@@ -27,7 +27,7 @@ jobs:
     name: Verify Cargo.lock has no source overrides or git dependencies
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain
@@ -65,7 +65,7 @@ jobs:
     name: Refresh contributors.json
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -75,7 +75,7 @@ jobs:
           toolchain: "1.95"
       - name: Run cargo xtask contributors
         run: cargo xtask contributors
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: contributors-json
           path: contributors/contributors.json
@@ -93,10 +93,10 @@ jobs:
             runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: contributors-json
           path: contributors
@@ -121,7 +121,7 @@ jobs:
         run: |
           ./packaging/linux/package.sh
           ./packaging/linux/flatpak-bundle.sh --no-test
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-linux-${{ matrix.arch }}
           path: dist/release/*
@@ -132,10 +132,10 @@ jobs:
     needs: [git-sources, credits]
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: contributors-json
           path: contributors
@@ -176,7 +176,7 @@ jobs:
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: ./packaging/macos/package.sh --arch universal
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-macos-universal
           path: dist/release/*
@@ -190,10 +190,10 @@ jobs:
         arch: [x64, x86, arm64]
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: contributors-json
           path: contributors
@@ -224,7 +224,7 @@ jobs:
           AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
           AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
         run: ./packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-windows-${{ matrix.arch }}
           path: dist/release/*
@@ -234,7 +234,7 @@ jobs:
     needs: [git-sources, credits]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - name: Install Rust toolchain & Trunk
@@ -249,7 +249,7 @@ jobs:
         env:
           LUMENCRAFT_VERSION: ${{ inputs.version }}
         run: ./packaging/web/package.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-web
           path: dist/release/*
@@ -260,10 +260,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           name: contributors-json
           path: contributors
@@ -275,7 +275,7 @@ jobs:
           run: |
             set -eu
             LUMENCRAFT_VERSION="${{ inputs.version }}" bash ./packaging/freebsd/package.sh
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: release-freebsd-x86_64
           path: dist/release/*
@@ -288,10 +288,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: dist/release
