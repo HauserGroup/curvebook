@@ -365,7 +365,7 @@ fn weighted_log_rank_stats(cohorts: &[&[SurvivalObservation]], weight_kind: Surv
                 SurvivalWeight::LogRank => 1.0,
                 SurvivalWeight::GehanWilcoxon => nf,
             };
-            let var_mult = w * w * df * (nf - df) / (nf * nf * (nf - 1.0));
+            let var_mult = w * w * df * (nf - df) / (nf * (nf - 1.0));
             for g in 0..k {
                 let ng = at_risk[g] as f64;
                 let dg = d_g[g] as f64;
@@ -1188,4 +1188,50 @@ fn append_survival_pairwise(
     }
     out.tabs.push(build_tab("survival-pairwise", "Pairwise survival comparisons", ResultTabKind::MultipleComparisons, headers, row_labels, rows));
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_doc::{SurvivalObservation, SurvivalStatus};
+
+    use super::{SurvivalWeight, compare_survival_curves, weighted_log_rank_stats};
+
+    #[test]
+    fn weighted_log_rank_exact_hypergeometric_covariance() {
+        let obs_a = [
+            SurvivalObservation { row: 0, time: 5.0, status: SurvivalStatus::Event },
+            SurvivalObservation { row: 1, time: 10.0, status: SurvivalStatus::Censored },
+            SurvivalObservation { row: 2, time: 10.0, status: SurvivalStatus::Censored },
+        ];
+        let obs_b = [
+            SurvivalObservation { row: 0, time: 5.0, status: SurvivalStatus::Event },
+            SurvivalObservation { row: 1, time: 5.0, status: SurvivalStatus::Censored },
+            SurvivalObservation { row: 2, time: 10.0, status: SurvivalStatus::Censored },
+            SurvivalObservation { row: 3, time: 10.0, status: SurvivalStatus::Censored },
+        ];
+
+        let (u, cov, _, _) = weighted_log_rank_stats(&[&obs_a, &obs_b], SurvivalWeight::LogRank).unwrap();
+        assert!((u[0] - (1.0 / 7.0)).abs() < 1e-12);
+        assert!((cov[0] - (20.0 / 49.0)).abs() < 1e-12);
+        assert!((cov[0] + cov[1]).abs() < 1e-12);
+        assert!((cov[1] - cov[2]).abs() < 1e-12);
+
+        let lr = compare_survival_curves(&[&obs_a, &obs_b], false).unwrap();
+        assert!((lr.chi_square - 0.05).abs() < 1e-12);
+        let gbw = compare_survival_curves(&[&obs_a, &obs_b], true).unwrap();
+        assert!((gbw.chi_square - 0.05).abs() < 1e-12);
+
+        let obs_c = [
+            SurvivalObservation { row: 0, time: 4.0, status: SurvivalStatus::Event },
+            SurvivalObservation { row: 1, time: 8.0, status: SurvivalStatus::Event },
+        ];
+        let (_, cov3, _, _) = weighted_log_rank_stats(&[&obs_a, &obs_b, &obs_c], SurvivalWeight::LogRank).unwrap();
+        for r in 0..3 {
+            let row_sum: f64 = (0..3).map(|c| cov3[r * 3 + c]).sum();
+            assert!(row_sum.abs() < 1e-12, "row {r} covariance sum {row_sum} != 0");
+            for c in 0..3 {
+                assert!((cov3[r * 3 + c] - cov3[c * 3 + r]).abs() < 1e-12);
+            }
+        }
+    }
 }

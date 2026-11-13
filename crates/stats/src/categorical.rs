@@ -547,86 +547,132 @@ pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: Confidenc
 pub fn koopman_rr_ci(a: u64, b: u64, c: u64, d: u64, confidence: ConfidenceLevel) -> Option<(f64, f64)> {
     let n1 = (a + b) as f64;
     let n2 = (c + d) as f64;
-    if n1 <= 0.0 || n2 <= 0.0 {
+    if n1 <= 0.0 || n2 <= 0.0 || (a == 0 && c == 0) {
         return None;
     }
-    let af = a as f64;
-    let cf = c as f64;
     let z2 = norm_two_sided_isf(confidence.alpha()).ok()?.powi(2);
+    let score = |phi: f64| koopman_chi2_score(a, b, c, d, z2, phi);
 
-    let score_fn = |phi: f64| -> f64 {
-        let n_tot = n1 + n2;
-        let aq = n_tot * phi;
-        let bq = -(n1 * phi + af * phi + n2 + cf * phi);
-        let cq = af + cf;
-        let disc = (bq * bq - 4.0 * aq * cq).max(0.0).sqrt();
-        let p2_tilde = if aq.abs() > 1e-18 { (-bq - disc) / (2.0 * aq) } else { cq / (n2 + n1 * phi) };
-        let p2 = p2_tilde.clamp(1e-12, 1.0 - 1e-12);
-        let p1 = (phi * p2).clamp(1e-12, 1.0 - 1e-12);
-        let v1 = p1 * (1.0 - p1) / n1;
-        let v2 = p2 * (1.0 - p2) / n2;
-        if phi <= 0.0 || v1 <= 0.0 || v2 <= 0.0 {
-            return f64::INFINITY;
-        }
-        let num = af - n1 * p1;
-        (num * num) / (n1 * p1 * (1.0 - p1)) * (1.0 + n1 * (phi - p1) / (n2 * (1.0 - p2)).max(1e-12))
-    };
-
-    let _ = score_fn;
-    // Closed-form Koopman chi-square score inversion over phi > 0.
-    let chi2_score = |phi: f64| -> f64 {
-        if phi <= 0.0 {
-            return f64::INFINITY;
-        }
-        let x1 = af;
-        let x2 = cf;
-        let aq = n1 + n2;
-        let bq = -(phi * (n1 + x2) + x1 + n2);
-        let cq = phi * (x1 + x2);
-        let disc = (bq * bq - 4.0 * aq * cq).max(0.0).sqrt();
-        let p2 = ((-bq - disc) / (2.0 * aq)).clamp(1e-12, 1.0 - 1e-12);
-        let p1 = (phi * p2).clamp(1e-12, 1.0 - 1e-12);
-        let term1 = (x1 - n1 * p1).powi(2) / (n1 * p1 * (1.0 - p1));
-        let term2 = (x2 - n2 * p2).powi(2) / (n2 * p2 * (1.0 - p2));
-        term1 + term2 - z2
-    };
-
-    let p1_hat = af / n1;
-    let p2_hat = cf / n2;
-    if a == 0 && c == 0 {
-        return None;
-    }
-    let rr_pt = if c == 0 { f64::INFINITY } else { p1_hat / p2_hat };
+    let rr_pt = if c == 0 { f64::INFINITY } else { ((a as f64) / n1) / ((c as f64) / n2) };
 
     let lo = if a == 0 {
         0.0
+    } else if c == 0 {
+        koopman_solve_lower_c_zero(&score)
     } else {
-        let start = if rr_pt.is_finite() { rr_pt.max(1e-6) } else { 1.0 };
-        let mut l = start * 0.5;
-        for _ in 0..40 {
-            if chi2_score(l) > 0.0 {
-                break;
-            }
-            l *= 0.5;
-        }
-        brent_root(chi2_score, l, start, RootOptions { rel_tol: 1e-8, abs_tol: 1e-9, max_iters: 64 }).unwrap_or(l)
+        koopman_solve_lower(&score, rr_pt)
     };
 
     let hi = if c == 0 {
         f64::INFINITY
+    } else if a == 0 {
+        koopman_solve_upper_a_zero(&score)
     } else {
-        let start = rr_pt.max(1e-6);
-        let mut h = start * 2.0;
-        for _ in 0..40 {
-            if chi2_score(h) > 0.0 {
-                break;
-            }
-            h *= 2.0;
-        }
-        brent_root(chi2_score, start, h, RootOptions { rel_tol: 1e-8, abs_tol: 1e-9, max_iters: 64 }).unwrap_or(h)
+        koopman_solve_upper(&score, rr_pt)
     };
 
     Some((lo, hi))
+}
+
+fn koopman_chi2_score(a: u64, b: u64, c: u64, d: u64, z2: f64, phi: f64) -> f64 {
+    if !phi.is_finite() || phi <= 0.0 {
+        return f64::INFINITY;
+    }
+    let x1 = a as f64;
+    let x2 = c as f64;
+    let n1 = (a + b) as f64;
+    let n2 = (c + d) as f64;
+    let aq = n1 + n2;
+    let abs_b = phi * (n1 + x2) + (x1 + n2); // = -b_q > 0
+    let cq = phi * (x1 + x2);
+    let disc = if abs_b > 1e150 {
+        let r1 = (4.0 * aq) / abs_b;
+        let r2 = cq / abs_b;
+        abs_b * (1.0 - r1 * r2).max(0.0).sqrt()
+    } else {
+        (abs_b * abs_b - 4.0 * aq * cq).max(0.0).sqrt()
+    };
+    // Quadratic solves for constrained MLE p1_tilde (= phi * p2_tilde); Citardauq's formula avoids cancellation.
+    let denom = abs_b + disc;
+    let p1_raw = (2.0 * cq) / denom;
+    let p2_raw = (2.0 * (x1 + x2)) / denom;
+
+    koopman_cell_term(a, b, n1, x1, p1_raw) + koopman_cell_term(c, d, n2, x2, p2_raw) - z2
+}
+
+fn koopman_cell_term(events: u64, non_events: u64, n: f64, x: f64, p_raw: f64) -> f64 {
+    if events == 0 {
+        n * p_raw / (1.0 - p_raw).max(1e-14)
+    } else if non_events == 0 {
+        n * (1.0 - p_raw).max(0.0) / p_raw.max(1e-100)
+    } else {
+        let p = p_raw.clamp(1e-100, 1.0 - 1e-15);
+        (x - n * p).powi(2) / (n * p * (1.0 - p))
+    }
+}
+
+fn koopman_solve_lower<F: Fn(f64) -> f64>(score: &F, rr_pt: f64) -> f64 {
+    let mut hi_neg = rr_pt;
+    let mut lo_pos = rr_pt * 0.5;
+    for _ in 0..120 {
+        if score(lo_pos) > 0.0 {
+            break;
+        }
+        hi_neg = lo_pos;
+        lo_pos *= 0.5;
+    }
+    brent_root(score, lo_pos, hi_neg, RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 }).unwrap_or(lo_pos)
+}
+
+fn koopman_solve_upper<F: Fn(f64) -> f64>(score: &F, rr_pt: f64) -> f64 {
+    let mut lo_neg = rr_pt;
+    let mut hi_pos = rr_pt * 2.0;
+    for _ in 0..120 {
+        if score(hi_pos) > 0.0 {
+            break;
+        }
+        lo_neg = hi_pos;
+        hi_pos *= 2.0;
+    }
+    brent_root(score, lo_neg, hi_pos, RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 }).unwrap_or(hi_pos)
+}
+
+fn koopman_solve_lower_c_zero<F: Fn(f64) -> f64>(score: &F) -> f64 {
+    let mut neg_pt = 1.0_f64;
+    for _ in 0..120 {
+        if score(neg_pt) < 0.0 {
+            break;
+        }
+        neg_pt *= 2.0;
+    }
+    let mut pos_pt = neg_pt * 0.5;
+    for _ in 0..120 {
+        if score(pos_pt) > 0.0 {
+            break;
+        }
+        neg_pt = pos_pt;
+        pos_pt *= 0.5;
+    }
+    brent_root(score, pos_pt, neg_pt, RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 }).unwrap_or(pos_pt)
+}
+
+fn koopman_solve_upper_a_zero<F: Fn(f64) -> f64>(score: &F) -> f64 {
+    let mut neg_pt = 1.0_f64;
+    for _ in 0..120 {
+        if score(neg_pt) < 0.0 {
+            break;
+        }
+        neg_pt *= 0.5;
+    }
+    let mut pos_pt = neg_pt * 2.0;
+    for _ in 0..120 {
+        if score(pos_pt) > 0.0 {
+            break;
+        }
+        neg_pt = pos_pt;
+        pos_pt *= 2.0;
+    }
+    brent_root(score, neg_pt, pos_pt, RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 }).unwrap_or(pos_pt)
 }
 
 /// Compute complete `2 x 2` risk/odds ratios (`[[a, b], [c, d]]`), Baptista-Pike OR CI, Koopman
@@ -978,4 +1024,72 @@ fn run_parts_of_whole_gof(pow: &lumencraft_doc::PartsOfWholeTable, out: &mut Res
         rows,
     ));
     Ok(out.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_math::ConfidenceLevel;
+    use lumencraft_math::dist::norm_two_sided_isf;
+
+    use super::{koopman_chi2_score, koopman_rr_ci};
+
+    #[test]
+    fn koopman_extreme_boundary_cases_bracket_and_solve_score_to_zero() {
+        let conf = ConfidenceLevel::DEFAULT_95;
+        let z2 = norm_two_sided_isf(conf.alpha()).unwrap().powi(2);
+
+        assert!(koopman_rr_ci(0, 10, 0, 10, conf).is_none());
+        assert!(koopman_rr_ci(0, 0, 5, 5, conf).is_none());
+        assert!(koopman_rr_ci(5, 5, 0, 0, conf).is_none());
+
+        let cases = [
+            (14_u64, 6_u64, 5_u64, 15_u64),
+            (10, 0, 5, 5),
+            (5, 5, 10, 0),
+            (10, 0, 10, 0),
+            (1, 0, 1, 0),
+            (0, 10, 5, 5),
+            (0, 10_000_000, 5, 5),
+            (0, 10, 10, 0),
+            (9, 1, 0, 10),
+            (10, 0, 0, 10),
+            (1, 999, 0, 10),
+            (1, 10_000_000_000, 1, 1),
+            (1, 1, 1, 10_000_000_000),
+            (1, 10_000_000_000, 1, 10_000_000_000),
+        ];
+
+        for (a, b, c, d) in cases {
+            let (lo, hi) = koopman_rr_ci(a, b, c, d, conf).unwrap();
+            assert!(lo >= 0.0 && lo < hi, "invalid interval ({lo}, {hi}) for ({a},{b},{c},{d})");
+            if a == 0 {
+                assert_eq!(lo, 0.0);
+            } else {
+                assert!(lo.is_finite() && lo > 0.0);
+                let err_lo = koopman_chi2_score(a, b, c, d, z2, lo).abs();
+                assert!(err_lo < 1e-7, "non-zero score at lo={lo}: {err_lo} for ({a},{b},{c},{d})");
+            }
+            if c == 0 {
+                assert!(hi.is_infinite());
+            } else {
+                assert!(hi.is_finite());
+                let err_hi = koopman_chi2_score(a, b, c, d, z2, hi).abs();
+                assert!(err_hi < 1e-7, "non-zero score at hi={hi}: {err_hi} for ({a},{b},{c},{d})");
+            }
+            if a > 0 && c > 0 {
+                let n1 = (a + b) as f64;
+                let n2 = (c + d) as f64;
+                let rr_pt = ((a as f64) / n1) / ((c as f64) / n2);
+                assert!(lo < rr_pt && rr_pt < hi, "point estimate {rr_pt} outside ({lo}, {hi})");
+            }
+        }
+
+        let (lo_all, hi_all) = koopman_rr_ci(10, 0, 10, 0, conf).unwrap();
+        assert!((lo_all - 10.0 / (10.0 + z2)).abs() < 1e-9);
+        assert!((hi_all - (10.0 + z2) / 10.0).abs() < 1e-9);
+
+        let (lo_sep, hi_sep) = koopman_rr_ci(10, 0, 0, 10, conf).unwrap();
+        assert!((lo_sep - (1.0 + 10.0 / z2)).abs() < 1e-9);
+        assert!(hi_sep.is_infinite());
+    }
 }
