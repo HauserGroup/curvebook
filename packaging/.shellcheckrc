@@ -1,3 +1,7 @@
 # ShellCheck defaults for packaging/*.sh
 external-sources=true
 enable=avoid-nullary-conditions
+# Resolve `# shellcheck source=` paths relative to the script that sources them,
+# not the directory ShellCheck is run from. Without this, `shellcheck -x` run
+# from the workspace root cannot find ../env.sh and fails with SC1091.
+source-path=SCRIPTDIR
