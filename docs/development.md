@@ -74,6 +74,7 @@ trunk serve --release   # serves on http://127.0.0.1:8767
 ## Vendor names & clean-room gates
 
 - `cargo xtask brands` fails on competitor vendor or product trademarks in Rust string literals (outside comments and `#[cfg(test)]`), `Cargo.toml` descriptions, `cursors.toml`, and `packaging/` manifests. Use neutral scientific terms ("nonlinear regression", "grouped table", "reference application"); mark genuine file-format compatibility notes with `brand-ok`.
+- The same command rejects the names of external application suites and their infrastructure (`SUITE_BRANDS` in `xtask/src/brands.rs`) in every file outside `xtask/`, and `brand-ok` does not exempt them. The single exception is the non-affiliation disclaimer in `README.md`: a README line carrying `brand-ok` may name the suite itself, but still may not reference its crates or domain.
 - `cargo xtask cleanroom` scans all tracked files for vendor copyright notices and vendor-authored XML/project signatures. Never copy text, equation prose, screenshots, or sample `.prism`/`.pzfx` files from proprietary products, and never copy GPL/LGPL/AGPL statistical code.
 
 ## Tests & numerical verification

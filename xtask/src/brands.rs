@@ -27,6 +27,17 @@ const SUITE_BRANDS: &[&str] = &[
 
 const ALLOW_MARKER: &str = "brand-ok";
 
+/// The only file in which a suite name may appear, and only on a line that carries [`ALLOW_MARKER`].
+/// The README's non-affiliation disclaimer has to name the suite it disclaims. Every other file,
+/// and every unmarked README line, stays strict so suite branding cannot drift back into docs,
+/// workflows, or packaging.
+const SUITE_DISCLAIMER_PATH: &str = "README.md";
+
+/// Suite names the disclaimer may use. Infrastructure identifiers (`craft-*` crates, the suite's
+/// domain) are deliberately absent: naming the suite is a disclaimer, referencing its
+/// infrastructure would be a dependency, which the standalone-repository rule forbids.
+const SUITE_DISCLAIMER_NAMES: &[&str] = &["artcraft"];
+
 #[derive(Debug, PartialEq, Eq)]
 pub struct BrandHit {
     pub path: String,
@@ -86,7 +97,12 @@ fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 
 fn scan_suite_lines(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     for (idx, line) in text.lines().enumerate() {
-        collect_line_words(path, idx + 1, line, SUITE_BRANDS, out);
+        if path == SUITE_DISCLAIMER_PATH && line.contains(ALLOW_MARKER) {
+            let strict: Vec<&'static str> = SUITE_BRANDS.iter().copied().filter(|brand| !SUITE_DISCLAIMER_NAMES.contains(brand)).collect();
+            collect_line_words(path, idx + 1, line, &strict, out);
+        } else {
+            collect_line_words(path, idx + 1, line, SUITE_BRANDS, out);
+        }
     }
 }
 
@@ -249,6 +265,33 @@ Keywords=biostatistics;regression;GraphPad;
             vec![
                 BrandHit { path: String::from("docs/releasing.md"), line: 1, brand: "artcraft" },
                 BrandHit { path: String::from("docs/releasing.md"), line: 1, brand: "getartcraft" },
+            ]
+        );
+    }
+
+    #[test]
+    fn readme_disclaimer_line_with_marker_may_name_the_suite() {
+        let mut hits = Vec::new();
+        scan_file("README.md", "Not affiliated with ArtCraft. <!-- brand-ok -->\n", &mut hits);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn suite_disclaimer_exemption_is_limited_to_marked_readme_lines_and_the_suite_name() {
+        let mut hits = Vec::new();
+        // No marker: still flagged in the README.
+        scan_file("README.md", "Part of ArtCraft.\n", &mut hits);
+        // Marker in any other file: still flagged.
+        scan_file("docs/releasing.md", "Not affiliated with ArtCraft. <!-- brand-ok -->\n", &mut hits);
+        // Marked README line: suite infrastructure is still flagged.
+        scan_file("README.md", "See https://getartcraft.com and craft-ui. <!-- brand-ok -->\n", &mut hits);
+        assert_eq!(
+            hits,
+            vec![
+                BrandHit { path: String::from("README.md"), line: 1, brand: "artcraft" },
+                BrandHit { path: String::from("docs/releasing.md"), line: 1, brand: "artcraft" },
+                BrandHit { path: String::from("README.md"), line: 1, brand: "getartcraft" },
+                BrandHit { path: String::from("README.md"), line: 1, brand: "craft-ui" },
             ]
         );
     }

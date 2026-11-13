@@ -1,5 +1,9 @@
 # LumenCraft
 
+<p align="center">
+  <img src="assets/app-icon/hicolor/256x256/apps/org.lumencraft.LumenCraft.png" alt="LumenCraft logo: an engraved mole holding a prism that splits a beam of light into a spectrum" width="160">
+</p>
+
 **LumenCraft** is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written in pure Rust — designed for experimental scientists who work with structured replicate tables, linked statistical analyses, curve fitting, and publication-ready figures on desktop and the web.
 
 > **Status:** Early workspace & infrastructure baseline (**Milestone M0**). The 17-crate layered architecture (`L0`–`L7`), CI quality gates, clean-room/brand/asset verification (`cargo xtask ci`), and cross-platform packaging pipelines (macOS, Linux, Windows, FreeBSD, WebAssembly) are in place; scientific domain engines are under active clean-room development. See [`ROADMAP.md`](ROADMAP.md) and [`docs/target-app-parity.md`](docs/target-app-parity.md).
@@ -87,3 +91,7 @@ LumenCraft is a **100% clean-room implementation**:
 - Statistical and curve-fitting algorithms are derived strictly from peer-reviewed statistical literature, open textbooks, and validated against public reference datasets (such as the **NIST Statistical Reference Datasets (StRD)**).
 - No proprietary code, decompiled binaries, XML schemas, icons, equation libraries, or vendor-created sample files are used or committed.
 - Dual-licensed under **MIT OR Apache-2.0** ([`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE)). Dependency policy and third-party notices live in [`ATTRIBUTION.md`](ATTRIBUTION.md), [`NOTICE`](NOTICE), and [`ASSETS.md`](ASSETS.md).
+
+## Affiliation
+
+LumenCraft is an independent project. It is not affiliated with, endorsed by, or part of ArtCraft, though we have mad respect for them. <!-- brand-ok -->
