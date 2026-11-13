@@ -1,6 +1,6 @@
 # Audit slices
 
-The parts of the codebase that reviewers claim, one at a time. Follow the protocol in [`README.md`](README.md). Sizes are approximate lines of Rust under `src/` at the round 1 base commit. Tests are out of scope unless a slice says otherwise, but reading them helps you see what is already covered.
+The parts of the codebase that reviewers claim, one at a time. Follow the protocol in [`README.md`](README.md). Sizes are approximate lines of Rust under `src/` at `71f37d8`, the first round 1 base. Tests are out of scope unless a slice says otherwise, but reading them helps you see what is already covered.
 
 Slices `S01`–`S13` follow the crate layering. `X1` and `X2` cross crates on purpose: the two defects fixed after the 2026-11-13 review (control server, CLI sandbox) sat on seams between crates, where a single-crate reviewer would miss them. Assign `X1`/`X2` to reviewers who have not reviewed a crate slice.
 
@@ -36,7 +36,7 @@ These questions come first. The general checklist in [`README.md`](README.md#wha
 
 **`S05` Document model.** Invariants that constructors enforce but deserialization or mutation skips: row, column and subcolumn caps, ID uniqueness, link targets, and exclusion masks staying aligned with cells after resizing.
 
-**`S06` File formats.** ZIP, XML, CSV, PZFX, `.prism` and `.lumencraft` readers given hostile input: size and count caps, offset arithmetic, depth limits, and the cell budget on every table kind. Also check that save and reopen is lossless, including non-finite values and empty tables. `recovery.rs` is new: review it if present at the base commit.
+**`S06` File formats.** ZIP, XML, CSV, PZFX, `.prism` and `.lumencraft` readers given hostile input: size and count caps, offset arithmetic, depth limits, and the cell budget on every table kind. Also check that save and reopen is lossless, including non-finite values and empty tables. `recovery.rs` is new: review it if it exists at your claimed base.
 
 **`S07` Engine.** Does every command validate its parameters before mutating? Does it roll back cleanly on error? Is the DAG recalculation atomic? Look for filesystem reads and writes driven by parameters, and for errors swallowed while reading files. Undo memory growth is a Known defect. Look for anything else of that kind.
 
