@@ -15,7 +15,7 @@ Public behavioural references:
 
 `lumencraft-chart` is a pure, deterministic compiler:
 $$\big(\text{GraphSpec},\, \text{DataSheet(s)},\, \text{ResultSheet(s)},\, \text{FontMetrics}\big) \longrightarrow \text{ChartScene}$$
-Neither `lumencraft-ui-egui`, `lumencraft-svg`, nor `lumencraft-pdf` ever computes error bars, kernel density estimates, axis ticks, or curve polylines on its own. All four outputs (`wgpu` interactive canvas, CPU golden rasterizer, SVG writer, and PDF 1.7 writer) consume the exact same `ChartScene` primitives (positioned `Path2D`, `GlyphRun`, `ClipRegion`, and `StrokeStyle`), guaranteeing sub-point visual parity between screen and journal export.
+Neither `lumencraft-ui-egui`, `lumencraft-svg`, nor `lumencraft-pdf` ever computes error bars, kernel density estimates, axis ticks, or curve polylines on its own. All output backends (software/interactive workspace compositor, CPU rasterizer `lumencraft-render`, SVG writer `lumencraft-svg`, and pure-Rust PDF 1.4+ writer `lumencraft-pdf`) consume the exact same `ChartScene` primitives (positioned `Path2D`, `PositionedText`/`RichText`, clip rects, and `StrokePaint`/`FillPaint`), guaranteeing sub-point visual parity between screen and journal export.
 
 ---
 
@@ -97,5 +97,16 @@ A `LayoutSheet` arranges multiple live `GraphSheet` panels, live embedded `DataS
 - **Grid & alignment guides:** Configurable row $\times$ column layout templates, baseline alignment across adjacent Y axes (aligning plot-area origins even when Y-tick label widths differ!), and automatic panel badges (`A`, `B`, `C`, … or `a`, `b`, `c`).
 - **Export targets:**
   - **SVG (`crates/svg`):** Crisp vector paths, optional editable `<text>` vs. outlined glyph paths, non-scaling hairlines avoided, deterministic attribute ordering.
-  - **PDF 1.7 (`crates/pdf`):** Direct vector streams, subsetted embedded fonts (when `LUMENCRAFT_FONTS_DIR` or system fonts are configured) or outlined fallback, sRGB or print CMYK colour spaces, exact `MediaBox` / `TrimBox` / `BleedBox`.
-  - **Raster (`crates/render`):** `72`–`1200` DPI anti-aliased PNG and uncompressed/LZW TIFF with transparent, white, or custom paper fill, enforcing WCAG AA contrast checks in UI chrome while keeping figure paper crisp white by default.
+  - **PDF 1.4+ (`crates/pdf`):** Direct vector streams (`FlateDecode`), Adobe Core-14 Helvetica/Symbol selectable text or outlined vector glyph-path fallback (with `BUNDLED_FONTS` optional/empty via `--no-default-features`), sRGB / print CMYK / Grayscale colour spaces, exact `MediaBox` / `TrimBox` / `BleedBox`, and 20-byte `xref`. *(TrueType font-stream subset embedding (`FontFile2`) and PDF 1.7 header remain queued after S2.)*
+  - **Raster (`crates/render`):** `72`–`1200` DPI anti-aliased PNG and uncompressed/Deflate/LZW TIFF with transparent, white, or custom paper fill, enforcing WCAG AA contrast checks in UI chrome while keeping figure paper crisp white by default.
+
+---
+
+## 7. Risk Spike `S2` Decision (Text & PDF without Bundled Fonts): **GO**
+
+- **Decision:** **GO** — direct pure-Rust **PDF 1.4+** writer (`crates/pdf`) + `lumencraft-text` Core-14 metrics/glyph path engine. No external PDF/text engine or heavy desktop font rasterizer dependency is required.
+- **Evidence (verified with `--no-default-features`, `BUNDLED_FONTS` empty, and default features):**
+  - `cargo test -p lumencraft-pdf -p lumencraft-text --no-default-features --offline -- spike_s2_`: `4 passed; 0 failed`, verifying multi-page PDF generation with `BUNDLED_FONTS` empty (`render_ms = 0.293–0.395 ms` under `--no-default-features`; `0.422 ms` default; compressed `2,898` B vs uncompressed `4,600` B; `pages = 2`, `total_objs = 15`, `xref_entries = 16`, `p1_stream_bytes = 1,997`, `p2_stream_bytes = 562`).
+  - Full Visual `L2`–`L3` verification: `lumencraft-text` (`18 passed` default & `--no-default-features`), `lumencraft-chart` (`30 passed`), `lumencraft-svg` (`11 passed`), `lumencraft-pdf` (`6 passed` default & `--no-default-features`), `lumencraft-render` (`8 passed` default & `--no-default-features`); `73 passed` default / `32 passed` `--no-default-features`, `0` Clippy warnings.
+  - Fidelity verified structurally in `spike_s2_pdf_fidelity` & `svg_export`: selectable Core-14 Helvetica + Symbol Greek/math text, superscripts & subscripts, rotated axis titles, `sRGB` / `CMYK` / `Grayscale` colour spaces, `/MediaBox` / `/TrimBox` / `/BleedBox`, and outlined glyph path mode.
+- **Scope note:** Structural parsers in `spike_s2_pdf_fidelity` & `svg_export` validate xref tables, compressed streams, operators, and XML/text geometry deterministically; interactive opening inside external GUI PDF/SVG viewers was not run in this headless CLI environment and remains a visual QA check when packaging desktop installers.

@@ -6,7 +6,7 @@
 
 **LumenCraft** is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written in pure Rust — designed for experimental scientists who work with structured replicate tables, linked statistical analyses, curve fitting, and publication-ready figures on desktop and the web.
 
-> **Status:** Early workspace & infrastructure baseline (**Milestone M0**). The 17-crate layered architecture (`L0`–`L7`), CI quality gates, clean-room/brand/asset verification (`cargo xtask ci`), and cross-platform packaging pipelines (macOS, Linux, Windows, FreeBSD, WebAssembly) are in place; scientific domain engines are under active clean-room development. See [`ROADMAP.md`](ROADMAP.md) and [`docs/target-app-parity.md`](docs/target-app-parity.md).
+> **Status:** Headless engine, statistical/fitting/graphing libraries, `Slice 0` CLI, MCP server, `--control` binary protocol, Tier-1 localization (`9` locales × `167` keys), Risk Spikes `S1`/`S2` (**GO**), and the pure-Rust `UiApp` UI state shell & software compositor are landed across the 21-member layered workspace (`17` library crates `L0`–`L7`, `3` apps, `xtask`). Active work focuses on live OS desktop/`wgpu` & WebAssembly UI hosting, optimizing `96`-curve batch regression (`16.91s` → `<50ms`), remaining library edge options, and `1.0` hardening. See [`ROADMAP.md`](ROADMAP.md) and [`docs/target-app-parity.md`](docs/target-app-parity.md).
 
 ---
 
@@ -36,7 +36,7 @@ lumencraft/
 │   ├── render/      # L3: GPU/CPU 2D chart & layout raster/frame renderer
 │   ├── format/      # L3: Native .lumencraft / .lctemplate archive + clean-room CSV/TSV/.pzfx/.prism I/O
 │   ├── svg/         # L3: Publication SVG serializer
-│   ├── pdf/         # L3: Publication PDF 1.7 / print vector writer
+│   ├── pdf/         # L3: Publication PDF 1.4+ / print vector writer (Core-14 Type1 + outlined paths)
 │   ├── tools/       # L4: Interactive table selection, graph annotation, bracket & layout tools
 │   ├── engine/      # L5: Project session, undo/redo journal, reactive recalculation DAG, command registry
 │   ├── ui-egui/     # L6: Native/web immediate-mode desktop shell (Navigator, Data Grid, Results, Graphs)
