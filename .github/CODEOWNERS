@@ -1,0 +1,7 @@
+# Code owners are asked to review automatically when a pull request touches a matching path.
+# The last matching pattern wins. Owners must have write access to the repository.
+#
+# This does not block merging by itself. It becomes a requirement only when a branch ruleset
+# on `main` turns on "Require review from Code Owners".
+
+*       @jsture

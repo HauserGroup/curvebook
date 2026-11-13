@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/HauserGroup/lumencraft/security/policy
+    about: Do not open a public issue. Follow the security policy to report it privately.
+  - name: What is planned, and in what order
+    url: https://github.com/HauserGroup/lumencraft/blob/main/docs/roadmap.md#execution-order
+    about: Check the execution order and the gap list before asking for a feature.

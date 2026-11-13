@@ -1,0 +1,89 @@
+name: Wrong numerical result
+description: A statistic, p-value, confidence interval, fitted parameter, or plotted value looks incorrect.
+title: "Numerical: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        A wrong number is the most serious kind of bug in this project, so please be exact.
+
+        **Clean-room rule:** we cannot accept output, screenshots, or files produced by running the proprietary reference application (GraphPad Prism) as the expected value. Use a published source or open-source statistical software instead.
+  - type: input
+    id: analysis
+    attributes:
+      label: Analysis or model
+      description: The test or fit, with the options that matter.
+      placeholder: Welch t-test, two-sided, 95% CI
+    validations:
+      required: true
+  - type: textarea
+    id: data
+    attributes:
+      label: Input data
+      description: The smallest dataset that shows the difference, pasted as text. Say which cells are excluded or missing.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: observed
+    attributes:
+      label: What LumenCraft reports
+      description: The values, with as many digits as you can get. Include how you ran it (CLI command, MCP request, or the steps in the app).
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What the reference gives
+      description: The expected values with as many digits as the reference provides.
+      render: text
+    validations:
+      required: true
+  - type: dropdown
+    id: reference-kind
+    attributes:
+      label: Kind of reference
+      options:
+        - NIST Statistical Reference Datasets
+        - Textbook worked example
+        - Peer-reviewed paper
+        - Analytical solution
+        - Open-source statistical software (R, SciPy, or similar)
+    validations:
+      required: true
+  - type: textarea
+    id: reference
+    attributes:
+      label: Reference details
+      description: |
+        For a publication: the full citation and the page, table, or equation.
+        For software: the package, its version, and the exact call you ran.
+      placeholder: |
+        R 4.5.1, stats::t.test(x, y, var.equal = FALSE)
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or build
+      description: The commit hash you built from, or the build shown in the About window.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      placeholder: Linux x86_64, or web app in Firefox 140
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: The expected value does not come from running the proprietary reference application.
+          required: true
+        - label: The data is synthetic, published, or mine to share, and contains nothing confidential.
+          required: true
+        - label: I checked that the two results use the same options (tails, pooled or unpooled variance, confidence level, handling of ties and missing values).
+          required: true
