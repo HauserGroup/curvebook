@@ -278,20 +278,30 @@ pub fn bind_control_tcp_listener(addr: SocketAddr) -> io::Result<TcpListener> {
 
 /// Accept and process JSON-lines control connections from `listener` until `app.quit` or accept error.
 ///
+/// A failure on one connection (invalid UTF-8, an oversized line, a client that disconnects
+/// mid-response) closes only that connection. It must not end the server: returning the error
+/// here would make the app exit and lose the researcher's unsaved session.
+///
 /// # Errors
-/// Propagates underlying accept/stream I/O errors.
+/// Propagates listener accept errors.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn serve_control_listener(app: &mut UiApp, listener: &TcpListener) -> io::Result<()> {
     for incoming in listener.incoming() {
-        let mut stream = incoming?;
-        let reader_stream = stream.try_clone()?;
-        let mut reader = io::BufReader::new(reader_stream);
-        let quit = serve_control_stream_with_quit(app, &mut reader, &mut stream)?;
-        if quit {
-            break;
+        let stream = incoming?;
+        match serve_control_connection(app, stream) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(err) => eprintln!("control connection closed after error: {err}"),
         }
     }
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn serve_control_connection(app: &mut UiApp, mut stream: std::net::TcpStream) -> io::Result<bool> {
+    let reader_stream = stream.try_clone()?;
+    let mut reader = io::BufReader::new(reader_stream);
+    serve_control_stream_with_quit(app, &mut reader, &mut stream)
 }
 
 /// Bind `addr` (loopback-only) and run the JSON-lines TCP control server until `app.quit`.

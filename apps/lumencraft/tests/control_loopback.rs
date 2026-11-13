@@ -330,3 +330,40 @@ fn cli_binary_options_and_headless_startup_smoke() -> Result<(), Box<dyn std::er
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }
+
+#[test]
+fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        other => other?,
+    };
+    let local_addr = listener.local_addr()?;
+
+    let client = std::thread::spawn(move || -> Result<Value, String> {
+        // First connection sends a line that is not valid UTF-8, which fails that connection.
+        {
+            let mut bad = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+            bad.write_all(b"\xff\xfe{\"id\":\"bad\"}\n").map_err(|e| e.to_string())?;
+            bad.flush().map_err(|e| e.to_string())?;
+            let _ = bad.shutdown(std::net::Shutdown::Both);
+        }
+        // A second connection must still be served.
+        let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let mut writer = BufWriter::new(stream);
+        writer.write_all(b"{\"id\":\"p\",\"method\":\"ping\"}\n").map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
+        writer.write_all(b"{\"id\":\"q\",\"method\":\"app.quit\"}\n").map_err(|e| e.to_string())?;
+        writer.flush().map_err(|e| e.to_string())?;
+        serde_json::from_str(&line).map_err(|e| e.to_string())
+    });
+
+    let mut app = UiApp::new();
+    serve_control_listener(&mut app, &listener)?;
+    let ping = client.join().map_err(|_| "client thread panicked")??;
+    assert_eq!(ping["ok"], json!(true));
+    Ok(())
+}
