@@ -1,0 +1,165 @@
+//! Safeguarded 1D root-finding primitives (Brent-Dekker method and bracketed Halley/Newton steps).
+//!
+//! Reference:
+//! - Brent, R. P. (1973). *Algorithms for Minimization without Derivatives* (Ch. 4). Prentice-Hall.
+
+use crate::error::MathError;
+
+/// Configuration tolerances and iteration cap for 1D root-finding.
+#[derive(Debug, Clone, Copy)]
+pub struct RootOptions {
+    /// Relative tolerance on bracket width `|b - a|`.
+    pub rel_tol: f64,
+    /// Absolute tolerance on bracket half-width.
+    pub abs_tol: f64,
+    /// Hard iteration limit.
+    pub max_iters: usize,
+}
+
+impl Default for RootOptions {
+    fn default() -> Self {
+        Self { rel_tol: 4.0 * f64::EPSILON, abs_tol: 1e-15, max_iters: 128 }
+    }
+}
+
+/// Find a root of continuous scalar function `f` inside `[a, b]` where `f(a)` and `f(b)` have
+/// opposite (or zero) signs, using Brent's safeguarded secant / inverse-quadratic / bisection method.
+///
+/// # Errors
+/// Returns [`MathError::DomainError`] if `f(a)` and `f(b)` are non-finite or strictly share the same
+/// sign, or [`MathError::NotConverged`] if `options.max_iters` is exhausted.
+pub fn brent_root<F>(mut f: F, a: f64, b: f64, options: RootOptions) -> Result<f64, MathError>
+where
+    F: FnMut(f64) -> f64,
+{
+    if !a.is_finite() || !b.is_finite() {
+        return Err(MathError::DomainError { name: "bracket", value: a + b });
+    }
+    let mut x_a = a;
+    let mut x_b = b;
+    let mut f_a = f(x_a);
+    let mut f_b = f(x_b);
+    if !f_a.is_finite() || !f_b.is_finite() {
+        return Err(MathError::DomainError { name: "f(bracket)", value: f_a + f_b });
+    }
+    if f_a == 0.0 {
+        return Ok(x_a);
+    }
+    if f_b == 0.0 {
+        return Ok(x_b);
+    }
+    if (f_a > 0.0) == (f_b > 0.0) {
+        return Err(MathError::DomainError { name: "bracket_sign", value: f_a * f_b });
+    }
+
+    let mut x_c = x_a;
+    let mut f_c = f_a;
+    let mut step = x_b - x_a;
+    let mut prev_step = step;
+
+    for _ in 0..options.max_iters {
+        if (f_b > 0.0) == (f_c > 0.0) {
+            x_c = x_a;
+            f_c = f_a;
+            step = x_b - x_a;
+            prev_step = step;
+        }
+        if f_c.abs() < f_b.abs() {
+            x_a = x_b;
+            x_b = x_c;
+            x_c = x_a;
+            f_a = f_b;
+            f_b = f_c;
+            f_c = f_a;
+        }
+
+        let tol = 2.0 * options.rel_tol * x_b.abs() + 0.5 * options.abs_tol;
+        let mid = 0.5 * (x_c - x_b);
+        if mid.abs() <= tol || f_b == 0.0 {
+            return Ok(x_b);
+        }
+
+        if prev_step.abs() >= tol && f_a.abs() > f_b.abs() {
+            let (p, q) = interp_numerator_denominator(x_a, x_b, x_c, f_a, f_b, f_c);
+            let limit = (3.0 * mid * q - (tol * q).abs()).min((prev_step * q).abs());
+            if 2.0 * p < limit {
+                prev_step = step;
+                step = p / q;
+            } else {
+                step = mid;
+                prev_step = mid;
+            }
+        } else {
+            step = mid;
+            prev_step = mid;
+        }
+
+        x_a = x_b;
+        f_a = f_b;
+        if step.abs() > tol {
+            x_b += step;
+        } else if mid > 0.0 {
+            x_b += tol;
+        } else {
+            x_b -= tol;
+        }
+        f_b = f(x_b);
+        if !f_b.is_finite() {
+            return Err(MathError::DomainError { name: "f(x)", value: f_b });
+        }
+    }
+
+    Err(MathError::NotConverged { algorithm: "brent_root", iterations: options.max_iters })
+}
+
+fn interp_numerator_denominator(x_a: f64, x_b: f64, x_c: f64, f_a: f64, f_b: f64, f_c: f64) -> (f64, f64) {
+    let s = f_b / f_a;
+    let (mut p, mut q) = if (x_a - x_c).abs() <= f64::EPSILON * x_c.abs().max(1.0) {
+        // Linear / secant interpolation.
+        (2.0 * (0.5 * (x_c - x_b)) * s, 1.0 - s)
+    } else {
+        // Inverse quadratic interpolation.
+        let q0 = f_a / f_c;
+        let r = f_b / f_c;
+        (s * (2.0 * (0.5 * (x_c - x_b)) * q0 * (q0 - r) - (x_b - x_a) * (r - 1.0)), (q0 - 1.0) * (r - 1.0) * (s - 1.0))
+    };
+    if p > 0.0 {
+        q = -q;
+    } else {
+        p = -p;
+    }
+    (p, q)
+}
+
+/// Take a single safeguarded Halley step inside `(lo, hi)` given `f(x)`, `f'(x)`, and `f''(x)/f'(x)`.
+/// Falls back cleanly to a bisection step if the Halley proposal leaves `(lo, hi)` or overflows.
+#[must_use]
+pub fn safeguarded_halley_step(x: f64, fx: f64, dfx: f64, d2_over_d1: f64, lo: f64, hi: f64) -> f64 {
+    if dfx.is_finite() && dfx.abs() > f64::MIN_POSITIVE {
+        let newton = fx / dfx;
+        let denom = (1.0 - 0.5 * newton * d2_over_d1).clamp(0.2, 5.0);
+        let step = newton / denom;
+        if step.abs() <= 2.0 * f64::EPSILON * x.abs().max(f64::MIN_POSITIVE) {
+            return (x - step).clamp(lo, hi);
+        }
+        let candidate = x - step;
+        if candidate.is_finite() && candidate > lo && candidate < hi {
+            return candidate;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{RootOptions, brent_root};
+
+    #[test]
+    fn brent_solves_sqrt2_and_transcendental_equation() {
+        let root = brent_root(|x| x * x - 2.0, 0.0, 2.0, RootOptions::default()).unwrap();
+        assert!((root - std::f64::consts::SQRT_2).abs() < 1e-15);
+
+        let cos_fixed = brent_root(|x| x.cos() - x, 0.0, 1.0, RootOptions::default()).unwrap();
+        assert!((cos_fixed - 0.739_085_133_215_160_7).abs() < 1e-15);
+    }
+}
