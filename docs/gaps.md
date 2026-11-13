@@ -29,6 +29,19 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 
 **Remaining totals (one agent):** Alpha `15–25 h` (headless Alpha already passes via CLI/MCP/`UiApp`; live OS desktop/`wgpu`/`wasm32` hosting `G6`) · Core workflows add `22–36 h` (`G1`–`G5`, `G6` Core UI polish), `37–61 h` cumulative · Beta adds `16–27 h` (`G7`–`G12`), `53–88 h` cumulative · `G13` adds `8–12 h`, `61–100 h` for all gaps. Milestone `M7` carries a further `12–18 h` of cross-OS GPU/trackpad/installer hardening not tracked as a parity gap, giving **`73–118 h`** to `1.0`. These are implementation hours and exclude human review.
 
+## Known defects
+
+Found in code review of commits `9b29c08`–`8f2ba04` (2026-11-13) and not yet fixed. They are not counted in the Hours column above. Each row names its gap and the failure to cover with a regression test.
+
+| Gap | Location | Defect | Failure to test |
+|---|---|---|---|
+| `G8` | `crates/stats/src/categorical.rs` — `koopman_solve_lower`/`_upper`/`_lower_c_zero`/`_upper_a_zero` | When bracketing fails or `brent_root` returns `Err`, each solver falls back to `.unwrap_or(endpoint)` and reports that endpoint as a finite Koopman RR confidence limit. | A table where 120 halvings/doublings never change the score's sign, or the score is non-finite at an endpoint, yields a bound near `rr·2^±120` that does not solve the score equation. Expected: an open bound or `None`, never a non-root. |
+| `G11` | `crates/engine/src/cmd_sci.rs` — `resolve_raster_target`; `crates/render/src/rasterizer.rs` — `RasterImage::new` | Explicit `width_px`/`height_px` are capped only per axis (`MAX_RASTER_DIM_PX = 16384`), with no total-pixel budget, and the buffer is allocated with `Vec::with_capacity`, which aborts on allocation failure. | PNG/TIFF export at `16384×16384` requests a 1 GiB buffer and aborts on `wasm32` or a low-memory host instead of returning `RenderError`. Add a pixel budget and use `try_reserve`. |
+| `G2` | `crates/engine/src/cmd_data.rs` — external delimited-file link creation (`read_to_string(path).unwrap_or_default()`) | Read errors on the linked file are discarded, and delimiter and decimal-separator detection run on empty text. | Linking a missing, unreadable or non-UTF-8 file (for example semicolon-delimited with decimal commas) succeeds with default separators; later refreshes parse it wrongly. Expected: the link command reports the read error. |
+| `G12` | `crates/engine/src/lib.rs` — `Session::execute`, `undo_stack` | Every command, read-only ones included, deep-clones the whole `ProjectDocument`, and every mutating snapshot is kept on an undo stack with no limit. | With a 10M-cell table, each `table.exportCsv` copies the whole project, and N edits keep N full copies until the process runs out of memory. Skip the clone for read-only commands and cap undo depth or memory. |
+| `G9` | `crates/fit/src/dsl.rs` — `Parser::parse_add`/`parse_mul`/`parse_cmp`, `enum Expr` | `MAX_PARSE_DEPTH` limits parentheses, calls, unary chains and `^`, but not left-associative binary chains, and `Expr` still derives recursive `Clone`/`Debug`. Stack safety depends on every walker being written iteratively. | `Y = X+X+…` with about 200k terms builds a left-deep tree. Any recursive `clone()`, `{:?}` or new recursive pass overflows the stack, and `wasm32` aborts. Cap total AST node count or depth in the parser. |
+| `G10` | `crates/format/src/pzfx.rs` — `estimate_table_cells` vs `build_table_archetype` | The import cell budget repeats the builder's per-kind sizing logic instead of measuring what the builder allocates. | If the builder changes (for example Nested pads groups to `max_units`, or Survival gains a subcolumn), the `MAX_IMPORT_CELLS` check undercounts without anyone noticing. Derive the count from the builder or the built table. |
+
 ---
 
 ## Details by gap
