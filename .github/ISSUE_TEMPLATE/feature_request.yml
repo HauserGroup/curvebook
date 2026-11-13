@@ -1,0 +1,49 @@
+name: Feature or parity gap
+description: An analysis, equation, graph type, file format, or workflow that is missing or incomplete.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Check [`docs/gaps.md`](https://github.com/HauserGroup/lumencraft/blob/main/docs/gaps.md) first. Most missing features are already listed there with a gap id and a gate.
+        Work is done in the order set out in the roadmap, so a request outside the current gate may wait.
+  - type: textarea
+    id: need
+    attributes:
+      label: What you are trying to do
+      description: The scientific task, not the menu item. What data do you have, and what result or figure do you need?
+    validations:
+      required: true
+  - type: textarea
+    id: missing
+    attributes:
+      label: What is missing or incomplete
+    validations:
+      required: true
+  - type: input
+    id: gap
+    attributes:
+      label: Related gap id
+      description: The id from docs/gaps.md if there is one, for example G3 or G8.
+      placeholder: G3
+  - type: textarea
+    id: spec
+    attributes:
+      label: Public specification
+      description: |
+        A textbook, paper, or public documentation page that defines the expected behaviour, with a citation or URL.
+        Do not paste vendor-authored text, and do not describe behaviour learned by running the proprietary reference application.
+    validations:
+      required: true
+  - type: textarea
+    id: verification
+    attributes:
+      label: How it could be verified
+      description: A reference dataset, worked example, or open-source implementation whose output could serve as a test oracle.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and docs/gaps.md.
+          required: true

@@ -1,0 +1,76 @@
+name: Bug report
+description: Something crashes, hangs, loses data, or behaves differently from what the app or docs say.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for the report. For a result that is numerically wrong, use the **Wrong numerical result** template instead.
+        For a security problem, do not open an issue; follow `SECURITY.md`.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The smallest sequence that shows the problem. CLI commands or MCP requests are ideal because they can be replayed exactly.
+      placeholder: |
+        1. cargo run -p lumencraft-cli -- ...
+        2. ...
+    validations:
+      required: true
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where it happens
+      multiple: true
+      options:
+        - Desktop app
+        - Web app (WebAssembly)
+        - Command-line interface
+        - MCP server
+        - Control channel (--control)
+        - Build, packaging, or CI
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Commit or build
+      description: The commit hash you built from, or the build shown in the About window.
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system and version, and the browser if this is the web app.
+      placeholder: macOS 15.2 on Apple silicon
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error text or logs
+      description: Paste any error message, panic text, or log output. Remove anything private first.
+      render: text
+  - type: checkboxes
+    id: data-loss
+    attributes:
+      label: Severity
+      options:
+        - label: The app crashed, froze, or lost unsaved work.
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues and did not find this one.
+          required: true
+        - label: Any file or data attached here is synthetic or mine to share, and contains nothing confidential.
+          required: true

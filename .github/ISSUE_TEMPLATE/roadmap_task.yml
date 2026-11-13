@@ -1,0 +1,60 @@
+name: Roadmap task
+description: A claimable piece of planned work - a step of the execution order, a risk spike, or part of a gap. Usually opened by a maintainer.
+title: "<task id>: "
+labels: ["help wanted"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        One task per issue, sized to land as **one pull request**. To take it, comment on the issue before you start, and say so if you stop.
+        Rules for the work are in `CONTRIBUTING.md` and `AGENTS.md`.
+  - type: input
+    id: task-id
+    attributes:
+      label: Task id
+      description: The step, spike, or gap id from docs/roadmap.md or docs/gaps.md. Commits and the pull request title start with it.
+      placeholder: Slice 0, S1, or G3
+    validations:
+      required: true
+  - type: dropdown
+    id: gate
+    attributes:
+      label: Gate
+      description: The gate this work counts toward.
+      options:
+        - Alpha
+        - Core workflows
+        - Beta
+        - "1.0"
+        - Not tied to a gate
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: Scope
+      description: What is included, and which crates it touches.
+    validations:
+      required: true
+  - type: textarea
+    id: out-of-scope
+    attributes:
+      label: Out of scope
+      description: What this task deliberately leaves for later, so the pull request stays narrow.
+  - type: textarea
+    id: done
+    attributes:
+      label: Done when
+      description: The exit criterion. Something a reviewer can run or check.
+    validations:
+      required: true
+  - type: textarea
+    id: oracle
+    attributes:
+      label: Verification reference
+      description: For numerical work, the reference the tests will use and the tolerance. Leave empty for non-numerical work.
+  - type: textarea
+    id: depends-on
+    attributes:
+      label: Depends on
+      description: Issues or pull requests that must land first.
