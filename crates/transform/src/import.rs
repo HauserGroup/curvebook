@@ -1,0 +1,607 @@
+//! Four-stage [`ImportLinkSpec`] data import, filtering, reshaping, placement, and
+//! circular-link detection pipeline (`docs/data-tables-and-transforms.md` §6).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use lumencraft_doc::{
+    BaselineOperation, Cell, CellCoord, CellValue, DataSheet, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource, LinkedDataRegion,
+    PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, transpose_cell_grid,
+};
+
+use crate::error::TransformError;
+use crate::formula::{ScalarEnv, eval_scalar_expr, parse_formula};
+
+/// Optional post-filter transformations applied during Stage 2/3 of import.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct ImportPipelineOptions {
+    /// Optional baseline subtraction/ratio against `baseline_col` (in the filtered grid).
+    pub baseline: Option<(usize, BaselineOperation)>,
+    /// Optional cell coordinates `(row, col)` to mark `excluded = true` after shaping.
+    pub exclude_coords: Vec<(usize, usize)>,
+    /// Optional row-level exclusion formula (rows where predicate evaluates true have all cells marked excluded).
+    pub exclude_row_predicate: Option<String>,
+    /// Optional provenance identifier when attaching a [`LinkedDataRegion`].
+    pub link_id: Option<String>,
+    /// Optional provenance summary text.
+    pub provenance_summary: Option<String>,
+}
+
+/// Source data bundle passed into [`apply_import_link_pipeline`].
+#[derive(Debug, Clone)]
+pub enum ImportSourcePayload<'a> {
+    InternalData(&'a DataSheet),
+    InternalResult(&'a ResultSheet),
+    DelimitedText { text: &'a str, delimiter: char, decimal_separator: char },
+}
+
+/// Summary of a completed 4-stage import pipeline run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportPipelineReport {
+    pub rows_placed: usize,
+    pub cols_placed: usize,
+    pub target_range: SheetCellRange,
+    pub provenance_summary: String,
+}
+
+/// Detect circular dependencies across [`DataSheet::linked_regions`] using Kahn's topological sort.
+///
+/// Returns `Ok(order)` of `SheetId`s if acyclic, or [`TransformError::CircularDependency`] if a cycle exists.
+pub fn detect_link_cycles(sheets: &[DataSheet]) -> Result<Vec<SheetId>, TransformError> {
+    let mut idx_by_id: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, s) in sheets.iter().enumerate() {
+        idx_by_id.insert(s.id.as_str(), i);
+    }
+
+    let n = sheets.len();
+    let mut dependents = vec![Vec::new(); n];
+    let mut in_degree = vec![0_usize; n];
+
+    for (dst_idx, sheet) in sheets.iter().enumerate() {
+        let mut seen = BTreeSet::new();
+        for region in &sheet.linked_regions {
+            if let Some(up_id) = region.spec.source.upstream_sheet_id() {
+                if up_id == &sheet.id {
+                    return Err(TransformError::CircularDependency { cycle: vec![sheet.id.to_string(), sheet.id.to_string()] });
+                }
+                if let Some(&src_idx) = idx_by_id.get(up_id.as_str())
+                    && seen.insert(src_idx)
+                {
+                    dependents[src_idx].push(dst_idx);
+                    in_degree[dst_idx] += 1;
+                }
+            }
+        }
+    }
+
+    let mut queue: Vec<usize> = (0..n).filter(|&i| in_degree[i] == 0).collect();
+    let mut order = Vec::with_capacity(n);
+    let mut cursor = 0;
+    while cursor < queue.len() {
+        let u = queue[cursor];
+        cursor += 1;
+        order.push(sheets[u].id.clone());
+        for &v in &dependents[u] {
+            in_degree[v] = in_degree[v].saturating_sub(1);
+            if in_degree[v] == 0 {
+                queue.push(v);
+            }
+        }
+    }
+
+    if order.len() < n {
+        let remaining: Vec<usize> = (0..n).filter(|&i| in_degree[i] > 0).collect();
+        let cycle = find_sheet_cycle(sheets, &dependents, &remaining);
+        return Err(TransformError::CircularDependency { cycle });
+    }
+    Ok(order)
+}
+
+fn find_sheet_cycle(sheets: &[DataSheet], adj: &[Vec<usize>], remaining: &[usize]) -> Vec<String> {
+    let mut state = vec![0_u8; sheets.len()];
+    let mut stack = Vec::new();
+    for &start in remaining {
+        if state[start] == 0
+            && let Some(idxs) = dfs_sheet_cycle(start, adj, &mut state, &mut stack)
+        {
+            return idxs.into_iter().map(|i| sheets[i].id.to_string()).collect();
+        }
+    }
+    remaining.iter().map(|&i| sheets[i].id.to_string()).collect()
+}
+
+fn dfs_sheet_cycle(node: usize, adj: &[Vec<usize>], state: &mut [u8], stack: &mut Vec<usize>) -> Option<Vec<usize>> {
+    state[node] = 1;
+    stack.push(node);
+    for &next in &adj[node] {
+        if state[next] == 1 {
+            let pos = stack.iter().position(|&x| x == next).unwrap_or(0);
+            let mut cycle = stack[pos..].to_vec();
+            cycle.push(next);
+            return Some(cycle);
+        }
+        if state[next] == 0
+            && let Some(found) = dfs_sheet_cycle(next, adj, state, stack)
+        {
+            return Some(found);
+        }
+    }
+    let _ = stack.pop();
+    state[node] = 2;
+    None
+}
+
+/// Execute the 4-stage [`ImportLinkSpec`] pipeline into `target` (respecting `target.frozen`),
+/// optionally updating `info_sheet` provenance notes.
+pub fn apply_import_link_pipeline(
+    target: &mut DataSheet,
+    spec: &ImportLinkSpec,
+    payload: ImportSourcePayload<'_>,
+    opts: &ImportPipelineOptions,
+    mut info_sheet: Option<&mut InfoSheet>,
+) -> Result<ImportPipelineReport, TransformError> {
+    target.ensure_mutable()?;
+
+    if let Some(up_id) = spec.source.upstream_sheet_id()
+        && up_id == &target.id
+    {
+        return Err(TransformError::CircularDependency { cycle: vec![target.id.to_string(), target.id.to_string()] });
+    }
+
+    // Stage 1: Extract raw grid.
+    let (raw_grid, mut header_row) = extract_stage1(&spec.source, &spec.filter, payload)?;
+
+    // Stage 2: Row/column window, decimation, unstacking, baseline, and exclusion rules.
+    let mut shaped = apply_stage2_filter(raw_grid, &spec.filter, opts, &mut header_row)?;
+
+    // Stage 3: Orientation (transpose), blank-skipping, and placement at anchor.
+    if spec.placement.skip_contiguous_blanks {
+        shaped = collapse_contiguous_blank_rows(shaped);
+    }
+    if spec.placement.transpose {
+        shaped = transpose_cell_grid(&shaped);
+    }
+
+    let rows_placed = shaped.len();
+    let cols_placed = shaped.iter().map(Vec::len).max().unwrap_or(0);
+    let target_range = place_grid(target, &shaped, spec.placement.mode, spec.placement.anchor)?;
+
+    if spec.placement.propagate_title_header {
+        let base_col = target_range.start.col;
+        for (offset, hdr) in header_row.iter().enumerate() {
+            if let Some(title) = hdr.active_text() {
+                set_column_title_if_possible(&mut target.archetype, base_col + offset, title);
+            }
+        }
+    }
+
+    // Stage 4: Provenance tracking & InfoSheet audit entry.
+    let provenance_summary = opts.provenance_summary.clone().unwrap_or_else(|| format_provenance(spec, rows_placed, cols_placed));
+    if !matches!(spec.source, LinkSource::Clipboard) {
+        let link_id = opts.link_id.clone().unwrap_or_else(|| format!("link-{}", target.linked_regions.len() + 1));
+        target.add_linked_region(LinkedDataRegion {
+            id: link_id,
+            spec: spec.clone(),
+            target_range,
+            provenance_summary: provenance_summary.clone(),
+        })?;
+    }
+    if let Some(ref mut info) = info_sheet {
+        if !info.notes_markdown.is_empty() {
+            info.notes_markdown.push('\n');
+        }
+        info.notes_markdown.push_str(&format!("- Import `{}`: {provenance_summary}", target.title));
+    }
+
+    Ok(ImportPipelineReport { rows_placed, cols_placed, target_range, provenance_summary })
+}
+
+fn extract_stage1(
+    source: &LinkSource,
+    filter: &ImportFilterSpec,
+    payload: ImportSourcePayload<'_>,
+) -> Result<(Vec<Vec<Cell>>, Vec<Cell>), TransformError> {
+    match (source, payload) {
+        (LinkSource::InternalSheet { range, .. }, ImportSourcePayload::InternalData(sheet)) => Ok((sheet.extract_cell_grid(*range), Vec::new())),
+        (LinkSource::InternalSheet { tab_id, range, .. }, ImportSourcePayload::InternalResult(res)) => {
+            let tab = if let Some(tid) = tab_id { res.tabs.iter().find(|t| &t.id == tid) } else { res.tabs.first() };
+            let Some(tab) = tab else {
+                return Err(TransformError::InvalidInput { message: String::from("referenced ResultTab not found") });
+            };
+            let mut grid = Vec::new();
+            let end_r = range.end.row.min(tab.rows.len().saturating_sub(1));
+            if range.start.row <= end_r && !tab.rows.is_empty() {
+                for r in range.start.row..=end_r {
+                    let row = &tab.rows[r];
+                    let end_c = range.end.col.min(row.len().saturating_sub(1));
+                    if range.start.col <= end_c && !row.is_empty() {
+                        grid.push(row[range.start.col..=end_c].iter().map(result_cell_to_cell).collect());
+                    }
+                }
+            }
+            Ok((grid, Vec::new()))
+        }
+        (LinkSource::ExternalDelimitedFile { delimiter, decimal_separator, .. }, ImportSourcePayload::DelimitedText { text, .. }) => {
+            Ok((parse_delimited_text(text, *delimiter, *decimal_separator, filter.parse_asterisk_exclusions), Vec::new()))
+        }
+        (LinkSource::Clipboard, ImportSourcePayload::DelimitedText { text, delimiter, decimal_separator }) => {
+            Ok((parse_delimited_text(text, delimiter, decimal_separator, filter.parse_asterisk_exclusions), Vec::new()))
+        }
+        (LinkSource::Clipboard, ImportSourcePayload::InternalData(sheet)) => {
+            let full = SheetCellRange::new(CellCoord::default(), CellCoord::new(usize::MAX, usize::MAX, usize::MAX));
+            Ok((sheet.extract_cell_grid(full), Vec::new()))
+        }
+        _ => Err(TransformError::InvalidInput { message: String::from("mismatched LinkSource and ImportSourcePayload") }),
+    }
+}
+
+fn result_cell_to_cell(rc: &ResultCell) -> Cell {
+    match rc {
+        ResultCell::Empty => Cell::empty(),
+        ResultCell::Number { value, .. } => Cell::number(*value),
+        ResultCell::PValue { raw, .. } => Cell::number(*raw),
+        ResultCell::Text(s) => Cell::text(s.clone()),
+        ResultCell::Boolean(b) => Cell::number(if *b { 1.0 } else { 0.0 }),
+        ResultCell::ConfidenceInterval { .. } => Cell::empty(),
+    }
+}
+
+fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_asterisk: bool) -> Vec<Vec<Cell>> {
+    let mut rows = Vec::new();
+    for line in text.lines() {
+        if line.is_empty() {
+            continue;
+        }
+        let cells: Vec<Cell> = line.split(delimiter).map(|tok| Cell::parse_import_token(tok, decimal_sep, parse_asterisk)).collect();
+        rows.push(cells);
+    }
+    rows
+}
+
+fn apply_stage2_filter(
+    mut grid: Vec<Vec<Cell>>,
+    filter: &ImportFilterSpec,
+    opts: &ImportPipelineOptions,
+    header_row: &mut Vec<Cell>,
+) -> Result<Vec<Vec<Cell>>, TransformError> {
+    if let Some((r0, r1)) = filter.row_window {
+        if r0 > r1 {
+            return Err(TransformError::InvalidSpec { message: format!("row_window start {r0} > end {r1}") });
+        }
+        if r0 >= grid.len() {
+            grid.clear();
+        } else {
+            let end = r1.min(grid.len() - 1);
+            grid = grid[r0..=end].to_vec();
+        }
+    }
+
+    if let Some((c0, c1)) = filter.col_window {
+        if c0 > c1 {
+            return Err(TransformError::InvalidSpec { message: format!("col_window start {c0} > end {c1}") });
+        }
+        for row in &mut grid {
+            if c0 >= row.len() {
+                row.clear();
+            } else {
+                let end = c1.min(row.len() - 1);
+                *row = row[c0..=end].to_vec();
+            }
+        }
+    }
+
+    if let Some(k) = filter.decimate_every_k {
+        if k == 0 {
+            return Err(TransformError::InvalidSpec { message: String::from("decimate_every_k must be >= 1") });
+        }
+        grid = grid.into_iter().step_by(k).collect();
+    }
+
+    if let Some(group_col) = filter.unstack_group_column {
+        let (unstacked, hdr) = unstack_grid_by_group(&grid, group_col)?;
+        grid = unstacked;
+        *header_row = hdr;
+    }
+
+    if let Some((base_col, op)) = opts.baseline {
+        apply_grid_baseline(&mut grid, base_col, op)?;
+    }
+
+    if let Some(ref pred) = opts.exclude_row_predicate {
+        apply_row_exclusion_predicate(&mut grid, pred)?;
+    }
+
+    for &(r, c) in &opts.exclude_coords {
+        if let Some(cell) = grid.get_mut(r).and_then(|row| row.get_mut(c)) {
+            cell.excluded = true;
+        }
+    }
+
+    Ok(grid)
+}
+
+fn unstack_grid_by_group(grid: &[Vec<Cell>], group_col: usize) -> Result<(Vec<Vec<Cell>>, Vec<Cell>), TransformError> {
+    let mut group_order: Vec<String> = Vec::new();
+    let mut buckets: BTreeMap<String, Vec<Cell>> = BTreeMap::new();
+
+    for row in grid {
+        let Some(g_cell) = row.get(group_col) else {
+            return Err(TransformError::InvalidSpec { message: format!("unstack_group_column {group_col} out of bounds") });
+        };
+        let key = match &g_cell.value {
+            CellValue::Text(s) => s.trim().to_owned(),
+            CellValue::Number(v) if v.is_finite() => format!("{v}"),
+            _ => continue,
+        };
+        if key.is_empty() {
+            continue;
+        }
+        let val_cell = row.iter().enumerate().find(|&(idx, _)| idx != group_col).map_or_else(Cell::empty, |(_, c)| c.clone());
+        if !buckets.contains_key(&key) {
+            group_order.push(key.clone());
+        }
+        buckets.entry(key).or_default().push(val_cell);
+    }
+
+    let max_rows = buckets.values().map(Vec::len).max().unwrap_or(0);
+    let cols = group_order.len();
+    let mut out = vec![vec![Cell::empty(); cols]; max_rows];
+    for (c, key) in group_order.iter().enumerate() {
+        if let Some(vals) = buckets.get(key) {
+            for (r, cell) in vals.iter().enumerate() {
+                out[r][c] = cell.clone();
+            }
+        }
+    }
+    let header = group_order.into_iter().map(Cell::text).collect();
+    Ok((out, header))
+}
+
+fn apply_grid_baseline(grid: &mut [Vec<Cell>], base_col: usize, op: BaselineOperation) -> Result<(), TransformError> {
+    for row in grid.iter_mut() {
+        let Some(base_val) = row.get(base_col).and_then(Cell::active_number) else {
+            return Err(TransformError::InvalidInput { message: format!("baseline column {base_col} missing active numeric value") });
+        };
+        for cell in row.iter_mut() {
+            let Some(v) = cell.value.finite_f64() else {
+                continue;
+            };
+            let res = match op {
+                BaselineOperation::Difference => v - base_val,
+                BaselineOperation::Ratio => {
+                    if base_val == 0.0 {
+                        f64::NAN
+                    } else {
+                        v / base_val
+                    }
+                }
+                BaselineOperation::PercentChange => {
+                    if base_val == 0.0 {
+                        f64::NAN
+                    } else {
+                        100.0 * (v - base_val) / base_val
+                    }
+                }
+                BaselineOperation::FractionalChange => {
+                    if base_val == 0.0 {
+                        f64::NAN
+                    } else {
+                        (v - base_val) / base_val
+                    }
+                }
+            };
+            cell.value = CellValue::from_finite_or_empty(res);
+        }
+    }
+    Ok(())
+}
+
+fn apply_row_exclusion_predicate(grid: &mut [Vec<Cell>], pred: &str) -> Result<(), TransformError> {
+    let expr = parse_formula(pred)?;
+    for (r, row) in grid.iter_mut().enumerate() {
+        let mut bindings = Vec::with_capacity(row.len() + 2);
+        #[allow(clippy::cast_precision_loss)]
+        {
+            bindings.push(("$row", (r + 1) as f64));
+            bindings.push(("$index", r as f64));
+        }
+        let col_names: Vec<String> = (0..row.len()).map(lumencraft_doc::default_column_label).collect();
+        for (c, cell) in row.iter().enumerate() {
+            if let Some(v) = cell.active_number() {
+                bindings.push((col_names[c].as_str(), v));
+            }
+        }
+        let env = ScalarEnv::new(bindings, None);
+        if eval_scalar_expr(&expr, &env)?.as_bool() == Some(true) {
+            for cell in row.iter_mut() {
+                cell.excluded = true;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collapse_contiguous_blank_rows(grid: Vec<Vec<Cell>>) -> Vec<Vec<Cell>> {
+    let mut out = Vec::with_capacity(grid.len());
+    let mut prev_blank = false;
+    for row in grid {
+        let is_blank = row.iter().all(Cell::is_empty);
+        if is_blank && prev_blank {
+            continue;
+        }
+        prev_blank = is_blank;
+        out.push(row);
+    }
+    out
+}
+
+fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, anchor: CellCoord) -> Result<SheetCellRange, TransformError> {
+    if grid.is_empty() {
+        return Ok(SheetCellRange::new(anchor, anchor));
+    }
+    let existing_rows = target.archetype.row_count();
+    let start_row = match mode {
+        PlacementMode::Overwrite | PlacementMode::InsertRows => anchor.row,
+        PlacementMode::AppendRows => existing_rows,
+        PlacementMode::AppendColumns => anchor.row,
+    };
+    let start_col = match mode {
+        PlacementMode::AppendColumns => target.archetype.column_count(),
+        _ => anchor.col,
+    };
+
+    let needed_rows = start_row + grid.len();
+    ensure_sheet_rows(&mut target.archetype, needed_rows)?;
+
+    let mut max_col = start_col;
+    let mut max_sub = anchor.subcol;
+    for (dr, row_cells) in grid.iter().enumerate() {
+        let r = start_row + dr;
+        for (dc, cell) in row_cells.iter().enumerate() {
+            let (col, subcol) = resolve_target_coord(&target.archetype, start_col, anchor.subcol, dc);
+            let coord = CellCoord::new(r, col, subcol);
+            if let Some(slot) = target.archetype.data_cell_mut(coord) {
+                *slot = cell.clone();
+                max_col = max_col.max(col);
+                max_sub = max_sub.max(subcol);
+            }
+        }
+    }
+
+    Ok(SheetCellRange::new(CellCoord::new(start_row, start_col, anchor.subcol), CellCoord::new(start_row + grid.len() - 1, max_col, max_sub)))
+}
+
+fn resolve_target_coord(arch: &TableArchetype, base_col: usize, base_sub: usize, offset: usize) -> (usize, usize) {
+    let subs_per_col = match arch {
+        TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
+        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
+        _ => 1,
+    };
+    if subs_per_col <= 1 {
+        (base_col + offset, 0)
+    } else {
+        let flat = base_sub + offset;
+        (base_col + flat / subs_per_col, flat % subs_per_col)
+    }
+}
+
+fn ensure_sheet_rows(arch: &mut TableArchetype, min_rows: usize) -> Result<(), TransformError> {
+    match arch {
+        TableArchetype::Xy(t) => {
+            let x_subs = t.x_mode.subcolumn_count();
+            if t.x_cells.len() < min_rows {
+                t.x_cells.resize_with(min_rows, || vec![Cell::empty(); x_subs]);
+            }
+            if t.row_titles.len() < min_rows {
+                t.row_titles.resize_with(min_rows, String::new);
+            }
+            let y_subs = t.y_subcolumn_mode.subcolumn_count();
+            for ds in &mut t.data_sets {
+                ds.ensure_rows(min_rows, y_subs)?;
+            }
+        }
+        TableArchetype::Column(t) => {
+            if t.row_titles.len() < min_rows {
+                t.row_titles.resize_with(min_rows, String::new);
+            }
+            let subs = t.subcolumn_mode.subcolumn_count();
+            for ds in &mut t.data_sets {
+                ds.ensure_rows(min_rows, subs)?;
+            }
+        }
+        TableArchetype::Grouped(t) => {
+            if t.row_titles.len() < min_rows {
+                t.row_titles.resize_with(min_rows, String::new);
+            }
+            let subs = t.subcolumn_mode.subcolumn_count();
+            for ds in &mut t.data_sets {
+                ds.ensure_rows(min_rows, subs)?;
+            }
+        }
+        TableArchetype::Contingency(t) => {
+            if t.row_titles.len() < min_rows {
+                t.row_titles.resize_with(min_rows, String::new);
+            }
+            for ds in &mut t.data_sets {
+                ds.ensure_rows(min_rows, 1)?;
+            }
+        }
+        TableArchetype::Survival(t) => {
+            if t.times.len() < min_rows {
+                t.times.resize_with(min_rows, Cell::empty);
+            }
+            if t.row_titles.len() < min_rows {
+                t.row_titles.resize_with(min_rows, String::new);
+            }
+            for ds in &mut t.cohorts {
+                ds.ensure_rows(min_rows, 1)?;
+            }
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            if t.slice_labels.len() < min_rows {
+                t.slice_labels.resize_with(min_rows, String::new);
+            }
+            for ds in &mut t.data_sets {
+                ds.ensure_rows(min_rows, 1)?;
+            }
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            if mv.row_titles.len() < min_rows {
+                mv.row_titles.resize_with(min_rows, String::new);
+            }
+            for var in &mut mv.variables {
+                if var.cells.len() < min_rows {
+                    var.cells.resize_with(min_rows, Cell::empty);
+                }
+            }
+        }
+        TableArchetype::Nested(t) => {
+            if t.row_titles.len() < min_rows {
+                t.row_titles.resize_with(min_rows, String::new);
+            }
+            for grp in &mut t.groups {
+                let units = grp.biological_unit_count();
+                if grp.cells.len() < min_rows {
+                    grp.cells.resize_with(min_rows, || vec![Cell::empty(); units]);
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn set_column_title_if_possible(arch: &mut TableArchetype, col: usize, title: &str) {
+    match arch {
+        TableArchetype::Xy(t) => {
+            if let Some(ds) = t.data_sets.get_mut(col) {
+                ds.title = title.to_owned();
+            }
+        }
+        TableArchetype::Column(t) => {
+            if let Some(ds) = t.data_sets.get_mut(col) {
+                ds.title = title.to_owned();
+            }
+        }
+        TableArchetype::Grouped(t) => {
+            if let Some(ds) = t.data_sets.get_mut(col) {
+                ds.title = title.to_owned();
+            }
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            if let Some(var) = mv.variables.get_mut(col) {
+                var.title = title.to_owned();
+            }
+        }
+        _ => {}
+    }
+}
+
+fn format_provenance(spec: &ImportLinkSpec, rows: usize, cols: usize) -> String {
+    let origin = match &spec.source {
+        LinkSource::Clipboard => String::from("clipboard"),
+        LinkSource::InternalSheet { sheet_id, .. } => format!("sheet:{sheet_id}"),
+        LinkSource::ExternalDelimitedFile { path, .. } => format!("file:{path}"),
+    };
+    let tx = if spec.placement.transpose { ", transposed" } else { "" };
+    format!("Linked {rows}x{cols} from {origin}{tx}")
+}

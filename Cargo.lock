@@ -280,6 +280,7 @@ dependencies = [
  "lumencraft-math",
  "lumencraft-testkit",
  "proptest",
+ "serde",
 ]
 
 [[package]]
@@ -358,6 +359,7 @@ dependencies = [
  "lumencraft-math",
  "lumencraft-testkit",
  "proptest",
+ "serde",
 ]
 
 [[package]]
@@ -409,6 +411,7 @@ dependencies = [
  "lumencraft-math",
  "lumencraft-testkit",
  "proptest",
+ "serde",
 ]
 
 [[package]]

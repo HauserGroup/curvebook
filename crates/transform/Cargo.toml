@@ -11,6 +11,7 @@ workspace = true
 [dependencies]
 lumencraft-math = { workspace = true }
 lumencraft-doc = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }

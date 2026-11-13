@@ -1,12 +1,14 @@
 # LumenCraft Roadmap
 
-**Stage: pre-alpha (`M0`)** · next: alpha, 6 core scientific workflows end to end (`M1`–`M5`) and ~165–255 h away
+**Stage: pre-alpha (`M0`)** · next: alpha, one experiment from raw data to exported figure at Essentials scope, ~120–185 h away
 
-> **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** `G1` numerical foundations & 58-file NIST StRD corpus harness landed + `G2` `L0`/`L1` schemas (`lumencraft-palette`, `lumencraft-doc`, `serde` & `proptest`) landed · **Target:** GraphPad Prism 11 (11.1.x)
+> **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** alpha redefined as the Essentials scope; execution order now runs a vertical slice and two risk spikes before widening ([`docs/roadmap.md`](docs/roadmap.md#execution-order)) · **Target:** GraphPad Prism 11 (11.1.x)
 
 LumenCraft is a clean-room, open-source, pure-Rust reimplementation of the scientific data-table, biostatistics, nonlinear regression (curve fitting), and publication graphing workflow. It runs natively on macOS, Windows, Linux, and FreeBSD, and in the browser via WebAssembly (`WASM`), and agents can drive all of it headlessly over MCP, the CLI, and a loopback JSONL control channel. This page is the summary; the evidence is in [`docs/target-app-parity.md`](docs/target-app-parity.md), the ranked work list is in [`docs/gaps.md`](docs/gaps.md), and the subsystem implementation guidelines live in [`docs/`](docs/).
 
-**Why pre-alpha (`M0`):** the layered 21-member workspace (`L0`–`L7`), strict no-panic / no-`unsafe` Clippy gates, cross-platform packaging definitions, CI workflows, UI command sync, clean-room/brand scanners, subsystem mathematical specifications, `G1` numerical foundations + 58-dataset NIST StRD corpus verifier (`lumencraft-math`, `lumencraft-testkit`, `cargo xtask corpus`), and the `L0`/`L1` foundation schemas of `G2` (`lumencraft-palette`, `lumencraft-doc` with `serde` & `proptest` round-trips) are complete and passing, while `crates/format` (`.lumencraft` ZIP/CSV I/O), `crates/engine` (reactive DAG + undo/redo), and the statistical, curve-fitting, chart-compiler, and shell crates remain M0 stubs (`~3%` weighted feature depth). Alpha requires all six everyday wet-lab workflows in the [Alpha gate](docs/roadmap.md#alpha-gate) to work end to end with lossless `.lumencraft` save/reopen and NIST StRD verification.
+**Why pre-alpha (`M0`):** the layered 21-member workspace (`L0`–`L7`), strict no-panic / no-`unsafe` Clippy gates, cross-platform packaging definitions, CI workflows, UI command sync, clean-room/brand scanners, subsystem mathematical specifications, `G1` numerical foundations + 58-dataset NIST StRD corpus verifier (`lumencraft-math`, `lumencraft-testkit`, `cargo xtask corpus`), and the `L0`/`L1` foundation schemas of `G2` (`lumencraft-palette`, `lumencraft-doc` with `serde` & `proptest` round-trips) are complete and passing, while `crates/format` (`.lumencraft` ZIP/CSV I/O), `crates/engine` (reactive DAG + undo/redo), and the statistical, curve-fitting, chart-compiler, and shell crates remain M0 stubs (`~3%` weighted feature depth). Alpha requires the Essentials scope in the [Alpha gate](docs/roadmap.md#alpha-gate) to work end to end with lossless `.lumencraft` save/reopen and numerics verified against a named reference. The six everyday wet-lab workflows at full depth are the later [Core-workflow gate](docs/roadmap.md#core-workflow-gate).
+
+**Where the work is:** Wave 1 (`L0`–`L1`) is done. Wave 2 (`L2`–`L3` libraries) is in progress with its scope frozen. Next come one vertical slice through every layer and two risk spikes, then the engine and shell for the Alpha scope. The numbers below count only merged, end-to-end behaviour, so they do not move until that work is merged and command-wired. See the [execution order](docs/roadmap.md#execution-order).
 
 ## Headline numbers
 
@@ -14,21 +16,26 @@ LumenCraft is a clean-room, open-source, pure-Rust reimplementation of the scien
 |---|---|---|
 | **Feature breadth** (table archetypes, statistical tests, equations, graph types, exports) | **~7%** | `G1` numerical foundations & 58-dataset StRD oracle + `G2` `lumencraft-palette` (`L0`) & `lumencraft-doc` (`L1`) schemas landed alongside `xtask` gates, i18n registry, and MCP/CLI/egui entry points; `crates/format`, engine DAG, solvers & UI queued in `G2`–`G14` |
 | **Feature depth** (weighted by scientific use, scored by verified behaviour) | **~3%** | estimated ([methodology](docs/target-app-parity.md#methodology)) |
-| **To alpha** | **~140–220 h** one agent · ~40–60 h with 4–6 agents | estimated ([Alpha gate](docs/roadmap.md#alpha-gate)) |
-| **To beta** | **~265–405 h** one agent · ~75–115 h with 4–6 agents | estimated |
-| **To full parity** | **~415–645 h** one agent · ~115–180 h with 4–6 agents | estimated |
+| **To alpha** (Essentials scope) | **~120–185 h** one agent · ~35–55 h with 4–6 agents | sum of Alpha-gated gap hours ([Alpha gate](docs/roadmap.md#alpha-gate)) |
+| **To core workflows** | **~210–330 h** one agent · ~60–95 h with 4–6 agents | Alpha plus Core-gated gap hours ([Core-workflow gate](docs/roadmap.md#core-workflow-gate)) |
+| **To beta** | **~360–565 h** one agent · ~100–160 h with 4–6 agents | Alpha, Core and Beta-gated gap hours |
+| **To full parity** | **~410–645 h** one agent · ~115–185 h with 4–6 agents | all gaps plus `M7` hardening and polish |
+
+Hours are implementation estimates and exclude human review, which sets the real pace ([landing rules](docs/roadmap.md#landing-rules)). The multi-agent figures assume work that splits cleanly across crates; the engine is a single crate on the critical path, so they are optimistic until it lands.
 
 **Readiness by audience** (estimated; formula in [`docs/target-app-parity.md`](docs/target-app-parity.md#ready-for-real-work)):
 
 | Audience | Ready % | Agent hours to ~95% (one agent) | With 4–6 agents | Work that dominates |
 |---|---:|---:|---:|---|
-| **Full Prism 11 (Pro / Enterprise)** (decides the stage) | **~2%** | **~415–645 h** | ~115–180 h | mainstream scope below, plus Multiple Variables unified analyses & Multifactor ANOVA (`G7`, 30–45 h), Cox PH / multivariate GLMs / PCA (`G8`, 35–55 h), custom ODE/implicit equations (`G9`, 25–40 h), `.prism`/`.pzfx` import (`G10`, 20–35 h), localization (`G13`, 35–55 h) |
-| **Mainstream wet-lab researcher** | **~4%** | **~235–355 h** | ~65–100 h | `.lumencraft` ZIP/CSV I/O & reactive DAG (`G2`), core *t*-tests/ANOVA/REML/post-hoc (`G3`), LM nonlinear fitting + dose–response/kinetics (`G4`), XY/Column/Grouped/Survival graphs + SVG/PDF (`G5`), desktop/web spreadsheet & inspector UX (`G6`) |
-| **Essentials / student biostatistics user** | **~5%** | **~125–190 h** | ~35–55 h | `XY`/`Column`/`Grouped` tables + `.lumencraft`/CSV I/O, descriptive stats, *t*-tests, one-/two-way ANOVA, linear + 4PL regression, bar/scatter/box plots, SVG/PDF/PNG export |
+| **Full Prism 11 (Pro / Enterprise)** (decides `1.0`) | **~2%** | **~410–645 h** | ~115–185 h | mainstream scope below, plus Multiple Variables unified analyses & Multifactor ANOVA (`G7`, 30–45 h), survival / Cox PH / multivariate GLMs / PCA (`G8`, 39–61 h), custom ODE/implicit equations (`G9`, 25–40 h), `.prism`/`.pzfx` import (`G10`, 20–35 h), localization (`G13`, 35–55 h) |
+| **Mainstream wet-lab researcher** | **~4%** | **~235–355 h** | ~65–100 h | `.lumencraft` ZIP/CSV I/O & reactive DAG (`G2`), core *t*-tests/ANOVA/REML/post-hoc (`G3`), LM nonlinear fitting + dose–response/kinetics (`G4`), XY/Column/Grouped graphs + SVG/PDF (`G5`), survival analysis and graph (`G8`), desktop/web spreadsheet & inspector UX (`G6`) |
+| **Essentials / student biostatistics user** (decides alpha) | **~5%** | **~125–190 h** | ~35–55 h | `XY`/`Column`/`Grouped` tables + `.lumencraft`/CSV I/O, descriptive stats, *t*-tests, one-/two-way ANOVA, linear + 4PL regression, bar/scatter/box plots, SVG/PDF/PNG export |
 
 The target application binary was **not** inspected or executed: the clean-room rule in [`AGENTS.md`](AGENTS.md) forbids it, so every requirement is derived from public documentation, peer-reviewed biostatistics literature, and public reference datasets (NIST StRD).
 
 ## By dimension
+
+Dimensions overlap (UI, file-format and hardware work is also counted inside feature areas), so this column does not sum to the headline totals.
 
 | Dimension | % | One agent (h) | Doc |
 |---|---:|---:|---|
@@ -66,14 +73,18 @@ Weights, scoring rubric, and missing items per area: [`docs/target-app-parity.md
 | English | `en` | baseline catalog wired (`cargo xtask i18n-report`) | 100% (M0 strings) |
 | Tier-1 scientific locales (`de`, `es`, `fr`, `ja`, `ko`, `pt-BR`, `zh-CN`, `zh-TW`) | — | planned (`G13`) | 0% |
 
-## Upcoming (pick work from [`docs/gaps.md`](docs/gaps.md))
+## Upcoming
 
-1. **G1 — Numerical foundations & NIST StRD harness (`crates/math`, `crates/testkit`, `2–4 h` remaining):** `L0` special functions, tail-safe distributions, Studentized range, Dunnett integrals, compensated summation, pivoted QR/SVD/Cholesky/SymEigen, `DoubleDouble` oracle, and 58-dataset `cargo xtask corpus` verifier landed; remaining work is wiring `crates/stats` (`G3`) and `crates/fit` (`G4`) into the full 58-file StRD corpus suite.
-2. **G2 — Typed data tables, `.lumencraft` container & CSV/TSV I/O (`crates/doc`, `crates/format`, `crates/engine`, `18–30 h` remaining):** `L0` (`lumencraft-palette`) and `L1` (`lumencraft-doc`) schemas + `serde`/`proptest` round-trips landed; remaining work is `crates/format` (`.lumencraft` ZIP+JSON+CSV archive + RFC-4180 CSV/TSV) and `crates/engine` (topological reactive DAG, live `Paste Link`/transpose, cycle rejection, undo/redo journal).
-3. **G3 — Core biostatistics & multiplicity (`crates/stats`):** descriptive suite, normality battery, Grubbs/ROUT, *t*-tests + standardized effect sizes, one-/two-way & RM ANOVA, REML mixed models, Dunnett/Tukey/Šídák/Holm–Šídák/BKY FDR.
-4. **G4 — Nonlinear regression & built-in equation library (`crates/fit`):** Moré Levenberg–Marquardt, Cauchy robust & ROUT fitting, shared global parameters, Venzon–Moolgavkar profile-likelihood CIs, AICc & extra-sum-of-squares *F*-test, dose–response/binding/enzyme-kinetics/exponential models.
-5. **G5 — Publication chart compiler & SVG/PDF export (`crates/chart`, `crates/svg`, `crates/pdf`, `crates/render`):** XY, Column, Grouped, Survival, and Multiple Variables graphs, nonlinear & discontinuous axes, live pairwise *p*-value brackets, Page Layouts.
-6. **G6 — Interactive desktop & WASM shell (`crates/ui-egui`, `apps/lumencraft`, `apps/lumencraft-web`):** five-folder Project Navigator, Family pane, virtualized subcolumn spreadsheet grid, Analyze wizard, Result tabs + Analysis Checklist, Format Graph inspector.
+In order; details and exit criteria are in the [execution order](docs/roadmap.md#execution-order), per-gap scope in [`docs/gaps.md`](docs/gaps.md).
+
+1. **Land Wave 2, scope frozen (`crates/format`, `crates/stats`, `crates/fit`, `crates/transform`):** finish what is in flight and land it one gap per pull request, including the `G1` corpus wiring with `G3` and `G4`. Start nothing new beyond what the Alpha scope needs.
+2. **Slice 0, one vertical slice (`crates/engine`, `crates/chart`, `crates/svg`, `apps/lumencraft-cli`, `15–25 h`):** `XY` table → 4PL fit → graph → SVG → `.lumencraft` save/reopen, every step an engine command driven from the CLI. Fix any schema or save-format problem it exposes before going further.
+3. **Risk spikes, in parallel with Slice 0 (`6–10 h` each):** `S1` spreadsheet grid at 60 fps on desktop and in the browser; `S2` publication-quality text and PDF with no bundled fonts. Each ends in a written go or redesign decision.
+4. **Wave 3, engine and commands for the Alpha scope (`crates/engine`, `crates/tools`):** reactive DAG, undo/redo, and a `CommandSpec` for every Alpha-scope analysis, fit, graph, and export. This is the critical path.
+5. **Wave 4, shell and automation for the Alpha scope (`crates/ui-egui`, `crates/mcp`, `apps/*`):** Navigator, subcolumn grid, Analyze dialog, Result tabs, basic Format Graph, and the CLI/MCP handlers. **Alpha.**
+6. **Widen to the Core workflows**, one workflow at a time through all layers, then Beta scope one gap at a time.
+
+**Decision `D1` (2026-11-13):** reference values produced by open-source statistical software may be used as test fixtures, within the limits in [`AGENTS.md`](AGENTS.md). Methods with no textbook or NIST reference are verified this way; see [verification oracles](docs/roadmap.md#verification-oracles).
 
 ## Progress log
 

@@ -1,0 +1,690 @@
+use std::collections::BTreeMap;
+
+use lumencraft_doc::{
+    AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, DocError,
+    ErrorPropagationMode, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LinkSource,
+    MathTransformPreset, MultipleVariablesTable, NormalizeAnchor, PlacementMode, SheetCellRange, SheetId, SimulationNoise, SubcolumnMode,
+    TableArchetype, TableKind, TransformAnalysisSpec, XColumnMode, XyTable,
+};
+use lumencraft_transform::{
+    AucOptions, BaselineKind, CurveSheetOp, DependencyTarget, DerivativeOrder, FormulaValue, ImportPipelineOptions, ImportSourcePayload,
+    MathTransformOp, PruneMethod, ScalarEnv, SelectRule, SmoothMethod, TransformContext, TransformError, apply_curve_calculus_to_sheet,
+    apply_import_link_pipeline, compute_auc, compute_auc_with_se, compute_sheet_auc, detect_link_cycles, differentiate_xy, eval_scalar_expr,
+    evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, evaluate_equation, evaluate_formula_for_sheet,
+    execute_analysis_transform, execute_math_transform, execute_prune, execute_remove_baseline_kind, execute_select, execute_transform,
+    extract_dependencies, integrate_xy, parse_formula, simulate_xy_sheet, smooth_xy,
+};
+
+fn assert_approx(actual: f64, expected: f64, tol: f64) {
+    assert!((actual - expected).abs() <= tol, "expected {expected} ± {tol}, got {actual} (diff = {})", (actual - expected).abs());
+}
+
+#[allow(clippy::unwrap_used)]
+fn make_xy_single(id: &str, xs: &[f64], ys: &[&[f64]]) -> DataSheet {
+    let n_rows = xs.len();
+    let n_cols = ys.len();
+    let mut xy =
+        XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::Single, n_cols, n_rows).unwrap();
+    for (r, &x) in xs.iter().enumerate() {
+        xy.set_x_cell(r, Cell::number(x)).unwrap();
+    }
+    for (c, col_vals) in ys.iter().enumerate() {
+        for (r, &y) in col_vals.iter().enumerate() {
+            xy.data_sets[c].cells[r][0] = Cell::number(y);
+        }
+    }
+    DataSheet::new(id, format!("Sheet {id}"), TableArchetype::Xy(xy)).unwrap()
+}
+
+#[allow(clippy::unwrap_used)]
+fn make_col_single(id: &str, cols: &[(&str, &[Cell])]) -> DataSheet {
+    let n_rows = cols.first().map_or(0, |(_, r)| r.len());
+    let mut tbl = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, cols.len().max(1), n_rows).unwrap();
+    for (c, (title, cells)) in cols.iter().enumerate() {
+        tbl.data_sets[c].title = (*title).to_owned();
+        for (r, cell) in cells.iter().enumerate() {
+            tbl.data_sets[c].cells[r][0] = cell.clone();
+        }
+    }
+    DataSheet::new(id, format!("Sheet {id}"), TableArchetype::Column(tbl)).unwrap()
+}
+
+// ============================================================================
+// 1. Formula Parser, Evaluator, Functions, NA Propagation, and DAG
+// ============================================================================
+
+#[test]
+fn formula_precedence_associativity_and_scalar_math() {
+    let env = ScalarEnv::default();
+    let cases = [
+        ("=-2^2", -4.0),
+        ("2^3^2", 512.0),
+        ("1 + 2 * 3 - 4 / 2", 5.0),
+        ("if(1 < 2 AND 3 >= 3, 10, 20)", 10.0),
+        ("if(NOT (1 == 2 OR 2 <> 2), 42, 0)", 42.0),
+        ("abs(-7) + sqrt(16) + cbrt(27)", 14.0),
+        ("floor(2.9) + ceil(2.1) + round(2.6) + trunc(-2.9) + sign(-5)", 5.0),
+        ("clamp(15, 0, 10) + min(3, 5, 2) + max(1, 9, 4)", 21.0),
+        ("pow(2, 5) + exp(0) + ln(1) + log10(1000) + log2(8)", 39.0),
+    ];
+    for (src, expected) in cases {
+        let ast = parse_formula(src).unwrap();
+        let val = eval_scalar_expr(&ast, &env).unwrap().as_finite_f64().unwrap();
+        assert_approx(val, expected, 1e-12);
+    }
+
+    // Special & trig functions
+    let trig = eval_scalar_expr(&parse_formula("sin(0) + cos(0) + tan(0) + atan2(1, 1) * 4 / 3.141592653589793").unwrap(), &env)
+        .unwrap()
+        .as_finite_f64()
+        .unwrap();
+    assert_approx(trig, 2.0, 1e-12);
+
+    let hyp = eval_scalar_expr(&parse_formula("sinh(0) + cosh(0) + tanh(0)").unwrap(), &env).unwrap().as_finite_f64().unwrap();
+    assert_approx(hyp, 1.0, 1e-12);
+
+    let inv_trig = eval_scalar_expr(&parse_formula("asin(0) + acos(1) + atan(0)").unwrap(), &env).unwrap().as_finite_f64().unwrap();
+    assert_approx(inv_trig, 0.0, 1e-12);
+
+    let special = eval_scalar_expr(&parse_formula("erf(0) + erfc(0) + lgamma(1) + logit(0.5)").unwrap(), &env).unwrap().as_finite_f64().unwrap();
+    assert_approx(special, 1.0, 1e-12);
+
+    // Bliss probit(0.5) == 5.0 while norm_inv(0.5) == 0.0
+    let probit_half = eval_scalar_expr(&parse_formula("probit(0.5)").unwrap(), &env).unwrap().as_finite_f64().unwrap();
+    assert_approx(probit_half, 5.0, 1e-12);
+    let norm_inv_half = eval_scalar_expr(&parse_formula("norm_inv(0.5)").unwrap(), &env).unwrap().as_finite_f64().unwrap();
+    assert_approx(norm_inv_half, 0.0, 1e-12);
+}
+
+#[test]
+fn formula_aggregates_window_and_excluded_propagation() {
+    let mut mv = MultipleVariablesTable::new(2, 5).unwrap();
+    mv.variables[0].title = String::from("Dose");
+    mv.variables[1].title = String::from("Group");
+    let nums = [1.0, 2.0, 3.0, 4.0, 100.0];
+    let groups = ["ctrl", "ctrl", "trt", "trt", "ctrl"];
+    for i in 0..5 {
+        mv.variables[0].cells[i] = Cell { value: CellValue::Number(nums[i]), excluded: i == 4 };
+        mv.variables[1].cells[i] = Cell::text(groups[i]);
+    }
+
+    let mut info = InfoSheet::new_preseeded("info1", "Meta").unwrap();
+    info.set_constant("Factor", ConstantValue::Number(10.0), None).unwrap();
+
+    let sheet = DataSheet::new("mv1", "MV", TableArchetype::MultipleVariables(mv)).unwrap();
+
+    // Excluded row 4 (value 100.0) must NOT pollute sum/mean/count/sd/geo_mean/iqr
+    let sums = evaluate_formula_for_sheet("sum(Dose)", &sheet, Some(&info)).unwrap();
+    assert_approx(sums[0].as_finite_f64().unwrap(), 10.0, 1e-12);
+
+    let means = evaluate_formula_for_sheet("mean(Dose) * Info(\"Factor\")", &sheet, Some(&info)).unwrap();
+    assert_approx(means[0].as_finite_f64().unwrap(), 25.0, 1e-12);
+
+    let cnt = evaluate_formula_for_sheet("count(Dose)", &sheet, None).unwrap();
+    assert_approx(cnt[0].as_finite_f64().unwrap(), 4.0, 1e-12);
+
+    let p50 = evaluate_formula_for_sheet("percentile(Dose, 50) + median(Dose) + min_col(Dose) + max_col(Dose)", &sheet, None).unwrap();
+    // median=2.5, min=1, max=4 => 2.5 + 2.5 + 1 + 4 = 10
+    assert_approx(p50[0].as_finite_f64().unwrap(), 10.0, 1e-12);
+
+    let gmean = evaluate_formula_for_sheet("geo_mean(Dose)", &sheet, None).unwrap();
+    assert_approx(gmean[0].as_finite_f64().unwrap(), (24.0_f64).powf(0.25), 1e-12);
+
+    let spreads = evaluate_formula_for_sheet("var(Dose) + sd(Dose) + sem(Dose) + iqr(Dose)", &sheet, None).unwrap();
+    assert!(spreads[0].as_finite_f64().is_some());
+
+    // Conditional aggregates
+    let sumif = evaluate_formula_for_sheet("sumif(Group == \"trt\", Dose)", &sheet, None).unwrap();
+    assert_approx(sumif[0].as_finite_f64().unwrap(), 7.0, 1e-12);
+    let countif = evaluate_formula_for_sheet("countif(Group == \"ctrl\")", &sheet, None).unwrap();
+    assert_approx(countif[0].as_finite_f64().unwrap(), 3.0, 1e-12);
+    let meanif = evaluate_formula_for_sheet("meanif(Group == \"ctrl\", Dose)", &sheet, None).unwrap();
+    assert_approx(meanif[0].as_finite_f64().unwrap(), 1.5, 1e-12);
+
+    // Window / cumulative / lag / lead / rank / row variables & NA propagation
+    let cum = evaluate_formula_for_sheet("cumsum(Dose)", &sheet, None).unwrap();
+    assert_approx(cum[0].as_finite_f64().unwrap(), 1.0, 1e-12);
+    assert_approx(cum[3].as_finite_f64().unwrap(), 10.0, 1e-12);
+    assert_eq!(cum[4], FormulaValue::Missing);
+
+    let cprod = evaluate_formula_for_sheet("cumprod(Dose)", &sheet, None).unwrap();
+    assert_approx(cprod[3].as_finite_f64().unwrap(), 24.0, 1e-12);
+
+    let diffs = evaluate_formula_for_sheet("diff(Dose)", &sheet, None).unwrap();
+    assert_eq!(diffs[0], FormulaValue::Missing);
+    assert_approx(diffs[1].as_finite_f64().unwrap(), 1.0, 1e-12);
+
+    let lags = evaluate_formula_for_sheet("lag(Dose, 2)", &sheet, None).unwrap();
+    assert_eq!(lags[0], FormulaValue::Missing);
+    assert_eq!(lags[1], FormulaValue::Missing);
+    assert_approx(lags[2].as_finite_f64().unwrap(), 1.0, 1e-12);
+
+    let leads = evaluate_formula_for_sheet("lead(Dose, 1)", &sheet, None).unwrap();
+    assert_approx(leads[0].as_finite_f64().unwrap(), 2.0, 1e-12);
+
+    let rmean = evaluate_formula_for_sheet("rolling_mean(Dose, 2)", &sheet, None).unwrap();
+    assert_approx(rmean[1].as_finite_f64().unwrap(), 1.5, 1e-12);
+
+    let rsum = evaluate_formula_for_sheet("rolling_sum(Dose, 3)", &sheet, None).unwrap();
+    assert_approx(rsum[2].as_finite_f64().unwrap(), 6.0, 1e-12);
+
+    let z = evaluate_formula_for_sheet("zscore(Dose)", &sheet, None).unwrap();
+    assert_approx(z[0].as_finite_f64().unwrap() + z[3].as_finite_f64().unwrap(), 0.0, 1e-12);
+
+    let rnk = evaluate_formula_for_sheet("rank(Dose)", &sheet, None).unwrap();
+    assert_approx(rnk[0].as_finite_f64().unwrap(), 1.0, 1e-12);
+    assert_approx(rnk[3].as_finite_f64().unwrap(), 4.0, 1e-12);
+
+    let row_fn = evaluate_formula_for_sheet("if(isvalid(Dose), $row + $index, coalesce(Dose, -99))", &sheet, None).unwrap();
+    assert_approx(row_fn[0].as_finite_f64().unwrap(), 1.0, 1e-12); // 1 + 0
+    assert_approx(row_fn[4].as_finite_f64().unwrap(), -99.0, 1e-12);
+
+    let is_missing = evaluate_formula_for_sheet("isnan(Dose)", &sheet, None).unwrap();
+    assert_approx(is_missing[4].as_finite_f64().unwrap(), 1.0, 1e-12);
+}
+
+#[test]
+fn formula_error_diagnostics() {
+    assert!(matches!(parse_formula("1 + * 2"), Err(TransformError::ParseError { .. })));
+    assert!(matches!(parse_formula("sqrt(1, 2"), Err(TransformError::ParseError { .. })));
+
+    let env = ScalarEnv::default();
+    assert!(matches!(eval_scalar_expr(&parse_formula("unknown_fn(1)").unwrap(), &env), Err(TransformError::UnknownFunction { .. })));
+    assert!(matches!(eval_scalar_expr(&parse_formula("sqrt(1, 2)").unwrap(), &env), Err(TransformError::ArityMismatch { .. })));
+    assert!(matches!(eval_scalar_expr(&parse_formula("MissingVar + 1").unwrap(), &env), Err(TransformError::UnknownVariable { .. })));
+}
+
+#[test]
+fn formula_dag_topological_order_and_cycle_detection() {
+    // Calculated column 0 depends on calculated column 1, which depends on entered column 2 and Info constant
+    let mut mv = MultipleVariablesTable::new(3, 3).unwrap();
+    mv.variables[0].title = String::from("Final");
+    mv.variables[0].set_calculated_formula("=Mid + [InfoConst]");
+    mv.variables[1].title = String::from("Mid");
+    mv.variables[1].set_calculated_formula("=col(\"Raw\") * 2");
+    mv.variables[2].title = String::from("Raw");
+    for r in 0..3 {
+        mv.variables[2].cells[r] = Cell::number((r + 1) as f64);
+    }
+
+    let mut info = InfoSheet::new_preseeded("i1", "I").unwrap();
+    info.set_constant("InfoConst", ConstantValue::Number(10.0), None).unwrap();
+
+    let ast0 = parse_formula("=Mid + [InfoConst]").unwrap();
+    let deps0 = extract_dependencies(&ast0);
+    assert!(deps0.contains(&DependencyTarget::ColumnName(String::from("Mid"))));
+
+    let order = evaluate_calculated_variables(&mut mv, Some(&info)).unwrap();
+    assert_eq!(order, vec![1, 0]);
+    assert_approx(mv.variables[0].cells[0].active_number().unwrap(), 12.0, 1e-12);
+    assert_approx(mv.variables[0].cells[2].active_number().unwrap(), 16.0, 1e-12);
+
+    // Test DataSheet wrapper as well
+    let mut ds = DataSheet::new("mv", "MV", TableArchetype::MultipleVariables(mv.clone())).unwrap();
+    let ds_order = evaluate_data_sheet_calculated_variables(&mut ds, Some(&info)).unwrap();
+    assert_eq!(ds_order, vec![1, 0]);
+
+    // Self-cycle detection
+    let mut self_cyc = mv.clone();
+    self_cyc.variables[0].set_calculated_formula("=Final + 1");
+    assert!(matches!(evaluate_calculated_variables(&mut self_cyc, None), Err(TransformError::CircularDependency { .. })));
+
+    // 3-node cycle detection: 0 -> 1 -> 2 -> 0
+    let mut three_cyc = MultipleVariablesTable::new(3, 2).unwrap();
+    three_cyc.variables[0].title = String::from("V0");
+    three_cyc.variables[1].title = String::from("V1");
+    three_cyc.variables[2].title = String::from("V2");
+    three_cyc.variables[0].set_calculated_formula("=V1 + 1");
+    three_cyc.variables[1].set_calculated_formula("=V2 + 1");
+    three_cyc.variables[2].set_calculated_formula("=V0 + 1");
+    let err = evaluate_calculated_variables(&mut three_cyc, None).unwrap_err();
+    match err {
+        TransformError::CircularDependency { cycle } => assert!(cycle.len() >= 3),
+        other => panic!("expected CircularDependency, got {other:?}"),
+    }
+}
+
+// ============================================================================
+// 2. TransformAnalysisSpec Operations & Error Propagation
+// ============================================================================
+
+#[test]
+fn math_transform_and_error_propagation_vs_finite_difference() {
+    // MeanSdN table with Y = 10.0, SD = 0.5, N = 4, plus an excluded row
+    let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::MeanSdN, 1, 2).unwrap();
+    xy.set_x_cell(0, Cell::number(100.0)).unwrap();
+    xy.set_x_cell(1, Cell::number(1000.0)).unwrap();
+    xy.data_sets[0].cells[0] = vec![Cell::number(10.0), Cell::number(0.5), Cell::number(4.0)];
+    xy.data_sets[0].cells[1] = vec![Cell { value: CellValue::Number(20.0), excluded: true }, Cell::number(1.0), Cell::number(5.0)];
+    let sheet = DataSheet::new("xy_err", "Err", TableArchetype::Xy(xy)).unwrap();
+
+    // 2a. FirstOrderDeltaMethod vs finite-difference derivative verification on UserExpression + Ln
+    let ctx = TransformContext::default();
+    let delta_out =
+        execute_math_transform(&sheet, Some(&MathTransformOp::Log10), Some(&MathTransformOp::Ln), ErrorPropagationMode::FirstOrderDeltaMethod, &ctx)
+            .unwrap();
+
+    let TableArchetype::Xy(res_xy) = &delta_out.data_sheet.archetype else {
+        panic!("expected XY output");
+    };
+    assert_approx(res_xy.x_value_at(0).unwrap(), 2.0, 1e-12);
+    let y0 = res_xy.data_sets[0].cells[0][0].active_number().unwrap();
+    let sd0 = res_xy.data_sets[0].cells[0][1].active_number().unwrap();
+    let n0 = res_xy.data_sets[0].cells[0][2].active_number().unwrap();
+    assert_approx(y0, 10.0_f64.ln(), 1e-12);
+    // Central finite difference check: |d/dy ln(y)| * 0.5
+    let eps = 1e-6_f64;
+    let fd_deriv = ((10.0_f64 + eps).ln() - (10.0_f64 - eps).ln()) / (2.0 * eps);
+    assert_approx(sd0, fd_deriv.abs() * 0.5, 1e-8);
+    assert_approx(n0, 4.0, 1e-12);
+    // Exclusion preserved on row 1
+    assert!(res_xy.data_sets[0].cells[1][0].excluded);
+
+    // 2b. ReplicateEndpoints on Log10
+    let ep_out = execute_transform(
+        &sheet,
+        &TransformAnalysisSpec::Math {
+            x_transform: None,
+            y_transform: Some(MathTransformPreset::Log10),
+            error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+        },
+        &ctx,
+    )
+    .unwrap();
+    let TableArchetype::Xy(ep_xy) = &ep_out.data_sheet.archetype else {
+        panic!("expected XY");
+    };
+    let expected_ep_sd = 0.5 * ((10.5_f64).log10() - (9.5_f64).log10());
+    assert_approx(ep_xy.data_sets[0].cells[0][1].active_number().unwrap(), expected_ep_sd, 1e-12);
+
+    // 2c. MeanLowHigh asymmetric intervals on XY + UserExpression & Constant ops
+    let mut xy_lh =
+        XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::MeanLowHigh, 1, 1).unwrap();
+    xy_lh.set_x_cell(0, Cell::number(2.0)).unwrap();
+    xy_lh.data_sets[0].cells[0] = vec![Cell::number(4.0), Cell::number(0.5), Cell::number(1.0)];
+    let col_sheet = DataSheet::new("col_lh", "LH", TableArchetype::Xy(xy_lh)).unwrap();
+    let user_out = execute_math_transform(
+        &col_sheet,
+        None,
+        Some(&MathTransformOp::UserExpression(String::from("Y^2 + 1"))),
+        ErrorPropagationMode::ReplicateEndpoints,
+        &ctx,
+    )
+    .unwrap();
+    let TableArchetype::Xy(u_col) = &user_out.data_sheet.archetype else {
+        panic!("expected XY");
+    };
+    // f(4) = 17, f(3.5) = 13.25 -> low_err = 3.75, f(5) = 26 -> high_err = 9.0
+    assert_approx(u_col.data_sets[0].cells[0][0].active_number().unwrap(), 17.0, 1e-10);
+    assert_approx(u_col.data_sets[0].cells[0][1].active_number().unwrap(), 3.75, 1e-10);
+    assert_approx(u_col.data_sets[0].cells[0][2].active_number().unwrap(), 9.0, 1e-10);
+
+    // Constant ops via MathTransformOp
+    let mul_out =
+        execute_math_transform(&col_sheet, None, Some(&MathTransformOp::MultiplyByConstant(2.0)), ErrorPropagationMode::FirstOrderDeltaMethod, &ctx)
+            .unwrap();
+    let TableArchetype::Xy(m_col) = &mul_out.data_sheet.archetype else {
+        panic!("expected XY");
+    };
+    assert_approx(m_col.data_sets[0].cells[0][0].active_number().unwrap(), 8.0, 1e-12);
+    assert_approx(m_col.data_sets[0].cells[0][1].active_number().unwrap(), 1.0, 1e-12);
+}
+
+#[test]
+fn normalize_baseline_transpose_prune_and_select() {
+    // Normalize with Hooked InfoConstant
+    let mut info = InfoSheet::new_preseeded("info_norm", "Info").unwrap();
+    info.set_constant("MaxRef", ConstantValue::Number(50.0), None).unwrap();
+    let ctx = TransformContext::with_info(&info);
+
+    let xy = make_xy_single("s1", &[1.0, 2.0, 3.0, 4.0], &[&[10.0, 20.0, 30.0, 50.0], &[0.0, 25.0, 50.0, 100.0]]);
+    let norm_out = execute_transform(
+        &xy,
+        &TransformAnalysisSpec::Normalize {
+            zero_anchor: NormalizeAnchor::ColumnMin,
+            hundred_anchor: NormalizeAnchor::Hooked(HookSource::InfoConstant {
+                info_sheet_id: Some(SheetId::new("info_norm")),
+                constant_name: String::from("MaxRef"),
+            }),
+            output_percent: true,
+            per_data_set: true,
+        },
+        &ctx,
+    )
+    .unwrap();
+    let TableArchetype::Xy(n_xy) = &norm_out.data_sheet.archetype else {
+        panic!("expected XY");
+    };
+    // Col 0: min=10, max=50 => 30 -> 50%, 50 -> 100%
+    assert_approx(n_xy.data_sets[0].cells[0][0].active_number().unwrap(), 0.0, 1e-12);
+    assert_approx(n_xy.data_sets[0].cells[2][0].active_number().unwrap(), 50.0, 1e-12);
+    assert_approx(n_xy.data_sets[0].cells[3][0].active_number().unwrap(), 100.0, 1e-12);
+    // Col 1: min=0, max=50 => 25 -> 50%, 100 -> 200%
+    assert_approx(n_xy.data_sets[1].cells[1][0].active_number().unwrap(), 50.0, 1e-12);
+    assert_approx(n_xy.data_sets[1].cells[3][0].active_number().unwrap(), 200.0, 1e-12);
+
+    // RemoveBaseline (AnalysisSpec wrapper) + BaselineKind variants
+    let analysis = AnalysisSpec::new(
+        "an1",
+        "s1",
+        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: vec![0], operation: BaselineOperation::Difference }),
+    )
+    .unwrap();
+    let res_sheet = execute_analysis_transform(&xy, &analysis, &ctx).unwrap();
+    let TableArchetype::Xy(base_xy) = &res_sheet.analyzable_data.as_ref().unwrap().archetype else {
+        panic!("expected XY");
+    };
+    // Col 1 - Col 0: 0-10 = -10, 25-20 = 5
+    assert_approx(base_xy.data_sets[1].cells[0][0].active_number().unwrap(), -10.0, 1e-12);
+    assert_approx(base_xy.data_sets[1].cells[1][0].active_number().unwrap(), 5.0, 1e-12);
+
+    let lin_base =
+        execute_remove_baseline_kind(&xy, &BaselineKind::FirstAndLastLinear { first_k: 1, last_k: 1 }, BaselineOperation::Difference, &ctx).unwrap();
+    let TableArchetype::Xy(lb_xy) = &lin_base.data_sheet.archetype else {
+        panic!("expected XY");
+    };
+    // Col 1 is linear 0 -> 100 so endpoints become 0.0
+    assert_approx(lb_xy.data_sets[1].cells[0][0].active_number().unwrap(), 0.0, 1e-12);
+    assert_approx(lb_xy.data_sets[1].cells[3][0].active_number().unwrap(), 0.0, 1e-12);
+
+    // Transpose
+    let col_sheet = make_col_single(
+        "c1",
+        &[("Ctrl", &[Cell::number(1.0), Cell { value: CellValue::Number(2.0), excluded: true }]), ("Drug", &[Cell::number(3.0), Cell::number(4.0)])],
+    );
+    let tr_out = execute_transform(&col_sheet, &TransformAnalysisSpec::Transpose { swap_row_and_column_titles: true }, &ctx).unwrap();
+    let TableArchetype::Column(tr_col) = &tr_out.data_sheet.archetype else {
+        panic!("expected Column");
+    };
+    assert_eq!(tr_col.row_titles, vec!["Ctrl", "Drug"]);
+    assert!(tr_col.data_sets[1].cells[0][0].excluded);
+    assert_approx(tr_col.data_sets[1].cells[1][0].active_number().unwrap(), 4.0, 1e-12);
+
+    // Prune: AverageBins, EveryNth, LogarithmicSpacing, MinMaxBins
+    let prune_avg = execute_transform(&xy, &TransformAnalysisSpec::PruneRows { every_k_rows: 2, average_window: true }, &ctx).unwrap();
+    let TableArchetype::Xy(pa_xy) = &prune_avg.data_sheet.archetype else {
+        panic!("expected XY");
+    };
+    assert_eq!(pa_xy.row_count(), 2);
+    assert_approx(pa_xy.x_value_at(0).unwrap(), 1.5, 1e-12);
+    assert_approx(pa_xy.data_sets[0].cells[0][0].active_number().unwrap(), 15.0, 1e-12);
+
+    let prune_minmax = execute_prune(&xy, PruneMethod::MinMaxBins(4), &ctx).unwrap();
+    assert_eq!(prune_minmax.data_sheet.archetype.row_count(), 2);
+
+    let big_xy = make_xy_single("big", &(1..=100).map(|i| i as f64).collect::<Vec<_>>(), &[&(1..=100).map(|i| (i * 2) as f64).collect::<Vec<_>>()]);
+    let log_pruned = execute_prune(&big_xy, PruneMethod::LogarithmicSpacing { target_points: 10 }, &ctx).unwrap();
+    assert!(log_pruned.data_sheet.archetype.row_count() >= 5 && log_pruned.data_sheet.archetype.row_count() <= 10);
+
+    // Select & Transform (predicate + projection to Column)
+    let sel_out = execute_transform(
+        &xy,
+        &TransformAnalysisSpec::SelectAndTransform { filter_formula: Some(String::from("X >= 2 AND X <= 3")), target_archetype: TableKind::Column },
+        &ctx,
+    )
+    .unwrap();
+    assert_eq!(sel_out.data_sheet.kind(), TableKind::Column);
+    assert_eq!(sel_out.data_sheet.archetype.row_count(), 2);
+
+    let top1 = execute_select(&xy, &[SelectRule::TopN { column: 0, n: 1 }], TableKind::Xy, &ctx).unwrap();
+    assert_eq!(top1.data_sheet.archetype.row_count(), 1);
+    let TableArchetype::Xy(top_xy) = &top1.data_sheet.archetype else {
+        panic!("expected XY");
+    };
+    assert_approx(top_xy.data_sets[0].cells[0][0].active_number().unwrap(), 50.0, 1e-12);
+}
+
+#[test]
+fn simulate_deterministic_equations_and_noise() {
+    let params =
+        vec![(String::from("Bottom"), 10.0), (String::from("Top"), 100.0), (String::from("LogEC50"), -6.0), (String::from("HillSlope"), 1.0)];
+    let y_mid = evaluate_equation("hill_4pl", -6.0, &params).unwrap();
+    assert_approx(y_mid, 55.0, 1e-12);
+
+    let y_mm = evaluate_equation("michaelis_menten", 2.0, &[(String::from("Vmax"), 100.0), (String::from("Km"), 2.0)]).unwrap();
+    assert_approx(y_mm, 50.0, 1e-12);
+
+    let y_custom = evaluate_equation("expr: A * X^2 + B", 3.0, &[(String::from("A"), 2.0), (String::from("B"), 5.0)]).unwrap();
+    assert_approx(y_custom, 23.0, 1e-12);
+
+    let s1 = simulate_xy_sheet(
+        "sim1",
+        "Sim",
+        42,
+        10,
+        3,
+        0.0,
+        9.0,
+        "exponential_decay",
+        &[(String::from("y0"), 100.0), (String::from("k"), 0.2), (String::from("plateau"), 10.0)],
+        SimulationNoise::Gaussian { sd: 1.5 },
+    )
+    .unwrap();
+    let s2 = simulate_xy_sheet(
+        "sim1",
+        "Sim",
+        42,
+        10,
+        3,
+        0.0,
+        9.0,
+        "exponential_decay",
+        &[(String::from("y0"), 100.0), (String::from("k"), 0.2), (String::from("plateau"), 10.0)],
+        SimulationNoise::Gaussian { sd: 1.5 },
+    )
+    .unwrap();
+    assert_eq!(s1, s2);
+
+    let ctx = TransformContext::default();
+    let spec = TransformAnalysisSpec::Simulate {
+        seed: 7,
+        row_count: 5,
+        replicates: 2,
+        x_min: 1.0,
+        x_max: 5.0,
+        equation_id: String::from("linear"),
+        parameters: vec![(String::from("slope"), 2.0), (String::from("intercept"), 1.0)],
+        noise: SimulationNoise::Poisson,
+    };
+    let sim_out = execute_transform(&s1, &spec, &ctx).unwrap();
+    assert_eq!(sim_out.data_sheet.archetype.row_count(), 5);
+}
+
+// ============================================================================
+// 3. Curve Calculus: AUC, Peaks, SG/MA/LOWESS Smoothing, Derivatives, Integral
+// ============================================================================
+
+#[test]
+fn curve_auc_peaks_se_sg_derivatives_and_integral() {
+    // 3a. Exact trapezoidal AUC on linear curve + crossing baseline + peak
+    // Points: (0, -2), (2, 2), (4, 0), (5, -1). Baseline = 0.
+    // Crossing at x=1 -> negative triangle [0,1] area = 0.5*1*2 = 1.0
+    // Peak [1,4]: triangle (1,0)->(2,2)->(4,0) area = 0.5*3*2 = 3.0
+    // Negative [4,5]: area = 0.5*1*1 = 0.5
+    let auc = compute_auc(&[(0.0, -2.0), (2.0, 2.0), (4.0, 0.0), (5.0, -1.0)], &AucOptions::default()).unwrap();
+    assert_approx(auc.positive_area, 3.0, 1e-12);
+    assert_approx(auc.negative_area, 1.5, 1e-12);
+    assert_approx(auc.net_area, 1.5, 1e-12);
+    assert_eq!(auc.peaks.len(), 1);
+    assert_approx(auc.peaks[0].peak_x, 2.0, 1e-12);
+    assert_approx(auc.peaks[0].area, 3.0, 1e-12);
+
+    // 3b. SE propagation on uniform grid [0, 1, 2], SE = [0.1, 0.2, 0.1]
+    // Weights: w0 = 0.5, w1 = 1.0, w2 = 0.5 -> var = (0.5*0.1)^2 + (1*0.2)^2 + (0.5*0.1)^2 = 0.0025 + 0.04 + 0.0025 = 0.045
+    let auc_se = compute_auc_with_se(&[(0.0, 1.0, 0.1), (1.0, 2.0, 0.2), (2.0, 1.0, 0.1)], &AucOptions::default()).unwrap();
+    assert_approx(auc_se.standard_error.unwrap(), (0.045_f64).sqrt(), 1e-12);
+
+    // Sheet AUC on MeanSemN
+    let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::MeanSemN, 1, 3).unwrap();
+    for r in 0..3 {
+        xy.set_x_cell(r, Cell::number(r as f64)).unwrap();
+        xy.data_sets[0].cells[r] = vec![Cell::number((r + 1) as f64), Cell::number(0.25), Cell::number(4.0)];
+    }
+    let xy_sheet = DataSheet::new("xy_auc", "AUC", TableArchetype::Xy(xy)).unwrap();
+    let sheet_auc = compute_sheet_auc(&xy_sheet, 0, &AucOptions::default()).unwrap();
+    assert!(sheet_auc.standard_error.is_some());
+    assert_approx(sheet_auc.positive_area, 4.0, 1e-12);
+
+    // 3c. Savitzky-Golay 5/7/9 exactness on cubic polynomials (including boundary points)
+    let cubic: Vec<(f64, f64)> = (0..15)
+        .map(|i| {
+            let x = i as f64;
+            (x, 0.5 * x.powi(3) - 2.0 * x.powi(2) + 3.0 * x - 1.0)
+        })
+        .collect();
+    for method in [SmoothMethod::SavitzkyGolay5, SmoothMethod::SavitzkyGolay7, SmoothMethod::SavitzkyGolay9] {
+        let smoothed = smooth_xy(&cubic, method).unwrap();
+        assert_eq!(smoothed.len(), cubic.len());
+        for (&(x0, y0), &(xs, ys)) in cubic.iter().zip(smoothed.iter()) {
+            assert_approx(x0, xs, 1e-12);
+            assert_approx(ys, y0, 1e-9);
+        }
+    }
+
+    // Moving average & LOWESS preserve length and reduce spike noise
+    let noisy = vec![(0.0, 0.0), (1.0, 1.0), (2.0, 8.0), (3.0, 3.0), (4.0, 4.0), (5.0, 5.0)];
+    let ma = smooth_xy(&noisy, SmoothMethod::MovingAverage { window: 3 }).unwrap();
+    assert!(ma[2].1 < 8.0);
+    let low = smooth_xy(&noisy, SmoothMethod::Lowess { span: 0.6, robustness_iters: 2 }).unwrap();
+    assert!(low[2].1 < 8.0);
+
+    // 3d. Exact 3-pt Lagrange derivatives on quadratic f(x) = 3x^2 - 4x + 5 on non-uniform grid
+    let quad: Vec<(f64, f64)> = [0.0, 0.5, 1.5, 3.0, 4.2].into_iter().map(|x| (x, 3.0 * x * x - 4.0 * x + 5.0)).collect();
+    let d1 = differentiate_xy(&quad, DerivativeOrder::First).unwrap();
+    let d2 = differentiate_xy(&quad, DerivativeOrder::Second).unwrap();
+    for &(x, dy) in &d1 {
+        assert_approx(dy, 6.0 * x - 4.0, 1e-11);
+    }
+    for &(_, d2y) in &d2 {
+        assert_approx(d2y, 6.0, 1e-11);
+    }
+
+    // 3e. Cumulative integral & DataSheet wrapper
+    let integ = integrate_xy(&[(0.0, 2.0), (2.0, 6.0), (4.0, 6.0)], 0.0).unwrap();
+    assert_approx(integ[0].1, 0.0, 1e-12);
+    assert_approx(integ[1].1, 8.0, 1e-12);
+    assert_approx(integ[2].1, 20.0, 1e-12);
+
+    let xy_simple = make_xy_single("curve_s", &[0.0, 1.0, 2.0, 3.0], &[&[0.0, 1.0, 4.0, 9.0]]);
+    let deriv_sheet = apply_curve_calculus_to_sheet(&xy_simple, CurveSheetOp::Differentiate(DerivativeOrder::Second)).unwrap();
+    let TableArchetype::Xy(d_xy) = &deriv_sheet.archetype else {
+        panic!("expected XY");
+    };
+    assert_approx(d_xy.data_sets[0].cells[1][0].active_number().unwrap(), 2.0, 1e-11);
+}
+
+// ============================================================================
+// 4. 4-Stage ImportLinkSpec Pipeline & Link Cycle Detection
+// ============================================================================
+
+#[test]
+fn import_link_pipeline_four_stages_and_cycle_detection() {
+    let mut target = make_col_single("dst", &[("A", &[Cell::empty()]), ("B", &[Cell::empty()])]);
+    let mut info = InfoSheet::new_preseeded("info_imp", "Import Meta").unwrap();
+
+    // Delimited text with European comma decimals, asterisk exclusion, header row, unstacking
+    let csv = "Group;Value\nG1;1,5\nG1;*2,5\nG2;3,5\nG2;4,5";
+    let spec = ImportLinkSpec {
+        source: LinkSource::ExternalDelimitedFile { path: String::from("plate.csv"), delimiter: ';', decimal_separator: ',' },
+        filter: ImportFilterSpec {
+            row_window: Some((1, 4)),
+            col_window: None,
+            decimate_every_k: None,
+            unstack_group_column: Some(0),
+            parse_asterisk_exclusions: true,
+        },
+        placement: ImportPlacementSpec {
+            mode: PlacementMode::Overwrite,
+            anchor: CellCoord::new(0, 0, 0),
+            propagate_title_header: true,
+            skip_contiguous_blanks: false,
+            transpose: false,
+        },
+    };
+    let opts = ImportPipelineOptions {
+        link_id: Some(String::from("lnk1")),
+        provenance_summary: Some(String::from("Plate CSV import")),
+        ..ImportPipelineOptions::default()
+    };
+
+    let report = apply_import_link_pipeline(
+        &mut target,
+        &spec,
+        ImportSourcePayload::DelimitedText { text: csv, delimiter: ';', decimal_separator: ',' },
+        &opts,
+        Some(&mut info),
+    )
+    .unwrap();
+
+    assert_eq!(report.cols_placed, 2);
+    assert_eq!(report.rows_placed, 2);
+    assert_eq!(target.linked_regions.len(), 1);
+    assert!(info.notes_markdown.contains("Plate CSV import"));
+
+    let TableArchetype::Column(col) = &target.archetype else {
+        panic!("expected Column");
+    };
+    assert_eq!(col.data_sets[0].title, "G1");
+    assert_eq!(col.data_sets[1].title, "G2");
+    assert_approx(col.data_sets[0].cells[0][0].active_number().unwrap(), 1.5, 1e-12);
+    assert!(col.data_sets[0].cells[1][0].excluded);
+
+    // Frozen target guard
+    target.frozen = true;
+    let frozen_err = apply_import_link_pipeline(
+        &mut target,
+        &spec,
+        ImportSourcePayload::DelimitedText { text: csv, delimiter: ';', decimal_separator: ',' },
+        &opts,
+        None,
+    );
+    assert!(matches!(frozen_err, Err(TransformError::Doc(DocError::SheetFrozen { .. }))));
+
+    // Link cycle detection across multiple sheets
+    let s1 = make_col_single("s1", &[("A", &[Cell::number(1.0)])]);
+    let mut s2 = make_col_single("s2", &[("A", &[Cell::empty()])]);
+    let mut s3 = make_col_single("s3", &[("A", &[Cell::empty()])]);
+    let mut link_from_1 = spec.clone();
+    link_from_1.source = LinkSource::InternalSheet {
+        sheet_id: SheetId::new("s1"),
+        kind: InternalLinkKind::DataSheet,
+        tab_id: None,
+        range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
+    };
+    let mut link_from_2 = link_from_1.clone();
+    if let LinkSource::InternalSheet { ref mut sheet_id, .. } = link_from_2.source {
+        *sheet_id = SheetId::new("s2");
+    }
+    s2.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+        id: String::from("l1"),
+        spec: link_from_1.clone(),
+        target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
+        provenance_summary: String::from("s1->s2"),
+    });
+    s3.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+        id: String::from("l2"),
+        spec: link_from_2,
+        target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
+        provenance_summary: String::from("s2->s3"),
+    });
+
+    let order = detect_link_cycles(&[s3.clone(), s1.clone(), s2.clone()]).unwrap();
+    assert_eq!(order, vec![SheetId::new("s1"), SheetId::new("s2"), SheetId::new("s3")]);
+
+    // Introduce s3 -> s1 cycle
+    let mut s1_cyclic = s1;
+    let mut link_from_3 = link_from_1;
+    if let LinkSource::InternalSheet { ref mut sheet_id, .. } = link_from_3.source {
+        *sheet_id = SheetId::new("s3");
+    }
+    s1_cyclic.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+        id: String::from("l3"),
+        spec: link_from_3,
+        target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
+        provenance_summary: String::from("s3->s1"),
+    });
+    assert!(matches!(detect_link_cycles(&[s1_cyclic, s2, s3]), Err(TransformError::CircularDependency { .. })));
+
+    // Unused helper import check
+    let _ = BTreeMap::<String, FormulaValue>::new();
+}

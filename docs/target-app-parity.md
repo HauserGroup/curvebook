@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** `G1` numerical foundations + 58-file NIST StRD corpus harness landed; `G2` `L0`/`L1` schemas (`lumencraft-palette`, `lumencraft-doc`), unified `ConfidenceLevel`/`PValueFormat`/`AxisScale`, enriched `Simulate` spec, and `serde` + `proptest` round-trips landed · **Target:** GraphPad Prism 11 (11.1.x; public guides & release notes through 11.1.0, August 2026)
 
-Authoritative clean-room parity assessment for LumenCraft. Summary in [`ROADMAP.md`](../ROADMAP.md); ranked work list in [`gaps.md`](gaps.md); milestone gates in [`roadmap.md`](roadmap.md).
+Authoritative clean-room parity assessment for LumenCraft. Summary in [`ROADMAP.md`](../ROADMAP.md); ranked work list in [`gaps.md`](gaps.md); stage gates, execution order, and verification oracles in [`roadmap.md`](roadmap.md).
 
 ## Methodology
 
@@ -45,7 +45,7 @@ Hour ranges are single-agent wall-clock hours calibrated from sibling Craft repo
 | 8 | **Publication graphing: 8 graph families, nonlinear/broken axes, live *p*-value brackets** | 10% | 0% | 35–55 | [graphing-and-layouts.md](graphing-and-layouts.md), [graphing-parity.md](graphing-parity.md) |
 | 9 | **Page Layouts, style cloning ("Wand"), vector SVG/PDF & high-DPI TIFF/PNG export** | 5% | 0% | 18–28 | [graphing-and-layouts.md](graphing-and-layouts.md), [file-format-parity.md](file-format-parity.md) |
 | 10 | **Workspace UX, `.lumencraft`/`.prism`/`.pzfx` I/O, templates, CLI, `--control` & MCP** | 5% | 8% | 25–40 | [ui-parity.md](ui-parity.md), [scripting-and-automation.md](scripting-and-automation.md) |
-| | **Total / Weighted depth** | **100%** | **~3%** | **284–442 h** | (plus `G1` downstream corpus wiring, QA, localization & platform polish → 415–645 h full parity) |
+| | **Total / Weighted depth** | **100%** | **~3%** | **284–442 h** | (plus `G1` downstream corpus wiring, QA, localization & platform polish → ~410–645 h full parity; see the totals in [`gaps.md`](gaps.md#ranked)) |
 
 ---
 

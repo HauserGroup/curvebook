@@ -1,0 +1,566 @@
+//! All 27 canonical NIST StRD nonlinear least-squares benchmark models with exact analytical
+//! Jacobians and domain-safe evaluations.
+
+use std::f64::consts::PI;
+
+use super::{ParametricModel, data_x_min_max, data_y_min_max};
+use crate::types::{DataPoint, EquationCategory};
+
+pub const NIST_EQUATION_IDS: &[&str] = &[
+    "nist_misra1a",
+    "nist_chwirut2",
+    "nist_chwirut1",
+    "nist_lanczos3",
+    "nist_gauss1",
+    "nist_gauss2",
+    "nist_danwood",
+    "nist_misra1b",
+    "nist_kirby2",
+    "nist_hahn1",
+    "nist_nelson",
+    "nist_mgh17",
+    "nist_lanczos1",
+    "nist_lanczos2",
+    "nist_gauss3",
+    "nist_misra1c",
+    "nist_misra1d",
+    "nist_roszman1",
+    "nist_enso",
+    "nist_mgh09",
+    "nist_thurber",
+    "nist_boxbod",
+    "nist_rat42",
+    "nist_mgh10",
+    "nist_eckerle4",
+    "nist_rat43",
+    "nist_bennett5",
+];
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NistKind {
+    Misra1a,
+    Chwirut,
+    Lanczos,
+    Gauss,
+    DanWood,
+    Misra1b,
+    Kirby2,
+    Hahn1,
+    Nelson,
+    Mgh17,
+    Misra1c,
+    Misra1d,
+    Roszman1,
+    Enso,
+    Mgh09,
+    Thurber,
+    BoxBod,
+    Rat42,
+    Mgh10,
+    Eckerle4,
+    Rat43,
+    Bennett5,
+}
+
+#[derive(Debug, Clone)]
+pub struct NistModel {
+    id: String,
+    name: String,
+    kind: NistKind,
+    param_names: Vec<String>,
+}
+
+impl NistModel {
+    fn new(id: &str, name: &str, kind: NistKind, count: usize) -> Self {
+        let param_names = (1..=count).map(|i| format!("b{i}")).collect();
+        Self { id: id.to_owned(), name: name.to_owned(), kind, param_names }
+    }
+}
+
+/// Resolve any of the 27 NIST StRD nonlinear model identifiers.
+#[must_use]
+pub fn resolve_nist_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
+    let stripped = norm_id.strip_prefix("nist_").unwrap_or(norm_id);
+    let (id, name, kind, p) = match stripped {
+        "misra1a" => ("nist_misra1a", "NIST Misra1a", NistKind::Misra1a, 2),
+        "chwirut2" => ("nist_chwirut2", "NIST Chwirut2", NistKind::Chwirut, 3),
+        "chwirut1" => ("nist_chwirut1", "NIST Chwirut1", NistKind::Chwirut, 3),
+        "lanczos3" => ("nist_lanczos3", "NIST Lanczos3", NistKind::Lanczos, 6),
+        "gauss1" => ("nist_gauss1", "NIST Gauss1", NistKind::Gauss, 8),
+        "gauss2" => ("nist_gauss2", "NIST Gauss2", NistKind::Gauss, 8),
+        "danwood" => ("nist_danwood", "NIST DanWood", NistKind::DanWood, 2),
+        "misra1b" => ("nist_misra1b", "NIST Misra1b", NistKind::Misra1b, 2),
+        "kirby2" => ("nist_kirby2", "NIST Kirby2", NistKind::Kirby2, 5),
+        "hahn1" => ("nist_hahn1", "NIST Hahn1", NistKind::Hahn1, 7),
+        "nelson" => ("nist_nelson", "NIST Nelson", NistKind::Nelson, 3),
+        "mgh17" => ("nist_mgh17", "NIST MGH17", NistKind::Mgh17, 5),
+        "lanczos1" => ("nist_lanczos1", "NIST Lanczos1", NistKind::Lanczos, 6),
+        "lanczos2" => ("nist_lanczos2", "NIST Lanczos2", NistKind::Lanczos, 6),
+        "gauss3" => ("nist_gauss3", "NIST Gauss3", NistKind::Gauss, 8),
+        "misra1c" => ("nist_misra1c", "NIST Misra1c", NistKind::Misra1c, 2),
+        "misra1d" => ("nist_misra1d", "NIST Misra1d", NistKind::Misra1d, 2),
+        "roszman1" => ("nist_roszman1", "NIST Roszman1", NistKind::Roszman1, 4),
+        "enso" => ("nist_enso", "NIST ENSO", NistKind::Enso, 9),
+        "mgh09" => ("nist_mgh09", "NIST MGH09", NistKind::Mgh09, 4),
+        "thurber" => ("nist_thurber", "NIST Thurber", NistKind::Thurber, 7),
+        "boxbod" => ("nist_boxbod", "NIST BoxBOD", NistKind::BoxBod, 2),
+        "rat42" => ("nist_rat42", "NIST Rat42", NistKind::Rat42, 3),
+        "mgh10" => ("nist_mgh10", "NIST MGH10", NistKind::Mgh10, 3),
+        "eckerle4" => ("nist_eckerle4", "NIST Eckerle4", NistKind::Eckerle4, 3),
+        "rat43" => ("nist_rat43", "NIST Rat43", NistKind::Rat43, 4),
+        "bennett5" => ("nist_bennett5", "NIST Bennett5", NistKind::Bennett5, 3),
+        _ => return None,
+    };
+    Some(Box::new(NistModel::new(id, name, kind, p)))
+}
+
+fn safe_exp(arg: f64) -> Option<f64> {
+    if !arg.is_finite() || arg > 700.0 {
+        return None;
+    }
+    let val = arg.exp();
+    val.is_finite().then_some(val)
+}
+
+impl ParametricModel for NistModel {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::NistBenchmark
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.param_names
+    }
+
+    fn eval(&self, x_vec: &[f64], b: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x = *x_vec.first()?;
+        let val = match self.kind {
+            NistKind::Misra1a | NistKind::BoxBod => b[0] * (1.0 - safe_exp(-b[1] * x)?),
+            NistKind::Chwirut => {
+                let d = b[1] + b[2] * x;
+                if d == 0.0 {
+                    return None;
+                }
+                safe_exp(-b[0] * x)? / d
+            }
+            NistKind::Lanczos => b[0] * safe_exp(-b[1] * x)? + b[2] * safe_exp(-b[3] * x)? + b[4] * safe_exp(-b[5] * x)?,
+            NistKind::Gauss => {
+                if b[4] == 0.0 || b[7] == 0.0 {
+                    return None;
+                }
+                let u1 = (x - b[3]) / b[4];
+                let u2 = (x - b[6]) / b[7];
+                b[0] * safe_exp(-b[1] * x)? + b[2] * safe_exp(-(u1 * u1))? + b[5] * safe_exp(-(u2 * u2))?
+            }
+            NistKind::DanWood => {
+                if x <= 0.0 {
+                    return None;
+                }
+                b[0] * x.powf(b[1])
+            }
+            NistKind::Misra1b => {
+                let u = 1.0 + 0.5 * b[1] * x;
+                if u <= 0.0 {
+                    return None;
+                }
+                b[0] * (1.0 - u.powi(-2))
+            }
+            NistKind::Kirby2 => {
+                let num = b[0] + b[1] * x + b[2] * x * x;
+                let den = 1.0 + b[3] * x + b[4] * x * x;
+                if den == 0.0 {
+                    return None;
+                }
+                num / den
+            }
+            NistKind::Hahn1 | NistKind::Thurber => {
+                let x2 = x * x;
+                let x3 = x2 * x;
+                let num = b[0] + b[1] * x + b[2] * x2 + b[3] * x3;
+                let den = 1.0 + b[4] * x + b[5] * x2 + b[6] * x3;
+                if den == 0.0 {
+                    return None;
+                }
+                num / den
+            }
+            NistKind::Nelson => {
+                let x2 = *x_vec.get(1)?;
+                b[0] - b[1] * x * safe_exp(-b[2] * x2)?
+            }
+            NistKind::Mgh17 => b[0] + b[1] * safe_exp(-x * b[3])? + b[2] * safe_exp(-x * b[4])?,
+            NistKind::Misra1c => {
+                let u = 1.0 + 2.0 * b[1] * x;
+                if u <= 0.0 {
+                    return None;
+                }
+                b[0] * (1.0 - u.powf(-0.5))
+            }
+            NistKind::Misra1d => {
+                let den = 1.0 + b[1] * x;
+                if den == 0.0 {
+                    return None;
+                }
+                b[0] * b[1] * x / den
+            }
+            NistKind::Roszman1 => {
+                let dx = x - b[3];
+                if dx == 0.0 {
+                    return None;
+                }
+                b[0] - b[1] * x - (b[2] / dx).atan() / PI
+            }
+            NistKind::Enso => {
+                if b[3] == 0.0 || b[6] == 0.0 {
+                    return None;
+                }
+                let t0 = 2.0 * PI * x / 12.0;
+                let t1 = 2.0 * PI * x / b[3];
+                let t2 = 2.0 * PI * x / b[6];
+                b[0] + b[1] * t0.cos() + b[2] * t0.sin() + b[4] * t1.cos() + b[5] * t1.sin() + b[7] * t2.cos() + b[8] * t2.sin()
+            }
+            NistKind::Mgh09 => {
+                let x2 = x * x;
+                let den = x2 + x * b[2] + b[3];
+                if den == 0.0 {
+                    return None;
+                }
+                b[0] * (x2 + x * b[1]) / den
+            }
+            NistKind::Rat42 => {
+                let e = safe_exp(b[1] - b[2] * x)?;
+                b[0] / (1.0 + e)
+            }
+            NistKind::Mgh10 => {
+                let dx = x + b[2];
+                if dx == 0.0 {
+                    return None;
+                }
+                b[0] * safe_exp(b[1] / dx)?
+            }
+            NistKind::Eckerle4 => {
+                if b[1] == 0.0 {
+                    return None;
+                }
+                let u = (x - b[2]) / b[1];
+                (b[0] / b[1]) * safe_exp(-0.5 * u * u)?
+            }
+            NistKind::Rat43 => {
+                if b[3] == 0.0 {
+                    return None;
+                }
+                let e = safe_exp(b[1] - b[2] * x)?;
+                let base = 1.0 + e;
+                if base <= 0.0 {
+                    return None;
+                }
+                b[0] * base.powf(-1.0 / b[3])
+            }
+            NistKind::Bennett5 => {
+                if b[2] == 0.0 {
+                    return None;
+                }
+                let base = b[1] + x;
+                if base <= 0.0 {
+                    return None;
+                }
+                b[0] * base.powf(-1.0 / b[2])
+            }
+        };
+        val.is_finite().then_some(val)
+    }
+
+    fn grad(&self, x_vec: &[f64], b: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x) = x_vec.first() else {
+            return false;
+        };
+        match self.kind {
+            NistKind::Misra1a | NistKind::BoxBod => {
+                let Some(e) = safe_exp(-b[1] * x) else {
+                    return false;
+                };
+                out[0] = 1.0 - e;
+                out[1] = b[0] * x * e;
+            }
+            NistKind::Chwirut => {
+                let d = b[1] + b[2] * x;
+                let Some(e) = safe_exp(-b[0] * x) else {
+                    return false;
+                };
+                if d == 0.0 {
+                    return false;
+                }
+                let inv_d = 1.0 / d;
+                let f = e * inv_d;
+                out[0] = -x * f;
+                out[1] = -f * inv_d;
+                out[2] = -x * f * inv_d;
+            }
+            NistKind::Lanczos => {
+                let (Some(e1), Some(e2), Some(e3)) = (safe_exp(-b[1] * x), safe_exp(-b[3] * x), safe_exp(-b[5] * x)) else {
+                    return false;
+                };
+                out[0] = e1;
+                out[1] = -b[0] * x * e1;
+                out[2] = e2;
+                out[3] = -b[2] * x * e2;
+                out[4] = e3;
+                out[5] = -b[4] * x * e3;
+            }
+            NistKind::Gauss => {
+                if b[4] == 0.0 || b[7] == 0.0 {
+                    return false;
+                }
+                let u1 = (x - b[3]) / b[4];
+                let u2 = (x - b[6]) / b[7];
+                let (Some(e0), Some(e1), Some(e2)) = (safe_exp(-b[1] * x), safe_exp(-u1 * u1), safe_exp(-u2 * u2)) else {
+                    return false;
+                };
+                out[0] = e0;
+                out[1] = -b[0] * x * e0;
+                out[2] = e1;
+                out[3] = b[2] * e1 * (2.0 * u1 / b[4]);
+                out[4] = b[2] * e1 * (2.0 * u1 * u1 / b[4]);
+                out[5] = e2;
+                out[6] = b[5] * e2 * (2.0 * u2 / b[7]);
+                out[7] = b[5] * e2 * (2.0 * u2 * u2 / b[7]);
+            }
+            NistKind::DanWood => {
+                if x <= 0.0 {
+                    return false;
+                }
+                let xp = x.powf(b[1]);
+                out[0] = xp;
+                out[1] = b[0] * xp * x.ln();
+            }
+            NistKind::Misra1b => {
+                let u = 1.0 + 0.5 * b[1] * x;
+                if u <= 0.0 {
+                    return false;
+                }
+                out[0] = 1.0 - u.powi(-2);
+                out[1] = b[0] * x * u.powi(-3);
+            }
+            NistKind::Kirby2 => {
+                let x2 = x * x;
+                let num = b[0] + b[1] * x + b[2] * x2;
+                let den = 1.0 + b[3] * x + b[4] * x2;
+                if den == 0.0 {
+                    return false;
+                }
+                let inv_d = 1.0 / den;
+                let f = num * inv_d;
+                out[0] = inv_d;
+                out[1] = x * inv_d;
+                out[2] = x2 * inv_d;
+                out[3] = -f * x * inv_d;
+                out[4] = -f * x2 * inv_d;
+            }
+            NistKind::Hahn1 | NistKind::Thurber => {
+                let x2 = x * x;
+                let x3 = x2 * x;
+                let num = b[0] + b[1] * x + b[2] * x2 + b[3] * x3;
+                let den = 1.0 + b[4] * x + b[5] * x2 + b[6] * x3;
+                if den == 0.0 {
+                    return false;
+                }
+                let inv_d = 1.0 / den;
+                let f = num * inv_d;
+                out[0] = inv_d;
+                out[1] = x * inv_d;
+                out[2] = x2 * inv_d;
+                out[3] = x3 * inv_d;
+                out[4] = -f * x * inv_d;
+                out[5] = -f * x2 * inv_d;
+                out[6] = -f * x3 * inv_d;
+            }
+            NistKind::Nelson => {
+                let Some(&x2) = x_vec.get(1) else {
+                    return false;
+                };
+                let Some(e) = safe_exp(-b[2] * x2) else {
+                    return false;
+                };
+                out[0] = 1.0;
+                out[1] = -x * e;
+                out[2] = b[1] * x * x2 * e;
+            }
+            NistKind::Mgh17 => {
+                let (Some(e1), Some(e2)) = (safe_exp(-x * b[3]), safe_exp(-x * b[4])) else {
+                    return false;
+                };
+                out[0] = 1.0;
+                out[1] = e1;
+                out[2] = e2;
+                out[3] = -b[1] * x * e1;
+                out[4] = -b[2] * x * e2;
+            }
+            NistKind::Misra1c => {
+                let u = 1.0 + 2.0 * b[1] * x;
+                if u <= 0.0 {
+                    return false;
+                }
+                out[0] = 1.0 - u.powf(-0.5);
+                out[1] = b[0] * x * u.powf(-1.5);
+            }
+            NistKind::Misra1d => {
+                let den = 1.0 + b[1] * x;
+                if den == 0.0 {
+                    return false;
+                }
+                out[0] = b[1] * x / den;
+                out[1] = b[0] * x / (den * den);
+            }
+            NistKind::Roszman1 => {
+                let dx = x - b[3];
+                if dx == 0.0 {
+                    return false;
+                }
+                let z = b[2] / dx;
+                let denom = PI * (1.0 + z * z);
+                out[0] = 1.0;
+                out[1] = -x;
+                out[2] = -(1.0 / dx) / denom;
+                out[3] = -(b[2] / (dx * dx)) / denom;
+            }
+            NistKind::Enso => {
+                if b[3] == 0.0 || b[6] == 0.0 {
+                    return false;
+                }
+                let t0 = 2.0 * PI * x / 12.0;
+                let t1 = 2.0 * PI * x / b[3];
+                let t2 = 2.0 * PI * x / b[6];
+                let (s1, c1) = t1.sin_cos();
+                let (s2, c2) = t2.sin_cos();
+                out[0] = 1.0;
+                out[1] = t0.cos();
+                out[2] = t0.sin();
+                out[3] = (b[4] * s1 - b[5] * c1) * (t1 / b[3]);
+                out[4] = c1;
+                out[5] = s1;
+                out[6] = (b[7] * s2 - b[8] * c2) * (t2 / b[6]);
+                out[7] = c2;
+                out[8] = s2;
+            }
+            NistKind::Mgh09 => {
+                let x2 = x * x;
+                let num = x2 + x * b[1];
+                let den = x2 + x * b[2] + b[3];
+                if den == 0.0 {
+                    return false;
+                }
+                let inv_d = 1.0 / den;
+                let f = b[0] * num * inv_d;
+                out[0] = num * inv_d;
+                out[1] = b[0] * x * inv_d;
+                out[2] = -f * x * inv_d;
+                out[3] = -f * inv_d;
+            }
+            NistKind::Rat42 => {
+                let Some(e) = safe_exp(b[1] - b[2] * x) else {
+                    return false;
+                };
+                let d = 1.0 + e;
+                let inv_d = 1.0 / d;
+                let f = b[0] * inv_d;
+                out[0] = inv_d;
+                out[1] = -f * e * inv_d;
+                out[2] = f * x * e * inv_d;
+            }
+            NistKind::Mgh10 => {
+                let dx = x + b[2];
+                if dx == 0.0 {
+                    return false;
+                }
+                let Some(e) = safe_exp(b[1] / dx) else {
+                    return false;
+                };
+                let f = b[0] * e;
+                out[0] = e;
+                out[1] = f / dx;
+                out[2] = -f * b[1] / (dx * dx);
+            }
+            NistKind::Eckerle4 => {
+                if b[1] == 0.0 {
+                    return false;
+                }
+                let u = (x - b[2]) / b[1];
+                let Some(e) = safe_exp(-0.5 * u * u) else {
+                    return false;
+                };
+                let f = (b[0] / b[1]) * e;
+                out[0] = e / b[1];
+                out[1] = f * (u * u - 1.0) / b[1];
+                out[2] = f * u / b[1];
+            }
+            NistKind::Rat43 => {
+                if b[3] == 0.0 {
+                    return false;
+                }
+                let Some(e) = safe_exp(b[1] - b[2] * x) else {
+                    return false;
+                };
+                let base = 1.0 + e;
+                if base <= 0.0 {
+                    return false;
+                }
+                let pow_term = base.powf(-1.0 / b[3]);
+                let f = b[0] * pow_term;
+                out[0] = pow_term;
+                out[1] = -f * (e / base) / b[3];
+                out[2] = f * x * (e / base) / b[3];
+                out[3] = f * base.ln() / (b[3] * b[3]);
+            }
+            NistKind::Bennett5 => {
+                if b[2] == 0.0 {
+                    return false;
+                }
+                let base = b[1] + x;
+                if base <= 0.0 {
+                    return false;
+                }
+                let pow_term = base.powf(-1.0 / b[2]);
+                let f = b[0] * pow_term;
+                out[0] = pow_term;
+                out[1] = -f / (b[2] * base);
+                out[2] = f * base.ln() / (b[2] * b[2]);
+            }
+        }
+        out.iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (y_min, y_max) = data_y_min_max(points);
+        let (x_min, x_max) = data_x_min_max(points);
+        let span_x = (x_max - x_min).max(1.0);
+        match self.kind {
+            NistKind::Misra1a | NistKind::BoxBod | NistKind::Misra1b | NistKind::Misra1c | NistKind::Misra1d => {
+                vec![y_max.max(1.0), 1.0 / span_x]
+            }
+            NistKind::Chwirut => vec![0.1, 0.01, 0.01],
+            NistKind::Lanczos => vec![0.1, 1.0, 1.0, 3.0, 1.5, 5.0],
+            NistKind::Gauss => {
+                vec![y_max * 0.5, 0.01, y_max * 0.5, x_min + 0.3 * span_x, 0.1 * span_x, y_max * 0.5, x_min + 0.6 * span_x, 0.1 * span_x]
+            }
+            NistKind::DanWood => vec![1.0, 1.0],
+            NistKind::Kirby2 => vec![y_min, 0.0, 0.0, 0.0, 0.0],
+            NistKind::Hahn1 | NistKind::Thurber => vec![y_min, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            NistKind::Nelson => vec![y_min, 1e-4, -0.01],
+            NistKind::Mgh17 => vec![y_min, y_max - y_min, -(y_max - y_min) * 0.5, 0.01, 0.02],
+            NistKind::Roszman1 => vec![0.2, 0.0, 1000.0, -100.0],
+            NistKind::Enso => vec![0.5 * (y_min + y_max), 1.0, 1.0, 44.0, 1.0, 1.0, 26.0, 1.0, 1.0],
+            NistKind::Mgh09 => vec![0.2, 0.2, 0.2, 0.2],
+            NistKind::Rat42 => vec![y_max, 2.0, 1.0 / span_x],
+            NistKind::Mgh10 => vec![0.01, 5000.0, 300.0],
+            NistKind::Eckerle4 => vec![1.5, 5.0, 0.5 * (x_min + x_max)],
+            NistKind::Rat43 => vec![y_max, 5.0, 1.0 / span_x, 1.0],
+            NistKind::Bennett5 => vec![y_min, -x_min + 50.0, 1.0],
+        }
+    }
+}

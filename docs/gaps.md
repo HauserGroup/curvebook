@@ -1,29 +1,33 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** `G1` numerical foundations + 58-file NIST StRD corpus harness landed (`2–4 h` downstream wiring remaining); `L0`/`L1` schemas + `serde`/`proptest` round-trips landed under `G2` · **Target:** GraphPad Prism 11 (11.1.x)
+> **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** Hours split by gate after Alpha was redefined as the Essentials scope (new Core-workflow gate between Alpha and Beta); Wave 2 scope frozen; per-gap Alpha scope stated · **Target:** GraphPad Prism 11 (11.1.x)
 
-Every shortfall between LumenCraft (`M0`) and GraphPad Prism 11.1, **ranked by how much it blocks a working scientist from switching**. Unless the user assigns a specific task, pick the highest-ranked unblocked gap below, read its linked implementation guide first, implement and test it end to end, and update this file, [`target-app-parity.md`](target-app-parity.md), the domain parity checklist, and [`ROADMAP.md`](../ROADMAP.md) in the same PR.
+Every shortfall between LumenCraft (`M0`) and GraphPad Prism 11.1, **ranked by how much it blocks a working scientist from switching**. Unless the user assigns a specific task, pick the highest-ranked unblocked gap below that falls in the current step of the [execution order](roadmap.md#execution-order) and inside the scope of the next gate, read its linked implementation guide first, implement and test it end to end, and update this file, [`target-app-parity.md`](target-app-parity.md), the domain parity checklist, and [`ROADMAP.md`](../ROADMAP.md) in the same PR.
 
-Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work lands. **Alpha** marks gaps required to pass the [Alpha gate](roadmap.md#alpha-gate); **Beta** marks gaps required for beta.
+Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work lands. **Alpha** marks work required to pass the [Alpha gate](roadmap.md#alpha-gate) (Essentials scope); **Core** marks work added by the [Core-workflow gate](roadmap.md#core-workflow-gate); **Beta** marks work required for beta. A gap split across gates shows the hours for each part, and its details state which scope is Alpha. Work the next gate does not need waits, however high the gap ranks. All landing follows the [landing rules](roadmap.md#landing-rules).
+
+**The Hours column here is the source of truth.** The Alpha-gate table and milestone table in [`roadmap.md`](roadmap.md) and the headline numbers in [`ROADMAP.md`](../ROADMAP.md) are sums of it; change them together.
 
 ## Ranked
 
-| Rank | Gap | Hours | Gate | Implementation guide & checklist |
+| Rank | Gap | Hours | By gate | Implementation guide & checklist |
 |---:|---|---:|:---:|---|
-| 1 | [G1 Numerical foundations & NIST StRD oracle](#g1-numerical-foundations-and-nist-strd-oracle) | 2–4 | Alpha | [statistics-implementation.md](statistics-implementation.md) |
-| 2 | [G2 Typed data tables, reactive DAG & `.lumencraft` / CSV I/O](#g2-typed-data-tables-reactive-dag-and-lumencraft--csv-io) | 18–30 | Alpha | [data-tables-and-transforms.md](data-tables-and-transforms.md), [file-format-parity.md](file-format-parity.md) |
-| 3 | [G3 Core biostatistics, ANOVA/REML, effect sizes & multiplicity](#g3-core-biostatistics-anovareml-effect-sizes-and-multiplicity) | 45–70 | Alpha | [statistics-implementation.md](statistics-implementation.md), [stats-parity.md](stats-parity.md) |
-| 4 | [G4 Nonlinear regression solver, profile CIs & built-in equations](#g4-nonlinear-regression-solver-profile-cis-and-built-in-equations) | 50–78 | Alpha | [curve-fitting-implementation.md](curve-fitting-implementation.md), [fitting-parity.md](fitting-parity.md) |
-| 5 | [G5 Publication chart compiler, broken/log axes & SVG/PDF export](#g5-publication-chart-compiler-brokenlog-axes-and-svgpdf-export) | 40–62 | Alpha | [graphing-and-layouts.md](graphing-and-layouts.md), [graphing-parity.md](graphing-parity.md) |
-| 6 | [G6 Desktop & WASM shell: Navigator, subcolumn grid & inspectors](#g6-desktop-and-wasm-shell-navigator-subcolumn-grid-and-inspectors) | 45–70 | Alpha | [ui-parity.md](ui-parity.md) |
+| 1 | [G1 Numerical foundations & NIST StRD oracle](#g1-numerical-foundations-and-nist-strd-oracle) | 2–4 | Alpha (with `G3`/`G4`) | [statistics-implementation.md](statistics-implementation.md) |
+| 2 | [G2 Typed data tables, reactive DAG & `.lumencraft` / CSV I/O](#g2-typed-data-tables-reactive-dag-and-lumencraft--csv-io) | 18–30 | Alpha 14–23 · Core 4–7 | [data-tables-and-transforms.md](data-tables-and-transforms.md), [file-format-parity.md](file-format-parity.md) |
+| 3 | [G3 Core biostatistics, ANOVA/REML, effect sizes & multiplicity](#g3-core-biostatistics-anovareml-effect-sizes-and-multiplicity) | 45–70 | Alpha 20–30 · Core 25–40 | [statistics-implementation.md](statistics-implementation.md), [stats-parity.md](stats-parity.md) |
+| 4 | [G4 Nonlinear regression solver, profile CIs & built-in equations](#g4-nonlinear-regression-solver-profile-cis-and-built-in-equations) | 50–78 | Alpha 18–28 · Core 32–50 | [curve-fitting-implementation.md](curve-fitting-implementation.md), [fitting-parity.md](fitting-parity.md) |
+| 5 | [G5 Publication chart compiler, broken/log axes & SVG/PDF export](#g5-publication-chart-compiler-brokenlog-axes-and-svgpdf-export) | 36–56 | Alpha 24–36 · Core 12–20 | [graphing-and-layouts.md](graphing-and-layouts.md), [graphing-parity.md](graphing-parity.md) |
+| 6 | [G6 Desktop & WASM shell: Navigator, subcolumn grid & inspectors](#g6-desktop-and-wasm-shell-navigator-subcolumn-grid-and-inspectors) | 45–70 | Alpha 30–45 · Core 15–25 | [ui-parity.md](ui-parity.md) |
 | 7 | [G7 Prism 11 Multiple Variables workflows, Calculated Variables & Multifactor ANOVA](#g7-prism-11-multiple-variables-workflows-calculated-variables-and-multifactor-anova) | 30–45 | Beta | [data-tables-and-transforms.md](data-tables-and-transforms.md), [statistics-implementation.md](statistics-implementation.md) |
-| 8 | [G8 Survival (Kaplan–Meier, Cox PH), contingency CIs, ROC, GLMs & PCA](#g8-survival-kaplanmeier-cox-ph-contingency-cis-roc-glms-and-pca) | 35–55 | Beta | [statistics-implementation.md](statistics-implementation.md), [stats-parity.md](stats-parity.md) |
-| 9 | [G9 Custom equation DSL, implicit/ODE models & derived transforms](#g9-custom-equation-dsl-implicitode-models-and-derived-transforms) | 25–40 | Beta | [curve-fitting-implementation.md](curve-fitting-implementation.md), [data-tables-and-transforms.md](data-tables-and-transforms.md) |
+| 8 | [G8 Survival (Kaplan–Meier, Cox PH), contingency CIs, ROC, GLMs & PCA](#g8-survival-kaplanmeier-cox-ph-contingency-cis-roc-glms-and-pca) | 39–61 | Beta | [statistics-implementation.md](statistics-implementation.md), [stats-parity.md](stats-parity.md) |
+| 9 | [G9 Custom equation DSL, implicit/ODE models & derived transforms](#g9-custom-equation-dsl-implicitode-models-and-derived-transforms) | 25–40 | Alpha 3–5 · Beta 22–35 | [curve-fitting-implementation.md](curve-fitting-implementation.md), [data-tables-and-transforms.md](data-tables-and-transforms.md) |
 | 10 | [G10 Clean-room `.prism` & `.pzfx` project import](#g10-clean-room-prism-and-pzfx-project-import) | 20–35 | Beta | [file-format-parity.md](file-format-parity.md) |
 | 11 | [G11 Multi-panel Page Layouts, style cloning & print/TIFF pipeline](#g11-multi-panel-page-layouts-style-cloning-and-printtiff-pipeline) | 18–28 | Beta | [graphing-and-layouts.md](graphing-and-layouts.md), [hardware-parity.md](hardware-parity.md) |
 | 12 | [G12 Performance budgets, large-table virtualization & fuzzing](#g12-performance-budgets-large-table-virtualization-and-fuzzing) | 15–25 | Beta | [development.md](development.md) |
 | 13 | [G13 Localization & regional scientific number formatting](#g13-localization-and-regional-scientific-number-formatting) | 35–55 | 1.0 | [localization-parity.md](localization-parity.md) |
-| 14 | [G14 Headless batch CLI, `.lctemplate` pipelines & full MCP catalog](#g14-headless-batch-cli-lctemplate-pipelines-and-full-mcp-catalog) | 15–25 | Beta | [scripting-and-automation.md](scripting-and-automation.md), [mcp.md](mcp.md) |
+| 14 | [G14 Headless batch CLI, `.lctemplate` pipelines & full MCP catalog](#g14-headless-batch-cli-lctemplate-pipelines-and-full-mcp-catalog) | 15–25 | Alpha 10–15 · Beta 5–10 | [scripting-and-automation.md](scripting-and-automation.md), [mcp.md](mcp.md) |
+
+**Totals (one agent):** Alpha `121–186 h` (`G1`, the Alpha parts of `G2`–`G6`, `G9` and `G14`) · Core workflows add `88–142 h` (the Core parts of `G2`–`G6`), `209–328 h` cumulative · Beta adds `149–239 h` (`G7`, `G8`, `G10`–`G12` plus the Beta parts of `G9` and `G14`), `358–567 h` cumulative · `G13` adds `35–55 h`, `393–622 h` for all gaps. Milestone `M7` carries a further `15–25 h` of hardware/print hardening and release polish that is not a gap, giving `408–647 h` to `1.0`. These are implementation hours and exclude human review.
 
 ---
 
@@ -36,9 +40,11 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
   - `crates/testkit` & `cargo xtask corpus`: 106-bit `DoubleDouble` reference oracle, NIST Log Relative Error & ULP metrics, FIPS 180-4 SHA-256 verifier, clean-room ASCII `.dat` parsers across all four NIST StRD suites, offline certified stiffness/collinearity benchmarks (`crates/math/tests/nist_strd.rs`), and `cargo xtask corpus` (`--fetch` / `--fetch-only`) verifying all 58 public-domain NIST StRD `.dat` files offline (`9` Univariate, `11` ANOVA, `11` Linear Regression, `27` Nonlinear Regression) with `LUMENCRAFT_REQUIRE_CORPUS=1`.
 - **Missing:**
   - Wiring `crates/stats` (`G3`) and `crates/fit` (`G4`, all 27 nonlinear least-squares benchmarks) through `lumencraft-testkit` against the full 58-file NIST StRD corpus, plus any edge-case special-function tuning surfaced during solver integration (`2–4 h`).
+  - This depends on the `stats` and `fit` crates, so it is done inside Wave 2 as part of `G3` and `G4` acceptance (about half with each).
 
 ### G2 Typed data tables, reactive DAG and `.lumencraft` / CSV I/O
 **Crates:** `crates/palette`, `crates/doc`, `crates/format`, `crates/engine` · **Spec:** [`data-tables-and-transforms.md`](data-tables-and-transforms.md)
+- **Alpha (Essentials) scope:** `.lumencraft` save/reopen, CSV/TSV import and export, the recalculation DAG with cycle rejection, and the undo/redo journal, for `XY`, `Column`, and `Grouped` tables. Live `Paste Link`, reactive transpose, and 4-stage import are Core.
 - **Done:**
   - `crates/palette` (`L0`): sRGB/linear-RGB/Oklab/OkLCH/CMYK colour conversions, WCAG 2.1 contrast checks, Okabe–Ito & Paul Tol (`Bright`, `Muted`, `HighContrast`, `Vibrant`, `MonochromePrint`) + user-customizable `CategoricalPalette`, Viridis/Cividis/Plasma/DivergingBlueRed/Grayscale colormaps (clamped to `MAX_DISCRETE_SAMPLES`), Machado (2009) CVD simulation, marker glyphs, and stroke dash styles.
   - `crates/doc` (`L1`): all 8 `TableArchetype` schemas (`Xy`, `Column` with `ColumnDesignHint` & pre-summarized subcolumns, `Grouped`, `Contingency`, `Survival`, `PartsOfWhole`, `MultipleVariables` with role inference, bulk recoding & `LevelOrderSpec`, `Nested`), all 8 `SubcolumnMode`s + `SummarizedPoint` moment reconstruction, non-destructive cell exclusions & `*` import token parsing, freeze-guarded `DataSheet` (`Y`, `X`, and `Survival.times` cell & exclusion accessors), `FloatingNote` callouts, `InfoSheet` constants & `HookSource` template parsing, `LinkedDataRegion` + 4-stage `ImportLinkSpec` + bounded cross-table slice/transpose helpers, `AnalysisSpec`/`ResultSheet` (with auto-titles & retargeting validation), enriched `TransformAnalysisSpec::Simulate` (`seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, `noise`), `GraphSpec`/`LayoutSpec` (including `FloatingBar`, `MultipleVariables` `BubbleScatter`/`CategoricalSummary` modes, geometric `Shape` annotations, and `apply_style_from`), and `ProjectDocument` upstream DAG dependency extraction.
@@ -49,6 +55,8 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 
 ### G3 Core biostatistics, ANOVA/REML, effect sizes and multiplicity
 **Crates:** `crates/stats` · **Spec:** [`statistics-implementation.md` §2–§4](statistics-implementation.md#2-descriptive-statistics-normality--outlier-detection)
+- **Alpha (Essentials) scope:** descriptive statistics; unpaired, Welch, and paired *t*-tests; ordinary one-way and two-way ANOVA; Tukey, Dunnett, Bonferroni, and Holm–Šídák. Everything else below is Core.
+- **Verification:** repeated-measures ANOVA, REML, and three-way ANOVA are verified against reference values from open-source statistical software, which are still to be generated; see [verification oracles](roadmap.md#verification-oracles) and decision `D1`.
 - **Missing:**
   - Descriptive statistics, normality/lognormality battery (D'Agostino–Pearson $K^2$, Shapiro–Wilk $W$, Anderson–Darling $A^{*2}$, KS), Grubbs & ROUT outlier identification.
   - Unpaired, Welch, paired, ratio-paired, lognormal, and one-sample *t*-tests + Cohen's $d$, Hedges' $g$, Glass's $\Delta$ with noncentral-$t$ CIs; Mann–Whitney $U$, Wilcoxon signed-rank, and two-sample KS (exact small-sample + tie-corrected asymptotic + Hodges–Lehmann CIs); decimal confidence levels (`0.01%..=99.99%`).
@@ -57,6 +65,7 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 
 ### G4 Nonlinear regression solver, profile CIs and built-in equations
 **Crates:** `crates/fit` · **Spec:** [`curve-fitting-implementation.md` §1–§3](curve-fitting-implementation.md#1-nonlinear-solver-architecture-cratesfit)
+- **Alpha (Essentials) scope:** weighted Levenberg–Marquardt; linear regression; 3PL/4PL dose–response, Michaelis–Menten, and one-phase exponential models; asymptotic CIs; standard-curve interpolation. Robust fitting, ROUT, global parameters, profile-likelihood CIs, model comparison, bands, and the rest of the library are Core.
 - **Missing:**
   - Moré trust-region Levenberg–Marquardt (QR augmented step, avoiding $J^\top J$ squaring), Nelder–Mead simplex warm-start, differential weights ($1/Y, 1/Y^2, 1/X, 1/\text{SD}^2$, Poisson), Lorentzian/Cauchy robust regression, and ROUT outlier masking.
   - Box constraints, constant hooks, shared global parameters across datasets, Venzon–Moolgavkar asymmetrical profile-likelihood CIs (`CiBound::Open` on flat plateaus), confidence/prediction bands, standard-curve inverse interpolation, extra-sum-of-squares *F*-test, AICc + Akaike weights, replicate/runs/homoscedasticity diagnostics.
@@ -64,14 +73,16 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 
 ### G5 Publication chart compiler, broken/log axes and SVG/PDF export
 **Crates:** `crates/chart`, `crates/text`, `crates/palette`, `crates/render`, `crates/svg`, `crates/pdf` · **Spec:** [`graphing-and-layouts.md`](graphing-and-layouts.md)
+- **Alpha (Essentials) scope:** XY scatter with fitted curve, bar with individual replicates, box plot, linear and log axes, error bars, and SVG/PDF/PNG export. Violin and before–after plots, probit/logit/broken axes, CI bands, and live brackets are Core. Risk spike `S2` (text and PDF without bundled fonts) runs before this work is widened; see [risk spikes](roadmap.md#risk-spikes).
 - **Missing:**
-  - Deterministic `GraphSpec -> ChartScene` compiler for XY, Column (bar + beeswarm replicates, box, violin, before–after), Grouped, Contingency/Parts-of-Whole, and Kaplan–Meier Survival (with number-at-risk table).
+  - Deterministic `GraphSpec -> ChartScene` compiler for XY, Column (bar + beeswarm replicates, box, violin, before–after), Grouped, and Contingency/Parts-of-Whole. The Kaplan–Meier survival graph ships with its analysis in `G8`; `MultipleVariables` graphs ship in `G7`.
   - Linear, $\log_{10}$, $\log_2$, $\ln$, $\text{logit}$, $\text{probit}$, and reciprocal axes; 2- and 3-segment discontinuous axes; solid and dashed error bars; scientific superscripts/subscripts & Greek symbols.
   - Live pairwise comparison brackets auto-stacked and hooked to upstream `ResultSheet` *p*/*q*-values.
   - Vector SVG (`crates/svg`), PDF 1.7 (`crates/pdf`), and 72–1200 DPI PNG raster (`crates/render`) export.
 
 ### G6 Desktop and WASM shell: Navigator, subcolumn grid and inspectors
 **Crates:** `crates/ui-egui`, `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` · **Spec:** [`ui-parity.md`](ui-parity.md)
+- **Alpha (Essentials) scope:** Project Navigator, subcolumn grid with exclusions, one Analyze dialog pattern, Result tabs, and basic Format Graph. The remaining inspectors, `Import & Paste Special`, the graph-type gallery, and the Family pane are Core. Risk spike `S1` (grid performance on desktop and in the browser) runs first; see [risk spikes](roadmap.md#risk-spikes).
 - **Done:** M0 desktop/web shell skeletons, i18n registry, and UI command sync.
 - **Missing:**
   - Five-folder Project Navigator (nested `Data with Results` vs. split view, bold dependency highlights) + stable-anchor Family dependency pane + Welcome / Project Initialization & `Clone Pipeline` dialog.
@@ -80,6 +91,7 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 
 ### G7 Prism 11 Multiple Variables workflows, Calculated Variables and Multifactor ANOVA
 **Crates:** `crates/doc`, `crates/transform`, `crates/stats`, `crates/fit`, `crates/chart`, `crates/ui-egui` · **Spec:** [`data-tables-and-transforms.md` §2.3 & §4](data-tables-and-transforms.md#23-multiplevariables-role-inference-bulk-recoding--categorical-level-ordering)
+- **Frozen until alpha:** library work already in flight is finished and landed; nothing further starts before the [Alpha gate](roadmap.md#alpha-gate) passes.
 - **Missing:**
   - In-table `=` Calculated Variables + aggregate/conditional/window functions with live column recalculation.
   - Auto-inferred vs. user-locked column role badges (`Continuous`, `Categorical`, `Label`), bulk categorical level recoding / typo merging, and categorical level ordering (entry, alphabetical, frequency, manual, reversed; independent graph level order).
@@ -88,14 +100,17 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 
 ### G8 Survival (Kaplan–Meier, Cox PH), contingency CIs, ROC, GLMs and PCA
 **Crates:** `crates/stats` · **Spec:** [`statistics-implementation.md` §5](statistics-implementation.md#5-contingency-survival-roc--multivariate-analysis)
-- **Missing:** Kaplan–Meier + log-rank / Gehan–Breslow–Wilcoxon / trend + Cox PH (Breslow/Efron ties, Schoenfeld residuals); Contingency $\chi^2$, Fisher's exact, Baptista–Pike OR CIs, Koopman RR CIs, Wilson binomial CIs, $\phi$ & Cramér's $V$ CIs; ROC (Hanley–McNeil / DeLong AUC CIs); Multiple linear, logistic & Poisson GLMs; PCA (Horn parallel analysis) & K-means / hierarchical clustering.
+- **Frozen until alpha:** library work already in flight is finished and landed; nothing further starts before the [Alpha gate](roadmap.md#alpha-gate) passes.
+- **Missing:** Kaplan–Meier survival graph (staircase, censor ticks, CI bands, number-at-risk table; `crates/chart`, `3–5 h`, moved from `G5`); Kaplan–Meier + log-rank / Gehan–Breslow–Wilcoxon / trend + Cox PH (Breslow/Efron ties, Schoenfeld residuals); Contingency $\chi^2$, Fisher's exact, Baptista–Pike OR CIs, Koopman RR CIs, Wilson binomial CIs, $\phi$ & Cramér's $V$ CIs; ROC (Hanley–McNeil / DeLong AUC CIs); Multiple linear, logistic & Poisson GLMs; PCA (Horn parallel analysis) & K-means / hierarchical clustering.
 
 ### G9 Custom equation DSL, implicit/ODE models and derived transforms
 **Crates:** `crates/fit`, `crates/transform` · **Spec:** [`curve-fitting-implementation.md` §4](curve-fitting-implementation.md#4-user-defined-equation-language-cratesfitdsl)
-- **Missing:** Safe bytecode VM for multiline/piecewise/dataset-scoped (`<A>`) custom equations, implicit root-solved equations, RK45 ODE integration, and standard derived transforms (`Normalize`, `Baseline`, `Transpose`, `Prune`, `Simulate`, `Smooth/Differentiate/AUC`).
+- **Missing (Alpha, `3–5 h`):** the `Transform` (log/linear functions of X and Y) and `Normalize` derived transforms that Alpha workflow 1 requires.
+- **Missing (Beta, `22–35 h`):** Safe bytecode VM for multiline/piecewise/dataset-scoped (`<A>`) custom equations, implicit root-solved equations, RK45 ODE integration, and the remaining derived transforms (`Baseline`, `Transpose`, `Prune`, `Simulate`, `Smooth/Differentiate/AUC`).
 
 ### G10 Clean-room `.prism` and `.pzfx` project import
 **Crates:** `crates/format` · **Spec:** [`file-format-parity.md`](file-format-parity.md)
+- **Frozen until alpha:** library work already in flight is finished and landed; nothing further starts before the [Alpha gate](roadmap.md#alpha-gate) passes.
 - **Missing:** Clean-room importers built strictly from public format documentation (`.prism` ZIP/JSON/CSV archive and legacy `.pzfx` XML tables, subcolumns, titles, exclusions, and Info constants) with bounded decompression/XML depth and synthetic test builders in `lumencraft-testkit`.
 
 ### G11 Multi-panel Page Layouts, style cloning and print/TIFF pipeline
@@ -104,14 +119,15 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 
 ### G12 Performance budgets, large-table virtualization and fuzzing
 **Crates:** `crates/engine`, `crates/format`, `crates/mcp`, `crates/ui-egui` · **Spec:** [`development.md`](development.md#fuzzing)
-- **Missing:** `lumencraft-cli bench` / `perf` budget suite (`100k`-row `MultipleVariables` formula eval $< 25\text{ ms}$, 96-curve 4PL batch fit $< 50\text{ ms}$, 60 fps grid scroll) and property/fuzz harnesses (`import_fuzz`, `command_sweep`, `prop_format`, `protocol_props`).
+- **Missing:** `lumencraft-cli bench` / `perf` budget suite (`100k`-row `MultipleVariables` formula eval $< 25\text{ ms}$, 96-curve 4PL batch fit $< 50\text{ ms}$, 60 fps grid scroll) and property/fuzz harnesses (`import_fuzz`, `command_sweep`, `protocol_props`). The `prop_format` round-trip suite belongs to `G2`.
 
 ### G13 Localization and regional scientific number formatting
 **Crates:** `crates/ui-egui`, `crates/format`, `crates/text` · **Spec:** [`localization-parity.md`](localization-parity.md)
 - **Done:** Locale registry and `cargo xtask i18n-report`.
-- **Missing:** Tier-1 translations, decimal comma vs. period formatting decoupled from OS locale, European `;`-CSV presets, RTL layout.
+- **Missing:** Tier-1 translations, decimal comma vs. period formatting decoupled from OS locale, European `;`-CSV presets. RTL layout is deferred until a right-to-left locale joins the tier-1 list.
 
 ### G14 Headless batch CLI, `.lctemplate` pipelines and full MCP catalog
 **Crates:** `apps/lumencraft-cli`, `crates/mcp`, `crates/engine` · **Spec:** [`scripting-and-automation.md`](scripting-and-automation.md)
 - **Done:** CLI/MCP/control crate skeletons and `ui-commands` sync.
-- **Missing:** `.lctemplate` instantiation, `lumencraft-cli batch` runner, and full MCP tool handlers (`doc_inspect`, `command_run`, `command_batch`, `render_preview`, `export`).
+- **Missing (Alpha, `10–15 h`):** the MCP, CLI and `--control` handlers that Alpha workflow 6 requires (`doc_inspect`, `command_run`, `command_batch`, `render_preview`, `export`).
+- **Missing (Beta, `5–10 h`):** `.lctemplate` instantiation and the `lumencraft-cli batch` runner.

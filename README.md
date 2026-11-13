@@ -69,7 +69,7 @@ cargo run -p lumencraft-cli -- --help
 
 ## Documentation & Implementation Guides
 
-- **Roadmap & Parity:** [`ROADMAP.md`](ROADMAP.md) · [`docs/target-app-parity.md`](docs/target-app-parity.md) · [`docs/gaps.md`](docs/gaps.md) · [`docs/roadmap.md`](docs/roadmap.md)
+- **Roadmap & Parity:** [`ROADMAP.md`](ROADMAP.md) · [`docs/target-app-parity.md`](docs/target-app-parity.md) · [`docs/gaps.md`](docs/gaps.md) · [`docs/roadmap.md`](docs/roadmap.md) · [`docs/qol-beyond-parity.md`](docs/qol-beyond-parity.md)
 - **Architecture & Engineering:** [`docs/architecture.md`](docs/architecture.md) · [`docs/development.md`](docs/development.md) · [`docs/releasing.md`](docs/releasing.md) · [`docs/contributors.md`](docs/contributors.md)
 - **Subsystem Implementation Guidelines:**
   - [`docs/data-tables-and-transforms.md`](docs/data-tables-and-transforms.md) — 8 data-table archetypes, subcolumns, exclusions, Info constants, Calculated Variables (`=`), and transforms
