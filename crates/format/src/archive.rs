@@ -5,9 +5,9 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use lumencraft_doc::{
-    CURRENT_SCHEMA_VERSION, Cell, CellValue, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation, GraphSheet, HookSource,
-    InfoSheet, LayoutItem, LayoutSheet, MAX_DATA_SETS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, ProjectDocument, ResultSheet, ResultStatus,
-    SheetId, SheetSection, TableArchetype, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation, GraphSheet,
+    HookSource, InfoSheet, LayoutItem, LayoutSheet, MAX_DATA_SETS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, ProjectDocument, ResultCell,
+    ResultSheet, ResultStatus, SheetId, SheetSection, TableArchetype, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 
 use crate::csv::{CsvOptions, export_datasheet_to_csv};
@@ -507,10 +507,49 @@ fn validate_result_sheet(res: &ResultSheet) -> Result<(), FormatError> {
             return Err(FormatError::NonFiniteFloat { location: format!("{}.scalars[{idx}]", res.id) });
         }
     }
+    for (tab_idx, tab) in res.tabs.iter().enumerate() {
+        for (r, row) in tab.rows.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                validate_result_cell_finite(cell, || format!("{}.tabs[{tab_idx}].rows[{r}][{c}]", res.id))?;
+            }
+        }
+    }
+    for (idx, cmp) in res.pairwise_comparisons.iter().enumerate() {
+        if cmp.estimate_diff.is_some_and(|v| !v.is_finite()) || !cmp.raw_p_or_q.is_finite() {
+            return Err(FormatError::NonFiniteFloat { location: format!("{}.pairwise_comparisons[{idx}]", res.id) });
+        }
+    }
+    for (c_idx, curve) in res.fitted_curves.iter().enumerate() {
+        for (p_idx, pt) in curve.points.iter().enumerate() {
+            if [Some(pt.x), Some(pt.y), pt.ci_lower, pt.ci_upper, pt.pred_lower, pt.pred_upper].into_iter().flatten().any(|v| !v.is_finite()) {
+                return Err(FormatError::NonFiniteFloat { location: format!("{}.fitted_curves[{c_idx}].points[{p_idx}]", res.id) });
+            }
+        }
+    }
     if let Some(data) = &res.analyzable_data {
         validate_data_sheet(data)?;
     }
     Ok(())
+}
+
+fn validate_result_cell_finite<F>(cell: &ResultCell, loc: F) -> Result<(), FormatError>
+where
+    F: FnOnce() -> String,
+{
+    let is_ok = match cell {
+        ResultCell::Number { value, .. } => value.is_finite(),
+        ResultCell::PValue { raw, .. } => raw.is_finite(),
+        ResultCell::ConfidenceInterval { lower, upper } => ci_bound_finite(*lower) && ci_bound_finite(*upper),
+        ResultCell::Empty | ResultCell::Text(_) | ResultCell::Boolean(_) => true,
+    };
+    if is_ok { Ok(()) } else { Err(FormatError::NonFiniteFloat { location: loc() }) }
+}
+
+fn ci_bound_finite(bound: CiBound) -> bool {
+    match bound {
+        CiBound::Finite(v) => v.is_finite(),
+        CiBound::Open => true,
+    }
 }
 
 /// Detect circular `HookSource`, `ImportLinkSpec`, and transform/analysis DAG dependencies across

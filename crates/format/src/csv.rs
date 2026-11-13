@@ -12,6 +12,9 @@ use lumencraft_doc::{
 
 use crate::error::FormatError;
 
+/// Maximum dense `Cell` entries allocated by delimited table import, filtering, or growth.
+pub const MAX_IMPORT_CELLS: usize = 10_000_000;
+
 /// Configuration for RFC-4180 CSV/TSV parsing and formatting.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CsvOptions {
@@ -615,12 +618,9 @@ pub fn import_csv_to_datasheet(
     validate_rows(row_count)?;
 
     let raw_col_count = headers.len().max(data_rows.iter().map(Vec::len).max().unwrap_or(0));
-    let mut col_offset = usize::from(opts.has_row_titles && raw_col_count > 0);
-    let row_titles: Vec<String> = if opts.has_row_titles && raw_col_count > 0 {
-        data_rows.iter().map(|r| r.first().cloned().unwrap_or_default()).collect()
-    } else {
-        vec![String::new(); row_count]
-    };
+    let has_row_titles = opts.has_row_titles && raw_col_count > 0;
+    let mut col_offset = usize::from(has_row_titles);
+    let err_line = header_count.saturating_add(1);
 
     let arch = match target_kind {
         TableKind::Xy => {
@@ -633,9 +633,10 @@ pub fn import_csv_to_datasheet(
             let data_cols = raw_col_count.saturating_sub(col_offset);
             let ds_count = data_cols.div_ceil(subs);
             validate_data_sets(ds_count)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 1, err_line)?;
             let mut xy = XyTable::new(subcolumn_mode, ds_count, row_count)?;
             xy.x_title = sanitize_title(&x_title)?;
-            xy.row_titles = row_titles;
+            assign_row_titles(&mut xy.row_titles, data_rows, has_row_titles);
             xy.row_titles_expanded = opts.has_row_titles;
             for (r, rec) in data_rows.iter().enumerate() {
                 if let Some(tok) = rec.get(x_col_idx) {
@@ -649,9 +650,10 @@ pub fn import_csv_to_datasheet(
             let subs = subcolumn_mode.subcolumn_count();
             let ds_count = raw_col_count.saturating_sub(col_offset).div_ceil(subs);
             validate_data_sets(ds_count)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line)?;
             let hint = if subcolumn_mode.is_pre_summarized() { ColumnDesignHint::PrecomputedError } else { ColumnDesignHint::UnpairedReplicates };
             let mut col = ColumnTable::new_with_subcolumns(hint, subcolumn_mode, ds_count, row_count)?;
-            col.row_titles = row_titles;
+            assign_row_titles(&mut col.row_titles, data_rows, has_row_titles);
             col.row_titles_expanded = opts.has_row_titles;
             populate_datasets(&mut col.data_sets, data_rows, &headers, col_offset, subs, opts)?;
             TableArchetype::Column(col)
@@ -660,16 +662,18 @@ pub fn import_csv_to_datasheet(
             let subs = subcolumn_mode.subcolumn_count();
             let ds_count = raw_col_count.saturating_sub(col_offset).div_ceil(subs);
             validate_data_sets(ds_count)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line)?;
             let mut grp = GroupedTable::new(subcolumn_mode, ds_count, row_count)?;
-            grp.row_titles = row_titles;
+            assign_row_titles(&mut grp.row_titles, data_rows, has_row_titles);
             populate_datasets(&mut grp.data_sets, data_rows, &headers, col_offset, subs, opts)?;
             TableArchetype::Grouped(grp)
         }
         TableKind::Contingency => {
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line)?;
             let mut cont = ContingencyTable::new(ds_count, row_count)?;
-            cont.row_titles = row_titles;
+            assign_row_titles(&mut cont.row_titles, data_rows, has_row_titles);
             populate_datasets(&mut cont.data_sets, data_rows, &headers, col_offset, 1, opts)?;
             TableArchetype::Contingency(cont)
         }
@@ -681,9 +685,10 @@ pub fn import_csv_to_datasheet(
             }
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 1, err_line)?;
             let mut surv = SurvivalTable::new(ds_count, row_count)?;
             surv.time_title = sanitize_title(&time_title)?;
-            surv.row_titles = row_titles;
+            assign_row_titles(&mut surv.row_titles, data_rows, has_row_titles);
             surv.row_titles_expanded = opts.has_row_titles;
             for (r, rec) in data_rows.iter().enumerate() {
                 if let Some(tok) = rec.get(time_col) {
@@ -700,17 +705,22 @@ pub fn import_csv_to_datasheet(
             }
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line)?;
             let mut pow = PartsOfWholeTable::new(ds_count, row_count)?;
-            pow.slice_labels =
-                if opts.has_row_titles { row_titles } else { data_rows.iter().map(|r| r.get(label_col).cloned().unwrap_or_default()).collect() };
+            if has_row_titles {
+                assign_row_titles(&mut pow.slice_labels, data_rows, true);
+            } else if !opts.has_row_titles {
+                pow.slice_labels = data_rows.iter().map(|r| r.get(label_col).cloned().unwrap_or_default()).collect();
+            }
             populate_datasets(&mut pow.data_sets, data_rows, &headers, col_offset, 1, opts)?;
             TableArchetype::PartsOfWhole(pow)
         }
         TableKind::MultipleVariables => {
             let var_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(var_count)?;
+            validate_csv_cell_budget(row_count, var_count, 1, 0, err_line)?;
             let mut mv = MultipleVariablesTable::new(var_count, row_count)?;
-            mv.row_titles = row_titles;
+            assign_row_titles(&mut mv.row_titles, data_rows, has_row_titles);
             mv.row_titles_expanded = opts.has_row_titles;
             for (idx, var) in mv.variables.iter_mut().enumerate() {
                 let c = col_offset + idx;
@@ -730,8 +740,9 @@ pub fn import_csv_to_datasheet(
             let bio_units = 1;
             let group_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(group_count)?;
+            validate_csv_cell_budget(row_count, group_count, bio_units, 0, err_line)?;
             let mut nested = NestedTable::new(group_count, bio_units, row_count)?;
-            nested.row_titles = row_titles;
+            assign_row_titles(&mut nested.row_titles, data_rows, has_row_titles);
             nested.row_titles_expanded = opts.has_row_titles;
             for (idx, grp) in nested.groups.iter_mut().enumerate() {
                 let c = col_offset + idx;
@@ -750,6 +761,29 @@ pub fn import_csv_to_datasheet(
     };
 
     Ok(DataSheet::new(id.into(), title, arch)?)
+}
+
+fn validate_csv_cell_budget(rows: usize, cols: usize, subs: usize, extra_cols_per_row: usize, line: usize) -> Result<(), FormatError> {
+    let per_row = cols
+        .checked_mul(subs)
+        .and_then(|v| v.checked_add(extra_cols_per_row))
+        .ok_or_else(|| FormatError::CsvParse { line, reason: String::from("table cell count overflow") })?;
+    let total_cells = rows.checked_mul(per_row).ok_or_else(|| FormatError::CsvParse { line, reason: String::from("table cell count overflow") })?;
+    if total_cells > MAX_IMPORT_CELLS {
+        return Err(FormatError::CsvParse { line, reason: format!("dense cell allocation {total_cells} exceeds limit {MAX_IMPORT_CELLS}") });
+    }
+    Ok(())
+}
+
+fn assign_row_titles(dst: &mut [String], data_rows: &[Vec<String>], has_row_titles: bool) {
+    if !has_row_titles {
+        return;
+    }
+    for (slot, rec) in dst.iter_mut().zip(data_rows.iter()) {
+        if let Some(first) = rec.first() {
+            *slot = first.clone();
+        }
+    }
 }
 
 fn sanitize_title(raw: &str) -> Result<String, FormatError> {
@@ -854,6 +888,9 @@ pub fn filter_delimited_text(
     let mut headers = Vec::new();
     let mut cells = Vec::new();
     if max_cols > 0 && c_start < max_cols {
+        let kept_cols = c_end - c_start + 1;
+        let kept_rows = sliced_rows.len().div_ceil(step);
+        check_pipeline_cell_budget(kept_rows.checked_mul(kept_cols), "filtered")?;
         for c in c_start..=c_end {
             headers.push(raw_headers.get(c).cloned().unwrap_or_else(|| default_column_label(c)));
         }
@@ -861,7 +898,7 @@ pub fn filter_delimited_text(
             if idx % step != 0 {
                 continue;
             }
-            let mut parsed_row = Vec::with_capacity(c_end - c_start + 1);
+            let mut parsed_row = Vec::with_capacity(kept_cols);
             for c in c_start..=c_end {
                 let tok = row.get(c).map(String::as_str).unwrap_or("");
                 parsed_row.push(parse_cell_token(tok, &opts));
@@ -878,6 +915,14 @@ pub fn filter_delimited_text(
     }
 
     Ok(FilteredDelimitedGrid { headers, cells })
+}
+
+fn check_pipeline_cell_budget(total_cells: Option<usize>, stage: &str) -> Result<(), FormatError> {
+    let total = total_cells.ok_or_else(|| FormatError::InvalidPipeline { reason: format!("{stage} cell count overflow") })?;
+    if total > MAX_IMPORT_CELLS {
+        return Err(FormatError::InvalidPipeline { reason: format!("{stage} dense cell allocation {total} exceeds limit {MAX_IMPORT_CELLS}") });
+    }
+    Ok(())
 }
 
 fn unstack_grid(headers: &[String], cells: &[Vec<Cell>], group_col: usize) -> Result<FilteredDelimitedGrid, FormatError> {
@@ -909,6 +954,7 @@ fn unstack_grid(headers: &[String], cells: &[Vec<Cell>], group_col: usize) -> Re
     let max_rows = groups.values().map(Vec::len).max().unwrap_or(0);
     validate_data_sets(order.len())?;
     validate_rows(max_rows)?;
+    check_pipeline_cell_budget(max_rows.checked_mul(order.len()), "unstacked")?;
     let mut out_cells = vec![vec![Cell::empty(); order.len()]; max_rows];
     for (c_idx, key) in order.iter().enumerate() {
         if let Some(vals) = groups.get(key) {
@@ -1066,7 +1112,7 @@ fn place_grid_in_datasheet(
 
     let mut end_coord = CellCoord::new(start_row, start_col, placement.anchor.subcol);
     for (r_off, row) in grid.iter().enumerate() {
-        let r = start_row + r_off;
+        let r = start_row.checked_add(r_off).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("row offset overflow") })?;
         for (c_off, cell) in row.iter().enumerate() {
             let (col, subcol) = resolve_target_coord(&target.archetype, start_col, placement.anchor.subcol, c_off)?;
             let coord = CellCoord::new(r, col, subcol);
@@ -1075,6 +1121,73 @@ fn place_grid_in_datasheet(
         }
     }
     Ok(SheetCellRange::new(CellCoord::new(start_row, start_col, placement.anchor.subcol), end_coord))
+}
+
+fn compute_needed_cols_with_subs(start_col: usize, start_subcol: usize, grid_cols: usize, subs: usize) -> Result<usize, FormatError> {
+    validate_subcolumns(subs)?;
+    let total_flat = start_col
+        .checked_mul(subs)
+        .and_then(|v| v.checked_add(start_subcol))
+        .and_then(|v| v.checked_add(grid_cols))
+        .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("column offset overflow") })?;
+    Ok(total_flat.div_ceil(subs))
+}
+
+fn check_datasets_growth_budget(
+    data_sets: &[DataSetColumn],
+    needed_cols: usize,
+    needed_rows: usize,
+    subs: usize,
+    extra_cells: Option<usize>,
+) -> Result<(), FormatError> {
+    let mut total = extra_cells.ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("sheet cell capacity overflow") })?;
+    for ds in data_sets {
+        let rows = ds.row_count().max(needed_rows);
+        let ds_subs = ds.subcolumn_count().max(subs);
+        let col_cells = rows.checked_mul(ds_subs);
+        total = col_cells
+            .and_then(|c| total.checked_add(c))
+            .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("sheet cell capacity overflow") })?;
+        check_pipeline_cell_budget(Some(total), "target sheet")?;
+    }
+    let extra_cols = needed_cols.saturating_sub(data_sets.len());
+    if extra_cols > 0 {
+        let added = extra_cols.checked_mul(needed_rows).and_then(|v| v.checked_mul(subs));
+        total = added
+            .and_then(|c| total.checked_add(c))
+            .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("sheet cell capacity overflow") })?;
+        check_pipeline_cell_budget(Some(total), "target sheet")?;
+    }
+    Ok(())
+}
+
+fn check_multivar_growth_budget(variables: &[VariableColumn], needed_cols: usize, needed_rows: usize) -> Result<(), FormatError> {
+    let mut total = 0_usize;
+    for var in variables {
+        let rows = var.cells.len().max(needed_rows);
+        total = total.checked_add(rows).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("sheet cell capacity overflow") })?;
+        check_pipeline_cell_budget(Some(total), "target sheet")?;
+    }
+    let extra_cols = needed_cols.saturating_sub(variables.len());
+    let added = extra_cols.checked_mul(needed_rows);
+    let combined = added.and_then(|c| total.checked_add(c));
+    check_pipeline_cell_budget(combined, "target sheet")
+}
+
+fn check_nested_growth_budget(groups: &[NestedGroupColumn], needed_cols: usize, needed_rows: usize) -> Result<(), FormatError> {
+    let mut total = 0_usize;
+    for g in groups {
+        let rows = g.cells.len().max(needed_rows);
+        let grp_cells = rows.checked_mul(g.biological_unit_count());
+        total = grp_cells
+            .and_then(|c| total.checked_add(c))
+            .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("sheet cell capacity overflow") })?;
+        check_pipeline_cell_budget(Some(total), "target sheet")?;
+    }
+    let extra_cols = needed_cols.saturating_sub(groups.len());
+    let added = extra_cols.checked_mul(needed_rows);
+    let combined = added.and_then(|c| total.checked_add(c));
+    check_pipeline_cell_budget(combined, "target sheet")
 }
 
 fn ensure_sheet_capacity(
@@ -1087,9 +1200,10 @@ fn ensure_sheet_capacity(
     match &mut target.archetype {
         TableArchetype::Xy(t) => {
             let subs = t.y_subcolumn_mode.subcolumn_count();
-            let total_flat = start_col * subs + start_subcol + grid_cols;
-            let needed_cols = total_flat.div_ceil(subs);
+            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
+            let x_cells = t.x_cells.len().max(needed_rows).checked_mul(t.x_mode.subcolumn_count());
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, x_cells)?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, subs)?;
             if t.x_cells.len() < needed_rows {
                 t.x_cells.resize_with(needed_rows, || vec![Cell::empty(); t.x_mode.subcolumn_count()]);
@@ -1100,8 +1214,9 @@ fn ensure_sheet_capacity(
         }
         TableArchetype::Column(t) => {
             let subs = t.subcolumn_mode.subcolumn_count();
-            let needed_cols = (start_col * subs + start_subcol + grid_cols).div_ceil(subs);
+            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, Some(0))?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, subs)?;
             if t.row_titles.len() < needed_rows {
                 t.row_titles.resize(needed_rows, String::new());
@@ -1109,24 +1224,28 @@ fn ensure_sheet_capacity(
         }
         TableArchetype::Grouped(t) => {
             let subs = t.subcolumn_mode.subcolumn_count();
-            let needed_cols = (start_col * subs + start_subcol + grid_cols).div_ceil(subs);
+            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, subs, Some(0))?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, subs)?;
             if t.row_titles.len() < needed_rows {
                 t.row_titles.resize(needed_rows, String::new());
             }
         }
         TableArchetype::Contingency(t) => {
-            let needed_cols = start_col + grid_cols;
+            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, 1, Some(0))?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, 1)?;
             if t.row_titles.len() < needed_rows {
                 t.row_titles.resize(needed_rows, String::new());
             }
         }
         TableArchetype::Survival(t) => {
-            let needed_cols = start_col + grid_cols;
+            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
+            let time_cells = t.times.len().max(needed_rows);
+            check_datasets_growth_budget(&t.cohorts, needed_cols, needed_rows, 1, Some(time_cells))?;
             grow_datasets(&mut t.cohorts, needed_cols, needed_rows, 1)?;
             if t.times.len() < needed_rows {
                 t.times.resize(needed_rows, Cell::empty());
@@ -1136,16 +1255,18 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::PartsOfWhole(t) => {
-            let needed_cols = start_col + grid_cols;
+            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
+            check_datasets_growth_budget(&t.data_sets, needed_cols, needed_rows, 1, Some(0))?;
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, 1)?;
             if t.slice_labels.len() < needed_rows {
                 t.slice_labels.resize(needed_rows, String::new());
             }
         }
         TableArchetype::MultipleVariables(t) => {
-            let needed_cols = start_col + grid_cols;
+            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
+            check_multivar_growth_budget(&t.variables, needed_cols, needed_rows)?;
             while t.variables.len() < needed_cols {
                 let idx = t.variables.len();
                 t.variables.push(VariableColumn::new(format!("Variable {}", default_column_label(idx)), needed_rows)?);
@@ -1160,8 +1281,9 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::Nested(t) => {
-            let needed_cols = start_col + grid_cols;
+            let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, 1)?;
             validate_data_sets(needed_cols)?;
+            check_nested_growth_budget(&t.groups, needed_cols, needed_rows)?;
             while t.groups.len() < needed_cols {
                 let idx = t.groups.len();
                 t.groups.push(NestedGroupColumn::new(default_column_label(idx), 1, needed_rows)?);
@@ -1199,7 +1321,12 @@ fn resolve_target_coord(arch: &TableArchetype, start_col: usize, start_subcol: u
         TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
         _ => 1,
     };
-    let flat = start_col * subs + start_subcol + flat_offset;
+    validate_subcolumns(subs)?;
+    let flat = start_col
+        .checked_mul(subs)
+        .and_then(|v| v.checked_add(start_subcol))
+        .and_then(|v| v.checked_add(flat_offset))
+        .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("target cell coordinate overflow") })?;
     Ok((flat / subs, flat % subs))
 }
 
@@ -1209,7 +1336,7 @@ fn apply_headers_to_sheet(target: &mut DataSheet, start_col: usize, headers: &[S
             continue;
         }
         validate_title(title)?;
-        let col = start_col + idx;
+        let col = start_col.checked_add(idx).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("header column offset overflow") })?;
         match &mut target.archetype {
             TableArchetype::Xy(t) => {
                 if let Some(ds) = t.data_sets.get_mut(col) {

@@ -18,6 +18,9 @@ use crate::csv::{CsvOptions, parse_cell_token};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::xml::{XmlElement, parse_xml};
 
+/// Maximum total dense `Cell` entries allocated across all tables of a single PZFX import.
+pub const MAX_IMPORT_CELLS: usize = crate::csv::MAX_IMPORT_CELLS;
+
 /// Import a `.pzfx` XML byte buffer into a [`ProjectDocument`] and compatibility warnings.
 pub fn import_pzfx_bytes(bytes: &[u8]) -> Result<ImportReport, FormatError> {
     let text = std::str::from_utf8(bytes).map_err(|err| FormatError::XmlParse { offset: 0, reason: format!("invalid UTF-8 in XML: {err}") })?;
@@ -114,8 +117,9 @@ fn import_table_sections(
     table_nodes.extend(root.children_named("Table"));
 
     let primary_info = doc.info_sheets.first().map(|s| s.id.clone());
+    let mut remaining_cells = MAX_IMPORT_CELLS;
     for (idx, table_el) in table_nodes.iter().enumerate() {
-        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings)?;
+        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings, &mut remaining_cells)?;
         if ds.info_sheet_id.is_none() {
             ds.info_sheet_id = primary_info.clone();
         }
@@ -129,6 +133,7 @@ fn parse_table_element(
     one_based_idx: usize,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
+    remaining_cells: &mut usize,
 ) -> Result<DataSheet, FormatError> {
     let id = allocate_unique_id(table_el.attr("ID"), "data", one_based_idx, used_ids);
     let raw_title = table_el
@@ -185,6 +190,17 @@ fn parse_table_element(
     let row_count = row_titles.len().max(max_x_rows).max(max_y_rows);
     validate_rows(row_count)?;
 
+    let table_cells = estimate_table_cells(kind, subcolumn_mode, table_el, &x_cols, &parsed_y, row_count)?;
+    if table_cells > *remaining_cells {
+        return Err(FormatError::XmlParse {
+            offset: 0,
+            reason: format!(
+                "table `{id}` cell allocation ({table_cells}) exceeds remaining import budget ({remaining_cells}, cap {MAX_IMPORT_CELLS})"
+            ),
+        });
+    }
+    *remaining_cells -= table_cells;
+
     let mut padded_row_titles = row_titles;
     padded_row_titles.resize(row_count, String::new());
     let has_row_titles = padded_row_titles.iter().any(|s| !s.is_empty());
@@ -192,6 +208,47 @@ fn parse_table_element(
     let arch = build_table_archetype(kind, subcolumn_mode, table_el, &x_title, &x_cols, &parsed_y, padded_row_titles, has_row_titles, row_count)?;
 
     Ok(DataSheet::new(SheetId::new(id), title, arch)?)
+}
+
+fn estimate_table_cells(
+    kind: TableKind,
+    subcolumn_mode: SubcolumnMode,
+    table_el: &XmlElement,
+    x_cols: &[Vec<Cell>],
+    parsed_y: &[(String, Vec<Vec<Cell>>)],
+    row_count: usize,
+) -> Result<usize, FormatError> {
+    let overflow = || FormatError::XmlParse { offset: 0, reason: format!("table cell count overflows budget cap of {MAX_IMPORT_CELLS}") };
+    match kind {
+        TableKind::Xy => {
+            validate_subcolumns(subcolumn_mode.subcolumn_count())?;
+            let x_subs = resolve_x_mode(table_el, x_cols).subcolumn_count();
+            let y_cols = parsed_y.len().checked_mul(subcolumn_mode.subcolumn_count()).ok_or_else(overflow)?;
+            let total_cols = x_subs.checked_add(y_cols).ok_or_else(overflow)?;
+            total_cols.checked_mul(row_count).ok_or_else(overflow)
+        }
+        TableKind::Column | TableKind::Grouped => {
+            validate_subcolumns(subcolumn_mode.subcolumn_count())?;
+            let total_cols = parsed_y.len().checked_mul(subcolumn_mode.subcolumn_count()).ok_or_else(overflow)?;
+            total_cols.checked_mul(row_count).ok_or_else(overflow)
+        }
+        TableKind::Contingency | TableKind::PartsOfWhole | TableKind::MultipleVariables => parsed_y.len().checked_mul(row_count).ok_or_else(overflow),
+        TableKind::Survival => {
+            let total_cols = parsed_y.len().checked_add(1).ok_or_else(overflow)?;
+            total_cols.checked_mul(row_count).ok_or_else(overflow)
+        }
+        TableKind::Nested => {
+            let max_units = parsed_y.iter().map(|(_, subs)| subs.len()).max().unwrap_or(1).max(1);
+            validate_subcolumns(max_units)?;
+            let mut total: usize = 0;
+            for (_, subs) in parsed_y {
+                let units = subs.len().max(1);
+                let group_cells = units.checked_mul(row_count).ok_or_else(overflow)?;
+                total = total.checked_add(group_cells).ok_or_else(overflow)?;
+            }
+            Ok(total)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -296,7 +353,7 @@ fn build_table_archetype(
         TableKind::Nested => {
             let max_units = parsed_y.iter().map(|(_, subs)| subs.len()).max().unwrap_or(1).max(1);
             validate_subcolumns(max_units)?;
-            let mut nested = NestedTable::new(parsed_y.len(), max_units, row_count)?;
+            let mut nested = NestedTable::new(parsed_y.len(), 1, 0)?;
             nested.row_titles = row_titles;
             nested.row_titles_expanded = has_row_titles;
             for (g_idx, (col_title, subs)) in parsed_y.iter().enumerate() {

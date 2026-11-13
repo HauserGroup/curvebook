@@ -409,7 +409,7 @@ fn parse_central_directory(bytes: &[u8], eocd: &EocdInfo, limits: ZipLimits) -> 
 }
 
 fn read_and_verify_entry(bytes: &[u8], cd: &ParsedCdEntry, remaining_budget: u64, max_entry_bytes: u64) -> Result<Vec<u8>, FormatError> {
-    if cd.local_offset + 30 > bytes.len() {
+    if cd.local_offset.checked_add(30).is_none_or(|end| end > bytes.len()) {
         return Err(FormatError::InvalidZip { reason: format!("truncated local header for `{}`", cd.path) });
     }
     if read_u32_le(bytes, cd.local_offset)? != LOCAL_FILE_HEADER_SIG {
@@ -468,11 +468,17 @@ fn read_and_verify_entry(bytes: &[u8], cd: &ParsedCdEntry, remaining_budget: u64
 }
 
 fn read_u16_le(bytes: &[u8], offset: usize) -> Result<u16, FormatError> {
-    let slice = bytes.get(offset..offset + 2).ok_or_else(|| FormatError::InvalidZip { reason: String::from("unexpected EOF reading u16") })?;
+    let slice = offset
+        .checked_add(2)
+        .and_then(|end| bytes.get(offset..end))
+        .ok_or_else(|| FormatError::InvalidZip { reason: String::from("unexpected EOF reading u16") })?;
     Ok(u16::from_le_bytes([slice[0], slice[1]]))
 }
 
 fn read_u32_le(bytes: &[u8], offset: usize) -> Result<u32, FormatError> {
-    let slice = bytes.get(offset..offset + 4).ok_or_else(|| FormatError::InvalidZip { reason: String::from("unexpected EOF reading u32") })?;
+    let slice = offset
+        .checked_add(4)
+        .and_then(|end| bytes.get(offset..end))
+        .ok_or_else(|| FormatError::InvalidZip { reason: String::from("unexpected EOF reading u32") })?;
     Ok(u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]))
 }
