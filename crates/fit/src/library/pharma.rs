@@ -100,7 +100,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         })),
         "log_agonist_vs_response_4pl" | "log_agonist_vs_response_variable_slope" | "4pl" => Some(Box::new(LogDoseResponse {
             id: "log_agonist_vs_response_4pl",
-            name: "log(agonist) vs. response -- Variable slope (four parameters)",
+            name: "log(agonist) vs. response, variable Hill slope (four parameters)",
             category: EquationCategory::DoseResponseStimulation,
             variable_slope: true,
             is_inhibition: false,
@@ -118,7 +118,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         })),
         "log_agonist_vs_response_normalized_var" => Some(Box::new(LogDoseResponse {
             id: "log_agonist_vs_response_normalized_var",
-            name: "log(agonist) vs. normalized response -- Variable slope",
+            name: "log(agonist) vs. normalized response, variable Hill slope",
             category: EquationCategory::DoseResponseStimulation,
             variable_slope: true,
             is_inhibition: false,
@@ -136,7 +136,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         })),
         "log_inhibitor_vs_response_4pl" | "log_inhibitor_vs_response_variable_slope" => Some(Box::new(LogDoseResponse {
             id: "log_inhibitor_vs_response_4pl",
-            name: "log(inhibitor) vs. response -- Variable slope (four parameters)",
+            name: "log(inhibitor) vs. response, variable Hill slope (four parameters)",
             category: EquationCategory::DoseResponseInhibition,
             variable_slope: true,
             is_inhibition: true,
@@ -154,7 +154,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         })),
         "log_inhibitor_vs_response_normalized_var" => Some(Box::new(LogDoseResponse {
             id: "log_inhibitor_vs_response_normalized_var",
-            name: "log(inhibitor) vs. normalized response -- Variable slope",
+            name: "log(inhibitor) vs. normalized response, variable Hill slope",
             category: EquationCategory::DoseResponseInhibition,
             variable_slope: true,
             is_inhibition: true,
@@ -171,7 +171,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         })),
         "agonist_vs_response_4pl" => Some(Box::new(LinearDoseResponse {
             id: "agonist_vs_response_4pl",
-            name: "[Agonist] vs. response -- Variable slope (four parameters)",
+            name: "[Agonist] vs. response, variable Hill slope (four parameters)",
             category: EquationCategory::DoseResponseStimulation,
             variable_slope: true,
             is_inhibition: false,
@@ -187,7 +187,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         })),
         "inhibitor_vs_response_4pl" => Some(Box::new(LinearDoseResponse {
             id: "inhibitor_vs_response_4pl",
-            name: "[Inhibitor] vs. response -- Variable slope (four parameters)",
+            name: "[Inhibitor] vs. response, variable Hill slope (four parameters)",
             category: EquationCategory::DoseResponseInhibition,
             variable_slope: true,
             is_inhibition: true,
@@ -211,21 +211,21 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         "operational_model_agonist" => Some(Box::new(OperationalAgonism { params: names(&["Basal", "Emax", "LogKA", "LogTau", "n"]) })),
         "one_site_specific_binding" => Some(Box::new(OneSiteBinding {
             id: "one_site_specific_binding",
-            name: "One site -- Specific binding",
+            name: "One-site specific binding",
             with_hill: false,
             with_ns: false,
             params: names(&["Bmax", "Kd"]),
         })),
         "one_site_specific_hill" => Some(Box::new(OneSiteBinding {
             id: "one_site_specific_hill",
-            name: "One site -- Specific binding with Hill slope",
+            name: "One-site specific binding with Hill slope",
             with_hill: true,
             with_ns: false,
             params: names(&["Bmax", "Kd", "h"]),
         })),
         "one_site_total_and_ns" => Some(Box::new(OneSiteBinding {
             id: "one_site_total_and_ns",
-            name: "One site -- Total and nonspecific binding",
+            name: "One-site total and nonspecific binding",
             with_hill: false,
             with_ns: true,
             params: names(&["Bmax", "Kd", "NS", "Background"]),
@@ -234,7 +234,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         "one_site_fit_ki" => Some(Box::new(CompetitionOneSiteKi { params: names(&["Top", "Bottom", "LogKi", "HotConc_nM", "HotKd_nM"]) })),
         "one_site_fit_logic50" => Some(Box::new(LogDoseResponse {
             id: "one_site_fit_logic50",
-            name: "One site -- Fit logIC50",
+            name: "One-site competitive binding (logIC50)",
             category: EquationCategory::ReceptorBinding,
             variable_slope: false,
             is_inhibition: true,
@@ -698,7 +698,7 @@ impl ParametricModel for OperationalAgonism {
         "operational_model_agonist"
     }
     fn name(&self) -> &str {
-        "Operational model -- Partial agonist"
+        "Black–Leff operational model, partial agonist"
     }
     fn category(&self) -> EquationCategory {
         EquationCategory::DoseResponseStimulation
@@ -827,7 +827,7 @@ impl ParametricModel for TwoSiteBinding {
         "two_sites_specific_binding"
     }
     fn name(&self) -> &str {
-        "Two sites -- Specific binding"
+        "Two-site specific binding"
     }
     fn category(&self) -> EquationCategory {
         EquationCategory::ReceptorBinding
@@ -859,7 +859,7 @@ impl ParametricModel for CompetitionOneSiteKi {
         "one_site_fit_ki"
     }
     fn name(&self) -> &str {
-        "One site -- Fit Ki (Cheng-Prusoff)"
+        "One-site competitive binding, Ki by Cheng–Prusoff"
     }
     fn category(&self) -> EquationCategory {
         EquationCategory::ReceptorBinding
@@ -892,7 +892,7 @@ impl ParametricModel for CompetitionTwoSiteKi {
         "two_sites_fit_ki"
     }
     fn name(&self) -> &str {
-        "Two sites -- Fit Ki"
+        "Two-site competitive binding (Ki)"
     }
     fn category(&self) -> EquationCategory {
         EquationCategory::ReceptorBinding
@@ -927,7 +927,7 @@ impl ParametricModel for DissociationOnePhase {
         "dissociation_one_phase"
     }
     fn name(&self) -> &str {
-        "Dissociation -- One phase exponential decay"
+        "One-phase exponential dissociation"
     }
     fn category(&self) -> EquationCategory {
         EquationCategory::ReceptorBinding
@@ -994,7 +994,7 @@ impl ParametricModel for AssociationTwoConc {
         "association_kinetics_two_conc"
     }
     fn name(&self) -> &str {
-        "Association kinetics -- Two or more concentrations of hot"
+        "Association kinetics at multiple radioligand concentrations"
     }
     fn category(&self) -> EquationCategory {
         EquationCategory::ReceptorBinding
@@ -1320,5 +1320,47 @@ impl ParametricModel for MorrisonKi {
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
         vec![ymax.max(1.0), 1.0, 0.1, 1.0, 1.0]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{PHARMA_EQUATION_IDS, resolve_pharma_model};
+
+    /// Display names are written in LumenCraft's own words (AGENTS.md › clean-room: no copied
+    /// equation wording), so none uses the "Family -- Variant" separator style.
+    #[test]
+    fn display_names_use_own_wording() {
+        for id in PHARMA_EQUATION_IDS {
+            let model = resolve_pharma_model(id).unwrap_or_else(|| panic!("{id} does not resolve"));
+            assert!(!model.name().contains(" -- "), "{id} uses the ` -- ` separator: {}", model.name());
+        }
+    }
+
+    #[test]
+    fn renamed_equations_keep_their_ids() {
+        let expected = [
+            ("log_agonist_vs_response_4pl", "log(agonist) vs. response, variable Hill slope (four parameters)"),
+            ("log_agonist_vs_response_normalized_var", "log(agonist) vs. normalized response, variable Hill slope"),
+            ("log_inhibitor_vs_response_4pl", "log(inhibitor) vs. response, variable Hill slope (four parameters)"),
+            ("log_inhibitor_vs_response_normalized_var", "log(inhibitor) vs. normalized response, variable Hill slope"),
+            ("agonist_vs_response_4pl", "[Agonist] vs. response, variable Hill slope (four parameters)"),
+            ("inhibitor_vs_response_4pl", "[Inhibitor] vs. response, variable Hill slope (four parameters)"),
+            ("one_site_specific_binding", "One-site specific binding"),
+            ("one_site_specific_hill", "One-site specific binding with Hill slope"),
+            ("one_site_total_and_ns", "One-site total and nonspecific binding"),
+            ("one_site_fit_logic50", "One-site competitive binding (logIC50)"),
+            ("operational_model_agonist", "Black\u{2013}Leff operational model, partial agonist"),
+            ("two_sites_specific_binding", "Two-site specific binding"),
+            ("one_site_fit_ki", "One-site competitive binding, Ki by Cheng\u{2013}Prusoff"),
+            ("two_sites_fit_ki", "Two-site competitive binding (Ki)"),
+            ("dissociation_one_phase", "One-phase exponential dissociation"),
+            ("association_kinetics_two_conc", "Association kinetics at multiple radioligand concentrations"),
+        ];
+        for (id, name) in expected {
+            let model = resolve_pharma_model(id).unwrap_or_else(|| panic!("{id} does not resolve"));
+            assert_eq!(model.id(), id);
+            assert_eq!(model.name(), name);
+        }
     }
 }
