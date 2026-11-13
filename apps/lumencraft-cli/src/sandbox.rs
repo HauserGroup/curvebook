@@ -8,6 +8,10 @@ use serde_json::Value;
 use crate::error::CliError;
 
 /// JSON parameter keys interpreted as filesystem paths inside engine commands.
+///
+/// Bare `csv` is deliberately absent: `table.importCsv` and the paste command read `csv` as
+/// inline CSV text, so rewriting it as a path would silently import the path string as data.
+/// Manifest `inputs[].csv` paths are resolved separately in `parse_manifest_inputs`.
 const PATH_PARAM_KEYS: &[&str] = &[
     "path",
     "file",
@@ -31,7 +35,6 @@ const PATH_PARAM_KEYS: &[&str] = &[
     "project",
     "project_path",
     "projectPath",
-    "csv",
     "csv_path",
     "csvPath",
 ];
@@ -181,4 +184,29 @@ fn resolve_preserving_nonexistent_tail(joined: &Path, raw: &str) -> Result<PathB
         base.push(part);
     }
     Ok(base)
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{PathResolver, WorkdirGuard};
+
+    #[test]
+    fn sandbox_rewrites_path_keys_but_keeps_inline_csv_text() {
+        let dir = std::env::temp_dir().join(format!("lumencraft_sandbox_csv_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let guard = WorkdirGuard::new(&dir).unwrap();
+        let resolver = PathResolver::Sandboxed(guard);
+
+        let inline = "x,y\n1,2\n../3,4\n";
+        let mut params = json!({ "csv": inline, "path": "out.csv" });
+        resolver.sanitize_params(&mut params).unwrap();
+
+        assert_eq!(params["csv"], json!(inline), "inline CSV text must not be rewritten as a path");
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(params["path"], json!(canonical.join("out.csv").to_string_lossy()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
