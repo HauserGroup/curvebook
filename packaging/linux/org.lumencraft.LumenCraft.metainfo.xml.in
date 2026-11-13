@@ -1,0 +1,61 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- AppStream metadata for software centres and Flathub. package.sh and the Flatpak manifest
+     substitute @VERSION@ and @DATE@ from Cargo.toml and the UTC build date. -->
+<component type="desktop-application">
+  <id>org.lumencraft.LumenCraft</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>MIT OR Apache-2.0</project_license>
+  <name>LumenCraft</name>
+  <summary>Biostatistics, nonlinear regression, and scientific graphing</summary>
+  <developer id="org.lumencraft">
+    <name>LumenCraft Contributors</name>
+  </developer>
+  <description>
+    <p>
+      LumenCraft is an open-source desktop and web application for experimental data analysis,
+      biostatistics, nonlinear curve fitting, and publication-grade scientific graphing. Organize
+      structured data tables (XY, Column, Grouped, Contingency, Survival, Parts of Whole, and
+      Multiple Variables), run linked statistical and regression pipelines, and export crisp SVG
+      and PDF figures.
+    </p>
+  </description>
+  <launchable type="desktop-id">org.lumencraft.LumenCraft.desktop</launchable>
+  <icon type="stock">org.lumencraft.LumenCraft</icon>
+  <url type="homepage">https://github.com/lumencraft/lumencraft</url>
+  <url type="bugtracker">https://github.com/lumencraft/lumencraft/issues</url>
+  <url type="help">https://github.com/lumencraft/lumencraft</url>
+  <categories>
+    <category>Science</category>
+    <category>Math</category>
+    <category>DataVisualization</category>
+    <category>NumericalAnalysis</category>
+  </categories>
+  <keywords>
+    <keyword>biostatistics</keyword>
+    <keyword>regression</keyword>
+    <keyword>anova</keyword>
+    <keyword>survival</keyword>
+    <keyword>graphing</keyword>
+    <keyword>science</keyword>
+  </keywords>
+  <branding>
+    <color type="primary" scheme_preference="light">#a8d8ff</color>
+    <color type="primary" scheme_preference="dark">#1b2d56</color>
+  </branding>
+  <requires>
+    <display_length compare="ge">760</display_length>
+  </requires>
+  <supports>
+    <control>keyboard</control>
+    <control>pointing</control>
+  </supports>
+  <provides>
+    <binary>lumencraft</binary>
+    <mediatype>application/vnd.lumencraft.project</mediatype>
+    <mediatype>application/vnd.lumencraft.template</mediatype>
+  </provides>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="@VERSION@" date="@DATE@"/>
+  </releases>
+</component>

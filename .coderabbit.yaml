@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+reviews:
+  auto_review:
+    # Dependabot bumps are checked by CI; skip CodeRabbit reviews on them.
+    ignore_usernames:
+      - "dependabot[bot]"
+  path_instructions:
+    - path: "crates/**"
+      instructions: "Enforce AGENTS.md and docs/development.md#robustness-lumencraft-never-crashes: zero unsafe, zero unwrap/expect/panic/todo/unimplemented/unreachable in non-test code, bounded allocations and safe slice indexing (.get), and strict L0-L7 crate layering (docs/architecture.md)."
+    - path: "crates/{math,stats}/**"
+      instructions: "Check mathematical accuracy, tail-safe probability evaluation (never 1.0 - cdf(x)), missing/excluded-value and tie handling, and NIST StRD / analytical test coverage per docs/statistics-implementation.md."
+    - path: "crates/fit/**"
+      instructions: "Check Levenberg-Marquardt conditioning, weighting, Cauchy/ROUT outlier handling, parameter constraints, profile-likelihood CI edge cases, and NIST StRD coverage per docs/curve-fitting-implementation.md."
+    - path: "crates/{doc,transform,format}/**"
+      instructions: "Check typed table invariants, non-destructive exclusions, DAG cycle safety, and bounded untrusted archive/CSV/XML parsing per docs/data-tables-and-transforms.md and docs/file-format-parity.md."
+    - path: "crates/{chart,text,palette,render,svg,pdf}/**"
+      instructions: "Check deterministic ChartScene compilation, safe log/probit/broken-axis guards, and SVG/PDF/raster parity per docs/graphing-and-layouts.md."

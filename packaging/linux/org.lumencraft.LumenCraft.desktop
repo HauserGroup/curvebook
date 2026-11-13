@@ -1,0 +1,20 @@
+[Desktop Entry]
+Type=Application
+Version=1.5
+Name=LumenCraft
+GenericName=Biostatistics and Scientific Graphing
+Comment=Analyze experimental data, fit curves, and compose publication graphs
+Icon=org.lumencraft.LumenCraft
+Exec=lumencraft %F
+TryExec=lumencraft
+Terminal=false
+Categories=Science;Math;DataVisualization;NumericalAnalysis;
+MimeType=application/vnd.lumencraft.project;application/vnd.lumencraft.template;application/x-prism-project;application/x-prism-xml;text/csv;text/tab-separated-values;
+Keywords=biostatistics;regression;curve-fitting;anova;survival;graphing;plotting;prism;
+StartupNotify=true
+StartupWMClass=lumencraft
+Actions=NewWindow;
+
+[Desktop Action NewWindow]
+Name=New Window
+Exec=lumencraft --new-instance

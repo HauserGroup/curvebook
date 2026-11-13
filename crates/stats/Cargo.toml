@@ -1,0 +1,16 @@
+[package]
+name = "lumencraft-stats"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft parametric and nonparametric hypothesis tests, ANOVA, survival and multivariate analyses"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-doc = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

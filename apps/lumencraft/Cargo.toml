@@ -1,0 +1,18 @@
+[package]
+name = "lumencraft"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+default-run = "lumencraft"
+description = "LumenCraft native desktop biostatistics, curve-fitting and scientific graphing application"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencraft-engine = { workspace = true, features = ["bundled-fonts"] }
+lumencraft-ui-egui = { workspace = true }
+lumencraft-text = { workspace = true }
+lumencraft-format = { workspace = true }
+lumencraft-render = { workspace = true }

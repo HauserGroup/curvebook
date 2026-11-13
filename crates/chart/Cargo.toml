@@ -1,0 +1,21 @@
+[package]
+name = "lumencraft-chart"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft scientific graph, error-bar, axis-break and significance-bracket scene compiler"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-palette = { workspace = true }
+lumencraft-doc = { workspace = true }
+lumencraft-transform = { workspace = true }
+lumencraft-stats = { workspace = true }
+lumencraft-fit = { workspace = true }
+lumencraft-text = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

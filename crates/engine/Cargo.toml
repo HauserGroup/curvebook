@@ -1,0 +1,31 @@
+[package]
+name = "lumencraft-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft session state, undo history, reactive analysis pipeline and command registry"
+
+[lints]
+workspace = true
+
+[features]
+default = ["bundled-fonts"]
+bundled-fonts = ["lumencraft-text/bundled-fonts"]
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-palette = { workspace = true }
+lumencraft-doc = { workspace = true }
+lumencraft-transform = { workspace = true }
+lumencraft-stats = { workspace = true }
+lumencraft-fit = { workspace = true }
+lumencraft-text = { workspace = true }
+lumencraft-chart = { workspace = true }
+lumencraft-render = { workspace = true }
+lumencraft-format = { workspace = true }
+lumencraft-svg = { workspace = true }
+lumencraft-pdf = { workspace = true }
+lumencraft-tools = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

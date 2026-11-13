@@ -1,0 +1,98 @@
+# Publication Graphing, Page Layouts & Export — Implementation Guidelines
+
+Governing specification for `crates/palette` (`L0`), `crates/text` (`L2`), `crates/chart` (`L2`), `crates/render` (`L3`), `crates/svg` (`L3`), `crates/pdf` (`L3`), and canvas tools in `crates/tools` (`L4`). Parity checklist: [`graphing-parity.md`](graphing-parity.md) and [`file-format-parity.md`](file-format-parity.md).
+
+Public behavioural references:
+- [Graphs & graph families overview](https://www.graphpad.com/guides/prism/latest/user-guide/making_graphs.htm)
+- [Axes, discontinuous segments & nonlinear scales](https://www.graphpad.com/guides/prism/latest/user-guide/axes.htm)
+- [Pairwise comparisons on graphs (asterisks & P values)](https://www.graphpad.com/guides/prism/latest/user-guide/adding_pairwise_comparisons.htm)
+- [Page layouts & publication figure export](https://www.graphpad.com/guides/prism/latest/user-guide/layouts.htm)
+- [Prism 11.1 release notes (Multiple Variables categorical graphs, dashed error bars, level ordering)](https://www.graphpad.com/updates/prism-11-1-0-release-notes)
+
+---
+
+## 1. Scene-Graph Compilation Pipeline
+
+`lumencraft-chart` is a pure, deterministic compiler:
+$$\big(\text{GraphSpec},\, \text{DataSheet(s)},\, \text{ResultSheet(s)},\, \text{FontMetrics}\big) \longrightarrow \text{ChartScene}$$
+Neither `lumencraft-ui-egui`, `lumencraft-svg`, nor `lumencraft-pdf` ever computes error bars, kernel density estimates, axis ticks, or curve polylines on its own. All four outputs (`wgpu` interactive canvas, CPU golden rasterizer, SVG writer, and PDF 1.7 writer) consume the exact same `ChartScene` primitives (positioned `Path2D`, `GlyphRun`, `ClipRegion`, and `StrokeStyle`), guaranteeing sub-point visual parity between screen and journal export.
+
+---
+
+## 2. Graph Families & Graphical Data Objects (GDOs)
+
+Each `GraphSpec` binds one or more data series and configures composable Graphical Data Objects:
+
+1. **XY Graphs:**
+   - Scatter symbols (circle, square, triangle, inverted triangle, diamond, cross, plus, open/filled/semi-filled, per-point size/color overrides),
+   - Connecting lines (point-to-point, staircase, Akima/monotonic cubic spline) and area-under-curve fills (to $Y = 0$, baseline constant, or between two curves),
+   - Vertical and horizontal error bars (SD, SEM, $95\%$ CI, interquartile range, range, or explicit subcolumns; solid or **dashed/dotted line styles** per series; optional end caps; one-sided upper/lower or symmetric),
+   - Smooth overlaid regression curves ($256$–$1024$ adaptive segments in axis space so log-X sigmoids stay smooth) + shaded or dashed confidence and prediction ribbons.
+2. **Column & Grouped Graphs:**
+   - Mean/median bar + error bar,
+   - Individual replicate scatter overlay (deterministic symmetric beeswarm / compact-letter-free jitter so points never overlap randomly across redraws),
+   - Aligned dot plot with mean/median + error crossbar,
+   - **Box-and-whisker** (Tukey $1.5 \times \text{IQR}$ with outlier points, min-to-max, $10\text{–}90\%$, $5\text{–}95\%$, $2.5\text{–}97.5\%$, or $1\text{–}99\%$ whiskers),
+   - **Violin plot** (Gaussian kernel density estimate clipped to observed `[min, max]` or extended, overlaid median/quartile dashed rules, optional truncated half-violin + points),
+   - Before–after paired subject lines, interleaved bars, stacked bars, and interaction plots.
+3. **Contingency & Parts-of-Whole Graphs:**
+   - Interleaved/stacked count or percentage bars, $100\%$ stacked fraction bar, pie, ring/donut (with center total callout), and $10 \times 10$ unit/waffle grid.
+4. **Survival Graphs:**
+   - Kaplan–Meier right-continuous step curves, vertical/cross censored-observation tick marks, shaded/dashed asymmetrical Greenwood $95\%$ CI bands, and an axis-aligned **Number at Risk** table rendered directly beneath major X-axis ticks.
+5. **Multiple Variables & Diagnostic Graphs (Prism 11.1 scope):**
+   - Continuous $\times$ continuous bubble/multivariate scatter (mapping up to 4 variables simultaneously to $X$, $Y$, symbol color ramp/category, and symbol area), optional group **convex hulls** and **confidence ellipses**,
+   - **Categorical $\times$ continuous GDOs directly from `MultipleVariables` sheets** (bars, box-and-whisker, violin, column scatter, summary symbols & connecting lines) honoring independent graph-level categorical ordering,
+   - **Heatmaps** (grouped cell means/medians or correlation matrix $r/\rho$ with continuous perceptual colorbar and optional cell value labels),
+   - **Volcano plots** ($-\log_{10} p$ or $-\log_{10} q$ vs. difference / $\log_2$ fold change with horizontal FDR/alpha threshold and vertical effect-size thresholds),
+   - **Bland–Altman** bias + $95\%$ limits-of-agreement plots, **ROC** curves with identity diagonal, and **Forest / parameter-CI** plots.
+
+---
+
+## 3. Coordinate Systems, Nonlinear Scales & Discontinuous Axes
+
+### 3.1 Scale Transforms (`AxisScale`)
+Every axis maps domain coordinate $u$ to normalized segment coordinate $t \in [0, 1]$ via a guarded, finite bijection (`Option<f64>`, never producing `NaN` or `±Inf` into scene paths):
+- `Linear`: $g(u) = u$,
+- `Log10`, `Log2`, `Ln`: defined strictly for $u > 0$ (non-positive data points are omitted from log axes with a structured `ChartWarning::NonPositiveOnLogAxis` count; lower error-bar whiskers that extend $\le 0$ clip cleanly to the axis floor with a downward-clipped indicator rather than disappearing or crashing),
+- `Logit`: $g(u) = \ln\!\left(\frac{u}{100 - u}\right)$ for percentages $u \in (0, 100)$ (or $u \in (0, 1)$),
+- `Probit` (probability axis): $g(u) = \Phi^{-1}(u / 100)$ for $u \in (0, 100)$, placing normal-distribution cumulative curves on a straight line with symmetric probability ticks (`0.1, 1, 5, 10, 20, 50, 80, 90, 95, 99, 99.9`),
+- `Reciprocal`: $g(u) = 1 / u$ ($u \ne 0$).
+
+### 3.2 Discontinuous (Broken) Axes
+An axis may split into $1$, $2$, or $3$ segments (`Vec<AxisSegment>`), each owning:
+- Domain `[min, max]`, independent `AxisScale`, fractional length weight on the physical axis (`length_share`), and independent major/minor tick interval,
+- Configurable gap width (mm/pt) and break-mark ornament (`DoubleSlash`, `Zigzag`, `BlankGap`).
+Data series and fitted curves clip cleanly per segment without drawing spurious diagonal strokes across the gap unless explicitly requested.
+
+### 3.3 Framing, Ticks & Scientific Typography (`crates/text`)
+- **Frame presets:** Open L-axes (default), offset/Tufte range frame, plain boxed, four-axis with secondary right-Y (`Y2`), or origin-crossing axes ($X=0, Y=0$).
+- **Tick formatting:** Decimal, power-of-10 superscript ($10^{-6}$), scientific (`1e-6`), antilog (`0.001, 0.01, 0.1, 1, 10`), engineering SI prefixes, or custom text/categorical labels at $0^\circ, 45^\circ, 90^\circ$.
+- **Rich scientific text spans:** `lumencraft-text` parses lightweight markup for subscripts (`EC_{50}`), superscripts (`cm^{-2}`), italic mathematical symbols, Greek letters, and live hooked constants (`R^2 = {{result:fit-1:r2}}`) into positioned glyph runs shared identically across GPU, SVG, and PDF.
+
+---
+
+## 4. Live Pairwise Significance Brackets
+
+`GraphSpec::comparisons` links directly to a post-hoc / *t*-test / survival `ResultSheet`:
+- **Automatic collision-free stacking:** Brackets sort by column span (`|col_b - col_a|` ascending, then left column ascending), measure the maximum rendered height of bars, error bars, and scatter points beneath `[col_a, col_b]`, and stack upward in crisp vertical increments (`bracket_step_pt`).
+- **Live recalculation:** Editing or excluding a replicate in the upstream `DataSheet` recomputes the *p*-value / *q*-value in `lumencraft-stats`, updates the bracket label (`****`, `***`, `**`, `*`, `ns`, or formatted numeric $p$/$q$ according to the analysis `PValueFormat`), and hides/shows non-significant brackets automatically when `"Show only significant comparisons"` is active.
+- **Bracket styles:** Classic square bracket, half-tick bracket, flat line, or curly brace, with configurable line weight and font size.
+
+---
+
+## 5. Consistent Styling ("Wand / Clone Style") & Palettes
+
+- **Perceptual, accessible palettes (`crates/palette`):** Ships original, license-clean scientific schemes (Okabe–Ito colorblind-safe, Paul Tol Bright/Muted/High-Contrast, Viridis, Cividis, Plasma, Monochrome journal print grays) plus live Deuteranopia / Protanopia / Tritanopia preview matrices (`AGENTS.md`: zero vendor colour schemes copied).
+- **Style cloning (`graph.applyStyleFrom`):** Copies visual appearance tokens (palette, fonts, axis frame/thickness, symbol shapes, error-bar cap width, background) from a reference graph onto one or multiple target graphs in a single undoable command without altering target data bindings.
+
+---
+
+## 6. Multi-Panel Page Layouts & Publication Export
+
+A `LayoutSheet` arranges multiple live `GraphSheet` panels, embedded `ResultSheet` parameter tables, legends, and rich-text callouts onto physical publication pages:
+- **Physical dimensions & journal presets:** Exact width $\times$ height in `mm`, `cm`, `in`, or `pt` (including single-column `85 mm` / `89 mm`, 1.5-column `120 mm` / `136 mm`, and double-column `174 mm` / `183 mm` journal widths).
+- **Grid & alignment guides:** Configurable row $\times$ column layout templates, baseline alignment across adjacent Y axes (aligning plot-area origins even when Y-tick label widths differ!), and automatic panel badges (`A`, `B`, `C`, … or `a`, `b`, `c`).
+- **Export targets:**
+  - **SVG (`crates/svg`):** Crisp vector paths, optional editable `<text>` vs. outlined glyph paths, non-scaling hairlines avoided, deterministic attribute ordering.
+  - **PDF 1.7 (`crates/pdf`):** Direct vector streams, subsetted embedded fonts (when `LUMENCRAFT_FONTS_DIR` or system fonts are configured) or outlined fallback, sRGB or print CMYK colour spaces, exact `MediaBox` / `TrimBox` / `BleedBox`.
+  - **Raster (`crates/render`):** `72`–`1200` DPI anti-aliased PNG and uncompressed/LZW TIFF with transparent, white, or custom paper fill, enforcing WCAG AA contrast checks in UI chrome while keeping figure paper crisp white by default.

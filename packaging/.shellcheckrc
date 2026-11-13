@@ -1,0 +1,3 @@
+# ShellCheck defaults for packaging/*.sh
+external-sources=true
+enable=avoid-nullary-conditions

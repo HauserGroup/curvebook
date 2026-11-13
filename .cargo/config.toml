@@ -1,0 +1,8 @@
+[alias]
+xtask = "run --package xtask --"
+
+# WebAssembly SIMD for the web build: accelerates vector/numerical kernels and CPU canvas
+# compositing on wasm32. Requires Chrome/Edge 91+, Firefox 89+ or Safari 16.4+. A RUSTFLAGS
+# environment variable replaces these flags.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

@@ -1,0 +1,26 @@
+[package]
+name = "lumencraft-ui-egui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft desktop and web interface shell: project navigator, spreadsheet grid, dialogs and graph canvas"
+
+[lints]
+workspace = true
+
+[features]
+default = ["bundled-fonts"]
+bundled-fonts = ["lumencraft-engine/bundled-fonts", "lumencraft-text/bundled-fonts"]
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-palette = { workspace = true }
+lumencraft-doc = { workspace = true }
+lumencraft-text = { workspace = true }
+lumencraft-chart = { workspace = true }
+lumencraft-render = { workspace = true }
+lumencraft-tools = { workspace = true }
+lumencraft-engine = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

@@ -1,0 +1,19 @@
+[package]
+name = "lumencraft-svg"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft vector SVG figure exporter and reader"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-palette = { workspace = true }
+lumencraft-doc = { workspace = true }
+lumencraft-text = { workspace = true }
+lumencraft-chart = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

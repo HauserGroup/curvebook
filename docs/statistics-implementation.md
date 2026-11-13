@@ -1,0 +1,149 @@
+# Biostatistics & Numerical Foundations — Implementation Guidelines
+
+Governing specification for `crates/math` (`L0`) and `crates/stats` (`L2`). Parity checklist: [`stats-parity.md`](stats-parity.md).
+
+Public behavioural & mathematical references:
+- [Principles of statistics & exact P-value computation](https://www.graphpad.com/guides/prism/latest/statistics/stat_how_prism_computes_exact_p_val.htm)
+- [Decimal formatting & asterisk summaries of P values](https://www.graphpad.com/guides/prism/latest/statistics/stat_decimal_formatting_of_p_values.htm)
+- [Outlier identification: ROUT and Grubbs methods](https://www.graphpad.com/guides/prism/latest/statistics/stat_how_it_works_rout_method.htm)
+- [Prism 11.0 & 11.1 release notes (Multifactor ANOVA, Effect Sizes, MV analyses, decimal CIs)](https://www.graphpad.com/updates/prism-11-1-0-release-notes)
+- Primary literature: Abramowitz & Stegun; NIST DLMF; Press et al., *Numerical Recipes*; Motulsky & Brown (2006) *BMC Bioinformatics* 7:123 (ROUT); Baptista & Pike (1977) *JRSS C* 26:214; Koopman (1984) *Biometrics* 40:513; Benjamini, Krieger & Yekutieli (2006) *Biometrika* 93:491; Kenward & Roger (1997) *Biometrics* 53:983; Klein & Moeschberger, *Survival Analysis*.
+
+---
+
+## 1. Numerical Foundations (`crates/math`)
+
+### 1.1 Tail-Safe Distribution Primitives
+
+Never compute small upper-tail probabilities via `1.0 - cdf(x)` (which loses all significant bits below $10^{-16}$ and collapses to `0.0`). Every continuous distribution in `lumencraft-math` exposes direct lower-tail `cdf`, upper-tail `sf`, and log-survival `ln_sf` evaluators backed by continued fractions and asymptotic expansions:
+
+- **Two-sided Student $t$ probability** ($\nu > 0$ real, supporting Welch–Satterthwaite fractional degrees of freedom):
+  $$p_{2}(t, \nu) = I_{\frac{\nu}{\nu + t^2}}\!\left(\frac{\nu}{2}, \frac{1}{2}\right)$$
+  where $I_x(a,b)$ is the regularized incomplete beta function evaluated via Lentz's modified continued fraction with symmetry reflection when $x > \frac{a+1}{a+b+2}$.
+- **Upper-tail Snedecor $F$ probability** ($\nu_1 > 0, \nu_2 > 0$):
+  $$p(F, \nu_1, \nu_2) = I_{\frac{\nu_2}{\nu_2 + \nu_1 F}}\!\left(\frac{\nu_2}{2}, \frac{\nu_1}{2}\right)$$
+- **Upper-tail $\chi^2$ probability** ($\nu > 0$):
+  $$p(\chi^2, \nu) = Q\!\left(\frac{\nu}{2}, \frac{\chi^2}{2}\right)$$
+  where $Q(a, x) = \Gamma(a, x)/\Gamma(a)$ is the upper regularized incomplete gamma function (series expansion for $x < a + 1$, Legendre continued fraction for $x \ge a + 1$, Temme uniform asymptotic expansion for large $a$).
+- **Standard normal two-sided probability:** $p_2(z) = \operatorname{erfc}\!\left(|z| / \sqrt{2}\right)$.
+- **Studentized range distribution $q(k, \nu)$** (for Tukey HSD and Newman–Keuls): Gauss–Legendre quadrature over the inner normal integral + outer $\chi$ density (Copenhaver & Holland 1988), accurate to $\ge 10$ digits for $2 \le k \le 200$.
+- **Multivariate Student $t$ integral** (for Dunnett's many-to-one test with unequal group sizes): 1D Gauss–Hermite / Gauss–Kronrod conditioning over the shared control group normal variate + common $\chi_\nu$ scale factor, yielding exact Dunnett *p*-values and critical values without table-interpolation caps.
+
+### 1.2 Arbitrary Confidence Levels & P-Value Formatting
+
+- **Confidence levels:** All confidence-interval routines accept any `confidence_percent: f64` in `[0.01, 99.99]` (`alpha = 1.0 - confidence_percent / 100.0`), supporting $\alpha = 0.001$ ($99.9\%$ CI) and decimal levels introduced in Prism 11.1.
+- **P-value display presets (`PValueFormat`):**
+  - `FourDecimal` (default): leading zero, 4 decimal places (`0.1234`), floor `< 0.0001`, up to 4 stars (`ns` $> 0.05$, `*` $\le 0.05$, `**` $\le 0.01$, `***` $\le 0.001$, `****` $\le 0.0001$).
+  - `Apa`: no leading zero, 3 decimal places (`.123`), floor `< .001`, ceiling of 3 stars (`***` for all $p \le 0.001$).
+  - `Nejm`: leading zero, 3 decimal places (`0.123`), floor `< 0.001`, ceiling of 3 stars (`***` for all $p \le 0.001$).
+  - `Custom { decimals: 1..=15, scientific_below: Option<f64> }`: full precision or scientific notation (`2.41e-9`) with 4-star thresholds.
+- Raw `f64` *p*-values are always stored unrounded in `ResultSheet` so downstream FDR procedures and live graph brackets never suffer rounding quantization.
+
+### 1.3 Compensated Summation & Rank-Revealing Linear Algebra
+
+- Sample variance, covariance, and ANOVA sums of squares use two-pass mean-centered Neumaier compensated summation (`lumencraft_math::sum`) so NIST StRD stiffness benchmarks (`NumAcc1`–`NumAcc4`) retain $\ge 14$ digits even when $\bar{x} / s > 10^8$.
+- Design matrices $X \in \mathbb{R}^{n \times p}$ use column-pivoted Householder QR (`qr_col_pivoted`) with explicit rank-deficiency detection (`|R_{kk}| \le \epsilon \cdot \max(n, p) \cdot |R_{00}|`), falling back cleanly to SVD pseudoinverse or reporting aliased/collinear predictors rather than dividing by zero.
+
+---
+
+## 2. Descriptive Statistics, Normality & Outlier Detection
+
+### 2.1 Column Descriptive Suite
+Computes $n$ (non-excluded), missing/excluded counts, arithmetic mean, sample SD ($n-1$), SEM, $(1-\alpha)$ CI of mean, minimum, 25th percentile ($Q_1$), median, 75th percentile ($Q_3$), maximum, interquartile range (hinge definition matching standard biostatistics conventions + configurable R-type quantiles), range, coefficient of variation ($\%\text{CV}$), geometric mean & geometric SD factor (when all $x_i > 0$), harmonic mean, skewness $G_1$, excess kurtosis $G_2$, and one-sample *t*-test / Wilcoxon signed-rank test against a user-specified hypothetical value $\mu_0$.
+
+### 2.2 Normality & Lognormality Battery
+Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognormality), returning the likelihood ratio between normal and lognormal generative models:
+1. **D'Agostino–Pearson omnibus $K^2$** ($n \ge 8$): Anscombe–Glynn kurtosis $Z(g_2)$ + D'Agostino skewness $Z(g_1)$, $K^2 = Z(g_1)^2 + Z(g_2)^2 \sim \chi^2_2$.
+2. **Shapiro–Wilk $W$** ($3 \le n \le 5000$): Royston AS R94 algorithm for $W$ weights and normalizing transformation.
+3. **Anderson–Darling $A^2$** ($n \ge 8$): Stephens small-sample modified statistic $A^{*2} = A^2 (1 + 0.75/n + 2.25/n^2)$.
+4. **Kolmogorov–Smirnov with Lilliefors $p$-value** ($n \ge 5$): Dallal–Wilkinson analytical approximation + Monte Carlo refinement in boundary regions.
+
+### 2.3 Outlier Detection (`Grubbs` & `ROUT`)
+- **Grubbs' ESD test** ($n \ge 3$, $\alpha$): $G = \max_i |x_i - \bar{x}| / s$, compared against critical value $G_{\text{crit}}(\alpha, n) = \frac{n-1}{\sqrt{n}} \sqrt{\frac{t^2_{\alpha/(2n), n-2}}{n - 2 + t^2_{\alpha/(2n), n-2}}}$. Single-outlier or iterative mode.
+- **ROUT method** (Motulsky & Brown 2006, $n \ge 3$, maximum desired FDR $Q \in (0, 1]$, default $Q = 1\%$):
+  1. Fit constant location (for a column stack, $Y = M$) or nonlinear curve via Lorentzian/Cauchy robust regression.
+  2. Compute the 68.27th percentile $P_{68.27}$ of absolute residuals $|r_i|$ and convert to the Robust Standard Deviation of Residuals:
+     $$\text{RSDR} = P_{68.27} \cdot \frac{N}{N - K}$$
+     where $K$ is the number of fitted parameters ($K = 1$ for a column stack).
+  3. Rank absolute residuals $|r_{(1)}| \le \dots \le |r_{(N)}|$. Scanning from $i = \lfloor 0.70 N \rfloor + 1$ up to $N$ (allowing up to $30\%$ outliers), compute two-tailed Student $t$ probabilities $p_{(i)}$ from $t_i = |r_{(i)}| / \text{RSDR}$ with $\nu = N - K$, and compare against Benjamini–Hochberg step-up thresholds $\alpha_i = Q \cdot \frac{N - (i - 1)}{N}$. Once the smallest $i^*$ with $p_{(i^*)} \le \alpha_{i^*}$ is found, flag observations $(i^* \dots N)$ as outliers.
+
+---
+
+## 3. Two-Group, One-Way, Factorial & Mixed-Effects Comparisons
+
+### 3.1 Two-Group Comparisons & Standardized Effect Sizes
+- **Unpaired *t*-test** (pooled SD + *F*-test of variances), **Welch's *t*-test** (Welch–Satterthwaite $\nu$), **Paired *t*-test**, **Ratio paired *t*-test** (paired *t* on $\ln x_i$, reporting geometric mean of ratios), and **Unpaired lognormal *t*-test**.
+- **Standardized effect sizes (Prism 11.0 parity):**
+  - Unpaired: **Cohen's $d$** $= (\bar{x}_1 - \bar{x}_2)/s_{\text{pooled}}$, **Hedges' $g$** $= J(\nu)\,d$ with exact gamma bias factor $J(\nu) = \frac{\Gamma(\nu/2)}{\sqrt{\nu/2}\,\Gamma((\nu-1)/2)}$, and **Glass's $\Delta$** $= (\bar{x}_1 - \bar{x}_2)/s_{\text{control}}$, with noncentral-$t$ exact confidence intervals (`lumencraft_math::noncentral_t_ci`).
+  - Paired: $d_z = \bar{d} / s_d$ and Hedges' corrected $g_z$ with noncentral-$t$ CIs.
+- **Nonparametric two-group:**
+  - **Mann–Whitney $U$:** Exact dynamic-programming distribution for small/medium samples (including exact tie permutation up to bounded state-space limit), normal approximation with tie variance correction beyond threshold, plus exact Hodges–Lehmann median difference and CI.
+  - **Wilcoxon matched-pairs signed-rank:** Exact signed-rank distribution + Pratt vs. Wilcoxon zero-difference handling + Hodges–Lehmann pseudomedian.
+  - **Kolmogorov–Smirnov two-sample:** Exact Smirnov lattice path count for small $n_1, n_2$ and Kolmogorov asymptotic series for large samples.
+
+### 3.2 One-Way, Two-Way, Three-Way & Multifactor ($N$-Way) ANOVA
+- **One-way designs:** Ordinary ANOVA (with Bartlett and Brown–Forsythe variance homogeneity tests), Brown–Forsythe & Welch unequal-variance one-way ANOVA, RM one-way ANOVA with Geisser–Greenhouse $\hat{\varepsilon}$ and Huynh–Feldt $\tilde{\varepsilon}$ sphericity adjustments, Kruskal–Wallis, and Friedman test.
+- **Factorial & Multifactor designs:**
+  - Classic `Grouped` Two-Way and Three-Way ANOVA supporting Type I (sequential) and Type III (marginal orthogonal-contrast) sums of squares for unbalanced cells, plus repeated measures on one or both factors.
+  - **Multifactor ($N$-way) GLM (`MultipleVariables`):** Accepts arbitrary numbers of categorical grouping factors from a `MultipleVariables` table with configurable main effects, two-way through $k$-way interactions, reference/sum contrasts, residual diagnostics, and post-hoc main/simple/cell comparisons.
+  - **ANOVA effect sizes (Prism 11.0 parity):** $\eta^2 = \text{SS}_{\text{effect}} / \text{SS}_{\text{total}}$, partial $\eta_p^2 = \text{SS}_{\text{effect}} / (\text{SS}_{\text{effect}} + \text{SS}_{\text{error}})$, omega-squared $\omega^2$, and Cohen's $f = \sqrt{\eta_p^2 / (1 - \eta_p^2)}$, with noncentral-$F$ confidence intervals.
+  - When a post-hoc comparison family contains only $m = 1$ comparison, emit an explicit informational note on the `ResultSheet` clarifying why multiplicity adjustment leaves the unadjusted *p*-value unchanged.
+
+### 3.3 Linear Mixed-Effects Models (REML) & Nested Designs
+- When repeated-measures `Grouped` tables have missing values (or for `Nested` tables with unequal subcolumn sizes), fit the linear mixed model $y = X\beta + Z u + \varepsilon$ by **Restricted Maximum Likelihood (REML)** using profiled log-likelihood optimization (BFGS / Newton–Raphson on log-Cholesky variance parameters):
+  - Compound-symmetry or unstructured / sphericity-adjusted (`Geisser–Greenhouse` $\hat{\varepsilon}$) residual covariance across repeated timepoints,
+  - Fixed-effect Wald *F*-tests with **Kenward–Roger** or **Satterthwaite** denominator degrees of freedom,
+  - Variance-component estimates, intraclass correlation (ICC), and likelihood-ratio $\chi^2$ test for random subject effects.
+
+---
+
+## 4. Multiple Comparisons & False Discovery Rate
+
+All multiplicity engines operate cleanly on contrast vectors $c_j^\top \hat{\beta}$ with covariance $V_{\hat{\beta}}$:
+- **Familywise Error Rate (FWER, $\alpha$):**
+  - **Tukey HSD** (all $\binom{k}{2}$ pairs, equal variance; Tukey–Kramer for unequal $n_i$),
+  - **Dunnett** (each treatment vs. designated control, exact multivariate-$t$),
+  - **Šídák** ($p_{\text{adj}} = 1 - (1 - p)^m$, simultaneous CIs at $1 - (1-\alpha)^{1/m}$) and **Bonferroni** ($p_{\text{adj}} = \min(1, m p)$),
+  - **Holm–Šídák** step-down multiplicity-adjusted *p*-values (sequentially monotonic; does not produce fixed-width simultaneous CIs),
+  - **Dunnett's T3** ($n < 50$ per group), **Games–Howell** ($n \ge 50$), and **Tamhane's T2** following Welch/Brown–Forsythe unequal-variance ANOVA,
+  - **Dunn's rank-sum test** following Kruskal–Wallis or Friedman,
+  - **Linear trend test** across ordered columns.
+- **False Discovery Rate (FDR, $Q$):**
+  - **Benjamini–Hochberg (BH)** one-stage step-up,
+  - **Benjamini–Yekutieli (BY)** under arbitrary dependency,
+  - **Two-stage linear step-up Benjamini–Krieger–Yekutieli (BKY)** estimating $\hat{\pi}_0$ in stage 1 with $Q' = Q/(1+Q)$. Discoveries are always flagged strictly from adjusted $q$-values ($q_i \le Q$), never raw $p_i$.
+
+---
+
+## 5. Contingency, Survival, ROC & Multivariate Analysis
+
+### 5.1 Contingency Tables (`crates/stats::contingency`)
+- $2 \times 2$ and $R \times C$ Pearson $\chi^2$ (with optional Yates continuity correction on $2 \times 2$), likelihood-ratio $G^2$, Fisher's exact test ($2 \times 2$ hypergeometric tail sum via log-factorials; Freeman–Halton network/Monte Carlo extension for $R \times C$), Cochran–Armitage linear trend test on $2 \times C$, and McNemar's paired test.
+- **Exact & score confidence intervals:**
+  - **Odds Ratio:** **Baptista–Pike** mid-*p* / exact hypergeometric interval (preferable to Woolf logit when cells are small or zero; Haldane–Anscombe $+0.5$ fallback noted when needed).
+  - **Relative Risk:** **Koopman (1984)** asymptotic score interval via constrained maximum likelihood root-finding.
+  - **Difference of proportions:** Newcombe hybrid Wilson score interval.
+  - **Sensitivity, Specificity, PPV, NPV:** Wilson score (default) and Clopper–Pearson exact binomial intervals.
+  - **Standardized effect sizes (Prism 11.0 parity):** $\phi$ coefficient ($2 \times 2$) and Cramér's $V = \sqrt{\chi^2 / (N \cdot \min(R-1, C-1))}$ with noncentral-$\chi^2$ confidence intervals (detecting perfect separation / zero-margin edge cases explicitly).
+
+### 5.2 Survival Analysis (`crates/stats::survival`)
+Supports both classic `Survival` sheets and `MultipleVariables` variable assignment (time, event/censoring indicator, grouping factor(s)):
+- **Kaplan–Meier** product-limit estimator $\hat{S}(t) = \prod_{t_i \le t} (1 - d_i / n_i)$ with **asymmetrical $\log(-\log \hat{S}(t))$ Greenwood confidence intervals** (guaranteed inside $[0, 1]$), median survival time + Brookmeyer–Crowley CI, and number-at-risk table at axis tick marks.
+- **Curve comparisons:** Log-rank (Mantel–Cox) $\chi^2$, Gehan–Breslow–Wilcoxon (early-event weighted), log-rank test for linear trend across $\ge 3$ ordered groups, pairwise post-hoc curve comparisons with multiplicity-adjusted *p*-values, and both Mantel–Haenszel and log-rank hazard ratios with $95\%$ CIs.
+- **Cox proportional hazards regression:** Partial likelihood maximization (Newton–Raphson) with **Breslow** and **Efron** tie approximations, profile-likelihood hazard-ratio CIs, omnibus likelihood-ratio / Wald / score tests, Schoenfeld proportional-hazards diagnostics, Martingale/deviance residuals, and baseline survival curves.
+
+### 5.3 ROC Curves, Multiple Regression, PCA & Clustering
+- **ROC:** Empirical step curve across all distinct cutoffs, trapezoidal AUC, **Hanley–McNeil** and **DeLong** non-parametric SE & CIs, sensitivity/specificity/likelihood-ratio table with Youden's $J = \text{Sens} + \text{Spec} - 1$.
+- **Multiple Linear, Logistic & Poisson GLMs:** IRLS solver with full Type I / Type III ANOVA / Deviance tables (including categorical $\times$ categorical interaction blocks), VIF multicollinearity diagnostics, AICc, pseudo-$R^2$ (Tjur, McFadden, Nagelkerke), Hosmer–Lemeshow goodness-of-fit, classification confusion matrices, and ROC curves.
+- **PCA & Clustering:** Mean-centered / standardized correlation or covariance SVD, Kaiser criterion ($\lambda > 1$), Horn's parallel analysis (Monte Carlo random eigenvalues via `lumencraft_math::rng`), scree/loading/biplot coordinates, plus K-means++ and agglomerative hierarchical clustering (alphabetical cluster label normalization for deterministic palette mapping).
+
+---
+
+## 6. Plain-Language Analysis Checklists & Verification Standard
+
+Every `ResultSheet` produced by `lumencraft-stats` includes a structured `AnalysisChecklist` vector (`assumption`, `status: Pass | Warn | Violated | Info`, `diagnostic_metric`, `explanation`) written in original clean-room scientific prose (checking independence, normality/lognormality test results, SD ratio / variance homogeneity, sample size adequacy, sphericity $\hat{\varepsilon}$, expected contingency counts $< 5$, proportional hazards).
+
+**Mandatory test gate:** Every statistical module in `crates/stats` must carry:
+1. Analytical / textbook exact-value unit tests,
+2. NIST StRD accuracy tests (`Pontius`, `Norris`, `AtmWtAg`, `SiRstv`, `SmLs01`–`SmLs09`) in `crates/stats/tests/`,
+3. Property tests (`proptest`) verifying invariance under row permutation, scale invariance of dimensionless statistics (*t*, *F*, *r*, *p*), and zero panics on degenerate inputs (`n = 0`, `n = 1`, all identical values, `NaN`, `±Inf`).

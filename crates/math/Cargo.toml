@@ -1,0 +1,12 @@
+[package]
+name = "lumencraft-math"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft numerical, linear-algebra, distribution and axis-scale primitives"
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

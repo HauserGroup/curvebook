@@ -1,0 +1,27 @@
+[package]
+name = "lumencraft-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "LumenCraft command line: MCP server (stdio), headless statistical runs and figure export"
+
+[[bin]]
+name = "lumencraft-cli"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencraft-doc = { workspace = true }
+lumencraft-engine = { workspace = true, features = ["bundled-fonts"] }
+lumencraft-format = { workspace = true }
+lumencraft-mcp = { workspace = true }
+lumencraft-pdf = { workspace = true }
+lumencraft-render = { workspace = true }
+lumencraft-svg = { workspace = true }
+lumencraft-text = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

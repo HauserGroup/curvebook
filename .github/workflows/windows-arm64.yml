@@ -1,0 +1,47 @@
+# Standalone Windows ARM64 build, MSI policy check, and smoke test.
+name: Windows ARM64
+
+on:
+  schedule:
+    - cron: "19 5 * * *"
+  push:
+    branches: [release]
+  pull_request:
+    paths:
+      - .github/workflows/windows-arm64.yml
+      - packaging/windows/**
+  workflow_dispatch:
+
+concurrency:
+  group: windows-arm64-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  windows-arm64:
+    name: Windows ARM64 MSI & portable package
+    runs-on: windows-11-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Install WiX v5
+        shell: pwsh
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP 'lumencraft-wix-arm64'
+          dotnet tool install --tool-path $tools wix --version 5.0.2
+          $tools >> $env:GITHUB_PATH
+          & (Join-Path $tools 'wix.exe') extension add -g WixToolset.UI.wixext/5.0.2
+          & (Join-Path $tools 'wix.exe') extension add -g WixToolset.Util.wixext/5.0.2
+      - name: Build and verify Windows ARM64 package
+        shell: pwsh
+        run: ./packaging/windows/package.ps1 -Arch arm64

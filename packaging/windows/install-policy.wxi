@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Include xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Property Id="INSTALLFOLDER" Secure="yes" />
+  <Property Id="LUMENCRAFT_SCOPE" Value="user" Secure="yes" />
+  <Property Id="LUMENCRAFT_U_DIR" Secure="yes"><RegistrySearch Id="LUMENCRAFT_U_DIRSearch" Root="HKCU" Key="Software\LumenCraft" Name="InstallDir" Type="raw" /></Property>
+  <SetProperty Id="LUMENCRAFT_USER_DIR" Action="LumencraftUFromDIR" Value="[LUMENCRAFT_U_DIR]" After="AppSearch" Sequence="both" Condition="NOT LUMENCRAFT_USER_DIR AND LUMENCRAFT_U_DIR" />
+  <Property Id="LUMENCRAFT_U_FOLDER" Secure="yes"><RegistrySearch Id="LUMENCRAFT_U_FOLDERSearch" Root="HKCU" Key="Software\LumenCraft" Name="InstallFolder" Type="raw" /></Property>
+  <SetProperty Id="LUMENCRAFT_USER_DIR" Action="LumencraftUFromFOLDER" Value="[LUMENCRAFT_U_FOLDER]" After="LumencraftUFromDIR" Sequence="both" Condition="NOT LUMENCRAFT_USER_DIR AND LUMENCRAFT_U_FOLDER" />
+  <Property Id="LUMENCRAFT_U_PATH" Secure="yes"><RegistrySearch Id="LUMENCRAFT_U_PATHSearch" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\lumencraft.exe" Name="Path" Type="raw" /></Property>
+  <SetProperty Id="LUMENCRAFT_USER_DIR" Action="LumencraftUFromPATH" Value="[LUMENCRAFT_U_PATH]" After="LumencraftUFromFOLDER" Sequence="both" Condition="NOT LUMENCRAFT_USER_DIR AND LUMENCRAFT_U_PATH" />
+  <Property Id="LUMENCRAFT_U_EXEFOLDER" Secure="yes"><RegistrySearch Id="LUMENCRAFT_ULegacyFolder" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\lumencraft.exe" Type="file" /></Property>
+  <Property Id="LUMENCRAFT_U_EXE" Secure="yes"><RegistrySearch Id="LUMENCRAFT_ULegacyExe" Root="HKCU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\lumencraft.exe" Type="file"><FileSearch Id="LUMENCRAFT_ULegacyFile" Name="lumencraft.exe" /></RegistrySearch></Property>
+  <SetProperty Id="LUMENCRAFT_USER_DIR" Action="LumencraftUFromLegacyExe" Value="[LUMENCRAFT_U_EXEFOLDER]" After="LumencraftUFromPATH" Sequence="both" Condition="NOT LUMENCRAFT_USER_DIR AND LUMENCRAFT_U_EXEFOLDER AND LUMENCRAFT_U_EXE" />
+  <Property Id="LUMENCRAFT_USER_DIR" Secure="yes" />
+  <Property Id="LUMENCRAFT_M_DIR" Secure="yes"><RegistrySearch Id="LUMENCRAFT_M_DIRSearch" Root="HKLM" Key="Software\LumenCraft" Name="InstallDir" Type="raw" /></Property>
+  <SetProperty Id="LUMENCRAFT_MACHINE_DIR" Action="LumencraftMFromDIR" Value="[LUMENCRAFT_M_DIR]" After="LumencraftUFromLegacyExe" Sequence="both" Condition="NOT LUMENCRAFT_MACHINE_DIR AND LUMENCRAFT_M_DIR" />
+  <Property Id="LUMENCRAFT_M_FOLDER" Secure="yes"><RegistrySearch Id="LUMENCRAFT_M_FOLDERSearch" Root="HKLM" Key="Software\LumenCraft" Name="InstallFolder" Type="raw" /></Property>
+  <SetProperty Id="LUMENCRAFT_MACHINE_DIR" Action="LumencraftMFromFOLDER" Value="[LUMENCRAFT_M_FOLDER]" After="LumencraftMFromDIR" Sequence="both" Condition="NOT LUMENCRAFT_MACHINE_DIR AND LUMENCRAFT_M_FOLDER" />
+  <Property Id="LUMENCRAFT_M_PATH" Secure="yes"><RegistrySearch Id="LUMENCRAFT_M_PATHSearch" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\lumencraft.exe" Name="Path" Type="raw" /></Property>
+  <SetProperty Id="LUMENCRAFT_MACHINE_DIR" Action="LumencraftMFromPATH" Value="[LUMENCRAFT_M_PATH]" After="LumencraftMFromFOLDER" Sequence="both" Condition="NOT LUMENCRAFT_MACHINE_DIR AND LUMENCRAFT_M_PATH" />
+  <Property Id="LUMENCRAFT_M_EXEFOLDER" Secure="yes"><RegistrySearch Id="LUMENCRAFT_MLegacyFolder" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\lumencraft.exe" Type="file" /></Property>
+  <Property Id="LUMENCRAFT_M_EXE" Secure="yes"><RegistrySearch Id="LUMENCRAFT_MLegacyExe" Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\lumencraft.exe" Type="file"><FileSearch Id="LUMENCRAFT_MLegacyFile" Name="lumencraft.exe" /></RegistrySearch></Property>
+  <SetProperty Id="LUMENCRAFT_MACHINE_DIR" Action="LumencraftMFromLegacyExe" Value="[LUMENCRAFT_M_EXEFOLDER]" After="LumencraftMFromPATH" Sequence="both" Condition="NOT LUMENCRAFT_MACHINE_DIR AND LUMENCRAFT_M_EXEFOLDER AND LUMENCRAFT_M_EXE" />
+  <Property Id="LUMENCRAFT_MACHINE_DIR" Secure="yes" />
+  <SetProperty Id="LUMENCRAFT_SCOPE" Action="LumencraftPreferMachineScope" Value="machine" After="LumencraftMFromLegacyExe" Sequence="ui" Condition="ALLUSERS = 1 OR (LUMENCRAFT_MACHINE_DIR AND NOT LUMENCRAFT_USER_DIR)" />
+  <SetProperty Id="INSTALLFOLDER" Action="LumencraftRestoreUserFolder" Value="[LUMENCRAFT_USER_DIR]" Before="CostInitialize" Sequence="both" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1 AND LUMENCRAFT_USER_DIR" />
+  <?if $(sys.BUILDARCH) = x86 ?>
+  <SetProperty Id="INSTALLFOLDER" Action="LumencraftDefaultMachineFolder" Value="[%ProgramFiles(x86)]\LumenCraft\" After="LumencraftRestoreUserFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND VersionNT64" />
+  <SetProperty Id="INSTALLFOLDER" Action="LumencraftDefaultMachineFolder32" Value="[%ProgramFiles]\LumenCraft\" After="LumencraftDefaultMachineFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND NOT VersionNT64" />
+  <SetProperty Id="INSTALLFOLDER" Action="LumencraftDefaultUserFolder" Value="[LocalAppDataFolder]Programs\LumenCraft\" After="LumencraftDefaultMachineFolder32" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1" />
+  <?else?>
+  <SetProperty Id="INSTALLFOLDER" Action="LumencraftDefaultMachineFolder" Value="[%ProgramW6432]\LumenCraft\" After="LumencraftRestoreUserFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1" />
+  <SetProperty Id="INSTALLFOLDER" Action="LumencraftDefaultUserFolder" Value="[LocalAppDataFolder]Programs\LumenCraft\" After="LumencraftDefaultMachineFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1" />
+  <?endif?>
+  <SetProperty Id="INSTALLFOLDER" Action="LumencraftRestoreMachineFolder" Value="[LUMENCRAFT_MACHINE_DIR]" Before="LumencraftRestoreUserFolder" Sequence="both" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND LUMENCRAFT_MACHINE_DIR" />
+  <Launch Condition="Installed OR ALLUSERS &lt;&gt; 1 OR NOT LUMENCRAFT_USER_DIR" Message="This app is already installed for your account. Choose Only for me to update it, or uninstall that copy before changing who it is installed for." />
+  <Launch Condition="Installed OR ALLUSERS = 1 OR NOT LUMENCRAFT_MACHINE_DIR" Message="This app is already installed for everyone. Choose Everyone to update it, or pass ALLUSERS=1 to msiexec. Uninstall that copy before changing who it is installed for." />
+  <UI>
+    <TextStyle Id="LumencraftScopeText" FaceName="Segoe UI" Size="9" />
+    <TextStyle Id="LumencraftScopeTitle" FaceName="Segoe UI" Size="12" Bold="yes" />
+    <Dialog Id="LumencraftScopeDlg" Width="370" Height="220" Title="[ProductName] Setup" NoMinimize="yes">
+      <Control Id="Title" Type="Text" X="20" Y="15" Width="330" Height="30" Text="{\LumencraftScopeTitle}Who should use [ProductName]?" />
+      <Control Id="Info" Type="Text" X="20" Y="50" Width="330" Height="30" Text="{\LumencraftScopeText}An update keeps the existing folder. New copies install to LumenCraft under Programs." />
+      <Control Id="Scope" Type="RadioButtonGroup" X="20" Y="88" Width="330" Height="60" Property="LUMENCRAFT_SCOPE">
+        <RadioButtonGroup Property="LUMENCRAFT_SCOPE">
+          <RadioButton Value="user" X="0" Y="0" Width="330" Height="20" Text="Only for me (no administrator permission needed)" />
+          <RadioButton Value="machine" X="0" Y="30" Width="330" Height="20" Text="Everyone on this computer (asks an administrator)" />
+        </RadioButtonGroup>
+      </Control>
+      <Control Id="Next" Type="PushButton" X="214" Y="182" Width="66" Height="20" Default="yes" Text="Next">
+        <Publish Property="ALLUSERS" Value="1" Order="1" Condition="LUMENCRAFT_SCOPE = &quot;machine&quot;" />
+        <Publish Property="ALLUSERS" Value="{}" Order="2" Condition="LUMENCRAFT_SCOPE = &quot;user&quot;" />
+        <Publish Property="MSIINSTALLPERUSER" Value="{}" Order="3" Condition="LUMENCRAFT_SCOPE = &quot;machine&quot;" />
+        <Publish Property="MSIINSTALLPERUSER" Value="1" Order="4" Condition="LUMENCRAFT_SCOPE = &quot;user&quot;" />
+        <Publish Event="EndDialog" Value="Return" Order="5" />
+      </Control>
+      <Control Id="Cancel" Type="PushButton" X="290" Y="182" Width="60" Height="20" Cancel="yes" Text="Cancel"><Publish Event="EndDialog" Value="Exit" /></Control>
+    </Dialog>
+  </UI>
+  <InstallUISequence>
+    <Show Dialog="LumencraftScopeDlg" After="LumencraftPreferMachineScope" Condition="NOT Installed AND NOT REMOVE AND UILevel = 5" />
+    <FindRelatedProducts After="LumencraftScopeDlg" />
+  </InstallUISequence>
+</Include>

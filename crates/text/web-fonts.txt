@@ -1,0 +1,2 @@
+# Optional font faces copied beside the WASM build by `cargo xtask web-fonts`
+# when LUMENCRAFT_FONTS_DIR is set (one relative path under $LUMENCRAFT_FONTS_DIR/fonts/ per line).

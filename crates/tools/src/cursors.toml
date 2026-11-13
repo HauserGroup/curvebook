@@ -1,0 +1,27 @@
+# Cursor manifest for LumenCraft interactive tools (`crates/tools/src/lib.rs` `Cursor` enum).
+# Checked by `cargo xtask cursors` (and `cargo xtask brands` for vendor-neutral wording).
+
+[[cursor]]
+name = "Select"
+hotspot = [1, 1]
+when = "Hovering selectable graph series, axes, legends or layout panels."
+
+[[cursor]]
+name = "CellGrid"
+hotspot = [8, 8]
+when = "Hovering cells, replicate subcolumns or row headers inside a data or results table."
+
+[[cursor]]
+name = "Crosshair"
+hotspot = [8, 8]
+when = "Drawing a pairwise comparison bracket, reference line or callout on a graph."
+
+[[cursor]]
+name = "AxisResize"
+hotspot = [8, 8]
+when = "Dragging an axis endpoint, segmented-axis break boundary or table column divider."
+
+[[cursor]]
+name = "HandGrab"
+hotspot = [8, 8]
+when = "Panning a zoomed graph canvas or multi-figure page layout."

@@ -1,0 +1,17 @@
+[package]
+name = "lumencraft-format"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft project archive, template and tabular scientific file format readers and writers"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-palette = { workspace = true }
+lumencraft-doc = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

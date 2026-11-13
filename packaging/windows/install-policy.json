@@ -1,0 +1,41 @@
+{
+  "id": "lumencraft",
+  "name": "LumenCraft",
+  "upgradeCode": "CC9EF573-33E0-4208-BE7A-690B34A5A4C9",
+  "sources": [
+    "lumencraft.wxs"
+  ],
+  "icon": "assets/app-icon/lumencraft.ico",
+  "localization": [
+    "lumencraft.en-us.wxl"
+  ],
+  "extensions": [
+    "UI",
+    "Util"
+  ],
+  "payloads": [
+    "lumencraft-cli.exe",
+    "lumencraft.exe"
+  ],
+  "registry": [
+    [
+      "-1",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\lumencraft.exe",
+      "",
+      "[#LumencraftExe]"
+    ],
+    [
+      "-1",
+      "Software\\LumenCraft",
+      "InstallDir",
+      "[INSTALLFOLDER]"
+    ],
+    [
+      "-1",
+      "Software\\LumenCraft",
+      "DesktopShortcut",
+      "#1"
+    ]
+  ],
+  "mode": "dualScope"
+}

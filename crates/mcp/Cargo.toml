@@ -1,0 +1,22 @@
+[package]
+name = "lumencraft-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft Model Context Protocol (MCP) server over stdio"
+
+[lints]
+workspace = true
+
+[features]
+default = ["bundled-fonts"]
+bundled-fonts = ["lumencraft-engine/bundled-fonts"]
+
+[dependencies]
+lumencraft-doc = { workspace = true }
+lumencraft-format = { workspace = true }
+lumencraft-render = { workspace = true }
+lumencraft-engine = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

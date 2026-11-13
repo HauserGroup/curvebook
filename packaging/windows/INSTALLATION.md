@@ -1,0 +1,20 @@
+# Windows installation policy checks
+
+New installations default to the current account under `Programs\LumenCraft`.
+The first setup page offers installation for everyone on the machine. Scope is selected before
+duplicate checks and directory costing. An update preserves the existing context's remembered
+folder; an explicit `INSTALLFOLDER` is never overwritten and survives elevation as a secure MSI
+property. Silent machine updates pass `ALLUSERS=1`. Cross-context duplicate installations are
+refused until the opposite-scope installation is removed.
+
+## Repeatable metadata tests
+
+On Windows with WiX 5.0.2 and its UI/Util extensions:
+
+```powershell
+./packaging/windows/test-install-policy.ps1 -OutputDirectory ./target/install-policy-tests
+```
+
+The script compiles x64, x86 and arm64 metadata-only MSI fixtures with non-executable placeholder
+payloads and verifies scope guards, folder preservation, action sequencing, upgrade identity, and
+the registry contract in `install-policy.json` using a read-only Windows Installer session.

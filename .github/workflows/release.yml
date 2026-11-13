@@ -1,0 +1,314 @@
+# Standalone release pipeline: every push to `release` builds installers for every platform and
+# creates or updates the draft GitHub Release "LumenCraft v<version>". See docs/releasing.md.
+name: Release
+
+on:
+  # Nightly dry run on main: builds release packages (except macOS notarization) without publishing.
+  schedule:
+    - cron: "37 3 * * *"
+  push:
+    branches: [release]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override for a test run, e.g. 0.2.0-rc.1 (empty: Cargo.toml)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  git-sources:
+    name: Verify Cargo.lock has no source overrides or git dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - name: Verify Cargo.lock sources
+        run: |
+          set -euo pipefail
+          test -f Cargo.lock || { echo "Cargo.lock is missing"; exit 1; }
+          python3 - <<'PY'
+          import os, sys, tomllib
+          for path in (".cargo/config", ".cargo/config.toml"):
+              if not os.path.exists(path):
+                  continue
+              config = tomllib.load(open(path, "rb"))
+              replaced = [name for name, source in config.get("source", {}).items()
+                          if isinstance(source, dict) and "replace-with" in source]
+              if replaced or "patch" in config or "paths" in config:
+                  print(f"{path} replaces, patches or overrides a source")
+                  sys.exit(1)
+          PY
+          cargo metadata --locked --format-version 1 > /dev/null
+          python3 - <<'PY'
+          import sys, tomllib
+          lock = tomllib.load(open("Cargo.lock", "rb"))
+          bad = sorted({p["source"] for p in lock.get("package", [])
+                        if p.get("source", "").startswith("git+")})
+          if bad:
+              print("Unapproved git+ dependencies in Cargo.lock:", *bad, sep="\n")
+              sys.exit(1)
+          PY
+
+  credits:
+    name: Refresh contributors.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - name: Run cargo xtask contributors
+        run: cargo xtask contributors
+      - uses: actions/upload-artifact@v4
+        with:
+          name: contributors-json
+          path: contributors/contributors.json
+
+  linux:
+    name: Linux (${{ matrix.arch }})
+    needs: [git-sources, credits]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            runner: ubuntu-latest
+          - arch: aarch64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: contributors-json
+          path: contributors
+      - name: Install Linux build & packaging dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers \
+            libgl1-mesa-dev desktop-file-utils appstream flatpak flatpak-builder fuse3 zsync
+          nfpm_arch="${{ matrix.arch == 'aarch64' && 'arm64' || 'x86_64' }}"
+          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_Linux_${nfpm_arch}.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin nfpm
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build Linux packages
+        env:
+          LUMENCRAFT_VERSION: ${{ inputs.version }}
+        run: |
+          ./packaging/linux/package.sh
+          ./packaging/linux/flatpak-bundle.sh --no-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-linux-${{ matrix.arch }}
+          path: dist/release/*
+
+  macos:
+    name: macOS universal
+    if: github.event_name != 'schedule'
+    needs: [git-sources, credits]
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: contributors-json
+          path: contributors
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+      - name: Import macOS signing certificate (when configured)
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
+            echo "No APPLE_CERTIFICATE configured; using ad-hoc signing."
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/lumencraft-signing.keychain-db"
+          cert="$RUNNER_TEMP/cert.p12"
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert"
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
+          security import "$cert" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$kc"
+          identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' 'NR==1{print $2}')"
+          echo "MACOS_KEYCHAIN=$kc" >> "$GITHUB_ENV"
+          echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          rm -f "$cert"
+      - name: Build macOS universal DMG & CLI zip
+        env:
+          LUMENCRAFT_VERSION: ${{ inputs.version }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: ./packaging/macos/package.sh --arch universal
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-macos-universal
+          path: dist/release/*
+
+  windows:
+    name: Windows (${{ matrix.arch }})
+    needs: [git-sources, credits]
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [x64, x86, arm64]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: contributors-json
+          path: contributors
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          targets: x86_64-pc-windows-msvc, i686-pc-windows-msvc, aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+      - name: Install WiX v5
+        shell: pwsh
+        run: |
+          $tools = Join-Path $env:RUNNER_TEMP 'lumencraft-wix'
+          dotnet tool install --tool-path $tools wix --version 5.0.2
+          $tools >> $env:GITHUB_PATH
+          & (Join-Path $tools 'wix.exe') extension add -g WixToolset.UI.wixext/5.0.2
+          & (Join-Path $tools 'wix.exe') extension add -g WixToolset.Util.wixext/5.0.2
+      - name: Build Windows MSI & portable zip
+        shell: pwsh
+        env:
+          LUMENCRAFT_VERSION: ${{ inputs.version }}
+          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
+          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
+          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+        run: ./packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-windows-${{ matrix.arch }}
+          path: dist/release/*
+
+  web:
+    name: WebAssembly bundle
+    needs: [git-sources, credits]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain & Trunk
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Trunk
+        run: cargo install trunk --locked
+      - name: Package WebAssembly app
+        env:
+          LUMENCRAFT_VERSION: ${{ inputs.version }}
+        run: ./packaging/web/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-web
+          path: dist/release/*
+
+  freebsd:
+    name: FreeBSD x86_64
+    needs: [git-sources, credits]
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: contributors-json
+          path: contributors
+      - name: Build FreeBSD package
+        uses: vmactions/freebsd-vm@v1
+        with:
+          usesh: true
+          prepare: pkg install -y bash curl git pkgconf rust
+          run: |
+            set -eu
+            LUMENCRAFT_VERSION="${{ inputs.version }}" bash ./packaging/freebsd/package.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-freebsd-x86_64
+          path: dist/release/*
+
+  publish:
+    name: Draft GitHub Release
+    if: github.event_name != 'schedule'
+    needs: [linux, macos, windows, freebsd, web]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: dist/release
+          merge-multiple: true
+      - name: Create or update draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          . ./packaging/env.sh
+          ver="${INPUT_VERSION:-$VERSION}"
+          tag="v$ver"
+          title="LumenCraft $tag"
+          (cd dist/release && sha256sum -- * > SHA256SUMS.txt)
+          if gh release view "$tag" >/dev/null 2>&1; then
+            gh release upload "$tag" dist/release/* --clobber
+          else
+            gh release create "$tag" dist/release/* --draft --title "$title" --generate-notes
+          fi

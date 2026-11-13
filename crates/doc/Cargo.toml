@@ -1,0 +1,16 @@
+[package]
+name = "lumencraft-doc"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft project manifest, typed scientific data tables, analyses, graphs and layouts"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-palette = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

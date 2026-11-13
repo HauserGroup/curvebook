@@ -1,0 +1,20 @@
+[package]
+name = "lumencraft-text"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft scientific text, Greek symbols, superscript/subscript and math label layout"
+
+[lints]
+workspace = true
+
+[features]
+default = ["bundled-fonts"]
+bundled-fonts = []
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-palette = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }

@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.lumencraft.project">
+    <comment>LumenCraft Project</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.lumencraft"/>
+    <icon name="org.lumencraft.LumenCraft"/>
+  </mime-type>
+  <mime-type type="application/vnd.lumencraft.template">
+    <comment>LumenCraft Project Template</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.lctemplate"/>
+    <icon name="org.lumencraft.LumenCraft"/>
+  </mime-type>
+  <mime-type type="application/x-prism-project">
+    <comment>Prism Scientific Project</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.prism"/>
+  </mime-type>
+  <mime-type type="application/x-prism-xml">
+    <comment>Prism XML Scientific Project</comment>
+    <sub-class-of type="application/xml"/>
+    <glob pattern="*.pzfx"/>
+  </mime-type>
+</mime-info>

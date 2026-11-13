@@ -1,0 +1,18 @@
+[package]
+name = "lumencraft-tools"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "LumenCraft interactive spreadsheet, graph annotation, axis-break and layout tools"
+
+[lints]
+workspace = true
+
+[dependencies]
+lumencraft-math = { workspace = true }
+lumencraft-palette = { workspace = true }
+lumencraft-doc = { workspace = true }
+lumencraft-chart = { workspace = true }
+
+[dev-dependencies]
+lumencraft-testkit = { workspace = true }
