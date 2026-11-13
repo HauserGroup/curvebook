@@ -7,10 +7,20 @@
 //! Governing spec: `docs/mcp.md` and `docs/scripting-and-automation.md`.
 #![forbid(unsafe_code)]
 
+pub mod protocol;
+pub mod tools;
 pub mod ui_catalog;
 
 /// MCP server protocol name advertised during initialization.
 pub const SERVER_NAME: &str = "lumencraft";
+
+#[cfg(not(target_arch = "wasm32"))]
+pub use protocol::run_stdio_with_control_port;
+pub use protocol::{
+    ERR_INTERNAL_ERROR, ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, ERR_PARSE_ERROR, FramingMode, JsonRpcError, JsonRpcResponse,
+    MAX_BATCH_LEN, MAX_REQUEST_BYTES, MCP_PROTOCOL_VERSION, dispatch_json_value, dispatch_payload, run_stdio, serve, serve_with_max_bytes,
+};
+pub use tools::{ContentBlock, McpServerState, ToolCallError, ToolCallResult, ToolDefinition, call_tool, list_tools};
 
 #[cfg(test)]
 mod tests {

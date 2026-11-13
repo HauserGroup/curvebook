@@ -14,6 +14,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+lumencraft-chart = { workspace = true }
 lumencraft-doc = { workspace = true }
 lumencraft-engine = { workspace = true, features = ["bundled-fonts"] }
 lumencraft-format = { workspace = true }
@@ -22,6 +23,8 @@ lumencraft-pdf = { workspace = true }
 lumencraft-render = { workspace = true }
 lumencraft-svg = { workspace = true }
 lumencraft-text = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }

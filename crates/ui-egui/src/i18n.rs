@@ -1,15 +1,2178 @@
-//! Interface localization catalog registry for LumenCraft.
+//! Interface localization catalog registry and regional number/delimiter presets for LumenCraft.
+//!
+//! Supports English (`en`) and all eight Tier-1 scientific locales (`de`, `es`, `fr`, `ja`,
+//! `ko`, `pt-BR`, `zh-CN`, `zh-TW`), integrating with [`lumencraft_text::LocaleNumberPolicy`] and
+//! [`lumencraft_format::CsvOptions`].
 
-/// Supported BCP-47 interface locale identifiers.
-pub const LOCALES: &[&str] = &["en"];
+use std::borrow::Cow;
+
+use lumencraft_doc::{SheetSection, TableKind};
+use lumencraft_format::CsvOptions;
+use lumencraft_math::{AxisScale, PValueFormat};
+use lumencraft_text::{LocaleNumberPolicy, format_axis_tick, format_pvalue_label};
+use serde::{Deserialize, Serialize};
+
+/// Supported BCP-47 interface locale identifiers (`en` + 8 Tier-1 scientific locales).
+pub const LOCALES: &[&str] = &["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"];
+
+/// Single catalog entry containing translations for all 9 registered [`LOCALES`] in order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CatalogEntry {
+    pub key: &'static str,
+    pub translations: [&'static str; 9],
+}
+
+macro_rules! entry {
+    (
+        $key:expr => [
+            en: $en:expr,
+            de: $de:expr,
+            es: $es:expr,
+            fr: $fr:expr,
+            ja: $ja:expr,
+            ko: $ko:expr,
+            pt_br: $pt_br:expr,
+            zh_cn: $zh_cn:expr,
+            zh_tw: $zh_tw:expr $(,)?
+        ]
+    ) => {
+        CatalogEntry { key: $key, translations: [$en, $de, $es, $fr, $ja, $ko, $pt_br, $zh_cn, $zh_tw] }
+    };
+}
+
+/// Complete interface translation catalog covering menus, navigator folders, the 8 data-table
+/// archetypes, analysis/fit families, dialog actions, inspector controls, and themes.
+pub const CATALOG: &[CatalogEntry] = &[
+    // --- Top-level menus ---
+    entry!("menu.file" => [
+        en: "File",
+        de: "Datei",
+        es: "Archivo",
+        fr: "Fichier",
+        ja: "ファイル",
+        ko: "파일",
+        pt_br: "Arquivo",
+        zh_cn: "文件",
+        zh_tw: "檔案",
+    ]),
+    entry!("menu.file.new_project" => [
+        en: "New Project",
+        de: "Neues Projekt",
+        es: "Nuevo proyecto",
+        fr: "Nouveau projet",
+        ja: "新規プロジェクト",
+        ko: "새 프로젝트",
+        pt_br: "Novo projeto",
+        zh_cn: "新建项目",
+        zh_tw: "新增專案",
+    ]),
+    entry!("menu.file.open" => [
+        en: "Open...",
+        de: "Öffnen...",
+        es: "Abrir...",
+        fr: "Ouvrir...",
+        ja: "開く...",
+        ko: "열기...",
+        pt_br: "Abrir...",
+        zh_cn: "打开...",
+        zh_tw: "開啟...",
+    ]),
+    entry!("menu.file.save" => [
+        en: "Save",
+        de: "Speichern",
+        es: "Guardar",
+        fr: "Enregistrer",
+        ja: "保存",
+        ko: "저장",
+        pt_br: "Salvar",
+        zh_cn: "保存",
+        zh_tw: "儲存",
+    ]),
+    entry!("menu.file.save_as" => [
+        en: "Save As...",
+        de: "Speichern unter...",
+        es: "Guardar como...",
+        fr: "Enregistrer sous...",
+        ja: "名前を付けて保存...",
+        ko: "다른 이름으로 저장...",
+        pt_br: "Salvar como...",
+        zh_cn: "另存为...",
+        zh_tw: "另存新檔...",
+    ]),
+    entry!("menu.file.import" => [
+        en: "Import...",
+        de: "Importieren...",
+        es: "Importar...",
+        fr: "Importer...",
+        ja: "インポート...",
+        ko: "가져오기...",
+        pt_br: "Importar...",
+        zh_cn: "导入...",
+        zh_tw: "匯入...",
+    ]),
+    entry!("menu.file.export" => [
+        en: "Export...",
+        de: "Exportieren...",
+        es: "Exportar...",
+        fr: "Exporter...",
+        ja: "エクスポート...",
+        ko: "내보내기...",
+        pt_br: "Exportar...",
+        zh_cn: "导出...",
+        zh_tw: "匯出...",
+    ]),
+    entry!("menu.file.export_svg" => [
+        en: "Export SVG",
+        de: "SVG exportieren",
+        es: "Exportar SVG",
+        fr: "Exporter en SVG",
+        ja: "SVG形式で書き出し",
+        ko: "SVG로 내보내기",
+        pt_br: "Exportar SVG",
+        zh_cn: "导出 SVG",
+        zh_tw: "匯出 SVG",
+    ]),
+    entry!("menu.file.export_pdf" => [
+        en: "Export PDF",
+        de: "PDF exportieren",
+        es: "Exportar PDF",
+        fr: "Exporter en PDF",
+        ja: "PDF形式で書き出し",
+        ko: "PDF로 내보내기",
+        pt_br: "Exportar PDF",
+        zh_cn: "导出 PDF",
+        zh_tw: "匯出 PDF",
+    ]),
+    entry!("menu.file.export_png" => [
+        en: "Export PNG",
+        de: "PNG exportieren",
+        es: "Exportar PNG",
+        fr: "Exporter en PNG",
+        ja: "PNG形式で書き出し",
+        ko: "PNG로 내보내기",
+        pt_br: "Exportar PNG",
+        zh_cn: "导出 PNG",
+        zh_tw: "匯出 PNG",
+    ]),
+    entry!("menu.file.export_tiff" => [
+        en: "Export TIFF",
+        de: "TIFF exportieren",
+        es: "Exportar TIFF",
+        fr: "Exporter en TIFF",
+        ja: "TIFF形式で書き出し",
+        ko: "TIFF로 내보내기",
+        pt_br: "Exportar TIFF",
+        zh_cn: "导出 TIFF",
+        zh_tw: "匯出 TIFF",
+    ]),
+    entry!("menu.file.print" => [
+        en: "Print...",
+        de: "Drucken...",
+        es: "Imprimir...",
+        fr: "Imprimer...",
+        ja: "印刷...",
+        ko: "인쇄...",
+        pt_br: "Imprimir...",
+        zh_cn: "打印...",
+        zh_tw: "列印...",
+    ]),
+    entry!("menu.file.close" => [
+        en: "Close",
+        de: "Schließen",
+        es: "Cerrar",
+        fr: "Fermer",
+        ja: "閉じる",
+        ko: "닫기",
+        pt_br: "Fechar",
+        zh_cn: "关闭",
+        zh_tw: "關閉",
+    ]),
+    entry!("menu.edit" => [
+        en: "Edit",
+        de: "Bearbeiten",
+        es: "Edición",
+        fr: "Édition",
+        ja: "編集",
+        ko: "편집",
+        pt_br: "Editar",
+        zh_cn: "编辑",
+        zh_tw: "編輯",
+    ]),
+    entry!("menu.edit.undo" => [
+        en: "Undo",
+        de: "Rückgängig",
+        es: "Deshacer",
+        fr: "Annuler",
+        ja: "元に戻す",
+        ko: "실행 취소",
+        pt_br: "Desfazer",
+        zh_cn: "撤销",
+        zh_tw: "復原",
+    ]),
+    entry!("menu.edit.redo" => [
+        en: "Redo",
+        de: "Wiederholen",
+        es: "Rehacer",
+        fr: "Rétablir",
+        ja: "やり直す",
+        ko: "다시 실행",
+        pt_br: "Refazer",
+        zh_cn: "重做",
+        zh_tw: "重做",
+    ]),
+    entry!("menu.edit.cut" => [
+        en: "Cut",
+        de: "Ausschneiden",
+        es: "Cortar",
+        fr: "Couper",
+        ja: "切り取り",
+        ko: "잘라내기",
+        pt_br: "Recortar",
+        zh_cn: "剪切",
+        zh_tw: "剪下",
+    ]),
+    entry!("menu.edit.copy" => [
+        en: "Copy",
+        de: "Kopieren",
+        es: "Copiar",
+        fr: "Copier",
+        ja: "コピー",
+        ko: "복사",
+        pt_br: "Copiar",
+        zh_cn: "复制",
+        zh_tw: "複製",
+    ]),
+    entry!("menu.edit.paste" => [
+        en: "Paste",
+        de: "Einfügen",
+        es: "Pegar",
+        fr: "Coller",
+        ja: "貼り付け",
+        ko: "붙여넣기",
+        pt_br: "Colar",
+        zh_cn: "粘贴",
+        zh_tw: "貼上",
+    ]),
+    entry!("menu.edit.paste_special" => [
+        en: "Paste Special...",
+        de: "Inhalte einfügen...",
+        es: "Pegado especial...",
+        fr: "Collage spécial...",
+        ja: "形式を選択して貼り付け...",
+        ko: "선택하여 붙여넣기...",
+        pt_br: "Colar especial...",
+        zh_cn: "选择性粘贴...",
+        zh_tw: "選擇性貼上...",
+    ]),
+    entry!("menu.edit.paste_link" => [
+        en: "Paste Link",
+        de: "Verknüpft einfügen",
+        es: "Pegar vínculo",
+        fr: "Coller avec liaison",
+        ja: "リンク貼り付け",
+        ko: "연결하여 붙여넣기",
+        pt_br: "Colar vínculo",
+        zh_cn: "粘贴链接",
+        zh_tw: "貼上連結",
+    ]),
+    entry!("menu.edit.find" => [
+        en: "Find...",
+        de: "Suchen...",
+        es: "Buscar...",
+        fr: "Rechercher...",
+        ja: "検索...",
+        ko: "찾기...",
+        pt_br: "Localizar...",
+        zh_cn: "查找...",
+        zh_tw: "尋找...",
+    ]),
+    entry!("menu.insert" => [
+        en: "Insert",
+        de: "Einfügen",
+        es: "Insertar",
+        fr: "Insérer",
+        ja: "挿入",
+        ko: "삽입",
+        pt_br: "Inserir",
+        zh_cn: "插入",
+        zh_tw: "插入",
+    ]),
+    entry!("menu.insert.new_data_table" => [
+        en: "New Data Table...",
+        de: "Neue Datentabelle...",
+        es: "Nueva tabla de datos...",
+        fr: "Nouveau tableau de données...",
+        ja: "新規データ表...",
+        ko: "새 데이터 표...",
+        pt_br: "Nova tabela de dados...",
+        zh_cn: "新建数据表...",
+        zh_tw: "新增資料表...",
+    ]),
+    entry!("menu.insert.new_info_sheet" => [
+        en: "New Info Sheet",
+        de: "Neues Infoblatt",
+        es: "Nueva hoja de información",
+        fr: "Nouvelle feuille d'info",
+        ja: "新規情報シート",
+        ko: "새 정보 시트",
+        pt_br: "Nova folha de informações",
+        zh_cn: "新建信息表",
+        zh_tw: "新增資訊工作表",
+    ]),
+    entry!("menu.insert.new_graph" => [
+        en: "New Graph",
+        de: "Neues Diagramm",
+        es: "Nuevo gráfico",
+        fr: "Nouveau graphique",
+        ja: "新規グラフ",
+        ko: "새 그래프",
+        pt_br: "Novo gráfico",
+        zh_cn: "新建图表",
+        zh_tw: "新增圖表",
+    ]),
+    entry!("menu.insert.new_layout" => [
+        en: "New Page Layout",
+        de: "Neues Seitenlayout",
+        es: "Nuevo diseño de página",
+        fr: "Nouvelle mise en page",
+        ja: "新規ページレイアウト",
+        ko: "새 페이지 레이아웃",
+        pt_br: "Novo layout de página",
+        zh_cn: "新建页面布局",
+        zh_tw: "新增頁面版面",
+    ]),
+    entry!("menu.insert.floating_note" => [
+        en: "Floating Note",
+        de: "Freie Notiz",
+        es: "Nota flotante",
+        fr: "Note flottante",
+        ja: "フローティングメモ",
+        ko: "부동 메모",
+        pt_br: "Nota flutuante",
+        zh_cn: "浮动注释",
+        zh_tw: "浮動備註",
+    ]),
+    entry!("menu.analyze" => [
+        en: "Analyze",
+        de: "Analysieren",
+        es: "Analizar",
+        fr: "Analyser",
+        ja: "解析",
+        ko: "분석",
+        pt_br: "Analisar",
+        zh_cn: "分析",
+        zh_tw: "分析",
+    ]),
+    entry!("menu.analyze.analyze" => [
+        en: "Analyze...",
+        de: "Analysieren...",
+        es: "Analizar...",
+        fr: "Analyser...",
+        ja: "解析を実行...",
+        ko: "분석...",
+        pt_br: "Analisar...",
+        zh_cn: "分析...",
+        zh_tw: "分析...",
+    ]),
+    entry!("menu.analyze.run_all" => [
+        en: "Recalculate All",
+        de: "Alle neu berechnen",
+        es: "Recalcular todo",
+        fr: "Tout recalculer",
+        ja: "すべて再計算",
+        ko: "모두 다시 계산",
+        pt_br: "Recalcular tudo",
+        zh_cn: "全部重新计算",
+        zh_tw: "全部重新計算",
+    ]),
+    entry!("menu.analyze.change_params" => [
+        en: "Change Analysis Parameters...",
+        de: "Analyseparameter ändern...",
+        es: "Cambiar parámetros de análisis...",
+        fr: "Modifier les paramètres d'analyse...",
+        ja: "解析パラメータの変更...",
+        ko: "분석 매개변수 변경...",
+        pt_br: "Alterar parâmetros de análise...",
+        zh_cn: "更改分析参数...",
+        zh_tw: "變更分析參數...",
+    ]),
+    entry!("menu.analyze.change_data" => [
+        en: "Change Data Analyzed...",
+        de: "Analysierte Daten ändern...",
+        es: "Cambiar datos analizados...",
+        fr: "Changer les données analysées...",
+        ja: "解析対象データの変更...",
+        ko: "분석 데이터 변경...",
+        pt_br: "Alterar dados analisados...",
+        zh_cn: "更改分析数据...",
+        zh_tw: "變更分析資料...",
+    ]),
+    entry!("menu.analyze.exclude_values" => [
+        en: "Exclude Values",
+        de: "Werte ausschließen",
+        es: "Excluir valores",
+        fr: "Exclure les valeurs",
+        ja: "値を除外",
+        ko: "값 제외",
+        pt_br: "Excluir valores",
+        zh_cn: "排除数值",
+        zh_tw: "排除數值",
+    ]),
+    entry!("menu.analyze.freeze_sheet" => [
+        en: "Freeze Data Table",
+        de: "Datentabelle einfrieren",
+        es: "Congelar tabla de datos",
+        fr: "Figer le tableau de données",
+        ja: "データ表を凍結",
+        ko: "데이터 표 고정",
+        pt_br: "Congelar tabela de dados",
+        zh_cn: "冻结数据表",
+        zh_tw: "凍結資料表",
+    ]),
+    entry!("menu.analyze.unfreeze_sheet" => [
+        en: "Unfreeze Data Table",
+        de: "Datentabelle entsperren",
+        es: "Descongelar tabla de datos",
+        fr: "Défiger le tableau de données",
+        ja: "データ表の凍結解除",
+        ko: "데이터 표 고정 해제",
+        pt_br: "Descongelar tabela de dados",
+        zh_cn: "取消冻结数据表",
+        zh_tw: "解除凍結資料表",
+    ]),
+    entry!("menu.graph" => [
+        en: "Graph",
+        de: "Diagramm",
+        es: "Gráfico",
+        fr: "Graphique",
+        ja: "グラフ",
+        ko: "그래프",
+        pt_br: "Gráfico",
+        zh_cn: "图表",
+        zh_tw: "圖表",
+    ]),
+    entry!("menu.graph.change_type" => [
+        en: "Change Graph Type...",
+        de: "Diagrammtyp ändern...",
+        es: "Cambiar tipo de gráfico...",
+        fr: "Changer le type de graphique...",
+        ja: "グラフの種類の変更...",
+        ko: "그래프 유형 변경...",
+        pt_br: "Alterar tipo de gráfico...",
+        zh_cn: "更改图表类型...",
+        zh_tw: "變更圖表類型...",
+    ]),
+    entry!("menu.graph.format_graph" => [
+        en: "Format Graph...",
+        de: "Diagramm formatieren...",
+        es: "Formato de gráfico...",
+        fr: "Formater le graphique...",
+        ja: "グラフの書式設定...",
+        ko: "그래프 서식...",
+        pt_br: "Formatar gráfico...",
+        zh_cn: "设置图表格式...",
+        zh_tw: "設定圖表格式...",
+    ]),
+    entry!("menu.graph.format_axes" => [
+        en: "Format Axes...",
+        de: "Achsen formatieren...",
+        es: "Formato de ejes...",
+        fr: "Formater les axes...",
+        ja: "軸の書式設定...",
+        ko: "축 서식...",
+        pt_br: "Formatar eixos...",
+        zh_cn: "设置坐标轴格式...",
+        zh_tw: "設定座標軸格式...",
+    ]),
+    entry!("menu.graph.pairwise_brackets" => [
+        en: "Pairwise Comparisons...",
+        de: "Paarweise Vergleiche...",
+        es: "Comparaciones por pares...",
+        fr: "Comparaisons par paires...",
+        ja: "多重比較ブラケット...",
+        ko: "쌍대 비교...",
+        pt_br: "Comparações pareadas...",
+        zh_cn: "成对比较标注...",
+        zh_tw: "成對比較標註...",
+    ]),
+    entry!("menu.graph.apply_style_from" => [
+        en: "Apply Style From...",
+        de: "Stil übernehmen von...",
+        es: "Aplicar estilo desde...",
+        fr: "Appliquer le style depuis...",
+        ja: "スタイルをコピーして適用...",
+        ko: "스타일 가져오기...",
+        pt_br: "Aplicar estilo de...",
+        zh_cn: "套用样式自...",
+        zh_tw: "套用樣式自...",
+    ]),
+    entry!("menu.view" => [
+        en: "View",
+        de: "Ansicht",
+        es: "Ver",
+        fr: "Affichage",
+        ja: "表示",
+        ko: "보기",
+        pt_br: "Exibir",
+        zh_cn: "视图",
+        zh_tw: "檢視",
+    ]),
+    entry!("menu.view.navigator" => [
+        en: "Project Navigator",
+        de: "Projektnavigator",
+        es: "Navegador del proyecto",
+        fr: "Navigateur du projet",
+        ja: "プロジェクトナビゲーター",
+        ko: "프로젝트 탐색기",
+        pt_br: "Navegador do projeto",
+        zh_cn: "项目导航器",
+        zh_tw: "專案導覽器",
+    ]),
+    entry!("menu.view.inspector" => [
+        en: "Format Inspector",
+        de: "Formatinspektor",
+        es: "Inspector de formato",
+        fr: "Inspecteur de format",
+        ja: "書式インスペクター",
+        ko: "서식 검사기",
+        pt_br: "Inspetor de formato",
+        zh_cn: "格式检查器",
+        zh_tw: "格式檢查器",
+    ]),
+    entry!("menu.view.family_pane" => [
+        en: "Family Pane",
+        de: "Familienbereich",
+        es: "Panel de familia",
+        fr: "Volet Famille",
+        ja: "ファミリーペイン",
+        ko: "패밀리 창",
+        pt_br: "Painel de família",
+        zh_cn: "关联族面板",
+        zh_tw: "關聯群組窗格",
+    ]),
+    entry!("menu.view.zoom_fit" => [
+        en: "Zoom to Fit Sheet",
+        de: "An Blattgröße anpassen",
+        es: "Ajustar hoja a la ventana",
+        fr: "Ajuster à la feuille",
+        ja: "シートに合わせてズーム",
+        ko: "시트에 맞게 확대/축소",
+        pt_br: "Ajustar zoom à folha",
+        zh_cn: "缩放至适应工作表",
+        zh_tw: "縮放至符合工作表",
+    ]),
+    entry!("menu.view.command_palette" => [
+        en: "Command Palette...",
+        de: "Befehlspalette...",
+        es: "Paleta de comandos...",
+        fr: "Palette de commandes...",
+        ja: "コマンドパレット...",
+        ko: "명령 팔레트...",
+        pt_br: "Paleta de comandos...",
+        zh_cn: "命令面板...",
+        zh_tw: "命令選擇區...",
+    ]),
+    entry!("menu.view.theme" => [
+        en: "Theme",
+        de: "Design",
+        es: "Tema",
+        fr: "Thème",
+        ja: "テーマ",
+        ko: "테마",
+        pt_br: "Tema",
+        zh_cn: "主题",
+        zh_tw: "佈景主題",
+    ]),
+    entry!("menu.help" => [
+        en: "Help",
+        de: "Hilfe",
+        es: "Ayuda",
+        fr: "Aide",
+        ja: "ヘルプ",
+        ko: "도움말",
+        pt_br: "Ajuda",
+        zh_cn: "帮助",
+        zh_tw: "說明",
+    ]),
+    entry!("menu.help.documentation" => [
+        en: "Documentation",
+        de: "Dokumentation",
+        es: "Documentación",
+        fr: "Documentation",
+        ja: "ドキュメント",
+        ko: "문서",
+        pt_br: "Documentação",
+        zh_cn: "文档",
+        zh_tw: "說明文件",
+    ]),
+    entry!("menu.help.checklist" => [
+        en: "Analysis Checklist",
+        de: "Analyse-Checkliste",
+        es: "Lista de verificación del análisis",
+        fr: "Liste de contrôle de l'analyse",
+        ja: "解析チェックリスト",
+        ko: "분석 체크리스트",
+        pt_br: "Lista de verificação da análise",
+        zh_cn: "分析检查清单",
+        zh_tw: "分析檢查清單",
+    ]),
+    entry!("menu.help.about" => [
+        en: "About LumenCraft",
+        de: "Über LumenCraft",
+        es: "Acerca de LumenCraft",
+        fr: "À propos de LumenCraft",
+        ja: "LumenCraft について",
+        ko: "LumenCraft 정보",
+        pt_br: "Sobre o LumenCraft",
+        zh_cn: "关于 LumenCraft",
+        zh_tw: "關於 LumenCraft",
+    ]),
+    // --- Navigator folders ---
+    entry!("nav.data_tables" => [
+        en: "Data Tables",
+        de: "Datentabellen",
+        es: "Tablas de datos",
+        fr: "Tableaux de données",
+        ja: "データ表",
+        ko: "데이터 표",
+        pt_br: "Tabelas de dados",
+        zh_cn: "数据表",
+        zh_tw: "資料表",
+    ]),
+    entry!("nav.info" => [
+        en: "Info",
+        de: "Info",
+        es: "Información",
+        fr: "Info",
+        ja: "情報",
+        ko: "정보",
+        pt_br: "Informações",
+        zh_cn: "信息",
+        zh_tw: "資訊",
+    ]),
+    entry!("nav.results" => [
+        en: "Results",
+        de: "Ergebnisse",
+        es: "Resultados",
+        fr: "Résultats",
+        ja: "結果",
+        ko: "결과",
+        pt_br: "Resultados",
+        zh_cn: "结果",
+        zh_tw: "結果",
+    ]),
+    entry!("nav.graphs" => [
+        en: "Graphs",
+        de: "Diagramme",
+        es: "Gráficos",
+        fr: "Graphiques",
+        ja: "グラフ",
+        ko: "그래프",
+        pt_br: "Gráficos",
+        zh_cn: "图表",
+        zh_tw: "圖表",
+    ]),
+    entry!("nav.layouts" => [
+        en: "Layouts",
+        de: "Layouts",
+        es: "Diseños",
+        fr: "Mises en page",
+        ja: "レイアウト",
+        ko: "레이아웃",
+        pt_br: "Layouts",
+        zh_cn: "页面布局",
+        zh_tw: "版面配置",
+    ]),
+    entry!("nav.family" => [
+        en: "Family",
+        de: "Familie",
+        es: "Familia",
+        fr: "Famille",
+        ja: "ファミリー",
+        ko: "패밀리",
+        pt_br: "Família",
+        zh_cn: "关联族",
+        zh_tw: "關聯群組",
+    ]),
+    // --- All 8 data table archetypes ---
+    entry!("table.xy" => [
+        en: "XY",
+        de: "XY",
+        es: "XY",
+        fr: "XY",
+        ja: "XY",
+        ko: "XY",
+        pt_br: "XY",
+        zh_cn: "XY",
+        zh_tw: "XY",
+    ]),
+    entry!("table.column" => [
+        en: "Column",
+        de: "Spalte",
+        es: "Columna",
+        fr: "Colonne",
+        ja: "列 (Column)",
+        ko: "열 (Column)",
+        pt_br: "Coluna",
+        zh_cn: "列",
+        zh_tw: "欄",
+    ]),
+    entry!("table.grouped" => [
+        en: "Grouped",
+        de: "Gruppiert",
+        es: "Agrupada",
+        fr: "Groupé",
+        ja: "グループ化",
+        ko: "그룹형",
+        pt_br: "Agrupada",
+        zh_cn: "分组",
+        zh_tw: "分組",
+    ]),
+    entry!("table.contingency" => [
+        en: "Contingency",
+        de: "Kontingenz",
+        es: "Contingencia",
+        fr: "Contingence",
+        ja: "分割表",
+        ko: "분할표",
+        pt_br: "Contingência",
+        zh_cn: "列联表",
+        zh_tw: "列聯表",
+    ]),
+    entry!("table.survival" => [
+        en: "Survival",
+        de: "Überleben",
+        es: "Supervivencia",
+        fr: "Survie",
+        ja: "生存曲線",
+        ko: "생존",
+        pt_br: "Sobrevivência",
+        zh_cn: "生存分析",
+        zh_tw: "存活分析",
+    ]),
+    entry!("table.parts_of_whole" => [
+        en: "Parts of Whole",
+        de: "Teile eines Ganzen",
+        es: "Partes del todo",
+        fr: "Parties d'un tout",
+        ja: "全体の一部",
+        ko: "전체의 일부",
+        pt_br: "Partes do todo",
+        zh_cn: "整体与部分",
+        zh_tw: "整體與部分",
+    ]),
+    entry!("table.multiple_variables" => [
+        en: "Multiple Variables",
+        de: "Mehrere Variablen",
+        es: "Múltiples variables",
+        fr: "Variables multiples",
+        ja: "多変数",
+        ko: "다중 변수",
+        pt_br: "Múltiplas variáveis",
+        zh_cn: "多变量",
+        zh_tw: "多變數",
+    ]),
+    entry!("table.nested" => [
+        en: "Nested",
+        de: "Verschachtelt",
+        es: "Anidada",
+        fr: "Imbriqué",
+        ja: "ネスト",
+        ko: "중첩",
+        pt_br: "Aninhada",
+        zh_cn: "嵌套",
+        zh_tw: "巢狀",
+    ]),
+    // --- Key analysis & curve-fitting families ---
+    entry!("analysis.transform" => [
+        en: "Transform",
+        de: "Transformieren",
+        es: "Transformar",
+        fr: "Transformer",
+        ja: "数値変換",
+        ko: "변환",
+        pt_br: "Transformar",
+        zh_cn: "数学变换",
+        zh_tw: "數學轉換",
+    ]),
+    entry!("analysis.normalize" => [
+        en: "Normalize",
+        de: "Normalisieren",
+        es: "Normalizar",
+        fr: "Normaliser",
+        ja: "正規化",
+        ko: "정규화",
+        pt_br: "Normalizar",
+        zh_cn: "归一化",
+        zh_tw: "正規化",
+    ]),
+    entry!("analysis.remove_baseline" => [
+        en: "Remove Baseline",
+        de: "Basislinie entfernen",
+        es: "Eliminar línea base",
+        fr: "Soustraire la ligne de base",
+        ja: "ベースライン補正",
+        ko: "기준선 제거",
+        pt_br: "Remover linha de base",
+        zh_cn: "扣除基线",
+        zh_tw: "扣除基線",
+    ]),
+    entry!("analysis.transpose" => [
+        en: "Transpose",
+        de: "Transponieren",
+        es: "Transponer",
+        fr: "Transposer",
+        ja: "転置",
+        ko: "행렬 바꿈",
+        pt_br: "Transpor",
+        zh_cn: "转置",
+        zh_tw: "轉置",
+    ]),
+    entry!("analysis.simulate_data" => [
+        en: "Simulate Data",
+        de: "Daten simulieren",
+        es: "Simular datos",
+        fr: "Simuler des données",
+        ja: "データのシミュレーション",
+        ko: "데이터 시뮬레이션",
+        pt_br: "Simular dados",
+        zh_cn: "模拟数据",
+        zh_tw: "模擬資料",
+    ]),
+    entry!("analysis.descriptive_stats" => [
+        en: "Descriptive Statistics",
+        de: "Deskriptive Statistik",
+        es: "Estadística descriptiva",
+        fr: "Statistiques descriptives",
+        ja: "記述統計",
+        ko: "기술 통계",
+        pt_br: "Estatística descritiva",
+        zh_cn: "描述性统计",
+        zh_tw: "敘述統計",
+    ]),
+    entry!("analysis.normality_tests" => [
+        en: "Normality and Lognormality Tests",
+        de: "Normalitäts- und Lognormalitätstests",
+        es: "Pruebas de normalidad y lognormalidad",
+        fr: "Tests de normalité et log-normalité",
+        ja: "正規性および対数正規性検定",
+        ko: "정규성 및 로그정규성 검정",
+        pt_br: "Testes de normalidade e lognormalidade",
+        zh_cn: "正态性与对数正态性检验",
+        zh_tw: "常態性與對數常態性檢定",
+    ]),
+    entry!("analysis.identify_outliers" => [
+        en: "Identify Outliers",
+        de: "Ausreißer identifizieren",
+        es: "Identificar valores atípicos",
+        fr: "Identifier les valeurs aberrantes",
+        ja: "外れ値の検出",
+        ko: "이상치 식별",
+        pt_br: "Identificar valores discrepantes",
+        zh_cn: "识别异常值",
+        zh_tw: "識別離群值",
+    ]),
+    entry!("analysis.unpaired_t" => [
+        en: "Unpaired t Test",
+        de: "Ungepaarter t-Test",
+        es: "Prueba t no pareada",
+        fr: "Test t non apparié",
+        ja: "対応のない t 検定",
+        ko: "독립 표본 t 검정",
+        pt_br: "Teste t não pareado",
+        zh_cn: "非配对 t 检验",
+        zh_tw: "非配對 t 檢定",
+    ]),
+    entry!("analysis.paired_t" => [
+        en: "Paired t Test",
+        de: "Gepaarter t-Test",
+        es: "Prueba t pareada",
+        fr: "Test t apparié",
+        ja: "対応のある t 検定",
+        ko: "대응 표본 t 검정",
+        pt_br: "Teste t pareado",
+        zh_cn: "配对 t 检验",
+        zh_tw: "配對 t 檢定",
+    ]),
+    entry!("analysis.welch_t" => [
+        en: "Welch's t Test",
+        de: "Welch-t-Test",
+        es: "Prueba t de Welch",
+        fr: "Test t de Welch",
+        ja: "Welch の t 検定",
+        ko: "Welch의 t 검정",
+        pt_br: "Teste t de Welch",
+        zh_cn: "Welch t 检验",
+        zh_tw: "Welch t 檢定",
+    ]),
+    entry!("analysis.mann_whitney" => [
+        en: "Mann-Whitney Test",
+        de: "Mann-Whitney-Test",
+        es: "Prueba de Mann-Whitney",
+        fr: "Test de Mann-Whitney",
+        ja: "Mann-Whitney 検定",
+        ko: "Mann-Whitney 검정",
+        pt_br: "Teste de Mann-Whitney",
+        zh_cn: "Mann-Whitney 检验",
+        zh_tw: "Mann-Whitney 檢定",
+    ]),
+    entry!("analysis.wilcoxon" => [
+        en: "Wilcoxon Matched-Pairs Test",
+        de: "Wilcoxon-Vorzeichen-Rang-Test",
+        es: "Prueba de rangos con signo de Wilcoxon",
+        fr: "Test des rangs signés de Wilcoxon",
+        ja: "Wilcoxon 符号順位検定",
+        ko: "Wilcoxon 부호 순위 검정",
+        pt_br: "Teste de Wilcoxon pareado",
+        zh_cn: "Wilcoxon 配对符号秩检验",
+        zh_tw: "Wilcoxon 配對符號等級檢定",
+    ]),
+    entry!("analysis.one_way_anova" => [
+        en: "One-Way ANOVA",
+        de: "Einfaktorielle ANOVA",
+        es: "ANOVA de un factor",
+        fr: "ANOVA à un facteur",
+        ja: "一元配置分散分析 (ANOVA)",
+        ko: "일원 분산 분석 (ANOVA)",
+        pt_br: "ANOVA de um fator",
+        zh_cn: "单因素方差分析 (ANOVA)",
+        zh_tw: "單因子變異數分析 (ANOVA)",
+    ]),
+    entry!("analysis.kruskal_wallis" => [
+        en: "Kruskal-Wallis Test",
+        de: "Kruskal-Wallis-Test",
+        es: "Prueba de Kruskal-Wallis",
+        fr: "Test de Kruskal-Wallis",
+        ja: "Kruskal-Wallis 検定",
+        ko: "Kruskal-Wallis 검정",
+        pt_br: "Teste de Kruskal-Wallis",
+        zh_cn: "Kruskal-Wallis 检验",
+        zh_tw: "Kruskal-Wallis 檢定",
+    ]),
+    entry!("analysis.rm_anova" => [
+        en: "Repeated-Measures ANOVA",
+        de: "ANOVA mit Messwiederholung",
+        es: "ANOVA de medidas repetidas",
+        fr: "ANOVA à mesures répétées",
+        ja: "反復測定分散分析",
+        ko: "반복 측정 분산 분석",
+        pt_br: "ANOVA de medidas repetidas",
+        zh_cn: "重复测量方差分析",
+        zh_tw: "重複測量變異數分析",
+    ]),
+    entry!("analysis.friedman" => [
+        en: "Friedman Test",
+        de: "Friedman-Test",
+        es: "Prueba de Friedman",
+        fr: "Test de Friedman",
+        ja: "Friedman 検定",
+        ko: "Friedman 검정",
+        pt_br: "Teste de Friedman",
+        zh_cn: "Friedman 检验",
+        zh_tw: "Friedman 檢定",
+    ]),
+    entry!("analysis.two_way_anova" => [
+        en: "Two-Way ANOVA",
+        de: "Zweifaktorielle ANOVA",
+        es: "ANOVA de dos factores",
+        fr: "ANOVA à deux facteurs",
+        ja: "二元配置分散分析",
+        ko: "이원 분산 분석",
+        pt_br: "ANOVA de dois fatores",
+        zh_cn: "双因素方差分析",
+        zh_tw: "雙因子變異數分析",
+    ]),
+    entry!("analysis.three_way_anova" => [
+        en: "Three-Way ANOVA",
+        de: "Dreifaktorielle ANOVA",
+        es: "ANOVA de tres factores",
+        fr: "ANOVA à trois facteurs",
+        ja: "三元配置分散分析",
+        ko: "삼원 분산 분석",
+        pt_br: "ANOVA de três fatores",
+        zh_cn: "三因素方差分析",
+        zh_tw: "三因子變異數分析",
+    ]),
+    entry!("analysis.multifactor_anova" => [
+        en: "Multifactor ANOVA",
+        de: "Mehrfaktorielle ANOVA",
+        es: "ANOVA multifactorial",
+        fr: "ANOVA multifactorielle",
+        ja: "多因子分散分析",
+        ko: "다요인 분산 분석",
+        pt_br: "ANOVA multifatorial",
+        zh_cn: "多因素方差分析",
+        zh_tw: "多因子變異數分析",
+    ]),
+    entry!("analysis.mixed_effects_reml" => [
+        en: "Mixed-Effects Model (REML)",
+        de: "Gemischtes Modell (REML)",
+        es: "Modelo de efectos mixtos (REML)",
+        fr: "Modèle à effets mixtes (REML)",
+        ja: "混合効果モデル (REML)",
+        ko: "혼합 효과 모형 (REML)",
+        pt_br: "Modelo de efeitos mistos (REML)",
+        zh_cn: "混合效应模型 (REML)",
+        zh_tw: "混合效應模型 (REML)",
+    ]),
+    entry!("analysis.nested_t" => [
+        en: "Nested t Test",
+        de: "Verschachtelter t-Test",
+        es: "Prueba t anidada",
+        fr: "Test t imbriqué",
+        ja: "ネスト型 t 検定",
+        ko: "중첩 t 검정",
+        pt_br: "Teste t aninhado",
+        zh_cn: "嵌套 t 检验",
+        zh_tw: "巢狀 t 檢定",
+    ]),
+    entry!("analysis.nested_anova" => [
+        en: "Nested One-Way ANOVA",
+        de: "Verschachtelte einfaktorielle ANOVA",
+        es: "ANOVA anidada de un factor",
+        fr: "ANOVA imbriquée à un facteur",
+        ja: "ネスト型一元配置分散分析",
+        ko: "중첩 일원 분산 분석",
+        pt_br: "ANOVA aninhada de um fator",
+        zh_cn: "嵌套单因素方差分析",
+        zh_tw: "巢狀單因子變異數分析",
+    ]),
+    entry!("analysis.chi_square" => [
+        en: "Chi-Square Test",
+        de: "Chi-Quadrat-Test",
+        es: "Prueba de chi-cuadrado",
+        fr: "Test du chi-deux",
+        ja: "カイ二乗検定",
+        ko: "카이제곱 검정",
+        pt_br: "Teste qui-quadrado",
+        zh_cn: "卡方检验",
+        zh_tw: "卡方檢定",
+    ]),
+    entry!("analysis.fisher_exact" => [
+        en: "Fisher's Exact Test",
+        de: "Exakter Fisher-Test",
+        es: "Prueba exacta de Fisher",
+        fr: "Test exact de Fisher",
+        ja: "Fisher の正確確率検定",
+        ko: "Fisher 정확 검정",
+        pt_br: "Teste exato de Fisher",
+        zh_cn: "Fisher 精确检验",
+        zh_tw: "Fisher 精確檢定",
+    ]),
+    entry!("analysis.kaplan_meier" => [
+        en: "Kaplan-Meier Survival",
+        de: "Kaplan-Meier-Überlebensanalyse",
+        es: "Supervivencia de Kaplan-Meier",
+        fr: "Survie de Kaplan-Meier",
+        ja: "Kaplan-Meier 生存曲線解析",
+        ko: "Kaplan-Meier 생존 분석",
+        pt_br: "Sobrevivência de Kaplan-Meier",
+        zh_cn: "Kaplan-Meier 生存分析",
+        zh_tw: "Kaplan-Meier 存活分析",
+    ]),
+    entry!("analysis.cox_ph" => [
+        en: "Cox Proportional Hazards",
+        de: "Proportionale Cox-Regression",
+        es: "Riesgos proporcionales de Cox",
+        fr: "Modèle de Cox à risques proportionnels",
+        ja: "Cox 比例ハザード回帰",
+        ko: "Cox 비례 위험 모형",
+        pt_br: "Riscos proporcionais de Cox",
+        zh_cn: "Cox 比例风险回归",
+        zh_tw: "Cox 比例風險迴歸",
+    ]),
+    entry!("analysis.roc_curve" => [
+        en: "ROC Curve",
+        de: "ROC-Kurve",
+        es: "Curva ROC",
+        fr: "Courbe ROC",
+        ja: "ROC 曲線",
+        ko: "ROC 곡선",
+        pt_br: "Curva ROC",
+        zh_cn: "ROC 曲线",
+        zh_tw: "ROC 曲線",
+    ]),
+    entry!("analysis.simple_linear_regression" => [
+        en: "Simple Linear Regression",
+        de: "Einfache lineare Regression",
+        es: "Regresión lineal simple",
+        fr: "Régression linéaire simple",
+        ja: "単回帰分析",
+        ko: "단순 선형 회귀",
+        pt_br: "Regressão linear simples",
+        zh_cn: "简单线性回归",
+        zh_tw: "簡單線性迴歸",
+    ]),
+    entry!("analysis.deming_regression" => [
+        en: "Deming (Model II) Regression",
+        de: "Deming-Regression (Modell II)",
+        es: "Regresión de Deming (Modelo II)",
+        fr: "Régression de Deming (Modèle II)",
+        ja: "Deming 回帰 (モデル II)",
+        ko: "Deming (모델 II) 회귀",
+        pt_br: "Regressão de Deming (Modelo II)",
+        zh_cn: "Deming (模型 II) 回归",
+        zh_tw: "Deming (模型 II) 迴歸",
+    ]),
+    entry!("analysis.multiple_linear_regression" => [
+        en: "Multiple Linear Regression",
+        de: "Multiple lineare Regression",
+        es: "Regresión lineal múltiple",
+        fr: "Régression linéaire multiple",
+        ja: "重回帰分析",
+        ko: "다중 선형 회귀",
+        pt_br: "Regressão linear múltipla",
+        zh_cn: "多元线性回归",
+        zh_tw: "多元線性迴歸",
+    ]),
+    entry!("analysis.multiple_logistic_regression" => [
+        en: "Multiple Logistic Regression",
+        de: "Multiple logistische Regression",
+        es: "Regresión logística múltiple",
+        fr: "Régression logistique multiple",
+        ja: "多変量ロジスティック回帰",
+        ko: "다중 로지스틱 회귀",
+        pt_br: "Regressão logística múltipla",
+        zh_cn: "多元 Logistic 回归",
+        zh_tw: "多元羅吉斯迴歸",
+    ]),
+    entry!("analysis.multiple_poisson_regression" => [
+        en: "Multiple Poisson Regression",
+        de: "Multiple Poisson-Regression",
+        es: "Regresión de Poisson múltiple",
+        fr: "Régression de Poisson multiple",
+        ja: "多変量ポアソン回帰",
+        ko: "다중 포아송 회귀",
+        pt_br: "Regressão de Poisson múltipla",
+        zh_cn: "多元泊松回归",
+        zh_tw: "多元卜瓦松迴歸",
+    ]),
+    entry!("analysis.nonlinear_regression" => [
+        en: "Nonlinear Regression",
+        de: "Nichtlineare Regression",
+        es: "Regresión no lineal",
+        fr: "Régression non linéaire",
+        ja: "非線形回帰分析",
+        ko: "비선형 회귀",
+        pt_br: "Regressão não linear",
+        zh_cn: "非线性回归",
+        zh_tw: "非線性迴歸",
+    ]),
+    entry!("analysis.dose_response" => [
+        en: "Dose-Response (4PL / 5PL)",
+        de: "Dosis-Wirkung (4PL / 5PL)",
+        es: "Dosis-respuesta (4PL / 5PL)",
+        fr: "Dose-réponse (4PL / 5PL)",
+        ja: "用量反応曲線 (4PL / 5PL)",
+        ko: "용량-반응 곡선 (4PL / 5PL)",
+        pt_br: "Dose-resposta (4PL / 5PL)",
+        zh_cn: "量效关系曲线 (4PL / 5PL)",
+        zh_tw: "劑量-反應曲線 (4PL / 5PL)",
+    ]),
+    entry!("analysis.receptor_binding" => [
+        en: "Receptor Binding",
+        de: "Rezeptorbindung",
+        es: "Unión a receptores",
+        fr: "Liaison aux récepteurs",
+        ja: "受容体結合反応",
+        ko: "수용체 결합",
+        pt_br: "Ligação a receptores",
+        zh_cn: "受体结合动力学",
+        zh_tw: "受體結合動力學",
+    ]),
+    entry!("analysis.enzyme_kinetics" => [
+        en: "Enzyme Kinetics",
+        de: "Enzymkinetik",
+        es: "Cinética enzimática",
+        fr: "Cinétique enzymatique",
+        ja: "酵素反応速度論",
+        ko: "효소 반응 속도론",
+        pt_br: "Cinética enzimática",
+        zh_cn: "酶动力学",
+        zh_tw: "酵素動力學",
+    ]),
+    entry!("analysis.exponential" => [
+        en: "Exponential Decay and Association",
+        de: "Exponentieller Zerfall und Assoziation",
+        es: "Decaimiento y asociación exponencial",
+        fr: "Décroissance et association exponentielles",
+        ja: "指数関数的減衰および結合",
+        ko: "지수 감쇠 및 결합",
+        pt_br: "Decaimento e associação exponencial",
+        zh_cn: "指数衰减与结合",
+        zh_tw: "指數衰減與結合",
+    ]),
+    entry!("analysis.growth_curves" => [
+        en: "Growth Curves",
+        de: "Wachstumskurven",
+        es: "Curvas de crecimiento",
+        fr: "Courbes de croissance",
+        ja: "増殖曲線",
+        ko: "성장 곡선",
+        pt_br: "Curvas de crescimento",
+        zh_cn: "生长曲线",
+        zh_tw: "生長曲線",
+    ]),
+    entry!("analysis.pca" => [
+        en: "Principal Component Analysis",
+        de: "Hauptkomponentenanalyse (PCA)",
+        es: "Análisis de componentes principales",
+        fr: "Analyse en composantes principales",
+        ja: "主成分分析 (PCA)",
+        ko: "주성분 분석 (PCA)",
+        pt_br: "Análise de componentes principais",
+        zh_cn: "主成分分析 (PCA)",
+        zh_tw: "主成分分析 (PCA)",
+    ]),
+    entry!("analysis.correlation_matrix" => [
+        en: "Correlation Matrix",
+        de: "Korrelationsmatrix",
+        es: "Matriz de correlación",
+        fr: "Matrice de corrélation",
+        ja: "相関行列",
+        ko: "상관 행렬",
+        pt_br: "Matriz de correlação",
+        zh_cn: "相关矩阵",
+        zh_tw: "相關矩陣",
+    ]),
+    entry!("analysis.cluster_analysis" => [
+        en: "Cluster Analysis",
+        de: "Clusteranalyse",
+        es: "Análisis de conglomerados",
+        fr: "Analyse par regroupement",
+        ja: "クラスター分析",
+        ko: "군집 분석",
+        pt_br: "Análise de agrupamento",
+        zh_cn: "聚类分析",
+        zh_tw: "聚類分析",
+    ]),
+    // --- Dialog buttons & actions ---
+    entry!("btn.ok" => [
+        en: "OK",
+        de: "OK",
+        es: "Aceptar",
+        fr: "OK",
+        ja: "OK",
+        ko: "확인",
+        pt_br: "OK",
+        zh_cn: "确定",
+        zh_tw: "確定",
+    ]),
+    entry!("btn.cancel" => [
+        en: "Cancel",
+        de: "Abbrechen",
+        es: "Cancelar",
+        fr: "Annuler",
+        ja: "キャンセル",
+        ko: "취소",
+        pt_br: "Cancelar",
+        zh_cn: "取消",
+        zh_tw: "取消",
+    ]),
+    entry!("btn.apply" => [
+        en: "Apply",
+        de: "Anwenden",
+        es: "Aplicar",
+        fr: "Appliquer",
+        ja: "適用",
+        ko: "적용",
+        pt_br: "Aplicar",
+        zh_cn: "应用",
+        zh_tw: "套用",
+    ]),
+    entry!("btn.close" => [
+        en: "Close",
+        de: "Schließen",
+        es: "Cerrar",
+        fr: "Fermer",
+        ja: "閉じる",
+        ko: "닫기",
+        pt_br: "Fechar",
+        zh_cn: "关闭",
+        zh_tw: "關閉",
+    ]),
+    entry!("btn.reset" => [
+        en: "Reset",
+        de: "Zurücksetzen",
+        es: "Restablecer",
+        fr: "Réinitialiser",
+        ja: "リセット",
+        ko: "재설정",
+        pt_br: "Redefinir",
+        zh_cn: "重置",
+        zh_tw: "重設",
+    ]),
+    entry!("btn.analyze" => [
+        en: "Analyze",
+        de: "Analysieren",
+        es: "Analizar",
+        fr: "Analyser",
+        ja: "解析",
+        ko: "분석",
+        pt_br: "Analisar",
+        zh_cn: "分析",
+        zh_tw: "分析",
+    ]),
+    entry!("btn.clone_pipeline" => [
+        en: "Clone Pipeline",
+        de: "Pipeline klonen",
+        es: "Clonar canalización",
+        fr: "Cloner le pipeline",
+        ja: "パイプラインを複製",
+        ko: "파이프라인 복제",
+        pt_br: "Clonar pipeline",
+        zh_cn: "克隆流程",
+        zh_tw: "複製流程",
+    ]),
+    entry!("btn.freeze" => [
+        en: "Freeze",
+        de: "Einfrieren",
+        es: "Congelar",
+        fr: "Figer",
+        ja: "凍結",
+        ko: "고정",
+        pt_br: "Congelar",
+        zh_cn: "冻结",
+        zh_tw: "凍結",
+    ]),
+    entry!("btn.unfreeze" => [
+        en: "Unfreeze",
+        de: "Entsperren",
+        es: "Descongelar",
+        fr: "Défiger",
+        ja: "凍結解除",
+        ko: "고정 해제",
+        pt_br: "Descongelar",
+        zh_cn: "取消冻结",
+        zh_tw: "解除凍結",
+    ]),
+    entry!("btn.import" => [
+        en: "Import",
+        de: "Importieren",
+        es: "Importar",
+        fr: "Importer",
+        ja: "インポート",
+        ko: "가져오기",
+        pt_br: "Importar",
+        zh_cn: "导入",
+        zh_tw: "匯入",
+    ]),
+    entry!("btn.export" => [
+        en: "Export",
+        de: "Exportieren",
+        es: "Exportar",
+        fr: "Exporter",
+        ja: "エクスポート",
+        ko: "내보내기",
+        pt_br: "Exportar",
+        zh_cn: "导出",
+        zh_tw: "匯出",
+    ]),
+    entry!("btn.change_data_analyzed" => [
+        en: "Change Data Analyzed",
+        de: "Analysierte Daten ändern",
+        es: "Cambiar datos analizados",
+        fr: "Changer les données analysées",
+        ja: "解析対象データの変更",
+        ko: "분석 데이터 변경",
+        pt_br: "Alterar dados analisados",
+        zh_cn: "更改分析数据",
+        zh_tw: "變更分析資料",
+    ]),
+    entry!("btn.apply_style_from" => [
+        en: "Apply Style From",
+        de: "Stil übernehmen von",
+        es: "Aplicar estilo desde",
+        fr: "Appliquer le style depuis",
+        ja: "スタイルを適用",
+        ko: "스타일 가져오기",
+        pt_br: "Aplicar estilo de",
+        zh_cn: "套用样式自",
+        zh_tw: "套用樣式自",
+    ]),
+    entry!("btn.modify_existing" => [
+        en: "Modify Existing",
+        de: "Bestehende ändern",
+        es: "Modificar existente",
+        fr: "Modifier l'existant",
+        ja: "既存を変更",
+        ko: "기존 항목 수정",
+        pt_br: "Modificar existente",
+        zh_cn: "修改现有",
+        zh_tw: "修改現有",
+    ]),
+    entry!("btn.create_new" => [
+        en: "Create New",
+        de: "Neu erstellen",
+        es: "Crear nuevo",
+        fr: "Créer nouveau",
+        ja: "新規作成",
+        ko: "새로 만들기",
+        pt_br: "Criar novo",
+        zh_cn: "新建",
+        zh_tw: "新建",
+    ]),
+    entry!("btn.auto_add_from_analysis" => [
+        en: "Auto-Add from Analysis",
+        de: "Automatisch aus Analyse hinzufügen",
+        es: "Añadir automáticamente desde análisis",
+        fr: "Ajouter automatiquement depuis l'analyse",
+        ja: "解析結果から自動追加",
+        ko: "분석에서 자동 추가",
+        pt_br: "Adicionar automaticamente da análise",
+        zh_cn: "从分析自动添加",
+        zh_tw: "從分析自動新增",
+    ]),
+    // --- Inspector controls, scales, quick stats & themes ---
+    entry!("inspector.graph_type" => [
+        en: "Graph Type",
+        de: "Diagrammtyp",
+        es: "Tipo de gráfico",
+        fr: "Type de graphique",
+        ja: "グラフの種類",
+        ko: "그래프 유형",
+        pt_br: "Tipo de gráfico",
+        zh_cn: "图表类型",
+        zh_tw: "圖表類型",
+    ]),
+    entry!("inspector.color_palette" => [
+        en: "Color Palette",
+        de: "Farbpalette",
+        es: "Paleta de colores",
+        fr: "Palette de couleurs",
+        ja: "カラーパレット",
+        ko: "색상 팔레트",
+        pt_br: "Paleta de cores",
+        zh_cn: "调色板",
+        zh_tw: "調色盤",
+    ]),
+    entry!("inspector.error_bars" => [
+        en: "Error Bars",
+        de: "Fehlerbalken",
+        es: "Barras de error",
+        fr: "Barres d'erreur",
+        ja: "エラーバー",
+        ko: "오차 막대",
+        pt_br: "Barras de erro",
+        zh_cn: "误差线",
+        zh_tw: "誤差線",
+    ]),
+    entry!("inspector.axis_scale" => [
+        en: "Axis Scale",
+        de: "Achsenskalierung",
+        es: "Escala del eje",
+        fr: "Échelle de l'axe",
+        ja: "軸スケール",
+        ko: "축 눈금",
+        pt_br: "Escala do eixo",
+        zh_cn: "坐标轴刻度",
+        zh_tw: "座標軸尺度",
+    ]),
+    entry!("inspector.scale.linear" => [
+        en: "Linear",
+        de: "Linear",
+        es: "Lineal",
+        fr: "Linéaire",
+        ja: "線形 (Linear)",
+        ko: "선형",
+        pt_br: "Linear",
+        zh_cn: "线性",
+        zh_tw: "線性",
+    ]),
+    entry!("inspector.scale.log10" => [
+        en: "Log 10",
+        de: "Log 10",
+        es: "Log 10",
+        fr: "Log 10",
+        ja: "常用対数 (Log 10)",
+        ko: "상용로그 (Log 10)",
+        pt_br: "Log 10",
+        zh_cn: "Log 10 对数",
+        zh_tw: "Log 10 對數",
+    ]),
+    entry!("inspector.scale.log2" => [
+        en: "Log 2",
+        de: "Log 2",
+        es: "Log 2",
+        fr: "Log 2",
+        ja: "二進対数 (Log 2)",
+        ko: "이진로그 (Log 2)",
+        pt_br: "Log 2",
+        zh_cn: "Log 2 对数",
+        zh_tw: "Log 2 對數",
+    ]),
+    entry!("inspector.scale.ln" => [
+        en: "Natural Log (ln)",
+        de: "Natürlicher Logarithmus (ln)",
+        es: "Logaritmo natural (ln)",
+        fr: "Logarithme naturel (ln)",
+        ja: "自然対数 (ln)",
+        ko: "자연로그 (ln)",
+        pt_br: "Logaritmo natural (ln)",
+        zh_cn: "自然对数 (ln)",
+        zh_tw: "自然對數 (ln)",
+    ]),
+    entry!("inspector.scale.logit" => [
+        en: "Logit",
+        de: "Logit",
+        es: "Logit",
+        fr: "Logit",
+        ja: "ロジット (Logit)",
+        ko: "로짓 (Logit)",
+        pt_br: "Logito",
+        zh_cn: "Logit 变换",
+        zh_tw: "Logit 轉換",
+    ]),
+    entry!("inspector.scale.probit" => [
+        en: "Probit",
+        de: "Probit",
+        es: "Probit",
+        fr: "Probit",
+        ja: "プロビット (Probit)",
+        ko: "프로빗 (Probit)",
+        pt_br: "Probito",
+        zh_cn: "Probit 概率单位",
+        zh_tw: "Probit 機率單位",
+    ]),
+    entry!("inspector.scale.reciprocal" => [
+        en: "Reciprocal (1/X)",
+        de: "Kehrwert (1/X)",
+        es: "Recíproco (1/X)",
+        fr: "Inverse (1/X)",
+        ja: "逆数 (1/X)",
+        ko: "역수 (1/X)",
+        pt_br: "Recíproco (1/X)",
+        zh_cn: "倒数 (1/X)",
+        zh_tw: "倒數 (1/X)",
+    ]),
+    entry!("inspector.broken_axis" => [
+        en: "Broken Axis Segments",
+        de: "Unterbrochene Achsensegmente",
+        es: "Segmentos de eje discontinuo",
+        fr: "Segments d'axe discontinu",
+        ja: "不連続軸セグメント",
+        ko: "분할 축 구간",
+        pt_br: "Segmentos de eixo quebrado",
+        zh_cn: "断轴分段",
+        zh_tw: "斷軸區段",
+    ]),
+    entry!("inspector.bubble_plot" => [
+        en: "Bubble Plot Variables",
+        de: "Blasendiagramm-Variablen",
+        es: "Variables del gráfico de burbujas",
+        fr: "Variables du graphique à bulles",
+        ja: "バブルプロット変数",
+        ko: "버블 차트 변수",
+        pt_br: "Variáveis do gráfico de bolhas",
+        zh_cn: "气泡图变量映射",
+        zh_tw: "氣泡圖變數映射",
+    ]),
+    entry!("inspector.var_x" => [
+        en: "X Variable",
+        de: "X-Variable",
+        es: "Variable X",
+        fr: "Variable X",
+        ja: "X 変数",
+        ko: "X 변수",
+        pt_br: "Variável X",
+        zh_cn: "X 变量",
+        zh_tw: "X 變數",
+    ]),
+    entry!("inspector.var_y" => [
+        en: "Y Variable",
+        de: "Y-Variable",
+        es: "Variable Y",
+        fr: "Variable Y",
+        ja: "Y 変数",
+        ko: "Y 변수",
+        pt_br: "Variável Y",
+        zh_cn: "Y 变量",
+        zh_tw: "Y 變數",
+    ]),
+    entry!("inspector.var_color" => [
+        en: "Color Variable",
+        de: "Farbvariable",
+        es: "Variable de color",
+        fr: "Variable de couleur",
+        ja: "色変数",
+        ko: "색상 변수",
+        pt_br: "Variável de cor",
+        zh_cn: "颜色变量",
+        zh_tw: "顏色變數",
+    ]),
+    entry!("inspector.var_size" => [
+        en: "Size Variable",
+        de: "Größenvariable",
+        es: "Variable de tamaño",
+        fr: "Variable de taille",
+        ja: "サイズ変数",
+        ko: "크기 변수",
+        pt_br: "Variável de tamanho",
+        zh_cn: "大小变量",
+        zh_tw: "大小變數",
+    ]),
+    entry!("inspector.var_label" => [
+        en: "Label Variable",
+        de: "Beschriftungsvariable",
+        es: "Variable de etiqueta",
+        fr: "Variable d'étiquette",
+        ja: "ラベル変数",
+        ko: "레이블 변수",
+        pt_br: "Variável de rótulo",
+        zh_cn: "标签变量",
+        zh_tw: "標籤變數",
+    ]),
+    entry!("inspector.calculated_variable" => [
+        en: "Calculated Variable",
+        de: "Berechnete Variable",
+        es: "Variable calculada",
+        fr: "Variable calculée",
+        ja: "計算変数",
+        ko: "계산 변수",
+        pt_br: "Variável calculada",
+        zh_cn: "计算变量",
+        zh_tw: "計算變數",
+    ]),
+    entry!("inspector.decimal_separator" => [
+        en: "Decimal Separator",
+        de: "Dezimaltrennzeichen",
+        es: "Separador decimal",
+        fr: "Séparateur décimal",
+        ja: "小数点記号",
+        ko: "소수점 구분 기호",
+        pt_br: "Separador decimal",
+        zh_cn: "小数分隔符",
+        zh_tw: "小數分隔符號",
+    ]),
+    entry!("inspector.csv_delimiter" => [
+        en: "CSV Delimiter",
+        de: "CSV-Trennzeichen",
+        es: "Delimitador CSV",
+        fr: "Délimiteur CSV",
+        ja: "CSV 区切り文字",
+        ko: "CSV 구분 기호",
+        pt_br: "Delimitador CSV",
+        zh_cn: "CSV 分隔符",
+        zh_tw: "CSV 分隔符號",
+    ]),
+    entry!("inspector.locale" => [
+        en: "Language",
+        de: "Sprache",
+        es: "Idioma",
+        fr: "Langue",
+        ja: "言語",
+        ko: "언어",
+        pt_br: "Idioma",
+        zh_cn: "语言",
+        zh_tw: "語言",
+    ]),
+    entry!("inspector.quick_stats" => [
+        en: "Selection Statistics",
+        de: "Auswahlstatistik",
+        es: "Estadísticas de selección",
+        fr: "Statistiques de sélection",
+        ja: "選択範囲の統計",
+        ko: "선택 통계",
+        pt_br: "Estatísticas da seleção",
+        zh_cn: "选区统计",
+        zh_tw: "選區統計",
+    ]),
+    entry!("inspector.count" => [
+        en: "Count",
+        de: "Anzahl",
+        es: "Recuento",
+        fr: "Effectif",
+        ja: "件数",
+        ko: "개수",
+        pt_br: "Contagem",
+        zh_cn: "计数",
+        zh_tw: "計數",
+    ]),
+    entry!("inspector.mean" => [
+        en: "Mean",
+        de: "Mittelwert",
+        es: "Media",
+        fr: "Moyenne",
+        ja: "平均",
+        ko: "평균",
+        pt_br: "Média",
+        zh_cn: "均值",
+        zh_tw: "平均值",
+    ]),
+    entry!("inspector.sd" => [
+        en: "SD",
+        de: "SD",
+        es: "DE",
+        fr: "ÉT",
+        ja: "標準偏差 (SD)",
+        ko: "표준편차 (SD)",
+        pt_br: "DP",
+        zh_cn: "标准差 (SD)",
+        zh_tw: "標準差 (SD)",
+    ]),
+    entry!("inspector.sem" => [
+        en: "SEM",
+        de: "SEM",
+        es: "EEM",
+        fr: "ESM",
+        ja: "標準誤差 (SEM)",
+        ko: "표준오차 (SEM)",
+        pt_br: "EPM",
+        zh_cn: "标准误 (SEM)",
+        zh_tw: "標準誤 (SEM)",
+    ]),
+    entry!("inspector.median" => [
+        en: "Median",
+        de: "Median",
+        es: "Mediana",
+        fr: "Médiane",
+        ja: "中央値",
+        ko: "중앙값",
+        pt_br: "Mediana",
+        zh_cn: "中位数",
+        zh_tw: "中位數",
+    ]),
+    entry!("inspector.sum" => [
+        en: "Sum",
+        de: "Summe",
+        es: "Suma",
+        fr: "Somme",
+        ja: "合計",
+        ko: "합계",
+        pt_br: "Soma",
+        zh_cn: "总和",
+        zh_tw: "總和",
+    ]),
+    entry!("inspector.search" => [
+        en: "Search",
+        de: "Suchen",
+        es: "Buscar",
+        fr: "Rechercher",
+        ja: "検索",
+        ko: "검색",
+        pt_br: "Pesquisar",
+        zh_cn: "搜索",
+        zh_tw: "搜尋",
+    ]),
+    entry!("inspector.panel_alignment" => [
+        en: "Plot-Origin Alignment",
+        de: "Achsenursprung-Ausrichtung",
+        es: "Alineación del origen de gráficos",
+        fr: "Alignement de l'origine des tracés",
+        ja: "プロット原点の整列",
+        ko: "플롯 원점 정렬",
+        pt_br: "Alinhamento da origem dos gráficos",
+        zh_cn: "绘图原点对齐",
+        zh_tw: "繪圖原點對齊",
+    ]),
+    entry!("inspector.format_graph" => [
+        en: "Format Graph",
+        de: "Diagramm formatieren",
+        es: "Formato de gráfico",
+        fr: "Formater le graphique",
+        ja: "グラフの書式",
+        ko: "그래프 서식",
+        pt_br: "Formatar gráfico",
+        zh_cn: "设置图表格式",
+        zh_tw: "設定圖表格式",
+    ]),
+    entry!("inspector.format_axes" => [
+        en: "Format Axes",
+        de: "Achsen formatieren",
+        es: "Formato de ejes",
+        fr: "Formater les axes",
+        ja: "軸の書式",
+        ko: "축 서식",
+        pt_br: "Formatar eixos",
+        zh_cn: "设置坐标轴格式",
+        zh_tw: "設定座標軸格式",
+    ]),
+    entry!("inspector.pairwise_comparisons" => [
+        en: "Pairwise Comparisons",
+        de: "Paarweise Vergleiche",
+        es: "Comparaciones por pares",
+        fr: "Comparaisons par paires",
+        ja: "ペアワイズ比較",
+        ko: "쌍대 비교",
+        pt_br: "Comparações pareadas",
+        zh_cn: "成对比较",
+        zh_tw: "成對比較",
+    ]),
+    entry!("inspector.significance_stars" => [
+        en: "Significance Stars",
+        de: "Signifikanzsterne",
+        es: "Estrellas de significancia",
+        fr: "Étoiles de significativité",
+        ja: "有意差アスタリスク",
+        ko: "유의성 별표",
+        pt_br: "Estrelas de significância",
+        zh_cn: "显著性星号",
+        zh_tw: "顯著性星號",
+    ]),
+    entry!("inspector.page_layout" => [
+        en: "Page Layout",
+        de: "Seitenlayout",
+        es: "Diseño de página",
+        fr: "Mise en page",
+        ja: "ページレイアウト",
+        ko: "페이지 레이아웃",
+        pt_br: "Layout de página",
+        zh_cn: "页面布局",
+        zh_tw: "頁面版面",
+    ]),
+    entry!("inspector.exclude_values" => [
+        en: "Exclude Values",
+        de: "Werte ausschließen",
+        es: "Excluir valores",
+        fr: "Exclure les valeurs",
+        ja: "値を除外",
+        ko: "값 제외",
+        pt_br: "Excluir valores",
+        zh_cn: "排除数值",
+        zh_tw: "排除數值",
+    ]),
+    entry!("inspector.analysis_checklist" => [
+        en: "Analysis Checklist",
+        de: "Analyse-Checkliste",
+        es: "Lista de verificación del análisis",
+        fr: "Liste de contrôle de l'analyse",
+        ja: "解析チェックリスト",
+        ko: "분석 체크리스트",
+        pt_br: "Lista de verificação da análise",
+        zh_cn: "分析检查清单",
+        zh_tw: "分析檢查清單",
+    ]),
+    entry!("inspector.command_palette" => [
+        en: "Command Palette",
+        de: "Befehlspalette",
+        es: "Paleta de comandos",
+        fr: "Palette de commandes",
+        ja: "コマンドパレット",
+        ko: "명령 팔레트",
+        pt_br: "Paleta de comandos",
+        zh_cn: "命令面板",
+        zh_tw: "命令選擇區",
+    ]),
+    entry!("theme.light" => [
+        en: "Light",
+        de: "Hell",
+        es: "Claro",
+        fr: "Clair",
+        ja: "ライト",
+        ko: "라이트",
+        pt_br: "Claro",
+        zh_cn: "浅色",
+        zh_tw: "淺色",
+    ]),
+    entry!("theme.dark" => [
+        en: "Dark",
+        de: "Dunkel",
+        es: "Oscuro",
+        fr: "Sombre",
+        ja: "ダーク",
+        ko: "다크",
+        pt_br: "Escuro",
+        zh_cn: "深色",
+        zh_tw: "深色",
+    ]),
+    entry!("theme.high_contrast" => [
+        en: "High Contrast",
+        de: "Hoher Kontrast",
+        es: "Alto contraste",
+        fr: "Contraste élevé",
+        ja: "ハイコントラスト",
+        ko: "고대비",
+        pt_br: "Alto contraste",
+        zh_cn: "高对比度",
+        zh_tw: "高對比",
+    ]),
+];
+
+/// Normalize an arbitrary BCP-47 locale tag to a supported [`LOCALES`] tag, falling back to `"en"`.
+#[must_use]
+pub fn normalize_locale(locale: &str) -> &'static str {
+    let trimmed = locale.trim();
+    if trimmed.is_empty() {
+        return "en";
+    }
+    let normalized = trimmed.replace('_', "-").to_ascii_lowercase();
+    let primary = normalized.split('-').next().unwrap_or("en");
+    if primary == "pt" {
+        return "pt-BR";
+    }
+    if primary == "zh" {
+        let is_traditional = normalized.split('-').skip(1).any(|sub| matches!(sub, "tw" | "hk" | "mo" | "hant"));
+        return if is_traditional { "zh-TW" } else { "zh-CN" };
+    }
+    match primary {
+        "de" => "de",
+        "es" => "es",
+        "fr" => "fr",
+        "ja" => "ja",
+        "ko" => "ko",
+        _ => "en",
+    }
+}
+
+fn exact_locale_index(locale: &str) -> Option<usize> {
+    let trimmed = locale.trim();
+    let lower = trimmed.replace('_', "-").to_ascii_lowercase();
+    match lower.as_str() {
+        "en" => Some(0),
+        "de" => Some(1),
+        "es" => Some(2),
+        "fr" => Some(3),
+        "ja" => Some(4),
+        "ko" => Some(5),
+        "pt-br" => Some(6),
+        "zh-cn" => Some(7),
+        "zh-tw" => Some(8),
+        _ => None,
+    }
+}
+
+/// Native autonym display label for a supported locale tag.
+#[must_use]
+pub fn locale_display_name(locale: &str) -> &'static str {
+    match normalize_locale(locale) {
+        "de" => "Deutsch",
+        "es" => "Español",
+        "fr" => "Français",
+        "ja" => "日本語",
+        "ko" => "한국어",
+        "pt-BR" => "Português (Brasil)",
+        "zh-CN" => "简体中文",
+        "zh-TW" => "繁體中文",
+        _ => "English",
+    }
+}
+
+/// Look up a translation strictly for `locale` without falling back to English.
+///
+/// Returns `None` if `locale` is not a registered code or if `key` is missing/empty in that locale.
+#[must_use]
+pub fn try_tr(locale: &str, key: &str) -> Option<&'static str> {
+    let idx = exact_locale_index(locale)?;
+    let entry = CATALOG.iter().find(|entry| entry.key == key)?;
+    let text = entry.translations.get(idx).copied()?;
+    if text.trim().is_empty() { None } else { Some(text) }
+}
+
+/// Look up a localized string for `(locale, key)`, normalizing BCP-47 tags and falling back to
+/// `"en"` when the key is missing in `locale`, or `""` when `key` is unknown.
+#[must_use]
+pub fn tr(locale: &str, key: &str) -> &'static str {
+    let canonical = normalize_locale(locale);
+    try_tr(canonical, key).or_else(|| try_tr("en", key)).unwrap_or("")
+}
+
+/// Look up a localized string, returning `key` unchanged if it is not registered in [`CATALOG`].
+#[must_use]
+pub fn tr_or<'a>(locale: &str, key: &'a str) -> Cow<'a, str> {
+    let resolved = tr(locale, key);
+    if resolved.is_empty() { Cow::Borrowed(key) } else { Cow::Borrowed(resolved) }
+}
+
+/// Iterate over every registered localization key in [`CATALOG`].
+pub fn all_keys() -> impl Iterator<Item = &'static str> {
+    CATALOG.iter().map(|entry| entry.key)
+}
+
+/// Total number of message keys registered in [`CATALOG`].
+#[must_use]
+pub const fn catalog_len() -> usize {
+    CATALOG.len()
+}
+
+/// Collect all `(locale, key)` pairs that are missing or empty across [`LOCALES`] x [`CATALOG`].
+#[must_use]
+pub fn missing_translations() -> Vec<(&'static str, &'static str)> {
+    let mut missing = Vec::new();
+    for &locale in LOCALES {
+        for entry in CATALOG {
+            if try_tr(locale, entry.key).is_none() {
+                missing.push((locale, entry.key));
+            }
+        }
+    }
+    missing
+}
+
+/// Return the localized label for one of the eight [`TableKind`] scientific data-table archetypes.
+#[must_use]
+pub fn table_kind_label(locale: &str, kind: TableKind) -> &'static str {
+    let key = match kind {
+        TableKind::Xy => "table.xy",
+        TableKind::Column => "table.column",
+        TableKind::Grouped => "table.grouped",
+        TableKind::Contingency => "table.contingency",
+        TableKind::Survival => "table.survival",
+        TableKind::PartsOfWhole => "table.parts_of_whole",
+        TableKind::MultipleVariables => "table.multiple_variables",
+        TableKind::Nested => "table.nested",
+    };
+    tr(locale, key)
+}
+
+/// Return the localized navigator folder label for a [`SheetSection`].
+#[must_use]
+pub fn sheet_section_label(locale: &str, section: SheetSection) -> &'static str {
+    let key = match section {
+        SheetSection::Data => "nav.data_tables",
+        SheetSection::Info => "nav.info",
+        SheetSection::Analyses => "nav.results",
+        SheetSection::Graphs => "nav.graphs",
+        SheetSection::Layouts => "nav.layouts",
+    };
+    tr(locale, key)
+}
+
+/// Regional numeric and CSV delimiter convention bound to a UI locale or explicit user override.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalePreset {
+    pub locale: String,
+    pub decimal_separator: char,
+    pub csv_delimiter: char,
+    pub thousands_separator: Option<char>,
+    pub minus_sign: String,
+}
+
+impl Default for LocalePreset {
+    fn default() -> Self {
+        Self::for_locale("en")
+    }
+}
+
+impl LocalePreset {
+    /// Construct the regional formatting preset for `locale` (`de`/`es`/`fr`/`pt-BR` default to
+    /// comma decimals and semicolon CSV delimiters; `en`/`ja`/`ko`/`zh-CN`/`zh-TW` use period
+    /// decimals and comma CSV delimiters).
+    #[must_use]
+    pub fn for_locale(locale: &str) -> Self {
+        let canonical = normalize_locale(locale);
+        match canonical {
+            "de" | "es" | "fr" | "pt-BR" => Self::comma_semicolon(canonical),
+            _ => Self::period_comma(canonical),
+        }
+    }
+
+    /// Standard period-decimal (`.` / `,` CSV) preset for reproducible international figures.
+    #[must_use]
+    pub fn period_comma(locale: &str) -> Self {
+        Self {
+            locale: normalize_locale(locale).to_owned(),
+            decimal_separator: '.',
+            csv_delimiter: ',',
+            thousands_separator: None,
+            minus_sign: String::from("-"),
+        }
+    }
+
+    /// European/Latin regional preset using comma decimals (`,`) and semicolon CSV delimiter (`;`).
+    #[must_use]
+    pub fn comma_semicolon(locale: &str) -> Self {
+        Self {
+            locale: normalize_locale(locale).to_owned(),
+            decimal_separator: ',',
+            csv_delimiter: ';',
+            thousands_separator: None,
+            minus_sign: String::from("-"),
+        }
+    }
+
+    /// Publication typography variant using Unicode minus (`U+2212`) with `locale`'s decimal rule.
+    #[must_use]
+    pub fn publication(locale: &str) -> Self {
+        let mut base = Self::for_locale(locale);
+        base.minus_sign = String::from("\u{2212}");
+        base
+    }
+
+    /// Build the [`LocaleNumberPolicy`] consumed by `lumencraft-text` axis and *p*-value formatters.
+    #[must_use]
+    pub fn number_policy(&self) -> LocaleNumberPolicy {
+        LocaleNumberPolicy {
+            decimal_separator: self.decimal_separator,
+            thousands_separator: self.thousands_separator,
+            minus_sign: self.minus_sign.clone(),
+        }
+    }
+
+    /// Build matching [`CsvOptions`] for `lumencraft-format` delimited import/export dialogs.
+    #[must_use]
+    pub fn csv_options(&self) -> CsvOptions {
+        CsvOptions {
+            delimiter: self.csv_delimiter,
+            decimal_separator: self.decimal_separator,
+            thousands_separator: self.thousands_separator,
+            ..CsvOptions::csv()
+        }
+    }
+
+    /// Format a numeric axis tick using this preset's [`LocaleNumberPolicy`].
+    #[must_use]
+    pub fn format_axis_tick(&self, value: f64, scale: AxisScale) -> String {
+        format_axis_tick(value, scale, &self.number_policy())
+    }
+
+    /// Format a *p*-value string using this preset's [`LocaleNumberPolicy`].
+    #[must_use]
+    pub fn format_pvalue(&self, p: f64, format: PValueFormat, include_prefix: bool, include_stars: bool) -> String {
+        format_pvalue_label(p, format, include_prefix, include_stars, &self.number_policy())
+    }
+}
 
 #[cfg(test)]
 mod tests {
-    use super::LOCALES;
+    use std::collections::HashSet;
+
+    use lumencraft_math::{AxisScale, PValueFormat};
+
+    use super::{CATALOG, LOCALES, LocalePreset, catalog_len, missing_translations, normalize_locale, tr, try_tr};
 
     #[test]
     fn untranslated_report() {
-        assert!(!LOCALES.is_empty());
-        println!("i18n: {} locale(s) registered ({}); 0 missing catalog keys", LOCALES.len(), LOCALES.join(", "));
+        assert_eq!(LOCALES, &["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"]);
+        assert!(!CATALOG.is_empty());
+
+        let mut seen_keys = HashSet::new();
+        for entry in CATALOG {
+            assert!(seen_keys.insert(entry.key), "duplicate i18n catalog key: {}", entry.key);
+        }
+
+        let missing = missing_translations();
+        assert!(missing.is_empty(), "missing catalog translations: {missing:?}");
+
+        for &locale in LOCALES {
+            let preset = LocalePreset::for_locale(locale);
+            assert_eq!(preset.locale, locale);
+            for entry in CATALOG {
+                let direct = try_tr(locale, entry.key).unwrap();
+                assert_eq!(tr(locale, entry.key), direct);
+            }
+        }
+
+        println!(
+            "i18n: {} locale(s) registered ({}); {} keys x {} locales = {} translations verified; 0 missing catalog keys",
+            LOCALES.len(),
+            LOCALES.join(", "),
+            catalog_len(),
+            LOCALES.len(),
+            LOCALES.len() * catalog_len()
+        );
+    }
+
+    #[test]
+    fn locale_normalization_and_presets_work_without_panics() {
+        assert_eq!(normalize_locale("pt_br"), "pt-BR");
+        assert_eq!(normalize_locale("zh-Hant-TW"), "zh-TW");
+        assert_eq!(normalize_locale("zh_CN"), "zh-CN");
+        assert_eq!(normalize_locale("unknown-XX"), "en");
+
+        let de = LocalePreset::for_locale("de");
+        assert_eq!(de.decimal_separator, ',');
+        assert_eq!(de.csv_delimiter, ';');
+        assert_eq!(de.format_axis_tick(12.34, AxisScale::Linear), "12,34");
+        assert_eq!(de.format_pvalue(0.0023, PValueFormat::FourDecimal, true, true), "P = 0,0023 **");
     }
 }

@@ -9,11 +9,14 @@ description = "LumenCraft deterministic CPU graph and multi-panel publication la
 workspace = true
 
 [dependencies]
+crc32fast = { workspace = true }
+flate2 = { workspace = true }
+lumencraft-chart = { workspace = true }
+lumencraft-doc = { workspace = true }
 lumencraft-math = { workspace = true }
 lumencraft-palette = { workspace = true }
-lumencraft-doc = { workspace = true }
 lumencraft-text = { workspace = true }
-lumencraft-chart = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }

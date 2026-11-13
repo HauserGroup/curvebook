@@ -1,0 +1,1800 @@
+//! Virtualized two-tier `(Group x Subcolumn)` spreadsheet grid view state, cell formatting,
+//! `MultipleVariables` role header strip & `Variables...` recoding/ordering model, `=` Calculated
+//! Variable formula bar with autocomplete, 4-stage `Import & Paste Special` / `Paste Link`
+//! pipeline model, and selection quick-stats footer (`docs/ui-parity.md`,
+//! `docs/data-tables-and-transforms.md`).
+
+use lumencraft_doc::{
+    CategoricalLevelSummary, Cell, CellCoord, CellValue, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind,
+    LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId, TableArchetype, TableKind, VariableRole,
+    VariableSource, XColumnMode, default_column_label,
+};
+use lumencraft_palette::Rgba8;
+use lumencraft_tools::{GridCellCoord, GridToolState, GridVisibleWindow, SelectionQuickStats, ToolCommandIntent};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+const MAX_QUICK_STATS_CELLS_FOR_CLONE_PASS: usize = 50_000;
+
+/// Cardinal arrow navigation direction inside the spreadsheet grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum MoveDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+/// Visual styling metadata computed for one visible cell (`blue italic strikethrough` exclusions,
+/// provenance borders, and selection highlight).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellVisualStyle {
+    pub text_color: Rgba8,
+    pub italic: bool,
+    pub strikethrough: bool,
+    pub excluded_badge: Option<String>,
+    pub provenance_border: Option<LinkBorderColor>,
+    pub provenance_border_rgba: Option<Rgba8>,
+    pub link_id: Option<String>,
+    pub validation_error: Option<String>,
+    pub is_selected: bool,
+    pub is_active: bool,
+    pub is_calculated: bool,
+}
+
+impl Default for CellVisualStyle {
+    fn default() -> Self {
+        Self {
+            text_color: Rgba8::rgb(24, 28, 36),
+            italic: false,
+            strikethrough: false,
+            excluded_badge: None,
+            provenance_border: None,
+            provenance_border_rgba: None,
+            link_id: None,
+            validation_error: None,
+            is_selected: false,
+            is_active: false,
+            is_calculated: false,
+        }
+    }
+}
+
+/// Formatted cell payload materialized strictly for cells inside the active viewport window.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormattedGridCell {
+    pub coord: GridCellCoord,
+    pub flat_col: usize,
+    pub display_text: String,
+    pub excluded: bool,
+    pub visual: CellVisualStyle,
+}
+
+/// Role/type pill rendered in the `MultipleVariables` column header strip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VariableRoleHeader {
+    pub col_index: usize,
+    pub title: String,
+    pub role: VariableRole,
+    pub role_inferred: bool,
+    pub is_calculated: bool,
+    pub formula: Option<String>,
+    pub badge_text: String,
+    pub badge_color: Rgba8,
+}
+
+/// Tier-1 group header span covering one or more replicate subcolumns (`Group A`, `Group B`, ...).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tier1GroupHeader {
+    pub col_index: usize,
+    pub letter: String,
+    pub title: String,
+    pub start_flat_col: usize,
+    pub span: usize,
+    pub variable_role: Option<VariableRoleHeader>,
+}
+
+/// Tier-2 subcolumn header (`Y`, `Y1..Yn`, `Mean`, `SD`, `N`, `A:1`, or variable role tag).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Tier2SubcolumnHeader {
+    pub flat_col: usize,
+    pub col: usize,
+    pub subcol: usize,
+    pub label: String,
+    pub is_calculated: bool,
+}
+
+/// Pinned leading column cell for Row Titles or independent `X` / `Elapsed Time` / `Slice`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LeadingRowData {
+    pub row: usize,
+    pub row_title: String,
+    pub x_or_time_display: Option<String>,
+    pub x_excluded: bool,
+}
+
+/// One materialized visible row slice inside [`GridVisibleFrame`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VisibleGridRow {
+    pub row: usize,
+    pub leading: LeadingRowData,
+    pub cells: Vec<FormattedGridCell>,
+}
+
+/// Complete O(visible_rows * visible_subcols) virtualized frame slice for rendering the grid.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GridVisibleFrame {
+    pub sheet_id: SheetId,
+    pub kind: TableKind,
+    pub frozen: bool,
+    pub row_titles_expanded: bool,
+    pub x_column_title: Option<String>,
+    pub total_rows: usize,
+    pub total_flat_cols: usize,
+    pub window: GridVisibleWindow,
+    pub tier1_groups: Vec<Tier1GroupHeader>,
+    pub tier2_subcolumns: Vec<Tier2SubcolumnHeader>,
+    pub rows: Vec<VisibleGridRow>,
+}
+
+/// Selection summary statistics footer (`n`, `excluded`, `mean`, `SD`, `SEM`, `median`, `sum`).
+#[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
+pub struct GridQuickStats {
+    pub selected_cells: usize,
+    pub n: usize,
+    pub excluded: usize,
+    pub sum: Option<f64>,
+    pub mean: Option<f64>,
+    pub sd: Option<f64>,
+    pub sem: Option<f64>,
+    pub median: Option<f64>,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+}
+
+impl GridQuickStats {
+    /// Compute quick summary statistics across `[a, b]` directly from `sheet` without cloning cells.
+    #[must_use]
+    pub fn from_data_sheet(sheet: &DataSheet, a: GridCellCoord, b: GridCellCoord) -> Self {
+        let row_count = sheet.archetype.row_count();
+        let col_count = sheet.archetype.column_count();
+        if row_count == 0 || col_count == 0 {
+            return Self::default();
+        }
+        let r0 = a.row.min(b.row);
+        let r1 = a.row.max(b.row);
+        if r0 >= row_count {
+            return Self::default();
+        }
+        let r1 = r1.min(row_count - 1);
+
+        let f0 = flat_index_for_coord(&sheet.archetype, a.col, a.subcol);
+        let f1 = flat_index_for_coord(&sheet.archetype, b.col, b.subcol);
+        let start_flat = f0.min(f1);
+        let end_flat = f0.max(f1);
+        let total_flat = total_flat_data_subcolumns(&sheet.archetype);
+        if total_flat == 0 || start_flat >= total_flat {
+            return Self::default();
+        }
+        let end_flat = end_flat.min(total_flat - 1);
+
+        let mut coords = Vec::with_capacity(end_flat - start_flat + 1);
+        for flat in start_flat..=end_flat {
+            if let Some((c, s)) = resolve_flat_coord(&sheet.archetype, flat) {
+                coords.push((c, s));
+            }
+        }
+
+        let mut selected_cells = 0usize;
+        let mut excluded = 0usize;
+        let mut values = Vec::new();
+        for r in r0..=r1 {
+            for &(c, s) in &coords {
+                selected_cells += 1;
+                if let Some(cell) = sheet.cell(CellCoord::new(r, c, s)) {
+                    if cell.excluded {
+                        excluded += 1;
+                        continue;
+                    }
+                    if let CellValue::Number(v) = cell.value
+                        && v.is_finite()
+                    {
+                        values.push(v);
+                    }
+                }
+            }
+        }
+
+        Self::from_values(selected_cells, excluded, &mut values)
+    }
+
+    #[must_use]
+    fn from_values(selected_cells: usize, excluded: usize, values: &mut [f64]) -> Self {
+        if values.is_empty() {
+            return Self { selected_cells, n: 0, excluded, ..Self::default() };
+        }
+        let n = values.len();
+        let mut sum = 0.0;
+        let mut comp = 0.0;
+        let mut min = f64::INFINITY;
+        let mut max = f64::NEG_INFINITY;
+        for &v in values.iter() {
+            let t = sum + v;
+            comp += if sum.abs() >= v.abs() { (sum - t) + v } else { (v - t) + sum };
+            sum = t;
+            min = min.min(v);
+            max = max.max(v);
+        }
+        sum += comp;
+        let mean = sum / (n as f64);
+
+        let (sd, sem) = if n > 1 {
+            let mut sq_sum = 0.0;
+            for &v in values.iter() {
+                let d = v - mean;
+                sq_sum += d * d;
+            }
+            let sample_sd = (sq_sum / ((n - 1) as f64)).sqrt();
+            (Some(sample_sd), Some(sample_sd / (n as f64).sqrt()))
+        } else {
+            (None, None)
+        };
+
+        values.sort_by(f64::total_cmp);
+        let median = if n % 2 == 1 { Some(values[n / 2]) } else { Some(0.5 * (values[n / 2 - 1] + values[n / 2])) };
+
+        Self { selected_cells, n, excluded, sum: Some(sum), mean: Some(mean), sd, sem, median, min: Some(min), max: Some(max) }
+    }
+
+    /// Format a concise status-bar summary (`n`, `excluded`, `mean`, `SD`, `SEM`, `median`, `sum`).
+    #[must_use]
+    pub fn format_footer(&self) -> String {
+        let mut parts = vec![format!("n={}", self.n), format!("excluded={}", self.excluded)];
+        if let Some(mean) = self.mean {
+            parts.push(format!("mean={}", format_compact_f64(mean, '.')));
+        }
+        if let Some(sd) = self.sd {
+            parts.push(format!("SD={}", format_compact_f64(sd, '.')));
+        }
+        if let Some(sem) = self.sem {
+            parts.push(format!("SEM={}", format_compact_f64(sem, '.')));
+        }
+        if let Some(median) = self.median {
+            parts.push(format!("median={}", format_compact_f64(median, '.')));
+        }
+        if let Some(sum) = self.sum {
+            parts.push(format!("sum={}", format_compact_f64(sum, '.')));
+        }
+        parts.join(" | ")
+    }
+}
+
+/// State model for the `Variables...` column-role, level-recoding, and level-ordering editor
+/// (`MultipleVariables` tables).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct VariablesDialogState {
+    pub open: bool,
+    pub selected_column: Option<usize>,
+    pub pending_role: Option<VariableRole>,
+    pub recode_mappings: Vec<(String, String)>,
+    pub level_order: LevelOrderSpec,
+    pub ordered_levels: Vec<CategoricalLevelSummary>,
+}
+
+impl VariablesDialogState {
+    /// Open and populate the inspector for `col_idx` on `sheet`.
+    pub fn open_for_column(&mut self, sheet: &DataSheet, col_idx: usize) {
+        self.open = true;
+        self.selected_column = Some(col_idx);
+        self.recode_mappings.clear();
+        self.sync_from_sheet(sheet);
+    }
+
+    /// Refresh level counts and role metadata from `sheet`.
+    pub fn sync_from_sheet(&mut self, sheet: &DataSheet) {
+        let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
+            self.ordered_levels.clear();
+            return;
+        };
+        let Some(col_idx) = self.selected_column else {
+            self.ordered_levels.clear();
+            return;
+        };
+        let Some(col) = mv.variables.get(col_idx) else {
+            self.ordered_levels.clear();
+            return;
+        };
+        self.pending_role = Some(col.role);
+        self.level_order = col.level_order.clone();
+        self.ordered_levels = col.ordered_levels_with(&self.level_order);
+    }
+
+    /// Stage a bulk level recoding replacement (`from -> to`), deduplicating existing entries.
+    pub fn add_recode_mapping(&mut self, from: impl Into<String>, to: impl Into<String>) {
+        let from = from.into();
+        let to = to.into();
+        if let Some(existing) = self.recode_mappings.iter_mut().find(|(src, _)| src == &from) {
+            existing.1 = to;
+        } else {
+            self.recode_mappings.push((from, to));
+        }
+    }
+
+    /// Merge multiple typo/synonym levels into one canonical `target` label.
+    pub fn merge_levels_into(&mut self, sources: &[&str], target: &str) {
+        for &src in sources {
+            if src != target {
+                self.add_recode_mapping(src, target);
+            }
+        }
+    }
+
+    /// Update the pending [`LevelOrderSpec`] and refresh live preview ordering when `sheet` is given.
+    pub fn set_level_order(&mut self, spec: LevelOrderSpec, sheet: Option<&DataSheet>) {
+        self.level_order = spec;
+        if let Some(s) = sheet
+            && let TableArchetype::MultipleVariables(mv) = &s.archetype
+            && let Some(col) = self.selected_column.and_then(|idx| mv.variables.get(idx))
+        {
+            self.ordered_levels = col.ordered_levels_with(&self.level_order);
+        }
+    }
+
+    /// Preview recoding impact without mutating `sheet`, returning `(changed_cells, resulting_levels)`.
+    #[must_use]
+    pub fn preview_recode(&self, sheet: &DataSheet) -> Option<(usize, Vec<CategoricalLevelSummary>)> {
+        let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
+            return None;
+        };
+        let col_idx = self.selected_column?;
+        let mut preview_col = mv.variables.get(col_idx)?.clone();
+        let edited = preview_col.recode_levels(&self.recode_mappings);
+        let levels = preview_col.ordered_levels_with(&self.level_order);
+        Some((edited, levels))
+    }
+
+    /// Emit a `"table.setVariableRole"` command intent for the selected column.
+    #[must_use]
+    pub fn build_role_command(&self, sheet_id: &SheetId) -> Option<ToolCommandIntent> {
+        let col = self.selected_column?;
+        let role = self.pending_role?;
+        Some(ToolCommandIntent {
+            command_id: String::from("table.setVariableRole"),
+            params: json!({ "sheet_id": sheet_id.as_str(), "column": col, "role": role }),
+        })
+    }
+
+    /// Emit a `"table.recodeLevels"` command intent for the staged recode mappings.
+    #[must_use]
+    pub fn build_recode_command(&self, sheet_id: &SheetId) -> Option<ToolCommandIntent> {
+        let col = self.selected_column?;
+        if self.recode_mappings.is_empty() {
+            return None;
+        }
+        let mappings: Vec<serde_json::Value> = self.recode_mappings.iter().map(|(from, to)| json!({ "from": from, "to": to })).collect();
+        Some(ToolCommandIntent {
+            command_id: String::from("table.recodeLevels"),
+            params: json!({ "sheet_id": sheet_id.as_str(), "column": col, "mappings": mappings }),
+        })
+    }
+
+    /// Emit a `"table.setCategoricalOrder"` command intent for `level_order`.
+    #[must_use]
+    pub fn build_order_command(&self, sheet_id: &SheetId) -> Option<ToolCommandIntent> {
+        let col = self.selected_column?;
+        Some(ToolCommandIntent {
+            command_id: String::from("table.setCategoricalOrder"),
+            params: json!({ "sheet_id": sheet_id.as_str(), "column": col, "order_spec": self.level_order }),
+        })
+    }
+}
+
+/// Category of an item suggested by the `=` Calculated Variable formula bar autocomplete.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum FormulaAutocompleteKind {
+    Column,
+    ScalarFunction,
+    AggregateFunction,
+    WindowFunction,
+    Constant,
+    InfoConstant,
+}
+
+/// One autocomplete suggestion produced by [`FormulaBarState`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FormulaAutocompleteItem {
+    pub label: String,
+    pub insert_text: String,
+    pub kind: FormulaAutocompleteKind,
+    pub detail: String,
+}
+
+const FORMULA_BUILTINS: &[(&str, &str, FormulaAutocompleteKind, &str)] = &[
+    ("abs(x)", "abs(", FormulaAutocompleteKind::ScalarFunction, "Absolute value"),
+    ("sqrt(x)", "sqrt(", FormulaAutocompleteKind::ScalarFunction, "Square root"),
+    ("sqr(x)", "sqr(", FormulaAutocompleteKind::ScalarFunction, "Square (x^2)"),
+    ("ln(x)", "ln(", FormulaAutocompleteKind::ScalarFunction, "Natural logarithm"),
+    ("log10(x)", "log10(", FormulaAutocompleteKind::ScalarFunction, "Base-10 logarithm"),
+    ("log2(x)", "log2(", FormulaAutocompleteKind::ScalarFunction, "Base-2 logarithm"),
+    ("exp(x)", "exp(", FormulaAutocompleteKind::ScalarFunction, "Exponential (e^x)"),
+    ("logit(p)", "logit(", FormulaAutocompleteKind::ScalarFunction, "Logit transform ln(p/(1-p))"),
+    ("probit(p)", "probit(", FormulaAutocompleteKind::ScalarFunction, "Probit transform 5 + inv_norm(p)"),
+    ("round(x)", "round(", FormulaAutocompleteKind::ScalarFunction, "Round to nearest integer"),
+    ("floor(x)", "floor(", FormulaAutocompleteKind::ScalarFunction, "Floor integer"),
+    ("ceil(x)", "ceil(", FormulaAutocompleteKind::ScalarFunction, "Ceiling integer"),
+    ("if(cond, a, b)", "if(", FormulaAutocompleteKind::ScalarFunction, "Conditional branch"),
+    ("clamp(x, lo, hi)", "clamp(", FormulaAutocompleteKind::ScalarFunction, "Clamp value to [lo, hi]"),
+    ("is_defined(x)", "is_defined(", FormulaAutocompleteKind::ScalarFunction, "True when cell is non-missing"),
+    ("count(var)", "count(", FormulaAutocompleteKind::AggregateFunction, "Active non-missing count"),
+    ("sum(var)", "sum(", FormulaAutocompleteKind::AggregateFunction, "Column sum"),
+    ("mean(var)", "mean(", FormulaAutocompleteKind::AggregateFunction, "Column arithmetic mean"),
+    ("sd(var)", "sd(", FormulaAutocompleteKind::AggregateFunction, "Sample standard deviation"),
+    ("sem(var)", "sem(", FormulaAutocompleteKind::AggregateFunction, "Standard error of the mean"),
+    ("median(var)", "median(", FormulaAutocompleteKind::AggregateFunction, "Column median"),
+    ("iqr(var)", "iqr(", FormulaAutocompleteKind::AggregateFunction, "Interquartile range"),
+    ("percentile(var, p)", "percentile(", FormulaAutocompleteKind::AggregateFunction, "p-th percentile (0..100)"),
+    ("zscore(var)", "zscore(", FormulaAutocompleteKind::AggregateFunction, "Standardized z-score"),
+    ("countif(cond)", "countif(", FormulaAutocompleteKind::AggregateFunction, "Conditional row count"),
+    ("sumif(cond, var)", "sumif(", FormulaAutocompleteKind::AggregateFunction, "Conditional column sum"),
+    ("meanif(cond, var)", "meanif(", FormulaAutocompleteKind::AggregateFunction, "Conditional column mean"),
+    ("row_number()", "row_number()", FormulaAutocompleteKind::WindowFunction, "1-based row number"),
+    ("rank(var)", "rank(", FormulaAutocompleteKind::WindowFunction, "Competition rank"),
+    ("dense_rank(var)", "dense_rank(", FormulaAutocompleteKind::WindowFunction, "Dense rank without gaps"),
+    ("lag(var, k)", "lag(", FormulaAutocompleteKind::WindowFunction, "Previous row offset k"),
+    ("lead(var, k)", "lead(", FormulaAutocompleteKind::WindowFunction, "Next row offset k"),
+    ("cumsum(var)", "cumsum(", FormulaAutocompleteKind::WindowFunction, "Cumulative sum"),
+    ("cummean(var)", "cummean(", FormulaAutocompleteKind::WindowFunction, "Cumulative running mean"),
+    ("diff(var, k)", "diff(", FormulaAutocompleteKind::WindowFunction, "Difference over lag k"),
+    ("moving_avg(var, w)", "moving_avg(", FormulaAutocompleteKind::WindowFunction, "Trailing moving average"),
+    ("pi", "pi", FormulaAutocompleteKind::Constant, "Circle constant 3.14159..."),
+    ("e", "e", FormulaAutocompleteKind::Constant, "Euler constant 2.71828..."),
+    ("$row", "$row", FormulaAutocompleteKind::Constant, "1-based row index"),
+];
+
+/// In-table `=` Calculated Variable formula bar with live syntax validation and column/function
+/// autocomplete (`docs/data-tables-and-transforms.md` §4).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FormulaBarState {
+    pub active: bool,
+    pub target_column: Option<usize>,
+    pub target_title: String,
+    pub input: String,
+    pub cursor_byte: usize,
+    pub completions: Vec<FormulaAutocompleteItem>,
+    pub selected_completion: usize,
+    pub parse_error: Option<String>,
+    pub is_valid: bool,
+}
+
+impl FormulaBarState {
+    /// Focus the formula bar on column `col_idx` of `sheet`.
+    pub fn open_for_column(&mut self, sheet: &DataSheet, col_idx: usize, doc: Option<&ProjectDocument>) {
+        self.active = true;
+        self.target_column = Some(col_idx);
+        self.selected_completion = 0;
+
+        if let TableArchetype::MultipleVariables(mv) = &sheet.archetype
+            && let Some(var) = mv.variables.get(col_idx)
+        {
+            self.target_title = var.title.clone();
+            self.input = match &var.source {
+                VariableSource::Calculated { formula } => format!("= {formula}"),
+                VariableSource::Entered => String::from("="),
+            };
+        } else {
+            self.target_title = default_column_label(col_idx);
+            self.input = String::from("=");
+        }
+        self.cursor_byte = self.input.len();
+        self.refresh_validation_and_completions(doc, Some(sheet));
+    }
+
+    /// Update the edited formula buffer and cursor offset (safe for arbitrary UTF-8 positions).
+    pub fn set_input(&mut self, text: impl Into<String>, cursor_byte: Option<usize>, doc: &ProjectDocument) {
+        self.input = text.into();
+        let raw_pos = cursor_byte.unwrap_or(self.input.len()).min(self.input.len());
+        self.cursor_byte = clamp_char_boundary(&self.input, raw_pos);
+        self.selected_completion = 0;
+        let active_sheet = doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id));
+        self.refresh_validation_and_completions(Some(doc), active_sheet);
+    }
+
+    /// Accept the currently highlighted autocomplete item into `self.input`.
+    pub fn accept_completion(&mut self, doc: &ProjectDocument) -> bool {
+        let Some(item) = self.completions.get(self.selected_completion).cloned() else {
+            return false;
+        };
+        let (prefix_start, prefix_end) = active_token_span(&self.input, self.cursor_byte);
+        let mut updated = String::with_capacity(self.input.len() + item.insert_text.len());
+        updated.push_str(&self.input[..prefix_start]);
+        updated.push_str(&item.insert_text);
+        let new_cursor = updated.len();
+        updated.push_str(&self.input[prefix_end..]);
+        self.set_input(updated, Some(new_cursor), doc);
+        true
+    }
+
+    /// Emit a canonical `"table.setCalculatedVariable"` command intent if the formula parses cleanly.
+    pub fn commit_intent(&self, sheet_id: &SheetId) -> Result<ToolCommandIntent, String> {
+        let Some(col) = self.target_column else {
+            return Err(String::from("no target variable column selected"));
+        };
+        if let Some(err) = &self.parse_error {
+            return Err(err.clone());
+        }
+        let normalized = self.input.trim().strip_prefix('=').unwrap_or(self.input.trim()).trim().to_owned();
+        if normalized.is_empty() {
+            return Err(String::from("calculated variable formula cannot be empty"));
+        }
+        Ok(ToolCommandIntent {
+            command_id: String::from("table.setCalculatedVariable"),
+            params: json!({
+                "sheet_id": sheet_id.as_str(),
+                "column": col,
+                "title": self.target_title,
+                "formula": normalized,
+            }),
+        })
+    }
+
+    fn refresh_validation_and_completions(&mut self, doc: Option<&ProjectDocument>, sheet: Option<&DataSheet>) {
+        let trimmed = self.input.trim();
+        let body = trimmed.strip_prefix('=').unwrap_or(trimmed).trim();
+        if body.is_empty() {
+            self.parse_error = None;
+            self.is_valid = false;
+        } else {
+            match validate_formula_syntax(body) {
+                Ok(()) => {
+                    self.parse_error = None;
+                    self.is_valid = true;
+                }
+                Err(err) => {
+                    self.parse_error = Some(err);
+                    self.is_valid = false;
+                }
+            }
+        }
+
+        self.completions = build_autocomplete_items(&self.input, self.cursor_byte, self.target_column, doc, sheet);
+        if self.selected_completion >= self.completions.len() {
+            self.selected_completion = 0;
+        }
+    }
+}
+
+/// Active stage of the four-stage `Import & Paste Special` / `Paste Link` pipeline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ImportWizardStage {
+    #[default]
+    Source,
+    Filter,
+    Placement,
+    Provenance,
+}
+
+/// Stage 1 origin type in [`ImportPasteWizardState`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ImportOriginKind {
+    #[default]
+    Clipboard,
+    InternalDataSheet,
+    InternalResultSheet,
+    ExternalDelimitedFile,
+}
+
+/// Complete 4-stage `Import & Paste Special` / `Paste Link` UI state model
+/// (`docs/data-tables-and-transforms.md` §6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ImportPasteWizardState {
+    pub open: bool,
+    pub stage: ImportWizardStage,
+    pub is_live_link: bool,
+    pub origin_kind: ImportOriginKind,
+    pub raw_clipboard_text: String,
+    pub source_sheet_id: Option<SheetId>,
+    pub source_tab_id: Option<String>,
+    pub source_range: SheetCellRange,
+    pub external_file_path: String,
+    pub delimiter: char,
+    pub decimal_separator: char,
+    pub filter: ImportFilterSpec,
+    pub placement: ImportPlacementSpec,
+    pub link_id: String,
+    pub provenance_note: String,
+    pub record_in_info_sheet: bool,
+}
+
+impl Default for ImportPasteWizardState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            stage: ImportWizardStage::Source,
+            is_live_link: false,
+            origin_kind: ImportOriginKind::Clipboard,
+            raw_clipboard_text: String::new(),
+            source_sheet_id: None,
+            source_tab_id: None,
+            source_range: SheetCellRange::default(),
+            external_file_path: String::new(),
+            delimiter: '\t',
+            decimal_separator: '.',
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec::default(),
+            link_id: String::from("link-1"),
+            provenance_note: String::new(),
+            record_in_info_sheet: true,
+        }
+    }
+}
+
+impl ImportPasteWizardState {
+    /// Advance to the next stage (`Source -> Filter -> Placement -> Provenance`).
+    pub fn next_stage(&mut self) {
+        self.stage = match self.stage {
+            ImportWizardStage::Source => ImportWizardStage::Filter,
+            ImportWizardStage::Filter => ImportWizardStage::Placement,
+            ImportWizardStage::Placement | ImportWizardStage::Provenance => ImportWizardStage::Provenance,
+        };
+    }
+
+    /// Step back to the previous stage.
+    pub fn prev_stage(&mut self) {
+        self.stage = match self.stage {
+            ImportWizardStage::Source | ImportWizardStage::Filter => ImportWizardStage::Source,
+            ImportWizardStage::Placement => ImportWizardStage::Filter,
+            ImportWizardStage::Provenance => ImportWizardStage::Placement,
+        };
+    }
+
+    /// Build the [`LinkSource`] corresponding to Stage 1 settings.
+    #[must_use]
+    pub fn build_link_source(&self, doc: Option<&ProjectDocument>) -> LinkSource {
+        match self.origin_kind {
+            ImportOriginKind::Clipboard => LinkSource::Clipboard,
+            ImportOriginKind::InternalDataSheet => LinkSource::InternalSheet {
+                sheet_id: self.source_sheet_id.clone().unwrap_or_else(|| SheetId::new("data-1")),
+                kind: InternalLinkKind::DataSheet,
+                tab_id: None,
+                range: self.source_range,
+            },
+            ImportOriginKind::InternalResultSheet => {
+                let sheet_id = self.source_sheet_id.clone().unwrap_or_else(|| SheetId::new("res-1"));
+                let kind = doc.and_then(|d| d.result_sheet(&sheet_id)).map_or(InternalLinkKind::TerminalResultSheet, |rs| {
+                    if rs.analyzable_data.is_some() { InternalLinkKind::AnalyzableResultSheet } else { InternalLinkKind::TerminalResultSheet }
+                });
+                LinkSource::InternalSheet { sheet_id, kind, tab_id: self.source_tab_id.clone(), range: self.source_range }
+            }
+            ImportOriginKind::ExternalDelimitedFile => LinkSource::ExternalDelimitedFile {
+                path: self.external_file_path.clone(),
+                delimiter: self.delimiter,
+                decimal_separator: self.decimal_separator,
+            },
+        }
+    }
+
+    /// Assemble the full [`ImportLinkSpec`] across Stages 1–3.
+    #[must_use]
+    pub fn to_link_spec(&self, doc: Option<&ProjectDocument>) -> ImportLinkSpec {
+        ImportLinkSpec { source: self.build_link_source(doc), filter: self.filter.clone(), placement: self.placement.clone() }
+    }
+
+    /// Determine the provenance border badge color that will surround the placed region.
+    #[must_use]
+    pub fn preview_border_color(&self, doc: Option<&ProjectDocument>) -> Option<LinkBorderColor> {
+        if !self.is_live_link {
+            return None;
+        }
+        self.build_link_source(doc).border_color()
+    }
+
+    /// Preview Stage 1–3 cells cleanly (honoring delimiter, decimal separator, `*` exclusion, and
+    /// `transpose`) without mutating the document.
+    #[must_use]
+    pub fn preview_grid(&self, doc: Option<&ProjectDocument>) -> Vec<Vec<Cell>> {
+        let mut grid = match self.origin_kind {
+            ImportOriginKind::Clipboard | ImportOriginKind::ExternalDelimitedFile => self
+                .raw_clipboard_text
+                .lines()
+                .filter(|line| !line.is_empty())
+                .map(|line| {
+                    line.split(self.delimiter)
+                        .map(|tok| Cell::parse_import_token(tok, self.decimal_separator, self.filter.parse_asterisk_exclusions))
+                        .collect::<Vec<Cell>>()
+                })
+                .collect::<Vec<Vec<Cell>>>(),
+            ImportOriginKind::InternalDataSheet => doc
+                .and_then(|d| self.source_sheet_id.as_ref().and_then(|id| d.data_sheet(id)))
+                .map(|ds| ds.extract_cell_grid(self.source_range))
+                .unwrap_or_default(),
+            ImportOriginKind::InternalResultSheet => Vec::new(),
+        };
+
+        if let Some((r0, r1)) = self.filter.row_window {
+            if r0 <= r1 && r0 < grid.len() {
+                let end = r1.min(grid.len() - 1);
+                grid = grid[r0..=end].to_vec();
+            } else {
+                grid.clear();
+            }
+        }
+        if let Some((c0, c1)) = self.filter.col_window {
+            for row in &mut grid {
+                if c0 <= c1 && c0 < row.len() {
+                    let end = c1.min(row.len() - 1);
+                    *row = row[c0..=end].to_vec();
+                } else {
+                    row.clear();
+                }
+            }
+        }
+        if let Some(k) = self.filter.decimate_every_k
+            && k >= 1
+        {
+            grid = grid.into_iter().step_by(k).collect();
+        }
+        if self.placement.transpose {
+            grid = lumencraft_doc::transpose_cell_grid(&grid);
+        }
+        grid
+    }
+
+    /// Emit `"table.pasteLink"` (for live links) or `"table.paste"` (for static pastes).
+    #[must_use]
+    pub fn build_command_intent(&self, target_sheet_id: &SheetId, doc: Option<&ProjectDocument>) -> ToolCommandIntent {
+        let spec = self.to_link_spec(doc);
+        if self.is_live_link && !matches!(spec.source, LinkSource::Clipboard) {
+            let link_id = (!self.link_id.trim().is_empty()).then_some(self.link_id.as_str());
+            let provenance_summary = (!self.provenance_note.trim().is_empty()).then_some(self.provenance_note.as_str());
+            return ToolCommandIntent {
+                command_id: String::from("table.pasteLink"),
+                params: json!({
+                    "target_sheet_id": target_sheet_id.as_str(),
+                    "link_id": link_id,
+                    "link_spec": spec,
+                    "provenance_summary": provenance_summary,
+                    "record_in_info_sheet": self.record_in_info_sheet,
+                }),
+            };
+        }
+
+        let delimiter = if self.delimiter == '\0' { String::from("\t") } else { self.delimiter.to_string() };
+        let decimal_separator = if self.decimal_separator == ',' { "," } else { "." };
+        ToolCommandIntent {
+            command_id: String::from("table.paste"),
+            params: json!({
+                "sheet_id": target_sheet_id.as_str(),
+                "text": self.raw_clipboard_text,
+                "delimiter": delimiter,
+                "decimal_separator": decimal_separator,
+                "anchor": self.placement.anchor,
+                "mode": self.placement.mode,
+                "transpose": self.placement.transpose,
+                "propagate_title_header": self.placement.propagate_title_header,
+                "skip_contiguous_blanks": self.placement.skip_contiguous_blanks,
+                "filter": self.filter,
+            }),
+        }
+    }
+}
+
+/// Non-modal `Format Link` inspector opened by double-clicking a linked cell.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct FormatLinkInspectorState {
+    pub open: bool,
+    pub region_id: String,
+    pub border_color: Option<LinkBorderColor>,
+    pub provenance_summary: String,
+    pub spec: Option<ImportLinkSpec>,
+}
+
+/// View-layer state for the virtualized spreadsheet grid and selection status bar.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct GridViewState {
+    pub tool: GridToolState,
+    pub quick_stats: Option<SelectionQuickStats>,
+    pub extended_stats: Option<GridQuickStats>,
+    pub decimal_separator: char,
+    pub row_titles_collapsed_override: Option<bool>,
+    pub variables_dialog: VariablesDialogState,
+    pub formula_bar: FormulaBarState,
+    pub import_wizard: ImportPasteWizardState,
+    pub format_link_inspector: FormatLinkInspectorState,
+}
+
+impl GridViewState {
+    /// Recompute quick summary statistics (`n`, `excluded`, `mean`, `SD`, `SEM`, `median`, `sum`)
+    /// for the active data sheet selection.
+    pub fn refresh_selection_stats(&mut self, doc: &ProjectDocument) {
+        let Some(active_id) = &doc.active_sheet_id else {
+            self.quick_stats = None;
+            self.extended_stats = None;
+            return;
+        };
+        let Some(sheet) = doc.data_sheet(active_id) else {
+            self.quick_stats = None;
+            self.extended_stats = None;
+            return;
+        };
+        let (Some(a), Some(b)) = (self.tool.anchor, self.tool.active) else {
+            self.quick_stats = None;
+            self.extended_stats = None;
+            return;
+        };
+
+        let selected_cells = selection_cell_count(sheet, a, b);
+        if selected_cells <= MAX_QUICK_STATS_CELLS_FOR_CLONE_PASS {
+            self.extended_stats = Some(GridQuickStats::from_data_sheet(sheet, a, b));
+            self.quick_stats = Some(SelectionQuickStats::from_data_sheet(sheet, a, b));
+        } else {
+            self.extended_stats = Some(GridQuickStats { selected_cells, ..GridQuickStats::default() });
+            self.quick_stats = None;
+        }
+    }
+
+    /// Visible row/column window for the currently selected [`DataSheet`].
+    #[must_use]
+    pub fn visible_window(&self, doc: &ProjectDocument) -> Option<GridVisibleWindow> {
+        let active_id = doc.active_sheet_id.as_ref()?;
+        let sheet = doc.data_sheet(active_id)?;
+        let total_rows = sheet.archetype.row_count();
+        let total_flat_cols = total_flat_data_subcolumns(&sheet.archetype);
+        Some(self.tool.visible_window(total_rows, total_flat_cols))
+    }
+
+    /// Materialize the two-tier `(Group x Subcolumn)` visible frame strictly for `[start_row..end_row)`
+    /// and `[start_col..end_col)` in `O(visible_rows * visible_subcols)` time.
+    #[must_use]
+    pub fn visible_frame(&self, doc: &ProjectDocument) -> Option<GridVisibleFrame> {
+        let active_id = doc.active_sheet_id.as_ref()?;
+        let sheet = doc.data_sheet(active_id)?;
+        let total_rows = sheet.archetype.row_count();
+        let total_flat_cols = total_flat_data_subcolumns(&sheet.archetype);
+        let window = self.tool.visible_window(total_rows, total_flat_cols);
+
+        let decimal_sep = if self.decimal_separator == ',' { ',' } else { '.' };
+        let (tier1_groups, tier2_subcolumns) = build_visible_headers(&sheet.archetype, window.start_col, window.end_col);
+
+        let sel_bounds = selection_flat_bounds(&sheet.archetype, self.tool.anchor, self.tool.active);
+        let fmt_ctx = CellFormatContext { decimal_sep, sel_bounds, active_coord: self.tool.active };
+        let mut rows = Vec::with_capacity(window.end_row.saturating_sub(window.start_row));
+        for r in window.start_row..window.end_row {
+            let leading = build_leading_row(sheet, r, decimal_sep);
+            let mut cells = Vec::with_capacity(tier2_subcolumns.len());
+            for hdr in &tier2_subcolumns {
+                let coord = GridCellCoord::new(r, hdr.col, hdr.subcol);
+                let cell = sheet.cell(CellCoord::from(coord)).cloned().unwrap_or_default();
+                let formatted = format_grid_cell(sheet, coord, hdr, &cell, &fmt_ctx);
+                cells.push(formatted);
+            }
+            rows.push(VisibleGridRow { row: r, leading, cells });
+        }
+
+        Some(GridVisibleFrame {
+            sheet_id: sheet.id.clone(),
+            kind: sheet.kind(),
+            frozen: sheet.frozen,
+            row_titles_expanded: effective_row_titles_expanded(sheet, self.row_titles_collapsed_override),
+            x_column_title: x_or_time_header_title(&sheet.archetype),
+            total_rows,
+            total_flat_cols,
+            window,
+            tier1_groups,
+            tier2_subcolumns,
+            rows,
+        })
+    }
+
+    /// Non-destructively toggle the `Row Titles` column expansion state without mutating `DataSheet`.
+    pub fn toggle_row_titles(&mut self, sheet: &DataSheet) {
+        let current = effective_row_titles_expanded(sheet, self.row_titles_collapsed_override);
+        self.row_titles_collapsed_override = Some(!current);
+    }
+
+    /// Inspect any [`LinkedDataRegion`] containing `coord` (for double-click `Format Link`).
+    pub fn inspect_link_at(&mut self, sheet: &DataSheet, coord: GridCellCoord) -> bool {
+        if let Some(region) = find_linked_region_at(sheet, coord) {
+            self.format_link_inspector = FormatLinkInspectorState {
+                open: true,
+                region_id: region.id.clone(),
+                border_color: region.border_color(),
+                provenance_summary: region.provenance_summary.clone(),
+                spec: Some(region.spec.clone()),
+            };
+            true
+        } else {
+            self.format_link_inspector.open = false;
+            false
+        }
+    }
+
+    /// Boundary-aware arrow navigation (`Shift+Cmd/Ctrl+Arrow` stops cleanly at the first empty
+    /// cell boundary). Updates `tool.anchor` and `tool.active`.
+    pub fn navigate(&mut self, sheet: &DataSheet, dir: MoveDirection, extend_selection: bool, jump_to_boundary: bool) {
+        let total_rows = sheet.archetype.row_count();
+        let total_flat = total_flat_data_subcolumns(&sheet.archetype);
+        if total_rows == 0 || total_flat == 0 {
+            return;
+        }
+        let current = self.tool.active.unwrap_or_default();
+        let curr_flat = flat_index_for_coord(&sheet.archetype, current.col, current.subcol).min(total_flat - 1);
+        let curr_row = current.row.min(total_rows - 1);
+
+        let (next_row, next_flat) = if jump_to_boundary {
+            jump_boundary_step(sheet, curr_row, curr_flat, total_rows, total_flat, dir)
+        } else {
+            single_step(curr_row, curr_flat, total_rows, total_flat, dir)
+        };
+
+        let Some((col, subcol)) = resolve_flat_coord(&sheet.archetype, next_flat) else {
+            return;
+        };
+        let next = GridCellCoord::new(next_row, col, subcol);
+        if extend_selection {
+            if self.tool.anchor.is_none() {
+                self.tool.anchor = Some(GridCellCoord::new(curr_row, current.col, current.subcol));
+            }
+            self.tool.active = Some(next);
+        } else {
+            self.tool.select_single(next);
+        }
+    }
+
+    /// Emit batched rectangular `"table.excludeCells"` range intents (`Cmd+E` / `Ctrl+E`) toggling
+    /// exclusion across the current selection (`docs/data-tables-and-transforms.md` §1.2).
+    /// Returns the number of `"range"` command intents queued into `tool.pending_intents`.
+    pub fn emit_toggle_exclude_intents(&mut self, sheet: &DataSheet, excluded: bool) -> usize {
+        let (Some(a), Some(b)) = (self.tool.anchor, self.tool.active) else {
+            return 0;
+        };
+        let total_rows = sheet.archetype.row_count();
+        let total_flat = total_flat_data_subcolumns(&sheet.archetype);
+        if total_rows == 0 || total_flat == 0 {
+            return 0;
+        }
+        let r0 = a.row.min(b.row).min(total_rows - 1);
+        let r1 = a.row.max(b.row).min(total_rows - 1);
+        let f0 = flat_index_for_coord(&sheet.archetype, a.col, a.subcol);
+        let f1 = flat_index_for_coord(&sheet.archetype, b.col, b.subcol);
+        let c0 = f0.min(f1).min(total_flat - 1);
+        let c1 = f0.max(f1).min(total_flat - 1);
+
+        let ranges = build_exclusion_ranges(&sheet.archetype, r0, r1, c0, c1);
+        let emitted = ranges.len();
+        for range in ranges {
+            self.tool.pending_intents.push(ToolCommandIntent {
+                command_id: String::from("table.excludeCells"),
+                params: json!({
+                    "sheet_id": sheet.id.as_str(),
+                    "range": range,
+                    "excluded": excluded,
+                }),
+            });
+        }
+        emitted
+    }
+
+    /// Build the `MultipleVariables` role/type column header strip across all variables in `sheet`.
+    #[must_use]
+    pub fn variable_role_strip(&self, sheet: &DataSheet) -> Vec<VariableRoleHeader> {
+        let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
+            return Vec::new();
+        };
+        mv.variables.iter().enumerate().map(|(idx, var)| build_variable_role_header(idx, var)).collect()
+    }
+}
+
+/// Map a [`LinkBorderColor`] to its canonical UI border RGB color (`docs/data-tables-and-transforms.md` §6.2).
+#[must_use]
+pub const fn provenance_border_rgba(color: LinkBorderColor) -> Rgba8 {
+    match color {
+        LinkBorderColor::Blue => Rgba8::rgb(59, 130, 246),
+        LinkBorderColor::Green => Rgba8::rgb(22, 163, 74),
+        LinkBorderColor::Red => Rgba8::rgb(220, 38, 38),
+        LinkBorderColor::Charcoal => Rgba8::rgb(55, 65, 81),
+    }
+}
+
+// ============================================================================
+// Virtualized Flat-Subcolumn Mapping Helpers (O(1) for uniform subcolumns)
+// ============================================================================
+
+#[must_use]
+pub fn total_flat_data_subcolumns(arch: &TableArchetype) -> usize {
+    match arch {
+        TableArchetype::Xy(t) => t.data_sets.len().saturating_mul(t.y_subcolumn_mode.subcolumn_count().max(1)),
+        TableArchetype::Column(t) => t.data_sets.len().saturating_mul(t.subcolumn_mode.subcolumn_count().max(1)),
+        TableArchetype::Grouped(t) => t.data_sets.len().saturating_mul(t.subcolumn_mode.subcolumn_count().max(1)),
+        TableArchetype::Contingency(t) => t.data_sets.len(),
+        TableArchetype::Survival(t) => t.cohorts.len(),
+        TableArchetype::PartsOfWhole(t) => t.data_sets.len(),
+        TableArchetype::MultipleVariables(t) => t.variables.len(),
+        TableArchetype::Nested(t) => t.groups.iter().map(|g| g.biological_unit_count().max(1)).sum(),
+    }
+}
+
+#[must_use]
+fn uniform_subcolumn_count(arch: &TableArchetype) -> Option<usize> {
+    match arch {
+        TableArchetype::Xy(t) => Some(t.y_subcolumn_mode.subcolumn_count().max(1)),
+        TableArchetype::Column(t) => Some(t.subcolumn_mode.subcolumn_count().max(1)),
+        TableArchetype::Grouped(t) => Some(t.subcolumn_mode.subcolumn_count().max(1)),
+        TableArchetype::Contingency(_) | TableArchetype::Survival(_) | TableArchetype::PartsOfWhole(_) | TableArchetype::MultipleVariables(_) => {
+            Some(1)
+        }
+        TableArchetype::Nested(_) => None,
+    }
+}
+
+#[must_use]
+fn flat_index_for_coord(arch: &TableArchetype, col: usize, subcol: usize) -> usize {
+    if let Some(subs) = uniform_subcolumn_count(arch) {
+        return col.saturating_mul(subs).saturating_add(subcol.min(subs - 1));
+    }
+    if let TableArchetype::Nested(t) = arch {
+        let mut offset = 0usize;
+        for (idx, grp) in t.groups.iter().enumerate() {
+            let units = grp.biological_unit_count().max(1);
+            if idx == col {
+                return offset.saturating_add(subcol.min(units - 1));
+            }
+            offset = offset.saturating_add(units);
+        }
+        return offset;
+    }
+    col
+}
+
+#[must_use]
+fn resolve_flat_coord(arch: &TableArchetype, flat_col: usize) -> Option<(usize, usize)> {
+    if let Some(subs) = uniform_subcolumn_count(arch) {
+        let col = flat_col / subs;
+        if col >= arch.column_count() {
+            return None;
+        }
+        return Some((col, flat_col % subs));
+    }
+    if let TableArchetype::Nested(t) = arch {
+        let mut offset = 0usize;
+        for (col_idx, grp) in t.groups.iter().enumerate() {
+            let units = grp.biological_unit_count().max(1);
+            if flat_col < offset + units {
+                return Some((col_idx, flat_col - offset));
+            }
+            offset += units;
+        }
+    }
+    None
+}
+
+#[must_use]
+fn selection_cell_count(sheet: &DataSheet, a: GridCellCoord, b: GridCellCoord) -> usize {
+    let row_count = sheet.archetype.row_count();
+    let total_flat = total_flat_data_subcolumns(&sheet.archetype);
+    if row_count == 0 || total_flat == 0 {
+        return 0;
+    }
+    let r0 = a.row.min(b.row);
+    if r0 >= row_count {
+        return 0;
+    }
+    let r1 = a.row.max(b.row).min(row_count - 1);
+
+    let f0 = flat_index_for_coord(&sheet.archetype, a.col, a.subcol);
+    let f1 = flat_index_for_coord(&sheet.archetype, b.col, b.subcol);
+    let start_flat = f0.min(f1);
+    if start_flat >= total_flat {
+        return 0;
+    }
+    let end_flat = f0.max(f1).min(total_flat - 1);
+
+    r1.saturating_sub(r0).saturating_add(1).saturating_mul(end_flat.saturating_sub(start_flat).saturating_add(1))
+}
+
+fn build_exclusion_ranges(arch: &TableArchetype, r0: usize, r1: usize, c0: usize, c1: usize) -> Vec<SheetCellRange> {
+    if let Some(subs) = uniform_subcolumn_count(arch) {
+        let col0 = c0 / subs;
+        let sub0 = c0 % subs;
+        let col1 = c1 / subs;
+        let sub1 = c1 % subs;
+        if col0 == col1 {
+            return vec![SheetCellRange::new(CellCoord::new(r0, col0, sub0), CellCoord::new(r1, col0, sub1))];
+        }
+        let mut ranges = Vec::with_capacity(3);
+        let mid_start = if sub0 > 0 {
+            ranges.push(SheetCellRange::new(CellCoord::new(r0, col0, sub0), CellCoord::new(r1, col0, subs - 1)));
+            col0 + 1
+        } else {
+            col0
+        };
+        let has_trailing = sub1 + 1 < subs;
+        if let Some(mid_end) = if has_trailing { col1.checked_sub(1) } else { Some(col1) }
+            && mid_start <= mid_end
+        {
+            ranges.push(SheetCellRange::new(CellCoord::new(r0, mid_start, 0), CellCoord::new(r1, mid_end, subs - 1)));
+        }
+        if has_trailing {
+            ranges.push(SheetCellRange::new(CellCoord::new(r0, col1, 0), CellCoord::new(r1, col1, sub1)));
+        }
+        return ranges;
+    }
+
+    let mut ranges = Vec::new();
+    if let TableArchetype::Nested(t) = arch {
+        let mut offset = 0usize;
+        for (col_idx, grp) in t.groups.iter().enumerate() {
+            let units = grp.biological_unit_count().max(1);
+            let lo = c0.max(offset);
+            let hi = c1.min(offset + units - 1);
+            if lo <= hi {
+                ranges.push(SheetCellRange::new(CellCoord::new(r0, col_idx, lo - offset), CellCoord::new(r1, col_idx, hi - offset)));
+            }
+            offset += units;
+        }
+    }
+    ranges
+}
+
+fn build_visible_headers(arch: &TableArchetype, start_flat: usize, end_flat: usize) -> (Vec<Tier1GroupHeader>, Vec<Tier2SubcolumnHeader>) {
+    if start_flat >= end_flat {
+        return (Vec::new(), Vec::new());
+    }
+    let mut tier1: Vec<Tier1GroupHeader> = Vec::new();
+    let mut tier2 = Vec::with_capacity(end_flat - start_flat);
+
+    let sub_labels_cache: Option<Vec<String>> = match arch {
+        TableArchetype::Xy(t) => Some(t.y_subcolumn_mode.subcolumn_labels()),
+        TableArchetype::Column(t) => Some(t.subcolumn_mode.subcolumn_labels()),
+        TableArchetype::Grouped(t) => Some(t.subcolumn_mode.subcolumn_labels()),
+        _ => None,
+    };
+
+    for flat in start_flat..end_flat {
+        let Some((col, subcol)) = resolve_flat_coord(arch, flat) else {
+            break;
+        };
+        let is_calc = matches!(arch, TableArchetype::MultipleVariables(mv) if mv.variables.get(col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. })));
+        let sub_label = subcolumn_header_label(arch, col, subcol, sub_labels_cache.as_deref());
+        tier2.push(Tier2SubcolumnHeader { flat_col: flat, col, subcol, label: sub_label, is_calculated: is_calc });
+
+        if let Some(last) = tier1.last_mut()
+            && last.col_index == col
+        {
+            last.span += 1;
+        } else {
+            let (title, var_role) = group_header_meta(arch, col);
+            tier1.push(Tier1GroupHeader {
+                col_index: col,
+                letter: default_column_label(col),
+                title,
+                start_flat_col: flat,
+                span: 1,
+                variable_role: var_role,
+            });
+        }
+    }
+
+    (tier1, tier2)
+}
+
+fn group_header_meta(arch: &TableArchetype, col: usize) -> (String, Option<VariableRoleHeader>) {
+    if let TableArchetype::MultipleVariables(mv) = arch {
+        match mv.variables.get(col) {
+            Some(var) => (var.title.clone(), Some(build_variable_role_header(col, var))),
+            None => (default_column_label(col), None),
+        }
+    } else {
+        archetype_column_title(arch, col)
+    }
+}
+
+fn archetype_column_title(arch: &TableArchetype, col: usize) -> (String, Option<VariableRoleHeader>) {
+    let title = match arch {
+        TableArchetype::Xy(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::Column(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::Grouped(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::Contingency(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::Survival(t) => t.cohorts.get(col).map(|d| d.title.clone()),
+        TableArchetype::PartsOfWhole(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::MultipleVariables(t) => t.variables.get(col).map(|v| v.title.clone()),
+        TableArchetype::Nested(t) => t.groups.get(col).map(|g| g.title.clone()),
+    };
+    (title.unwrap_or_else(|| default_column_label(col)), None)
+}
+
+fn subcolumn_header_label(arch: &TableArchetype, col: usize, subcol: usize, cached: Option<&[String]>) -> String {
+    if let Some(labels) = cached {
+        return labels.get(subcol).cloned().unwrap_or_else(|| format!("Y{}", subcol + 1));
+    }
+    match arch {
+        TableArchetype::Nested(t) => t
+            .groups
+            .get(col)
+            .and_then(|g| g.subcolumn_titles.get(subcol))
+            .cloned()
+            .unwrap_or_else(|| format!("{}:{}", default_column_label(col), subcol + 1)),
+        TableArchetype::MultipleVariables(mv) => {
+            mv.variables.get(col).map(|v| role_short_label(v.role, v.role_inferred)).unwrap_or_else(|| String::from("Y"))
+        }
+        TableArchetype::Contingency(_) => String::from("Count"),
+        TableArchetype::Survival(_) => String::from("Status"),
+        TableArchetype::PartsOfWhole(_) => String::from("Value"),
+        TableArchetype::Xy(_) | TableArchetype::Column(_) | TableArchetype::Grouped(_) => String::from("Y"),
+    }
+}
+
+fn role_short_label(role: VariableRole, inferred: bool) -> String {
+    let base = match role {
+        VariableRole::Continuous => "Continuous",
+        VariableRole::Categorical => "Categorical",
+        VariableRole::Label => "Label",
+        VariableRole::Calculated => "Calculated",
+    };
+    if inferred && role != VariableRole::Calculated { format!("{base} (auto)") } else { String::from(base) }
+}
+
+fn build_variable_role_header(col_index: usize, var: &lumencraft_doc::VariableColumn) -> VariableRoleHeader {
+    let is_calculated = matches!(var.source, VariableSource::Calculated { .. });
+    let formula = match &var.source {
+        VariableSource::Calculated { formula } => Some(formula.clone()),
+        VariableSource::Entered => None,
+    };
+    let badge_color = match (var.role, var.role_inferred) {
+        (VariableRole::Continuous, false) => Rgba8::rgb(29, 78, 216),
+        (VariableRole::Continuous, true) => Rgba8::rgb(100, 116, 139),
+        (VariableRole::Categorical, false) => Rgba8::rgb(124, 58, 237),
+        (VariableRole::Categorical, true) => Rgba8::rgb(139, 92, 246),
+        (VariableRole::Label, _) => Rgba8::rgb(71, 85, 105),
+        (VariableRole::Calculated, _) => Rgba8::rgb(5, 150, 105),
+    };
+    VariableRoleHeader {
+        col_index,
+        title: var.title.clone(),
+        role: var.role,
+        role_inferred: var.role_inferred,
+        is_calculated,
+        formula,
+        badge_text: role_short_label(var.role, var.role_inferred),
+        badge_color,
+    }
+}
+
+// ============================================================================
+// Cell Formatting, Exclusions, Provenance Borders & Typed Validation
+// ============================================================================
+
+fn effective_row_titles_expanded(sheet: &DataSheet, override_flag: Option<bool>) -> bool {
+    if let Some(val) = override_flag {
+        return val;
+    }
+    match &sheet.archetype {
+        TableArchetype::Xy(t) => t.row_titles_expanded,
+        TableArchetype::Column(t) => t.row_titles_expanded,
+        TableArchetype::Survival(t) => t.row_titles_expanded,
+        TableArchetype::MultipleVariables(t) => t.row_titles_expanded,
+        TableArchetype::Nested(t) => t.row_titles_expanded,
+        TableArchetype::Grouped(_) | TableArchetype::Contingency(_) | TableArchetype::PartsOfWhole(_) => true,
+    }
+}
+
+fn x_or_time_header_title(arch: &TableArchetype) -> Option<String> {
+    match arch {
+        TableArchetype::Xy(t) => Some(t.x_title.clone()),
+        TableArchetype::Survival(t) => Some(t.time_title.clone()),
+        TableArchetype::PartsOfWhole(_) => Some(String::from("Slice")),
+        _ => None,
+    }
+}
+
+fn build_leading_row(sheet: &DataSheet, row: usize, decimal_sep: char) -> LeadingRowData {
+    let row_title = match &sheet.archetype {
+        TableArchetype::Xy(t) => t.row_titles.get(row).cloned().unwrap_or_default(),
+        TableArchetype::Column(t) => t.row_titles.get(row).cloned().unwrap_or_default(),
+        TableArchetype::Grouped(t) => t.row_titles.get(row).cloned().unwrap_or_default(),
+        TableArchetype::Contingency(t) => t.row_titles.get(row).cloned().unwrap_or_default(),
+        TableArchetype::Survival(t) => t.row_titles.get(row).cloned().unwrap_or_default(),
+        TableArchetype::PartsOfWhole(t) => t.slice_labels.get(row).cloned().unwrap_or_default(),
+        TableArchetype::MultipleVariables(t) => t.row_titles.get(row).cloned().unwrap_or_default(),
+        TableArchetype::Nested(t) => t.row_titles.get(row).cloned().unwrap_or_default(),
+    };
+
+    let (x_or_time_display, x_excluded) = match &sheet.archetype {
+        TableArchetype::Xy(t) => match &t.x_mode {
+            XColumnMode::GeneratedSequence { .. } => (t.x_value_at(row).map(|v| format_compact_f64(v, decimal_sep)), false),
+            _ => match t.x_cells.get(row).and_then(|subs| subs.first()) {
+                Some(cell) => (Some(format_cell_value(&cell.value, decimal_sep)), cell.excluded),
+                None => (None, false),
+            },
+        },
+        TableArchetype::Survival(t) => match t.times.get(row) {
+            Some(cell) => (Some(format_cell_value(&cell.value, decimal_sep)), cell.excluded),
+            None => (None, false),
+        },
+        TableArchetype::PartsOfWhole(t) => (t.slice_labels.get(row).cloned(), false),
+        _ => (None, false),
+    };
+
+    LeadingRowData { row, row_title, x_or_time_display, x_excluded }
+}
+
+struct CellFormatContext {
+    decimal_sep: char,
+    sel_bounds: Option<(usize, usize, usize, usize)>,
+    active_coord: Option<GridCellCoord>,
+}
+
+fn format_grid_cell(sheet: &DataSheet, coord: GridCellCoord, hdr: &Tier2SubcolumnHeader, cell: &Cell, ctx: &CellFormatContext) -> FormattedGridCell {
+    let display_text = format_cell_value(&cell.value, ctx.decimal_sep);
+    let region = find_linked_region_at(sheet, coord);
+    let provenance_border = region.and_then(LinkedDataRegion::border_color);
+    let provenance_border_rgba = provenance_border.map(provenance_border_rgba);
+    let link_id = region.map(|r| r.id.clone());
+
+    let is_selected = ctx.sel_bounds.is_some_and(|(r0, r1, f0, f1)| coord.row >= r0 && coord.row <= r1 && hdr.flat_col >= f0 && hdr.flat_col <= f1);
+    let is_active = ctx.active_coord == Some(coord);
+    let validation_error = validate_cell_for_archetype(sheet, coord, cell);
+
+    let text_color = if cell.excluded { Rgba8::rgb(37, 99, 235) } else { Rgba8::rgb(24, 28, 36) };
+    let visual = CellVisualStyle {
+        text_color,
+        italic: cell.excluded,
+        strikethrough: cell.excluded,
+        excluded_badge: cell.excluded.then(|| String::from("*")),
+        provenance_border,
+        provenance_border_rgba,
+        link_id,
+        validation_error,
+        is_selected,
+        is_active,
+        is_calculated: hdr.is_calculated,
+    };
+
+    FormattedGridCell { coord, flat_col: hdr.flat_col, display_text, excluded: cell.excluded, visual }
+}
+
+fn format_cell_value(val: &CellValue, decimal_sep: char) -> String {
+    match val {
+        CellValue::Empty => String::new(),
+        CellValue::Number(v) if v.is_finite() => format_compact_f64(*v, decimal_sep),
+        CellValue::Number(_) => String::new(),
+        CellValue::Text(s) => s.clone(),
+    }
+}
+
+fn format_compact_f64(value: f64, decimal_sep: char) -> String {
+    let normalized = if value == 0.0 { 0.0 } else { value };
+    let formatted = format!("{normalized}");
+    if decimal_sep == ',' { formatted.replace('.', ",") } else { formatted }
+}
+
+fn validate_cell_for_archetype(sheet: &DataSheet, coord: GridCellCoord, cell: &Cell) -> Option<String> {
+    if cell.excluded || cell.is_empty() {
+        return None;
+    }
+    match &sheet.archetype {
+        TableArchetype::Contingency(cont) => {
+            if let Err(err) = cont.count_at(coord.row, coord.col) {
+                return Some(err.to_string());
+            }
+        }
+        TableArchetype::Survival(surv) => {
+            let Some(v) = cell.value.finite_f64() else {
+                return Some(String::from("survival status must be numeric (event/censored code)"));
+            };
+            if v.fract() != 0.0 || (v as i64 != surv.event_code && v as i64 != surv.censored_code) {
+                return Some(format!("status code must be {} or {}", surv.event_code, surv.censored_code));
+            }
+        }
+        TableArchetype::PartsOfWhole(_) => {
+            let Some(v) = cell.value.finite_f64() else {
+                return Some(String::from("slice value must be numeric"));
+            };
+            if v < 0.0 {
+                return Some(String::from("slice value must be >= 0"));
+            }
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            if let Some(var) = mv.variables.get(coord.col)
+                && matches!(var.role, VariableRole::Continuous | VariableRole::Calculated)
+                && matches!(cell.value, CellValue::Text(_))
+            {
+                return Some(String::from("continuous variable expects numeric value"));
+            }
+        }
+        TableArchetype::Xy(_) | TableArchetype::Column(_) | TableArchetype::Grouped(_) | TableArchetype::Nested(_) => {
+            if matches!(cell.value, CellValue::Text(_)) {
+                return Some(String::from("numeric observation expected"));
+            }
+        }
+    }
+    None
+}
+
+fn selection_flat_bounds(
+    arch: &TableArchetype,
+    anchor: Option<GridCellCoord>,
+    active: Option<GridCellCoord>,
+) -> Option<(usize, usize, usize, usize)> {
+    let (a, b) = (anchor?, active?);
+    let fa = flat_index_for_coord(arch, a.col, a.subcol);
+    let fb = flat_index_for_coord(arch, b.col, b.subcol);
+    Some((a.row.min(b.row), a.row.max(b.row), fa.min(fb), fa.max(fb)))
+}
+
+fn find_linked_region_at(sheet: &DataSheet, coord: GridCellCoord) -> Option<&LinkedDataRegion> {
+    sheet.linked_regions.iter().rev().find(|region| range_contains(&region.target_range, coord))
+}
+
+fn range_contains(range: &SheetCellRange, coord: GridCellCoord) -> bool {
+    if coord.row < range.start.row || coord.row > range.end.row {
+        return false;
+    }
+    if coord.col < range.start.col || coord.col > range.end.col {
+        return false;
+    }
+    if coord.col == range.start.col && coord.subcol < range.start.subcol {
+        return false;
+    }
+    if coord.col == range.end.col && coord.subcol > range.end.subcol {
+        return false;
+    }
+    true
+}
+
+// ============================================================================
+// Boundary-Aware Range Navigation Helpers
+// ============================================================================
+
+fn single_step(row: usize, flat_col: usize, total_rows: usize, total_flat: usize, dir: MoveDirection) -> (usize, usize) {
+    match dir {
+        MoveDirection::Up => (row.saturating_sub(1), flat_col),
+        MoveDirection::Down => ((row + 1).min(total_rows - 1), flat_col),
+        MoveDirection::Left => (row, flat_col.saturating_sub(1)),
+        MoveDirection::Right => (row, (flat_col + 1).min(total_flat - 1)),
+    }
+}
+
+fn jump_boundary_step(sheet: &DataSheet, row: usize, flat_col: usize, total_rows: usize, total_flat: usize, dir: MoveDirection) -> (usize, usize) {
+    let step = |r: usize, f: usize| -> Option<(usize, usize)> {
+        match dir {
+            MoveDirection::Up => (r > 0).then(|| (r - 1, f)),
+            MoveDirection::Down => (r + 1 < total_rows).then(|| (r + 1, f)),
+            MoveDirection::Left => (f > 0).then(|| (r, f - 1)),
+            MoveDirection::Right => (f + 1 < total_flat).then(|| (r, f + 1)),
+        }
+    };
+
+    let is_filled = |r: usize, f: usize| -> bool {
+        resolve_flat_coord(&sheet.archetype, f).and_then(|(c, s)| sheet.cell(CellCoord::new(r, c, s))).is_some_and(|cell| !cell.is_empty())
+    };
+
+    let Some((mut cur_r, mut cur_f)) = step(row, flat_col) else {
+        return (row, flat_col);
+    };
+
+    if is_filled(row, flat_col) && is_filled(cur_r, cur_f) {
+        while let Some((nr, nf)) = step(cur_r, cur_f) {
+            if !is_filled(nr, nf) {
+                break;
+            }
+            cur_r = nr;
+            cur_f = nf;
+        }
+        return (cur_r, cur_f);
+    }
+
+    while !is_filled(cur_r, cur_f) {
+        let Some((nr, nf)) = step(cur_r, cur_f) else {
+            return (cur_r, cur_f);
+        };
+        cur_r = nr;
+        cur_f = nf;
+    }
+    (cur_r, cur_f)
+}
+
+// ============================================================================
+// Formula Bar UTF-8 Safe Autocomplete Helpers
+// ============================================================================
+
+fn clamp_char_boundary(s: &str, mut pos: usize) -> usize {
+    pos = pos.min(s.len());
+    while pos > 0 && !s.is_char_boundary(pos) {
+        pos -= 1;
+    }
+    pos
+}
+
+fn active_token_span(input: &str, cursor_byte: usize) -> (usize, usize) {
+    let cursor = clamp_char_boundary(input, cursor_byte);
+    let prefix = &input[..cursor];
+
+    if let Some(open_bracket) = prefix.rfind('[') {
+        let after = &prefix[open_bracket + 1..];
+        if !after.contains(']') {
+            return (open_bracket, cursor);
+        }
+    }
+
+    let mut start = cursor;
+    for (idx, ch) in prefix.char_indices().rev() {
+        if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+            start = idx;
+        } else {
+            break;
+        }
+    }
+    (start, cursor)
+}
+
+fn build_autocomplete_items(
+    input: &str,
+    cursor_byte: usize,
+    target_col: Option<usize>,
+    doc: Option<&ProjectDocument>,
+    sheet: Option<&DataSheet>,
+) -> Vec<FormulaAutocompleteItem> {
+    let (start, end) = active_token_span(input, cursor_byte);
+    let raw_token = &input[start..end];
+    let bracket_mode = raw_token.starts_with('[');
+    let query = raw_token.trim_start_matches('[').trim().to_ascii_lowercase();
+
+    let mut items = Vec::new();
+    collect_column_completions(sheet, target_col, bracket_mode, &query, &mut items);
+
+    if !bracket_mode {
+        collect_info_completions(doc, &query, &mut items);
+        for &(label, insert_text, kind, detail) in FORMULA_BUILTINS {
+            if query.is_empty() || label.to_ascii_lowercase().starts_with(&query) {
+                items.push(FormulaAutocompleteItem {
+                    label: String::from(label),
+                    insert_text: String::from(insert_text),
+                    kind,
+                    detail: String::from(detail),
+                });
+            }
+        }
+    }
+
+    items.sort_by(|a, b| score_completion(a, &query).cmp(&score_completion(b, &query)).then_with(|| a.label.cmp(&b.label)));
+    items
+}
+
+fn collect_column_completions(
+    sheet: Option<&DataSheet>,
+    target_col: Option<usize>,
+    bracket_mode: bool,
+    query: &str,
+    out: &mut Vec<FormulaAutocompleteItem>,
+) {
+    let Some(s) = sheet else {
+        return;
+    };
+    let TableArchetype::MultipleVariables(mv) = &s.archetype else {
+        return;
+    };
+    for (idx, var) in mv.variables.iter().enumerate() {
+        if Some(idx) == target_col {
+            continue;
+        }
+        let lower = var.title.to_ascii_lowercase();
+        let matches = if query.is_empty() {
+            true
+        } else if bracket_mode {
+            lower.contains(query)
+        } else {
+            lower.starts_with(query) || lower.contains(query)
+        };
+        if !matches {
+            continue;
+        }
+        let ref_text = format_column_reference(&var.title);
+        out.push(FormulaAutocompleteItem {
+            label: ref_text.clone(),
+            insert_text: ref_text,
+            kind: FormulaAutocompleteKind::Column,
+            detail: format!("{} variable", role_short_label(var.role, var.role_inferred)),
+        });
+    }
+}
+
+fn collect_info_completions(doc: Option<&ProjectDocument>, query: &str, out: &mut Vec<FormulaAutocompleteItem>) {
+    let Some(d) = doc else {
+        return;
+    };
+    for info in &d.info_sheets {
+        for c in &info.constants {
+            let lower = c.name.to_ascii_lowercase();
+            if query.is_empty() || lower.contains(query) {
+                out.push(FormulaAutocompleteItem {
+                    label: format!("Info(\"{}\")", c.name),
+                    insert_text: format!("Info(\"{}\")", c.name),
+                    kind: FormulaAutocompleteKind::InfoConstant,
+                    detail: format!("Constant from {}", info.title),
+                });
+            }
+        }
+    }
+}
+
+fn format_column_reference(title: &str) -> String {
+    let trimmed = title.trim();
+    let is_simple_ident = !trimmed.is_empty()
+        && trimmed
+            .chars()
+            .enumerate()
+            .all(|(i, c)| (i == 0 && (c.is_ascii_alphabetic() || c == '_')) || (i > 0 && (c.is_ascii_alphanumeric() || c == '_')));
+    if is_simple_ident { String::from(trimmed) } else { format!("[{trimmed}]") }
+}
+
+fn score_completion(item: &FormulaAutocompleteItem, query: &str) -> (u8, usize) {
+    let rank_kind = match item.kind {
+        FormulaAutocompleteKind::Column => 0,
+        FormulaAutocompleteKind::InfoConstant => 1,
+        FormulaAutocompleteKind::ScalarFunction => 2,
+        FormulaAutocompleteKind::AggregateFunction => 3,
+        FormulaAutocompleteKind::WindowFunction => 4,
+        FormulaAutocompleteKind::Constant => 5,
+    };
+    let exact_prefix = usize::from(!query.is_empty() && !item.label.trim_start_matches('[').to_ascii_lowercase().starts_with(query));
+    (rank_kind, exact_prefix)
+}
+
+fn validate_formula_syntax(body: &str) -> Result<(), String> {
+    let mut paren_depth: usize = 0;
+    let mut in_bracket = false;
+    let mut bracket_len: usize = 0;
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    let mut last_non_ws: Option<char> = None;
+
+    for ch in body.chars() {
+        if let Some(q) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == q {
+                quote = None;
+            }
+            last_non_ws = Some(ch);
+            continue;
+        }
+        if in_bracket {
+            match ch {
+                '[' => return Err(String::from("nested '[' inside column reference")),
+                ']' if bracket_len == 0 => return Err(String::from("empty column reference '[]'")),
+                ']' => in_bracket = false,
+                _ => bracket_len += 1,
+            }
+            last_non_ws = Some(ch);
+            continue;
+        }
+        match ch {
+            '"' | '\'' => quote = Some(ch),
+            '[' => {
+                in_bracket = true;
+                bracket_len = 0;
+            }
+            ']' => return Err(String::from("unmatched ']' in formula")),
+            '(' => paren_depth += 1,
+            ')' => paren_depth = paren_depth.checked_sub(1).ok_or_else(|| String::from("unmatched ')' in formula"))?,
+            _ => {}
+        }
+        if !ch.is_whitespace() {
+            last_non_ws = Some(ch);
+        }
+    }
+
+    if quote.is_some() {
+        return Err(String::from("unclosed string literal in formula"));
+    }
+    if in_bracket {
+        return Err(String::from("unclosed '[' column reference"));
+    }
+    if paren_depth > 0 {
+        return Err(String::from("unclosed '(' in formula"));
+    }
+    if matches!(last_non_ws, Some('+' | '-' | '*' | '/' | '^' | ',' | '<' | '>' | '=' | '&' | '|')) {
+        return Err(String::from("unexpected trailing operator in formula"));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GridQuickStats, GridViewState, ImportOriginKind, MoveDirection};
+    use lumencraft_doc::{
+        Cell, CellCoord, DataSheet, LinkBorderColor, MultipleVariablesTable, ProjectDocument, SubcolumnMode, TableArchetype, VariableRole, XyTable,
+    };
+    use lumencraft_tools::GridCellCoord;
+
+    #[test]
+    fn quick_stats_computes_n_excluded_mean_sd_sem_median_sum() {
+        let xy = XyTable::new(SubcolumnMode::Single, 1, 6).unwrap();
+        let mut sheet = DataSheet::new("d1", "Assay", TableArchetype::Xy(xy)).unwrap();
+        for (r, v) in [10.0, 12.0, 14.0, 16.0, 999.0].iter().enumerate() {
+            sheet.set_cell(CellCoord::new(r, 0, 0), Cell::number(*v)).unwrap();
+        }
+        sheet.set_excluded(CellCoord::new(4, 0, 0), true).unwrap();
+
+        let stats = GridQuickStats::from_data_sheet(&sheet, GridCellCoord::new(0, 0, 0), GridCellCoord::new(5, 0, 0));
+        assert_eq!(stats.selected_cells, 6);
+        assert_eq!(stats.n, 4);
+        assert_eq!(stats.excluded, 1);
+        assert!((stats.sum.unwrap() - 52.0).abs() < 1e-12);
+        assert!((stats.mean.unwrap() - 13.0).abs() < 1e-12);
+        assert!((stats.median.unwrap() - 13.0).abs() < 1e-12);
+        let expected_sd = (20.0_f64 / 3.0).sqrt();
+        assert!((stats.sd.unwrap() - expected_sd).abs() < 1e-12);
+        assert!((stats.sem.unwrap() - expected_sd / 2.0).abs() < 1e-12);
+        assert!(stats.format_footer().contains("SEM="));
+    }
+
+    #[test]
+    fn formula_bar_autocompletes_columns_and_functions() {
+        let mut doc = ProjectDocument::default();
+        let mut mv = MultipleVariablesTable::new(3, 4).unwrap();
+        mv.variables[0].title = String::from("Body Mass");
+        mv.variables[1].title = String::from("Height_m");
+        mv.variables[2].title = String::from("BMI");
+        let sheet = DataSheet::new("mv-1", "Cohort", TableArchetype::MultipleVariables(mv)).unwrap();
+        doc.add_data_sheet(sheet).unwrap();
+
+        let mut grid = GridViewState::default();
+        let ds = doc.data_sheet(&"mv-1".into()).unwrap();
+        grid.formula_bar.open_for_column(ds, 2, Some(&doc));
+        grid.formula_bar.set_input("= [Body", None, &doc);
+        assert!(grid.formula_bar.completions.iter().any(|c| c.insert_text == "[Body Mass]"));
+        assert!(grid.formula_bar.accept_completion(&doc));
+        assert_eq!(grid.formula_bar.input, "= [Body Mass]");
+        assert!(grid.formula_bar.is_valid);
+
+        grid.formula_bar.set_input("= zsc", None, &doc);
+        assert!(grid.formula_bar.completions.iter().any(|c| c.insert_text == "zscore("));
+    }
+
+    #[test]
+    fn variables_dialog_and_import_wizard_and_boundary_navigation() {
+        let mut doc = ProjectDocument::default();
+        let mut mv = MultipleVariablesTable::new(2, 5).unwrap();
+        mv.variables[0].title = String::from("EyeColor");
+        for (r, s) in ["Hzel", "Blue", "Hazel", "Blue", ""].iter().enumerate() {
+            if !s.is_empty() {
+                mv.variables[0].cells[r] = Cell::text(*s);
+            }
+        }
+        mv.variables[0].refresh_inferred_role();
+        let sheet = DataSheet::new("mv-1", "Cohort", TableArchetype::MultipleVariables(mv)).unwrap();
+        doc.add_data_sheet(sheet).unwrap();
+
+        let ds = doc.data_sheet(&"mv-1".into()).unwrap();
+        let mut grid = GridViewState::default();
+        let strip = grid.variable_role_strip(ds);
+        assert_eq!(strip[0].role, VariableRole::Categorical);
+        assert!(strip[0].role_inferred);
+
+        grid.variables_dialog.open_for_column(ds, 0);
+        grid.variables_dialog.merge_levels_into(&["Hzel"], "Hazel");
+        let (edited, levels) = grid.variables_dialog.preview_recode(ds).unwrap();
+        assert_eq!(edited, 1);
+        assert_eq!(levels.len(), 2);
+
+        // Boundary navigation stops at row 3 (last filled cell before blank row 4).
+        grid.tool.select_single(GridCellCoord::new(0, 0, 0));
+        grid.navigate(ds, MoveDirection::Down, true, true);
+        assert_eq!(grid.tool.active, Some(GridCellCoord::new(3, 0, 0)));
+
+        // 4-stage Import & Paste Special / Paste Link preview.
+        grid.import_wizard.is_live_link = true;
+        grid.import_wizard.origin_kind = ImportOriginKind::ExternalDelimitedFile;
+        grid.import_wizard.delimiter = ',';
+        grid.import_wizard.decimal_separator = ',';
+        grid.import_wizard.raw_clipboard_text = String::from("12,5*;14,0");
+        grid.import_wizard.delimiter = ';';
+        assert_eq!(grid.import_wizard.preview_border_color(Some(&doc)), Some(LinkBorderColor::Charcoal));
+        let preview = grid.import_wizard.preview_grid(Some(&doc));
+        assert!(preview[0][0].excluded);
+        assert_eq!(preview[0][0].value.finite_f64(), Some(12.5));
+    }
+}

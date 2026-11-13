@@ -9,10 +9,13 @@ description = "LumenCraft interactive spreadsheet, graph annotation, axis-break 
 workspace = true
 
 [dependencies]
+lumencraft-chart = { workspace = true }
+lumencraft-doc = { workspace = true }
 lumencraft-math = { workspace = true }
 lumencraft-palette = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-chart = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }
+proptest = { workspace = true }

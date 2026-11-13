@@ -15,6 +15,8 @@ bundled-fonts = []
 [dependencies]
 lumencraft-math = { workspace = true }
 lumencraft-palette = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }
+proptest = { workspace = true }

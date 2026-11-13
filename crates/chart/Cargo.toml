@@ -9,13 +9,15 @@ description = "LumenCraft scientific graph, error-bar, axis-break and significan
 workspace = true
 
 [dependencies]
+lumencraft-doc = { workspace = true }
+lumencraft-fit = { workspace = true }
 lumencraft-math = { workspace = true }
 lumencraft-palette = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-transform = { workspace = true }
 lumencraft-stats = { workspace = true }
-lumencraft-fit = { workspace = true }
 lumencraft-text = { workspace = true }
+lumencraft-transform = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }
+proptest = { workspace = true }

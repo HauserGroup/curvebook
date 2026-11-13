@@ -9,11 +9,13 @@ description = "LumenCraft publication PDF and EPS figure and analysis-report exp
 workspace = true
 
 [dependencies]
+flate2 = { workspace = true }
+lumencraft-chart = { workspace = true }
+lumencraft-doc = { workspace = true }
 lumencraft-math = { workspace = true }
 lumencraft-palette = { workspace = true }
-lumencraft-doc = { workspace = true }
 lumencraft-text = { workspace = true }
-lumencraft-chart = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }

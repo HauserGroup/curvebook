@@ -204,11 +204,17 @@ checksum = "32a66949e030da00e8c7d4434b251670a91556f4144941d37452769c25d58a53"
 name = "lumencraft"
 version = "0.1.0"
 dependencies = [
+ "lumencraft-chart",
+ "lumencraft-doc",
  "lumencraft-engine",
  "lumencraft-format",
+ "lumencraft-pdf",
  "lumencraft-render",
+ "lumencraft-svg",
  "lumencraft-text",
  "lumencraft-ui-egui",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -223,12 +229,15 @@ dependencies = [
  "lumencraft-testkit",
  "lumencraft-text",
  "lumencraft-transform",
+ "proptest",
+ "serde",
 ]
 
 [[package]]
 name = "lumencraft-cli"
 version = "0.1.0"
 dependencies = [
+ "lumencraft-chart",
  "lumencraft-doc",
  "lumencraft-engine",
  "lumencraft-format",
@@ -238,6 +247,8 @@ dependencies = [
  "lumencraft-svg",
  "lumencraft-testkit",
  "lumencraft-text",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -270,6 +281,9 @@ dependencies = [
  "lumencraft-text",
  "lumencraft-tools",
  "lumencraft-transform",
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -310,11 +324,17 @@ dependencies = [
 name = "lumencraft-mcp"
 version = "0.1.0"
 dependencies = [
+ "lumencraft-chart",
  "lumencraft-doc",
  "lumencraft-engine",
  "lumencraft-format",
+ "lumencraft-pdf",
  "lumencraft-render",
+ "lumencraft-svg",
  "lumencraft-testkit",
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -331,24 +351,29 @@ dependencies = [
 name = "lumencraft-pdf"
 version = "0.1.0"
 dependencies = [
+ "flate2",
  "lumencraft-chart",
  "lumencraft-doc",
  "lumencraft-math",
  "lumencraft-palette",
  "lumencraft-testkit",
  "lumencraft-text",
+ "serde",
 ]
 
 [[package]]
 name = "lumencraft-render"
 version = "0.1.0"
 dependencies = [
+ "crc32fast",
+ "flate2",
  "lumencraft-chart",
  "lumencraft-doc",
  "lumencraft-math",
  "lumencraft-palette",
  "lumencraft-testkit",
  "lumencraft-text",
+ "serde",
 ]
 
 [[package]]
@@ -372,6 +397,7 @@ dependencies = [
  "lumencraft-palette",
  "lumencraft-testkit",
  "lumencraft-text",
+ "serde",
 ]
 
 [[package]]
@@ -390,6 +416,8 @@ dependencies = [
  "lumencraft-math",
  "lumencraft-palette",
  "lumencraft-testkit",
+ "proptest",
+ "serde",
 ]
 
 [[package]]
@@ -401,6 +429,9 @@ dependencies = [
  "lumencraft-math",
  "lumencraft-palette",
  "lumencraft-testkit",
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -421,12 +452,18 @@ dependencies = [
  "lumencraft-chart",
  "lumencraft-doc",
  "lumencraft-engine",
+ "lumencraft-format",
  "lumencraft-math",
  "lumencraft-palette",
+ "lumencraft-pdf",
  "lumencraft-render",
+ "lumencraft-svg",
  "lumencraft-testkit",
  "lumencraft-text",
  "lumencraft-tools",
+ "proptest",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

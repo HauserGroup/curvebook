@@ -13,14 +13,20 @@ default = ["bundled-fonts"]
 bundled-fonts = ["lumencraft-engine/bundled-fonts", "lumencraft-text/bundled-fonts"]
 
 [dependencies]
+lumencraft-chart = { workspace = true }
+lumencraft-doc = { workspace = true }
+lumencraft-engine = { workspace = true }
+lumencraft-format = { workspace = true }
 lumencraft-math = { workspace = true }
 lumencraft-palette = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-text = { workspace = true }
-lumencraft-chart = { workspace = true }
+lumencraft-pdf = { workspace = true }
 lumencraft-render = { workspace = true }
+lumencraft-svg = { workspace = true }
+lumencraft-text = { workspace = true }
 lumencraft-tools = { workspace = true }
-lumencraft-engine = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }
+proptest = { workspace = true }

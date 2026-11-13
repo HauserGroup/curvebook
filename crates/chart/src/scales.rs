@@ -1,0 +1,2702 @@
+//! Axis scale mapping, guarded domain diagnostics, major/minor nice-tick computation,
+//! discontinuous multi-segment axes, frame presets, thresholds, legends, and annotations.
+
+use std::fmt::Write as FmtWrite;
+
+use lumencraft_doc::{
+    AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CiBound, FramePreset, GraphAnnotation, GraphSpec, LegendSpec,
+    ProjectDocument, ResultCell, ResultTab, SheetId, SizePt, TableArchetype, TickLabelFormat,
+};
+use lumencraft_math::dist::{norm_cdf, norm_ppf};
+use lumencraft_math::{AxisScale, LogitDomain};
+use lumencraft_palette::{LineDashStyle, MarkerFillMode, MarkerShape, Rgba8};
+use lumencraft_text::{LocaleNumberPolicy, RichText, expand_template_hooks, measure_text_pt, parse_markup};
+
+use crate::scene::{
+    ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+};
+
+/// Upper bound on ticks emitted per segment to prevent unbounded allocation on adversarial specs.
+pub const MAX_TICKS_PER_SEGMENT: usize = 256;
+
+/// Fallback strictly positive lower floor used when clamping invalid log-scale bounds.
+pub const LOG_POSITIVE_FLOOR_DEFAULT: f64 = 1e-12;
+
+/// Default outward offset (in points) for [`AxisFrameMode::OffsetAxes`].
+pub const DEFAULT_AXIS_OFFSET_PT: f64 = 6.0;
+
+/// Default major tick length in PostScript points.
+pub const DEFAULT_MAJOR_TICK_LEN_PT: f64 = 4.5;
+
+/// Default minor tick length in PostScript points.
+pub const DEFAULT_MINOR_TICK_LEN_PT: f64 = 2.5;
+
+const MAX_SEGMENTS_PER_AXIS: usize = 3;
+const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
+const SI_PREFIXES: [&str; 17] = ["y", "z", "a", "f", "p", "n", "\u{00B5}", "m", "", "k", "M", "G", "T", "P", "E", "Z", "Y"];
+
+// ============================================================================
+// 1. Guarded Scale Mapping, Inverse Mapping, Diagnostics & Error-Bar Clamping
+// ============================================================================
+
+/// Aggregated counts of non-fatal domain anomalies encountered while mapping data onto an axis.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ScaleDiagnostics {
+    pub non_positive_log_skipped: usize,
+    pub log_error_bars_clamped: usize,
+    pub out_of_domain_logit_skipped: usize,
+    pub out_of_domain_probit_skipped: usize,
+    pub zero_reciprocal_skipped: usize,
+    pub non_finite_skipped: usize,
+    pub boundary_clamped: usize,
+}
+
+impl ScaleDiagnostics {
+    /// True when zero domain anomalies occurred.
+    #[must_use]
+    pub const fn is_clean(&self) -> bool {
+        self.non_positive_log_skipped == 0
+            && self.log_error_bars_clamped == 0
+            && self.out_of_domain_logit_skipped == 0
+            && self.out_of_domain_probit_skipped == 0
+            && self.zero_reciprocal_skipped == 0
+            && self.non_finite_skipped == 0
+            && self.boundary_clamped == 0
+    }
+
+    /// Record a domain rejection matching `scale` when `value` failed forward transformation.
+    pub fn record_domain_rejection(&mut self, scale: AxisScale, value: f64) {
+        if !value.is_finite() {
+            self.non_finite_skipped += 1;
+            return;
+        }
+        match scale {
+            AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => self.non_positive_log_skipped += 1,
+            AxisScale::Logit(_) => self.out_of_domain_logit_skipped += 1,
+            AxisScale::Probit => self.out_of_domain_probit_skipped += 1,
+            AxisScale::Reciprocal => self.zero_reciprocal_skipped += 1,
+            AxisScale::Linear => {}
+        }
+    }
+
+    /// Flush non-zero anomaly counters as structured [`ChartWarning`] entries into `warnings`.
+    pub fn emit_warnings(&self, axis_label: &str, warnings: &mut Vec<ChartWarning>) {
+        if self.non_positive_log_skipped > 0 {
+            warnings.push(ChartWarning::new(
+                "non_positive_on_log_axis",
+                format!("skipped {} non-positive value(s) on log axis '{axis_label}'", self.non_positive_log_skipped),
+            ));
+        }
+        if self.log_error_bars_clamped > 0 {
+            warnings.push(ChartWarning::new(
+                "log_error_bar_clamped",
+                format!("clamped {} lower error-bar bound(s) to positive floor on log axis '{axis_label}'", self.log_error_bars_clamped),
+            ));
+        }
+        if self.out_of_domain_logit_skipped > 0 {
+            warnings.push(ChartWarning::new(
+                "out_of_domain_logit",
+                format!("skipped {} out-of-domain value(s) on logit axis '{axis_label}'", self.out_of_domain_logit_skipped),
+            ));
+        }
+        if self.out_of_domain_probit_skipped > 0 {
+            warnings.push(ChartWarning::new(
+                "out_of_domain_probit",
+                format!("skipped {} out-of-domain value(s) on probit axis '{axis_label}'", self.out_of_domain_probit_skipped),
+            ));
+        }
+        if self.zero_reciprocal_skipped > 0 {
+            warnings.push(ChartWarning::new(
+                "zero_on_reciprocal_axis",
+                format!("skipped {} zero value(s) on reciprocal (1/X) axis '{axis_label}'", self.zero_reciprocal_skipped),
+            ));
+        }
+        if self.non_finite_skipped > 0 {
+            warnings.push(ChartWarning::new(
+                "non_finite_axis_value",
+                format!("skipped {} non-finite value(s) on axis '{axis_label}'", self.non_finite_skipped),
+            ));
+        }
+        if self.boundary_clamped > 0 {
+            warnings.push(ChartWarning::new(
+                "error_bar_domain_clamped",
+                format!("clamped {} error-bar bound(s) to valid scale domain on axis '{axis_label}'", self.boundary_clamped),
+            ));
+        }
+    }
+}
+
+/// Result of mapping a point and its `[lower, upper]` error-bar bounds onto a single axis span.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ErrorBarMappedPt {
+    pub center_pt: f64,
+    pub lower_pt: f64,
+    pub upper_pt: f64,
+    pub lower_clipped: bool,
+    pub upper_clipped: bool,
+}
+
+/// Guarded forward transform `g(u)` across all 7 [`AxisScale`] variants, explicitly invoking
+/// `lumencraft_math` inverse normal CDF (`norm_ppf`) for [`AxisScale::Probit`].
+#[must_use]
+pub fn scale_transform(scale: AxisScale, value: f64) -> Option<f64> {
+    if !value.is_finite() {
+        return None;
+    }
+    match scale {
+        AxisScale::Probit => {
+            if !(value > 0.0 && value < 100.0) {
+                return None;
+            }
+            norm_ppf(value / 100.0).ok().filter(|t| t.is_finite())
+        }
+        _ => scale.transform(value),
+    }
+}
+
+/// Guarded inverse transform `g^{-1}(t)` across all 7 [`AxisScale`] variants, using
+/// `lumencraft_math::dist::norm_cdf` for [`AxisScale::Probit`].
+#[must_use]
+pub fn scale_inverse(scale: AxisScale, transformed: f64) -> Option<f64> {
+    if !transformed.is_finite() {
+        return None;
+    }
+    match scale {
+        AxisScale::Probit => {
+            let pct = 100.0 * norm_cdf(transformed);
+            pct.is_finite().then_some(pct)
+        }
+        _ => scale.inverse(transformed),
+    }
+}
+
+/// Continuous mapping of a single axis domain `[min, max]` under [`AxisScale`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisMapping {
+    pub min: f64,
+    pub max: f64,
+    pub scale: AxisScale,
+}
+
+impl AxisMapping {
+    /// Project `value` onto `[span_start, span_end]` in scene points, returning `None` if invalid.
+    #[must_use]
+    pub fn map_value(self, value: f64, span_start: f64, span_end: f64) -> Option<f64> {
+        if !span_start.is_finite() || !span_end.is_finite() {
+            return None;
+        }
+        let t_min = scale_transform(self.scale, self.min)?;
+        let t_max = scale_transform(self.scale, self.max)?;
+        let t_val = scale_transform(self.scale, value)?;
+        let denom = t_max - t_min;
+        if !denom.is_finite() || denom.abs() <= f64::EPSILON {
+            return None;
+        }
+        let u = (t_val - t_min) / denom;
+        let pt = span_start + u * (span_end - span_start);
+        pt.is_finite().then_some(pt)
+    }
+
+    /// Invert scene coordinate `coord_pt` along `[span_start, span_end]` back into data space.
+    #[must_use]
+    pub fn unmap_coord(self, coord_pt: f64, span_start: f64, span_end: f64) -> Option<f64> {
+        if !coord_pt.is_finite() || !span_start.is_finite() || !span_end.is_finite() {
+            return None;
+        }
+        let span = span_end - span_start;
+        if !span.is_finite() || span.abs() <= f64::EPSILON {
+            return None;
+        }
+        let t_min = scale_transform(self.scale, self.min)?;
+        let t_max = scale_transform(self.scale, self.max)?;
+        let u = (coord_pt - span_start) / span;
+        let t_val = t_min + u * (t_max - t_min);
+        scale_inverse(self.scale, t_val)
+    }
+
+    /// Map `value` onto `[span_start, span_end]`, recording domain rejections on `diag`.
+    #[must_use]
+    pub fn map_value_tracked(self, value: f64, span_start: f64, span_end: f64, diag: &mut ScaleDiagnostics) -> Option<f64> {
+        if !value.is_finite() {
+            diag.non_finite_skipped += 1;
+            return None;
+        }
+        if scale_transform(self.scale, value).is_none() {
+            diag.record_domain_rejection(self.scale, value);
+            return None;
+        }
+        self.map_value(value, span_start, span_end)
+    }
+
+    /// Map `value` onto `[span_start, span_end]` and immediately append any warning to `warnings`.
+    #[must_use]
+    pub fn map_value_checked(self, value: f64, span_start: f64, span_end: f64, axis_label: &str, warnings: &mut Vec<ChartWarning>) -> Option<f64> {
+        let mut diag = ScaleDiagnostics::default();
+        let out = self.map_value_tracked(value, span_start, span_end, &mut diag);
+        diag.emit_warnings(axis_label, warnings);
+        out
+    }
+
+    /// Strictly positive domain floor used when clamping lower error-bar whiskers on log scales.
+    #[must_use]
+    pub fn positive_floor(self) -> f64 {
+        match (self.min.is_finite() && self.min > 0.0, self.max.is_finite() && self.max > 0.0) {
+            (true, true) => self.min.min(self.max),
+            (true, false) => self.min,
+            (false, true) => self.max,
+            (false, false) => LOG_POSITIVE_FLOOR_DEFAULT,
+        }
+    }
+
+    /// Map `(center, lower, upper)` onto `[span_start, span_end]`, clamping non-positive lower
+    /// bounds on log axes to the positive axis floor and guarding logit/probit/reciprocal limits.
+    #[must_use]
+    pub fn map_error_bar(
+        self,
+        center: f64,
+        lower: f64,
+        upper: f64,
+        span_start: f64,
+        span_end: f64,
+        diag: &mut ScaleDiagnostics,
+    ) -> Option<ErrorBarMappedPt> {
+        let center_pt = self.map_value_tracked(center, span_start, span_end, diag)?;
+        let (safe_lower, lower_clipped) = self.clamp_error_bound(center, lower, true, diag);
+        let (safe_upper, upper_clipped) = self.clamp_error_bound(center, upper, false, diag);
+        let lower_pt = self.map_value(safe_lower, span_start, span_end).unwrap_or(center_pt);
+        let upper_pt = self.map_value(safe_upper, span_start, span_end).unwrap_or(center_pt);
+        Some(ErrorBarMappedPt { center_pt, lower_pt, upper_pt, lower_clipped, upper_clipped })
+    }
+
+    /// Map `(center, lower, upper)` onto `[span.0, span.1]` and flush any clamping warnings.
+    #[must_use]
+    pub fn map_error_bar_checked(
+        self,
+        center: f64,
+        lower: f64,
+        upper: f64,
+        span: (f64, f64),
+        axis_label: &str,
+        warnings: &mut Vec<ChartWarning>,
+    ) -> Option<ErrorBarMappedPt> {
+        let mut diag = ScaleDiagnostics::default();
+        let out = self.map_error_bar(center, lower, upper, span.0, span.1, &mut diag);
+        diag.emit_warnings(axis_label, warnings);
+        out
+    }
+
+    fn clamp_error_bound(self, center: f64, bound: f64, is_lower: bool, diag: &mut ScaleDiagnostics) -> (f64, bool) {
+        if !bound.is_finite() {
+            diag.non_finite_skipped += 1;
+            return (center, true);
+        }
+        match self.scale {
+            AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => {
+                if bound <= 0.0 {
+                    if is_lower {
+                        diag.log_error_bars_clamped += 1;
+                    } else {
+                        diag.non_positive_log_skipped += 1;
+                    }
+                    return (self.positive_floor(), true);
+                }
+                (bound, false)
+            }
+            AxisScale::Logit(LogitDomain::Proportion) => clamp_open_interval(bound, self.min, self.max, 0.0, 1.0, 1e-6, diag),
+            AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => clamp_open_interval(bound, self.min, self.max, 0.0, 100.0, 1e-4, diag),
+            AxisScale::Reciprocal => {
+                if bound == 0.0 || (bound.signum() != center.signum() && center != 0.0) {
+                    diag.boundary_clamped += 1;
+                    let safe = if center > 0.0 { self.positive_floor() } else { -self.positive_floor() };
+                    return (safe, true);
+                }
+                (bound, false)
+            }
+            AxisScale::Linear => (bound, false),
+        }
+    }
+}
+
+fn clamp_open_interval(bound: f64, dom_min: f64, dom_max: f64, lo_open: f64, hi_open: f64, eps: f64, diag: &mut ScaleDiagnostics) -> (f64, bool) {
+    let floor = if dom_min.is_finite() && dom_min > lo_open && dom_min < hi_open { dom_min } else { lo_open + eps };
+    let ceil = if dom_max.is_finite() && dom_max > lo_open && dom_max < hi_open { dom_max } else { hi_open - eps };
+    if bound <= lo_open {
+        diag.boundary_clamped += 1;
+        (floor.min(ceil), true)
+    } else if bound >= hi_open {
+        diag.boundary_clamped += 1;
+        (floor.max(ceil), true)
+    } else {
+        (bound, false)
+    }
+}
+
+// ============================================================================
+// 2. Discontinuous Multi-Segment Axes & Segment-Aware Splitting Helpers
+// ============================================================================
+
+/// Orientation of a plotted axis on the 2D canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum AxisOrientation {
+    Horizontal,
+    Vertical,
+}
+
+/// Physical break gap between two adjacent segments of a discontinuous axis.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AxisBreakGap {
+    pub after_segment_index: usize,
+    pub gap_start_pt: f64,
+    pub gap_end_pt: f64,
+    pub ornament: BreakOrnament,
+}
+
+/// Resolved segment of a 1–3 segment axis with finite validated bounds and point span.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResolvedSegment {
+    pub segment_index: usize,
+    pub domain_min: f64,
+    pub domain_max: f64,
+    pub scale: AxisScale,
+    /// Normalized share of usable axis length in `(0.0, 1.0]`.
+    pub length_fraction: f64,
+    /// Point coordinate corresponding to `domain_min`.
+    pub span_start_pt: f64,
+    /// Point coordinate corresponding to `domain_max`.
+    pub span_end_pt: f64,
+    pub major_tick_interval: Option<f64>,
+    pub minor_ticks_per_interval: u8,
+}
+
+impl ResolvedSegment {
+    /// Build an [`AxisMapping`] for this segment's domain and scale.
+    #[must_use]
+    pub const fn mapping(&self) -> AxisMapping {
+        AxisMapping { min: self.domain_min, max: self.domain_max, scale: self.scale }
+    }
+
+    /// True if `value` lies within `[domain_min, domain_max]` (inclusive with tiny boundary eps).
+    #[must_use]
+    pub fn contains_value(&self, value: f64) -> bool {
+        if !value.is_finite() {
+            return false;
+        }
+        let lo = self.domain_min.min(self.domain_max);
+        let hi = self.domain_min.max(self.domain_max);
+        let tol = 1e-12 * (hi - lo).abs().max(1.0);
+        value >= lo - tol && value <= hi + tol
+    }
+
+    /// True if scene coordinate `coord_pt` lies within `[span_start_pt, span_end_pt]`.
+    #[must_use]
+    pub fn contains_coord(&self, coord_pt: f64) -> bool {
+        if !coord_pt.is_finite() {
+            return false;
+        }
+        let lo = self.span_start_pt.min(self.span_end_pt);
+        let hi = self.span_start_pt.max(self.span_end_pt);
+        coord_pt >= lo - 1e-6 && coord_pt <= hi + 1e-6
+    }
+
+    /// Map `value` onto this segment's scene coordinate span if it belongs to this segment.
+    #[must_use]
+    pub fn map_value(&self, value: f64) -> Option<f64> {
+        if !self.contains_value(value) {
+            return None;
+        }
+        self.mapping().map_value(value, self.span_start_pt, self.span_end_pt)
+    }
+
+    /// Clip a data interval `[v_lo, v_hi]` against this segment and return its mapped point span.
+    #[must_use]
+    pub fn map_interval(&self, v_lo: f64, v_hi: f64) -> Option<SegmentIntervalPt> {
+        if !v_lo.is_finite() || !v_hi.is_finite() {
+            return None;
+        }
+        let seg_lo = self.domain_min.min(self.domain_max);
+        let seg_hi = self.domain_min.max(self.domain_max);
+        let req_lo = v_lo.min(v_hi);
+        let req_hi = v_lo.max(v_hi);
+        if req_hi < seg_lo || req_lo > seg_hi {
+            return None;
+        }
+        let clipped_lo = req_lo.max(seg_lo);
+        let clipped_hi = req_hi.min(seg_hi);
+        let p0 = self.mapping().map_value(clipped_lo, self.span_start_pt, self.span_end_pt)?;
+        let p1 = self.mapping().map_value(clipped_hi, self.span_start_pt, self.span_end_pt)?;
+        Some(SegmentIntervalPt {
+            segment_index: self.segment_index,
+            start_pt: p0,
+            end_pt: p1,
+            clipped_start: req_lo < seg_lo,
+            clipped_end: req_hi > seg_hi,
+        })
+    }
+}
+
+/// Result of locating and projecting a data value onto a [`ResolvedAxis`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegmentedPointMatch {
+    pub segment_index: usize,
+    pub coord_pt: f64,
+}
+
+/// Mapped sub-interval within a single [`ResolvedSegment`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SegmentIntervalPt {
+    pub segment_index: usize,
+    pub start_pt: f64,
+    pub end_pt: f64,
+    pub clipped_start: bool,
+    pub clipped_end: bool,
+}
+
+/// Error bar mapped across one or more segments of a [`ResolvedAxis`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct SegmentedErrorBar {
+    pub center: Option<SegmentedPointMatch>,
+    pub spans: Vec<SegmentIntervalPt>,
+    pub lower_clipped: bool,
+    pub upper_clipped: bool,
+}
+
+/// Clipped polyline path confined to a single `(x_segment_index, y_segment_index)` plot cell.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClippedSegmentPath {
+    pub x_segment_index: usize,
+    pub y_segment_index: usize,
+    pub clip_rect: RectPt,
+    pub path: Path2D,
+}
+
+/// Complete resolved axis across 1–3 discontinuous segments and their break gaps.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedAxis {
+    pub orientation: AxisOrientation,
+    pub segments: Vec<ResolvedSegment>,
+    pub breaks: Vec<AxisBreakGap>,
+    pub axis_start_pt: f64,
+    pub axis_end_pt: f64,
+}
+
+impl ResolvedAxis {
+    /// Resolve an [`AxisSpec`] over `plot_rect` along `orientation`, clamping invalid domains and
+    /// normalizing `length_share` weights into `length_fraction`.
+    pub fn resolve(
+        spec: &AxisSpec,
+        orientation: AxisOrientation,
+        plot_rect: RectPt,
+        data_bounds: Option<(f64, f64)>,
+        warnings: &mut Vec<ChartWarning>,
+    ) -> Self {
+        let raw_segments = normalize_segment_slice(&spec.segments, &spec.title, warnings);
+        let n = raw_segments.len();
+        let (axis_start_pt, axis_end_pt, total_len, dir) = match orientation {
+            AxisOrientation::Horizontal => (plot_rect.x, plot_rect.right(), plot_rect.width.max(1.0), 1.0),
+            AxisOrientation::Vertical => (plot_rect.bottom(), plot_rect.y, plot_rect.height.max(1.0), -1.0),
+        };
+
+        let num_gaps = n.saturating_sub(1);
+        let raw_gap = if spec.gap_width_pt.is_finite() && spec.gap_width_pt >= 0.0 { spec.gap_width_pt } else { 8.0 };
+        let gap_pt = if num_gaps == 0 { 0.0 } else { raw_gap.min((total_len * 0.25) / (num_gaps as f64)) };
+        let usable_len = (total_len - gap_pt * (num_gaps as f64)).max(1.0);
+
+        let shares = normalize_length_shares(&raw_segments);
+        let mut resolved = Vec::with_capacity(n);
+        let mut breaks = Vec::with_capacity(num_gaps);
+        let mut cursor = axis_start_pt;
+        let mut prev_hi: Option<f64> = None;
+
+        for (idx, seg) in raw_segments.iter().enumerate() {
+            let fraction = shares.get(idx).copied().unwrap_or(1.0 / (n as f64));
+            let seg_len = usable_len * fraction;
+            let span_start_pt = cursor;
+            let span_end_pt = cursor + dir * seg_len;
+            let seg_bounds_hint = segment_data_bounds_hint(idx, n, data_bounds);
+            let (domain_min, domain_max) = resolve_segment_domain(seg, seg_bounds_hint, prev_hi, &spec.title, warnings);
+            prev_hi = Some(domain_max);
+
+            resolved.push(ResolvedSegment {
+                segment_index: idx,
+                domain_min,
+                domain_max,
+                scale: seg.scale,
+                length_fraction: fraction,
+                span_start_pt,
+                span_end_pt,
+                major_tick_interval: seg.major_tick_interval,
+                minor_ticks_per_interval: seg.minor_ticks_per_interval,
+            });
+
+            if idx + 1 < n {
+                let gap_start_pt = span_end_pt;
+                let gap_end_pt = gap_start_pt + dir * gap_pt;
+                breaks.push(AxisBreakGap { after_segment_index: idx, gap_start_pt, gap_end_pt, ornament: spec.break_ornament });
+                cursor = gap_end_pt;
+            }
+        }
+
+        Self { orientation, segments: resolved, breaks, axis_start_pt, axis_end_pt }
+    }
+
+    /// Map `value` onto the first matching segment, returning `None` if it falls in a break gap
+    /// or outside every segment.
+    #[must_use]
+    pub fn map_value(&self, value: f64) -> Option<SegmentedPointMatch> {
+        for seg in &self.segments {
+            if let Some(coord_pt) = seg.map_value(value) {
+                return Some(SegmentedPointMatch { segment_index: seg.segment_index, coord_pt });
+            }
+        }
+        None
+    }
+
+    /// Map `value` onto the first matching segment, recording invalid-domain statistics on `diag`.
+    #[must_use]
+    pub fn map_value_tracked(&self, value: f64, diag: &mut ScaleDiagnostics) -> Option<SegmentedPointMatch> {
+        if !value.is_finite() {
+            diag.non_finite_skipped += 1;
+            return None;
+        }
+        if let Some(matched) = self.map_value(value) {
+            return Some(matched);
+        }
+        if let Some(first) = self.segments.first()
+            && scale_transform(first.scale, value).is_none()
+        {
+            diag.record_domain_rejection(first.scale, value);
+        }
+        None
+    }
+
+    /// Invert scene coordinate `coord_pt` back to data space using the segment containing `coord_pt`.
+    #[must_use]
+    pub fn unmap_coord(&self, coord_pt: f64) -> Option<f64> {
+        for seg in &self.segments {
+            if seg.contains_coord(coord_pt) {
+                return seg.mapping().unmap_coord(coord_pt, seg.span_start_pt, seg.span_end_pt);
+            }
+        }
+        None
+    }
+
+    /// Split a data-space interval `[v_start, v_end]` across all overlapping segments.
+    #[must_use]
+    pub fn map_interval(&self, v_start: f64, v_end: f64) -> Vec<SegmentIntervalPt> {
+        let mut out = Vec::new();
+        for seg in &self.segments {
+            if let Some(interval) = seg.map_interval(v_start, v_end) {
+                out.push(interval);
+            }
+        }
+        out
+    }
+
+    /// Map a data point and error-bar bounds `[lower, upper]` across all matching segments,
+    /// clamping non-positive log lower bounds to the positive floor with diagnostics.
+    #[must_use]
+    pub fn map_error_bar(&self, center: f64, lower: f64, upper: f64, diag: &mut ScaleDiagnostics) -> Option<SegmentedErrorBar> {
+        if !center.is_finite() {
+            diag.non_finite_skipped += 1;
+            return None;
+        }
+        let center_match = self.map_value_tracked(center, diag);
+        let first_seg = self.segments.first()?;
+        let mapping = center_match.and_then(|m| self.segments.get(m.segment_index)).unwrap_or(first_seg).mapping();
+        let (safe_lower, lower_clipped) = mapping.clamp_error_bound(center, lower, true, diag);
+        let (safe_upper, upper_clipped) = mapping.clamp_error_bound(center, upper, false, diag);
+        let lo = safe_lower.min(safe_upper);
+        let hi = safe_lower.max(safe_upper);
+        let spans = self.map_interval(lo, hi);
+        if center_match.is_none() && spans.is_empty() {
+            return None;
+        }
+        Some(SegmentedErrorBar { center: center_match, spans, lower_clipped, upper_clipped })
+    }
+}
+
+/// Build the axis-aligned clip rectangle for a `(x_seg, y_seg)` pair.
+#[must_use]
+pub fn segment_cell_rect(x_seg: &ResolvedSegment, y_seg: &ResolvedSegment) -> RectPt {
+    let x0 = x_seg.span_start_pt.min(x_seg.span_end_pt);
+    let x1 = x_seg.span_start_pt.max(x_seg.span_end_pt);
+    let y0 = y_seg.span_start_pt.min(y_seg.span_end_pt);
+    let y1 = y_seg.span_start_pt.max(y_seg.span_end_pt);
+    RectPt::new(x0, y0, (x1 - x0).max(0.0), (y1 - y0).max(0.0))
+}
+
+/// Split a data-space polyline into clean per-segment [`ClippedSegmentPath`]s without drawing
+/// spurious strokes across axis break gaps.
+pub fn split_polyline_across_segments(
+    points: &[(f64, f64)],
+    x_axis: &ResolvedAxis,
+    y_axis: &ResolvedAxis,
+    diag: &mut ScaleDiagnostics,
+) -> Vec<ClippedSegmentPath> {
+    if points.len() < 2 {
+        return Vec::new();
+    }
+    let nx = x_axis.segments.len();
+    let ny = y_axis.segments.len();
+    let mut cell_paths = vec![Path2D::new(); nx * ny];
+    let mut last_pts: Vec<Option<PointPt>> = vec![None; nx * ny];
+
+    for pair in points.windows(2) {
+        let [(x0, y0), (x1, y1)] = *pair else { continue };
+        if !validate_pair_domains(x0, y0, x1, y1, x_axis, y_axis, diag) {
+            last_pts.fill(None);
+            continue;
+        }
+        for (xi, x_seg) in x_axis.segments.iter().enumerate() {
+            for (yi, y_seg) in y_axis.segments.iter().enumerate() {
+                let cell_idx = xi * ny + yi;
+                if let Some((p0, p1)) = clip_edge_to_segment_cell((x0, y0), (x1, y1), x_seg, y_seg) {
+                    if let (Some(path), Some(last)) = (cell_paths.get_mut(cell_idx), last_pts.get_mut(cell_idx)) {
+                        append_clipped_edge(path, last, p0, p1);
+                    }
+                } else if let Some(last) = last_pts.get_mut(cell_idx) {
+                    *last = None;
+                }
+            }
+        }
+    }
+
+    collect_non_empty_cell_paths(x_axis, y_axis, cell_paths)
+}
+
+fn validate_pair_domains(x0: f64, y0: f64, x1: f64, y1: f64, x_axis: &ResolvedAxis, y_axis: &ResolvedAxis, diag: &mut ScaleDiagnostics) -> bool {
+    let mut ok = true;
+    for x in [x0, x1] {
+        if x_axis.segments.iter().all(|s| scale_transform(s.scale, x).is_none()) {
+            let scale = x_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale);
+            diag.record_domain_rejection(scale, x);
+            ok = false;
+        }
+    }
+    for y in [y0, y1] {
+        if y_axis.segments.iter().all(|s| scale_transform(s.scale, y).is_none()) {
+            let scale = y_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale);
+            diag.record_domain_rejection(scale, y);
+            ok = false;
+        }
+    }
+    ok
+}
+
+fn clip_edge_to_segment_cell(p0: (f64, f64), p1: (f64, f64), x_seg: &ResolvedSegment, y_seg: &ResolvedSegment) -> Option<(PointPt, PointPt)> {
+    let gx0 = scale_transform(x_seg.scale, p0.0)?;
+    let gy0 = scale_transform(y_seg.scale, p0.1)?;
+    let gx1 = scale_transform(x_seg.scale, p1.0)?;
+    let gy1 = scale_transform(y_seg.scale, p1.1)?;
+
+    let gx_min = scale_transform(x_seg.scale, x_seg.domain_min)?;
+    let gx_max = scale_transform(x_seg.scale, x_seg.domain_max)?;
+    let gy_min = scale_transform(y_seg.scale, y_seg.domain_min)?;
+    let gy_max = scale_transform(y_seg.scale, y_seg.domain_max)?;
+
+    let (t0, t1) = liang_barsky_clip((gx0, gy0), (gx1, gy1), (gx_min.min(gx_max), gy_min.min(gy_max)), (gx_min.max(gx_max), gy_min.max(gy_max)))?;
+
+    let dx = gx1 - gx0;
+    let dy = gy1 - gy0;
+    let cx0 = map_transformed_to_span(gx0 + t0 * dx, gx_min, gx_max, x_seg.span_start_pt, x_seg.span_end_pt)?;
+    let cy0 = map_transformed_to_span(gy0 + t0 * dy, gy_min, gy_max, y_seg.span_start_pt, y_seg.span_end_pt)?;
+    let cx1 = map_transformed_to_span(gx0 + t1 * dx, gx_min, gx_max, x_seg.span_start_pt, x_seg.span_end_pt)?;
+    let cy1 = map_transformed_to_span(gy0 + t1 * dy, gy_min, gy_max, y_seg.span_start_pt, y_seg.span_end_pt)?;
+    Some((PointPt::new(cx0, cy0), PointPt::new(cx1, cy1)))
+}
+
+fn liang_barsky_clip(p0: (f64, f64), p1: (f64, f64), b_min: (f64, f64), b_max: (f64, f64)) -> Option<(f64, f64)> {
+    let dx = p1.0 - p0.0;
+    let dy = p1.1 - p0.1;
+    let mut t_enter = 0.0_f64;
+    let mut t_leave = 1.0_f64;
+    let edges = [(-dx, p0.0 - b_min.0), (dx, b_max.0 - p0.0), (-dy, p0.1 - b_min.1), (dy, b_max.1 - p0.1)];
+    for (p, q) in edges {
+        if p.abs() <= 1e-15 {
+            if q < -1e-12 {
+                return None;
+            }
+        } else {
+            let r = q / p;
+            if p < 0.0 {
+                if r > t_leave {
+                    return None;
+                }
+                t_enter = t_enter.max(r);
+            } else {
+                if r < t_enter {
+                    return None;
+                }
+                t_leave = t_leave.min(r);
+            }
+        }
+    }
+    if t_enter <= t_leave { Some((t_enter, t_leave)) } else { None }
+}
+
+fn map_transformed_to_span(t_val: f64, t_min: f64, t_max: f64, span_start: f64, span_end: f64) -> Option<f64> {
+    let denom = t_max - t_min;
+    if !denom.is_finite() || denom.abs() <= f64::EPSILON {
+        return None;
+    }
+    let u = (t_val - t_min) / denom;
+    let out = span_start + u * (span_end - span_start);
+    out.is_finite().then_some(out)
+}
+
+fn append_clipped_edge(path: &mut Path2D, last_pt: &mut Option<PointPt>, p0: PointPt, p1: PointPt) {
+    let same_start = last_pt.is_some_and(|prev| (prev.x - p0.x).abs() <= 1e-4 && (prev.y - p0.y).abs() <= 1e-4);
+    if !same_start {
+        path.commands.push(PathCmd::MoveTo(p0));
+    }
+    path.commands.push(PathCmd::LineTo(p1));
+    *last_pt = Some(p1);
+}
+
+fn collect_non_empty_cell_paths(x_axis: &ResolvedAxis, y_axis: &ResolvedAxis, cell_paths: Vec<Path2D>) -> Vec<ClippedSegmentPath> {
+    let ny = y_axis.segments.len();
+    let mut out = Vec::new();
+    for (xi, x_seg) in x_axis.segments.iter().enumerate() {
+        for (yi, y_seg) in y_axis.segments.iter().enumerate() {
+            if let Some(path) = cell_paths.get(xi * ny + yi)
+                && !path.is_empty()
+            {
+                out.push(ClippedSegmentPath {
+                    x_segment_index: xi,
+                    y_segment_index: yi,
+                    clip_rect: segment_cell_rect(x_seg, y_seg),
+                    path: path.clone(),
+                });
+            }
+        }
+    }
+    out
+}
+
+fn segment_data_bounds_hint(idx: usize, count: usize, data_bounds: Option<(f64, f64)>) -> Option<(f64, f64)> {
+    let (lo, hi) = data_bounds?;
+    if count <= 1 {
+        return Some((lo, hi));
+    }
+    if idx == 0 {
+        Some((lo, lo))
+    } else if idx + 1 == count {
+        Some((hi, hi))
+    } else {
+        None
+    }
+}
+
+fn normalize_segment_slice(segments: &[AxisSegment], title: &str, warnings: &mut Vec<ChartWarning>) -> Vec<AxisSegment> {
+    if segments.is_empty() {
+        warnings.push(ChartWarning::new("empty_axis_segments", format!("axis '{title}' had 0 segments; defaulted to 1 linear segment")));
+        return vec![AxisSegment::default()];
+    }
+    if segments.len() > MAX_SEGMENTS_PER_AXIS {
+        warnings.push(ChartWarning::new(
+            "too_many_axis_segments",
+            format!("axis '{title}' had {} segments; clamped to {MAX_SEGMENTS_PER_AXIS}", segments.len()),
+        ));
+        return segments[..MAX_SEGMENTS_PER_AXIS].to_vec();
+    }
+    segments.to_vec()
+}
+
+fn normalize_length_shares(segments: &[AxisSegment]) -> Vec<f64> {
+    let valid_shares: Vec<f64> =
+        segments.iter().map(|s| if s.length_share.is_finite() && s.length_share > 0.0 { s.length_share } else { 1.0 }).collect();
+    let sum: f64 = valid_shares.iter().sum();
+    if sum <= 0.0 || !sum.is_finite() {
+        return vec![1.0 / (segments.len().max(1) as f64); segments.len()];
+    }
+    valid_shares.into_iter().map(|w| w / sum).collect()
+}
+
+fn default_domain_for_scale(scale: AxisScale, prev_hi: Option<f64>) -> (f64, f64) {
+    match scale {
+        AxisScale::Linear => {
+            let lo = prev_hi.map_or(0.0, |p| p + 10.0);
+            (lo, lo + 10.0)
+        }
+        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => {
+            let lo = prev_hi.filter(|v| *v > 0.0).map_or(1.0, |p| p * 10.0);
+            (lo, lo * 10.0)
+        }
+        AxisScale::Logit(LogitDomain::Proportion) => (0.05, 0.95),
+        AxisScale::Logit(LogitDomain::Percent) => (5.0, 95.0),
+        AxisScale::Probit => (1.0, 99.0),
+        AxisScale::Reciprocal => {
+            let lo = prev_hi.filter(|v| *v > 0.0).map_or(1.0, |p| p * 2.0);
+            (lo, lo * 10.0)
+        }
+    }
+}
+
+fn resolve_segment_domain(
+    seg: &AxisSegment,
+    data_bounds: Option<(f64, f64)>,
+    prev_hi: Option<f64>,
+    axis_title: &str,
+    warnings: &mut Vec<ChartWarning>,
+) -> (f64, f64) {
+    let (def_lo, def_hi) = default_domain_for_scale(seg.scale, prev_hi);
+    let (auto_lo, auto_hi) = match data_bounds {
+        Some((d_lo, d_hi)) if d_lo.is_finite() && d_hi.is_finite() => compute_nice_bounds_for_scale(d_lo.min(d_hi), d_lo.max(d_hi), seg.scale),
+        _ => (def_lo, def_hi),
+    };
+    let mut lo = seg.min.filter(|v| v.is_finite()).unwrap_or(auto_lo);
+    let mut hi = seg.max.filter(|v| v.is_finite()).unwrap_or(auto_hi);
+    if seg.min.is_some() && seg.max.is_none() && hi <= lo {
+        hi = extend_upper_bound(lo, seg.scale);
+    }
+    if seg.max.is_some() && seg.min.is_none() && lo >= hi {
+        lo = extend_lower_bound(hi, seg.scale);
+    }
+
+    let valid_lo = scale_transform(seg.scale, lo).is_some();
+    let valid_hi = scale_transform(seg.scale, hi).is_some();
+    let valid_span = (hi - lo).abs() > f64::EPSILON;
+    let valid_reciprocal = !matches!(seg.scale, AxisScale::Reciprocal) || (lo.signum() == hi.signum());
+
+    if valid_lo && valid_hi && valid_span && valid_reciprocal {
+        (lo, hi)
+    } else {
+        warnings.push(ChartWarning::new(
+            "invalid_axis_domain",
+            format!("repaired invalid domain [{lo}, {hi}] for {:?} on axis '{axis_title}'", seg.scale),
+        ));
+        (def_lo, def_hi)
+    }
+}
+
+fn compute_nice_bounds_for_scale(lo: f64, hi: f64, scale: AxisScale) -> (f64, f64) {
+    match scale {
+        AxisScale::Linear => nice_linear_bounds(lo, hi),
+        AxisScale::Log10 => nice_log_bounds(lo, hi, 10.0),
+        AxisScale::Log2 => nice_log_bounds(lo, hi, 2.0),
+        AxisScale::Ln => nice_log_bounds(lo, hi, std::f64::consts::E),
+        AxisScale::Logit(LogitDomain::Proportion) => (lo.clamp(0.001, 0.49), hi.clamp(0.51, 0.999)),
+        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => (lo.clamp(0.1, 49.0), hi.clamp(51.0, 99.9)),
+        AxisScale::Reciprocal => {
+            if lo > 0.0 && hi > 0.0 {
+                (lo, if hi > lo { hi } else { lo * 10.0 })
+            } else {
+                (1.0, 10.0)
+            }
+        }
+    }
+}
+
+fn nice_linear_bounds(lo: f64, hi: f64) -> (f64, f64) {
+    if (hi - lo).abs() <= 1e-12 {
+        let pad = (lo.abs() * 0.1).max(1.0);
+        return (lo - pad, hi + pad);
+    }
+    let step = nice_linear_step((hi - lo) / 5.0);
+    let nice_lo = if lo >= 0.0 && lo <= step { 0.0 } else { (lo / step).floor() * step };
+    let nice_hi = (hi / step).ceil() * step;
+    (clean_zero(nice_lo), clean_zero(nice_hi))
+}
+
+fn nice_log_bounds(lo: f64, hi: f64, base: f64) -> (f64, f64) {
+    let safe_lo = if lo > 0.0 {
+        lo
+    } else if hi > 0.0 {
+        hi * 0.01
+    } else {
+        1.0
+    };
+    let safe_hi = if hi > safe_lo { hi } else { safe_lo * base };
+    let exp_lo = (safe_lo.ln() / base.ln()).floor();
+    let exp_hi = (safe_hi.ln() / base.ln()).ceil().max(exp_lo + 1.0);
+    (base.powf(exp_lo), base.powf(exp_hi))
+}
+
+fn extend_upper_bound(lo: f64, scale: AxisScale) -> f64 {
+    match scale {
+        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => lo.max(LOG_POSITIVE_FLOOR_DEFAULT) * 10.0,
+        AxisScale::Logit(LogitDomain::Proportion) => (lo + 0.25).min(0.999),
+        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => (lo + 10.0).min(99.99),
+        AxisScale::Linear | AxisScale::Reciprocal => lo + lo.abs().max(1.0),
+    }
+}
+
+fn extend_lower_bound(hi: f64, scale: AxisScale) -> f64 {
+    match scale {
+        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => (hi * 0.1).max(LOG_POSITIVE_FLOOR_DEFAULT),
+        AxisScale::Logit(LogitDomain::Proportion) => (hi - 0.25).max(0.001),
+        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => (hi - 10.0).max(0.01),
+        AxisScale::Linear | AxisScale::Reciprocal => hi - hi.abs().max(1.0),
+    }
+}
+
+// ============================================================================
+// 3. Auto Nice-Tick Computation & Scientific Rich-Text Formatting
+// ============================================================================
+
+/// Major vs minor tick mark classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TickKind {
+    Major,
+    Minor,
+}
+
+/// Optional explicit categorical tick entry mapping a data coordinate to a display label.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CategoricalTick {
+    pub value: f64,
+    pub label: String,
+}
+
+impl CategoricalTick {
+    /// Construct a categorical tick at coordinate `value`.
+    #[must_use]
+    pub fn new(value: f64, label: impl Into<String>) -> Self {
+        Self { value, label: label.into() }
+    }
+
+    /// Build evenly indexed categorical ticks at `0.0, 1.0, ...` from label strings.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss)]
+    pub fn from_labels(labels: &[String]) -> Vec<Self> {
+        labels.iter().enumerate().map(|(i, s)| Self { value: i as f64, label: s.clone() }).collect()
+    }
+}
+
+/// Single resolved tick mark along an axis segment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AxisTick {
+    pub segment_index: usize,
+    pub value: f64,
+    pub coord_pt: f64,
+    pub kind: TickKind,
+    pub label: Option<RichText>,
+}
+
+/// Configuration for generating and formatting ticks on a [`ResolvedAxis`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct TickComputeConfig<'a> {
+    pub tick_format: TickLabelFormat,
+    pub policy: &'a LocaleNumberPolicy,
+    pub auto_log_minor_ticks: bool,
+    pub categorical_ticks: Option<&'a [CategoricalTick]>,
+}
+
+/// Compute all major and minor ticks across all segments of `axis`.
+#[must_use]
+pub fn compute_axis_ticks(axis: &ResolvedAxis, config: TickComputeConfig<'_>) -> Vec<AxisTick> {
+    let mut out = Vec::new();
+    for seg in &axis.segments {
+        let mut seg_ticks = compute_segment_ticks(seg, config);
+        out.append(&mut seg_ticks);
+    }
+    out
+}
+
+/// Compute major and minor ticks for a single [`ResolvedSegment`].
+#[must_use]
+pub fn compute_segment_ticks(seg: &ResolvedSegment, config: TickComputeConfig<'_>) -> Vec<AxisTick> {
+    if let TickLabelFormat::Categorical(_) = config.tick_format
+        && let Some(cat_ticks) = config.categorical_ticks
+    {
+        return compute_categorical_ticks(seg, cat_ticks);
+    }
+
+    let span_pt = (seg.span_end_pt - seg.span_start_pt).abs().max(1.0);
+    let target_major = ((span_pt / 54.0).round() as usize).clamp(3, 9);
+    let (majors, minors) = match seg.scale {
+        AxisScale::Linear => linear_major_minor(seg, target_major),
+        AxisScale::Log10 => log10_major_minor(seg, config.auto_log_minor_ticks),
+        AxisScale::Log2 => log_base_major_minor(seg, 2.0),
+        AxisScale::Ln => log_base_major_minor(seg, std::f64::consts::E),
+        AxisScale::Logit(LogitDomain::Percent) => candidate_prob_ticks(seg, &LOGIT_PCT_TICKS),
+        AxisScale::Logit(LogitDomain::Proportion) => candidate_prob_ticks(seg, &LOGIT_PROP_TICKS),
+        AxisScale::Probit => candidate_prob_ticks(seg, &PROBIT_PCT_TICKS),
+        AxisScale::Reciprocal => reciprocal_major_minor(seg, target_major),
+    };
+
+    let mut ticks = Vec::with_capacity(majors.len() + minors.len());
+    for val in majors {
+        if let Some(coord_pt) = seg.mapping().map_value(val, seg.span_start_pt, seg.span_end_pt) {
+            let label = format_tick_rich(val, seg.scale, config.tick_format, config.policy);
+            ticks.push(AxisTick { segment_index: seg.segment_index, value: val, coord_pt, kind: TickKind::Major, label: Some(label) });
+        }
+    }
+    for val in minors {
+        if let Some(coord_pt) = seg.mapping().map_value(val, seg.span_start_pt, seg.span_end_pt) {
+            ticks.push(AxisTick { segment_index: seg.segment_index, value: val, coord_pt, kind: TickKind::Minor, label: None });
+        }
+    }
+    ticks
+}
+
+const LOGIT_PCT_TICKS: [f64; 13] = [0.01, 0.1, 1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99];
+const LOGIT_PROP_TICKS: [f64; 11] = [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 0.999];
+const PROBIT_PCT_TICKS: [f64; 13] = [0.01, 0.1, 1.0, 5.0, 10.0, 20.0, 50.0, 80.0, 90.0, 95.0, 99.0, 99.9, 99.99];
+
+fn compute_categorical_ticks(seg: &ResolvedSegment, cat_ticks: &[CategoricalTick]) -> Vec<AxisTick> {
+    let mut out = Vec::new();
+    for ct in cat_ticks.iter().take(MAX_TICKS_PER_SEGMENT) {
+        if seg.contains_value(ct.value)
+            && let Some(coord_pt) = seg.mapping().map_value(ct.value, seg.span_start_pt, seg.span_end_pt)
+        {
+            out.push(AxisTick {
+                segment_index: seg.segment_index,
+                value: ct.value,
+                coord_pt,
+                kind: TickKind::Major,
+                label: Some(parse_markup(&ct.label)),
+            });
+        }
+    }
+    out
+}
+
+fn nice_linear_step(rough: f64) -> f64 {
+    if !rough.is_finite() || rough <= 0.0 {
+        return 1.0;
+    }
+    let exp = rough.log10().floor();
+    let base = 10.0_f64.powf(exp);
+    let frac = rough / base;
+    let nice_mult = if frac <= 1.5 {
+        1.0
+    } else if frac <= 3.0 {
+        2.0
+    } else if frac <= 7.0 {
+        5.0
+    } else {
+        10.0
+    };
+    nice_mult * base
+}
+
+fn linear_major_minor(seg: &ResolvedSegment, target_major: usize) -> (Vec<f64>, Vec<f64>) {
+    let lo = seg.domain_min.min(seg.domain_max);
+    let hi = seg.domain_min.max(seg.domain_max);
+    let range = hi - lo;
+    if !range.is_finite() || range <= 0.0 {
+        return (vec![lo], Vec::new());
+    }
+    let step = match seg.major_tick_interval {
+        Some(s) if s.is_finite() && s > 0.0 => s,
+        _ => nice_linear_step(range / (target_major.max(2) as f64)),
+    };
+    let min_step = range / (MAX_TICKS_PER_SEGMENT as f64);
+    let safe_step = step.max(min_step);
+
+    let k_start = (lo / safe_step).ceil() as i64;
+    let k_end = (hi / safe_step).floor() as i64;
+    let mut majors = Vec::new();
+    let eps = 1e-9 * safe_step;
+    let mut k = k_start - 1;
+    while k <= k_end + 1 && majors.len() < MAX_TICKS_PER_SEGMENT {
+        let v = clean_tick_residual((k as f64) * safe_step, safe_step);
+        if v >= lo - eps && v <= hi + eps {
+            majors.push(v);
+        }
+        k += 1;
+    }
+
+    let minors = compute_linear_minors(lo, hi, &majors, safe_step, seg.minor_ticks_per_interval);
+    (majors, minors)
+}
+
+fn compute_linear_minors(lo: f64, hi: f64, majors: &[f64], major_step: f64, minor_per_interval: u8) -> Vec<f64> {
+    if minor_per_interval == 0 {
+        return Vec::new();
+    }
+    let sub_divs = usize::from(minor_per_interval) + 1;
+    let sub_step = major_step / (sub_divs as f64);
+    let anchor = majors.first().copied().unwrap_or(lo);
+    let start_idx = ((lo - anchor) / sub_step).floor() as i64 - 1;
+    let end_idx = ((hi - anchor) / sub_step).ceil() as i64 + 1;
+    let mut minors = Vec::new();
+    let eps = 1e-9 * major_step;
+    for idx in start_idx..=end_idx {
+        if minors.len() >= MAX_TICKS_PER_SEGMENT {
+            break;
+        }
+        let v = clean_tick_residual(anchor + (idx as f64) * sub_step, major_step);
+        if v < lo - eps || v > hi + eps {
+            continue;
+        }
+        let is_major = majors.iter().any(|&m| (m - v).abs() <= eps);
+        if !is_major {
+            minors.push(v);
+        }
+    }
+    minors
+}
+
+fn log10_major_minor(seg: &ResolvedSegment, auto_log_minor_ticks: bool) -> (Vec<f64>, Vec<f64>) {
+    let lo = seg.domain_min.min(seg.domain_max).max(f64::MIN_POSITIVE);
+    let hi = seg.domain_min.max(seg.domain_max).max(lo * 1.0001);
+    let k_lo = lo.log10().floor() as i32;
+    let k_hi = hi.log10().ceil() as i32;
+    let decades = (k_hi - k_lo).max(1) as usize;
+    let stride = if decades > 10 { ((decades as f64) / 8.0).ceil() as i32 } else { 1 };
+
+    let mut majors = Vec::new();
+    let eps_rel = 1e-9;
+    let mut k = k_lo;
+    while k <= k_hi && majors.len() < MAX_TICKS_PER_SEGMENT {
+        let v = 10.0_f64.powi(k);
+        if v >= lo * (1.0 - eps_rel) && v <= hi * (1.0 + eps_rel) {
+            majors.push(v);
+        }
+        k += stride;
+    }
+
+    if majors.len() < 2 {
+        let (lin_maj, _) = linear_major_minor(seg, 4);
+        if lin_maj.len() >= 2 {
+            majors = lin_maj;
+        }
+    }
+
+    let mut minors = Vec::new();
+    let emit_minors = (auto_log_minor_ticks || seg.minor_ticks_per_interval > 0) && decades <= 8 && stride == 1;
+    if emit_minors {
+        for dec in (k_lo - 1)..=k_hi {
+            let base = 10.0_f64.powi(dec);
+            for mult in 2_u8..=9 {
+                if minors.len() >= MAX_TICKS_PER_SEGMENT {
+                    break;
+                }
+                let v = f64::from(mult) * base;
+                if v >= lo * (1.0 - eps_rel) && v <= hi * (1.0 + eps_rel) {
+                    let is_major = majors.iter().any(|&m| (m - v).abs() <= m * 1e-9);
+                    if !is_major {
+                        minors.push(v);
+                    }
+                }
+            }
+        }
+    }
+    (majors, minors)
+}
+
+fn log_base_major_minor(seg: &ResolvedSegment, base: f64) -> (Vec<f64>, Vec<f64>) {
+    let lo = seg.domain_min.min(seg.domain_max).max(f64::MIN_POSITIVE);
+    let hi = seg.domain_min.max(seg.domain_max).max(lo * 1.0001);
+    let ln_base = base.ln();
+    let k_lo = (lo.ln() / ln_base).floor() as i32;
+    let k_hi = (hi.ln() / ln_base).ceil() as i32;
+    let span = (k_hi - k_lo).max(1) as usize;
+    let stride = if span > 10 { ((span as f64) / 8.0).ceil() as i32 } else { 1 };
+
+    let mut majors = Vec::new();
+    let mut k = k_lo;
+    while k <= k_hi && majors.len() < MAX_TICKS_PER_SEGMENT {
+        let v = base.powi(k);
+        if v >= lo * (1.0 - 1e-9) && v <= hi * (1.0 + 1e-9) {
+            majors.push(v);
+        }
+        k += stride;
+    }
+    if majors.len() < 2 {
+        return linear_major_minor(seg, 4);
+    }
+
+    let mut minors = Vec::new();
+    if seg.minor_ticks_per_interval > 0 && majors.len() >= 2 {
+        let divs = usize::from(seg.minor_ticks_per_interval) + 1;
+        for pair in majors.windows(2) {
+            let [a, b] = *pair else { continue };
+            let ta = a.ln();
+            let tb = b.ln();
+            for j in 1..divs {
+                if minors.len() >= MAX_TICKS_PER_SEGMENT {
+                    break;
+                }
+                let t = ta + (tb - ta) * ((j as f64) / (divs as f64));
+                minors.push(t.exp());
+            }
+        }
+    }
+    (majors, minors)
+}
+
+fn candidate_prob_ticks(seg: &ResolvedSegment, candidates: &[f64]) -> (Vec<f64>, Vec<f64>) {
+    let lo = seg.domain_min.min(seg.domain_max);
+    let hi = seg.domain_min.max(seg.domain_max);
+    let eps = 1e-12;
+    let majors: Vec<f64> = candidates.iter().copied().filter(|&v| v >= lo - eps && v <= hi + eps).collect();
+    if majors.len() >= 2 {
+        let mut minors = Vec::new();
+        if seg.minor_ticks_per_interval > 0 {
+            let divs = usize::from(seg.minor_ticks_per_interval) + 1;
+            for pair in majors.windows(2) {
+                let [a, b] = *pair else { continue };
+                if let (Some(ta), Some(tb)) = (scale_transform(seg.scale, a), scale_transform(seg.scale, b)) {
+                    for j in 1..divs {
+                        if minors.len() >= MAX_TICKS_PER_SEGMENT {
+                            break;
+                        }
+                        let t = ta + (tb - ta) * ((j as f64) / (divs as f64));
+                        if let Some(v) = scale_inverse(seg.scale, t) {
+                            minors.push(v);
+                        }
+                    }
+                }
+            }
+        }
+        (majors, minors)
+    } else {
+        linear_major_minor(seg, 4)
+    }
+}
+
+fn reciprocal_major_minor(seg: &ResolvedSegment, target_major: usize) -> (Vec<f64>, Vec<f64>) {
+    let (Some(t0), Some(t1)) = (scale_transform(seg.scale, seg.domain_min), scale_transform(seg.scale, seg.domain_max)) else {
+        return (Vec::new(), Vec::new());
+    };
+    let t_lo = t0.min(t1);
+    let t_hi = t0.max(t1);
+    let temp_seg = ResolvedSegment {
+        segment_index: seg.segment_index,
+        domain_min: t_lo,
+        domain_max: t_hi,
+        scale: AxisScale::Linear,
+        length_fraction: seg.length_fraction,
+        span_start_pt: seg.span_start_pt,
+        span_end_pt: seg.span_end_pt,
+        major_tick_interval: None,
+        minor_ticks_per_interval: seg.minor_ticks_per_interval,
+    };
+    let (t_majors, t_minors) = linear_major_minor(&temp_seg, target_major);
+    let majors = t_majors.into_iter().filter_map(|t| scale_inverse(AxisScale::Reciprocal, t)).collect();
+    let minors = t_minors.into_iter().filter_map(|t| scale_inverse(AxisScale::Reciprocal, t)).collect();
+    (majors, minors)
+}
+
+fn clean_zero(v: f64) -> f64 {
+    if v == 0.0 { 0.0 } else { v }
+}
+
+fn clean_tick_residual(v: f64, step: f64) -> f64 {
+    if v.abs() <= step.abs() * 1e-11 { 0.0 } else { clean_zero(v) }
+}
+
+/// Format a numeric tick value into [`RichText`] honoring `format`, `scale`, and `policy`.
+#[must_use]
+pub fn format_tick_rich(value: f64, scale: AxisScale, format: TickLabelFormat, policy: &LocaleNumberPolicy) -> RichText {
+    if !value.is_finite() {
+        return RichText::plain("NaN");
+    }
+    let clean = clean_zero(value);
+    match format {
+        TickLabelFormat::Decimal | TickLabelFormat::Categorical(_) => RichText::plain(lumencraft_text::format_axis_tick(clean, scale, policy)),
+        TickLabelFormat::PowerOfTenSuperscript => format_power_of_ten_rich(clean, policy),
+        TickLabelFormat::ScientificE => RichText::plain(format_scientific_e(clean, policy)),
+        TickLabelFormat::Antilog => {
+            let antilog_val = match scale {
+                AxisScale::Linear if clean.abs() <= 300.0 => 10.0_f64.powf(clean),
+                _ => clean,
+            };
+            RichText::plain(lumencraft_text::format_axis_tick(antilog_val, AxisScale::Log10, policy))
+        }
+        TickLabelFormat::EngineeringSi => RichText::plain(format_engineering_si(clean, policy)),
+    }
+}
+
+fn format_power_of_ten_rich(value: f64, policy: &LocaleNumberPolicy) -> RichText {
+    if value == 0.0 {
+        return RichText::plain("0");
+    }
+    let abs = value.abs();
+    let mut exp = abs.log10().floor() as i32;
+    let mut mant = abs / 10.0_f64.powi(exp);
+    while mant >= 10.0 - 1e-9 && exp < 308 {
+        exp += 1;
+        mant = abs / 10.0_f64.powi(exp);
+    }
+    while mant < 1.0 - 1e-9 && exp > -308 {
+        exp -= 1;
+        mant = abs / 10.0_f64.powi(exp);
+    }
+    let sign = if value.is_sign_negative() { policy.minus_sign.as_str() } else { "" };
+    let exp_str = format_signed_int(exp, policy);
+    let markup = if (mant - 1.0).abs() < 1e-7 {
+        format!("{sign}10<sup>{exp_str}</sup>")
+    } else {
+        let mant_str = apply_locale_chars(&trim_decimal_str(format!("{mant:.3}")), policy);
+        format!("{sign}{mant_str}\u{00D7}10<sup>{exp_str}</sup>")
+    };
+    parse_markup(&markup)
+}
+
+fn format_scientific_e(value: f64, policy: &LocaleNumberPolicy) -> String {
+    if value == 0.0 {
+        return String::from("0");
+    }
+    let abs = value.abs();
+    let mut exp = abs.log10().floor() as i32;
+    let mut mant = abs / 10.0_f64.powi(exp);
+    while mant >= 10.0 - 1e-9 && exp < 308 {
+        exp += 1;
+        mant = abs / 10.0_f64.powi(exp);
+    }
+    while mant < 1.0 - 1e-9 && exp > -308 {
+        exp -= 1;
+        mant = abs / 10.0_f64.powi(exp);
+    }
+    let sign = if value.is_sign_negative() { policy.minus_sign.as_str() } else { "" };
+    let mant_str = apply_locale_chars(&trim_decimal_str(format!("{mant:.3}")), policy);
+    let exp_str = format_signed_int(exp, policy);
+    format!("{sign}{mant_str}e{exp_str}")
+}
+
+fn format_engineering_si(value: f64, policy: &LocaleNumberPolicy) -> String {
+    if value == 0.0 {
+        return String::from("0");
+    }
+    let abs = value.abs();
+    let mut exp3 = (abs.log10() / 3.0).floor() as i32;
+    exp3 = exp3.clamp(-8, 8);
+    let mut scaled = abs / 10.0_f64.powi(exp3 * 3);
+    while scaled >= 1000.0 - 1e-9 && exp3 < 8 {
+        exp3 += 1;
+        scaled = abs / 10.0_f64.powi(exp3 * 3);
+    }
+    while scaled < 1.0 - 1e-9 && exp3 > -8 {
+        exp3 -= 1;
+        scaled = abs / 10.0_f64.powi(exp3 * 3);
+    }
+    let prefix = SI_PREFIXES.get((exp3 + 8) as usize).copied().unwrap_or("");
+    let sign = if value.is_sign_negative() { policy.minus_sign.as_str() } else { "" };
+    let num_str = apply_locale_chars(&trim_decimal_str(format!("{scaled:.3}")), policy);
+    if prefix.is_empty() { format!("{sign}{num_str}") } else { format!("{sign}{num_str} {prefix}") }
+}
+
+fn format_signed_int(n: i32, policy: &LocaleNumberPolicy) -> String {
+    if n < 0 { format!("{}{}", policy.minus_sign, n.unsigned_abs()) } else { format!("{n}") }
+}
+
+fn trim_decimal_str(mut s: String) -> String {
+    if s.contains('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    if s == "-0" { String::from("0") } else { s }
+}
+
+fn apply_locale_chars(raw: &str, policy: &LocaleNumberPolicy) -> String {
+    let mut out = String::with_capacity(raw.len() + 2);
+    for ch in raw.chars() {
+        match ch {
+            '-' => out.push_str(&policy.minus_sign),
+            '.' => out.push(policy.decimal_separator),
+            _ => out.push(ch),
+        }
+    }
+    out
+}
+
+/// Resolve `{{info:...}}` and `{{result:...}}` template hooks using `doc`.
+#[must_use]
+pub fn resolve_template_hooks(template: &str, doc: &ProjectDocument, primary_data_id: Option<&SheetId>) -> String {
+    let paired_info = primary_data_id
+        .and_then(|id| doc.data_sheet(id))
+        .and_then(|ds| ds.info_sheet_id.as_ref())
+        .and_then(|info_id| doc.info_sheet(info_id))
+        .or_else(|| doc.info_sheets.first());
+
+    expand_template_hooks(template, |token| resolve_single_hook(token, doc, paired_info))
+}
+
+fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&lumencraft_doc::InfoSheet>) -> Option<String> {
+    let parts: Vec<&str> = token.split(':').map(str::trim).collect();
+    match parts.as_slice() {
+        ["info", name] if !name.is_empty() => paired_info.and_then(|i| i.get_constant(name)).map(|c| c.value.display_text()),
+        ["info", sheet, name] if !sheet.is_empty() && !name.is_empty() => {
+            doc.info_sheet(&SheetId::new(*sheet)).and_then(|i| i.get_constant(name)).map(|c| c.value.display_text())
+        }
+        ["result", sheet, param] if !sheet.is_empty() && !param.is_empty() => {
+            doc.result_sheet(&SheetId::new(*sheet)).and_then(|r| r.lookup_scalar(param, None)).map(format_scalar_clean)
+        }
+        ["result", sheet, ds_str, param] if !sheet.is_empty() && !param.is_empty() => {
+            let ds = ds_str.parse::<usize>().ok()?;
+            doc.result_sheet(&SheetId::new(*sheet)).and_then(|r| r.lookup_scalar(param, Some(ds))).map(format_scalar_clean)
+        }
+        _ => None,
+    }
+}
+
+fn format_scalar_clean(v: f64) -> String {
+    if !v.is_finite() {
+        return String::from("NaN");
+    }
+    let abs = v.abs();
+    if abs > 0.0 && !(1e-3..1e5).contains(&abs) { format!("{v:.3e}") } else { trim_decimal_str(format!("{v:.4}")) }
+}
+
+// ============================================================================
+// 4. Frame Presets, Thresholds/Bands, Break Glyphs & Axis Rendering
+// ============================================================================
+
+/// Axis frame geometry mode covering all [`FramePreset`] variants plus `TopRightTicks` and `NoAxes`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum AxisFrameMode {
+    #[default]
+    OpenL,
+    PlainBox,
+    TopRightTicks,
+    OffsetAxes,
+    OriginCrosshair,
+    NoAxes,
+    DualYSecondaryRight,
+}
+
+impl From<FramePreset> for AxisFrameMode {
+    fn from(preset: FramePreset) -> Self {
+        match preset {
+            FramePreset::OpenL => Self::OpenL,
+            FramePreset::OffsetRangeTufte => Self::OffsetAxes,
+            FramePreset::PlainBoxed => Self::PlainBox,
+            FramePreset::DualYSecondaryRight => Self::DualYSecondaryRight,
+            FramePreset::OriginCrossing => Self::OriginCrosshair,
+        }
+    }
+}
+
+/// Rendering options for axes, ticks, frames, and margins.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AxisRenderOptions {
+    pub frame_mode: Option<AxisFrameMode>,
+    pub policy: LocaleNumberPolicy,
+    pub tick_font_size_pt: f64,
+    pub title_font_size_pt: f64,
+    pub major_tick_len_pt: f64,
+    pub minor_tick_len_pt: f64,
+    pub offset_gap_pt: f64,
+    pub auto_log_minor_ticks: bool,
+    pub show_gridlines: bool,
+    pub axis_color: Rgba8,
+    pub grid_color: Rgba8,
+    pub x_categories: Option<Vec<CategoricalTick>>,
+    pub y_categories: Option<Vec<CategoricalTick>>,
+    pub y2_categories: Option<Vec<CategoricalTick>>,
+    pub x_data_bounds: Option<(f64, f64)>,
+    pub y_data_bounds: Option<(f64, f64)>,
+    pub y2_data_bounds: Option<(f64, f64)>,
+}
+
+impl Default for AxisRenderOptions {
+    fn default() -> Self {
+        Self {
+            frame_mode: None,
+            policy: LocaleNumberPolicy::publication(),
+            tick_font_size_pt: 8.5,
+            title_font_size_pt: 10.0,
+            major_tick_len_pt: DEFAULT_MAJOR_TICK_LEN_PT,
+            minor_tick_len_pt: DEFAULT_MINOR_TICK_LEN_PT,
+            offset_gap_pt: DEFAULT_AXIS_OFFSET_PT,
+            auto_log_minor_ticks: true,
+            show_gridlines: false,
+            axis_color: Rgba8::BLACK,
+            grid_color: Rgba8::rgba(210, 210, 210, 180),
+            x_categories: None,
+            y_categories: None,
+            y2_categories: None,
+            x_data_bounds: None,
+            y_data_bounds: None,
+            y2_data_bounds: None,
+        }
+    }
+}
+
+/// Compiled axes and ticks returned by [`render_axes_and_frame`] for downstream series builders.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompiledAxes {
+    pub x_axis: ResolvedAxis,
+    pub y_axis: ResolvedAxis,
+    pub y2_axis: Option<ResolvedAxis>,
+    pub x_ticks: Vec<AxisTick>,
+    pub y_ticks: Vec<AxisTick>,
+    pub y2_ticks: Vec<AxisTick>,
+    pub frame_mode: AxisFrameMode,
+}
+
+/// Estimate the inner plot rectangle on a canvas of `canvas_size_pt`, leaving clearance for
+/// title, rotated tick labels, Y/Y2 labels, and axis titles.
+#[must_use]
+pub fn compute_plot_rect(canvas_size_pt: SizePt, graph: &GraphSpec, options: &AxisRenderOptions) -> RectPt {
+    let w = if canvas_size_pt.width.is_finite() { canvas_size_pt.width.max(40.0) } else { 360.0 };
+    let h = if canvas_size_pt.height.is_finite() { canvas_size_pt.height.max(40.0) } else { 260.0 };
+    let mode = options.frame_mode.unwrap_or_else(|| AxisFrameMode::from(graph.frame_preset));
+    if mode == AxisFrameMode::NoAxes {
+        let top = if graph.title.trim().is_empty() { 14.0 } else { 28.0 };
+        return RectPt::new(16.0, top, (w - 32.0).max(16.0), (h - top - 16.0).max(16.0));
+    }
+
+    let extra_offset = if mode == AxisFrameMode::OffsetAxes { options.offset_gap_pt } else { 0.0 };
+    let left_margin = estimate_y_margin(&graph.y_axis, options.y_categories.as_deref(), options, extra_offset);
+    let right_margin = if mode == AxisFrameMode::DualYSecondaryRight || graph.y2_axis.is_some() {
+        let y2_spec = graph.y2_axis.as_ref().unwrap_or(&graph.y_axis);
+        estimate_y_margin(y2_spec, options.y2_categories.as_deref(), options, 0.0).max(40.0)
+    } else {
+        18.0
+    };
+    let top_margin = if graph.title.trim().is_empty() { 16.0 } else { 30.0 };
+    let bottom_margin = estimate_x_margin(&graph.x_axis, options.x_categories.as_deref(), options, extra_offset);
+
+    let plot_w = (w - left_margin - right_margin).max(24.0);
+    let plot_h = (h - top_margin - bottom_margin).max(24.0);
+    RectPt::new(left_margin.min(w * 0.45), top_margin.min(h * 0.4), plot_w, plot_h)
+}
+
+fn estimate_y_margin(spec: &AxisSpec, cats: Option<&[CategoricalTick]>, options: &AxisRenderOptions, extra_offset: f64) -> f64 {
+    let sample_w = if let Some(list) = cats {
+        list.iter().map(|c| measure_text_pt(&parse_markup(&c.label), options.tick_font_size_pt).width_pt).fold(18.0_f64, f64::max)
+    } else {
+        26.0
+    };
+    let title_space = if spec.title.trim().is_empty() { 6.0 } else { options.title_font_size_pt + 10.0 };
+    (sample_w + options.major_tick_len_pt + title_space + extra_offset + 8.0).clamp(32.0, 120.0)
+}
+
+fn estimate_x_margin(spec: &AxisSpec, cats: Option<&[CategoricalTick]>, options: &AxisRenderOptions, extra_offset: f64) -> f64 {
+    let max_label_w = if let Some(list) = cats {
+        list.iter().map(|c| measure_text_pt(&parse_markup(&c.label), options.tick_font_size_pt).width_pt).fold(16.0_f64, f64::max)
+    } else {
+        24.0
+    };
+    let angle_rad = spec.tick_angle_deg.to_radians().abs();
+    let label_h = options.tick_font_size_pt * angle_rad.cos().abs() + max_label_w * angle_rad.sin().abs();
+    let title_space = if spec.title.trim().is_empty() { 6.0 } else { options.title_font_size_pt + 10.0 };
+    (label_h + options.major_tick_len_pt + title_space + extra_offset + 10.0).clamp(28.0, 120.0)
+}
+
+/// Render background threshold zones (`shade_to: Some(...)`) and optional gridlines behind data.
+pub fn render_thresholds_background(axes: &CompiledAxes, graph: &GraphSpec, scene: &mut ChartScene, options: &AxisRenderOptions) {
+    if options.show_gridlines {
+        emit_axis_gridlines(axes, scene, options.grid_color);
+    }
+    emit_threshold_zones(&graph.x_axis.thresholds, &axes.x_axis, &axes.y_axis, scene);
+    emit_threshold_zones(&graph.y_axis.thresholds, &axes.y_axis, &axes.x_axis, scene);
+    if let (Some(y2_spec), Some(y2_axis)) = (&graph.y2_axis, &axes.y2_axis) {
+        emit_threshold_zones(&y2_spec.thresholds, y2_axis, &axes.x_axis, scene);
+    }
+}
+
+/// Render foreground threshold lines and optional threshold labels across matching axis segments.
+pub fn render_thresholds_lines(axes: &CompiledAxes, graph: &GraphSpec, doc: &ProjectDocument, scene: &mut ChartScene) {
+    let primary_id = Some(&graph.primary_source_sheet_id);
+    emit_threshold_rules(&graph.x_axis.thresholds, &axes.x_axis, &axes.y_axis, doc, primary_id, scene);
+    emit_threshold_rules(&graph.y_axis.thresholds, &axes.y_axis, &axes.x_axis, doc, primary_id, scene);
+    if let (Some(y2_spec), Some(y2_axis)) = (&graph.y2_axis, &axes.y2_axis) {
+        emit_threshold_rules(&y2_spec.thresholds, y2_axis, &axes.x_axis, doc, primary_id, scene);
+    }
+}
+
+fn emit_axis_gridlines(axes: &CompiledAxes, scene: &mut ChartScene, grid_color: Rgba8) {
+    let stroke = StrokePaint { color: grid_color, width_pt: 0.5, dash: LineDashStyle::Dotted, cap: LineCap::Butt, join: LineJoin::Miter };
+    for tick in &axes.x_ticks {
+        if tick.kind != TickKind::Major {
+            continue;
+        }
+        for y_seg in &axes.y_axis.segments {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(tick.coord_pt, y_seg.span_start_pt), PointPt::new(tick.coord_pt, y_seg.span_end_pt)),
+                fill: None,
+                stroke: Some(stroke),
+                clip: None,
+            });
+        }
+    }
+    for tick in &axes.y_ticks {
+        if tick.kind != TickKind::Major {
+            continue;
+        }
+        for x_seg in &axes.x_axis.segments {
+            scene.primitives.push(ScenePrimitive::Path {
+                path: Path2D::line(PointPt::new(x_seg.span_start_pt, tick.coord_pt), PointPt::new(x_seg.span_end_pt, tick.coord_pt)),
+                fill: None,
+                stroke: Some(stroke),
+                clip: None,
+            });
+        }
+    }
+}
+
+fn emit_threshold_zones(thresholds: &[AxisThreshold], primary: &ResolvedAxis, perp: &ResolvedAxis, scene: &mut ChartScene) {
+    for thr in thresholds {
+        let Some(shade_to) = thr.shade_to else { continue };
+        if !thr.value.is_finite() || !shade_to.is_finite() {
+            continue;
+        }
+        let fill_color = if thr.color.a == u8::MAX { thr.color.with_alpha(48) } else { thr.color };
+        let fill = FillPaint::solid(fill_color);
+        for p_span in primary.map_interval(thr.value, shade_to) {
+            for q_seg in &perp.segments {
+                let rect = match primary.orientation {
+                    AxisOrientation::Horizontal => RectPt::new(
+                        p_span.start_pt.min(p_span.end_pt),
+                        q_seg.span_start_pt.min(q_seg.span_end_pt),
+                        (p_span.end_pt - p_span.start_pt).abs(),
+                        (q_seg.span_end_pt - q_seg.span_start_pt).abs(),
+                    ),
+                    AxisOrientation::Vertical => RectPt::new(
+                        q_seg.span_start_pt.min(q_seg.span_end_pt),
+                        p_span.start_pt.min(p_span.end_pt),
+                        (q_seg.span_end_pt - q_seg.span_start_pt).abs(),
+                        (p_span.end_pt - p_span.start_pt).abs(),
+                    ),
+                };
+                if rect.width > 0.0 && rect.height > 0.0 {
+                    scene.primitives.push(ScenePrimitive::Path { path: Path2D::rect(rect), fill: Some(fill), stroke: None, clip: None });
+                }
+            }
+        }
+    }
+}
+
+fn emit_threshold_rules(
+    thresholds: &[AxisThreshold],
+    primary: &ResolvedAxis,
+    perp: &ResolvedAxis,
+    doc: &ProjectDocument,
+    primary_id: Option<&SheetId>,
+    scene: &mut ChartScene,
+) {
+    for thr in thresholds {
+        let Some(matched) = primary.map_value(thr.value) else { continue };
+        let width_pt = if thr.stroke_width_pt.is_finite() && thr.stroke_width_pt > 0.0 { thr.stroke_width_pt } else { 1.0 };
+        let stroke = StrokePaint { color: thr.color, width_pt, dash: thr.dash_style, cap: LineCap::Butt, join: LineJoin::Miter };
+        for q_seg in &perp.segments {
+            let (p0, p1) = match primary.orientation {
+                AxisOrientation::Horizontal => {
+                    (PointPt::new(matched.coord_pt, q_seg.span_start_pt), PointPt::new(matched.coord_pt, q_seg.span_end_pt))
+                }
+                AxisOrientation::Vertical => (PointPt::new(q_seg.span_start_pt, matched.coord_pt), PointPt::new(q_seg.span_end_pt, matched.coord_pt)),
+            };
+            scene.primitives.push(ScenePrimitive::Path { path: Path2D::line(p0, p1), fill: None, stroke: Some(stroke), clip: None });
+        }
+
+        if let Some(raw_label) = &thr.label
+            && !raw_label.trim().is_empty()
+        {
+            let expanded = resolve_template_hooks(raw_label, doc, primary_id);
+            let rich = parse_markup(&expanded);
+            let (anchor_pt, anchor) = match primary.orientation {
+                AxisOrientation::Horizontal => (PointPt::new(matched.coord_pt + 3.0, scene.plot_rect_pt.y + 10.0), TextAnchor::Start),
+                AxisOrientation::Vertical => (PointPt::new(scene.plot_rect_pt.right() - 4.0, matched.coord_pt - 3.0), TextAnchor::End),
+            };
+            scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                rich,
+                anchor_pt,
+                anchor,
+                font_size_pt: 8.0,
+                rotation_deg: 0.0,
+                color: thr.color,
+            }));
+        }
+    }
+}
+
+/// Resolve axes and compute major/minor ticks for `graph` without emitting drawing primitives yet.
+pub fn resolve_axes_and_ticks(graph: &GraphSpec, scene: &mut ChartScene, options: &AxisRenderOptions) -> CompiledAxes {
+    let mode = options.frame_mode.unwrap_or_else(|| AxisFrameMode::from(graph.frame_preset));
+    let r = scene.plot_rect_pt;
+
+    let x_axis = ResolvedAxis::resolve(&graph.x_axis, AxisOrientation::Horizontal, r, options.x_data_bounds, &mut scene.warnings);
+    let y_axis = ResolvedAxis::resolve(&graph.y_axis, AxisOrientation::Vertical, r, options.y_data_bounds, &mut scene.warnings);
+    let y2_spec_fallback = AxisSpec::linear("");
+    let (y2_spec, y2_axis) = if mode == AxisFrameMode::DualYSecondaryRight || graph.y2_axis.is_some() {
+        let spec_ref = graph.y2_axis.as_ref().unwrap_or(&y2_spec_fallback);
+        (Some(spec_ref), Some(ResolvedAxis::resolve(spec_ref, AxisOrientation::Vertical, r, options.y2_data_bounds, &mut scene.warnings)))
+    } else {
+        (None, None)
+    };
+
+    let x_ticks = compute_axis_ticks(
+        &x_axis,
+        TickComputeConfig {
+            tick_format: graph.x_axis.tick_format,
+            policy: &options.policy,
+            auto_log_minor_ticks: options.auto_log_minor_ticks,
+            categorical_ticks: options.x_categories.as_deref(),
+        },
+    );
+    let y_ticks = compute_axis_ticks(
+        &y_axis,
+        TickComputeConfig {
+            tick_format: graph.y_axis.tick_format,
+            policy: &options.policy,
+            auto_log_minor_ticks: options.auto_log_minor_ticks,
+            categorical_ticks: options.y_categories.as_deref(),
+        },
+    );
+    let y2_ticks = match (y2_spec, &y2_axis) {
+        (Some(spec), Some(ax)) => compute_axis_ticks(
+            ax,
+            TickComputeConfig {
+                tick_format: spec.tick_format,
+                policy: &options.policy,
+                auto_log_minor_ticks: options.auto_log_minor_ticks,
+                categorical_ticks: options.y2_categories.as_deref(),
+            },
+        ),
+        _ => Vec::new(),
+    };
+
+    CompiledAxes { x_axis, y_axis, y2_axis, x_ticks, y_ticks, y2_ticks, frame_mode: mode }
+}
+
+/// Emit spines, break ornaments, tick marks, tick labels, and axis titles for pre-resolved `axes`.
+pub fn emit_axes_and_frame(axes: &CompiledAxes, graph: &GraphSpec, doc: &ProjectDocument, scene: &mut ChartScene, options: &AxisRenderOptions) {
+    if axes.frame_mode != AxisFrameMode::NoAxes {
+        emit_frame_geometry(axes, graph, doc, scene, options);
+    }
+}
+
+/// Resolve axes, compute nice ticks, and emit spines, break ornaments, tick marks, tick labels,
+/// and axis titles according to `graph.frame_preset` (or `options.frame_mode`).
+pub fn render_axes_and_frame(graph: &GraphSpec, doc: &ProjectDocument, scene: &mut ChartScene, options: &AxisRenderOptions) -> CompiledAxes {
+    let compiled = resolve_axes_and_ticks(graph, scene, options);
+    emit_axes_and_frame(&compiled, graph, doc, scene, options);
+    compiled
+}
+
+fn emit_frame_geometry(axes: &CompiledAxes, graph: &GraphSpec, doc: &ProjectDocument, scene: &mut ChartScene, options: &AxisRenderOptions) {
+    let r = scene.plot_rect_pt;
+    let x_stroke = axis_stroke(&graph.x_axis, options.axis_color);
+    let y_stroke = axis_stroke(&graph.y_axis, options.axis_color);
+    let offset = if axes.frame_mode == AxisFrameMode::OffsetAxes { options.offset_gap_pt } else { 0.0 };
+
+    let (x_spine_y, y_spine_x) = match axes.frame_mode {
+        AxisFrameMode::OriginCrosshair => resolve_origin_crosshair_coords(axes, r, &mut scene.warnings),
+        AxisFrameMode::OffsetAxes => (r.bottom() + offset, r.x - offset),
+        _ => (r.bottom(), r.x),
+    };
+
+    let trim_tufte = axes.frame_mode == AxisFrameMode::OffsetAxes;
+    emit_horizontal_spine(&axes.x_axis, &axes.x_ticks, x_spine_y, trim_tufte, x_stroke, scene);
+    emit_vertical_spine(&axes.y_axis, &axes.y_ticks, y_spine_x, trim_tufte, y_stroke, scene);
+
+    if matches!(axes.frame_mode, AxisFrameMode::PlainBox | AxisFrameMode::TopRightTicks) {
+        emit_horizontal_spine(&axes.x_axis, &axes.x_ticks, r.y, false, x_stroke, scene);
+        emit_vertical_spine(&axes.y_axis, &axes.y_ticks, r.right(), false, y_stroke, scene);
+    }
+    if axes.frame_mode == AxisFrameMode::TopRightTicks {
+        emit_ticks_only_horizontal(&axes.x_ticks, r.y, true, x_stroke, options, scene);
+        emit_ticks_only_vertical(&axes.y_ticks, r.right(), false, y_stroke, options, scene);
+    }
+
+    emit_x_ticks_and_labels(&axes.x_ticks, x_spine_y, graph.x_axis.tick_angle_deg, x_stroke, options, scene);
+    emit_y_ticks_and_labels(&axes.y_ticks, y_spine_x, false, y_stroke, options, scene);
+
+    let primary_id = Some(&graph.primary_source_sheet_id);
+    emit_axis_titles(graph, doc, primary_id, x_spine_y, y_spine_x, options, scene);
+
+    if let Some(y2_ax) = &axes.y2_axis {
+        let y2_spec = graph.y2_axis.as_ref().unwrap_or(&graph.y_axis);
+        let y2_stroke = axis_stroke(y2_spec, options.axis_color);
+        emit_vertical_spine(y2_ax, &axes.y2_ticks, r.right(), false, y2_stroke, scene);
+        emit_y_ticks_and_labels(&axes.y2_ticks, r.right(), true, y2_stroke, options, scene);
+        emit_y2_title(y2_spec, doc, primary_id, r, options, scene);
+    }
+}
+
+fn axis_stroke(spec: &AxisSpec, color: Rgba8) -> StrokePaint {
+    let w = if spec.stroke_width_pt.is_finite() && spec.stroke_width_pt > 0.0 { spec.stroke_width_pt } else { 1.0 };
+    StrokePaint::solid(color, w)
+}
+
+fn resolve_origin_crosshair_coords(axes: &CompiledAxes, r: RectPt, warnings: &mut Vec<ChartWarning>) -> (f64, f64) {
+    let x_spine_y = match axes.y_axis.map_value(0.0) {
+        Some(m) => m.coord_pt,
+        None => {
+            warnings.push(ChartWarning::new("origin_outside_y_domain", "Y=0 lies outside domain; crosshair X spine placed at plot bottom"));
+            r.bottom()
+        }
+    };
+    let y_spine_x = match axes.x_axis.map_value(0.0) {
+        Some(m) => m.coord_pt,
+        None => {
+            warnings.push(ChartWarning::new("origin_outside_x_domain", "X=0 lies outside domain; crosshair Y spine placed at plot left"));
+            r.x
+        }
+    };
+    (x_spine_y, y_spine_x)
+}
+
+fn emit_horizontal_spine(axis: &ResolvedAxis, ticks: &[AxisTick], spine_y: f64, trim_tufte: bool, stroke: StrokePaint, scene: &mut ChartScene) {
+    for seg in &axis.segments {
+        let (x0, x1) = if trim_tufte && axis.segments.len() == 1 {
+            tufte_trimmed_span(ticks, seg.segment_index, seg.span_start_pt, seg.span_end_pt)
+        } else {
+            (seg.span_start_pt, seg.span_end_pt)
+        };
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(x0, spine_y), PointPt::new(x1, spine_y)),
+            fill: None,
+            stroke: Some(stroke),
+            clip: None,
+        });
+    }
+    for br in &axis.breaks {
+        emit_horizontal_break_ornament(*br, spine_y, stroke, scene);
+    }
+}
+
+fn emit_vertical_spine(axis: &ResolvedAxis, ticks: &[AxisTick], spine_x: f64, trim_tufte: bool, stroke: StrokePaint, scene: &mut ChartScene) {
+    for seg in &axis.segments {
+        let (y0, y1) = if trim_tufte && axis.segments.len() == 1 {
+            tufte_trimmed_span(ticks, seg.segment_index, seg.span_start_pt, seg.span_end_pt)
+        } else {
+            (seg.span_start_pt, seg.span_end_pt)
+        };
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(spine_x, y0), PointPt::new(spine_x, y1)),
+            fill: None,
+            stroke: Some(stroke),
+            clip: None,
+        });
+    }
+    for br in &axis.breaks {
+        emit_vertical_break_ornament(*br, spine_x, stroke, scene);
+    }
+}
+
+fn tufte_trimmed_span(ticks: &[AxisTick], seg_idx: usize, fallback_start: f64, fallback_end: f64) -> (f64, f64) {
+    let mut coords: Vec<f64> = ticks.iter().filter(|t| t.segment_index == seg_idx && t.kind == TickKind::Major).map(|t| t.coord_pt).collect();
+    if coords.len() < 2 {
+        return (fallback_start, fallback_end);
+    }
+    coords.sort_by(f64::total_cmp);
+    match (coords.first().copied(), coords.last().copied()) {
+        (Some(a), Some(b)) if (b - a).abs() > 1.0 => (a, b),
+        _ => (fallback_start, fallback_end),
+    }
+}
+
+fn emit_horizontal_break_ornament(br: AxisBreakGap, spine_y: f64, stroke: StrokePaint, scene: &mut ChartScene) {
+    let dx = 2.0_f64;
+    let dy = 4.0_f64;
+    match br.ornament {
+        BreakOrnament::BlankGap => {}
+        BreakOrnament::DoubleSlash => {
+            for gx in [br.gap_start_pt, br.gap_end_pt] {
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::line(PointPt::new(gx - dx, spine_y + dy), PointPt::new(gx + dx, spine_y - dy)),
+                    fill: None,
+                    stroke: Some(stroke),
+                    clip: None,
+                });
+            }
+        }
+        BreakOrnament::Zigzag => {
+            let mid = 0.5 * (br.gap_start_pt + br.gap_end_pt);
+            let q1 = 0.5 * (br.gap_start_pt + mid);
+            let q3 = 0.5 * (mid + br.gap_end_pt);
+            let path = Path2D {
+                commands: vec![
+                    PathCmd::MoveTo(PointPt::new(br.gap_start_pt, spine_y)),
+                    PathCmd::LineTo(PointPt::new(q1, spine_y - dy)),
+                    PathCmd::LineTo(PointPt::new(q3, spine_y + dy)),
+                    PathCmd::LineTo(PointPt::new(br.gap_end_pt, spine_y)),
+                ],
+            };
+            scene.primitives.push(ScenePrimitive::Path { path, fill: None, stroke: Some(stroke), clip: None });
+        }
+    }
+}
+
+fn emit_vertical_break_ornament(br: AxisBreakGap, spine_x: f64, stroke: StrokePaint, scene: &mut ChartScene) {
+    let dx = 4.0_f64;
+    let dy = 2.0_f64;
+    match br.ornament {
+        BreakOrnament::BlankGap => {}
+        BreakOrnament::DoubleSlash => {
+            for gy in [br.gap_start_pt, br.gap_end_pt] {
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::line(PointPt::new(spine_x - dx, gy + dy), PointPt::new(spine_x + dx, gy - dy)),
+                    fill: None,
+                    stroke: Some(stroke),
+                    clip: None,
+                });
+            }
+        }
+        BreakOrnament::Zigzag => {
+            let mid = 0.5 * (br.gap_start_pt + br.gap_end_pt);
+            let q1 = 0.5 * (br.gap_start_pt + mid);
+            let q3 = 0.5 * (mid + br.gap_end_pt);
+            let path = Path2D {
+                commands: vec![
+                    PathCmd::MoveTo(PointPt::new(spine_x, br.gap_start_pt)),
+                    PathCmd::LineTo(PointPt::new(spine_x - dx, q1)),
+                    PathCmd::LineTo(PointPt::new(spine_x + dx, q3)),
+                    PathCmd::LineTo(PointPt::new(spine_x, br.gap_end_pt)),
+                ],
+            };
+            scene.primitives.push(ScenePrimitive::Path { path, fill: None, stroke: Some(stroke), clip: None });
+        }
+    }
+}
+
+fn emit_ticks_only_horizontal(
+    ticks: &[AxisTick],
+    spine_y: f64,
+    inward_down: bool,
+    stroke: StrokePaint,
+    options: &AxisRenderOptions,
+    scene: &mut ChartScene,
+) {
+    let dir = if inward_down { 1.0 } else { -1.0 };
+    for tick in ticks {
+        let len = match tick.kind {
+            TickKind::Major => options.major_tick_len_pt,
+            TickKind::Minor => options.minor_tick_len_pt,
+        };
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(tick.coord_pt, spine_y), PointPt::new(tick.coord_pt, spine_y + dir * len)),
+            fill: None,
+            stroke: Some(stroke),
+            clip: None,
+        });
+    }
+}
+
+fn emit_ticks_only_vertical(
+    ticks: &[AxisTick],
+    spine_x: f64,
+    outward_left: bool,
+    stroke: StrokePaint,
+    options: &AxisRenderOptions,
+    scene: &mut ChartScene,
+) {
+    let dir = if outward_left { -1.0 } else { 1.0 };
+    for tick in ticks {
+        let len = match tick.kind {
+            TickKind::Major => options.major_tick_len_pt,
+            TickKind::Minor => options.minor_tick_len_pt,
+        };
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(spine_x, tick.coord_pt), PointPt::new(spine_x + dir * len, tick.coord_pt)),
+            fill: None,
+            stroke: Some(stroke),
+            clip: None,
+        });
+    }
+}
+
+fn emit_x_ticks_and_labels(
+    ticks: &[AxisTick],
+    spine_y: f64,
+    angle_deg: f64,
+    stroke: StrokePaint,
+    options: &AxisRenderOptions,
+    scene: &mut ChartScene,
+) {
+    let rot = if angle_deg.is_finite() { angle_deg } else { 0.0 };
+    let anchor = if rot > 5.0 {
+        TextAnchor::Start
+    } else if rot < -5.0 {
+        TextAnchor::End
+    } else {
+        TextAnchor::Middle
+    };
+
+    for tick in ticks {
+        let len = match tick.kind {
+            TickKind::Major => options.major_tick_len_pt,
+            TickKind::Minor => options.minor_tick_len_pt,
+        };
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(tick.coord_pt, spine_y), PointPt::new(tick.coord_pt, spine_y + len)),
+            fill: None,
+            stroke: Some(stroke),
+            clip: None,
+        });
+
+        if let Some(rich) = &tick.label {
+            let y_offset = len + options.tick_font_size_pt * 1.05;
+            scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                rich: rich.clone(),
+                anchor_pt: PointPt::new(tick.coord_pt, spine_y + y_offset),
+                anchor,
+                font_size_pt: options.tick_font_size_pt,
+                rotation_deg: rot,
+                color: options.axis_color,
+            }));
+        }
+    }
+}
+
+fn emit_y_ticks_and_labels(
+    ticks: &[AxisTick],
+    spine_x: f64,
+    is_right_axis: bool,
+    stroke: StrokePaint,
+    options: &AxisRenderOptions,
+    scene: &mut ChartScene,
+) {
+    let dir = if is_right_axis { 1.0 } else { -1.0 };
+    let anchor = if is_right_axis { TextAnchor::Start } else { TextAnchor::End };
+
+    for tick in ticks {
+        let len = match tick.kind {
+            TickKind::Major => options.major_tick_len_pt,
+            TickKind::Minor => options.minor_tick_len_pt,
+        };
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(spine_x, tick.coord_pt), PointPt::new(spine_x + dir * len, tick.coord_pt)),
+            fill: None,
+            stroke: Some(stroke),
+            clip: None,
+        });
+
+        if let Some(rich) = &tick.label {
+            let x_pos = spine_x + dir * (len + 3.0);
+            let y_pos = tick.coord_pt + options.tick_font_size_pt * 0.32;
+            scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                rich: rich.clone(),
+                anchor_pt: PointPt::new(x_pos, y_pos),
+                anchor,
+                font_size_pt: options.tick_font_size_pt,
+                rotation_deg: 0.0,
+                color: options.axis_color,
+            }));
+        }
+    }
+}
+
+fn emit_axis_titles(
+    graph: &GraphSpec,
+    doc: &ProjectDocument,
+    primary_id: Option<&SheetId>,
+    x_spine_y: f64,
+    y_spine_x: f64,
+    options: &AxisRenderOptions,
+    scene: &mut ChartScene,
+) {
+    let r = scene.plot_rect_pt;
+    if !graph.x_axis.title.trim().is_empty() {
+        let expanded = resolve_template_hooks(&graph.x_axis.title, doc, primary_id);
+        let y_pos = (x_spine_y + options.major_tick_len_pt + options.tick_font_size_pt * 2.2 + 4.0).min(scene.height_pt - 4.0);
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich: parse_markup(&expanded),
+            anchor_pt: PointPt::new(r.center().x, y_pos),
+            anchor: TextAnchor::Middle,
+            font_size_pt: options.title_font_size_pt,
+            rotation_deg: 0.0,
+            color: options.axis_color,
+        }));
+    }
+    if !graph.y_axis.title.trim().is_empty() {
+        let expanded = resolve_template_hooks(&graph.y_axis.title, doc, primary_id);
+        let x_pos = (y_spine_x - 30.0).max(options.title_font_size_pt + 2.0);
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich: parse_markup(&expanded),
+            anchor_pt: PointPt::new(x_pos, r.center().y),
+            anchor: TextAnchor::Middle,
+            font_size_pt: options.title_font_size_pt,
+            rotation_deg: -90.0,
+            color: options.axis_color,
+        }));
+    }
+}
+
+fn emit_y2_title(
+    y2_spec: &AxisSpec,
+    doc: &ProjectDocument,
+    primary_id: Option<&SheetId>,
+    r: RectPt,
+    options: &AxisRenderOptions,
+    scene: &mut ChartScene,
+) {
+    if y2_spec.title.trim().is_empty() {
+        return;
+    }
+    let expanded = resolve_template_hooks(&y2_spec.title, doc, primary_id);
+    let x_pos = (r.right() + 30.0).min(scene.width_pt - options.title_font_size_pt - 2.0);
+    scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: parse_markup(&expanded),
+        anchor_pt: PointPt::new(x_pos, r.center().y),
+        anchor: TextAnchor::Middle,
+        font_size_pt: options.title_font_size_pt,
+        rotation_deg: 90.0,
+        color: options.axis_color,
+    }));
+}
+
+// ============================================================================
+// 5. Legends & Canvas GraphAnnotations
+// ============================================================================
+
+/// Visual swatch + label entry rendered inside a figure legend.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LegendEntry {
+    pub label: String,
+    pub swatch_color: Rgba8,
+    pub stroke_color: Option<Rgba8>,
+    pub marker_shape: Option<MarkerShape>,
+    pub marker_fill_mode: MarkerFillMode,
+    pub dash_style: Option<LineDashStyle>,
+    pub is_box_swatch: bool,
+}
+
+/// Extract default [`LegendEntry`] rows from [`GraphSpec`] series bindings and dataset titles.
+#[must_use]
+pub fn legend_entries_from_graph_spec(graph: &GraphSpec, doc: &ProjectDocument) -> Vec<LegendEntry> {
+    let mut entries = Vec::with_capacity(graph.series.len());
+    for (idx, series) in graph.series.iter().enumerate() {
+        let label = series
+            .legend_label
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                doc.data_sheet(&series.source_sheet_id)
+                    .and_then(|ds| data_set_title(&ds.archetype, series.data_set_index))
+                    .map(str::to_owned)
+                    .filter(|s| !s.trim().is_empty())
+            })
+            .unwrap_or_else(|| format!("Series {}", idx + 1));
+
+        let entry = entry_from_gdo(label, &series.gdo, graph.palette.color_at(idx));
+        entries.push(entry);
+    }
+    entries
+}
+
+fn data_set_title(archetype: &TableArchetype, idx: usize) -> Option<&str> {
+    match archetype {
+        TableArchetype::Xy(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        TableArchetype::Column(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        TableArchetype::Grouped(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        TableArchetype::Contingency(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        TableArchetype::Survival(t) => t.cohorts.get(idx).map(|c| c.title.as_str()),
+        TableArchetype::PartsOfWhole(t) => t.data_sets.get(idx).map(|c| c.title.as_str()),
+        TableArchetype::MultipleVariables(t) => t.variables.get(idx).map(|v| v.title.as_str()),
+        TableArchetype::Nested(t) => t.groups.get(idx).map(|g| g.title.as_str()),
+    }
+}
+
+fn entry_from_gdo(label: String, gdo: &lumencraft_doc::GraphicalDataObject, fallback: Rgba8) -> LegendEntry {
+    use lumencraft_doc::GraphicalDataObject as Gdo;
+    match gdo {
+        Gdo::ScatterAndLine { marker, line, .. } => LegendEntry {
+            label,
+            swatch_color: marker.map_or_else(|| line.map_or(fallback, |l| l.color), |m| m.fill_color),
+            stroke_color: marker.map(|m| m.stroke_color).or_else(|| line.map(|l| l.color)),
+            marker_shape: marker.map(|m| m.shape),
+            marker_fill_mode: marker.map_or(MarkerFillMode::Filled, |m| m.fill_mode),
+            dash_style: line.map(|l| l.dash_style),
+            is_box_swatch: false,
+        },
+        Gdo::BarWithReplicates { fill_color, border_color, .. } | Gdo::FloatingBar { fill_color, border_color, .. } => LegendEntry {
+            label,
+            swatch_color: *fill_color,
+            stroke_color: Some(*border_color),
+            marker_shape: None,
+            marker_fill_mode: MarkerFillMode::Filled,
+            dash_style: None,
+            is_box_swatch: true,
+        },
+        Gdo::BoxAndWhisker { fill_color, stroke_color, .. } | Gdo::Violin { fill_color, stroke_color, .. } => LegendEntry {
+            label,
+            swatch_color: *fill_color,
+            stroke_color: Some(*stroke_color),
+            marker_shape: None,
+            marker_fill_mode: MarkerFillMode::Filled,
+            dash_style: None,
+            is_box_swatch: true,
+        },
+        Gdo::AlignedDotPlot { marker, .. } => LegendEntry {
+            label,
+            swatch_color: marker.fill_color,
+            stroke_color: Some(marker.stroke_color),
+            marker_shape: Some(marker.shape),
+            marker_fill_mode: marker.fill_mode,
+            dash_style: None,
+            is_box_swatch: false,
+        },
+        Gdo::BeforeAfterLines { marker, line_color, .. } => LegendEntry {
+            label,
+            swatch_color: *line_color,
+            stroke_color: Some(*line_color),
+            marker_shape: marker.map(|m| m.shape),
+            marker_fill_mode: marker.map_or(MarkerFillMode::Filled, |m| m.fill_mode),
+            dash_style: Some(LineDashStyle::Solid),
+            is_box_swatch: false,
+        },
+        Gdo::KaplanMeierStep { line_color, .. } => LegendEntry {
+            label,
+            swatch_color: *line_color,
+            stroke_color: Some(*line_color),
+            marker_shape: None,
+            marker_fill_mode: MarkerFillMode::Filled,
+            dash_style: Some(LineDashStyle::Solid),
+            is_box_swatch: false,
+        },
+        Gdo::PartsOfWhole { .. } => LegendEntry {
+            label,
+            swatch_color: fallback,
+            stroke_color: Some(Rgba8::BLACK),
+            marker_shape: None,
+            marker_fill_mode: MarkerFillMode::Filled,
+            dash_style: None,
+            is_box_swatch: true,
+        },
+    }
+}
+
+/// Render a figure legend from `legend` and `entries` into `scene`.
+pub fn render_legend(legend: &LegendSpec, entries: &[LegendEntry], doc: &ProjectDocument, primary_id: Option<&SheetId>, scene: &mut ChartScene) {
+    if !legend.visible || entries.is_empty() {
+        return;
+    }
+    let font_size = 8.5_f64;
+    let row_h = 13.0_f64;
+    let swatch_w = 18.0_f64;
+    let pad = 6.0_f64;
+
+    let mut parsed_labels = Vec::with_capacity(entries.len());
+    let mut max_text_w = 12.0_f64;
+    for entry in entries {
+        let expanded = resolve_template_hooks(&entry.label, doc, primary_id);
+        let rich = parse_markup(&expanded);
+        max_text_w = max_text_w.max(measure_text_pt(&rich, font_size).width_pt);
+        parsed_labels.push(rich);
+    }
+
+    let box_w = pad * 2.0 + swatch_w + 6.0 + max_text_w;
+    let box_h = pad * 2.0 + (entries.len() as f64) * row_h;
+    let (bx, by) = match legend.position_pt {
+        Some((px, py)) if px.is_finite() && py.is_finite() => (px, py),
+        _ => ((scene.plot_rect_pt.right() - box_w - 6.0).max(scene.plot_rect_pt.x + 4.0), scene.plot_rect_pt.y + 6.0),
+    };
+    let box_rect = RectPt::new(bx, by, box_w, box_h);
+
+    if legend.bordered {
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::rect(box_rect),
+            fill: Some(FillPaint::solid(Rgba8::rgba(255, 255, 255, 235))),
+            stroke: Some(StrokePaint::solid(Rgba8::BLACK, 0.8)),
+            clip: None,
+        });
+    }
+
+    for (idx, (entry, rich)) in entries.iter().zip(parsed_labels).enumerate() {
+        let row_cy = by + pad + ((idx as f64) + 0.5) * row_h;
+        let sx0 = bx + pad;
+        emit_legend_swatch(entry, sx0, row_cy, swatch_w, scene);
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich,
+            anchor_pt: PointPt::new(sx0 + swatch_w + 6.0, row_cy + font_size * 0.34),
+            anchor: TextAnchor::Start,
+            font_size_pt: font_size,
+            rotation_deg: 0.0,
+            color: Rgba8::BLACK,
+        }));
+    }
+}
+
+fn emit_legend_swatch(entry: &LegendEntry, x0: f64, cy: f64, width: f64, scene: &mut ChartScene) {
+    if entry.is_box_swatch {
+        let swatch_rect = RectPt::new(x0 + 2.0, cy - 4.0, (width - 4.0).max(6.0), 8.0);
+        let stroke = entry.stroke_color.map(|c| StrokePaint::solid(c, 0.8));
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::rect(swatch_rect),
+            fill: Some(FillPaint::solid(entry.swatch_color)),
+            stroke,
+            clip: None,
+        });
+        return;
+    }
+
+    if let Some(dash) = entry.dash_style {
+        let col = entry.stroke_color.unwrap_or(entry.swatch_color);
+        let stroke = StrokePaint { color: col, width_pt: 1.4, dash, cap: LineCap::Butt, join: LineJoin::Miter };
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(x0, cy), PointPt::new(x0 + width, cy)),
+            fill: None,
+            stroke: Some(stroke),
+            clip: None,
+        });
+    }
+
+    let cx = x0 + 0.5 * width;
+    let shape = entry.marker_shape.unwrap_or(MarkerShape::Circle);
+    let path = swatch_marker_path(PointPt::new(cx, cy), 3.0, shape);
+    let fill = match entry.marker_fill_mode {
+        MarkerFillMode::Open => None,
+        _ => Some(FillPaint::solid(entry.swatch_color)),
+    };
+    let stroke = entry.stroke_color.map(|c| StrokePaint::solid(c, 0.9));
+    if entry.marker_shape.is_some() || entry.dash_style.is_none() {
+        scene.primitives.push(ScenePrimitive::Path { path, fill, stroke, clip: None });
+    }
+}
+
+fn swatch_marker_path(c: PointPt, r: f64, shape: MarkerShape) -> Path2D {
+    match shape {
+        MarkerShape::Square => Path2D::rect(RectPt::new(c.x - r, c.y - r, 2.0 * r, 2.0 * r)),
+        MarkerShape::Diamond => Path2D {
+            commands: vec![
+                PathCmd::MoveTo(PointPt::new(c.x, c.y - r)),
+                PathCmd::LineTo(PointPt::new(c.x + r, c.y)),
+                PathCmd::LineTo(PointPt::new(c.x, c.y + r)),
+                PathCmd::LineTo(PointPt::new(c.x - r, c.y)),
+                PathCmd::Close,
+            ],
+        },
+        MarkerShape::TriangleUp => Path2D {
+            commands: vec![
+                PathCmd::MoveTo(PointPt::new(c.x, c.y - r)),
+                PathCmd::LineTo(PointPt::new(c.x + r, c.y + r)),
+                PathCmd::LineTo(PointPt::new(c.x - r, c.y + r)),
+                PathCmd::Close,
+            ],
+        },
+        MarkerShape::TriangleDown => Path2D {
+            commands: vec![
+                PathCmd::MoveTo(PointPt::new(c.x - r, c.y - r)),
+                PathCmd::LineTo(PointPt::new(c.x + r, c.y - r)),
+                PathCmd::LineTo(PointPt::new(c.x, c.y + r)),
+                PathCmd::Close,
+            ],
+        },
+        _ => ellipse_path(RectPt::new(c.x - r, c.y - r, 2.0 * r, 2.0 * r)),
+    }
+}
+
+/// Render all [`GraphAnnotation`] items (`TextBox`, `LineOrArrow`, `Shape`, `EmbeddedResultTable`)
+/// onto `scene`.
+pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument, primary_id: Option<&SheetId>, scene: &mut ChartScene) {
+    for ann in annotations {
+        match ann {
+            GraphAnnotation::TextBox { bounds_pt, markdown, bordered } => {
+                render_textbox_annotation(RectPt::from(*bounds_pt), markdown, *bordered, doc, primary_id, scene);
+            }
+            GraphAnnotation::LineOrArrow { start_pt, end_pt, arrowhead, dash, color } => {
+                render_line_or_arrow_annotation(*start_pt, *end_pt, *arrowhead, *dash, *color, scene);
+            }
+            GraphAnnotation::Shape { kind, bounds_pt, stroke_color, stroke_width_pt, dash, fill_color } => {
+                render_shape_annotation(*kind, RectPt::from(*bounds_pt), *stroke_color, *stroke_width_pt, *dash, *fill_color, scene);
+            }
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt } => {
+                render_embedded_result_table(result_sheet_id, tab_id.as_deref(), RectPt::from(*bounds_pt), doc, scene);
+            }
+        }
+    }
+}
+
+fn render_textbox_annotation(
+    rect: RectPt,
+    markdown: &str,
+    bordered: bool,
+    doc: &ProjectDocument,
+    primary_id: Option<&SheetId>,
+    scene: &mut ChartScene,
+) {
+    if bordered {
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::rect(rect),
+            fill: Some(FillPaint::solid(Rgba8::rgba(255, 255, 255, 240))),
+            stroke: Some(StrokePaint::solid(Rgba8::BLACK, 0.8)),
+            clip: None,
+        });
+    }
+    let expanded = resolve_template_hooks(markdown, doc, primary_id);
+    let font_size = 8.5_f64;
+    let line_h = font_size * 1.3;
+    scene.primitives.push(ScenePrimitive::PushClip { rect });
+    for (idx, line) in expanded.lines().enumerate() {
+        let y_pt = rect.y + 4.0 + font_size + (idx as f64) * line_h;
+        if y_pt > rect.bottom() + line_h {
+            break;
+        }
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich: parse_markup(line),
+            anchor_pt: PointPt::new(rect.x + 4.0, y_pt),
+            anchor: TextAnchor::Start,
+            font_size_pt: font_size,
+            rotation_deg: 0.0,
+            color: Rgba8::BLACK,
+        }));
+    }
+    scene.primitives.push(ScenePrimitive::PopClip);
+}
+
+fn render_line_or_arrow_annotation(
+    start_pt: (f64, f64),
+    end_pt: (f64, f64),
+    arrowhead: bool,
+    dash: LineDashStyle,
+    color: Rgba8,
+    scene: &mut ChartScene,
+) {
+    if !start_pt.0.is_finite() || !start_pt.1.is_finite() || !end_pt.0.is_finite() || !end_pt.1.is_finite() {
+        scene.warnings.push(ChartWarning::new("non_finite_annotation", "skipped LineOrArrow annotation with non-finite coordinates"));
+        return;
+    }
+    let p0 = PointPt::new(start_pt.0, start_pt.1);
+    let p1 = PointPt::new(end_pt.0, end_pt.1);
+    let stroke = StrokePaint { color, width_pt: 1.25, dash, cap: LineCap::Round, join: LineJoin::Round };
+    scene.primitives.push(ScenePrimitive::Path { path: Path2D::line(p0, p1), fill: None, stroke: Some(stroke), clip: None });
+
+    if arrowhead {
+        let dx = p1.x - p0.x;
+        let dy = p1.y - p0.y;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len > 1e-6 {
+            let ux = dx / len;
+            let uy = dy / len;
+            let nx = -uy;
+            let ny = ux;
+            let head_len = 7.0_f64.min(len * 0.6);
+            let half_w = 3.0_f64;
+            let base_x = p1.x - ux * head_len;
+            let base_y = p1.y - uy * head_len;
+            let head = Path2D {
+                commands: vec![
+                    PathCmd::MoveTo(p1),
+                    PathCmd::LineTo(PointPt::new(base_x + nx * half_w, base_y + ny * half_w)),
+                    PathCmd::LineTo(PointPt::new(base_x - nx * half_w, base_y - ny * half_w)),
+                    PathCmd::Close,
+                ],
+            };
+            scene.primitives.push(ScenePrimitive::Path { path: head, fill: Some(FillPaint::solid(color)), stroke: None, clip: None });
+        }
+    }
+}
+
+fn render_shape_annotation(
+    kind: AnnotationShapeKind,
+    rect: RectPt,
+    stroke_color: Rgba8,
+    stroke_width_pt: f64,
+    dash: LineDashStyle,
+    fill_color: Option<Rgba8>,
+    scene: &mut ChartScene,
+) {
+    if rect.width <= 0.0 || rect.height <= 0.0 {
+        return;
+    }
+    let path = match kind {
+        AnnotationShapeKind::Rectangle => Path2D::rect(rect),
+        AnnotationShapeKind::RoundedRectangle => rounded_rect_path(rect),
+        AnnotationShapeKind::Ellipse => ellipse_path(rect),
+    };
+    let fill = fill_color.map(FillPaint::solid);
+    let stroke = (stroke_width_pt.is_finite() && stroke_width_pt > 0.0).then_some(StrokePaint {
+        color: stroke_color,
+        width_pt: stroke_width_pt,
+        dash,
+        cap: LineCap::Butt,
+        join: LineJoin::Miter,
+    });
+    scene.primitives.push(ScenePrimitive::Path { path, fill, stroke, clip: None });
+}
+
+/// Construct a smooth closed cubic-Bezier ellipse inside `r`.
+#[must_use]
+pub fn ellipse_path(r: RectPt) -> Path2D {
+    let cx = r.x + 0.5 * r.width;
+    let cy = r.y + 0.5 * r.height;
+    let rx = 0.5 * r.width;
+    let ry = 0.5 * r.height;
+    let ox = rx * ELLIPSE_KAPPA;
+    let oy = ry * ELLIPSE_KAPPA;
+    Path2D {
+        commands: vec![
+            PathCmd::MoveTo(PointPt::new(cx, r.y)),
+            PathCmd::CubicTo { c1: PointPt::new(cx + ox, r.y), c2: PointPt::new(r.right(), cy - oy), to: PointPt::new(r.right(), cy) },
+            PathCmd::CubicTo { c1: PointPt::new(r.right(), cy + oy), c2: PointPt::new(cx + ox, r.bottom()), to: PointPt::new(cx, r.bottom()) },
+            PathCmd::CubicTo { c1: PointPt::new(cx - ox, r.bottom()), c2: PointPt::new(r.x, cy + oy), to: PointPt::new(r.x, cy) },
+            PathCmd::CubicTo { c1: PointPt::new(r.x, cy - oy), c2: PointPt::new(cx - ox, r.y), to: PointPt::new(cx, r.y) },
+            PathCmd::Close,
+        ],
+    }
+}
+
+fn rounded_rect_path(r: RectPt) -> Path2D {
+    let rad = (r.width.min(r.height) * 0.15).clamp(1.0, 8.0);
+    let x0 = r.x;
+    let x1 = r.right();
+    let y0 = r.y;
+    let y1 = r.bottom();
+    Path2D {
+        commands: vec![
+            PathCmd::MoveTo(PointPt::new(x0 + rad, y0)),
+            PathCmd::LineTo(PointPt::new(x1 - rad, y0)),
+            PathCmd::QuadTo { control: PointPt::new(x1, y0), to: PointPt::new(x1, y0 + rad) },
+            PathCmd::LineTo(PointPt::new(x1, y1 - rad)),
+            PathCmd::QuadTo { control: PointPt::new(x1, y1), to: PointPt::new(x1 - rad, y1) },
+            PathCmd::LineTo(PointPt::new(x0 + rad, y1)),
+            PathCmd::QuadTo { control: PointPt::new(x0, y1), to: PointPt::new(x0, y1 - rad) },
+            PathCmd::LineTo(PointPt::new(x0, y0 + rad)),
+            PathCmd::QuadTo { control: PointPt::new(x0, y0), to: PointPt::new(x0 + rad, y0) },
+            PathCmd::Close,
+        ],
+    }
+}
+
+fn render_embedded_result_table(result_sheet_id: &SheetId, tab_id: Option<&str>, rect: RectPt, doc: &ProjectDocument, scene: &mut ChartScene) {
+    let Some(result) = doc.result_sheet(result_sheet_id) else {
+        scene.warnings.push(ChartWarning::new("missing_embedded_result_table", format!("embedded result sheet '{result_sheet_id}' not found")));
+        return;
+    };
+    let tab = select_result_tab(&result.tabs, tab_id, result_sheet_id, &mut scene.warnings);
+    let Some(tab) = tab else {
+        scene.warnings.push(ChartWarning::new("empty_embedded_result_table", format!("result sheet '{result_sheet_id}' has no tabs")));
+        return;
+    };
+
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::rect(rect),
+        fill: Some(FillPaint::solid(Rgba8::rgba(255, 255, 255, 245))),
+        stroke: Some(StrokePaint::solid(Rgba8::BLACK, 0.8)),
+        clip: None,
+    });
+    scene.primitives.push(ScenePrimitive::PushClip { rect });
+    draw_result_tab_cells(tab, rect, scene);
+    scene.primitives.push(ScenePrimitive::PopClip);
+}
+
+fn select_result_tab<'a>(tabs: &'a [ResultTab], tab_id: Option<&str>, sheet_id: &SheetId, warnings: &mut Vec<ChartWarning>) -> Option<&'a ResultTab> {
+    if let Some(target_id) = tab_id {
+        if let Some(found) = tabs.iter().find(|t| t.id == target_id) {
+            return Some(found);
+        }
+        warnings.push(ChartWarning::new(
+            "missing_result_tab",
+            format!("tab '{target_id}' not found on result sheet '{sheet_id}'; fell back to first tab"),
+        ));
+    }
+    tabs.first()
+}
+
+fn draw_result_tab_cells(tab: &ResultTab, rect: RectPt, scene: &mut ChartScene) {
+    let font_size = 7.5_f64;
+    let row_h = 11.5_f64;
+    let col_count = tab.column_headers.len().max(1) + usize::from(!tab.row_labels.is_empty());
+    let col_w = (rect.width - 8.0).max(16.0) / (col_count as f64);
+
+    let mut y = rect.y + 3.0 + font_size;
+    let start_col = usize::from(!tab.row_labels.is_empty());
+    for (offset, hdr) in tab.column_headers.iter().enumerate() {
+        let x = rect.x + 4.0 + ((start_col + offset) as f64) * col_w;
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich: parse_markup(&format!("<b>{hdr}</b>")),
+            anchor_pt: PointPt::new(x, y),
+            anchor: TextAnchor::Start,
+            font_size_pt: font_size,
+            rotation_deg: 0.0,
+            color: Rgba8::BLACK,
+        }));
+    }
+
+    let rule_y = rect.y + row_h + 2.0;
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::line(PointPt::new(rect.x + 2.0, rule_y), PointPt::new(rect.right() - 2.0, rule_y)),
+        fill: None,
+        stroke: Some(StrokePaint::solid(Rgba8::rgb(120, 120, 120), 0.6)),
+        clip: None,
+    });
+
+    for (r_idx, row) in tab.rows.iter().enumerate() {
+        y = rect.y + 4.0 + font_size + ((r_idx + 1) as f64) * row_h;
+        if y > rect.bottom() + row_h {
+            break;
+        }
+        let mut cx = rect.x + 4.0;
+        if let Some(row_lbl) = tab.row_labels.get(r_idx) {
+            scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                rich: parse_markup(row_lbl),
+                anchor_pt: PointPt::new(cx, y),
+                anchor: TextAnchor::Start,
+                font_size_pt: font_size,
+                rotation_deg: 0.0,
+                color: Rgba8::BLACK,
+            }));
+            cx += col_w;
+        }
+        for (c_idx, cell) in row.iter().enumerate() {
+            let cell_text = format_result_cell_text(cell);
+            scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                rich: parse_markup(&cell_text),
+                anchor_pt: PointPt::new(cx + (c_idx as f64) * col_w, y),
+                anchor: TextAnchor::Start,
+                font_size_pt: font_size,
+                rotation_deg: 0.0,
+                color: Rgba8::BLACK,
+            }));
+        }
+    }
+}
+
+fn format_result_cell_text(cell: &ResultCell) -> String {
+    match cell {
+        ResultCell::Empty => String::new(),
+        ResultCell::Number { value, prefix, units } => {
+            let mut out = String::new();
+            if let Some(p) = prefix {
+                out.push_str(p);
+            }
+            out.push_str(&format_scalar_clean(*value));
+            if let Some(u) = units
+                && !u.is_empty()
+            {
+                out.push(' ');
+                out.push_str(u);
+            }
+            out
+        }
+        ResultCell::ConfidenceInterval { lower, upper } => {
+            let lo = match lower {
+                CiBound::Finite(v) => format_scalar_clean(*v),
+                CiBound::Open => String::from("open"),
+            };
+            let hi = match upper {
+                CiBound::Finite(v) => format_scalar_clean(*v),
+                CiBound::Open => String::from("open"),
+            };
+            format!("[{lo}, {hi}]")
+        }
+        ResultCell::PValue { formatted, stars, .. } => {
+            if stars.is_empty() {
+                formatted.clone()
+            } else {
+                format!("{formatted} {stars}")
+            }
+        }
+        ResultCell::Text(s) => s.clone(),
+        ResultCell::Boolean(b) => String::from(if *b { "Yes" } else { "No" }),
+    }
+}
+
+/// Convenience helper compiling all chrome (background thresholds, axes/frame/ticks/labels,
+/// foreground threshold rules, legend, and annotations) around `scene.plot_rect_pt`.
+pub fn render_graph_chrome(graph: &GraphSpec, doc: &ProjectDocument, scene: &mut ChartScene, options: &AxisRenderOptions) -> CompiledAxes {
+    scene.plot_rect_pt = compute_plot_rect(SizePt::new(scene.width_pt, scene.height_pt), graph, options);
+    let axes = resolve_axes_and_ticks(graph, scene, options);
+    render_thresholds_background(&axes, graph, scene, options);
+    emit_axes_and_frame(&axes, graph, doc, scene, options);
+    render_thresholds_lines(&axes, graph, doc, scene);
+    let entries = legend_entries_from_graph_spec(graph, doc);
+    render_legend(&graph.legend, &entries, doc, Some(&graph.primary_source_sheet_id), scene);
+    render_annotations(&graph.annotations, doc, Some(&graph.primary_source_sheet_id), scene);
+    axes
+}
+
+/// Format an arbitrary slice of [`ChartWarning`] entries into a deterministic diagnostic report line.
+#[must_use]
+pub fn summarize_warnings(warnings: &[ChartWarning]) -> String {
+    let mut out = String::new();
+    for (idx, w) in warnings.iter().enumerate() {
+        if idx > 0 {
+            out.push_str("; ");
+        }
+        let _ = write!(out, "[{}] {}", w.code, w.message);
+    }
+    out
+}
