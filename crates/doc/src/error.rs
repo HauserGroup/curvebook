@@ -3,6 +3,8 @@
 
 use std::fmt;
 
+pub use lumencraft_math::ConfidenceLevel;
+
 use crate::ids::SheetId;
 use crate::{SubcolumnMode, TableKind};
 
@@ -59,42 +61,10 @@ pub fn validate_subcolumns(count: usize) -> Result<(), DocError> {
     Ok(())
 }
 
-/// Validated statistical confidence level in `[0.01%, 99.99%]` (`docs/statistics-implementation.md` §1.2).
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct ConfidenceLevel(f64);
-
-impl ConfidenceLevel {
-    /// Standard 95.0% confidence level (`alpha = 0.05`).
-    pub const DEFAULT_95: Self = Self(95.0);
-
-    /// Standard 99.0% confidence level (`alpha = 0.01`).
-    pub const PERCENT_99: Self = Self(99.0);
-
-    /// Construct a validated confidence level in `[0.01, 99.99]`.
-    pub fn new(percent: f64) -> Result<Self, DocError> {
-        if !percent.is_finite() || !(0.01..=99.99).contains(&percent) {
-            return Err(DocError::InvalidConfidenceLevel { percent });
-        }
-        Ok(Self(percent))
-    }
-
-    /// Confidence level expressed as a percentage (`0.01..=99.99`).
-    #[must_use]
-    pub const fn percent(self) -> f64 {
-        self.0
-    }
-
-    /// Complementary tail significance threshold `alpha = 1.0 - percent / 100.0`.
-    #[must_use]
-    pub fn alpha(self) -> f64 {
-        (1.0 - self.0 / 100.0).clamp(1e-6, 0.9999)
-    }
-}
-
-impl Default for ConfidenceLevel {
-    fn default() -> Self {
-        Self::DEFAULT_95
-    }
+/// Construct a validated [`ConfidenceLevel`] in `[0.01%, 99.99%]`, mapping invalid inputs to
+/// [`DocError::InvalidConfidenceLevel`].
+pub fn validate_confidence_level(percent: f64) -> Result<ConfidenceLevel, DocError> {
+    ConfidenceLevel::from_percent(percent).map_err(|_| DocError::InvalidConfidenceLevel { percent })
 }
 
 /// Validation failure when reconstructing within-point parametric moments from pre-summarized

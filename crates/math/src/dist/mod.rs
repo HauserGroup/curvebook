@@ -24,4 +24,7 @@ pub use dunnett::{
     dunnett_two_sided_crit, dunnett_two_sided_crit_loadings, dunnett_two_sided_p, dunnett_two_sided_p_loadings,
 };
 pub use noncentral::{ncchi2_cdf, ncchi2_sf, ncf_cdf, ncf_sf, nct_cdf, nct_sf, noncentral_chi2_ci, noncentral_f_ci, noncentral_t_ci};
-pub use studentized_range::{studentized_range_cdf, studentized_range_isf, studentized_range_ln_sf, studentized_range_ppf, studentized_range_sf};
+pub use studentized_range::{
+    max_studentized_range_cdf, max_studentized_range_isf, max_studentized_range_sf, studentized_range_cdf, studentized_range_isf,
+    studentized_range_ln_sf, studentized_range_ppf, studentized_range_sf,
+};

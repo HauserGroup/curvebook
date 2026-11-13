@@ -5,6 +5,9 @@
 
 use crate::error::MathError;
 
+/// Hard ceiling on Brent-Dekker root-finding iterations regardless of caller configuration.
+pub const MAX_BRENT_ITERS: usize = 4_096;
+
 /// Configuration tolerances and iteration cap for 1D root-finding.
 #[derive(Debug, Clone, Copy)]
 pub struct RootOptions {
@@ -12,7 +15,7 @@ pub struct RootOptions {
     pub rel_tol: f64,
     /// Absolute tolerance on bracket half-width.
     pub abs_tol: f64,
-    /// Hard iteration limit.
+    /// Hard iteration limit (clamped internally to `1..=4_096`).
     pub max_iters: usize,
 }
 
@@ -52,12 +55,13 @@ where
         return Err(MathError::DomainError { name: "bracket_sign", value: f_a * f_b });
     }
 
+    let max_iters = options.max_iters.clamp(1, MAX_BRENT_ITERS);
     let mut x_c = x_a;
     let mut f_c = f_a;
     let mut step = x_b - x_a;
     let mut prev_step = step;
 
-    for _ in 0..options.max_iters {
+    for _ in 0..max_iters {
         if (f_b > 0.0) == (f_c > 0.0) {
             x_c = x_a;
             f_c = f_a;
@@ -109,7 +113,7 @@ where
         }
     }
 
-    Err(MathError::NotConverged { algorithm: "brent_root", iterations: options.max_iters })
+    Err(MathError::NotConverged { algorithm: "brent_root", iterations: max_iters })
 }
 
 fn interp_numerator_denominator(x_a: f64, x_b: f64, x_c: f64, f_a: f64, f_b: f64, f_c: f64) -> (f64, f64) {
@@ -161,5 +165,12 @@ mod tests {
 
         let cos_fixed = brent_root(|x| x.cos() - x, 0.0, 1.0, RootOptions::default()).unwrap();
         assert!((cos_fixed - 0.739_085_133_215_160_7).abs() < 1e-15);
+
+        // Zero and huge max_iters are clamped into 1..=MAX_BRENT_ITERS cleanly.
+        let err = brent_root(|x| x * x - 2.0, 0.0, 2.0, RootOptions { rel_tol: 0.0, abs_tol: 0.0, max_iters: 0 }).unwrap_err();
+        assert!(matches!(err, crate::error::MathError::NotConverged { iterations: 1, .. }));
+        let err_cap = brent_root(|x| if x < 1.0 { -1.0 } else { 1.0 }, 0.0, 2.0, RootOptions { rel_tol: 0.0, abs_tol: 0.0, max_iters: usize::MAX })
+            .unwrap_err();
+        assert!(matches!(err_cap, crate::error::MathError::NotConverged { iterations: super::MAX_BRENT_ITERS, .. }));
     }
 }

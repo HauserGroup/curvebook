@@ -21,7 +21,7 @@ Neither `lumencraft-ui-egui`, `lumencraft-svg`, nor `lumencraft-pdf` ever comput
 
 ## 2. Graph Families & Graphical Data Objects (GDOs)
 
-Each `GraphSpec` binds one or more data series and configures composable Graphical Data Objects:
+Creating a new `DataSheet` automatically provisions a paired `GraphSheet` (`initialized: false`). On the user's first visit to an uninitialized `GraphSheet` (or via `Change › Graph Type…`), the visual family gallery presents live schematic thumbnails filtered to the upstream `TableArchetype` and `ColumnDesignHint`. Each `GraphSpec` binds one or more data series and configures composable Graphical Data Objects:
 
 1. **XY Graphs:**
    - Scatter symbols (circle, square, triangle, inverted triangle, diamond, cross, plus, open/filled/semi-filled, per-point size/color overrides),
@@ -34,13 +34,16 @@ Each `GraphSpec` binds one or more data series and configures composable Graphic
    - Aligned dot plot with mean/median + error crossbar,
    - **Box-and-whisker** (Tukey $1.5 \times \text{IQR}$ with outlier points, min-to-max, $10\text{–}90\%$, $5\text{–}95\%$, $2.5\text{–}97.5\%$, or $1\text{–}99\%$ whiskers),
    - **Violin plot** (Gaussian kernel density estimate clipped to observed `[min, max]` or extended, overlaid median/quartile dashed rules, optional truncated half-violin + points),
-   - Before–after paired subject lines, interleaved bars, stacked bars, and interaction plots.
+   - Before–after paired subject lines (default when `ColumnDesignHint::PairedRepeatedMeasures`), stacked bars, and interaction plots,
+   - **`Grouped` visual factor mapping (`Columns = Color/Legend`, `Rows = X-Axis Position`):**
+     - `Interleaved` bars/symbols cluster series at each Row factor $r$ along the X-axis (defaulting X tick labels to `Row titles`), comparing Column series side-by-side within each row.
+     - `Separated` bars/symbols render all rows of Column $A$ as Block 1 followed by all rows of Column $B$ as Block 2 (defaulting X tick labels to `Column titles`, or switchable to `Row titles` / `Row numbers` in `Format Axes` while numeric range bounds stay disabled on categorical axes). Swapping which factor controls series color vs. cluster grouping is achieved cleanly via `Transpose`.
 3. **Contingency & Parts-of-Whole Graphs:**
    - Interleaved/stacked count or percentage bars, $100\%$ stacked fraction bar, pie, ring/donut (with center total callout), and $10 \times 10$ unit/waffle grid.
 4. **Survival Graphs:**
    - Kaplan–Meier right-continuous step curves, vertical/cross censored-observation tick marks, shaded/dashed asymmetrical Greenwood $95\%$ CI bands, and an axis-aligned **Number at Risk** table rendered directly beneath major X-axis ticks.
 5. **Multiple Variables & Diagnostic Graphs (Prism 11.1 scope):**
-   - Continuous $\times$ continuous bubble/multivariate scatter (mapping up to 4 variables simultaneously to $X$, $Y$, symbol color ramp/category, and symbol area), optional group **convex hulls** and **confidence ellipses**,
+   - **Five-channel Multivariate & Bubble Scatter:** Maps up to five independent columns simultaneously to `X`, `Y`, `Color` (discrete categorical palette or continuous perceptual ramp + colorbar), `Size` (continuous area scaling or ordered discrete step radii), and point `Label` text, with non-modal `Apply` live preview, optional group **convex hulls**, and **confidence ellipses**,
    - **Categorical $\times$ continuous GDOs directly from `MultipleVariables` sheets** (bars, box-and-whisker, violin, column scatter, summary symbols & connecting lines) honoring independent graph-level categorical ordering,
    - **Heatmaps** (grouped cell means/medians or correlation matrix $r/\rho$ with continuous perceptual colorbar and optional cell value labels),
    - **Volcano plots** ($-\log_{10} p$ or $-\log_{10} q$ vs. difference / $\log_2$ fold change with horizontal FDR/alpha threshold and vertical effect-size thresholds),
@@ -89,7 +92,7 @@ Data series and fitted curves clip cleanly per segment without drawing spurious 
 
 ## 6. Multi-Panel Page Layouts & Publication Export
 
-A `LayoutSheet` arranges multiple live `GraphSheet` panels, embedded `ResultSheet` parameter tables, legends, and rich-text callouts onto physical publication pages:
+A `LayoutSheet` arranges multiple live `GraphSheet` panels, live embedded `DataSheet` / `ResultSheet` tables, legends, and rich-text callouts onto physical publication pages (editing or excluding an upstream cell refreshes all placed graphs and embedded table cells reactively):
 - **Physical dimensions & journal presets:** Exact width $\times$ height in `mm`, `cm`, `in`, or `pt` (including single-column `85 mm` / `89 mm`, 1.5-column `120 mm` / `136 mm`, and double-column `174 mm` / `183 mm` journal widths).
 - **Grid & alignment guides:** Configurable row $\times$ column layout templates, baseline alignment across adjacent Y axes (aligning plot-area origins even when Y-tick label widths differ!), and automatic panel badges (`A`, `B`, `C`, … or `a`, `b`, `c`).
 - **Export targets:**

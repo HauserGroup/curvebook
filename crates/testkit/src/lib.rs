@@ -3,6 +3,21 @@
 //!
 //! May only be depended on as a `[dev-dependencies]` entry (enforced by `cargo xtask layers`).
 //! Governing spec: `docs/development.md` (§Tests & numerical verification, §Verified NIST StRD corpus).
+//!
+//! # Example
+//!
+//! ```
+//! use lumencraft_testkit::{assert_lre_at_least, oracle_univariate_f64, sha256_hex};
+//! use lumencraft_testkit::nist_strd::numacc4;
+//!
+//! let ds = numacc4();
+//! let (mean, sd, r1) = oracle_univariate_f64(&ds.values);
+//! assert_lre_at_least(mean, ds.certified_mean, 15.0, "NumAcc4 mean");
+//! // Decimal 10_000_000.2 rounds in IEEE-754 f64 (~8.43 digits vs decimal 0.1).
+//! assert_lre_at_least(sd, ds.certified_sd, 8.0, "NumAcc4 sd");
+//! assert_lre_at_least(r1, ds.certified_r1, 14.5, "NumAcc4 r1");
+//! assert_eq!(sha256_hex(b"abc").len(), 64);
+//! ```
 #![forbid(unsafe_code)]
 
 pub mod dd;

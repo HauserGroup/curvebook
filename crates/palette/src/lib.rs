@@ -26,7 +26,9 @@ pub use categorical::{
     OKABE_ITO_REDDISH_PURPLE, OKABE_ITO_SKY_BLUE, OKABE_ITO_VERMILION, OKABE_ITO_YELLOW, PAUL_TOL_BRIGHT, PAUL_TOL_HIGH_CONTRAST, PAUL_TOL_MUTED,
     PAUL_TOL_VIBRANT, PaletteId,
 };
-pub use colormap::{CIVIDIS_STOPS, ColorRamp, ColorStop, ColormapId, DIVERGING_BLUE_RED_STOPS, GRAYSCALE_STOPS, PLASMA_STOPS, VIRIDIS_STOPS};
+pub use colormap::{
+    CIVIDIS_STOPS, ColorRamp, ColorStop, ColormapId, DIVERGING_BLUE_RED_STOPS, GRAYSCALE_STOPS, MAX_DISCRETE_SAMPLES, PLASMA_STOPS, VIRIDIS_STOPS,
+};
 pub use cvd::{CvdKind, simulate_cvd};
 pub use space::{Cmyk, LinearRgba, Oklab, Oklch, Rgba8, lerp_oklab, linear_channel_to_srgb, srgb_channel_to_linear};
 pub use style::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle};
@@ -34,8 +36,9 @@ pub use style::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle};
 #[cfg(test)]
 mod tests {
     use super::{
-        Cmyk, ColorRamp, ColorStop, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, OKABE_ITO, PAUL_TOL_BRIGHT,
-        PAUL_TOL_HIGH_CONTRAST, PAUL_TOL_MUTED, PaletteId, Rgba8, lerp_oklab, simulate_cvd,
+        CategoricalPalette, Cmyk, ColorRamp, ColorStop, ColormapId, CvdKind, LineDashStyle, LinearRgba, MAX_DISCRETE_SAMPLES, MarkerFillMode,
+        MarkerShape, MarkerStyle, OKABE_ITO, Oklab, Oklch, PAUL_TOL_BRIGHT, PAUL_TOL_HIGH_CONTRAST, PAUL_TOL_MUTED, PaletteId, Rgba8, lerp_oklab,
+        simulate_cvd,
     };
 
     #[test]
@@ -99,10 +102,41 @@ mod tests {
 
         for id in PaletteId::ALL {
             let desc = id.descriptor();
+            assert_eq!(desc.id, Some(id));
+            assert_eq!(desc.name, id.label());
             assert!(!desc.swatches.is_empty());
             assert_eq!(id.color_at(0), id.color_at(desc.swatches.len()));
             assert_eq!(desc.color_at(2), id.color_at(2));
         }
+    }
+
+    #[test]
+    fn custom_categorical_palette_supports_owned_name_color_at_and_cvd() {
+        let swatches = vec![Rgba8::rgb(0x1B, 0x9E, 0x77), Rgba8::rgb(0xD9, 0x5F, 0x02), Rgba8::rgb(0x75, 0x70, 0xB3)];
+        let custom = CategoricalPalette::custom(String::from("Lab Assay Scheme"), swatches.clone());
+        assert_eq!(custom.id, None);
+        assert_eq!(custom.name, "Lab Assay Scheme");
+        assert_eq!(custom.color_at(0), swatches[0]);
+        assert_eq!(custom.color_at(3), swatches[0]);
+        assert!(custom.min_pairwise_oklab_distance() > 0.05);
+
+        let sim = custom.simulate_cvd(CvdKind::Deuteranopia, 1.0);
+        assert_eq!(sim.id, None);
+        assert_eq!(sim.name, "Lab Assay Scheme");
+        assert_eq!(sim.swatches.len(), 3);
+        assert_eq!(sim.color_at(1), simulate_cvd(swatches[1], CvdKind::Deuteranopia, 1.0));
+
+        let empty = CategoricalPalette::custom("Empty", Vec::new());
+        assert_eq!(empty.color_at(0), Rgba8::BLACK);
+        assert!((empty.min_pairwise_oklab_distance() - 0.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn sample_discrete_clamps_unbounded_counts_to_max() {
+        let clamped = ColormapId::Viridis.sample_discrete(usize::MAX);
+        assert_eq!(clamped.len(), MAX_DISCRETE_SAMPLES);
+        assert_eq!(clamped.first().copied(), Some(ColormapId::Viridis.sample(0.0)));
+        assert_eq!(clamped.last().copied(), Some(ColormapId::Viridis.sample(1.0)));
     }
 
     #[test]
@@ -153,5 +187,89 @@ mod tests {
         assert_eq!(m.fill_mode, MarkerFillMode::Filled);
         assert!(LineDashStyle::Solid.dash_multipliers().is_empty());
         assert_eq!(LineDashStyle::Dashed.dash_multipliers().len(), 2);
+    }
+
+    #[test]
+    fn palette_and_style_types_round_trip_via_serde_json() {
+        fn assert_roundtrip<T>(value: &T)
+        where
+            T: serde::Serialize + for<'de> serde::Deserialize<'de> + PartialEq + std::fmt::Debug,
+        {
+            let json = serde_json::to_string(value).unwrap();
+            let decoded: T = serde_json::from_str(&json).unwrap();
+            assert_eq!(&decoded, value);
+        }
+
+        let rgba = Rgba8::rgba(0x1B, 0x9E, 0x77, 0xCC);
+        assert_roundtrip(&rgba);
+        let lin: LinearRgba = rgba.to_linear();
+        assert_roundtrip(&lin);
+        let lab: Oklab = rgba.to_oklab();
+        assert_roundtrip(&lab);
+        let lch: Oklch = rgba.to_oklch();
+        assert_roundtrip(&lch);
+        let cmyk: Cmyk = rgba.to_cmyk();
+        assert_roundtrip(&cmyk);
+
+        for id in PaletteId::ALL {
+            assert_roundtrip(&id);
+            assert_roundtrip(&id.descriptor());
+        }
+        assert_roundtrip(&CategoricalPalette::custom("Custom", vec![rgba, Rgba8::WHITE]));
+
+        for cmap in ColormapId::ALL {
+            assert_roundtrip(&cmap);
+            assert_roundtrip(&ColorRamp::Named { id: cmap, reversed: true });
+        }
+        assert_roundtrip(&ColorRamp::Custom {
+            stops: vec![ColorStop { position: 0.0, color: Rgba8::BLACK }, ColorStop { position: 1.0, color: rgba }],
+        });
+
+        for cvd in [CvdKind::Protanopia, CvdKind::Deuteranopia, CvdKind::Tritanopia, CvdKind::Achromatopsia] {
+            assert_roundtrip(&cvd);
+        }
+        for shape in [
+            MarkerShape::Circle,
+            MarkerShape::Square,
+            MarkerShape::TriangleUp,
+            MarkerShape::TriangleDown,
+            MarkerShape::Diamond,
+            MarkerShape::Cross,
+            MarkerShape::Plus,
+            MarkerShape::Star,
+            MarkerShape::Hexagon,
+            MarkerShape::HorizontalBar,
+            MarkerShape::VerticalBar,
+        ] {
+            assert_roundtrip(&shape);
+        }
+        for fill_mode in [
+            MarkerFillMode::Filled,
+            MarkerFillMode::Open,
+            MarkerFillMode::SemiFilledTop,
+            MarkerFillMode::SemiFilledBottom,
+            MarkerFillMode::SemiFilledLeft,
+            MarkerFillMode::SemiFilledRight,
+        ] {
+            assert_roundtrip(&fill_mode);
+        }
+        assert_roundtrip(&MarkerStyle {
+            shape: MarkerShape::Diamond,
+            fill_mode: MarkerFillMode::SemiFilledLeft,
+            size_pt: 6.25,
+            fill_color: rgba,
+            stroke_color: Rgba8::BLACK,
+            stroke_width_pt: 1.25,
+        });
+        for dash in [
+            LineDashStyle::Solid,
+            LineDashStyle::Dashed,
+            LineDashStyle::Dotted,
+            LineDashStyle::DashDot,
+            LineDashStyle::DashDotDot,
+            LineDashStyle::LongDash,
+        ] {
+            assert_roundtrip(&dash);
+        }
     }
 }

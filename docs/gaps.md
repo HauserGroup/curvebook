@@ -1,6 +1,6 @@
 # Gaps
 
-> **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** ranked `G1`–`G14` clean-room work list established from Prism 11.1 public guides · **Target:** GraphPad Prism 11 (11.1.x)
+> **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** `G1` numerical foundations + 58-file NIST StRD corpus harness landed (`2–4 h` downstream wiring remaining); `L0`/`L1` schemas + `serde`/`proptest` round-trips landed under `G2` · **Target:** GraphPad Prism 11 (11.1.x)
 
 Every shortfall between LumenCraft (`M0`) and GraphPad Prism 11.1, **ranked by how much it blocks a working scientist from switching**. Unless the user assigns a specific task, pick the highest-ranked unblocked gap below, read its linked implementation guide first, implement and test it end to end, and update this file, [`target-app-parity.md`](target-app-parity.md), the domain parity checklist, and [`ROADMAP.md`](../ROADMAP.md) in the same PR.
 
@@ -10,8 +10,8 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 
 | Rank | Gap | Hours | Gate | Implementation guide & checklist |
 |---:|---|---:|:---:|---|
-| 1 | [G1 Numerical foundations & NIST StRD oracle](#g1-numerical-foundations-and-nist-strd-oracle) | 20–30 | Alpha | [statistics-implementation.md](statistics-implementation.md) |
-| 2 | [G2 Typed data tables, reactive DAG & `.lumencraft` / CSV I/O](#g2-typed-data-tables-reactive-dag-and-lumencraft--csv-io) | 25–40 | Alpha | [data-tables-and-transforms.md](data-tables-and-transforms.md), [file-format-parity.md](file-format-parity.md) |
+| 1 | [G1 Numerical foundations & NIST StRD oracle](#g1-numerical-foundations-and-nist-strd-oracle) | 2–4 | Alpha | [statistics-implementation.md](statistics-implementation.md) |
+| 2 | [G2 Typed data tables, reactive DAG & `.lumencraft` / CSV I/O](#g2-typed-data-tables-reactive-dag-and-lumencraft--csv-io) | 18–30 | Alpha | [data-tables-and-transforms.md](data-tables-and-transforms.md), [file-format-parity.md](file-format-parity.md) |
 | 3 | [G3 Core biostatistics, ANOVA/REML, effect sizes & multiplicity](#g3-core-biostatistics-anovareml-effect-sizes-and-multiplicity) | 45–70 | Alpha | [statistics-implementation.md](statistics-implementation.md), [stats-parity.md](stats-parity.md) |
 | 4 | [G4 Nonlinear regression solver, profile CIs & built-in equations](#g4-nonlinear-regression-solver-profile-cis-and-built-in-equations) | 50–78 | Alpha | [curve-fitting-implementation.md](curve-fitting-implementation.md), [fitting-parity.md](fitting-parity.md) |
 | 5 | [G5 Publication chart compiler, broken/log axes & SVG/PDF export](#g5-publication-chart-compiler-brokenlog-axes-and-svgpdf-export) | 40–62 | Alpha | [graphing-and-layouts.md](graphing-and-layouts.md), [graphing-parity.md](graphing-parity.md) |
@@ -30,21 +30,22 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 ## Details by gap
 
 ### G1 Numerical foundations and NIST StRD oracle
-**Crates:** `crates/math`, `crates/testkit` · **Spec:** [`statistics-implementation.md` §1](statistics-implementation.md#1-numerical-foundations-cratesmath)
-- **Done:** M0 crate structure and strict no-panic lint gates.
+**Crates:** `crates/math`, `crates/testkit`, `xtask` · **Spec:** [`statistics-implementation.md` §1](statistics-implementation.md#1-numerical-foundations-cratesmath)
+- **Done:**
+  - `crates/math` (`L0`): Neumaier compensated summation & shifted two-pass moments (`NumAcc1`–`NumAcc4`, `BinaryStiff1e8`), cancellation-free `erf`/`erfc`/`ln_gamma` and regularized incomplete beta $I_x(a,b)$ & gamma $P(a,x), Q(a,x)$, tail-safe evaluators/quantiles for normal, Student *t* (real df), Snedecor *F*, $\chi^2$, noncentral *t*/*F*/$\chi^2$ CIs, Copenhaver–Holland Studentized range $q(k,\nu)$ ($2 \le k \le 200$), exact multivariate Dunnett *t* integrals, column-pivoted Householder QR with Björck augmented iterative refinement, Golub–Kahan SVD, Cholesky, symmetric eigensolver (`SymEigen`), quadrature, Brent root-finding, `DeterministicRng`, plus `serde`-serializable `ConfidenceLevel` (`0.01%..=99.99%`), `PValueFormat`, and guarded `AxisScale`/`LogitDomain`.
+  - `crates/testkit` & `cargo xtask corpus`: 106-bit `DoubleDouble` reference oracle, NIST Log Relative Error & ULP metrics, FIPS 180-4 SHA-256 verifier, clean-room ASCII `.dat` parsers across all four NIST StRD suites, offline certified stiffness/collinearity benchmarks (`crates/math/tests/nist_strd.rs`), and `cargo xtask corpus` (`--fetch` / `--fetch-only`) verifying all 58 public-domain NIST StRD `.dat` files offline (`9` Univariate, `11` ANOVA, `11` Linear Regression, `27` Nonlinear Regression) with `LUMENCRAFT_REQUIRE_CORPUS=1`.
 - **Missing:**
-  - Regularized incomplete beta $I_x(a,b)$ and gamma $P(a,x), Q(a,x)$ accurate to $\le 10^{-13}$ relative error without `1.0 - cdf(x)` tail cancellation.
-  - Exact tail/quantile evaluators for Student *t* (real df), Snedecor *F*, $\chi^2$, normal, noncentral *t*/*F*/$\chi^2$ (for standardized effect-size CIs), Studentized range $q(k,\nu)$, and multivariate Dunnett *t*.
-  - Neumaier compensated summation (`NumAcc1`–`NumAcc4`), column-pivoted Householder QR, Golub–Kahan SVD, Cholesky, and seeded deterministic PRNG.
-  - `cargo xtask corpus` downloader/verifier + `lumencraft-testkit` NIST StRD parser.
+  - Wiring `crates/stats` (`G3`) and `crates/fit` (`G4`, all 27 nonlinear least-squares benchmarks) through `lumencraft-testkit` against the full 58-file NIST StRD corpus, plus any edge-case special-function tuning surfaced during solver integration (`2–4 h`).
 
 ### G2 Typed data tables, reactive DAG and `.lumencraft` / CSV I/O
-**Crates:** `crates/doc`, `crates/format`, `crates/engine` · **Spec:** [`data-tables-and-transforms.md`](data-tables-and-transforms.md)
-- **Done:** M0 stubs.
+**Crates:** `crates/palette`, `crates/doc`, `crates/format`, `crates/engine` · **Spec:** [`data-tables-and-transforms.md`](data-tables-and-transforms.md)
+- **Done:**
+  - `crates/palette` (`L0`): sRGB/linear-RGB/Oklab/OkLCH/CMYK colour conversions, WCAG 2.1 contrast checks, Okabe–Ito & Paul Tol (`Bright`, `Muted`, `HighContrast`, `Vibrant`, `MonochromePrint`) + user-customizable `CategoricalPalette`, Viridis/Cividis/Plasma/DivergingBlueRed/Grayscale colormaps (clamped to `MAX_DISCRETE_SAMPLES`), Machado (2009) CVD simulation, marker glyphs, and stroke dash styles.
+  - `crates/doc` (`L1`): all 8 `TableArchetype` schemas (`Xy`, `Column` with `ColumnDesignHint` & pre-summarized subcolumns, `Grouped`, `Contingency`, `Survival`, `PartsOfWhole`, `MultipleVariables` with role inference, bulk recoding & `LevelOrderSpec`, `Nested`), all 8 `SubcolumnMode`s + `SummarizedPoint` moment reconstruction, non-destructive cell exclusions & `*` import token parsing, freeze-guarded `DataSheet` (`Y`, `X`, and `Survival.times` cell & exclusion accessors), `FloatingNote` callouts, `InfoSheet` constants & `HookSource` template parsing, `LinkedDataRegion` + 4-stage `ImportLinkSpec` + bounded cross-table slice/transpose helpers, `AnalysisSpec`/`ResultSheet` (with auto-titles & retargeting validation), enriched `TransformAnalysisSpec::Simulate` (`seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, `noise`), `GraphSpec`/`LayoutSpec` (including `FloatingBar`, `MultipleVariables` `BubbleScatter`/`CategoricalSummary` modes, geometric `Shape` annotations, and `apply_style_from`), and `ProjectDocument` upstream DAG dependency extraction.
+  - Unified `ConfidenceLevel`/`PValueFormat`/`AxisScale`/`LogitDomain` across `math` and `doc`, workspace-allowlisted `serde`, `serde_json` (`float_roundtrip`), `flate2` (`rust_backend`), `crc32fast`, and `proptest`, and `serde` + `proptest!` round-trip verification across `math`, `palette`, and `doc`.
 - **Missing:**
-  - All 8 `TableArchetype` data models, replicate subcolumn modes (`RawReplicates`, `MeanSdN`, `MeanSemN`, `MeanCvN`, `MeanLowHigh`, `MedianIqr`), non-destructive cell exclusions, freeze/unfreeze state, and `InfoSheet` hookable constants.
-  - Topological dependency DAG (`DataSheet -> Transform/Analysis -> ResultSheet -> Graph -> Layout`) with cycle rejection, dirty-sub-DAG recalculation, and atomic undo/redo command journal in `lumencraft-engine`.
-  - Lossless `.lumencraft` ZIP+JSON+CSV persistence (`prop_format` round-trip tests) and RFC-4180 CSV/TSV import/export.
+  - Topological recalculation DAG (`DataSheet -> LinkedDataRegion / Transform / Analysis -> ResultSheet -> Graph -> Layout`) in `crates/engine` with live cross-table `Paste Link` & reactive transpose execution, cycle rejection, and atomic undo/redo command journal (`sheet.*`, `table.*`, `info.*`, `analysis.*`).
+  - Lossless `.lumencraft` ZIP+JSON+CSV persistence (`prop_format` round-trip tests) and RFC-4180 CSV/TSV import/export in `crates/format`.
 
 ### G3 Core biostatistics, ANOVA/REML, effect sizes and multiplicity
 **Crates:** `crates/stats` · **Spec:** [`statistics-implementation.md` §2–§4](statistics-implementation.md#2-descriptive-statistics-normality--outlier-detection)
@@ -73,17 +74,17 @@ Gap IDs (`G1`–`G14`) are permanent; ranks and hour estimates adjust as work la
 **Crates:** `crates/ui-egui`, `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` · **Spec:** [`ui-parity.md`](ui-parity.md)
 - **Done:** M0 desktop/web shell skeletons, i18n registry, and UI command sync.
 - **Missing:**
-  - Five-folder Project Navigator + Family dependency pane + Welcome / New Table dialog.
-  - Virtualized 60 fps two-tier subcolumn spreadsheet grid with cell exclusions (`Cmd/Ctrl+E`), Excel/TSV paste-special, keyboard range selection stopping cleanly at empty boundaries, and WCAG AA contrast compliance.
-  - Analyze parameter dialogs, multi-tab Result viewer with Analysis Checklist, interactive Graph canvas + Format Graph / Axes / Pairwise-Comparisons inspector.
+  - Five-folder Project Navigator (nested `Data with Results` vs. split view, bold dependency highlights) + stable-anchor Family dependency pane + Welcome / Project Initialization & `Clone Pipeline` dialog.
+  - Virtualized 60 fps two-tier subcolumn spreadsheet grid with cell exclusions (`Cmd/Ctrl+E`), 4-stage `Import & Paste Special` / `Paste Link` (with color-coded provenance borders and reactive transpose), keyboard range selection stopping cleanly at empty boundaries, and WCAG AA contrast compliance.
+  - Analyze parameter dialogs (with duplicate-analysis disambiguation, `Cmd/Ctrl+T` parameter editing, and `Change Data Analyzed`), multi-tab Result viewer with contextual Interpret / Analysis Checklist panel, first-visit `Change Graph Type` gallery, and non-modal Format Graph / Axes / Pairwise-Comparisons inspectors.
 
 ### G7 Prism 11 Multiple Variables workflows, Calculated Variables and Multifactor ANOVA
-**Crates:** `crates/doc`, `crates/transform`, `crates/stats`, `crates/fit`, `crates/chart`, `crates/ui-egui` · **Spec:** [`data-tables-and-transforms.md` §2.2 & §4](data-tables-and-transforms.md#22-categorical-level-ordering-multiplevariables)
+**Crates:** `crates/doc`, `crates/transform`, `crates/stats`, `crates/fit`, `crates/chart`, `crates/ui-egui` · **Spec:** [`data-tables-and-transforms.md` §2.3 & §4](data-tables-and-transforms.md#23-multiplevariables-role-inference-bulk-recoding--categorical-level-ordering)
 - **Missing:**
   - In-table `=` Calculated Variables + aggregate/conditional/window functions with live column recalculation.
-  - Categorical level ordering (entry, alphabetical, frequency, manual, reversed; independent graph level order).
+  - Auto-inferred vs. user-locked column role badges (`Continuous`, `Categorical`, `Label`), bulk categorical level recoding / typo merging, and categorical level ordering (entry, alphabetical, frequency, manual, reversed; independent graph level order).
   - Running classic *t*-tests, nonlinear regression, simple Kaplan–Meier survival, and $N$-way **Multifactor ANOVA** directly from `MultipleVariables` tables via typed/color-coded variable role assignment.
-  - Categorical $\times$ continuous `MultipleVariables` graph types (bars, box-and-whisker, violin, column scatter) + bubble/convex-hull/confidence-ellipse multivariate plots.
+  - Categorical $\times$ continuous `MultipleVariables` graph types (bars, box-and-whisker, violin, column scatter) + five-channel (`X`, `Y`, `Color`, `Size`, `Label`) bubble/convex-hull/confidence-ellipse multivariate plots.
 
 ### G8 Survival (Kaplan–Meier, Cox PH), contingency CIs, ROC, GLMs and PCA
 **Crates:** `crates/stats` · **Spec:** [`statistics-implementation.md` §5](statistics-implementation.md#5-contingency-survival-roc--multivariate-analysis)

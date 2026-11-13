@@ -6,6 +6,7 @@ mod brands;
 mod bundle;
 mod cleanroom;
 mod contributors;
+mod corpus;
 mod cursors;
 mod ico;
 mod json;
@@ -32,7 +33,7 @@ commands:
   i18n-report           report untranslated locale keys in lumencraft-ui-egui
   ui-commands [--check] sync (or verify) crates/mcp/src/ui_catalog.rs from crates/ui-egui
   wasm                  check wasm32-unknown-unknown compilation across web-targeted crates
-  corpus                run document/import corpus smoke checks
+  corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
   bundle                build release binaries and assemble dist/LumenCraft.app
   ico <out> <png...>    pack PNG frames (<=256px) into a Windows .ico container
   version [set <ver>]   print or update [workspace.package] version
@@ -73,7 +74,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "i18n-report" => cmd_i18n_report(&root),
         "ui-commands" => ui_commands::run(&root, rest.iter().any(|a| a == "--check")),
         "wasm" => cmd_wasm(&root),
-        "corpus" => cmd_corpus(&root),
+        "corpus" => corpus::run(&root, rest),
         "bundle" => bundle::run(&root),
         "ico" => ico::run(rest),
         "version" => version::run(&root, rest),
@@ -150,10 +151,6 @@ fn cmd_i18n_report(root: &Path) -> Result<(), String> {
 
 fn cmd_wasm(root: &Path) -> Result<(), String> {
     run_cargo_strs(root, &["check", "--target", "wasm32-unknown-unknown", "-p", "lumencraft-web", "-p", "lumencraft-engine", "--keep-going"])
-}
-
-fn cmd_corpus(root: &Path) -> Result<(), String> {
-    run_cargo_strs(root, &["test", "-p", "lumencraft-format", "-p", "lumencraft-testkit"])
 }
 
 fn cmd_ci(root: &Path) -> Result<(), String> {

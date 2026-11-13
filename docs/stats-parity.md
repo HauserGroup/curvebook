@@ -1,9 +1,11 @@
 # Biostatistics & Hypothesis Testing Parity (`lumencraft-stats`)
 
 > Governing mathematical & algorithmic specification: [`statistics-implementation.md`](statistics-implementation.md) · Ranked work queue: [`gaps.md`](gaps.md) (`G1`, `G3`, `G7`, `G8`)
+>
+> **`L0` numerical foundations (`G1`):** `crates/math` and `crates/testkit` now provide the underlying cancellation-free incomplete beta/gamma functions, fractional-df `t`/`F`/$\chi^2$/normal distributions, noncentral `t`/`F`/$\chi^2$ confidence-interval solvers, Hartley/Copenhaver–Holland Studentized range $q(k,\nu)$ & $q(r,c,\nu)$ ($2 \le k \le 200$), exact equal/unequal-$n$ multivariate-*t* Dunnett integrals, compensated `SummaryMoments`, rank-revealing Householder QR & SVD, seeded `DeterministicRng`, unified `ConfidenceLevel` / `PValueFormat` types, and the NIST StRD `.dat` oracle. Checkboxes below remain unchecked until end-to-end `crates/stats` analyses, engine commands, and result sheets land (`G3`, `G7`, `G8`).
 
 ## Descriptive, Normality & Outlier Identification
-- [ ] Column descriptive statistics (mean, SD, SEM, arbitrary $0.01\%\text{–}99.99\%$ CI, median, IQR, configurable percentiles, geometric mean & geometric SD factor, harmonic mean, $\% \text{CV}$, skewness $G_1$, excess kurtosis $G_2$)
+- [ ] Column descriptive statistics (mean, SD, SEM, arbitrary $0.01\%\text{–}99.99\%$ CI, median + exact binomial CI reporting actual confidence level, IQR, symmetric custom $(100-P)\% / P\%$ percentiles, geometric mean & SD factor, harmonic mean, quadratic mean / RMS + CI, $\% \text{CV}$, skewness $G_1$, excess kurtosis $G_2$, and 3 subcolumn aggregation modes on `XY`/`Grouped` sheets)
 - [ ] D'Agostino–Pearson omnibus $K^2$ normality & lognormality test (+ normal vs. lognormal likelihood ratio)
 - [ ] Shapiro–Wilk $W$ normality & lognormality test
 - [ ] Anderson–Darling $A^{*2}$ and Kolmogorov–Smirnov (Lilliefors) normality tests

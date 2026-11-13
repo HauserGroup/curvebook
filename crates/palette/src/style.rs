@@ -4,7 +4,7 @@
 use crate::space::Rgba8;
 
 /// Geometric shape of scatter / summary data-point symbols (`docs/graphing-and-layouts.md` §2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum MarkerShape {
     #[default]
     Circle,
@@ -21,7 +21,7 @@ pub enum MarkerShape {
 }
 
 /// Fill treatment of a data-point symbol.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum MarkerFillMode {
     #[default]
     Filled,
@@ -33,7 +33,7 @@ pub enum MarkerFillMode {
 }
 
 /// Complete visual styling for a scatter or summary marker.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MarkerStyle {
     pub shape: MarkerShape,
     pub fill_mode: MarkerFillMode,
@@ -58,7 +58,7 @@ impl Default for MarkerStyle {
 
 /// Stroke dash cadence for connecting lines, regression curves, thresholds, and error bars
 /// (including dashed/dotted error bars per `docs/graphing-and-layouts.md` §2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum LineDashStyle {
     #[default]
     Solid,

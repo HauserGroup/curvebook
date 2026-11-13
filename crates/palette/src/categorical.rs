@@ -84,7 +84,7 @@ pub const MONOCHROME_PRINT: &[Rgba8] = &[
 ];
 
 /// Identifier for built-in qualitative scientific colour palettes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PaletteId {
     #[default]
     OkabeIto,
@@ -138,19 +138,26 @@ impl PaletteId {
     /// Materialize a [`CategoricalPalette`] descriptor.
     #[must_use]
     pub fn descriptor(self) -> CategoricalPalette {
-        CategoricalPalette { id: self, name: self.label(), swatches: self.swatches().to_vec() }
+        CategoricalPalette { id: Some(self), name: String::from(self.label()), swatches: self.swatches().to_vec() }
     }
 }
 
 /// Qualitative colour palette (either built-in or user-customized).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CategoricalPalette {
-    pub id: PaletteId,
-    pub name: &'static str,
+    /// Built-in palette identifier, or `None` for user-customized palettes.
+    pub id: Option<PaletteId>,
+    pub name: String,
     pub swatches: Vec<Rgba8>,
 }
 
 impl CategoricalPalette {
+    /// Construct a user-customized qualitative colour palette with an owned display name.
+    #[must_use]
+    pub fn custom(name: impl Into<String>, swatches: Vec<Rgba8>) -> Self {
+        Self { id: None, name: name.into(), swatches }
+    }
+
     /// Deterministically fetch a swatch by cyclic 0-based series index, falling back to black if empty.
     #[must_use]
     pub fn color_at(&self, index: usize) -> Rgba8 {
@@ -164,7 +171,7 @@ impl CategoricalPalette {
     /// Return a copy of this palette simulated under a colour-vision deficiency at `severity` in `[0.0, 1.0]`.
     #[must_use]
     pub fn simulate_cvd(&self, kind: CvdKind, severity: f64) -> Self {
-        Self { id: self.id, name: self.name, swatches: self.swatches.iter().map(|&c| simulate_cvd(c, kind, severity)).collect() }
+        Self { id: self.id, name: self.name.clone(), swatches: self.swatches.iter().map(|&c| simulate_cvd(c, kind, severity)).collect() }
     }
 
     /// Minimum pairwise perceptual `Delta E_OK` distance across all distinct swatches (`0.0` if `< 2` swatches).

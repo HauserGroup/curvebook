@@ -86,8 +86,11 @@ pub const DIVERGING_BLUE_RED_STOPS: [Rgba8; 9] = [
 /// Monochrome continuous ramp from black (`0.0`) to white (`1.0`).
 pub const GRAYSCALE_STOPS: [Rgba8; 2] = [Rgba8::BLACK, Rgba8::WHITE];
 
+/// Hard ceiling on discrete colormap samples returned by [`ColormapId::sample_discrete`].
+pub const MAX_DISCRETE_SAMPLES: usize = 4_096;
+
 /// Built-in continuous colormap identifier.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ColormapId {
     #[default]
     Viridis,
@@ -131,11 +134,12 @@ impl ColormapId {
         sample_uniform_stops(self.stops(), t)
     }
 
-    /// Sample `n` evenly spaced discrete colours across `[0.0, 1.0]`.
+    /// Sample `n` evenly spaced discrete colours across `[0.0, 1.0]`, clamped to
+    /// [`MAX_DISCRETE_SAMPLES`].
     #[must_use]
     #[allow(clippy::cast_precision_loss)]
     pub fn sample_discrete(self, n: usize) -> Vec<Rgba8> {
-        match n {
+        match n.min(MAX_DISCRETE_SAMPLES) {
             0 => Vec::new(),
             1 => vec![self.sample(0.5)],
             count => {
@@ -147,14 +151,14 @@ impl ColormapId {
 }
 
 /// Positioned colour stop in `[0.0, 1.0]` for user-defined gradients.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColorStop {
     pub position: f64,
     pub color: Rgba8,
 }
 
 /// User-configurable continuous colour ramp (either a named colormap or custom stops).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ColorRamp {
     Named { id: ColormapId, reversed: bool },
     Custom { stops: Vec<ColorStop> },

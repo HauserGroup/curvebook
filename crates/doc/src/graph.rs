@@ -3,6 +3,7 @@
 //! bubble/categorical encodings, live pairwise significance brackets, and style cloning
 //! (`docs/graphing-and-layouts.md` §1–§5).
 
+pub use lumencraft_math::{AxisScale, LogitDomain};
 use lumencraft_palette::{ColorRamp, LineDashStyle, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 
 use crate::archetypes::{ColumnDesignHint, LevelOrderSpec, TableArchetype};
@@ -11,7 +12,7 @@ use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_temp
 use crate::links::DataSheet;
 
 /// Specialized diagnostic plot subtypes (`docs/graphing-and-layouts.md` §2.5).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticPlotKind {
     Heatmap,
     Volcano,
@@ -23,7 +24,7 @@ pub enum DiagnosticPlotKind {
 }
 
 /// Primary visual family of a [`GraphSpec`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum GraphKind {
     Xy,
     Column,
@@ -36,7 +37,7 @@ pub enum GraphKind {
 }
 
 /// Axis frame geometry preset (`docs/graphing-and-layouts.md` §3.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum FramePreset {
     #[default]
     OpenL,
@@ -46,31 +47,11 @@ pub enum FramePreset {
     OriginCrossing,
 }
 
-/// Percentage vs proportion domain for `Logit` axes (`docs/graphing-and-layouts.md` §3.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum LogitDomain {
-    /// Percentages `u in (0, 100)`.
-    #[default]
-    Percent,
-    /// Unit proportions `u in (0, 1)`.
-    Proportion,
-}
-
-/// Guarded axis scale bijection (`docs/graphing-and-layouts.md` §3.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub enum GraphAxisScale {
-    #[default]
-    Linear,
-    Log10,
-    Log2,
-    Ln,
-    Logit(LogitDomain),
-    Probit,
-    Reciprocal,
-}
+/// Guarded axis scale bijection (`docs/graphing-and-layouts.md` §3.1), unified with [`lumencraft_math::AxisScale`].
+pub type GraphAxisScale = AxisScale;
 
 /// Break-mark ornament between discontinuous axis segments (`docs/graphing-and-layouts.md` §3.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum BreakOrnament {
     #[default]
     DoubleSlash,
@@ -79,7 +60,7 @@ pub enum BreakOrnament {
 }
 
 /// Source for categorical tick labels on `Column` and `Grouped` X axes (`docs/graphing-and-layouts.md` §2.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum CategoricalTickSource {
     #[default]
     RowTitles,
@@ -88,7 +69,7 @@ pub enum CategoricalTickSource {
 }
 
 /// Numeric or categorical tick formatting mode (`docs/graphing-and-layouts.md` §3.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum TickLabelFormat {
     #[default]
     Decimal,
@@ -100,7 +81,7 @@ pub enum TickLabelFormat {
 }
 
 /// Reference threshold rule or shaded band drawn across a plot area (e.g. Volcano alpha/fold-change cutoffs).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AxisThreshold {
     pub value: f64,
     pub shade_to: Option<f64>,
@@ -111,7 +92,7 @@ pub struct AxisThreshold {
 }
 
 /// One continuous segment (`1..=3` per axis) of a standard or discontinuous axis (`docs/graphing-and-layouts.md` §3.2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AxisSegment {
     /// `None` selects automatic data-driven lower bound.
     pub min: Option<f64>,
@@ -131,7 +112,7 @@ impl Default for AxisSegment {
 }
 
 /// Complete X, Y, or secondary Y2 axis model.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AxisSpec {
     pub title: String,
     pub segments: Vec<AxisSegment>,
@@ -169,7 +150,7 @@ impl AxisSpec {
 }
 
 /// Central tendency statistic for bars and summary crossbars.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SummaryMeasure {
     #[default]
     Mean,
@@ -178,7 +159,7 @@ pub enum SummaryMeasure {
 }
 
 /// Whisker extent convention for box-and-whisker plots (`docs/graphing-and-layouts.md` §2.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum WhiskerMethod {
     #[default]
     Tukey1_5Iqr,
@@ -190,7 +171,7 @@ pub enum WhiskerMethod {
 }
 
 /// Deterministic replicate point overlay on bars, boxes, and violins.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ReplicateOverlayStyle {
     #[default]
     DeterministicBeeswarm,
@@ -198,7 +179,7 @@ pub enum ReplicateOverlayStyle {
 }
 
 /// Curve interpolation rule for XY connecting lines (`docs/graphing-and-layouts.md` §2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum LineConnectionKind {
     #[default]
     PointToPoint,
@@ -207,7 +188,7 @@ pub enum LineConnectionKind {
     AkimaSpline,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConnectingLineStyle {
     pub kind: LineConnectionKind,
     pub dash_style: LineDashStyle,
@@ -215,13 +196,13 @@ pub struct ConnectingLineStyle {
     pub color: Rgba8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AreaFillSpec {
     pub baseline_y: f64,
     pub fill_color: Rgba8,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum PartsOfWholeLayout {
     Pie,
     #[default]
@@ -231,7 +212,7 @@ pub enum PartsOfWholeLayout {
 }
 
 /// Composable Graphical Data Object (GDO) describing how a series renders (`docs/graphing-and-layouts.md` §2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GraphicalDataObject {
     ScatterAndLine {
         marker: Option<MarkerStyle>,
@@ -264,6 +245,12 @@ pub enum GraphicalDataObject {
         show_median_and_quartiles: bool,
         half_violin_with_points: bool,
     },
+    FloatingBar {
+        summary: Option<SummaryMeasure>,
+        fill_color: Rgba8,
+        border_color: Rgba8,
+        border_width_pt: f64,
+    },
     BeforeAfterLines {
         marker: Option<MarkerStyle>,
         line_color: Rgba8,
@@ -283,7 +270,7 @@ pub enum GraphicalDataObject {
 }
 
 /// Dispersion statistic encoded by error bars (`docs/graphing-and-layouts.md` §2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ErrorBarMetric {
     #[default]
     Sd,
@@ -294,7 +281,7 @@ pub enum ErrorBarMetric {
     ExplicitSubcolumns,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ErrorBarDirection {
     #[default]
     Both,
@@ -303,7 +290,7 @@ pub enum ErrorBarDirection {
 }
 
 /// Vertical or horizontal error-bar styling (supporting solid, dashed, and dotted strokes).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ErrorBarSpec {
     pub metric: ErrorBarMetric,
     pub direction: ErrorBarDirection,
@@ -327,7 +314,7 @@ impl Default for ErrorBarSpec {
 }
 
 /// Overlaid smooth curve bound to an upstream nonlinear/linear regression `ResultSheet`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RegressionOverlaySpec {
     pub result_sheet_id: SheetId,
     /// Adaptive polyline subdivision count in `[256, 1024]`.
@@ -338,7 +325,7 @@ pub struct RegressionOverlaySpec {
 }
 
 /// Single plotted data series inside a [`GraphSpec`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SeriesSpec {
     pub source_sheet_id: SheetId,
     pub data_set_index: usize,
@@ -351,7 +338,7 @@ pub struct SeriesSpec {
 }
 
 /// Horizontal cluster arrangement for `Grouped` and `Contingency` graphs (`docs/graphing-and-layouts.md` §2.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum GroupedArrangement {
     #[default]
     Interleaved,
@@ -360,7 +347,7 @@ pub enum GroupedArrangement {
 }
 
 /// Fill-colour visual channel in a five-channel `MultipleVariables` plot (`docs/graphing-and-layouts.md` §2.5).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ColorChannelMapping {
     Constant(Rgba8),
     Categorical { column: usize, palette: PaletteId, level_order_override: Option<LevelOrderSpec> },
@@ -368,15 +355,27 @@ pub enum ColorChannelMapping {
 }
 
 /// Symbol-area / radius channel in a five-channel `MultipleVariables` bubble plot.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SizeChannelMapping {
     Constant { radius_pt: f64 },
     Variable { column: usize, min_radius_pt: f64, max_radius_pt: f64 },
 }
 
-/// Declarative five-channel (`X`, `Y`, `Color`, `Size`, `Label`) encoding for `MultipleVariables` plots.
-#[derive(Debug, Clone, PartialEq)]
+/// Rendering mode for a `MultipleVariables` graph (`docs/graphing-and-layouts.md` §2.5).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum MultivariatePlotMode {
+    /// Five-channel continuous/categorical scatter and bubble plot.
+    #[default]
+    BubbleScatter,
+    /// Categorical × continuous group summary plot (bar, box-and-whisker, violin, dot plot, floating bar).
+    CategoricalSummary { gdo: GraphicalDataObject, y_error_bars: Option<ErrorBarSpec> },
+}
+
+/// Declarative five-channel (`X`, `Y`, `Color`, `Size`, `Label`) or categorical × continuous
+/// encoding for `MultipleVariables` plots.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MultivariateGraphEncoding {
+    pub plot_mode: MultivariatePlotMode,
     pub x_column: usize,
     pub y_column: usize,
     pub color: ColorChannelMapping,
@@ -388,7 +387,7 @@ pub struct MultivariateGraphEncoding {
 }
 
 /// Geometry style of pairwise significance brackets (`docs/graphing-and-layouts.md` §4).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum BracketStyle {
     #[default]
     Square,
@@ -398,7 +397,7 @@ pub enum BracketStyle {
 }
 
 /// Text label mode for pairwise significance brackets.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum BracketLabelMode {
     #[default]
     SummaryStars,
@@ -407,7 +406,7 @@ pub enum BracketLabelMode {
 }
 
 /// Live pairwise comparison bracket hooked to an upstream statistical `ResultSheet`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PairwiseBracketSpec {
     pub result_sheet_id: SheetId,
     pub group_a: usize,
@@ -420,15 +419,25 @@ pub struct PairwiseBracketSpec {
     pub bracket_step_pt: f64,
 }
 
+/// Geometric shape primitive for canvas callout regions (`docs/graphing-parity.md`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum AnnotationShapeKind {
+    #[default]
+    Rectangle,
+    RoundedRectangle,
+    Ellipse,
+}
+
 /// Canvas annotation primitive placed on a [`GraphSpec`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GraphAnnotation {
     TextBox { bounds_pt: RectPt, markdown: String, bordered: bool },
     LineOrArrow { start_pt: (f64, f64), end_pt: (f64, f64), arrowhead: bool, dash: LineDashStyle, color: Rgba8 },
+    Shape { kind: AnnotationShapeKind, bounds_pt: RectPt, stroke_color: Rgba8, stroke_width_pt: f64, dash: LineDashStyle, fill_color: Option<Rgba8> },
     EmbeddedResultTable { result_sheet_id: SheetId, tab_id: Option<String>, bounds_pt: RectPt },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LegendSpec {
     pub visible: bool,
     pub position_pt: Option<(f64, f64)>,
@@ -442,7 +451,7 @@ impl Default for LegendSpec {
 }
 
 /// Resolution-independent figure specification compiled by `lumencraft-chart`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GraphSpec {
     pub kind: GraphKind,
     pub primary_source_sheet_id: SheetId,
@@ -521,6 +530,7 @@ impl GraphSpec {
 
         let multivariate = match &sheet.archetype {
             TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 2 => Some(MultivariateGraphEncoding {
+                plot_mode: MultivariatePlotMode::default(),
                 x_column: 0,
                 y_column: 1,
                 color: ColorChannelMapping::Constant(palette.color_at(0)),
@@ -569,15 +579,39 @@ impl GraphSpec {
         self.legend.bordered = donor.legend.bordered;
         self.legend.visible = donor.legend.visible;
 
+        let donor_eb = donor.series.first().and_then(|s| s.y_error_bars).or_else(|| match donor.multivariate.as_ref().map(|m| &m.plot_mode) {
+            Some(MultivariatePlotMode::CategoricalSummary { y_error_bars, .. }) => *y_error_bars,
+            _ => None,
+        });
+
         for (idx, series) in self.series.iter_mut().enumerate() {
             let swatch = self.palette.color_at(idx);
             recolor_gdo(&mut series.gdo, swatch);
-            if let Some(donor_eb) = donor.series.first().and_then(|s| s.y_error_bars)
+            if let Some(d_eb) = donor_eb
                 && let Some(eb) = &mut series.y_error_bars
             {
-                eb.dash_style = donor_eb.dash_style;
-                eb.stroke_width_pt = donor_eb.stroke_width_pt;
-                eb.cap_width_pt = donor_eb.cap_width_pt;
+                eb.dash_style = d_eb.dash_style;
+                eb.stroke_width_pt = d_eb.stroke_width_pt;
+                eb.cap_width_pt = d_eb.cap_width_pt;
+            }
+        }
+
+        if let Some(mv) = &mut self.multivariate {
+            let primary_swatch = self.palette.color_at(0);
+            match &mut mv.color {
+                ColorChannelMapping::Constant(color) => *color = primary_swatch,
+                ColorChannelMapping::Categorical { palette, .. } => *palette = self.palette,
+                ColorChannelMapping::Continuous { .. } => {}
+            }
+            if let MultivariatePlotMode::CategoricalSummary { gdo, y_error_bars } = &mut mv.plot_mode {
+                recolor_gdo(gdo, primary_swatch);
+                if let Some(d_eb) = donor_eb
+                    && let Some(eb) = y_error_bars
+                {
+                    eb.dash_style = d_eb.dash_style;
+                    eb.stroke_width_pt = d_eb.stroke_width_pt;
+                    eb.cap_width_pt = d_eb.cap_width_pt;
+                }
             }
         }
     }
@@ -656,7 +690,8 @@ fn recolor_gdo(gdo: &mut GraphicalDataObject, swatch: Rgba8) {
                 l.color = swatch;
             }
         }
-        GraphicalDataObject::BarWithReplicates { fill_color, border_color, .. } => {
+        GraphicalDataObject::BarWithReplicates { fill_color, border_color, .. }
+        | GraphicalDataObject::FloatingBar { fill_color, border_color, .. } => {
             *fill_color = swatch.with_alpha(fill_color.a);
             *border_color = swatch;
         }
@@ -683,7 +718,7 @@ fn recolor_gdo(gdo: &mut GraphicalDataObject, swatch: Rgba8) {
 }
 
 /// Navigator sheet wrapping a [`GraphSpec`] and tracking first-visit gallery initialization.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GraphSheet {
     pub id: SheetId,
     pub title: String,

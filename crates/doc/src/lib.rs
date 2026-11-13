@@ -46,14 +46,14 @@ pub use archetypes::{
 pub use cell::{Cell, CellValue, ExplicitErrorBounds, ReplicateStacking, SubcolumnMode, SummarizedPoint};
 pub use error::{
     CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, MAX_TITLE_BYTES,
-    SummaryPointError, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    SummaryPointError, validate_confidence_level, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 pub use graph::{
-    AreaFillSpec, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CategoricalTickSource, ColorChannelMapping,
-    ConnectingLineStyle, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation, GraphAxisScale,
-    GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LegendSpec, LineConnectionKind, LogitDomain,
-    MultivariateGraphEncoding, PairwiseBracketSpec, PartsOfWholeLayout, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping,
-    SummaryMeasure, TickLabelFormat, WhiskerMethod,
+    AnnotationShapeKind, AreaFillSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament,
+    CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec,
+    FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LegendSpec,
+    LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PartsOfWholeLayout, RegressionOverlaySpec,
+    ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
 };
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, extract_template_hooks};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};
@@ -69,7 +69,7 @@ pub use result::{
 };
 
 /// The eight typed scientific data-table families in a LumenCraft project.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TableKind {
     Xy,
     Column,
@@ -106,7 +106,9 @@ impl TableKind {
     pub const fn allows_subcolumn_mode(self, mode: SubcolumnMode) -> bool {
         match self {
             Self::Xy => true,
-            Self::Column => matches!(mode, SubcolumnMode::Single | SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN),
+            Self::Column => {
+                matches!(mode, SubcolumnMode::Single | SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN)
+            }
             Self::Grouped => !matches!(mode, SubcolumnMode::Single),
             Self::Contingency | Self::Survival | Self::PartsOfWhole | Self::MultipleVariables => matches!(mode, SubcolumnMode::Single),
             Self::Nested => matches!(mode, SubcolumnMode::RawReplicates(_)),
@@ -115,7 +117,7 @@ impl TableKind {
 }
 
 /// Top-level sheet sections in a LumenCraft project navigator.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SheetSection {
     Data,
     Info,
@@ -309,6 +311,11 @@ mod tests {
 
         let mut spec = AnalysisSpec::new("res-1", "data-1", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).unwrap();
         assert_eq!(spec.effective_title(), "Ordinary one-way ANOVA");
+        spec.set_confidence_percent(99.0).unwrap();
+        assert_eq!(spec.confidence_level, lumencraft_math::ConfidenceLevel::PERCENT_99);
+        assert!(matches!(spec.set_confidence_percent(105.0), Err(DocError::InvalidConfidenceLevel { percent }) if percent == 105.0));
+        assert_eq!(super::GraphAxisScale::Logit(super::LogitDomain::Proportion), lumencraft_math::AxisScale::LOGIT_PROPORTION);
+        assert_eq!(super::GraphAxisScale::Logit(super::LogitDomain::Proportion).transform(0.5), Some(0.0));
 
         // In-place parameter update dynamically re-derives the default sheet title.
         spec.update_kind(AnalysisKind::OneWayAnova(OneWayAnovaSpec {
@@ -468,5 +475,249 @@ mod tests {
         assert_eq!((mlh.center, mlh.lower, mlh.upper), (10.0, 8.0, 13.0));
         let ull = SubcolumnMode::UpperLowerLimits.explicit_bounds(&[Cell::number(10.0), Cell::number(7.5), Cell::number(14.5)]).unwrap();
         assert_eq!((ull.center, ull.lower, ull.upper), (10.0, 7.5, 14.5));
+    }
+
+    #[test]
+    fn extract_cell_grid_clamps_unbounded_ranges_and_handles_empty_sheets() {
+        let mut grouped = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3).unwrap();
+        grouped.data_sets[0].cells[0] = vec![Cell::number(1.5), Cell::excluded_number(2.5)];
+        grouped.data_sets[1].cells[2] = vec![Cell::number(8.0), Cell::number(9.0)];
+        let sheet = DataSheet::new("grp-bounded", "Small Sheet", TableArchetype::Grouped(grouped)).unwrap();
+
+        let unbounded = SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(usize::MAX, usize::MAX, usize::MAX));
+        let grid = sheet.extract_cell_grid(unbounded);
+        assert_eq!(grid.len(), 3);
+        assert!(grid.iter().all(|row| row.len() == 4));
+        assert_eq!(grid[0][0].active_number(), Some(1.5));
+        assert!(grid[0][1].excluded);
+        assert_eq!(grid[2][3].active_number(), Some(9.0));
+
+        // Out-of-bounds start coordinates and inverted ranges return empty without panicking.
+        assert!(sheet.extract_cell_grid(SheetCellRange::new(CellCoord::new(3, 0, 0), CellCoord::new(usize::MAX, 0, 0))).is_empty());
+        assert!(sheet.extract_cell_grid(SheetCellRange::new(CellCoord::new(0, 2, 0), CellCoord::new(0, usize::MAX, 0))).is_empty());
+        assert!(sheet.extract_cell_grid(SheetCellRange::new(CellCoord::new(2, 0, 0), CellCoord::new(1, 0, 0))).is_empty());
+        assert!(sheet.extract_cell_grid(SheetCellRange::new(CellCoord::new(0, 0, 5), CellCoord::new(0, 0, usize::MAX))).is_empty());
+
+        // Zero-row sheet returns empty cleanly on `usize::MAX` bounds.
+        let empty_xy = XyTable::new(SubcolumnMode::Single, 2, 0).unwrap();
+        let empty_sheet = DataSheet::new("xy-empty", "Zero Rows", TableArchetype::Xy(empty_xy)).unwrap();
+        assert!(empty_sheet.extract_cell_grid(unbounded).is_empty());
+    }
+
+    #[test]
+    fn freeze_guarded_x_and_survival_time_accessors() {
+        let xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::MeanSdN }, SubcolumnMode::Single, 1, 2).unwrap();
+        let mut xy_sheet = DataSheet::new("xy-x", "Calibrated X", TableArchetype::Xy(xy)).unwrap();
+        xy_sheet.set_x_or_time_cell(0, 0, Cell::number(5.0)).unwrap();
+        xy_sheet.set_x_or_time_cell(0, 1, Cell::number(0.5)).unwrap();
+        xy_sheet.set_x_or_time_cell(0, 2, Cell::number(4.0)).unwrap();
+        assert_eq!(xy_sheet.x_or_time_cell(0, 0).unwrap().active_number(), Some(5.0));
+        xy_sheet.set_x_or_time_excluded(0, 0, true).unwrap();
+        assert_eq!(xy_sheet.x_or_time_cell(0, 0).unwrap().active_number(), None);
+        assert_eq!(xy_sheet.x_or_time_cell(0, 0).unwrap().value.finite_f64(), Some(5.0));
+        assert!(matches!(xy_sheet.set_x_or_time_cell(0, 3, Cell::number(1.0)), Err(DocError::CellOutOfBounds { row: 0, col: 0, subcol: 3 })));
+
+        xy_sheet.frozen = true;
+        assert!(matches!(xy_sheet.set_x_or_time_cell(0, 0, Cell::number(7.0)), Err(DocError::SheetFrozen { .. })));
+        assert!(matches!(xy_sheet.set_x_or_time_excluded(0, 0, false), Err(DocError::SheetFrozen { .. })));
+
+        let surv = SurvivalTable::new(1, 2).unwrap();
+        let mut surv_sheet = DataSheet::new("surv-t", "Cohort Survival", TableArchetype::Survival(surv)).unwrap();
+        surv_sheet.set_x_or_time_cell(0, 0, Cell::number(14.0)).unwrap();
+        surv_sheet.set_cell(CellCoord::new(0, 0, 0), Cell::number(1.0)).unwrap();
+        assert!(matches!(surv_sheet.set_x_or_time_cell(0, 1, Cell::number(14.0)), Err(DocError::CellOutOfBounds { row: 0, col: 0, subcol: 1 })));
+        surv_sheet.set_x_or_time_excluded(0, 0, true).unwrap();
+        if let TableArchetype::Survival(t) = &surv_sheet.archetype {
+            assert!(t.cohort_observations(0).unwrap().is_empty());
+        }
+        surv_sheet.frozen = true;
+        assert!(matches!(surv_sheet.set_x_or_time_cell(0, 0, Cell::number(21.0)), Err(DocError::SheetFrozen { .. })));
+        assert!(matches!(surv_sheet.set_x_or_time_excluded(0, 0, false), Err(DocError::SheetFrozen { .. })));
+
+        let col_sheet =
+            DataSheet::new("col-no-x", "Groups", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2).unwrap()))
+                .unwrap();
+        assert_eq!(col_sheet.x_or_time_cell(0, 0), None);
+    }
+
+    #[test]
+    fn column_table_pre_summarized_subcolumns_and_moment_reconstruction() {
+        let mut sem_col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSemN, 2, 2).unwrap();
+        sem_col.data_sets[0].cells[0] = vec![Cell::number(30.0), Cell::number(3.0), Cell::number(9.0)];
+        let pt_sem = sem_col.summarized_point(0, 0).unwrap().unwrap();
+        assert!((pt_sem.sd - 9.0).abs() < 1e-12);
+        assert!((pt_sem.ss_within - 648.0).abs() < 1e-12);
+
+        let mut cv_col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanCvN, 1, 2).unwrap();
+        cv_col.data_sets[0].cells[0] = vec![Cell::number(50.0), Cell::number(10.0), Cell::number(5.0)];
+        let pt_cv = cv_col.summarized_point(0, 0).unwrap().unwrap();
+        assert!((pt_cv.sd - 5.0).abs() < 1e-12);
+        assert!((pt_cv.ss_within - 100.0).abs() < 1e-12);
+        assert_eq!(cv_col.summarized_point(1, 0).unwrap(), None);
+
+        assert!(matches!(
+            ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::RawReplicates(3), 2, 4),
+            Err(DocError::IncompatibleSubcolumnMode { archetype: TableKind::Column, mode: SubcolumnMode::RawReplicates(3) })
+        ));
+    }
+
+    #[test]
+    fn multivariate_categorical_summary_floating_bar_and_shape_annotations() {
+        let mv = MultipleVariablesTable::new(3, 6).unwrap();
+        let mv_sheet = DataSheet::new("mv-cat", "Biomarker Cohort", TableArchetype::MultipleVariables(mv)).unwrap();
+        let mut spec = GraphSpec::default_for_data_sheet(&mv_sheet);
+        assert_eq!(spec.multivariate.as_ref().unwrap().plot_mode, super::MultivariatePlotMode::BubbleScatter);
+
+        if let Some(enc) = &mut spec.multivariate {
+            enc.plot_mode = super::MultivariatePlotMode::CategoricalSummary {
+                gdo: GraphicalDataObject::FloatingBar {
+                    summary: Some(super::SummaryMeasure::Median),
+                    fill_color: Rgba8::rgba(10, 20, 30, 180),
+                    border_color: Rgba8::BLACK,
+                    border_width_pt: 1.25,
+                },
+                y_error_bars: Some(super::ErrorBarSpec::default()),
+            };
+        }
+        spec.series[0].gdo = GraphicalDataObject::FloatingBar {
+            summary: None,
+            fill_color: Rgba8::rgba(1, 2, 3, 200),
+            border_color: Rgba8::BLACK,
+            border_width_pt: 1.0,
+        };
+        for kind in [super::AnnotationShapeKind::Rectangle, super::AnnotationShapeKind::RoundedRectangle, super::AnnotationShapeKind::Ellipse] {
+            spec.annotations.push(super::GraphAnnotation::Shape {
+                kind,
+                bounds_pt: RectPt::new(12.0, 16.0, 80.0, 40.0),
+                stroke_color: Rgba8::BLACK,
+                stroke_width_pt: 1.0,
+                dash: LineDashStyle::Dotted,
+                fill_color: Some(Rgba8::rgba(240, 240, 240, 128)),
+            });
+        }
+        assert_eq!(spec.annotations.len(), 3);
+
+        let mut donor = spec.clone();
+        donor.palette = PaletteId::PaulTolVibrant;
+        donor.series[0].y_error_bars = Some(super::ErrorBarSpec { dash_style: LineDashStyle::Dashed, ..super::ErrorBarSpec::default() });
+        spec.apply_style_from(&donor);
+
+        let expected_primary = PaletteId::PaulTolVibrant.color_at(0);
+        assert_eq!(
+            spec.series[0].gdo,
+            GraphicalDataObject::FloatingBar {
+                summary: None,
+                fill_color: expected_primary.with_alpha(200),
+                border_color: expected_primary,
+                border_width_pt: 1.0,
+            }
+        );
+        let Some(super::MultivariatePlotMode::CategoricalSummary { gdo, y_error_bars }) = spec.multivariate.as_ref().map(|m| &m.plot_mode) else {
+            panic!("expected CategoricalSummary");
+        };
+        assert_eq!(
+            *gdo,
+            GraphicalDataObject::FloatingBar {
+                summary: Some(super::SummaryMeasure::Median),
+                fill_color: expected_primary.with_alpha(180),
+                border_color: expected_primary,
+                border_width_pt: 1.25,
+            }
+        );
+        assert_eq!(y_error_bars.unwrap().dash_style, LineDashStyle::Dashed);
+    }
+
+    #[test]
+    fn project_document_full_serde_json_round_trip() {
+        let mut proj = ProjectDocument::new("Serde Round-Trip Study").unwrap();
+
+        let mut info = InfoSheet::new_preseeded("info-1", "Assay Metadata").unwrap();
+        info.set_constant("HotNM", ConstantValue::Number(1e-300), Some(String::from("M"))).unwrap();
+        info.set_constant("MinPos", ConstantValue::Number(f64::MIN_POSITIVE), None).unwrap();
+        info.set_constant("NegHi", ConstantValue::Number(-1.234_567_890_123_456_7e12), None).unwrap();
+        info.set_constant("Date", ConstantValue::Date(String::from("2026-11-13")), None).unwrap();
+        proj.add_info_sheet(info).unwrap();
+
+        let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 2).unwrap();
+        xy.x_mode = XColumnMode::GeneratedSequence { start: 1e-300, step: 10.0, progression: SequenceProgression::Geometric };
+        xy.data_sets[0].cells[0] = vec![Cell::number(f64::MIN_POSITIVE), Cell::excluded_number(-1.234_567_890_123_456_7e12)];
+        let mut xy_sheet = DataSheet::new("data-xy", "XY Sheet", TableArchetype::Xy(xy)).unwrap();
+        xy_sheet.info_sheet_id = Some(SheetId::new("info-1"));
+        xy_sheet
+            .add_linked_region(LinkedDataRegion {
+                id: String::from("lnk-1"),
+                spec: ImportLinkSpec {
+                    source: LinkSource::InternalSheet {
+                        sheet_id: SheetId::new("data-col"),
+                        kind: InternalLinkKind::DataSheet,
+                        tab_id: None,
+                        range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1, 0, 0)),
+                    },
+                    filter: ImportFilterSpec::default(),
+                    placement: ImportPlacementSpec::default(),
+                },
+                target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1, 0, 0)),
+                provenance_summary: String::from("Linked column"),
+            })
+            .unwrap();
+        xy_sheet.floating_notes.push(FloatingNote::new("note-1", RectPt::new(4.0, 8.0, 120.0, 50.0), "Check dilution"));
+        proj.add_data_sheet(xy_sheet.clone()).unwrap();
+
+        let col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSemN, 2, 2).unwrap();
+        proj.add_data_sheet(DataSheet::new("data-col", "Column", TableArchetype::Column(col)).unwrap()).unwrap();
+
+        let sim_spec = AnalysisSpec::new(
+            "res-sim",
+            "data-xy",
+            AnalysisKind::Transform(super::TransformAnalysisSpec::Simulate {
+                seed: 42,
+                row_count: 16,
+                replicates: 3,
+                x_min: -9.0,
+                x_max: -3.0,
+                equation_id: String::from("four_pl"),
+                parameters: vec![
+                    (String::from("Bottom"), 0.0),
+                    (String::from("Top"), 100.0),
+                    (String::from("LogIC50"), -6.5),
+                    (String::from("HillSlope"), 1.25),
+                ],
+                noise: super::SimulationNoise::RelativePercent { cv_percent: 5.0 },
+            }),
+        )
+        .unwrap();
+        let mut res_sheet = ResultSheet::new(sim_spec).unwrap();
+        res_sheet.status = super::ResultStatus::UpToDate;
+        res_sheet.analyzable_data = Some(xy_sheet.clone());
+        res_sheet.scalars.push(ResultScalarEntry {
+            key: String::from("EC50"),
+            data_set_index: Some(0),
+            value: 3.162_277_660_168_379_5e-7,
+            units: Some(String::from("M")),
+        });
+        proj.add_result_sheet(res_sheet).unwrap();
+
+        let mut gsheet = GraphSheet::new_uninitialized_for_data("graph-1", &xy_sheet).unwrap();
+        gsheet.spec.x_axis.segments[0].scale = super::GraphAxisScale::Logit(super::LogitDomain::Proportion);
+        proj.add_graph_sheet(gsheet).unwrap();
+
+        let mut lspec = LayoutSpec::from_preset(JournalWidthPreset::SingleColumn85Mm);
+        lspec.items.push(LayoutItem::LiveGraph {
+            id: String::from("panel-a"),
+            graph_sheet_id: SheetId::new("graph-1"),
+            bounds_pt: RectPt::new(0.0, 0.0, 200.0, 150.0),
+            scale_percent: 100.0,
+            badge_override: None,
+        });
+        proj.add_layout_sheet(LayoutSheet::new("layout-1", "Fig 1", lspec).unwrap()).unwrap();
+
+        let json = serde_json::to_string(&proj).unwrap();
+        let decoded: ProjectDocument = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, proj);
+
+        // Verify transparent SheetId / NoteId JSON representation and ConfidenceLevel validation.
+        assert_eq!(serde_json::to_string(&SheetId::new("data-xy")).unwrap(), "\"data-xy\"");
+        assert!(serde_json::from_str::<ConfidenceLevel>("0.0").is_err());
+        assert!(serde_json::from_str::<ConfidenceLevel>("100.0").is_err());
     }
 }

@@ -5,7 +5,7 @@
 use crate::error::{DocError, SummaryPointError, validate_subcolumns};
 
 /// Typed content of a single grid cell (`docs/data-tables-and-transforms.md` §1.2).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CellValue {
     #[default]
     Empty,
@@ -46,7 +46,7 @@ impl CellValue {
 /// Excluded cells remain visible in the spreadsheet (rendered in blue italics with an `*` badge)
 /// and persist in `.lumencraft` archives while downstream statistical tests, fits, transforms, and
 /// graphs mask them out without mutating raw observations (`docs/data-tables-and-transforms.md` §1.2).
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Cell {
     pub value: CellValue,
     pub excluded: bool,
@@ -145,7 +145,7 @@ impl Cell {
 }
 
 /// Subcolumn structure within each data-set column (`docs/data-tables-and-transforms.md` §2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SubcolumnMode {
     /// Single value per row (`1` subcolumn).
     #[default]
@@ -251,7 +251,7 @@ impl SubcolumnMode {
 }
 
 /// Plottable `(center, lower_endpoint, upper_endpoint)` resolved from pre-summarized subcolumns.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitErrorBounds {
     pub center: f64,
     pub lower: f64,
@@ -259,7 +259,7 @@ pub struct ExplicitErrorBounds {
 }
 
 /// Visual layout of replicate subcolumns in a `Grouped` table (`docs/data-tables-and-transforms.md` §2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ReplicateStacking {
     #[default]
     SideBySide,
@@ -270,7 +270,7 @@ pub enum ReplicateStacking {
 /// `MeanCvN` subcolumns (`docs/data-tables-and-transforms.md` §2.1):
 ///
 /// `SS_within = (n - 1) * SD^2`, where `SD = SEM * sqrt(n)` or `(%CV / 100) * |Mean|`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SummarizedPoint {
     pub mean: f64,
     pub sd: f64,

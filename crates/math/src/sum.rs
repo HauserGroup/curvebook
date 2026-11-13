@@ -111,7 +111,7 @@ pub fn dot(a: &[f64], b: &[f64]) -> Result<f64, MathError> {
 
 /// Compensated univariate location and dispersion summary computed via Chan-Golub-LeVeque's
 /// shifted two-pass algorithm with Neumaier compensation.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SummaryMoments {
     /// Number of finite observations `n`.
     pub count: usize,
@@ -309,11 +309,20 @@ pub fn lag1_autocorrelation(values: &[f64]) -> Result<f64, MathError> {
         return Err(MathError::DomainError { name: "variance", value: 0.0 });
     }
     let m = moments.mean;
+    let mut dev_all = NeumaierSum::new();
+    for &x in values {
+        dev_all.add(x - m);
+    }
+    let delta = dev_all.total() / (values.len() as f64);
+
     let mut acc = NeumaierSum::new();
+    let mut pair_dev_acc = NeumaierSum::new();
     for pair in values.windows(2) {
         if let [a, b] = *pair {
             let da = a - m;
             let db = b - m;
+            pair_dev_acc.add(da);
+            pair_dev_acc.add(db);
             let p = da * db;
             let err = da.mul_add(db, -p);
             acc.add(p);
@@ -322,6 +331,8 @@ pub fn lag1_autocorrelation(values: &[f64]) -> Result<f64, MathError> {
             }
         }
     }
+    acc.add(-delta * pair_dev_acc.total());
+    acc.add(((values.len() - 1) as f64) * delta * delta);
     Ok((acc.total() / moments.css).clamp(-1.0, 1.0))
 }
 

@@ -4,7 +4,7 @@
 use crate::space::{LinearRgba, Rgba8};
 
 /// Type of colour-vision deficiency simulated for figure accessibility previews.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CvdKind {
     /// L-cone (red-sensitive) deficiency.
     Protanopia,

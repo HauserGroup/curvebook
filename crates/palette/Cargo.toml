@@ -10,6 +10,8 @@ workspace = true
 
 [dependencies]
 lumencraft-math = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }
+serde_json = { workspace = true }

@@ -8,7 +8,7 @@ use crate::error::{DocError, validate_title};
 use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_template_hooks};
 
 /// Physical measurement unit for figure and page dimensions (`docs/graphing-and-layouts.md` §6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PhysicalUnit {
     #[default]
     Millimeters,
@@ -49,7 +49,7 @@ impl PhysicalUnit {
 }
 
 /// Standard academic journal figure-width and page presets (`docs/graphing-and-layouts.md` §6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum JournalWidthPreset {
     SingleColumn85Mm,
     SingleColumn89Mm,
@@ -82,7 +82,7 @@ impl JournalWidthPreset {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PageOrientation {
     Portrait,
     #[default]
@@ -90,7 +90,7 @@ pub enum PageOrientation {
 }
 
 /// Automatic panel lettering badge style (`A, B, C` vs `a, b, c`; `docs/graphing-and-layouts.md` §6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PanelBadgeStyle {
     #[default]
     UpperCaseLetters,
@@ -112,7 +112,7 @@ impl PanelBadgeStyle {
 }
 
 /// Live element placed onto a [`LayoutSpec`] page.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayoutItem {
     LiveGraph { id: String, graph_sheet_id: SheetId, bounds_pt: RectPt, scale_percent: f64, badge_override: Option<String> },
     LiveTable { id: String, source_sheet_id: SheetId, tab_id: Option<String>, bounds_pt: RectPt },
@@ -120,7 +120,7 @@ pub enum LayoutItem {
 }
 
 /// Multi-panel publication layout specification.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayoutSpec {
     pub width: f64,
     pub height: f64,
@@ -180,7 +180,7 @@ impl Default for LayoutSpec {
 }
 
 /// Navigator sheet wrapping a [`LayoutSpec`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayoutSheet {
     pub id: SheetId,
     pub title: String,

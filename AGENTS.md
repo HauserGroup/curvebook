@@ -37,7 +37,7 @@ Dependencies and assets use SPDX identifiers. An expression is allowed when ever
 
 ## Start Every Session Here
 1. Read [`ROADMAP.md`](ROADMAP.md) (stage, numbers by dimension, what's next) and the ranked work list in [`docs/gaps.md`](docs/gaps.md). Unless the user gives you a task, pick work from that list.
-2. `plan/` is an optional gitignored notebook. Behaviour notes and local reference material may live under `plan/prism/`. Do not ask for it and do not stop when it is absent. Orient, implement, test, verify, then record in the public docs.
+2. `plan/` is an optional gitignored notebook. Behaviour notes and local reference material may live under `plan/prism/` and `plan/papers/`. Do not ask for it and do not stop when it is absent. Orient, implement, test, verify, then record in the public docs.
 3. Before touching a domain crate, read its governing implementation guide in [`docs/`](docs/): [`data-tables-and-transforms.md`](docs/data-tables-and-transforms.md), [`statistics-implementation.md`](docs/statistics-implementation.md), [`curve-fitting-implementation.md`](docs/curve-fitting-implementation.md), [`graphing-and-layouts.md`](docs/graphing-and-layouts.md), [`scripting-and-automation.md`](docs/scripting-and-automation.md), and [`development.md`](docs/development.md).
 
 ## Non-Negotiables

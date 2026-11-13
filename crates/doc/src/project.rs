@@ -12,7 +12,7 @@ use crate::links::DataSheet;
 use crate::result::ResultSheet;
 
 /// Complete serializable LumenCraft project model (`L1`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectDocument {
     pub schema_version: u32,
     pub title: String,

@@ -11,7 +11,7 @@ use crate::ids::{FloatingNote, SheetId};
 use crate::links::DataSheet;
 
 /// Recalculation status of a [`ResultSheet`] inside `lumencraft-engine`'s reactive DAG.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ResultStatus {
     #[default]
     Dirty,
@@ -24,14 +24,14 @@ pub enum ResultStatus {
 
 /// Confidence-interval endpoint supporting unbounded profile-likelihood plateaus (`CiBound::Open`;
 /// `docs/curve-fitting-implementation.md` §2.2).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CiBound {
     Finite(f64),
     Open,
 }
 
 /// Typed cell inside a [`ResultTab`].
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ResultCell {
     #[default]
     Empty,
@@ -56,7 +56,7 @@ pub enum ResultCell {
 }
 
 /// Semantic category of a sub-tab inside a [`ResultSheet`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ResultTabKind {
     #[default]
     MainSummary,
@@ -73,7 +73,7 @@ pub enum ResultTabKind {
 }
 
 /// Single tabular view within a [`ResultSheet`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResultTab {
     pub id: String,
     pub title: String,
@@ -85,7 +85,7 @@ pub struct ResultTab {
 }
 
 /// Named scalar published by a [`ResultSheet`] for constant hooking (`{{result:fit-1:EC50}}`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResultScalarEntry {
     pub key: String,
     pub data_set_index: Option<usize>,
@@ -95,7 +95,7 @@ pub struct ResultScalarEntry {
 
 /// Pairwise group comparison record consumed by live significance brackets on [`crate::GraphSpec`]
 /// (`docs/graphing-and-layouts.md` §4).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PairwiseComparisonRecord {
     pub group_a: usize,
     pub group_b: usize,
@@ -109,7 +109,7 @@ pub struct PairwiseComparisonRecord {
 }
 
 /// Sampled curve coordinate plus optional confidence and prediction band bounds for `lumencraft-chart`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CurveSamplePoint {
     pub x: f64,
     pub y: f64,
@@ -120,7 +120,7 @@ pub struct CurveSamplePoint {
 }
 
 /// Evaluated regression curve overlay associated with a data set on an upstream `DataSheet`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FittedCurveOverlay {
     pub data_set_index: usize,
     pub equation_id: String,
@@ -130,7 +130,7 @@ pub struct FittedCurveOverlay {
 }
 
 /// Severity status of an assumption check in [`ChecklistItem`] (`docs/statistics-implementation.md` §6).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ChecklistStatus {
     Pass,
     Warn,
@@ -139,7 +139,7 @@ pub enum ChecklistStatus {
 }
 
 /// Plain-language statistical assumption diagnostic attached to a [`ResultSheet`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ChecklistItem {
     pub assumption: String,
     pub status: ChecklistStatus,
@@ -148,7 +148,7 @@ pub struct ChecklistItem {
 }
 
 /// Complete output node produced by running an [`AnalysisSpec`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ResultSheet {
     pub id: SheetId,
     pub analysis: AnalysisSpec,

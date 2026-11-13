@@ -8,5 +8,8 @@ description = "LumenCraft numerical, linear-algebra, distribution and axis-scale
 [lints]
 workspace = true
 
+[dependencies]
+serde = { workspace = true }
+
 [dev-dependencies]
 lumencraft-testkit = { workspace = true }

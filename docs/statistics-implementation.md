@@ -7,7 +7,11 @@ Public behavioural & mathematical references:
 - [Decimal formatting & asterisk summaries of P values](https://www.graphpad.com/guides/prism/latest/statistics/stat_decimal_formatting_of_p_values.htm)
 - [Outlier identification: ROUT and Grubbs methods](https://www.graphpad.com/guides/prism/latest/statistics/stat_how_it_works_rout_method.htm)
 - [Prism 11.0 & 11.1 release notes (Multifactor ANOVA, Effect Sizes, MV analyses, decimal CIs)](https://www.graphpad.com/updates/prism-11-1-0-release-notes)
-- Primary literature: Abramowitz & Stegun; NIST DLMF; Press et al., *Numerical Recipes*; Motulsky & Brown (2006) *BMC Bioinformatics* 7:123 (ROUT); Baptista & Pike (1977) *JRSS C* 26:214; Koopman (1984) *Biometrics* 40:513; Benjamini, Krieger & Yekutieli (2006) *Biometrika* 93:491; Kenward & Roger (1997) *Biometrics* 53:983; Klein & Moeschberger, *Survival Analysis*.
+- Primary literature (exact equations, polynomial approximations & test vectors):
+  - **Special functions & Studentized range:** Abramowitz & Stegun; NIST DLMF; Copenhaver & Holland (1988) *J. Stat. Comput. Simul.* 30:1–15 (`10.1080/00949658808811082`).
+  - **Normality & outliers:** Dallal & Wilkinson (1986) *Am. Stat.* 40:294–296 (`10.1080/00031305.1986.10475419`); D'Agostino, Belanger & D'Agostino (1990) *Am. Stat.* 44:316–321 (`10.1080/00031305.1990.10475751`); Royston (1992) *Stat. Comput.* 2:117–119 (`10.1007/BF01891203`) & Royston (1995) *Appl. Stat.* 44:547–551 (`10.2307/2986146`); Motulsky & Brown (2006) *BMC Bioinformatics* 7:123 (`10.1186/1471-2105-7-123`).
+  - **Multiplicity, REML mixed models & ROC:** Benjamini, Krieger & Yekutieli (2006) *Biometrika* 93:491–507 (`10.1093/biomet/93.3.491`); Kenward & Roger (1997) *Biometrics* 53:983–997 (`10.2307/2533558`); DeLong, DeLong & Clarke-Pearson (1988) *Biometrics* 44:837–845 (`10.2307/2531595`).
+  - **Contingency CIs & survival:** Baptista & Pike (1977) *Appl. Stat.* 26:214–220 (`10.2307/2347041`); Koopman (1984) *Biometrics* 40:513–517 (`10.2307/2531405`); Newcombe (1998) *Stat. Med.* 17:873–890 (`10.1002/(SICI)1097-0258(19980430)17:8<873::AID-SIM779>3.0.CO;2-I`); Klein & Moeschberger, *Survival Analysis*.
 
 ---
 
@@ -48,15 +52,20 @@ Never compute small upper-tail probabilities via `1.0 - cdf(x)` (which loses all
 
 ## 2. Descriptive Statistics, Normality & Outlier Detection
 
-### 2.1 Column Descriptive Suite
-Computes $n$ (non-excluded), missing/excluded counts, arithmetic mean, sample SD ($n-1$), SEM, $(1-\alpha)$ CI of mean, minimum, 25th percentile ($Q_1$), median, 75th percentile ($Q_3$), maximum, interquartile range (hinge definition matching standard biostatistics conventions + configurable R-type quantiles), range, coefficient of variation ($\%\text{CV}$), geometric mean & geometric SD factor (when all $x_i > 0$), harmonic mean, skewness $G_1$, excess kurtosis $G_2$, and one-sample *t*-test / Wilcoxon signed-rank test against a user-specified hypothetical value $\mu_0$.
+### 2.1 Column Descriptive Suite & Subcolumn Aggregation Modes
+- **Summary metrics:** Computes $n$ (non-excluded), missing/excluded counts, arithmetic mean, sample SD ($n-1$), SEM, $(1-\alpha)$ CI of mean, minimum, 25th percentile ($Q_1$), median, 75th percentile ($Q_3$), maximum, **symmetric custom percentile pairs** (selecting custom $P \in (50, 100)$ emits both $(100 - P)\%$ and $P\%$ tails), interquartile range (hinge definition matching standard biostatistics conventions + configurable R-type quantiles), range, coefficient of variation ($\%\text{CV}$), geometric mean & geometric SD factor + CI (when all $x_i > 0$), harmonic mean + CI, **quadratic mean (root-mean-square, $\text{RMS} = \sqrt{\frac{1}{n}\sum_{i=1}^n x_i^2}$) + CI**, sum, skewness $G_1$, excess kurtosis $G_2$, and one-sample *t*-test / Wilcoxon signed-rank test against a user-specified hypothetical value $\mu_0$.
+- **Exact nonparametric binomial Median CI:** Selects order-statistic endpoints $[x_{(L)}, x_{(U)}]$ using exact $\operatorname{Binomial}(n, 0.5)$ cumulative tail probabilities without normal approximation, reporting the discrete **`Actual confidence level`** achieved alongside the requested target level (returning `InsufficientN` cleanly when $n < 3$).
+- **Three replicate-subcolumn aggregation modes** when invoked on `XY` or `Grouped` sheets with $N > 1$ subcolumns:
+  1. *Row-means summary:* average the non-excluded replicates within each row first, then compute column descriptive statistics across those row means;
+  2. *Per-subcolumn summary:* compute an independent descriptive column for each subcolumn $1 \dots N$;
+  3. *Pooled grand summary:* flatten all non-excluded cells across rows and subcolumns of a data set into a single pooled sample.
 
 ### 2.2 Normality & Lognormality Battery
 Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognormality), returning the likelihood ratio between normal and lognormal generative models:
-1. **D'Agostino–Pearson omnibus $K^2$** ($n \ge 8$): Anscombe–Glynn kurtosis $Z(g_2)$ + D'Agostino skewness $Z(g_1)$, $K^2 = Z(g_1)^2 + Z(g_2)^2 \sim \chi^2_2$.
-2. **Shapiro–Wilk $W$** ($3 \le n \le 5000$): Royston AS R94 algorithm for $W$ weights and normalizing transformation.
+1. **D'Agostino–Pearson omnibus $K^2$** ($n \ge 8$): D'Agostino skewness $Z(\sqrt{b_1})$ + Anscombe–Glynn kurtosis $Z(b_2)$ (D'Agostino, Belanger & D'Agostino 1990), $K^2 = Z(\sqrt{b_1})^2 + Z(b_2)^2 \sim \chi^2_2$.
+2. **Shapiro–Wilk $W$** ($3 \le n \le 5000$): Royston (1992) polynomial approximations for $a_i$ weights and normalizing transformation of $W$, verified against the Royston (1995, AS R94) $n = 25$ lognormal benchmark ($W = 0.83467, p = 0.000914$).
 3. **Anderson–Darling $A^2$** ($n \ge 8$): Stephens small-sample modified statistic $A^{*2} = A^2 (1 + 0.75/n + 2.25/n^2)$.
-4. **Kolmogorov–Smirnov with Lilliefors $p$-value** ($n \ge 5$): Dallal–Wilkinson analytical approximation + Monte Carlo refinement in boundary regions.
+4. **Kolmogorov–Smirnov with Lilliefors $p$-value** ($n \ge 5$): Dallal & Wilkinson (1986) analytical polynomial approximation + Monte Carlo refinement in boundary regions.
 
 ### 2.3 Outlier Detection (`Grubbs` & `ROUT`)
 - **Grubbs' ESD test** ($n \ge 3$, $\alpha$): $G = \max_i |x_i - \bar{x}| / s$, compared against critical value $G_{\text{crit}}(\alpha, n) = \frac{n-1}{\sqrt{n}} \sqrt{\frac{t^2_{\alpha/(2n), n-2}}{n - 2 + t^2_{\alpha/(2n), n-2}}}$. Single-outlier or iterative mode.
@@ -134,7 +143,7 @@ Supports both classic `Survival` sheets and `MultipleVariables` variable assignm
 
 ### 5.3 ROC Curves, Multiple Regression, PCA & Clustering
 - **ROC:** Empirical step curve across all distinct cutoffs, trapezoidal AUC, **Hanley–McNeil** and **DeLong** non-parametric SE & CIs, sensitivity/specificity/likelihood-ratio table with Youden's $J = \text{Sens} + \text{Spec} - 1$.
-- **Multiple Linear, Logistic & Poisson GLMs:** IRLS solver with full Type I / Type III ANOVA / Deviance tables (including categorical $\times$ categorical interaction blocks), VIF multicollinearity diagnostics, AICc, pseudo-$R^2$ (Tjur, McFadden, Nagelkerke), Hosmer–Lemeshow goodness-of-fit, classification confusion matrices, and ROC curves.
+- **Multiple Linear, Logistic & Poisson GLMs:** IRLS solver with configurable categorical **Reference-level contrast coding** (selecting reference level $r$ for a $K$-level predictor emits $K - 1$ named indicator columns `Var[Level vs. Ref]` in parameter and VIF tables), full Type I / Type III omnibus ANOVA / Deviance tables (including categorical $\times$ categorical interaction blocks), VIF multicollinearity diagnostics, AICc, pseudo-$R^2$ (Tjur, McFadden, Nagelkerke), Hosmer–Lemeshow goodness-of-fit, classification confusion matrices, and ROC curves.
 - **PCA & Clustering:** Mean-centered / standardized correlation or covariance SVD, Kaiser criterion ($\lambda > 1$), Horn's parallel analysis (Monte Carlo random eigenvalues via `lumencraft_math::rng`), scree/loading/biplot coordinates, plus K-means++ and agglomerative hierarchical clustering (alphabetical cluster label normalization for deterministic palette mapping).
 
 ---

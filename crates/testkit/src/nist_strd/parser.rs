@@ -10,6 +10,12 @@
 
 use std::fmt;
 
+/// Maximum input payload accepted by the NIST StRD ASCII parser (`16 MiB`).
+pub const MAX_STRD_BYTES: usize = 16 * 1024 * 1024;
+
+/// Maximum number of observation rows accepted in a single NIST StRD `.dat` file.
+pub const MAX_STRD_ROWS: usize = 1_000_000;
+
 /// NIST StRD numerical stiffness / ill-conditioning difficulty tier.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NistDifficulty {
@@ -25,6 +31,7 @@ pub enum StrdParseError {
     InvalidNumber { context: &'static str, token: String },
     EmptyDataSection,
     MalformedDataRow { line_number: usize, line: String },
+    InputTooLarge { kind: &'static str, actual: usize, max: usize },
 }
 
 impl fmt::Display for StrdParseError {
@@ -37,6 +44,9 @@ impl fmt::Display for StrdParseError {
             Self::EmptyDataSection => write!(f, "NIST StRD Data section contains no observations"),
             Self::MalformedDataRow { line_number, line } => {
                 write!(f, "malformed NIST StRD data row at line {line_number}: {line}")
+            }
+            Self::InputTooLarge { kind, actual, max } => {
+                write!(f, "NIST StRD {kind} ({actual}) exceeds maximum bound ({max})")
             }
         }
     }
@@ -114,11 +124,32 @@ fn normalize_fortran_float(token: &str) -> String {
 
 fn parse_f64_token(token: &str, context: &'static str) -> Result<f64, StrdParseError> {
     let cleaned = normalize_fortran_float(token.trim());
-    cleaned.parse::<f64>().map_err(|_| StrdParseError::InvalidNumber { context, token: token.to_owned() })
+    let value = cleaned.parse::<f64>().map_err(|_| StrdParseError::InvalidNumber { context, token: token.to_owned() })?;
+    if !value.is_finite() {
+        return Err(StrdParseError::InvalidNumber { context, token: token.to_owned() });
+    }
+    Ok(value)
 }
 
 fn parse_usize_token(token: &str, context: &'static str) -> Result<usize, StrdParseError> {
     token.trim().parse::<usize>().map_err(|_| StrdParseError::InvalidNumber { context, token: token.to_owned() })
+}
+
+fn parse_positive_group_token(token: &str, context: &'static str) -> Result<usize, StrdParseError> {
+    let trimmed = token.trim();
+    if let Ok(group) = trimmed.parse::<usize>() {
+        if group >= 1 {
+            return Ok(group);
+        }
+        return Err(StrdParseError::InvalidNumber { context, token: token.to_owned() });
+    }
+    // Accept exact positive integer floats (e.g. `1.0`, `2.0000000E+00`) while rejecting <= 0, fractional, NaN, or Inf.
+    const MAX_EXACT_F64_INT: f64 = 9_007_199_254_740_992.0; // 2^53
+    let value = parse_f64_token(trimmed, context)?;
+    if !(1.0..=MAX_EXACT_F64_INT).contains(&value) || value.fract() != 0.0 {
+        return Err(StrdParseError::InvalidNumber { context, token: token.to_owned() });
+    }
+    usize::try_from(value as u64).map_err(|_| StrdParseError::InvalidNumber { context, token: token.to_owned() })
 }
 
 fn extract_dataset_name(header: &str) -> Option<String> {
@@ -151,24 +182,61 @@ fn extract_difficulty(header: &str) -> NistDifficulty {
 type NumberedLine<'a> = (usize, &'a str);
 type SplitSections<'a> = (String, Vec<NumberedLine<'a>>);
 
+fn is_data_section_header(trimmed_lower: &str) -> bool {
+    let Some(rest) = trimmed_lower.strip_prefix("data:") else {
+        return false;
+    };
+    let rest = rest.trim();
+    if rest.is_empty() {
+        return true;
+    }
+    // Header Table-of-Contents entries look like `Data: (lines 61 to 81)` or `Data: y, x (line 61)`.
+    !rest.contains("lines ") && !rest.contains("(lines") && !rest.contains("(line") && !rest.starts_with("line ")
+}
+
+fn is_data_row_candidate(trimmed: &str) -> bool {
+    let Some(first) = trimmed.as_bytes().first() else {
+        return false;
+    };
+    if !(first.is_ascii_digit() || *first == b'-' || *first == b'+' || *first == b'.') {
+        return false;
+    }
+    // Skip decorative separator lines such as `----------` under `Data: Y` in univariate `.dat` files.
+    !trimmed.bytes().all(|b| b == b'-')
+}
+
 /// Split a NIST `.dat` file into `(header_lines, data_lines_with_1based_line_numbers)`.
 fn split_header_and_data(text: &str) -> Result<SplitSections<'_>, StrdParseError> {
-    let mut header = String::new();
-    let mut in_data = false;
-    let mut data_rows = Vec::new();
+    if text.len() > MAX_STRD_BYTES {
+        return Err(StrdParseError::InputTooLarge { kind: "input bytes", actual: text.len(), max: MAX_STRD_BYTES });
+    }
 
-    for (idx, line) in text.lines().enumerate() {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut last_data_idx = None;
+    for (idx, line) in lines.iter().enumerate() {
+        let lower = line.trim().to_ascii_lowercase();
+        if is_data_section_header(&lower) {
+            last_data_idx = Some(idx);
+        }
+    }
+    let Some(data_header_idx) = last_data_idx else {
+        return Err(StrdParseError::EmptyDataSection);
+    };
+
+    let mut header = String::new();
+    for line in lines.get(..data_header_idx).unwrap_or(&[]) {
+        header.push_str(line);
+        header.push('\n');
+    }
+
+    let mut data_rows = Vec::new();
+    for (offset, line) in lines.get(data_header_idx + 1..).unwrap_or(&[]).iter().enumerate() {
         let trimmed = line.trim();
-        if !in_data {
-            let lower = trimmed.to_ascii_lowercase();
-            if lower == "data:" || lower.starts_with("data:") && !lower.contains("lines ") || (lower.starts_with("data:") && lower.contains("line")) {
-                in_data = true;
-                continue;
+        if is_data_row_candidate(trimmed) {
+            if data_rows.len() >= MAX_STRD_ROWS {
+                return Err(StrdParseError::InputTooLarge { kind: "data rows", actual: data_rows.len().saturating_add(1), max: MAX_STRD_ROWS });
             }
-            header.push_str(line);
-            header.push('\n');
-        } else if !trimmed.is_empty() && trimmed.as_bytes().first().is_some_and(|b| b.is_ascii_digit() || *b == b'-' || *b == b'+' || *b == b'.') {
-            data_rows.push((idx + 1, trimmed));
+            data_rows.push((data_header_idx + 2 + offset, trimmed));
         }
     }
 
@@ -213,83 +281,144 @@ pub fn parse_univariate_dat(text: &str) -> Result<UnivariateDataset, StrdParseEr
     Ok(UnivariateDataset { name, difficulty, certified_mean, certified_sd, certified_r1, values })
 }
 
-/// Parse a NIST StRD One-Way ANOVA `.dat` file (`SmLs01`-`SmLs09`, `AtmWtAg`, `SiRstv`).
-///
-/// # Errors
-/// Returns [`StrdParseError`] if certified ANOVA table entries or `(group, y)` rows are malformed.
-pub fn parse_anova_dat(text: &str) -> Result<AnovaDataset, StrdParseError> {
-    let (header, data_rows) = split_header_and_data(text)?;
-    let name = extract_dataset_name(&header).ok_or(StrdParseError::MissingField("Dataset Name"))?;
-    let difficulty = extract_difficulty(&header);
+struct AnovaHeaderSummary {
+    df_between: usize,
+    ss_between: f64,
+    f_stat: f64,
+    df_within: usize,
+    ss_within: f64,
+    r_squared: f64,
+    residual_sd: f64,
+}
 
+fn parse_anova_header_summary(header: &str) -> Result<AnovaHeaderSummary, StrdParseError> {
     let mut between: Option<(usize, f64, f64)> = None;
     let mut within: Option<(usize, f64)> = None;
     let mut r_squared: Option<f64> = None;
     let mut residual_sd: Option<f64> = None;
+    let mut pending_residual_prefix = false;
 
     for line in header.lines() {
         let lower = line.trim().to_ascii_lowercase();
+        if lower.is_empty() {
+            continue;
+        }
         if lower.starts_with("between") {
             let nums = trailing_tokens(line, 4).ok_or(StrdParseError::MissingField("Between Treatments row"))?;
-            let df = parse_usize_token(nums[0], "df_between")?;
-            let ss = parse_f64_token(nums[1], "ss_between")?;
-            let f_stat = parse_f64_token(nums[3], "certified_f")?;
-            between = Some((df, ss, f_stat));
+            let [df_tok, ss_tok, _, f_tok] = nums.as_slice() else {
+                return Err(StrdParseError::MissingField("Between Treatments row"));
+            };
+            between =
+                Some((parse_usize_token(df_tok, "df_between")?, parse_f64_token(ss_tok, "ss_between")?, parse_f64_token(f_tok, "certified_f")?));
         } else if lower.starts_with("within") {
             let nums = trailing_tokens(line, 3).ok_or(StrdParseError::MissingField("Within Treatments row"))?;
-            let df = parse_usize_token(nums[0], "df_within")?;
-            let ss = parse_f64_token(nums[1], "ss_within")?;
-            within = Some((df, ss));
+            let [df_tok, ss_tok, _] = nums.as_slice() else {
+                return Err(StrdParseError::MissingField("Within Treatments row"));
+            };
+            within = Some((parse_usize_token(df_tok, "df_within")?, parse_f64_token(ss_tok, "ss_within")?));
         } else if lower.contains("r-squared") {
             if let Some(tok) = line.split_whitespace().last()
                 && let Ok(v) = parse_f64_token(tok, "r_squared")
             {
                 r_squared = Some(v);
             }
-        } else if lower.contains("residual standard deviation")
+        } else if (lower.contains("residual standard deviation") || (pending_residual_prefix && lower.starts_with("standard deviation")))
             && let Some(tok) = line.split_whitespace().last()
             && let Ok(v) = parse_f64_token(tok, "residual_sd")
         {
             residual_sd = Some(v);
         }
+        pending_residual_prefix = lower == "certified residual" || lower == "residual";
     }
 
-    let (certified_df_between, certified_ss_between, certified_f) = between.ok_or(StrdParseError::MissingField("Between Treatments"))?;
-    let (certified_df_within, certified_ss_within) = within.ok_or(StrdParseError::MissingField("Within Treatments"))?;
-    let certified_r_squared = r_squared.ok_or(StrdParseError::MissingField("R-Squared"))?;
-    let certified_residual_sd = residual_sd.ok_or(StrdParseError::MissingField("Residual Standard Deviation"))?;
+    let (df_between, ss_between, f_stat) = between.ok_or(StrdParseError::MissingField("Between Treatments"))?;
+    let (df_within, ss_within) = within.ok_or(StrdParseError::MissingField("Within Treatments"))?;
+    Ok(AnovaHeaderSummary {
+        df_between,
+        ss_between,
+        f_stat,
+        df_within,
+        ss_within,
+        r_squared: r_squared.ok_or(StrdParseError::MissingField("R-Squared"))?,
+        residual_sd: residual_sd.ok_or(StrdParseError::MissingField("Residual Standard Deviation"))?,
+    })
+}
 
-    let mut observations = Vec::with_capacity(data_rows.len());
-    for (line_number, row) in data_rows {
-        let parts: Vec<&str> = row.split_whitespace().collect();
-        if parts.len() < 2 {
-            return Err(StrdParseError::MalformedDataRow { line_number, line: row.to_owned() });
-        }
-        let group = parse_f64_token(parts[0], "anova group")? as usize;
-        let response = parse_f64_token(parts[1], "anova response")?;
-        observations.push((group, response));
+/// Parse a NIST StRD One-Way ANOVA `.dat` file (`SmLs01`-`SmLs09`, `AtmWtAg`, `SiRstv`).
+///
+/// NIST StRD ANOVA `.dat` files may store `(group, response)` (`Data: Treatment  Response`) or
+/// `(response, group)` (`Data: y  x`) in each data row; this parser normalizes both into
+/// `observations: Vec<(group, response)>` (`group >= 1`).
+///
+/// # Errors
+/// Returns [`StrdParseError`] if certified ANOVA table entries or `(y, group)` rows are malformed.
+pub fn parse_anova_dat(text: &str) -> Result<AnovaDataset, StrdParseError> {
+    let (header, data_rows) = split_header_and_data(text)?;
+    let name = extract_dataset_name(&header).ok_or(StrdParseError::MissingField("Dataset Name"))?;
+    let difficulty = extract_difficulty(&header);
+    let summary = parse_anova_header_summary(&header)?;
+
+    let expected_groups = summary.df_between.saturating_add(1);
+    let mut observations = parse_anova_rows(&data_rows, false);
+    let needs_group_first = match &observations {
+        Err(_) => true,
+        Ok(obs) => !anova_groups_cover_range(obs, expected_groups),
+    };
+    if needs_group_first
+        && let Ok(alt) = parse_anova_rows(&data_rows, true)
+        && anova_groups_cover_range(&alt, expected_groups)
+    {
+        observations = Ok(alt);
     }
+    let observations = observations?;
 
     Ok(AnovaDataset {
         name,
         difficulty,
-        certified_df_between,
-        certified_df_within,
-        certified_ss_between,
-        certified_ss_within,
-        certified_f,
-        certified_r_squared,
-        certified_residual_sd,
+        certified_df_between: summary.df_between,
+        certified_df_within: summary.df_within,
+        certified_ss_between: summary.ss_between,
+        certified_ss_within: summary.ss_within,
+        certified_f: summary.f_stat,
+        certified_r_squared: summary.r_squared,
+        certified_residual_sd: summary.residual_sd,
         observations,
     })
 }
 
+fn parse_anova_rows(data_rows: &[NumberedLine<'_>], group_first: bool) -> Result<Vec<(usize, f64)>, StrdParseError> {
+    let mut observations = Vec::with_capacity(data_rows.len());
+    for &(line_number, row) in data_rows {
+        let parts: Vec<&str> = row.split_whitespace().collect();
+        let [col0, col1, ..] = parts.as_slice() else {
+            return Err(StrdParseError::MalformedDataRow { line_number, line: row.to_owned() });
+        };
+        let (group_tok, y_tok) = if group_first { (col0, col1) } else { (col1, col0) };
+        let group = parse_positive_group_token(group_tok, "anova group")?;
+        let response = parse_f64_token(y_tok, "anova response")?;
+        observations.push((group, response));
+    }
+    Ok(observations)
+}
+
+fn anova_groups_cover_range(observations: &[(usize, f64)], expected_groups: usize) -> bool {
+    if expected_groups == 0 || observations.is_empty() {
+        return false;
+    }
+    let mut seen = vec![false; expected_groups];
+    for &(group, _) in observations {
+        let Some(slot) = group.checked_sub(1).and_then(|idx| seen.get_mut(idx)) else {
+            return false;
+        };
+        *slot = true;
+    }
+    seen.into_iter().all(|present| present)
+}
+
 fn trailing_tokens(line: &str, count: usize) -> Option<Vec<&str>> {
     let all: Vec<&str> = line.split_whitespace().collect();
-    if all.len() < count {
-        return None;
-    }
-    Some(all[all.len() - count..].to_vec())
+    let start = all.len().checked_sub(count)?;
+    all.get(start..).map(<[&str]>::to_vec)
 }
 
 fn is_beta_param_label(tok: &str) -> Option<usize> {
@@ -310,44 +439,51 @@ struct LinearHeaderSummary {
     f_stat: Option<f64>,
 }
 
+#[derive(Default)]
+struct LinearSummaryAccum {
+    residual_sd: Option<f64>,
+    r_squared: Option<f64>,
+    reg_row: Option<(usize, f64, Option<f64>)>,
+    res_row: Option<(usize, f64)>,
+    pending_residual_prefix: bool,
+}
+
 fn parse_linear_header_summary(header: &str) -> Result<LinearHeaderSummary, StrdParseError> {
     let mut has_b0 = false;
     let mut betas = Vec::new();
     let mut se_betas = Vec::new();
-    let mut residual_sd: Option<f64> = None;
-    let mut r_squared: Option<f64> = None;
-    let mut reg_row: Option<(usize, f64, Option<f64>)> = None;
-    let mut res_row: Option<(usize, f64)> = None;
+    let mut acc = LinearSummaryAccum::default();
 
     for line in header.lines() {
         let tokens: Vec<&str> = line.split_whitespace().collect();
-        if tokens.len() == 3
-            && let Some(idx) = is_beta_param_label(tokens[0])
-            && let Ok(est) = parse_f64_token(tokens[1], "beta")
+        if let [label_tok, est_tok, se_tok] = tokens.as_slice()
+            && let Some(idx) = is_beta_param_label(label_tok)
+            && let Ok(est) = parse_f64_token(est_tok, "beta")
         {
-            let se = if tokens[2].eq_ignore_ascii_case("exact") { 0.0 } else { parse_f64_token(tokens[2], "se_beta")? };
+            let se = if se_tok.eq_ignore_ascii_case("exact") { 0.0 } else { parse_f64_token(se_tok, "se_beta")? };
             if idx == 0 {
                 has_b0 = true;
             }
             betas.push(est);
             se_betas.push(se);
+            acc.pending_residual_prefix = false;
             continue;
         }
-        parse_linear_summary_line(line, &mut residual_sd, &mut r_squared, &mut reg_row, &mut res_row)?;
+        parse_linear_summary_line(line, &mut acc)?;
     }
 
     if betas.is_empty() {
         return Err(StrdParseError::MissingField("Certified Parameter Estimates (B0/B1...)"));
     }
-    let (df_reg, ss_reg, f_stat) = reg_row.ok_or(StrdParseError::MissingField("Model/Regression ANOVA row"))?;
-    let (df_res, ss_res) = res_row.ok_or(StrdParseError::MissingField("Residual ANOVA row"))?;
+    let (df_reg, ss_reg, f_stat) = acc.reg_row.ok_or(StrdParseError::MissingField("Model/Regression ANOVA row"))?;
+    let (df_res, ss_res) = acc.res_row.ok_or(StrdParseError::MissingField("Residual ANOVA row"))?;
 
     Ok(LinearHeaderSummary {
         has_intercept: has_b0,
         betas,
         se_betas,
-        residual_sd: residual_sd.ok_or(StrdParseError::MissingField("Residual Standard Deviation"))?,
-        r_squared: r_squared.ok_or(StrdParseError::MissingField("R-Squared"))?,
+        residual_sd: acc.residual_sd.ok_or(StrdParseError::MissingField("Residual Standard Deviation"))?,
+        r_squared: acc.r_squared.ok_or(StrdParseError::MissingField("R-Squared"))?,
         df_reg,
         df_res,
         ss_reg,
@@ -356,39 +492,37 @@ fn parse_linear_header_summary(header: &str) -> Result<LinearHeaderSummary, Strd
     })
 }
 
-fn parse_linear_summary_line(
-    line: &str,
-    residual_sd: &mut Option<f64>,
-    r_squared: &mut Option<f64>,
-    reg_row: &mut Option<(usize, f64, Option<f64>)>,
-    res_row: &mut Option<(usize, f64)>,
-) -> Result<(), StrdParseError> {
+fn parse_linear_summary_line(line: &str, acc: &mut LinearSummaryAccum) -> Result<(), StrdParseError> {
     let lower = line.trim().to_ascii_lowercase();
-    if lower.starts_with("residual standard deviation") {
+    if lower.is_empty() {
+        return Ok(());
+    }
+    if lower.starts_with("residual standard deviation") || (acc.pending_residual_prefix && lower.starts_with("standard deviation")) {
         if let Some(last) = line.split_whitespace().last() {
-            *residual_sd = Some(parse_f64_token(last, "residual_sd")?);
+            acc.residual_sd = Some(parse_f64_token(last, "residual_sd")?);
         }
     } else if lower.starts_with("r-squared") {
         if let Some(last) = line.split_whitespace().last() {
-            *r_squared = Some(parse_f64_token(last, "r_squared")?);
+            acc.r_squared = Some(parse_f64_token(last, "r_squared")?);
         }
     } else if lower.starts_with("regression") || lower.starts_with("model") {
         let toks: Vec<&str> = line.split_whitespace().collect();
-        if toks.len() >= 5 {
-            let df = parse_usize_token(toks[1], "df_reg")?;
-            let ss = parse_f64_token(toks[2], "ss_reg")?;
-            let f_val = if toks[4].eq_ignore_ascii_case("infinity") { Some(f64::INFINITY) } else { parse_f64_token(toks[4], "f_stat").ok() };
-            *reg_row = Some((df, ss, f_val));
+        if let [_, df_tok, ss_tok, _, f_tok, ..] = toks.as_slice() {
+            let df = parse_usize_token(df_tok, "df_reg")?;
+            let ss = parse_f64_token(ss_tok, "ss_reg")?;
+            let f_val = if f_tok.eq_ignore_ascii_case("infinity") { Some(f64::INFINITY) } else { parse_f64_token(f_tok, "f_stat").ok() };
+            acc.reg_row = Some((df, ss, f_val));
         }
     } else if lower.starts_with("residual") {
         let toks: Vec<&str> = line.split_whitespace().collect();
-        if toks.len() >= 4
-            && let Ok(df) = parse_usize_token(toks[1], "df_res")
-            && let Ok(ss) = parse_f64_token(toks[2], "ss_res")
+        if let [_, df_tok, ss_tok, _, ..] = toks.as_slice()
+            && let Ok(df) = parse_usize_token(df_tok, "df_res")
+            && let Ok(ss) = parse_f64_token(ss_tok, "ss_res")
         {
-            *res_row = Some((df, ss));
+            acc.res_row = Some((df, ss));
         }
     }
+    acc.pending_residual_prefix = lower == "residual" || lower == "certified residual";
     Ok(())
 }
 
@@ -411,11 +545,14 @@ pub fn parse_linear_regression_dat(text: &str) -> Result<LinearRegressionDataset
 
     for (line_number, row) in data_rows {
         let parts: Vec<&str> = row.split_whitespace().collect();
-        if parts.len() < 2 {
+        let [y_tok, x_toks @ ..] = parts.as_slice() else {
+            return Err(StrdParseError::MalformedDataRow { line_number, line: row.to_owned() });
+        };
+        if x_toks.is_empty() {
             return Err(StrdParseError::MalformedDataRow { line_number, line: row.to_owned() });
         }
-        y.push(parse_f64_token(parts[0], "linear y")?);
-        let raw_x: Result<Vec<f64>, StrdParseError> = parts[1..].iter().map(|t| parse_f64_token(t, "linear x")).collect();
+        y.push(parse_f64_token(y_tok, "linear y")?);
+        let raw_x: Result<Vec<f64>, StrdParseError> = x_toks.iter().map(|t| parse_f64_token(t, "linear x")).collect();
         let raw_x = raw_x?;
 
         let design_row = expand_linear_design_row(&raw_x, summary.has_intercept, p, line_number, row)?;
@@ -457,8 +594,7 @@ fn expand_linear_design_row(
         return Ok(row);
     }
     // Single-predictor polynomial model: [1, x, x^2, ..., x^d] (or [x, x^2, ..., x^p] without intercept).
-    if raw_x.len() == 1 {
-        let x = raw_x[0];
+    if let &[x] = raw_x {
         let mut row = Vec::with_capacity(target_p);
         let start_pow = i32::from(!has_intercept);
         for k in 0..target_p {
@@ -492,14 +628,15 @@ pub fn parse_nonlinear_dat(text: &str) -> Result<NonlinearDataset, StrdParseErro
         let parts: Vec<&str> = trimmed.split_whitespace().collect();
         // Parameter rows look like: `b1 = 500.0  250.0  2.3894212918E+02  1.2156585877E+01` or without `=`.
         if (parts.len() == 5 || parts.len() == 6)
-            && is_beta_param_label(parts[0]).is_some()
-            && let Some(nums) = extract_nonlinear_param_numbers(&parts)
+            && let Some(&first) = parts.first()
+            && is_beta_param_label(first).is_some()
+            && let Some([s1, s2, cb, cse]) = extract_nonlinear_param_numbers(&parts)
         {
-            param_names.push(parts[0].to_owned());
-            start_1.push(nums[0]);
-            start_2.push(nums[1]);
-            certified_betas.push(nums[2]);
-            certified_se_betas.push(nums[3]);
+            param_names.push(first.to_owned());
+            start_1.push(s1);
+            start_2.push(s2);
+            certified_betas.push(cb);
+            certified_se_betas.push(cse);
             continue;
         }
         let lower = trimmed.to_ascii_lowercase();
@@ -526,11 +663,14 @@ pub fn parse_nonlinear_dat(text: &str) -> Result<NonlinearDataset, StrdParseErro
     let mut predictors = Vec::with_capacity(data_rows.len());
     for (line_number, row) in data_rows {
         let parts: Vec<&str> = row.split_whitespace().collect();
-        if parts.len() < 2 {
+        let [y_tok, pred_toks @ ..] = parts.as_slice() else {
+            return Err(StrdParseError::MalformedDataRow { line_number, line: row.to_owned() });
+        };
+        if pred_toks.is_empty() {
             return Err(StrdParseError::MalformedDataRow { line_number, line: row.to_owned() });
         }
-        y.push(parse_f64_token(parts[0], "nonlinear y")?);
-        let preds: Result<Vec<f64>, StrdParseError> = parts[1..].iter().map(|t| parse_f64_token(t, "nonlinear predictor")).collect();
+        y.push(parse_f64_token(y_tok, "nonlinear y")?);
+        let preds: Result<Vec<f64>, StrdParseError> = pred_toks.iter().map(|t| parse_f64_token(t, "nonlinear predictor")).collect();
         predictors.push(preds?);
     }
 
@@ -552,28 +692,35 @@ pub fn parse_nonlinear_dat(text: &str) -> Result<NonlinearDataset, StrdParseErro
 
 fn extract_nonlinear_param_numbers(parts: &[&str]) -> Option<[f64; 4]> {
     let tail = if parts.get(1) == Some(&"=") { parts.get(2..6)? } else { parts.get(1..5)? };
+    let [s1, s2, cb, cse] = tail else {
+        return None;
+    };
     Some([
-        parse_f64_token(tail[0], "start_1").ok()?,
-        parse_f64_token(tail[1], "start_2").ok()?,
-        parse_f64_token(tail[2], "certified_beta").ok()?,
-        parse_f64_token(tail[3], "certified_se").ok()?,
+        parse_f64_token(s1, "start_1").ok()?,
+        parse_f64_token(s2, "start_2").ok()?,
+        parse_f64_token(cb, "certified_beta").ok()?,
+        parse_f64_token(cse, "certified_se").ok()?,
     ])
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{NistDifficulty, parse_anova_dat, parse_linear_regression_dat, parse_nonlinear_dat, parse_univariate_dat};
+    use super::{
+        MAX_STRD_BYTES, NistDifficulty, StrdParseError, parse_anova_dat, parse_linear_regression_dat, parse_nonlinear_dat, parse_univariate_dat,
+    };
 
     #[test]
     fn parses_all_four_nist_strd_ascii_formats() {
         let uni_dat = "\
 Dataset Name:  NumAcc1            (NumAcc1.dat)
+File Format:   ASCII
+               Data:              (lines 12 to 14)
 Level of Difficulty:  Lower
 Certified Values:
  Sample Mean                        : 10000002.0
  Sample Standard Deviation          :        1.0
  Sample Autocorrelation Coefficient :        0.0
-Data:
+Data:  y
  10000001
  10000002
  10000003
@@ -585,25 +732,31 @@ Data:
 
         let anova_dat = "\
 Dataset Name:  MiniAnova          (MiniAnova.dat)
+File Format:   ASCII
+               Certified Values:  (lines 6 to 10)
+               Data: y, x         (lines 12 to 17)
 Level of Difficulty:  Higher
 Certified Analysis of Variance Table:
 Between Treatments   1   4.00000000000000E+00   4.00000000000000E+00   4.00000000000000E+00
 Within Treatments    4   4.00000000000000E+00   1.00000000000000E+00
 R-Squared: 5.00000000000000E-01
 Residual Standard Deviation: 1.00000000000000E+00
-Data:
- 1  10000000.0
- 1  10000001.0
- 1  10000002.0
- 2  10000002.0
- 2  10000003.0
- 2  10000004.0
+Data:  y          x
+ 10000000.0   1
+ 10000001.0   1
+ 10000002.0   1
+ 10000002.0   2
+ 10000003.0   2
+ 10000004.0   2.0
 ";
         let anova = parse_anova_dat(anova_dat).unwrap();
         assert_eq!(anova.difficulty, NistDifficulty::Higher);
         assert_eq!(anova.certified_df_between, 1);
         assert_eq!(anova.certified_df_within, 4);
-        assert_eq!(anova.observations.len(), 6);
+        assert_eq!(
+            anova.observations,
+            vec![(1, 10_000_000.0), (1, 10_000_001.0), (1, 10_000_002.0), (2, 10_000_002.0), (2, 10_000_003.0), (2, 10_000_004.0),]
+        );
 
         let lin_dat = "\
 Dataset Name:  Wampler1           (Wampler1.dat)
@@ -642,5 +795,30 @@ Data:
         assert_eq!(nl.param_names, vec!["b1", "b2"]);
         assert_eq!(nl.certified_df, 12);
         assert_eq!(nl.predictors.len(), 2);
+    }
+
+    #[test]
+    fn anova_parser_rejects_invalid_group_labels_and_oversized_inputs() {
+        let base_header = "\
+Dataset Name:  BadAnova           (BadAnova.dat)
+Level of Difficulty:  Lower
+Certified Analysis of Variance Table:
+Between Treatments   1   4.0   4.0   4.0
+Within Treatments    4   4.0   1.0
+R-Squared: 0.5
+Residual Standard Deviation: 1.0
+Data:  y   x
+";
+        for bad_group in ["0", "-1", "1.5", "NaN", "inf"] {
+            let text = format!("{base_header} 10.0   {bad_group}\n");
+            let err = parse_anova_dat(&text).unwrap_err();
+            assert!(
+                matches!(err, StrdParseError::InvalidNumber { context: "anova group", .. }),
+                "expected InvalidNumber for {bad_group}, got {err:?}"
+            );
+        }
+
+        let oversized = "x".repeat(MAX_STRD_BYTES + 1);
+        assert!(matches!(parse_univariate_dat(&oversized), Err(StrdParseError::InputTooLarge { kind: "input bytes", .. })));
     }
 }

@@ -5,5 +5,8 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
+[dependencies]
+lumencraft-testkit = { workspace = true }
+
 [lints]
 workspace = true

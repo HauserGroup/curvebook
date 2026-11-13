@@ -6,11 +6,11 @@ use lumencraft_palette::Rgba8;
 use crate::TableKind;
 use crate::archetypes::{CellCoord, TableArchetype, default_column_label};
 use crate::cell::{Cell, SubcolumnMode};
-use crate::error::{DocError, validate_subcolumns, validate_title};
+use crate::error::{DocError, MAX_SUBCOLUMNS, validate_subcolumns, validate_title};
 use crate::ids::{FloatingNote, SheetId};
 
 /// Inclusive rectangular sub-grid range `(start ..= end)` inside a data or result sheet.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct SheetCellRange {
     pub start: CellCoord,
     pub end: CellCoord,
@@ -24,7 +24,7 @@ impl SheetCellRange {
 }
 
 /// Classification of an internal upstream sheet referenced by a live [`LinkedDataRegion`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum InternalLinkKind {
     /// Upstream `DataSheet` cell range (rendered with a blue provenance border).
     DataSheet,
@@ -36,7 +36,7 @@ pub enum InternalLinkKind {
 
 /// Provenance border colour rendered around a [`LinkedDataRegion`] in the spreadsheet grid
 /// (`docs/data-tables-and-transforms.md` §6.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LinkBorderColor {
     /// Live link to an internal `DataSheet` cell range.
     Blue,
@@ -49,7 +49,7 @@ pub enum LinkBorderColor {
 }
 
 /// Stage 1 of [`ImportLinkSpec`]: data origin (`docs/data-tables-and-transforms.md` §6.1).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LinkSource {
     Clipboard,
     InternalSheet { sheet_id: SheetId, kind: InternalLinkKind, tab_id: Option<String>, range: SheetCellRange },
@@ -80,7 +80,7 @@ impl LinkSource {
 }
 
 /// Stage 2 of [`ImportLinkSpec`]: slicing, periodic decimation, unstacking, and `*` exclusion parsing.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportFilterSpec {
     pub row_window: Option<(usize, usize)>,
     pub col_window: Option<(usize, usize)>,
@@ -96,7 +96,7 @@ impl Default for ImportFilterSpec {
 }
 
 /// Placement mode at anchor cell `(row, col, subcol)`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PlacementMode {
     #[default]
     Overwrite,
@@ -107,7 +107,7 @@ pub enum PlacementMode {
 
 /// Stage 3 of [`ImportLinkSpec`]: placement anchor, blank-skipping, header promotion, and reactive
 /// transposition (`Grouped` <-> `Column`; `docs/data-tables-and-transforms.md` §6.3).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ImportPlacementSpec {
     pub mode: PlacementMode,
     pub anchor: CellCoord,
@@ -117,7 +117,7 @@ pub struct ImportPlacementSpec {
 }
 
 /// Complete four-stage `Import & Paste Special` / `Paste Link` specification.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportLinkSpec {
     pub source: LinkSource,
     pub filter: ImportFilterSpec,
@@ -125,7 +125,7 @@ pub struct ImportLinkSpec {
 }
 
 /// Live provenance-tracked cell region embedded inside a [`DataSheet`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkedDataRegion {
     pub id: String,
     pub spec: ImportLinkSpec,
@@ -143,7 +143,7 @@ impl LinkedDataRegion {
 
 /// Project data-table sheet pairing metadata, freeze state, live linked regions, and floating notes
 /// with one of the eight [`TableArchetype`] schemas (`docs/data-tables-and-transforms.md` §1).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DataSheet {
     pub id: SheetId,
     pub title: String,
@@ -223,6 +223,34 @@ impl DataSheet {
         Ok(())
     }
 
+    /// Read an independent `X` (`Xy`) or elapsed-time (`Survival`, `subcol == 0`) cell.
+    #[must_use]
+    pub fn x_or_time_cell(&self, row: usize, subcol: usize) -> Option<&Cell> {
+        self.archetype.x_or_time_cell(row, subcol)
+    }
+
+    /// Mutate an independent `X` (`Xy`) or elapsed-time (`Survival`, `subcol == 0`) cell
+    /// (enforces freeze state and bounds).
+    pub fn set_x_or_time_cell(&mut self, row: usize, subcol: usize, cell: Cell) -> Result<(), DocError> {
+        self.ensure_mutable()?;
+        let Some(slot) = self.archetype.x_or_time_cell_mut(row, subcol) else {
+            return Err(DocError::CellOutOfBounds { row, col: 0, subcol });
+        };
+        *slot = cell;
+        Ok(())
+    }
+
+    /// Non-destructively set or clear the exclusion mask on an independent `X` (`Xy`) or
+    /// elapsed-time (`Survival`, `subcol == 0`) cell.
+    pub fn set_x_or_time_excluded(&mut self, row: usize, subcol: usize, excluded: bool) -> Result<(), DocError> {
+        self.ensure_mutable()?;
+        let Some(slot) = self.archetype.x_or_time_cell_mut(row, subcol) else {
+            return Err(DocError::CellOutOfBounds { row, col: 0, subcol });
+        };
+        slot.excluded = excluded;
+        Ok(())
+    }
+
     /// Attach a live [`LinkedDataRegion`] to this sheet (enforces freeze state).
     pub fn add_linked_region(&mut self, region: LinkedDataRegion) -> Result<(), DocError> {
         self.ensure_mutable()?;
@@ -231,24 +259,39 @@ impl DataSheet {
     }
 
     /// Extract a 2D slice of cells `[row][flat_subcol]` across inclusive `range` (`start ..= end`),
-    /// preserving raw values and `excluded` masks losslessly for cross-table `Paste Link`.
+    /// clamped safely against sheet dimensions and preserving raw values and `excluded` masks
+    /// losslessly for cross-table `Paste Link`.
     #[must_use]
     pub fn extract_cell_grid(&self, range: SheetCellRange) -> Vec<Vec<Cell>> {
-        if range.end.row < range.start.row || range.end.col < range.start.col {
+        let row_count = self.archetype.row_count();
+        let col_count = self.archetype.column_count();
+        if row_count == 0
+            || col_count == 0
+            || range.end.row < range.start.row
+            || range.end.col < range.start.col
+            || range.start.row >= row_count
+            || range.start.col >= col_count
+        {
             return Vec::new();
         }
-        let mut out = Vec::with_capacity(range.end.row.saturating_sub(range.start.row).saturating_add(1));
-        for r in range.start.row..=range.end.row {
+        let end_row = range.end.row.min(row_count - 1);
+        let end_col = range.end.col.min(col_count - 1);
+        let mut out = Vec::with_capacity(end_row - range.start.row + 1);
+        for r in range.start.row..=end_row {
             let mut row_cells = Vec::new();
-            for c in range.start.col..=range.end.col {
+            for c in range.start.col..=end_col {
+                let max_sub = subcolumn_upper_index(&self.archetype, c);
                 let s_min = if c == range.start.col { range.start.subcol } else { 0 };
-                let s_max = if c == range.end.col { range.end.subcol } else { subcolumn_upper_index(&self.archetype, c) };
+                let s_max = if c == range.end.col { range.end.subcol.min(max_sub) } else { max_sub };
                 if s_max < s_min {
                     continue;
                 }
                 for s in s_min..=s_max {
                     row_cells.push(self.cell(CellCoord::new(r, c, s)).cloned().unwrap_or_default());
                 }
+            }
+            if row_cells.is_empty() {
+                return Vec::new();
             }
             out.push(row_cells);
         }
@@ -279,7 +322,7 @@ impl DataSheet {
 }
 
 /// Options for [`DataSheet::clone_structure`] (`sheet.clonePipeline`).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CloneDataSheetOptions {
     pub title: String,
     pub keep_x_values: bool,
@@ -310,13 +353,14 @@ pub fn transpose_cell_grid(grid: &[Vec<Cell>]) -> Vec<Vec<Cell>> {
 }
 
 fn subcolumn_upper_index(arch: &TableArchetype, col: usize) -> usize {
-    match arch {
-        TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count().saturating_sub(1),
-        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count().saturating_sub(1),
-        TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count().saturating_sub(1),
-        TableArchetype::Nested(t) => t.groups.get(col).map_or(0, |g| g.biological_unit_count().saturating_sub(1)),
-        TableArchetype::Contingency(_) | TableArchetype::Survival(_) | TableArchetype::PartsOfWhole(_) | TableArchetype::MultipleVariables(_) => 0,
-    }
+    let count = match arch {
+        TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
+        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Nested(t) => t.groups.get(col).map_or(0, |g| g.biological_unit_count()),
+        TableArchetype::Contingency(_) | TableArchetype::Survival(_) | TableArchetype::PartsOfWhole(_) | TableArchetype::MultipleVariables(_) => 1,
+    };
+    count.min(MAX_SUBCOLUMNS).saturating_sub(1)
 }
 
 fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) -> Result<(), DocError> {

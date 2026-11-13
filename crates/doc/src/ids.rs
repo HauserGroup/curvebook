@@ -9,7 +9,8 @@ use crate::error::DocError;
 
 /// Stable project-unique identifier for a `DataSheet`, `InfoSheet`, `ResultSheet`, `GraphSheet`,
 /// or `LayoutSheet`.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct SheetId(String);
 
 impl SheetId {
@@ -54,7 +55,8 @@ impl From<String> for SheetId {
 }
 
 /// Stable identifier for a [`FloatingNote`] callout attached to a sheet.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct NoteId(String);
 
 impl NoteId {
@@ -76,7 +78,7 @@ impl fmt::Display for NoteId {
 }
 
 /// 2D physical size in typographic points (`1 pt = 1/72 in`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SizePt {
     pub width: f64,
     pub height: f64,
@@ -96,7 +98,7 @@ impl Default for SizePt {
 }
 
 /// Axis-aligned rectangle in typographic points (`1 pt = 1/72 in`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RectPt {
     pub x: f64,
     pub y: f64,
@@ -118,7 +120,7 @@ impl RectPt {
 
 /// Collapsible rich-text sticky note attachable to any sheet in a project
 /// (`docs/data-tables-and-transforms.md` §3).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FloatingNote {
     pub id: NoteId,
     pub fill_color: Rgba8,
@@ -139,7 +141,7 @@ impl FloatingNote {
 
 /// Upstream source for a hooked constant used in regression parameter constraints, normalization
 /// anchors, or dynamic figure/layout text spans (`{{info:...}}`, `{{result:...}}`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HookSource {
     /// Named constant on an `InfoSheet` (`info_sheet_id: None` resolves the paired or primary info sheet).
     InfoConstant { info_sheet_id: Option<SheetId>, constant_name: String },

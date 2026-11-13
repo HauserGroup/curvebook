@@ -11,7 +11,7 @@ use crate::ids::{FloatingNote, SheetId};
 pub const STANDARD_INFO_KEYS: [&str; 6] = ["Experiment Date", "Experiment ID", "Notebook ID", "Project", "Experimenter", "Protocol"];
 
 /// Typed value stored in an [`InfoConstant`] row.
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ConstantValue {
     #[default]
     Empty,
@@ -46,7 +46,7 @@ impl ConstantValue {
 }
 
 /// Structured key–value constant on an [`InfoSheet`] (`docs/data-tables-and-transforms.md` §3).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InfoConstant {
     pub name: String,
     pub value: ConstantValue,
@@ -69,7 +69,7 @@ impl InfoConstant {
 
 /// Two-pane laboratory metadata and experimental notes sheet paired with (or shared across) one or
 /// more [`crate::DataSheet`]s.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InfoSheet {
     pub id: SheetId,
     pub title: String,

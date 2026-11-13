@@ -9,7 +9,7 @@ use crate::cell::{Cell, CellValue, ReplicateStacking, SubcolumnMode, SummarizedP
 use crate::error::{DocError, SummaryPointError, validate_data_sets, validate_rows, validate_subcolumns, validate_title};
 
 /// Zero-based 3D cell address `(row, col, subcol)` inside a data table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct CellCoord {
     pub row: usize,
     pub col: usize,
@@ -40,7 +40,7 @@ pub fn default_column_label(mut index: usize) -> String {
 }
 
 /// Named data-set column (`A`, `B`, ...) storing `[row][subcolumn]` cells.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DataSetColumn {
     pub title: String,
     pub cells: Vec<Vec<Cell>>,
@@ -91,7 +91,7 @@ impl DataSetColumn {
 // ============================================================================
 
 /// Progression rule for generated X sequences (`X0`, `Delta X`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SequenceProgression {
     /// `X_r = start + r * step`.
     #[default]
@@ -101,7 +101,7 @@ pub enum SequenceProgression {
 }
 
 /// Independent X-column configuration for an [`XyTable`] (`docs/data-tables-and-transforms.md` §2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum XColumnMode {
     /// Explicit numeric X coordinates with optional error subcolumns (`Single`, `MeanSdN`, etc.).
     Numbers { subcolumn_mode: SubcolumnMode },
@@ -129,7 +129,7 @@ impl XColumnMode {
 }
 
 /// Archetype 1: Continuous independent X variable paired with one or more Y response series.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct XyTable {
     pub x_title: String,
     pub x_mode: XColumnMode,
@@ -267,7 +267,7 @@ impl XyTable {
 // ============================================================================
 
 /// Experimental row-index semantics for a [`ColumnTable`] (`docs/data-tables-and-transforms.md` §2.2).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ColumnDesignHint {
     /// Unmatched replicates stacked down each group column; row permutations within a single column
     /// leave unpaired test statistics invariant (`Row Titles` collapsed by default).
@@ -281,7 +281,7 @@ pub enum ColumnDesignHint {
 }
 
 /// Archetype 2: One-factor group comparison table (one treatment/group per column).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColumnTable {
     pub design_hint: ColumnDesignHint,
     pub subcolumn_mode: SubcolumnMode,
@@ -292,12 +292,27 @@ pub struct ColumnTable {
 
 impl ColumnTable {
     pub fn new(design_hint: ColumnDesignHint, data_set_count: usize, row_count: usize) -> Result<Self, DocError> {
-        validate_data_sets(data_set_count)?;
-        validate_rows(row_count)?;
         let subcolumn_mode = match design_hint {
             ColumnDesignHint::UnpairedReplicates | ColumnDesignHint::PairedRepeatedMeasures => SubcolumnMode::Single,
             ColumnDesignHint::PrecomputedError => SubcolumnMode::MeanSdN,
         };
+        Self::new_with_subcolumns(design_hint, subcolumn_mode, data_set_count, row_count)
+    }
+
+    /// Construct a `ColumnTable` with an explicit subcolumn layout (`Single`, `MeanSdN`,
+    /// `MeanSemN`, or `MeanCvN`).
+    pub fn new_with_subcolumns(
+        design_hint: ColumnDesignHint,
+        subcolumn_mode: SubcolumnMode,
+        data_set_count: usize,
+        row_count: usize,
+    ) -> Result<Self, DocError> {
+        subcolumn_mode.validate()?;
+        if !TableKind::Column.allows_subcolumn_mode(subcolumn_mode) {
+            return Err(DocError::IncompatibleSubcolumnMode { archetype: TableKind::Column, mode: subcolumn_mode });
+        }
+        validate_data_sets(data_set_count)?;
+        validate_rows(row_count)?;
         let subs = subcolumn_mode.subcolumn_count();
         let mut data_sets = Vec::with_capacity(data_set_count);
         for idx in 0..data_set_count {
@@ -315,6 +330,17 @@ impl ColumnTable {
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.data_sets.first().map_or(self.row_titles.len(), DataSetColumn::row_count)
+    }
+
+    /// Reconstruct parametric `(Mean, SD, N, SS_within)` for pre-summarized column cells.
+    pub fn summarized_point(&self, row: usize, col: usize) -> Result<Option<SummarizedPoint>, SummaryPointError> {
+        let Some(ds) = self.data_sets.get(col) else {
+            return Ok(None);
+        };
+        let Some(subcells) = ds.cells.get(row) else {
+            return Ok(None);
+        };
+        SummarizedPoint::reconstruct(self.subcolumn_mode, subcells)
     }
 
     /// Non-excluded finite observations in column `col` (subcolumn `0`).
@@ -357,7 +383,7 @@ impl ColumnTable {
 
 /// Optional `2 × 2 × K` Three-Way ANOVA column factor metadata mapping 4 data-set columns
 /// `((F1_0, F2_0), (F1_0, F2_1), (F1_1, F2_0), (F1_1, F2_1))` (`docs/data-tables-and-transforms.md` §2.2).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreeWayColumnGrouping {
     pub factor_1_name: String,
     pub factor_1_levels: [String; 2],
@@ -366,7 +392,7 @@ pub struct ThreeWayColumnGrouping {
 }
 
 /// Archetype 3: Two-factor (or `2 × 2 × K` three-factor) tensor `(Row r × Column c × Subcolumn s)`.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GroupedTable {
     pub row_factor_title: String,
     pub column_factor_title: String,
@@ -447,7 +473,7 @@ impl GroupedTable {
 // ============================================================================
 
 /// Archetype 4: Categorical cross-tabulation of non-negative integer counts (`R × C`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ContingencyTable {
     pub row_factor_title: String,
     pub column_factor_title: String,
@@ -513,14 +539,14 @@ impl ContingencyTable {
 // ============================================================================
 
 /// Subject endpoint status in a [`SurvivalTable`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SurvivalStatus {
     Event,
     Censored,
 }
 
 /// Validated time-to-event record for a single subject.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SurvivalObservation {
     pub row: usize,
     pub time: f64,
@@ -528,7 +554,7 @@ pub struct SurvivalObservation {
 }
 
 /// Archetype 5: Time-to-event survival table (`t >= 0`, configurable event/censored status codes).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SurvivalTable {
     pub time_title: String,
     pub times: Vec<Cell>,
@@ -634,7 +660,7 @@ impl SurvivalTable {
 // ============================================================================
 
 /// Validated non-negative slice observation and normalized fraction of total.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SliceFraction {
     pub row: usize,
     pub label: String,
@@ -643,7 +669,7 @@ pub struct SliceFraction {
 }
 
 /// Archetype 6: Mutually exclusive categorical slices summing to a whole.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PartsOfWholeTable {
     pub slice_labels: Vec<String>,
     pub data_sets: Vec<DataSetColumn>,
@@ -699,7 +725,7 @@ impl PartsOfWholeTable {
 // ============================================================================
 
 /// Typed semantic role of a column in a [`MultipleVariablesTable`] (`docs/data-tables-and-transforms.md` §2.3).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum VariableRole {
     #[default]
     Continuous,
@@ -709,7 +735,7 @@ pub enum VariableRole {
 }
 
 /// Origin of values in a [`VariableColumn`] (`docs/data-tables-and-transforms.md` §4).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum VariableSource {
     #[default]
     Entered,
@@ -718,7 +744,7 @@ pub enum VariableSource {
 }
 
 /// Ordering rule for distinct levels of a `Categorical` variable (`docs/data-tables-and-transforms.md` §2.3).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum LevelOrderKind {
     /// Order of first appearance in the column.
     #[default]
@@ -734,14 +760,14 @@ pub enum LevelOrderKind {
 }
 
 /// Complete categorical level-ordering specification (`LevelOrderKind` + `reversed` modifier).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LevelOrderSpec {
     pub order: LevelOrderKind,
     pub reversed: bool,
 }
 
 /// Frequency summary for a single categorical level in a [`VariableColumn`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CategoricalLevelSummary {
     pub level: String,
     pub included_count: usize,
@@ -749,7 +775,7 @@ pub struct CategoricalLevelSummary {
 }
 
 /// Single named variable column in a [`MultipleVariablesTable`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VariableColumn {
     pub title: String,
     pub role: VariableRole,
@@ -955,7 +981,7 @@ fn take_digits<I: Iterator<Item = char>>(iter: &mut std::iter::Peekable<I>) -> S
 }
 
 /// Archetype 7: Tidy observational dataframe (`rows = observational units`, `columns = typed variables`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MultipleVariablesTable {
     pub row_titles: Vec<String>,
     pub row_titles_expanded: bool,
@@ -992,7 +1018,7 @@ impl MultipleVariablesTable {
 
 /// Experimental group (`A`, `B`, ...) containing biological-unit subcolumns (`A:1`, `A:2`, ...)
 /// with technical replicates stacked down rows (`docs/data-tables-and-transforms.md` §2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NestedGroupColumn {
     pub title: String,
     pub subcolumn_titles: Vec<String>,
@@ -1016,7 +1042,7 @@ impl NestedGroupColumn {
 }
 
 /// Archetype 8: Hierarchical two-level design (experimental groups -> biological units -> technical replicates).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NestedTable {
     pub row_titles: Vec<String>,
     pub row_titles_expanded: bool,
@@ -1055,7 +1081,7 @@ impl NestedTable {
 // ============================================================================
 
 /// Strongly typed table payload carried by every [`crate::DataSheet`] (`docs/data-tables-and-transforms.md` §1.1 & §2).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TableArchetype {
     Xy(XyTable),
     Column(ColumnTable),
@@ -1144,6 +1170,30 @@ impl TableArchetype {
                 t.variables.get_mut(coord.col)?.cells.get_mut(coord.row)
             }
             Self::Nested(t) => t.groups.get_mut(coord.col)?.cells.get_mut(coord.row)?.get_mut(coord.subcol),
+        }
+    }
+
+    /// Read an independent `X` (`XyTable`) or elapsed-time (`SurvivalTable`, `subcol == 0`) cell.
+    #[must_use]
+    pub fn x_or_time_cell(&self, row: usize, subcol: usize) -> Option<&Cell> {
+        match self {
+            Self::Xy(t) => t.x_cells.get(row)?.get(subcol),
+            Self::Survival(t) => (subcol == 0).then(|| t.times.get(row)).flatten(),
+            Self::Column(_) | Self::Grouped(_) | Self::Contingency(_) | Self::PartsOfWhole(_) | Self::MultipleVariables(_) | Self::Nested(_) => None,
+        }
+    }
+
+    /// Mutably borrow an independent `X` (`XyTable`) or elapsed-time (`SurvivalTable`, `subcol == 0`) cell.
+    pub fn x_or_time_cell_mut(&mut self, row: usize, subcol: usize) -> Option<&mut Cell> {
+        match self {
+            Self::Xy(t) => t.x_cells.get_mut(row)?.get_mut(subcol),
+            Self::Survival(t) => {
+                if subcol != 0 {
+                    return None;
+                }
+                t.times.get_mut(row)
+            }
+            Self::Column(_) | Self::Grouped(_) | Self::Contingency(_) | Self::PartsOfWhole(_) | Self::MultipleVariables(_) | Self::Nested(_) => None,
         }
     }
 }

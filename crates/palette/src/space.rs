@@ -2,7 +2,7 @@
 //! contrast helpers.
 
 /// RGBA colour in 8-bit sRGB channels.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Rgba8 {
     pub r: u8,
     pub g: u8,
@@ -132,7 +132,7 @@ impl Default for Rgba8 {
 }
 
 /// Linear-light RGBA colour with channels nominally in `[0.0, 1.0]`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LinearRgba {
     pub r: f64,
     pub g: f64,
@@ -173,7 +173,7 @@ impl LinearRgba {
 }
 
 /// Perceptual Oklab colour (`l` in `[0, 1]`, opponent axes `a` and `b`, `alpha` in `[0, 1]`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Oklab {
     pub l: f64,
     pub a: f64,
@@ -232,7 +232,7 @@ impl Oklab {
 }
 
 /// Cylindrical OkLCH colour (`l` lightness, `c` chroma, `h_deg` hue in degrees `[0, 360)`).
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Oklch {
     pub l: f64,
     pub c: f64,
@@ -257,7 +257,7 @@ impl Oklch {
 }
 
 /// Print CMYK colour with ink coverages in `[0.0, 1.0]`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Cmyk {
     pub c: f64,
     pub m: f64,

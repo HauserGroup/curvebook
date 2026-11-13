@@ -12,13 +12,14 @@
 //!   *Biometrics*, 20(3), 482-491.
 
 use crate::dist::core::{norm_pdf, norm_sf, student_t_isf, student_t_sf, student_t_two_sided_isf, student_t_two_sided_p};
-use crate::dist::studentized_range::integrate_over_chi_scale;
+use crate::dist::studentized_range::integrate_over_chi_scale_tail;
 use crate::error::MathError;
 use crate::quad::gauss_legendre_32;
 use crate::roots::{RootOptions, brent_root};
 
 const Z0_LIMIT: f64 = 9.5;
 const HUGE_DF_CUTOFF: f64 = 1e8;
+const MAX_BRACKET_STEPS: usize = 64;
 
 /// Convert control sample size `n_control > 0` and treatment sample sizes `n_treatments` (`n_i > 0`)
 /// into Dunnett 1-factor correlation loadings `lambda_i = sqrt(n_i / (n_control + n_i))`.
@@ -133,7 +134,7 @@ pub fn dunnett_two_sided_p_loadings(d: f64, df: f64, loadings: &[f64]) -> Result
     if df.is_infinite() || df >= HUGE_DF_CUTOFF {
         return Ok(dunnett_two_sided_gaussian_sf(ad, &scales));
     }
-    Ok(integrate_over_chi_scale(df, |u| dunnett_two_sided_gaussian_sf(ad * u, &scales))?.clamp(0.0, 1.0))
+    Ok(integrate_over_chi_scale_tail(df, ad * ad, |u| dunnett_two_sided_gaussian_sf(ad * u, &scales))?.clamp(0.0, 1.0))
 }
 
 /// Exact two-sided Dunnett *p*-value given control size `n_control` and treatment sizes `n_treatments`.
@@ -165,7 +166,8 @@ pub fn dunnett_one_sided_p_loadings(d: f64, df: f64, loadings: &[f64]) -> Result
     if df.is_infinite() || df >= HUGE_DF_CUTOFF {
         return Ok(dunnett_one_sided_gaussian_sf(d, &scales));
     }
-    Ok(integrate_over_chi_scale(df, |u| dunnett_one_sided_gaussian_sf(d * u, &scales))?.clamp(0.0, 1.0))
+    let tail_rate_sq = if d > 0.0 { d * d } else { 0.0 };
+    Ok(integrate_over_chi_scale_tail(df, tail_rate_sq, |u| dunnett_one_sided_gaussian_sf(d * u, &scales))?.clamp(0.0, 1.0))
 }
 
 /// Exact one-sided Dunnett *p*-value given control size `n_control` and treatment sizes `n_treatments`.
@@ -202,11 +204,20 @@ pub fn dunnett_two_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) ->
     let mut lo = (0.99 * student_t_two_sided_isf(alpha, df)?).max(0.0);
     let mut hi = 1.02 * student_t_two_sided_isf((alpha / m).max(f64::MIN_POSITIVE), df)? + 0.05;
 
-    while dunnett_two_sided_p_loadings(lo, df, loadings)? < alpha && lo > 0.0 {
+    for _ in 0..MAX_BRACKET_STEPS {
+        if dunnett_two_sided_p_loadings(lo, df, loadings)? >= alpha || lo == 0.0 {
+            break;
+        }
         lo *= 0.5;
     }
-    while dunnett_two_sided_p_loadings(hi, df, loadings)? > alpha {
+    for _ in 0..MAX_BRACKET_STEPS {
+        if dunnett_two_sided_p_loadings(hi, df, loadings)? <= alpha {
+            break;
+        }
         hi *= 1.5;
+    }
+    if dunnett_two_sided_p_loadings(lo, df, loadings)? < alpha || dunnett_two_sided_p_loadings(hi, df, loadings)? > alpha {
+        return Err(MathError::NotConverged { algorithm: "dunnett_two_sided_crit_loadings", iterations: MAX_BRACKET_STEPS });
     }
 
     brent_root(
@@ -251,11 +262,20 @@ pub fn dunnett_one_sided_crit_loadings(alpha: f64, df: f64, loadings: &[f64]) ->
     let mut lo = t_single.min(t_bonf) - 0.5;
     let mut hi = t_single.max(t_bonf) + 0.5;
 
-    while dunnett_one_sided_p_loadings(lo, df, loadings)? < alpha {
+    for _ in 0..MAX_BRACKET_STEPS {
+        if dunnett_one_sided_p_loadings(lo, df, loadings)? >= alpha {
+            break;
+        }
         lo -= lo.abs() + 2.0;
     }
-    while dunnett_one_sided_p_loadings(hi, df, loadings)? > alpha {
+    for _ in 0..MAX_BRACKET_STEPS {
+        if dunnett_one_sided_p_loadings(hi, df, loadings)? <= alpha {
+            break;
+        }
         hi += hi.abs() + 2.0;
+    }
+    if dunnett_one_sided_p_loadings(lo, df, loadings)? < alpha || dunnett_one_sided_p_loadings(hi, df, loadings)? > alpha {
+        return Err(MathError::NotConverged { algorithm: "dunnett_one_sided_crit_loadings", iterations: MAX_BRACKET_STEPS });
     }
 
     brent_root(

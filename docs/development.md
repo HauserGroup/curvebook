@@ -23,6 +23,7 @@
 | Verify tool cursor catalog sync (`cursors.toml`) | `cargo xtask cursors` |
 | Check translation coverage | `cargo xtask i18n-report` |
 | Sync desktop UI commands to MCP catalog | `cargo xtask ui-commands` |
+| Verify offline corpus & NIST StRD suites (`--fetch` to download) | `cargo xtask corpus` |
 | Print per-crate LOC and test statistics | `cargo xtask stats` |
 | Build macOS `dist/LumenCraft.app` bundle | `cargo xtask bundle` |
 
@@ -118,4 +119,8 @@ Untrusted boundaries carry `proptest` / fuzz suites that must never panic:
 
 ## Verified NIST StRD corpus
 
-Public-domain [NIST Statistical Reference Datasets (StRD)](https://www.itl.nist.gov/div898/strd/) ASCII files (summary statistics, linear ANOVA, linear regression, and all 27 nonlinear least-squares benchmarks) are fetched on demand into the gitignored `corpus/nist-strd/` directory and verified against pinned SHA-256 digests and exact byte sizes before running extended accuracy suites. Small analytical and canonical regression tables are generated directly in `lumencraft-testkit` so offline `cargo xtask ci` requires zero network access.
+Public-domain [NIST Statistical Reference Datasets (StRD)](https://www.itl.nist.gov/div898/strd/) ASCII `.dat` files across all **58 canonical datasets** (`9` Univariate, `11` ANOVA, `11` Linear Regression, and `27` Nonlinear Regression) are fetched on demand into the gitignored `corpus/nist-strd/` directory (`univ/`, `anova/`, `lls/`, `nls/`) and verified against `sha256sums.txt` (SHA-256 digest + exact byte size) and clean-room `.dat` structural parsers in `lumencraft-testkit`:
+
+- `cargo xtask corpus` runs strictly offline (zero network I/O): if `corpus/nist-strd/` is present it verifies every cached `.dat` file and manifest entry, then runs `lumencraft-format`, `lumencraft-testkit`, and `lumencraft-math --test nist_strd` with `LUMENCRAFT_REQUIRE_CORPUS=1` so corpus-backed checks enforce the cached dataset set when populated; when `corpus/nist-strd/` is absent, it runs the offline test suites directly.
+- `cargo xtask corpus --fetch` (or `--fetch-only` to skip running tests afterwards) downloads all 58 NIST StRD `.dat` files into `corpus/nist-strd/`, writes `corpus/nist-strd/sha256sums.txt`, and verifies the downloaded corpus with `LUMENCRAFT_REQUIRE_CORPUS=1`.
+- Small analytical and canonical stiffness benchmarks (`NumAcc1`–`NumAcc4`, `BinaryStiff1e8`, `Wampler1`–`2`, `WamplerOrtho1`–`3`, `NoInt1`–`2`, `FilipScaleVandermonde`, `SmLs` ANOVA) are generated directly in `lumencraft-testkit` so offline `cargo xtask ci` requires zero network access.

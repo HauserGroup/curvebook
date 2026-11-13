@@ -8,13 +8,14 @@ use lumencraft_math::dist::{
 };
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments, covariance, lag1_autocorrelation, pearson_r, sample_sd};
 use lumencraft_math::{
-    AxisScale, ConfidenceLevel, DenseMatrix, DeterministicRng, PValueFormat, cholesky, noncentral_chi2_ci, noncentral_f_ci, noncentral_t_ci,
-    parameter_dependencies, qr_col_pivoted, solve_linear_least_squares, svd,
+    AxisScale, ConfidenceLevel, DenseMatrix, DeterministicRng, LogitDomain, PValueFormat, cholesky, noncentral_chi2_ci, noncentral_f_ci,
+    noncentral_t_ci, parameter_dependencies, qr_col_pivoted, solve_linear_least_squares, svd,
 };
 use lumencraft_testkit::nist_strd::{
-    all_offline_anova_benchmarks, all_offline_linear_regression_benchmarks, all_offline_univariate_benchmarks, binary_stiff_1e8, numacc4,
+    all_offline_anova_benchmarks, all_offline_linear_regression_benchmarks, all_offline_univariate_benchmarks, binary_stiff_1e8, corpus_available,
+    default_nist_strd_dir, load_corpus_anova_all, load_corpus_linear_all, load_corpus_univariate_all, numacc4,
 };
-use lumencraft_testkit::{assert_approx_eq, assert_lre_at_least, oracle_univariate_f64};
+use lumencraft_testkit::{DoubleDouble, assert_approx_eq, assert_lre_at_least, oracle_univariate_f64};
 
 #[test]
 fn nist_strd_univariate_stiffness_and_permutation_invariance() {
@@ -275,16 +276,218 @@ fn degenerate_and_non_finite_inputs_return_structured_errors_without_panicking()
     assert_eq!(DenseMatrix::zeros(0, 3).unwrap().nrows(), 0);
 
     // Guarded AxisScale on hostile inputs never yields NaN or Inf:
-    for scale in
-        [AxisScale::Linear, AxisScale::Log10, AxisScale::Log2, AxisScale::NaturalLog, AxisScale::Reciprocal, AxisScale::Logit, AxisScale::Probability]
-    {
-        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -10.0, 0.0, 100.0, 150.0] {
+    for scale in [
+        AxisScale::Linear,
+        AxisScale::Log10,
+        AxisScale::Log2,
+        AxisScale::Ln,
+        AxisScale::Reciprocal,
+        AxisScale::Logit(LogitDomain::Percent),
+        AxisScale::Logit(LogitDomain::Proportion),
+        AxisScale::Probit,
+    ] {
+        for &bad in &[f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -10.0, 0.0, 1.0, 100.0, 150.0] {
             if let Some(t) = scale.transform(bad) {
                 assert!(t.is_finite());
             }
             if let Some(u) = scale.inverse(bad) {
                 assert!(u.is_finite());
             }
+        }
+    }
+}
+
+fn require_corpus_dir() -> Option<std::path::PathBuf> {
+    let dir = default_nist_strd_dir();
+    if corpus_available(&dir) {
+        return Some(dir);
+    }
+    assert!(
+        std::env::var_os("LUMENCRAFT_REQUIRE_CORPUS").is_none_or(|v| v != "1"),
+        "LUMENCRAFT_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}",
+        dir.display()
+    );
+    None
+}
+
+#[test]
+fn nist_strd_real_corpus_univariate_all_9_datasets() {
+    let Some(dir) = require_corpus_dir() else {
+        return;
+    };
+    let datasets = load_corpus_univariate_all(&dir).unwrap();
+    assert_eq!(datasets.len(), 9);
+
+    for ds in datasets {
+        let moments = SummaryMoments::from_slice(&ds.values).unwrap();
+        let sd = moments.sample_sd().unwrap();
+        let r1 = lag1_autocorrelation(&ds.values).unwrap();
+
+        // Against 106-bit DoubleDouble oracle of the IEEE-754 f64 input vector:
+        let (oracle_mean, oracle_sd, oracle_r1) = oracle_univariate_f64(&ds.values);
+        assert_lre_at_least(moments.mean, oracle_mean, 14.5, &format!("{} mean (f64 oracle)", ds.name));
+        assert_lre_at_least(sd, oracle_sd, 14.5, &format!("{} sd (f64 oracle)", ds.name));
+        let oracle_r1_tol = match ds.name.as_str() {
+            "NumAcc3" | "NumAcc4" => 1e-10,
+            _ => 1e-13,
+        };
+        assert_approx_eq(r1, oracle_r1, 1e-14, oracle_r1_tol, &format!("{} r1 (f64 oracle)", ds.name));
+
+        // Against decimal NIST certified targets (reflecting IEEE-754 decimal-input rounding on shifted series):
+        assert_lre_at_least(moments.mean, ds.certified_mean, 14.5, &format!("{} decimal mean", ds.name));
+        let (min_sd_lre, min_r1_lre) = match ds.name.as_str() {
+            "NumAcc3" => (9.2, 11.5),   // 1000000.2_f64 decimal input rounding (~9.46 digits sd, ~11.93 r1)
+            "NumAcc4" => (8.0, 10.5),   // 10000000.2_f64 decimal input rounding (~8.25 digits sd, ~10.73 r1)
+            "Mavro" => (13.0, 13.5),    // 3 constant leading digits around 2.0018 (~13.12 sd, ~13.75 r1)
+            "Michelso" => (13.5, 13.2), // 4 constant leading digits around 299.85 (~13.84 sd, ~13.44 r1)
+            _ => (15.0, 14.5),
+        };
+        assert_lre_at_least(sd, ds.certified_sd, min_sd_lre, &format!("{} decimal sd", ds.name));
+        assert_lre_at_least(r1, ds.certified_r1, min_r1_lre, &format!("{} decimal r1", ds.name));
+    }
+}
+
+fn oracle_anova_f64(groups: &[Vec<f64>], all_vals: &[f64], df_b: usize, df_w: usize) -> (f64, f64, f64, f64, f64) {
+    let grand =
+        all_vals.iter().copied().fold(DoubleDouble::ZERO, |a, v| a + DoubleDouble::from_f64(v)) / DoubleDouble::from_f64(all_vals.len() as f64);
+    let mut ss_b = DoubleDouble::ZERO;
+    let mut ss_w = DoubleDouble::ZERO;
+    for grp in groups {
+        let g_n = DoubleDouble::from_f64(grp.len() as f64);
+        let g_mean = grp.iter().copied().fold(DoubleDouble::ZERO, |a, v| a + DoubleDouble::from_f64(v)) / g_n;
+        ss_b += g_n * (g_mean - grand).sqr();
+        for &v in grp {
+            ss_w += (DoubleDouble::from_f64(v) - g_mean).sqr();
+        }
+    }
+    let ms_b = ss_b / DoubleDouble::from_f64(df_b as f64);
+    let ms_w = ss_w / DoubleDouble::from_f64(df_w as f64);
+    let f_stat = ms_b / ms_w;
+    let r_sq = ss_b / (ss_b + ss_w);
+    let rsd = ms_w.sqrt();
+    (ss_b.to_f64(), ss_w.to_f64(), f_stat.to_f64(), r_sq.to_f64(), rsd.to_f64())
+}
+
+#[test]
+fn nist_strd_real_corpus_anova_all_11_datasets() {
+    let Some(dir) = require_corpus_dir() else {
+        return;
+    };
+    let datasets = load_corpus_anova_all(&dir).unwrap();
+    assert_eq!(datasets.len(), 11);
+
+    for ds in datasets {
+        let mut max_group = 0_usize;
+        for &(g, _) in &ds.observations {
+            max_group = max_group.max(g);
+        }
+        let mut groups: Vec<Vec<f64>> = vec![Vec::new(); max_group];
+        let mut all_vals = Vec::with_capacity(ds.observations.len());
+        for &(g, y) in &ds.observations {
+            groups[g - 1].push(y);
+            all_vals.push(y);
+        }
+
+        let grand = SummaryMoments::from_slice(&all_vals).unwrap();
+        let mut ss_between_acc = NeumaierSum::new();
+        let mut ss_within_acc = NeumaierSum::new();
+        for grp in &groups {
+            let gm = SummaryMoments::from_slice(grp).unwrap();
+            let diff = gm.mean - grand.mean;
+            ss_between_acc.add((gm.count as f64) * diff * diff);
+            ss_within_acc.add(gm.css);
+        }
+
+        let ss_between = ss_between_acc.total();
+        let ss_within = ss_within_acc.total();
+        let df_b = ds.certified_df_between as f64;
+        let df_w = ds.certified_df_within as f64;
+        let f_stat = (ss_between / df_b) / (ss_within / df_w);
+        let r_sq = ss_between / (ss_between + ss_within);
+        let rsd = (ss_within / df_w).sqrt();
+
+        // Against 106-bit DoubleDouble oracle of the parsed IEEE-754 f64 observations:
+        // `SS_within` (`SummaryMoments::css`) hits full 15.95-digit f64 precision on all 11 datasets,
+        // while `SS_between` from f64 `SummaryMoments::mean` is bounded by `ulp(mean)` in `gm.mean - grand.mean`.
+        let (o_ssb, o_ssw, o_f, o_r2, o_rsd) = oracle_anova_f64(&groups, &all_vals, ds.certified_df_between, ds.certified_df_within);
+        let oracle_ssb_floor = match ds.name.as_str() {
+            "SmLs07" | "SmLs08" | "SmLs09" => 3.0,
+            "AtmWtAg" => 8.5,
+            "SmLs04" | "SmLs05" | "SmLs06" => 9.0,
+            _ => 13.5,
+        };
+        assert_lre_at_least(ss_between, o_ssb, oracle_ssb_floor, &format!("{} SS_between (f64 oracle)", ds.name));
+        assert_lre_at_least(ss_within, o_ssw, 15.0, &format!("{} SS_within (f64 oracle)", ds.name));
+        assert_lre_at_least(f_stat, o_f, oracle_ssb_floor, &format!("{} F (f64 oracle)", ds.name));
+        assert_lre_at_least(r_sq, o_r2, oracle_ssb_floor, &format!("{} R^2 (f64 oracle)", ds.name));
+        assert_lre_at_least(rsd, o_rsd, 15.0, &format!("{} RSD (f64 oracle)", ds.name));
+
+        // Against decimal NIST certified targets (bounded by IEEE-754 f64 input representation):
+        let min_lre = match ds.name.as_str() {
+            // SmLs07-09 shift by 1e12 + 0.4, so IEEE-754 f64 input rounding limits decimal LRE to ~3.13-4.57 digits.
+            "SmLs07" | "SmLs08" | "SmLs09" => 3.0,
+            // AtmWtAg (107.8681..., ~8.79 digits) & SmLs04-06 (1e6 + 0.4, ~9.16-10.59 digits).
+            "AtmWtAg" => 8.5,
+            "SmLs04" | "SmLs05" | "SmLs06" => 9.0,
+            "SiRstv" => 13.0,
+            _ => 14.5,
+        };
+        assert_lre_at_least(ss_between, ds.certified_ss_between, min_lre, &format!("{} SS_between", ds.name));
+        assert_lre_at_least(ss_within, ds.certified_ss_within, min_lre, &format!("{} SS_within", ds.name));
+        assert_lre_at_least(f_stat, ds.certified_f, min_lre, &format!("{} F", ds.name));
+        assert_lre_at_least(r_sq, ds.certified_r_squared, min_lre, &format!("{} R^2", ds.name));
+        assert_lre_at_least(rsd, ds.certified_residual_sd, min_lre, &format!("{} RSD", ds.name));
+    }
+}
+
+#[test]
+fn nist_strd_real_corpus_linear_regression_all_11_datasets() {
+    let Some(dir) = require_corpus_dir() else {
+        return;
+    };
+    let datasets = load_corpus_linear_all(&dir).unwrap();
+    assert_eq!(datasets.len(), 11);
+
+    for ds in datasets {
+        let n = ds.design_rows.len();
+        let p = ds.certified_betas.len();
+        let mut flat = Vec::with_capacity(n * p);
+        for row in &ds.design_rows {
+            flat.extend_from_slice(row);
+        }
+        let x = DenseMatrix::from_row_major(n, p, flat).unwrap();
+        let (fit, cov_unscaled) = solve_linear_least_squares(&x, &ds.y).unwrap();
+        assert_eq!(fit.rank, p, "{} expected full rank {p}, got {}", ds.name, fit.rank);
+
+        let beta_floor = match ds.name.as_str() {
+            "Filip" => 7.5,     // degree-10 Vandermonde (kappa(X) ~ 1e10): observed min LRE = 7.63 digits
+            "Wampler2" => 13.0, // observed min LRE = 13.20 digits
+            _ => 13.5,          // Norris 14.06, Pontius 13.51, Longley 14.66, NoInt1/2 & Wampler1/3/4/5 >= 14.7
+        };
+        for (j, (&actual_b, &cert_b)) in fit.coefficients.iter().zip(ds.certified_betas.iter()).enumerate() {
+            assert_lre_at_least(actual_b, cert_b, beta_floor, &format!("{} B{j}", ds.name));
+        }
+
+        if ds.certified_ss_res > 0.0 {
+            let rss_floor = match ds.name.as_str() {
+                "Filip" => 8.5, // observed RSS LRE = 8.61, RSD = 8.91
+                _ => 13.5,      // Norris/Pontius/NoInt1/2/Longley/Wampler3-5 >= 13.57
+            };
+            assert_lre_at_least(fit.rss, ds.certified_ss_res, rss_floor, &format!("{} RSS", ds.name));
+            let sigma2 = fit.rss / (fit.df_residual as f64);
+            let rsd = sigma2.sqrt();
+            assert_lre_at_least(rsd, ds.certified_residual_sd, rss_floor, &format!("{} RSD", ds.name));
+            let se_floor = match ds.name.as_str() {
+                "Filip" => 7.2,    // observed min SE LRE = 7.36
+                "Longley" => 12.5, // observed min SE LRE = 12.74
+                _ => 13.5,         // Norris/Pontius/NoInt1/2/Wampler3-5 >= 13.76
+            };
+            for (j, &cert_se) in ds.certified_se_betas.iter().enumerate() {
+                let se = (sigma2 * cov_unscaled.get(j, j).unwrap()).sqrt();
+                assert_lre_at_least(se, cert_se, se_floor, &format!("{} SE(B{j})", ds.name));
+            }
+        } else {
+            assert!(fit.rss < 1e-14, "{} exact polynomial RSS={:.3e}", ds.name, fit.rss);
         }
     }
 }

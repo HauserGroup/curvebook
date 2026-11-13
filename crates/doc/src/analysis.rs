@@ -3,106 +3,18 @@
 //! rules and `Change Data Analyzed` compatibility checks (`docs/data-tables-and-transforms.md` §5,
 //! `docs/statistics-implementation.md` §1–§5, `docs/curve-fitting-implementation.md` §1–§4).
 
+pub use lumencraft_math::PValueFormat;
+
 use crate::TableKind;
-use crate::error::{ConfidenceLevel, DocError, validate_title};
+use crate::error::{ConfidenceLevel, DocError, validate_confidence_level, validate_title};
 use crate::ids::{HookSource, SheetId};
-
-// ============================================================================
-// P-Value Formatting Presets (`docs/statistics-implementation.md` §1.2)
-// ============================================================================
-
-/// Display formatting and asterisk ceiling preset for *p*-values and *q*-values.
-///
-/// Raw `f64` probabilities are always stored unrounded in [`crate::ResultSheet`] so downstream FDR
-/// procedures and live graph brackets never suffer rounding quantization.
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
-pub enum PValueFormat {
-    /// Leading zero, 4 decimals (`0.1234`), floor `< 0.0001`, up to 4 stars (`****`).
-    #[default]
-    FourDecimal,
-    /// No leading zero, 3 decimals (`.123`), floor `< .001`, ceiling of 3 stars (`***`).
-    Apa,
-    /// Leading zero, 3 decimals (`0.123`), floor `< 0.001`, ceiling of 3 stars (`***`).
-    Nejm,
-    /// User-specified decimal count (`1..=15`) and optional scientific-notation cutoff.
-    Custom { decimals: u8, scientific_below: Option<f64> },
-}
-
-impl PValueFormat {
-    /// Format a probability `p` in `[0.0, 1.0]` according to this preset.
-    #[must_use]
-    pub fn format_p(self, p: f64) -> String {
-        if !p.is_finite() || !(0.0..=1.0).contains(&p) {
-            return String::from("NaN");
-        }
-        match self {
-            Self::FourDecimal => {
-                if p < 0.0001 {
-                    String::from("< 0.0001")
-                } else if p > 0.9999 {
-                    String::from("> 0.9999")
-                } else {
-                    format!("{p:.4}")
-                }
-            }
-            Self::Apa => {
-                if p < 0.001 {
-                    String::from("< .001")
-                } else if p > 0.999 {
-                    String::from("> .999")
-                } else {
-                    let s = format!("{p:.3}");
-                    s.strip_prefix('0').map_or(s.clone(), str::to_owned)
-                }
-            }
-            Self::Nejm => {
-                if p < 0.001 {
-                    String::from("< 0.001")
-                } else if p > 0.999 {
-                    String::from("> 0.999")
-                } else {
-                    format!("{p:.3}")
-                }
-            }
-            Self::Custom { decimals, scientific_below } => {
-                let d = usize::from(decimals.clamp(1, 15));
-                if let Some(cutoff) = scientific_below
-                    && cutoff.is_finite()
-                    && p > 0.0
-                    && p < cutoff
-                {
-                    return format!("{p:.2e}");
-                }
-                format!("{p:.d$}")
-            }
-        }
-    }
-
-    /// Standard significance summary badge (`ns`, `*`, `**`, `***`, or `****`).
-    #[must_use]
-    pub fn summary_stars(self, p: f64) -> &'static str {
-        if !p.is_finite() || p > 0.05 {
-            return "ns";
-        }
-        let max_three_stars = matches!(self, Self::Apa | Self::Nejm);
-        if !max_three_stars && p <= 0.0001 {
-            "****"
-        } else if p <= 0.001 {
-            "***"
-        } else if p <= 0.01 {
-            "**"
-        } else {
-            "*"
-        }
-    }
-}
 
 // ============================================================================
 // Multiplicity & FDR Specifications (`docs/statistics-implementation.md` §4)
 // ============================================================================
 
 /// Familywise error-rate (FWER) or false-discovery-rate (FDR) procedure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum MultiplicityMethod {
     #[default]
     None,
@@ -124,7 +36,7 @@ pub enum MultiplicityMethod {
 }
 
 /// Multiple-comparisons configuration shared across ANOVA, nonparametrics, and survival curves.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MultiplicitySpec {
     pub method: MultiplicityMethod,
     /// Familywise `alpha` (e.g. `0.05`) for FWER methods or desired FDR `Q` (e.g. `0.05` / `0.01`) for FDR methods.
@@ -143,7 +55,7 @@ impl Default for MultiplicitySpec {
 // ============================================================================
 
 /// Scalar mathematical transform preset.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MathTransformPreset {
     Ln,
     Log10,
@@ -167,7 +79,7 @@ pub enum MathTransformPreset {
 }
 
 /// Error-propagation strategy when transforming `Mean + SD/SEM` tables.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ErrorPropagationMode {
     #[default]
     ReplicateEndpoints,
@@ -175,7 +87,7 @@ pub enum ErrorPropagationMode {
 }
 
 /// Anchor value for `[0%, 100%]` normalization.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum NormalizeAnchor {
     ColumnMin,
     ColumnMax,
@@ -188,7 +100,7 @@ pub enum NormalizeAnchor {
 }
 
 /// Baseline calculation method for `Remove Baseline and Column Math`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum BaselineOperation {
     Difference,
     Ratio,
@@ -197,7 +109,7 @@ pub enum BaselineOperation {
 }
 
 /// Monte Carlo scatter model for `Simulate Data`.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SimulationNoise {
     None,
     Gaussian { sd: f64 },
@@ -206,15 +118,44 @@ pub enum SimulationNoise {
 }
 
 /// Derived data-table transformation (`crates/transform`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TransformAnalysisSpec {
-    Math { x_transform: Option<MathTransformPreset>, y_transform: Option<MathTransformPreset>, error_propagation: ErrorPropagationMode },
-    Normalize { zero_anchor: NormalizeAnchor, hundred_anchor: NormalizeAnchor, output_percent: bool, per_data_set: bool },
-    RemoveBaseline { baseline_columns: Vec<usize>, operation: BaselineOperation },
-    Transpose { swap_row_and_column_titles: bool },
-    PruneRows { every_k_rows: usize, average_window: bool },
-    SelectAndTransform { filter_formula: Option<String>, target_archetype: TableKind },
-    Simulate { seed: u64, row_count: usize, replicates: usize, equation_id: String, noise: SimulationNoise },
+    Math {
+        x_transform: Option<MathTransformPreset>,
+        y_transform: Option<MathTransformPreset>,
+        error_propagation: ErrorPropagationMode,
+    },
+    Normalize {
+        zero_anchor: NormalizeAnchor,
+        hundred_anchor: NormalizeAnchor,
+        output_percent: bool,
+        per_data_set: bool,
+    },
+    RemoveBaseline {
+        baseline_columns: Vec<usize>,
+        operation: BaselineOperation,
+    },
+    Transpose {
+        swap_row_and_column_titles: bool,
+    },
+    PruneRows {
+        every_k_rows: usize,
+        average_window: bool,
+    },
+    SelectAndTransform {
+        filter_formula: Option<String>,
+        target_archetype: TableKind,
+    },
+    Simulate {
+        seed: u64,
+        row_count: usize,
+        replicates: usize,
+        x_min: f64,
+        x_max: f64,
+        equation_id: String,
+        parameters: Vec<(String, f64)>,
+        noise: SimulationNoise,
+    },
 }
 
 // ============================================================================
@@ -222,7 +163,7 @@ pub enum TransformAnalysisSpec {
 // ============================================================================
 
 /// Replicate-subcolumn aggregation rule for Descriptive Statistics (`docs/statistics-implementation.md` §2.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SubcolumnAggregation {
     #[default]
     RowMeans,
@@ -230,7 +171,7 @@ pub enum SubcolumnAggregation {
     PooledGrandSample,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DescriptiveSpec {
     pub aggregation: SubcolumnAggregation,
     pub custom_upper_percentile: Option<f64>,
@@ -244,13 +185,13 @@ impl Default for DescriptiveSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum OutlierSpec {
     Grubbs { alpha: f64, iterative: bool },
     Rout { fdr_q_percent: f64 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TwoGroupMethod {
     UnpairedT,
     WelchT,
@@ -264,7 +205,7 @@ pub enum TwoGroupMethod {
     OneSampleWilcoxon { hypothetical: f64 },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TwoGroupSpec {
     pub method: TwoGroupMethod,
     pub two_tailed: bool,
@@ -277,7 +218,7 @@ impl Default for TwoGroupSpec {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum OneWayMethod {
     #[default]
     OrdinaryAnova,
@@ -289,21 +230,21 @@ pub enum OneWayMethod {
     Friedman,
 }
 
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct OneWayAnovaSpec {
     pub method: OneWayMethod,
     pub compute_effect_sizes: bool,
     pub multiplicity: MultiplicitySpec,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SumOfSquaresType {
     TypeI,
     #[default]
     TypeIII,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum RepeatedMeasuresDesign {
     #[default]
     None,
@@ -312,7 +253,7 @@ pub enum RepeatedMeasuresDesign {
     BothFactorsMatched,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FactorialAnovaSpec {
     pub three_way: bool,
     /// Populated when invoked as Multifactor (`N`-way) GLM on a `MultipleVariables` sheet.
@@ -342,13 +283,13 @@ impl Default for FactorialAnovaSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NestedAnalysisSpec {
     pub two_group_t_test: bool,
     pub multiplicity: MultiplicitySpec,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ContingencyMethod {
     PearsonChiSquare { yates_continuity: bool },
     LikelihoodRatioG2,
@@ -363,7 +304,7 @@ impl Default for ContingencyMethod {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct ContingencySpec {
     pub method: ContingencyMethod,
     pub compute_odds_and_risk_ratios: bool,
@@ -371,14 +312,14 @@ pub struct ContingencySpec {
     pub compute_phi_and_cramers_v: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum CoxTieMethod {
     Breslow,
     #[default]
     Efron,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SurvivalAnalysisSpec {
     KaplanMeier {
         log_rank_mantel_cox: bool,
@@ -396,19 +337,19 @@ pub enum SurvivalAnalysisSpec {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum RocCiMethod {
     HanleyMcNeil,
     #[default]
     DeLong,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct RocSpec {
     pub ci_method: RocCiMethod,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum GlmFamily {
     #[default]
     Linear,
@@ -416,7 +357,7 @@ pub enum GlmFamily {
     Poisson,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GlmSpec {
     pub family: GlmFamily,
     pub response_column: usize,
@@ -425,7 +366,7 @@ pub struct GlmSpec {
     pub compute_vif: bool,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MultivariateSpec {
     Pca { standardize: bool, parallel_analysis_seed: Option<u64> },
     CorrelationMatrix { spearman_rank: bool },
@@ -436,7 +377,7 @@ pub enum MultivariateSpec {
 // Linear & Nonlinear Regression Specifications (`docs/curve-fitting-implementation.md`)
 // ============================================================================
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LinearRegressionSpec {
     pub deming_model_ii: bool,
     pub force_through_origin: bool,
@@ -452,7 +393,7 @@ impl Default for LinearRegressionSpec {
 }
 
 /// Differential weighting scheme for nonlinear regression (`docs/curve-fitting-implementation.md` §1.1).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WeightingScheme {
     #[default]
     None,
@@ -471,7 +412,7 @@ pub enum WeightingScheme {
 }
 
 /// Regression objective function (`docs/curve-fitting-implementation.md` §1.1).
-#[derive(Debug, Clone, Copy, PartialEq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FitMethod {
     #[default]
     LeastSquares,
@@ -483,7 +424,7 @@ pub enum FitMethod {
 }
 
 /// Dataset parameter sharing or constant constraint (`docs/curve-fitting-implementation.md` §1.3).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ParameterScope {
     Local,
     SharedGlobal,
@@ -492,7 +433,7 @@ pub enum ParameterScope {
 }
 
 /// Constraint and sharing rule for a single named equation parameter.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ParameterRule {
     pub name: String,
     pub scope: ParameterScope,
@@ -502,14 +443,14 @@ pub struct ParameterRule {
 }
 
 /// Model-comparison configuration (`Extra-sum-of-squares F` vs `AICc`; §2.4).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModelComparisonSpec {
     ExtraSumOfSquaresF { alternative_equation_id: String },
     Aicc { alternative_equation_id: String },
 }
 
 /// Complete nonlinear regression specification (`crates/fit`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NonlinearFitSpec {
     pub equation_id: String,
     pub custom_dsl: Option<String>,
@@ -560,7 +501,7 @@ impl NonlinearFitSpec {
 // ============================================================================
 
 /// Discriminated statistical, regression, or transformation specification.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum AnalysisKind {
     Transform(TransformAnalysisSpec),
     DescriptiveStats(DescriptiveSpec),
@@ -709,7 +650,7 @@ impl AnalysisKind {
 
 /// Stateful, mutable analysis node linking an upstream `DataSheet` (or analyzable `ResultSheet`)
 /// to its [`crate::ResultSheet`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AnalysisSpec {
     pub id: SheetId,
     pub source_sheet_id: SheetId,
@@ -755,6 +696,15 @@ impl AnalysisSpec {
             validate_title(t)?;
         }
         self.custom_title = custom.filter(|s| !s.trim().is_empty());
+        Ok(())
+    }
+
+    /// Update the analysis confidence level (`0.01..=99.99` percent).
+    ///
+    /// # Errors
+    /// Returns [`DocError::InvalidConfidenceLevel`] if `percent` is outside `[0.01, 99.99]` or non-finite.
+    pub fn set_confidence_percent(&mut self, percent: f64) -> Result<(), DocError> {
+        self.confidence_level = validate_confidence_level(percent)?;
         Ok(())
     }
 

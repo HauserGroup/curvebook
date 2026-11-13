@@ -28,8 +28,12 @@ pub struct PivotedQr {
     taus: Vec<f64>,
     /// Column permutation `P`: column `j` of `A P` corresponds to original column `perm[j]` of `A`.
     perm: Vec<usize>,
-    /// Detected numerical rank under default threshold `eps * max(m, n) * |R_{00}|`.
+    /// Detected numerical rank under default threshold `eps * max(m, n) * max_k |R_{kk}|`.
     rank: usize,
+    /// Whether column pivoting was enabled during factorization.
+    pivoted: bool,
+    /// Default diagonal tolerance `eps * max(m, n) * max_k |R_{kk}|`.
+    default_tol: f64,
 }
 
 /// Structured output of a least-squares linear regression or Jacobian step solve `min_x ||A x - b||_2`.
@@ -92,11 +96,15 @@ fn factor_householder(a: &DenseMatrix, pivot_columns: bool) -> Result<PivotedQr,
         }
     }
 
-    let r00 = if k_max > 0 { work.entry(0, 0).abs() } else { 0.0 };
-    let default_tol = f64::EPSILON * (m.max(n) as f64) * r00;
-    let rank = count_rank(&work, k_max, default_tol);
+    let diag_scale = if pivot_columns {
+        if k_max > 0 { work.entry(0, 0).abs() } else { 0.0 }
+    } else {
+        (0..k_max).fold(0.0_f64, |acc, k| acc.max(work.entry(k, k).abs()))
+    };
+    let default_tol = f64::EPSILON * (m.max(n) as f64) * diag_scale;
+    let rank = count_rank(&work, k_max, default_tol, pivot_columns);
 
-    Ok(PivotedQr { nrows: m, ncols: n, factors: work, taus, perm, rank })
+    Ok(PivotedQr { nrows: m, ncols: n, factors: work, taus, perm, rank, pivoted: pivot_columns, default_tol })
 }
 
 fn select_max_norm_column(work: &DenseMatrix, k: usize, n: usize) -> usize {
@@ -169,22 +177,32 @@ fn apply_householder_to_trailing(work: &mut DenseMatrix, k: usize, m: usize, n: 
     }
 }
 
-fn count_rank(factors: &DenseMatrix, k_max: usize, tol: f64) -> usize {
+fn count_rank(factors: &DenseMatrix, k_max: usize, tol: f64, pivoted: bool) -> usize {
     if k_max == 0 {
         return 0;
     }
-    if factors.entry(0, 0).abs() == 0.0 {
-        return 0;
-    }
-    let mut r = 0;
-    for k in 0..k_max {
-        if factors.entry(k, k).abs() > tol {
-            r += 1;
-        } else {
-            break;
+    if pivoted {
+        if factors.entry(0, 0).abs() == 0.0 {
+            return 0;
         }
+        let mut r = 0;
+        for k in 0..k_max {
+            if factors.entry(k, k).abs() > tol {
+                r += 1;
+            } else {
+                break;
+            }
+        }
+        r
+    } else {
+        let mut r = 0;
+        for k in 0..k_max {
+            if factors.entry(k, k).abs() > tol {
+                r += 1;
+            }
+        }
+        r
     }
-    r
 }
 
 impl PivotedQr {
@@ -200,7 +218,7 @@ impl PivotedQr {
         self.ncols
     }
 
-    /// Detected numerical rank under `|R_{kk}| > eps * max(m, n) * |R_{00}|`.
+    /// Detected numerical rank under `|R_{kk}| > eps * max(m, n) * max_j |R_{jj}|`.
     #[must_use]
     pub const fn rank(&self) -> usize {
         self.rank
@@ -209,7 +227,7 @@ impl PivotedQr {
     /// Re-evaluate numerical rank with a caller-supplied diagonal tolerance `tol >= 0`.
     #[must_use]
     pub fn rank_with_tol(&self, tol: f64) -> usize {
-        count_rank(&self.factors, self.nrows.min(self.ncols), tol)
+        count_rank(&self.factors, self.nrows.min(self.ncols), tol, self.pivoted)
     }
 
     /// Whether `rank == min(nrows, ncols)`.
@@ -224,12 +242,23 @@ impl PivotedQr {
         &self.perm
     }
 
-    /// Original column indices detected as linearly dependent / aliased (`perm[rank..]`, sorted).
+    /// Original column indices detected as linearly dependent / aliased (sorted).
     #[must_use]
     pub fn aliased_columns(&self) -> Vec<usize> {
-        let mut cols: Vec<usize> = self.perm.get(self.rank..).unwrap_or(&[]).to_vec();
-        cols.sort_unstable();
-        cols
+        if self.pivoted {
+            let mut cols: Vec<usize> = self.perm.get(self.rank..).unwrap_or(&[]).to_vec();
+            cols.sort_unstable();
+            cols
+        } else {
+            let k_max = self.nrows.min(self.ncols);
+            let mut cols = Vec::new();
+            for j in 0..self.ncols {
+                if j >= k_max || self.factors.entry(j, j).abs() <= self.default_tol {
+                    cols.push(j);
+                }
+            }
+            cols
+        }
     }
 
     /// Extract the thin upper-trapezoidal factor `R` (`min(m, n) x n`).
@@ -276,8 +305,7 @@ impl PivotedQr {
             return Err(MathError::DimensionMismatch { expected: self.nrows, actual: mat.nrows() });
         }
         let cols = mat.ncols();
-        for k in (0..self.taus.len()).rev() {
-            let tau = self.taus[k];
+        for (k, &tau) in self.taus.iter().enumerate().rev() {
             if tau == 0.0 {
                 continue;
             }
@@ -341,8 +369,7 @@ impl PivotedQr {
             return Err(MathError::DimensionMismatch { expected: self.nrows, actual: v.len() });
         }
         let mut out = v.to_vec();
-        for k in (0..self.taus.len()).rev() {
-            let tau = self.taus[k];
+        for (k, &tau) in self.taus.iter().enumerate().rev() {
             if tau == 0.0 {
                 continue;
             }
@@ -380,7 +407,9 @@ impl PivotedQr {
             for (k, &uk) in u.iter().enumerate().take(i) {
                 acc.add(-self.factors.entry(k, i) * uk);
             }
-            u[i] = acc.total() / self.factors.entry(i, i);
+            if let Some(slot) = u.get_mut(i) {
+                *slot = acc.total() / self.factors.entry(i, i);
+            }
         }
         u
     }
@@ -395,33 +424,41 @@ impl PivotedQr {
             for (j, &wj) in w.iter().enumerate().take(p).skip(i + 1) {
                 acc.add(-self.factors.entry(i, j) * wj);
             }
-            w[i] = acc.total() / self.factors.entry(i, i);
+            if let Some(slot) = w.get_mut(i) {
+                *slot = acc.total() / self.factors.entry(i, i);
+            }
         }
         w
     }
 
-    /// Solve `min_x ||A x - b||_2` using the basic pivoted QR solution on the leading `rank`
-    /// linearly independent columns (setting aliased columns `perm[rank..]` to `0.0`).
+    /// Solve `min_x ||A x - b||_2` using the basic QR solution on non-aliased columns
+    /// (setting aliased columns to `0.0`).
     ///
     /// # Errors
     /// Returns [`MathError::DimensionMismatch`] if `b.len() != self.nrows`.
     pub fn solve_basic(&self, b: &[f64]) -> Result<Vec<f64>, MathError> {
         let qtb = self.apply_qt(b)?;
-        let r_rank = self.rank;
+        let active_cols = if self.pivoted { self.rank } else { self.nrows.min(self.ncols) };
         let mut z = vec![0.0_f64; self.ncols];
-        for i in (0..r_rank).rev() {
+        for i in (0..active_cols).rev() {
+            let diag = self.factors.entry(i, i);
+            if !self.pivoted && diag.abs() <= self.default_tol {
+                continue;
+            }
             let mut acc = NeumaierSum::new();
             acc.add(qtb.get(i).copied().unwrap_or(0.0));
-            for (j, &zj) in z.iter().enumerate().take(r_rank).skip(i + 1) {
+            for (j, &zj) in z.iter().enumerate().take(active_cols).skip(i + 1) {
                 acc.add(-self.factors.entry(i, j) * zj);
             }
-            let diag = self.factors.entry(i, i);
-            z[i] = acc.total() / diag;
+            if let Some(slot) = z.get_mut(i) {
+                *slot = acc.total() / diag;
+            }
         }
         let mut x = vec![0.0_f64; self.ncols];
         for (piv_idx, &orig_col) in self.perm.iter().enumerate() {
+            let z_val = z.get(piv_idx).copied().unwrap_or(0.0);
             if let Some(slot) = x.get_mut(orig_col) {
-                *slot = z[piv_idx];
+                *slot = z_val;
             }
         }
         Ok(x)
@@ -452,10 +489,8 @@ impl PivotedQr {
         // (R^T R)^{-1} = R^{-1} * R^{-T}, then unpermute rows and columns by `perm`.
         let rtr_inv_piv = r_inv.matmul(&r_inv.transpose())?;
         let mut unpermuted = DenseMatrix::zeros(p, p)?;
-        for i in 0..p {
-            let oi = self.perm[i];
-            for j in 0..p {
-                let oj = self.perm[j];
+        for (i, &oi) in self.perm.iter().enumerate().take(p) {
+            for (j, &oj) in self.perm.iter().enumerate().take(p) {
                 unpermuted.set_in_bounds(oi, oj, rtr_inv_piv.entry(i, j));
             }
         }
@@ -549,10 +584,7 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
         let svd_s = svd(&x_scaled)?;
         let z = svd_s.solve_least_squares(y, None)?;
         let cov_s = svd_s.ata_pseudoinverse(None)?;
-        let mut beta_svd = vec![0.0_f64; p];
-        for j in 0..p {
-            beta_svd[j] = if scales[j] > 0.0 { z[j] / scales[j] } else { 0.0 };
-        }
+        let beta_svd: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| if sj > 0.0 { zj / sj } else { 0.0 }).collect();
         let cov_u = unscale_covariance(&cov_s, &scales)?;
         let rss_svd = compensated_rss(x, y, &beta_svd);
         (beta_svd, cov_u, rss_svd)
@@ -566,9 +598,9 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
 fn unscale_covariance(cov_scaled: &DenseMatrix, scales: &[f64]) -> Result<DenseMatrix, MathError> {
     let p = scales.len();
     let mut cov_unscaled = DenseMatrix::zeros(p, p)?;
-    for i in 0..p {
-        for j in 0..p {
-            let denom = scales[i] * scales[j];
+    for (i, &si) in scales.iter().enumerate() {
+        for (j, &sj) in scales.iter().enumerate() {
+            let denom = si * sj;
             let v = if denom > 0.0 { cov_scaled.entry(i, j) / denom } else { 0.0 };
             cov_unscaled.set_in_bounds(i, j, v);
         }
@@ -615,24 +647,31 @@ fn bjorck_refined_qr_solve(x: &DenseMatrix, y: &[f64], scales: &[f64], pqr: &Piv
     let n = x.nrows();
     let p = x.ncols();
     let qty = pqr.apply_qt(y)?;
-    let z_piv0 = pqr.solve_r_full(&qty[..p]);
+    let z_piv0 = pqr.solve_r_full(qty.get(..p).unwrap_or(&[]));
     let mut z = vec![0.0_f64; p];
     for (piv_idx, &orig_col) in pqr.perm.iter().enumerate() {
-        z[orig_col] = z_piv0[piv_idx];
+        if let (Some(slot), Some(&val)) = (z.get_mut(orig_col), z_piv0.get(piv_idx)) {
+            *slot = val;
+        }
     }
     let mut q_rhs0 = vec![0.0_f64; n];
-    q_rhs0[p..n].copy_from_slice(&qty[p..n]);
+    if let (Some(dst), Some(src)) = (q_rhs0.get_mut(p..n), qty.get(p..n)) {
+        dst.copy_from_slice(src);
+    }
     let mut r_vec = pqr.apply_q_vec(&q_rhs0)?;
 
     for _ in 0..3 {
         let beta_curr: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| zj / sj).collect();
+        if !beta_curr.iter().all(|v| v.is_finite()) {
+            break;
+        }
         // Primal defect: f = y - r - X * beta_curr (evaluated in Dot2 precision).
         let mut f_def = Vec::with_capacity(n);
         for i in 0..n {
             let mut main = NeumaierSum::new();
             let mut err = NeumaierSum::new();
-            main.add(y[i]);
-            main.add(-r_vec[i]);
+            main.add(y.get(i).copied().unwrap_or(0.0));
+            main.add(-r_vec.get(i).copied().unwrap_or(0.0));
             for (j, &bj) in beta_curr.iter().enumerate() {
                 let xij = x.entry(i, j);
                 let prod = -xij * bj;
@@ -644,7 +683,7 @@ fn bjorck_refined_qr_solve(x: &DenseMatrix, y: &[f64], scales: &[f64], pqr: &Piv
 
         // Dual defect: g_j = -(X^T r)_j / scales[j] (evaluated in Dot2 precision).
         let mut g_def = vec![0.0_f64; p];
-        for j in 0..p {
+        for (j, (g_slot, &sj)) in g_def.iter_mut().zip(scales.iter()).enumerate() {
             let mut main = NeumaierSum::new();
             let mut err = NeumaierSum::new();
             for (i, &ri) in r_vec.iter().enumerate() {
@@ -653,26 +692,48 @@ fn bjorck_refined_qr_solve(x: &DenseMatrix, y: &[f64], scales: &[f64], pqr: &Piv
                 main.add(prod);
                 err.add((-xij).mul_add(ri, -prod));
             }
-            g_def[j] = (main.total() + err.total()) / scales[j];
+            *g_slot = (main.total() + err.total()) / sj;
+        }
+        if !f_def.iter().all(|v| v.is_finite()) || !g_def.iter().all(|v| v.is_finite()) {
+            break;
         }
 
-        let g_piv: Vec<f64> = pqr.perm.iter().map(|&orig| g_def[orig]).collect();
+        let g_piv: Vec<f64> = pqr.perm.iter().map(|&orig| g_def.get(orig).copied().unwrap_or(0.0)).collect();
         let u1 = pqr.solve_rt_full(&g_piv);
         let c = pqr.apply_qt(&f_def)?;
         let mut u_full = vec![0.0_f64; n];
-        u_full[..p].copy_from_slice(&u1);
-        u_full[p..n].copy_from_slice(&c[p..n]);
+        if let Some(dst) = u_full.get_mut(..p) {
+            dst.copy_from_slice(&u1);
+        }
+        if let (Some(dst), Some(src)) = (u_full.get_mut(p..n), c.get(p..n)) {
+            dst.copy_from_slice(src);
+        }
         let dr = pqr.apply_q_vec(&u_full)?;
 
-        let rhs_dz: Vec<f64> = c[..p].iter().zip(u1.iter()).map(|(&ci, &ui)| ci - ui).collect();
+        let rhs_dz: Vec<f64> = c.get(..p).unwrap_or(&[]).iter().zip(u1.iter()).map(|(&ci, &ui)| ci - ui).collect();
         let dz_piv = pqr.solve_r_full(&rhs_dz);
+
+        // Guard against non-finite refinement steps so `z` and `r_vec` are never corrupted.
+        if !dr.iter().all(|v| v.is_finite()) || !dz_piv.iter().all(|v| v.is_finite()) {
+            break;
+        }
+        let steps_keep_finite = pqr.perm.iter().enumerate().all(|(piv_idx, &orig_col)| {
+            let z_cur = z.get(orig_col).copied().unwrap_or(0.0);
+            let step = dz_piv.get(piv_idx).copied().unwrap_or(0.0);
+            (z_cur + step).is_finite()
+        }) && r_vec.iter().zip(dr.iter()).all(|(&ri, &dri)| (ri + dri).is_finite());
+        if !steps_keep_finite {
+            break;
+        }
 
         let mut max_rel = 0.0_f64;
         for (piv_idx, &orig_col) in pqr.perm.iter().enumerate() {
-            let step = dz_piv[piv_idx];
-            z[orig_col] += step;
-            let denom = z[orig_col].abs().max(1e-30);
-            max_rel = max_rel.max(step.abs() / denom);
+            let step = dz_piv.get(piv_idx).copied().unwrap_or(0.0);
+            if let Some(slot) = z.get_mut(orig_col) {
+                *slot += step;
+                let denom = slot.abs().max(1e-30);
+                max_rel = max_rel.max(step.abs() / denom);
+            }
         }
         for (ri, &dri) in r_vec.iter_mut().zip(dr.iter()) {
             *ri += dri;
@@ -742,5 +803,30 @@ mod tests {
         let deps = parameter_dependencies(&a).unwrap();
         assert_eq!(deps.len(), 3);
         assert!(deps.iter().all(|&d| (0.0..1.0).contains(&d)));
+    }
+
+    #[test]
+    fn unpivoted_qr_handles_leading_zero_column_rank_and_refinement_stays_finite() {
+        let leading_zero = DenseMatrix::from_row_major(2, 2, vec![0.0, 1.0, 0.0, 2.0]).unwrap();
+        let uqr = qr(&leading_zero).unwrap();
+        assert_eq!(uqr.rank(), 1);
+        assert!(!uqr.is_full_rank());
+        assert_eq!(uqr.aliased_columns(), vec![0]);
+
+        let q = uqr.full_q().unwrap();
+        let r = uqr.r().unwrap();
+        let recon = q.matmul(&r).unwrap();
+        for i in 0..2 {
+            for j in 0..2 {
+                assert!((recon.entry(i, j) - leading_zero.entry(i, j)).abs() < 1e-14);
+            }
+        }
+        let basic = uqr.solve_basic(&[3.0, 6.0]).unwrap();
+        assert!(basic.iter().all(|v| v.is_finite()));
+        assert_eq!(basic[0], 0.0);
+
+        let pqr = qr_col_pivoted(&leading_zero).unwrap();
+        assert_eq!(pqr.rank(), 1);
+        assert_eq!(pqr.aliased_columns(), vec![0]);
     }
 }

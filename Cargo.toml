@@ -33,6 +33,13 @@ lumencraft-ui-egui = { path = "crates/ui-egui" }
 lumencraft-mcp = { path = "crates/mcp" }
 lumencraft-testkit = { path = "crates/testkit" }
 
+# serialization, archive compression & property testing (MIT OR Apache-2.0)
+crc32fast = "1.5"
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+proptest = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["float_roundtrip"] }
+
 [workspace.lints.rust]
 unsafe_code = "deny"
 

@@ -10,7 +10,7 @@
 use crate::error::MathError;
 
 /// Deterministic 256-bit `xoshiro256**` pseudo-random number generator.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DeterministicRng {
     state: [u64; 4],
     cached_normal: Option<f64>,
@@ -68,12 +68,13 @@ impl DeterministicRng {
             return Some((self.next_u64() & (bound - 1)) as usize);
         }
         let threshold = bound.wrapping_neg() % bound;
-        loop {
+        for _ in 0..128 {
             let candidate = self.next_u64();
             if candidate >= threshold {
                 return Some((candidate % bound) as usize);
             }
         }
+        Some((self.next_u64() % bound) as usize)
     }
 
     /// In-place unbiased Fisher-Yates shuffle.
@@ -203,7 +204,12 @@ mod tests {
             let x = a.next_open_f64();
             assert!(x > 0.0 && x < 1.0);
             assert_eq!(x.to_bits(), b.next_open_f64().to_bits());
+            let idx = a.gen_index(13).unwrap();
+            assert!(idx < 13);
+            assert_eq!(idx, b.gen_index(13).unwrap());
         }
+        assert_eq!(a.gen_index(0), None);
+        assert_eq!(a.gen_index(1), Some(0));
     }
 
     #[test]

@@ -4,6 +4,9 @@
 use crate::error::MathError;
 use crate::sum::{NeumaierSum, dot};
 
+/// Maximum total element count (`nrows * ncols`) permitted in a [`DenseMatrix`].
+pub const MAX_MATRIX_ELEMENTS: usize = 100_000_000;
+
 /// Dense 2D `f64` matrix (`nrows x ncols`) stored contiguously in row-major order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DenseMatrix {
@@ -16,12 +19,12 @@ impl DenseMatrix {
     /// Allocate an `nrows x ncols` zero matrix.
     ///
     /// # Errors
-    /// Returns [`MathError::InvalidParameter`] if `nrows * ncols` overflows `usize` or exceeds `100_000_000`.
+    /// Returns [`MathError::InvalidParameter`] if `nrows * ncols` overflows `usize` or exceeds [`MAX_MATRIX_ELEMENTS`].
     pub fn zeros(nrows: usize, ncols: usize) -> Result<Self, MathError> {
         let Some(len) = nrows.checked_mul(ncols) else {
             return Err(MathError::InvalidParameter { name: "matrix_elements", value: f64::INFINITY });
         };
-        if len > 100_000_000 {
+        if len > MAX_MATRIX_ELEMENTS {
             return Err(MathError::InvalidParameter { name: "matrix_elements", value: len as f64 });
         }
         Ok(Self { nrows, ncols, data: vec![0.0; len] })
@@ -42,11 +45,15 @@ impl DenseMatrix {
     /// Construct an `nrows x ncols` matrix from row-major `data`.
     ///
     /// # Errors
-    /// Returns [`MathError::DimensionMismatch`] if `data.len() != nrows * ncols`.
+    /// Returns [`MathError::InvalidParameter`] if `nrows * ncols` overflows or exceeds
+    /// [`MAX_MATRIX_ELEMENTS`], or [`MathError::DimensionMismatch`] if `data.len() != nrows * ncols`.
     pub fn from_row_major(nrows: usize, ncols: usize, data: Vec<f64>) -> Result<Self, MathError> {
         let Some(expected) = nrows.checked_mul(ncols) else {
             return Err(MathError::InvalidParameter { name: "matrix_elements", value: f64::INFINITY });
         };
+        if expected > MAX_MATRIX_ELEMENTS {
+            return Err(MathError::InvalidParameter { name: "matrix_elements", value: expected as f64 });
+        }
         if data.len() != expected {
             return Err(MathError::DimensionMismatch { expected, actual: data.len() });
         }
@@ -302,5 +309,19 @@ impl DenseMatrix {
             acc.add(u * u);
         }
         scale * acc.total().max(0.0).sqrt()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DenseMatrix, MAX_MATRIX_ELEMENTS};
+    use crate::error::MathError;
+
+    #[test]
+    fn from_row_major_and_zeros_enforce_max_matrix_elements() {
+        let side = 10_001;
+        assert!(side * side > MAX_MATRIX_ELEMENTS);
+        assert!(matches!(DenseMatrix::zeros(side, side), Err(MathError::InvalidParameter { name: "matrix_elements", .. })));
+        assert!(matches!(DenseMatrix::from_row_major(side, side, Vec::new()), Err(MathError::InvalidParameter { name: "matrix_elements", .. })));
     }
 }

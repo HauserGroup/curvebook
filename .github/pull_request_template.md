@@ -12,6 +12,6 @@
 - [ ] No panics in shipped code: no `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!` or
       `unimplemented!` outside tests, and no unchecked indexing on data from files, parameters or
       messages. Errors are returned as `Result` and shown to the user
-      ([why and how](docs/development.md#robustness-lumencraft-never-crashes)).
-- [ ] Clean-room: nothing copied from GraphPad / Dotmatics products or GPL/AGPL/LGPL code ([AGENTS.md](AGENTS.md)).
+      ([why and how](../docs/development.md#robustness-lumencraft-never-crashes)).
+- [ ] Clean-room: nothing copied from GraphPad / Dotmatics products or GPL/AGPL/LGPL code ([AGENTS.md](../AGENTS.md)).
 - [ ] Every new asset has a row in `ASSETS.md` (and `ATTRIBUTION.md` when third-party).

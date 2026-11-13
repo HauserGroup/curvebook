@@ -24,7 +24,7 @@ Public behavioural references:
 | Archetype | Row Semantics | X Column | Data-Set Columns (`A`, `B`, …) | Subcolumn Modes | Primary Downstream Analyses |
 |---|---|---|---|---|---|
 | **`Xy`** | Continuous independent point or time step | Numeric (`f64`), date/elapsed-time series, or generated arithmetic/geometric sequence (`X0`, `ΔX`), with optional error subcolumns | Continuous response series | `Single`, `RawReplicates(n)`, `MeanSdN`, `MeanSemN`, `MeanCvN`, `MeanLowHigh`, `UpperLowerLimits`, `MedianIqr` | Simple linear/logistic regression, nonlinear curve fitting, correlation, AUC, smooth/differentiate/integrate, XY graphs |
-| **`Column`** | Unmatched replicate observation (or matched subject row when paired) | Optional row labels only | One treatment/group per column | `Single` (one column per group, replicates stacked down rows) | Unpaired/paired/Welch/one-sample *t*-tests, Mann–Whitney, Wilcoxon, ordinary/Welch/RM one-way ANOVA, Kruskal–Wallis, Friedman, descriptive stats, normality, Grubbs/ROUT outliers |
+| **`Column`** | Unmatched replicate observation (or matched subject row when paired) | Optional row labels only | One treatment/group per column | `Single` (replicates stacked down rows) or pre-summarized `MeanSdN` / `MeanSemN` / `MeanCvN` | Unpaired/paired/Welch/one-sample *t*-tests, Mann–Whitney, Wilcoxon, ordinary/Welch/RM one-way ANOVA, Kruskal–Wallis, Friedman, descriptive stats, normality, Grubbs/ROUT outliers |
 | **`Grouped`** | Factor A (row factor, e.g. time or dose tier) | Optional row titles / numeric spacing | Factor B (column factor, e.g. treatment or genotype) | `RawReplicates(n)` (stacked or side-by-side) or pre-summarized `MeanSdN` / `MeanSemN` | Two-way & three-way ANOVA (ordinary, repeated-measures, mixed-effects REML), multiple *t*-tests (one per row) |
 | **`Contingency`** | Categorical outcome / exposure row | Row category title | Categorical outcome / exposure column | `Single` non-negative integer counts (`u64` / integral `f64 >= 0`) | Pearson $\chi^2$, Fisher's exact test, McNemar's test, Cochran–Armitage trend, RR/OR/sensitivity/specificity CIs |
 | **`Survival`** | Individual subject / event time | Elapsed time $t \ge 0$ | One cohort column per group (`1` = event/death, `0` = censored; configurable codes) | `Single` status code per cohort column | Kaplan–Meier product-limit survival, log-rank (Mantel–Cox), Gehan–Breslow–Wilcoxon, trend log-rank |
@@ -40,24 +40,37 @@ When a user enters pre-averaged data (`MeanSdN`, `MeanSemN`, `MeanCvN`) instead 
 - Points with $n_i < 1$, negative SD/SEM, or missing $n_i$ when degrees of freedom depend on $n_i$ are flagged as invalid for parametric inference rather than silently treated as $n_i = 1$.
 - Nonparametric rank tests, outlier tests, normality tests, and robust regression **refuse** pre-summarized `Mean/SD/N` tables with a clear `StatsError::RequiresRawReplicates` diagnostic, because rank order and heavy-tailed residuals cannot be recovered from sample moments.
 
-### 2.2 Categorical Level Ordering (`MultipleVariables`)
+### 2.2 `Column` Design Semantics & `Grouped` 3D Tensor Coordinates
 
-Matching the Prism 11.1 categorical-variable model, each `Categorical` column in a `MultipleVariables` sheet stores a `LevelOrderSpec`:
-- `EntryOrder` (order of first appearance in the column),
-- `Alphabetical` (natural case-insensitive UTF-8 sort),
-- `FrequencyDescending` / `FrequencyAscending` (count of non-excluded rows),
-- `Explicit(Vec<String>)` (manual drag-ordered sequence; unseen levels append deterministically in entry order),
-- `reversed: bool` modifier.
+- **`Column` unpaired vs. matched row-index semantics (`ColumnDesignHint`):** Although unpaired and matched `Column` sheets share the same 2D `[row][column]` grid, `ColumnDesignHint` (`UnpairedReplicates`, `PairedRepeatedMeasures`, `PrecomputedError`) governs both UI layout and default downstream defaults:
+  - In `UnpairedReplicates` (default), row index $r$ is an arbitrary vertical stack slot: permuting observations within column `A` alone leaves all unpaired test statistics invariant, unequal column lengths ($n_A \ne n_B$) are ordinary unbalanced groups, the `Row Titles` column starts collapsed, and the auto-created graph defaults to a summary bar/column-scatter plot.
+  - In `PairedRepeatedMeasures`, row index $r$ identifies a shared experimental block/subject measured across columns `A, B, …`: permuting a single column changes paired-*t* / RM-ANOVA statistics, missing cells indicate incomplete blocks (handled by pair dropping in two-group tests or REML mixed-effects in $\ge 3$ groups), the `Row Titles` column starts expanded for subject identifiers, and the auto-created graph defaults to a before–after individual-value line plot. Expanding or collapsing the `Row Titles` divider is always non-destructive and reversible on live tables.
+- **`Grouped` 3D coordinate tensor:** Every observation $y_{r, c, s}$ in a `Grouped` table is addressed by `(Row Factor r, Column Factor c, Subcolumn Replicate s)`:
+  - Two-Way ANOVA main effects ($F_{\text{Row}}, F_{\text{Col}}$) and interaction ($F_{\text{Row}\times\text{Col}}$) are mathematically symmetric under swapping Row and Column factors, whereas default graph encoding binds `Column Factor c` to series color/legend and `Row Factor r` to X-axis cluster position.
+  - Three-Way ANOVA (`2 × 2 × K`) maps two binary factors across four column groups (`(F1_0, F2_0)`, `(F1_0, F2_1)`, `(F1_1, F2_0)`, `(F1_1, F2_1)`) and the $K$-level factor across rows; higher-level multi-way designs ($3 \times 3 \times 3$, etc.) route to `MultipleVariables` Multifactor GLM.
+
+### 2.3 `MultipleVariables` Role Inference, Bulk Recoding & Categorical Level Ordering
+
+Each column in a `MultipleVariables` sheet stores a `VariableRole` (`Continuous`, `Categorical`, `Label`, or `Calculated`) paired with `role_inferred: bool` (displaying a muted badge when auto-inferred on paste/import vs. an accented badge once explicitly confirmed by the user):
+- **Bulk categorical level recoding (`table.recodeLevels`):** Renaming a category token in the Variables inspector (for instance correcting `"Hzel"` to `"Hazel"`) rewrites matching non-excluded and excluded cells across the column atomically and merges the two levels' frequency counts in a single undoable transaction.
+- **Categorical ordering (`LevelOrderSpec`, Prism 11.1 parity):** Each `Categorical` column stores:
+  - `EntryOrder` (order of first appearance in the column),
+  - `Alphabetical` (natural case-insensitive UTF-8 sort),
+  - `FrequencyDescending` / `FrequencyAscending` (count of non-excluded rows),
+  - `Explicit(Vec<String>)` (manual drag-ordered sequence; unseen levels append deterministically in entry order),
+  - `reversed: bool` modifier.
 
 Graphs referencing a `MultipleVariables` sheet may either inherit the table's `LevelOrderSpec` or override display order per axis/legend without mutating the source table's contrast reference level.
 
 ---
 
-## 3. Info Sheets & Hookable Constants
+## 3. Info Sheets, Floating Notes & Hookable Constants
 
-Every `DataSheet` is paired with (or shares) an `InfoSheet` containing:
-1. Freeform Rich/Markdown experimental notes,
-2. Structured key–value **Info Constants** (`name: String`, `value: ConstantValue`, `units: Option<String>`).
+Every `DataSheet` is paired with (or shares) a two-pane `InfoSheet` containing:
+1. Structured key–value **Info Constants** (`name: String`, `value: ConstantValue`, `units: Option<String>`) on the left pane, pre-seeded on new projects with standard laboratory keys (`Experiment Date`, `Experiment ID`, `Notebook ID`, `Project`, `Experimenter`, `Protocol`) alongside user-appended rows,
+2. Freeform Rich/Markdown experimental notes on the right pane.
+
+In addition, any sheet in a project (`DataSheet`, `InfoSheet`, `ResultSheet`, `GraphSheet`, `LayoutSheet`) may carry zero or more collapsible **`FloatingNote`** callouts (`id`, `fill_color`, `bounds_pt`, `minimized: bool`, rich-text body) for inline methodological reminders and outlier audit trails.
 
 Info constants and upstream `ResultSheet` scalars (such as a fitted $K_d$ from a saturation-binding sheet or a control mean from a descriptive-stats sheet) participate in the engine's **Constant Hooking** graph (`HookSource`):
 - Nonlinear regression constraints (e.g., fixing radioligand concentration `HotNM` or Michaelis constant `Km` in a competitive-inhibition fit),
@@ -100,22 +113,47 @@ Transforms never overwrite a `DataSheet` in place; they execute as pure function
    - Subtract or divide by baseline column(s), linear baseline interpolated between first/last $k$ rows, or mean of replicate subcolumns (`A - B`, `A / B`, `% change from baseline`).
 4. **Transpose, Prune Rows & Binning:**
    - Swap rows $\leftrightarrow$ data sets while preserving titles; decimate every $k$-th row or average $k$-row windows for high-frequency time-series traces; Select & Transform subsetting (`MultipleVariables` $\to$ `XY` / `Column` / `Grouped` / `Survival`).
-5. **Simulate XY / Column / Contingency Data (`TransformSimulate`):**
-   - Deterministic seeded PRNG (`lumencraft-math::rng`) generating synthetic curves or distributions with Gaussian, Poisson, or relative-percentage scatter for Monte Carlo validation, power exploration, and teaching workflows.
+5. **Simulate XY / Column / Contingency Data (`TransformAnalysisSpec::Simulate`):**
+   - Deterministic seeded PRNG (`lumencraft-math::rng`) parameterized by `seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise` (`SimulationNoise`: `None`, `Gaussian`, `RelativePercent`, or `Poisson`) to generate synthetic curves or distributions for Monte Carlo validation, power exploration, and teaching workflows.
 
 ---
 
-## 6. Engine Command Contracts (`crates/engine/src/cmd/table.rs`)
+## 6. Live Linked Data Regions, Import Filtering & Reactive Transposition
+
+Beyond derived `ResultSheet` transforms, a `DataSheet` may embed live, provenance-tracked **`LinkedDataRegion`** cell ranges (`table.pasteLink` and the 4-stage `Import & Paste Special` pipeline):
+
+1. **Four-stage import & link specification (`ImportLinkSpec`):**
+   - **Source:** Clipboard buffer, internal upstream `DataSheet` / `ResultSheet` range, or external delimited text file (`CSV` / `TSV` path + delimiter + decimal locale `,` vs `.`).
+   - **Filter & Reshape:** Row/column window slicing (`start..=end`), periodic row decimation (every $k$-th row), long-to-wide `Unstack` grouping, and **inline asterisk exclusion parsing** (tokens formatted as `45.6*` or `*45.6` parse directly as `CellValue::Number(45.6)` with `excluded = true`).
+   - **Placement & Orientation:** Overwrite, insert, or append at anchor cell `(row, col, subcol)`, optional `skip_contiguous_blanks`, and optional **`transpose: bool`**.
+   - **Provenance & Notes:** Automatic audit entry in the target `InfoSheet` recording source path/sheet, filter slice, and timestamp.
+2. **Color-coded provenance borders in the grid:**
+   - **Blue border:** Live link to an internal `DataSheet` cell range.
+   - **Green border:** Live link to an analyzable `ResultSheet` (such as `Transform`, `Normalize`, or `Transpose`).
+   - **Red border:** Live link to a terminal statistical/regression `ResultSheet` parameter cell.
+   - **Charcoal border:** Live link to an external CSV/TSV file on disk.
+3. **Reactive cross-table transposition (`Grouped` $\leftrightarrow$ `Column`):**
+   - Linking a single row's horizontal replicate subcolumns (`1 × N`) from a `Grouped` sheet into a `Column` sheet with `transpose: true` reshapes the slice into `(N × 1)` vertical replicates; anchoring the link in the target's column-title header row also propagates the upstream row title as the target column title.
+   - Any upstream cell edit, value exclusion, or title rename invalidates the `LinkedDataRegion` in `lumencraft-engine`'s DAG and automatically recomputes all downstream `Column` analyses and graphs.
+
+---
+
+## 7. Engine Command Contracts (`crates/engine/src/cmd/table.rs`)
 
 Planned canonical command IDs (all JSON-serializable, undoable in one step, reachable from GUI, CLI, `--control`, and MCP):
 
-- `sheet.createData` — `{ archetype, title, subcolumnMode, replicates }`
+- `sheet.createData` — `{ archetype, title, designHint, subcolumnMode, replicates }`
 - `sheet.freeze` / `sheet.unfreeze` — `{ sheetId }`
-- `sheet.clonePipeline` — `{ sheetId, keepXValues, clearYValues, title }` ("Clone family / New data for existing graph & analysis")
+- `sheet.clonePipeline` — `{ sheetId, keepXValues, clearYValues, clearColumnTitles, clearRowTitles, overrideReplicates, title }` ("Clone family / New data for existing graph & analysis")
 - `table.setCells` — `{ sheetId, edits: [{ row, dataSet, subcolumn, value }] }`
+- `table.pasteLink` — `{ targetSheetId, anchor, linkSpec }` (live `LinkedDataRegion` including reactive transpose)
 - `table.excludeCells` — `{ sheetId, selection, excluded: bool }`
 - `table.setTitles` — `{ sheetId, xTitle, dataSetTitles, rowTitles }`
+- `table.setVariableRole` — `{ sheetId, column, role }` (locks `role_inferred = false`)
+- `table.recodeLevels` — `{ sheetId, column, mappings: [{ from, to }] }`
 - `table.setCategoricalOrder` — `{ sheetId, column, orderSpec }`
 - `table.setCalculatedVariable` — `{ sheetId, column, title, formula }`
 - `info.setConstant` / `analysis.hookConstant` — `{ sheetId, name, value, units }`
+- `analysis.updateParams` — `{ analysisId, spec }` (in-place parameter reconfiguration + auto-title refresh)
+- `analysis.retargetData` — `{ analysisId, newSourceSheetId, columnMapping }` (`Change Data Analyzed` across families)
 - `transform.run` — `{ sourceSheetId, spec }`

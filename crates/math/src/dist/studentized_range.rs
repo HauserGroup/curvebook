@@ -1,15 +1,19 @@
-//! Studentized range distribution `q(k, df)` (`ptukey` / `qtukey` family) for Tukey HSD,
-//! Tukey-Kramer, Newman-Keuls, and Games-Howell post-hoc multiple comparisons.
+//! Studentized range distribution `q(k, df)` (`ptukey` / `qtukey` family) and maximum of `r`
+//! Studentized ranges `q(r, c, df)` for Tukey HSD, Tukey-Kramer, Newman-Keuls, Games-Howell, and
+//! simple-effects multiple comparisons.
 //!
-//! Evaluates two-panel 32-point Gauss-Legendre quadrature over the inner Gaussian range integral
-//! paired with outer chi-scale integration, achieving >= 10-13 digits for `2 <= k <= 200` and all
+//! Evaluates multi-panel 32-point Gauss-Legendre quadrature over Hartley's folded Gaussian range
+//! integral (for lower-tail CDF) and saddle-point-adapted cancellation-free upper-tail quadrature
+//! paired with outer chi-scale integration, achieving >= 11-14 digits for `2 <= k <= 200` and all
 //! real `df > 0` (including fractional Welch-Satterthwaite degrees of freedom and `df = +inf`)
 //! without `1.0 - cdf` upper-tail cancellation.
 //!
-//! Reference:
+//! References:
 //! - Copenhaver, M. D., & Holland, B. (1988). Computation of the distribution of the maximum
 //!   studentized range statistic with application to multiple significance testing of simple
 //!   effects. *Journal of Statistical Computation and Simulation*, 30(1), 1-15.
+//!   `doi:10.1080/00949658808811082`.
+//! - Hartley, H. O. (1942). The range in random samples. *Biometrika*, 32(3/4), 334-348.
 
 use crate::dist::core::{norm_cdf, norm_isf, norm_pdf, norm_sf, student_t_two_sided_isf, student_t_two_sided_p};
 use crate::error::MathError;
@@ -20,28 +24,52 @@ use crate::special::gamma::{deviance_bd0, ln_gamma, stirling_err};
 const NORMAL_Z_MIN: f64 = -10.0;
 const NORMAL_Z_MAX: f64 = 9.5;
 const HUGE_DF_CUTOFF: f64 = 1e8;
+const MAX_BRACKET_STEPS: usize = 64;
 
 fn active_z_upper_bound(km1_f: f64) -> f64 {
     let tail_floor = (1e-20_f64).powf(1.0 / km1_f.max(1.0)).min(0.999_999);
     norm_isf(tail_floor).unwrap_or(NORMAL_Z_MAX).clamp(-2.0, NORMAL_Z_MAX)
 }
 
-fn integrate_z_panels<F: FnMut(f64) -> f64>(mut f: F, w: f64, k: usize) -> f64 {
+/// Integrate `f` over `[lo, hi]` across non-degenerate sub-panels partitioned by `knots`.
+fn sum_gl32_panels<F: FnMut(f64) -> f64>(mut f: F, lo: f64, hi: f64, knots: &[f64], min_gap: f64) -> f64 {
+    if hi <= lo {
+        return 0.0;
+    }
+    let mut sorted = [0.0_f64; 8];
+    let mut count = 0_usize;
+    for &x in knots.iter().take(sorted.len()) {
+        if x.is_finite()
+            && let Some(slot) = sorted.get_mut(count)
+        {
+            *slot = x;
+            count += 1;
+        }
+    }
+    if let Some(active) = sorted.get_mut(..count) {
+        active.sort_by(f64::total_cmp);
+    }
+
+    let mut total = 0.0_f64;
+    let mut cur = lo;
+    for &x in sorted.get(..count).unwrap_or(&[]) {
+        if x > cur + min_gap && x + min_gap < hi {
+            total += gauss_legendre_32(&mut f, cur, x);
+            cur = x;
+        }
+    }
+    total + gauss_legendre_32(&mut f, cur, hi)
+}
+
+fn integrate_z_sf_panels<F: FnMut(f64) -> f64>(f: F, w: f64, k: usize) -> f64 {
     let kf = k as f64;
     let km1_f = (k - 1) as f64;
+    let z_star = -0.5 * w;
+    let z_min = (z_star - 9.5).min(NORMAL_Z_MIN);
     let z_mode = -norm_isf(1.0 / kf).unwrap_or(0.0).min(5.0);
-    let z_max = active_z_upper_bound(km1_f).max(z_mode + 1.5).min(NORMAL_Z_MAX);
-    let p1 = (-w).clamp(NORMAL_Z_MIN + 1.0, z_mode - 0.5);
-    if p1 < z_mode - 0.25 {
-        let i1 = gauss_legendre_32(&mut f, NORMAL_Z_MIN, p1);
-        let i2 = gauss_legendre_32(&mut f, p1, z_mode);
-        let i3 = gauss_legendre_32(&mut f, z_mode, z_max);
-        i1 + i2 + i3
-    } else {
-        let i1 = gauss_legendre_32(&mut f, NORMAL_Z_MIN, z_mode);
-        let i2 = gauss_legendre_32(&mut f, z_mode, z_max);
-        i1 + i2
-    }
+    let z_max = active_z_upper_bound(km1_f).max(z_mode + 2.0).min(NORMAL_Z_MAX);
+    let knots = [z_star - 3.0, z_star, z_star + 3.0, z_mode];
+    sum_gl32_panels(f, z_min, z_max, &knots, 0.25)
 }
 
 fn validate_q_args(q: f64, k: usize, df: f64) -> Result<(), MathError> {
@@ -57,24 +85,61 @@ fn validate_q_args(q: f64, k: usize, df: f64) -> Result<(), MathError> {
     Ok(())
 }
 
-/// Inner Gaussian range CDF `W_k(w) = P(max_{1..=k} Z_i - min_{1..=k} Z_i <= w)` for `w > 0`.
+fn validate_max_q_args(q: f64, r: usize, c: usize, df: f64) -> Result<(), MathError> {
+    if r < 1 {
+        return Err(MathError::InvalidParameter { name: "r", value: r as f64 });
+    }
+    if c < 2 {
+        return Err(MathError::InvalidParameter { name: "c", value: c as f64 });
+    }
+    if df.is_nan() || df <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df", value: df });
+    }
+    if q.is_nan() {
+        return Err(MathError::DomainError { name: "q", value: q });
+    }
+    Ok(())
+}
+
+/// Inner Gaussian range CDF `H_k(w) = P(max_{1..=k} Z_i - min_{1..=k} Z_i <= w)` for `w > 0`.
+///
+/// Uses Hartley's (1942) / Copenhaver & Holland (1988, Eq. 2.1-2.2) folded positive-half-line
+/// integral `[Phi(w/2) - Phi(-w/2)]^k + 2 k int_{w/2}^{inf} phi(v) [Phi(v) - Phi(v - w)]^{k-1} dv`
+/// for `w < 20`, switching to `1 - gaussian_range_sf(w, k)` in the far upper tail.
 fn gaussian_range_cdf(w: f64, k: usize) -> f64 {
     if w <= 0.0 {
         return 0.0;
     }
+    if k == 2 {
+        return (1.0 - crate::special::erfc(0.5 * w)).clamp(0.0, 1.0);
+    }
     if w >= 20.0 {
         return (1.0 - gaussian_range_sf(w, k)).clamp(0.0, 1.0);
     }
+    let half_w = 0.5 * w;
+    let center_prob = normal_interval_prob(-half_w, half_w);
+    let center_term = if center_prob > 0.0 { center_prob.powi(k as i32) } else { 0.0 };
+
     let kf = k as f64;
-    let km1 = (k - 1) as i32;
-    let integrand = |z: f64| -> f64 {
-        let diff = normal_interval_prob(z, z + w);
-        if diff <= 0.0 { 0.0 } else { kf * norm_pdf(z) * diff.powi(km1) }
+    let km1_f = (k - 1) as f64;
+    let km1_i = (k - 1) as i32;
+    let v_mode = norm_isf(1.0 / kf).unwrap_or(0.0).clamp(0.0, 5.5);
+    let v_max = active_z_upper_bound(km1_f).max(v_mode + 2.5).max(half_w + 4.0).min(11.0);
+    if half_w >= v_max {
+        return center_term.clamp(0.0, 1.0);
+    }
+
+    let wing_integrand = |v: f64| -> f64 {
+        let diff = normal_interval_prob(v - w, v);
+        if diff <= 0.0 { 0.0 } else { 2.0 * kf * norm_pdf(v) * diff.powi(km1_i) }
     };
-    integrate_z_panels(integrand, w, k).clamp(0.0, 1.0)
+    let mid = 0.5 * (half_w + v_max);
+    let knots = [v_mode, v_mode + 2.0, mid];
+    let wings = sum_gl32_panels(wing_integrand, half_w, v_max, &knots, 0.25);
+    (center_term + wings).clamp(0.0, 1.0)
 }
 
-/// Cancellation-free inner Gaussian range survival `1 - W_k(w) = P(Z_{(k)} - Z_{(1)} > w)`:
+/// Cancellation-free inner Gaussian range survival `1 - H_k(w) = P(Z_{(k)} - Z_{(1)} > w)`:
 /// uses the exact identity `int_{-inf}^{inf} k phi(z) Phi(-z)^{k-1} dz = 1` so the integrand is
 /// strictly non-negative everywhere:
 /// `k * phi(z) * A^{k-1} * (1 - (1 - B/A)^{k-1})` where `A = Phi(-z)` and `B = Phi(-z - w)`.
@@ -84,6 +149,9 @@ fn gaussian_range_sf(w: f64, k: usize) -> f64 {
     }
     if k == 2 {
         return crate::special::erfc(0.5 * w);
+    }
+    if 0.25 * w * w > 760.0 {
+        return 0.0;
     }
     let kf = k as f64;
     let km1_f = (k - 1) as f64;
@@ -105,7 +173,22 @@ fn gaussian_range_sf(w: f64, k: usize) -> f64 {
         };
         kf * norm_pdf(z) * a.powi(km1_i) * bracket_gap.max(0.0)
     };
-    integrate_z_panels(integrand, w, k).clamp(0.0, 1.0)
+    integrate_z_sf_panels(integrand, w, k).clamp(0.0, 1.0)
+}
+
+/// Cancellation-free survival `1 - [H_c(w)]^r` of the maximum of `r` independent `c`-group Gaussian ranges.
+fn max_gaussian_range_sf(w: f64, r: usize, c: usize) -> f64 {
+    if r == 1 {
+        return gaussian_range_sf(w, c);
+    }
+    let s = gaussian_range_sf(w, c);
+    if s <= 0.0 {
+        0.0
+    } else if s >= 1.0 {
+        1.0
+    } else {
+        (-((-s).ln_1p() * (r as f64)).exp_m1()).clamp(0.0, 1.0)
+    }
 }
 
 /// Compute `Phi(hi) - Phi(lo)` for `hi >= lo` without subtraction cancellation in either tail.
@@ -136,19 +219,27 @@ pub(crate) fn chi_scale_pdf(u: f64, df: f64, lg_half_df: f64) -> f64 {
     (2.0 / u) * ln_kern.exp()
 }
 
-/// Integrate `inner(u)` against `U = sqrt(chi^2_{df} / df)` over `(0, inf)` with power-change-of-variables
-/// protection when `df < 2` so `u^{df - 1}` is smooth at `u = 0`.
-pub(crate) fn integrate_over_chi_scale<F: FnMut(f64) -> f64>(df: f64, mut inner: F) -> Result<f64, MathError> {
+/// Integrate `inner(u)` against `U = sqrt(chi^2_{df} / df)` over `(0, inf)`.
+pub(crate) fn integrate_over_chi_scale<F: FnMut(f64) -> f64>(df: f64, inner: F) -> Result<f64, MathError> {
+    integrate_over_chi_scale_tail(df, 0.0, inner)
+}
+
+/// Integrate `inner(u)` against `U = sqrt(chi^2_{df} / df)` over `(0, inf)`, placing extra panel
+/// resolution around the joint saddle point `u_* = sqrt((df - 1) / (df + tail_rate_sq))` when
+/// `inner(u)` decays like `exp(-0.5 * tail_rate_sq * u^2)`.
+pub(crate) fn integrate_over_chi_scale_tail<F: FnMut(f64) -> f64>(df: f64, tail_rate_sq: f64, mut inner: F) -> Result<f64, MathError> {
     let a = 0.5 * df;
     let lg_a = if a < 12.0 { ln_gamma(a)? } else { 0.0 };
+    let rate = tail_rate_sq.max(0.0);
 
     if df < 2.0 {
-        // Substitute u = t^{1 / a} (a = df / 2): x = a u^2 = a t^{2 / a}, dx / x = (2 / a) dt / t,
-        // so f_X(x) dx = 2 * a^{a - 1} * t * exp(-x - ln Gamma(a)) dt — smooth at t = 0 with mode at t = 1!
+        // Substitute u = t^{1 / a} (a = df / 2): x = a u^2 = a t^{2 / a},
+        // f_X(x) dx = 2 * a^{a - 1} * t * exp(-x - ln Gamma(a)) dt — smooth at t = 0 with mode at t = 1.
         let p = 1.0 / a;
+        let t_star = (df / (df + rate)).powf(0.5 * a);
         let t_mid = (12.0 / a).max(2.0).powf(0.5 * a);
         let t_max = (65.0 / a).max(16.0).powf(0.5 * a);
-        let mut mapped = |t: f64| -> f64 {
+        let mapped = |t: f64| -> f64 {
             if t <= 0.0 {
                 return 0.0;
             }
@@ -157,29 +248,26 @@ pub(crate) fn integrate_over_chi_scale<F: FnMut(f64) -> f64>(df: f64, mut inner:
             let dens_dt = 2.0 * a.powf(a - 1.0) * t * (-x - lg_a).exp();
             dens_dt * inner(u)
         };
-        let p0 = gauss_legendre_32(&mut mapped, 0.0, 0.2);
-        let p1 = gauss_legendre_32(&mut mapped, 0.2, 1.0);
-        let p2 = gauss_legendre_32(&mut mapped, 1.0, t_mid);
-        let p3 = gauss_legendre_32(&mut mapped, t_mid, t_max);
-        return Ok(p0 + p1 + p2 + p3);
+        let knots = [0.2 * t_star, t_star, 0.2, 1.0, t_mid];
+        return Ok(sum_gl32_panels(mapped, 0.0, t_max, &knots, 0.02));
     }
 
     let u_mode = ((df - 1.0) / df).sqrt();
     let sigma_u = (0.5 / df).sqrt();
-    let u_min = (u_mode - 11.0 * sigma_u).max(0.0);
-    let u_left = (u_mode - 3.5 * sigma_u).max(0.35 * u_mode);
-    let u_mid_right = u_mode + 4.0 * sigma_u;
-    let u_max = u_mode + 13.5 * sigma_u;
+    let eff_df = df + rate;
+    let u_star = ((df - 1.0) / eff_df).sqrt();
+    let sigma_star = (0.5 / eff_df).sqrt();
 
-    let mut weighted = |u: f64| -> f64 {
+    let u_min = (u_star - 11.0 * sigma_star).min(u_mode - 11.0 * sigma_u).max(0.0);
+    let u_max = (u_mode + 13.5 * sigma_u).max(u_star + 11.0 * sigma_star);
+    let min_gap = (0.25 * sigma_star.min(sigma_u)).max(1e-6);
+
+    let weighted = |u: f64| -> f64 {
         let dens = chi_scale_pdf(u, df, lg_a);
         if dens <= 1e-300 { 0.0 } else { dens * inner(u) }
     };
-    let i1 = gauss_legendre_32(&mut weighted, u_min, u_left);
-    let i2 = gauss_legendre_32(&mut weighted, u_left, u_mode);
-    let i3 = gauss_legendre_32(&mut weighted, u_mode, u_mid_right);
-    let i4 = gauss_legendre_32(&mut weighted, u_mid_right, u_max);
-    Ok(i1 + i2 + i3 + i4)
+    let knots = [u_star - 3.5 * sigma_star, u_star, u_star + 3.5 * sigma_star, u_mode - 3.5 * sigma_u, u_mode, u_mode + 4.0 * sigma_u];
+    Ok(sum_gl32_panels(weighted, u_min, u_max, &knots, min_gap))
 }
 
 /// Lower-tail CDF `P(Q_{k, df} <= q)` of the Studentized range distribution for `k >= 2` groups
@@ -223,7 +311,7 @@ pub fn studentized_range_sf(q: f64, k: usize, df: f64) -> Result<f64, MathError>
     if df.is_infinite() || df >= HUGE_DF_CUTOFF {
         return Ok(gaussian_range_sf(q, k));
     }
-    Ok(integrate_over_chi_scale(df, |u| gaussian_range_sf(q * u, k))?.clamp(0.0, 1.0))
+    Ok(integrate_over_chi_scale_tail(df, 0.5 * q * q, |u| gaussian_range_sf(q * u, k))?.clamp(0.0, 1.0))
 }
 
 /// Natural logarithm of the Studentized range upper-tail probability `ln P(Q_{k, df} > q)`.
@@ -247,44 +335,12 @@ pub fn studentized_range_ln_sf(q: f64, k: usize, df: f64) -> Result<f64, MathErr
 /// Upper-tail critical value `q_{alpha, k, df}` solving `P(Q_{k, df} > q) = alpha` for `alpha in [0, 1]`.
 ///
 /// # Errors
-/// Returns an error if `k < 2`, `df <= 0`, or `alpha` lies outside `[0, 1]`.
+/// Returns an error if `k < 2`, `df <= 0`, `alpha` lies outside `[0, 1]`, or bracketing fails.
 pub fn studentized_range_isf(alpha: f64, k: usize, df: f64) -> Result<f64, MathError> {
     if k < 2 {
         return Err(MathError::InvalidParameter { name: "k", value: k as f64 });
     }
-    if df.is_nan() || df <= 0.0 {
-        return Err(MathError::InvalidParameter { name: "df", value: df });
-    }
-    if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
-        return Err(MathError::DomainError { name: "alpha", value: alpha });
-    }
-    if alpha == 0.0 {
-        return Ok(f64::INFINITY);
-    }
-    if alpha == 1.0 {
-        return Ok(0.0);
-    }
-    if k == 2 {
-        return Ok(std::f64::consts::SQRT_2 * student_t_two_sided_isf(alpha, df)?);
-    }
-
-    // Rigorous mathematical bounds:
-    // Lower bound: k = 2 single-pair range sqrt(2) * t_{alpha, df} (since Q_k >= Q_2 stochastically).
-    // Upper bound: Bonferroni over all k(k-1)/2 pairs: sqrt(2) * t_{alpha / pairs, df}!
-    let pairs = ((k * (k - 1)) / 2) as f64;
-    let lo_base = std::f64::consts::SQRT_2 * student_t_two_sided_isf(alpha, df)?;
-    let hi_base = std::f64::consts::SQRT_2 * student_t_two_sided_isf((alpha / pairs).max(f64::MIN_POSITIVE), df)?;
-    let mut lo = (0.99 * lo_base).max(0.0);
-    let mut hi = 1.02 * hi_base + 0.1;
-
-    while studentized_range_sf(lo, k, df)? < alpha && lo > 0.0 {
-        lo *= 0.5;
-    }
-    while studentized_range_sf(hi, k, df)? > alpha {
-        hi *= 1.5;
-    }
-
-    brent_root(|q| studentized_range_sf(q, k, df).unwrap_or(f64::NAN) - alpha, lo, hi, RootOptions { rel_tol: 1e-11, abs_tol: 1e-12, max_iters: 96 })
+    max_studentized_range_isf(alpha, 1, k, df)
 }
 
 /// Lower-tail quantile `F^{-1}(p)` of the Studentized range distribution solving `P(Q_{k, df} <= q) = p`.
@@ -298,22 +354,142 @@ pub fn studentized_range_ppf(p: f64, k: usize, df: f64) -> Result<f64, MathError
     studentized_range_isf(1.0 - p, k, df)
 }
 
+/// Lower-tail CDF `F(q; r, c, df) = P(max_{1 <= i <= r} Q_i <= q)` of the maximum of `r >= 1`
+/// independent `c`-group Studentized ranges (`c >= 2`) sharing a common variance estimate on `df`
+/// degrees of freedom (Copenhaver & Holland, 1988, Eq. 2.3-2.4).
+///
+/// When `r == 1`, this coincides with [`studentized_range_cdf`].
+///
+/// # Errors
+/// Returns an error if `r < 1`, `c < 2`, `df <= 0`, or `q` is `NaN`.
+pub fn max_studentized_range_cdf(q: f64, r: usize, c: usize, df: f64) -> Result<f64, MathError> {
+    validate_max_q_args(q, r, c, df)?;
+    if r == 1 {
+        return studentized_range_cdf(q, c, df);
+    }
+    if q <= 0.0 {
+        return Ok(0.0);
+    }
+    if q.is_infinite() {
+        return Ok(1.0);
+    }
+    let r_i = i32::try_from(r).unwrap_or(i32::MAX);
+    if df.is_infinite() || df >= HUGE_DF_CUTOFF {
+        return Ok(gaussian_range_cdf(q, c).powi(r_i).clamp(0.0, 1.0));
+    }
+    Ok(integrate_over_chi_scale(df, |u| gaussian_range_cdf(q * u, c).powi(r_i))?.clamp(0.0, 1.0))
+}
+
+/// Upper-tail *p*-value `P(max_{1 <= i <= r} Q_i > q)` of the maximum of `r >= 1` Studentized ranges
+/// (`c >= 2` means each, common `df > 0`) evaluated directly without `1.0 - cdf` cancellation.
+///
+/// # Errors
+/// Returns an error if `r < 1`, `c < 2`, `df <= 0`, or `q` is `NaN`.
+pub fn max_studentized_range_sf(q: f64, r: usize, c: usize, df: f64) -> Result<f64, MathError> {
+    validate_max_q_args(q, r, c, df)?;
+    if r == 1 {
+        return studentized_range_sf(q, c, df);
+    }
+    if q <= 0.0 {
+        return Ok(1.0);
+    }
+    if q.is_infinite() {
+        return Ok(0.0);
+    }
+    if df.is_infinite() || df >= HUGE_DF_CUTOFF {
+        return Ok(max_gaussian_range_sf(q, r, c));
+    }
+    Ok(integrate_over_chi_scale_tail(df, 0.5 * q * q, |u| max_gaussian_range_sf(q * u, r, c))?.clamp(0.0, 1.0))
+}
+
+/// Upper-tail critical value `q(alpha; r, c, df)` solving `P(max_{1 <= i <= r} Q_i > q) = alpha`
+/// for `r >= 1`, `c >= 2`, `df > 0`, and `alpha in [0, 1]` (Copenhaver & Holland, 1988).
+///
+/// # Errors
+/// Returns an error if `r < 1`, `c < 2`, `df <= 0`, `alpha` lies outside `[0, 1]`, or bracketing fails.
+pub fn max_studentized_range_isf(alpha: f64, r: usize, c: usize, df: f64) -> Result<f64, MathError> {
+    if r < 1 {
+        return Err(MathError::InvalidParameter { name: "r", value: r as f64 });
+    }
+    if c < 2 {
+        return Err(MathError::InvalidParameter { name: "c", value: c as f64 });
+    }
+    if df.is_nan() || df <= 0.0 {
+        return Err(MathError::InvalidParameter { name: "df", value: df });
+    }
+    if !alpha.is_finite() || !(0.0..=1.0).contains(&alpha) {
+        return Err(MathError::DomainError { name: "alpha", value: alpha });
+    }
+    if alpha == 0.0 {
+        return Ok(f64::INFINITY);
+    }
+    if alpha == 1.0 {
+        return Ok(0.0);
+    }
+    if r == 1 && c == 2 {
+        return Ok(std::f64::consts::SQRT_2 * student_t_two_sided_isf(alpha, df)?);
+    }
+
+    // Rigorous mathematical bounds:
+    // Lower bound: single-pair range (r = 1, c = 2) sqrt(2) * t_{alpha, df}.
+    // Upper bound: Bonferroni over all r * c * (c - 1) / 2 pairwise comparisons.
+    let pairs_per_range = ((c * (c - 1)) / 2) as f64;
+    let total_pairs = (r as f64) * pairs_per_range;
+    let lo_base = std::f64::consts::SQRT_2 * student_t_two_sided_isf(alpha, df)?;
+    let hi_base = std::f64::consts::SQRT_2 * student_t_two_sided_isf((alpha / total_pairs).max(f64::MIN_POSITIVE), df)?;
+    let mut lo = (0.99 * lo_base).max(0.0);
+    let mut hi = 1.02 * hi_base + 0.1;
+
+    for _ in 0..MAX_BRACKET_STEPS {
+        if max_studentized_range_sf(lo, r, c, df)? >= alpha || lo == 0.0 {
+            break;
+        }
+        lo *= 0.5;
+    }
+    for _ in 0..MAX_BRACKET_STEPS {
+        if max_studentized_range_sf(hi, r, c, df)? <= alpha {
+            break;
+        }
+        hi *= 1.5;
+    }
+    if max_studentized_range_sf(lo, r, c, df)? < alpha || max_studentized_range_sf(hi, r, c, df)? > alpha {
+        return Err(MathError::NotConverged { algorithm: "max_studentized_range_isf", iterations: MAX_BRACKET_STEPS });
+    }
+
+    brent_root(
+        |q| max_studentized_range_sf(q, r, c, df).unwrap_or(f64::NAN) - alpha,
+        lo,
+        hi,
+        RootOptions { rel_tol: 1e-11, abs_tol: 1e-12, max_iters: 96 },
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{gaussian_range_sf, integrate_over_chi_scale, studentized_range_cdf, studentized_range_isf, studentized_range_sf};
+    use super::{
+        gaussian_range_sf, integrate_over_chi_scale_tail, max_studentized_range_cdf, max_studentized_range_isf, max_studentized_range_sf,
+        studentized_range_cdf, studentized_range_isf, studentized_range_sf,
+    };
     use crate::dist::core::student_t_two_sided_p;
+    use crate::dist::dunnett::dunnett_two_sided_p_loadings;
 
     #[test]
     fn quadrature_k2_matches_exact_sqrt2_student_t_to_12_plus_digits() {
         // Test the full 2D quadrature engine directly on k = 2 (bypassing the k == 2 fast-path)
-        // against exact sqrt(2) * |t_{df}| across integer and fractional degrees of freedom!
+        // against exact sqrt(2) * |t_{df}| across integer, fractional, and deep-tail inputs.
         for &df in &[1.5, 4.0, 12.7, 60.0] {
-            for &q in &[1.2, 3.5, 6.0] {
-                let quad_sf = integrate_over_chi_scale(df, |u| gaussian_range_sf(q * u, 2)).unwrap();
+            for &q in &[1.2, 3.5, 6.0, 12.0] {
+                let quad_sf = integrate_over_chi_scale_tail(df, 0.5 * q * q, |u| gaussian_range_sf(q * u, 2)).unwrap();
                 let exact_sf = student_t_two_sided_p(q * std::f64::consts::FRAC_1_SQRT_2, df).unwrap();
                 assert!((quad_sf - exact_sf).abs() <= 1e-11 * exact_sf, "df={df}, q={q}: quad={quad_sf:.15e} vs exact={exact_sf:.15e}");
             }
         }
+
+        // Verify extreme Gaussian upper tail w = 24.0 on k = 3 (saddle point z_* = -12 < -10):
+        // P(Z_{(3)} - Z_{(1)} > w) ~ 3 * erfc(w / 2) = 3 * erfc(12) to > 12 digits!
+        let sf_w24 = studentized_range_sf(24.0, 3, f64::INFINITY).unwrap();
+        let asymp_w24 = 3.0 * crate::special::erfc(12.0);
+        assert!((sf_w24 - asymp_w24).abs() <= 1e-11 * asymp_w24, "w=24: {sf_w24:.15e} vs {asymp_w24:.15e}");
     }
 
     #[test]
@@ -346,5 +522,68 @@ mod tests {
         assert!((sf_back - 0.05).abs() < 1e-10, "k=200 roundtrip: q={q_200_60}, sf={sf_back}");
         let cdf_back = studentized_range_cdf(q_200_60, 200, 60.0).unwrap();
         assert!(((cdf_back + sf_back) - 1.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn copenhaver_holland_1988_published_tables_and_sugar_cane_example() {
+        // Published numerical values from Copenhaver, M. D., & Holland, B. (1988),
+        // "Computation of the distribution of the maximum studentized range statistic with
+        // application to multiple significance testing of simple effects", Journal of Statistical
+        // Computation and Simulation, 30(1), 1-15, doi:10.1080/00949658808811082.
+        //
+        // Note: Table 1's printed heading reads "0.005", a well-known publisher misprint for
+        // alpha = 0.05 (confirmed both by [H_3(3.68)]^2 = 0.95 at df = inf and by Section 5 p. 14).
+        let table_1_alpha_05: &[(usize, usize, f64, f64)] = &[
+            (2, 3, 5.0, 5.37),
+            (2, 3, 10.0, 4.42),
+            (2, 3, 20.0, 4.02),
+            (2, 3, 60.0, 3.79),
+            (2, 3, f64::INFINITY, 3.68),
+            (3, 4, 15.0, 4.82),
+            (4, 5, 20.0, 5.08),
+            (5, 6, 40.0, 5.08),
+            (10, 10, 120.0, 5.57),
+            (20, 20, f64::INFINITY, 6.11),
+        ];
+        for &(r, c, df, published) in table_1_alpha_05 {
+            let q = max_studentized_range_isf(0.05, r, c, df).unwrap();
+            assert!((q - published).abs() <= 0.006, "Table 1 (alpha=0.05, r={r}, c={c}, df={df}): got {q:.6} vs {published:.2}");
+        }
+
+        // Table 2 (pp. 9-10): experimentwise type I error rate alpha = 0.10.
+        let table_2_alpha_10: &[(usize, usize, f64, f64)] = &[
+            (2, 3, 5.0, 4.41),
+            (2, 3, 10.0, 3.80),
+            (2, 3, 20.0, 3.54),
+            (2, 3, f64::INFINITY, 3.30),
+            (3, 3, 15.0, 3.90),
+            (4, 4, 20.0, 4.34),
+            (6, 5, 60.0, 4.52),
+            (10, 8, 120.0, 5.08),
+            (20, 20, f64::INFINITY, 5.87),
+        ];
+        for &(r, c, df, published) in table_2_alpha_10 {
+            let q = max_studentized_range_isf(0.10, r, c, df).unwrap();
+            assert!((q - published).abs() <= 0.006, "Table 2 (alpha=0.10, r={r}, c={c}, df={df}): got {q:.6} vs {published:.2}");
+        }
+
+        // Section 3 (p. 11) identity: when c = 2, max_{1..=r} Q_i / sqrt(2) follows the Studentized
+        // maximum modulus distribution |T|_{r, df} with zero off-diagonal correlations (Dunnett lambda = 0).
+        for &(r, df, q) in &[(4_usize, 18.0_f64, 3.6_f64), (6_usize, f64::INFINITY, 4.1_f64)] {
+            let sf_q = max_studentized_range_sf(q, r, 2, df).unwrap();
+            let sf_smm = dunnett_two_sided_p_loadings(q * std::f64::consts::FRAC_1_SQRT_2, df, &vec![0.0; r]).unwrap();
+            assert!((sf_q - sf_smm).abs() < 1e-11, "SMM identity r={r}, df={df}: {sf_q} vs {sf_smm}");
+            let cdf_q = max_studentized_range_cdf(q, r, 2, df).unwrap();
+            assert!(((cdf_q + sf_q) - 1.0).abs() < 1e-12);
+        }
+
+        // Section 5 (p. 14) Cochran & Cox (1957) 3x3 sugar cane randomized-block example (4 blocks):
+        // r = 3, c = 3, RCBD error df = (4 - 1) * (9 - 1) = 24, S / sqrt(n) = 3.3132;
+        // paper reports critical differences 13.93 (alpha = 0.05) and 12.43 (alpha = 0.10).
+        let se = 3.3132_f64;
+        let rhs_05 = se * max_studentized_range_isf(0.05, 3, 3, 24.0).unwrap();
+        let rhs_10 = se * max_studentized_range_isf(0.10, 3, 3, 24.0).unwrap();
+        assert!((rhs_05 - 13.93).abs() < 0.005, "sugar cane alpha=0.05 RHS = {rhs_05:.4}");
+        assert!((rhs_10 - 12.43).abs() < 0.005, "sugar cane alpha=0.10 RHS = {rhs_10:.4}");
     }
 }

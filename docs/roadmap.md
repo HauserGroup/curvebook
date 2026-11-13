@@ -1,6 +1,6 @@
 # Roadmap: milestones and stage gates
 
-> **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** Alpha/Beta workflow gates & hour estimates added · **Target:** GraphPad Prism 11 (11.1.x)
+> **Last reviewed:** 2026-11-13 · **Last updated:** 2026-11-13 · **Change:** Reconciled `G1` numerical foundations + 58-file NIST StRD corpus harness and `G2` `L0`/`L1` schema foundation against Alpha/Beta gates · **Target:** GraphPad Prism 11 (11.1.x)
 
 Forward-looking engineering plan. Current status and headline numbers live in [`ROADMAP.md`](../ROADMAP.md) and [`target-app-parity.md`](target-app-parity.md); the ranked task queue lives in [`gaps.md`](gaps.md). Hours are single-agent wall-clock estimates.
 
@@ -12,8 +12,8 @@ The core-workflow gate: the six everyday workflows a wet-lab biologist, pharmaco
 
 | Core workflow | Works end to end? | Governing spec | Est. hours to pass |
 |---|:---:|---|---:|
-| **1. Enter, paste, exclude & transform structured experimental data** (`XY`, `Column`, `Grouped` with replicate subcolumns, CSV/clipboard paste, blue-italic exclusions, Info constants, log/normalize transforms) | no (`M0`) | [data-tables-and-transforms.md](data-tables-and-transforms.md) | 30–45 |
-| **2. Compare groups with parametric & nonparametric tests** (unpaired/Welch/paired *t*-tests, Mann–Whitney, Wilcoxon, ordinary/Welch/RM one-way & two-way ANOVA, REML missing-replicate mixed model, Dunnett/Tukey/Šídák/BKY FDR, standardized effect sizes & Analysis Checklists) | no (`M0`) | [statistics-implementation.md](statistics-implementation.md) | 50–75 |
+| **1. Enter, paste, exclude & transform structured experimental data** (`XY`, `Column`, `Grouped` with replicate subcolumns, CSV/clipboard paste, blue-italic exclusions, Info constants, log/normalize transforms) | partial (`L0`/`L1` schemas) | [data-tables-and-transforms.md](data-tables-and-transforms.md) | 23–35 |
+| **2. Compare groups with parametric & nonparametric tests** (unpaired/Welch/paired *t*-tests, Mann–Whitney, Wilcoxon, ordinary/Welch/RM one-way & two-way ANOVA, REML missing-replicate mixed model, Dunnett/Tukey/Šídák/BKY FDR, standardized effect sizes & Analysis Checklists) | partial (`L0` math/corpus) | [statistics-implementation.md](statistics-implementation.md) | 35–55 |
 | **3. Fit nonlinear curves, compare models & interpolate unknowns** (weighted/robust Levenberg–Marquardt, 3PL/4PL/5PL dose–response, Michaelis–Menten & enzyme inhibition, binding, exponentials, shared global parameters, profile-likelihood CIs, AICc vs. *F*-test, standard-curve interpolation) | no (`M0`) | [curve-fitting-implementation.md](curve-fitting-implementation.md) | 45–70 |
 | **4. Build publication graphs with live significance brackets** (XY scatter + smooth fit curves + CI bands, bar + individual beeswarm replicates, box/violin, linear/log/probit & broken axes, auto-stacked live *p*-value brackets) | no (`M0`) | [graphing-and-layouts.md](graphing-and-layouts.md) | 30–45 |
 | **5. Compose figures & export journal-ready vectors/rasters** ( SVG, PDF 1.7, 300–1200 DPI PNG, lossless `.lumencraft` save/reopen, tidy CSV/JSON results export) | no (`M0`) | [graphing-and-layouts.md](graphing-and-layouts.md), [file-format-parity.md](file-format-parity.md) | 15–25 |
@@ -36,7 +36,7 @@ LumenCraft enters **beta** when the Alpha gate holds **and**:
 | # | Milestone | Gaps covered | Status | Est. remaining, one agent (h) |
 |---|---|---|---|---:|
 | **M0** | Clean-room workspace, `L0`–`L7` layer enforcement, `xtask` gates, packaging, CI & subsystem specs | — | ✅ done | — |
-| **M1** | Numerical primitives (`lumencraft-math`), NIST StRD harness & typed data-table model (`lumencraft-doc`, `lumencraft-format`) | `G1`, `G2` | planned | 45–70 |
+| **M1** | Numerical primitives (`lumencraft-math`), NIST StRD harness & typed data-table model (`lumencraft-doc`, `lumencraft-format`) | `G1`, `G2` | in progress (`math`, `testkit`, `palette`, `doc` done; `format` & `G1` wiring left) | 20–34 |
 | **M2** | Reactive DAG (`lumencraft-engine`) & core biostatistics + REML + multiplicity (`lumencraft-stats`) | `G2`, `G3` | planned | 45–70 |
 | **M3** | Nonlinear regression solver, profile-likelihood CIs & built-in equation library (`lumencraft-fit`) | `G4` | planned | 50–78 |
 | **M4** | Publication chart scene compiler (`lumencraft-chart`), live brackets & SVG/PDF/PNG export | `G5` | planned | 40–62 |
