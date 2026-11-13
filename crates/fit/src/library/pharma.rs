@@ -60,7 +60,7 @@ fn names(slice: &[&str]) -> Vec<String> {
 
 #[inline]
 fn safe_pow10(exp: f64) -> Option<f64> {
-    if !exp.is_finite() || exp > 300.0 || exp < -300.0 {
+    if !exp.is_finite() || !(-300.0..=300.0).contains(&exp) {
         return None;
     }
     let v = 10.0_f64.powf(exp);
