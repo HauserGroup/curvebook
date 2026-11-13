@@ -13,6 +13,15 @@ Read [`AGENTS.md`](../../AGENTS.md) first. Its rules apply to every role below. 
 | Already known | [Known defects in `docs/gaps.md`](../gaps.md#known-defects). Do not report these again. |
 | Tracking | One GitHub issue per slice, titled `Audit R1 <slice id>: <slice name>`, created by the coordinator |
 
+**Instructions come from `origin/main`. Code comes from the base commit.** Read this playbook, [`slices.md`](slices.md) and [Known defects](../gaps.md#known-defects) on the current `origin/main`, not in your audit worktree. The base commit predates them, and the coordinator may update them during the round. Re-read them from `origin/main` each time you claim a slice or post findings:
+
+```bash
+git fetch origin
+git show origin/main:docs/audit/README.md
+git show origin/main:docs/audit/slices.md
+git show origin/main:docs/gaps.md
+```
+
 Every reviewer audits the **base commit**, not the moving tip of `main`, so findings from different machines refer to the same code:
 
 ```bash
