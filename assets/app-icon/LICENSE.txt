@@ -1,7 +1,9 @@
 Copyright (c) 2026 LumenCraft contributors
 
-The original LumenCraft application icon sources and rendered icon assets in this directory are
-dual-licensed under either:
+The original LumenCraft application icon artwork (`source/approved-mole.png`), traced vector
+masters (`lumencraft.svg`, `lumencraft-small.svg`), and every derived icon asset in this directory
+(`lumencraft-1024.png`, `lumencraft-macos-512.png`, `lumencraft.icns`, `lumencraft.ico`, and
+`hicolor/`) are dual-licensed under either:
 
   - Apache License, Version 2.0 (../../LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
   - MIT license (../../LICENSE-MIT or http://opensource.org/licenses/MIT)
