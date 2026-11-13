@@ -675,7 +675,7 @@ fn exact_runs_two_sided(r_obs: usize, n1: usize, n2: usize) -> f64 {
 /// replicate `X` values and lack-of-fit).
 #[must_use]
 pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) -> Option<LackOfFitResult> {
-    if points.is_empty() || df_res == 0 {
+    if points.is_empty() || df_res == 0 || !ss_res.is_finite() || ss_res < 0.0 {
         return None;
     }
     let mut groups: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
@@ -686,10 +686,13 @@ pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) 
     for pt in points {
         if let (Some(sd), Some(n)) = (pt.sd, pt.n) {
             has_summarized = true;
+            if !n.is_finite() || !(1.0..=1e9).contains(&n) || !sd.is_finite() {
+                return None;
+            }
             if n > 1.0 {
                 let df_i = (n - 1.0).round() as usize;
                 ss_pe_acc.add((n - 1.0) * sd * sd);
-                df_pe += df_i;
+                df_pe = df_pe.checked_add(df_i)?;
             }
         } else {
             let key = pt.x0().to_bits();
@@ -703,7 +706,7 @@ pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) 
                 && let Ok(m) = SummaryMoments::from_slice(ys)
             {
                 ss_pe_acc.add(m.css);
-                df_pe += ys.len() - 1;
+                df_pe = df_pe.checked_add(ys.len() - 1)?;
             }
         }
     }
@@ -712,6 +715,9 @@ pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) 
         return None;
     }
     let ss_pure_error = ss_pe_acc.total().max(0.0);
+    if !ss_pure_error.is_finite() {
+        return None;
+    }
     let ss_lack_of_fit = (ss_res - ss_pure_error).max(0.0);
     let df_lack_of_fit = df_res - df_pe;
     let ms_pe = ss_pure_error / (df_pe as f64);
@@ -996,4 +1002,34 @@ pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usi
     }
 
     Ok(RoutDetectionResult { rsdr, df, q_threshold_percent: q_percent, outlier_indices, audit })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::types::DataPoint;
+
+    use super::replicates_lack_of_fit;
+
+    #[test]
+    fn replicates_lack_of_fit_guards_non_finite_and_extreme_n() {
+        let inf_pts = vec![
+            DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(f64::INFINITY), explicit_weight: None, data_set_index: 0, row: 0 },
+            DataPoint { x: vec![2.0], y: 3.0, sd: Some(0.5), n: Some(f64::INFINITY), explicit_weight: None, data_set_index: 0, row: 1 },
+        ];
+        assert!(replicates_lack_of_fit(&inf_pts, 10.0, 4).is_none());
+
+        let huge_pts = vec![
+            DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(1e10), explicit_weight: None, data_set_index: 0, row: 0 },
+            DataPoint { x: vec![2.0], y: 3.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 1 },
+        ];
+        assert!(replicates_lack_of_fit(&huge_pts, 10.0, 4).is_none());
+
+        let valid_pts = vec![
+            DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(1.0), explicit_weight: None, data_set_index: 0, row: 0 },
+            DataPoint { x: vec![2.0], y: 3.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 1 },
+        ];
+        let res = replicates_lack_of_fit(&valid_pts, 5.0, 4).unwrap();
+        assert_eq!(res.df_pure_error, 2);
+        assert_eq!(res.df_lack_of_fit, 2);
+    }
 }

@@ -23,6 +23,14 @@ fn num_cell(v: f64) -> ResultCell {
     if v.is_finite() { ResultCell::Number { value: v, prefix: None, units: None } } else { ResultCell::Empty }
 }
 
+fn ci_cell(lower: CiBound, upper: CiBound) -> ResultCell {
+    let sanitize = |bound: CiBound| match bound {
+        CiBound::Finite(v) if v.is_finite() => CiBound::Finite(v),
+        _ => CiBound::Open,
+    };
+    ResultCell::ConfidenceInterval { lower: sanitize(lower), upper: sanitize(upper) }
+}
+
 /// Execute either a [`AnalysisKind::LinearRegression`] or [`AnalysisKind::NonlinearRegression`]
 /// [`AnalysisSpec`] against a [`DataSheet`] and return a populated [`ResultSheet`].
 pub fn execute_analysis(spec: &AnalysisSpec, sheet: &DataSheet, hooks: &HookContext) -> Result<ResultSheet, FitError> {
@@ -398,6 +406,8 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
         footnotes: Vec::new(),
     });
 
+    append_nonlinear_interpolated_tab(result, fit);
+
     // Curve overlays + derived scalars.
     for (idx, ds_res) in fit.datasets.iter().enumerate() {
         if let Some(overlay) = &ds_res.curve_overlay {
@@ -553,5 +563,165 @@ fn append_comparison_tab(
                 footnotes: Vec::new(),
             });
         }
+    }
+}
+
+fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
+    if fit.interpolated_x.is_empty() && fit.interpolated_y.is_empty() {
+        return;
+    }
+    let total = fit.interpolated_x.len() + fit.interpolated_y.len();
+    let mut interp_rows = Vec::with_capacity(total);
+    let mut interp_labels = Vec::with_capacity(total);
+    let mut footnotes = Vec::new();
+
+    for (items, direction) in [(&fit.interpolated_x, "X from Y"), (&fit.interpolated_y, "Y from X")] {
+        for item in items {
+            let lbl = fit
+                .datasets
+                .iter()
+                .find(|d| d.data_set_index == item.data_set_index)
+                .map_or_else(|| format!("DS{}", item.data_set_index + 1), |d| d.label.clone());
+            interp_labels.push(format!("{lbl} ({direction}={:.4})", item.input_value));
+            interp_rows.push(vec![
+                num_cell(item.input_value),
+                num_cell(item.output_estimate),
+                ci_cell(item.ci_lower, item.ci_upper),
+                ResultCell::Text(direction.to_owned()),
+                ResultCell::Text(lbl.clone()),
+            ]);
+            if let Some(note) = &item.note {
+                footnotes.push(format!("{lbl} (row {}, {direction}): {note}", item.row + 1));
+            }
+        }
+    }
+
+    result.tabs.push(ResultTab {
+        id: "nonlinear_interpolated".to_owned(),
+        title: "Interpolated unknowns".to_owned(),
+        kind: ResultTabKind::InterpolatedUnknowns,
+        column_headers: vec![
+            "Input".to_owned(),
+            "Interpolated".to_owned(),
+            "Confidence Interval".to_owned(),
+            "Direction".to_owned(),
+            "Dataset".to_owned(),
+        ],
+        row_labels: interp_labels,
+        rows: interp_rows,
+        footnotes,
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_doc::{
+        AnalysisKind, AnalysisSpec, Cell, CellCoord, CiBound, DataSheet, NonlinearFitSpec, ResultCell, ResultStatus, ResultTabKind, SubcolumnMode,
+        TableArchetype, WeightingScheme, XyTable,
+    };
+    use lumencraft_math::ConfidenceLevel;
+
+    use super::execute_analysis;
+    use crate::types::HookContext;
+
+    fn hill_4pl(log_x: f64, bottom: f64, top: f64, log_ec50: f64, slope: f64) -> f64 {
+        bottom + (top - bottom) / (1.0 + 10_f64.powf((log_ec50 - log_x) * slope))
+    }
+
+    fn build_4pl_sheet_with_unknowns(extra_out_of_range_y: Option<f64>) -> DataSheet {
+        let std_xs = [-9.0, -8.0, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
+        let extra_rows = if extra_out_of_range_y.is_some() { 4 } else { 3 };
+        let xy = XyTable::new(SubcolumnMode::Single, 1, std_xs.len() + extra_rows).unwrap();
+        let mut sheet = DataSheet::new("dose-4pl", "4PL Standard Curve", TableArchetype::Xy(xy)).unwrap();
+
+        for (r, &lx) in std_xs.iter().enumerate() {
+            let y = hill_4pl(lx, 5.0, 100.0, -6.0, 1.15);
+            sheet.set_x_or_time_cell(r, 0, Cell::number(lx)).unwrap();
+            sheet.set_cell(CellCoord::new(r, 0, 0), Cell::number(y)).unwrap();
+        }
+
+        // Rows 8..10: blank X with known Y (inverse X from Y), then row 10: known X with blank Y (forward Y from X).
+        let base = std_xs.len();
+        sheet.set_cell(CellCoord::new(base, 0, 0), Cell::number(hill_4pl(-6.2, 5.0, 100.0, -6.0, 1.15))).unwrap();
+        sheet.set_cell(CellCoord::new(base + 1, 0, 0), Cell::number(hill_4pl(-5.4, 5.0, 100.0, -6.0, 1.15))).unwrap();
+        sheet.set_x_or_time_cell(base + 2, 0, Cell::number(-6.0)).unwrap();
+        if let Some(bad_y) = extra_out_of_range_y {
+            sheet.set_cell(CellCoord::new(base + 3, 0, 0), Cell::number(bad_y)).unwrap();
+        }
+
+        sheet
+    }
+
+    fn make_4pl_spec(id: &str, interpolate_unknowns: bool) -> AnalysisSpec {
+        let nl = NonlinearFitSpec { weighting: WeightingScheme::None, interpolate_unknowns, ..NonlinearFitSpec::new("log_agonist_vs_response_4pl") };
+        let mut spec = AnalysisSpec::new(id, "dose-4pl", AnalysisKind::NonlinearRegression(nl)).unwrap();
+        spec.confidence_level = ConfidenceLevel::DEFAULT_95;
+        spec
+    }
+
+    #[test]
+    fn nonlinear_4pl_unknown_interpolation_emits_interpolated_unknowns_tab() {
+        let sheet = build_4pl_sheet_with_unknowns(None);
+        let spec = make_4pl_spec("fit-4pl-interp", true);
+
+        let res = execute_analysis(&spec, &sheet, &HookContext::default()).unwrap();
+        assert_eq!(res.status, ResultStatus::UpToDate);
+        assert!(res.analyzable_data.is_none());
+        assert!(res.tabs.iter().any(|t| t.kind == ResultTabKind::ParametersAndConfidenceIntervals));
+        assert!(res.tabs.iter().any(|t| t.kind == ResultTabKind::MainSummary));
+
+        let interp_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).expect("InterpolatedUnknowns tab");
+        assert_eq!(interp_tab.id, "nonlinear_interpolated");
+        assert_eq!(interp_tab.title, "Interpolated unknowns");
+        assert_eq!(interp_tab.column_headers, vec!["Input", "Interpolated", "Confidence Interval", "Direction", "Dataset"]);
+        assert_eq!(interp_tab.rows.len(), 3);
+        assert_eq!(interp_tab.row_labels.len(), 3);
+        assert!(interp_tab.footnotes.is_empty());
+
+        for (idx, expected_x) in [-6.2_f64, -5.4_f64].iter().enumerate() {
+            assert!(interp_tab.row_labels[idx].contains("X from Y="));
+            let ResultCell::Number { value, .. } = interp_tab.rows[idx][1] else {
+                panic!("expected numeric interpolated X in row {idx}");
+            };
+            assert!((value - expected_x).abs() < 1e-4, "row {idx}: got {value}, expected {expected_x}");
+            assert_eq!(interp_tab.rows[idx][3], ResultCell::Text("X from Y".to_owned()));
+            assert_eq!(interp_tab.rows[idx][4], ResultCell::Text("A".to_owned()));
+        }
+
+        assert!(interp_tab.row_labels[2].contains("Y from X="));
+        let ResultCell::Number { value: est_y, .. } = interp_tab.rows[2][1] else {
+            panic!("expected numeric interpolated Y in row 2");
+        };
+        assert!((est_y - 52.5).abs() < 1e-4, "expected Y=52.5 at LogEC50, got {est_y}");
+        let ResultCell::ConfidenceInterval { lower: CiBound::Finite(lo), upper: CiBound::Finite(hi) } = interp_tab.rows[2][2] else {
+            panic!("expected finite CI for interpolated Y");
+        };
+        assert!(lo <= est_y && est_y <= hi);
+        assert_eq!(interp_tab.rows[2][3], ResultCell::Text("Y from X".to_owned()));
+        assert_eq!(interp_tab.rows[2][4], ResultCell::Text("A".to_owned()));
+    }
+
+    #[test]
+    fn nonlinear_without_interpolate_unknowns_omits_interpolated_tab() {
+        let sheet = build_4pl_sheet_with_unknowns(None);
+        let spec = make_4pl_spec("fit-4pl-no-interp", false);
+
+        let res = execute_analysis(&spec, &sheet, &HookContext::default()).unwrap();
+        assert_eq!(res.tabs.len(), 2);
+        assert!(res.tabs.iter().all(|t| t.kind != ResultTabKind::InterpolatedUnknowns));
+    }
+
+    #[test]
+    fn nonlinear_out_of_range_unknown_sanitizes_estimate_and_records_footnote() {
+        let sheet = build_4pl_sheet_with_unknowns(Some(500.0));
+        let spec = make_4pl_spec("fit-4pl-oor", true);
+
+        let res = execute_analysis(&spec, &sheet, &HookContext::default()).unwrap();
+        let interp_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).expect("InterpolatedUnknowns tab");
+        assert_eq!(interp_tab.rows.len(), 4);
+        assert_eq!(interp_tab.rows[2][1], ResultCell::Empty);
+        assert_eq!(interp_tab.rows[2][2], ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Open });
+        assert_eq!(interp_tab.footnotes.len(), 1);
+        assert!(interp_tab.footnotes[0].contains("outside fitted curve range"));
     }
 }

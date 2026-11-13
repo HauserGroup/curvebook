@@ -22,6 +22,9 @@ use crate::types::{DataPoint, EquationCategory};
 
 const MAX_VM_STEPS: usize = 100_000;
 const MAX_ODE_STEPS: usize = 50_000;
+const MAX_PARSE_DEPTH: usize = 128;
+const MAX_DATASET_EXPANSION: usize = 10_000;
+const MAX_BESSEL_ORDER: i32 = 100_000;
 
 /// Dataset-filter predicate parsed from `<A>`, `<~A>`, `<B:D>`, or `<0>` line prefixes.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +87,68 @@ enum Expr {
     Binary { op: BinaryOp, lhs: Box<Expr>, rhs: Box<Expr> },
     Call { name: String, args: Vec<Expr> },
     If { cond: Box<Expr>, then_br: Box<Expr>, else_br: Box<Expr> },
+}
+
+impl Expr {
+    fn is_leaf(&self) -> bool {
+        matches!(self, Self::Num(_) | Self::Ident(_))
+    }
+
+    fn needs_iterative_drop(&self) -> bool {
+        match self {
+            Self::Num(_) | Self::Ident(_) => false,
+            Self::Unary { rhs, .. } => !rhs.is_leaf(),
+            Self::Binary { lhs, rhs, .. } => !lhs.is_leaf() || !rhs.is_leaf(),
+            Self::Call { args, .. } => args.iter().any(|a| !a.is_leaf()),
+            Self::If { cond, then_br, else_br } => !cond.is_leaf() || !then_br.is_leaf() || !else_br.is_leaf(),
+        }
+    }
+}
+
+impl Drop for Expr {
+    fn drop(&mut self) {
+        if !self.needs_iterative_drop() {
+            return;
+        }
+        let mut stack = Vec::new();
+        stack.push(std::mem::replace(self, Self::Num(0.0)));
+        while let Some(mut node) = stack.pop() {
+            match &mut node {
+                Self::Num(_) | Self::Ident(_) => {}
+                Self::Unary { rhs, .. } => {
+                    if !rhs.is_leaf() {
+                        stack.push(std::mem::replace(rhs.as_mut(), Self::Num(0.0)));
+                    }
+                }
+                Self::Binary { lhs, rhs, .. } => {
+                    if !lhs.is_leaf() {
+                        stack.push(std::mem::replace(lhs.as_mut(), Self::Num(0.0)));
+                    }
+                    if !rhs.is_leaf() {
+                        stack.push(std::mem::replace(rhs.as_mut(), Self::Num(0.0)));
+                    }
+                }
+                Self::Call { args, .. } => {
+                    for arg in args.iter_mut() {
+                        if !arg.is_leaf() {
+                            stack.push(std::mem::replace(arg, Self::Num(0.0)));
+                        }
+                    }
+                }
+                Self::If { cond, then_br, else_br } => {
+                    if !cond.is_leaf() {
+                        stack.push(std::mem::replace(cond.as_mut(), Self::Num(0.0)));
+                    }
+                    if !then_br.is_leaf() {
+                        stack.push(std::mem::replace(then_br.as_mut(), Self::Num(0.0)));
+                    }
+                    if !else_br.is_leaf() {
+                        stack.push(std::mem::replace(else_br.as_mut(), Self::Num(0.0)));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -441,8 +506,11 @@ impl CompiledDslModel {
     fn eval_ode_single(&self, t_end: f64, x_tail: &[f64], params: &[f64], ds_idx: usize) -> Option<f64> {
         let prog = self.select_program(ds_idx)?;
         let init_prog = self.ode_init_program.as_ref()?;
+        if !self.ode_t0.is_finite() || !t_end.is_finite() {
+            return None;
+        }
         let y0 = eval_bytecode(init_prog, &[self.ode_t0], 0.0, params, ds_idx)?;
-        if !y0.is_finite() || !t_end.is_finite() {
+        if !y0.is_finite() {
             return None;
         }
         if (t_end - self.ode_t0).abs() < 1e-15 {
@@ -503,18 +571,28 @@ pub fn integrate_rk45<F>(t0: f64, t_end: f64, y0: f64, mut rhs: F) -> Option<f64
 where
     F: FnMut(f64, f64) -> Option<f64>,
 {
+    if !t0.is_finite() || !t_end.is_finite() || !y0.is_finite() {
+        return None;
+    }
     let dir = if t_end >= t0 { 1.0 } else { -1.0 };
     let span = (t_end - t0).abs();
     if span == 0.0 {
         return Some(y0);
+    }
+    if !span.is_finite() {
+        return None;
     }
     let rtol = 1e-8_f64;
     let atol = 1e-10_f64;
 
     let mut t = t0;
     let mut y = y0;
-    let mut h = (span * 0.05).clamp(1e-8, span);
-    let min_h = 1e-13 * span.max(1.0);
+    let min_init_h = (span * 1e-6).max(1e-18).min(span);
+    let mut h = (span * 0.05).max(min_init_h).min(span);
+    let min_h = (1e-13 * span.max(1.0)).min(span * 0.5);
+    if min_h <= 0.0 {
+        return None;
+    }
 
     // Dormand-Prince Butcher tableau coefficients.
     const A21: f64 = 1.0 / 5.0;
@@ -547,8 +625,8 @@ where
     const E7: f64 = -1.0 / 40.0;
 
     for _ in 0..MAX_ODE_STEPS {
-        let rem = (t_end - t).abs();
-        if rem <= 1e-14 * span.max(1.0) {
+        let rem = (t_end - t) * dir;
+        if rem <= 1e-14 * span || rem <= 4.0 * f64::EPSILON * t_end.abs() {
             return Some(y);
         }
         if h > rem {
@@ -574,9 +652,20 @@ where
         let err = (dt * (E1 * k1 + E3 * k3 + E4 * k4 + E5 * k5 + E6 * k6 + E7 * k7)).abs();
         let tol = atol + rtol * y.abs().max(y_next.abs());
         let ratio = err / tol;
+        if !err.is_finite() || !tol.is_finite() || !ratio.is_finite() {
+            h *= 0.25;
+            if h < min_h {
+                return None;
+            }
+            continue;
+        }
 
         if ratio <= 1.0 {
-            t += dt;
+            let t_next = t + dt;
+            if t_next == t {
+                return if h >= rem { Some(y_next) } else { None };
+            }
+            t = t_next;
             y = y_next;
             let factor = if ratio < 1e-12 { 5.0 } else { (0.9 * ratio.powf(-0.2)).clamp(0.2, 5.0) };
             h = (h * factor).max(min_h);
@@ -612,6 +701,7 @@ fn strip_comment<'a>(line: &'a str, hints: &mut HashMap<String, f64>, _ode_t0: &
                 for pair in rest.split(',') {
                     if let Some((k, v)) = pair.split_once('=')
                         && let Ok(num) = v.trim().parse::<f64>()
+                        && num.is_finite()
                     {
                         hints.insert(k.trim().to_owned(), num);
                     }
@@ -640,11 +730,24 @@ fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(DatasetFilter, &s
             let s_idx = parse_ds_token(start_s.trim(), line_no)?;
             let e_idx = parse_ds_token(end_s.trim(), line_no)?;
             if s_idx <= e_idx {
-                for idx in s_idx..=e_idx {
-                    indices.push(idx);
+                let count = e_idx.checked_sub(s_idx).and_then(|d| d.checked_add(1));
+                if count.is_none_or(|c| c > MAX_DATASET_EXPANSION || indices.len().saturating_add(c) > MAX_DATASET_EXPANSION) {
+                    return Err(FitError::DslCompileError {
+                        message: format!("Dataset range `{p}` exceeds maximum expansion limit ({MAX_DATASET_EXPANSION})"),
+                        line: line_no,
+                        column: 1,
+                    });
                 }
+                indices.extend(s_idx..=e_idx);
             }
         } else if !p.is_empty() {
+            if indices.len() >= MAX_DATASET_EXPANSION {
+                return Err(FitError::DslCompileError {
+                    message: format!("Dataset selector exceeds maximum limit ({MAX_DATASET_EXPANSION})"),
+                    line: line_no,
+                    column: 1,
+                });
+            }
             indices.push(parse_ds_token(p, line_no)?);
         }
     }
@@ -753,14 +856,33 @@ fn push_local(pool: &mut Vec<(DatasetFilter, Vec<(String, Expr)>)>, filter: Data
 }
 
 fn expr_references_y(expr: &Expr) -> bool {
-    match expr {
-        Expr::Num(_) => false,
-        Expr::Ident(n) => n.eq_ignore_ascii_case("Y"),
-        Expr::Unary { rhs, .. } => expr_references_y(rhs),
-        Expr::Binary { lhs, rhs, .. } => expr_references_y(lhs) || expr_references_y(rhs),
-        Expr::Call { args, .. } => args.iter().any(expr_references_y),
-        Expr::If { cond, then_br, else_br } => expr_references_y(cond) || expr_references_y(then_br) || expr_references_y(else_br),
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Num(_) => {}
+            Expr::Ident(n) => {
+                if n.eq_ignore_ascii_case("Y") {
+                    return true;
+                }
+            }
+            Expr::Unary { rhs, .. } => stack.push(rhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                stack.push(rhs);
+                stack.push(lhs);
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    stack.push(a);
+                }
+            }
+            Expr::If { cond, then_br, else_br } => {
+                stack.push(else_br);
+                stack.push(then_br);
+                stack.push(cond);
+            }
+        }
     }
+    false
 }
 
 fn is_builtin_constant_or_var(name: &str) -> bool {
@@ -779,28 +901,31 @@ fn is_builtin_constant_or_var(name: &str) -> bool {
 }
 
 fn collect_free_idents(expr: &Expr, bound_locals: &BTreeSet<String>, seen: &mut BTreeSet<String>, order: &mut Vec<String>) {
-    match expr {
-        Expr::Num(_) => {}
-        Expr::Ident(name) => {
-            if !is_builtin_constant_or_var(name) && !bound_locals.contains(name) && !seen.contains(name) {
-                seen.insert(name.clone());
-                order.push(name.clone());
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Num(_) => {}
+            Expr::Ident(name) => {
+                if !is_builtin_constant_or_var(name) && !bound_locals.contains(name) && !seen.contains(name) {
+                    seen.insert(name.clone());
+                    order.push(name.clone());
+                }
             }
-        }
-        Expr::Unary { rhs, .. } => collect_free_idents(rhs, bound_locals, seen, order),
-        Expr::Binary { lhs, rhs, .. } => {
-            collect_free_idents(lhs, bound_locals, seen, order);
-            collect_free_idents(rhs, bound_locals, seen, order);
-        }
-        Expr::Call { args, .. } => {
-            for a in args {
-                collect_free_idents(a, bound_locals, seen, order);
+            Expr::Unary { rhs, .. } => stack.push(rhs),
+            Expr::Binary { lhs, rhs, .. } => {
+                stack.push(rhs);
+                stack.push(lhs);
             }
-        }
-        Expr::If { cond, then_br, else_br } => {
-            collect_free_idents(cond, bound_locals, seen, order);
-            collect_free_idents(then_br, bound_locals, seen, order);
-            collect_free_idents(else_br, bound_locals, seen, order);
+            Expr::Call { args, .. } => {
+                for a in args.iter().rev() {
+                    stack.push(a);
+                }
+            }
+            Expr::If { cond, then_br, else_br } => {
+                stack.push(else_br);
+                stack.push(then_br);
+                stack.push(cond);
+            }
         }
     }
 }
@@ -889,6 +1014,7 @@ struct Parser<'a> {
     tokens: &'a [Token],
     pos: usize,
     line: usize,
+    depth: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -899,6 +1025,20 @@ impl<'a> Parser<'a> {
         let t = self.tokens.get(self.pos)?.clone();
         self.pos += 1;
         Some(t)
+    }
+    fn enter_depth(&mut self, line: usize, col: usize) -> Result<(), FitError> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(FitError::DslCompileError {
+                message: format!("Expression nesting exceeds maximum depth ({MAX_PARSE_DEPTH})"),
+                line,
+                column: col,
+            });
+        }
+        self.depth += 1;
+        Ok(())
+    }
+    fn leave_depth(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
     fn parse_or(&mut self) -> Result<Expr, FitError> {
         let mut lhs = self.parse_and()?;
@@ -966,34 +1106,123 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
     fn parse_pow(&mut self) -> Result<Expr, FitError> {
-        let base = self.parse_unary()?;
-        if self.peek().is_some_and(|t| t.kind == TokenKind::Caret) {
+        let mut factors = vec![self.parse_unary()?];
+        while let Some(tok) = self.peek() {
+            if tok.kind != TokenKind::Caret {
+                break;
+            }
+            let (tok_line, tok_col) = (tok.line, tok.col);
             self.bump();
-            let exp = self.parse_pow()?;
-            Ok(Expr::Binary { op: BinaryOp::Pow, lhs: Box::new(base), rhs: Box::new(exp) })
-        } else {
-            Ok(base)
+            if self.depth + factors.len() > MAX_PARSE_DEPTH {
+                return Err(FitError::DslCompileError {
+                    message: format!("Expression nesting exceeds maximum depth ({MAX_PARSE_DEPTH})"),
+                    line: tok_line,
+                    column: tok_col,
+                });
+            }
+            factors.push(self.parse_unary()?);
         }
+        let mut acc = factors.pop().ok_or_else(|| FitError::DslCompileError {
+            message: "Unexpected end of expression".to_owned(),
+            line: self.line,
+            column: 1,
+        })?;
+        while let Some(base) = factors.pop() {
+            acc = Expr::Binary { op: BinaryOp::Pow, lhs: Box::new(base), rhs: Box::new(acc) };
+        }
+        Ok(acc)
     }
     fn parse_unary(&mut self) -> Result<Expr, FitError> {
-        if let Some(tok) = self.peek() {
-            match tok.kind {
+        let mut ops: Vec<UnaryOp> = Vec::new();
+        let mut chain_len = 0_usize;
+        while let Some(tok) = self.peek() {
+            let (tok_line, tok_col, kind) = (tok.line, tok.col, tok.kind);
+            match kind {
                 TokenKind::Plus => {
                     self.bump();
-                    return self.parse_unary();
                 }
                 TokenKind::Minus => {
                     self.bump();
-                    return Ok(Expr::Unary { op: UnaryOp::Neg, rhs: Box::new(self.parse_unary()?) });
+                    ops.push(UnaryOp::Neg);
                 }
                 TokenKind::Bang => {
                     self.bump();
-                    return Ok(Expr::Unary { op: UnaryOp::Not, rhs: Box::new(self.parse_unary()?) });
+                    ops.push(UnaryOp::Not);
                 }
-                _ => {}
+                _ => break,
+            }
+            chain_len += 1;
+            if self.depth + chain_len > MAX_PARSE_DEPTH {
+                return Err(FitError::DslCompileError {
+                    message: format!("Expression nesting exceeds maximum depth ({MAX_PARSE_DEPTH})"),
+                    line: tok_line,
+                    column: tok_col,
+                });
             }
         }
-        self.parse_primary()
+        let mut expr = self.parse_primary()?;
+        while let Some(op) = ops.pop() {
+            expr = Expr::Unary { op, rhs: Box::new(expr) };
+        }
+        Ok(expr)
+    }
+    fn parse_call_args(&mut self, tok: &Token) -> Result<Vec<Expr>, FitError> {
+        self.bump();
+        let mut args = Vec::new();
+        if !self.peek().is_some_and(|t| t.kind == TokenKind::RParen) {
+            loop {
+                args.push(self.parse_or()?);
+                if self.peek().is_some_and(|t| t.kind == TokenKind::Comma) {
+                    self.bump();
+                } else {
+                    break;
+                }
+            }
+        }
+        if !self.bump().is_some_and(|t| t.kind == TokenKind::RParen) {
+            return Err(FitError::DslCompileError { message: format!("Expected `)` after call to `{}`", tok.text), line: tok.line, column: tok.col });
+        }
+        Ok(args)
+    }
+    fn build_call_expr(tok: Token, args: Vec<Expr>) -> Result<Expr, FitError> {
+        let upper = tok.text.to_ascii_uppercase();
+        if upper == "IF" {
+            if args.len() != 3 {
+                return Err(FitError::DslCompileError {
+                    message: "`IF(cond, then, else)` requires 3 arguments".to_owned(),
+                    line: tok.line,
+                    column: tok.col,
+                });
+            }
+            let mut it = args.into_iter();
+            if let (Some(c), Some(t_br), Some(e_br)) = (it.next(), it.next(), it.next()) {
+                Ok(Expr::If { cond: Box::new(c), then_br: Box::new(t_br), else_br: Box::new(e_br) })
+            } else {
+                Err(FitError::DslCompileError { message: "Invalid IF arguments".to_owned(), line: tok.line, column: tok.col })
+            }
+        } else if upper == "AND" && args.len() == 2 {
+            let mut it = args.into_iter();
+            if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                Ok(Expr::Binary { op: BinaryOp::And, lhs: Box::new(a), rhs: Box::new(b) })
+            } else {
+                Err(FitError::DslCompileError { message: "Invalid AND arguments".to_owned(), line: tok.line, column: tok.col })
+            }
+        } else if upper == "OR" && args.len() == 2 {
+            let mut it = args.into_iter();
+            if let (Some(a), Some(b)) = (it.next(), it.next()) {
+                Ok(Expr::Binary { op: BinaryOp::Or, lhs: Box::new(a), rhs: Box::new(b) })
+            } else {
+                Err(FitError::DslCompileError { message: "Invalid OR arguments".to_owned(), line: tok.line, column: tok.col })
+            }
+        } else if upper == "NOT" && args.len() == 1 {
+            if let Some(a) = args.into_iter().next() {
+                Ok(Expr::Unary { op: UnaryOp::Not, rhs: Box::new(a) })
+            } else {
+                Err(FitError::DslCompileError { message: "Invalid NOT argument".to_owned(), line: tok.line, column: tok.col })
+            }
+        } else {
+            Ok(Expr::Call { name: tok.text, args })
+        }
     }
     fn parse_primary(&mut self) -> Result<Expr, FitError> {
         let Some(tok) = self.bump() else {
@@ -1002,7 +1231,10 @@ impl<'a> Parser<'a> {
         match tok.kind {
             TokenKind::Number => Ok(Expr::Num(tok.num)),
             TokenKind::LParen => {
-                let inner = self.parse_or()?;
+                self.enter_depth(tok.line, tok.col)?;
+                let inner = self.parse_or();
+                self.leave_depth();
+                let inner = inner?;
                 match self.bump() {
                     Some(t) if t.kind == TokenKind::RParen => Ok(inner),
                     _ => Err(FitError::DslCompileError { message: "Expected `)`".to_owned(), line: tok.line, column: tok.col }),
@@ -1010,63 +1242,10 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident => {
                 if self.peek().is_some_and(|t| t.kind == TokenKind::LParen) {
-                    self.bump();
-                    let mut args = Vec::new();
-                    if !self.peek().is_some_and(|t| t.kind == TokenKind::RParen) {
-                        loop {
-                            args.push(self.parse_or()?);
-                            if self.peek().is_some_and(|t| t.kind == TokenKind::Comma) {
-                                self.bump();
-                            } else {
-                                break;
-                            }
-                        }
-                    }
-                    if !self.bump().is_some_and(|t| t.kind == TokenKind::RParen) {
-                        return Err(FitError::DslCompileError {
-                            message: format!("Expected `)` after call to `{}`", tok.text),
-                            line: tok.line,
-                            column: tok.col,
-                        });
-                    }
-                    let upper = tok.text.to_ascii_uppercase();
-                    if upper == "IF" {
-                        if args.len() != 3 {
-                            return Err(FitError::DslCompileError {
-                                message: "`IF(cond, then, else)` requires 3 arguments".to_owned(),
-                                line: tok.line,
-                                column: tok.col,
-                            });
-                        }
-                        let mut it = args.into_iter();
-                        if let (Some(c), Some(t_br), Some(e_br)) = (it.next(), it.next(), it.next()) {
-                            Ok(Expr::If { cond: Box::new(c), then_br: Box::new(t_br), else_br: Box::new(e_br) })
-                        } else {
-                            Err(FitError::DslCompileError { message: "Invalid IF arguments".to_owned(), line: tok.line, column: tok.col })
-                        }
-                    } else if upper == "AND" && args.len() == 2 {
-                        let mut it = args.into_iter();
-                        if let (Some(a), Some(b)) = (it.next(), it.next()) {
-                            Ok(Expr::Binary { op: BinaryOp::And, lhs: Box::new(a), rhs: Box::new(b) })
-                        } else {
-                            Err(FitError::DslCompileError { message: "Invalid AND arguments".to_owned(), line: tok.line, column: tok.col })
-                        }
-                    } else if upper == "OR" && args.len() == 2 {
-                        let mut it = args.into_iter();
-                        if let (Some(a), Some(b)) = (it.next(), it.next()) {
-                            Ok(Expr::Binary { op: BinaryOp::Or, lhs: Box::new(a), rhs: Box::new(b) })
-                        } else {
-                            Err(FitError::DslCompileError { message: "Invalid OR arguments".to_owned(), line: tok.line, column: tok.col })
-                        }
-                    } else if upper == "NOT" && args.len() == 1 {
-                        if let Some(a) = args.into_iter().next() {
-                            Ok(Expr::Unary { op: UnaryOp::Not, rhs: Box::new(a) })
-                        } else {
-                            Err(FitError::DslCompileError { message: "Invalid NOT argument".to_owned(), line: tok.line, column: tok.col })
-                        }
-                    } else {
-                        Ok(Expr::Call { name: tok.text, args })
-                    }
+                    self.enter_depth(tok.line, tok.col)?;
+                    let args = self.parse_call_args(&tok);
+                    self.leave_depth();
+                    Self::build_call_expr(tok, args?)
                 } else {
                     Ok(Expr::Ident(tok.text))
                 }
@@ -1078,7 +1257,7 @@ impl<'a> Parser<'a> {
 
 fn parse_expr(input: &str, line: usize) -> Result<Expr, FitError> {
     let tokens = tokenize(input, line)?;
-    let mut parser = Parser { tokens: &tokens, pos: 0, line };
+    let mut parser = Parser { tokens: &tokens, pos: 0, line, depth: 0 };
     let expr = parser.parse_or()?;
     if let Some(rem) = parser.peek() {
         return Err(FitError::DslCompileError { message: format!("Unexpected trailing token `{}`", rem.text), line: rem.line, column: rem.col });
@@ -1105,80 +1284,74 @@ fn compile_program(locals: &[(String, Expr)], target: &Expr, params: &HashMap<St
     Ok(CompiledProgram { code, local_count: local_map.len() })
 }
 
-fn compile_expr(expr: &Expr, locals: &HashMap<String, usize>, params: &HashMap<String, usize>, code: &mut Vec<OpCode>) -> Result<(), FitError> {
-    match expr {
+enum CompileTask<'a> {
+    Eval(&'a Expr),
+    EmitUnary(UnaryKind),
+    EmitBinary(BinaryKind),
+    EmitCall(BuiltinFn, usize),
+    AndAfterLhs { rhs: &'a Expr },
+    AndAfterRhs { jz_idx: usize },
+    OrAfterLhs { rhs: &'a Expr },
+    OrAfterRhs { jmp_end: usize },
+    IfAfterCond { then_br: &'a Expr, else_br: &'a Expr },
+    IfAfterThen { else_br: &'a Expr, jz_idx: usize },
+    IfAfterElse { jmp_end: usize },
+}
+
+fn binary_op_to_kind(op: BinaryOp) -> BinaryKind {
+    match op {
+        BinaryOp::Add => BinaryKind::Add,
+        BinaryOp::Sub => BinaryKind::Sub,
+        BinaryOp::Mul => BinaryKind::Mul,
+        BinaryOp::Div => BinaryKind::Div,
+        BinaryOp::Rem => BinaryKind::Rem,
+        BinaryOp::Pow => BinaryKind::Pow,
+        BinaryOp::Eq => BinaryKind::Eq,
+        BinaryOp::Ne => BinaryKind::Ne,
+        BinaryOp::Lt => BinaryKind::Lt,
+        BinaryOp::Le => BinaryKind::Le,
+        BinaryOp::Gt => BinaryKind::Gt,
+        BinaryOp::Ge => BinaryKind::Ge,
+        BinaryOp::And | BinaryOp::Or => BinaryKind::Eq,
+    }
+}
+
+fn schedule_expr_compile<'a>(
+    node: &'a Expr,
+    locals: &HashMap<String, usize>,
+    params: &HashMap<String, usize>,
+    code: &mut Vec<OpCode>,
+    tasks: &mut Vec<CompileTask<'a>>,
+) -> Result<(), FitError> {
+    match node {
         Expr::Num(v) => code.push(OpCode::PushConst(*v)),
         Expr::Ident(name) => compile_ident(name, locals, params, code)?,
         Expr::Unary { op, rhs } => {
-            compile_expr(rhs, locals, params, code)?;
-            code.push(OpCode::Unary(match op {
+            let kind = match op {
                 UnaryOp::Neg => UnaryKind::Neg,
                 UnaryOp::Not => UnaryKind::Not,
-            }));
+            };
+            tasks.push(CompileTask::EmitUnary(kind));
+            tasks.push(CompileTask::Eval(rhs));
         }
         Expr::Binary { op, lhs, rhs } => match op {
             BinaryOp::And => {
-                compile_expr(lhs, locals, params, code)?;
-                let jz_idx = code.len();
-                code.push(OpCode::JumpIfZero(0));
-                compile_expr(rhs, locals, params, code)?;
-                code.push(OpCode::PushConst(0.0));
-                code.push(OpCode::Binary(BinaryKind::Ne));
-                let jmp_end = code.len();
-                code.push(OpCode::Jump(0));
-                let false_target = code.len();
-                code.push(OpCode::PushConst(0.0));
-                let end_target = code.len();
-                code[jz_idx] = OpCode::JumpIfZero(false_target);
-                code[jmp_end] = OpCode::Jump(end_target);
+                tasks.push(CompileTask::AndAfterLhs { rhs });
+                tasks.push(CompileTask::Eval(lhs));
             }
             BinaryOp::Or => {
-                compile_expr(lhs, locals, params, code)?;
-                let jz_idx = code.len();
-                code.push(OpCode::JumpIfZero(0));
-                code.push(OpCode::PushConst(1.0));
-                let jmp_end = code.len();
-                code.push(OpCode::Jump(0));
-                let rhs_target = code.len();
-                compile_expr(rhs, locals, params, code)?;
-                code.push(OpCode::PushConst(0.0));
-                code.push(OpCode::Binary(BinaryKind::Ne));
-                let end_target = code.len();
-                code[jz_idx] = OpCode::JumpIfZero(rhs_target);
-                code[jmp_end] = OpCode::Jump(end_target);
+                tasks.push(CompileTask::OrAfterLhs { rhs });
+                tasks.push(CompileTask::Eval(lhs));
             }
             _ => {
-                compile_expr(lhs, locals, params, code)?;
-                compile_expr(rhs, locals, params, code)?;
-                code.push(OpCode::Binary(match op {
-                    BinaryOp::Add => BinaryKind::Add,
-                    BinaryOp::Sub => BinaryKind::Sub,
-                    BinaryOp::Mul => BinaryKind::Mul,
-                    BinaryOp::Div => BinaryKind::Div,
-                    BinaryOp::Rem => BinaryKind::Rem,
-                    BinaryOp::Pow => BinaryKind::Pow,
-                    BinaryOp::Eq => BinaryKind::Eq,
-                    BinaryOp::Ne => BinaryKind::Ne,
-                    BinaryOp::Lt => BinaryKind::Lt,
-                    BinaryOp::Le => BinaryKind::Le,
-                    BinaryOp::Gt => BinaryKind::Gt,
-                    BinaryOp::Ge => BinaryKind::Ge,
-                    BinaryOp::And | BinaryOp::Or => BinaryKind::Eq,
-                }));
+                tasks.push(CompileTask::EmitBinary(binary_op_to_kind(*op)));
+                tasks.push(CompileTask::Eval(rhs));
+                tasks.push(CompileTask::Eval(lhs));
             }
         },
         Expr::If { cond, then_br, else_br } => {
-            compile_expr(cond, locals, params, code)?;
-            let jz_idx = code.len();
-            code.push(OpCode::JumpIfZero(0));
-            compile_expr(then_br, locals, params, code)?;
-            let jmp_end = code.len();
-            code.push(OpCode::Jump(0));
-            let else_target = code.len();
-            compile_expr(else_br, locals, params, code)?;
-            let end_target = code.len();
-            code[jz_idx] = OpCode::JumpIfZero(else_target);
-            code[jmp_end] = OpCode::Jump(end_target);
+            tasks.push(CompileTask::IfAfterCond { then_br, else_br });
+            tasks.push(CompileTask::Eval(cond));
         }
         Expr::Call { name, args } => {
             let (bf, expected_arity) = resolve_builtin_fn(name)?;
@@ -1189,10 +1362,75 @@ fn compile_expr(expr: &Expr, locals: &HashMap<String, usize>, params: &HashMap<S
                     column: 1,
                 });
             }
-            for a in args {
-                compile_expr(a, locals, params, code)?;
+            tasks.push(CompileTask::EmitCall(bf, args.len()));
+            for a in args.iter().rev() {
+                tasks.push(CompileTask::Eval(a));
             }
-            code.push(OpCode::CallBuiltin(bf, args.len()));
+        }
+    }
+    Ok(())
+}
+
+fn compile_expr(expr: &Expr, locals: &HashMap<String, usize>, params: &HashMap<String, usize>, code: &mut Vec<OpCode>) -> Result<(), FitError> {
+    let mut tasks = vec![CompileTask::Eval(expr)];
+    while let Some(task) = tasks.pop() {
+        match task {
+            CompileTask::Eval(node) => schedule_expr_compile(node, locals, params, code, &mut tasks)?,
+            CompileTask::EmitUnary(kind) => code.push(OpCode::Unary(kind)),
+            CompileTask::EmitBinary(kind) => code.push(OpCode::Binary(kind)),
+            CompileTask::EmitCall(bf, arity) => code.push(OpCode::CallBuiltin(bf, arity)),
+            CompileTask::AndAfterLhs { rhs } => {
+                let jz_idx = code.len();
+                code.push(OpCode::JumpIfZero(0));
+                tasks.push(CompileTask::AndAfterRhs { jz_idx });
+                tasks.push(CompileTask::Eval(rhs));
+            }
+            CompileTask::AndAfterRhs { jz_idx } => {
+                code.push(OpCode::PushConst(0.0));
+                code.push(OpCode::Binary(BinaryKind::Ne));
+                let jmp_end = code.len();
+                code.push(OpCode::Jump(0));
+                let false_target = code.len();
+                code.push(OpCode::PushConst(0.0));
+                let end_target = code.len();
+                code[jz_idx] = OpCode::JumpIfZero(false_target);
+                code[jmp_end] = OpCode::Jump(end_target);
+            }
+            CompileTask::OrAfterLhs { rhs } => {
+                let jz_idx = code.len();
+                code.push(OpCode::JumpIfZero(0));
+                code.push(OpCode::PushConst(1.0));
+                let jmp_end = code.len();
+                code.push(OpCode::Jump(0));
+                let rhs_target = code.len();
+                code[jz_idx] = OpCode::JumpIfZero(rhs_target);
+                tasks.push(CompileTask::OrAfterRhs { jmp_end });
+                tasks.push(CompileTask::Eval(rhs));
+            }
+            CompileTask::OrAfterRhs { jmp_end } => {
+                code.push(OpCode::PushConst(0.0));
+                code.push(OpCode::Binary(BinaryKind::Ne));
+                let end_target = code.len();
+                code[jmp_end] = OpCode::Jump(end_target);
+            }
+            CompileTask::IfAfterCond { then_br, else_br } => {
+                let jz_idx = code.len();
+                code.push(OpCode::JumpIfZero(0));
+                tasks.push(CompileTask::IfAfterThen { else_br, jz_idx });
+                tasks.push(CompileTask::Eval(then_br));
+            }
+            CompileTask::IfAfterThen { else_br, jz_idx } => {
+                let jmp_end = code.len();
+                code.push(OpCode::Jump(0));
+                let else_target = code.len();
+                code[jz_idx] = OpCode::JumpIfZero(else_target);
+                tasks.push(CompileTask::IfAfterElse { jmp_end });
+                tasks.push(CompileTask::Eval(else_br));
+            }
+            CompileTask::IfAfterElse { jmp_end } => {
+                let end_target = code.len();
+                code[jmp_end] = OpCode::Jump(end_target);
+            }
         }
     }
     Ok(())
@@ -1461,7 +1699,15 @@ fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         }
         BuiltinFn::Min => a[0].min(a[1]),
         BuiltinFn::Max => a[0].max(a[1]),
-        BuiltinFn::Clamp => a[0].clamp(a[1].min(a[2]), a[1].max(a[2])),
+        BuiltinFn::Clamp => {
+            if a[0].is_nan() || a[1].is_nan() || a[2].is_nan() {
+                f64::NAN
+            } else {
+                let lo = a[1].min(a[2]);
+                let hi = a[1].max(a[2]);
+                if lo <= hi { a[0].clamp(lo, hi) } else { f64::NAN }
+            }
+        }
         BuiltinFn::Hypot => a[0].hypot(a[1]),
         BuiltinFn::PowFn => a[0].powf(a[1]),
         BuiltinFn::Erf => erf(a[0]),
@@ -1474,10 +1720,16 @@ fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         BuiltinFn::Digamma => digamma(a[0]).ok()?,
         BuiltinFn::BesselJ0 => bessel_j0(a[0]),
         BuiltinFn::BesselJ1 => bessel_j1(a[0]),
-        BuiltinFn::BesselJn => bessel_jn(a[0].round() as i32, a[1]),
+        BuiltinFn::BesselJn => {
+            let n = parse_bessel_order(a[0])?;
+            bessel_jn(n, a[1])
+        }
         BuiltinFn::BesselY0 => bessel_y0(a[0])?,
         BuiltinFn::BesselY1 => bessel_y1(a[0])?,
-        BuiltinFn::BesselYn => bessel_yn(a[0].round() as i32, a[1])?,
+        BuiltinFn::BesselYn => {
+            let n = parse_bessel_order(a[0])?;
+            bessel_yn(n, a[1])?
+        }
         BuiltinFn::BesselI0 => bessel_i0(a[0])?,
         BuiltinFn::BesselI1 => bessel_i1(a[0])?,
         BuiltinFn::BesselK0 => bessel_k0(a[0])?,
@@ -1493,7 +1745,21 @@ fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
 // Pure-Rust Bessel & Hypergeometric Special Functions (Abramowitz & Stegun)
 // ============================================================================
 
+fn parse_bessel_order(v: f64) -> Option<i32> {
+    if !v.is_finite() {
+        return None;
+    }
+    let rounded = v.round();
+    if rounded.abs() > f64::from(MAX_BESSEL_ORDER) {
+        return None;
+    }
+    Some(rounded as i32)
+}
+
 fn bessel_j0(x: f64) -> f64 {
+    if !x.is_finite() {
+        return f64::NAN;
+    }
     let ax = x.abs();
     if ax < 8.0 {
         let y = x * x;
@@ -1512,6 +1778,9 @@ fn bessel_j0(x: f64) -> f64 {
 }
 
 fn bessel_j1(x: f64) -> f64 {
+    if !x.is_finite() {
+        return f64::NAN;
+    }
     let ax = x.abs();
     if ax < 8.0 {
         let y = x * x;
@@ -1531,6 +1800,9 @@ fn bessel_j1(x: f64) -> f64 {
 }
 
 fn bessel_jn(n: i32, x: f64) -> f64 {
+    if n.unsigned_abs() > MAX_BESSEL_ORDER as u32 || !x.is_finite() {
+        return f64::NAN;
+    }
     if n < 0 {
         let pos = bessel_jn(-n, x);
         return if (-n) % 2 == 0 { pos } else { -pos };
@@ -1587,7 +1859,7 @@ fn bessel_jn(n: i32, x: f64) -> f64 {
 }
 
 fn bessel_y0(x: f64) -> Option<f64> {
-    if x <= 0.0 {
+    if !x.is_finite() || x <= 0.0 {
         return None;
     }
     let ans = if x < 8.0 {
@@ -1607,7 +1879,7 @@ fn bessel_y0(x: f64) -> Option<f64> {
 }
 
 fn bessel_y1(x: f64) -> Option<f64> {
-    if x <= 0.0 {
+    if !x.is_finite() || x <= 0.0 {
         return None;
     }
     let ans = if x < 8.0 {
@@ -1630,6 +1902,9 @@ fn bessel_y1(x: f64) -> Option<f64> {
 }
 
 fn bessel_yn(n: i32, x: f64) -> Option<f64> {
+    if n.unsigned_abs() > MAX_BESSEL_ORDER as u32 || !x.is_finite() || x <= 0.0 {
+        return None;
+    }
     if n < 0 {
         let pos = bessel_yn(-n, x)?;
         return Some(if (-n) % 2 == 0 { pos } else { -pos });
@@ -1782,4 +2057,75 @@ fn confluent_u(a: f64, b_in: f64, z: f64) -> Option<f64> {
         * (hyp1f1(a, b, z)? / (gamma(1.0 + a - b).ok()? * gamma(b).ok()?)
             - z.powf(1.0 - b) * hyp1f1(1.0 + a - b, 2.0 - b, z)? / (gamma(a).ok()? * gamma(2.0 - b).ok()?));
     if t1.is_finite() { Some(t1) } else { None }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeSet, HashMap};
+
+    use crate::library::ParametricModel;
+
+    use super::{
+        CompiledDslModel, DatasetFilter, Expr, MAX_DATASET_EXPANSION, MAX_PARSE_DEPTH, UnaryOp, bessel_jn, bessel_yn, collect_free_idents,
+        compile_expr, expr_references_y, integrate_rk45, parse_dataset_prefix,
+    };
+
+    #[test]
+    fn rk45_tiny_and_non_finite_spans_do_not_panic_or_hang() {
+        let tiny = integrate_rk45(0.0, 1e-10, 2.0, |_t, y| Some(-y)).unwrap();
+        assert!((tiny - 2.0 * (-1e-10_f64).exp()).abs() < 1e-14);
+        assert!(integrate_rk45(f64::NAN, 1.0, 1.0, |_t, y| Some(-y)).is_none());
+        assert!(integrate_rk45(0.0, f64::NAN, 1.0, |_t, y| Some(-y)).is_none());
+        assert!(integrate_rk45(0.0, f64::INFINITY, 1.0, |_t, y| Some(-y)).is_none());
+        assert!(integrate_rk45(-1e308, 1e308, 1.0, |_t, _y| Some(0.0)).is_none());
+    }
+
+    #[test]
+    fn clamp_and_bessel_guard_extremes() {
+        let clamp_m = CompiledDslModel::compile("c", "Y = clamp(X, a, b)").unwrap();
+        assert_eq!(clamp_m.eval(&[1.0], &[f64::NAN, f64::NAN], 0), None);
+        assert_eq!(clamp_m.eval(&[5.0], &[0.0, f64::INFINITY], 0), Some(5.0));
+
+        assert!(bessel_jn(i32::MIN, 1.0).is_nan());
+        assert!(bessel_jn(1_000_000, 1.0).is_nan());
+        assert!(bessel_yn(i32::MIN, 1.0).is_none());
+        assert!(bessel_yn(1_000_000, 1.0).is_none());
+
+        let jm = CompiledDslModel::compile("jn", "Y = jn(n, X)").unwrap();
+        assert_eq!(jm.eval(&[1.0], &[-1e12], 0), None);
+        assert_eq!(jm.eval(&[1.0], &[f64::NAN], 0), None);
+    }
+
+    #[test]
+    fn dataset_prefix_caps_expansion_and_overflow() {
+        let ok = parse_dataset_prefix("<0:9999> Y = X", 1).unwrap();
+        assert!(matches!(ok.0, DatasetFilter::Include(v) if v.len() == MAX_DATASET_EXPANSION));
+        assert!(parse_dataset_prefix("<0:10000> Y = X", 1).is_err());
+        assert!(parse_dataset_prefix("<0:18446744073709551615> Y = X", 1).is_err());
+    }
+
+    #[test]
+    fn parser_depth_limit_and_iterative_ast_walkers_prevent_stack_overflow() {
+        let ok_src = format!("Y = {}X{}", "(".repeat(MAX_PARSE_DEPTH), ")".repeat(MAX_PARSE_DEPTH));
+        assert!(CompiledDslModel::compile("ok_depth", &ok_src).is_ok());
+
+        let too_deep = format!("Y = {}X{}", "(".repeat(MAX_PARSE_DEPTH + 1), ")".repeat(MAX_PARSE_DEPTH + 1));
+        assert!(CompiledDslModel::compile("too_deep", &too_deep).is_err());
+
+        let too_many_unary = format!("Y = {}X", "-".repeat(MAX_PARSE_DEPTH + 1));
+        assert!(CompiledDslModel::compile("unary_deep", &too_many_unary).is_err());
+
+        let mut deep = Expr::Ident("Y".to_owned());
+        for _ in 0..20_000 {
+            deep = Expr::Unary { op: UnaryOp::Neg, rhs: Box::new(deep) };
+        }
+        assert!(expr_references_y(&deep));
+        let mut seen = BTreeSet::new();
+        let mut order = Vec::new();
+        collect_free_idents(&deep, &BTreeSet::new(), &mut seen, &mut order);
+        let mut code = Vec::new();
+        compile_expr(&deep, &HashMap::new(), &HashMap::new(), &mut code).unwrap();
+        assert_eq!(code.len(), 20_001);
+        drop(deep);
+    }
 }
