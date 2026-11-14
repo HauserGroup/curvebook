@@ -18,8 +18,10 @@ use crate::scales::{
     emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
 };
 use crate::scene::{
-    ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+    ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
+    SourceCellId, StrokePaint, TextAnchor,
 };
+use crate::xy::format_point_value;
 
 const CIRCLE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const COLORBAR_STEPS: usize = 48;
@@ -1206,6 +1208,8 @@ pub(crate) fn render_data_grid_table(
 // ============================================================================
 
 struct KmCurveData {
+    sheet_id: Option<SheetId>,
+    col_index: usize,
     label: String,
     color: Rgba8,
     stroke_width_pt: f64,
@@ -1214,7 +1218,7 @@ struct KmCurveData {
     ci_dashed: bool,
     n_total: usize,
     steps: Vec<KmPointStep>,
-    censored_times: Vec<f64>,
+    censored_times: Vec<(f64, Option<usize>, usize)>,
     observations: Vec<SurvivalObservation>,
 }
 
@@ -1314,7 +1318,7 @@ fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<KmCurveD
     if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id)
         && let TableArchetype::Survival(surv) = &ds.archetype
     {
-        return build_km_from_survival_table(graph, surv, km_result);
+        return build_km_from_survival_table(graph, &ds.id, surv, km_result);
     }
 
     if let Some(res) = km_result {
@@ -1335,7 +1339,12 @@ fn km_series_style(graph: &GraphSheet, data_set_idx: usize, fallback_idx: usize)
     (default_col, 1.8, true, true, false, None)
 }
 
-fn build_km_from_survival_table(graph: &GraphSheet, surv: &lumencraft_doc::SurvivalTable, km_result: Option<&ResultSheet>) -> Vec<KmCurveData> {
+fn build_km_from_survival_table(
+    graph: &GraphSheet,
+    sheet_id: &SheetId,
+    surv: &lumencraft_doc::SurvivalTable,
+    km_result: Option<&ResultSheet>,
+) -> Vec<KmCurveData> {
     let indices: Vec<usize> = if graph.spec.series.is_empty() {
         (0..surv.cohorts.len()).collect()
     } else {
@@ -1351,7 +1360,8 @@ fn build_km_from_survival_table(graph: &GraphSheet, surv: &lumencraft_doc::Survi
         }
         let (color, stroke_w, show_censor, show_ci, ci_dashed, label_override) = km_series_style(graph, c_idx, pos);
         let label = label_override.unwrap_or_else(|| cohort_col.title.clone());
-        let censored_times: Vec<f64> = obs.iter().filter(|o| o.status == SurvivalStatus::Censored).map(|o| o.time).collect();
+        let censored_times: Vec<(f64, Option<usize>, usize)> =
+            obs.iter().filter(|o| o.status == SurvivalStatus::Censored).map(|o| (o.time, Some(o.row), c_idx)).collect();
 
         if let Some(res) = km_result
             && let Some(curve) = res.fitted_curves.iter().find(|fc| fc.data_set_index == c_idx)
@@ -1369,6 +1379,8 @@ fn build_km_from_survival_table(graph: &GraphSheet, surv: &lumencraft_doc::Survi
                 })
                 .collect();
             out.push(KmCurveData {
+                sheet_id: Some(sheet_id.clone()),
+                col_index: c_idx,
                 label,
                 color,
                 stroke_width_pt: stroke_w,
@@ -1396,6 +1408,8 @@ fn build_km_from_survival_table(graph: &GraphSheet, surv: &lumencraft_doc::Survi
                 });
             }
             out.push(KmCurveData {
+                sheet_id: Some(sheet_id.clone()),
+                col_index: c_idx,
                 label,
                 color,
                 stroke_width_pt: stroke_w,
@@ -1432,9 +1446,11 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
         let n_total = steps.first().map_or(0, |s| s.n_at_risk_before);
         let mut censored_times = Vec::new();
         if let Some(tab) = nar_tab {
-            extract_censored_from_nar_tab(tab, &label, &mut censored_times);
+            extract_censored_from_nar_tab(tab, &label, fc.data_set_index, &mut censored_times);
         }
         out.push(KmCurveData {
+            sheet_id: None,
+            col_index: fc.data_set_index,
             label,
             color,
             stroke_width_pt: stroke_w,
@@ -1466,7 +1482,7 @@ fn nar_at_time_from_tab(nar_tab: Option<&ResultTab>, cohort_label: &str, t: f64)
     None
 }
 
-fn extract_censored_from_nar_tab(tab: &ResultTab, cohort_label: &str, out: &mut Vec<f64>) {
+fn extract_censored_from_nar_tab(tab: &ResultTab, cohort_label: &str, col_idx: usize, out: &mut Vec<(f64, Option<usize>, usize)>) {
     let mut prev_risk: Option<usize> = None;
     for row in &tab.rows {
         let Some(ResultCell::Text(lbl)) = row.first() else { continue };
@@ -1481,9 +1497,9 @@ fn extract_censored_from_nar_tab(tab: &ResultTab, cohort_label: &str, out: &mut 
         if let Some(prev) = prev_risk
             && prev > r_now + ev_now
         {
-            out.push(*row_t);
+            out.push((*row_t, None, col_idx));
         } else if ev_now == 0 && r_now > 0 {
-            out.push(*row_t);
+            out.push((*row_t, None, col_idx));
         }
         prev_risk = Some(r_now);
     }
@@ -1517,7 +1533,7 @@ fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: Ax
         path_line(&mut step_path, PointPt::new(xb, yb));
     }
     if let Some(last) = cohort.steps.last()
-        && let Some(&max_cens) = cohort.censored_times.iter().max_by(|a, b| a.total_cmp(b))
+        && let Some(max_cens) = cohort.censored_times.iter().map(|&(t, _, _)| t).max_by(|a, b| a.total_cmp(b))
         && max_cens > last.time
         && let (Some(xe), Some(yl)) =
             (x_map.map_value(max_cens.min(x_max), r.x, r.right()), y_map.map_value(last.survival * scale_pct, r.bottom(), r.y))
@@ -1532,9 +1548,27 @@ fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: Ax
         clip: Some(r),
     });
 
+    if let Some(sheet_id) = &cohort.sheet_id {
+        for obs in &cohort.observations {
+            if obs.status != SurvivalStatus::Event {
+                continue;
+            }
+            let s_val = eval_km_step(&cohort.steps, obs.time) * scale_pct;
+            if let (Some(xe), Some(ye)) = (x_map.map_value(obs.time, r.x, r.right()), y_map.map_value(s_val, r.bottom(), r.y)) {
+                scene.plotted_points.push(PlottedPointMeta {
+                    center_pt: PointPt::new(xe, ye),
+                    radius_pt: 4.0,
+                    source_cell: SourceCellId { sheet_id: sheet_id.clone(), row: obs.row, col: cohort.col_index, subcol: 0 },
+                    series_label: cohort.label.clone(),
+                    value_summary: format!("t={}, S={}", format_point_value(obs.time), format_point_value(s_val)),
+                });
+            }
+        }
+    }
+
     if cohort.show_censored_ticks {
         let censor_stroke = solid_stroke(cohort.color, (cohort.stroke_width_pt * 0.85).max(1.0), LineDashStyle::Solid);
-        for &tc in &cohort.censored_times {
+        for &(tc, row_opt, col_idx) in &cohort.censored_times {
             let s_val = eval_km_step(&cohort.steps, tc) * scale_pct;
             if let (Some(xc), Some(yc)) = (x_map.map_value(tc, r.x, r.right()), y_map.map_value(s_val, r.bottom(), r.y)) {
                 scene.primitives.push(ScenePrimitive::Path {
@@ -1543,6 +1577,15 @@ fn draw_single_km_cohort(scene: &mut ChartScene, cohort: &KmCurveData, x_map: Ax
                     stroke: Some(censor_stroke),
                     clip: Some(r),
                 });
+                if let (Some(sheet_id), Some(row)) = (&cohort.sheet_id, row_opt) {
+                    scene.plotted_points.push(PlottedPointMeta {
+                        center_pt: PointPt::new(xc, yc),
+                        radius_pt: 4.5,
+                        source_cell: SourceCellId { sheet_id: sheet_id.clone(), row, col: col_idx, subcol: 0 },
+                        series_label: cohort.label.clone(),
+                        value_summary: format!("t={}, S={}", format_point_value(tc), format_point_value(s_val)),
+                    });
+                }
             }
         }
     }

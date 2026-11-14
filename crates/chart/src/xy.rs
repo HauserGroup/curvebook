@@ -19,8 +19,8 @@ use crate::scales::{
     emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
 };
 use crate::scene::{
-    ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive,
-    StrokePaint, TextAnchor,
+    ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt,
+    ScenePrimitive, SourceCellId, StrokePaint, TextAnchor,
 };
 
 const KAPPA: f64 = 0.552_284_749_830_793_6;
@@ -1220,6 +1220,10 @@ fn generate_log_ticks(seg: ResolvedSegment, base: f64, default_subdivisions: u8)
     (majors, minors)
 }
 
+pub(crate) fn format_point_value(value: f64) -> String {
+    format_axis_tick(value, AxisScale::Linear, &LocaleNumberPolicy::default())
+}
+
 pub(crate) fn format_tick_rich(value: f64, scale: AxisScale, format: TickLabelFormat, policy: &LocaleNumberPolicy) -> RichText {
     match format {
         TickLabelFormat::Decimal | TickLabelFormat::Categorical(_) => RichText::plain(format_axis_tick(value, scale, policy)),
@@ -1498,6 +1502,7 @@ fn render_legend(scene: &mut ChartScene, spec: &GraphSpec, items: &[LegendItem])
 
 #[derive(Debug, Clone)]
 struct XyDatum {
+    row: usize,
     x_center: f64,
     x_lo: f64,
     x_hi: f64,
@@ -1508,8 +1513,10 @@ struct XyDatum {
 
 #[derive(Debug, Clone)]
 struct ExtractedXySeries {
+    sheet_id: SheetId,
+    col_index: usize,
     points: Vec<XyDatum>,
-    replicates: Vec<(f64, f64)>,
+    replicates: Vec<(f64, f64, usize, usize)>,
     has_x_err: bool,
     has_y_err: bool,
     label: String,
@@ -1599,6 +1606,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
         let has_x_err = series_spec.x_error_bars.is_some();
         let has_y_err = series_spec.y_error_bars.is_some();
 
+        let sheet_id = sheet_opt.map_or_else(|| series_spec.source_sheet_id.clone(), |s| s.id.clone());
         if let Some(sheet) = sheet_opt
             && let TableArchetype::Xy(xy) = &sheet.archetype
         {
@@ -1615,6 +1623,8 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
 
         let fitted_overlay = resolve_fitted_overlay(doc, series_spec, warnings);
         out.push(ExtractedXySeries {
+            sheet_id,
+            col_index: series_spec.data_set_index,
             points,
             replicates,
             has_x_err,
@@ -1631,7 +1641,7 @@ fn extract_xy_table_series(
     xy: &XyTable,
     series_spec: &SeriesSpec,
     points: &mut Vec<XyDatum>,
-    replicates: &mut Vec<(f64, f64)>,
+    replicates: &mut Vec<(f64, f64, usize, usize)>,
     warnings: &mut Vec<ChartWarning>,
 ) {
     let Some(ds) = xy.data_sets.get(series_spec.data_set_index) else {
@@ -1657,14 +1667,14 @@ fn extract_xy_table_series(
             continue;
         };
         if !xy.y_subcolumn_mode.is_pre_summarized() && series_spec.y_error_bars.is_none() {
-            for cell in subcells {
+            for (subcol, cell) in subcells.iter().enumerate() {
                 if let Some(yv) = cell.active_number() {
-                    replicates.push((xc, yv));
+                    replicates.push((xc, yv, row, subcol));
                 }
             }
         }
         if let Some((yc, ylo, yhi)) = summarize_subcells(xy.y_subcolumn_mode, subcells, y_summary, series_spec.y_error_bars.as_ref(), warnings) {
-            points.push(XyDatum { x_center: xc, x_lo: xlo, x_hi: xhi, y_center: yc, y_lo: ylo, y_hi: yhi });
+            points.push(XyDatum { row, x_center: xc, x_lo: xlo, x_hi: xhi, y_center: yc, y_lo: ylo, y_hi: yhi });
         }
     }
 }
@@ -1718,7 +1728,7 @@ fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -
                 target_y.push(pt.y_hi);
             }
         }
-        for &(rx, ry) in &item.replicates {
+        for &(rx, ry, _, _) in &item.replicates {
             x_vals.push(rx);
             target_y.push(ry);
         }
@@ -1765,6 +1775,7 @@ fn render_xy_series(scene: &mut ChartScene, spec: &SeriesSpec, data: &ExtractedX
     // 2. Map summary points & emit warnings for off-domain coordinates
     let mut mapped_runs: Vec<Vec<PointPt>> = Vec::new();
     let mut current_run: Vec<PointPt> = Vec::new();
+    let mut summary_markers: Vec<(PointPt, usize, f64, f64)> = Vec::new();
     let mut prev_seg_pair: Option<(usize, usize)> = None;
     let mut warned_x_domain = false;
     let mut warned_y_domain = false;
@@ -1799,7 +1810,9 @@ fn render_xy_series(scene: &mut ChartScene, spec: &SeriesSpec, data: &ExtractedX
             flush_run(&mut current_run, &mut mapped_runs);
         }
         prev_seg_pair = Some((sx, sy));
-        current_run.push(PointPt::new(px, py));
+        let mapped_pt = PointPt::new(px, py);
+        current_run.push(mapped_pt);
+        summary_markers.push((mapped_pt, pt.row, pt.x_center, pt.y_center));
     }
     flush_run(&mut current_run, &mut mapped_runs);
 
@@ -1861,30 +1874,73 @@ fn render_xy_series(scene: &mut ChartScene, spec: &SeriesSpec, data: &ExtractedX
 
     // 6. Markers (either raw individual replicates when y_error_bars is None, or summarized centers)
     if let Some(marker) = marker_opt {
-        if !data.replicates.is_empty() && spec.y_error_bars.is_none() {
-            for &(rx, ry) in &data.replicates {
-                let Some((_, px)) = x_axis.map_value(rx) else {
-                    if !warned_x_domain && is_out_of_axis_domain(x_axis, rx) {
-                        warned_x_domain = true;
-                        scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("omitted X replicate {rx} outside domain")));
-                    }
-                    continue;
-                };
-                let Some((_, py)) = y_axis.map_value(ry) else {
-                    if !warned_y_domain && is_out_of_axis_domain(y_axis, ry) {
-                        warned_y_domain = true;
-                        scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("omitted Y replicate {ry} outside domain")));
-                    }
-                    continue;
-                };
-                emit_marker(&mut scene.primitives, PointPt::new(px, py), &marker, Some(clip));
-            }
-        } else {
-            for run in &mapped_runs {
-                for &p in run {
-                    emit_marker(&mut scene.primitives, p, &marker, Some(clip));
+        let ctx = XyMarkerCtx {
+            x_axis,
+            y_axis,
+            marker,
+            clip,
+            use_replicates: !data.replicates.is_empty() && spec.y_error_bars.is_none(),
+            warned_x_domain,
+            warned_y_domain,
+        };
+        emit_xy_markers(scene, data, &summary_markers, &ctx);
+    }
+}
+
+struct XyMarkerCtx<'a> {
+    x_axis: &'a SegmentedAxis,
+    y_axis: &'a SegmentedAxis,
+    marker: MarkerStyle,
+    clip: RectPt,
+    use_replicates: bool,
+    warned_x_domain: bool,
+    warned_y_domain: bool,
+}
+
+fn push_xy_point_meta(
+    scene: &mut ChartScene,
+    data: &ExtractedXySeries,
+    center_pt: PointPt,
+    marker_size_pt: f64,
+    cell_info: (usize, usize, f64, f64),
+) {
+    let (row, subcol, vx, vy) = cell_info;
+    scene.plotted_points.push(PlottedPointMeta {
+        center_pt,
+        radius_pt: (marker_size_pt * 0.5).max(3.0),
+        source_cell: SourceCellId { sheet_id: data.sheet_id.clone(), row, col: data.col_index, subcol },
+        series_label: data.label.clone(),
+        value_summary: format!("X={}, Y={}", format_point_value(vx), format_point_value(vy)),
+    });
+}
+
+fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_markers: &[(PointPt, usize, f64, f64)], ctx: &XyMarkerCtx<'_>) {
+    let mut warned_x = ctx.warned_x_domain;
+    let mut warned_y = ctx.warned_y_domain;
+    if ctx.use_replicates {
+        for &(rx, ry, row, subcol) in &data.replicates {
+            let Some((_, px)) = ctx.x_axis.map_value(rx) else {
+                if !warned_x && is_out_of_axis_domain(ctx.x_axis, rx) {
+                    warned_x = true;
+                    scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("omitted X replicate {rx} outside domain")));
                 }
-            }
+                continue;
+            };
+            let Some((_, py)) = ctx.y_axis.map_value(ry) else {
+                if !warned_y && is_out_of_axis_domain(ctx.y_axis, ry) {
+                    warned_y = true;
+                    scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("omitted Y replicate {ry} outside domain")));
+                }
+                continue;
+            };
+            let pt = PointPt::new(px, py);
+            emit_marker(&mut scene.primitives, pt, &ctx.marker, Some(ctx.clip));
+            push_xy_point_meta(scene, data, pt, ctx.marker.size_pt, (row, subcol, rx, ry));
+        }
+    } else {
+        for &(pt, row, vx, vy) in summary_markers {
+            emit_marker(&mut scene.primitives, pt, &ctx.marker, Some(ctx.clip));
+            push_xy_point_meta(scene, data, pt, ctx.marker.size_pt, (row, 0, vx, vy));
         }
     }
 }

@@ -1386,6 +1386,7 @@ mod tests {
             plot_rect_pt: RectPt::new(60.0, 40.0, 280.0, 200.0),
             primitives: Vec::new(),
             warnings: Vec::new(),
+            plotted_points: Vec::new(),
         }
     }
 

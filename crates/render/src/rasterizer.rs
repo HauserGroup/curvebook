@@ -1,7 +1,7 @@
 //! Deterministic software rasterizer converting [`lumencraft_chart::ChartScene`] into RGBA pixels.
 
 use lumencraft_chart::{ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
-use lumencraft_palette::{LineDashStyle, Rgba8};
+use lumencraft_palette::{CanvasPreviewFilter, LineDashStyle, Rgba8, simulate_preview_filter};
 use lumencraft_text::{GlyphOutlineCmd, outline_rich_text};
 use serde::{Deserialize, Serialize};
 
@@ -9,6 +9,12 @@ use crate::RenderTargetSpec;
 
 /// Maximum supported raster width or height in pixels (`16384 x 16384`).
 pub const MAX_RASTER_DIM_PX: u32 = 16_384;
+
+/// Maximum supported total raster pixel budget (`8192 x 8192` = 67,108,864 pixels).
+pub const MAX_RASTER_PIXELS: u64 = 67_108_864;
+
+/// Alias for uncompressed RGBA pixel buffers compatible with canvas preview filters.
+pub type RgbaPixmap = RasterImage;
 
 const BEZIER_FLATNESS_TOL_PX: f64 = 0.15;
 const MAX_BEZIER_DEPTH: u8 = 12;
@@ -38,12 +44,20 @@ impl RasterImage {
                 message: format!("raster dimensions {width_px}x{height_px} exceed maximum {MAX_RASTER_DIM_PX}x{MAX_RASTER_DIM_PX}"),
             });
         }
-        let pixel_count = (width_px as usize)
-            .checked_mul(height_px as usize)
-            .ok_or_else(|| RenderError::InvalidTarget { message: String::from("raster dimensions overflow addressable pixel count") })?;
+        let total_pixels = u64::from(width_px).saturating_mul(u64::from(height_px));
+        if total_pixels > MAX_RASTER_PIXELS {
+            return Err(RenderError::InvalidTarget {
+                message: format!("raster pixel count {total_pixels} ({width_px}x{height_px}) exceeds budget {MAX_RASTER_PIXELS}"),
+            });
+        }
+        let pixel_count = usize::try_from(total_pixels)
+            .map_err(|_| RenderError::InvalidTarget { message: String::from("raster dimensions overflow addressable pixel count") })?;
         let byte_len =
             pixel_count.checked_mul(4).ok_or_else(|| RenderError::InvalidTarget { message: String::from("raster byte buffer size overflow") })?;
-        let mut rgba = Vec::with_capacity(byte_len);
+        let mut rgba = Vec::new();
+        rgba.try_reserve_exact(byte_len).map_err(|err| RenderError::InvalidTarget {
+            message: format!("failed to reserve {byte_len} bytes for raster image ({width_px}x{height_px}): {err}"),
+        })?;
         for _ in 0..pixel_count {
             rgba.extend_from_slice(&[fill.r, fill.g, fill.b, fill.a]);
         }
@@ -123,6 +137,17 @@ pub enum RenderError {
     InvalidTarget { message: String },
     BufferSizeMismatch { expected: usize, actual: usize },
     EncodingFailed { message: String },
+}
+
+/// Apply a canvas CVD or grayscale print simulation filter across every pixel of `pixmap`.
+pub fn apply_canvas_preview_filter(pixmap: &mut RgbaPixmap, filter: CanvasPreviewFilter) {
+    for [r, g, b, a] in pixmap.rgba.as_chunks_mut::<4>().0 {
+        let filtered = simulate_preview_filter(Rgba8 { r: *r, g: *g, b: *b, a: *a }, filter);
+        *r = filtered.r;
+        *g = filtered.g;
+        *b = filtered.b;
+        *a = filtered.a;
+    }
 }
 
 impl std::fmt::Display for RenderError {

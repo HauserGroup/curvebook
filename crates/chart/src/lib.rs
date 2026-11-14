@@ -16,8 +16,8 @@ use lumencraft_doc::{GraphKind, GraphSheet, LayoutSheet, ProjectDocument};
 use lumencraft_palette::Rgba8;
 use lumencraft_text::parse_markup;
 pub use scene::{
-    ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive,
-    StrokePaint, TextAnchor,
+    ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, PreflightIssue,
+    RectPt, ScenePrimitive, SourceCellId, StrokePaint, TextAnchor, preflight_check_scene,
 };
 
 use serde::{Deserialize, Serialize};

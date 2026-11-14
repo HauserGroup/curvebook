@@ -3,6 +3,7 @@ name = "lumencraft-render"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "LumenCraft deterministic CPU graph and multi-panel publication layout renderer"
 
 [lints]

@@ -244,6 +244,33 @@ impl fmt::Display for ChartError {
 
 impl std::error::Error for ChartError {}
 
+/// Coordinate provenance pointing back to the originating [`lumencraft_doc::DataSheet`] cell (`QOL-5`).
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SourceCellId {
+    pub sheet_id: lumencraft_doc::SheetId,
+    pub row: usize,
+    pub col: usize,
+    pub subcol: usize,
+}
+
+/// Interactive metadata for an individual plotted marker/point inside [`ChartScene`] (`QOL-5`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PlottedPointMeta {
+    pub center_pt: PointPt,
+    pub radius_pt: f64,
+    pub source_cell: SourceCellId,
+    pub series_label: String,
+    pub value_summary: String,
+}
+
+/// Publication preflight diagnostic finding emitted by [`preflight_check_scene`] (`QOL-8`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PreflightIssue {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+}
+
 /// Complete compiled figure or layout scene ready for SVG, PDF, raster, and canvas rendering.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChartScene {
@@ -255,6 +282,8 @@ pub struct ChartScene {
     pub plot_rect_pt: RectPt,
     pub primitives: Vec<ScenePrimitive>,
     pub warnings: Vec<ChartWarning>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub plotted_points: Vec<PlottedPointMeta>,
 }
 
 impl ChartScene {
@@ -273,6 +302,80 @@ impl ChartScene {
                 clip: None,
             });
         }
-        Self { sheet_id: sheet_id.into(), title: title.into(), width_pt: w, height_pt: h, background, plot_rect_pt, primitives, warnings: Vec::new() }
+        Self {
+            sheet_id: sheet_id.into(),
+            title: title.into(),
+            width_pt: w,
+            height_pt: h,
+            background,
+            plot_rect_pt,
+            primitives,
+            warnings: Vec::new(),
+            plotted_points: Vec::new(),
+        }
     }
+
+    /// Hit-test individual plotted points in scene coordinates (`pt` in PostScript points) (`QOL-5`).
+    #[must_use]
+    pub fn hit_test_point(&self, pt: PointPt, tolerance_pt: f64) -> Option<&PlottedPointMeta> {
+        let tol = if tolerance_pt.is_finite() { tolerance_pt.max(0.0) } else { 0.0 };
+        let mut best: Option<(f64, &PlottedPointMeta)> = None;
+        for meta in &self.plotted_points {
+            let dist = (meta.center_pt.x - pt.x).hypot(meta.center_pt.y - pt.y);
+            let max_r = meta.radius_pt.max(tol);
+            if dist <= max_r && best.is_none_or(|(best_d, _)| dist < best_d) {
+                best = Some((dist, meta));
+            }
+        }
+        best.map(|(_, m)| m)
+    }
+}
+
+/// Inspect a compiled [`ChartScene`] for typography or stroke violations at print dimensions (`QOL-8`).
+#[must_use]
+pub fn preflight_check_scene(scene: &ChartScene) -> Vec<PreflightIssue> {
+    let mut issues = Vec::new();
+    let mut min_font_found: Option<f64> = None;
+    let mut min_stroke_found: Option<f64> = None;
+    let mut clipped_text_count = 0_usize;
+
+    for prim in &scene.primitives {
+        match prim {
+            ScenePrimitive::Text(t) if !t.rich.plain_text().trim().is_empty() => {
+                if t.font_size_pt > 0.0 && t.font_size_pt < 5.0 {
+                    min_font_found = Some(min_font_found.map_or(t.font_size_pt, |m| m.min(t.font_size_pt)));
+                }
+                if t.anchor_pt.x < -2.0 || t.anchor_pt.y < -2.0 || t.anchor_pt.x > scene.width_pt + 2.0 || t.anchor_pt.y > scene.height_pt + 2.0 {
+                    clipped_text_count += 1;
+                }
+            }
+            ScenePrimitive::Path { stroke: Some(s), .. } if s.width_pt > 0.0 && s.width_pt < 0.25 => {
+                min_stroke_found = Some(min_stroke_found.map_or(s.width_pt, |m| m.min(s.width_pt)));
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(sz) = min_font_found {
+        issues.push(PreflightIssue {
+            code: String::from("min_font_size"),
+            severity: String::from("warn"),
+            message: format!("visible text size {sz:.2} pt is below recommended 5.0 pt journal print minimum"),
+        });
+    }
+    if let Some(w) = min_stroke_found {
+        issues.push(PreflightIssue {
+            code: String::from("hairline_stroke"),
+            severity: String::from("warn"),
+            message: format!("stroke width {w:.3} pt is below recommended 0.25 pt hairline minimum"),
+        });
+    }
+    if clipped_text_count > 0 {
+        issues.push(PreflightIssue {
+            code: String::from("text_outside_canvas"),
+            severity: String::from("warn"),
+            message: format!("{clipped_text_count} label anchor(s) fall outside canvas bounds ({:.1}x{:.1} pt)", scene.width_pt, scene.height_pt),
+        });
+    }
+    issues
 }

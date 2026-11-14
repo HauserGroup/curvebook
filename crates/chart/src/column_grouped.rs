@@ -3,7 +3,7 @@
 
 use lumencraft_doc::{
     BracketLabelMode, BracketStyle, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec, GraphSheet, GraphicalDataObject,
-    GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, ProjectDocument, ReplicateOverlayStyle,
+    GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, ProjectDocument, ReplicateOverlayStyle, SheetId,
     SummaryMeasure, TableArchetype, TickLabelFormat, WhiskerMethod,
 };
 use lumencraft_math::sum::SummaryMoments;
@@ -12,20 +12,27 @@ use lumencraft_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
 use lumencraft_text::{LocaleNumberPolicy, RichText, format_pvalue_label, measure_text_pt};
 
 use crate::scene::{
-    ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+    ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
+    SourceCellId, StrokePaint, TextAnchor,
 };
 use crate::xy::{
     AxisErrorTarget, LegendItem, SegmentedAxis, compute_central_tendency, compute_raw_error_bounds, configure_plot_rect, emit_directional_error_bar,
-    emit_marker, expand_doc_text, is_log_like, polygon_path, primary_info_sheet_id, render_cartesian_chrome, render_legend_and_annotations,
-    resolve_data_sheet, stroke_with_dash, summarize_subcells,
+    emit_marker, expand_doc_text, format_point_value, is_log_like, polygon_path, primary_info_sheet_id, render_cartesian_chrome,
+    render_legend_and_annotations, resolve_data_sheet, stroke_with_dash, summarize_subcells,
 };
 
 const KDE_SAMPLES: usize = 65;
 
 #[derive(Debug, Clone)]
+struct RawObs {
+    value: f64,
+    source: SourceCellId,
+}
+
+#[derive(Debug, Clone)]
 enum ExtractedKind {
-    Raw(Vec<f64>),
-    PreSummarized { center: f64, lower: f64, upper: f64 },
+    Raw(Vec<RawObs>),
+    PreSummarized { center: f64, lower: f64, upper: f64, source: SourceCellId },
 }
 
 #[derive(Debug, Clone)]
@@ -224,9 +231,9 @@ fn extract_items(
     warnings: &mut Vec<ChartWarning>,
 ) -> Vec<CategorySlotItem> {
     match &sheet.archetype {
-        TableArchetype::Column(col) => extract_column_items(graph, col, tick_positions, warnings),
-        TableArchetype::Nested(nested) => extract_nested_items(graph, nested, tick_positions),
-        TableArchetype::Grouped(grouped) => extract_grouped_items(graph, grouped, tick_positions, warnings),
+        TableArchetype::Column(col) => extract_column_items(graph, &sheet.id, col, tick_positions, warnings),
+        TableArchetype::Nested(nested) => extract_nested_items(graph, &sheet.id, nested, tick_positions),
+        TableArchetype::Grouped(grouped) => extract_grouped_items(graph, &sheet.id, grouped, tick_positions, warnings),
         _ => {
             warnings.push(ChartWarning::new("incompatible_table_archetype", "sheet archetype is not a Column, Grouped, or Nested table"));
             Vec::new()
@@ -236,6 +243,7 @@ fn extract_items(
 
 fn extract_column_items(
     graph: &GraphSheet,
+    sheet_id: &SheetId,
     table: &ColumnTable,
     tick_positions: &mut Vec<(f64, String)>,
     warnings: &mut Vec<ChartWarning>,
@@ -251,9 +259,17 @@ fn extract_column_items(
         tick_positions.push((x_pos, label.clone()));
 
         let payload = if table.subcolumn_mode.is_pre_summarized() {
-            extract_column_presummarized(table.subcolumn_mode, &ds.cells, y_error_bars.as_ref(), warnings)
+            extract_column_presummarized(sheet_id, c, table.subcolumn_mode, &ds.cells, y_error_bars.as_ref(), warnings)
         } else {
-            ExtractedKind::Raw(table.active_column_values(c))
+            let mut obs = Vec::new();
+            for (row, subcells) in ds.cells.iter().enumerate() {
+                for (subcol, cell) in subcells.iter().enumerate() {
+                    if let Some(value) = cell.active_number() {
+                        obs.push(RawObs { value, source: SourceCellId { sheet_id: sheet_id.clone(), row, col: c, subcol } });
+                    }
+                }
+            }
+            ExtractedKind::Raw(obs)
         };
 
         items.push(CategorySlotItem {
@@ -274,20 +290,27 @@ fn extract_column_items(
 }
 
 fn extract_column_presummarized(
+    sheet_id: &SheetId,
+    col: usize,
     mode: lumencraft_doc::SubcolumnMode,
     rows: &[Vec<lumencraft_doc::Cell>],
     err_spec: Option<&ErrorBarSpec>,
     warnings: &mut Vec<ChartWarning>,
 ) -> ExtractedKind {
-    for subcells in rows {
+    for (row, subcells) in rows.iter().enumerate() {
         if let Some((center, lower, upper)) = summarize_subcells(mode, subcells, SummaryMeasure::Mean, err_spec, warnings) {
-            return ExtractedKind::PreSummarized { center, lower, upper };
+            return ExtractedKind::PreSummarized { center, lower, upper, source: SourceCellId { sheet_id: sheet_id.clone(), row, col, subcol: 0 } };
         }
     }
     ExtractedKind::Raw(Vec::new())
 }
 
-fn extract_nested_items(graph: &GraphSheet, table: &NestedTable, tick_positions: &mut Vec<(f64, String)>) -> Vec<CategorySlotItem> {
+fn extract_nested_items(
+    graph: &GraphSheet,
+    sheet_id: &SheetId,
+    table: &NestedTable,
+    tick_positions: &mut Vec<(f64, String)>,
+) -> Vec<CategorySlotItem> {
     let mut items = Vec::with_capacity(table.groups.len());
     for (g_idx, group) in table.groups.iter().enumerate() {
         let (gdo, y_error_bars, default_color, bind_to_right_y2) = resolve_series_style(graph, g_idx);
@@ -297,12 +320,22 @@ fn extract_nested_items(graph: &GraphSheet, table: &NestedTable, tick_positions:
         let mut unit_means = Vec::new();
         let mut all_tech = Vec::new();
         for b in 0..group.biological_unit_count() {
-            let tech = table.active_technical_replicates(g_idx, b);
-            if !tech.is_empty() {
-                if let Ok(m) = SummaryMoments::from_slice(&tech) {
-                    unit_means.push(m.mean);
+            let mut unit_vals = Vec::new();
+            let mut first_row: Option<usize> = None;
+            for (r, row_cells) in group.cells.iter().enumerate() {
+                if let Some(v) = row_cells.get(b).and_then(lumencraft_doc::Cell::active_number) {
+                    first_row.get_or_insert(r);
+                    unit_vals.push(v);
+                    all_tech.push(RawObs { value: v, source: SourceCellId { sheet_id: sheet_id.clone(), row: r, col: g_idx, subcol: b } });
                 }
-                all_tech.extend(tech);
+            }
+            if !unit_vals.is_empty()
+                && let Ok(m) = SummaryMoments::from_slice(&unit_vals)
+            {
+                unit_means.push(RawObs {
+                    value: m.mean,
+                    source: SourceCellId { sheet_id: sheet_id.clone(), row: first_row.unwrap_or(0), col: g_idx, subcol: b },
+                });
             }
         }
 
@@ -332,6 +365,7 @@ fn extract_nested_items(graph: &GraphSheet, table: &NestedTable, tick_positions:
 
 fn extract_grouped_items(
     graph: &GraphSheet,
+    sheet_id: &SheetId,
     table: &GroupedTable,
     tick_positions: &mut Vec<(f64, String)>,
     warnings: &mut Vec<ChartWarning>,
@@ -358,7 +392,7 @@ fn extract_grouped_items(
                 for c in 0..ncols {
                     let slot_x = cx - 0.5 * cluster_w + ((c as f64) + 0.5) * slot_w;
                     let slot = GroupedSlotPlacement { r, c, x_pos: slot_x, slot_w: slot_w * 0.88, stack_group: None };
-                    push_grouped_cell(&mut items, graph, table, slot, warnings);
+                    push_grouped_cell(&mut items, graph, sheet_id, table, slot, warnings);
                 }
             }
         }
@@ -371,7 +405,7 @@ fn extract_grouped_items(
                     let col_title = table.data_sets.get(c).map_or("", |d| d.title.as_str());
                     tick_positions.push((slot_x, format!("{col_title}:{row_label}")));
                     let slot = GroupedSlotPlacement { r, c, x_pos: slot_x, slot_w: 0.72, stack_group: None };
-                    push_grouped_cell(&mut items, graph, table, slot, warnings);
+                    push_grouped_cell(&mut items, graph, sheet_id, table, slot, warnings);
                 }
             }
         }
@@ -383,7 +417,7 @@ fn extract_grouped_items(
                 }
                 for c in 0..ncols {
                     let slot = GroupedSlotPlacement { r, c, x_pos: cx, slot_w: 0.62, stack_group: Some(r) };
-                    push_grouped_cell(&mut items, graph, table, slot, warnings);
+                    push_grouped_cell(&mut items, graph, sheet_id, table, slot, warnings);
                 }
             }
         }
@@ -428,9 +462,20 @@ struct GroupedSlotPlacement {
     stack_group: Option<usize>,
 }
 
+fn raw_values(obs: &[RawObs]) -> Vec<f64> {
+    obs.iter().map(|o| o.value).collect()
+}
+
+fn sorted_finite_obs(obs: &[RawObs]) -> Vec<RawObs> {
+    let mut out: Vec<RawObs> = obs.iter().filter(|o| o.value.is_finite()).cloned().collect();
+    out.sort_by(|a, b| a.value.total_cmp(&b.value));
+    out
+}
+
 fn push_grouped_cell(
     out: &mut Vec<CategorySlotItem>,
     graph: &GraphSheet,
+    sheet_id: &SheetId,
     table: &GroupedTable,
     slot: GroupedSlotPlacement,
     warnings: &mut Vec<ChartWarning>,
@@ -440,17 +485,24 @@ fn push_grouped_cell(
     let (gdo, y_error_bars, default_color, bind_to_right_y2) = resolve_series_style(graph, c);
     let col_title = table.data_sets.get(c).map_or_else(|| format!("Col {}", c + 1), |d| d.title.clone());
     let row_label = row_display_label(&table.row_titles, r);
+    let subcells = table.data_sets.get(c).and_then(|d| d.cells.get(r));
     let payload = if table.subcolumn_mode.is_pre_summarized() {
-        let subcells = table.data_sets.get(c).and_then(|d| d.cells.get(r)).cloned().unwrap_or_default();
-        if let Some((center, lower, upper)) =
-            summarize_subcells(table.subcolumn_mode, &subcells, SummaryMeasure::Mean, y_error_bars.as_ref(), warnings)
-        {
-            ExtractedKind::PreSummarized { center, lower, upper }
+        let cells = subcells.map_or(&[][..], Vec::as_slice);
+        if let Some((center, lower, upper)) = summarize_subcells(table.subcolumn_mode, cells, SummaryMeasure::Mean, y_error_bars.as_ref(), warnings) {
+            ExtractedKind::PreSummarized { center, lower, upper, source: SourceCellId { sheet_id: sheet_id.clone(), row: r, col: c, subcol: 0 } }
         } else {
             ExtractedKind::Raw(Vec::new())
         }
     } else {
-        ExtractedKind::Raw(table.active_replicates(r, c))
+        let mut obs = Vec::new();
+        if let Some(cells) = subcells {
+            for (subcol, cell) in cells.iter().enumerate() {
+                if let Some(value) = cell.active_number() {
+                    obs.push(RawObs { value, source: SourceCellId { sheet_id: sheet_id.clone(), row: r, col: c, subcol } });
+                }
+            }
+        }
+        ExtractedKind::Raw(obs)
     };
 
     let idx = out.len();
@@ -503,14 +555,15 @@ fn collect_domain_values(
                     }
                 }
             }
-            ExtractedKind::Raw(vals) => {
-                for &v in vals {
+            ExtractedKind::Raw(obs) => {
+                let vals = raw_values(obs);
+                for &v in &vals {
                     target_y.push(v);
                 }
                 let summary = gdo_summary_measure(&it.gdo);
-                if let Some(center) = compute_central_tendency(vals, summary, warnings) {
+                if let Some(center) = compute_central_tendency(&vals, summary, warnings) {
                     let (lo, hi) =
-                        if let Some(eb) = &it.y_error_bars { compute_raw_error_bounds(vals, center, eb.metric, 0.05) } else { (center, center) };
+                        if let Some(eb) = &it.y_error_bars { compute_raw_error_bounds(&vals, center, eb.metric, 0.05) } else { (center, center) };
                     if let Some(sg) = it.stack_group {
                         record_stack_extents(center, lo, hi, sg, &mut stack_pos, &mut stack_neg, target_y);
                     } else {
@@ -593,14 +646,14 @@ fn render_before_after_connectors(
     let mut top_per_col: Vec<f64> = vec![clip.bottom(); items.len()];
 
     for row in 0..col_table.row_count() {
-        let mut pts: Vec<(usize, PointPt)> = Vec::new();
+        let mut pts: Vec<(usize, PointPt, f64)> = Vec::new();
         for &(col_idx, item) in &ba_cols {
             let Some(val) = col_table.data_sets.get(col_idx).and_then(|d| d.cell(row, 0)).and_then(lumencraft_doc::Cell::active_number) else {
                 continue;
             };
             let target_y = if item.bind_to_right_y2 { y2_axis.unwrap_or(y_axis) } else { y_axis };
             if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(item.x_pos), target_y.map_value(val)) {
-                pts.push((col_idx, PointPt::new(px, py)));
+                pts.push((col_idx, PointPt::new(px, py), val));
                 if let Some(slot_top) = top_per_col.get_mut(col_idx) {
                     *slot_top = slot_top.min(py);
                 }
@@ -609,14 +662,21 @@ fn render_before_after_connectors(
         if pts.len() >= 2 {
             let mut cmds = Vec::with_capacity(pts.len());
             cmds.push(PathCmd::MoveTo(pts[0].1));
-            for &(_, p) in &pts[1..] {
+            for &(_, p, _) in &pts[1..] {
                 cmds.push(PathCmd::LineTo(p));
             }
             scene.primitives.push(ScenePrimitive::Path { path: Path2D { commands: cmds }, fill: None, stroke: Some(stroke), clip: Some(clip) });
         }
         if let Some(m) = marker_opt {
-            for &(_, p) in &pts {
+            for &(col_idx, p, val) in &pts {
                 emit_marker(&mut scene.primitives, p, &m, Some(clip));
+                scene.plotted_points.push(PlottedPointMeta {
+                    center_pt: p,
+                    radius_pt: (m.size_pt * 0.5).max(3.0),
+                    source_cell: SourceCellId { sheet_id: sheet.id.clone(), row, col: col_idx, subcol: 0 },
+                    series_label: items[col_idx].match_label.clone(),
+                    value_summary: format_point_value(val),
+                });
             }
         }
     }
@@ -664,12 +724,13 @@ fn render_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGe
     let cx = slot.cx;
     let slot_w_pt = slot.width_pt;
     let clip = scene.plot_rect_pt;
-    let (center, err_lo, err_hi, raw_vals) = match &item.payload {
+    let (center, err_lo, err_hi, raw_obs) = match &item.payload {
         ExtractedKind::PreSummarized { center, lower, upper, .. } => (*center, *lower, *upper, Vec::new()),
-        ExtractedKind::Raw(vals) => {
-            let c = compute_central_tendency(vals, summary, &mut scene.warnings)?;
-            let (lo, hi) = if let Some(eb) = &item.y_error_bars { compute_raw_error_bounds(vals, c, eb.metric, 0.05) } else { (c, c) };
-            (c, lo, hi, vals.clone())
+        ExtractedKind::Raw(obs) => {
+            let vals = raw_values(obs);
+            let c = compute_central_tendency(&vals, summary, &mut scene.warnings)?;
+            let (lo, hi) = if let Some(eb) = &item.y_error_bars { compute_raw_error_bounds(&vals, c, eb.metric, 0.05) } else { (c, c) };
+            (c, lo, hi, obs.clone())
         }
     };
 
@@ -747,7 +808,7 @@ fn render_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGe
     }
 
     if let Some(overlay) = replicate_overlay
-        && !raw_vals.is_empty()
+        && !raw_obs.is_empty()
         && item.stack_group.is_none()
     {
         let dot_style = MarkerStyle {
@@ -758,7 +819,8 @@ fn render_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGe
             stroke_color: Rgba8::WHITE,
             stroke_width_pt: 0.4,
         };
-        let top_dot = emit_replicate_dots(scene, cx, slot_w_pt * 0.40, &raw_vals, y_axis, overlay, &dot_style);
+        let ctx = ReplicateDotCtx { cx, max_half_w: slot_w_pt * 0.40, y_axis, style: overlay, marker: &dot_style, series_label: &item.match_label };
+        let top_dot = emit_replicate_dots(scene, &raw_obs, &ctx);
         highest_pt = highest_pt.min(top_dot);
     }
 
@@ -777,17 +839,26 @@ fn render_aligned_dot_item(scene: &mut ChartScene, item: &CategorySlotItem, slot
     let cx = slot.cx;
     let slot_w_pt = slot.width_pt;
     let clip = scene.plot_rect_pt;
-    let raw_vals = match &item.payload {
-        ExtractedKind::Raw(vals) => vals.clone(),
-        ExtractedKind::PreSummarized { center, .. } => vec![*center],
+    let raw_obs = match &item.payload {
+        ExtractedKind::Raw(obs) => obs.clone(),
+        ExtractedKind::PreSummarized { center, source, .. } => vec![RawObs { value: *center, source: source.clone() }],
     };
-    let mut highest_pt = emit_replicate_dots(scene, cx, slot_w_pt * 0.42, &raw_vals, y_axis, ReplicateOverlayStyle::DeterministicBeeswarm, &marker);
+    let dot_ctx = ReplicateDotCtx {
+        cx,
+        max_half_w: slot_w_pt * 0.42,
+        y_axis,
+        style: ReplicateOverlayStyle::DeterministicBeeswarm,
+        marker: &marker,
+        series_label: &item.match_label,
+    };
+    let mut highest_pt = emit_replicate_dots(scene, &raw_obs, &dot_ctx);
 
     let (center, lo, hi) = match &item.payload {
         ExtractedKind::PreSummarized { center, lower, upper, .. } => (*center, *lower, *upper),
-        ExtractedKind::Raw(vals) => {
-            let c = compute_central_tendency(vals, summary, &mut scene.warnings)?;
-            let (l, h) = if let Some(eb) = &item.y_error_bars { compute_raw_error_bounds(vals, c, eb.metric, 0.05) } else { (c, c) };
+        ExtractedKind::Raw(obs) => {
+            let vals = raw_values(obs);
+            let c = compute_central_tendency(&vals, summary, &mut scene.warnings)?;
+            let (l, h) = if let Some(eb) = &item.y_error_bars { compute_raw_error_bounds(&vals, c, eb.metric, 0.05) } else { (c, c) };
             (c, l, h)
         }
     };
@@ -825,15 +896,20 @@ fn render_box_whisker_item(scene: &mut ChartScene, item: &CategorySlotItem, slot
     let cx = slot.cx;
     let slot_w_pt = slot.width_pt;
     let clip = scene.plot_rect_pt;
-    let sorted = match &item.payload {
-        ExtractedKind::Raw(vals) => sorted_finite(vals),
-        ExtractedKind::PreSummarized { center, lower, upper, .. } => vec![*lower, *center, *upper],
+    let sorted_obs = match &item.payload {
+        ExtractedKind::Raw(obs) => sorted_finite_obs(obs),
+        ExtractedKind::PreSummarized { center, lower, upper, source } => vec![
+            RawObs { value: *lower, source: source.clone() },
+            RawObs { value: *center, source: source.clone() },
+            RawObs { value: *upper, source: source.clone() },
+        ],
     };
-    if sorted.is_empty() {
+    if sorted_obs.is_empty() {
         return None;
     }
+    let sorted = raw_values(&sorted_obs);
     let (q1, median, q3) = quartiles_hinge(&sorted)?;
-    let (w_lo, w_hi, outliers) = compute_box_whiskers(&sorted, q1, q3, whiskers);
+    let (w_lo, w_hi, outlier_indices) = compute_box_whiskers(&sorted, q1, q3, whiskers);
 
     let (_, py_q1, _) = y_axis.map_clamped_to_nearest(q1);
     let (_, py_med, _) = y_axis.map_clamped_to_nearest(median);
@@ -898,12 +974,23 @@ fn render_box_whisker_item(scene: &mut ChartScene, item: &CategorySlotItem, slot
         stroke_width_pt: 0.5,
     };
     if show_all_points {
-        let top_dot = emit_replicate_dots(scene, cx, box_w * 0.42, &sorted, y_axis, ReplicateOverlayStyle::DeterministicBeeswarm, &dot_style);
+        let dot_ctx = ReplicateDotCtx {
+            cx,
+            max_half_w: box_w * 0.42,
+            y_axis,
+            style: ReplicateOverlayStyle::DeterministicBeeswarm,
+            marker: &dot_style,
+            series_label: &item.match_label,
+        };
+        let top_dot = emit_replicate_dots(scene, &sorted_obs, &dot_ctx);
         highest_pt = highest_pt.min(top_dot);
     } else if show_outliers {
-        for val in outliers {
-            if let Some((_, py)) = y_axis.map_value(val) {
-                emit_marker(&mut scene.primitives, PointPt::new(cx, py), &dot_style, Some(clip));
+        for idx in outlier_indices {
+            let obs = &sorted_obs[idx];
+            if let Some((_, py)) = y_axis.map_value(obs.value) {
+                let dot_pt = PointPt::new(cx, py);
+                emit_marker(&mut scene.primitives, dot_pt, &dot_style, Some(clip));
+                push_col_point_meta(scene, dot_pt, dot_style.size_pt, obs, &item.match_label);
                 highest_pt = highest_pt.min(py);
             }
         }
@@ -911,7 +998,7 @@ fn render_box_whisker_item(scene: &mut ChartScene, item: &CategorySlotItem, slot
     Some(highest_pt)
 }
 
-fn compute_box_whiskers(sorted: &[f64], q1: f64, q3: f64, method: WhiskerMethod) -> (f64, f64, Vec<f64>) {
+fn compute_box_whiskers(sorted: &[f64], q1: f64, q3: f64, method: WhiskerMethod) -> (f64, f64, Vec<usize>) {
     let min_v = sorted.first().copied().unwrap_or(q1);
     let max_v = sorted.last().copied().unwrap_or(q3);
     match method {
@@ -922,7 +1009,7 @@ fn compute_box_whiskers(sorted: &[f64], q1: f64, q3: f64, method: WhiskerMethod)
             let hi_fence = q3 + 1.5 * iqr;
             let w_lo = sorted.iter().copied().find(|&v| v >= lo_fence).unwrap_or(q1);
             let w_hi = sorted.iter().rev().copied().find(|&v| v <= hi_fence).unwrap_or(q3);
-            let outliers = sorted.iter().copied().filter(|&v| v < w_lo || v > w_hi).collect();
+            let outliers = sorted.iter().enumerate().filter_map(|(idx, &v)| (v < w_lo || v > w_hi).then_some(idx)).collect();
             (w_lo, w_hi, outliers)
         }
         WhiskerMethod::Percentile10To90 => percentile_whiskers(sorted, 0.10, 0.90),
@@ -932,10 +1019,10 @@ fn compute_box_whiskers(sorted: &[f64], q1: f64, q3: f64, method: WhiskerMethod)
     }
 }
 
-fn percentile_whiskers(sorted: &[f64], p_lo: f64, p_hi: f64) -> (f64, f64, Vec<f64>) {
+fn percentile_whiskers(sorted: &[f64], p_lo: f64, p_hi: f64) -> (f64, f64, Vec<usize>) {
     let w_lo = quantile_sorted(sorted, p_lo).unwrap_or(0.0);
     let w_hi = quantile_sorted(sorted, p_hi).unwrap_or(w_lo);
-    let outliers = sorted.iter().copied().filter(|&v| v < w_lo - 1e-12 || v > w_hi + 1e-12).collect();
+    let outliers = sorted.iter().enumerate().filter_map(|(idx, &v)| (v < w_lo - 1e-12 || v > w_hi + 1e-12).then_some(idx)).collect();
     (w_lo, w_hi, outliers)
 }
 
@@ -948,13 +1035,18 @@ fn render_violin_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: Slo
     let cx = slot.cx;
     let slot_w_pt = slot.width_pt;
     let clip = scene.plot_rect_pt;
-    let sorted = match &item.payload {
-        ExtractedKind::Raw(vals) => sorted_finite(vals),
-        ExtractedKind::PreSummarized { center, lower, upper, .. } => vec![*lower, *center, *upper],
+    let sorted_obs = match &item.payload {
+        ExtractedKind::Raw(obs) => sorted_finite_obs(obs),
+        ExtractedKind::PreSummarized { center, lower, upper, source } => vec![
+            RawObs { value: *lower, source: source.clone() },
+            RawObs { value: *center, source: source.clone() },
+            RawObs { value: *upper, source: source.clone() },
+        ],
     };
-    if sorted.is_empty() {
+    if sorted_obs.is_empty() {
         return None;
     }
+    let sorted = raw_values(&sorted_obs);
 
     let (q1, median, q3) = quartiles_hinge(&sorted)?;
     let half_max_w = slot_w_pt * 0.45;
@@ -1023,8 +1115,15 @@ fn render_violin_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: Slo
             stroke_width_pt: 0.4,
         };
         let half_center = cx - 0.52 * half_max_w;
-        let top_dot =
-            emit_replicate_dots(scene, half_center, 0.40 * half_max_w, &sorted, y_axis, ReplicateOverlayStyle::DeterministicBeeswarm, &dot_style);
+        let dot_ctx = ReplicateDotCtx {
+            cx: half_center,
+            max_half_w: 0.40 * half_max_w,
+            y_axis,
+            style: ReplicateOverlayStyle::DeterministicBeeswarm,
+            marker: &dot_style,
+            series_label: &item.match_label,
+        };
+        let top_dot = emit_replicate_dots(scene, &sorted_obs, &dot_ctx);
         highest_pt = highest_pt.min(top_dot);
     }
 
@@ -1102,8 +1201,9 @@ fn render_floating_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slo
     let clip = scene.plot_rect_pt;
     let (lo, hi, mid) = match &item.payload {
         ExtractedKind::PreSummarized { center, lower, upper, .. } => (*lower, *upper, summary.map(|_| *center)),
-        ExtractedKind::Raw(vals) => {
-            let sorted = sorted_finite(vals);
+        ExtractedKind::Raw(obs) => {
+            let vals = raw_values(obs);
+            let sorted = sorted_finite(&vals);
             if sorted.is_empty() {
                 return None;
             }
@@ -1140,35 +1240,50 @@ fn render_floating_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slo
     Some(top_y)
 }
 
-fn emit_replicate_dots(
-    scene: &mut ChartScene,
+struct ReplicateDotCtx<'a> {
     cx: f64,
     max_half_w: f64,
-    values: &[f64],
-    y_axis: &SegmentedAxis,
+    y_axis: &'a SegmentedAxis,
     style: ReplicateOverlayStyle,
-    marker: &MarkerStyle,
-) -> f64 {
+    marker: &'a MarkerStyle,
+    series_label: &'a str,
+}
+
+fn push_col_point_meta(scene: &mut ChartScene, center_pt: PointPt, marker_size_pt: f64, obs: &RawObs, series_label: &str) {
+    scene.plotted_points.push(PlottedPointMeta {
+        center_pt,
+        radius_pt: (marker_size_pt * 0.5).max(3.0),
+        source_cell: obs.source.clone(),
+        series_label: series_label.to_owned(),
+        value_summary: format_point_value(obs.value),
+    });
+}
+
+fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDotCtx<'_>) -> f64 {
     let clip = scene.plot_rect_pt;
     let mut top_pt = clip.bottom();
-    let dot_r = (marker.size_pt * 0.5).max(1.2);
-    let mut pts_y: Vec<f64> = Vec::with_capacity(values.len());
-    for &v in values {
-        if let Some((_, py)) = y_axis.map_value(v) {
+    let dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
+    let mut mapped: Vec<(f64, &RawObs)> = Vec::with_capacity(obs.len());
+    let mut pts_y: Vec<f64> = Vec::with_capacity(obs.len());
+    for o in obs {
+        if let Some((_, py)) = ctx.y_axis.map_value(o.value) {
+            mapped.push((py, o));
             pts_y.push(py);
             top_pt = top_pt.min(py);
         }
     }
-    if pts_y.is_empty() {
+    if mapped.is_empty() {
         return top_pt;
     }
 
-    let offsets = match style {
-        ReplicateOverlayStyle::AlignedColumn => vec![0.0; pts_y.len()],
-        ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_y, max_half_w, dot_r),
+    let offsets = match ctx.style {
+        ReplicateOverlayStyle::AlignedColumn => vec![0.0; mapped.len()],
+        ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_y, ctx.max_half_w, dot_r),
     };
-    for (&py, dx) in pts_y.iter().zip(offsets.iter()) {
-        emit_marker(&mut scene.primitives, PointPt::new(cx + dx, py), marker, Some(clip));
+    for (&(py, raw), dx) in mapped.iter().zip(offsets.iter()) {
+        let dot_pt = PointPt::new(ctx.cx + dx, py);
+        emit_marker(&mut scene.primitives, dot_pt, ctx.marker, Some(clip));
+        push_col_point_meta(scene, dot_pt, ctx.marker.size_pt, raw, ctx.series_label);
     }
     top_pt - dot_r
 }

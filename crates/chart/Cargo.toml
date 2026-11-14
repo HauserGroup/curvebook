@@ -3,6 +3,7 @@ name = "lumencraft-chart"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "LumenCraft scientific graph, error-bar, axis-break and significance-bracket scene compiler"
 
 [lints]

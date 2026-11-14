@@ -17,12 +17,16 @@ use lumencraft_stats::two_group::bland_altman;
 use lumencraft_text::{RichText, parse_markup};
 
 use crate::scales::AxisMapping;
-use crate::scene::{ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, TextAnchor};
+use crate::scene::{
+    ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
+    SourceCellId, TextAnchor,
+};
 use crate::survival_cat::{
     CartesianFrame, LegendEntry, PlotMarginConfig, alpha_fill, draw_cartesian_frame, draw_categorical_x_ticks, draw_colorbar, draw_empty_open_frame,
     draw_graph_annotations, draw_legend_entries, emit_marker, extract_sheet_grid, nice_axis_ticks, path_close, path_line, path_move, polygon_path,
     render_data_grid_table, resolve_axis_domain, resolve_graph_text, sanitize_range, solid_stroke, text_metrics, update_plot_rect_for_labels,
 };
+use crate::xy::format_point_value;
 
 const GROUP_SHAPES: [MarkerShape; 9] = [
     MarkerShape::Circle,
@@ -69,6 +73,7 @@ pub fn compile_multivariate_or_diagnostic_graph(graph: &GraphSheet, doc: &Projec
 // ============================================================================
 
 struct BubblePoint {
+    row: usize,
     x: f64,
     y: f64,
     color_cat_idx: usize,
@@ -165,7 +170,7 @@ fn compile_bubble_scatter(
         let (cat_idx, col_scalar) = extract_row_color(mv, &enc.color, &cat_levels, row);
         let size_scalar = extract_row_size(mv, enc.size, row);
         let label = enc.label_column.and_then(|lc| mv.variables.get(lc)).and_then(|c| cell_token(c, row));
-        points.push(BubblePoint { x: xv, y: yv, color_cat_idx: cat_idx, color_scalar: col_scalar, size_scalar, label });
+        points.push(BubblePoint { row, x: xv, y: yv, color_cat_idx: cat_idx, color_scalar: col_scalar, size_scalar, label });
     }
 
     if points.is_empty() {
@@ -232,9 +237,10 @@ fn compile_bubble_scatter(
         };
         let radius = bubble_radius_pt(enc.size, pt.size_scalar, max_abs_s);
         let shape = if cat_levels.is_empty() { MarkerShape::Circle } else { GROUP_SHAPES[pt.color_cat_idx % GROUP_SHAPES.len()] };
+        let center_pt = PointPt::new(px, py);
         emit_marker(
             scene,
-            PointPt::new(px, py),
+            center_pt,
             MarkerStyle {
                 shape,
                 fill_mode: MarkerFillMode::Filled,
@@ -245,6 +251,13 @@ fn compile_bubble_scatter(
             },
             Some(r),
         );
+        scene.plotted_points.push(PlottedPointMeta {
+            center_pt,
+            radius_pt: radius.max(3.0),
+            source_cell: SourceCellId { sheet_id: graph.spec.primary_source_sheet_id.clone(), row: pt.row, col: enc.y_column, subcol: 0 },
+            series_label: cat_levels.get(pt.color_cat_idx).cloned().unwrap_or_else(|| y_col.title.clone()),
+            value_summary: format!("X={}, Y={}", format_point_value(pt.x), format_point_value(pt.y)),
+        });
         if let Some(lbl) = &pt.label {
             scene.primitives.push(ScenePrimitive::Text(PositionedText {
                 rich: parse_markup(lbl),
@@ -2819,6 +2832,15 @@ fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel) {
         }
         for prim in &sub.primitives {
             scene.primitives.push(transform_primitive(prim, panel.tx, panel.ty, panel.scale));
+        }
+        for p in &sub.plotted_points {
+            scene.plotted_points.push(PlottedPointMeta {
+                center_pt: transform_point(p.center_pt, panel.tx, panel.ty, panel.scale),
+                radius_pt: (p.radius_pt * panel.scale).max(2.0),
+                source_cell: p.source_cell.clone(),
+                series_label: p.series_label.clone(),
+                value_summary: p.value_summary.clone(),
+            });
         }
         for w in &sub.warnings {
             scene.warnings.push(ChartWarning::new(w.code.clone(), format!("panel {}: {}", panel.panel_idx + 1, w.message)));

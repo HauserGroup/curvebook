@@ -4,14 +4,16 @@
 //! Layer L3 rendering crate. Governing spec: `docs/graphing-and-layouts.md` (§1, §6).
 #![forbid(unsafe_code)]
 
+pub mod emf;
 pub mod png;
 pub mod rasterizer;
 pub mod tiff;
 
 use serde::{Deserialize, Serialize};
 
+pub use emf::{encode_emf, encode_emf_with_raster, encode_raster_emf};
 pub use png::encode_png;
-pub use rasterizer::{RasterImage, RenderError, render_scene};
+pub use rasterizer::{MAX_RASTER_PIXELS, RasterImage, RenderError, RgbaPixmap, apply_canvas_preview_filter, render_scene};
 pub use tiff::{TiffCompression, encode_tiff};
 
 /// Output pixel dimensions and dots-per-inch metadata for rendered scientific figures.
