@@ -209,6 +209,7 @@ dependencies = [
  "lumencraft-engine",
  "lumencraft-format",
  "lumencraft-pdf",
+ "lumencraft-platform",
  "lumencraft-render",
  "lumencraft-svg",
  "lumencraft-text",
@@ -243,6 +244,7 @@ dependencies = [
  "lumencraft-format",
  "lumencraft-mcp",
  "lumencraft-pdf",
+ "lumencraft-platform",
  "lumencraft-render",
  "lumencraft-svg",
  "lumencraft-testkit",
@@ -274,6 +276,7 @@ dependencies = [
  "lumencraft-math",
  "lumencraft-palette",
  "lumencraft-pdf",
+ "lumencraft-platform",
  "lumencraft-render",
  "lumencraft-stats",
  "lumencraft-svg",
@@ -306,6 +309,7 @@ dependencies = [
  "lumencraft-doc",
  "lumencraft-math",
  "lumencraft-palette",
+ "lumencraft-platform",
  "lumencraft-testkit",
  "proptest",
  "serde",
@@ -329,6 +333,7 @@ dependencies = [
  "lumencraft-engine",
  "lumencraft-format",
  "lumencraft-pdf",
+ "lumencraft-platform",
  "lumencraft-render",
  "lumencraft-svg",
  "lumencraft-testkit",
@@ -359,6 +364,14 @@ dependencies = [
  "lumencraft-testkit",
  "lumencraft-text",
  "serde",
+]
+
+[[package]]
+name = "lumencraft-platform"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -456,6 +469,7 @@ dependencies = [
  "lumencraft-math",
  "lumencraft-palette",
  "lumencraft-pdf",
+ "lumencraft-platform",
  "lumencraft-render",
  "lumencraft-svg",
  "lumencraft-testkit",
@@ -774,7 +788,10 @@ dependencies = [
 name = "xtask"
 version = "0.1.0"
 dependencies = [
+ "lumencraft-engine",
+ "lumencraft-format",
  "lumencraft-testkit",
+ "serde_json",
 ]
 
 [[package]]

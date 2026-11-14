@@ -80,9 +80,47 @@ jobs:
           name: contributors-json
           path: contributors/contributors.json
 
+  licenses:
+    name: Generate third-party license report
+    needs: [git-sources]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate THIRD-PARTY-LICENSES.html
+        run: |
+          set -euo pipefail
+          mkdir -p licenses
+          if command -v cargo-about >/dev/null 2>&1; then
+            cargo about generate about.hbs -o licenses/THIRD-PARTY-LICENSES.html
+          else
+            out="$(cargo xtask licenses --html)"
+            if [ -s licenses/THIRD-PARTY-LICENSES.html ]; then
+              :
+            elif [ -s THIRD-PARTY-LICENSES.html ]; then
+              mv THIRD-PARTY-LICENSES.html licenses/THIRD-PARTY-LICENSES.html
+            elif [ -n "$out" ]; then
+              printf '%s\n' "$out" > licenses/THIRD-PARTY-LICENSES.html
+            else
+              echo "error: failed to generate THIRD-PARTY-LICENSES.html" >&2
+              exit 1
+            fi
+          fi
+          test -s licenses/THIRD-PARTY-LICENSES.html
+      - uses: actions/upload-artifact@v7
+        with:
+          name: third-party-licenses
+          path: licenses/THIRD-PARTY-LICENSES.html
+
   linux:
     name: Linux (${{ matrix.arch }})
-    needs: [git-sources, credits]
+    needs: [git-sources, credits, licenses]
     strategy:
       fail-fast: false
       matrix:
@@ -100,6 +138,10 @@ jobs:
         with:
           name: contributors-json
           path: contributors
+      - uses: actions/download-artifact@v8
+        with:
+          name: third-party-licenses
+          path: licenses
       - name: Install Linux build & packaging dependencies
         run: |
           sudo apt-get update
@@ -129,7 +171,7 @@ jobs:
   macos:
     name: macOS universal
     if: github.event_name != 'schedule'
-    needs: [git-sources, credits]
+    needs: [git-sources, credits, licenses]
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@v7
@@ -139,6 +181,10 @@ jobs:
         with:
           name: contributors-json
           path: contributors
+      - uses: actions/download-artifact@v8
+        with:
+          name: third-party-licenses
+          path: licenses
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -183,7 +229,7 @@ jobs:
 
   windows:
     name: Windows (${{ matrix.arch }})
-    needs: [git-sources, credits]
+    needs: [git-sources, credits, licenses]
     strategy:
       fail-fast: false
       matrix:
@@ -197,6 +243,10 @@ jobs:
         with:
           name: contributors-json
           path: contributors
+      - uses: actions/download-artifact@v8
+        with:
+          name: third-party-licenses
+          path: licenses
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
@@ -231,12 +281,16 @@ jobs:
 
   web:
     name: WebAssembly bundle
-    needs: [git-sources, credits]
+    needs: [git-sources, credits, licenses]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
+      - uses: actions/download-artifact@v8
+        with:
+          name: third-party-licenses
+          path: licenses
       - name: Install Rust toolchain & Trunk
         uses: dtolnay/rust-toolchain@master
         with:
@@ -256,7 +310,7 @@ jobs:
 
   freebsd:
     name: FreeBSD x86_64
-    needs: [git-sources, credits]
+    needs: [git-sources, credits, licenses]
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:
@@ -267,6 +321,10 @@ jobs:
         with:
           name: contributors-json
           path: contributors
+      - uses: actions/download-artifact@v8
+        with:
+          name: third-party-licenses
+          path: licenses
       - name: Build FreeBSD package
         uses: vmactions/freebsd-vm@v1
         with:
@@ -296,6 +354,10 @@ jobs:
           pattern: release-*
           path: dist/release
           merge-multiple: true
+      - uses: actions/download-artifact@v8
+        with:
+          name: third-party-licenses
+          path: dist/release
       - name: Create or update draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

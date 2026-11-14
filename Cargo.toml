@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "apps/*", "xtask"]
+members = ["crates/*", "crates/platform", "apps/*", "xtask"]
 default-members = ["crates/*", "apps/lumencraft", "apps/lumencraft-cli", "xtask"]
 
 [workspace.package]
@@ -9,11 +9,13 @@ edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
 repository = "https://github.com/lumencraft/lumencraft"
+publish = false
 
 [workspace.dependencies]
 # internal workspace crates (L0 -> L6 + testkit)
 lumencraft-math = { path = "crates/math" }
 lumencraft-palette = { path = "crates/palette" }
+lumencraft-platform = { path = "crates/platform" }
 lumencraft-doc = { path = "crates/doc" }
 lumencraft-transform = { path = "crates/transform" }
 lumencraft-stats = { path = "crates/stats" }
@@ -41,7 +43,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
 
 [workspace.lints.rust]
-unsafe_code = "deny"
+unsafe_code = "forbid"
 
 [workspace.lints.clippy]
 cognitive_complexity = "deny"
@@ -70,3 +72,10 @@ debug = "line-tables-only"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[profile.web-release]
+inherits = "release"
+opt-level = "s"
+lto = "fat"
+strip = "symbols"
+panic = "abort"

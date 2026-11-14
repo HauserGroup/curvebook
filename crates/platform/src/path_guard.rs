@@ -1,0 +1,310 @@
+//! `--workdir` canonical path containment and recursive JSON command parameter sanitization.
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::ffi::OsString;
+#[cfg(not(target_arch = "wasm32"))]
+use std::fs;
+#[cfg(not(target_arch = "wasm32"))]
+use std::path::{Component, Path, PathBuf};
+
+#[cfg(not(target_arch = "wasm32"))]
+use serde_json::Value;
+
+#[cfg(not(target_arch = "wasm32"))]
+use crate::PlatformError;
+
+/// JSON parameter keys interpreted as filesystem paths inside engine commands.
+///
+/// Bare `csv` is deliberately absent: `table.importCsv` and the paste command read `csv` as
+/// inline CSV text, so rewriting it as a path would silently import the path string as data.
+/// Manifest `inputs[].csv` paths are resolved separately by batch manifest loaders.
+pub const PATH_PARAM_KEYS: &[&str] = &[
+    "path",
+    "file",
+    "file_path",
+    "filePath",
+    "out",
+    "output",
+    "output_path",
+    "outputPath",
+    "in",
+    "input",
+    "input_path",
+    "inputPath",
+    "source_path",
+    "sourcePath",
+    "target_path",
+    "targetPath",
+    "template",
+    "template_path",
+    "templatePath",
+    "project",
+    "project_path",
+    "projectPath",
+    "csv_path",
+    "csvPath",
+    "ttf_font",
+    "ttfFont",
+    "font_path",
+    "fontPath",
+];
+
+/// Canonicalized `--workdir` guard rejecting parent traversal (`..`), outside paths, and symlink escapes.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub struct WorkdirGuard {
+    canonical_root: PathBuf,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WorkdirGuard {
+    /// Validate and canonicalize `workdir`.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError::InvalidPath`] if `workdir` is inaccessible or not a directory, or
+    /// [`PlatformError::Io`] if canonicalization fails.
+    pub fn new(workdir: &Path) -> Result<Self, PlatformError> {
+        let meta = fs::metadata(workdir)
+            .map_err(|err| PlatformError::InvalidPath { reason: format!("workdir `{}` is inaccessible: {err}", workdir.display()) })?;
+        if !meta.is_dir() {
+            return Err(PlatformError::InvalidPath { reason: format!("workdir `{}` must be a directory", workdir.display()) });
+        }
+        let canonical_root = fs::canonicalize(workdir)
+            .map_err(|err| PlatformError::Io { context: format!("canonicalize workdir `{}`", workdir.display()), message: err.to_string() })?;
+        Ok(Self { canonical_root })
+    }
+
+    /// Borrow the canonical root directory guarded by this instance.
+    #[must_use]
+    pub fn canonical_root(&self) -> &Path {
+        &self.canonical_root
+    }
+
+    /// Resolve and verify that `raw_path` stays strictly inside [`Self::canonical_root`].
+    ///
+    /// # Errors
+    /// Returns [`PlatformError::InvalidPath`] if `raw_path` is empty or contains NUL bytes, or
+    /// [`PlatformError::PathEscape`] if `raw_path` traverses `..` or resolves outside the workdir.
+    pub fn resolve(&self, raw_path: &str) -> Result<PathBuf, PlatformError> {
+        validate_raw_path(raw_path)?;
+        let candidate = Path::new(raw_path);
+        reject_parent_components(candidate, raw_path, &self.canonical_root)?;
+
+        let joined = if candidate.is_absolute() { candidate.to_path_buf() } else { self.canonical_root.join(candidate) };
+        let resolved = resolve_preserving_nonexistent_tail(&joined, raw_path, &self.canonical_root)?;
+        if !resolved.starts_with(&self.canonical_root) {
+            return Err(PlatformError::PathEscape { path: raw_path.to_owned(), workdir: self.canonical_root.display().to_string() });
+        }
+        Ok(resolved)
+    }
+}
+
+/// Strategy for resolving file paths in headless scripts, manifests, and guarded host adapters.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+pub enum PathResolver {
+    /// Strict containment inside `--workdir`.
+    Sandboxed(WorkdirGuard),
+    /// Unsandboxed resolution relative to `base_dir` (when `--workdir` is omitted).
+    Unconstrained { base_dir: PathBuf },
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PathResolver {
+    /// Resolve a filesystem path string according to the active containment policy.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError::InvalidPath`] or [`PlatformError::PathEscape`] on invalid or
+    /// escaping paths.
+    pub fn resolve(&self, raw_path: &str) -> Result<PathBuf, PlatformError> {
+        match self {
+            Self::Sandboxed(guard) => guard.resolve(raw_path),
+            Self::Unconstrained { base_dir } => {
+                validate_raw_path(raw_path)?;
+                let path = Path::new(raw_path);
+                if path.is_absolute() { Ok(path.to_path_buf()) } else { Ok(base_dir.join(path)) }
+            }
+        }
+    }
+
+    /// Recursively inspect and rewrite any filesystem-path fields in a JSON command parameter tree.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError`] if a path field has a non-string non-null value or violates
+    /// containment rules.
+    pub fn sanitize_params(&self, params: &mut Value) -> Result<(), PlatformError> {
+        match params {
+            Value::Object(map) => {
+                for (key, val) in map.iter_mut() {
+                    if is_path_key(key) {
+                        sanitize_path_value(self, key, val)?;
+                    } else {
+                        self.sanitize_params(val)?;
+                    }
+                }
+                Ok(())
+            }
+            Value::Array(items) => {
+                for item in items {
+                    self.sanitize_params(item)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_raw_path(raw_path: &str) -> Result<(), PlatformError> {
+    if raw_path.trim().is_empty() {
+        return Err(PlatformError::InvalidPath { reason: String::from("empty path is not permitted") });
+    }
+    if raw_path.contains('\0') {
+        return Err(PlatformError::InvalidPath { reason: String::from("path must not contain NUL bytes") });
+    }
+    Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_path_key(key: &str) -> bool {
+    PATH_PARAM_KEYS.contains(&key)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sanitize_path_value(resolver: &PathResolver, key: &str, val: &mut Value) -> Result<(), PlatformError> {
+    match val {
+        Value::String(raw) => {
+            let resolved = resolver.resolve(raw)?;
+            *raw = resolved.to_string_lossy().into_owned();
+            Ok(())
+        }
+        Value::Null => Ok(()),
+        _ => Err(PlatformError::InvalidPath { reason: format!("parameter `{key}` must be a string path") }),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn reject_parent_components(path: &Path, raw: &str, canonical_root: &Path) -> Result<(), PlatformError> {
+    for comp in path.components() {
+        if matches!(comp, Component::ParentDir) {
+            return Err(PlatformError::PathEscape { path: raw.to_owned(), workdir: canonical_root.display().to_string() });
+        }
+    }
+    Ok(())
+}
+
+/// Canonicalize the deepest existing ancestor of `joined` (rejecting broken symlink escapes too),
+/// then append the normalized non-existing suffix.
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_preserving_nonexistent_tail(joined: &Path, raw: &str, canonical_root: &Path) -> Result<PathBuf, PlatformError> {
+    let mut existing = joined.to_path_buf();
+    let mut tail_parts: Vec<OsString> = Vec::new();
+    let workdir_str = || canonical_root.display().to_string();
+
+    loop {
+        match fs::symlink_metadata(&existing) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() && fs::canonicalize(&existing).is_err() {
+                    return Err(PlatformError::PathEscape { path: raw.to_owned(), workdir: workdir_str() });
+                }
+                break;
+            }
+            Err(_) => {
+                let Some(name) = existing.file_name().map(std::ffi::OsStr::to_os_string) else {
+                    break;
+                };
+                let Some(parent) = existing.parent().map(Path::to_path_buf) else {
+                    break;
+                };
+                tail_parts.push(name);
+                existing = parent;
+            }
+        }
+    }
+
+    let mut base = fs::canonicalize(&existing).map_err(|_| PlatformError::PathEscape { path: raw.to_owned(), workdir: workdir_str() })?;
+    for part in tail_parts.into_iter().rev() {
+        base.push(part);
+    }
+    Ok(base)
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests {
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use serde_json::json;
+
+    use super::{PathResolver, WorkdirGuard};
+    use crate::PlatformError;
+
+    static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("lumencraft-platform-guard-{label}-{}-{seq}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn sandbox_rewrites_path_keys_and_preserves_inline_csv_text() {
+        let dir = temp_dir("csv");
+        let guard = WorkdirGuard::new(&dir).unwrap();
+        let resolver = PathResolver::Sandboxed(guard);
+
+        let inline = "x,y\n1,2\n../3,4\n";
+        let mut params = json!({ "csv": inline, "path": "nested/out.csv", "template": null });
+        resolver.sanitize_params(&mut params).unwrap();
+
+        assert_eq!(params["csv"], json!(inline));
+        let canonical = std::fs::canonicalize(&dir).unwrap();
+        assert_eq!(params["path"], json!(canonical.join("nested").join("out.csv").to_string_lossy()));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn rejects_empty_parent_traversal_and_outside_paths() {
+        let dir = temp_dir("escape");
+        let outside = temp_dir("outside");
+        let guard = WorkdirGuard::new(&dir).unwrap();
+
+        assert!(matches!(guard.resolve(""), Err(PlatformError::InvalidPath { .. })));
+        assert!(matches!(guard.resolve("   "), Err(PlatformError::InvalidPath { .. })));
+        assert!(matches!(guard.resolve("../secret.txt"), Err(PlatformError::PathEscape { .. })));
+        assert!(matches!(guard.resolve("sub/../../secret.txt"), Err(PlatformError::PathEscape { .. })));
+
+        let outside_file = outside.join("escape.txt").to_string_lossy().into_owned();
+        assert!(matches!(guard.resolve(&outside_file), Err(PlatformError::PathEscape { .. })));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn rejects_symlink_and_dangling_symlink_escapes_even_with_nonexistent_tails() {
+        use std::os::unix::fs::symlink;
+
+        let dir = temp_dir("symlink-wd");
+        let outside = temp_dir("symlink-outside");
+        let guard = WorkdirGuard::new(&dir).unwrap();
+
+        let dir_link = dir.join("out_link");
+        symlink(&outside, &dir_link).unwrap();
+        assert!(matches!(guard.resolve("out_link"), Err(PlatformError::PathEscape { .. })));
+        assert!(matches!(guard.resolve("out_link/nested/new_file.txt"), Err(PlatformError::PathEscape { .. })));
+
+        let dangling_link = dir.join("dangling_link");
+        symlink(outside.join("does_not_exist"), &dangling_link).unwrap();
+        assert!(matches!(guard.resolve("dangling_link"), Err(PlatformError::PathEscape { .. })));
+        assert!(matches!(guard.resolve("dangling_link/child.txt"), Err(PlatformError::PathEscape { .. })));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+}

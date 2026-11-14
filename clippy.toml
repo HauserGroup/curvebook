@@ -1,7 +1,10 @@
-# Tests may unwrap, expect and panic: a failing assertion is the point of a test. Shipped code may
-# not (workspace lints in Cargo.toml; AGENTS.md › Non-negotiables).
+# Tests may unwrap, expect, panic and index/slice directly: a failing assertion is the point of a
+# test. Shipped code may not (workspace lints in Cargo.toml; AGENTS.md › Non-negotiables).
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
-disallowed-types = []
+allow-indexing-slicing-in-tests = true
+disallowed-types = [
+  { path = "std::sync::Mutex", reason = "avoid raw std::sync::Mutex; keep shared state single-owner or use message passing until a checked lock wrapper lands" },
+]
 cognitive-complexity-threshold = 30

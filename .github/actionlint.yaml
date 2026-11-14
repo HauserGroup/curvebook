@@ -1,0 +1,8 @@
+# Actionlint configuration for LumenCraft GitHub Actions workflows.
+# Recognizes GitHub-hosted ARM runner labels and keeps config variables unrestricted.
+self-hosted-runner:
+  labels:
+    - ubuntu-24.04-arm
+    - windows-11-arm
+
+config-variables: null

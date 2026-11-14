@@ -1,0 +1,16 @@
+* text=auto eol=lf
+
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.ico binary
+*.icns binary
+*.pdf binary
+*.emf binary
+*.tif binary
+*.tiff binary
+*.zip binary
+*.woff binary
+*.woff2 binary
+*.lumencraft binary
+*.lctemplate binary

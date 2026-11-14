@@ -9,7 +9,7 @@ HERE="$ROOT/packaging/web"
 
 if [[ "${1:-}" != "--skip-build" ]]; then
   command -v trunk >/dev/null || { echo "error: trunk not found (cargo install trunk --locked)" >&2; exit 1; }
-  (cd "$ROOT/apps/lumencraft-web" && trunk build --release)
+  (cd "$ROOT/apps/lumencraft-web" && trunk build --release --cargo-profile web-release)
 fi
 
 SITE="$ROOT/dist/web"
