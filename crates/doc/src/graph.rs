@@ -91,6 +91,16 @@ pub struct AxisThreshold {
     pub label: Option<String>,
 }
 
+/// Custom extra tick mark (with optional label override and gridline) placed on an axis.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct AdditionalTick {
+    pub value: f64,
+    #[serde(default)]
+    pub label: Option<String>,
+    #[serde(default)]
+    pub draw_gridline: bool,
+}
+
 /// One continuous segment (`1..=3` per axis) of a standard or discontinuous axis (`docs/graphing-and-layouts.md` §3.2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AxisSegment {
@@ -122,6 +132,8 @@ pub struct AxisSpec {
     pub tick_angle_deg: f64,
     pub stroke_width_pt: f64,
     pub thresholds: Vec<AxisThreshold>,
+    #[serde(default)]
+    pub additional_ticks: Vec<AdditionalTick>,
 }
 
 impl AxisSpec {
@@ -136,14 +148,21 @@ impl AxisSpec {
             tick_angle_deg: 0.0,
             stroke_width_pt: 1.0,
             thresholds: Vec::new(),
+            additional_ticks: Vec::new(),
         }
     }
 
-    /// Enforce that discontinuous axes carry `1`, `2`, or `3` segments (`docs/graphing-and-layouts.md` §3.2).
+    /// Enforce that discontinuous axes carry `1`, `2`, or `3` segments (`docs/graphing-and-layouts.md` §3.2)
+    /// and validate axis and custom tick labels.
     pub fn validate(&self) -> Result<(), DocError> {
         validate_title(&self.title)?;
         if !(1..=3).contains(&self.segments.len()) {
             return Err(DocError::InvalidAxisSegments { count: self.segments.len() });
+        }
+        for tick in &self.additional_ticks {
+            if let Some(label) = &tick.label {
+                validate_title(label)?;
+            }
         }
         Ok(())
     }

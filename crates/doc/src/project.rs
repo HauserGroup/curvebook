@@ -11,6 +11,30 @@ use crate::layout::{LayoutItem, LayoutSheet};
 use crate::links::DataSheet;
 use crate::result::ResultSheet;
 
+/// Navigator sheet folder targeted by sheet-ordering operations such as [`ProjectDocument::reorder_sheet`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum SheetFolderKind {
+    Data,
+    Info,
+    Results,
+    Graphs,
+    Layouts,
+}
+
+impl SheetFolderKind {
+    /// Map this folder kind to the corresponding [`SheetSection`] navigator section.
+    #[must_use]
+    pub const fn section(self) -> SheetSection {
+        match self {
+            Self::Data => SheetSection::Data,
+            Self::Info => SheetSection::Info,
+            Self::Results => SheetSection::Analyses,
+            Self::Graphs => SheetSection::Graphs,
+            Self::Layouts => SheetSection::Layouts,
+        }
+    }
+}
+
 /// Complete serializable LumenCraft project model (`L1`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectDocument {
@@ -120,6 +144,22 @@ impl ProjectDocument {
         self.ensure_can_insert(&sheet.id)?;
         self.layout_sheets.push(sheet);
         Ok(())
+    }
+
+    /// Move a sheet inside `folder` from `from_index` to `to_index`, preserving relative order of
+    /// all other sheets in that folder.
+    ///
+    /// # Errors
+    /// Returns [`DocError::SheetIndexOutOfBounds`] when either `from_index` or `to_index` is outside
+    /// `0..len`.
+    pub fn reorder_sheet(&mut self, folder: SheetFolderKind, from_index: usize, to_index: usize) -> Result<(), DocError> {
+        match folder {
+            SheetFolderKind::Data => reorder_vec(&mut self.data_sheets, folder, from_index, to_index),
+            SheetFolderKind::Info => reorder_vec(&mut self.info_sheets, folder, from_index, to_index),
+            SheetFolderKind::Results => reorder_vec(&mut self.result_sheets, folder, from_index, to_index),
+            SheetFolderKind::Graphs => reorder_vec(&mut self.graph_sheets, folder, from_index, to_index),
+            SheetFolderKind::Layouts => reorder_vec(&mut self.layout_sheets, folder, from_index, to_index),
+        }
     }
 
     /// Select a sheet from the main Project Navigator, re-anchoring `family_anchor_sheet_id`.
@@ -245,6 +285,26 @@ impl ProjectDocument {
         deps.dedup();
         deps
     }
+}
+
+fn reorder_vec<T>(items: &mut [T], folder: SheetFolderKind, from_index: usize, to_index: usize) -> Result<(), DocError> {
+    let len = items.len();
+    if from_index >= len {
+        return Err(DocError::SheetIndexOutOfBounds { folder, index: from_index, len });
+    }
+    if to_index >= len {
+        return Err(DocError::SheetIndexOutOfBounds { folder, index: to_index, len });
+    }
+    if from_index < to_index {
+        if let Some(window) = items.get_mut(from_index..=to_index) {
+            window.rotate_left(1);
+        }
+    } else if from_index > to_index
+        && let Some(window) = items.get_mut(to_index..=from_index)
+    {
+        window.rotate_right(1);
+    }
+    Ok(())
 }
 
 fn push_hook_dep(deps: &mut Vec<SheetId>, hook: &HookSource, fallback_info: Option<&SheetId>) {

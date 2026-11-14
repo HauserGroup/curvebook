@@ -6,6 +6,7 @@ use std::fmt;
 pub use lumencraft_math::ConfidenceLevel;
 
 use crate::ids::SheetId;
+use crate::project::SheetFolderKind;
 use crate::{SubcolumnMode, TableKind};
 
 /// Hard ceiling on rows per data table (`docs/data-tables-and-transforms.md` §1.3).
@@ -114,6 +115,7 @@ pub enum DocError {
     CellOutOfBounds { row: usize, col: usize, subcol: usize },
     InvalidCellValue { archetype: TableKind, row: usize, col: usize, reason: &'static str },
     SheetNotFound { sheet_id: SheetId },
+    SheetIndexOutOfBounds { folder: SheetFolderKind, index: usize, len: usize },
     DuplicateSheetId { sheet_id: SheetId },
     InvalidConfidenceLevel { percent: f64 },
     InvalidAxisSegments { count: usize },
@@ -141,6 +143,9 @@ impl fmt::Display for DocError {
                 write!(f, "invalid {archetype:?} cell at (row={row}, col={col}): {reason}")
             }
             Self::SheetNotFound { sheet_id } => write!(f, "sheet `{sheet_id}` not found in project"),
+            Self::SheetIndexOutOfBounds { folder, index, len } => {
+                write!(f, "sheet index {index} out of bounds for {folder:?} folder of length {len}")
+            }
             Self::DuplicateSheetId { sheet_id } => write!(f, "duplicate sheet identifier `{sheet_id}`"),
             Self::InvalidConfidenceLevel { percent } => {
                 write!(f, "confidence level must be finite in [0.01, 99.99], got {percent}")

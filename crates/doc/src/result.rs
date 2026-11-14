@@ -70,6 +70,10 @@ pub enum ResultTabKind {
     CurveCoordinates,
     NumberAtRisk,
     Diagnostics,
+    CovarianceMatrix,
+    NormalQq,
+    BaselineSurvival,
+    LogMinusLog,
 }
 
 /// Single tabular view within a [`ResultSheet`].

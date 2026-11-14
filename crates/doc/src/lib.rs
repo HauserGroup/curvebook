@@ -31,11 +31,12 @@ pub mod project;
 pub mod result;
 
 pub use analysis::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, ContingencyMethod, ContingencySpec, CoxTieMethod, DescriptiveSpec, ErrorPropagationMode,
-    FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultiplicityMethod,
-    MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
-    PValueFormat, ParameterRule, ParameterScope, RepeatedMeasuresDesign, RocCiMethod, RocSpec, SimulationNoise, SubcolumnAggregation,
-    SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
+    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ContingencyMethod, ContingencySpec, CoxTieMethod, DescriptiveSpec,
+    ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec,
+    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
+    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, ParameterRule, ParameterScope, PassingBablokSpec, RepeatedMeasuresDesign, RocCiMethod,
+    RocSpec, SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    WeightingScheme,
 };
 pub use archetypes::{
     CategoricalLevelSummary, CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, GroupedTable, LevelOrderKind, LevelOrderSpec,
@@ -49,11 +50,11 @@ pub use error::{
     SummaryPointError, validate_confidence_level, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 pub use graph::{
-    AnnotationShapeKind, AreaFillSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament,
-    CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec,
-    FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LegendSpec,
-    LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PartsOfWholeLayout, RegressionOverlaySpec,
-    ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
+    AdditionalTick, AnnotationShapeKind, AreaFillSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle,
+    BreakOrnament, CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric,
+    ErrorBarSpec, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement,
+    LegendSpec, LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PartsOfWholeLayout,
+    RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
 };
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, extract_template_hooks};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};
@@ -62,7 +63,7 @@ pub use links::{
     CloneDataSheetOptions, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinkBorderColor, LinkSource,
     LinkedDataRegion, PlacementMode, SheetCellRange, transpose_cell_grid,
 };
-pub use project::ProjectDocument;
+pub use project::{ProjectDocument, SheetFolderKind};
 pub use result::{
     ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultScalarEntry,
     ResultSheet, ResultStatus, ResultTab, ResultTabKind,

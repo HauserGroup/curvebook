@@ -9,6 +9,14 @@ use crate::TableKind;
 use crate::error::{ConfidenceLevel, DocError, validate_confidence_level, validate_title};
 use crate::ids::{HookSource, SheetId};
 
+const fn default_col_b() -> usize {
+    1
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 // ============================================================================
 // Multiplicity & FDR Specifications (`docs/statistics-implementation.md` §4)
 // ============================================================================
@@ -33,10 +41,12 @@ pub enum MultiplicityMethod {
     BenjaminiHochbergFdr,
     BenjaminiYekutieliFdr,
     TwoStageBkyFdr,
+    NewmanKeuls,
+    FisherLsd,
 }
 
 /// Multiple-comparisons configuration shared across ANOVA, nonparametrics, and survival curves.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MultiplicitySpec {
     pub method: MultiplicityMethod,
     /// Familywise `alpha` (e.g. `0.05`) for FWER methods or desired FDR `Q` (e.g. `0.05` / `0.01`) for FDR methods.
@@ -210,11 +220,66 @@ pub struct TwoGroupSpec {
     pub method: TwoGroupMethod,
     pub two_tailed: bool,
     pub compute_effect_sizes: bool,
+    #[serde(default)]
+    pub mv_group_column: Option<usize>,
+    #[serde(default)]
+    pub mv_response_column: Option<usize>,
 }
 
 impl Default for TwoGroupSpec {
     fn default() -> Self {
-        Self { method: TwoGroupMethod::UnpairedT, two_tailed: true, compute_effect_sizes: true }
+        Self { method: TwoGroupMethod::UnpairedT, two_tailed: true, compute_effect_sizes: true, mv_group_column: None, mv_response_column: None }
+    }
+}
+
+/// Bland-Altman method-comparison specification (`column_a` vs `column_b`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct BlandAltmanSpec {
+    #[serde(default)]
+    pub column_a: usize,
+    #[serde(default = "default_col_b")]
+    pub column_b: usize,
+    #[serde(default)]
+    pub percent_difference: bool,
+}
+
+impl Default for BlandAltmanSpec {
+    fn default() -> Self {
+        Self { column_a: 0, column_b: 1, percent_difference: false }
+    }
+}
+
+/// Row-wise multiple two-group t-test or nonparametric comparison specification.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MultipleRowTestsSpec {
+    #[serde(default)]
+    pub paired: bool,
+    #[serde(default)]
+    pub nonparametric: bool,
+    #[serde(default = "default_true")]
+    pub assume_equal_sd: bool,
+    #[serde(default)]
+    pub multiplicity: MultiplicitySpec,
+}
+
+impl Default for MultipleRowTestsSpec {
+    fn default() -> Self {
+        Self { paired: false, nonparametric: false, assume_equal_sd: true, multiplicity: MultiplicitySpec::default() }
+    }
+}
+
+/// Passing-Bablok nonparametric method-comparison regression specification (`x_column` vs `y_column`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct PassingBablokSpec {
+    #[serde(default)]
+    pub x_column: usize,
+    #[serde(default = "default_col_b")]
+    pub y_column: usize,
+}
+
+impl Default for PassingBablokSpec {
+    fn default() -> Self {
+        Self { x_column: 0, y_column: 1 }
     }
 }
 
@@ -294,6 +359,7 @@ pub enum ContingencyMethod {
     PearsonChiSquare { yates_continuity: bool },
     LikelihoodRatioG2,
     FisherExact,
+    BarnardExact,
     CochranArmitageTrend,
     McNemarPaired,
 }
@@ -327,6 +393,12 @@ pub enum SurvivalAnalysisSpec {
         trend_test: bool,
         asymmetrical_greenwood_ci: bool,
         multiplicity: MultiplicitySpec,
+        #[serde(default)]
+        mv_time_column: Option<usize>,
+        #[serde(default)]
+        mv_status_column: Option<usize>,
+        #[serde(default)]
+        mv_group_column: Option<usize>,
     },
     CoxProportionalHazards {
         time_column: usize,
@@ -368,9 +440,25 @@ pub struct GlmSpec {
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MultivariateSpec {
-    Pca { standardize: bool, parallel_analysis_seed: Option<u64> },
-    CorrelationMatrix { spearman_rank: bool },
-    Clustering { k_means_k: Option<usize> },
+    Pca {
+        standardize: bool,
+        parallel_analysis_seed: Option<u64>,
+    },
+    CorrelationMatrix {
+        spearman_rank: bool,
+    },
+    Clustering {
+        k_means_k: Option<usize>,
+    },
+    MultipleImputation {
+        imputations_m: usize,
+        max_iters: usize,
+        seed: u64,
+        #[serde(default)]
+        response_column: Option<usize>,
+        #[serde(default)]
+        predictor_columns: Vec<usize>,
+    },
 }
 
 // ============================================================================
@@ -430,6 +518,8 @@ pub enum ParameterScope {
     SharedGlobal,
     Constant(f64),
     HookedConstant(HookSource),
+    PerDatasetConstant(Vec<(usize, f64)>),
+    ColumnTitleConstant,
 }
 
 /// Constraint and sharing rule for a single named equation parameter.
@@ -442,11 +532,12 @@ pub struct ParameterRule {
     pub upper_bound: Option<f64>,
 }
 
-/// Model-comparison configuration (`Extra-sum-of-squares F` vs `AICc`; §2.4).
+/// Model-comparison configuration (`Extra-sum-of-squares F` vs `AICc` vs `LikelihoodRatioTest`; §2.4).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ModelComparisonSpec {
     ExtraSumOfSquaresF { alternative_equation_id: String },
     Aicc { alternative_equation_id: String },
+    LikelihoodRatioTest { alternative_equation_id: String },
 }
 
 /// Complete nonlinear regression specification (`crates/fit`).
@@ -465,12 +556,40 @@ pub struct NonlinearFitSpec {
     pub replicates_lack_of_fit_test: bool,
     pub normality_of_residuals: bool,
     pub max_iters: usize,
+    #[serde(default)]
+    pub x_range_filter: Option<(Option<f64>, Option<f64>)>,
+    #[serde(default)]
+    pub y_range_filter: Option<(Option<f64>, Option<f64>)>,
+    #[serde(default)]
+    pub plot_function_only: bool,
+    #[serde(default)]
+    pub plot_x_min: Option<f64>,
+    #[serde(default)]
+    pub plot_x_max: Option<f64>,
+    #[serde(default)]
+    pub homoscedasticity_test: bool,
+    /// Emit the `ResultTabKind::Residuals` tab (`true` by default for new specs; missing legacy JSON
+    /// fields deserialize as `false` via `#[serde(default)]`).
+    #[serde(default)]
+    pub emit_residuals_tab: bool,
+    #[serde(default)]
+    pub emit_covariance_tab: bool,
+    #[serde(default)]
+    pub mv_group_columns: Vec<usize>,
+    #[serde(default)]
+    pub mv_x_columns: Vec<usize>,
+    #[serde(default)]
+    pub mv_y_column: Option<usize>,
 }
 
 impl NonlinearFitSpec {
     pub const DEFAULT_MAX_ITERS: usize = 1_000;
     pub const HARD_MAX_ITERS: usize = 50_000;
 
+    /// Construct a default nonlinear regression specification for `equation_id`.
+    ///
+    /// Defaults `emit_residuals_tab` to `true` so [`crate::ResultTabKind::Residuals`] diagnostics are
+    /// generated out of the box for newly created fits.
     #[must_use]
     pub fn new(equation_id: impl Into<String>) -> Self {
         Self {
@@ -487,6 +606,17 @@ impl NonlinearFitSpec {
             replicates_lack_of_fit_test: false,
             normality_of_residuals: false,
             max_iters: Self::DEFAULT_MAX_ITERS,
+            x_range_filter: None,
+            y_range_filter: None,
+            plot_function_only: false,
+            plot_x_min: None,
+            plot_x_max: None,
+            homoscedasticity_test: false,
+            emit_residuals_tab: true,
+            emit_covariance_tab: false,
+            mv_group_columns: Vec::new(),
+            mv_x_columns: Vec::new(),
+            mv_y_column: None,
         }
     }
 
@@ -507,6 +637,9 @@ pub enum AnalysisKind {
     DescriptiveStats(DescriptiveSpec),
     OutlierDetection(OutlierSpec),
     TwoGroupComparison(TwoGroupSpec),
+    BlandAltman(BlandAltmanSpec),
+    MultipleRowTTests(MultipleRowTestsSpec),
+    PassingBablok(PassingBablokSpec),
     OneWayAnova(OneWayAnovaSpec),
     FactorialAnova(FactorialAnovaSpec),
     NestedComparison(NestedAnalysisSpec),
@@ -549,6 +682,14 @@ impl AnalysisKind {
                 TwoGroupMethod::OneSampleT { .. } => String::from("One-sample t test"),
                 TwoGroupMethod::OneSampleWilcoxon { .. } => String::from("One-sample Wilcoxon test"),
             },
+            Self::BlandAltman(_) => String::from("Bland-Altman method comparison"),
+            Self::MultipleRowTTests(s) => match (s.nonparametric, s.paired) {
+                (false, false) => String::from("Multiple unpaired t tests"),
+                (false, true) => String::from("Multiple paired t tests"),
+                (true, false) => String::from("Multiple Mann-Whitney tests"),
+                (true, true) => String::from("Multiple Wilcoxon tests"),
+            },
+            Self::PassingBablok(_) => String::from("Passing-Bablok regression"),
             Self::OneWayAnova(s) => match s.method {
                 OneWayMethod::OrdinaryAnova => String::from("Ordinary one-way ANOVA"),
                 OneWayMethod::BrownForsytheAndWelch => String::from("Brown-Forsythe and Welch ANOVA"),
@@ -578,6 +719,7 @@ impl AnalysisKind {
                 ContingencyMethod::PearsonChiSquare { .. } => String::from("Chi-square test"),
                 ContingencyMethod::LikelihoodRatioG2 => String::from("Likelihood-ratio contingency test"),
                 ContingencyMethod::FisherExact => String::from("Fisher's exact test"),
+                ContingencyMethod::BarnardExact => String::from("Barnard's exact test"),
                 ContingencyMethod::CochranArmitageTrend => String::from("Chi-square test for trend"),
                 ContingencyMethod::McNemarPaired => String::from("McNemar's test"),
             },
@@ -592,6 +734,7 @@ impl AnalysisKind {
             Self::Multivariate(MultivariateSpec::Pca { .. }) => String::from("Principal component analysis"),
             Self::Multivariate(MultivariateSpec::CorrelationMatrix { .. }) => String::from("Correlation matrix"),
             Self::Multivariate(MultivariateSpec::Clustering { .. }) => String::from("Cluster analysis"),
+            Self::Multivariate(MultivariateSpec::MultipleImputation { .. }) => String::from("Multiple imputation"),
             Self::LinearRegression(_) => String::from("Simple linear regression"),
             Self::NonlinearRegression(fit) => format!("Nonlinear regression ({})", fit.equation_id),
         }
@@ -608,6 +751,12 @@ impl AnalysisKind {
             }
             Self::TwoGroupComparison(_) | Self::OneWayAnova(_) | Self::RocCurve(_) => {
                 matches!(table_kind, TableKind::Column | TableKind::MultipleVariables)
+            }
+            Self::BlandAltman(_) | Self::PassingBablok(_) => {
+                matches!(table_kind, TableKind::Column | TableKind::Xy | TableKind::MultipleVariables)
+            }
+            Self::MultipleRowTTests(_) => {
+                matches!(table_kind, TableKind::Grouped | TableKind::Xy | TableKind::Column | TableKind::MultipleVariables)
             }
             Self::FactorialAnova(_) => matches!(table_kind, TableKind::Grouped | TableKind::MultipleVariables),
             Self::NestedComparison(_) => matches!(table_kind, TableKind::Nested),
@@ -645,6 +794,15 @@ impl AnalysisKind {
             _ => {}
         }
         out
+    }
+
+    /// Collect sorted, deduplicated explicit upstream [`SheetId`] references embedded inside this analysis configuration.
+    #[must_use]
+    pub fn upstream_sheet_ids(&self) -> Vec<SheetId> {
+        let mut ids: Vec<SheetId> = self.hooked_sources().into_iter().filter_map(|h| h.upstream_sheet_id().cloned()).collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 }
 

@@ -1,20 +1,20 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, Cell, CellCoord, CellValue, ChecklistItem, ChecklistStatus, CiBound,
-    ColorChannelMapping, ColumnDesignHint, ColumnTable, ConfidenceLevel, ConstantValue, ContingencyMethod, ContingencySpec, ContingencyTable,
-    CurveSamplePoint, DataSheet, DescriptiveSpec, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FactorialAnovaSpec, FitMethod,
-    FittedCurveOverlay, FloatingNote, GlmFamily, GlmSpec, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject, GroupedArrangement,
-    GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet,
-    LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LinearRegressionSpec, LinkSource, LinkedDataRegion, LogitDomain, MathTransformPreset,
-    ModelComparisonSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode,
-    MultivariateSpec, NestedAnalysisSpec, NestedTable, NonlinearFitSpec, NormalizeAnchor, NoteId, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
-    PValueFormat, PairwiseBracketSpec, PairwiseComparisonRecord, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
-    PartsOfWholeTable, PhysicalUnit, PlacementMode, ProjectDocument, RectPt, RegressionOverlaySpec, RepeatedMeasuresDesign, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SequenceProgression, SheetCellRange, SheetId,
-    SimulationNoise, SizeChannelMapping, SizePt, SubcolumnMode, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, SurvivalTable,
-    TableArchetype, TickLabelFormat, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod, XColumnMode,
-    XyTable,
+    AdditionalTick, AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, BlandAltmanSpec, Cell, CellCoord, CellValue, ChecklistItem,
+    ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ColumnTable, ConfidenceLevel, ConstantValue, ContingencyMethod, ContingencySpec,
+    ContingencyTable, CurveSamplePoint, DataSheet, DescriptiveSpec, DiagnosticPlotKind, DocError, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec,
+    FactorialAnovaSpec, FitMethod, FittedCurveOverlay, FloatingNote, GlmFamily, GlmSpec, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject,
+    GroupedArrangement, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, JournalWidthPreset, LayoutItem,
+    LayoutSheet, LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LinearRegressionSpec, LinkSource, LinkedDataRegion, LogitDomain,
+    MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
+    MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NestedTable, NonlinearFitSpec, NormalizeAnchor, NoteId,
+    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PairwiseBracketSpec, PairwiseComparisonRecord, PanelBadgeStyle, ParameterRule,
+    ParameterScope, PartsOfWholeLayout, PartsOfWholeTable, PassingBablokSpec, PhysicalUnit, PlacementMode, ProjectDocument, RectPt,
+    RegressionOverlaySpec, RepeatedMeasuresDesign, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod,
+    RocSpec, SequenceProgression, SheetCellRange, SheetFolderKind, SheetId, SimulationNoise, SizeChannelMapping, SizePt, SubcolumnMode,
+    SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, SurvivalTable, TableArchetype, TableKind, TickLabelFormat, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod, XColumnMode, XyTable,
 };
 use lumencraft_palette::{
     CategoricalPalette, Cmyk, ColorRamp, ColorStop, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8,
@@ -467,6 +467,9 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             trend_test: false,
             asymmetrical_greenwood_ci: true,
             multiplicity: MultiplicitySpec::default(),
+            mv_time_column: Some(0),
+            mv_status_column: Some(1),
+            mv_group_column: Some(2),
         }),
         AnalysisKind::RocCurve(RocSpec { ci_method: RocCiMethod::DeLong }),
         AnalysisKind::GeneralizedLinearModel(GlmSpec {
@@ -477,6 +480,21 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             compute_vif: true,
         }),
         AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(123) }),
+        AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
+            imputations_m: 5,
+            max_iters: 20,
+            seed: 42,
+            response_column: Some(0),
+            predictor_columns: vec![1, 2, 3],
+        }),
+        AnalysisKind::BlandAltman(BlandAltmanSpec::default()),
+        AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
+            paired: true,
+            nonparametric: false,
+            assume_equal_sd: false,
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::NewmanKeuls, threshold: 0.05, report_confidence_intervals: true },
+        }),
+        AnalysisKind::PassingBablok(PassingBablokSpec::default()),
         AnalysisKind::LinearRegression(LinearRegressionSpec::default()),
         AnalysisKind::NonlinearRegression(NonlinearFitSpec {
             method: FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
@@ -495,6 +513,298 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
     for kind in extra_analyses {
         assert_json_roundtrip(&kind);
     }
+}
+
+#[test]
+fn new_analysis_specs_compatibility_auto_titles_and_copy_traits() {
+    fn assert_copy_spec<T: Copy + Clone + PartialEq + Default + serde::Serialize + for<'de> serde::Deserialize<'de>>() {}
+    assert_copy_spec::<TwoGroupSpec>();
+    assert_copy_spec::<BlandAltmanSpec>();
+    assert_copy_spec::<MultipleRowTestsSpec>();
+    assert_copy_spec::<PassingBablokSpec>();
+
+    assert_eq!(BlandAltmanSpec::default(), BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false });
+    assert_eq!(PassingBablokSpec::default(), PassingBablokSpec { x_column: 0, y_column: 1 });
+    assert!(MultipleRowTestsSpec::default().assume_equal_sd);
+    assert!(NonlinearFitSpec::new("four_pl").emit_residuals_tab);
+
+    // MultiplicityMethod::NewmanKeuls & FisherLsd, ContingencyMethod::BarnardExact
+    assert_json_roundtrip(&MultiplicityMethod::NewmanKeuls);
+    assert_json_roundtrip(&MultiplicityMethod::FisherLsd);
+    assert_json_roundtrip(&ContingencyMethod::BarnardExact);
+    assert_eq!(
+        AnalysisKind::Contingency(ContingencySpec { method: ContingencyMethod::BarnardExact, ..ContingencySpec::default() }).derive_auto_title(),
+        "Barnard's exact test"
+    );
+
+    // BlandAltman compatibility & auto-title
+    let ba = AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 2, percent_difference: true });
+    assert_eq!(ba.derive_auto_title(), "Bland-Altman method comparison");
+    assert!(ba.is_compatible_with(TableKind::Column));
+    assert!(ba.is_compatible_with(TableKind::Xy));
+    assert!(ba.is_compatible_with(TableKind::MultipleVariables));
+    assert!(!ba.is_compatible_with(TableKind::Grouped));
+    assert!(!ba.is_compatible_with(TableKind::Contingency));
+    assert!(ba.upstream_sheet_ids().is_empty());
+    assert_json_roundtrip(&ba);
+
+    // MultipleRowTTests compatibility & auto-titles
+    for (paired, nonparametric, expected_title) in [
+        (false, false, "Multiple unpaired t tests"),
+        (true, false, "Multiple paired t tests"),
+        (false, true, "Multiple Mann-Whitney tests"),
+        (true, true, "Multiple Wilcoxon tests"),
+    ] {
+        let mrow = AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec {
+            paired,
+            nonparametric,
+            assume_equal_sd: true,
+            multiplicity: MultiplicitySpec { method: MultiplicityMethod::FisherLsd, threshold: 0.05, report_confidence_intervals: false },
+        });
+        assert_eq!(mrow.derive_auto_title(), expected_title);
+        assert!(mrow.is_compatible_with(TableKind::Grouped));
+        assert!(mrow.is_compatible_with(TableKind::Xy));
+        assert!(mrow.is_compatible_with(TableKind::Column));
+        assert!(mrow.is_compatible_with(TableKind::MultipleVariables));
+        assert!(!mrow.is_compatible_with(TableKind::Survival));
+        assert!(mrow.upstream_sheet_ids().is_empty());
+        assert_json_roundtrip(&mrow);
+    }
+
+    // PassingBablok compatibility & auto-title
+    let pb = AnalysisKind::PassingBablok(PassingBablokSpec { x_column: 1, y_column: 3 });
+    assert_eq!(pb.derive_auto_title(), "Passing-Bablok regression");
+    assert!(pb.is_compatible_with(TableKind::Xy));
+    assert!(pb.is_compatible_with(TableKind::Column));
+    assert!(pb.is_compatible_with(TableKind::MultipleVariables));
+    assert!(!pb.is_compatible_with(TableKind::Grouped));
+    assert!(pb.upstream_sheet_ids().is_empty());
+    assert_json_roundtrip(&pb);
+}
+
+#[test]
+fn extended_nonlinear_parameters_tabs_and_axis_additional_ticks() {
+    // MultivariateSpec::MultipleImputation
+    let mi = AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
+        imputations_m: 10,
+        max_iters: 25,
+        seed: 777,
+        response_column: None,
+        predictor_columns: vec![0, 1, 2],
+    });
+    assert_eq!(mi.derive_auto_title(), "Multiple imputation");
+    assert!(mi.is_compatible_with(TableKind::MultipleVariables));
+    assert_json_roundtrip(&mi);
+
+    // TwoGroupSpec MV columns
+    let tg = TwoGroupSpec { mv_group_column: Some(0), mv_response_column: Some(1), ..TwoGroupSpec::default() };
+    assert_json_roundtrip(&tg);
+
+    // ParameterScope, ModelComparisonSpec, NonlinearFitSpec extended fields & upstream_sheet_ids
+    let mut nl = NonlinearFitSpec::new("one_site_fit_ki");
+    nl.parameter_rules = vec![
+        ParameterRule {
+            name: String::from("Top"),
+            scope: ParameterScope::PerDatasetConstant(vec![(0, 100.0), (1, 120.0)]),
+            initial_override: None,
+            lower_bound: None,
+            upper_bound: None,
+        },
+        ParameterRule {
+            name: String::from("Ligand"),
+            scope: ParameterScope::ColumnTitleConstant,
+            initial_override: None,
+            lower_bound: None,
+            upper_bound: None,
+        },
+        ParameterRule {
+            name: String::from("HotNM"),
+            scope: ParameterScope::HookedConstant(HookSource::InfoConstant {
+                info_sheet_id: Some(SheetId::new("info-1")),
+                constant_name: String::from("HotNM"),
+            }),
+            initial_override: None,
+            lower_bound: None,
+            upper_bound: None,
+        },
+    ];
+    nl.comparison = Some(ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id: String::from("two_site") });
+    nl.x_range_filter = Some((Some(0.1), Some(100.0)));
+    nl.y_range_filter = Some((None, Some(500.0)));
+    nl.plot_function_only = true;
+    nl.plot_x_min = Some(-10.0);
+    nl.plot_x_max = Some(-2.0);
+    nl.homoscedasticity_test = true;
+    nl.emit_residuals_tab = true;
+    nl.emit_covariance_tab = true;
+    nl.mv_group_columns = vec![0, 1];
+    nl.mv_x_columns = vec![2];
+    nl.mv_y_column = Some(3);
+    let nl_kind = AnalysisKind::NonlinearRegression(nl);
+    assert_eq!(nl_kind.upstream_sheet_ids(), vec![SheetId::new("info-1")]);
+    assert_json_roundtrip(&nl_kind);
+
+    // ResultTabKind new variants
+    for tab_kind in [ResultTabKind::CovarianceMatrix, ResultTabKind::NormalQq, ResultTabKind::BaselineSurvival, ResultTabKind::LogMinusLog] {
+        assert_json_roundtrip(&tab_kind);
+    }
+
+    // AdditionalTick on AxisSpec + validation
+    let mut axis = AxisSpec::linear("Concentration");
+    axis.additional_ticks = vec![
+        AdditionalTick { value: 2.5, label: Some(String::from("IC50")), draw_gridline: true },
+        AdditionalTick { value: 10.0, label: None, draw_gridline: false },
+    ];
+    axis.validate().unwrap();
+    assert_json_roundtrip(&axis);
+
+    let mut bad_axis = AxisSpec::linear("TooLongTick");
+    bad_axis.additional_ticks.push(AdditionalTick { value: 1.0, label: Some("x".repeat(lumencraft_doc::MAX_TITLE_BYTES + 1)), draw_gridline: false });
+    assert!(matches!(bad_axis.validate(), Err(DocError::TitleTooLong { .. })));
+}
+
+#[test]
+fn legacy_json_deserializes_without_new_schema_fields() {
+    let legacy_two_group = r#"{"method":"WelchT","two_tailed":false,"compute_effect_sizes":true}"#;
+    let decoded_tg: TwoGroupSpec = serde_json::from_str(legacy_two_group).unwrap();
+    assert_eq!(decoded_tg.method, TwoGroupMethod::WelchT);
+    assert!(!decoded_tg.two_tailed);
+    assert_eq!(decoded_tg.mv_group_column, None);
+    assert_eq!(decoded_tg.mv_response_column, None);
+
+    let legacy_km = r#"{"KaplanMeier":{"log_rank_mantel_cox":true,"gehan_breslow_wilcoxon":true,"trend_test":false,"asymmetrical_greenwood_ci":true,"multiplicity":{"method":"Bonferroni","threshold":0.05,"report_confidence_intervals":false}}}"#;
+    let decoded_km: SurvivalAnalysisSpec = serde_json::from_str(legacy_km).unwrap();
+    assert!(matches!(
+        decoded_km,
+        SurvivalAnalysisSpec::KaplanMeier {
+            log_rank_mantel_cox: true,
+            gehan_breslow_wilcoxon: true,
+            mv_time_column: None,
+            mv_status_column: None,
+            mv_group_column: None,
+            ..
+        }
+    ));
+
+    let legacy_nl = r#"{
+        "equation_id":"four_pl",
+        "custom_dsl":null,
+        "method":"LeastSquares",
+        "weighting":"None",
+        "parameter_rules":[],
+        "profile_likelihood_ci":true,
+        "comparison":null,
+        "confidence_bands":true,
+        "prediction_bands":false,
+        "interpolate_unknowns":false,
+        "replicates_lack_of_fit_test":false,
+        "normality_of_residuals":false,
+        "max_iters":1000
+    }"#;
+    let decoded_nl: NonlinearFitSpec = serde_json::from_str(legacy_nl).unwrap();
+    assert_eq!(decoded_nl.equation_id, "four_pl");
+    assert_eq!(decoded_nl.x_range_filter, None);
+    assert_eq!(decoded_nl.y_range_filter, None);
+    assert!(!decoded_nl.plot_function_only);
+    assert_eq!(decoded_nl.plot_x_min, None);
+    assert_eq!(decoded_nl.plot_x_max, None);
+    assert!(!decoded_nl.homoscedasticity_test);
+    assert!(!decoded_nl.emit_residuals_tab);
+    assert!(!decoded_nl.emit_covariance_tab);
+    assert!(decoded_nl.mv_group_columns.is_empty());
+    assert!(decoded_nl.mv_x_columns.is_empty());
+    assert_eq!(decoded_nl.mv_y_column, None);
+
+    let legacy_axis = r#"{
+        "title":"Dose",
+        "segments":[{"min":null,"max":null,"scale":"Linear","length_share":1.0,"major_tick_interval":null,"minor_ticks_per_interval":0}],
+        "gap_width_pt":8.0,
+        "break_ornament":"DoubleSlash",
+        "tick_format":"Decimal",
+        "tick_angle_deg":0.0,
+        "stroke_width_pt":1.0,
+        "thresholds":[]
+    }"#;
+    let decoded_axis: AxisSpec = serde_json::from_str(legacy_axis).unwrap();
+    assert_eq!(decoded_axis, AxisSpec::linear("Dose"));
+
+    assert_eq!(serde_json::from_str::<BlandAltmanSpec>("{}").unwrap(), BlandAltmanSpec::default());
+    assert_eq!(serde_json::from_str::<MultipleRowTestsSpec>("{}").unwrap(), MultipleRowTestsSpec::default());
+    assert_eq!(serde_json::from_str::<PassingBablokSpec>("{}").unwrap(), PassingBablokSpec::default());
+    assert_eq!(serde_json::from_str::<AdditionalTick>(r#"{"value":3.5}"#).unwrap(), AdditionalTick { value: 3.5, label: None, draw_gridline: false });
+}
+
+#[test]
+fn project_document_reorder_sheet_across_all_folders_and_bounds() {
+    let mut proj = ProjectDocument::new("Reorder Test").unwrap();
+
+    // Empty folder bounds check
+    assert!(matches!(
+        proj.reorder_sheet(SheetFolderKind::Data, 0, 0),
+        Err(DocError::SheetIndexOutOfBounds { folder: SheetFolderKind::Data, index: 0, len: 0 })
+    ));
+
+    let make_xy = |id: &str| DataSheet::new(id, id, TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 2).unwrap())).unwrap();
+    let ds_a = make_xy("d-a");
+    let ds_b = make_xy("d-b");
+    let ds_c = make_xy("d-c");
+    proj.add_data_sheet(ds_a.clone()).unwrap();
+    proj.add_data_sheet(ds_b).unwrap();
+    proj.add_data_sheet(ds_c).unwrap();
+
+    for id in ["i-a", "i-b", "i-c"] {
+        proj.add_info_sheet(InfoSheet::new_preseeded(id, id).unwrap()).unwrap();
+    }
+    for id in ["r-a", "r-b", "r-c"] {
+        let spec = AnalysisSpec::new(id, "d-a", AnalysisKind::BlandAltman(BlandAltmanSpec::default())).unwrap();
+        proj.add_result_sheet(ResultSheet::new(spec).unwrap()).unwrap();
+    }
+    for id in ["g-a", "g-b", "g-c"] {
+        proj.add_graph_sheet(GraphSheet::new_uninitialized_for_data(id, &ds_a).unwrap()).unwrap();
+    }
+    for id in ["l-a", "l-b", "l-c"] {
+        proj.add_layout_sheet(LayoutSheet::new(id, id, LayoutSpec::default()).unwrap()).unwrap();
+    }
+
+    // Forward move (0 -> 2): [a, b, c] -> [b, c, a]
+    proj.reorder_sheet(SheetFolderKind::Data, 0, 2).unwrap();
+    let data_ids: Vec<&str> = proj.data_sheets.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(data_ids, vec!["d-b", "d-c", "d-a"]);
+
+    // Backward move (2 -> 0): [b, c, a] -> [a, b, c]
+    proj.reorder_sheet(SheetFolderKind::Data, 2, 0).unwrap();
+    let data_ids: Vec<&str> = proj.data_sheets.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(data_ids, vec!["d-a", "d-b", "d-c"]);
+
+    // Adjacent swaps + no-op across Info, Results, Graphs, Layouts
+    proj.reorder_sheet(SheetFolderKind::Info, 1, 2).unwrap();
+    assert_eq!(proj.info_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["i-a", "i-c", "i-b"]);
+    proj.reorder_sheet(SheetFolderKind::Info, 1, 1).unwrap();
+    assert_eq!(proj.info_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["i-a", "i-c", "i-b"]);
+
+    proj.reorder_sheet(SheetFolderKind::Results, 2, 1).unwrap();
+    assert_eq!(proj.result_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["r-a", "r-c", "r-b"]);
+
+    proj.reorder_sheet(SheetFolderKind::Graphs, 0, 1).unwrap();
+    assert_eq!(proj.graph_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["g-b", "g-a", "g-c"]);
+
+    proj.reorder_sheet(SheetFolderKind::Layouts, 2, 0).unwrap();
+    assert_eq!(proj.layout_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["l-c", "l-a", "l-b"]);
+
+    // Out-of-bounds checks preserve slice state
+    assert!(matches!(
+        proj.reorder_sheet(SheetFolderKind::Graphs, 3, 0),
+        Err(DocError::SheetIndexOutOfBounds { folder: SheetFolderKind::Graphs, index: 3, len: 3 })
+    ));
+    assert!(matches!(
+        proj.reorder_sheet(SheetFolderKind::Layouts, 0, 3),
+        Err(DocError::SheetIndexOutOfBounds { folder: SheetFolderKind::Layouts, index: 3, len: 3 })
+    ));
+    assert_eq!(proj.graph_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["g-b", "g-a", "g-c"]);
+    assert_eq!(proj.layout_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["l-c", "l-a", "l-b"]);
+
+    assert_eq!(SheetFolderKind::Results.section(), lumencraft_doc::SheetSection::Analyses);
+    assert_json_roundtrip(&proj);
 }
 
 proptest! {
