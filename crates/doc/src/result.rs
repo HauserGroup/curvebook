@@ -3,12 +3,190 @@
 //! records, fitted curve overlays, and plain-language `ChecklistItem` diagnostics
 //! (`docs/architecture.md`, `docs/statistics-implementation.md` §6, `docs/curve-fitting-implementation.md` §2).
 
+use std::fmt;
+
 use lumencraft_palette::Rgba8;
 
 use crate::analysis::AnalysisSpec;
 use crate::error::DocError;
 use crate::ids::{FloatingNote, SheetId};
 use crate::links::DataSheet;
+
+/// High-level grouping for structured [`ErrorCode`] diagnostics across L1/L2 crates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ErrorCategory {
+    Input,
+    State,
+    Format,
+    Io,
+    Policy,
+    Compute,
+    Internal,
+}
+
+impl ErrorCategory {
+    /// Complete ordered list of all canonical [`ErrorCategory`] variants.
+    pub const ALL: [Self; 7] = [Self::Input, Self::State, Self::Format, Self::Io, Self::Policy, Self::Compute, Self::Internal];
+
+    /// Canonical `snake_case` identifier for this error category.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Input => "input",
+            Self::State => "state",
+            Self::Format => "format",
+            Self::Io => "io",
+            Self::Policy => "policy",
+            Self::Compute => "compute",
+            Self::Internal => "internal",
+        }
+    }
+}
+
+impl fmt::Display for ErrorCategory {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Stable machine-readable error code for structured diagnostics across document, engine, format, and UI layers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ErrorCode {
+    BadInput,
+    NotFound,
+    AlreadyExists,
+    Conflict,
+    FrozenSheet,
+    CycleDetected,
+    UnsupportedFormat,
+    UnsupportedVersion,
+    CorruptData,
+    IoError,
+    PathEscape,
+    ResourceLimit,
+    SolverFailed,
+    InsufficientData,
+    Cancelled,
+    InternalPanic,
+    InternalError,
+}
+
+impl ErrorCode {
+    /// Complete ordered list of all canonical [`ErrorCode`] variants.
+    pub const ALL: [Self; 17] = [
+        Self::BadInput,
+        Self::NotFound,
+        Self::AlreadyExists,
+        Self::Conflict,
+        Self::FrozenSheet,
+        Self::CycleDetected,
+        Self::UnsupportedFormat,
+        Self::UnsupportedVersion,
+        Self::CorruptData,
+        Self::IoError,
+        Self::PathEscape,
+        Self::ResourceLimit,
+        Self::SolverFailed,
+        Self::InsufficientData,
+        Self::Cancelled,
+        Self::InternalPanic,
+        Self::InternalError,
+    ];
+
+    /// Canonical stable `snake_case` identifier for this error code.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::BadInput => "bad_input",
+            Self::NotFound => "not_found",
+            Self::AlreadyExists => "already_exists",
+            Self::Conflict => "conflict",
+            Self::FrozenSheet => "frozen_sheet",
+            Self::CycleDetected => "cycle_detected",
+            Self::UnsupportedFormat => "unsupported_format",
+            Self::UnsupportedVersion => "unsupported_version",
+            Self::CorruptData => "corrupt_data",
+            Self::IoError => "io_error",
+            Self::PathEscape => "path_escape",
+            Self::ResourceLimit => "resource_limit",
+            Self::SolverFailed => "solver_failed",
+            Self::InsufficientData => "insufficient_data",
+            Self::Cancelled => "cancelled",
+            Self::InternalPanic => "internal_panic",
+            Self::InternalError => "internal_error",
+        }
+    }
+
+    /// Coarse [`ErrorCategory`] classification for this error code.
+    #[must_use]
+    pub const fn category(self) -> ErrorCategory {
+        match self {
+            Self::BadInput => ErrorCategory::Input,
+            Self::NotFound | Self::AlreadyExists | Self::Conflict | Self::FrozenSheet | Self::CycleDetected => ErrorCategory::State,
+            Self::UnsupportedFormat | Self::UnsupportedVersion | Self::CorruptData => ErrorCategory::Format,
+            Self::IoError => ErrorCategory::Io,
+            Self::PathEscape | Self::ResourceLimit => ErrorCategory::Policy,
+            Self::SolverFailed | Self::InsufficientData | Self::Cancelled => ErrorCategory::Compute,
+            Self::InternalPanic | Self::InternalError => ErrorCategory::Internal,
+        }
+    }
+
+    /// Parse a canonical `snake_case` code or known legacy alias, mapping unknown legacy strings to
+    /// [`Self::InternalError`] so historical snapshots remain readable.
+    #[must_use]
+    pub fn from_code_str(raw: &str) -> Self {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "bad_input" | "invalid_input" | "validation_error" => Self::BadInput,
+            "not_found" | "missing_source" | "sheet_not_found" => Self::NotFound,
+            "already_exists" | "duplicate_id" => Self::AlreadyExists,
+            "conflict" => Self::Conflict,
+            "frozen_sheet" | "frozen" => Self::FrozenSheet,
+            "cycle_detected" | "cycle" => Self::CycleDetected,
+            "unsupported_format" => Self::UnsupportedFormat,
+            "unsupported_version" => Self::UnsupportedVersion,
+            "corrupt_data" | "corrupt" => Self::CorruptData,
+            "io_error" | "io" => Self::IoError,
+            "path_escape" => Self::PathEscape,
+            "resource_limit" => Self::ResourceLimit,
+            "solver_failed" | "analysis_error" => Self::SolverFailed,
+            "insufficient_data" => Self::InsufficientData,
+            "cancelled" | "canceled" => Self::Cancelled,
+            "internal_panic" | "panic" => Self::InternalPanic,
+            _ => Self::InternalError,
+        }
+    }
+}
+
+impl fmt::Display for ErrorCode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl serde::Serialize for ErrorCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ErrorCode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct ErrorCodeVisitor;
+        impl serde::de::Visitor<'_> for ErrorCodeVisitor {
+            type Value = ErrorCode;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("a snake_case error code string")
+            }
+
+            fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+                Ok(ErrorCode::from_code_str(value))
+            }
+        }
+        deserializer.deserialize_str(ErrorCodeVisitor)
+    }
+}
 
 /// Recalculation status of a [`ResultSheet`] inside `lumencraft-engine`'s reactive DAG.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -17,7 +195,7 @@ pub enum ResultStatus {
     Dirty,
     UpToDate,
     Failed {
-        code: String,
+        code: ErrorCode,
         message: String,
     },
 }
@@ -133,6 +311,52 @@ pub struct FittedCurveOverlay {
     pub points: Vec<CurveSamplePoint>,
 }
 
+/// Recommended non-destructive alternative statistical method for a violated assumption (`QOL-7` / `C2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum RemediationKind {
+    WelchT,
+    MannWhitneyU,
+    WilcoxonSignedRank,
+    OneSampleWilcoxon,
+    WelchAnova,
+    KruskalWallis,
+    Friedman,
+}
+
+impl RemediationKind {
+    /// Complete ordered list of all canonical [`RemediationKind`] variants.
+    pub const ALL: [Self; 7] =
+        [Self::WelchT, Self::MannWhitneyU, Self::WilcoxonSignedRank, Self::OneSampleWilcoxon, Self::WelchAnova, Self::KruskalWallis, Self::Friedman];
+
+    /// Engine shorthand identifier accepted by `analysis.run` / `stats.run`.
+    #[must_use]
+    pub const fn engine_kind(self) -> &'static str {
+        match self {
+            Self::WelchT => "welch_t",
+            Self::MannWhitneyU => "mann_whitney",
+            Self::WilcoxonSignedRank => "wilcoxon",
+            Self::OneSampleWilcoxon => "one_sample_wilcoxon",
+            Self::WelchAnova => "welch_anova",
+            Self::KruskalWallis => "kruskal_wallis",
+            Self::Friedman => "friedman",
+        }
+    }
+
+    /// Short human-readable label for the sibling remediation analysis.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::WelchT => "Welch's t test",
+            Self::MannWhitneyU => "Mann-Whitney U test",
+            Self::WilcoxonSignedRank => "Wilcoxon matched-pairs test",
+            Self::OneSampleWilcoxon => "One-sample Wilcoxon test",
+            Self::WelchAnova => "Brown-Forsythe & Welch ANOVA",
+            Self::KruskalWallis => "Kruskal-Wallis test",
+            Self::Friedman => "Friedman test",
+        }
+    }
+}
+
 /// Severity status of an assumption check in [`ChecklistItem`] (`docs/statistics-implementation.md` §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ChecklistStatus {
@@ -149,6 +373,8 @@ pub struct ChecklistItem {
     pub status: ChecklistStatus,
     pub diagnostic_metric: Option<String>,
     pub explanation: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remediation: Option<RemediationKind>,
 }
 
 /// Complete output node produced by running an [`AnalysisSpec`].

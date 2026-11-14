@@ -52,3 +52,54 @@ pub fn simulate_cvd(color: Rgba8, kind: CvdKind, severity: f64) -> Rgba8 {
     }
     .to_rgba8()
 }
+
+/// Live non-destructive canvas preview simulation filter (`QOL-9`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum CanvasPreviewFilter {
+    #[default]
+    Normal,
+    Deuteranopia,
+    Protanopia,
+    Tritanopia,
+    GrayscalePrint,
+}
+
+impl CanvasPreviewFilter {
+    /// Canonical serialization / CLI identifier.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Normal => "normal",
+            Self::Deuteranopia => "deuteranopia",
+            Self::Protanopia => "protanopia",
+            Self::Tritanopia => "tritanopia",
+            Self::GrayscalePrint => "grayscale",
+        }
+    }
+
+    /// Parse a case-insensitive preview filter name.
+    #[must_use]
+    pub fn from_name(raw: &str) -> Option<Self> {
+        let norm: String = raw.trim().to_ascii_lowercase().chars().map(|c| if c == '-' { '_' } else { c }).collect();
+        match norm.as_str() {
+            "normal" | "none" | "off" => Some(Self::Normal),
+            "deuteranopia" | "deutan" => Some(Self::Deuteranopia),
+            "protanopia" | "protan" => Some(Self::Protanopia),
+            "tritanopia" | "tritan" => Some(Self::Tritanopia),
+            "grayscale" | "grayscale_print" | "achromatopsia" | "print_bw" | "bw" => Some(Self::GrayscalePrint),
+            _ => None,
+        }
+    }
+}
+
+/// Apply a [`CanvasPreviewFilter`] to an [`Rgba8`] swatch without altering alpha (`QOL-9`).
+#[must_use]
+pub fn simulate_preview_filter(color: Rgba8, filter: CanvasPreviewFilter) -> Rgba8 {
+    match filter {
+        CanvasPreviewFilter::Normal => color,
+        CanvasPreviewFilter::Deuteranopia => simulate_cvd(color, CvdKind::Deuteranopia, 1.0),
+        CanvasPreviewFilter::Protanopia => simulate_cvd(color, CvdKind::Protanopia, 1.0),
+        CanvasPreviewFilter::Tritanopia => simulate_cvd(color, CvdKind::Tritanopia, 1.0),
+        CanvasPreviewFilter::GrayscalePrint => simulate_cvd(color, CvdKind::Achromatopsia, 1.0),
+    }
+}

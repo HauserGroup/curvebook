@@ -254,7 +254,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
     sim_spec.p_value_format = PValueFormat::new_custom(3, Some(1e-4));
 
     let mut res_sheet = ResultSheet::new(sim_spec).unwrap();
-    res_sheet.status = ResultStatus::Failed { code: String::from("E_TEST"), message: String::from("Synthetic diagnostic") };
+    res_sheet.status = ResultStatus::Failed { code: lumencraft_doc::ErrorCode::SolverFailed, message: String::from("Synthetic diagnostic") };
     res_sheet.tabs.push(ResultTab {
         id: String::from("tab-1"),
         title: String::from("Summary"),
@@ -297,6 +297,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
         status: ChecklistStatus::Pass,
         diagnostic_metric: Some(String::from("W = 0.98")),
         explanation: String::from("No evidence of non-normality."),
+        remediation: None,
     });
     proj.add_result_sheet(res_sheet).unwrap();
 

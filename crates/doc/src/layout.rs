@@ -82,6 +82,81 @@ impl JournalWidthPreset {
     }
 }
 
+/// Standardized print / presentation figure size presets (`QOL-8`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FigureCanvasPreset {
+    SingleColumn88mm,
+    ColumnAndHalf130mm,
+    DoubleColumn180mm,
+    FullPagePortrait,
+    Slide16x9,
+    PosterPanel,
+}
+
+impl FigureCanvasPreset {
+    /// Physical dimensions `(width, height, unit)` for this figure preset.
+    #[must_use]
+    pub const fn dimensions(self) -> (f64, f64, PhysicalUnit) {
+        match self {
+            Self::SingleColumn88mm => (88.0, 66.0, PhysicalUnit::Millimeters),
+            Self::ColumnAndHalf130mm => (130.0, 97.5, PhysicalUnit::Millimeters),
+            Self::DoubleColumn180mm => (180.0, 120.0, PhysicalUnit::Millimeters),
+            Self::FullPagePortrait => (180.0, 240.0, PhysicalUnit::Millimeters),
+            Self::Slide16x9 => (720.0, 405.0, PhysicalUnit::Points),
+            Self::PosterPanel => (864.0, 648.0, PhysicalUnit::Points),
+        }
+    }
+
+    /// Physical dimensions converted to typographic points (`1 pt = 1/72 in`).
+    #[must_use]
+    pub fn dimensions_pt(self) -> SizePt {
+        let (w, h, unit) = self.dimensions();
+        SizePt::new(unit.to_points(w), unit.to_points(h))
+    }
+
+    /// Physical dimensions in millimeters.
+    #[must_use]
+    pub fn dimensions_mm(self) -> (f64, f64) {
+        let pt = self.dimensions_pt();
+        (PhysicalUnit::Millimeters.from_points(pt.width), PhysicalUnit::Millimeters.from_points(pt.height))
+    }
+
+    /// Parse preset name from CLI / JSON command parameters.
+    #[must_use]
+    pub fn from_name(raw: &str) -> Option<Self> {
+        let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        match norm.as_str() {
+            "singlecolumn88mm" | "singlecolumn88" | "88mm" => Some(Self::SingleColumn88mm),
+            "columnandhalf130mm" | "columnandhalf130" | "130mm" => Some(Self::ColumnAndHalf130mm),
+            "doublecolumn180mm" | "doublecolumn180" | "180mm" => Some(Self::DoubleColumn180mm),
+            "fullpageportrait" | "fullpage" => Some(Self::FullPagePortrait),
+            "slide16x9" | "16x9" | "slide" => Some(Self::Slide16x9),
+            "posterpanel" | "poster" => Some(Self::PosterPanel),
+            _ => None,
+        }
+    }
+}
+
+/// How strokes, annotations, and font sizes behave when applying a [`FigureCanvasPreset`] (`QOL-8`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum CanvasResizeMode {
+    #[default]
+    KeepTypographyPt,
+    ProportionalScale,
+}
+
+impl CanvasResizeMode {
+    #[must_use]
+    pub fn from_name(raw: &str) -> Option<Self> {
+        let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        match norm.as_str() {
+            "keeptypographypt" | "keeptypography" | "locktypography" | "keep" => Some(Self::KeepTypographyPt),
+            "proportionalscale" | "proportional" | "scale" => Some(Self::ProportionalScale),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PageOrientation {
     Portrait,

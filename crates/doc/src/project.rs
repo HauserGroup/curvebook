@@ -35,6 +35,17 @@ impl SheetFolderKind {
     }
 }
 
+/// Immutable named project milestone snapshot stored alongside the project (`QOL-11`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NamedCheckpoint {
+    pub id: String,
+    pub name: String,
+    pub note: String,
+    pub created_utc: String,
+    /// Canonical JSON snapshot of `ProjectDocument` with `checkpoints` empty to prevent recursive nesting.
+    pub snapshot_json: String,
+}
+
 /// Complete serializable LumenCraft project model (`L1`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectDocument {
@@ -49,6 +60,9 @@ pub struct ProjectDocument {
     /// Anchored root sheet for the Family dependency pane (updated when navigating in the Project
     /// Navigator, kept stable when inspecting sibling sheets inside the Family pane; `docs/ui-parity.md`).
     pub family_anchor_sheet_id: Option<SheetId>,
+    /// Named snapshots created via `project.createCheckpoint` (`QOL-11`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub checkpoints: Vec<NamedCheckpoint>,
 }
 
 impl Default for ProjectDocument {
@@ -63,6 +77,7 @@ impl Default for ProjectDocument {
             layout_sheets: Vec::new(),
             active_sheet_id: None,
             family_anchor_sheet_id: None,
+            checkpoints: Vec::new(),
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::cell::{Cell, CellValue, ReplicateStacking, SubcolumnMode, SummarizedP
 use crate::error::{DocError, SummaryPointError, validate_data_sets, validate_rows, validate_subcolumns, validate_title};
 
 /// Zero-based 3D cell address `(row, col, subcol)` inside a data table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct CellCoord {
     pub row: usize,
     pub col: usize,
@@ -1194,6 +1194,25 @@ impl TableArchetype {
                 t.times.get_mut(row)
             }
             Self::Column(_) | Self::Grouped(_) | Self::Contingency(_) | Self::PartsOfWhole(_) | Self::MultipleVariables(_) | Self::Nested(_) => None,
+        }
+    }
+
+    /// Exact number of allocated [`Cell`] slots held across all internal buffers of this archetype
+    /// (`G10` single source of truth for import budget checks).
+    #[must_use]
+    pub fn allocated_cell_slots(&self) -> usize {
+        fn dataset_slots(cols: &[DataSetColumn]) -> usize {
+            cols.iter().map(|c| c.cells.iter().map(Vec::len).sum::<usize>()).sum()
+        }
+        match self {
+            Self::Xy(t) => t.x_cells.iter().map(Vec::len).sum::<usize>() + dataset_slots(&t.data_sets),
+            Self::Column(t) => dataset_slots(&t.data_sets),
+            Self::Grouped(t) => dataset_slots(&t.data_sets),
+            Self::Contingency(t) => dataset_slots(&t.data_sets),
+            Self::Survival(t) => t.times.len() + dataset_slots(&t.cohorts),
+            Self::PartsOfWhole(t) => dataset_slots(&t.data_sets),
+            Self::MultipleVariables(t) => t.variables.iter().map(|v| v.cells.len()).sum(),
+            Self::Nested(t) => t.groups.iter().map(|g| g.cells.iter().map(Vec::len).sum::<usize>()).sum(),
         }
     }
 }

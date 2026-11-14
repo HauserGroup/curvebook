@@ -141,6 +141,15 @@ impl LinkedDataRegion {
     }
 }
 
+/// Auditable justification attached to an excluded cell (`QOL-3`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CellExclusionNote {
+    pub coord: CellCoord,
+    pub reason_tag: String,
+    pub note: String,
+    pub timestamp_utc: String,
+}
+
 /// Project data-table sheet pairing metadata, freeze state, live linked regions, and floating notes
 /// with one of the eight [`TableArchetype`] schemas (`docs/data-tables-and-transforms.md` §1).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -155,6 +164,8 @@ pub struct DataSheet {
     pub linked_regions: Vec<LinkedDataRegion>,
     pub floating_notes: Vec<FloatingNote>,
     pub color_tag: Option<Rgba8>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub exclusion_notes: Vec<CellExclusionNote>,
 }
 
 impl DataSheet {
@@ -166,7 +177,17 @@ impl DataSheet {
         }
         let title = title.into();
         validate_title(&title)?;
-        Ok(Self { id, title, archetype, frozen: false, info_sheet_id: None, linked_regions: Vec::new(), floating_notes: Vec::new(), color_tag: None })
+        Ok(Self {
+            id,
+            title,
+            archetype,
+            frozen: false,
+            info_sheet_id: None,
+            linked_regions: Vec::new(),
+            floating_notes: Vec::new(),
+            color_tag: None,
+            exclusion_notes: Vec::new(),
+        })
     }
 
     #[must_use]
@@ -214,13 +235,48 @@ impl DataSheet {
     }
 
     /// Non-destructively set or clear the exclusion mask at `coord` (`table.excludeCells`).
+    /// Clearing an exclusion also clears any attached [`CellExclusionNote`].
     pub fn set_excluded(&mut self, coord: CellCoord, excluded: bool) -> Result<(), DocError> {
         self.ensure_mutable()?;
         let Some(slot) = self.archetype.data_cell_mut(coord) else {
             return Err(DocError::CellOutOfBounds { row: coord.row, col: coord.col, subcol: coord.subcol });
         };
         slot.excluded = excluded;
+        if !excluded {
+            self.exclusion_notes.retain(|entry| entry.coord != coord);
+        }
         Ok(())
+    }
+
+    /// Non-destructively mark `coord` excluded together with an auditable [`CellExclusionNote`] (`QOL-3`).
+    pub fn set_excluded_with_reason(
+        &mut self,
+        coord: CellCoord,
+        reason_tag: impl Into<String>,
+        note: impl Into<String>,
+        timestamp_utc: impl Into<String>,
+    ) -> Result<(), DocError> {
+        let reason_tag = reason_tag.into();
+        let note = note.into();
+        let timestamp_utc = timestamp_utc.into();
+        validate_title(&reason_tag)?;
+        validate_title(&note)?;
+        validate_title(&timestamp_utc)?;
+        self.set_excluded(coord, true)?;
+        let entry = CellExclusionNote { coord, reason_tag, note, timestamp_utc };
+        if let Some(existing) = self.exclusion_notes.iter_mut().find(|n| n.coord == coord) {
+            *existing = entry;
+        } else {
+            self.exclusion_notes.push(entry);
+            self.exclusion_notes.sort_by_key(|n| n.coord);
+        }
+        Ok(())
+    }
+
+    /// Look up the exclusion reason note attached to `coord`, if any (`QOL-3`).
+    #[must_use]
+    pub fn exclusion_note(&self, coord: CellCoord) -> Option<&CellExclusionNote> {
+        self.exclusion_notes.iter().find(|n| n.coord == coord)
     }
 
     /// Read an independent `X` (`Xy`) or elapsed-time (`Survival`, `subcol == 0`) cell.

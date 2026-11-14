@@ -29,7 +29,7 @@ pub use categorical::{
 pub use colormap::{
     CIVIDIS_STOPS, ColorRamp, ColorStop, ColormapId, DIVERGING_BLUE_RED_STOPS, GRAYSCALE_STOPS, MAX_DISCRETE_SAMPLES, PLASMA_STOPS, VIRIDIS_STOPS,
 };
-pub use cvd::{CvdKind, simulate_cvd};
+pub use cvd::{CanvasPreviewFilter, CvdKind, simulate_cvd, simulate_preview_filter};
 pub use space::{Cmyk, LinearRgba, Oklab, Oklch, Rgba8, lerp_oklab, linear_channel_to_srgb, srgb_channel_to_linear};
 pub use style::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle};
 
@@ -271,5 +271,22 @@ mod tests {
         ] {
             assert_roundtrip(&dash);
         }
+    }
+
+    #[test]
+    fn canvas_preview_filter_simulates_cvd_and_bt709_grayscale() {
+        use super::{CanvasPreviewFilter, simulate_preview_filter};
+
+        let orange = Rgba8::rgba(230, 159, 0, 180);
+        assert_eq!(simulate_preview_filter(orange, CanvasPreviewFilter::Normal), orange);
+        let gray = simulate_preview_filter(orange, CanvasPreviewFilter::GrayscalePrint);
+        assert!(gray.r.abs_diff(gray.g) <= 1 && gray.g.abs_diff(gray.b) <= 1);
+        assert_eq!(gray.a, 180);
+
+        let deut = simulate_preview_filter(orange, CanvasPreviewFilter::Deuteranopia);
+        assert_eq!(deut, simulate_cvd(orange, CvdKind::Deuteranopia, 1.0));
+        assert_eq!(CanvasPreviewFilter::from_name("grayscale-print"), Some(CanvasPreviewFilter::GrayscalePrint));
+        assert_eq!(CanvasPreviewFilter::from_name("deuteranopia"), Some(CanvasPreviewFilter::Deuteranopia));
+        assert_eq!(CanvasPreviewFilter::from_name("invalid"), None);
     }
 }

@@ -29,6 +29,7 @@ pub mod layout;
 pub mod links;
 pub mod project;
 pub mod result;
+pub mod schema;
 
 pub use analysis::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ContingencyMethod, ContingencySpec, CoxTieMethod, DescriptiveSpec,
@@ -58,15 +59,22 @@ pub use graph::{
 };
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, extract_template_hooks};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};
-pub use layout::{JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle, PhysicalUnit};
-pub use links::{
-    CloneDataSheetOptions, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinkBorderColor, LinkSource,
-    LinkedDataRegion, PlacementMode, SheetCellRange, transpose_cell_grid,
+pub use layout::{
+    CanvasResizeMode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle, PhysicalUnit,
 };
-pub use project::{ProjectDocument, SheetFolderKind};
+pub use links::{
+    CellExclusionNote, CloneDataSheetOptions, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinkBorderColor,
+    LinkSource, LinkedDataRegion, PlacementMode, SheetCellRange, transpose_cell_grid,
+};
+pub use project::{NamedCheckpoint, ProjectDocument, SheetFolderKind};
 pub use result::{
-    ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultScalarEntry,
-    ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, ErrorCategory, ErrorCode, FittedCurveOverlay, PairwiseComparisonRecord,
+    RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+};
+pub use schema::{
+    AdditionalProperties, DRAFT_2020_12_SCHEMA_URI, JsonSchema, PROJECT_DOCUMENT_SCHEMA_ID, SchemaLiteral, SchemaNode, SchemaObject, SchemaType,
+    SchemaTypeSpec, any_of_schema, array_schema, bool_schema, const_integer_schema, const_string_schema, enum_schema, integer_schema, map_schema,
+    null_schema, nullable_schema, number_schema, object_schema, one_of_schema, project_document_schema, ref_schema, string_schema,
 };
 
 /// The eight typed scientific data-table families in a LumenCraft project.
