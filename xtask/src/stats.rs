@@ -100,4 +100,9 @@ mod tests {
         assert_eq!(st.tests, 1);
         assert_eq!(st.proptests, 1);
     }
+
+    #[test]
+    fn classifies_platform_crate_as_layer_zero() {
+        assert_eq!(crate::layers::describe(crate::layers::classify("lumencraft-platform")), "L0");
+    }
 }

@@ -14,7 +14,6 @@ const HEADER: &str = "\
 //! Generated from `crates/ui-egui/src/menus/ui_commands.rs` by `cargo xtask ui-commands`.
 //! Do not edit by hand; re-run the xtask when that table changes.
 
-/// `(id, label, shortcut, params doc)` — same shape as the desktop `UI_COMMANDS` table.
 ";
 
 pub fn run(root: &Path, check: bool) -> Result<(), String> {
@@ -39,11 +38,32 @@ pub fn run(root: &Path, check: bool) -> Result<(), String> {
 }
 
 pub fn render_catalog(src: &str) -> Result<String, String> {
-    let start = src.find("pub const UI_COMMANDS:").ok_or_else(|| format!("{SRC_REL}: `pub const UI_COMMANDS:` not found"))?;
-    let tail = &src[start..];
+    let struct_pos = src.find("pub struct UiCommandSpec").ok_or_else(|| format!("{SRC_REL}: `pub struct UiCommandSpec` not found"))?;
+    let start = leading_doc_and_attr_start(src, struct_pos);
+    let cmd_pos = src[struct_pos..]
+        .find("pub const UI_COMMANDS:")
+        .map(|rel| struct_pos + rel)
+        .ok_or_else(|| format!("{SRC_REL}: `pub const UI_COMMANDS:` not found"))?;
+    let tail = &src[cmd_pos..];
     let end_rel = tail.find("];").ok_or_else(|| format!("{SRC_REL}: closing `];` for `UI_COMMANDS` not found"))?;
-    let decl = &tail[..end_rel + 2];
+    let decl = &src[start..cmd_pos + end_rel + 2];
     Ok(format!("{HEADER}{decl}\n"))
+}
+
+fn leading_doc_and_attr_start(src: &str, item_pos: usize) -> usize {
+    let line_start = src[..item_pos].rfind('\n').map_or(0, |idx| idx + 1);
+    let mut start = line_start;
+    while start > 0 {
+        let prev_end = start - 1;
+        let prev_start = src[..prev_end].rfind('\n').map_or(0, |idx| idx + 1);
+        let line = src[prev_start..prev_end].trim();
+        if line.starts_with("///") || line.starts_with("#[") {
+            start = prev_start;
+        } else {
+            break;
+        }
+    }
+    start
 }
 
 fn rustfmt(root: &Path, code: &str) -> Result<String, String> {
@@ -73,10 +93,12 @@ mod tests {
     use super::render_catalog;
 
     #[test]
-    fn extracts_ui_commands_slice_declaration() {
-        let src = "//! docs\npub const UI_COMMANDS: &[(&str, &str, &str, &str)] = &[\n    (\"app.about\", \"About\", \"\", \"{}\"),\n];\n";
+    fn extracts_ui_command_spec_and_slice_declaration() {
+        let src = "//! docs\n\n/// Spec doc.\n#[derive(Copy, Clone, Debug, PartialEq, Eq)]\npub struct UiCommandSpec {\n    pub id: &'static str,\n    pub label: &'static str,\n    pub shortcut: &'static str,\n    pub params_doc: &'static str,\n    pub summary: &'static str,\n    pub beginner: &'static str,\n}\n\n/// Table doc.\npub const UI_COMMANDS: &[UiCommandSpec] = &[\n    UiCommandSpec { id: \"app.about\", label: \"About\", shortcut: \"\", params_doc: \"{}\", summary: \"Show about.\", beginner: \"Opens about dialog.\" },\n];\n";
         let rendered = render_catalog(src).unwrap();
         assert!(rendered.contains("Generated from `crates/ui-egui/src/menus/ui_commands.rs`"));
-        assert!(rendered.contains("(\"app.about\", \"About\", \"\", \"{}\")"));
+        assert!(rendered.contains("pub struct UiCommandSpec"));
+        assert!(rendered.contains("pub const UI_COMMANDS: &[UiCommandSpec]"));
+        assert!(rendered.contains("id: \"app.about\""));
     }
 }

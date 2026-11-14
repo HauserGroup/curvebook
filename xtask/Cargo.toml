@@ -6,7 +6,10 @@ license.workspace = true
 publish = false
 
 [dependencies]
+lumencraft-engine = { workspace = true }
+lumencraft-format = { workspace = true }
 lumencraft-testkit = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

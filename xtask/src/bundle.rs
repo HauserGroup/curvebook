@@ -1,42 +1,64 @@
 //! `cargo xtask bundle`: build release binaries and assemble `dist/LumenCraft.app` on macOS.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PLIST_IN: &str = "packaging/macos/Info.plist.in";
 const ICON_ICNS: &str = "assets/app-icon/lumencraft.icns";
+const PLUTIL_BIN: &str = "/usr/bin/plutil";
+const CODESIGN_BIN: &str = "/usr/bin/codesign";
 
 pub fn run(root: &Path) -> Result<(), String> {
     let cargo_toml = std::fs::read_to_string(root.join("Cargo.toml")).map_err(|e| format!("Cargo.toml: {e}"))?;
     let version = crate::version::read_workspace_version(&cargo_toml)?;
     let sha = git_short_sha(root);
 
-    let status = Command::new("cargo")
-        .current_dir(root)
-        .env("LUMENCRAFT_BUILD_SHA", &sha)
-        .args(["build", "--release", "-p", "lumencraft", "-p", "lumencraft-cli"])
-        .status()
-        .map_err(|e| format!("cargo build --release: {e}"))?;
-    if !status.success() {
-        return Err(String::from("release build failed"));
-    }
+    build_release_binaries(root, &sha)?;
 
-    let app_dir = root.join("dist/LumenCraft.app");
-    let contents = app_dir.join("Contents");
-    let macos_dir = contents.join("MacOS");
-    let res_dir = contents.join("Resources");
+    let dist_dir = root.join("dist");
+    let app_dir = dist_dir.join("LumenCraft.app");
     if app_dir.exists() {
         std::fs::remove_dir_all(&app_dir).map_err(|e| format!("clean {}: {e}", app_dir.display()))?;
     }
+
+    if let Err(err) = assemble_validate_and_sign(root, &app_dir, &version, &sha) {
+        let _ = std::fs::remove_dir_all(&app_dir);
+        let _ = std::fs::remove_dir(&dist_dir);
+        return Err(err);
+    }
+
+    println!("bundle: assembled, validated, and signed {} (v{version}, {sha})", app_dir.display());
+    Ok(())
+}
+
+fn build_release_binaries(root: &Path, sha: &str) -> Result<(), String> {
+    let mut cmd = Command::new("cargo");
+    cmd.current_dir(root).env("LUMENCRAFT_BUILD_SHA", sha).args(["build", "--release"]);
+    if std::env::var("CARGO_NET_OFFLINE").is_ok_and(|val| val == "true" || val == "1") {
+        cmd.arg("--offline");
+    }
+    cmd.args(["-p", "lumencraft", "-p", "lumencraft-cli"]);
+    let status = cmd.status().map_err(|e| format!("cargo build --release: {e}"))?;
+    if !status.success() {
+        return Err(String::from("release build failed"));
+    }
+    Ok(())
+}
+
+fn assemble_validate_and_sign(root: &Path, app_dir: &Path, version: &str, sha: &str) -> Result<(), String> {
+    let contents = app_dir.join("Contents");
+    let macos_dir = contents.join("MacOS");
+    let res_dir = contents.join("Resources");
     std::fs::create_dir_all(&macos_dir).map_err(|e| format!("mkdir {}: {e}", macos_dir.display()))?;
     std::fs::create_dir_all(&res_dir).map_err(|e| format!("mkdir {}: {e}", res_dir.display()))?;
 
     let plist_tpl = std::fs::read_to_string(root.join(PLIST_IN)).map_err(|e| format!("{PLIST_IN}: {e}"))?;
-    let plist = render_info_plist(&plist_tpl, &version, &sha);
-    std::fs::write(contents.join("Info.plist"), plist).map_err(|e| format!("write Info.plist: {e}"))?;
+    let plist = render_info_plist(&plist_tpl, version, sha);
+    let plist_path = contents.join("Info.plist");
+    std::fs::write(&plist_path, plist).map_err(|e| format!("write Info.plist: {e}"))?;
+    validate_info_plist(&plist_path)?;
 
-    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), std::path::PathBuf::from);
-    let release_dir = target_dir.join("release");
+    let release_dir = resolve_target_dir(root).join("release");
     for bin in ["lumencraft", "lumencraft-cli"] {
         let src = release_dir.join(bin);
         let dst = macos_dir.join(bin);
@@ -47,18 +69,56 @@ pub fn run(root: &Path) -> Result<(), String> {
     let icns = root.join(ICON_ICNS);
     std::fs::copy(&icns, res_dir.join("lumencraft.icns")).map_err(|e| format!("copy {ICON_ICNS}: {e}"))?;
 
-    if cfg!(target_os = "macos") && Path::new("/usr/bin/codesign").exists() {
-        let sign = Command::new("/usr/bin/codesign")
-            .args(["--force", "--deep", "--sign", "-"])
-            .arg(&app_dir)
-            .status()
-            .map_err(|e| format!("codesign: {e}"))?;
-        if !sign.success() {
-            return Err(String::from("ad-hoc codesign failed"));
+    adhoc_codesign_and_verify(app_dir)?;
+    Ok(())
+}
+
+fn resolve_target_dir(root: &Path) -> PathBuf {
+    match std::env::var_os("CARGO_TARGET_DIR") {
+        Some(raw) => {
+            let path = PathBuf::from(raw);
+            if path.is_absolute() { path } else { root.join(path) }
+        }
+        None => root.join("target"),
+    }
+}
+
+/// Validate a generated `Info.plist` file (unsubstituted placeholders + `/usr/bin/plutil -lint` on macOS).
+pub fn validate_info_plist(plist_path: &Path) -> Result<(), String> {
+    let content = std::fs::read_to_string(plist_path).map_err(|e| format!("read {}: {e}", plist_path.display()))?;
+    for token in ["@VERSION@", "@SHORT_VERSION@", "@BUILD_SHA@"] {
+        if content.contains(token) {
+            return Err(format!("Info.plist validation failed: unsubstituted placeholder `{token}` in {}", plist_path.display()));
         }
     }
+    if cfg!(target_os = "macos") {
+        run_macos_tool(PLUTIL_BIN, &["-lint"], plist_path, "Info.plist plutil -lint")?;
+    }
+    Ok(())
+}
 
-    println!("bundle: assembled {} (v{version}, {sha})", app_dir.display());
+/// Ad-hoc codesign a macOS `.app` bundle and verify the resulting signature strictly.
+pub fn adhoc_codesign_and_verify(app_dir: &Path) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Ok(());
+    }
+    run_macos_tool(CODESIGN_BIN, &["--force", "--deep", "--sign", "-"], app_dir, "ad-hoc codesign")?;
+    run_macos_tool(CODESIGN_BIN, &["--verify", "--strict", "--deep"], app_dir, "codesign --verify")?;
+    Ok(())
+}
+
+fn run_macos_tool(tool: &str, args: &[&str], target: &Path, label: &str) -> Result<(), String> {
+    if !Path::new(tool).exists() {
+        return Err(format!("{label} failed: missing macOS system tool `{tool}`"));
+    }
+    let output =
+        Command::new(tool).args(args).arg(target).output().map_err(|e| format!("{label} failed to launch `{tool}` for {}: {e}", target.display()))?;
+    if !output.status.success() {
+        let code = output.status.code().map_or_else(|| String::from("signal"), |c| c.to_string());
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        return Err(format!("{label} failed for `{}` (exit {code}): stdout=`{stdout}` stderr=`{stderr}`", target.display()));
+    }
     Ok(())
 }
 
@@ -95,13 +155,49 @@ fn set_executable(_path: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::render_info_plist;
-    use std::path::Path;
+    use super::{adhoc_codesign_and_verify, render_info_plist, validate_info_plist};
+    use std::path::{Path, PathBuf};
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lumencraft-xtask-bundle-{label}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
 
     #[test]
     fn substitutes_version_and_sha_placeholders() {
-        let rendered = render_info_plist("<string>@VERSION@ (@BUILD_SHA@)</string>", "0.1.0", "abc1234");
-        assert_eq!(rendered, "<string>0.1.0 (abc1234)</string>");
+        let rendered = render_info_plist("<string>@VERSION@/@SHORT_VERSION@ (@BUILD_SHA@)</string>", "0.1.0-rc.1", "abc1234");
+        assert_eq!(rendered, "<string>0.1.0-rc.1/0.1.0 (abc1234)</string>");
+    }
+
+    #[test]
+    fn validate_info_plist_accepts_rendered_template_and_rejects_broken_or_unrendered() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let tpl = std::fs::read_to_string(root.join("packaging/macos/Info.plist.in")).unwrap();
+        let dir = unique_temp_dir("plist");
+
+        let valid_path = dir.join("ValidInfo.plist");
+        std::fs::write(&valid_path, render_info_plist(&tpl, "0.1.0", "deadbeef1")).unwrap();
+        validate_info_plist(&valid_path).expect("rendered Info.plist.in must pass plutil validation");
+
+        let unrendered_path = dir.join("UnrenderedInfo.plist");
+        std::fs::write(&unrendered_path, &tpl).unwrap();
+        let err = validate_info_plist(&unrendered_path).expect_err("unsubstituted placeholders must fail");
+        assert!(err.contains("@VERSION@"));
+
+        if cfg!(target_os = "macos") {
+            let malformed_path = dir.join("MalformedInfo.plist");
+            std::fs::write(&malformed_path, "<?xml version=\"1.0\"?><plist><dict><key>Broken</plist>").unwrap();
+            let err = validate_info_plist(&malformed_path).expect_err("malformed XML plist must fail plutil -lint");
+            assert!(err.contains("plutil -lint"), "unexpected error: {err}");
+
+            let missing_app = dir.join("Missing.app");
+            let sign_err = adhoc_codesign_and_verify(&missing_app).expect_err("missing app must fail codesign");
+            assert!(sign_err.contains("codesign"), "unexpected sign error: {sign_err}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

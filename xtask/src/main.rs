@@ -5,13 +5,19 @@ mod assets;
 mod brands;
 mod bundle;
 mod cleanroom;
+mod commands;
 mod contributors;
 mod corpus;
 mod cursors;
 mod ico;
 mod json;
 mod layers;
+mod licenses;
+mod pending;
+mod schemas;
+mod secrets;
 mod stats;
+mod status;
 mod ui_commands;
 mod version;
 mod web_fonts;
@@ -25,13 +31,19 @@ usage: cargo xtask <command> [args...]
 commands:
   ci                    run full local/CI gate (fmt, clippy, tests, doctests, feature checks, policy gates, wasm)
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
-  layers                verify L0..L7 dependency rules and UI-crate isolation
+  layers                verify L0..L7 dependency rules, UI-crate isolation, and source hygiene
+  secrets [--history]   scan repo (or git history additions) for API tokens, private keys, and local paths
+  pending [--count]     list or count open ROADMAP.md checklist items with R<m>.<n> section IDs
+  status                verify STATUS.md and ROADMAP.md tables have unique first-column keys
+  licenses [--html [out]] verify deny policy/lockfile sources offline and optionally emit HTML report
   assets                verify all non-code assets are attributed in ASSETS.md
   brands                verify user-facing strings and packaging contain no competitor trademarks
   cleanroom             verify no vendor copyright headers or vendor-created fixtures exist
   cursors               report undocumented Cursor enum variants (warning-only)
   i18n-report           report untranslated locale keys in lumencraft-ui-egui
   ui-commands [--check] sync (or verify) crates/mcp/src/ui_catalog.rs from crates/ui-egui
+  commands [--check]    regenerate (or verify) docs/commands.md from lumencraft-engine
+  schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from lumencraft-format
   wasm                  check wasm32-unknown-unknown compilation across web-targeted crates
   corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
   bundle                build release binaries and assemble dist/LumenCraft.app
@@ -67,12 +79,18 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "ci" => cmd_ci(&root),
         "test" => cmd_test(&root, rest),
         "layers" => cmd_layers(&root),
+        "secrets" => secrets::run_cli(&root, rest),
+        "pending" => pending::run(&root, rest),
+        "status" => status::run(&root),
+        "licenses" => licenses::run(&root, rest),
         "assets" => assets::run(&root),
         "brands" => brands::run(&root),
         "cleanroom" => cleanroom::run(&root),
         "cursors" => cursors::run(&root),
         "i18n-report" => cmd_i18n_report(&root),
         "ui-commands" => ui_commands::run(&root, rest.iter().any(|a| a == "--check")),
+        "commands" => commands::run_cli(&root, rest),
+        "schemas" => schemas::run_cli(&root, rest),
         "wasm" => cmd_wasm(&root),
         "corpus" => corpus::run(&root, rest),
         "bundle" => bundle::run(&root),
@@ -125,12 +143,14 @@ fn cmd_layers(root: &Path) -> Result<(), String> {
     let meta = cargo_metadata(root)?;
     let graph = layers::from_metadata(&meta)?;
     let violations = layers::check(&graph);
-    if violations.is_empty() {
-        println!("layers: all {} workspace packages satisfy L0..L7 dependency rules", graph.len());
+    let hygiene = layers::check_source_hygiene(root);
+    if violations.is_empty() && hygiene.is_empty() {
+        println!("layers: all {} workspace packages satisfy L0..L7 dependency rules and source hygiene", graph.len());
         return Ok(());
     }
-    let lines: Vec<String> = violations.iter().map(ToString::to_string).collect();
-    Err(format!("{} layer violation(s):\n  {}", violations.len(), lines.join("\n  ")))
+    let mut lines: Vec<String> = violations.iter().map(ToString::to_string).collect();
+    lines.extend(hygiene.iter().map(ToString::to_string));
+    Err(format!("{} layer/hygiene violation(s):\n  {}", lines.len(), lines.join("\n  ")))
 }
 
 fn cmd_test(root: &Path, extra: &[String]) -> Result<(), String> {
@@ -170,7 +190,12 @@ fn cmd_ci(root: &Path) -> Result<(), String> {
     cursors::run(root)?;
     cmd_i18n_report(root)?;
     ui_commands::run(root, true)?;
+    commands::run(root, true)?;
+    schemas::run(root, true)?;
     cmd_layers(root)?;
+    secrets::run(root)?;
+    pending::run_count(root)?;
+    status::run(root)?;
 
     let in_ci = std::env::var_os("CI").is_some_and(|v| !v.is_empty());
     if in_ci || wasm_target_installed() {
