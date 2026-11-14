@@ -63,6 +63,7 @@ fn verify_nist_start(ds: &NonlinearDataset, series: &DatasetSeries, start_name: 
         compute_normality: false,
         interpolate_unknowns: false,
         use_simplex_warm_start: true,
+        ..SolverConfig::default()
     };
 
     let fit_res = fit_nonlinear(model.as_ref(), std::slice::from_ref(series), &HookContext::default(), &cfg);

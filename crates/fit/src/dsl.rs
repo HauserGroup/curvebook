@@ -10,15 +10,15 @@
 //! - Rich scalar math + statistical/special functions (Bessel J/Y/I/K, Kummer 1F1, Gauss 2F1,
 //!   `erf`, `gamma`, `normcdf`, etc.) executed in a bounded, WASM-safe stack VM.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use lumencraft_math::dist::{norm_cdf, norm_ppf};
 use lumencraft_math::roots::{RootOptions, brent_root};
 use lumencraft_math::special::{beta, digamma, erf, erfc, gamma, ln_gamma};
 
 use crate::error::FitError;
-use crate::library::ParametricModel;
-use crate::types::{DataPoint, EquationCategory};
+use crate::library::{ParametricModel, estimate_x_at_ymid};
+use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 
 const MAX_VM_STEPS: usize = 100_000;
 const MAX_ODE_STEPS: usize = 50_000;
@@ -298,6 +298,8 @@ pub struct CompiledDslModel {
     ode_init_program: Option<CompiledProgram>,
     ode_t0: f64,
     initial_hints: HashMap<String, f64>,
+    initial_rules: Vec<(DatasetFilter, String, CompiledProgram)>,
+    transforms: Vec<(String, CompiledProgram)>,
 }
 
 impl CompiledDslModel {
@@ -305,7 +307,10 @@ impl CompiledDslModel {
     /// implicit `LHS=RHS`, or 1st-order ODE `dY/dX=...` / `D(Y, X)=...`).
     pub fn compile(id: impl Into<String>, source: &str) -> Result<Self, FitError> {
         let id = id.into();
+        let mut section = DslSection::Equation;
         let mut parsed_lines: Vec<(usize, DatasetFilter, ParsedStatement)> = Vec::new();
+        let mut raw_init_lines: Vec<(usize, DatasetFilter, String, Expr)> = Vec::new();
+        let mut raw_transform_lines: Vec<(usize, String, Expr)> = Vec::new();
         let mut initial_hints = HashMap::new();
         let mut ode_t0 = 0.0_f64;
 
@@ -315,95 +320,56 @@ impl CompiledDslModel {
             if trimmed.is_empty() {
                 continue;
             }
+            if let Some(next_section) = parse_section_header(trimmed, line_no)? {
+                section = next_section;
+                continue;
+            }
             let (filter, rest) = parse_dataset_prefix(trimmed, line_no)?;
             if rest.is_empty() {
                 continue;
             }
-            let stmt = parse_statement(rest, line_no)?;
-            parsed_lines.push((line_no, filter, stmt));
+            match section {
+                DslSection::Equation => {
+                    let stmt = parse_statement(rest, line_no)?;
+                    parsed_lines.push((line_no, filter, stmt));
+                }
+                DslSection::InitialValues => match parse_statement(rest, line_no)? {
+                    ParsedStatement::Assign { name, rhs } => raw_init_lines.push((line_no, filter, name, rhs)),
+                    _ => {
+                        return Err(FitError::DslCompileError {
+                            message: "Expected `PARAM = expr` assignment in [InitialValues]".to_owned(),
+                            line: line_no,
+                            column: 1,
+                        });
+                    }
+                },
+                DslSection::Transforms => {
+                    if filter != DatasetFilter::Any {
+                        return Err(FitError::DslCompileError {
+                            message: "Dataset selectors are not supported in [Transforms]".to_owned(),
+                            line: line_no,
+                            column: 1,
+                        });
+                    }
+                    match parse_statement(rest, line_no)? {
+                        ParsedStatement::Assign { name, rhs } => raw_transform_lines.push((line_no, name, rhs)),
+                        _ => {
+                            return Err(FitError::DslCompileError {
+                                message: "Expected `SCALAR = expr` assignment in [Transforms]".to_owned(),
+                                line: line_no,
+                                column: 1,
+                            });
+                        }
+                    }
+                }
+            }
         }
 
         if parsed_lines.is_empty() {
             return Err(FitError::DslCompileError { message: "Empty custom equation".to_owned(), line: 1, column: 1 });
         }
 
-        let mut kind = DslEquationKind::Explicit;
-        let mut init_stmts: Vec<(usize, Expr)> = Vec::new();
-
-        type OutputBranch = (DatasetFilter, Vec<(String, Expr)>, Expr);
-
-        // Separate ODE initial conditions (`Y0 = ...` or `Y(t0) = ...`), local assignments, and final target.
-        let mut per_filter_locals: Vec<(DatasetFilter, Vec<(String, Expr)>)> = Vec::new();
-        let mut explicit_outputs: Vec<OutputBranch> = Vec::new();
-        let mut implicit_outputs: Vec<OutputBranch> = Vec::new();
-        let mut ode_outputs: Vec<OutputBranch> = Vec::new();
-
-        for (line_no, filter, stmt) in parsed_lines {
-            match stmt {
-                ParsedStatement::OdeDerivative(rhs) => {
-                    kind = DslEquationKind::OdeFirstOrder;
-                    let locals = take_locals(&mut per_filter_locals, &filter);
-                    ode_outputs.push((filter, locals, rhs));
-                }
-                ParsedStatement::OdeInitial { t0, rhs } => {
-                    if let Some(t) = t0 {
-                        ode_t0 = t;
-                    }
-                    init_stmts.push((line_no, rhs));
-                }
-                ParsedStatement::Assign { name, rhs } => {
-                    let upper = name.to_ascii_uppercase();
-                    if upper == "Y" {
-                        if expr_references_y(&rhs) {
-                            kind = DslEquationKind::Implicit;
-                            let diff = Expr::Binary { op: BinaryOp::Sub, lhs: Box::new(Expr::Ident("Y".to_owned())), rhs: Box::new(rhs) };
-                            let locals = take_locals(&mut per_filter_locals, &filter);
-                            implicit_outputs.push((filter, locals, diff));
-                        } else {
-                            let locals = take_locals(&mut per_filter_locals, &filter);
-                            explicit_outputs.push((filter, locals, rhs));
-                        }
-                    } else {
-                        push_local(&mut per_filter_locals, filter, name, rhs);
-                    }
-                }
-                ParsedStatement::ImplicitEquation { lhs, rhs } => {
-                    kind = DslEquationKind::Implicit;
-                    let diff = Expr::Binary { op: BinaryOp::Sub, lhs: Box::new(lhs), rhs: Box::new(rhs) };
-                    let locals = take_locals(&mut per_filter_locals, &filter);
-                    implicit_outputs.push((filter, locals, diff));
-                }
-                ParsedStatement::BareExpr(rhs) => {
-                    let locals = take_locals(&mut per_filter_locals, &filter);
-                    if expr_references_y(&rhs) {
-                        kind = DslEquationKind::Implicit;
-                        implicit_outputs.push((filter, locals, rhs));
-                    } else {
-                        explicit_outputs.push((filter, locals, rhs));
-                    }
-                }
-            }
-        }
-
-        let body_stmts = match kind {
-            DslEquationKind::OdeFirstOrder => {
-                if ode_outputs.is_empty() {
-                    return Err(FitError::DslCompileError { message: "Missing ODE derivative expression".to_owned(), line: 1, column: 1 });
-                }
-                ode_outputs
-            }
-            DslEquationKind::Implicit => {
-                let mut combined = implicit_outputs;
-                combined.extend(
-                    explicit_outputs
-                        .into_iter()
-                        .map(|(f, l, e)| (f, l, Expr::Binary { op: BinaryOp::Sub, lhs: Box::new(Expr::Ident("Y".to_owned())), rhs: Box::new(e) })),
-                );
-                combined
-            }
-            DslEquationKind::Explicit => explicit_outputs,
-        };
-
+        let ResolvedEquationBody { kind, body_stmts, init_stmts, ode_t0 } = resolve_equation_branches(parsed_lines, ode_t0)?;
         if body_stmts.is_empty() {
             return Err(FitError::DslCompileError { message: "No target expression (`Y = ...` or expression) found".to_owned(), line: 1, column: 1 });
         }
@@ -448,7 +414,21 @@ impl CompiledDslModel {
             None
         };
 
-        Ok(Self { name: id.clone(), id, kind, param_names: param_order, programs, ode_init_program, ode_t0, initial_hints })
+        let initial_rules = compile_initial_rules(raw_init_lines)?;
+        let transforms = compile_transforms(raw_transform_lines, &param_map)?;
+
+        Ok(Self {
+            name: id.clone(),
+            id,
+            kind,
+            param_names: param_order,
+            programs,
+            ode_init_program,
+            ode_t0,
+            initial_hints,
+            initial_rules,
+            transforms,
+        })
     }
 
     #[must_use]
@@ -554,7 +534,8 @@ impl ParametricModel for CompiledDslModel {
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let mean_y = if points.is_empty() { 1.0 } else { points.iter().map(|p| p.y).sum::<f64>() / points.len() as f64 };
-        self.param_names
+        let mut guesses: Vec<f64> = self
+            .param_names
             .iter()
             .map(|p| {
                 if let Some(&v) = self.initial_hints.get(p) {
@@ -562,7 +543,54 @@ impl ParametricModel for CompiledDslModel {
                 }
                 if p.eq_ignore_ascii_case("Y0") || p.eq_ignore_ascii_case("Top") { mean_y.max(0.1) } else { 1.0 }
             })
-            .collect()
+            .collect();
+        if self.initial_rules.is_empty() {
+            return guesses;
+        }
+        let stats = compute_dataset_stats(points);
+        let same_ds = points.first().map(|p0| p0.data_set_index).filter(|&first| points.iter().all(|p| p.data_set_index == first));
+        let eval_ds = same_ds.unwrap_or(0);
+        let mut applied = vec![false; guesses.len()];
+        for pass in 0..2 {
+            for (filter, name, prog) in &self.initial_rules {
+                let matches = match (same_ds, pass) {
+                    (Some(ds), 0) => filter.matches(ds),
+                    (Some(_), _) => false,
+                    (None, 0) => *filter == DatasetFilter::Any,
+                    (None, _) => filter.matches(0),
+                };
+                if !matches {
+                    continue;
+                }
+                let Some(p_idx) =
+                    self.param_names.iter().position(|p| p == name).or_else(|| self.param_names.iter().position(|p| p.eq_ignore_ascii_case(name)))
+                else {
+                    continue;
+                };
+                if pass == 1 && applied[p_idx] {
+                    continue;
+                }
+                if let Some(val) = eval_bytecode(prog, &[0.0], f64::NAN, &stats, eval_ds)
+                    && val.is_finite()
+                {
+                    guesses[p_idx] = val;
+                    applied[p_idx] = true;
+                }
+            }
+        }
+        guesses
+    }
+
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = Vec::with_capacity(self.transforms.len());
+        for (name, prog) in &self.transforms {
+            if let Some(val) = eval_bytecode(prog, &[0.0], f64::NAN, params, 0)
+                && val.is_finite()
+            {
+                out.push(DerivedScalar { name: name.clone(), value: val, units: None });
+            }
+        }
+        out
     }
 }
 
@@ -833,26 +861,366 @@ fn is_valid_ident(s: &str) -> bool {
     (first.is_ascii_alphabetic() || first == '_') && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
-fn take_locals(pool: &mut Vec<(DatasetFilter, Vec<(String, Expr)>)>, filter: &DatasetFilter) -> Vec<(String, Expr)> {
-    let mut out = Vec::new();
-    let mut kept = Vec::new();
-    for (f, mut locals) in pool.drain(..) {
-        if &f == filter || f == DatasetFilter::Any {
-            out.append(&mut locals);
-        } else {
-            kept.push((f, locals));
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DslSection {
+    Equation,
+    InitialValues,
+    Transforms,
+}
+
+const INIT_STAT_NAMES: [&str; 11] = ["YMIN", "YMAX", "XMIN", "XMAX", "XMID", "YMID", "XATYMIN", "XATYMAX", "XATY50", "SPAN", "SIGN"];
+
+type OutputBranch = (DatasetFilter, Vec<(String, Expr)>, Expr);
+
+enum EqItem {
+    Local { filter: DatasetFilter, name: String, rhs: Expr },
+    Explicit { filter: DatasetFilter, expr: Expr },
+    Implicit { filter: DatasetFilter, diff: Expr },
+    Ode { filter: DatasetFilter, rhs: Expr },
+}
+
+impl EqItem {
+    fn filter(&self) -> &DatasetFilter {
+        match self {
+            Self::Local { filter, .. } | Self::Explicit { filter, .. } | Self::Implicit { filter, .. } | Self::Ode { filter, .. } => filter,
         }
     }
-    *pool = kept;
+}
+
+fn parse_section_header(trimmed: &str, line_no: usize) -> Result<Option<DslSection>, FitError> {
+    if !trimmed.starts_with('[') || !trimmed.ends_with(']') {
+        return Ok(None);
+    }
+    let inner: String =
+        trimmed[1..trimmed.len() - 1].chars().filter(|c| !c.is_ascii_whitespace() && *c != '_' && *c != '-').flat_map(char::to_lowercase).collect();
+    match inner.as_str() {
+        "equation" | "equations" | "body" | "model" => Ok(Some(DslSection::Equation)),
+        "initialvalues" | "initialvalue" | "initials" | "init" => Ok(Some(DslSection::InitialValues)),
+        "transforms" | "transform" | "derived" | "derivedscalars" => Ok(Some(DslSection::Transforms)),
+        _ => Err(FitError::DslCompileError { message: format!("Unknown DSL section `{trimmed}`"), line: line_no, column: 1 }),
+    }
+}
+
+fn build_eq_items(
+    parsed_lines: Vec<(usize, DatasetFilter, ParsedStatement)>,
+    mut ode_t0: f64,
+) -> (DslEquationKind, Vec<EqItem>, Vec<(usize, Expr)>, f64) {
+    let mut kind = DslEquationKind::Explicit;
+    let mut items = Vec::with_capacity(parsed_lines.len());
+    let mut init_stmts = Vec::new();
+    for (line_no, filter, stmt) in parsed_lines {
+        match stmt {
+            ParsedStatement::OdeDerivative(rhs) => {
+                kind = DslEquationKind::OdeFirstOrder;
+                items.push(EqItem::Ode { filter, rhs });
+            }
+            ParsedStatement::OdeInitial { t0, rhs } => {
+                if let Some(t) = t0 {
+                    ode_t0 = t;
+                }
+                init_stmts.push((line_no, rhs));
+            }
+            ParsedStatement::Assign { name, rhs } => {
+                if name.eq_ignore_ascii_case("Y") {
+                    if expr_references_y(&rhs) {
+                        kind = DslEquationKind::Implicit;
+                        let diff = Expr::Binary { op: BinaryOp::Sub, lhs: Box::new(Expr::Ident("Y".to_owned())), rhs: Box::new(rhs) };
+                        items.push(EqItem::Implicit { filter, diff });
+                    } else {
+                        items.push(EqItem::Explicit { filter, expr: rhs });
+                    }
+                } else {
+                    items.push(EqItem::Local { filter, name, rhs });
+                }
+            }
+            ParsedStatement::ImplicitEquation { lhs, rhs } => {
+                kind = DslEquationKind::Implicit;
+                let diff = Expr::Binary { op: BinaryOp::Sub, lhs: Box::new(lhs), rhs: Box::new(rhs) };
+                items.push(EqItem::Implicit { filter, diff });
+            }
+            ParsedStatement::BareExpr(rhs) => {
+                if expr_references_y(&rhs) {
+                    kind = DslEquationKind::Implicit;
+                    items.push(EqItem::Implicit { filter, diff: rhs });
+                } else {
+                    items.push(EqItem::Explicit { filter, expr: rhs });
+                }
+            }
+        }
+    }
+    (kind, items, init_stmts, ode_t0)
+}
+
+fn collect_filter_classes(eq_items: &[EqItem]) -> (Vec<(DatasetFilter, usize)>, DatasetFilter, usize) {
+    let mut non_any_filters: Vec<&DatasetFilter> = Vec::new();
+    let mut mentioned_set: BTreeSet<usize> = BTreeSet::new();
+    for item in eq_items {
+        let f = item.filter();
+        match f {
+            DatasetFilter::Any => {}
+            DatasetFilter::Include(v) | DatasetFilter::Exclude(v) => {
+                mentioned_set.extend(v.iter().copied());
+                if !non_any_filters.contains(&f) {
+                    non_any_filters.push(f);
+                }
+            }
+        }
+    }
+    let mentioned: Vec<usize> = mentioned_set.into_iter().collect();
+    let pos_by_ds: HashMap<usize, usize> = mentioned.iter().enumerate().map(|(pos, &ds)| (ds, pos)).collect();
+    let outside_rep = (0..=mentioned.len()).find(|ds| !pos_by_ds.contains_key(ds)).unwrap_or(0);
+    let outside_filter = if mentioned.is_empty() { DatasetFilter::Any } else { DatasetFilter::Exclude(mentioned.clone()) };
+    if mentioned.is_empty() {
+        return (Vec::new(), outside_filter, outside_rep);
+    }
+
+    let words = non_any_filters.len().div_ceil(64);
+    let mut exclude_default = vec![0_u64; words];
+    for (fi, f) in non_any_filters.iter().enumerate() {
+        if matches!(f, DatasetFilter::Exclude(_)) {
+            exclude_default[fi / 64] |= 1_u64 << (fi % 64);
+        }
+    }
+    let mut sigs = vec![exclude_default; mentioned.len()];
+    for (fi, f) in non_any_filters.iter().enumerate() {
+        let word = fi / 64;
+        let mask = 1_u64 << (fi % 64);
+        match f {
+            DatasetFilter::Include(v) => {
+                for &ds in v {
+                    if let Some(&pos) = pos_by_ds.get(&ds) {
+                        sigs[pos][word] |= mask;
+                    }
+                }
+            }
+            DatasetFilter::Exclude(v) => {
+                for &ds in v {
+                    if let Some(&pos) = pos_by_ds.get(&ds) {
+                        sigs[pos][word] &= !mask;
+                    }
+                }
+            }
+            DatasetFilter::Any => {}
+        }
+    }
+
+    let mut groups: BTreeMap<Vec<u64>, Vec<usize>> = BTreeMap::new();
+    for (pos, &ds) in mentioned.iter().enumerate() {
+        groups.entry(sigs[pos].clone()).or_default().push(ds);
+    }
+    let mut classes: Vec<(DatasetFilter, usize)> =
+        groups.into_values().map(|indices| (DatasetFilter::Include(indices.clone()), indices[0])).collect();
+    classes.sort_by_key(|(_, rep)| *rep);
+    (classes, outside_filter, outside_rep)
+}
+
+fn target_for_kind(item: &EqItem, kind: DslEquationKind) -> Option<(Expr, bool)> {
+    let was_any = *item.filter() == DatasetFilter::Any;
+    match (kind, item) {
+        (DslEquationKind::OdeFirstOrder, EqItem::Ode { rhs, .. }) => Some((rhs.clone(), was_any)),
+        (DslEquationKind::Implicit, EqItem::Implicit { diff, .. }) => Some((diff.clone(), was_any)),
+        (DslEquationKind::Implicit, EqItem::Explicit { expr, .. }) => {
+            Some((Expr::Binary { op: BinaryOp::Sub, lhs: Box::new(Expr::Ident("Y".to_owned())), rhs: Box::new(expr.clone()) }, was_any))
+        }
+        (DslEquationKind::Explicit, EqItem::Explicit { expr, .. }) => Some((expr.clone(), was_any)),
+        _ => None,
+    }
+}
+
+fn branch_uses_unbound_scoped(locals: &[(String, Expr)], target: &Expr, scoped_names: &BTreeSet<String>) -> bool {
+    let mut free = Vec::new();
+    let mut seen = BTreeSet::new();
+    let mut bound = BTreeSet::new();
+    for (lname, rhs) in locals {
+        collect_free_idents(rhs, &bound, &mut seen, &mut free);
+        bound.insert(lname.clone());
+    }
+    collect_free_idents(target, &bound, &mut seen, &mut free);
+    free.iter().any(|ident| scoped_names.contains(ident))
+}
+
+fn collect_branches_for_rep(eq_items: &[EqItem], kind: DslEquationKind, class_filter: &DatasetFilter, rep_ds: usize) -> Vec<(OutputBranch, bool)> {
+    let mut active_locals: Vec<(String, Expr)> = Vec::new();
+    let mut out = Vec::new();
+    for item in eq_items {
+        if !item.filter().matches(rep_ds) {
+            continue;
+        }
+        if let EqItem::Local { name, rhs, .. } = item {
+            active_locals.push((name.clone(), rhs.clone()));
+            continue;
+        }
+        if let Some((target, was_any)) = target_for_kind(item, kind) {
+            out.push(((class_filter.clone(), active_locals.clone(), target), was_any));
+        }
+    }
     out
 }
 
-fn push_local(pool: &mut Vec<(DatasetFilter, Vec<(String, Expr)>)>, filter: DatasetFilter, name: String, rhs: Expr) {
-    if let Some((_, list)) = pool.iter_mut().find(|(f, _)| *f == filter) {
-        list.push((name, rhs));
-    } else {
-        pool.push((filter, vec![(name, rhs)]));
+struct ResolvedEquationBody {
+    kind: DslEquationKind,
+    body_stmts: Vec<OutputBranch>,
+    init_stmts: Vec<(usize, Expr)>,
+    ode_t0: f64,
+}
+
+fn resolve_equation_branches(parsed_lines: Vec<(usize, DatasetFilter, ParsedStatement)>, ode_t0: f64) -> Result<ResolvedEquationBody, FitError> {
+    let (kind, eq_items, init_stmts, ode_t0) = build_eq_items(parsed_lines, ode_t0);
+    let has_ode_output = eq_items.iter().any(|it| matches!(it, EqItem::Ode { .. }));
+    if kind == DslEquationKind::OdeFirstOrder && !has_ode_output {
+        return Err(FitError::DslCompileError { message: "Missing ODE derivative expression".to_owned(), line: 1, column: 1 });
     }
+    let scoped_local_names: BTreeSet<String> = eq_items
+        .iter()
+        .filter_map(|it| match it {
+            EqItem::Local { filter, name, .. } if *filter != DatasetFilter::Any => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+
+    let (explicit_classes, outside_filter, outside_rep) = collect_filter_classes(&eq_items);
+    let mut body_stmts = Vec::new();
+    for (class_filter, rep_ds) in &explicit_classes {
+        for (branch, _) in collect_branches_for_rep(&eq_items, kind, class_filter, *rep_ds) {
+            body_stmts.push(branch);
+        }
+    }
+    let any_explicit_branch = !body_stmts.is_empty();
+    for (branch, was_any) in collect_branches_for_rep(&eq_items, kind, &outside_filter, outside_rep) {
+        if any_explicit_branch && was_any && branch_uses_unbound_scoped(&branch.1, &branch.2, &scoped_local_names) {
+            continue;
+        }
+        body_stmts.push(branch);
+    }
+    Ok(ResolvedEquationBody { kind, body_stmts, init_stmts, ode_t0 })
+}
+
+fn compute_dataset_stats(points: &[DataPoint]) -> [f64; 11] {
+    let mut finite_pts: Vec<(f64, f64)> = points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| (p.x0(), p.y)).collect();
+    if finite_pts.is_empty() {
+        return [0.0, 1.0, 0.0, 1.0, 0.5, 0.5, 0.0, 1.0, 0.5, 1.0, 1.0];
+    }
+    finite_pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let xmin = finite_pts[0].0;
+    let xmax = finite_pts[finite_pts.len() - 1].0;
+    let mut ymin = finite_pts[0].1;
+    let mut ymax = finite_pts[0].1;
+    let mut x_at_ymin = finite_pts[0].0;
+    let mut x_at_ymax = finite_pts[0].0;
+    for &(x, y) in &finite_pts {
+        if y < ymin {
+            ymin = y;
+            x_at_ymin = x;
+        }
+        if y > ymax {
+            ymax = y;
+            x_at_ymax = x;
+        }
+    }
+    let eps = 1e-12 * (xmax - xmin).max(1e-12);
+    let left_vals: Vec<f64> = finite_pts.iter().filter(|&&(x, _)| (x - xmin).abs() <= eps).map(|&(_, y)| y).collect();
+    let right_vals: Vec<f64> = finite_pts.iter().filter(|&&(x, _)| (xmax - x).abs() <= eps).map(|&(_, y)| y).collect();
+    let y_left = if left_vals.is_empty() { finite_pts[0].1 } else { left_vals.iter().sum::<f64>() / left_vals.len() as f64 };
+    let y_right = if right_vals.is_empty() { finite_pts[finite_pts.len() - 1].1 } else { right_vals.iter().sum::<f64>() / right_vals.len() as f64 };
+    let xmid = 0.5 * (xmin + xmax);
+    let ymid = 0.5 * (ymin + ymax);
+    let span = ymax - ymin;
+    let sign = if y_right >= y_left { 1.0 } else { -1.0 };
+    let est_50 = estimate_x_at_ymid(points);
+    let x_at_y50 = if est_50.is_finite() { est_50 } else { xmid };
+    [ymin, ymax, xmin, xmax, xmid, ymid, x_at_ymin, x_at_ymax, x_at_y50, span, sign]
+}
+
+fn canonicalize_init_expr(expr: &mut Expr, shadowed: &BTreeSet<String>) {
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Num(_) => {}
+            Expr::Ident(name) => {
+                if !shadowed.contains(name.as_str())
+                    && let Some(&canon) = INIT_STAT_NAMES.iter().find(|&&s| s.eq_ignore_ascii_case(name))
+                {
+                    *name = canon.to_owned();
+                }
+            }
+            Expr::Unary { rhs, .. } => stack.push(rhs.as_mut()),
+            Expr::Binary { lhs, rhs, .. } => {
+                stack.push(lhs.as_mut());
+                stack.push(rhs.as_mut());
+            }
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    stack.push(arg);
+                }
+            }
+            Expr::If { cond, then_br, else_br } => {
+                stack.push(cond.as_mut());
+                stack.push(then_br.as_mut());
+                stack.push(else_br.as_mut());
+            }
+        }
+    }
+}
+
+fn with_line(mut err: FitError, line_no: usize) -> FitError {
+    if let FitError::DslCompileError { line, .. } = &mut err
+        && *line <= 1
+    {
+        *line = line_no;
+    }
+    err
+}
+
+fn ensure_no_data_vars(prog: &CompiledProgram, section_name: &str, line_no: usize) -> Result<(), FitError> {
+    if prog.code.iter().any(|op| matches!(op, OpCode::LoadPredictor(_) | OpCode::LoadY)) {
+        return Err(FitError::DslCompileError { message: format!("{section_name} cannot reference X or Y"), line: line_no, column: 1 });
+    }
+    Ok(())
+}
+
+fn compile_initial_rules(
+    raw_init_lines: Vec<(usize, DatasetFilter, String, Expr)>,
+) -> Result<Vec<(DatasetFilter, String, CompiledProgram)>, FitError> {
+    if raw_init_lines.is_empty() {
+        return Ok(Vec::new());
+    }
+    let stat_map: HashMap<String, usize> = INIT_STAT_NAMES.iter().enumerate().map(|(i, &n)| (n.to_owned(), i)).collect();
+    let mut history: Vec<(DatasetFilter, String, Expr)> = Vec::new();
+    let mut compiled = Vec::with_capacity(raw_init_lines.len());
+    for (line_no, filter, name, mut rhs) in raw_init_lines {
+        let mut prior_locals = Vec::new();
+        let mut shadowed = BTreeSet::new();
+        for (prev_filter, prev_name, prev_rhs) in &history {
+            if *prev_filter == DatasetFilter::Any || *prev_filter == filter {
+                prior_locals.push((prev_name.clone(), prev_rhs.clone()));
+                shadowed.insert(prev_name.clone());
+            }
+        }
+        canonicalize_init_expr(&mut rhs, &shadowed);
+        let prog = compile_program(&prior_locals, &rhs, &stat_map).map_err(|e| with_line(e, line_no))?;
+        ensure_no_data_vars(&prog, "[InitialValues]", line_no)?;
+        compiled.push((filter.clone(), name.clone(), prog));
+        history.push((filter, name, rhs));
+    }
+    Ok(compiled)
+}
+
+fn compile_transforms(
+    raw_transform_lines: Vec<(usize, String, Expr)>,
+    param_map: &HashMap<String, usize>,
+) -> Result<Vec<(String, CompiledProgram)>, FitError> {
+    if raw_transform_lines.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut prior_locals: Vec<(String, Expr)> = Vec::new();
+    let mut compiled = Vec::with_capacity(raw_transform_lines.len());
+    for (line_no, name, rhs) in raw_transform_lines {
+        let prog = compile_program(&prior_locals, &rhs, param_map).map_err(|e| with_line(e, line_no))?;
+        ensure_no_data_vars(&prog, "[Transforms]", line_no)?;
+        prior_locals.push((name.clone(), rhs));
+        compiled.push((name, prog));
+    }
+    Ok(compiled)
 }
 
 fn expr_references_y(expr: &Expr) -> bool {

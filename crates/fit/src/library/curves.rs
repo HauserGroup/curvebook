@@ -45,6 +45,15 @@ pub const CURVE_EQUATION_IDS: &[&str] = &[
     "polynomial_6",
     "power_series",
     "logarithmic_curve",
+    "centered_poly_1",
+    "centered_poly_2",
+    "centered_poly_3",
+    "centered_poly_4",
+    "centered_poly_5",
+    "centered_poly_6",
+    "semi_log_line",
+    "log_log_line",
+    "probit_line",
 ];
 
 fn names(slice: &[&str]) -> Vec<String> {
@@ -104,6 +113,15 @@ pub fn resolve_curve_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         "polynomial_6" => Some(Box::new(Polynomial { degree: 6 })),
         "power_series" => Some(Box::new(PowerCurve { params: names(&["a", "b"]) })),
         "logarithmic_curve" => Some(Box::new(LogarithmicCurve { params: names(&["a", "b"]) })),
+        "centered_poly_1" | "centered_linear" | "centered_polynomial_1" => Some(Box::new(CenteredPolynomial::new(1))),
+        "centered_poly_2" | "centered_quadratic" | "centered_polynomial_2" => Some(Box::new(CenteredPolynomial::new(2))),
+        "centered_poly_3" | "centered_cubic" | "centered_polynomial_3" => Some(Box::new(CenteredPolynomial::new(3))),
+        "centered_poly_4" | "centered_quartic" | "centered_polynomial_4" => Some(Box::new(CenteredPolynomial::new(4))),
+        "centered_poly_5" | "centered_polynomial_5" => Some(Box::new(CenteredPolynomial::new(5))),
+        "centered_poly_6" | "centered_polynomial_6" => Some(Box::new(CenteredPolynomial::new(6))),
+        "semi_log_line" | "semilog_line" => Some(Box::new(SemiLogLine { params: names(&["Slope", "YIntercept"]) })),
+        "log_log_line" | "loglog_line" => Some(Box::new(LogLogLine { params: names(&["Slope", "LogYIntercept"]) })),
+        "probit_line" => Some(Box::new(ProbitLine { params: names(&["Slope", "Intercept"]) })),
         _ => None,
     }
 }
@@ -1067,5 +1085,303 @@ impl ParametricModel for LogarithmicCurve {
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, _) = data_y_min_max(points);
         vec![1.0, ymin]
+    }
+}
+
+fn estimate_ols_from_pairs(pairs: &[(f64, f64)]) -> (f64, f64) {
+    if pairs.is_empty() {
+        return (1.0, 0.0);
+    }
+    let n = pairs.len() as f64;
+    let mean_x = pairs.iter().map(|&(x, _)| x).sum::<f64>() / n;
+    let mean_y = pairs.iter().map(|&(_, y)| y).sum::<f64>() / n;
+    let mut sxx = 0.0_f64;
+    let mut sxy = 0.0_f64;
+    for &(x, y) in pairs {
+        let dx = x - mean_x;
+        sxx += dx * dx;
+        sxy += dx * (y - mean_y);
+    }
+    let slope = if sxx > 1e-30 { sxy / sxx } else { 0.0 };
+    let intercept = mean_y - slope * mean_x;
+    (slope, intercept)
+}
+
+fn estimate_centered_linear_seed(points: &[DataPoint]) -> (f64, f64, f64) {
+    let pairs: Vec<(f64, f64)> = points.iter().filter(|p| p.x0().is_finite() && p.y.is_finite()).map(|p| (p.x0(), p.y)).collect();
+    if pairs.is_empty() {
+        return (0.0, 0.0, 0.0);
+    }
+    let n = pairs.len() as f64;
+    let mean_x = pairs.iter().map(|&(x, _)| x).sum::<f64>() / n;
+    let mean_y = pairs.iter().map(|&(_, y)| y).sum::<f64>() / n;
+    let (slope, _) = estimate_ols_from_pairs(&pairs);
+    (mean_x, mean_y, slope)
+}
+
+/// Centered polynomial model: `Y = sum_{k=0..degree} B_k * (X - XCenter)^k`.
+struct CenteredPolynomial {
+    degree: usize,
+    id: &'static str,
+    name: &'static str,
+    params: Vec<String>,
+}
+
+impl CenteredPolynomial {
+    fn new(degree: usize) -> Self {
+        let clamped = degree.clamp(1, 6);
+        let (id, name) = match clamped {
+            1 => ("centered_poly_1", "Centered polynomial (order 1)"),
+            2 => ("centered_poly_2", "Centered polynomial (order 2)"),
+            3 => ("centered_poly_3", "Centered polynomial (order 3)"),
+            4 => ("centered_poly_4", "Centered polynomial (order 4)"),
+            5 => ("centered_poly_5", "Centered polynomial (order 5)"),
+            _ => ("centered_poly_6", "Centered polynomial (order 6)"),
+        };
+        let mut params: Vec<String> = (0..=clamped).map(|k| format!("B{k}")).collect();
+        params.push("XCenter".to_owned());
+        Self { degree: clamped, id, name, params }
+    }
+}
+
+impl ParametricModel for CenteredPolynomial {
+    fn id(&self) -> &str {
+        self.id
+    }
+
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::StandardCurve
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        let x_center = *params.get(self.degree + 1)?;
+        let coeffs = params.get(..=self.degree)?;
+        if !x0.is_finite() || !x_center.is_finite() {
+            return None;
+        }
+        let dx = x0 - x_center;
+        let mut acc = 0.0_f64;
+        for &coeff in coeffs.iter().rev() {
+            acc = acc * dx + coeff;
+        }
+        acc.is_finite().then_some(acc)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        let Some(&x_center) = params.get(self.degree + 1) else {
+            return false;
+        };
+        if !x0.is_finite() || !x_center.is_finite() || params.len() < self.degree + 2 || out.len() < self.degree + 2 {
+            return false;
+        }
+        let dx = x0 - x_center;
+        let mut pow = 1.0_f64;
+        for slot in &mut out[..=self.degree] {
+            *slot = pow;
+            pow *= dx;
+        }
+        let mut d_dx = 0.0_f64;
+        for (k, &coeff) in params[1..=self.degree].iter().enumerate().rev() {
+            d_dx = d_dx * dx + (k + 1) as f64 * coeff;
+        }
+        out[self.degree + 1] = -d_dx;
+        out[..self.degree + 2].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (mean_x, mean_y, slope) = estimate_centered_linear_seed(points);
+        let mut guess = vec![0.0_f64; self.degree + 2];
+        guess[0] = mean_y;
+        guess[1] = slope;
+        guess[self.degree + 1] = mean_x;
+        guess
+    }
+}
+
+/// Semi-logarithmic standard curve: `Y = Slope * log10(X) + YIntercept`.
+struct SemiLogLine {
+    params: Vec<String>,
+}
+
+impl ParametricModel for SemiLogLine {
+    fn id(&self) -> &str {
+        "semi_log_line"
+    }
+
+    fn name(&self) -> &str {
+        "Semi-log line (Y vs log10(X))"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::StandardCurve
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || x0 <= 0.0 || params.len() < 2 {
+            return None;
+        }
+        let y = params[0] * x0.log10() + params[1];
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || x0 <= 0.0 || params.len() < 2 || out.len() < 2 {
+            return false;
+        }
+        let lx = x0.log10();
+        out[0] = lx;
+        out[1] = 1.0;
+        lx.is_finite()
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let pairs: Vec<(f64, f64)> =
+            points.iter().filter(|p| p.x0() > 0.0 && p.x0().is_finite() && p.y.is_finite()).map(|p| (p.x0().log10(), p.y)).collect();
+        let (slope, intercept) = estimate_ols_from_pairs(&pairs);
+        vec![slope, intercept]
+    }
+}
+
+/// Power-law standard curve in log10-log10 form: `Y = 10^(Slope * log10(X) + LogYIntercept)`.
+struct LogLogLine {
+    params: Vec<String>,
+}
+
+impl ParametricModel for LogLogLine {
+    fn id(&self) -> &str {
+        "log_log_line"
+    }
+
+    fn name(&self) -> &str {
+        "Log-log regression line"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::StandardCurve
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || x0 <= 0.0 || params.len() < 2 {
+            return None;
+        }
+        let exponent = params[0] * x0.log10() + params[1];
+        let y = 10.0_f64.powf(exponent);
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || x0 <= 0.0 || params.len() < 2 || out.len() < 2 {
+            return false;
+        }
+        let Some(y) = self.eval(x, params, 0) else {
+            return false;
+        };
+        out[0] = y * x0.ln();
+        out[1] = y * core::f64::consts::LN_10;
+        out[0].is_finite() && out[1].is_finite()
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let pairs: Vec<(f64, f64)> = points
+            .iter()
+            .filter(|p| p.x0() > 0.0 && p.y > 0.0 && p.x0().is_finite() && p.y.is_finite())
+            .map(|p| (p.x0().log10(), p.y.log10()))
+            .collect();
+        let (slope, log_intercept) = estimate_ols_from_pairs(&pairs);
+        vec![slope, log_intercept]
+    }
+}
+
+/// Probit percentage curve: `Y = NormalCdf(Slope * X + Intercept) * 100`.
+struct ProbitLine {
+    params: Vec<String>,
+}
+
+impl ParametricModel for ProbitLine {
+    fn id(&self) -> &str {
+        "probit_line"
+    }
+
+    fn name(&self) -> &str {
+        "Probit curve"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::StandardCurve
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || params.len() < 2 {
+            return None;
+        }
+        let z = params[0] * x0 + params[1];
+        if !z.is_finite() {
+            return None;
+        }
+        let y = lumencraft_math::dist::norm_cdf(z) * 100.0;
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || params.len() < 2 || out.len() < 2 {
+            return false;
+        }
+        let z = params[0] * x0 + params[1];
+        if !z.is_finite() {
+            return false;
+        }
+        let scale = 100.0 * lumencraft_math::dist::norm_pdf(z);
+        out[0] = scale * x0;
+        out[1] = scale;
+        out[0].is_finite() && out[1].is_finite()
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let pairs: Vec<(f64, f64)> = points
+            .iter()
+            .filter(|p| p.x0().is_finite() && p.y.is_finite())
+            .filter_map(|p| {
+                let prob = (p.y / 100.0).clamp(0.01, 0.99);
+                lumencraft_math::dist::norm_ppf(prob).ok().map(|z| (p.x0(), z))
+            })
+            .collect();
+        let (slope, intercept) = estimate_ols_from_pairs(&pairs);
+        vec![slope, intercept]
     }
 }

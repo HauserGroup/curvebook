@@ -11,13 +11,15 @@ use lumencraft_math::special::deviance_bd0;
 use lumencraft_math::sum::NeumaierSum;
 
 use crate::diagnostics::{
-    AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, LackOfFitResult, NormalityTestResult, RoutDetectionResult, RunsTestResult,
-    compare_models_aicc, compare_models_f_test, compute_covariance_diagnostics, compute_hougaard_skewness, compute_information_criteria,
-    compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test, replicates_lack_of_fit, rout_detect_outliers, runs_test, shapiro_wilk_test,
+    AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, HomoscedasticityResult, LackOfFitResult, LikelihoodRatioResult,
+    NormalityTestResult, RoutDetectionResult, RunsTestResult, anderson_darling_test, compare_models_aicc, compare_models_f_test, compare_models_lrt,
+    compare_models_lrt_deviance, compute_covariance_diagnostics, compute_hougaard_skewness_into, compute_information_criteria,
+    compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test, lilliefors_ks_test, replicates_lack_of_fit,
+    rout_detect_outliers, runs_test, shapiro_wilk_test,
 };
 use crate::error::{FitError, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
-use crate::types::{DataPoint, DatasetSeries, DerivedScalar, HookContext};
+use crate::types::{DataPoint, DatasetSeries, DerivedScalar, HookContext, filter_datasets_by_range, parse_leading_number};
 
 /// Configuration for executing nonlinear regression via [`fit_nonlinear`].
 #[derive(Debug, Clone)]
@@ -34,8 +36,15 @@ pub struct SolverConfig {
     pub compute_runs_test: bool,
     pub compute_lack_of_fit: bool,
     pub compute_normality: bool,
+    pub compute_homoscedasticity: bool,
     pub interpolate_unknowns: bool,
     pub use_simplex_warm_start: bool,
+    pub x_range_filter: Option<(Option<f64>, Option<f64>)>,
+    pub y_range_filter: Option<(Option<f64>, Option<f64>)>,
+    pub plot_function_only: bool,
+    pub plot_x_min: Option<f64>,
+    pub plot_x_max: Option<f64>,
+    pub curve_overlay_segments: usize,
 }
 
 impl Default for SolverConfig {
@@ -53,8 +62,15 @@ impl Default for SolverConfig {
             compute_runs_test: true,
             compute_lack_of_fit: false,
             compute_normality: false,
+            compute_homoscedasticity: false,
             interpolate_unknowns: false,
             use_simplex_warm_start: true,
+            x_range_filter: None,
+            y_range_filter: None,
+            plot_function_only: false,
+            plot_x_min: None,
+            plot_x_max: None,
+            curve_overlay_segments: 256,
         }
     }
 }
@@ -98,17 +114,19 @@ pub struct FittedDatasetResult {
     pub y_hat: Vec<f64>,
     pub residuals: Vec<f64>,
     pub weighted_residuals: Vec<f64>,
+    pub studentized_residuals: Vec<f64>,
     pub ss_residual: f64,
     pub r_squared: f64,
     pub sy_x: f64,
     pub curve_overlay: Option<FittedCurveOverlay>,
 }
 
-/// Model comparison output (`Extra-SS F` or `AICc`).
+/// Model comparison output (`Extra-SS F`, `AICc`, or Likelihood Ratio Test).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ModelComparisonOutcome {
     ExtraSumOfSquaresF(ExtraSumOfSquaresResult),
     Aicc(AiccComparisonResult),
+    LikelihoodRatioTest(LikelihoodRatioResult),
 }
 
 /// Complete nonlinear regression result across one or multiple globally fitted datasets.
@@ -136,6 +154,9 @@ pub struct NonlinearFitResult {
     pub runs_test: Option<RunsTestResult>,
     pub lack_of_fit: Option<LackOfFitResult>,
     pub normality: Option<NormalityTestResult>,
+    pub normality_anderson_darling: Option<NormalityTestResult>,
+    pub normality_lilliefors_ks: Option<NormalityTestResult>,
+    pub homoscedasticity: Option<HomoscedasticityResult>,
     pub rout: Option<RoutDetectionResult>,
     pub interpolated_x: Vec<InterpolatedUnknown>,
     pub interpolated_y: Vec<InterpolatedUnknown>,
@@ -143,6 +164,7 @@ pub struct NonlinearFitResult {
 
 #[derive(Debug, Clone)]
 struct FreeSlot {
+    ds_local_idx: Option<usize>,
     dataset_idx: Option<usize>,
     name: String,
     lower: Option<f64>,
@@ -213,10 +235,54 @@ impl ParameterLayout {
                     }
                     fixed_constants.push((pname.clone(), val, vec![ParameterNote::Hooked]));
                 }
+                Some(ParameterScope::PerDatasetConstant(pairs)) => {
+                    for &(_, val) in pairs {
+                        if !val.is_finite() {
+                            return Err(FitError::InvalidParameter {
+                                name: "parameter_rules",
+                                reason: format!("Non-finite per-dataset constant for `{pname}`"),
+                            });
+                        }
+                    }
+                    for (ds_idx, ds) in datasets.iter().enumerate() {
+                        if let Some(&(_, val)) = pairs.iter().rev().find(|&&(idx, _)| idx == ds.data_set_index) {
+                            bindings[ds_idx][p_idx] = ParamBinding::Fixed(val);
+                            let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
+                            fixed_constants.push((label, val, vec![ParameterNote::Constant]));
+                        } else {
+                            let slot = free_slots.len();
+                            let init_v =
+                                rule.and_then(|r| r.initial_override).unwrap_or_else(|| per_ds_init[ds_idx].get(p_idx).copied().unwrap_or(1.0));
+                            free_slots.push(FreeSlot {
+                                ds_local_idx: Some(ds_idx),
+                                dataset_idx: Some(ds.data_set_index),
+                                name: pname.clone(),
+                                lower: lb,
+                                upper: ub,
+                                init: clamp_to_bounds(init_v, lb, ub),
+                                is_shared: false,
+                            });
+                            bindings[ds_idx][p_idx] = ParamBinding::Free(slot);
+                        }
+                    }
+                }
+                Some(ParameterScope::ColumnTitleConstant) => {
+                    for (ds_idx, ds) in datasets.iter().enumerate() {
+                        let val = ds.column_title_value.or_else(|| parse_leading_number(&ds.label)).filter(|v| v.is_finite()).ok_or_else(|| {
+                            FitError::HookResolutionError {
+                                message: format!("Column title `{}` for `{pname}` has no finite numeric constant", ds.label),
+                            }
+                        })?;
+                        bindings[ds_idx][p_idx] = ParamBinding::Fixed(val);
+                        let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
+                        fixed_constants.push((label, val, vec![ParameterNote::Hooked]));
+                    }
+                }
                 Some(ParameterScope::SharedGlobal) => {
                     let slot = free_slots.len();
                     let init_v = rule.and_then(|r| r.initial_override).unwrap_or_else(|| default_init.get(p_idx).copied().unwrap_or(1.0));
                     free_slots.push(FreeSlot {
+                        ds_local_idx: None,
                         dataset_idx: None,
                         name: pname.clone(),
                         lower: lb,
@@ -232,8 +298,10 @@ impl ParameterLayout {
                     if n_datasets <= 1 {
                         let slot = free_slots.len();
                         let init_v = rule.and_then(|r| r.initial_override).unwrap_or_else(|| default_init.get(p_idx).copied().unwrap_or(1.0));
+                        let ds_ext_idx = datasets.first().map_or(0, |d| d.data_set_index);
                         free_slots.push(FreeSlot {
-                            dataset_idx: Some(0),
+                            ds_local_idx: Some(0),
+                            dataset_idx: Some(ds_ext_idx),
                             name: pname.clone(),
                             lower: lb,
                             upper: ub,
@@ -244,12 +312,13 @@ impl ParameterLayout {
                             ds_row[p_idx] = ParamBinding::Free(slot);
                         }
                     } else {
-                        for ds_idx in 0..n_datasets {
+                        for (ds_idx, ds) in datasets.iter().enumerate() {
                             let slot = free_slots.len();
                             let init_v =
                                 rule.and_then(|r| r.initial_override).unwrap_or_else(|| per_ds_init[ds_idx].get(p_idx).copied().unwrap_or(1.0));
                             free_slots.push(FreeSlot {
-                                dataset_idx: Some(ds_idx),
+                                ds_local_idx: Some(ds_idx),
+                                dataset_idx: Some(ds.data_set_index),
                                 name: pname.clone(),
                                 lower: lb,
                                 upper: ub,
@@ -275,14 +344,47 @@ impl ParameterLayout {
     }
 
     fn expand_params(&self, theta: &[f64], ds_idx: usize) -> Vec<f64> {
+        let mut out = vec![0.0_f64; self.p_model];
+        self.expand_params_into(theta, ds_idx, &mut out);
+        out
+    }
+
+    fn expand_params_into(&self, theta: &[f64], ds_idx: usize, out: &mut [f64]) {
         let row = &self.bindings[ds_idx.min(self.n_datasets - 1)];
-        row.iter()
-            .map(|b| match b {
+        for (dst, b) in out.iter_mut().zip(row.iter()) {
+            *dst = match b {
                 ParamBinding::Free(slot) => theta[*slot],
                 ParamBinding::Fixed(v) => *v,
-            })
-            .collect()
+            };
+        }
     }
+
+    fn fill_all_params(&self, theta: &[f64], flat_out: &mut [f64]) {
+        for ds_idx in 0..self.n_datasets {
+            let start = ds_idx * self.p_model;
+            self.expand_params_into(theta, ds_idx, &mut flat_out[start..(start + self.p_model)]);
+        }
+    }
+}
+
+fn uses_shared_global(rules: &[ParameterRule]) -> bool {
+    rules.iter().any(|r| matches!(r.scope, ParameterScope::SharedGlobal))
+}
+
+fn rules_for_dataset(rules: &[ParameterRule], data_set_index: usize) -> Vec<ParameterRule> {
+    rules
+        .iter()
+        .map(|r| match &r.scope {
+            ParameterScope::PerDatasetConstant(pairs) => {
+                if let Some(&(_, v)) = pairs.iter().rev().find(|&&(d, _)| d == data_set_index) {
+                    ParameterRule { scope: ParameterScope::Constant(v), ..r.clone() }
+                } else {
+                    ParameterRule { scope: ParameterScope::Local, ..r.clone() }
+                }
+            }
+            _ => r.clone(),
+        })
+        .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -384,17 +486,17 @@ fn build_observations(datasets: &[DatasetSeries], scheme: WeightingScheme) -> Re
 
 /// Evaluate weighted residual vector `r_i = sqrt_w_i * (y_i - f(x_i; theta))` and predictions.
 fn eval_residuals(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[ObsRecord], theta: &[f64]) -> Option<(Vec<f64>, Vec<f64>, f64)> {
-    let mut full_per_ds = Vec::with_capacity(layout.n_datasets);
-    for ds_idx in 0..layout.n_datasets {
-        full_per_ds.push(layout.expand_params(theta, ds_idx));
-    }
+    let mut flat_params = vec![0.0_f64; layout.n_datasets * layout.p_model];
+    layout.fill_all_params(theta, &mut flat_params);
 
     let mut weighted_res = Vec::with_capacity(obs.len());
     let mut y_hat = Vec::with_capacity(obs.len());
     let mut ss = NeumaierSum::new();
+    let p_m = layout.p_model;
 
     for rec in obs {
-        let p = &full_per_ds[rec.ds_local_idx];
+        let start = rec.ds_local_idx * p_m;
+        let p = &flat_params[start..(start + p_m)];
         let pred = model.eval(&rec.point.x, p, rec.point.data_set_index)?;
         if !pred.is_finite() {
             return None;
@@ -409,6 +511,29 @@ fn eval_residuals(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[
     }
     let total_ss = ss.total();
     if total_ss.is_finite() { Some((weighted_res, y_hat, total_ss)) } else { None }
+}
+
+fn eval_predictions_into(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta: &[f64],
+    flat_params: &mut [f64],
+    y_hat_out: &mut [f64],
+) -> bool {
+    layout.fill_all_params(theta, flat_params);
+    let p_m = layout.p_model;
+    for (dst, rec) in y_hat_out.iter_mut().zip(obs.iter()) {
+        let start = rec.ds_local_idx * p_m;
+        let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
+            return false;
+        };
+        if !pred.is_finite() {
+            return false;
+        }
+        *dst = pred;
+    }
+    true
 }
 
 fn mat_get(m: &DenseMatrix, r: usize, c: usize) -> f64 {
@@ -439,20 +564,20 @@ fn compute_jacobian(
     }
 
     // Try analytical gradient path first across all observations.
-    let mut full_per_ds = Vec::with_capacity(layout.n_datasets);
-    for ds_idx in 0..layout.n_datasets {
-        full_per_ds.push(layout.expand_params(theta, ds_idx));
-    }
+    let p_m = layout.p_model;
+    let mut flat_params = vec![0.0_f64; layout.n_datasets * p_m];
+    layout.fill_all_params(theta, &mut flat_params);
 
-    let mut grad_buf = vec![0.0_f64; layout.p_model];
+    let mut grad_buf = vec![0.0_f64; p_m];
     let mut analytical_ok = true;
     for (i, rec) in obs.iter().enumerate() {
         grad_buf.fill(0.0);
-        if !model.grad(&rec.point.x, &full_per_ds[rec.ds_local_idx], rec.point.data_set_index, &mut grad_buf) {
+        let start = rec.ds_local_idx * p_m;
+        if !model.grad(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index, &mut grad_buf) {
             analytical_ok = false;
             break;
         }
-        for (p_idx, &g_val) in grad_buf.iter().enumerate().take(layout.p_model) {
+        for (p_idx, &g_val) in grad_buf.iter().enumerate().take(p_m) {
             if let ParamBinding::Free(slot) = layout.bindings[rec.ds_local_idx][p_idx] {
                 let prev = mat_get(&j_mat, i, slot);
                 mat_set(&mut j_mat, i, slot, prev + rec.sqrt_weight * g_val);
@@ -468,6 +593,8 @@ fn compute_jacobian(
     let eps_central = 1e-6_f64;
     let eps_forward = 1.5e-8_f64;
     let mut work = theta.to_vec();
+    let mut yp = vec![0.0_f64; n];
+    let mut ym = vec![0.0_f64; n];
 
     for slot in 0..k {
         let info = &layout.free_slots[slot];
@@ -478,33 +605,21 @@ fn compute_jacobian(
         let mut can_plus = ub.is_none_or(|u| xj + h_c <= u);
         let mut can_minus = lb.is_none_or(|l| xj - h_c >= l);
 
-        let mut yp: Option<Vec<f64>> = None;
-        let mut ym: Option<Vec<f64>> = None;
-
         if can_plus {
             work[slot] = xj + h_c;
-            yp = eval_predictions_for_slot(model, layout, obs, &work, info.dataset_idx);
-            if yp.is_none() {
-                can_plus = false;
-            }
+            can_plus = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, info.ds_local_idx, &mut yp);
         }
         if can_minus {
             work[slot] = xj - h_c;
-            ym = eval_predictions_for_slot(model, layout, obs, &work, info.dataset_idx);
-            if ym.is_none() {
-                can_minus = false;
-            }
+            can_minus = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, info.ds_local_idx, &mut ym);
         }
         work[slot] = xj;
 
-        if can_plus
-            && can_minus
-            && let (Some(fp), Some(fm)) = (yp, ym)
-        {
+        if can_plus && can_minus {
             let inv_2h = 1.0 / (2.0 * h_c);
             for (i, rec) in obs.iter().enumerate() {
-                if info.dataset_idx.is_none_or(|d| d == rec.ds_local_idx) {
-                    mat_set(&mut j_mat, i, slot, rec.sqrt_weight * (fp[i] - fm[i]) * inv_2h);
+                if info.ds_local_idx.is_none_or(|d| d == rec.ds_local_idx) {
+                    mat_set(&mut j_mat, i, slot, rec.sqrt_weight * (yp[i] - ym[i]) * inv_2h);
                 }
             }
             continue;
@@ -514,41 +629,45 @@ fn compute_jacobian(
         let h_f = eps_forward * xj.abs().max(1.0);
         let sign = if ub.is_some_and(|u| xj + h_f > u) { -1.0 } else { 1.0 };
         work[slot] = xj + sign * h_f;
-        let fp_opt = eval_predictions_for_slot(model, layout, obs, &work, info.dataset_idx);
+        let ok = eval_predictions_for_slot_into(model, layout, obs, &work, &mut flat_params, info.ds_local_idx, &mut yp);
         work[slot] = xj;
-        let fp = fp_opt?;
+        if !ok {
+            return None;
+        }
         let inv_h = sign / h_f;
         for (i, rec) in obs.iter().enumerate() {
-            if info.dataset_idx.is_none_or(|d| d == rec.ds_local_idx) {
-                mat_set(&mut j_mat, i, slot, rec.sqrt_weight * (fp[i] - y_hat0[i]) * inv_h);
+            if info.ds_local_idx.is_none_or(|d| d == rec.ds_local_idx) {
+                mat_set(&mut j_mat, i, slot, rec.sqrt_weight * (yp[i] - y_hat0[i]) * inv_h);
             }
         }
     }
     Some(j_mat)
 }
 
-fn eval_predictions_for_slot(
+fn eval_predictions_for_slot_into(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
     obs: &[ObsRecord],
     theta: &[f64],
+    flat_params: &mut [f64],
     slot_ds: Option<usize>,
-) -> Option<Vec<f64>> {
-    let mut full_per_ds = Vec::with_capacity(layout.n_datasets);
-    for ds_idx in 0..layout.n_datasets {
-        full_per_ds.push(layout.expand_params(theta, ds_idx));
-    }
-    let mut out = vec![0.0_f64; obs.len()];
-    for (i, rec) in obs.iter().enumerate() {
+    out: &mut [f64],
+) -> bool {
+    layout.fill_all_params(theta, flat_params);
+    let p_m = layout.p_model;
+    for (dst, rec) in out.iter_mut().zip(obs.iter()) {
         if slot_ds.is_none_or(|d| d == rec.ds_local_idx) {
-            let v = model.eval(&rec.point.x, &full_per_ds[rec.ds_local_idx], rec.point.data_set_index)?;
+            let start = rec.ds_local_idx * p_m;
+            let Some(v) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
+                return false;
+            };
             if !v.is_finite() {
-                return None;
+                return false;
             }
-            out[i] = v;
+            *dst = v;
         }
     }
-    Some(out)
+    true
 }
 
 #[derive(Debug, Clone)]
@@ -602,6 +721,7 @@ fn run_trust_region_lm(
     let mut delta = 0.0_f64;
     let mut iter = 0_usize;
     let mut j_mat = DenseMatrix::zeros(n, k)?;
+    let mut damp_ws = LmDampWorkspace::new(n, k)?;
 
     while iter < max_iters {
         j_mat = compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds)
@@ -673,7 +793,7 @@ fn run_trust_region_lm(
         let mut accepted = false;
         let mut lambda = 0.0_f64;
         for _ in 0..40 {
-            let (step, lam_used) = solve_trust_region_subproblem(&j_mat, &w_res, &diag, delta, lambda)?;
+            let (step, lam_used) = solve_trust_region_subproblem(&j_mat, &w_res, &diag, delta, lambda, &mut damp_ws)?;
             lambda = lam_used;
 
             let mut theta_trial: Vec<f64> = theta.iter().zip(step.iter()).map(|(a, b)| a + b).collect();
@@ -785,11 +905,29 @@ fn run_trust_region_lm(
     })
 }
 
+struct LmDampWorkspace {
+    aug: DenseMatrix,
+    rhs: Vec<f64>,
+}
+
+impl LmDampWorkspace {
+    fn new(n: usize, k: usize) -> Result<Self, FitError> {
+        Ok(Self { aug: DenseMatrix::zeros(n + k, k)?, rhs: vec![0.0_f64; n + k] })
+    }
+}
+
 /// Solve the Moré trust-region subproblem `(J^T J + lambda D^2) p = J^T r` with `||D p|| <= delta`
 /// via QR decomposition of the augmented matrix `[J; sqrt(lambda) D]`.
-fn solve_trust_region_subproblem(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], delta: f64, lambda_hint: f64) -> Result<(Vec<f64>, f64), FitError> {
+fn solve_trust_region_subproblem(
+    j_mat: &DenseMatrix,
+    r: &[f64],
+    diag: &[f64],
+    delta: f64,
+    lambda_hint: f64,
+    ws: &mut LmDampWorkspace,
+) -> Result<(Vec<f64>, f64), FitError> {
     let k = j_mat.ncols();
-    if let Ok(p_gn) = solve_damped_qr(j_mat, r, diag, 0.0) {
+    if let Ok(p_gn) = solve_damped_qr(j_mat, r, diag, 0.0, ws) {
         let p_norm = scaled_l2_norm(diag, &p_gn);
         if p_norm <= 1.1 * delta && p_gn.iter().all(|v| v.is_finite()) {
             return Ok((p_gn, 0.0));
@@ -815,7 +953,7 @@ fn solve_trust_region_subproblem(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], d
         if lam == 0.0 {
             lam = (0.001 * paru).max(1e-12);
         }
-        let p = solve_damped_qr(j_mat, r, diag, lam)?;
+        let p = solve_damped_qr(j_mat, r, diag, lam, ws)?;
         let p_norm = scaled_l2_norm(diag, &p);
         let fp = p_norm - delta;
         best_p = p;
@@ -824,8 +962,6 @@ fn solve_trust_region_subproblem(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], d
         }
         if fp > 0.0 {
             parl = parl.max(lam);
-        } else {
-            // Shrink upper bracket carefully.
         }
         let corr = lam * (fp / delta);
         let next_lam = if fp > 0.0 { (lam + corr.abs()).min(paru.max(lam * 4.0)) } else { (0.5 * (lam + parl)).max(0.1 * lam) };
@@ -838,7 +974,7 @@ fn solve_trust_region_subproblem(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], d
 }
 
 /// QR solve of `min || [J; sqrt(lambda) D] p - [r; 0] ||_2`.
-fn solve_damped_qr(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], lambda: f64) -> Result<Vec<f64>, FitError> {
+fn solve_damped_qr(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], lambda: f64, ws: &mut LmDampWorkspace) -> Result<Vec<f64>, FitError> {
     let n = j_mat.nrows();
     let k = j_mat.ncols();
     if lambda <= 0.0 {
@@ -849,21 +985,19 @@ fn solve_damped_qr(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], lambda: f64) ->
         return Ok(pqr.solve_basic(r)?);
     }
     let sqrt_lam = lambda.sqrt();
-    let mut aug = DenseMatrix::zeros(n + k, k)?;
     for i in 0..n {
         for j in 0..k {
-            mat_set(&mut aug, i, j, mat_get(j_mat, i, j));
+            mat_set(&mut ws.aug, i, j, mat_get(j_mat, i, j));
         }
     }
     for (j, &dj) in diag.iter().enumerate().take(k) {
-        mat_set(&mut aug, n + j, j, sqrt_lam * dj);
+        mat_set(&mut ws.aug, n + j, j, sqrt_lam * dj);
     }
-    let mut rhs = Vec::with_capacity(n + k);
-    rhs.extend_from_slice(r);
-    rhs.resize(n + k, 0.0);
+    ws.rhs[..n].copy_from_slice(r);
+    ws.rhs[n..(n + k)].fill(0.0);
 
-    let qr_res = qr(&aug)?;
-    Ok(qr_res.solve_basic(&rhs)?)
+    let qr_res = qr(&ws.aug)?;
+    Ok(qr_res.solve_basic(&ws.rhs)?)
 }
 
 fn scaled_l2_norm(diag: &[f64], v: &[f64]) -> f64 {
@@ -1033,6 +1167,116 @@ fn obs_y_ss(obs: &[ObsRecord]) -> f64 {
     acc.total().max(1.0)
 }
 
+fn wald_ci_bounds(cov: &CovarianceDiagnostics, df: usize) -> Vec<(CiBound, CiBound)> {
+    cov.standard_errors
+        .iter()
+        .zip(cov.symmetric_ci_lower.iter().zip(cov.symmetric_ci_upper.iter()))
+        .map(|(&se, (&lo, &hi))| {
+            if !cov.ambiguous && df > 0 && se.is_finite() && lo.is_finite() && hi.is_finite() {
+                (CiBound::Finite(lo), CiBound::Finite(hi))
+            } else {
+                (CiBound::Open, CiBound::Open)
+            }
+        })
+        .collect()
+}
+
+fn unscaled_cov_from_diag_or_j(cov: &CovarianceDiagnostics, df: usize, weighted_ss: f64, j_mat: &DenseMatrix) -> Option<DenseMatrix> {
+    let k = cov.covariance_matrix.len();
+    if cov.ambiguous || k == 0 || j_mat.ncols() == 0 {
+        return None;
+    }
+    let sigma2 = if df > 0 { weighted_ss / (df as f64) } else { 0.0 };
+    if sigma2 > 0.0 && sigma2.is_finite() {
+        let mut mat = DenseMatrix::zeros(k, k).ok()?;
+        let inv_s2 = 1.0 / sigma2;
+        for (i, row) in cov.covariance_matrix.iter().enumerate().take(k) {
+            for (j, &v) in row.iter().enumerate().take(k) {
+                mat_set(&mut mat, i, j, v * inv_s2);
+            }
+        }
+        return Some(mat);
+    }
+    compute_unscaled_cov(j_mat)
+}
+
+fn compute_studentized_residuals(j_mat: &DenseMatrix, w_res: &[f64], cov_unscaled: Option<&DenseMatrix>, sigma_w: f64, ambiguous: bool) -> Vec<f64> {
+    let n = w_res.len();
+    if !sigma_w.is_finite() || sigma_w <= 0.0 {
+        return vec![0.0; n];
+    }
+    let k = j_mat.ncols();
+    let use_leverage = !ambiguous && cov_unscaled.is_some() && k > 0 && k <= 64 && j_mat.nrows() == n;
+    let mut out = Vec::with_capacity(n);
+    for (i, &wr) in w_res.iter().enumerate() {
+        let h_ii = if use_leverage && let Some(cov_u) = cov_unscaled {
+            let mut h = 0.0_f64;
+            for a in 0..k {
+                let ja = mat_get(j_mat, i, a);
+                for b in 0..k {
+                    h += ja * mat_get(cov_u, a, b) * mat_get(j_mat, i, b);
+                }
+            }
+            h.clamp(0.0, 1.0 - 1e-12)
+        } else {
+            0.0
+        };
+        out.push(wr / (sigma_w * (1.0 - h_ii).sqrt()));
+    }
+    out
+}
+
+struct ResidualDiagnosticsBundle {
+    runs_test: Option<RunsTestResult>,
+    lack_of_fit: Option<LackOfFitResult>,
+    normality: Option<NormalityTestResult>,
+    normality_anderson_darling: Option<NormalityTestResult>,
+    normality_lilliefors_ks: Option<NormalityTestResult>,
+    homoscedasticity: Option<HomoscedasticityResult>,
+}
+
+fn compute_residual_diagnostics(
+    points: &[DataPoint],
+    y_hat_all: &[f64],
+    raw_residuals_all: &[f64],
+    weighted_ss: f64,
+    df: usize,
+    config: &SolverConfig,
+) -> ResidualDiagnosticsBundle {
+    let runs_res = if config.compute_runs_test {
+        let mut pairs: Vec<(f64, f64)> = points.iter().zip(raw_residuals_all.iter()).map(|(p, &r)| (p.x0(), r)).collect();
+        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let ordered_res: Vec<f64> = pairs.into_iter().map(|(_, r)| r).collect();
+        Some(runs_test(&ordered_res))
+    } else {
+        None
+    };
+
+    let lof_res = if config.compute_lack_of_fit { replicates_lack_of_fit(points, weighted_ss, df) } else { None };
+
+    let (norm_main, norm_ad, norm_ks) = if config.compute_normality {
+        (
+            shapiro_wilk_test(raw_residuals_all).or_else(|| dagostino_pearson_test(raw_residuals_all)),
+            anderson_darling_test(raw_residuals_all),
+            lilliefors_ks_test(raw_residuals_all),
+        )
+    } else {
+        (None, None, None)
+    };
+
+    let homo_res =
+        if config.compute_homoscedasticity { homoscedasticity_spearman_test(y_hat_all, raw_residuals_all, config.confidence.alpha()) } else { None };
+
+    ResidualDiagnosticsBundle {
+        runs_test: runs_res,
+        lack_of_fit: lof_res,
+        normality: norm_main,
+        normality_anderson_darling: norm_ad,
+        normality_lilliefors_ks: norm_ks,
+        homoscedasticity: homo_res,
+    }
+}
+
 /// Execute nonlinear regression for one or more datasets using any built-in or DSL [`ParametricModel`].
 pub fn fit_nonlinear(
     model: &dyn ParametricModel,
@@ -1043,27 +1287,189 @@ pub fn fit_nonlinear(
     if datasets.is_empty() {
         return Err(FitError::EmptyInput);
     }
-    if matches!(config.method, FitMethod::RobustCauchy | FitMethod::RoutOutlierElimination { .. }) && datasets.iter().any(|d| d.is_pre_summarized) {
+    if config.plot_function_only {
+        return fit_plot_function_only(model, datasets, hooks, config);
+    }
+
+    let mut filtered_storage: Option<Vec<DatasetSeries>> = None;
+    if config.x_range_filter.is_some() || config.y_range_filter.is_some() {
+        let mut copy = datasets.to_vec();
+        filter_datasets_by_range(&mut copy, config.x_range_filter, config.y_range_filter);
+        if copy.is_empty() {
+            return Err(FitError::EmptyInput);
+        }
+        filtered_storage = Some(copy);
+    }
+    let active_datasets = filtered_storage.as_deref().unwrap_or(datasets);
+
+    if matches!(config.method, FitMethod::RobustCauchy | FitMethod::RoutOutlierElimination { .. })
+        && active_datasets.iter().any(|d| d.is_pre_summarized)
+    {
         return Err(FitError::RequiresRawReplicates);
     }
 
-    let layout = ParameterLayout::build(model, datasets, hooks, &config.parameter_rules)?;
+    let layout = ParameterLayout::build(model, active_datasets, hooks, &config.parameter_rules)?;
     let k_free = layout.k_free();
-    let mut obs = build_observations(datasets, config.weighting)?;
-    if obs.len() <= k_free {
-        return Err(FitError::InsufficientData { required: k_free + 1, actual: obs.len() });
+    let obs = build_observations(active_datasets, config.weighting)?;
+    let min_required = if matches!(config.method, FitMethod::RoutOutlierElimination { .. }) { k_free + 1 } else { k_free };
+    if obs.len() < min_required {
+        return Err(FitError::InsufficientData { required: min_required, actual: obs.len() });
     }
 
-    let mut init_theta: Vec<f64> = layout.free_slots.iter().map(|s| s.init).collect();
-    let mut rout_result: Option<RoutDetectionResult> = None;
-    let mut n_outliers_excluded = 0_usize;
+    if active_datasets.len() > 1 && !uses_shared_global(&config.parameter_rules) {
+        return fit_independent_datasets(model, active_datasets, hooks, config, layout, obs);
+    }
+    fit_single_or_shared(model, active_datasets, config, layout, obs)
+}
 
-    let mut lm_out = match config.method {
-        FitMethod::LeastSquares => solve_with_warm_start(model, &layout, &obs, &init_theta, config)?,
-        FitMethod::PoissonDeviance => fit_poisson_irls(model, &layout, &obs, &init_theta, config)?,
-        FitMethod::RobustCauchy => fit_cauchy_irls(model, &layout, &obs, &init_theta, config)?,
+fn fit_plot_function_only(
+    model: &dyn ParametricModel,
+    datasets: &[DatasetSeries],
+    hooks: &HookContext,
+    config: &SolverConfig,
+) -> Result<NonlinearFitResult, FitError> {
+    let layout = ParameterLayout::build(model, datasets, hooks, &config.parameter_rules)?;
+    let k_free = layout.k_free();
+    let theta: Vec<f64> = layout.free_slots.iter().map(|s| s.init).collect();
+    let mut parameters = Vec::with_capacity(k_free);
+    for (idx, slot) in layout.free_slots.iter().enumerate() {
+        parameters.push(FittedParameterSummary {
+            slot_index: idx,
+            name: slot.name.clone(),
+            dataset_index: slot.dataset_idx,
+            estimate: theta[idx],
+            se: f64::NAN,
+            ci_lower: CiBound::Open,
+            ci_upper: CiBound::Open,
+            symmetric_ci_lower: f64::NAN,
+            symmetric_ci_upper: f64::NAN,
+            dependency: 0.0,
+            hougaard_g1: 0.0,
+            notes: vec![ParameterNote::UnboundedCi],
+        });
+    }
+
+    let mut ds_results = Vec::with_capacity(datasets.len());
+    let mut derived_scalars = Vec::with_capacity(datasets.len());
+    let mut total_obs = 0_usize;
+    let mut raw_rss_acc = NeumaierSum::new();
+    let mut y_vals_all = Vec::new();
+
+    for (ds_local_idx, ds) in datasets.iter().enumerate() {
+        let ds_params = layout.expand_params(&theta, ds_local_idx);
+        derived_scalars.push(model.derived_transforms(&ds_params));
+        let mut ds_yh = Vec::with_capacity(ds.points.len());
+        let mut ds_res = Vec::with_capacity(ds.points.len());
+        let mut ds_rss = NeumaierSum::new();
+        for pt in &ds.points {
+            let yh = model.eval(&pt.x, &ds_params, ds.data_set_index).unwrap_or(f64::NAN);
+            if yh.is_finite() && pt.y.is_finite() {
+                let r = pt.y - yh;
+                ds_yh.push(yh);
+                ds_res.push(r);
+                ds_rss.add(r * r);
+                raw_rss_acc.add(r * r);
+                y_vals_all.push(pt.y);
+                total_obs += 1;
+            }
+        }
+        let ds_ss = ds_rss.total();
+        let overlay = build_curve_overlay(&CurveOverlayContext {
+            model,
+            layout: &layout,
+            theta: &theta,
+            ds_params: &ds_params,
+            ds,
+            ds_local_idx,
+            cov_unscaled: None,
+            sigma: 0.0,
+            t_crit: f64::NAN,
+            converged: true,
+            ambiguous: false,
+            solver: config,
+        });
+        ds_results.push(FittedDatasetResult {
+            data_set_index: ds.data_set_index,
+            label: ds.label.clone(),
+            params: ds_params,
+            param_names: model.param_names().to_vec(),
+            y_hat: ds_yh,
+            residuals: ds_res.clone(),
+            weighted_residuals: ds_res.clone(),
+            studentized_residuals: vec![0.0; ds_res.len()],
+            ss_residual: ds_ss,
+            r_squared: 1.0,
+            sy_x: 0.0,
+            curve_overlay: Some(overlay),
+        });
+    }
+
+    let raw_rss = raw_rss_acc.total();
+    let df = total_obs.saturating_sub(k_free);
+    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
+    let r_squared = if y_vals_all.len() > 1 {
+        let ym = y_vals_all.iter().sum::<f64>() / (y_vals_all.len() as f64);
+        let tss: f64 = y_vals_all.iter().map(|v| (v - ym) * (v - ym)).sum();
+        if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 }
+    } else {
+        1.0
+    };
+
+    Ok(NonlinearFitResult {
+        equation_id: model.id().to_owned(),
+        equation_name: model.name().to_owned(),
+        status: FitStatus::Converged,
+        iterations: 0,
+        n_obs: total_obs,
+        n_outliers_excluded: 0,
+        k_free,
+        df,
+        rss: raw_rss,
+        weighted_ss: raw_rss,
+        rsd,
+        r_squared,
+        aic_c: None,
+        bic: None,
+        parameters,
+        fixed_constants: layout.fixed_constants,
+        covariance: CovarianceDiagnostics {
+            standard_errors: vec![f64::NAN; k_free],
+            symmetric_ci_lower: vec![f64::NAN; k_free],
+            symmetric_ci_upper: vec![f64::NAN; k_free],
+            covariance_matrix: vec![vec![0.0; k_free]; k_free],
+            correlation_matrix: vec![vec![0.0; k_free]; k_free],
+            dependencies: vec![0.0; k_free],
+            numerical_rank: 0,
+            ambiguous: false,
+        },
+        datasets: ds_results,
+        derived_scalars,
+        runs_test: None,
+        lack_of_fit: None,
+        normality: None,
+        normality_anderson_darling: None,
+        normality_lilliefors_ks: None,
+        homoscedasticity: None,
+        rout: None,
+        interpolated_x: Vec::new(),
+        interpolated_y: Vec::new(),
+    })
+}
+
+fn solve_lm_by_method(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &mut Vec<ObsRecord>,
+    init_theta: &[f64],
+    config: &SolverConfig,
+) -> Result<(LmRunOutput, Option<RoutDetectionResult>, usize), FitError> {
+    let k_free = layout.k_free();
+    match config.method {
+        FitMethod::LeastSquares => Ok((solve_with_warm_start(model, layout, obs, init_theta, config)?, None, 0)),
+        FitMethod::PoissonDeviance => Ok((fit_poisson_irls(model, layout, obs, init_theta, config)?, None, 0)),
+        FitMethod::RobustCauchy => Ok((fit_cauchy_irls(model, layout, obs, init_theta, config)?, None, 0)),
         FitMethod::RoutOutlierElimination { fdr_q_percent } => {
-            let cauchy_out = fit_cauchy_irls(model, &layout, &obs, &init_theta, config)?;
+            let cauchy_out = fit_cauchy_irls(model, layout, obs, init_theta, config)?;
             let pts: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
             let raw_res: Vec<f64> = obs.iter().zip(cauchy_out.y_hat.iter()).map(|(o, yh)| o.point.y - yh).collect();
             let rout = rout_detect_outliers(&pts, &raw_res, k_free, fdr_q_percent)?;
@@ -1075,30 +1481,42 @@ pub fn fit_nonlinear(
             if clean_obs.len() <= k_free {
                 return Err(FitError::InsufficientData { required: k_free + 1, actual: clean_obs.len() });
             }
-            n_outliers_excluded = obs.len() - clean_obs.len();
-            obs = clean_obs;
-            init_theta = cauchy_out.theta;
-            rout_result = Some(rout);
-            solve_with_warm_start(model, &layout, &obs, &init_theta, config)?
+            let excluded = obs.len() - clean_obs.len();
+            *obs = clean_obs;
+            let ols = solve_with_warm_start(model, layout, obs, &cauchy_out.theta, config)?;
+            Ok((ols, Some(rout), excluded))
         }
-    };
+    }
+}
+
+fn fit_single_or_shared(
+    model: &dyn ParametricModel,
+    datasets: &[DatasetSeries],
+    config: &SolverConfig,
+    layout: ParameterLayout,
+    mut obs: Vec<ObsRecord>,
+) -> Result<NonlinearFitResult, FitError> {
+    let k_free = layout.k_free();
+    let init_theta: Vec<f64> = layout.free_slots.iter().map(|s| s.init).collect();
+    let (mut lm_out, rout_result, n_outliers_excluded) = solve_lm_by_method(model, &layout, &mut obs, &init_theta, config)?;
 
     let n_obs = obs.len();
     let df = n_obs - k_free;
-    let cov = compute_covariance_diagnostics(&lm_out.j_mat, lm_out.weighted_ss, df, &lm_out.theta, config.confidence)?;
+    let mut cov = compute_covariance_diagnostics(&lm_out.j_mat, lm_out.weighted_ss, df, &lm_out.theta, config.confidence)?;
 
     if cov.ambiguous && lm_out.status == FitStatus::Converged {
         lm_out.status = FitStatus::Ambiguous;
     }
 
-    // Hougaard's skewness (for moderate parameter dimensions where Hessian 3-tensor is tractable).
-    let hougaard = if config.compute_hougaard && k_free > 0 && k_free <= 10 && !cov.ambiguous {
-        let sqrt_w: Vec<f64> = obs.iter().map(|o| o.sqrt_weight).collect();
-        let cov_unscaled = compute_unscaled_cov(&lm_out.j_mat);
-        if let Some(cov_u) = cov_unscaled {
+    let cov_unscaled = unscaled_cov_from_diag_or_j(&cov, df, lm_out.weighted_ss, &lm_out.j_mat);
+
+    let hougaard = if config.compute_hougaard && k_free > 0 && k_free <= 10 && !cov.ambiguous && df > 0 {
+        if let Some(cov_u) = cov_unscaled.as_ref() {
+            let sqrt_w: Vec<f64> = obs.iter().map(|o| o.sqrt_weight).collect();
             let sigma = (lm_out.weighted_ss / (df as f64)).sqrt();
-            compute_hougaard_skewness(&lm_out.theta, &sqrt_w, &lm_out.j_mat, &cov_u, sigma, |th| {
-                eval_residuals(model, &layout, &obs, th).map(|(_, yh, _)| yh)
+            let mut flat_p = vec![0.0_f64; layout.n_datasets * layout.p_model];
+            compute_hougaard_skewness_into(&lm_out.theta, &sqrt_w, &lm_out.j_mat, cov_u, sigma, |th, out| {
+                eval_predictions_into(model, &layout, &obs, th, &mut flat_p, out)
             })
         } else {
             vec![0.0; k_free]
@@ -1107,27 +1525,18 @@ pub fn fit_nonlinear(
         vec![0.0; k_free]
     };
 
-    // Venzon-Moolgavkar Profile Likelihood Confidence Intervals.
     let bounds = layout.bounds();
-    let profile_cis = if config.compute_profile_ci && k_free > 0 && !cov.ambiguous {
+    let profile_cis = if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
         compute_profile_likelihood_cis(&lm_out.theta, lm_out.weighted_ss, df, &cov, &bounds, config.confidence, |fixed_idx, fixed_val, seed| {
             solve_profile_subproblem(model, &layout, &obs, seed, fixed_idx, fixed_val)
         })
     } else {
-        cov.symmetric_ci_lower
-            .iter()
-            .zip(cov.symmetric_ci_upper.iter())
-            .map(
-                |(&lo, &hi)| {
-                    if lo.is_finite() && hi.is_finite() { (CiBound::Finite(lo), CiBound::Finite(hi)) } else { (CiBound::Open, CiBound::Open) }
-                },
-            )
-            .collect()
+        wald_ci_bounds(&cov, df)
     };
 
     let parameters = build_fitted_parameter_summaries(&layout, &lm_out.theta, &cov, &hougaard, &profile_cis);
+    let _ = &mut cov;
 
-    // Unweighted RSS & R^2 across clean observations.
     let mut raw_rss_acc = NeumaierSum::new();
     let mut y_mean_acc = NeumaierSum::new();
     for (rec, &yh) in obs.iter().zip(lm_out.y_hat.iter()) {
@@ -1144,42 +1553,33 @@ pub fn fit_nonlinear(
     }
     let tss = tss_acc.total();
     let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
-    let rsd = (raw_rss / (df as f64)).sqrt();
+    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
 
     let ic = compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok();
-    let cov_unscaled = compute_unscaled_cov(&lm_out.j_mat);
-    let t_crit = student_t_two_sided_isf(config.confidence.alpha(), df as f64).unwrap_or(1.96);
-    let sigma_w = (lm_out.weighted_ss / (df as f64)).sqrt();
+    let t_crit = if df > 0 { student_t_two_sided_isf(config.confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN };
+    let sigma_w = if df > 0 { (lm_out.weighted_ss / (df as f64)).sqrt() } else { 0.0 };
 
+    let all_stud = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, cov_unscaled.as_ref(), sigma_w, cov.ambiguous);
     let assembled = assemble_dataset_results(
         model,
         &layout,
         datasets,
         &obs,
         &lm_out,
-        &DatasetAssemblyConfig { cov_unscaled: cov_unscaled.as_ref(), sigma_w, t_crit, rsd, ambiguous: cov.ambiguous, solver: config },
+        &all_stud,
+        &DatasetAssemblyConfig {
+            cov_unscaled: if df > 0 { cov_unscaled.as_ref() } else { None },
+            sigma_w,
+            t_crit,
+            rsd,
+            ambiguous: cov.ambiguous,
+            solver: config,
+        },
     );
-    let ds_results = assembled.ds_results;
-    let derived_scalars = assembled.derived_scalars;
-    let interpolated_x = assembled.interpolated_x;
-    let interpolated_y = assembled.interpolated_y;
 
     let raw_residuals_all: Vec<f64> = obs.iter().zip(lm_out.y_hat.iter()).map(|(o, yh)| o.point.y - yh).collect();
     let clean_points: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
-
-    let runs_res = if config.compute_runs_test {
-        let mut pairs: Vec<(f64, f64)> = obs.iter().zip(raw_residuals_all.iter()).map(|(o, &r)| (o.point.x0(), r)).collect();
-        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let ordered_res: Vec<f64> = pairs.into_iter().map(|(_, r)| r).collect();
-        Some(runs_test(&ordered_res))
-    } else {
-        None
-    };
-
-    let lof_res = if config.compute_lack_of_fit { replicates_lack_of_fit(&clean_points, lm_out.weighted_ss, df) } else { None };
-
-    let normality_res =
-        if config.compute_normality { shapiro_wilk_test(&raw_residuals_all).or_else(|| dagostino_pearson_test(&raw_residuals_all)) } else { None };
+    let res_diag = compute_residual_diagnostics(&clean_points, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
@@ -1199,11 +1599,335 @@ pub fn fit_nonlinear(
         parameters,
         fixed_constants: layout.fixed_constants,
         covariance: cov,
+        datasets: assembled.ds_results,
+        derived_scalars: assembled.derived_scalars,
+        runs_test: res_diag.runs_test,
+        lack_of_fit: res_diag.lack_of_fit,
+        normality: res_diag.normality,
+        normality_anderson_darling: res_diag.normality_anderson_darling,
+        normality_lilliefors_ks: res_diag.normality_lilliefors_ks,
+        homoscedasticity: res_diag.homoscedasticity,
+        rout: rout_result,
+        interpolated_x: assembled.interpolated_x,
+        interpolated_y: assembled.interpolated_y,
+    })
+}
+
+struct SingleDatasetOutcome {
+    layout: ParameterLayout,
+    theta: Vec<f64>,
+    status: FitStatus,
+    iterations: usize,
+    weighted_ss: f64,
+    cov: CovarianceDiagnostics,
+    hougaard: Vec<f64>,
+    profile_cis: Vec<(CiBound, CiBound)>,
+    ds_result: FittedDatasetResult,
+    derived_scalars: Vec<DerivedScalar>,
+    interpolated_x: Vec<InterpolatedUnknown>,
+    interpolated_y: Vec<InterpolatedUnknown>,
+}
+
+fn solve_single_dataset_unit(
+    model: &dyn ParametricModel,
+    ds: &DatasetSeries,
+    hooks: &HookContext,
+    ds_rules: &[ParameterRule],
+    config: &SolverConfig,
+    seed_override: Option<&[f64]>,
+) -> Result<SingleDatasetOutcome, FitError> {
+    let ds_slice = std::slice::from_ref(ds);
+    let ds_layout = ParameterLayout::build(model, ds_slice, hooks, ds_rules)?;
+    let p_d = ds_layout.k_free();
+    let ds_obs = build_observations(ds_slice, config.weighting)?;
+    let n_d = ds_obs.len();
+    let init_theta: Vec<f64> = seed_override.map_or_else(|| ds_layout.free_slots.iter().map(|s| s.init).collect(), |s| s.to_vec());
+
+    let mut lm_out = match config.method {
+        FitMethod::LeastSquares | FitMethod::RoutOutlierElimination { .. } => solve_with_warm_start(model, &ds_layout, &ds_obs, &init_theta, config)?,
+        FitMethod::PoissonDeviance => fit_poisson_irls(model, &ds_layout, &ds_obs, &init_theta, config)?,
+        FitMethod::RobustCauchy => fit_cauchy_irls(model, &ds_layout, &ds_obs, &init_theta, config)?,
+    };
+
+    let df_d = n_d.saturating_sub(p_d);
+    let cov = compute_covariance_diagnostics(&lm_out.j_mat, lm_out.weighted_ss, df_d, &lm_out.theta, config.confidence)?;
+    if cov.ambiguous && lm_out.status == FitStatus::Converged {
+        lm_out.status = FitStatus::Ambiguous;
+    }
+
+    let cov_unscaled = unscaled_cov_from_diag_or_j(&cov, df_d, lm_out.weighted_ss, &lm_out.j_mat);
+    let hougaard = if config.compute_hougaard && p_d > 0 && p_d <= 10 && df_d > 0 && !cov.ambiguous {
+        if let Some(cov_u) = cov_unscaled.as_ref() {
+            let sqrt_w: Vec<f64> = ds_obs.iter().map(|o| o.sqrt_weight).collect();
+            let sigma = (lm_out.weighted_ss / (df_d as f64)).sqrt();
+            let mut flat_p = vec![0.0_f64; ds_layout.p_model];
+            compute_hougaard_skewness_into(&lm_out.theta, &sqrt_w, &lm_out.j_mat, cov_u, sigma, |th, out| {
+                eval_predictions_into(model, &ds_layout, &ds_obs, th, &mut flat_p, out)
+            })
+        } else {
+            vec![0.0; p_d]
+        }
+    } else {
+        vec![0.0; p_d]
+    };
+
+    let bounds = ds_layout.bounds();
+    let profile_cis = if config.compute_profile_ci && p_d > 0 && df_d > 0 && !cov.ambiguous {
+        compute_profile_likelihood_cis(&lm_out.theta, lm_out.weighted_ss, df_d, &cov, &bounds, config.confidence, |fixed_idx, fixed_val, seed| {
+            solve_profile_subproblem(model, &ds_layout, &ds_obs, seed, fixed_idx, fixed_val)
+        })
+    } else {
+        wald_ci_bounds(&cov, df_d)
+    };
+
+    let t_crit = if df_d > 0 { student_t_two_sided_isf(config.confidence.alpha(), df_d as f64).unwrap_or(1.96) } else { f64::NAN };
+    let sigma_w = if df_d > 0 { (lm_out.weighted_ss / (df_d as f64)).sqrt() } else { 0.0 };
+    let mut raw_rss_d = NeumaierSum::new();
+    for (rec, &yh) in ds_obs.iter().zip(lm_out.y_hat.iter()) {
+        let diff = rec.point.y - yh;
+        raw_rss_d.add(diff * diff);
+    }
+    let rsd_d = if df_d > 0 { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { 0.0 };
+    let stud_d = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, cov_unscaled.as_ref(), sigma_w, cov.ambiguous);
+
+    let assembled = assemble_dataset_results(
+        model,
+        &ds_layout,
+        ds_slice,
+        &ds_obs,
+        &lm_out,
+        &stud_d,
+        &DatasetAssemblyConfig {
+            cov_unscaled: if df_d > 0 { cov_unscaled.as_ref() } else { None },
+            sigma_w,
+            t_crit,
+            rsd: rsd_d,
+            ambiguous: cov.ambiguous,
+            solver: config,
+        },
+    );
+
+    let ds_result = assembled.ds_results.into_iter().next().ok_or(FitError::EmptyInput)?;
+    let derived = assembled.derived_scalars.into_iter().next().unwrap_or_default();
+
+    Ok(SingleDatasetOutcome {
+        layout: ds_layout,
+        theta: lm_out.theta,
+        status: lm_out.status,
+        iterations: lm_out.iterations,
+        weighted_ss: lm_out.weighted_ss,
+        cov,
+        hougaard,
+        profile_cis,
+        ds_result,
+        derived_scalars: derived,
+        interpolated_x: assembled.interpolated_x,
+        interpolated_y: assembled.interpolated_y,
+    })
+}
+
+fn fit_independent_datasets(
+    model: &dyn ParametricModel,
+    datasets: &[DatasetSeries],
+    hooks: &HookContext,
+    config: &SolverConfig,
+    global_layout: ParameterLayout,
+    _initial_obs: Vec<ObsRecord>,
+) -> Result<NonlinearFitResult, FitError> {
+    let k_free = global_layout.k_free();
+    let (clean_storage, cauchy_seeds, rout_result, n_outliers_excluded) = if let FitMethod::RoutOutlierElimination { fdr_q_percent } = config.method {
+        let mut cauchy_cfg = config.clone();
+        cauchy_cfg.method = FitMethod::RobustCauchy;
+        cauchy_cfg.compute_hougaard = false;
+        cauchy_cfg.compute_profile_ci = false;
+        cauchy_cfg.compute_bands = false;
+        cauchy_cfg.interpolate_unknowns = false;
+
+        let mut seeds = Vec::with_capacity(datasets.len());
+        let mut pts = Vec::new();
+        let mut raw_res = Vec::new();
+        let mut origins = Vec::new();
+        for (d_idx, ds) in datasets.iter().enumerate() {
+            let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
+            let sub = solve_single_dataset_unit(model, ds, hooks, &ds_rules, &cauchy_cfg, None)?;
+            for (pt_idx, (pt, &res)) in ds.points.iter().zip(sub.ds_result.residuals.iter()).enumerate() {
+                pts.push(pt.clone());
+                raw_res.push(res);
+                origins.push((d_idx, pt_idx));
+            }
+            seeds.push(sub.theta);
+        }
+        let rout = rout_detect_outliers(&pts, &raw_res, k_free, fdr_q_percent)?;
+        let mut is_out = vec![false; pts.len()];
+        for &idx in &rout.outlier_indices {
+            is_out[idx] = true;
+        }
+        let mut cleaned = datasets.to_vec();
+        let mut per_ds_keep: Vec<Vec<bool>> = datasets.iter().map(|d| vec![true; d.points.len()]).collect();
+        for (global_i, &out_flag) in is_out.iter().enumerate() {
+            if out_flag {
+                let (d_idx, p_idx) = origins[global_i];
+                per_ds_keep[d_idx][p_idx] = false;
+            }
+        }
+        let mut remaining_obs = 0_usize;
+        for (ds_c, keeps) in cleaned.iter_mut().zip(per_ds_keep.iter()) {
+            let mut idx_iter = keeps.iter().copied();
+            ds_c.points.retain(|_| idx_iter.next().unwrap_or(true));
+            if ds_c.points.is_empty() {
+                return Err(FitError::InsufficientData { required: k_free + 1, actual: remaining_obs });
+            }
+            remaining_obs += ds_c.points.len();
+        }
+        if remaining_obs <= k_free {
+            return Err(FitError::InsufficientData { required: k_free + 1, actual: remaining_obs });
+        }
+        let excluded = pts.len() - remaining_obs;
+        (Some(cleaned), Some(seeds), Some(rout), excluded)
+    } else {
+        (None, None, None, 0)
+    };
+
+    let active_datasets = clean_storage.as_deref().unwrap_or(datasets);
+    let mut sub_fits = Vec::with_capacity(active_datasets.len());
+    for (d_idx, ds) in active_datasets.iter().enumerate() {
+        let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
+        let seed = cauchy_seeds.as_ref().map(|v| v[d_idx].as_slice());
+        sub_fits.push(solve_single_dataset_unit(model, ds, hooks, &ds_rules, config, seed)?);
+    }
+
+    let mut global_theta = vec![0.0_f64; k_free];
+    let mut global_se = vec![0.0_f64; k_free];
+    let mut global_sym_lo = vec![f64::NAN; k_free];
+    let mut global_sym_hi = vec![f64::NAN; k_free];
+    let mut global_deps = vec![0.0_f64; k_free];
+    let mut global_hougaard = vec![0.0_f64; k_free];
+    let mut global_profile_cis = vec![(CiBound::Open, CiBound::Open); k_free];
+    let mut global_cov_mat = vec![vec![0.0_f64; k_free]; k_free];
+    let mut global_corr_mat = vec![vec![0.0_f64; k_free]; k_free];
+
+    let mut total_rank = 0_usize;
+    let mut any_ambiguous = false;
+    let mut any_max_iters = false;
+    let mut max_iterations = 0_usize;
+    let mut total_weighted_ss = NeumaierSum::new();
+    let mut total_raw_rss = NeumaierSum::new();
+    let mut total_y_sum = NeumaierSum::new();
+    let mut n_obs = 0_usize;
+
+    let mut ds_results = Vec::with_capacity(sub_fits.len());
+    let mut derived_scalars = Vec::with_capacity(sub_fits.len());
+    let mut interpolated_x = Vec::new();
+    let mut interpolated_y = Vec::new();
+    let mut all_points = Vec::new();
+    let mut all_y_hat = Vec::new();
+    let mut all_raw_residuals = Vec::new();
+
+    for (d_idx, (sub, ds)) in sub_fits.into_iter().zip(active_datasets.iter()).enumerate() {
+        let p_d = sub.layout.k_free();
+        let mut l2g = vec![0_usize; p_d];
+        for p_idx in 0..global_layout.p_model {
+            if let (ParamBinding::Free(g_slot), ParamBinding::Free(l_slot)) = (&global_layout.bindings[d_idx][p_idx], &sub.layout.bindings[0][p_idx])
+            {
+                l2g[*l_slot] = *g_slot;
+                global_theta[*g_slot] = sub.theta[*l_slot];
+                global_se[*g_slot] = sub.cov.standard_errors[*l_slot];
+                global_sym_lo[*g_slot] = sub.cov.symmetric_ci_lower[*l_slot];
+                global_sym_hi[*g_slot] = sub.cov.symmetric_ci_upper[*l_slot];
+                global_deps[*g_slot] = sub.cov.dependencies[*l_slot];
+                global_hougaard[*g_slot] = sub.hougaard[*l_slot];
+                global_profile_cis[*g_slot] = sub.profile_cis[*l_slot];
+            }
+        }
+        for (a, &g_a) in l2g.iter().enumerate() {
+            for (b, &g_b) in l2g.iter().enumerate() {
+                global_cov_mat[g_a][g_b] = sub.cov.covariance_matrix[a][b];
+                global_corr_mat[g_a][g_b] = sub.cov.correlation_matrix[a][b];
+            }
+        }
+
+        total_rank += sub.cov.numerical_rank;
+        any_ambiguous |= sub.cov.ambiguous || sub.status == FitStatus::Ambiguous;
+        any_max_iters |= sub.status == FitStatus::HitMaxIters;
+        max_iterations = max_iterations.max(sub.iterations);
+        total_weighted_ss.add(sub.weighted_ss);
+        total_raw_rss.add(sub.ds_result.ss_residual);
+
+        for ((pt, &yh), &res) in ds.points.iter().zip(sub.ds_result.y_hat.iter()).zip(sub.ds_result.residuals.iter()) {
+            all_points.push(pt.clone());
+            all_y_hat.push(yh);
+            all_raw_residuals.push(res);
+            total_y_sum.add(pt.y);
+            n_obs += 1;
+        }
+
+        ds_results.push(sub.ds_result);
+        derived_scalars.push(sub.derived_scalars);
+        interpolated_x.extend(sub.interpolated_x);
+        interpolated_y.extend(sub.interpolated_y);
+    }
+
+    let status = if any_ambiguous {
+        FitStatus::Ambiguous
+    } else if any_max_iters {
+        FitStatus::HitMaxIters
+    } else {
+        FitStatus::Converged
+    };
+    let cov = CovarianceDiagnostics {
+        standard_errors: global_se,
+        symmetric_ci_lower: global_sym_lo,
+        symmetric_ci_upper: global_sym_hi,
+        covariance_matrix: global_cov_mat,
+        correlation_matrix: global_corr_mat,
+        dependencies: global_deps,
+        numerical_rank: total_rank,
+        ambiguous: any_ambiguous,
+    };
+    let parameters = build_fitted_parameter_summaries(&global_layout, &global_theta, &cov, &global_hougaard, &global_profile_cis);
+
+    let raw_rss = total_raw_rss.total();
+    let weighted_ss = total_weighted_ss.total();
+    let df = n_obs.saturating_sub(k_free);
+    let y_mean = if n_obs > 0 { total_y_sum.total() / (n_obs as f64) } else { 0.0 };
+    let mut tss_acc = NeumaierSum::new();
+    for pt in &all_points {
+        let d = pt.y - y_mean;
+        tss_acc.add(d * d);
+    }
+    let tss = tss_acc.total();
+    let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
+    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
+    let ic = compute_information_criteria(weighted_ss, n_obs, k_free).ok();
+
+    let res_diag = compute_residual_diagnostics(&all_points, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
+
+    Ok(NonlinearFitResult {
+        equation_id: model.id().to_owned(),
+        equation_name: model.name().to_owned(),
+        status,
+        iterations: max_iterations,
+        n_obs,
+        n_outliers_excluded,
+        k_free,
+        df,
+        rss: raw_rss,
+        weighted_ss,
+        rsd,
+        r_squared,
+        aic_c: ic.as_ref().map(|x| x.aicc),
+        bic: ic.as_ref().map(|x| x.bic),
+        parameters,
+        fixed_constants: global_layout.fixed_constants,
+        covariance: cov,
         datasets: ds_results,
         derived_scalars,
-        runs_test: runs_res,
-        lack_of_fit: lof_res,
-        normality: normality_res,
+        runs_test: res_diag.runs_test,
+        lack_of_fit: res_diag.lack_of_fit,
+        normality: res_diag.normality,
+        normality_anderson_darling: res_diag.normality_anderson_darling,
+        normality_lilliefors_ks: res_diag.normality_lilliefors_ks,
+        homoscedasticity: res_diag.homoscedasticity,
         rout: rout_result,
         interpolated_x,
         interpolated_y,
@@ -1277,6 +2001,7 @@ fn assemble_dataset_results(
     datasets: &[DatasetSeries],
     obs: &[ObsRecord],
     lm_out: &LmRunOutput,
+    studentized_all: &[f64],
     cfg: &DatasetAssemblyConfig<'_>,
 ) -> AssembledDatasets {
     let k_free = layout.k_free();
@@ -1292,6 +2017,7 @@ fn assemble_dataset_results(
         let mut ds_y_hat = Vec::new();
         let mut ds_res = Vec::new();
         let mut ds_w_res = Vec::new();
+        let mut ds_stud_res = Vec::new();
         let mut ds_rss = NeumaierSum::new();
         let mut ds_y_vals = Vec::new();
         for (i, rec) in obs.iter().enumerate() {
@@ -1301,6 +2027,7 @@ fn assemble_dataset_results(
                 ds_y_hat.push(yh);
                 ds_res.push(r);
                 ds_w_res.push(lm_out.weighted_res[i]);
+                ds_stud_res.push(studentized_all.get(i).copied().unwrap_or(0.0));
                 ds_rss.add(r * r);
                 ds_y_vals.push(rec.point.y);
             }
@@ -1316,23 +2043,22 @@ fn assemble_dataset_results(
         let ds_sy_x = if ds_y_vals.len() > k_free { (ds_ss / ((ds_y_vals.len() - k_free) as f64)).sqrt() } else { cfg.rsd };
 
         let converged_or_ambig = lm_out.status == FitStatus::Converged || lm_out.status == FitStatus::Ambiguous;
-        let curve_overlay = if cfg.solver.compute_bands {
-            Some(build_curve_overlay(
+        let curve_overlay = (cfg.solver.curve_overlay_segments > 0).then(|| {
+            build_curve_overlay(&CurveOverlayContext {
                 model,
                 layout,
-                &lm_out.theta,
-                &ds_params,
+                theta: &lm_out.theta,
+                ds_params: &ds_params,
                 ds,
-                cfg.cov_unscaled,
-                cfg.sigma_w,
-                cfg.t_crit,
-                cfg.solver.compute_prediction_bands,
-                converged_or_ambig,
-                cfg.ambiguous,
-            ))
-        } else {
-            None
-        };
+                ds_local_idx,
+                cov_unscaled: cfg.cov_unscaled,
+                sigma: cfg.sigma_w,
+                t_crit: cfg.t_crit,
+                converged: converged_or_ambig,
+                ambiguous: cfg.ambiguous,
+                solver: cfg.solver,
+            })
+        });
 
         if cfg.solver.interpolate_unknowns {
             for &(row, y_target) in &ds.unknowns_y {
@@ -1342,6 +2068,7 @@ fn assemble_dataset_results(
                     &lm_out.theta,
                     &ds_params,
                     ds,
+                    ds_local_idx,
                     row,
                     y_target,
                     cfg.cov_unscaled,
@@ -1356,6 +2083,7 @@ fn assemble_dataset_results(
                     &lm_out.theta,
                     &ds_params,
                     ds,
+                    ds_local_idx,
                     row,
                     x_val,
                     cfg.cov_unscaled,
@@ -1373,6 +2101,7 @@ fn assemble_dataset_results(
             y_hat: ds_y_hat,
             residuals: ds_res,
             weighted_residuals: ds_w_res,
+            studentized_residuals: ds_stud_res,
             ss_residual: ds_ss,
             r_squared: ds_r2,
             sy_x: ds_sy_x,
@@ -1383,8 +2112,8 @@ fn assemble_dataset_results(
     AssembledDatasets { ds_results, derived_scalars, interpolated_x, interpolated_y }
 }
 
-/// Compare primary fitted model against an alternative nested/non-nested model via Extra-SS *F*
-/// or $\text{AIC}_c$ (`ModelComparisonSpec`).
+/// Compare primary fitted model against an alternative nested/non-nested model via Extra-SS *F*,
+/// $\text{AIC}_c$, or Likelihood Ratio Test (`ModelComparisonSpec`).
 pub fn compare_models(
     primary: &NonlinearFitResult,
     alt_model: &dyn ParametricModel,
@@ -1411,6 +2140,19 @@ pub fn compare_models(
         }
         ModelComparisonSpec::Aicc { .. } => {
             ModelComparisonOutcome::Aicc(compare_models_aicc(primary.weighted_ss, primary.k_free, alt.weighted_ss, alt.k_free, primary.n_obs)?)
+        }
+        ModelComparisonSpec::LikelihoodRatioTest { .. } => {
+            let (ss_null, df_null, ss_alt, df_alt) = if primary.df >= alt.df {
+                (primary.weighted_ss, primary.df, alt.weighted_ss, alt.df)
+            } else {
+                (alt.weighted_ss, alt.df, primary.weighted_ss, primary.df)
+            };
+            let res = if config.method == FitMethod::PoissonDeviance {
+                compare_models_lrt_deviance(ss_null, df_null, ss_alt, df_alt, config.confidence.alpha())?
+            } else {
+                compare_models_lrt(ss_null, df_null, ss_alt, df_alt, primary.n_obs, config.confidence.alpha())?
+            };
+            ModelComparisonOutcome::LikelihoodRatioTest(res)
         }
     };
     Ok((alt, outcome))
@@ -1544,16 +2286,11 @@ fn solve_profile_subproblem(
 
     let mut diag = vec![1.0_f64; sub_k];
     let mut delta = 1.0_f64;
-    let (_, mut y_hat, mut ss_curr) = {
-        for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
-            work[orig] = v;
-        }
-        eval_residuals(model, layout, obs, &work)?
-    };
-    let mut w_res = {
-        let (r, _, _) = eval_residuals(model, layout, obs, &work)?;
-        r
-    };
+    let mut lm_ws = LmDampWorkspace::new(obs.len(), sub_k).ok()?;
+    for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
+        work[orig] = v;
+    }
+    let (mut w_res, mut y_hat, mut ss_curr) = eval_residuals(model, layout, obs, &work)?;
 
     for iter in 0..40 {
         for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
@@ -1578,7 +2315,7 @@ fn solve_profile_subproblem(
         let mut accepted = false;
         let mut lam = 0.0_f64;
         for _ in 0..15 {
-            let Ok((step, lam_u)) = solve_trust_region_subproblem(&j_sub, &w_res, &diag, delta, lam) else {
+            let Ok((step, lam_u)) = solve_trust_region_subproblem(&j_sub, &w_res, &diag, delta, lam, &mut lm_ws) else {
                 break;
             };
             lam = lam_u;
@@ -1621,54 +2358,94 @@ fn solve_profile_subproblem(
     Some((ss_curr, work))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn build_curve_overlay(
-    model: &dyn ParametricModel,
-    layout: &ParameterLayout,
-    theta: &[f64],
-    ds_params: &[f64],
-    ds: &DatasetSeries,
-    cov_unscaled: Option<&DenseMatrix>,
+struct CurveOverlayContext<'a> {
+    model: &'a dyn ParametricModel,
+    layout: &'a ParameterLayout,
+    theta: &'a [f64],
+    ds_params: &'a [f64],
+    ds: &'a DatasetSeries,
+    ds_local_idx: usize,
+    cov_unscaled: Option<&'a DenseMatrix>,
     sigma: f64,
     t_crit: f64,
-    prediction_bands: bool,
     converged: bool,
     ambiguous: bool,
-) -> FittedCurveOverlay {
-    let mut x_min = f64::INFINITY;
-    let mut x_max = f64::NEG_INFINITY;
-    for pt in &ds.points {
+    solver: &'a SolverConfig,
+}
+
+fn build_curve_overlay(ctx: &CurveOverlayContext<'_>) -> FittedCurveOverlay {
+    let mut data_x_min = f64::INFINITY;
+    let mut data_x_max = f64::NEG_INFINITY;
+    for pt in &ctx.ds.points {
         let x0 = pt.x0();
         if x0.is_finite() {
-            x_min = x_min.min(x0);
-            x_max = x_max.max(x0);
+            data_x_min = data_x_min.min(x0);
+            data_x_max = data_x_max.max(x0);
         }
     }
-    if !x_min.is_finite() || !x_max.is_finite() || (x_max - x_min).abs() < 1e-15 {
-        x_min = -1.0;
-        x_max = 1.0;
-    }
+    let x_lo_opt = ctx.solver.plot_x_min.filter(|v| v.is_finite()).or(if data_x_min.is_finite() { Some(data_x_min) } else { None });
+    let x_hi_opt = ctx.solver.plot_x_max.filter(|v| v.is_finite()).or(if data_x_max.is_finite() { Some(data_x_max) } else { None });
+    let (x_min, x_max) = match (x_lo_opt, x_hi_opt) {
+        (Some(lo), Some(hi)) if (hi - lo).abs() >= 1e-15 => (lo.min(hi), lo.max(hi)),
+        (Some(lo), Some(_)) => (lo - 1.0, lo + 1.0),
+        (Some(lo), None) => (lo, lo + 2.0),
+        (None, Some(hi)) => (hi - 2.0, hi),
+        (None, None) => (-1.0, 1.0),
+    };
 
-    let n_grid = 101_usize;
+    let use_log = x_min > 0.0 && x_max > x_min && (x_max / x_min) >= 100.0;
+    let log_min = if use_log { x_min.ln() } else { 0.0 };
+    let log_span = if use_log { x_max.ln() - log_min } else { 0.0 };
+
+    let n_grid = ctx.solver.curve_overlay_segments.max(2);
     let mut points = Vec::with_capacity(n_grid);
+    let k = ctx.layout.k_free();
+    let p_m = ctx.layout.p_model;
+    let mut grad_buf = vec![0.0_f64; p_m];
+    let mut g = vec![0.0_f64; k];
+    let mut work_theta = ctx.theta.to_vec();
+    let mut work_params = vec![0.0_f64; p_m];
+
+    let active_cov = if ctx.solver.plot_function_only || !ctx.solver.compute_bands || !ctx.t_crit.is_finite() { None } else { ctx.cov_unscaled };
+
     for i in 0..n_grid {
         let frac = (i as f64) / ((n_grid - 1) as f64);
-        let x = x_min + frac * (x_max - x_min);
-        let Some(y) = model.eval(&[x], ds_params, ds.data_set_index) else {
+        let x = if use_log { (log_min + frac * log_span).exp().clamp(x_min, x_max) } else { x_min + frac * (x_max - x_min) };
+        let Some(y) = ctx.model.eval(&[x], ctx.ds_params, ctx.ds.data_set_index) else {
             continue;
         };
         if !y.is_finite() {
             continue;
         }
-        let (band_lo, band_hi, pred_lo, pred_hi) = if let Some(cov_u) = cov_unscaled {
-            let g = delta_grad_at_x(model, layout, theta, ds, x);
+        let (band_lo, band_hi, pred_lo, pred_hi) = if let Some(cov_u) = active_cov {
+            grad_buf.fill(0.0);
+            g.fill(0.0);
+            if ctx.model.grad(&[x], ctx.ds_params, ctx.ds.data_set_index, &mut grad_buf) {
+                for (p_idx, &gv) in grad_buf.iter().enumerate().take(p_m) {
+                    if let ParamBinding::Free(slot) = ctx.layout.bindings[ctx.ds_local_idx][p_idx] {
+                        g[slot] += gv;
+                    }
+                }
+            } else {
+                delta_grad_at_x_into(
+                    ctx.model,
+                    ctx.layout,
+                    ctx.theta,
+                    ctx.ds_local_idx,
+                    ctx.ds.data_set_index,
+                    x,
+                    &mut work_theta,
+                    &mut work_params,
+                    &mut g,
+                );
+            }
             let quad = quadratic_form(cov_u, &g).max(0.0);
-            let se_f = sigma * quad.sqrt();
-            let b_lo = Some(y - t_crit * se_f);
-            let b_hi = Some(y + t_crit * se_f);
-            let (p_lo, p_hi) = if prediction_bands {
-                let se_p = sigma * (1.0 + quad).sqrt();
-                (Some(y - t_crit * se_p), Some(y + t_crit * se_p))
+            let se_f = ctx.sigma * quad.sqrt();
+            let b_lo = Some(y - ctx.t_crit * se_f);
+            let b_hi = Some(y + ctx.t_crit * se_f);
+            let (p_lo, p_hi) = if ctx.solver.compute_prediction_bands {
+                let se_p = ctx.sigma * (1.0 + quad).sqrt();
+                (Some(y - ctx.t_crit * se_p), Some(y + ctx.t_crit * se_p))
             } else {
                 (None, None)
             };
@@ -1679,31 +2456,75 @@ fn build_curve_overlay(
         points.push(CurveSamplePoint { x, y, ci_lower: band_lo, ci_upper: band_hi, pred_lower: pred_lo, pred_upper: pred_hi });
     }
 
-    FittedCurveOverlay { data_set_index: ds.data_set_index, equation_id: model.id().to_owned(), converged, ambiguous, points }
+    FittedCurveOverlay {
+        data_set_index: ctx.ds.data_set_index,
+        equation_id: ctx.model.id().to_owned(),
+        converged: ctx.converged,
+        ambiguous: ctx.ambiguous,
+        points,
+    }
 }
 
-fn delta_grad_at_x(model: &dyn ParametricModel, layout: &ParameterLayout, theta: &[f64], ds: &DatasetSeries, x: f64) -> Vec<f64> {
+#[allow(clippy::too_many_arguments)]
+fn delta_grad_at_x_into(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    theta: &[f64],
+    ds_local_idx: usize,
+    ds_data_idx: usize,
+    x: f64,
+    work: &mut [f64],
+    work_params: &mut [f64],
+    g_out: &mut [f64],
+) {
     let k = layout.k_free();
-    let mut g = vec![0.0_f64; k];
-    let mut work = theta.to_vec();
+    g_out.fill(0.0);
+    work.copy_from_slice(theta);
     for slot in 0..k {
         let info = &layout.free_slots[slot];
-        if let Some(d_idx) = info.dataset_idx
-            && d_idx != ds.data_set_index
-            && layout.n_datasets > 1
+        if let Some(local_d) = info.ds_local_idx
+            && local_d != ds_local_idx
         {
             continue;
         }
         let h = 1e-6 * theta[slot].abs().max(1.0);
         work[slot] = theta[slot] + h;
-        let fp = model.eval(&[x], &layout.expand_params(&work, 0), ds.data_set_index);
+        layout.expand_params_into(work, ds_local_idx, work_params);
+        let fp = model.eval(&[x], work_params, ds_data_idx);
         work[slot] = theta[slot] - h;
-        let fm = model.eval(&[x], &layout.expand_params(&work, 0), ds.data_set_index);
+        layout.expand_params_into(work, ds_local_idx, work_params);
+        let fm = model.eval(&[x], work_params, ds_data_idx);
         work[slot] = theta[slot];
         if let (Some(p), Some(m)) = (fp, fm) {
-            g[slot] = (p - m) / (2.0 * h);
+            g_out[slot] = (p - m) / (2.0 * h);
         }
     }
+}
+
+fn delta_grad_at_x(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    theta: &[f64],
+    ds_params: &[f64],
+    ds_local_idx: usize,
+    ds: &DatasetSeries,
+    x: f64,
+) -> Vec<f64> {
+    let k = layout.k_free();
+    let p_m = layout.p_model;
+    let mut g = vec![0.0_f64; k];
+    let mut grad_buf = vec![0.0_f64; p_m];
+    if model.grad(&[x], ds_params, ds.data_set_index, &mut grad_buf) {
+        for (p_idx, &gv) in grad_buf.iter().enumerate().take(p_m) {
+            if let ParamBinding::Free(slot) = layout.bindings[ds_local_idx][p_idx] {
+                g[slot] += gv;
+            }
+        }
+        return g;
+    }
+    let mut work = theta.to_vec();
+    let mut work_params = vec![0.0_f64; p_m];
+    delta_grad_at_x_into(model, layout, theta, ds_local_idx, ds.data_set_index, x, &mut work, &mut work_params, &mut g);
     g
 }
 
@@ -1727,6 +2548,7 @@ fn interpolate_x_from_y(
     theta: &[f64],
     ds_params: &[f64],
     ds: &DatasetSeries,
+    ds_local_idx: usize,
     row: usize,
     y_target: f64,
     cov_unscaled: Option<&DenseMatrix>,
@@ -1760,12 +2582,14 @@ fn interpolate_x_from_y(
         };
     };
 
-    let (ci_lower, ci_upper) = if let Some(cov_u) = cov_unscaled {
+    let (ci_lower, ci_upper) = if let Some(cov_u) = cov_unscaled
+        && t_crit.is_finite()
+    {
         let band_lo_fn = |x: f64| -> f64 {
             let Some(y) = model.eval(&[x], ds_params, ds.data_set_index) else {
                 return f64::NAN;
             };
-            let g = delta_grad_at_x(model, layout, theta, ds, x);
+            let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x);
             let se = sigma * quadratic_form(cov_u, &g).max(0.0).sqrt();
             (y - t_crit * se) - y_target
         };
@@ -1773,7 +2597,7 @@ fn interpolate_x_from_y(
             let Some(y) = model.eval(&[x], ds_params, ds.data_set_index) else {
                 return f64::NAN;
             };
-            let g = delta_grad_at_x(model, layout, theta, ds, x);
+            let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x);
             let se = sigma * quadratic_form(cov_u, &g).max(0.0).sqrt();
             (y + t_crit * se) - y_target
         };
@@ -1811,6 +2635,7 @@ fn interpolate_y_from_x(
     theta: &[f64],
     ds_params: &[f64],
     ds: &DatasetSeries,
+    ds_local_idx: usize,
     row: usize,
     x_val: f64,
     cov_unscaled: Option<&DenseMatrix>,
@@ -1828,8 +2653,10 @@ fn interpolate_y_from_x(
             note: Some("X outside fitted model domain".to_owned()),
         };
     };
-    let (ci_lower, ci_upper) = if let Some(cov_u) = cov_unscaled {
-        let g = delta_grad_at_x(model, layout, theta, ds, x_val);
+    let (ci_lower, ci_upper) = if let Some(cov_u) = cov_unscaled
+        && t_crit.is_finite()
+    {
+        let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x_val);
         let se = sigma * quadratic_form(cov_u, &g).max(0.0).sqrt();
         (CiBound::Finite(y_hat - t_crit * se), CiBound::Finite(y_hat + t_crit * se))
     } else {

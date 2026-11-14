@@ -1022,6 +1022,7 @@ fn box_constraints_and_hooked_constants_end_to_end_oracle() {
         replicates_lack_of_fit_test: false,
         normality_of_residuals: false,
         max_iters: 1000,
+        ..NonlinearFitSpec::new("log_agonist_vs_response_4pl")
     };
     let baseline_analysis_spec =
         AnalysisSpec::new(SheetId::new("ana-base"), baseline_sheet.id.clone(), AnalysisKind::NonlinearRegression(base_nl.clone()))
@@ -1095,6 +1096,7 @@ fn box_constraints_and_hooked_constants_end_to_end_oracle() {
         replicates_lack_of_fit_test: false,
         normality_of_residuals: false,
         max_iters: 1000,
+        ..NonlinearFitSpec::new("one_site_fit_ki")
     };
     let ki_spec = AnalysisSpec::new(SheetId::new("ana-ki"), comp_sheet.id.clone(), AnalysisKind::NonlinearRegression(ki_nl.clone()))
         .expect("AnalysisSpec::new");
@@ -1129,6 +1131,7 @@ fn box_constraints_and_hooked_constants_end_to_end_oracle() {
         replicates_lack_of_fit_test: false,
         normality_of_residuals: false,
         max_iters: 1000,
+        ..NonlinearFitSpec::new("competitive_inhibition")
     };
     let enz_spec = AnalysisSpec::new(SheetId::new("ana-enz"), enz_sheet.id.clone(), AnalysisKind::NonlinearRegression(enz_nl.clone()))
         .expect("AnalysisSpec::new");
@@ -1425,6 +1428,7 @@ fn deming_model_ii_and_weighting_and_poisson_and_robust_oracles() {
         replicates_lack_of_fit_test: false,
         normality_of_residuals: false,
         max_iters: 1000,
+        ..NonlinearFitSpec::new("one_site_specific_binding")
     };
     let msd_spec = AnalysisSpec::new(SheetId::new("ana-msd"), sheet_msd.id.clone(), AnalysisKind::NonlinearRegression(msd_nl.clone()))
         .expect("AnalysisSpec::new");

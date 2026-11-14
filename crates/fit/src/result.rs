@@ -7,13 +7,14 @@ use lumencraft_doc::{
     ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
 };
 use lumencraft_math::PValueFormat;
+use lumencraft_math::dist::norm_ppf;
 
 use crate::dsl::CompiledDslModel;
 use crate::error::{FitError, FitStatus, ParameterNote};
 use crate::library::{ParametricModel, get_builtin_model};
 use crate::linear::{DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, simple_linear_regression};
 use crate::solver::{ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models, fit_nonlinear};
-use crate::types::{HookContext, extract_datasets_from_sheet};
+use crate::types::{DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options};
 
 fn p_cell(fmt: PValueFormat, p: f64) -> ResultCell {
     ResultCell::PValue { raw: p, formatted: fmt.format_p(p), stars: fmt.stars(p).to_owned() }
@@ -285,7 +286,21 @@ pub fn execute_nonlinear_analysis(
     hooks: &HookContext,
 ) -> Result<ResultSheet, FitError> {
     let mut result = ResultSheet::new(spec.clone())?;
-    let datasets = extract_datasets_from_sheet(sheet, &spec.selected_data_sets)?;
+    let mv_spec =
+        MultivarExtractionSpec { group_columns: &nl_spec.mv_group_columns, x_columns: &nl_spec.mv_x_columns, y_column: nl_spec.mv_y_column };
+    let datasets = match extract_datasets_from_sheet_with_options(sheet, &spec.selected_data_sets, &mv_spec) {
+        Ok(ds) => ds,
+        Err(FitError::EmptyInput) if nl_spec.plot_function_only => vec![DatasetSeries {
+            data_set_index: 0,
+            label: nl_spec.equation_id.clone(),
+            points: Vec::new(),
+            unknowns_y: Vec::new(),
+            unknowns_x: Vec::new(),
+            is_pre_summarized: false,
+            column_title_value: None,
+        }],
+        Err(err) => return Err(err),
+    };
     let model = resolve_model_from_spec(nl_spec)?;
 
     let config = SolverConfig {
@@ -296,22 +311,30 @@ pub fn execute_nonlinear_analysis(
         max_iters: nl_spec.clamped_max_iters(),
         compute_profile_ci: nl_spec.profile_likelihood_ci,
         compute_hougaard: true,
-        compute_bands: nl_spec.confidence_bands || nl_spec.prediction_bands,
+        compute_bands: nl_spec.confidence_bands || nl_spec.prediction_bands || nl_spec.plot_function_only,
         compute_prediction_bands: nl_spec.prediction_bands,
-        compute_runs_test: true,
+        compute_runs_test: !nl_spec.plot_function_only,
         compute_lack_of_fit: nl_spec.replicates_lack_of_fit_test,
         compute_normality: nl_spec.normality_of_residuals,
+        compute_homoscedasticity: nl_spec.homoscedasticity_test,
         interpolate_unknowns: nl_spec.interpolate_unknowns,
         use_simplex_warm_start: true,
+        x_range_filter: nl_spec.x_range_filter,
+        y_range_filter: nl_spec.y_range_filter,
+        plot_function_only: nl_spec.plot_function_only,
+        plot_x_min: nl_spec.plot_x_min,
+        plot_x_max: nl_spec.plot_x_max,
+        curve_overlay_segments: 256,
     };
 
     let fit = fit_nonlinear(model.as_ref(), &datasets, hooks, &config)?;
-    populate_nonlinear_result_sheet(&mut result, &fit, spec.p_value_format);
+    populate_nonlinear_result_sheet(&mut result, &fit, nl_spec, spec.p_value_format);
 
     if let Some(comp_spec) = &nl_spec.comparison {
         let alt_id = match comp_spec {
             lumencraft_doc::ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id }
-            | lumencraft_doc::ModelComparisonSpec::Aicc { alternative_equation_id } => alternative_equation_id,
+            | lumencraft_doc::ModelComparisonSpec::Aicc { alternative_equation_id }
+            | lumencraft_doc::ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id } => alternative_equation_id,
         };
         let alt_model = get_builtin_model(alt_id).ok_or_else(|| FitError::UnknownEquation { id: alt_id.clone() })?;
         let (alt_fit, outcome) = compare_models(&fit, alt_model.as_ref(), &datasets, hooks, &config, comp_spec)?;
@@ -322,17 +345,20 @@ pub fn execute_nonlinear_analysis(
     Ok(result)
 }
 
-fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, p_fmt: PValueFormat) {
+fn parameter_display_label(fit: &NonlinearFitResult, name: &str, dataset_index: Option<usize>) -> String {
+    match dataset_index {
+        Some(d) if fit.datasets.len() > 1 => format!("{name} [DS{}]", d + 1),
+        _ => name.to_owned(),
+    }
+}
+
+fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
     // Parameter & CI table.
     let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
     let mut param_labels = Vec::with_capacity(param_rows.capacity());
 
     for p in &fit.parameters {
-        let lbl = match p.dataset_index {
-            Some(d) if fit.datasets.len() > 1 => format!("{} [DS{}]", p.name, d + 1),
-            _ => p.name.clone(),
-        };
-        param_labels.push(lbl);
+        param_labels.push(parameter_display_label(fit, &p.name, p.dataset_index));
         let prefix = if p.notes.contains(&ParameterNote::Ambiguous) { Some("~".to_owned()) } else { None };
         param_rows.push(vec![
             ResultCell::Number { value: p.estimate, prefix, units: None },
@@ -392,6 +418,16 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
         gof_labels.push("Runs test P value".to_owned());
         gof_vals.push(vec![p_cell(p_fmt, r.p_too_few_runs)]);
     }
+    for norm in [&fit.normality, &fit.normality_anderson_darling, &fit.normality_lilliefors_ks].into_iter().flatten() {
+        gof_labels.push(format!("Normality ({}) P value", norm.test_name));
+        gof_vals.push(vec![p_cell(p_fmt, norm.p_value)]);
+    }
+    if let Some(homo) = &fit.homoscedasticity {
+        gof_labels.push("Homoscedasticity (Spearman rho)".to_owned());
+        gof_vals.push(vec![num_cell(homo.spearman_rho)]);
+        gof_labels.push("Homoscedasticity P value".to_owned());
+        gof_vals.push(vec![p_cell(p_fmt, homo.p_value)]);
+    }
     if fit.n_outliers_excluded > 0 {
         gof_labels.push("ROUT outliers excluded".to_owned());
         gof_vals.push(vec![num_cell(fit.n_outliers_excluded as f64)]);
@@ -406,6 +442,12 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
         footnotes: Vec::new(),
     });
 
+    if nl_spec.emit_residuals_tab {
+        append_nonlinear_residuals_tab(result, fit);
+    }
+    if nl_spec.emit_covariance_tab {
+        append_nonlinear_covariance_tab(result, fit);
+    }
     append_nonlinear_interpolated_tab(result, fit);
 
     // Curve overlays + derived scalars.
@@ -475,7 +517,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
         });
     }
 
-    if let Some(norm) = &fit.normality {
+    for norm in [&fit.normality, &fit.normality_anderson_darling, &fit.normality_lilliefors_ks].into_iter().flatten() {
         result.checklist.push(ChecklistItem {
             assumption: format!("Normality of residuals ({})", norm.test_name),
             status: if norm.passed { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
@@ -484,6 +526,19 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
                 "Residuals pass Gaussian normality check.".to_owned()
             } else {
                 "Residuals depart significantly from Gaussian normality.".to_owned()
+            },
+        });
+    }
+
+    if let Some(homo) = &fit.homoscedasticity {
+        result.checklist.push(ChecklistItem {
+            assumption: "Homoscedasticity (Spearman rank |residual| vs Y_hat)".to_owned(),
+            status: if homo.homoscedastic { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+            diagnostic_metric: Some(format!("rho = {:.4}, p = {:.4}", homo.spearman_rho, homo.p_value)),
+            explanation: if homo.homoscedastic {
+                "Residual magnitude shows no significant trend with fitted response.".to_owned()
+            } else {
+                "Residual magnitude varies systematically with fitted response (heteroscedasticity); consider weighted regression.".to_owned()
             },
         });
     }
@@ -563,7 +618,105 @@ fn append_comparison_tab(
                 footnotes: Vec::new(),
             });
         }
+        ModelComparisonOutcome::LikelihoodRatioTest(lrt) => {
+            result.tabs.push(ResultTab {
+                id: "model_comparison_lrt".to_owned(),
+                title: "Comparison of Models (Likelihood Ratio Test)".to_owned(),
+                kind: ResultTabKind::ModelComparison,
+                column_headers: vec!["Value".to_owned()],
+                row_labels: vec![
+                    "Null hypothesis model".to_owned(),
+                    "Alternative model".to_owned(),
+                    "LR statistic D = 2*(ln L_alt - ln L_null)".to_owned(),
+                    "DF (diff)".to_owned(),
+                    "P value".to_owned(),
+                    "Preferred model".to_owned(),
+                ],
+                rows: vec![
+                    vec![ResultCell::Text(primary.equation_name.clone())],
+                    vec![ResultCell::Text(alt.equation_name.clone())],
+                    vec![num_cell(lrt.lr_statistic)],
+                    vec![num_cell(lrt.df_diff as f64)],
+                    vec![p_cell(p_fmt, lrt.p_value)],
+                    vec![ResultCell::Text(if lrt.preferred_complex_model { "More complex model".to_owned() } else { "Simpler model".to_owned() })],
+                ],
+                footnotes: Vec::new(),
+            });
+        }
     }
+}
+
+fn append_nonlinear_residuals_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
+    let total_pts: usize = fit.datasets.iter().map(|d| d.y_hat.len()).sum();
+    if total_pts == 0 {
+        return;
+    }
+
+    let mut raw_list = Vec::with_capacity(total_pts);
+    for ds in &fit.datasets {
+        for &r in &ds.residuals {
+            raw_list.push(r);
+        }
+    }
+    let mut order: Vec<usize> = (0..total_pts).collect();
+    order.sort_by(|&a, &b| raw_list[a].total_cmp(&raw_list[b]));
+    let mut qq_quantiles = vec![0.0_f64; total_pts];
+    let denom = (total_pts as f64) + 0.25;
+    for (rank, &orig_idx) in order.iter().enumerate() {
+        let prob = ((rank as f64) + 0.625) / denom;
+        qq_quantiles[orig_idx] = norm_ppf(prob).unwrap_or(0.0);
+    }
+
+    let multi_ds = fit.datasets.len() > 1;
+    let mut row_labels = Vec::with_capacity(total_pts);
+    let mut rows = Vec::with_capacity(total_pts);
+    let mut flat_idx = 0_usize;
+    for ds in &fit.datasets {
+        for i in 0..ds.y_hat.len() {
+            let lbl = if multi_ds { format!("{} #{}", ds.label, i + 1) } else { format!("Pt {}", i + 1) };
+            row_labels.push(lbl);
+            let yh = ds.y_hat[i];
+            let res = ds.residuals.get(i).copied().unwrap_or(f64::NAN);
+            let w_res = ds.weighted_residuals.get(i).copied().unwrap_or(f64::NAN);
+            let stud_res = ds.studentized_residuals.get(i).copied().unwrap_or(f64::NAN);
+            let qq = qq_quantiles[flat_idx];
+            rows.push(vec![num_cell(yh), num_cell(res), num_cell(w_res), num_cell(stud_res), num_cell(qq)]);
+            flat_idx += 1;
+        }
+    }
+
+    result.tabs.push(ResultTab {
+        id: "nonlinear_residuals".to_owned(),
+        title: "Residuals".to_owned(),
+        kind: ResultTabKind::Residuals,
+        column_headers: vec![
+            "Predicted Y".to_owned(),
+            "Residual".to_owned(),
+            "Weighted Residual".to_owned(),
+            "Studentized Residual".to_owned(),
+            "Q-Q Normal Quantile".to_owned(),
+        ],
+        row_labels,
+        rows,
+        footnotes: Vec::new(),
+    });
+}
+
+fn append_nonlinear_covariance_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
+    if fit.covariance.covariance_matrix.is_empty() {
+        return;
+    }
+    let labels: Vec<String> = fit.parameters.iter().map(|p| parameter_display_label(fit, &p.name, p.dataset_index)).collect();
+    let rows: Vec<Vec<ResultCell>> = fit.covariance.covariance_matrix.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+    result.tabs.push(ResultTab {
+        id: "nonlinear_covariance".to_owned(),
+        title: "Covariance Matrix".to_owned(),
+        kind: ResultTabKind::CovarianceMatrix,
+        column_headers: labels.clone(),
+        row_labels: labels,
+        rows,
+        footnotes: vec![format!("Numerical rank: {}/{}", fit.covariance.numerical_rank, fit.parameters.len())],
+    });
 }
 
 fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
@@ -707,7 +860,8 @@ mod tests {
         let spec = make_4pl_spec("fit-4pl-no-interp", false);
 
         let res = execute_analysis(&spec, &sheet, &HookContext::default()).unwrap();
-        assert_eq!(res.tabs.len(), 2);
+        assert_eq!(res.tabs.len(), 3);
+        assert!(res.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals));
         assert!(res.tabs.iter().all(|t| t.kind != ResultTabKind::InterpolatedUnknowns));
     }
 

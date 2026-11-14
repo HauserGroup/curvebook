@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 
 use lumencraft_doc::CiBound;
 use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, f_sf, norm_ppf, norm_sf, student_t_two_sided_isf, student_t_two_sided_p};
+use lumencraft_math::dist::{chi2_sf, f_sf, norm_cdf, norm_ppf, norm_sf, student_t_two_sided_isf, student_t_two_sided_p};
 use lumencraft_math::linalg::{DenseMatrix, parameter_dependencies, qr_col_pivoted, svd};
 use lumencraft_math::roots::{RootOptions, brent_root};
 use lumencraft_math::special::ln_choose;
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments};
+use lumencraft_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 
 use crate::error::FitError;
 use crate::types::DataPoint;
@@ -90,6 +90,27 @@ pub struct NormalityTestResult {
     pub statistic: f64,
     pub p_value: f64,
     pub passed: bool,
+}
+
+/// Model comparison outcome via Likelihood Ratio Test (`D = 2(ln L_alt - ln L_null)` chi-square test).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct LikelihoodRatioResult {
+    pub lr_statistic: f64,
+    pub df_diff: usize,
+    pub df_null: usize,
+    pub df_alt: usize,
+    pub p_value: f64,
+    pub preferred_complex_model: bool,
+}
+
+/// Residual homoscedasticity check via Spearman rank correlation between `|residual|` and predicted `Y`.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HomoscedasticityResult {
+    pub spearman_rho: f64,
+    pub statistic_t: f64,
+    pub df: usize,
+    pub p_value: f64,
+    pub homoscedastic: bool,
 }
 
 /// Per-point ROUT outlier audit entry.
@@ -217,40 +238,44 @@ pub fn compute_hougaard_skewness<F>(
 where
     F: FnMut(&[f64]) -> Option<Vec<f64>>,
 {
+    compute_hougaard_skewness_into(theta, sqrt_weights, j_mat, cov_unscaled, sigma, |th, out| {
+        if let Some(vals) = eval_fn(th)
+            && vals.len() == out.len()
+        {
+            out.copy_from_slice(&vals);
+            true
+        } else {
+            false
+        }
+    })
+}
+
+/// Zero-allocation Hougaard skewness helper writing predictions directly into caller buffers.
+pub(crate) fn compute_hougaard_skewness_into<F>(
+    theta: &[f64],
+    sqrt_weights: &[f64],
+    j_mat: &DenseMatrix,
+    cov_unscaled: &DenseMatrix,
+    sigma: f64,
+    mut eval_into: F,
+) -> Vec<f64>
+where
+    F: FnMut(&[f64], &mut [f64]) -> bool,
+{
     let p = theta.len();
     let n = j_mat.nrows();
     if p == 0 || n == 0 || !sigma.is_finite() || sigma <= 0.0 {
         return vec![0.0; p];
     }
-    let Some(f0) = eval_fn(theta) else {
-        return vec![0.0; p];
-    };
-    if f0.len() != n {
+    let mut f0 = vec![0.0_f64; n];
+    if !eval_into(theta, &mut f0) {
         return vec![0.0; p];
     }
 
     let steps: Vec<f64> = theta.iter().map(|&t| 1e-4 * t.abs().max(1.0)).collect();
-    let mut hess_rows = vec![vec![vec![0.0_f64; n]; p]; p];
-    if !fill_second_derivatives(theta, &f0, &steps, &mut eval_fn, &mut hess_rows) {
+    let Some(w_flat) = build_hougaard_w_tensor(theta, &f0, &steps, sqrt_weights, j_mat, &mut eval_into) else {
         return vec![0.0; p];
-    }
-
-    // W_{j,k,l} = sum_m sqrt_w_m * J_{m,j} * (d^2 f_m / dtheta_k dtheta_l)
-    // Note j_mat already contains sqrt_w_m * df_m/dtheta_j.
-    let mut w_tensor = vec![vec![vec![0.0_f64; p]; p]; p];
-    for (j, wj) in w_tensor.iter_mut().enumerate().take(p) {
-        for k in 0..p {
-            for l in k..p {
-                let mut acc = NeumaierSum::new();
-                for (m, (&wm, &h_val)) in sqrt_weights.iter().zip(hess_rows[k][l].iter()).enumerate().take(n) {
-                    acc.add(j_mat.get(m, j).unwrap_or(0.0) * wm * h_val);
-                }
-                let val = acc.total();
-                wj[k][l] = val;
-                wj[l][k] = val;
-            }
-        }
-    }
+    };
 
     let mut out = Vec::with_capacity(p);
     for i in 0..p {
@@ -260,14 +285,16 @@ where
             continue;
         }
         let mut s_acc = NeumaierSum::new();
-        for (j, wj) in w_tensor.iter().enumerate().take(p) {
+        for j in 0..p {
             let l_ij = cov_unscaled.get(i, j).unwrap_or(0.0);
-            for (k, wk) in w_tensor.iter().enumerate().take(p) {
+            for k in 0..p {
                 let l_ik = cov_unscaled.get(i, k).unwrap_or(0.0);
-                for (l, wl) in w_tensor.iter().enumerate().take(p) {
+                for l in 0..p {
                     let l_il = cov_unscaled.get(i, l).unwrap_or(0.0);
-                    let sym_w = wj[k][l] + wk[j][l] + wl[j][k];
-                    s_acc.add(l_ij * l_ik * l_il * sym_w);
+                    let w_jkl = w_flat[(j * p + k) * p + l];
+                    let w_kjl = w_flat[(k * p + j) * p + l];
+                    let w_ljk = w_flat[(l * p + j) * p + k];
+                    s_acc.add(l_ij * l_ik * l_il * (w_jkl + w_kjl + w_ljk));
                 }
             }
         }
@@ -277,59 +304,118 @@ where
     out
 }
 
-fn fill_second_derivatives<F>(theta: &[f64], f0: &[f64], steps: &[f64], eval_fn: &mut F, hess: &mut [Vec<Vec<f64>>]) -> bool
+struct HougaardAccum<'a> {
+    p: usize,
+    n: usize,
+    sqrt_weights: &'a [f64],
+    j_mat: &'a DenseMatrix,
+    w_flat: &'a mut [f64],
+    accs: Vec<NeumaierSum>,
+}
+
+impl<'a> HougaardAccum<'a> {
+    fn new(p: usize, n: usize, sqrt_weights: &'a [f64], j_mat: &'a DenseMatrix, w_flat: &'a mut [f64]) -> Self {
+        Self { p, n, sqrt_weights, j_mat, w_flat, accs: vec![NeumaierSum::new(); p] }
+    }
+
+    fn record_diag(&mut self, j: usize, inv_h2: f64, f0: &[f64], fp: &[f64], fm: &[f64]) {
+        for acc in &mut self.accs {
+            *acc = NeumaierSum::new();
+        }
+        for m in 0..self.n {
+            let d2 = (fp[m] - 2.0 * f0[m] + fm[m]) * inv_h2;
+            let wd = self.sqrt_weights[m] * d2;
+            for (g, acc) in self.accs.iter_mut().enumerate() {
+                acc.add(self.j_mat.get(m, g).unwrap_or(0.0) * wd);
+            }
+        }
+        for (g, acc) in self.accs.iter().enumerate() {
+            self.w_flat[(g * self.p + j) * self.p + j] = acc.total();
+        }
+    }
+
+    fn record_mixed(&mut self, pair: (usize, usize), inv_4hk: f64, samples: [&[f64]; 4]) {
+        let (j, k) = pair;
+        let [fpp, fpm, fmp, fmm] = samples;
+        for acc in &mut self.accs {
+            *acc = NeumaierSum::new();
+        }
+        for m in 0..self.n {
+            let d2 = (fpp[m] - fpm[m] - fmp[m] + fmm[m]) * inv_4hk;
+            let wd = self.sqrt_weights[m] * d2;
+            for (g, acc) in self.accs.iter_mut().enumerate() {
+                acc.add(self.j_mat.get(m, g).unwrap_or(0.0) * wd);
+            }
+        }
+        for (g, acc) in self.accs.iter().enumerate() {
+            let val = acc.total();
+            self.w_flat[(g * self.p + j) * self.p + k] = val;
+            self.w_flat[(g * self.p + k) * self.p + j] = val;
+        }
+    }
+}
+
+fn build_hougaard_w_tensor<F>(
+    theta: &[f64],
+    f0: &[f64],
+    steps: &[f64],
+    sqrt_weights: &[f64],
+    j_mat: &DenseMatrix,
+    eval_into: &mut F,
+) -> Option<Vec<f64>>
 where
-    F: FnMut(&[f64]) -> Option<Vec<f64>>,
+    F: FnMut(&[f64], &mut [f64]) -> bool,
 {
     let p = theta.len();
     let n = f0.len();
+    let mut w_flat = vec![0.0_f64; p * p * p];
+    let mut accum = HougaardAccum::new(p, n, sqrt_weights, j_mat, &mut w_flat);
+
     let mut work = theta.to_vec();
+    let mut fp = vec![0.0_f64; n];
+    let mut fm = vec![0.0_f64; n];
+    let mut fmp = vec![0.0_f64; n];
+    let mut fmm = vec![0.0_f64; n];
+
     for j in 0..p {
         let hj = steps[j];
         work[j] = theta[j] + hj;
-        let Some(fp) = eval_fn(&work) else {
-            return false;
-        };
-        work[j] = theta[j] - hj;
-        let Some(fm) = eval_fn(&work) else {
-            return false;
-        };
-        work[j] = theta[j];
-        let inv_h2 = 1.0 / (hj * hj);
-        for m in 0..n {
-            hess[j][j][m] = (fp[m] - 2.0 * f0[m] + fm[m]) * inv_h2;
+        if !eval_into(&work, &mut fp) {
+            return None;
         }
+        work[j] = theta[j] - hj;
+        if !eval_into(&work, &mut fm) {
+            return None;
+        }
+        work[j] = theta[j];
+        accum.record_diag(j, 1.0 / (hj * hj), f0, &fp, &fm);
+
         for k in (j + 1)..p {
             let hk = steps[k];
             work[j] = theta[j] + hj;
             work[k] = theta[k] + hk;
-            let Some(fpp) = eval_fn(&work) else {
-                return false;
-            };
+            if !eval_into(&work, &mut fp) {
+                return None;
+            }
             work[k] = theta[k] - hk;
-            let Some(fpm) = eval_fn(&work) else {
-                return false;
-            };
+            if !eval_into(&work, &mut fm) {
+                return None;
+            }
             work[j] = theta[j] - hj;
             work[k] = theta[k] + hk;
-            let Some(fmp) = eval_fn(&work) else {
-                return false;
-            };
+            if !eval_into(&work, &mut fmp) {
+                return None;
+            }
             work[k] = theta[k] - hk;
-            let Some(fmm) = eval_fn(&work) else {
-                return false;
-            };
+            if !eval_into(&work, &mut fmm) {
+                return None;
+            }
             work[j] = theta[j];
             work[k] = theta[k];
-            let inv_4hk = 1.0 / (4.0 * hj * hk);
-            for m in 0..n {
-                let d2 = (fpp[m] - fpm[m] - fmp[m] + fmm[m]) * inv_4hk;
-                hess[j][k][m] = d2;
-                hess[k][j][m] = d2;
-            }
+            accum.record_mixed((j, k), 1.0 / (4.0 * hj * hk), [&fp, &fm, &fmp, &fmm]);
         }
     }
-    true
+    Some(w_flat)
 }
 
 /// Trace Venzon–Moolgavkar asymmetrical profile-likelihood confidence intervals for every free
@@ -502,6 +588,56 @@ pub fn compare_models_f_test(
     };
     let p_value = if f_stat.is_infinite() { 0.0 } else { f_sf(f_stat, df_num as f64, df_den as f64)? };
     Ok(ExtraSumOfSquaresResult { f_stat, df_num, df_den, p_value, preferred_complex_model: p_value < alpha })
+}
+
+/// Compare two nested regression models using the Gaussian Likelihood Ratio Test
+/// ($D = 2(\ln L_{\text{alt}} - \ln L_{\text{null}}) = N \ln(\text{SS}_{\text{null}} / \text{SS}_{\text{alt}}) \sim \chi^2_{\Delta k}$).
+///
+/// # Errors
+/// Returns [`FitError::InvalidParameter`] if degrees of freedom or sums of squares are invalid.
+pub fn compare_models_lrt(
+    ss_null: f64,
+    df_null: usize,
+    ss_alt: f64,
+    df_alt: usize,
+    n_obs: usize,
+    alpha: f64,
+) -> Result<LikelihoodRatioResult, FitError> {
+    if n_obs == 0 || df_alt == 0 || df_null <= df_alt {
+        return Err(FitError::InvalidParameter { name: "df", reason: format!("requires df_null ({df_null}) > df_alt ({df_alt}) > 0 and n_obs > 0") });
+    }
+    if ss_null < 0.0 || ss_alt < 0.0 || !ss_null.is_finite() || !ss_alt.is_finite() {
+        return Err(FitError::InvalidParameter { name: "ss", reason: String::from("SS must be finite and non-negative") });
+    }
+    let df_diff = df_null - df_alt;
+    let lr_statistic = if ss_alt == 0.0 && ss_null == 0.0 {
+        0.0
+    } else if ss_alt <= 0.0 {
+        (n_obs as f64) * (ss_null.max(1e-300) / 1e-300).ln()
+    } else {
+        ((n_obs as f64) * (ss_null / ss_alt).ln()).max(0.0)
+    };
+    let p_value = chi2_sf(lr_statistic, df_diff as f64)?.clamp(0.0, 1.0);
+    Ok(LikelihoodRatioResult { lr_statistic, df_diff, df_null, df_alt, p_value, preferred_complex_model: p_value < alpha })
+}
+
+pub(crate) fn compare_models_lrt_deviance(
+    dev_null: f64,
+    df_null: usize,
+    dev_alt: f64,
+    df_alt: usize,
+    alpha: f64,
+) -> Result<LikelihoodRatioResult, FitError> {
+    if df_alt == 0 || df_null <= df_alt {
+        return Err(FitError::InvalidParameter { name: "df", reason: format!("requires df_null ({df_null}) > df_alt ({df_alt}) > 0") });
+    }
+    if dev_null < 0.0 || dev_alt < 0.0 || !dev_null.is_finite() || !dev_alt.is_finite() {
+        return Err(FitError::InvalidParameter { name: "deviance", reason: String::from("Deviance must be finite and non-negative") });
+    }
+    let df_diff = df_null - df_alt;
+    let lr_statistic = (dev_null - dev_alt).max(0.0);
+    let p_value = chi2_sf(lr_statistic, df_diff as f64)?.clamp(0.0, 1.0);
+    Ok(LikelihoodRatioResult { lr_statistic, df_diff, df_null, df_alt, p_value, preferred_complex_model: p_value < alpha })
 }
 
 /// Compute $\text{AIC}_c$ and $\text{BIC}$ for least-squares residuals (`K = p_free + 1` including $\sigma^2$).
@@ -899,6 +1035,142 @@ pub fn dagostino_pearson_test(values: &[f64]) -> Option<NormalityTestResult> {
     let k2 = z1 * z1 + z2 * z2;
     let p_value = chi2_sf(k2, 2.0).unwrap_or(1.0).clamp(0.0, 1.0);
     Some(NormalityTestResult { test_name: String::from("D'Agostino-Pearson K2"), statistic: k2, p_value, passed: p_value >= 0.05 })
+}
+
+/// Anderson–Darling normality test on residuals (`n >= 8`) with Stephens small-sample adjustment $A^{*2}$.
+#[must_use]
+pub fn anderson_darling_test(values: &[f64]) -> Option<NormalityTestResult> {
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    let n = sorted.len();
+    if n < 8 {
+        return None;
+    }
+    sorted.sort_by(f64::total_cmp);
+    let moments = SummaryMoments::from_slice(&sorted).ok()?;
+    let sd = moments.sample_sd().ok()?;
+    if sd <= 0.0 {
+        return None;
+    }
+    let nf = n as f64;
+    let mut sum_acc = NeumaierSum::new();
+    for i in 0..n {
+        let z_lo = (sorted[i] - moments.mean) / sd;
+        let z_hi = (sorted[n - 1 - i] - moments.mean) / sd;
+        let p_lo = norm_cdf(z_lo).clamp(1e-16, 1.0 - 1e-16);
+        let q_hi = norm_sf(z_hi).clamp(1e-16, 1.0 - 1e-16);
+        sum_acc.add(((2 * i + 1) as f64) * (p_lo.ln() + q_hi.ln()));
+    }
+    let a2 = (-nf - sum_acc.total() / nf).max(0.0);
+    let a2_star = a2 * (1.0 + 0.75 / nf + 2.25 / (nf * nf));
+
+    let p_value = if a2_star >= 0.6 {
+        (1.2937 - 5.709 * a2_star + 0.0186 * a2_star * a2_star).exp()
+    } else if a2_star > 0.34 {
+        (0.9177 - 4.279 * a2_star - 1.38 * a2_star * a2_star).exp()
+    } else if a2_star > 0.20 {
+        1.0 - (-8.318 + 42.796 * a2_star - 59.938 * a2_star * a2_star).exp()
+    } else {
+        1.0 - (-13.436 + 101.14 * a2_star - 223.73 * a2_star * a2_star).exp()
+    }
+    .clamp(0.0, 1.0);
+
+    Some(NormalityTestResult { test_name: String::from("Anderson-Darling A2*"), statistic: a2_star, p_value, passed: p_value >= 0.05 })
+}
+
+/// Lilliefors-adjusted Kolmogorov–Smirnov normality test on residuals (`n >= 5`).
+#[must_use]
+pub fn lilliefors_ks_test(values: &[f64]) -> Option<NormalityTestResult> {
+    let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
+    let n = sorted.len();
+    if n < 5 {
+        return None;
+    }
+    sorted.sort_by(f64::total_cmp);
+    let moments = SummaryMoments::from_slice(&sorted).ok()?;
+    let sd = moments.sample_sd().ok()?;
+    if sd <= 0.0 {
+        return None;
+    }
+    let nf = n as f64;
+    let mut d_max = 0.0_f64;
+    for (i, &x) in sorted.iter().enumerate() {
+        let f_z = norm_cdf((x - moments.mean) / sd);
+        let d_plus = ((i + 1) as f64) / nf - f_z;
+        let d_minus = f_z - (i as f64) / nf;
+        d_max = d_max.max(d_plus).max(d_minus);
+    }
+
+    let (d_eff, n_eff) = if n > 100 { (d_max * (nf / 100.0).powf(0.49), 100.0) } else { (d_max, nf) };
+    let sqrt_n_term = (n_eff + 2.78019).sqrt();
+    let p_dw =
+        (-7.01256 * d_eff * d_eff * (n_eff + 2.78019) + 2.99587 * d_eff * sqrt_n_term - 0.122_119 + 0.974_598 / n_eff.sqrt() + 1.67997 / n_eff).exp();
+
+    let p_value = if p_dw <= 0.10 {
+        p_dw.clamp(0.0, 1.0)
+    } else {
+        let k = d_max * (nf.sqrt() - 0.01 + 0.85 / nf.sqrt());
+        if k <= 0.302 {
+            1.0
+        } else if k <= 0.500 {
+            (2.767_73 - 19.828_315 * k + 80.709_644 * k * k - 138.551_52 * k.powi(3) + 81.218_052 * k.powi(4)).clamp(0.10, 1.0)
+        } else if k <= 0.900 {
+            (-4.901_232 + 40.662_806 * k - 97.490_286 * k * k + 94.029_866 * k.powi(3) - 32.355_711 * k.powi(4)).clamp(0.0, 1.0)
+        } else {
+            p_dw.clamp(0.0, 1.0)
+        }
+    };
+
+    Some(NormalityTestResult { test_name: String::from("Kolmogorov-Smirnov (Lilliefors)"), statistic: d_max, p_value, passed: p_value >= 0.05 })
+}
+
+fn average_ranks(vals: &[f64]) -> Vec<f64> {
+    let n = vals.len();
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| vals[a].total_cmp(&vals[b]));
+    let mut ranks = vec![0.0_f64; n];
+    let mut i = 0_usize;
+    while i < n {
+        let mut j = i + 1;
+        while j < n && vals[order[j]] == vals[order[i]] {
+            j += 1;
+        }
+        let avg_rank = 0.5 * ((i + 1 + j) as f64);
+        for &idx in &order[i..j] {
+            ranks[idx] = avg_rank;
+        }
+        i = j;
+    }
+    ranks
+}
+
+/// Homoscedasticity check via Spearman rank correlation between `|residual|` and predicted `Y`.
+#[must_use]
+pub fn homoscedasticity_spearman_test(y_hat: &[f64], residuals: &[f64], alpha: f64) -> Option<HomoscedasticityResult> {
+    let mut yh_vals = Vec::with_capacity(y_hat.len().min(residuals.len()));
+    let mut abs_r = Vec::with_capacity(yh_vals.capacity());
+    for (&yh, &r) in y_hat.iter().zip(residuals.iter()) {
+        if yh.is_finite() && r.is_finite() {
+            yh_vals.push(yh);
+            abs_r.push(r.abs());
+        }
+    }
+    let n = yh_vals.len();
+    if n < 3 {
+        return None;
+    }
+    let rx = average_ranks(&yh_vals);
+    let ry = average_ranks(&abs_r);
+    let rho = pearson_r(&rx, &ry).ok()?;
+    let df = n - 2;
+    let one_m_r2 = 1.0 - rho * rho;
+    let (statistic_t, p_value) = if one_m_r2.abs() <= 1e-15 {
+        (if rho >= 0.0 { f64::INFINITY } else { f64::NEG_INFINITY }, 0.0)
+    } else {
+        let t = rho * ((df as f64) / one_m_r2).sqrt();
+        let p = student_t_two_sided_p(t, df as f64).ok()?.clamp(0.0, 1.0);
+        (t, p)
+    };
+    Some(HomoscedasticityResult { spearman_rho: rho, statistic_t, df, p_value, homoscedastic: p_value >= alpha })
 }
 
 /// Compute the 68.27th percentile of absolute residuals multiplied by `N / (N - K)`

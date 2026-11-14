@@ -34,6 +34,10 @@ pub const PHARMA_EQUATION_IDS: &[&str] = &[
     "one_site_specific_binding",
     "one_site_specific_hill",
     "one_site_total_and_ns",
+    "one_site_total_and_ns_global",
+    "one_site_specific_ligand_depletion",
+    "allosteric_modulator_saturation",
+    "homologous_one_site_competition",
     "two_sites_specific_binding",
     "one_site_fit_ki",
     "one_site_fit_logic50",
@@ -42,6 +46,7 @@ pub const PHARMA_EQUATION_IDS: &[&str] = &[
     "association_kinetics_one_conc",
     "association_kinetics_two_conc",
     "assoc_then_dissoc",
+    "motulsky_mahan_kinetics",
     // Enzyme Kinetics
     "michaelis_menten",
     "kcat_enzyme_kinetics",
@@ -230,6 +235,12 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
             with_ns: true,
             params: names(&["Bmax", "Kd", "NS", "Background"]),
         })),
+        "one_site_total_and_ns_global" => Some(Box::new(OneSiteTotalAndNsGlobal { params: names(&["Bmax", "Kd", "NS", "Background"]) })),
+        "one_site_specific_ligand_depletion" => Some(Box::new(OneSiteSpecificLigandDepletion { params: names(&["Rt", "Kd", "NS"]) })),
+        "allosteric_modulator_saturation" => {
+            Some(Box::new(AllostericModulatorSaturation { params: names(&["Bmax", "Kd", "alpha", "Kb", "ModConc"]) }))
+        }
+        "homologous_one_site_competition" => Some(Box::new(HomologousOneSiteCompetition { params: names(&["Bmax", "Kd", "NS", "HotConc"]) })),
         "two_sites_specific_binding" => Some(Box::new(TwoSiteBinding { params: names(&["BmaxHi", "KdHi", "BmaxLo", "KdLo"]) })),
         "one_site_fit_ki" => Some(Box::new(CompetitionOneSiteKi { params: names(&["Top", "Bottom", "LogKi", "HotConc_nM", "HotKd_nM"]) })),
         "one_site_fit_logic50" => Some(Box::new(LogDoseResponse {
@@ -248,6 +259,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         "association_kinetics_one_conc" => Some(Box::new(AssociationOneConc { params: names(&["Ymax", "Kobs"]) })),
         "association_kinetics_two_conc" => Some(Box::new(AssociationTwoConc { params: names(&["Bmax", "Kon", "Koff", "LigandConc"]) })),
         "assoc_then_dissoc" => Some(Box::new(AssocThenDissoc { params: names(&["Bmax", "Kon", "Koff", "LigandConc", "Time0"]) })),
+        "motulsky_mahan_kinetics" => Some(Box::new(MotulskyMahanKinetics { params: names(&["Bmax", "kon1", "koff1", "kon2", "koff2", "L", "I"]) })),
         "michaelis_menten" => Some(Box::new(MichaelisMenten { kcat_mode: false, params: names(&["Vmax", "Km"]) })),
         "kcat_enzyme_kinetics" | "kcat" => Some(Box::new(MichaelisMenten { kcat_mode: true, params: names(&["kcat", "Km", "Et"]) })),
         "allosteric_sigmoidal_kinetics" | "allosteric_sigmoidal" => Some(Box::new(AllostericSigmoidal { params: names(&["Vmax", "Khalf", "h"]) })),
@@ -330,9 +342,16 @@ impl ParametricModel for LogDoseResponse {
         let Some((sig, p)) = sigmoid_from_log_x(x0, log_c50, eff_slope) else {
             return false;
         };
-        let d_sig_d_p = if p.is_finite() { -(sig * sig) } else { 0.0 };
+        let sig_deriv = if !p.is_finite() {
+            0.0
+        } else if p <= 1.0 {
+            p * sig * sig
+        } else {
+            let inv = 1.0 / p;
+            (inv / (1.0 + inv)) / (1.0 + inv)
+        };
         let span = top - bottom;
-        let common = if p.is_finite() { span * d_sig_d_p * p * core::f64::consts::LN_10 } else { 0.0 };
+        let common = -span * sig_deriv * core::f64::consts::LN_10;
         let d_log_c50 = common * eff_slope;
         let d_hill = common * (log_c50 - x0) * if self.is_inhibition { -1.0 } else { 1.0 };
         match (self.normalized, self.variable_slope) {
@@ -427,6 +446,57 @@ impl ParametricModel for LinearDoseResponse {
         }
         let frac = if self.is_inhibition { 1.0 / (1.0 + ratio) } else { ratio / (1.0 + ratio) };
         Some(bottom + (top - bottom) * frac)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&c) = x.first() else {
+            return false;
+        };
+        if !c.is_finite() || c < 0.0 || params.len() < self.params.len() || out.len() < self.params.len() {
+            return false;
+        }
+        let bottom = params[0];
+        let top = params[1];
+        let c50 = params[2];
+        let hill = if self.variable_slope { params[3] } else { 1.0 };
+        if !bottom.is_finite() || !top.is_finite() || !c50.is_finite() || c50 <= 0.0 || !hill.is_finite() {
+            return false;
+        }
+        if c == 0.0 {
+            out[0] = if self.is_inhibition { 0.0 } else { 1.0 };
+            out[1] = if self.is_inhibition { 1.0 } else { 0.0 };
+            out[2] = 0.0;
+            if self.variable_slope {
+                out[3] = 0.0;
+            }
+            return true;
+        }
+        let ratio = (c / c50).powf(hill);
+        if !ratio.is_finite() {
+            out[0] = if self.is_inhibition { 1.0 } else { 0.0 };
+            out[1] = if self.is_inhibition { 0.0 } else { 1.0 };
+            out[2] = 0.0;
+            if self.variable_slope {
+                out[3] = 0.0;
+            }
+            return true;
+        }
+        let frac = if self.is_inhibition { 1.0 / (1.0 + ratio) } else { ratio / (1.0 + ratio) };
+        let du_d_ln = if ratio <= 1.0 {
+            (ratio / (1.0 + ratio)) / (1.0 + ratio)
+        } else {
+            let inv = 1.0 / ratio;
+            (inv / (1.0 + inv)) / (1.0 + inv)
+        };
+        let span = top - bottom;
+        let sign = if self.is_inhibition { -1.0 } else { 1.0 };
+        out[0] = 1.0 - frac;
+        out[1] = frac;
+        out[2] = span * sign * du_d_ln * (-hill / c50);
+        if self.variable_slope {
+            out[3] = span * sign * du_d_ln * (c / c50).ln();
+        }
+        out[..self.params.len()].iter().all(|v| v.is_finite())
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
@@ -1320,6 +1390,409 @@ impl ParametricModel for MorrisonKi {
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
         vec![ymax.max(1.0), 1.0, 0.1, 1.0, 1.0]
+    }
+}
+
+/// Global one-site total and nonspecific binding (`dataset 0` = Total, `dataset >= 1` = Nonspecific).
+struct OneSiteTotalAndNsGlobal {
+    params: Vec<String>,
+}
+
+impl ParametricModel for OneSiteTotalAndNsGlobal {
+    fn id(&self) -> &str {
+        "one_site_total_and_ns_global"
+    }
+
+    fn name(&self) -> &str {
+        "One-site total and nonspecific binding (global)"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::ReceptorBinding
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || x0 < 0.0 || params.len() < 4 || !params[..4].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let [bmax, kd, ns, bg] = [params[0], params[1], params[2], params[3]];
+        if dataset_index == 0 {
+            if kd <= 0.0 {
+                return None;
+            }
+            let y = bmax * x0 / (kd + x0) + ns * x0 + bg;
+            y.is_finite().then_some(y)
+        } else {
+            let y = ns * x0 + bg;
+            y.is_finite().then_some(y)
+        }
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || x0 < 0.0 || params.len() < 4 || out.len() < 4 || !params[..4].iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        if dataset_index == 0 {
+            let [bmax, kd] = [params[0], params[1]];
+            if kd <= 0.0 {
+                return false;
+            }
+            let denom = kd + x0;
+            out[0] = x0 / denom;
+            out[1] = -bmax * x0 / (denom * denom);
+            out[2] = x0;
+            out[3] = 1.0;
+        } else {
+            out[0] = 0.0;
+            out[1] = 0.0;
+            out[2] = x0;
+            out[3] = 1.0;
+        }
+        out[..4].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let ds0: Vec<DataPoint> = points.iter().filter(|p| p.data_set_index == 0).cloned().collect();
+        let ds1: Vec<DataPoint> = points.iter().filter(|p| p.data_set_index >= 1).cloned().collect();
+        let primary = if ds0.is_empty() { points } else { &ds0 };
+        let (ymin, ymax) = data_y_min_max(primary);
+        let (_, xmax) = data_x_min_max(primary);
+        let kd = estimate_x_at_ymid(primary).max(1e-6);
+        let (ns, bg) = if ds1.len() >= 2 {
+            let n = ds1.len() as f64;
+            let mx = ds1.iter().map(|p| p.x0()).sum::<f64>() / n;
+            let my = ds1.iter().map(|p| p.y).sum::<f64>() / n;
+            let mut sxx = 0.0_f64;
+            let mut sxy = 0.0_f64;
+            for p in &ds1 {
+                let dx = p.x0() - mx;
+                sxx += dx * dx;
+                sxy += dx * (p.y - my);
+            }
+            let slope = if sxx > 1e-30 { (sxy / sxx).max(0.0) } else { 0.0 };
+            (slope, my - slope * mx)
+        } else {
+            (((ymax - ymin) / xmax.max(1e-12)) * 0.05, ymin)
+        };
+        let bmax = (ymax - bg - ns * xmax).max(ymax - ymin).max(1.0);
+        vec![bmax, kd, ns, bg]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(0.0), None), (Some(1e-12), None), (Some(0.0), None), (None, None)]
+    }
+}
+
+/// Specific saturation binding with ligand depletion (Swillens 1995 / Morrison quadratic root).
+struct OneSiteSpecificLigandDepletion {
+    params: Vec<String>,
+}
+
+impl OneSiteSpecificLigandDepletion {
+    fn solve_free_ligand(hot_tot: f64, rt: f64, kd: f64, ns: f64) -> Option<(f64, f64)> {
+        let a = 1.0 + ns;
+        if a <= 0.0 || kd <= 0.0 || rt < 0.0 || hot_tot < 0.0 {
+            return None;
+        }
+        if hot_tot == 0.0 {
+            return Some((0.0, a));
+        }
+        let b = kd * a + rt - hot_tot;
+        let disc = (b * b + 4.0 * a * kd * hot_tot).sqrt();
+        if !disc.is_finite() {
+            return None;
+        }
+        let l_free = if b >= 0.0 { (2.0 * kd * hot_tot) / (b + disc) } else { (-b + disc) / (2.0 * a) };
+        l_free.is_finite().then_some((l_free, a))
+    }
+}
+
+impl ParametricModel for OneSiteSpecificLigandDepletion {
+    fn id(&self) -> &str {
+        "one_site_specific_ligand_depletion"
+    }
+
+    fn name(&self) -> &str {
+        "One-site specific binding with ligand depletion"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::ReceptorBinding
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let hot_tot = x.first().copied()?;
+        if !hot_tot.is_finite() || hot_tot < 0.0 || params.len() < 3 || !params[..3].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let [rt, kd, ns] = [params[0], params[1], params[2]];
+        let (l_free, _) = Self::solve_free_ligand(hot_tot, rt, kd, ns)?;
+        let y = rt * l_free / (kd + l_free);
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&hot_tot) = x.first() else {
+            return false;
+        };
+        if !hot_tot.is_finite() || hot_tot < 0.0 || params.len() < 3 || out.len() < 3 || !params[..3].iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let [rt, kd, ns] = [params[0], params[1], params[2]];
+        let Some((l_free, a)) = Self::solve_free_ligand(hot_tot, rt, kd, ns) else {
+            return false;
+        };
+        let denom = kd + l_free;
+        let p = l_free / denom;
+        let q = kd / denom;
+        let df_dl = a + rt * q / denom;
+        if df_dl <= 0.0 || !df_dl.is_finite() {
+            return false;
+        }
+        let y = rt * p;
+        out[0] = (a * p) / df_dl;
+        out[1] = -(a * rt * p) / (denom * df_dl);
+        out[2] = -(y * q) / df_dl;
+        out[..3].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        let kd = estimate_x_at_ymid(points).max(1e-6);
+        vec![ymax.max(1.0), kd, 0.0]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(0.0), None), (Some(1e-12), None), (Some(0.0), None)]
+    }
+}
+
+/// Allosteric ternary-complex saturation binding with modulator concentration `ModConc`.
+struct AllostericModulatorSaturation {
+    params: Vec<String>,
+}
+
+impl ParametricModel for AllostericModulatorSaturation {
+    fn id(&self) -> &str {
+        "allosteric_modulator_saturation"
+    }
+
+    fn name(&self) -> &str {
+        "Allosteric modulator saturation binding"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::ReceptorBinding
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || x0 < 0.0 || params.len() < 5 || !params[..5].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let [bmax, kd, alpha, kb, mod_conc] = [params[0], params[1], params[2], params[3], params[4]];
+        if kd <= 0.0 || kb <= 0.0 || alpha < 0.0 || mod_conc < 0.0 {
+            return None;
+        }
+        let u = mod_conc / kb;
+        let num_factor = 1.0 + alpha * u;
+        let mod_factor = 1.0 + u;
+        let denom = kd * mod_factor + x0 * num_factor;
+        if denom <= 0.0 {
+            return None;
+        }
+        let y = bmax * x0 * num_factor / denom;
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || x0 < 0.0 || params.len() < 5 || out.len() < 5 || !params[..5].iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let [bmax, kd, alpha, kb, mod_conc] = [params[0], params[1], params[2], params[3], params[4]];
+        if kd <= 0.0 || kb <= 0.0 || alpha < 0.0 || mod_conc < 0.0 {
+            return false;
+        }
+        let u = mod_conc / kb;
+        let n = 1.0 + alpha * u;
+        let m = 1.0 + u;
+        let denom = kd * m + x0 * n;
+        if denom <= 0.0 {
+            return false;
+        }
+        let d2 = denom * denom;
+        out[0] = (x0 * n) / denom;
+        out[1] = -(bmax * x0 * n * m) / d2;
+        out[2] = (bmax * x0 * kd * m * u) / d2;
+        out[3] = -(bmax * x0 * kd * (alpha - 1.0) * u) / (kb * d2);
+        out[4] = (bmax * x0 * kd * (alpha - 1.0)) / (kb * d2);
+        out[..5].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        let kd = estimate_x_at_ymid(points).max(1e-6);
+        vec![ymax.max(1.0), kd, 1.0, 1e-6, 0.0]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(0.0), None), (Some(1e-12), None), (Some(0.0), None), (Some(1e-12), None), (Some(0.0), None)]
+    }
+}
+
+/// Homologous one-site competitive binding (`Kd_cold == Kd_hot`, `X = log10[Cold]`).
+struct HomologousOneSiteCompetition {
+    params: Vec<String>,
+}
+
+impl ParametricModel for HomologousOneSiteCompetition {
+    fn id(&self) -> &str {
+        "homologous_one_site_competition"
+    }
+
+    fn name(&self) -> &str {
+        "Homologous one-site competitive binding"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::ReceptorBinding
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || params.len() < 4 || !params[..4].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let [bmax, kd, ns, hot_conc] = [params[0], params[1], params[2], params[3]];
+        if kd <= 0.0 || hot_conc <= 0.0 {
+            return None;
+        }
+        let cold = safe_pow10(x0)?;
+        let denom = hot_conc + cold + kd;
+        let y = bmax * hot_conc / denom + ns;
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || params.len() < 4 || out.len() < 4 || !params[..4].iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        let [bmax, kd, _, hot_conc] = [params[0], params[1], params[2], params[3]];
+        if kd <= 0.0 || hot_conc <= 0.0 {
+            return false;
+        }
+        let Some(cold) = safe_pow10(x0) else {
+            return false;
+        };
+        let denom = hot_conc + cold + kd;
+        let d2 = denom * denom;
+        out[0] = hot_conc / denom;
+        out[1] = -(bmax * hot_conc) / d2;
+        out[2] = 1.0;
+        out[3] = (bmax * (cold + kd)) / d2;
+        out[..4].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (ymin, ymax) = data_y_min_max(points);
+        let x_mid = estimate_x_at_ymid(points);
+        let ic50 = safe_pow10(x_mid).unwrap_or(1e-9).max(1e-18);
+        let hot = 0.5 * ic50;
+        let kd = 0.5 * ic50;
+        let bmax = 2.0 * (ymax - ymin).max(1.0);
+        vec![bmax, kd, ymin, hot]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(0.0), None), (Some(1e-18), None), (None, None), (Some(1e-18), None)]
+    }
+}
+
+/// Motulsky-Mahan (1984) closed-form competitive binding kinetics vs time `t = X`.
+struct MotulskyMahanKinetics {
+    params: Vec<String>,
+}
+
+impl ParametricModel for MotulskyMahanKinetics {
+    fn id(&self) -> &str {
+        "motulsky_mahan_kinetics"
+    }
+
+    fn name(&self) -> &str {
+        "Motulsky-Mahan competitive binding kinetics"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::ReceptorBinding
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let t = x.first().copied()?;
+        if !t.is_finite() || t < 0.0 || params.len() < 7 || !params[..7].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let [bmax, kon1, koff1, kon2, koff2, l, i] = [params[0], params[1], params[2], params[3], params[4], params[5], params[6]];
+        if bmax < 0.0 || kon1 < 0.0 || koff1 < 0.0 || kon2 < 0.0 || koff2 <= 0.0 || l < 0.0 || i < 0.0 {
+            return None;
+        }
+        if t == 0.0 || kon1 == 0.0 || l == 0.0 {
+            return Some(0.0);
+        }
+        let ka = kon1 * l + koff1;
+        let kb = kon2 * i + koff2;
+        let s = (ka - kb).hypot(2.0 * (kon1 * kon2 * l * i).sqrt());
+        let kf = 0.5 * (ka + kb + s);
+        let kf_ks = kon1 * l * koff2 + koff1 * kon2 * i + koff1 * koff2;
+        if kf <= 0.0 || kf_ks <= 0.0 {
+            return None;
+        }
+        let ks = kf_ks / kf;
+        let z_s = -ks * t;
+        let term1 = (koff2 / kf_ks) * (-z_s.exp_m1());
+        let z_diff = -s * t;
+        let phi1 = if z_diff.abs() < 1e-7 { 1.0 + z_diff * (0.5 + z_diff / 6.0) } else { z_diff.exp_m1() / z_diff };
+        let term2 = (1.0 - koff2 / kf) * z_s.exp() * t * phi1;
+        let y = bmax * kon1 * l * (term1 + term2);
+        y.is_finite().then_some(y)
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        vec![ymax.max(1.0), 1e6, 0.1, 1e6, 0.1, 1e-8, 1e-8]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(0.0), None), (Some(0.0), None), (Some(0.0), None), (Some(0.0), None), (Some(1e-12), None), (Some(0.0), None), (Some(0.0), None)]
     }
 }
 

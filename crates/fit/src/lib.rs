@@ -12,10 +12,11 @@ pub mod solver;
 pub mod types;
 
 pub use diagnostics::{
-    AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, InformationCriteria, LackOfFitResult, NormalityTestResult,
-    RoutDetectionResult, RoutPointAudit, RunsTestResult, compare_models_aicc, compare_models_f_test, compute_covariance_diagnostics,
-    compute_hougaard_skewness, compute_information_criteria, compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test,
-    replicates_lack_of_fit, rout_detect_outliers, runs_test, shapiro_wilk_test,
+    AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, HomoscedasticityResult, InformationCriteria, LackOfFitResult,
+    LikelihoodRatioResult, NormalityTestResult, RoutDetectionResult, RoutPointAudit, RunsTestResult, anderson_darling_test, compare_models_aicc,
+    compare_models_f_test, compare_models_lrt, compute_covariance_diagnostics, compute_hougaard_skewness, compute_information_criteria,
+    compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test, lilliefors_ks_test, replicates_lack_of_fit,
+    rout_detect_outliers, runs_test, shapiro_wilk_test,
 };
 pub use dsl::{CompiledDslModel, DslEquationKind, integrate_rk45};
 pub use error::{FitError, FitStatus, ParameterNote};
@@ -29,7 +30,10 @@ pub use solver::{
     FittedDatasetResult, FittedParameterSummary, InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models,
     fit_nonlinear,
 };
-pub use types::{DataPoint, DatasetSeries, DerivedScalar, EquationCategory, HookContext, extract_datasets_from_sheet};
+pub use types::{
+    DataPoint, DatasetSeries, DerivedScalar, EquationCategory, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet,
+    extract_datasets_from_sheet_with_options, filter_datasets_by_range,
+};
 
 #[cfg(test)]
 mod tests {

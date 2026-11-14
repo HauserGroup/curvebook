@@ -1,9 +1,9 @@
 //! Core data structures, equation category namespaces, hook resolution, and table extraction
 //! helpers for `lumencraft-fit`.
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
-use lumencraft_doc::{Cell, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, SheetId, TableArchetype};
+use lumencraft_doc::{Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, SheetId, TableArchetype};
 
 use crate::error::FitError;
 
@@ -186,18 +186,63 @@ pub fn parse_leading_number(text: &str) -> Option<f64> {
     None
 }
 
+/// Column selection & multi-factor Cartesian grouping options for `MultipleVariables` tables.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MultivarExtractionSpec<'a> {
+    pub group_columns: &'a [usize],
+    pub x_columns: &'a [usize],
+    pub y_column: Option<usize>,
+}
+
 /// Extract regression datasets from a [`DataSheet`] (`Xy`, `Grouped`, or `MultipleVariables`).
 ///
 /// # Errors
 /// Returns [`FitError::IncompatibleTable`] for unsupported table archetypes or [`FitError::EmptyInput`]
 /// if no active finite observations exist across the selected data sets.
 pub fn extract_datasets_from_sheet(sheet: &DataSheet, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
+    extract_datasets_from_sheet_with_options(sheet, selected_data_sets, &MultivarExtractionSpec::default())
+}
+
+/// Extract regression datasets from a [`DataSheet`] with explicit `MultipleVariables` factor,
+/// predictor, and response column mappings.
+///
+/// # Errors
+/// Returns [`FitError::IncompatibleTable`] for unsupported table archetypes,
+/// [`FitError::InvalidParameter`] if multivariate column indices are out of range, or
+/// [`FitError::EmptyInput`] if no active finite observations exist.
+pub fn extract_datasets_from_sheet_with_options(
+    sheet: &DataSheet,
+    selected_data_sets: &[usize],
+    mv_spec: &MultivarExtractionSpec<'_>,
+) -> Result<Vec<DatasetSeries>, FitError> {
     match &sheet.archetype {
         TableArchetype::Xy(xy) => extract_from_xy(xy, selected_data_sets),
         TableArchetype::Grouped(g) => extract_from_grouped(g, selected_data_sets),
-        TableArchetype::MultipleVariables(mv) => extract_from_multivar(mv, selected_data_sets),
+        TableArchetype::MultipleVariables(mv) => extract_from_multivar(mv, selected_data_sets, mv_spec),
         other => Err(FitError::IncompatibleTable { kind: other.kind() }),
     }
+}
+
+/// Filter dataset observations against optional `X` and `Y` inclusive bounds (`Don't fit points when...`),
+/// dropping any datasets that retain zero points.
+pub fn filter_datasets_by_range(
+    datasets: &mut Vec<DatasetSeries>,
+    x_range: Option<(Option<f64>, Option<f64>)>,
+    y_range: Option<(Option<f64>, Option<f64>)>,
+) {
+    if x_range.is_none() && y_range.is_none() {
+        return;
+    }
+    for ds in datasets.iter_mut() {
+        ds.points.retain(|pt| {
+            let x0 = pt.x0();
+            let x_ok = x_range.is_none_or(|(lo, hi)| lo.is_none_or(|v| !v.is_finite() || x0 >= v) && hi.is_none_or(|v| !v.is_finite() || x0 <= v));
+            let y_ok =
+                y_range.is_none_or(|(lo, hi)| lo.is_none_or(|v| !v.is_finite() || pt.y >= v) && hi.is_none_or(|v| !v.is_finite() || pt.y <= v));
+            x_ok && y_ok
+        });
+    }
+    datasets.retain(|ds| !ds.points.is_empty());
 }
 
 fn resolve_selected_indices(total: usize, selected: &[usize]) -> Vec<usize> {
@@ -341,31 +386,103 @@ fn extract_from_grouped(g: &lumencraft_doc::GroupedTable, selected_data_sets: &[
     Ok(series_list)
 }
 
-fn extract_from_multivar(mv: &lumencraft_doc::MultipleVariablesTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
-    // Convention: selected_data_sets if length >= 2 gives [x_col..., y_col], or empty uses col 0 as X and col 1 as Y.
+fn mv_group_token(cell: &Cell) -> Option<String> {
+    if cell.excluded {
+        return None;
+    }
+    match &cell.value {
+        CellValue::Empty => None,
+        CellValue::Text(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        CellValue::Number(v) if v.is_finite() => Some(format!("{v}")),
+        CellValue::Number(_) => None,
+    }
+}
+
+fn resolve_mv_columns(
+    mv: &lumencraft_doc::MultipleVariablesTable,
+    selected_data_sets: &[usize],
+    mv_spec: &MultivarExtractionSpec<'_>,
+) -> Result<(Vec<usize>, usize, Vec<usize>), FitError> {
+    let n_vars = mv.variables.len();
+    for &gc in mv_spec.group_columns {
+        if gc >= n_vars {
+            return Err(FitError::InvalidParameter { name: "mv_group_columns", reason: format!("Column index {gc} >= {n_vars}") });
+        }
+    }
+    for &xc in mv_spec.x_columns {
+        if xc >= n_vars {
+            return Err(FitError::InvalidParameter { name: "mv_x_columns", reason: format!("Column index {xc} >= {n_vars}") });
+        }
+    }
+    if let Some(yc) = mv_spec.y_column
+        && yc >= n_vars
+    {
+        return Err(FitError::InvalidParameter { name: "mv_y_column", reason: format!("Column index {yc} >= {n_vars}") });
+    }
+
+    let group_set: HashSet<usize> = mv_spec.group_columns.iter().copied().collect();
+    let x_set: HashSet<usize> = mv_spec.x_columns.iter().copied().collect();
+
+    let y_col = if let Some(yc) = mv_spec.y_column {
+        yc
+    } else if mv_spec.x_columns.is_empty() && selected_data_sets.len() >= 2 {
+        selected_data_sets[selected_data_sets.len() - 1]
+    } else if let Some(&sel) = selected_data_sets.first()
+        && !x_set.contains(&sel)
+        && !group_set.contains(&sel)
+    {
+        sel
+    } else {
+        (0..n_vars)
+            .rev()
+            .find(|idx| !x_set.contains(idx) && !group_set.contains(idx))
+            .unwrap_or_else(|| selected_data_sets.first().copied().unwrap_or(1))
+    };
+
+    let x_cols = if !mv_spec.x_columns.is_empty() {
+        mv_spec.x_columns.to_vec()
+    } else if selected_data_sets.len() >= 2 {
+        selected_data_sets[..selected_data_sets.len() - 1].to_vec()
+    } else {
+        let fallback = (0..n_vars).find(|&idx| idx != y_col && !group_set.contains(&idx)).unwrap_or(usize::from(y_col == 0));
+        vec![fallback]
+    };
+
+    let x_used: HashSet<usize> = x_cols.iter().copied().collect();
+    let group_cols = if !mv_spec.group_columns.is_empty() {
+        mv_spec.group_columns.to_vec()
+    } else if selected_data_sets.len() < 2 {
+        mv.variables
+            .iter()
+            .enumerate()
+            .find(|(idx, v)| *idx != y_col && !x_used.contains(idx) && v.role == lumencraft_doc::VariableRole::Categorical)
+            .map(|(idx, _)| vec![idx])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    Ok((x_cols, y_col, group_cols))
+}
+
+fn extract_from_multivar(
+    mv: &lumencraft_doc::MultipleVariablesTable,
+    selected_data_sets: &[usize],
+    mv_spec: &MultivarExtractionSpec<'_>,
+) -> Result<Vec<DatasetSeries>, FitError> {
     if mv.variables.len() < 2 {
         return Err(FitError::InsufficientData { required: 2, actual: mv.variables.len() });
     }
-    let (x_cols, y_col, group_col): (Vec<usize>, usize, Option<usize>) = if selected_data_sets.len() >= 2 {
-        let last = selected_data_sets.len() - 1;
-        (selected_data_sets[..last].to_vec(), selected_data_sets[last], None)
-    } else {
-        let y_idx = selected_data_sets.first().copied().unwrap_or(1);
-        let x_idx = if y_idx == 0 { 1 } else { 0 };
-        let grp = mv
-            .variables
-            .iter()
-            .enumerate()
-            .find(|(idx, v)| *idx != x_idx && *idx != y_idx && v.role == lumencraft_doc::VariableRole::Categorical)
-            .map(|(idx, _)| idx);
-        (vec![x_idx], y_idx, grp)
-    };
+    let (x_cols, y_col, group_cols) = resolve_mv_columns(mv, selected_data_sets, mv_spec)?;
 
     let Some(y_var) = mv.variables.get(y_col) else {
         return Err(FitError::EmptyInput);
     };
     let n_rows = mv.row_count();
-    let mut grouped: BTreeMap<String, Vec<DataPoint>> = BTreeMap::new();
+    let mut grouped: BTreeMap<Vec<String>, Vec<DataPoint>> = BTreeMap::new();
     for row in 0..n_rows {
         let Some(y_val) = y_var.cells.get(row).and_then(Cell::active_number) else {
             continue;
@@ -383,28 +500,69 @@ fn extract_from_multivar(mv: &lumencraft_doc::MultipleVariablesTable, selected_d
         if !all_x {
             continue;
         }
-        let label = group_col
-            .and_then(|gc| mv.variables.get(gc))
-            .and_then(|v| v.cells.get(row))
-            .and_then(Cell::active_text)
-            .unwrap_or(&y_var.title)
-            .to_owned();
-        grouped.entry(label).or_default().push(DataPoint { x: xs, y: y_val, sd: None, n: None, explicit_weight: None, data_set_index: 0, row });
+        let mut key_tokens = Vec::with_capacity(group_cols.len());
+        let mut all_groups = true;
+        for &gc in &group_cols {
+            if let Some(tok) = mv.variables.get(gc).and_then(|v| v.cells.get(row)).and_then(mv_group_token) {
+                key_tokens.push(tok);
+            } else {
+                all_groups = false;
+                break;
+            }
+        }
+        if !all_groups {
+            continue;
+        }
+        grouped.entry(key_tokens).or_default().push(DataPoint { x: xs, y: y_val, sd: None, n: None, explicit_weight: None, data_set_index: 0, row });
     }
 
-    let mut out = Vec::with_capacity(grouped.len());
-    for (idx, (label, mut pts)) in grouped.into_iter().enumerate() {
+    let level_ranks: Vec<HashMap<String, usize>> = group_cols
+        .iter()
+        .filter_map(|&gc| mv.variables.get(gc))
+        .map(|var| var.ordered_levels().into_iter().enumerate().map(|(i, lvl)| (lvl.level, i)).collect())
+        .collect();
+
+    let mut entries: Vec<(Vec<String>, Vec<DataPoint>)> = grouped.into_iter().collect();
+    if !group_cols.is_empty() {
+        entries.sort_by(|(ka, _), (kb, _)| {
+            for (pos, (ta, tb)) in ka.iter().zip(kb.iter()).enumerate() {
+                let ra = level_ranks.get(pos).and_then(|m| m.get(ta)).copied().unwrap_or(usize::MAX);
+                let rb = level_ranks.get(pos).and_then(|m| m.get(tb)).copied().unwrap_or(usize::MAX);
+                let cmp = ra.cmp(&rb).then_with(|| ta.cmp(tb));
+                if cmp != std::cmp::Ordering::Equal {
+                    return cmp;
+                }
+            }
+            ka.cmp(kb)
+        });
+    }
+
+    let explicit_column_mapping = !mv_spec.x_columns.is_empty() && mv_spec.y_column.is_some();
+    let keep_indices = if explicit_column_mapping && !group_cols.is_empty() && !selected_data_sets.is_empty() {
+        resolve_selected_indices(entries.len(), selected_data_sets)
+    } else {
+        (0..entries.len()).collect()
+    };
+
+    let mut indexed: Vec<Option<(Vec<String>, Vec<DataPoint>)>> = entries.into_iter().map(Some).collect();
+    let mut out = Vec::with_capacity(keep_indices.len());
+    for idx in keep_indices {
+        let Some((tokens, mut pts)) = indexed.get_mut(idx).and_then(Option::take) else {
+            continue;
+        };
         for p in &mut pts {
             p.data_set_index = idx;
         }
+        let label = if tokens.is_empty() { y_var.title.clone() } else { tokens.join(" | ") };
+        let title_val = tokens.first().and_then(|t| parse_leading_number(t)).or_else(|| parse_leading_number(&label));
         out.push(DatasetSeries {
             data_set_index: idx,
-            label: label.clone(),
+            label,
             points: pts,
             unknowns_y: Vec::new(),
             unknowns_x: Vec::new(),
             is_pre_summarized: false,
-            column_title_value: parse_leading_number(&label),
+            column_title_value: title_val,
         });
     }
     if out.is_empty() {
