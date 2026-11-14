@@ -12,21 +12,31 @@ Before tagging or publishing a release, verify both source invariants and packag
 
 1. **Workspace gates & licences:**
    - Bump version cleanly: `cargo xtask version set <X.Y.Z>` (check synced outputs with `git diff`).
-   - Run licence compliance & regenerate licence compendium:
-     ```sh
-     cargo xtask licenses
-     ```
-     This verifies crates against [docs/licences.md](licences.md) (`deny.toml`) and builds `THIRD-PARTY-LICENSES.html` (`about.toml`).
-   - Run the full CI gate suite:
-     ```sh
-     cargo xtask ci
-     ```
+    - Run the Zero-Telemetry & static security hygiene gate:
+      ```sh
+      cargo xtask telemetry
+      ```
+      This asserts zero telemetry/analytics/crash-uploader egress across workspace sources, strict GitHub workflow `permissions` / `${{ }}` hygiene, and no-egress web headers.
+    - Verify clean-room workspace screenshots & `ASSETS.md` attribution:
+      ```sh
+      cargo xtask screenshots --check
+      ```
+      Use `cargo xtask screenshots` (without `--check`) to regenerate `docs/images/workspace-split-fit.png` and `docs/images/workspace-layout-dark.png`.
+    - Run licence compliance & regenerate licence compendium:
+      ```sh
+      cargo xtask licenses
+      ```
+      This verifies crates offline against [docs/licences.md](licences.md) (`deny.toml`) and builds `THIRD-PARTY-LICENSES.html` (`about.toml`); CI adds `cargo deny check licenses` and `cargo about` with `cargo xtask licenses --html` fallback.
+    - Run the full CI gate suite:
+      ```sh
+      cargo xtask ci
+      ```
 2. **Cross-platform packaging integrity scripts:**
    - Shared packaging metadata / brand hygiene check (verifies `packaging/env.sh` values and rejects stale template placeholders):
      ```sh
      sh packaging/check-app-specific.sh
      ```
-   - **macOS:** Build `.app` & verify `Info.plist`, codesign, and bundle invariants (`cargo xtask bundle` on macOS, plus package verification):
+   - **macOS:** Build `.app`, `.dmg`, and `lumencraft-cli-*.zip` (`packaging/macos/package.sh --arch aarch64` / `universal`), verify `Info.plist` + codesign (`cargo xtask bundle`), and run `verify.sh` on non-sandboxed macOS hosts / CI runners (`hdiutil create` requires disk-image creation outside restricted sandboxes):
      ```sh
      sh packaging/macos/verify.sh
      ```
@@ -50,12 +60,12 @@ Every tagged release distributes binaries and archives alongside licence disclos
 
 | Platform | Artefact / Format | Builder / Config | Notes |
 | :--- | :--- | :--- | :--- |
-| **macOS** | Signed/universal `.dmg` installer (`x86_64` + `aarch64` `.app`) and macOS archive(s) | `packaging/macos/package.sh`, `Info.plist.in`, `entitlements.plist` | Verified via `cargo xtask bundle` (`plutil -lint`, ad-hoc/release `codesign`) and `packaging/macos/verify.sh`. |
+| **macOS** | Signed/universal `.dmg` installer (`x86_64` + `aarch64` `.app`), CLI `.zip` | `packaging/macos/package.sh`, `Info.plist.in`, `entitlements.plist` | Verified via `cargo xtask bundle` / `package.sh` (`LumenCraft.app` `24M` arm64 build, `plutil -lint OK`, ad-hoc `codesign --verify --strict --deep`) and `packaging/macos/verify.sh` on non-sandboxed macOS hosts (`hdiutil create` requires disk-image creation outside restricted sandboxes). |
 | **Linux** | `.AppImage` + `.AppImage.zsync`, `.deb`, `.rpm`, portable `.tar.gz` | `packaging/linux/package.sh` | AppImage tested via `packaging/linux/apprun-test.sh`; includes desktop entry, AppStream metadata, and MIME associations. |
 | **Linux (Flatpak / OCI)** | `.flatpak` bundle and GHCR OCI image (`org.lumencraft.LumenCraft`) | `packaging/linux/flatpak-bundle.sh`, `packaging/linux/flatpak-oci.sh`, `packaging/linux/flatpak/org.lumencraft.LumenCraft.yml` | Sandboxed desktop distribution matching `packaging/env.sh` App ID. |
 | **Windows** | WiX v5 `.msi` installer and `-portable.zip` standalone archive | `packaging/windows/package.ps1`, `packaging/windows/INSTALLATION.md` | Dual-scope MSI (`PerUser` default, optional `PerMachine`); static MSVC CRT; checked via `check-icons.ps1` & `check-install-policy.ps1`. |
 | **FreeBSD** | `.tar.gz` binary archive | `packaging/freebsd/package.sh` | Desktop & headless CLI archive for FreeBSD builds. |
-| **Web (WASM)** | Trunk `web-release` static `.zip` bundle | `packaging/web/package.sh` | Built targeting `wasm32-unknown-unknown` with relative (`./`) asset URLs; verified via `cargo xtask wasm`. |
+| **Web (WASM)** | Trunk `web-release` static `.zip` bundle | `packaging/web/package.sh`, `packaging/web/{_headers,.htaccess}` | Built targeting `wasm32-unknown-unknown` with relative (`./`) asset URLs and strict Zero-Telemetry CSP (`connect-src 'none'`), COOP, and COEP headers; verified via `cargo xtask wasm` + `telemetry`. |
 | **Compliance & Checksums** | **`THIRD-PARTY-LICENSES.html`**, `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`, `ATTRIBUTION.md`, `SHA256SUMS.txt` | `cargo xtask licenses` (`about.toml`) & release workflow | Bundled inside packages / release assets so every binary download includes complete third-party dependency & asset notices. |
 
 ---
@@ -63,11 +73,12 @@ Every tagged release distributes binaries and archives alongside licence disclos
 ## 3. App-Specific Packaging Notes
 
 - **Canonical identity (`packaging/env.sh`):** All installers share App ID `org.lumencraft.LumenCraft`, binary/CLI slug `lumencraft` / `lumencraft-cli`, and project/template/interchange file associations (`.lumencraft`, `.lctemplate`, `.pzfx`, `.prism`). `packaging/check-app-specific.sh` must pass cleanly without template leftover strings.
+- **Zero Telemetry & Web Privacy Headers:** LumenCraft ships zero telemetry, analytics, crash uploaders, update-check pings, or external third-party cloud scanners (`cargo xtask telemetry`). Web deployments bundle `packaging/web/_headers` and `packaging/web/.htaccess` enforcing `default-src 'self'`, `connect-src 'none'`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, and `Cross-Origin-Embedder-Policy: require-corp`.
 - **Zero bundled fonts:** Packages do **not** embed binary fonts by default (`cargo xtask assets` rejects tracked `.ttf`/`.otf`/`.woff`/`.woff2`). Desktop releases resolve OS fonts at runtime (`LUMENCRAFT_FONTS_DIR` override); web tests using `bundled-fonts` require explicit local font staging (`cargo xtask web-fonts`) with matching licence notice rules ([docs/licences.md](licences.md)).
 - **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.lumencraft`, `.lctemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`.
 - **Linux specifics:** `packaging/linux/` installs desktop, AppStream, icon sizes, and MIME definitions consistently for `.AppImage`, `.deb`, `.rpm`, and Flatpak (`org.lumencraft.LumenCraft`).
 - **Windows specifics:** WiX v5 dual-scope MSI supports unprivileged per-user installation by default and elevated per-machine deployment ([packaging/windows/INSTALLATION.md](../packaging/windows/INSTALLATION.md)). Both `.msi` and `-portable.zip` link the static CRT to avoid external redistributable prompts.
-- **Web specifics:** Built via Trunk under `web-release` with relative root paths so bundles deploy cleanly on subpath hosts without rebuilding.
+- **Web specifics:** Built via Trunk under `web-release` with relative root paths (`./`) and strict no-egress security headers (`packaging/web/{_headers,.htaccess}`) so bundles deploy cleanly on subpath hosts without rebuilding.
 
 ---
 

@@ -31,18 +31,18 @@ Claimable engineering roadmap for **LumenCraft**. For current verified capabilit
 
 | Milestone | Scope & target gate | Was | Status | Notes |
 |---|---|---|---|---|
-| **R0** | Align with house principles & typed engine scaffold | Phases A–E | in progress | `R0.1`–`R0.4`, `R0.7`–`R0.13` done (Waves 8A–11); `R0.5` (`xtask licenses` & `release.yml` done; CI gate wiring deferred), `R0.6` (GH Actions run open), `R0.14` (CI release dry-run & `R8.3` screenshots open) in progress |
+| **R0** | Align with house principles & typed engine scaffold | Phases A–E | in progress | `R0.1`–`R0.5`, `R0.7`–`R0.13` done (Waves 8A–14); `R0.6` (Zero-Telemetry policy & local `xtask telemetry` done; remote GH Actions `actionlint` open), `R0.14` (clean-room PNG screenshots & local `LumenCraft.app` build/`plutil`/`codesign` done; non-sandboxed `.dmg`/`.zip` `verify.sh`, `v0.1.0-rc1` CI tag & `cargo deny`/`cargo about` run open) in progress |
 | **R1** | Workspace scaffold, numerical foundations & NIST StRD oracle | `M0`, `M1` (partial), `G1` | done | `58` NIST StRD datasets + `D1` R `4.5.2` oracle matrices verified (`0 h`) |
 | **R2** | Typed data tables, reactive DAG, persistence & `.prism`/`.pzfx` import | `M1`, `M2`, `G2`, `G10` | done | Waves 1–6 incl. `.lumencraft.d/`, `G2` & `G10` fixes verified (`0 h`) |
 | **R3** | Core biostatistics, ANOVA/REML, survival, contingency, ROC & multivariate | `M2`, `M6`, `G3`, `G8` | done | Waves 2–5 incl. `BarnardExact`, `PassingBablok`, MICE, `G8` Koopman fix (`0 h`) |
 | **R4** | Nonlinear regression solver, `117` equations & custom DSL/ODE | `M3`, `M6`, `G4`, `G9` | done | Waves 2–5 incl. `47` pharma models, `MAX_AST_NODES`, iterative `Expr` (`0 h`) |
-| **R5** | Publication graphing, vector SVG/PDF 1.7/TIFF/EMF & Page Layouts | `M4`, `M6`, `S2`, `G5`, `G11` | in progress | `G5` Poppler+Ghostscript PDF QA done; `R5.4` native binary clipboard/print dialogs & live layout drag-snap open (`2–3 h`, **Beta**) |
+| **R5** | Publication graphing, vector SVG/PDF 1.7/TIFF/EMF & Page Layouts | `M4`, `M6`, `S2`, `G5`, `G11` | done | `R5.1`–`R5.4` & `G5` done (Waves 2–13): Poppler+Ghostscript PDF QA, live macOS `NSPasteboard` `%PDF-1.7` + Win32/Linux vector clipboard adapters, `ActiveDialog::Print` + OS printer discovery/preview, and live WYSIWYG layout drag-snap/resize grips |
 | **R6** | Multiple Variables workflows, Calculated Variables & Multifactor ANOVA | `M6`, `G7` | done | Waves 2–4 end-to-end verified (`0 h`) |
-| **R7** | Automation, headless CLI, `--control`, MCP & performance budgets | `M5` (headless), `M6`, `Slice 0`, `G12`, `G14` | done | `90` engine commands, `96`-curve 4PL `< 50 ms`, `G12` read-only skip & bounded undo (`0 h`) |
-| **R8** | Live desktop & WASM UI shell, localization QA & `1.0` hardening | `M5` (UI), `M7`, `S1`, `G6`, `G13` | in progress | `UiApp`/HiDPI/RTL/`WebWorkspaceHost`/macOS bundle signing done; `R8.3`–`R8.4` (`eframe`/`wgpu`/`wasm32`, `20–33 h` **Alpha/Core**) & `R8.5` (`14–22 h` **1.0**) open |
-| **R9** | Post-parity scientific quality-of-life suite | `M8+`, `QOL-1`–`QOL-11` | done (core/UI/web) | Waves 5–7 wired all `11` QoL workflows across doc, domain, engine, `UiApp`, CLI & `WebWorkspaceHost` (browser Trunk deploy tracked in `R8.4`) |
+| **R7** | Automation, headless CLI, `--control`, MCP & performance budgets | `M5` (headless), `M6`, `Slice 0`, `G12`, `G14` | done | `92` engine commands (`90` Wave 11–14 + Wave 15 `sheet.extractResultTab` & `graph.formatSelectedPoints`), `96`-curve 4PL `< 50 ms`, `G12` read-only skip & bounded undo (`0 h`) |
+| **R8** | Live desktop & WASM UI shell, GUI-agent parity, localization QA & `1.0` hardening | `M5` (UI), `M7`, `S1`, `G6`, `G13` | in progress | `UiApp`/HiDPI/RTL/`WebWorkspaceHost`, `DesktopHostRuntime` (`R8.3` adapters), browser storage/locks/FS (`R8.4` adapters), `cjk_rtl_hidpi_desktop_qa`, arm64 `LumenCraft.app` `plutil`/`codesign`, & `gui_only` agent parity/Power wizard/28-workflow suite (`R8.6`–`R8.8`, `16×291` i18n, `32` `UI_COMMANDS`) done; external `eframe`/`wgpu` GPU crate link (`R8.3`), `wasm32`/`trunk` build (`R8.4`), & non-sandboxed `.dmg`/`.zip` + Windows/Linux/FreeBSD VM QA (`R8.5`) open |
+| **R9** | Scientific quality-of-life scope | `M8+`, `QOL-1`–`QOL-17` | in progress; scope revised | Existing Wave A code retained; `R9.7` requires diagnostics-only alignment. Active Wave B: `R9.12`, `R9.14`, equations-only `R9.16`, and `R9.17` (`WF-29`–`WF-49` extended `gui_only` suite). `R9.10`, `R9.11`, `R9.13`, and `R9.15` deferred without scheduled milestones ([scope](qol-beyond-parity.md)) |
 
-**Gate summary:** Headless **Alpha**, **Core**, and **Beta** scientific/engine/CLI/MCP/`UiApp` workflows pass today; reaching live GUI **Alpha** (`R8.3` Alpha host `10–17 h` + `R8.4` WASM `5–8 h` = `15–25 h`), **Core** (`R8.3` native pointer/inline GUI polish, `+5–8 h` -> `20–33 h`), **Beta** (`R5.4` native binary clipboard/print/layout drag, `+2–3 h` -> `22–36 h`), and **1.0** (`R8.5` cross-OS CJK/RTL desktop QA `2–4 h` + installer/hardware hardening `12–18 h` = `+14–22 h` -> **`36–58 h`**) leaves an estimated **`36–58 h`** single-agent parity/release scope alongside remaining `R0.5`/`R0.6`/`R0.14` CI and release gates.
+**Gate summary:** Headless **Alpha**, **Core**, and **Beta** scientific/engine/CLI/MCP/`UiApp`/`R5.4` workflows — plus full **`R8.6`–`R8.8` `gui_only` workflow parity** (`ui.inspect`, 8-tool `gui` MCP mode, `--gui-only` lock, 4-stage/8-family Power & Sample Size wizard, 10 modal predicates, `FormatSelectedPoints`, `ResultSheet` `Analyze` chaining, and the 28-workflow `gui_wf_*.rs` acceptance suite) — pass today; reaching live GPU desktop **Alpha** (`R8.3` external `eframe`/`wgpu` crate linkage), browser **Alpha** (`R8.4` `wasm32`/`trunk` release bundle), and signed cross-OS **1.0** (`R8.5` non-sandboxed macOS `.dmg`/`.zip` `verify.sh`, Windows/Linux/FreeBSD VMs & live browser QA alongside `R0.6` remote CI `actionlint` and `R0.14` `v0.1.0-rc1` CI tag/matrix) remains open.
 
 ---
 
@@ -74,16 +74,16 @@ Owner: open · Status: done · Was: Phase B2
 - [x] Implement `cargo xtask status` failing on duplicate Column 1 rows in any table in `docs/ROADMAP.md` or `docs/STATUS.md`, and add both to `cargo xtask ci` (Wave 8B).
 
 ### R0.5 Licences & supply-chain policy
-Owner: open · Status: in progress · Was: Phase B3
+Owner: maintainers · Status: done · Was: Phase B3 · Est. note: 0 h remaining
 
 - [x] Add `deny.toml`, `about.toml`, `about.hbs`, and `docs/licences.md` aligned with the allowlist and add the `licenses` job generating `THIRD-PARTY-LICENSES.html` in `.github/workflows/release.yml` (Wave 8A).
-- [ ] Implement `cargo xtask licenses` (`cargo deny check licenses`, `--html` fallback) and wire into CI gate workflow (`xtask/src/licenses.rs` & `release.yml` landed in Wave 8B; wiring `cargo-deny` + `cargo xtask licenses` into `.github/workflows/ci.yml` / `cmd_ci` deferred).
+- [x] Implement `cargo xtask licenses` (`cargo deny check licenses`, `--html` fallback) and wire it into `cmd_ci` and `.github/workflows/ci.yml` (`cargo install --locked cargo-deny && cargo deny check licenses`, Waves 8B & 13; offline workspace passes cleanly via `cargo xtask licenses` when `cargo-deny`/`cargo-about` binaries are absent locally).
 
 ### R0.6 Repository hygiene & CI cleanup
 Owner: open · Status: in progress · Was: Phase B4
 
-- [x] Add `.gitattributes`, workspace `publish = false` (`publish.workspace = true` across library crates), `unsafe_code = "forbid"`, `[profile.web-release]`, `clippy.toml` (`allow-indexing-slicing-in-tests`, `disallowed-types` for `std::sync::Mutex`), `.github/actionlint.yaml`, and remove dead `.github/workflows/nix.yml` (Wave 8A).
-- [ ] Verify CI workflows (`actionlint` & `cargo xtask ci`) pass cleanly on GitHub Actions (parked pending remote CI runner execution); **decision** (maintainers): keep SonarCloud external telemetry/service **out** unless maintainers approve adding a third-party service.
+- [x] Add `.gitattributes`, workspace `publish = false` (`publish.workspace = true` across library crates), `unsafe_code = "forbid"`, `[profile.web-release]`, `clippy.toml` (`allow-indexing-slicing-in-tests`, `disallowed-types` for `std::sync::Mutex`), `.github/actionlint.yaml`, remove dead `.github/workflows/nix.yml`, wire `cargo xtask telemetry` (zero telemetry/egress/analytics + workflow `permissions` / `${{ }}` hygiene) into `cmd_ci`, and invoke `actionlint` + `shellcheck` in `.github/workflows/ci.yml` (Waves 8A, 13–14). **Decision resolved (Zero-Telemetry policy):** SonarCloud and all external cloud scanners/telemetry services are permanently excluded.
+- [ ] Verify CI workflows (`actionlint` & `cargo xtask ci`) pass cleanly on live GitHub Actions runners (`actionlint` is not installed locally in this environment, so external live workflow lint/execution remains remote CI-only while `cargo xtask telemetry` and local CI gates pass).
 
 ### R0.7 Generated command & schema docs
 Owner: open · Status: done · Was: Phase B5
@@ -95,8 +95,8 @@ Owner: open · Status: done · Was: Phase B5
 ### R0.8 Typed `CommandSpec` registry
 Owner: open · Status: done · Was: Phase C1
 
-- [x] Replace `CommandDescriptor`, `catalog::COMMANDS` (`90` entries), and string `match` dispatch in `cmd_data.rs` / `cmd_sci.rs` with `crates/engine/src/cmd/mod.rs` (`CommandSpec`, `CommandGroup`, `Effects`, `Ctx`, `Registry`), migrating area-by-area with `serde_path_to_error` typed params and preserving WAL / `lumencraft.batch.v1` compatibility (Waves 9–11).
-- [x] Convert `UI_COMMANDS` (`29` entries in `crates/ui-egui/src/menus/ui_commands.rs`) to a typed `UiCommandSpec` struct and regenerate `crates/mcp/src/ui_catalog.rs` via `cargo xtask ui-commands` (Wave 9).
+- [x] Replace `CommandDescriptor`, `catalog::COMMANDS` (`90` entries), and string `match` dispatch in `cmd_data.rs` / `cmd_sci.rs` with `crates/engine/src/cmd/mod.rs` (`CommandSpec`, `CommandGroup`, `Effects`, `Ctx`, `Registry`), migrating area-by-area with `serde_path_to_error` typed params and preserving WAL / `lumencraft.batch.v1` compatibility (Waves 9–11; expanded to `92` entries in Wave 15 with `sheet.extractResultTab` & `graph.formatSelectedPoints`).
+- [x] Convert `UI_COMMANDS` (`29` entries in `crates/ui-egui/src/menus/ui_commands.rs`) to a typed `UiCommandSpec` struct and regenerate `crates/mcp/src/ui_catalog.rs` via `cargo xtask ui-commands` (Wave 9; expanded to `32` entries through Wave 16).
 
 ### R0.9 Structured `EngineError` & `ChecklistItem` remediation
 Owner: open · Status: done · Was: Phase C2
@@ -130,8 +130,9 @@ Owner: open · Status: done · Was: Phase D1, D2, D3
 ### R0.14 Release verification scripts & README scaffold
 Owner: open · Status: in progress · Was: Phase E
 
-- [x] Expand `docs/releasing.md`, add `packaging/macos/verify.sh`, `packaging/linux/apprun-test.sh`, `packaging/windows/check-icons.ps1`, pass `--cargo-profile web-release` in `packaging/web/package.sh`, generate `THIRD-PARTY-LICENSES.html` in `release.yml`, and modernize `README.md` with badges, section nav, Downloads, `platform/`, and one-line Status (Wave 8A).
-- [ ] Verify the signed release workflow dry-run end-to-end across CI artifacts and add `docs/images/` workspace screenshots to `README.md` once `R8.3` live desktop windowing lands.
+- [x] Expand `docs/releasing.md`, add `packaging/macos/verify.sh`, `packaging/linux/apprun-test.sh`, `packaging/windows/check-icons.ps1`, pass `--cargo-profile web-release` in `packaging/web/package.sh`, generate `THIRD-PARTY-LICENSES.html` in `release.yml`, and modernize `README.md` with badges, section nav, Downloads, `platform/`, Zero-Telemetry callout, and one-line Status (Waves 8A, 14).
+- [x] Generate clean-room `1440x900` Light Split Workspace and Dark Multi-Panel Layout PNG screenshots (`crates/ui-egui/examples/doc_screenshots.rs`, `cargo xtask screenshots [--check]`, `docs/images/workspace-split-fit.png`, `docs/images/workspace-layout-dark.png`, `ASSETS.md`, `README.md`) and run local macOS `arm64` release app validation (`LumenCraft.app` `24M`, `lumencraft-cli 0.1.0`, `plutil -lint OK`, ad-hoc `codesign --verify --strict --deep valid on disk`) (Wave 14).
+- [ ] Run non-sandboxed macOS `.dmg`/`.zip` `package.sh` + `verify.sh` dry-run (`hdiutil create` failed in sandbox with `Operation not permitted`), tag `v0.1.0-rc1` across the 5-OS GitHub Actions release matrix, and verify live `cargo deny`/`cargo about` CI execution.
 
 ---
 
@@ -234,10 +235,10 @@ Owner: maintainers · Status: done · Was: G11 (partial), M6 · Est. note: 0 h r
 - [x] Land `LayoutSheet` plot-origin alignment (`layout.alignOrigins`) & panel lettering, `graph.applyStyleFrom` ("Wand"), `ClipboardBundle` (with Wave 7 `emf_bytes`), `PrintJobSpec::spool_pdf`, subprocess pasteboard/print adapters, and Wave 7 live macOS `/usr/bin/pbcopy` + `/usr/bin/pbpaste` roundtrip (`macos_clipboard_live`, `EXECUTED_LIVE_ROUNDTRIP`).
 
 ### R5.4 Native binary OS vector clipboard, interactive print dialogs & live layout drag-snap
-Owner: open · Status: todo · Was: G11 (remaining `2–3 h`, **Beta**) · Est. note: 2–3 h
+Owner: maintainers · Status: done · Was: G11 (**Beta**) · Est. note: 0 h remaining
 
-- [ ] Implement native binary OS vector pasteboard APIs (`NSPasteboard` PDF on macOS, Win32 EMF on Windows, browser Clipboard API on WASM).
-- [ ] Wire interactive OS print-dialog submission and live WYSIWYG layout canvas drag-snap inside `R8.3` host windowing.
+- [x] Implement native binary OS vector pasteboard APIs (`write_os_clipboard_bundle` / `read_os_clipboard_pdf_bytes`: macOS `NSPasteboard` `com.adobe.pdf`/`public.png`/`public.svg-image`/`public.html`/`public.utf8-plain-text` verified live with `%PDF-1.7` byte roundtrip in `macos_clipboard_live`, Windows `CF_ENHMETAFILE`/`PNG`/`CF_HTML`/`SVG` STA adapter, Linux `wl-copy`/`xclip` `application/pdf`, and browser host clipboard adapters) (Wave 13).
+- [x] Wire interactive `ActiveDialog::Print` / `PrintDialogState` (`ui.print.open`, `file.print`) + OS printer discovery & print preview (`discover_os_printers`, `open_os_print_preview_dialog`) and live WYSIWYG layout `PlotOrigin` drag-snap, resize handles (`LayoutResizeHandle`), and alignment guide hairlines (Wave 13).
 
 ---
 
@@ -260,7 +261,7 @@ Owner: maintainers · Status: done · Was: G7, M6 · Est. note: 0 h remaining
 ### R7.1 `Slice 0`, headless CLI, `--control` TCP JSONL & MCP server
 Owner: maintainers · Status: done · Was: G14, Slice 0, M5 (headless) · Est. note: 0 h remaining
 
-- [x] Land `Slice 0` vertical gate, `lumencraft-cli` (`18 passed`, incl. `.lctemplate`, `perf --json`, `.lumencraft.d`, `.emf`), `lumencraft --control` (`9 passed`), `lumencraft-mcp` (`25 passed`, `29` synced `UI_COMMANDS`), and `90` registered engine commands (Waves 2–7).
+- [x] Land `Slice 0` vertical gate, `lumencraft-cli` (`31 passed` Wave 14 -> `35 passed` Wave 17, incl. `.lctemplate`, `perf --json`, `.lumencraft.d`, `.emf`, & `mcp_gui_only_parity`), `lumencraft --control` (`17 passed` Wave 14 -> `19 passed` Wave 17 across `lumencraft` incl. `gui_only_wiring`), `lumencraft-mcp` (`33 passed` / `30` synced `UI_COMMANDS` Wave 14 -> `39 passed` / `32` synced `UI_COMMANDS` Wave 17 incl. `gui_only_surface`), and `90` -> `92` registered engine commands (Waves 2–17).
 
 ### R7.2 Performance budgets, `1M`-cell virtualization & property/fuzz suites
 Owner: maintainers · Status: done · Was: G12, M6 · Est. note: 0 h remaining
@@ -274,34 +275,55 @@ Owner: maintainers · Status: done · Was: G12, M6 · Est. note: 0 h remaining
 ### R8.1 Pure-Rust `UiApp` shell, software RGBA compositor, HiDPI/RTL input & `WebWorkspaceHost`
 Owner: maintainers · Status: done · Was: G6 (shell), S1, M5 (partial) · Est. note: 0 h remaining
 
-- [x] Land `lumencraft-tools` (`21 passed`, **S1 GO**), `lumencraft-ui-egui` (`69 passed` default & `--no-default-features`, `UiApp`, RGBA/PNG compositor, `29` `UI_COMMANDS`, `NavigatorDragState`, `PortfolioGalleryState`, `F6` pane cycle, rulers, `ShortcutRegistry`, Wave 7 `ViewportMetrics` `1.0x`–`3.0x` HiDPI, `WorkspaceLayoutMap`, `UiInputEvent`, `InlineEditorState`, `VirtualWorkspaceFolder`), and `apps/lumencraft-web` `WebWorkspaceHost` (`5 passed`, zero JS, `#![forbid(unsafe_code)]`).
+- [x] Land `lumencraft-tools` (`21 passed`, **S1 GO**), `lumencraft-ui-egui` (`83 passed` Wave 14 -> `122 passed` Wave 17, `UiApp`, RGBA/PNG compositor incl. `1440x900` `doc_screenshots`, `30` -> `32` `UI_COMMANDS`, `NavigatorDragState`, `PortfolioGalleryState`, `F6` pane cycle, rulers, `ShortcutRegistry`, `ViewportMetrics` `1.0x`–`3.0x` HiDPI, `WorkspaceLayoutMap`, `UiInputEvent`, `InlineEditorState`, `VirtualWorkspaceFolder`), and `apps/lumencraft-web` `WebWorkspaceHost` (`13 passed`, `#![forbid(unsafe_code)]`, zero OS calls).
 
 ### R8.2 `16`-locale i18n, RTL mirroring & desktop CJK/RTL font/pasteboard checks
 Owner: maintainers · Status: done · Was: G13 (core & macOS QA), M7 (partial) · Est. note: 0 h remaining
 
-- [x] Land `16` locales × `167` keys = `2,672` translations (`0` missing in `i18n-report`), RTL UI mirroring (`ar`/`he`), locale decimal/CSV presets, Poppler+Ghostscript CJK/RTL `%PDF-1.7` QA, and live macOS `pbcopy`/`pbpaste` `de-DE` comma + `=A1*2` formula roundtrip (`crates/ui-egui/tests/macos_clipboard_live.rs`). Remaining live OS desktop CJK/RTL window verification joins `R8.5`.
+- [x] Land `16` locales × `291` keys = `4,656` translations (`0` missing catalog or command keys in `cargo xtask i18n-report`; expanded from `287` keys / `4,592` translations in Wave 14), RTL UI mirroring (`ar`/`he`), locale decimal/CSV presets, Poppler+Ghostscript CJK/RTL `%PDF-1.7` QA, and live macOS `pbcopy`/`pbpaste` `de-DE` comma + `=A1*2` formula roundtrip (`crates/ui-egui/tests/macos_clipboard_live.rs`). Remaining live OS target-host verification joins `R8.5`.
 
 ### R8.3 Live OS `eframe`/`egui`/`wgpu` desktop windowing & interactive event loop
-Owner: open · Status: todo · Was: G6 (desktop **Alpha** `10–17 h` + **Core** `5–8 h`), M5 · Est. note: 15–25 h (incl. Core pointer polish)
+Owner: open · Status: in progress · Was: G6 (desktop **Alpha** + **Core**), M5
 
-- [ ] Integrate `eframe`/`egui`/`wgpu` live OS window loop over `UiApp` and `UiInputEvent` (`apps/lumencraft`) across macOS, Linux (Wayland/X11), Windows, and FreeBSD (**Alpha**).
-- [ ] Bind native OS pointer drag-reorder, split-divider drag, inline grid/`InfoSheet`/title text widgets, trackpad pinch-zoom gestures, and `--in-window-menus`/`--new-instance` flags into the live host loop (**Core**).
+- [x] Implement `DesktopHostRuntime` (`apps/lumencraft/src/desktop_host.rs`) with `--in-window-menus`, `--new-instance` isolated crash-recovery journals, Retina DPI transitions, IME composition, trackpad pinch/inertial pan, and file-drop integration tests (`desktop_host_loop`; `lumencraft` `19 passed`) (Wave 13).
+- [ ] Link external `eframe`/`wgpu` GPU windowing crates across macOS, Linux (Wayland/X11), Windows, and FreeBSD once online `Cargo.lock` expansion is permitted (**Alpha**/**Core**).
 
 ### R8.4 Live `wasm32-unknown-unknown` Trunk WebGPU/WebGL2 browser hosting
-Owner: open · Status: todo · Was: G6 (WASM **Alpha** `5–8 h`), M5 · Est. note: 5–8 h
+Owner: open · Status: in progress · Was: G6 (WASM **Alpha**), M5
 
-- [ ] Install/verify `wasm32-unknown-unknown` sysroot and `trunk` in CI/release environments (`cargo xtask wasm` passing) and wire browser canvas + `localStorage` / Web Locks / File System Access host adapters into `apps/lumencraft-web` (`WebWorkspaceHost`) (**Alpha**).
+- [x] Implement `apps/lumencraft-web/src/host_adapters.rs` (`WebStorageManager` 5 MiB `localStorage` + forward-version guard, `WebLockCoordinator` multi-tab read-only contention fallback, `FileSystemAccessBridge` incremental `.lumencraft.d/` sync, `TouchGestureRecognizer`, and `WebBridgeSession` protocol; `lumencraft-web` `13 passed`) plus strict no-egress `index.html` and CSP/COOP/COEP headers (`packaging/web/{_headers,.htaccess}`) (Wave 13).
+- [ ] Compile the `wasm32-unknown-unknown` / `trunk build --release` bundle (`cargo xtask wasm`) once `wasm32` sysroot and `trunk` are available (**Alpha**).
 
 ### R8.5 Cross-OS hardware, CJK/RTL desktop QA & installer/signing hardening
-Owner: open · Status: in progress · Was: G13 (live desktop QA `2–4 h`), M7 (`12–18 h`, **1.0**) · Est. note: 14–22 h
+Owner: open · Status: in progress · Was: G13, M7 (**1.0**)
 
-- [x] Implement macOS `Info.plist` `plutil -lint` validation and ad-hoc `codesign --force --deep --sign -` + `--verify --strict --deep` in `xtask/src/bundle.rs` (Wave 7).
-- [ ] Run live OS desktop CJK/RTL system font & HiDPI/trackpad QA on macOS, Windows, Linux, and FreeBSD hosts (`R8.3` prerequisite).
-- [ ] Verify signed/notarized release artifacts (`packaging/macos/verify.sh`, Linux AppImage/deb/rpm/Flatpak, Windows MSI/portable, FreeBSD tarball) on target OS runners.
+- [x] Implement macOS `Info.plist` `plutil -lint` validation and ad-hoc `codesign --force --deep --sign -` + `--verify --strict --deep` in `xtask/src/bundle.rs` (Wave 7), plus live macOS `NSPasteboard` `%PDF-1.7` roundtrip (`macos_clipboard_live`), `cjk_rtl_hidpi_desktop_qa` (`ja`/`zh-CN`/`ko`/`ar`/`he` across `1.0x`/`1.5x`/`2.0x`/`3.0x`, `4 passed`), and local macOS `arm64` `LumenCraft.app` (`24M`) + `lumencraft-cli` build/`plutil -lint`/`codesign` verification (Waves 13–14).
+- [ ] Complete non-sandboxed macOS `.dmg`/`.zip` `package.sh` + `packaging/macos/verify.sh` verification (`hdiutil create` failed inside sandbox with `Operation not permitted`), Windows VM, Linux X11/Wayland VM (AppImage/deb/rpm/Flatpak), FreeBSD runner, and live browser QA runs.
+
+### R8.6 Semantic UI inspection, `gui` MCP toolset & strict `--gui-only` lock
+Owner: maintainers · Status: done · Was: GUI-agent Phase A ([`gui-workflows.md`](gui-workflows.md)) · Est. note: 0 h remaining
+
+- [x] Add `crates/ui-egui/src/inspect.rs` (`UiTreeSnapshot` / `inspect_ui_tree` / `ui.inspect`) exposing localized menus, active modal/wizard `tabs[]` (`UiTabSnapshot`) and recursive `widgets[]` (`UiWidgetNode`) with logical/physical bounds, values, and `enabled` + `disabled_reason` predicates, visible grid viewport cells (`excluded`, selection, link provenance), and hit-testable canvas scene targets, with `UI_COMMANDS` (`32` entries) synced to `crates/mcp/src/ui_catalog.rs` via `cargo xtask ui-commands` (Waves 15–16).
+- [x] Expose the 8-tool human-equivalent `gui` MCP toolset (`GUI_TOOL_NAMES` in `crates/mcp/src/gui_tools.rs`: `ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`) operating identically across in-process `UiApp` sessions (`GuiSessionHost` / `InProcessUiGuiHost`) and live `--control` TCP sessions (`crates/mcp/tests/gui_only_surface.rs` `6 passed`, `apps/lumencraft-cli/tests/mcp_gui_only_parity.rs` `3 passed`, Waves 15–17).
+- [x] Implement `--gui-only` enforcement (`GuiOnlyPolicy::Strict` in `crates/engine/src/lib.rs`, `ErrorCode::GuiOnlyViolation` / `"gui_only_violation"` in `crates/doc/src/result.rs`, `GUI_ONLY_SERVER_INSTRUCTIONS` in `crates/mcp/src/protocol.rs`) on `lumencraft-cli mcp --gui-only` and `lumencraft --control <port> --gui-only` (`apps/lumencraft/tests/gui_only_wiring.rs` `2 passed`), refusing direct `L5` engine bypass commands, `doc_inspect`, `resources/read`, and `ui.screenshot` disk writes while allowing internal `UiApp` widget handlers (`Caller::Ui`) and read-only UI inspection calls to commit cleanly (Waves 15–17).
+
+### R8.7 Interactive Power & Sample Size wizard, dynamic modal predicates & chained GUI surfaces
+Owner: maintainers · Status: done · Was: GUI-agent Phase B ([`gui-workflows.md`](gui-workflows.md)) · Est. note: 0 h remaining
+
+- [x] Implement the standalone 4-stage **Power & Sample Size** wizard (`crates/ui-egui/src/power_wizard.rs` `PowerWizardState` / `PowerWizardStage::{ExperimentDesign, EffectSize, SignificanceAndSolve, Results}` & `crates/stats/src/power.rs` across all `8` `PowerTestFamily` variants — two-sample unpaired *t*, paired *t* with within-pair correlation $r$, one-sample *t*, one-way ANOVA, two proportions, correlation, $\chi^2$, and simple linear regression — solving for Sample Size, Power, or Detectable Effect, with interactive `power.curve_hover` curves, sensitivity tables, live right-sidebar parameter recalculation, and linked XY+Info+Graph+Result sheet creation; `crates/stats/tests/power_oracle.rs` `8 passed`, Waves 15–16).
+- [x] Implement all 10 declarative conditional enablement and graying predicates `R1`–`R10` (`crates/ui-egui/src/modal_predicates.rs`: ANOVA pairing -> `Repeated Measures` tab & sphericity/REML `R1`; Gaussian toggle -> parametric vs. `Dunn's` rank post-hoc `R2`; control-column contrast -> `Dunnett` `R3`; two-group mode -> residual/rank/Welch toggles `R4`; contingency $2 \times 2$ clinical effect sizes vs. $R \times 2$ Cochran–Armitage trend `R5` & parent-coupled CI selectors `R6`; correlation matrix heatmap gate `R7`; single-subcolumn aggregation gate `R8`; custom *p*-value digit spinner `R9`; and leakage-safe `PCA` -> `PCR` dependent-variable exclusion `R10`, Waves 15–16).
+- [x] Wire multi-row grid selection -> right-click `Format Selected Points` (`ActiveDialog::FormatSelectedPoints`, `PointStyleOverride`, `graph.formatSelectedPoints`, `ui.formatPoints.open` for symbol color, symbol shape, and row-label hit tagging), `GroupedArrangement::Superimposed`, `Cmd+T` / `EditAnalysisParameters` `FactorialAnovaSpec::multiplicity` UI editing (generating post-hoc comparison tabs in `run_factorial_anova` remains deferred to [`R9.12`](#r912-categorical--continuous-table-analysis-completions-qol-12)), and direct toolbar `Analyze` chaining from tabular intermediate `ResultSheet` tabs (`sheet.extractResultTab` / direct `ResultSheet` analysis for `Transform`, `Transpose`, `Extract and Rearrange`, `Outlier Cleaned Data`, `PCA Scores`; verified in `gui_only_workflows` `4 passed`, Waves 15–16).
+
+### R8.8 Clean-room 28-workflow `gui_only` acceptance suite
+Owner: maintainers · Status: done · Was: GUI-agent Phase C ([`gui-workflows.md`](gui-workflows.md)) · Est. note: 0 h remaining
+
+- [x] Build and pass the 4-shard deterministic `gui_only` acceptance suite (`crates/ui-egui/tests/gui_wf_foundations_and_data.rs` [`6`], `gui_wf_group_comparisons_and_power.rs` [`9`], `gui_wf_regression_contingency_multivariate.rs` [`8`], `gui_wf_statistical_graphs.rs` [`5`] = `28` workflows `wf01`–`wf28`, alongside `gui_only_workflows.rs` [`4`], `crates/mcp/tests/gui_only_surface.rs` [`6`], `apps/lumencraft-cli/tests/mcp_gui_only_parity.rs` [`3`], and `apps/lumencraft/tests/gui_only_wiring.rs` [`2`]) driving original synthetic `lumencraft-testkit` datasets strictly through `ui.inspect` + GUI input primitives + `ui.screenshot` PNG verification under `GuiOnlyPolicy::Strict`, asserting live upstream cell-edit and `Cmd/Ctrl+E` exclusion DAG recomputation (**Core workflows** GUI parity gate, Wave 17).
 
 ---
 
 ## R9 Post-parity scientific quality-of-life suite
+
+Planning decisions in [`qol-beyond-parity.md`](qol-beyond-parity.md) separate existing implementation evidence from future scope. Deferred items are not in the active queue; existing code and persisted-file compatibility remain supported. Unchecked tasks below describe work still required, not newly assigned dates or implementation claims.
 
 ### R9.1 Non-destructive table archetype conversion (`QOL-1`)
 Owner: maintainers · Status: done · Was: QOL-1, M8+ · Est. note: 0 h remaining
@@ -333,10 +355,11 @@ Owner: maintainers · Status: done · Was: QOL-6, M8+ · Est. note: 0 h remainin
 
 - [x] Implemented `generate_methods_report` (`PlainText`, `Markdown`, `Latex` in `crates/engine/src/methods_report.rs`), `result.generateReport`, and `ui.result.copyMethodsReport` in `crates/ui-egui` (Waves 6–7).
 
-### R9.7 Inline assumption diagnostic banners & non-blocking remediation (`QOL-7`)
-Owner: maintainers · Status: done · Was: QOL-7, M8+ · Est. note: 0 h remaining
+### R9.7 Inline assumption diagnostic banners (diagnostics only, `QOL-7`)
+Owner: maintainers · Status: todo (revised scope) · Was: QOL-7, M8+ · Est. note: re-estimate
 
-- [x] Implemented `AssumptionDiagnosticBanner` & `RemediationKind` (`ui.result.applyRemediation`) creating non-destructive sibling analyses without altering the original user test (Wave 7).
+- Existing implementation: `AssumptionDiagnosticBanner` and `ui.result.applyRemediation` create sibling analyses. This records prior behavior, not completion of the revised scope.
+- [ ] Align banners, surfaced checklist wording, and acceptance tests with diagnostics-only presentation: show diagnostic values, limitations, and links to details; no test/transform/exclusion recommendations, ranked alternatives, remediation buttons, or banner-triggered analysis creation. Preserve numerical outputs and persisted/replay contracts.
 
 ### R9.8 Journal figure dimension & typography lock presets (`QOL-8`)
 Owner: maintainers · Status: done · Was: QOL-8, M8+ · Est. note: 0 h remaining
@@ -349,14 +372,45 @@ Owner: maintainers · Status: done · Was: QOL-9, M8+ · Est. note: 0 h remainin
 - [x] Implemented `CanvasPreviewFilter`, `apply_canvas_preview_filter` (`crates/render`), and `ui.previewFilter.set` non-mutating viewport filter in `crates/ui-egui` & `WebWorkspaceHost` (Waves 5 & 7).
 
 ### R9.10 Zero-install client-side WASM viewer & virtual workspace folder (`QOL-10`)
-Owner: maintainers · Status: done · Was: QOL-10, M8+ · Est. note: 0 h remaining
+Owner: maintainers · Status: deferred · Was: QOL-10, M8+ · Scheduling: no milestone assigned
 
-- [x] Implemented `VirtualWorkspaceFolder` (`crates/ui-egui`), `presentation_mode` (`ui.presentation.toggle`, `Cmd+Shift+P`), and `WebWorkspaceHost` (`apps/lumencraft-web`) opening `.lumencraft`/`.lctemplate`/`.pzfx`/`.prism`/CSV/TSV/`.lumencraft.d` 100% locally in memory; browser Trunk build/hosting tracked in `R8.4` (Wave 7).
+- Existing `VirtualWorkspaceFolder`, `presentation_mode`, and `WebWorkspaceHost` code remains supported. Further collaborator-viewer and folder-workspace QoL work is deferred. Core WASM compatibility and baseline browser hosting in `R8.4` remain separate requirements.
 
 ### R9.11 Unpacked Git-friendly `.lumencraft.d/` directory & checkpoints (`QOL-11`)
-Owner: maintainers · Status: done · Was: QOL-11, M8+ · Est. note: 0 h remaining
+Owner: maintainers · Status: deferred · Was: QOL-11, M8+ · Scheduling: no milestone assigned
 
-- [x] Implemented `save_project_unpacked_dir`/`open_project_unpacked_dir` (`crates/format`), `NamedCheckpoint` (`project.{create,list,restore,delete}Checkpoint`), and `.lumencraft.d` auto-detection in `engine`, `lumencraft-cli`, `apps/lumencraft`, and `WebWorkspaceHost` (Waves 5–7).
+- Existing unpacked-directory I/O, `NamedCheckpoint` commands, and CLI/desktop/web detection remain supported. Further QoL development is deferred; this does not remove file compatibility, recovery, or safety maintenance.
+
+### R9.12 Categorical & continuous table-analysis completions (`QOL-12`)
+Owner: open · Status: todo · Was: QOL-12, M8+ ([`calculators-and-quick-stats.md`](calculators-and-quick-stats.md))
+
+- [ ] Expose `cohens_kappa` (`Unweighted`, `Linear`, `Quadratic`) and `fleiss_kappa` on `ContingencyMethod` (`crates/doc`, `crates/stats/src/categorical.rs`, `methods_report.rs`), invert Newcombe `2×2` risk-difference bounds into Altman `NNTB`/`NNTH` CIs, emit McNemar discordant-pair odds-ratio CIs, add custom expected proportions to `PartsOfWhole` goodness-of-fit $\chi^2$, and add exact one-sample Binomial ($p_0 \in (0, 1)$) & paired Sign tests.
+- [ ] Add exact $\chi^2$ standard-deviation confidence intervals (`sd_ci`) to `DescriptiveSummary` (`crates/stats/src/column.rs`), support pre-summarized `Mean + SD/SEM + N` inputs directly in `run_two_group_analysis` (`crates/stats/src/two_group.rs`), and verify `run_factorial_anova` main/simple-effect multiplicity tabs (`crates/stats/src/anova.rs`, shared with `R8.7`).
+
+### R9.13 Instant statistical, distribution & Bayesian calculators (`QOL-13`)
+Owner: open · Status: deferred · Was: QOL-13, M8+ · Scheduling: no milestone assigned ([reference specification](calculators-and-quick-stats.md))
+
+- Deferred reference scope: stateless statistical/distribution/Bayesian `calc.*` commands, scalar formula builtins, and a Calculators drawer. No subset is queued for implementation; detailed proposals remain in the reference specification.
+
+### R9.14 Experimental subject randomization & random subset sampling (`QOL-14`)
+Owner: open · Status: todo · Was: QOL-14, M8+ ([`calculators-and-quick-stats.md`](calculators-and-quick-stats.md))
+
+- [ ] Add `crates/transform/src/randomize.rs` over `DeterministicRng` implementing `table.randomizeGroups` (seeded complete balanced & permuted-block subject-to-group allocation writing seed/block provenance to `InfoSheet`), `table.randomSampleRows` / `TransformAnalysisSpec::RandomSample` (uniform & stratified $k$-of-$N$ row sampling without replacement), and `table.simulateDistributions` (Uniform, Gaussian, Log-normal, Binomial, Poisson & Exponential column generation).
+
+### R9.15 Bench molarity, stock dilution & radiochemical decay calculators (`QOL-15`)
+Owner: open · Status: deferred · Was: QOL-15, M8+ · Scheduling: no milestone assigned ([reference specification](calculators-and-quick-stats.md))
+
+- Deferred reference scope: molarity, stock/serial dilution, moles/grams, and radiochemical calculators, including export-to-sheet conveniences. No subset is queued for implementation; detailed proposals remain in the reference specification.
+
+### R9.16 Live best-fit $\TeX$ equation annotations (equations only, `QOL-16`)
+Owner: open · Status: todo · Was: QOL-16, M8+ ([`calculators-and-quick-stats.md`](calculators-and-quick-stats.md))
+
+- [ ] Implement one-click symbolic or live-substituted $\TeX$-subset best-fit model equation annotations across RGBA, SVG, and `%PDF-1.7`, updating coefficients when the linked fit recalculates. Compact Letter Display, significance grouping, pairwise-display modes, and additional fit-statistic callouts are excluded. Re-estimate the narrowed scope.
+
+### R9.17 Extended multivariable, clustering, GLM & statistical-graphing `gui_only` acceptance suite (`QOL-17`)
+Owner: open · Status: todo · Was: QOL-17, M8+ ([`gui-workflows.md`](gui-workflows.md#5-extended-21-workflow-multivariable-clustering-glm--statistical-graphing-gui_only-matrix-r917--qol-17-planned))
+
+- [ ] Add Shards 5–7 (`crates/ui-egui/tests/gui_wf_{multivariable_and_transforms,clustering_glm_and_pharma,advanced_statistical_graphs}.rs`, `WF-29`–`WF-49`) under `GuiOnlyPolicy::Strict` covering conjunctive `Select and Transform` filtering, `MultipleVariables` formula-bar `Calculated Variables` (syntax/circularity guards & $2^{-\Delta\Delta C_t}$ qPCR), multi-schema `Extract and Rearrange`, direct `MultipleVariables` role-bound Welch *t* / Multifactor ANOVA / Kaplan–Meier / 4PL dose–response, full linkage/metric Hierarchical & K-Means clustering diagnostics, Cox PH & Poisson count GLMs, confidence ellipses/convex hulls, cross-tabulated `MultipleVariables` heatmaps, synchronized survival `Number at Risk` re-binning, bubble symbol sizing, and `R9.16` equations-only live $\TeX$ annotations (keeping Compact Letter Display and `QOL-7` remediation actions excluded).
 
 ---
 
@@ -365,18 +419,20 @@ Owner: maintainers · Status: done · Was: QOL-11, M8+ · Est. note: 0 h remaini
 | Step | Items | Depends on | Target gate |
 |---|---|---|---|
 | **Step 1 (8A)** | `R0.1`, `R0.2` (done); foundations for `R0.3`, `R0.5`, `R0.6`, `R0.7`, `R0.10`, `R0.14` | — | Scaffold |
-| **Step 2 (8B)** | `R0.3` (secrets gate), `R0.4` (pending/status), `R0.5` (licenses gate), `R0.6` (CI verification) | `R0.2` for `R0.4` | Scaffold |
+| **Step 2 (8B)** | `R0.3` (secrets gate), `R0.4` (pending/status), `R0.5` (licenses gate — done), `R0.6` (Zero Telemetry done; remote CI `actionlint` open) | `R0.2` for `R0.4` | Scaffold |
 | **Step 3** | `R0.10` (`lumencraft-platform` wiring & source checks), `R0.11` (versioned files) | `R0.6` | Scaffold |
 | **Step 4** | `R0.8` (`CommandSpec` registry, area by area), then `R0.9` (structured errors & remediation) | — (runs beside Step 3) | Engine contract |
 | **Step 5** | `R0.7` (generated `commands.md` & `schemas`), `R0.12` (format registry) | `R0.8` (commands), `R0.11` (schemas) | Docs & seams |
 | **Step 6** | `R0.13` (MCP/CLI/UI alignment) | `R0.8`, `R0.9` | Surfaces |
-| **Step 7** | `R8.3` (live `eframe`/`wgpu` windowing), `R8.4` (`wasm32`/Trunk browser host) | `R8.1` (done) | **Alpha** & **Core** |
-| **Step 8** | `R5.4` (native binary OS clipboard, print dialogs & layout drag-snap) | `R8.3` | **Beta** |
-| **Step 9** | `R8.5` (cross-OS CJK/RTL QA & installer hardening), `R0.14` (release verification & screenshots) | `R0.5`, `R8.3`, `R8.4` | **1.0** |
+| **Step 7** | `R8.3` (`DesktopHostRuntime` done; external `eframe`/`wgpu` crate link open), `R8.4` (`host_adapters.rs` & CSP/COOP/COEP done; `wasm32`/Trunk bundle open) | `R8.1` (done) | **Alpha** & **Core** |
+| **Step 7B** | `R8.6` (`ui.inspect`, `gui` MCP toolset & `--gui-only` lock — **done**), `R8.7` (Power & Sample Size wizard, 10 modal predicates & chained GUI surfaces — **done**), then `R8.8` (4-shard 28-workflow `gui_only` acceptance suite — **done**) | `R8.1` (done), `R0.13` (done) | **Core workflows** (`R8.6`–`R8.8` done) |
+| **Step 8** | `R5.4` (native binary OS clipboard, `ActiveDialog::Print` & WYSIWYG layout drag-snap — **done**) | `R8.1` | **Beta** (done) |
+| **Step 9** | `R8.5` (cross-OS VM QA & non-sandboxed `.dmg`/`.zip` `verify.sh`), `R0.14` (`README.md` screenshots done; non-sandboxed dry-run & `v0.1.0-rc1` CI tag/matrix open) | `R0.5` (done), `R8.3`, `R8.4`, `R8.8` (done) | **1.0** |
+| **Step 10 (M8+)** | `R9.12` (table-analysis completions), `R9.14` (randomization & sampling), `R9.16` (equation callouts only), `R9.17` (extended 21-workflow `gui_only` suite `WF-29`–`WF-49`); `R9.10`, `R9.11`, `R9.13`, and `R9.15` excluded from active sequencing | `R0.8` (done), `R3.1`–`R3.3` (done), `R4.4` (done), `R5.1` (done), `R8.8` (done; `R9.12` & `R9.16` for `WF-33`/`WF-49`) | Post-`1.0` QoL; no new dates |
 
 **Active `**decision**` markers:**
-- **SonarCloud (`R0.6`):** **decision** — adding SonarCloud requires adopting an external service and token management; keep disabled unless maintainers explicitly approve.
 - **Plugins (`Parked`):** **decision** — dynamic plugin loading / third-party plugin SDKs stay out of `1.0` scope so the `L0`–`L7` workspace, `#![forbid(unsafe_code)]`, and clean-room guarantees stay self-contained.
+- **SonarCloud (`R0.6`):** **Decision resolved (Zero-Telemetry policy):** SonarCloud and all external cloud scanners/telemetry services are permanently excluded; `cargo xtask telemetry` enforces zero telemetry/egress/analytics and workflow `permissions` / `${{ }}` hygiene inside `cargo xtask ci`.
 
 ---
 
@@ -396,19 +452,19 @@ Legacy `G1`–`G14` parity gaps and the preserved `#known-defects` table live in
 | `M2` | Core biostatistics (`t`-tests, ANOVA, RM/REML), transforms & reactive DAG engine | [`R2.3`](#r23-reactive-recalculation-dag-bounded-undoredo--linked-file-error-propagation), [`R3.1`](#r31-descriptive-statistics-normality-battery-outliers--two-group-tests)–[`R3.2`](#r32-one-two-three-way-anova-rm-reml-mixed-models--multiplicity), [`R4.4`](#r44-derived-table-transforms) | Done (Waves 2–6) |
 | `M3` | Nonlinear regression (`LM` solver, weighting, ROUT, global fits, `117` built-in equations) | [`R4.1`](#r41-damped-lm-solver-weighting-robustrout-shared-globals-profile-cis--aiccflrt)–[`R4.2`](#r42-built-in-equation-library-117-models-across-all-categories) | Done (Waves 2–5) |
 | `M4` | Publication graphing, rich text, broken axes, SVG/`%PDF-1.7`/PNG/TIFF/`.emf` & PDF viewer QA | [`R5.1`](#r51-scientific-scene-compiler-rich-typography-nonlinearbroken-axes--brackets)–[`R5.2`](#r52-publication-svg-pdf-17--fontfile2-pngtiff--ecma-234-emf-export) | Done (Waves 2–5) |
-| `M5` | Headless CLI, `--control`, MCP, pure-Rust `UiApp`/`WebWorkspaceHost` + remaining **Alpha** live OS/WASM hosts | [`R7.1`](#r71-slice-0-headless-cli---control-tcp-jsonl--mcp-server), [`R8.1`](#r81-pure-rust-uiapp-shell-software-rgba-compositor-hidpirtl-input--webworkspacehost), [`R8.3`](#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop)–[`R8.4`](#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting) | Headless + `UiApp` done; `20–33 h` remaining (`R8.3`–`R8.4`) |
-| `M6` | Survival, Cox PH, Barnard/Koopman, ROC, MV/Calculated Vars, custom DSL/ODE, `.prism`/`.pzfx`, Layouts & `Beta` dialogs | [`R2.4`](#r24-clean-room-prism--pzfx-project-import-with-authoritative-cell-budget), [`R3.3`](#r33-survival-cox-ph-contingency-barnardkoopman-method-comparison-roc--glmspcamice), [`R4.3`](#r43-safe-custom-algebraicimplicitode-dsl-bytecode-vm), [`R5.3`](#r53-headless-page-layouts-style-cloning-spool-pdf--subprocessmacos-clipboard)–[`R5.4`](#r54-native-binary-os-vector-clipboard-interactive-print-dialogs--live-layout-drag-snap), [`R6.1`](#r61--calculated-variables-role-locking--level-ordering)–[`R6.2`](#r62-multifactor-anova-mv-groupingsplits--five-channel-mv-plots), [`R7.2`](#r72-performance-budgets-1m-cell-virtualization--propertyfuzz-suites) | Core landed; `2–3 h` Beta OS vector clipboard/print/layout drag remaining (`R5.4`) |
-| `M7` | `16`-locale i18n/RTL, macOS `pbcopy`/`pbpaste` & codesign, cross-OS hardware/CJK desktop QA & signed installers | [`R8.2`](#r82-16-locale-i18n-rtl-mirroring--desktop-cjkrtl-fontpasteboard-checks), [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening) | Core/macOS/PDF QA done; `14–22 h` **1.0** target-OS QA remaining (`R8.5`) |
-| `M8+` | `QOL-1`–`QOL-11` post-parity workflows + house-principles architecture alignment (`R0`) | [`R0`](#r0-align-with-house-principles), [`R9`](#r9-post-parity-scientific-quality-of-life-suite) | `QOL-1`–`QOL-11` done in `R9`; `R0` Phases A–E active |
+| `M5` | Headless CLI, `--control`, MCP, pure-Rust `UiApp`/`WebWorkspaceHost` + remaining **Alpha** live OS/WASM GPU/bundler linkage | [`R7.1`](#r71-slice-0-headless-cli---control-tcp-jsonl--mcp-server), [`R8.1`](#r81-pure-rust-uiapp-shell-software-rgba-compositor-hidpirtl-input--webworkspacehost), [`R8.3`](#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop)–[`R8.4`](#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting) | Headless + `UiApp` + `DesktopHostRuntime`/web host adapters done; external `eframe`/`wgpu` linkage (`R8.3`) & `wasm32`/Trunk build (`R8.4`) open |
+| `M6` | Survival, Cox PH, Barnard/Koopman, ROC, MV/Calculated Vars, custom DSL/ODE, `.prism`/`.pzfx`, Layouts & `Beta` clipboard/print/drag | [`R2.4`](#r24-clean-room-prism--pzfx-project-import-with-authoritative-cell-budget), [`R3.3`](#r33-survival-cox-ph-contingency-barnardkoopman-method-comparison-roc--glmspcamice), [`R4.3`](#r43-safe-custom-algebraicimplicitode-dsl-bytecode-vm), [`R5.3`](#r53-headless-page-layouts-style-cloning-spool-pdf--subprocessmacos-clipboard)–[`R5.4`](#r54-native-binary-os-vector-clipboard-interactive-print-dialogs--live-layout-drag-snap), [`R6.1`](#r61--calculated-variables-role-locking--level-ordering)–[`R6.2`](#r62-multifactor-anova-mv-groupingsplits--five-channel-mv-plots), [`R7.2`](#r72-performance-budgets-1m-cell-virtualization--propertyfuzz-suites) | Done (Waves 2–13; `R5.4` macOS `NSPasteboard` `%PDF-1.7` + Win32/Linux vector clipboard adapters, `ActiveDialog::Print`, & WYSIWYG layout drag-snap landed) |
+| `M7` | `16`-locale i18n/RTL, macOS `pbcopy`/`pbpaste`/`NSPasteboard` & codesign, cross-OS hardware/CJK desktop QA & signed installers | [`R8.2`](#r82-16-locale-i18n-rtl-mirroring--desktop-cjkrtl-fontpasteboard-checks), [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening) | Core/macOS/PDF/`cjk_rtl_hidpi_desktop_qa`/arm64 `.app` done; non-sandboxed `.dmg`/`.zip` & Windows/Linux/FreeBSD VMs open (`R8.5`) |
+| `M8+` | Active QoL: diagnostics-only banners, table-analysis completions, randomization, and equation callouts; house-principles alignment (`R0`) | [`R0`](#r0-align-with-house-principles), [`R9`](#r9-post-parity-scientific-quality-of-life-suite) | `R9.7` alignment pending; `R9.12`, `R9.14`, `R9.16` planned; `R9.10`, `R9.11`, `R9.13`, `R9.15` deferred without milestones |
 
 ### Release Gates
 
 | Release Gate | Required Roadmap Items | Status & Remaining Work |
 |---|---|---|
-| **Alpha** (first visual desktop & WASM release) | [`R1`](#r1-workspace-numerical-foundations--nist-strd-oracle)–[`R7`](#r7-headless-automation-cli---control-mcp--performance-budgets) headless parity + [`R8.1`](#r81-pure-rust-uiapp-shell-software-rgba-compositor-hidpirtl-input--webworkspacehost) + [`R8.3`](#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop) + [`R8.4`](#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting) | `15–25 h` remaining (`R8.3` Alpha host `10–17 h` + `R8.4` WASM `5–8 h`) |
-| **Core workflows** | **Alpha** + [`R8.3`](#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop) native pointer/text/zoom polish | `+5–8 h` (`20–33 h` cumulative) |
-| **Beta** (OS vector clipboard/print/layout drag) | **Core workflows** + [`R5.4`](#r54-native-binary-os-vector-clipboard-interactive-print-dialogs--live-layout-drag-snap) | `+2–3 h` (`22–36 h` cumulative) |
-| **1.0** (full signed installers & target-OS QA) | **Beta** + [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening) + [`R0`](#r0-align-with-house-principles) release gates | `+14–22 h` (`36–58 h` cumulative parity/release remaining) |
+| **Alpha** (first visual desktop & WASM release) | [`R1`](#r1-workspace-numerical-foundations--nist-strd-oracle)–[`R7`](#r7-headless-automation-cli---control-mcp--performance-budgets) headless parity + [`R8.1`](#r81-pure-rust-uiapp-shell-software-rgba-compositor-hidpirtl-input--webworkspacehost) + [`R8.3`](#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop) + [`R8.4`](#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting) | `DesktopHostRuntime` & browser host adapters landed; external `eframe`/`wgpu` crate link (`R8.3`) & `wasm32`/Trunk build (`R8.4`) open |
+| **Core workflows** | **Alpha** + [`R8.3`](#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop) native pointer/text/zoom binding + [`R8.6`](#r86-semantic-ui-inspection-gui-mcp-toolset--strict---gui-only-lock)–[`R8.8`](#r88-clean-room-28-workflow-gui_only-acceptance-suite) `gui_only` workflow parity | `R8.6`–`R8.8` **done** (`ui.inspect`, 8-tool `gui` MCP mode, `--gui-only`, 4-stage/8-family Power wizard, `R1`–`R10` modal predicates, `FormatSelectedPoints`, `ResultSheet` `Analyze` chaining, & 28-workflow `gui_wf_*` suite verified) + `DesktopHostRuntime` DPI/IME/pinch/drop tests landed; external GPU linkage/event pump (`R8.3`) and **Alpha** (`R8.4`) open |
+| **Beta** (OS vector clipboard/print/layout drag) | **Core workflows** + [`R5.4`](#r54-native-binary-os-vector-clipboard-interactive-print-dialogs--live-layout-drag-snap) | `R5.4` **done** (live macOS `NSPasteboard` `%PDF-1.7` + Win32/Linux adapters, `ActiveDialog::Print`, WYSIWYG layout drag-snap) |
+| **1.0** (full signed installers & target-OS QA) | **Beta** + [`R8.5`](#r85-cross-os-hardware-cjkrtl-desktop-qa--installersigning-hardening) + [`R0`](#r0-align-with-house-principles) release gates | `R0.5`, `README.md` screenshots & local `arm64` `.app` `plutil`/`codesign` done; non-sandboxed `.dmg`/`.zip` `verify.sh`, Windows/Linux/FreeBSD VMs, remote CI `actionlint` (`R0.6`), & `v0.1.0-rc1` tag/matrix (`R0.14`) open |
 
 ---
 

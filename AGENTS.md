@@ -49,6 +49,11 @@ Copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) is strictly forbidden. See [docs/licences
 ### Contributor Credits & Security
 Never delete, truncate, or omit contributor attributions in [docs/contributors.md](docs/contributors.md), `ATTRIBUTION.md`, or `NOTICE` (`cargo xtask contributors` keeps contributor records synced). Report or handle vulnerability details strictly per [SECURITY.md](SECURITY.md).
 
+### Zero Telemetry (`xtask telemetry`)
+1. **Strict zero-telemetry & zero-egress architecture.** Never add analytics, crash reporters, telemetry SDKs, auto-updaters, or HTTP client crates anywhere in Cargo manifests or `Cargo.lock`, and never introduce `fetch(`, `XMLHttpRequest`, `navigator.sendBeacon`, `WebSocket`, or external origins in `apps/lumencraft-web/` or `packaging/web/`.
+2. **Loopback-only local sockets.** Non-test production Rust code may bind TCP sockets only for explicit user-initiated local loopback IPC (`127.0.0.1` / `::1` via `validate_loopback_addr` in `--control` / MCP modes), and GitHub Actions workflows must pin `permissions: contents: read` without unvalidated `${{ github.event.* }}` script injection (`cargo xtask telemetry` enforces all 5 checks inside `cargo xtask ci`).
+3. **Web security headers.** Keep strict `Content-Security-Policy` (`default-src 'self'`, `connect-src 'none'`), `Referrer-Policy: no-referrer`, `Permissions-Policy`, `COOP`/`COEP`, and `X-Content-Type-Options: nosniff` in `packaging/web/_headers` and `packaging/web/.htaccess`.
+
 ---
 
 ## 2. Workspace Map (22 Crates)
@@ -72,22 +77,23 @@ Dependency direction strictly flows downward (`L0` -> `L1` -> ... -> `L6`), veri
 | `lumencraft-render` | `L3` | `crates/render` | Deterministic CPU rasterizer, PNG/TIFF, and ECMA-234 `.emf` renderer |
 | `lumencraft-tools` | `L4` | `crates/tools` | Interactive canvas hit-testing, selection handles, annotation/zoom tools, `cursors.toml` |
 | `lumencraft-engine` | `L5` | `crates/engine` | Headless `Session` execution, undo/redo (`MAX_UNDO_ENTRIES = 64`), command registry, `guard.rs` boundary, journaling |
-| `lumencraft-ui-egui` | `L6` | `crates/ui-egui` | UI state shell (`UiApp`), software RGBA compositor, menus, inspectors, `UI_COMMANDS`, and `i18n.rs` driving `lumencraft-engine` *(live `egui`/`eframe`/`wgpu` windowing planned in `R8.3`)* |
-| `lumencraft-mcp` | `L6` | `crates/mcp` | Model Context Protocol server exposing document inspection, commands, and headless tools |
-| `lumencraft` | `L7` *(app)* | `apps/lumencraft` | Desktop application binary (`UiApp` shell, OS integration, `preferences.json`/`shortcuts.json`, crash recovery; live `eframe`/`egui`/`wgpu` windowing planned in `R8.3`) |
-| `lumencraft-cli` | `L7` *(app)* | `apps/lumencraft-cli` | Headless CLI (`convert`, `run-batch`, `lumencraft.batch.v1` execution, exports) |
+| `lumencraft-ui-egui` | `L6` | `crates/ui-egui` | UI state shell (`UiApp`), software RGBA compositor, `ui.inspect` (`UiTreeSnapshot`), Power wizard, modal predicates, menus, inspectors, `UI_COMMANDS`, and `i18n.rs` driving `lumencraft-engine` *(live `egui`/`eframe`/`wgpu` windowing planned in `R8.3`)* |
+| `lumencraft-mcp` | `L6` | `crates/mcp` | Model Context Protocol server exposing document inspection, commands, headless tools, and the 8-tool `gui` / `--gui-only` UI surface (`GuiSessionHost`) |
+| `lumencraft` | `L7` *(app)* | `apps/lumencraft` | Desktop application binary (`UiApp` shell, `--control [--gui-only]` JSONL server, OS integration, `preferences.json`/`shortcuts.json`, crash recovery; live `eframe`/`egui`/`wgpu` windowing planned in `R8.3`) |
+| `lumencraft-cli` | `L7` *(app)* | `apps/lumencraft-cli` | Headless CLI (`convert`, `run-batch`, `lumencraft.batch.v1`, exports, and `mcp [--control-port <p>] [--gui-only]` via `InProcessUiGuiHost`) |
 | `lumencraft-web` | `L7` *(app)* | `apps/lumencraft-web` | WebAssembly browser workspace host (`wasm32-unknown-unknown`; Trunk deploy tracked in `R8.4`) |
 | `lumencraft-testkit` | `dev-only` | `crates/testkit` | Shared fixtures, NIST StRD corpus helpers, and headless harnesses (`[dev-dependencies]` only) |
 | `xtask` | `exempt` | `xtask/` | Workspace verification, codegen, and release-prep CLI (`cargo xtask <cmd>`) |
 
 ---
 
-## 3. Command Registries (Target Seam & Current Transition)
+## 3. Command Registries
 
-One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came from describing an unimplemented command table. Always keep docs aligned with both the actual code and the active seam:
+One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came from describing an unimplemented command table before it landed and deserializing raw positional tuples. Keep docs and generated files synchronized with the landed typed registries:
 
-- **Engine command registry:** The target architecture (`R0.8`) unifies command metadata, parameter schema, read-only classification, and dispatch in a single typed `CommandSpec` registry at `crates/engine/src/cmd/mod.rs`. Until `R0.8` lands, engine commands are declared in `COMMANDS: &[CommandDescriptor]` in `crates/engine/src/catalog.rs`, read-only classification lives in `is_read_only_command` (`crates/engine/src/lib.rs`), and dispatch runs through `crates/engine/src/{lib.rs,cmd_data.rs,cmd_sci.rs}`. Whenever adding or editing an engine command right now, update the table/handler/tests together in one PR and conform to [docs/command-ids.md](docs/command-ids.md).
-- **UI command registry:** UI-only actions live in `UI_COMMANDS` in `crates/ui-egui/src/menus/ui_commands.rs` (moving to a typed `UiCommandSpec` struct in `R0.8`; currently a 4-tuple slice `(id, label, shortcut, params_doc)`). `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and never destructure `UI_COMMANDS` tuples manually elsewhere (`cargo xtask ui-commands --check` verifies sync).
+- **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`92` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `MUTATES_DOCUMENT` / `READ_ONLY` / `IDEMPOTENT`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
+- **UI command registry:** UI-only actions use the typed `UiCommandSpec` struct slice `UI_COMMANDS` (`32` entries) in `crates/ui-egui/src/menus/ui_commands.rs`. `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and always check sync with `cargo xtask ui-commands --check`.
+- **Strict `--gui-only` channel lock:** Under `lumencraft --control <port> --gui-only` or `lumencraft-cli mcp [--control-port <p>] --gui-only` (`GuiOnlyPolicy::Strict` in `crates/engine/src/lib.rs`), direct `Caller::Control` / `Caller::Mcp` engine mutations, `doc_inspect`, `resources/read`, and disk-path `ui.screenshot` writes are rejected with `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`), while the 8 `gui` tools (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`) drive `UiApp` widgets that commit internally via `Caller::Ui`.
 
 ---
 
@@ -109,8 +115,10 @@ Run workspace checks through `cargo xtask <command>` (invokes `xtask/`):
 | `cargo xtask secrets [--history]` | Scan working tree (or `--history` across commits) for secrets, tokens, or private keys *(R0.3)* |
 | `cargo xtask pending [--count]` | List remaining uncompleted roadmap items/defects (or print counts with `--count`) *(R0.4)* |
 | `cargo xtask status` | Verify `docs/STATUS.md` live metrics and table Column 1 uniqueness *(R0.4)* |
-| `cargo xtask licenses` | Run licence allowlist audit (`cargo deny check licenses`) and generate `THIRD-PARTY-LICENSES.html` *(R0.5)* |
-| `cargo xtask commands [--check]` | Regenerate (or `--check`) `docs/commands.md` from engine & UI command registries *(R0.7)* |
+| `cargo xtask licenses [--html [out]]` | Verify crate licences offline against `deny.toml` / `Cargo.lock` (plus `cargo deny check licenses` when installed / `CI=true`) and optionally generate `THIRD-PARTY-LICENSES.html` *(R0.5)* |
+| `cargo xtask telemetry` | Enforce zero telemetry/egress crates, loopback-only sockets, workflow hygiene, and web security headers *(R0.6)* |
+| `cargo xtask screenshots [--check]` | Regenerate (or `--check` in-process PNG magic/dimensions/CRCs & `ASSETS.md` attribution for) `docs/images/*.png` *(R0.14)* |
+| `cargo xtask commands [--check]` | Regenerate (or `--check`) `docs/commands.md` from engine `CommandSpec` registry *(R0.7)* |
 | `cargo xtask schemas [--check]` | Regenerate (or `--check`) `docs/schemas/*.schema.json` from persisted document/manifest schemas *(R0.7)* |
 | `cargo xtask wasm` | Verify `wasm32-unknown-unknown` builds for web and core headless crates |
 | `cargo xtask corpus [--fetch\|--fetch-only]` | Verify (or fetch locally) external NIST StRD & regression test corpora |
@@ -150,7 +158,7 @@ Read these before editing code:
 - Keep each PR focused on **one** roadmap item (`R<m>.<n>`) unless splitting/grouping is explicitly planned in `docs/ROADMAP.md`.
 
 ### Architecture Rules
-1. **Headless first:** All document/data/analysis/graph mutations execute through `lumencraft-engine` (`Session::execute`), ensuring parity across GUI (`ui-egui`), CLI (`lumencraft-cli`), MCP (`lumencraft-mcp`), crash-recovery replay (`ops.journal`), and batch runs (`lumencraft.batch.v1`). UI layers must never mutate `Project` directly.
+1. **Headless first:** All document/data/analysis/graph mutations execute through `lumencraft-engine` (`Session::execute`), ensuring parity across GUI (`ui-egui` via `Caller::Ui`), CLI (`lumencraft-cli`), MCP (`lumencraft-mcp`), crash-recovery replay (`ops.journal`), and batch runs (`lumencraft.batch.v1`). UI layers must never mutate `Project` directly. Under strict `--gui-only`, interactive MCP/control callers must drive `UiApp` widgets rather than calling direct `L5` engine mutation commands.
 2. **Extend through seams:** Register new commands, analyses, fit equations, file formats, cursors, locales, and schema steps through the canonical seams documented in [docs/extending.md](docs/extending.md).
 3. **Data over code:** Prefer declarative descriptor tables, schema definitions, and TOML/struct registries (`CommandSpec`, `UiCommandSpec`, `cursors.toml`, parametric model metadata, format descriptors) over copy-pasted match arms.
 4. **Structured results:** Commands, fits, statistical analyses, and imports return typed result structures and typed errors (`EngineError`, `DocError`, `FormatError`) rather than opaque strings.
@@ -182,13 +190,16 @@ Once the `R0` `xtask` generators/gates are present on your branch, also run:
 
 ```sh
 cargo xtask secrets
+cargo xtask licenses
+cargo xtask telemetry
+cargo xtask screenshots --check
 cargo xtask commands --check
 cargo xtask schemas --check
 cargo xtask status
 cargo xtask pending
 ```
 
-(Running `cargo xtask ci` executes the full workspace CI bundle.)
+(Running `cargo xtask ci` executes the full workspace CI bundle. For strict `--gui-only` MCP/control/UI workflow checks, run integration targets `gui_only_workflows`, `gui_wf_foundations_and_data`, `gui_wf_group_comparisons_and_power`, `gui_wf_regression_contingency_multivariate`, and `gui_wf_statistical_graphs` in `lumencraft-ui-egui`, `gui_only_surface` in `lumencraft-mcp`, `mcp_gui_only_parity` in `lumencraft-cli`, and `gui_only_wiring` in `lumencraft`.)
 
 ### Parallel Agents
 When multiple agents work concurrently on the repository:

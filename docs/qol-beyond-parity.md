@@ -1,8 +1,10 @@
 # Post-Parity Quality-of-Life Enhancements (`M8+`)
 
-> **Status:** Implemented & verified across core crates, `lumencraft-engine`, `UiApp`, `lumencraft-cli`, `lumencraft-mcp`, and `WebWorkspaceHost` (Waves 5–7) · **Last updated:** 2026-11-14 · **Roadmap:** [`ROADMAP.md#r9`](ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) ([`STATUS.md`](STATUS.md); browser Trunk build & OS windowing remain in [`R8.3`](ROADMAP.md#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop)–[`R8.4`](ROADMAP.md#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting))
+> **Status:** Existing Wave A implementation evidence is retained; `QOL-7` is revised to diagnostics only, with implementation alignment still pending. `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` are deferred without a scheduled milestone. Active Wave B scope is `QOL-12`, `QOL-14`, equations-only `QOL-16`, and `QOL-17` (`WF-29`–`WF-49` extended `gui_only` workflow suite) · **Last updated:** 2026-11-14 · **Roadmap:** [`ROADMAP.md#r9`](ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) · **Implementation evidence:** [`STATUS.md`](STATUS.md)
 
-This document tracks **non-breaking quality-of-life (QoL) workflows** (`QOL-1`–`QOL-11`, mapped to [`ROADMAP.md#r9`](ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite)). Implemented and verified across foundational `L1`–`L6` schemas, domain crates, `lumencraft-engine`, `lumencraft-ui-egui` (`UiApp`), `lumencraft-cli`, `lumencraft-mcp`, and `WebWorkspaceHost` in Waves 5–7 ([`STATUS.md`](STATUS.md)).
+This document tracks quality-of-life (QoL) scope and its implementation evidence separately. The current plan retains table-analysis completions, subject randomization, live $\TeX$ equation callouts, and the extended 21-workflow multivariable/clustering/GLM/graphing `gui_only` acceptance suite in Wave B; Compact Letter Display (`CLD`) is excluded. Supporting specifications are in [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md) and [`gui-workflows.md`](gui-workflows.md).
+
+**Deferral policy:** Deferred items are retained for possible future reconsideration, outside the active implementation queue and effort totals. Existing viewer, unpacked-directory, and checkpoint code, file compatibility, and safety fixes remain supported; this planning change does not remove them. Deferring `QOL-10` does not defer core WASM compatibility or the baseline browser host work in `R8.4`. No implementation changes or new release dates are made by this scope revision.
 
 ---
 
@@ -20,7 +22,7 @@ Every item in this backlog must satisfy five invariants:
 
 ## Summary & Effort Matrix
 
-Hours follow the single-agent calibration in [`target-app-parity.md`](target-app-parity.md#calibration).
+Unchanged estimates below are historical scope estimates, following [`target-app-parity.md`](target-app-parity.md#calibration), rather than verified remaining work. Revised items require re-estimation; deferred estimates are excluded from active totals.
 
 | ID | Enhancement | Area | Crates (`L0`–`L6`) | Est. hours | Status (Waves 5–7) |
 |---|---|---|---|---:|---|
@@ -30,12 +32,19 @@ Hours follow the single-agent calibration in [`target-app-parity.md`](target-app
 | [QOL-4](#qol-4-optional-side-by-side-split-workspace) | Optional side-by-side split workspace (Data/Results + live Graph) | Workspace UX | `ui-egui`, `mcp` | 8–14 | **Done** (`R9.4`) |
 | [QOL-5](#qol-5-two-way-data-to-graph-point-brushing) | Two-way point brushing (hover/click graph glyph ↔ source table cell) | Graphing & QC | `chart`, `render`, `tools`, `ui-egui` | 8–12 | **Done** (`R9.5`) |
 | [QOL-6](#qol-6-one-click-methods-and-statistical-reporting-generator) | One-click Methods & statistical reporting paragraph (plain text / Markdown / LaTeX) | Biostatistics | `stats`, `fit`, `engine`, `ui-egui` | 6–10 | **Done** (`R9.6`) |
-| [QOL-7](#qol-7-inline-assumption-diagnostic-banners-with-non-blocking-remediation) | Inline assumption diagnostic banners with one-click test alternatives | Biostatistics | `stats`, `ui-egui` | 5–9 | **Done** (`R9.7`) |
+| [QOL-7](#qol-7-inline-assumption-diagnostic-banners-diagnostics-only) | Informational assumption diagnostics; no test recommendations or remediation actions | Biostatistics | `stats`, `ui-egui` | Re-estimate | **Revised; implementation alignment pending** (`R9.7`) |
 | [QOL-8](#qol-8-journal-figure-dimension-and-typography-lock-presets) | Journal column-width presets with locked print typography & stroke scaling | Graphing & Layouts | `doc`, `chart`, `engine`, `ui-egui` | 6–10 | **Done** (`R9.8`) |
 | [QOL-9](#qol-9-live-color-vision-deficiency-cvd-and-grayscale-canvas-preview) | Live colorblind (CVD) & grayscale print preflight toggle on canvas | Accessibility | `palette`, `render`, `ui-egui` | 4–7 | **Done** (`R9.9`) |
-| [QOL-10](#qol-10-zero-install-client-side-wasm-viewer-and-browser-folder-workspaces) | Zero-install client-side WASM collaborator viewer & browser folder workspaces | Web / Collaboration | `format`, `ui-egui`, `lumencraft-web` | 10–16 | **Done** (`R9.10`, Trunk deploy in `R8.4`) |
-| [QOL-11](#qol-11-unpacked-git-friendly-project-directory-and-in-file-checkpoints) | Unpacked Git-friendly directory mode & lightweight named checkpoints | Persistence | `format`, `engine`, `ui-egui` | 10–16 | **Done** (`R9.11`) |
-| | **Total post-parity QoL suite (`QOL-1`–`QOL-11`)** | | | **82–136 h** | **All 11 landed (`0 h` core remaining)** |
+| [QOL-10](#qol-10-zero-install-client-side-wasm-viewer-and-browser-folder-workspaces) | Zero-install client-side WASM collaborator viewer & browser folder workspaces | Web / Collaboration | `format`, `ui-egui`, `lumencraft-web` | Deferred | **Deferred; existing code retained** (`R9.10`) |
+| [QOL-11](#qol-11-unpacked-git-friendly-project-directory-and-in-file-checkpoints) | Unpacked Git-friendly directory mode & named checkpoints | Persistence | `format`, `engine`, `ui-egui` | Deferred | **Deferred; existing code retained** (`R9.11`) |
+| **Wave A active scope** | **`QOL-1`–`QOL-9`; diagnostics-only revision in `QOL-7`** | | | **Re-estimate** | **Existing core evidence retained; revised behavior not yet implemented** |
+| [QOL-12](#qol-12-categorical-and-continuous-table-analysis-completions) | Factorial ANOVA post-hoc tabs, Cohen/Fleiss $\kappa$, `NNT` CIs, custom GOF $\chi^2$, Binomial/Sign tests, $\chi^2$ SD CIs & summary *t*-tests | Biostatistics | `doc`, `stats`, `engine`, `ui-egui` | 8–13 | **Planned** (`R9.12`) |
+| [QOL-13](#qol-13-instant-statistical-distribution-and-bayesian-calculators) | Stateless statistical, distribution, and Bayesian calculators | Calculators & DSL | `stats`, `transform`, `engine`, `mcp`, `ui-egui` | Deferred | **Deferred; no scheduled milestone** (`R9.13`) |
+| [QOL-14](#qol-14-experimental-subject-randomization-and-random-subset-sampling) | Seeded complete/permuted-block group randomization, uniform/stratified $k$-of-$N$ row sampling & multi-distribution table generation | Experimental Design | `doc`, `transform`, `engine`, `ui-egui` | 6–10 | **Planned** (`R9.14`) |
+| [QOL-15](#qol-15-bench-molarity-dilution-and-radiochemical-decay-calculators) | Molarity, dilution, moles/grams, and radiochemical calculators | Bench Lab Tools | `stats`, `engine`, `ui-egui` | Deferred | **Deferred; no scheduled milestone** (`R9.15`) |
+| [QOL-16](#qol-16-live-tex-model-equation-annotations-equations-only) | Symbolic and live-substituted $\TeX$-subset best-fit equation callouts only | Graphing | `doc`, `fit`, `text`, `chart`, `engine`, `ui-egui` | Re-estimate | **Planned; narrowed scope** (`R9.16`) |
+| [QOL-17](#qol-17-extended-multivariable-clustering-glm-and-statistical-graphing-gui_only-suite) | 21-workflow extended multivariable, clustering, GLM, survival & graphing `gui_only` acceptance suite (`WF-29`–`WF-49`) | GUI Parity & QA | `ui-egui`, `mcp`, `testkit` | 10–16 | **Planned** (`R9.17`) |
+| **Wave B active scope** | **Statistical completions, randomization, equation callouts, and extended `gui_only` workflows** | | | **Re-estimate** | **`R9.12`, `R9.14`, `R9.16`, `R9.17`; post-`1.0`, no new dates** |
 
 ---
 
@@ -92,13 +101,16 @@ Hours follow the single-agent calibration in [`target-app-parity.md`](target-app
   - Cover both statistical comparisons and nonlinear regression (equation formula, weighting scheme, robust/ROUT settings, shared global parameters, AICc / extra-sum-of-squares *F*-test outcome, and profile-likelihood CI method).
 - **Non-breaking invariant:** Pure read-only formatter over `AnalysisSpec` and `ResultSheet`; alters zero stored or computed numbers.
 
-### QOL-7 Inline assumption diagnostic banners with non-blocking remediation
-- **Crates:** `crates/stats`, `crates/ui-egui` · **Est.:** `5–9 h`
+### QOL-7 Inline assumption diagnostic banners (diagnostics only)
+- **Crates:** `crates/stats`, `crates/ui-egui` · **Est.:** Re-estimate for revised scope
 - **Problem:** Normality, lognormality, homoscedasticity (Brown–Forsythe / Bartlett), and sphericity diagnostics are easy to overlook when buried in secondary result tabs.
 - **Scope:**
-  - Surface a compact, non-blocking status strip at the top of the primary Result tab summarizing checked assumptions (e.g., severe skewness/unequal variance detected on small or unbalanced groups, or candidate lognormal structure).
-  - Offer one-click non-destructive actions (*Duplicate as Welch ANOVA*, *View Residual Diagnostics*) that invoke `Change › Analysis Parameters…` or create a sibling analysis without ever overriding the researcher's chosen test automatically.
-- **Non-breaking invariant:** Purely advisory UI presentation backed by existing `G3`/`G4` diagnostic outputs; strictly clean-room wording.
+  - Surface a compact, non-blocking status strip at the top of the primary Result tab showing the diagnostics performed, their values, and their limitations; distinguish unchecked or inconclusive diagnostics from evidence about an assumption.
+  - Allow navigation to the underlying diagnostic tables and residual plots for inspection only.
+  - Do not recommend tests, transformations, exclusions, or analysis changes. Do not rank alternatives, offer remediation buttons, duplicate an analysis, or change the selected method from the banner. This restriction also covers checklist text surfaced by the banner.
+- **Acceptance:** A flagged diagnostic can be inspected without producing an alternative-test suggestion or any document mutation. Small sample size and failed normality checks must not trigger a recommendation.
+- **Implementation status:** Existing `AssumptionDiagnosticBanner`, checklist wording, and `ui.result.applyRemediation` behavior predate this decision. Aligning the QOL-7 surface and its tests remains pending; this document edit does not claim that behavior has changed or authorize removal of persisted fields or replayable command IDs.
+- **Non-breaking invariant:** Informational UI presentation backed by existing diagnostic outputs; no numerical changes or automatic analysis selection.
 
 ### QOL-8 Journal figure dimension and typography lock presets
 - **Crates:** `crates/doc`, `crates/chart`, `crates/ui-egui` · **Est.:** `6–10 h`
@@ -116,6 +128,7 @@ Hours follow the single-agent calibration in [`target-app-parity.md`](target-app
 - **Non-breaking invariant:** Viewport-only display filter (`L3`/`L6`); never mutates `GraphSpec` colors or exported SVG/PDF bytes unless the user explicitly switches palettes.
 
 ### QOL-10 Zero-install client-side WASM viewer and browser folder workspaces
+- **Planning status:** Deferred without a scheduled milestone. The scope below is retained for reference, not active implementation. Existing code remains supported; baseline browser hosting and core WASM checks are separate requirements.
 - **Crates:** `crates/format`, `crates/ui-egui`, `apps/lumencraft-web` · **Est.:** `10–16 h`
 - **Problem:** Collaborators, principal investigators, students, and peer reviewers frequently receive project archives on machines without native software installed (or on Linux, Chromebooks, or tablets), while institutional data-governance policies prohibit uploading unpublished raw experimental data to third-party cloud servers.
 - **Scope:**
@@ -125,9 +138,55 @@ Hours follow the single-agent calibration in [`target-app-parity.md`](target-app
 - **Non-breaking invariant:** Preserves strict `wasm32-unknown-unknown` compatibility (`cargo xtask wasm`) and zero-JS/zero-backend architecture rules in [`AGENTS.md`](../AGENTS.md).
 
 ### QOL-11 Unpacked Git-friendly project directory and in-file checkpoints
+- **Planning status:** Deferred without a scheduled milestone. The scope below is retained for reference, not active implementation. Existing unpacked files, checkpoint data, and commands remain supported.
 - **Crates:** `crates/format`, `crates/engine`, `crates/ui-egui` · **Est.:** `10–16 h`
 - **Problem:** Researchers routinely duplicate entire project files (`Assay_v1.prism`, `Assay_v2_no_outlier.prism`, `Assay_FINAL.prism`) before trying alternative curve fits, and binary containers produce opaque diffs in Git/DVC repositories.
 - **Scope:**
   - **Unpacked Directory Format (`.lumencraft.d/`):** Mirror the exact internal file tree of the deterministic `.lumencraft` ZIP container (`manifest.json`, canonical 2-space-indented JSON specs, RFC-4180 CSV data sheets) directly as a plain directory on disk so computational labs can track line-by-line Git diffs and attach folders directly in desktop or Chromium WASM workflows.
-  - **Lightweight Named Checkpoints:** Allow users to record named snapshots (e.g., *"Pre-exclusion raw fit"*, *"Submitted revision 1"*) inside a `.lumencraft` session so they can compare or restore prior analysis states without file sprawl.
+  - **Named Checkpoints:** Allow users to record named snapshots (e.g., *"Pre-exclusion raw fit"*, *"Submitted revision 1"*) inside a `.lumencraft` session so they can compare or restore prior analysis states without file sprawl. Existing snapshots store full project JSON; no lightweight-storage claim is made.
 - **Forward-compatibility hook (`G2`):** Design `crates/format` around a virtual archive trait (`ArchiveReader` / `ArchiveWriter`) backed by deterministic ZIP first (`G2`), making unpacked-directory I/O a thin second backend with identical schema validation.
+
+### QOL-12 Categorical and continuous table-analysis completions
+- **Crates:** `crates/doc`, `crates/stats`, `crates/engine`, `crates/ui-egui` · **Est.:** `8–13 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#2-categorical--continuous-table-analysis-completions-r912--qol-12)
+- **Scope:**
+  - Emit `ResultTabKind::MultipleComparisons` post-hoc tabs inside `run_factorial_anova` (`FactorialAnovaSpec::multiplicity`, also tracked on `R8.7` for `WF-09`/`WF-10`).
+  - Expose `cohens_kappa` (`Unweighted`, `Linear`, `Quadratic`) and `fleiss_kappa` via `ContingencyMethod`, invert Newcombe `2×2` risk-difference bounds into Altman `NNTB`/`NNTH` CIs, emit McNemar discordant-pair OR CIs, add custom expected proportions to `PartsOfWhole` goodness-of-fit $\chi^2$, and add exact one-sample Binomial ($p_0 \in (0, 1)$) & paired Sign tests.
+  - Add exact $\chi^2$ standard-deviation CIs (`sd_ci`) to `DescriptiveSummary` and direct `Mean + SD/SEM + N` support to `run_two_group_analysis`.
+- **Non-breaking invariant:** Additive `#[serde(default)]` enum variants and optional fields only; existing `.lumencraft` files and statistical oracle values remain unchanged.
+
+### QOL-13 Instant statistical, distribution and Bayesian calculators
+- **Planning status:** Deferred without a scheduled milestone. The scope below is retained for reference; it does not authorize new calculator commands, formula builtins, or UI drawers.
+- **Crates:** `crates/stats`, `crates/transform`, `crates/engine`, `crates/mcp`, `crates/ui-egui` · **Est.:** `10–16 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#3-instant-statistical-distribution--bayesian-calculators-r913--qol-13)
+- **Scope:**
+  - Add stateless read-only `calc.*` commands (`CommandGroup::Calculator`, `Effects::read_only()`) and a non-modal **Calculators** drawer (`ui.calculator.open`) for table-free calculations: binomial proportion & Garwood exact Poisson count CIs, clinical Bayes PPV/NPV/$\text{LR}^{\pm}$ from sensitivity/specificity/prior prevalence, two-mean error propagation ($A \pm B$, $A \cdot B$, and Fieller's exact quotient CI for $A / B$), summary-table multi-way ANOVA post-tests, forward/inverse probability distributions ($z, t, F, r, \chi^2$, Binomial, Poisson, Gaussian — also exposed as scalar functions in `=` Calculated Variables), Sellke–Bayarri–Berger & Colquhoun Bayesian $P$-value / False Positive Risk interpretation, summary $F$/$\text{AIC}_c$ fit comparisons, and scalar $\text{EC}_F$ from $(\text{EC}_{50}, h, F)$.
+- **Non-breaking invariant:** Zero document or undo-stack mutation during calculation; zero `.lumencraft` archive version changes.
+
+### QOL-14 Experimental subject randomization and random subset sampling
+- **Crates:** `crates/doc`, `crates/transform`, `crates/engine`, `crates/ui-egui` · **Est.:** `6–10 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#4-experimental-randomization--subset-sampling-r914--qol-14)
+- **Scope:**
+  - Add `crates/transform/src/randomize.rs` over `DeterministicRng` providing seeded **Complete** and **Permuted-Block** subject-to-group randomization (`table.randomizeGroups`, writing seed & block metadata to `InfoSheet` for ARRIVE reporting), non-destructive uniform/stratified $k$-of-$N$ row subset sampling without replacement (`table.randomSampleRows` / `TransformAnalysisSpec::RandomSample`), and multi-distribution column simulation (`table.simulateDistributions`).
+- **Non-breaking invariant:** Never mutates upstream raw observations in place; deterministic across native and `wasm32` targets.
+
+### QOL-15 Bench molarity, dilution and radiochemical decay calculators
+- **Planning status:** Deferred without a scheduled milestone. The scope below is retained for reference; no subset is moved into active work by this revision.
+- **Crates:** `crates/stats`, `crates/engine`, `crates/ui-egui` · **Est.:** `6–10 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#5-bench-molarity-dilution--radiochemical-calculators-r915--qol-15)
+- **Scope:**
+  - Add stateless wet-lab bench calculators (`calc.molarity`, `calc.dilution`, `calc.molesGrams`, `calc.radioactivity`) solving $m = C \cdot V \cdot \text{FW}$, single & serial stock dilutions ($C_1 V_1 = C_2 V_2$), moles $\leftrightarrow$ grams, and NUBASE2020-evaluated radionuclide half-life decay ($A(t) = A_0 2^{-\Delta t / t_{1/2}}$, carrier-free & decay-corrected specific activity, molar radioligand concentration, $\text{Bq} \leftrightarrow \text{Ci} \leftrightarrow \text{dpm}$), with optional one-click export to `InfoSheet` constants or `XY` dilution columns.
+- **Non-breaking invariant:** Pure read-only `calc.*` queries unless the user explicitly exports constants or creates a new dilution sheet.
+
+### QOL-16 Live $\TeX$ model equation annotations (equations only)
+- **Crates:** `crates/doc`, `crates/fit`, `crates/text`, `crates/chart`, `crates/engine`, `crates/ui-egui` · **Est.:** Re-estimate for equations-only scope · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#qol16-equations)
+- **Scope:**
+  - Add one-click insertion of symbolic or live-parameterized $\TeX$-subset best-fit model equations onto fitted `XY` graphs, rendered deterministically across RGBA, SVG, and `%PDF-1.7`.
+  - Refresh substituted coefficients when the linked fit recalculates; keep symbolic form available without copying values manually.
+- **Excluded:** Compact Letter Display, group letters, pairwise-display modes, significance-matrix algorithms, and additional fit-statistic callouts. Do not implement them as prerequisites or optional extras under this item.
+- **Acceptance:** Symbolic and substituted equations stay linked to the selected fit and render consistently on screen and in exports; existing significance brackets remain unchanged.
+- **Non-breaking invariant:** Add equation annotations through versioned graph metadata and existing commands; preserve existing graph rendering and archive safety guarantees.
+
+### QOL-17 Extended multivariable, clustering, GLM and statistical-graphing `gui_only` suite
+- **Crates:** `crates/ui-egui`, `crates/mcp`, `crates/testkit` · **Est.:** `10–16 h` · **Spec:** [`gui-workflows.md`](gui-workflows.md#5-extended-21-workflow-multivariable-clustering-glm--statistical-graphing-gui_only-matrix-r917--qol-17-planned)
+- **Problem:** While `R8.8` (`WF-01`–`WF-28`) verifies Core two-group, ANOVA, regression, contingency, PCA/PCR, and foundational graph workflows under `GuiOnlyPolicy::Strict`, deeper multivariable role-bound workflows (formula-bar `Calculated Variables` circularity guards, $2^{-\Delta\Delta C_t}$ qPCR pipelines, direct `MultipleVariables` Welch *t* / Multifactor ANOVA / Kaplan–Meier / multi-series 4PL dose–response, Cox PH, Poisson count GLMs, full linkage/metric clustering sweeps, synchronized survival `Number at Risk` re-binning, multivariable symbol sizing, and `R9.16` live $\TeX$ equation annotations) benefit from dedicated end-to-end `gui_only` regression shards.
+- **Scope:**
+  - Add 21 strict `gui_only` integration workflows (`WF-29`–`WF-49`) across 3 shards (`gui_wf_multivariable_and_transforms`, `gui_wf_clustering_glm_and_pharma`, `gui_wf_advanced_statistical_graphs`) driving `UiApp` exclusively through the 8 `ui.*` / `gui` perception and input primitives over original synthetic datasets in `lumencraft-testkit`, closing any inspector/dialog `ui.inspect` control gaps surfaced along the way.
+- **Excluded:** Compact Letter Display (`CLD`), group-letter displays, extra fit-statistic callouts (excluded per `QOL-16`), and assumption-banner test recommendations or remediation actions (excluded per `QOL-7`).
+- **Non-breaking invariant:** Pure `L6` inspection coverage and integration test shards; alters zero `.lumencraft` persistence formats or numerical solver tolerances.

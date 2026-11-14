@@ -80,6 +80,7 @@ Data series and fitted curves clip cleanly per segment without drawing spurious 
 - **Automatic collision-free stacking:** Brackets sort by column span (`|col_b - col_a|` ascending, then left column ascending), measure the maximum rendered height of bars, error bars, and scatter points beneath `[col_a, col_b]`, and stack upward in crisp vertical increments (`bracket_step_pt`).
 - **Live recalculation:** Editing or excluding a replicate in the upstream `DataSheet` recomputes the *p*-value / *q*-value in `lumencraft-stats`, updates the bracket label (`****`, `***`, `**`, `*`, `ns`, or formatted numeric $p$/$q$ according to the analysis `PValueFormat`), and hides/shows non-significant brackets automatically when `"Show only significant comparisons"` is active.
 - **Bracket styles:** Classic square bracket, half-tick bracket, flat line, or curly brace, with configurable line weight and font size.
+- **Planned Wave B extension (`R9.16` / `QOL-16`, [equations-only specification](calculators-and-quick-stats.md#qol16-equations)):** One-click symbolic or live-substituted $\TeX$-subset best-fit model equation callouts on regression graphs, linked to fit recalculation. Compact Letter Display, group letters, pairwise-display modes, and additional fit-statistic callouts are excluded; existing significance brackets remain unchanged.
 
 ---
 
