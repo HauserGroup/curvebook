@@ -5,9 +5,10 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::Path;
 
 use lumencraft_doc::{
-    CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation, GraphSheet,
-    HookSource, InfoSheet, LayoutItem, LayoutSheet, MAX_DATA_SETS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, ProjectDocument, ResultCell,
-    ResultSheet, ResultStatus, SheetId, SheetSection, TableArchetype, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation,
+    GraphSheet, HookSource, InfoSheet, LayoutItem, LayoutSheet, MAX_DATA_SETS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, NormalizeAnchor,
+    ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultStatus, SheetId, SheetSection, TableArchetype, TransformAnalysisSpec,
+    extract_template_hooks, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 
 use crate::csv::{CsvOptions, export_datasheet_to_csv};
@@ -295,27 +296,174 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
     Ok(out)
 }
 
-/// Migrate a deserialized JSON [`ProjectDocument`] from `from_version` to [`CURRENT_SCHEMA_VERSION`].
+struct SchemaMigrationStep {
+    from_version: u32,
+    apply: fn(&mut serde_json::Value) -> Result<(), FormatError>,
+}
+
+const MIGRATION_STEPS: &[SchemaMigrationStep] = &[SchemaMigrationStep { from_version: 0, apply: migrate_v0_to_v1 }];
+
+/// Migrate a deserialized JSON [`ProjectDocument`] forward step-by-step from `from_version` to
+/// [`CURRENT_SCHEMA_VERSION`], filling backwards-compatible optional fields and rejecting unsupported
+/// future major schemas cleanly.
 pub fn migrate_document_json(mut value: serde_json::Value, from_version: u32) -> Result<serde_json::Value, FormatError> {
     if from_version > CURRENT_SCHEMA_VERSION {
         return Err(FormatError::UnsupportedSchemaVersion { version: from_version, max_supported: CURRENT_SCHEMA_VERSION });
     }
-    if from_version == CURRENT_SCHEMA_VERSION {
-        return Ok(value);
+
+    for step_ver in from_version..CURRENT_SCHEMA_VERSION {
+        let Some(step) = MIGRATION_STEPS.iter().find(|s| s.from_version == step_ver) else {
+            return Err(FormatError::UnsupportedSchemaVersion { version: step_ver, max_supported: CURRENT_SCHEMA_VERSION });
+        };
+        (step.apply)(&mut value)?;
     }
-    // Schema v0 -> v1 migration: normalize missing optional v1 fields and bump schema_version.
-    if from_version == 0
-        && let Some(obj) = value.as_object_mut()
-    {
-        obj.insert(String::from("schema_version"), serde_json::Value::from(CURRENT_SCHEMA_VERSION));
-        obj.entry(String::from("info_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        obj.entry(String::from("result_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        obj.entry(String::from("graph_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        obj.entry(String::from("layout_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
-        obj.entry(String::from("active_sheet_id")).or_insert(serde_json::Value::Null);
-        obj.entry(String::from("family_anchor_sheet_id")).or_insert(serde_json::Value::Null);
-    }
+
+    backfill_compatible_fields(&mut value, from_version < CURRENT_SCHEMA_VERSION);
     Ok(value)
+}
+
+fn migrate_v0_to_v1(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(String::from("schema_version"), serde_json::Value::from(1_u32));
+        backfill_top_level_fields(obj);
+    }
+    Ok(())
+}
+
+fn backfill_top_level_fields(obj: &mut serde_json::Map<String, serde_json::Value>) {
+    obj.entry(String::from("title")).or_insert_with(|| serde_json::Value::String(String::from("Untitled Project")));
+    obj.entry(String::from("data_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("info_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("result_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("graph_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("layout_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("active_sheet_id")).or_insert(serde_json::Value::Null);
+    obj.entry(String::from("family_anchor_sheet_id")).or_insert(serde_json::Value::Null);
+}
+
+fn backfill_compatible_fields(value: &mut serde_json::Value, bump_schema_version: bool) {
+    let Some(obj) = value.as_object_mut() else {
+        return;
+    };
+    if bump_schema_version {
+        obj.insert(String::from("schema_version"), serde_json::Value::from(CURRENT_SCHEMA_VERSION));
+    } else {
+        obj.entry(String::from("schema_version")).or_insert_with(|| serde_json::Value::from(CURRENT_SCHEMA_VERSION));
+    }
+    backfill_top_level_fields(obj);
+
+    if let Some(data_sheets) = obj.get_mut("data_sheets").and_then(serde_json::Value::as_array_mut) {
+        for ds in data_sheets {
+            backfill_data_sheet_defaults(ds);
+        }
+    }
+    if let Some(info_sheets) = obj.get_mut("info_sheets").and_then(serde_json::Value::as_array_mut) {
+        for info in info_sheets {
+            backfill_info_sheet_defaults(info);
+        }
+    }
+    if let Some(result_sheets) = obj.get_mut("result_sheets").and_then(serde_json::Value::as_array_mut) {
+        for res in result_sheets {
+            backfill_result_sheet_defaults(res);
+        }
+    }
+    if let Some(graph_sheets) = obj.get_mut("graph_sheets").and_then(serde_json::Value::as_array_mut) {
+        for gs in graph_sheets {
+            backfill_graph_sheet_defaults(gs);
+        }
+    }
+    if let Some(layout_sheets) = obj.get_mut("layout_sheets").and_then(serde_json::Value::as_array_mut) {
+        for ls in layout_sheets {
+            backfill_layout_sheet_defaults(ls);
+        }
+    }
+}
+
+fn backfill_info_sheet_defaults(info: &mut serde_json::Value) {
+    let Some(obj) = info.as_object_mut() else {
+        return;
+    };
+    for arr_key in ["linked_data_sheets", "constants", "floating_notes"] {
+        obj.entry(String::from(arr_key)).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    }
+    obj.entry(String::from("notes_markdown")).or_insert_with(|| serde_json::Value::String(String::new()));
+    obj.entry(String::from("color_tag")).or_insert(serde_json::Value::Null);
+}
+
+fn backfill_layout_sheet_defaults(ls: &mut serde_json::Value) {
+    let Some(obj) = ls.as_object_mut() else {
+        return;
+    };
+    obj.entry(String::from("floating_notes")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("color_tag")).or_insert(serde_json::Value::Null);
+}
+
+fn backfill_data_sheet_defaults(ds: &mut serde_json::Value) {
+    let Some(obj) = ds.as_object_mut() else {
+        return;
+    };
+    obj.entry(String::from("frozen")).or_insert(serde_json::Value::Bool(false));
+    obj.entry(String::from("info_sheet_id")).or_insert(serde_json::Value::Null);
+    obj.entry(String::from("linked_regions")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("floating_notes")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("color_tag")).or_insert(serde_json::Value::Null);
+}
+
+fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
+    let Some(res_obj) = res.as_object_mut() else {
+        return;
+    };
+    res_obj.entry(String::from("status")).or_insert_with(|| serde_json::Value::String(String::from("UpToDate")));
+    res_obj.entry(String::from("analyzable_data")).or_insert(serde_json::Value::Null);
+    for arr_key in ["tabs", "scalars", "pairwise_comparisons", "fitted_curves", "checklist", "floating_notes"] {
+        res_obj.entry(String::from(arr_key)).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    }
+    res_obj.entry(String::from("color_tag")).or_insert(serde_json::Value::Null);
+    let Some(analysis) = res_obj.get_mut("analysis").and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+    let Some(kind) = analysis.get_mut("kind").and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+    if let Some(fit) = kind.get_mut("NonlinearRegression").and_then(serde_json::Value::as_object_mut) {
+        for opt_key in ["x_range_filter", "y_range_filter", "plot_x_min", "plot_x_max", "mv_y_column"] {
+            fit.entry(String::from(opt_key)).or_insert(serde_json::Value::Null);
+        }
+        for vec_key in ["mv_group_columns", "mv_x_columns"] {
+            fit.entry(String::from(vec_key)).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        }
+        for bool_key in ["plot_function_only", "homoscedasticity_test", "emit_residuals_tab", "emit_covariance_tab"] {
+            fit.entry(String::from(bool_key)).or_insert(serde_json::Value::Bool(false));
+        }
+    }
+    if let Some(two_grp) = kind.get_mut("TwoGroupComparison").and_then(serde_json::Value::as_object_mut) {
+        two_grp.entry(String::from("mv_group_column")).or_insert(serde_json::Value::Null);
+        two_grp.entry(String::from("mv_response_column")).or_insert(serde_json::Value::Null);
+    }
+    if let Some(surv) = kind.get_mut("Survival").and_then(serde_json::Value::as_object_mut)
+        && let Some(km) = surv.get_mut("KaplanMeier").and_then(serde_json::Value::as_object_mut)
+    {
+        km.entry(String::from("mv_time_column")).or_insert(serde_json::Value::Null);
+        km.entry(String::from("mv_status_column")).or_insert(serde_json::Value::Null);
+        km.entry(String::from("mv_group_column")).or_insert(serde_json::Value::Null);
+    }
+}
+
+fn backfill_graph_sheet_defaults(gs: &mut serde_json::Value) {
+    let Some(gs_obj) = gs.as_object_mut() else {
+        return;
+    };
+    gs_obj.entry(String::from("initialized")).or_insert(serde_json::Value::Bool(true));
+    gs_obj.entry(String::from("floating_notes")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    gs_obj.entry(String::from("color_tag")).or_insert(serde_json::Value::Null);
+    let Some(spec) = gs_obj.get_mut("spec").and_then(serde_json::Value::as_object_mut) else {
+        return;
+    };
+    for axis_key in ["x_axis", "y_axis", "y2_axis"] {
+        if let Some(axis) = spec.get_mut(axis_key).and_then(serde_json::Value::as_object_mut) {
+            axis.entry(String::from("additional_ticks")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+        }
+    }
 }
 
 /// Enforce all `lumencraft-doc` structural bounds, finite-float invariants, and DAG cycle absence.
@@ -529,6 +677,30 @@ fn validate_result_sheet(res: &ResultSheet) -> Result<(), FormatError> {
     if let Some(data) = &res.analyzable_data {
         validate_data_sheet(data)?;
     }
+    validate_analysis_hooks_and_bounds(&res.analysis.kind, &res.id)?;
+    Ok(())
+}
+
+fn validate_analysis_hooks_and_bounds(kind: &AnalysisKind, sheet_id: &SheetId) -> Result<(), FormatError> {
+    if let AnalysisKind::NonlinearRegression(fit) = kind {
+        for (idx, rule) in fit.parameter_rules.iter().enumerate() {
+            if let ParameterScope::PerDatasetConstant(pairs) = &rule.scope {
+                for (ds_idx, val) in pairs {
+                    if !val.is_finite() {
+                        return Err(FormatError::NonFiniteFloat { location: format!("{sheet_id}.parameter_rules[{idx}].per_dataset[{ds_idx}]") });
+                    }
+                }
+            }
+        }
+        let bounds = [fit.plot_x_min, fit.plot_x_max]
+            .into_iter()
+            .chain(fit.x_range_filter.into_iter().flat_map(|(a, b)| [a, b]))
+            .chain(fit.y_range_filter.into_iter().flat_map(|(a, b)| [a, b]))
+            .flatten();
+        if bounds.into_iter().any(|v| !v.is_finite()) {
+            return Err(FormatError::NonFiniteFloat { location: format!("{sheet_id}.nonlinear_fit_bounds") });
+        }
+    }
     Ok(())
 }
 
@@ -689,4 +861,156 @@ fn dfs_visit(
     let _ = stack.pop();
     state.insert(node.clone(), VisitState::Done);
     Ok(())
+}
+
+/// Recovery helper that detects circular [`HookSource`] references inside `doc`, breaks the
+/// offending hook edges cleanly so the dependency graph becomes acyclic, and returns human-readable
+/// diagnostic descriptions of each sanitized hook.
+pub fn sanitize_circular_hooks(doc: &mut ProjectDocument) -> Vec<String> {
+    let mut diagnostics = Vec::new();
+    let max_iterations = doc.total_sheet_count().saturating_mul(8).saturating_add(16);
+
+    for _ in 0..max_iterations {
+        let Err(FormatError::DependencyCycle { cycle }) = detect_dependency_cycles(doc) else {
+            break;
+        };
+        if cycle.len() < 2 {
+            break;
+        }
+        let default_info = doc.info_sheets.first().map(|s| s.id.clone());
+        let mut broke_edge = false;
+
+        for edge in cycle.windows(2) {
+            let [src_id, dst_id] = edge else {
+                continue;
+            };
+            if let Some(msg) = break_hook_edge_in_result_sheets(doc, src_id, dst_id, default_info.as_ref()) {
+                diagnostics.push(msg);
+                broke_edge = true;
+                break;
+            }
+            if let Some(msg) = break_hook_edge_in_graph_sheets(doc, src_id, dst_id, default_info.as_ref()) {
+                diagnostics.push(msg);
+                broke_edge = true;
+                break;
+            }
+            if let Some(msg) = break_hook_edge_in_layout_sheets(doc, src_id, dst_id, default_info.as_ref()) {
+                diagnostics.push(msg);
+                broke_edge = true;
+                break;
+            }
+        }
+
+        if !broke_edge {
+            break;
+        }
+    }
+
+    diagnostics
+}
+
+fn paired_info_for_result(doc: &ProjectDocument, source_sheet_id: &SheetId, default_info: Option<&SheetId>) -> Option<SheetId> {
+    doc.data_sheet(source_sheet_id).and_then(|d| d.info_sheet_id.clone()).or_else(|| default_info.cloned())
+}
+
+fn break_hook_edge_in_result_sheets(doc: &mut ProjectDocument, src_id: &SheetId, dst_id: &SheetId, default_info: Option<&SheetId>) -> Option<String> {
+    let paired_info = {
+        let res = doc.result_sheets.iter().find(|r| &r.id == src_id)?;
+        paired_info_for_result(doc, &res.analysis.source_sheet_id, default_info)
+    };
+    let res = doc.result_sheets.iter_mut().find(|r| &r.id == src_id)?;
+    match &mut res.analysis.kind {
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. }) => {
+            if let NormalizeAnchor::Hooked(hook) = zero_anchor
+                && resolve_hook_target(hook, paired_info.as_ref()).as_ref() == Some(dst_id)
+            {
+                *zero_anchor = NormalizeAnchor::FixedValue(0.0);
+                return Some(format!("broke circular Normalize zero_anchor HookSource from `{src_id}` to `{dst_id}`"));
+            }
+            if let NormalizeAnchor::Hooked(hook) = hundred_anchor
+                && resolve_hook_target(hook, paired_info.as_ref()).as_ref() == Some(dst_id)
+            {
+                *hundred_anchor = NormalizeAnchor::FixedValue(100.0);
+                return Some(format!("broke circular Normalize hundred_anchor HookSource from `{src_id}` to `{dst_id}`"));
+            }
+            None
+        }
+        AnalysisKind::NonlinearRegression(fit) => {
+            for rule in &mut fit.parameter_rules {
+                if let ParameterScope::HookedConstant(hook) = &rule.scope
+                    && resolve_hook_target(hook, paired_info.as_ref()).as_ref() == Some(dst_id)
+                {
+                    let param_name = rule.name.clone();
+                    rule.scope = ParameterScope::Local;
+                    return Some(format!("broke circular ParameterScope::HookedConstant(`{param_name}`) HookSource from `{src_id}` to `{dst_id}`"));
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+fn break_hook_edge_in_graph_sheets(doc: &mut ProjectDocument, src_id: &SheetId, dst_id: &SheetId, default_info: Option<&SheetId>) -> Option<String> {
+    let gs = doc.graph_sheets.iter_mut().find(|g| &g.id == src_id)?;
+    let mut removed = 0usize;
+    removed += strip_template_hooks_targeting(&mut gs.spec.title, dst_id, default_info);
+    removed += strip_template_hooks_targeting(&mut gs.spec.x_axis.title, dst_id, default_info);
+    removed += strip_template_hooks_targeting(&mut gs.spec.y_axis.title, dst_id, default_info);
+    if let Some(y2) = &mut gs.spec.y2_axis {
+        removed += strip_template_hooks_targeting(&mut y2.title, dst_id, default_info);
+    }
+    for ann in &mut gs.spec.annotations {
+        if let GraphAnnotation::TextBox { markdown, .. } = ann {
+            removed += strip_template_hooks_targeting(markdown, dst_id, default_info);
+        }
+    }
+    if removed > 0 { Some(format!("removed {removed} circular inline HookSource token(s) in graph `{src_id}` targeting `{dst_id}`")) } else { None }
+}
+
+fn break_hook_edge_in_layout_sheets(doc: &mut ProjectDocument, src_id: &SheetId, dst_id: &SheetId, default_info: Option<&SheetId>) -> Option<String> {
+    let ls = doc.layout_sheets.iter_mut().find(|l| &l.id == src_id)?;
+    let mut removed = 0usize;
+    for item in &mut ls.spec.items {
+        if let LayoutItem::TextCallout { markdown, .. } = item {
+            removed += strip_template_hooks_targeting(markdown, dst_id, default_info);
+        }
+    }
+    if removed > 0 { Some(format!("removed {removed} circular inline HookSource token(s) in layout `{src_id}` targeting `{dst_id}`")) } else { None }
+}
+
+fn strip_template_hooks_targeting(text: &mut String, target_id: &SheetId, default_info: Option<&SheetId>) -> usize {
+    if !text.contains("{{") {
+        return 0;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    let mut removed = 0usize;
+
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("}}") else {
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        };
+        let inner = &after_open[..close];
+        let token = format!("{{{{{inner}}}}}");
+        let hits_target = extract_template_hooks(&token)
+            .first()
+            .and_then(|hook| resolve_hook_target(hook, default_info))
+            .is_some_and(|resolved| &resolved == target_id);
+        if hits_target {
+            removed = removed.saturating_add(1);
+        } else {
+            out.push_str(&token);
+        }
+        rest = &after_open[close + 2..];
+    }
+    out.push_str(rest);
+    if removed > 0 {
+        *text = out;
+    }
+    removed
 }

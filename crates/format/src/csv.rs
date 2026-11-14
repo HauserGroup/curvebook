@@ -737,23 +737,53 @@ pub fn import_csv_to_datasheet(
             TableArchetype::MultipleVariables(mv)
         }
         TableKind::Nested => {
-            let bio_units = 1;
-            let group_count = raw_col_count.saturating_sub(col_offset);
+            let value_headers = headers.get(col_offset..).unwrap_or(&[]);
+            let groups_spec = parse_nested_column_groups(value_headers, col_offset, subcolumn_mode);
+            let group_count = groups_spec.len();
             validate_data_sets(group_count)?;
-            validate_csv_cell_budget(row_count, group_count, bio_units, 0, err_line)?;
-            let mut nested = NestedTable::new(group_count, bio_units, row_count)?;
+            let mut total_units: usize = 0;
+            for spec in &groups_spec {
+                validate_subcolumns(spec.col_indices.len())?;
+                total_units = total_units
+                    .checked_add(spec.col_indices.len())
+                    .ok_or_else(|| FormatError::CsvParse { line: err_line, reason: String::from("table cell count overflow") })?;
+            }
+            let total_cells = row_count
+                .checked_mul(total_units)
+                .ok_or_else(|| FormatError::CsvParse { line: err_line, reason: String::from("table cell count overflow") })?;
+            if total_cells > MAX_IMPORT_CELLS {
+                return Err(FormatError::CsvParse {
+                    line: err_line,
+                    reason: format!("dense cell allocation {total_cells} exceeds limit {MAX_IMPORT_CELLS}"),
+                });
+            }
+
+            let mut nested = NestedTable::new(group_count, 1, row_count)?;
             assign_row_titles(&mut nested.row_titles, data_rows, has_row_titles);
             nested.row_titles_expanded = opts.has_row_titles;
-            for (idx, grp) in nested.groups.iter_mut().enumerate() {
-                let c = col_offset + idx;
-                if let Some(h) = headers.get(c).filter(|s| !s.trim().is_empty()) {
-                    grp.title = sanitize_title(h)?;
-                    grp.subcolumn_titles = vec![format!("{}:1", grp.title)];
+            for (g_idx, spec) in groups_spec.iter().enumerate() {
+                let title_str = if spec.group_title.trim().is_empty() { default_column_label(g_idx) } else { sanitize_title(&spec.group_title)? };
+                let units = spec.col_indices.len().max(1);
+                let mut grp = NestedGroupColumn::new(title_str, units, row_count)?;
+                for (u_idx, raw_sub) in spec.sub_titles.iter().enumerate() {
+                    if let Some(sub_title) = raw_sub.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
+                        && let Some(slot) = grp.subcolumn_titles.get_mut(u_idx)
+                    {
+                        *slot = sanitize_title(sub_title)?;
+                    }
                 }
                 for (r, rec) in data_rows.iter().enumerate() {
-                    if let Some(tok) = rec.get(c) {
-                        grp.cells[r][0] = parse_cell_token(tok, opts);
+                    for (u_idx, &col_idx) in spec.col_indices.iter().enumerate() {
+                        if let Some(tok) = rec.get(col_idx)
+                            && let Some(row_cells) = grp.cells.get_mut(r)
+                            && let Some(cell) = row_cells.get_mut(u_idx)
+                        {
+                            *cell = parse_cell_token(tok, opts);
+                        }
                     }
+                }
+                if let Some(slot) = nested.groups.get_mut(g_idx) {
+                    *slot = grp;
                 }
             }
             TableArchetype::Nested(nested)
@@ -761,6 +791,81 @@ pub fn import_csv_to_datasheet(
     };
 
     Ok(DataSheet::new(id.into(), title, arch)?)
+}
+
+struct NestedColumnGroupSpec {
+    group_title: String,
+    col_indices: Vec<usize>,
+    sub_titles: Vec<Option<String>>,
+}
+
+fn parse_nested_column_groups(value_headers: &[String], col_offset: usize, subcolumn_mode: SubcolumnMode) -> Vec<NestedColumnGroupSpec> {
+    if value_headers.is_empty() {
+        return Vec::new();
+    }
+
+    let split_pairs: Vec<Option<(&str, &str)>> =
+        value_headers.iter().map(|h| h.rsplit_once(':').filter(|(p, s)| !p.trim().is_empty() && !s.trim().is_empty())).collect();
+
+    let all_colon = split_pairs.iter().all(Option::is_some);
+    let any_adjacent_colon_match = split_pairs.windows(2).any(|w| matches!((w[0], w[1]), (Some((p1, _)), Some((p2, _))) if p1.trim() == p2.trim()));
+
+    if all_colon || any_adjacent_colon_match {
+        return group_nested_by_colon(value_headers, &split_pairs, col_offset);
+    }
+
+    let chunk = match subcolumn_mode {
+        SubcolumnMode::RawReplicates(k) if k > 1 => k,
+        _ => 1,
+    };
+    if chunk > 1 && value_headers.len() >= chunk && value_headers.len().is_multiple_of(chunk) {
+        return value_headers
+            .chunks(chunk)
+            .enumerate()
+            .map(|(chunk_idx, cols)| {
+                let start = col_offset + chunk_idx * chunk;
+                let group_title = cols.first().map(|s| s.trim().to_owned()).unwrap_or_default();
+                let col_indices = (start..start + cols.len()).collect();
+                let sub_titles = cols.iter().map(|s| (!s.trim().is_empty()).then(|| s.trim().to_owned())).collect();
+                NestedColumnGroupSpec { group_title, col_indices, sub_titles }
+            })
+            .collect();
+    }
+
+    value_headers
+        .iter()
+        .enumerate()
+        .map(|(i, h)| {
+            let trimmed = h.trim().to_owned();
+            NestedColumnGroupSpec { group_title: trimmed, col_indices: vec![col_offset + i], sub_titles: vec![None] }
+        })
+        .collect()
+}
+
+fn group_nested_by_colon(value_headers: &[String], split_pairs: &[Option<(&str, &str)>], col_offset: usize) -> Vec<NestedColumnGroupSpec> {
+    let mut groups: Vec<NestedColumnGroupSpec> = Vec::new();
+    for (i, h) in value_headers.iter().enumerate() {
+        let col_idx = col_offset + i;
+        if let Some((prefix, _)) = split_pairs.get(i).copied().flatten() {
+            let prefix_trimmed = prefix.trim();
+            if let Some(last) = groups.last_mut()
+                && last.group_title == prefix_trimmed
+                && !last.sub_titles.first().is_some_and(Option::is_none)
+            {
+                last.col_indices.push(col_idx);
+                last.sub_titles.push(Some(h.trim().to_owned()));
+                continue;
+            }
+            groups.push(NestedColumnGroupSpec {
+                group_title: prefix_trimmed.to_owned(),
+                col_indices: vec![col_idx],
+                sub_titles: vec![Some(h.trim().to_owned())],
+            });
+        } else {
+            groups.push(NestedColumnGroupSpec { group_title: h.trim().to_owned(), col_indices: vec![col_idx], sub_titles: vec![None] });
+        }
+    }
+    groups
 }
 
 fn validate_csv_cell_budget(rows: usize, cols: usize, subs: usize, extra_cols_per_row: usize, line: usize) -> Result<(), FormatError> {

@@ -9,8 +9,9 @@ use std::collections::{BTreeMap, HashSet};
 use lumencraft_doc::{ConstantValue, DataSheet, InfoConstant, InfoSheet, ProjectDocument, SheetId, SubcolumnMode, TableKind};
 
 use crate::archive::{migrate_document_json, validate_project_document};
-use crate::csv::{CsvOptions, import_csv_to_datasheet};
+use crate::csv::{CsvOptions, import_csv_to_datasheet, parse_delimited_records};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
+use crate::pzfx::import_pzfx_bytes;
 use crate::zip::{ZipArchive, ZipLimits};
 
 /// Optional metadata sidecar describing a tabular CSV sheet inside a `.prism` ZIP archive.
@@ -33,6 +34,7 @@ struct PrismTableMeta {
 struct PrismManifest {
     title: Option<String>,
     sheets: Option<Vec<PrismTableMeta>>,
+    info_sheets: Option<Vec<PrismInfoMeta>>,
 }
 
 /// Optional info metadata JSON inside a `.prism` ZIP archive.
@@ -84,12 +86,17 @@ pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
     let mut meta_by_stem: BTreeMap<String, PrismTableMeta> = BTreeMap::new();
     let mut meta_by_csv: BTreeMap<String, PrismTableMeta> = BTreeMap::new();
 
-    if let Some(manifest) = &manifest_meta
-        && let Some(sheets) = &manifest.sheets
-    {
-        for item in sheets {
-            if let Some(csv_path) = &item.csv_path {
-                meta_by_csv.insert(csv_path.clone(), item.clone());
+    if let Some(manifest) = &manifest_meta {
+        if let Some(sheets) = &manifest.sheets {
+            for item in sheets {
+                if let Some(csv_path) = &item.csv_path {
+                    meta_by_csv.insert(csv_path.clone(), item.clone());
+                }
+            }
+        }
+        if let Some(infos) = &manifest.info_sheets {
+            for meta in infos {
+                import_info_meta(meta, &mut doc, &mut used_ids)?;
             }
         }
     }
@@ -139,6 +146,15 @@ pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
         data_idx += 1;
     }
 
+    // Embedded `.pzfx` payloads inside a `.prism` ZIP container (if any).
+    for (path, payload) in archive.iter() {
+        if handled_paths.contains(path) || !path.ends_with(".pzfx") {
+            continue;
+        }
+        handled_paths.insert(path.to_owned());
+        merge_embedded_pzfx(payload, &mut doc, &mut used_ids, &mut warnings)?;
+    }
+
     // Third pass: warn on any unrecognized binary/script/other chunks without panicking.
     for (path, _) in archive.iter() {
         if !handled_paths.contains(path) {
@@ -172,11 +188,10 @@ fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<Impor
     if val.get("data_sheets").is_none() {
         return Ok(None);
     }
-    let version = val
-        .get("schema_version")
-        .and_then(serde_json::Value::as_u64)
-        .and_then(|v| u32::try_from(v).ok())
-        .unwrap_or(lumencraft_doc::CURRENT_SCHEMA_VERSION);
+    let version = match val.get("schema_version") {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(lumencraft_doc::CURRENT_SCHEMA_VERSION),
+    };
     let migrated = migrate_document_json(val, version)?;
     let doc: ProjectDocument = serde_json::from_value(migrated)?;
     validate_project_document(&doc)?;
@@ -201,6 +216,27 @@ fn stem_without_ext(path: &str) -> &str {
     path.rsplit_once('.').map_or(path, |(stem, _)| stem)
 }
 
+fn merge_embedded_pzfx(
+    payload: &[u8],
+    doc: &mut ProjectDocument,
+    used_ids: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+) -> Result<(), FormatError> {
+    let sub = import_pzfx_bytes(payload)?;
+    warnings.extend(sub.warnings);
+    for mut info in sub.document.info_sheets {
+        let idx = doc.info_sheets.len() + 1;
+        info.id = SheetId::new(allocate_unique_id(Some(info.id.as_str()), "info", idx, used_ids));
+        doc.add_info_sheet(info)?;
+    }
+    for mut ds in sub.document.data_sheets {
+        let idx = doc.data_sheets.len() + 1;
+        ds.id = SheetId::new(allocate_unique_id(Some(ds.id.as_str()), "data", idx, used_ids));
+        doc.add_data_sheet(ds)?;
+    }
+    Ok(())
+}
+
 fn import_info_json(
     path: &str,
     payload: &[u8],
@@ -215,34 +251,52 @@ fn import_info_json(
             return Ok(());
         }
     };
+    import_info_meta(&meta, doc, used_ids)
+}
+
+fn import_info_meta(meta: &PrismInfoMeta, doc: &mut ProjectDocument, used_ids: &mut HashSet<String>) -> Result<(), FormatError> {
     let idx = doc.info_sheets.len() + 1;
     let id = allocate_unique_id(meta.id.as_deref(), "info", idx, used_ids);
-    let title = meta.title.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| format!("Info {idx}"));
+    let title = meta.title.as_deref().map(str::trim).filter(|s| !s.is_empty()).map_or_else(|| format!("Info {idx}"), str::to_owned);
     let mut sheet = InfoSheet::new_preseeded(id, title)?;
     sheet.constants.clear();
-    if let Some(map) = meta.constants {
+    if let Some(map) = &meta.constants {
         for (k, v) in map {
             if k.trim().is_empty() {
                 continue;
             }
-            let cval = match v {
-                serde_json::Value::Null => ConstantValue::Empty,
-                serde_json::Value::Number(n) => match n.as_f64().filter(|x| x.is_finite()) {
-                    Some(f) => ConstantValue::Number(f),
-                    None => ConstantValue::Text(n.to_string()),
-                },
-                serde_json::Value::String(s) => ConstantValue::Text(s),
-                serde_json::Value::Bool(b) => ConstantValue::Text(b.to_string()),
-                other => ConstantValue::Text(other.to_string()),
-            };
-            sheet.constants.push(InfoConstant::new(k, cval, None)?);
+            let (cval, units) = parse_prism_constant_value(v);
+            sheet.constants.push(InfoConstant::new(k.clone(), cval, units)?);
         }
     }
-    if let Some(notes) = meta.notes {
-        sheet.notes_markdown = notes;
+    if let Some(notes) = &meta.notes {
+        sheet.notes_markdown = notes.clone();
     }
     doc.add_info_sheet(sheet)?;
     Ok(())
+}
+
+fn parse_prism_constant_value(v: &serde_json::Value) -> (ConstantValue, Option<String>) {
+    if let Some(obj) = v.as_object()
+        && let Some(inner) = obj.get("value")
+    {
+        let units = obj.get("units").and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+        return (scalar_json_to_constant(inner), units);
+    }
+    (scalar_json_to_constant(v), None)
+}
+
+fn scalar_json_to_constant(v: &serde_json::Value) -> ConstantValue {
+    match v {
+        serde_json::Value::Null => ConstantValue::Empty,
+        serde_json::Value::Number(n) => match n.as_f64().filter(|x| x.is_finite()) {
+            Some(f) => ConstantValue::Number(f),
+            None => ConstantValue::Text(n.to_string()),
+        },
+        serde_json::Value::String(s) => ConstantValue::Text(s.clone()),
+        serde_json::Value::Bool(b) => ConstantValue::Text(b.to_string()),
+        other => ConstantValue::Text(other.to_string()),
+    }
 }
 
 fn import_csv_entry(
@@ -269,9 +323,30 @@ fn import_csv_entry(
     }
     if let Some(has_rt) = meta.has_row_titles {
         opts.has_row_titles = has_rt;
+    } else if csv_has_explicit_row_title_header(text, kind, &opts) {
+        opts.has_row_titles = true;
     }
 
     import_csv_to_datasheet(SheetId::new(id), title, text, kind, subcolumn_mode, &opts)
+}
+
+fn csv_has_explicit_row_title_header(text: &str, kind: TableKind, opts: &CsvOptions) -> bool {
+    let prefix: String = text.lines().take(2).collect::<Vec<_>>().join("\n");
+    let Ok(records) = parse_delimited_records(&prefix, opts) else {
+        return false;
+    };
+    let Some(first_row) = records.first() else {
+        return false;
+    };
+    let Some(first_hdr) = first_row.first().map(|h| h.trim()) else {
+        return false;
+    };
+    if first_row.len() < 2 {
+        return false;
+    }
+    first_hdr.eq_ignore_ascii_case("Row Title")
+        || (kind == TableKind::Contingency && first_hdr.eq_ignore_ascii_case("Outcome / Exposure"))
+        || (kind == TableKind::Grouped && first_hdr.eq_ignore_ascii_case("Row Factor"))
 }
 
 fn parse_table_kind(raw: Option<&str>, source: &str, warnings: &mut Vec<ImportWarning>) -> TableKind {

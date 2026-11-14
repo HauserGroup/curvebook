@@ -329,33 +329,119 @@ pub fn decode_xml_entities(raw: &str, base_offset: usize) -> Result<String, Form
             return Err(FormatError::XmlParse { offset: base_offset, reason: String::from("unterminated XML entity reference") });
         };
         let entity = &after_amp[..semi_idx];
-        match entity {
-            "lt" => out.push('<'),
-            "gt" => out.push('>'),
-            "amp" => out.push('&'),
-            "apos" => out.push('\''),
-            "quot" => out.push('"'),
-            _ if entity.starts_with("#x") || entity.starts_with("#X") => {
-                let code = u32::from_str_radix(&entity[2..], 16)
-                    .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid hex XML entity `&{entity};`") })?;
-                let ch = char::from_u32(code)
-                    .ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })?;
-                out.push(ch);
-            }
-            _ if entity.starts_with('#') => {
-                let code = entity[1..]
-                    .parse::<u32>()
-                    .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid decimal XML entity `&{entity};`") })?;
-                let ch = char::from_u32(code)
-                    .ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })?;
-                out.push(ch);
-            }
-            other => {
-                return Err(FormatError::XmlParse { offset: base_offset, reason: format!("unknown XML entity `&{other};`") });
-            }
+        if let Some(ch) = lookup_named_xml_entity(entity) {
+            out.push(ch);
+        } else if entity.starts_with("#x") || entity.starts_with("#X") {
+            let code = u32::from_str_radix(&entity[2..], 16)
+                .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid hex XML entity `&{entity};`") })?;
+            let ch = char::from_u32(code)
+                .ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })?;
+            out.push(ch);
+        } else if let Some(digits) = entity.strip_prefix('#') {
+            let code = digits
+                .parse::<u32>()
+                .map_err(|_| FormatError::XmlParse { offset: base_offset, reason: format!("invalid decimal XML entity `&{entity};`") })?;
+            let ch = char::from_u32(code)
+                .ok_or_else(|| FormatError::XmlParse { offset: base_offset, reason: format!("invalid Unicode scalar `&{entity};`") })?;
+            out.push(ch);
+        } else {
+            return Err(FormatError::XmlParse { offset: base_offset, reason: format!("unknown XML entity `&{entity};`") });
         }
         rest = &after_amp[semi_idx + 1..];
     }
     out.push_str(rest);
     Ok(out)
+}
+
+fn lookup_named_xml_entity(entity: &str) -> Option<char> {
+    match entity {
+        "lt" => Some('<'),
+        "gt" => Some('>'),
+        "amp" => Some('&'),
+        "apos" => Some('\''),
+        "quot" => Some('"'),
+        "nbsp" => Some('\u{00A0}'),
+        "alpha" => Some('\u{03B1}'),
+        "beta" => Some('\u{03B2}'),
+        "gamma" => Some('\u{03B3}'),
+        "delta" => Some('\u{03B4}'),
+        "epsilon" => Some('\u{03B5}'),
+        "varepsilon" => Some('\u{03F5}'),
+        "zeta" => Some('\u{03B6}'),
+        "eta" => Some('\u{03B7}'),
+        "theta" => Some('\u{03B8}'),
+        "vartheta" => Some('\u{03D1}'),
+        "iota" => Some('\u{03B9}'),
+        "kappa" => Some('\u{03BA}'),
+        "varkappa" => Some('\u{03F0}'),
+        "lambda" => Some('\u{03BB}'),
+        "mu" | "micro" => Some('\u{03BC}'),
+        "nu" => Some('\u{03BD}'),
+        "xi" => Some('\u{03BE}'),
+        "omicron" => Some('\u{03BF}'),
+        "pi" => Some('\u{03C0}'),
+        "varpi" => Some('\u{03D6}'),
+        "rho" => Some('\u{03C1}'),
+        "varrho" => Some('\u{03F1}'),
+        "varsigma" => Some('\u{03C2}'),
+        "sigma" => Some('\u{03C3}'),
+        "tau" => Some('\u{03C4}'),
+        "upsilon" => Some('\u{03C5}'),
+        "phi" => Some('\u{03C6}'),
+        "varphi" => Some('\u{03D5}'),
+        "chi" => Some('\u{03C7}'),
+        "psi" => Some('\u{03C8}'),
+        "omega" => Some('\u{03C9}'),
+        "Alpha" => Some('\u{0391}'),
+        "Beta" => Some('\u{0392}'),
+        "Gamma" => Some('\u{0393}'),
+        "Delta" => Some('\u{0394}'),
+        "Epsilon" => Some('\u{0395}'),
+        "Zeta" => Some('\u{0396}'),
+        "Eta" => Some('\u{0397}'),
+        "Theta" => Some('\u{0398}'),
+        "Iota" => Some('\u{0399}'),
+        "Kappa" => Some('\u{039A}'),
+        "Lambda" => Some('\u{039B}'),
+        "Mu" => Some('\u{039C}'),
+        "Nu" => Some('\u{039D}'),
+        "Xi" => Some('\u{039E}'),
+        "Omicron" => Some('\u{039F}'),
+        "Pi" => Some('\u{03A0}'),
+        "Rho" => Some('\u{03A1}'),
+        "Sigma" => Some('\u{03A3}'),
+        "Tau" => Some('\u{03A4}'),
+        "Upsilon" => Some('\u{03A5}'),
+        "Phi" => Some('\u{03A6}'),
+        "Chi" => Some('\u{03A7}'),
+        "Psi" => Some('\u{03A8}'),
+        "Omega" | "ohm" => Some('\u{03A9}'),
+        "deg" => Some('\u{00B0}'),
+        "pm" | "plusmn" => Some('\u{00B1}'),
+        "mp" => Some('\u{2213}'),
+        "sup1" => Some('\u{00B9}'),
+        "sup2" => Some('\u{00B2}'),
+        "sup3" => Some('\u{00B3}'),
+        "times" => Some('\u{00D7}'),
+        "divide" | "div" => Some('\u{00F7}'),
+        "cdot" | "middot" => Some('\u{00B7}'),
+        "bull" | "bullet" => Some('\u{2022}'),
+        "minus" => Some('\u{2212}'),
+        "ndash" => Some('\u{2013}'),
+        "mdash" => Some('\u{2014}'),
+        "hellip" => Some('\u{2026}'),
+        "prime" => Some('\u{2032}'),
+        "Prime" => Some('\u{2033}'),
+        "permil" => Some('\u{2030}'),
+        "infin" => Some('\u{221E}'),
+        "le" | "leq" => Some('\u{2264}'),
+        "ge" | "geq" => Some('\u{2265}'),
+        "ne" | "neq" => Some('\u{2260}'),
+        "asymp" | "approx" => Some('\u{2248}'),
+        "equiv" => Some('\u{2261}'),
+        "rarr" => Some('\u{2192}'),
+        "larr" => Some('\u{2190}'),
+        "harr" => Some('\u{2194}'),
+        _ => None,
+    }
 }

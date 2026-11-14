@@ -77,12 +77,16 @@ fn import_info_sections(
         let mut sheet = InfoSheet::new_preseeded(id, title)?;
         sheet.constants.clear();
         for c_el in info_el.children_named("Constant") {
-            let name_raw = c_el.first_child("Name").map(|el| el.plain_text().trim().to_owned()).unwrap_or_default();
+            let name_raw = c_el
+                .first_child("Name")
+                .map(|el| el.plain_text().trim().to_owned())
+                .or_else(|| c_el.attr("Name").map(|s| s.trim().to_owned()))
+                .unwrap_or_default();
             if name_raw.is_empty() {
                 continue;
             }
             let name = clamp_title(&name_raw, "constant", warnings);
-            let val_raw = c_el.first_child("Value").map(|el| el.plain_text()).unwrap_or_default();
+            let val_raw = c_el.first_child("Value").map(|el| el.plain_text()).or_else(|| c_el.attr("Value").map(str::to_owned)).unwrap_or_default();
             let val_trimmed = val_raw.trim();
             let value = if val_trimmed.is_empty() {
                 ConstantValue::Empty
@@ -93,7 +97,11 @@ fn import_info_sections(
             } else {
                 ConstantValue::Text(val_trimmed.to_owned())
             };
-            let units = c_el.first_child("Units").map(|el| clamp_title(el.plain_text().trim(), "units", warnings)).filter(|u| !u.is_empty());
+            let units = c_el
+                .first_child("Units")
+                .map(|el| clamp_title(el.plain_text().trim(), "units", warnings))
+                .or_else(|| c_el.attr("Units").map(|s| clamp_title(s.trim(), "units", warnings)))
+                .filter(|u| !u.is_empty());
             sheet.constants.push(InfoConstant::new(name, value, units)?);
         }
         if let Some(notes_el) = info_el.first_child("Notes") {
@@ -175,14 +183,16 @@ fn parse_table_element(
     validate_data_sets(y_elements.len())?;
 
     let mut parsed_y: Vec<(String, Vec<Vec<Cell>>)> = Vec::with_capacity(y_elements.len());
+    let mut nested_sub_titles: Vec<Vec<Option<String>>> = Vec::with_capacity(y_elements.len());
     for (c_idx, y_el) in y_elements.iter().enumerate() {
         let col_title = y_el
             .first_child("Title")
             .map(|el| clamp_title(el.plain_text().trim(), &id, warnings))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| default_column_label(c_idx));
-        let subs = extract_column_subcolumns(y_el);
+        let (sub_titles, subs) = extract_labeled_subcolumns(y_el, &id, warnings);
         parsed_y.push((col_title, subs));
+        nested_sub_titles.push(sub_titles);
     }
 
     let max_y_rows = parsed_y.iter().flat_map(|(_, subs)| subs.iter().map(Vec::len)).max().unwrap_or(0);
@@ -205,7 +215,10 @@ fn parse_table_element(
     padded_row_titles.resize(row_count, String::new());
     let has_row_titles = padded_row_titles.iter().any(|s| !s.is_empty());
 
-    let arch = build_table_archetype(kind, subcolumn_mode, table_el, &x_title, &x_cols, &parsed_y, padded_row_titles, has_row_titles, row_count)?;
+    let mut arch = build_table_archetype(kind, subcolumn_mode, table_el, &x_title, &x_cols, &parsed_y, padded_row_titles, has_row_titles, row_count)?;
+    if let TableArchetype::Nested(ref mut nested) = arch {
+        apply_nested_subcolumn_titles(nested, &nested_sub_titles);
+    }
 
     Ok(DataSheet::new(SheetId::new(id), title, arch)?)
 }
@@ -418,23 +431,54 @@ fn fill_datasets(target: &mut [DataSetColumn], parsed_y: &[(String, Vec<Vec<Cell
     }
 }
 
-fn extract_column_subcolumns(col_el: &XmlElement) -> Vec<Vec<Cell>> {
+fn extract_subcolumn_cells(sub_el: &XmlElement, csv_opts: &CsvOptions) -> Vec<Cell> {
+    let mut cells = Vec::new();
+    for d_el in sub_el.children_named("d") {
+        let excluded_attr = d_el.attr("Excluded").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"));
+        let raw = d_el.plain_text();
+        let mut cell = parse_cell_token(&raw, csv_opts);
+        if excluded_attr {
+            cell.excluded = true;
+        }
+        cells.push(cell);
+    }
+    cells
+}
+
+fn extract_labeled_subcolumns(col_el: &XmlElement, source_id: &str, warnings: &mut Vec<ImportWarning>) -> (Vec<Option<String>>, Vec<Vec<Cell>>) {
     let csv_opts = CsvOptions::csv();
+    let mut titles = Vec::new();
     let mut subcolumns = Vec::new();
     for sub_el in col_el.children_named("Subcolumn") {
-        let mut cells = Vec::new();
-        for d_el in sub_el.children_named("d") {
-            let excluded_attr = d_el.attr("Excluded").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"));
-            let raw = d_el.plain_text();
-            let mut cell = parse_cell_token(&raw, &csv_opts);
-            if excluded_attr {
-                cell.excluded = true;
-            }
-            cells.push(cell);
-        }
-        subcolumns.push(cells);
+        let sub_title = sub_el
+            .first_child("Title")
+            .map(|el| clamp_title(el.plain_text().trim(), source_id, warnings))
+            .or_else(|| sub_el.attr("Title").map(|s| clamp_title(s.trim(), source_id, warnings)))
+            .filter(|s| !s.is_empty());
+        titles.push(sub_title);
+        subcolumns.push(extract_subcolumn_cells(sub_el, &csv_opts));
     }
-    subcolumns
+    (titles, subcolumns)
+}
+
+fn apply_nested_subcolumn_titles(nested: &mut NestedTable, nested_sub_titles: &[Vec<Option<String>>]) {
+    for (g_idx, grp) in nested.groups.iter_mut().enumerate() {
+        let Some(titles) = nested_sub_titles.get(g_idx) else {
+            continue;
+        };
+        for (s_idx, maybe_title) in titles.iter().enumerate() {
+            if let Some(sub_title) = maybe_title
+                && let Some(slot) = grp.subcolumn_titles.get_mut(s_idx)
+            {
+                *slot = sub_title.clone();
+            }
+        }
+    }
+}
+
+fn extract_column_subcolumns(col_el: &XmlElement) -> Vec<Vec<Cell>> {
+    let csv_opts = CsvOptions::csv();
+    col_el.children_named("Subcolumn").map(|sub_el| extract_subcolumn_cells(sub_el, &csv_opts)).collect()
 }
 
 fn resolve_table_kind(raw: Option<&str>, id: &str, warnings: &mut Vec<ImportWarning>) -> TableKind {
