@@ -2,31 +2,28 @@
 //! machines, Command Palette (`Cmd+K`) fuzzy matching, and deterministic software frame
 //! compositing (`RasterImage` / PNG) for headless screenshots and visual regression tests.
 
-use lumencraft_chart::ChartScene;
+use lumencraft_chart::{ChartScene, PreflightIssue};
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
-    ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ConnectingLineStyle, ContingencySpec, CoxTieMethod, DataSheet,
-    DescriptiveSpec, DiagnosticPlotKind, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FramePreset, GlmFamily, GlmSpec,
-    GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource, InfoSheet, JournalWidthPreset, LayoutItem,
-    LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, LinkBorderColor, MathTransformPreset, MultipleRowTestsSpec,
-    MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OutlierSpec, PValueFormat, PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule, ParameterScope,
-    PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, RocSpec, SheetId,
-    SheetSection, SizeChannelMapping, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ConnectingLineStyle, ContingencySpec,
+    CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec,
+    FigureCanvasPreset, FramePreset, GlmFamily, GlmSpec, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement,
+    HookSource, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset,
+    MultipleRowTestsSpec, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
+    NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueFormat, PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule,
+    ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab,
+    RocSpec, SheetId, SizeChannelMapping, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupSpec,
     VariableRole, WhiskerMethod,
 };
-use lumencraft_engine::{EngineError, Session, catalog};
+use lumencraft_engine::{EngineError, Session, cmd};
 use lumencraft_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
-use lumencraft_render::{RasterImage, RenderError, RenderTargetSpec, TiffCompression, encode_png, render_scene};
-use lumencraft_text::{TextDirection, reorder_visual_bidi};
-use lumencraft_tools::{CanvasToolState, PanZoomInertiaState, PhysicalUnit, ToolCommandIntent, build_ruler_ticks};
+use lumencraft_render::TiffCompression;
+use lumencraft_tools::{CanvasToolState, GridCellCoord, PanZoomInertiaState, PhysicalUnit, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::UiApp;
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::theme::UiThemeSpec;
-use crate::workspace_nav::{ActiveWorkspacePane, PortfolioCard};
 
 // ============================================================================
 // Dialog & Inspector Discriminators
@@ -79,6 +76,13 @@ pub enum ActiveDialog {
         layout_sheet_id: SheetId,
     },
     ExportFigure {
+        sheet_id: SheetId,
+    },
+    ConvertArchetype {
+        sheet_id: SheetId,
+    },
+    ImportReshape,
+    ExcludeWithReason {
         sheet_id: SheetId,
     },
     CommandPalette,
@@ -931,6 +935,14 @@ pub struct ResultSheetViewState {
     pub active_tab_index: usize,
     pub checklist_expanded: bool,
     pub checklist_filter: ChecklistSeverityFilter,
+    #[serde(default = "default_report_format")]
+    pub report_format: String,
+    #[serde(default)]
+    pub last_methods_report: Option<String>,
+}
+
+fn default_report_format() -> String {
+    String::from("markdown")
 }
 
 impl ResultSheetViewState {
@@ -1002,6 +1014,13 @@ impl ResultSheetViewState {
         (pass, warn, violated, info)
     }
 
+    /// Build a `result.generateReport` intent for `result_sheet_id` (`QOL-6`).
+    #[must_use]
+    pub fn generate_report_intent(&self, result_sheet_id: &SheetId) -> ToolCommandIntent {
+        let fmt = if self.report_format.trim().is_empty() { "markdown" } else { self.report_format.trim() };
+        ToolCommandIntent::new("result.generateReport", json!({ "result_sheet_id": result_sheet_id.as_str(), "format": fmt }))
+    }
+
     /// Format a typed [`ResultCell`] cleanly without panicking on `CiBound::Open` or non-finite values.
     #[must_use]
     pub fn format_result_cell(cell: &ResultCell, p_format: PValueFormat) -> String {
@@ -1037,7 +1056,7 @@ fn format_ci_bound(bound: CiBound) -> String {
     }
 }
 
-fn format_compact_f64(v: f64) -> String {
+pub(crate) fn format_compact_f64(v: f64) -> String {
     if !v.is_finite() {
         return String::from("NaN");
     }
@@ -1243,7 +1262,7 @@ fn collect_column_title_hooks(doc: &ProjectDocument, out: &mut Vec<AvailableHook
     }
 }
 
-fn data_column_title(sheet: &DataSheet, col_idx: usize) -> Option<&str> {
+pub(crate) fn data_column_title(sheet: &DataSheet, col_idx: usize) -> Option<&str> {
     match &sheet.archetype {
         TableArchetype::Xy(t) => t.data_sets.get(col_idx).map(|c| c.title.as_str()),
         TableArchetype::Column(t) => t.data_sets.get(col_idx).map(|c| c.title.as_str()),
@@ -2356,8 +2375,51 @@ pub struct CommandPaletteEntry {
     pub menu_path: &'static str,
     pub shortcut: &'static str,
     pub params_doc: &'static str,
+    pub summary: &'static str,
+    pub beginner: &'static str,
+    pub enabled: bool,
     pub origin: CommandOrigin,
     pub score: i32,
+}
+
+impl CommandPaletteEntry {
+    /// Resolve the localized label for this command in `locale`, falling back to English [`Self::label`].
+    #[must_use]
+    pub fn localized_label(&self, locale: &str) -> &'static str {
+        crate::i18n::command_label(locale, self.id, self.label)
+    }
+
+    /// Format compact command palette row copy surfacing `label`, `id`, and `summary`.
+    #[must_use]
+    pub fn format_compact_row(&self) -> String {
+        let status = if self.enabled { "" } else { " [disabled]" };
+        format!("{} ({}){} — {}", self.label, self.id, status, self.summary)
+    }
+
+    /// Format compact command palette row copy using the localized label for `locale`.
+    #[must_use]
+    pub fn format_compact_row_in_locale(&self, locale: &str) -> String {
+        let status = if self.enabled { "" } else { " [disabled]" };
+        format!("{} ({}){} — {}", self.localized_label(locale), self.id, status, self.summary)
+    }
+
+    /// Format rich command palette row copy surfacing `label`, `id`, `shortcut`, `summary`, and `beginner`.
+    #[must_use]
+    pub fn format_palette_row(&self) -> String {
+        self.format_palette_row_in_locale("en")
+    }
+
+    /// Format rich localized command palette row copy surfacing `summary` and `beginner`.
+    #[must_use]
+    pub fn format_palette_row_in_locale(&self, locale: &str) -> String {
+        let status = if self.enabled { "" } else { " [disabled]" };
+        let title = self.localized_label(locale);
+        if self.shortcut.is_empty() {
+            format!("{title} ({}){} — {} | Tip: {}", self.id, status, self.summary, self.beginner)
+        } else {
+            format!("{title} ({}) [{}]{} — {} | Tip: {}", self.id, self.shortcut, status, self.summary, self.beginner)
+        }
+    }
 }
 
 /// Command Palette (`Cmd+K`) fuzzy search state spanning Engine + UI commands.
@@ -2377,30 +2439,101 @@ impl CommandPaletteState {
     /// Return fuzzy-filtered and relevance-sorted commands from both Engine and UI catalogs.
     #[must_use]
     pub fn matches(&self) -> Vec<CommandPaletteEntry> {
+        self.collect_matches(None)
+    }
+
+    /// Return fuzzy-filtered and relevance-sorted commands with `enabled` evaluated for `session`.
+    #[must_use]
+    pub fn matches_for_session(&self, session: &Session) -> Vec<CommandPaletteEntry> {
+        self.collect_matches(Some(session))
+    }
+
+    /// Format visible command palette rows surfacing `summary` and active `beginner` guidance.
+    #[must_use]
+    pub fn preview_rows(&self, session: Option<&Session>, max_rows: usize) -> Vec<String> {
+        self.preview_rows_for_locale(session, "en", max_rows)
+    }
+
+    /// Format localized visible command palette rows surfacing `summary` and active `beginner` guidance.
+    #[must_use]
+    pub fn preview_rows_for_locale(&self, session: Option<&Session>, locale: &str, max_rows: usize) -> Vec<String> {
+        let hits = match session {
+            Some(s) => self.matches_for_session(s),
+            None => self.matches(),
+        };
+        let mut rows = Vec::with_capacity(hits.len().min(max_rows) + 2);
+        rows.push(format!("> {}", self.query));
+        for (idx, hit) in hits.iter().take(max_rows).enumerate() {
+            let marker = if idx == self.selected_index { "* " } else { "  " };
+            rows.push(format!("{marker}{}", hit.format_compact_row_in_locale(locale)));
+        }
+        if let Some(selected) = hits.get(self.selected_index).or_else(|| hits.first()) {
+            rows.push(format!("Tip: {}", selected.beginner));
+        }
+        rows
+    }
+
+    fn collect_matches(&self, session: Option<&Session>) -> Vec<CommandPaletteEntry> {
         let q = self.query.trim();
         let mut results = Vec::new();
-        for cmd in catalog::COMMANDS {
-            if let Some(score) = score_command(q, cmd.id, cmd.label, cmd.menu_path, cmd.shortcut) {
+        for spec in cmd::registry().specs() {
+            let base = score_command(q, spec.id, spec.label, spec.menu_path, spec.shortcut);
+            if let Some(score) = score_palette_entry(q, base, spec.summary, spec.beginner) {
+                let enabled = session.is_none_or(|s| (spec.enabled)(s));
                 results.push(CommandPaletteEntry {
-                    id: cmd.id,
-                    label: cmd.label,
-                    menu_path: cmd.menu_path,
-                    shortcut: cmd.shortcut,
-                    params_doc: cmd.params_doc,
+                    id: spec.id,
+                    label: spec.label,
+                    menu_path: spec.menu_path,
+                    shortcut: spec.shortcut,
+                    params_doc: spec.summary,
+                    summary: spec.summary,
+                    beginner: spec.beginner,
+                    enabled,
                     origin: CommandOrigin::Engine,
                     score,
                 });
             }
         }
-        for &(id, label, shortcut, params_doc) in UI_COMMANDS {
-            if let Some(score) = score_command(q, id, label, "View", shortcut) {
-                results.push(CommandPaletteEntry { id, label, menu_path: "UI", shortcut, params_doc, origin: CommandOrigin::Ui, score });
+        for spec in UI_COMMANDS {
+            let base = score_command(q, spec.id, spec.label, "View", spec.shortcut);
+            if let Some(score) = score_palette_entry(q, base, spec.summary, spec.beginner) {
+                results.push(CommandPaletteEntry {
+                    id: spec.id,
+                    label: spec.label,
+                    menu_path: "UI",
+                    shortcut: spec.shortcut,
+                    params_doc: spec.params_doc,
+                    summary: spec.summary,
+                    beginner: spec.beginner,
+                    enabled: true,
+                    origin: CommandOrigin::Ui,
+                    score,
+                });
             }
         }
         results.sort_by(|a, b| b.score.cmp(&a.score).then_with(|| a.id.cmp(b.id)));
         results
     }
+}
 
+fn score_palette_entry(query: &str, base_score: Option<i32>, summary: &str, beginner: &str) -> Option<i32> {
+    if let Some(score) = base_score {
+        return Some(score);
+    }
+    let needle = query.trim().to_ascii_lowercase();
+    if needle.is_empty() {
+        return Some(0);
+    }
+    if summary.to_ascii_lowercase().contains(&needle) {
+        return Some(40);
+    }
+    if beginner.to_ascii_lowercase().contains(&needle) {
+        return Some(30);
+    }
+    None
+}
+
+impl CommandPaletteState {
     /// Move selection cursor down in the filtered list.
     pub fn select_next(&mut self) {
         let count = self.matches().len();
@@ -2473,6 +2606,334 @@ fn fuzzy_score(needle: &str, haystack: &str) -> Option<i32> {
 }
 
 // ============================================================================
+// QOL-1 / QOL-3 / QOL-4 / QOL-7 / QOL-8 Dialog & Workspace Models
+// ============================================================================
+
+/// Non-destructive table archetype conversion modal state (`QOL-1`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConvertArchetypeDialogState {
+    pub sheet_id: Option<SheetId>,
+    pub source_kind: Option<TableKind>,
+    pub target_kind: TableKind,
+    pub allow_lossy: bool,
+    pub preview_ready: bool,
+    pub preview_lossy: bool,
+    pub preserved_cells: usize,
+    pub dropped_cells: usize,
+    pub preserved_exclusions: usize,
+    pub preview_warnings: Vec<String>,
+}
+
+impl Default for ConvertArchetypeDialogState {
+    fn default() -> Self {
+        Self {
+            sheet_id: None,
+            source_kind: None,
+            target_kind: TableKind::Column,
+            allow_lossy: false,
+            preview_ready: false,
+            preview_lossy: false,
+            preserved_cells: 0,
+            dropped_cells: 0,
+            preserved_exclusions: 0,
+            preview_warnings: Vec::new(),
+        }
+    }
+}
+
+impl ConvertArchetypeDialogState {
+    /// Supported conversion destination archetypes for `table.convertArchetype`.
+    #[must_use]
+    pub const fn supported_targets() -> &'static [TableKind] {
+        &[TableKind::Column, TableKind::Grouped, TableKind::Xy, TableKind::MultipleVariables]
+    }
+
+    /// Initialize conversion dialog state for `sheet`.
+    pub fn open_for_sheet(&mut self, sheet: &DataSheet) {
+        let current = sheet.kind();
+        self.sheet_id = Some(sheet.id.clone());
+        self.source_kind = Some(current);
+        self.target_kind = match current {
+            TableKind::Column => TableKind::Grouped,
+            TableKind::Grouped => TableKind::Column,
+            TableKind::Xy => TableKind::MultipleVariables,
+            _ => TableKind::Column,
+        };
+        self.allow_lossy = false;
+        self.preview_ready = false;
+        self.preview_lossy = false;
+        self.preserved_cells = 0;
+        self.dropped_cells = 0;
+        self.preserved_exclusions = 0;
+        self.preview_warnings.clear();
+    }
+
+    /// Set a new target archetype, resetting stale preview state.
+    pub fn set_target_kind(&mut self, target: TableKind) {
+        if self.target_kind != target {
+            self.target_kind = target;
+            self.preview_ready = false;
+        }
+    }
+
+    /// Build a read-only `table.convertArchetype` (`preview_only: true`) intent.
+    #[must_use]
+    pub fn preview_intent(&self) -> Option<ToolCommandIntent> {
+        let sheet_id = self.sheet_id.as_ref()?;
+        Some(ToolCommandIntent::new(
+            "table.convertArchetype",
+            json!({
+                "sheet_id": sheet_id.as_str(),
+                "target_kind": convert_target_wire_name(self.target_kind),
+                "preview_only": true,
+            }),
+        ))
+    }
+
+    /// Populate preview impact fields from engine `table.convertArchetype` preview JSON output.
+    pub fn apply_preview_payload(&mut self, payload: &Value) {
+        let p = payload.get("preview").unwrap_or(payload);
+        self.preview_lossy = p.get("lossy").and_then(Value::as_bool).unwrap_or(false);
+        self.preserved_cells = p.get("preserved_cells").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).unwrap_or(0);
+        self.dropped_cells = p.get("dropped_cells").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).unwrap_or(0);
+        self.preserved_exclusions = p.get("preserved_exclusions").and_then(Value::as_u64).and_then(|v| usize::try_from(v).ok()).unwrap_or(0);
+        self.preview_warnings = p
+            .get("warnings")
+            .and_then(Value::as_array)
+            .map(|items| items.iter().filter_map(|w| w.as_str().map(str::to_owned)).collect())
+            .unwrap_or_default();
+        self.preview_ready = true;
+    }
+
+    /// Build the mutating `table.convertArchetype` intent, enforcing explicit `allow_lossy` when required.
+    ///
+    /// # Errors
+    /// Returns an error when no sheet is bound or when a lossy conversion awaits explicit confirmation.
+    pub fn commit_intent(&self) -> Result<ToolCommandIntent, String> {
+        let sheet_id = self.sheet_id.as_ref().ok_or_else(|| String::from("no data sheet selected for archetype conversion"))?;
+        if self.preview_lossy && !self.allow_lossy {
+            return Err(format!(
+                "lossy conversion to {} drops {} cell(s); enable allow_lossy to proceed",
+                self.target_kind.label(),
+                self.dropped_cells
+            ));
+        }
+        Ok(ToolCommandIntent::new(
+            "table.convertArchetype",
+            json!({
+                "sheet_id": sheet_id.as_str(),
+                "target_kind": convert_target_wire_name(self.target_kind),
+                "allow_lossy": self.allow_lossy,
+                "preview_only": false,
+            }),
+        ))
+    }
+}
+
+fn convert_target_wire_name(kind: TableKind) -> &'static str {
+    match kind {
+        TableKind::Column => "Column",
+        TableKind::Grouped => "Grouped",
+        TableKind::Xy => "Xy",
+        TableKind::MultipleVariables => "MultipleVariables",
+        _ => "Column",
+    }
+}
+
+/// Modal dialog state for auditable exclusion-with-reason (`QOL-3`, `Cmd+Shift+E`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExcludeWithReasonDialogState {
+    pub sheet_id: Option<SheetId>,
+    pub coords: Vec<GridCellCoord>,
+    pub reason_tag: String,
+    pub note: String,
+    pub timestamp_utc: Option<String>,
+}
+
+impl Default for ExcludeWithReasonDialogState {
+    fn default() -> Self {
+        Self { sheet_id: None, coords: Vec::new(), reason_tag: String::from("Outlier"), note: String::new(), timestamp_utc: None }
+    }
+}
+
+impl ExcludeWithReasonDialogState {
+    /// Preset reason tags offered in the exclusion audit dialog.
+    #[must_use]
+    pub const fn preset_reason_tags() -> &'static [&'static str] {
+        &["Outlier", "Contamination", "Instrument Fault", "Bubble", "Missing Replicate"]
+    }
+
+    /// Initialize dialog state targeting `coords` on `sheet_id`.
+    pub fn open_for_coords(&mut self, sheet_id: SheetId, coords: Vec<GridCellCoord>) {
+        self.sheet_id = Some(sheet_id);
+        self.coords = coords;
+        if self.reason_tag.trim().is_empty() {
+            self.reason_tag = String::from("Outlier");
+        }
+    }
+
+    /// Build the `table.excludeCellsWithReason` command intent.
+    ///
+    /// # Errors
+    /// Returns an error if no cells are selected or `reason_tag` is empty.
+    pub fn commit_intent(&self) -> Result<ToolCommandIntent, String> {
+        let sheet_id = self.sheet_id.as_ref().ok_or_else(|| String::from("no data sheet selected for exclusion"))?;
+        if self.coords.is_empty() {
+            return Err(String::from("at least one grid cell must be selected before excluding with reason"));
+        }
+        let tag = self.reason_tag.trim();
+        if tag.is_empty() {
+            return Err(String::from("exclusion reason_tag cannot be empty"));
+        }
+        let coords_json: Vec<Value> = self.coords.iter().map(|c| json!({ "row": c.row, "col": c.col, "subcol": c.subcol })).collect();
+        let mut params = json!({
+            "sheet_id": sheet_id.as_str(),
+            "coords": coords_json,
+            "reason_tag": tag,
+            "note": self.note,
+        });
+        if let Some(ts) = &self.timestamp_utc
+            && !ts.trim().is_empty()
+            && let Some(obj) = params.as_object_mut()
+        {
+            obj.insert(String::from("timestamp_utc"), Value::String(ts.trim().to_owned()));
+        }
+        Ok(ToolCommandIntent::new("table.excludeCellsWithReason", params))
+    }
+}
+
+/// Simultaneous side-by-side Data/Result + live Graph split-pane workspace configuration (`QOL-4`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SplitWorkspaceState {
+    pub enabled: bool,
+    /// Fraction of center canvas width allocated to the primary pane in `[0.2, 0.8]`.
+    pub ratio: f64,
+    pub primary_sheet_id: Option<SheetId>,
+    pub secondary_sheet_id: Option<SheetId>,
+    #[serde(default)]
+    pub dragging_divider: bool,
+}
+
+impl Default for SplitWorkspaceState {
+    fn default() -> Self {
+        Self { enabled: false, ratio: 0.5, primary_sheet_id: None, secondary_sheet_id: None, dragging_divider: false }
+    }
+}
+
+impl SplitWorkspaceState {
+    /// Clamp split divider fraction into `[0.2, 0.8]`.
+    pub fn set_ratio(&mut self, ratio: f64) {
+        if ratio.is_finite() {
+            self.ratio = ratio.clamp(0.2, 0.8);
+        }
+    }
+
+    /// Resolve concrete `(primary_sheet_id, secondary_sheet_id)` pair against `doc`.
+    #[must_use]
+    pub fn resolve_sheets(&self, doc: &ProjectDocument) -> (Option<SheetId>, Option<SheetId>) {
+        let active = doc.active_sheet_id.clone();
+        let primary = self
+            .primary_sheet_id
+            .clone()
+            .filter(|id| doc.sheet_section(id).is_some())
+            .or_else(|| {
+                active.as_ref().and_then(|id| {
+                    if doc.graph_sheet(id).is_some() {
+                        doc.graph_sheet(id)
+                            .map(|gs| gs.spec.primary_source_sheet_id.clone())
+                            .filter(|src| doc.data_sheet(src).is_some())
+                            .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()))
+                    } else {
+                        Some(id.clone())
+                    }
+                })
+            })
+            .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()));
+
+        let secondary = self.secondary_sheet_id.clone().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).or_else(|| {
+            if let Some(act) = &active
+                && (doc.graph_sheet(act).is_some() || doc.layout_sheet(act).is_some())
+            {
+                return Some(act.clone());
+            }
+            if let Some(prim) = &primary {
+                if let Some(gs) = doc.graph_sheets.iter().find(|g| &g.spec.primary_source_sheet_id == prim) {
+                    return Some(gs.id.clone());
+                }
+                if let Some(rs) = doc.result_sheet(prim)
+                    && let Some(gs) = doc.graph_sheets.iter().find(|g| g.spec.primary_source_sheet_id == rs.analysis.source_sheet_id)
+                {
+                    return Some(gs.id.clone());
+                }
+            }
+            doc.graph_sheets.first().map(|g| g.id.clone()).or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+        });
+
+        (primary, secondary)
+    }
+}
+
+pub use lumencraft_doc::RemediationKind;
+
+/// Interactive assumption warning strip displayed above a [`ResultSheet`] when diagnostics flag
+/// unequal variance or non-normality (`QOL-7`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AssumptionDiagnosticBanner {
+    pub source_result_id: SheetId,
+    pub severity: ChecklistStatus,
+    pub summary: String,
+    pub recommendation_label: String,
+    pub remediation_kind: RemediationKind,
+}
+
+impl AssumptionDiagnosticBanner {
+    /// Derive an actionable remediation banner from structured `ChecklistItem::remediation` diagnostics.
+    ///
+    /// Never modifies `rs`; remediation creates a fresh non-destructive sibling analysis sheet.
+    #[must_use]
+    pub fn from_result(rs: &ResultSheet) -> Option<Self> {
+        let supports_sibling = matches!(&rs.analysis.kind, AnalysisKind::TwoGroupComparison(_) | AnalysisKind::OneWayAnova(_));
+        if !supports_sibling {
+            return None;
+        }
+        let flagged = rs
+            .checklist
+            .iter()
+            .filter(|c| matches!(c.status, ChecklistStatus::Violated | ChecklistStatus::Warn) && c.remediation.is_some())
+            .max_by_key(|c| if c.status == ChecklistStatus::Violated { 2u8 } else { 1u8 })?;
+        let remediation_kind = flagged.remediation?;
+
+        Some(Self {
+            source_result_id: rs.id.clone(),
+            severity: flagged.status,
+            summary: format!("{}: {}", flagged.assumption, flagged.explanation),
+            recommendation_label: format!("Run {} (sibling)", remediation_kind.label()),
+            remediation_kind,
+        })
+    }
+
+    /// Build a non-destructive `analysis.run` intent creating a new sibling [`ResultSheet`] (`sibling_id`).
+    #[must_use]
+    pub fn build_sibling_analysis_intent(&self, original: &ResultSheet, sibling_id: &SheetId) -> ToolCommandIntent {
+        let title = format!("{} ({})", original.title(), self.remediation_kind.label());
+        let mut params = json!({
+            "sheet_id": sibling_id.as_str(),
+            "source_sheet": original.analysis.source_sheet_id.as_str(),
+            "kind": self.remediation_kind.engine_kind(),
+            "title": title,
+            "confidence_percent": original.analysis.confidence_level.percent(),
+            "overwrite": false,
+        });
+        if !original.analysis.selected_data_sets.is_empty()
+            && let Some(obj) = params.as_object_mut()
+        {
+            obj.insert(String::from("selected_data_sets"), json!(original.analysis.selected_data_sets));
+        }
+        ToolCommandIntent::new("analysis.run", params)
+    }
+}
+
+// ============================================================================
 // Unified CanvasDialogState
 // ============================================================================
 
@@ -2497,6 +2958,16 @@ pub struct CanvasDialogState {
     pub page_layout: PageLayoutComposerState,
     pub export_figure: ExportFigureState,
     pub command_palette: CommandPaletteState,
+    #[serde(default)]
+    pub convert_archetype: ConvertArchetypeDialogState,
+    #[serde(default)]
+    pub exclude_with_reason: ExcludeWithReasonDialogState,
+    #[serde(default)]
+    pub active_canvas_preset: Option<FigureCanvasPreset>,
+    #[serde(default)]
+    pub canvas_resize_mode: CanvasResizeMode,
+    #[serde(default)]
+    pub preflight_issues: Vec<PreflightIssue>,
     #[serde(default)]
     pub rulers_visible: bool,
     #[serde(default)]
@@ -2527,11 +2998,52 @@ impl CanvasDialogState {
         self.pan_zoom = PanZoomInertiaState::default();
     }
 
-    fn effective_zoom_and_pan(&self) -> (f64, [f64; 2]) {
+    pub(crate) fn effective_zoom_and_pan(&self) -> (f64, [f64; 2]) {
         let zoom = if (self.pan_zoom.zoom - 1.0).abs() > 1e-9 { self.pan_zoom.zoom } else { self.canvas.zoom };
         let pan_x = if self.pan_zoom.pan_pt[0].abs() > 1e-9 { self.pan_zoom.pan_pt[0] } else { self.canvas.pan_pt.x };
         let pan_y = if self.pan_zoom.pan_pt[1].abs() > 1e-9 { self.pan_zoom.pan_pt[1] } else { self.canvas.pan_pt.y };
         (zoom.max(0.05), [pan_x, pan_y])
+    }
+
+    /// Open `Convert Table Archetype...` modal dialog (`QOL-1`).
+    pub fn open_convert_archetype(&mut self, doc: &ProjectDocument, sheet_id: &SheetId) -> bool {
+        let Some(ds) = doc.data_sheet(sheet_id) else {
+            return false;
+        };
+        self.convert_archetype.open_for_sheet(ds);
+        self.active_dialog = ActiveDialog::ConvertArchetype { sheet_id: sheet_id.clone() };
+        true
+    }
+
+    /// Open `Import Reshape (Plate Map / Tidy Long)` modal dialog (`QOL-2`).
+    pub fn open_import_reshape(&mut self) {
+        self.active_dialog = ActiveDialog::ImportReshape;
+    }
+
+    /// Open `Exclude Selection with Reason...` (`Cmd+Shift+E`) modal dialog (`QOL-3`).
+    pub fn open_exclude_with_reason(&mut self, sheet_id: SheetId, coords: Vec<GridCellCoord>) {
+        self.exclude_with_reason.open_for_coords(sheet_id.clone(), coords);
+        self.active_dialog = ActiveDialog::ExcludeWithReason { sheet_id };
+    }
+
+    /// Build `graph.applyCanvasPreset` or `layout.applyCanvasPreset` intent (`QOL-8`).
+    #[must_use]
+    pub fn apply_canvas_preset_intent(&mut self, sheet_id: &SheetId, is_layout: bool, preset: FigureCanvasPreset) -> ToolCommandIntent {
+        self.active_canvas_preset = Some(preset);
+        let cmd = if is_layout { "layout.applyCanvasPreset" } else { "graph.applyCanvasPreset" };
+        ToolCommandIntent::new(
+            cmd,
+            json!({
+                "sheet_id": sheet_id.as_str(),
+                "preset": format!("{preset:?}"),
+                "resize_mode": format!("{:?}", self.canvas_resize_mode),
+            }),
+        )
+    }
+
+    /// Refresh [`Self::preflight_issues`] directly from a compiled [`ChartScene`] (`QOL-8`).
+    pub fn refresh_preflight(&mut self, scene: &ChartScene) {
+        self.preflight_issues = lumencraft_chart::preflight_check_scene(scene);
     }
 
     /// Synchronize inspector/dialog state when navigating to `sheet_id`.
@@ -2649,1315 +3161,21 @@ impl CanvasDialogState {
     }
 }
 
-// ============================================================================
-// Deterministic Software Frame Compositor (RasterImage + PNG for ui.screenshot)
-// ============================================================================
-
-/// Integer pixel rectangle inside a composited workspace frame.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
-pub struct WorkspacePixelRect {
-    pub x: u32,
-    pub y: u32,
-    pub width: u32,
-    pub height: u32,
-}
-
-impl WorkspacePixelRect {
-    #[must_use]
-    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
-        Self { x, y, width, height }
-    }
-
-    #[must_use]
-    pub const fn right(self) -> u32 {
-        self.x.saturating_add(self.width)
-    }
-
-    #[must_use]
-    pub const fn bottom(self) -> u32 {
-        self.y.saturating_add(self.height)
-    }
-}
-
-/// Partitioned pixel geometry of every chrome and canvas region in a workspace screenshot.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub struct WorkspaceFrameLayout {
-    pub total_width: u32,
-    pub total_height: u32,
-    pub toolbar: WorkspacePixelRect,
-    pub navigator: WorkspacePixelRect,
-    pub canvas: WorkspacePixelRect,
-    pub inspector: WorkspacePixelRect,
-    pub status_bar: WorkspacePixelRect,
-    pub modal_overlay: Option<WorkspacePixelRect>,
-}
-
-/// Compute deterministic UI region bounds for a frame of `(width_px, height_px)`.
-///
-/// Mirrors horizontal Navigator / Canvas / Inspector panes via [`crate::i18n::mirror_x_for_rtl`]
-/// when `app.locale` resolves to a right-to-left script (`ar`, `he`, `fa`, `ur`).
-#[must_use]
-pub fn compute_workspace_layout(app: &UiApp, width_px: u32, height_px: u32) -> WorkspaceFrameLayout {
-    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    let toolbar_h = (height_px / 14).clamp(20, 38).min(height_px);
-    let status_h = (height_px / 22).clamp(16, 26).min(height_px.saturating_sub(toolbar_h));
-    let mid_y = toolbar_h;
-    let mid_h = height_px.saturating_sub(toolbar_h).saturating_sub(status_h);
-
-    let nav_w = if app.nav.navigator_open && width_px >= 320 { (width_px / 5).clamp(136, 240) } else { 0 };
-    let insp_w = if app.nav.inspector_open && width_px >= 420 { (width_px / 4).clamp(176, 280) } else { 0 };
-    let canvas_w = width_px.saturating_sub(nav_w).saturating_sub(insp_w);
-
-    let nav_x = crate::i18n::mirror_x_for_rtl(0, nav_w, width_px, is_rtl);
-    let canvas_x = crate::i18n::mirror_x_for_rtl(nav_w, canvas_w, width_px, is_rtl);
-    let insp_x = crate::i18n::mirror_x_for_rtl(nav_w.saturating_add(canvas_w), insp_w, width_px, is_rtl);
-
-    let modal_overlay = if app.canvas_dialogs.active_dialog != ActiveDialog::None {
-        let mw = (width_px * 3 / 5).clamp(180, width_px.saturating_sub(24).max(1));
-        let mh = (height_px * 3 / 5).clamp(120, height_px.saturating_sub(24).max(1));
-        let mx = crate::i18n::mirror_x_for_rtl((width_px.saturating_sub(mw)) / 2, mw, width_px, is_rtl);
-        Some(WorkspacePixelRect::new(mx, (height_px.saturating_sub(mh)) / 2, mw, mh))
-    } else {
-        None
-    };
-
-    WorkspaceFrameLayout {
-        total_width: width_px,
-        total_height: height_px,
-        toolbar: WorkspacePixelRect::new(0, 0, width_px, toolbar_h),
-        navigator: WorkspacePixelRect::new(nav_x, mid_y, nav_w, mid_h),
-        canvas: WorkspacePixelRect::new(canvas_x, mid_y, canvas_w, mid_h),
-        inspector: WorkspacePixelRect::new(insp_x, mid_y, insp_w, mid_h),
-        status_bar: WorkspacePixelRect::new(0, toolbar_h.saturating_add(mid_h), width_px, status_h),
-        modal_overlay,
-    }
-}
-
-/// Render the full application frame (chrome, active graph/layout/grid/result view, inspector,
-/// status bar, and open modal overlay) deterministically into an RGBA [`RasterImage`].
-pub fn render_workspace_rgba(app: &UiApp, target: RenderTargetSpec) -> Result<RasterImage, RenderError> {
-    let mut img = RasterImage::new(target.width_px, target.height_px, target.dpi, app.theme.surface_bg)?;
-    let layout = compute_workspace_layout(app, target.width_px, target.height_px);
-    let palette = FramePalette::from_theme(&app.theme);
-
-    draw_toolbar(&mut img, layout.toolbar, app, &palette);
-    if layout.navigator.width > 0 {
-        draw_navigator(&mut img, layout.navigator, app, &palette);
-    }
-    let viewport_rect = if app.canvas_dialogs.rulers_visible && layout.canvas.width >= 48 && layout.canvas.height >= 48 {
-        draw_physical_rulers(&mut img, layout.canvas, app, &palette)
-    } else {
-        layout.canvas
-    };
-    draw_center_viewport(&mut img, viewport_rect, app, target.dpi, &palette);
-    if layout.inspector.width > 0 {
-        draw_inspector_pane(&mut img, layout.inspector, app, &palette);
-    }
-    draw_status_bar(&mut img, layout.status_bar, app, &palette);
-    draw_active_pane_focus(&mut img, &layout, app, &palette);
-    if let Some(modal_rect) = layout.modal_overlay {
-        draw_modal_overlay(&mut img, layout.canvas, modal_rect, app, &palette);
-    }
-    Ok(img)
-}
-
-/// Render the full application frame deterministically and encode it as PNG bytes (`ui.screenshot`).
-pub fn render_workspace_frame_png(app: &UiApp, target: RenderTargetSpec) -> Result<Vec<u8>, RenderError> {
-    let image = render_workspace_rgba(app, target)?;
-    encode_png(&image)
-}
-
-#[derive(Clone, Copy)]
-struct FramePalette {
-    panel: Rgba8,
-    surface: Rgba8,
-    text: Rgba8,
-    muted: Rgba8,
-    accent: Rgba8,
-    header: Rgba8,
-    border: Rgba8,
-    canvas_mat: Rgba8,
-    excluded: Rgba8,
-    link_blue: Rgba8,
-    link_green: Rgba8,
-    link_red: Rgba8,
-}
-
-impl FramePalette {
-    fn from_theme(theme: &UiThemeSpec) -> Self {
-        let is_dark = theme.surface_bg.relative_luminance() < 0.25;
-        let delta = if is_dark { 14 } else { -12 };
-        let mat_delta = if is_dark { -8 } else { -18 };
-        Self {
-            panel: theme.panel_bg,
-            surface: theme.surface_bg,
-            text: theme.text_primary,
-            muted: theme.text_muted,
-            accent: theme.accent,
-            header: shift_luma(theme.panel_bg, delta),
-            border: theme.border,
-            canvas_mat: shift_luma(theme.surface_bg, mat_delta),
-            excluded: theme.excluded_cell_text,
-            link_blue: theme.link_blue,
-            link_green: theme.link_green,
-            link_red: theme.link_red,
-        }
-    }
-}
-
-fn shift_luma(color: Rgba8, delta: i16) -> Rgba8 {
-    let shift = |ch: u8| -> u8 { i16::from(ch).saturating_add(delta).clamp(0, 255) as u8 };
-    Rgba8::rgba(shift(color.r), shift(color.g), shift(color.b), color.a)
-}
-
-fn draw_toolbar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
-    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    fill_rect(img, rect, pal.header);
-    fill_rect(img, WorkspacePixelRect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1), pal.border);
-
-    let brand_w = 56u32.min(rect.width.saturating_sub(8));
-    let brand_local_x = crate::i18n::mirror_x_for_rtl(8, brand_w, rect.width, is_rtl);
-    let brand_rect = WorkspacePixelRect::new(rect.x.saturating_add(brand_local_x), rect.y + 5, brand_w, rect.height.saturating_sub(10).max(1));
-    fill_rect(img, brand_rect, pal.accent);
-    draw_text_5x7_dir(img, brand_rect.x + 6, brand_rect.y + 4, "LUMEN", Rgba8::WHITE, is_rtl);
-
-    let reserved_buttons_px = draw_toolbar_buttons(img, rect, app, pal, is_rtl);
-    let title = app.document().active_sheet_id.as_ref().map_or(app.document().title.as_str(), |id| active_sheet_title(app.document(), id));
-    let (title_x, title_max_w) = if is_rtl {
-        let left_bound = rect.x.saturating_add(reserved_buttons_px).saturating_add(8);
-        let right_bound = brand_rect.x.saturating_sub(12);
-        (left_bound, right_bound.saturating_sub(left_bound))
-    } else {
-        let left_bound = brand_rect.right().saturating_add(12);
-        let right_bound = rect.right().saturating_sub(reserved_buttons_px).saturating_sub(8);
-        (left_bound, right_bound.saturating_sub(left_bound))
-    };
-    if title_max_w >= 24 {
-        draw_text_clipped_dir(
-            img,
-            DrawTextClipped { x: title_x, y: rect.y + 10, text: title, color: pal.text, max_width_px: title_max_w, rtl: is_rtl },
-        );
-    }
-}
-
-fn draw_toolbar_buttons(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette, is_rtl: bool) -> u32 {
-    let buttons = [
-        ("Analyze", matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. })),
-        ("Axes", matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. })),
-        ("Cmd+K", matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette)),
-    ];
-    let min_gap_guard = 80u32;
-    let mut rx = rect.width.saturating_sub(12);
-    for (label, active) in buttons.into_iter().rev() {
-        let bw = ((label.len() as u32) * 6 + 14).min(80);
-        if rx < min_gap_guard.saturating_add(bw) {
-            break;
-        }
-        rx = rx.saturating_sub(bw);
-        let btn_local_x = crate::i18n::mirror_x_for_rtl(rx, bw, rect.width, is_rtl);
-        let btn = WorkspacePixelRect::new(rect.x.saturating_add(btn_local_x), rect.y + 5, bw, rect.height.saturating_sub(10).max(1));
-        fill_rect(img, btn, if active { pal.accent } else { pal.surface });
-        stroke_rect(img, btn, pal.border);
-        draw_text_5x7_dir(img, btn.x + 6, btn.y + 4, label, if active { Rgba8::WHITE } else { pal.text }, is_rtl);
-        rx = rx.saturating_sub(6);
-    }
-    rect.width.saturating_sub(rx)
-}
-
-fn active_sheet_title<'a>(doc: &'a ProjectDocument, id: &'a SheetId) -> &'a str {
-    doc.data_sheet(id)
-        .map(|s| s.title.as_str())
-        .or_else(|| doc.info_sheet(id).map(|s| s.title.as_str()))
-        .or_else(|| doc.result_sheet(id).map(|s| s.title()))
-        .or_else(|| doc.graph_sheet(id).map(|s| s.title.as_str()))
-        .or_else(|| doc.layout_sheet(id).map(|s| s.title.as_str()))
-        .unwrap_or(id.as_str())
-}
-
-fn draw_navigator(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
-    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    fill_rect(img, rect, pal.panel);
-    let border_x = if is_rtl { rect.x } else { rect.right().saturating_sub(1) };
-    fill_rect(img, WorkspacePixelRect::new(border_x, rect.y, 1, rect.height), pal.border);
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped {
-            x: rect.x + 10,
-            y: rect.y + 8,
-            text: "PROJECT NAVIGATOR",
-            color: pal.muted,
-            max_width_px: rect.width.saturating_sub(20),
-            rtl: is_rtl,
-        },
-    );
-
-    let list_bottom = rect.y + (rect.height * 2 / 3);
-    let mut y = rect.y + 24;
-    for entry in &app.nav.entries {
-        if y + 18 >= list_bottom {
-            break;
-        }
-        let row = WorkspacePixelRect::new(rect.x + 6, y, rect.width.saturating_sub(12), 16);
-        if entry.is_active {
-            fill_rect(img, row, pal.accent);
-        }
-        let tag = match entry.section {
-            SheetSection::Data => "D",
-            SheetSection::Info => "I",
-            SheetSection::Analyses => "A",
-            SheetSection::Graphs => "G",
-            SheetSection::Layouts => "L",
-        };
-        let fg = if entry.is_active { Rgba8::WHITE } else { pal.text };
-        draw_text_clipped_dir(
-            img,
-            DrawTextClipped {
-                x: row.x + 4,
-                y: row.y + 4,
-                text: &format!("[{tag}] {}", entry.title),
-                color: fg,
-                max_width_px: row.width.saturating_sub(8),
-                rtl: is_rtl,
-            },
-        );
-        y = y.saturating_add(18);
-    }
-
-    let fam_y = list_bottom.saturating_add(4);
-    fill_rect(img, WorkspacePixelRect::new(rect.x + 6, fam_y, rect.width.saturating_sub(12), 1), pal.border);
-    if fam_y + 18 < rect.bottom() {
-        draw_text_clipped_dir(
-            img,
-            DrawTextClipped {
-                x: rect.x + 10,
-                y: fam_y + 6,
-                text: "FAMILY",
-                color: pal.muted,
-                max_width_px: rect.width.saturating_sub(20),
-                rtl: is_rtl,
-            },
-        );
-        let mut fy = fam_y + 20;
-        for rel in &app.nav.family_related_ids {
-            if fy + 12 >= rect.bottom() {
-                break;
-            }
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped {
-                    x: rect.x + 12,
-                    y: fy,
-                    text: rel.as_str(),
-                    color: pal.link_blue,
-                    max_width_px: rect.width.saturating_sub(20),
-                    rtl: is_rtl,
-                },
-            );
-            fy = fy.saturating_add(13);
-        }
-    }
-}
-
-fn draw_physical_rulers(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) -> WorkspacePixelRect {
-    let ruler_h = 16u32;
-    let ruler_w = 24u32;
-    let corner = WorkspacePixelRect::new(rect.x, rect.y, ruler_w, ruler_h);
-    let top_bar = WorkspacePixelRect::new(rect.x.saturating_add(ruler_w), rect.y, rect.width.saturating_sub(ruler_w), ruler_h);
-    let left_bar = WorkspacePixelRect::new(rect.x, rect.y.saturating_add(ruler_h), ruler_w, rect.height.saturating_sub(ruler_h));
-    let inner = WorkspacePixelRect::new(
-        rect.x.saturating_add(ruler_w),
-        rect.y.saturating_add(ruler_h),
-        rect.width.saturating_sub(ruler_w),
-        rect.height.saturating_sub(ruler_h),
-    );
-
-    fill_rect(img, corner, pal.header);
-    fill_rect(img, top_bar, pal.header);
-    fill_rect(img, left_bar, pal.header);
-    fill_rect(img, WorkspacePixelRect::new(rect.x, rect.y.saturating_add(ruler_h).saturating_sub(1), rect.width, 1), pal.border);
-    fill_rect(img, WorkspacePixelRect::new(rect.x.saturating_add(ruler_w).saturating_sub(1), rect.y, 1, rect.height), pal.border);
-
-    let unit_tag = match app.canvas_dialogs.ruler_unit {
-        PhysicalUnit::Millimeters => "MM",
-        PhysicalUnit::Inches => "IN",
-        PhysicalUnit::Points => "PT",
-    };
-    draw_text_5x7(img, corner.x + 4, corner.y + 4, unit_tag, pal.accent);
-
-    let (doc_w_pt, doc_h_pt) = active_ruler_doc_span_pt(app);
-    let (zoom, pan_pt) = app.canvas_dialogs.effective_zoom_and_pan();
-    draw_horizontal_ruler_ticks(img, top_bar, app.canvas_dialogs.ruler_unit, doc_w_pt, zoom, pan_pt[0], pal);
-    draw_vertical_ruler_ticks(img, left_bar, app.canvas_dialogs.ruler_unit, doc_h_pt, zoom, pan_pt[1], pal);
-    inner
-}
-
-fn active_ruler_doc_span_pt(app: &UiApp) -> (f64, f64) {
-    if let Some(preset) = app.canvas_dialogs.journal_preset {
-        return preset.size_pt();
-    }
-    let doc = app.document();
-    if let Some(active_id) = &doc.active_sheet_id
-        && let Some(ls) = doc.layout_sheet(active_id)
-    {
-        let page = ls.spec.page_size_pt();
-        if page.width > 0.0 && page.height > 0.0 {
-            return (page.width, page.height);
-        }
-    }
-    lumencraft_tools::JournalWidthPreset::DoubleColumn174Mm.size_pt()
-}
-
-fn ruler_px_offset(view_px: f64, span_px: u32) -> Option<u32> {
-    if !view_px.is_finite() || view_px < 0.0 || span_px == 0 {
-        return None;
-    }
-    let max_off = f64::from(span_px.saturating_sub(1));
-    if view_px > max_off {
-        return None;
-    }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    Some(view_px.round() as u32)
-}
-
-fn draw_horizontal_ruler_ticks(
-    img: &mut RasterImage,
-    bar: WorkspacePixelRect,
-    unit: PhysicalUnit,
-    doc_span_pt: f64,
-    zoom: f64,
-    pan_pt: f64,
-    pal: &FramePalette,
-) {
-    if bar.width == 0 {
-        return;
-    }
-    let px_per_pt = (f64::from(bar.width) / doc_span_pt.max(1.0)).max(0.05);
-    let ticks = build_ruler_ticks(unit, doc_span_pt, zoom, pan_pt, px_per_pt);
-    for tick in ticks {
-        let Some(off_x) = ruler_px_offset(tick.view_px, bar.width) else {
-            continue;
-        };
-        let tick_h = if tick.major { 7 } else { 3 };
-        let color = if tick.major { pal.text } else { pal.muted };
-        fill_rect(img, WorkspacePixelRect::new(bar.x.saturating_add(off_x), bar.bottom().saturating_sub(tick_h + 1), 1, tick_h), color);
-        if let Some(label) = tick.label.as_deref()
-            && off_x.saturating_add(10) < bar.width
-        {
-            draw_text_clipped(
-                img,
-                bar.x.saturating_add(off_x).saturating_add(2),
-                bar.y + 2,
-                label,
-                pal.text,
-                bar.width.saturating_sub(off_x + 3).min(24),
-            );
-        }
-    }
-}
-
-fn draw_vertical_ruler_ticks(
-    img: &mut RasterImage,
-    bar: WorkspacePixelRect,
-    unit: PhysicalUnit,
-    doc_span_pt: f64,
-    zoom: f64,
-    pan_pt: f64,
-    pal: &FramePalette,
-) {
-    if bar.height == 0 {
-        return;
-    }
-    let px_per_pt = (f64::from(bar.height) / doc_span_pt.max(1.0)).max(0.05);
-    let ticks = build_ruler_ticks(unit, doc_span_pt, zoom, pan_pt, px_per_pt);
-    for tick in ticks {
-        let Some(off_y) = ruler_px_offset(tick.view_px, bar.height) else {
-            continue;
-        };
-        let tick_w = if tick.major { 7 } else { 3 };
-        let color = if tick.major { pal.text } else { pal.muted };
-        fill_rect(img, WorkspacePixelRect::new(bar.right().saturating_sub(tick_w + 1), bar.y.saturating_add(off_y), tick_w, 1), color);
-        if let Some(label) = tick.label.as_deref()
-            && off_y.saturating_add(8) < bar.height
-        {
-            draw_text_clipped(img, bar.x + 2, bar.y.saturating_add(off_y).saturating_add(2), label, pal.text, bar.width.saturating_sub(10));
-        }
-    }
-}
-
-fn draw_center_viewport(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, dpi: u16, pal: &FramePalette) {
-    fill_rect(img, rect, pal.canvas_mat);
-    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    if app.nav.gallery.open {
-        draw_portfolio_gallery(img, rect, app, pal, is_rtl);
-        return;
-    }
-    let doc = app.document();
-    let Some(active_id) = &doc.active_sheet_id else {
-        draw_empty_studio(img, rect, pal, is_rtl);
-        return;
-    };
-
-    if doc.graph_sheet(active_id).is_some() || doc.layout_sheet(active_id).is_some() {
-        draw_scene_viewport(img, rect, app, active_id, dpi, pal);
-    } else if let Some(ds) = doc.data_sheet(active_id) {
-        draw_data_grid(img, rect, ds, app, pal);
-    } else if let Some(rs) = doc.result_sheet(active_id) {
-        draw_result_view(img, rect, rs, &app.canvas_dialogs.result_view, pal);
-    } else if let Some(info) = doc.info_sheet(active_id) {
-        draw_info_view(img, rect, info, pal);
-    } else {
-        draw_empty_studio(img, rect, pal, is_rtl);
-    }
-}
-
-fn draw_portfolio_gallery(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette, is_rtl: bool) {
-    let header_title = format!("PORTFOLIO GALLERY ({})", app.nav.gallery.cards.len());
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped {
-            x: rect.x + 12,
-            y: rect.y + 8,
-            text: &header_title,
-            color: pal.text,
-            max_width_px: rect.width.saturating_sub(24),
-            rtl: is_rtl,
-        },
-    );
-    fill_rect(img, WorkspacePixelRect::new(rect.x + 10, rect.y + 22, rect.width.saturating_sub(20), 1), pal.border);
-
-    let body = WorkspacePixelRect::new(rect.x + 12, rect.y + 28, rect.width.saturating_sub(24), rect.height.saturating_sub(36));
-    if body.width < 40 || body.height < 32 {
-        return;
-    }
-    if app.nav.gallery.cards.is_empty() {
-        draw_text_clipped_dir(
-            img,
-            DrawTextClipped { x: body.x, y: body.y + 12, text: "NO SHEETS MATCH FILTER", color: pal.muted, max_width_px: body.width, rtl: is_rtl },
-        );
-        return;
-    }
-
-    let gap = 10u32;
-    let cols = (body.width / 132).clamp(1, 4);
-    let card_w = body.width.saturating_sub(gap.saturating_mul(cols.saturating_sub(1))) / cols;
-    let card_h = 74u32.min(body.height);
-    for (idx, card) in app.nav.gallery.cards.iter().enumerate() {
-        let col = (idx as u32) % cols;
-        let row = (idx as u32) / cols;
-        let cy = body.y.saturating_add(row.saturating_mul(card_h.saturating_add(gap)));
-        if cy.saturating_add(card_h) > body.bottom() {
-            break;
-        }
-        let local_cx = col.saturating_mul(card_w.saturating_add(gap));
-        let cx = body.x.saturating_add(crate::i18n::mirror_x_for_rtl(local_cx, card_w, body.width, is_rtl));
-        let card_rect = WorkspacePixelRect::new(cx, cy, card_w, card_h);
-        draw_gallery_card(img, card_rect, card, app.nav.gallery.selected_ids.contains(&card.sheet_id), pal, is_rtl);
-    }
-}
-
-fn draw_gallery_card(img: &mut RasterImage, rect: WorkspacePixelRect, card: &PortfolioCard, is_selected: bool, pal: &FramePalette, is_rtl: bool) {
-    fill_rect(img, rect, pal.surface);
-    let accent_band = card.color_tag.unwrap_or(pal.accent);
-    let stripe_x = rect.x.saturating_add(crate::i18n::mirror_x_for_rtl(0, 4, rect.width, is_rtl));
-    fill_rect(img, WorkspacePixelRect::new(stripe_x, rect.y + 1, 4, rect.height.saturating_sub(2)), accent_band);
-
-    let thumb = WorkspacePixelRect::new(rect.x + 8, rect.y + 6, rect.width.saturating_sub(16), rect.height.saturating_sub(36).max(8));
-    fill_rect(img, thumb, pal.panel);
-    stroke_rect(img, thumb, pal.border);
-    if thumb.width >= 20 && thumb.height >= 12 {
-        fill_rect(img, WorkspacePixelRect::new(thumb.x + 4, thumb.y + 4, thumb.width.saturating_sub(8) / 2, 4), accent_band);
-        fill_rect(img, WorkspacePixelRect::new(thumb.x + 4, thumb.y + 11, thumb.width.saturating_sub(12), 2), pal.muted);
-    }
-
-    let text_y = thumb.bottom().saturating_add(4);
-    let label = format!("[{}] {}", card.badge_label, card.title);
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped { x: rect.x + 8, y: text_y, text: &label, color: pal.text, max_width_px: rect.width.saturating_sub(16), rtl: is_rtl },
-    );
-    if text_y + 18 <= rect.bottom() {
-        draw_text_clipped_dir(
-            img,
-            DrawTextClipped {
-                x: rect.x + 8,
-                y: text_y + 10,
-                text: &card.subtitle,
-                color: pal.muted,
-                max_width_px: rect.width.saturating_sub(16),
-                rtl: is_rtl,
-            },
-        );
-    }
-
-    let selected = is_selected || card.selected;
-    let border_color = if selected {
-        pal.accent
-    } else if card.active {
-        pal.link_blue
-    } else {
-        pal.border
-    };
-    stroke_rect(img, rect, border_color);
-    if selected && rect.width > 4 && rect.height > 4 {
-        stroke_rect(img, WorkspacePixelRect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2), pal.accent);
-    }
-}
-
-fn draw_active_pane_focus(img: &mut RasterImage, layout: &WorkspaceFrameLayout, app: &UiApp, pal: &FramePalette) {
-    let focus_color = Rgba8::rgba(pal.accent.r, pal.accent.g, pal.accent.b, 190);
-    let target = match app.nav.active_pane {
-        ActiveWorkspacePane::Navigator if layout.navigator.width > 4 => Some(layout.navigator),
-        ActiveWorkspacePane::FamilyStrip if layout.navigator.width > 4 && layout.navigator.height > 24 => {
-            let fam_y = layout.navigator.y + (layout.navigator.height * 2 / 3).saturating_add(2);
-            Some(WorkspacePixelRect::new(layout.navigator.x, fam_y, layout.navigator.width, layout.navigator.bottom().saturating_sub(fam_y)))
-        }
-        ActiveWorkspacePane::MainCanvasOrGrid if layout.canvas.width > 4 => Some(layout.canvas),
-        ActiveWorkspacePane::Inspector if layout.inspector.width > 4 => Some(layout.inspector),
-        ActiveWorkspacePane::FloatingNotes if layout.canvas.width >= 96 && layout.canvas.height >= 40 => {
-            let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-            let badge_w = 88u32;
-            let local_x = crate::i18n::mirror_x_for_rtl(layout.canvas.width.saturating_sub(badge_w + 8), badge_w, layout.canvas.width, is_rtl);
-            let notes_rect = WorkspacePixelRect::new(layout.canvas.x.saturating_add(local_x), layout.canvas.bottom().saturating_sub(24), badge_w, 18);
-            fill_rect(img, notes_rect, pal.panel);
-            stroke_rect(img, notes_rect, pal.accent);
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped {
-                    x: notes_rect.x + 6,
-                    y: notes_rect.y + 5,
-                    text: "NOTES PANE",
-                    color: pal.accent,
-                    max_width_px: badge_w - 12,
-                    rtl: is_rtl,
-                },
-            );
-            None
-        }
-        _ => None,
-    };
-
-    if let Some(pane) = target
-        && pane.width >= 4
-        && pane.height >= 4
-    {
-        fill_rect(img, WorkspacePixelRect::new(pane.x, pane.y, pane.width, 2), focus_color);
-        stroke_rect(img, WorkspacePixelRect::new(pane.x + 1, pane.y + 1, pane.width - 2, pane.height - 2), focus_color);
-    }
-}
-
-fn draw_empty_studio(img: &mut RasterImage, rect: WorkspacePixelRect, pal: &FramePalette, is_rtl: bool) {
-    let cw = rect.width.saturating_sub(48).min(260);
-    let ch = rect.height.saturating_sub(48).min(96);
-    let card = WorkspacePixelRect::new(rect.x + (rect.width.saturating_sub(cw)) / 2, rect.y + (rect.height.saturating_sub(ch)) / 2, cw, ch);
-    fill_rect(img, card, pal.panel);
-    stroke_rect(img, card, pal.border);
-    let max_w = card.width.saturating_sub(32);
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped { x: card.x + 16, y: card.y + 18, text: "LUMEN SCIENTIFIC STUDIO", color: pal.text, max_width_px: max_w, rtl: is_rtl },
-    );
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped { x: card.x + 16, y: card.y + 38, text: "NEW DATA TABLE: CMD+T", color: pal.muted, max_width_px: max_w, rtl: is_rtl },
-    );
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped { x: card.x + 16, y: card.y + 56, text: "COMMAND PALETTE: CMD+K", color: pal.accent, max_width_px: max_w, rtl: is_rtl },
-    );
-}
-
-fn draw_scene_viewport(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, sheet_id: &SheetId, dpi: u16, pal: &FramePalette) {
-    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    let pad = 16u32.min(rect.width / 8).min(rect.height / 8);
-    let inner_w = rect.width.saturating_sub(pad * 2).max(1);
-    let inner_h = rect.height.saturating_sub(pad * 2 + 20).max(1);
-    let paper = WorkspacePixelRect::new(rect.x + pad, rect.y + pad + 18, inner_w, inner_h);
-
-    let zoom_pct = (app.canvas_dialogs.effective_zoom_and_pan().0 * 100.0).round() as i64;
-    let header_label = format!("CANVAS: {} ({zoom_pct}%)", active_sheet_title(app.document(), sheet_id));
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped {
-            x: rect.x + pad,
-            y: rect.y + 8,
-            text: &header_label,
-            color: pal.text,
-            max_width_px: rect.width.saturating_sub(pad * 2),
-            rtl: is_rtl,
-        },
-    );
-
-    if let Ok(Some(scene)) = app.canvas_dialogs.active_scene(app.session()) {
-        if let Ok(rendered) = render_scene(&scene, RenderTargetSpec { width_px: paper.width, height_px: paper.height, dpi: dpi.max(72) }) {
-            blit_image(img, paper.x, paper.y, &rendered);
-        }
-    } else {
-        fill_rect(img, paper, Rgba8::WHITE);
-    }
-    stroke_rect(img, paper, pal.border);
-
-    if let Some(gs) = app.document().graph_sheet(sheet_id) {
-        draw_graph_summary_chips(img, paper, gs, pal);
-    } else if let Some(ls) = app.document().layout_sheet(sheet_id) {
-        draw_layout_summary_badges(img, paper, ls, pal);
-    }
-}
-
-fn draw_graph_summary_chips(img: &mut RasterImage, paper: WorkspacePixelRect, gs: &GraphSheet, pal: &FramePalette) {
-    let mut sx = paper.x + 10;
-    for (idx, _s) in gs.spec.series.iter().take(4).enumerate() {
-        let chip = WorkspacePixelRect::new(sx, paper.y + 8, 12, 8);
-        fill_rect(img, chip, gs.spec.palette.color_at(idx));
-        stroke_rect(img, chip, Rgba8::BLACK);
-        sx = sx.saturating_add(16);
-    }
-    if !gs.initialized && paper.width > 120 && paper.height > 40 {
-        let banner = WorkspacePixelRect::new(paper.x + 10, paper.bottom().saturating_sub(24), paper.width.saturating_sub(20).min(180), 16);
-        fill_rect(img, banner, pal.accent);
-        draw_text_clipped(img, banner.x + 6, banner.y + 4, "SELECT GRAPH TYPE", Rgba8::WHITE, banner.width.saturating_sub(12));
-    }
-}
-
-fn draw_layout_summary_badges(img: &mut RasterImage, paper: WorkspacePixelRect, ls: &LayoutSheet, pal: &FramePalette) {
-    let page = ls.spec.page_size_pt();
-    if page.width <= 0.0 || page.height <= 0.0 {
-        return;
-    }
-    let sx = f64::from(paper.width) / page.width;
-    let sy = f64::from(paper.height) / page.height;
-    for (idx, item) in ls.spec.items.iter().enumerate() {
-        let bounds = match item {
-            LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => {
-                *bounds_pt
-            }
-        };
-        let px = paper.x + ((bounds.x * sx).round().max(0.0) as u32);
-        let py = paper.y + ((bounds.y * sy).round().max(0.0) as u32);
-        let pw = ((bounds.width * sx).round().max(8.0) as u32).min(paper.right().saturating_sub(px));
-        let ph = ((bounds.height * sy).round().max(8.0) as u32).min(paper.bottom().saturating_sub(py));
-        if pw >= 4 && ph >= 4 {
-            let box_rect = WorkspacePixelRect::new(px, py, pw, ph);
-            stroke_rect(img, box_rect, pal.accent);
-            if let Some(badge) = ls.spec.panel_badges.badge_for(idx) {
-                fill_rect(img, WorkspacePixelRect::new(px + 2, py + 2, 14, 12), pal.accent);
-                draw_text_clipped(img, px + 5, py + 4, &badge, Rgba8::WHITE, 10);
-            }
-        }
-    }
-}
-
-fn draw_data_grid(img: &mut RasterImage, rect: WorkspacePixelRect, ds: &DataSheet, app: &UiApp, pal: &FramePalette) {
-    let sheet_rect = WorkspacePixelRect::new(rect.x + 8, rect.y + 8, rect.width.saturating_sub(16), rect.height.saturating_sub(16));
-    fill_rect(img, sheet_rect, pal.surface);
-    stroke_rect(img, sheet_rect, pal.border);
-
-    let title = format!("[{}] {}", ds.kind().label(), ds.title);
-    draw_text_clipped(img, sheet_rect.x + 8, sheet_rect.y + 6, &title, pal.text, sheet_rect.width.saturating_sub(16));
-
-    let frame = app.grid.tool.format_visible_window(ds);
-    let row_h = 18u32;
-    let hdr_y = sheet_rect.y + 22;
-    let body_y = hdr_y + row_h + 4;
-    let col_w = 72u32;
-    let gutter_w = 34u32;
-
-    fill_rect(img, WorkspacePixelRect::new(sheet_rect.x + 1, hdr_y, sheet_rect.width.saturating_sub(2), row_h), pal.header);
-    draw_text_5x7(img, sheet_rect.x + 8, hdr_y + 5, "#", pal.muted);
-
-    let max_cols = (sheet_rect.width.saturating_sub(gutter_w + 8) / col_w).max(1) as usize;
-    for (vis_idx, g_idx) in (frame.window.start_col..frame.window.end_col).take(max_cols).enumerate() {
-        let cx = sheet_rect.x + gutter_w + (vis_idx as u32) * col_w;
-        let hdr = WorkspacePixelRect::new(cx, hdr_y, col_w.saturating_sub(2), row_h);
-        stroke_rect(img, hdr, pal.border);
-        if let TableArchetype::MultipleVariables(mv) = &ds.archetype
-            && let Some(var) = mv.variables.get(g_idx)
-        {
-            fill_rect(img, WorkspacePixelRect::new(cx + 2, hdr_y + 2, 16, row_h.saturating_sub(4)), variable_role_color(var.role, &app.theme));
-            draw_text_clipped(img, cx + 21, hdr_y + 5, &var.title, pal.text, col_w.saturating_sub(24));
-        } else {
-            let label = data_column_title(ds, g_idx).unwrap_or("Col");
-            draw_text_clipped(img, cx + 4, hdr_y + 5, label, pal.text, col_w.saturating_sub(8));
-        }
-    }
-
-    let geom = GridCellGeometry { sheet_rect, body_y, row_h, gutter_w, col_w };
-    draw_visible_grid_cells(img, &geom, &frame.window, &frame.cells, pal);
-}
-
-struct GridCellGeometry {
-    sheet_rect: WorkspacePixelRect,
-    body_y: u32,
-    row_h: u32,
-    gutter_w: u32,
-    col_w: u32,
-}
-
-fn draw_visible_grid_cells(
-    img: &mut RasterImage,
-    geom: &GridCellGeometry,
-    window: &lumencraft_tools::GridVisibleWindow,
-    cells: &[lumencraft_tools::grid::VisibleCellView],
-    pal: &FramePalette,
-) {
-    let sheet_rect = geom.sheet_rect;
-    let body_y = geom.body_y;
-    let row_h = geom.row_h;
-    let gutter_w = geom.gutter_w;
-    let col_w = geom.col_w;
-    let max_rows = (sheet_rect.bottom().saturating_sub(body_y) / row_h) as usize;
-    let max_cols = (sheet_rect.width.saturating_sub(gutter_w + 8) / col_w).max(1) as usize;
-    for r_off in 0..max_rows.min(window.end_row.saturating_sub(window.start_row)) {
-        let ry = body_y + (r_off as u32) * row_h;
-        let row_num = window.start_row + r_off + 1;
-        draw_text_5x7(img, sheet_rect.x + 6, ry + 5, &format!("{row_num}"), pal.muted);
-        fill_rect(img, WorkspacePixelRect::new(sheet_rect.x + 1, ry + row_h - 1, sheet_rect.width.saturating_sub(2), 1), pal.border);
-    }
-
-    for cell in cells {
-        let r_off = cell.coord.row.saturating_sub(window.start_row);
-        let c_off = cell.flat_col.saturating_sub(window.start_col);
-        if r_off >= max_rows || c_off >= max_cols {
-            continue;
-        }
-        let cx = sheet_rect.x + gutter_w + (c_off as u32) * col_w;
-        let cy = body_y + (r_off as u32) * row_h;
-        let cell_rect = WorkspacePixelRect::new(cx, cy, col_w.saturating_sub(1), row_h.saturating_sub(1));
-        if cell.is_selected {
-            fill_rect(img, cell_rect, shift_luma(pal.surface, -10));
-        }
-        if cell.is_active {
-            stroke_rect(img, cell_rect, pal.accent);
-        } else if let Some(link) = cell.link_border {
-            let link_color = match link {
-                LinkBorderColor::Blue => pal.link_blue,
-                LinkBorderColor::Green => pal.link_green,
-                LinkBorderColor::Red => pal.link_red,
-                LinkBorderColor::Charcoal => pal.muted,
-            };
-            stroke_rect(img, cell_rect, link_color);
-        }
-        let fg = if cell.excluded { pal.excluded } else { pal.text };
-        draw_text_clipped(img, cx + 4, cy + 5, &cell.display_text, fg, col_w.saturating_sub(8));
-    }
-}
-
-fn draw_result_view(img: &mut RasterImage, rect: WorkspacePixelRect, rs: &ResultSheet, view: &ResultSheetViewState, pal: &FramePalette) {
-    let box_rect = WorkspacePixelRect::new(rect.x + 8, rect.y + 8, rect.width.saturating_sub(16), rect.height.saturating_sub(16));
-    fill_rect(img, box_rect, pal.surface);
-    stroke_rect(img, box_rect, pal.border);
-
-    draw_text_clipped(img, box_rect.x + 10, box_rect.y + 8, rs.title(), pal.text, box_rect.width.saturating_sub(20));
-
-    let mut tx = box_rect.x + 10;
-    let tab_y = box_rect.y + 24;
-    for (idx, tab) in rs.tabs.iter().take(4).enumerate() {
-        let tw = ((tab.title.len() as u32) * 6 + 14).min(110);
-        if tx + tw >= box_rect.right() {
-            break;
-        }
-        let active = idx == view.active_tab_index;
-        let trect = WorkspacePixelRect::new(tx, tab_y, tw, 18);
-        fill_rect(img, trect, if active { pal.accent } else { pal.header });
-        stroke_rect(img, trect, pal.border);
-        draw_text_clipped(img, trect.x + 5, trect.y + 5, &tab.title, if active { Rgba8::WHITE } else { pal.text }, tw.saturating_sub(10));
-        tx = tx.saturating_add(tw + 4);
-    }
-
-    let mut row_y = tab_y + 28;
-    if let Some(tab) = view.active_tab(rs) {
-        for (r_idx, row) in tab.rows.iter().take(6).enumerate() {
-            if row_y + 16 >= box_rect.bottom().saturating_sub(56) {
-                break;
-            }
-            let r_label = tab.row_labels.get(r_idx).map(String::as_str).unwrap_or("");
-            let first_val = row.first().map(|c| ResultSheetViewState::format_result_cell(c, rs.analysis.p_value_format)).unwrap_or_default();
-            draw_text_clipped(img, box_rect.x + 12, row_y, &format!("{r_label}: {first_val}"), pal.text, box_rect.width.saturating_sub(24));
-            row_y = row_y.saturating_add(16);
-        }
-    }
-
-    let chk_y = box_rect.bottom().saturating_sub(54).max(row_y + 6);
-    fill_rect(img, WorkspacePixelRect::new(box_rect.x + 8, chk_y, box_rect.width.saturating_sub(16), 1), pal.border);
-    draw_text_5x7(img, box_rect.x + 10, chk_y + 6, "ASSUMPTION CHECKLIST", pal.muted);
-    let mut cy = chk_y + 18;
-    for item in view.visible_checklist(rs).into_iter().take(2) {
-        if cy + 12 >= box_rect.bottom() {
-            break;
-        }
-        let status_color = match item.status {
-            ChecklistStatus::Pass => pal.link_green,
-            ChecklistStatus::Warn => Rgba8::rgb(0xD5, 0x5E, 0x00),
-            ChecklistStatus::Violated => pal.link_red,
-            ChecklistStatus::Info => pal.link_blue,
-        };
-        fill_rect(img, WorkspacePixelRect::new(box_rect.x + 10, cy + 1, 8, 8), status_color);
-        draw_text_clipped(img, box_rect.x + 24, cy, &item.assumption, pal.text, box_rect.width.saturating_sub(32));
-        cy = cy.saturating_add(14);
-    }
-}
-
-fn draw_info_view(img: &mut RasterImage, rect: WorkspacePixelRect, info: &InfoSheet, pal: &FramePalette) {
-    let box_rect = WorkspacePixelRect::new(rect.x + 8, rect.y + 8, rect.width.saturating_sub(16), rect.height.saturating_sub(16));
-    fill_rect(img, box_rect, pal.surface);
-    stroke_rect(img, box_rect, pal.border);
-    draw_text_clipped(img, box_rect.x + 10, box_rect.y + 8, &info.title, pal.text, box_rect.width.saturating_sub(20));
-
-    let split_x = box_rect.x + (box_rect.width / 2);
-    fill_rect(img, WorkspacePixelRect::new(split_x, box_rect.y + 24, 1, box_rect.height.saturating_sub(28)), pal.border);
-    let mut y = box_rect.y + 28;
-    for c in info.constants.iter().take(8) {
-        if y + 14 >= box_rect.bottom() {
-            break;
-        }
-        let line = format!("{}: {}", c.name, c.value.display_text());
-        draw_text_clipped(img, box_rect.x + 10, y, &line, pal.text, (box_rect.width / 2).saturating_sub(18));
-        y = y.saturating_add(15);
-    }
-    draw_text_clipped(img, split_x + 10, box_rect.y + 28, &info.notes_markdown, pal.muted, (box_rect.width / 2).saturating_sub(18));
-}
-
-fn draw_inspector_pane(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
-    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    fill_rect(img, rect, pal.panel);
-    let border_x = if is_rtl { rect.right().saturating_sub(1) } else { rect.x };
-    fill_rect(img, WorkspacePixelRect::new(border_x, rect.y, 1, rect.height), pal.border);
-    let text_w = rect.width.saturating_sub(18);
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped {
-            x: rect.x + 10,
-            y: rect.y + 8,
-            text: app.canvas_dialogs.active_inspector.label(),
-            color: pal.text,
-            max_width_px: text_w,
-            rtl: is_rtl,
-        },
-    );
-    fill_rect(img, WorkspacePixelRect::new(rect.x + 8, rect.y + 22, rect.width.saturating_sub(16), 1), pal.border);
-
-    match app.canvas_dialogs.active_inspector {
-        ActiveInspector::FormatGraph => draw_inspector_format_graph(img, rect, app, pal, is_rtl),
-        ActiveInspector::FormatAxes => {
-            let draft = &app.canvas_dialogs.format_axes.axis_draft;
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped {
-                    x: rect.x + 10,
-                    y: rect.y + 30,
-                    text: &format!("Segments: {}", draft.segments.len()),
-                    color: pal.text,
-                    max_width_px: text_w,
-                    rtl: is_rtl,
-                },
-            );
-            for (idx, seg) in draft.segments.iter().enumerate() {
-                let y = rect.y + 46 + (idx as u32) * 16;
-                draw_text_clipped_dir(
-                    img,
-                    DrawTextClipped {
-                        x: rect.x + 10,
-                        y,
-                        text: &format!("S{}: {:?}", idx + 1, seg.scale),
-                        color: pal.muted,
-                        max_width_px: text_w,
-                        rtl: is_rtl,
-                    },
-                );
-            }
-        }
-        ActiveInspector::PairwiseComparisons => {
-            let count = app.canvas_dialogs.pairwise.brackets.len();
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped {
-                    x: rect.x + 10,
-                    y: rect.y + 30,
-                    text: &format!("Brackets: {count}"),
-                    color: pal.text,
-                    max_width_px: text_w,
-                    rtl: is_rtl,
-                },
-            );
-        }
-        ActiveInspector::BubblePlot => {
-            let bp = &app.canvas_dialogs.bubble_plot;
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped {
-                    x: rect.x + 10,
-                    y: rect.y + 30,
-                    text: &format!("X col {} / Y col {}", bp.x_column, bp.y_column),
-                    color: pal.text,
-                    max_width_px: text_w,
-                    rtl: is_rtl,
-                },
-            );
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped {
-                    x: rect.x + 10,
-                    y: rect.y + 46,
-                    text: if bp.show_convex_hulls { "Hulls: On" } else { "Hulls: Off" },
-                    color: pal.muted,
-                    max_width_px: text_w,
-                    rtl: is_rtl,
-                },
-            );
-        }
-        ActiveInspector::PageLayout => {
-            let pl = &app.canvas_dialogs.page_layout;
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped {
-                    x: rect.x + 10,
-                    y: rect.y + 30,
-                    text: &format!("Grid: {}x{}", pl.rows, pl.cols),
-                    color: pal.text,
-                    max_width_px: text_w,
-                    rtl: is_rtl,
-                },
-            );
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped {
-                    x: rect.x + 10,
-                    y: rect.y + 46,
-                    text: &format!("Items: {}", pl.items.len()),
-                    color: pal.muted,
-                    max_width_px: text_w,
-                    rtl: is_rtl,
-                },
-            );
-        }
-        ActiveInspector::ResultDetails | ActiveInspector::None => {
-            draw_text_clipped_dir(
-                img,
-                DrawTextClipped { x: rect.x + 10, y: rect.y + 30, text: "Ready", color: pal.muted, max_width_px: text_w, rtl: is_rtl },
-            );
-        }
-    }
-}
-
-fn draw_inspector_format_graph(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette, is_rtl: bool) {
-    let text_w = rect.width.saturating_sub(18);
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped {
-            x: rect.x + 10,
-            y: rect.y + 30,
-            text: app.canvas_dialogs.format_graph.palette.label(),
-            color: pal.muted,
-            max_width_px: text_w,
-            rtl: is_rtl,
-        },
-    );
-    let mut local_x = 10u32;
-    for i in 0..6 {
-        if local_x + 18 >= rect.width {
-            break;
-        }
-        let sx = rect.x.saturating_add(crate::i18n::mirror_x_for_rtl(local_x, 16, rect.width, is_rtl));
-        let sw = WorkspacePixelRect::new(sx, rect.y + 44, 16, 14);
-        fill_rect(img, sw, app.canvas_dialogs.format_graph.preview_swatch(i));
-        stroke_rect(img, sw, pal.border);
-        local_x = local_x.saturating_add(20);
-    }
-    let frame_lbl = format!("Frame: {:?}", app.canvas_dialogs.format_graph.frame_preset);
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped { x: rect.x + 10, y: rect.y + 68, text: &frame_lbl, color: pal.text, max_width_px: text_w, rtl: is_rtl },
-    );
-}
-
-fn draw_status_bar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
-    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    fill_rect(img, rect, pal.header);
-    fill_rect(img, WorkspacePixelRect::new(rect.x, rect.y, rect.width, 1), pal.border);
-
-    let cursor_str = format!("Cursor: {:?}", app.active_cursor());
-    let stats_str = app
-        .grid
-        .quick_stats
-        .filter(|s| s.numeric_count > 0)
-        .and_then(|s| s.mean.map(|m| format!("n={} Mean={}", s.numeric_count, format_compact_f64(m))))
-        .unwrap_or_default();
-    let banner = app.canvas_dialogs.status_banner.as_deref().unwrap_or("");
-    let left_text = [cursor_str, stats_str, String::from(banner)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<String>>().join(" | ");
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped {
-            x: rect.x + 10,
-            y: rect.y + (rect.height.saturating_sub(7)) / 2,
-            text: &left_text,
-            color: pal.text,
-            max_width_px: rect.width.saturating_sub(20),
-            rtl: is_rtl,
-        },
-    );
-}
-
-fn draw_modal_overlay(img: &mut RasterImage, backdrop: WorkspacePixelRect, modal: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
-    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    dim_rect(img, backdrop);
-    fill_rect(img, modal, pal.surface);
-    stroke_rect(img, modal, pal.accent);
-
-    let header = WorkspacePixelRect::new(modal.x, modal.y, modal.width, 24);
-    fill_rect(img, header, pal.accent);
-    let title = modal_title(&app.canvas_dialogs.active_dialog);
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped {
-            x: header.x + 10,
-            y: header.y + 8,
-            text: title,
-            color: Rgba8::WHITE,
-            max_width_px: header.width.saturating_sub(20),
-            rtl: is_rtl,
-        },
-    );
-
-    let body_y = header.bottom().saturating_add(8);
-    let lines = modal_preview_lines(&app.canvas_dialogs);
-    for (idx, line) in lines.into_iter().take(6).enumerate() {
-        let ly = body_y + (idx as u32) * 16;
-        if ly + 10 >= modal.bottom() {
-            break;
-        }
-        draw_text_clipped_dir(
-            img,
-            DrawTextClipped { x: modal.x + 12, y: ly, text: &line, color: pal.text, max_width_px: modal.width.saturating_sub(24), rtl: is_rtl },
-        );
-    }
-}
-
-fn modal_title(dialog: &ActiveDialog) -> &'static str {
-    match dialog {
-        ActiveDialog::None => "",
-        ActiveDialog::AnalyzeSheet { .. } => "Analyze...",
-        ActiveDialog::DuplicateAnalysisPrompt { .. } => "Analysis Already Exists",
-        ActiveDialog::EditAnalysisParameters { .. } => "Edit Analysis Parameters (Cmd+T)",
-        ActiveDialog::ChangeDataAnalyzed { .. } => "Change Data Analyzed",
-        ActiveDialog::ResultViewer { .. } => "Result Sheet Viewer",
-        ActiveDialog::ConstantHookPicker { .. } => "Insert Hooked Constant",
-        ActiveDialog::ChangeGraphType { .. } => "Change Graph Type",
-        ActiveDialog::FormatGraph { .. } => "Format Graph",
-        ActiveDialog::FormatAxes { .. } => "Format Axes",
-        ActiveDialog::PairwiseComparisons { .. } => "Pairwise Comparisons",
-        ActiveDialog::BubblePlotInspector { .. } => "Bubble Plot Channels",
-        ActiveDialog::ApplyStyleFrom { .. } => "Apply Style From...",
-        ActiveDialog::PageLayoutComposer { .. } => "Page Layout Composer",
-        ActiveDialog::ExportFigure { .. } => "Export Publication Figure",
-        ActiveDialog::CommandPalette => "Command Palette (Cmd+K)",
-        ActiveDialog::About => "About LumenCraft",
-    }
-}
-
-fn modal_preview_lines(state: &CanvasDialogState) -> Vec<String> {
-    match &state.active_dialog {
-        ActiveDialog::AnalyzeSheet { .. } => {
-            let mut rows = vec![format!("Search: {}", state.analyze.search_query)];
-            for item in state.analyze.compatible_entries().into_iter().take(5) {
-                rows.push(format!("- {}", item.label));
-            }
-            rows
-        }
-        ActiveDialog::CommandPalette => {
-            let mut rows = vec![format!("> {}", state.command_palette.query)];
-            for hit in state.command_palette.matches().into_iter().take(5) {
-                rows.push(format!("{} ({})", hit.label, hit.id));
-            }
-            rows
-        }
-        ActiveDialog::ChangeGraphType { .. } => {
-            state.change_graph_type.recommended_options().into_iter().take(5).map(|o| format!("[*] {}", o.label)).collect()
-        }
-        ActiveDialog::ApplyStyleFrom { .. } => {
-            state.apply_style.donor_candidates.iter().take(5).map(|(id, title)| format!("Donor: {title} ({})", id.as_str())).collect()
-        }
-        _ => vec![String::from("Active scientific dialog ready")],
-    }
-}
-
-// ============================================================================
-// Low-Level Safe Software Raster Primitives & Compact 5x7 ASCII Font
-// ============================================================================
-
-fn fill_rect(img: &mut RasterImage, rect: WorkspacePixelRect, color: Rgba8) {
-    let x_end = rect.right().min(img.width_px);
-    let y_end = rect.bottom().min(img.height_px);
-    for py in rect.y..y_end {
-        for px in rect.x..x_end {
-            img.blend_pixel(px, py, color);
-        }
-    }
-}
-
-fn stroke_rect(img: &mut RasterImage, rect: WorkspacePixelRect, color: Rgba8) {
-    if rect.width == 0 || rect.height == 0 {
-        return;
-    }
-    fill_rect(img, WorkspacePixelRect::new(rect.x, rect.y, rect.width, 1), color);
-    fill_rect(img, WorkspacePixelRect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1), color);
-    fill_rect(img, WorkspacePixelRect::new(rect.x, rect.y, 1, rect.height), color);
-    fill_rect(img, WorkspacePixelRect::new(rect.right().saturating_sub(1), rect.y, 1, rect.height), color);
-}
-
-fn dim_rect(img: &mut RasterImage, rect: WorkspacePixelRect) {
-    fill_rect(img, rect, Rgba8::rgba(16, 20, 28, 110));
-}
-
-fn blit_image(dst: &mut RasterImage, dst_x: u32, dst_y: u32, src: &RasterImage) {
-    let w = src.width_px.min(dst.width_px.saturating_sub(dst_x));
-    let h = src.height_px.min(dst.height_px.saturating_sub(dst_y));
-    for sy in 0..h {
-        for sx in 0..w {
-            let idx = ((sy as usize) * (src.width_px as usize) + (sx as usize)) * 4;
-            if let Some(&[r, g, b, a]) = src.rgba.get(idx..idx + 4) {
-                dst.blend_pixel(dst_x + sx, dst_y + sy, Rgba8::rgba(r, g, b, a));
-            }
-        }
-    }
-}
-
-struct DrawTextClipped<'a> {
-    x: u32,
-    y: u32,
-    text: &'a str,
-    color: Rgba8,
-    max_width_px: u32,
-    rtl: bool,
-}
-
-fn draw_text_clipped(img: &mut RasterImage, x: u32, y: u32, text: &str, color: Rgba8, max_width_px: u32) {
-    draw_text_clipped_dir(img, DrawTextClipped { x, y, text, color, max_width_px, rtl: false });
-}
-
-fn draw_text_clipped_dir(img: &mut RasterImage, spec: DrawTextClipped<'_>) {
-    let reordered;
-    let display = if spec.rtl {
-        reordered = reorder_visual_bidi(spec.text, TextDirection::Rtl);
-        reordered.as_str()
-    } else {
-        spec.text
-    };
-    let max_chars = (spec.max_width_px / 6) as usize;
-    let count = display.chars().count().min(max_chars);
-    let draw_w = (count as u32).saturating_mul(6).saturating_sub(1);
-    let mut cx = if spec.rtl { spec.x.saturating_add(spec.max_width_px.saturating_sub(draw_w)) } else { spec.x };
-    for ch in display.chars().take(max_chars) {
-        draw_glyph_5x7(img, cx, spec.y, ch, spec.color);
-        cx = cx.saturating_add(6);
-    }
-}
-
-fn draw_text_5x7(img: &mut RasterImage, x: u32, y: u32, text: &str, color: Rgba8) {
-    draw_text_5x7_dir(img, x, y, text, color, false);
-}
-
-fn draw_text_5x7_dir(img: &mut RasterImage, x: u32, y: u32, text: &str, color: Rgba8, rtl: bool) {
-    let reordered;
-    let display = if rtl {
-        reordered = reorder_visual_bidi(text, TextDirection::Rtl);
-        reordered.as_str()
-    } else {
-        text
-    };
-    let mut cx = x;
-    for ch in display.chars() {
-        draw_glyph_5x7(img, cx, y, ch, color);
-        cx = cx.saturating_add(6);
-    }
-}
-
-fn draw_glyph_5x7(img: &mut RasterImage, x: u32, y: u32, ch: char, color: Rgba8) {
-    let rows = glyph_5x7(ch.to_ascii_uppercase());
-    for (dy, bits) in rows.into_iter().enumerate() {
-        for dx in 0..5u32 {
-            if (bits & (1 << (4 - dx))) != 0 {
-                img.blend_pixel(x.saturating_add(dx), y.saturating_add(dy as u32), color);
-            }
-        }
-    }
-}
-
-const FONT_5X7: &[(u8, [u8; 7])] = &[
-    (b' ', [0, 0, 0, 0, 0, 0, 0]),
-    (b'!', [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00000, 0b00100]),
-    (b'#', [0b01010, 0b11111, 0b01010, 0b01010, 0b11111, 0b01010, 0]),
-    (b'%', [0b11001, 0b11010, 0b00100, 0b01000, 0b10110, 0b10011, 0]),
-    (b'+', [0, 0b00100, 0b00100, 0b11111, 0b00100, 0b00100, 0]),
-    (b',', [0, 0, 0, 0, 0, 0b00100, 0b01000]),
-    (b'-', [0, 0, 0, 0b11111, 0, 0, 0]),
-    (b'.', [0, 0, 0, 0, 0, 0b01100, 0b01100]),
-    (b'/', [0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0, 0]),
-    (b':', [0, 0b01100, 0b01100, 0, 0b01100, 0b01100, 0]),
-    (b'=', [0, 0, 0b11111, 0, 0b11111, 0, 0]),
-    (b'>', [0b10000, 0b01000, 0b00100, 0b01000, 0b10000, 0, 0]),
-    (b'(', [0b00010, 0b00100, 0b01000, 0b01000, 0b01000, 0b00100, 0b00010]),
-    (b')', [0b01000, 0b00100, 0b00010, 0b00010, 0b00010, 0b00100, 0b01000]),
-    (b'[', [0b01110, 0b01000, 0b01000, 0b01000, 0b01000, 0b01000, 0b01110]),
-    (b']', [0b01110, 0b00010, 0b00010, 0b00010, 0b00010, 0b00010, 0b01110]),
-    (b'|', [0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]),
-    (b'*', [0b00100, 0b10101, 0b01110, 0b11111, 0b01110, 0b10101, 0b00100]),
-    (b'0', [0b01110, 0b10001, 0b10011, 0b10101, 0b11001, 0b10001, 0b01110]),
-    (b'1', [0b00100, 0b01100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]),
-    (b'2', [0b01110, 0b10001, 0b00001, 0b00010, 0b00100, 0b01000, 0b11111]),
-    (b'3', [0b11110, 0b00001, 0b00001, 0b01110, 0b00001, 0b00001, 0b11110]),
-    (b'4', [0b00010, 0b00110, 0b01010, 0b10010, 0b11111, 0b00010, 0b00010]),
-    (b'5', [0b11111, 0b10000, 0b11110, 0b00001, 0b00001, 0b10001, 0b01110]),
-    (b'6', [0b00110, 0b01000, 0b10000, 0b11110, 0b10001, 0b10001, 0b01110]),
-    (b'7', [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b01000, 0b01000]),
-    (b'8', [0b01110, 0b10001, 0b10001, 0b01110, 0b10001, 0b10001, 0b01110]),
-    (b'9', [0b01110, 0b10001, 0b10001, 0b01111, 0b00001, 0b00010, 0b01100]),
-    (b'A', [0b01110, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]),
-    (b'B', [0b11110, 0b10001, 0b10001, 0b11110, 0b10001, 0b10001, 0b11110]),
-    (b'C', [0b01110, 0b10001, 0b10000, 0b10000, 0b10000, 0b10001, 0b01110]),
-    (b'D', [0b11100, 0b10010, 0b10001, 0b10001, 0b10001, 0b10010, 0b11100]),
-    (b'E', [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b11111]),
-    (b'F', [0b11111, 0b10000, 0b10000, 0b11110, 0b10000, 0b10000, 0b10000]),
-    (b'G', [0b01110, 0b10001, 0b10000, 0b10111, 0b10001, 0b10001, 0b01111]),
-    (b'H', [0b10001, 0b10001, 0b10001, 0b11111, 0b10001, 0b10001, 0b10001]),
-    (b'I', [0b01110, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b01110]),
-    (b'J', [0b00111, 0b00010, 0b00010, 0b00010, 0b10010, 0b10010, 0b01100]),
-    (b'K', [0b10001, 0b10010, 0b10100, 0b11000, 0b10100, 0b10010, 0b10001]),
-    (b'L', [0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b10000, 0b11111]),
-    (b'M', [0b10001, 0b11011, 0b10101, 0b10101, 0b10001, 0b10001, 0b10001]),
-    (b'N', [0b10001, 0b11001, 0b10101, 0b10011, 0b10001, 0b10001, 0b10001]),
-    (b'O', [0b01110, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]),
-    (b'P', [0b11110, 0b10001, 0b10001, 0b11110, 0b10000, 0b10000, 0b10000]),
-    (b'Q', [0b01110, 0b10001, 0b10001, 0b10001, 0b10101, 0b10010, 0b01101]),
-    (b'R', [0b11110, 0b10001, 0b10001, 0b11110, 0b10100, 0b10010, 0b10001]),
-    (b'S', [0b01111, 0b10000, 0b10000, 0b01110, 0b00001, 0b00001, 0b11110]),
-    (b'T', [0b11111, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]),
-    (b'U', [0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b01110]),
-    (b'V', [0b10001, 0b10001, 0b10001, 0b10001, 0b01010, 0b01010, 0b00100]),
-    (b'W', [0b10001, 0b10001, 0b10001, 0b10101, 0b10101, 0b11011, 0b10001]),
-    (b'X', [0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b01010, 0b10001]),
-    (b'Y', [0b10001, 0b01010, 0b00100, 0b00100, 0b00100, 0b00100, 0b00100]),
-    (b'Z', [0b11111, 0b00001, 0b00010, 0b00100, 0b01000, 0b10000, 0b11111]),
-];
-
-fn glyph_5x7(ch: char) -> [u8; 7] {
-    if !ch.is_ascii() {
-        return [0b11111, 0b10001, 0b10001, 0b10001, 0b10001, 0b10001, 0b11111];
-    }
-    let byte = ch as u8;
-    FONT_5X7.iter().find(|(k, _)| *k == byte).map_or([0b00000, 0b01110, 0b01010, 0b01010, 0b01110, 0b00000, 0b00000], |(_, rows)| *rows)
-}
+pub use crate::compositor::{WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, render_workspace_frame_png, render_workspace_rgba};
 
 #[cfg(test)]
 mod tests {
     use lumencraft_doc::{
         AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, ConstantValue, DataSheet, GraphSheet, InfoConstant, InfoSheet,
-        JournalWidthPreset, LayoutSheet, LayoutSpec, NonlinearFitSpec, PValueFormat, ProjectDocument, ResultCell, ResultSheet, ResultStatus,
-        TableArchetype, XyTable,
+        JournalWidthPreset, LayoutSheet, LayoutSpec, NonlinearFitSpec, OneWayAnovaSpec, PValueFormat, ProjectDocument, RemediationKind, ResultCell,
+        ResultSheet, ResultStatus, TableArchetype, TwoGroupSpec, XyTable,
     };
 
     use super::{
-        ActiveDialog, AxisTarget, CanvasDialogState, CommandPaletteState, ConstantHookPickerState, FormatAxesState, FramePalette, HookTargetKind,
-        ResultSheetViewState,
+        ActiveDialog, AssumptionDiagnosticBanner, AxisTarget, CanvasDialogState, CommandPaletteState, ConstantHookPickerState, FormatAxesState,
+        HookTargetKind, ResultSheetViewState,
     };
+    use crate::compositor::FramePalette;
     use crate::theme::{UiThemeSpec, wcag_contrast_ratio};
 
     #[test]
@@ -4016,6 +3234,7 @@ mod tests {
             status: ChecklistStatus::Warn,
             diagnostic_metric: Some(String::from("p=0.04")),
             explanation: String::from("Mild skew"),
+            remediation: None,
         });
         assert_eq!(ResultSheetViewState::checklist_summary_counts(&res), (0, 1, 0, 0));
         doc.add_result_sheet(res).expect("add result");
@@ -4074,5 +3293,82 @@ mod tests {
         let layout_intent = picker.commit_intent().expect("layout hook");
         assert_eq!(layout_intent.command_id, "layout.addPanel");
         assert_eq!(layout_intent.params["sheet_id"], "l1");
+    }
+
+    #[test]
+    fn assumption_banner_reads_structured_remediation_ignoring_checklist_wording() {
+        let tg_spec = AnalysisSpec::new("res-t", "d1", AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())).expect("spec");
+        let mut res = ResultSheet::new(tg_spec).expect("result");
+        res.status = ResultStatus::UpToDate;
+        // Reworded non-English text without any English keywords ("variance", "levene", "welch")
+        // should still resolve directly from `ChecklistItem::remediation`.
+        res.checklist = vec![
+            ChecklistItem {
+                assumption: String::from("Streuung der Stichproben"),
+                status: ChecklistStatus::Violated,
+                diagnostic_metric: Some(String::from("F = 8.42, p = 0.008")),
+                explanation: String::from("Die Gruppen zeigen stark unterschiedliche Streuungen."),
+                remediation: Some(RemediationKind::WelchT),
+            },
+            ChecklistItem {
+                assumption: String::from("Normalverteilung"),
+                status: ChecklistStatus::Warn,
+                diagnostic_metric: Some(String::from("p = 0.03")),
+                explanation: String::from("Schiefe Verteilung."),
+                remediation: Some(RemediationKind::MannWhitneyU),
+            },
+        ];
+        let banner = AssumptionDiagnosticBanner::from_result(&res).expect("banner from Violated remediation");
+        assert_eq!(banner.remediation_kind, RemediationKind::WelchT);
+
+        // Switching the checklist wording while carrying `MannWhitneyU` selects `MannWhitneyU`.
+        res.checklist = vec![ChecklistItem {
+            assumption: String::from("Even if text mentions variance or Levene or Brown-Forsythe"),
+            status: ChecklistStatus::Warn,
+            diagnostic_metric: None,
+            explanation: String::from("Text wording must not override structured remediation."),
+            remediation: Some(RemediationKind::MannWhitneyU),
+        }];
+        let banner_mw = AssumptionDiagnosticBanner::from_result(&res).expect("banner from structured field");
+        assert_eq!(banner_mw.remediation_kind, RemediationKind::MannWhitneyU);
+
+        // Conversely, an ANOVA checklist item with keywords but `remediation: None` yields no banner.
+        let anova_spec = AnalysisSpec::new("res-a", "d1", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).expect("anova spec");
+        let mut anova_res = ResultSheet::new(anova_spec).expect("anova res");
+        anova_res.checklist = vec![ChecklistItem {
+            assumption: String::from("Equal variance check with Welch keyword"),
+            status: ChecklistStatus::Warn,
+            diagnostic_metric: None,
+            explanation: String::from("Informational only when remediation is None."),
+            remediation: None,
+        }];
+        assert!(AssumptionDiagnosticBanner::from_result(&anova_res).is_none());
+
+        anova_res.checklist[0].remediation = Some(RemediationKind::KruskalWallis);
+        assert_eq!(AssumptionDiagnosticBanner::from_result(&anova_res).expect("kruskal wallis").remediation_kind, RemediationKind::KruskalWallis);
+    }
+
+    #[test]
+    fn command_palette_surfaces_summary_beginner_and_session_enabled() {
+        let palette = CommandPaletteState { query: String::from("analyze.run"), ..CommandPaletteState::default() };
+        let session = super::Session::new();
+        let rows = palette.preview_rows(Some(&session), 5);
+        assert!(rows.len() >= 3);
+        let hits = palette.matches_for_session(&session);
+        let top = hits.first().expect("expected analyze.run match");
+        assert_eq!(top.id, "analyze.run");
+        assert!(!top.summary.is_empty());
+        assert!(!top.beginner.is_empty());
+        assert!(top.format_palette_row().contains(top.summary));
+        assert!(top.format_palette_row().contains(top.beginner));
+        assert!(rows.iter().any(|row| row.contains(top.summary)));
+        assert!(rows.iter().any(|row| row.contains(top.beginner)));
+
+        let axes_disabled = {
+            let axes_palette = CommandPaletteState { query: String::from("graph.setAxes"), ..CommandPaletteState::default() };
+            axes_palette.matches_for_session(&session)
+        };
+        assert!(!axes_disabled.first().expect("graph.setAxes entry").enabled);
+        assert!(axes_disabled.first().expect("graph.setAxes entry").format_palette_row().contains("[disabled]"));
     }
 }

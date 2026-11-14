@@ -189,7 +189,7 @@ fn all_sixteen_locales_are_complete_and_genuinely_translated() {
     let expected_locales = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
     assert_eq!(LOCALES, &expected_locales);
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 167);
+    assert_eq!(catalog_len(), 286);
     assert!(missing_translations().is_empty());
 
     let keys: Vec<&'static str> = all_keys().collect();
@@ -200,6 +200,11 @@ fn all_sixteen_locales_are_complete_and_genuinely_translated() {
     verify_non_english_translations();
     verify_non_latin_scripts(&keys);
     verify_locale_tag_normalization();
+
+    // Command catalog localization parity across all 16 locales.
+    assert_eq!(lumencraft_ui_egui::i18n::command_label("de", "project.save", ""), "Projekt speichern");
+    assert_eq!(lumencraft_ui_egui::i18n::command_label("ja", "ui.palette.open", ""), "コマンドパレットを開く");
+    assert_eq!(lumencraft_ui_egui::i18n::translate_command_label("fr", "About LumenCraft"), "À propos de LumenCraft");
 }
 
 #[test]

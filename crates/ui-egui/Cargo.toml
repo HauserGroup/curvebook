@@ -3,6 +3,7 @@ name = "lumencraft-ui-egui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "LumenCraft desktop and web interface shell: project navigator, spreadsheet grid, dialogs and graph canvas"
 
 [lints]
@@ -20,6 +21,7 @@ lumencraft-format = { workspace = true }
 lumencraft-math = { workspace = true }
 lumencraft-palette = { workspace = true }
 lumencraft-pdf = { workspace = true }
+lumencraft-platform = { workspace = true }
 lumencraft-render = { workspace = true }
 lumencraft-svg = { workspace = true }
 lumencraft-text = { workspace = true }

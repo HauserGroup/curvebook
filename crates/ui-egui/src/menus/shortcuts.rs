@@ -1,8 +1,8 @@
-//! Customizable keyboard shortcut registry seeded from engine `COMMANDS` and `UI_COMMANDS`.
+//! Customizable keyboard shortcut registry seeded from engine `cmd::registry()` and `UI_COMMANDS`.
 
 use std::collections::BTreeMap;
 
-use lumencraft_engine::catalog::COMMANDS;
+use lumencraft_engine::cmd::registry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -54,30 +54,30 @@ impl Default for ShortcutRegistry {
 }
 
 impl ShortcutRegistry {
-    /// Seed the shortcut registry from engine [`COMMANDS`] and front-end [`UI_COMMANDS`].
+    /// Seed the shortcut registry from engine [`lumencraft_engine::cmd::registry`] and front-end [`UI_COMMANDS`].
     #[must_use]
     pub fn new() -> Self {
         let mut bindings = BTreeMap::new();
-        for desc in COMMANDS {
-            let normalized = normalize_shortcut_combo(desc.shortcut).unwrap_or_else(|_| desc.shortcut.trim().to_owned());
+        for spec in registry().specs() {
+            let normalized = normalize_shortcut_combo(spec.shortcut).unwrap_or_else(|_| spec.shortcut.trim().to_owned());
             bindings.insert(
-                desc.id.to_owned(),
+                spec.id.to_owned(),
                 ShortcutBinding {
-                    command_id: desc.id.to_owned(),
-                    label: desc.label.to_owned(),
+                    command_id: spec.id.to_owned(),
+                    label: spec.label.to_owned(),
                     default_combo: normalized.clone(),
                     active_combo: normalized,
                     is_ui: false,
                 },
             );
         }
-        for &(id, label, shortcut, _) in UI_COMMANDS {
-            let normalized = normalize_shortcut_combo(shortcut).unwrap_or_else(|_| shortcut.trim().to_owned());
+        for spec in UI_COMMANDS {
+            let normalized = normalize_shortcut_combo(spec.shortcut).unwrap_or_else(|_| spec.shortcut.trim().to_owned());
             bindings.insert(
-                id.to_owned(),
+                spec.id.to_owned(),
                 ShortcutBinding {
-                    command_id: id.to_owned(),
-                    label: label.to_owned(),
+                    command_id: spec.id.to_owned(),
+                    label: spec.label.to_owned(),
                     default_combo: normalized.clone(),
                     active_combo: normalized,
                     is_ui: true,

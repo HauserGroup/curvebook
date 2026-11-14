@@ -9,8 +9,8 @@ use lumencraft_doc::{
     ColumnTable, ConstantValue, ContingencyTable, DataSheet, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GroupedTable, HookSource,
     InfoConstant, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
     MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, PanelBadgeStyle, ParameterScope,
-    ProjectDocument, RectPt, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SizeChannelMapping, SubcolumnMode,
-    SurvivalAnalysisSpec, TableArchetype, TableKind, VariableRole, XyTable, extract_template_hooks,
+    ProjectDocument, RectPt, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SizeChannelMapping,
+    SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TableKind, VariableRole, XyTable, extract_template_hooks,
 };
 use lumencraft_engine::Session;
 use lumencraft_palette::{ColormapId, CvdKind, LineDashStyle, MarkerFillMode, PaletteId};
@@ -148,12 +148,14 @@ fn build_rich_test_project() -> ProjectDocument {
             status: ChecklistStatus::Pass,
             diagnostic_metric: Some(String::from("W = 0.97, p = 0.62")),
             explanation: String::from("Residuals are consistent with Gaussian distribution."),
+            remediation: None,
         },
         ChecklistItem {
             assumption: String::from("Equal variances (Brown-Forsythe)"),
             status: ChecklistStatus::Warn,
             diagnostic_metric: Some(String::from("p = 0.041")),
             explanation: String::from("Consider Brown-Forsythe / Welch ANOVA."),
+            remediation: Some(RemediationKind::WelchAnova),
         },
     ];
     doc.add_result_sheet(res).expect("add res");

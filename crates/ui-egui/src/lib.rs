@@ -6,32 +6,54 @@
 //! commands. Governing spec: `docs/ui-parity.md`, `docs/control-protocol.md`, and `docs/development.md`.
 #![forbid(unsafe_code)]
 
+pub mod compositor;
 pub mod control_io;
 pub mod dialogs_canvas;
 pub mod grid_view;
 pub mod i18n;
+pub mod interaction;
 pub mod menus;
+pub mod os_integration;
 pub mod theme;
 pub mod workspace_nav;
 
-use lumencraft_doc::{ProjectDocument, SheetSection};
+pub use lumencraft_chart::{ChartScene, PointPt, PreflightIssue, SourceCellId};
+use lumencraft_doc::{ProjectDocument, SheetId, SheetSection, TableKind};
 use lumencraft_engine::{CommandOutcome, EngineError, Session};
-use lumencraft_tools::{Cursor, GridVisibleWindow};
+pub use lumencraft_palette::CanvasPreviewFilter;
+pub use lumencraft_render::{RasterImage, RenderError, RenderTargetSpec};
+use lumencraft_tools::{Cursor, GridCellCoord, GridVisibleWindow};
+pub use serde_json;
 
+pub use compositor::{
+    WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, compute_workspace_layout_map, render_workspace_frame_png,
+    render_workspace_rgba,
+};
 pub use control_io::{
-    ClipboardBundle, ControlLoopAction, ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, OsAdapterAvailability, OsAdapterStatus,
-    PrintJobSpec, PrintSpoolOutput, dispatch_ui_command, handle_control_line, handle_control_line_with_action, parse_control_port,
-    serve_control_stream, serve_control_stream_with_quit,
+    ControlLoopAction, ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_ui_command,
+    handle_control_line, handle_control_line_with_action, parse_control_port, serve_control_stream, serve_control_stream_with_quit,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use control_io::{
-    bind_control_tcp_listener, read_os_pasteboard, run_control_tcp_server, serve_control_listener, submit_os_print_job, submit_os_print_pdf_bytes,
-    validate_loopback_addr, write_os_pasteboard,
+pub use control_io::{bind_control_tcp_listener, run_control_tcp_server, serve_control_listener, validate_loopback_addr};
+pub use dialogs_canvas::{
+    ActiveDialog, AssumptionDiagnosticBanner, CanvasDialogState, ConvertArchetypeDialogState, ExcludeWithReasonDialogState, RemediationKind,
+    SplitWorkspaceState,
 };
-pub use dialogs_canvas::{ActiveDialog, CanvasDialogState};
-pub use grid_view::GridViewState;
+pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use i18n::{LOCALES, LocalePreset, locale_display_name, normalize_locale, tr};
-pub use menus::{ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, normalize_shortcut_combo};
+pub use interaction::{
+    CanvasDragTarget, GridHitGeometry, InfoRowHitRect, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers,
+    NavigatorEntryHitRect, PointerButton, ScenePaperMapping, UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder,
+    WorkspaceHitTarget, WorkspaceLayoutMap, dispatch_ui_event,
+};
+pub use menus::{
+    CommandTooltip, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, TOOLBAR_BUTTONS, ToolbarButtonSpec,
+    ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, menu_bar_tooltips, normalize_shortcut_combo, toolbar_caption_command_id,
+    toolbar_tooltips,
+};
+pub use os_integration::{ClipboardBundle, OsAdapterAvailability, OsAdapterStatus};
+#[cfg(not(target_arch = "wasm32"))]
+pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
 pub use theme::{UiThemeMode, UiThemeSpec};
 pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 
@@ -44,7 +66,7 @@ pub const fn bundled_fonts_enabled() -> bool {
 /// Top-level application shell facade owning [`Session`] and panel/tool view state.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiApp {
-    session: Session,
+    pub(crate) session: Session,
     pub theme: UiThemeSpec,
     pub nav: WorkspaceNavState,
     pub grid: GridViewState,
@@ -53,6 +75,14 @@ pub struct UiApp {
     pub family_open: bool,
     pub locale: String,
     pub locale_preset: i18n::LocalePreset,
+    pub split: SplitWorkspaceState,
+    pub brushed_cell: Option<SourceCellId>,
+    pub preview_filter: CanvasPreviewFilter,
+    pub presentation_mode: bool,
+    pub virtual_workspace: VirtualWorkspaceFolder,
+    pub inline_editor: InlineEditorState,
+    pub interaction: InteractionControllerState,
+    pub hover_command_id: Option<String>,
 }
 
 impl Default for UiApp {
@@ -81,6 +111,14 @@ impl UiApp {
             family_open: true,
             locale: String::from("en"),
             locale_preset: i18n::LocalePreset::default(),
+            split: SplitWorkspaceState::default(),
+            brushed_cell: None,
+            preview_filter: CanvasPreviewFilter::default(),
+            presentation_mode: false,
+            virtual_workspace: VirtualWorkspaceFolder::default(),
+            inline_editor: InlineEditorState::default(),
+            interaction: InteractionControllerState::default(),
+            hover_command_id: None,
         };
         app.sync_views();
         app
@@ -91,6 +129,7 @@ impl UiApp {
         let normalized = i18n::normalize_locale(locale);
         self.locale = normalized.to_owned();
         self.locale_preset = i18n::LocalePreset::for_locale(normalized);
+        self.grid.decimal_separator = self.locale_preset.decimal_separator;
         &self.locale
     }
 
@@ -139,6 +178,113 @@ impl UiApp {
     #[must_use]
     pub fn dispatch_control_line_with_action(&mut self, line: &str) -> (String, ControlLoopAction) {
         handle_control_line_with_action(self, line)
+    }
+
+    /// Render the full application frame deterministically into an RGBA [`RasterImage`].
+    ///
+    /// # Errors
+    /// Returns [`RenderError`] if the target dimensions or scene rasterization fail.
+    pub fn render_rgba(&self, target: RenderTargetSpec) -> Result<RasterImage, RenderError> {
+        compositor::render_workspace_rgba(self, target)
+    }
+
+    /// Render the workspace at the physical HiDPI dimensions described by `metrics`.
+    ///
+    /// # Errors
+    /// Returns [`RenderError`] if rasterization fails.
+    pub fn render_rgba_for_metrics(&self, metrics: ViewportMetrics, base_dpi: u16) -> Result<RasterImage, RenderError> {
+        compositor::render_workspace_rgba(self, metrics.to_render_target_spec(base_dpi))
+    }
+
+    /// Compute interactive pixel/RTL geometry for `metrics`.
+    #[must_use]
+    pub fn layout_map(&self, metrics: ViewportMetrics) -> WorkspaceLayoutMap {
+        compositor::compute_workspace_layout_map(self, metrics)
+    }
+
+    /// Dispatch a HiDPI interactive [`UiInputEvent`] through the interaction controller (`G6`, `M7`).
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when a triggered engine or UI command fails.
+    pub fn dispatch_ui_event(&mut self, event: UiInputEvent, metrics: ViewportMetrics) -> Result<UiEventOutcome, String> {
+        interaction::dispatch_ui_event(self, event, metrics)
+    }
+
+    /// Synchronize [`Self::brushed_cell`] from a grid cell selection (`QOL-5`).
+    pub fn brush_from_grid_cell(&mut self, data_sheet_id: &SheetId, coord: GridCellCoord) {
+        self.brushed_cell = Some(SourceCellId { sheet_id: data_sheet_id.clone(), row: coord.row, col: coord.col, subcol: coord.subcol });
+    }
+
+    /// Hit-test a graph/layout scene coordinate (`PointPt`) and mirror the matching data cell into
+    /// [`Self::brushed_cell`] (`QOL-5`).
+    pub fn brush_point_from_graph_pt(&mut self, graph_sheet_id: &SheetId, scene_pt: PointPt, tolerance_pt: f64) -> Option<SourceCellId> {
+        let scene = self.session.render_sheet_scene(graph_sheet_id).ok()?;
+        let hit = scene.hit_test_point(scene_pt, tolerance_pt)?;
+        let brushed = hit.source_cell.clone();
+        if let Some(ds) = self.session.document().data_sheet(&brushed.sheet_id)
+            && self.session.document().active_sheet_id.as_ref() == Some(&brushed.sheet_id)
+        {
+            let _ = ds;
+            self.grid.tool.select_single(GridCellCoord::new(brushed.row, brushed.col, brushed.subcol));
+        }
+        self.brushed_cell = Some(brushed.clone());
+        Some(brushed)
+    }
+
+    /// Clear any active data/graph point brush highlight (`QOL-5`).
+    pub fn clear_brush(&mut self) {
+        self.brushed_cell = None;
+    }
+
+    /// Preview a table archetype conversion cleanly via `table.convertArchetype` (`QOL-1`).
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when preview execution fails.
+    pub fn preview_convert_archetype(&mut self, sheet_id: &SheetId, target_kind: TableKind) -> Result<(), String> {
+        {
+            let ds = self.session.document().data_sheet(sheet_id).ok_or_else(|| format!("data sheet `{}` not found", sheet_id.as_str()))?;
+            self.canvas_dialogs.convert_archetype.open_for_sheet(ds);
+        }
+        self.canvas_dialogs.convert_archetype.set_target_kind(target_kind);
+        let intent = self
+            .canvas_dialogs
+            .convert_archetype
+            .preview_intent()
+            .ok_or_else(|| String::from("no data sheet bound for archetype conversion preview"))?;
+        let outcome = self.session.execute(&intent.command_id, intent.params).map_err(|err| err.to_string())?;
+        self.canvas_dialogs.convert_archetype.apply_preview_payload(&outcome.payload);
+        self.canvas_dialogs.active_dialog = ActiveDialog::ConvertArchetype { sheet_id: sheet_id.clone() };
+        Ok(())
+    }
+
+    /// Commit the active table archetype conversion after any required `allow_lossy` opt-in (`QOL-1`).
+    ///
+    /// # Errors
+    /// Returns an error if lossy conversion is unconfirmed or engine execution fails.
+    pub fn commit_convert_archetype(&mut self) -> Result<CommandOutcome, String> {
+        let intent = self.canvas_dialogs.convert_archetype.commit_intent()?;
+        let outcome = self.execute_command(&intent.command_id, intent.params).map_err(|err| err.to_string())?;
+        self.canvas_dialogs.close_dialog();
+        Ok(outcome)
+    }
+
+    /// Save the active [`ProjectDocument`] into [`Self::virtual_workspace`] (`QOL-10`, WASM-clean).
+    ///
+    /// # Errors
+    /// Returns an error string if serialization fails.
+    pub fn save_to_virtual_workspace(&mut self, file_name: &str) -> Result<usize, String> {
+        self.virtual_workspace.save_project_archive(file_name, self.session.document())
+    }
+
+    /// Load a `.lumen` archive from [`Self::virtual_workspace`] into the active [`Session`] (`QOL-10`).
+    ///
+    /// # Errors
+    /// Returns an error string if the entry is missing or fails validation.
+    pub fn load_from_virtual_workspace(&mut self, file_name: &str) -> Result<(), String> {
+        let doc = self.virtual_workspace.open_project_archive(file_name)?;
+        self.session = Session::from_document(doc);
+        self.sync_views();
+        Ok(())
     }
 
     /// Dispatch a keyboard shortcut combination (such as `"F6"`, `"Shift+F6"`, or a customized
@@ -196,7 +342,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 17);
+        assert_eq!(UI_COMMANDS.len(), 29);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
@@ -214,11 +360,23 @@ mod tests {
             "ui.locale.set",
             "ui.theme.set",
             "ui.screenshot",
+            "ui.event.dispatch",
+            "ui.split.toggle",
+            "ui.brush.point",
+            "ui.result.copyMethodsReport",
+            "ui.result.applyRemediation",
+            "ui.canvas.applyPreset",
+            "ui.canvas.preflight",
+            "ui.previewFilter.set",
+            "ui.presentation.toggle",
+            "ui.grid.excludeWithReason",
+            "ui.table.convertArchetype.open",
+            "ui.import.reshape.open",
             "app.about",
         ] {
-            assert!(UI_COMMANDS.iter().any(|(id, ..)| *id == required), "missing UI command {required}");
+            assert!(UI_COMMANDS.iter().any(|spec| spec.id == required), "missing UI command {required}");
         }
-        let locale_doc = UI_COMMANDS.iter().find(|(id, ..)| *id == "ui.locale.set").map(|&(_, _, _, doc)| doc).unwrap_or("");
+        let locale_doc = UI_COMMANDS.iter().find(|spec| spec.id == "ui.locale.set").map(|spec| spec.params_doc).unwrap_or("");
         for tag in ["it", "nl", "pl", "ru", "tr", "ar", "he"] {
             assert!(locale_doc.contains(tag), "ui.locale.set params doc missing `{tag}`: {locale_doc}");
         }

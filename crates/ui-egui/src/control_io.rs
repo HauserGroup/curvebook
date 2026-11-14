@@ -4,26 +4,26 @@
 use std::io::{self, BufRead, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{SocketAddr, TcpListener};
-#[cfg(not(target_arch = "wasm32"))]
-use std::process::{Command, Output, Stdio};
 
 use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
-use lumencraft_doc::{DataSheet, ProjectDocument, SheetCellRange, SheetFolderKind, SheetId, SheetSection};
-use lumencraft_engine::Session;
-use lumencraft_engine::catalog::COMMANDS;
-use lumencraft_format::{CsvOptions, export_datasheet_to_csv, format_cell_token, write_delimited_records};
-use lumencraft_palette::Rgba8;
+use lumencraft_doc::{CanvasResizeMode, ChecklistStatus, FigureCanvasPreset, ProjectDocument, SheetFolderKind, SheetId, SheetSection};
+use lumencraft_engine::{EngineError, Session, cmd};
+use lumencraft_palette::{CanvasPreviewFilter, Rgba8};
 use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use lumencraft_render::{RenderTargetSpec, encode_png, render_scene};
+use lumencraft_render::RenderTargetSpec;
 use lumencraft_svg::{SvgExportOptions, render_svg};
-use lumencraft_tools::PhysicalUnit;
+use lumencraft_tools::{GridCellCoord, PhysicalUnit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
-use crate::dialogs_canvas::{ActiveDialog, render_workspace_frame_png};
+use crate::compositor::render_workspace_frame_png;
+use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, RemediationKind};
+use crate::grid_view::ImportReshapeMode;
 use crate::i18n::{LocalePreset, is_rtl_locale, locale_display_name, normalize_locale};
+use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
 use crate::menus::ui_commands::UI_COMMANDS;
+pub use crate::os_integration::ClipboardBundle;
 use crate::theme::{UiThemeMode, UiThemeSpec};
 use crate::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 
@@ -36,7 +36,6 @@ const DEFAULT_SCREENSHOT_DPI: u16 = 144;
 const MIN_SCREENSHOT_DIM_PX: u32 = 64;
 const MAX_SCREENSHOT_DIM_PX: u32 = 4096;
 const MIN_DPI: u16 = 72;
-const MAX_DPI: u16 = 1200;
 const CROP_MARGIN_PT: f64 = 18.0;
 
 /// Control-loop continuation directive returned alongside a serialized response line.
@@ -67,89 +66,62 @@ pub struct ControlResponse {
     pub ok: bool,
     pub result: Value,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error_detail: Option<Value>,
 }
 
 impl ControlResponse {
     fn ok(id: Value, result: Value) -> Self {
-        Self { id, ok: true, result, error: None }
+        Self { id, ok: true, result, error: None, error_detail: None }
     }
 
     fn err(id: Value, message: impl Into<String>) -> Self {
-        Self { id, ok: false, result: Value::Null, error: Some(message.into()) }
+        Self { id, ok: false, result: Value::Null, error: Some(message.into()), error_detail: None }
+    }
+
+    fn err_with_detail(id: Value, error: ControlCallError) -> Self {
+        Self { id, ok: false, result: Value::Null, error: Some(error.message), error_detail: error.detail }
     }
 }
 
-/// Multi-flavor publication clipboard payload (`PDF`, `SVG`, `HTML`, high-DPI `PNG`).
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct ClipboardBundle {
-    pub pdf_bytes: Vec<u8>,
-    pub svg: String,
-    pub html: String,
-    pub png_bytes: Vec<u8>,
-    pub width_pt: f64,
-    pub height_pt: f64,
-    pub width_px: u32,
-    pub height_px: u32,
-    pub dpi: u16,
+struct ControlCallError {
+    message: String,
+    detail: Option<Value>,
 }
 
-impl ClipboardBundle {
-    /// Build a multi-flavor clipboard payload (`PDF`, `SVG`, `HTML`, `PNG`) from a compiled [`ChartScene`].
-    ///
-    /// # Errors
-    /// Returns an error if `dpi` is outside `72..=1200`, scene bounds are invalid, or any vector/raster encoder fails.
-    pub fn from_scene(scene: &ChartScene, dpi: u16) -> Result<Self, String> {
-        if !(MIN_DPI..=MAX_DPI).contains(&dpi) {
-            return Err(format!("clipboard DPI {dpi} out of supported range {MIN_DPI}..={MAX_DPI}"));
-        }
-        if !scene.width_pt.is_finite() || !scene.height_pt.is_finite() || scene.width_pt <= 0.0 || scene.height_pt <= 0.0 {
-            return Err(String::from("scene dimensions must be finite and positive"));
-        }
-
-        let scale = f64::from(dpi) / 72.0;
-        let width_px = (scene.width_pt * scale).round().clamp(1.0, 8192.0) as u32;
-        let height_px = (scene.height_pt * scale).round().clamp(1.0, 8192.0) as u32;
-
-        let pdf_opts = PdfExportOptions { title: Some(scene.title.clone()), ..PdfExportOptions::default() };
-        let pdf_bytes = render_pdf(scene, &pdf_opts).map_err(|err| format!("clipboard PDF encode failed: {err}"))?;
-        let svg = render_svg(scene, &SvgExportOptions::default()).map_err(|err| format!("clipboard SVG encode failed: {err}"))?;
-        let html = build_html_clipboard_wrapper(&scene.title, &svg, scene.width_pt, scene.height_pt);
-        let raster =
-            render_scene(scene, RenderTargetSpec { width_px, height_px, dpi }).map_err(|err| format!("clipboard raster render failed: {err}"))?;
-        let png_bytes = encode_png(&raster).map_err(|err| format!("clipboard PNG encode failed: {err}"))?;
-
-        Ok(Self { pdf_bytes, svg, html, png_bytes, width_pt: scene.width_pt, height_pt: scene.height_pt, width_px, height_px, dpi })
+impl From<String> for ControlCallError {
+    fn from(message: String) -> Self {
+        Self { message, detail: None }
     }
+}
 
-    /// Compile `sheet_id` from `session` and build its multi-flavor [`ClipboardBundle`].
-    ///
-    /// # Errors
-    /// Returns an error if compiling `sheet_id` or rendering any clipboard flavor fails.
-    pub fn from_sheet(session: &Session, sheet_id: &SheetId, dpi: u16) -> Result<Self, String> {
-        let scene = session.render_sheet_scene(sheet_id).map_err(|err| err.to_string())?;
-        Self::from_scene(&scene, dpi)
+impl From<&'static str> for ControlCallError {
+    fn from(message: &'static str) -> Self {
+        Self { message: message.to_owned(), detail: None }
     }
+}
 
-    /// Format an entire [`DataSheet`] as a tab-delimited TSV payload preserving `*` exclusions.
-    ///
-    /// # Errors
-    /// Returns an error if TSV formatting fails.
-    pub fn tsv_from_datasheet(sheet: &DataSheet, decimal_separator: char) -> Result<String, String> {
-        let opts = CsvOptions { decimal_separator, ..CsvOptions::tsv() };
-        export_datasheet_to_csv(sheet, &opts).map_err(|err| err.to_string())
+impl From<EngineError> for ControlCallError {
+    fn from(err: EngineError) -> Self {
+        Self { message: err.to_string(), detail: Some(engine_error_detail(&err)) }
     }
+}
 
-    /// Format a rectangular [`SheetCellRange`] of `sheet` as TSV text preserving `*` exclusions and locale decimals.
-    #[must_use]
-    pub fn tsv_from_datasheet_range(sheet: &DataSheet, range: SheetCellRange, decimal_separator: char) -> String {
-        let grid = sheet.extract_cell_grid(range);
-        if grid.is_empty() {
-            return String::new();
-        }
-        let opts = CsvOptions { decimal_separator, ..CsvOptions::tsv() };
-        let rows: Vec<Vec<String>> = grid.iter().map(|row| row.iter().map(|cell| format_cell_token(cell, &opts)).collect()).collect();
-        write_delimited_records(&rows, &opts)
-    }
+fn engine_error_detail(err: &EngineError) -> Value {
+    serde_json::to_value(err).unwrap_or_else(|_| {
+        json!({
+            "code": err.code.as_str(),
+            "category": err.category,
+            "message": err.message(),
+            "retryable": err.retryable,
+            "remediation": err.remediation,
+            "details": err.details,
+        })
+    })
+}
+
+fn map_ui_result(res: Result<Value, String>) -> Result<Option<Value>, ControlCallError> {
+    res.map(Some).map_err(ControlCallError::from)
 }
 
 /// Physical-size print spool specification (`docs/hardware-parity.md` `G10`).
@@ -383,6 +355,10 @@ pub fn handle_control_line_with_action(app: &mut UiApp, line: &str) -> (String, 
 /// # Errors
 /// Returns a descriptive error string when a recognized UI command fails validation or precondition checks.
 pub fn dispatch_ui_command(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, String> {
+    dispatch_ui_command_detailed(app, command_id, params).map_err(|err| err.message)
+}
+
+fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, ControlCallError> {
     match command_id {
         "ui.navigator.toggle" => {
             app.nav.navigator_open = !app.nav.navigator_open;
@@ -403,21 +379,33 @@ pub fn dispatch_ui_command(app: &mut UiApp, command_id: &str, params: &Value) ->
                 "dialog": "CommandPalette",
             })))
         }
-        "ui.analyze.open" => dispatch_ui_analyze_open(app, params).map(Some),
-        "ui.changeGraphType.open" => dispatch_ui_change_graph_type_open(app, params).map(Some),
-        "ui.clonePipeline.open" => dispatch_ui_clone_pipeline_open(app, params).map(Some),
+        "ui.analyze.open" => map_ui_result(dispatch_ui_analyze_open(app, params)),
+        "ui.changeGraphType.open" => map_ui_result(dispatch_ui_change_graph_type_open(app, params)),
+        "ui.clonePipeline.open" => map_ui_result(dispatch_ui_clone_pipeline_open(app, params)),
         "ui.zoom.fitSheet" => {
             app.canvas_dialogs.reset_zoom_to_fit();
             Ok(Some(json!({ "zoom": app.canvas_dialogs.canvas.zoom })))
         }
-        "ui.gallery.toggle" => dispatch_ui_gallery_toggle(app, params).map(Some),
-        "ui.pane.cycle" => dispatch_ui_pane_cycle(app, params).map(Some),
-        "ui.rulers.toggle" => dispatch_ui_rulers_toggle(app, params).map(Some),
-        "ui.shortcut.set" => dispatch_ui_shortcut_set(app, params).map(Some),
-        "ui.shortcut.reset" => dispatch_ui_shortcut_reset(app, params).map(Some),
-        "ui.locale.set" => dispatch_ui_locale_set(app, params).map(Some),
-        "ui.theme.set" => dispatch_ui_theme_set(app, params).map(Some),
-        "ui.screenshot" => dispatch_ui_screenshot(app, params).map(Some),
+        "ui.gallery.toggle" => map_ui_result(dispatch_ui_gallery_toggle(app, params)),
+        "ui.pane.cycle" => map_ui_result(dispatch_ui_pane_cycle(app, params)),
+        "ui.rulers.toggle" => map_ui_result(dispatch_ui_rulers_toggle(app, params)),
+        "ui.shortcut.set" => map_ui_result(dispatch_ui_shortcut_set(app, params)),
+        "ui.shortcut.reset" => map_ui_result(dispatch_ui_shortcut_reset(app, params)),
+        "ui.locale.set" => map_ui_result(dispatch_ui_locale_set(app, params)),
+        "ui.theme.set" => map_ui_result(dispatch_ui_theme_set(app, params)),
+        "ui.screenshot" => map_ui_result(dispatch_ui_screenshot(app, params)),
+        "ui.event.dispatch" => map_ui_result(dispatch_ui_event_cmd(app, params)),
+        "ui.split.toggle" => map_ui_result(dispatch_ui_split_toggle(app, params)),
+        "ui.brush.point" => map_ui_result(dispatch_ui_brush_point(app, params)),
+        "ui.result.copyMethodsReport" => dispatch_ui_result_copy_methods_report(app, params).map(Some),
+        "ui.result.applyRemediation" => dispatch_ui_result_apply_remediation(app, params).map(Some),
+        "ui.canvas.applyPreset" => dispatch_ui_canvas_apply_preset(app, params).map(Some),
+        "ui.canvas.preflight" => dispatch_ui_canvas_preflight(app, params).map(Some),
+        "ui.previewFilter.set" => map_ui_result(dispatch_ui_preview_filter_set(app, params)),
+        "ui.presentation.toggle" => map_ui_result(dispatch_ui_presentation_toggle(app, params)),
+        "ui.grid.excludeWithReason" => dispatch_ui_grid_exclude_with_reason(app, params).map(Some),
+        "ui.table.convertArchetype.open" => map_ui_result(dispatch_ui_table_convert_archetype_open(app, params)),
+        "ui.import.reshape.open" => map_ui_result(dispatch_ui_import_reshape_open(app, params)),
         "app.about" => {
             app.canvas_dialogs.active_dialog = ActiveDialog::About;
             Ok(Some(json!({
@@ -444,7 +432,7 @@ fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, C
         "command.list" => Ok(handle_command_list(app)),
         "command.run" => handle_command_run(app, &params),
         "command.batch" => handle_command_batch(app, &params),
-        "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), &params),
+        "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), &params).map_err(ControlCallError::from),
         "render.svg" => handle_render_svg(app, &params),
         "render.pdf" => handle_render_pdf(app, &params),
         "ui.state" | "state.snapshot" => Ok(handle_ui_state(app)),
@@ -454,17 +442,17 @@ fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, C
 
     let response = match result {
         Ok(value) => ControlResponse::ok(id, value),
-        Err(message) => ControlResponse::err(id, message),
+        Err(err) => ControlResponse::err_with_detail(id, err),
     };
     (response, ControlLoopAction::Continue)
 }
 
-fn dispatch_command_by_id(app: &mut UiApp, command_id: &str, params: Value) -> Result<Value, String> {
-    if let Some(ui_value) = dispatch_ui_command(app, command_id, &params)? {
+fn dispatch_command_by_id(app: &mut UiApp, command_id: &str, params: Value) -> Result<Value, ControlCallError> {
+    if let Some(ui_value) = dispatch_ui_command_detailed(app, command_id, &params)? {
         return Ok(ui_value);
     }
-    let outcome = app.execute_command(command_id, params).map_err(|err| err.to_string())?;
-    serde_json::to_value(outcome).map_err(|err| format!("failed to serialize command outcome: {err}"))
+    let outcome = app.execute_command(command_id, params)?;
+    serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize command outcome: {err}")))
 }
 
 fn parse_control_request(line: &str) -> Result<ControlRequest, (Value, String)> {
@@ -525,48 +513,59 @@ fn serialize_response(resp: &ControlResponse) -> String {
 }
 
 fn handle_command_list(app: &UiApp) -> Value {
-    let mut commands = Vec::with_capacity(COMMANDS.len() + UI_COMMANDS.len());
-    for desc in COMMANDS {
-        let active_shortcut = app.shortcuts.active_combo(desc.id).unwrap_or(desc.shortcut);
+    let engine_specs: Vec<_> = cmd::registry().specs().collect();
+    let mut commands = Vec::with_capacity(engine_specs.len() + UI_COMMANDS.len());
+    for spec in &engine_specs {
+        let active_shortcut = app.shortcuts.active_combo(spec.id).unwrap_or(spec.shortcut);
         commands.push(json!({
-            "id": desc.id,
-            "label": desc.label,
-            "menu_path": desc.menu_path,
+            "id": spec.id,
+            "label": spec.label,
+            "menu_path": spec.menu_path,
             "shortcut": active_shortcut,
-            "params_doc": desc.params_doc,
+            "params_doc": spec.summary,
+            "summary": spec.summary,
+            "beginner": spec.beginner,
+            "group": format!("{:?}", spec.group),
+            "effects": spec.effects.flag_names(),
+            "read_only": spec.effects.read_only_hint(),
+            "destructive": spec.effects.destructive_hint(),
+            "needs_consent": spec.effects.needs_consent(),
+            "enabled": (spec.enabled)(&app.session),
             "ui": false,
         }));
     }
-    for &(id, label, shortcut, params_doc) in UI_COMMANDS {
-        let active_shortcut = app.shortcuts.active_combo(id).unwrap_or(shortcut);
+    for spec in UI_COMMANDS {
+        let active_shortcut = app.shortcuts.active_combo(spec.id).unwrap_or(spec.shortcut);
         commands.push(json!({
-            "id": id,
-            "label": label,
+            "id": spec.id,
+            "label": spec.label,
             "menu_path": "UI",
             "shortcut": active_shortcut,
-            "params_doc": params_doc,
+            "params_doc": spec.params_doc,
+            "summary": spec.summary,
+            "beginner": spec.beginner,
             "ui": true,
         }));
     }
     json!({
         "commands": commands,
-        "engine_count": COMMANDS.len(),
+        "engine_count": engine_specs.len(),
         "ui_count": UI_COMMANDS.len(),
     })
 }
 
-fn handle_command_run(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+fn handle_command_run(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
     let command_id = extract_command_id(params)?;
     let cmd_params = extract_nested_params(params);
     if command_id == "app.quit" {
-        return Err(String::from("use top-level method 'app.quit' to shut down the control server"));
+        return Err(ControlCallError::from("use top-level method 'app.quit' to shut down the control server"));
     }
     dispatch_command_by_id(app, &command_id, cmd_params)
 }
 
-fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
     let Some(items) = params.get("commands").and_then(Value::as_array) else {
-        return Err(String::from("command.batch requires a 'commands' array"));
+        return Err(ControlCallError::from("command.batch requires a 'commands' array"));
     };
     let atomic = params.get("atomic").and_then(Value::as_bool).unwrap_or(false);
     let rollback_snapshot = atomic.then(|| app.clone());
@@ -579,7 +578,7 @@ fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, String
                 if let Some(snapshot) = rollback_snapshot {
                     *app = snapshot;
                 }
-                return Err(format!("batch step {idx}: {err}"));
+                return Err(ControlCallError::from(format!("batch step {idx}: {err}")));
             }
         };
         let cmd_params = extract_nested_params(item);
@@ -589,7 +588,10 @@ fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, String
                 if let Some(snapshot) = rollback_snapshot {
                     *app = snapshot;
                 }
-                return Err(format!("batch step {idx} ({cmd_id}) failed (rolled_back={atomic}): {err}"));
+                return Err(ControlCallError {
+                    message: format!("batch step {idx} ({cmd_id}) failed (rolled_back={atomic}): {}", err.message),
+                    detail: err.detail,
+                });
             }
         }
     }
@@ -601,17 +603,17 @@ fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, String
     }))
 }
 
-fn handle_engine_execute(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+fn handle_engine_execute(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
     let cmd_id = params
         .get("command_id")
         .or_else(|| params.get("command"))
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .ok_or_else(|| String::from("engine.execute requires non-empty 'command_id'"))?;
+        .ok_or_else(|| ControlCallError::from("engine.execute requires non-empty 'command_id'"))?;
     let cmd_params = params.get("params").cloned().unwrap_or(Value::Null);
-    let outcome = app.execute_command(cmd_id, cmd_params).map_err(|err| err.to_string())?;
-    serde_json::to_value(outcome).map_err(|err| format!("failed to serialize engine outcome: {err}"))
+    let outcome = app.execute_command(cmd_id, cmd_params)?;
+    serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize engine outcome: {err}")))
 }
 
 fn handle_ui_state(app: &mut UiApp) -> Value {
@@ -641,6 +643,13 @@ fn handle_ui_state(app: &mut UiApp) -> Value {
         "active_inspector": app.canvas_dialogs.active_inspector.label(),
         "command_palette_open": matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette),
         "welcome_open": app.nav.welcome.open,
+        "split_enabled": app.split.enabled,
+        "split_ratio": app.split.ratio,
+        "preview_filter": app.preview_filter.as_str(),
+        "presentation_mode": app.presentation_mode,
+        "brushed_cell": app.brushed_cell,
+        "inline_editor_active": app.inline_editor.active,
+        "preflight_issue_count": app.canvas_dialogs.preflight_issues.len(),
     })
 }
 
@@ -807,9 +816,9 @@ fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<Val
     }
 }
 
-fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, String> {
+fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
-    let scene = app.session().render_sheet_scene(&sheet_id).map_err(|err| err.to_string())?;
+    let scene = app.session().render_sheet_scene(&sheet_id)?;
     let opts = SvgExportOptions {
         pretty: params.get("pretty").and_then(Value::as_bool).unwrap_or(true),
         outline_text: params.get("outline_text").and_then(Value::as_bool).unwrap_or(false),
@@ -825,7 +834,7 @@ fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, String> {
     }))
 }
 
-fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, String> {
+fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
     let doc = app.document();
     let all = params.get("all").and_then(Value::as_bool).unwrap_or(false);
     let sheet_ids = if all { collect_all_renderable_ids(doc)? } else { vec![resolve_renderable_sheet_id(doc, params)?] };
@@ -833,7 +842,7 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, String> {
     let color_space = parse_pdf_color_space(params)?;
     let mut scenes = Vec::with_capacity(sheet_ids.len());
     for sheet_id in &sheet_ids {
-        scenes.push(app.session().render_sheet_scene(sheet_id).map_err(|err| err.to_string())?);
+        scenes.push(app.session().render_sheet_scene(sheet_id)?);
     }
 
     let opts = PdfExportOptions { color_space, title: Some(doc.title.clone()), ..PdfExportOptions::default() };
@@ -927,6 +936,293 @@ fn dispatch_ui_clone_pipeline_open(app: &mut UiApp, params: &Value) -> Result<Va
             "source_sheet_id": Value::Null,
         }))
     }
+}
+
+fn dispatch_ui_event_cmd(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let ev_val = params.get("event").unwrap_or(params);
+    let event: UiInputEvent = serde_json::from_value(ev_val.clone()).map_err(|err| format!("invalid ui.event.dispatch payload: {err}"))?;
+    let metrics: ViewportMetrics = if let Some(m) = params.get("metrics") {
+        serde_json::from_value(m.clone()).map_err(|err| format!("invalid viewport metrics: {err}"))?
+    } else {
+        ViewportMetrics::default()
+    };
+    let outcome = dispatch_ui_event(app, event, metrics)?;
+    serde_json::to_value(outcome).map_err(|err| format!("failed to serialize ui event outcome: {err}"))
+}
+
+fn dispatch_ui_split_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    if let Some(enabled) = params.get("enabled").and_then(Value::as_bool) {
+        app.split.enabled = enabled;
+    } else {
+        app.split.enabled = !app.split.enabled;
+    }
+    if let Some(ratio) = params.get("ratio").and_then(Value::as_f64) {
+        app.split.set_ratio(ratio);
+    }
+    if let Some(raw_p) = params.get("primary_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        app.split.primary_sheet_id = Some(SheetId::try_new(raw_p).map_err(|e| e.to_string())?);
+    }
+    if let Some(raw_s) = params.get("secondary_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        app.split.secondary_sheet_id = Some(SheetId::try_new(raw_s).map_err(|e| e.to_string())?);
+    }
+    let (primary, secondary) = app.split.resolve_sheets(app.document());
+    Ok(json!({
+        "enabled": app.split.enabled,
+        "ratio": app.split.ratio,
+        "primary_sheet_id": primary.as_ref().map(SheetId::as_str),
+        "secondary_sheet_id": secondary.as_ref().map(SheetId::as_str),
+    }))
+}
+
+fn dispatch_ui_brush_point(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    if params.get("clear").and_then(Value::as_bool) == Some(true) {
+        app.clear_brush();
+        return Ok(json!({ "brushed_cell": Value::Null }));
+    }
+    let doc = app.document();
+    let sheet_id = if let Some(id) = resolve_sheet_id_param(params)? {
+        id
+    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        active.clone()
+    } else {
+        doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available to brush"))?
+    };
+    let row = usize::try_from(params.get("row").and_then(Value::as_u64).unwrap_or(0)).map_err(|_| String::from("`row` exceeds usize"))?;
+    let col = usize::try_from(params.get("col").and_then(Value::as_u64).unwrap_or(0)).map_err(|_| String::from("`col` exceeds usize"))?;
+    let subcol = usize::try_from(params.get("subcol").and_then(Value::as_u64).unwrap_or(0)).map_err(|_| String::from("`subcol` exceeds usize"))?;
+    app.brush_from_grid_cell(&sheet_id, GridCellCoord::new(row, col, subcol));
+    Ok(json!({ "brushed_cell": app.brushed_cell }))
+}
+
+fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    let doc = app.document();
+    let rs_id = if let Some(raw) = params.get("result_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        SheetId::try_new(raw).map_err(|e| e.to_string())?
+    } else if let Some(explicit) = resolve_sheet_id_param(params)? {
+        explicit
+    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
+        active.clone()
+    } else {
+        doc.result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("no result sheet available for methods report"))?
+    };
+
+    if let Some(fmt) = params.get("format").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        app.canvas_dialogs.result_view.report_format = fmt.to_owned();
+    }
+    let intent = app.canvas_dialogs.result_view.generate_report_intent(&rs_id);
+    let outcome = app.execute_command(&intent.command_id, intent.params)?;
+    let report = outcome.payload.get("report").and_then(Value::as_str).unwrap_or_default().to_owned();
+    app.canvas_dialogs.result_view.last_methods_report = Some(report.clone());
+
+    let mut clipboard_status = Value::Null;
+    #[cfg(not(target_arch = "wasm32"))]
+    if params.get("skip_os_clipboard").and_then(Value::as_bool) != Some(true)
+        && let Ok(status) = write_os_pasteboard(&report)
+    {
+        clipboard_status = serde_json::to_value(status).unwrap_or(Value::Null);
+    }
+
+    Ok(json!({
+        "sheet_id": rs_id.as_str(),
+        "format": app.canvas_dialogs.result_view.report_format,
+        "report": report,
+        "clipboard_status": clipboard_status,
+    }))
+}
+
+fn dispatch_ui_result_apply_remediation(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    let doc = app.document().clone();
+    let rs_id = if let Some(raw) = params.get("result_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        SheetId::try_new(raw).map_err(|e| e.to_string())?
+    } else if let Some(explicit) = resolve_sheet_id_param(params)? {
+        explicit
+    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
+        active.clone()
+    } else {
+        doc.result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("no result sheet available for remediation"))?
+    };
+
+    let rs = doc.result_sheet(&rs_id).ok_or_else(|| format!("result sheet `{}` not found", rs_id.as_str()))?;
+    let mut banner = AssumptionDiagnosticBanner::from_result(rs).unwrap_or_else(|| AssumptionDiagnosticBanner {
+        source_result_id: rs.id.clone(),
+        severity: ChecklistStatus::Warn,
+        summary: String::from("Manual remediation requested"),
+        recommendation_label: String::from("Run robust non-parametric alternative"),
+        remediation_kind: RemediationKind::WelchT,
+    });
+    if let Some(raw_kind) = params.get("kind").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        banner.remediation_kind = match raw_kind.to_ascii_lowercase().as_str() {
+            "welch_t" | "welcht" => RemediationKind::WelchT,
+            "mann_whitney" | "mannwhitney" => RemediationKind::MannWhitneyU,
+            "wilcoxon" | "wilcoxon_signed_rank" => RemediationKind::WilcoxonSignedRank,
+            "one_sample_wilcoxon" => RemediationKind::OneSampleWilcoxon,
+            "welch_anova" => RemediationKind::WelchAnova,
+            "kruskal_wallis" | "kruskalwallis" => RemediationKind::KruskalWallis,
+            "friedman" => RemediationKind::Friedman,
+            other => return Err(ControlCallError::from(format!("unsupported remediation kind `{other}`"))),
+        };
+    } else if AssumptionDiagnosticBanner::from_result(rs).is_none() {
+        return Err(ControlCallError::from(format!("no assumption violation banner active for result sheet `{}`", rs_id.as_str())));
+    }
+
+    let sibling_id = next_sibling_result_id(&doc, rs_id.as_str())?;
+    let intent = banner.build_sibling_analysis_intent(rs, &sibling_id);
+    app.execute_command(&intent.command_id, intent.params)?;
+    let doc_after = app.document().clone();
+    app.canvas_dialogs.on_sheet_selected(&doc_after, &sibling_id);
+    Ok(json!({
+        "source_result_id": rs_id.as_str(),
+        "sibling_result_id": sibling_id.as_str(),
+        "remediation_kind": banner.remediation_kind.engine_kind(),
+        "label": banner.remediation_kind.label(),
+    }))
+}
+
+fn next_sibling_result_id(doc: &ProjectDocument, base: &str) -> Result<SheetId, String> {
+    let mut suffix = 1usize;
+    loop {
+        let candidate_raw = format!("{base}-remediation-{suffix}");
+        let candidate = SheetId::try_new(&candidate_raw).map_err(|err| err.to_string())?;
+        if doc.sheet_section(&candidate).is_none() {
+            return Ok(candidate);
+        }
+        suffix = suffix.saturating_add(1);
+    }
+}
+
+fn dispatch_ui_canvas_apply_preset(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
+    let preset_raw = params
+        .get("preset")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| String::from("missing required `preset` string parameter"))?;
+    let preset = FigureCanvasPreset::from_name(preset_raw).ok_or_else(|| format!("unknown canvas preset `{preset_raw}`"))?;
+    if let Some(mode_raw) = params.get("resize_mode").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        app.canvas_dialogs.canvas_resize_mode =
+            CanvasResizeMode::from_name(mode_raw).ok_or_else(|| format!("unknown canvas resize_mode `{mode_raw}`"))?;
+    }
+    let is_layout = app.document().layout_sheet(&sheet_id).is_some();
+    let intent = app.canvas_dialogs.apply_canvas_preset_intent(&sheet_id, is_layout, preset);
+    app.execute_command(&intent.command_id, intent.params)?;
+    if let Ok(scene) = app.session().render_sheet_scene(&sheet_id) {
+        app.canvas_dialogs.refresh_preflight(&scene);
+    }
+    Ok(json!({
+        "sheet_id": sheet_id.as_str(),
+        "preset": format!("{preset:?}"),
+        "resize_mode": format!("{:?}", app.canvas_dialogs.canvas_resize_mode),
+        "preflight_issues": app.canvas_dialogs.preflight_issues,
+    }))
+}
+
+fn dispatch_ui_canvas_preflight(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
+    let scene = app.session().render_sheet_scene(&sheet_id)?;
+    app.canvas_dialogs.refresh_preflight(&scene);
+    Ok(json!({
+        "sheet_id": sheet_id.as_str(),
+        "passed": app.canvas_dialogs.preflight_issues.is_empty(),
+        "issue_count": app.canvas_dialogs.preflight_issues.len(),
+        "issues": app.canvas_dialogs.preflight_issues,
+    }))
+}
+
+fn dispatch_ui_preview_filter_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let raw = params
+        .get("filter")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| String::from("missing non-empty `filter` string"))?;
+    let filter = CanvasPreviewFilter::from_name(raw).ok_or_else(|| format!("unknown preview filter `{raw}`"))?;
+    app.preview_filter = filter;
+    Ok(json!({ "preview_filter": app.preview_filter.as_str() }))
+}
+
+fn dispatch_ui_presentation_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    if let Some(enabled) = params.get("enabled").and_then(Value::as_bool) {
+        app.presentation_mode = enabled;
+    } else {
+        app.presentation_mode = !app.presentation_mode;
+    }
+    Ok(json!({ "presentation_mode": app.presentation_mode }))
+}
+
+fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    let doc = app.document();
+    let sheet_id = if let Some(id) = resolve_sheet_id_param(params)? {
+        id
+    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        active.clone()
+    } else {
+        doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available for exclusion"))?
+    };
+    let ds = doc.data_sheet(&sheet_id).ok_or_else(|| format!("data sheet `{}` not found", sheet_id.as_str()))?;
+    let mut coords = app.grid.selection_coords(ds);
+    if coords.is_empty()
+        && let Some(active) = app.grid.tool.active
+    {
+        coords.push(active);
+    }
+    app.canvas_dialogs.open_exclude_with_reason(sheet_id.clone(), coords.clone());
+    if let Some(tag) = params.get("reason_tag").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        app.canvas_dialogs.exclude_with_reason.reason_tag = tag.to_owned();
+    }
+    if let Some(note) = params.get("note").and_then(Value::as_str) {
+        app.canvas_dialogs.exclude_with_reason.note = note.to_owned();
+    }
+    if params.get("commit").and_then(Value::as_bool) == Some(true) {
+        let intent = app.canvas_dialogs.exclude_with_reason.commit_intent()?;
+        app.execute_command(&intent.command_id, intent.params)?;
+        app.canvas_dialogs.close_dialog();
+        return Ok(json!({
+            "committed": true,
+            "sheet_id": sheet_id.as_str(),
+            "reason_tag": app.canvas_dialogs.exclude_with_reason.reason_tag,
+            "count": coords.len(),
+        }));
+    }
+    Ok(json!({
+        "dialog": "ExcludeWithReason",
+        "sheet_id": sheet_id.as_str(),
+        "coords_count": app.canvas_dialogs.exclude_with_reason.coords.len(),
+    }))
+}
+
+fn dispatch_ui_table_convert_archetype_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let sheet_id = if let Some(id) = resolve_sheet_id_param(params)? {
+        id
+    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        active.clone()
+    } else {
+        doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available to convert"))?
+    };
+    if !app.canvas_dialogs.open_convert_archetype(&doc, &sheet_id) {
+        return Err(format!("data sheet `{}` not found", sheet_id.as_str()));
+    }
+    Ok(json!({
+        "dialog": "ConvertArchetype",
+        "sheet_id": sheet_id.as_str(),
+    }))
+}
+
+fn dispatch_ui_import_reshape_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    if let Some(mode_raw) = params.get("mode").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        app.grid.import_reshape.mode = match mode_raw.to_ascii_lowercase().as_str() {
+            "plate96" | "plate_96" | "96" => ImportReshapeMode::Plate96,
+            "plate384" | "plate_384" | "384" => ImportReshapeMode::Plate384,
+            "tidylongpivot" | "tidy_long_pivot" | "tidylong" | "tidy" => ImportReshapeMode::TidyLongPivot,
+            other => return Err(format!("unknown import reshape mode `{other}`")),
+        };
+    }
+    app.canvas_dialogs.open_import_reshape();
+    Ok(json!({
+        "dialog": "ImportReshape",
+        "mode": format!("{:?}", app.grid.import_reshape.mode),
+    }))
 }
 
 const fn physical_unit_name(unit: PhysicalUnit) -> &'static str {
@@ -1135,7 +1431,7 @@ fn dispatch_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, String> 
 
 #[cfg(not(target_arch = "wasm32"))]
 fn write_host_file(path: &str, bytes: &[u8]) -> Result<(), String> {
-    std::fs::write(path, bytes).map_err(|err| format!("failed to write file `{path}`: {err}"))
+    lumencraft_platform::fs::write_atomic(std::path::Path::new(path), bytes).map_err(|err| format!("failed to write file `{path}`: {err}"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -1237,29 +1533,6 @@ fn parse_pdf_color_space(params: &Value) -> Result<PdfColorSpace, String> {
     }
 }
 
-fn build_html_clipboard_wrapper(title: &str, svg: &str, width_pt: f64, height_pt: f64) -> String {
-    let escaped_title = escape_html(title);
-    format!(
-        "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{escaped_title}</title></head>\
-<body><div class=\"lumencraft-figure\" style=\"width:{width_pt:.3}pt;height:{height_pt:.3}pt;\">{svg}</div></body></html>"
-    )
-}
-
-fn escape_html(input: &str) -> String {
-    let mut out = String::with_capacity(input.len());
-    for ch in input.chars() {
-        match ch {
-            '&' => out.push_str("&amp;"),
-            '<' => out.push_str("&lt;"),
-            '>' => out.push_str("&gt;"),
-            '"' => out.push_str("&quot;"),
-            '\'' => out.push_str("&#39;"),
-            _ => out.push(ch),
-        }
-    }
-    out
-}
-
 fn scale_scene_for_print(scene: &ChartScene, factor: f64) -> ChartScene {
     if (factor - 1.0).abs() <= f64::EPSILON {
         return scene.clone();
@@ -1267,6 +1540,16 @@ fn scale_scene_for_print(scene: &ChartScene, factor: f64) -> ChartScene {
     let scale_pt = |pt: PointPt| PointPt::new(pt.x * factor, pt.y * factor);
     let scale_rect = |r: RectPt| RectPt::new(r.x * factor, r.y * factor, r.width * factor, r.height * factor);
     let primitives = scene.primitives.iter().map(|prim| transform_primitive(prim, factor, &scale_pt, &scale_rect)).collect();
+    let plotted_points = scene
+        .plotted_points
+        .iter()
+        .map(|p| {
+            let mut next = p.clone();
+            next.center_pt = scale_pt(p.center_pt);
+            next.radius_pt *= factor;
+            next
+        })
+        .collect();
 
     ChartScene {
         sheet_id: scene.sheet_id.clone(),
@@ -1277,6 +1560,7 @@ fn scale_scene_for_print(scene: &ChartScene, factor: f64) -> ChartScene {
         plot_rect_pt: scale_rect(scene.plot_rect_pt),
         primitives,
         warnings: scene.warnings.clone(),
+        plotted_points,
     }
 }
 
@@ -1288,6 +1572,15 @@ fn decorate_scene_for_print(scene: &ChartScene, margin_pt: f64, crop_marks: bool
     if crop_marks {
         push_corner_crop_marks(&mut primitives, margin_pt, scene.width_pt, scene.height_pt);
     }
+    let plotted_points = scene
+        .plotted_points
+        .iter()
+        .map(|p| {
+            let mut next = p.clone();
+            next.center_pt = shift_pt(p.center_pt);
+            next
+        })
+        .collect();
 
     ChartScene {
         sheet_id: scene.sheet_id.clone(),
@@ -1298,6 +1591,7 @@ fn decorate_scene_for_print(scene: &ChartScene, margin_pt: f64, crop_marks: bool
         plot_rect_pt: shift_rect(scene.plot_rect_pt),
         primitives,
         warnings: scene.warnings.clone(),
+        plotted_points,
     }
 }
 
@@ -1447,378 +1741,20 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::ApplyStyleFrom { .. } => "ApplyStyleFrom",
         ActiveDialog::PageLayoutComposer { .. } => "PageLayoutComposer",
         ActiveDialog::ExportFigure { .. } => "ExportFigure",
+        ActiveDialog::ConvertArchetype { .. } => "ConvertArchetype",
+        ActiveDialog::ImportReshape => "ImportReshape",
+        ActiveDialog::ExcludeWithReason { .. } => "ExcludeWithReason",
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::About => "About",
     }
 }
 
-/// Execution / availability state returned by native OS pasteboard and print spool adapters.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum OsAdapterAvailability {
-    Submitted,
-    Read,
-    Unavailable,
-}
-
-/// Structured status returned by OS pasteboard and print spool integration helpers.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OsAdapterStatus {
-    pub available: bool,
-    pub availability: OsAdapterAvailability,
-    pub backend: String,
-    pub detail: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub text: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub job_id: Option<String>,
-}
-
-impl OsAdapterStatus {
-    /// Construct an [`OsAdapterStatus`] representing a missing tool or headless environment.
-    #[must_use]
-    pub fn unavailable(backend: impl Into<String>, detail: impl Into<String>) -> Self {
-        Self {
-            available: false,
-            availability: OsAdapterAvailability::Unavailable,
-            backend: backend.into(),
-            detail: detail.into(),
-            text: None,
-            job_id: None,
-        }
-    }
-}
-
+pub use crate::os_integration::{OsAdapterAvailability, OsAdapterStatus};
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone)]
-struct OsCommandCandidate {
-    program: String,
-    args: Vec<String>,
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl OsCommandCandidate {
-    fn new(program: impl Into<String>, args: &[&str]) -> Self {
-        Self { program: program.into(), args: args.iter().map(|&s| s.to_owned()).collect() }
-    }
-}
-
-/// Write UTF-8 text (`TSV`, `SVG`, or `HTML`) to the host OS clipboard using platform tools
-/// (`pbcopy` on macOS, `wl-copy`/`xclip` on Linux, `clip`/`powershell` on Windows).
-///
-/// Missing OS clipboard binaries or headless display environments return
-/// `Ok(OsAdapterStatus { available: false, availability: OsAdapterAvailability::Unavailable, .. })`
-/// without panicking.
-///
-/// # Errors
-/// Returns a structured error string if spawning or executing an available clipboard adapter fails.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn write_os_pasteboard(text: &str) -> Result<OsAdapterStatus, String> {
-    let candidates = os_pasteboard_write_candidates();
-    if candidates.is_empty() {
-        return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
-    }
-    write_os_pasteboard_with(&candidates, text)
-}
-
-/// Read UTF-8 text from the host OS clipboard using platform tools (`pbpaste` on macOS,
-/// `wl-paste`/`xclip` on Linux, `powershell Get-Clipboard` on Windows).
-///
-/// Missing OS clipboard binaries or headless display environments return
-/// `Ok(OsAdapterStatus { available: false, availability: OsAdapterAvailability::Unavailable, .. })`
-/// without panicking.
-///
-/// # Errors
-/// Returns a structured error string if an available clipboard adapter fails or returns non-UTF-8
-/// output.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn read_os_pasteboard() -> Result<OsAdapterStatus, String> {
-    let candidates = os_pasteboard_read_candidates();
-    if candidates.is_empty() {
-        return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
-    }
-    read_os_pasteboard_with(&candidates)
-}
-
-/// Submit a physical-scale [`PrintSpoolOutput`] PDF payload to the host OS print spooler
-/// (`lp` / `lpr`).
-///
-/// Missing print-spool binaries return
-/// `Ok(OsAdapterStatus { available: false, availability: OsAdapterAvailability::Unavailable, .. })`
-/// without panicking.
-///
-/// # Errors
-/// Returns a structured error string if `spool.pdf_bytes` is not a valid PDF payload, `printer` is
-/// invalid, or an available print-spool binary rejects the job.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn submit_os_print_job(spool: &PrintSpoolOutput, printer: Option<&str>) -> Result<OsAdapterStatus, String> {
-    submit_os_print_pdf_bytes(&spool.pdf_bytes, printer)
-}
-
-/// Submit raw `%PDF-` bytes to the host OS print spooler (`lp` / `lpr`).
-///
-/// # Errors
-/// Returns a structured error string if `pdf_bytes` is not a valid PDF payload, `printer` is
-/// invalid, or an available print-spool binary fails.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn submit_os_print_pdf_bytes(pdf_bytes: &[u8], printer: Option<&str>) -> Result<OsAdapterStatus, String> {
-    let clean_printer = validate_printer_name(printer)?;
-    let candidates = os_print_candidates(clean_printer);
-    submit_os_print_bytes_with(&candidates, pdf_bytes)
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn validate_printer_name(printer: Option<&str>) -> Result<Option<&str>, String> {
-    let Some(raw) = printer else {
-        return Ok(None);
-    };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(String::from("printer name must not be empty"));
-    }
-    if trimmed.starts_with('-') {
-        return Err(format!("invalid printer name `{trimmed}`: must not start with '-'"));
-    }
-    Ok(Some(trimmed))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn write_os_pasteboard_with(candidates: &[OsCommandCandidate], text: &str) -> Result<OsAdapterStatus, String> {
-    let mut missing = Vec::new();
-    for candidate in candidates {
-        match spawn_candidate_with_stdin(candidate, Some(text.as_bytes()))? {
-            Some(output) => {
-                let detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-                return Ok(OsAdapterStatus {
-                    available: true,
-                    availability: OsAdapterAvailability::Submitted,
-                    backend: candidate.program.clone(),
-                    detail: if detail.is_empty() { format!("wrote {} bytes to OS pasteboard", text.len()) } else { detail },
-                    text: None,
-                    job_id: None,
-                });
-            }
-            None => missing.push(candidate.program.as_str()),
-        }
-    }
-    Ok(OsAdapterStatus::unavailable(missing.join("/"), "no OS clipboard adapter binary found on PATH"))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn read_os_pasteboard_with(candidates: &[OsCommandCandidate]) -> Result<OsAdapterStatus, String> {
-    let mut missing = Vec::new();
-    for candidate in candidates {
-        match spawn_candidate_with_stdin(candidate, None)? {
-            Some(output) => {
-                let text = String::from_utf8(output.stdout).map_err(|err| format!("OS pasteboard returned non-UTF-8 text: {err}"))?;
-                return Ok(OsAdapterStatus {
-                    available: true,
-                    availability: OsAdapterAvailability::Read,
-                    backend: candidate.program.clone(),
-                    detail: format!("read {} bytes from OS pasteboard", text.len()),
-                    text: Some(text),
-                    job_id: None,
-                });
-            }
-            None => missing.push(candidate.program.as_str()),
-        }
-    }
-    Ok(OsAdapterStatus::unavailable(missing.join("/"), "no OS clipboard adapter binary found on PATH"))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn submit_os_print_bytes_with(candidates: &[OsCommandCandidate], pdf_bytes: &[u8]) -> Result<OsAdapterStatus, String> {
-    if !pdf_bytes.starts_with(b"%PDF-") {
-        return Err(String::from("print spool payload must start with `%PDF-` signature"));
-    }
-    let mut missing = Vec::new();
-    for candidate in candidates {
-        match spawn_candidate_with_stdin(candidate, Some(pdf_bytes))? {
-            Some(output) => {
-                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
-                let job_id = (!stdout.is_empty()).then_some(stdout.clone());
-                return Ok(OsAdapterStatus {
-                    available: true,
-                    availability: OsAdapterAvailability::Submitted,
-                    backend: candidate.program.clone(),
-                    detail: if stdout.is_empty() { format!("submitted {} PDF bytes to print spool", pdf_bytes.len()) } else { stdout },
-                    text: None,
-                    job_id,
-                });
-            }
-            None => missing.push(candidate.program.as_str()),
-        }
-    }
-    Ok(OsAdapterStatus::unavailable(missing.join("/"), "no OS print spooler binary (`lp`/`lpr`) found on PATH"))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn spawn_candidate_with_stdin(candidate: &OsCommandCandidate, stdin_bytes: Option<&[u8]>) -> Result<Option<Output>, String> {
-    let mut cmd = Command::new(&candidate.program);
-    cmd.args(&candidate.args).stdout(Stdio::piped()).stderr(Stdio::piped());
-    if stdin_bytes.is_some() {
-        cmd.stdin(Stdio::piped());
-    } else {
-        cmd.stdin(Stdio::null());
-    }
-
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
-        Err(err) => return Err(format!("failed to launch `{}`: {err}", candidate.program)),
-    };
-
-    if let Some(bytes) = stdin_bytes
-        && let Some(mut stdin) = child.stdin.take()
-    {
-        stdin.write_all(bytes).map_err(|err| format!("failed writing payload to `{}` stdin: {err}", candidate.program))?;
-    }
-
-    let output = child.wait_with_output().map_err(|err| format!("failed waiting on `{}`: {err}", candidate.program))?;
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
-        let detail = if stderr.is_empty() { String::from("no stderr output") } else { stderr };
-        return Err(format!("`{}` exited with {}: {detail}", candidate.program, output.status));
-    }
-    Ok(Some(output))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn os_pasteboard_write_candidates() -> Vec<OsCommandCandidate> {
-    #[cfg(target_os = "macos")]
-    {
-        vec![OsCommandCandidate::new("pbcopy", &[])]
-    }
-    #[cfg(target_os = "windows")]
-    {
-        vec![
-            OsCommandCandidate::new("clip", &[]),
-            OsCommandCandidate::new("powershell", &["-NoProfile", "-NonInteractive", "-Command", "$input | Set-Clipboard"]),
-        ]
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let mut out = Vec::new();
-        if has_nonempty_env("WAYLAND_DISPLAY") {
-            out.push(OsCommandCandidate::new("wl-copy", &[]));
-        }
-        if has_nonempty_env("DISPLAY") {
-            out.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard"]));
-        }
-        out
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn os_pasteboard_read_candidates() -> Vec<OsCommandCandidate> {
-    #[cfg(target_os = "macos")]
-    {
-        vec![OsCommandCandidate::new("pbpaste", &[])]
-    }
-    #[cfg(target_os = "windows")]
-    {
-        vec![OsCommandCandidate::new("powershell", &["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"])]
-    }
-    #[cfg(all(unix, not(target_os = "macos")))]
-    {
-        let mut out = Vec::new();
-        if has_nonempty_env("WAYLAND_DISPLAY") {
-            out.push(OsCommandCandidate::new("wl-paste", &["--no-newline"]));
-        }
-        if has_nonempty_env("DISPLAY") {
-            out.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-o"]));
-        }
-        out
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn os_print_candidates(printer: Option<&str>) -> Vec<OsCommandCandidate> {
-    let lp = match printer {
-        Some(p) => OsCommandCandidate::new("lp", &["-d", p]),
-        None => OsCommandCandidate::new("lp", &[]),
-    };
-    let lpr = match printer {
-        Some(p) => OsCommandCandidate::new("lpr", &["-P", p]),
-        None => OsCommandCandidate::new("lpr", &[]),
-    };
-    #[cfg(target_os = "windows")]
-    {
-        vec![lpr, lp]
-    }
-    #[cfg(not(target_os = "windows"))]
-    {
-        vec![lp, lpr]
-    }
-}
-
-#[cfg(all(not(target_arch = "wasm32"), all(unix, not(target_os = "macos"))))]
-fn has_nonempty_env(key: &str) -> bool {
-    std::env::var_os(key).is_some_and(|v| !v.is_empty())
-}
+pub use crate::os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        OsAdapterAvailability, OsCommandCandidate, PrintJobSpec, PrintSpoolOutput, read_os_pasteboard_with, submit_os_print_bytes_with,
-        submit_os_print_job, write_os_pasteboard_with,
-    };
-
-    #[test]
-    fn os_adapters_handle_missing_tools_and_invalid_inputs_safely() -> Result<(), Box<dyn std::error::Error>> {
-        let missing = [OsCommandCandidate::new("lumencraft-nonexistent-os-tool-1", &[])];
-        let write_unavail = write_os_pasteboard_with(&missing, "hello")?;
-        assert!(!write_unavail.available);
-        assert_eq!(write_unavail.availability, OsAdapterAvailability::Unavailable);
-
-        let read_unavail = read_os_pasteboard_with(&missing)?;
-        assert!(!read_unavail.available);
-        assert_eq!(read_unavail.availability, OsAdapterAvailability::Unavailable);
-        assert!(read_unavail.text.is_none());
-
-        let print_unavail = submit_os_print_bytes_with(&missing, b"%PDF-1.7\n%%EOF\n")?;
-        assert!(!print_unavail.available);
-        assert_eq!(print_unavail.availability, OsAdapterAvailability::Unavailable);
-
-        let bad_spool = PrintSpoolOutput { pdf_bytes: b"not-a-pdf".to_vec(), page_count: 0, page_sizes_pt: Vec::new(), scale_percent: 100.0 };
-        assert!(submit_os_print_job(&bad_spool, None).is_err());
-
-        let valid_spool = PrintSpoolOutput {
-            pdf_bytes: b"%PDF-1.7\n%%EOF\n".to_vec(),
-            page_count: 1,
-            page_sizes_pt: vec![(100.0, 100.0)],
-            scale_percent: PrintJobSpec::default().scale_percent,
-        };
-        assert!(submit_os_print_job(&valid_spool, Some("-malicious-flag")).is_err());
-        assert!(submit_os_print_job(&valid_spool, Some("   ")).is_err());
-
-        #[cfg(unix)]
-        {
-            let write_fallback = [OsCommandCandidate::new("lumencraft-missing-bin", &[]), OsCommandCandidate::new("sh", &["-c", "cat >/dev/null"])];
-            let ok_write = write_os_pasteboard_with(&write_fallback, "x\ty\n1\t2\n")?;
-            assert!(ok_write.available);
-            assert_eq!(ok_write.availability, OsAdapterAvailability::Submitted);
-
-            let read_mock = [OsCommandCandidate::new("printf", &["alpha\tbeta"])];
-            let ok_read = read_os_pasteboard_with(&read_mock)?;
-            assert!(ok_read.available);
-            assert_eq!(ok_read.availability, OsAdapterAvailability::Read);
-            assert_eq!(ok_read.text.as_deref(), Some("alpha\tbeta"));
-
-            let print_mock = [OsCommandCandidate::new("sh", &["-c", "cat >/dev/null && printf 'request id is Mock-1'"])];
-            let ok_print = submit_os_print_bytes_with(&print_mock, &valid_spool.pdf_bytes)?;
-            assert!(ok_print.available);
-            assert_eq!(ok_print.availability, OsAdapterAvailability::Submitted);
-            assert_eq!(ok_print.job_id.as_deref(), Some("request id is Mock-1"));
-
-            let failing = [OsCommandCandidate::new("sh", &["-c", "echo 'printer offline' >&2; exit 2"])];
-            match submit_os_print_bytes_with(&failing, &valid_spool.pdf_bytes) {
-                Err(err) => assert!(err.contains("printer offline")),
-                Ok(other) => return Err(format!("expected failure status, got {other:?}").into()),
-            }
-        }
-        Ok(())
-    }
-
     fn dispatch_json(app: &mut crate::UiApp, req: &serde_json::Value) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         Ok(serde_json::from_str(&app.dispatch_control_line(&req.to_string()))?)
     }
@@ -1919,6 +1855,95 @@ mod tests {
         let state_en = dispatch_json(&mut app, &json!({"id": 4, "method": "ui.state"}))?;
         assert_eq!(state_en["result"]["locale"], json!("en"));
         assert_eq!(state_en["result"]["is_rtl"], json!(false));
+
+        Ok(())
+    }
+
+    #[test]
+    fn control_response_includes_structured_error_detail_for_engine_failures() -> Result<(), Box<dyn std::error::Error>> {
+        use super::ControlResponse;
+        use serde_json::json;
+        let mut app = crate::UiApp::new();
+
+        // Unknown engine command via command.run emits backward-compatible `error` + structured `error_detail`.
+        let unknown = dispatch_json(
+            &mut app,
+            &json!({
+                "id": 10,
+                "method": "command.run",
+                "params": { "command": "no.such.command", "params": {} }
+            }),
+        )?;
+        assert_eq!(unknown["ok"], json!(false));
+        let err_str = unknown["error"].as_str().ok_or("missing legacy error string")?;
+        let detail = &unknown["error_detail"];
+        assert_eq!(detail["code"], json!("not_found"));
+        assert_eq!(detail["category"], json!("state"));
+        assert!(detail["message"].as_str().is_some_and(|m| err_str.contains(m)));
+        assert_eq!(detail["retryable"], json!(false));
+        assert!(detail.get("remediation").is_some());
+        assert!(detail.get("details").is_some());
+
+        // Frozen-sheet engine failure via engine.execute includes structured remediation/details.
+        let created = dispatch_json(
+            &mut app,
+            &json!({
+                "id": 11,
+                "method": "sheet.createData",
+                "params": { "kind": "xy", "title": "Frozen Data", "auto_family": false }
+            }),
+        )?;
+        let sheet_id = created["result"]["payload"]["sheet_id"].as_str().ok_or("missing sheet_id")?.to_owned();
+        let froze = dispatch_json(
+            &mut app,
+            &json!({
+                "id": 12,
+                "method": "sheet.freeze",
+                "params": { "sheet_id": sheet_id }
+            }),
+        )?;
+        assert_eq!(froze["ok"], json!(true));
+        assert!(froze.as_object().is_some_and(|obj| !obj.contains_key("error_detail")));
+
+        let frozen_rename = dispatch_json(
+            &mut app,
+            &json!({
+                "id": 13,
+                "method": "engine.execute",
+                "params": { "command_id": "sheet.rename", "params": { "sheet_id": sheet_id, "title": "Blocked" } }
+            }),
+        )?;
+        assert_eq!(frozen_rename["ok"], json!(false));
+        let rename_err = frozen_rename["error"].as_str().ok_or("missing frozen error string")?;
+        assert!(rename_err.contains("frozen") || rename_err.contains("Frozen"));
+        assert_eq!(frozen_rename["error_detail"]["code"], json!("frozen_sheet"));
+        assert_eq!(frozen_rename["error_detail"]["category"], json!("state"));
+        assert_eq!(frozen_rename["error_detail"]["retryable"], json!(false));
+        assert!(frozen_rename["error_detail"]["message"].as_str().is_some_and(|m| rename_err.contains(m)));
+
+        // Command batch propagates engine failure error_detail too.
+        let batch_err = dispatch_json(
+            &mut app,
+            &json!({
+                "id": 14,
+                "method": "command.batch",
+                "params": {
+                    "atomic": true,
+                    "commands": [{ "command": "sheet.rename", "params": { "sheet_id": sheet_id, "title": "Still Blocked" } }]
+                }
+            }),
+        )?;
+        assert_eq!(batch_err["ok"], json!(false));
+        assert_eq!(batch_err["error_detail"]["code"], json!("frozen_sheet"));
+
+        // Invalid control JSON line omits `error_detail` and deserializes legacy ControlResponse payloads cleanly.
+        let bad_json: ControlResponse = serde_json::from_str(&app.dispatch_control_line("{not-json"))?;
+        assert!(!bad_json.ok);
+        assert!(bad_json.error.is_some());
+        assert_eq!(bad_json.error_detail, None);
+        let legacy: ControlResponse = serde_json::from_str(r#"{"id":1,"ok":false,"result":null,"error":"legacy"}"#)?;
+        assert_eq!(legacy.error.as_deref(), Some("legacy"));
+        assert_eq!(legacy.error_detail, None);
 
         Ok(())
     }

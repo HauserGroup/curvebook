@@ -15,7 +15,7 @@ use lumencraft_doc::{
 use lumencraft_palette::Rgba8;
 use lumencraft_tools::{GridCellCoord, GridToolState, GridVisibleWindow, SelectionQuickStats, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 const MAX_QUICK_STATS_CELLS_FOR_CLONE_PASS: usize = 50_000;
 
@@ -586,6 +586,153 @@ pub enum ImportOriginKind {
     ExternalDelimitedFile,
 }
 
+/// Guided structural import reshaping preset (`QOL-2`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ImportReshapeMode {
+    #[default]
+    Plate96,
+    Plate384,
+    TidyLongPivot,
+}
+
+/// Interactive state for Plate Map (`96` / `384`-well) and Tidy Long Pivot import reshaping (`QOL-2`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ImportReshapeState {
+    pub open: bool,
+    pub mode: ImportReshapeMode,
+    pub title: String,
+    pub target_kind: TableKind,
+    pub x_title: String,
+    pub subtract_blank_mean: bool,
+    pub plate_values: Vec<Option<f64>>,
+    pub plate_roles: Vec<Value>,
+    pub tidy_csv: String,
+    pub tidy_delimiter: char,
+    pub decimal_separator: char,
+    pub x_col: Option<String>,
+    pub group_col: String,
+    pub replicate_col: Option<String>,
+    pub value_col: String,
+    pub excluded_col: Option<String>,
+}
+
+impl Default for ImportReshapeState {
+    fn default() -> Self {
+        Self {
+            open: false,
+            mode: ImportReshapeMode::Plate96,
+            title: String::from("Reshaped Import"),
+            target_kind: TableKind::Grouped,
+            x_title: String::from("Concentration"),
+            subtract_blank_mean: true,
+            plate_values: Vec::new(),
+            plate_roles: Vec::new(),
+            tidy_csv: String::new(),
+            tidy_delimiter: ',',
+            decimal_separator: '.',
+            x_col: None,
+            group_col: String::from("Group"),
+            replicate_col: None,
+            value_col: String::from("Value"),
+            excluded_col: None,
+        }
+    }
+}
+
+impl ImportReshapeState {
+    /// Target engine command identifier for the currently selected reshape mode.
+    #[must_use]
+    pub const fn command_id(&self) -> &'static str {
+        match self.mode {
+            ImportReshapeMode::Plate96 | ImportReshapeMode::Plate384 => "table.importPlateMap",
+            ImportReshapeMode::TidyLongPivot => "table.importTidyLong",
+        }
+    }
+
+    /// Build the engine [`ToolCommandIntent`] (`table.importPlateMap` or `table.importTidyLong`).
+    ///
+    /// # Errors
+    /// Returns a descriptive message when plate geometry dimensions or tidy column mappings are incomplete.
+    pub fn build_import_intent(&self) -> Result<ToolCommandIntent, String> {
+        let title = if self.title.trim().is_empty() { "Reshaped Import" } else { self.title.trim() };
+        let target_kind = target_kind_wire_name(self.target_kind);
+        match self.mode {
+            ImportReshapeMode::Plate96 | ImportReshapeMode::Plate384 => {
+                let (geom_label, expected_wells) = match self.mode {
+                    ImportReshapeMode::Plate96 => ("Wells96", 96usize),
+                    ImportReshapeMode::Plate384 => ("Wells384", 384usize),
+                    ImportReshapeMode::TidyLongPivot => ("Wells96", 96usize),
+                };
+                if self.plate_values.len() != expected_wells {
+                    return Err(format!("expected {expected_wells} well values for {geom_label}, got {}", self.plate_values.len()));
+                }
+                if self.plate_roles.len() != expected_wells {
+                    return Err(format!("expected {expected_wells} well roles for {geom_label}, got {}", self.plate_roles.len()));
+                }
+                Ok(ToolCommandIntent::new(
+                    "table.importPlateMap",
+                    json!({
+                        "title": title,
+                        "geometry": geom_label,
+                        "values": self.plate_values,
+                        "roles": self.plate_roles,
+                        "x_title": self.x_title,
+                        "target_kind": target_kind,
+                        "subtract_blank_mean": self.subtract_blank_mean,
+                    }),
+                ))
+            }
+            ImportReshapeMode::TidyLongPivot => {
+                if self.tidy_csv.trim().is_empty() {
+                    return Err(String::from("tidy CSV payload cannot be empty"));
+                }
+                if self.group_col.trim().is_empty() || self.value_col.trim().is_empty() {
+                    return Err(String::from("tidy long mapping requires both `group_col` and `value_col`"));
+                }
+                let mut mapping = serde_json::Map::new();
+                mapping.insert(String::from("group_col"), Value::String(self.group_col.clone()));
+                mapping.insert(String::from("value_col"), Value::String(self.value_col.clone()));
+                if let Some(x) = &self.x_col
+                    && !x.trim().is_empty()
+                {
+                    mapping.insert(String::from("x_col"), Value::String(x.clone()));
+                }
+                if let Some(rep) = &self.replicate_col
+                    && !rep.trim().is_empty()
+                {
+                    mapping.insert(String::from("replicate_col"), Value::String(rep.clone()));
+                }
+                if let Some(excl) = &self.excluded_col
+                    && !excl.trim().is_empty()
+                {
+                    mapping.insert(String::from("excluded_col"), Value::String(excl.clone()));
+                }
+                Ok(ToolCommandIntent::new(
+                    "table.importTidyLong",
+                    json!({
+                        "title": title,
+                        "csv": self.tidy_csv,
+                        "delimiter": self.tidy_delimiter.to_string(),
+                        "decimal_sep": if self.decimal_separator == ',' { "," } else { "." },
+                        "mapping": Value::Object(mapping),
+                        "target_kind": target_kind,
+                    }),
+                ))
+            }
+        }
+    }
+}
+
+fn target_kind_wire_name(kind: TableKind) -> &'static str {
+    match kind {
+        TableKind::Column => "Column",
+        TableKind::Grouped => "Grouped",
+        TableKind::Xy => "Xy",
+        TableKind::MultipleVariables => "MultipleVariables",
+        _ => "Grouped",
+    }
+}
+
 /// Complete 4-stage `Import & Paste Special` / `Paste Link` UI state model
 /// (`docs/data-tables-and-transforms.md` §6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -802,10 +949,69 @@ pub struct GridViewState {
     pub variables_dialog: VariablesDialogState,
     pub formula_bar: FormulaBarState,
     pub import_wizard: ImportPasteWizardState,
+    #[serde(default)]
+    pub import_reshape: ImportReshapeState,
     pub format_link_inspector: FormatLinkInspectorState,
+    #[serde(default)]
+    pub hover_exclusion_tooltip: Option<String>,
 }
 
 impl GridViewState {
+    /// Format the exclusion tooltip string for `coord` on `sheet`, including auditable reason tag
+    /// and note when present (`QOL-3`).
+    #[must_use]
+    pub fn cell_exclusion_tooltip(sheet: &DataSheet, coord: GridCellCoord) -> Option<String> {
+        let cell_coord = CellCoord::from(coord);
+        let is_excluded = sheet.archetype.data_cell(cell_coord).is_some_and(|cell| cell.excluded);
+        let note = sheet.exclusion_note(cell_coord);
+        match (is_excluded, note) {
+            (_, Some(entry)) => {
+                if entry.note.trim().is_empty() {
+                    Some(format!("Excluded [{}] ({})", entry.reason_tag, entry.timestamp_utc))
+                } else {
+                    Some(format!("Excluded [{}]: {} ({})", entry.reason_tag, entry.note, entry.timestamp_utc))
+                }
+            }
+            (true, None) => Some(String::from("Excluded from analyses")),
+            (false, None) => None,
+        }
+    }
+
+    /// Refresh [`Self::hover_exclusion_tooltip`] from the cell under pointer `coord`.
+    pub fn update_hover_exclusion_tooltip(&mut self, sheet: &DataSheet, coord: Option<GridCellCoord>) -> Option<&str> {
+        self.hover_exclusion_tooltip = coord.and_then(|c| Self::cell_exclusion_tooltip(sheet, c));
+        self.hover_exclusion_tooltip.as_deref()
+    }
+
+    /// Expand the current rectangular selection into concrete [`GridCellCoord`] coordinates bounded to `sheet`.
+    #[must_use]
+    pub fn selection_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
+        let total_rows = sheet.archetype.row_count();
+        let total_flat = total_flat_data_subcolumns(&sheet.archetype);
+        if total_rows == 0 || total_flat == 0 {
+            return Vec::new();
+        }
+        let Some((min_c, max_c)) = self.tool.selection_bounds() else {
+            return Vec::new();
+        };
+        let r0 = min_c.row.min(total_rows - 1);
+        let r1 = max_c.row.min(total_rows - 1);
+        let f0 = flat_index_for_coord(&sheet.archetype, min_c.col, min_c.subcol);
+        let f1 = flat_index_for_coord(&sheet.archetype, max_c.col, max_c.subcol);
+        let lo = f0.min(f1).min(total_flat - 1);
+        let hi = f0.max(f1).min(total_flat - 1);
+
+        let mut coords = Vec::with_capacity((r1 - r0 + 1).saturating_mul(hi - lo + 1));
+        for row in r0..=r1 {
+            for flat in lo..=hi {
+                if let Some((col, subcol)) = resolve_flat_coord(&sheet.archetype, flat) {
+                    coords.push(GridCellCoord::new(row, col, subcol));
+                }
+            }
+        }
+        coords
+    }
+
     /// Recompute quick summary statistics (`n`, `excluded`, `mean`, `SD`, `SEM`, `median`, `sum`)
     /// for the active data sheet selection.
     pub fn refresh_selection_stats(&mut self, doc: &ProjectDocument) {
@@ -1049,7 +1255,7 @@ fn flat_index_for_coord(arch: &TableArchetype, col: usize, subcol: usize) -> usi
 }
 
 #[must_use]
-fn resolve_flat_coord(arch: &TableArchetype, flat_col: usize) -> Option<(usize, usize)> {
+pub(crate) fn resolve_flat_coord(arch: &TableArchetype, flat_col: usize) -> Option<(usize, usize)> {
     if let Some(subs) = uniform_subcolumn_count(arch) {
         let col = flat_col / subs;
         if col >= arch.column_count() {
