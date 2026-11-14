@@ -85,6 +85,15 @@ impl From<serde_json::Error> for FormatError {
     }
 }
 
+impl From<lumencraft_platform::PlatformError> for FormatError {
+    fn from(value: lumencraft_platform::PlatformError) -> Self {
+        match value {
+            lumencraft_platform::PlatformError::PathEscape { path, .. } => Self::UnsafePath { path },
+            other => Self::Io(other.to_string()),
+        }
+    }
+}
+
 /// Classification of a non-fatal compatibility warning emitted during external import.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ImportWarningKind {

@@ -219,6 +219,7 @@ fn result_sheet_tidy_csv_and_structured_json_export() {
         status: ChecklistStatus::Pass,
         diagnostic_metric: Some(String::from("W = 0.98")),
         explanation: String::from("Residuals consistent with Gaussian distribution"),
+        remediation: None,
     });
 
     let opts = CsvOptions::csv();

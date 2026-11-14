@@ -2,7 +2,8 @@
 //! schema migration, dimension/float validation, and circular dependency guards.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::path::Path;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 
 use lumencraft_doc::{
     AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation,
@@ -13,10 +14,12 @@ use lumencraft_doc::{
 
 use crate::csv::{CsvOptions, export_datasheet_to_csv};
 use crate::error::FormatError;
-use crate::zip::{ZipArchive, ZipLimits, ZipWriter};
+use crate::versioned::{VersionStep, upgrade};
+use crate::zip::{ZipArchive, ZipLimits, ZipWriter, sanitize_zip_path};
 
 const MANIFEST_PATH: &str = "manifest.json";
 const DOCUMENT_PATH: &str = "document.json";
+const SHEETS_DIR: &str = "sheets";
 const FORMAT_MAGIC: &str = "lumencraft-archive";
 
 /// Kind of native LumenCraft ZIP archive.
@@ -110,13 +113,7 @@ pub fn open_archive_bytes(bytes: &[u8]) -> Result<(ArchiveKind, ProjectDocument)
 pub fn open_archive_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result<(ArchiveKind, ProjectDocument), FormatError> {
     let archive = ZipArchive::from_bytes_with_limits(bytes, limits)?;
     let manifest_text = archive.get_utf8(MANIFEST_PATH)?.ok_or_else(|| FormatError::MissingArchiveEntry { path: String::from(MANIFEST_PATH) })?;
-    let manifest: ArchiveManifest = serde_json::from_str(manifest_text)?;
-    if manifest.format != FORMAT_MAGIC {
-        return Err(FormatError::UnsupportedFormat { reason: format!("unexpected archive format `{}`", manifest.format) });
-    }
-    if manifest.schema_version > CURRENT_SCHEMA_VERSION {
-        return Err(FormatError::UnsupportedSchemaVersion { version: manifest.schema_version, max_supported: CURRENT_SCHEMA_VERSION });
-    }
+    let manifest = parse_and_validate_manifest(manifest_text)?;
 
     let doc_bytes = archive.get(DOCUMENT_PATH).ok_or_else(|| FormatError::MissingArchiveEntry { path: String::from(DOCUMENT_PATH) })?;
     let actual_doc_crc = crc32fast::hash(doc_bytes);
@@ -134,22 +131,25 @@ pub fn open_archive_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
         }
     }
 
-    let raw_value: serde_json::Value = serde_json::from_slice(doc_bytes)?;
-    let doc_version =
-        raw_value.get("schema_version").and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(manifest.schema_version);
-    if doc_version > CURRENT_SCHEMA_VERSION {
-        return Err(FormatError::UnsupportedSchemaVersion { version: doc_version, max_supported: CURRENT_SCHEMA_VERSION });
-    }
-    let migrated_value = migrate_document_json(raw_value, doc_version)?;
-    let doc: ProjectDocument = serde_json::from_value(migrated_value)?;
-    validate_project_document(&doc)?;
+    let doc = decode_and_validate_document(doc_bytes, manifest.schema_version)?;
     Ok((manifest.kind, doc))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn platform_write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FormatError> {
+    lumencraft_platform::fs::write_atomic(path, bytes)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn platform_write_atomic(_path: &Path, _bytes: &[u8]) -> Result<(), FormatError> {
+    Err(FormatError::Io(String::from("atomic file writes are not supported on wasm32")))
 }
 
 /// Write a `.lumencraft` archive to disk.
 pub fn save_project_file(path: &Path, doc: &ProjectDocument) -> Result<(), FormatError> {
     let bytes = save_project_bytes(doc)?;
-    std::fs::write(path, bytes)?;
+    platform_write_atomic(path, &bytes)?;
     Ok(())
 }
 
@@ -162,7 +162,7 @@ pub fn open_project_file(path: &Path) -> Result<ProjectDocument, FormatError> {
 /// Write a `.lctemplate` archive to disk.
 pub fn save_template_file(path: &Path, doc: &ProjectDocument) -> Result<(), FormatError> {
     let bytes = save_template_bytes(doc)?;
-    std::fs::write(path, bytes)?;
+    platform_write_atomic(path, &bytes)?;
     Ok(())
 }
 
@@ -172,7 +172,122 @@ pub fn open_template_file(path: &Path) -> Result<ProjectDocument, FormatError> {
     open_template_bytes(&bytes)
 }
 
+/// Return `true` when `path` is an existing directory containing a valid unpacked `.lumencraft.d/`
+/// project manifest and document payload (rejecting template archives and escaping symlinks).
+#[must_use]
+pub fn is_unpacked_project_dir(path: &Path) -> bool {
+    check_unpacked_project_dir(path).unwrap_or(false)
+}
+
+/// Write `doc` to an unpacked, Git-friendly `.lumencraft.d/` project directory using the exact
+/// deterministic `.lumencraft` layout (`manifest.json`, canonical 2-space `document.json`, and
+/// RFC-4180 `sheets/<id>.csv` CSVs), pruning stale sheet files without disturbing `.git` or other
+/// user files and rejecting any relative-path escapes or symlinks resolving outside `dir`.
+pub fn save_project_unpacked_dir(doc: &ProjectDocument, dir: &Path) -> Result<(), FormatError> {
+    let entries = build_archive_entries(doc, ArchiveKind::Project)?;
+    ensure_dir_exists(dir)?;
+    let canon_root = std::fs::canonicalize(dir)?;
+    let prior_paths = preflight_unpacked_save(&canon_root, &entries)?;
+
+    let mut expected_paths = HashSet::with_capacity(entries.len());
+    for (rel, bytes) in &entries {
+        expected_paths.insert(rel.clone());
+        write_file_atomically(&canon_root, rel, bytes)?;
+    }
+
+    prune_stale_unpacked_files(&canon_root, &prior_paths, &expected_paths)
+}
+
+/// Read and validate an unpacked `.lumencraft.d/` project directory, enforcing strict relative-path
+/// containment, symlink boundaries, CRC-32 verification, size caps, and schema migration.
+pub fn open_project_unpacked_dir(dir: &Path) -> Result<ProjectDocument, FormatError> {
+    if !std::fs::metadata(dir)?.is_dir() {
+        return Err(FormatError::Io(format!("`{}` is not a directory", dir.display())));
+    }
+    let canon_root = std::fs::canonicalize(dir)?;
+    let limits = ZipLimits::default();
+    let mut remaining_budget = limits.max_total_uncompressed_bytes;
+
+    let manifest_bytes = read_contained_file(&canon_root, MANIFEST_PATH, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
+    let manifest_text = std::str::from_utf8(&manifest_bytes)
+        .map_err(|err| FormatError::InvalidZip { reason: format!("entry `{MANIFEST_PATH}` is not valid UTF-8: {err}") })?;
+    let manifest = parse_and_validate_manifest(manifest_text)?;
+    if manifest.kind != ArchiveKind::Project {
+        return Err(FormatError::InvalidArchiveKind { expected: ArchiveKind::Project.as_str(), found: manifest.kind.as_str() });
+    }
+
+    let doc_bytes = read_contained_file(&canon_root, DOCUMENT_PATH, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
+    let actual_doc_crc = crc32fast::hash(&doc_bytes);
+    if actual_doc_crc != manifest.document_crc32 {
+        return Err(FormatError::CorruptCrc { entry: String::from(DOCUMENT_PATH), expected: manifest.document_crc32, actual: actual_doc_crc });
+    }
+
+    verify_unpacked_sheet_entries(&canon_root, &manifest, limits, &mut remaining_budget)?;
+    decode_and_validate_document(&doc_bytes, manifest.schema_version)
+}
+
+fn check_unpacked_project_dir(path: &Path) -> Result<bool, FormatError> {
+    if !std::fs::metadata(path).map(|m| m.is_dir()).unwrap_or(false) {
+        return Ok(false);
+    }
+    let canon_root = std::fs::canonicalize(path)?;
+    let mut remaining_budget = crate::zip::MAX_ZIP_UNCOMPRESSED_BYTES;
+    let manifest_bytes = read_contained_file(&canon_root, MANIFEST_PATH, crate::zip::MAX_ZIP_ENTRY_BYTES, &mut remaining_budget)?;
+    let manifest_text = std::str::from_utf8(&manifest_bytes)
+        .map_err(|err| FormatError::InvalidZip { reason: format!("entry `{MANIFEST_PATH}` is not valid UTF-8: {err}") })?;
+    let manifest = parse_and_validate_manifest(manifest_text)?;
+    if manifest.kind != ArchiveKind::Project {
+        return Ok(false);
+    }
+    let doc_path = resolve_contained_path(&canon_root, DOCUMENT_PATH, true)?;
+    let doc_meta = std::fs::metadata(doc_path)?;
+    Ok(doc_meta.is_file() && doc_meta.len() <= crate::zip::MAX_ZIP_ENTRY_BYTES)
+}
+
+fn parse_and_validate_manifest(manifest_text: &str) -> Result<ArchiveManifest, FormatError> {
+    let manifest: ArchiveManifest = serde_json::from_str(manifest_text)?;
+    if manifest.format != FORMAT_MAGIC {
+        return Err(FormatError::UnsupportedFormat { reason: format!("unexpected archive format `{}`", manifest.format) });
+    }
+    if manifest.schema_version > CURRENT_SCHEMA_VERSION {
+        return Err(FormatError::UnsupportedSchemaVersion { version: manifest.schema_version, max_supported: CURRENT_SCHEMA_VERSION });
+    }
+    if manifest.sheets.len() > crate::zip::MAX_ZIP_ENTRIES {
+        return Err(FormatError::ZipBomb {
+            reason: format!("manifest sheet count {} exceeds limit {}", manifest.sheets.len(), crate::zip::MAX_ZIP_ENTRIES),
+        });
+    }
+    for entry in &manifest.sheets {
+        if let Some(csv_path) = &entry.csv_path {
+            validate_unpacked_relative_path(csv_path)?;
+        }
+    }
+    Ok(manifest)
+}
+
+fn decode_and_validate_document(doc_bytes: &[u8], manifest_schema_version: u32) -> Result<ProjectDocument, FormatError> {
+    let raw_value: serde_json::Value = serde_json::from_slice(doc_bytes)?;
+    let doc_version =
+        raw_value.get("schema_version").and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(manifest_schema_version);
+    if doc_version > CURRENT_SCHEMA_VERSION {
+        return Err(FormatError::UnsupportedSchemaVersion { version: doc_version, max_supported: CURRENT_SCHEMA_VERSION });
+    }
+    let migrated_value = migrate_document_json(raw_value, doc_version)?;
+    let doc: ProjectDocument = serde_json::from_value(migrated_value)?;
+    validate_project_document(&doc)?;
+    Ok(doc)
+}
+
 fn save_archive_bytes(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec<u8>, FormatError> {
+    let entries = build_archive_entries(doc, kind)?;
+    let mut writer = ZipWriter::new();
+    for (path, bytes) in entries {
+        writer.add_file(&path, bytes)?;
+    }
+    writer.finish()
+}
+
+fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec<(String, Vec<u8>)>, FormatError> {
     validate_project_document(doc)?;
 
     let mut normalized = doc.clone();
@@ -180,8 +295,8 @@ fn save_archive_bytes(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec<u8
     let doc_json = serde_json::to_vec_pretty(&normalized)?;
     let doc_crc = crc32fast::hash(&doc_json);
 
-    let mut writer = ZipWriter::new();
-    writer.add_file(DOCUMENT_PATH, doc_json)?;
+    let mut entries = Vec::with_capacity(normalized.data_sheets.len() + 2);
+    entries.push((String::from(DOCUMENT_PATH), doc_json));
 
     let mut manifest_sheets = Vec::with_capacity(normalized.total_sheet_count());
     let csv_opts = CsvOptions::csv();
@@ -191,7 +306,7 @@ fn save_archive_bytes(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec<u8
         let csv_path = unique_sheet_csv_path(idx, &ds.id, &mut used_paths);
         let csv_bytes = export_datasheet_to_csv(ds, &csv_opts)?.into_bytes();
         let crc = crc32fast::hash(&csv_bytes);
-        writer.add_file(&csv_path, csv_bytes)?;
+        entries.push((csv_path.clone(), csv_bytes));
         manifest_sheets.push(SheetManifestEntry {
             id: ds.id.clone(),
             section: SheetSection::Data,
@@ -212,8 +327,235 @@ fn save_archive_bytes(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec<u8
         sheets: manifest_sheets,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
-    writer.add_file(MANIFEST_PATH, manifest_json)?;
-    writer.finish()
+    entries.push((String::from(MANIFEST_PATH), manifest_json));
+    Ok(entries)
+}
+
+fn ensure_dir_exists(dir: &Path) -> Result<(), FormatError> {
+    match std::fs::symlink_metadata(dir) {
+        Ok(_) => {
+            if !std::fs::metadata(dir)?.is_dir() {
+                return Err(FormatError::Io(format!("`{}` exists and is not a directory", dir.display())));
+            }
+            Ok(())
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::create_dir_all(dir)?;
+            Ok(())
+        }
+        Err(err) => Err(FormatError::Io(err.to_string())),
+    }
+}
+
+fn validate_unpacked_relative_path(raw: &str) -> Result<(), FormatError> {
+    let clean = sanitize_zip_path(raw)?;
+    if clean.ends_with('/') {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    }
+    Ok(())
+}
+
+fn check_symlink_contained(cur: &Path, canon_root: &Path, rel: &str) -> Result<(), FormatError> {
+    let Ok(resolved) = std::fs::canonicalize(cur) else {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    };
+    if !resolved.starts_with(canon_root) {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    }
+    Ok(())
+}
+
+fn resolve_contained_path(canon_root: &Path, rel: &str, must_exist: bool) -> Result<PathBuf, FormatError> {
+    validate_unpacked_relative_path(rel)?;
+    let mut cur = canon_root.to_path_buf();
+    let mut parts = rel.split('/').peekable();
+    while let Some(seg) = parts.next() {
+        let is_last = parts.peek().is_none();
+        cur.push(seg);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(meta) => {
+                if meta.file_type().is_symlink() {
+                    check_symlink_contained(&cur, canon_root, rel)?;
+                }
+                if !is_last && !std::fs::metadata(&cur).map(|m| m.is_dir()).unwrap_or(false) {
+                    return Err(if must_exist {
+                        FormatError::MissingArchiveEntry { path: rel.to_owned() }
+                    } else {
+                        FormatError::Io(format!("path component `{}` for `{rel}` is not a directory", cur.display()))
+                    });
+                }
+            }
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                if must_exist {
+                    return Err(FormatError::MissingArchiveEntry { path: rel.to_owned() });
+                }
+                for rest in parts {
+                    cur.push(rest);
+                }
+                return Ok(cur);
+            }
+            Err(err) => return Err(FormatError::Io(err.to_string())),
+        }
+    }
+    if let Ok(resolved) = std::fs::canonicalize(&cur)
+        && !resolved.starts_with(canon_root)
+    {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    }
+    Ok(cur)
+}
+
+fn read_contained_file(canon_root: &Path, rel: &str, max_entry_bytes: u64, remaining_budget: &mut u64) -> Result<Vec<u8>, FormatError> {
+    let resolved = resolve_contained_path(canon_root, rel, true)?;
+    let meta = std::fs::metadata(&resolved)?;
+    if !meta.is_file() {
+        return Err(FormatError::Io(format!("entry `{rel}` is not a regular file")));
+    }
+    let entry_cap = max_entry_bytes.min(*remaining_budget);
+    if meta.len() > entry_cap {
+        return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` size {} exceeds security limit {entry_cap}", meta.len()) });
+    }
+    let file = std::fs::File::open(&resolved)?;
+    let mut reader = file.take(entry_cap.saturating_add(1));
+    let mut buf = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
+    reader.read_to_end(&mut buf)?;
+    if (buf.len() as u64) > entry_cap {
+        return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` payload exceeds security limit") });
+    }
+    *remaining_budget = remaining_budget.saturating_sub(buf.len() as u64);
+    Ok(buf)
+}
+
+fn verify_unpacked_sheet_entries(
+    canon_root: &Path,
+    manifest: &ArchiveManifest,
+    limits: ZipLimits,
+    remaining_budget: &mut u64,
+) -> Result<(), FormatError> {
+    let mut seen_csvs = HashSet::new();
+    let mut entry_count = 2_usize;
+    for entry in &manifest.sheets {
+        let Some(csv_path) = &entry.csv_path else {
+            continue;
+        };
+        if !seen_csvs.insert(csv_path.as_str()) {
+            return Err(FormatError::DuplicateEntry { path: csv_path.clone() });
+        }
+        entry_count += 1;
+        if entry_count > limits.max_entries {
+            return Err(FormatError::ZipBomb { reason: format!("unpacked entry count exceeds limit {}", limits.max_entries) });
+        }
+        let csv_bytes = read_contained_file(canon_root, csv_path, limits.max_entry_uncompressed_bytes, remaining_budget)?;
+        if let Some(expected_crc) = entry.crc32 {
+            let actual_crc = crc32fast::hash(&csv_bytes);
+            if actual_crc != expected_crc {
+                return Err(FormatError::CorruptCrc { entry: csv_path.clone(), expected: expected_crc, actual: actual_crc });
+            }
+        }
+    }
+    Ok(())
+}
+
+fn preflight_unpacked_save(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> Result<Vec<String>, FormatError> {
+    for (rel, _) in entries {
+        resolve_contained_path(canon_root, rel, false)?;
+    }
+    let sheets_path = canon_root.join(SHEETS_DIR);
+    if let Ok(meta) = std::fs::symlink_metadata(&sheets_path) {
+        if meta.file_type().is_symlink() {
+            check_symlink_contained(&sheets_path, canon_root, SHEETS_DIR)?;
+        } else if meta.is_dir() {
+            for entry in std::fs::read_dir(&sheets_path)? {
+                let entry = entry?;
+                if entry.file_type()?.is_symlink() {
+                    let rel = format!("{SHEETS_DIR}/{}", entry.file_name().to_string_lossy());
+                    check_symlink_contained(&entry.path(), canon_root, &rel)?;
+                }
+            }
+        }
+    }
+    collect_prior_manifest_csv_paths(canon_root)
+}
+
+fn collect_prior_manifest_csv_paths(canon_root: &Path) -> Result<Vec<String>, FormatError> {
+    let Ok(manifest_path) = resolve_contained_path(canon_root, MANIFEST_PATH, true) else {
+        return Ok(Vec::new());
+    };
+    let Ok(meta) = std::fs::metadata(&manifest_path) else {
+        return Ok(Vec::new());
+    };
+    if !meta.is_file() || meta.len() > crate::zip::MAX_ZIP_ENTRY_BYTES {
+        return Ok(Vec::new());
+    }
+    let Ok(bytes) = std::fs::read(&manifest_path) else {
+        return Ok(Vec::new());
+    };
+    let Ok(manifest) = serde_json::from_slice::<ArchiveManifest>(&bytes) else {
+        return Ok(Vec::new());
+    };
+    Ok(manifest.sheets.into_iter().filter_map(|e| e.csv_path).collect())
+}
+
+fn write_file_atomically(canon_root: &Path, rel: &str, bytes: &[u8]) -> Result<(), FormatError> {
+    let target = resolve_contained_path(canon_root, rel, false)?;
+    let parent = target.parent().ok_or_else(|| FormatError::UnsafePath { path: rel.to_owned() })?;
+    std::fs::create_dir_all(parent)?;
+    let canon_parent = std::fs::canonicalize(parent)?;
+    if !canon_parent.starts_with(canon_root) {
+        return Err(FormatError::UnsafePath { path: rel.to_owned() });
+    }
+    if let Ok(meta) = std::fs::symlink_metadata(&target)
+        && !meta.file_type().is_symlink()
+        && meta.is_file()
+        && meta.len() == bytes.len() as u64
+        && let Ok(existing) = std::fs::read(&target)
+        && existing == bytes
+    {
+        return Ok(());
+    }
+
+    platform_write_atomic(&target, bytes)
+}
+
+fn prune_stale_unpacked_files(canon_root: &Path, prior_paths: &[String], expected_paths: &HashSet<String>) -> Result<(), FormatError> {
+    for rel in prior_paths {
+        if expected_paths.contains(rel) || validate_unpacked_relative_path(rel).is_err() {
+            continue;
+        }
+        if let Ok(path) = resolve_contained_path(canon_root, rel, true)
+            && let Ok(meta) = std::fs::symlink_metadata(&path)
+            && !meta.file_type().is_symlink()
+            && meta.is_file()
+        {
+            std::fs::remove_file(path)?;
+        }
+    }
+
+    let sheets_dir = canon_root.join(SHEETS_DIR);
+    if let Ok(meta) = std::fs::symlink_metadata(&sheets_dir)
+        && !meta.file_type().is_symlink()
+        && meta.is_dir()
+    {
+        for entry in std::fs::read_dir(&sheets_dir)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let rel = format!("{SHEETS_DIR}/{name}");
+            if expected_paths.contains(&rel) {
+                continue;
+            }
+            let ft = entry.file_type()?;
+            if !ft.is_symlink() && ft.is_file() {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        let has_sheet_outputs = expected_paths.iter().any(|p| p.starts_with(&format!("{SHEETS_DIR}/")));
+        if !has_sheet_outputs {
+            let _ = std::fs::remove_dir(&sheets_dir);
+        }
+    }
+    Ok(())
 }
 
 fn push_metadata_entries(entries: &mut Vec<SheetManifestEntry>, doc: &ProjectDocument) {
@@ -296,30 +638,17 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
     Ok(out)
 }
 
-struct SchemaMigrationStep {
-    from_version: u32,
-    apply: fn(&mut serde_json::Value) -> Result<(), FormatError>,
-}
+const MIGRATION_STEPS: &[VersionStep] = &[VersionStep { from_version: 0, apply: migrate_v0_to_v1 }];
 
-const MIGRATION_STEPS: &[SchemaMigrationStep] = &[SchemaMigrationStep { from_version: 0, apply: migrate_v0_to_v1 }];
+const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
 
 /// Migrate a deserialized JSON [`ProjectDocument`] forward step-by-step from `from_version` to
 /// [`CURRENT_SCHEMA_VERSION`], filling backwards-compatible optional fields and rejecting unsupported
 /// future major schemas cleanly.
-pub fn migrate_document_json(mut value: serde_json::Value, from_version: u32) -> Result<serde_json::Value, FormatError> {
-    if from_version > CURRENT_SCHEMA_VERSION {
-        return Err(FormatError::UnsupportedSchemaVersion { version: from_version, max_supported: CURRENT_SCHEMA_VERSION });
-    }
-
-    for step_ver in from_version..CURRENT_SCHEMA_VERSION {
-        let Some(step) = MIGRATION_STEPS.iter().find(|s| s.from_version == step_ver) else {
-            return Err(FormatError::UnsupportedSchemaVersion { version: step_ver, max_supported: CURRENT_SCHEMA_VERSION });
-        };
-        (step.apply)(&mut value)?;
-    }
-
-    backfill_compatible_fields(&mut value, from_version < CURRENT_SCHEMA_VERSION);
-    Ok(value)
+pub fn migrate_document_json(value: serde_json::Value, from_version: u32) -> Result<serde_json::Value, FormatError> {
+    let mut upgraded = upgrade(value, from_version, 0, CURRENT_SCHEMA_VERSION, MIGRATION_STEPS)?;
+    backfill_compatible_fields(&mut upgraded, from_version < CURRENT_SCHEMA_VERSION);
+    Ok(upgraded)
 }
 
 fn migrate_v0_to_v1(value: &mut serde_json::Value) -> Result<(), FormatError> {
@@ -339,6 +668,7 @@ fn backfill_top_level_fields(obj: &mut serde_json::Map<String, serde_json::Value
     obj.entry(String::from("layout_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
     obj.entry(String::from("active_sheet_id")).or_insert(serde_json::Value::Null);
     obj.entry(String::from("family_anchor_sheet_id")).or_insert(serde_json::Value::Null);
+    obj.entry(String::from("checkpoints")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
 }
 
 fn backfill_compatible_fields(value: &mut serde_json::Value, bump_schema_version: bool) {
@@ -406,6 +736,7 @@ fn backfill_data_sheet_defaults(ds: &mut serde_json::Value) {
     obj.entry(String::from("info_sheet_id")).or_insert(serde_json::Value::Null);
     obj.entry(String::from("linked_regions")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
     obj.entry(String::from("floating_notes")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("exclusion_notes")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
     obj.entry(String::from("color_tag")).or_insert(serde_json::Value::Null);
 }
 

@@ -3,6 +3,7 @@ name = "lumencraft-format"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "LumenCraft project archive, template and tabular scientific file format readers and writers"
 
 [lints]
@@ -13,6 +14,7 @@ crc32fast = { workspace = true }
 flate2 = { workspace = true }
 lumencraft-math = { workspace = true }
 lumencraft-palette = { workspace = true }
+lumencraft-platform = { workspace = true }
 lumencraft-doc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

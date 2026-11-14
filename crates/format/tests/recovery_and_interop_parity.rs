@@ -117,7 +117,12 @@ fn directory_journal_recovers_stale_lock_and_truncates_torn_tail_without_crashin
     assert_eq!(report.discarded_corrupt_tail_lines, 1);
     assert_eq!(
         report.recovered_from_stale_lock,
-        Some(JournalLockLease { owner_id: String::from("writer-1"), acquired_epoch_ms: 11_000, ttl_ms: 5_000 })
+        Some(JournalLockLease {
+            format_version: lumencraft_format::CURRENT_LOCK_VERSION,
+            owner_id: String::from("writer-1"),
+            acquired_epoch_ms: 11_000,
+            ttl_ms: 5_000,
+        })
     );
     assert_eq!(report.active_lease.owner_id, "writer-2");
     assert_eq!(recovered.next_seq(), 3);

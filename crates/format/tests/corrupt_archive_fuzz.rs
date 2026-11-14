@@ -299,6 +299,7 @@ fn build_rich_eight_archetype_project() -> ProjectDocument {
         status: ChecklistStatus::Pass,
         diagnostic_metric: Some(String::from("W = 0.99")),
         explanation: String::from("Residuals consistent with Gaussian model"),
+        remediation: None,
     });
     doc.add_result_sheet(res).unwrap();
 

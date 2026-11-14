@@ -18,8 +18,11 @@ use std::fs::{File, OpenOptions};
 use std::io::{ErrorKind, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
-#[cfg(not(target_arch = "wasm32"))]
-use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Current persisted format version of [`JournalOpRecord`] entries in `ops.journal`.
+pub const CURRENT_JOURNAL_VERSION: u32 = 1;
+/// Current persisted format version of [`JournalLockLease`] files (`lumencraft.lock`).
+pub const CURRENT_LOCK_VERSION: u32 = 1;
 
 /// Filename of the exclusive writer lease file on native backends.
 pub const LOCKFILE_NAME: &str = "lumencraft.lock";
@@ -30,12 +33,16 @@ pub const JOURNAL_FILE_NAME: &str = "ops.journal";
 
 const MAX_WEB_STORAGE_JSON_BYTES: usize = 64 * 1024 * 1024;
 
-#[cfg(not(target_arch = "wasm32"))]
-static TMP_FILE_COUNTER: AtomicU64 = AtomicU64::new(1);
+fn default_v1() -> u32 {
+    1
+}
 
 /// Exclusive writer lease stored in `lumencraft.lock` or serialized web-storage state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalLockLease {
+    /// Persisted schema version of this lock lease (`1`).
+    #[serde(default = "default_v1")]
+    pub format_version: u32,
     /// Identifier of the session/process/tab holding the lock lease.
     pub owner_id: String,
     /// Epoch timestamp (milliseconds) when the lease was acquired or last renewed.
@@ -51,7 +58,22 @@ impl JournalLockLease {
         if owner_id.trim().is_empty() {
             return Err(FormatError::Io(String::from("journal lock owner_id must not be empty")));
         }
-        Ok(Self { owner_id, acquired_epoch_ms, ttl_ms })
+        Ok(Self { format_version: CURRENT_LOCK_VERSION, owner_id, acquired_epoch_ms, ttl_ms })
+    }
+
+    /// Reject leases with unsupported `format_version` (`0` or `> CURRENT_LOCK_VERSION`).
+    pub fn validate_version(&self) -> Result<(), FormatError> {
+        if self.format_version == 0 || self.format_version > CURRENT_LOCK_VERSION {
+            return Err(FormatError::UnsupportedSchemaVersion { version: self.format_version, max_supported: CURRENT_LOCK_VERSION });
+        }
+        Ok(())
+    }
+
+    /// Deserialize a lock lease from JSON bytes and validate its `format_version`.
+    pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, FormatError> {
+        let lease: Self = serde_json::from_slice(bytes)?;
+        lease.validate_version()?;
+        Ok(lease)
     }
 
     /// Epoch timestamp (milliseconds, saturating) at which this lease becomes stale.
@@ -70,9 +92,12 @@ impl JournalLockLease {
     }
 }
 
-/// Single NDJSON line record in `ops.journal`: `{ "seq", "crc32", "command_json" }`.
+/// Single NDJSON line record in `ops.journal`: `{ "format_version", "seq", "crc32", "command_json" }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalOpRecord {
+    /// Persisted schema version of this journal record (`1`).
+    #[serde(default = "default_v1")]
+    pub format_version: u32,
     /// Monotonically increasing 1-based command sequence number.
     pub seq: u64,
     /// IEEE CRC32 checksum over `seq` and canonical JSON representation of `command_json`.
@@ -85,7 +110,22 @@ impl JournalOpRecord {
     /// Create a checksummed journal entry for `seq` and `command_json`.
     pub fn new(seq: u64, command_json: serde_json::Value) -> Result<Self, FormatError> {
         let crc32 = compute_record_crc32(seq, &command_json)?;
-        Ok(Self { seq, crc32, command_json })
+        Ok(Self { format_version: CURRENT_JOURNAL_VERSION, seq, crc32, command_json })
+    }
+
+    /// Reject journal records with unsupported `format_version` (`0` or `> CURRENT_JOURNAL_VERSION`).
+    pub fn validate_version(&self) -> Result<(), FormatError> {
+        if self.format_version == 0 || self.format_version > CURRENT_JOURNAL_VERSION {
+            return Err(FormatError::UnsupportedSchemaVersion { version: self.format_version, max_supported: CURRENT_JOURNAL_VERSION });
+        }
+        Ok(())
+    }
+
+    /// Parse a single JSON journal record string and validate its `format_version`.
+    pub fn from_json_str(text: &str) -> Result<Self, FormatError> {
+        let record: Self = serde_json::from_str(text)?;
+        record.validate_version()?;
+        Ok(record)
     }
 
     /// Compute and validate the record's CRC32 checksum, returning the computed checksum on mismatch.
@@ -195,7 +235,11 @@ impl MemoryJournalBackend {
         if json.len() > MAX_WEB_STORAGE_JSON_BYTES {
             return Err(FormatError::Io(format!("web-storage journal payload exceeds budget of {MAX_WEB_STORAGE_JSON_BYTES} bytes")));
         }
-        Ok(serde_json::from_str(json)?)
+        let backend: Self = serde_json::from_str(json)?;
+        if let Some(lease) = &backend.lease {
+            lease.validate_version()?;
+        }
+        Ok(backend)
     }
 
     /// Inspect the stored snapshot bytes, if present.
@@ -231,15 +275,19 @@ impl MemoryJournalBackend {
 
 impl JournalBackend for MemoryJournalBackend {
     fn acquire_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<Option<JournalLockLease>, FormatError> {
+        lease.validate_version()?;
         let evicted = match &self.lease {
-            Some(existing) if !existing.is_stale(now_epoch_ms) => {
-                return Err(FormatError::Io(format!(
-                    "journal lock `{LOCKFILE_NAME}` is actively held by `{}` until {}ms",
-                    existing.owner_id,
-                    existing.expires_epoch_ms()
-                )));
+            Some(existing) => {
+                existing.validate_version()?;
+                if !existing.is_stale(now_epoch_ms) {
+                    return Err(FormatError::Io(format!(
+                        "journal lock `{LOCKFILE_NAME}` is actively held by `{}` until {}ms",
+                        existing.owner_id,
+                        existing.expires_epoch_ms()
+                    )));
+                }
+                Some(existing.clone())
             }
-            Some(stale) => Some(stale.clone()),
             None => None,
         };
         self.lease = Some(lease.clone());
@@ -247,9 +295,11 @@ impl JournalBackend for MemoryJournalBackend {
     }
 
     fn renew_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<(), FormatError> {
+        lease.validate_version()?;
         let Some(existing) = &self.lease else {
             return Err(FormatError::Io(String::from("cannot renew journal lock: no active lease present")));
         };
+        existing.validate_version()?;
         if existing.owner_id != lease.owner_id {
             return Err(FormatError::Io(format!("cannot renew journal lock owned by `{}` from `{}`", existing.owner_id, lease.owner_id)));
         }
@@ -271,6 +321,9 @@ impl JournalBackend for MemoryJournalBackend {
     }
 
     fn read_lease(&self) -> Result<Option<JournalLockLease>, FormatError> {
+        if let Some(existing) = &self.lease {
+            existing.validate_version()?;
+        }
         Ok(self.lease.clone())
     }
 
@@ -343,66 +396,19 @@ impl DirectoryJournalBackend {
         self.dir.join(JOURNAL_FILE_NAME)
     }
 
-    fn next_temp_path(&self, target_name: &str) -> PathBuf {
-        let id = TMP_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-        self.dir.join(format!(".{target_name}.tmp.{id}"))
-    }
-
-    fn write_temp_and_sync(&self, target_name: &str, bytes: &[u8]) -> Result<PathBuf, FormatError> {
-        let tmp_path = self.next_temp_path(target_name);
-        let write_result = (|| -> Result<(), std::io::Error> {
-            let mut file = OpenOptions::new().write(true).create_new(true).open(&tmp_path)?;
-            file.write_all(bytes)?;
-            file.sync_all()?;
-            Ok(())
-        })();
-        if let Err(err) = write_result {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(FormatError::from(err));
-        }
-        Ok(tmp_path)
-    }
-
-    fn atomic_write_file(&self, target_name: &str, bytes: &[u8]) -> Result<(), FormatError> {
-        let target_path = self.dir.join(target_name);
-        let tmp_path = self.write_temp_and_sync(target_name, bytes)?;
-        if let Err(err) = std::fs::rename(&tmp_path, &target_path) {
-            let _ = std::fs::remove_file(&tmp_path);
-            return Err(FormatError::from(err));
-        }
-        sync_directory_best_effort(&self.dir);
-        Ok(())
-    }
-
     fn try_create_lock_exclusively(&self, lease_bytes: &[u8]) -> Result<bool, FormatError> {
         let lock_path = self.lock_path();
-        let tmp_path = self.write_temp_and_sync(LOCKFILE_NAME, lease_bytes)?;
-        match std::fs::hard_link(&tmp_path, &lock_path) {
-            Ok(()) => {
-                let _ = std::fs::remove_file(&tmp_path);
+        match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
+            Ok(mut file) => {
+                if let Err(write_err) = file.write_all(lease_bytes).and_then(|()| file.sync_all()) {
+                    let _ = std::fs::remove_file(&lock_path);
+                    return Err(FormatError::from(write_err));
+                }
                 sync_directory_best_effort(&self.dir);
                 Ok(true)
             }
-            Err(err) if err.kind() == ErrorKind::AlreadyExists => {
-                let _ = std::fs::remove_file(&tmp_path);
-                Ok(false)
-            }
-            Err(_) => {
-                // Fallback for filesystems without hard-link support: exclusive file creation.
-                let _ = std::fs::remove_file(&tmp_path);
-                match OpenOptions::new().write(true).create_new(true).open(&lock_path) {
-                    Ok(mut file) => {
-                        if let Err(write_err) = file.write_all(lease_bytes).and_then(|()| file.sync_all()) {
-                            let _ = std::fs::remove_file(&lock_path);
-                            return Err(FormatError::from(write_err));
-                        }
-                        sync_directory_best_effort(&self.dir);
-                        Ok(true)
-                    }
-                    Err(create_err) if create_err.kind() == ErrorKind::AlreadyExists => Ok(false),
-                    Err(create_err) => Err(FormatError::from(create_err)),
-                }
-            }
+            Err(create_err) if create_err.kind() == ErrorKind::AlreadyExists => Ok(false),
+            Err(create_err) => Err(FormatError::from(create_err)),
         }
     }
 }
@@ -417,6 +423,7 @@ fn sync_directory_best_effort(dir: &Path) {
 #[cfg(not(target_arch = "wasm32"))]
 impl JournalBackend for DirectoryJournalBackend {
     fn acquire_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<Option<JournalLockLease>, FormatError> {
+        lease.validate_version()?;
         let lease_bytes = serde_json::to_vec(lease)?;
         if self.try_create_lock_exclusively(&lease_bytes)? {
             return Ok(None);
@@ -456,6 +463,7 @@ impl JournalBackend for DirectoryJournalBackend {
     }
 
     fn renew_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<(), FormatError> {
+        lease.validate_version()?;
         let Some(existing) = self.read_lease()? else {
             return Err(FormatError::Io(String::from("cannot renew journal lock: lockfile missing")));
         };
@@ -465,7 +473,8 @@ impl JournalBackend for DirectoryJournalBackend {
         let mut refreshed = lease.clone();
         refreshed.acquired_epoch_ms = now_epoch_ms;
         let bytes = serde_json::to_vec(&refreshed)?;
-        self.atomic_write_file(LOCKFILE_NAME, &bytes)
+        lumencraft_platform::fs::write_atomic(&self.lock_path(), &bytes)?;
+        Ok(())
     }
 
     fn release_lease(&mut self, owner_id: &str) -> Result<(), FormatError> {
@@ -487,17 +496,15 @@ impl JournalBackend for DirectoryJournalBackend {
 
     fn read_lease(&self) -> Result<Option<JournalLockLease>, FormatError> {
         match std::fs::read(self.lock_path()) {
-            Ok(bytes) => {
-                let parsed: JournalLockLease = serde_json::from_slice(&bytes)?;
-                Ok(Some(parsed))
-            }
+            Ok(bytes) => Ok(Some(JournalLockLease::from_json_bytes(&bytes)?)),
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(None),
             Err(err) => Err(FormatError::from(err)),
         }
     }
 
     fn write_snapshot_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
-        self.atomic_write_file(SNAPSHOT_FILE_NAME, bytes)
+        lumencraft_platform::fs::write_atomic(&self.snapshot_path(), bytes)?;
+        Ok(())
     }
 
     fn read_snapshot(&self) -> Result<Option<Vec<u8>>, FormatError> {
@@ -527,7 +534,8 @@ impl JournalBackend for DirectoryJournalBackend {
     }
 
     fn replace_journal_bytes_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
-        self.atomic_write_file(JOURNAL_FILE_NAME, bytes)
+        lumencraft_platform::fs::write_atomic(&self.journal_path(), bytes)?;
+        Ok(())
     }
 
     fn clear_journal(&mut self) -> Result<(), FormatError> {
@@ -714,7 +722,10 @@ fn parse_journal_line(line_no: usize, raw_line: &[u8], is_tail: bool) -> Result<
     };
 
     match serde_json::from_str::<JournalOpRecord>(text) {
-        Ok(record) => Ok(Some(record)),
+        Ok(record) => {
+            record.validate_version()?;
+            Ok(Some(record))
+        }
         Err(_) if is_tail => Ok(None),
         Err(err) => Err(FormatError::Json(format!("malformed entry in {JOURNAL_FILE_NAME} line {line_no}: {err}"))),
     }

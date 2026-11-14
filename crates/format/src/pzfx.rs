@@ -125,9 +125,25 @@ fn import_table_sections(
     table_nodes.extend(root.children_named("Table"));
 
     let primary_info = doc.info_sheets.first().map(|s| s.id.clone());
-    let mut remaining_cells = MAX_IMPORT_CELLS;
+    let mut total_cells: usize = 0;
     for (idx, table_el) in table_nodes.iter().enumerate() {
-        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings, &mut remaining_cells)?;
+        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings, total_cells)?;
+        let actual_cells = ds.archetype.allocated_cell_slots();
+        let next_total = total_cells.checked_add(actual_cells).ok_or_else(|| FormatError::XmlParse {
+            offset: 0,
+            reason: format!("table `{}` cell allocation overflows budget cap ({MAX_IMPORT_CELLS})", ds.id),
+        })?;
+        if next_total > MAX_IMPORT_CELLS {
+            let remaining = MAX_IMPORT_CELLS.saturating_sub(total_cells);
+            return Err(FormatError::XmlParse {
+                offset: 0,
+                reason: format!(
+                    "table `{}` cell allocation ({actual_cells}) exceeds remaining import budget ({remaining}, cap {MAX_IMPORT_CELLS})",
+                    ds.id
+                ),
+            });
+        }
+        total_cells = next_total;
         if ds.info_sheet_id.is_none() {
             ds.info_sheet_id = primary_info.clone();
         }
@@ -141,7 +157,7 @@ fn parse_table_element(
     one_based_idx: usize,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
-    remaining_cells: &mut usize,
+    used_cells: usize,
 ) -> Result<DataSheet, FormatError> {
     let id = allocate_unique_id(table_el.attr("ID"), "data", one_based_idx, used_ids);
     let raw_title = table_el
@@ -200,8 +216,9 @@ fn parse_table_element(
     let row_count = row_titles.len().max(max_x_rows).max(max_y_rows);
     validate_rows(row_count)?;
 
+    let remaining_cells = MAX_IMPORT_CELLS.saturating_sub(used_cells);
     let table_cells = estimate_table_cells(kind, subcolumn_mode, table_el, &x_cols, &parsed_y, row_count)?;
-    if table_cells > *remaining_cells {
+    if table_cells > remaining_cells {
         return Err(FormatError::XmlParse {
             offset: 0,
             reason: format!(
@@ -209,7 +226,6 @@ fn parse_table_element(
             ),
         });
     }
-    *remaining_cells -= table_cells;
 
     let mut padded_row_titles = row_titles;
     padded_row_titles.resize(row_count, String::new());
@@ -591,4 +607,91 @@ fn clamp_title(raw: &str, source: &str, warnings: &mut Vec<ImportWarning>) -> St
     }
     warnings.push(ImportWarning::new(ImportWarningKind::TruncatedTitle, source, format!("title exceeded {MAX_TITLE_BYTES} bytes and was truncated")));
     raw[..end].to_owned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn estimate_table_cells_matches_allocated_cell_slots_across_all_archetypes() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<PrismFile>
+  <TableSequence>
+    <Table ID="xy-sd" TableType="XY" XEVFormat="SD" YFormat="replicates" Replicates="2">
+      <XColumn><Subcolumn><d>1</d><d>2</d><d>3</d></Subcolumn><Subcolumn><d>0.1</d></Subcolumn><Subcolumn><d>3</d></Subcolumn></XColumn>
+      <YColumn><Subcolumn><d>10</d></Subcolumn><Subcolumn><d>11</d></Subcolumn></YColumn>
+      <YColumn><Subcolumn><d>20</d></Subcolumn><Subcolumn><d>21</d></Subcolumn></YColumn>
+    </Table>
+    <Table ID="xy-seq" TableType="XY" XFormat="sequence" X0="0" DeltaX="5">
+      <RowTitlesColumn><Subcolumn><d>r1</d><d>r2</d><d>r3</d><d>r4</d></Subcolumn></RowTitlesColumn>
+      <YColumn><Subcolumn><d>1</d><d>2</d></Subcolumn></YColumn>
+    </Table>
+    <Table ID="surv" TableType="Survival">
+      <XColumn><Subcolumn><d>5</d><d>10</d><d>15</d></Subcolumn></XColumn>
+      <YColumn><Subcolumn><d>1</d><d>0</d><d>1</d></Subcolumn></YColumn>
+      <YColumn><Subcolumn><d>0</d><d>1</d><d>0</d></Subcolumn></YColumn>
+    </Table>
+    <Table ID="col" TableType="OneWay" YFormat="SD">
+      <YColumn><Subcolumn><d>1</d></Subcolumn><Subcolumn><d>0.2</d></Subcolumn><Subcolumn><d>5</d></Subcolumn></YColumn>
+    </Table>
+    <Table ID="grp" TableType="TwoWay" Replicates="3">
+      <YColumn><Subcolumn><d>1</d><d>2</d></Subcolumn><Subcolumn><d>3</d><d>4</d></Subcolumn><Subcolumn><d>5</d><d>6</d></Subcolumn></YColumn>
+    </Table>
+    <Table ID="cont" TableType="Contingency">
+      <YColumn><Subcolumn><d>10</d><d>20</d></Subcolumn></YColumn>
+      <YColumn><Subcolumn><d>5</d><d>15</d></Subcolumn></YColumn>
+    </Table>
+    <Table ID="pow" TableType="PartsOfWhole">
+      <YColumn><Subcolumn><d>25</d><d>75</d></Subcolumn></YColumn>
+    </Table>
+    <Table ID="mv" TableType="MultipleVariables">
+      <YColumn><Subcolumn><d>A</d><d>B</d><d>C</d></Subcolumn></YColumn>
+      <YColumn><Subcolumn><d>1</d><d>2</d><d>3</d></Subcolumn></YColumn>
+    </Table>
+    <Table ID="nest" TableType="Nested">
+      <YColumn><Subcolumn><d>1</d><d>2</d></Subcolumn><Subcolumn><d>3</d><d>4</d></Subcolumn></YColumn>
+      <YColumn><Subcolumn><d>5</d><d>6</d></Subcolumn></YColumn>
+    </Table>
+  </TableSequence>
+</PrismFile>"#;
+
+        let root = parse_xml(xml).unwrap();
+        let seq = root.first_child("TableSequence").unwrap();
+        let mut total_slots = 0_usize;
+        for table_el in seq.children_named("Table") {
+            let kind = resolve_table_kind(table_el.attr("TableType"), "t", &mut Vec::new());
+            let reps = table_el.attr("Replicates").and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(1);
+            let mode = resolve_subcolumn_mode(kind, table_el.attr("YFormat"), reps, "t", &mut Vec::new()).unwrap();
+            let row_titles = table_el
+                .first_child("RowTitlesColumn")
+                .map(|el| extract_column_subcolumns(el).into_iter().next().unwrap_or_default())
+                .unwrap_or_default();
+            let x_cols = table_el.first_child("XColumn").map(extract_column_subcolumns).unwrap_or_default();
+            let parsed_y: Vec<(String, Vec<Vec<Cell>>)> =
+                table_el.children_named("YColumn").enumerate().map(|(i, y_el)| (default_column_label(i), extract_column_subcolumns(y_el))).collect();
+            let max_y = parsed_y.iter().flat_map(|(_, s)| s.iter().map(Vec::len)).max().unwrap_or(0);
+            let max_x = x_cols.iter().map(Vec::len).max().unwrap_or(0);
+            let rows = row_titles.len().max(max_x).max(max_y);
+            let est = estimate_table_cells(kind, mode, table_el, &x_cols, &parsed_y, rows).unwrap();
+            let arch = build_table_archetype(kind, mode, table_el, "X", &x_cols, &parsed_y, vec![String::new(); rows], false, rows).unwrap();
+            assert_eq!(est, arch.allocated_cell_slots(), "estimate mismatch for {kind:?}");
+            total_slots += arch.allocated_cell_slots();
+        }
+        // xy-sd: 3*(3+4)=21, xy-seq: 4*(0+1)=4, surv: 3*(1+2)=9, col: 1*3=3, grp: 2*3=6, cont: 2*2=4, pow: 2*1=2, mv: 3*2=6, nest: 2*(2+1)=6
+        assert_eq!(total_slots, 61);
+    }
+
+    #[test]
+    fn estimate_table_cells_rejects_usize_overflow_cleanly() {
+        let root = parse_xml("<Table TableType=\"XY\" Replicates=\"512\"/>").unwrap();
+        let parsed_y = vec![(String::from("A"), vec![vec![]]); 1_024];
+        // On 64-bit, `usize::MAX` rows overflows checked_mul cleanly without panic.
+        let err = estimate_table_cells(TableKind::Xy, SubcolumnMode::RawReplicates(512), &root, &[], &parsed_y, usize::MAX).unwrap_err();
+        assert!(matches!(err, FormatError::XmlParse { offset: 0, .. }));
+
+        let surv_root = parse_xml("<Table TableType=\"Survival\"/>").unwrap();
+        let surv_err = estimate_table_cells(TableKind::Survival, SubcolumnMode::Single, &surv_root, &[], &parsed_y, usize::MAX).unwrap_err();
+        assert!(matches!(surv_err, FormatError::XmlParse { offset: 0, .. }));
+    }
 }
