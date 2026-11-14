@@ -9,9 +9,10 @@ use lumencraft_format::{
     ArchiveKind, CsvOptions, ImportReport, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv,
     import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes, open_archive_bytes, save_project_bytes,
 };
-use lumencraft_pdf::{PdfExportOptions, render_pdf};
+use lumencraft_pdf::{PdfExportOptions, PdfVersion, render_pdf};
 use lumencraft_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
 use lumencraft_svg::{SvgExportOptions, render_svg};
+use lumencraft_text::parse_truetype_font_info;
 use serde_json::json;
 
 use crate::error::CliError;
@@ -69,6 +70,8 @@ pub struct ExportRequest<'a> {
     pub dpi: Option<u16>,
     pub pretty: bool,
     pub tab_index: Option<usize>,
+    pub pdf_version: PdfVersion,
+    pub embedded_truetype_font: Option<&'a [u8]>,
 }
 
 /// Summary metadata produced after writing an export artifact.
@@ -85,6 +88,8 @@ struct ConvertArgs {
     output_path: String,
     sheet: Option<String>,
     dpi: Option<u16>,
+    pdf_version: PdfVersion,
+    ttf_font: Option<String>,
     json: bool,
 }
 
@@ -98,11 +103,12 @@ enum TabularTarget<'a> {
     Result(&'a ResultSheet),
 }
 
-/// Execute `lumencraft-cli convert <in> <out> [--sheet <id>] [--dpi <u16>] [--json]`.
+/// Execute `lumencraft-cli convert <in> <out> [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]`.
 pub fn run_convert(args: &[String]) -> Result<(), CliError> {
     let parsed = parse_convert_args(args)?;
     let in_path = Path::new(&parsed.input_path);
     let out_path = Path::new(&parsed.output_path);
+    let font_bytes = parsed.ttf_font.as_deref().map(Path::new).map(load_validated_ttf_font).transpose()?;
 
     let bytes = fs::read(in_path).map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", in_path.display())))?;
     let loaded = load_project_from_bytes(in_path, &bytes, true)?;
@@ -116,19 +122,36 @@ pub fn run_convert(args: &[String]) -> Result<(), CliError> {
         dpi: parsed.dpi,
         pretty: true,
         tab_index: None,
+        pdf_version: parsed.pdf_version,
+        embedded_truetype_font: font_bytes.as_deref(),
     })?;
 
     if parsed.json {
-        let payload = json!({
-            "ok": true,
-            "input": parsed.input_path,
-            "input_format": loaded.format_tag,
-            "output": summary.out_path,
-            "format": summary.format,
-            "sheet_id": summary.sheet_id,
-            "bytes_written": summary.bytes_written,
-            "warnings": loaded.warnings,
-        });
+        let payload = if format == ExportFormat::Pdf {
+            json!({
+                "ok": true,
+                "input": parsed.input_path,
+                "input_format": loaded.format_tag,
+                "output": summary.out_path,
+                "format": summary.format,
+                "sheet_id": summary.sheet_id,
+                "bytes_written": summary.bytes_written,
+                "pdf_version": pdf_version_str(parsed.pdf_version),
+                "ttf_font_embedded": font_bytes.is_some(),
+                "warnings": loaded.warnings,
+            })
+        } else {
+            json!({
+                "ok": true,
+                "input": parsed.input_path,
+                "input_format": loaded.format_tag,
+                "output": summary.out_path,
+                "format": summary.format,
+                "sheet_id": summary.sheet_id,
+                "bytes_written": summary.bytes_written,
+                "warnings": loaded.warnings,
+            })
+        };
         let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
         println!("{text}");
     } else {
@@ -138,6 +161,37 @@ pub fn run_convert(args: &[String]) -> Result<(), CliError> {
         );
     }
     Ok(())
+}
+
+/// Parse a PDF specification version string (`1.4` or `1.7`).
+pub fn parse_pdf_version(raw: &str) -> Result<PdfVersion, CliError> {
+    match raw.trim() {
+        "1.4" => Ok(PdfVersion::Pdf14),
+        "1.7" => Ok(PdfVersion::Pdf17),
+        other => Err(CliError::Usage(format!("invalid --pdf-version `{other}` (expected `1.4` or `1.7`)"))),
+    }
+}
+
+/// Canonical string representation of a [`PdfVersion`].
+#[must_use]
+pub const fn pdf_version_str(version: PdfVersion) -> &'static str {
+    match version {
+        PdfVersion::Pdf14 => "1.4",
+        PdfVersion::Pdf17 => "1.7",
+    }
+}
+
+/// Read and validate TrueType SFNT bytes from `path` via [`parse_truetype_font_info`].
+pub fn load_validated_ttf_font(path: &Path) -> Result<Vec<u8>, CliError> {
+    let bytes = fs::read(path).map_err(|err| CliError::Runtime(format!("failed to read TrueType font `{}`: {err}", path.display())))?;
+    let _info = parse_truetype_font_info(&bytes).map_err(|err| CliError::Runtime(format!("invalid TrueType font `{}`: {err}", path.display())))?;
+    if !matches!(bytes.get(0..4), Some([0x00, 0x01, 0x00, 0x00] | b"true")) {
+        return Err(CliError::Runtime(format!(
+            "unsupported SFNT font `{}`: expected TrueType outlines (`0x00010000` or `true`), not CFF/OTTO",
+            path.display()
+        )));
+    }
+    Ok(bytes)
 }
 
 /// Parse an export format keyword or file extension.
@@ -197,7 +251,12 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
         }
         ExportFormat::Pdf => {
             let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-            let pdf = render_pdf(&scene, &PdfExportOptions::default())?;
+            let pdf_opts = PdfExportOptions {
+                version: req.pdf_version,
+                embedded_truetype_font: req.embedded_truetype_font.map(<[u8]>::to_vec),
+                ..PdfExportOptions::default()
+            };
+            let pdf = render_pdf(&scene, &pdf_opts)?;
             (pdf, Some(id))
         }
         ExportFormat::Png => {
@@ -430,6 +489,8 @@ fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, CliError> {
     let mut positionals = Vec::new();
     let mut sheet = None;
     let mut dpi = None;
+    let mut pdf_version = PdfVersion::Pdf17;
+    let mut ttf_font = None;
     let mut json = false;
     let mut idx = 0;
 
@@ -438,22 +499,17 @@ fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, CliError> {
         if arg == "--json" {
             json = true;
             idx += 1;
-        } else if arg == "--sheet" {
-            idx += 1;
-            let val = args.get(idx).ok_or_else(|| CliError::Usage(String::from("--sheet requires a sheet ID or title")))?;
-            sheet = Some(val.clone());
-            idx += 1;
-        } else if let Some(val) = arg.strip_prefix("--sheet=") {
-            sheet = Some(val.to_owned());
-            idx += 1;
-        } else if arg == "--dpi" {
-            idx += 1;
-            let val = args.get(idx).ok_or_else(|| CliError::Usage(String::from("--dpi requires an integer >= 1")))?;
-            dpi = Some(parse_dpi_value(val)?);
-            idx += 1;
-        } else if let Some(val) = arg.strip_prefix("--dpi=") {
-            dpi = Some(parse_dpi_value(val)?);
-            idx += 1;
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--sheet", "--sheet requires a sheet ID or title")? {
+            sheet = Some(val);
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--dpi", "--dpi requires an integer >= 1")? {
+            dpi = Some(parse_dpi_value(&val)?);
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--pdf-version", "--pdf-version requires `1.4` or `1.7`")? {
+            pdf_version = parse_pdf_version(&val)?;
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--ttf-font", "--ttf-font requires a TrueType font file path")? {
+            if val.trim().is_empty() {
+                return Err(CliError::Usage(String::from("--ttf-font requires a non-empty font file path")));
+            }
+            ttf_font = Some(val);
         } else if arg.starts_with('-') {
             return Err(CliError::Usage(format!("unknown flag `{arg}` for `convert`")));
         } else {
@@ -463,7 +519,9 @@ fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, CliError> {
     }
 
     if positionals.len() != 2 {
-        return Err(CliError::Usage(String::from("usage: lumencraft-cli convert <in> <out> [--sheet <id>] [--dpi <u16>] [--json]")));
+        return Err(CliError::Usage(String::from(
+            "usage: lumencraft-cli convert <in> <out> [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]",
+        )));
     }
 
     let Some(output_path) = positionals.pop() else {
@@ -473,7 +531,22 @@ fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, CliError> {
         return Err(CliError::Usage(String::from("missing <in> argument")));
     };
 
-    Ok(ConvertArgs { input_path, output_path, sheet, dpi, json })
+    Ok(ConvertArgs { input_path, output_path, sheet, dpi, pdf_version, ttf_font, json })
+}
+
+fn consume_flag_opt(args: &[String], idx: &mut usize, flag: &str, missing_msg: &str) -> Result<Option<String>, CliError> {
+    let arg = &args[*idx];
+    if arg == flag {
+        *idx += 1;
+        let val = args.get(*idx).ok_or_else(|| CliError::Usage(String::from(missing_msg)))?;
+        *idx += 1;
+        return Ok(Some(val.clone()));
+    }
+    if let Some(rest) = arg.strip_prefix(flag).and_then(|s| s.strip_prefix('=')) {
+        *idx += 1;
+        return Ok(Some(rest.to_owned()));
+    }
+    Ok(None)
 }
 
 fn parse_dpi_value(raw: &str) -> Result<u16, CliError> {
@@ -482,4 +555,38 @@ fn parse_dpi_value(raw: &str) -> Result<u16, CliError> {
         return Err(CliError::Usage(String::from("--dpi must be >= 1")));
     }
     Ok(dpi)
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_pdf::PdfVersion;
+
+    use super::{parse_convert_args, parse_pdf_version};
+    use crate::error::CliError;
+
+    #[test]
+    fn parse_pdf_version_accepts_1_4_and_1_7_only() {
+        assert_eq!(parse_pdf_version("1.4").unwrap(), PdfVersion::Pdf14);
+        assert_eq!(parse_pdf_version("1.7").unwrap(), PdfVersion::Pdf17);
+        assert_eq!(parse_pdf_version(" 1.4 ").unwrap(), PdfVersion::Pdf14);
+        assert!(matches!(parse_pdf_version("1.5"), Err(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn parse_convert_args_handles_pdf_version_and_ttf_font_flags() {
+        let defaults = parse_convert_args(&[String::from("in.lumencraft"), String::from("out.pdf")]).unwrap();
+        assert_eq!(defaults.pdf_version, PdfVersion::Pdf17);
+        assert!(defaults.ttf_font.is_none());
+
+        let custom = parse_convert_args(&[
+            String::from("in.lumencraft"),
+            String::from("out.pdf"),
+            String::from("--pdf-version"),
+            String::from("1.4"),
+            String::from("--ttf-font=fonts/sans.ttf"),
+        ])
+        .unwrap();
+        assert_eq!(custom.pdf_version, PdfVersion::Pdf14);
+        assert_eq!(custom.ttf_font.as_deref(), Some("fonts/sans.ttf"));
+    }
 }

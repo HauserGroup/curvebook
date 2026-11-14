@@ -7,10 +7,12 @@ use std::path::{Path, PathBuf};
 use lumencraft_doc::ProjectDocument;
 use lumencraft_engine::Session;
 use lumencraft_format::instantiate_template_bytes;
+use lumencraft_pdf::PdfVersion;
 use serde_json::{Map, Value, json};
 
 use crate::cmd_convert::{
-    ExportFormat, ExportRequest, detect_export_format_from_path, export_from_document, load_project_from_bytes, parse_export_format,
+    ExportFormat, ExportRequest, detect_export_format_from_path, export_from_document, load_project_from_bytes, load_validated_ttf_font,
+    parse_export_format, parse_pdf_version,
 };
 use crate::error::CliError;
 use crate::sandbox::{PathResolver, WorkdirGuard};
@@ -47,6 +49,8 @@ struct BatchExportSpec {
     dpi: Option<u16>,
     pretty: bool,
     tab_index: Option<usize>,
+    pdf_version: PdfVersion,
+    ttf_font_path: Option<PathBuf>,
 }
 
 struct ParsedManifest {
@@ -102,6 +106,7 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
 
     let mut export_summaries = Vec::with_capacity(manifest.exports.len());
     for exp in &manifest.exports {
+        let ttf_font_bytes = exp.ttf_font_path.as_deref().map(load_validated_ttf_font).transpose()?;
         let summary = export_from_document(&ExportRequest {
             doc: session.document(),
             out_path: &exp.out_path,
@@ -110,6 +115,8 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
             dpi: exp.dpi,
             pretty: exp.pretty,
             tab_index: exp.tab_index,
+            pdf_version: exp.pdf_version,
+            embedded_truetype_font: ttf_font_bytes.as_deref(),
         })?;
         export_summaries.push(json!({
             "out": summary.out_path,
@@ -298,49 +305,82 @@ fn parse_manifest_exports(val: Option<&Value>, resolver: &PathResolver) -> Resul
     };
     let mut out = Vec::with_capacity(arr.len());
     for (idx, item) in arr.iter().enumerate() {
-        let Some(obj) = item.as_object() else {
-            return Err(CliError::Schema(format!("manifest `exports[{idx}]` must be an object")));
-        };
-        let raw_out = opt_obj_str(obj, &["out", "path"])
-            .ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}]` requires string `out` (or `path`)")))?;
-        let out_path = resolver.resolve(raw_out)?;
-        let format = match obj.get("format") {
-            Some(Value::String(s)) => parse_export_format(s).map_err(|e| CliError::Schema(e.to_string()))?,
-            None | Some(Value::Null) => detect_export_format_from_path(&out_path).map_err(|e| CliError::Schema(e.to_string()))?,
-            Some(_) => return Err(CliError::Schema(format!("manifest `exports[{idx}].format` must be a string"))),
-        };
-        let dpi = match obj.get("dpi") {
-            None | Some(Value::Null) => None,
-            Some(Value::Number(n)) => {
-                let raw_u64 = n.as_u64().ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].dpi` must be a positive integer")))?;
-                let val_u16 = u16::try_from(raw_u64)
-                    .ok()
-                    .filter(|&d| d > 0)
-                    .ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].dpi` out of range")))?;
-                Some(val_u16)
-            }
-            Some(_) => return Err(CliError::Schema(format!("manifest `exports[{idx}].dpi` must be an integer"))),
-        };
-        let pretty = obj.get("pretty").and_then(Value::as_bool).unwrap_or(true);
-        let tab_index = match obj.get("tab_index").or_else(|| obj.get("tabIndex")) {
-            None | Some(Value::Null) => None,
-            Some(Value::Number(n)) => {
-                let raw_u64 = n.as_u64().ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].tab_index` must be an integer")))?;
-                let idx_val = usize::try_from(raw_u64).map_err(|_| CliError::Schema(format!("manifest `exports[{idx}].tab_index` out of bounds")))?;
-                Some(idx_val)
-            }
-            Some(_) => return Err(CliError::Schema(format!("manifest `exports[{idx}].tab_index` must be an integer"))),
-        };
-        out.push(BatchExportSpec {
-            out_path,
-            format,
-            sheet: opt_obj_str(obj, &["sheet", "sheet_id", "sheetId"]).map(str::to_owned),
-            dpi,
-            pretty,
-            tab_index,
-        });
+        out.push(parse_single_export_entry(idx, item, resolver)?);
     }
     Ok(out)
+}
+
+fn parse_single_export_entry(idx: usize, item: &Value, resolver: &PathResolver) -> Result<BatchExportSpec, CliError> {
+    let Some(obj) = item.as_object() else {
+        return Err(CliError::Schema(format!("manifest `exports[{idx}]` must be an object")));
+    };
+    let raw_out =
+        opt_obj_str(obj, &["out", "path"]).ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}]` requires string `out` (or `path`)")))?;
+    let out_path = resolver.resolve(raw_out)?;
+    let format = match obj.get("format") {
+        Some(Value::String(s)) => parse_export_format(s).map_err(|e| CliError::Schema(e.to_string()))?,
+        None | Some(Value::Null) => detect_export_format_from_path(&out_path).map_err(|e| CliError::Schema(e.to_string()))?,
+        Some(_) => return Err(CliError::Schema(format!("manifest `exports[{idx}].format` must be a string"))),
+    };
+    let dpi = parse_export_dpi(idx, obj.get("dpi"))?;
+    let pretty = obj.get("pretty").and_then(Value::as_bool).unwrap_or(true);
+    let tab_index = parse_export_tab_index(idx, obj.get("tab_index").or_else(|| obj.get("tabIndex")))?;
+    let pdf_version = parse_export_pdf_version(idx, obj.get("pdf_version").or_else(|| obj.get("pdfVersion")))?;
+    let ttf_font_path = parse_export_ttf_font(idx, obj.get("ttf_font").or_else(|| obj.get("ttfFont")), resolver)?;
+
+    Ok(BatchExportSpec {
+        out_path,
+        format,
+        sheet: opt_obj_str(obj, &["sheet", "sheet_id", "sheetId"]).map(str::to_owned),
+        dpi,
+        pretty,
+        tab_index,
+        pdf_version,
+        ttf_font_path,
+    })
+}
+
+fn parse_export_dpi(idx: usize, val: Option<&Value>) -> Result<Option<u16>, CliError> {
+    match val {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => {
+            let raw_u64 = n.as_u64().ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].dpi` must be a positive integer")))?;
+            let val_u16 = u16::try_from(raw_u64)
+                .ok()
+                .filter(|&d| d > 0)
+                .ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].dpi` out of range")))?;
+            Ok(Some(val_u16))
+        }
+        Some(_) => Err(CliError::Schema(format!("manifest `exports[{idx}].dpi` must be an integer"))),
+    }
+}
+
+fn parse_export_tab_index(idx: usize, val: Option<&Value>) -> Result<Option<usize>, CliError> {
+    match val {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => {
+            let raw_u64 = n.as_u64().ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}].tab_index` must be an integer")))?;
+            let idx_val = usize::try_from(raw_u64).map_err(|_| CliError::Schema(format!("manifest `exports[{idx}].tab_index` out of bounds")))?;
+            Ok(Some(idx_val))
+        }
+        Some(_) => Err(CliError::Schema(format!("manifest `exports[{idx}].tab_index` must be an integer"))),
+    }
+}
+
+fn parse_export_pdf_version(idx: usize, val: Option<&Value>) -> Result<PdfVersion, CliError> {
+    match val {
+        None | Some(Value::Null) => Ok(PdfVersion::Pdf17),
+        Some(Value::String(s)) => parse_pdf_version(s).map_err(|e| CliError::Schema(e.to_string())),
+        Some(_) => Err(CliError::Schema(format!("manifest `exports[{idx}].pdf_version` must be a string (`1.4` or `1.7`)"))),
+    }
+}
+
+fn parse_export_ttf_font(idx: usize, val: Option<&Value>, resolver: &PathResolver) -> Result<Option<PathBuf>, CliError> {
+    match val {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(raw)) => Ok(Some(resolver.resolve(raw)?)),
+        Some(_) => Err(CliError::Schema(format!("manifest `exports[{idx}].ttf_font` must be a string path"))),
+    }
 }
 
 fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<Session, CliError> {
@@ -511,4 +551,40 @@ fn parse_runner_args(args: &[String], usage: &str) -> Result<RunnerArgs, CliErro
     };
 
     Ok(RunnerArgs { source_path, workdir, json })
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_pdf::PdfVersion;
+    use serde_json::json;
+
+    use super::parse_manifest_exports;
+    use crate::error::CliError;
+    use crate::sandbox::{PathResolver, WorkdirGuard};
+
+    #[test]
+    fn manifest_exports_parse_pdf_version_and_enforce_workdir_on_ttf_font() {
+        let dir = std::env::temp_dir().join(format!("lc_batch_parse_{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("fonts")).unwrap();
+        let guard = WorkdirGuard::new(&dir).unwrap();
+        let resolver = PathResolver::Sandboxed(guard);
+
+        let valid = json!([
+            { "format": "pdf", "out": "out/a.pdf", "pdf_version": "1.4", "ttf_font": "fonts/custom.ttf" },
+            { "format": "pdf", "out": "out/b.pdf" }
+        ]);
+        let parsed = parse_manifest_exports(Some(&valid), &resolver).unwrap();
+        assert_eq!(parsed.len(), 2);
+        assert_eq!(parsed[0].pdf_version, PdfVersion::Pdf14);
+        assert!(parsed[0].ttf_font_path.as_ref().is_some_and(|p| p.ends_with("fonts/custom.ttf")));
+        assert_eq!(parsed[1].pdf_version, PdfVersion::Pdf17);
+        assert!(parsed[1].ttf_font_path.is_none());
+
+        let escape = json!([
+            { "format": "pdf", "out": "out/esc.pdf", "ttf_font": "../outside.ttf" }
+        ]);
+        assert!(matches!(parse_manifest_exports(Some(&escape), &resolver), Err(CliError::PathEscape(_))));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

@@ -37,6 +37,10 @@ const PATH_PARAM_KEYS: &[&str] = &[
     "projectPath",
     "csv_path",
     "csvPath",
+    "ttf_font",
+    "ttfFont",
+    "font_path",
+    "fontPath",
 ];
 
 /// Canonicalized `--workdir` guard rejecting parent traversal (`..`), outside paths, and symlink escapes.

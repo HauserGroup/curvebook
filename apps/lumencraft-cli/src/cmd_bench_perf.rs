@@ -23,6 +23,7 @@ use crate::error::CliError;
 const PERF_MV_ROWS: usize = 100_000;
 const PERF_MV_BUDGET_MS: f64 = 250.0;
 const PERF_BATCH_CURVES: usize = 96;
+const PERF_96_CURVE_BUDGET_MS: f64 = 50.0;
 const PERF_RASTER_DPI: u16 = 300;
 const MAX_RASTER_EDGE_PX: f64 = 16_384.0;
 
@@ -123,8 +124,46 @@ pub fn run_perf(args: &[String]) -> Result<(), CliError> {
     let archive_bench = bench_lumencraft_archive_roundtrip(&batch_doc)?;
     let export_bench = bench_exports(&batch_scene)?;
 
+    let (report, budget_result) = build_perf_report(mv_bench, batch_bench, archive_bench, export_bench);
+    let mv_check = &report["checks"]["mv_100k_calculated_variable"];
+    let curve_check = &report["checks"]["dose_response_96_curves"];
+    let arch_check = &report["checks"]["archive_roundtrip"];
+    let exp_check = &report["checks"]["exports"];
+
+    emit_report(&report, parsed.json, || {
+        println!(
+            "G12 perf results:\n  (a) 100k MV CalcVar: {} ms (budget < {PERF_MV_BUDGET_MS:.0} ms, within_budget={})\n  (b) 96-curve 4PL fit + compile: fit={} ms (budget <= {PERF_96_CURVE_BUDGET_MS:.0} ms, within_budget={}), compile={} ms, total={} ms (total_within_budget={})\n  (c) .lumencraft save/reopen: save={} ms, open={} ms, total={} ms ({} bytes)\n  (d) exports ({} DPI): svg={} ms ({} B), pdf={} ms ({} B), png={} ms ({} B)",
+            mv_check["eval_ms"],
+            mv_check["within_budget"],
+            curve_check["fit_ms"],
+            curve_check["within_budget"],
+            curve_check["compile_ms"],
+            curve_check["total_ms"],
+            curve_check["total_within_budget"],
+            arch_check["save_ms"],
+            arch_check["open_ms"],
+            arch_check["total_ms"],
+            arch_check["archive_bytes"],
+            PERF_RASTER_DPI,
+            exp_check["svg_ms"],
+            exp_check["svg_bytes"],
+            exp_check["pdf_ms"],
+            exp_check["pdf_bytes"],
+            exp_check["png_ms"],
+            exp_check["png_bytes"],
+        );
+    })?;
+
+    budget_result
+}
+
+fn build_perf_report(mv_bench: Value, batch_bench: Value, archive_bench: Value, export_bench: Value) -> (Value, Result<(), CliError>) {
+    let mv_within = mv_bench["within_budget"].as_bool().unwrap_or(false);
+    let curve_within = batch_bench["within_budget"].as_bool().unwrap_or(false);
+    let all_within_budget = mv_within && curve_within;
+
     let report = json!({
-        "ok": true,
+        "ok": all_within_budget,
         "checks": {
             "mv_100k_calculated_variable": mv_bench,
             "dose_response_96_curves": batch_bench,
@@ -133,27 +172,15 @@ pub fn run_perf(args: &[String]) -> Result<(), CliError> {
         }
     });
 
-    emit_report(&report, parsed.json, || {
-        println!(
-            "G12 perf results:\n  (a) 100k MV CalcVar: {} ms (budget < {PERF_MV_BUDGET_MS:.0} ms, within_budget={})\n  (b) 96-curve 4PL fit + compile: fit={} ms, compile={} ms, total={} ms\n  (c) .lumencraft save/reopen: save={} ms, open={} ms, total={} ms ({} bytes)\n  (d) exports ({} DPI): svg={} ms ({} B), pdf={} ms ({} B), png={} ms ({} B)",
-            mv_bench["eval_ms"],
-            mv_bench["within_budget"],
-            batch_bench["fit_ms"],
-            batch_bench["compile_ms"],
-            batch_bench["total_ms"],
-            archive_bench["save_ms"],
-            archive_bench["open_ms"],
-            archive_bench["total_ms"],
-            archive_bench["archive_bytes"],
-            PERF_RASTER_DPI,
-            export_bench["svg_ms"],
-            export_bench["svg_bytes"],
-            export_bench["pdf_ms"],
-            export_bench["pdf_bytes"],
-            export_bench["png_ms"],
-            export_bench["png_bytes"],
-        );
-    })
+    let status = if all_within_budget {
+        Ok(())
+    } else {
+        Err(CliError::Runtime(format!(
+            "G12 performance budget exceeded (mv_100k within_budget={mv_within}, dose_response_96_curves within_budget={curve_within})"
+        )))
+    };
+
+    (report, status)
 }
 
 fn bench_mv_100k_calculated_variable() -> Result<Value, CliError> {
@@ -265,12 +292,18 @@ fn bench_96_curve_dose_response() -> Result<(Value, ProjectDocument, ChartScene)
     let t_compile = Instant::now();
     let scene = compile_graph(&fitted_doc.graph_sheets[0], &fitted_doc)?;
     let compile_ms = elapsed_ms(t_compile);
+    let total_ms = ((fit_ms + compile_ms) * 1_000.0).round() / 1_000.0;
+    let fit_within_budget = fit_ms <= PERF_96_CURVE_BUDGET_MS;
+    let total_within_budget = total_ms <= PERF_96_CURVE_BUDGET_MS;
 
     let summary = json!({
         "curves": fitted_curves,
         "fit_ms": fit_ms,
         "compile_ms": compile_ms,
-        "total_ms": fit_ms + compile_ms,
+        "total_ms": total_ms,
+        "budget_ms": PERF_96_CURVE_BUDGET_MS,
+        "within_budget": fit_within_budget,
+        "total_within_budget": total_within_budget,
         "primitives": scene.primitives.len(),
     });
     Ok((summary, fitted_doc, scene))
@@ -399,4 +432,33 @@ fn parse_bench_args(args: &[String], require_file: bool, usage: &str) -> Result<
         return Err(CliError::Usage(String::from(usage)));
     }
     Ok(SingleFlagArgs { file, json })
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{PERF_96_CURVE_BUDGET_MS, PERF_MV_BUDGET_MS, build_perf_report};
+    use crate::error::CliError;
+
+    #[test]
+    fn perf_report_fails_when_either_budget_is_exceeded() {
+        let mv_ok = json!({ "rows": 100_000, "eval_ms": 12.0, "budget_ms": PERF_MV_BUDGET_MS, "within_budget": true });
+        let mv_slow = json!({ "rows": 100_000, "eval_ms": 300.0, "budget_ms": PERF_MV_BUDGET_MS, "within_budget": false });
+        let curve_ok = json!({ "curves": 96, "fit_ms": 15.0, "budget_ms": PERF_96_CURVE_BUDGET_MS, "within_budget": true });
+        let curve_slow = json!({ "curves": 96, "fit_ms": 55.0, "budget_ms": PERF_96_CURVE_BUDGET_MS, "within_budget": false });
+        let dummy = json!({});
+
+        let (ok_report, ok_res) = build_perf_report(mv_ok.clone(), curve_ok.clone(), dummy.clone(), dummy.clone());
+        assert_eq!(ok_report["ok"], json!(true));
+        assert!(ok_res.is_ok());
+
+        let (slow_mv_report, slow_mv_res) = build_perf_report(mv_slow, curve_ok, dummy.clone(), dummy.clone());
+        assert_eq!(slow_mv_report["ok"], json!(false));
+        assert!(matches!(slow_mv_res, Err(CliError::Runtime(_))));
+
+        let (slow_curve_report, slow_curve_res) = build_perf_report(mv_ok, curve_slow, dummy.clone(), dummy);
+        assert_eq!(slow_curve_report["ok"], json!(false));
+        assert!(matches!(slow_curve_res, Err(CliError::Runtime(_))));
+    }
 }

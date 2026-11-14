@@ -22,7 +22,7 @@ commands:
                     execute a JSON-lines command stream headlessly
   batch <manifest> [--workdir <dir>] [--json]
                     execute a `lumencraft.batch.v1` JSON manifest headlessly
-  convert <in> <out> [--sheet <id>] [--dpi <u16>] [--json]
+  convert <in> <out> [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]
                     convert archives or export tables and figures (lumencraft, svg, pdf, png, tiff, csv, tsv, json)
   bench <file> [--json]
                     measure parse, recalculation, compilation and export timings
