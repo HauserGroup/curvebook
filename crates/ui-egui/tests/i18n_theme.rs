@@ -1,5 +1,5 @@
 //! Integration tests for `lumencraft-ui-egui` theming, WCAG 2.1 AA contrast, font feature
-//! handling, and 9-locale scientific internationalization & number formatting.
+//! handling, and 16-locale scientific internationalization, RTL layout helpers, and number formatting.
 
 #![allow(clippy::unwrap_used)]
 
@@ -10,8 +10,8 @@ use lumencraft_format::{export_datasheet_to_csv, import_csv_to_datasheet};
 use lumencraft_math::{AxisScale, PValueFormat};
 use lumencraft_palette::Rgba8;
 use lumencraft_ui_egui::i18n::{
-    LOCALES, LocalePreset, all_keys, catalog_len, locale_display_name, missing_translations, normalize_locale, sheet_section_label, table_kind_label,
-    tr, tr_or, try_tr,
+    LOCALES, LocalePreset, all_keys, catalog_len, is_rtl_locale, locale_display_name, mirror_x_for_rtl, missing_translations, normalize_locale,
+    sheet_section_label, table_kind_label, tr, tr_or, try_tr,
 };
 use lumencraft_ui_egui::theme::{
     UiThemeMode, UiThemeSpec, WCAG_AA_TEXT_MIN_RATIO, WCAG_AA_UI_MIN_RATIO, WCAG_AAA_TEXT_MIN_RATIO, bundled_font_entries, install_fonts,
@@ -62,18 +62,7 @@ fn wcag_contrast_meets_aa_for_light_dark_and_high_contrast() {
     assert!(hc.muted_text_contrast() >= WCAG_AAA_TEXT_MIN_RATIO);
 }
 
-#[test]
-fn all_nine_locales_are_complete_and_genuinely_translated() {
-    let expected_locales = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"];
-    assert_eq!(LOCALES, &expected_locales);
-    assert!(catalog_len() >= 100);
-    assert!(missing_translations().is_empty());
-
-    let keys: Vec<&'static str> = all_keys().collect();
-    let unique: HashSet<&'static str> = keys.iter().copied().collect();
-    assert_eq!(keys.len(), unique.len());
-
-    // Verify required domain coverage keys exist across all 9 locales.
+fn verify_required_catalog_coverage() {
     let required_keys = [
         "menu.file",
         "menu.edit",
@@ -131,8 +120,9 @@ fn all_nine_locales_are_complete_and_genuinely_translated() {
             assert!(!sheet_section_label(locale, section).trim().is_empty());
         }
     }
+}
 
-    // Confirm non-English locales provide real translated strings rather than English placeholders.
+fn verify_non_english_translations() {
     let sample_translated_keys = [
         "menu.file",
         "menu.edit",
@@ -155,13 +145,38 @@ fn all_nine_locales_are_complete_and_genuinely_translated() {
             assert_ne!(loc_val, en_val, "expected {locale} translation for `{key}` to differ from English `{en_val}`");
         }
     }
+}
 
-    // Tag normalization and unknown-input resilience.
+fn verify_non_latin_scripts(keys: &[&'static str]) {
+    let has_cyrillic = |s: &str| s.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
+    let has_arabic = |s: &str| s.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c));
+    let has_hebrew = |s: &str| s.chars().any(|c| ('\u{0590}'..='\u{05FF}').contains(&c));
+    assert!(has_cyrillic(locale_display_name("ru")));
+    assert!(has_arabic(locale_display_name("ar")));
+    assert!(has_hebrew(locale_display_name("he")));
+    for &key in keys {
+        if key == "table.xy" {
+            continue;
+        }
+        assert!(has_cyrillic(tr("ru", key)), "expected Cyrillic in ru translation for `{key}`");
+        assert!(has_arabic(tr("ar", key)), "expected Arabic script in ar translation for `{key}`");
+        assert!(has_hebrew(tr("he", key)), "expected Hebrew script in he translation for `{key}`");
+    }
+}
+
+fn verify_locale_tag_normalization() {
     assert_eq!(normalize_locale("EN_us"), "en");
     assert_eq!(normalize_locale("de-DE"), "de");
     assert_eq!(normalize_locale("pt_br"), "pt-BR");
     assert_eq!(normalize_locale("zh-Hans"), "zh-CN");
     assert_eq!(normalize_locale("zh-Hant-HK"), "zh-TW");
+    assert_eq!(normalize_locale("it-IT"), "it");
+    assert_eq!(normalize_locale("nl_NL"), "nl");
+    assert_eq!(normalize_locale("pl-PL"), "pl");
+    assert_eq!(normalize_locale("ru_RU"), "ru");
+    assert_eq!(normalize_locale("tr-TR"), "tr");
+    assert_eq!(normalize_locale("ar-EG"), "ar");
+    assert_eq!(normalize_locale("he_IL"), "he");
     assert_eq!(normalize_locale("zz-Unknown"), "en");
     assert_eq!(tr("zz-Unknown", "menu.file"), "File");
     assert!(try_tr("en", "no.such.key").is_none());
@@ -170,12 +185,31 @@ fn all_nine_locales_are_complete_and_genuinely_translated() {
 }
 
 #[test]
+fn all_sixteen_locales_are_complete_and_genuinely_translated() {
+    let expected_locales = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
+    assert_eq!(LOCALES, &expected_locales);
+    assert_eq!(LOCALES.len(), 16);
+    assert_eq!(catalog_len(), 167);
+    assert!(missing_translations().is_empty());
+
+    let keys: Vec<&'static str> = all_keys().collect();
+    let unique: HashSet<&'static str> = keys.iter().copied().collect();
+    assert_eq!(keys.len(), unique.len());
+
+    verify_required_catalog_coverage();
+    verify_non_english_translations();
+    verify_non_latin_scripts(&keys);
+    verify_locale_tag_normalization();
+}
+
+#[test]
 fn locale_presets_integrate_number_policy_and_csv_options() {
     for &locale in LOCALES {
         let preset = LocalePreset::for_locale(locale);
-        let expect_comma = matches!(locale, "de" | "es" | "fr" | "pt-BR");
+        let expect_comma = matches!(locale, "de" | "es" | "fr" | "pt-BR" | "it" | "nl" | "pl" | "ru" | "tr");
         assert_eq!(preset.decimal_separator, if expect_comma { ',' } else { '.' }, "{locale}");
         assert_eq!(preset.csv_delimiter, if expect_comma { ';' } else { ',' }, "{locale}");
+        assert_eq!(preset.is_rtl(), matches!(locale, "ar" | "he"), "{locale}");
 
         let csv = preset.csv_options();
         assert_eq!(csv.delimiter, preset.csv_delimiter);
@@ -220,6 +254,31 @@ fn locale_presets_integrate_number_policy_and_csv_options() {
     let en_csv_opts = LocalePreset::for_locale("en").csv_options();
     let exported_en = export_datasheet_to_csv(&sheet, &en_csv_opts).unwrap();
     assert!(exported_en.contains("1.5,2.75"), "{exported_en}");
+}
+
+#[test]
+fn rtl_locale_predicates_and_mirroring_work_cleanly() {
+    for rtl_code in ["ar", "he", "fa", "ur", "ar-EG", "ar_SA", "he-IL", "he_IL", "fa-IR", "ur-PK", " ar-EG "] {
+        assert!(is_rtl_locale(rtl_code), "expected RTL predicate true for `{rtl_code}`");
+    }
+    for ltr_code in ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "", "unknown"] {
+        assert!(!is_rtl_locale(ltr_code), "expected RTL predicate false for `{ltr_code}`");
+    }
+
+    assert!(LocalePreset::for_locale("ar").is_rtl());
+    assert!(LocalePreset::for_locale("ar-EG").is_rtl());
+    assert!(LocalePreset::for_locale("he").is_rtl());
+    assert!(LocalePreset::for_locale("he-IL").is_rtl());
+    assert!(LocalePreset::publication("ar").is_rtl());
+    assert!(!LocalePreset::for_locale("it").is_rtl());
+    assert!(!LocalePreset::for_locale("ru").is_rtl());
+
+    assert_eq!(mirror_x_for_rtl(24, 120, 800, false), 24);
+    assert_eq!(mirror_x_for_rtl(24, 120, 800, true), 656);
+    assert_eq!(mirror_x_for_rtl(656, 120, 800, true), 24);
+    assert_eq!(mirror_x_for_rtl(0, 800, 800, true), 0);
+    assert_eq!(mirror_x_for_rtl(750, 100, 800, true), 0);
+    assert_eq!(mirror_x_for_rtl(u32::MAX, 50, 800, true), 0);
 }
 
 #[test]

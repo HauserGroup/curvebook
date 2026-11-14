@@ -4,26 +4,29 @@
 
 use lumencraft_chart::ChartScene;
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BracketLabelMode, BracketStyle, ChecklistItem,
-    ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ConnectingLineStyle, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec,
-    DiagnosticPlotKind, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FramePreset, GlmFamily, GlmSpec, GraphAxisScale,
-    GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet,
-    LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, LinkBorderColor, MathTransformPreset, MultiplicitySpec,
-    MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec,
-    OutlierSpec, PValueFormat, PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
-    ProjectDocument, RectPt, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, RocSpec, SheetId, SheetSection, SizeChannelMapping,
-    SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupSpec, VariableRole, WhiskerMethod,
+    AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
+    ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ConnectingLineStyle, ContingencySpec, CoxTieMethod, DataSheet,
+    DescriptiveSpec, DiagnosticPlotKind, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FramePreset, GlmFamily, GlmSpec,
+    GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource, InfoSheet, JournalWidthPreset, LayoutItem,
+    LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, LinkBorderColor, MathTransformPreset, MultipleRowTestsSpec,
+    MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
+    OneWayAnovaSpec, OutlierSpec, PValueFormat, PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule, ParameterScope,
+    PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, RocSpec, SheetId,
+    SheetSection, SizeChannelMapping, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupSpec,
+    VariableRole, WhiskerMethod,
 };
 use lumencraft_engine::{EngineError, Session, catalog};
 use lumencraft_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
 use lumencraft_render::{RasterImage, RenderError, RenderTargetSpec, TiffCompression, encode_png, render_scene};
-use lumencraft_tools::{CanvasToolState, ToolCommandIntent};
+use lumencraft_text::{TextDirection, reorder_visual_bidi};
+use lumencraft_tools::{CanvasToolState, PanZoomInertiaState, PhysicalUnit, ToolCommandIntent, build_ruler_ticks};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::theme::UiThemeSpec;
+use crate::workspace_nav::{ActiveWorkspacePane, PortfolioCard};
 
 // ============================================================================
 // Dialog & Inspector Discriminators
@@ -318,6 +321,34 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         keywords: "cluster kmeans hierarchical dendrogram",
         summary: "Unsupervised observation clustering on standardized numeric variables.",
     },
+    AnalysisCatalogItem {
+        id: "stats.multiple_row_t_tests",
+        label: "Multiple Row t Tests / Nonparametric",
+        category: AnalysisCategory::Grouped,
+        keywords: "multiple row t test mann whitney wilcoxon fdr holm sidak row-wise",
+        summary: "Row-wise two-group parametric or rank comparisons with multiplicity control.",
+    },
+    AnalysisCatalogItem {
+        id: "stats.bland_altman",
+        label: "Bland-Altman Method Comparison",
+        category: AnalysisCategory::Column,
+        keywords: "bland altman bias limits of agreement method comparison agreement",
+        summary: "Paired bias and 95% limits of agreement across two measurement methods.",
+    },
+    AnalysisCatalogItem {
+        id: "stats.passing_bablok",
+        label: "Passing-Bablok Regression",
+        category: AnalysisCategory::XyAndRegression,
+        keywords: "passing bablok nonparametric method comparison slope intercept cusum",
+        summary: "Rank-based Passing-Bablok regression with exact/bootstrap CIs and CUSUM check.",
+    },
+    AnalysisCatalogItem {
+        id: "stats.multiple_imputation",
+        label: "Multiple Imputation (PMM)",
+        category: AnalysisCategory::Multivariate,
+        keywords: "multiple imputation pmm mice missing data rubin rules",
+        summary: "Chained predictive mean matching imputations pooled via Rubin's rules.",
+    },
 ];
 
 /// Map a static catalog identifier into its default [`AnalysisKind`].
@@ -376,6 +407,9 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             trend_test: false,
             asymmetrical_greenwood_ci: true,
             multiplicity: MultiplicitySpec::default(),
+            mv_time_column: None,
+            mv_status_column: None,
+            mv_group_column: None,
         })),
         "stats.survival_cox" => Some(AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
             time_column: 0,
@@ -395,6 +429,16 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         "stats.pca" => Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(7) })),
         "stats.corr_matrix" => Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
         "stats.clustering" => Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: Some(3) })),
+        "stats.multiple_row_t_tests" => Some(AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec::default())),
+        "stats.bland_altman" => Some(AnalysisKind::BlandAltman(BlandAltmanSpec::default())),
+        "stats.passing_bablok" => Some(AnalysisKind::PassingBablok(PassingBablokSpec::default())),
+        "stats.multiple_imputation" => Some(AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation {
+            imputations_m: 5,
+            max_iters: 10,
+            seed: 42,
+            response_column: None,
+            predictor_columns: Vec::new(),
+        })),
         _ => None,
     }
 }
@@ -615,6 +659,12 @@ impl AnalyzeDialogState {
             AnalysisKind::FactorialAnova(fac) if !predictor_cols.is_empty() => {
                 fac.multifactor_columns = predictor_cols;
                 fac.response_column = response_col;
+            }
+            AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { response_column, predictor_columns, .. }) => {
+                *response_column = response_col;
+                if !predictor_cols.is_empty() {
+                    *predictor_columns = predictor_cols;
+                }
             }
             _ => {}
         }
@@ -2447,6 +2497,14 @@ pub struct CanvasDialogState {
     pub page_layout: PageLayoutComposerState,
     pub export_figure: ExportFigureState,
     pub command_palette: CommandPaletteState,
+    #[serde(default)]
+    pub rulers_visible: bool,
+    #[serde(default)]
+    pub ruler_unit: PhysicalUnit,
+    #[serde(default)]
+    pub journal_preset: Option<lumencraft_tools::JournalWidthPreset>,
+    #[serde(default)]
+    pub pan_zoom: PanZoomInertiaState,
 }
 
 impl CanvasDialogState {
@@ -2466,6 +2524,14 @@ impl CanvasDialogState {
         self.canvas.set_zoom(1.0);
         self.canvas.pan_pt.x = 0.0;
         self.canvas.pan_pt.y = 0.0;
+        self.pan_zoom = PanZoomInertiaState::default();
+    }
+
+    fn effective_zoom_and_pan(&self) -> (f64, [f64; 2]) {
+        let zoom = if (self.pan_zoom.zoom - 1.0).abs() > 1e-9 { self.pan_zoom.zoom } else { self.canvas.zoom };
+        let pan_x = if self.pan_zoom.pan_pt[0].abs() > 1e-9 { self.pan_zoom.pan_pt[0] } else { self.canvas.pan_pt.x };
+        let pan_y = if self.pan_zoom.pan_pt[1].abs() > 1e-9 { self.pan_zoom.pan_pt[1] } else { self.canvas.pan_pt.y };
+        (zoom.max(0.05), [pan_x, pan_y])
     }
 
     /// Synchronize inspector/dialog state when navigating to `sheet_id`.
@@ -2627,8 +2693,12 @@ pub struct WorkspaceFrameLayout {
 }
 
 /// Compute deterministic UI region bounds for a frame of `(width_px, height_px)`.
+///
+/// Mirrors horizontal Navigator / Canvas / Inspector panes via [`crate::i18n::mirror_x_for_rtl`]
+/// when `app.locale` resolves to a right-to-left script (`ar`, `he`, `fa`, `ur`).
 #[must_use]
 pub fn compute_workspace_layout(app: &UiApp, width_px: u32, height_px: u32) -> WorkspaceFrameLayout {
+    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
     let toolbar_h = (height_px / 14).clamp(20, 38).min(height_px);
     let status_h = (height_px / 22).clamp(16, 26).min(height_px.saturating_sub(toolbar_h));
     let mid_y = toolbar_h;
@@ -2638,10 +2708,15 @@ pub fn compute_workspace_layout(app: &UiApp, width_px: u32, height_px: u32) -> W
     let insp_w = if app.nav.inspector_open && width_px >= 420 { (width_px / 4).clamp(176, 280) } else { 0 };
     let canvas_w = width_px.saturating_sub(nav_w).saturating_sub(insp_w);
 
+    let nav_x = crate::i18n::mirror_x_for_rtl(0, nav_w, width_px, is_rtl);
+    let canvas_x = crate::i18n::mirror_x_for_rtl(nav_w, canvas_w, width_px, is_rtl);
+    let insp_x = crate::i18n::mirror_x_for_rtl(nav_w.saturating_add(canvas_w), insp_w, width_px, is_rtl);
+
     let modal_overlay = if app.canvas_dialogs.active_dialog != ActiveDialog::None {
         let mw = (width_px * 3 / 5).clamp(180, width_px.saturating_sub(24).max(1));
         let mh = (height_px * 3 / 5).clamp(120, height_px.saturating_sub(24).max(1));
-        Some(WorkspacePixelRect::new((width_px.saturating_sub(mw)) / 2, (height_px.saturating_sub(mh)) / 2, mw, mh))
+        let mx = crate::i18n::mirror_x_for_rtl((width_px.saturating_sub(mw)) / 2, mw, width_px, is_rtl);
+        Some(WorkspacePixelRect::new(mx, (height_px.saturating_sub(mh)) / 2, mw, mh))
     } else {
         None
     };
@@ -2650,9 +2725,9 @@ pub fn compute_workspace_layout(app: &UiApp, width_px: u32, height_px: u32) -> W
         total_width: width_px,
         total_height: height_px,
         toolbar: WorkspacePixelRect::new(0, 0, width_px, toolbar_h),
-        navigator: WorkspacePixelRect::new(0, mid_y, nav_w, mid_h),
-        canvas: WorkspacePixelRect::new(nav_w, mid_y, canvas_w, mid_h),
-        inspector: WorkspacePixelRect::new(nav_w.saturating_add(canvas_w), mid_y, insp_w, mid_h),
+        navigator: WorkspacePixelRect::new(nav_x, mid_y, nav_w, mid_h),
+        canvas: WorkspacePixelRect::new(canvas_x, mid_y, canvas_w, mid_h),
+        inspector: WorkspacePixelRect::new(insp_x, mid_y, insp_w, mid_h),
         status_bar: WorkspacePixelRect::new(0, toolbar_h.saturating_add(mid_h), width_px, status_h),
         modal_overlay,
     }
@@ -2669,11 +2744,17 @@ pub fn render_workspace_rgba(app: &UiApp, target: RenderTargetSpec) -> Result<Ra
     if layout.navigator.width > 0 {
         draw_navigator(&mut img, layout.navigator, app, &palette);
     }
-    draw_center_viewport(&mut img, layout.canvas, app, target.dpi, &palette);
+    let viewport_rect = if app.canvas_dialogs.rulers_visible && layout.canvas.width >= 48 && layout.canvas.height >= 48 {
+        draw_physical_rulers(&mut img, layout.canvas, app, &palette)
+    } else {
+        layout.canvas
+    };
+    draw_center_viewport(&mut img, viewport_rect, app, target.dpi, &palette);
     if layout.inspector.width > 0 {
         draw_inspector_pane(&mut img, layout.inspector, app, &palette);
     }
     draw_status_bar(&mut img, layout.status_bar, app, &palette);
+    draw_active_pane_focus(&mut img, &layout, app, &palette);
     if let Some(modal_rect) = layout.modal_overlay {
         draw_modal_overlay(&mut img, layout.canvas, modal_rect, app, &palette);
     }
@@ -2730,38 +2811,57 @@ fn shift_luma(color: Rgba8, delta: i16) -> Rgba8 {
 }
 
 fn draw_toolbar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
+    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
     fill_rect(img, rect, pal.header);
     fill_rect(img, WorkspacePixelRect::new(rect.x, rect.bottom().saturating_sub(1), rect.width, 1), pal.border);
 
     let brand_w = 56u32.min(rect.width.saturating_sub(8));
-    let brand_rect = WorkspacePixelRect::new(rect.x + 8, rect.y + 5, brand_w, rect.height.saturating_sub(10).max(1));
+    let brand_local_x = crate::i18n::mirror_x_for_rtl(8, brand_w, rect.width, is_rtl);
+    let brand_rect = WorkspacePixelRect::new(rect.x.saturating_add(brand_local_x), rect.y + 5, brand_w, rect.height.saturating_sub(10).max(1));
     fill_rect(img, brand_rect, pal.accent);
-    draw_text_5x7(img, brand_rect.x + 6, brand_rect.y + 4, "LUMEN", Rgba8::WHITE);
+    draw_text_5x7_dir(img, brand_rect.x + 6, brand_rect.y + 4, "LUMEN", Rgba8::WHITE, is_rtl);
 
+    let reserved_buttons_px = draw_toolbar_buttons(img, rect, app, pal, is_rtl);
     let title = app.document().active_sheet_id.as_ref().map_or(app.document().title.as_str(), |id| active_sheet_title(app.document(), id));
-    let title_x = brand_rect.right().saturating_add(12);
-    if title_x + 40 < rect.right() {
-        draw_text_clipped(img, title_x, rect.y + 10, title, pal.text, rect.right().saturating_sub(180).saturating_sub(title_x));
+    let (title_x, title_max_w) = if is_rtl {
+        let left_bound = rect.x.saturating_add(reserved_buttons_px).saturating_add(8);
+        let right_bound = brand_rect.x.saturating_sub(12);
+        (left_bound, right_bound.saturating_sub(left_bound))
+    } else {
+        let left_bound = brand_rect.right().saturating_add(12);
+        let right_bound = rect.right().saturating_sub(reserved_buttons_px).saturating_sub(8);
+        (left_bound, right_bound.saturating_sub(left_bound))
+    };
+    if title_max_w >= 24 {
+        draw_text_clipped_dir(
+            img,
+            DrawTextClipped { x: title_x, y: rect.y + 10, text: title, color: pal.text, max_width_px: title_max_w, rtl: is_rtl },
+        );
     }
+}
 
+fn draw_toolbar_buttons(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette, is_rtl: bool) -> u32 {
     let buttons = [
         ("Analyze", matches!(app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. })),
         ("Axes", matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. })),
         ("Cmd+K", matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette)),
     ];
-    let mut rx = rect.right().saturating_sub(12);
+    let min_gap_guard = 80u32;
+    let mut rx = rect.width.saturating_sub(12);
     for (label, active) in buttons.into_iter().rev() {
         let bw = ((label.len() as u32) * 6 + 14).min(80);
-        if rx < title_x + bw + 8 {
+        if rx < min_gap_guard.saturating_add(bw) {
             break;
         }
         rx = rx.saturating_sub(bw);
-        let btn = WorkspacePixelRect::new(rx, rect.y + 5, bw, rect.height.saturating_sub(10).max(1));
+        let btn_local_x = crate::i18n::mirror_x_for_rtl(rx, bw, rect.width, is_rtl);
+        let btn = WorkspacePixelRect::new(rect.x.saturating_add(btn_local_x), rect.y + 5, bw, rect.height.saturating_sub(10).max(1));
         fill_rect(img, btn, if active { pal.accent } else { pal.surface });
         stroke_rect(img, btn, pal.border);
-        draw_text_5x7(img, btn.x + 6, btn.y + 4, label, if active { Rgba8::WHITE } else { pal.text });
+        draw_text_5x7_dir(img, btn.x + 6, btn.y + 4, label, if active { Rgba8::WHITE } else { pal.text }, is_rtl);
         rx = rx.saturating_sub(6);
     }
+    rect.width.saturating_sub(rx)
 }
 
 fn active_sheet_title<'a>(doc: &'a ProjectDocument, id: &'a SheetId) -> &'a str {
@@ -2775,9 +2875,21 @@ fn active_sheet_title<'a>(doc: &'a ProjectDocument, id: &'a SheetId) -> &'a str 
 }
 
 fn draw_navigator(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
+    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
     fill_rect(img, rect, pal.panel);
-    fill_rect(img, WorkspacePixelRect::new(rect.right().saturating_sub(1), rect.y, 1, rect.height), pal.border);
-    draw_text_5x7(img, rect.x + 10, rect.y + 8, "PROJECT NAVIGATOR", pal.muted);
+    let border_x = if is_rtl { rect.x } else { rect.right().saturating_sub(1) };
+    fill_rect(img, WorkspacePixelRect::new(border_x, rect.y, 1, rect.height), pal.border);
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped {
+            x: rect.x + 10,
+            y: rect.y + 8,
+            text: "PROJECT NAVIGATOR",
+            color: pal.muted,
+            max_width_px: rect.width.saturating_sub(20),
+            rtl: is_rtl,
+        },
+    );
 
     let list_bottom = rect.y + (rect.height * 2 / 3);
     let mut y = rect.y + 24;
@@ -2797,30 +2909,191 @@ fn draw_navigator(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, 
             SheetSection::Layouts => "L",
         };
         let fg = if entry.is_active { Rgba8::WHITE } else { pal.text };
-        draw_text_clipped(img, row.x + 4, row.y + 4, &format!("[{tag}] {}", entry.title), fg, row.width.saturating_sub(8));
+        draw_text_clipped_dir(
+            img,
+            DrawTextClipped {
+                x: row.x + 4,
+                y: row.y + 4,
+                text: &format!("[{tag}] {}", entry.title),
+                color: fg,
+                max_width_px: row.width.saturating_sub(8),
+                rtl: is_rtl,
+            },
+        );
         y = y.saturating_add(18);
     }
 
     let fam_y = list_bottom.saturating_add(4);
     fill_rect(img, WorkspacePixelRect::new(rect.x + 6, fam_y, rect.width.saturating_sub(12), 1), pal.border);
     if fam_y + 18 < rect.bottom() {
-        draw_text_5x7(img, rect.x + 10, fam_y + 6, "FAMILY", pal.muted);
+        draw_text_clipped_dir(
+            img,
+            DrawTextClipped {
+                x: rect.x + 10,
+                y: fam_y + 6,
+                text: "FAMILY",
+                color: pal.muted,
+                max_width_px: rect.width.saturating_sub(20),
+                rtl: is_rtl,
+            },
+        );
         let mut fy = fam_y + 20;
         for rel in &app.nav.family_related_ids {
             if fy + 12 >= rect.bottom() {
                 break;
             }
-            draw_text_clipped(img, rect.x + 12, fy, rel.as_str(), pal.link_blue, rect.width.saturating_sub(20));
+            draw_text_clipped_dir(
+                img,
+                DrawTextClipped {
+                    x: rect.x + 12,
+                    y: fy,
+                    text: rel.as_str(),
+                    color: pal.link_blue,
+                    max_width_px: rect.width.saturating_sub(20),
+                    rtl: is_rtl,
+                },
+            );
             fy = fy.saturating_add(13);
+        }
+    }
+}
+
+fn draw_physical_rulers(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) -> WorkspacePixelRect {
+    let ruler_h = 16u32;
+    let ruler_w = 24u32;
+    let corner = WorkspacePixelRect::new(rect.x, rect.y, ruler_w, ruler_h);
+    let top_bar = WorkspacePixelRect::new(rect.x.saturating_add(ruler_w), rect.y, rect.width.saturating_sub(ruler_w), ruler_h);
+    let left_bar = WorkspacePixelRect::new(rect.x, rect.y.saturating_add(ruler_h), ruler_w, rect.height.saturating_sub(ruler_h));
+    let inner = WorkspacePixelRect::new(
+        rect.x.saturating_add(ruler_w),
+        rect.y.saturating_add(ruler_h),
+        rect.width.saturating_sub(ruler_w),
+        rect.height.saturating_sub(ruler_h),
+    );
+
+    fill_rect(img, corner, pal.header);
+    fill_rect(img, top_bar, pal.header);
+    fill_rect(img, left_bar, pal.header);
+    fill_rect(img, WorkspacePixelRect::new(rect.x, rect.y.saturating_add(ruler_h).saturating_sub(1), rect.width, 1), pal.border);
+    fill_rect(img, WorkspacePixelRect::new(rect.x.saturating_add(ruler_w).saturating_sub(1), rect.y, 1, rect.height), pal.border);
+
+    let unit_tag = match app.canvas_dialogs.ruler_unit {
+        PhysicalUnit::Millimeters => "MM",
+        PhysicalUnit::Inches => "IN",
+        PhysicalUnit::Points => "PT",
+    };
+    draw_text_5x7(img, corner.x + 4, corner.y + 4, unit_tag, pal.accent);
+
+    let (doc_w_pt, doc_h_pt) = active_ruler_doc_span_pt(app);
+    let (zoom, pan_pt) = app.canvas_dialogs.effective_zoom_and_pan();
+    draw_horizontal_ruler_ticks(img, top_bar, app.canvas_dialogs.ruler_unit, doc_w_pt, zoom, pan_pt[0], pal);
+    draw_vertical_ruler_ticks(img, left_bar, app.canvas_dialogs.ruler_unit, doc_h_pt, zoom, pan_pt[1], pal);
+    inner
+}
+
+fn active_ruler_doc_span_pt(app: &UiApp) -> (f64, f64) {
+    if let Some(preset) = app.canvas_dialogs.journal_preset {
+        return preset.size_pt();
+    }
+    let doc = app.document();
+    if let Some(active_id) = &doc.active_sheet_id
+        && let Some(ls) = doc.layout_sheet(active_id)
+    {
+        let page = ls.spec.page_size_pt();
+        if page.width > 0.0 && page.height > 0.0 {
+            return (page.width, page.height);
+        }
+    }
+    lumencraft_tools::JournalWidthPreset::DoubleColumn174Mm.size_pt()
+}
+
+fn ruler_px_offset(view_px: f64, span_px: u32) -> Option<u32> {
+    if !view_px.is_finite() || view_px < 0.0 || span_px == 0 {
+        return None;
+    }
+    let max_off = f64::from(span_px.saturating_sub(1));
+    if view_px > max_off {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Some(view_px.round() as u32)
+}
+
+fn draw_horizontal_ruler_ticks(
+    img: &mut RasterImage,
+    bar: WorkspacePixelRect,
+    unit: PhysicalUnit,
+    doc_span_pt: f64,
+    zoom: f64,
+    pan_pt: f64,
+    pal: &FramePalette,
+) {
+    if bar.width == 0 {
+        return;
+    }
+    let px_per_pt = (f64::from(bar.width) / doc_span_pt.max(1.0)).max(0.05);
+    let ticks = build_ruler_ticks(unit, doc_span_pt, zoom, pan_pt, px_per_pt);
+    for tick in ticks {
+        let Some(off_x) = ruler_px_offset(tick.view_px, bar.width) else {
+            continue;
+        };
+        let tick_h = if tick.major { 7 } else { 3 };
+        let color = if tick.major { pal.text } else { pal.muted };
+        fill_rect(img, WorkspacePixelRect::new(bar.x.saturating_add(off_x), bar.bottom().saturating_sub(tick_h + 1), 1, tick_h), color);
+        if let Some(label) = tick.label.as_deref()
+            && off_x.saturating_add(10) < bar.width
+        {
+            draw_text_clipped(
+                img,
+                bar.x.saturating_add(off_x).saturating_add(2),
+                bar.y + 2,
+                label,
+                pal.text,
+                bar.width.saturating_sub(off_x + 3).min(24),
+            );
+        }
+    }
+}
+
+fn draw_vertical_ruler_ticks(
+    img: &mut RasterImage,
+    bar: WorkspacePixelRect,
+    unit: PhysicalUnit,
+    doc_span_pt: f64,
+    zoom: f64,
+    pan_pt: f64,
+    pal: &FramePalette,
+) {
+    if bar.height == 0 {
+        return;
+    }
+    let px_per_pt = (f64::from(bar.height) / doc_span_pt.max(1.0)).max(0.05);
+    let ticks = build_ruler_ticks(unit, doc_span_pt, zoom, pan_pt, px_per_pt);
+    for tick in ticks {
+        let Some(off_y) = ruler_px_offset(tick.view_px, bar.height) else {
+            continue;
+        };
+        let tick_w = if tick.major { 7 } else { 3 };
+        let color = if tick.major { pal.text } else { pal.muted };
+        fill_rect(img, WorkspacePixelRect::new(bar.right().saturating_sub(tick_w + 1), bar.y.saturating_add(off_y), tick_w, 1), color);
+        if let Some(label) = tick.label.as_deref()
+            && off_y.saturating_add(8) < bar.height
+        {
+            draw_text_clipped(img, bar.x + 2, bar.y.saturating_add(off_y).saturating_add(2), label, pal.text, bar.width.saturating_sub(10));
         }
     }
 }
 
 fn draw_center_viewport(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, dpi: u16, pal: &FramePalette) {
     fill_rect(img, rect, pal.canvas_mat);
+    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
+    if app.nav.gallery.open {
+        draw_portfolio_gallery(img, rect, app, pal, is_rtl);
+        return;
+    }
     let doc = app.document();
     let Some(active_id) = &doc.active_sheet_id else {
-        draw_empty_studio(img, rect, pal);
+        draw_empty_studio(img, rect, pal, is_rtl);
         return;
     };
 
@@ -2833,30 +3106,186 @@ fn draw_center_viewport(img: &mut RasterImage, rect: WorkspacePixelRect, app: &U
     } else if let Some(info) = doc.info_sheet(active_id) {
         draw_info_view(img, rect, info, pal);
     } else {
-        draw_empty_studio(img, rect, pal);
+        draw_empty_studio(img, rect, pal, is_rtl);
     }
 }
 
-fn draw_empty_studio(img: &mut RasterImage, rect: WorkspacePixelRect, pal: &FramePalette) {
+fn draw_portfolio_gallery(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette, is_rtl: bool) {
+    let header_title = format!("PORTFOLIO GALLERY ({})", app.nav.gallery.cards.len());
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped {
+            x: rect.x + 12,
+            y: rect.y + 8,
+            text: &header_title,
+            color: pal.text,
+            max_width_px: rect.width.saturating_sub(24),
+            rtl: is_rtl,
+        },
+    );
+    fill_rect(img, WorkspacePixelRect::new(rect.x + 10, rect.y + 22, rect.width.saturating_sub(20), 1), pal.border);
+
+    let body = WorkspacePixelRect::new(rect.x + 12, rect.y + 28, rect.width.saturating_sub(24), rect.height.saturating_sub(36));
+    if body.width < 40 || body.height < 32 {
+        return;
+    }
+    if app.nav.gallery.cards.is_empty() {
+        draw_text_clipped_dir(
+            img,
+            DrawTextClipped { x: body.x, y: body.y + 12, text: "NO SHEETS MATCH FILTER", color: pal.muted, max_width_px: body.width, rtl: is_rtl },
+        );
+        return;
+    }
+
+    let gap = 10u32;
+    let cols = (body.width / 132).clamp(1, 4);
+    let card_w = body.width.saturating_sub(gap.saturating_mul(cols.saturating_sub(1))) / cols;
+    let card_h = 74u32.min(body.height);
+    for (idx, card) in app.nav.gallery.cards.iter().enumerate() {
+        let col = (idx as u32) % cols;
+        let row = (idx as u32) / cols;
+        let cy = body.y.saturating_add(row.saturating_mul(card_h.saturating_add(gap)));
+        if cy.saturating_add(card_h) > body.bottom() {
+            break;
+        }
+        let local_cx = col.saturating_mul(card_w.saturating_add(gap));
+        let cx = body.x.saturating_add(crate::i18n::mirror_x_for_rtl(local_cx, card_w, body.width, is_rtl));
+        let card_rect = WorkspacePixelRect::new(cx, cy, card_w, card_h);
+        draw_gallery_card(img, card_rect, card, app.nav.gallery.selected_ids.contains(&card.sheet_id), pal, is_rtl);
+    }
+}
+
+fn draw_gallery_card(img: &mut RasterImage, rect: WorkspacePixelRect, card: &PortfolioCard, is_selected: bool, pal: &FramePalette, is_rtl: bool) {
+    fill_rect(img, rect, pal.surface);
+    let accent_band = card.color_tag.unwrap_or(pal.accent);
+    let stripe_x = rect.x.saturating_add(crate::i18n::mirror_x_for_rtl(0, 4, rect.width, is_rtl));
+    fill_rect(img, WorkspacePixelRect::new(stripe_x, rect.y + 1, 4, rect.height.saturating_sub(2)), accent_band);
+
+    let thumb = WorkspacePixelRect::new(rect.x + 8, rect.y + 6, rect.width.saturating_sub(16), rect.height.saturating_sub(36).max(8));
+    fill_rect(img, thumb, pal.panel);
+    stroke_rect(img, thumb, pal.border);
+    if thumb.width >= 20 && thumb.height >= 12 {
+        fill_rect(img, WorkspacePixelRect::new(thumb.x + 4, thumb.y + 4, thumb.width.saturating_sub(8) / 2, 4), accent_band);
+        fill_rect(img, WorkspacePixelRect::new(thumb.x + 4, thumb.y + 11, thumb.width.saturating_sub(12), 2), pal.muted);
+    }
+
+    let text_y = thumb.bottom().saturating_add(4);
+    let label = format!("[{}] {}", card.badge_label, card.title);
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped { x: rect.x + 8, y: text_y, text: &label, color: pal.text, max_width_px: rect.width.saturating_sub(16), rtl: is_rtl },
+    );
+    if text_y + 18 <= rect.bottom() {
+        draw_text_clipped_dir(
+            img,
+            DrawTextClipped {
+                x: rect.x + 8,
+                y: text_y + 10,
+                text: &card.subtitle,
+                color: pal.muted,
+                max_width_px: rect.width.saturating_sub(16),
+                rtl: is_rtl,
+            },
+        );
+    }
+
+    let selected = is_selected || card.selected;
+    let border_color = if selected {
+        pal.accent
+    } else if card.active {
+        pal.link_blue
+    } else {
+        pal.border
+    };
+    stroke_rect(img, rect, border_color);
+    if selected && rect.width > 4 && rect.height > 4 {
+        stroke_rect(img, WorkspacePixelRect::new(rect.x + 1, rect.y + 1, rect.width - 2, rect.height - 2), pal.accent);
+    }
+}
+
+fn draw_active_pane_focus(img: &mut RasterImage, layout: &WorkspaceFrameLayout, app: &UiApp, pal: &FramePalette) {
+    let focus_color = Rgba8::rgba(pal.accent.r, pal.accent.g, pal.accent.b, 190);
+    let target = match app.nav.active_pane {
+        ActiveWorkspacePane::Navigator if layout.navigator.width > 4 => Some(layout.navigator),
+        ActiveWorkspacePane::FamilyStrip if layout.navigator.width > 4 && layout.navigator.height > 24 => {
+            let fam_y = layout.navigator.y + (layout.navigator.height * 2 / 3).saturating_add(2);
+            Some(WorkspacePixelRect::new(layout.navigator.x, fam_y, layout.navigator.width, layout.navigator.bottom().saturating_sub(fam_y)))
+        }
+        ActiveWorkspacePane::MainCanvasOrGrid if layout.canvas.width > 4 => Some(layout.canvas),
+        ActiveWorkspacePane::Inspector if layout.inspector.width > 4 => Some(layout.inspector),
+        ActiveWorkspacePane::FloatingNotes if layout.canvas.width >= 96 && layout.canvas.height >= 40 => {
+            let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
+            let badge_w = 88u32;
+            let local_x = crate::i18n::mirror_x_for_rtl(layout.canvas.width.saturating_sub(badge_w + 8), badge_w, layout.canvas.width, is_rtl);
+            let notes_rect = WorkspacePixelRect::new(layout.canvas.x.saturating_add(local_x), layout.canvas.bottom().saturating_sub(24), badge_w, 18);
+            fill_rect(img, notes_rect, pal.panel);
+            stroke_rect(img, notes_rect, pal.accent);
+            draw_text_clipped_dir(
+                img,
+                DrawTextClipped {
+                    x: notes_rect.x + 6,
+                    y: notes_rect.y + 5,
+                    text: "NOTES PANE",
+                    color: pal.accent,
+                    max_width_px: badge_w - 12,
+                    rtl: is_rtl,
+                },
+            );
+            None
+        }
+        _ => None,
+    };
+
+    if let Some(pane) = target
+        && pane.width >= 4
+        && pane.height >= 4
+    {
+        fill_rect(img, WorkspacePixelRect::new(pane.x, pane.y, pane.width, 2), focus_color);
+        stroke_rect(img, WorkspacePixelRect::new(pane.x + 1, pane.y + 1, pane.width - 2, pane.height - 2), focus_color);
+    }
+}
+
+fn draw_empty_studio(img: &mut RasterImage, rect: WorkspacePixelRect, pal: &FramePalette, is_rtl: bool) {
     let cw = rect.width.saturating_sub(48).min(260);
     let ch = rect.height.saturating_sub(48).min(96);
     let card = WorkspacePixelRect::new(rect.x + (rect.width.saturating_sub(cw)) / 2, rect.y + (rect.height.saturating_sub(ch)) / 2, cw, ch);
     fill_rect(img, card, pal.panel);
     stroke_rect(img, card, pal.border);
-    draw_text_clipped(img, card.x + 16, card.y + 18, "LUMEN SCIENTIFIC STUDIO", pal.text, card.width.saturating_sub(32));
-    draw_text_clipped(img, card.x + 16, card.y + 38, "NEW DATA TABLE: CMD+T", pal.muted, card.width.saturating_sub(32));
-    draw_text_clipped(img, card.x + 16, card.y + 56, "COMMAND PALETTE: CMD+K", pal.accent, card.width.saturating_sub(32));
+    let max_w = card.width.saturating_sub(32);
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped { x: card.x + 16, y: card.y + 18, text: "LUMEN SCIENTIFIC STUDIO", color: pal.text, max_width_px: max_w, rtl: is_rtl },
+    );
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped { x: card.x + 16, y: card.y + 38, text: "NEW DATA TABLE: CMD+T", color: pal.muted, max_width_px: max_w, rtl: is_rtl },
+    );
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped { x: card.x + 16, y: card.y + 56, text: "COMMAND PALETTE: CMD+K", color: pal.accent, max_width_px: max_w, rtl: is_rtl },
+    );
 }
 
 fn draw_scene_viewport(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, sheet_id: &SheetId, dpi: u16, pal: &FramePalette) {
+    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
     let pad = 16u32.min(rect.width / 8).min(rect.height / 8);
     let inner_w = rect.width.saturating_sub(pad * 2).max(1);
     let inner_h = rect.height.saturating_sub(pad * 2 + 20).max(1);
     let paper = WorkspacePixelRect::new(rect.x + pad, rect.y + pad + 18, inner_w, inner_h);
 
-    let zoom_pct = (app.canvas_dialogs.canvas.zoom * 100.0).round() as i64;
+    let zoom_pct = (app.canvas_dialogs.effective_zoom_and_pan().0 * 100.0).round() as i64;
     let header_label = format!("CANVAS: {} ({zoom_pct}%)", active_sheet_title(app.document(), sheet_id));
-    draw_text_clipped(img, rect.x + pad, rect.y + 8, &header_label, pal.text, rect.width.saturating_sub(pad * 2));
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped {
+            x: rect.x + pad,
+            y: rect.y + 8,
+            text: &header_label,
+            color: pal.text,
+            max_width_px: rect.width.saturating_sub(pad * 2),
+            rtl: is_rtl,
+        },
+    );
 
     if let Ok(Some(scene)) = app.canvas_dialogs.active_scene(app.session()) {
         if let Ok(rendered) = render_scene(&scene, RenderTargetSpec { width_px: paper.width, height_px: paper.height, dpi: dpi.max(72) }) {
@@ -3088,77 +3517,160 @@ fn draw_info_view(img: &mut RasterImage, rect: WorkspacePixelRect, info: &InfoSh
 }
 
 fn draw_inspector_pane(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
+    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
     fill_rect(img, rect, pal.panel);
-    fill_rect(img, WorkspacePixelRect::new(rect.x, rect.y, 1, rect.height), pal.border);
-    draw_text_clipped(img, rect.x + 10, rect.y + 8, app.canvas_dialogs.active_inspector.label(), pal.text, rect.width.saturating_sub(18));
+    let border_x = if is_rtl { rect.right().saturating_sub(1) } else { rect.x };
+    fill_rect(img, WorkspacePixelRect::new(border_x, rect.y, 1, rect.height), pal.border);
+    let text_w = rect.width.saturating_sub(18);
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped {
+            x: rect.x + 10,
+            y: rect.y + 8,
+            text: app.canvas_dialogs.active_inspector.label(),
+            color: pal.text,
+            max_width_px: text_w,
+            rtl: is_rtl,
+        },
+    );
     fill_rect(img, WorkspacePixelRect::new(rect.x + 8, rect.y + 22, rect.width.saturating_sub(16), 1), pal.border);
 
     match app.canvas_dialogs.active_inspector {
-        ActiveInspector::FormatGraph => {
-            draw_text_clipped(
-                img,
-                rect.x + 10,
-                rect.y + 30,
-                app.canvas_dialogs.format_graph.palette.label(),
-                pal.muted,
-                rect.width.saturating_sub(18),
-            );
-            let mut sx = rect.x + 10;
-            for i in 0..6 {
-                if sx + 18 >= rect.right() {
-                    break;
-                }
-                let sw = WorkspacePixelRect::new(sx, rect.y + 44, 16, 14);
-                fill_rect(img, sw, app.canvas_dialogs.format_graph.preview_swatch(i));
-                stroke_rect(img, sw, pal.border);
-                sx = sx.saturating_add(20);
-            }
-            let frame_lbl = format!("Frame: {:?}", app.canvas_dialogs.format_graph.frame_preset);
-            draw_text_clipped(img, rect.x + 10, rect.y + 68, &frame_lbl, pal.text, rect.width.saturating_sub(18));
-        }
+        ActiveInspector::FormatGraph => draw_inspector_format_graph(img, rect, app, pal, is_rtl),
         ActiveInspector::FormatAxes => {
             let draft = &app.canvas_dialogs.format_axes.axis_draft;
-            draw_text_clipped(img, rect.x + 10, rect.y + 30, &format!("Segments: {}", draft.segments.len()), pal.text, rect.width.saturating_sub(18));
+            draw_text_clipped_dir(
+                img,
+                DrawTextClipped {
+                    x: rect.x + 10,
+                    y: rect.y + 30,
+                    text: &format!("Segments: {}", draft.segments.len()),
+                    color: pal.text,
+                    max_width_px: text_w,
+                    rtl: is_rtl,
+                },
+            );
             for (idx, seg) in draft.segments.iter().enumerate() {
                 let y = rect.y + 46 + (idx as u32) * 16;
-                draw_text_clipped(img, rect.x + 10, y, &format!("S{}: {:?}", idx + 1, seg.scale), pal.muted, rect.width.saturating_sub(18));
+                draw_text_clipped_dir(
+                    img,
+                    DrawTextClipped {
+                        x: rect.x + 10,
+                        y,
+                        text: &format!("S{}: {:?}", idx + 1, seg.scale),
+                        color: pal.muted,
+                        max_width_px: text_w,
+                        rtl: is_rtl,
+                    },
+                );
             }
         }
         ActiveInspector::PairwiseComparisons => {
             let count = app.canvas_dialogs.pairwise.brackets.len();
-            draw_text_clipped(img, rect.x + 10, rect.y + 30, &format!("Brackets: {count}"), pal.text, rect.width.saturating_sub(18));
+            draw_text_clipped_dir(
+                img,
+                DrawTextClipped {
+                    x: rect.x + 10,
+                    y: rect.y + 30,
+                    text: &format!("Brackets: {count}"),
+                    color: pal.text,
+                    max_width_px: text_w,
+                    rtl: is_rtl,
+                },
+            );
         }
         ActiveInspector::BubblePlot => {
             let bp = &app.canvas_dialogs.bubble_plot;
-            draw_text_clipped(
+            draw_text_clipped_dir(
                 img,
-                rect.x + 10,
-                rect.y + 30,
-                &format!("X col {} / Y col {}", bp.x_column, bp.y_column),
-                pal.text,
-                rect.width.saturating_sub(18),
+                DrawTextClipped {
+                    x: rect.x + 10,
+                    y: rect.y + 30,
+                    text: &format!("X col {} / Y col {}", bp.x_column, bp.y_column),
+                    color: pal.text,
+                    max_width_px: text_w,
+                    rtl: is_rtl,
+                },
             );
-            draw_text_clipped(
+            draw_text_clipped_dir(
                 img,
-                rect.x + 10,
-                rect.y + 46,
-                if bp.show_convex_hulls { "Hulls: On" } else { "Hulls: Off" },
-                pal.muted,
-                rect.width.saturating_sub(18),
+                DrawTextClipped {
+                    x: rect.x + 10,
+                    y: rect.y + 46,
+                    text: if bp.show_convex_hulls { "Hulls: On" } else { "Hulls: Off" },
+                    color: pal.muted,
+                    max_width_px: text_w,
+                    rtl: is_rtl,
+                },
             );
         }
         ActiveInspector::PageLayout => {
             let pl = &app.canvas_dialogs.page_layout;
-            draw_text_clipped(img, rect.x + 10, rect.y + 30, &format!("Grid: {}x{}", pl.rows, pl.cols), pal.text, rect.width.saturating_sub(18));
-            draw_text_clipped(img, rect.x + 10, rect.y + 46, &format!("Items: {}", pl.items.len()), pal.muted, rect.width.saturating_sub(18));
+            draw_text_clipped_dir(
+                img,
+                DrawTextClipped {
+                    x: rect.x + 10,
+                    y: rect.y + 30,
+                    text: &format!("Grid: {}x{}", pl.rows, pl.cols),
+                    color: pal.text,
+                    max_width_px: text_w,
+                    rtl: is_rtl,
+                },
+            );
+            draw_text_clipped_dir(
+                img,
+                DrawTextClipped {
+                    x: rect.x + 10,
+                    y: rect.y + 46,
+                    text: &format!("Items: {}", pl.items.len()),
+                    color: pal.muted,
+                    max_width_px: text_w,
+                    rtl: is_rtl,
+                },
+            );
         }
         ActiveInspector::ResultDetails | ActiveInspector::None => {
-            draw_text_clipped(img, rect.x + 10, rect.y + 30, "Ready", pal.muted, rect.width.saturating_sub(18));
+            draw_text_clipped_dir(
+                img,
+                DrawTextClipped { x: rect.x + 10, y: rect.y + 30, text: "Ready", color: pal.muted, max_width_px: text_w, rtl: is_rtl },
+            );
         }
     }
 }
 
+fn draw_inspector_format_graph(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette, is_rtl: bool) {
+    let text_w = rect.width.saturating_sub(18);
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped {
+            x: rect.x + 10,
+            y: rect.y + 30,
+            text: app.canvas_dialogs.format_graph.palette.label(),
+            color: pal.muted,
+            max_width_px: text_w,
+            rtl: is_rtl,
+        },
+    );
+    let mut local_x = 10u32;
+    for i in 0..6 {
+        if local_x + 18 >= rect.width {
+            break;
+        }
+        let sx = rect.x.saturating_add(crate::i18n::mirror_x_for_rtl(local_x, 16, rect.width, is_rtl));
+        let sw = WorkspacePixelRect::new(sx, rect.y + 44, 16, 14);
+        fill_rect(img, sw, app.canvas_dialogs.format_graph.preview_swatch(i));
+        stroke_rect(img, sw, pal.border);
+        local_x = local_x.saturating_add(20);
+    }
+    let frame_lbl = format!("Frame: {:?}", app.canvas_dialogs.format_graph.frame_preset);
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped { x: rect.x + 10, y: rect.y + 68, text: &frame_lbl, color: pal.text, max_width_px: text_w, rtl: is_rtl },
+    );
+}
+
 fn draw_status_bar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
+    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
     fill_rect(img, rect, pal.header);
     fill_rect(img, WorkspacePixelRect::new(rect.x, rect.y, rect.width, 1), pal.border);
 
@@ -3171,10 +3683,21 @@ fn draw_status_bar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp,
         .unwrap_or_default();
     let banner = app.canvas_dialogs.status_banner.as_deref().unwrap_or("");
     let left_text = [cursor_str, stats_str, String::from(banner)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<String>>().join(" | ");
-    draw_text_clipped(img, rect.x + 10, rect.y + (rect.height.saturating_sub(7)) / 2, &left_text, pal.text, rect.width.saturating_sub(20));
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped {
+            x: rect.x + 10,
+            y: rect.y + (rect.height.saturating_sub(7)) / 2,
+            text: &left_text,
+            color: pal.text,
+            max_width_px: rect.width.saturating_sub(20),
+            rtl: is_rtl,
+        },
+    );
 }
 
 fn draw_modal_overlay(img: &mut RasterImage, backdrop: WorkspacePixelRect, modal: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
+    let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
     dim_rect(img, backdrop);
     fill_rect(img, modal, pal.surface);
     stroke_rect(img, modal, pal.accent);
@@ -3182,7 +3705,17 @@ fn draw_modal_overlay(img: &mut RasterImage, backdrop: WorkspacePixelRect, modal
     let header = WorkspacePixelRect::new(modal.x, modal.y, modal.width, 24);
     fill_rect(img, header, pal.accent);
     let title = modal_title(&app.canvas_dialogs.active_dialog);
-    draw_text_clipped(img, header.x + 10, header.y + 8, title, Rgba8::WHITE, header.width.saturating_sub(20));
+    draw_text_clipped_dir(
+        img,
+        DrawTextClipped {
+            x: header.x + 10,
+            y: header.y + 8,
+            text: title,
+            color: Rgba8::WHITE,
+            max_width_px: header.width.saturating_sub(20),
+            rtl: is_rtl,
+        },
+    );
 
     let body_y = header.bottom().saturating_add(8);
     let lines = modal_preview_lines(&app.canvas_dialogs);
@@ -3191,7 +3724,10 @@ fn draw_modal_overlay(img: &mut RasterImage, backdrop: WorkspacePixelRect, modal
         if ly + 10 >= modal.bottom() {
             break;
         }
-        draw_text_clipped(img, modal.x + 12, ly, &line, pal.text, modal.width.saturating_sub(24));
+        draw_text_clipped_dir(
+            img,
+            DrawTextClipped { x: modal.x + 12, y: ly, text: &line, color: pal.text, max_width_px: modal.width.saturating_sub(24), rtl: is_rtl },
+        );
     }
 }
 
@@ -3284,18 +3820,51 @@ fn blit_image(dst: &mut RasterImage, dst_x: u32, dst_y: u32, src: &RasterImage) 
     }
 }
 
+struct DrawTextClipped<'a> {
+    x: u32,
+    y: u32,
+    text: &'a str,
+    color: Rgba8,
+    max_width_px: u32,
+    rtl: bool,
+}
+
 fn draw_text_clipped(img: &mut RasterImage, x: u32, y: u32, text: &str, color: Rgba8, max_width_px: u32) {
-    let max_chars = (max_width_px / 6) as usize;
-    let mut cx = x;
-    for ch in text.chars().take(max_chars) {
-        draw_glyph_5x7(img, cx, y, ch, color);
+    draw_text_clipped_dir(img, DrawTextClipped { x, y, text, color, max_width_px, rtl: false });
+}
+
+fn draw_text_clipped_dir(img: &mut RasterImage, spec: DrawTextClipped<'_>) {
+    let reordered;
+    let display = if spec.rtl {
+        reordered = reorder_visual_bidi(spec.text, TextDirection::Rtl);
+        reordered.as_str()
+    } else {
+        spec.text
+    };
+    let max_chars = (spec.max_width_px / 6) as usize;
+    let count = display.chars().count().min(max_chars);
+    let draw_w = (count as u32).saturating_mul(6).saturating_sub(1);
+    let mut cx = if spec.rtl { spec.x.saturating_add(spec.max_width_px.saturating_sub(draw_w)) } else { spec.x };
+    for ch in display.chars().take(max_chars) {
+        draw_glyph_5x7(img, cx, spec.y, ch, spec.color);
         cx = cx.saturating_add(6);
     }
 }
 
 fn draw_text_5x7(img: &mut RasterImage, x: u32, y: u32, text: &str, color: Rgba8) {
+    draw_text_5x7_dir(img, x, y, text, color, false);
+}
+
+fn draw_text_5x7_dir(img: &mut RasterImage, x: u32, y: u32, text: &str, color: Rgba8, rtl: bool) {
+    let reordered;
+    let display = if rtl {
+        reordered = reorder_visual_bidi(text, TextDirection::Rtl);
+        reordered.as_str()
+    } else {
+        text
+    };
     let mut cx = x;
-    for ch in text.chars() {
+    for ch in display.chars() {
         draw_glyph_5x7(img, cx, y, ch, color);
         cx = cx.saturating_add(6);
     }

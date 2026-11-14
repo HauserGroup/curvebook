@@ -30,5 +30,16 @@ mod tests {
         assert!(reply.contains("\"ok\":true"));
         assert!(reply.contains("\"dark\""));
         assert_eq!(app.locale, "en");
+
+        assert!(matches!(app.handle_key_combo("F6"), Ok(Some(_))));
+        assert!(matches!(app.handle_key_combo("Shift+F6"), Ok(Some(_))));
+
+        let rulers = app.dispatch_control_line("{\"id\":\"w2\",\"method\":\"ui.rulers.toggle\",\"params\":{\"unit\":\"mm\"}}");
+        assert!(rulers.contains("\"ok\":true"));
+        assert!(rulers.contains("\"rulers_visible\":true"));
+
+        let ar_locale = app.dispatch_control_line("{\"id\":\"w3\",\"method\":\"ui.locale.set\",\"params\":{\"locale\":\"ar\"}}");
+        assert!(ar_locale.contains("\"ok\":true"));
+        assert_eq!(app.locale, "ar");
     }
 }

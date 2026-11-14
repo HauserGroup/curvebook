@@ -6,22 +6,24 @@
 
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, Cell, CellCoord, ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint,
-    ColumnTable, ConstantValue, ContingencyTable, DataSheet, FramePreset, GraphAnnotation, GraphKind, GraphSheet, HookSource, InfoConstant,
-    InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
-    NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, PanelBadgeStyle, ParameterScope, ProjectDocument,
-    RectPt, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SizeChannelMapping, SubcolumnMode, TableArchetype,
-    VariableRole, XyTable, extract_template_hooks,
+    ColumnTable, ConstantValue, ContingencyTable, DataSheet, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GroupedTable, HookSource,
+    InfoConstant, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
+    MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, PanelBadgeStyle, ParameterScope,
+    ProjectDocument, RectPt, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SizeChannelMapping, SubcolumnMode,
+    SurvivalAnalysisSpec, TableArchetype, TableKind, VariableRole, XyTable, extract_template_hooks,
 };
 use lumencraft_engine::Session;
 use lumencraft_palette::{ColormapId, CvdKind, LineDashStyle, MarkerFillMode, PaletteId};
 use lumencraft_render::RenderTargetSpec;
-use lumencraft_tools::{GridCellCoord, SelectionQuickStats};
+use lumencraft_tools::{GridCellCoord, JournalWidthPreset as ToolJournalWidthPreset, PhysicalUnit, SelectionQuickStats};
 use lumencraft_ui_egui::UiApp;
 use lumencraft_ui_egui::dialogs_canvas::{
-    ActiveDialog, ActiveInspector, AnalyzeDuplicateChoice, AxisTarget, CommandOrigin, CommandPaletteState, VariableRoleFilter,
-    compute_workspace_layout, render_workspace_frame_png, render_workspace_rgba, variable_role_badge, variable_role_color,
+    ANALYSIS_CATALOG, ActiveDialog, ActiveInspector, AnalyzeDialogState, AnalyzeDuplicateChoice, AxisTarget, CommandOrigin, CommandPaletteState,
+    VariableRoleFilter, compute_workspace_layout, default_analysis_kind_for_id, render_workspace_frame_png, render_workspace_rgba,
+    variable_role_badge, variable_role_color,
 };
-use lumencraft_ui_egui::theme::UiThemeSpec;
+use lumencraft_ui_egui::theme::{UiThemeSpec, font_diagnostics};
+use lumencraft_ui_egui::workspace_nav::ActiveWorkspacePane;
 use serde_json::json;
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -750,4 +752,221 @@ fn engine_command_round_trips_for_graph_and_layout_inspectors() {
     assert_eq!(layout.spec.panel_badges, PanelBadgeStyle::UpperCaseLetters);
     assert!(layout.spec.align_plot_origins);
     assert!(layout.spec.items.len() >= 3);
+}
+
+fn copy_rect_rgba(rgba: &[u8], frame_width: u32, x: u32, y: u32, w: u32, h: u32) -> Vec<u8> {
+    let mut out = Vec::with_capacity((w as usize) * (h as usize) * 4);
+    for py in y..y.saturating_add(h) {
+        let start = ((py as usize) * (frame_width as usize) + (x as usize)) * 4;
+        let end = start + (w as usize) * 4;
+        if let Some(slice) = rgba.get(start..end) {
+            out.extend_from_slice(slice);
+        }
+    }
+    out
+}
+
+#[test]
+fn wave3_analyze_catalog_entries_and_survival_mv_fields_wire_cleanly() {
+    let new_ids = ["stats.multiple_row_t_tests", "stats.bland_altman", "stats.passing_bablok", "stats.multiple_imputation"];
+    for id in new_ids {
+        let entry = ANALYSIS_CATALOG.iter().find(|item| item.id == id).expect("catalog item present");
+        assert!(!entry.label.is_empty());
+        assert!(!entry.keywords.is_empty());
+        assert!(!entry.summary.is_empty());
+        assert!(default_analysis_kind_for_id(id).is_some(), "missing default kind for {id}");
+    }
+
+    assert!(matches!(default_analysis_kind_for_id("stats.multiple_row_t_tests"), Some(AnalysisKind::MultipleRowTTests(_))));
+    assert!(matches!(default_analysis_kind_for_id("stats.bland_altman"), Some(AnalysisKind::BlandAltman(_))));
+    assert!(matches!(default_analysis_kind_for_id("stats.passing_bablok"), Some(AnalysisKind::PassingBablok(_))));
+    assert!(matches!(
+        default_analysis_kind_for_id("stats.multiple_imputation"),
+        Some(AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { .. }))
+    ));
+    assert!(matches!(
+        default_analysis_kind_for_id("stats.survival_km"),
+        Some(AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_time_column: None, mv_status_column: None, mv_group_column: None, .. }))
+    ));
+
+    let grouped = GroupedTable::new(SubcolumnMode::RawReplicates(3), 2, 4).expect("grouped");
+    let ds_grouped = DataSheet::new("d-grp", "Row Series", TableArchetype::Grouped(grouped)).expect("ds grouped");
+    let mut dialog = AnalyzeDialogState::default();
+    dialog.open_for_data_sheet(&ds_grouped);
+    assert_eq!(dialog.source_table_kind, Some(TableKind::Grouped));
+    assert!(dialog.compatible_entries().iter().any(|e| e.id == "stats.multiple_row_t_tests"));
+
+    let doc = build_rich_test_project();
+    let ds_mv = doc.data_sheet(&"data-mv".into()).expect("mv sheet");
+    dialog.open_for_data_sheet(ds_mv);
+    dialog.selected_entry_id = Some(String::from("stats.multiple_imputation"));
+    dialog.set_response_column(0);
+    let kind = dialog.build_analysis_kind().expect("imputation kind");
+    match kind {
+        AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { response_column, predictor_columns, .. }) => {
+            assert_eq!(response_column, Some(0));
+            assert_eq!(predictor_columns, vec![1, 3]);
+        }
+        other => panic!("unexpected analysis kind: {other:?}"),
+    }
+
+    for col_id in ["stats.bland_altman", "stats.passing_bablok"] {
+        let kind = default_analysis_kind_for_id(col_id).expect("col/xy compatible");
+        assert!(kind.is_compatible_with(TableKind::Column));
+        assert!(kind.is_compatible_with(TableKind::Xy));
+        assert!(kind.is_compatible_with(TableKind::MultipleVariables));
+    }
+}
+
+#[test]
+fn rtl_workspace_mirroring_and_font_diagnostics_behave_deterministically() {
+    let doc = build_rich_test_project();
+    let target = RenderTargetSpec { width_px: 800, height_px: 520, dpi: 150 };
+
+    let mut ltr_app = UiApp::from_session(Session::from_document(doc.clone()));
+    ltr_app.locale = String::from("en");
+    ltr_app.nav.navigator_open = true;
+    ltr_app.nav.inspector_open = true;
+    ltr_app.sync_views();
+    let ltr_layout = compute_workspace_layout(&ltr_app, target.width_px, target.height_px);
+    assert_eq!(ltr_layout.navigator.x, 0);
+    assert_eq!(ltr_layout.navigator.right(), ltr_layout.canvas.x);
+    assert_eq!(ltr_layout.canvas.right(), ltr_layout.inspector.x);
+    assert_eq!(ltr_layout.inspector.right(), 800);
+    let ltr_img = render_workspace_rgba(&ltr_app, target).expect("ltr rgba");
+
+    for rtl_locale in ["ar", "he"] {
+        let mut rtl_app = UiApp::from_session(Session::from_document(doc.clone()));
+        rtl_app.locale = String::from(rtl_locale);
+        rtl_app.nav.navigator_open = true;
+        rtl_app.nav.inspector_open = true;
+        rtl_app.sync_views();
+
+        let rtl_layout = compute_workspace_layout(&rtl_app, target.width_px, target.height_px);
+        assert_eq!(rtl_layout.inspector.x, 0, "inspector should mirror to left for {rtl_locale}");
+        assert_eq!(rtl_layout.inspector.width, ltr_layout.inspector.width);
+        assert_eq!(rtl_layout.inspector.right(), rtl_layout.canvas.x);
+        assert_eq!(rtl_layout.canvas.right(), rtl_layout.navigator.x);
+        assert_eq!(rtl_layout.navigator.right(), 800, "navigator should mirror to right for {rtl_locale}");
+        assert_eq!(rtl_layout.navigator.width, ltr_layout.navigator.width);
+
+        let png_a = render_workspace_frame_png(&rtl_app, target).expect("rtl png a");
+        let png_b = render_workspace_frame_png(&rtl_app, target).expect("rtl png b");
+        assert_eq!(png_a, png_b, "RTL render for {rtl_locale} must be byte-for-byte deterministic");
+
+        let rtl_img = render_workspace_rgba(&rtl_app, target).expect("rtl rgba");
+        assert_ne!(
+            copy_rect_rgba(&ltr_img.rgba, target.width_px, 0, 0, 140, target.height_px),
+            copy_rect_rgba(&rtl_img.rgba, target.width_px, 0, 0, 140, target.height_px),
+            "left chrome strip should mirror for {rtl_locale}"
+        );
+        assert_ne!(
+            copy_rect_rgba(&ltr_img.rgba, target.width_px, 660, 0, 140, target.height_px),
+            copy_rect_rgba(&rtl_img.rgba, target.width_px, 660, 0, 140, target.height_px),
+            "right chrome strip should mirror for {rtl_locale}"
+        );
+        for region in [rtl_layout.toolbar, rtl_layout.navigator, rtl_layout.canvas, rtl_layout.inspector, rtl_layout.status_bar] {
+            assert!(
+                region_distinct_colors(&rtl_img.rgba, rtl_img.width_px, region.x, region.y, region.width, region.height) >= 2,
+                "RTL region {region:?} should render distinct content"
+            );
+        }
+
+        let diag = font_diagnostics(rtl_locale);
+        assert!(diag.rtl_supported);
+    }
+
+    let en_diag = font_diagnostics("en");
+    assert!(!en_diag.rtl_supported);
+    let ja_diag = font_diagnostics("ja");
+    assert!(!ja_diag.system_cjk_candidates.is_empty());
+    assert!(!ja_diag.rtl_supported);
+}
+
+#[test]
+fn physical_ruler_chrome_toggles_and_renders_tick_bands() {
+    let doc = build_rich_test_project();
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.nav.navigator_open = true;
+    app.nav.inspector_open = true;
+    app.execute_command("sheet.select", json!({ "sheet_id": "layout-1" })).expect("select layout");
+    app.sync_views();
+
+    let target = RenderTargetSpec { width_px: 800, height_px: 520, dpi: 150 };
+    let layout = compute_workspace_layout(&app, target.width_px, target.height_px);
+
+    assert!(!app.canvas_dialogs.rulers_visible);
+    let without_rulers = render_workspace_rgba(&app, target).expect("no rulers");
+
+    app.canvas_dialogs.rulers_visible = true;
+    app.canvas_dialogs.ruler_unit = PhysicalUnit::Millimeters;
+    app.canvas_dialogs.journal_preset = Some(ToolJournalWidthPreset::SingleColumn85Mm);
+    let with_mm = render_workspace_rgba(&app, target).expect("with mm rulers");
+
+    let top_strip_off = copy_rect_rgba(&without_rulers.rgba, target.width_px, layout.canvas.x, layout.canvas.y, layout.canvas.width, 16);
+    let top_strip_on = copy_rect_rgba(&with_mm.rgba, target.width_px, layout.canvas.x, layout.canvas.y, layout.canvas.width, 16);
+    assert_ne!(top_strip_off, top_strip_on);
+    assert!(region_distinct_colors(&with_mm.rgba, target.width_px, layout.canvas.x, layout.canvas.y, layout.canvas.width, 16) >= 3);
+
+    let left_strip_off = copy_rect_rgba(&without_rulers.rgba, target.width_px, layout.canvas.x, layout.canvas.y, 24, layout.canvas.height);
+    let left_strip_on = copy_rect_rgba(&with_mm.rgba, target.width_px, layout.canvas.x, layout.canvas.y, 24, layout.canvas.height);
+    assert_ne!(left_strip_off, left_strip_on);
+    assert!(region_distinct_colors(&with_mm.rgba, target.width_px, layout.canvas.x, layout.canvas.y, 24, layout.canvas.height) >= 3);
+
+    app.canvas_dialogs.ruler_unit = PhysicalUnit::Inches;
+    app.canvas_dialogs.journal_preset = Some(ToolJournalWidthPreset::LetterHalf);
+    app.canvas_dialogs.pan_zoom.apply_pinch_zoom(1.5, [120.0, 80.0]);
+    let with_in = render_workspace_rgba(&app, target).expect("with inches rulers");
+    assert_ne!(with_mm.rgba, with_in.rgba);
+
+    app.canvas_dialogs.reset_zoom_to_fit();
+    assert!((app.canvas_dialogs.pan_zoom.zoom - 1.0).abs() < 1e-12);
+}
+
+#[test]
+fn portfolio_gallery_and_active_pane_focus_indicator_render_distinctly() {
+    let doc = build_rich_test_project();
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.nav.navigator_open = true;
+    app.nav.inspector_open = true;
+    app.sync_views();
+
+    let target = RenderTargetSpec { width_px: 800, height_px: 520, dpi: 150 };
+    let layout = compute_workspace_layout(&app, target.width_px, target.height_px);
+
+    let closed_img = render_workspace_rgba(&app, target).expect("gallery closed");
+    assert!(app.nav.toggle_gallery());
+    assert!(app.nav.gallery.cards.len() >= 4);
+
+    let open_img = render_workspace_rgba(&app, target).expect("gallery open");
+    assert_ne!(
+        copy_rect_rgba(&closed_img.rgba, target.width_px, layout.canvas.x, layout.canvas.y, layout.canvas.width, layout.canvas.height),
+        copy_rect_rgba(&open_img.rgba, target.width_px, layout.canvas.x, layout.canvas.y, layout.canvas.width, layout.canvas.height)
+    );
+    assert!(
+        region_distinct_colors(&open_img.rgba, target.width_px, layout.canvas.x, layout.canvas.y, layout.canvas.width, layout.canvas.height) >= 4
+    );
+
+    let first_id = app.nav.gallery.cards[0].sheet_id.clone();
+    app.nav.select_gallery_card(&first_id, false);
+    let selected_img = render_workspace_rgba(&app, target).expect("gallery selected");
+    assert_ne!(open_img.rgba, selected_img.rgba);
+
+    let _ = app.nav.toggle_gallery();
+    let mut focus_frames: Vec<(ActiveWorkspacePane, Vec<u8>)> = Vec::new();
+    for _ in 0..5 {
+        let pane = app.nav.active_pane;
+        let frame = render_workspace_rgba(&app, target).expect("focus frame");
+        focus_frames.push((pane, frame.rgba));
+        app.nav.cycle_focus_pane(false);
+    }
+    for i in 0..focus_frames.len() {
+        for j in (i + 1)..focus_frames.len() {
+            assert_ne!(
+                focus_frames[i].1, focus_frames[j].1,
+                "active_pane focus {:?} and {:?} must render distinct pixels",
+                focus_frames[i].0, focus_frames[j].0
+            );
+        }
+    }
 }

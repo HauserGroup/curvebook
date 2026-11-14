@@ -4,10 +4,13 @@
 //! pipeline model, and selection quick-stats footer (`docs/ui-parity.md`,
 //! `docs/data-tables-and-transforms.md`).
 
+use std::borrow::Borrow;
+
+use crate::i18n::LocalePreset;
 use lumencraft_doc::{
     CategoricalLevelSummary, Cell, CellCoord, CellValue, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind,
-    LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId, TableArchetype, TableKind, VariableRole,
-    VariableSource, XColumnMode, default_column_label,
+    LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId, SubcolumnMode, TableArchetype,
+    TableKind, VariableRole, VariableSource, XColumnMode, default_column_label,
 };
 use lumencraft_palette::Rgba8;
 use lumencraft_tools::{GridCellCoord, GridToolState, GridVisibleWindow, SelectionQuickStats, ToolCommandIntent};
@@ -1202,25 +1205,66 @@ fn archetype_column_title(arch: &TableArchetype, col: usize) -> (String, Option<
     (title.unwrap_or_else(|| default_column_label(col)), None)
 }
 
+/// Return Tier-2 subcolumn header labels for group/data-set column `col` (`A:1..A:k` for `Nested`,
+/// `Y1..Yn` / `Mean, SD, N` for `Xy`/`Column`/`Grouped`, or single role/kind headers).
+#[must_use]
+pub fn subcolumn_header_labels(arch: &TableArchetype, col: usize) -> Vec<String> {
+    match arch {
+        TableArchetype::Xy(t) if col < t.data_sets.len() => t.y_subcolumn_mode.subcolumn_labels(),
+        TableArchetype::Column(t) if col < t.data_sets.len() => t.subcolumn_mode.subcolumn_labels(),
+        TableArchetype::Grouped(t) if col < t.data_sets.len() => t.subcolumn_mode.subcolumn_labels(),
+        TableArchetype::Nested(t) => t
+            .groups
+            .get(col)
+            .map(|g| {
+                let units = g.biological_unit_count().max(1);
+                (0..units)
+                    .map(|subcol| g.subcolumn_titles.get(subcol).cloned().unwrap_or_else(|| format!("{}:{}", default_column_label(col), subcol + 1)))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        TableArchetype::MultipleVariables(mv) => mv.variables.get(col).map(|v| vec![role_short_label(v.role, v.role_inferred)]).unwrap_or_default(),
+        TableArchetype::Contingency(t) if col < t.data_sets.len() => vec![String::from("Count")],
+        TableArchetype::Survival(t) if col < t.cohorts.len() => vec![String::from("Status")],
+        TableArchetype::PartsOfWhole(t) if col < t.data_sets.len() => vec![String::from("Value")],
+        _ => Vec::new(),
+    }
+}
+
+/// Return a compact group-level badge summarizing biological units (`Nested`) or replicate
+/// subcolumn modes (`Xy`, `Column`, `Grouped`) for column `col`, or `None` for single columns.
+#[must_use]
+pub fn biological_unit_label(arch: &TableArchetype, col: usize) -> Option<String> {
+    match arch {
+        TableArchetype::Nested(t) => t.groups.get(col).map(|grp| {
+            let count = grp.biological_unit_count();
+            format!("{count} bio unit{}", if count == 1 { "" } else { "s" })
+        }),
+        TableArchetype::Xy(t) => t.data_sets.get(col).and_then(|_| replicate_mode_badge(t.y_subcolumn_mode)),
+        TableArchetype::Column(t) => t.data_sets.get(col).and_then(|_| replicate_mode_badge(t.subcolumn_mode)),
+        TableArchetype::Grouped(t) => t.data_sets.get(col).and_then(|_| replicate_mode_badge(t.subcolumn_mode)),
+        TableArchetype::Contingency(_) | TableArchetype::Survival(_) | TableArchetype::PartsOfWhole(_) | TableArchetype::MultipleVariables(_) => None,
+    }
+}
+
+fn replicate_mode_badge(mode: SubcolumnMode) -> Option<String> {
+    match mode {
+        SubcolumnMode::Single => None,
+        SubcolumnMode::RawReplicates(n) => Some(format!("{n} replicate{}", if n == 1 { "" } else { "s" })),
+        SubcolumnMode::MeanSdN => Some(String::from("Mean / SD / N")),
+        SubcolumnMode::MeanSemN => Some(String::from("Mean / SEM / N")),
+        SubcolumnMode::MeanCvN => Some(String::from("Mean / %CV / N")),
+        SubcolumnMode::MeanLowHigh => Some(String::from("Mean / -Err / +Err")),
+        SubcolumnMode::UpperLowerLimits => Some(String::from("Mean / Lower / Upper")),
+        SubcolumnMode::MedianIqr => Some(String::from("Median / Q1 / Q3")),
+    }
+}
+
 fn subcolumn_header_label(arch: &TableArchetype, col: usize, subcol: usize, cached: Option<&[String]>) -> String {
     if let Some(labels) = cached {
         return labels.get(subcol).cloned().unwrap_or_else(|| format!("Y{}", subcol + 1));
     }
-    match arch {
-        TableArchetype::Nested(t) => t
-            .groups
-            .get(col)
-            .and_then(|g| g.subcolumn_titles.get(subcol))
-            .cloned()
-            .unwrap_or_else(|| format!("{}:{}", default_column_label(col), subcol + 1)),
-        TableArchetype::MultipleVariables(mv) => {
-            mv.variables.get(col).map(|v| role_short_label(v.role, v.role_inferred)).unwrap_or_else(|| String::from("Y"))
-        }
-        TableArchetype::Contingency(_) => String::from("Count"),
-        TableArchetype::Survival(_) => String::from("Status"),
-        TableArchetype::PartsOfWhole(_) => String::from("Value"),
-        TableArchetype::Xy(_) | TableArchetype::Column(_) | TableArchetype::Grouped(_) => String::from("Y"),
-    }
+    subcolumn_header_labels(arch, col).get(subcol).cloned().unwrap_or_else(|| String::from("Y"))
 }
 
 fn role_short_label(role: VariableRole, inferred: bool) -> String {
@@ -1365,6 +1409,196 @@ fn format_compact_f64(value: f64, decimal_sep: char) -> String {
     let normalized = if value == 0.0 { 0.0 } else { value };
     let formatted = format!("{normalized}");
     if decimal_sep == ',' { formatted.replace('.', ",") } else { formatted }
+}
+
+/// Format a grid [`Cell`] for display under `preset`, applying regional decimal separators,
+/// typography minus signs, and trailing `*` exclusion markers while keeping formulas/text intact.
+#[must_use]
+pub fn format_cell_display(cell: &Cell, preset: impl Borrow<LocalePreset>) -> String {
+    let preset = preset.borrow();
+    let base = match &cell.value {
+        CellValue::Empty => String::new(),
+        CellValue::Number(v) if v.is_finite() => format_localized_f64(*v, preset),
+        CellValue::Number(_) => String::new(),
+        CellValue::Text(s) => s.clone(),
+    };
+    if cell.excluded && !base.is_empty() { format!("{base}*") } else { base }
+}
+
+/// Parse a user-entered localized numeric string into a finite `f64`.
+///
+/// Formulas starting with `=` return `None` so callers preserve formula expressions verbatim
+/// without corrupting commas or numbers inside formulas.
+#[must_use]
+pub fn parse_localized_number_input(raw: &str, preset: impl Borrow<LocalePreset>) -> Option<f64> {
+    let preset = preset.borrow();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() || trimmed.starts_with('=') {
+        return None;
+    }
+
+    let (neg, body) = split_leading_sign(trimmed, &preset.minus_sign);
+    if body.is_empty() {
+        return None;
+    }
+
+    let (mantissa, exp_suffix) = match body.find(['e', 'E']) {
+        Some(idx) => {
+            let (m, exp) = body.split_at(idx);
+            let normalized_exp = normalize_exponent_suffix(&exp[1..], &preset.minus_sign)?;
+            (m, Some(normalized_exp))
+        }
+        None => (body, None),
+    };
+
+    let ascii_mantissa = normalize_mantissa(mantissa, preset)?;
+    let mut normalized = String::new();
+    if neg {
+        normalized.push('-');
+    }
+    normalized.push_str(&ascii_mantissa);
+    if let Some(exp) = exp_suffix {
+        normalized.push('e');
+        normalized.push_str(&exp);
+    }
+
+    normalized.parse::<f64>().ok().filter(|v| v.is_finite())
+}
+
+fn format_localized_f64(value: f64, preset: &LocalePreset) -> String {
+    let normalized = if value == 0.0 { 0.0 } else { value };
+    let mut text = format!("{normalized}");
+    if let Some(rest) = text.strip_prefix('-') {
+        text = format!("{}{rest}", preset.minus_sign);
+    }
+    if preset.decimal_separator != '.' {
+        text = text.replace('.', &preset.decimal_separator.to_string());
+    }
+    text
+}
+
+fn split_leading_sign<'a>(s: &'a str, preset_minus: &str) -> (bool, &'a str) {
+    if !preset_minus.is_empty()
+        && let Some(rest) = s.strip_prefix(preset_minus)
+    {
+        return (true, rest);
+    }
+    if let Some(rest) = s.strip_prefix('\u{2212}') {
+        return (true, rest);
+    }
+    if let Some(rest) = s.strip_prefix('-') {
+        return (true, rest);
+    }
+    if let Some(rest) = s.strip_prefix('+') {
+        return (false, rest);
+    }
+    (false, s)
+}
+
+fn normalize_exponent_suffix(exp_body: &str, preset_minus: &str) -> Option<String> {
+    if exp_body.is_empty() {
+        return None;
+    }
+    let (exp_neg, digits) = split_leading_sign(exp_body, preset_minus);
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    Some(if exp_neg { format!("-{digits}") } else { digits.to_owned() })
+}
+
+fn normalize_mantissa(mantissa: &str, preset: &LocalePreset) -> Option<String> {
+    let dec = preset.decimal_separator;
+    let dec_count = mantissa.chars().filter(|&c| c == dec).count();
+    if dec_count > 1 {
+        return None;
+    }
+
+    if dec_count == 1 {
+        let (int_raw, frac_raw) = mantissa.split_once(dec)?;
+        if (int_raw.is_empty() && frac_raw.is_empty()) || !frac_raw.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let clean_int = if int_raw.is_empty() {
+            String::new()
+        } else {
+            let mut seps = Vec::with_capacity(5);
+            if let Some(t) = preset.thousands_separator
+                && t != dec
+            {
+                seps.push(t);
+            }
+            for fallback in [' ', '\u{00a0}', '\u{202f}', if dec == ',' { '.' } else { ',' }] {
+                if fallback != dec && !seps.contains(&fallback) {
+                    seps.push(fallback);
+                }
+            }
+            strip_thousands_grouping(int_raw, &seps)?
+        };
+        return Some(format!("{clean_int}.{frac_raw}"));
+    }
+
+    if mantissa.bytes().all(|b| b.is_ascii_digit()) {
+        return (!mantissa.is_empty()).then(|| mantissa.to_owned());
+    }
+
+    let mut plain_seps = Vec::with_capacity(4);
+    if let Some(t) = preset.thousands_separator
+        && t != dec
+    {
+        plain_seps.push(t);
+    }
+    for space in [' ', '\u{00a0}', '\u{202f}'] {
+        if !plain_seps.contains(&space) {
+            plain_seps.push(space);
+        }
+    }
+    if let Some(clean_int) = strip_thousands_grouping(mantissa, &plain_seps) {
+        return Some(clean_int);
+    }
+
+    if dec == ',' && preset.thousands_separator != Some('.') && mantissa.chars().filter(|&c| c == '.').count() == 1 {
+        let (int_raw, frac_raw) = mantissa.split_once('.')?;
+        let valid_parts = !(int_raw.is_empty() && frac_raw.is_empty())
+            && int_raw.bytes().all(|b| b.is_ascii_digit())
+            && frac_raw.bytes().all(|b| b.is_ascii_digit());
+        if valid_parts {
+            return Some(mantissa.to_owned());
+        }
+    }
+
+    None
+}
+
+fn strip_thousands_grouping(int_part: &str, allowed_seps: &[char]) -> Option<String> {
+    if int_part.is_empty() {
+        return None;
+    }
+    if int_part.bytes().all(|b| b.is_ascii_digit()) {
+        return Some(int_part.to_owned());
+    }
+    for &sep in allowed_seps {
+        if !int_part.contains(sep) {
+            continue;
+        }
+        let mut parts = int_part.split(sep);
+        let first = parts.next()?;
+        if first.is_empty() || first.len() > 3 || !first.bytes().all(|b| b.is_ascii_digit()) {
+            return None;
+        }
+        let mut out = String::from(first);
+        let mut group_count = 0usize;
+        for part in parts {
+            if part.len() != 3 || !part.bytes().all(|b| b.is_ascii_digit()) {
+                return None;
+            }
+            out.push_str(part);
+            group_count += 1;
+        }
+        if group_count > 0 {
+            return Some(out);
+        }
+    }
+    None
 }
 
 fn validate_cell_for_archetype(sheet: &DataSheet, coord: GridCellCoord, cell: &Cell) -> Option<String> {

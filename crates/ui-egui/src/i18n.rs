@@ -1,8 +1,9 @@
 //! Interface localization catalog registry and regional number/delimiter presets for LumenCraft.
 //!
-//! Supports English (`en`) and all eight Tier-1 scientific locales (`de`, `es`, `fr`, `ja`,
-//! `ko`, `pt-BR`, `zh-CN`, `zh-TW`), integrating with [`lumencraft_text::LocaleNumberPolicy`] and
-//! [`lumencraft_format::CsvOptions`].
+//! Supports English (`en`), eight Tier-1 scientific locales (`de`, `es`, `fr`, `ja`, `ko`,
+//! `pt-BR`, `zh-CN`, `zh-TW`), five Tier-2 European locales (`it`, `nl`, `pl`, `ru`, `tr`), and
+//! two right-to-left (RTL) locales (`ar`, `he`), integrating with
+//! [`lumencraft_text::LocaleNumberPolicy`] and [`lumencraft_format::CsvOptions`].
 
 use std::borrow::Cow;
 
@@ -12,14 +13,14 @@ use lumencraft_math::{AxisScale, PValueFormat};
 use lumencraft_text::{LocaleNumberPolicy, format_axis_tick, format_pvalue_label};
 use serde::{Deserialize, Serialize};
 
-/// Supported BCP-47 interface locale identifiers (`en` + 8 Tier-1 scientific locales).
-pub const LOCALES: &[&str] = &["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"];
+/// Supported BCP-47 interface locale identifiers (`en` + 8 Tier-1 + 5 Tier-2 European + 2 RTL).
+pub const LOCALES: &[&str] = &["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
 
-/// Single catalog entry containing translations for all 9 registered [`LOCALES`] in order.
+/// Single catalog entry containing translations for all 16 registered [`LOCALES`] in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogEntry {
     pub key: &'static str,
-    pub translations: [&'static str; 9],
+    pub translations: [&'static str; 16],
 }
 
 macro_rules! entry {
@@ -33,10 +34,17 @@ macro_rules! entry {
             ko: $ko:expr,
             pt_br: $pt_br:expr,
             zh_cn: $zh_cn:expr,
-            zh_tw: $zh_tw:expr $(,)?
+            zh_tw: $zh_tw:expr,
+            it: $it:expr,
+            nl: $nl:expr,
+            pl: $pl:expr,
+            ru: $ru:expr,
+            tr: $tr:expr,
+            ar: $ar:expr,
+            he: $he:expr $(,)?
         ]
     ) => {
-        CatalogEntry { key: $key, translations: [$en, $de, $es, $fr, $ja, $ko, $pt_br, $zh_cn, $zh_tw] }
+        CatalogEntry { key: $key, translations: [$en, $de, $es, $fr, $ja, $ko, $pt_br, $zh_cn, $zh_tw, $it, $nl, $pl, $ru, $tr, $ar, $he] }
     };
 }
 
@@ -54,6 +62,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Arquivo",
         zh_cn: "文件",
         zh_tw: "檔案",
+        it: "Archivio",
+        nl: "Bestand",
+        pl: "Plik",
+        ru: "Файл",
+        tr: "Dosya",
+        ar: "ملف",
+        he: "קובץ",
     ]),
     entry!("menu.file.new_project" => [
         en: "New Project",
@@ -65,6 +80,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Novo projeto",
         zh_cn: "新建项目",
         zh_tw: "新增專案",
+        it: "Nuovo progetto",
+        nl: "Nieuw project",
+        pl: "Nowy projekt",
+        ru: "Новый проект",
+        tr: "Yeni Proje",
+        ar: "مشروع جديد",
+        he: "פרויקט חדש",
     ]),
     entry!("menu.file.open" => [
         en: "Open...",
@@ -76,6 +98,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Abrir...",
         zh_cn: "打开...",
         zh_tw: "開啟...",
+        it: "Apri...",
+        nl: "Openen...",
+        pl: "Otwórz...",
+        ru: "Открыть...",
+        tr: "Aç...",
+        ar: "فتح...",
+        he: "פתיחה...",
     ]),
     entry!("menu.file.save" => [
         en: "Save",
@@ -87,6 +116,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Salvar",
         zh_cn: "保存",
         zh_tw: "儲存",
+        it: "Salva",
+        nl: "Opslaan",
+        pl: "Zapisz",
+        ru: "Сохранить",
+        tr: "Kaydet",
+        ar: "حفظ",
+        he: "שמירה",
     ]),
     entry!("menu.file.save_as" => [
         en: "Save As...",
@@ -98,6 +134,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Salvar como...",
         zh_cn: "另存为...",
         zh_tw: "另存新檔...",
+        it: "Salva con nome...",
+        nl: "Opslaan als...",
+        pl: "Zapisz jako...",
+        ru: "Сохранить как...",
+        tr: "Farklı Kaydet...",
+        ar: "حفظ باسم...",
+        he: "שמירה בשם...",
     ]),
     entry!("menu.file.import" => [
         en: "Import...",
@@ -109,6 +152,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Importar...",
         zh_cn: "导入...",
         zh_tw: "匯入...",
+        it: "Importa...",
+        nl: "Importeren...",
+        pl: "Importuj...",
+        ru: "Импорт...",
+        tr: "İçe Aktar...",
+        ar: "استيراد...",
+        he: "ייבוא...",
     ]),
     entry!("menu.file.export" => [
         en: "Export...",
@@ -120,6 +170,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Exportar...",
         zh_cn: "导出...",
         zh_tw: "匯出...",
+        it: "Esporta...",
+        nl: "Exporteren...",
+        pl: "Eksportuj...",
+        ru: "Экспорт...",
+        tr: "Dışa Aktar...",
+        ar: "تصدير...",
+        he: "ייצוא...",
     ]),
     entry!("menu.file.export_svg" => [
         en: "Export SVG",
@@ -131,6 +188,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Exportar SVG",
         zh_cn: "导出 SVG",
         zh_tw: "匯出 SVG",
+        it: "Esporta SVG",
+        nl: "SVG exporteren",
+        pl: "Eksportuj SVG",
+        ru: "Экспорт в SVG",
+        tr: "SVG Olarak Dışa Aktar",
+        ar: "تصدير SVG",
+        he: "ייצוא ל-SVG",
     ]),
     entry!("menu.file.export_pdf" => [
         en: "Export PDF",
@@ -142,6 +206,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Exportar PDF",
         zh_cn: "导出 PDF",
         zh_tw: "匯出 PDF",
+        it: "Esporta PDF",
+        nl: "PDF exporteren",
+        pl: "Eksportuj PDF",
+        ru: "Экспорт в PDF",
+        tr: "PDF Olarak Dışa Aktar",
+        ar: "تصدير PDF",
+        he: "ייצוא ל-PDF",
     ]),
     entry!("menu.file.export_png" => [
         en: "Export PNG",
@@ -153,6 +224,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Exportar PNG",
         zh_cn: "导出 PNG",
         zh_tw: "匯出 PNG",
+        it: "Esporta PNG",
+        nl: "PNG exporteren",
+        pl: "Eksportuj PNG",
+        ru: "Экспорт в PNG",
+        tr: "PNG Olarak Dışa Aktar",
+        ar: "تصدير PNG",
+        he: "ייצוא ל-PNG",
     ]),
     entry!("menu.file.export_tiff" => [
         en: "Export TIFF",
@@ -164,6 +242,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Exportar TIFF",
         zh_cn: "导出 TIFF",
         zh_tw: "匯出 TIFF",
+        it: "Esporta TIFF",
+        nl: "TIFF exporteren",
+        pl: "Eksportuj TIFF",
+        ru: "Экспорт в TIFF",
+        tr: "TIFF Olarak Dışa Aktar",
+        ar: "تصدير TIFF",
+        he: "ייצוא ל-TIFF",
     ]),
     entry!("menu.file.print" => [
         en: "Print...",
@@ -175,6 +260,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Imprimir...",
         zh_cn: "打印...",
         zh_tw: "列印...",
+        it: "Stampa...",
+        nl: "Afdrukken...",
+        pl: "Drukuj...",
+        ru: "Печать...",
+        tr: "Yazdır...",
+        ar: "طباعة...",
+        he: "הדפסה...",
     ]),
     entry!("menu.file.close" => [
         en: "Close",
@@ -186,6 +278,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Fechar",
         zh_cn: "关闭",
         zh_tw: "關閉",
+        it: "Chiudi",
+        nl: "Sluiten",
+        pl: "Zamknij",
+        ru: "Закрыть",
+        tr: "Kapat",
+        ar: "إغلاق",
+        he: "סגירה",
     ]),
     entry!("menu.edit" => [
         en: "Edit",
@@ -197,6 +296,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Editar",
         zh_cn: "编辑",
         zh_tw: "編輯",
+        it: "Modifica",
+        nl: "Bewerken",
+        pl: "Edycja",
+        ru: "Правка",
+        tr: "Düzenle",
+        ar: "تحرير",
+        he: "עריכה",
     ]),
     entry!("menu.edit.undo" => [
         en: "Undo",
@@ -208,6 +314,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Desfazer",
         zh_cn: "撤销",
         zh_tw: "復原",
+        it: "Annulla",
+        nl: "Ongedaan maken",
+        pl: "Cofnij",
+        ru: "Отменить",
+        tr: "Geri Al",
+        ar: "تراجع",
+        he: "ביטול פעולה",
     ]),
     entry!("menu.edit.redo" => [
         en: "Redo",
@@ -219,6 +332,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Refazer",
         zh_cn: "重做",
         zh_tw: "重做",
+        it: "Ripeti",
+        nl: "Opnieuw uitvoeren",
+        pl: "Ponów",
+        ru: "Повторить",
+        tr: "Yinele",
+        ar: "إعادة",
+        he: "ביצוע חוזר",
     ]),
     entry!("menu.edit.cut" => [
         en: "Cut",
@@ -230,6 +350,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Recortar",
         zh_cn: "剪切",
         zh_tw: "剪下",
+        it: "Taglia",
+        nl: "Knippen",
+        pl: "Wytnij",
+        ru: "Вырезать",
+        tr: "Kes",
+        ar: "قص",
+        he: "גזירה",
     ]),
     entry!("menu.edit.copy" => [
         en: "Copy",
@@ -241,6 +368,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Copiar",
         zh_cn: "复制",
         zh_tw: "複製",
+        it: "Copia",
+        nl: "Kopiëren",
+        pl: "Kopiuj",
+        ru: "Копировать",
+        tr: "Kopyala",
+        ar: "نسخ",
+        he: "העתקה",
     ]),
     entry!("menu.edit.paste" => [
         en: "Paste",
@@ -252,6 +386,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Colar",
         zh_cn: "粘贴",
         zh_tw: "貼上",
+        it: "Incolla",
+        nl: "Plakken",
+        pl: "Wklej",
+        ru: "Вставить",
+        tr: "Yapıştır",
+        ar: "لصق",
+        he: "הדבקה",
     ]),
     entry!("menu.edit.paste_special" => [
         en: "Paste Special...",
@@ -263,6 +404,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Colar especial...",
         zh_cn: "选择性粘贴...",
         zh_tw: "選擇性貼上...",
+        it: "Incolla speciale...",
+        nl: "Plakken speciaal...",
+        pl: "Wklej specjalnie...",
+        ru: "Специальная вставка...",
+        tr: "Özel Yapıştır...",
+        ar: "لصق خاص...",
+        he: "הדבקה מיוחדת...",
     ]),
     entry!("menu.edit.paste_link" => [
         en: "Paste Link",
@@ -274,6 +422,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Colar vínculo",
         zh_cn: "粘贴链接",
         zh_tw: "貼上連結",
+        it: "Incolla collegamento",
+        nl: "Koppeling plakken",
+        pl: "Wklej łącze",
+        ru: "Вставить связь",
+        tr: "Bağlantı Olarak Yapıştır",
+        ar: "لصق كارتباط",
+        he: "הדבקת קישור",
     ]),
     entry!("menu.edit.find" => [
         en: "Find...",
@@ -285,6 +440,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Localizar...",
         zh_cn: "查找...",
         zh_tw: "尋找...",
+        it: "Trova...",
+        nl: "Zoeken...",
+        pl: "Znajdź...",
+        ru: "Найти...",
+        tr: "Bul...",
+        ar: "بحث...",
+        he: "חיפוש...",
     ]),
     entry!("menu.insert" => [
         en: "Insert",
@@ -296,6 +458,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Inserir",
         zh_cn: "插入",
         zh_tw: "插入",
+        it: "Inserisci",
+        nl: "Invoegen",
+        pl: "Wstaw",
+        ru: "Вставка",
+        tr: "Ekle",
+        ar: "إدراج",
+        he: "הוספה",
     ]),
     entry!("menu.insert.new_data_table" => [
         en: "New Data Table...",
@@ -307,6 +476,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Nova tabela de dados...",
         zh_cn: "新建数据表...",
         zh_tw: "新增資料表...",
+        it: "Nuova tabella dati...",
+        nl: "Nieuwe gegevenstabel...",
+        pl: "Nowa tabela danych...",
+        ru: "Новая таблица данных...",
+        tr: "Yeni Veri Tablosu...",
+        ar: "جدول بيانات جديد...",
+        he: "טבלת נתונים חדשה...",
     ]),
     entry!("menu.insert.new_info_sheet" => [
         en: "New Info Sheet",
@@ -318,6 +494,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Nova folha de informações",
         zh_cn: "新建信息表",
         zh_tw: "新增資訊工作表",
+        it: "Nuovo foglio informazioni",
+        nl: "Nieuw infoblad",
+        pl: "Nowy arkusz informacji",
+        ru: "Новый лист сведений",
+        tr: "Yeni Bilgi Sayfası",
+        ar: "ورقة معلومات جديدة",
+        he: "גיליון מידע חדש",
     ]),
     entry!("menu.insert.new_graph" => [
         en: "New Graph",
@@ -329,6 +512,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Novo gráfico",
         zh_cn: "新建图表",
         zh_tw: "新增圖表",
+        it: "Nuovo grafico",
+        nl: "Nieuwe grafiek",
+        pl: "Nowy wykres",
+        ru: "Новый график",
+        tr: "Yeni Grafik",
+        ar: "رسم بياني جديد",
+        he: "גרף חדש",
     ]),
     entry!("menu.insert.new_layout" => [
         en: "New Page Layout",
@@ -340,6 +530,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Novo layout de página",
         zh_cn: "新建页面布局",
         zh_tw: "新增頁面版面",
+        it: "Nuovo layout di pagina",
+        nl: "Nieuwe pagina-indeling",
+        pl: "Nowy układ strony",
+        ru: "Новый макет страницы",
+        tr: "Yeni Sayfa Düzeni",
+        ar: "تخطيط صفحة جديد",
+        he: "פריסת עמוד חדשה",
     ]),
     entry!("menu.insert.floating_note" => [
         en: "Floating Note",
@@ -351,6 +548,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Nota flutuante",
         zh_cn: "浮动注释",
         zh_tw: "浮動備註",
+        it: "Nota mobile",
+        nl: "Zwevende notitie",
+        pl: "Notatka pływająca",
+        ru: "Плавающая заметка",
+        tr: "Serbest Not",
+        ar: "ملاحظة عائمة",
+        he: "הערה צפה",
     ]),
     entry!("menu.analyze" => [
         en: "Analyze",
@@ -362,6 +566,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Analisar",
         zh_cn: "分析",
         zh_tw: "分析",
+        it: "Analizza",
+        nl: "Analyseren",
+        pl: "Analiza",
+        ru: "Анализ",
+        tr: "Analiz",
+        ar: "تحليل",
+        he: "ניתוח",
     ]),
     entry!("menu.analyze.analyze" => [
         en: "Analyze...",
@@ -373,6 +584,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Analisar...",
         zh_cn: "分析...",
         zh_tw: "分析...",
+        it: "Analizza...",
+        nl: "Analyseren...",
+        pl: "Analizuj...",
+        ru: "Анализировать...",
+        tr: "Analiz Et...",
+        ar: "تحليل...",
+        he: "ביצוע ניתוח...",
     ]),
     entry!("menu.analyze.run_all" => [
         en: "Recalculate All",
@@ -384,6 +602,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Recalcular tudo",
         zh_cn: "全部重新计算",
         zh_tw: "全部重新計算",
+        it: "Ricalcola tutto",
+        nl: "Alles herberekenen",
+        pl: "Przelicz wszystko",
+        ru: "Пересчитать всё",
+        tr: "Tümünü Yeniden Hesapla",
+        ar: "إعادة حساب الكل",
+        he: "חישוב מחדש של הכול",
     ]),
     entry!("menu.analyze.change_params" => [
         en: "Change Analysis Parameters...",
@@ -395,6 +620,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Alterar parâmetros de análise...",
         zh_cn: "更改分析参数...",
         zh_tw: "變更分析參數...",
+        it: "Cambia parametri di analisi...",
+        nl: "Analyseparameters wijzigen...",
+        pl: "Zmień parametry analizy...",
+        ru: "Изменить параметры анализа...",
+        tr: "Analiz Parametrelerini Değiştir...",
+        ar: "تغيير معاملات التحليل...",
+        he: "שינוי פרמטרי הניתוח...",
     ]),
     entry!("menu.analyze.change_data" => [
         en: "Change Data Analyzed...",
@@ -406,6 +638,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Alterar dados analisados...",
         zh_cn: "更改分析数据...",
         zh_tw: "變更分析資料...",
+        it: "Cambia dati analizzati...",
+        nl: "Geanalyseerde gegevens wijzigen...",
+        pl: "Zmień analizowane dane...",
+        ru: "Изменить анализируемые данные...",
+        tr: "Analiz Edilen Veriyi Değiştir...",
+        ar: "تغيير البيانات المحلّلة...",
+        he: "שינוי הנתונים המנותחים...",
     ]),
     entry!("menu.analyze.exclude_values" => [
         en: "Exclude Values",
@@ -417,6 +656,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Excluir valores",
         zh_cn: "排除数值",
         zh_tw: "排除數值",
+        it: "Escludi valori",
+        nl: "Waarden uitsluiten",
+        pl: "Wyklucz wartości",
+        ru: "Исключить значения",
+        tr: "Değerleri Hariç Tut",
+        ar: "استبعاد القيم",
+        he: "החרגת ערכים",
     ]),
     entry!("menu.analyze.freeze_sheet" => [
         en: "Freeze Data Table",
@@ -428,6 +674,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Congelar tabela de dados",
         zh_cn: "冻结数据表",
         zh_tw: "凍結資料表",
+        it: "Blocca tabella dati",
+        nl: "Gegevenstabel bevriezen",
+        pl: "Zamróź tabelę danych",
+        ru: "Заморозить таблицу данных",
+        tr: "Veri Tablosunu Dondur",
+        ar: "تجميد جدول البيانات",
+        he: "הקפאת טבלת נתונים",
     ]),
     entry!("menu.analyze.unfreeze_sheet" => [
         en: "Unfreeze Data Table",
@@ -439,6 +692,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Descongelar tabela de dados",
         zh_cn: "取消冻结数据表",
         zh_tw: "解除凍結資料表",
+        it: "Sblocca tabella dati",
+        nl: "Gegevenstabel ontdooien",
+        pl: "Odmróź tabelę danych",
+        ru: "Разморозить таблицу данных",
+        tr: "Veri Tablosunun Dondurmasını Kaldır",
+        ar: "إلغاء تجميد جدول البيانات",
+        he: "ביטול הקפאת טבלת נתונים",
     ]),
     entry!("menu.graph" => [
         en: "Graph",
@@ -450,6 +710,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Gráfico",
         zh_cn: "图表",
         zh_tw: "圖表",
+        it: "Grafico",
+        nl: "Grafiek",
+        pl: "Wykres",
+        ru: "График",
+        tr: "Grafik",
+        ar: "رسم بياني",
+        he: "גרף",
     ]),
     entry!("menu.graph.change_type" => [
         en: "Change Graph Type...",
@@ -461,6 +728,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Alterar tipo de gráfico...",
         zh_cn: "更改图表类型...",
         zh_tw: "變更圖表類型...",
+        it: "Cambia tipo di grafico...",
+        nl: "Grafiektype wijzigen...",
+        pl: "Zmień typ wykresu...",
+        ru: "Изменить тип графика...",
+        tr: "Grafik Türünü Değiştir...",
+        ar: "تغيير نوع الرسم البياني...",
+        he: "שינוי סוג הגרף...",
     ]),
     entry!("menu.graph.format_graph" => [
         en: "Format Graph...",
@@ -472,6 +746,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Formatar gráfico...",
         zh_cn: "设置图表格式...",
         zh_tw: "設定圖表格式...",
+        it: "Formatta grafico...",
+        nl: "Grafiek opmaken...",
+        pl: "Formatuj wykres...",
+        ru: "Формат графика...",
+        tr: "Grafiği Biçimlendir...",
+        ar: "تنسيق الرسم البياني...",
+        he: "עיצוב גרף...",
     ]),
     entry!("menu.graph.format_axes" => [
         en: "Format Axes...",
@@ -483,6 +764,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Formatar eixos...",
         zh_cn: "设置坐标轴格式...",
         zh_tw: "設定座標軸格式...",
+        it: "Formatta assi...",
+        nl: "Assen opmaken...",
+        pl: "Formatuj osie...",
+        ru: "Формат осей...",
+        tr: "Eksenleri Biçimlendir...",
+        ar: "تنسيق المحاور...",
+        he: "עיצוב צירים...",
     ]),
     entry!("menu.graph.pairwise_brackets" => [
         en: "Pairwise Comparisons...",
@@ -494,6 +782,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Comparações pareadas...",
         zh_cn: "成对比较标注...",
         zh_tw: "成對比較標註...",
+        it: "Confronti a coppie...",
+        nl: "Paarsgewijze vergelijkingen...",
+        pl: "Porównania parami...",
+        ru: "Попарные сравнения...",
+        tr: "İkili Karşılaştırmalar...",
+        ar: "المقارنات الزوجية...",
+        he: "השוואות זוגיות...",
     ]),
     entry!("menu.graph.apply_style_from" => [
         en: "Apply Style From...",
@@ -505,6 +800,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Aplicar estilo de...",
         zh_cn: "套用样式自...",
         zh_tw: "套用樣式自...",
+        it: "Applica stile da...",
+        nl: "Stijl toepassen van...",
+        pl: "Zastosuj styl z...",
+        ru: "Применить стиль из...",
+        tr: "Stili Şuradan Uygula...",
+        ar: "تطبيق النمط من...",
+        he: "החלת סגנון מתוך...",
     ]),
     entry!("menu.view" => [
         en: "View",
@@ -516,6 +818,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Exibir",
         zh_cn: "视图",
         zh_tw: "檢視",
+        it: "Visualizza",
+        nl: "Beeld",
+        pl: "Widok",
+        ru: "Вид",
+        tr: "Görünüm",
+        ar: "عرض",
+        he: "תצוגה",
     ]),
     entry!("menu.view.navigator" => [
         en: "Project Navigator",
@@ -527,6 +836,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Navegador do projeto",
         zh_cn: "项目导航器",
         zh_tw: "專案導覽器",
+        it: "Navigatore progetto",
+        nl: "Projectnavigator",
+        pl: "Nawigator projektu",
+        ru: "Навигатор проекта",
+        tr: "Proje Gezgini",
+        ar: "متصفح المشروع",
+        he: "נווט הפרויקט",
     ]),
     entry!("menu.view.inspector" => [
         en: "Format Inspector",
@@ -538,6 +854,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Inspetor de formato",
         zh_cn: "格式检查器",
         zh_tw: "格式檢查器",
+        it: "Ispettore di formato",
+        nl: "Opmaakinspecteur",
+        pl: "Inspektor formatu",
+        ru: "Инспектор формата",
+        tr: "Biçim Denetçisi",
+        ar: "فاحص التنسيق",
+        he: "בוחן העיצוב",
     ]),
     entry!("menu.view.family_pane" => [
         en: "Family Pane",
@@ -549,6 +872,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Painel de família",
         zh_cn: "关联族面板",
         zh_tw: "關聯群組窗格",
+        it: "Pannello famiglia",
+        nl: "Familiedeelvenster",
+        pl: "Panel powiązań",
+        ru: "Панель семейства",
+        tr: "Aile Bölmesi",
+        ar: "جزء العائلة",
+        he: "חלונית משפחה",
     ]),
     entry!("menu.view.zoom_fit" => [
         en: "Zoom to Fit Sheet",
@@ -560,6 +890,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Ajustar zoom à folha",
         zh_cn: "缩放至适应工作表",
         zh_tw: "縮放至符合工作表",
+        it: "Adatta al foglio",
+        nl: "Passend op blad zoomen",
+        pl: "Dopasuj powiększenie do arkusza",
+        ru: "Подогнать масштаб к листу",
+        tr: "Sayfaya Sığdır",
+        ar: "تكبير لملء الورقة",
+        he: "התאמת תצוגה לגיליון",
     ]),
     entry!("menu.view.command_palette" => [
         en: "Command Palette...",
@@ -571,6 +908,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Paleta de comandos...",
         zh_cn: "命令面板...",
         zh_tw: "命令選擇區...",
+        it: "Tavolozza comandi...",
+        nl: "Opdrachtenpalet...",
+        pl: "Paleta poleceń...",
+        ru: "Палитра команд...",
+        tr: "Komut Paleti...",
+        ar: "لوحة الأوامر...",
+        he: "לוח הפקודות...",
     ]),
     entry!("menu.view.theme" => [
         en: "Theme",
@@ -582,6 +926,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Tema",
         zh_cn: "主题",
         zh_tw: "佈景主題",
+        it: "Tema",
+        nl: "Thema",
+        pl: "Motyw",
+        ru: "Тема",
+        tr: "Tema",
+        ar: "السمة",
+        he: "ערכת נושא",
     ]),
     entry!("menu.help" => [
         en: "Help",
@@ -593,6 +944,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Ajuda",
         zh_cn: "帮助",
         zh_tw: "說明",
+        it: "Aiuto",
+        nl: "Hulp",
+        pl: "Pomoc",
+        ru: "Справка",
+        tr: "Yardım",
+        ar: "مساعدة",
+        he: "עזרה",
     ]),
     entry!("menu.help.documentation" => [
         en: "Documentation",
@@ -604,6 +962,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Documentação",
         zh_cn: "文档",
         zh_tw: "說明文件",
+        it: "Documentazione",
+        nl: "Documentatie",
+        pl: "Dokumentacja",
+        ru: "Документация",
+        tr: "Belgeler",
+        ar: "التوثيق",
+        he: "תיעוד",
     ]),
     entry!("menu.help.checklist" => [
         en: "Analysis Checklist",
@@ -615,6 +980,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Lista de verificação da análise",
         zh_cn: "分析检查清单",
         zh_tw: "分析檢查清單",
+        it: "Lista di controllo dell'analisi",
+        nl: "Analysechecklist",
+        pl: "Lista kontrolna analizy",
+        ru: "Контрольный список анализа",
+        tr: "Analiz Kontrol Listesi",
+        ar: "قائمة التحقق من التحليل",
+        he: "רשימת בדיקה לניתוח",
     ]),
     entry!("menu.help.about" => [
         en: "About LumenCraft",
@@ -626,6 +998,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Sobre o LumenCraft",
         zh_cn: "关于 LumenCraft",
         zh_tw: "關於 LumenCraft",
+        it: "Informazioni su LumenCraft",
+        nl: "Over LumenCraft",
+        pl: "O programie LumenCraft",
+        ru: "О программе LumenCraft",
+        tr: "LumenCraft Hakkında",
+        ar: "حول LumenCraft",
+        he: "אודות LumenCraft",
     ]),
     // --- Navigator folders ---
     entry!("nav.data_tables" => [
@@ -638,6 +1017,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Tabelas de dados",
         zh_cn: "数据表",
         zh_tw: "資料表",
+        it: "Tabelle dati",
+        nl: "Gegevenstabellen",
+        pl: "Tabele danych",
+        ru: "Таблицы данных",
+        tr: "Veri Tabloları",
+        ar: "جداول البيانات",
+        he: "טבלאות נתונים",
     ]),
     entry!("nav.info" => [
         en: "Info",
@@ -649,6 +1035,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Informações",
         zh_cn: "信息",
         zh_tw: "資訊",
+        it: "Informazioni",
+        nl: "Informatie",
+        pl: "Informacje",
+        ru: "Сведения",
+        tr: "Bilgi",
+        ar: "معلومات",
+        he: "מידע",
     ]),
     entry!("nav.results" => [
         en: "Results",
@@ -660,6 +1053,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Resultados",
         zh_cn: "结果",
         zh_tw: "結果",
+        it: "Risultati",
+        nl: "Resultaten",
+        pl: "Wyniki",
+        ru: "Результаты",
+        tr: "Sonuçlar",
+        ar: "النتائج",
+        he: "תוצאות",
     ]),
     entry!("nav.graphs" => [
         en: "Graphs",
@@ -671,6 +1071,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Gráficos",
         zh_cn: "图表",
         zh_tw: "圖表",
+        it: "Grafici",
+        nl: "Grafieken",
+        pl: "Wykresy",
+        ru: "Графики",
+        tr: "Grafikler",
+        ar: "الرسوم البيانية",
+        he: "גרפים",
     ]),
     entry!("nav.layouts" => [
         en: "Layouts",
@@ -682,6 +1089,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Layouts",
         zh_cn: "页面布局",
         zh_tw: "版面配置",
+        it: "Impaginazioni",
+        nl: "Indelingen",
+        pl: "Układy",
+        ru: "Макеты",
+        tr: "Düzenler",
+        ar: "التخطيطات",
+        he: "פריסות",
     ]),
     entry!("nav.family" => [
         en: "Family",
@@ -693,6 +1107,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Família",
         zh_cn: "关联族",
         zh_tw: "關聯群組",
+        it: "Famiglia",
+        nl: "Familie",
+        pl: "Rodzina",
+        ru: "Семейство",
+        tr: "Aile",
+        ar: "العائلة",
+        he: "משפחה",
     ]),
     // --- All 8 data table archetypes ---
     entry!("table.xy" => [
@@ -705,6 +1126,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "XY",
         zh_cn: "XY",
         zh_tw: "XY",
+        it: "XY",
+        nl: "XY",
+        pl: "XY",
+        ru: "XY",
+        tr: "XY",
+        ar: "XY",
+        he: "XY",
     ]),
     entry!("table.column" => [
         en: "Column",
@@ -716,6 +1144,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Coluna",
         zh_cn: "列",
         zh_tw: "欄",
+        it: "Colonna",
+        nl: "Kolom",
+        pl: "Kolumnowa",
+        ru: "Столбцовая",
+        tr: "Sütun",
+        ar: "عمودية",
+        he: "עמודות",
     ]),
     entry!("table.grouped" => [
         en: "Grouped",
@@ -727,6 +1162,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Agrupada",
         zh_cn: "分组",
         zh_tw: "分組",
+        it: "Raggruppata",
+        nl: "Gegroepeerd",
+        pl: "Pogrupowana",
+        ru: "Группированная",
+        tr: "Gruplanmış",
+        ar: "مجمّعة",
+        he: "מקובצת",
     ]),
     entry!("table.contingency" => [
         en: "Contingency",
@@ -738,6 +1180,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Contingência",
         zh_cn: "列联表",
         zh_tw: "列聯表",
+        it: "Contingenza",
+        nl: "Kruistabel",
+        pl: "Kontyngencji",
+        ru: "Сопряжённости",
+        tr: "Çapraz Tablo",
+        ar: "التوافق",
+        he: "שכיחויות צולבות",
     ]),
     entry!("table.survival" => [
         en: "Survival",
@@ -749,6 +1198,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Sobrevivência",
         zh_cn: "生存分析",
         zh_tw: "存活分析",
+        it: "Sopravvivenza",
+        nl: "Overleving",
+        pl: "Przeżywalność",
+        ru: "Выживаемость",
+        tr: "Sağkalım",
+        ar: "البقاء",
+        he: "הישרדות",
     ]),
     entry!("table.parts_of_whole" => [
         en: "Parts of Whole",
@@ -760,6 +1216,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Partes do todo",
         zh_cn: "整体与部分",
         zh_tw: "整體與部分",
+        it: "Parti di un tutto",
+        nl: "Delen van een geheel",
+        pl: "Części całości",
+        ru: "Части целого",
+        tr: "Bütünün Parçaları",
+        ar: "أجزاء من الكل",
+        he: "חלקים מהשלם",
     ]),
     entry!("table.multiple_variables" => [
         en: "Multiple Variables",
@@ -771,6 +1234,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Múltiplas variáveis",
         zh_cn: "多变量",
         zh_tw: "多變數",
+        it: "Variabili multiple",
+        nl: "Meerdere variabelen",
+        pl: "Wiele zmiennych",
+        ru: "Множественные переменные",
+        tr: "Çoklu Değişkenler",
+        ar: "متغيرات متعددة",
+        he: "משתנים מרובים",
     ]),
     entry!("table.nested" => [
         en: "Nested",
@@ -782,6 +1252,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Aninhada",
         zh_cn: "嵌套",
         zh_tw: "巢狀",
+        it: "Annidata",
+        nl: "Genest",
+        pl: "Zagnieżdżona",
+        ru: "Вложенная",
+        tr: "Yuvalanmış",
+        ar: "متداخلة",
+        he: "מקוננת",
     ]),
     // --- Key analysis & curve-fitting families ---
     entry!("analysis.transform" => [
@@ -794,6 +1271,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Transformar",
         zh_cn: "数学变换",
         zh_tw: "數學轉換",
+        it: "Trasforma",
+        nl: "Transformeren",
+        pl: "Przekształć",
+        ru: "Преобразование",
+        tr: "Dönüştür",
+        ar: "تحويل",
+        he: "התמרה",
     ]),
     entry!("analysis.normalize" => [
         en: "Normalize",
@@ -805,6 +1289,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Normalizar",
         zh_cn: "归一化",
         zh_tw: "正規化",
+        it: "Normalizza",
+        nl: "Normaliseren",
+        pl: "Normalizuj",
+        ru: "Нормализация",
+        tr: "Normalize Et",
+        ar: "تطبيع",
+        he: "נרמול",
     ]),
     entry!("analysis.remove_baseline" => [
         en: "Remove Baseline",
@@ -816,6 +1307,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Remover linha de base",
         zh_cn: "扣除基线",
         zh_tw: "扣除基線",
+        it: "Rimuovi linea di base",
+        nl: "Basislijn verwijderen",
+        pl: "Usuń linię bazową",
+        ru: "Вычитание базовой линии",
+        tr: "Taban Çizgisini Çıkar",
+        ar: "إزالة خط الأساس",
+        he: "הסרת קו בסיס",
     ]),
     entry!("analysis.transpose" => [
         en: "Transpose",
@@ -827,6 +1325,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Transpor",
         zh_cn: "转置",
         zh_tw: "轉置",
+        it: "Trasponi",
+        nl: "Transponeren",
+        pl: "Transponuj",
+        ru: "Транспонирование",
+        tr: "Transpoze Et",
+        ar: "تبديل الصفوف والأعمدة",
+        he: "שחלוף",
     ]),
     entry!("analysis.simulate_data" => [
         en: "Simulate Data",
@@ -838,6 +1343,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Simular dados",
         zh_cn: "模拟数据",
         zh_tw: "模擬資料",
+        it: "Simula dati",
+        nl: "Gegevens simuleren",
+        pl: "Symuluj dane",
+        ru: "Моделирование данных",
+        tr: "Veri Simülasyonu",
+        ar: "محاكاة البيانات",
+        he: "הדמיית נתונים",
     ]),
     entry!("analysis.descriptive_stats" => [
         en: "Descriptive Statistics",
@@ -849,6 +1361,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Estatística descritiva",
         zh_cn: "描述性统计",
         zh_tw: "敘述統計",
+        it: "Statistiche descrittive",
+        nl: "Beschrijvende statistiek",
+        pl: "Statystyki opisowe",
+        ru: "Описательная статистика",
+        tr: "Tanımlayıcı İstatistikler",
+        ar: "الإحصاء الوصفي",
+        he: "סטטיסטיקה תיאורית",
     ]),
     entry!("analysis.normality_tests" => [
         en: "Normality and Lognormality Tests",
@@ -860,6 +1379,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Testes de normalidade e lognormalidade",
         zh_cn: "正态性与对数正态性检验",
         zh_tw: "常態性與對數常態性檢定",
+        it: "Test di normalità e log-normalità",
+        nl: "Normaliteits- en lognormaliteitstoetsen",
+        pl: "Testy normalności i lognormalności",
+        ru: "Критерии нормальности и логнормальности",
+        tr: "Normallik ve Lognormallik Testleri",
+        ar: "اختبارات التوزيع الطبيعي واللوغاريتمي الطبيعي",
+        he: "מבחני נורמליות ולוג-נורמליות",
     ]),
     entry!("analysis.identify_outliers" => [
         en: "Identify Outliers",
@@ -871,6 +1397,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Identificar valores discrepantes",
         zh_cn: "识别异常值",
         zh_tw: "識別離群值",
+        it: "Identifica valori anomali",
+        nl: "Uitbijters identificeren",
+        pl: "Wykryj wartości odstające",
+        ru: "Выявление выбросов",
+        tr: "Aykırı Değerleri Belirle",
+        ar: "تحديد القيم المتطرفة",
+        he: "זיהוי ערכים חריגים",
     ]),
     entry!("analysis.unpaired_t" => [
         en: "Unpaired t Test",
@@ -882,6 +1415,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste t não pareado",
         zh_cn: "非配对 t 检验",
         zh_tw: "非配對 t 檢定",
+        it: "Test t per dati non appaiati",
+        nl: "Ongepaarde t-toets",
+        pl: "Test t dla prób niezależnych",
+        ru: "Непарный t-критерий",
+        tr: "Eşleştirilmemiş t Testi",
+        ar: "اختبار t للعينات المستقلة",
+        he: "מבחן t למדגמים בלתי תלויים",
     ]),
     entry!("analysis.paired_t" => [
         en: "Paired t Test",
@@ -893,6 +1433,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste t pareado",
         zh_cn: "配对 t 检验",
         zh_tw: "配對 t 檢定",
+        it: "Test t per dati appaiati",
+        nl: "Gepaarde t-toets",
+        pl: "Test t dla prób powiązanych",
+        ru: "Парный t-критерий",
+        tr: "Eşleştirilmiş t Testi",
+        ar: "اختبار t للعينات المزدوجة",
+        he: "מבחן t למדגמים מזווגים",
     ]),
     entry!("analysis.welch_t" => [
         en: "Welch's t Test",
@@ -904,6 +1451,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste t de Welch",
         zh_cn: "Welch t 检验",
         zh_tw: "Welch t 檢定",
+        it: "Test t di Welch",
+        nl: "t-toets van Welch",
+        pl: "Test t Welcha",
+        ru: "t-критерий Уэлча",
+        tr: "Welch t Testi",
+        ar: "اختبار t لويلش",
+        he: "מבחן t של וולש",
     ]),
     entry!("analysis.mann_whitney" => [
         en: "Mann-Whitney Test",
@@ -915,6 +1469,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste de Mann-Whitney",
         zh_cn: "Mann-Whitney 检验",
         zh_tw: "Mann-Whitney 檢定",
+        it: "Test di Mann-Whitney",
+        nl: "Mann-Whitney-toets",
+        pl: "Test Manna-Whitneya",
+        ru: "Критерий Манна — Уитни",
+        tr: "Mann-Whitney Testi",
+        ar: "اختبار مان-ويتني",
+        he: "מבחן מאן-ויטני",
     ]),
     entry!("analysis.wilcoxon" => [
         en: "Wilcoxon Matched-Pairs Test",
@@ -926,6 +1487,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste de Wilcoxon pareado",
         zh_cn: "Wilcoxon 配对符号秩检验",
         zh_tw: "Wilcoxon 配對符號等級檢定",
+        it: "Test dei ranghi con segno di Wilcoxon",
+        nl: "Wilcoxon-rangtekentoets",
+        pl: "Test znakowanych rang Wilcoxona",
+        ru: "Критерий знаковых рангов Уилкоксона",
+        tr: "Wilcoxon İşaretli Sıra Testi",
+        ar: "اختبار ويلكوكسون للأزواج المتطابقة",
+        he: "מבחן וילקוקסון למדגמים מזווגים",
     ]),
     entry!("analysis.one_way_anova" => [
         en: "One-Way ANOVA",
@@ -937,6 +1505,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "ANOVA de um fator",
         zh_cn: "单因素方差分析 (ANOVA)",
         zh_tw: "單因子變異數分析 (ANOVA)",
+        it: "ANOVA a una via",
+        nl: "Eenweg-ANOVA",
+        pl: "Jednoczynnikowa ANOVA",
+        ru: "Однофакторный дисперсионный анализ (ANOVA)",
+        tr: "Tek Yönlü ANOVA",
+        ar: "تحليل التباين الأحادي (ANOVA)",
+        he: "ניתוח שונות חד-כיווני (ANOVA)",
     ]),
     entry!("analysis.kruskal_wallis" => [
         en: "Kruskal-Wallis Test",
@@ -948,6 +1523,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste de Kruskal-Wallis",
         zh_cn: "Kruskal-Wallis 检验",
         zh_tw: "Kruskal-Wallis 檢定",
+        it: "Test di Kruskal-Wallis",
+        nl: "Kruskal-Wallis-toets",
+        pl: "Test Kruskala-Wallisa",
+        ru: "Критерий Краскела — Уоллиса",
+        tr: "Kruskal-Wallis Testi",
+        ar: "اختبار كروسكال-واليس",
+        he: "מבחן קרוסקל-ווליס",
     ]),
     entry!("analysis.rm_anova" => [
         en: "Repeated-Measures ANOVA",
@@ -959,6 +1541,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "ANOVA de medidas repetidas",
         zh_cn: "重复测量方差分析",
         zh_tw: "重複測量變異數分析",
+        it: "ANOVA per misure ripetute",
+        nl: "ANOVA voor herhaalde metingen",
+        pl: "ANOVA z powtarzanymi pomiarami",
+        ru: "Дисперсионный анализ с повторными измерениями",
+        tr: "Tekrarlı Ölçümlerde ANOVA",
+        ar: "تحليل التباين للقياسات المتكررة",
+        he: "ניתוח שונות למדידות חוזרות",
     ]),
     entry!("analysis.friedman" => [
         en: "Friedman Test",
@@ -970,6 +1559,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste de Friedman",
         zh_cn: "Friedman 检验",
         zh_tw: "Friedman 檢定",
+        it: "Test di Friedman",
+        nl: "Friedman-toets",
+        pl: "Test Friedmana",
+        ru: "Критерий Фридмана",
+        tr: "Friedman Testi",
+        ar: "اختبار فريدمان",
+        he: "מבחן פרידמן",
     ]),
     entry!("analysis.two_way_anova" => [
         en: "Two-Way ANOVA",
@@ -981,6 +1577,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "ANOVA de dois fatores",
         zh_cn: "双因素方差分析",
         zh_tw: "雙因子變異數分析",
+        it: "ANOVA a due vie",
+        nl: "Tweeweg-ANOVA",
+        pl: "Dwuczynnikowa ANOVA",
+        ru: "Двухфакторный дисперсионный анализ",
+        tr: "İki Yönlü ANOVA",
+        ar: "تحليل التباين الثنائي",
+        he: "ניתוח שונות דו-כיווני",
     ]),
     entry!("analysis.three_way_anova" => [
         en: "Three-Way ANOVA",
@@ -992,6 +1595,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "ANOVA de três fatores",
         zh_cn: "三因素方差分析",
         zh_tw: "三因子變異數分析",
+        it: "ANOVA a tre vie",
+        nl: "Drieweg-ANOVA",
+        pl: "Trójczynnikowa ANOVA",
+        ru: "Трёхфакторный дисперсионный анализ",
+        tr: "Üç Yönlü ANOVA",
+        ar: "تحليل التباين الثلاثي",
+        he: "ניתוח שונות תלת-כיווני",
     ]),
     entry!("analysis.multifactor_anova" => [
         en: "Multifactor ANOVA",
@@ -1003,6 +1613,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "ANOVA multifatorial",
         zh_cn: "多因素方差分析",
         zh_tw: "多因子變異數分析",
+        it: "ANOVA multifattoriale",
+        nl: "Multifactor-ANOVA",
+        pl: "Wieloczynnikowa ANOVA",
+        ru: "Многофакторный дисперсионный анализ",
+        tr: "Çok Faktörlü ANOVA",
+        ar: "تحليل التباين متعدد العوامل",
+        he: "ניתוח שונות רב-גורמי",
     ]),
     entry!("analysis.mixed_effects_reml" => [
         en: "Mixed-Effects Model (REML)",
@@ -1014,6 +1631,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Modelo de efeitos mistos (REML)",
         zh_cn: "混合效应模型 (REML)",
         zh_tw: "混合效應模型 (REML)",
+        it: "Modello a effetti misti (REML)",
+        nl: "Gemengd model (REML)",
+        pl: "Model efektów mieszanych (REML)",
+        ru: "Модель со смешанными эффектами (REML)",
+        tr: "Karma Etkili Model (REML)",
+        ar: "نموذج التأثيرات المختلطة (REML)",
+        he: "מודל השפעות מעורבות (REML)",
     ]),
     entry!("analysis.nested_t" => [
         en: "Nested t Test",
@@ -1025,6 +1649,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste t aninhado",
         zh_cn: "嵌套 t 检验",
         zh_tw: "巢狀 t 檢定",
+        it: "Test t annidato",
+        nl: "Geneste t-toets",
+        pl: "Zagnieżdżony test t",
+        ru: "Вложенный t-критерий",
+        tr: "Yuvalanmış t Testi",
+        ar: "اختبار t المتداخل",
+        he: "מבחן t מקונן",
     ]),
     entry!("analysis.nested_anova" => [
         en: "Nested One-Way ANOVA",
@@ -1036,6 +1667,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "ANOVA aninhada de um fator",
         zh_cn: "嵌套单因素方差分析",
         zh_tw: "巢狀單因子變異數分析",
+        it: "ANOVA annidata a una via",
+        nl: "Geneste eenweg-ANOVA",
+        pl: "Zagnieżdżona jednoczynnikowa ANOVA",
+        ru: "Вложенный однофакторный дисперсионный анализ",
+        tr: "Yuvalanmış Tek Yönlü ANOVA",
+        ar: "تحليل التباين الأحادي المتداخل",
+        he: "ניתוח שונות חד-כיווני מקונן",
     ]),
     entry!("analysis.chi_square" => [
         en: "Chi-Square Test",
@@ -1047,6 +1685,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste qui-quadrado",
         zh_cn: "卡方检验",
         zh_tw: "卡方檢定",
+        it: "Test del chi-quadrato",
+        nl: "Chi-kwadraattoets",
+        pl: "Test chi-kwadrat",
+        ru: "Критерий хи-квадрат",
+        tr: "Ki-Kare Testi",
+        ar: "اختبار مربع كاي",
+        he: "מבחן חי-בריבוע",
     ]),
     entry!("analysis.fisher_exact" => [
         en: "Fisher's Exact Test",
@@ -1058,6 +1703,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Teste exato de Fisher",
         zh_cn: "Fisher 精确检验",
         zh_tw: "Fisher 精確檢定",
+        it: "Test esatto di Fisher",
+        nl: "Exacte toets van Fisher",
+        pl: "Dokładny test Fishera",
+        ru: "Точный критерий Фишера",
+        tr: "Fisher Kesin Testi",
+        ar: "اختبار فيشر الدقيق",
+        he: "מבחן פישר המדויק",
     ]),
     entry!("analysis.kaplan_meier" => [
         en: "Kaplan-Meier Survival",
@@ -1069,6 +1721,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Sobrevivência de Kaplan-Meier",
         zh_cn: "Kaplan-Meier 生存分析",
         zh_tw: "Kaplan-Meier 存活分析",
+        it: "Sopravvivenza di Kaplan-Meier",
+        nl: "Kaplan-Meier-overlevingsanalyse",
+        pl: "Analiza przeżycia Kaplana-Meiera",
+        ru: "Анализ выживаемости Каплана — Мейера",
+        tr: "Kaplan-Meier Sağkalım Analizi",
+        ar: "تحليل البقاء لكابلان-ماير",
+        he: "ניתוח הישרדות קפלן-מאייר",
     ]),
     entry!("analysis.cox_ph" => [
         en: "Cox Proportional Hazards",
@@ -1080,6 +1739,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Riscos proporcionais de Cox",
         zh_cn: "Cox 比例风险回归",
         zh_tw: "Cox 比例風險迴歸",
+        it: "Rischi proporzionali di Cox",
+        nl: "Proportionele risico's van Cox",
+        pl: "Model proporcjonalnego hazardu Coxa",
+        ru: "Модель пропорциональных рисков Кокса",
+        tr: "Cox Orantılı Riskler Modeli",
+        ar: "نموذج كوكس للمخاطر النسبية",
+        he: "מודל סיכונים יחסיים של קוקס",
     ]),
     entry!("analysis.roc_curve" => [
         en: "ROC Curve",
@@ -1091,6 +1757,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Curva ROC",
         zh_cn: "ROC 曲线",
         zh_tw: "ROC 曲線",
+        it: "Curva ROC",
+        nl: "ROC-curve",
+        pl: "Krzywa ROC",
+        ru: "ROC-кривая",
+        tr: "ROC Eğrisi",
+        ar: "منحنى ROC",
+        he: "עקומת ROC",
     ]),
     entry!("analysis.simple_linear_regression" => [
         en: "Simple Linear Regression",
@@ -1102,6 +1775,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Regressão linear simples",
         zh_cn: "简单线性回归",
         zh_tw: "簡單線性迴歸",
+        it: "Regressione lineare semplice",
+        nl: "Enkelvoudige lineaire regressie",
+        pl: "Prosta regresja liniowa",
+        ru: "Простая линейная регрессия",
+        tr: "Basit Doğrusal Regresyon",
+        ar: "الانحدار الخطي البسيط",
+        he: "רגרסיה לינארית פשוטה",
     ]),
     entry!("analysis.deming_regression" => [
         en: "Deming (Model II) Regression",
@@ -1113,6 +1793,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Regressão de Deming (Modelo II)",
         zh_cn: "Deming (模型 II) 回归",
         zh_tw: "Deming (模型 II) 迴歸",
+        it: "Regressione di Deming (Modello II)",
+        nl: "Deming-regressie (Model II)",
+        pl: "Regresja Deminga (Model II)",
+        ru: "Регрессия Деминга (Модель II)",
+        tr: "Deming (Model II) Regresyonu",
+        ar: "انحدار ديمينغ (النموذج II)",
+        he: "רגרסיית דמינג (מודל II)",
     ]),
     entry!("analysis.multiple_linear_regression" => [
         en: "Multiple Linear Regression",
@@ -1124,6 +1811,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Regressão linear múltipla",
         zh_cn: "多元线性回归",
         zh_tw: "多元線性迴歸",
+        it: "Regressione lineare multipla",
+        nl: "Meervoudige lineaire regressie",
+        pl: "Wielokrotna regresja liniowa",
+        ru: "Множественная линейная регрессия",
+        tr: "Çoklu Doğrusal Regresyon",
+        ar: "الانحدار الخطي المتعدد",
+        he: "רגרסיה לינארית מרובה",
     ]),
     entry!("analysis.multiple_logistic_regression" => [
         en: "Multiple Logistic Regression",
@@ -1135,6 +1829,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Regressão logística múltipla",
         zh_cn: "多元 Logistic 回归",
         zh_tw: "多元羅吉斯迴歸",
+        it: "Regressione logistica multipla",
+        nl: "Meervoudige logistische regressie",
+        pl: "Wielokrotna regresja logistyczna",
+        ru: "Множественная логистическая регрессия",
+        tr: "Çoklu Lojistik Regresyon",
+        ar: "الانحدار اللوجستي المتعدد",
+        he: "רגרסיה לוגיסטית מרובה",
     ]),
     entry!("analysis.multiple_poisson_regression" => [
         en: "Multiple Poisson Regression",
@@ -1146,6 +1847,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Regressão de Poisson múltipla",
         zh_cn: "多元泊松回归",
         zh_tw: "多元卜瓦松迴歸",
+        it: "Regressione di Poisson multipla",
+        nl: "Meervoudige Poisson-regressie",
+        pl: "Wielokrotna regresja Poissona",
+        ru: "Множественная регрессия Пуассона",
+        tr: "Çoklu Poisson Regresyonu",
+        ar: "انحدار بواسون المتعدد",
+        he: "רגרסיית פואסון מרובה",
     ]),
     entry!("analysis.nonlinear_regression" => [
         en: "Nonlinear Regression",
@@ -1157,6 +1865,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Regressão não linear",
         zh_cn: "非线性回归",
         zh_tw: "非線性迴歸",
+        it: "Regressione non lineare",
+        nl: "Niet-lineaire regressie",
+        pl: "Regresja nieliniowa",
+        ru: "Нелинейная регрессия",
+        tr: "Doğrusal Olmayan Regresyon",
+        ar: "الانحدار غير الخطي",
+        he: "רגרסיה לא-לינארית",
     ]),
     entry!("analysis.dose_response" => [
         en: "Dose-Response (4PL / 5PL)",
@@ -1168,6 +1883,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Dose-resposta (4PL / 5PL)",
         zh_cn: "量效关系曲线 (4PL / 5PL)",
         zh_tw: "劑量-反應曲線 (4PL / 5PL)",
+        it: "Dose-risposta (4PL / 5PL)",
+        nl: "Dosis-respons (4PL / 5PL)",
+        pl: "Krzywa dawka-odpowiedź (4PL / 5PL)",
+        ru: "Зависимость «доза — эффект» (4PL / 5PL)",
+        tr: "Doz-Yanıt (4PL / 5PL)",
+        ar: "منحنى الجرعة والاستجابة (4PL / 5PL)",
+        he: "עקומת מינון-תגובה (4PL / 5PL)",
     ]),
     entry!("analysis.receptor_binding" => [
         en: "Receptor Binding",
@@ -1179,6 +1901,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Ligação a receptores",
         zh_cn: "受体结合动力学",
         zh_tw: "受體結合動力學",
+        it: "Legame recettoriale",
+        nl: "Receptorbinding",
+        pl: "Wiązanie z receptorem",
+        ru: "Связывание с рецепторами",
+        tr: "Reseptör Bağlanması",
+        ar: "الارتباط بالمستقبلات",
+        he: "קישור לקולטנים",
     ]),
     entry!("analysis.enzyme_kinetics" => [
         en: "Enzyme Kinetics",
@@ -1190,6 +1919,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Cinética enzimática",
         zh_cn: "酶动力学",
         zh_tw: "酵素動力學",
+        it: "Cinetica enzimatica",
+        nl: "Enzymkinetiek",
+        pl: "Kinetyka enzymatyczna",
+        ru: "Ферментативная кинетика",
+        tr: "Enzim Kinetiği",
+        ar: "حركية الإنزيمات",
+        he: "קינטיקה אנזימטית",
     ]),
     entry!("analysis.exponential" => [
         en: "Exponential Decay and Association",
@@ -1201,6 +1937,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Decaimento e associação exponencial",
         zh_cn: "指数衰减与结合",
         zh_tw: "指數衰減與結合",
+        it: "Decadimento e associazione esponenziale",
+        nl: "Exponentieel verval en associatie",
+        pl: "Rozpad i asocjacja wykładnicza",
+        ru: "Экспоненциальный спад и ассоциация",
+        tr: "Üstel Azalma ve Bağlanma",
+        ar: "الاضمحلال والارتباط الأسي",
+        he: "דעיכה והתקשרות מעריכית",
     ]),
     entry!("analysis.growth_curves" => [
         en: "Growth Curves",
@@ -1212,6 +1955,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Curvas de crescimento",
         zh_cn: "生长曲线",
         zh_tw: "生長曲線",
+        it: "Curve di crescita",
+        nl: "Groeicurven",
+        pl: "Krzywe wzrostu",
+        ru: "Кривые роста",
+        tr: "Büyüme Eğrileri",
+        ar: "منحنيات النمو",
+        he: "עקומות גידול",
     ]),
     entry!("analysis.pca" => [
         en: "Principal Component Analysis",
@@ -1223,6 +1973,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Análise de componentes principais",
         zh_cn: "主成分分析 (PCA)",
         zh_tw: "主成分分析 (PCA)",
+        it: "Analisi delle componenti principali (PCA)",
+        nl: "Hoofdcomponentenanalyse (PCA)",
+        pl: "Analiza głównych składowych (PCA)",
+        ru: "Метод главных компонент (PCA)",
+        tr: "Temel Bileşen Analizi (PCA)",
+        ar: "تحليل المكونات الرئيسية (PCA)",
+        he: "ניתוח רכיבים עיקריים (PCA)",
     ]),
     entry!("analysis.correlation_matrix" => [
         en: "Correlation Matrix",
@@ -1234,6 +1991,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Matriz de correlação",
         zh_cn: "相关矩阵",
         zh_tw: "相關矩陣",
+        it: "Matrice di correlazione",
+        nl: "Correlatiematrix",
+        pl: "Macierz korelacji",
+        ru: "Корреляционная матрица",
+        tr: "Korelasyon Matrisi",
+        ar: "مصفوفة الارتباط",
+        he: "מטריצת מתאמים",
     ]),
     entry!("analysis.cluster_analysis" => [
         en: "Cluster Analysis",
@@ -1245,6 +2009,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Análise de agrupamento",
         zh_cn: "聚类分析",
         zh_tw: "聚類分析",
+        it: "Analisi dei cluster",
+        nl: "Clusteranalyse",
+        pl: "Analiza skupień",
+        ru: "Кластерный анализ",
+        tr: "Kümeleme Analizi",
+        ar: "التحليل العنقودي",
+        he: "ניתוח אשכולות",
     ]),
     // --- Dialog buttons & actions ---
     entry!("btn.ok" => [
@@ -1257,6 +2028,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "OK",
         zh_cn: "确定",
         zh_tw: "確定",
+        it: "OK",
+        nl: "OK",
+        pl: "OK",
+        ru: "ОК",
+        tr: "Tamam",
+        ar: "موافق",
+        he: "אישור",
     ]),
     entry!("btn.cancel" => [
         en: "Cancel",
@@ -1268,6 +2046,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Cancelar",
         zh_cn: "取消",
         zh_tw: "取消",
+        it: "Annulla",
+        nl: "Annuleren",
+        pl: "Anuluj",
+        ru: "Отмена",
+        tr: "İptal",
+        ar: "إلغاء",
+        he: "ביטול",
     ]),
     entry!("btn.apply" => [
         en: "Apply",
@@ -1279,6 +2064,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Aplicar",
         zh_cn: "应用",
         zh_tw: "套用",
+        it: "Applica",
+        nl: "Toepassen",
+        pl: "Zastosuj",
+        ru: "Применить",
+        tr: "Uygula",
+        ar: "تطبيق",
+        he: "החלה",
     ]),
     entry!("btn.close" => [
         en: "Close",
@@ -1290,6 +2082,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Fechar",
         zh_cn: "关闭",
         zh_tw: "關閉",
+        it: "Chiudi",
+        nl: "Sluiten",
+        pl: "Zamknij",
+        ru: "Закрыть",
+        tr: "Kapat",
+        ar: "إغلاق",
+        he: "סגירה",
     ]),
     entry!("btn.reset" => [
         en: "Reset",
@@ -1301,6 +2100,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Redefinir",
         zh_cn: "重置",
         zh_tw: "重設",
+        it: "Ripristina",
+        nl: "Opnieuw instellen",
+        pl: "Przywróć domyślne",
+        ru: "Сбросить",
+        tr: "Sıfırla",
+        ar: "إعادة تعيين",
+        he: "איפוס",
     ]),
     entry!("btn.analyze" => [
         en: "Analyze",
@@ -1312,6 +2118,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Analisar",
         zh_cn: "分析",
         zh_tw: "分析",
+        it: "Analizza",
+        nl: "Analyseren",
+        pl: "Analizuj",
+        ru: "Анализировать",
+        tr: "Analiz Et",
+        ar: "تحليل",
+        he: "ניתוח",
     ]),
     entry!("btn.clone_pipeline" => [
         en: "Clone Pipeline",
@@ -1323,6 +2136,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Clonar pipeline",
         zh_cn: "克隆流程",
         zh_tw: "複製流程",
+        it: "Clona flusso di analisi",
+        nl: "Analyseketen klonen",
+        pl: "Klonuj potok analizy",
+        ru: "Клонировать конвейер",
+        tr: "Analiz Akışını Klonla",
+        ar: "استنساخ مسار التحليل",
+        he: "שכפול תהליך ניתוח",
     ]),
     entry!("btn.freeze" => [
         en: "Freeze",
@@ -1334,6 +2154,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Congelar",
         zh_cn: "冻结",
         zh_tw: "凍結",
+        it: "Blocca",
+        nl: "Bevriezen",
+        pl: "Zamróź",
+        ru: "Заморозить",
+        tr: "Dondur",
+        ar: "تجميد",
+        he: "הקפאה",
     ]),
     entry!("btn.unfreeze" => [
         en: "Unfreeze",
@@ -1345,6 +2172,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Descongelar",
         zh_cn: "取消冻结",
         zh_tw: "解除凍結",
+        it: "Sblocca",
+        nl: "Ontdooien",
+        pl: "Odmróź",
+        ru: "Разморозить",
+        tr: "Dondurmayı Kaldır",
+        ar: "إلغاء التجميد",
+        he: "ביטול הקפאה",
     ]),
     entry!("btn.import" => [
         en: "Import",
@@ -1356,6 +2190,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Importar",
         zh_cn: "导入",
         zh_tw: "匯入",
+        it: "Importa",
+        nl: "Importeren",
+        pl: "Importuj",
+        ru: "Импорт",
+        tr: "İçe Aktar",
+        ar: "استيراد",
+        he: "ייבוא",
     ]),
     entry!("btn.export" => [
         en: "Export",
@@ -1367,6 +2208,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Exportar",
         zh_cn: "导出",
         zh_tw: "匯出",
+        it: "Esporta",
+        nl: "Exporteren",
+        pl: "Eksportuj",
+        ru: "Экспорт",
+        tr: "Dışa Aktar",
+        ar: "تصدير",
+        he: "ייצוא",
     ]),
     entry!("btn.change_data_analyzed" => [
         en: "Change Data Analyzed",
@@ -1378,6 +2226,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Alterar dados analisados",
         zh_cn: "更改分析数据",
         zh_tw: "變更分析資料",
+        it: "Cambia dati analizzati",
+        nl: "Geanalyseerde gegevens wijzigen",
+        pl: "Zmień analizowane dane",
+        ru: "Изменить анализируемые данные",
+        tr: "Analiz Edilen Veriyi Değiştir",
+        ar: "تغيير البيانات المحلّلة",
+        he: "שינוי הנתונים המנותחים",
     ]),
     entry!("btn.apply_style_from" => [
         en: "Apply Style From",
@@ -1389,6 +2244,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Aplicar estilo de",
         zh_cn: "套用样式自",
         zh_tw: "套用樣式自",
+        it: "Applica stile da",
+        nl: "Stijl toepassen van",
+        pl: "Zastosuj styl z",
+        ru: "Применить стиль из",
+        tr: "Stili Şuradan Uygula",
+        ar: "تطبيق النمط من",
+        he: "החלת סגנון מתוך",
     ]),
     entry!("btn.modify_existing" => [
         en: "Modify Existing",
@@ -1400,6 +2262,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Modificar existente",
         zh_cn: "修改现有",
         zh_tw: "修改現有",
+        it: "Modifica esistente",
+        nl: "Bestaande wijzigen",
+        pl: "Modyfikuj istniejącą",
+        ru: "Изменить существующий",
+        tr: "Mevcut Olanı Düzenle",
+        ar: "تعديل الموجود",
+        he: "עריכת הקיים",
     ]),
     entry!("btn.create_new" => [
         en: "Create New",
@@ -1411,6 +2280,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Criar novo",
         zh_cn: "新建",
         zh_tw: "新建",
+        it: "Crea nuovo",
+        nl: "Nieuwe maken",
+        pl: "Utwórz nową",
+        ru: "Создать новый",
+        tr: "Yeni Oluştur",
+        ar: "إنشاء جديد",
+        he: "יצירת חדש",
     ]),
     entry!("btn.auto_add_from_analysis" => [
         en: "Auto-Add from Analysis",
@@ -1422,6 +2298,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Adicionar automaticamente da análise",
         zh_cn: "从分析自动添加",
         zh_tw: "從分析自動新增",
+        it: "Aggiungi automaticamente dall'analisi",
+        nl: "Automatisch toevoegen uit analyse",
+        pl: "Dodaj automatycznie z analizy",
+        ru: "Автодобавление из анализа",
+        tr: "Analizden Otomatik Ekle",
+        ar: "إضافة تلقائية من التحليل",
+        he: "הוספה אוטומטית מהניתוח",
     ]),
     // --- Inspector controls, scales, quick stats & themes ---
     entry!("inspector.graph_type" => [
@@ -1434,6 +2317,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Tipo de gráfico",
         zh_cn: "图表类型",
         zh_tw: "圖表類型",
+        it: "Tipo di grafico",
+        nl: "Grafiektype",
+        pl: "Typ wykresu",
+        ru: "Тип графика",
+        tr: "Grafik Türü",
+        ar: "نوع الرسم البياني",
+        he: "סוג גרף",
     ]),
     entry!("inspector.color_palette" => [
         en: "Color Palette",
@@ -1445,6 +2335,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Paleta de cores",
         zh_cn: "调色板",
         zh_tw: "調色盤",
+        it: "Tavolozza colori",
+        nl: "Kleurenpalet",
+        pl: "Paleta kolorów",
+        ru: "Цветовая палитра",
+        tr: "Renk Paleti",
+        ar: "لوحة الألوان",
+        he: "לוח צבעים",
     ]),
     entry!("inspector.error_bars" => [
         en: "Error Bars",
@@ -1456,6 +2353,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Barras de erro",
         zh_cn: "误差线",
         zh_tw: "誤差線",
+        it: "Barre di errore",
+        nl: "Foutbalken",
+        pl: "Słupki błędów",
+        ru: "Планки погрешностей",
+        tr: "Hata Çubukları",
+        ar: "أشرطة الخطأ",
+        he: "פסי שגיאה",
     ]),
     entry!("inspector.axis_scale" => [
         en: "Axis Scale",
@@ -1467,6 +2371,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Escala do eixo",
         zh_cn: "坐标轴刻度",
         zh_tw: "座標軸尺度",
+        it: "Scala dell'asse",
+        nl: "Asschaal",
+        pl: "Skala osi",
+        ru: "Шкала оси",
+        tr: "Eksen Ölçeği",
+        ar: "مقياس المحور",
+        he: "סקאלת ציר",
     ]),
     entry!("inspector.scale.linear" => [
         en: "Linear",
@@ -1478,6 +2389,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Linear",
         zh_cn: "线性",
         zh_tw: "線性",
+        it: "Lineare",
+        nl: "Lineair",
+        pl: "Liniowa",
+        ru: "Линейная",
+        tr: "Doğrusal",
+        ar: "خطي",
+        he: "לינארי",
     ]),
     entry!("inspector.scale.log10" => [
         en: "Log 10",
@@ -1489,6 +2407,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Log 10",
         zh_cn: "Log 10 对数",
         zh_tw: "Log 10 對數",
+        it: "Log 10",
+        nl: "Log 10",
+        pl: "Log 10",
+        ru: "Десятичный логарифм (Log 10)",
+        tr: "Log 10",
+        ar: "لوغاريتم عشري (Log 10)",
+        he: "לוגריתם עשרוני (Log 10)",
     ]),
     entry!("inspector.scale.log2" => [
         en: "Log 2",
@@ -1500,6 +2425,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Log 2",
         zh_cn: "Log 2 对数",
         zh_tw: "Log 2 對數",
+        it: "Log 2",
+        nl: "Log 2",
+        pl: "Log 2",
+        ru: "Двоичный логарифм (Log 2)",
+        tr: "Log 2",
+        ar: "لوغاريتم ثنائي (Log 2)",
+        he: "לוגריתם בסיס 2 (Log 2)",
     ]),
     entry!("inspector.scale.ln" => [
         en: "Natural Log (ln)",
@@ -1511,6 +2443,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Logaritmo natural (ln)",
         zh_cn: "自然对数 (ln)",
         zh_tw: "自然對數 (ln)",
+        it: "Logaritmo naturale (ln)",
+        nl: "Natuurlijke logaritme (ln)",
+        pl: "Logarytm naturalny (ln)",
+        ru: "Натуральный логарифм (ln)",
+        tr: "Doğal Logaritma (ln)",
+        ar: "اللوغاريتم الطبيعي (ln)",
+        he: "לוגריתם טבעי (ln)",
     ]),
     entry!("inspector.scale.logit" => [
         en: "Logit",
@@ -1522,6 +2461,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Logito",
         zh_cn: "Logit 变换",
         zh_tw: "Logit 轉換",
+        it: "Logit",
+        nl: "Logit",
+        pl: "Logit",
+        ru: "Логит (Logit)",
+        tr: "Logit",
+        ar: "لوجيت (Logit)",
+        he: "לוגיט (Logit)",
     ]),
     entry!("inspector.scale.probit" => [
         en: "Probit",
@@ -1533,6 +2479,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Probito",
         zh_cn: "Probit 概率单位",
         zh_tw: "Probit 機率單位",
+        it: "Probit",
+        nl: "Probit",
+        pl: "Probit",
+        ru: "Пробит (Probit)",
+        tr: "Probit",
+        ar: "بروبيت (Probit)",
+        he: "פרוביט (Probit)",
     ]),
     entry!("inspector.scale.reciprocal" => [
         en: "Reciprocal (1/X)",
@@ -1544,6 +2497,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Recíproco (1/X)",
         zh_cn: "倒数 (1/X)",
         zh_tw: "倒數 (1/X)",
+        it: "Reciproco (1/X)",
+        nl: "Reciproke (1/X)",
+        pl: "Odwrotność (1/X)",
+        ru: "Обратная величина (1/X)",
+        tr: "Tersi (1/X)",
+        ar: "المقلوب (1/X)",
+        he: "הופכי (1/X)",
     ]),
     entry!("inspector.broken_axis" => [
         en: "Broken Axis Segments",
@@ -1555,6 +2515,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Segmentos de eixo quebrado",
         zh_cn: "断轴分段",
         zh_tw: "斷軸區段",
+        it: "Segmenti di asse interrotto",
+        nl: "Onderbroken assegmenten",
+        pl: "Segmenty przerwanej osi",
+        ru: "Сегменты разрыва оси",
+        tr: "Kesikli Eksen Bölümleri",
+        ar: "مقاطع المحور المتقطع",
+        he: "מקטעי ציר קטוע",
     ]),
     entry!("inspector.bubble_plot" => [
         en: "Bubble Plot Variables",
@@ -1566,6 +2533,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Variáveis do gráfico de bolhas",
         zh_cn: "气泡图变量映射",
         zh_tw: "氣泡圖變數映射",
+        it: "Variabili grafico a bolle",
+        nl: "Variabelen bellendiagram",
+        pl: "Zmienne wykresu bąbelkowego",
+        ru: "Переменные пузырьковой диаграммы",
+        tr: "Kabarcık Grafiği Değişkenleri",
+        ar: "متغيرات المخطط الفقاعي",
+        he: "משתני תרשים בועות",
     ]),
     entry!("inspector.var_x" => [
         en: "X Variable",
@@ -1577,6 +2551,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Variável X",
         zh_cn: "X 变量",
         zh_tw: "X 變數",
+        it: "Variabile X",
+        nl: "Variabele X",
+        pl: "Zmienna X",
+        ru: "Переменная X",
+        tr: "X Değişkeni",
+        ar: "متغير X",
+        he: "משתנה X",
     ]),
     entry!("inspector.var_y" => [
         en: "Y Variable",
@@ -1588,6 +2569,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Variável Y",
         zh_cn: "Y 变量",
         zh_tw: "Y 變數",
+        it: "Variabile Y",
+        nl: "Variabele Y",
+        pl: "Zmienna Y",
+        ru: "Переменная Y",
+        tr: "Y Değişkeni",
+        ar: "متغير Y",
+        he: "משתנה Y",
     ]),
     entry!("inspector.var_color" => [
         en: "Color Variable",
@@ -1599,6 +2587,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Variável de cor",
         zh_cn: "颜色变量",
         zh_tw: "顏色變數",
+        it: "Variabile colore",
+        nl: "Kleurvariabele",
+        pl: "Zmienna koloru",
+        ru: "Переменная цвета",
+        tr: "Renk Değişkeni",
+        ar: "متغير اللون",
+        he: "משתנה צבע",
     ]),
     entry!("inspector.var_size" => [
         en: "Size Variable",
@@ -1610,6 +2605,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Variável de tamanho",
         zh_cn: "大小变量",
         zh_tw: "大小變數",
+        it: "Variabile dimensione",
+        nl: "Groottevariabele",
+        pl: "Zmienna rozmiaru",
+        ru: "Переменная размера",
+        tr: "Boyut Değişkeni",
+        ar: "متغير الحجم",
+        he: "משתנה גודל",
     ]),
     entry!("inspector.var_label" => [
         en: "Label Variable",
@@ -1621,6 +2623,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Variável de rótulo",
         zh_cn: "标签变量",
         zh_tw: "標籤變數",
+        it: "Variabile etichetta",
+        nl: "Labelvariabele",
+        pl: "Zmienna etykiety",
+        ru: "Переменная подписи",
+        tr: "Etiket Değişkeni",
+        ar: "متغير التسمية",
+        he: "משתנה תווית",
     ]),
     entry!("inspector.calculated_variable" => [
         en: "Calculated Variable",
@@ -1632,6 +2641,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Variável calculada",
         zh_cn: "计算变量",
         zh_tw: "計算變數",
+        it: "Variabile calcolata",
+        nl: "Berekende variabele",
+        pl: "Zmienna obliczona",
+        ru: "Вычисляемая переменная",
+        tr: "Hesaplanan Değişken",
+        ar: "متغير محسوب",
+        he: "משתנה מחושב",
     ]),
     entry!("inspector.decimal_separator" => [
         en: "Decimal Separator",
@@ -1643,6 +2659,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Separador decimal",
         zh_cn: "小数分隔符",
         zh_tw: "小數分隔符號",
+        it: "Separatore decimale",
+        nl: "Decimaalscheidingsteken",
+        pl: "Separator dziesiętny",
+        ru: "Десятичный разделитель",
+        tr: "Ondalık Ayırıcı",
+        ar: "الفاصل العشري",
+        he: "מפריד עשרוני",
     ]),
     entry!("inspector.csv_delimiter" => [
         en: "CSV Delimiter",
@@ -1654,6 +2677,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Delimitador CSV",
         zh_cn: "CSV 分隔符",
         zh_tw: "CSV 分隔符號",
+        it: "Delimitatore CSV",
+        nl: "CSV-scheidingsteken",
+        pl: "Separator CSV",
+        ru: "Разделитель CSV",
+        tr: "CSV Ayırıcısı",
+        ar: "محدد CSV",
+        he: "תו מפריד ב-CSV",
     ]),
     entry!("inspector.locale" => [
         en: "Language",
@@ -1665,6 +2695,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Idioma",
         zh_cn: "语言",
         zh_tw: "語言",
+        it: "Lingua",
+        nl: "Taal",
+        pl: "Język",
+        ru: "Язык",
+        tr: "Dil",
+        ar: "اللغة",
+        he: "שפה",
     ]),
     entry!("inspector.quick_stats" => [
         en: "Selection Statistics",
@@ -1676,6 +2713,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Estatísticas da seleção",
         zh_cn: "选区统计",
         zh_tw: "選區統計",
+        it: "Statistiche della selezione",
+        nl: "Selectiestatistieken",
+        pl: "Statystyki zaznaczenia",
+        ru: "Статистика выделения",
+        tr: "Seçim İstatistikleri",
+        ar: "إحصاءات التحديد",
+        he: "סטטיסטיקת הבחירה",
     ]),
     entry!("inspector.count" => [
         en: "Count",
@@ -1687,6 +2731,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Contagem",
         zh_cn: "计数",
         zh_tw: "計數",
+        it: "Conteggio",
+        nl: "Aantal",
+        pl: "Liczba",
+        ru: "Количество",
+        tr: "Sayı",
+        ar: "العدد",
+        he: "ספירה",
     ]),
     entry!("inspector.mean" => [
         en: "Mean",
@@ -1698,6 +2749,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Média",
         zh_cn: "均值",
         zh_tw: "平均值",
+        it: "Media",
+        nl: "Gemiddelde",
+        pl: "Średnia",
+        ru: "Среднее",
+        tr: "Ortalama",
+        ar: "المتوسط",
+        he: "ממוצע",
     ]),
     entry!("inspector.sd" => [
         en: "SD",
@@ -1709,6 +2767,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "DP",
         zh_cn: "标准差 (SD)",
         zh_tw: "標準差 (SD)",
+        it: "DS",
+        nl: "SD",
+        pl: "Odch. std. (SD)",
+        ru: "Ст. откл. (SD)",
+        tr: "SS (SD)",
+        ar: "الانحراف المعياري (SD)",
+        he: "סטיית תקן (SD)",
     ]),
     entry!("inspector.sem" => [
         en: "SEM",
@@ -1720,6 +2785,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "EPM",
         zh_cn: "标准误 (SEM)",
         zh_tw: "標準誤 (SEM)",
+        it: "ESM",
+        nl: "SEM",
+        pl: "Błąd std. (SEM)",
+        ru: "Ст. ошибка (SEM)",
+        tr: "SH (SEM)",
+        ar: "الخطأ المعياري (SEM)",
+        he: "שגיאת תקן (SEM)",
     ]),
     entry!("inspector.median" => [
         en: "Median",
@@ -1731,6 +2803,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Mediana",
         zh_cn: "中位数",
         zh_tw: "中位數",
+        it: "Mediana",
+        nl: "Mediaan",
+        pl: "Mediana",
+        ru: "Медиана",
+        tr: "Medyan",
+        ar: "الوسيط",
+        he: "חציון",
     ]),
     entry!("inspector.sum" => [
         en: "Sum",
@@ -1742,6 +2821,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Soma",
         zh_cn: "总和",
         zh_tw: "總和",
+        it: "Somma",
+        nl: "Som",
+        pl: "Suma",
+        ru: "Сумма",
+        tr: "Toplam",
+        ar: "المجموع",
+        he: "סכום",
     ]),
     entry!("inspector.search" => [
         en: "Search",
@@ -1753,6 +2839,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Pesquisar",
         zh_cn: "搜索",
         zh_tw: "搜尋",
+        it: "Cerca",
+        nl: "Zoeken",
+        pl: "Szukaj",
+        ru: "Поиск",
+        tr: "Ara",
+        ar: "بحث",
+        he: "חיפוש",
     ]),
     entry!("inspector.panel_alignment" => [
         en: "Plot-Origin Alignment",
@@ -1764,6 +2857,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Alinhamento da origem dos gráficos",
         zh_cn: "绘图原点对齐",
         zh_tw: "繪圖原點對齊",
+        it: "Allineamento origine grafico",
+        nl: "Uitlijning grafiekoorsprong",
+        pl: "Wyrównanie początku wykresu",
+        ru: "Выравнивание начала координат",
+        tr: "Grafik Başlangıç Hizalaması",
+        ar: "محاذاة نقطة أصل المخطط",
+        he: "יישור ראשית הגרף",
     ]),
     entry!("inspector.format_graph" => [
         en: "Format Graph",
@@ -1775,6 +2875,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Formatar gráfico",
         zh_cn: "设置图表格式",
         zh_tw: "設定圖表格式",
+        it: "Formatta grafico",
+        nl: "Grafiek opmaken",
+        pl: "Formatuj wykres",
+        ru: "Формат графика",
+        tr: "Grafiği Biçimlendir",
+        ar: "تنسيق الرسم البياني",
+        he: "עיצוב גרף",
     ]),
     entry!("inspector.format_axes" => [
         en: "Format Axes",
@@ -1786,6 +2893,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Formatar eixos",
         zh_cn: "设置坐标轴格式",
         zh_tw: "設定座標軸格式",
+        it: "Formatta assi",
+        nl: "Assen opmaken",
+        pl: "Formatuj osie",
+        ru: "Формат осей",
+        tr: "Eksenleri Biçimlendir",
+        ar: "تنسيق المحاور",
+        he: "עיצוב צירים",
     ]),
     entry!("inspector.pairwise_comparisons" => [
         en: "Pairwise Comparisons",
@@ -1797,6 +2911,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Comparações pareadas",
         zh_cn: "成对比较",
         zh_tw: "成對比較",
+        it: "Confronti a coppie",
+        nl: "Paarsgewijze vergelijkingen",
+        pl: "Porównania parami",
+        ru: "Попарные сравнения",
+        tr: "İkili Karşılaştırmalar",
+        ar: "المقارنات الزوجية",
+        he: "השוואות זוגיות",
     ]),
     entry!("inspector.significance_stars" => [
         en: "Significance Stars",
@@ -1808,6 +2929,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Estrelas de significância",
         zh_cn: "显著性星号",
         zh_tw: "顯著性星號",
+        it: "Stelle di significatività",
+        nl: "Significantiesterren",
+        pl: "Gwiazdki istotności",
+        ru: "Звёздочки значимости",
+        tr: "Anlamlılık Yıldızları",
+        ar: "نجوم الدلالة الإحصائية",
+        he: "כוכביות מובהקות",
     ]),
     entry!("inspector.page_layout" => [
         en: "Page Layout",
@@ -1819,6 +2947,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Layout de página",
         zh_cn: "页面布局",
         zh_tw: "頁面版面",
+        it: "Layout di pagina",
+        nl: "Pagina-indeling",
+        pl: "Układ strony",
+        ru: "Макет страницы",
+        tr: "Sayfa Düzeni",
+        ar: "تخطيط الصفحة",
+        he: "פריסת עמוד",
     ]),
     entry!("inspector.exclude_values" => [
         en: "Exclude Values",
@@ -1830,6 +2965,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Excluir valores",
         zh_cn: "排除数值",
         zh_tw: "排除數值",
+        it: "Escludi valori",
+        nl: "Waarden uitsluiten",
+        pl: "Wyklucz wartości",
+        ru: "Исключить значения",
+        tr: "Değerleri Hariç Tut",
+        ar: "استبعاد القيم",
+        he: "החרגת ערכים",
     ]),
     entry!("inspector.analysis_checklist" => [
         en: "Analysis Checklist",
@@ -1841,6 +2983,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Lista de verificação da análise",
         zh_cn: "分析检查清单",
         zh_tw: "分析檢查清單",
+        it: "Lista di controllo dell'analisi",
+        nl: "Analysechecklist",
+        pl: "Lista kontrolna analizy",
+        ru: "Контрольный список анализа",
+        tr: "Analiz Kontrol Listesi",
+        ar: "قائمة التحقق من التحليل",
+        he: "רשימת בדיקה לניתוח",
     ]),
     entry!("inspector.command_palette" => [
         en: "Command Palette",
@@ -1852,6 +3001,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Paleta de comandos",
         zh_cn: "命令面板",
         zh_tw: "命令選擇區",
+        it: "Tavolozza comandi",
+        nl: "Opdrachtenpalet",
+        pl: "Paleta poleceń",
+        ru: "Палитра команд",
+        tr: "Komut Paleti",
+        ar: "لوحة الأوامر",
+        he: "לוח הפקודות",
     ]),
     entry!("theme.light" => [
         en: "Light",
@@ -1863,6 +3019,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Claro",
         zh_cn: "浅色",
         zh_tw: "淺色",
+        it: "Chiaro",
+        nl: "Licht",
+        pl: "Jasny",
+        ru: "Светлая",
+        tr: "Açık",
+        ar: "فاتح",
+        he: "בהיר",
     ]),
     entry!("theme.dark" => [
         en: "Dark",
@@ -1874,6 +3037,13 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Escuro",
         zh_cn: "深色",
         zh_tw: "深色",
+        it: "Scuro",
+        nl: "Donker",
+        pl: "Ciemny",
+        ru: "Тёмная",
+        tr: "Koyu",
+        ar: "داكن",
+        he: "כהה",
     ]),
     entry!("theme.high_contrast" => [
         en: "High Contrast",
@@ -1885,8 +3055,34 @@ pub const CATALOG: &[CatalogEntry] = &[
         pt_br: "Alto contraste",
         zh_cn: "高对比度",
         zh_tw: "高對比",
+        it: "Contrasto elevato",
+        nl: "Hoog contrast",
+        pl: "Wysoki kontrast",
+        ru: "Высокая контрастность",
+        tr: "Yüksek Karşıtlık",
+        ar: "تباين عالٍ",
+        he: "ניגודיות גבוהה",
     ]),
 ];
+/// Return `true` when `code` identifies a right-to-left (RTL) locale (`ar`, `he`, `fa`, `ur`, and
+/// regional variants such as `ar-EG` or `he-IL`, plus legacy `iw`).
+#[must_use]
+pub fn is_rtl_locale(code: &str) -> bool {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
+        return false;
+    }
+    let normalized = trimmed.replace('_', "-").to_ascii_lowercase();
+    let primary = normalized.split('-').next().unwrap_or("");
+    matches!(primary, "ar" | "he" | "iw" | "fa" | "ur")
+}
+
+/// Mirror a horizontal layout coordinate `x` of span `width` inside a `canvas_width`-wide area
+/// when `is_rtl` is `true`, using saturating arithmetic so out-of-bounds spans never underflow.
+#[must_use]
+pub const fn mirror_x_for_rtl(x: u32, width: u32, canvas_width: u32, is_rtl: bool) -> u32 {
+    if is_rtl { canvas_width.saturating_sub(x).saturating_sub(width) } else { x }
+}
 
 /// Normalize an arbitrary BCP-47 locale tag to a supported [`LOCALES`] tag, falling back to `"en"`.
 #[must_use]
@@ -1910,6 +3106,13 @@ pub fn normalize_locale(locale: &str) -> &'static str {
         "fr" => "fr",
         "ja" => "ja",
         "ko" => "ko",
+        "it" => "it",
+        "nl" => "nl",
+        "pl" => "pl",
+        "ru" => "ru",
+        "tr" => "tr",
+        "ar" => "ar",
+        "he" | "iw" => "he",
         _ => "en",
     }
 }
@@ -1927,6 +3130,13 @@ fn exact_locale_index(locale: &str) -> Option<usize> {
         "pt-br" => Some(6),
         "zh-cn" => Some(7),
         "zh-tw" => Some(8),
+        "it" => Some(9),
+        "nl" => Some(10),
+        "pl" => Some(11),
+        "ru" => Some(12),
+        "tr" => Some(13),
+        "ar" => Some(14),
+        "he" => Some(15),
         _ => None,
     }
 }
@@ -1943,6 +3153,13 @@ pub fn locale_display_name(locale: &str) -> &'static str {
         "pt-BR" => "Português (Brasil)",
         "zh-CN" => "简体中文",
         "zh-TW" => "繁體中文",
+        "it" => "Italiano",
+        "nl" => "Nederlands",
+        "pl" => "Polski",
+        "ru" => "Русский",
+        "tr" => "Türkçe",
+        "ar" => "العربية",
+        "he" => "עברית",
         _ => "English",
     }
 }
@@ -2044,14 +3261,14 @@ impl Default for LocalePreset {
 }
 
 impl LocalePreset {
-    /// Construct the regional formatting preset for `locale` (`de`/`es`/`fr`/`pt-BR` default to
-    /// comma decimals and semicolon CSV delimiters; `en`/`ja`/`ko`/`zh-CN`/`zh-TW` use period
-    /// decimals and comma CSV delimiters).
+    /// Construct the regional formatting preset for `locale` (`de`/`es`/`fr`/`pt-BR`/`it`/`nl`/
+    /// `pl`/`ru`/`tr` default to comma decimals and semicolon CSV delimiters;
+    /// `en`/`ja`/`ko`/`zh-CN`/`zh-TW`/`ar`/`he` use period decimals and comma CSV delimiters).
     #[must_use]
     pub fn for_locale(locale: &str) -> Self {
         let canonical = normalize_locale(locale);
         match canonical {
-            "de" | "es" | "fr" | "pt-BR" => Self::comma_semicolon(canonical),
+            "de" | "es" | "fr" | "pt-BR" | "it" | "nl" | "pl" | "ru" | "tr" => Self::comma_semicolon(canonical),
             _ => Self::period_comma(canonical),
         }
     }
@@ -2086,6 +3303,12 @@ impl LocalePreset {
         let mut base = Self::for_locale(locale);
         base.minus_sign = String::from("\u{2212}");
         base
+    }
+
+    /// Whether this preset's locale uses right-to-left (RTL) layout and text direction.
+    #[must_use]
+    pub fn is_rtl(&self) -> bool {
+        is_rtl_locale(&self.locale)
     }
 
     /// Build the [`LocaleNumberPolicy`] consumed by `lumencraft-text` axis and *p*-value formatters.
@@ -2128,11 +3351,52 @@ mod tests {
 
     use lumencraft_math::{AxisScale, PValueFormat};
 
-    use super::{CATALOG, LOCALES, LocalePreset, catalog_len, missing_translations, normalize_locale, tr, try_tr};
+    use super::{
+        CATALOG, LOCALES, LocalePreset, catalog_len, is_rtl_locale, locale_display_name, mirror_x_for_rtl, missing_translations, normalize_locale,
+        tr, try_tr,
+    };
+
+    fn assert_rtl_and_non_latin_scripts() {
+        for rtl_tag in ["ar", "he", "fa", "ur", "ar-EG", "AR_SA", "he-IL", "he_IL", "fa-IR", "ur-PK", " ar-EG "] {
+            assert!(is_rtl_locale(rtl_tag), "expected RTL for `{rtl_tag}`");
+        }
+        for ltr_tag in ["en", "en-US", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "", "  ", "ar2", "zz"] {
+            assert!(!is_rtl_locale(ltr_tag), "expected LTR for `{ltr_tag}`");
+        }
+
+        assert_eq!(mirror_x_for_rtl(10, 20, 100, false), 10);
+        assert_eq!(mirror_x_for_rtl(10, 20, 100, true), 70);
+        assert_eq!(mirror_x_for_rtl(70, 20, 100, true), 10);
+        assert_eq!(mirror_x_for_rtl(15, 0, 100, true), 85);
+        assert_eq!(mirror_x_for_rtl(95, 20, 100, true), 0);
+        assert_eq!(mirror_x_for_rtl(u32::MAX, 10, 100, true), 0);
+        assert_eq!(mirror_x_for_rtl(10, u32::MAX, 100, true), 0);
+
+        let has_cyrillic = |s: &str| s.chars().any(|c| ('\u{0400}'..='\u{04FF}').contains(&c));
+        let has_arabic = |s: &str| s.chars().any(|c| ('\u{0600}'..='\u{06FF}').contains(&c));
+        let has_hebrew = |s: &str| s.chars().any(|c| ('\u{0590}'..='\u{05FF}').contains(&c));
+
+        assert!(has_cyrillic(locale_display_name("ru")));
+        assert!(has_arabic(locale_display_name("ar")));
+        assert!(has_hebrew(locale_display_name("he")));
+
+        for entry in CATALOG {
+            if entry.key == "table.xy" {
+                continue;
+            }
+            assert!(has_cyrillic(try_tr("ru", entry.key).unwrap()), "expected Cyrillic in ru:{}", entry.key);
+            assert!(has_arabic(try_tr("ar", entry.key).unwrap()), "expected Arabic script in ar:{}", entry.key);
+            assert!(has_hebrew(try_tr("he", entry.key).unwrap()), "expected Hebrew script in he:{}", entry.key);
+        }
+    }
 
     #[test]
     fn untranslated_report() {
-        assert_eq!(LOCALES, &["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW"]);
+        let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
+        assert_eq!(LOCALES, &expected);
+        assert_eq!(LOCALES.len(), 16);
+        assert_eq!(catalog_len(), 167);
+        assert_eq!(LOCALES.len() * catalog_len(), 2_672);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -2146,18 +3410,22 @@ mod tests {
         for &locale in LOCALES {
             let preset = LocalePreset::for_locale(locale);
             assert_eq!(preset.locale, locale);
+            assert_eq!(preset.is_rtl(), matches!(locale, "ar" | "he"));
+            assert!(!locale_display_name(locale).is_empty());
             for entry in CATALOG {
                 let direct = try_tr(locale, entry.key).unwrap();
                 assert_eq!(tr(locale, entry.key), direct);
             }
         }
 
+        assert_rtl_and_non_latin_scripts();
+
         println!(
-            "i18n: {} locale(s) registered ({}); {} keys x {} locales = {} translations verified; 0 missing catalog keys",
+            "i18n: {} locale(s) registered ({}); {} locales x {} keys = {} translations verified; 0 missing catalog keys",
             LOCALES.len(),
             LOCALES.join(", "),
-            catalog_len(),
             LOCALES.len(),
+            catalog_len(),
             LOCALES.len() * catalog_len()
         );
     }
@@ -2167,12 +3435,32 @@ mod tests {
         assert_eq!(normalize_locale("pt_br"), "pt-BR");
         assert_eq!(normalize_locale("zh-Hant-TW"), "zh-TW");
         assert_eq!(normalize_locale("zh_CN"), "zh-CN");
+        assert_eq!(normalize_locale("it-IT"), "it");
+        assert_eq!(normalize_locale("nl_BE"), "nl");
+        assert_eq!(normalize_locale("pl-PL"), "pl");
+        assert_eq!(normalize_locale("ru_RU"), "ru");
+        assert_eq!(normalize_locale("tr-TR"), "tr");
+        assert_eq!(normalize_locale("ar-EG"), "ar");
+        assert_eq!(normalize_locale("he_IL"), "he");
+        assert_eq!(normalize_locale("iw"), "he");
         assert_eq!(normalize_locale("unknown-XX"), "en");
 
         let de = LocalePreset::for_locale("de");
         assert_eq!(de.decimal_separator, ',');
         assert_eq!(de.csv_delimiter, ';');
+        assert!(!de.is_rtl());
         assert_eq!(de.format_axis_tick(12.34, AxisScale::Linear), "12,34");
         assert_eq!(de.format_pvalue(0.0023, PValueFormat::FourDecimal, true, true), "P = 0,0023 **");
+
+        let ar = LocalePreset::for_locale("ar-EG");
+        assert_eq!(ar.locale, "ar");
+        assert_eq!(ar.decimal_separator, '.');
+        assert_eq!(ar.csv_delimiter, ',');
+        assert!(ar.is_rtl());
+    }
+
+    #[test]
+    fn rtl_helpers_and_non_latin_scripts_behave_cleanly() {
+        assert_rtl_and_non_latin_scripts();
     }
 }

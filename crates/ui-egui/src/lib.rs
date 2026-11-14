@@ -19,14 +19,19 @@ use lumencraft_engine::{CommandOutcome, EngineError, Session};
 use lumencraft_tools::{Cursor, GridVisibleWindow};
 
 pub use control_io::{
-    ClipboardBundle, ControlLoopAction, ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_ui_command,
-    handle_control_line, handle_control_line_with_action, parse_control_port, serve_control_stream, serve_control_stream_with_quit,
+    ClipboardBundle, ControlLoopAction, ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, OsAdapterAvailability, OsAdapterStatus,
+    PrintJobSpec, PrintSpoolOutput, dispatch_ui_command, handle_control_line, handle_control_line_with_action, parse_control_port,
+    serve_control_stream, serve_control_stream_with_quit,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use control_io::{bind_control_tcp_listener, run_control_tcp_server, serve_control_listener, validate_loopback_addr};
+pub use control_io::{
+    bind_control_tcp_listener, read_os_pasteboard, run_control_tcp_server, serve_control_listener, submit_os_print_job, submit_os_print_pdf_bytes,
+    validate_loopback_addr, write_os_pasteboard,
+};
 pub use dialogs_canvas::{ActiveDialog, CanvasDialogState};
 pub use grid_view::GridViewState;
 pub use i18n::{LOCALES, LocalePreset, locale_display_name, normalize_locale, tr};
+pub use menus::{ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, normalize_shortcut_combo};
 pub use theme::{UiThemeMode, UiThemeSpec};
 pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 
@@ -44,6 +49,7 @@ pub struct UiApp {
     pub nav: WorkspaceNavState,
     pub grid: GridViewState,
     pub canvas_dialogs: CanvasDialogState,
+    pub shortcuts: ShortcutRegistry,
     pub family_open: bool,
     pub locale: String,
     pub locale_preset: i18n::LocalePreset,
@@ -71,6 +77,7 @@ impl UiApp {
             nav: WorkspaceNavState::default(),
             grid: GridViewState::default(),
             canvas_dialogs: CanvasDialogState::default(),
+            shortcuts: ShortcutRegistry::new(),
             family_open: true,
             locale: String::from("en"),
             locale_preset: i18n::LocalePreset::default(),
@@ -134,6 +141,25 @@ impl UiApp {
         handle_control_line_with_action(self, line)
     }
 
+    /// Dispatch a keyboard shortcut combination (such as `"F6"`, `"Shift+F6"`, or a customized
+    /// binding) through [`Self::shortcuts`].
+    ///
+    /// Returns `Ok(None)` when no command is bound to the normalized key combination.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string if executing the matched UI or engine command fails.
+    pub fn handle_key_combo(&mut self, combo: &str) -> Result<Option<ShortcutExecution>, String> {
+        let Some(matched) = self.shortcuts.handle_key_combo(combo) else {
+            return Ok(None);
+        };
+        if let Some(ui_result) = control_io::dispatch_ui_command(self, &matched.command_id, &matched.params)? {
+            return Ok(Some(ShortcutExecution { command_id: matched.command_id, ui: true, result: ui_result }));
+        }
+        let outcome = self.execute_command(&matched.command_id, matched.params).map_err(|err| err.to_string())?;
+        let result = serde_json::to_value(outcome).map_err(|err| format!("failed to serialize command outcome: {err}"))?;
+        Ok(Some(ShortcutExecution { command_id: matched.command_id, ui: false, result }))
+    }
+
     /// Synchronize navigator entries, family pane links, and status-bar statistics from `Session`.
     pub fn sync_views(&mut self) {
         self.nav.sync_from_document(self.session.document());
@@ -170,7 +196,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 12);
+        assert_eq!(UI_COMMANDS.len(), 17);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
@@ -180,12 +206,21 @@ mod tests {
             "ui.changeGraphType.open",
             "ui.clonePipeline.open",
             "ui.zoom.fitSheet",
+            "ui.gallery.toggle",
+            "ui.rulers.toggle",
+            "ui.pane.cycle",
+            "ui.shortcut.set",
+            "ui.shortcut.reset",
             "ui.locale.set",
             "ui.theme.set",
             "ui.screenshot",
             "app.about",
         ] {
             assert!(UI_COMMANDS.iter().any(|(id, ..)| *id == required), "missing UI command {required}");
+        }
+        let locale_doc = UI_COMMANDS.iter().find(|(id, ..)| *id == "ui.locale.set").map(|&(_, _, _, doc)| doc).unwrap_or("");
+        for tag in ["it", "nl", "pl", "ru", "tr", "ar", "he"] {
+            assert!(locale_doc.contains(tag), "ui.locale.set params doc missing `{tag}`: {locale_doc}");
         }
     }
 

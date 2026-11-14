@@ -338,6 +338,16 @@ fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::
         other => other?,
     };
     let local_addr = listener.local_addr()?;
+    match TcpStream::connect_timeout(&local_addr, Duration::from_millis(250)) {
+        Ok(probe) => {
+            drop(probe);
+            let _ = listener.accept();
+        }
+        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+            return Ok(());
+        }
+        Err(err) => return Err(Box::new(err)),
+    }
 
     let client = std::thread::spawn(move || -> Result<Value, String> {
         // First connection sends a line that is not valid UTF-8, which fails that connection.

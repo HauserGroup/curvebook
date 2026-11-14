@@ -4,9 +4,11 @@
 use std::io::{self, BufRead, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{SocketAddr, TcpListener};
+#[cfg(not(target_arch = "wasm32"))]
+use std::process::{Command, Output, Stdio};
 
 use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
-use lumencraft_doc::{DataSheet, ProjectDocument, SheetCellRange, SheetId, SheetSection};
+use lumencraft_doc::{DataSheet, ProjectDocument, SheetCellRange, SheetFolderKind, SheetId, SheetSection};
 use lumencraft_engine::Session;
 use lumencraft_engine::catalog::COMMANDS;
 use lumencraft_format::{CsvOptions, export_datasheet_to_csv, format_cell_token, write_delimited_records};
@@ -14,15 +16,16 @@ use lumencraft_palette::Rgba8;
 use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
 use lumencraft_render::{RenderTargetSpec, encode_png, render_scene};
 use lumencraft_svg::{SvgExportOptions, render_svg};
+use lumencraft_tools::PhysicalUnit;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, render_workspace_frame_png};
-use crate::i18n::{LocalePreset, locale_display_name, normalize_locale};
+use crate::i18n::{LocalePreset, is_rtl_locale, locale_display_name, normalize_locale};
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::theme::{UiThemeMode, UiThemeSpec};
-use crate::workspace_nav::WelcomeMode;
+use crate::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 
 /// Hard bound per JSON-lines control request/response frame (16 MiB).
 pub const MAX_CONTROL_LINE_BYTES: usize = 16 * 1024 * 1024;
@@ -229,6 +232,7 @@ impl PrintJobSpec {
             outline_text: false,
             trim_pt,
             bleed_pt,
+            ..PdfExportOptions::default()
         };
         let pdf_bytes = render_pdf_pages(&pages, &pdf_opts).map_err(|err| format!("print PDF spool failed: {err}"))?;
 
@@ -406,6 +410,11 @@ pub fn dispatch_ui_command(app: &mut UiApp, command_id: &str, params: &Value) ->
             app.canvas_dialogs.reset_zoom_to_fit();
             Ok(Some(json!({ "zoom": app.canvas_dialogs.canvas.zoom })))
         }
+        "ui.gallery.toggle" => dispatch_ui_gallery_toggle(app, params).map(Some),
+        "ui.pane.cycle" => dispatch_ui_pane_cycle(app, params).map(Some),
+        "ui.rulers.toggle" => dispatch_ui_rulers_toggle(app, params).map(Some),
+        "ui.shortcut.set" => dispatch_ui_shortcut_set(app, params).map(Some),
+        "ui.shortcut.reset" => dispatch_ui_shortcut_reset(app, params).map(Some),
         "ui.locale.set" => dispatch_ui_locale_set(app, params).map(Some),
         "ui.theme.set" => dispatch_ui_theme_set(app, params).map(Some),
         "ui.screenshot" => dispatch_ui_screenshot(app, params).map(Some),
@@ -432,7 +441,7 @@ fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, C
             "bundled_fonts": crate::bundled_fonts_enabled(),
             "version": env!("CARGO_PKG_VERSION"),
         })),
-        "command.list" => Ok(handle_command_list()),
+        "command.list" => Ok(handle_command_list(app)),
         "command.run" => handle_command_run(app, &params),
         "command.batch" => handle_command_batch(app, &params),
         "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), &params),
@@ -515,24 +524,26 @@ fn serialize_response(resp: &ControlResponse) -> String {
     serde_json::to_string(resp).unwrap_or_else(|_| String::from("{\"id\":\"\",\"ok\":false,\"result\":null,\"error\":\"serialization failure\"}"))
 }
 
-fn handle_command_list() -> Value {
+fn handle_command_list(app: &UiApp) -> Value {
     let mut commands = Vec::with_capacity(COMMANDS.len() + UI_COMMANDS.len());
     for desc in COMMANDS {
+        let active_shortcut = app.shortcuts.active_combo(desc.id).unwrap_or(desc.shortcut);
         commands.push(json!({
             "id": desc.id,
             "label": desc.label,
             "menu_path": desc.menu_path,
-            "shortcut": desc.shortcut,
+            "shortcut": active_shortcut,
             "params_doc": desc.params_doc,
             "ui": false,
         }));
     }
     for &(id, label, shortcut, params_doc) in UI_COMMANDS {
+        let active_shortcut = app.shortcuts.active_combo(id).unwrap_or(shortcut);
         commands.push(json!({
             "id": id,
             "label": label,
             "menu_path": "UI",
-            "shortcut": shortcut,
+            "shortcut": active_shortcut,
             "params_doc": params_doc,
             "ui": true,
         }));
@@ -615,8 +626,13 @@ fn handle_ui_state(app: &mut UiApp) -> Value {
         "navigator_open": app.nav.navigator_open,
         "inspector_open": app.nav.inspector_open,
         "family_open": app.family_open,
+        "gallery_open": app.nav.gallery.open,
+        "active_pane": active_pane_name(app.nav.active_pane),
+        "rulers_visible": app.canvas_dialogs.rulers_visible,
+        "ruler_unit": physical_unit_name(app.canvas_dialogs.ruler_unit),
         "locale": app.locale,
         "locale_display_name": locale_display_name(&app.locale),
+        "is_rtl": is_rtl_locale(&app.locale),
         "decimal_separator": app.locale_preset.decimal_separator.to_string(),
         "theme_mode": theme_mode_name(app.theme.mode),
         "wcag_aa": app.theme.meets_wcag_aa(),
@@ -913,14 +929,150 @@ fn dispatch_ui_clone_pipeline_open(app: &mut UiApp, params: &Value) -> Result<Va
     }
 }
 
+const fn physical_unit_name(unit: PhysicalUnit) -> &'static str {
+    match unit {
+        PhysicalUnit::Millimeters => "mm",
+        PhysicalUnit::Inches => "in",
+        PhysicalUnit::Points => "pt",
+    }
+}
+
+const fn active_pane_name(pane: ActiveWorkspacePane) -> &'static str {
+    match pane {
+        ActiveWorkspacePane::Navigator => "Navigator",
+        ActiveWorkspacePane::FamilyStrip => "FamilyStrip",
+        ActiveWorkspacePane::MainCanvasOrGrid => "MainCanvasOrGrid",
+        ActiveWorkspacePane::Inspector => "Inspector",
+        ActiveWorkspacePane::FloatingNotes => "FloatingNotes",
+    }
+}
+
+const fn sheet_folder_kind_name(folder: SheetFolderKind) -> &'static str {
+    match folder {
+        SheetFolderKind::Data => "data",
+        SheetFolderKind::Info => "info",
+        SheetFolderKind::Results => "results",
+        SheetFolderKind::Graphs => "graphs",
+        SheetFolderKind::Layouts => "layouts",
+    }
+}
+
+fn parse_gallery_folder(raw: &str) -> Result<Option<SheetFolderKind>, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "all" => Ok(None),
+        "data" => Ok(Some(SheetFolderKind::Data)),
+        "info" => Ok(Some(SheetFolderKind::Info)),
+        "results" | "analyses" | "analysis" => Ok(Some(SheetFolderKind::Results)),
+        "graphs" | "graph" => Ok(Some(SheetFolderKind::Graphs)),
+        "layouts" | "layout" => Ok(Some(SheetFolderKind::Layouts)),
+        other => Err(format!("unsupported gallery folder `{other}`; expected data, info, results, graphs, layouts, or all")),
+    }
+}
+
+fn dispatch_ui_gallery_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    if let Some(folder_val) = params.get("folder") {
+        let folder = match folder_val {
+            Value::Null => None,
+            Value::String(raw) => parse_gallery_folder(raw)?,
+            other => return Err(format!("ui.gallery.toggle 'folder' must be a string, got {other}")),
+        };
+        app.nav.set_gallery_filter(folder, app.session.document());
+    } else {
+        app.nav.sync_gallery(app.session.document());
+    }
+    match params.get("open") {
+        None | Some(Value::Null) => {
+            app.nav.toggle_gallery();
+        }
+        Some(Value::Bool(explicit)) => {
+            app.nav.gallery.open = *explicit;
+        }
+        Some(other) => return Err(format!("ui.gallery.toggle 'open' must be a boolean, got {other}")),
+    }
+    Ok(json!({
+        "gallery_open": app.nav.gallery.open,
+        "filter_folder": app.nav.gallery.filter_folder.map(sheet_folder_kind_name),
+        "card_count": app.nav.gallery.cards.len(),
+    }))
+}
+
+fn dispatch_ui_pane_cycle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let reverse = match params.get("reverse") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(flag)) => *flag,
+        Some(other) => return Err(format!("ui.pane.cycle 'reverse' must be a boolean, got {other}")),
+    };
+    let active = app.nav.cycle_focus_pane(reverse);
+    Ok(json!({
+        "active_pane": active_pane_name(active),
+        "reverse": reverse,
+    }))
+}
+
+fn dispatch_ui_rulers_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    if let Some(raw_unit) = params.get("unit").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        app.canvas_dialogs.ruler_unit = match raw_unit.to_ascii_lowercase().as_str() {
+            "mm" | "millimeters" | "millimeter" => PhysicalUnit::Millimeters,
+            "in" | "inch" | "inches" => PhysicalUnit::Inches,
+            "pt" | "points" | "point" => PhysicalUnit::Points,
+            other => return Err(format!("unsupported ruler unit `{other}`; expected pt, in, or mm")),
+        };
+    }
+    if let Some(explicit) = params.get("visible").and_then(Value::as_bool) {
+        app.canvas_dialogs.rulers_visible = explicit;
+    } else {
+        app.canvas_dialogs.rulers_visible = !app.canvas_dialogs.rulers_visible;
+    }
+    Ok(json!({
+        "rulers_visible": app.canvas_dialogs.rulers_visible,
+        "unit": physical_unit_name(app.canvas_dialogs.ruler_unit),
+    }))
+}
+
+fn dispatch_ui_shortcut_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let Some(command_id) = params.get("command_id").or_else(|| params.get("id")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+    else {
+        return Err(String::from("ui.shortcut.set requires non-empty string 'command_id'"));
+    };
+    let Some(shortcut) = params.get("shortcut").or_else(|| params.get("combo")).and_then(Value::as_str) else {
+        return Err(String::from("ui.shortcut.set requires string 'shortcut'"));
+    };
+    app.shortcuts.set_shortcut(command_id, shortcut)?;
+    let active = app.shortcuts.active_combo(command_id).unwrap_or("");
+    Ok(json!({
+        "command_id": command_id,
+        "shortcut": active,
+    }))
+}
+
+fn dispatch_ui_shortcut_reset(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let target = params.get("command_id").or_else(|| params.get("id")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    if let Some(command_id) = target {
+        app.shortcuts.reset_shortcut(command_id)?;
+        let active = app.shortcuts.active_combo(command_id).unwrap_or("");
+        Ok(json!({
+            "command_id": command_id,
+            "shortcut": active,
+            "reset_all": false,
+        }))
+    } else {
+        app.shortcuts.reset_all();
+        Ok(json!({
+            "reset_all": true,
+        }))
+    }
+}
+
 fn dispatch_ui_locale_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let Some(raw_locale) = params.get("locale").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
         return Err(String::from("ui.locale.set requires non-empty string 'locale'"));
     };
     let lower = raw_locale.replace('_', "-").to_ascii_lowercase();
     let primary = lower.split('-').next().unwrap_or("");
-    if !matches!(primary, "en" | "de" | "es" | "fr" | "ja" | "ko" | "pt" | "zh") {
-        return Err(format!("unsupported locale `{raw_locale}`; expected one of en, de, es, fr, ja, ko, pt-BR, zh-CN, zh-TW"));
+    if !matches!(primary, "en" | "de" | "es" | "fr" | "ja" | "ko" | "pt" | "zh" | "it" | "nl" | "pl" | "ru" | "tr" | "ar" | "he" | "iw") {
+        return Err(format!(
+            "unsupported locale `{raw_locale}`; expected one of en, de, es, fr, ja, ko, pt-BR, zh-CN, zh-TW, it, nl, pl, ru, tr, ar, he"
+        ));
     }
     let normalized = normalize_locale(raw_locale);
     app.set_locale(normalized);
@@ -1297,5 +1449,477 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::ExportFigure { .. } => "ExportFigure",
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::About => "About",
+    }
+}
+
+/// Execution / availability state returned by native OS pasteboard and print spool adapters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum OsAdapterAvailability {
+    Submitted,
+    Read,
+    Unavailable,
+}
+
+/// Structured status returned by OS pasteboard and print spool integration helpers.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OsAdapterStatus {
+    pub available: bool,
+    pub availability: OsAdapterAvailability,
+    pub backend: String,
+    pub detail: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub job_id: Option<String>,
+}
+
+impl OsAdapterStatus {
+    /// Construct an [`OsAdapterStatus`] representing a missing tool or headless environment.
+    #[must_use]
+    pub fn unavailable(backend: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            available: false,
+            availability: OsAdapterAvailability::Unavailable,
+            backend: backend.into(),
+            detail: detail.into(),
+            text: None,
+            job_id: None,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone)]
+struct OsCommandCandidate {
+    program: String,
+    args: Vec<String>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl OsCommandCandidate {
+    fn new(program: impl Into<String>, args: &[&str]) -> Self {
+        Self { program: program.into(), args: args.iter().map(|&s| s.to_owned()).collect() }
+    }
+}
+
+/// Write UTF-8 text (`TSV`, `SVG`, or `HTML`) to the host OS clipboard using platform tools
+/// (`pbcopy` on macOS, `wl-copy`/`xclip` on Linux, `clip`/`powershell` on Windows).
+///
+/// Missing OS clipboard binaries or headless display environments return
+/// `Ok(OsAdapterStatus { available: false, availability: OsAdapterAvailability::Unavailable, .. })`
+/// without panicking.
+///
+/// # Errors
+/// Returns a structured error string if spawning or executing an available clipboard adapter fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn write_os_pasteboard(text: &str) -> Result<OsAdapterStatus, String> {
+    let candidates = os_pasteboard_write_candidates();
+    if candidates.is_empty() {
+        return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
+    }
+    write_os_pasteboard_with(&candidates, text)
+}
+
+/// Read UTF-8 text from the host OS clipboard using platform tools (`pbpaste` on macOS,
+/// `wl-paste`/`xclip` on Linux, `powershell Get-Clipboard` on Windows).
+///
+/// Missing OS clipboard binaries or headless display environments return
+/// `Ok(OsAdapterStatus { available: false, availability: OsAdapterAvailability::Unavailable, .. })`
+/// without panicking.
+///
+/// # Errors
+/// Returns a structured error string if an available clipboard adapter fails or returns non-UTF-8
+/// output.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_os_pasteboard() -> Result<OsAdapterStatus, String> {
+    let candidates = os_pasteboard_read_candidates();
+    if candidates.is_empty() {
+        return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
+    }
+    read_os_pasteboard_with(&candidates)
+}
+
+/// Submit a physical-scale [`PrintSpoolOutput`] PDF payload to the host OS print spooler
+/// (`lp` / `lpr`).
+///
+/// Missing print-spool binaries return
+/// `Ok(OsAdapterStatus { available: false, availability: OsAdapterAvailability::Unavailable, .. })`
+/// without panicking.
+///
+/// # Errors
+/// Returns a structured error string if `spool.pdf_bytes` is not a valid PDF payload, `printer` is
+/// invalid, or an available print-spool binary rejects the job.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn submit_os_print_job(spool: &PrintSpoolOutput, printer: Option<&str>) -> Result<OsAdapterStatus, String> {
+    submit_os_print_pdf_bytes(&spool.pdf_bytes, printer)
+}
+
+/// Submit raw `%PDF-` bytes to the host OS print spooler (`lp` / `lpr`).
+///
+/// # Errors
+/// Returns a structured error string if `pdf_bytes` is not a valid PDF payload, `printer` is
+/// invalid, or an available print-spool binary fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn submit_os_print_pdf_bytes(pdf_bytes: &[u8], printer: Option<&str>) -> Result<OsAdapterStatus, String> {
+    let clean_printer = validate_printer_name(printer)?;
+    let candidates = os_print_candidates(clean_printer);
+    submit_os_print_bytes_with(&candidates, pdf_bytes)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_printer_name(printer: Option<&str>) -> Result<Option<&str>, String> {
+    let Some(raw) = printer else {
+        return Ok(None);
+    };
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("printer name must not be empty"));
+    }
+    if trimmed.starts_with('-') {
+        return Err(format!("invalid printer name `{trimmed}`: must not start with '-'"));
+    }
+    Ok(Some(trimmed))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn write_os_pasteboard_with(candidates: &[OsCommandCandidate], text: &str) -> Result<OsAdapterStatus, String> {
+    let mut missing = Vec::new();
+    for candidate in candidates {
+        match spawn_candidate_with_stdin(candidate, Some(text.as_bytes()))? {
+            Some(output) => {
+                let detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                return Ok(OsAdapterStatus {
+                    available: true,
+                    availability: OsAdapterAvailability::Submitted,
+                    backend: candidate.program.clone(),
+                    detail: if detail.is_empty() { format!("wrote {} bytes to OS pasteboard", text.len()) } else { detail },
+                    text: None,
+                    job_id: None,
+                });
+            }
+            None => missing.push(candidate.program.as_str()),
+        }
+    }
+    Ok(OsAdapterStatus::unavailable(missing.join("/"), "no OS clipboard adapter binary found on PATH"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_os_pasteboard_with(candidates: &[OsCommandCandidate]) -> Result<OsAdapterStatus, String> {
+    let mut missing = Vec::new();
+    for candidate in candidates {
+        match spawn_candidate_with_stdin(candidate, None)? {
+            Some(output) => {
+                let text = String::from_utf8(output.stdout).map_err(|err| format!("OS pasteboard returned non-UTF-8 text: {err}"))?;
+                return Ok(OsAdapterStatus {
+                    available: true,
+                    availability: OsAdapterAvailability::Read,
+                    backend: candidate.program.clone(),
+                    detail: format!("read {} bytes from OS pasteboard", text.len()),
+                    text: Some(text),
+                    job_id: None,
+                });
+            }
+            None => missing.push(candidate.program.as_str()),
+        }
+    }
+    Ok(OsAdapterStatus::unavailable(missing.join("/"), "no OS clipboard adapter binary found on PATH"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn submit_os_print_bytes_with(candidates: &[OsCommandCandidate], pdf_bytes: &[u8]) -> Result<OsAdapterStatus, String> {
+    if !pdf_bytes.starts_with(b"%PDF-") {
+        return Err(String::from("print spool payload must start with `%PDF-` signature"));
+    }
+    let mut missing = Vec::new();
+    for candidate in candidates {
+        match spawn_candidate_with_stdin(candidate, Some(pdf_bytes))? {
+            Some(output) => {
+                let stdout = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+                let job_id = (!stdout.is_empty()).then_some(stdout.clone());
+                return Ok(OsAdapterStatus {
+                    available: true,
+                    availability: OsAdapterAvailability::Submitted,
+                    backend: candidate.program.clone(),
+                    detail: if stdout.is_empty() { format!("submitted {} PDF bytes to print spool", pdf_bytes.len()) } else { stdout },
+                    text: None,
+                    job_id,
+                });
+            }
+            None => missing.push(candidate.program.as_str()),
+        }
+    }
+    Ok(OsAdapterStatus::unavailable(missing.join("/"), "no OS print spooler binary (`lp`/`lpr`) found on PATH"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_candidate_with_stdin(candidate: &OsCommandCandidate, stdin_bytes: Option<&[u8]>) -> Result<Option<Output>, String> {
+    let mut cmd = Command::new(&candidate.program);
+    cmd.args(&candidate.args).stdout(Stdio::piped()).stderr(Stdio::piped());
+    if stdin_bytes.is_some() {
+        cmd.stdin(Stdio::piped());
+    } else {
+        cmd.stdin(Stdio::null());
+    }
+
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(format!("failed to launch `{}`: {err}", candidate.program)),
+    };
+
+    if let Some(bytes) = stdin_bytes
+        && let Some(mut stdin) = child.stdin.take()
+    {
+        stdin.write_all(bytes).map_err(|err| format!("failed writing payload to `{}` stdin: {err}", candidate.program))?;
+    }
+
+    let output = child.wait_with_output().map_err(|err| format!("failed waiting on `{}`: {err}", candidate.program))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+        let detail = if stderr.is_empty() { String::from("no stderr output") } else { stderr };
+        return Err(format!("`{}` exited with {}: {detail}", candidate.program, output.status));
+    }
+    Ok(Some(output))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn os_pasteboard_write_candidates() -> Vec<OsCommandCandidate> {
+    #[cfg(target_os = "macos")]
+    {
+        vec![OsCommandCandidate::new("pbcopy", &[])]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        vec![
+            OsCommandCandidate::new("clip", &[]),
+            OsCommandCandidate::new("powershell", &["-NoProfile", "-NonInteractive", "-Command", "$input | Set-Clipboard"]),
+        ]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut out = Vec::new();
+        if has_nonempty_env("WAYLAND_DISPLAY") {
+            out.push(OsCommandCandidate::new("wl-copy", &[]));
+        }
+        if has_nonempty_env("DISPLAY") {
+            out.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard"]));
+        }
+        out
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn os_pasteboard_read_candidates() -> Vec<OsCommandCandidate> {
+    #[cfg(target_os = "macos")]
+    {
+        vec![OsCommandCandidate::new("pbpaste", &[])]
+    }
+    #[cfg(target_os = "windows")]
+    {
+        vec![OsCommandCandidate::new("powershell", &["-NoProfile", "-NonInteractive", "-Command", "Get-Clipboard"])]
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut out = Vec::new();
+        if has_nonempty_env("WAYLAND_DISPLAY") {
+            out.push(OsCommandCandidate::new("wl-paste", &["--no-newline"]));
+        }
+        if has_nonempty_env("DISPLAY") {
+            out.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-o"]));
+        }
+        out
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn os_print_candidates(printer: Option<&str>) -> Vec<OsCommandCandidate> {
+    let lp = match printer {
+        Some(p) => OsCommandCandidate::new("lp", &["-d", p]),
+        None => OsCommandCandidate::new("lp", &[]),
+    };
+    let lpr = match printer {
+        Some(p) => OsCommandCandidate::new("lpr", &["-P", p]),
+        None => OsCommandCandidate::new("lpr", &[]),
+    };
+    #[cfg(target_os = "windows")]
+    {
+        vec![lpr, lp]
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        vec![lp, lpr]
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), all(unix, not(target_os = "macos"))))]
+fn has_nonempty_env(key: &str) -> bool {
+    std::env::var_os(key).is_some_and(|v| !v.is_empty())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        OsAdapterAvailability, OsCommandCandidate, PrintJobSpec, PrintSpoolOutput, read_os_pasteboard_with, submit_os_print_bytes_with,
+        submit_os_print_job, write_os_pasteboard_with,
+    };
+
+    #[test]
+    fn os_adapters_handle_missing_tools_and_invalid_inputs_safely() -> Result<(), Box<dyn std::error::Error>> {
+        let missing = [OsCommandCandidate::new("lumencraft-nonexistent-os-tool-1", &[])];
+        let write_unavail = write_os_pasteboard_with(&missing, "hello")?;
+        assert!(!write_unavail.available);
+        assert_eq!(write_unavail.availability, OsAdapterAvailability::Unavailable);
+
+        let read_unavail = read_os_pasteboard_with(&missing)?;
+        assert!(!read_unavail.available);
+        assert_eq!(read_unavail.availability, OsAdapterAvailability::Unavailable);
+        assert!(read_unavail.text.is_none());
+
+        let print_unavail = submit_os_print_bytes_with(&missing, b"%PDF-1.7\n%%EOF\n")?;
+        assert!(!print_unavail.available);
+        assert_eq!(print_unavail.availability, OsAdapterAvailability::Unavailable);
+
+        let bad_spool = PrintSpoolOutput { pdf_bytes: b"not-a-pdf".to_vec(), page_count: 0, page_sizes_pt: Vec::new(), scale_percent: 100.0 };
+        assert!(submit_os_print_job(&bad_spool, None).is_err());
+
+        let valid_spool = PrintSpoolOutput {
+            pdf_bytes: b"%PDF-1.7\n%%EOF\n".to_vec(),
+            page_count: 1,
+            page_sizes_pt: vec![(100.0, 100.0)],
+            scale_percent: PrintJobSpec::default().scale_percent,
+        };
+        assert!(submit_os_print_job(&valid_spool, Some("-malicious-flag")).is_err());
+        assert!(submit_os_print_job(&valid_spool, Some("   ")).is_err());
+
+        #[cfg(unix)]
+        {
+            let write_fallback = [OsCommandCandidate::new("lumencraft-missing-bin", &[]), OsCommandCandidate::new("sh", &["-c", "cat >/dev/null"])];
+            let ok_write = write_os_pasteboard_with(&write_fallback, "x\ty\n1\t2\n")?;
+            assert!(ok_write.available);
+            assert_eq!(ok_write.availability, OsAdapterAvailability::Submitted);
+
+            let read_mock = [OsCommandCandidate::new("printf", &["alpha\tbeta"])];
+            let ok_read = read_os_pasteboard_with(&read_mock)?;
+            assert!(ok_read.available);
+            assert_eq!(ok_read.availability, OsAdapterAvailability::Read);
+            assert_eq!(ok_read.text.as_deref(), Some("alpha\tbeta"));
+
+            let print_mock = [OsCommandCandidate::new("sh", &["-c", "cat >/dev/null && printf 'request id is Mock-1'"])];
+            let ok_print = submit_os_print_bytes_with(&print_mock, &valid_spool.pdf_bytes)?;
+            assert!(ok_print.available);
+            assert_eq!(ok_print.availability, OsAdapterAvailability::Submitted);
+            assert_eq!(ok_print.job_id.as_deref(), Some("request id is Mock-1"));
+
+            let failing = [OsCommandCandidate::new("sh", &["-c", "echo 'printer offline' >&2; exit 2"])];
+            match submit_os_print_bytes_with(&failing, &valid_spool.pdf_bytes) {
+                Err(err) => assert!(err.contains("printer offline")),
+                Ok(other) => return Err(format!("expected failure status, got {other:?}").into()),
+            }
+        }
+        Ok(())
+    }
+
+    fn dispatch_json(app: &mut crate::UiApp, req: &serde_json::Value) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        Ok(serde_json::from_str(&app.dispatch_control_line(&req.to_string()))?)
+    }
+
+    #[test]
+    fn wave3_shortcuts_gallery_rulers_and_pane_cycle() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+
+        use crate::UiApp;
+        use crate::workspace_nav::ActiveWorkspacePane;
+
+        let mut app = UiApp::new();
+        assert_eq!(app.nav.active_pane, ActiveWorkspacePane::MainCanvasOrGrid);
+        assert!(!app.nav.gallery.open);
+        assert!(!app.canvas_dialogs.rulers_visible);
+
+        // F6 forward and Shift+F6 reverse pane cycling through UiApp::handle_key_combo.
+        let fwd = app.handle_key_combo("F6")?.ok_or("F6 should match ui.pane.cycle")?;
+        assert_eq!(fwd.command_id, "ui.pane.cycle");
+        assert!(fwd.ui);
+        assert_eq!(app.nav.active_pane, ActiveWorkspacePane::Inspector);
+
+        let rev = app.handle_key_combo("Shift+F6")?.ok_or("Shift+F6 should match ui.pane.cycle")?;
+        assert_eq!(rev.command_id, "ui.pane.cycle");
+        assert_eq!(app.nav.active_pane, ActiveWorkspacePane::MainCanvasOrGrid);
+
+        // Custom shortcut set -> command.list reflects override -> handle_key_combo dispatches -> reset restores default.
+        let set_reply = dispatch_json(
+            &mut app,
+            &json!({"id": 1, "method": "ui.shortcut.set", "params": {"command_id": "ui.gallery.toggle", "shortcut": "Ctrl+Shift+G"}}),
+        )?;
+        assert_eq!(set_reply["ok"], json!(true));
+        assert_eq!(set_reply["result"]["shortcut"], json!("Ctrl+Shift+G"));
+
+        let list_reply = dispatch_json(&mut app, &json!({"id": 2, "method": "command.list"}))?;
+        let gallery_entry = list_reply["result"]["commands"]
+            .as_array()
+            .and_then(|arr| arr.iter().find(|entry| entry["id"] == "ui.gallery.toggle"))
+            .ok_or("missing ui.gallery.toggle in command.list")?;
+        assert_eq!(gallery_entry["shortcut"], json!("Ctrl+Shift+G"));
+
+        let gallery_key = app.handle_key_combo("shift + ctrl + g")?.ok_or("custom gallery shortcut must match")?;
+        assert_eq!(gallery_key.command_id, "ui.gallery.toggle");
+        assert!(app.nav.gallery.open);
+
+        let reset_reply = dispatch_json(&mut app, &json!({"id": 3, "method": "ui.shortcut.reset", "params": {"command_id": "ui.gallery.toggle"}}))?;
+        assert_eq!(reset_reply["ok"], json!(true));
+        assert!(app.handle_key_combo("Ctrl+Shift+G")?.is_none());
+
+        // Create one data sheet so Portfolio Gallery filter returns a concrete card.
+        app.execute_command("sheet.createData", json!({ "kind": "xy", "title": "Gallery Table", "auto_family": false }))?;
+
+        // Control-line dispatch for ui.gallery.toggle, ui.rulers.toggle, ui.pane.cycle.
+        let gallery_filter = dispatch_json(&mut app, &json!({"id": 4, "method": "ui.gallery.toggle", "params": {"open": true, "folder": "data"}}))?;
+        assert_eq!(gallery_filter["ok"], json!(true));
+        assert_eq!(gallery_filter["result"]["filter_folder"], json!("data"));
+        assert_eq!(gallery_filter["result"]["card_count"], json!(1));
+
+        let rulers_reply = dispatch_json(&mut app, &json!({"id": 5, "method": "ui.rulers.toggle", "params": {"visible": true, "unit": "mm"}}))?;
+        assert_eq!(rulers_reply["ok"], json!(true));
+        assert_eq!(rulers_reply["result"]["rulers_visible"], json!(true));
+        assert_eq!(rulers_reply["result"]["unit"], json!("mm"));
+
+        let pane_reply = dispatch_json(&mut app, &json!({"id": 6, "method": "ui.pane.cycle", "params": {"reverse": true}}))?;
+        assert_eq!(pane_reply["ok"], json!(true));
+        assert_eq!(pane_reply["result"]["active_pane"], json!("FamilyStrip"));
+
+        let state = dispatch_json(&mut app, &json!({"id": 7, "method": "ui.state"}))?;
+        assert_eq!(state["result"]["gallery_open"], json!(true));
+        assert_eq!(state["result"]["rulers_visible"], json!(true));
+        assert_eq!(state["result"]["ruler_unit"], json!("mm"));
+        assert_eq!(state["result"]["active_pane"], json!("FamilyStrip"));
+
+        Ok(())
+    }
+
+    #[test]
+    fn wave3_locale_set_covers_all_16_locales_and_rtl() -> Result<(), Box<dyn std::error::Error>> {
+        use serde_json::json;
+
+        use crate::UiApp;
+        use crate::i18n::LOCALES;
+
+        let mut app = UiApp::new();
+        assert_eq!(LOCALES.len(), 16);
+
+        for &locale in LOCALES {
+            let reply = dispatch_json(&mut app, &json!({"id": 1, "method": "ui.locale.set", "params": {"locale": locale}}))?;
+            assert_eq!(reply["ok"], json!(true), "locale {locale} failed: {reply}");
+        }
+
+        let state_he = dispatch_json(&mut app, &json!({"id": 2, "method": "ui.state"}))?;
+        assert_eq!(state_he["result"]["locale"], json!("he"));
+        assert_eq!(state_he["result"]["is_rtl"], json!(true));
+
+        let reply_en = dispatch_json(&mut app, &json!({"id": 3, "method": "ui.locale.set", "params": {"locale": "en"}}))?;
+        assert_eq!(reply_en["ok"], json!(true));
+        let state_en = dispatch_json(&mut app, &json!({"id": 4, "method": "ui.state"}))?;
+        assert_eq!(state_en["result"]["locale"], json!("en"));
+        assert_eq!(state_en["result"]["is_rtl"], json!(false));
+
+        Ok(())
     }
 }

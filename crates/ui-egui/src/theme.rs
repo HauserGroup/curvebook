@@ -248,11 +248,29 @@ pub fn bundled_font_entries() -> Vec<BundledFontEntry> {
         .collect()
 }
 
+/// Font availability and script-support diagnostics without host filesystem probing (native and WASM safe).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FontDiagnostics {
+    pub bundled_count: usize,
+    pub system_cjk_candidates: &'static [&'static str],
+    pub rtl_supported: bool,
+}
+
+/// Inspect bundled font count, system CJK fallback candidates, and RTL script routing for `locale`.
+#[must_use]
+pub fn font_diagnostics(locale: &str) -> FontDiagnostics {
+    FontDiagnostics {
+        bundled_count: install_fonts(),
+        system_cjk_candidates: lumencraft_text::system_cjk_font_candidates(locale),
+        rtl_supported: lumencraft_text::is_rtl_locale(locale),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use lumencraft_palette::Rgba8;
 
-    use super::{UiThemeMode, UiThemeSpec, WCAG_AA_TEXT_MIN_RATIO, WCAG_AAA_TEXT_MIN_RATIO, install_fonts, wcag_contrast_ratio};
+    use super::{UiThemeMode, UiThemeSpec, WCAG_AA_TEXT_MIN_RATIO, WCAG_AAA_TEXT_MIN_RATIO, font_diagnostics, install_fonts, wcag_contrast_ratio};
 
     #[test]
     fn all_theme_presets_meet_wcag_aa_and_keep_paper_white() {
@@ -273,5 +291,26 @@ mod tests {
     fn wcag_contrast_and_install_fonts_behave_cleanly() {
         assert!((wcag_contrast_ratio(Rgba8::BLACK, Rgba8::WHITE) - 21.0).abs() < 1e-9);
         assert_eq!(install_fonts(), super::bundled_font_entries().len());
+    }
+
+    #[test]
+    fn font_diagnostics_reports_locale_cjk_and_rtl_without_fs_probe() {
+        let en = font_diagnostics("en");
+        assert_eq!(en.bundled_count, install_fonts());
+        assert!(!en.rtl_supported);
+
+        let ja = font_diagnostics("ja");
+        assert!(!ja.system_cjk_candidates.is_empty());
+        assert!(!ja.rtl_supported);
+
+        let zh = font_diagnostics("zh-TW");
+        assert!(!zh.system_cjk_candidates.is_empty());
+        assert!(!zh.rtl_supported);
+
+        let ar = font_diagnostics("ar");
+        assert!(ar.rtl_supported);
+
+        let he = font_diagnostics("he-IL");
+        assert!(he.rtl_supported);
     }
 }

@@ -4,15 +4,15 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use lumencraft_doc::{
-    Cell, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, GroupedTable, LinkBorderColor,
-    MultipleVariablesTable, NestedTable, PartsOfWholeTable, ProjectDocument, ResultStatus, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
-    TableArchetype, TableKind, XColumnMode, XyTable,
+    Cell, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, DocError, GroupedTable, LinkBorderColor,
+    MultipleVariablesTable, NestedTable, PartsOfWholeTable, ProjectDocument, ResultStatus, SheetFolderKind, SheetId, SheetSection, SubcolumnMode,
+    SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use lumencraft_engine::Session;
 use lumencraft_palette::Rgba8;
-use lumencraft_tools::ToolCommandIntent;
+use lumencraft_tools::{NavigatorDragState, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 /// Display mode for the five-folder Project Navigator tree (`docs/ui-parity.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -553,11 +553,108 @@ impl WelcomeWizardState {
     }
 }
 
+/// Active keyboard focus pane cycled with `F6` / `Shift+F6`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ActiveWorkspacePane {
+    Navigator,
+    FamilyStrip,
+    #[default]
+    MainCanvasOrGrid,
+    Inspector,
+    FloatingNotes,
+}
+
+impl ActiveWorkspacePane {
+    /// Canonical pane focus cycle order (`F6` forward, `Shift+F6` reverse).
+    pub const CYCLE_ORDER: [Self; 5] = [Self::Navigator, Self::FamilyStrip, Self::MainCanvasOrGrid, Self::Inspector, Self::FloatingNotes];
+
+    /// Step one pane forward (`reverse = false`) or backward (`reverse = true`).
+    #[must_use]
+    pub const fn cycle(self, reverse: bool) -> Self {
+        let idx = match self {
+            Self::Navigator => 0,
+            Self::FamilyStrip => 1,
+            Self::MainCanvasOrGrid => 2,
+            Self::Inspector => 3,
+            Self::FloatingNotes => 4,
+        };
+        let len = Self::CYCLE_ORDER.len();
+        let next = if reverse { (idx + len - 1) % len } else { (idx + 1) % len };
+        Self::CYCLE_ORDER[next]
+    }
+}
+
+/// Visual summary card rendered in the Portfolio Gallery overview and batch-export view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PortfolioCard {
+    pub sheet_id: SheetId,
+    pub title: String,
+    pub folder: SheetFolderKind,
+    pub badge_label: String,
+    pub subtitle: String,
+    pub color_tag: Option<Rgba8>,
+    pub active: bool,
+    pub selected: bool,
+}
+
+/// State for the Project Portfolio Gallery overlay supporting folder filters and multi-select batch export.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct PortfolioGalleryState {
+    pub open: bool,
+    pub filter_folder: Option<SheetFolderKind>,
+    pub selected_ids: BTreeSet<SheetId>,
+    pub cards: Vec<PortfolioCard>,
+}
+
+/// Build an `"info.setConstant"` [`ToolCommandIntent`] for updating or creating an [`lumencraft_doc::InfoSheet`] constant.
+#[must_use]
+pub fn build_set_info_constant_command(sheet_id: &SheetId, name: &str, value: &ConstantValue, units: Option<&str>) -> ToolCommandIntent {
+    let mut obj = serde_json::Map::new();
+    obj.insert(String::from("sheet_id"), json!(sheet_id.as_str()));
+    obj.insert(String::from("name"), json!(name));
+    match value {
+        ConstantValue::Empty => {
+            obj.insert(String::from("value"), Value::Null);
+        }
+        ConstantValue::Number(v) => {
+            obj.insert(String::from("value"), if v.is_finite() { json!(v) } else { Value::Null });
+        }
+        ConstantValue::Text(s) => {
+            obj.insert(String::from("value"), json!(s));
+        }
+        ConstantValue::Date(s) => {
+            obj.insert(String::from("value"), json!(s));
+            obj.insert(String::from("kind"), json!("date"));
+        }
+    }
+    if let Some(u) = units {
+        obj.insert(String::from("units"), json!(u));
+    }
+    ToolCommandIntent::new("info.setConstant", Value::Object(obj))
+}
+
+/// Build an `"info.setNote"` [`ToolCommandIntent`] for updating or appending structured notes on an [`lumencraft_doc::InfoSheet`].
+#[must_use]
+pub fn build_set_info_notes_command(sheet_id: &SheetId, markdown: &str, append: bool) -> ToolCommandIntent {
+    ToolCommandIntent::new(
+        "info.setNote",
+        json!({
+            "sheet_id": sheet_id.as_str(),
+            "note": markdown,
+            "append": append,
+        }),
+    )
+}
+
 /// Front-end drawer state for the Project Navigator, Family dependency pane, and Welcome wizard.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceNavState {
     pub navigator_open: bool,
     pub inspector_open: bool,
+    pub active_pane: ActiveWorkspacePane,
+    pub navigator_drag: NavigatorDragState,
+    pub gallery: PortfolioGalleryState,
+    pub floating_notes_collapsed: BTreeMap<String, bool>,
     pub entries: Vec<NavigatorEntry>,
     pub family_related_ids: Vec<SheetId>,
     pub nesting_mode: NavigatorNestingMode,
@@ -578,6 +675,10 @@ impl Default for WorkspaceNavState {
         Self {
             navigator_open: true,
             inspector_open: true,
+            active_pane: ActiveWorkspacePane::default(),
+            navigator_drag: NavigatorDragState::default(),
+            gallery: PortfolioGalleryState::default(),
+            floating_notes_collapsed: BTreeMap::new(),
             entries: Vec::new(),
             family_related_ids: Vec::new(),
             nesting_mode: NavigatorNestingMode::SeparateFolders,
@@ -592,6 +693,190 @@ impl Default for WorkspaceNavState {
             welcome: WelcomeWizardState::default(),
             pending_intents: Vec::new(),
         }
+    }
+}
+
+impl WorkspaceNavState {
+    /// Cycle active workspace pane focus forward (`reverse = false`, `F6`) or backward (`reverse = true`, `Shift+F6`).
+    pub fn cycle_focus_pane(&mut self, reverse: bool) -> ActiveWorkspacePane {
+        self.active_pane = self.active_pane.cycle(reverse);
+        self.active_pane
+    }
+
+    /// Begin dragging a navigator sheet within `folder` starting at `from_index`.
+    pub fn begin_sheet_drag(&mut self, folder: SheetFolderKind, sheet_id: impl Into<String>, from_index: usize) {
+        self.navigator_drag.begin_drag(folder, sheet_id, from_index);
+    }
+
+    /// Update the live drop slot index during an active navigator sheet drag.
+    pub fn update_sheet_hover(&mut self, to_index: usize) {
+        self.navigator_drag.update_hover(to_index);
+    }
+
+    /// Cancel an in-progress navigator sheet drag without emitting a reorder command.
+    pub fn cancel_sheet_drag(&mut self) {
+        self.navigator_drag.cancel();
+    }
+
+    /// Commit an active navigator drag-reorder as an engine `("sheet.reorder", payload)` command pair.
+    pub fn commit_sheet_drop_command(&mut self) -> Option<(&'static str, Value)> {
+        let (folder, from_index, to_index) = self.navigator_drag.commit_drop()?;
+        if from_index == to_index {
+            return None;
+        }
+        Some(("sheet.reorder", json!({ "folder": folder, "from_index": from_index, "to_index": to_index })))
+    }
+
+    /// Toggle visibility of the Project Portfolio Gallery overview.
+    pub fn toggle_gallery(&mut self) -> bool {
+        self.gallery.open = !self.gallery.open;
+        self.gallery.open
+    }
+
+    /// Update the active folder filter and refresh gallery cards from `doc`.
+    pub fn set_gallery_filter(&mut self, folder: Option<SheetFolderKind>, doc: &ProjectDocument) {
+        self.gallery.filter_folder = folder;
+        self.sync_gallery(doc);
+    }
+
+    /// Select a gallery card (single-select when `additive = false`, toggle membership when `additive = true`).
+    pub fn select_gallery_card(&mut self, sheet_id: &SheetId, additive: bool) {
+        if additive {
+            if !self.gallery.selected_ids.remove(sheet_id) {
+                self.gallery.selected_ids.insert(sheet_id.clone());
+            }
+        } else {
+            self.gallery.selected_ids.clear();
+            self.gallery.selected_ids.insert(sheet_id.clone());
+        }
+        for card in &mut self.gallery.cards {
+            card.selected = self.gallery.selected_ids.contains(&card.sheet_id);
+        }
+    }
+
+    /// Clear all multi-selected Portfolio Gallery sheet IDs.
+    pub fn clear_gallery_selection(&mut self) {
+        self.gallery.selected_ids.clear();
+        for card in &mut self.gallery.cards {
+            card.selected = false;
+        }
+    }
+
+    /// Return selected sheet IDs ordered consistently with visible gallery cards (for batch figure export).
+    #[must_use]
+    pub fn selected_gallery_ids(&self) -> Vec<SheetId> {
+        let mut out: Vec<SheetId> = self.gallery.cards.iter().filter(|c| c.selected).map(|c| c.sheet_id.clone()).collect();
+        for id in &self.gallery.selected_ids {
+            if !out.contains(id) {
+                out.push(id.clone());
+            }
+        }
+        out
+    }
+
+    /// Rebuild Portfolio Gallery cards from `doc`, pruning deleted sheet IDs from `selected_ids`.
+    pub fn sync_gallery(&mut self, doc: &ProjectDocument) {
+        let valid_ids: BTreeSet<SheetId> = doc
+            .data_sheets
+            .iter()
+            .map(|s| s.id.clone())
+            .chain(doc.info_sheets.iter().map(|s| s.id.clone()))
+            .chain(doc.result_sheets.iter().map(|s| s.id.clone()))
+            .chain(doc.graph_sheets.iter().map(|s| s.id.clone()))
+            .chain(doc.layout_sheets.iter().map(|s| s.id.clone()))
+            .collect();
+        self.gallery.selected_ids.retain(|id| valid_ids.contains(id));
+
+        let active = doc.active_sheet_id.as_ref();
+        let selected = &self.gallery.selected_ids;
+        let filter = self.gallery.filter_folder;
+        let mut cards = Vec::new();
+
+        if filter.is_none_or(|f| f == SheetFolderKind::Data) {
+            for s in &doc.data_sheets {
+                cards.push(PortfolioCard {
+                    sheet_id: s.id.clone(),
+                    title: s.title.clone(),
+                    folder: SheetFolderKind::Data,
+                    badge_label: s.kind().label().to_owned(),
+                    subtitle: format!("{} rows", s.archetype.row_count()),
+                    color_tag: s.color_tag,
+                    active: active == Some(&s.id),
+                    selected: selected.contains(&s.id),
+                });
+            }
+        }
+        if filter.is_none_or(|f| f == SheetFolderKind::Info) {
+            for s in &doc.info_sheets {
+                cards.push(PortfolioCard {
+                    sheet_id: s.id.clone(),
+                    title: s.title.clone(),
+                    folder: SheetFolderKind::Info,
+                    badge_label: String::from("Info"),
+                    subtitle: format!("{} constants", s.constants.len()),
+                    color_tag: s.color_tag,
+                    active: active == Some(&s.id),
+                    selected: selected.contains(&s.id),
+                });
+            }
+        }
+        if filter.is_none_or(|f| f == SheetFolderKind::Results) {
+            for s in &doc.result_sheets {
+                cards.push(PortfolioCard {
+                    sheet_id: s.id.clone(),
+                    title: s.title().to_owned(),
+                    folder: SheetFolderKind::Results,
+                    badge_label: String::from("Results"),
+                    subtitle: format!("{} tabs", s.tabs.len()),
+                    color_tag: s.color_tag,
+                    active: active == Some(&s.id),
+                    selected: selected.contains(&s.id),
+                });
+            }
+        }
+        if filter.is_none_or(|f| f == SheetFolderKind::Graphs) {
+            for s in &doc.graph_sheets {
+                cards.push(PortfolioCard {
+                    sheet_id: s.id.clone(),
+                    title: s.title.clone(),
+                    folder: SheetFolderKind::Graphs,
+                    badge_label: format!("{:?}", s.spec.kind),
+                    subtitle: if s.initialized { format!("{} series", s.spec.series.len()) } else { String::from("Uninitialized") },
+                    color_tag: s.color_tag,
+                    active: active == Some(&s.id),
+                    selected: selected.contains(&s.id),
+                });
+            }
+        }
+        if filter.is_none_or(|f| f == SheetFolderKind::Layouts) {
+            for s in &doc.layout_sheets {
+                cards.push(PortfolioCard {
+                    sheet_id: s.id.clone(),
+                    title: s.title.clone(),
+                    folder: SheetFolderKind::Layouts,
+                    badge_label: String::from("Layout"),
+                    subtitle: format!("{} items", s.spec.items.len()),
+                    color_tag: s.color_tag,
+                    active: active == Some(&s.id),
+                    selected: selected.contains(&s.id),
+                });
+            }
+        }
+
+        self.gallery.cards = cards;
+    }
+
+    /// Toggle collapsed state for a [`lumencraft_doc::FloatingNote`] identifier and return the new collapsed flag.
+    pub fn toggle_floating_note(&mut self, note_id: &str) -> bool {
+        let collapsed = self.floating_notes_collapsed.entry(note_id.to_owned()).or_insert(false);
+        *collapsed = !*collapsed;
+        *collapsed
+    }
+
+    /// Return whether a [`lumencraft_doc::FloatingNote`] is currently collapsed in the UI.
+    #[must_use]
+    pub fn is_floating_note_collapsed(&self, note_id: &str) -> bool {
+        self.floating_notes_collapsed.get(note_id).copied().unwrap_or(false)
     }
 }
 
@@ -691,6 +976,7 @@ impl WorkspaceNavState {
 
         self.family_anchor_sheet_id = doc.family_anchor_sheet_id.clone();
         self.sync_family_pane(doc, &upstream_map, &downstream_map);
+        self.sync_gallery(doc);
     }
 
     fn sync_family_pane(
