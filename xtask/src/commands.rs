@@ -84,7 +84,9 @@ mod tests {
         let generated_path = tmp.0.join("docs/commands.md");
         let contents = fs::read_to_string(&generated_path).expect("read generated commands.md");
         assert!(contents.starts_with("# LumenCraft Command Reference\n"));
-        assert!(contents.contains("Registered commands: 90\n"));
+        let command_count = lumencraft_engine::cmd::registry().len();
+        assert!(command_count >= 92, "expected >= 92 registered commands, got {command_count}");
+        assert!(contents.contains(&format!("Registered commands: {command_count}\n")));
 
         run(&tmp.0, true).expect("freshly generated docs/commands.md must pass --check");
 

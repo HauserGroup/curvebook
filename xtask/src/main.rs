@@ -15,9 +15,11 @@ mod layers;
 mod licenses;
 mod pending;
 mod schemas;
+mod screenshots;
 mod secrets;
 mod stats;
 mod status;
+mod telemetry;
 mod ui_commands;
 mod version;
 mod web_fonts;
@@ -36,6 +38,8 @@ commands:
   pending [--count]     list or count open ROADMAP.md checklist items with R<m>.<n> section IDs
   status                verify STATUS.md and ROADMAP.md tables have unique first-column keys
   licenses [--html [out]] verify deny policy/lockfile sources offline and optionally emit HTML report
+  telemetry             verify zero-telemetry policy across crates, Rust sources, workflows, and web headers
+  screenshots [--check] generate (or verify) clean-room 1440x900 README workspace PNGs in docs/images/
   assets                verify all non-code assets are attributed in ASSETS.md
   brands                verify user-facing strings and packaging contain no competitor trademarks
   cleanroom             verify no vendor copyright headers or vendor-created fixtures exist
@@ -83,6 +87,8 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "pending" => pending::run(&root, rest),
         "status" => status::run(&root),
         "licenses" => licenses::run(&root, rest),
+        "telemetry" => telemetry::run(&root, rest),
+        "screenshots" => screenshots::run(&root, rest),
         "assets" => assets::run(&root),
         "brands" => brands::run(&root),
         "cleanroom" => cleanroom::run(&root),
@@ -194,6 +200,9 @@ fn cmd_ci(root: &Path) -> Result<(), String> {
     schemas::run(root, true)?;
     cmd_layers(root)?;
     secrets::run(root)?;
+    licenses::run(root, &[])?;
+    telemetry::run(root, &[])?;
+    screenshots::run(root, &[String::from("--check")])?;
     pending::run_count(root)?;
     status::run(root)?;
 
