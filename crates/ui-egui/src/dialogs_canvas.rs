@@ -5,15 +5,15 @@
 use lumencraft_chart::{ChartScene, PreflightIssue};
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
-    CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ConnectingLineStyle, ContingencySpec,
-    CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec,
-    FigureCanvasPreset, FramePreset, GlmFamily, GlmSpec, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement,
-    HookSource, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset,
-    MultipleRowTestsSpec, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OutlierSpec, PValueFormat, PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule,
-    ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab,
-    RocSpec, SheetId, SizeChannelMapping, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupSpec,
-    VariableRole, WhiskerMethod,
+    CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ConnectingLineStyle, ContingencyMethod,
+    ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode,
+    FactorialAnovaSpec, FigureCanvasPreset, FramePreset, GlmFamily, GlmSpec, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject,
+    GroupedArrangement, HookSource, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec,
+    MathTransformPreset, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode,
+    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat,
+    PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument,
+    RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, RocSpec, SheetId, SizeChannelMapping, SummaryMeasure,
+    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WhiskerMethod,
 };
 use lumencraft_engine::{EngineError, Session, cmd};
 use lumencraft_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -23,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::menus::ui_commands::UI_COMMANDS;
+use crate::power_wizard::PowerWizardState;
 use crate::theme::UiThemeSpec;
 
 // ============================================================================
@@ -84,6 +85,13 @@ pub enum ActiveDialog {
     ImportReshape,
     ExcludeWithReason {
         sheet_id: SheetId,
+    },
+    FormatSelectedPoints {
+        graph_sheet_id: SheetId,
+    },
+    PowerAndSampleSize,
+    Print {
+        sheet_id: Option<SheetId>,
     },
     CommandPalette,
     About,
@@ -526,10 +534,12 @@ pub enum AnalyzeDuplicateChoice {
 }
 
 /// Interactive state for the searchable `Analyze...` dialog (`docs/ui-parity.md`).
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyzeDialogState {
     pub source_sheet_id: Option<SheetId>,
     pub source_table_kind: Option<TableKind>,
+    #[serde(default)]
+    pub extracted_result_tab_id: Option<String>,
     pub search_query: String,
     pub category_filter: Option<AnalysisCategory>,
     pub selected_entry_id: Option<String>,
@@ -537,6 +547,51 @@ pub struct AnalyzeDialogState {
     pub variable_candidates: Vec<VariableCandidate>,
     pub role_filter: VariableRoleFilter,
     pub equation_id: String,
+    #[serde(default)]
+    pub pca_predictors: Vec<usize>,
+    #[serde(default)]
+    pub pcr_outcome_column: Option<usize>,
+    #[serde(default = "default_true_flag")]
+    pub correlation_all_pairs: bool,
+    #[serde(default)]
+    pub correlation_heatmap: bool,
+    #[serde(default)]
+    pub transform_x: Option<MathTransformPreset>,
+    #[serde(default = "default_transform_y")]
+    pub transform_y: Option<MathTransformPreset>,
+    #[serde(default)]
+    pub transform_error_propagation: ErrorPropagationMode,
+    #[serde(default)]
+    pub transform_formula: Option<String>,
+}
+
+const fn default_transform_y() -> Option<MathTransformPreset> {
+    Some(MathTransformPreset::Log10)
+}
+
+impl Default for AnalyzeDialogState {
+    fn default() -> Self {
+        Self {
+            source_sheet_id: None,
+            source_table_kind: None,
+            extracted_result_tab_id: None,
+            search_query: String::new(),
+            category_filter: None,
+            selected_entry_id: None,
+            selected_data_sets: Vec::new(),
+            variable_candidates: Vec::new(),
+            role_filter: VariableRoleFilter::All,
+            equation_id: String::new(),
+            pca_predictors: Vec::new(),
+            pcr_outcome_column: None,
+            correlation_all_pairs: true,
+            correlation_heatmap: false,
+            transform_x: None,
+            transform_y: Some(MathTransformPreset::Log10),
+            transform_error_propagation: ErrorPropagationMode::ReplicateEndpoints,
+            transform_formula: None,
+        }
+    }
 }
 
 impl AnalyzeDialogState {
@@ -544,16 +599,143 @@ impl AnalyzeDialogState {
     pub fn open_for_data_sheet(&mut self, sheet: &DataSheet) {
         self.source_sheet_id = Some(sheet.id.clone());
         self.source_table_kind = Some(sheet.kind());
+        self.extracted_result_tab_id = None;
         self.search_query.clear();
         self.category_filter = None;
         self.selected_data_sets.clear();
         self.role_filter = VariableRoleFilter::All;
+        self.pca_predictors.clear();
+        self.pcr_outcome_column = None;
+        self.correlation_all_pairs = true;
+        self.correlation_heatmap = false;
+        self.transform_x = None;
+        self.transform_y = Some(MathTransformPreset::Log10);
+        self.transform_error_propagation = ErrorPropagationMode::ReplicateEndpoints;
+        self.transform_formula = None;
         if self.equation_id.is_empty() {
             self.equation_id = String::from("log_agonist_vs_response_4pl");
         }
         self.variable_candidates = collect_variable_candidates(sheet);
         let first_id = self.compatible_entries().first().map(|item| item.id.to_owned());
         self.selected_entry_id = first_id;
+    }
+
+    /// Populate defaults and column candidates from a non-analyzable [`ResultTab`] for chained GUI `Analyze` (`docs/gui-workflows.md` §3.3).
+    pub fn open_for_result_tab(&mut self, result: &ResultSheet, tab: &ResultTab) {
+        self.source_sheet_id = Some(result.id.clone());
+        self.extracted_result_tab_id = Some(tab.id.clone());
+        let has_text = tab.rows.iter().flatten().any(|cell| matches!(cell, ResultCell::Text(_) | ResultCell::Boolean(_)));
+        self.source_table_kind = Some(if has_text { TableKind::MultipleVariables } else { TableKind::Column });
+        self.search_query.clear();
+        self.category_filter = None;
+        self.selected_data_sets.clear();
+        self.role_filter = VariableRoleFilter::All;
+        self.pca_predictors = if matches!(result.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })) {
+            result.analysis.selected_data_sets.clone()
+        } else {
+            Vec::new()
+        };
+        self.pcr_outcome_column = None;
+        self.correlation_all_pairs = true;
+        self.correlation_heatmap = false;
+        self.transform_x = None;
+        self.transform_y = Some(MathTransformPreset::Log10);
+        self.transform_error_propagation = ErrorPropagationMode::ReplicateEndpoints;
+        self.transform_formula = None;
+        if self.equation_id.is_empty() {
+            self.equation_id = String::from("log_agonist_vs_response_4pl");
+        }
+        self.variable_candidates = collect_result_tab_candidates(tab);
+        let first_id = self.compatible_entries().first().map(|item| item.id.to_owned());
+        self.selected_entry_id = first_id;
+    }
+
+    /// Apply modal field updates from `ui.answer_dialog` / interactive controls.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "entry_id" | "selected_entry_id" | "analysis" | "analyze.entry" => {
+                    if let Some(s) = val.as_str() {
+                        self.selected_entry_id = Some(s.to_owned());
+                    }
+                }
+                "search" | "search_query" | "analyze.search" => {
+                    if let Some(s) = val.as_str() {
+                        self.search_query = s.to_owned();
+                    }
+                }
+                "equation_id" | "analyze.equation_id" => {
+                    if let Some(s) = val.as_str() {
+                        self.equation_id = s.to_owned();
+                    }
+                }
+                "correlation_all_pairs" | "analyze.correlation_all_pairs" => {
+                    if let Some(b) = val.as_bool() {
+                        self.correlation_all_pairs = b;
+                        if !b {
+                            self.correlation_heatmap = false;
+                        }
+                    }
+                }
+                "correlation_heatmap" | "analyze.correlation_heatmap" => {
+                    if let Some(b) = val.as_bool() {
+                        if b && !self.correlation_all_pairs {
+                            return Err(String::from("Create correlation heatmap is disabled in X vs every Y mode."));
+                        }
+                        self.correlation_heatmap = b;
+                    }
+                }
+                "selected_data_sets" | "pca_predictors" | "analyze.pca_predictors" => {
+                    if let Some(arr) = val.as_array() {
+                        let cols: Vec<usize> = arr.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect();
+                        self.selected_data_sets = cols.clone();
+                        if key != "selected_data_sets" {
+                            self.pca_predictors = cols;
+                        }
+                        for cand in &mut self.variable_candidates {
+                            cand.selected = self.selected_data_sets.contains(&cand.col_index);
+                        }
+                    }
+                }
+                "pcr_outcome_column" | "response_column" | "analyze.pcr_outcome_column" => {
+                    if let Some(col) = val.as_u64().map(|n| n as usize) {
+                        if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
+                            return Err(format!(
+                                "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
+                            ));
+                        }
+                        self.pcr_outcome_column = Some(col);
+                        self.set_response_column(col);
+                    }
+                }
+                "formula" | "transform_formula" | "analyze.transform.formula" | "filter_formula" => {
+                    if val.is_null() {
+                        self.transform_formula = None;
+                    } else {
+                        let raw = val.as_str().ok_or_else(|| String::from("`formula` must be a string or null"))?.trim();
+                        if raw.is_empty() {
+                            self.transform_formula = None;
+                        } else {
+                            self.transform_formula = Some(raw.to_owned());
+                            if self.selected_entry_id.as_deref() != Some("transform.select") {
+                                let _ = apply_transform_formula_str(raw, &mut self.transform_x, &mut self.transform_y);
+                            }
+                        }
+                    }
+                }
+                "x_transform" | "analyze.transform.x_transform" | "transform_x" => {
+                    self.transform_x = parse_math_preset_opt(val)?;
+                }
+                "y_transform" | "analyze.transform.y_transform" | "transform_y" => {
+                    self.transform_y = parse_math_preset_opt(val)?;
+                }
+                "error_propagation" | "analyze.transform.error_propagation" => {
+                    self.transform_error_propagation = parse_error_prop_value(val)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Filter [`ANALYSIS_CATALOG`] by source table compatibility, category chip, and search query.
@@ -670,6 +852,14 @@ impl AnalyzeDialogState {
                     *predictor_columns = predictor_cols;
                 }
             }
+            AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation }) => {
+                *x_transform = self.transform_x;
+                *y_transform = self.transform_y;
+                *error_propagation = self.transform_error_propagation;
+            }
+            AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, .. }) => {
+                *filter_formula = self.transform_formula.clone();
+            }
             _ => {}
         }
         Some(kind)
@@ -764,12 +954,102 @@ fn collect_variable_candidates(sheet: &DataSheet) -> Vec<VariableCandidate> {
     }
 }
 
+fn collect_result_tab_candidates(tab: &ResultTab) -> Vec<VariableCandidate> {
+    tab.column_headers
+        .iter()
+        .enumerate()
+        .map(|(col_index, header)| {
+            let has_text = tab.rows.iter().filter_map(|r| r.get(col_index)).any(|c| matches!(c, ResultCell::Text(_) | ResultCell::Boolean(_)));
+            VariableCandidate {
+                col_index,
+                title: header.clone(),
+                role: if has_text { VariableRole::Categorical } else { VariableRole::Continuous },
+                role_inferred: true,
+                selected: true,
+                is_response: col_index == 0,
+            }
+        })
+        .collect()
+}
+
+fn default_true_flag() -> bool {
+    true
+}
+
+fn default_edit_tab() -> String {
+    String::from("experimental_design")
+}
+
 /// `Cmd+T` parameter re-entry draft editing an existing [`AnalysisSpec`].
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EditAnalysisParametersState {
     pub result_sheet_id: Option<SheetId>,
     pub draft: Option<AnalysisSpec>,
     pub title_was_custom: bool,
+    #[serde(default = "default_edit_tab")]
+    pub active_tab: String,
+    #[serde(default = "default_true_flag")]
+    pub assume_gaussian: bool,
+    #[serde(default)]
+    pub paired_or_matched: bool,
+    #[serde(default)]
+    pub compare_against_control: bool,
+    #[serde(default)]
+    pub control_column: usize,
+    #[serde(default = "default_true_flag")]
+    pub correlation_all_pairs: bool,
+    #[serde(default)]
+    pub correlation_heatmap: bool,
+    #[serde(default)]
+    pub contingency_odds_ratio_checked: bool,
+    #[serde(default)]
+    pub contingency_relative_risk_checked: bool,
+    #[serde(default)]
+    pub contingency_attributable_risk_checked: bool,
+    #[serde(default)]
+    pub contingency_or_ci_method: String,
+    #[serde(default)]
+    pub contingency_rr_ci_method: String,
+    #[serde(default)]
+    pub contingency_arr_ci_method: String,
+    #[serde(default)]
+    pub contingency_diag_ci_method: String,
+    #[serde(default)]
+    pub graph_differences: bool,
+    #[serde(default)]
+    pub graph_ranks: bool,
+    #[serde(default)]
+    pub hodges_lehmann_ci: bool,
+    #[serde(default)]
+    pub welch_correction: bool,
+}
+
+impl Default for EditAnalysisParametersState {
+    fn default() -> Self {
+        Self {
+            result_sheet_id: None,
+            draft: None,
+            title_was_custom: false,
+            active_tab: default_edit_tab(),
+            assume_gaussian: true,
+            paired_or_matched: false,
+            compare_against_control: false,
+            control_column: 0,
+            correlation_all_pairs: true,
+            correlation_heatmap: false,
+            contingency_odds_ratio_checked: false,
+            contingency_relative_risk_checked: false,
+            contingency_attributable_risk_checked: false,
+            contingency_or_ci_method: String::from("Baptista-Pike"),
+            contingency_rr_ci_method: String::from("Koopman"),
+            contingency_arr_ci_method: String::from("Newcombe-Wilson"),
+            contingency_diag_ci_method: String::from("Wilson-Brown"),
+            graph_differences: false,
+            graph_ranks: false,
+            hodges_lehmann_ci: false,
+            welch_correction: false,
+        }
+    }
 }
 
 impl EditAnalysisParametersState {
@@ -777,7 +1057,58 @@ impl EditAnalysisParametersState {
     pub fn open_for_result(&mut self, result: &ResultSheet) {
         self.result_sheet_id = Some(result.id.clone());
         self.title_was_custom = result.analysis.custom_title.is_some();
+        self.active_tab = default_edit_tab();
         self.draft = Some(result.analysis.clone());
+        self.sync_rule_flags_from_kind();
+    }
+
+    /// Synchronize predicate flags (`assume_gaussian`, `paired_or_matched`, etc.) from `draft.kind`.
+    pub fn sync_rule_flags_from_kind(&mut self) {
+        let Some(kind) = self.draft.as_ref().map(|s| &s.kind) else {
+            return;
+        };
+        match kind {
+            AnalysisKind::OneWayAnova(spec) => {
+                self.assume_gaussian = !matches!(spec.method, OneWayMethod::KruskalWallis | OneWayMethod::Friedman);
+                self.paired_or_matched = matches!(spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::Friedman);
+                if let MultiplicityMethod::Dunnett { control_column } = spec.multiplicity.method {
+                    self.compare_against_control = true;
+                    self.control_column = control_column;
+                } else {
+                    self.compare_against_control = false;
+                }
+            }
+            AnalysisKind::FactorialAnova(spec) => {
+                self.assume_gaussian = true;
+                self.paired_or_matched = spec.repeated_measures != RepeatedMeasuresDesign::None;
+                if let MultiplicityMethod::Dunnett { control_column } = spec.multiplicity.method {
+                    self.compare_against_control = true;
+                    self.control_column = control_column;
+                } else {
+                    self.compare_against_control = false;
+                }
+            }
+            AnalysisKind::TwoGroupComparison(spec) => {
+                self.assume_gaussian = !matches!(
+                    spec.method,
+                    TwoGroupMethod::MannWhitneyU
+                        | TwoGroupMethod::WilcoxonSignedRank
+                        | TwoGroupMethod::KolmogorovSmirnov
+                        | TwoGroupMethod::OneSampleWilcoxon { .. }
+                );
+                self.paired_or_matched =
+                    matches!(spec.method, TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank);
+                self.welch_correction = spec.method == TwoGroupMethod::WelchT;
+            }
+            AnalysisKind::Contingency(spec) => {
+                self.contingency_odds_ratio_checked = spec.compute_odds_and_risk_ratios;
+                self.contingency_relative_risk_checked = spec.compute_odds_and_risk_ratios;
+            }
+            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }) => {
+                self.correlation_all_pairs = true;
+            }
+            _ => {}
+        }
     }
 
     /// Mutate [`AnalysisKind`] in-place, updating `auto_title` while preserving any user-pinned
@@ -787,6 +1118,7 @@ impl EditAnalysisParametersState {
             return false;
         };
         spec.update_kind(new_kind);
+        self.sync_rule_flags_from_kind();
         true
     }
 
@@ -815,6 +1147,312 @@ impl EditAnalysisParametersState {
         Ok(())
     }
 
+    /// Apply modal field updates from `ui.answer_dialog` / parameter widgets while enforcing R1–R9 predicates.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for key in ["assume_gaussian", "edit.assume_gaussian", "paired_or_matched", "matched", "edit.paired_or_matched"] {
+            if let Some(val) = fields.get(key) {
+                self.apply_single_param_patch(key, val)?;
+            }
+        }
+        for (key, val) in fields {
+            if matches!(key.as_str(), "assume_gaussian" | "edit.assume_gaussian" | "paired_or_matched" | "matched" | "edit.paired_or_matched") {
+                continue;
+            }
+            self.apply_single_param_patch(key, val)?;
+        }
+        Ok(())
+    }
+
+    fn apply_single_param_patch(&mut self, key: &str, val: &Value) -> Result<(), String> {
+        if self.apply_contingency_param_patch(key, val)? || self.apply_transform_param_patch(key, val)? {
+            return Ok(());
+        }
+        match key {
+            "active_tab" | "tab" => {
+                if let Some(t) = val.as_str() {
+                    if t.eq_ignore_ascii_case("repeated_measures") && !self.paired_or_matched {
+                        return Err(String::from("Repeated Measures tab is disabled when No matching is selected."));
+                    }
+                    self.active_tab = t.to_owned();
+                }
+            }
+            "assume_gaussian" | "edit.assume_gaussian" => {
+                let g = val.as_bool().ok_or_else(|| String::from("`assume_gaussian` must be boolean"))?;
+                self.assume_gaussian = g;
+                let matched = self.paired_or_matched;
+                let ctrl = self.control_column;
+                if let Some(spec) = &mut self.draft {
+                    let mut k = spec.kind.clone();
+                    crate::modal_predicates::apply_r2_gaussian_toggle(&mut k, g, matched, ctrl);
+                    spec.update_kind(k);
+                }
+            }
+            "paired_or_matched" | "matched" | "edit.paired_or_matched" => {
+                let matched = val.as_bool().ok_or_else(|| String::from("`paired_or_matched` must be boolean"))?;
+                self.paired_or_matched = matched;
+                self.apply_matched_toggle(matched);
+            }
+            "compare_against_control" | "edit.compare_against_control" => {
+                let cmp = val.as_bool().ok_or_else(|| String::from("`compare_against_control` must be boolean"))?;
+                self.compare_against_control = cmp;
+                if cmp {
+                    let ctrl = self.control_column;
+                    self.set_anova_multiplicity(MultiplicityMethod::Dunnett { control_column: ctrl });
+                }
+            }
+            "control_column" | "edit.control_column" => {
+                let col = val.as_u64().ok_or_else(|| String::from("`control_column` must be a non-negative integer"))? as usize;
+                self.control_column = col;
+                if self.compare_against_control {
+                    self.set_anova_multiplicity(MultiplicityMethod::Dunnett { control_column: col });
+                }
+            }
+            "welch_correction" | "edit.welch_correction" => {
+                let w = val.as_bool().ok_or_else(|| String::from("`welch_correction` must be boolean"))?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::TwoGroupComparison(mut two) = spec.kind.clone()
+                {
+                    if w && !crate::modal_predicates::r4_two_group_welch_correction(two.method).enabled {
+                        return Err(String::from("Welch's correction is disabled for paired or nonparametric tests."));
+                    }
+                    self.welch_correction = w;
+                    two.method = if w { TwoGroupMethod::WelchT } else { TwoGroupMethod::UnpairedT };
+                    spec.update_kind(AnalysisKind::TwoGroupComparison(two));
+                }
+            }
+            "correlation_all_pairs" | "edit.correlation_all_pairs" => {
+                if let Some(b) = val.as_bool() {
+                    self.correlation_all_pairs = b;
+                    if !b {
+                        self.correlation_heatmap = false;
+                    }
+                }
+            }
+            "correlation_heatmap" | "edit.correlation_heatmap" => {
+                if let Some(b) = val.as_bool() {
+                    if b && !self.correlation_all_pairs {
+                        return Err(String::from("Correlation heatmap is disabled unless all-pairs Correlation matrix mode is active."));
+                    }
+                    self.correlation_heatmap = b;
+                }
+            }
+            "p_value_format" | "edit.p_value_format" => {
+                if let Some(s) = val.as_str() {
+                    let next = match s.trim().to_ascii_lowercase().as_str() {
+                        "apa" => PValueFormat::Apa,
+                        "nejm" => PValueFormat::Nejm,
+                        "custom" => PValueFormat::new_custom(4, None),
+                        _ => PValueFormat::FourDecimal,
+                    };
+                    self.set_p_value_format(next);
+                }
+            }
+            "p_value_decimals" | "edit.p_value_digits" => {
+                let d = val.as_u64().ok_or_else(|| String::from("`p_value_decimals` must be integer"))? as u8;
+                if let Some(spec) = &mut self.draft {
+                    if !matches!(spec.p_value_format, PValueFormat::Custom { .. }) {
+                        return Err(String::from("Custom decimal precision spinner is disabled unless Custom P-value format is selected."));
+                    }
+                    let sci = match spec.p_value_format {
+                        PValueFormat::Custom { scientific_below, .. } => scientific_below,
+                        _ => None,
+                    };
+                    spec.p_value_format = PValueFormat::new_custom(d, sci);
+                }
+            }
+            "confidence_percent" | "edit.confidence_percent" => {
+                if let Some(c) = val.as_f64() {
+                    self.set_confidence_percent(c)?;
+                }
+            }
+            "custom_title" | "edit.custom_title" => {
+                self.set_custom_title(val.as_str().map(ToOwned::to_owned))?;
+            }
+            "geisser_greenhouse" | "edit.geisser_greenhouse" | "edit.sphericity.geisser_greenhouse" => {
+                if !self.paired_or_matched {
+                    return Err(String::from("Geisser-Greenhouse sphericity control is disabled when No matching is selected."));
+                }
+                if let Some(gg) = val.as_bool()
+                    && let Some(spec) = &mut self.draft
+                    && let AnalysisKind::OneWayAnova(mut a) = spec.kind.clone()
+                {
+                    a.method = OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg };
+                    spec.update_kind(AnalysisKind::OneWayAnova(a));
+                }
+            }
+            "multiplicity_method" => {
+                if let Some(raw) = val.as_str() {
+                    let method = parse_multiplicity_method_name(raw, self.control_column)?;
+                    if !crate::modal_predicates::r2_parametric_post_hoc_method(self.assume_gaussian, method).enabled {
+                        return Err(String::from("Parametric post-hoc test disabled when Assume Gaussian = No."));
+                    }
+                    self.set_anova_multiplicity(method);
+                }
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
+    /// Applies Contingency-specific field patches on `EditAnalysisParametersState`.
+    fn apply_contingency_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+        let method_flag = match key {
+            "fisher" | "edit.contingency.fisher" => Some(ContingencyMethod::FisherExact),
+            "mcnemar" | "edit.contingency.mcnemar" => Some(ContingencyMethod::McNemarPaired),
+            "cochran_armitage" | "edit.contingency.cochran_armitage" => Some(ContingencyMethod::CochranArmitageTrend),
+            _ => None,
+        };
+        if let Some(target_method) = method_flag {
+            if let Some(b) = val.as_bool() {
+                let next = if b { target_method } else { ContingencyMethod::PearsonChiSquare { yates_continuity: false } };
+                self.update_contingency_spec(|c| c.method = next);
+            }
+            return Ok(true);
+        }
+        match key {
+            "compute_odds_and_risk_ratios" | "contingency_odds_ratio_checked" | "edit.contingency.odds_ratio" => {
+                if let Some(b) = val.as_bool() {
+                    self.contingency_odds_ratio_checked = b;
+                    self.contingency_relative_risk_checked = b;
+                    self.update_contingency_spec(|c| c.compute_odds_and_risk_ratios = b);
+                }
+            }
+            "contingency_attributable_risk_checked" | "attributable_risk" | "compute_attributable_risk" | "edit.contingency.attributable_risk" => {
+                if let Some(b) = val.as_bool() {
+                    self.contingency_attributable_risk_checked = b;
+                }
+            }
+            "compute_sensitivity_specificity" | "sensitivity_specificity" | "edit.contingency.sensitivity_specificity" => {
+                if let Some(b) = val.as_bool() {
+                    self.update_contingency_spec(|c| c.compute_sensitivity_specificity = b);
+                }
+            }
+            "contingency_method" => {
+                if let Some(raw) = val.as_str() {
+                    let method = parse_contingency_method_name(raw)?;
+                    self.update_contingency_spec(|c| c.method = method);
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn update_contingency_spec(&mut self, mutate: impl FnOnce(&mut lumencraft_doc::ContingencySpec)) {
+        if let Some(spec) = &mut self.draft
+            && let AnalysisKind::Contingency(mut c) = spec.kind.clone()
+        {
+            mutate(&mut c);
+            spec.update_kind(AnalysisKind::Contingency(c));
+        }
+    }
+
+    /// Applies Transform-specific field patches on `EditAnalysisParametersState`.
+    fn apply_transform_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+        match key {
+            "x_transform" | "edit.transform.x_transform" => {
+                let parsed = parse_math_preset_opt(val)?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, error_propagation, .. }) = spec.kind.clone()
+                {
+                    spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform: parsed, y_transform, error_propagation }));
+                }
+            }
+            "y_transform" | "edit.transform.y_transform" => {
+                let parsed = parse_math_preset_opt(val)?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, error_propagation, .. }) = spec.kind.clone()
+                {
+                    spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform: parsed, error_propagation }));
+                }
+            }
+            "error_propagation" | "edit.transform.error_propagation" => {
+                let ep_mode = parse_error_prop_value(val)?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, .. }) = spec.kind.clone()
+                {
+                    spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation: ep_mode }));
+                }
+            }
+            "formula" | "transform_formula" | "edit.transform.formula" | "filter_formula" => {
+                if let Some(spec) = &mut self.draft {
+                    match spec.kind.clone() {
+                        AnalysisKind::Transform(TransformAnalysisSpec::Math { mut x_transform, mut y_transform, error_propagation }) => {
+                            if let Some(raw) = val.as_str().map(str::trim).filter(|s| !s.is_empty()) {
+                                apply_transform_formula_str(raw, &mut x_transform, &mut y_transform)?;
+                                spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::Math {
+                                    x_transform,
+                                    y_transform,
+                                    error_propagation,
+                                }));
+                            }
+                        }
+                        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, .. }) => {
+                            let filter_formula = if val.is_null() {
+                                None
+                            } else {
+                                Some(
+                                    val.as_str()
+                                        .map(str::trim)
+                                        .filter(|s| !s.is_empty())
+                                        .ok_or_else(|| String::from("`formula` must be a string"))?
+                                        .to_owned(),
+                                )
+                            };
+                            spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype }));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => return Ok(false),
+        }
+        Ok(true)
+    }
+
+    fn apply_matched_toggle(&mut self, matched: bool) {
+        let Some(spec) = &mut self.draft else {
+            return;
+        };
+        let mut updated = spec.kind.clone();
+        match &mut updated {
+            AnalysisKind::OneWayAnova(a) => {
+                a.method = match (self.assume_gaussian, matched) {
+                    (true, true) => OneWayMethod::RepeatedMeasures { geisser_greenhouse: true },
+                    (true, false) => OneWayMethod::OrdinaryAnova,
+                    (false, true) => OneWayMethod::Friedman,
+                    (false, false) => OneWayMethod::KruskalWallis,
+                };
+            }
+            AnalysisKind::TwoGroupComparison(t) => {
+                t.method = match (self.assume_gaussian, matched) {
+                    (true, true) => TwoGroupMethod::PairedT,
+                    (true, false) => TwoGroupMethod::UnpairedT,
+                    (false, true) => TwoGroupMethod::WilcoxonSignedRank,
+                    (false, false) => TwoGroupMethod::MannWhitneyU,
+                };
+            }
+            AnalysisKind::FactorialAnova(f) => {
+                f.repeated_measures = if matched { RepeatedMeasuresDesign::RowFactorMatched } else { RepeatedMeasuresDesign::None };
+            }
+            _ => {}
+        }
+        spec.update_kind(updated);
+    }
+
+    fn set_anova_multiplicity(&mut self, method: MultiplicityMethod) {
+        let Some(spec) = &mut self.draft else {
+            return;
+        };
+        let mut updated = spec.kind.clone();
+        if let AnalysisKind::OneWayAnova(a) = &mut updated {
+            a.multiplicity.method = method;
+        } else if let AnalysisKind::FactorialAnova(f) = &mut updated {
+            f.multiplicity.method = method;
+        }
+        spec.update_kind(updated);
+    }
+
     /// Effective displayed title reflecting auto-title vs custom title rules.
     #[must_use]
     pub fn preview_title(&self) -> Option<&str> {
@@ -838,6 +1476,169 @@ impl EditAnalysisParametersState {
             }),
         ))
     }
+}
+
+fn parse_multiplicity_method_name(raw: &str, control_col: usize) -> Result<MultiplicityMethod, String> {
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "none" => Ok(MultiplicityMethod::None),
+        "tukey" | "tukeyhsd" => Ok(MultiplicityMethod::TukeyHsd),
+        "dunnett" => Ok(MultiplicityMethod::Dunnett { control_column: control_col }),
+        "sidak" => Ok(MultiplicityMethod::Sidak),
+        "bonferroni" => Ok(MultiplicityMethod::Bonferroni),
+        "holmsidak" => Ok(MultiplicityMethod::HolmSidak),
+        "dunn" | "dunnranksum" => Ok(MultiplicityMethod::DunnRankSum),
+        _ => Err(format!("unknown multiplicity method `{raw}`")),
+    }
+}
+
+fn parse_contingency_method_name(raw: &str) -> Result<ContingencyMethod, String> {
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "chisquare" | "pearsonchisquare" => Ok(ContingencyMethod::PearsonChiSquare { yates_continuity: false }),
+        "yates" => Ok(ContingencyMethod::PearsonChiSquare { yates_continuity: true }),
+        "fisher" | "fisherexact" => Ok(ContingencyMethod::FisherExact),
+        "cochranarmitage" | "cochranarmitagetrend" | "trend" => Ok(ContingencyMethod::CochranArmitageTrend),
+        "mcnemar" => Ok(ContingencyMethod::McNemarPaired),
+        _ => Err(format!("unknown contingency test method `{raw}`")),
+    }
+}
+
+fn parse_dialog_num(val: &Value, field: &str) -> Result<f64, String> {
+    let parsed = val.as_f64().or_else(|| val.as_str().and_then(|s| s.trim().parse::<f64>().ok()));
+    parsed.filter(|v| v.is_finite()).ok_or_else(|| format!("`{field}` must be a finite number"))
+}
+
+pub(crate) fn parse_table_kind_str(raw: &str) -> Result<TableKind, String> {
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "column" | "columnar" => Ok(TableKind::Column),
+        "grouped" => Ok(TableKind::Grouped),
+        "xy" => Ok(TableKind::Xy),
+        "multiplevariables" | "multivariate" | "mv" => Ok(TableKind::MultipleVariables),
+        "contingency" => Ok(TableKind::Contingency),
+        "survival" => Ok(TableKind::Survival),
+        "partsofwhole" | "parts" => Ok(TableKind::PartsOfWhole),
+        "nested" => Ok(TableKind::Nested),
+        _ => Err(format!("unknown table archetype `{raw}`")),
+    }
+}
+
+fn parse_grouped_arrangement_str(raw: &str) -> Result<GroupedArrangement, String> {
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "interleaved" | "sidebyside" => Ok(GroupedArrangement::Interleaved),
+        "stacked" => Ok(GroupedArrangement::Stacked),
+        "superimposed" | "overlaid" | "overlay" => Ok(GroupedArrangement::Superimposed),
+        _ => Err(format!("unknown grouped_arrangement `{raw}`")),
+    }
+}
+
+fn parse_graph_kind_str(raw: &str) -> Result<GraphKind, String> {
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "xy" | "scatter" | "scatterline" => Ok(GraphKind::Xy),
+        "column" | "col" => Ok(GraphKind::Column),
+        "grouped" => Ok(GraphKind::Grouped),
+        "contingency" => Ok(GraphKind::Contingency),
+        "partsofwhole" | "parts" | "donut" | "pie" => Ok(GraphKind::PartsOfWhole),
+        "survival" | "km" | "kaplanmeier" => Ok(GraphKind::Survival),
+        "multiplevariables" | "multivariate" | "bubble" => Ok(GraphKind::MultipleVariables),
+        _ => Err(format!("unknown graph_kind `{raw}`")),
+    }
+}
+
+fn parse_palette_id_str(raw: &str) -> Result<PaletteId, String> {
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "okabeito" | "default" => Ok(PaletteId::OkabeIto),
+        "paultolbright" | "bright" => Ok(PaletteId::PaulTolBright),
+        "paultolmuted" | "muted" => Ok(PaletteId::PaulTolMuted),
+        "paultolhighcontrast" | "highcontrast" => Ok(PaletteId::PaulTolHighContrast),
+        "paultolvibrant" | "vibrant" => Ok(PaletteId::PaulTolVibrant),
+        "monochromeprint" | "monochrome" | "grayscale" | "greyscale" => Ok(PaletteId::MonochromePrint),
+        _ => Err(format!("unknown palette `{raw}`")),
+    }
+}
+
+fn parse_frame_preset_str(raw: &str) -> Result<FramePreset, String> {
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "openl" | "lframe" => Ok(FramePreset::OpenL),
+        "offsetrangetufte" | "offset" | "tufte" => Ok(FramePreset::OffsetRangeTufte),
+        "plainboxed" | "boxed" | "plain" => Ok(FramePreset::PlainBoxed),
+        "dualysecondaryright" | "dualy" => Ok(FramePreset::DualYSecondaryRight),
+        "origincrossing" | "origin" => Ok(FramePreset::OriginCrossing),
+        _ => Err(format!("unknown frame_preset `{raw}`")),
+    }
+}
+
+pub(crate) fn parse_math_preset_opt(val: &Value) -> Result<Option<MathTransformPreset>, String> {
+    if val.is_null() {
+        return Ok(None);
+    }
+    if let Some(raw) = val.as_str() {
+        return parse_math_preset_str(raw);
+    }
+    if val.is_object() {
+        let preset: MathTransformPreset = serde_json::from_value(val.clone()).map_err(|e| format!("invalid math transform preset: {e}"))?;
+        return Ok(Some(preset));
+    }
+    Err(String::from("math transform preset must be a string, preset object, or null"))
+}
+
+fn parse_math_preset_str(raw: &str) -> Result<Option<MathTransformPreset>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let compact: String = trimmed.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
+    if matches!(compact.as_str(), "none" | "identity" | "null" | "x" | "y") {
+        return Ok(None);
+    }
+    let norm: String = trimmed.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    let preset = match (compact.as_str(), norm.as_str()) {
+        (_, "log10" | "log10x" | "log10y" | "ylog10y" | "ylog10x" | "xlog10x") => MathTransformPreset::Log10,
+        (_, "ln" | "lnx" | "lny" | "loge" | "ylny" | "ylnx" | "xlnx") => MathTransformPreset::Ln,
+        (_, "log2" | "log2x" | "log2y" | "ylog2y" | "ylog2x" | "xlog2x") => MathTransformPreset::Log2,
+        ("10^x" | "10^y" | "10**x" | "10**y", _) | (_, "exp10" | "exp10x" | "exp10y" | "10powx" | "10powy") => MathTransformPreset::Exp10,
+        ("e^x" | "e^y", _) | (_, "exp" | "expx" | "expy" | "epowx" | "epowy") => MathTransformPreset::Exp,
+        ("1/x" | "1/y", _) | (_, "reciprocal" | "reciprocalx" | "reciprocaly") => MathTransformPreset::Reciprocal,
+        (_, "sqrt" | "sqrtx" | "sqrty") => MathTransformPreset::Sqrt,
+        ("x^2" | "y^2" | "x*x" | "y*y" | "x**2" | "y**2", _) | (_, "square" | "squarex" | "squarey") => MathTransformPreset::Square,
+        (_, "logit" | "logitx" | "logity") => MathTransformPreset::Logit,
+        (_, "probit" | "probitx" | "probity") => MathTransformPreset::Probit,
+        (_, "arcsinsqrt" | "arcsinsqrtx" | "arcsinsqrty") => MathTransformPreset::ArcsinSqrt,
+        _ => return Err(format!("unknown math transform preset `{raw}`")),
+    };
+    Ok(Some(preset))
+}
+
+fn parse_error_prop_value(val: &Value) -> Result<ErrorPropagationMode, String> {
+    let raw = val.as_str().ok_or_else(|| String::from("`error_propagation` must be a string"))?;
+    let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "asymmetric" | "replicateendpoints" | "endpoints" => Ok(ErrorPropagationMode::ReplicateEndpoints),
+        "delta" | "deltamethod" | "firstorderdelta" | "firstorderdeltamethod" => Ok(ErrorPropagationMode::FirstOrderDeltaMethod),
+        _ => Err(format!("unknown error propagation mode `{raw}`")),
+    }
+}
+
+fn apply_transform_formula_str(raw: &str, x_slot: &mut Option<MathTransformPreset>, y_slot: &mut Option<MathTransformPreset>) -> Result<(), String> {
+    for part in raw.split(';').map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some((lhs, rhs)) = part.split_once('=') {
+            let axis = lhs.trim().to_ascii_lowercase();
+            let parsed = parse_math_preset_str(rhs)?;
+            match axis.as_str() {
+                "x" | "x_transform" => *x_slot = parsed,
+                "y" | "y_transform" => *y_slot = parsed,
+                _ => return Err(format!("unsupported transform formula target `{lhs}`")),
+            }
+        } else {
+            *y_slot = parse_math_preset_str(part)?;
+        }
+    }
+    Ok(())
 }
 
 /// Candidate table listed in `Change Data Analyzed`.
@@ -1381,7 +2182,7 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
         id: "grouped.stacked",
         label: "Grouped / Contingency Stacked",
         subtitle: "Stacked component bars across categorical rows",
-        graph_kind: GraphKind::Contingency,
+        graph_kind: GraphKind::Grouped,
         thumbnail: ThumbnailGlyphKind::StackedBar,
         compatible_tables: &[TableKind::Grouped, TableKind::Contingency],
     },
@@ -1476,6 +2277,20 @@ impl Default for ChangeGraphTypeState {
 }
 
 impl ChangeGraphTypeState {
+    fn resolved_graph_kind(&self, opt: &GraphTypeOption, doc: Option<&ProjectDocument>) -> GraphKind {
+        if opt.id == "grouped.stacked" {
+            let is_contingency = self.source_table_kind == Some(TableKind::Contingency)
+                || self.graph_sheet_id.as_ref().and_then(|gid| doc?.graph_sheet(gid)).is_some_and(|gs| {
+                    doc.and_then(|d| d.data_sheet(&gs.spec.primary_source_sheet_id)).is_some_and(|ds| ds.kind() == TableKind::Contingency)
+                });
+            if is_contingency {
+                return GraphKind::Contingency;
+            }
+            return GraphKind::Grouped;
+        }
+        opt.graph_kind
+    }
+
     /// Synchronize chooser state when opening or first visiting `graph`.
     pub fn open_for_graph(&mut self, graph: &GraphSheet, doc: &ProjectDocument) {
         self.graph_sheet_id = Some(graph.id.clone());
@@ -1511,7 +2326,7 @@ impl ChangeGraphTypeState {
         let Some(opt) = GRAPH_TYPE_OPTIONS.iter().find(|o| o.id == self.selected_option_id) else {
             return false;
         };
-        spec.kind = opt.graph_kind;
+        spec.kind = self.resolved_graph_kind(opt, None);
         if opt.id == "grouped.stacked" {
             spec.grouped_arrangement = GroupedArrangement::Stacked;
         } else if opt.id == "grouped.interleaved" {
@@ -1528,8 +2343,12 @@ impl ChangeGraphTypeState {
                 stroke_width_pt: 1.0,
             };
             series.gdo = build_gdo_for_option(opt.id, color, marker, self.summary_measure);
-            if matches!(series.gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::ScatterAndLine { .. }) {
+            if opt.id == "grouped.stacked" {
+                series.y_error_bars = None;
+            } else if matches!(series.gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::ScatterAndLine { .. }) {
                 series.y_error_bars = Some(ErrorBarSpec { metric: self.error_bar_metric, ..ErrorBarSpec::default() });
+            } else {
+                series.y_error_bars = None;
             }
         }
         true
@@ -1540,15 +2359,63 @@ impl ChangeGraphTypeState {
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
         let id = self.graph_sheet_id.as_ref()?;
         let opt = GRAPH_TYPE_OPTIONS.iter().find(|o| o.id == self.selected_option_id)?;
+        let kind = self.resolved_graph_kind(opt, None);
         Some(ToolCommandIntent::new(
             "graph.setKind",
             json!({
                 "sheet_id": id.as_str(),
                 "option_id": opt.id,
-                "kind": opt.graph_kind,
+                "kind": kind,
                 "reset_series_style": true,
             }),
         ))
+    }
+
+    /// Emit `graph.setSpec` + `graph.setSeries` command intents applying full `option_id` layout,
+    /// `grouped_arrangement`, GDO style, and error-bar rules cleanly via `Caller::Ui`.
+    #[must_use]
+    pub fn commit_intents(&self, doc: &ProjectDocument) -> Vec<ToolCommandIntent> {
+        let Some(id) = self.graph_sheet_id.as_ref() else {
+            return Vec::new();
+        };
+        let Some(opt) = GRAPH_TYPE_OPTIONS.iter().find(|o| o.id == self.selected_option_id) else {
+            return Vec::new();
+        };
+        let Some(mut spec) = doc.graph_sheet(id).map(|g| g.spec.clone()) else {
+            return self.commit_intent().into_iter().collect();
+        };
+        let _ = self.apply_to_spec(&mut spec);
+        spec.kind = self.resolved_graph_kind(opt, Some(doc));
+
+        let mut intents = vec![ToolCommandIntent::new(
+            "graph.setSpec",
+            json!({
+                "sheet_id": id.as_str(),
+                "kind": spec.kind,
+                "grouped_arrangement": spec.grouped_arrangement,
+                "initialized": true,
+            }),
+        )];
+        if !spec.series.is_empty() {
+            let series_patches: Vec<Value> = spec
+                .series
+                .iter()
+                .map(|s| {
+                    json!({
+                        "gdo": s.gdo,
+                        "y_error_bars": s.y_error_bars,
+                    })
+                })
+                .collect();
+            intents.push(ToolCommandIntent::new(
+                "graph.setSeries",
+                json!({
+                    "sheet_id": id.as_str(),
+                    "series": series_patches,
+                }),
+            ));
+        }
+        intents
     }
 }
 
@@ -1602,6 +2469,8 @@ pub struct FormatGraphState {
     pub cvd_preview: Option<CvdKind>,
     pub frame_preset: FramePreset,
     pub grouped_arrangement: GroupedArrangement,
+    #[serde(default)]
+    pub graph_kind: Option<GraphKind>,
     pub selected_series_index: usize,
     pub error_bar_enabled: bool,
     pub error_bar_spec: ErrorBarSpec,
@@ -1620,6 +2489,7 @@ impl Default for FormatGraphState {
             cvd_preview: None,
             frame_preset: FramePreset::OpenL,
             grouped_arrangement: GroupedArrangement::Interleaved,
+            graph_kind: None,
             selected_series_index: 0,
             error_bar_enabled: true,
             error_bar_spec: ErrorBarSpec::default(),
@@ -1639,6 +2509,7 @@ impl FormatGraphState {
         self.palette = graph.spec.palette;
         self.frame_preset = graph.spec.frame_preset;
         self.grouped_arrangement = graph.spec.grouped_arrangement;
+        self.graph_kind = Some(graph.spec.kind);
         self.show_legend = graph.spec.legend.visible;
         self.legend_bordered = graph.spec.legend.bordered;
         let series_idx = self.selected_series_index.min(graph.spec.series.len().saturating_sub(1));
@@ -1688,12 +2559,68 @@ impl FormatGraphState {
         spec.palette = self.palette;
         spec.frame_preset = self.frame_preset;
         spec.grouped_arrangement = self.grouped_arrangement;
+        if let Some(kind) = self.graph_kind {
+            spec.kind = kind;
+        }
         spec.legend = LegendSpec { visible: self.show_legend, bordered: self.legend_bordered, ..spec.legend };
         if let Some(series) = spec.series.get_mut(self.selected_series_index) {
             series.y_error_bars = self.error_bar_enabled.then_some(self.error_bar_spec);
             let swatch = self.palette.color_at(self.selected_series_index);
             apply_marker_and_dash(&mut series.gdo, swatch, self.marker_size_pt, self.marker_fill_mode, self.line_dash);
         }
+    }
+
+    /// Patch `FormatGraph` fields from scripted GUI actions / inspector text inputs.
+    ///
+    /// # Errors
+    /// Returns an error if a supplied enum variant or numeric value is invalid.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "show_legend" | "format_graph.show_legend" => {
+                    self.show_legend = val.as_bool().ok_or_else(|| String::from("`show_legend` must be boolean"))?;
+                }
+                "legend_bordered" | "format_graph.legend_bordered" => {
+                    self.legend_bordered = val.as_bool().ok_or_else(|| String::from("`legend_bordered` must be boolean"))?;
+                }
+                "error_bar_enabled" | "format_graph.error_bar_enabled" => {
+                    self.error_bar_enabled = val.as_bool().ok_or_else(|| String::from("`error_bar_enabled` must be boolean"))?;
+                }
+                "marker_size_pt" | "format_graph.marker_size_pt" => {
+                    let sz = val
+                        .as_f64()
+                        .or_else(|| val.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+                        .filter(|v| v.is_finite() && *v > 0.0)
+                        .ok_or_else(|| String::from("`marker_size_pt` must be a finite positive number"))?;
+                    self.marker_size_pt = sz.clamp(1.0, 24.0);
+                }
+                "selected_series_index" | "series_index" | "format_graph.selected_series_index" => {
+                    let idx = val
+                        .as_u64()
+                        .or_else(|| val.as_str().and_then(|s| s.trim().parse::<u64>().ok()))
+                        .ok_or_else(|| String::from("`selected_series_index` must be a non-negative integer"))?;
+                    self.selected_series_index = usize::try_from(idx).unwrap_or(usize::MAX);
+                }
+                "grouped_arrangement" | "format_graph.grouped_arrangement" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`grouped_arrangement` must be a string"))?;
+                    self.grouped_arrangement = parse_grouped_arrangement_str(raw)?;
+                }
+                "graph_kind" | "kind" | "format_graph.graph_kind" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`graph_kind` must be a string"))?;
+                    self.graph_kind = Some(parse_graph_kind_str(raw)?);
+                }
+                "palette" | "format_graph.palette" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`palette` must be a string"))?;
+                    self.palette = parse_palette_id_str(raw)?;
+                }
+                "frame_preset" | "format_graph.frame_preset" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`frame_preset` must be a string"))?;
+                    self.frame_preset = parse_frame_preset_str(raw)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Emit declarative `graph.setSpec` and `graph.setSeries` engine command intents.
@@ -1703,17 +2630,17 @@ impl FormatGraphState {
             return Vec::new();
         };
         let error_bars = self.error_bar_enabled.then_some(self.error_bar_spec);
+        let mut spec_patch = serde_json::Map::new();
+        spec_patch.insert(String::from("sheet_id"), json!(id.as_str()));
+        spec_patch.insert(String::from("palette"), json!(self.palette));
+        spec_patch.insert(String::from("frame_preset"), json!(self.frame_preset));
+        spec_patch.insert(String::from("grouped_arrangement"), json!(self.grouped_arrangement));
+        if let Some(kind) = self.graph_kind {
+            spec_patch.insert(String::from("kind"), json!(kind));
+        }
+        spec_patch.insert(String::from("legend"), json!({ "visible": self.show_legend, "bordered": self.legend_bordered }));
         vec![
-            ToolCommandIntent::new(
-                "graph.setSpec",
-                json!({
-                    "sheet_id": id.as_str(),
-                    "palette": self.palette,
-                    "frame_preset": self.frame_preset,
-                    "grouped_arrangement": self.grouped_arrangement,
-                    "legend": { "visible": self.show_legend, "bordered": self.legend_bordered },
-                }),
-            ),
+            ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch)),
             ToolCommandIntent::new(
                 "graph.setSeries",
                 json!({
@@ -2616,6 +3543,8 @@ pub struct ConvertArchetypeDialogState {
     pub source_kind: Option<TableKind>,
     pub target_kind: TableKind,
     pub allow_lossy: bool,
+    #[serde(default)]
+    pub preview_only: bool,
     pub preview_ready: bool,
     pub preview_lossy: bool,
     pub preserved_cells: usize,
@@ -2631,6 +3560,7 @@ impl Default for ConvertArchetypeDialogState {
             source_kind: None,
             target_kind: TableKind::Column,
             allow_lossy: false,
+            preview_only: false,
             preview_ready: false,
             preview_lossy: false,
             preserved_cells: 0,
@@ -2660,12 +3590,40 @@ impl ConvertArchetypeDialogState {
             _ => TableKind::Column,
         };
         self.allow_lossy = false;
+        self.preview_only = false;
         self.preview_ready = false;
         self.preview_lossy = false;
         self.preserved_cells = 0;
         self.dropped_cells = 0;
         self.preserved_exclusions = 0;
         self.preview_warnings.clear();
+    }
+
+    /// Patch conversion dialog fields from scripted GUI actions / inspector text inputs.
+    ///
+    /// # Errors
+    /// Returns an error if `target_kind` is unrecognized or flags have wrong types.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "target_kind" | "kind" | "convert.target_kind" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`target_kind` must be a string"))?;
+                    let parsed = parse_table_kind_str(raw)?;
+                    if !Self::supported_targets().contains(&parsed) {
+                        return Err(format!("unsupported conversion target `{raw}`"));
+                    }
+                    self.set_target_kind(parsed);
+                }
+                "allow_lossy" | "convert.allow_lossy" => {
+                    self.allow_lossy = val.as_bool().ok_or_else(|| String::from("`allow_lossy` must be boolean"))?;
+                }
+                "preview_only" | "convert.preview_only" => {
+                    self.preview_only = val.as_bool().ok_or_else(|| String::from("`preview_only` must be boolean"))?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 
     /// Set a new target archetype, resetting stale preview state.
@@ -2937,6 +3895,173 @@ impl AssumptionDiagnosticBanner {
 // Unified CanvasDialogState
 // ============================================================================
 
+/// Modal dialog state for styling selected graph points (`Format > Format Selected Points...`, `WF-22`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct FormatSelectedPointsState {
+    pub graph_sheet_id: Option<SheetId>,
+    pub selected_points: Vec<(usize, usize)>,
+    pub color: Option<String>,
+    pub fill_color: Option<String>,
+    pub symbol: Option<String>,
+    pub size_pt: Option<f64>,
+    pub border_width_pt: Option<f64>,
+    pub fill_mode: Option<String>,
+    pub hidden: Option<bool>,
+    pub show_row_labels: bool,
+    pub clear_overrides: bool,
+}
+
+impl FormatSelectedPointsState {
+    /// Open dialog state targeting `graph_sheet_id` and `points` `(series_index, point_index)`.
+    pub fn open_for_graph(&mut self, graph_sheet_id: SheetId, points: Vec<(usize, usize)>) {
+        self.graph_sheet_id = Some(graph_sheet_id);
+        self.selected_points = points;
+        self.clear_overrides = false;
+    }
+
+    /// Apply field patches from UI widgets or `ui.answer_dialog`.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "points" | "selected_points" => {
+                    if let Some(arr) = val.as_array() {
+                        let mut pts = Vec::with_capacity(arr.len());
+                        for item in arr {
+                            let s = item.get("series_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                            let p = item.get("point_index").and_then(Value::as_u64).unwrap_or(0) as usize;
+                            pts.push((s, p));
+                        }
+                        self.selected_points = pts;
+                    }
+                }
+                "color" | "symbol_color" | "format_points.color" => self.color = val.as_str().map(ToOwned::to_owned),
+                "fill_color" | "format_points.fill_color" => self.fill_color = val.as_str().map(ToOwned::to_owned),
+                "symbol" | "shape" | "symbol_shape" | "format_points.symbol" => self.symbol = val.as_str().map(ToOwned::to_owned),
+                "size_pt" | "format_points.size_pt" => self.size_pt = val.as_f64(),
+                "border_width_pt" | "stroke_width_pt" | "format_points.border_width_pt" => self.border_width_pt = val.as_f64(),
+                "fill_mode" | "format_points.fill_mode" => self.fill_mode = val.as_str().map(ToOwned::to_owned),
+                "hidden" | "format_points.hidden" => self.hidden = val.as_bool(),
+                "show_row_labels" | "format_points.show_row_labels" => {
+                    if let Some(b) = val.as_bool() {
+                        self.show_row_labels = b;
+                    }
+                }
+                "clear" | "clear_overrides" | "format_points.clear" => {
+                    if let Some(b) = val.as_bool() {
+                        self.clear_overrides = b;
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Build `graph.formatSelectedPoints` command intent across all selected points.
+    #[must_use]
+    pub fn build_commit_intent(&self) -> Option<ToolCommandIntent> {
+        let sheet_id = self.graph_sheet_id.as_ref()?;
+        if self.selected_points.is_empty() {
+            return None;
+        }
+        let points_json: Vec<Value> = self
+            .selected_points
+            .iter()
+            .map(|&(series_index, point_index)| json!({ "series_index": series_index, "point_index": point_index }))
+            .collect();
+        let mut payload = serde_json::Map::new();
+        payload.insert(String::from("sheet_id"), json!(sheet_id.as_str()));
+        payload.insert(String::from("points"), Value::Array(points_json));
+        if self.clear_overrides {
+            payload.insert(String::from("mode"), json!("clear"));
+            return Some(ToolCommandIntent::new("graph.formatSelectedPoints", Value::Object(payload)));
+        }
+
+        let mut has_patch = false;
+        if let Some(ref c) = self.color {
+            payload.insert(String::from("color"), json!(c));
+            has_patch = true;
+        }
+        if let Some(ref fc) = self.fill_color {
+            payload.insert(String::from("fill_color"), json!(fc));
+            has_patch = true;
+        }
+        if let Some(ref sym) = self.symbol {
+            payload.insert(String::from("symbol"), json!(sym));
+            has_patch = true;
+        }
+        if let Some(sz) = self.size_pt {
+            payload.insert(String::from("size_pt"), json!(sz));
+            has_patch = true;
+        }
+        if let Some(bw) = self.border_width_pt {
+            payload.insert(String::from("border_width_pt"), json!(bw));
+            has_patch = true;
+        }
+        if let Some(ref fm) = self.fill_mode {
+            payload.insert(String::from("fill_mode"), json!(fm));
+            has_patch = true;
+        }
+        if let Some(h) = self.hidden {
+            payload.insert(String::from("hidden"), json!(h));
+            has_patch = true;
+        }
+        if !has_patch && !self.show_row_labels {
+            return None;
+        }
+        if has_patch {
+            payload.insert(String::from("mode"), json!("merge"));
+            Some(ToolCommandIntent::new("graph.formatSelectedPoints", Value::Object(payload)))
+        } else {
+            None
+        }
+    }
+
+    /// Build optional `graph.addAnnotation` intents displaying row labels when `show_row_labels` is true.
+    #[must_use]
+    pub fn build_row_label_intents(&self, doc: &ProjectDocument) -> Vec<ToolCommandIntent> {
+        if !self.show_row_labels {
+            return Vec::new();
+        }
+        let Some(ref graph_id) = self.graph_sheet_id else {
+            return Vec::new();
+        };
+        let Some(gs) = doc.graph_sheet(graph_id) else {
+            return Vec::new();
+        };
+        let ds = doc
+            .data_sheet(&gs.spec.primary_source_sheet_id)
+            .or_else(|| doc.result_sheet(&gs.spec.primary_source_sheet_id).and_then(|rs| rs.analyzable_data.as_ref()));
+        let mut intents = Vec::new();
+        for &(_series_idx, point_idx) in &self.selected_points {
+            let label =
+                ds.and_then(|d| row_title_at(&d.archetype, point_idx)).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("Row {}", point_idx + 1));
+            intents.push(ToolCommandIntent::new(
+                "graph.addAnnotation",
+                json!({
+                    "sheet_id": graph_id.as_str(),
+                    "kind": "text",
+                    "text": label,
+                }),
+            ));
+        }
+        intents
+    }
+}
+
+fn row_title_at(arch: &TableArchetype, row: usize) -> Option<String> {
+    match arch {
+        TableArchetype::Xy(t) => t.row_titles.get(row).cloned(),
+        TableArchetype::Column(t) => t.row_titles.get(row).cloned(),
+        TableArchetype::Grouped(t) => t.row_titles.get(row).cloned(),
+        TableArchetype::Contingency(t) => t.row_titles.get(row).cloned(),
+        TableArchetype::Survival(t) => t.row_titles.get(row).cloned(),
+        TableArchetype::PartsOfWhole(t) => t.slice_labels.get(row).cloned(),
+        TableArchetype::MultipleVariables(t) => t.row_titles.get(row).cloned(),
+        TableArchetype::Nested(t) => t.row_titles.get(row).cloned(),
+    }
+}
+
 /// Interactive state for the graph/layout canvas, non-modal inspectors, and parameter dialogs.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct CanvasDialogState {
@@ -2976,6 +4101,146 @@ pub struct CanvasDialogState {
     pub journal_preset: Option<lumencraft_tools::JournalWidthPreset>,
     #[serde(default)]
     pub pan_zoom: PanZoomInertiaState,
+    #[serde(default)]
+    pub print: PrintDialogState,
+    #[serde(default)]
+    pub power_wizard: PowerWizardState,
+    #[serde(default)]
+    pub format_points: FormatSelectedPointsState,
+}
+
+/// Interactive state for the `Print...` setup and OS print-spool dialog (`R5.4`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PrintDialogState {
+    pub job: crate::PrintJobSpec,
+    pub copies: u16,
+    pub selected_printer: Option<String>,
+    pub discovered_printers: Vec<String>,
+    pub last_spool_bytes: usize,
+    pub last_status: Option<String>,
+}
+
+impl Default for PrintDialogState {
+    fn default() -> Self {
+        Self {
+            job: crate::PrintJobSpec::default(),
+            copies: 1,
+            selected_printer: None,
+            discovered_printers: Vec::new(),
+            last_spool_bytes: 0,
+            last_status: None,
+        }
+    }
+}
+
+impl PrintDialogState {
+    /// Initialize dialog settings targeting `active_sheet` (falling back to the first graph or
+    /// layout sheet in `doc`) and refresh discovered OS print queues.
+    pub fn open_for_document(&mut self, doc: &ProjectDocument, active_sheet: Option<&SheetId>, discovered_printers: Vec<String>) {
+        let resolved_id = active_sheet
+            .filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some())
+            .cloned()
+            .or_else(|| doc.layout_sheets.first().map(|ls| ls.id.clone()))
+            .or_else(|| doc.graph_sheets.first().map(|gs| gs.id.clone()));
+
+        if let Some(id) = &resolved_id {
+            self.job.sheet_ids = vec![id.clone()];
+            if let Some(ls) = doc.layout_sheet(id) {
+                self.job.title = Some(ls.title.clone());
+            } else if let Some(gs) = doc.graph_sheet(id) {
+                self.job.title = Some(gs.title.clone());
+            }
+        } else {
+            self.job.sheet_ids.clear();
+            self.job.title = Some(doc.title.clone());
+        }
+
+        self.copies = self.copies.clamp(1, 999);
+        self.discovered_printers = discovered_printers;
+        if let Some(sel) = &self.selected_printer
+            && !self.discovered_printers.is_empty()
+            && !self.discovered_printers.iter().any(|p| p == sel)
+        {
+            self.selected_printer = self.discovered_printers.first().cloned();
+        }
+        self.last_status = Some(match self.discovered_printers.len() {
+            0 => String::from("Ready to spool PDF at 100% physical scale"),
+            n => format!("{n} OS printer queue(s) discovered"),
+        });
+    }
+
+    /// Update desired print copy count, clamping into `1..=999`.
+    pub fn update_copies(&mut self, copies: u16) -> u16 {
+        self.copies = copies.clamp(1, 999);
+        self.copies
+    }
+
+    /// Select an OS printer queue name (or `None` for the OS default queue).
+    pub fn select_printer(&mut self, printer: Option<String>) {
+        self.selected_printer = printer.map(|p| p.trim().to_owned()).filter(|p| !p.is_empty());
+    }
+
+    /// Update print scale percentage, clamping finite values into `10.0..=400.0`.
+    pub fn set_scale_percent(&mut self, scale_percent: f64) {
+        if scale_percent.is_finite() {
+            self.job.scale_percent = scale_percent.clamp(10.0, 400.0);
+        }
+    }
+
+    /// Patch `Print` modal fields (`crop_marks`, `bleed_pt`, `copies`, `scale_percent`, `printer`, `title`).
+    ///
+    /// # Errors
+    /// Returns an error when any numeric field is out of valid range or has an invalid type.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "crop_marks" | "print.crop_marks" => {
+                    self.job.crop_marks = val.as_bool().ok_or_else(|| String::from("`crop_marks` must be boolean"))?;
+                }
+                "bleed_pt" | "print.bleed_pt" => {
+                    let bleed = parse_dialog_num(val, key)?;
+                    if !(0.0..=144.0).contains(&bleed) {
+                        return Err(format!("`bleed_pt` ({bleed}) must be within 0.0..=144.0"));
+                    }
+                    self.job.bleed_pt = bleed;
+                }
+                "copies" | "print.copies" => {
+                    let raw = parse_dialog_num(val, key)?;
+                    if raw < 1.0 || raw > 999.0 || (raw - raw.round()).abs() > 1e-9 {
+                        return Err(format!("`copies` ({raw}) must be an integer within 1..=999"));
+                    }
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let count = raw.round() as u16;
+                    self.update_copies(count);
+                }
+                "scale_percent" | "print.scale_percent" => {
+                    let scale = parse_dialog_num(val, key)?;
+                    if !(10.0..=400.0).contains(&scale) {
+                        return Err(format!("`scale_percent` ({scale}) must be within 10.0..=400.0"));
+                    }
+                    self.set_scale_percent(scale);
+                }
+                "selected_printer" | "printer" | "print.printer" => {
+                    if val.is_null() {
+                        self.select_printer(None);
+                    } else {
+                        let s = val.as_str().ok_or_else(|| String::from("`printer` must be a string or null"))?;
+                        self.select_printer(Some(s.to_owned()));
+                    }
+                }
+                "title" | "print.title" => {
+                    if val.is_null() {
+                        self.job.title = None;
+                    } else {
+                        let s = val.as_str().ok_or_else(|| String::from("`title` must be a string or null"))?;
+                        self.job.title = (!s.trim().is_empty()).then(|| s.trim().to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 impl CanvasDialogState {
@@ -3074,20 +4339,46 @@ impl CanvasDialogState {
         }
     }
 
-    /// Open `Analyze...` for `source_sheet_id` if it is a `DataSheet` (or analyzable `ResultSheet`).
+    /// Open standalone 4-stage Power & Sample Size Wizard (`WF-15`, `R8.7`).
+    pub fn open_power_wizard(&mut self) {
+        let _ = self.power_wizard.recalculate();
+        self.active_dialog = ActiveDialog::PowerAndSampleSize;
+    }
+
+    /// Open `Format Selected Points...` dialog targeting `graph_sheet_id` and `points` (`WF-22`).
+    pub fn open_format_selected_points(&mut self, doc: &ProjectDocument, graph_sheet_id: &SheetId, points: Vec<(usize, usize)>) -> bool {
+        if doc.graph_sheet(graph_sheet_id).is_none() {
+            return false;
+        }
+        self.format_points.open_for_graph(graph_sheet_id.clone(), points);
+        self.active_dialog = ActiveDialog::FormatSelectedPoints { graph_sheet_id: graph_sheet_id.clone() };
+        true
+    }
+
+    /// Open `Analyze...` for `source_sheet_id` (`DataSheet`, analyzable `ResultSheet`, or tabular `ResultSheet`).
     pub fn open_analyze_dialog(&mut self, doc: &ProjectDocument, source_sheet_id: &SheetId) -> bool {
         if let Some(ds) = doc.data_sheet(source_sheet_id) {
             self.analyze.open_for_data_sheet(ds);
             self.active_dialog = ActiveDialog::AnalyzeSheet { source_sheet_id: ds.id.clone() };
             return true;
         }
-        if let Some(rs) = doc.result_sheet(source_sheet_id)
-            && let Some(analyzable) = &rs.analyzable_data
-        {
-            self.analyze.open_for_data_sheet(analyzable);
-            self.analyze.source_sheet_id = Some(rs.id.clone());
-            self.active_dialog = ActiveDialog::AnalyzeSheet { source_sheet_id: rs.id.clone() };
-            return true;
+        if let Some(rs) = doc.result_sheet(source_sheet_id) {
+            if let Some(analyzable) = &rs.analyzable_data {
+                self.analyze.open_for_data_sheet(analyzable);
+                self.analyze.source_sheet_id = Some(rs.id.clone());
+                self.active_dialog = ActiveDialog::AnalyzeSheet { source_sheet_id: rs.id.clone() };
+                return true;
+            }
+            let active_tab = self
+                .result_view
+                .active_tab(rs)
+                .filter(|t| !t.column_headers.is_empty() && !t.rows.is_empty())
+                .or_else(|| rs.tabs.iter().find(|t| !t.column_headers.is_empty() && !t.rows.is_empty()));
+            if let Some(tab) = active_tab {
+                self.analyze.open_for_result_tab(rs, tab);
+                self.active_dialog = ActiveDialog::AnalyzeSheet { source_sheet_id: rs.id.clone() };
+                return true;
+            }
         }
         false
     }
@@ -3132,6 +4423,13 @@ impl CanvasDialogState {
     pub fn open_command_palette(&mut self) {
         self.command_palette.open();
         self.active_dialog = ActiveDialog::CommandPalette;
+    }
+
+    /// Open `Print...` dialog for `sheet_id` (or first printable sheet in `doc`).
+    pub fn open_print_dialog(&mut self, doc: &ProjectDocument, sheet_id: Option<&SheetId>, discovered_printers: Vec<String>) {
+        self.print.open_for_document(doc, sheet_id, discovered_printers);
+        let target = self.print.job.sheet_ids.first().cloned().or_else(|| sheet_id.cloned());
+        self.active_dialog = ActiveDialog::Print { sheet_id: target };
     }
 
     /// Confirm `Analyze...`, opening [`ActiveDialog::DuplicateAnalysisPrompt`] if a matching

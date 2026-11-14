@@ -3568,6 +3568,60 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "فتح إعادة تشكيل استيراد اللوحة / الجدول الطويل",
         he: "פתח עיצוב מחדש ליבוא פלטה / טבלה ארוכה",
     ]),
+    entry!("cmd.ui.print.open" => [
+        en: "Print...",
+        de: "Drucken...",
+        es: "Imprimir...",
+        fr: "Imprimer...",
+        ja: "印刷...",
+        ko: "인쇄...",
+        pt_br: "Imprimir...",
+        zh_cn: "打印...",
+        zh_tw: "列印...",
+        it: "Stampa...",
+        nl: "Afdrukken...",
+        pl: "Drukuj...",
+        ru: "Печать...",
+        tr: "Yazdır...",
+        ar: "طباعة...",
+        he: "הדפסה...",
+    ]),
+    entry!("cmd.ui.powerWizard.open" => [
+        en: "Power and Sample Size...",
+        de: "Teststärke und Stichprobenumfang...",
+        es: "Potencia y tamaño de muestra...",
+        fr: "Puissance et taille d'échantillon...",
+        ja: "検出力と標本サイズ...",
+        ko: "검정력 및 표본 크기...",
+        pt_br: "Poder e tamanho da amostra...",
+        zh_cn: "检验效能与样本量...",
+        zh_tw: "檢定力與樣本數...",
+        it: "Potenza e dimensione del campione...",
+        nl: "Power en steekproefgrootte...",
+        pl: "Moc testu i liczebność próby...",
+        ru: "Мощность и размер выборки...",
+        tr: "Güç ve Örneklem Büyüklüğü...",
+        ar: "القوة الإحصائية وحجم العينة...",
+        he: "עוצמה וגודל מדגם...",
+    ]),
+    entry!("cmd.ui.formatPoints.open" => [
+        en: "Format Selected Points...",
+        de: "Ausgewählte Punkte formatieren...",
+        es: "Dar formato a puntos seleccionados...",
+        fr: "Formater les points sélectionnés...",
+        ja: "選択したポイントの書式設定...",
+        ko: "선택한 데이터 점 서식...",
+        pt_br: "Formatar pontos selecionados...",
+        zh_cn: "格式化所选数据点...",
+        zh_tw: "格式化所選資料點...",
+        it: "Formatta punti selezionati...",
+        nl: "Geselecteerde punten opmaken...",
+        pl: "Formatuj zaznaczone punkty...",
+        ru: "Формат выбранных точек...",
+        tr: "Seçili Noktaları Biçimlendir...",
+        ar: "تنسيق النقاط المحددة...",
+        he: "עיצוב נקודות נבחרות...",
+    ]),
     entry!("cmd.app.about" => [
         en: "About LumenCraft",
         de: "Über LumenCraft",
@@ -4017,6 +4071,24 @@ pub const CATALOG: &[CatalogEntry] = &[
         tr: "Sayfa Seç",
         ar: "تحديد ورقة",
         he: "בחר גיליון",
+    ]),
+    entry!("cmd.sheet.extractResultTab" => [
+        en: "Extract Result Tab to Data Table",
+        de: "Ergebnisregister in Datentabelle extrahieren",
+        es: "Extraer pestaña de resultados a tabla de datos",
+        fr: "Extraire l'onglet de résultats vers une table de données",
+        ja: "結果タブをデータテーブルへ抽出",
+        ko: "결과 탭을 데이터 테이블로 추출",
+        pt_br: "Extrair aba de resultados para tabela de dados",
+        zh_cn: "将结果选项卡提取为数据表",
+        zh_tw: "將結果索引標籤擷取為資料表",
+        it: "Estrai scheda risultati in tabella dati",
+        nl: "Resultaattabblad naar gegevenstabel extraheren",
+        pl: "Wyodrębnij kartę wyników do tabeli danych",
+        ru: "Извлечь вкладку результатов в таблицу данных",
+        tr: "Sonuç Sekmesini Veri Tablosuna Aktar",
+        ar: "استخراج علامة تبويب النتائج إلى جدول بيانات",
+        he: "חלץ לשונית תוצאות לטבלת נתונים",
     ]),
     entry!("cmd.info.setNote" => [
         en: "Set Info Note",
@@ -4954,6 +5026,24 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "فحص الشكل قبل النشر",
         he: "בדיקת תקינות איור",
     ]),
+    entry!("cmd.graph.formatSelectedPoints" => [
+        en: "Format Selected Points",
+        de: "Ausgewählte Punkte formatieren",
+        es: "Dar formato a puntos seleccionados",
+        fr: "Formater les points sélectionnés",
+        ja: "選択したポイントの書式設定",
+        ko: "선택한 데이터 점 서식",
+        pt_br: "Formatar pontos selecionados",
+        zh_cn: "格式化所选数据点",
+        zh_tw: "格式化所選資料點",
+        it: "Formatta punti selezionati",
+        nl: "Geselecteerde punten opmaken",
+        pl: "Formatuj zaznaczone punkty",
+        ru: "Формат выбранных точек",
+        tr: "Seçili Noktaları Biçimlendir",
+        ar: "تنسيق النقاط المحددة",
+        he: "עיצוב נקודות נבחרות",
+    ]),
     entry!("cmd.layout.create" => [
         en: "New Layout",
         de: "Neues Layout",
@@ -5568,8 +5658,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 286);
-        assert_eq!(LOCALES.len() * catalog_len(), 4_576);
+        assert_eq!(catalog_len(), 291);
+        assert_eq!(LOCALES.len() * catalog_len(), 4_656);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -5606,8 +5696,8 @@ mod tests {
 
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = lumencraft_engine::cmd::registry().specs().collect();
-        assert_eq!(engine_specs.len(), 90, "expected 90 engine CommandSpec entries");
-        assert_eq!(crate::menus::UI_COMMANDS.len(), 29, "expected 29 UiCommandSpec entries");
+        assert_eq!(engine_specs.len(), 92, "expected 92 engine CommandSpec entries");
+        assert_eq!(crate::menus::UI_COMMANDS.len(), 32, "expected 32 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();
         for spec in &engine_specs {

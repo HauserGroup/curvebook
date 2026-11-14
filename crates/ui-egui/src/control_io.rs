@@ -6,20 +6,19 @@ use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpListener};
 
 use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
-use lumencraft_doc::{CanvasResizeMode, ChecklistStatus, FigureCanvasPreset, ProjectDocument, SheetFolderKind, SheetId, SheetSection};
+use lumencraft_doc::{CanvasResizeMode, ChecklistStatus, ErrorCode, FigureCanvasPreset, ProjectDocument, SheetFolderKind, SheetId, SheetSection};
 use lumencraft_engine::{EngineError, Session, cmd};
 use lumencraft_palette::{CanvasPreviewFilter, Rgba8};
 use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use lumencraft_render::RenderTargetSpec;
 use lumencraft_svg::{SvgExportOptions, render_svg};
 use lumencraft_tools::{GridCellCoord, PhysicalUnit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
-use crate::compositor::render_workspace_frame_png;
 use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, RemediationKind};
 use crate::grid_view::ImportReshapeMode;
+use crate::gui_actions::{dispatch as dispatch_gui_action_impl, is_gui_action_method};
 use crate::i18n::{LocalePreset, is_rtl_locale, locale_display_name, normalize_locale};
 use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
 use crate::menus::ui_commands::UI_COMMANDS;
@@ -30,12 +29,12 @@ use crate::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 /// Hard bound per JSON-lines control request/response frame (16 MiB).
 pub const MAX_CONTROL_LINE_BYTES: usize = 16 * 1024 * 1024;
 
-const DEFAULT_SCREENSHOT_WIDTH_PX: u32 = 1024;
-const DEFAULT_SCREENSHOT_HEIGHT_PX: u32 = 640;
-const DEFAULT_SCREENSHOT_DPI: u16 = 144;
-const MIN_SCREENSHOT_DIM_PX: u32 = 64;
-const MAX_SCREENSHOT_DIM_PX: u32 = 4096;
-const MIN_DPI: u16 = 72;
+pub(crate) const DEFAULT_SCREENSHOT_WIDTH_PX: u32 = 1024;
+pub(crate) const DEFAULT_SCREENSHOT_HEIGHT_PX: u32 = 640;
+pub(crate) const DEFAULT_SCREENSHOT_DPI: u16 = 144;
+pub(crate) const MIN_SCREENSHOT_DIM_PX: u32 = 64;
+pub(crate) const MAX_SCREENSHOT_DIM_PX: u32 = 4096;
+pub(crate) const MIN_DPI: u16 = 72;
 const CROP_MARGIN_PT: f64 = 18.0;
 
 /// Control-loop continuation directive returned alongside a serialized response line.
@@ -352,6 +351,33 @@ pub fn handle_control_line_with_action(app: &mut UiApp, line: &str) -> (String, 
 /// Returns `Ok(None)` when `command_id` is not a front-end UI command so callers can delegate
 /// to engine command execution cleanly.
 ///
+/// Dispatch one of the 8 interactive GUI actions (`ui.inspect`, `ui.screenshot`,
+/// `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`,
+/// `ui.answer_dialog`) against `app` for in-process callers (`lumencraft-cli` MCP bridge, `R8.7`).
+///
+/// All workspace mutations invoked via these GUI interactions run as `Caller::Ui`.
+///
+/// # Errors
+/// Returns a structured [`EngineError`] on invalid parameters, disabled UI controls/tabs/menus
+/// (`ErrorCode::Conflict`), missing widgets (`ErrorCode::NotFound`), or blocked disk writes under
+/// strict `--gui-only` (`ErrorCode::GuiOnlyViolation`).
+pub fn dispatch_gui_action(app: &mut UiApp, method: &str, params: Value) -> Result<Value, EngineError> {
+    dispatch_gui_action_impl(app, method, params)
+}
+
+/// Dispatch a UI command using `Caller::Ui` privileges (invoked internally by menus, shortcuts,
+/// and the command palette).
+pub(crate) fn dispatch_ui_command_as_ui(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, EngineError> {
+    dispatch_ui_command_detailed(app, command_id, params).map_err(|err| {
+        if let Some(detail) = err.detail
+            && let Ok(parsed) = serde_json::from_value::<EngineError>(detail)
+        {
+            return parsed;
+        }
+        EngineError::with_code(ErrorCode::Conflict, err.message)
+    })
+}
+
 /// # Errors
 /// Returns a descriptive error string when a recognized UI command fails validation or precondition checks.
 pub fn dispatch_ui_command(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, String> {
@@ -380,6 +406,8 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             })))
         }
         "ui.analyze.open" => map_ui_result(dispatch_ui_analyze_open(app, params)),
+        "ui.powerWizard.open" => map_ui_result(dispatch_ui_power_wizard_open(app, params)),
+        "ui.formatPoints.open" => map_ui_result(dispatch_ui_format_points_open(app, params)),
         "ui.changeGraphType.open" => map_ui_result(dispatch_ui_change_graph_type_open(app, params)),
         "ui.clonePipeline.open" => map_ui_result(dispatch_ui_clone_pipeline_open(app, params)),
         "ui.zoom.fitSheet" => {
@@ -393,7 +421,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
         "ui.shortcut.reset" => map_ui_result(dispatch_ui_shortcut_reset(app, params)),
         "ui.locale.set" => map_ui_result(dispatch_ui_locale_set(app, params)),
         "ui.theme.set" => map_ui_result(dispatch_ui_theme_set(app, params)),
-        "ui.screenshot" => map_ui_result(dispatch_ui_screenshot(app, params)),
+        "ui.screenshot" => dispatch_gui_action(app, "ui.screenshot", params.clone()).map(Some).map_err(ControlCallError::from),
         "ui.event.dispatch" => map_ui_result(dispatch_ui_event_cmd(app, params)),
         "ui.split.toggle" => map_ui_result(dispatch_ui_split_toggle(app, params)),
         "ui.brush.point" => map_ui_result(dispatch_ui_brush_point(app, params)),
@@ -406,6 +434,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
         "ui.grid.excludeWithReason" => dispatch_ui_grid_exclude_with_reason(app, params).map(Some),
         "ui.table.convertArchetype.open" => map_ui_result(dispatch_ui_table_convert_archetype_open(app, params)),
         "ui.import.reshape.open" => map_ui_result(dispatch_ui_import_reshape_open(app, params)),
+        "ui.print.open" | "file.print" => map_ui_result(dispatch_ui_print_open(app, params)),
         "app.about" => {
             app.canvas_dialogs.active_dialog = ActiveDialog::About;
             Ok(Some(json!({
@@ -423,21 +452,26 @@ fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, C
         return (ControlResponse::ok(id, json!({ "quit": true })), ControlLoopAction::Quit);
     }
 
-    let result = match method.as_str() {
-        "ping" => Ok(json!({
-            "pong": true,
-            "bundled_fonts": crate::bundled_fonts_enabled(),
-            "version": env!("CARGO_PKG_VERSION"),
-        })),
-        "command.list" => Ok(handle_command_list(app)),
-        "command.run" => handle_command_run(app, &params),
-        "command.batch" => handle_command_batch(app, &params),
-        "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), &params).map_err(ControlCallError::from),
-        "render.svg" => handle_render_svg(app, &params),
-        "render.pdf" => handle_render_pdf(app, &params),
-        "ui.state" | "state.snapshot" => Ok(handle_ui_state(app)),
-        "engine.execute" => handle_engine_execute(app, &params),
-        _ => dispatch_command_by_id(app, &method, params),
+    let result = if is_gui_action_method(method.as_str()) {
+        dispatch_gui_action(app, &method, params).map_err(ControlCallError::from)
+    } else {
+        match method.as_str() {
+            "ping" => Ok(json!({
+                "pong": true,
+                "bundled_fonts": crate::bundled_fonts_enabled(),
+                "version": env!("CARGO_PKG_VERSION"),
+                "gui_only": app.is_gui_only(),
+            })),
+            "command.list" => Ok(handle_command_list(app)),
+            "command.run" => handle_command_run(app, &params),
+            "command.batch" => handle_command_batch(app, &params),
+            "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), &params).map_err(ControlCallError::from),
+            "render.svg" => handle_render_svg(app, &params),
+            "render.pdf" => handle_render_pdf(app, &params),
+            "ui.state" | "state.snapshot" => Ok(handle_ui_state(app)),
+            "engine.execute" => handle_engine_execute(app, &params),
+            _ => dispatch_command_by_id(app, &method, params),
+        }
     };
 
     let response = match result {
@@ -447,11 +481,29 @@ fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, C
     (response, ControlLoopAction::Continue)
 }
 
+fn is_control_readonly_ui_command(command_id: &str) -> bool {
+    command_id == "ui.canvas.preflight"
+}
+
 fn dispatch_command_by_id(app: &mut UiApp, command_id: &str, params: Value) -> Result<Value, ControlCallError> {
+    if is_gui_action_method(command_id) {
+        return dispatch_gui_action(app, command_id, params).map_err(ControlCallError::from);
+    }
+    if app.is_gui_only()
+        && !is_control_readonly_ui_command(command_id)
+        && (command_id.starts_with("ui.") || command_id == "app.about" || command_id == "file.print")
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            format!("direct `{command_id}` control request is blocked under --gui-only"),
+        )
+        .with_remediation("Interact via the 8 GUI actions (`ui.invoke_menu`, `ui.pointer_gesture`, `ui.press_key`, `ui.answer_dialog`).")
+        .into());
+    }
     if let Some(ui_value) = dispatch_ui_command_detailed(app, command_id, &params)? {
         return Ok(ui_value);
     }
-    let outcome = app.execute_command(command_id, params)?;
+    let outcome = app.execute_control_command(command_id, params)?;
     serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize command outcome: {err}")))
 }
 
@@ -612,7 +664,7 @@ fn handle_engine_execute(app: &mut UiApp, params: &Value) -> Result<Value, Contr
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ControlCallError::from("engine.execute requires non-empty 'command_id'"))?;
     let cmd_params = params.get("params").cloned().unwrap_or(Value::Null);
-    let outcome = app.execute_command(cmd_id, cmd_params)?;
+    let outcome = app.execute_control_command(cmd_id, cmd_params)?;
     serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize engine outcome: {err}")))
 }
 
@@ -623,6 +675,7 @@ fn handle_ui_state(app: &mut UiApp) -> Value {
         "title": doc.title,
         "sheet_count": doc.total_sheet_count(),
         "dirty": app.session().is_dirty(),
+        "gui_only": app.is_gui_only(),
         "active_sheet_id": doc.active_sheet_id.as_ref().map(SheetId::as_str),
         "family_anchor_sheet_id": doc.family_anchor_sheet_id.as_ref().map(SheetId::as_str),
         "navigator_open": app.nav.navigator_open,
@@ -648,6 +701,8 @@ fn handle_ui_state(app: &mut UiApp) -> Value {
         "preview_filter": app.preview_filter.as_str(),
         "presentation_mode": app.presentation_mode,
         "brushed_cell": app.brushed_cell,
+        "brushed_points": app.brushed_points,
+        "selected_rows": app.grid.selected_rows,
         "inline_editor_active": app.inline_editor.active,
         "preflight_issue_count": app.canvas_dialogs.preflight_issues.len(),
     })
@@ -853,6 +908,14 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     };
 
     if let Some(path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()) {
+        if app.is_gui_only() {
+            return Err(EngineError::with_code(
+                ErrorCode::GuiOnlyViolation,
+                "direct filesystem writes via `render.pdf` `path` are blocked under --gui-only",
+            )
+            .with_remediation("Inspect the returned base64 PDF payload or trigger Export through GUI dialogs.")
+            .into());
+        }
         write_host_file(path, &pdf_bytes)?;
     }
 
@@ -873,7 +936,10 @@ fn dispatch_ui_analyze_open(app: &mut UiApp, params: &Value) -> Result<Value, St
     let target_id = if let Some(explicit) = resolve_sheet_id_param(params)? {
         explicit
     } else if let Some(active) = &doc.active_sheet_id {
-        if doc.data_sheet(active).is_some() || doc.result_sheet(active).and_then(|rs| rs.analyzable_data.as_ref()).is_some() {
+        let is_analyzable_result = doc
+            .result_sheet(active)
+            .is_some_and(|rs| rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.column_headers.is_empty() && !t.rows.is_empty()));
+        if doc.data_sheet(active).is_some() || is_analyzable_result {
             active.clone()
         } else {
             doc.data_sheets.first().map(|ds| ds.id.clone()).ok_or_else(|| String::from("no data or analyzable sheet available for Analyze dialog"))?
@@ -883,11 +949,68 @@ fn dispatch_ui_analyze_open(app: &mut UiApp, params: &Value) -> Result<Value, St
     };
 
     if !app.canvas_dialogs.open_analyze_dialog(&doc, &target_id) {
-        return Err(format!("sheet `{}` is not a data sheet or analyzable transform sheet", target_id.as_str()));
+        return Err(format!("sheet `{}` is not a data sheet or tabular result sheet", target_id.as_str()));
     }
     Ok(json!({
         "dialog": "AnalyzeSheet",
         "source_sheet_id": target_id.as_str(),
+        "extracted_result_tab_id": app.canvas_dialogs.analyze.extracted_result_tab_id,
+    }))
+}
+
+fn dispatch_ui_power_wizard_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    app.canvas_dialogs.open_power_wizard();
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.power_wizard.apply_field_patch(fields)?;
+    }
+    Ok(json!({
+        "dialog": "PowerAndSampleSize",
+        "stage": app.canvas_dialogs.power_wizard.stage.label(),
+        "stage_index": app.canvas_dialogs.power_wizard.stage.index(),
+    }))
+}
+
+fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let graph = if let Some(explicit) = resolve_sheet_id_param(params)? {
+        doc.graph_sheet(&explicit).ok_or_else(|| format!("graph sheet `{}` not found", explicit.as_str()))?
+    } else if let Some(active) = doc.active_sheet_id.as_ref().and_then(|id| doc.graph_sheet(id)) {
+        active
+    } else {
+        doc.graph_sheets.first().ok_or_else(|| String::from("no graph sheet available to format points"))?
+    };
+
+    let mut points: Vec<(usize, usize)> = if let Some(arr) = params.get("points").and_then(Value::as_array) {
+        arr.iter()
+            .filter_map(|item| {
+                let s = item.get("series_index").and_then(Value::as_u64)? as usize;
+                let p = item.get("point_index").and_then(Value::as_u64)? as usize;
+                Some((s, p))
+            })
+            .collect()
+    } else if !app.brushed_points.is_empty() {
+        app.brushed_points.iter().map(|pt| (pt.col, pt.row)).collect()
+    } else if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) {
+        app.grid.selected_graph_point_indices(ds, graph.spec.series.len().max(1))
+    } else {
+        Vec::new()
+    };
+    points.sort_unstable();
+    points.dedup();
+
+    let graph_id = graph.id.clone();
+    app.canvas_dialogs.open_format_selected_points(&doc, &graph_id, points);
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.format_points.apply_field_patch(fields)?;
+    }
+    Ok(json!({
+        "dialog": "FormatSelectedPoints",
+        "graph_sheet_id": graph_id.as_str(),
+        "selected_count": app.canvas_dialogs.format_points.selected_points.len(),
     }))
 }
 
@@ -1225,6 +1348,46 @@ fn dispatch_ui_import_reshape_open(app: &mut UiApp, params: &Value) -> Result<Va
     }))
 }
 
+fn dispatch_ui_print_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let sheet_override = resolve_sheet_id_param(params)?;
+    let active = app.session.document().active_sheet_id.clone();
+    app.open_print_dialog_for(sheet_override.as_ref().or(active.as_ref()));
+
+    if let Some(copies) = params.get("copies").and_then(Value::as_u64) {
+        let clamped = u16::try_from(copies.clamp(1, 999)).unwrap_or(999);
+        app.update_print_dialog_copies(clamped);
+    }
+    if let Some(printer_val) = params.get("printer") {
+        let printer = printer_val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
+        app.select_print_dialog_printer(printer);
+    }
+    if let Some(scale) = params.get("scale_percent").and_then(Value::as_f64) {
+        app.update_print_dialog_scale(scale);
+    }
+    if let Some(crop_marks) = params.get("crop_marks").and_then(Value::as_bool) {
+        let bleed_pt = params.get("bleed_pt").and_then(Value::as_f64);
+        app.update_print_dialog_crop_marks(crop_marks, bleed_pt);
+    }
+
+    if params.get("spool").and_then(Value::as_bool).unwrap_or(false) {
+        let submit = params.get("submit_to_os").and_then(Value::as_bool).unwrap_or(false);
+        let _ = app.execute_print_dialog_spool(submit)?;
+    }
+
+    let p = &app.canvas_dialogs.print;
+    Ok(json!({
+        "dialog": "Print",
+        "sheet_ids": p.job.sheet_ids,
+        "copies": p.copies,
+        "scale_percent": p.job.scale_percent,
+        "crop_marks": p.job.crop_marks,
+        "selected_printer": p.selected_printer,
+        "discovered_printers": p.discovered_printers,
+        "last_spool_bytes": p.last_spool_bytes,
+        "last_status": p.last_status,
+    }))
+}
+
 const fn physical_unit_name(unit: PhysicalUnit) -> &'static str {
     match unit {
         PhysicalUnit::Millimeters => "mm",
@@ -1399,47 +1562,17 @@ fn dispatch_ui_theme_set(app: &mut UiApp, params: &Value) -> Result<Value, Strin
     }))
 }
 
-fn dispatch_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, String> {
-    let width_px = parse_bounded_u32(params.get("width_px"), DEFAULT_SCREENSHOT_WIDTH_PX, MIN_SCREENSHOT_DIM_PX, MAX_SCREENSHOT_DIM_PX, "width_px")?;
-    let height_px =
-        parse_bounded_u32(params.get("height_px"), DEFAULT_SCREENSHOT_HEIGHT_PX, MIN_SCREENSHOT_DIM_PX, MAX_SCREENSHOT_DIM_PX, "height_px")?;
-    let dpi_u32 = parse_bounded_u32(params.get("dpi"), u32::from(DEFAULT_SCREENSHOT_DPI), u32::from(MIN_DPI), 600, "dpi")?;
-    let dpi = u16::try_from(dpi_u32).map_err(|_| String::from("dpi out of range"))?;
-
-    let png_bytes =
-        render_workspace_frame_png(app, RenderTargetSpec { width_px, height_px, dpi }).map_err(|err| format!("screenshot capture failed: {err}"))?;
-
-    let saved_path = match params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
-        Some(path) => {
-            write_host_file(path, &png_bytes)?;
-            Some(path.to_owned())
-        }
-        None => None,
-    };
-
-    let data_base64 = encode_base64(&png_bytes);
-    Ok(json!({
-        "format": "png",
-        "width_px": width_px,
-        "height_px": height_px,
-        "dpi": dpi,
-        "bytes_len": png_bytes.len(),
-        "data_base64": data_base64,
-        "path": saved_path,
-    }))
-}
-
 #[cfg(not(target_arch = "wasm32"))]
-fn write_host_file(path: &str, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_host_file(path: &str, bytes: &[u8]) -> Result<(), String> {
     lumencraft_platform::fs::write_atomic(std::path::Path::new(path), bytes).map_err(|err| format!("failed to write file `{path}`: {err}"))
 }
 
 #[cfg(target_arch = "wasm32")]
-fn write_host_file(path: &str, _bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_host_file(path: &str, _bytes: &[u8]) -> Result<(), String> {
     Err(format!("writing local filesystem path `{path}` is unsupported on wasm32"))
 }
 
-fn parse_bounded_u32(raw: Option<&Value>, default: u32, min: u32, max: u32, field: &str) -> Result<u32, String> {
+pub(crate) fn parse_bounded_u32(raw: Option<&Value>, default: u32, min: u32, max: u32, field: &str) -> Result<u32, String> {
     let Some(val) = raw.filter(|v| !v.is_null()) else {
         return Ok(default);
     };
@@ -1700,7 +1833,7 @@ fn read_bounded_control_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> io
     }
 }
 
-fn encode_base64(input: &[u8]) -> String {
+pub(crate) fn encode_base64(input: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     for chunk in input.chunks(3) {
@@ -1744,12 +1877,18 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::ConvertArchetype { .. } => "ConvertArchetype",
         ActiveDialog::ImportReshape => "ImportReshape",
         ActiveDialog::ExcludeWithReason { .. } => "ExcludeWithReason",
+        ActiveDialog::FormatSelectedPoints { .. } => "FormatSelectedPoints",
+        ActiveDialog::PowerAndSampleSize => "PowerAndSampleSize",
+        ActiveDialog::Print { .. } => "Print",
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::About => "About",
     }
 }
 
-pub use crate::os_integration::{OsAdapterAvailability, OsAdapterStatus};
+pub use crate::os_integration::{
+    OsAdapterAvailability, OsAdapterStatus, build_cf_html_payload, discover_os_printers, open_os_print_preview_dialog,
+    open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use crate::os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
 

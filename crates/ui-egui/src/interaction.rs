@@ -6,17 +6,19 @@ use std::collections::BTreeMap;
 
 use lumencraft_chart::PointPt;
 use lumencraft_doc::{
-    CellCoord, CellValue, ConstantValue, DataSheet, GraphAnnotation, LayoutItem, ProjectDocument, RectPt, SheetFolderKind, SheetId,
+    CellCoord, CellValue, ConstantValue, DataSheet, GraphAnnotation, LayoutItem, LayoutSpec, ProjectDocument, RectPt, SheetFolderKind, SheetId,
+    TableArchetype, XColumnMode,
 };
 use lumencraft_format::{export_datasheet_to_csv, open_project_bytes, save_project_bytes};
 use lumencraft_render::RenderTargetSpec;
-use lumencraft_tools::canvas::{CanvasHitTarget, SnapGuide, SnapOrientation, SnapSource};
+use lumencraft_tools::canvas::{CanvasHitTarget, ResizeHandleCorner, SnapGuide, SnapOrientation, SnapSource};
 use lumencraft_tools::{CanvasToolMode, GridCellCoord, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::compositor::{WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout_map};
+use crate::dialogs_canvas::ActiveDialog;
 use crate::grid_view::{GridViewState, format_cell_display, parse_localized_number_input, resolve_flat_coord};
 use crate::workspace_nav::{ActiveWorkspacePane, build_set_info_constant_command, build_set_info_notes_command};
 
@@ -165,6 +167,7 @@ pub enum UiInputEvent {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InlineEditorTarget {
     GridCell { sheet_id: SheetId, coord: GridCellCoord },
+    GridXCell { sheet_id: SheetId, row: usize, subcol: usize },
     InfoConstant { sheet_id: SheetId, name: String },
     InfoNotes { sheet_id: SheetId },
     GraphTitle { sheet_id: SheetId },
@@ -237,16 +240,7 @@ impl InlineEditorState {
 
         match target {
             InlineEditorTarget::GridCell { sheet_id, coord } => {
-                let trimmed = text.trim();
-                let value = if trimmed.is_empty() {
-                    Value::Null
-                } else if trimmed.starts_with('=') {
-                    Value::String(trimmed.to_owned())
-                } else if let Some(num) = parse_localized_number_input(trimmed, &app.locale_preset) {
-                    json!(num)
-                } else {
-                    Value::String(text)
-                };
+                let value = parse_inline_cell_input(app, text);
                 Some(ToolCommandIntent::new(
                     "table.setCell",
                     json!({
@@ -254,6 +248,18 @@ impl InlineEditorState {
                         "row": coord.row,
                         "col": coord.col,
                         "subcol": coord.subcol,
+                        "value": value,
+                    }),
+                ))
+            }
+            InlineEditorTarget::GridXCell { sheet_id, row, subcol } => {
+                let value = parse_inline_cell_input(app, text);
+                Some(ToolCommandIntent::new(
+                    "table.setXCells",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "row": row,
+                        "subcol": subcol,
                         "value": value,
                     }),
                 ))
@@ -289,6 +295,19 @@ impl InlineEditorState {
                 Some(ToolCommandIntent::new("graph.setAxes", json!({ "sheet_id": sheet_id.as_str(), axis_key: { "title": text } })))
             }
         }
+    }
+}
+
+fn parse_inline_cell_input(app: &UiApp, text: String) -> Value {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        Value::Null
+    } else if trimmed.starts_with('=') {
+        Value::String(trimmed.to_owned())
+    } else if let Some(num) = parse_localized_number_input(trimmed, &app.locale_preset) {
+        json!(num)
+    } else {
+        Value::String(text)
     }
 }
 
@@ -478,6 +497,12 @@ pub struct GridHitGeometry {
     pub row_h: u32,
     pub gutter_w: u32,
     pub col_w: u32,
+    /// Number of visible X / Time subcolumns before the Y columns (e.g. `1` or `3` on XY, `1` on Survival).
+    #[serde(default)]
+    pub x_subcols: usize,
+    /// Pixel width of each X / Time subcolumn (`0` when [`Self::x_subcols`] == 0).
+    #[serde(default)]
+    pub x_col_w: u32,
     pub start_row: usize,
     pub end_row: usize,
     pub start_col: usize,
@@ -486,6 +511,14 @@ pub struct GridHitGeometry {
 }
 
 impl GridHitGeometry {
+    /// Local pixel offset where Y columns begin (immediately after `#` gutter + visible X subcolumns).
+    #[must_use]
+    pub const fn data_x_origin(&self) -> u32 {
+        #[allow(clippy::cast_possible_truncation)]
+        let x_cnt = if self.x_subcols > 16 { 16 } else { self.x_subcols as u32 };
+        self.gutter_w.saturating_add(x_cnt.saturating_mul(self.x_col_w))
+    }
+
     /// Pixel rectangle for the leading `#` gutter of visible row offset `r_off`.
     #[must_use]
     pub const fn row_gutter_rect(&self, r_off: u32) -> WorkspacePixelRect {
@@ -498,10 +531,74 @@ impl GridHitGeometry {
         )
     }
 
+    /// Pixel rectangle for X / Time subcolumn header `subcol`.
+    #[must_use]
+    pub fn x_header_rect(&self, subcol: usize) -> Option<WorkspacePixelRect> {
+        if subcol >= self.x_subcols || self.x_col_w == 0 {
+            return None;
+        }
+        let s_off = u32::try_from(subcol).ok()?;
+        let local_raw = self.gutter_w.saturating_add(s_off.saturating_mul(self.x_col_w));
+        let w = self.x_col_w.saturating_sub(2);
+        let local_x = crate::i18n::mirror_x_for_rtl(local_raw, w, self.sheet_rect.width, self.is_rtl);
+        Some(WorkspacePixelRect::new(self.sheet_rect.x.saturating_add(local_x), self.hdr_y, w, self.row_h))
+    }
+
+    /// Exact physical pixel rectangle for X / Time cell `(row, subcol)` when currently visible.
+    #[must_use]
+    pub fn x_cell_rect(&self, row: usize, subcol: usize) -> Option<WorkspacePixelRect> {
+        if subcol >= self.x_subcols || self.x_col_w == 0 || row < self.start_row || row >= self.end_row {
+            return None;
+        }
+        let r_off = u32::try_from(row - self.start_row).ok()?;
+        let s_off = u32::try_from(subcol).ok()?;
+        let cy = self.body_y.saturating_add(r_off.saturating_mul(self.row_h));
+        if cy >= self.sheet_rect.bottom() {
+            return None;
+        }
+        let cw = self.x_col_w.saturating_sub(1);
+        let ch = self.row_h.saturating_sub(1);
+        let local_raw = self.gutter_w.saturating_add(s_off.saturating_mul(self.x_col_w));
+        let local_x = crate::i18n::mirror_x_for_rtl(local_raw, cw, self.sheet_rect.width, self.is_rtl);
+        let cx = self.sheet_rect.x.saturating_add(local_x);
+        if cx >= self.sheet_rect.right() {
+            return None;
+        }
+        Some(WorkspacePixelRect::new(cx, cy, cw, ch))
+    }
+
+    /// Hit-test physical `(phys_x, phys_y)` into `(row, subcol)` for visible X / Time cells.
+    #[must_use]
+    pub fn hit_test_x_cell(&self, phys_x: u32, phys_y: u32) -> Option<(usize, usize)> {
+        if self.x_subcols == 0
+            || self.x_col_w == 0
+            || phys_x < self.sheet_rect.x
+            || phys_x >= self.sheet_rect.right()
+            || phys_y < self.body_y
+            || phys_y >= self.sheet_rect.bottom()
+            || self.row_h == 0
+        {
+            return None;
+        }
+        let r_off = usize::try_from((phys_y - self.body_y) / self.row_h).ok()?;
+        let row = self.start_row.checked_add(r_off)?;
+        if row >= self.end_row {
+            return None;
+        }
+        for subcol in 0..self.x_subcols {
+            if let Some(rect) = self.x_cell_rect(row, subcol)
+                && rect.contains(phys_x, phys_y)
+            {
+                return Some((row, subcol));
+            }
+        }
+        None
+    }
+
     /// Pixel rectangle for header column offset `c_off`.
     #[must_use]
     pub const fn column_header_rect(&self, c_off: u32) -> WorkspacePixelRect {
-        let local_raw = self.gutter_w.saturating_add(c_off.saturating_mul(self.col_w));
+        let local_raw = self.data_x_origin().saturating_add(c_off.saturating_mul(self.col_w));
         let w = self.col_w.saturating_sub(2);
         let local_x = crate::i18n::mirror_x_for_rtl(local_raw, w, self.sheet_rect.width, self.is_rtl);
         WorkspacePixelRect::new(self.sheet_rect.x.saturating_add(local_x), self.hdr_y, w, self.row_h)
@@ -524,7 +621,7 @@ impl GridHitGeometry {
         }
         let cw = self.col_w.saturating_sub(1);
         let ch = self.row_h.saturating_sub(1);
-        let local_raw = self.gutter_w.saturating_add(c_off.saturating_mul(self.col_w));
+        let local_raw = self.data_x_origin().saturating_add(c_off.saturating_mul(self.col_w));
         let local_x = crate::i18n::mirror_x_for_rtl(local_raw, cw, self.sheet_rect.width, self.is_rtl);
         let cx = self.sheet_rect.x.saturating_add(local_x);
         if cx >= self.sheet_rect.right() {
@@ -551,9 +648,10 @@ impl GridHitGeometry {
             return None;
         }
 
+        let origin = self.data_x_origin();
         for (c_off, (flat_col, base_coord)) in self.visible_cols.iter().enumerate() {
             let cw = self.col_w.saturating_sub(1);
-            let local_raw = self.gutter_w.saturating_add((c_off as u32).saturating_mul(self.col_w));
+            let local_raw = origin.saturating_add((c_off as u32).saturating_mul(self.col_w));
             let local_x = crate::i18n::mirror_x_for_rtl(local_raw, cw, self.sheet_rect.width, self.is_rtl);
             let cx = self.sheet_rect.x.saturating_add(local_x);
             if phys_x >= cx && phys_x < cx.saturating_add(cw) {
@@ -619,6 +717,7 @@ impl ScenePaperMapping {
 pub enum WorkspaceHitTarget {
     SplitDivider,
     NavigatorEntry { sheet_id: SheetId, folder: SheetFolderKind, index_in_folder: usize },
+    GridXCell { sheet_id: SheetId, row: usize, subcol: usize },
     GridCell { sheet_id: SheetId, coord: GridCellCoord, flat_col: usize },
     ResultBannerAction { result_sheet_id: SheetId },
     InfoConstant { sheet_id: SheetId, name: String, value_text: String },
@@ -689,10 +788,13 @@ impl WorkspaceLayoutMap {
             return WorkspaceHitTarget::ResultBannerAction { result_sheet_id: rs_id.clone() };
         }
 
-        if let Some(grid) = &self.grid_geometry
-            && let Some((coord, flat_col)) = grid.hit_test_cell(px, py)
-        {
-            return WorkspaceHitTarget::GridCell { sheet_id: grid.sheet_id.clone(), coord, flat_col };
+        if let Some(grid) = &self.grid_geometry {
+            if let Some((row, subcol)) = grid.hit_test_x_cell(px, py) {
+                return WorkspaceHitTarget::GridXCell { sheet_id: grid.sheet_id.clone(), row, subcol };
+            }
+            if let Some((coord, flat_col)) = grid.hit_test_cell(px, py) {
+                return WorkspaceHitTarget::GridCell { sheet_id: grid.sheet_id.clone(), coord, flat_col };
+            }
         }
 
         if let Some(row) = self.info_constant_rows.iter().find(|r| r.rect.contains(px, py)) {
@@ -750,11 +852,55 @@ impl WorkspaceLayoutMap {
     }
 }
 
+/// Active layout item resize corner or edge handle tracked during live pointer resize drags.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum LayoutResizeHandle {
+    TopLeft,
+    TopRight,
+    BottomLeft,
+    BottomRight,
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+impl From<ResizeHandleCorner> for LayoutResizeHandle {
+    fn from(value: ResizeHandleCorner) -> Self {
+        match value {
+            ResizeHandleCorner::TopLeft => Self::TopLeft,
+            ResizeHandleCorner::TopRight => Self::TopRight,
+            ResizeHandleCorner::BottomLeft => Self::BottomLeft,
+            ResizeHandleCorner::BottomRight => Self::BottomRight,
+            ResizeHandleCorner::Left => Self::Left,
+            ResizeHandleCorner::Right => Self::Right,
+            ResizeHandleCorner::Top => Self::Top,
+            ResizeHandleCorner::Bottom => Self::Bottom,
+        }
+    }
+}
+
 /// Active canvas annotation or layout panel drag state (`G6`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum CanvasDragTarget {
-    LayoutItem { sheet_id: SheetId, item_index: usize, start_scene_pt: PointPt, initial_bounds_pt: RectPt, current_bounds_pt: RectPt },
-    GraphAnnotation { sheet_id: SheetId, annotation_index: usize, start_scene_pt: PointPt, initial_bounds_pt: RectPt, current_bounds_pt: RectPt },
+    LayoutItem {
+        sheet_id: SheetId,
+        item_index: usize,
+        start_scene_pt: PointPt,
+        initial_bounds_pt: RectPt,
+        current_bounds_pt: RectPt,
+        #[serde(default)]
+        resize_handle: Option<LayoutResizeHandle>,
+        #[serde(default)]
+        preview_rect_pt: Option<RectPt>,
+    },
+    GraphAnnotation {
+        sheet_id: SheetId,
+        annotation_index: usize,
+        start_scene_pt: PointPt,
+        initial_bounds_pt: RectPt,
+        current_bounds_pt: RectPt,
+    },
 }
 
 /// Ephemeral pointer drag tracking across frames (`G6`).
@@ -766,6 +912,8 @@ pub struct InteractionControllerState {
     pub dragging_split_divider: bool,
     pub dragging_navigator_sheet: Option<SheetId>,
     pub canvas_drag: Option<CanvasDragTarget>,
+    #[serde(default)]
+    pub context_menu_target: Option<String>,
 }
 
 /// Structured outcome emitted by [`dispatch_ui_event`].
@@ -808,10 +956,14 @@ fn handle_pointer_down(
     button: PointerButton,
     modifiers: KeyModifiers,
 ) -> Result<UiEventOutcome, String> {
+    let layout = compute_workspace_layout_map(app, metrics);
+    if button == PointerButton::Secondary {
+        return Ok(handle_secondary_pointer_down(app, &layout, logical_pos));
+    }
     if button != PointerButton::Primary {
         return Ok(UiEventOutcome { handled: false, action: String::from("pointer_down_ignored"), ..Default::default() });
     }
-    let layout = compute_workspace_layout_map(app, metrics);
+    app.interaction.context_menu_target = None;
     app.interaction.pointer_down = true;
     app.interaction.last_logical_pos = Some(logical_pos);
     let target = layout.hit_test_logical(logical_pos[0], logical_pos[1]);
@@ -836,24 +988,60 @@ fn handle_pointer_down(
                 command_result: Some(json!({ "sheet_id": sheet_id.as_str() })),
             })
         }
+        WorkspaceHitTarget::GridXCell { sheet_id, row, subcol } => {
+            app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
+            app.grid.select_x_cell_sync(row, subcol);
+            app.grid.refresh_selection_stats(app.session.document());
+            app.interaction.dragging_grid_sheet = None;
+            app.focus_widget_id = Some(format!("grid.xcell.{row}.{subcol}"));
+            Ok(UiEventOutcome {
+                handled: true,
+                action: String::from("grid.select_x_cell"),
+                command_id: None,
+                command_result: Some(json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "row": row,
+                    "subcol": subcol,
+                    "selected_rows": app.grid.selected_rows,
+                })),
+            })
+        }
         WorkspaceHitTarget::GridCell { sheet_id, coord, .. } => {
             app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
-            if modifiers.shift {
-                app.grid.tool.extend_selection(coord);
+            let doc_sheet = app.session.document().data_sheet(&sheet_id).cloned();
+            if modifiers.ctrl || modifiers.meta {
+                if let Some(ref ds) = doc_sheet {
+                    app.grid.toggle_cmd_selection(ds, coord);
+                } else {
+                    app.grid.select_single_sync(coord);
+                }
+            } else if modifiers.shift {
+                if let Some(ref ds) = doc_sheet {
+                    app.grid.extend_shift_range(ds, coord);
+                } else {
+                    app.grid.tool.extend_selection(coord);
+                }
             } else {
-                app.grid.tool.select_single(coord);
+                app.grid.select_single_sync(coord);
             }
             app.grid.refresh_selection_stats(app.session.document());
             app.interaction.dragging_grid_sheet = Some(sheet_id.clone());
-            app.brush_from_grid_cell(&sheet_id, coord);
-            if let Some(ds) = app.session.document().data_sheet(&sheet_id) {
+            app.sync_brush_from_grid_selection(&sheet_id);
+            if let Some(ref ds) = doc_sheet {
                 app.grid.update_hover_exclusion_tooltip(ds, Some(coord));
             }
             Ok(UiEventOutcome {
                 handled: true,
                 action: String::from("grid.select_cell"),
                 command_id: Some(String::from("ui.brush.point")),
-                command_result: Some(json!({ "sheet_id": sheet_id.as_str(), "row": coord.row, "col": coord.col, "subcol": coord.subcol })),
+                command_result: Some(json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "row": coord.row,
+                    "col": coord.col,
+                    "subcol": coord.subcol,
+                    "selected_rows": app.grid.selected_rows,
+                    "selected_count": app.grid.selected_coords.len(),
+                })),
             })
         }
         WorkspaceHitTarget::ResultBannerAction { result_sheet_id } => {
@@ -867,7 +1055,7 @@ fn handle_pointer_down(
                 command_result: Some(res),
             })
         }
-        WorkspaceHitTarget::ScenePaper { sheet_id, scene_pt } => handle_scene_pointer_down(app, &sheet_id, scene_pt),
+        WorkspaceHitTarget::ScenePaper { sheet_id, scene_pt } => handle_scene_pointer_down(app, &sheet_id, scene_pt, modifiers),
         WorkspaceHitTarget::InfoConstant { sheet_id, name, value_text } => {
             app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
             app.inline_editor.begin(InlineEditorTarget::InfoConstant { sheet_id, name }, value_text);
@@ -890,13 +1078,61 @@ fn handle_pointer_down(
     }
 }
 
-fn handle_scene_pointer_down(app: &mut UiApp, sheet_id: &SheetId, scene_pt: PointPt) -> Result<UiEventOutcome, String> {
+fn handle_secondary_pointer_down(app: &mut UiApp, layout: &WorkspaceLayoutMap, logical_pos: [f64; 2]) -> UiEventOutcome {
+    match layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
+        WorkspaceHitTarget::GridXCell { row, subcol, .. } => {
+            app.grid.select_x_cell_sync(row, subcol);
+            app.grid.refresh_selection_stats(app.session.document());
+            app.interaction.context_menu_target = Some(String::from("grid"));
+            UiEventOutcome {
+                handled: true,
+                action: String::from("grid.context_menu"),
+                command_result: Some(json!({ "target": "grid", "row": row, "subcol": subcol, "selected_rows": app.grid.selected_rows })),
+                ..Default::default()
+            }
+        }
+        WorkspaceHitTarget::GridCell { sheet_id, coord, .. } => {
+            if let Some(ds) = app.session.document().data_sheet(&sheet_id) {
+                let existing = app.grid.all_selected_coords(ds);
+                if existing.is_empty() || (existing.len() == 1 && existing[0] != coord) {
+                    app.grid.select_single_sync(coord);
+                    app.grid.refresh_selection_stats(app.session.document());
+                    app.sync_brush_from_grid_selection(&sheet_id);
+                }
+            }
+            app.interaction.context_menu_target = Some(String::from("grid"));
+            UiEventOutcome {
+                handled: true,
+                action: String::from("grid.context_menu"),
+                command_result: Some(json!({ "target": "grid", "selected_rows": app.grid.selected_rows })),
+                ..Default::default()
+            }
+        }
+        WorkspaceHitTarget::ScenePaper { .. } => {
+            app.interaction.context_menu_target = Some(String::from("canvas"));
+            UiEventOutcome {
+                handled: true,
+                action: String::from("canvas.context_menu"),
+                command_result: Some(json!({ "target": "canvas", "brushed_count": app.brushed_points.len() })),
+                ..Default::default()
+            }
+        }
+        _ => UiEventOutcome { handled: false, action: String::from("secondary_click_ignored"), ..Default::default() },
+    }
+}
+
+fn handle_scene_pointer_down(app: &mut UiApp, sheet_id: &SheetId, scene_pt: PointPt, modifiers: KeyModifiers) -> Result<UiEventOutcome, String> {
     app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
 
     if let Some(ls) = app.session.document().layout_sheet(sheet_id) {
         let hit = app.canvas_dialogs.canvas.update_hover_layout(&ls.spec, scene_pt);
+        let target_info = match hit {
+            Some(CanvasHitTarget::PanelResizeHandle { index, corner }) => Some((index, Some(LayoutResizeHandle::from(corner)))),
+            Some(CanvasHitTarget::LayoutPanel { index } | CanvasHitTarget::EmbeddedTable { index }) => Some((index, None)),
+            _ => None,
+        };
         if app.canvas_dialogs.canvas.mode == CanvasToolMode::Select
-            && let Some(CanvasHitTarget::LayoutPanel { index } | CanvasHitTarget::PanelResizeHandle { index, .. }) = hit
+            && let Some((index, resize_handle)) = target_info
             && let Some(item) = ls.spec.items.get(index)
         {
             let bounds = layout_item_bounds(item);
@@ -906,6 +1142,8 @@ fn handle_scene_pointer_down(app: &mut UiApp, sheet_id: &SheetId, scene_pt: Poin
                 start_scene_pt: scene_pt,
                 initial_bounds_pt: bounds,
                 current_bounds_pt: bounds,
+                resize_handle,
+                preview_rect_pt: Some(bounds),
             });
             return Ok(UiEventOutcome { handled: true, action: String::from("layout.item_drag_start"), ..Default::default() });
         }
@@ -919,11 +1157,28 @@ fn handle_scene_pointer_down(app: &mut UiApp, sheet_id: &SheetId, scene_pt: Poin
     }
     if let Some(cell) = brushed {
         app.brushed_cell = Some(cell.clone());
+        if modifiers.shift || modifiers.ctrl || modifiers.meta {
+            if let Some(pos) = app.brushed_points.iter().position(|c| c == &cell) {
+                if app.brushed_points.len() > 1 {
+                    app.brushed_points.remove(pos);
+                }
+            } else {
+                app.brushed_points.push(cell.clone());
+            }
+        } else {
+            app.brushed_points = vec![cell.clone()];
+        }
         return Ok(UiEventOutcome {
             handled: true,
             action: String::from("canvas.brush_point"),
             command_id: Some(String::from("ui.brush.point")),
-            command_result: Some(json!({ "sheet_id": cell.sheet_id.as_str(), "row": cell.row, "col": cell.col, "subcol": cell.subcol })),
+            command_result: Some(json!({
+                "sheet_id": cell.sheet_id.as_str(),
+                "row": cell.row,
+                "col": cell.col,
+                "subcol": cell.subcol,
+                "brushed_count": app.brushed_points.len(),
+            })),
         });
     }
 
@@ -974,8 +1229,13 @@ fn handle_pointer_move(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
         if let WorkspaceHitTarget::GridCell { sheet_id, coord, .. } = layout.hit_test_physical(phys_x, phys_y)
             && sheet_id == drag_sheet
         {
-            app.grid.tool.extend_selection(coord);
+            if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
+                app.grid.extend_shift_range(&ds, coord);
+            } else {
+                app.grid.tool.extend_selection(coord);
+            }
             app.grid.refresh_selection_stats(app.session.document());
+            app.sync_brush_from_grid_selection(&sheet_id);
         }
         return UiEventOutcome { handled: true, action: String::from("grid.drag_select"), ..Default::default() };
     }
@@ -1010,20 +1270,37 @@ fn update_canvas_object_drag(app: &mut UiApp, layout: &WorkspaceLayoutMap, phys:
     };
 
     match &mut drag_target {
-        CanvasDragTarget::LayoutItem { sheet_id, item_index, start_scene_pt, initial_bounds_pt, current_bounds_pt } => {
-            let candidate = RectPt::new(
-                initial_bounds_pt.x + (scene_pt.x - start_scene_pt.x),
-                initial_bounds_pt.y + (scene_pt.y - start_scene_pt.y),
-                initial_bounds_pt.width,
-                initial_bounds_pt.height,
+        CanvasDragTarget::LayoutItem {
+            sheet_id,
+            item_index,
+            start_scene_pt,
+            initial_bounds_pt,
+            current_bounds_pt,
+            resize_handle,
+            preview_rect_pt,
+        } => {
+            let dx = scene_pt.x - start_scene_pt.x;
+            let dy = scene_pt.y - start_scene_pt.y;
+            let Some(ls) = app.document().layout_sheet(sheet_id) else {
+                let fallback = raw_layout_candidate(*initial_bounds_pt, dx, dy, *resize_handle);
+                *current_bounds_pt = fallback;
+                *preview_rect_pt = Some(fallback);
+                return drag_target;
+            };
+            let spec = ls.spec.clone();
+            let plot_origin_offsets = compute_layout_plot_origins(app, &spec);
+            let (snapped, guides) = compute_live_layout_drag_snap(
+                &app.canvas_dialogs.canvas,
+                &spec,
+                *item_index,
+                *initial_bounds_pt,
+                (dx, dy),
+                *resize_handle,
+                &plot_origin_offsets,
             );
-            if let Some(ls) = app.document().layout_sheet(sheet_id) {
-                let snap = app.canvas_dialogs.canvas.compute_layout_snap(&ls.spec, Some(*item_index), candidate.into(), &[]);
-                app.canvas_dialogs.canvas.active_snap_guides = snap.guides;
-                *current_bounds_pt = snap.snapped_bounds_pt.into();
-            } else {
-                *current_bounds_pt = candidate;
-            }
+            app.canvas_dialogs.canvas.active_snap_guides = guides;
+            *current_bounds_pt = snapped;
+            *preview_rect_pt = Some(snapped);
         }
         CanvasDragTarget::GraphAnnotation { start_scene_pt, initial_bounds_pt, current_bounds_pt, .. } => {
             let raw_x = initial_bounds_pt.x + (scene_pt.x - start_scene_pt.x);
@@ -1140,16 +1417,31 @@ fn handle_double_click(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
     if button != PointerButton::Primary {
         return UiEventOutcome { handled: false, action: String::from("double_click_ignored"), ..Default::default() };
     }
+    let initial_for = |cell: Option<&lumencraft_doc::Cell>| -> String {
+        cell.map_or_else(String::new, |cell| match &cell.value {
+            CellValue::Text(s) if s.starts_with('=') => s.clone(),
+            _ => format_cell_display(cell, &app.locale_preset),
+        })
+    };
     let layout = compute_workspace_layout_map(app, metrics);
     match layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
+        WorkspaceHitTarget::GridXCell { sheet_id, row, subcol } => {
+            app.grid.select_x_cell_sync(row, subcol);
+            app.focus_widget_id = Some(format!("grid.xcell.{row}.{subcol}"));
+            let is_generated = app
+                .document()
+                .data_sheet(&sheet_id)
+                .is_some_and(|ds| matches!(&ds.archetype, TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. })));
+            if is_generated {
+                return UiEventOutcome { handled: true, action: String::from("grid.x_cell_readonly"), ..Default::default() };
+            }
+            let initial_text = initial_for(app.document().data_sheet(&sheet_id).and_then(|ds| ds.x_or_time_cell(row, subcol)));
+            app.inline_editor.begin(InlineEditorTarget::GridXCell { sheet_id, row, subcol }, initial_text);
+            UiEventOutcome { handled: true, action: String::from("grid.x_inline_edit_begin"), ..Default::default() }
+        }
         WorkspaceHitTarget::GridCell { sheet_id, coord, .. } => {
-            app.grid.tool.select_single(coord);
-            let initial_text = app.document().data_sheet(&sheet_id).and_then(|ds| ds.cell(CellCoord::from(coord))).map_or_else(String::new, |cell| {
-                match &cell.value {
-                    CellValue::Text(s) if s.starts_with('=') => s.clone(),
-                    _ => format_cell_display(cell, &app.locale_preset),
-                }
-            });
+            app.grid.select_single_sync(coord);
+            let initial_text = initial_for(app.document().data_sheet(&sheet_id).and_then(|ds| ds.cell(CellCoord::from(coord))));
             app.inline_editor.begin(InlineEditorTarget::GridCell { sheet_id, coord }, initial_text);
             UiEventOutcome { handled: true, action: String::from("grid.inline_edit_begin"), ..Default::default() }
         }
@@ -1247,12 +1539,21 @@ fn sync_canvas_camera_from_inertia(app: &mut UiApp) {
     app.canvas_dialogs.canvas.pan_pt = PointPt::new(app.canvas_dialogs.pan_zoom.pan_pt[0], app.canvas_dialogs.pan_zoom.pan_pt[1]);
 }
 
+impl UiApp {
+    /// Advance active inertial pan coasting by `dt_sec` and synchronize canvas camera offsets.
+    pub fn tick_inertial_pan(&mut self, dt_sec: f64) -> bool {
+        let moving = self.canvas_dialogs.pan_zoom.step_inertia(dt_sec);
+        sync_canvas_camera_from_inertia(self);
+        moving
+    }
+}
+
 fn handle_text_input(app: &mut UiApp, text: &str) -> UiEventOutcome {
     if !app.inline_editor.active || text.is_empty() {
         return UiEventOutcome { handled: false, action: String::from("text_input_ignored"), ..Default::default() };
     }
     app.inline_editor.insert_text(text);
-    if matches!(app.inline_editor.target, Some(InlineEditorTarget::GridCell { .. })) {
+    if matches!(app.inline_editor.target, Some(InlineEditorTarget::GridCell { .. } | InlineEditorTarget::GridXCell { .. })) {
         app.grid.tool.editing_buffer = Some(app.inline_editor.buffer.clone());
     }
     UiEventOutcome { handled: true, action: String::from("inline_edit.text_input"), ..Default::default() }
@@ -1274,6 +1575,11 @@ fn handle_key_down(app: &mut UiApp, key: &str, modifiers: KeyModifiers) -> Resul
                 }
             }
         }
+    }
+
+    if app.canvas_dialogs.active_dialog != ActiveDialog::None && matches!(trimmed, "Escape" | "Esc") {
+        app.canvas_dialogs.close_dialog();
+        return Ok(UiEventOutcome { handled: true, action: String::from("dialog.cancelled"), ..Default::default() });
     }
 
     for candidate in build_shortcut_candidates(trimmed, modifiers) {
@@ -1349,6 +1655,287 @@ fn layout_item_bounds(item: &LayoutItem) -> RectPt {
     match item {
         LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => *bounds_pt,
     }
+}
+
+const MIN_LAYOUT_PANEL_DIM_PT: f64 = 18.0;
+
+fn raw_layout_candidate(initial: RectPt, dx: f64, dy: f64, resize_handle: Option<LayoutResizeHandle>) -> RectPt {
+    let Some(handle) = resize_handle else {
+        return RectPt::new(initial.x + dx, initial.y + dy, initial.width, initial.height);
+    };
+    let mut left = initial.x;
+    let mut right = initial.x + initial.width;
+    let mut top = initial.y;
+    let mut bottom = initial.y + initial.height;
+    if matches!(handle, LayoutResizeHandle::TopLeft | LayoutResizeHandle::Left | LayoutResizeHandle::BottomLeft) {
+        left = (initial.x + dx).min(right - MIN_LAYOUT_PANEL_DIM_PT);
+    }
+    if matches!(handle, LayoutResizeHandle::TopRight | LayoutResizeHandle::Right | LayoutResizeHandle::BottomRight) {
+        right = (initial.x + initial.width + dx).max(left + MIN_LAYOUT_PANEL_DIM_PT);
+    }
+    if matches!(handle, LayoutResizeHandle::TopLeft | LayoutResizeHandle::Top | LayoutResizeHandle::TopRight) {
+        top = (initial.y + dy).min(bottom - MIN_LAYOUT_PANEL_DIM_PT);
+    }
+    if matches!(handle, LayoutResizeHandle::BottomLeft | LayoutResizeHandle::Bottom | LayoutResizeHandle::BottomRight) {
+        bottom = (initial.y + initial.height + dy).max(top + MIN_LAYOUT_PANEL_DIM_PT);
+    }
+    RectPt::new(left, top, (right - left).max(MIN_LAYOUT_PANEL_DIM_PT), (bottom - top).max(MIN_LAYOUT_PANEL_DIM_PT))
+}
+
+fn compute_layout_plot_origins(app: &UiApp, spec: &LayoutSpec) -> Vec<(usize, PointPt)> {
+    let mut origins = Vec::new();
+    for (idx, item) in spec.items.iter().enumerate() {
+        let LayoutItem::LiveGraph { graph_sheet_id, bounds_pt, scale_percent, .. } = item else {
+            continue;
+        };
+        let Ok(sub) = app.session().render_sheet_scene(graph_sheet_id) else {
+            continue;
+        };
+        let pct = if scale_percent.is_finite() && *scale_percent > 0.0 { *scale_percent / 100.0 } else { 1.0 };
+        let fit = (bounds_pt.width / sub.width_pt.max(1.0)).min(bounds_pt.height / sub.height_pt.max(1.0));
+        let scale = (fit * pct).max(0.05);
+        origins.push((idx, PointPt::new(sub.plot_rect_pt.x * scale, sub.plot_rect_pt.y * scale)));
+    }
+    origins
+}
+
+fn compute_live_layout_drag_snap(
+    canvas: &lumencraft_tools::CanvasToolState,
+    spec: &LayoutSpec,
+    moving_index: usize,
+    initial: RectPt,
+    delta_pt: (f64, f64),
+    resize_handle: Option<LayoutResizeHandle>,
+    plot_origin_offsets: &[(usize, PointPt)],
+) -> (RectPt, Vec<SnapGuide>) {
+    let candidate = raw_layout_candidate(initial, delta_pt.0, delta_pt.1, resize_handle);
+    let sibling_plot_origins: Vec<PointPt> = plot_origin_offsets
+        .iter()
+        .filter(|(idx, _)| *idx != moving_index)
+        .filter_map(|(idx, off)| {
+            spec.items.get(*idx).map(|item| {
+                let b = layout_item_bounds(item);
+                PointPt::new(b.x + off.x, b.y + off.y)
+            })
+        })
+        .collect();
+
+    if let Some(handle) = resize_handle {
+        return snap_layout_resize(canvas, spec, moving_index, candidate, handle, &sibling_plot_origins);
+    }
+
+    let snap = canvas.compute_layout_snap(spec, Some(moving_index), candidate.into(), &sibling_plot_origins);
+    let mut snapped: RectPt = snap.snapped_bounds_pt.into();
+    let mut guides = snap.guides;
+
+    if spec.align_plot_origins
+        && let Some((_, own_off)) = plot_origin_offsets.iter().find(|(idx, _)| *idx == moving_index)
+    {
+        let page = spec.page_size_pt();
+        let tol = canvas.snap_tolerance_pt.max(0.0);
+        apply_plot_origin_axis_snap(
+            PlotOriginAxis {
+                orientation: SnapOrientation::Vertical,
+                candidate_coord: candidate.x,
+                own_off: own_off.x,
+                cross_span_pt: page.height,
+                tol,
+            },
+            &sibling_plot_origins,
+            &mut snapped.x,
+            &mut guides,
+        );
+        apply_plot_origin_axis_snap(
+            PlotOriginAxis {
+                orientation: SnapOrientation::Horizontal,
+                candidate_coord: candidate.y,
+                own_off: own_off.y,
+                cross_span_pt: page.width,
+                tol,
+            },
+            &sibling_plot_origins,
+            &mut snapped.y,
+            &mut guides,
+        );
+    }
+
+    (snapped, guides)
+}
+
+struct PlotOriginAxis {
+    orientation: SnapOrientation,
+    candidate_coord: f64,
+    own_off: f64,
+    cross_span_pt: f64,
+    tol: f64,
+}
+
+fn apply_plot_origin_axis_snap(axis: PlotOriginAxis, sibling_plot_origins: &[PointPt], snapped_coord: &mut f64, guides: &mut Vec<SnapGuide>) {
+    let vertical = axis.orientation == SnapOrientation::Vertical;
+    let Some((target, delta)) = nearest_plot_origin_coord(axis.candidate_coord + axis.own_off, sibling_plot_origins, vertical, axis.tol) else {
+        return;
+    };
+    let cur_delta = (*snapped_coord - axis.candidate_coord).abs();
+    let has_semantic_guide = guides.iter().any(|g| g.orientation == axis.orientation && g.source != SnapSource::Grid);
+    let coincident = ((*snapped_coord + axis.own_off) - target).abs() <= 0.01;
+    if !has_semantic_guide || delta.abs() < cur_delta {
+        *snapped_coord = target - axis.own_off;
+        guides.retain(|g| g.orientation != axis.orientation);
+        guides.push(SnapGuide {
+            orientation: axis.orientation,
+            position_pt: target,
+            span_start_pt: 0.0,
+            span_end_pt: axis.cross_span_pt,
+            source: SnapSource::PlotOrigin,
+        });
+    } else if coincident {
+        guides.push(SnapGuide {
+            orientation: axis.orientation,
+            position_pt: target,
+            span_start_pt: 0.0,
+            span_end_pt: axis.cross_span_pt,
+            source: SnapSource::PlotOrigin,
+        });
+    }
+}
+
+fn nearest_plot_origin_coord(coord: f64, origins: &[PointPt], vertical: bool, tol: f64) -> Option<(f64, f64)> {
+    let mut best: Option<(f64, f64)> = None;
+    for origin in origins {
+        let target = if vertical { origin.x } else { origin.y };
+        let delta = target - coord;
+        if delta.abs() <= tol && best.is_none_or(|(_, prev)| delta.abs() < prev.abs()) {
+            best = Some((target, delta));
+        }
+    }
+    best
+}
+
+fn snap_layout_resize(
+    canvas: &lumencraft_tools::CanvasToolState,
+    spec: &LayoutSpec,
+    moving_index: usize,
+    candidate: RectPt,
+    handle: LayoutResizeHandle,
+    sibling_plot_origins: &[PointPt],
+) -> (RectPt, Vec<SnapGuide>) {
+    let mut left = candidate.x;
+    let mut right = candidate.x + candidate.width;
+    let mut top = candidate.y;
+    let mut bottom = candidate.y + candidate.height;
+    let tol = canvas.snap_tolerance_pt.max(0.0);
+    let mut guides = Vec::new();
+    let page = spec.page_size_pt();
+
+    let (x_targets, y_targets) = collect_resize_targets(spec, moving_index, sibling_plot_origins, canvas.snap_to_grid, canvas.snap_grid_pt);
+    if matches!(handle, LayoutResizeHandle::TopLeft | LayoutResizeHandle::Left | LayoutResizeHandle::BottomLeft)
+        && let Some((pos, src)) = best_snap_target(left, &x_targets, tol)
+        && right - pos >= MIN_LAYOUT_PANEL_DIM_PT
+    {
+        left = pos;
+        guides.push(SnapGuide {
+            orientation: SnapOrientation::Vertical,
+            position_pt: pos,
+            span_start_pt: 0.0,
+            span_end_pt: page.height,
+            source: src,
+        });
+    }
+    if matches!(handle, LayoutResizeHandle::TopRight | LayoutResizeHandle::Right | LayoutResizeHandle::BottomRight)
+        && let Some((pos, src)) = best_snap_target(right, &x_targets, tol)
+        && pos - left >= MIN_LAYOUT_PANEL_DIM_PT
+    {
+        right = pos;
+        guides.push(SnapGuide {
+            orientation: SnapOrientation::Vertical,
+            position_pt: pos,
+            span_start_pt: 0.0,
+            span_end_pt: page.height,
+            source: src,
+        });
+    }
+    if matches!(handle, LayoutResizeHandle::TopLeft | LayoutResizeHandle::Top | LayoutResizeHandle::TopRight)
+        && let Some((pos, src)) = best_snap_target(top, &y_targets, tol)
+        && bottom - pos >= MIN_LAYOUT_PANEL_DIM_PT
+    {
+        top = pos;
+        guides.push(SnapGuide {
+            orientation: SnapOrientation::Horizontal,
+            position_pt: pos,
+            span_start_pt: 0.0,
+            span_end_pt: page.width,
+            source: src,
+        });
+    }
+    if matches!(handle, LayoutResizeHandle::BottomLeft | LayoutResizeHandle::Bottom | LayoutResizeHandle::BottomRight)
+        && let Some((pos, src)) = best_snap_target(bottom, &y_targets, tol)
+        && pos - top >= MIN_LAYOUT_PANEL_DIM_PT
+    {
+        bottom = pos;
+        guides.push(SnapGuide {
+            orientation: SnapOrientation::Horizontal,
+            position_pt: pos,
+            span_start_pt: 0.0,
+            span_end_pt: page.width,
+            source: src,
+        });
+    }
+
+    (RectPt::new(left, top, right - left, bottom - top), guides)
+}
+
+type SnapTargets = Vec<(f64, SnapSource)>;
+
+fn collect_resize_targets(
+    spec: &LayoutSpec,
+    moving_index: usize,
+    sibling_plot_origins: &[PointPt],
+    snap_to_grid: bool,
+    grid_pt: f64,
+) -> (SnapTargets, SnapTargets) {
+    let page = spec.page_size_pt();
+    let mut xs = vec![(0.0, SnapSource::PageEdge), (page.width * 0.5, SnapSource::PageCenter), (page.width, SnapSource::PageEdge)];
+    let mut ys = vec![(0.0, SnapSource::PageEdge), (page.height * 0.5, SnapSource::PageCenter), (page.height, SnapSource::PageEdge)];
+    for (idx, item) in spec.items.iter().enumerate() {
+        if idx == moving_index {
+            continue;
+        }
+        let b = layout_item_bounds(item);
+        xs.extend([(b.x, SnapSource::SiblingEdge), (b.x + b.width * 0.5, SnapSource::SiblingCenter), (b.x + b.width, SnapSource::SiblingEdge)]);
+        ys.extend([(b.y, SnapSource::SiblingEdge), (b.y + b.height * 0.5, SnapSource::SiblingCenter), (b.y + b.height, SnapSource::SiblingEdge)]);
+    }
+    if spec.align_plot_origins {
+        for origin in sibling_plot_origins {
+            if origin.x.is_finite() {
+                xs.push((origin.x, SnapSource::PlotOrigin));
+            }
+            if origin.y.is_finite() {
+                ys.push((origin.y, SnapSource::PlotOrigin));
+            }
+        }
+    }
+    if snap_to_grid && grid_pt.is_finite() && grid_pt > 0.0 {
+        let cols = (page.width / grid_pt).floor() as usize;
+        for c in 0..=cols.min(256) {
+            xs.push((c as f64 * grid_pt, SnapSource::Grid));
+        }
+        let rows = (page.height / grid_pt).floor() as usize;
+        for r in 0..=rows.min(256) {
+            ys.push((r as f64 * grid_pt, SnapSource::Grid));
+        }
+    }
+    (xs, ys)
+}
+
+fn best_snap_target(edge: f64, targets: &[(f64, SnapSource)], tol: f64) -> Option<(f64, SnapSource)> {
+    let mut best: Option<(f64, SnapSource, f64)> = None;
+    for &(pos, src) in targets {
+        let dist = (pos - edge).abs();
+        if dist <= tol && best.is_none_or(|(_, _, prev)| dist < prev) {
+            best = Some((pos, src, dist));
+        }
+    }
+    best.map(|(pos, src, _)| (pos, src))
 }
 
 fn set_layout_item_bounds(item: &mut LayoutItem, bounds: RectPt) {

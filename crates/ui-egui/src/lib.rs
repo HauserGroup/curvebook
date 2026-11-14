@@ -10,10 +10,14 @@ pub mod compositor;
 pub mod control_io;
 pub mod dialogs_canvas;
 pub mod grid_view;
+mod gui_actions;
 pub mod i18n;
+pub mod inspect;
 pub mod interaction;
 pub mod menus;
+pub mod modal_predicates;
 pub mod os_integration;
+pub mod power_wizard;
 pub mod theme;
 pub mod workspace_nav;
 
@@ -30,31 +34,38 @@ pub use compositor::{
     render_workspace_rgba,
 };
 pub use control_io::{
-    ControlLoopAction, ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_ui_command,
-    handle_control_line, handle_control_line_with_action, parse_control_port, serve_control_stream, serve_control_stream_with_quit,
+    ControlLoopAction, ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_gui_action,
+    dispatch_ui_command, handle_control_line, handle_control_line_with_action, parse_control_port, serve_control_stream,
+    serve_control_stream_with_quit,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use control_io::{bind_control_tcp_listener, run_control_tcp_server, serve_control_listener, validate_loopback_addr};
 pub use dialogs_canvas::{
-    ActiveDialog, AssumptionDiagnosticBanner, CanvasDialogState, ConvertArchetypeDialogState, ExcludeWithReasonDialogState, RemediationKind,
-    SplitWorkspaceState,
+    ActiveDialog, AssumptionDiagnosticBanner, CanvasDialogState, ConvertArchetypeDialogState, ExcludeWithReasonDialogState, PrintDialogState,
+    RemediationKind, SplitWorkspaceState,
 };
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use i18n::{LOCALES, LocalePreset, locale_display_name, normalize_locale, tr};
+pub use inspect::{UiTreeSnapshot, inspect_ui_tree};
 pub use interaction::{
     CanvasDragTarget, GridHitGeometry, InfoRowHitRect, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers,
-    NavigatorEntryHitRect, PointerButton, ScenePaperMapping, UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder,
-    WorkspaceHitTarget, WorkspaceLayoutMap, dispatch_ui_event,
+    LayoutResizeHandle, NavigatorEntryHitRect, PointerButton, ScenePaperMapping, UiEventOutcome, UiInputEvent, ViewportMetrics,
+    VirtualWorkspaceFolder, WorkspaceHitTarget, WorkspaceLayoutMap, dispatch_ui_event,
 };
 pub use menus::{
     CommandTooltip, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, TOOLBAR_BUTTONS, ToolbarButtonSpec,
     ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, menu_bar_tooltips, normalize_shortcut_combo, toolbar_caption_command_id,
     toolbar_tooltips,
 };
-pub use os_integration::{ClipboardBundle, OsAdapterAvailability, OsAdapterStatus};
+pub use modal_predicates::ControlEnablement;
+pub use os_integration::{
+    ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, build_cf_html_payload, discover_os_printers, open_os_print_preview_dialog,
+    open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
+};
 #[cfg(not(target_arch = "wasm32"))]
 pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
-pub use theme::{UiThemeMode, UiThemeSpec};
+pub use power_wizard::{PowerWizardStage, PowerWizardState};
+pub use theme::{FontBook, UiThemeMode, UiThemeSpec};
 pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 
 /// Whether the UI crate was compiled with bundled interface/document fonts enabled.
@@ -77,12 +88,15 @@ pub struct UiApp {
     pub locale_preset: i18n::LocalePreset,
     pub split: SplitWorkspaceState,
     pub brushed_cell: Option<SourceCellId>,
+    pub brushed_points: Vec<SourceCellId>,
     pub preview_filter: CanvasPreviewFilter,
     pub presentation_mode: bool,
     pub virtual_workspace: VirtualWorkspaceFolder,
     pub inline_editor: InlineEditorState,
     pub interaction: InteractionControllerState,
     pub hover_command_id: Option<String>,
+    pub focus_widget_id: Option<String>,
+    pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
 }
 
 impl Default for UiApp {
@@ -113,12 +127,15 @@ impl UiApp {
             locale_preset: i18n::LocalePreset::default(),
             split: SplitWorkspaceState::default(),
             brushed_cell: None,
+            brushed_points: Vec::new(),
             preview_filter: CanvasPreviewFilter::default(),
             presentation_mode: false,
             virtual_workspace: VirtualWorkspaceFolder::default(),
             inline_editor: InlineEditorState::default(),
             interaction: InteractionControllerState::default(),
             hover_command_id: None,
+            focus_widget_id: None,
+            power_wizards_by_sheet: std::collections::BTreeMap::new(),
         };
         app.sync_views();
         app
@@ -161,9 +178,29 @@ impl UiApp {
         self.session.document()
     }
 
-    /// Execute an engine command and refresh UI navigator and selection quick-statistics state.
+    /// Return whether strict `--gui-only` enforcement is active on the underlying [`Session`].
+    #[must_use]
+    pub fn is_gui_only(&self) -> bool {
+        self.session.gui_only() == lumencraft_engine::GuiOnlyPolicy::Strict
+    }
+
+    /// Enable or disable strict `--gui-only` enforcement on the underlying [`Session`].
+    pub fn set_gui_only(&mut self, gui_only: bool) {
+        let policy = if gui_only { lumencraft_engine::GuiOnlyPolicy::Strict } else { lumencraft_engine::GuiOnlyPolicy::Disabled };
+        self.session.set_gui_only(policy);
+    }
+
+    /// Execute an internal UI command (`Caller::Ui`) and refresh UI navigator and selection state.
     pub fn execute_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
-        let outcome = self.session.execute(command_id, params)?;
+        let outcome = self.session.execute_as_ui(command_id, params)?;
+        self.sync_views();
+        Ok(outcome)
+    }
+
+    /// Execute an external control-protocol command (`Caller::Control`) respecting `--gui-only` locks.
+    pub fn execute_control_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
+        let cancelled = std::sync::atomic::AtomicBool::new(false);
+        let outcome = self.session.execute_with_caller(command_id, params, lumencraft_engine::Caller::Control, &cancelled)?;
         self.sync_views();
         Ok(outcome)
     }
@@ -210,13 +247,28 @@ impl UiApp {
         interaction::dispatch_ui_event(self, event, metrics)
     }
 
-    /// Synchronize [`Self::brushed_cell`] from a grid cell selection (`QOL-5`).
+    /// Synchronize [`Self::brushed_cell`] and [`Self::brushed_points`] from a grid cell selection (`QOL-5`).
     pub fn brush_from_grid_cell(&mut self, data_sheet_id: &SheetId, coord: GridCellCoord) {
-        self.brushed_cell = Some(SourceCellId { sheet_id: data_sheet_id.clone(), row: coord.row, col: coord.col, subcol: coord.subcol });
+        let brushed = SourceCellId { sheet_id: data_sheet_id.clone(), row: coord.row, col: coord.col, subcol: coord.subcol };
+        self.brushed_cell = Some(brushed.clone());
+        self.brushed_points = vec![brushed];
+    }
+
+    /// Synchronize [`Self::brushed_cell`] and [`Self::brushed_points`] from all currently selected
+    /// rows/cells on `data_sheet_id` (`WF-22`).
+    pub fn sync_brush_from_grid_selection(&mut self, data_sheet_id: &SheetId) {
+        let Some(sheet) = self.session.document().data_sheet(data_sheet_id) else {
+            return;
+        };
+        let coords = self.grid.all_selected_coords(sheet);
+        let points: Vec<SourceCellId> =
+            coords.into_iter().map(|c| SourceCellId { sheet_id: data_sheet_id.clone(), row: c.row, col: c.col, subcol: c.subcol }).collect();
+        self.brushed_cell = points.first().cloned();
+        self.brushed_points = points;
     }
 
     /// Hit-test a graph/layout scene coordinate (`PointPt`) and mirror the matching data cell into
-    /// [`Self::brushed_cell`] (`QOL-5`).
+    /// [`Self::brushed_cell`] and [`Self::brushed_points`] (`QOL-5`).
     pub fn brush_point_from_graph_pt(&mut self, graph_sheet_id: &SheetId, scene_pt: PointPt, tolerance_pt: f64) -> Option<SourceCellId> {
         let scene = self.session.render_sheet_scene(graph_sheet_id).ok()?;
         let hit = scene.hit_test_point(scene_pt, tolerance_pt)?;
@@ -225,15 +277,99 @@ impl UiApp {
             && self.session.document().active_sheet_id.as_ref() == Some(&brushed.sheet_id)
         {
             let _ = ds;
-            self.grid.tool.select_single(GridCellCoord::new(brushed.row, brushed.col, brushed.subcol));
+            self.grid.select_single_sync(GridCellCoord::new(brushed.row, brushed.col, brushed.subcol));
         }
         self.brushed_cell = Some(brushed.clone());
+        self.brushed_points = vec![brushed.clone()];
         Some(brushed)
     }
 
     /// Clear any active data/graph point brush highlight (`QOL-5`).
     pub fn clear_brush(&mut self) {
         self.brushed_cell = None;
+        self.brushed_points.clear();
+    }
+
+    /// Open the interactive `Print...` dialog for the active (or first printable) sheet (`R5.4`).
+    pub fn open_print_dialog(&mut self) {
+        let active = self.session.document().active_sheet_id.clone();
+        self.open_print_dialog_for(active.as_ref());
+    }
+
+    /// Open the interactive `Print...` dialog targeting `sheet_id` (`R5.4`).
+    pub fn open_print_dialog_for(&mut self, sheet_id: Option<&SheetId>) {
+        let printers = os_integration::discover_os_printers();
+        self.canvas_dialogs.open_print_dialog(self.session.document(), sheet_id, printers);
+    }
+
+    /// Update desired print copy count (`1..=999`) inside `canvas_dialogs.print`.
+    pub fn update_print_dialog_copies(&mut self, copies: u16) -> u16 {
+        self.canvas_dialogs.print.update_copies(copies)
+    }
+
+    /// Select an OS printer queue name (`None` for host default) inside `canvas_dialogs.print`.
+    pub fn select_print_dialog_printer(&mut self, printer: Option<String>) {
+        self.canvas_dialogs.print.select_printer(printer);
+    }
+
+    /// Update print scale percentage (`10.0..=400.0`) inside `canvas_dialogs.print`.
+    pub fn update_print_dialog_scale(&mut self, scale_percent: f64) {
+        self.canvas_dialogs.print.set_scale_percent(scale_percent);
+    }
+
+    /// Toggle publication crop marks and optional bleed margin on `canvas_dialogs.print`.
+    pub fn update_print_dialog_crop_marks(&mut self, crop_marks: bool, bleed_pt: Option<f64>) {
+        self.canvas_dialogs.print.job.crop_marks = crop_marks;
+        if let Some(bleed) = bleed_pt
+            && bleed.is_finite()
+            && bleed >= 0.0
+        {
+            self.canvas_dialogs.print.job.bleed_pt = bleed;
+        }
+    }
+
+    /// Spool the active `PrintDialogState` into a physical-scale PDF and optionally submit to the OS spooler.
+    ///
+    /// # Errors
+    /// Returns an error if no printable sheet exists, PDF generation fails, or OS spool submission fails.
+    pub fn execute_print_dialog_spool(&mut self, submit_to_os: bool) -> Result<PrintSpoolOutput, String> {
+        let spool = self.canvas_dialogs.print.job.spool_pdf(&self.session)?;
+        self.canvas_dialogs.print.last_spool_bytes = spool.pdf_bytes.len();
+        let copies = self.canvas_dialogs.print.copies.clamp(1, 999);
+        if submit_to_os {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                let printer = self.canvas_dialogs.print.selected_printer.as_deref();
+                let status = os_integration::submit_os_print_job(&spool, printer)?;
+                self.canvas_dialogs.print.last_status =
+                    Some(format!("{} ({copies} copy/copies, {} page(s), {} bytes)", status.detail, spool.page_count, spool.pdf_bytes.len()));
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                self.canvas_dialogs.print.last_status =
+                    Some(format!("Spooled {} bytes ({copies} copy/copies); OS print queue unavailable on wasm32", spool.pdf_bytes.len()));
+            }
+        } else {
+            self.canvas_dialogs.print.last_status = Some(format!(
+                "Spooled {} bytes ({} page(s), {:.0}% scale, {copies} copy/copies)",
+                spool.pdf_bytes.len(),
+                spool.page_count,
+                spool.scale_percent
+            ));
+        }
+        Ok(spool)
+    }
+
+    /// Spool the active `PrintDialogState` and stage a `<title>.pdf` preview via [`open_os_print_preview_dialog_titled`].
+    ///
+    /// # Errors
+    /// Returns an error if spooling or staging fails.
+    pub fn preview_print_dialog_spool(&mut self) -> Result<OsAdapterStatus, String> {
+        let spool = self.execute_print_dialog_spool(false)?;
+        let title = self.canvas_dialogs.print.job.title.as_deref().unwrap_or("lumencraft-print");
+        let status = os_integration::open_os_print_preview_dialog_titled(&spool, title)?;
+        self.canvas_dialogs.print.last_status = Some(status.detail.clone());
+        Ok(status)
     }
 
     /// Preview a table archetype conversion cleanly via `table.convertArchetype` (`QOL-1`).
@@ -251,7 +387,7 @@ impl UiApp {
             .convert_archetype
             .preview_intent()
             .ok_or_else(|| String::from("no data sheet bound for archetype conversion preview"))?;
-        let outcome = self.session.execute(&intent.command_id, intent.params).map_err(|err| err.to_string())?;
+        let outcome = self.session.execute_as_ui(&intent.command_id, intent.params).map_err(|err| err.to_string())?;
         self.canvas_dialogs.convert_archetype.apply_preview_payload(&outcome.payload);
         self.canvas_dialogs.active_dialog = ActiveDialog::ConvertArchetype { sheet_id: sheet_id.clone() };
         Ok(())
@@ -342,7 +478,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 29);
+        assert_eq!(UI_COMMANDS.len(), 32);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",

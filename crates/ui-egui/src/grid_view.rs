@@ -721,6 +721,163 @@ impl ImportReshapeState {
             }
         }
     }
+
+    /// Patch `ImportReshape` dialog state from scripted GUI actions / text fields.
+    ///
+    /// # Errors
+    /// Returns an error if `mode`, `target_kind`, `delimiter`, `plate_values`, or `plate_roles` is invalid.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for key in ["mode", "import.mode", "reshape_mode"] {
+            if let Some(val) = fields.get(key) {
+                let raw = val.as_str().ok_or_else(|| String::from("`mode` must be a string"))?;
+                let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+                self.mode = match norm.as_str() {
+                    "plate96" | "plates96" | "wells96" | "96" => ImportReshapeMode::Plate96,
+                    "plate384" | "plates384" | "wells384" | "384" => ImportReshapeMode::Plate384,
+                    "tidylongpivot" | "tidylong" | "tidy" => ImportReshapeMode::TidyLongPivot,
+                    _ => return Err(format!("unsupported ImportReshape mode `{raw}`")),
+                };
+            }
+        }
+        for (key, val) in fields {
+            match key.as_str() {
+                "mode" | "import.mode" | "reshape_mode" => {}
+                "title" | "import.title" | "sheet_title" => {
+                    self.title = val.as_str().ok_or_else(|| String::from("`title` must be a string"))?.to_owned();
+                }
+                "target_kind" | "import.target_kind" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`target_kind` must be a string"))?;
+                    self.target_kind = crate::dialogs_canvas::parse_table_kind_str(raw)?;
+                }
+                "x_title" | "import.x_title" => {
+                    self.x_title = val.as_str().ok_or_else(|| String::from("`x_title` must be a string"))?.to_owned();
+                }
+                "subtract_blank_mean" | "import.subtract_blank_mean" => {
+                    self.subtract_blank_mean = val.as_bool().ok_or_else(|| String::from("`subtract_blank_mean` must be boolean"))?;
+                }
+                "tidy_csv" | "csv" | "import.tidy_csv" | "import.csv" => {
+                    self.tidy_csv = val.as_str().ok_or_else(|| String::from("`tidy_csv` must be a string"))?.to_owned();
+                }
+                "data" | "text" | "import.data" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`data` must be a string"))?;
+                    if self.mode == ImportReshapeMode::TidyLongPivot {
+                        self.tidy_csv = s.to_owned();
+                    } else {
+                        self.plate_values = parse_plate_values_text(s)?;
+                    }
+                }
+                "plate_values" | "values" | "import.plate_values" => {
+                    self.plate_values = parse_plate_values_json(val)?;
+                }
+                "plate_roles" | "roles" | "import.plate_roles" => {
+                    let arr = val.as_array().ok_or_else(|| String::from("`plate_roles` must be an array"))?;
+                    self.plate_roles = arr.clone();
+                }
+                "tidy_delimiter" | "delimiter" | "import.delimiter" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`delimiter` must be a string"))?;
+                    self.tidy_delimiter = match s.trim().to_ascii_lowercase().as_str() {
+                        "tab" | "\\t" | "\t" => '\t',
+                        "comma" | "," => ',',
+                        "semicolon" | ";" => ';',
+                        "pipe" | "|" => '|',
+                        _ => s.chars().next().ok_or_else(|| String::from("`delimiter` cannot be empty"))?,
+                    };
+                }
+                "decimal_separator" | "decimal_sep" | "import.decimal_separator" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`decimal_separator` must be a string"))?;
+                    self.decimal_separator = match s.trim() {
+                        "," => ',',
+                        "." => '.',
+                        _ => return Err(format!("unsupported decimal_separator `{s}`")),
+                    };
+                }
+                "x_col" | "import.x_col" => {
+                    self.x_col = opt_nonempty_string(val, key)?;
+                }
+                "group_col" | "import.group_col" => {
+                    self.group_col = val.as_str().ok_or_else(|| String::from("`group_col` must be a string"))?.to_owned();
+                }
+                "replicate_col" | "import.replicate_col" => {
+                    self.replicate_col = opt_nonempty_string(val, key)?;
+                }
+                "value_col" | "import.value_col" => {
+                    self.value_col = val.as_str().ok_or_else(|| String::from("`value_col` must be a string"))?.to_owned();
+                }
+                "excluded_col" | "import.excluded_col" => {
+                    self.excluded_col = opt_nonempty_string(val, key)?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+}
+
+fn opt_nonempty_string(val: &Value, field: &str) -> Result<Option<String>, String> {
+    if val.is_null() {
+        return Ok(None);
+    }
+    let s = val.as_str().ok_or_else(|| format!("`{field}` must be a string or null"))?.trim();
+    Ok((!s.is_empty()).then(|| s.to_owned()))
+}
+
+fn parse_plate_cell_token(tok: &str) -> Result<Option<f64>, String> {
+    let t = tok.trim();
+    if t.is_empty() || t.eq_ignore_ascii_case("na") || t.eq_ignore_ascii_case("null") || t == "-" {
+        return Ok(None);
+    }
+    t.parse::<f64>().ok().filter(|v| v.is_finite()).map(Some).ok_or_else(|| format!("invalid plate numeric token `{t}`"))
+}
+
+fn parse_plate_values_text(raw: &str) -> Result<Vec<Option<f64>>, String> {
+    let mut out = Vec::new();
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if trimmed.contains(',') || trimmed.contains('\t') || trimmed.contains(';') {
+            for cell in trimmed.split([',', '\t', ';']) {
+                out.push(parse_plate_cell_token(cell)?);
+            }
+        } else {
+            for cell in trimmed.split_whitespace() {
+                out.push(parse_plate_cell_token(cell)?);
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn parse_plate_values_json(val: &Value) -> Result<Vec<Option<f64>>, String> {
+    if let Some(s) = val.as_str() {
+        return parse_plate_values_text(s);
+    }
+    let arr = val.as_array().ok_or_else(|| String::from("`plate_values` must be an array or delimited string"))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for item in arr {
+        if let Some(inner) = item.as_array() {
+            for sub in inner {
+                out.push(parse_plate_scalar(sub)?);
+            }
+        } else {
+            out.push(parse_plate_scalar(item)?);
+        }
+    }
+    Ok(out)
+}
+
+fn parse_plate_scalar(val: &Value) -> Result<Option<f64>, String> {
+    if val.is_null() {
+        return Ok(None);
+    }
+    if let Some(f) = val.as_f64() {
+        return f.is_finite().then_some(Some(f)).ok_or_else(|| String::from("plate well value must be finite"));
+    }
+    if let Some(s) = val.as_str() {
+        return parse_plate_cell_token(s);
+    }
+    Err(String::from("plate well value must be a number, string, or null"))
 }
 
 fn target_kind_wire_name(kind: TableKind) -> &'static str {
@@ -954,6 +1111,13 @@ pub struct GridViewState {
     pub format_link_inspector: FormatLinkInspectorState,
     #[serde(default)]
     pub hover_exclusion_tooltip: Option<String>,
+    #[serde(default)]
+    pub selected_rows: Vec<usize>,
+    #[serde(default)]
+    pub selected_coords: Vec<GridCellCoord>,
+    /// Currently focused/active X (or Time) column cell `(row, subcol)` for XY / Survival sheets.
+    #[serde(default)]
+    pub active_x_cell: Option<(usize, usize)>,
 }
 
 impl GridViewState {
@@ -981,6 +1145,165 @@ impl GridViewState {
     pub fn update_hover_exclusion_tooltip(&mut self, sheet: &DataSheet, coord: Option<GridCellCoord>) -> Option<&str> {
         self.hover_exclusion_tooltip = coord.and_then(|c| Self::cell_exclusion_tooltip(sheet, c));
         self.hover_exclusion_tooltip.as_deref()
+    }
+
+    /// Clear multi-selection and select a single coordinate (`coord`).
+    pub fn select_single_sync(&mut self, coord: GridCellCoord) {
+        self.active_x_cell = None;
+        self.tool.select_single(coord);
+        self.selected_rows = vec![coord.row];
+        self.selected_coords = vec![coord];
+    }
+
+    /// Focus/select a single X-column (or Survival Time-column) cell at `(row, subcol)`.
+    pub fn select_x_cell_sync(&mut self, row: usize, subcol: usize) {
+        self.active_x_cell = Some((row, subcol));
+        self.tool.active = None;
+        self.tool.anchor = None;
+        self.selected_rows = vec![row];
+        self.selected_coords.clear();
+    }
+
+    /// Extend a contiguous rectangular / multi-row selection (`Shift+Click` or pointer drag).
+    pub fn extend_shift_range(&mut self, sheet: &DataSheet, coord: GridCellCoord) {
+        self.active_x_cell = None;
+        self.tool.extend_selection(coord);
+        self.selected_coords = self.selection_coords(sheet);
+        let mut rows: Vec<usize> = self.selected_coords.iter().map(|c| c.row).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        self.selected_rows = rows;
+    }
+
+    /// Toggle a cell coordinate in a discontiguous multi-selection (`Cmd/Ctrl+Click`).
+    pub fn toggle_cmd_selection(&mut self, sheet: &DataSheet, coord: GridCellCoord) {
+        self.active_x_cell = None;
+        let mut union = self.all_selected_coords(sheet);
+        if let Some(pos) = union.iter().position(|c| *c == coord) {
+            if union.len() > 1 {
+                union.remove(pos);
+            }
+        } else {
+            union.push(coord);
+        }
+        self.tool.active = Some(coord);
+        if self.tool.anchor.is_none() {
+            self.tool.anchor = Some(coord);
+        }
+        self.selected_coords = union;
+        self.sync_selected_rows_from_coords();
+    }
+
+    /// Select or toggle an entire row (across all data columns of `sheet`), supporting `Shift+Click`
+    /// range and `Cmd/Ctrl+Click` discontiguous multi-row selection (`WF-22`).
+    pub fn select_row_click(&mut self, sheet: &DataSheet, row: usize, shift: bool, command: bool) {
+        self.active_x_cell = None;
+        let max_row = sheet.archetype.row_count().saturating_sub(1);
+        let clamped_row = row.min(max_row);
+        let col_count = sheet.archetype.column_count().max(1);
+        let first_coord = GridCellCoord::new(clamped_row, 0, 0);
+        let last_col = col_count - 1;
+        let last_coord = GridCellCoord::new(clamped_row, last_col, 0);
+
+        if shift {
+            let anchor_row = self.tool.anchor.map_or(clamped_row, |a| a.row);
+            self.tool.select_single(GridCellCoord::new(anchor_row, 0, 0));
+            self.tool.extend_selection(last_coord);
+            let lo = anchor_row.min(clamped_row);
+            let hi = anchor_row.max(clamped_row);
+            self.selected_rows = (lo..=hi).collect();
+            self.selected_coords = self.selection_coords(sheet);
+        } else if command {
+            if let Some(pos) = self.selected_rows.iter().position(|&r| r == clamped_row) {
+                if self.selected_rows.len() > 1 {
+                    self.selected_rows.remove(pos);
+                    self.selected_coords.retain(|c| c.row != clamped_row);
+                }
+            } else {
+                if self.selected_coords.is_empty() {
+                    self.selected_coords = self.selection_coords(sheet);
+                }
+                self.selected_rows.push(clamped_row);
+                for col in 0..col_count {
+                    let c = GridCellCoord::new(clamped_row, col, 0);
+                    if !self.selected_coords.contains(&c) {
+                        self.selected_coords.push(c);
+                    }
+                }
+            }
+            self.selected_rows.sort_unstable();
+            self.selected_rows.dedup();
+            self.tool.active = Some(first_coord);
+            if self.tool.anchor.is_none() {
+                self.tool.anchor = Some(first_coord);
+            }
+        } else {
+            self.tool.select_single(first_coord);
+            self.tool.extend_selection(last_coord);
+            self.selected_rows = vec![clamped_row];
+            self.selected_coords = self.selection_coords(sheet);
+        }
+        self.refresh_selection_stats_slice(sheet);
+    }
+
+    fn sync_selected_rows_from_coords(&mut self) {
+        let mut rows: Vec<usize> = self.selected_coords.iter().map(|c| c.row).collect();
+        rows.sort_unstable();
+        rows.dedup();
+        self.selected_rows = rows;
+    }
+
+    fn refresh_selection_stats_slice(&mut self, sheet: &DataSheet) {
+        let coords = self.all_selected_coords(sheet);
+        let Some(first) = coords.first().copied() else {
+            return;
+        };
+        let total = coords.len();
+        if self.formula_bar.active {
+            self.formula_bar.open_for_column(sheet, first.col, None);
+        }
+        if let Some(ref mut qs) = self.quick_stats {
+            qs.selected_cells = total;
+        }
+    }
+
+    /// Return all currently selected [`GridCellCoord`] entries (combining rectangular range and
+    /// discontiguous `Cmd/Ctrl+Click` selections).
+    #[must_use]
+    pub fn all_selected_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
+        if !self.selected_coords.is_empty() {
+            let mut out = Vec::new();
+            for &c in &self.selected_coords {
+                if !out.contains(&c) {
+                    out.push(c);
+                }
+            }
+            return out;
+        }
+        self.selection_coords(sheet)
+    }
+
+    /// Map currently selected grid rows/cells into graph `(series_index, point_index)` targets.
+    #[must_use]
+    pub fn selected_graph_point_indices(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize)> {
+        let coords = self.all_selected_coords(sheet);
+        let mut out: Vec<(usize, usize)> = Vec::new();
+        for c in coords {
+            let series = if max_series == 0 { c.col } else { c.col.min(max_series - 1) };
+            let pair = (series, c.row);
+            if !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+        if out.is_empty() {
+            for &row in &self.selected_rows {
+                let pair = (0, row);
+                if !out.contains(&pair) {
+                    out.push(pair);
+                }
+            }
+        }
+        out
     }
 
     /// Expand the current rectangular selection into concrete [`GridCellCoord`] coordinates bounded to `sheet`.

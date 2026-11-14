@@ -6,12 +6,12 @@
 use lumencraft_chart::{ChartScene, PointPt, preflight_check_scene};
 use lumencraft_doc::{
     ChecklistStatus, DataSheet, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, LinkBorderColor, ProjectDocument, ResultSheet, SheetFolderKind,
-    SheetId, SheetSection, TableArchetype,
+    SheetId, SheetSection, TableArchetype, XColumnMode,
 };
 use lumencraft_palette::{CanvasPreviewFilter, Rgba8};
 use lumencraft_render::{RasterImage, RenderError, RenderTargetSpec, apply_canvas_preview_filter, encode_png, render_scene};
 use lumencraft_text::{TextDirection, reorder_visual_bidi};
-use lumencraft_tools::canvas::SnapOrientation;
+use lumencraft_tools::canvas::{CanvasHitTarget, SnapOrientation, SnapSource};
 use lumencraft_tools::{GridCellCoord, PhysicalUnit, build_ruler_ticks};
 use serde::{Deserialize, Serialize};
 
@@ -19,9 +19,10 @@ use crate::UiApp;
 use crate::dialogs_canvas::{
     ActiveDialog, ActiveInspector, AssumptionDiagnosticBanner, ResultSheetViewState, data_column_title, format_compact_f64, variable_role_color,
 };
-use crate::grid_view::resolve_flat_coord;
+use crate::grid_view::{format_cell_display, resolve_flat_coord};
 use crate::interaction::{
-    GridHitGeometry, InfoRowHitRect, InlineEditorTarget, NavigatorEntryHitRect, ScenePaperMapping, ViewportMetrics, WorkspaceLayoutMap,
+    CanvasDragTarget, GridHitGeometry, InfoRowHitRect, InlineEditorTarget, NavigatorEntryHitRect, ScenePaperMapping, ViewportMetrics,
+    WorkspaceLayoutMap,
 };
 use crate::workspace_nav::{ActiveWorkspacePane, PortfolioCard};
 
@@ -384,8 +385,14 @@ fn compute_grid_geometry(rect: WorkspacePixelRect, ds: &DataSheet, app: &UiApp, 
     let body_y = hdr_y + row_h + 4;
     let col_w = 72u32;
     let gutter_w = 34u32;
+    let (x_subcols, x_col_w) = match &ds.archetype {
+        TableArchetype::Xy(xy) => (xy.x_mode.subcolumn_count().max(1), 60u32),
+        TableArchetype::Survival(_) => (1, 60u32),
+        _ => (0, 0),
+    };
+    let x_total_w = u32::try_from(x_subcols).unwrap_or(0).saturating_mul(x_col_w);
 
-    let max_cols = (sheet_rect.width.saturating_sub(gutter_w + 8) / col_w).max(1) as usize;
+    let max_cols = (sheet_rect.width.saturating_sub(gutter_w + x_total_w + 8) / col_w).max(1) as usize;
     let max_rows = (sheet_rect.bottom().saturating_sub(body_y) / row_h) as usize;
     let visible_rows = max_rows.min(frame.window.end_row.saturating_sub(frame.window.start_row));
     let end_row = frame.window.start_row.saturating_add(visible_rows);
@@ -404,6 +411,8 @@ fn compute_grid_geometry(rect: WorkspacePixelRect, ds: &DataSheet, app: &UiApp, 
         row_h,
         gutter_w,
         col_w,
+        x_subcols,
+        x_col_w,
         start_row: frame.window.start_row,
         end_row,
         start_col: frame.window.start_col,
@@ -518,10 +527,63 @@ pub fn render_workspace_rgba(app: &UiApp, target: RenderTargetSpec) -> Result<Ra
     Ok(img)
 }
 
+/// Screenshot crop target supported by `ui.screenshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScreenshotRegionTarget {
+    #[default]
+    FullWindow,
+    Canvas,
+    Dialog,
+}
+
 /// Render the full application frame deterministically and encode it as PNG bytes (`ui.screenshot`).
 pub fn render_workspace_frame_png(app: &UiApp, target: RenderTargetSpec) -> Result<Vec<u8>, RenderError> {
     let image = render_workspace_rgba(app, target)?;
     encode_png(&image)
+}
+
+/// Render either the full window, active canvas region, or active modal overlay to PNG bytes and dimensions.
+///
+/// # Errors
+/// Returns [`RenderError`] if dimensions are invalid, the requested modal region is not open, or PNG encoding fails.
+pub fn render_workspace_region_png(
+    app: &UiApp,
+    target: RenderTargetSpec,
+    region: ScreenshotRegionTarget,
+) -> Result<(Vec<u8>, u32, u32), RenderError> {
+    let image = render_workspace_rgba(app, target)?;
+    let layout = compute_workspace_layout(app, image.width_px, image.height_px);
+    let crop = match region {
+        ScreenshotRegionTarget::FullWindow => WorkspacePixelRect::new(0, 0, image.width_px, image.height_px),
+        ScreenshotRegionTarget::Canvas => layout.canvas,
+        ScreenshotRegionTarget::Dialog => layout
+            .modal_overlay
+            .ok_or_else(|| RenderError::InvalidTarget { message: String::from("cannot capture `dialog` screenshot when no modal dialog is open") })?,
+    };
+    let sub = crop_raster_image(&image, crop)?;
+    let bytes = encode_png(&sub)?;
+    Ok((bytes, sub.width_px, sub.height_px))
+}
+
+fn crop_raster_image(src: &RasterImage, rect: WorkspacePixelRect) -> Result<RasterImage, RenderError> {
+    let x0 = rect.x.min(src.width_px.saturating_sub(1));
+    let y0 = rect.y.min(src.height_px.saturating_sub(1));
+    let w = rect.width.min(src.width_px.saturating_sub(x0)).max(1);
+    let h = rect.height.min(src.height_px.saturating_sub(y0)).max(1);
+    if w == src.width_px && h == src.height_px && x0 == 0 && y0 == 0 {
+        return Ok(src.clone());
+    }
+    let mut out = RasterImage::new(w, h, src.dpi, Rgba8::TRANSPARENT)?;
+    for row in 0..h {
+        let src_start = ((y0 + row) as usize * src.width_px as usize + x0 as usize) * 4;
+        let src_end = src_start + (w as usize) * 4;
+        let dst_start = (row as usize * w as usize) * 4;
+        let dst_end = dst_start + (w as usize) * 4;
+        if let (Some(src_slice), Some(dst_slice)) = (src.rgba.get(src_start..src_end), out.rgba.get_mut(dst_start..dst_end)) {
+            dst_slice.copy_from_slice(src_slice);
+        }
+    }
+    Ok(out)
 }
 
 fn draw_toolbar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
@@ -1059,6 +1121,7 @@ fn draw_scene_viewport(img: &mut RasterImage, rect: WorkspacePixelRect, app: &Ui
 
     if !app.presentation_mode {
         draw_snap_guides(img, paper, app, &geom.paper_mapping, pal);
+        draw_live_canvas_drag_and_handles(img, paper, app, sheet_id, &geom.paper_mapping, pal);
 
         if matches!(
             (&app.inline_editor.active, &app.inline_editor.target),
@@ -1153,11 +1216,13 @@ fn draw_brushed_point_highlights(
     mapping: &ScenePaperMapping,
     pal: &FramePalette,
 ) {
-    let Some(brushed) = &app.brushed_cell else {
+    if app.brushed_cell.is_none() && app.brushed_points.is_empty() {
         return;
-    };
+    }
     for meta in &scene.plotted_points {
-        if &meta.source_cell != brushed {
+        let is_primary = app.brushed_cell.as_ref() == Some(&meta.source_cell);
+        let is_multi = app.brushed_points.iter().any(|p| p == &meta.source_cell);
+        if !is_primary && !is_multi {
             continue;
         }
         let Some([fx, fy]) = mapping.scene_pt_to_pixel(meta.center_pt) else {
@@ -1180,6 +1245,10 @@ fn draw_brushed_point_highlights(
 
 fn draw_snap_guides(img: &mut RasterImage, paper: WorkspacePixelRect, app: &UiApp, mapping: &ScenePaperMapping, pal: &FramePalette) {
     for guide in &app.canvas_dialogs.canvas.active_snap_guides {
+        let guide_color = match guide.source {
+            SnapSource::PlotOrigin => Rgba8::rgb(220, 38, 38),
+            _ => pal.accent,
+        };
         match guide.orientation {
             SnapOrientation::Vertical => {
                 if let (Some([px, sy]), Some([_, ey])) = (
@@ -1189,7 +1258,7 @@ fn draw_snap_guides(img: &mut RasterImage, paper: WorkspacePixelRect, app: &UiAp
                     let x = clamp_to_u32(px, paper.x, paper.right().saturating_sub(1));
                     let y0 = clamp_to_u32(sy.min(ey), paper.y, paper.bottom());
                     let y1 = clamp_to_u32(sy.max(ey), paper.y, paper.bottom());
-                    fill_rect(img, WorkspacePixelRect::new(x, y0, 1, y1.saturating_sub(y0)), pal.accent);
+                    fill_rect(img, WorkspacePixelRect::new(x, y0, 1, y1.saturating_sub(y0)), guide_color);
                 }
             }
             SnapOrientation::Horizontal => {
@@ -1200,10 +1269,82 @@ fn draw_snap_guides(img: &mut RasterImage, paper: WorkspacePixelRect, app: &UiAp
                     let y = clamp_to_u32(py, paper.y, paper.bottom().saturating_sub(1));
                     let x0 = clamp_to_u32(sx.min(ex), paper.x, paper.right());
                     let x1 = clamp_to_u32(sx.max(ex), paper.x, paper.right());
-                    fill_rect(img, WorkspacePixelRect::new(x0, y, x1.saturating_sub(x0), 1), pal.accent);
+                    fill_rect(img, WorkspacePixelRect::new(x0, y, x1.saturating_sub(x0), 1), guide_color);
                 }
             }
         }
+    }
+}
+
+fn draw_live_canvas_drag_and_handles(
+    img: &mut RasterImage,
+    paper: WorkspacePixelRect,
+    app: &UiApp,
+    sheet_id: &SheetId,
+    mapping: &ScenePaperMapping,
+    pal: &FramePalette,
+) {
+    let preview_bounds = match &app.interaction.canvas_drag {
+        Some(CanvasDragTarget::LayoutItem { sheet_id: drag_sheet, current_bounds_pt, preview_rect_pt, .. }) if drag_sheet == sheet_id => {
+            Some(preview_rect_pt.unwrap_or(*current_bounds_pt))
+        }
+        Some(CanvasDragTarget::GraphAnnotation { sheet_id: drag_sheet, current_bounds_pt, .. }) if drag_sheet == sheet_id => Some(*current_bounds_pt),
+        _ => None,
+    };
+
+    if let Some(bounds_pt) = preview_bounds
+        && let Some(rect_px) = scene_rect_to_paper_px(bounds_pt, paper, mapping)
+    {
+        stroke_rect(img, rect_px, pal.accent);
+        draw_resize_handle_grips(img, rect_px, pal.accent);
+        return;
+    }
+
+    if let Some(ls) = app.document().layout_sheet(sheet_id)
+        && let Some(
+            CanvasHitTarget::LayoutPanel { index } | CanvasHitTarget::PanelResizeHandle { index, .. } | CanvasHitTarget::EmbeddedTable { index },
+        ) = app.canvas_dialogs.canvas.hover_target
+        && let Some(item) = ls.spec.items.get(index)
+    {
+        let bounds_pt = match item {
+            LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => {
+                *bounds_pt
+            }
+        };
+        if let Some(rect_px) = scene_rect_to_paper_px(bounds_pt, paper, mapping) {
+            stroke_rect(img, rect_px, pal.accent);
+            draw_resize_handle_grips(img, rect_px, pal.accent);
+        }
+    }
+}
+
+fn scene_rect_to_paper_px(bounds: lumencraft_doc::RectPt, paper: WorkspacePixelRect, mapping: &ScenePaperMapping) -> Option<WorkspacePixelRect> {
+    let [x0, y0] = mapping.scene_pt_to_pixel(PointPt::new(bounds.x, bounds.y))?;
+    let [x1, y1] = mapping.scene_pt_to_pixel(PointPt::new(bounds.x + bounds.width, bounds.y + bounds.height))?;
+    let px = clamp_to_u32(x0.min(x1), paper.x, paper.right().saturating_sub(1));
+    let py = clamp_to_u32(y0.min(y1), paper.y, paper.bottom().saturating_sub(1));
+    let pr = clamp_to_u32(x0.max(x1), px.saturating_add(2), paper.right());
+    let pb = clamp_to_u32(y0.max(y1), py.saturating_add(2), paper.bottom());
+    Some(WorkspacePixelRect::new(px, py, pr.saturating_sub(px), pb.saturating_sub(py)))
+}
+
+fn draw_resize_handle_grips(img: &mut RasterImage, rect: WorkspacePixelRect, accent: Rgba8) {
+    let mid_x = rect.x.saturating_add(rect.width / 2);
+    let mid_y = rect.y.saturating_add(rect.height / 2);
+    let points = [
+        (rect.x, rect.y),
+        (mid_x, rect.y),
+        (rect.right(), rect.y),
+        (rect.right(), mid_y),
+        (rect.right(), rect.bottom()),
+        (mid_x, rect.bottom()),
+        (rect.x, rect.bottom()),
+        (rect.x, mid_y),
+    ];
+    for (hx, hy) in points {
+        let grip = WorkspacePixelRect::new(hx.saturating_sub(2), hy.saturating_sub(2), 5, 5);
+        fill_rect(img, grip, Rgba8::WHITE);
+        stroke_rect(img, grip, accent);
     }
 }
 
@@ -1284,6 +1425,27 @@ fn draw_data_grid(img: &mut RasterImage, rect: WorkspacePixelRect, ds: &DataShee
     let hash_x = sheet_rect.x.saturating_add(crate::i18n::mirror_x_for_rtl(0, geom.gutter_w, sheet_rect.width, is_rtl));
     draw_text_5x7(img, hash_x + 8, geom.hdr_y + 5, "#", pal.muted);
 
+    for subcol in 0..geom.x_subcols {
+        let Some(hdr) = geom.x_header_rect(subcol) else {
+            continue;
+        };
+        stroke_rect(img, hdr, pal.border);
+        let x_label = match &ds.archetype {
+            TableArchetype::Xy(xy) => match subcol {
+                0 if xy.x_title.is_empty() => "X",
+                0 => xy.x_title.as_str(),
+                1 => "X+/-",
+                _ => "XN",
+            },
+            TableArchetype::Survival(_) => "Time",
+            _ => "X",
+        };
+        draw_text_clipped_dir(
+            img,
+            DrawTextClipped { x: hdr.x + 4, y: hdr.y + 5, text: x_label, color: pal.text, max_width_px: hdr.width.saturating_sub(6), rtl: is_rtl },
+        );
+    }
+
     for (vis_idx, (g_idx, _)) in geom.visible_cols.iter().enumerate() {
         #[allow(clippy::cast_possible_truncation)]
         let hdr = geom.column_header_rect(vis_idx as u32);
@@ -1316,11 +1478,12 @@ fn draw_data_grid(img: &mut RasterImage, rect: WorkspacePixelRect, ds: &DataShee
         }
     }
 
-    draw_visible_grid_cells(img, &geom, &frame.cells, app, pal);
+    draw_visible_grid_cells(img, ds, &geom, &frame.cells, app, pal);
 }
 
 fn draw_visible_grid_cells(
     img: &mut RasterImage,
+    ds: &DataSheet,
     geom: &GridHitGeometry,
     cells: &[lumencraft_tools::grid::VisibleCellView],
     app: &UiApp,
@@ -1336,6 +1499,49 @@ fn draw_visible_grid_cells(
         fill_rect(img, WorkspacePixelRect::new(sheet_rect.x + 1, gutter.y + geom.row_h - 1, sheet_rect.width.saturating_sub(2), 1), pal.border);
     }
 
+    let is_generated_x = matches!(&ds.archetype, TableArchetype::Xy(xy) if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }));
+    for row in geom.start_row..geom.end_row {
+        for subcol in 0..geom.x_subcols {
+            let Some(cell_rect) = geom.x_cell_rect(row, subcol) else {
+                continue;
+            };
+            let is_active = app.grid.active_x_cell == Some((row, subcol));
+            let is_inline_edited = matches!(
+                (&app.inline_editor.active, &app.inline_editor.target),
+                (true, Some(InlineEditorTarget::GridXCell { sheet_id, row: r, subcol: s }))
+                    if sheet_id == &geom.sheet_id && *r == row && *s == subcol
+            );
+            if is_active || is_inline_edited {
+                fill_rect(img, cell_rect, shift_luma(pal.surface, -10));
+                stroke_rect(img, cell_rect, pal.accent);
+            }
+            let (raw_text, fg) = if is_inline_edited {
+                (app.inline_editor.buffer.clone(), pal.text)
+            } else if is_generated_x {
+                let text = match &ds.archetype {
+                    TableArchetype::Xy(xy) => xy.x_value_at(row).map_or_else(String::new, format_compact_f64),
+                    _ => String::new(),
+                };
+                (text, pal.muted)
+            } else if let Some(cell) = ds.x_or_time_cell(row, subcol) {
+                (format_cell_display(cell, &app.locale_preset), if cell.excluded { pal.excluded } else { pal.text })
+            } else {
+                (String::new(), pal.text)
+            };
+            draw_text_clipped_dir(
+                img,
+                DrawTextClipped {
+                    x: cell_rect.x + 4,
+                    y: cell_rect.y + 5,
+                    text: &raw_text,
+                    color: fg,
+                    max_width_px: cell_rect.width.saturating_sub(6),
+                    rtl: geom.is_rtl,
+                },
+            );
+        }
+    }
+
     for cell in cells {
         let Some(cell_rect) = geom.cell_rect(cell.coord.row, cell.flat_col) else {
             continue;
@@ -1343,7 +1549,11 @@ fn draw_visible_grid_cells(
         let is_brushed = app
             .brushed_cell
             .as_ref()
-            .is_some_and(|b| b.sheet_id == geom.sheet_id && b.row == cell.coord.row && b.col == cell.coord.col && b.subcol == cell.coord.subcol);
+            .is_some_and(|b| b.sheet_id == geom.sheet_id && b.row == cell.coord.row && b.col == cell.coord.col && b.subcol == cell.coord.subcol)
+            || app
+                .brushed_points
+                .iter()
+                .any(|b| b.sheet_id == geom.sheet_id && b.row == cell.coord.row && b.col == cell.coord.col && b.subcol == cell.coord.subcol);
         let is_inline_edited = matches!(
             (&app.inline_editor.active, &app.inline_editor.target),
             (true, Some(InlineEditorTarget::GridCell { sheet_id, coord })) if sheet_id == &geom.sheet_id && *coord == cell.coord
@@ -1354,7 +1564,7 @@ fn draw_visible_grid_cells(
         } else if cell.is_selected {
             fill_rect(img, cell_rect, shift_luma(pal.surface, -10));
         }
-        if is_inline_edited || cell.is_active {
+        if is_inline_edited || (cell.is_active && app.grid.active_x_cell.is_none()) {
             stroke_rect(img, cell_rect, pal.accent);
         } else if is_brushed {
             stroke_rect(img, cell_rect, pal.link_blue);
@@ -1777,6 +1987,47 @@ fn draw_modal_overlay(img: &mut RasterImage, backdrop: WorkspacePixelRect, modal
             DrawTextClipped { x: modal.x + 12, y: ly, text: &line, color: pal.text, max_width_px: modal.width.saturating_sub(24), rtl: is_rtl },
         );
     }
+
+    if app.canvas_dialogs.active_dialog == ActiveDialog::PowerAndSampleSize
+        && app.canvas_dialogs.power_wizard.stage == crate::power_wizard::PowerWizardStage::Results
+    {
+        draw_power_wizard_curve_preview(img, modal, body_y.saturating_add(72), app, pal);
+    }
+}
+
+fn draw_power_wizard_curve_preview(img: &mut RasterImage, modal: WorkspacePixelRect, top_y: u32, app: &UiApp, pal: &FramePalette) {
+    let Some(res) = app.canvas_dialogs.power_wizard.result.as_ref() else {
+        return;
+    };
+    if res.power_curve.len() < 2 || top_y + 36 >= modal.bottom() {
+        return;
+    }
+    let plot_h = (modal.bottom().saturating_sub(top_y + 12)).min(84);
+    let plot_w = modal.width.saturating_sub(28);
+    let plot = WorkspacePixelRect::new(modal.x + 14, top_y, plot_w, plot_h);
+    fill_rect(img, plot, pal.surface);
+    stroke_rect(img, plot, pal.border);
+
+    let n_lo = res.power_curve.first().map_or(2.0, |p| p.n);
+    let n_hi = res.power_curve.last().map_or(n_lo + 1.0, |p| p.n).max(n_lo + 1e-6);
+    for pt in &res.power_curve {
+        let fx = ((pt.n - n_lo) / (n_hi - n_lo)).clamp(0.0, 1.0);
+        let fy = (1.0 - pt.power.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = plot.x + (fx * f64::from(plot.width.saturating_sub(6))).round() as u32 + 2;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let py = plot.y + (fy * f64::from(plot.height.saturating_sub(6))).round() as u32 + 2;
+        fill_rect(img, WorkspacePixelRect::new(px.saturating_sub(1), py.saturating_sub(1), 3, 3), pal.accent);
+    }
+    if let (Some(hn), Some(hp)) = (app.canvas_dialogs.power_wizard.hover_n, app.canvas_dialogs.power_wizard.hover_power) {
+        let fx = ((hn - n_lo) / (n_hi - n_lo)).clamp(0.0, 1.0);
+        let fy = (1.0 - hp.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let px = plot.x + (fx * f64::from(plot.width.saturating_sub(6))).round() as u32 + 2;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let py = plot.y + (fy * f64::from(plot.height.saturating_sub(6))).round() as u32 + 2;
+        fill_rect(img, WorkspacePixelRect::new(px.saturating_sub(3), py.saturating_sub(3), 7, 7), pal.link_red);
+    }
 }
 
 fn modal_title(dialog: &ActiveDialog) -> &'static str {
@@ -1799,6 +2050,9 @@ fn modal_title(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::ConvertArchetype { .. } => "Convert Table Archetype...",
         ActiveDialog::ImportReshape => "Import Reshape (Plate Map / Tidy Long)",
         ActiveDialog::ExcludeWithReason { .. } => "Exclude Selection with Reason",
+        ActiveDialog::FormatSelectedPoints { .. } => "Format Selected Points...",
+        ActiveDialog::PowerAndSampleSize => "Power and Sample Size",
+        ActiveDialog::Print { .. } => "Print...",
         ActiveDialog::CommandPalette => "Command Palette (Cmd+K)",
         ActiveDialog::About => "About LumenCraft",
     }
@@ -1807,6 +2061,19 @@ fn modal_title(dialog: &ActiveDialog) -> &'static str {
 fn modal_preview_lines(app: &UiApp) -> Vec<String> {
     let state = &app.canvas_dialogs;
     match &state.active_dialog {
+        ActiveDialog::PowerAndSampleSize => {
+            let mut lines = vec![format!("Stage: {}", state.power_wizard.stage.label())];
+            lines.extend(state.power_wizard.summary_lines());
+            lines
+        }
+        ActiveDialog::FormatSelectedPoints { .. } => {
+            let fp = &state.format_points;
+            vec![
+                format!("Points selected: {}", fp.selected_points.len()),
+                format!("Color: {} | Symbol: {}", fp.color.as_deref().unwrap_or("keep"), fp.symbol.as_deref().unwrap_or("keep")),
+                format!("Show row labels: {} | Clear: {}", fp.show_row_labels, fp.clear_overrides),
+            ]
+        }
         ActiveDialog::AnalyzeSheet { .. } => {
             let mut rows = vec![format!("Search: {}", state.analyze.search_query)];
             for item in state.analyze.compatible_entries().into_iter().take(5) {
@@ -1846,6 +2113,20 @@ fn modal_preview_lines(app: &UiApp) -> Vec<String> {
                 format!("Note: {}", state.exclude_with_reason.note),
                 format!("Cells selected: {}", state.exclude_with_reason.coords.len()),
             ]
+        }
+        ActiveDialog::Print { sheet_id } => {
+            let p = &state.print;
+            let printer_label = p.selected_printer.as_deref().unwrap_or("System Default");
+            let sheet_label = sheet_id.as_ref().map(SheetId::as_str).or_else(|| p.job.sheet_ids.first().map(SheetId::as_str)).unwrap_or("None");
+            let mut lines = vec![
+                format!("Sheet: {sheet_label} | Copies: {} | Scale: {:.0}%", p.copies, p.job.scale_percent),
+                format!("Printer: {printer_label} ({} queue(s) found)", p.discovered_printers.len()),
+                format!("Crop marks: {} | Spool bytes: {}", p.job.crop_marks, p.last_spool_bytes),
+            ];
+            if let Some(status) = &p.last_status {
+                lines.push(format!("Status: {status}"));
+            }
+            lines
         }
         _ => vec![String::from("Active scientific dialog ready")],
     }

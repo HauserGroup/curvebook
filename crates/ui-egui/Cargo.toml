@@ -23,6 +23,7 @@ lumencraft-palette = { workspace = true }
 lumencraft-pdf = { workspace = true }
 lumencraft-platform = { workspace = true }
 lumencraft-render = { workspace = true }
+lumencraft-stats = { workspace = true }
 lumencraft-svg = { workspace = true }
 lumencraft-text = { workspace = true }
 lumencraft-tools = { workspace = true }
