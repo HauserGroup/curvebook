@@ -2,21 +2,22 @@
 #![forbid(unsafe_code)]
 
 use lumencraft_ui_egui::UiApp;
-use lumencraft_ui_egui::theme::install_fonts;
+use lumencraft_web::WebWorkspaceHost;
 
-/// Construct and initialize the browser WASM shell without any host OS, filesystem, or socket calls.
+/// Construct and initialize the browser WASM host without any host OS, filesystem, or socket calls.
+#[must_use]
+pub fn init_web_host() -> WebWorkspaceHost {
+    WebWorkspaceHost::new()
+}
+
+/// Construct and initialize the browser WASM [`UiApp`] without any host OS, filesystem, or socket calls.
 #[must_use]
 pub fn init_web_app() -> UiApp {
-    let _fonts_loaded = install_fonts();
-    let _ = lumencraft_ui_egui::bundled_fonts_enabled();
-    let _ = lumencraft_format::EXTENSION;
-    let mut app = UiApp::new();
-    app.sync_views();
-    app
+    init_web_host().app().clone()
 }
 
 fn main() {
-    let _app = init_web_app();
+    let _host = init_web_host();
 }
 
 #[cfg(test)]

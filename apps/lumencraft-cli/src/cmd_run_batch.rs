@@ -3,15 +3,17 @@
 use std::fs;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::AtomicBool;
 
 use lumencraft_doc::ProjectDocument;
 use lumencraft_engine::Session;
+use lumencraft_engine::cmd::Caller;
 use lumencraft_format::instantiate_template_bytes;
 use lumencraft_pdf::PdfVersion;
 use serde_json::{Map, Value, json};
 
 use crate::cmd_convert::{
-    ExportFormat, ExportRequest, detect_export_format_from_path, export_from_document, load_project_from_bytes, load_validated_ttf_font,
+    ExportFormat, ExportRequest, detect_export_format_from_path, export_from_document, load_project_from_path, load_validated_ttf_font,
     parse_export_format, parse_pdf_version,
 };
 use crate::error::CliError;
@@ -390,8 +392,7 @@ fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<Session, CliE
         return Ok(Session::from_document(doc));
     }
     if let Some(proj_path) = &manifest.project_path {
-        let bytes = fs::read(proj_path).map_err(|err| CliError::Runtime(format!("failed to read project `{}`: {err}", proj_path.display())))?;
-        let loaded = load_project_from_bytes(proj_path, &bytes, false)?;
+        let (loaded, _bytes) = load_project_from_path(proj_path, false)?;
         return Ok(Session::from_document(loaded.doc));
     }
     Ok(Session::new())
@@ -447,9 +448,8 @@ fn execute_commands(session: &mut Session, commands: &[ParsedCommand], ensure_ou
         if ensure_output_parents && is_file_write_command(&entry.cmd) {
             ensure_parent_dir_exists(&params)?;
         }
-        let outcome = session
-            .execute(&entry.cmd, params)
-            .map_err(|err| CliError::Runtime(format!("command #{} (`{}`) failed: {err}", entry.index + 1, entry.cmd)))?;
+        let cancelled = AtomicBool::new(false);
+        let outcome = session.execute_with_caller(&entry.cmd, params, Caller::Cli, &cancelled)?;
         results.push(json!({
             "index": entry.index,
             "id": entry.id,
@@ -483,8 +483,19 @@ fn is_file_write_command(cmd: &str) -> bool {
             | "analysis.exportCsv"
             | "export.svg"
             | "export.pdf"
+            | "export.emf"
             | "export.png"
             | "export.tiff"
+            | "graph.exportEmf"
+            | "graph.exportSvg"
+            | "graph.exportPdf"
+            | "graph.exportPng"
+            | "graph.exportTiff"
+            | "layout.exportEmf"
+            | "layout.exportSvg"
+            | "layout.exportPdf"
+            | "layout.exportPng"
+            | "layout.exportTiff"
     )
 }
 

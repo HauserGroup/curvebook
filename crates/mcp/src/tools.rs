@@ -1,40 +1,37 @@
 //! MCP tool schemas, server state management, live desktop `--control` attach client,
-//! headless `Session` handlers, PNG/TIFF/PDF/SVG/CSV/JSON exporters, and RFC 4648 base64 encoding.
+//! command dispatch with `Caller::Mcp` + `run_guarded`, and RFC 4648 base64 encoding.
 
+use std::collections::BTreeSet;
 use std::fmt;
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::atomic::AtomicBool;
 
-use lumencraft_chart::{ChartScene, compile_graph, compile_layout};
-use lumencraft_doc::{DataSheet, ProjectDocument, ResultSheet, SheetId, SheetSection, SubcolumnMode, TableKind};
-use lumencraft_engine::Session;
-use lumencraft_engine::catalog::COMMANDS;
-use lumencraft_format::{
-    CsvOptions, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv, import_csv_to_datasheet,
-    import_prism_bytes, import_pzfx_bytes, instantiate_template_bytes, open_project_file, save_project_file, save_template_file,
-};
-use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use lumencraft_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
-use lumencraft_svg::{SvgExportOptions, render_svg};
+use lumencraft_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
+use lumencraft_engine::cmd::{Caller, CommandGroup, Effects, registry};
+use lumencraft_engine::{EngineError, Session};
+use lumencraft_format::{CsvOptions, export_datasheet_to_csv};
+#[cfg(not(target_arch = "wasm32"))]
+use lumencraft_platform::{PlatformError, WorkdirGuard};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
+use crate::errors::{self, StructuredErrorPayload};
+use crate::formats;
+use crate::toolsets::{self, ToolAnnotations, command_id_to_mcp_tool_name, command_spec_to_tool_definition, group_enum_json, parse_command_group};
 use crate::ui_catalog::UI_COMMANDS;
 
-const DEFAULT_PREVIEW_WIDTH_PX: u32 = 960;
-const DEFAULT_PREVIEW_HEIGHT_PX: u32 = 640;
-const DEFAULT_PREVIEW_DPI: u16 = 144;
-const MAX_RASTER_DIM_PX: u32 = 8192;
-const MAX_DPI: u16 = 2400;
-const MIN_DPI: u16 = 18;
 const MAX_BATCH_COMMANDS: usize = 1024;
 
 /// Stateful execution context shared across requests on an MCP server connection.
 #[derive(Debug, Clone)]
 pub struct McpServerState {
-    session: Session,
+    pub(crate) session: Session,
     #[cfg(not(target_arch = "wasm32"))]
     control_port: Option<u16>,
+    #[cfg(not(target_arch = "wasm32"))]
+    workdir_guard: Option<WorkdirGuard>,
+    enabled_toolsets: BTreeSet<CommandGroup>,
+    pending_notifications: Vec<Value>,
     initialized: bool,
 }
 
@@ -52,6 +49,10 @@ impl McpServerState {
             session: Session::new(),
             #[cfg(not(target_arch = "wasm32"))]
             control_port: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            workdir_guard: None,
+            enabled_toolsets: BTreeSet::new(),
+            pending_notifications: Vec::new(),
             initialized: false,
         }
     }
@@ -63,6 +64,10 @@ impl McpServerState {
             session,
             #[cfg(not(target_arch = "wasm32"))]
             control_port: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            workdir_guard: None,
+            enabled_toolsets: BTreeSet::new(),
+            pending_notifications: Vec::new(),
             initialized: false,
         }
     }
@@ -74,7 +79,45 @@ impl McpServerState {
         if port == 0 {
             return Err(String::from("control port must be in 1..=65535"));
         }
-        Ok(Self { session: Session::new(), control_port: Some(port), initialized: false })
+        Ok(Self {
+            session: Session::new(),
+            control_port: Some(port),
+            workdir_guard: None,
+            enabled_toolsets: BTreeSet::new(),
+            pending_notifications: Vec::new(),
+            initialized: false,
+        })
+    }
+
+    /// Construct a headless MCP server state whose file operations are confined strictly inside `workdir`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_workdir(workdir: &Path) -> Result<Self, PlatformError> {
+        let guard = WorkdirGuard::new(workdir)?;
+        Ok(Self {
+            session: Session::new(),
+            control_port: None,
+            workdir_guard: Some(guard),
+            enabled_toolsets: BTreeSet::new(),
+            pending_notifications: Vec::new(),
+            initialized: false,
+        })
+    }
+
+    /// Attach or clear a canonical [`WorkdirGuard`] confinement root on this server state.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_workdir(&mut self, workdir: Option<&Path>) -> Result<(), PlatformError> {
+        self.workdir_guard = match workdir {
+            Some(dir) => Some(WorkdirGuard::new(dir)?),
+            None => None,
+        };
+        Ok(())
+    }
+
+    /// Active [`WorkdirGuard`] confinement root, when configured.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn workdir_guard(&self) -> Option<&WorkdirGuard> {
+        self.workdir_guard.as_ref()
     }
 
     /// Borrow the underlying headless [`Session`].
@@ -112,6 +155,42 @@ impl McpServerState {
         Ok(())
     }
 
+    /// Borrow the set of currently enabled per-command toolset groups.
+    #[must_use]
+    pub fn enabled_toolsets(&self) -> &BTreeSet<CommandGroup> {
+        &self.enabled_toolsets
+    }
+
+    /// Return `true` when `group` has been enabled on this connection.
+    #[must_use]
+    pub fn is_toolset_enabled(&self, group: CommandGroup) -> bool {
+        self.enabled_toolsets.contains(&group)
+    }
+
+    /// Enable or disable `group`, returning `true` when the active set changed.
+    pub fn set_toolset_enabled(&mut self, group: CommandGroup, enabled: bool) -> bool {
+        if enabled { self.enabled_toolsets.insert(group) } else { self.enabled_toolsets.remove(&group) }
+    }
+
+    /// Queue an outgoing JSON-RPC `notifications/tools/list_changed` notification for emission.
+    pub fn queue_tools_list_changed(&mut self) {
+        self.pending_notifications.push(json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed"
+        }));
+    }
+
+    /// Drain all queued server-to-client JSON-RPC notifications in FIFO order.
+    pub fn take_pending_notifications(&mut self) -> Vec<Value> {
+        std::mem::take(&mut self.pending_notifications)
+    }
+
+    /// Inspect queued outbound notifications without draining them.
+    #[must_use]
+    pub fn pending_notifications(&self) -> &[Value] {
+        &self.pending_notifications
+    }
+
     /// Record whether MCP `initialize` / `notifications/initialized` has been observed.
     #[must_use]
     pub fn is_initialized(&self) -> bool {
@@ -124,13 +203,14 @@ impl McpServerState {
     }
 }
 
-/// JSON Schema descriptor exposed in MCP `tools/list`.
+/// JSON Schema and behavioral annotation descriptor exposed in MCP `tools/list`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolDefinition {
     pub name: String,
     pub description: String,
     #[serde(rename = "inputSchema")]
     pub input_schema: Value,
+    pub annotations: ToolAnnotations,
 }
 
 /// Content item returned inside an MCP `tools/call` response.
@@ -153,32 +233,47 @@ pub struct ToolCallResult {
     pub content: Vec<ContentBlock>,
     #[serde(rename = "isError")]
     pub is_error: bool,
+    #[serde(rename = "structuredContent", default, skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Value>,
 }
 
 impl ToolCallResult {
     /// Construct a non-error text result.
     #[must_use]
     pub fn ok_text(text: impl Into<String>) -> Self {
-        Self { content: vec![ContentBlock::Text { text: text.into() }], is_error: false }
+        Self { content: vec![ContentBlock::Text { text: text.into() }], is_error: false, structured_content: None }
     }
 
-    /// Construct a non-error pretty-printed JSON text result.
+    /// Construct a non-error pretty-printed JSON text result with matching `structuredContent`.
     pub fn ok_json(value: &impl Serialize) -> Result<Self, ToolCallError> {
-        let text = serde_json::to_string_pretty(value).map_err(|err| ToolCallError::Execution(format!("JSON serialization error: {err}")))?;
-        Ok(Self::ok_text(text))
+        let structured = serde_json::to_value(value).map_err(|err| ToolCallError::Execution(format!("JSON serialization error: {err}")))?;
+        let text = serde_json::to_string_pretty(&structured).map_err(|err| ToolCallError::Execution(format!("JSON serialization error: {err}")))?;
+        Ok(Self { content: vec![ContentBlock::Text { text }], is_error: false, structured_content: Some(structured) })
     }
 
-    /// Construct a domain/execution error result (`isError: true`).
+    /// Construct a structured domain/execution error result (`isError: true`).
     #[must_use]
     pub fn error_text(message: impl Into<String>) -> Self {
-        Self { content: vec![ContentBlock::Text { text: message.into() }], is_error: true }
+        errors::result_from_error_message(message.into())
+    }
+
+    /// Construct a canonical structured error result from an [`EngineError`].
+    #[must_use]
+    pub fn from_engine_error(err: &EngineError) -> Self {
+        errors::result_from_engine_error(err)
+    }
+
+    /// Construct a canonical structured error result from a [`StructuredErrorPayload`].
+    #[must_use]
+    pub fn structured_error(payload: &StructuredErrorPayload) -> Self {
+        errors::result_from_payload(payload)
     }
 }
 
 /// Protocol-level or execution-level failure returned by [`call_tool`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolCallError {
-    /// Tool name is not registered in [`list_tools`].
+    /// Tool name is not currently enabled or registered.
     UnknownTool(String),
     /// Caller supplied malformed or out-of-range tool arguments (`-32602`).
     InvalidParams(String),
@@ -195,9 +290,14 @@ impl fmt::Display for ToolCallError {
     }
 }
 
-/// Return all registered MCP tool definitions with full JSON Schemas.
+/// Return the default core MCP tool definitions (including progressive toolset discovery tools).
 #[must_use]
 pub fn list_tools() -> Vec<ToolDefinition> {
+    let mut group_enum = vec![Value::String(String::from("all"))];
+    if let Value::Array(items) = group_enum_json() {
+        group_enum.extend(items);
+    }
+
     vec![
         ToolDefinition {
             name: String::from("doc_inspect"),
@@ -210,16 +310,19 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 },
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::from_effects(Effects::NONE.with(Effects::IDEMPOTENT)),
         },
         ToolDefinition {
             name: String::from("open_file"),
-            description: String::from("Open or import a .lumencraft, .lctemplate, .prism, .pzfx, .csv, or .tsv file into the session."),
+            description: String::from(
+                "Open or import a .lumencraft, .lumencraft.d, .lctemplate, .prism, .pzfx, .csv, or .tsv file into the session.",
+            ),
             input_schema: json!({
                 "type": "object",
                 "required": ["path"],
                 "properties": {
                     "path": { "type": "string", "description": "Filesystem path to open or import." },
-                    "format": { "type": "string", "enum": ["lumencraft", "lctemplate", "prism", "pzfx", "csv", "tsv"] },
+                    "format": { "type": "string", "enum": ["lumencraft", "lumencraft.d", "lctemplate", "prism", "pzfx", "csv", "tsv"] },
                     "target_kind": { "type": "string", "enum": ["xy", "column", "grouped", "contingency", "survival", "parts_of_whole", "multiple_variables", "nested"] },
                     "subcolumn_mode": { "type": "string" },
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text." },
@@ -229,18 +332,22 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 },
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::from_effects(Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA)),
         },
         ToolDefinition {
             name: String::from("save_file"),
-            description: String::from("Save the current document as a .lumencraft archive or .lctemplate template."),
+            description: String::from(
+                "Save the current document as a .lumencraft archive, .lumencraft.d unpacked directory, or .lctemplate template.",
+            ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination file path (defaults to current project path when available)." },
-                    "format": { "type": "string", "enum": ["lumencraft", "lctemplate"] }
+                    "format": { "type": "string", "enum": ["lumencraft", "lumencraft.d", "lctemplate"] }
                 },
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::from_effects(Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT)),
         },
         ToolDefinition {
             name: String::from("command_list"),
@@ -248,12 +355,14 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "filter": { "type": "string", "description": "Case-insensitive substring filter across id, label, and menu_path." },
+                    "filter": { "type": "string", "description": "Case-insensitive substring filter across id, label, menu_path, and summary." },
+                    "group": { "type": "string", "enum": group_enum_json(), "description": "Optional engine CommandGroup filter." },
                     "include_ui": { "type": "boolean", "description": "Include UI-only commands from ui_catalog (default: true)." },
                     "ui_only": { "type": "boolean", "description": "Return only UI-only commands (default: false)." }
                 },
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::from_effects(Effects::NONE.with(Effects::IDEMPOTENT)),
         },
         ToolDefinition {
             name: String::from("command_run"),
@@ -267,6 +376,9 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 },
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::from_effects(
+                Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA).with(Effects::READS_FILESYSTEM).with(Effects::WRITES_FILESYSTEM),
+            ),
         },
         ToolDefinition {
             name: String::from("command_batch"),
@@ -290,6 +402,9 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 },
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::from_effects(
+                Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA).with(Effects::READS_FILESYSTEM).with(Effects::WRITES_FILESYSTEM),
+            ),
         },
         ToolDefinition {
             name: String::from("render_preview"),
@@ -304,6 +419,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 },
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::from_effects(Effects::NONE.with(Effects::IDEMPOTENT)),
         },
         ToolDefinition {
             name: String::from("export"),
@@ -330,24 +446,93 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 },
                 "additionalProperties": false
             }),
+            annotations: ToolAnnotations::from_effects(Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT)),
+        },
+        ToolDefinition {
+            name: String::from("list_toolsets"),
+            description: String::from("List all CommandGroup toolsets, their enabled status, and normalized per-command MCP tools."),
+            input_schema: json!({
+                "type": "object",
+                "properties": {},
+                "additionalProperties": false
+            }),
+            annotations: ToolAnnotations::from_effects(Effects::NONE.with(Effects::IDEMPOTENT)),
+        },
+        ToolDefinition {
+            name: String::from("enable_toolset"),
+            description: String::from(
+                "Enable or disable progressive CommandGroup per-command tools (emits notifications/tools/list_changed when modified).",
+            ),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "group": { "type": "string", "enum": group_enum, "description": "Single CommandGroup (or 'all') to toggle." },
+                    "groups": { "type": "array", "items": { "type": "string", "enum": group_enum_json() }, "description": "Multiple CommandGroups to toggle." },
+                    "enabled": { "type": "boolean", "description": "Enable (true, default) or disable (false) the requested toolset(s)." }
+                },
+                "additionalProperties": false
+            }),
+            annotations: ToolAnnotations::from_effects(Effects::CHANGES_UI_STATE.with(Effects::IDEMPOTENT)),
         },
     ]
 }
 
-/// Dispatch an MCP `tools/call` invocation onto `state`.
+/// Return default core tools plus normalized per-command tools for every enabled `CommandGroup`.
+#[must_use]
+pub fn list_tools_for_state(state: &McpServerState) -> Vec<ToolDefinition> {
+    let mut tools = list_tools();
+    for spec in registry().specs() {
+        if state.is_toolset_enabled(spec.group) {
+            tools.push(command_spec_to_tool_definition(spec));
+        }
+    }
+    tools
+}
+
+/// Dispatch an MCP `tools/call` invocation onto `state`, isolating every handler inside `run_guarded`.
 pub fn call_tool(state: &mut McpServerState, name: &str, arguments: Value) -> Result<ToolCallResult, ToolCallError> {
+    run_guarded_tool(name, || dispatch_tool_inner(state, name, arguments))
+}
+
+pub(crate) fn run_guarded_tool<F>(op: &str, f: F) -> Result<ToolCallResult, ToolCallError>
+where
+    F: FnOnce() -> Result<ToolCallResult, ToolCallError>,
+{
+    match lumencraft_engine::guard::run_guarded(op, || Ok(f())) {
+        Ok(inner_res) => inner_res,
+        Err(engine_err) => Ok(errors::result_from_engine_error(&engine_err)),
+    }
+}
+
+fn dispatch_tool_inner(state: &mut McpServerState, name: &str, arguments: Value) -> Result<ToolCallResult, ToolCallError> {
     let args = arguments.as_object().ok_or_else(|| ToolCallError::InvalidParams(String::from("tool arguments must be an object")))?;
 
     match name {
         "doc_inspect" => handle_doc_inspect(state, args),
-        "open_file" => handle_open_file(state, args),
-        "save_file" => handle_save_file(state, args),
+        "open_file" => formats::handle_open_file(state, args),
+        "save_file" => formats::handle_save_file(state, args),
         "command_list" => handle_command_list(args),
         "command_run" => handle_command_run(state, args),
         "command_batch" => handle_command_batch(state, args),
-        "render_preview" => handle_render_preview(state, args),
-        "export" => handle_export(state, args),
-        _ => Err(ToolCallError::UnknownTool(name.to_owned())),
+        "render_preview" => formats::handle_render_preview(state, args),
+        "export" => formats::handle_export(state, args),
+        "list_toolsets" => toolsets::handle_list_toolsets(state),
+        "enable_toolset" => toolsets::handle_enable_toolset(state, args),
+        _ => {
+            if let Some(spec) = toolsets::find_command_spec_by_tool_name(name)
+                && state.is_toolset_enabled(spec.group)
+            {
+                return handle_direct_command_tool(state, spec.id, Value::Object(args.clone()));
+            }
+            Err(ToolCallError::UnknownTool(name.to_owned()))
+        }
+    }
+}
+
+fn handle_direct_command_tool(state: &mut McpServerState, command_id: &str, params: Value) -> Result<ToolCallResult, ToolCallError> {
+    match execute_single_command(state, command_id, params) {
+        Ok(val) => ToolCallResult::ok_json(&val),
+        Err(err) => Ok(errors::result_from_engine_error(&err)),
     }
 }
 
@@ -365,7 +550,7 @@ fn handle_doc_inspect(state: &McpServerState, args: &Map<String, Value>) -> Resu
                 "control_port": port,
                 "snapshot": snapshot,
             })),
-            Err(err) => Ok(ToolCallResult::error_text(err)),
+            Err(err) => Ok(errors::result_from_error_message(err)),
         };
     }
 
@@ -382,7 +567,7 @@ fn handle_doc_inspect(state: &McpServerState, args: &Map<String, Value>) -> Resu
 fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: bool) -> Result<ToolCallResult, ToolCallError> {
     let deps = doc.upstream_dependencies(target);
     let Some(section) = doc.sheet_section(target) else {
-        return Ok(ToolCallResult::error_text(format!("sheet '{}' not found", target.as_str())));
+        return Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str())));
     };
 
     let detail = match section {
@@ -447,7 +632,7 @@ fn inspect_single_sheet(doc: &ProjectDocument, target: &SheetId, include_cells: 
 
     match detail {
         Some(value) => ToolCallResult::ok_json(&value),
-        None => Ok(ToolCallResult::error_text(format!("sheet '{}' not found", target.as_str()))),
+        None => Ok(errors::result_from_code(ErrorCode::NotFound, format!("sheet '{}' not found", target.as_str()))),
     }
 }
 
@@ -616,215 +801,51 @@ fn collect_variables_and_hooks(doc: &ProjectDocument) -> (Value, Vec<Value>) {
     (variables, hooks)
 }
 
-fn handle_open_file(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    let path_str = required_non_empty_str(args, "path")?;
-    let path = PathBuf::from(&path_str);
-    let format = resolve_open_format(&path, args)?;
-
-    match format.as_str() {
-        "lumencraft" => {
-            let doc = match open_project_file(&path) {
-                Ok(doc) => doc,
-                Err(err) => return Ok(ToolCallResult::error_text(format!("failed to open '{}': {err}", path.display()))),
-            };
-            let sheets = doc.total_sheet_count();
-            let title = doc.title.clone();
-            state.session = Session::from_document(doc);
-            state.session.set_file_path(Some(path.clone()), true);
-            ToolCallResult::ok_json(&json!({
-                "opened": true,
-                "format": "lumencraft",
-                "path": path.display().to_string(),
-                "title": title,
-                "total_sheet_count": sheets,
-            }))
-        }
-        "lctemplate" => {
-            let title_override = optional_non_empty_str(args, "title")?;
-            let bytes = match fs::read(&path) {
-                Ok(b) => b,
-                Err(err) => return Ok(ToolCallResult::error_text(format!("failed to read '{}': {err}", path.display()))),
-            };
-            let doc = match instantiate_template_bytes(&bytes, title_override.as_deref()) {
-                Ok(doc) => doc,
-                Err(err) => return Ok(ToolCallResult::error_text(format!("failed to instantiate template '{}': {err}", path.display()))),
-            };
-            let sheets = doc.total_sheet_count();
-            let title = doc.title.clone();
-            state.session = Session::from_document(doc);
-            state.session.set_file_path(None, true);
-            ToolCallResult::ok_json(&json!({
-                "opened": true,
-                "format": "lctemplate",
-                "path": path.display().to_string(),
-                "title": title,
-                "total_sheet_count": sheets,
-            }))
-        }
-        "prism" | "pzfx" => open_cleanroom_import(state, &path, &format),
-        "csv" | "tsv" => open_delimited_file(state, &path, &format, args),
-        other => Err(ToolCallError::InvalidParams(format!("unsupported open format '{other}'"))),
-    }
-}
-
-fn open_cleanroom_import(state: &mut McpServerState, path: &Path, format: &str) -> Result<ToolCallResult, ToolCallError> {
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("failed to read '{}': {err}", path.display()))),
-    };
-    let report = if format == "prism" { import_prism_bytes(&bytes) } else { import_pzfx_bytes(&bytes) };
-    let report = match report {
-        Ok(r) => r,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("failed to import '{}': {err}", path.display()))),
-    };
-    let sheets = report.document.total_sheet_count();
-    let title = report.document.title.clone();
-    state.session = Session::from_document(report.document);
-    state.session.set_file_path(None, false);
-    ToolCallResult::ok_json(&json!({
-        "opened": true,
-        "format": format,
-        "path": path.display().to_string(),
-        "title": title,
-        "total_sheet_count": sheets,
-        "warnings": report.warnings,
-    }))
-}
-
-fn open_delimited_file(state: &mut McpServerState, path: &Path, format: &str, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    let text = match fs::read_to_string(path) {
-        Ok(s) => s,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("failed to read '{}': {err}", path.display()))),
-    };
-    let target_kind = match optional_non_empty_str(args, "target_kind")? {
-        Some(raw) => parse_table_kind(&raw)?,
-        None => TableKind::Xy,
-    };
-    let subcolumn_mode = match optional_non_empty_str(args, "subcolumn_mode")? {
-        Some(raw) => parse_subcolumn_mode(&raw)?,
-        None => SubcolumnMode::Single,
-    };
-    let mut opts = if format == "tsv" { CsvOptions::tsv() } else { CsvOptions::detect(&text) };
-    if let Some(delim) = optional_non_empty_str(args, "delimiter")? {
-        let mut chars = delim.chars();
-        let Some(ch) = chars.next() else {
-            return Err(ToolCallError::InvalidParams(String::from("delimiter must not be empty")));
-        };
-        if chars.next().is_some() {
-            return Err(ToolCallError::InvalidParams(String::from("delimiter must be a single character")));
-        }
-        opts.delimiter = ch;
-    }
-
-    let append = optional_bool(args, "append")?.unwrap_or(false);
-    let stem = path.file_stem().and_then(|s| s.to_str()).filter(|s| !s.trim().is_empty()).unwrap_or("Imported Data");
-    let sheet_title = optional_non_empty_str(args, "title")?.unwrap_or_else(|| stem.to_owned());
-    let sheet_id_str = optional_non_empty_str(args, "sheet_id")?.unwrap_or_else(|| sanitize_sheet_id(stem, "data-1"));
-
-    let ds = match import_csv_to_datasheet(sheet_id_str.clone(), sheet_title.clone(), &text, target_kind, subcolumn_mode, &opts) {
-        Ok(ds) => ds,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("failed to parse '{}': {err}", path.display()))),
-    };
-    let rows = ds.archetype.row_count();
-    let cols = ds.archetype.column_count();
-
-    if append {
-        let mut doc = state.session.document().clone();
-        if let Err(err) = doc.add_data_sheet(ds) {
-            return Ok(ToolCallResult::error_text(format!("failed to add imported sheet: {err}")));
-        }
-        let is_dirty = state.session.is_dirty();
-        let existing_path = state.session.file_path().map(Path::to_path_buf);
-        state.session = Session::from_document(doc);
-        state.session.set_file_path(existing_path, !is_dirty);
-    } else {
-        let mut doc = match ProjectDocument::new(sheet_title.clone()) {
-            Ok(d) => d,
-            Err(err) => return Ok(ToolCallResult::error_text(format!("invalid document title: {err}"))),
-        };
-        if let Err(err) = doc.add_data_sheet(ds) {
-            return Ok(ToolCallResult::error_text(format!("failed to register imported sheet: {err}")));
-        }
-        state.session = Session::from_document(doc);
-        state.session.set_file_path(None, false);
-    }
-
-    ToolCallResult::ok_json(&json!({
-        "opened": true,
-        "format": format,
-        "path": path.display().to_string(),
-        "sheet_id": sheet_id_str,
-        "title": sheet_title,
-        "table_kind": target_kind.label(),
-        "rows": rows,
-        "columns": cols,
-    }))
-}
-
-fn handle_save_file(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    let explicit_path = optional_non_empty_str(args, "path")?.map(PathBuf::from);
-    let path = match explicit_path.or_else(|| state.session.file_path().map(Path::to_path_buf)) {
-        Some(p) => p,
-        None => {
-            return Err(ToolCallError::InvalidParams(String::from("save_file requires \"path\" when session has no associated file_path")));
-        }
-    };
-
-    let format = resolve_save_format(&path, args)?;
-    let doc = state.session.document().clone();
-    let result = match format.as_str() {
-        "lumencraft" => save_project_file(&path, &doc),
-        "lctemplate" => save_template_file(&path, &doc),
-        other => return Err(ToolCallError::InvalidParams(format!("unsupported save format '{other}'"))),
-    };
-
-    if let Err(err) = result {
-        return Ok(ToolCallResult::error_text(format!("failed to save '{}': {err}", path.display())));
-    }
-
-    if format == "lumencraft" {
-        state.session.set_file_path(Some(path.clone()), true);
-    }
-
-    ToolCallResult::ok_json(&json!({
-        "saved": true,
-        "format": format,
-        "path": path.display().to_string(),
-        "schema_version": doc.schema_version,
-        "total_sheet_count": doc.total_sheet_count(),
-    }))
-}
-
 fn handle_command_list(args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let filter = optional_non_empty_str(args, "filter")?.map(|s| s.to_ascii_lowercase());
+    let group_filter = match optional_non_empty_str(args, "group")? {
+        Some(raw) => Some(parse_command_group(&raw)?),
+        None => None,
+    };
     let include_ui = optional_bool(args, "include_ui")?.unwrap_or(true);
     let ui_only = optional_bool(args, "ui_only")?.unwrap_or(false);
 
     let mut commands = Vec::new();
     if !ui_only {
-        for desc in COMMANDS {
-            if matches_filter(filter.as_deref(), desc.id, desc.label, desc.menu_path) {
+        for spec in registry().specs() {
+            if group_filter.is_some_and(|g| spec.group != g) {
+                continue;
+            }
+            if matches_filter(filter.as_deref(), spec.id, spec.label, spec.menu_path, spec.summary) {
                 commands.push(json!({
-                    "id": desc.id,
-                    "label": desc.label,
-                    "menu_path": desc.menu_path,
-                    "shortcut": desc.shortcut,
-                    "params_doc": desc.params_doc,
+                    "id": spec.id,
+                    "label": spec.label,
+                    "menu_path": spec.menu_path,
+                    "shortcut": spec.shortcut,
+                    "group": spec.group.as_str(),
+                    "group_title": spec.group.title(),
+                    "effects": spec.effects.flag_names(),
+                    "summary": spec.summary,
+                    "beginner": spec.beginner,
+                    "input_schema": (spec.input_schema)(),
+                    "mcp_tool": command_id_to_mcp_tool_name(spec.id),
                     "ui": false,
                 }));
             }
         }
     }
 
-    if include_ui || ui_only {
-        for &(id, label, menu_path, shortcut) in UI_COMMANDS {
-            if matches_filter(filter.as_deref(), id, label, menu_path) {
+    if (include_ui || ui_only) && group_filter.is_none() {
+        for spec in UI_COMMANDS {
+            if matches_filter(filter.as_deref(), spec.id, spec.label, "", spec.summary) {
                 commands.push(json!({
-                    "id": id,
-                    "label": label,
-                    "menu_path": menu_path,
-                    "shortcut": shortcut,
-                    "params_doc": "{}",
+                    "id": spec.id,
+                    "label": spec.label,
+                    "menu_path": "",
+                    "shortcut": spec.shortcut,
+                    "params_doc": spec.params_doc,
+                    "summary": spec.summary,
+                    "beginner": spec.beginner,
                     "ui": true,
                 }));
             }
@@ -837,11 +858,14 @@ fn handle_command_list(args: &Map<String, Value>) -> Result<ToolCallResult, Tool
     }))
 }
 
-fn matches_filter(filter: Option<&str>, id: &str, label: &str, menu_path: &str) -> bool {
+fn matches_filter(filter: Option<&str>, id: &str, label: &str, menu_path: &str, summary: &str) -> bool {
     let Some(needle) = filter else {
         return true;
     };
-    id.to_ascii_lowercase().contains(needle) || label.to_ascii_lowercase().contains(needle) || menu_path.to_ascii_lowercase().contains(needle)
+    id.to_ascii_lowercase().contains(needle)
+        || label.to_ascii_lowercase().contains(needle)
+        || menu_path.to_ascii_lowercase().contains(needle)
+        || summary.to_ascii_lowercase().contains(needle)
 }
 
 fn handle_command_run(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
@@ -849,7 +873,7 @@ fn handle_command_run(state: &mut McpServerState, args: &Map<String, Value>) -> 
     let params = extract_command_params(args)?;
     match execute_single_command(state, &command_id, params) {
         Ok(val) => ToolCallResult::ok_json(&val),
-        Err(msg) => Ok(ToolCallResult::error_text(msg)),
+        Err(err) => Ok(errors::result_from_engine_error(&err)),
     }
 }
 
@@ -890,29 +914,30 @@ fn execute_batch_items(state: &mut McpServerState, items: Vec<(String, Value)>, 
                 }
                 outcomes.push(json!({ "index": idx, "ok": true, "outcome": outcome }));
             }
-            Err(err_msg) => {
+            Err(err) => {
+                let err_payload = StructuredErrorPayload::from_engine_error(&err);
+                let mut extra = Map::new();
+                extra.insert(String::from("failed_index"), json!(idx));
+                extra.insert(String::from("failed_command_id"), json!(command_id));
+                extra.insert(String::from("error"), json!(err.message()));
                 if atomic {
                     let rolled_back = rollback_batch(state, snapshot, remote_mutated_steps);
-                    let payload = json!({
-                        "atomic": true,
-                        "rolled_back": rolled_back,
-                        "failed_index": idx,
-                        "failed_command_id": command_id,
-                        "error": err_msg,
-                        "completed_before_failure": outcomes,
-                    });
-                    let text = serde_json::to_string_pretty(&payload).unwrap_or(err_msg);
-                    return Ok(ToolCallResult::error_text(text));
+                    extra.insert(String::from("atomic"), json!(true));
+                    extra.insert(String::from("rolled_back"), json!(rolled_back));
+                    extra.insert(String::from("completed_before_failure"), Value::Array(outcomes));
+                } else {
+                    outcomes.push(json!({
+                        "index": idx,
+                        "ok": false,
+                        "command_id": command_id,
+                        "error": err.message(),
+                        "code": err.code,
+                    }));
+                    extra.insert(String::from("atomic"), json!(false));
+                    extra.insert(String::from("completed"), json!(idx));
+                    extra.insert(String::from("results"), Value::Array(outcomes));
                 }
-                outcomes.push(json!({ "index": idx, "ok": false, "command_id": command_id, "error": err_msg }));
-                let payload = json!({
-                    "atomic": false,
-                    "completed": idx,
-                    "failed_index": idx,
-                    "results": outcomes,
-                });
-                let text = serde_json::to_string_pretty(&payload).unwrap_or(err_msg);
-                return Ok(ToolCallResult::error_text(text));
+                return Ok(errors::result_from_payload_with_extra(&err_payload, extra));
             }
         }
     }
@@ -944,17 +969,28 @@ fn rollback_batch(state: &mut McpServerState, snapshot: Option<Session>, remote_
     false
 }
 
-fn execute_single_command(state: &mut McpServerState, command_id: &str, params: Value) -> Result<Value, String> {
+fn execute_single_command(state: &mut McpServerState, command_id: &str, mut params: Value) -> Result<Value, EngineError> {
+    formats::sanitize_command_params(state, &mut params)?;
+
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
-        return execute_remote_command(port, command_id, params);
+        return execute_remote_command(port, command_id, params).map_err(|msg| {
+            let mut err = EngineError::with_code(ErrorCode::IoError, msg);
+            err = err.with_retryable(true).with_remediation("Ensure the desktop control server is running and reachable.");
+            err
+        });
     }
 
     if is_ui_catalog_command(command_id) {
-        return Err(format!("UI command '{command_id}' requires attaching to a live desktop --control <port>"));
+        return Err(EngineError::with_code(
+            ErrorCode::Conflict,
+            format!("UI command '{command_id}' requires attaching to a live desktop --control <port>"),
+        )
+        .with_remediation("Attach `--control-port <port>` to a live desktop session or invoke a headless engine command."));
     }
 
-    let outcome = state.session.execute(command_id, params).map_err(|err| format!("command '{command_id}' failed: {}", err.message()))?;
+    let cancel = AtomicBool::new(false);
+    let outcome = state.session.execute_with_caller(command_id, params, Caller::Mcp, &cancel)?;
     Ok(json!({
         "command_id": outcome.command_id,
         "mutated": outcome.mutated,
@@ -979,7 +1015,7 @@ fn execute_remote_command(port: u16, command_id: &str, params: Value) -> Result<
 }
 
 fn is_ui_catalog_command(command_id: &str) -> bool {
-    UI_COMMANDS.iter().any(|&(id, _, _, _)| id == command_id)
+    UI_COMMANDS.iter().any(|spec| spec.id == command_id)
 }
 
 const fn is_attached(state: &McpServerState) -> bool {
@@ -994,543 +1030,7 @@ const fn is_attached(state: &McpServerState) -> bool {
     }
 }
 
-fn handle_render_preview(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    let sheet_id = optional_non_empty_str(args, "sheet_id")?;
-    let dpi = parse_dpi(args)?;
-    let requested_w = optional_u32_bounded(args, "width_px", 1, MAX_RASTER_DIM_PX)?;
-    let requested_h = optional_u32_bounded(args, "height_px", 1, MAX_RASTER_DIM_PX)?;
-
-    let (target_id, sheet_kind, scene) = match compile_visual_sheet(state.session.document(), sheet_id.as_deref()) {
-        Ok(compiled) => compiled,
-        Err(msg) => return Ok(ToolCallResult::error_text(msg)),
-    };
-
-    let spec = build_render_spec(&scene, requested_w, requested_h, dpi);
-    let raster = match render_scene(&scene, spec) {
-        Ok(img) => img,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("rasterization failed: {err}"))),
-    };
-    let png_bytes = match encode_png(&raster) {
-        Ok(bytes) => bytes,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("PNG encoding failed: {err}"))),
-    };
-
-    let metadata = json!({
-        "sheet_id": target_id,
-        "sheet_kind": sheet_kind,
-        "title": scene.title,
-        "width_px": raster.width_px,
-        "height_px": raster.height_px,
-        "dpi": raster.dpi,
-        "width_pt": scene.width_pt,
-        "height_pt": scene.height_pt,
-        "png_bytes": png_bytes.len(),
-        "primitives_count": scene.primitives.len(),
-        "warnings": scene.warnings,
-    });
-    let metadata_text = serde_json::to_string_pretty(&metadata).unwrap_or_default();
-
-    Ok(ToolCallResult {
-        content: vec![
-            ContentBlock::Image { data: encode_base64(&png_bytes), mime_type: String::from("image/png") },
-            ContentBlock::Text { text: metadata_text },
-        ],
-        is_error: false,
-    })
-}
-
-fn handle_export(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    let format = required_non_empty_str(args, "format")?.to_ascii_lowercase();
-    let sheet_id = optional_non_empty_str(args, "sheet_id")?;
-    let output_path = optional_non_empty_str(args, "output_path")?.or(optional_non_empty_str(args, "path")?);
-    let doc = state.session.document();
-
-    match format.as_str() {
-        "svg" => export_svg_tool(doc, sheet_id.as_deref(), output_path.as_deref(), args),
-        "pdf" => export_pdf_tool(doc, sheet_id.as_deref(), output_path.as_deref(), args),
-        "png" => export_png_tool(doc, sheet_id.as_deref(), output_path.as_deref(), args),
-        "tiff" => export_tiff_tool(doc, sheet_id.as_deref(), output_path.as_deref(), args),
-        "csv" => export_csv_tool(doc, sheet_id.as_deref(), output_path.as_deref(), args),
-        "json" => export_json_tool(doc, sheet_id.as_deref(), output_path.as_deref(), args),
-        _ => Err(ToolCallError::InvalidParams(format!("unsupported export format '{format}'"))),
-    }
-}
-
-fn export_svg_tool(
-    doc: &ProjectDocument,
-    sheet_id: Option<&str>,
-    output_path: Option<&str>,
-    args: &Map<String, Value>,
-) -> Result<ToolCallResult, ToolCallError> {
-    let pretty = optional_bool(args, "pretty")?.unwrap_or(true);
-    let precision = optional_u32_bounded(args, "svg_precision", 1, 8)?;
-    let (target_id, _, scene) = match compile_visual_sheet(doc, sheet_id) {
-        Ok(compiled) => compiled,
-        Err(msg) => return Ok(ToolCallResult::error_text(msg)),
-    };
-
-    let mut opts = SvgExportOptions { pretty, ..SvgExportOptions::default() };
-    if let Some(p) = precision {
-        opts.precision = p as u8;
-    }
-
-    let svg = match render_svg(&scene, &opts) {
-        Ok(s) => s,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("SVG export failed: {err}"))),
-    };
-
-    if let Some(path) = output_path {
-        return write_text_export(path, "svg", &target_id, &svg);
-    }
-    Ok(ToolCallResult::ok_text(svg))
-}
-
-fn export_pdf_tool(
-    doc: &ProjectDocument,
-    sheet_id: Option<&str>,
-    output_path: Option<&str>,
-    args: &Map<String, Value>,
-) -> Result<ToolCallResult, ToolCallError> {
-    let all_graphs = optional_bool(args, "all_graphs")?.unwrap_or(false);
-    let color_space = match optional_non_empty_str(args, "pdf_color_space")? {
-        Some(raw) => parse_pdf_color_space(&raw)?,
-        None => PdfColorSpace::Srgb,
-    };
-
-    let mut opts = PdfExportOptions { color_space, ..PdfExportOptions::default() };
-
-    let (target_id, pdf_bytes) = if all_graphs && sheet_id.is_none() {
-        let mut scenes = Vec::new();
-        for gs in &doc.graph_sheets {
-            let scene = match compile_graph(gs, doc) {
-                Ok(s) => s,
-                Err(err) => return Ok(ToolCallResult::error_text(format!("chart compile failed for '{}': {err}", gs.id))),
-            };
-            scenes.push(scene);
-        }
-        for ls in &doc.layout_sheets {
-            let scene = match compile_layout(ls, doc) {
-                Ok(s) => s,
-                Err(err) => return Ok(ToolCallResult::error_text(format!("layout compile failed for '{}': {err}", ls.id))),
-            };
-            scenes.push(scene);
-        }
-        if scenes.is_empty() {
-            return Ok(ToolCallResult::error_text(String::from("no GraphSheet or LayoutSheet available to export")));
-        }
-        opts.title = Some(doc.title.clone());
-        match render_pdf_pages(&scenes, &opts) {
-            Ok(bytes) => (String::from("all"), bytes),
-            Err(err) => return Ok(ToolCallResult::error_text(format!("PDF export failed: {err}"))),
-        }
-    } else {
-        let (target_id, _, scene) = match compile_visual_sheet(doc, sheet_id) {
-            Ok(compiled) => compiled,
-            Err(msg) => return Ok(ToolCallResult::error_text(msg)),
-        };
-        opts.title = Some(scene.title.clone());
-        match render_pdf(&scene, &opts) {
-            Ok(bytes) => (target_id, bytes),
-            Err(err) => return Ok(ToolCallResult::error_text(format!("PDF export failed: {err}"))),
-        }
-    };
-
-    if let Some(path) = output_path {
-        return write_binary_export(path, "pdf", &target_id, &pdf_bytes);
-    }
-
-    ToolCallResult::ok_json(&json!({
-        "format": "pdf",
-        "sheet_id": target_id,
-        "encoding": "base64",
-        "bytes_len": pdf_bytes.len(),
-        "data": encode_base64(&pdf_bytes),
-    }))
-}
-
-fn export_png_tool(
-    doc: &ProjectDocument,
-    sheet_id: Option<&str>,
-    output_path: Option<&str>,
-    args: &Map<String, Value>,
-) -> Result<ToolCallResult, ToolCallError> {
-    let dpi = parse_dpi(args)?;
-    let requested_w = optional_u32_bounded(args, "width_px", 1, MAX_RASTER_DIM_PX)?;
-    let requested_h = optional_u32_bounded(args, "height_px", 1, MAX_RASTER_DIM_PX)?;
-    let (target_id, _, scene) = match compile_visual_sheet(doc, sheet_id) {
-        Ok(compiled) => compiled,
-        Err(msg) => return Ok(ToolCallResult::error_text(msg)),
-    };
-
-    let spec = build_render_spec(&scene, requested_w, requested_h, dpi);
-    let raster = match render_scene(&scene, spec) {
-        Ok(img) => img,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("rasterization failed: {err}"))),
-    };
-    let png_bytes = match encode_png(&raster) {
-        Ok(bytes) => bytes,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("PNG encoding failed: {err}"))),
-    };
-
-    if let Some(path) = output_path {
-        return write_binary_export(path, "png", &target_id, &png_bytes);
-    }
-
-    Ok(ToolCallResult {
-        content: vec![
-            ContentBlock::Image { data: encode_base64(&png_bytes), mime_type: String::from("image/png") },
-            ContentBlock::Text {
-                text: serde_json::to_string_pretty(&json!({
-                    "format": "png",
-                    "sheet_id": target_id,
-                    "width_px": raster.width_px,
-                    "height_px": raster.height_px,
-                    "dpi": raster.dpi,
-                    "bytes_len": png_bytes.len(),
-                }))
-                .unwrap_or_default(),
-            },
-        ],
-        is_error: false,
-    })
-}
-
-fn export_tiff_tool(
-    doc: &ProjectDocument,
-    sheet_id: Option<&str>,
-    output_path: Option<&str>,
-    args: &Map<String, Value>,
-) -> Result<ToolCallResult, ToolCallError> {
-    let dpi = parse_dpi(args)?;
-    let requested_w = optional_u32_bounded(args, "width_px", 1, MAX_RASTER_DIM_PX)?;
-    let requested_h = optional_u32_bounded(args, "height_px", 1, MAX_RASTER_DIM_PX)?;
-    let compression = match optional_non_empty_str(args, "tiff_compression")? {
-        Some(raw) => parse_tiff_compression(&raw)?,
-        None => TiffCompression::Lzw,
-    };
-    let (target_id, _, scene) = match compile_visual_sheet(doc, sheet_id) {
-        Ok(compiled) => compiled,
-        Err(msg) => return Ok(ToolCallResult::error_text(msg)),
-    };
-
-    let spec = build_render_spec(&scene, requested_w, requested_h, dpi);
-    let raster = match render_scene(&scene, spec) {
-        Ok(img) => img,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("rasterization failed: {err}"))),
-    };
-    let tiff_bytes = match encode_tiff(&raster, compression) {
-        Ok(bytes) => bytes,
-        Err(err) => return Ok(ToolCallResult::error_text(format!("TIFF encoding failed: {err}"))),
-    };
-
-    if let Some(path) = output_path {
-        return write_binary_export(path, "tiff", &target_id, &tiff_bytes);
-    }
-
-    ToolCallResult::ok_json(&json!({
-        "format": "tiff",
-        "sheet_id": target_id,
-        "encoding": "base64",
-        "width_px": raster.width_px,
-        "height_px": raster.height_px,
-        "dpi": raster.dpi,
-        "bytes_len": tiff_bytes.len(),
-        "data": encode_base64(&tiff_bytes),
-    }))
-}
-
-fn export_csv_tool(
-    doc: &ProjectDocument,
-    sheet_id: Option<&str>,
-    output_path: Option<&str>,
-    args: &Map<String, Value>,
-) -> Result<ToolCallResult, ToolCallError> {
-    let tidy = optional_bool(args, "tidy")?.unwrap_or(true);
-    let tab_id = optional_non_empty_str(args, "tab_id")?;
-    let mut opts = CsvOptions::csv();
-    if let Some(delim) = optional_non_empty_str(args, "csv_delimiter")? {
-        let mut chars = delim.chars();
-        let Some(ch) = chars.next() else {
-            return Err(ToolCallError::InvalidParams(String::from("csv_delimiter must not be empty")));
-        };
-        if chars.next().is_some() {
-            return Err(ToolCallError::InvalidParams(String::from("csv_delimiter must be a single character")));
-        }
-        opts.delimiter = ch;
-    }
-
-    let (target_id, csv_text) = match resolve_tabular_export_target(doc, sheet_id) {
-        Ok(TabularTarget::Data(ds)) => match export_datasheet_to_csv(ds, &opts) {
-            Ok(csv) => (ds.id.as_str().to_owned(), csv),
-            Err(err) => return Ok(ToolCallResult::error_text(format!("CSV export failed: {err}"))),
-        },
-        Ok(TabularTarget::Result(rs)) => {
-            let csv = if tidy {
-                export_result_sheet_tidy_csv(rs, &opts)
-            } else if let Some(tid) = tab_id {
-                let Some(tab) = rs.tabs.iter().find(|t| t.id == tid) else {
-                    return Ok(ToolCallResult::error_text(format!("tab '{tid}' not found on result sheet '{}'", rs.id)));
-                };
-                export_result_tab_csv(tab, &opts)
-            } else if let Some(first_tab) = rs.tabs.first() {
-                export_result_tab_csv(first_tab, &opts)
-            } else {
-                export_result_sheet_tidy_csv(rs, &opts)
-            };
-            (rs.id.as_str().to_owned(), csv)
-        }
-        Err(msg) => return Ok(ToolCallResult::error_text(msg)),
-    };
-
-    if let Some(path) = output_path {
-        return write_text_export(path, "csv", &target_id, &csv_text);
-    }
-    Ok(ToolCallResult::ok_text(csv_text))
-}
-
-fn export_json_tool(
-    doc: &ProjectDocument,
-    sheet_id: Option<&str>,
-    output_path: Option<&str>,
-    args: &Map<String, Value>,
-) -> Result<ToolCallResult, ToolCallError> {
-    let pretty = optional_bool(args, "pretty")?.unwrap_or(true);
-    let (target_id, json_text) = if let Some(id_str) = sheet_id {
-        let id = SheetId::new(id_str);
-        if let Some(rs) = doc.result_sheet(&id) {
-            let text = match export_result_sheet_json(rs, pretty) {
-                Ok(t) => t,
-                Err(err) => return Ok(ToolCallResult::error_text(format!("JSON export failed: {err}"))),
-            };
-            (id_str.to_owned(), text)
-        } else if let Some(ds) = doc.data_sheet(&id) {
-            (id_str.to_owned(), serialize_json_value(ds, pretty)?)
-        } else if let Some(info) = doc.info_sheet(&id) {
-            (id_str.to_owned(), serialize_json_value(info, pretty)?)
-        } else if let Some(gs) = doc.graph_sheet(&id) {
-            (id_str.to_owned(), serialize_json_value(gs, pretty)?)
-        } else if let Some(ls) = doc.layout_sheet(&id) {
-            (id_str.to_owned(), serialize_json_value(ls, pretty)?)
-        } else {
-            return Ok(ToolCallResult::error_text(format!("sheet '{id_str}' not found")));
-        }
-    } else {
-        (String::from("project"), serialize_json_value(doc, pretty)?)
-    };
-
-    if let Some(path) = output_path {
-        return write_text_export(path, "json", &target_id, &json_text);
-    }
-    Ok(ToolCallResult::ok_text(json_text))
-}
-
-fn serialize_json_value(val: &impl Serialize, pretty: bool) -> Result<String, ToolCallError> {
-    if pretty { serde_json::to_string_pretty(val) } else { serde_json::to_string(val) }
-        .map_err(|err| ToolCallError::Execution(format!("JSON serialization error: {err}")))
-}
-
-fn write_text_export(path: &str, format: &str, target_id: &str, text: &str) -> Result<ToolCallResult, ToolCallError> {
-    write_binary_export(path, format, target_id, text.as_bytes())
-}
-
-fn write_binary_export(path: &str, format: &str, target_id: &str, bytes: &[u8]) -> Result<ToolCallResult, ToolCallError> {
-    let dest = Path::new(path);
-    if let Err(err) = fs::write(dest, bytes) {
-        return Ok(ToolCallResult::error_text(format!("failed to write '{}': {err}", dest.display())));
-    }
-    ToolCallResult::ok_json(&json!({
-        "exported": true,
-        "format": format,
-        "sheet_id": target_id,
-        "path": dest.display().to_string(),
-        "bytes_written": bytes.len(),
-    }))
-}
-
-fn compile_visual_sheet(doc: &ProjectDocument, sheet_id: Option<&str>) -> Result<(String, &'static str, ChartScene), String> {
-    if let Some(id_str) = sheet_id {
-        let id = SheetId::new(id_str);
-        if let Some(gs) = doc.graph_sheet(&id) {
-            let scene = compile_graph(gs, doc).map_err(|err| format!("failed to compile graph '{id_str}': {err}"))?;
-            return Ok((id_str.to_owned(), "graph", scene));
-        }
-        if let Some(ls) = doc.layout_sheet(&id) {
-            let scene = compile_layout(ls, doc).map_err(|err| format!("failed to compile layout '{id_str}': {err}"))?;
-            return Ok((id_str.to_owned(), "layout", scene));
-        }
-        return Err(format!("graph or layout sheet '{id_str}' not found"));
-    }
-
-    if let Some(active) = &doc.active_sheet_id {
-        if let Some(gs) = doc.graph_sheet(active) {
-            let scene = compile_graph(gs, doc).map_err(|err| format!("failed to compile graph '{}': {err}", active.as_str()))?;
-            return Ok((active.as_str().to_owned(), "graph", scene));
-        }
-        if let Some(ls) = doc.layout_sheet(active) {
-            let scene = compile_layout(ls, doc).map_err(|err| format!("failed to compile layout '{}': {err}", active.as_str()))?;
-            return Ok((active.as_str().to_owned(), "layout", scene));
-        }
-    }
-
-    if let Some(gs) = doc.graph_sheets.first() {
-        let scene = compile_graph(gs, doc).map_err(|err| format!("failed to compile graph '{}': {err}", gs.id.as_str()))?;
-        return Ok((gs.id.as_str().to_owned(), "graph", scene));
-    }
-    if let Some(ls) = doc.layout_sheets.first() {
-        let scene = compile_layout(ls, doc).map_err(|err| format!("failed to compile layout '{}': {err}", ls.id.as_str()))?;
-        return Ok((ls.id.as_str().to_owned(), "layout", scene));
-    }
-
-    Err(String::from("no GraphSheet or LayoutSheet exists in the current document"))
-}
-
-enum TabularTarget<'a> {
-    Data(&'a DataSheet),
-    Result(&'a ResultSheet),
-}
-
-fn resolve_tabular_export_target<'a>(doc: &'a ProjectDocument, sheet_id: Option<&str>) -> Result<TabularTarget<'a>, String> {
-    if let Some(id_str) = sheet_id {
-        let id = SheetId::new(id_str);
-        if let Some(rs) = doc.result_sheet(&id) {
-            return Ok(TabularTarget::Result(rs));
-        }
-        if let Some(ds) = doc.data_sheet(&id) {
-            return Ok(TabularTarget::Data(ds));
-        }
-        return Err(format!("data or result sheet '{id_str}' not found"));
-    }
-
-    if let Some(active) = &doc.active_sheet_id {
-        if let Some(rs) = doc.result_sheet(active) {
-            return Ok(TabularTarget::Result(rs));
-        }
-        if let Some(ds) = doc.data_sheet(active) {
-            return Ok(TabularTarget::Data(ds));
-        }
-    }
-
-    if let Some(rs) = doc.result_sheets.first() {
-        return Ok(TabularTarget::Result(rs));
-    }
-    if let Some(ds) = doc.data_sheets.first() {
-        return Ok(TabularTarget::Data(ds));
-    }
-
-    Err(String::from("no DataSheet or ResultSheet exists in the current document"))
-}
-
-fn build_render_spec(scene: &ChartScene, requested_w: Option<u32>, requested_h: Option<u32>, dpi: u16) -> RenderTargetSpec {
-    let default_w = if scene.width_pt.is_finite() && scene.width_pt > 0.0 {
-        let scaled = (scene.width_pt * f64::from(dpi) / 72.0).round();
-        scaled.clamp(64.0, f64::from(MAX_RASTER_DIM_PX)) as u32
-    } else {
-        DEFAULT_PREVIEW_WIDTH_PX
-    };
-    let default_h = if scene.height_pt.is_finite() && scene.height_pt > 0.0 {
-        let scaled = (scene.height_pt * f64::from(dpi) / 72.0).round();
-        scaled.clamp(64.0, f64::from(MAX_RASTER_DIM_PX)) as u32
-    } else {
-        DEFAULT_PREVIEW_HEIGHT_PX
-    };
-
-    RenderTargetSpec { width_px: requested_w.unwrap_or(default_w), height_px: requested_h.unwrap_or(default_h), dpi }
-}
-
-fn parse_dpi(args: &Map<String, Value>) -> Result<u16, ToolCallError> {
-    match optional_u32_bounded(args, "dpi", u32::from(MIN_DPI), u32::from(MAX_DPI))? {
-        Some(v) => Ok(v as u16),
-        None => Ok(DEFAULT_PREVIEW_DPI),
-    }
-}
-
-fn resolve_open_format(path: &Path, args: &Map<String, Value>) -> Result<String, ToolCallError> {
-    if let Some(fmt_str) = optional_non_empty_str(args, "format")? {
-        return Ok(fmt_str.to_ascii_lowercase());
-    }
-    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    match ext.as_str() {
-        "lumencraft" | "lctemplate" | "prism" | "pzfx" | "csv" | "tsv" => Ok(ext),
-        "txt" => Ok(String::from("csv")),
-        "" => Err(ToolCallError::InvalidParams(String::from("cannot infer file format without extension; specify \"format\""))),
-        other => Err(ToolCallError::InvalidParams(format!("unsupported file extension '.{other}'"))),
-    }
-}
-
-fn resolve_save_format(path: &Path, args: &Map<String, Value>) -> Result<String, ToolCallError> {
-    if let Some(fmt_str) = optional_non_empty_str(args, "format")? {
-        return Ok(fmt_str.to_ascii_lowercase());
-    }
-    let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-    match ext.as_str() {
-        "lctemplate" => Ok(String::from("lctemplate")),
-        _ => Ok(String::from("lumencraft")),
-    }
-}
-
-fn parse_table_kind(raw: &str) -> Result<TableKind, ToolCallError> {
-    let normalized = raw.trim().to_ascii_lowercase();
-    match normalized.as_str() {
-        "xy" => Ok(TableKind::Xy),
-        "column" => Ok(TableKind::Column),
-        "grouped" => Ok(TableKind::Grouped),
-        "contingency" => Ok(TableKind::Contingency),
-        "survival" => Ok(TableKind::Survival),
-        "parts_of_whole" | "partsofwhole" => Ok(TableKind::PartsOfWhole),
-        "multiple_variables" | "multiplevariables" => Ok(TableKind::MultipleVariables),
-        "nested" => Ok(TableKind::Nested),
-        _ => Err(ToolCallError::InvalidParams(format!("unknown table kind '{raw}'"))),
-    }
-}
-
-fn parse_subcolumn_mode(raw: &str) -> Result<SubcolumnMode, ToolCallError> {
-    let normalized = raw.trim().to_ascii_lowercase();
-    if let Some(rest) = normalized.strip_prefix("replicates:") {
-        let count = rest
-            .trim()
-            .parse::<usize>()
-            .ok()
-            .filter(|&n| (1..=256).contains(&n))
-            .ok_or_else(|| ToolCallError::InvalidParams(format!("invalid replicate subcolumn count in '{raw}'")))?;
-        return Ok(SubcolumnMode::RawReplicates(count));
-    }
-    match normalized.as_str() {
-        "single" => Ok(SubcolumnMode::Single),
-        "mean_sd_n" => Ok(SubcolumnMode::MeanSdN),
-        "mean_sem_n" => Ok(SubcolumnMode::MeanSemN),
-        "mean_cv_n" => Ok(SubcolumnMode::MeanCvN),
-        "mean_low_high" => Ok(SubcolumnMode::MeanLowHigh),
-        "upper_lower_limits" => Ok(SubcolumnMode::UpperLowerLimits),
-        "median_iqr" => Ok(SubcolumnMode::MedianIqr),
-        _ => Err(ToolCallError::InvalidParams(format!("unknown subcolumn_mode '{raw}'"))),
-    }
-}
-
-fn parse_pdf_color_space(raw: &str) -> Result<PdfColorSpace, ToolCallError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "srgb" | "rgb" => Ok(PdfColorSpace::Srgb),
-        "cmyk" => Ok(PdfColorSpace::Cmyk),
-        "grayscale" | "gray" => Ok(PdfColorSpace::Grayscale),
-        _ => Err(ToolCallError::InvalidParams(format!("unsupported pdf_color_space '{raw}'"))),
-    }
-}
-
-fn parse_tiff_compression(raw: &str) -> Result<TiffCompression, ToolCallError> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "none" => Ok(TiffCompression::None),
-        "deflate" => Ok(TiffCompression::Deflate),
-        "lzw" => Ok(TiffCompression::Lzw),
-        _ => Err(ToolCallError::InvalidParams(format!("unsupported tiff_compression '{raw}'"))),
-    }
-}
-
-fn sanitize_sheet_id(stem: &str, fallback: &str) -> String {
-    let cleaned: String = stem.chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '-' }).collect();
-    let trimmed = cleaned.trim_matches('-');
-    if trimmed.is_empty() { fallback.to_owned() } else { trimmed.to_owned() }
-}
-
-fn extract_command_params(args: &Map<String, Value>) -> Result<Value, ToolCallError> {
+pub(crate) fn extract_command_params(args: &Map<String, Value>) -> Result<Value, ToolCallError> {
     match args.get("params") {
         None | Some(Value::Null) => Ok(Value::Object(Map::new())),
         Some(v) if v.is_object() => Ok(v.clone()),
@@ -1538,11 +1038,11 @@ fn extract_command_params(args: &Map<String, Value>) -> Result<Value, ToolCallEr
     }
 }
 
-fn required_non_empty_str(args: &Map<String, Value>, key: &str) -> Result<String, ToolCallError> {
+pub(crate) fn required_non_empty_str(args: &Map<String, Value>, key: &str) -> Result<String, ToolCallError> {
     optional_non_empty_str(args, key)?.ok_or_else(|| ToolCallError::InvalidParams(format!("missing or empty string parameter \"{key}\"")))
 }
 
-fn optional_non_empty_str(args: &Map<String, Value>, key: &str) -> Result<Option<String>, ToolCallError> {
+pub(crate) fn optional_non_empty_str(args: &Map<String, Value>, key: &str) -> Result<Option<String>, ToolCallError> {
     let Some(val) = args.get(key) else {
         return Ok(None);
     };
@@ -1559,7 +1059,7 @@ fn optional_non_empty_str(args: &Map<String, Value>, key: &str) -> Result<Option
     Ok(Some(trimmed.to_owned()))
 }
 
-fn optional_bool(args: &Map<String, Value>, key: &str) -> Result<Option<bool>, ToolCallError> {
+pub(crate) fn optional_bool(args: &Map<String, Value>, key: &str) -> Result<Option<bool>, ToolCallError> {
     let Some(val) = args.get(key) else {
         return Ok(None);
     };
@@ -1569,7 +1069,7 @@ fn optional_bool(args: &Map<String, Value>, key: &str) -> Result<Option<bool>, T
     val.as_bool().map(Some).ok_or_else(|| ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a boolean")))
 }
 
-fn optional_u32_bounded(args: &Map<String, Value>, key: &str, min: u32, max: u32) -> Result<Option<u32>, ToolCallError> {
+pub(crate) fn optional_u32_bounded(args: &Map<String, Value>, key: &str, min: u32, max: u32) -> Result<Option<u32>, ToolCallError> {
     let Some(val) = args.get(key) else {
         return Ok(None);
     };
@@ -1711,9 +1211,13 @@ mod live_control {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    use lumencraft_engine::cmd::{CommandGroup, Effects, registry};
     use serde_json::{Value, json};
 
-    use super::{McpServerState, ToolCallError, call_tool, encode_base64, list_tools};
+    use super::{McpServerState, ToolAnnotations, ToolCallError, call_tool, encode_base64, list_tools, list_tools_for_state, run_guarded_tool};
+    use crate::toolsets::command_id_to_mcp_tool_name;
     use crate::ui_catalog::UI_COMMANDS;
 
     #[test]
@@ -1728,9 +1232,60 @@ mod tests {
     }
 
     #[test]
-    fn list_tools_exposes_all_eight_tools() {
+    fn list_tools_exposes_all_ten_default_tools() {
         let names: Vec<String> = list_tools().into_iter().map(|t| t.name).collect();
-        assert_eq!(names, vec!["doc_inspect", "open_file", "save_file", "command_list", "command_run", "command_batch", "render_preview", "export"]);
+        assert_eq!(
+            names,
+            vec![
+                "doc_inspect",
+                "open_file",
+                "save_file",
+                "command_list",
+                "command_run",
+                "command_batch",
+                "render_preview",
+                "export",
+                "list_toolsets",
+                "enable_toolset",
+            ]
+        );
+    }
+
+    #[test]
+    fn per_command_mcp_names_are_valid_and_collision_free() {
+        let mut seen: BTreeSet<String> = list_tools().into_iter().map(|t| t.name).collect();
+        for spec in registry().specs() {
+            let normalized = command_id_to_mcp_tool_name(spec.id);
+            assert!(!normalized.is_empty(), "empty MCP tool name for {}", spec.id);
+            assert!(
+                normalized.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'),
+                "invalid MCP tool name '{}' for '{}'",
+                normalized,
+                spec.id
+            );
+            assert!(seen.insert(normalized.clone()), "collision on MCP tool name '{normalized}' for '{}'", spec.id);
+        }
+        assert_eq!(command_id_to_mcp_tool_name("sheet.createData"), "sheet_create_data");
+        assert_eq!(command_id_to_mcp_tool_name("table.setXCells"), "table_set_x_cells");
+        assert_eq!(command_id_to_mcp_tool_name("graph.exportSvg"), "graph_export_svg");
+    }
+
+    #[test]
+    fn annotations_match_engine_effects_flags() {
+        let mut state = McpServerState::new();
+        call_tool(&mut state, "enable_toolset", json!({ "group": "all" })).expect("enable all");
+        let tools = list_tools_for_state(&state);
+        for spec in registry().specs() {
+            let mcp_name = command_id_to_mcp_tool_name(spec.id);
+            let tool = tools.iter().find(|t| t.name == mcp_name).expect("per-command tool");
+            let expected = ToolAnnotations {
+                read_only_hint: spec.effects.read_only_hint(),
+                destructive_hint: spec.effects.destructive_hint(),
+                idempotent_hint: spec.effects.contains(Effects::IDEMPOTENT),
+                open_world_hint: spec.effects.intersects(Effects::READS_FILESYSTEM.with(Effects::WRITES_FILESYSTEM).with(Effects::LAUNCHES_PROCESS)),
+            };
+            assert_eq!(tool.annotations, expected, "annotation mismatch for {}", spec.id);
+        }
     }
 
     #[test]
@@ -1738,26 +1293,41 @@ mod tests {
         let mut state = McpServerState::new();
         let res = call_tool(&mut state, "command_list", json!({})).expect("command_list");
         assert!(!res.is_error);
+        assert!(res.structured_content.is_some());
         let super::ContentBlock::Text { text } = &res.content[0] else {
             panic!("expected text block");
         };
         let parsed: Value = serde_json::from_str(text).expect("json");
         let list = parsed["commands"].as_array().expect("commands array");
 
-        for &(ui_id, _, _, _) in UI_COMMANDS {
-            let entry = list.iter().find(|c| c["id"] == ui_id).expect("ui command entry");
+        for spec in UI_COMMANDS {
+            let entry = list.iter().find(|c| c["id"] == spec.id).expect("ui command entry");
             assert_eq!(entry["ui"], json!(true));
+            assert_eq!(entry["summary"], json!(spec.summary));
         }
         let non_ui = list.iter().find(|c| c["id"] == "sheet.createData").expect("engine command");
         assert_eq!(non_ui["ui"], json!(false));
+        assert_eq!(non_ui["group"], json!(CommandGroup::Sheet.as_str()));
     }
 
     #[test]
     fn unknown_tool_and_bad_params_return_protocol_errors() {
         let mut state = McpServerState::new();
         assert!(matches!(call_tool(&mut state, "nonexistent", json!({})), Err(ToolCallError::UnknownTool(_))));
+        assert!(matches!(call_tool(&mut state, "sheet_create_data", json!({})), Err(ToolCallError::UnknownTool(_))));
         assert!(matches!(call_tool(&mut state, "command_run", json!({})), Err(ToolCallError::InvalidParams(_))));
         assert!(matches!(call_tool(&mut state, "export", json!({"format": "bmp"})), Err(ToolCallError::InvalidParams(_))));
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn run_guarded_converts_panics_into_structured_internal_panic_result() {
+        let res = run_guarded_tool("test_panic", || panic!("simulated boom")).expect("recovered panic");
+        assert!(res.is_error);
+        let payload = res.structured_content.expect("structured error content");
+        assert_eq!(payload["code"], json!("internal_panic"));
+        assert_eq!(payload["category"], json!("internal"));
+        assert!(payload["message"].as_str().is_some_and(|m| m.contains("simulated boom")));
     }
 
     #[cfg(not(target_arch = "wasm32"))]

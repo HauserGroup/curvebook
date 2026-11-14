@@ -281,7 +281,20 @@ proptest! {
         params in arb_json_value(),
         has_id in proptest::arbitrary::any::<bool>(),
     ) {
-        if matches!(method.as_str(), "initialize" | "ping" | "tools/list" | "tools/call" | "notifications/initialized" | "initialized" | "notifications/cancelled") {
+        if matches!(
+            method.as_str(),
+            "initialize"
+                | "ping"
+                | "tools/list"
+                | "tools/call"
+                | "resources/list"
+                | "resources/read"
+                | "prompts/list"
+                | "prompts/get"
+                | "notifications/initialized"
+                | "initialized"
+                | "notifications/cancelled"
+        ) {
             return Ok(());
         }
         let mut req = json!({ "jsonrpc": "2.0", "method": method, "params": params });

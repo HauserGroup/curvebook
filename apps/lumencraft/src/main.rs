@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
@@ -10,7 +11,9 @@ use std::process::ExitCode;
 use lumencraft_doc::{ProjectDocument, SheetId, SubcolumnMode, TableKind};
 use lumencraft_engine::Session;
 use lumencraft_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, RecoveryReport};
-use lumencraft_format::{CsvOptions, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes, instantiate_template_bytes, open_project_file};
+use lumencraft_format::registry::{FormatKind, FormatRegistry, ImportOptions};
+use lumencraft_format::versioned::{CURRENT_PREFERENCES_VERSION, PreferencesFile, load_preferences_file, save_preferences_file};
+use lumencraft_format::{instantiate_template_bytes, is_unpacked_project_dir};
 use lumencraft_render::RenderTargetSpec;
 use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use lumencraft_ui_egui::dialogs_canvas::render_workspace_frame_png;
@@ -190,8 +193,20 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
         run_control_tcp_server(&mut app, addr)?;
     }
 
+    if should_persist_preferences(&app, &app_paths)? {
+        save_shortcut_preferences(&app, &app_paths)?;
+    }
     close_startup_recovery_cleanly(&mut app, startup.journal)?;
     Ok(())
+}
+
+fn should_persist_preferences(app: &UiApp, paths: &AppPaths) -> Result<bool, String> {
+    if paths.preferences_file.is_file() {
+        return Ok(true);
+    }
+    let raw = app.shortcuts.export_overrides_json()?;
+    let map: BTreeMap<String, String> = serde_json::from_str(&raw).map_err(|err| err.to_string())?;
+    Ok(!map.is_empty())
 }
 
 struct StartupRecoveryState {
@@ -326,29 +341,44 @@ fn load_validated_ttf_font(path: &Path) -> Result<(Vec<u8>, TrueTypeFontInfo), S
 }
 
 fn load_shortcut_preferences(app: &mut UiApp, paths: &AppPaths) -> Result<usize, String> {
+    if paths.preferences_file.is_file() {
+        let prefs = load_preferences_file(&paths.preferences_file)
+            .map_err(|err| format!("failed to load preferences `{}`: {err}", paths.preferences_file.display()))?;
+        if prefs.shortcuts.is_empty() {
+            return Ok(0);
+        }
+        let text = serde_json::to_string(&prefs.shortcuts).map_err(|err| err.to_string())?;
+        return app.shortcuts.import_overrides_json(&text);
+    }
     if paths.shortcuts_file.is_file() {
         let raw = std::fs::read_to_string(&paths.shortcuts_file)
             .map_err(|err| format!("failed to read shortcuts file `{}`: {err}", paths.shortcuts_file.display()))?;
         return app.shortcuts.import_overrides_json(&raw);
     }
-    if paths.preferences_file.is_file() {
-        let raw = std::fs::read_to_string(&paths.preferences_file)
-            .map_err(|err| format!("failed to read preferences file `{}`: {err}", paths.preferences_file.display()))?;
-        let val: serde_json::Value =
-            serde_json::from_str(&raw).map_err(|err| format!("invalid preferences JSON `{}`: {err}", paths.preferences_file.display()))?;
-        if let Some(shortcuts_obj) = val.get("shortcuts") {
-            let text = serde_json::to_string(shortcuts_obj).map_err(|err| err.to_string())?;
-            return app.shortcuts.import_overrides_json(&text);
-        }
-    }
     Ok(0)
 }
 
-#[cfg(test)]
 fn save_shortcut_preferences(app: &UiApp, paths: &AppPaths) -> Result<(), String> {
-    std::fs::create_dir_all(&paths.config_dir).map_err(|err| format!("failed to create config directory `{}`: {err}", paths.config_dir.display()))?;
-    let json = app.shortcuts.export_overrides_json()?;
-    std::fs::write(&paths.shortcuts_file, json).map_err(|err| format!("failed to write shortcuts file `{}`: {err}", paths.shortcuts_file.display()))
+    let mut prefs = if paths.preferences_file.is_file() {
+        load_preferences_file(&paths.preferences_file)
+            .map_err(|err| format!("failed to read existing preferences `{}`: {err}", paths.preferences_file.display()))?
+    } else {
+        PreferencesFile::default()
+    };
+    let raw_shortcuts = app.shortcuts.export_overrides_json()?;
+    let shortcuts: BTreeMap<String, String> = serde_json::from_str(&raw_shortcuts).map_err(|err| err.to_string())?;
+    prefs.version = CURRENT_PREFERENCES_VERSION;
+    prefs.shortcuts = shortcuts;
+    save_preferences_file(&paths.preferences_file, &prefs)
+        .map_err(|err| format!("failed to write preferences `{}`: {err}", paths.preferences_file.display()))
+}
+
+fn has_unpacked_dir_suffix(path: &Path) -> bool {
+    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.to_ascii_lowercase().ends_with(".lumencraft.d"))
+}
+
+fn is_unpacked_project_target(path: &Path) -> bool {
+    has_unpacked_dir_suffix(path) || is_unpacked_project_dir(path) || path.is_dir()
 }
 
 fn load_startup_session(files: &[PathBuf]) -> Result<Session, String> {
@@ -356,20 +386,31 @@ fn load_startup_session(files: &[PathBuf]) -> Result<Session, String> {
         return Ok(Session::new());
     }
 
+    let registry = FormatRegistry::default_registry();
     let mut primary_doc: Option<ProjectDocument> = None;
     let mut primary_archive_path: Option<PathBuf> = None;
     let mut clean_archive = false;
 
     for (idx, path) in files.iter().enumerate() {
-        let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-        match ext.as_str() {
-            "lumencraft" => {
-                let doc = open_project_file(path).map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
-                primary_doc = Some(doc);
+        let importer = if is_unpacked_project_target(path) { registry.importer_by_format("lumencraft.d") } else { registry.importer_for_path(path) };
+        let Some(importer) = importer else {
+            let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+            return Err(format!(
+                "unsupported file extension `.{ext}` for `{}`; expected .lumencraft, .lumencraft.d, .lctemplate, .prism, .pzfx, .csv, or .tsv",
+                path.display()
+            ));
+        };
+
+        let desc = importer.descriptor();
+        match desc.kind {
+            FormatKind::ProjectDir | FormatKind::Archive => {
+                let payload =
+                    importer.import_path(path, &ImportOptions::default()).map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
+                primary_doc = payload.into_document();
                 primary_archive_path = Some(path.clone());
                 clean_archive = true;
             }
-            "lctemplate" => {
+            FormatKind::Template => {
                 let bytes = std::fs::read(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
                 let doc =
                     instantiate_template_bytes(&bytes, None).map_err(|err| format!("failed to instantiate template `{}`: {err}", path.display()))?;
@@ -377,38 +418,34 @@ fn load_startup_session(files: &[PathBuf]) -> Result<Session, String> {
                 primary_archive_path = None;
                 clean_archive = false;
             }
-            "prism" => {
-                let bytes = std::fs::read(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
-                let report = import_prism_bytes(&bytes).map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
-                primary_doc = Some(report.document);
+            FormatKind::ForeignProject => {
+                let payload =
+                    importer.import_path(path, &ImportOptions::default()).map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
+                primary_doc = payload.into_document();
                 primary_archive_path = None;
                 clean_archive = false;
             }
-            "pzfx" => {
-                let bytes = std::fs::read(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
-                let report = import_pzfx_bytes(&bytes).map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
-                primary_doc = Some(report.document);
-                primary_archive_path = None;
-                clean_archive = false;
-            }
-            "csv" | "tsv" => {
-                let text = std::fs::read_to_string(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
-                let opts = if ext == "tsv" { CsvOptions::tsv() } else { CsvOptions::detect(&text) };
+            FormatKind::DelimitedText => {
                 let doc = primary_doc.get_or_insert_with(ProjectDocument::default);
                 let sheet_id = next_csv_sheet_id(doc, idx);
                 let title = file_stem_title(path);
-                let sheet = import_csv_to_datasheet(sheet_id.clone(), title, &text, TableKind::Column, SubcolumnMode::Single, &opts)
-                    .map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
+                let opts = ImportOptions {
+                    sheet_id: sheet_id.clone(),
+                    title,
+                    table_kind: TableKind::Column,
+                    subcolumn_mode: SubcolumnMode::Single,
+                    csv: None,
+                };
+                let payload = importer.import_path(path, &opts).map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
+                let sheet =
+                    payload.into_data_sheet().ok_or_else(|| format!("importer `{}` did not yield a data sheet for `{}`", desc.id, path.display()))?;
                 doc.add_data_sheet(sheet).map_err(|err| err.to_string())?;
                 if doc.active_sheet_id.is_none() {
                     let _ = doc.select_in_navigator(&sheet_id);
                 }
             }
-            other => {
-                return Err(format!(
-                    "unsupported file extension `.{other}` for `{}`; expected .lumencraft, .lctemplate, .prism, .pzfx, .csv, or .tsv",
-                    path.display()
-                ));
+            FormatKind::ResultTable | FormatKind::FigureVector | FormatKind::FigureRaster => {
+                return Err(format!("format `{}` cannot be opened directly as a startup workspace document", desc.id));
             }
         }
     }
@@ -546,10 +583,14 @@ mod tests {
         assert_eq!(marker_paths.config_dir, exe_dir.join("lumencraft-data"));
         assert_eq!(marker_paths.recovery_dir, exe_dir.join("lumencraft-data").join("recovery"));
 
-        // Shortcut preferences save & reload round-trip in portable mode
+        // Shortcut preferences save & reload round-trip in portable mode (versioned preferences.json)
         let mut app = lumencraft_ui_egui::UiApp::new();
         app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+L")?;
         super::save_shortcut_preferences(&app, &marker_paths)?;
+        assert!(marker_paths.preferences_file.is_file());
+        let saved_prefs_raw = std::fs::read_to_string(&marker_paths.preferences_file)?;
+        let saved_prefs_val: serde_json::Value = serde_json::from_str(&saved_prefs_raw)?;
+        assert_eq!(saved_prefs_val["version"], serde_json::json!(lumencraft_format::versioned::CURRENT_PREFERENCES_VERSION));
         let mut reloaded = lumencraft_ui_egui::UiApp::new();
         let imported = super::load_shortcut_preferences(&mut reloaded, &marker_paths)?;
         assert_eq!(imported, 1);
@@ -627,6 +668,96 @@ mod tests {
         let csv_session = load_startup_session(&[csv_path])?;
         assert_eq!(csv_session.document().data_sheets.len(), 1);
         assert_eq!(csv_session.document().data_sheets[0].title, "plate");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn startup_and_session_auto_detect_unpacked_project_dirs() -> Result<(), Box<dyn std::error::Error>> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-unpacked-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+
+        let unpacked_dot_d = dir.join("study.lumencraft.d");
+        let mut doc = ProjectDocument::new("Unpacked Startup")?;
+        let xy = XyTable::new(SubcolumnMode::Single, 1, 2)?;
+        doc.add_data_sheet(DataSheet::new("data-1", "Dose", TableArchetype::Xy(xy))?)?;
+        lumencraft_format::save_project_unpacked_dir(&doc, &unpacked_dot_d)?;
+
+        let session = load_startup_session(std::slice::from_ref(&unpacked_dot_d))?;
+        assert_eq!(session.document().title, "Unpacked Startup");
+        assert_eq!(session.file_path(), Some(unpacked_dot_d.as_path()));
+        assert!(!session.is_dirty());
+
+        let mut mut_session = session;
+        // 1. Auto-detect `.lumencraft.d` suffix when saving without explicit `unpacked: true`.
+        let saved_dot_d = dir.join("saved.lumencraft.d");
+        let save_resp =
+            mut_session.execute("project.save", serde_json::json!({ "path": saved_dot_d.display().to_string(), "return_bytes": false }))?;
+        assert_eq!(save_resp.payload.get("unpacked").and_then(|v| v.as_bool()), Some(true));
+        assert!(lumencraft_format::is_unpacked_project_dir(&saved_dot_d));
+
+        let reopened_dot_d = load_startup_session(std::slice::from_ref(&saved_dot_d))?;
+        assert_eq!(reopened_dot_d.document().title, "Unpacked Startup");
+
+        // 2. Also auto-detect an unpacked directory without `.lumencraft.d` suffix via `is_unpacked_project_dir`.
+        let plain_unpacked = dir.join("plain_project_dir");
+        let save_plain_resp = mut_session
+            .execute("project.save", serde_json::json!({ "path": plain_unpacked.display().to_string(), "unpacked": true, "return_bytes": false }))?;
+        assert_eq!(save_plain_resp.payload.get("unpacked").and_then(|v| v.as_bool()), Some(true));
+        assert!(lumencraft_format::is_unpacked_project_dir(&plain_unpacked));
+
+        let reopened = load_startup_session(std::slice::from_ref(&plain_unpacked))?;
+        assert_eq!(reopened.document().title, "Unpacked Startup");
+        assert_eq!(reopened.document().data_sheets.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn preferences_preserve_forward_fields_and_refuse_newer_version_overwrite() -> Result<(), Box<dyn std::error::Error>> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-prefs-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let paths = super::resolve_app_paths(None, Some(&dir));
+        std::fs::create_dir_all(&paths.config_dir)?;
+
+        // 1. Legacy v0 preferences file without explicit `version` upgrades and preserves metadata.
+        let legacy_raw = serde_json::json!({
+            "locale": "en-US",
+            "theme": "light",
+            "shortcuts": { "ui.gallery.toggle": "Ctrl+Alt+G" },
+            "future_flag": true
+        });
+        std::fs::write(&paths.preferences_file, serde_json::to_string_pretty(&legacy_raw)?)?;
+        let mut app = lumencraft_ui_egui::UiApp::new();
+        let count = super::load_shortcut_preferences(&mut app, &paths)?;
+        assert_eq!(count, 1);
+        assert_eq!(app.shortcuts.active_combo("ui.gallery.toggle"), Some("Ctrl+Alt+G"));
+
+        app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+G")?;
+        super::save_shortcut_preferences(&app, &paths)?;
+        let after_save: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&paths.preferences_file)?)?;
+        assert_eq!(after_save["version"], serde_json::json!(super::CURRENT_PREFERENCES_VERSION));
+        assert_eq!(after_save["locale"], serde_json::json!("en-US"));
+        assert_eq!(after_save["future_flag"], serde_json::json!(true));
+
+        // 2. Future version file on disk must never be overwritten.
+        let future_raw = serde_json::json!({
+            "version": super::CURRENT_PREFERENCES_VERSION + 42,
+            "shortcuts": { "ui.gallery.toggle": "Ctrl+Alt+F" },
+            "custom_future_setting": 123
+        });
+        let future_text = serde_json::to_string_pretty(&future_raw)?;
+        std::fs::write(&paths.preferences_file, &future_text)?;
+
+        let mut future_app = lumencraft_ui_egui::UiApp::new();
+        assert!(super::load_shortcut_preferences(&mut future_app, &paths).is_err());
+        future_app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+X")?;
+        assert!(super::save_shortcut_preferences(&future_app, &paths).is_err());
+        assert_eq!(std::fs::read_to_string(&paths.preferences_file)?, future_text, "newer-version preferences file must remain untouched");
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

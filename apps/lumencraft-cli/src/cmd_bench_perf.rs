@@ -1,6 +1,5 @@
 //! `lumencraft-cli bench <file>` and synthetic `lumencraft-cli perf` benchmarks.
 
-use std::fs;
 use std::path::Path;
 use std::time::Instant;
 
@@ -17,7 +16,7 @@ use lumencraft_svg::{SvgExportOptions, render_svg};
 use lumencraft_text::{measure_text_pt, parse_markup};
 use serde_json::{Value, json};
 
-use crate::cmd_convert::load_project_from_bytes;
+use crate::cmd_convert::load_project_from_path;
 use crate::error::CliError;
 
 const PERF_MV_ROWS: usize = 100_000;
@@ -39,10 +38,9 @@ pub fn run_bench(args: &[String]) -> Result<(), CliError> {
         return Err(CliError::Usage(String::from("usage: lumencraft-cli bench <file> [--json]")));
     };
     let path = Path::new(&file);
-    let bytes = fs::read(path).map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", path.display())))?;
 
     let t_parse = Instant::now();
-    let loaded = load_project_from_bytes(path, &bytes, false)?;
+    let (loaded, input_bytes) = load_project_from_path(path, false)?;
     let parse_ms = elapsed_ms(t_parse);
 
     let t_recalc = Instant::now();
@@ -83,7 +81,7 @@ pub fn run_bench(args: &[String]) -> Result<(), CliError> {
         "ok": true,
         "file": file,
         "format": loaded.format_tag,
-        "input_bytes": bytes.len(),
+        "input_bytes": input_bytes,
         "tables": doc.data_sheets.len(),
         "analyses": doc.result_sheets.len(),
         "graphs": doc.graph_sheets.len(),
@@ -109,7 +107,7 @@ pub fn run_bench(args: &[String]) -> Result<(), CliError> {
         println!(
             "bench `{file}` ({}, {} bytes): parse={parse_ms:.2}ms recalc={recalc_ms:.2}ms compile={compile_ms:.2}ms ({} scene(s)) svg={svg_ms:.2}ms pdf={pdf_ms:.2}ms png={png_ms:.2}ms",
             loaded.format_tag,
-            bytes.len(),
+            input_bytes,
             scenes.len()
         );
     })

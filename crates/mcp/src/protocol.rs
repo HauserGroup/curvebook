@@ -9,10 +9,20 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::SERVER_NAME;
-use crate::tools::{McpServerState, ToolCallError, call_tool, list_tools};
+use crate::errors;
+use crate::prompts::{get_prompt, list_prompts};
+use crate::resources::{ResourceError, list_resources, read_resource};
+use crate::tools::{McpServerState, ToolCallError, call_tool, list_tools_for_state};
 
 /// MCP protocol revision advertised by this server during `initialize`.
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+
+/// Guidance string advertised to MCP clients during `initialize`.
+pub const SERVER_INSTRUCTIONS: &str = "\
+LumenCraft MCP server for scientific tables, statistical analysis, curve fitting, and publication figures. \
+Use `doc_inspect` or MCP resources (`resources/list`, `resources/read` with `sheet://<id>` or `result://<id>`) to inspect active sheets and results. \
+Core tools are available immediately; call `list_toolsets` and `enable_toolset` to dynamically load per-command CommandGroup tools (which emits `notifications/tools/list_changed`). \
+Inspect each tool's `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) before executing mutating or filesystem commands, and use `prompts/list` + `prompts/get` for guided analysis workflows.";
 
 /// Newer MCP protocol revision accepted when explicitly requested by a client.
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] = ["2024-11-05", "2025-03-26"];
@@ -46,6 +56,9 @@ pub const ERR_INVALID_PARAMS: i64 = -32602;
 
 /// JSON-RPC 2.0 Internal error code.
 pub const ERR_INTERNAL_ERROR: i64 = -32603;
+
+/// MCP Resource not found error code.
+pub const ERR_RESOURCE_NOT_FOUND: i64 = -32002;
 
 /// Wire framing mode detected for an inbound JSON-RPC message and mirrored on outbound replies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -141,6 +154,9 @@ pub fn serve_with_max_bytes<R: BufRead, W: Write>(reader: &mut R, writer: &mut W
                 last_mode = mode;
                 if let Some(reply_value) = dispatch_payload(&bytes, state) {
                     write_json_value(writer, &reply_value, mode)?;
+                }
+                for notif in state.take_pending_notifications() {
+                    write_json_value(writer, &notif, mode)?;
                 }
             }
             NextFrame::RecoverableError { mode, code, message } => {
@@ -256,8 +272,12 @@ fn dispatch_method(req_id: Option<Value>, method: &str, params: Value, state: &m
     match method {
         "initialize" => Some(handle_initialize(id, &params, state)),
         "ping" => Some(JsonRpcResponse::ok(id, json!({}))),
-        "tools/list" => Some(handle_tools_list(id, &params)),
+        "tools/list" => Some(handle_tools_list(id, &params, state)),
         "tools/call" => Some(handle_tools_call(id, params, state)),
+        "resources/list" => Some(handle_resources_list(id, &params, state)),
+        "resources/read" => Some(handle_resources_read(id, &params, state)),
+        "prompts/list" => Some(handle_prompts_list(id, &params)),
+        "prompts/get" => Some(handle_prompts_get(id, &params)),
         _ => Some(JsonRpcResponse::err(id, ERR_METHOD_NOT_FOUND, format!("method not found: {method}"), None)),
     }
 }
@@ -279,13 +299,21 @@ fn handle_initialize(id: Value, params: &Value, state: &mut McpServerState) -> J
             "protocolVersion": negotiated,
             "capabilities": {
                 "tools": {
+                    "listChanged": true
+                },
+                "resources": {
+                    "subscribe": false,
+                    "listChanged": false
+                },
+                "prompts": {
                     "listChanged": false
                 }
             },
             "serverInfo": {
                 "name": SERVER_NAME,
                 "version": env!("CARGO_PKG_VERSION")
-            }
+            },
+            "instructions": SERVER_INSTRUCTIONS
         }),
     )
 }
@@ -301,11 +329,11 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
     MCP_PROTOCOL_VERSION
 }
 
-fn handle_tools_list(id: Value, params: &Value) -> JsonRpcResponse {
+fn handle_tools_list(id: Value, params: &Value, state: &McpServerState) -> JsonRpcResponse {
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "tools/list params must be an object", None);
     }
-    JsonRpcResponse::ok(id, json!({ "tools": list_tools() }))
+    JsonRpcResponse::ok(id, json!({ "tools": list_tools_for_state(state) }))
 }
 
 fn handle_tools_call(id: Value, params: Value, state: &mut McpServerState) -> JsonRpcResponse {
@@ -331,12 +359,66 @@ fn handle_tools_call(id: Value, params: Value, state: &mut McpServerState) -> Js
         Err(ToolCallError::UnknownTool(unknown)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, format!("unknown tool: {unknown}"), None),
         Err(ToolCallError::InvalidParams(msg)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, msg, None),
         Err(ToolCallError::Execution(msg)) => {
-            let err_result = crate::tools::ToolCallResult::error_text(msg);
+            let err_result = errors::result_from_error_message(msg);
             match serde_json::to_value(err_result) {
                 Ok(val) => JsonRpcResponse::ok(id, val),
                 Err(err) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, format!("failed to encode tool error: {err}"), None),
             }
         }
+    }
+}
+
+fn handle_resources_list(id: Value, params: &Value, state: &McpServerState) -> JsonRpcResponse {
+    if !params.is_object() {
+        return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/list params must be an object", None);
+    }
+    JsonRpcResponse::ok(id, json!({ "resources": list_resources(state.session().document()) }))
+}
+
+fn handle_resources_read(id: Value, params: &Value, state: &McpServerState) -> JsonRpcResponse {
+    let Some(map) = params.as_object() else {
+        return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/read params must be an object", None);
+    };
+    let Some(uri) = map.get("uri").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) else {
+        return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/read requires a non-empty string \"uri\"", None);
+    };
+
+    match read_resource(state.session().document(), uri) {
+        Ok(contents) => JsonRpcResponse::ok(id, json!({ "contents": contents })),
+        Err(ResourceError::InvalidUri(msg)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, msg, None),
+        Err(ResourceError::NotFound(msg)) => JsonRpcResponse::err(id, ERR_RESOURCE_NOT_FOUND, msg, Some(json!({ "uri": uri }))),
+        Err(ResourceError::Internal(msg)) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, msg, None),
+    }
+}
+
+fn handle_prompts_list(id: Value, params: &Value) -> JsonRpcResponse {
+    if !params.is_object() {
+        return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/list params must be an object", None);
+    }
+    JsonRpcResponse::ok(id, json!({ "prompts": list_prompts() }))
+}
+
+fn handle_prompts_get(id: Value, params: &Value) -> JsonRpcResponse {
+    let Some(map) = params.as_object() else {
+        return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/get params must be an object", None);
+    };
+    let Some(name) = map.get("name").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) else {
+        return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/get requires a non-empty string \"name\"", None);
+    };
+    let arguments = match map.get("arguments") {
+        None | Some(Value::Null) => Map::new(),
+        Some(Value::Object(obj)) => obj.clone(),
+        Some(_) => {
+            return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/get \"arguments\" must be an object", None);
+        }
+    };
+
+    match get_prompt(name, &arguments) {
+        Ok(result) => match serde_json::to_value(result) {
+            Ok(val) => JsonRpcResponse::ok(id, val),
+            Err(err) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, format!("failed to encode prompt result: {err}"), None),
+        },
+        Err(msg) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, msg, None),
     }
 }
 
@@ -676,11 +758,14 @@ mod tests {
         assert_eq!(replies[0]["id"], json!(1));
         assert_eq!(replies[0]["result"]["protocolVersion"], json!("2024-11-05"));
         assert_eq!(replies[0]["result"]["serverInfo"]["name"], json!("lumencraft"));
-        assert!(replies[0]["result"]["capabilities"]["tools"].is_object());
+        assert!(replies[0]["result"]["instructions"].as_str().is_some_and(|s| !s.is_empty()));
+        assert_eq!(replies[0]["result"]["capabilities"]["tools"]["listChanged"], json!(true));
+        assert!(replies[0]["result"]["capabilities"]["resources"].is_object());
+        assert!(replies[0]["result"]["capabilities"]["prompts"].is_object());
         assert_eq!(replies[1]["id"], json!(2));
         assert_eq!(replies[1]["result"], json!({}));
         assert_eq!(replies[2]["id"], json!(3));
-        assert_eq!(replies[2]["result"]["tools"].as_array().expect("tools").len(), 8);
+        assert_eq!(replies[2]["result"]["tools"].as_array().expect("tools").len(), 10);
     }
 
     #[test]

@@ -150,16 +150,16 @@ fn slice0_handshake_and_catalog(state: &mut McpServerState) -> Result<(), String
     {
         return Err(format!("unexpected initialize reply: {}", hs_replies[0]));
     }
-    if hs_replies[2]["result"]["tools"].as_array().map(Vec::len) != Some(8) || !state.is_initialized() {
+    if hs_replies[2]["result"]["tools"].as_array().map(Vec::len) != Some(10) || !state.is_initialized() {
         return Err(format!("unexpected tools/list or init state: {}", hs_replies[2]));
     }
 
     let cmd_list = first_text_json(&call_tool_rpc(state, 4, "command_list", json!({}))?)?;
     let entries = cmd_list["commands"].as_array().ok_or_else(|| String::from("missing commands array"))?;
-    for &(ui_id, _, _, _) in UI_COMMANDS {
-        let hit = entries.iter().find(|item| item["id"] == ui_id).ok_or_else(|| format!("missing UI command {ui_id}"))?;
+    for spec in UI_COMMANDS {
+        let hit = entries.iter().find(|item| item["id"] == spec.id).ok_or_else(|| format!("missing UI command {}", spec.id))?;
         if hit["ui"] != json!(true) {
-            return Err(format!("expected ui=true on {ui_id}: {hit}"));
+            return Err(format!("expected ui=true on {}: {hit}", spec.id));
         }
     }
     Ok(())
@@ -595,7 +595,7 @@ fn newline_transport_supports_layout_rendering_and_multipage_pdf() {
 fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     use std::io::ErrorKind;
     use std::net::{TcpListener, TcpStream};
-    use std::sync::{Arc, Mutex};
+    use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
@@ -631,8 +631,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
         Err(err) => panic!("unexpected loopback probe error: {err}"),
     }
 
-    let recorded_methods: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    let recorded_clone = Arc::clone(&recorded_methods);
+    let (methods_tx, methods_rx) = mpsc::channel::<String>();
 
     let handle = thread::spawn(move || {
         for stream_res in listener.incoming().take(5) {
@@ -643,7 +642,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
             let req: Value = serde_json::from_str(&line).expect("json req");
             let id = req["id"].as_str().unwrap_or("mcp-1").to_owned();
             let method = req["method"].as_str().unwrap_or("").to_owned();
-            recorded_clone.lock().expect("lock").push(method.clone());
+            methods_tx.send(method.clone()).expect("record method");
 
             let resp = match method.as_str() {
                 "state.snapshot" => json!({ "id": id, "ok": true, "result": { "title": "Live Desktop Window", "active_sheet_id": "xy-live" } }),
@@ -698,6 +697,6 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     assert_eq!(batch_json["rolled_back"], json!(true));
 
     handle.join().expect("server thread finished");
-    let methods = recorded_methods.lock().expect("lock").clone();
+    let methods: Vec<String> = methods_rx.iter().collect();
     assert_eq!(methods, vec!["state.snapshot", "ui.navigator.toggle", "engine.execute", "engine.execute", "engine.execute"]);
 }

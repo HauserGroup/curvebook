@@ -5,12 +5,13 @@ use std::path::Path;
 
 use lumencraft_chart::{ChartScene, compile_graph, compile_layout};
 use lumencraft_doc::{DataSheet, GraphSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
+use lumencraft_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry, ImportOptions, ImportPayload};
 use lumencraft_format::{
-    ArchiveKind, CsvOptions, ImportReport, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv,
-    import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes, open_archive_bytes, save_project_bytes,
+    ArchiveKind, CsvOptions, ImportReport, export_result_tab_csv, import_prism_bytes, import_pzfx_bytes, is_unpacked_project_dir, open_archive_bytes,
 };
 use lumencraft_pdf::{PdfExportOptions, PdfVersion, render_pdf};
-use lumencraft_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
+use lumencraft_platform::fs::write_atomic;
+use lumencraft_render::{RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
 use lumencraft_svg::{SvgExportOptions, render_svg};
 use lumencraft_text::parse_truetype_font_info;
 use serde_json::json;
@@ -31,12 +32,14 @@ pub struct LoadedProject {
     pub warnings: Vec<String>,
 }
 
-/// Supported target export formats for `convert` and batch manifest `exports`.
+/// Supported target export formats for `convert`, `export`, and batch manifest `exports`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExportFormat {
     Lumencraft,
+    LumencraftDir,
     Svg,
     Pdf,
+    Emf,
     Png,
     Tiff,
     Csv,
@@ -50,8 +53,10 @@ impl ExportFormat {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Lumencraft => "lumencraft",
+            Self::LumencraftDir => "lumencraft.d",
             Self::Svg => "svg",
             Self::Pdf => "pdf",
+            Self::Emf => "emf",
             Self::Png => "png",
             Self::Tiff => "tiff",
             Self::Csv => "csv",
@@ -86,6 +91,7 @@ pub struct ExportOutcomeSummary {
 struct ConvertArgs {
     input_path: String,
     output_path: String,
+    format: Option<ExportFormat>,
     sheet: Option<String>,
     dpi: Option<u16>,
     pdf_version: PdfVersion,
@@ -103,16 +109,27 @@ enum TabularTarget<'a> {
     Result(&'a ResultSheet),
 }
 
-/// Execute `lumencraft-cli convert <in> <out> [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]`.
+/// Execute `lumencraft-cli convert <in> <out> [--sheet <id>] [--format <fmt>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]`.
 pub fn run_convert(args: &[String]) -> Result<(), CliError> {
-    let parsed = parse_convert_args(args)?;
+    run_convert_or_export(args, "convert", "converted")
+}
+
+/// Execute `lumencraft-cli export <in> (<out> | --out <out>) [--sheet <id>] [--format <fmt>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]`.
+pub fn run_export(args: &[String]) -> Result<(), CliError> {
+    run_convert_or_export(args, "export", "exported")
+}
+
+fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Result<(), CliError> {
+    let parsed = parse_export_or_convert_args(args, command_name)?;
     let in_path = Path::new(&parsed.input_path);
     let out_path = Path::new(&parsed.output_path);
     let font_bytes = parsed.ttf_font.as_deref().map(Path::new).map(load_validated_ttf_font).transpose()?;
 
-    let bytes = fs::read(in_path).map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", in_path.display())))?;
-    let loaded = load_project_from_bytes(in_path, &bytes, true)?;
-    let format = detect_export_format_from_path(out_path)?;
+    let (loaded, _input_bytes) = load_project_from_path(in_path, true)?;
+    let format = match parsed.format {
+        Some(fmt) => fmt,
+        None => detect_export_format_from_path(out_path)?,
+    };
 
     let summary = export_from_document(&ExportRequest {
         doc: &loaded.doc,
@@ -156,7 +173,7 @@ pub fn run_convert(args: &[String]) -> Result<(), CliError> {
         println!("{text}");
     } else {
         println!(
-            "converted `{}` ({}) -> `{}` ({}, {} bytes)",
+            "{verb} `{}` ({}) -> `{}` ({}, {} bytes)",
             parsed.input_path, loaded.format_tag, summary.out_path, summary.format, summary.bytes_written
         );
     }
@@ -194,24 +211,80 @@ pub fn load_validated_ttf_font(path: &Path) -> Result<Vec<u8>, CliError> {
     Ok(bytes)
 }
 
-/// Parse an export format keyword or file extension.
-pub fn parse_export_format(raw: &str) -> Result<ExportFormat, CliError> {
-    let norm = raw.trim().trim_start_matches('.').to_ascii_lowercase();
-    match norm.as_str() {
-        "lumencraft" => Ok(ExportFormat::Lumencraft),
-        "svg" => Ok(ExportFormat::Svg),
-        "pdf" => Ok(ExportFormat::Pdf),
-        "png" => Ok(ExportFormat::Png),
-        "tiff" | "tif" => Ok(ExportFormat::Tiff),
-        "csv" => Ok(ExportFormat::Csv),
-        "tsv" => Ok(ExportFormat::Tsv),
-        "json" => Ok(ExportFormat::Json),
-        _ => Err(CliError::Usage(format!("unsupported export format `{raw}` (expected lumencraft, svg, pdf, png, tiff, csv, tsv, json)"))),
+/// Return `true` when `path` carries a `.lumencraft.d` directory suffix (case-insensitive).
+#[must_use]
+pub fn has_unpacked_dir_suffix(path: &Path) -> bool {
+    path.file_name().and_then(std::ffi::OsStr::to_str).is_some_and(|name| name.to_ascii_lowercase().ends_with(".lumencraft.d"))
+}
+
+/// Return `true` when `path` refers to an unpacked `.lumencraft.d` directory or an existing directory.
+#[must_use]
+pub fn is_unpacked_project_path(path: &Path) -> bool {
+    has_unpacked_dir_suffix(path) || is_unpacked_project_dir(path) || path.is_dir()
+}
+
+/// Compute total file byte size inside an unpacked directory tree.
+pub fn dir_size_bytes(root: &Path) -> Result<usize, CliError> {
+    let mut total = 0_u64;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = fs::read_dir(&dir).map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", dir.display())))?;
+        for entry in entries {
+            let entry = entry.map_err(|err| CliError::Runtime(format!("failed to inspect `{}`: {err}", dir.display())))?;
+            let meta = entry.metadata().map_err(|err| CliError::Runtime(format!("failed to stat `{}`: {err}", entry.path().display())))?;
+            if meta.is_dir() {
+                stack.push(entry.path());
+            } else {
+                total = total.saturating_add(meta.len());
+            }
+        }
+    }
+    Ok(usize::try_from(total).unwrap_or(usize::MAX))
+}
+
+fn export_format_from_descriptor_id(id: &str) -> Option<ExportFormat> {
+    match id {
+        "lumencraft" => Some(ExportFormat::Lumencraft),
+        "lumencraft.d" => Some(ExportFormat::LumencraftDir),
+        "svg" => Some(ExportFormat::Svg),
+        "pdf" => Some(ExportFormat::Pdf),
+        "emf" => Some(ExportFormat::Emf),
+        "png" => Some(ExportFormat::Png),
+        "tiff" => Some(ExportFormat::Tiff),
+        "csv" => Some(ExportFormat::Csv),
+        "tsv" => Some(ExportFormat::Tsv),
+        "json" => Some(ExportFormat::Json),
+        _ => None,
     }
 }
 
-/// Infer [`ExportFormat`] from an output file extension.
+/// Parse an export format keyword or file extension via [`FormatRegistry`].
+pub fn parse_export_format(raw: &str) -> Result<ExportFormat, CliError> {
+    let norm = raw.trim().trim_start_matches('.').to_ascii_lowercase();
+    let canonical = match norm.as_str() {
+        "lumencraft-dir" | "unpacked" | "dir" => "lumencraft.d",
+        other => other,
+    };
+    let registry = FormatRegistry::default_registry();
+    if let Some(exporter) = registry.exporter_by_format(canonical)
+        && let Some(fmt) = export_format_from_descriptor_id(exporter.descriptor().id)
+    {
+        return Ok(fmt);
+    }
+    Err(CliError::Usage(format!("unsupported export format `{raw}` (expected lumencraft, lumencraft.d, svg, pdf, emf, png, tiff, csv, tsv, json)")))
+}
+
+/// Infer [`ExportFormat`] from an output path via [`FormatRegistry`] (including `.lumencraft.d` directories).
 pub fn detect_export_format_from_path(path: &Path) -> Result<ExportFormat, CliError> {
+    if is_unpacked_project_path(path) {
+        return Ok(ExportFormat::LumencraftDir);
+    }
+    let registry = FormatRegistry::default_registry();
+    if let Some(exporter) = registry.exporter_for_path(path)
+        && let Some(fmt) = export_format_from_descriptor_id(exporter.descriptor().id)
+    {
+        return Ok(fmt);
+    }
     let ext = path
         .extension()
         .and_then(std::ffi::OsStr::to_str)
@@ -219,22 +292,78 @@ pub fn detect_export_format_from_path(path: &Path) -> Result<ExportFormat, CliEr
     parse_export_format(ext)
 }
 
-/// Load a [`ProjectDocument`] from archive, interchange, JSON, or optionally CSV/TSV bytes.
+/// Load a [`ProjectDocument`] from a file path or unpacked `.lumencraft.d` directory, returning `(loaded, input_bytes)`.
+pub fn load_project_from_path(path: &Path, allow_delimited: bool) -> Result<(LoadedProject, usize), CliError> {
+    if is_unpacked_project_path(path) {
+        let registry = FormatRegistry::default_registry();
+        let importer = registry
+            .importer_by_format("lumencraft.d")
+            .ok_or_else(|| CliError::Runtime(String::from("missing `lumencraft.d` importer in FormatRegistry")))?;
+        let payload = importer.import_path(path, &ImportOptions::default())?;
+        let doc = payload.into_document().ok_or_else(|| CliError::Runtime(String::from("`lumencraft.d` importer returned non-document payload")))?;
+        let total_bytes = dir_size_bytes(path)?;
+        return Ok((LoadedProject { doc, format_tag: "lumencraft.d", warnings: Vec::new() }, total_bytes));
+    }
+    let bytes = fs::read(path).map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", path.display())))?;
+    let loaded = load_project_from_bytes(path, &bytes, allow_delimited)?;
+    Ok((loaded, bytes.len()))
+}
+
+/// Load a [`ProjectDocument`] from archive, interchange, JSON, or optionally CSV/TSV bytes via [`FormatRegistry`].
 pub fn load_project_from_bytes(path_hint: &Path, bytes: &[u8], allow_delimited: bool) -> Result<LoadedProject, CliError> {
+    let registry = FormatRegistry::default_registry();
+    if let Some(importer) = registry.importer_for_path(path_hint) {
+        let desc = importer.descriptor();
+        return import_with_registered_adapter(importer, desc.id, desc.kind, path_hint, bytes, allow_delimited);
+    }
     let ext = path_hint.extension().and_then(std::ffi::OsStr::to_str).map(str::to_ascii_lowercase);
-    match ext.as_deref() {
-        Some("lumencraft" | "lctemplate") => load_native_archive(bytes),
-        Some("prism") => load_import_report(import_prism_bytes(bytes)?, "prism"),
-        Some("pzfx") => load_import_report(import_pzfx_bytes(bytes)?, "pzfx"),
-        Some("json") => load_project_json(bytes),
-        Some("csv") if allow_delimited => load_delimited_bytes(path_hint, bytes, &CsvOptions::csv(), "csv"),
-        Some("tsv") if allow_delimited => load_delimited_bytes(path_hint, bytes, &CsvOptions::tsv(), "tsv"),
-        Some("csv" | "tsv") => Err(CliError::Usage(String::from("delimited CSV/TSV files are not project archives"))),
-        _ => sniff_project_bytes(bytes),
+    if ext.as_deref() == Some("json") {
+        return load_project_json(bytes);
+    }
+    sniff_project_bytes(bytes)
+}
+
+fn import_with_registered_adapter(
+    importer: &dyn lumencraft_format::registry::Importer,
+    format_tag: &'static str,
+    kind: FormatKind,
+    path_hint: &Path,
+    bytes: &[u8],
+    allow_delimited: bool,
+) -> Result<LoadedProject, CliError> {
+    match kind {
+        FormatKind::Archive | FormatKind::Template => {
+            let doc = match importer.import_bytes(bytes, &ImportOptions::default()) {
+                Ok(payload) => {
+                    payload.into_document().ok_or_else(|| CliError::Runtime(format!("importer `{format_tag}` returned non-document payload")))?
+                }
+                Err(registry_err) => {
+                    if let Ok((_, doc)) = open_archive_bytes(bytes) {
+                        doc
+                    } else {
+                        return Err(CliError::from(registry_err));
+                    }
+                }
+            };
+            Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
+        }
+        FormatKind::ForeignProject => match importer.import_bytes(bytes, &ImportOptions::default())? {
+            ImportPayload::Report(report) => load_import_report(report, format_tag),
+            ImportPayload::Document(doc) => Ok(LoadedProject { doc, format_tag, warnings: Vec::new() }),
+            ImportPayload::DataSheet(_) => Err(CliError::Runtime(format!("importer `{format_tag}` returned unexpected single-sheet payload"))),
+        },
+        FormatKind::DelimitedText => {
+            if !allow_delimited {
+                return Err(CliError::Usage(String::from("delimited CSV/TSV files are not project archives")));
+            }
+            let csv_opts = if format_tag == "tsv" { CsvOptions::tsv() } else { CsvOptions::csv() };
+            load_delimited_with_importer(importer, path_hint, bytes, &csv_opts, format_tag)
+        }
+        FormatKind::ProjectDir | FormatKind::ResultTable | FormatKind::FigureVector | FormatKind::FigureRaster => sniff_project_bytes(bytes),
     }
 }
 
-/// Write an exported sheet or whole document to `req.out_path`.
+/// Write an exported sheet or whole document to `req.out_path` using atomic writes and [`FormatRegistry`].
 pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSummary, CliError> {
     if let Some(dpi) = req.dpi
         && dpi == 0
@@ -242,8 +371,29 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
         return Err(CliError::Usage(String::from("--dpi must be >= 1")));
     }
 
+    let registry = FormatRegistry::default_registry();
+    if req.format == ExportFormat::LumencraftDir {
+        let exporter = registry
+            .exporter_by_format("lumencraft.d")
+            .ok_or_else(|| CliError::Runtime(String::from("missing `lumencraft.d` exporter in FormatRegistry")))?;
+        exporter.export_path(ExportSource::Document(req.doc), req.out_path, &ExportOptions::default())?;
+        let bytes_written = dir_size_bytes(req.out_path)?;
+        return Ok(ExportOutcomeSummary {
+            out_path: req.out_path.to_string_lossy().into_owned(),
+            format: req.format.as_str(),
+            sheet_id: None,
+            bytes_written,
+        });
+    }
+
     let (bytes, sheet_id) = match req.format {
-        ExportFormat::Lumencraft => (save_project_bytes(req.doc)?, None),
+        ExportFormat::Lumencraft => {
+            let exporter = registry
+                .exporter_by_format("lumencraft")
+                .ok_or_else(|| CliError::Runtime(String::from("missing `lumencraft` exporter in FormatRegistry")))?;
+            (exporter.export_bytes(ExportSource::Document(req.doc), &ExportOptions::default())?, None)
+        }
+        ExportFormat::LumencraftDir => (Vec::new(), None),
         ExportFormat::Svg => {
             let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
             let svg = render_svg(&scene, &SvgExportOptions::default())?;
@@ -259,6 +409,11 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
             let pdf = render_pdf(&scene, &pdf_opts)?;
             (pdf, Some(id))
         }
+        ExportFormat::Emf => {
+            let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
+            let emf = encode_emf(&scene)?;
+            (emf, Some(id))
+        }
         ExportFormat::Png => {
             let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
             let img = rasterize_scene(&scene, req.dpi.unwrap_or(DEFAULT_RASTER_DPI))?;
@@ -269,9 +424,9 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
             let img = rasterize_scene(&scene, req.dpi.unwrap_or(DEFAULT_RASTER_DPI))?;
             (encode_tiff(&img, TiffCompression::Deflate)?, Some(id))
         }
-        ExportFormat::Csv => export_tabular_csv(req.doc, req.sheet, req.tab_index, &CsvOptions::csv())?,
-        ExportFormat::Tsv => export_tabular_csv(req.doc, req.sheet, req.tab_index, &CsvOptions::tsv())?,
-        ExportFormat::Json => export_json_target(req.doc, req.sheet, req.pretty)?,
+        ExportFormat::Csv => export_tabular_csv(&registry, req.doc, req.sheet, req.tab_index, "csv", &CsvOptions::csv())?,
+        ExportFormat::Tsv => export_tabular_csv(&registry, req.doc, req.sheet, req.tab_index, "tsv", &CsvOptions::tsv())?,
+        ExportFormat::Json => export_json_target(&registry, req.doc, req.sheet, req.pretty)?,
     };
 
     if let Some(parent) = req.out_path.parent()
@@ -280,7 +435,7 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
     {
         fs::create_dir_all(parent).map_err(|err| CliError::Runtime(format!("failed to create output directory `{}`: {err}", parent.display())))?;
     }
-    fs::write(req.out_path, &bytes).map_err(|err| CliError::Runtime(format!("failed to write `{}`: {err}", req.out_path.display())))?;
+    write_atomic(req.out_path, &bytes)?;
 
     Ok(ExportOutcomeSummary {
         out_path: req.out_path.to_string_lossy().into_owned(),
@@ -309,10 +464,25 @@ fn load_project_json(bytes: &[u8]) -> Result<LoadedProject, CliError> {
     Ok(LoadedProject { doc, format_tag: "json", warnings: Vec::new() })
 }
 
-fn load_delimited_bytes(path_hint: &Path, bytes: &[u8], opts: &CsvOptions, format_tag: &'static str) -> Result<LoadedProject, CliError> {
-    let text = std::str::from_utf8(bytes).map_err(|err| CliError::Runtime(format!("input file is not valid UTF-8: {err}")))?;
+fn load_delimited_with_importer(
+    importer: &dyn lumencraft_format::registry::Importer,
+    path_hint: &Path,
+    bytes: &[u8],
+    csv_opts: &CsvOptions,
+    format_tag: &'static str,
+) -> Result<LoadedProject, CliError> {
     let stem = path_hint.file_stem().and_then(std::ffi::OsStr::to_str).filter(|s| !s.trim().is_empty()).unwrap_or("Imported Table");
-    let ds = import_csv_to_datasheet(SheetId::new("data_1"), stem, text, TableKind::Xy, SubcolumnMode::Single, opts)?;
+    let opts = ImportOptions {
+        sheet_id: SheetId::new("data_1"),
+        title: stem.to_owned(),
+        table_kind: TableKind::Xy,
+        subcolumn_mode: SubcolumnMode::Single,
+        csv: Some(csv_opts.clone()),
+    };
+    let ds = importer
+        .import_bytes(bytes, &opts)?
+        .into_data_sheet()
+        .ok_or_else(|| CliError::Runtime(format!("delimited importer `{format_tag}` did not return a DataSheet")))?;
     let mut doc = ProjectDocument::new(stem)?;
     let mut graph = GraphSheet::new_uninitialized_for_data(SheetId::new("graph_1"), &ds)?;
     graph.initialized = true;
@@ -425,35 +595,42 @@ fn find_result_sheet<'a>(doc: &'a ProjectDocument, needle: &str) -> Option<&'a R
 }
 
 fn export_tabular_csv(
+    registry: &FormatRegistry,
     doc: &ProjectDocument,
     sheet: Option<&str>,
     tab_index: Option<usize>,
-    opts: &CsvOptions,
+    format_id: &str,
+    csv_opts: &CsvOptions,
 ) -> Result<(Vec<u8>, Option<String>), CliError> {
+    let exporter =
+        registry.exporter_by_format(format_id).ok_or_else(|| CliError::Runtime(format!("missing `{format_id}` exporter in FormatRegistry")))?;
+    let opts = ExportOptions { csv: Some(csv_opts.clone()), ..ExportOptions::default() };
     match resolve_tabular_target(doc, sheet)? {
-        TabularTarget::Data(ds) => Ok((export_datasheet_to_csv(ds, opts)?.into_bytes(), Some(ds.id.as_str().to_owned()))),
-        TabularTarget::Result(res) => {
-            let text = match tab_index {
-                Some(idx) => {
-                    let tab = res.tabs.get(idx).ok_or_else(|| CliError::Runtime(format!("result sheet `{}` has no tab at index {idx}", res.id)))?;
-                    export_result_tab_csv(tab, opts)
-                }
-                None => export_result_sheet_tidy_csv(res, opts),
-            };
-            Ok((text.into_bytes(), Some(res.id.as_str().to_owned())))
-        }
+        TabularTarget::Data(ds) => Ok((exporter.export_bytes(ExportSource::DataSheet(ds), &opts)?, Some(ds.id.as_str().to_owned()))),
+        TabularTarget::Result(res) => match tab_index {
+            Some(idx) => {
+                let tab = res.tabs.get(idx).ok_or_else(|| CliError::Runtime(format!("result sheet `{}` has no tab at index {idx}", res.id)))?;
+                Ok((export_result_tab_csv(tab, csv_opts).into_bytes(), Some(res.id.as_str().to_owned())))
+            }
+            None => Ok((exporter.export_bytes(ExportSource::ResultSheet(res), &opts)?, Some(res.id.as_str().to_owned()))),
+        },
     }
 }
 
-fn export_json_target(doc: &ProjectDocument, sheet: Option<&str>, pretty: bool) -> Result<(Vec<u8>, Option<String>), CliError> {
+fn export_json_target(
+    registry: &FormatRegistry,
+    doc: &ProjectDocument,
+    sheet: Option<&str>,
+    pretty: bool,
+) -> Result<(Vec<u8>, Option<String>), CliError> {
+    let exporter = registry.exporter_by_format("json").ok_or_else(|| CliError::Runtime(String::from("missing `json` exporter in FormatRegistry")))?;
+    let opts = ExportOptions { pretty, ..ExportOptions::default() };
     if let Some(needle) = sheet {
         if let Some(res) = find_result_sheet(doc, needle) {
-            return Ok((export_result_sheet_json(res, pretty)?.into_bytes(), Some(res.id.as_str().to_owned())));
+            return Ok((exporter.export_bytes(ExportSource::ResultSheet(res), &opts)?, Some(res.id.as_str().to_owned())));
         }
         if let Some(ds) = find_data_sheet(doc, needle) {
-            let json_text = if pretty { serde_json::to_string_pretty(ds) } else { serde_json::to_string(ds) }
-                .map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
-            return Ok((json_text.into_bytes(), Some(ds.id.as_str().to_owned())));
+            return Ok((exporter.export_bytes(ExportSource::DataSheet(ds), &opts)?, Some(ds.id.as_str().to_owned())));
         }
         if let Some(info) = doc.info_sheets.iter().find(|s| s.id.as_str() == needle || s.title == needle) {
             let json_text = if pretty { serde_json::to_string_pretty(info) } else { serde_json::to_string(info) }
@@ -465,12 +642,10 @@ fn export_json_target(doc: &ProjectDocument, sheet: Option<&str>, pretty: bool) 
 
     if doc.result_sheets.len() == 1 && doc.data_sheets.is_empty() && doc.graph_sheets.is_empty() && doc.layout_sheets.is_empty() {
         let res = &doc.result_sheets[0];
-        return Ok((export_result_sheet_json(res, pretty)?.into_bytes(), Some(res.id.as_str().to_owned())));
+        return Ok((exporter.export_bytes(ExportSource::ResultSheet(res), &opts)?, Some(res.id.as_str().to_owned())));
     }
 
-    let json_text = if pretty { serde_json::to_string_pretty(doc) } else { serde_json::to_string(doc) }
-        .map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
-    Ok((json_text.into_bytes(), None))
+    Ok((exporter.export_bytes(ExportSource::Document(doc), &opts)?, None))
 }
 
 fn rasterize_scene(scene: &ChartScene, dpi: u16) -> Result<lumencraft_render::RasterImage, CliError> {
@@ -485,8 +660,15 @@ fn clamped_pixel_dim(raw: f64) -> u32 {
     raw.round().clamp(1.0, MAX_RASTER_EDGE_PX) as u32
 }
 
+#[cfg(test)]
 fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, CliError> {
+    parse_export_or_convert_args(args, "convert")
+}
+
+fn parse_export_or_convert_args(args: &[String], cmd_name: &str) -> Result<ConvertArgs, CliError> {
     let mut positionals = Vec::new();
+    let mut explicit_out = None;
+    let mut format = None;
     let mut sheet = None;
     let mut dpi = None;
     let mut pdf_version = PdfVersion::Pdf17;
@@ -499,6 +681,12 @@ fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, CliError> {
         if arg == "--json" {
             json = true;
             idx += 1;
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--out", "--out requires an output file path")? {
+            explicit_out = Some(val);
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "-o", "-o requires an output file path")? {
+            explicit_out = Some(val);
+        } else if let Some(val) = consume_flag_opt(args, &mut idx, "--format", "--format requires an export format name")? {
+            format = Some(parse_export_format(&val)?);
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--sheet", "--sheet requires a sheet ID or title")? {
             sheet = Some(val);
         } else if let Some(val) = consume_flag_opt(args, &mut idx, "--dpi", "--dpi requires an integer >= 1")? {
@@ -511,27 +699,42 @@ fn parse_convert_args(args: &[String]) -> Result<ConvertArgs, CliError> {
             }
             ttf_font = Some(val);
         } else if arg.starts_with('-') {
-            return Err(CliError::Usage(format!("unknown flag `{arg}` for `convert`")));
+            return Err(CliError::Usage(format!("unknown flag `{arg}` for `{cmd_name}`")));
         } else {
             positionals.push(arg.clone());
             idx += 1;
         }
     }
 
-    if positionals.len() != 2 {
-        return Err(CliError::Usage(String::from(
-            "usage: lumencraft-cli convert <in> <out> [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]",
-        )));
+    let (input_path, output_path) = resolve_io_positionals(&mut positionals, explicit_out, cmd_name)?;
+    Ok(ConvertArgs { input_path, output_path, format, sheet, dpi, pdf_version, ttf_font, json })
+}
+
+fn resolve_io_positionals(positionals: &mut Vec<String>, explicit_out: Option<String>, cmd_name: &str) -> Result<(String, String), CliError> {
+    if let Some(out) = explicit_out {
+        if positionals.len() != 1 {
+            return Err(CliError::Usage(format!(
+                "usage: lumencraft-cli {cmd_name} <in> --out <out> [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]"
+            )));
+        }
+        let Some(input) = positionals.pop() else {
+            return Err(CliError::Usage(String::from("missing <in> argument")));
+        };
+        return Ok((input, out));
     }
 
+    if positionals.len() != 2 {
+        return Err(CliError::Usage(format!(
+            "usage: lumencraft-cli {cmd_name} <in> <out> [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]"
+        )));
+    }
     let Some(output_path) = positionals.pop() else {
         return Err(CliError::Usage(String::from("missing <out> argument")));
     };
     let Some(input_path) = positionals.pop() else {
         return Err(CliError::Usage(String::from("missing <in> argument")));
     };
-
-    Ok(ConvertArgs { input_path, output_path, sheet, dpi, pdf_version, ttf_font, json })
+    Ok((input_path, output_path))
 }
 
 fn consume_flag_opt(args: &[String], idx: &mut usize, flag: &str, missing_msg: &str) -> Result<Option<String>, CliError> {
@@ -559,10 +762,67 @@ fn parse_dpi_value(raw: &str) -> Result<u16, CliError> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
+    use lumencraft_doc::{
+        Cell, DataSheet, GraphSheet, LayoutItem, LayoutSheet, LayoutSpec, ProjectDocument, RectPt, SheetId, SubcolumnMode, TableArchetype, XyTable,
+    };
+    use lumencraft_format::{is_unpacked_project_dir, save_project_file};
     use lumencraft_pdf::PdfVersion;
 
-    use super::{parse_convert_args, parse_pdf_version};
+    use super::{
+        ExportFormat, detect_export_format_from_path, load_project_from_path, parse_convert_args, parse_export_format, parse_pdf_version,
+        run_convert, run_export,
+    };
+    use crate::cmd_info;
+    use crate::cmd_run_batch;
     use crate::error::CliError;
+
+    fn unique_temp_dir(label: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-cli-convert-{label}-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn build_sample_doc_with_graph_and_layout() -> Result<ProjectDocument, Box<dyn std::error::Error>> {
+        let mut doc = ProjectDocument::new("CLI Unpacked & EMF Study")?;
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 3)?;
+        xy.x_cells[0][0] = Cell::number(1.0);
+        xy.x_cells[1][0] = Cell::number(2.0);
+        xy.x_cells[2][0] = Cell::number(3.0);
+        xy.data_sets[0].cells[0][0] = Cell::number(2.5);
+        xy.data_sets[0].cells[1][0] = Cell::number(5.0);
+        xy.data_sets[0].cells[2][0] = Cell::number(7.5);
+        let ds = DataSheet::new("data-1", "Dose Response", TableArchetype::Xy(xy))?;
+
+        let mut graph = GraphSheet::new_uninitialized_for_data(SheetId::new("graph-1"), &ds)?;
+        graph.title = String::from("Response Plot");
+        graph.initialized = true;
+
+        doc.add_data_sheet(ds)?;
+        doc.add_graph_sheet(graph)?;
+
+        let mut layout_spec = LayoutSpec::default();
+        layout_spec.items.push(LayoutItem::LiveGraph {
+            id: String::from("item-1"),
+            graph_sheet_id: SheetId::new("graph-1"),
+            bounds_pt: RectPt::new(24.0, 24.0, 220.0, 160.0),
+            scale_percent: 100.0,
+            badge_override: None,
+        });
+        let layout = LayoutSheet::new("layout-1", "Figure 1", layout_spec)?;
+        doc.add_layout_sheet(layout)?;
+        Ok(doc)
+    }
+
+    fn assert_emf_magic(bytes: &[u8]) {
+        assert!(bytes.len() >= 88, "EMF header shorter than 88 bytes ({})", bytes.len());
+        let record_type = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+        assert_eq!(record_type, 1, "expected EMR_HEADER record type 1");
+        let magic = u32::from_le_bytes([bytes[40], bytes[41], bytes[42], bytes[43]]);
+        assert_eq!(magic, 0x464D_4520, "expected EMF header signature 0x464D4520, got {magic:#010X}");
+    }
 
     #[test]
     fn parse_pdf_version_accepts_1_4_and_1_7_only() {
@@ -588,5 +848,79 @@ mod tests {
         .unwrap();
         assert_eq!(custom.pdf_version, PdfVersion::Pdf14);
         assert_eq!(custom.ttf_font.as_deref(), Some("fonts/sans.ttf"));
+    }
+
+    #[test]
+    fn format_detection_handles_unpacked_dirs_and_emf() {
+        assert_eq!(parse_export_format("emf").unwrap(), ExportFormat::Emf);
+        assert_eq!(parse_export_format("lumencraft.d").unwrap(), ExportFormat::LumencraftDir);
+        assert_eq!(detect_export_format_from_path(std::path::Path::new("figure.emf")).unwrap(), ExportFormat::Emf);
+        assert_eq!(detect_export_format_from_path(std::path::Path::new("study.lumencraft.d")).unwrap(), ExportFormat::LumencraftDir);
+    }
+
+    #[test]
+    fn unpacked_dir_round_trip_and_emf_export_work_end_to_end() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = unique_temp_dir("emf-unpacked");
+        let doc = build_sample_doc_with_graph_and_layout()?;
+        let src_zip = dir.join("source.lumencraft");
+        save_project_file(&src_zip, &doc)?;
+
+        // 1. Convert archive -> `.lumencraft.d` unpacked directory, inspect with `info`, then convert back to `.lumencraft`.
+        let unpacked_dir = dir.join("study.lumencraft.d");
+        run_convert(&[src_zip.display().to_string(), unpacked_dir.display().to_string(), String::from("--json")])?;
+        assert!(is_unpacked_project_dir(&unpacked_dir));
+        assert!(unpacked_dir.join("manifest.json").is_file());
+
+        cmd_info::run_info(&[unpacked_dir.display().to_string(), String::from("--json")])?;
+        let (reloaded, size_bytes) = load_project_from_path(&unpacked_dir, false)?;
+        assert_eq!(reloaded.format_tag, "lumencraft.d");
+        assert_eq!(reloaded.doc.title, doc.title);
+        assert_eq!(reloaded.doc.data_sheets.len(), 1);
+        assert!(size_bytes > 0);
+
+        let repacked_zip = dir.join("repacked.lumencraft");
+        run_convert(&[unpacked_dir.display().to_string(), repacked_zip.display().to_string()])?;
+        let (repacked_loaded, _) = load_project_from_path(&repacked_zip, false)?;
+        assert_eq!(repacked_loaded.doc.title, doc.title);
+        assert_eq!(repacked_loaded.doc.graph_sheets.len(), 1);
+
+        // 2. Direct `lumencraft-cli export` to `.emf` from the unpacked directory using positional and `--out` forms.
+        let graph_emf = dir.join("graph-1.emf");
+        run_export(&[
+            unpacked_dir.display().to_string(),
+            graph_emf.display().to_string(),
+            String::from("--sheet"),
+            String::from("graph-1"),
+            String::from("--json"),
+        ])?;
+        assert_emf_magic(&std::fs::read(&graph_emf)?);
+
+        let layout_emf = dir.join("layout-1.emf");
+        run_export(&[
+            unpacked_dir.display().to_string(),
+            String::from("--out"),
+            layout_emf.display().to_string(),
+            String::from("--sheet"),
+            String::from("layout-1"),
+        ])?;
+        assert_emf_magic(&std::fs::read(&layout_emf)?);
+
+        // 3. Scripted engine `graph.exportEmf` & `layout.exportEmf` via `lumencraft-cli run` from `.lumencraft.d` base.
+        let script_graph_emf = dir.join("script_graph.emf");
+        let script_layout_emf = dir.join("script_layout.emf");
+        let script_path = dir.join("export_emf.jsonl");
+        let script_lines = format!(
+            "{}\n{}\n{}\n",
+            serde_json::json!({ "id": "c1", "cmd": "project.open", "params": { "path": unpacked_dir.display().to_string() } }),
+            serde_json::json!({ "id": "c2", "cmd": "graph.exportEmf", "params": { "sheet_id": "graph-1", "path": script_graph_emf.display().to_string() } }),
+            serde_json::json!({ "id": "c3", "cmd": "layout.exportEmf", "params": { "sheet_id": "layout-1", "path": script_layout_emf.display().to_string() } }),
+        );
+        std::fs::write(&script_path, script_lines)?;
+        cmd_run_batch::run_script(&[script_path.display().to_string(), String::from("--json")])?;
+        assert_emf_magic(&std::fs::read(&script_graph_emf)?);
+        assert_emf_magic(&std::fs::read(&script_layout_emf)?);
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
     }
 }

@@ -1,12 +1,11 @@
 //! `lumencraft-cli info <file>` archive & document inspection.
 
-use std::fs;
 use std::path::Path;
 
 use lumencraft_doc::{ProjectDocument, ResultCell, ResultSheet, ResultStatus, TableArchetype};
 use serde_json::{Map, Value, json};
 
-use crate::cmd_convert::{LoadedProject, load_project_from_bytes};
+use crate::cmd_convert::{LoadedProject, load_project_from_path};
 use crate::error::CliError;
 
 struct InfoArgs {
@@ -18,8 +17,7 @@ struct InfoArgs {
 pub fn run_info(args: &[String]) -> Result<(), CliError> {
     let parsed = parse_info_args(args)?;
     let path = Path::new(&parsed.file);
-    let bytes = fs::read(path).map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", path.display())))?;
-    let loaded = load_project_from_bytes(path, &bytes, false)?;
+    let (loaded, _bytes) = load_project_from_path(path, false)?;
 
     if parsed.json {
         let report = build_info_json(&parsed.file, &loaded);

@@ -1,0 +1,470 @@
+//! Wave 10 MCP surface integration tests:
+//! - Progressive toolsets per `CommandGroup` + `notifications/tools/list_changed`
+//! - `Effects` -> MCP `annotations` fidelity and normalized `[a-z0-9_]` per-command tools
+//! - Structured `isError` + `structuredContent` error contracts
+//! - `initialize` instructions & capabilities, `resources/list` + `resources/read`, `prompts/list` + `prompts/get`
+//! - `WorkdirGuard` path-escape refusal across `open_file`, `save_file`, `export`, and command path params.
+
+use std::collections::BTreeSet;
+use std::env;
+use std::fs;
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use lumencraft_engine::cmd::{CommandGroup, Effects, registry};
+use lumencraft_mcp::{
+    ERR_INVALID_PARAMS, ERR_RESOURCE_NOT_FOUND, McpServerState, ToolAnnotations, call_tool, command_id_to_mcp_tool_name, list_tools,
+    list_tools_for_group, list_tools_for_state, serve,
+};
+use serde_json::{Value, json};
+
+static TEMP_DIR_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+struct TempDirGuard {
+    path: PathBuf,
+}
+
+impl TempDirGuard {
+    fn new(prefix: &str) -> Self {
+        let id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = env::temp_dir().join(format!("lumencraft-{prefix}-{}-{id}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        Self { path: dir }
+    }
+}
+
+impl Drop for TempDirGuard {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.path);
+    }
+}
+
+fn frame_cl(body: &Value) -> Result<Vec<u8>, String> {
+    let raw = serde_json::to_string(body).map_err(|err| format!("json body: {err}"))?;
+    Ok(format!("Content-Length: {}\r\n\r\n{raw}", raw.len()).into_bytes())
+}
+
+fn decode_cl_frames(raw: &[u8]) -> Result<Vec<Value>, String> {
+    let mut cur = raw;
+    let mut out = Vec::new();
+    while !cur.is_empty() {
+        let text = std::str::from_utf8(cur).map_err(|err| format!("utf8: {err}"))?;
+        let (headers, rest) = text.split_once("\r\n\r\n").ok_or_else(|| String::from("header terminator"))?;
+        let len: usize = headers
+            .strip_prefix("Content-Length: ")
+            .ok_or_else(|| String::from("content-length"))?
+            .trim()
+            .parse()
+            .map_err(|err| format!("len: {err}"))?;
+        let body = &rest.as_bytes()[..len];
+        out.push(serde_json::from_slice(body).map_err(|err| format!("json frame: {err}"))?);
+        cur = &rest.as_bytes()[len..];
+    }
+    Ok(out)
+}
+
+fn rpc_roundtrip(state: &mut McpServerState, id: i64, method: &str, params: Value) -> Result<Value, String> {
+    let req = json!({
+        "jsonrpc": "2.0",
+        "id": id,
+        "method": method,
+        "params": params,
+    });
+    let framed = frame_cl(&req)?;
+    let mut out = Vec::new();
+    serve(&mut Cursor::new(framed), &mut out, state).map_err(|err| format!("serve {method}: {err}"))?;
+    let frames = decode_cl_frames(&out)?;
+    frames.into_iter().next().ok_or_else(|| format!("expected response frame for {method}"))
+}
+
+fn snapshot_tool_names(tools: &[lumencraft_mcp::ToolDefinition]) -> Vec<String> {
+    tools.iter().map(|t| t.name.clone()).collect()
+}
+
+#[test]
+fn progressive_toolsets_snapshot_per_command_group_and_list_changed_notification() {
+    let mut state = McpServerState::new();
+
+    let default_names = snapshot_tool_names(&list_tools_for_state(&state));
+    assert_eq!(default_names.len(), 10);
+    assert!(default_names.contains(&String::from("list_toolsets")));
+    assert!(default_names.contains(&String::from("enable_toolset")));
+
+    // Snapshot per-CommandGroup normalized tool names directly against engine registry.
+    let reg = registry();
+    for &group in CommandGroup::all() {
+        let expected_names: Vec<String> = reg.specs_by_group(group).into_iter().map(|spec| command_id_to_mcp_tool_name(spec.id)).collect();
+        let actual_names = snapshot_tool_names(&list_tools_for_group(group));
+        assert_eq!(actual_names, expected_names, "group snapshot mismatch for {}", group.as_str());
+    }
+
+    // Exercise enable_toolset over framed Content-Length transport and verify list_changed notification.
+    let enable_req = frame_cl(&json!({
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "tools/call",
+        "params": {
+            "name": "enable_toolset",
+            "arguments": { "group": "sheet" }
+        }
+    }))
+    .expect("frame_cl");
+    let mut wire_out = Vec::new();
+    serve(&mut Cursor::new(enable_req), &mut wire_out, &mut state).expect("serve enable_toolset");
+    let frames = decode_cl_frames(&wire_out).expect("decode frames");
+    assert_eq!(frames.len(), 2, "expected response + notifications/tools/list_changed");
+    assert_eq!(frames[0]["id"], json!(10));
+    assert_eq!(frames[0]["result"]["isError"], json!(false));
+    assert_eq!(frames[0]["result"]["structuredContent"]["changed"], json!(true));
+    assert_eq!(frames[0]["result"]["structuredContent"]["enabled_groups"], json!(["sheet"]));
+    assert_eq!(
+        frames[1],
+        json!({
+            "jsonrpc": "2.0",
+            "method": "notifications/tools/list_changed"
+        })
+    );
+
+    // Enabling the same group again must NOT emit a duplicate notification.
+    let mut second_out = Vec::new();
+    let enable_again = frame_cl(&json!({
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "tools/call",
+        "params": {
+            "name": "enable_toolset",
+            "arguments": { "group": "sheet" }
+        }
+    }))
+    .expect("frame_cl repeat");
+    serve(&mut Cursor::new(enable_again), &mut second_out, &mut state).expect("serve repeat enable");
+    let second_frames = decode_cl_frames(&second_out).expect("decode second frames");
+    assert_eq!(second_frames.len(), 1);
+    assert_eq!(second_frames[0]["result"]["structuredContent"]["changed"], json!(false));
+
+    // tools/list now includes the core 10 + exact Sheet group tools.
+    let list_reply = rpc_roundtrip(&mut state, 12, "tools/list", json!({})).expect("tools/list");
+    let listed_tools = list_reply["result"]["tools"].as_array().expect("tools array");
+    let sheet_count = reg.specs_by_group(CommandGroup::Sheet).len();
+    assert_eq!(listed_tools.len(), 10 + sheet_count);
+
+    // Invoke normalized per-command tool (`sheet_create_data` -> `sheet.createData`) directly.
+    let call_reply = rpc_roundtrip(
+        &mut state,
+        13,
+        "tools/call",
+        json!({
+            "name": "sheet_create_data",
+            "arguments": {
+                "sheet_id": "xy-toolset",
+                "title": "Toolset Created XY",
+                "archetype": "xy",
+                "rows": 4,
+                "cols": 1
+            }
+        }),
+    )
+    .expect("sheet_create_data rpc");
+    assert_eq!(call_reply["result"]["isError"], json!(false));
+    assert_eq!(call_reply["result"]["structuredContent"]["command_id"], json!("sheet.createData"));
+    assert_eq!(call_reply["result"]["structuredContent"]["mutated"], json!(true));
+
+    // list_toolsets reflects enabled groups and complete command counts.
+    let inv = call_tool(&mut state, "list_toolsets", json!({})).expect("list_toolsets");
+    let inv_json = inv.structured_content.expect("structured inventory");
+    assert_eq!(inv_json["total_engine_commands"], json!(reg.len()));
+    assert_eq!(inv_json["enabled_groups"], json!(["sheet"]));
+}
+
+#[test]
+fn tools_list_annotations_match_engine_effects_and_names_are_valid() {
+    let mut state = McpServerState::new();
+    call_tool(&mut state, "enable_toolset", json!({ "group": "all" })).expect("enable all");
+
+    let list_reply = rpc_roundtrip(&mut state, 1, "tools/list", json!({})).expect("tools/list");
+    let wire_tools = list_reply["result"]["tools"].as_array().expect("tools");
+    assert_eq!(wire_tools.len(), list_tools().len() + registry().len());
+
+    let mut unique_names = BTreeSet::new();
+    for tool in wire_tools {
+        let name = tool["name"].as_str().expect("tool name");
+        assert!(name.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_'), "non-normalized name: {name}");
+        assert!(unique_names.insert(name.to_owned()), "duplicate tool name: {name}");
+        assert!(tool["annotations"]["readOnlyHint"].is_boolean());
+        assert!(tool["annotations"]["destructiveHint"].is_boolean());
+        assert!(tool["annotations"]["idempotentHint"].is_boolean());
+        assert!(tool["annotations"]["openWorldHint"].is_boolean());
+    }
+
+    // Verify specific Effects -> ToolAnnotations mappings across representative commands.
+    let cases = [
+        ("project.inspect", Effects::NONE.with(Effects::IDEMPOTENT)),
+        ("sheet.delete", Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA)),
+        ("export.svg", Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT)),
+        ("project.open", Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA)),
+    ];
+    for (cmd_id, expected_effects) in cases {
+        let spec = registry().get(cmd_id).expect("spec exists");
+        assert_eq!(spec.effects, expected_effects);
+        let tool_name = command_id_to_mcp_tool_name(cmd_id);
+        let wire = wire_tools.iter().find(|t| t["name"] == tool_name).expect("wire tool");
+        let expected_ann = ToolAnnotations::from_effects(expected_effects);
+        assert_eq!(wire["annotations"], serde_json::to_value(expected_ann).expect("serialize ann"), "annotations mismatch for {cmd_id}");
+    }
+}
+
+#[test]
+fn structured_is_error_snapshot_includes_all_canonical_fields() {
+    let mut state = McpServerState::new();
+
+    // 1. Unknown sheet ID -> structured NotFound error.
+    let missing_sheet = rpc_roundtrip(
+        &mut state,
+        1,
+        "tools/call",
+        json!({
+            "name": "doc_inspect",
+            "arguments": { "sheet_id": "does-not-exist" }
+        }),
+    )
+    .expect("missing sheet rpc");
+    let result = &missing_sheet["result"];
+    assert_eq!(result["isError"], json!(true));
+    let sc = result["structuredContent"].as_object().expect("structuredContent object");
+    for key in ["code", "category", "message", "retryable", "remediation", "details"] {
+        assert!(sc.contains_key(key), "missing structured error key '{key}' in {sc:?}");
+    }
+    assert_eq!(sc["code"], json!("not_found"));
+    assert_eq!(sc["category"], json!("state"));
+    assert_eq!(sc["retryable"], json!(false));
+
+    let text_json: Value = serde_json::from_str(result["content"][0]["text"].as_str().expect("error json text")).expect("parse text json");
+    assert_eq!(text_json, result["structuredContent"]);
+
+    // 2. UI command in headless mode -> structured Conflict error with remediation.
+    let ui_headless = rpc_roundtrip(
+        &mut state,
+        2,
+        "tools/call",
+        json!({
+            "name": "command_run",
+            "arguments": { "command_id": "ui.navigator.toggle", "params": {} }
+        }),
+    )
+    .expect("ui headless rpc");
+    let ui_res = &ui_headless["result"];
+    assert_eq!(ui_res["isError"], json!(true));
+    assert_eq!(ui_res["structuredContent"]["code"], json!("conflict"));
+    assert_eq!(ui_res["structuredContent"]["category"], json!("state"));
+    assert!(ui_res["structuredContent"]["remediation"].as_str().is_some_and(|s| !s.is_empty()));
+}
+
+#[test]
+fn initialize_resources_and_prompts_work_end_to_end() {
+    let mut state = McpServerState::new();
+
+    // Initialize advertises instructions, tools.listChanged, resources, and prompts.
+    let init = rpc_roundtrip(
+        &mut state,
+        1,
+        "initialize",
+        json!({
+            "protocolVersion": "2024-11-05",
+            "capabilities": {},
+            "clientInfo": { "name": "surface-test", "version": "1.0" }
+        }),
+    )
+    .expect("initialize rpc");
+    let init_res = &init["result"];
+    assert_eq!(init_res["capabilities"]["tools"]["listChanged"], json!(true));
+    assert!(init_res["capabilities"]["resources"].is_object());
+    assert!(init_res["capabilities"]["prompts"].is_object());
+    assert!(init_res["instructions"].as_str().is_some_and(|s| s.contains("enable_toolset")));
+
+    // Populate an XY table + 4PL fit + linked graph so resources include sheet:// and result:// URIs.
+    call_tool(
+        &mut state,
+        "command_run",
+        json!({
+            "command_id": "sheet.createData",
+            "params": {
+                "sheet_id": "xy-res",
+                "title": "Resource Assay",
+                "archetype": "xy",
+                "rows": 5,
+                "cols": 1,
+                "replicates": 1,
+                "auto_family": true,
+                "info_sheet_id": "info-res",
+                "graph_sheet_id": "graph-res"
+            }
+        }),
+    )
+    .expect("createData");
+    call_tool(
+        &mut state,
+        "command_run",
+        json!({ "command_id": "table.setXCells", "params": { "sheet_id": "xy-res", "values": [-9.0, -8.0, -7.0, -6.0, -5.0] } }),
+    )
+    .expect("setX");
+    call_tool(
+        &mut state,
+        "command_run",
+        json!({
+            "command_id": "table.setCells",
+            "params": {
+                "sheet_id": "xy-res",
+                "edits": [
+                    { "row": 0, "col": 0, "value": 5.0 },
+                    { "row": 1, "col": 0, "value": 20.0 },
+                    { "row": 2, "col": 0, "value": 50.0 },
+                    { "row": 3, "col": 0, "value": 80.0 },
+                    { "row": 4, "col": 0, "value": 95.0 }
+                ]
+            }
+        }),
+    )
+    .expect("setCells");
+    call_tool(
+        &mut state,
+        "command_run",
+        json!({
+            "command_id": "fit.run",
+            "params": {
+                "sheet_id": "fit-res",
+                "source_sheet_id": "xy-res",
+                "equation_id": "log_agonist_vs_response_4pl"
+            }
+        }),
+    )
+    .expect("fit.run");
+
+    let list_res = rpc_roundtrip(&mut state, 2, "resources/list", json!({})).expect("resources/list");
+    let resources = list_res["result"]["resources"].as_array().expect("resources array");
+    let uris: Vec<&str> = resources.iter().filter_map(|r| r["uri"].as_str()).collect();
+    for expected in ["sheet://xy-res", "sheet://info-res", "sheet://fit-res", "sheet://graph-res", "result://fit-res"] {
+        assert!(uris.contains(&expected), "missing resource URI {expected} in {uris:?}");
+    }
+
+    let read_sheet = rpc_roundtrip(&mut state, 3, "resources/read", json!({ "uri": "sheet://xy-res" })).expect("read sheet");
+    let sheet_text = read_sheet["result"]["contents"][0]["text"].as_str().expect("sheet resource text");
+    let sheet_val: Value = serde_json::from_str(sheet_text).expect("sheet resource json");
+    assert_eq!(sheet_val["section"], json!("data"));
+    assert_eq!(sheet_val["id"], json!("xy-res"));
+
+    let read_result = rpc_roundtrip(&mut state, 4, "resources/read", json!({ "uri": "result://fit-res" })).expect("read result");
+    assert_eq!(read_result["result"]["contents"][0]["mimeType"], json!("application/json"));
+    let result_text = read_result["result"]["contents"][0]["text"].as_str().expect("result resource text");
+    let result_val: Value = serde_json::from_str(result_text).expect("result resource json");
+    assert_eq!(result_val["id"], json!("fit-res"));
+    assert!(!result_val["scalars"].as_array().expect("scalars").is_empty());
+
+    let missing_res = rpc_roundtrip(&mut state, 5, "resources/read", json!({ "uri": "result://nope" })).expect("missing res");
+    assert_eq!(missing_res["error"]["code"], json!(ERR_RESOURCE_NOT_FOUND));
+
+    let bad_scheme = rpc_roundtrip(&mut state, 6, "resources/read", json!({ "uri": "file:///etc/passwd" })).expect("bad scheme");
+    assert_eq!(bad_scheme["error"]["code"], json!(ERR_INVALID_PARAMS));
+
+    // Prompts list + get
+    let prompts_list = rpc_roundtrip(&mut state, 7, "prompts/list", json!({})).expect("prompts/list");
+    let prompts = prompts_list["result"]["prompts"].as_array().expect("prompts array");
+    let prompt_names: Vec<&str> = prompts.iter().filter_map(|p| p["name"].as_str()).collect();
+    assert!(prompt_names.contains(&"dose_response_curve_fit"));
+    assert!(prompt_names.contains(&"choose_two_group_test"));
+
+    let dose_prompt = rpc_roundtrip(
+        &mut state,
+        8,
+        "prompts/get",
+        json!({
+            "name": "dose_response_curve_fit",
+            "arguments": { "sheet_id": "xy-res", "response_type": "antagonist" }
+        }),
+    )
+    .expect("dose prompt");
+    let prompt_text = dose_prompt["result"]["messages"][0]["content"]["text"].as_str().expect("prompt text");
+    assert!(prompt_text.contains("xy-res"));
+    assert!(prompt_text.contains("log_inhibitor_vs_response_4pl"));
+
+    let two_group = rpc_roundtrip(
+        &mut state,
+        9,
+        "prompts/get",
+        json!({
+            "name": "choose_two_group_test",
+            "arguments": { "sheet_id": "col-a", "paired": "false", "parametric": "false" }
+        }),
+    )
+    .expect("two group prompt");
+    assert!(two_group["result"]["messages"][0]["content"]["text"].as_str().is_some_and(|t| t.contains("Mann-Whitney")));
+
+    let unknown_prompt = rpc_roundtrip(&mut state, 10, "prompts/get", json!({ "name": "nonexistent_prompt" })).expect("unknown prompt");
+    assert_eq!(unknown_prompt["error"]["code"], json!(ERR_INVALID_PARAMS));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn workdir_guard_blocks_parent_traversal_and_outside_paths_on_all_io_surfaces() {
+    let dir = TempDirGuard::new("mcp-workdir");
+    let sandbox_root = dir.path.join("sandbox");
+    let outside_dir = dir.path.join("outside");
+    fs::create_dir_all(&sandbox_root).expect("sandbox dir");
+    fs::create_dir_all(&outside_dir).expect("outside dir");
+
+    let outside_csv = outside_dir.join("secret.csv");
+    fs::write(&outside_csv, "X,Y\n1,2\n").expect("outside csv");
+    let inside_csv = sandbox_root.join("inside.csv");
+    fs::write(&inside_csv, "X,Y\n1,10\n2,20\n").expect("inside csv");
+
+    let mut state = McpServerState::with_workdir(&sandbox_root).expect("with_workdir");
+
+    // 1. Refuse ../ escape and absolute outside path in open_file
+    for bad in ["../outside/secret.csv", &outside_csv.display().to_string()] {
+        let res = call_tool(&mut state, "open_file", json!({ "path": bad })).expect("open_file refusal");
+        assert!(res.is_error, "expected path escape refusal for '{bad}'");
+        let sc = res.structured_content.expect("structured error");
+        assert_eq!(sc["code"], json!("path_escape"), "unexpected error for '{bad}': {sc}");
+        assert_eq!(sc["category"], json!("policy"));
+    }
+
+    // 2. Refuse ../ escape and outside path in save_file
+    for bad in ["../escape.lumencraft", &outside_dir.join("escape.lumencraft").display().to_string()] {
+        let res = call_tool(&mut state, "save_file", json!({ "path": bad })).expect("save_file refusal");
+        assert!(res.is_error, "expected save_file refusal for '{bad}'");
+        let sc = res.structured_content.expect("structured error");
+        assert_eq!(sc["code"], json!("path_escape"));
+    }
+    assert!(!outside_dir.join("escape.lumencraft").exists());
+
+    // 3. Legitimate inside path succeeds via open_file + export + save_file (atomic)
+    let open_ok = call_tool(&mut state, "open_file", json!({ "path": "inside.csv" })).expect("inside open_file");
+    assert!(!open_ok.is_error);
+
+    let export_bad = call_tool(&mut state, "export", json!({ "format": "csv", "output_path": "../outside/leak.csv" })).expect("export refusal");
+    assert!(export_bad.is_error);
+    assert_eq!(export_bad.structured_content.expect("sc")["code"], json!("path_escape"));
+    assert!(!outside_dir.join("leak.csv").exists());
+
+    let export_ok = call_tool(&mut state, "export", json!({ "format": "csv", "output_path": "nested/out.csv" })).expect("inside export");
+    assert!(!export_ok.is_error);
+    assert!(Path::new(&sandbox_root.join("nested/out.csv")).exists());
+
+    let save_ok = call_tool(&mut state, "save_file", json!({ "path": "saved.lumencraft" })).expect("inside save");
+    assert!(!save_ok.is_error);
+    assert!(sandbox_root.join("saved.lumencraft").exists());
+
+    // 4. Command path parameters inside command_run must also respect WorkdirGuard.
+    let cmd_escape = call_tool(
+        &mut state,
+        "command_run",
+        json!({
+            "command_id": "project.save",
+            "params": { "path": "../outside/cmd_escape.lumencraft" }
+        }),
+    )
+    .expect("command_run path escape");
+    assert!(cmd_escape.is_error);
+    assert_eq!(cmd_escape.structured_content.expect("sc")["code"], json!("path_escape"));
+    assert!(!outside_dir.join("cmd_escape.lumencraft").exists());
+}

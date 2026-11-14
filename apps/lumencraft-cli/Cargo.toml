@@ -20,6 +20,7 @@ lumencraft-engine = { workspace = true, features = ["bundled-fonts"] }
 lumencraft-format = { workspace = true }
 lumencraft-mcp = { workspace = true }
 lumencraft-pdf = { workspace = true }
+lumencraft-platform = { workspace = true }
 lumencraft-render = { workspace = true }
 lumencraft-svg = { workspace = true }
 lumencraft-text = { workspace = true }
