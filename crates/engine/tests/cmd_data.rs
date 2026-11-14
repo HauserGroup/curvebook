@@ -1,14 +1,14 @@
 //! Integration tests for all document, sheet, table, import/link, variable, and info commands in `cmd_data`.
 
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, ConstantValue, FramePreset, GraphSheet, HookSource, JournalWidthPreset, LayoutItem,
     LayoutSheet, LayoutSpec, NonlinearFitSpec, ParameterRule, ParameterScope, ProjectDocument, RectPt, ResultSheet, ResultStatus, SheetId,
     TableArchetype, TableKind, VariableRole,
 };
-use lumencraft_engine::{Session, cmd_data};
+use lumencraft_engine::{Caller, Session, cmd};
 use serde_json::{Value, json};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -583,12 +583,14 @@ fn table_paste_link_reactive_transpose_freeze_unfreeze_and_cycle_guard() {
     assert!(cycle_err.is_err());
     assert!(session.document().data_sheet(&SheetId::new("grp-1")).expect("grp").linked_regions.is_empty());
 
-    // Direct dispatch cycle check also cleans up outside Session wrapper.
-    let mut raw_doc = session.document().clone();
-    let direct_err = cmd_data::dispatch_data_command(
-        &mut raw_doc,
-        "table.pasteLink",
-        &json!({
+    // Direct dispatch cycle check also cleans up outside Session rollback wrapper.
+    let mut raw_session = Session::from_document(session.document().clone());
+    let spec = cmd::registry().get("table.pasteLink").expect("table.pasteLink registered");
+    let cancelled = AtomicBool::new(false);
+    let mut ctx = cmd::Ctx { session: &mut raw_session, caller: Caller::Ui, cancelled: &cancelled };
+    let direct_err = (spec.run)(
+        &mut ctx,
+        json!({
             "target_sheet_id": "grp-1",
             "source_sheet_id": "col-1",
             "range": { "start": { "row": 0, "col": 0, "subcol": 0 }, "end": { "row": 1, "col": 0, "subcol": 0 } },
@@ -596,7 +598,7 @@ fn table_paste_link_reactive_transpose_freeze_unfreeze_and_cycle_guard() {
         }),
     );
     assert!(direct_err.is_err());
-    assert!(raw_doc.data_sheet(&SheetId::new("grp-1")).expect("grp").linked_regions.is_empty());
+    assert!(raw_session.document().data_sheet(&SheetId::new("grp-1")).expect("grp").linked_regions.is_empty());
 }
 
 #[test]

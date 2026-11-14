@@ -1,11 +1,11 @@
 //! Proptest command-sweep and corrupt-input fuzzing for `lumencraft_engine::Session` (Gap G12).
 //!
 //! Covers:
-//! 1. Exhaustive valid execution of every `CommandDescriptor` in `lumencraft_engine::catalog::COMMANDS`.
-//! 2. Exhaustive hostile/malformed-input sweep across every `CommandDescriptor` (wrong types,
+//! 1. Exhaustive valid execution of every `CommandSpec` in `lumencraft_engine::cmd::registry()`.
+//! 2. Exhaustive hostile/malformed-input sweep across every `CommandSpec` (wrong types,
 //!    non-finite/`NaN` strings, `u64::MAX` indices, nonexistent sheets, cyclic links/formulas,
 //!    frozen sheet protections, malformed archives/XML/CSV).
-//! 3. `proptest!` arbitrary corrupt JSON fuzzing across all catalog commands.
+//! 3. `proptest!` arbitrary corrupt JSON fuzzing across all registered commands.
 //! 4. `proptest!` random multi-step command sequences verifying zero internal panics, strict
 //!    transactional rollback on error, and exact `ProjectDocument` undo/redo equality.
 
@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use lumencraft_doc::{InfoSheet, ProjectDocument, TableKind};
-use lumencraft_engine::catalog::COMMANDS;
+use lumencraft_engine::cmd;
 use lumencraft_engine::{CommandOutcome, EngineError, Session};
 use proptest::collection::vec;
 use proptest::prelude::TestCaseError;
@@ -273,8 +273,8 @@ fn sweep_every_catalog_command_valid_realistic_params() -> Result<(), String> {
     sweep_valid_graph_and_layout_commands(&mut s, &mut covered)?;
     sweep_valid_export_and_project_commands(&mut s, &mut covered)?;
 
-    let catalog_ids: BTreeSet<&'static str> = COMMANDS.iter().map(|c| c.id).collect();
-    assert_eq!(covered, catalog_ids, "valid sweep must cover every catalog command");
+    let registry_ids: BTreeSet<&'static str> = cmd::registry().specs().map(|s| s.id).collect();
+    assert_eq!(covered, registry_ids, "valid sweep must cover every registered command");
     Ok(())
 }
 
@@ -328,6 +328,13 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
     run_valid(s, covered, "table.setTitles", json!({ "sheet_id": "xy-extra", "x_title": "Time", "y_titles": ["Signal"] }))?;
     run_valid(s, covered, "table.setSubcolumnTitles", json!({ "sheet_id": "nested-1", "col": 0, "titles": ["Rep 1", "Rep 2"] }))?;
     run_valid(s, covered, "table.excludeCells", json!({ "sheet_id": "xy-extra", "cells": [{ "row": 1, "col": 0 }], "excluded": true }))?;
+    run_valid(
+        s,
+        covered,
+        "table.excludeCellsWithReason",
+        json!({ "sheet_id": "xy-extra", "coords": [{ "row": 0, "col": 0 }], "reason_tag": "outlier", "note": "sweep exclusion" }),
+    )?;
+    run_valid(s, covered, "table.exclusionAuditReport", json!({ "sheet_id": "xy-extra" }))?;
     run_valid(
         s,
         covered,
@@ -404,6 +411,48 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
             "seed": 7
         }),
     )?;
+    run_valid(s, covered, "table.convertArchetype", json!({ "sheet_id": "csv-1", "target_kind": "Grouped", "allow_lossy": true }))?;
+    let plate_values = vec![10.0_f64; 96];
+    let mut plate_roles = Vec::with_capacity(96);
+    for idx in 0..96_usize {
+        if idx < 2 {
+            plate_roles.push(json!("Blank"));
+        } else if idx < 6 {
+            let offset = idx - 2;
+            plate_roles.push(json!({
+                "role": "treatment",
+                "group_name": "Dose",
+                "dilution_x": (offset / 2 + 1) as f64,
+                "replicate": (offset % 2) + 1
+            }));
+        } else {
+            plate_roles.push(json!("Excluded"));
+        }
+    }
+    run_valid(
+        s,
+        covered,
+        "table.importPlateMap",
+        json!({
+            "sheet_id": "plate-1",
+            "title": "Plate 96",
+            "geometry": "Wells96",
+            "values": plate_values,
+            "roles": plate_roles,
+            "subtract_blank_mean": true
+        }),
+    )?;
+    run_valid(
+        s,
+        covered,
+        "table.importTidyLong",
+        json!({
+            "sheet_id": "tidy-1",
+            "title": "Tidy Long",
+            "csv": "Group,Value\nCtrl,10\nCtrl,12\nDrug,20\nDrug,22\n",
+            "mapping": { "group_col": "Group", "value_col": "Value" }
+        }),
+    )?;
     Ok(())
 }
 
@@ -423,6 +472,7 @@ fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSe
     run_valid(s, covered, "analysis.retargetData", json!({ "sheet_id": "res-anova", "source_sheet": "col-2" }))?;
     run_valid(s, covered, "analysis.exportJson", json!({ "sheet_id": "res-anova" }))?;
     run_valid(s, covered, "analysis.exportCsv", json!({ "sheet_id": "res-anova" }))?;
+    run_valid(s, covered, "result.generateReport", json!({ "result_sheet_id": "res-anova", "format": "markdown" }))?;
     Ok(())
 }
 
@@ -457,6 +507,13 @@ fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet
     run_valid(s, covered, "graph.addComparisonBrackets", json!({ "sheet_id": "gr-col", "result_sheet_id": "res-anova", "significant_only": false }))?;
     run_valid(s, covered, "graph.addAnnotation", json!({ "sheet_id": "gr-1", "kind": "text", "text": "Peak", "x_pt": 180.0, "y_pt": 60.0 }))?;
     run_valid(s, covered, "graph.applyStyleFrom", json!({ "sheet_id": "gr-col", "donor_sheet_id": "gr-1" }))?;
+    run_valid(
+        s,
+        covered,
+        "graph.applyCanvasPreset",
+        json!({ "sheet_id": "gr-col", "preset": "SingleColumn88mm", "resize_mode": "KeepTypographyPt" }),
+    )?;
+    run_valid(s, covered, "graph.preflightCheck", json!({ "sheet_id": "gr-col" }))?;
 
     run_valid(
         s,
@@ -484,6 +541,12 @@ fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet
         json!({ "sheet_id": "lay-1", "kind": "graph", "graph_sheet_id": "gr-col", "bounds_pt": [260.0, 20.0, 220.0, 140.0] }),
     )?;
     run_valid(s, covered, "layout.alignOrigins", json!({ "sheet_id": "lay-1", "align_plot_origins": true }))?;
+    run_valid(
+        s,
+        covered,
+        "layout.applyCanvasPreset",
+        json!({ "sheet_id": "lay-1", "preset": "DoubleColumn180mm", "resize_mode": "KeepTypographyPt" }),
+    )?;
     Ok(())
 }
 
@@ -495,6 +558,8 @@ fn sweep_valid_export_and_project_commands(s: &mut Session, covered: &mut BTreeS
     let g_svg_path = next_temp_file("graph2", "svg");
     let g_pdf_path = next_temp_file("graph2", "pdf");
     let g_png_path = next_temp_file("graph2", "png");
+    let g_emf_path = next_temp_file("graph2", "emf");
+    let lay_emf_path = next_temp_file("layout1", "emf");
 
     run_valid(s, covered, "export.svg", json!({ "sheet_id": "gr-1", "path": svg_path }))?;
     run_valid(s, covered, "export.pdf", json!({ "sheet_id": "gr-1", "path": pdf_path }))?;
@@ -503,13 +568,19 @@ fn sweep_valid_export_and_project_commands(s: &mut Session, covered: &mut BTreeS
     run_valid(s, covered, "graph.exportSvg", json!({ "sheet_id": "gr-col", "path": g_svg_path }))?;
     run_valid(s, covered, "graph.exportPdf", json!({ "sheet_id": "gr-col", "path": g_pdf_path }))?;
     run_valid(s, covered, "graph.exportPng", json!({ "sheet_id": "gr-col", "path": g_png_path, "width_px": 64, "height_px": 48, "dpi": 72 }))?;
+    run_valid(s, covered, "graph.exportEmf", json!({ "sheet_id": "gr-col", "path": g_emf_path }))?;
+    run_valid(s, covered, "layout.exportEmf", json!({ "sheet_id": "lay-1", "path": lay_emf_path }))?;
 
-    for p in [&svg_path, &pdf_path, &png_path, &tiff_path, &g_svg_path, &g_pdf_path, &g_png_path] {
+    for p in [&svg_path, &pdf_path, &png_path, &tiff_path, &g_svg_path, &g_pdf_path, &g_png_path, &g_emf_path, &lay_emf_path] {
         let _ = fs::remove_file(p);
     }
 
     run_valid(s, covered, "project.inspect", json!({}))?;
     run_valid(s, covered, "project.recalculate", json!({}))?;
+    run_valid(s, covered, "project.createCheckpoint", json!({ "name": "cp-sweep", "note": "sweep baseline" }))?;
+    run_valid(s, covered, "project.listCheckpoints", json!({}))?;
+    run_valid(s, covered, "project.restoreCheckpoint", json!({ "name": "cp-sweep" }))?;
+    run_valid(s, covered, "project.deleteCheckpoint", json!({ "name": "cp-sweep" }))?;
     run_valid(s, covered, "edit.undo", json!({}))?;
     run_valid(s, covered, "edit.redo", json!({}))?;
 
@@ -591,19 +662,19 @@ fn sweep_every_catalog_command_hostile_and_corrupt_inputs() -> Result<(), String
         }),
     ];
 
-    for desc in COMMANDS {
-        covered.insert(desc.id);
+    for spec in cmd::registry().specs() {
+        covered.insert(spec.id);
         for hostile in &universal_hostile {
             let mut s = base.clone();
-            let _ = execute_checked(&mut s, desc.id, hostile.clone());
+            let _ = execute_checked(&mut s, spec.id, hostile.clone());
         }
-        run_targeted_hostile_cases(&base, desc.id);
+        run_targeted_hostile_cases(&base, spec.id);
     }
 
     verify_cyclic_and_frozen_protections()?;
 
-    let catalog_ids: BTreeSet<&'static str> = COMMANDS.iter().map(|c| c.id).collect();
-    assert_eq!(covered, catalog_ids, "hostile sweep must cover every catalog command");
+    let registry_ids: BTreeSet<&'static str> = cmd::registry().specs().map(|s| s.id).collect();
+    assert_eq!(covered, registry_ids, "hostile sweep must cover every registered command");
     Ok(())
 }
 
@@ -665,9 +736,19 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
             json!({ "sheet_id": "missing-layout", "kind": "graph", "graph_sheet_id": "gr-seed", "bounds_pt": ["bad"] }),
         ],
         "export.png" | "export.tiff" | "graph.exportPng" => vec![
-            json!({ "sheet_id": "nonexistent", "width_px": u32::MAX, "height_px": u32::MAX }),
+            json!({ "sheet_id": "gr-seed", "width_px": u32::MAX, "height_px": u32::MAX }),
+            json!({ "sheet_id": "gr-seed", "width_px": 16_384, "height_px": 16_384 }),
+            json!({ "sheet_id": "gr-seed", "dpi": 0 }),
             json!({ "sheet_id": "nonexistent", "compression": "bad_codec" }),
         ],
+        "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => vec![
+            json!({ "sheet_id": "gr-seed", "preset": "nonexistent_preset" }),
+            json!({ "sheet_id": "gr-seed", "preset": "SingleColumn88mm", "resize_mode": "unknown_mode" }),
+            json!({ "sheet_id": "missing-sheet", "preset": "SingleColumn88mm" }),
+        ],
+        "graph.preflightCheck" | "graph.exportEmf" | "layout.exportEmf" | "result.generateReport" => {
+            vec![json!({ "sheet_id": "missing-sheet", "format": "bad_fmt" }), json!({ "sheet_id": "xy-1" })]
+        }
         "project.open" | "project.instantiateTemplate" => vec![
             json!({ "bytes_base64": "====" }),
             json!({ "bytes_base64": "aGVsbG8=" }),
@@ -847,7 +928,7 @@ fn corrupt_value_strategy() -> BoxedStrategy<Value> {
 }
 
 fn command_index_strategy() -> BoxedStrategy<usize> {
-    (0..COMMANDS.len()).boxed()
+    (0..cmd::registry().len()).boxed()
 }
 
 proptest! {
@@ -858,9 +939,13 @@ proptest! {
         steps in vec((command_index_strategy(), corrupt_value_strategy()), 1..20)
     ) {
         let mut session = seed_rich_fixture().map_err(TestCaseError::fail)?;
+        let specs: Vec<_> = cmd::registry().specs().collect();
         // Keep path-bearing commands safely inside temp or rejected rather than writing workspace files.
         for (cmd_idx, mut params) in steps {
-            let cmd = COMMANDS[cmd_idx].id;
+            let Some(spec) = specs.get(cmd_idx) else {
+                return Err(TestCaseError::fail(format!("command index out of bounds: {cmd_idx}")));
+            };
+            let cmd = spec.id;
             let mut created_temp: Option<PathBuf> = None;
             if let Some(obj) = params.as_object_mut() {
                 if obj.contains_key("path") || cmd.starts_with("export.") || cmd.contains("export") || cmd == "project.save" {

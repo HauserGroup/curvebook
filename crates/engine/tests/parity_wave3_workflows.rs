@@ -9,7 +9,7 @@ use lumencraft_doc::{
     NonlinearFitSpec, NormalizeAnchor, ParameterScope, ProjectDocument, ResultSheet, ResultStatus, ResultTabKind, SheetFolderKind, SheetId,
     SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableRole, XyTable,
 };
-use lumencraft_engine::{CommandOutcome, Session, catalog, cmd_sci::compile_sheet_scene, dag};
+use lumencraft_engine::{CommandOutcome, Session, cmd, cmd::helpers::compile_sheet_scene, dag};
 use lumencraft_format::{JOURNAL_FILE_NAME, MemoryJournalBackend};
 use lumencraft_palette::LineDashStyle;
 use serde_json::{Value, json};
@@ -191,7 +191,7 @@ fn sheet_reorder_all_folders_and_undo_redo() -> TestRes {
 
 #[test]
 fn graph_set_additional_ticks_renders_to_chart_scene_with_undo_redo() -> TestRes {
-    assert!(catalog::find_command("graph.setAdditionalTicks").is_some());
+    assert!(cmd::registry().get("graph.setAdditionalTicks").is_some());
     let mut doc = ProjectDocument::new("Additional Ticks Parity").map_err(|e| e.to_string())?;
     doc.add_data_sheet(build_dose_response_two_dataset_xy("xy-1")?).map_err(|e| e.to_string())?;
 
@@ -244,7 +244,7 @@ fn graph_set_additional_ticks_renders_to_chart_scene_with_undo_redo() -> TestRes
 
 #[test]
 fn analysis_add_new_biostatistics_and_multiple_imputation_kinds() -> TestRes {
-    assert!(catalog::find_command("analysis.add").is_some());
+    assert!(cmd::registry().get("analysis.add").is_some());
     let mut doc = ProjectDocument::new("New Analyses Parity").map_err(|e| e.to_string())?;
     doc.add_data_sheet(build_grouped_multiple_row_sheet("grp-mr")?).map_err(|e| e.to_string())?;
     doc.add_data_sheet(build_column_pair_sheet(

@@ -1,11 +1,11 @@
-//! End-to-end integration tests for `cmd_sci`, `catalog`, and `compile_sheet_scene`.
+//! End-to-end integration tests for `cmd_sci`, `cmd::registry()`, and `compile_sheet_scene`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, BreakOrnament, Cell, ColumnDesignHint, ColumnTable, DataSheet, FramePreset, GraphKind, MultipleVariablesTable,
     NonlinearFitSpec, ProjectDocument, ResultStatus, ResultTabKind, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, VariableRole, XyTable,
 };
-use lumencraft_engine::{CommandOutcome, Session, catalog, cmd_sci::compile_sheet_scene};
+use lumencraft_engine::{CommandOutcome, Session, cmd, cmd::helpers::compile_sheet_scene};
 use serde_json::{Value, json};
 
 fn ok_cmd(session: &mut Session, id: &str, params: Value) -> CommandOutcome {
@@ -486,15 +486,16 @@ fn test_aligned_layout_scene_compilation_and_exports() {
 }
 
 #[test]
-fn test_catalog_completeness_and_undo_redo_of_sci_commands() {
+fn test_registry_completeness_and_undo_redo_of_sci_commands() {
     use std::collections::BTreeSet;
 
+    let reg = cmd::registry();
     let mut seen = BTreeSet::new();
-    for desc in catalog::COMMANDS {
-        assert!(!desc.id.is_empty(), "empty catalog id");
-        assert!(!desc.label.is_empty(), "empty catalog label for {}", desc.id);
-        assert!(!desc.menu_path.is_empty(), "empty catalog menu_path for {}", desc.id);
-        assert!(seen.insert(desc.id), "duplicate catalog id `{}`", desc.id);
+    for spec in reg.specs() {
+        assert!(!spec.id.is_empty(), "empty command id");
+        assert!(!spec.label.is_empty(), "empty command label for {}", spec.id);
+        assert!(!spec.menu_path.is_empty(), "empty command menu_path for {}", spec.id);
+        assert!(seen.insert(spec.id), "duplicate command id `{}`", spec.id);
     }
 
     let required_ids = [
@@ -531,17 +532,17 @@ fn test_catalog_completeness_and_undo_redo_of_sci_commands() {
         "export.tiff",
     ];
     for id in required_ids {
-        assert!(catalog::find_command(id).is_some(), "missing catalog entry for `{id}`");
+        assert!(reg.get(id).is_some(), "missing registry entry for `{id}`");
     }
 
-    // Verify every command in catalog is recognized by Session (none returns unknown command).
+    // Verify every command in cmd::registry() is recognized by Session (none returns unknown command).
     let mut session = Session::new();
-    for desc in catalog::COMMANDS {
-        if matches!(desc.id, "file.new" | "project.new") {
+    for spec in reg.specs() {
+        if matches!(spec.id, "file.new" | "project.new") {
             continue;
         }
-        if let Err(err) = session.execute(desc.id, json!({})) {
-            assert!(!err.to_string().contains("unknown engine command"), "catalog command `{}` is not wired in dispatcher: {err}", desc.id);
+        if let Err(err) = session.execute(spec.id, json!({})) {
+            assert!(!err.to_string().contains("unknown engine command"), "registered command `{}` is not wired in dispatcher: {err}", spec.id);
         }
     }
 

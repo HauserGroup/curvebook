@@ -27,11 +27,20 @@ where
         Ok(res) => res,
         Err(payload) => {
             let reason = extract_panic_payload(payload.as_ref());
-            if op.trim().is_empty() {
-                Err(EngineError::new(format!("recovered from internal panic: {reason}")))
+            let trimmed = op.trim();
+            let message = if trimmed.is_empty() {
+                format!("recovered from internal panic: {reason}")
             } else {
-                Err(EngineError::new(format!("{op}: recovered from internal panic: {reason}")))
-            }
+                format!("{op}: recovered from internal panic: {reason}")
+            };
+            let details = if trimmed.is_empty() {
+                serde_json::json!({ "panic_reason": reason })
+            } else {
+                serde_json::json!({ "operation": op, "panic_reason": reason })
+            };
+            Err(EngineError::with_code(crate::ErrorCode::InternalPanic, message)
+                .with_remediation("Report this internal failure; the document was rolled back cleanly.")
+                .with_details(details))
         }
     }
 }
@@ -66,6 +75,8 @@ mod tests {
         committed = snapshot.clone();
         assert!(err_str.to_string().contains("data.set_cell"));
         assert!(err_str.to_string().contains("index out of bounds in transform"));
+        assert_eq!(err_str.code, crate::ErrorCode::InternalPanic);
+        assert_eq!(err_str.category, crate::ErrorCategory::Internal);
         assert_eq!(committed, vec![1, 2, 3]);
 
         let err_string = run_guarded::<(), _>("fit.solve", || {

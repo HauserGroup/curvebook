@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSheet, HookSource, ImportLinkSpec, InfoSheet, InternalLinkKind, LayoutItem, LinkSource,
-    PlacementMode, ProjectDocument, ResultSheet, ResultStatus, SheetCellRange, SheetId,
+    AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSheet, ErrorCode, HookSource, ImportLinkSpec, InfoSheet, InternalLinkKind, LayoutItem,
+    LinkSource, PlacementMode, ProjectDocument, ResultSheet, ResultStatus, SheetCellRange, SheetId,
 };
 use lumencraft_fit::HookContext;
 use lumencraft_transform::{
@@ -421,10 +421,8 @@ fn resolve_transform_info_sheet<'a>(doc: &'a ProjectDocument, source_ds: &'a Dat
 fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
     let existing = doc.result_sheets[res_idx].clone();
     let Some(source_ds) = resolve_source_table(doc, &existing.analysis.source_sheet_id) else {
-        doc.result_sheets[res_idx].status = ResultStatus::Failed {
-            code: String::from("missing_source"),
-            message: format!("source sheet `{}` not found", existing.analysis.source_sheet_id),
-        };
+        doc.result_sheets[res_idx].status =
+            ResultStatus::Failed { code: ErrorCode::NotFound, message: format!("source sheet `{}` not found", existing.analysis.source_sheet_id) };
         return false;
     };
 
@@ -467,7 +465,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             true
         }
         Err(message) => {
-            target.status = ResultStatus::Failed { code: String::from("analysis_error"), message };
+            target.status = ResultStatus::Failed { code: ErrorCode::SolverFailed, message };
             false
         }
     }
