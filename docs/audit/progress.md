@@ -20,15 +20,15 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 4 | `S03` Curve fitting and equation language | `crates/fit` | done | 3/6/3/0 | 12/0/0/0 | 2026-11-14 |
 | 5 | `S04` Transforms | `crates/transform` | done | 4/5/4/0 | 13/0/0/0 | 2026-11-14 |
 | 6 | `S06` File formats and import | `crates/format` | done | 1/4/9/0 | 12/2/0/0 | 2026-11-14 |
-| 7 | `S08` Chart compiler and scales | `crates/chart` | verifying | 2/6/3/0 | — | 2026-11-14 |
+| 7 | `S08` Chart compiler and scales | `crates/chart` | done | 2/6/3/0 | 11/0/0/0 | 2026-11-14 |
 | 8 | `S09` Text, raster, SVG and PDF output | `crates/text`, `crates/render`, `crates/svg`, `crates/pdf` | done | 1/3/6/0 | 10/0/0/0 | 2026-11-14 |
 | 9 | `S11` Tools and app entry points | `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` | done | 1/5/6/1 | 12/1/0/0 | 2026-11-14 |
-| 10 | `S07` Engine | `crates/engine` | reviewing | 1/0/0/0 | — | 2026-11-14 |
+| 10 | `S07` Engine | `crates/engine` | reviewing | 2/1/0/0 | — | 2026-11-14 |
 | 11 | `S10` UI shell | `crates/ui-egui` | reviewing | 0/0/0/0 | — | 2026-11-14 |
 | 12 | `S12` CLI and MCP | `apps/lumencraft-cli`, `crates/mcp` | reviewing | 0/0/0/0 | — | 2026-11-14 |
 | 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | reviewing | 0/0/0/0 | — | 2026-11-14 |
 | 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | pending | — | — | — |
-| 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | pending | — | — | — |
+| 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | reviewing | 0/0/0/0 | — | 2026-11-14 |
 
 Status values: `pending` → `reviewing` → `verifying` → `done`. Verdicts: C = CONFIRMED, P = PLAUSIBLE, R = REFUTED, D = DUPLICATE.
 
@@ -43,6 +43,7 @@ What each review actually read, so a later session can see what was and was not 
 | `S05` | see [`findings/S05.md`](findings/S05.md) › Scope read | — | `cargo test -p lumencraft-doc` pass; verifier: `audit/r1/S05` `audit_r1_s05.rs` in `crates/doc`, `crates/format`, `crates/stats` |
 | `S03` | see [`findings/S03.md`](findings/S03.md) › Scope read (`linear.rs` not read; reviewer interrupted by a rate limit after writing its file) | Bessel functions, pharma/curves/NIST library skimmed | reviewer: probe crate, 12 probes; verifier: `audit/r1/S03` `crates/fit/tests/audit_r1_s03.rs`, all 12 fail at base (R1-S03-10 `#[ignore]`, 195 s) |
 | `S04` | see [`findings/S04.md`](findings/S04.md) › Scope read | — | reviewer: probe crate (11 of 13 reproduced); verifier: `audit/r1/S04` `crates/transform/tests/audit_r1_s04.rs` |
+| `S08` | see [`findings/S08.md`](findings/S08.md) › Scope read | — | `cargo test -p lumencraft-chart` 35/35 pass; reviewer: probe crate (debug + release); verifier: `audit/r1/S08` (`c15abdc`) `crates/chart/tests/audit_r1_s08.rs`; 07 and 11 traced only |
 | `S09` | see [`findings/S09.md`](findings/S09.md) › Scope read | — | slice tests pass (55); reviewer: probe binary; verifier: `audit/r1/S09` (`5a0e8ee`), tests in `text`, `pdf`, `svg`, `render`; 08 and 10 traced only |
 | `S11` | see [`findings/S11.md`](findings/S11.md) › Scope read | — | slice tests pass; reviewer: `--control` probe + scratch engine crate; verifier: `audit/r1/S11` `apps/lumencraft/tests/audit_r1_s11.rs` (02, 05, 13 fail at base; rest traced) |
 | `S06` | see [`findings/S06.md`](findings/S06.md) › Scope read | — | `cargo test -p lumencraft-format` 43/43 pass; verifier: `audit/r1/S06` `crates/format/tests/audit_r1_s06.rs`, 5 fail at base (02, 03, 04, 06, 10) |
@@ -80,6 +81,8 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S05-02](findings/S05.md) | S1 | `transpose_cell_grid` turns a ragged grid into a dense `max_cols × rows` grid with no cap, so a ~200 KB CSV can abort the app | CONFIRMED | test | `S05` |
 | [R1-S05-03](findings/S05.md) | S1 | `XColumnMode::Numbers { subcolumn_mode: RawReplicates(n) }` is not bounded after load, so saving loops `n` times | CONFIRMED | test | `S05` |
 | [R1-S06-01](findings/S06.md) | S1 | `.prism` import has no project-wide cell budget: a 6 KB file allocates 1.5 GiB and scales to hundreds of GiB | CONFIRMED | trace | `S06` |
+| [R1-S08-01](findings/S08.md) | S1 | Log-axis tick generator overflows and allocates without bound when a data value is near `f64::MAX` or the smallest subnormal | CONFIRMED | test | `S08` |
+| [R1-S08-02](findings/S08.md) | S1 | Y-axis title placement panics in `f64::clamp` on canvases narrower than about 40 pt | CONFIRMED | test | `S08` |
 | [R1-S09-01](findings/S09.md) | S1 | Raster dashing has no length budget: one long dashed annotation line allocates without bound and aborts the app | CONFIRMED | test | `S09` |
 | [R1-S11-01](findings/S11.md) | S1 | The desktop app opens a crash-recovery journal but never records a command, so a crash loses all work since launch | CONFIRMED | test | `S11` |
 | [R1-S01-02](findings/S01.md) | S2 | Noncentral F and χ² cap the Poisson mode at 500 000, so λ > 1e6 gives CDF = SF = 0 and a truncated upper CI limit | CONFIRMED | test | `S01` |
@@ -110,6 +113,12 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S06-03](findings/S06.md) | S2 | One malformed interior journal line aborts all recovery, and the desktop app then refuses to start | CONFIRMED | test | `S06` |
 | [R1-S06-04](findings/S06.md) | S2 | PZFX import silently drops subcolumns beyond the resolved subcolumn mode | CONFIRMED | test | `S06` |
 | [R1-S06-05](findings/S06.md) | S2 | `.lumencraft` open parses `document.json` into a `serde_json::Value` tree first: a 61 KB archive drives 1.1 GiB of heap | CONFIRMED | trace | `S06` |
+| [R1-S08-03](findings/S08.md) | S2 | Default replicate beeswarm is quadratic: a 16,000-value column takes 8 s per render, a 100,000-value column several minutes | CONFIRMED | test | `S08` |
+| [R1-S08-04](findings/S08.md) | S2 | XY/Column auto ranges on probit, logit and reciprocal axes exclude valid data, and the omitted points raise no warning | CONFIRMED | test | `S08` |
+| [R1-S08-05](findings/S08.md) | S2 | An explicit reversed axis range (`min > max`) is silently replaced, hiding data | CONFIRMED | test | `S08` |
+| [R1-S08-06](findings/S08.md) | S2 | Pre-summarized Mean/SD/N rows: a missing N draws ±SD for any requested metric, and a missing SD removes the mean even when no error bars are requested | CONFIRMED | test | `S08` |
+| [R1-S08-07](findings/S08.md) | S2 | A significance bracket whose group is not drawn falls back to the slot at the same position and labels the wrong pair | CONFIRMED | test | `S08` |
+| [R1-S08-08](findings/S08.md) | S2 | User major-tick intervals: ticks silently stop after 65 intervals, and tiny intervals overflow `i64` arithmetic | CONFIRMED | test | `S08` |
 | [R1-S09-02](findings/S09.md) | S2 | `parse_markup` is quadratic on unmatched `*`: a large text-box annotation hangs every render | CONFIRMED | test | `S09` |
 | [R1-S09-03](findings/S09.md) | S2 | Default (selectable-text) PDF export replaces every non-WinAnsi, non-Symbol character with `?`, even with an embedded TrueType font | CONFIRMED | test | `S09` |
 | [R1-S09-04](findings/S09.md) | S2 | SVG export writes XML-forbidden control characters from labels, producing a file no XML parser accepts, while `validate_svg_structure` passes it | CONFIRMED | test | `S09` |
@@ -139,6 +148,9 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S06-11](findings/S06.md) | S3 | XML node cap counts elements only; text nodes and attributes give about 10× memory amplification | CONFIRMED | trace | `S06` |
 | [R1-S06-12](findings/S06.md) | S3 | `PlacementMode::InsertRows` overwrites the rows at the anchor instead of inserting | CONFIRMED | trace | `S06` |
 | [R1-S06-13](findings/S06.md) | S3 | `apply_csv_import_link` header promotion maps header index to data-set index, ignoring subcolumns | CONFIRMED | trace | `S06` |
+| [R1-S08-09](findings/S08.md) | S3 | The guarded axis engine in `scales.rs` that the tests and parity checklist verify is not the one `compile_graph` runs | CONFIRMED | trace | `S08` |
+| [R1-S08-10](findings/S08.md) | S3 | `scales.rs` reciprocal error-bar clamp uses +1e-12 as the floor on a negative axis, producing coordinates near 1e14 pt | CONFIRMED | test | `S08` |
+| [R1-S08-11](findings/S08.md) | S3 | Dendrogram node ids from a result tab are negated without overflow checks | CONFIRMED | test | `S08` |
 | [R1-S09-05](findings/S09.md) | S3 | PDF writer measures text with its own approximate Helvetica/Symbol width table, so centred and right-aligned PDF text is misplaced | CONFIRMED | test | `S09` |
 | [R1-S09-06](findings/S09.md) | S3 | Multi-line text is broken into lines only by the raster/outline paths; selectable PDF and editable SVG put all lines on one baseline | CONFIRMED | test | `S09` |
 | [R1-S09-07](findings/S09.md) | S3 | With `BUNDLED_FONTS` empty, raster and outlined text draw every accented Latin letter as an empty box | CONFIRMED | test | `S09` |
