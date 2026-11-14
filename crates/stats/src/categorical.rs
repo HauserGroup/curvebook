@@ -75,6 +75,31 @@ pub enum KappaWeighting {
     Quadratic,
 }
 
+/// Test-statistic ordering rule used to construct the two-sided rejection region for Barnard's
+/// exact unconditional `2 x 2` binomial test.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum BarnardOrdering {
+    /// Suissa & Shuster (1985) pooled-variance score statistic `|Z_pooled|`.
+    #[default]
+    ScorePooled,
+    /// Unpooled Wald statistic `|Z_wald|`.
+    WaldUnpooled,
+    /// Boschloo (1970) ordering by two-sided Fisher exact *p*-value (`<= p_obs`).
+    Boschloo,
+    /// Barnard's (1945/1947) Convexity–Symmetry–Maximum (CSM) iterative rejection-region ordering.
+    Csm,
+}
+
+/// Complete output of Barnard's exact unconditional `2 x 2` binomial test (`[[a, b], [c, d]]`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BarnardExactResult {
+    pub statistic: f64,
+    pub p_value: f64,
+    pub nuisance_pi: f64,
+    pub ordering: BarnardOrdering,
+    pub used_asymptotic_fallback: bool,
+}
+
 /// Inter-rater agreement metrics (Cohen's kappa or Fleiss' kappa).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KappaResult {
@@ -168,6 +193,422 @@ pub fn fisher_exact_2x2(a: u64, b: u64, c: u64, d: u64) -> Result<f64, StatsErro
         }
     }
     Ok(p_sum.clamp(0.0, 1.0))
+}
+
+const BARNARD_MAX_TOTAL: u64 = 2_000;
+const BARNARD_MAX_GRID_CELLS: u64 = 250_000;
+const BARNARD_MAX_BOSCHLOO_TOTAL: u64 = 600;
+const BARNARD_MAX_CSM_CELLS: u64 = 1_600;
+
+fn z_pooled_2x2(i: u64, n1: u64, j: u64, n2: u64) -> f64 {
+    let total = n1 + n2;
+    let s = i + j;
+    if s == 0 || s == total || n1 == 0 || n2 == 0 {
+        return 0.0;
+    }
+    let p1 = (i as f64) / (n1 as f64);
+    let p2 = (j as f64) / (n2 as f64);
+    let p_pool = (s as f64) / (total as f64);
+    let denom = (p_pool * (1.0 - p_pool) * (1.0 / (n1 as f64) + 1.0 / (n2 as f64))).sqrt();
+    if denom > 0.0 { (p1 - p2) / denom } else { 0.0 }
+}
+
+fn z_wald_2x2(i: u64, n1: u64, j: u64, n2: u64) -> f64 {
+    if n1 == 0 || n2 == 0 {
+        return 0.0;
+    }
+    let p1 = (i as f64) / (n1 as f64);
+    let p2 = (j as f64) / (n2 as f64);
+    let diff = p1 - p2;
+    if diff == 0.0 {
+        return 0.0;
+    }
+    let var = p1 * (1.0 - p1) / (n1 as f64) + p2 * (1.0 - p2) / (n2 as f64);
+    if var > 0.0 { diff / var.sqrt() } else { diff.signum() * f64::INFINITY }
+}
+
+fn build_ln_factorials(n_max: usize) -> Result<Vec<f64>, StatsError> {
+    let mut out = Vec::with_capacity(n_max + 1);
+    for k in 0..=n_max {
+        out.push(ln_factorial(k as u64));
+    }
+    Ok(out)
+}
+
+fn precompute_binom_terms(f_s: &[f64], ln_fact: &[f64], total: usize) -> Vec<(usize, f64, f64)> {
+    let mut terms = Vec::new();
+    let ln_n = ln_fact[total];
+    for (s, &f_val) in f_s.iter().enumerate() {
+        if f_val > 0.0 {
+            let ln_binom = ln_n - ln_fact[s] - ln_fact[total - s];
+            terms.push((s, f_val, ln_binom));
+        }
+    }
+    terms
+}
+
+fn eval_unconditional_prob(terms: &[(usize, f64, f64)], f0: f64, fn_end: f64, total: usize, pi: f64) -> f64 {
+    if pi <= 0.0 {
+        return f0;
+    }
+    if pi >= 1.0 {
+        return fn_end;
+    }
+    let ln_pi = pi.ln();
+    let ln_1_pi = (1.0 - pi).ln();
+    let mut sum = 0.0_f64;
+    for &(s, f_val, ln_binom) in terms {
+        let lp = ln_binom + (s as f64) * ln_pi + ((total - s) as f64) * ln_1_pi;
+        if lp > -745.0 {
+            sum += f_val * lp.exp();
+        }
+    }
+    sum.clamp(0.0, 1.0)
+}
+
+fn golden_maximize_pi<F: Fn(f64) -> f64>(eval: &F, mut a: f64, mut b: f64) -> (f64, f64) {
+    const INV_PHI: f64 = 0.618_033_988_749_894_9;
+    let mut c = b - INV_PHI * (b - a);
+    let mut d = a + INV_PHI * (b - a);
+    let mut fc = eval(c);
+    let mut fd = eval(d);
+    for _ in 0..55 {
+        if fc < fd {
+            a = c;
+            c = d;
+            fc = fd;
+            d = a + INV_PHI * (b - a);
+            fd = eval(d);
+        } else {
+            b = d;
+            d = c;
+            fd = fc;
+            c = b - INV_PHI * (b - a);
+            fc = eval(c);
+        }
+    }
+    let mid = 0.5 * (a + b);
+    let fm = eval(mid);
+    if fc >= fd && fc >= fm {
+        (fc, c)
+    } else if fd >= fm {
+        (fd, d)
+    } else {
+        (fm, mid)
+    }
+}
+
+fn maximize_nuisance_pi(f_s: &[f64], ln_fact: &[f64], total: usize, pi_hint: f64) -> (f64, f64) {
+    let f0 = f_s.first().copied().unwrap_or(0.0);
+    let fn_end = f_s.last().copied().unwrap_or(0.0);
+    let terms = precompute_binom_terms(f_s, ln_fact, total);
+    if terms.is_empty() {
+        return (0.0, 0.5);
+    }
+
+    let mut pis = Vec::with_capacity(1120 + total.min(400));
+    for k in 0..=1000 {
+        pis.push((k as f64) / 1000.0);
+    }
+    if total > 0 {
+        let tf = total as f64;
+        for k in 1..=32 {
+            let eps = (k as f64) / (32.0 * tf);
+            if eps > 0.0 && eps < 1.0 {
+                pis.push(eps);
+                pis.push(1.0 - eps);
+            }
+        }
+        if total <= 400 {
+            for s in 1..total {
+                pis.push((s as f64) / tf);
+            }
+        }
+    }
+    pis.sort_by(f64::total_cmp);
+    pis.dedup_by(|a, b| (*a - *b).abs() < 1e-13);
+
+    let eval = |pi: f64| eval_unconditional_prob(&terms, f0, fn_end, total, pi);
+    let vals: Vec<f64> = pis.iter().map(|&pi| eval(pi)).collect();
+
+    let mut best_p = -1.0_f64;
+    let mut best_pi = 0.5_f64;
+    for (idx, (&pi, &val)) in pis.iter().zip(vals.iter()).enumerate() {
+        if val > best_p {
+            best_p = val;
+            best_pi = pi;
+        }
+        let ge_prev = idx == 0 || val >= vals[idx - 1];
+        let ge_next = idx + 1 == vals.len() || val >= vals[idx + 1];
+        if ge_prev && ge_next && idx > 0 && idx + 1 < vals.len() {
+            let (cand_p, cand_pi) = golden_maximize_pi(&eval, pis[idx - 1], pis[idx + 1]);
+            if cand_p > best_p {
+                best_p = cand_p;
+                best_pi = cand_pi;
+            }
+        }
+    }
+    let sym_pi = (1.0 - best_pi).clamp(0.0, 1.0);
+    let sym_val = eval(sym_pi);
+    if (best_p - sym_val).abs() <= 1.0e-12 * best_p.max(1.0) && (sym_pi - pi_hint).abs() < (best_pi - pi_hint).abs() {
+        best_p = best_p.max(sym_val);
+        best_pi = sym_pi;
+    }
+    (best_p.clamp(0.0, 1.0), best_pi)
+}
+
+fn fast_grid_max_pi(f_s: &[f64], ln_fact: &[f64], total: usize) -> f64 {
+    let f0 = f_s.first().copied().unwrap_or(0.0);
+    let fn_end = f_s.last().copied().unwrap_or(0.0);
+    let terms = precompute_binom_terms(f_s, ln_fact, total);
+    let mut best = f0.max(fn_end);
+    for k in 1..200 {
+        let pi = (k as f64) / 200.0;
+        let v = eval_unconditional_prob(&terms, f0, fn_end, total, pi);
+        if v > best {
+            best = v;
+        }
+    }
+    best
+}
+
+fn accumulate_score_region(a: usize, n1: usize, c: usize, n2: usize, ln_fact: &[f64]) -> Vec<f64> {
+    let total = n1 + n2;
+    let s_obs = (a + c) as u128;
+    let obs_diff = (a * n2).abs_diff(c * n1) as u128;
+    let obs_num_sq = obs_diff * obs_diff;
+    let obs_s_term = s_obs * ((total as u128) - s_obs);
+    let mut f_s = vec![0.0_f64; total + 1];
+    let ln_n1 = ln_fact[n1];
+    let ln_n2 = ln_fact[n2];
+    let ln_total = ln_fact[total];
+
+    for i in 0..=n1 {
+        let lp_i = ln_n1 - ln_fact[i] - ln_fact[n1 - i];
+        for j in 0..=n2 {
+            let s = i + j;
+            if s == 0 || s == total {
+                continue;
+            }
+            let d_ij = (i * n2).abs_diff(j * n1) as u128;
+            let lhs = (d_ij * d_ij).saturating_mul(obs_s_term);
+            let s_term = (s as u128) * ((total - s) as u128);
+            let rhs = obs_num_sq.saturating_mul(s_term);
+            if lhs >= rhs {
+                let lp_j = ln_n2 - ln_fact[j] - ln_fact[n2 - j];
+                let ln_hg = lp_i + lp_j + ln_fact[s] + ln_fact[total - s] - ln_total;
+                f_s[s] += ln_hg.exp();
+            }
+        }
+    }
+    f_s
+}
+
+fn accumulate_wald_region(a: usize, n1: usize, c: usize, n2: usize, ln_fact: &[f64]) -> Vec<f64> {
+    let total = n1 + n2;
+    let z_obs = z_wald_2x2(a as u64, n1 as u64, c as u64, n2 as u64).abs();
+    let mut f_s = vec![0.0_f64; total + 1];
+    let ln_n1 = ln_fact[n1];
+    let ln_n2 = ln_fact[n2];
+    let ln_total = ln_fact[total];
+
+    for i in 0..=n1 {
+        let lp_i = ln_n1 - ln_fact[i] - ln_fact[n1 - i];
+        for j in 0..=n2 {
+            let z = z_wald_2x2(i as u64, n1 as u64, j as u64, n2 as u64).abs();
+            let in_region = if z_obs.is_infinite() { z.is_infinite() } else { z >= z_obs - 1e-12 };
+            if in_region {
+                let s = i + j;
+                let lp_j = ln_n2 - ln_fact[j] - ln_fact[n2 - j];
+                let ln_hg = lp_i + lp_j + ln_fact[s] + ln_fact[total - s] - ln_total;
+                f_s[s] += ln_hg.exp();
+            }
+        }
+    }
+    f_s
+}
+
+fn accumulate_boschloo_region(a: usize, n1: usize, c: usize, n2: usize, ln_fact: &[f64]) -> Vec<f64> {
+    let total = n1 + n2;
+    let s_obs = a + c;
+    let ln_n1 = ln_fact[n1];
+    let ln_n2 = ln_fact[n2];
+    let ln_total = ln_fact[total];
+
+    let fisher_slice = |s: usize| -> Vec<(usize, f64, f64)> {
+        let lo = s.saturating_sub(n2);
+        let hi = n1.min(s);
+        let log_const = ln_n1 + ln_n2 + ln_fact[s] + ln_fact[total - s] - ln_total;
+        let mut probs: Vec<(usize, f64)> = Vec::with_capacity(hi - lo + 1);
+        for x in lo..=hi {
+            let lp = log_const - (ln_fact[x] + ln_fact[n1 - x] + ln_fact[s - x] + ln_fact[n2 - (s - x)]);
+            probs.push((x, lp.exp()));
+        }
+        let mut sorted = probs.clone();
+        sorted.sort_by(|u, v| u.1.total_cmp(&v.1));
+        let mut out = Vec::with_capacity(probs.len());
+        for (x, px) in probs {
+            let p_fisher: f64 = sorted.iter().take_while(|(_, pv)| *pv <= px + 1e-12).map(|(_, pv)| *pv).sum();
+            out.push((x, px, p_fisher.clamp(0.0, 1.0)));
+        }
+        out
+    };
+
+    let obs_slice = fisher_slice(s_obs);
+    let p_obs = obs_slice.iter().find(|&&(x, _, _)| x == a).map_or(1.0, |&(_, _, pf)| pf);
+
+    let mut f_s = vec![0.0_f64; total + 1];
+    for (s, slot) in f_s.iter_mut().enumerate() {
+        for (_, hg_p, pf) in fisher_slice(s) {
+            if pf <= p_obs + 1e-12 {
+                *slot += hg_p;
+            }
+        }
+    }
+    f_s
+}
+
+fn csm_frontier_pairs(in_region: &[Vec<bool>], n1: usize, n2: usize) -> Vec<Vec<(usize, usize)>> {
+    let mut pairs = Vec::new();
+    let mut seen = vec![vec![false; n2 + 1]; n1 + 1];
+    for i in 0..=n1 {
+        for j in 0..=n2 {
+            if in_region[i][j] || seen[i][j] {
+                continue;
+            }
+            let lhs = i * n2;
+            let rhs = j * n1;
+            let eligible = if lhs > rhs {
+                let up_ok = i == n1 || in_region[i + 1][j];
+                let left_ok = j == 0 || in_region[i][j - 1];
+                up_ok && left_ok
+            } else if lhs < rhs {
+                let down_ok = i == 0 || in_region[i - 1][j];
+                let right_ok = j == n2 || in_region[i][j + 1];
+                down_ok && right_ok
+            } else {
+                false
+            };
+            if eligible {
+                let ci = n1 - i;
+                let cj = n2 - j;
+                seen[i][j] = true;
+                seen[ci][cj] = true;
+                if i == ci && j == cj {
+                    pairs.push(vec![(i, j)]);
+                } else {
+                    pairs.push(vec![(i, j), (ci, cj)]);
+                }
+            }
+        }
+    }
+    pairs
+}
+
+fn accumulate_csm_region(a: usize, n1: usize, c: usize, n2: usize, ln_fact: &[f64]) -> Vec<f64> {
+    let total = n1 + n2;
+    let ln_n1 = ln_fact[n1];
+    let ln_n2 = ln_fact[n2];
+    let ln_total = ln_fact[total];
+    let hg_at = |i: usize, j: usize| -> f64 {
+        let s = i + j;
+        (ln_n1 - ln_fact[i] - ln_fact[n1 - i] + ln_n2 - ln_fact[j] - ln_fact[n2 - j] + ln_fact[s] + ln_fact[total - s] - ln_total).exp()
+    };
+
+    let mut in_region = vec![vec![false; n2 + 1]; n1 + 1];
+    let mut f_s = vec![0.0_f64; total + 1];
+    while !in_region[a][c] {
+        let candidates = csm_frontier_pairs(&in_region, n1, n2);
+        if candidates.is_empty() {
+            break;
+        }
+        let mut best_val = f64::INFINITY;
+        let mut scores = Vec::with_capacity(candidates.len());
+        for pair in &candidates {
+            let mut prev = [0.0_f64; 2];
+            for (idx, &(i, j)) in pair.iter().enumerate() {
+                let s = i + j;
+                prev[idx] = f_s[s];
+                f_s[s] += hg_at(i, j);
+            }
+            let val = fast_grid_max_pi(&f_s, ln_fact, total);
+            if val < best_val {
+                best_val = val;
+            }
+            scores.push(val);
+            for (idx, &(i, j)) in pair.iter().enumerate().rev() {
+                f_s[i + j] = prev[idx];
+            }
+        }
+        for (pair, &val) in candidates.iter().zip(scores.iter()) {
+            if val <= best_val + 1e-12 {
+                for &(i, j) in pair {
+                    if !in_region[i][j] {
+                        in_region[i][j] = true;
+                        f_s[i + j] += hg_at(i, j);
+                    }
+                }
+            }
+        }
+    }
+    f_s
+}
+
+/// Barnard's exact unconditional two-sided test for a `2 x 2` count matrix `[[a, b], [c, d]]`
+/// using the Suissa & Shuster (1985) pooled-variance score statistic (`ScorePooled`).
+pub fn barnard_exact_2x2(a: u64, b: u64, c: u64, d: u64) -> Result<BarnardExactResult, StatsError> {
+    barnard_exact_2x2_with_ordering(a, b, c, d, BarnardOrdering::ScorePooled)
+}
+
+/// Barnard's exact unconditional two-sided test for `[[a, b], [c, d]]` with configurable
+/// rejection-region ordering (`ScorePooled`, `WaldUnpooled`, `Boschloo`, or `Csm`).
+pub fn barnard_exact_2x2_with_ordering(a: u64, b: u64, c: u64, d: u64, ordering: BarnardOrdering) -> Result<BarnardExactResult, StatsError> {
+    let n1 = a.checked_add(b).ok_or(StatsError::InvalidParameter { name: "barnard_row1_total", value: f64::INFINITY })?;
+    let n2 = c.checked_add(d).ok_or(StatsError::InvalidParameter { name: "barnard_row2_total", value: f64::INFINITY })?;
+    let total = n1.checked_add(n2).ok_or(StatsError::InvalidParameter { name: "barnard_table_total", value: f64::INFINITY })?;
+    if total == 0 || n1 == 0 || n2 == 0 {
+        return Ok(BarnardExactResult { statistic: 0.0, p_value: 1.0, nuisance_pi: 0.5, ordering, used_asymptotic_fallback: false });
+    }
+
+    let z_stat = match ordering {
+        BarnardOrdering::WaldUnpooled => z_wald_2x2(a, n1, c, n2),
+        BarnardOrdering::ScorePooled | BarnardOrdering::Boschloo | BarnardOrdering::Csm => z_pooled_2x2(a, n1, c, n2),
+    };
+    if (a as u128) * (n2 as u128) == (c as u128) * (n1 as u128) {
+        return Ok(BarnardExactResult { statistic: 0.0, p_value: 1.0, nuisance_pi: 0.5, ordering, used_asymptotic_fallback: false });
+    }
+
+    let grid_cells = n1.saturating_add(1).saturating_mul(n2.saturating_add(1));
+    if ordering == BarnardOrdering::Csm && grid_cells > BARNARD_MAX_CSM_CELLS {
+        return Err(StatsError::InvalidParameter { name: "barnard_csm_grid_cells", value: grid_cells as f64 });
+    }
+    let exceeds_exact_cap = total > BARNARD_MAX_TOTAL
+        || grid_cells > BARNARD_MAX_GRID_CELLS
+        || (ordering == BarnardOrdering::Boschloo && total > BARNARD_MAX_BOSCHLOO_TOTAL);
+    if exceeds_exact_cap {
+        let z_pool = z_pooled_2x2(a, n1, c, n2);
+        let p_asym = if z_pool.is_finite() { (2.0 * norm_sf(z_pool.abs())).clamp(0.0, 1.0) } else { 0.0 };
+        let pi_hat = ((a + c) as f64) / (total as f64);
+        return Ok(BarnardExactResult { statistic: z_stat, p_value: p_asym, nuisance_pi: pi_hat, ordering, used_asymptotic_fallback: true });
+    }
+
+    let n1_u = n1 as usize;
+    let n2_u = n2 as usize;
+    let total_u = total as usize;
+    let a_u = a as usize;
+    let c_u = c as usize;
+    let ln_fact = build_ln_factorials(total_u)?;
+
+    let f_s = match ordering {
+        BarnardOrdering::ScorePooled => accumulate_score_region(a_u, n1_u, c_u, n2_u, &ln_fact),
+        BarnardOrdering::WaldUnpooled => accumulate_wald_region(a_u, n1_u, c_u, n2_u, &ln_fact),
+        BarnardOrdering::Boschloo => accumulate_boschloo_region(a_u, n1_u, c_u, n2_u, &ln_fact),
+        BarnardOrdering::Csm => accumulate_csm_region(a_u, n1_u, c_u, n2_u, &ln_fact),
+    };
+    let pi_hint = ((a_u + c_u) as f64) / (total_u as f64);
+    let (p_value, nuisance_pi) = maximize_nuisance_pi(&f_s, &ln_fact, total_u, pi_hint);
+
+    Ok(BarnardExactResult { statistic: z_stat, p_value, nuisance_pi, ordering, used_asymptotic_fallback: false })
 }
 
 /// Freeman–Halton exact / deterministic Monte Carlo *p*-value for general `R x C` contingency tables.
@@ -897,6 +1338,15 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
     }
 
     let yates = matches!(cont_spec.method, ContingencyMethod::PearsonChiSquare { yates_continuity: true });
+    let barnard_res = if matches!(cont_spec.method, ContingencyMethod::BarnardExact) {
+        if n_rows != 2 || n_cols != 2 {
+            return Err(StatsError::InvalidParameter { name: "barnard_exact_dimensions", value: n_rows.max(n_cols) as f64 });
+        }
+        Some(barnard_exact_2x2(counts[0][0], counts[0][1], counts[1][0], counts[1][1])?)
+    } else {
+        None
+    };
+
     let res = analyze_contingency(&counts, yates, confidence)?;
     push_scalar(&mut out, "Chi-square", None, res.chi_square);
     push_scalar(&mut out, "Chi-square P value", None, res.chi_square_p);
@@ -904,6 +1354,11 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
     push_scalar(&mut out, "Cramer's V", None, res.cramers_v);
     if let Some(fp) = res.fisher_exact_p {
         push_scalar(&mut out, "Fisher's exact P", None, fp);
+    }
+    if let Some(br) = &barnard_res {
+        push_scalar(&mut out, "Barnard's exact P", None, br.p_value);
+        push_scalar(&mut out, "Barnard nuisance pi", None, br.nuisance_pi);
+        push_scalar(&mut out, "Barnard Z-pooled", None, br.statistic);
     }
 
     let (primary_name, primary_stat, primary_p) = match cont_spec.method {
@@ -913,6 +1368,10 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
         }
         ContingencyMethod::LikelihoodRatioG2 => ("Likelihood-ratio G2", Some(res.g_squared), res.g_squared_p),
         ContingencyMethod::FisherExact => ("Fisher's exact test", None, res.fisher_exact_p.unwrap_or(res.chi_square_p)),
+        ContingencyMethod::BarnardExact => {
+            let br = barnard_res.as_ref();
+            ("Barnard's exact test", br.map(|b| b.statistic), br.map_or(res.chi_square_p, |b| b.p_value))
+        }
         ContingencyMethod::CochranArmitageTrend => {
             ("Cochran-Armitage trend", res.cochran_armitage_z, res.cochran_armitage_p.unwrap_or(res.chi_square_p))
         }
@@ -978,6 +1437,20 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
             r_headers,
             r_labels,
             r_rows,
+        ));
+    }
+
+    if let Some(br) = &barnard_res {
+        let status = if br.used_asymptotic_fallback { ChecklistStatus::Info } else { ChecklistStatus::Pass };
+        out.checklist.push(checklist_item(
+            "Barnard unconditional nuisance maximization",
+            status,
+            Some(format!("max P = {:.4} at pi = {:.4}, Z_pooled = {:.4}", br.p_value, br.nuisance_pi, br.statistic)),
+            if br.used_asymptotic_fallback {
+                "Table total exceeded the exact unconditional grid cap; asymptotic pooled score P value was reported."
+            } else {
+                "Unconditional exact test maximized the two-binomial null probability across nuisance pi in [0, 1] without fixing column margins."
+            },
         ));
     }
 

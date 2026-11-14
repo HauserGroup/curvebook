@@ -4,8 +4,9 @@
 //! with Schoenfeld residual proportional-hazards diagnostics.
 
 use lumencraft_doc::{
-    AnalysisSpec, ChecklistStatus, CoxTieMethod, CurveSamplePoint, DataSheet, FittedCurveOverlay, PValueFormat, PairwiseComparisonRecord, ResultCell,
-    ResultSheet, ResultTabKind, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, TableArchetype,
+    AnalysisSpec, Cell, CellValue, ChecklistStatus, CoxTieMethod, CurveSamplePoint, DataSheet, FittedCurveOverlay, MultipleVariablesTable,
+    PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus,
+    TableArchetype, VariableRole,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
@@ -79,6 +80,15 @@ pub struct CoxCovariateResult {
     pub schoenfeld_p: f64,
 }
 
+/// Single time-indexed baseline cumulative hazard and survival point from a Cox PH fit
+/// (evaluated at the sample mean covariates).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct CoxBaselinePoint {
+    pub time: f64,
+    pub cum_hazard: f64,
+    pub survival: f64,
+}
+
 /// Complete Cox Proportional Hazards regression output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoxPhResult {
@@ -102,6 +112,7 @@ pub struct CoxPhResult {
     pub covariates: Vec<CoxCovariateResult>,
     pub martingale_residuals: Vec<f64>,
     pub deviance_residuals: Vec<f64>,
+    pub baseline_survival: Vec<CoxBaselinePoint>,
 }
 
 // ============================================================================
@@ -438,7 +449,7 @@ pub fn cox_ph_regression(
             (s.time, s.event, xc, orig_idx)
         })
         .collect();
-    ordered.sort_by(|a, b| a.0.total_cmp(&b.0));
+    ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
 
     let zero_beta = vec![0.0_f64; p];
     let (ll_null, grad_null, info_null) = cox_eval(&ordered, &zero_beta, tie_method, p)?;
@@ -510,7 +521,13 @@ pub fn cox_ph_regression(
     };
 
     let lr_chi2 = (2.0 * (ll_curr - ll_null)).max(0.0);
-    let wald_chi2 = solve_quad_form(&info, &beta, p).unwrap_or(0.0);
+    let wald_chi2 = (0..p)
+        .map(|j| {
+            let row_dot: f64 = (0..p).map(|k| info[j * p + k] * beta[k]).sum();
+            beta[j] * row_dot
+        })
+        .sum::<f64>()
+        .max(0.0);
     let df = p as f64;
     let lr_p = chi2_sf(lr_chi2, df)?;
     let wald_p = chi2_sf(wald_chi2, df)?;
@@ -541,7 +558,7 @@ pub fn cox_ph_regression(
         });
     }
 
-    let (martingale_residuals, deviance_residuals) = cox_residuals(&ordered, &beta, tie_method, n);
+    let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &beta, tie_method, n);
     let concordance = harrell_c_index(&ordered, &beta);
 
     Ok(CoxPhResult {
@@ -565,6 +582,7 @@ pub fn cox_ph_regression(
         covariates,
         martingale_residuals,
         deviance_residuals,
+        baseline_survival,
     })
 }
 
@@ -747,8 +765,21 @@ fn schoenfeld_diagnostics(
         return Ok((vec![0.0; p], vec![1.0; p], 0.0));
     }
 
-    // Grambsch-Therneau (1994) scaled Schoenfeld correlation test against event-rank time.
-    let g_times: Vec<f64> = (1..=n_evt).map(|r| (r as f64) / ((n_evt + 1) as f64)).collect();
+    // Grambsch-Therneau (1994) scaled Schoenfeld correlation test against tied average event-rank time.
+    let mut g_times = vec![0.0_f64; n_evt];
+    let denom_rank = (n_evt + 1) as f64;
+    let mut r_idx = 0_usize;
+    while r_idx < n_evt {
+        let t_curr = resid_rows[r_idx].0;
+        let start = r_idx;
+        while r_idx < n_evt && resid_rows[r_idx].0 == t_curr {
+            r_idx += 1;
+        }
+        let avg_rank = 0.5 * ((start + 1 + r_idx) as f64) / denom_rank;
+        for g in &mut g_times[start..r_idx] {
+            *g = avg_rank;
+        }
+    }
     let g_mean: f64 = g_times.iter().sum::<f64>() / (n_evt as f64);
     let g_ss: f64 = g_times.iter().map(|&g| (g - g_mean).powi(2)).sum();
     let n_ef = n_evt as f64;
@@ -779,11 +810,8 @@ fn schoenfeld_diagnostics(
         }
         let rho = if g_ss > 0.0 && ss_s > 0.0 { (cross / (g_ss * ss_s).sqrt()).clamp(-1.0, 1.0) } else { 0.0 };
         rhos[j] = rho;
-        let z2 = if cov_beta.get(j, j).unwrap_or(0.0) > 0.0 && g_ss > 0.0 {
-            (n_ef * cov_beta.get(j, j).unwrap_or(0.0) * sum_scaled_t[j] * sum_scaled_t[j]) / g_ss
-        } else {
-            0.0
-        };
+        let v_jj = cov_beta.get(j, j).unwrap_or(0.0);
+        let z2 = if v_jj > 0.0 && g_ss > 0.0 { (cross * cross) / (n_ef * v_jj * g_ss) } else { 0.0 };
         ps[j] = chi2_sf(z2, 1.0)?;
     }
 
@@ -799,7 +827,12 @@ fn schoenfeld_diagnostics(
     Ok((rhos, ps, global_chi2.max(0.0)))
 }
 
-fn cox_residuals(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64], tie_method: CoxTieMethod, n: usize) -> (Vec<f64>, Vec<f64>) {
+fn cox_residuals_and_baseline(
+    ordered: &[(f64, bool, Vec<f64>, usize)],
+    beta: &[f64],
+    tie_method: CoxTieMethod,
+    n: usize,
+) -> (Vec<f64>, Vec<f64>, Vec<CoxBaselinePoint>) {
     let w: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum::<f64>().clamp(-50.0, 50.0).exp()).collect();
     let mut s0_rev = vec![0.0_f64; n + 1];
     for i in (0..n).rev() {
@@ -809,6 +842,7 @@ fn cox_residuals(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64], tie_met
     let mut cum_h0 = 0.0_f64;
     let mut mart = vec![0.0_f64; n];
     let mut dev = vec![0.0_f64; n];
+    let mut baseline = Vec::new();
 
     let mut idx = 0_usize;
     while idx < n {
@@ -823,17 +857,25 @@ fn cox_residuals(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64], tie_met
             }
             idx += 1;
         }
+        let mut cum_h0_evt = cum_h0;
         if !evts.is_empty() {
+            let cum_h0_before = cum_h0;
             let s0_e: f64 = evts.iter().map(|&ei| w[ei]).sum();
             let d = evts.len() as f64;
+            let mut dh_evt = 0.0_f64;
             for m in 0..evts.len() {
                 let frac = if tie_method == CoxTieMethod::Efron { (m as f64) / d } else { 0.0 };
-                cum_h0 += 1.0 / (s0_rev[r_start] - frac * s0_e).max(1e-18);
+                let step = 1.0 / (s0_rev[r_start] - frac * s0_e).max(1e-18);
+                cum_h0 += step;
+                dh_evt += (1.0 - frac) * step;
             }
+            cum_h0_evt = cum_h0_before + dh_evt;
+            baseline.push(CoxBaselinePoint { time: t, cum_hazard: cum_h0, survival: (-cum_h0).exp().clamp(0.0, 1.0) });
         }
         for &i in &grp {
             let delta = if ordered[i].1 { 1.0 } else { 0.0 };
-            let m = delta - w[i] * cum_h0;
+            let h_subj = if ordered[i].1 { cum_h0_evt } else { cum_h0 };
+            let m = delta - w[i] * h_subj;
             let orig = ordered[i].3;
             mart[orig] = m;
             let sign = if m >= 0.0 { 1.0 } else { -1.0 };
@@ -841,7 +883,7 @@ fn cox_residuals(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64], tie_met
             dev[orig] = sign * d_sq.sqrt();
         }
     }
-    (mart, dev)
+    (mart, dev, baseline)
 }
 
 fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> f64 {
@@ -852,11 +894,12 @@ fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> f6
         if !ordered[i].1 {
             continue;
         }
-        for j in (i + 1)..ordered.len() {
-            if ordered[j].0 <= ordered[i].0 && !ordered[j].1 {
+        for j in 0..ordered.len() {
+            if j == i {
                 continue;
             }
-            if ordered[j].0 > ordered[i].0 {
+            let comparable = ordered[j].0 > ordered[i].0 || (ordered[j].0 == ordered[i].0 && !ordered[j].1);
+            if comparable {
                 pairs += 1.0;
                 if lp[i] > lp[j] {
                     conc += 1.0;
@@ -880,20 +923,42 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
     let p_fmt = spec.p_value_format;
 
     match surv_spec {
-        SurvivalAnalysisSpec::KaplanMeier { log_rank_mantel_cox, gehan_breslow_wilcoxon, trend_test, asymmetrical_greenwood_ci, multiplicity } => {
-            let TableArchetype::Survival(table) = &sheet.archetype else {
-                return Err(StatsError::IncompatibleTable { analysis: "Kaplan-Meier survival", actual: sheet.archetype.kind() });
+        SurvivalAnalysisSpec::KaplanMeier {
+            log_rank_mantel_cox,
+            gehan_breslow_wilcoxon,
+            trend_test,
+            asymmetrical_greenwood_ci,
+            multiplicity,
+            mv_time_column,
+            mv_status_column,
+            mv_group_column,
+        } => {
+            let cohorts: Vec<(usize, String, Vec<SurvivalObservation>)> = match &sheet.archetype {
+                TableArchetype::Survival(table) => {
+                    let indices = resolve_selected_indices(&spec.selected_data_sets, table.cohorts.len());
+                    if indices.is_empty() {
+                        return Err(StatsError::EmptyInput);
+                    }
+                    let mut list = Vec::with_capacity(indices.len());
+                    for c_idx in indices {
+                        let obs = table.cohort_observations(c_idx)?;
+                        list.push((c_idx, table.cohorts[c_idx].title.clone(), obs));
+                    }
+                    list
+                }
+                TableArchetype::MultipleVariables(mv) => {
+                    extract_mv_km_cohorts(mv, &spec.selected_data_sets, *mv_time_column, *mv_status_column, *mv_group_column)?
+                }
+                other => {
+                    return Err(StatsError::IncompatibleTable { analysis: "Kaplan-Meier survival", actual: other.kind() });
+                }
             };
-            let indices = resolve_selected_indices(&spec.selected_data_sets, table.cohorts.len());
-            if indices.is_empty() {
-                return Err(StatsError::EmptyInput);
-            }
 
-            let mut cohort_obs = Vec::with_capacity(indices.len());
-            let mut km_results = Vec::with_capacity(indices.len());
-            for (pos, &c_idx) in indices.iter().enumerate() {
-                let obs = table.cohort_observations(c_idx)?;
-                let km = kaplan_meier_curve(&table.cohorts[c_idx].title, &obs, *asymmetrical_greenwood_ci, confidence)?;
+            let indices: Vec<usize> = cohorts.iter().map(|(idx, _, _)| *idx).collect();
+            let mut cohort_obs = Vec::with_capacity(cohorts.len());
+            let mut km_results = Vec::with_capacity(cohorts.len());
+            for (pos, (c_idx, label, obs)) in cohorts.into_iter().enumerate() {
+                let km = kaplan_meier_curve(&label, &obs, *asymmetrical_greenwood_ci, confidence)?;
                 if let Some(med) = km.median_survival {
                     push_scalar(&mut out, format!("Median survival ({})", km.label), Some(c_idx), med);
                 }
@@ -1104,6 +1169,8 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 rows,
             ));
 
+            append_cox_baseline_tabs(&mut out, &cox.baseline_survival);
+
             let ph_ok = cox.global_schoenfeld_p >= 0.05;
             out.checklist.push(checklist_item(
                 "Proportional hazards assumption (Schoenfeld)",
@@ -1119,6 +1186,227 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
     }
 
     Ok(out)
+}
+
+fn append_cox_baseline_tabs(out: &mut ResultSheet, baseline: &[CoxBaselinePoint]) {
+    let mut base_labels = Vec::with_capacity(baseline.len() + 1);
+    let mut base_rows = Vec::with_capacity(baseline.len() + 1);
+    if baseline.first().is_some_and(|p| p.time > 0.0) {
+        base_labels.push(String::from("t = 0.0000"));
+        base_rows.push(vec![num_cell(0.0), num_cell(0.0), num_cell(1.0)]);
+    }
+    for pt in baseline {
+        base_labels.push(format!("t = {:.4}", pt.time));
+        base_rows.push(vec![num_cell(pt.time), num_cell(pt.cum_hazard), num_cell(pt.survival)]);
+    }
+    let mut base_tab = build_tab(
+        "cox-baseline-survival",
+        "Cox baseline survival curve (at mean covariates)",
+        ResultTabKind::BaselineSurvival,
+        vec![String::from("Time"), String::from("Cumulative Hazard H0(t)"), String::from("Baseline Survival S0(t)")],
+        base_labels,
+        base_rows,
+    );
+    base_tab.footnotes.push(String::from("Evaluated at sample covariate means using the fitted Breslow/Efron cumulative hazard step function."));
+    out.tabs.push(base_tab);
+
+    let mut lml_labels = Vec::with_capacity(baseline.len());
+    let mut lml_rows = Vec::with_capacity(baseline.len());
+    for pt in baseline {
+        if pt.cum_hazard > 0.0 && pt.survival > 0.0 && pt.survival < 1.0 {
+            let log_t = (pt.time > 0.0).then(|| pt.time.ln());
+            let lml = pt.cum_hazard.ln();
+            lml_labels.push(format!("t = {:.4}", pt.time));
+            lml_rows.push(vec![num_cell(pt.time), opt_num_cell(log_t), num_cell(pt.survival), num_cell(lml)]);
+        }
+    }
+    out.tabs.push(build_tab(
+        "cox-log-minus-log",
+        "Cox log-minus-log survival coordinates",
+        ResultTabKind::LogMinusLog,
+        vec![String::from("Time"), String::from("ln(Time)"), String::from("Baseline Survival S0(t)"), String::from("ln(-ln S0(t))")],
+        lml_labels,
+        lml_rows,
+    ));
+}
+
+fn mv_survival_token(cell: &Cell) -> Option<String> {
+    if cell.excluded {
+        return None;
+    }
+    match &cell.value {
+        CellValue::Empty => None,
+        CellValue::Text(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        CellValue::Number(v) if v.is_finite() => Some(format!("{v}")),
+        CellValue::Number(_) => None,
+    }
+}
+
+fn is_binary_status_column(mv: &MultipleVariablesTable, col_idx: usize) -> bool {
+    let Some(var) = mv.variables.get(col_idx) else {
+        return false;
+    };
+    let mut count = 0_usize;
+    for cell in &var.cells {
+        if cell.excluded || cell.is_empty() {
+            continue;
+        }
+        match cell.value {
+            CellValue::Number(v) if v.is_finite() && (v == 0.0 || v == 1.0) => {
+                count += 1;
+            }
+            _ => return false,
+        }
+    }
+    count > 0
+}
+
+fn title_has_any(title: &str, hints: &[&str]) -> bool {
+    let lower = title.to_ascii_lowercase();
+    hints.iter().any(|h| lower.contains(h))
+}
+
+fn extract_mv_km_cohorts(
+    mv: &MultipleVariablesTable,
+    selected: &[usize],
+    mv_time_column: Option<usize>,
+    mv_status_column: Option<usize>,
+    mv_group_column: Option<usize>,
+) -> Result<Vec<(usize, String, Vec<SurvivalObservation>)>, StatsError> {
+    if let Some(t) = mv_time_column
+        && t >= mv.variables.len()
+    {
+        return Err(StatsError::MissingColumn { index: t });
+    }
+    if let Some(s) = mv_status_column
+        && s >= mv.variables.len()
+    {
+        return Err(StatsError::MissingColumn { index: s });
+    }
+    if let Some(g) = mv_group_column
+        && g >= mv.variables.len()
+    {
+        return Err(StatsError::MissingColumn { index: g });
+    }
+
+    let pool = resolve_selected_indices(selected, mv.variables.len());
+    let status_col = match mv_status_column {
+        Some(s) => s,
+        None => {
+            let candidates: Vec<usize> =
+                pool.iter().copied().filter(|&i| Some(i) != mv_time_column && Some(i) != mv_group_column && is_binary_status_column(mv, i)).collect();
+            let preferred = candidates.iter().copied().find(|&i| title_has_any(&mv.variables[i].title, &["status", "event", "censor", "death"]));
+            preferred.or_else(|| candidates.first().copied()).ok_or(StatsError::InvalidParameter { name: "mv_status_column", value: -1.0 })?
+        }
+    };
+
+    let time_col = match mv_time_column {
+        Some(t) => t,
+        None => {
+            let candidates: Vec<usize> =
+                pool.iter()
+                    .copied()
+                    .filter(|&i| {
+                        i != status_col
+                            && Some(i) != mv_group_column
+                            && mv.variables.get(i).is_some_and(|v| {
+                                v.role != VariableRole::Categorical && v.cells.iter().filter_map(Cell::active_number).any(|x| x >= 0.0)
+                            })
+                    })
+                    .collect();
+            let preferred = candidates
+                .iter()
+                .copied()
+                .find(|&i| title_has_any(&mv.variables[i].title, &["time", "surv", "follow", "dur", "day", "month", "year"]));
+            preferred.or_else(|| candidates.first().copied()).ok_or(StatsError::InvalidParameter { name: "mv_time_column", value: -1.0 })?
+        }
+    };
+
+    if time_col == status_col {
+        return Err(StatsError::InvalidParameter { name: "mv_status_column", value: status_col as f64 });
+    }
+
+    let group_col = match mv_group_column {
+        Some(g) => {
+            if g == time_col || g == status_col {
+                return Err(StatsError::InvalidParameter { name: "mv_group_column", value: g as f64 });
+            }
+            Some(g)
+        }
+        None => {
+            if mv_time_column.is_none() || mv_status_column.is_none() || !selected.is_empty() {
+                let cat_candidates: Vec<usize> = pool
+                    .iter()
+                    .copied()
+                    .filter(|&i| i != time_col && i != status_col && mv.variables.get(i).is_some_and(|v| v.role == VariableRole::Categorical))
+                    .collect();
+                cat_candidates.first().copied()
+            } else {
+                None
+            }
+        }
+    };
+
+    let time_var = &mv.variables[time_col];
+    let status_var = &mv.variables[status_col];
+
+    if let Some(g_col) = group_col {
+        let g_var = &mv.variables[g_col];
+        let levels: Vec<String> = g_var.ordered_levels().into_iter().filter(|l| l.included_count > 0).map(|l| l.level).collect();
+        if levels.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        let mut buckets: Vec<Vec<SurvivalObservation>> = vec![Vec::new(); levels.len()];
+        for r in 0..mv.row_count() {
+            let Some(t) = time_var.cells.get(r).and_then(Cell::active_number) else { continue };
+            let Some(st) = status_var.cells.get(r).and_then(Cell::active_number) else { continue };
+            if !t.is_finite() || t < 0.0 {
+                return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+            }
+            let status = if st == 1.0 {
+                SurvivalStatus::Event
+            } else if st == 0.0 {
+                SurvivalStatus::Censored
+            } else {
+                return Err(StatsError::InvalidParameter { name: "survival_status", value: st });
+            };
+            let Some(tok) = g_var.cells.get(r).and_then(mv_survival_token) else { continue };
+            if let Some(pos) = levels.iter().position(|lvl| lvl == &tok) {
+                buckets[pos].push(SurvivalObservation { row: r, time: t, status });
+            }
+        }
+        let cohorts: Vec<(usize, String, Vec<SurvivalObservation>)> =
+            levels.into_iter().zip(buckets).enumerate().filter(|(_, (_, obs))| !obs.is_empty()).map(|(idx, (lbl, obs))| (idx, lbl, obs)).collect();
+        if cohorts.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        Ok(cohorts)
+    } else {
+        let mut obs = Vec::new();
+        for r in 0..mv.row_count() {
+            let Some(t) = time_var.cells.get(r).and_then(Cell::active_number) else { continue };
+            let Some(st) = status_var.cells.get(r).and_then(Cell::active_number) else { continue };
+            if !t.is_finite() || t < 0.0 {
+                return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+            }
+            let status = if st == 1.0 {
+                SurvivalStatus::Event
+            } else if st == 0.0 {
+                SurvivalStatus::Censored
+            } else {
+                return Err(StatsError::InvalidParameter { name: "survival_status", value: st });
+            };
+            obs.push(SurvivalObservation { row: r, time: t, status });
+        }
+        if obs.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        let label = if time_var.title.trim().is_empty() { String::from("Overall") } else { time_var.title.clone() };
+        Ok(vec![(0, label, obs)])
+    }
 }
 
 fn append_survival_pairwise(
@@ -1142,7 +1430,7 @@ fn append_survival_pairwise(
         }
     }
     let proc_eff = match MultiplicityProcedure::from(mult.method) {
-        MultiplicityProcedure::None => MultiplicityProcedure::None,
+        MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => MultiplicityProcedure::None,
         MultiplicityProcedure::BenjaminiHochbergFdr | MultiplicityProcedure::BenjaminiYekutieliFdr | MultiplicityProcedure::TwoStageBkyFdr => {
             MultiplicityProcedure::from(mult.method)
         }

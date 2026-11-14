@@ -1,22 +1,26 @@
 //! Multivariate statistics: Pearson *r* (Fisher-*z* CI), Spearman *rho*, Kendall *tau_b*,
 //! correlation matrices with Benjamini–Hochberg multiplicity, Principal Component Analysis (SVD,
 //! scree, Kaiser, Horn's parallel analysis, scores, loadings, biplot contributions), *k*-means++,
-//! and Hierarchical Clustering (Single, Complete, Average/UPGMA, Ward.D2 dendrogram linkage).
+//! Hierarchical Clustering (Single, Complete, Average/UPGMA, Ward.D2 dendrogram linkage), and
+//! Multiple Imputation by Chained Equations (MICE PMM) with Rubin (1987) / Barnard–Rubin (1999) pooling.
 
-use lumencraft_doc::{AnalysisSpec, ChecklistStatus, DataSheet, MultivariateSpec, ResultCell, ResultSheet, ResultTabKind, TableArchetype};
+use lumencraft_doc::{
+    AnalysisSpec, ChecklistStatus, DataSheet, MultivariateSpec, ResultCell, ResultSheet, ResultTabKind, TableArchetype, VariableRole,
+};
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_p};
-use lumencraft_math::linalg::{DenseMatrix, svd};
+use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, svd, sym_eigen};
 use lumencraft_math::rng::DeterministicRng;
-use lumencraft_math::sum::{SummaryMoments, pearson_r};
+use lumencraft_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
     build_tab, checklist_item, ci_cell, extract_numeric_columns, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, quantile_sorted,
-    rank_with_ties, resolve_selected_indices, validate_finite_slice,
+    rank_with_ties, resolve_selected_indices, t_crit_two_sided, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::adjust_benjamini_hochberg;
+use crate::regression::multiple_linear_regression;
 
 // ============================================================================
 // Typed Outputs
@@ -93,6 +97,59 @@ pub struct KMeansResult {
     pub centroids: Vec<Vec<f64>>,
     pub wcss: f64,
     pub mean_silhouette: f64,
+}
+
+/// Pooled parameter estimate across `m` multiply imputed datasets using Rubin's (1987) rules
+/// with Barnard–Rubin (1999) small-sample degrees-of-freedom adjustment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RubinPooledEstimate {
+    pub term: String,
+    pub m: usize,
+    pub estimate: f64,
+    pub within_variance: f64,
+    pub between_variance: f64,
+    pub total_variance: f64,
+    pub pooled_se: f64,
+    pub t_statistic: f64,
+    pub df: f64,
+    pub p_value: f64,
+    pub ci: (f64, f64),
+    pub riv: f64,
+    pub lambda: f64,
+    pub fmi: f64,
+}
+
+/// Configuration options for seeded MICE Predictive Mean Matching multiple imputation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultipleImputationConfig {
+    pub imputations_m: usize,
+    pub max_iters: usize,
+    pub seed: u64,
+    pub response_col: Option<usize>,
+    pub predictor_cols: Vec<usize>,
+    pub confidence: ConfidenceLevel,
+}
+
+impl Default for MultipleImputationConfig {
+    fn default() -> Self {
+        Self { imputations_m: 5, max_iters: 10, seed: 42, response_col: None, predictor_cols: Vec::new(), confidence: ConfidenceLevel::default() }
+    }
+}
+
+/// Complete Multiple Imputation (MICE PMM + Rubin pooling) result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultipleImputationResult {
+    pub m: usize,
+    pub max_iters: usize,
+    pub seed: u64,
+    pub n_rows: usize,
+    pub variable_labels: Vec<String>,
+    pub missing_counts: Vec<usize>,
+    pub total_missing: usize,
+    pub pooled_means: Vec<RubinPooledEstimate>,
+    pub pooled_regression: Option<Vec<RubinPooledEstimate>>,
+    /// Completed datasets indexed as `imputed_datasets[imp_idx][row_idx][col_idx]`.
+    pub imputed_datasets: Vec<Vec<Vec<f64>>>,
 }
 
 // ============================================================================
@@ -828,9 +885,832 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 "Mean silhouette near +1 indicates tight, well-separated clusters; Ward.D2 dendrogram captures nested agglomerative hierarchy.",
             ));
         }
+        MultivariateSpec::MultipleImputation { imputations_m, max_iters, seed, response_column, predictor_columns } => {
+            let extracted = extract_mi_columns(sheet, &spec.selected_data_sets, *response_column, predictor_columns)?;
+            let config = MultipleImputationConfig {
+                imputations_m: *imputations_m,
+                max_iters: *max_iters,
+                seed: *seed,
+                response_col: extracted.model_response_col,
+                predictor_cols: extracted.model_predictor_cols,
+                confidence: spec.confidence_level,
+            };
+            let res = mice_predictive_mean_matching(&extracted.labels, &extracted.cols, &config)?;
+            populate_mi_result_sheet(&mut out, &res, p_fmt, spec.confidence_level);
+        }
     }
 
     Ok(out)
+}
+
+// ============================================================================
+// Multiple Imputation (MICE PMM) & Rubin's Pooling Rules
+// ============================================================================
+
+/// Combine `m` scalar parameter estimates `estimates` (`Q_1..Q_m`) and corresponding
+/// within-imputation variances `variances` (`U_1..U_m`, i.e., `SE_k^2`) via Rubin's (1987)
+/// combination rules with optional Barnard–Rubin (1999) small-sample df adjustment.
+pub fn rubin_pool_estimates(
+    term: impl Into<String>,
+    estimates: &[f64],
+    variances: &[f64],
+    complete_data_df: Option<f64>,
+    confidence: ConfidenceLevel,
+) -> Result<RubinPooledEstimate, StatsError> {
+    let m = estimates.len();
+    if variances.len() != m {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: m, actual: variances.len() }));
+    }
+    if m < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "Rubin pooling imputations (m)", required: 2, actual: m });
+    }
+    validate_finite_slice(estimates)?;
+    validate_finite_slice(variances)?;
+    for &u in variances {
+        if u < 0.0 {
+            return Err(StatsError::InvalidParameter { name: "within_variance", value: u });
+        }
+    }
+    if let Some(vc) = complete_data_df
+        && (!vc.is_finite() || vc <= 0.0)
+    {
+        return Err(StatsError::InvalidParameter { name: "complete_data_df", value: vc });
+    }
+
+    let m_f = m as f64;
+    let mut sum_q = NeumaierSum::new();
+    let mut sum_u = NeumaierSum::new();
+    for (&q, &u) in estimates.iter().zip(variances.iter()) {
+        sum_q.add(q);
+        sum_u.add(u);
+    }
+    let q_bar = sum_q.total() / m_f;
+    let u_bar = sum_u.total() / m_f;
+
+    let mut sum_sq = NeumaierSum::new();
+    for &q in estimates {
+        let diff = q - q_bar;
+        sum_sq.add(diff * diff);
+    }
+    let b = sum_sq.total() / (m_f - 1.0);
+    let b_inflated = (1.0 + 1.0 / m_f) * b;
+    let t_total = u_bar + b_inflated;
+
+    let term = term.into();
+    if t_total <= 0.0 {
+        let df = complete_data_df.unwrap_or(1.0e6);
+        return Ok(RubinPooledEstimate {
+            term,
+            m,
+            estimate: q_bar,
+            within_variance: u_bar,
+            between_variance: 0.0,
+            total_variance: 0.0,
+            pooled_se: 0.0,
+            t_statistic: 0.0,
+            df,
+            p_value: 1.0,
+            ci: (q_bar, q_bar),
+            riv: 0.0,
+            lambda: 0.0,
+            fmi: 0.0,
+        });
+    }
+
+    let pooled_se = t_total.sqrt();
+    let lambda = (b_inflated / t_total).clamp(0.0, 1.0);
+    let riv = if u_bar > 0.0 { b_inflated / u_bar } else { 1.0e12 };
+
+    let (df, fmi) = if b <= 0.0 || lambda <= 1.0e-15 {
+        (complete_data_df.unwrap_or(1.0e6), 0.0)
+    } else {
+        let nu_old = (m_f - 1.0) / (lambda * lambda);
+        let df_val = if let Some(vc) = complete_data_df {
+            let nu_obs = ((vc + 1.0) / (vc + 3.0)) * vc * (1.0 - lambda).max(1.0e-12);
+            ((nu_old * nu_obs) / (nu_old + nu_obs)).max(1.0e-6)
+        } else {
+            nu_old.max(1.0e-6)
+        };
+        let fmi_val = (lambda + (1.0 - lambda) * (2.0 / (df_val + 3.0))).clamp(0.0, 1.0);
+        (df_val, fmi_val)
+    };
+
+    let t_stat = q_bar / pooled_se;
+    let p_val = student_t_two_sided_p(t_stat, df)?;
+    let t_crit = t_crit_two_sided(confidence, df)?;
+
+    Ok(RubinPooledEstimate {
+        term,
+        m,
+        estimate: q_bar,
+        within_variance: u_bar,
+        between_variance: b,
+        total_variance: t_total,
+        pooled_se,
+        t_statistic: t_stat,
+        df,
+        p_value: p_val,
+        ci: (q_bar - t_crit * pooled_se, q_bar + t_crit * pooled_se),
+        riv,
+        lambda,
+        fmi,
+    })
+}
+
+/// Run seeded MICE with Bayesian posterior linear parameter draws and Type-1 Predictive Mean
+/// Matching (PMM) across `cols`, pooling variable means and optional complete-data OLS estimates
+/// with Rubin's rules.
+pub fn mice_predictive_mean_matching(
+    labels: &[String],
+    cols: &[Vec<Option<f64>>],
+    config: &MultipleImputationConfig,
+) -> Result<MultipleImputationResult, StatsError> {
+    let p = cols.len();
+    if p == 0 {
+        return Err(StatsError::EmptyInput);
+    }
+    if labels.len() != p {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: p, actual: labels.len() }));
+    }
+    let n_rows = cols[0].len();
+    if n_rows < 3 {
+        return Err(StatsError::InsufficientSampleSize { context: "multiple imputation rows", required: 3, actual: n_rows });
+    }
+    for col in cols {
+        if col.len() != n_rows {
+            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n_rows, actual: col.len() }));
+        }
+    }
+
+    validate_mi_model_indices(config.response_col, &config.predictor_cols, p)?;
+
+    let mut obs_indices = Vec::with_capacity(p);
+    let mut mis_indices = Vec::with_capacity(p);
+    let mut missing_counts = Vec::with_capacity(p);
+    let mut total_missing = 0_usize;
+
+    for col in cols {
+        let mut obs = Vec::new();
+        let mut mis = Vec::new();
+        for (r, &cell) in col.iter().enumerate() {
+            match cell {
+                Some(v) if v.is_finite() => obs.push(r),
+                _ => mis.push(r),
+            }
+        }
+        if obs.len() < 2 {
+            return Err(StatsError::InsufficientSampleSize { context: "multiple imputation observed cells", required: 2, actual: obs.len() });
+        }
+        total_missing += mis.len();
+        missing_counts.push(mis.len());
+        obs_indices.push(obs);
+        mis_indices.push(mis);
+    }
+
+    let m = config.imputations_m.clamp(2, 50);
+    let max_iters = config.max_iters.clamp(1, 100);
+    let mut rng = DeterministicRng::from_seed(config.seed);
+
+    let mut base_rows = vec![vec![0.0_f64; p]; n_rows];
+    for (j, col) in cols.iter().enumerate() {
+        for (r, &cell) in col.iter().enumerate() {
+            base_rows[r][j] = match cell {
+                Some(v) if v.is_finite() => v,
+                _ => 0.0,
+            };
+        }
+    }
+
+    let mut imputed_datasets = Vec::with_capacity(m);
+    if total_missing == 0 {
+        for _ in 0..m {
+            imputed_datasets.push(base_rows.clone());
+        }
+    } else {
+        for _imp_idx in 0..m {
+            let mut work = base_rows.clone();
+            initialize_missing_cells(&mut work, &obs_indices, &mis_indices, &mut rng);
+            for _iter in 0..max_iters {
+                for j in 0..p {
+                    if mis_indices[j].is_empty() {
+                        continue;
+                    }
+                    if p == 1 {
+                        impute_single_variable(&mut work, &obs_indices[0], &mis_indices[0], &mut rng);
+                    } else {
+                        impute_column_pmm(&mut work, j, &obs_indices[j], &mis_indices[j], &mut rng)?;
+                    }
+                }
+            }
+            imputed_datasets.push(work);
+        }
+    }
+
+    let pooled_means = pool_imputed_means(labels, &imputed_datasets, n_rows, config.confidence)?;
+    let pooled_regression = pool_imputed_regression(labels, &imputed_datasets, n_rows, config)?;
+
+    Ok(MultipleImputationResult {
+        m,
+        max_iters,
+        seed: config.seed,
+        n_rows,
+        variable_labels: labels.to_vec(),
+        missing_counts,
+        total_missing,
+        pooled_means,
+        pooled_regression,
+        imputed_datasets,
+    })
+}
+
+fn validate_mi_model_indices(response_col: Option<usize>, predictor_cols: &[usize], p: usize) -> Result<(), StatsError> {
+    if let Some(resp) = response_col
+        && resp >= p
+    {
+        return Err(StatsError::MissingColumn { index: resp });
+    }
+    for &pred in predictor_cols {
+        if pred >= p {
+            return Err(StatsError::MissingColumn { index: pred });
+        }
+    }
+    Ok(())
+}
+
+fn initialize_missing_cells(rows: &mut [Vec<f64>], obs_indices: &[Vec<usize>], mis_indices: &[Vec<usize>], rng: &mut DeterministicRng) {
+    for (j, (obs, mis)) in obs_indices.iter().zip(mis_indices.iter()).enumerate() {
+        for &r_mis in mis {
+            let pick = rng.gen_index(obs.len()).unwrap_or(0);
+            rows[r_mis][j] = rows[obs[pick]][j];
+        }
+    }
+}
+
+fn impute_single_variable(rows: &mut [Vec<f64>], obs_rows: &[usize], mis_rows: &[usize], rng: &mut DeterministicRng) {
+    let n_obs = obs_rows.len();
+    let y_obs: Vec<f64> = obs_rows.iter().map(|&r| rows[r][0]).collect();
+    let Ok(m) = SummaryMoments::from_slice(&y_obs) else {
+        return;
+    };
+    let df = n_obs.saturating_sub(1).max(1);
+    let g = chi2_draw(df, rng);
+    let sigma_star = if m.css > 0.0 { (m.css / g).sqrt() } else { 0.0 };
+    let mu_star = m.mean + (sigma_star / (n_obs as f64).sqrt()) * rng.standard_normal();
+
+    let donors_k = if n_obs <= 3 { n_obs } else { (n_obs / 2).clamp(2, 5) };
+    let mut ranked: Vec<(usize, f64)> = y_obs.iter().enumerate().map(|(i, &yv)| (i, (yv - mu_star).abs())).collect();
+    ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+    for &r_mis in mis_rows {
+        let pick = rng.gen_index(donors_k).unwrap_or(0);
+        rows[r_mis][0] = y_obs[ranked[pick].0];
+    }
+}
+
+fn impute_column_pmm(
+    rows: &mut [Vec<f64>],
+    target_col: usize,
+    obs_rows: &[usize],
+    mis_rows: &[usize],
+    rng: &mut DeterministicRng,
+) -> Result<(), StatsError> {
+    let n_obs = obs_rows.len();
+    let y_obs: Vec<f64> = obs_rows.iter().map(|&r| rows[r][target_col]).collect();
+    let predictors = select_pmm_predictors(rows, obs_rows, target_col, rows[0].len());
+
+    let x_obs = build_design_matrix(rows, obs_rows, &predictors)?;
+    let (sol, cov_unscaled) = solve_linear_least_squares(&x_obs, &y_obs)?;
+    let beta_hat = &sol.coefficients;
+    let df_res = n_obs.saturating_sub(sol.rank).max(1);
+    let g = chi2_draw(df_res, rng);
+    let sigma_star = if sol.rss > 0.0 { (sol.rss / g).sqrt() } else { 0.0 };
+    let beta_star = posterior_beta_draw(beta_hat, &cov_unscaled, sigma_star, rng);
+
+    let y_hat_obs = predict_rows(&x_obs, beta_hat);
+    let x_mis = build_design_matrix(rows, mis_rows, &predictors)?;
+    let y_hat_mis = predict_rows(&x_mis, &beta_star);
+
+    let donors_k = if n_obs <= 3 { n_obs } else { (n_obs / 2).clamp(2, 5) };
+    let mut distances: Vec<(usize, f64)> = Vec::with_capacity(n_obs);
+
+    for (m_pos, &r_mis) in mis_rows.iter().enumerate() {
+        let target_pred = y_hat_mis[m_pos];
+        distances.clear();
+        for (o_pos, &obs_pred) in y_hat_obs.iter().enumerate() {
+            distances.push((o_pos, (obs_pred - target_pred).abs()));
+        }
+        distances.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+        // Break boundary ties fairly so discrete predictors draw across the tied donor pool.
+        let cutoff = distances[donors_k - 1].1 + 1.0e-12 * target_pred.abs().max(1.0);
+        let pool_len = distances.iter().take_while(|(_, d)| *d <= cutoff).count().max(donors_k);
+        let pick = rng.gen_index(pool_len).unwrap_or(0);
+        rows[r_mis][target_col] = y_obs[distances[pick].0];
+    }
+    Ok(())
+}
+
+fn select_pmm_predictors(rows: &[Vec<f64>], obs_rows: &[usize], target_col: usize, n_cols: usize) -> Vec<usize> {
+    let n_obs = obs_rows.len();
+    let max_preds = n_obs.saturating_sub(2);
+    if max_preds == 0 {
+        return Vec::new();
+    }
+    let y_obs: Vec<f64> = obs_rows.iter().map(|&r| rows[r][target_col]).collect();
+    let mut candidates: Vec<(usize, f64)> = Vec::new();
+    for k in (0..n_cols).filter(|&col_idx| col_idx != target_col) {
+        let x_k: Vec<f64> = obs_rows.iter().map(|&r| rows[r].get(k).copied().unwrap_or(0.0)).collect();
+        if let Ok(mx) = SummaryMoments::from_slice(&x_k)
+            && mx.css > 0.0
+        {
+            let score = pearson_r(&x_k, &y_obs).map_or(0.0, f64::abs);
+            candidates.push((k, score));
+        }
+    }
+    if candidates.len() > max_preds {
+        candidates.sort_by(|a, b| b.1.total_cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        candidates.truncate(max_preds);
+    }
+    candidates.into_iter().map(|(k, _)| k).collect()
+}
+
+fn build_design_matrix(rows: &[Vec<f64>], row_indices: &[usize], predictor_cols: &[usize]) -> Result<DenseMatrix, StatsError> {
+    let nr = row_indices.len();
+    let nc = 1 + predictor_cols.len();
+    let mut flat = Vec::with_capacity(nr * nc);
+    for &r in row_indices {
+        flat.push(1.0);
+        for &c in predictor_cols {
+            flat.push(rows[r][c]);
+        }
+    }
+    Ok(DenseMatrix::from_row_major(nr, nc, flat)?)
+}
+
+fn predict_rows(x: &DenseMatrix, beta: &[f64]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(x.nrows());
+    for i in 0..x.nrows() {
+        let mut s = NeumaierSum::new();
+        for (j, &bj) in beta.iter().enumerate().take(x.ncols()) {
+            s.add(x.get(i, j).unwrap_or(0.0) * bj);
+        }
+        out.push(s.total());
+    }
+    out
+}
+
+fn posterior_beta_draw(beta_hat: &[f64], cov_unscaled: &DenseMatrix, sigma_star: f64, rng: &mut DeterministicRng) -> Vec<f64> {
+    let q = beta_hat.len();
+    if q == 0 || sigma_star <= 0.0 || !sigma_star.is_finite() {
+        return beta_hat.to_vec();
+    }
+    let z: Vec<f64> = (0..q).map(|_| rng.standard_normal()).collect();
+    let delta = draw_cov_vector(cov_unscaled, &z);
+    beta_hat.iter().zip(delta.iter()).map(|(&b, &d)| b + sigma_star * d).collect()
+}
+
+fn draw_cov_vector(cov: &DenseMatrix, z: &[f64]) -> Vec<f64> {
+    let q = z.len();
+    if let Ok(chol) = cholesky(cov) {
+        let l = chol.l();
+        let mut out = vec![0.0_f64; q];
+        for (i, slot) in out.iter_mut().enumerate() {
+            let mut s = NeumaierSum::new();
+            for (j, &zj) in z.iter().enumerate().take(i + 1) {
+                s.add(l.get(i, j).unwrap_or(0.0) * zj);
+            }
+            *slot = s.total();
+        }
+        return out;
+    }
+    if let Ok(eig) = sym_eigen(cov) {
+        let mut out = vec![0.0_f64; q];
+        for (k, &lam) in eig.eigenvalues.iter().enumerate() {
+            if lam > 0.0 && lam.is_finite() {
+                let scale = lam.sqrt() * z[k];
+                for (i, slot) in out.iter_mut().enumerate() {
+                    *slot += eig.eigenvectors.get(i, k).unwrap_or(0.0) * scale;
+                }
+            }
+        }
+        return out;
+    }
+    vec![0.0_f64; q]
+}
+
+fn chi2_draw(df: usize, rng: &mut DeterministicRng) -> f64 {
+    let df_safe = df.max(1);
+    if df_safe <= 30 {
+        let mut sum = 0.0_f64;
+        for _ in 0..df_safe {
+            let z = rng.standard_normal();
+            sum += z * z;
+        }
+        return sum.max(1.0e-12);
+    }
+    // Marsaglia & Tsang (2000) transformation for Gamma(alpha = df / 2 >= 15.5, 1), scaled by 2.
+    let alpha = 0.5 * (df_safe as f64);
+    let d = alpha - 1.0 / 3.0;
+    let c = 1.0 / (9.0 * d).sqrt();
+    for _ in 0..1024 {
+        let x = rng.standard_normal();
+        let v_root = 1.0 + c * x;
+        if v_root <= 0.0 {
+            continue;
+        }
+        let v = v_root * v_root * v_root;
+        let u = rng.next_open_f64();
+        let x2 = x * x;
+        if u < 1.0 - 0.0331 * x2 * x2 || u.ln() < 0.5 * x2 + d * (1.0 - v + v.ln()) {
+            return (2.0 * d * v).max(1.0e-12);
+        }
+    }
+    df_safe as f64
+}
+
+fn pool_imputed_means(
+    labels: &[String],
+    imputed_datasets: &[Vec<Vec<f64>>],
+    n_rows: usize,
+    confidence: ConfidenceLevel,
+) -> Result<Vec<RubinPooledEstimate>, StatsError> {
+    let p = labels.len();
+    let m = imputed_datasets.len();
+    let complete_df = (n_rows.saturating_sub(1).max(1)) as f64;
+    let denom_df = complete_df;
+    let n_f = n_rows as f64;
+
+    let mut out = Vec::with_capacity(p);
+    for (j, label) in labels.iter().enumerate() {
+        let mut qs = Vec::with_capacity(m);
+        let mut us = Vec::with_capacity(m);
+        for ds in imputed_datasets {
+            let col: Vec<f64> = ds.iter().map(|row| row[j]).collect();
+            let mom = SummaryMoments::from_slice(&col)?;
+            let var_sample = mom.css / denom_df;
+            qs.push(mom.mean);
+            us.push(var_sample / n_f);
+        }
+        out.push(rubin_pool_estimates(label.clone(), &qs, &us, Some(complete_df), confidence)?);
+    }
+    Ok(out)
+}
+
+fn pool_imputed_regression(
+    labels: &[String],
+    imputed_datasets: &[Vec<Vec<f64>>],
+    n_rows: usize,
+    config: &MultipleImputationConfig,
+) -> Result<Option<Vec<RubinPooledEstimate>>, StatsError> {
+    let Some(resp) = config.response_col else {
+        return Ok(None);
+    };
+    let preds: Vec<usize> = config.predictor_cols.iter().copied().filter(|&c| c != resp).collect();
+    if preds.is_empty() {
+        return Ok(None);
+    }
+
+    let mut term_names = vec![String::from("Intercept")];
+    for &c in &preds {
+        term_names.push(labels[c].clone());
+    }
+    let m = imputed_datasets.len();
+    let n_terms = term_names.len();
+    if n_rows <= n_terms {
+        return Err(StatsError::InsufficientSampleSize { context: "multiple imputation regression df", required: n_terms + 1, actual: n_rows });
+    }
+
+    let mut fits = Vec::with_capacity(m);
+    for ds in imputed_datasets {
+        let mut x_flat = Vec::with_capacity(n_rows * n_terms);
+        let mut y_vec = Vec::with_capacity(n_rows);
+        for row in ds {
+            x_flat.push(1.0);
+            for &c in &preds {
+                x_flat.push(row[c]);
+            }
+            y_vec.push(row[resp]);
+        }
+        let x_mat = DenseMatrix::from_row_major(n_rows, n_terms, x_flat)?;
+        fits.push(multiple_linear_regression(&x_mat, &y_vec, &term_names, true, false, config.confidence)?);
+    }
+
+    let complete_df = fits[0].df_residual.max(1.0);
+    let mut pooled = Vec::with_capacity(n_terms);
+    for (t_idx, name) in term_names.iter().enumerate() {
+        let mut qs = Vec::with_capacity(m);
+        let mut us = Vec::with_capacity(m);
+        for fit in &fits {
+            let term = &fit.terms[t_idx];
+            qs.push(term.estimate);
+            us.push(term.se * term.se);
+        }
+        pooled.push(rubin_pool_estimates(name.clone(), &qs, &us, Some(complete_df), config.confidence)?);
+    }
+    Ok(Some(pooled))
+}
+
+struct ExtractedMiData {
+    labels: Vec<String>,
+    cols: Vec<Vec<Option<f64>>>,
+    model_response_col: Option<usize>,
+    model_predictor_cols: Vec<usize>,
+}
+
+struct RawOptionalColumns {
+    labels: Vec<String>,
+    cols: Vec<Vec<Option<f64>>>,
+    is_label: Vec<bool>,
+}
+
+fn extract_raw_optional_columns(sheet: &DataSheet) -> Result<RawOptionalColumns, StatsError> {
+    match &sheet.archetype {
+        TableArchetype::MultipleVariables(mv) => {
+            let mut labels = Vec::with_capacity(mv.variables.len());
+            let mut cols = Vec::with_capacity(mv.variables.len());
+            let mut is_label = Vec::with_capacity(mv.variables.len());
+            for v in &mv.variables {
+                labels.push(v.title.clone());
+                cols.push(v.cells.iter().map(|c| c.active_number()).collect());
+                is_label.push(matches!(v.role, VariableRole::Label));
+            }
+            Ok(RawOptionalColumns { labels, cols, is_label })
+        }
+        TableArchetype::Column(col_tab) => {
+            let labels = col_tab.data_sets.iter().map(|ds| ds.title.clone()).collect();
+            let cols =
+                col_tab.data_sets.iter().map(|ds| ds.cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect()).collect();
+            let is_label = vec![false; col_tab.data_sets.len()];
+            Ok(RawOptionalColumns { labels, cols, is_label })
+        }
+        TableArchetype::Xy(xy) => {
+            let mut labels = vec![xy.x_title.clone()];
+            let mut cols = vec![xy.x_cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect()];
+            for ds in &xy.data_sets {
+                labels.push(ds.title.clone());
+                cols.push(ds.cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect());
+            }
+            let is_label = vec![false; labels.len()];
+            Ok(RawOptionalColumns { labels, cols, is_label })
+        }
+        other => Err(StatsError::IncompatibleTable { analysis: "multiple imputation", actual: other.kind() }),
+    }
+}
+
+fn push_unique(target: &mut Vec<usize>, val: usize) {
+    if !target.contains(&val) {
+        target.push(val);
+    }
+}
+
+fn collect_mi_column_indices(
+    raw_cols: &[Vec<Option<f64>>],
+    is_label: &[bool],
+    selected: &[usize],
+    response_column: Option<usize>,
+    predictor_columns: &[usize],
+) -> Vec<usize> {
+    let total_cols = raw_cols.len();
+    let is_numeric_usable = |idx: usize| !is_label[idx] && raw_cols[idx].iter().any(|c| c.is_some_and(f64::is_finite));
+    let mut chosen = Vec::new();
+
+    if response_column.is_some() || !predictor_columns.is_empty() {
+        if let Some(resp) = response_column {
+            push_unique(&mut chosen, resp);
+        }
+        for &pred in predictor_columns {
+            push_unique(&mut chosen, pred);
+        }
+        let extra = if !selected.is_empty() {
+            resolve_selected_indices(selected, total_cols)
+        } else if response_column.is_some() && predictor_columns.is_empty() {
+            (0..total_cols).collect()
+        } else {
+            Vec::new()
+        };
+        for idx in extra {
+            if is_numeric_usable(idx) {
+                push_unique(&mut chosen, idx);
+            }
+        }
+        return chosen;
+    }
+
+    if !selected.is_empty() {
+        for idx in resolve_selected_indices(selected, total_cols) {
+            push_unique(&mut chosen, idx);
+        }
+        return chosen;
+    }
+
+    for idx in 0..total_cols {
+        if is_numeric_usable(idx) {
+            chosen.push(idx);
+        }
+    }
+    chosen
+}
+
+fn extract_mi_columns(
+    sheet: &DataSheet,
+    selected: &[usize],
+    response_column: Option<usize>,
+    predictor_columns: &[usize],
+) -> Result<ExtractedMiData, StatsError> {
+    let raw = extract_raw_optional_columns(sheet)?;
+    let (raw_labels, raw_cols, is_label) = (raw.labels, raw.cols, raw.is_label);
+    let total_cols = raw_cols.len();
+    if total_cols == 0 {
+        return Err(StatsError::EmptyInput);
+    }
+
+    if let Some(resp) = response_column
+        && resp >= total_cols
+    {
+        return Err(StatsError::MissingColumn { index: resp });
+    }
+    for &pred in predictor_columns {
+        if pred >= total_cols {
+            return Err(StatsError::MissingColumn { index: pred });
+        }
+    }
+
+    let chosen_orig = collect_mi_column_indices(&raw_cols, &is_label, selected, response_column, predictor_columns);
+    if chosen_orig.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+
+    let max_len = chosen_orig.iter().map(|&idx| raw_cols[idx].len()).max().unwrap_or(0);
+    let mut padded_cols: Vec<Vec<Option<f64>>> = chosen_orig
+        .iter()
+        .map(|&idx| {
+            let mut v: Vec<Option<f64>> = raw_cols[idx].iter().map(|&c| c.filter(|x| x.is_finite())).collect();
+            v.resize(max_len, None);
+            v
+        })
+        .collect();
+
+    // Trim trailing completely blank spreadsheet rows without dropping internal missingness.
+    let mut effective_rows = max_len;
+    while effective_rows > 0 && padded_cols.iter().all(|c| c[effective_rows - 1].is_none()) {
+        effective_rows -= 1;
+    }
+    for col in &mut padded_cols {
+        col.truncate(effective_rows);
+    }
+
+    let labels: Vec<String> = chosen_orig.iter().map(|&idx| raw_labels[idx].clone()).collect();
+    let model_response_col = response_column.and_then(|r| chosen_orig.iter().position(|&orig| orig == r));
+    let model_predictor_cols = if let Some(resp_pos) = model_response_col {
+        if predictor_columns.is_empty() {
+            (0..chosen_orig.len()).filter(|&pos| pos != resp_pos).collect()
+        } else {
+            predictor_columns
+                .iter()
+                .filter_map(|&p_orig| chosen_orig.iter().position(|&orig| orig == p_orig))
+                .filter(|&pos| pos != resp_pos)
+                .collect()
+        }
+    } else {
+        Vec::new()
+    };
+
+    Ok(ExtractedMiData { labels, cols: padded_cols, model_response_col, model_predictor_cols })
+}
+
+fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResult, p_fmt: lumencraft_doc::PValueFormat, confidence: ConfidenceLevel) {
+    push_scalar(out, "Imputations (m)", None, res.m as f64);
+    push_scalar(out, "Max iterations", None, res.max_iters as f64);
+    push_scalar(out, "Total missing cells", None, res.total_missing as f64);
+    for pm in &res.pooled_means {
+        push_scalar(out, format!("{}: Pooled mean", pm.term), None, pm.estimate);
+        push_scalar(out, format!("{}: Pooled SE", pm.term), None, pm.pooled_se);
+        push_scalar(out, format!("{}: FMI", pm.term), None, pm.fmi);
+    }
+
+    let ci_header = format!("{}% CI", confidence.percent());
+    let mean_headers = vec![
+        String::from("Pooled mean"),
+        String::from("Within var (U)"),
+        String::from("Between var (B)"),
+        String::from("Total var (T)"),
+        String::from("Pooled SE"),
+        ci_header.clone(),
+        String::from("df (Barnard-Rubin)"),
+        String::from("RIV"),
+        String::from("FMI"),
+        String::from("Missing count"),
+    ];
+    let mut mean_rows = Vec::with_capacity(res.pooled_means.len());
+    for (pm, &mis_cnt) in res.pooled_means.iter().zip(res.missing_counts.iter()) {
+        mean_rows.push(vec![
+            num_cell(pm.estimate),
+            num_cell(pm.within_variance),
+            num_cell(pm.between_variance),
+            num_cell(pm.total_variance),
+            num_cell(pm.pooled_se),
+            ci_cell(pm.ci.0, pm.ci.1),
+            num_cell(pm.df),
+            num_cell(pm.riv),
+            num_cell(pm.fmi),
+            num_cell(mis_cnt as f64),
+        ]);
+    }
+    out.tabs.push(build_tab(
+        "mi-pooled-means",
+        "Pooled descriptive estimates (Rubin 1987)",
+        ResultTabKind::MainSummary,
+        mean_headers,
+        res.variable_labels.clone(),
+        mean_rows,
+    ));
+
+    if let Some(reg_terms) = &res.pooled_regression {
+        let reg_headers = vec![
+            String::from("Pooled estimate"),
+            String::from("Pooled SE"),
+            ci_header,
+            String::from("t"),
+            String::from("df"),
+            String::from("P value"),
+            String::from("Within var (U)"),
+            String::from("Between var (B)"),
+            String::from("Total var (T)"),
+            String::from("RIV"),
+            String::from("FMI"),
+        ];
+        let mut reg_labels = Vec::with_capacity(reg_terms.len());
+        let mut reg_rows = Vec::with_capacity(reg_terms.len());
+        for term in reg_terms {
+            push_scalar(out, format!("Reg {}: Pooled estimate", term.term), None, term.estimate);
+            push_scalar(out, format!("Reg {}: Pooled SE", term.term), None, term.pooled_se);
+            push_scalar(out, format!("Reg {}: P value", term.term), None, term.p_value);
+            push_scalar(out, format!("Reg {}: FMI", term.term), None, term.fmi);
+            reg_labels.push(term.term.clone());
+            reg_rows.push(vec![
+                num_cell(term.estimate),
+                num_cell(term.pooled_se),
+                ci_cell(term.ci.0, term.ci.1),
+                num_cell(term.t_statistic),
+                num_cell(term.df),
+                p_cell(term.p_value, p_fmt),
+                num_cell(term.within_variance),
+                num_cell(term.between_variance),
+                num_cell(term.total_variance),
+                num_cell(term.riv),
+                num_cell(term.fmi),
+            ]);
+        }
+        out.tabs.push(build_tab(
+            "mi-pooled-regression",
+            "Pooled regression parameters (Rubin 1987)",
+            ResultTabKind::ParametersAndConfidenceIntervals,
+            reg_headers,
+            reg_labels,
+            reg_rows,
+        ));
+    }
+
+    let diag_headers = vec![
+        String::from("Observed n"),
+        String::from("Missing count"),
+        String::from("Missing %"),
+        String::from("Imputations (m)"),
+        String::from("FMI"),
+    ];
+    let diag_rows: Vec<Vec<ResultCell>> = res
+        .missing_counts
+        .iter()
+        .zip(res.pooled_means.iter())
+        .map(|(&mis, pm)| {
+            let obs = res.n_rows.saturating_sub(mis);
+            let pct = if res.n_rows > 0 { 100.0 * (mis as f64) / (res.n_rows as f64) } else { 0.0 };
+            vec![num_cell(obs as f64), num_cell(mis as f64), num_cell(pct), num_cell(res.m as f64), num_cell(pm.fmi)]
+        })
+        .collect();
+    out.tabs.push(build_tab(
+        "mi-missingness",
+        "Missingness & imputation diagnostics",
+        ResultTabKind::Diagnostics,
+        diag_headers,
+        res.variable_labels.clone(),
+        diag_rows,
+    ));
+
+    let max_fmi = res.pooled_means.iter().map(|e| e.fmi).chain(res.pooled_regression.iter().flatten().map(|e| e.fmi)).fold(0.0_f64, f64::max);
+    let adequacy_status = if res.total_missing == 0 {
+        ChecklistStatus::Info
+    } else if (res.m as f64) + 1.0e-9 >= (100.0 * max_fmi).ceil().min(50.0) || max_fmi <= 0.25 {
+        ChecklistStatus::Pass
+    } else {
+        ChecklistStatus::Warn
+    };
+    out.checklist.push(checklist_item(
+        "Multiple imputation pooling & FMI",
+        adequacy_status,
+        Some(format!("m = {}, {} missing cell(s), max FMI = {:.3}", res.m, res.total_missing, max_fmi)),
+        "Chained equations use Type-1 predictive mean matching with posterior parameter draws and Barnard–Rubin small-sample df; higher FMI warrants larger m.",
+    ));
 }
 
 type OptionalColumnsPair = (Vec<String>, Vec<Vec<Option<f64>>>);

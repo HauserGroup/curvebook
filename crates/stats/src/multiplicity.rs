@@ -7,12 +7,9 @@
 
 use lumencraft_doc::{MultiplicityMethod, MultiplicitySpec, PairwiseComparisonRecord, ResultCell, ResultTab};
 use lumencraft_math::dist::{
-    dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, f_sf, norm_sf, norm_two_sided_p, student_t_two_sided_isf,
-    student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
+    dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, f_sf, max_studentized_range_isf, max_studentized_range_sf,
+    norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
 };
-use lumencraft_math::quad::gauss_legendre_32;
-use lumencraft_math::roots::{RootOptions, brent_root};
-use lumencraft_math::special::gamma::ln_gamma;
 use lumencraft_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
 
@@ -40,15 +37,25 @@ pub enum MultiplicityProcedure {
     TwoStageBkyFdr,
 }
 
+impl MultiplicityProcedure {
+    /// Convert a document-layer [`MultiplicityMethod`] specification into a [`MultiplicityProcedure`].
+    #[must_use]
+    pub fn from_spec(method: MultiplicityMethod) -> Self {
+        Self::from(method)
+    }
+}
+
 impl From<MultiplicityMethod> for MultiplicityProcedure {
     fn from(value: MultiplicityMethod) -> Self {
         match value {
             MultiplicityMethod::None => Self::None,
             MultiplicityMethod::TukeyHsd => Self::TukeyKramer,
+            MultiplicityMethod::NewmanKeuls => Self::NewmanKeuls,
             MultiplicityMethod::Dunnett { control_column } => Self::Dunnett { control_column },
             MultiplicityMethod::Sidak => Self::Sidak,
             MultiplicityMethod::Bonferroni => Self::Bonferroni,
             MultiplicityMethod::HolmSidak => Self::HolmSidak,
+            MultiplicityMethod::FisherLsd => Self::FisherLsd,
             MultiplicityMethod::DunnettT3 => Self::DunnettT3,
             MultiplicityMethod::GamesHowell => Self::GamesHowell,
             MultiplicityMethod::TamhaneT2 => Self::TamhaneT2,
@@ -488,7 +495,12 @@ fn compare_newman_keuls(
             let gb = &groups[j];
             let diff = ga.mean - gb.mean;
             let se_q = (0.5 * mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
-            let q_stat = if se_q > 0.0 { diff.abs() / se_q } else { 0.0 };
+            let (q_stat, raw_p) = if se_q > 0.0 {
+                let q = diff.abs() / se_q;
+                (q, studentized_range_sf(q, 2, df_error)?)
+            } else {
+                (0.0, 1.0)
+            };
             let (p_lo, p_hi) = if pos_of[i] < pos_of[j] { (pos_of[i], pos_of[j]) } else { (pos_of[j], pos_of[i]) };
             let adj_p = p_mat[p_lo][p_hi];
             out.push(PairwiseComparisonDetail {
@@ -500,7 +512,7 @@ fn compare_newman_keuls(
                 se_diff: se_q * std::f64::consts::SQRT_2,
                 statistic: q_stat,
                 df: df_error,
-                raw_p: adj_p,
+                raw_p,
                 adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci: None,
@@ -663,43 +675,18 @@ fn compare_tamhane_t2(groups: &[GroupComparisonInput], threshold: f64, report_ci
 
 /// Studentized Maximum Modulus survival probability `P(max_{1..m} |T_l| > t)` with Welch df `nu`,
 /// used for Dunnett's T3 unequal-variance pairwise comparisons.
+///
+/// Uses the identity between Studentized Maximum Modulus `M(m, nu)` and the maximum of `m`
+/// independent 2-group Studentized ranges scaled by `1 / sqrt(2)`.
 fn studentized_max_modulus_sf(t_abs: f64, m: usize, df: f64) -> Result<f64, StatsError> {
     if t_abs <= 0.0 {
         return Ok(1.0);
     }
-    if df >= 1e7 {
-        let p1 = norm_two_sided_p(t_abs);
-        return Ok(sidak_single(p1, m as f64));
-    }
-    let mf = m as f64;
-    let half_df = 0.5 * df;
-    let ln_c = (1.0 - half_df) * std::f64::consts::LN_2 + half_df.ln() * half_df - ln_gamma(half_df)?;
-    let integrand = |u: f64| -> f64 {
-        if u <= 0.0 {
-            return 0.0;
-        }
-        let log_chi = ln_c + (df - 1.0) * u.ln() - 0.5 * df * u * u;
-        if log_chi < -700.0 {
-            return 0.0;
-        }
-        let two_tail = (2.0 * norm_sf(t_abs * u)).min(1.0);
-        if two_tail >= 1.0 {
-            return log_chi.exp();
-        }
-        let p_out = -((mf * (-two_tail).ln_1p()).exp_m1());
-        log_chi.exp() * p_out.clamp(0.0, 1.0)
-    };
-    let u_sd = 1.0 / (2.0 * df).sqrt();
-    let u_lo = (1.0 - 7.0 * u_sd).max(0.0);
-    let u_hi = (1.0 + 7.0 * u_sd).max(2.0);
-    let val = gauss_legendre_32(integrand, u_lo, 1.0) + gauss_legendre_32(integrand, 1.0, u_hi);
-    Ok(val.clamp(0.0, 1.0))
+    Ok(max_studentized_range_sf(std::f64::consts::SQRT_2 * t_abs, m.max(1), 2, df)?)
 }
 
 fn studentized_max_modulus_crit(alpha: f64, m: usize, df: f64) -> Result<f64, StatsError> {
-    let hi_guess = student_t_two_sided_isf((alpha / (m as f64)).clamp(1e-12, 0.999), df)?.max(2.0) * 1.25;
-    let f = |t: f64| studentized_max_modulus_sf(t, m, df).unwrap_or(0.0) - alpha;
-    brent_root(f, 0.0, hi_guess, RootOptions { rel_tol: 1e-8, abs_tol: 1e-9, max_iters: 64 }).map_err(StatsError::from)
+    Ok(max_studentized_range_isf(alpha, m.max(1), 2, df)? * std::f64::consts::FRAC_1_SQRT_2)
 }
 
 fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {

@@ -4,7 +4,8 @@
 //! ROC AUC), and Multiple Poisson Regression (log-link IRLS, deviance & Pearson dispersion).
 
 use lumencraft_doc::{
-    AnalysisSpec, ChecklistStatus, DataSheet, GlmFamily, GlmSpec, ResultCell, ResultSheet, ResultTabKind, TableArchetype, VariableRole,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, GlmFamily, GlmSpec, PassingBablokSpec,
+    ResultCell, ResultSheet, ResultTabKind, SheetId, TableArchetype, VariableRole,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{chi2_sf, f_sf, norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p};
@@ -941,6 +942,427 @@ fn build_glm_design(sheet: &DataSheet, glm_spec: &GlmSpec) -> Result<(DenseMatri
         }
         other => Err(StatsError::IncompatibleTable { analysis: "generalized linear model", actual: other.kind() }),
     }
+}
+
+/// Complete Passing–Bablok (1983) nonparametric method-comparison regression output.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PassingBablokResult {
+    pub n: usize,
+    pub valid_slopes: usize,
+    pub k_offset: usize,
+    pub slope: f64,
+    pub slope_ci: (f64, f64),
+    pub intercept: f64,
+    pub intercept_ci: (f64, f64),
+    /// Raw maximum absolute cumulative sum `H = max_k |S_k|` across ordered residuals.
+    pub cusum_h: f64,
+    /// Standardized CUSUM statistic `H / sqrt(L + l)` distributed as Kolmogorov supremum.
+    pub cusum_statistic: f64,
+    /// Two-sided asymptotic Kolmogorov CUSUM linearity *p*-value.
+    pub cusum_p_value: f64,
+    pub linearity_passed: bool,
+    pub slope_ci_clamped: bool,
+    pub residuals: Vec<f64>,
+}
+
+const PASSING_BABLOK_MAX_N: usize = 10_000;
+
+fn median_unsorted(vals: &mut [f64]) -> f64 {
+    vals.sort_by(f64::total_cmp);
+    let m = vals.len();
+    if m % 2 == 1 { vals[m / 2] } else { 0.5 * (vals[m / 2 - 1] + vals[m / 2]) }
+}
+
+fn kolmogorov_cusum_p(lambda: f64) -> f64 {
+    if !lambda.is_finite() || lambda <= 0.0 {
+        return 1.0;
+    }
+    if lambda > 8.0 {
+        return 0.0;
+    }
+    let l2 = lambda * lambda;
+    let mut sum = 0.0_f64;
+    for k in 1..=200 {
+        let kf = k as f64;
+        let term = (-2.0 * kf * kf * l2).exp();
+        if k % 2 == 1 {
+            sum += term;
+        } else {
+            sum -= term;
+        }
+        if term <= 1e-16 * sum.abs().max(1e-300) {
+            break;
+        }
+    }
+    (2.0 * sum).clamp(0.0, 1.0)
+}
+
+fn passing_bablok_cusum(x: &[f64], y: &[f64], slope: f64, intercept: f64, residuals: &[f64]) -> (f64, f64, f64) {
+    let scale_y = y.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let scale_x = x.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    let tol = 1e-12 * (1.0 + scale_y + (slope * scale_x).abs());
+
+    let pos_count = residuals.iter().filter(|&&r| r > tol).count();
+    let neg_count = residuals.iter().filter(|&&r| r < -tol).count();
+    if pos_count == 0 || neg_count == 0 {
+        return (0.0, 0.0, 1.0);
+    }
+
+    let pos_score = ((neg_count as f64) / (pos_count as f64)).sqrt();
+    let neg_score = -((pos_count as f64) / (neg_count as f64)).sqrt();
+    let denom = (1.0 + slope * slope).sqrt();
+
+    let mut proj_scores: Vec<(f64, f64)> = Vec::with_capacity(x.len());
+    let mut d_max_abs = 0.0_f64;
+    for i in 0..x.len() {
+        let d_i = (x[i] + slope * (y[i] - intercept)) / denom;
+        d_max_abs = d_max_abs.max(d_i.abs());
+        let score = if residuals[i] > tol {
+            pos_score
+        } else if residuals[i] < -tol {
+            neg_score
+        } else {
+            0.0
+        };
+        proj_scores.push((d_i, score));
+    }
+    proj_scores.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let d_tol = 1e-12 * (1.0 + d_max_abs);
+    let mut cum = 0.0_f64;
+    let mut h_raw = 0.0_f64;
+    let mut idx = 0_usize;
+    while idx < proj_scores.len() {
+        let d0 = proj_scores[idx].0;
+        let mut grp = proj_scores[idx].1;
+        idx += 1;
+        while idx < proj_scores.len() && (proj_scores[idx].0 - d0).abs() <= d_tol {
+            grp += proj_scores[idx].1;
+            idx += 1;
+        }
+        cum += grp;
+        h_raw = h_raw.max(cum.abs());
+    }
+
+    let h_std = h_raw / ((pos_count + neg_count) as f64).sqrt();
+    let p_val = kolmogorov_cusum_p(h_std);
+    (h_raw, h_std, p_val)
+}
+
+/// Passing–Bablok (1983) nonparametric method-comparison regression (`Y = a + b X`) with
+/// exact `K`-offset slope estimator, rank-based slope/intercept confidence intervals, and
+/// Kolmogorov-type CUSUM linearity test.
+pub fn passing_bablok_regression(x: &[f64], y: &[f64], conf: ConfidenceLevel) -> Result<PassingBablokResult, StatsError> {
+    if x.len() != y.len() {
+        return Err(StatsError::DimensionMismatch { expected: x.len(), actual: y.len() });
+    }
+    validate_finite_slice(x)?;
+    validate_finite_slice(y)?;
+    let n = x.len();
+    if n < 3 {
+        return Err(StatsError::InsufficientSampleSize { context: "Passing-Bablok regression", required: 3, actual: n });
+    }
+    if n > PASSING_BABLOK_MAX_N {
+        return Err(StatsError::InvalidParameter { name: "passing_bablok_max_n", value: n as f64 });
+    }
+
+    let mut slopes = Vec::with_capacity(n * (n - 1) / 2);
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let dx = x[j] - x[i];
+            if dx == 0.0 {
+                continue;
+            }
+            let s = (y[j] - y[i]) / dx;
+            if !s.is_finite() || (s + 1.0).abs() <= 1e-12 {
+                continue;
+            }
+            slopes.push(s);
+        }
+    }
+    if slopes.is_empty() {
+        return Err(StatsError::ZeroVariance { context: "Passing-Bablok pairwise slopes" });
+    }
+
+    slopes.sort_by(f64::total_cmp);
+    let k_offset = slopes.iter().take_while(|&&s| s < -1.0).count();
+    let n_slopes = slopes.len();
+    let mut angular = Vec::with_capacity(n_slopes);
+    angular.extend_from_slice(&slopes[k_offset..]);
+    angular.extend_from_slice(&slopes[..k_offset]);
+
+    let slope = if n_slopes % 2 == 1 { angular[n_slopes / 2] } else { 0.5 * (angular[n_slopes / 2 - 1] + angular[n_slopes / 2]) };
+
+    let z_crit = norm_two_sided_isf(conf.alpha())?;
+    let nf = n as f64;
+    let c_alpha = z_crit * (nf * (nf - 1.0) * (2.0 * nf + 5.0) / 18.0).sqrt();
+    let m1_raw = (((n_slopes as f64) - c_alpha) / 2.0).round() as isize;
+    let slope_ci_clamped = m1_raw < 1;
+    let m1 = m1_raw.max(1).min(n_slopes as isize) as usize;
+    let m2 = (n_slopes + 1 - m1).max(m1).min(n_slopes);
+    let raw_lo = angular[m1 - 1];
+    let raw_hi = angular[m2 - 1];
+
+    let mut tmp = Vec::with_capacity(n);
+    for (&xi, &yi) in x.iter().zip(y.iter()) {
+        tmp.push(yi - slope * xi);
+    }
+    let intercept = median_unsorted(&mut tmp);
+
+    let (slope_ci, intercept_ci) = if raw_lo <= slope && slope <= raw_hi {
+        tmp.clear();
+        for (&xi, &yi) in x.iter().zip(y.iter()) {
+            tmp.push(yi - raw_hi * xi);
+        }
+        let a1 = median_unsorted(&mut tmp);
+        tmp.clear();
+        for (&xi, &yi) in x.iter().zip(y.iter()) {
+            tmp.push(yi - raw_lo * xi);
+        }
+        let a2 = median_unsorted(&mut tmp);
+        ((raw_lo, raw_hi), (a1.min(a2), a1.max(a2)))
+    } else {
+        ((-f64::INFINITY, f64::INFINITY), (-f64::INFINITY, f64::INFINITY))
+    };
+
+    let residuals: Vec<f64> = x.iter().zip(y.iter()).map(|(&xi, &yi)| yi - (intercept + slope * xi)).collect();
+    let (cusum_h, cusum_statistic, cusum_p_value) = passing_bablok_cusum(x, y, slope, intercept, &residuals);
+    let linearity_passed = cusum_p_value >= conf.alpha();
+
+    Ok(PassingBablokResult {
+        n,
+        valid_slopes: n_slopes,
+        k_offset,
+        slope,
+        slope_ci,
+        intercept,
+        intercept_ci,
+        cusum_h,
+        cusum_statistic,
+        cusum_p_value,
+        linearity_passed,
+        slope_ci_clamped,
+        residuals,
+    })
+}
+
+type PassingBablokInput = (Vec<f64>, Vec<f64>, String, String);
+
+fn extract_passing_bablok_pairs(sheet: &DataSheet, x_col: usize, y_col: usize) -> Result<PassingBablokInput, StatsError> {
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    let (x_label, y_label) = match &sheet.archetype {
+        TableArchetype::Column(t) => {
+            if t.subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            let cx = t.data_sets.get(x_col).ok_or(StatsError::MissingColumn { index: x_col })?;
+            let cy = t.data_sets.get(y_col).ok_or(StatsError::MissingColumn { index: y_col })?;
+            for r in 0..t.row_count() {
+                if let (Some(xv), Some(yv)) = (cx.cell(r, 0).and_then(Cell::active_number), cy.cell(r, 0).and_then(Cell::active_number)) {
+                    xs.push(xv);
+                    ys.push(yv);
+                }
+            }
+            (cx.title.clone(), cy.title.clone())
+        }
+        TableArchetype::MultipleVariables(t) => {
+            let vx = t.variables.get(x_col).ok_or(StatsError::MissingColumn { index: x_col })?;
+            let vy = t.variables.get(y_col).ok_or(StatsError::MissingColumn { index: y_col })?;
+            for r in 0..t.row_count() {
+                if let (Some(xv), Some(yv)) = (vx.cells.get(r).and_then(Cell::active_number), vy.cells.get(r).and_then(Cell::active_number)) {
+                    xs.push(xv);
+                    ys.push(yv);
+                }
+            }
+            (vx.title.clone(), vy.title.clone())
+        }
+        TableArchetype::Xy(t) => {
+            if t.y_subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            let total_cols = 1 + t.data_sets.len();
+            if x_col >= total_cols {
+                return Err(StatsError::MissingColumn { index: x_col });
+            }
+            if y_col >= total_cols {
+                return Err(StatsError::MissingColumn { index: y_col });
+            }
+            let label_for = |col: usize| -> String { if col == 0 { t.x_title.clone() } else { t.data_sets[col - 1].title.clone() } };
+            let val_for = |row: usize, col: usize| -> Option<f64> {
+                if col == 0 { t.x_value_at(row) } else { t.data_sets[col - 1].cell(row, 0).and_then(Cell::active_number) }
+            };
+            for r in 0..t.row_count() {
+                if let (Some(xv), Some(yv)) = (val_for(r, x_col), val_for(r, y_col)) {
+                    xs.push(xv);
+                    ys.push(yv);
+                }
+            }
+            (label_for(x_col), label_for(y_col))
+        }
+        other => return Err(StatsError::IncompatibleTable { analysis: "Passing-Bablok regression", actual: other.kind() }),
+    };
+
+    if xs.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    Ok((xs, ys, x_label, y_label))
+}
+
+/// Execute a [`PassingBablokSpec`] against a `Column`, `Xy`, or `MultipleVariables` [`DataSheet`]
+/// using the caller's [`AnalysisSpec`] metadata.
+pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_spec: &PassingBablokSpec) -> Result<ResultSheet, StatsError> {
+    let mut out = init_result_sheet(spec)?;
+    let conf = spec.confidence_level;
+    let p_fmt = spec.p_value_format;
+    let (xs, ys, x_label, y_label) = extract_passing_bablok_pairs(sheet, pb_spec.x_column, pb_spec.y_column)?;
+    let res = passing_bablok_regression(&xs, &ys, conf)?;
+
+    push_scalar(&mut out, "Slope", None, res.slope);
+    push_scalar(&mut out, "Slope CI lower", None, res.slope_ci.0);
+    push_scalar(&mut out, "Slope CI upper", None, res.slope_ci.1);
+    push_scalar(&mut out, "Intercept", None, res.intercept);
+    push_scalar(&mut out, "Intercept CI lower", None, res.intercept_ci.0);
+    push_scalar(&mut out, "Intercept CI upper", None, res.intercept_ci.1);
+    push_scalar(&mut out, "CUSUM H", None, res.cusum_h);
+    push_scalar(&mut out, "CUSUM statistic", None, res.cusum_statistic);
+    push_scalar(&mut out, "CUSUM P value", None, res.cusum_p_value);
+    push_scalar(&mut out, "N", None, res.n as f64);
+    push_scalar(&mut out, "Valid slopes", None, res.valid_slopes as f64);
+    push_scalar(&mut out, "K offset", None, res.k_offset as f64);
+
+    let prop_ok = res.slope_ci.0.is_finite() && res.slope_ci.1.is_finite() && (res.slope_ci.0..=res.slope_ci.1).contains(&1.0);
+    let sys_ok = res.intercept_ci.0.is_finite() && res.intercept_ci.1.is_finite() && (res.intercept_ci.0..=res.intercept_ci.1).contains(&0.0);
+
+    let param_headers = vec![String::from("Estimate"), format!("{}% CI", conf.percent()), String::from("Identity check")];
+    let param_rows = vec![
+        vec![
+            num_cell(res.slope),
+            ci_cell(res.slope_ci.0, res.slope_ci.1),
+            ResultCell::Text(String::from(if prop_ok { "CI includes 1 (no proportional bias)" } else { "CI excludes 1 (proportional bias)" })),
+        ],
+        vec![
+            num_cell(res.intercept),
+            ci_cell(res.intercept_ci.0, res.intercept_ci.1),
+            ResultCell::Text(String::from(if sys_ok { "CI includes 0 (no systematic bias)" } else { "CI excludes 0 (systematic bias)" })),
+        ],
+    ];
+    out.tabs.push(build_tab(
+        "pb-parameters",
+        format!("Passing-Bablok regression ({y_label} vs {x_label})"),
+        ResultTabKind::ParametersAndConfidenceIntervals,
+        param_headers,
+        vec![String::from("Slope (b)"), String::from("Intercept (a)")],
+        param_rows,
+    ));
+
+    let summary_rows = vec![
+        vec![num_cell(res.n as f64)],
+        vec![num_cell(res.valid_slopes as f64)],
+        vec![num_cell(res.k_offset as f64)],
+        vec![num_cell(res.cusum_h)],
+        vec![num_cell(res.cusum_statistic)],
+        vec![p_cell(res.cusum_p_value, p_fmt)],
+    ];
+    out.tabs.push(build_tab(
+        "pb-summary",
+        "Passing-Bablok linearity & slope counts",
+        ResultTabKind::MainSummary,
+        vec![String::from("Value")],
+        vec![
+            String::from("Paired observations (n)"),
+            String::from("Valid pairwise slopes (N)"),
+            String::from("Negative-slope offset (K)"),
+            String::from("CUSUM linearity H"),
+            String::from("CUSUM standardized H / sqrt(L + l)"),
+            String::from("CUSUM linearity P value"),
+        ],
+        summary_rows,
+    ));
+
+    let resid_labels: Vec<String> = (1..=res.n).map(|i| format!("Row {i}")).collect();
+    let resid_rows: Vec<Vec<ResultCell>> = xs
+        .iter()
+        .zip(ys.iter())
+        .zip(res.residuals.iter())
+        .map(|((&xv, &yv), &rv)| vec![num_cell(xv), num_cell(yv), num_cell(res.intercept + res.slope * xv), num_cell(rv)])
+        .collect();
+    out.tabs.push(build_tab(
+        "pb-residuals",
+        "Passing-Bablok residuals",
+        ResultTabKind::Residuals,
+        vec![x_label, y_label, String::from("Fitted Y"), String::from("Residual (Y - a - bX)")],
+        resid_labels,
+        resid_rows,
+    ));
+
+    let x_min = xs.iter().copied().fold(f64::INFINITY, f64::min);
+    let x_max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    if x_min.is_finite() && x_max.is_finite() {
+        let n_pts = 65_usize;
+        let mut pts = Vec::with_capacity(n_pts);
+        for i in 0..n_pts {
+            let t = (i as f64) / ((n_pts - 1) as f64);
+            let xv = x_min + t * (x_max - x_min);
+            let yv = res.intercept + res.slope * xv;
+            let (ci_lo, ci_hi) =
+                if res.slope_ci.0.is_finite() && res.slope_ci.1.is_finite() && res.intercept_ci.0.is_finite() && res.intercept_ci.1.is_finite() {
+                    let y1 = res.intercept_ci.0 + res.slope_ci.0 * xv;
+                    let y2 = res.intercept_ci.0 + res.slope_ci.1 * xv;
+                    let y3 = res.intercept_ci.1 + res.slope_ci.0 * xv;
+                    let y4 = res.intercept_ci.1 + res.slope_ci.1 * xv;
+                    (Some(y1.min(y2).min(y3).min(y4)), Some(y1.max(y2).max(y3).max(y4)))
+                } else {
+                    (None, None)
+                };
+            pts.push(CurveSamplePoint { x: xv, y: yv, ci_lower: ci_lo, ci_upper: ci_hi, pred_lower: None, pred_upper: None });
+        }
+        out.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: 0,
+            equation_id: String::from("passing_bablok"),
+            converged: true,
+            ambiguous: false,
+            points: pts,
+        });
+    }
+
+    out.checklist.push(checklist_item(
+        "Linearity assumption (Passing-Bablok CUSUM)",
+        if res.linearity_passed { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+        Some(format!("H = {:.3}, z_H = {:.3}, P = {:.4}", res.cusum_h, res.cusum_statistic, res.cusum_p_value)),
+        if res.linearity_passed {
+            "CUSUM test shows no significant deviation from linearity between the two methods."
+        } else {
+            "Significant deviation from linearity detected by CUSUM; Passing-Bablok linear parameters may misrepresent nonlinear bias."
+        },
+    ));
+    out.checklist.push(checklist_item(
+        "Method equivalence against Y = X",
+        if prop_ok && sys_ok { ChecklistStatus::Pass } else { ChecklistStatus::Info },
+        Some(format!("slope = {:.4}, intercept = {:.4}", res.slope, res.intercept)),
+        if prop_ok && sys_ok {
+            "Slope CI includes 1 and intercept CI includes 0, indicating no evidence of proportional or constant systematic bias."
+        } else {
+            "At least one confidence interval excludes the identity line (slope != 1 or intercept != 0), indicating method bias."
+        },
+    ));
+    if res.slope_ci_clamped {
+        out.checklist.push(checklist_item(
+            "Sample size for rank confidence interval",
+            ChecklistStatus::Warn,
+            Some(format!("n = {}, N = {} valid slopes", res.n, res.valid_slopes)),
+            "Sample size is too small for the requested exact rank-based confidence width; CI endpoints were clamped to observed extreme slopes.",
+        ));
+    }
+
+    Ok(out)
+}
+
+/// Execute Passing–Bablok nonparametric regression against a [`DataSheet`] at confidence `conf`.
+pub fn execute_passing_bablok(sheet: &DataSheet, spec: &PassingBablokSpec, conf: ConfidenceLevel) -> Result<ResultSheet, StatsError> {
+    let mut analysis = AnalysisSpec::new(SheetId::new("passing-bablok"), sheet.id.clone(), AnalysisKind::PassingBablok(*spec))?;
+    analysis.confidence_level = conf;
+    run_passing_bablok_analysis(sheet, &analysis, spec)
 }
 
 /// Execute a [`GlmSpec`] (`Linear`, `Logistic`, or `Poisson`) against a `DataSheet`.

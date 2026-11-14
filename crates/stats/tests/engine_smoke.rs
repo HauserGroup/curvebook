@@ -122,7 +122,7 @@ fn two_group_and_bland_altman_suite() {
         TwoGroupMethod::OneSampleT { hypothetical: 12.0 },
         TwoGroupMethod::OneSampleWilcoxon { hypothetical: 12.0 },
     ] {
-        let sp = TwoGroupSpec { method, two_tailed: true, compute_effect_sizes: true };
+        let sp = TwoGroupSpec { method, two_tailed: true, compute_effect_sizes: true, mv_group_column: None, mv_response_column: None };
         let res = run_analysis(&sheet, &spec_for("r-2g", "s-2g", AnalysisKind::TwoGroupComparison(sp))).unwrap();
         assert!(!res.tabs.is_empty());
         assert!(!res.checklist.is_empty());
@@ -383,6 +383,9 @@ fn categorical_survival_roc_glm_and_multivariate() {
                 trend_test: true,
                 asymmetrical_greenwood_ci: true,
                 multiplicity: MultiplicitySpec::default(),
+                mv_time_column: None,
+                mv_status_column: None,
+                mv_group_column: None,
             }),
         ),
     )

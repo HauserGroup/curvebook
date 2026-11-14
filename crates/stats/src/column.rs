@@ -1391,6 +1391,10 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
         append_one_sample_tab(&mut res, &raw_series, mu0, conf, p_fmt)?;
     }
 
+    if let Some(qq_tab) = build_normal_qq_tab(&raw_series)? {
+        res.tabs.push(qq_tab);
+    }
+
     if summaries.iter().all(|s| s.n < 3) {
         res.checklist.push(checklist_item(
             "Sample size adequacy",
@@ -1408,6 +1412,56 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     }
 
     Ok(res)
+}
+
+fn build_normal_qq_tab(raw_series: &[(String, Vec<f64>, usize)]) -> Result<Option<ResultTab>, StatsError> {
+    if raw_series.is_empty() {
+        return Ok(None);
+    }
+    let headers = vec![
+        String::from("Data Set"),
+        String::from("Order Index"),
+        String::from("Normal Expected"),
+        String::from("Normal Observed"),
+        String::from("Lognormal Expected (ln)"),
+        String::from("Lognormal Observed ln(Y)"),
+    ];
+    let mut row_labels = Vec::new();
+    let mut rows = Vec::new();
+    let mut footnotes = Vec::new();
+
+    for (label, vals, _) in raw_series {
+        if vals.is_empty() {
+            continue;
+        }
+        let normal_pairs = qq_expected_quantiles(vals, false)?;
+        let lognormal_pairs = qq_expected_quantiles(vals, true).ok();
+        if lognormal_pairs.is_none() {
+            footnotes.push(format!("{label}: lognormal Q-Q coordinates omitted because one or more values are <= 0."));
+        }
+        for (idx, &(exp_n, obs_n)) in normal_pairs.iter().enumerate() {
+            let (exp_ln, obs_ln) = match lognormal_pairs.as_ref().and_then(|v| v.get(idx)) {
+                Some(&(e, o)) => (Some(e), Some(o)),
+                None => (None, None),
+            };
+            row_labels.push(format!("{label} #{}", idx + 1));
+            rows.push(vec![
+                ResultCell::Text(label.clone()),
+                num_cell((idx + 1) as f64),
+                num_cell(exp_n),
+                num_cell(obs_n),
+                opt_num_cell(exp_ln),
+                opt_num_cell(obs_ln),
+            ]);
+        }
+    }
+
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    let mut tab = build_tab("normal-qq", "Normal & Lognormal Q-Q Quantiles", ResultTabKind::NormalQq, headers, row_labels, rows);
+    tab.footnotes = footnotes;
+    Ok(Some(tab))
 }
 
 fn populate_pooled_descriptive_sheet(

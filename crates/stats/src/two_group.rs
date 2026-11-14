@@ -2,8 +2,9 @@
 //! exact noncentral-*t* confidence intervals, variance homogeneity tests, and Bland–Altman agreement.
 
 use lumencraft_doc::{
-    AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind,
-    TwoGroupMethod, TwoGroupSpec,
+    AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
+    MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, TableArchetype,
+    TwoGroupMethod, TwoGroupSpec, VariableRole,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{f_sf, norm_sf, norm_two_sided_isf, student_t_cdf, student_t_sf, student_t_two_sided_p};
@@ -956,20 +957,64 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
 
     match tg.method {
         TwoGroupMethod::OneSampleT { hypothetical } => {
-            let cols = extract_numeric_columns(sheet, &spec.selected_data_sets)?;
+            let sel = resolve_mv_one_sample_selection(sheet, &spec.selected_data_sets, tg.mv_response_column)?;
+            let cols = extract_numeric_columns(sheet, &sel)?;
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = crate::column::one_sample_t_test(&first.values, hypothetical, tg.two_tailed, conf)?;
             populate_one_sample_t_sheet(&mut res, &first.label, &out, conf, p_fmt);
             return Ok(res);
         }
         TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
-            let cols = extract_numeric_columns(sheet, &spec.selected_data_sets)?;
+            let sel = resolve_mv_one_sample_selection(sheet, &spec.selected_data_sets, tg.mv_response_column)?;
+            let cols = extract_numeric_columns(sheet, &sel)?;
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = crate::column::one_sample_wilcoxon(&first.values, hypothetical, tg.two_tailed, conf)?;
             populate_one_sample_w_sheet(&mut res, &first.label, &out, conf, p_fmt);
             return Ok(res);
         }
         _ => {}
+    }
+
+    if let Some((lvl_a, lvl_b, skipped_missing)) = resolve_mv_two_group_inputs(sheet, spec, tg)? {
+        if matches!(tg.method, TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank) {
+            return Err(StatsError::InvalidParameter { name: "paired_method_on_mv_categorical_grouping", value: 0.0 });
+        }
+        match tg.method {
+            TwoGroupMethod::UnpairedT => {
+                let out = unpaired_t_test(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
+                populate_unpaired_t_sheet(&mut res, 0, 1, &lvl_a.label, &lvl_b.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+            }
+            TwoGroupMethod::WelchT => {
+                let out = welch_t_test(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
+                populate_unpaired_t_sheet(&mut res, 0, 1, &lvl_a.label, &lvl_b.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+            }
+            TwoGroupMethod::LognormalUnpairedT => {
+                let out = lognormal_unpaired_t_test(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
+                populate_unpaired_t_sheet(&mut res, 0, 1, &lvl_a.label, &lvl_b.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+            }
+            TwoGroupMethod::MannWhitneyU => {
+                let out = mann_whitney_u(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
+                populate_mann_whitney_sheet(&mut res, 0, 1, &lvl_a.label, &lvl_b.label, &out, conf, p_fmt);
+            }
+            TwoGroupMethod::KolmogorovSmirnov => {
+                let out = ks_two_sample(&lvl_a.values, &lvl_b.values)?;
+                populate_ks_sheet(&mut res, (0, 1), (&lvl_a.label, &lvl_b.label), &out, conf, p_fmt);
+            }
+            TwoGroupMethod::PairedT
+            | TwoGroupMethod::RatioPairedT
+            | TwoGroupMethod::WilcoxonSignedRank
+            | TwoGroupMethod::OneSampleT { .. }
+            | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
+        }
+        if skipped_missing > 0 {
+            res.checklist.push(checklist_item(
+                "Complete-case row filtering",
+                ChecklistStatus::Info,
+                Some(format!("{skipped_missing} incomplete or excluded row(s) skipped")),
+                "Rows with missing or excluded group/response cells were omitted prior to two-group comparison.",
+            ));
+        }
+        return Ok(res);
     }
 
     let indices = resolve_selected_indices(&spec.selected_data_sets, sheet.archetype.column_count());
@@ -1018,6 +1063,631 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
         TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
     }
     Ok(res)
+}
+
+/// Execute [`BlandAltmanSpec`] on a `Column`, `MultipleVariables`, or `Xy` [`DataSheet`] and emit a
+/// complete [`ResultSheet`] (`MainSummary`, pair coordinate table, `scalars`, and overlay curve).
+pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &BlandAltmanSpec) -> Result<ResultSheet, StatsError> {
+    let mut res = init_result_sheet(spec)?;
+    let conf = spec.confidence_level;
+    let (lbl_a, lbl_b, vals_a, vals_b) = extract_bland_altman_pairs(sheet, ba)?;
+    let out = bland_altman(&vals_a, &vals_b, ba.percent_difference, conf)?;
+
+    let mode_text = if out.percent_difference { "Percent difference (100 * (A - B) / Mean)" } else { "Absolute difference (A - B)" };
+    let row_labels = vec![
+        String::from("Difference mode"),
+        String::from("N pairs"),
+        String::from("Bias"),
+        String::from("SD of bias"),
+        String::from("SE of bias"),
+        format!("{}% CI of bias", conf.percent()),
+        format!("Lower {}% LoA", conf.percent()),
+        format!("{}% CI of lower LoA", conf.percent()),
+        format!("Upper {}% LoA", conf.percent()),
+        format!("{}% CI of upper LoA", conf.percent()),
+    ];
+    let rows = vec![
+        vec![ResultCell::Text(mode_text.to_owned())],
+        vec![num_cell(out.n as f64)],
+        vec![num_cell(out.bias)],
+        vec![num_cell(out.sd_bias)],
+        vec![num_cell(out.se_bias)],
+        vec![ci_cell(out.bias_ci.0, out.bias_ci.1)],
+        vec![num_cell(out.loa_lower)],
+        vec![ci_cell(out.loa_lower_ci.0, out.loa_lower_ci.1)],
+        vec![num_cell(out.loa_upper)],
+        vec![ci_cell(out.loa_upper_ci.0, out.loa_upper_ci.1)],
+    ];
+    res.tabs.push(build_tab(
+        "bland-altman-summary",
+        "Bland-Altman method comparison",
+        ResultTabKind::MainSummary,
+        vec![format!("{lbl_a} vs. {lbl_b}")],
+        row_labels,
+        rows,
+    ));
+
+    let diff_header = if out.percent_difference { String::from("Percent Difference (%)") } else { String::from("Difference (A - B)") };
+    let coord_headers = vec![String::from("Average (A + B) / 2"), diff_header, lbl_a.clone(), lbl_b.clone()];
+    let mut coord_labels = Vec::with_capacity(out.n);
+    let mut coord_rows = Vec::with_capacity(out.n);
+    let mut overlay_pts = Vec::with_capacity(out.n);
+    for (idx, ((&(avg, diff), &a), &b)) in out.points.iter().zip(vals_a.iter()).zip(vals_b.iter()).enumerate() {
+        coord_labels.push(format!("Pair {}", idx + 1));
+        coord_rows.push(vec![num_cell(avg), num_cell(diff), num_cell(a), num_cell(b)]);
+        overlay_pts.push(CurveSamplePoint {
+            x: avg,
+            y: diff,
+            ci_lower: Some(out.loa_lower),
+            ci_upper: Some(out.loa_upper),
+            pred_lower: None,
+            pred_upper: None,
+        });
+    }
+    res.tabs.push(build_tab(
+        "bland-altman-coordinates",
+        "Bland-Altman Pair Coordinates",
+        ResultTabKind::Residuals,
+        coord_headers,
+        coord_labels,
+        coord_rows,
+    ));
+    res.fitted_curves.push(FittedCurveOverlay {
+        data_set_index: ba.column_a,
+        equation_id: String::from("BlandAltman"),
+        converged: true,
+        ambiguous: false,
+        points: overlay_pts,
+    });
+
+    push_scalar(&mut res, "N", None, out.n as f64);
+    push_scalar(&mut res, "Bias", None, out.bias);
+    push_scalar(&mut res, "SDBias", None, out.sd_bias);
+    push_scalar(&mut res, "SEBias", None, out.se_bias);
+    push_scalar(&mut res, "LoALower", None, out.loa_lower);
+    push_scalar(&mut res, "LoAUpper", None, out.loa_upper);
+    res.checklist.push(checklist_item(
+        "Bland-Altman sample size & normality of differences",
+        if out.n >= 10 { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+        Some(format!("n = {} pairs", out.n)),
+        "Limits of Agreement assume differences follow an approximately normal distribution with constant variance across the measurement range.",
+    ));
+    Ok(res)
+}
+
+/// Execute [`MultipleRowTestsSpec`] row-by-row across two groups and emit a complete [`ResultSheet`]
+/// (`MainSummary`, `MultipleComparisons`, `scalars`, and `PairwiseComparisonRecord`s for Volcano plots).
+pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mr: &MultipleRowTestsSpec) -> Result<ResultSheet, StatsError> {
+    let mut res = init_result_sheet(spec)?;
+    let conf = spec.confidence_level;
+    let p_fmt = spec.p_value_format;
+    let threshold = mr.multiplicity.threshold;
+    if !threshold.is_finite() || threshold <= 0.0 || threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "multiplicity_threshold", value: threshold });
+    }
+
+    let (lbl_a, lbl_b, row_labels, group_a_rows, group_b_rows) = extract_multiple_row_inputs(sheet, spec, mr.paired)?;
+    let proc_eff = MultiplicityProcedure::from(mr.multiplicity.method);
+    let mut raw_p = Vec::new();
+    let mut staged = Vec::new();
+    let mut skipped_rows = 0_usize;
+
+    for (idx, (ra, rb)) in group_a_rows.iter().zip(group_b_rows.iter()).enumerate() {
+        let row_lbl = row_labels.get(idx).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", idx + 1));
+        let row_out = run_single_row_comparison(ra, rb, mr, conf);
+        match row_out {
+            Ok((mean_a, mean_b, diff, stat, df, p_val)) => {
+                raw_p.push(p_val);
+                staged.push((idx, row_lbl, mean_a, mean_b, diff, stat, df, p_val));
+            }
+            Err(_) => {
+                skipped_rows += 1;
+            }
+        }
+    }
+
+    if staged.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+
+    let (adj_p, is_fdr) = adjust_p_values(&raw_p, proc_eff, threshold);
+    let mut entries = Vec::with_capacity(staged.len());
+    for ((row_index, label, mean_a, mean_b, difference, statistic, df, rp), adj) in staged.into_iter().zip(adj_p) {
+        entries.push(MultipleRowTestEntry {
+            row_index,
+            label,
+            mean_a,
+            mean_b,
+            difference,
+            statistic,
+            df,
+            raw_p: rp,
+            adjusted_p_or_q: adj,
+            significant: adj <= threshold,
+        });
+    }
+
+    let discoveries = entries.iter().filter(|e| e.significant).count();
+    let min_raw_p = entries.iter().map(|e| e.raw_p).fold(f64::INFINITY, f64::min);
+    let min_adj_p = entries.iter().map(|e| e.adjusted_p_or_q).fold(f64::INFINITY, f64::min);
+    let variant_label = match (mr.paired, mr.nonparametric, mr.assume_equal_sd) {
+        (true, true, _) => "Wilcoxon matched-pairs signed-rank",
+        (true, false, _) => "Paired Student t test",
+        (false, true, _) => "Mann-Whitney U test",
+        (false, false, true) => "Unpaired Student t test",
+        (false, false, false) => "Welch unpaired t test",
+    };
+
+    let sum_labels = vec![
+        String::from("Rows tested"),
+        String::from("Rows skipped (insufficient data)"),
+        String::from("Significant discoveries"),
+        String::from("Test family"),
+        String::from("Multiplicity method"),
+        String::from("Significance / FDR threshold"),
+        String::from("Minimum raw P"),
+        String::from("Minimum adjusted P / q"),
+    ];
+    let sum_rows = vec![
+        vec![num_cell(entries.len() as f64)],
+        vec![num_cell(skipped_rows as f64)],
+        vec![num_cell(discoveries as f64)],
+        vec![ResultCell::Text(String::from(variant_label))],
+        vec![ResultCell::Text(format!("{:?}", mr.multiplicity.method))],
+        vec![num_cell(threshold)],
+        vec![p_cell(min_raw_p, p_fmt)],
+        vec![p_cell(min_adj_p, p_fmt)],
+    ];
+    res.tabs.push(build_tab(
+        "multiple-row-summary",
+        "Multiple Row t-Tests Summary",
+        ResultTabKind::MainSummary,
+        vec![format!("{lbl_a} vs. {lbl_b}")],
+        sum_labels,
+        sum_rows,
+    ));
+
+    let cmp_headers = vec![
+        format!("Mean ({lbl_a})"),
+        format!("Mean ({lbl_b})"),
+        String::from("Difference (A - B)"),
+        String::from("Statistic"),
+        String::from("df"),
+        String::from("Raw P"),
+        String::from("Adjusted P / q"),
+        String::from("Significant"),
+    ];
+    let mut cmp_labels = Vec::with_capacity(entries.len());
+    let mut cmp_rows = Vec::with_capacity(entries.len());
+    let pair_desc = format!("{lbl_a} vs. {lbl_b}");
+    for e in &entries {
+        cmp_labels.push(e.label.clone());
+        cmp_rows.push(vec![
+            num_cell(e.mean_a),
+            num_cell(e.mean_b),
+            num_cell(e.difference),
+            num_cell(e.statistic),
+            num_cell(e.df),
+            p_cell(e.raw_p, p_fmt),
+            p_cell(e.adjusted_p_or_q, p_fmt),
+            ResultCell::Boolean(e.significant),
+        ]);
+        res.pairwise_comparisons.push(PairwiseComparisonRecord {
+            group_a: e.row_index,
+            group_b: 1,
+            label_a: e.label.clone(),
+            label_b: pair_desc.clone(),
+            estimate_diff: Some(e.difference),
+            raw_p_or_q: e.adjusted_p_or_q,
+            is_fdr_q: is_fdr,
+            significant: e.significant,
+        });
+    }
+    res.tabs.push(build_tab(
+        "multiple-row-comparisons",
+        "Multiple Row-Wise Comparisons",
+        ResultTabKind::MultipleComparisons,
+        cmp_headers,
+        cmp_labels,
+        cmp_rows,
+    ));
+
+    push_scalar(&mut res, "RowsTested", None, entries.len() as f64);
+    push_scalar(&mut res, "Discoveries", None, discoveries as f64);
+    push_scalar(&mut res, "Threshold", None, threshold);
+    push_scalar(&mut res, "MinRawP", None, min_raw_p);
+    push_scalar(&mut res, "MinAdjustedP", None, min_adj_p);
+    res.checklist.push(checklist_item(
+        "Multiple row hypothesis testing",
+        ChecklistStatus::Pass,
+        Some(format!("{discoveries} / {} rows significant at threshold {threshold}", entries.len())),
+        "Per-row test statistics and multiplicity-adjusted P/q values are available for Volcano plotting.",
+    ));
+    Ok(res)
+}
+
+#[derive(Debug, Clone)]
+struct LabeledGroupSample {
+    label: String,
+    values: Vec<f64>,
+}
+
+fn resolve_mv_one_sample_selection(sheet: &DataSheet, selected: &[usize], mv_response: Option<usize>) -> Result<Vec<usize>, StatsError> {
+    if let TableArchetype::MultipleVariables(mv) = &sheet.archetype
+        && let Some(r_col) = mv_response
+    {
+        if r_col >= mv.variables.len() {
+            return Err(StatsError::MissingColumn { index: r_col });
+        }
+        return Ok(vec![r_col]);
+    }
+    Ok(selected.to_vec())
+}
+
+fn mv_cell_token(cell: &Cell) -> Option<String> {
+    if cell.excluded {
+        return None;
+    }
+    match &cell.value {
+        CellValue::Empty => None,
+        CellValue::Text(s) => {
+            let trimmed = s.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        }
+        CellValue::Number(v) if v.is_finite() => Some(format!("{v}")),
+        CellValue::Number(_) => None,
+    }
+}
+
+fn infer_mv_group_column(mv: &MultipleVariablesTable, response_col: Option<usize>, selected: &[usize]) -> Result<usize, StatsError> {
+    let pool = resolve_selected_indices(selected, mv.variables.len());
+    let candidates: Vec<usize> = pool
+        .into_iter()
+        .filter(|&idx| Some(idx) != response_col && mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Categorical))
+        .collect();
+    match candidates.as_slice() {
+        [only] => Ok(*only),
+        _ => Err(StatsError::InvalidParameter { name: "mv_group_column", value: candidates.len() as f64 }),
+    }
+}
+
+fn infer_mv_response_column(mv: &MultipleVariablesTable, group_col: usize, selected: &[usize]) -> Result<usize, StatsError> {
+    let pool = resolve_selected_indices(selected, mv.variables.len());
+    let candidates: Vec<usize> =
+        pool.into_iter().filter(|&idx| idx != group_col && mv.variables.get(idx).is_some_and(|v| v.role != VariableRole::Categorical)).collect();
+    match candidates.as_slice() {
+        [only] => Ok(*only),
+        _ => Err(StatsError::InvalidParameter { name: "mv_response_column", value: candidates.len() as f64 }),
+    }
+}
+
+fn resolve_mv_two_group_inputs(
+    sheet: &DataSheet,
+    spec: &AnalysisSpec,
+    tg: &TwoGroupSpec,
+) -> Result<Option<(LabeledGroupSample, LabeledGroupSample, usize)>, StatsError> {
+    let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
+        return Ok(None);
+    };
+    let explicit_mode = tg.mv_group_column.is_some() || tg.mv_response_column.is_some();
+    let (g_col, r_col) = if explicit_mode {
+        let g = match tg.mv_group_column {
+            Some(g) => g,
+            None => infer_mv_group_column(mv, tg.mv_response_column, &spec.selected_data_sets)?,
+        };
+        let r = match tg.mv_response_column {
+            Some(r) => r,
+            None => infer_mv_response_column(mv, g, &spec.selected_data_sets)?,
+        };
+        (g, r)
+    } else {
+        let selected = resolve_selected_indices(&spec.selected_data_sets, mv.variables.len());
+        let cat_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables[i].role == VariableRole::Categorical).collect();
+        let num_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables[i].role != VariableRole::Categorical).collect();
+        if cat_cols.len() == 1 && num_cols.len() == 1 {
+            (cat_cols[0], num_cols[0])
+        } else {
+            return Ok(None);
+        }
+    };
+
+    let g_var = mv.variables.get(g_col).ok_or(StatsError::MissingColumn { index: g_col })?;
+    let r_var = mv.variables.get(r_col).ok_or(StatsError::MissingColumn { index: r_col })?;
+    if g_col == r_col {
+        return Err(StatsError::InvalidParameter { name: "mv_group_column", value: g_col as f64 });
+    }
+
+    let levels: Vec<String> = g_var.ordered_levels().into_iter().filter(|l| l.included_count > 0).map(|l| l.level).collect();
+    if levels.len() != 2 {
+        return Err(StatsError::DimensionMismatch { expected: 2, actual: levels.len() });
+    }
+
+    let mut vals_a = Vec::new();
+    let mut vals_b = Vec::new();
+    let mut skipped_missing = 0_usize;
+    for r in 0..mv.row_count() {
+        let Some(gc) = g_var.cells.get(r) else {
+            continue;
+        };
+        let Some(rc) = r_var.cells.get(r) else {
+            continue;
+        };
+        let tok = mv_cell_token(gc);
+        let num = rc.active_number();
+        match (tok, num) {
+            (Some(t), Some(y)) if t == levels[0] => vals_a.push(y),
+            (Some(t), Some(y)) if t == levels[1] => vals_b.push(y),
+            _ => {
+                if !gc.is_empty() || !rc.is_empty() {
+                    skipped_missing += 1;
+                }
+            }
+        }
+    }
+
+    if vals_a.is_empty() || vals_b.is_empty() {
+        return Err(StatsError::InsufficientSampleSize {
+            context: "two-group MV level observations",
+            required: 1,
+            actual: vals_a.len().min(vals_b.len()),
+        });
+    }
+
+    Ok(Some((
+        LabeledGroupSample { label: levels[0].clone(), values: vals_a },
+        LabeledGroupSample { label: levels[1].clone(), values: vals_b },
+        skipped_missing,
+    )))
+}
+
+fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result<(String, String, Vec<f64>, Vec<f64>), StatsError> {
+    match &sheet.archetype {
+        TableArchetype::Column(col) => {
+            if col.subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            if ba.column_a == ba.column_b {
+                return Err(StatsError::InvalidParameter { name: "column_b", value: ba.column_b as f64 });
+            }
+            let (xs, ys) = extract_paired_values(sheet, ba.column_a, ba.column_b)?;
+            let la = col.data_sets[ba.column_a].title.clone();
+            let lb = col.data_sets[ba.column_b].title.clone();
+            Ok((la, lb, xs, ys))
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            if ba.column_a == ba.column_b {
+                return Err(StatsError::InvalidParameter { name: "column_b", value: ba.column_b as f64 });
+            }
+            let (xs, ys) = extract_paired_values(sheet, ba.column_a, ba.column_b)?;
+            let la = mv.variables[ba.column_a].title.clone();
+            let lb = mv.variables[ba.column_b].title.clone();
+            Ok((la, lb, xs, ys))
+        }
+        TableArchetype::Xy(xy) => {
+            if xy.y_subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            if xy.data_sets.len() >= 2 && ba.column_a != ba.column_b {
+                let dsa = xy.data_sets.get(ba.column_a).ok_or(StatsError::MissingColumn { index: ba.column_a })?;
+                let dsb = xy.data_sets.get(ba.column_b).ok_or(StatsError::MissingColumn { index: ba.column_b })?;
+                let mut xs = Vec::new();
+                let mut ys = Vec::new();
+                for r in 0..xy.row_count() {
+                    if let (Some(a), Some(b)) = (
+                        dsa.cells.get(r).and_then(|s| s.first()).and_then(Cell::active_number),
+                        dsb.cells.get(r).and_then(|s| s.first()).and_then(Cell::active_number),
+                    ) {
+                        xs.push(a);
+                        ys.push(b);
+                    }
+                }
+                if xs.is_empty() {
+                    return Err(StatsError::EmptyInput);
+                }
+                Ok((dsa.title.clone(), dsb.title.clone(), xs, ys))
+            } else {
+                let y_idx = if ba.column_a < xy.data_sets.len() { ba.column_a } else { 0 };
+                let ds = xy.data_sets.get(y_idx).ok_or(StatsError::MissingColumn { index: y_idx })?;
+                let pairs = xy.active_xy_pairs(y_idx);
+                if pairs.is_empty() {
+                    return Err(StatsError::EmptyInput);
+                }
+                let (xs, ys) = pairs.into_iter().unzip();
+                Ok((xy.x_title.clone(), ds.title.clone(), xs, ys))
+            }
+        }
+        other => Err(StatsError::IncompatibleTable { analysis: "Bland-Altman", actual: other.kind() }),
+    }
+}
+
+type MultipleRowInputs = (String, String, Vec<String>, Vec<Vec<f64>>, Vec<Vec<f64>>);
+
+fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: bool) -> Result<MultipleRowInputs, StatsError> {
+    match &sheet.archetype {
+        TableArchetype::Grouped(grp) => {
+            if grp.subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            let indices = resolve_selected_indices(&spec.selected_data_sets, grp.data_sets.len());
+            if indices.len() < 2 {
+                return Err(StatsError::InsufficientSampleSize { context: "multiple row t-tests groups", required: 2, actual: indices.len() });
+            }
+            let (ia, ib) = (indices[0], indices[1]);
+            let dsa = &grp.data_sets[ia];
+            let dsb = &grp.data_sets[ib];
+            let n_rows = grp.row_count();
+            let mut labels = Vec::with_capacity(n_rows);
+            let mut rows_a = Vec::with_capacity(n_rows);
+            let mut rows_b = Vec::with_capacity(n_rows);
+            for r in 0..n_rows {
+                let lbl = grp.row_titles.get(r).filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1));
+                let (va, vb) = extract_paired_or_unpaired_subcolumns(dsa.cells.get(r), dsb.cells.get(r), paired);
+                labels.push(lbl);
+                rows_a.push(va);
+                rows_b.push(vb);
+            }
+            Ok((dsa.title.clone(), dsb.title.clone(), labels, rows_a, rows_b))
+        }
+        TableArchetype::Xy(xy) => {
+            if xy.y_subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            let indices = resolve_selected_indices(&spec.selected_data_sets, xy.data_sets.len());
+            if indices.len() < 2 {
+                return Err(StatsError::InsufficientSampleSize { context: "multiple row t-tests groups", required: 2, actual: indices.len() });
+            }
+            let (ia, ib) = (indices[0], indices[1]);
+            let dsa = &xy.data_sets[ia];
+            let dsb = &xy.data_sets[ib];
+            let n_rows = xy.row_count();
+            let mut labels = Vec::with_capacity(n_rows);
+            let mut rows_a = Vec::with_capacity(n_rows);
+            let mut rows_b = Vec::with_capacity(n_rows);
+            for r in 0..n_rows {
+                let lbl = xy.x_value_at(r).map_or_else(|| format!("Row {}", r + 1), |x| format!("{x}"));
+                let (va, vb) = extract_paired_or_unpaired_subcolumns(dsa.cells.get(r), dsb.cells.get(r), paired);
+                labels.push(lbl);
+                rows_a.push(va);
+                rows_b.push(vb);
+            }
+            Ok((dsa.title.clone(), dsb.title.clone(), labels, rows_a, rows_b))
+        }
+        TableArchetype::Column(col) => {
+            if col.subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            let indices = resolve_selected_indices(&spec.selected_data_sets, col.data_sets.len());
+            if indices.len() < 4 {
+                return Err(StatsError::InsufficientSampleSize {
+                    context: "multiple row t-tests replicate columns per group",
+                    required: 4,
+                    actual: indices.len(),
+                });
+            }
+            let mid = indices.len() / 2;
+            let (left, right) = (&indices[..mid], &indices[mid..]);
+            let n_rows = col.row_count();
+            let mut labels = Vec::with_capacity(n_rows);
+            let mut rows_a = Vec::with_capacity(n_rows);
+            let mut rows_b = Vec::with_capacity(n_rows);
+            for r in 0..n_rows {
+                let lbl = col.row_titles.get(r).filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1));
+                let (va, vb) = if paired {
+                    let mut pa = Vec::new();
+                    let mut pb = Vec::new();
+                    for (&la, &rb_idx) in left.iter().zip(right.iter()) {
+                        if let (Some(a), Some(b)) = (
+                            col.data_sets[la].cell(r, 0).and_then(Cell::active_number),
+                            col.data_sets[rb_idx].cell(r, 0).and_then(Cell::active_number),
+                        ) {
+                            pa.push(a);
+                            pb.push(b);
+                        }
+                    }
+                    (pa, pb)
+                } else {
+                    (
+                        left.iter().filter_map(|&c| col.data_sets[c].cell(r, 0).and_then(Cell::active_number)).collect(),
+                        right.iter().filter_map(|&c| col.data_sets[c].cell(r, 0).and_then(Cell::active_number)).collect(),
+                    )
+                };
+                labels.push(lbl);
+                rows_a.push(va);
+                rows_b.push(vb);
+            }
+            Ok((String::from("Group A"), String::from("Group B"), labels, rows_a, rows_b))
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let indices: Vec<usize> = resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())
+                .into_iter()
+                .filter(|&i| mv.variables.get(i).is_some_and(|v| v.role != VariableRole::Categorical))
+                .collect();
+            if indices.len() < 4 {
+                return Err(StatsError::InsufficientSampleSize {
+                    context: "multiple row t-tests numeric replicate columns",
+                    required: 4,
+                    actual: indices.len(),
+                });
+            }
+            let mid = indices.len() / 2;
+            let (left, right) = (&indices[..mid], &indices[mid..]);
+            let label_col = mv.variables.iter().position(|v| v.role == VariableRole::Categorical);
+            let n_rows = mv.row_count();
+            let mut labels = Vec::with_capacity(n_rows);
+            let mut rows_a = Vec::with_capacity(n_rows);
+            let mut rows_b = Vec::with_capacity(n_rows);
+            for r in 0..n_rows {
+                let lbl = label_col.and_then(|lc| mv.variables[lc].cells.get(r)).and_then(mv_cell_token).unwrap_or_else(|| format!("Row {}", r + 1));
+                let (va, vb) = if paired {
+                    let mut pa = Vec::new();
+                    let mut pb = Vec::new();
+                    for (&la, &rb_idx) in left.iter().zip(right.iter()) {
+                        if let (Some(a), Some(b)) = (
+                            mv.variables[la].cells.get(r).and_then(Cell::active_number),
+                            mv.variables[rb_idx].cells.get(r).and_then(Cell::active_number),
+                        ) {
+                            pa.push(a);
+                            pb.push(b);
+                        }
+                    }
+                    (pa, pb)
+                } else {
+                    (
+                        left.iter().filter_map(|&c| mv.variables[c].cells.get(r).and_then(Cell::active_number)).collect(),
+                        right.iter().filter_map(|&c| mv.variables[c].cells.get(r).and_then(Cell::active_number)).collect(),
+                    )
+                };
+                labels.push(lbl);
+                rows_a.push(va);
+                rows_b.push(vb);
+            }
+            Ok((String::from("Group A"), String::from("Group B"), labels, rows_a, rows_b))
+        }
+        other => Err(StatsError::IncompatibleTable { analysis: "Multiple row t-tests", actual: other.kind() }),
+    }
+}
+
+fn extract_paired_or_unpaired_subcolumns(row_a: Option<&Vec<Cell>>, row_b: Option<&Vec<Cell>>, paired: bool) -> (Vec<f64>, Vec<f64>) {
+    match (row_a, row_b) {
+        (Some(sa), Some(sb)) if paired => {
+            let mut va = Vec::new();
+            let mut vb = Vec::new();
+            for (ca, cb) in sa.iter().zip(sb.iter()) {
+                if let (Some(a), Some(b)) = (ca.active_number(), cb.active_number()) {
+                    va.push(a);
+                    vb.push(b);
+                }
+            }
+            (va, vb)
+        }
+        (Some(sa), Some(sb)) => (sa.iter().filter_map(Cell::active_number).collect(), sb.iter().filter_map(Cell::active_number).collect()),
+        _ => (Vec::new(), Vec::new()),
+    }
+}
+
+type SingleRowOutcome = (f64, f64, f64, f64, f64, f64);
+
+fn run_single_row_comparison(ra: &[f64], rb: &[f64], mr: &MultipleRowTestsSpec, conf: ConfidenceLevel) -> Result<SingleRowOutcome, StatsError> {
+    if mr.paired && mr.nonparametric {
+        let out = wilcoxon_matched_pairs(ra, rb, true, conf, false)?;
+        let ma = SummaryMoments::from_slice(ra)?.mean;
+        let mb = SummaryMoments::from_slice(rb)?.mean;
+        return Ok((ma, mb, out.hodges_lehmann_pseudomedian, out.w_stat, out.n_effective as f64, out.p_value));
+    }
+    if mr.paired {
+        let out = paired_t_test(ra, rb, true, conf)?;
+        let ma = SummaryMoments::from_slice(ra)?.mean;
+        let mb = SummaryMoments::from_slice(rb)?.mean;
+        return Ok((ma, mb, out.mean_of_differences, out.t_statistic, out.df, out.p_value));
+    }
+    if mr.nonparametric {
+        let out = mann_whitney_u(ra, rb, true, conf)?;
+        let ma = SummaryMoments::from_slice(ra)?.mean;
+        let mb = SummaryMoments::from_slice(rb)?.mean;
+        return Ok((ma, mb, out.hodges_lehmann_diff, out.u_min, (ra.len() + rb.len()) as f64 - 2.0, out.p_value));
+    }
+    let out = if mr.assume_equal_sd { unpaired_t_test(ra, rb, true, conf)? } else { welch_t_test(ra, rb, true, conf)? };
+    Ok((out.mean_a, out.mean_b, out.difference, out.t_statistic, out.df, out.p_value))
 }
 
 #[allow(clippy::too_many_arguments)]

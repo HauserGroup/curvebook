@@ -1309,6 +1309,9 @@ fn oracle_end_to_end_run_analysis_sheets() {
             trend_test: false,
             asymmetrical_greenwood_ci: true,
             multiplicity: MultiplicitySpec::default(),
+            mv_time_column: None,
+            mv_status_column: None,
+            mv_group_column: None,
         }),
     )
     .unwrap();
