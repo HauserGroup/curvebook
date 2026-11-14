@@ -17,7 +17,7 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 1 | `S01` Numerical foundations | `crates/math`, `crates/palette` | done | 1/2/4/1 | 8/0/0/0 | 2026-11-14 |
 | 2 | `S05` Document model | `crates/doc` | done | 3/3/1/0 | 7/0/0/0 | 2026-11-14 |
 | 3 | `S02` Statistics | `crates/stats` | done | 6/5/2/0 | 13/0/0/0 | 2026-11-14 |
-| 4 | `S03` Curve fitting and equation language | `crates/fit` | reviewing | — | — | 2026-11-14 |
+| 4 | `S03` Curve fitting and equation language | `crates/fit` | verifying | 3/6/3/0 | — | 2026-11-14 |
 | 5 | `S04` Transforms | `crates/transform` | done | 4/5/4/0 | 13/0/0/0 | 2026-11-14 |
 | 6 | `S06` File formats and import | `crates/format` | done | 1/4/9/0 | 12/2/0/0 | 2026-11-14 |
 | 7 | `S08` Chart compiler and scales | `crates/chart` | reviewing | — | — | 2026-11-14 |
