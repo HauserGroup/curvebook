@@ -1721,6 +1721,7 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
 
     let proportion_scale = detect_proportion_scale(&graph.spec);
     let is_stacked = matches!(graph.spec.grouped_arrangement, GroupedArrangement::Stacked);
+    let is_superimposed = matches!(graph.spec.grouped_arrangement, GroupedArrangement::Superimposed);
 
     let mut values = mat.counts.clone();
     if let Some(scale_top) = proportion_scale {
@@ -1788,6 +1789,22 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
                     clip: Some(r),
                 });
                 acc = top_val;
+            }
+        } else if is_superimposed {
+            let base_w = (slot_w * 0.62).min(44.0);
+            let mut order: Vec<(usize, f64)> = row_vals.iter().copied().enumerate().collect();
+            order.sort_by(|a, b| b.1.abs().total_cmp(&a.1.abs()).then_with(|| a.0.cmp(&b.0)));
+            for (rank, &(s_idx, val)) in order.iter().enumerate() {
+                let Some(y_top) = y_map.map_value(val, r.bottom(), r.y) else { continue };
+                let bar_w = (base_w * (1.0 - 0.12 * (rank as f64).min(4.0))).max(4.0);
+                let rect = RectPt::new(center_x - bar_w * 0.5, y_top.min(y_base_pt), bar_w, (y_base_pt - y_top).abs().max(0.5));
+                let color = mat.series_colors.get(s_idx).copied().unwrap_or_else(|| graph.spec.palette.color_at(s_idx));
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::rect(rect),
+                    fill: Some(FillPaint::solid(color)),
+                    stroke: Some(bar_border),
+                    clip: Some(r),
+                });
             }
         } else {
             let n_s = mat.series_labels.len().max(1);

@@ -55,7 +55,7 @@ pub use graph::{
     BreakOrnament, CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric,
     ErrorBarSpec, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement,
     LegendSpec, LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PartsOfWholeLayout,
-    RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
+    PointStyleOverride, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
 };
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, extract_template_hooks};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};

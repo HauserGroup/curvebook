@@ -1564,7 +1564,7 @@ fn apply_locale_chars(raw: &str, policy: &LocaleNumberPolicy) -> String {
 #[must_use]
 pub fn resolve_template_hooks(template: &str, doc: &ProjectDocument, primary_data_id: Option<&SheetId>) -> String {
     let paired_info = primary_data_id
-        .and_then(|id| doc.data_sheet(id))
+        .and_then(|id| doc.data_sheet(id).or_else(|| doc.result_sheet(id).and_then(|res| res.analyzable_data.as_ref())))
         .and_then(|ds| ds.info_sheet_id.as_ref())
         .and_then(|info_id| doc.info_sheet(info_id))
         .or_else(|| doc.info_sheets.first());
@@ -2424,6 +2424,7 @@ pub fn legend_entries_from_graph_spec(graph: &GraphSpec, doc: &ProjectDocument) 
             .filter(|s| !s.trim().is_empty())
             .or_else(|| {
                 doc.data_sheet(&series.source_sheet_id)
+                    .or_else(|| doc.result_sheet(&series.source_sheet_id).and_then(|res| res.analyzable_data.as_ref()))
                     .and_then(|ds| data_set_title(&ds.archetype, series.data_set_index))
                     .map(str::to_owned)
                     .filter(|s| !s.trim().is_empty())

@@ -5,8 +5,8 @@ use lumencraft_doc::{
     AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CanvasResizeMode,
     CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, ErrorCode,
     FigureCanvasPreset, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, LineConnectionKind,
-    MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PairwiseComparisonRecord, PartsOfWholeLayout, ProjectDocument, RectPt,
-    RegressionOverlaySpec, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure, TickLabelFormat,
+    MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PairwiseComparisonRecord, PartsOfWholeLayout, PointStyleOverride,
+    ProjectDocument, RectPt, RegressionOverlaySpec, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure, TickLabelFormat,
 };
 use lumencraft_math::LogitDomain;
 use lumencraft_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -15,10 +15,12 @@ use serde_json::{Map, Value, json};
 
 use super::analysis::{de_present_opt, merge_json_struct, strip_keys};
 use super::export::{compile_scene_for_sheet, de_opt_u16, de_opt_usize};
-use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_data_sheet, require_graph_sheet, require_graph_sheet_mut, require_result_sheet};
+use super::helpers::{
+    next_unique_sheet_id, parse_sheet_id, require_analyzable_data_sheet, require_graph_sheet, require_graph_sheet_mut, require_result_sheet,
+};
 use super::params::{
-    any_json_schema, array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema_with_aliases, parse_params,
-    str_schema,
+    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
+    obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
@@ -202,10 +204,23 @@ static SPECS: &[CommandSpec] = &[
         enabled: has_graph_or_layout,
         run: run_graph_preflight_check,
     },
+    CommandSpec {
+        id: "graph.formatSelectedPoints",
+        label: "Format Selected Points",
+        menu_path: "Format/Selected Points...",
+        shortcut: "",
+        summary: "Apply, merge, replace, or clear per-point visual overrides across one or more selected graph points.",
+        beginner: "Highlights or hides specific data points (changing color, symbol, size, border, or visibility) without modifying the whole series.",
+        group: CommandGroup::Graph,
+        effects: MUTATE_IDEMPOTENT,
+        input_schema: schema_graph_format_selected_points,
+        enabled: has_graph_sheet,
+        run: run_graph_format_selected_points,
+    },
 ];
 
 fn has_data_sheet(session: &Session) -> bool {
-    !session.document().data_sheets.is_empty()
+    !session.document().data_sheets.is_empty() || session.document().result_sheets.iter().any(|r| r.analyzable_data.is_some())
 }
 
 fn has_graph_sheet(session: &Session) -> bool {
@@ -720,6 +735,73 @@ fn schema_graph_preflight_check() -> Value {
     )
 }
 
+fn schema_graph_format_selected_points() -> Value {
+    let coord_schema = obj_schema(
+        vec![
+            ("series_index", int_schema("Zero-based series index", Some(0), None)),
+            ("point_index", int_schema("Zero-based data point index within the series", Some(0), None)),
+        ],
+        &["series_index", "point_index"],
+        false,
+    );
+    let override_item_schema = obj_schema(
+        vec![
+            ("series_index", int_schema("Zero-based series index", Some(0), None)),
+            ("point_index", int_schema("Zero-based data point index within the series", Some(0), None)),
+            ("color", nullable_schema(any_json_schema("Override accent/stroke color (hex, color name, [r,g,b], [r,g,b,a], or null to clear)"))),
+            (
+                "symbol",
+                nullable_schema(str_schema(
+                    "Override marker shape (circle, square, triangle_up, triangle_down, diamond, cross, plus, star, hexagon, or null)",
+                )),
+            ),
+            ("shape", nullable_schema(str_schema("Alias for `symbol`"))),
+            ("size_pt", nullable_schema(num_schema("Override positive marker size in points (> 0, or null to clear)", None, None))),
+            ("border_width_pt", nullable_schema(num_schema("Override marker border width in points (>= 0, or null to clear)", None, None))),
+            ("stroke_width_pt", nullable_schema(num_schema("Alias for `border_width_pt`", None, None))),
+            ("fill_color", nullable_schema(any_json_schema("Override marker fill color (or null to clear)"))),
+            (
+                "fill_mode",
+                nullable_schema(str_schema("Override marker fill mode (filled, open, semi_top, semi_bottom, semi_left, semi_right, or null)")),
+            ),
+            ("hidden", bool_schema("True hides this point marker while leaving data intact")),
+        ],
+        &["series_index", "point_index"],
+        false,
+    );
+
+    obj_schema_with_aliases(
+        vec![
+            ("sheet_id", non_empty_str_schema("Target graph sheet ID")),
+            (
+                "mode",
+                enum_str_schema(
+                    "Override update mode: merge (default, updates provided fields), replace (replaces full override table), or clear",
+                    &["merge", "replace", "clear"],
+                ),
+            ),
+            ("clear", bool_schema("Convenience flag: true selects clear mode when `mode` is omitted")),
+            ("overrides", array_schema("Explicit per-point override records", override_item_schema, None, None)),
+            ("points", array_schema("Target (series_index, point_index) points to format uniformly or clear", coord_schema, None, None)),
+            ("color", nullable_schema(any_json_schema("Shared stroke/accent color for batch `points` (or null to clear)"))),
+            ("symbol", nullable_schema(str_schema("Shared marker shape for batch `points` (or null to clear)"))),
+            ("shape", nullable_schema(str_schema("Alias for `symbol`"))),
+            ("size_pt", nullable_schema(num_schema("Shared positive marker size in points for batch `points` (or null to clear)", None, None))),
+            (
+                "border_width_pt",
+                nullable_schema(num_schema("Shared marker border width in points for batch `points` (or null to clear)", None, None)),
+            ),
+            ("stroke_width_pt", nullable_schema(num_schema("Alias for `border_width_pt`", None, None))),
+            ("fill_color", nullable_schema(any_json_schema("Shared marker fill color for batch `points` (or null to clear)"))),
+            ("fill_mode", nullable_schema(str_schema("Shared marker fill mode for batch `points` (or null to clear)"))),
+            ("hidden", bool_schema("Shared hidden flag applied across batch `points`")),
+        ],
+        &["sheet_id"],
+        vec![("sheet_id", &["id", "graph_sheet_id"]), ("symbol", &["shape"]), ("border_width_pt", &["stroke_width_pt"])],
+        false,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Command Runners
 // ---------------------------------------------------------------------------
@@ -730,13 +812,17 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
     let doc = &mut ctx.session.doc;
 
     let data_id = parse_sheet_id(&params.data_sheet_id)?;
-    let ds = require_data_sheet(doc, &data_id)?.clone();
+    let ds = require_analyzable_data_sheet(doc, &data_id)?.clone();
     let id = match params.sheet_id.as_deref() {
         Some(raw_id) => parse_sheet_id(raw_id)?,
         None => next_unique_sheet_id(doc, "graph")?,
     };
 
     let mut graph = GraphSheet::new_uninitialized_for_data(id.clone(), &ds)?;
+    graph.spec.primary_source_sheet_id = data_id.clone();
+    for series in &mut graph.spec.series {
+        series.source_sheet_id = data_id.clone();
+    }
     if let Some(title) = params.title {
         graph.title = title;
     }
@@ -781,6 +867,221 @@ fn run_graph_initialize(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         "graph.initialize",
         format!("initialized graph `{id}`"),
         json!({ "sheet_id": id.as_str(), "kind": graph.spec.kind, "initialized": true }),
+    ))
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+enum OptionalPatch<T> {
+    #[default]
+    Keep,
+    Clear,
+    Set(T),
+}
+
+#[derive(Debug, Clone, Default)]
+struct PointStylePatch {
+    color: OptionalPatch<Rgba8>,
+    symbol: OptionalPatch<MarkerShape>,
+    size_pt: OptionalPatch<f64>,
+    border_width_pt: OptionalPatch<f64>,
+    fill_color: OptionalPatch<Rgba8>,
+    fill_mode: OptionalPatch<MarkerFillMode>,
+    hidden: Option<bool>,
+}
+
+impl PointStylePatch {
+    fn has_any_change(&self) -> bool {
+        !matches!(self.color, OptionalPatch::Keep)
+            || !matches!(self.symbol, OptionalPatch::Keep)
+            || !matches!(self.size_pt, OptionalPatch::Keep)
+            || !matches!(self.border_width_pt, OptionalPatch::Keep)
+            || !matches!(self.fill_color, OptionalPatch::Keep)
+            || !matches!(self.fill_mode, OptionalPatch::Keep)
+            || self.hidden.is_some()
+    }
+}
+
+fn parse_optional_patch<T>(
+    obj: &Map<String, Value>,
+    keys: &[&str],
+    parser: fn(&Value) -> Result<T, EngineError>,
+) -> Result<OptionalPatch<T>, EngineError> {
+    for key in keys {
+        if let Some(val) = obj.get(*key) {
+            if val.is_null() {
+                return Ok(OptionalPatch::Clear);
+            }
+            return Ok(OptionalPatch::Set(parser(val)?));
+        }
+    }
+    Ok(OptionalPatch::Keep)
+}
+
+fn parse_positive_f64(val: &Value) -> Result<f64, EngineError> {
+    let v = val.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`size_pt` must be a finite number"))?;
+    if !v.is_finite() || v <= 0.0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("point `size_pt` must be finite and > 0 (got {v})")));
+    }
+    Ok(v)
+}
+
+fn parse_non_negative_f64(val: &Value) -> Result<f64, EngineError> {
+    let v = val.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`border_width_pt` must be a finite number"))?;
+    if !v.is_finite() || v < 0.0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("point `border_width_pt` must be finite and >= 0 (got {v})")));
+    }
+    Ok(v)
+}
+
+fn parse_point_style_patch(obj: &Map<String, Value>) -> Result<PointStylePatch, EngineError> {
+    Ok(PointStylePatch {
+        color: parse_optional_patch(obj, &["color"], parse_rgba8)?,
+        symbol: parse_optional_patch(obj, &["symbol", "shape"], parse_marker_shape)?,
+        size_pt: parse_optional_patch(obj, &["size_pt"], parse_positive_f64)?,
+        border_width_pt: parse_optional_patch(obj, &["border_width_pt", "stroke_width_pt"], parse_non_negative_f64)?,
+        fill_color: parse_optional_patch(obj, &["fill_color"], parse_rgba8)?,
+        fill_mode: parse_optional_patch(obj, &["fill_mode"], parse_marker_fill_mode)?,
+        hidden: obj.get("hidden").and_then(Value::as_bool),
+    })
+}
+
+fn parse_point_coord(obj: &Map<String, Value>) -> Result<(usize, usize), EngineError> {
+    let s_raw = obj
+        .get("series_index")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "point entry requires non-negative `series_index`"))?;
+    let p_raw = obj
+        .get("point_index")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "point entry requires non-negative `point_index`"))?;
+    let series_index = usize::try_from(s_raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`series_index` out of range"))?;
+    let point_index = usize::try_from(p_raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`point_index` out of range"))?;
+    Ok((series_index, point_index))
+}
+
+fn apply_optional_patch<T>(slot: &mut Option<T>, patch: &OptionalPatch<T>)
+where
+    T: Clone,
+{
+    match patch {
+        OptionalPatch::Keep => {}
+        OptionalPatch::Clear => *slot = None,
+        OptionalPatch::Set(v) => *slot = Some(v.clone()),
+    }
+}
+
+fn apply_point_style_patch(ov: &mut PointStyleOverride, patch: &PointStylePatch) {
+    apply_optional_patch(&mut ov.color, &patch.color);
+    apply_optional_patch(&mut ov.symbol, &patch.symbol);
+    apply_optional_patch(&mut ov.size_pt, &patch.size_pt);
+    apply_optional_patch(&mut ov.border_width_pt, &patch.border_width_pt);
+    apply_optional_patch(&mut ov.fill_color, &patch.fill_color);
+    apply_optional_patch(&mut ov.fill_mode, &patch.fill_mode);
+    if let Some(hidden) = patch.hidden {
+        ov.hidden = hidden;
+    }
+}
+
+fn is_empty_point_override(ov: &PointStyleOverride) -> bool {
+    ov.color.is_none()
+        && ov.symbol.is_none()
+        && ov.size_pt.is_none()
+        && ov.border_width_pt.is_none()
+        && ov.fill_color.is_none()
+        && ov.fill_mode.is_none()
+        && !ov.hidden
+}
+
+fn parse_override_entries(validated: &Map<String, Value>) -> Result<Vec<(usize, usize, PointStylePatch)>, EngineError> {
+    let mut entries = Vec::new();
+    if let Some(arr) = validated.get("overrides").and_then(Value::as_array) {
+        for item in arr {
+            let Some(obj) = item.as_object() else {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "each `overrides` entry must be an object"));
+            };
+            let (series_index, point_index) = parse_point_coord(obj)?;
+            let patch = parse_point_style_patch(obj)?;
+            entries.push((series_index, point_index, patch));
+        }
+    }
+    if let Some(arr) = validated.get("points").and_then(Value::as_array) {
+        let shared = parse_point_style_patch(validated)?;
+        for item in arr {
+            let Some(obj) = item.as_object() else {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "each `points` entry must be an object"));
+            };
+            let (series_index, point_index) = parse_point_coord(obj)?;
+            entries.push((series_index, point_index, shared.clone()));
+        }
+    }
+    Ok(entries)
+}
+
+fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_graph_format_selected_points();
+    let validated: Value = parse_params(&schema, raw)?;
+    let obj = validated.as_object().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "parameters must be a JSON object"))?;
+
+    let sheet_raw = obj.get("sheet_id").and_then(Value::as_str).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `sheet_id`"))?;
+    let id = parse_sheet_id(sheet_raw)?;
+
+    let mode = match obj.get("mode").and_then(Value::as_str) {
+        Some(m) => m,
+        None if obj.get("clear").and_then(Value::as_bool) == Some(true) => "clear",
+        None => "merge",
+    };
+
+    let entries = parse_override_entries(obj)?;
+    if mode != "clear" && entries.is_empty() {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "graph.formatSelectedPoints requires non-empty `overrides` or `points` unless `mode` is `clear`",
+        ));
+    }
+    if mode != "clear" && entries.iter().all(|(_, _, p)| !p.has_any_change()) {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "graph.formatSelectedPoints requires at least one style attribute (`color`, `symbol`, `size_pt`, `border_width_pt`, `fill_color`, `fill_mode`, or `hidden`)",
+        ));
+    }
+
+    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
+    if mode == "clear" {
+        if entries.is_empty() {
+            graph.spec.point_overrides.clear();
+        } else {
+            graph.spec.point_overrides.retain(|existing| !entries.iter().any(|(s, p, _)| existing.series_index == *s && existing.point_index == *p));
+        }
+    } else {
+        if mode == "replace" {
+            graph.spec.point_overrides.clear();
+        }
+        for (series_index, point_index, patch) in entries {
+            if let Some(existing) = graph.spec.point_overrides.iter_mut().find(|ov| ov.series_index == series_index && ov.point_index == point_index)
+            {
+                apply_point_style_patch(existing, &patch);
+            } else {
+                let mut ov = PointStyleOverride { series_index, point_index, ..PointStyleOverride::default() };
+                apply_point_style_patch(&mut ov, &patch);
+                graph.spec.point_overrides.push(ov);
+            }
+        }
+    }
+
+    graph.spec.point_overrides.retain(|ov| !is_empty_point_override(ov));
+    graph.spec.point_overrides.sort_by_key(|ov| (ov.series_index, ov.point_index));
+    graph.spec.validate()?;
+    let override_count = graph.spec.point_overrides.len();
+
+    Ok(CommandOutcome::mutated(
+        "graph.formatSelectedPoints",
+        format!("updated {override_count} point override(s) on `{id}`"),
+        json!({
+            "sheet_id": id.as_str(),
+            "mode": mode,
+            "override_count": override_count,
+            "point_overrides": graph.spec.point_overrides,
+        }),
     ))
 }
 
@@ -2123,7 +2424,7 @@ fn parse_bracket_label_mode(val: Option<&Value>) -> Result<BracketLabelMode, Eng
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{Cell, DataSheet, ErrorCode, ProjectDocument, SubcolumnMode, TableArchetype, XyTable};
+    use lumencraft_doc::{Cell, DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
     use serde_json::json;
 
     use super::*;
@@ -2140,13 +2441,89 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_all_thirteen_graph_commands() {
-        assert_eq!(specs().len(), 13);
+    fn registry_contains_all_fourteen_graph_commands() {
+        assert_eq!(specs().len(), 14);
         for spec in specs() {
             assert_eq!(spec.group, CommandGroup::Graph);
             assert!(!spec.summary.is_empty());
             assert!(!spec.beginner.is_empty());
         }
+    }
+
+    #[test]
+    fn formats_selected_points_with_undo_redo_and_clear() {
+        let mut session = session_with_xy();
+        session.execute("graph.create", json!({ "data_sheet_id": "xy1", "sheet_id": "g1", "kind": "xy" })).unwrap();
+
+        let batch = session
+            .execute(
+                "graph.formatSelectedPoints",
+                json!({
+                    "sheet_id": "g1",
+                    "points": [
+                        { "series_index": 0, "point_index": 0 },
+                        { "series_index": 0, "point_index": 1 }
+                    ],
+                    "color": "#FF0000",
+                    "symbol": "diamond",
+                    "size_pt": 9.0,
+                    "border_width_pt": 1.5
+                }),
+            )
+            .unwrap();
+        assert_eq!(batch.payload["override_count"], json!(2));
+
+        let single = session
+            .execute(
+                "graph.formatSelectedPoints",
+                json!({
+                    "sheet_id": "g1",
+                    "overrides": [
+                        { "series_index": 0, "point_index": 1, "hidden": true, "symbol": null }
+                    ]
+                }),
+            )
+            .unwrap();
+        assert_eq!(single.payload["override_count"], json!(2));
+        let gs = session.document().graph_sheet(&SheetId::new("g1")).unwrap();
+        let ov0 = gs.spec.point_override(0, 0).unwrap();
+        assert_eq!(ov0.symbol, Some(MarkerShape::Diamond));
+        assert_eq!(ov0.size_pt, Some(9.0));
+        let ov1 = gs.spec.point_override(0, 1).unwrap();
+        assert!(ov1.hidden);
+        assert_eq!(ov1.symbol, None);
+
+        let scene = compile_scene_for_sheet(session.document(), &SheetId::new("g1")).unwrap();
+        assert_eq!(scene.plotted_points.len(), 1);
+        assert_eq!(scene.plotted_points[0].source_cell.row, 0);
+
+        session.undo().unwrap();
+        let ov1_undone = session.document().graph_sheet(&SheetId::new("g1")).unwrap().spec.point_override(0, 1).unwrap();
+        assert!(!ov1_undone.hidden);
+        assert_eq!(ov1_undone.symbol, Some(MarkerShape::Diamond));
+
+        session.redo().unwrap();
+        assert!(session.document().graph_sheet(&SheetId::new("g1")).unwrap().spec.point_override(0, 1).unwrap().hidden);
+
+        session
+            .execute("graph.formatSelectedPoints", json!({ "sheet_id": "g1", "mode": "clear", "points": [{ "series_index": 0, "point_index": 0 }] }))
+            .unwrap();
+        assert_eq!(session.document().graph_sheet(&SheetId::new("g1")).unwrap().spec.point_overrides.len(), 1);
+
+        session.execute("graph.formatSelectedPoints", json!({ "sheet_id": "g1", "mode": "clear" })).unwrap();
+        assert!(session.document().graph_sheet(&SheetId::new("g1")).unwrap().spec.point_overrides.is_empty());
+
+        let bad_size = session
+            .execute(
+                "graph.formatSelectedPoints",
+                json!({
+                    "sheet_id": "g1",
+                    "points": [{ "series_index": 0, "point_index": 0 }],
+                    "size_pt": 0.0
+                }),
+            )
+            .unwrap_err();
+        assert_eq!(bad_size.code, ErrorCode::BadInput);
     }
 
     #[test]

@@ -81,6 +81,29 @@ pub fn require_data_sheet<'a>(doc: &'a ProjectDocument, id: &SheetId) -> Result<
     doc.data_sheet(id).ok_or_else(|| not_found_sheet_err("data sheet", id))
 }
 
+/// Borrow an analyzable [`DataSheet`] from either `doc.data_sheets` or a [`ResultSheet`]'s
+/// `analyzable_data` secondary table (`Transform`, `Normalize`, `Transpose`, etc.).
+///
+/// # Errors
+/// Returns [`EngineError`] with [`ErrorCode::NotFound`] if no sheet exists with `id`, or
+/// [`ErrorCode::Conflict`] if `id` names a terminal [`ResultSheet`] with no analyzable table.
+pub fn require_analyzable_data_sheet<'a>(doc: &'a ProjectDocument, id: &SheetId) -> Result<&'a DataSheet, EngineError> {
+    if let Some(ds) = doc.data_sheet(id) {
+        return Ok(ds);
+    }
+    if let Some(res) = doc.result_sheet(id) {
+        return res.analyzable_data.as_ref().ok_or_else(|| {
+            EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("result sheet `{id}` has no primary analyzable table; extract a tabular result tab first with `sheet.extractResultTab`"),
+            )
+            .with_remediation("Use `sheet.extractResultTab` to copy a ResultTab into a reactive DataSheet, or choose an analyzable ResultSheet.")
+            .with_details(json!({ "sheet_id": id.as_str() }))
+        });
+    }
+    Err(not_found_sheet_err("data or analyzable result sheet", id))
+}
+
 /// Look up a mutable [`DataSheet`] or return [`ErrorCode::NotFound`].
 ///
 /// # Errors

@@ -237,23 +237,22 @@ fn compile_bubble_scatter(
         };
         let radius = bubble_radius_pt(enc.size, pt.size_scalar, max_abs_s);
         let shape = if cat_levels.is_empty() { MarkerShape::Circle } else { GROUP_SHAPES[pt.color_cat_idx % GROUP_SHAPES.len()] };
+        let base_marker = MarkerStyle {
+            shape,
+            fill_mode: MarkerFillMode::Filled,
+            size_pt: radius * 2.0,
+            fill_color: Rgba8::rgba(fill.r, fill.g, fill.b, 210),
+            stroke_color: Rgba8::rgba(25, 25, 25, 210),
+            stroke_width_pt: 0.75,
+        };
+        let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, pt.row, base_marker) else {
+            continue;
+        };
         let center_pt = PointPt::new(px, py);
-        emit_marker(
-            scene,
-            center_pt,
-            MarkerStyle {
-                shape,
-                fill_mode: MarkerFillMode::Filled,
-                size_pt: radius * 2.0,
-                fill_color: Rgba8::rgba(fill.r, fill.g, fill.b, 210),
-                stroke_color: Rgba8::rgba(25, 25, 25, 210),
-                stroke_width_pt: 0.75,
-            },
-            Some(r),
-        );
+        emit_marker(scene, center_pt, marker, Some(r));
         scene.plotted_points.push(PlottedPointMeta {
             center_pt,
-            radius_pt: radius.max(3.0),
+            radius_pt: (marker.size_pt * 0.5).max(3.0),
             source_cell: SourceCellId { sheet_id: graph.spec.primary_source_sheet_id.clone(), row: pt.row, col: enc.y_column, subcol: 0 },
             series_label: cat_levels.get(pt.color_cat_idx).cloned().unwrap_or_else(|| y_col.title.clone()),
             value_summary: format!("X={}, Y={}", format_point_value(pt.x), format_point_value(pt.y)),
@@ -1413,7 +1412,7 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     let up_col = Rgba8::rgb(213, 94, 0);
     let down_col = Rgba8::rgb(0, 114, 178);
     let ns_col = Rgba8::rgb(145, 153, 163);
-    for (fc, neg_log_p, opt_lbl) in &pts {
+    for (idx, (fc, neg_log_p, opt_lbl)) in pts.iter().enumerate() {
         let (Some(px), Some(py)) = (x_map.map_value(*fc, r.x, r.right()), y_map.map_value(*neg_log_p, r.bottom(), r.y)) else {
             continue;
         };
@@ -1425,19 +1424,18 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         } else {
             ns_col
         };
-        emit_marker(
-            scene,
-            PointPt::new(px, py),
-            MarkerStyle {
-                shape: MarkerShape::Circle,
-                fill_mode: MarkerFillMode::Filled,
-                size_pt: if is_sig { 5.0 } else { 3.8 },
-                fill_color: col,
-                stroke_color: Rgba8::WHITE,
-                stroke_width_pt: 0.4,
-            },
-            Some(r),
-        );
+        let base_marker = MarkerStyle {
+            shape: MarkerShape::Circle,
+            fill_mode: MarkerFillMode::Filled,
+            size_pt: if is_sig { 5.0 } else { 3.8 },
+            fill_color: col,
+            stroke_color: Rgba8::WHITE,
+            stroke_width_pt: 0.4,
+        };
+        let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) else {
+            continue;
+        };
+        emit_marker(scene, PointPt::new(px, py), marker, Some(r));
         if is_sig
             && (*fc >= fc_pos || *fc <= fc_neg)
             && let Some(lbl) = opt_lbl
@@ -1625,21 +1623,19 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
     draw_cartesian_frame(scene, &frame);
 
     let color = graph.spec.palette.color_at(0);
-    for &(avg, diff) in &pts {
+    for (idx, &(avg, diff)) in pts.iter().enumerate() {
         if let (Some(px), Some(py)) = (x_map.map_value(avg, r.x, r.right()), y_map.map_value(diff, r.bottom(), r.y)) {
-            emit_marker(
-                scene,
-                PointPt::new(px, py),
-                MarkerStyle {
-                    shape: MarkerShape::Circle,
-                    fill_mode: MarkerFillMode::Filled,
-                    size_pt: 5.0,
-                    fill_color: color,
-                    stroke_color: Rgba8::WHITE,
-                    stroke_width_pt: 0.6,
-                },
-                Some(r),
-            );
+            let base_marker = MarkerStyle {
+                shape: MarkerShape::Circle,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 5.0,
+                fill_color: color,
+                stroke_color: Rgba8::WHITE,
+                stroke_width_pt: 0.6,
+            };
+            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
+                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            }
         }
     }
 
@@ -2292,21 +2288,19 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
     }
 
     let color = graph.spec.palette.color_at(0);
-    for &(xv, yv) in &pts {
+    for (idx, &(xv, yv)) in pts.iter().enumerate() {
         if let (Some(px), Some(py)) = (x_map.map_value(xv, r.x, r.right()), y_map.map_value(yv, r.bottom(), r.y)) {
-            emit_marker(
-                scene,
-                PointPt::new(px, py),
-                MarkerStyle {
-                    shape: MarkerShape::Circle,
-                    fill_mode: MarkerFillMode::Filled,
-                    size_pt: 4.8,
-                    fill_color: color,
-                    stroke_color: Rgba8::WHITE,
-                    stroke_width_pt: 0.5,
-                },
-                Some(r),
-            );
+            let base_marker = MarkerStyle {
+                shape: MarkerShape::Circle,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 4.8,
+                fill_color: color,
+                stroke_color: Rgba8::WHITE,
+                stroke_width_pt: 0.5,
+            };
+            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
+                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            }
         }
     }
     Ok(())
@@ -2458,21 +2452,19 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
     }
 
     let color = graph.spec.palette.color_at(0);
-    for &(z, y) in &pts {
+    for (idx, &(z, y)) in pts.iter().enumerate() {
         if let (Some(px), Some(py)) = (x_map.map_value(z, r.x, r.right()), y_map.map_value(y, r.bottom(), r.y)) {
-            emit_marker(
-                scene,
-                PointPt::new(px, py),
-                MarkerStyle {
-                    shape: MarkerShape::Circle,
-                    fill_mode: MarkerFillMode::Filled,
-                    size_pt: 4.8,
-                    fill_color: color,
-                    stroke_color: Rgba8::WHITE,
-                    stroke_width_pt: 0.5,
-                },
-                Some(r),
-            );
+            let base_marker = MarkerStyle {
+                shape: MarkerShape::Circle,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 4.8,
+                fill_color: color,
+                stroke_color: Rgba8::WHITE,
+                stroke_width_pt: 0.5,
+            };
+            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
+                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            }
         }
     }
     Ok(())

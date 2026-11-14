@@ -1,6 +1,6 @@
 # LumenCraft Command Reference
 
-Registered commands: 90
+Registered commands: 92
 
 ## Project & Files (`project`)
 
@@ -165,6 +165,14 @@ Registered commands: 90
 - **Summary:** Duplicate a data sheet together with its paired info, analyses, graphs, and layouts.
 - **Beginner note:** Clones a complete linked family of sheets so all formulas, analyses, and figures remain wired to the copied table.
 - **Parameters:** `clear_data` (any), `new_sheet_id` (any), `prefix` (any), `sheet_id*` (string), `title` (any)
+
+### `sheet.extractResultTab` — Extract Result Tab to Data Table
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Insert/Extract Result Tab...`
+- **Summary:** Create a reactive linked DataSheet from a ResultSheet sub-tab (such as PC scores, residuals, or cleaned data).
+- **Beginner note:** Copies a computed result table tab into a new linked data table so you can analyze or graph it.
+- **Parameters:** `archetype` (any), `auto_graph` (boolean), `result_sheet_id*` (string), `sheet_id` (any), `tab_id` (any), `title` (any)
 
 ### `sheet.freeze` — Freeze Sheet
 
@@ -568,6 +576,14 @@ Registered commands: 90
 - **Summary:** Create a new graph sheet bound to an input data sheet with optional kind, title, and initialization state.
 - **Beginner note:** Creates a new graph linked to one of your data tables.
 - **Parameters:** `data_sheet_id*` (string), `initialized` (any), `kind` (any), `sheet_id` (any), `title` (any)
+
+### `graph.formatSelectedPoints` — Format Selected Points
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Format/Selected Points...`
+- **Summary:** Apply, merge, replace, or clear per-point visual overrides across one or more selected graph points.
+- **Beginner note:** Highlights or hides specific data points (changing color, symbol, size, border, or visibility) without modifying the whole series.
+- **Parameters:** `border_width_pt` (any), `clear` (boolean), `color` (any), `fill_color` (any), `fill_mode` (any), `hidden` (boolean), `mode` (string), `overrides` (array), `points` (array), `shape` (any), `sheet_id*` (string), `size_pt` (any), `stroke_width_pt` (any), `symbol` (any)
 
 ### `graph.initialize` — Initialize Graph
 

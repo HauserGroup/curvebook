@@ -3,17 +3,22 @@
 use std::collections::{HashMap, HashSet};
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode,
-    GraphAnnotation, GraphSheet, GroupedTable, HookSource, InfoSheet, LayoutItem, LayoutSheet, MultipleVariablesTable, NestedTable, ParameterScope,
-    PartsOfWholeTable, ProjectDocument, ResultSheet, ResultStatus, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
+    AnalysisKind, AnalysisSpec, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode,
+    GraphAnnotation, GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
+    LayoutItem, LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, ParameterScope, PartsOfWholeTable, PlacementMode, ProjectDocument,
+    ResultCell, ResultSheet, ResultStatus, ResultTab, SheetCellRange, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
     TableArchetype, TableKind, VariableRole, XColumnMode, XyTable, validate_title,
 };
+use lumencraft_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::cmd::helpers::{ensure_sheet_not_frozen, parse_sheet_id, require_data_sheet_mut, sheet_id_exists};
+use crate::cmd::helpers::{
+    ensure_sheet_not_frozen, parse_sheet_id, require_data_sheet_mut, require_result_sheet, select_result_tab, sheet_id_exists,
+};
 use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
+    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases,
+    parse_params, str_schema,
 };
 use crate::cmd::project::{RecalcSummary, recalculate_with_links};
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
@@ -1658,7 +1663,219 @@ fn run_sheet_select(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     ))
 }
 
-static SPECS: [CommandSpec; 10] = [
+fn has_result_sheet(session: &Session) -> bool {
+    !session.document().result_sheets.is_empty()
+}
+
+#[derive(Debug, Deserialize)]
+struct ExtractResultTabParams {
+    result_sheet_id: String,
+    tab_id: Option<String>,
+    sheet_id: Option<String>,
+    title: Option<String>,
+    archetype: Option<String>,
+    auto_graph: Option<bool>,
+}
+
+fn extract_result_tab_schema() -> Value {
+    obj_schema_with_aliases(
+        vec![
+            ("result_sheet_id", non_empty_str_schema("Source ResultSheet ID whose tab should be extracted")),
+            ("tab_id", nullable_schema(str_schema("ResultTab ID or exact title (defaults to first tab)"))),
+            ("sheet_id", nullable_schema(non_empty_str_schema("Optional destination DataSheet ID (auto-generated when omitted)"))),
+            ("title", nullable_schema(str_schema("Optional title for the extracted linked DataSheet"))),
+            (
+                "archetype",
+                nullable_schema(enum_str_schema(
+                    "Target table archetype: auto (default), column, multiple_variables, or grouped",
+                    &["auto", "column", "multiple_variables", "grouped"],
+                )),
+            ),
+            ("auto_graph", bool_schema("When true, also create an uninitialized GraphSheet linked to the extracted DataSheet")),
+        ],
+        &["result_sheet_id"],
+        vec![
+            ("result_sheet_id", &["source_sheet_id", "source_sheet", "result_id"]),
+            ("sheet_id", &["id", "target_sheet_id"]),
+            ("archetype", &["kind"]),
+        ],
+        false,
+    )
+}
+
+fn tab_has_non_numeric_cells(tab: &ResultTab) -> bool {
+    tab.rows.iter().flatten().any(|cell| matches!(cell, ResultCell::Text(_) | ResultCell::Boolean(_)))
+}
+
+fn resolve_extracted_table_kind(tab: &ResultTab, raw: Option<&str>) -> Result<TableKind, EngineError> {
+    match raw.unwrap_or("auto").trim().to_ascii_lowercase().as_str() {
+        "auto" => {
+            if tab_has_non_numeric_cells(tab) {
+                Ok(TableKind::MultipleVariables)
+            } else {
+                Ok(TableKind::Column)
+            }
+        }
+        "column" => Ok(TableKind::Column),
+        "multiple_variables" | "multivariate" => Ok(TableKind::MultipleVariables),
+        "grouped" => Ok(TableKind::Grouped),
+        other => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("unsupported `sheet.extractResultTab` archetype `{other}` (expected auto, column, multiple_variables, or grouped)"),
+        )),
+    }
+}
+
+fn clip_safe_title(raw: &str) -> String {
+    if validate_title(raw).is_ok() {
+        return raw.to_owned();
+    }
+    let mut clipped = String::new();
+    for ch in raw.chars() {
+        if clipped.len() + ch.len_utf8() > 180 {
+            break;
+        }
+        clipped.push(ch);
+    }
+    clipped
+}
+
+fn apply_row_labels(row_titles: &mut [String], tab: &ResultTab) {
+    for (r, slot) in row_titles.iter_mut().enumerate() {
+        if let Some(lbl) = tab.row_labels.get(r).filter(|s| !s.is_empty()) {
+            *slot = lbl.clone();
+        }
+    }
+}
+
+fn apply_tab_metadata_to_sheet(sheet: &mut DataSheet, tab: &ResultTab) {
+    match &mut sheet.archetype {
+        TableArchetype::Column(lumencraft_doc::ColumnTable { data_sets, row_titles, .. })
+        | TableArchetype::Grouped(lumencraft_doc::GroupedTable { data_sets, row_titles, .. }) => {
+            for (idx, ds) in data_sets.iter_mut().enumerate() {
+                if let Some(hdr) = tab.column_headers.get(idx).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    ds.title = clip_safe_title(hdr);
+                }
+            }
+            apply_row_labels(row_titles, tab);
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            for (idx, var) in mv.variables.iter_mut().enumerate() {
+                if let Some(hdr) = tab.column_headers.get(idx).map(|s| s.trim()).filter(|s| !s.is_empty()) {
+                    var.title = clip_safe_title(hdr);
+                }
+                let col_has_text = tab.rows.iter().any(|row| matches!(row.get(idx), Some(ResultCell::Text(_) | ResultCell::Boolean(_))));
+                if col_has_text {
+                    var.role = VariableRole::Label;
+                }
+            }
+            apply_row_labels(&mut mv.row_titles, tab);
+        }
+        _ => {}
+    }
+}
+
+fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
+    let parsed: ExtractResultTabParams = parse_params(&extract_result_tab_schema(), params)?;
+    let res_id = parse_sheet_id(&parsed.result_sheet_id)?;
+
+    let (res, tab) = {
+        let doc = &ctx.session.doc;
+        let res = require_result_sheet(doc, &res_id)?;
+        let tab = select_result_tab(res, parsed.tab_id.as_deref())?;
+        (res.clone(), tab.clone())
+    };
+
+    if tab.rows.is_empty() {
+        return Err(EngineError::with_code(ErrorCode::Conflict, format!("result tab `{}` on `{res_id}` has no rows to extract", tab.id))
+            .with_remediation("Select a tabular ResultTab with at least one data row."));
+    }
+
+    let row_count = tab.rows.len();
+    let col_count = tab.rows.iter().map(Vec::len).max().unwrap_or(0).max(tab.column_headers.len()).max(1);
+    let target_kind = resolve_extracted_table_kind(&tab, parsed.archetype.as_deref())?;
+
+    let target_id = allocate_new_sheet_id(&ctx.session.doc, parsed.sheet_id.as_deref(), "data")?;
+    let title = match parsed.title.as_deref() {
+        Some(t) => {
+            validate_title(t)?;
+            t.to_owned()
+        }
+        None => clip_safe_title(&format!("{} - {}", res.title(), tab.title)),
+    };
+
+    let archetype = match target_kind {
+        TableKind::Column => TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, col_count, row_count)?),
+        TableKind::Grouped => TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(1), col_count, row_count)?),
+        TableKind::MultipleVariables => TableArchetype::MultipleVariables(MultipleVariablesTable::new(col_count, row_count)?),
+        other => {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unsupported target archetype `{other:?}` for `sheet.extractResultTab`"),
+            ));
+        }
+    };
+
+    let mut sheet = DataSheet::new(target_id.clone(), title.clone(), archetype)?;
+    let link_kind = if res.analyzable_data.is_some() { InternalLinkKind::AnalyzableResultSheet } else { InternalLinkKind::TerminalResultSheet };
+    let link_spec = ImportLinkSpec {
+        source: LinkSource::InternalSheet {
+            sheet_id: res_id.clone(),
+            kind: link_kind,
+            tab_id: Some(tab.id.clone()),
+            range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1_000_000, col_count.saturating_sub(1), 0)),
+        },
+        filter: ImportFilterSpec { parse_asterisk_exclusions: false, ..ImportFilterSpec::default() },
+        placement: ImportPlacementSpec {
+            mode: PlacementMode::Overwrite,
+            anchor: CellCoord::new(0, 0, 0),
+            propagate_title_header: false,
+            skip_contiguous_blanks: false,
+            transpose: false,
+        },
+    };
+    let opts = ImportPipelineOptions {
+        link_id: Some(format!("result-tab-{}-{}", res_id.as_str(), target_id.as_str())),
+        provenance_summary: Some(format!("Linked tab `{}` from {}", tab.title, res_id)),
+        ..ImportPipelineOptions::default()
+    };
+    let report = apply_import_link_pipeline(&mut sheet, &link_spec, ImportSourcePayload::InternalResult(&res), &opts, None)?;
+    apply_tab_metadata_to_sheet(&mut sheet, &tab);
+
+    let mut reserved = HashSet::new();
+    reserved.insert(target_id.as_str().to_owned());
+    let new_graph = if parsed.auto_graph.unwrap_or(false) {
+        let gid = next_unique_id_with_reserved(&ctx.session.doc, "graph", &reserved)?;
+        Some(GraphSheet::new_uninitialized_for_data(gid, &sheet)?)
+    } else {
+        None
+    };
+    let graph_id = new_graph.as_ref().map(|g| g.id.as_str().to_owned());
+
+    ctx.session.doc.add_data_sheet(sheet)?;
+    if let Some(graph) = new_graph {
+        ctx.session.doc.add_graph_sheet(graph)?;
+    }
+    let _ = crate::dag::topological_order(&ctx.session.doc)?;
+
+    Ok(CommandOutcome::mutated(
+        "sheet.extractResultTab",
+        format!("extracted tab `{}` from `{res_id}` into `{target_id}`", tab.id),
+        json!({
+            "sheet_id": target_id.as_str(),
+            "title": title,
+            "result_sheet_id": res_id.as_str(),
+            "tab_id": tab.id,
+            "tab_title": tab.title,
+            "archetype": target_kind,
+            "rows_placed": report.rows_placed,
+            "cols_placed": report.cols_placed,
+            "graph_sheet_id": graph_id,
+        }),
+    ))
+}
+
+static SPECS: [CommandSpec; 11] = [
     CommandSpec {
         id: "sheet.createData",
         label: "New Data Table",
@@ -1788,6 +2005,19 @@ static SPECS: [CommandSpec; 10] = [
         input_schema: select_sheet_schema,
         enabled: always_enabled,
         run: run_sheet_select,
+    },
+    CommandSpec {
+        id: "sheet.extractResultTab",
+        label: "Extract Result Tab to Data Table",
+        menu_path: "Insert/Extract Result Tab...",
+        shortcut: "",
+        summary: "Create a reactive linked DataSheet from a ResultSheet sub-tab (such as PC scores, residuals, or cleaned data).",
+        beginner: "Copies a computed result table tab into a new linked data table so you can analyze or graph it.",
+        group: CommandGroup::Sheet,
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: extract_result_tab_schema,
+        enabled: has_result_sheet,
+        run: run_sheet_extract_result_tab,
     },
 ];
 
@@ -1955,5 +2185,120 @@ mod tests {
             TableArchetype::Grouped(grp) => assert_eq!(grp.subcolumn_mode, SubcolumnMode::UpperLowerLimits),
             other => panic!("expected Grouped table, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn extract_result_tab_and_analyzable_chaining_propagate_reactively() {
+        let mut session = Session::from_document(ProjectDocument::new("Chained Analysis").unwrap());
+        session
+            .execute(
+                "sheet.createData",
+                json!({
+                    "sheet_id": "xy-1",
+                    "kind": "xy",
+                    "cols": 1,
+                    "rows": 6,
+                    "x_title": "Dose",
+                    "title": "Raw Curves"
+                }),
+            )
+            .unwrap();
+        session.execute("table.setXCells", json!({ "sheet_id": "xy-1", "values": [1.0, 2.0, 3.0, 4.0, 5.0, 6.0] })).unwrap();
+        for (r, y) in [10.0, 22.0, 55.0, 88.0, 96.0, 99.0].iter().enumerate() {
+            session.execute("table.setCell", json!({ "sheet_id": "xy-1", "row": r, "col": 0, "value": y })).unwrap();
+        }
+
+        // Direct chaining on an analyzable Transform ResultSheet (`analyzable_data`):
+        session
+            .execute(
+                "transform.run",
+                json!({
+                    "sheet_id": "norm-1",
+                    "source_sheet_id": "xy-1",
+                    "kind": "normalize"
+                }),
+            )
+            .unwrap();
+        session
+            .execute(
+                "fit.run",
+                json!({
+                    "sheet_id": "norm-stats",
+                    "source_sheet_id": "norm-1",
+                    "kind": "linear_regression"
+                }),
+            )
+            .unwrap();
+        session
+            .execute(
+                "graph.create",
+                json!({
+                    "sheet_id": "g-norm",
+                    "data_sheet_id": "norm-1",
+                    "kind": "xy"
+                }),
+            )
+            .unwrap();
+        assert_eq!(session.document().result_sheet(&SheetId::new("norm-stats")).unwrap().status, ResultStatus::UpToDate);
+
+        // Chaining via `sheet.extractResultTab` on a non-analyzable nonlinear fit residuals tab:
+        session
+            .execute(
+                "fit.run",
+                json!({
+                    "sheet_id": "fit-1",
+                    "source_sheet_id": "xy-1",
+                    "kind": "nonlinear_regression",
+                    "emit_residuals_tab": true
+                }),
+            )
+            .unwrap();
+
+        let extracted = session
+            .execute(
+                "sheet.extractResultTab",
+                json!({
+                    "result_sheet_id": "fit-1",
+                    "tab_id": "nonlinear_residuals",
+                    "sheet_id": "res-data",
+                    "archetype": "column",
+                    "auto_graph": true
+                }),
+            )
+            .unwrap();
+        assert_eq!(extracted.payload["sheet_id"], json!("res-data"));
+        assert_eq!(extracted.payload["tab_id"], json!("nonlinear_residuals"));
+
+        let initial_cells = match &session.document().data_sheet(&SheetId::new("res-data")).unwrap().archetype {
+            TableArchetype::Column(col) => col.data_sets.iter().map(|ds| ds.cells.clone()).collect::<Vec<_>>(),
+            other => panic!("expected Column table, got {other:?}"),
+        };
+
+        session
+            .execute(
+                "stats.run",
+                json!({
+                    "sheet_id": "res-desc",
+                    "source_sheet_id": "res-data",
+                    "kind": "descriptive_stats"
+                }),
+            )
+            .unwrap();
+        assert_eq!(session.document().result_sheet(&SheetId::new("res-desc")).unwrap().status, ResultStatus::UpToDate);
+
+        let initial_desc_tabs = session.document().result_sheet(&SheetId::new("res-desc")).unwrap().tabs.clone();
+
+        // Edit upstream input cell: reactive DAG recomputes `fit-1` -> refreshes `res-data` -> recomputes `res-desc`.
+        let set_out = session.execute("table.setCell", json!({ "sheet_id": "xy-1", "row": 0, "col": 0, "value": 25.0 })).unwrap();
+        assert!(set_out.payload["recalculated_sheets"].as_u64().unwrap() >= 3);
+
+        let updated_cells = match &session.document().data_sheet(&SheetId::new("res-data")).unwrap().archetype {
+            TableArchetype::Column(col) => col.data_sets.iter().map(|ds| ds.cells.clone()).collect::<Vec<_>>(),
+            other => panic!("expected Column table, got {other:?}"),
+        };
+        assert_ne!(initial_cells, updated_cells, "upstream cell edit must refresh extracted ResultTab DataSheet");
+        let updated_desc = session.document().result_sheet(&SheetId::new("res-desc")).unwrap();
+        assert_eq!(updated_desc.status, ResultStatus::UpToDate);
+        assert_ne!(initial_desc_tabs, updated_desc.tabs, "downstream analysis on extracted DataSheet must recompute");
     }
 }

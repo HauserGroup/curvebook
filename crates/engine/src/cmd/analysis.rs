@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::export::{de_opt_usize, write_atomic_output_file};
-use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_data_sheet, require_result_sheet};
+use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_analyzable_data_sheet, require_result_sheet};
 use super::params::{
     any_json_schema, array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema_with_aliases, parse_params,
     str_schema,
@@ -195,7 +195,7 @@ fn always_enabled(_session: &Session) -> bool {
 }
 
 fn has_data_sheet(session: &Session) -> bool {
-    !session.document().data_sheets.is_empty()
+    !session.document().data_sheets.is_empty() || session.document().result_sheets.iter().any(|r| r.analyzable_data.is_some())
 }
 
 fn has_result_sheet(session: &Session) -> bool {
@@ -699,7 +699,7 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let doc = &mut ctx.session.doc;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let mut updated = require_result_sheet(doc, &id)?.analysis.clone();
-    let source_kind = require_data_sheet(doc, &updated.source_sheet_id)?.kind();
+    let source_kind = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?.kind();
 
     let combined = update_params_to_value(&parsed);
     apply_metadata_updates(
@@ -778,7 +778,7 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let doc = &mut ctx.session.doc;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let new_source = parse_sheet_id(&parsed.source_sheet_id)?;
-    let new_table_kind = require_data_sheet(doc, &new_source)?.kind();
+    let new_table_kind = require_analyzable_data_sheet(doc, &new_source)?.kind();
     let mut updated = require_result_sheet(doc, &id)?.analysis.clone();
 
     let next_selected = if parsed.clear_selected_data_sets == Some(true) {
@@ -933,7 +933,7 @@ fn try_raw_analysis_spec(
         let spec: AnalysisSpec = serde_json::from_value(spec_val.clone()).map_err(|err| {
             EngineError::with_code(ErrorCode::BadInput, format!("invalid `spec` object: {err}")).with_details(json!({ "pointer": "/spec" }))
         })?;
-        let table_kind = require_data_sheet(doc, &spec.source_sheet_id)?.kind();
+        let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
         validate_domain_and_compat(&spec.kind, domain, table_kind)?;
         return Ok(Some(spec));
     }
@@ -945,7 +945,7 @@ fn try_raw_analysis_spec(
         obj.insert(String::from("id"), Value::String(id_str.to_owned()));
         obj.insert(String::from("source_sheet_id"), Value::String(src_str.to_owned()));
         if let Ok(spec) = serde_json::from_value::<AnalysisSpec>(Value::Object(obj)) {
-            let table_kind = require_data_sheet(doc, &spec.source_sheet_id)?.kind();
+            let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
             validate_domain_and_compat(&spec.kind, domain, table_kind)?;
             return Ok(Some(spec));
         }
@@ -969,7 +969,7 @@ fn build_analysis_spec(
             .with_details(json!({ "pointer": "/source_sheet_id" }))
     })?;
     let source_sheet_id = parse_sheet_id(raw_source)?;
-    let table_kind = require_data_sheet(doc, &source_sheet_id)?.kind();
+    let table_kind = require_analyzable_data_sheet(doc, &source_sheet_id)?.kind();
     let id = match parsed.sheet_id.as_deref() {
         Some(raw) => parse_sheet_id(raw)?,
         None => next_unique_sheet_id(doc, domain_prefix(domain))?,
@@ -993,7 +993,7 @@ fn build_analysis_spec(
 }
 
 fn default_multivariate_numeric_columns(doc: &ProjectDocument, sheet_id: &SheetId) -> Vec<usize> {
-    let Some(sheet) = doc.data_sheet(sheet_id) else {
+    let Ok(sheet) = require_analyzable_data_sheet(doc, sheet_id) else {
         return Vec::new();
     };
     let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
