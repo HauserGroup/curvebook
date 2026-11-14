@@ -20,7 +20,7 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 4 | `S03` Curve fitting and equation language | `crates/fit` | done | 3/6/3/0 | 12/0/0/0 | 2026-11-14 |
 | 5 | `S04` Transforms | `crates/transform` | done | 4/5/4/0 | 13/0/0/0 | 2026-11-14 |
 | 6 | `S06` File formats and import | `crates/format` | done | 1/4/9/0 | 12/2/0/0 | 2026-11-14 |
-| 7 | `S08` Chart compiler and scales | `crates/chart` | reviewing | 2/6/3/0 | — | 2026-11-14 |
+| 7 | `S08` Chart compiler and scales | `crates/chart` | verifying | 2/6/3/0 | — | 2026-11-14 |
 | 8 | `S09` Text, raster, SVG and PDF output | `crates/text`, `crates/render`, `crates/svg`, `crates/pdf` | verifying | 1/3/6/0 | — | 2026-11-14 |
 | 9 | `S11` Tools and app entry points | `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` | done | 1/5/6/1 | 12/1/0/0 | 2026-11-14 |
 | 10 | `S07` Engine | `crates/engine` | reviewing | — | — | 2026-11-14 |
@@ -56,6 +56,8 @@ What each review actually read, so a later session can see what was and was not 
 - **R1-S11-01 spot check (trace-only S1).** Confirmed by the coordinator: the only non-test callers of the journal write path are the engine wrappers in `crates/engine/src/lib.rs:162`–`:237`; their one caller in `apps/lumencraft/src/main.rs:574` sits inside `mod tests` (`:448`). The desktop app never records a command.
 - **Rate-limit interruption (2026-11-14).** Reviewers for S07, S08, S09 and S11 were interrupted with no output and rerun from scratch; S03's reviewer was interrupted after writing a complete findings file, which was kept.
 - **Unrelated edits in the main checkout.** While this audit ran, another session left uncommitted feature edits (`QOL-5`, `QOL-8`, CLI, engine) in the main checkout's working tree on this branch. Audit commits stage only `docs/audit/`; reviewers read code only from the base worktree.
+
+- **`main` moved past the base during the audit.** After `a993740`, ten commits landed on `main` (`7b5bafa`..`47704e8`, 214 files, including "stats/fit remediation" and "Koopman/pharma parity"). The audit stays at `ebcc622`. Verdict lines reading "Still present on main: yes (main == base)" were true when written; re-check each finding against current `main` before fixing it, since some may already be fixed or moved. Audit bookkeeping moved to its own worktree on branch `audit/r1-local-2` so it no longer shares the main checkout.
 
 ## Confirmed and plausible findings
 
