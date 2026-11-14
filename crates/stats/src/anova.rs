@@ -4,9 +4,9 @@
 //! noncentral-*F* confidence intervals.
 
 use lumencraft_doc::{
-    AnalysisSpec, ChecklistStatus, DataSheet, FactorialAnovaSpec, MultiplicityMethod, MultiplicitySpec, NestedAnalysisSpec, OneWayAnovaSpec,
-    OneWayMethod, PValueFormat, PairwiseComparisonRecord, RepeatedMeasuresDesign, ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode,
-    SumOfSquaresType, TableArchetype,
+    AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, FactorialAnovaSpec, MultiplicityMethod, MultiplicitySpec, NestedAnalysisSpec,
+    OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, RemediationKind, RepeatedMeasuresDesign, ResultCell, ResultSheet,
+    ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{chi2_sf, f_sf, noncentral_f_ci, student_t_two_sided_p};
@@ -14,9 +14,10 @@ use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares,
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
 
+use crate::column::shapiro_wilk;
 use crate::common::{
-    build_tab, checklist_item, extract_numeric_columns, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar,
-    quantile_type6_sorted, rank_with_ties, resolve_selected_indices, sorted_finite, validate_finite_slice,
+    build_tab, checklist_item, checklist_item_with_remediation, extract_numeric_columns, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell,
+    p_cell, push_scalar, quantile_type6_sorted, rank_with_ties, resolve_selected_indices, sorted_finite, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{
@@ -1635,7 +1636,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
 
             out.tabs.push(build_one_way_tab(&res, anova_spec.compute_effect_sizes, confidence, p_fmt));
             append_one_way_multiplicity(&mut out, &group_inputs, res.ms_within, res.df_within, &anova_spec.multiplicity, p_fmt, confidence)?;
-            append_one_way_checklist(&mut out, &res, &group_inputs);
+            append_one_way_checklist(&mut out, &res, &group_inputs, &raw_slices_owned, false, confidence.alpha());
         }
         OneWayMethod::BrownForsytheAndWelch => {
             let base = if let Some(r) = raw_res_opt { r } else { ordinary_one_way_from_summary(&group_inputs, confidence)? };
@@ -1673,7 +1674,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                 anova_spec.multiplicity.report_confidence_intervals,
             )?;
             push_pairwise_outputs(&mut out, &details, "Multiple comparisons (Games-Howell / T2 / T3)", p_fmt, confidence);
-            append_one_way_checklist(&mut out, &base, &group_inputs);
+            append_one_way_checklist(&mut out, &base, &group_inputs, &raw_slices_owned, true, confidence.alpha());
         }
         OneWayMethod::KruskalWallis => {
             if raw_slices_owned.is_empty() {
@@ -1828,7 +1829,8 @@ fn run_rm_one_way_anova_sheet(
             append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, &anova_spec.multiplicity, p_fmt, confidence)?;
 
             let sph_status = if rm.sphericity.greenhouse_geisser_eps < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
-            out.checklist.push(checklist_item(
+            let sph_remediation = if sph_status == ChecklistStatus::Warn && !geisser_greenhouse { Some(RemediationKind::Friedman) } else { None };
+            out.checklist.push(checklist_item_with_remediation(
                 "Sphericity (Mauchly / Greenhouse-Geisser)",
                 sph_status,
                 Some(format!(
@@ -1840,7 +1842,17 @@ fn run_rm_one_way_anova_sheet(
                 } else {
                     "Consider enabling Geisser-Greenhouse correction if epsilon_GG < 0.75."
                 },
+                sph_remediation,
             ));
+            let condition_slices: Vec<Vec<f64>> = (0..indices.len()).map(|pos| blocks.iter().map(|b| b[pos]).collect()).collect();
+            append_group_normality_checklist(
+                &mut out.checklist,
+                &condition_slices,
+                confidence.alpha(),
+                RemediationKind::Friedman,
+                "Repeated-measures condition normality (Shapiro-Wilk)",
+                "Friedman test",
+            );
         }
         OneWayMethod::Friedman => {
             let fr = friedman_test(&blocks)?;
@@ -2010,18 +2022,66 @@ fn push_pairwise_outputs(out: &mut ResultSheet, details: &[PairwiseComparisonDet
     }
 }
 
-fn append_one_way_checklist(out: &mut ResultSheet, res: &OneWayAnovaResult, inputs: &[GroupComparisonInput]) {
+fn append_group_normality_checklist(
+    checklist: &mut Vec<ChecklistItem>,
+    raw_slices: &[Vec<f64>],
+    alpha: f64,
+    remediation_on_fail: RemediationKind,
+    assumption: &str,
+    alt_label: &str,
+) {
+    let worst = raw_slices.iter().filter_map(|s| shapiro_wilk(s, alpha).ok()).min_by(|a, b| a.p_value.total_cmp(&b.p_value));
+    if let Some(sw) = worst {
+        let violated = !sw.passed;
+        checklist.push(checklist_item_with_remediation(
+            assumption,
+            if violated { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
+            Some(format!("min Shapiro-Wilk W = {:.4}, p = {:.4}", sw.statistic, sw.p_value)),
+            if violated {
+                format!("At least one group departs significantly from Gaussian normality; {alt_label} is recommended.")
+            } else {
+                String::from("Group distributions do not depart significantly from Gaussian normality.")
+            },
+            violated.then_some(remediation_on_fail),
+        ));
+    }
+}
+
+fn append_one_way_checklist(
+    out: &mut ResultSheet,
+    res: &OneWayAnovaResult,
+    inputs: &[GroupComparisonInput],
+    raw_slices: &[Vec<f64>],
+    is_welch: bool,
+    alpha: f64,
+) {
     let equal_var_ok = res.variance_tests.brown_forsythe_p >= 0.05;
-    out.checklist.push(checklist_item(
+    let (var_status, var_explanation, var_remediation) = if equal_var_ok {
+        (ChecklistStatus::Pass, "Group variances do not differ significantly; ordinary pooled-variance ANOVA is appropriate.", None)
+    } else if is_welch {
+        (ChecklistStatus::Info, "Variances appear unequal (P < 0.05); Brown-Forsythe & Welch ANOVA does not assume equal variances.", None)
+    } else {
+        (
+            ChecklistStatus::Warn,
+            "Variances appear unequal (P < 0.05); consider Brown-Forsythe & Welch ANOVA with Games-Howell or Dunnett T3 post-hoc tests.",
+            Some(RemediationKind::WelchAnova),
+        )
+    };
+    out.checklist.push(checklist_item_with_remediation(
         "Homogeneity of variances (Brown-Forsythe)",
-        if equal_var_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+        var_status,
         Some(format!("F = {:.3}, P = {:.4}", res.variance_tests.brown_forsythe_f, res.variance_tests.brown_forsythe_p)),
-        if equal_var_ok {
-            "Group variances do not differ significantly; ordinary pooled-variance ANOVA is appropriate."
-        } else {
-            "Variances appear unequal (P < 0.05); consider Brown-Forsythe & Welch ANOVA with Games-Howell or Dunnett T3 post-hoc tests."
-        },
+        var_explanation,
+        var_remediation,
     ));
+    append_group_normality_checklist(
+        &mut out.checklist,
+        raw_slices,
+        alpha,
+        RemediationKind::KruskalWallis,
+        "Group normality (Shapiro-Wilk)",
+        "Kruskal-Wallis test",
+    );
     let min_n = inputs.iter().map(|g| g.n as usize).min().unwrap_or(0);
     out.checklist.push(checklist_item(
         "Group sample size",

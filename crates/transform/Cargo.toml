@@ -3,6 +3,7 @@ name = "lumencraft-transform"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish.workspace = true
 description = "LumenCraft data transformations, normalization, baseline subtraction and simulation"
 
 [lints]

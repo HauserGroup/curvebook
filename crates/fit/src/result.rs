@@ -97,6 +97,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
             } else {
                 "No significant systematic departure from linearity detected.".to_owned()
             },
+            remediation: None,
         });
         if let Some(lof) = &fit.lack_of_fit {
             result.checklist.push(ChecklistItem {
@@ -108,6 +109,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
                 } else {
                     "Model agrees with replicate variation.".to_owned()
                 },
+                remediation: None,
             });
         }
         fits.push((ds.data_set_index, ds.label.clone(), fit));
@@ -476,6 +478,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             status: ChecklistStatus::Violated,
             diagnostic_metric: Some("Dependency > 0.9999 or rank-deficient Jacobian".to_owned()),
             explanation: "Fit is ambiguous; one or more parameters are redundant or unidentifiable.".to_owned(),
+            remediation: None,
         });
     } else if fit.parameters.iter().any(|p| p.dependency > 0.99) {
         result.checklist.push(ChecklistItem {
@@ -483,6 +486,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             status: ChecklistStatus::Warn,
             diagnostic_metric: Some("Dependency > 0.99".to_owned()),
             explanation: "Strong correlation among parameters may widen confidence intervals.".to_owned(),
+            remediation: None,
         });
     } else {
         result.checklist.push(ChecklistItem {
@@ -490,6 +494,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             status: ChecklistStatus::Pass,
             diagnostic_metric: None,
             explanation: "All free parameters are cleanly identifiable.".to_owned(),
+            remediation: None,
         });
     }
 
@@ -501,6 +506,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             status: ChecklistStatus::Warn,
             diagnostic_metric: Some(format!("max |g1| = {max_g1:.3}")),
             explanation: "Strong parameter nonlinearity; profile-likelihood CIs are strongly recommended over symmetric CIs.".to_owned(),
+            remediation: None,
         });
     }
 
@@ -514,6 +520,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             } else {
                 "Residuals do not systematically deviate from the fitted curve.".to_owned()
             },
+            remediation: None,
         });
     }
 
@@ -527,6 +534,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             } else {
                 "Residuals depart significantly from Gaussian normality.".to_owned()
             },
+            remediation: None,
         });
     }
 
@@ -540,6 +548,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             } else {
                 "Residual magnitude varies systematically with fitted response (heteroscedasticity); consider weighted regression.".to_owned()
             },
+            remediation: None,
         });
     }
 
@@ -553,6 +562,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             } else {
                 "Model fits within pure replicate error.".to_owned()
             },
+            remediation: None,
         });
     }
 
@@ -567,6 +577,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
                 rout.outlier_indices.len()
             )),
             explanation: format!("{} outlier(s) identified and excluded before ordinary least-squares refit.", rout.outlier_indices.len()),
+            remediation: None,
         });
     }
 }

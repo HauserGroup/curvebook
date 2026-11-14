@@ -986,8 +986,8 @@ pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: Confidenc
 
 /// Koopman (1984) asymptotic score confidence interval for relative risk `RR = (a/n1) / (c/n2)`.
 pub fn koopman_rr_ci(a: u64, b: u64, c: u64, d: u64, confidence: ConfidenceLevel) -> Option<(f64, f64)> {
-    let n1 = (a + b) as f64;
-    let n2 = (c + d) as f64;
+    let n1 = (u128::from(a) + u128::from(b)) as f64;
+    let n2 = (u128::from(c) + u128::from(d)) as f64;
     if n1 <= 0.0 || n2 <= 0.0 || (a == 0 && c == 0) {
         return None;
     }
@@ -999,17 +999,17 @@ pub fn koopman_rr_ci(a: u64, b: u64, c: u64, d: u64, confidence: ConfidenceLevel
     let lo = if a == 0 {
         0.0
     } else if c == 0 {
-        koopman_solve_lower_c_zero(&score)
+        koopman_solve_lower_c_zero(&score)?
     } else {
-        koopman_solve_lower(&score, rr_pt)
+        koopman_solve_lower(&score, rr_pt)?
     };
 
     let hi = if c == 0 {
         f64::INFINITY
     } else if a == 0 {
-        koopman_solve_upper_a_zero(&score)
+        koopman_solve_upper_a_zero(&score)?
     } else {
-        koopman_solve_upper(&score, rr_pt)
+        koopman_solve_upper(&score, rr_pt)?
     };
 
     Some((lo, hi))
@@ -1021,8 +1021,8 @@ fn koopman_chi2_score(a: u64, b: u64, c: u64, d: u64, z2: f64, phi: f64) -> f64 
     }
     let x1 = a as f64;
     let x2 = c as f64;
-    let n1 = (a + b) as f64;
-    let n2 = (c + d) as f64;
+    let n1 = (u128::from(a) + u128::from(b)) as f64;
+    let n2 = (u128::from(c) + u128::from(d)) as f64;
     let aq = n1 + n2;
     let abs_b = phi * (n1 + x2) + (x1 + n2); // = -b_q > 0
     let cq = phi * (x1 + x2);
@@ -1052,68 +1052,83 @@ fn koopman_cell_term(events: u64, non_events: u64, n: f64, x: f64, p_raw: f64) -
     }
 }
 
-fn koopman_solve_lower<F: Fn(f64) -> f64>(score: &F, rr_pt: f64) -> f64 {
-    let mut hi_neg = rr_pt;
-    let mut lo_pos = rr_pt * 0.5;
-    for _ in 0..120 {
-        if score(lo_pos) > 0.0 {
-            break;
+const KOOPMAN_BRACKET_STEPS: usize = 120;
+const KOOPMAN_ROOT_OPTIONS: RootOptions = RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 };
+
+fn koopman_find_negative_score_point<F: Fn(f64) -> f64>(score: &F, scale: f64) -> Option<(f64, f64)> {
+    let mut pt = 1.0_f64;
+    for _ in 0..KOOPMAN_BRACKET_STEPS {
+        if !pt.is_finite() || pt <= 0.0 {
+            return None;
         }
-        hi_neg = lo_pos;
-        lo_pos *= 0.5;
+        let val = score(pt);
+        if !val.is_finite() {
+            return None;
+        }
+        if val <= 0.0 {
+            return Some((pt, val));
+        }
+        pt *= scale;
     }
-    brent_root(score, lo_pos, hi_neg, RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 }).unwrap_or(lo_pos)
+    None
 }
 
-fn koopman_solve_upper<F: Fn(f64) -> f64>(score: &F, rr_pt: f64) -> f64 {
-    let mut lo_neg = rr_pt;
-    let mut hi_pos = rr_pt * 2.0;
-    for _ in 0..120 {
-        if score(hi_pos) > 0.0 {
-            break;
-        }
-        lo_neg = hi_pos;
-        hi_pos *= 2.0;
+fn koopman_bracket_and_solve<F: Fn(f64) -> f64>(score: &F, neg_start: f64, s_neg_start: f64, scale: f64, lower_branch: bool) -> Option<f64> {
+    if !neg_start.is_finite() || neg_start <= 0.0 || !s_neg_start.is_finite() || s_neg_start > 0.0 {
+        return None;
     }
-    brent_root(score, lo_neg, hi_pos, RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 }).unwrap_or(hi_pos)
-}
-
-fn koopman_solve_lower_c_zero<F: Fn(f64) -> f64>(score: &F) -> f64 {
-    let mut neg_pt = 1.0_f64;
-    for _ in 0..120 {
-        if score(neg_pt) < 0.0 {
-            break;
-        }
-        neg_pt *= 2.0;
+    if s_neg_start == 0.0 {
+        return Some(neg_start);
     }
-    let mut pos_pt = neg_pt * 0.5;
-    for _ in 0..120 {
-        if score(pos_pt) > 0.0 {
+    let mut neg_pt = neg_start;
+    let mut pos_pt = neg_start * scale;
+    let mut bracketed = false;
+    for _ in 0..KOOPMAN_BRACKET_STEPS {
+        if !pos_pt.is_finite() || pos_pt <= 0.0 {
+            return None;
+        }
+        let s_pos = score(pos_pt);
+        if !s_pos.is_finite() {
+            return None;
+        }
+        if s_pos >= 0.0 {
+            bracketed = true;
             break;
         }
         neg_pt = pos_pt;
-        pos_pt *= 0.5;
+        pos_pt *= scale;
     }
-    brent_root(score, pos_pt, neg_pt, RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 }).unwrap_or(pos_pt)
+    if !bracketed {
+        return None;
+    }
+    let (lo, hi) = if lower_branch { (pos_pt, neg_pt) } else { (neg_pt, pos_pt) };
+    brent_root(score, lo, hi, KOOPMAN_ROOT_OPTIONS).ok()
 }
 
-fn koopman_solve_upper_a_zero<F: Fn(f64) -> f64>(score: &F) -> f64 {
-    let mut neg_pt = 1.0_f64;
-    for _ in 0..120 {
-        if score(neg_pt) < 0.0 {
-            break;
-        }
-        neg_pt *= 0.5;
+fn koopman_solve_lower<F: Fn(f64) -> f64>(score: &F, rr_pt: f64) -> Option<f64> {
+    if !rr_pt.is_finite() || rr_pt <= 0.0 {
+        return None;
     }
-    let mut pos_pt = neg_pt * 2.0;
-    for _ in 0..120 {
-        if score(pos_pt) > 0.0 {
-            break;
-        }
-        neg_pt = pos_pt;
-        pos_pt *= 2.0;
+    let s_neg = score(rr_pt);
+    koopman_bracket_and_solve(score, rr_pt, s_neg, 0.5, true)
+}
+
+fn koopman_solve_upper<F: Fn(f64) -> f64>(score: &F, rr_pt: f64) -> Option<f64> {
+    if !rr_pt.is_finite() || rr_pt <= 0.0 {
+        return None;
     }
-    brent_root(score, neg_pt, pos_pt, RootOptions { rel_tol: 1e-10, abs_tol: 1e-30, max_iters: 128 }).unwrap_or(pos_pt)
+    let s_neg = score(rr_pt);
+    koopman_bracket_and_solve(score, rr_pt, s_neg, 2.0, false)
+}
+
+fn koopman_solve_lower_c_zero<F: Fn(f64) -> f64>(score: &F) -> Option<f64> {
+    let (neg_pt, s_neg) = koopman_find_negative_score_point(score, 2.0)?;
+    koopman_bracket_and_solve(score, neg_pt, s_neg, 0.5, true)
+}
+
+fn koopman_solve_upper_a_zero<F: Fn(f64) -> f64>(score: &F) -> Option<f64> {
+    let (neg_pt, s_neg) = koopman_find_negative_score_point(score, 0.5)?;
+    koopman_bracket_and_solve(score, neg_pt, s_neg, 2.0, false)
 }
 
 /// Compute complete `2 x 2` risk/odds ratios (`[[a, b], [c, d]]`), Baptista-Pike OR CI, Koopman
@@ -1504,7 +1519,9 @@ mod tests {
     use lumencraft_math::ConfidenceLevel;
     use lumencraft_math::dist::norm_two_sided_isf;
 
-    use super::{koopman_chi2_score, koopman_rr_ci};
+    use super::{
+        koopman_chi2_score, koopman_rr_ci, koopman_solve_lower, koopman_solve_lower_c_zero, koopman_solve_upper, koopman_solve_upper_a_zero,
+    };
 
     #[test]
     fn koopman_extreme_boundary_cases_bracket_and_solve_score_to_zero() {
@@ -1564,5 +1581,143 @@ mod tests {
         let (lo_sep, hi_sep) = koopman_rr_ci(10, 0, 0, 10, conf).unwrap();
         assert!((lo_sep - (1.0 + 10.0 / z2)).abs() < 1e-9);
         assert!(hi_sep.is_infinite());
+    }
+
+    #[test]
+    fn koopman_published_reference_and_zero_cell_values() {
+        let conf_95 = ConfidenceLevel::DEFAULT_95;
+        let conf_99 = ConfidenceLevel::PERCENT_99;
+        let conf_9999 = ConfidenceLevel::from_percent(99.99).unwrap();
+
+        // Koopman (1984), Biometrics 40:513-517, p. 516 example: x1=36/40, x2=16/80 (RR = 4.5).
+        let (lo_36_95, hi_36_95) = koopman_rr_ci(36, 4, 16, 64, conf_95).unwrap();
+        assert!((lo_36_95 - 2.939_569_192_214_994).abs() < 1e-9, "lo={lo_36_95}");
+        assert!((hi_36_95 - 7.152_223_434_866_03).abs() < 1e-9, "hi={hi_36_95}");
+
+        let (lo_36_99, hi_36_99) = koopman_rr_ci(36, 4, 16, 64, conf_99).unwrap();
+        assert!((lo_36_99 - 2.598_049_751_056_122).abs() < 1e-9, "lo99={lo_36_99}");
+        assert!((hi_36_99 - 8.284_221_357_270_2).abs() < 1e-9, "hi99={hi_36_99}");
+
+        let (lo_16, hi_16) = koopman_rr_ci(16, 4, 2, 18, conf_95).unwrap();
+        assert!((lo_16 - 2.565_778_683_398_19).abs() < 1e-9, "lo16={lo_16}");
+        assert!((hi_16 - 29.093_901_260_350_407).abs() < 1e-8, "hi16={hi_16}");
+
+        // Zero-cell edge cases: a = 0 gives [0, upper], c = 0 gives [lower, +inf), symmetric under group swap.
+        let a_zero_cases =
+            [(0_u64, 10_u64, 5_u64, 5_u64, 0.612_860_577_425_767), (0, 15, 4, 11, 0.841_877_258_244_93), (0, 10, 10, 0, 0.277_532_799_862_889)];
+        for (a, b, c, d, expected_hi) in a_zero_cases {
+            let (lo, hi) = koopman_rr_ci(a, b, c, d, conf_95).unwrap();
+            assert_eq!(lo, 0.0);
+            assert!((hi - expected_hi).abs() < 1e-9, "a=0 hi={hi} expected={expected_hi}");
+
+            let (swap_lo, swap_hi) = koopman_rr_ci(c, d, a, b, conf_95).unwrap();
+            assert!((swap_lo - 1.0 / expected_hi).abs() < 1e-9, "swap_lo={swap_lo} expected={}", 1.0 / expected_hi);
+            assert!(swap_hi.is_infinite());
+        }
+
+        let (lo_9999, hi_9999) = koopman_rr_ci(0, 10, 10, 0, conf_9999).unwrap();
+        assert_eq!(lo_9999, 0.0);
+        assert!((hi_9999 - 0.756_835_261_331_17).abs() < 1e-9, "hi9999={hi_9999}");
+
+        let (lo_c0_a, hi_c0_a) = koopman_rr_ci(5, 5, 0, 10, conf_95).unwrap();
+        assert!((lo_c0_a - 1.631_692_487_384_906).abs() < 1e-9);
+        assert!(hi_c0_a.is_infinite());
+
+        let (lo_c0_b, hi_c0_b) = koopman_rr_ci(9, 1, 0, 10, conf_95).unwrap();
+        assert!((lo_c0_b - 3.186_579_700_647_302).abs() < 1e-9);
+        assert!(hi_c0_b.is_infinite());
+    }
+
+    #[test]
+    fn koopman_solvers_return_none_on_non_bracketing_scores() {
+        assert!((koopman_solve_lower(&|phi| 0.5 - phi, 1.0).unwrap() - 0.5).abs() < 1e-9);
+        assert!((koopman_solve_upper(&|phi| phi - 2.5, 1.0).unwrap() - 2.5).abs() < 1e-9);
+        assert!((koopman_solve_lower_c_zero(&|phi| 0.25 - phi).unwrap() - 0.25).abs() < 1e-9);
+        assert!((koopman_solve_upper_a_zero(&|phi| phi - 4.0).unwrap() - 4.0).abs() < 1e-9);
+
+        for rr_bad in [0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(koopman_solve_lower(&|phi| 0.5 - phi, rr_bad).is_none());
+            assert!(koopman_solve_upper(&|phi| phi - 2.5, rr_bad).is_none());
+        }
+
+        let always_neg = |_: f64| -1.0;
+        let always_pos = |_: f64| 1.0;
+        let unreachable_lo = |phi: f64| if phi < 1e-45 { 1.0 } else { -1.0 };
+        let unreachable_hi = |phi: f64| if phi > 1e45 { 1.0 } else { -1.0 };
+
+        assert!(koopman_solve_lower(&always_neg, 1.0).is_none());
+        assert!(koopman_solve_lower(&always_pos, 1.0).is_none());
+        assert!(koopman_solve_lower(&unreachable_lo, 1.0).is_none());
+
+        assert!(koopman_solve_upper(&always_neg, 1.0).is_none());
+        assert!(koopman_solve_upper(&always_pos, 1.0).is_none());
+        assert!(koopman_solve_upper(&unreachable_hi, 1.0).is_none());
+
+        assert!(koopman_solve_lower_c_zero(&always_neg).is_none());
+        assert!(koopman_solve_lower_c_zero(&always_pos).is_none());
+        assert!(koopman_solve_lower_c_zero(&unreachable_lo).is_none());
+
+        assert!(koopman_solve_upper_a_zero(&always_neg).is_none());
+        assert!(koopman_solve_upper_a_zero(&always_pos).is_none());
+        assert!(koopman_solve_upper_a_zero(&unreachable_hi).is_none());
+    }
+
+    #[test]
+    fn koopman_solvers_return_none_on_non_finite_and_non_convergent_scores() {
+        let lower_nan_mid = |phi: f64| {
+            if phi < 0.4 {
+                1.0
+            } else if phi < 0.6 {
+                f64::NAN
+            } else {
+                -1.0
+            }
+        };
+        let upper_neginf_mid = |phi: f64| {
+            if phi > 3.0 {
+                1.0
+            } else if phi > 1.5 {
+                f64::NEG_INFINITY
+            } else {
+                -1.0
+            }
+        };
+        let nan_inside_lo_bracket = |phi: f64| {
+            if phi <= 0.5 {
+                1.0
+            } else if phi >= 1.0 {
+                -1.0
+            } else {
+                f64::NAN
+            }
+        };
+        let nan_inside_hi_bracket = |phi: f64| {
+            if phi <= 1.0 {
+                -1.0
+            } else if phi >= 2.0 {
+                1.0
+            } else {
+                f64::NAN
+            }
+        };
+
+        assert!(koopman_solve_lower(&|_| f64::NAN, 1.0).is_none());
+        assert!(koopman_solve_lower(&|phi| if phi < 0.6 { f64::INFINITY } else { -1.0 }, 1.0).is_none());
+        assert!(koopman_solve_lower(&lower_nan_mid, 1.0).is_none());
+
+        assert!(koopman_solve_upper(&|_| f64::NAN, 1.0).is_none());
+        assert!(koopman_solve_upper(&|phi| if phi > 1.5 { f64::INFINITY } else { -1.0 }, 1.0).is_none());
+        assert!(koopman_solve_upper(&upper_neginf_mid, 1.0).is_none());
+
+        assert!(koopman_solve_lower_c_zero(&|phi| if phi >= 1.0 { f64::NAN } else { -1.0 }).is_none());
+        assert!(koopman_solve_lower_c_zero(&|phi| if phi <= 0.6 { f64::INFINITY } else { -1.0 }).is_none());
+
+        assert!(koopman_solve_upper_a_zero(&|phi| if phi <= 1.0 { f64::NAN } else { -1.0 }).is_none());
+        assert!(koopman_solve_upper_a_zero(&|phi| if phi >= 1.5 { f64::INFINITY } else { -1.0 }).is_none());
+
+        assert!(koopman_solve_lower(&nan_inside_lo_bracket, 1.0).is_none());
+        assert!(koopman_solve_upper(&nan_inside_hi_bracket, 1.0).is_none());
+        assert!(koopman_solve_lower_c_zero(&nan_inside_lo_bracket).is_none());
+        assert!(koopman_solve_upper_a_zero(&nan_inside_hi_bracket).is_none());
     }
 }

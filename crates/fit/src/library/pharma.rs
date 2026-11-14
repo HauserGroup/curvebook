@@ -35,7 +35,9 @@ pub const PHARMA_EQUATION_IDS: &[&str] = &[
     "one_site_specific_hill",
     "one_site_total_and_ns",
     "one_site_total_and_ns_global",
+    "two_site_total_and_ns_global",
     "one_site_specific_ligand_depletion",
+    "one_site_competition_ligand_depletion",
     "allosteric_modulator_saturation",
     "homologous_one_site_competition",
     "two_sites_specific_binding",
@@ -236,7 +238,13 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
             params: names(&["Bmax", "Kd", "NS", "Background"]),
         })),
         "one_site_total_and_ns_global" => Some(Box::new(OneSiteTotalAndNsGlobal { params: names(&["Bmax", "Kd", "NS", "Background"]) })),
+        "two_site_total_and_ns_global" => {
+            Some(Box::new(TwoSiteTotalAndNsGlobal { params: names(&["BmaxHi", "KdHi", "BmaxLo", "KdLo", "NS", "Background"]) }))
+        }
         "one_site_specific_ligand_depletion" => Some(Box::new(OneSiteSpecificLigandDepletion { params: names(&["Rt", "Kd", "NS"]) })),
+        "one_site_competition_ligand_depletion" => {
+            Some(Box::new(OneSiteCompetitionLigandDepletion { params: names(&["Rt", "HotNM", "KdNM", "LogKi", "NS"]) }))
+        }
         "allosteric_modulator_saturation" => {
             Some(Box::new(AllostericModulatorSaturation { params: names(&["Bmax", "Kd", "alpha", "Kb", "ModConc"]) }))
         }
@@ -1393,6 +1401,33 @@ impl ParametricModel for MorrisonKi {
     }
 }
 
+fn split_total_and_ns_datasets(points: &[DataPoint]) -> (Vec<DataPoint>, Vec<DataPoint>) {
+    let ds0 = points.iter().filter(|p| p.data_set_index == 0).cloned().collect();
+    let ds1 = points.iter().filter(|p| p.data_set_index >= 1).cloned().collect();
+    (ds0, ds1)
+}
+
+fn estimate_global_ns_and_bg(primary: &[DataPoint], ds1: &[DataPoint]) -> (f64, f64) {
+    let (ymin, ymax) = data_y_min_max(primary);
+    let (_, xmax) = data_x_min_max(primary);
+    if ds1.len() >= 2 {
+        let n = ds1.len() as f64;
+        let mx = ds1.iter().map(|p| p.x0()).sum::<f64>() / n;
+        let my = ds1.iter().map(|p| p.y).sum::<f64>() / n;
+        let mut sxx = 0.0_f64;
+        let mut sxy = 0.0_f64;
+        for p in ds1 {
+            let dx = p.x0() - mx;
+            sxx += dx * dx;
+            sxy += dx * (p.y - my);
+        }
+        let slope = if sxx > 1e-30 { (sxy / sxx).max(0.0) } else { 0.0 };
+        (slope, my - slope * mx)
+    } else {
+        (((ymax - ymin) / xmax.max(1e-12)) * 0.05, ymin)
+    }
+}
+
 /// Global one-site total and nonspecific binding (`dataset 0` = Total, `dataset >= 1` = Nonspecific).
 struct OneSiteTotalAndNsGlobal {
     params: Vec<String>,
@@ -1460,34 +1495,117 @@ impl ParametricModel for OneSiteTotalAndNsGlobal {
     }
 
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
-        let ds0: Vec<DataPoint> = points.iter().filter(|p| p.data_set_index == 0).cloned().collect();
-        let ds1: Vec<DataPoint> = points.iter().filter(|p| p.data_set_index >= 1).cloned().collect();
+        let (ds0, ds1) = split_total_and_ns_datasets(points);
         let primary = if ds0.is_empty() { points } else { &ds0 };
         let (ymin, ymax) = data_y_min_max(primary);
         let (_, xmax) = data_x_min_max(primary);
         let kd = estimate_x_at_ymid(primary).max(1e-6);
-        let (ns, bg) = if ds1.len() >= 2 {
-            let n = ds1.len() as f64;
-            let mx = ds1.iter().map(|p| p.x0()).sum::<f64>() / n;
-            let my = ds1.iter().map(|p| p.y).sum::<f64>() / n;
-            let mut sxx = 0.0_f64;
-            let mut sxy = 0.0_f64;
-            for p in &ds1 {
-                let dx = p.x0() - mx;
-                sxx += dx * dx;
-                sxy += dx * (p.y - my);
-            }
-            let slope = if sxx > 1e-30 { (sxy / sxx).max(0.0) } else { 0.0 };
-            (slope, my - slope * mx)
-        } else {
-            (((ymax - ymin) / xmax.max(1e-12)) * 0.05, ymin)
-        };
+        let (ns, bg) = estimate_global_ns_and_bg(primary, &ds1);
         let bmax = (ymax - bg - ns * xmax).max(ymax - ymin).max(1.0);
         vec![bmax, kd, ns, bg]
     }
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(Some(0.0), None), (Some(1e-12), None), (Some(0.0), None), (None, None)]
+    }
+}
+
+/// Global two-site total and nonspecific binding (`dataset 0` = Total, `dataset >= 1` = Nonspecific).
+struct TwoSiteTotalAndNsGlobal {
+    params: Vec<String>,
+}
+
+impl ParametricModel for TwoSiteTotalAndNsGlobal {
+    fn id(&self) -> &str {
+        "two_site_total_and_ns_global"
+    }
+
+    fn name(&self) -> &str {
+        "Two-site total and nonspecific binding (global)"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::ReceptorBinding
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        if !x0.is_finite() || x0 < 0.0 || params.len() < 6 || !params[..6].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let [bmax_hi, kd_hi, bmax_lo, kd_lo, ns, bg] = [params[0], params[1], params[2], params[3], params[4], params[5]];
+        if dataset_index == 0 {
+            if kd_hi <= 0.0 || kd_lo <= 0.0 {
+                return None;
+            }
+            let y = bmax_hi * x0 / (kd_hi + x0) + bmax_lo * x0 / (kd_lo + x0) + ns * x0 + bg;
+            y.is_finite().then_some(y)
+        } else {
+            let y = ns * x0 + bg;
+            y.is_finite().then_some(y)
+        }
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if !x0.is_finite() || x0 < 0.0 || params.len() < 6 || out.len() < 6 || !params[..6].iter().all(|v| v.is_finite()) {
+            return false;
+        }
+        if dataset_index == 0 {
+            let [bmax_hi, kd_hi, bmax_lo, kd_lo] = [params[0], params[1], params[2], params[3]];
+            if kd_hi <= 0.0 || kd_lo <= 0.0 {
+                return false;
+            }
+            let denom_hi = kd_hi + x0;
+            let denom_lo = kd_lo + x0;
+            out[0] = x0 / denom_hi;
+            out[1] = -bmax_hi * x0 / (denom_hi * denom_hi);
+            out[2] = x0 / denom_lo;
+            out[3] = -bmax_lo * x0 / (denom_lo * denom_lo);
+            out[4] = x0;
+            out[5] = 1.0;
+        } else {
+            out[0] = 0.0;
+            out[1] = 0.0;
+            out[2] = 0.0;
+            out[3] = 0.0;
+            out[4] = x0;
+            out[5] = 1.0;
+        }
+        out[..6].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (ds0, ds1) = split_total_and_ns_datasets(points);
+        let primary = if ds0.is_empty() { points } else { &ds0 };
+        let (ymin, ymax) = data_y_min_max(primary);
+        let (_, xmax) = data_x_min_max(primary);
+        let (ns, bg) = estimate_global_ns_and_bg(primary, &ds1);
+        let spec_pts: Vec<DataPoint> = primary
+            .iter()
+            .map(|p| {
+                let mut q = p.clone();
+                q.y = p.y - (ns * p.x0() + bg);
+                q
+            })
+            .collect();
+        let (_, spec_ymax) = data_y_min_max(&spec_pts);
+        let bmax_tot = spec_ymax.max(ymax - bg - ns * xmax).max(ymax - ymin).max(1.0);
+        let raw_kd = estimate_x_at_ymid(&spec_pts);
+        let kd_mid = if raw_kd.is_finite() && raw_kd > 0.0 { raw_kd } else { 0.2 * xmax.max(1e-9) };
+        let kd_hi = (0.2 * kd_mid).max(1e-12);
+        let kd_lo = (5.0 * kd_mid).max(1e-12);
+        vec![0.5 * bmax_tot, kd_hi, 0.5 * bmax_tot, kd_lo, ns, bg]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(0.0), None), (Some(1e-15), None), (Some(0.0), None), (Some(1e-15), None), (Some(0.0), None), (None, None)]
     }
 }
 
@@ -1576,6 +1694,200 @@ impl ParametricModel for OneSiteSpecificLigandDepletion {
 
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(Some(0.0), None), (Some(1e-12), None), (Some(0.0), None)]
+    }
+}
+
+struct CompetitionDepletionState {
+    r: f64,
+    kd_nm: f64,
+    ns: f64,
+    kd: f64,
+    hot_nm: f64,
+    ki: f64,
+    i_tot: f64,
+}
+
+#[inline]
+fn eval_competition_mass_balance(r: f64, rt: f64, hot_nm: f64, kd: f64, i_tot: f64, ki: f64) -> (f64, f64) {
+    let d_d = kd + r;
+    let d_i = ki + r;
+    let p_d = r / d_d;
+    let q_d = kd / d_d;
+    let p_i = r / d_i;
+    let q_i = ki / d_i;
+    let g = (r - rt) + p_d * hot_nm + p_i * i_tot;
+    let gp = 1.0 + (hot_nm / d_d) * q_d + (i_tot / d_i) * q_i;
+    (g, gp)
+}
+
+fn tighten_competition_bracket(rt: f64, hot_nm: f64, kd: f64, i_tot: f64, ki: f64) -> (f64, f64) {
+    let mut lo = 0.0_f64;
+    let mut hi = rt;
+    let inv_lo = 1.0 + hot_nm / kd + i_tot / ki;
+    if inv_lo.is_finite() && inv_lo > 0.0 {
+        let cand_lo = (rt / inv_lo).min(rt);
+        if cand_lo > 0.0 {
+            let (g_lo, _) = eval_competition_mass_balance(cand_lo, rt, hot_nm, kd, i_tot, ki);
+            if g_lo.is_finite() {
+                if g_lo <= 0.0 {
+                    lo = cand_lo;
+                } else {
+                    hi = cand_lo;
+                }
+            }
+        }
+    }
+    let inv_hi = 1.0 + hot_nm / (kd + rt) + i_tot / (ki + rt);
+    if inv_hi.is_finite() && inv_hi > 0.0 {
+        let cand_hi = (rt / inv_hi).clamp(lo, hi);
+        if cand_hi > lo && cand_hi < hi {
+            let (g_hi, _) = eval_competition_mass_balance(cand_hi, rt, hot_nm, kd, i_tot, ki);
+            if g_hi.is_finite() {
+                if g_hi >= 0.0 {
+                    hi = cand_hi;
+                } else {
+                    lo = cand_hi;
+                }
+            }
+        }
+    }
+    (lo, hi)
+}
+
+/// One-site competitive binding with depletion of both radioligand and unlabeled competitor (`X = log10[Competitor M]`).
+struct OneSiteCompetitionLigandDepletion {
+    params: Vec<String>,
+}
+
+impl OneSiteCompetitionLigandDepletion {
+    fn solve_free_receptor(x0: f64, params: &[f64]) -> Option<CompetitionDepletionState> {
+        if !x0.is_finite() || params.len() < 5 || !params[..5].iter().all(|v| v.is_finite()) {
+            return None;
+        }
+        let [rt, hot_nm, kd_nm, log_ki, ns] = [params[0], params[1], params[2], params[3], params[4]];
+        if rt < 0.0 || hot_nm < 0.0 || kd_nm <= 0.0 || ns < 0.0 {
+            return None;
+        }
+        let i_tot = safe_pow10(x0 + 9.0)?;
+        let ki = safe_pow10(log_ki + 9.0)?;
+        let kd = kd_nm * (1.0 + ns);
+        if !kd.is_finite() || kd <= 0.0 || ki <= 0.0 {
+            return None;
+        }
+        if rt == 0.0 {
+            return Some(CompetitionDepletionState { r: 0.0, kd_nm, ns, kd, hot_nm, ki, i_tot });
+        }
+        let (mut lo, mut hi) = tighten_competition_bracket(rt, hot_nm, kd, i_tot, ki);
+        let mut r = 0.5 * (lo + hi);
+        let mut prev_step = (hi - lo).max(0.0);
+        for _ in 0..64 {
+            if (hi - lo) <= 1e-14 * r.max(1e-300) {
+                break;
+            }
+            let (g, gp) = eval_competition_mass_balance(r, rt, hot_nm, kd, i_tot, ki);
+            if !g.is_finite() || !gp.is_finite() || gp < 1.0 {
+                let mid = 0.5 * (lo + hi);
+                if mid == lo || mid == hi || mid == r {
+                    break;
+                }
+                prev_step = (hi - lo).max(0.0);
+                r = mid;
+                continue;
+            }
+            if g == 0.0 {
+                break;
+            }
+            if g < 0.0 {
+                lo = r;
+            } else {
+                hi = r;
+            }
+            let delta = g / gp;
+            let r_new = r - delta;
+            let step_abs = delta.abs();
+            if r_new.is_finite() && r_new > lo && r_new < hi && step_abs <= 0.5 * prev_step {
+                prev_step = step_abs;
+                r = r_new;
+                if step_abs <= 1e-14 * r.max(1e-300) {
+                    break;
+                }
+            } else {
+                let mid = 0.5 * (lo + hi);
+                prev_step = (hi - lo).max(0.0);
+                if mid == lo || mid == hi || mid == r {
+                    break;
+                }
+                r = mid;
+            }
+        }
+        r.is_finite().then_some(CompetitionDepletionState { r, kd_nm, ns, kd, hot_nm, ki, i_tot })
+    }
+}
+
+impl ParametricModel for OneSiteCompetitionLigandDepletion {
+    fn id(&self) -> &str {
+        "one_site_competition_ligand_depletion"
+    }
+
+    fn name(&self) -> &str {
+        "One-site competitive binding with ligand depletion"
+    }
+
+    fn category(&self) -> EquationCategory {
+        EquationCategory::ReceptorBinding
+    }
+
+    fn param_names(&self) -> &[String] {
+        &self.params
+    }
+
+    fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
+        let x0 = x.first().copied()?;
+        let st = Self::solve_free_receptor(x0, params)?;
+        let y = (st.r / (st.kd + st.r)) * st.hot_nm;
+        y.is_finite().then_some(y)
+    }
+
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&x0) = x.first() else {
+            return false;
+        };
+        if out.len() < 5 {
+            return false;
+        }
+        let Some(st) = Self::solve_free_receptor(x0, params) else {
+            return false;
+        };
+        let d_d = st.kd + st.r;
+        let d_i = st.ki + st.r;
+        let p_d = st.r / d_d;
+        let q_d = st.kd / d_d;
+        let q_i = st.ki / d_i;
+        let alpha = (st.hot_nm / d_d) * q_d;
+        let beta = (st.i_tot / d_i) * q_i;
+        let rest_g = 1.0 + beta;
+        let g_prime = alpha + rest_g;
+        if !g_prime.is_finite() || g_prime < 1.0 {
+            return false;
+        }
+        let y = st.hot_nm * p_d;
+        out[0] = alpha / g_prime;
+        out[1] = p_d * (rest_g / g_prime);
+        out[2] = -((y * (1.0 + st.ns)) / d_d) * (rest_g / g_prime);
+        out[3] = alpha * (core::f64::consts::LN_10 * st.r * beta) / g_prime;
+        out[4] = -((y * st.kd_nm) / d_d) * (rest_g / g_prime);
+        out[..5].iter().all(|v| v.is_finite())
+    }
+
+    fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
+        let (_, ymax) = data_y_min_max(points);
+        let rt_guess = if ymax.is_finite() && ymax > 0.0 { 2.0 * ymax } else { 1.0 };
+        let log_ki = if points.is_empty() { -8.0 } else { estimate_x_at_ymid(points) };
+        vec![rt_guess, 1.0, 1.0, log_ki, 0.0]
+    }
+
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(Some(0.0), None), (Some(0.0), None), (Some(1e-15), None), (None, None), (Some(0.0), None)]
     }
 }
 

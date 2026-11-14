@@ -1,8 +1,8 @@
 //! Shared numerical, ranking, quantile, validation, and `ResultSheet` construction helpers.
 
 use lumencraft_doc::{
-    AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PValueFormat, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus,
-    ResultTab, ResultTabKind, SubcolumnMode, TableArchetype,
+    AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PValueFormat, RemediationKind, ResultCell, ResultScalarEntry,
+    ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype,
 };
 use lumencraft_math::ConfidenceLevel;
 
@@ -169,7 +169,19 @@ pub fn p_cell(raw_p: f64, format: PValueFormat) -> ResultCell {
     ResultCell::PValue { raw: clamped, formatted: format.format_p(clamped), stars: format.stars(clamped).to_owned() }
 }
 
-/// Construct a [`ChecklistItem`].
+/// Construct a [`ChecklistItem`] with an optional structured [`RemediationKind`].
+#[must_use]
+pub fn checklist_item_with_remediation(
+    assumption: impl Into<String>,
+    status: ChecklistStatus,
+    metric: Option<String>,
+    explanation: impl Into<String>,
+    remediation: Option<RemediationKind>,
+) -> ChecklistItem {
+    ChecklistItem { assumption: assumption.into(), status, diagnostic_metric: metric, explanation: explanation.into(), remediation }
+}
+
+/// Construct a diagnostic [`ChecklistItem`] with `remediation: None`.
 #[must_use]
 pub fn checklist_item(
     assumption: impl Into<String>,
@@ -177,7 +189,7 @@ pub fn checklist_item(
     metric: Option<String>,
     explanation: impl Into<String>,
 ) -> ChecklistItem {
-    ChecklistItem { assumption: assumption.into(), status, diagnostic_metric: metric, explanation: explanation.into() }
+    checklist_item_with_remediation(assumption, status, metric, explanation, None)
 }
 
 /// Initialize an up-to-date [`ResultSheet`] from an [`AnalysisSpec`].

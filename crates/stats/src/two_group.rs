@@ -3,8 +3,8 @@
 
 use lumencraft_doc::{
     AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
-    MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, TableArchetype,
-    TwoGroupMethod, TwoGroupSpec, VariableRole,
+    MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, RemediationKind, ResultCell, ResultSheet, ResultTabKind,
+    TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{f_sf, norm_sf, norm_two_sided_isf, student_t_cdf, student_t_sf, student_t_two_sided_p};
@@ -12,10 +12,11 @@ use lumencraft_math::noncentral_t_ci;
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
-use crate::column::{hedges_j_factor, hodges_lehmann_one_sample, ks_asymptotic_p, wilcoxon_exact_p};
+use crate::column::{hedges_j_factor, hodges_lehmann_one_sample, ks_asymptotic_p, shapiro_wilk, wilcoxon_exact_p};
 use crate::common::{
-    build_tab, checklist_item, ci_cell, extract_numeric_columns, extract_paired_values, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell,
-    p_cell, push_scalar, quantile_type6_sorted, rank_with_ties, resolve_selected_indices, sorted_finite, t_crit_two_sided, validate_finite_slice,
+    build_tab, checklist_item, checklist_item_with_remediation, ci_cell, extract_numeric_columns, extract_paired_values, init_result_sheet, num_cell,
+    opt_ci_cell, opt_num_cell, p_cell, push_scalar, quantile_type6_sorted, rank_with_ties, resolve_selected_indices, sorted_finite, t_crit_two_sided,
+    validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
@@ -961,7 +962,7 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
             let cols = extract_numeric_columns(sheet, &sel)?;
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = crate::column::one_sample_t_test(&first.values, hypothetical, tg.two_tailed, conf)?;
-            populate_one_sample_t_sheet(&mut res, &first.label, &out, conf, p_fmt);
+            populate_one_sample_t_sheet(&mut res, &first.label, &first.values, &out, conf, p_fmt);
             return Ok(res);
         }
         TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
@@ -983,14 +984,17 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
             TwoGroupMethod::UnpairedT => {
                 let out = unpaired_t_test(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
                 populate_unpaired_t_sheet(&mut res, 0, 1, &lvl_a.label, &lvl_b.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+                append_unpaired_normality_checklist(&mut res.checklist, &lvl_a.values, &lvl_b.values, false, conf.alpha());
             }
             TwoGroupMethod::WelchT => {
                 let out = welch_t_test(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
                 populate_unpaired_t_sheet(&mut res, 0, 1, &lvl_a.label, &lvl_b.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+                append_unpaired_normality_checklist(&mut res.checklist, &lvl_a.values, &lvl_b.values, false, conf.alpha());
             }
             TwoGroupMethod::LognormalUnpairedT => {
                 let out = lognormal_unpaired_t_test(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
                 populate_unpaired_t_sheet(&mut res, 0, 1, &lvl_a.label, &lvl_b.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+                append_unpaired_normality_checklist(&mut res.checklist, &lvl_a.values, &lvl_b.values, true, conf.alpha());
             }
             TwoGroupMethod::MannWhitneyU => {
                 let out = mann_whitney_u(&lvl_a.values, &lvl_b.values, tg.two_tailed, conf)?;
@@ -1028,24 +1032,29 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
         TwoGroupMethod::UnpairedT => {
             let out = unpaired_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+            append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, false, conf.alpha());
         }
         TwoGroupMethod::WelchT => {
             let out = welch_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+            append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, false, conf.alpha());
         }
         TwoGroupMethod::LognormalUnpairedT => {
             let out = lognormal_unpaired_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+            append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, true, conf.alpha());
         }
         TwoGroupMethod::PairedT => {
             let (xa, xb) = extract_paired_values(sheet, ca.index, cb.index)?;
             let out = paired_t_test(&xa, &xb, tg.two_tailed, conf)?;
             populate_paired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+            append_paired_normality_checklist(&mut res.checklist, &xa, &xb, false, conf.alpha());
         }
         TwoGroupMethod::RatioPairedT => {
             let (xa, xb) = extract_paired_values(sheet, ca.index, cb.index)?;
             let out = ratio_paired_t_test(&xa, &xb, tg.two_tailed, conf)?;
             populate_paired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
+            append_paired_normality_checklist(&mut res.checklist, &xa, &xb, true, conf.alpha());
         }
         TwoGroupMethod::MannWhitneyU => {
             let out = mann_whitney_u(&ca.values, &cb.values, tg.two_tailed, conf)?;
@@ -1770,11 +1779,12 @@ fn populate_unpaired_t_sheet(
 
 fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedTResult, alpha: f64) {
     if out.n_a < 5 || out.n_b < 5 {
-        checklist.push(checklist_item(
+        checklist.push(checklist_item_with_remediation(
             "Sample size adequacy",
             ChecklistStatus::Warn,
             Some(format!("n_A = {}, n_B = {}", out.n_a, out.n_b)),
             "Small group sample sizes limit statistical power and make normality checks unreliable.",
+            Some(RemediationKind::MannWhitneyU),
         ));
     } else {
         checklist.push(checklist_item(
@@ -1785,11 +1795,12 @@ fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedT
         ));
     }
     if out.method_label == "Unpaired Student t test" && out.f_test.p_value <= alpha {
-        checklist.push(checklist_item(
+        checklist.push(checklist_item_with_remediation(
             "Homogeneity of variances",
             ChecklistStatus::Violated,
             Some(format!("F = {:.3}, p = {:.4}", out.f_test.f_statistic, out.f_test.p_value)),
             "Group variances differ significantly; Welch's t-test is recommended.",
+            Some(RemediationKind::WelchT),
         ));
     } else {
         checklist.push(checklist_item(
@@ -1797,6 +1808,63 @@ fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedT
             ChecklistStatus::Pass,
             Some(format!("Levene(median) F = {:.3}, p = {:.4}", out.levene_median.f_statistic, out.levene_median.p_value)),
             "No severe departure from equal group variances was flagged.",
+        ));
+    }
+}
+
+fn append_unpaired_normality_checklist(checklist: &mut Vec<ChecklistItem>, vals_a: &[f64], vals_b: &[f64], is_lognormal: bool, alpha: f64) {
+    let prep =
+        |slice: &[f64]| -> Vec<f64> { if is_lognormal { slice.iter().copied().filter(|&x| x > 0.0).map(f64::ln).collect() } else { slice.to_vec() } };
+    let a = prep(vals_a);
+    let b = prep(vals_b);
+    let sw_a = shapiro_wilk(&a, alpha).ok();
+    let sw_b = shapiro_wilk(&b, alpha).ok();
+    if sw_a.is_none() && sw_b.is_none() {
+        return;
+    }
+    let min_sw = [sw_a.as_ref(), sw_b.as_ref()].into_iter().flatten().min_by(|x, y| x.p_value.total_cmp(&y.p_value));
+    if let Some(worst) = min_sw {
+        let violated = !worst.passed;
+        checklist.push(checklist_item_with_remediation(
+            if is_lognormal { "Lognormality of group values" } else { "Normality of group values" },
+            if violated { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
+            Some(format!("min Shapiro-Wilk W = {:.4}, p = {:.4}", worst.statistic, worst.p_value)),
+            if violated {
+                "At least one group departs significantly from Gaussian normality; Mann-Whitney U test is recommended."
+            } else {
+                "Neither group shows a significant departure from Gaussian normality."
+            },
+            violated.then_some(RemediationKind::MannWhitneyU),
+        ));
+    }
+}
+
+fn append_paired_normality_checklist(checklist: &mut Vec<ChecklistItem>, vals_a: &[f64], vals_b: &[f64], is_ratio: bool, alpha: f64) {
+    let diffs: Vec<f64> = vals_a
+        .iter()
+        .zip(vals_b.iter())
+        .filter_map(|(&a, &b)| if is_ratio { (a > 0.0 && b > 0.0).then(|| (a / b).ln()) } else { Some(a - b) })
+        .collect();
+    if diffs.len() < 5 {
+        checklist.push(checklist_item_with_remediation(
+            "Normality of paired differences",
+            ChecklistStatus::Warn,
+            Some(format!("n = {} pairs", diffs.len())),
+            "Small paired sample size limits normality checking; Wilcoxon matched-pairs test is recommended.",
+            Some(RemediationKind::WilcoxonSignedRank),
+        ));
+    } else if let Ok(sw) = shapiro_wilk(&diffs, alpha) {
+        let violated = !sw.passed;
+        checklist.push(checklist_item_with_remediation(
+            "Normality of paired differences",
+            if violated { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
+            Some(format!("Shapiro-Wilk W = {:.4}, p = {:.4}", sw.statistic, sw.p_value)),
+            if violated {
+                "Paired differences depart significantly from Gaussian normality; Wilcoxon matched-pairs test is recommended."
+            } else {
+                "Paired differences do not depart significantly from Gaussian normality."
+            },
+            violated.then_some(RemediationKind::WilcoxonSignedRank),
         ));
     }
 }
@@ -2020,6 +2088,7 @@ fn populate_ks_sheet(
 fn populate_one_sample_t_sheet(
     res: &mut ResultSheet,
     label: &str,
+    values: &[f64],
     out: &crate::column::OneSampleTResult,
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
@@ -2047,12 +2116,31 @@ fn populate_one_sample_t_sheet(
     res.tabs.push(build_tab("one-sample-t", "One-sample t test", ResultTabKind::MainSummary, vec![label.to_owned()], row_labels, rows));
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "t", None, out.t_statistic);
-    res.checklist.push(checklist_item(
-        "One-sample Gaussian assumption",
-        if out.n < 5 { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
-        Some(format!("n = {}", out.n)),
-        "One-sample t test assumes independent observations from an approximately Gaussian population.",
-    ));
+    let (status, metric, explanation, remediation) = if out.n < 5 {
+        (
+            ChecklistStatus::Warn,
+            Some(format!("n = {}", out.n)),
+            "Small sample size limits normality checking; One-sample Wilcoxon test is recommended.",
+            Some(RemediationKind::OneSampleWilcoxon),
+        )
+    } else if let Ok(sw) = shapiro_wilk(values, conf.alpha())
+        && !sw.passed
+    {
+        (
+            ChecklistStatus::Warn,
+            Some(format!("n = {}, Shapiro-Wilk W = {:.4}, p = {:.4}", out.n, sw.statistic, sw.p_value)),
+            "Sample departs significantly from Gaussian normality; One-sample Wilcoxon test is recommended.",
+            Some(RemediationKind::OneSampleWilcoxon),
+        )
+    } else {
+        (
+            ChecklistStatus::Pass,
+            Some(format!("n = {}", out.n)),
+            "One-sample t test assumes independent observations from an approximately Gaussian population.",
+            None,
+        )
+    };
+    res.checklist.push(checklist_item_with_remediation("One-sample Gaussian assumption", status, metric, explanation, remediation));
 }
 
 fn populate_one_sample_w_sheet(

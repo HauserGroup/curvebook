@@ -11,6 +11,7 @@
 //!   `erf`, `gamma`, `normcdf`, etc.) executed in a bounded, WASM-safe stack VM.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::fmt;
 
 use lumencraft_math::dist::{norm_cdf, norm_ppf};
 use lumencraft_math::roots::{RootOptions, brent_root};
@@ -23,6 +24,7 @@ use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 const MAX_VM_STEPS: usize = 100_000;
 const MAX_ODE_STEPS: usize = 50_000;
 const MAX_PARSE_DEPTH: usize = 128;
+const MAX_AST_NODES: usize = 4_096;
 const MAX_DATASET_EXPANSION: usize = 10_000;
 const MAX_BESSEL_ORDER: i32 = 100_000;
 
@@ -79,7 +81,6 @@ struct Token {
     col: usize,
 }
 
-#[derive(Debug, Clone)]
 enum Expr {
     Num(f64),
     Ident(String),
@@ -102,6 +103,126 @@ impl Expr {
             Self::Call { args, .. } => args.iter().any(|a| !a.is_leaf()),
             Self::If { cond, then_br, else_br } => !cond.is_leaf() || !then_br.is_leaf() || !else_br.is_leaf(),
         }
+    }
+}
+
+impl Clone for Expr {
+    fn clone(&self) -> Self {
+        match self {
+            Self::Num(v) => return Self::Num(*v),
+            Self::Ident(name) => return Self::Ident(name.clone()),
+            _ => {}
+        }
+        enum CloneTask<'a> {
+            Visit(&'a Expr),
+            BuildUnary(UnaryOp),
+            BuildBinary(BinaryOp),
+            BuildCall(String, usize),
+            BuildIf,
+        }
+        let mut tasks = vec![CloneTask::Visit(self)];
+        let mut results: Vec<Expr> = Vec::new();
+        while let Some(task) = tasks.pop() {
+            match task {
+                CloneTask::Visit(node) => match node {
+                    Expr::Num(v) => results.push(Expr::Num(*v)),
+                    Expr::Ident(name) => results.push(Expr::Ident(name.clone())),
+                    Expr::Unary { op, rhs } => {
+                        tasks.push(CloneTask::BuildUnary(*op));
+                        tasks.push(CloneTask::Visit(rhs));
+                    }
+                    Expr::Binary { op, lhs, rhs } => {
+                        tasks.push(CloneTask::BuildBinary(*op));
+                        tasks.push(CloneTask::Visit(rhs));
+                        tasks.push(CloneTask::Visit(lhs));
+                    }
+                    Expr::Call { name, args } => {
+                        tasks.push(CloneTask::BuildCall(name.clone(), args.len()));
+                        for arg in args.iter().rev() {
+                            tasks.push(CloneTask::Visit(arg));
+                        }
+                    }
+                    Expr::If { cond, then_br, else_br } => {
+                        tasks.push(CloneTask::BuildIf);
+                        tasks.push(CloneTask::Visit(else_br));
+                        tasks.push(CloneTask::Visit(then_br));
+                        tasks.push(CloneTask::Visit(cond));
+                    }
+                },
+                CloneTask::BuildUnary(op) => {
+                    if let Some(rhs) = results.pop() {
+                        results.push(Expr::Unary { op, rhs: Box::new(rhs) });
+                    }
+                }
+                CloneTask::BuildBinary(op) => {
+                    if let (Some(rhs), Some(lhs)) = (results.pop(), results.pop()) {
+                        results.push(Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) });
+                    }
+                }
+                CloneTask::BuildCall(name, arity) => {
+                    let start = results.len().saturating_sub(arity);
+                    let args = results.split_off(start);
+                    results.push(Expr::Call { name, args });
+                }
+                CloneTask::BuildIf => {
+                    if let (Some(else_br), Some(then_br), Some(cond)) = (results.pop(), results.pop(), results.pop()) {
+                        results.push(Expr::If { cond: Box::new(cond), then_br: Box::new(then_br), else_br: Box::new(else_br) });
+                    }
+                }
+            }
+        }
+        results.pop().unwrap_or(Self::Num(0.0))
+    }
+}
+
+impl fmt::Debug for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        enum DebugTask<'a> {
+            Expr(&'a Expr),
+            Str(&'static str),
+        }
+        let mut tasks = vec![DebugTask::Expr(self)];
+        while let Some(task) = tasks.pop() {
+            match task {
+                DebugTask::Str(s) => f.write_str(s)?,
+                DebugTask::Expr(node) => match node {
+                    Self::Num(v) => write!(f, "Num({v:?})")?,
+                    Self::Ident(name) => write!(f, "Ident({name:?})")?,
+                    Self::Unary { op, rhs } => {
+                        write!(f, "Unary {{ op: {op:?}, rhs: ")?;
+                        tasks.push(DebugTask::Str(" }"));
+                        tasks.push(DebugTask::Expr(rhs));
+                    }
+                    Self::Binary { op, lhs, rhs } => {
+                        write!(f, "Binary {{ op: {op:?}, lhs: ")?;
+                        tasks.push(DebugTask::Str(" }"));
+                        tasks.push(DebugTask::Expr(rhs));
+                        tasks.push(DebugTask::Str(", rhs: "));
+                        tasks.push(DebugTask::Expr(lhs));
+                    }
+                    Self::Call { name, args } => {
+                        write!(f, "Call {{ name: {name:?}, args: [")?;
+                        tasks.push(DebugTask::Str("] }"));
+                        for (idx, arg) in args.iter().enumerate().rev() {
+                            tasks.push(DebugTask::Expr(arg));
+                            if idx > 0 {
+                                tasks.push(DebugTask::Str(", "));
+                            }
+                        }
+                    }
+                    Self::If { cond, then_br, else_br } => {
+                        f.write_str("If { cond: ")?;
+                        tasks.push(DebugTask::Str(" }"));
+                        tasks.push(DebugTask::Expr(else_br));
+                        tasks.push(DebugTask::Str(", else_br: "));
+                        tasks.push(DebugTask::Expr(then_br));
+                        tasks.push(DebugTask::Str(", then_br: "));
+                        tasks.push(DebugTask::Expr(cond));
+                    }
+                },
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1383,6 +1504,7 @@ struct Parser<'a> {
     pos: usize,
     line: usize,
     depth: usize,
+    nodes: usize,
 }
 
 impl<'a> Parser<'a> {
@@ -1393,6 +1515,13 @@ impl<'a> Parser<'a> {
         let t = self.tokens.get(self.pos)?.clone();
         self.pos += 1;
         Some(t)
+    }
+    fn track_node(&mut self, line: usize, col: usize) -> Result<(), FitError> {
+        self.nodes = self.nodes.saturating_add(1);
+        if self.nodes > MAX_AST_NODES {
+            return Err(FitError::DslCompileError { message: format!("Expression AST exceeds maximum nodes ({MAX_AST_NODES})"), line, column: col });
+        }
+        Ok(())
     }
     fn enter_depth(&mut self, line: usize, col: usize) -> Result<(), FitError> {
         if self.depth >= MAX_PARSE_DEPTH {
@@ -1410,8 +1539,9 @@ impl<'a> Parser<'a> {
     }
     fn parse_or(&mut self) -> Result<Expr, FitError> {
         let mut lhs = self.parse_and()?;
-        while self.peek().is_some_and(|t| t.kind == TokenKind::OrOr) {
+        while let Some((tok_line, tok_col)) = self.peek().filter(|t| t.kind == TokenKind::OrOr).map(|t| (t.line, t.col)) {
             self.bump();
+            self.track_node(tok_line, tok_col)?;
             let rhs = self.parse_and()?;
             lhs = Expr::Binary { op: BinaryOp::Or, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
@@ -1419,8 +1549,9 @@ impl<'a> Parser<'a> {
     }
     fn parse_and(&mut self) -> Result<Expr, FitError> {
         let mut lhs = self.parse_cmp()?;
-        while self.peek().is_some_and(|t| t.kind == TokenKind::AndAnd) {
+        while let Some((tok_line, tok_col)) = self.peek().filter(|t| t.kind == TokenKind::AndAnd).map(|t| (t.line, t.col)) {
             self.bump();
+            self.track_node(tok_line, tok_col)?;
             let rhs = self.parse_cmp()?;
             lhs = Expr::Binary { op: BinaryOp::And, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
@@ -1429,6 +1560,7 @@ impl<'a> Parser<'a> {
     fn parse_cmp(&mut self) -> Result<Expr, FitError> {
         let mut lhs = self.parse_add()?;
         while let Some(tok) = self.peek() {
+            let (tok_line, tok_col) = (tok.line, tok.col);
             let op = match tok.kind {
                 TokenKind::EqEq | TokenKind::Eq => BinaryOp::Eq,
                 TokenKind::NotEq => BinaryOp::Ne,
@@ -1439,6 +1571,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.bump();
+            self.track_node(tok_line, tok_col)?;
             let rhs = self.parse_add()?;
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
@@ -1447,12 +1580,14 @@ impl<'a> Parser<'a> {
     fn parse_add(&mut self) -> Result<Expr, FitError> {
         let mut lhs = self.parse_mul()?;
         while let Some(tok) = self.peek() {
+            let (tok_line, tok_col) = (tok.line, tok.col);
             let op = match tok.kind {
                 TokenKind::Plus => BinaryOp::Add,
                 TokenKind::Minus => BinaryOp::Sub,
                 _ => break,
             };
             self.bump();
+            self.track_node(tok_line, tok_col)?;
             let rhs = self.parse_mul()?;
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
@@ -1461,6 +1596,7 @@ impl<'a> Parser<'a> {
     fn parse_mul(&mut self) -> Result<Expr, FitError> {
         let mut lhs = self.parse_pow()?;
         while let Some(tok) = self.peek() {
+            let (tok_line, tok_col) = (tok.line, tok.col);
             let op = match tok.kind {
                 TokenKind::Star => BinaryOp::Mul,
                 TokenKind::Slash => BinaryOp::Div,
@@ -1468,6 +1604,7 @@ impl<'a> Parser<'a> {
                 _ => break,
             };
             self.bump();
+            self.track_node(tok_line, tok_col)?;
             let rhs = self.parse_pow()?;
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
@@ -1488,6 +1625,7 @@ impl<'a> Parser<'a> {
                     column: tok_col,
                 });
             }
+            self.track_node(tok_line, tok_col)?;
             factors.push(self.parse_unary()?);
         }
         let mut acc = factors.pop().ok_or_else(|| FitError::DslCompileError {
@@ -1511,10 +1649,12 @@ impl<'a> Parser<'a> {
                 }
                 TokenKind::Minus => {
                     self.bump();
+                    self.track_node(tok_line, tok_col)?;
                     ops.push(UnaryOp::Neg);
                 }
                 TokenKind::Bang => {
                     self.bump();
+                    self.track_node(tok_line, tok_col)?;
                     ops.push(UnaryOp::Not);
                 }
                 _ => break,
@@ -1597,7 +1737,10 @@ impl<'a> Parser<'a> {
             return Err(FitError::DslCompileError { message: "Unexpected end of expression".to_owned(), line: self.line, column: 1 });
         };
         match tok.kind {
-            TokenKind::Number => Ok(Expr::Num(tok.num)),
+            TokenKind::Number => {
+                self.track_node(tok.line, tok.col)?;
+                Ok(Expr::Num(tok.num))
+            }
             TokenKind::LParen => {
                 self.enter_depth(tok.line, tok.col)?;
                 let inner = self.parse_or();
@@ -1610,11 +1753,13 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident => {
                 if self.peek().is_some_and(|t| t.kind == TokenKind::LParen) {
+                    self.track_node(tok.line, tok.col)?;
                     self.enter_depth(tok.line, tok.col)?;
                     let args = self.parse_call_args(&tok);
                     self.leave_depth();
                     Self::build_call_expr(tok, args?)
                 } else {
+                    self.track_node(tok.line, tok.col)?;
                     Ok(Expr::Ident(tok.text))
                 }
             }
@@ -1625,7 +1770,7 @@ impl<'a> Parser<'a> {
 
 fn parse_expr(input: &str, line: usize) -> Result<Expr, FitError> {
     let tokens = tokenize(input, line)?;
-    let mut parser = Parser { tokens: &tokens, pos: 0, line, depth: 0 };
+    let mut parser = Parser { tokens: &tokens, pos: 0, line, depth: 0, nodes: 0 };
     let expr = parser.parse_or()?;
     if let Some(rem) = parser.peek() {
         return Err(FitError::DslCompileError { message: format!("Unexpected trailing token `{}`", rem.text), line: rem.line, column: rem.col });
@@ -2434,7 +2579,7 @@ mod tests {
     use crate::library::ParametricModel;
 
     use super::{
-        CompiledDslModel, DatasetFilter, Expr, MAX_DATASET_EXPANSION, MAX_PARSE_DEPTH, UnaryOp, bessel_jn, bessel_yn, collect_free_idents,
+        BinaryOp, CompiledDslModel, DatasetFilter, Expr, MAX_DATASET_EXPANSION, MAX_PARSE_DEPTH, UnaryOp, bessel_jn, bessel_yn, collect_free_idents,
         compile_expr, expr_references_y, integrate_rk45, parse_dataset_prefix,
     };
 
@@ -2495,5 +2640,42 @@ mod tests {
         compile_expr(&deep, &HashMap::new(), &HashMap::new(), &mut code).unwrap();
         assert_eq!(code.len(), 20_001);
         drop(deep);
+    }
+
+    #[test]
+    fn deep_expr_all_variants_clone_and_debug_without_stack_overflow() {
+        let handle = std::thread::Builder::new()
+            .stack_size(512 * 1024)
+            .spawn(|| {
+                let mut expr = Expr::Ident("X".to_owned());
+                for step in 0..50_000_usize {
+                    expr = match step % 4 {
+                        0 => Expr::Unary { op: UnaryOp::Neg, rhs: Box::new(expr) },
+                        1 => Expr::Binary { op: BinaryOp::Add, lhs: Box::new(expr), rhs: Box::new(Expr::Num(1.0)) },
+                        2 => Expr::Call { name: "sin".to_owned(), args: vec![Expr::Num(0.5), expr] },
+                        _ => Expr::If { cond: Box::new(Expr::Ident("k".to_owned())), then_br: Box::new(expr), else_br: Box::new(Expr::Num(0.0)) },
+                    };
+                }
+                let cloned = expr.clone();
+                let dbg_orig = format!("{expr:?}");
+                let dbg_cloned = format!("{cloned:?}");
+                assert_eq!(dbg_orig, dbg_cloned);
+                assert!(dbg_orig.contains("Unary"));
+                assert!(dbg_orig.contains("Binary"));
+                assert!(dbg_orig.contains("Call"));
+                assert!(dbg_orig.contains("If"));
+                assert!(dbg_orig.contains("Ident"));
+                assert!(dbg_orig.contains("Num"));
+
+                let mut empty_call = Expr::Call { name: "f".to_owned(), args: Vec::new() };
+                for _ in 0..10 {
+                    empty_call = Expr::Call { name: "g".to_owned(), args: vec![empty_call] };
+                }
+                assert_eq!(format!("{empty_call:?}"), format!("{:?}", empty_call.clone()));
+                drop(cloned);
+                drop(expr);
+            })
+            .unwrap();
+        handle.join().unwrap();
     }
 }
