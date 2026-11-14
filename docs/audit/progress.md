@@ -22,11 +22,11 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 6 | `S06` File formats and import | `crates/format` | done | 1/4/9/0 | 12/2/0/0 | 2026-11-14 |
 | 7 | `S08` Chart compiler and scales | `crates/chart` | reviewing | — | — | 2026-11-14 |
 | 8 | `S09` Text, raster, SVG and PDF output | `crates/text`, `crates/render`, `crates/svg`, `crates/pdf` | reviewing | — | — | 2026-11-14 |
-| 9 | `S11` Tools and app entry points | `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` | reviewing | — | — | 2026-11-14 |
+| 9 | `S11` Tools and app entry points | `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` | verifying | 1/5/6/1 | — | 2026-11-14 |
 | 10 | `S07` Engine | `crates/engine` | reviewing | — | — | 2026-11-14 |
 | 11 | `S10` UI shell | `crates/ui-egui` | pending | — | — | — |
-| 12 | `S12` CLI and MCP | `apps/lumencraft-cli`, `crates/mcp` | pending | — | — | — |
-| 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | pending | — | — | — |
+| 12 | `S12` CLI and MCP | `apps/lumencraft-cli`, `crates/mcp` | reviewing | — | — | 2026-11-14 |
+| 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | reviewing | — | — | 2026-11-14 |
 | 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | pending | — | — | — |
 | 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | pending | — | — | — |
 
