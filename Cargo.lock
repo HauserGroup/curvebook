@@ -249,6 +249,7 @@ dependencies = [
  "lumencraft-svg",
  "lumencraft-testkit",
  "lumencraft-text",
+ "lumencraft-ui-egui",
  "serde",
  "serde_json",
 ]
@@ -471,6 +472,7 @@ dependencies = [
  "lumencraft-pdf",
  "lumencraft-platform",
  "lumencraft-render",
+ "lumencraft-stats",
  "lumencraft-svg",
  "lumencraft-testkit",
  "lumencraft-text",

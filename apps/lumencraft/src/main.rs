@@ -8,15 +8,14 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use lumencraft_doc::{ProjectDocument, SheetId, SubcolumnMode, TableKind};
+use lumencraft::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, open_document_from_files};
 use lumencraft_engine::Session;
 use lumencraft_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, RecoveryReport};
-use lumencraft_format::registry::{FormatKind, FormatRegistry, ImportOptions};
 use lumencraft_format::versioned::{CURRENT_PREFERENCES_VERSION, PreferencesFile, load_preferences_file, save_preferences_file};
-use lumencraft_format::{instantiate_template_bytes, is_unpacked_project_dir};
 use lumencraft_render::RenderTargetSpec;
 use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use lumencraft_ui_egui::dialogs_canvas::render_workspace_frame_png;
+use lumencraft_ui_egui::interaction::ViewportMetrics;
 use lumencraft_ui_egui::theme::install_fonts;
 use lumencraft_ui_egui::{UiApp, parse_control_port, run_control_tcp_server};
 
@@ -27,12 +26,14 @@ usage: lumencraft [options] [file...]
 
 options:
   --control <port>      listen on 127.0.0.1:<port> for JSON-lines automation
+  --gui-only            restrict automation (--control) to interactive GUI actions only
   --in-window-menus     render the menu bar inside the window on macOS
   --new-instance        open files in a separate application window
   --headless-once       render one software compositor frame and exit
   --portable-dir <dir>  store config, shortcuts, and crash-recovery journal under <dir>/lumencraft-data
   --ttf-font <path>     load and validate an external TrueType/SFNT (.ttf) font file
   --rulers              show physical canvas rulers on startup
+  --event-script <path> replay newline-delimited DesktopHostEvent JSONL commands
   -V, --version         print version and exit
   -h, --help            print this help message and exit
 ";
@@ -47,12 +48,14 @@ enum CliAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LaunchConfig {
     control_port: Option<u16>,
+    gui_only: bool,
     in_window_menus: bool,
     new_instance: bool,
     headless_once: bool,
     portable_dir: Option<PathBuf>,
     ttf_font: Option<PathBuf>,
     rulers: bool,
+    event_script: Option<PathBuf>,
     files: Vec<PathBuf>,
 }
 
@@ -110,6 +113,10 @@ fn parse_args(args: &[String], env_port: Option<&str>) -> Result<CliAction, Stri
                 cfg.control_port = Some(parse_port(raw)?);
                 i += 2;
             }
+            "--gui-only" => {
+                cfg.gui_only = true;
+                i += 1;
+            }
             "--in-window-menus" => {
                 cfg.in_window_menus = true;
                 i += 1;
@@ -142,6 +149,14 @@ fn parse_args(args: &[String], env_port: Option<&str>) -> Result<CliAction, Stri
                 cfg.rulers = true;
                 i += 1;
             }
+            "--event-script" => {
+                let raw = args.get(i + 1).ok_or_else(|| String::from("--event-script requires a JSONL file path"))?;
+                if raw.trim().is_empty() {
+                    return Err(String::from("--event-script requires a non-empty file path"));
+                }
+                cfg.event_script = Some(PathBuf::from(raw));
+                i += 2;
+            }
             flag if flag.starts_with('-') => {
                 return Err(format!("unknown option `{flag}`\n\n{USAGE}"));
             }
@@ -161,6 +176,27 @@ fn parse_args(args: &[String], env_port: Option<&str>) -> Result<CliAction, Stri
     Ok(CliAction::Launch(cfg))
 }
 
+fn can_create_recovery_root(path: &Path) -> Result<bool, String> {
+    if path.exists() {
+        return Ok(true);
+    }
+    match std::fs::create_dir_all(path) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(false),
+        Err(err) => Err(format!("failed to create recovery directory `{}`: {err}", path.display())),
+    }
+}
+
+fn configure_window_preferences(app: &mut UiApp, app_paths: &AppPaths, cfg: &LaunchConfig) -> Result<(), String> {
+    load_shortcut_preferences(app, app_paths)?;
+    if cfg.rulers {
+        app.canvas_dialogs.rulers_visible = true;
+    }
+    lumencraft::configure_gui_only(app, cfg.gui_only);
+    app.sync_views();
+    Ok(())
+}
+
 fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     let _loaded_fonts = install_fonts();
     let _ = lumencraft_ui_egui::bundled_fonts_enabled();
@@ -171,32 +207,86 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     let _validated_font = cfg.ttf_font.as_deref().map(load_validated_ttf_font).transpose()?;
 
     let enable_recovery = app_paths.portable || !cfg.headless_once;
-    let startup = open_startup_session_with_recovery(&cfg.files, &app_paths, enable_recovery, now_epoch_ms())?;
-    let _recovered_session = startup.report.as_ref().is_some_and(|r| r.recovered_from_stale_lock.is_some() || !r.recovered_commands.is_empty());
-    let mut app = UiApp::from_session(startup.session);
-    load_shortcut_preferences(&mut app, &app_paths)?;
-    if cfg.rulers {
-        app.canvas_dialogs.rulers_visible = true;
+    let initial_viewport = ViewportMetrics::new(400.0, 260.0, 2.0);
+    let recovery_root = if cfg.new_instance && enable_recovery && can_create_recovery_root(&app_paths.recovery_dir)? {
+        Some(app_paths.recovery_dir.clone())
+    } else {
+        None
+    };
+
+    let host_cfg = DesktopHostConfig {
+        in_window_menus: cfg.in_window_menus,
+        new_instance: cfg.new_instance,
+        gui_only: cfg.gui_only,
+        locale_override: None,
+        theme_override: None,
+        recovery_root,
+        initial_viewport,
+    };
+    let mut runtime = DesktopHostRuntime::new(host_cfg);
+    let mut single_instance_journal: Option<CrashRecoveryJournal<DirectoryJournalBackend>> = None;
+
+    if cfg.new_instance {
+        if cfg.files.is_empty() {
+            let _ = runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: None, viewport: initial_viewport })?;
+        } else {
+            for path in &cfg.files {
+                let _ = runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: Some(path.clone()), viewport: initial_viewport })?;
+            }
+        }
+    } else {
+        let startup = open_startup_session_with_recovery(&cfg.files, &app_paths, enable_recovery, now_epoch_ms())?;
+        let _recovered_session = startup.report.as_ref().is_some_and(|r| r.recovered_from_stale_lock.is_some() || !r.recovered_commands.is_empty());
+        single_instance_journal = startup.journal;
+        let _ = runtime.open_window_with_session(startup.session, initial_viewport, false)?;
     }
-    app.sync_views();
+
+    for win_id in runtime.window_ids() {
+        let win = runtime.window_mut(win_id)?;
+        configure_window_preferences(win.app_mut(), &app_paths, cfg)?;
+    }
+
+    if let Some(script_path) = cfg.event_script.as_deref() {
+        let script =
+            std::fs::read_to_string(script_path).map_err(|err| format!("failed to read --event-script `{}`: {err}", script_path.display()))?;
+        let _ = runtime.run_event_script_jsonl(&script)?;
+    }
 
     if cfg.headless_once {
-        let png = render_workspace_frame_png(&app, RenderTargetSpec { width_px: 800, height_px: 520, dpi: 144 })
-            .map_err(|err| format!("headless frame render failed: {err}"))?;
-        if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
-            return Err(String::from("headless compositor produced invalid PNG signature"));
+        for win_id in runtime.window_ids() {
+            let redraw = runtime.dispatch(DesktopHostEvent::RedrawRequested { window_id: win_id })?;
+            let frame = redraw.frame.ok_or_else(|| format!("missing headless frame for window `{win_id}`"))?;
+            if frame.rgba_bytes.is_empty() || frame.width_px == 0 || frame.height_px == 0 {
+                return Err(String::from("headless desktop host produced empty RGBA framebuffer"));
+            }
+            let win = runtime.window(win_id)?;
+            let png = render_workspace_frame_png(win.app(), RenderTargetSpec { width_px: 800, height_px: 520, dpi: 144 })
+                .map_err(|err| format!("headless frame render failed: {err}"))?;
+            if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
+                return Err(String::from("headless compositor produced invalid PNG signature"));
+            }
         }
     }
 
     if let Some(port) = cfg.control_port {
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        run_control_tcp_server(&mut app, addr)?;
+        let focused_id = runtime.focused_window_id().ok_or_else(|| String::from("no open window available for --control server"))?;
+        let win = runtime.window_mut(focused_id)?;
+        run_control_tcp_server(win.app_mut(), addr)?;
     }
 
-    if should_persist_preferences(&app, &app_paths)? {
-        save_shortcut_preferences(&app, &app_paths)?;
+    if let Some(focused_id) = runtime.focused_window_id() {
+        let win = runtime.window_mut(focused_id)?;
+        if should_persist_preferences(win.app(), &app_paths)? {
+            save_shortcut_preferences(win.app(), &app_paths)?;
+        }
+        close_startup_recovery_cleanly(win.app_mut(), single_instance_journal.take())?;
+    } else if let Some(journal) = single_instance_journal.take() {
+        let mut fallback = Session::new();
+        let _backend = fallback.close_journal_cleanly(journal).map_err(|err| format!("failed to close crash-recovery journal cleanly: {err}"))?;
     }
-    close_startup_recovery_cleanly(&mut app, startup.journal)?;
+
+    runtime.close_all_force()?;
     Ok(())
 }
 
@@ -373,108 +463,8 @@ fn save_shortcut_preferences(app: &UiApp, paths: &AppPaths) -> Result<(), String
         .map_err(|err| format!("failed to write preferences `{}`: {err}", paths.preferences_file.display()))
 }
 
-fn has_unpacked_dir_suffix(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.to_ascii_lowercase().ends_with(".lumencraft.d"))
-}
-
-fn is_unpacked_project_target(path: &Path) -> bool {
-    has_unpacked_dir_suffix(path) || is_unpacked_project_dir(path) || path.is_dir()
-}
-
 fn load_startup_session(files: &[PathBuf]) -> Result<Session, String> {
-    if files.is_empty() {
-        return Ok(Session::new());
-    }
-
-    let registry = FormatRegistry::default_registry();
-    let mut primary_doc: Option<ProjectDocument> = None;
-    let mut primary_archive_path: Option<PathBuf> = None;
-    let mut clean_archive = false;
-
-    for (idx, path) in files.iter().enumerate() {
-        let importer = if is_unpacked_project_target(path) { registry.importer_by_format("lumencraft.d") } else { registry.importer_for_path(path) };
-        let Some(importer) = importer else {
-            let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
-            return Err(format!(
-                "unsupported file extension `.{ext}` for `{}`; expected .lumencraft, .lumencraft.d, .lctemplate, .prism, .pzfx, .csv, or .tsv",
-                path.display()
-            ));
-        };
-
-        let desc = importer.descriptor();
-        match desc.kind {
-            FormatKind::ProjectDir | FormatKind::Archive => {
-                let payload =
-                    importer.import_path(path, &ImportOptions::default()).map_err(|err| format!("failed to open `{}`: {err}", path.display()))?;
-                primary_doc = payload.into_document();
-                primary_archive_path = Some(path.clone());
-                clean_archive = true;
-            }
-            FormatKind::Template => {
-                let bytes = std::fs::read(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
-                let doc =
-                    instantiate_template_bytes(&bytes, None).map_err(|err| format!("failed to instantiate template `{}`: {err}", path.display()))?;
-                primary_doc = Some(doc);
-                primary_archive_path = None;
-                clean_archive = false;
-            }
-            FormatKind::ForeignProject => {
-                let payload =
-                    importer.import_path(path, &ImportOptions::default()).map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
-                primary_doc = payload.into_document();
-                primary_archive_path = None;
-                clean_archive = false;
-            }
-            FormatKind::DelimitedText => {
-                let doc = primary_doc.get_or_insert_with(ProjectDocument::default);
-                let sheet_id = next_csv_sheet_id(doc, idx);
-                let title = file_stem_title(path);
-                let opts = ImportOptions {
-                    sheet_id: sheet_id.clone(),
-                    title,
-                    table_kind: TableKind::Column,
-                    subcolumn_mode: SubcolumnMode::Single,
-                    csv: None,
-                };
-                let payload = importer.import_path(path, &opts).map_err(|err| format!("failed to import `{}`: {err}", path.display()))?;
-                let sheet =
-                    payload.into_data_sheet().ok_or_else(|| format!("importer `{}` did not yield a data sheet for `{}`", desc.id, path.display()))?;
-                doc.add_data_sheet(sheet).map_err(|err| err.to_string())?;
-                if doc.active_sheet_id.is_none() {
-                    let _ = doc.select_in_navigator(&sheet_id);
-                }
-            }
-            FormatKind::ResultTable | FormatKind::FigureVector | FormatKind::FigureRaster => {
-                return Err(format!("format `{}` cannot be opened directly as a startup workspace document", desc.id));
-            }
-        }
-    }
-
-    let doc = primary_doc.unwrap_or_default();
-    let mut session = Session::from_document(doc);
-    if let Some(path) = primary_archive_path {
-        session.set_file_path(Some(path), clean_archive);
-    }
-    Ok(session)
-}
-
-fn next_csv_sheet_id(doc: &ProjectDocument, hint_idx: usize) -> SheetId {
-    let mut seq = hint_idx.saturating_add(1);
-    loop {
-        let candidate = SheetId::new(format!("data-{seq}"));
-        if doc.sheet_section(&candidate).is_none() {
-            return candidate;
-        }
-        seq = seq.saturating_add(1);
-    }
-}
-
-fn file_stem_title(path: &Path) -> String {
-    path.file_stem()
-        .and_then(|s| s.to_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map_or_else(|| String::from("Imported Table"), ToOwned::to_owned)
+    open_document_from_files(files)
 }
 
 fn parse_port(raw: &str) -> Result<u16, String> {
@@ -512,15 +502,35 @@ mod tests {
             parse_args(&args, None).ok(),
             Some(CliAction::Launch(LaunchConfig {
                 control_port: Some(9123),
+                gui_only: false,
                 in_window_menus: true,
                 new_instance: true,
                 headless_once: false,
                 portable_dir: None,
                 ttf_font: None,
                 rulers: false,
+                event_script: None,
                 files: vec![PathBuf::from("study.lumencraft")],
             }))
         );
+
+        let gui_only_args = vec![String::from("--control"), String::from("9124"), String::from("--gui-only"), String::from("--headless-once")];
+        assert_eq!(
+            parse_args(&gui_only_args, None).ok(),
+            Some(CliAction::Launch(LaunchConfig {
+                control_port: Some(9124),
+                gui_only: true,
+                in_window_menus: false,
+                new_instance: false,
+                headless_once: true,
+                portable_dir: None,
+                ttf_font: None,
+                rulers: false,
+                event_script: None,
+                files: Vec::new(),
+            }))
+        );
+        assert!(super::USAGE.contains("--gui-only"));
 
         let portable_args = vec![
             String::from("--portable-dir"),
@@ -528,17 +538,21 @@ mod tests {
             String::from("--ttf-font"),
             String::from("/tmp/sans.ttf"),
             String::from("--rulers"),
+            String::from("--event-script"),
+            String::from("/tmp/script.jsonl"),
         ];
         assert_eq!(
             parse_args(&portable_args, None).ok(),
             Some(CliAction::Launch(LaunchConfig {
                 control_port: None,
+                gui_only: false,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
                 portable_dir: Some(PathBuf::from("/tmp/lc-usb")),
                 ttf_font: Some(PathBuf::from("/tmp/sans.ttf")),
                 rulers: true,
+                event_script: Some(PathBuf::from("/tmp/script.jsonl")),
                 files: Vec::new(),
             }))
         );

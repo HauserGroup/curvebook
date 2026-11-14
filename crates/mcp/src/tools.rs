@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use lumencraft_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
 use lumencraft_engine::cmd::{Caller, CommandGroup, Effects, registry};
-use lumencraft_engine::{EngineError, Session};
+use lumencraft_engine::{EngineError, GuiOnlyPolicy, Session};
 use lumencraft_format::{CsvOptions, export_datasheet_to_csv};
 #[cfg(not(target_arch = "wasm32"))]
 use lumencraft_platform::{PlatformError, WorkdirGuard};
@@ -17,22 +17,54 @@ use serde_json::{Map, Value, json};
 
 use crate::errors::{self, StructuredErrorPayload};
 use crate::formats;
+use crate::gui_tools;
 use crate::toolsets::{self, ToolAnnotations, command_id_to_mcp_tool_name, command_spec_to_tool_definition, group_enum_json, parse_command_group};
 use crate::ui_catalog::UI_COMMANDS;
 
 const MAX_BATCH_COMMANDS: usize = 1024;
 
+/// Host-supplied in-process GUI bridge implemented outside `crates/mcp` (`L6`/`L7`) so the 8
+/// `gui` MCP tools can inspect and drive a live UI without `crates/mcp` depending on `ui-egui`.
+pub trait GuiSessionHost {
+    /// Execute a GUI control method (`ui.inspect`, `ui.screenshot`, `ui.pointer_gesture`, etc.).
+    fn call_gui(&mut self, method: &str, params: Value) -> Result<Value, EngineError>;
+
+    /// Synchronize `--gui-only` restriction policy onto the hosted UI session.
+    fn set_gui_only(&mut self, gui_only: bool);
+
+    /// Return `true` when the hosted UI session enforces `--gui-only` mode.
+    fn is_gui_only(&self) -> bool;
+}
+
 /// Stateful execution context shared across requests on an MCP server connection.
-#[derive(Debug, Clone)]
 pub struct McpServerState {
     pub(crate) session: Session,
     #[cfg(not(target_arch = "wasm32"))]
     control_port: Option<u16>,
     #[cfg(not(target_arch = "wasm32"))]
     workdir_guard: Option<WorkdirGuard>,
+    gui_host: Option<Box<dyn GuiSessionHost>>,
+    gui_only: bool,
+    gui_toolset_enabled: bool,
     enabled_toolsets: BTreeSet<CommandGroup>,
     pending_notifications: Vec<Value>,
     initialized: bool,
+}
+
+impl fmt::Debug for McpServerState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut s = f.debug_struct("McpServerState");
+        s.field("session", &self.session);
+        #[cfg(not(target_arch = "wasm32"))]
+        s.field("control_port", &self.control_port).field("workdir_guard", &self.workdir_guard);
+        s.field("has_gui_host", &self.gui_host.is_some())
+            .field("gui_only", &self.gui_only)
+            .field("gui_toolset_enabled", &self.gui_toolset_enabled)
+            .field("enabled_toolsets", &self.enabled_toolsets)
+            .field("pending_notifications_len", &self.pending_notifications.len())
+            .field("initialized", &self.initialized)
+            .finish()
+    }
 }
 
 impl Default for McpServerState {
@@ -51,6 +83,9 @@ impl McpServerState {
             control_port: None,
             #[cfg(not(target_arch = "wasm32"))]
             workdir_guard: None,
+            gui_host: None,
+            gui_only: false,
+            gui_toolset_enabled: false,
             enabled_toolsets: BTreeSet::new(),
             pending_notifications: Vec::new(),
             initialized: false,
@@ -60,12 +95,16 @@ impl McpServerState {
     /// Wrap an existing headless [`Session`].
     #[must_use]
     pub fn from_session(session: Session) -> Self {
+        let gui_only = session.gui_only() == GuiOnlyPolicy::Strict;
         Self {
             session,
             #[cfg(not(target_arch = "wasm32"))]
             control_port: None,
             #[cfg(not(target_arch = "wasm32"))]
             workdir_guard: None,
+            gui_host: None,
+            gui_only,
+            gui_toolset_enabled: false,
             enabled_toolsets: BTreeSet::new(),
             pending_notifications: Vec::new(),
             initialized: false,
@@ -83,10 +122,22 @@ impl McpServerState {
             session: Session::new(),
             control_port: Some(port),
             workdir_guard: None,
+            gui_host: None,
+            gui_only: false,
+            gui_toolset_enabled: false,
             enabled_toolsets: BTreeSet::new(),
             pending_notifications: Vec::new(),
             initialized: false,
         })
+    }
+
+    /// Construct an MCP server state attached to a running desktop `--control <port>` with explicit
+    /// `--gui-only` policy state.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_control_port_and_gui_only(port: u16, gui_only: bool) -> Result<Self, String> {
+        let mut state = Self::with_control_port(port)?;
+        state.set_gui_only(gui_only);
+        Ok(state)
     }
 
     /// Construct a headless MCP server state whose file operations are confined strictly inside `workdir`.
@@ -97,10 +148,41 @@ impl McpServerState {
             session: Session::new(),
             control_port: None,
             workdir_guard: Some(guard),
+            gui_host: None,
+            gui_only: false,
+            gui_toolset_enabled: false,
             enabled_toolsets: BTreeSet::new(),
             pending_notifications: Vec::new(),
             initialized: false,
         })
+    }
+
+    /// Construct an MCP server state backed by an in-process [`GuiSessionHost`].
+    #[must_use]
+    pub fn with_gui_host(host: Box<dyn GuiSessionHost>) -> Self {
+        let gui_only = host.is_gui_only();
+        let mut session = Session::new();
+        session.set_gui_only(if gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled });
+        Self {
+            session,
+            #[cfg(not(target_arch = "wasm32"))]
+            control_port: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            workdir_guard: None,
+            gui_host: Some(host),
+            gui_only,
+            gui_toolset_enabled: false,
+            enabled_toolsets: BTreeSet::new(),
+            pending_notifications: Vec::new(),
+            initialized: false,
+        }
+    }
+
+    /// Fluent builder to enable or disable strict `--gui-only` mode on this server state.
+    #[must_use]
+    pub fn with_gui_only(mut self, gui_only: bool) -> Self {
+        self.set_gui_only(gui_only);
+        self
     }
 
     /// Attach or clear a canonical [`WorkdirGuard`] confinement root on this server state.
@@ -201,6 +283,69 @@ impl McpServerState {
     pub fn mark_initialized(&mut self) {
         self.initialized = true;
     }
+
+    /// Attach or clear an in-process [`GuiSessionHost`].
+    ///
+    /// If `--gui-only` is already enabled on this state, it is propagated to the newly attached
+    /// host; conversely, if the attached host already enforces `--gui-only`, this state adopts it.
+    pub fn set_gui_host(&mut self, host: Option<Box<dyn GuiSessionHost>>) {
+        self.gui_host = host.map(|mut h| {
+            if self.gui_only {
+                h.set_gui_only(true);
+            } else if h.is_gui_only() {
+                self.gui_only = true;
+                self.session.set_gui_only(GuiOnlyPolicy::Strict);
+            }
+            h
+        });
+    }
+
+    /// Return `true` when an in-process [`GuiSessionHost`] is attached.
+    #[must_use]
+    pub fn has_gui_host(&self) -> bool {
+        self.gui_host.is_some()
+    }
+
+    /// Borrow the attached [`GuiSessionHost`], if present.
+    #[must_use]
+    pub fn gui_host(&self) -> Option<&dyn GuiSessionHost> {
+        self.gui_host.as_deref()
+    }
+
+    /// Mutably borrow the attached [`GuiSessionHost`], if present.
+    pub fn gui_host_mut(&mut self) -> Option<&mut (dyn GuiSessionHost + 'static)> {
+        self.gui_host.as_deref_mut()
+    }
+
+    /// Enable or disable strict `--gui-only` enforcement, propagating to both `self.session` and
+    /// any attached [`GuiSessionHost`].
+    pub fn set_gui_only(&mut self, gui_only: bool) {
+        self.gui_only = gui_only;
+        let policy = if gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled };
+        self.session.set_gui_only(policy);
+        if let Some(host) = self.gui_host.as_mut() {
+            host.set_gui_only(gui_only);
+        }
+    }
+
+    /// Return `true` when `--gui-only` policy is active on this state, session, or GUI host.
+    #[must_use]
+    pub fn is_gui_only(&self) -> bool {
+        self.gui_only || self.session.gui_only() == GuiOnlyPolicy::Strict || self.gui_host.as_ref().is_some_and(|host| host.is_gui_only())
+    }
+
+    /// Return `true` when the progressive `gui` toolset has been explicitly enabled in normal mode.
+    #[must_use]
+    pub const fn is_gui_toolset_enabled(&self) -> bool {
+        self.gui_toolset_enabled
+    }
+
+    /// Enable or disable the progressive `gui` toolset in normal mode, returning `true` if changed.
+    pub const fn set_gui_toolset_enabled(&mut self, enabled: bool) -> bool {
+        let changed = self.gui_toolset_enabled != enabled;
+        self.gui_toolset_enabled = enabled;
+        changed
+    }
 }
 
 /// JSON Schema and behavioral annotation descriptor exposed in MCP `tools/list`.
@@ -297,6 +442,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
     if let Value::Array(items) = group_enum_json() {
         group_enum.extend(items);
     }
+    group_enum.push(Value::String(String::from("gui")));
+
+    let mut groups_item_enum = Vec::new();
+    if let Value::Array(items) = group_enum_json() {
+        groups_item_enum.extend(items);
+    }
+    groups_item_enum.push(Value::String(String::from("gui")));
 
     vec![
         ToolDefinition {
@@ -461,13 +613,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("enable_toolset"),
             description: String::from(
-                "Enable or disable progressive CommandGroup per-command tools (emits notifications/tools/list_changed when modified).",
+                "Enable or disable progressive CommandGroup per-command tools or the 'gui' toolset (emits notifications/tools/list_changed when modified).",
             ),
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "group": { "type": "string", "enum": group_enum, "description": "Single CommandGroup (or 'all') to toggle." },
-                    "groups": { "type": "array", "items": { "type": "string", "enum": group_enum_json() }, "description": "Multiple CommandGroups to toggle." },
+                    "group": { "type": "string", "enum": group_enum, "description": "Single CommandGroup, 'gui', or 'all' to toggle." },
+                    "groups": { "type": "array", "items": { "type": "string", "enum": groups_item_enum }, "description": "Multiple CommandGroups (or 'gui') to toggle." },
                     "enabled": { "type": "boolean", "description": "Enable (true, default) or disable (false) the requested toolset(s)." }
                 },
                 "additionalProperties": false
@@ -477,14 +629,24 @@ pub fn list_tools() -> Vec<ToolDefinition> {
     ]
 }
 
-/// Return default core tools plus normalized per-command tools for every enabled `CommandGroup`.
+/// Return the exposed MCP tools for `state`.
+///
+/// Under `--gui-only` (`state.is_gui_only()`), this shrinks strictly to the 8 `gui` tools.
+/// In normal mode, returns the 10 core tools plus per-command tools for every enabled `CommandGroup`
+/// (and the 8 `gui` tools when enabled via `enable_toolset` or backed by a `GuiSessionHost`).
 #[must_use]
 pub fn list_tools_for_state(state: &McpServerState) -> Vec<ToolDefinition> {
+    if state.is_gui_only() {
+        return gui_tools::list_gui_tools();
+    }
     let mut tools = list_tools();
     for spec in registry().specs() {
         if state.is_toolset_enabled(spec.group) {
             tools.push(command_spec_to_tool_definition(spec));
         }
+    }
+    if state.is_gui_toolset_enabled() || state.has_gui_host() {
+        tools.extend(gui_tools::list_gui_tools());
     }
     tools
 }
@@ -507,6 +669,14 @@ where
 fn dispatch_tool_inner(state: &mut McpServerState, name: &str, arguments: Value) -> Result<ToolCallResult, ToolCallError> {
     let args = arguments.as_object().ok_or_else(|| ToolCallError::InvalidParams(String::from("tool arguments must be an object")))?;
 
+    if gui_tools::is_gui_tool_name(name) {
+        return gui_tools::dispatch_gui_tool(state, name, args);
+    }
+
+    if state.is_gui_only() {
+        return Ok(gui_only_violation_result(name));
+    }
+
     match name {
         "doc_inspect" => handle_doc_inspect(state, args),
         "open_file" => formats::handle_open_file(state, args),
@@ -527,6 +697,38 @@ fn dispatch_tool_inner(state: &mut McpServerState, name: &str, arguments: Value)
             Err(ToolCallError::UnknownTool(name.to_owned()))
         }
     }
+}
+
+pub(crate) fn gui_only_violation_result(tool_name: &str) -> ToolCallResult {
+    let payload = StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, format!("tool '{tool_name}' is forbidden under --gui-only policy"))
+        .with_remediation(
+            "Under --gui-only mode, use only the 8 human-equivalent GUI tools: ui_inspect, ui_screenshot, ui_pointer_gesture, ui_type_text, ui_press_key, ui_invoke_menu, ui_switch_tab, ui_answer_dialog.",
+        )
+        .with_details(json!({
+            "tool": tool_name,
+            "policy": "gui_only",
+            "allowed_tools": gui_tools::GUI_TOOL_NAMES,
+        }));
+    errors::result_from_payload(&payload)
+}
+
+pub(crate) fn dispatch_gui_backend(state: &mut McpServerState, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
+    if let Some(host) = state.gui_host.as_mut() {
+        return host.call_gui(method, params).map_err(|err| StructuredErrorPayload::from_engine_error(&err));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(port) = state.control_port() {
+        return live_control::send_control_detailed(port, method, params);
+    }
+    Err(StructuredErrorPayload::new(
+        ErrorCode::Conflict,
+        format!("GUI tool method '{method}' requires an in-process GuiSessionHost (--gui-only) or --control-port <PORT>"),
+    )
+    .with_remediation("Attach an in-process GuiSessionHost (e.g. desktop `--gui-only` host) or pass `--control-port <PORT>` pointing to a running LumenCraft window.")
+    .with_details(json!({
+        "method": method,
+        "gui_only": state.is_gui_only(),
+    })))
 }
 
 fn handle_direct_command_tool(state: &mut McpServerState, command_id: &str, params: Value) -> Result<ToolCallResult, ToolCallError> {
@@ -1119,8 +1321,12 @@ mod live_control {
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
 
+    use lumencraft_doc::ErrorCode;
+    use lumencraft_engine::EngineError;
     use serde::Deserialize;
     use serde_json::{Value, json};
+
+    use crate::errors::StructuredErrorPayload;
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
     const IO_TIMEOUT: Duration = Duration::from_secs(5);
@@ -1133,22 +1339,34 @@ mod live_control {
         #[serde(default)]
         result: Value,
         error: Option<String>,
+        #[serde(default)]
+        error_detail: Option<Value>,
     }
 
     pub fn send_control(port: u16, method: &str, params: Value) -> Result<Value, String> {
+        send_control_detailed(port, method, params).map_err(|payload| payload.message)
+    }
+
+    pub fn send_control_detailed(port: u16, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
         if port == 0 {
-            return Err(String::from("control port must be in 1..=65535"));
+            return Err(StructuredErrorPayload::new(ErrorCode::BadInput, "control port must be in 1..=65535"));
         }
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
-        let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT)
-            .map_err(|err| format!("failed to connect to desktop control port 127.0.0.1:{port}: {err}"))?;
+        let mut stream = TcpStream::connect_timeout(&addr, CONNECT_TIMEOUT).map_err(|err| {
+            StructuredErrorPayload::new(ErrorCode::IoError, format!("failed to connect to desktop control port 127.0.0.1:{port}: {err}"))
+                .with_retryable(true)
+                .with_remediation("Ensure the desktop control server is running and reachable on 127.0.0.1.")
+        })?;
         let _ = stream.set_read_timeout(Some(IO_TIMEOUT));
         let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
 
-        let mut writer = stream.try_clone().map_err(|err| format!("control stream clone failed: {err}"))?;
-        send_control_on_io(&mut stream, &mut writer, method, params, MAX_CONTROL_RESPONSE_BYTES)
+        let mut writer = stream
+            .try_clone()
+            .map_err(|err| StructuredErrorPayload::new(ErrorCode::IoError, format!("control stream clone failed: {err}")).with_retryable(true))?;
+        send_control_envelope_on_io(&mut stream, &mut writer, method, params, MAX_CONTROL_RESPONSE_BYTES)
     }
 
+    #[cfg(test)]
     pub(crate) fn send_control_on_io<R: Read, W: Write>(
         reader_io: &mut R,
         writer_io: &mut W,
@@ -1156,28 +1374,82 @@ mod live_control {
         params: Value,
         max_response_bytes: usize,
     ) -> Result<Value, String> {
+        send_control_envelope_on_io(reader_io, writer_io, method, params, max_response_bytes).map_err(|payload| payload.message)
+    }
+
+    pub(crate) fn send_control_envelope_on_io<R: Read, W: Write>(
+        reader_io: &mut R,
+        writer_io: &mut W,
+        method: &str,
+        params: Value,
+        max_response_bytes: usize,
+    ) -> Result<Value, StructuredErrorPayload> {
         let req_id = String::from("mcp-1");
         let payload = serde_json::to_vec(&json!({
             "id": req_id,
             "method": method,
             "params": params,
         }))
-        .map_err(|err| format!("failed to encode control request: {err}"))?;
+        .map_err(|err| StructuredErrorPayload::new(ErrorCode::InternalError, format!("failed to encode control request: {err}")))?;
 
-        writer_io.write_all(&payload).map_err(|err| format!("control write failed: {err}"))?;
-        writer_io.write_all(b"\n").map_err(|err| format!("control write failed: {err}"))?;
-        writer_io.flush().map_err(|err| format!("control flush failed: {err}"))?;
+        writer_io
+            .write_all(&payload)
+            .and_then(|()| writer_io.write_all(b"\n"))
+            .and_then(|()| writer_io.flush())
+            .map_err(|err| StructuredErrorPayload::new(ErrorCode::IoError, format!("control write failed: {err}")).with_retryable(true))?;
 
         let mut reader = BufReader::new(reader_io);
-        let line_bytes = read_bounded_line(&mut reader, max_response_bytes)?;
-        let resp: ControlResponse = serde_json::from_slice(&line_bytes).map_err(|err| format!("invalid control response JSON: {err}"))?;
+        let line_bytes = read_bounded_line(&mut reader, max_response_bytes)
+            .map_err(|msg| StructuredErrorPayload::new(ErrorCode::IoError, msg).with_retryable(true))?;
+        let resp: ControlResponse = serde_json::from_slice(&line_bytes)
+            .map_err(|err| StructuredErrorPayload::new(ErrorCode::CorruptData, format!("invalid control response JSON: {err}")))?;
         if resp.id != req_id {
-            return Err(format!("mismatched control response id '{}'", resp.id));
+            return Err(StructuredErrorPayload::new(ErrorCode::CorruptData, format!("mismatched control response id '{}'", resp.id)));
         }
         if !resp.ok {
-            return Err(resp.error.unwrap_or_else(|| String::from("desktop control command failed")));
+            return Err(parse_control_error(resp.error, resp.error_detail));
         }
         Ok(resp.result)
+    }
+
+    fn parse_control_error(error: Option<String>, error_detail: Option<Value>) -> StructuredErrorPayload {
+        if let Some(detail) = error_detail {
+            if let Ok(parsed) = serde_json::from_value::<StructuredErrorPayload>(detail.clone()) {
+                return parsed;
+            }
+            if let Ok(engine_err) = serde_json::from_value::<EngineError>(detail.clone()) {
+                return StructuredErrorPayload::from_engine_error(&engine_err);
+            }
+            if let Some(code_str) = detail.get("code").and_then(Value::as_str) {
+                let code = ErrorCode::from_code_str(code_str);
+                let msg = detail
+                    .get("message")
+                    .and_then(Value::as_str)
+                    .map(ToOwned::to_owned)
+                    .or(error)
+                    .unwrap_or_else(|| String::from("desktop control command failed"));
+                let mut payload = StructuredErrorPayload::new(code, msg);
+                if let Some(retryable) = detail.get("retryable").and_then(Value::as_bool) {
+                    payload = payload.with_retryable(retryable);
+                }
+                if let Some(rem) = detail.get("remediation").and_then(Value::as_str) {
+                    payload = payload.with_remediation(rem);
+                }
+                if let Some(extra) = detail.get("details") {
+                    payload = payload.with_details(extra.clone());
+                }
+                return payload;
+            }
+        }
+        let msg = error.unwrap_or_else(|| String::from("desktop control command failed"));
+        let lower = msg.to_ascii_lowercase();
+        if lower.contains("gui_only_violation") || lower.contains("gui-only") || lower.contains("gui_only") {
+            return StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, msg);
+        }
+        if lower.contains("disabled") || lower.contains("grayed") {
+            return StructuredErrorPayload::new(ErrorCode::Conflict, msg);
+        }
+        StructuredErrorPayload::from_message(msg)
     }
 
     fn read_bounded_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> Result<Vec<u8>, String> {
@@ -1254,6 +1526,9 @@ mod tests {
     #[test]
     fn per_command_mcp_names_are_valid_and_collision_free() {
         let mut seen: BTreeSet<String> = list_tools().into_iter().map(|t| t.name).collect();
+        for gui_name in crate::gui_tools::GUI_TOOL_NAMES {
+            assert!(seen.insert(gui_name.to_owned()), "collision between core tools and gui tool '{gui_name}'");
+        }
         for spec in registry().specs() {
             let normalized = command_id_to_mcp_tool_name(spec.id);
             assert!(!normalized.is_empty(), "empty MCP tool name for {}", spec.id);
@@ -1355,5 +1630,21 @@ mod tests {
         let huge = vec![b'a'; 256];
         let mut huge_cur = Cursor::new(huge.as_slice());
         assert!(super::live_control::send_control_on_io(&mut huge_cur, &mut outbound, "ping", json!({}), 64).is_err());
+
+        // Detailed error parsing preserves structured error_detail codes and disabled/gui_only heuristics.
+        let mut outbound = Vec::new();
+        let mut gui_err = Cursor::new(
+            br#"{"id":"mcp-1","ok":false,"error":"blocked","error_detail":{"code":"gui_only_violation","category":"policy","message":"forbidden shortcut","retryable":false,"remediation":"Use visible UI","details":{"remote":true}}}"#.as_slice(),
+        );
+        let parsed = super::live_control::send_control_envelope_on_io(&mut gui_err, &mut outbound, "ui.invoke_menu", json!({}), 4096)
+            .expect_err("structured detail err");
+        assert_eq!(parsed.code, lumencraft_doc::ErrorCode::GuiOnlyViolation);
+        assert_eq!(parsed.remediation.as_deref(), Some("Use visible UI"));
+
+        let mut outbound = Vec::new();
+        let mut disabled_err = Cursor::new(br#"{"id":"mcp-1","ok":false,"error":"control is disabled"}"#.as_slice());
+        let fallback = super::live_control::send_control_envelope_on_io(&mut disabled_err, &mut outbound, "ui.switch_tab", json!({}), 4096)
+            .expect_err("disabled heuristic");
+        assert_eq!(fallback.code, lumencraft_doc::ErrorCode::Conflict);
     }
 }
