@@ -17,7 +17,7 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 1 | `S01` Numerical foundations | `crates/math`, `crates/palette` | done | 1/2/4/1 | 8/0/0/0 | 2026-11-14 |
 | 2 | `S05` Document model | `crates/doc` | done | 3/3/1/0 | 7/0/0/0 | 2026-11-14 |
 | 3 | `S02` Statistics | `crates/stats` | done | 6/5/2/0 | 13/0/0/0 | 2026-11-14 |
-| 4 | `S03` Curve fitting and equation language | `crates/fit` | verifying | 3/6/3/0 | — | 2026-11-14 |
+| 4 | `S03` Curve fitting and equation language | `crates/fit` | done | 3/6/3/0 | 12/0/0/0 | 2026-11-14 |
 | 5 | `S04` Transforms | `crates/transform` | done | 4/5/4/0 | 13/0/0/0 | 2026-11-14 |
 | 6 | `S06` File formats and import | `crates/format` | done | 1/4/9/0 | 12/2/0/0 | 2026-11-14 |
 | 7 | `S08` Chart compiler and scales | `crates/chart` | reviewing | — | — | 2026-11-14 |
@@ -41,6 +41,7 @@ What each review actually read, so a later session can see what was and was not 
 | `S02` | see [`findings/S02.md`](findings/S02.md) › Scope read | — | reviewer: release probe crate (12 of 13 findings reproduced); verifier: `audit/r1/S02` `crates/stats/tests/audit_r1_s02.rs`, 9 tests, all fail at base (re-run by coordinator) |
 | `S01` | see [`findings/S01.md`](findings/S01.md) › Scope read | — | reviewer: probe crate + R 4.5.2 black-box oracle; verifier: `audit/r1/S01` `crates/math/tests/audit_r1_s01.rs`, `crates/palette/tests/audit_r1_s01.rs`, all 8 fail at base (R exact integrals, analytic eigenvalues) |
 | `S05` | see [`findings/S05.md`](findings/S05.md) › Scope read | — | `cargo test -p lumencraft-doc` pass; verifier: `audit/r1/S05` `audit_r1_s05.rs` in `crates/doc`, `crates/format`, `crates/stats` |
+| `S03` | see [`findings/S03.md`](findings/S03.md) › Scope read (`linear.rs` not read; reviewer interrupted by a rate limit after writing its file) | Bessel functions, pharma/curves/NIST library skimmed | reviewer: probe crate, 12 probes; verifier: `audit/r1/S03` `crates/fit/tests/audit_r1_s03.rs`, all 12 fail at base (R1-S03-10 `#[ignore]`, 195 s) |
 | `S04` | see [`findings/S04.md`](findings/S04.md) › Scope read | — | reviewer: probe crate (11 of 13 reproduced); verifier: `audit/r1/S04` `crates/transform/tests/audit_r1_s04.rs` |
 | `S06` | see [`findings/S06.md`](findings/S06.md) › Scope read | — | `cargo test -p lumencraft-format` 43/43 pass; verifier: `audit/r1/S06` `crates/format/tests/audit_r1_s06.rs`, 5 fail at base (02, 03, 04, 06, 10) |
 
@@ -63,6 +64,9 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S02-04](findings/S02.md) | S1 | Dunn's test after Kruskal–Wallis, and "Dunn" after ordinary ANOVA, report unadjusted P as "Adjusted P" | CONFIRMED | test | `S02` |
 | [R1-S02-05](findings/S02.md) | S1 | Cox PH: a singular information matrix ships SE = 1000, or SE = 1 from an identity fallback, and non-convergence is never reported | CONFIRMED | test | `S02` |
 | [R1-S02-06](findings/S02.md) | S1 | One-tailed Mann–Whitney and Wilcoxon P-values ignore the direction of the effect and contradict the one-tailed *t* tests | CONFIRMED | test | `S02` |
+| [R1-S03-01](findings/S03.md) | S1 | Poisson and robust fits report profile CIs exactly half the Wald width (profile computed on the wrong objective) | CONFIRMED | test | `S03` |
+| [R1-S03-02](findings/S03.md) | S1 | Profile-likelihood bound falls back to the bracket midpoint when Brent fails | CONFIRMED | test | `S03` |
+| [R1-S03-03](findings/S03.md) | S1 | ROUT in the independent-curves (96-curve batch) path pools the residual scale across curves | CONFIRMED | test | `S03` |
 | [R1-S04-03](findings/S04.md) | S1 | Import placement grows tables without a row cap before validating | CONFIRMED | test | `S04` |
 | [R1-S05-01](findings/S05.md) | S1 | Ragged tables pass load validation; `row_count()` reads only the first column and consumers index the others → panic | CONFIRMED | test | `S05` |
 | [R1-S05-02](findings/S05.md) | S1 | `transpose_cell_grid` turns a ragged grid into a dense `max_cols × rows` grid with no cap, so a ~200 KB CSV can abort the app | CONFIRMED | test | `S05` |
@@ -75,6 +79,12 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S02-09](findings/S02.md) | S2 | Cox regression treats any non-zero status as an event; Kaplan–Meier rejects the same column | CONFIRMED | trace | `S02` |
 | [R1-S02-10](findings/S02.md) | S2 | Outlier "Row Index" and per-column scalar indices count only non-blank cells, not table rows or data sets | CONFIRMED | trace | `S02` |
 | [R1-S02-11](findings/S02.md) | S2 | ROUT flags nothing when 68% or more of the values are tied | CONFIRMED | test | `S02` |
+| [R1-S03-04](findings/S03.md) | S2 | Implicit-equation solver uses absolute tolerances and a fixed search range | CONFIRMED | test | `S03` |
+| [R1-S03-05](findings/S03.md) | S2 | `hyp1f1` and `hyp2f1` return truncated partial sums as values | CONFIRMED | test | `S03` |
+| [R1-S03-06](findings/S03.md) | S2 | Robust (Cauchy) fits report SEs, CIs, bands and AICc/F comparisons that the guide says are not applicable | CONFIRMED | test | `S03` |
+| [R1-S03-07](findings/S03.md) | S2 | Batch (independent-curves) path accepts curves with fewer points than parameters and reports SE 0, R² 1, Sy.x 0 | CONFIRMED | test | `S03` |
+| [R1-S03-08](findings/S03.md) | S2 | `Y0 = expr` in a non-ODE equation is silently discarded and `Y0` becomes a fitted parameter | CONFIRMED | test | `S03` |
+| [R1-S03-09](findings/S03.md) | S2 | DSL compile cost grows quadratically with source size, with no total cap | CONFIRMED | test | `S03` |
 | [R1-S04-01](findings/S04.md) | S2 | Ragged tables panic the formula evaluator and Transpose | CONFIRMED | test | `S04` |
 | [R1-S04-02](findings/S04.md) | S2 | Long left-associative formula chains overflow the stack in the recursive evaluator | CONFIRMED | test | `S04` |
 | [R1-S04-04](findings/S04.md) | S2 | Bare built-in constants such as `e` silently resolve to default-labelled columns | CONFIRMED | test | `S04` |
@@ -96,6 +106,9 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S01-07](findings/S01.md) | S3 | `ColorRamp::Custom` copies and sorts every stop on every sample, and the stop count is unbounded | CONFIRMED | test | `S01` |
 | [R1-S02-12](findings/S02.md) | S3 | Mann–Whitney does not match its documented exactness: ties always use the normal approximation, and large-sample "Hodges–Lehmann" is a difference of medians | CONFIRMED | trace | `S02` |
 | [R1-S02-13](findings/S02.md) | S3 | RM one-way ANOVA, Friedman and Cox drop incomplete rows without saying so, and Cox ignores `reference_levels` | CONFIRMED | trace | `S02` |
+| [R1-S03-10](findings/S03.md) | S3 | ODE models re-integrate from `t0` per point with a per-evaluation step ceiling and no overall budget | CONFIRMED | test | `S03` |
+| [R1-S03-11](findings/S03.md) | S3 | References to non-existent predictors (`X2`, `X3`, …) silently evaluate to 0 | CONFIRMED | test | `S03` |
+| [R1-S03-12](findings/S03.md) | S3 | Interpolated unknowns extrapolate up to 50 % of the X span without a flag; documented out-of-range flags do not exist | CONFIRMED | test | `S03` |
 | [R1-S04-10](findings/S04.md) | S3 | Curve calculus pairs each data set's compacted series with data set A's X values | CONFIRMED | test | `S04` |
 | [R1-S04-11](findings/S04.md) | S3 | Remove Baseline blanks cells for missing or zero baselines without a warning | CONFIRMED | test | `S04` |
 | [R1-S04-12](findings/S04.md) | S3 | The simulation seed in the summary tab loses precision above 2^53 | CONFIRMED | test | `S04` |
