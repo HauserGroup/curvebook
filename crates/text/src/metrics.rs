@@ -682,3 +682,1098 @@ pub(crate) fn read_u32_be(bytes: &[u8], offset: usize) -> Option<u32> {
     let arr: [u8; 4] = bytes.get(offset..end)?.try_into().ok()?;
     Some(u32::from_be_bytes(arr))
 }
+
+pub(crate) fn read_i32_be(bytes: &[u8], offset: usize) -> Option<i32> {
+    let end = offset.checked_add(4)?;
+    let arr: [u8; 4] = bytes.get(offset..end)?.try_into().ok()?;
+    Some(i32::from_be_bytes(arr))
+}
+
+// ---------------------------------------------------------------------------
+// SFNT Inspection, Pure-Rust Fallback TTF Builder & CJK Font Candidates
+// ---------------------------------------------------------------------------
+
+const MAX_CMAP_COLLECT: usize = 65_536;
+
+/// Parsed metadata, descriptor metrics, Windows-1252 advance widths, and Unicode `cmap`
+/// mappings extracted from a TrueType/OpenType SFNT binary.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TrueTypeFontInfo {
+    pub postscript_name: String,
+    pub family_name: String,
+    pub units_per_em: u16,
+    pub ascender_1000: i32,
+    pub descender_1000: i32,
+    pub cap_height_1000: i32,
+    pub italic_angle: f64,
+    pub flags: u32,
+    pub stem_v: i32,
+    pub bbox_1000: [i32; 4],
+    pub widths_1000: Vec<u16>,
+    pub cmap_basic: Vec<(u32, u16)>,
+}
+
+impl TrueTypeFontInfo {
+    /// Look up the TrueType glyph ID for Unicode scalar `ch` (`0` for `.notdef` when unmapped).
+    #[must_use]
+    pub fn glyph_id(&self, ch: char) -> u16 {
+        let target = u32::from(ch);
+        if let Ok(idx) = self.cmap_basic.binary_search_by_key(&target, |&(cp, _)| cp) {
+            return self.cmap_basic.get(idx).map_or(0, |&(_, gid)| gid);
+        }
+        if self.cmap_basic.len() <= 64 {
+            return self.cmap_basic.iter().find(|&&(cp, _)| cp == target).map_or(0, |&(_, gid)| gid);
+        }
+        0
+    }
+
+    /// Compute the advance width in PostScript points (`pt`) for `ch` at `font_size_pt`.
+    #[must_use]
+    pub fn width_pt(&self, ch: char, font_size_pt: f64) -> f64 {
+        if !font_size_pt.is_finite() || font_size_pt <= 0.0 || matches!(ch, '\n' | '\r') {
+            return 0.0;
+        }
+        if ch == '\t' {
+            return 4.0 * self.width_pt(' ', font_size_pt);
+        }
+        if let Some(code) = char_to_win1252_byte(ch)
+            && code >= 32
+            && let Some(&w1000) = self.widths_1000.get(usize::from(code - 32))
+        {
+            return f64::from(w1000) * font_size_pt / 1000.0;
+        }
+        core14_advance_em(ch, SpanWeight::Regular, SpanSlope::Upright) * font_size_pt
+    }
+}
+
+/// Inspect an SFNT/TrueType byte slice (`head`, `hhea`, `maxp`, `hmtx`, `OS/2`, `post`, `name`,
+/// and `cmap` format 4 / 12) with strict bounds checking and zero panics.
+///
+/// # Errors
+/// Returns [`crate::TextError`] if the SFNT header or any table is malformed, truncated, or lacks
+/// required tables (`head`, `hhea`, `maxp`, `hmtx`, `cmap`).
+pub fn parse_truetype_font_info(sfnt_bytes: &[u8]) -> Result<TrueTypeFontInfo, crate::TextError> {
+    let num_tables = validate_sfnt_directory(sfnt_bytes)?;
+
+    let head = require_sfnt_table(sfnt_bytes, num_tables, *b"head")?;
+    let hhea = require_sfnt_table(sfnt_bytes, num_tables, *b"hhea")?;
+    let maxp = require_sfnt_table(sfnt_bytes, num_tables, *b"maxp")?;
+    let hmtx = require_sfnt_table(sfnt_bytes, num_tables, *b"hmtx")?;
+    let cmap = require_sfnt_table(sfnt_bytes, num_tables, *b"cmap")?;
+
+    let os2 = find_sfnt_table(sfnt_bytes, num_tables, *b"OS/2");
+    let post = find_sfnt_table(sfnt_bytes, num_tables, *b"post");
+    let name = find_sfnt_table(sfnt_bytes, num_tables, *b"name");
+
+    let head_metrics = parse_head_table(head)?;
+    let hhea_metrics = parse_hhea_table(hhea)?;
+    let num_glyphs = parse_maxp_num_glyphs(maxp)?;
+
+    if hhea_metrics.num_h_metrics == 0 || hhea_metrics.num_h_metrics > num_glyphs {
+        return Err(invalid_sfnt("hhea numberOfHMetrics out of range for maxp numGlyphs"));
+    }
+    let min_hmtx_bytes = usize::from(hhea_metrics.num_h_metrics) * 4;
+    if hmtx.len() < min_hmtx_bytes {
+        return Err(invalid_sfnt("hmtx table shorter than numberOfHMetrics * 4"));
+    }
+
+    let os2_metrics = os2.map(parse_os2_table).transpose()?;
+    let post_metrics = post.map(parse_post_table).transpose()?;
+    let (parsed_family, parsed_ps) = name.map(parse_name_table).transpose()?.unwrap_or_default();
+    let cmap_basic = parse_cmap_mappings(cmap, num_glyphs)?;
+
+    let units_per_em = head_metrics.units_per_em;
+    let raw_asc = if hhea_metrics.ascender != 0 { hhea_metrics.ascender } else { os2_metrics.map_or(800, |m| m.typo_ascender) };
+    let raw_desc = if hhea_metrics.descender != 0 { hhea_metrics.descender } else { os2_metrics.map_or(-200, |m| m.typo_descender) };
+
+    let ascender_1000 = scale_font_units_1000(i32::from(raw_asc), units_per_em);
+    let descender_1000 = scale_font_units_1000(i32::from(raw_desc), units_per_em);
+    let cap_height_1000 = os2_metrics
+        .and_then(|m| m.cap_height)
+        .filter(|&c| c > 0)
+        .map_or_else(|| (ascender_1000 * 7 / 8).max(1), |c| scale_font_units_1000(i32::from(c), units_per_em));
+
+    let is_italic_flag = os2_metrics.is_some_and(|m| (m.fs_selection & 0x0001) != 0) || (head_metrics.mac_style & 0x0002) != 0;
+    let italic_angle = post_metrics.map_or(if is_italic_flag { -12.0 } else { 0.0 }, |p| p.italic_angle);
+
+    let is_fixed_pitch = post_metrics.is_some_and(|p| p.is_fixed_pitch);
+    let is_serif = os2_metrics.is_some_and(|m| {
+        let class_id = (m.family_class >> 8) & 0xFF;
+        (1..=7).contains(&class_id)
+    });
+    let mut flags = 32u32;
+    if is_fixed_pitch {
+        flags |= 1;
+    }
+    if is_serif {
+        flags |= 2;
+    }
+    if italic_angle.abs() > 1e-6 || is_italic_flag {
+        flags |= 64;
+    }
+
+    let weight_class = os2_metrics.map_or(if (head_metrics.mac_style & 0x0001) != 0 { 700 } else { 400 }, |m| m.weight_class);
+    let stem_v = (10 + (i32::from(weight_class) / 100) * 18).clamp(30, 300);
+
+    let bbox_1000 = [
+        scale_font_units_1000(i32::from(head_metrics.x_min), units_per_em),
+        scale_font_units_1000(i32::from(head_metrics.y_min), units_per_em),
+        scale_font_units_1000(i32::from(head_metrics.x_max), units_per_em),
+        scale_font_units_1000(i32::from(head_metrics.y_max), units_per_em),
+    ];
+
+    let widths_1000 = build_win1252_widths(hmtx, hhea_metrics.num_h_metrics, units_per_em, &cmap_basic)?;
+
+    let family_name = if !parsed_family.is_empty() {
+        parsed_family
+    } else if !parsed_ps.is_empty() {
+        parsed_ps.clone()
+    } else {
+        String::from("LumenCraft Sans")
+    };
+    let postscript_name = if !parsed_ps.is_empty() { sanitize_postscript_name(&parsed_ps) } else { sanitize_postscript_name(&family_name) };
+
+    Ok(TrueTypeFontInfo {
+        postscript_name,
+        family_name,
+        units_per_em,
+        ascender_1000,
+        descender_1000,
+        cap_height_1000,
+        italic_angle,
+        flags,
+        stem_v,
+        bbox_1000,
+        widths_1000,
+        cmap_basic,
+    })
+}
+
+/// Return `true` when at least one valid bundled TrueType/OpenType font is compiled into
+/// [`BUNDLED_FONTS`].
+#[must_use]
+pub fn has_bundled_or_ttf_font() -> bool {
+    BUNDLED_FONTS.iter().any(|&(_, bytes)| TrueTypeFont::parse(bytes).is_some())
+}
+
+/// Standard macOS, Windows, and Linux CJK fallback font family names ordered by `locale`.
+#[must_use]
+pub fn system_cjk_font_candidates(locale: &str) -> &'static [&'static str] {
+    const JA_CANDIDATES: &[&str] =
+        &["Hiragino Sans", "Hiragino Kaku Gothic ProN", "Hirakaku", "Yu Gothic", "Meiryo", "Noto Sans CJK JP", "Noto Sans JP", "BIZ UDPGothic"];
+    const KO_CANDIDATES: &[&str] = &["Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans CJK KR", "Noto Sans KR", "NanumGothic"];
+    const ZH_HANT_CANDIDATES: &[&str] = &["PingFang TC", "Microsoft JhengHei", "Noto Sans CJK TC", "Noto Sans TC", "Heiti TC"];
+    const ZH_HANS_CANDIDATES: &[&str] = &["PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Noto Sans SC", "Hiragino Sans GB", "Heiti SC"];
+    const GENERIC_CJK_CANDIDATES: &[&str] = &[
+        "Noto Sans CJK",
+        "PingFang SC",
+        "PingFang TC",
+        "Hiragino Sans",
+        "Hiragino Kaku Gothic ProN",
+        "Hirakaku",
+        "Yu Gothic",
+        "Malgun Gothic",
+        "Microsoft YaHei",
+        "Microsoft JhengHei",
+    ];
+
+    let normalized = locale.trim().to_ascii_lowercase().replace('_', "-");
+    if normalized == "ja" || normalized.starts_with("ja-") {
+        JA_CANDIDATES
+    } else if normalized == "ko" || normalized.starts_with("ko-") {
+        KO_CANDIDATES
+    } else if normalized.starts_with("zh-tw")
+        || normalized.starts_with("zh-hk")
+        || normalized.starts_with("zh-mo")
+        || normalized.starts_with("zh-hant")
+    {
+        ZH_HANT_CANDIDATES
+    } else if normalized == "zh" || normalized.starts_with("zh-") {
+        ZH_HANS_CANDIDATES
+    } else {
+        GENERIC_CJK_CANDIDATES
+    }
+}
+
+/// Pure-Rust in-memory SFNT (`0x00010000`) TrueType font builder covering `.notdef`,
+/// printable ASCII (`32..=126`), Latin-1 (`160..=255`), and scientific Greek
+/// (`α`, `β`, `γ`, `Δ`, `μ`, `σ`).
+///
+/// Produces a valid binary font with `OS/2`, `cmap` (format 4), `glyf`, `head`, `hhea`,
+/// `hmtx`, `loca`, `maxp`, `name`, and `post` tables without bundling external `.ttf` files.
+#[must_use]
+pub fn build_minimal_truetype_font() -> Vec<u8> {
+    let glyphs = build_minimal_glyph_specs();
+    let num_glyphs = glyphs.len() as u16;
+
+    let (glyf, loca, font_bbox, h_extents) = build_glyf_and_loca(&glyphs);
+    let hmtx = build_hmtx_table(&glyphs);
+    let head = build_head_table(font_bbox);
+    let hhea = build_hhea_table(num_glyphs, h_extents);
+    let maxp = build_maxp_table(num_glyphs);
+    let os2 = build_os2_table();
+    let cmap = build_minimal_cmap_table();
+    let name = build_minimal_name_table();
+    let post = build_minimal_post_table();
+
+    assemble_sfnt_tables(&[
+        (*b"OS/2", os2),
+        (*b"cmap", cmap),
+        (*b"glyf", glyf),
+        (*b"head", head),
+        (*b"hhea", hhea),
+        (*b"hmtx", hmtx),
+        (*b"loca", loca),
+        (*b"maxp", maxp),
+        (*b"name", name),
+        (*b"post", post),
+    ])
+}
+
+// --- SFNT Parsing Helpers ---
+
+fn invalid_sfnt(message: impl Into<String>) -> crate::TextError {
+    crate::TextError::InvalidSfnt { message: message.into() }
+}
+
+fn validate_sfnt_directory(bytes: &[u8]) -> Result<u16, crate::TextError> {
+    let version = bytes.get(0..4).ok_or_else(|| invalid_sfnt("SFNT header shorter than 12 bytes"))?;
+    if version != [0x00, 0x01, 0x00, 0x00] && version != b"true" && version != b"OTTO" {
+        return Err(invalid_sfnt("unrecognized SFNT version tag"));
+    }
+    if bytes.len() < 12 {
+        return Err(invalid_sfnt("SFNT header truncated"));
+    }
+    let num_tables = read_u16_be(bytes, 4).ok_or_else(|| invalid_sfnt("missing numTables"))?;
+    if num_tables == 0 || num_tables > 128 {
+        return Err(invalid_sfnt("invalid SFNT numTables"));
+    }
+    let dir_end =
+        usize::from(num_tables).checked_mul(16).and_then(|n| 12usize.checked_add(n)).ok_or_else(|| invalid_sfnt("SFNT directory size overflow"))?;
+    if dir_end > bytes.len() {
+        return Err(invalid_sfnt("SFNT table directory truncated"));
+    }
+    for i in 0..usize::from(num_tables) {
+        let rec_off = 12 + i * 16;
+        let offset = read_u32_be(bytes, rec_off + 8).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid_sfnt("invalid table offset"))?;
+        let length = read_u32_be(bytes, rec_off + 12).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid_sfnt("invalid table length"))?;
+        let end = offset.checked_add(length).ok_or_else(|| invalid_sfnt("table range overflow"))?;
+        if end > bytes.len() {
+            return Err(invalid_sfnt("SFNT table extends past EOF"));
+        }
+    }
+    Ok(num_tables)
+}
+
+fn require_sfnt_table(bytes: &[u8], num_tables: u16, tag: [u8; 4]) -> Result<&[u8], crate::TextError> {
+    find_sfnt_table(bytes, num_tables, tag).ok_or(crate::TextError::MissingSfntTable { tag })
+}
+
+struct HeadMetrics {
+    units_per_em: u16,
+    x_min: i16,
+    y_min: i16,
+    x_max: i16,
+    y_max: i16,
+    mac_style: u16,
+}
+
+fn parse_head_table(head: &[u8]) -> Result<HeadMetrics, crate::TextError> {
+    if head.len() < 54 {
+        return Err(invalid_sfnt("head table shorter than 54 bytes"));
+    }
+    let units_per_em = read_u16_be(head, 18).ok_or_else(|| invalid_sfnt("missing unitsPerEm"))?;
+    if !(16..=16384).contains(&units_per_em) {
+        return Err(invalid_sfnt("head unitsPerEm outside 16..=16384"));
+    }
+    let x_min = read_i16_be(head, 36).ok_or_else(|| invalid_sfnt("missing head xMin"))?;
+    let y_min = read_i16_be(head, 38).ok_or_else(|| invalid_sfnt("missing head yMin"))?;
+    let x_max = read_i16_be(head, 40).ok_or_else(|| invalid_sfnt("missing head xMax"))?;
+    let y_max = read_i16_be(head, 42).ok_or_else(|| invalid_sfnt("missing head yMax"))?;
+    let mac_style = read_u16_be(head, 44).ok_or_else(|| invalid_sfnt("missing head macStyle"))?;
+    Ok(HeadMetrics { units_per_em, x_min, y_min, x_max, y_max, mac_style })
+}
+
+struct HheaMetrics {
+    ascender: i16,
+    descender: i16,
+    num_h_metrics: u16,
+}
+
+fn parse_hhea_table(hhea: &[u8]) -> Result<HheaMetrics, crate::TextError> {
+    if hhea.len() < 36 {
+        return Err(invalid_sfnt("hhea table shorter than 36 bytes"));
+    }
+    let ascender = read_i16_be(hhea, 4).ok_or_else(|| invalid_sfnt("missing hhea ascender"))?;
+    let descender = read_i16_be(hhea, 6).ok_or_else(|| invalid_sfnt("missing hhea descender"))?;
+    let num_h_metrics = read_u16_be(hhea, 34).ok_or_else(|| invalid_sfnt("missing hhea numberOfHMetrics"))?;
+    Ok(HheaMetrics { ascender, descender, num_h_metrics })
+}
+
+fn parse_maxp_num_glyphs(maxp: &[u8]) -> Result<u16, crate::TextError> {
+    if maxp.len() < 6 {
+        return Err(invalid_sfnt("maxp table shorter than 6 bytes"));
+    }
+    let num_glyphs = read_u16_be(maxp, 4).ok_or_else(|| invalid_sfnt("missing maxp numGlyphs"))?;
+    if num_glyphs == 0 {
+        return Err(invalid_sfnt("maxp numGlyphs is zero"));
+    }
+    Ok(num_glyphs)
+}
+
+#[derive(Clone, Copy)]
+struct Os2Metrics {
+    weight_class: u16,
+    family_class: i16,
+    fs_selection: u16,
+    typo_ascender: i16,
+    typo_descender: i16,
+    cap_height: Option<i16>,
+}
+
+fn parse_os2_table(os2: &[u8]) -> Result<Os2Metrics, crate::TextError> {
+    if os2.len() < 78 {
+        return Err(invalid_sfnt("OS/2 table shorter than 78 bytes"));
+    }
+    let version = read_u16_be(os2, 0).ok_or_else(|| invalid_sfnt("missing OS/2 version"))?;
+    if version >= 2 && os2.len() < 96 {
+        return Err(invalid_sfnt("OS/2 v2+ table shorter than 96 bytes"));
+    }
+    let weight_class = read_u16_be(os2, 4).ok_or_else(|| invalid_sfnt("missing OS/2 usWeightClass"))?;
+    let family_class = read_i16_be(os2, 30).ok_or_else(|| invalid_sfnt("missing OS/2 sFamilyClass"))?;
+    let fs_selection = read_u16_be(os2, 62).ok_or_else(|| invalid_sfnt("missing OS/2 fsSelection"))?;
+    let typo_ascender = read_i16_be(os2, 68).ok_or_else(|| invalid_sfnt("missing OS/2 sTypoAscender"))?;
+    let typo_descender = read_i16_be(os2, 70).ok_or_else(|| invalid_sfnt("missing OS/2 sTypoDescender"))?;
+    let cap_height = if version >= 2 { read_i16_be(os2, 88) } else { None };
+    Ok(Os2Metrics { weight_class, family_class, fs_selection, typo_ascender, typo_descender, cap_height })
+}
+
+#[derive(Clone, Copy)]
+struct PostMetrics {
+    italic_angle: f64,
+    is_fixed_pitch: bool,
+}
+
+fn parse_post_table(post: &[u8]) -> Result<PostMetrics, crate::TextError> {
+    if post.len() < 32 {
+        return Err(invalid_sfnt("post table shorter than 32 bytes"));
+    }
+    let italic_fixed = read_i32_be(post, 4).ok_or_else(|| invalid_sfnt("missing post italicAngle"))?;
+    let is_fixed_pitch = read_u32_be(post, 12).ok_or_else(|| invalid_sfnt("missing post isFixedPitch"))? != 0;
+    Ok(PostMetrics { italic_angle: f64::from(italic_fixed) / 65536.0, is_fixed_pitch })
+}
+
+fn parse_name_table(name: &[u8]) -> Result<(String, String), crate::TextError> {
+    if name.len() < 6 {
+        return Err(invalid_sfnt("name table shorter than 6 bytes"));
+    }
+    let format = read_u16_be(name, 0).ok_or_else(|| invalid_sfnt("missing name format"))?;
+    if format > 1 {
+        return Err(invalid_sfnt("unsupported name table format"));
+    }
+    let count = read_u16_be(name, 2).ok_or_else(|| invalid_sfnt("missing name count"))?;
+    let str_base = usize::from(read_u16_be(name, 4).ok_or_else(|| invalid_sfnt("missing name stringOffset"))?);
+    if str_base > name.len() {
+        return Err(invalid_sfnt("name stringOffset past end of table"));
+    }
+    let recs_end = usize::from(count).checked_mul(12).and_then(|n| 6usize.checked_add(n)).ok_or_else(|| invalid_sfnt("name count overflow"))?;
+    if recs_end > name.len() {
+        return Err(invalid_sfnt("name records truncated"));
+    }
+
+    let mut best_family: Option<(i32, String)> = None;
+    let mut best_ps: Option<(i32, String)> = None;
+
+    for i in 0..usize::from(count) {
+        let off = 6 + i * 12;
+        let platform = read_u16_be(name, off).ok_or_else(|| invalid_sfnt("name record platformID"))?;
+        let encoding = read_u16_be(name, off + 2).ok_or_else(|| invalid_sfnt("name record encodingID"))?;
+        let lang = read_u16_be(name, off + 4).ok_or_else(|| invalid_sfnt("name record languageID"))?;
+        let name_id = read_u16_be(name, off + 6).ok_or_else(|| invalid_sfnt("name record nameID"))?;
+        let len = usize::from(read_u16_be(name, off + 8).ok_or_else(|| invalid_sfnt("name record length"))?);
+        let str_off = usize::from(read_u16_be(name, off + 10).ok_or_else(|| invalid_sfnt("name record offset"))?);
+
+        let start = str_base.checked_add(str_off).ok_or_else(|| invalid_sfnt("name string start overflow"))?;
+        let end = start.checked_add(len).ok_or_else(|| invalid_sfnt("name string end overflow"))?;
+        let slice = name.get(start..end).ok_or_else(|| invalid_sfnt("name string slice out of bounds"))?;
+
+        if !matches!(name_id, 1 | 6 | 16) {
+            continue;
+        }
+        let decoded = decode_name_string(slice, platform, encoding);
+        let trimmed = decoded.trim_matches(|c: char| c == '\0' || c.is_whitespace()).to_owned();
+        if trimmed.is_empty() {
+            continue;
+        }
+
+        let base_rank = match (platform, lang) {
+            (3, 0x0409) => 100,
+            (3, _) => 80,
+            (0, _) => 70,
+            (1, 0) => 50,
+            (1, _) => 30,
+            _ => 10,
+        };
+        if name_id == 6 {
+            if best_ps.as_ref().is_none_or(|(r, _)| base_rank > *r) {
+                best_ps = Some((base_rank, trimmed));
+            }
+        } else {
+            let fam_rank = base_rank + if name_id == 16 { 10 } else { 0 };
+            if best_family.as_ref().is_none_or(|(r, _)| fam_rank > *r) {
+                best_family = Some((fam_rank, trimmed));
+            }
+        }
+    }
+
+    Ok((best_family.map_or_else(String::new, |(_, s)| s), best_ps.map_or_else(String::new, |(_, s)| s)))
+}
+
+fn decode_name_string(bytes: &[u8], platform: u16, encoding: u16) -> String {
+    if platform == 0 || (platform == 3 && matches!(encoding, 0 | 1 | 10)) {
+        let (pairs, _) = bytes.as_chunks::<2>();
+        let iter = pairs.iter().map(|&pair| u16::from_be_bytes(pair));
+        return char::decode_utf16(iter).filter_map(Result::ok).collect();
+    }
+    bytes.iter().filter_map(|&b| (0x20..=0x7E).contains(&b).then_some(char::from(b))).collect()
+}
+
+fn parse_cmap_mappings(cmap: &[u8], num_glyphs: u16) -> Result<Vec<(u32, u16)>, crate::TextError> {
+    if cmap.len() < 4 {
+        return Err(invalid_sfnt("cmap table shorter than 4 bytes"));
+    }
+    let num_subtables = read_u16_be(cmap, 2).ok_or_else(|| invalid_sfnt("missing cmap numTables"))?;
+    if num_subtables == 0 {
+        return Err(crate::TextError::UnsupportedCmap { message: String::from("cmap has zero encoding records") });
+    }
+    let records_end =
+        usize::from(num_subtables).checked_mul(8).and_then(|n| 4usize.checked_add(n)).ok_or_else(|| invalid_sfnt("cmap directory overflow"))?;
+    if records_end > cmap.len() {
+        return Err(invalid_sfnt("cmap encoding records truncated"));
+    }
+
+    let mut best_fmt4: Option<(i32, usize)> = None;
+    let mut best_fmt12: Option<(i32, usize)> = None;
+    let mut best_fmt0: Option<(i32, usize)> = None;
+
+    for i in 0..usize::from(num_subtables) {
+        let rec_off = 4 + i * 8;
+        let platform = read_u16_be(cmap, rec_off).ok_or_else(|| invalid_sfnt("cmap platformID"))?;
+        let encoding = read_u16_be(cmap, rec_off + 2).ok_or_else(|| invalid_sfnt("cmap encodingID"))?;
+        let sub_off =
+            read_u32_be(cmap, rec_off + 4).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid_sfnt("cmap subtable offset overflow"))?;
+        let fmt = read_u16_be(cmap, sub_off).ok_or_else(|| invalid_sfnt("cmap subtable offset out of bounds"))?;
+        let rank = match (platform, encoding, fmt) {
+            (3, 10, 12) => 100,
+            (0, 4, 12) => 95,
+            (3, 1, 4) => 90,
+            (0, 3, 4) => 85,
+            (0, _, 4) => 80,
+            (0, _, 12) => 75,
+            (1, 0, 0) => 20,
+            _ => 10,
+        };
+        match fmt {
+            4 if best_fmt4.is_none_or(|(r, _)| rank > r) => best_fmt4 = Some((rank, sub_off)),
+            12 if best_fmt12.is_none_or(|(r, _)| rank > r) => best_fmt12 = Some((rank, sub_off)),
+            0 if best_fmt0.is_none_or(|(r, _)| rank > r) => best_fmt0 = Some((rank, sub_off)),
+            _ => {}
+        }
+    }
+
+    let mut merged = Vec::new();
+    if let Some((_, off)) = best_fmt4 {
+        let sub = cmap.get(off..).ok_or_else(|| invalid_sfnt("cmap format 4 out of bounds"))?;
+        collect_cmap_format4(sub, num_glyphs, &mut merged)?;
+    }
+    if let Some((_, off)) = best_fmt12 {
+        let sub = cmap.get(off..).ok_or_else(|| invalid_sfnt("cmap format 12 out of bounds"))?;
+        collect_cmap_format12(sub, num_glyphs, &mut merged)?;
+    }
+    if merged.is_empty()
+        && let Some((_, off)) = best_fmt0
+    {
+        let sub = cmap.get(off..).ok_or_else(|| invalid_sfnt("cmap format 0 out of bounds"))?;
+        collect_cmap_format0(sub, num_glyphs, &mut merged)?;
+    }
+    if best_fmt4.is_none() && best_fmt12.is_none() && best_fmt0.is_none() {
+        return Err(crate::TextError::UnsupportedCmap { message: String::from("no format 0, 4, or 12 cmap subtable found") });
+    }
+
+    merged.sort_unstable_by_key(|&(cp, _)| cp);
+    merged.dedup_by_key(|pair| pair.0);
+    Ok(merged)
+}
+
+fn collect_cmap_format4(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
+    if sub.len() < 16 {
+        return Err(invalid_sfnt("cmap format 4 subtable shorter than 16 bytes"));
+    }
+    let seg_count_x2 = read_u16_be(sub, 6).ok_or_else(|| invalid_sfnt("missing cmap4 segCountX2"))?;
+    if seg_count_x2 < 2 || !seg_count_x2.is_multiple_of(2) {
+        return Err(invalid_sfnt("invalid cmap4 segCountX2"));
+    }
+    let seg_count = usize::from(seg_count_x2 / 2);
+    let end_off = 14usize;
+    let start_off = end_off.checked_add(seg_count * 2).and_then(|n| n.checked_add(2)).ok_or_else(|| invalid_sfnt("cmap4 offset overflow"))?;
+    let delta_off = start_off.checked_add(seg_count * 2).ok_or_else(|| invalid_sfnt("cmap4 delta overflow"))?;
+    let range_off = delta_off.checked_add(seg_count * 2).ok_or_else(|| invalid_sfnt("cmap4 range overflow"))?;
+    let min_len = range_off.checked_add(seg_count * 2).ok_or_else(|| invalid_sfnt("cmap4 size overflow"))?;
+    if min_len > sub.len() {
+        return Err(invalid_sfnt("cmap format 4 segments truncated"));
+    }
+
+    for i in 0..seg_count {
+        let end_code = read_u16_be(sub, end_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 endCode"))?;
+        let start_code = read_u16_be(sub, start_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 startCode"))?;
+        let id_delta = read_i16_be(sub, delta_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 idDelta"))?;
+        let id_range_offset = read_u16_be(sub, range_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 idRangeOffset"))?;
+
+        if start_code > end_code {
+            return Err(invalid_sfnt("cmap4 segment has startCode > endCode"));
+        }
+        if start_code == 0xFFFF && end_code == 0xFFFF {
+            continue;
+        }
+        for code in start_code..=end_code {
+            if out.len() >= MAX_CMAP_COLLECT {
+                return Ok(());
+            }
+            if code == 0xFFFF {
+                continue;
+            }
+            let gid = if id_range_offset == 0 {
+                code.wrapping_add_signed(id_delta)
+            } else {
+                let slot_off = range_off + i * 2;
+                let glyph_addr = slot_off
+                    .checked_add(usize::from(id_range_offset))
+                    .and_then(|n| n.checked_add(usize::from(code - start_code) * 2))
+                    .ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray offset overflow"))?;
+                let raw = read_u16_be(sub, glyph_addr).ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray out of bounds"))?;
+                if raw == 0 { 0 } else { raw.wrapping_add_signed(id_delta) }
+            };
+            if gid != 0 && gid < num_glyphs {
+                out.push((u32::from(code), gid));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_cmap_format12(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
+    if sub.len() < 16 {
+        return Err(invalid_sfnt("cmap format 12 subtable shorter than 16 bytes"));
+    }
+    let num_groups = read_u32_be(sub, 12).and_then(|v| usize::try_from(v).ok()).ok_or_else(|| invalid_sfnt("cmap12 numGroups overflow"))?;
+    let table_end = num_groups.checked_mul(12).and_then(|n| 16usize.checked_add(n)).ok_or_else(|| invalid_sfnt("cmap12 size overflow"))?;
+    if table_end > sub.len() {
+        return Err(invalid_sfnt("cmap format 12 groups truncated"));
+    }
+
+    for i in 0..num_groups {
+        let g_off = 16 + i * 12;
+        let start_code = read_u32_be(sub, g_off).ok_or_else(|| invalid_sfnt("cmap12 startCharCode"))?;
+        let end_code = read_u32_be(sub, g_off + 4).ok_or_else(|| invalid_sfnt("cmap12 endCharCode"))?;
+        let start_gid = read_u32_be(sub, g_off + 8).ok_or_else(|| invalid_sfnt("cmap12 startGlyphID"))?;
+        if start_code > end_code {
+            return Err(invalid_sfnt("cmap12 group has startCharCode > endCharCode"));
+        }
+        let span = end_code - start_code;
+        for delta in 0..=span {
+            if out.len() >= MAX_CMAP_COLLECT {
+                return Ok(());
+            }
+            let Some(gid_u32) = start_gid.checked_add(delta) else {
+                break;
+            };
+            if gid_u32 >= u32::from(num_glyphs) {
+                break;
+            }
+            if gid_u32 != 0
+                && let Ok(gid) = u16::try_from(gid_u32)
+            {
+                out.push((start_code + delta, gid));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_cmap_format0(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
+    if sub.len() < 262 {
+        return Err(invalid_sfnt("cmap format 0 subtable shorter than 262 bytes"));
+    }
+    for code in 0usize..256 {
+        let Some(&gid_byte) = sub.get(6 + code) else {
+            return Err(invalid_sfnt("cmap format 0 truncated"));
+        };
+        let gid = u16::from(gid_byte);
+        if gid != 0 && gid < num_glyphs {
+            out.push((code as u32, gid));
+        }
+    }
+    Ok(())
+}
+
+fn build_win1252_widths(hmtx: &[u8], num_h_metrics: u16, units_per_em: u16, cmap: &[(u32, u16)]) -> Result<Vec<u16>, crate::TextError> {
+    let notdef_adv = hmtx_advance_for_gid(hmtx, num_h_metrics, 0)?;
+    let notdef_1000 = u16::try_from(scale_font_units_1000(i32::from(notdef_adv), units_per_em).clamp(0, i32::from(u16::MAX))).unwrap_or(500);
+    let mut widths = Vec::with_capacity(224);
+
+    for code in 32u8..=255u8 {
+        let gid = win1252_byte_to_char(code)
+            .and_then(|ch| cmap.binary_search_by_key(&u32::from(ch), |&(cp, _)| cp).ok().and_then(|idx| cmap.get(idx).map(|&(_, g)| g)))
+            .unwrap_or(0);
+        if gid == 0 {
+            widths.push(notdef_1000);
+            continue;
+        }
+        let adv = hmtx_advance_for_gid(hmtx, num_h_metrics, gid)?;
+        let scaled = scale_font_units_1000(i32::from(adv), units_per_em).clamp(0, i32::from(u16::MAX));
+        widths.push(u16::try_from(scaled).unwrap_or(notdef_1000));
+    }
+    Ok(widths)
+}
+
+fn hmtx_advance_for_gid(hmtx: &[u8], num_h_metrics: u16, gid: u16) -> Result<u16, crate::TextError> {
+    let idx = gid.min(num_h_metrics.saturating_sub(1));
+    read_u16_be(hmtx, usize::from(idx) * 4).ok_or_else(|| invalid_sfnt("hmtx advance offset out of bounds"))
+}
+
+fn scale_font_units_1000(value: i32, units_per_em: u16) -> i32 {
+    let upem = i64::from(units_per_em.max(1));
+    let num = i64::from(value) * 1000;
+    let rounded = if num >= 0 { (num + upem / 2) / upem } else { (num - upem / 2) / upem };
+    i32::try_from(rounded).unwrap_or(if rounded >= 0 { i32::MAX } else { i32::MIN })
+}
+
+fn sanitize_postscript_name(raw: &str) -> String {
+    let cleaned: String =
+        raw.chars().filter(|&c| c.is_ascii_graphic() && !matches!(c, '(' | ')' | '<' | '>' | '[' | ']' | '{' | '}' | '/' | '%')).collect();
+    if cleaned.is_empty() { String::from("LumenCraftSans-Regular") } else { cleaned }
+}
+
+const WIN1252_80_9F: [Option<char>; 32] = [
+    Some('\u{20AC}'),
+    None,
+    Some('\u{201A}'),
+    Some('\u{0192}'),
+    Some('\u{201E}'),
+    Some('\u{2026}'),
+    Some('\u{2020}'),
+    Some('\u{2021}'),
+    Some('\u{02C6}'),
+    Some('\u{2030}'),
+    Some('\u{0160}'),
+    Some('\u{2039}'),
+    Some('\u{0152}'),
+    None,
+    Some('\u{017D}'),
+    None,
+    None,
+    Some('\u{2018}'),
+    Some('\u{2019}'),
+    Some('\u{201C}'),
+    Some('\u{201D}'),
+    Some('\u{2022}'),
+    Some('\u{2013}'),
+    Some('\u{2014}'),
+    Some('\u{02DC}'),
+    Some('\u{2122}'),
+    Some('\u{0161}'),
+    Some('\u{203A}'),
+    Some('\u{0153}'),
+    None,
+    Some('\u{017E}'),
+    Some('\u{0178}'),
+];
+
+const fn win1252_byte_to_char(code: u8) -> Option<char> {
+    match code {
+        0x20..=0x7E | 0xA0..=0xFF => Some(code as char),
+        0x80..=0x9F => WIN1252_80_9F[(code - 0x80) as usize],
+        _ => None,
+    }
+}
+
+fn char_to_win1252_byte(ch: char) -> Option<u8> {
+    let cp = ch as u32;
+    if (0x20..=0x7E).contains(&cp) || (0xA0..=0xFF).contains(&cp) {
+        return u8::try_from(cp).ok();
+    }
+    for (idx, entry) in WIN1252_80_9F.iter().enumerate() {
+        if *entry == Some(ch) {
+            return u8::try_from(0x80 + idx).ok();
+        }
+    }
+    None
+}
+
+// --- Pure-Rust Minimal SFNT / TrueType Builder Helpers ---
+
+struct MinimalGlyphSpec {
+    advance: u16,
+    lsb: i16,
+    bbox: Option<[i16; 4]>,
+}
+
+struct HheaExtents {
+    advance_max: u16,
+    min_lsb: i16,
+    min_rsb: i16,
+    x_max_extent: i16,
+}
+
+fn build_minimal_glyph_specs() -> Vec<MinimalGlyphSpec> {
+    let mut glyphs = Vec::with_capacity(198);
+    // GID 0: .notdef
+    glyphs.push(MinimalGlyphSpec { advance: 556, lsb: 60, bbox: Some([60, 0, 496, 720]) });
+    // GIDs 1..=95: ASCII 32..=126
+    for code in 32u8..=126u8 {
+        glyphs.push(glyph_spec_for_char(char::from(code)));
+    }
+    // GIDs 96..=191: Latin-1 160..=255
+    for code in 160u8..=255u8 {
+        glyphs.push(glyph_spec_for_char(char::from(code)));
+    }
+    // GIDs 192..=197: Greek Δ, α, β, γ, μ, σ
+    for ch in ['\u{0394}', '\u{03B1}', '\u{03B2}', '\u{03B3}', '\u{03BC}', '\u{03C3}'] {
+        glyphs.push(glyph_spec_for_char(ch));
+    }
+    glyphs
+}
+
+fn glyph_spec_for_char(ch: char) -> MinimalGlyphSpec {
+    let advance = minimal_char_width_1000(ch);
+    if matches!(ch, ' ' | '\u{00A0}' | '\u{00AD}') {
+        return MinimalGlyphSpec { advance, lsb: 0, bbox: None };
+    }
+    let adv_i16 = i16::try_from(advance).unwrap_or(556);
+    let pad = (adv_i16 / 10).max(20);
+    let x_min = pad;
+    let x_max = (adv_i16 - pad).max(x_min + 40);
+    let (y_min, y_max) = if ch.is_ascii_uppercase() || ch.is_ascii_digit() || matches!(ch, 'Δ' | 'b' | 'd' | 'f' | 'h' | 'k' | 'l' | 't') {
+        (0, 720)
+    } else if matches!(ch, 'g' | 'j' | 'p' | 'q' | 'y' | 'β' | 'γ' | 'μ') {
+        (-200, 520)
+    } else {
+        (0, 520)
+    };
+    MinimalGlyphSpec { advance, lsb: x_min, bbox: Some([x_min, y_min, x_max, y_max]) }
+}
+
+fn minimal_char_width_1000(ch: char) -> u16 {
+    if let Some(w) = core14_ascii_width_1000(ch, SpanWeight::Regular) {
+        return w;
+    }
+    if let Some(w) = core14_symbol_width_1000(ch) {
+        return w;
+    }
+    match ch {
+        '\u{00A0}' => 278,
+        '\u{00AD}' => 333,
+        '\u{00C6}' | '\u{00D0}'..='\u{00D6}' | '\u{00D8}'..='\u{00DE}' => 722,
+        '\u{00C0}'..='\u{00C5}' | '\u{00C7}'..='\u{00CF}' => 667,
+        '\u{00EC}'..='\u{00EF}' => 278,
+        '\u{00E6}' | '\u{00FD}'..='\u{00FF}' => 611,
+        _ => 556,
+    }
+}
+
+fn build_glyf_and_loca(glyphs: &[MinimalGlyphSpec]) -> (Vec<u8>, Vec<u8>, [i16; 4], HheaExtents) {
+    let mut glyf = Vec::new();
+    let mut loca = Vec::with_capacity((glyphs.len() + 1) * 2);
+    let mut min_x = i16::MAX;
+    let mut min_y = i16::MAX;
+    let mut max_x = i16::MIN;
+    let mut max_y = i16::MIN;
+    let mut adv_max = 0u16;
+    let mut min_lsb = i16::MAX;
+    let mut min_rsb = i16::MAX;
+    let mut x_max_extent = i16::MIN;
+
+    for g in glyphs {
+        push_u16_be(&mut loca, u16::try_from(glyf.len() / 2).unwrap_or(u16::MAX));
+        adv_max = adv_max.max(g.advance);
+        min_lsb = min_lsb.min(g.lsb);
+
+        if let Some([x0, y0, x1, y1]) = g.bbox {
+            min_x = min_x.min(x0);
+            min_y = min_y.min(y0);
+            max_x = max_x.max(x1);
+            max_y = max_y.max(y1);
+            let adv_i16 = i16::try_from(g.advance).unwrap_or(556);
+            min_rsb = min_rsb.min(adv_i16.saturating_sub(x1));
+            x_max_extent = x_max_extent.max(x1);
+
+            push_i16_be(&mut glyf, 1); // numberOfContours
+            push_i16_be(&mut glyf, x0);
+            push_i16_be(&mut glyf, y0);
+            push_i16_be(&mut glyf, x1);
+            push_i16_be(&mut glyf, y1);
+            push_u16_be(&mut glyf, 3); // endPtsOfContours[0]
+            push_u16_be(&mut glyf, 0); // instructionLength
+            glyf.extend_from_slice(&[0x01, 0x01, 0x01, 0x01]);
+            // Clockwise Y-up rectangle: (x0,y0) -> (x0,y1) -> (x1,y1) -> (x1,y0)
+            for dx in [x0, 0, x1 - x0, 0] {
+                push_i16_be(&mut glyf, dx);
+            }
+            for dy in [y0, y1 - y0, 0, y0 - y1] {
+                push_i16_be(&mut glyf, dy);
+            }
+            if !glyf.len().is_multiple_of(2) {
+                glyf.push(0);
+            }
+        }
+    }
+    push_u16_be(&mut loca, u16::try_from(glyf.len() / 2).unwrap_or(u16::MAX));
+
+    let bbox = if min_x <= max_x { [min_x, min_y, max_x, max_y] } else { [0, -200, 955, 720] };
+    let extents = HheaExtents {
+        advance_max: adv_max,
+        min_lsb: if min_lsb == i16::MAX { 0 } else { min_lsb },
+        min_rsb: if min_rsb == i16::MAX { 0 } else { min_rsb },
+        x_max_extent: if x_max_extent == i16::MIN { bbox[2] } else { x_max_extent },
+    };
+    (glyf, loca, bbox, extents)
+}
+
+fn build_hmtx_table(glyphs: &[MinimalGlyphSpec]) -> Vec<u8> {
+    let mut hmtx = Vec::with_capacity(glyphs.len() * 4);
+    for g in glyphs {
+        push_u16_be(&mut hmtx, g.advance);
+        push_i16_be(&mut hmtx, g.lsb);
+    }
+    hmtx
+}
+
+fn build_head_table(bbox: [i16; 4]) -> Vec<u8> {
+    let mut head = vec![0u8; 54];
+    head[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // major=1, minor=0
+    head[4..8].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // fontRevision 1.0
+    head[12..16].copy_from_slice(&0x5F0F_3CF5u32.to_be_bytes()); // magicNumber
+    head[16..18].copy_from_slice(&0x000Bu16.to_be_bytes()); // flags
+    head[18..20].copy_from_slice(&1000u16.to_be_bytes()); // unitsPerEm
+    head[36..38].copy_from_slice(&bbox[0].to_be_bytes());
+    head[38..40].copy_from_slice(&bbox[1].to_be_bytes());
+    head[40..42].copy_from_slice(&bbox[2].to_be_bytes());
+    head[42..44].copy_from_slice(&bbox[3].to_be_bytes());
+    head[46..48].copy_from_slice(&8u16.to_be_bytes()); // lowestRecPPEM
+    head[48..50].copy_from_slice(&2i16.to_be_bytes()); // fontDirectionHint
+    head
+}
+
+fn build_hhea_table(num_glyphs: u16, ext: HheaExtents) -> Vec<u8> {
+    let mut hhea = vec![0u8; 36];
+    hhea[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes());
+    hhea[4..6].copy_from_slice(&800i16.to_be_bytes());
+    hhea[6..8].copy_from_slice(&(-200i16).to_be_bytes());
+    hhea[8..10].copy_from_slice(&100i16.to_be_bytes());
+    hhea[10..12].copy_from_slice(&ext.advance_max.to_be_bytes());
+    hhea[12..14].copy_from_slice(&ext.min_lsb.to_be_bytes());
+    hhea[14..16].copy_from_slice(&ext.min_rsb.to_be_bytes());
+    hhea[16..18].copy_from_slice(&ext.x_max_extent.to_be_bytes());
+    hhea[18..20].copy_from_slice(&1i16.to_be_bytes()); // caretSlopeRise
+    hhea[34..36].copy_from_slice(&num_glyphs.to_be_bytes());
+    hhea
+}
+
+fn build_maxp_table(num_glyphs: u16) -> Vec<u8> {
+    let mut maxp = vec![0u8; 32];
+    maxp[0..4].copy_from_slice(&0x0001_0000u32.to_be_bytes()); // v1.0
+    maxp[4..6].copy_from_slice(&num_glyphs.to_be_bytes());
+    maxp[6..8].copy_from_slice(&4u16.to_be_bytes()); // maxPoints
+    maxp[8..10].copy_from_slice(&1u16.to_be_bytes()); // maxContours
+    maxp[28..30].copy_from_slice(&2u16.to_be_bytes()); // maxSizeOfInstructions
+    maxp
+}
+
+fn build_os2_table() -> Vec<u8> {
+    let mut os2 = vec![0u8; 96];
+    os2[0..2].copy_from_slice(&4u16.to_be_bytes()); // version 4
+    os2[2..4].copy_from_slice(&556i16.to_be_bytes()); // xAvgCharWidth
+    os2[4..6].copy_from_slice(&400u16.to_be_bytes()); // usWeightClass
+    os2[6..8].copy_from_slice(&5u16.to_be_bytes()); // usWidthClass
+    os2[10..12].copy_from_slice(&650i16.to_be_bytes());
+    os2[12..14].copy_from_slice(&600i16.to_be_bytes());
+    os2[16..18].copy_from_slice(&140i16.to_be_bytes());
+    os2[18..20].copy_from_slice(&650i16.to_be_bytes());
+    os2[20..22].copy_from_slice(&600i16.to_be_bytes());
+    os2[24..26].copy_from_slice(&480i16.to_be_bytes());
+    os2[26..28].copy_from_slice(&50i16.to_be_bytes());
+    os2[28..30].copy_from_slice(&260i16.to_be_bytes());
+    os2[30..32].copy_from_slice(&0x0800i16.to_be_bytes()); // Sans-serif
+    os2[32..42].copy_from_slice(&[2, 11, 5, 2, 2, 2, 2, 2, 2, 4]); // PANOSE
+    os2[42..46].copy_from_slice(&0x0000_0083u32.to_be_bytes()); // Basic Latin + Latin-1 + Greek
+    os2[58..62].copy_from_slice(b"LCFT");
+    os2[62..64].copy_from_slice(&0x0040u16.to_be_bytes()); // REGULAR
+    os2[64..66].copy_from_slice(&32u16.to_be_bytes()); // usFirstCharIndex
+    os2[66..68].copy_from_slice(&0x03C3u16.to_be_bytes()); // usLastCharIndex
+    os2[68..70].copy_from_slice(&800i16.to_be_bytes());
+    os2[70..72].copy_from_slice(&(-200i16).to_be_bytes());
+    os2[72..74].copy_from_slice(&100i16.to_be_bytes());
+    os2[74..76].copy_from_slice(&850u16.to_be_bytes());
+    os2[76..78].copy_from_slice(&220u16.to_be_bytes());
+    os2[78..82].copy_from_slice(&1u32.to_be_bytes()); // Latin-1 codepage
+    os2[86..88].copy_from_slice(&520i16.to_be_bytes()); // sxHeight
+    os2[88..90].copy_from_slice(&720i16.to_be_bytes()); // sCapHeight
+    os2[92..94].copy_from_slice(&32u16.to_be_bytes()); // usBreakChar
+    os2
+}
+
+fn build_minimal_cmap_table() -> Vec<u8> {
+    // 7 sorted non-overlapping segments:
+    // (32..=126)->gid 1..=95, (160..=255)->gid 96..=191, Δ->192, α..=γ->193..=195, μ->196, σ->197, 0xFFFF->0
+    const STARTS: [u16; 7] = [32, 160, 0x0394, 0x03B1, 0x03BC, 0x03C3, 0xFFFF];
+    const ENDS: [u16; 7] = [126, 255, 0x0394, 0x03B3, 0x03BC, 0x03C3, 0xFFFF];
+    const DELTAS: [i16; 7] = [-31, -64, -724, -752, -760, -766, 1];
+
+    let mut sub = Vec::new();
+    let seg_count = STARTS.len() as u16;
+    let sub_len = 16u16 + seg_count * 8;
+    push_u16_be(&mut sub, 4); // format
+    push_u16_be(&mut sub, sub_len);
+    push_u16_be(&mut sub, 0); // language
+    push_u16_be(&mut sub, seg_count * 2); // segCountX2 = 14
+    push_u16_be(&mut sub, 8); // searchRange = 2 * 2^2
+    push_u16_be(&mut sub, 2); // entrySelector = log2(4)
+    push_u16_be(&mut sub, seg_count * 2 - 8); // rangeShift = 6
+    for end in ENDS {
+        push_u16_be(&mut sub, end);
+    }
+    push_u16_be(&mut sub, 0); // reservedPad
+    for start in STARTS {
+        push_u16_be(&mut sub, start);
+    }
+    for delta in DELTAS {
+        push_i16_be(&mut sub, delta);
+    }
+    for _ in 0..STARTS.len() {
+        push_u16_be(&mut sub, 0);
+    }
+
+    let header_len = 4u32 + 2 * 8;
+    let mut cmap = Vec::with_capacity(header_len as usize + sub.len());
+    push_u16_be(&mut cmap, 0); // version
+    push_u16_be(&mut cmap, 2); // numTables
+    push_u16_be(&mut cmap, 0);
+    push_u16_be(&mut cmap, 3);
+    push_u32_be(&mut cmap, header_len);
+    push_u16_be(&mut cmap, 3);
+    push_u16_be(&mut cmap, 1);
+    push_u32_be(&mut cmap, header_len);
+    cmap.extend_from_slice(&sub);
+    cmap
+}
+
+fn build_minimal_name_table() -> Vec<u8> {
+    const ENTRIES: [(u16, &str); 5] =
+        [(1, "LumenCraft Sans"), (2, "Regular"), (3, "LumenCraft-Sans-Regular"), (4, "LumenCraft Sans Regular"), (6, "LumenCraftSans-Regular")];
+    let mut str_buf = Vec::new();
+    let mut records = Vec::new();
+    for (name_id, text) in ENTRIES {
+        let start = str_buf.len() as u16;
+        for unit in text.encode_utf16() {
+            push_u16_be(&mut str_buf, unit);
+        }
+        let len = (str_buf.len() as u16) - start;
+        records.push((name_id, len, start));
+    }
+
+    let string_offset = 6u16 + (records.len() as u16) * 12;
+    let mut name = Vec::with_capacity(usize::from(string_offset) + str_buf.len());
+    push_u16_be(&mut name, 0); // format
+    push_u16_be(&mut name, records.len() as u16);
+    push_u16_be(&mut name, string_offset);
+    for (name_id, len, offset) in records {
+        push_u16_be(&mut name, 3); // Windows
+        push_u16_be(&mut name, 1); // Unicode BMP
+        push_u16_be(&mut name, 0x0409); // en-US
+        push_u16_be(&mut name, name_id);
+        push_u16_be(&mut name, len);
+        push_u16_be(&mut name, offset);
+    }
+    name.extend_from_slice(&str_buf);
+    name
+}
+
+fn build_minimal_post_table() -> Vec<u8> {
+    let mut post = vec![0u8; 32];
+    post[0..4].copy_from_slice(&0x0003_0000u32.to_be_bytes()); // format 3.0
+    post[8..10].copy_from_slice(&(-100i16).to_be_bytes()); // underlinePosition
+    post[10..12].copy_from_slice(&50i16.to_be_bytes()); // underlineThickness
+    post
+}
+
+fn assemble_sfnt_tables(tables: &[([u8; 4], Vec<u8>)]) -> Vec<u8> {
+    let num_tables = tables.len() as u16;
+    let max_pow2 = 8u16; // largest power of 2 <= 10
+    let search_range = max_pow2 * 16;
+    let entry_selector = 3u16;
+    let range_shift = num_tables * 16 - search_range;
+
+    let dir_size = 12 + tables.len() * 16;
+    let mut font = Vec::with_capacity(dir_size + tables.iter().map(|(_, d)| d.len() + 3).sum::<usize>());
+    push_u32_be(&mut font, 0x0001_0000);
+    push_u16_be(&mut font, num_tables);
+    push_u16_be(&mut font, search_range);
+    push_u16_be(&mut font, entry_selector);
+    push_u16_be(&mut font, range_shift);
+
+    let mut cur_offset = dir_size;
+    let mut head_offset = 0usize;
+    for (tag, data) in tables {
+        if tag == b"head" {
+            head_offset = cur_offset;
+        }
+        font.extend_from_slice(tag);
+        push_u32_be(&mut font, sfnt_checksum(data));
+        push_u32_be(&mut font, cur_offset as u32);
+        push_u32_be(&mut font, data.len() as u32);
+        cur_offset += (data.len() + 3) & !3;
+    }
+    for (_, data) in tables {
+        font.extend_from_slice(data);
+        while !font.len().is_multiple_of(4) {
+            font.push(0);
+        }
+    }
+
+    if head_offset > 0 {
+        let total = sfnt_checksum(&font);
+        let adj = 0xB1B0_AFBAu32.wrapping_sub(total);
+        if let Some(slot) = font.get_mut(head_offset + 8..head_offset + 12) {
+            slot.copy_from_slice(&adj.to_be_bytes());
+        }
+    }
+    font
+}
+
+fn sfnt_checksum(data: &[u8]) -> u32 {
+    let mut sum = 0u32;
+    let (chunks, rem) = data.as_chunks::<4>();
+    for &c in chunks {
+        sum = sum.wrapping_add(u32::from_be_bytes(c));
+    }
+    if !rem.is_empty() {
+        let mut tail = [0u8; 4];
+        for (dst, &src) in tail.iter_mut().zip(rem.iter()) {
+            *dst = src;
+        }
+        sum = sum.wrapping_add(u32::from_be_bytes(tail));
+    }
+    sum
+}
+
+fn push_u16_be(buf: &mut Vec<u8>, v: u16) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
+
+fn push_i16_be(buf: &mut Vec<u8>, v: i16) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
+
+fn push_u32_be(buf: &mut Vec<u8>, v: u32) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}

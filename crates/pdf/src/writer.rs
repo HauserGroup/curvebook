@@ -2,6 +2,7 @@
 //! selectable scientific typography (WinAnsi + Adobe Symbol), optional glyph outlines,
 //! alpha transparency states, sRGB/CMYK/Grayscale colour spaces, and multi-page layouts.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
@@ -12,13 +13,16 @@ use lumencraft_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
 use lumencraft_palette::Rgba8;
-use lumencraft_text::{GlyphOutlineCmd, PositionedGlyphOutline, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
+use lumencraft_text::{
+    BUNDLED_FONTS, GlyphOutlineCmd, PositionedGlyphOutline, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, TrueTypeFontInfo,
+    contains_rtl_script, outline_rich_text, parse_truetype_font_info, reorder_visual_bidi, shape_bidi_runs,
+};
 use serde::{Deserialize, Serialize};
 
-use crate::PdfColorSpace;
+pub use crate::{PdfColorSpace, PdfVersion};
 
-/// Export options controlling PDF colour space, text outline mode, trim/bleed boxes, stream
-/// compression, and document metadata.
+/// Export options controlling PDF specification version, colour space, optional TrueType font
+/// embedding, text outline mode, trim/bleed boxes, stream compression, and document metadata.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PdfExportOptions {
     pub color_space: PdfColorSpace,
@@ -28,6 +32,10 @@ pub struct PdfExportOptions {
     pub outline_text: bool,
     pub trim_pt: Option<RectPt>,
     pub bleed_pt: Option<RectPt>,
+    #[serde(default)]
+    pub version: PdfVersion,
+    #[serde(default)]
+    pub embedded_truetype_font: Option<Vec<u8>>,
 }
 
 impl Default for PdfExportOptions {
@@ -40,6 +48,8 @@ impl Default for PdfExportOptions {
             outline_text: false,
             trim_pt: None,
             bleed_pt: None,
+            version: PdfVersion::Pdf17,
+            embedded_truetype_font: None,
         }
     }
 }
@@ -85,20 +95,68 @@ pub fn render_pdf_pages(pages: &[ChartScene], options: &PdfExportOptions) -> Res
     validate_box_opt(options.trim_pt, "trim_pt")?;
     validate_box_opt(options.bleed_pt, "bleed_pt")?;
 
+    let embedded_ttf = resolve_embedded_truetype(options)?;
+    let embedded_info = embedded_ttf.as_ref().map(|ttf| &ttf.info);
+
     let mut encoded_pages = Vec::with_capacity(pages.len());
     let mut all_gs_both = BTreeSet::new();
     let mut all_gs_stroke = BTreeSet::new();
 
     for scene in pages {
         validate_scene_bounds(scene)?;
-        let (raw_stream, used) = encode_page_stream(scene, options)?;
+        let (raw_stream, used) = encode_page_stream(scene, options, embedded_info)?;
         all_gs_both.extend(used.gs_both.iter().copied());
         all_gs_stroke.extend(used.gs_stroke.iter().copied());
         let stream_bytes = compress_if_requested(raw_stream.into_bytes(), options.compress_streams)?;
         encoded_pages.push(EncodedPage { stream_bytes, used });
     }
 
-    assemble_pdf_document(pages, &encoded_pages, &all_gs_both, &all_gs_stroke, options)
+    assemble_pdf_document(pages, &encoded_pages, &all_gs_both, &all_gs_stroke, options, embedded_ttf.as_ref())
+}
+
+struct EmbeddedTrueTypeFont {
+    raw_len: usize,
+    compressed_bytes: Vec<u8>,
+    info: TrueTypeFontInfo,
+    ps_name: String,
+}
+
+struct ExtGStateIds {
+    both: BTreeMap<u8, usize>,
+    stroke: BTreeMap<u8, usize>,
+}
+
+fn is_truetype_sfnt(bytes: &[u8]) -> bool {
+    bytes.get(0..4).is_some_and(|tag| tag == [0x00, 0x01, 0x00, 0x00] || tag == b"true")
+}
+
+fn sanitize_pdf_font_name(primary: &str, fallback: &str) -> String {
+    let pick = |raw: &str| -> String {
+        raw.chars().filter(|&c| c.is_ascii_graphic() && !matches!(c, '(' | ')' | '<' | '>' | '[' | ']' | '{' | '}' | '/' | '%' | '#')).collect()
+    };
+    let clean = pick(primary);
+    if !clean.is_empty() {
+        return clean;
+    }
+    let fb = pick(fallback);
+    if !fb.is_empty() { fb } else { String::from("LumenCraftEmbedded") }
+}
+
+fn resolve_embedded_truetype(options: &PdfExportOptions) -> Result<Option<EmbeddedTrueTypeFont>, PdfError> {
+    let candidate = if let Some(bytes) = options.embedded_truetype_font.as_deref() {
+        is_truetype_sfnt(bytes).then(|| parse_truetype_font_info(bytes).ok().map(|info| (bytes, info))).flatten()
+    } else {
+        BUNDLED_FONTS
+            .iter()
+            .find_map(|&(_, bytes)| if is_truetype_sfnt(bytes) { parse_truetype_font_info(bytes).ok().map(|info| (bytes, info)) } else { None })
+    };
+
+    let Some((raw_bytes, info)) = candidate else {
+        return Ok(None);
+    };
+    let ps_name = sanitize_pdf_font_name(&info.postscript_name, &info.family_name);
+    let compressed_bytes = compress_if_requested(raw_bytes.to_vec(), true)?;
+    Ok(Some(EmbeddedTrueTypeFont { raw_len: raw_bytes.len(), compressed_bytes, info, ps_name }))
 }
 
 #[derive(Default)]
@@ -143,12 +201,21 @@ fn assemble_pdf_document(
     all_gs_both: &BTreeSet<u8>,
     all_gs_stroke: &BTreeSet<u8>,
     options: &PdfExportOptions,
+    embedded_ttf: Option<&EmbeddedTrueTypeFont>,
 ) -> Result<Vec<u8>, PdfError> {
     // Fixed objects:
     // 1: Catalog, 2: Pages, 3: /F1 Helvetica, 4: /F2 Helvetica-Bold,
     // 5: /F3 Helvetica-Oblique, 6: /F4 Symbol, 7: /F5 Helvetica-BoldOblique, 8: Info
     let fixed_objs = 8usize;
     let mut next_id = fixed_objs + 1;
+
+    let ttf_ids = embedded_ttf.map(|ttf| {
+        let font_id = next_id;
+        let desc_id = next_id + 1;
+        let stream_id = next_id + 2;
+        next_id += 3;
+        (ttf, font_id, desc_id, stream_id)
+    });
 
     let mut gs_both_ids = BTreeMap::new();
     for &alpha in all_gs_both {
@@ -160,13 +227,18 @@ fn assemble_pdf_document(
         gs_stroke_ids.insert(alpha, next_id);
         next_id += 1;
     }
+    let gs_ids = ExtGStateIds { both: gs_both_ids, stroke: gs_stroke_ids };
 
     let pages_base_id = next_id;
     let total_objs = pages_base_id - 1 + pages.len() * 2;
     let mut offsets = vec![0usize; total_objs + 1];
 
-    let mut pdf = Vec::with_capacity(8192);
-    pdf.extend_from_slice(b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n");
+    let mut pdf = Vec::with_capacity(8192 + embedded_ttf.map_or(0, |t| t.compressed_bytes.len()));
+    let header: &[u8] = match options.version {
+        PdfVersion::Pdf14 => b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n",
+        PdfVersion::Pdf17 => b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n",
+    };
+    pdf.extend_from_slice(header);
 
     let mut page_refs = String::new();
     for idx in 0..pages.len() {
@@ -187,17 +259,22 @@ fn assemble_pdf_document(
     let info_dict = build_info_dict(pages, options);
     write_pdf_obj(&mut pdf, &mut offsets, 8, info_dict.as_bytes());
 
-    for (&alpha, &obj_id) in &gs_both_ids {
+    if let Some((ttf, font_id, desc_id, stream_id)) = ttf_ids {
+        write_truetype_font_objects(&mut pdf, &mut offsets, ttf, font_id, desc_id, stream_id);
+    }
+
+    for (&alpha, &obj_id) in &gs_ids.both {
         let a = norm_zero(f64::from(alpha) / 255.0);
         let gs = format!("<< /Type /ExtGState /ca {a:.3} /CA {a:.3} >>\n");
         write_pdf_obj(&mut pdf, &mut offsets, obj_id, gs.as_bytes());
     }
-    for (&alpha, &obj_id) in &gs_stroke_ids {
+    for (&alpha, &obj_id) in &gs_ids.stroke {
         let a = norm_zero(f64::from(alpha) / 255.0);
         let gs = format!("<< /Type /ExtGState /CA {a:.3} >>\n");
         write_pdf_obj(&mut pdf, &mut offsets, obj_id, gs.as_bytes());
     }
 
+    let ttf_font_id = ttf_ids.map(|(_, font_id, _, _)| font_id);
     for (idx, (scene, encoded)) in pages.iter().zip(encoded_pages.iter()).enumerate() {
         let content_obj_id = pages_base_id + idx * 2;
         let page_obj_id = content_obj_id + 1;
@@ -210,12 +287,66 @@ fn assemble_pdf_document(
         content_obj.extend_from_slice(b"\nendstream\n");
         write_pdf_obj(&mut pdf, &mut offsets, content_obj_id, &content_obj);
 
-        let page_dict = build_page_dict(scene, options, encoded, content_obj_id, &gs_both_ids, &gs_stroke_ids);
+        let page_dict = build_page_dict(scene, options, encoded, content_obj_id, ttf_font_id, &gs_ids);
         write_pdf_obj(&mut pdf, &mut offsets, page_obj_id, page_dict.as_bytes());
     }
 
     write_xref_and_trailer(&mut pdf, &offsets, total_objs);
     Ok(pdf)
+}
+
+fn write_truetype_font_objects(
+    pdf: &mut Vec<u8>,
+    offsets: &mut [usize],
+    ttf: &EmbeddedTrueTypeFont,
+    font_id: usize,
+    desc_id: usize,
+    stream_id: usize,
+) {
+    let mut widths = String::with_capacity(224 * 5);
+    for idx in 0..224usize {
+        if idx > 0 {
+            widths.push(' ');
+        }
+        let w = ttf.info.widths_1000.get(idx).copied().unwrap_or(556);
+        let _ = write!(widths, "{w}");
+    }
+    let font_dict = format!(
+        "<< /Type /Font /Subtype /TrueType /BaseFont /{} /FirstChar 32 /LastChar 255 /Widths [{}] /FontDescriptor {} 0 R /Encoding /WinAnsiEncoding >>\n",
+        ttf.ps_name, widths, desc_id
+    );
+    write_pdf_obj(pdf, offsets, font_id, font_dict.as_bytes());
+
+    let flags = if ttf.info.flags == 0 { 32 } else { ttf.info.flags };
+    let [b0, b1, b2, b3] = ttf.info.bbox_1000;
+    let italic_str = if ttf.info.italic_angle.is_finite() && ttf.info.italic_angle.abs() >= 0.05 {
+        format!("{:.2}", ttf.info.italic_angle)
+    } else {
+        String::from("0")
+    };
+    let desc_dict = format!(
+        "<< /Type /FontDescriptor /FontName /{} /Flags {} /FontBBox [{} {} {} {}] /ItalicAngle {} /Ascent {} /Descent {} /CapHeight {} /StemV {} /FontFile2 {} 0 R >>\n",
+        ttf.ps_name,
+        flags,
+        b0,
+        b1,
+        b2,
+        b3,
+        italic_str,
+        ttf.info.ascender_1000,
+        ttf.info.descender_1000,
+        ttf.info.cap_height_1000,
+        ttf.info.stem_v,
+        stream_id
+    );
+    write_pdf_obj(pdf, offsets, desc_id, desc_dict.as_bytes());
+
+    let mut stream_obj = Vec::with_capacity(ttf.compressed_bytes.len() + 128);
+    let header = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", ttf.compressed_bytes.len(), ttf.raw_len);
+    stream_obj.extend_from_slice(header.as_bytes());
+    stream_obj.extend_from_slice(&ttf.compressed_bytes);
+    stream_obj.extend_from_slice(b"\nendstream\n");
+    write_pdf_obj(pdf, offsets, stream_id, &stream_obj);
 }
 
 fn build_info_dict(pages: &[ChartScene], options: &PdfExportOptions) -> String {
@@ -238,11 +369,11 @@ fn build_page_dict(
     options: &PdfExportOptions,
     encoded: &EncodedPage,
     content_obj_id: usize,
-    gs_both_ids: &BTreeMap<u8, usize>,
-    gs_stroke_ids: &BTreeMap<u8, usize>,
+    ttf_font_id: Option<usize>,
+    gs_ids: &ExtGStateIds,
 ) -> String {
-    let mut dict = String::with_capacity(256);
-    let _ = write!(dict, "<< /Type /Page /Parent 2 0 R /MediaBox [0.000 0.000 {:.3} {:.3}]", norm_zero(scene.width_pt), norm_zero(scene.height_pt),);
+    let mut dict = String::with_capacity(280);
+    let _ = write!(dict, "<< /Type /Page /Parent 2 0 R /MediaBox [0.000 0.000 {:.3} {:.3}]", norm_zero(scene.width_pt), norm_zero(scene.height_pt));
     if let Some(trim) = options.trim_pt {
         let [llx, lly, urx, ury] = rect_to_pdf_box(trim, scene.height_pt);
         let _ = write!(dict, " /TrimBox [{llx:.3} {lly:.3} {urx:.3} {ury:.3}]");
@@ -251,16 +382,20 @@ fn build_page_dict(
         let [llx, lly, urx, ury] = rect_to_pdf_box(bleed, scene.height_pt);
         let _ = write!(dict, " /BleedBox [{llx:.3} {lly:.3} {urx:.3} {ury:.3}]");
     }
-    dict.push_str(" /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R /F5 7 0 R >>");
+    if let Some(ttf_id) = ttf_font_id {
+        let _ = write!(dict, " /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R /F5 7 0 R /F6 {ttf_id} 0 R >>");
+    } else {
+        dict.push_str(" /Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R /F4 6 0 R /F5 7 0 R >>");
+    }
     if !encoded.used.gs_both.is_empty() || !encoded.used.gs_stroke.is_empty() {
         dict.push_str(" /ExtGState <<");
         for &alpha in &encoded.used.gs_both {
-            if let Some(&obj_id) = gs_both_ids.get(&alpha) {
+            if let Some(&obj_id) = gs_ids.both.get(&alpha) {
                 let _ = write!(dict, " /GSa{alpha:03} {obj_id} 0 R");
             }
         }
         for &alpha in &encoded.used.gs_stroke {
-            if let Some(&obj_id) = gs_stroke_ids.get(&alpha) {
+            if let Some(&obj_id) = gs_ids.stroke.get(&alpha) {
                 let _ = write!(dict, " /GSs{alpha:03} {obj_id} 0 R");
             }
         }
@@ -295,13 +430,18 @@ fn write_pdf_obj(pdf: &mut Vec<u8>, offsets: &mut [usize], obj_id: usize, body: 
     pdf.extend_from_slice(b"endobj\n");
 }
 
-fn encode_page_stream(scene: &ChartScene, options: &PdfExportOptions) -> Result<(String, PageResourcesUsed), PdfError> {
+fn encode_page_stream(
+    scene: &ChartScene,
+    options: &PdfExportOptions,
+    embedded_info: Option<&TrueTypeFontInfo>,
+) -> Result<(String, PageResourcesUsed), PdfError> {
     let mut ctx = StreamCtx {
         buf: String::with_capacity(1024),
         used: PageResourcesUsed::default(),
         page_h: scene.height_pt,
         color_space: options.color_space,
         outline_text: options.outline_text,
+        embedded_info,
     };
     let mut clip_depth = 0usize;
 
@@ -334,15 +474,16 @@ fn encode_page_stream(scene: &ChartScene, options: &PdfExportOptions) -> Result<
     Ok((ctx.buf, ctx.used))
 }
 
-struct StreamCtx {
+struct StreamCtx<'a> {
     buf: String,
     used: PageResourcesUsed,
     page_h: f64,
     color_space: PdfColorSpace,
     outline_text: bool,
+    embedded_info: Option<&'a TrueTypeFontInfo>,
 }
 
-impl StreamCtx {
+impl StreamCtx<'_> {
     fn y_pdf(&self, y_scene: f64) -> f64 {
         norm_zero(self.page_h - y_scene)
     }
@@ -522,7 +663,9 @@ impl StreamCtx {
     }
 
     fn emit_selectable_text(&mut self, text: &PositionedText) -> Result<(), PdfError> {
-        let total_width = measure_selectable_text_width_pt(&text.rich, text.font_size_pt);
+        let visual_rich: Cow<'_, RichText> =
+            if rich_contains_rtl(&text.rich) { Cow::Owned(reorder_rich_text_bidi(&text.rich)) } else { Cow::Borrowed(&text.rich) };
+        let total_width = measure_selectable_text_width_pt(&visual_rich, text.font_size_pt, self.embedded_info);
         let u_start = anchor_offset_x(text.anchor, total_width);
         let rad = text.rotation_deg.to_radians();
         let mut state = SelectableTextState {
@@ -547,7 +690,7 @@ impl StreamCtx {
         let _ = writeln!(self.buf, "{}", format_fill_color(text.color, self.color_space));
         self.open_text_block(state.anchor_pt, state.pen_u, state.cos_a, state.sin_a);
 
-        for span in &text.rich.spans {
+        for span in &visual_rich.spans {
             self.emit_selectable_span(span, &mut state);
         }
 
@@ -565,7 +708,7 @@ impl StreamCtx {
         }
         let span_color = span.color.unwrap_or(state.base_color);
         if span_color.a == 0 {
-            state.pen_u += measure_span_width_pt(span, state.font_size_pt);
+            state.pen_u += measure_span_width_pt(span, state.font_size_pt, self.embedded_info);
             return;
         }
         if span_color.a != state.active_alpha {
@@ -599,7 +742,7 @@ impl StreamCtx {
             state.active_rise = span_rise;
         }
 
-        for run in split_span_into_pdf_runs(&span.text, span.weight, span.slope) {
+        for run in split_span_into_pdf_runs(&span.text, span.weight, span.slope, self.embedded_info.is_some()) {
             if run.bytes.is_empty() {
                 continue;
             }
@@ -612,7 +755,7 @@ impl StreamCtx {
             write_pdf_bytes_literal(&mut self.buf, &run.bytes);
             self.buf.push_str(" Tj\n");
         }
-        state.pen_u += measure_span_width_pt(span, state.font_size_pt);
+        state.pen_u += measure_span_width_pt(span, state.font_size_pt, self.embedded_info);
     }
 
     fn open_text_block(&mut self, anchor_pt: PointPt, pen_u: f64, cos_a: f64, sin_a: f64) {
@@ -623,7 +766,9 @@ impl StreamCtx {
     }
 
     fn emit_outlined_text(&mut self, text: &PositionedText) -> Result<(), PdfError> {
-        let outlines = outline_rich_text(&text.rich, 0.0, 0.0, text.font_size_pt);
+        let visual_rich: Cow<'_, RichText> =
+            if rich_contains_rtl(&text.rich) { Cow::Owned(reorder_rich_text_bidi(&text.rich)) } else { Cow::Borrowed(&text.rich) };
+        let outlines = outline_rich_text(&visual_rich, 0.0, 0.0, text.font_size_pt);
         if outlines.is_empty() {
             return Ok(());
         }
@@ -771,6 +916,7 @@ enum PdfFontId {
     HelveticaOblique,
     Symbol,
     HelveticaBoldOblique,
+    EmbeddedTrueType,
 }
 
 impl PdfFontId {
@@ -781,6 +927,7 @@ impl PdfFontId {
             Self::HelveticaOblique => "F3",
             Self::Symbol => "F4",
             Self::HelveticaBoldOblique => "F5",
+            Self::EmbeddedTrueType => "F6",
         }
     }
 
@@ -792,6 +939,14 @@ impl PdfFontId {
             (SpanWeight::Bold, SpanSlope::Italic) => Self::HelveticaBoldOblique,
         }
     }
+
+    const fn from_style_with_ttf(weight: SpanWeight, slope: SpanSlope, has_ttf: bool) -> Self {
+        if has_ttf && matches!((weight, slope), (SpanWeight::Regular, SpanSlope::Upright)) {
+            Self::EmbeddedTrueType
+        } else {
+            Self::from_style(weight, slope)
+        }
+    }
 }
 
 struct TextRun {
@@ -799,8 +954,82 @@ struct TextRun {
     bytes: Vec<u8>,
 }
 
-fn split_span_into_pdf_runs(text: &str, weight: SpanWeight, slope: SpanSlope) -> Vec<TextRun> {
-    let base_font = PdfFontId::from_style(weight, slope);
+fn rich_contains_rtl(rich: &RichText) -> bool {
+    rich.spans.iter().any(|span| contains_rtl_script(&span.text))
+}
+
+fn infer_base_direction(rich: &RichText) -> TextDirection {
+    let mut buf = [0u8; 4];
+    for span in &rich.spans {
+        for ch in span.text.chars() {
+            if contains_rtl_script(ch.encode_utf8(&mut buf)) {
+                return TextDirection::Rtl;
+            }
+            if ch.is_alphabetic() {
+                return TextDirection::Ltr;
+            }
+        }
+    }
+    TextDirection::Rtl
+}
+
+fn reorder_rich_text_bidi(rich: &RichText) -> RichText {
+    let base_dir = infer_base_direction(rich);
+    if rich.spans.len() == 1
+        && let Some(span) = rich.spans.first()
+    {
+        let visual_spans = shape_bidi_runs(&span.text, base_dir).into_iter().map(|run| RichSpan { text: run.text, ..span.clone() }).collect();
+        return RichText::new(visual_spans);
+    }
+
+    let mut plain = String::new();
+    let mut span_ranges = Vec::with_capacity(rich.spans.len());
+    for span in &rich.spans {
+        if span.text.is_empty() {
+            continue;
+        }
+        let start = plain.len();
+        plain.push_str(&span.text);
+        span_ranges.push((start, plain.len(), span));
+    }
+
+    let mut visual_spans = Vec::new();
+    for run in shape_bidi_runs(&plain, base_dir) {
+        if let Some(&(_, _, single_span)) = span_ranges.iter().find(|&&(s, e, _)| s <= run.start_byte && run.end_byte <= e) {
+            visual_spans.push(RichSpan { text: run.text, ..single_span.clone() });
+            continue;
+        }
+        match run.direction {
+            TextDirection::Ltr => {
+                for &(s_start, s_end, span) in &span_ranges {
+                    let o_start = run.start_byte.max(s_start);
+                    let o_end = run.end_byte.min(s_end);
+                    if o_start < o_end
+                        && let Some(slice) = plain.get(o_start..o_end)
+                    {
+                        visual_spans.push(RichSpan { text: slice.to_owned(), ..span.clone() });
+                    }
+                }
+            }
+            TextDirection::Rtl => {
+                for &(s_start, s_end, span) in span_ranges.iter().rev() {
+                    let o_start = run.start_byte.max(s_start);
+                    let o_end = run.end_byte.min(s_end);
+                    if o_start < o_end
+                        && let Some(slice) = plain.get(o_start..o_end)
+                    {
+                        let reordered = reorder_visual_bidi(slice, TextDirection::Rtl);
+                        visual_spans.push(RichSpan { text: reordered, ..span.clone() });
+                    }
+                }
+            }
+        }
+    }
+    RichText::new(visual_spans)
+}
+
+fn split_span_into_pdf_runs(text: &str, weight: SpanWeight, slope: SpanSlope, has_ttf: bool) -> Vec<TextRun> {
+    let base_font = PdfFontId::from_style_with_ttf(weight, slope, has_ttf);
     let mut runs: Vec<TextRun> = Vec::new();
     for ch in text.chars() {
         let (font, byte) = if let Some(sym_byte) = symbol_font_byte(ch) { (PdfFontId::Symbol, sym_byte) } else { (base_font, winansi_font_byte(ch)) };
@@ -1031,23 +1260,28 @@ fn anchor_offset_x(anchor: TextAnchor, total_width: f64) -> f64 {
     }
 }
 
-fn measure_span_width_pt(span: &RichSpan, base_font_size_pt: f64) -> f64 {
+fn measure_span_width_pt(span: &RichSpan, base_font_size_pt: f64, embedded_info: Option<&TrueTypeFontInfo>) -> f64 {
     let size_pt = effective_span_font_size(base_font_size_pt, span);
-    let base_font = PdfFontId::from_style(span.weight, span.slope);
+    let base_font = PdfFontId::from_style_with_ttf(span.weight, span.slope, embedded_info.is_some());
     let mut total = 0.0;
     for ch in span.text.chars() {
-        let width_em = if let Some(sym) = symbol_font_byte(ch) {
-            symbol_advance_thousandths(sym)
+        if let Some(sym) = symbol_font_byte(ch) {
+            total += size_pt * (f64::from(symbol_advance_thousandths(sym)) / 1000.0);
+        } else if base_font == PdfFontId::EmbeddedTrueType
+            && let Some(info) = embedded_info
+        {
+            let effective_ch = if winansi_font_byte(ch) == b'?' && ch != '?' { '?' } else { ch };
+            total += info.width_pt(effective_ch, size_pt);
         } else {
-            helvetica_advance_thousandths(winansi_font_byte(ch), base_font)
-        };
-        total += size_pt * (f64::from(width_em) / 1000.0);
+            let width_em = helvetica_advance_thousandths(winansi_font_byte(ch), base_font);
+            total += size_pt * (f64::from(width_em) / 1000.0);
+        }
     }
     total
 }
 
-fn measure_selectable_text_width_pt(rich: &RichText, base_font_size_pt: f64) -> f64 {
-    rich.spans.iter().map(|span| measure_span_width_pt(span, base_font_size_pt)).sum()
+fn measure_selectable_text_width_pt(rich: &RichText, base_font_size_pt: f64, embedded_info: Option<&TrueTypeFontInfo>) -> f64 {
+    rich.spans.iter().map(|span| measure_span_width_pt(span, base_font_size_pt, embedded_info)).sum()
 }
 
 /// Core-14 Helvetica advance widths in 1/1000 em units for accurate `Middle`/`End` alignment.

@@ -13,7 +13,10 @@ use lumencraft_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, 
 use lumencraft_stats::survival::kaplan_meier_curve;
 use lumencraft_text::{LocaleNumberPolicy, RichText, TextMetricsPt, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
 
-use crate::scales::AxisMapping;
+use crate::scales::{
+    AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, compute_additional_ticks_for_segments, emit_additional_tick_gridline_segments,
+    emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
+};
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
@@ -416,8 +419,35 @@ pub(crate) fn draw_cartesian_frame(scene: &mut ChartScene, frame: &CartesianFram
     draw_y_numeric_ticks(scene, frame.spec, frame.y_ticks, frame.y_map, frame.max_y_label_w, frame.doc);
 }
 
+fn resolve_single_axis_additional(
+    axis: &AxisSpec,
+    map: AxisMapping,
+    span_start: f64,
+    span_end: f64,
+    doc: &ProjectDocument,
+    primary_id: &SheetId,
+) -> Vec<ResolvedAdditionalTick> {
+    if axis.additional_ticks.is_empty() {
+        return Vec::new();
+    }
+    let policy = LocaleNumberPolicy::default();
+    compute_additional_ticks_for_segments(
+        &[(0, map, span_start, span_end)],
+        &axis.additional_ticks,
+        axis.tick_format,
+        &policy,
+        Some(doc),
+        Some(primary_id),
+    )
+}
+
 fn draw_axis_thresholds(scene: &mut ChartScene, frame: &CartesianFrame<'_>) {
     let r = scene.plot_rect_pt;
+    let grid_color = AxisRenderOptions::default().grid_color;
+    let x_add = resolve_single_axis_additional(&frame.spec.x_axis, frame.x_map, r.x, r.right(), frame.doc, &frame.spec.primary_source_sheet_id);
+    let y_add = resolve_single_axis_additional(&frame.spec.y_axis, frame.y_map, r.bottom(), r.y, frame.doc, &frame.spec.primary_source_sheet_id);
+    emit_additional_tick_gridline_segments(&x_add, true, &[(r.bottom(), r.y)], grid_color, &mut scene.primitives);
+    emit_additional_tick_gridline_segments(&y_add, false, &[(r.x, r.right())], grid_color, &mut scene.primitives);
     for thr in &frame.spec.x_axis.thresholds {
         if let Some(x_pt) = frame.x_map.map_value(thr.value, r.x, r.right()) {
             emit_vertical_threshold(scene, r, x_pt, thr, frame.x_map);
@@ -504,6 +534,10 @@ fn draw_x_numeric_ticks(scene: &mut ChartScene, frame: &CartesianFrame<'_>) {
             color: Rgba8::BLACK,
         }));
     }
+    let x_add = resolve_single_axis_additional(&frame.spec.x_axis, frame.x_map, r.x, r.right(), frame.doc, &frame.spec.primary_source_sheet_id);
+    if !x_add.is_empty() {
+        emit_additional_x_tick_primitives(&x_add, r.bottom(), angle, tick_stroke, &mut scene.primitives);
+    }
     emit_x_title(scene, frame.spec, frame.doc, angle.abs() > 10.0);
 }
 
@@ -579,6 +613,10 @@ pub(crate) fn draw_y_numeric_ticks(
             rotation_deg: 0.0,
             color: Rgba8::BLACK,
         }));
+    }
+    let y_add = resolve_single_axis_additional(&spec.y_axis, y_map, r.bottom(), r.y, doc, &spec.primary_source_sheet_id);
+    if !y_add.is_empty() {
+        emit_additional_y_tick_primitives(&y_add, r.x, true, 0.0, 6.0, tick_stroke, &mut scene.primitives);
     }
     emit_y_title(scene, spec, max_y_label_w, doc);
 }

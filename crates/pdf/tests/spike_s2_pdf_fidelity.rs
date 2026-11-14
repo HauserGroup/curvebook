@@ -27,7 +27,7 @@ fn rfind_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 fn parse_and_verify_pdf(bytes: &[u8]) -> Result<ParsedPdf, String> {
-    assert!(bytes.starts_with(b"%PDF-1.4\n"), "missing %PDF-1.4 header");
+    assert!(bytes.starts_with(b"%PDF-1.4\n") || bytes.starts_with(b"%PDF-1.7\n"), "missing %PDF-1.4/%PDF-1.7 header");
     assert!(bytes.ends_with(b"%%EOF\n"), "missing %%EOF\\n footer");
 
     let startxref_pos = rfind_subslice(bytes, b"startxref\n").ok_or("missing startxref")?;
@@ -333,6 +333,7 @@ fn spike_s2_selectable_vector_pdf_greek_super_sub_rotation_and_xref_fidelity() -
         outline_text: false,
         trim_pt: Some(RectPt::new(12.0, 10.0, 456.0, 320.0)),
         bleed_pt: Some(RectPt::new(4.0, 4.0, 472.0, 332.0)),
+        ..PdfExportOptions::default()
     };
 
     let t0 = Instant::now();

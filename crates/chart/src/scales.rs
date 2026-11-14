@@ -4,8 +4,8 @@
 use std::fmt::Write as FmtWrite;
 
 use lumencraft_doc::{
-    AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CiBound, FramePreset, GraphAnnotation, GraphSpec, LegendSpec,
-    ProjectDocument, ResultCell, ResultTab, SheetId, SizePt, TableArchetype, TickLabelFormat,
+    AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CiBound, FramePreset, GraphAnnotation, GraphSpec,
+    LegendSpec, ProjectDocument, ResultCell, ResultTab, SheetId, SizePt, TableArchetype, TickLabelFormat,
 };
 use lumencraft_math::dist::{norm_cdf, norm_ppf};
 use lumencraft_math::{AxisScale, LogitDomain};
@@ -1030,6 +1030,168 @@ pub fn compute_segment_ticks(seg: &ResolvedSegment, config: TickComputeConfig<'_
     ticks
 }
 
+/// Resolved custom [`AdditionalTick`] projected onto an active axis segment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedAdditionalTick {
+    pub segment_index: usize,
+    pub value: f64,
+    pub coord_pt: f64,
+    pub label: Option<RichText>,
+    pub draw_gridline: bool,
+}
+
+/// Map custom [`AdditionalTick`] entries across active segments of `axis`.
+///
+/// Values outside every active segment domain (including values inside break gaps or outside the
+/// valid scale domain such as `<= 0` on log scales, `0` on reciprocal, or endpoints on
+/// logit/probit) are omitted cleanly. When `label` is `None`, the value is formatted using
+/// `tick_format` and `policy`.
+#[must_use]
+pub fn compute_additional_ticks(
+    axis: &ResolvedAxis,
+    additional: &[AdditionalTick],
+    tick_format: TickLabelFormat,
+    policy: &LocaleNumberPolicy,
+) -> Vec<ResolvedAdditionalTick> {
+    let segs: Vec<(usize, AxisMapping, f64, f64)> =
+        axis.segments.iter().map(|s| (s.segment_index, s.mapping(), s.span_start_pt, s.span_end_pt)).collect();
+    compute_additional_ticks_for_segments(&segs, additional, tick_format, policy, None, None)
+}
+
+fn additional_segment_contains_value(min: f64, max: f64, value: f64) -> bool {
+    if !min.is_finite() || !max.is_finite() || !value.is_finite() {
+        return false;
+    }
+    let lo = min.min(max);
+    let hi = min.max(max);
+    let tol = 1e-12 * (hi - lo).abs().max(lo.abs()).max(hi.abs());
+    value >= lo - tol && value <= hi + tol
+}
+
+pub(crate) fn compute_additional_ticks_for_segments(
+    segments: &[(usize, AxisMapping, f64, f64)],
+    additional: &[AdditionalTick],
+    tick_format: TickLabelFormat,
+    policy: &LocaleNumberPolicy,
+    doc: Option<&ProjectDocument>,
+    primary_id: Option<&SheetId>,
+) -> Vec<ResolvedAdditionalTick> {
+    let mut out = Vec::with_capacity(additional.len().min(MAX_TICKS_PER_SEGMENT));
+    for tick in additional.iter().take(MAX_TICKS_PER_SEGMENT) {
+        if !tick.value.is_finite() {
+            continue;
+        }
+        for &(segment_index, mapping, span_start, span_end) in segments {
+            if !additional_segment_contains_value(mapping.min, mapping.max, tick.value) {
+                continue;
+            }
+            if let Some(raw_coord) = mapping.map_value(tick.value, span_start, span_end) {
+                let lo_pt = span_start.min(span_end);
+                let hi_pt = span_start.max(span_end);
+                let coord_pt = raw_coord.clamp(lo_pt, hi_pt);
+                let label = match &tick.label {
+                    Some(raw) => {
+                        let expanded = doc.map_or_else(|| raw.clone(), |d| resolve_template_hooks(raw, d, primary_id));
+                        if expanded.trim().is_empty() { None } else { Some(parse_markup(&expanded)) }
+                    }
+                    None => Some(format_tick_rich(tick.value, mapping.scale, tick_format, policy)),
+                };
+                out.push(ResolvedAdditionalTick { segment_index, value: tick.value, coord_pt, label, draw_gridline: tick.draw_gridline });
+                break;
+            }
+        }
+    }
+    out
+}
+
+pub(crate) fn gridline_stroke(grid_color: Rgba8) -> StrokePaint {
+    StrokePaint { color: grid_color, width_pt: 0.5, dash: LineDashStyle::Dotted, cap: LineCap::Butt, join: LineJoin::Miter }
+}
+
+pub(crate) fn emit_additional_tick_gridline_segments(
+    ticks: &[ResolvedAdditionalTick],
+    is_horizontal: bool,
+    perp_spans: &[(f64, f64)],
+    grid_color: Rgba8,
+    primitives: &mut Vec<ScenePrimitive>,
+) {
+    let stroke = gridline_stroke(grid_color);
+    for tick in ticks {
+        if !tick.draw_gridline {
+            continue;
+        }
+        for &(q0, q1) in perp_spans {
+            let (p0, p1) = if is_horizontal {
+                (PointPt::new(tick.coord_pt, q0), PointPt::new(tick.coord_pt, q1))
+            } else {
+                (PointPt::new(q0, tick.coord_pt), PointPt::new(q1, tick.coord_pt))
+            };
+            primitives.push(ScenePrimitive::Path { path: Path2D::line(p0, p1), fill: None, stroke: Some(stroke), clip: None });
+        }
+    }
+}
+
+pub(crate) fn emit_additional_x_tick_primitives(
+    ticks: &[ResolvedAdditionalTick],
+    spine_y: f64,
+    tick_angle_deg: f64,
+    tick_stroke: StrokePaint,
+    primitives: &mut Vec<ScenePrimitive>,
+) {
+    let rot = if tick_angle_deg.is_finite() { tick_angle_deg } else { 0.0 };
+    let anchor = if rot.abs() > 10.0 { TextAnchor::End } else { TextAnchor::Middle };
+    for tick in ticks {
+        primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(tick.coord_pt, spine_y), PointPt::new(tick.coord_pt, spine_y + 4.0)),
+            fill: None,
+            stroke: Some(tick_stroke),
+            clip: None,
+        });
+        if let Some(rich) = &tick.label {
+            primitives.push(ScenePrimitive::Text(PositionedText {
+                rich: rich.clone(),
+                anchor_pt: PointPt::new(tick.coord_pt, spine_y + 13.0),
+                anchor,
+                font_size_pt: 8.5,
+                rotation_deg: rot,
+                color: Rgba8::BLACK,
+            }));
+        }
+    }
+}
+
+pub(crate) fn emit_additional_y_tick_primitives(
+    ticks: &[ResolvedAdditionalTick],
+    spine_x: f64,
+    is_left: bool,
+    tick_angle_deg: f64,
+    label_offset_pt: f64,
+    tick_stroke: StrokePaint,
+    primitives: &mut Vec<ScenePrimitive>,
+) {
+    let dir = if is_left { -1.0 } else { 1.0 };
+    let anchor = if is_left { TextAnchor::End } else { TextAnchor::Start };
+    let rot = if tick_angle_deg.is_finite() { tick_angle_deg } else { 0.0 };
+    for tick in ticks {
+        primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(spine_x, tick.coord_pt), PointPt::new(spine_x + dir * 4.0, tick.coord_pt)),
+            fill: None,
+            stroke: Some(tick_stroke),
+            clip: None,
+        });
+        if let Some(rich) = &tick.label {
+            primitives.push(ScenePrimitive::Text(PositionedText {
+                rich: rich.clone(),
+                anchor_pt: PointPt::new(spine_x + dir * label_offset_pt, tick.coord_pt + 3.0),
+                anchor,
+                font_size_pt: 8.5,
+                rotation_deg: rot,
+                color: Rgba8::BLACK,
+            }));
+        }
+    }
+}
+
 const LOGIT_PCT_TICKS: [f64; 13] = [0.01, 0.1, 1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.99];
 const LOGIT_PROP_TICKS: [f64; 11] = [0.001, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 0.999];
 const PROBIT_PCT_TICKS: [f64; 13] = [0.01, 0.1, 1.0, 5.0, 10.0, 20.0, 50.0, 80.0, 90.0, 95.0, 99.0, 99.9, 99.99];
@@ -1575,9 +1737,12 @@ fn estimate_x_margin(spec: &AxisSpec, cats: Option<&[CategoricalTick]>, options:
 
 /// Render background threshold zones (`shade_to: Some(...)`) and optional gridlines behind data.
 pub fn render_thresholds_background(axes: &CompiledAxes, graph: &GraphSpec, scene: &mut ChartScene, options: &AxisRenderOptions) {
+    let mut drawn_x: Vec<f64> = Vec::new();
+    let mut drawn_y: Vec<f64> = Vec::new();
     if options.show_gridlines {
-        emit_axis_gridlines(axes, scene, options.grid_color);
+        emit_axis_gridlines(axes, graph, &options.policy, scene, options.grid_color, &mut drawn_x, &mut drawn_y);
     }
+    emit_additional_tick_gridlines_dedup(axes, graph, scene, options, &drawn_x, &drawn_y);
     emit_threshold_zones(&graph.x_axis.thresholds, &axes.x_axis, &axes.y_axis, scene);
     emit_threshold_zones(&graph.y_axis.thresholds, &axes.y_axis, &axes.x_axis, scene);
     if let (Some(y2_spec), Some(y2_axis)) = (&graph.y2_axis, &axes.y2_axis) {
@@ -1595,12 +1760,31 @@ pub fn render_thresholds_lines(axes: &CompiledAxes, graph: &GraphSpec, doc: &Pro
     }
 }
 
-fn emit_axis_gridlines(axes: &CompiledAxes, scene: &mut ChartScene, grid_color: Rgba8) {
-    let stroke = StrokePaint { color: grid_color, width_pt: 0.5, dash: LineDashStyle::Dotted, cap: LineCap::Butt, join: LineJoin::Miter };
-    for tick in &axes.x_ticks {
+fn emit_axis_gridlines(
+    axes: &CompiledAxes,
+    graph: &GraphSpec,
+    policy: &LocaleNumberPolicy,
+    scene: &mut ChartScene,
+    grid_color: Rgba8,
+    drawn_x: &mut Vec<f64>,
+    drawn_y: &mut Vec<f64>,
+) {
+    let stroke = gridline_stroke(grid_color);
+    let auto_prefix = |ticks: &[AxisTick], ax: &ResolvedAxis, spec: &AxisSpec| -> usize {
+        if spec.additional_ticks.is_empty() {
+            return ticks.len();
+        }
+        let add = compute_additional_ticks(ax, &spec.additional_ticks, spec.tick_format, policy);
+        let prefix = ticks.len().saturating_sub(add.len());
+        let suffix_matches = ticks.len() >= add.len() && ticks[prefix..].iter().zip(&add).all(|(t, a)| (t.coord_pt - a.coord_pt).abs() <= 1e-6);
+        if suffix_matches { prefix } else { ticks.len() }
+    };
+    let x_auto_len = auto_prefix(&axes.x_ticks, &axes.x_axis, &graph.x_axis);
+    for tick in &axes.x_ticks[..x_auto_len] {
         if tick.kind != TickKind::Major {
             continue;
         }
+        drawn_x.push(tick.coord_pt);
         for y_seg in &axes.y_axis.segments {
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::line(PointPt::new(tick.coord_pt, y_seg.span_start_pt), PointPt::new(tick.coord_pt, y_seg.span_end_pt)),
@@ -1610,10 +1794,12 @@ fn emit_axis_gridlines(axes: &CompiledAxes, scene: &mut ChartScene, grid_color: 
             });
         }
     }
-    for tick in &axes.y_ticks {
+    let y_auto_len = auto_prefix(&axes.y_ticks, &axes.y_axis, &graph.y_axis);
+    for tick in &axes.y_ticks[..y_auto_len] {
         if tick.kind != TickKind::Major {
             continue;
         }
+        drawn_y.push(tick.coord_pt);
         for x_seg in &axes.x_axis.segments {
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::line(PointPt::new(x_seg.span_start_pt, tick.coord_pt), PointPt::new(x_seg.span_end_pt, tick.coord_pt)),
@@ -1622,6 +1808,35 @@ fn emit_axis_gridlines(axes: &CompiledAxes, scene: &mut ChartScene, grid_color: 
                 clip: None,
             });
         }
+    }
+}
+
+fn emit_additional_tick_gridlines_dedup(
+    axes: &CompiledAxes,
+    graph: &GraphSpec,
+    scene: &mut ChartScene,
+    options: &AxisRenderOptions,
+    skip_x: &[f64],
+    skip_y: &[f64],
+) {
+    let y_spans: Vec<(f64, f64)> = axes.y_axis.segments.iter().map(|s| (s.span_start_pt, s.span_end_pt)).collect();
+    let x_spans: Vec<(f64, f64)> = axes.x_axis.segments.iter().map(|s| (s.span_start_pt, s.span_end_pt)).collect();
+
+    if !graph.x_axis.additional_ticks.is_empty() {
+        let mut x_add = compute_additional_ticks(&axes.x_axis, &graph.x_axis.additional_ticks, graph.x_axis.tick_format, &options.policy);
+        x_add.retain(|t| t.draw_gridline && !skip_x.iter().any(|&c| (c - t.coord_pt).abs() <= 1e-6));
+        emit_additional_tick_gridline_segments(&x_add, true, &y_spans, options.grid_color, &mut scene.primitives);
+    }
+    if !graph.y_axis.additional_ticks.is_empty() {
+        let mut y_add = compute_additional_ticks(&axes.y_axis, &graph.y_axis.additional_ticks, graph.y_axis.tick_format, &options.policy);
+        y_add.retain(|t| t.draw_gridline && !skip_y.iter().any(|&c| (c - t.coord_pt).abs() <= 1e-6));
+        emit_additional_tick_gridline_segments(&y_add, false, &x_spans, options.grid_color, &mut scene.primitives);
+    }
+    if let (Some(y2_spec), Some(y2_ax)) = (&graph.y2_axis, &axes.y2_axis)
+        && !y2_spec.additional_ticks.is_empty()
+    {
+        let y2_add = compute_additional_ticks(y2_ax, &y2_spec.additional_ticks, y2_spec.tick_format, &options.policy);
+        emit_additional_tick_gridline_segments(&y2_add, false, &x_spans, options.grid_color, &mut scene.primitives);
     }
 }
 
@@ -1715,7 +1930,22 @@ pub fn resolve_axes_and_ticks(graph: &GraphSpec, scene: &mut ChartScene, options
         (None, None)
     };
 
-    let x_ticks = compute_axis_ticks(
+    let append_additional = |ticks: &mut Vec<AxisTick>, ax: &ResolvedAxis, spec: &AxisSpec| {
+        if spec.additional_ticks.is_empty() {
+            return;
+        }
+        for add in compute_additional_ticks(ax, &spec.additional_ticks, spec.tick_format, &options.policy) {
+            ticks.push(AxisTick {
+                segment_index: add.segment_index,
+                value: add.value,
+                coord_pt: add.coord_pt,
+                kind: TickKind::Major,
+                label: add.label,
+            });
+        }
+    };
+
+    let mut x_ticks = compute_axis_ticks(
         &x_axis,
         TickComputeConfig {
             tick_format: graph.x_axis.tick_format,
@@ -1724,7 +1954,9 @@ pub fn resolve_axes_and_ticks(graph: &GraphSpec, scene: &mut ChartScene, options
             categorical_ticks: options.x_categories.as_deref(),
         },
     );
-    let y_ticks = compute_axis_ticks(
+    append_additional(&mut x_ticks, &x_axis, &graph.x_axis);
+
+    let mut y_ticks = compute_axis_ticks(
         &y_axis,
         TickComputeConfig {
             tick_format: graph.y_axis.tick_format,
@@ -1733,16 +1965,22 @@ pub fn resolve_axes_and_ticks(graph: &GraphSpec, scene: &mut ChartScene, options
             categorical_ticks: options.y_categories.as_deref(),
         },
     );
+    append_additional(&mut y_ticks, &y_axis, &graph.y_axis);
+
     let y2_ticks = match (y2_spec, &y2_axis) {
-        (Some(spec), Some(ax)) => compute_axis_ticks(
-            ax,
-            TickComputeConfig {
-                tick_format: spec.tick_format,
-                policy: &options.policy,
-                auto_log_minor_ticks: options.auto_log_minor_ticks,
-                categorical_ticks: options.y2_categories.as_deref(),
-            },
-        ),
+        (Some(spec), Some(ax)) => {
+            let mut ts = compute_axis_ticks(
+                ax,
+                TickComputeConfig {
+                    tick_format: spec.tick_format,
+                    policy: &options.policy,
+                    auto_log_minor_ticks: options.auto_log_minor_ticks,
+                    categorical_ticks: options.y2_categories.as_deref(),
+                },
+            );
+            append_additional(&mut ts, ax, spec);
+            ts
+        }
         _ => Vec::new(),
     };
 
@@ -1760,8 +1998,36 @@ pub fn emit_axes_and_frame(axes: &CompiledAxes, graph: &GraphSpec, doc: &Project
 /// and axis titles according to `graph.frame_preset` (or `options.frame_mode`).
 pub fn render_axes_and_frame(graph: &GraphSpec, doc: &ProjectDocument, scene: &mut ChartScene, options: &AxisRenderOptions) -> CompiledAxes {
     let compiled = resolve_axes_and_ticks(graph, scene, options);
+    if compiled.frame_mode != AxisFrameMode::NoAxes {
+        emit_additional_tick_gridlines_dedup(&compiled, graph, scene, options, &[], &[]);
+    }
     emit_axes_and_frame(&compiled, graph, doc, scene, options);
     compiled
+}
+
+fn ticks_with_expanded_additional<'a>(
+    ticks: &'a [AxisTick],
+    ax: &ResolvedAxis,
+    spec: &AxisSpec,
+    doc: &ProjectDocument,
+    primary_id: Option<&SheetId>,
+    options: &AxisRenderOptions,
+) -> std::borrow::Cow<'a, [AxisTick]> {
+    if !spec.additional_ticks.iter().any(|t| t.label.as_ref().is_some_and(|s| s.contains("{{"))) {
+        return std::borrow::Cow::Borrowed(ticks);
+    }
+    let segs: Vec<(usize, AxisMapping, f64, f64)> =
+        ax.segments.iter().map(|s| (s.segment_index, s.mapping(), s.span_start_pt, s.span_end_pt)).collect();
+    let expanded = compute_additional_ticks_for_segments(&segs, &spec.additional_ticks, spec.tick_format, &options.policy, Some(doc), primary_id);
+    let prefix = ticks.len().saturating_sub(expanded.len());
+    if ticks.len() < expanded.len() || !ticks[prefix..].iter().zip(&expanded).all(|(t, a)| (t.coord_pt - a.coord_pt).abs() <= 1e-6) {
+        return std::borrow::Cow::Borrowed(ticks);
+    }
+    let mut cloned = ticks.to_vec();
+    for (slot, add) in cloned[prefix..].iter_mut().zip(expanded) {
+        slot.label = add.label;
+    }
+    std::borrow::Cow::Owned(cloned)
 }
 
 fn emit_frame_geometry(axes: &CompiledAxes, graph: &GraphSpec, doc: &ProjectDocument, scene: &mut ChartScene, options: &AxisRenderOptions) {
@@ -1776,30 +2042,34 @@ fn emit_frame_geometry(axes: &CompiledAxes, graph: &GraphSpec, doc: &ProjectDocu
         _ => (r.bottom(), r.x),
     };
 
+    let primary_id = Some(&graph.primary_source_sheet_id);
+    let x_ticks = ticks_with_expanded_additional(&axes.x_ticks, &axes.x_axis, &graph.x_axis, doc, primary_id, options);
+    let y_ticks = ticks_with_expanded_additional(&axes.y_ticks, &axes.y_axis, &graph.y_axis, doc, primary_id, options);
+
     let trim_tufte = axes.frame_mode == AxisFrameMode::OffsetAxes;
-    emit_horizontal_spine(&axes.x_axis, &axes.x_ticks, x_spine_y, trim_tufte, x_stroke, scene);
-    emit_vertical_spine(&axes.y_axis, &axes.y_ticks, y_spine_x, trim_tufte, y_stroke, scene);
+    emit_horizontal_spine(&axes.x_axis, &x_ticks, x_spine_y, trim_tufte, x_stroke, scene);
+    emit_vertical_spine(&axes.y_axis, &y_ticks, y_spine_x, trim_tufte, y_stroke, scene);
 
     if matches!(axes.frame_mode, AxisFrameMode::PlainBox | AxisFrameMode::TopRightTicks) {
-        emit_horizontal_spine(&axes.x_axis, &axes.x_ticks, r.y, false, x_stroke, scene);
-        emit_vertical_spine(&axes.y_axis, &axes.y_ticks, r.right(), false, y_stroke, scene);
+        emit_horizontal_spine(&axes.x_axis, &x_ticks, r.y, false, x_stroke, scene);
+        emit_vertical_spine(&axes.y_axis, &y_ticks, r.right(), false, y_stroke, scene);
     }
     if axes.frame_mode == AxisFrameMode::TopRightTicks {
-        emit_ticks_only_horizontal(&axes.x_ticks, r.y, true, x_stroke, options, scene);
-        emit_ticks_only_vertical(&axes.y_ticks, r.right(), false, y_stroke, options, scene);
+        emit_ticks_only_horizontal(&x_ticks, r.y, true, x_stroke, options, scene);
+        emit_ticks_only_vertical(&y_ticks, r.right(), false, y_stroke, options, scene);
     }
 
-    emit_x_ticks_and_labels(&axes.x_ticks, x_spine_y, graph.x_axis.tick_angle_deg, x_stroke, options, scene);
-    emit_y_ticks_and_labels(&axes.y_ticks, y_spine_x, false, y_stroke, options, scene);
+    emit_x_ticks_and_labels(&x_ticks, x_spine_y, graph.x_axis.tick_angle_deg, x_stroke, options, scene);
+    emit_y_ticks_and_labels(&y_ticks, y_spine_x, false, y_stroke, options, scene);
 
-    let primary_id = Some(&graph.primary_source_sheet_id);
     emit_axis_titles(graph, doc, primary_id, x_spine_y, y_spine_x, options, scene);
 
     if let Some(y2_ax) = &axes.y2_axis {
         let y2_spec = graph.y2_axis.as_ref().unwrap_or(&graph.y_axis);
         let y2_stroke = axis_stroke(y2_spec, options.axis_color);
-        emit_vertical_spine(y2_ax, &axes.y2_ticks, r.right(), false, y2_stroke, scene);
-        emit_y_ticks_and_labels(&axes.y2_ticks, r.right(), true, y2_stroke, options, scene);
+        let y2_ticks = ticks_with_expanded_additional(&axes.y2_ticks, y2_ax, y2_spec, doc, primary_id, options);
+        emit_vertical_spine(y2_ax, &y2_ticks, r.right(), false, y2_stroke, scene);
+        emit_y_ticks_and_labels(&y2_ticks, r.right(), true, y2_stroke, options, scene);
         emit_y2_title(y2_spec, doc, primary_id, r, options, scene);
     }
 }

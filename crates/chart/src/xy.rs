@@ -14,7 +14,10 @@ use lumencraft_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle
 use lumencraft_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
 use lumencraft_text::{LocaleNumberPolicy, RichText, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
 
-use crate::scales::AxisMapping;
+use crate::scales::{
+    AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, compute_additional_ticks_for_segments, emit_additional_tick_gridline_segments,
+    emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
+};
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive,
     StrokePaint, TextAnchor,
@@ -792,7 +795,21 @@ pub(crate) fn render_cartesian_chrome(
 ) {
     let r = scene.plot_rect_pt;
     let info_id = primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
+    let primary_opt = Some(&graph.spec.primary_source_sheet_id);
     let policy = LocaleNumberPolicy::default();
+    let grid_color = AxisRenderOptions::default().grid_color;
+
+    let x_add = resolve_segmented_additional_ticks(x_axis, &graph.spec.x_axis, &policy, doc, primary_opt);
+    let y_add = resolve_segmented_additional_ticks(y_axis, &graph.spec.y_axis, &policy, doc, primary_opt);
+    let y2_add = match (y2_axis, graph.spec.y2_axis.as_ref()) {
+        (Some(y2), Some(y2_spec)) => resolve_segmented_additional_ticks(y2, y2_spec, &policy, doc, primary_opt),
+        _ => Vec::new(),
+    };
+    let x_spans: Vec<(f64, f64)> = x_axis.segments.iter().map(|s| (s.span_start, s.span_end)).collect();
+    let y_spans: Vec<(f64, f64)> = y_axis.segments.iter().map(|s| (s.span_start, s.span_end)).collect();
+    emit_additional_tick_gridline_segments(&x_add, true, &y_spans, grid_color, &mut scene.primitives);
+    emit_additional_tick_gridline_segments(&y_add, false, &x_spans, grid_color, &mut scene.primitives);
+    emit_additional_tick_gridline_segments(&y2_add, false, &x_spans, grid_color, &mut scene.primitives);
 
     emit_thresholds(&mut scene.primitives, r, x_axis, &graph.spec.x_axis.thresholds, true);
     emit_thresholds(&mut scene.primitives, r, y_axis, &graph.spec.y_axis.thresholds, false);
@@ -803,9 +820,21 @@ pub(crate) fn render_cartesian_chrome(
     emit_frame_spines(&mut scene.primitives, r, graph.spec.frame_preset, x_axis, y_axis, y2_axis);
 
     emit_x_ticks(&mut scene.primitives, r, x_axis, categorical_x_ticks, &policy);
+    if !x_add.is_empty() {
+        let tick_stroke = StrokePaint::solid(Rgba8::BLACK, x_axis.stroke_width_pt.max(0.75));
+        emit_additional_x_tick_primitives(&x_add, r.bottom(), x_axis.tick_angle_deg, tick_stroke, &mut scene.primitives);
+    }
     emit_y_ticks(&mut scene.primitives, r.x, true, y_axis, &policy);
+    if !y_add.is_empty() {
+        let tick_stroke = StrokePaint::solid(Rgba8::BLACK, y_axis.stroke_width_pt.max(0.75));
+        emit_additional_y_tick_primitives(&y_add, r.x, true, y_axis.tick_angle_deg, 6.5, tick_stroke, &mut scene.primitives);
+    }
     if let Some(y2) = y2_axis {
         emit_y_ticks(&mut scene.primitives, r.right(), false, y2, &policy);
+        if !y2_add.is_empty() {
+            let tick_stroke = StrokePaint::solid(Rgba8::BLACK, y2.stroke_width_pt.max(0.75));
+            emit_additional_y_tick_primitives(&y2_add, r.right(), false, y2.tick_angle_deg, 6.5, tick_stroke, &mut scene.primitives);
+        }
     }
 
     // Axis titles (expanded + parsed for Greek / sub / superscript)
@@ -845,6 +874,21 @@ pub(crate) fn render_cartesian_chrome(
             color: Rgba8::BLACK,
         }));
     }
+}
+
+fn resolve_segmented_additional_ticks(
+    axis: &SegmentedAxis,
+    spec: &AxisSpec,
+    policy: &LocaleNumberPolicy,
+    doc: &ProjectDocument,
+    primary_id: Option<&SheetId>,
+) -> Vec<ResolvedAdditionalTick> {
+    if spec.additional_ticks.is_empty() {
+        return Vec::new();
+    }
+    let segs: Vec<(usize, AxisMapping, f64, f64)> =
+        axis.segments.iter().map(|s| (s.index, AxisMapping { min: s.min, max: s.max, scale: s.scale }, s.span_start, s.span_end)).collect();
+    compute_additional_ticks_for_segments(&segs, &spec.additional_ticks, axis.tick_format, policy, Some(doc), primary_id)
 }
 
 fn emit_thresholds(primitives: &mut Vec<ScenePrimitive>, r: RectPt, axis: &SegmentedAxis, thresholds: &[AxisThreshold], is_x: bool) {

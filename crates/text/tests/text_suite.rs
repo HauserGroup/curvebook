@@ -9,11 +9,17 @@ use lumencraft_text::glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, outl
 fn assert_near(actual: f64, expected: f64, tol: f64, label: &str) {
     assert_approx_eq(actual, expected, tol, tol, label);
 }
-use lumencraft_text::markup::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, expand_template_hooks, parse_markup};
-use lumencraft_text::metrics::{TextMetricsPt, TrueTypeFont, char_advance_pt, core14_advance_em, measure_text_pt};
+use lumencraft_text::markup::{
+    BidiRun, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, expand_template_hooks, is_rtl_locale,
+    parse_markup, reorder_visual_bidi, shape_bidi_runs,
+};
+use lumencraft_text::metrics::{
+    TextMetricsPt, TrueTypeFont, TrueTypeFontInfo, build_minimal_truetype_font, char_advance_pt, core14_advance_em, has_bundled_or_ttf_font,
+    measure_text_pt, parse_truetype_font_info, system_cjk_font_candidates,
+};
 use lumencraft_text::number::{AxisTickFormat, LocaleNumberPolicy, format_axis_tick, format_axis_tick_with_format, format_pvalue_label};
-use lumencraft_text::{BUNDLED_FONTS, has_bundled_fonts_feature};
-use proptest::{prop_assert, prop_assert_eq, proptest};
+use lumencraft_text::{BUNDLED_FONTS, TextError, has_bundled_fonts_feature};
+use proptest::{prelude::any, prop_assert, prop_assert_eq, proptest};
 
 // ---------------------------------------------------------------------------
 // 1. Markup & Template Hook Tests
@@ -790,4 +796,207 @@ proptest! {
         prop_assert_eq!(outlines.len(), rich.plain_text().chars().count());
         assert_valid_closed_outlines(&outlines);
     }
+
+    #[test]
+    fn prop_bidi_shaping_never_panics_and_preserves_byte_bounds(s in "\\PC{0,80}") {
+        for base_dir in [TextDirection::Ltr, TextDirection::Rtl] {
+            let runs = shape_bidi_runs(&s, base_dir);
+            let visual = reorder_visual_bidi(&s, base_dir);
+            let mut joined = String::new();
+            for run in &runs {
+                prop_assert!(run.start_byte < run.end_byte);
+                prop_assert!(run.end_byte <= s.len());
+                prop_assert!(s.is_char_boundary(run.start_byte));
+                prop_assert!(s.is_char_boundary(run.end_byte));
+                joined.push_str(&run.text);
+            }
+            prop_assert_eq!(joined, visual);
+        }
+    }
+
+    #[test]
+    fn prop_parse_truetype_font_info_never_panics_on_hostile_bytes(bytes in proptest::collection::vec(any::<u8>(), 0..256)) {
+        let _ = parse_truetype_font_info(&bytes);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 6. BiDi / RTL Shaping, SFNT Inspection & Builder, and CJK Fallbacks
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bidi_locale_and_script_detection_covers_rtl_blocks() {
+    for rtl_loc in ["ar", "ar-SA", "AR_EG", "he", "he-IL", "fa", "fa-IR", "ur", "ur-PK"] {
+        assert!(is_rtl_locale(rtl_loc), "expected RTL locale for {rtl_loc}");
+    }
+    for ltr_loc in ["", "en", "en-US", "de", "fr", "ja", "ko", "zh-CN", "zh-TW", "pt-BR", "ar-Latn"] {
+        assert!(!is_rtl_locale(ltr_loc), "expected LTR locale for {ltr_loc}");
+    }
+
+    assert!(contains_rtl_script("שלום")); // Hebrew U+0590..=U+05FF
+    assert!(contains_rtl_script("مرحبا")); // Arabic U+0600..=U+06FF
+    assert!(contains_rtl_script("abc \u{0750} def")); // Arabic Supplement U+0750..=U+077F
+    assert!(contains_rtl_script("\u{FB50}")); // Arabic Presentation Forms-A
+    assert!(contains_rtl_script("\u{FE8E}")); // Arabic Presentation Forms-B
+    assert!(!contains_rtl_script("IC50 = 12.4 ± 0.5 μM (Δαβ)"));
+    assert!(!contains_rtl_script("濃度 日本語 한국어"));
+    assert!(!contains_rtl_script(""));
+}
+
+#[test]
+fn bidi_shaping_handles_mixed_hebrew_arabic_numbers_math_and_bracket_mirroring() {
+    assert!(shape_bidi_runs("", TextDirection::Ltr).is_empty());
+    assert_eq!(reorder_visual_bidi("", TextDirection::Rtl), "");
+
+    let pure_ltr = "IC50 = 12.4 ± 0.5 μM";
+    let ltr_runs = shape_bidi_runs(pure_ltr, TextDirection::Ltr);
+    assert_eq!(ltr_runs, vec![BidiRun { text: pure_ltr.to_owned(), direction: TextDirection::Ltr, start_byte: 0, end_byte: pure_ltr.len() }]);
+
+    // Pure Hebrew & pure Arabic reverse into visual LTR order.
+    let he = "שלום";
+    let he_runs = shape_bidi_runs(he, TextDirection::Rtl);
+    assert_eq!(he_runs, vec![BidiRun { text: String::from("םולש"), direction: TextDirection::Rtl, start_byte: 0, end_byte: he.len() }]);
+    assert_eq!(reorder_visual_bidi(he, TextDirection::Ltr), "םולש");
+    assert_eq!(reorder_visual_bidi("مرحبا", TextDirection::Rtl), "ابحرم");
+
+    // Bracket mirroring () / [] / {} / <> with numbers & math identifiers in RTL runs.
+    assert_eq!(reorder_visual_bidi("שלום (123)", TextDirection::Rtl), "(123) םולש");
+    assert_eq!(reorder_visual_bidi("שלום (עולם)", TextDirection::Rtl), "(םלוע) םולש");
+    assert_eq!(reorder_visual_bidi("التركيز [IC50] = 5.2", TextDirection::Rtl), "5.2 = [IC50] زيكرتلا");
+    assert_eq!(reorder_visual_bidi("قيمة {α + β}", TextDirection::Rtl), "{α + β} ةميق");
+    assert_eq!(reorder_visual_bidi("ערך <נתון>", TextDirection::Rtl), "<ןותנ> ךרע");
+
+    // Mixed LTR base sentence containing parenthesized Hebrew.
+    assert_eq!(reorder_visual_bidi("a (שלום) b", TextDirection::Ltr), "a (םולש) b");
+    assert_eq!(reorder_visual_bidi("א (ב) ג", TextDirection::Ltr), "ג (ב) א");
+
+    // Combining niqqud stays attached after its base Hebrew letter.
+    let with_niqqud = "ש\u{05BC}לום";
+    assert_eq!(reorder_visual_bidi(with_niqqud, TextDirection::Rtl), "םולש\u{05BC}");
+
+    // Multi-line paragraphs keep line 1 above line 2.
+    assert_eq!(reorder_visual_bidi("שלום\nעולם", TextDirection::Rtl), "םולש\nםלוע");
+
+    // Byte spans remain valid logical slices of original input.
+    let mixed = "التركيز [IC50]";
+    let mixed_runs = shape_bidi_runs(mixed, TextDirection::Rtl);
+    assert!(mixed_runs.iter().any(|r| r.direction == TextDirection::Ltr && r.text == "IC50"));
+    for run in &mixed_runs {
+        assert!(mixed.get(run.start_byte..run.end_byte).is_some());
+    }
+}
+
+#[test]
+fn minimal_truetype_font_builder_roundtrips_through_sfnt_parsers_and_outlines() {
+    let ttf_bytes = build_minimal_truetype_font();
+    assert_eq!(&ttf_bytes[0..4], &[0x00, 0x01, 0x00, 0x00]);
+    for tag in [b"OS/2", b"cmap", b"glyf", b"head", b"hhea", b"hmtx", b"loca", b"maxp", b"name", b"post"] {
+        assert!(ttf_bytes.windows(4).any(|w| w == tag), "missing SFNT tag {:?}", std::str::from_utf8(tag));
+    }
+
+    let ttf = TrueTypeFont::parse(&ttf_bytes).expect("minimal TTF must parse with TrueTypeFont");
+    assert_eq!(ttf.units_per_em(), 1000);
+    assert_eq!(ttf.ascent(), 800);
+    assert_eq!(ttf.descent(), -200);
+    assert_eq!(ttf.num_glyphs(), 198);
+    assert!(ttf.has_glyf_outlines());
+
+    let info: TrueTypeFontInfo = parse_truetype_font_info(&ttf_bytes).expect("minimal TTF must inspect cleanly");
+    assert_eq!(info.postscript_name, "LumenCraftSans-Regular");
+    assert_eq!(info.family_name, "LumenCraft Sans");
+    assert_eq!(info.units_per_em, 1000);
+    assert_eq!(info.ascender_1000, 800);
+    assert_eq!(info.descender_1000, -200);
+    assert_eq!(info.cap_height_1000, 720);
+    assert_near(info.italic_angle, 0.0, 1e-6, "minimal TTF italic angle");
+    assert_eq!(info.flags, 32);
+    assert_eq!(info.stem_v, 82);
+    assert_eq!(info.bbox_1000[1], -200);
+    assert_eq!(info.bbox_1000[3], 720);
+    assert_eq!(info.widths_1000.len(), 224);
+
+    assert!(info.width_pt('W', 10.0) > info.width_pt('a', 10.0));
+    assert!(info.width_pt('a', 10.0) > info.width_pt('i', 10.0));
+    assert_near(info.width_pt('\n', 10.0), 0.0, 1e-9, "newline width");
+
+    for code in 32u8..=126u8 {
+        let ch = char::from(code);
+        assert_ne!(info.glyph_id(ch), 0, "ASCII {ch:?} should be mapped");
+        assert!(info.width_pt(ch, 12.0) > 0.0);
+    }
+    for code in 160u8..=255u8 {
+        let ch = char::from(code);
+        assert_ne!(info.glyph_id(ch), 0, "Latin-1 U+{:04X} should be mapped", u32::from(ch));
+        assert!(info.width_pt(ch, 12.0) > 0.0);
+    }
+    for greek in ['α', 'β', 'γ', 'Δ', 'μ', 'σ'] {
+        assert_ne!(info.glyph_id(greek), 0, "Greek {greek:?} should be mapped");
+        assert!(info.width_pt(greek, 12.0) > 0.0);
+        let cmds = outline_ttf_glyph(&ttf, greek, 10.0, 50.0, 12.0, false).expect("Greek glyph outline");
+        assert!(!cmds.is_empty());
+    }
+
+    assert_eq!(info.glyph_id('中'), 0);
+    assert!(info.width_pt('中', 12.0) > 0.0);
+    let space_cmds = outline_ttf_glyph(&ttf, ' ', 0.0, 50.0, 12.0, false).expect("space glyph");
+    assert!(space_cmds.is_empty());
+}
+
+#[test]
+fn parse_truetype_font_info_handles_format12_and_rejects_hostile_sfnt() {
+    let syn_bytes = build_synthetic_ttf(true);
+    let syn_info = parse_truetype_font_info(&syn_bytes).expect("synthetic format-12 TTF must inspect");
+    assert_eq!(syn_info.glyph_id('A'), 1);
+    assert_eq!(syn_info.glyph_id('B'), 2);
+    assert_eq!(syn_info.glyph_id('\u{1D400}'), 1);
+    assert_eq!(syn_info.widths_1000.len(), 224);
+    assert_eq!(syn_info.widths_1000[usize::from(b'A' - 32)], 600);
+
+    // Every single truncated prefix of minimal TTF must return Err cleanly.
+    let full = build_minimal_truetype_font();
+    for cut in 0..full.len() {
+        assert!(parse_truetype_font_info(&full[..cut]).is_err(), "prefix len {cut} should error");
+    }
+
+    // Invalid SFNT magic and directory anomalies.
+    assert!(matches!(parse_truetype_font_info(&[]), Err(TextError::InvalidSfnt { .. })));
+    assert!(matches!(parse_truetype_font_info(b"wOFF\x00\x01\x00\x00\x00\x00\x00\x00"), Err(TextError::InvalidSfnt { .. })));
+
+    // Missing required table (`cmap` renamed to `xxxx`) yields MissingSfntTable.
+    let mut missing_cmap = full.clone();
+    if let Some(pos) = missing_cmap.windows(4).position(|w| w == b"cmap") {
+        missing_cmap[pos..pos + 4].copy_from_slice(b"xxxx");
+    }
+    assert!(matches!(parse_truetype_font_info(&missing_cmap), Err(TextError::MissingSfntTable { tag }) if tag == *b"cmap"));
+
+    // Corrupt directory length exceeding EOF.
+    let mut oob = full.clone();
+    oob[12 + 12..12 + 16].copy_from_slice(&0x7FFF_FFFFu32.to_be_bytes());
+    assert!(matches!(parse_truetype_font_info(&oob), Err(TextError::InvalidSfnt { .. })));
+}
+
+#[test]
+fn cjk_candidates_and_bundled_font_helpers_behave_consistently() {
+    let ja = system_cjk_font_candidates("ja-JP");
+    assert!(ja.iter().any(|name| name.contains("Hiragino") || name.contains("Hirakaku")));
+    assert!(ja.iter().any(|name| name.contains("Yu Gothic")));
+    assert!(ja.iter().any(|name| name.contains("Noto Sans CJK")));
+
+    let ko = system_cjk_font_candidates("ko-KR");
+    assert!(ko.iter().any(|name| name.contains("Malgun Gothic")));
+
+    let zh_cn = system_cjk_font_candidates("zh-CN");
+    assert!(zh_cn.iter().any(|name| name.contains("PingFang")));
+
+    let zh_tw = system_cjk_font_candidates("zh-TW");
+    assert!(zh_tw.iter().any(|name| name.contains("PingFang TC")));
+
+    let fallback = system_cjk_font_candidates("en-US");
+    assert!(fallback.iter().any(|name| name.contains("Noto Sans CJK")));
+    assert!(fallback.iter().any(|name| name.contains("PingFang")));
+    assert!(fallback.iter().any(|name| name.contains("Malgun Gothic")));
+    assert!(fallback.iter().any(|name| name.contains("Yu Gothic")));
+    assert!(fallback.iter().any(|name| name.contains("Hiragino")));
+
+    assert_eq!(has_bundled_or_ttf_font(), !BUNDLED_FONTS.is_empty());
 }

@@ -777,3 +777,671 @@ where
     out.push_str(rest);
     out
 }
+
+// ---------------------------------------------------------------------------
+// Bidirectional (BiDi) & RTL Text Shaping (UAX #9 subset + bracket mirroring)
+// ---------------------------------------------------------------------------
+
+/// Base or resolved run text direction for bidirectional scientific text layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TextDirection {
+    #[default]
+    Ltr,
+    Rtl,
+}
+
+/// A contiguous visually ordered run produced by [`shape_bidi_runs`].
+///
+/// `start_byte..end_byte` records the corresponding logical UTF-8 byte slice in the original
+/// input string, while `text` contains the visually ordered (and for [`TextDirection::Rtl`],
+/// bracket-mirrored) UTF-8 characters ready for left-to-right glyph emission.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BidiRun {
+    pub text: String,
+    pub direction: TextDirection,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+/// Return `true` when BCP-47 locale `code` denotes a right-to-left language
+/// (`"ar"`, `"he"`, `"fa"`, `"ur"`), including region or script subtags such as `"ar-SA"`.
+#[must_use]
+pub fn is_rtl_locale(code: &str) -> bool {
+    let mut parts = code.trim().split(['-', '_']);
+    let Some(lang) = parts.next() else {
+        return false;
+    };
+    let is_rtl_lang =
+        lang.eq_ignore_ascii_case("ar") || lang.eq_ignore_ascii_case("he") || lang.eq_ignore_ascii_case("fa") || lang.eq_ignore_ascii_case("ur");
+    if !is_rtl_lang {
+        return false;
+    }
+    !parts.any(|sub| sub.eq_ignore_ascii_case("latn"))
+}
+
+/// Return `true` if `text` contains any Hebrew or Arabic script character.
+///
+/// Covers Hebrew (`U+0590..=U+05FF`, `U+FB1D..=U+FB4F`) and Arabic (`U+0600..=U+06FF`,
+/// Supplement `U+0750..=U+077F`, Extended `U+0870..=U+08FF`, Presentation `U+FB50..=U+FDFF` /
+/// `U+FE70..=U+FEFF`).
+#[must_use]
+pub fn contains_rtl_script(text: &str) -> bool {
+    text.chars().any(is_rtl_script_char)
+}
+
+const fn is_rtl_script_char(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0590..=0x05FF
+            | 0x0600..=0x06FF
+            | 0x0750..=0x077F
+            | 0x0870..=0x08FF
+            | 0xFB1D..=0xFB4F
+            | 0xFB50..=0xFDFF
+            | 0xFE70..=0xFEFF
+    )
+}
+
+/// Shape `text` into visually ordered (left-to-right) [`BidiRun`] segments under `base_dir`.
+///
+/// Handles mixed Arabic/Hebrew text with embedded ASCII/numbers/math identifiers (`IC50`, `12.4`,
+/// `α + β`), multi-line paragraph breaks, combining marks, and Unicode bracket mirroring
+/// (`()`, `[]`, `{}`, `<>`, etc.) inside RTL runs.
+#[must_use]
+pub fn shape_bidi_runs(text: &str, base_dir: TextDirection) -> Vec<BidiRun> {
+    if text.is_empty() {
+        return Vec::new();
+    }
+    let mut runs = Vec::new();
+    let mut line_start = 0usize;
+
+    while line_start < text.len() {
+        let rest = &text[line_start..];
+        let (line_rel_end, sep_rel_end) = find_paragraph_break(rest);
+        let line_end = line_start + line_rel_end;
+        let sep_end = line_start + sep_rel_end;
+
+        if line_end > line_start {
+            shape_bidi_line(&text[line_start..line_end], line_start, base_dir, &mut runs);
+        }
+        if sep_end > line_end {
+            push_merged_run(
+                &mut runs,
+                BidiRun { text: text[line_end..sep_end].to_owned(), direction: TextDirection::Ltr, start_byte: line_end, end_byte: sep_end },
+            );
+        }
+        line_start = sep_end;
+    }
+
+    runs
+}
+
+/// Return `text` reordered into visual left-to-right display order under `base_dir`.
+#[must_use]
+pub fn reorder_visual_bidi(text: &str, base_dir: TextDirection) -> String {
+    let runs = shape_bidi_runs(text, base_dir);
+    let mut out = String::with_capacity(text.len());
+    for run in runs {
+        out.push_str(&run.text);
+    }
+    out
+}
+
+fn find_paragraph_break(rest: &str) -> (usize, usize) {
+    for (idx, ch) in rest.char_indices() {
+        if ch == '\r' {
+            let next_len = if rest[idx + 1..].starts_with('\n') { 2 } else { 1 };
+            return (idx, idx + next_len);
+        }
+        if matches!(ch, '\n' | '\u{0085}' | '\u{2029}') {
+            return (idx, idx + ch.len_utf8());
+        }
+    }
+    (rest.len(), rest.len())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BidiClass {
+    L,
+    R,
+    Al,
+    En,
+    Es,
+    Et,
+    An,
+    Cs,
+    Nsm,
+    Ws,
+    S,
+    On,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct BidiChar {
+    ch: char,
+    byte_start: usize,
+    byte_end: usize,
+    orig_class: BidiClass,
+    resolved_class: BidiClass,
+    level: u8,
+}
+
+#[derive(Debug, Clone)]
+struct VisualCluster {
+    text: String,
+    direction: TextDirection,
+    level: u8,
+    start_byte: usize,
+    end_byte: usize,
+}
+
+const fn needs_bidi_resolution(ch: char) -> bool {
+    is_rtl_script_char(ch)
+        || matches!(
+            ch as u32,
+            0x061C | 0x0700..=0x074F | 0x0780..=0x085F | 0x200E..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069
+        )
+}
+
+fn shape_bidi_line(line: &str, base_offset: usize, base_dir: TextDirection, out: &mut Vec<BidiRun>) {
+    if base_dir == TextDirection::Ltr && !line.chars().any(needs_bidi_resolution) {
+        push_merged_run(
+            out,
+            BidiRun { text: line.to_owned(), direction: TextDirection::Ltr, start_byte: base_offset, end_byte: base_offset + line.len() },
+        );
+        return;
+    }
+
+    let para_level: u8 = match base_dir {
+        TextDirection::Ltr => 0,
+        TextDirection::Rtl => 1,
+    };
+    let embed_dir = if para_level.is_multiple_of(2) { BidiClass::L } else { BidiClass::R };
+
+    let mut chars: Vec<BidiChar> = line
+        .char_indices()
+        .map(|(rel_idx, ch)| {
+            let cls = classify_bidi_char(ch);
+            BidiChar {
+                ch,
+                byte_start: base_offset + rel_idx,
+                byte_end: base_offset + rel_idx + ch.len_utf8(),
+                orig_class: cls,
+                resolved_class: cls,
+                level: para_level,
+            }
+        })
+        .collect();
+    if chars.is_empty() {
+        return;
+    }
+
+    resolve_weak_types(&mut chars, embed_dir);
+    resolve_brackets_and_neutrals(&mut chars, embed_dir);
+    resolve_implicit_levels(&mut chars, para_level);
+    reset_trailing_whitespace_levels(&mut chars, para_level);
+
+    let mut clusters = build_visual_clusters(&chars);
+    reorder_clusters_l2(&mut clusters);
+
+    for cluster in clusters {
+        push_merged_run(
+            out,
+            BidiRun { text: cluster.text, direction: cluster.direction, start_byte: cluster.start_byte, end_byte: cluster.end_byte },
+        );
+    }
+}
+
+fn resolve_weak_types(chars: &mut [BidiChar], sos: BidiClass) {
+    // W1: NSM takes previous character's type (or sos at start).
+    let mut prev = sos;
+    for item in chars.iter_mut() {
+        if item.resolved_class == BidiClass::Nsm {
+            item.resolved_class = prev;
+        }
+        prev = item.resolved_class;
+    }
+
+    // W2: EN preceded by AL becomes AN.
+    let mut last_strong = sos;
+    for item in chars.iter_mut() {
+        match item.resolved_class {
+            BidiClass::L | BidiClass::R | BidiClass::Al => last_strong = item.resolved_class,
+            BidiClass::En if last_strong == BidiClass::Al => item.resolved_class = BidiClass::An,
+            _ => {}
+        }
+    }
+
+    // W3: AL -> R.
+    for item in chars.iter_mut() {
+        if item.resolved_class == BidiClass::Al {
+            item.resolved_class = BidiClass::R;
+        }
+    }
+
+    // W4: Single ES between ENs -> EN; single CS between two ENs -> EN or two ANs -> AN.
+    for i in 1..chars.len().saturating_sub(1) {
+        let prev_cls = chars[i - 1].resolved_class;
+        let next_cls = chars[i + 1].resolved_class;
+        match chars[i].resolved_class {
+            BidiClass::Es if prev_cls == BidiClass::En && next_cls == BidiClass::En => {
+                chars[i].resolved_class = BidiClass::En;
+            }
+            BidiClass::Cs if prev_cls == BidiClass::En && next_cls == BidiClass::En => {
+                chars[i].resolved_class = BidiClass::En;
+            }
+            BidiClass::Cs if prev_cls == BidiClass::An && next_cls == BidiClass::An => {
+                chars[i].resolved_class = BidiClass::An;
+            }
+            _ => {}
+        }
+    }
+
+    // W5: Sequences of ET adjacent to EN -> EN.
+    let mut adjacent_en = false;
+    for item in chars.iter_mut() {
+        match item.resolved_class {
+            BidiClass::En => adjacent_en = true,
+            BidiClass::Et if adjacent_en => item.resolved_class = BidiClass::En,
+            _ => adjacent_en = false,
+        }
+    }
+    adjacent_en = false;
+    for item in chars.iter_mut().rev() {
+        match item.resolved_class {
+            BidiClass::En => adjacent_en = true,
+            BidiClass::Et if adjacent_en => item.resolved_class = BidiClass::En,
+            _ => adjacent_en = false,
+        }
+    }
+
+    // W6: Remaining ES/ET/CS -> ON.
+    for item in chars.iter_mut() {
+        if matches!(item.resolved_class, BidiClass::Es | BidiClass::Et | BidiClass::Cs) {
+            item.resolved_class = BidiClass::On;
+        }
+    }
+
+    // W7: EN preceded by strong L -> L.
+    last_strong = sos;
+    for item in chars.iter_mut() {
+        match item.resolved_class {
+            BidiClass::L | BidiClass::R => last_strong = item.resolved_class,
+            BidiClass::En if last_strong == BidiClass::L => item.resolved_class = BidiClass::L,
+            _ => {}
+        }
+    }
+}
+
+fn resolve_brackets_and_neutrals(chars: &mut [BidiChar], embed_dir: BidiClass) {
+    // N0: Paired bracket resolution (UAX #9 BD16).
+    let opp_dir = if embed_dir == BidiClass::L { BidiClass::R } else { BidiClass::L };
+    let pairs = find_bracket_pairs(chars);
+    for (open_idx, close_idx) in pairs {
+        let mut has_embed = false;
+        let mut has_opp = false;
+        for item in chars.iter().take(close_idx).skip(open_idx + 1) {
+            if item.resolved_class == embed_dir {
+                has_embed = true;
+                break;
+            }
+            if item.resolved_class == opp_dir {
+                has_opp = true;
+            }
+        }
+        let chosen = if has_embed {
+            Some(embed_dir)
+        } else if has_opp {
+            let preceding = chars[..open_idx]
+                .iter()
+                .rev()
+                .find_map(|c| matches!(c.resolved_class, BidiClass::L | BidiClass::R).then_some(c.resolved_class))
+                .unwrap_or(embed_dir);
+            Some(if preceding == opp_dir { opp_dir } else { embed_dir })
+        } else {
+            None
+        };
+        if let Some(dir) = chosen {
+            chars[open_idx].resolved_class = dir;
+            chars[close_idx].resolved_class = dir;
+            apply_bracket_nsm(chars, open_idx + 1, dir);
+            apply_bracket_nsm(chars, close_idx + 1, dir);
+        }
+    }
+
+    // N1 & N2: Neutrals flanked by matching effective strong types take that type, else embed_dir.
+    let n = chars.len();
+    let mut i = 0usize;
+    while i < n {
+        if !is_neutral_class(chars[i].resolved_class) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && is_neutral_class(chars[i].resolved_class) {
+            i += 1;
+        }
+        let prev_dir = if start == 0 { embed_dir } else { neutral_effective_strong(chars[start - 1].resolved_class, embed_dir) };
+        let next_dir = if i >= n { embed_dir } else { neutral_effective_strong(chars[i].resolved_class, embed_dir) };
+        let fill = if prev_dir == next_dir { prev_dir } else { embed_dir };
+        for item in &mut chars[start..i] {
+            item.resolved_class = fill;
+        }
+    }
+}
+
+fn find_bracket_pairs(chars: &[BidiChar]) -> Vec<(usize, usize)> {
+    const MAX_STACK: usize = 63;
+    let mut stack: Vec<(usize, char)> = Vec::new();
+    let mut pairs = Vec::new();
+    for (idx, item) in chars.iter().enumerate() {
+        if item.resolved_class != BidiClass::On {
+            continue;
+        }
+        if let Some(closing) = paired_bracket_closing(item.ch) {
+            if stack.len() >= MAX_STACK {
+                break;
+            }
+            stack.push((idx, closing));
+        } else if is_paired_closing_bracket(item.ch)
+            && let Some(pos) = stack.iter().rposition(|&(_, expected)| expected == item.ch || canonical_bracket_eq(expected, item.ch))
+        {
+            let (open_idx, _) = stack[pos];
+            stack.truncate(pos);
+            pairs.push((open_idx, idx));
+        }
+    }
+    pairs.sort_unstable_by_key(|&(open_idx, _)| open_idx);
+    pairs
+}
+
+fn apply_bracket_nsm(chars: &mut [BidiChar], mut idx: usize, dir: BidiClass) {
+    while let Some(item) = chars.get_mut(idx) {
+        if item.orig_class != BidiClass::Nsm {
+            break;
+        }
+        item.resolved_class = dir;
+        idx += 1;
+    }
+}
+
+const fn is_neutral_class(cls: BidiClass) -> bool {
+    matches!(cls, BidiClass::On | BidiClass::Ws | BidiClass::S)
+}
+
+const fn neutral_effective_strong(cls: BidiClass, fallback: BidiClass) -> BidiClass {
+    match cls {
+        BidiClass::L => BidiClass::L,
+        BidiClass::R | BidiClass::En | BidiClass::An => BidiClass::R,
+        _ => fallback,
+    }
+}
+
+fn resolve_implicit_levels(chars: &mut [BidiChar], embed_level: u8) {
+    let even = embed_level.is_multiple_of(2);
+    for item in chars {
+        item.level = if even {
+            match item.resolved_class {
+                BidiClass::L => embed_level,
+                BidiClass::R => embed_level + 1,
+                BidiClass::An | BidiClass::En => embed_level + 2,
+                _ => embed_level,
+            }
+        } else {
+            match item.resolved_class {
+                BidiClass::R => embed_level,
+                BidiClass::L | BidiClass::An | BidiClass::En => embed_level + 1,
+                _ => embed_level,
+            }
+        };
+    }
+}
+
+fn reset_trailing_whitespace_levels(chars: &mut [BidiChar], para_level: u8) {
+    for item in chars.iter_mut().rev() {
+        if matches!(item.orig_class, BidiClass::Ws | BidiClass::S) {
+            item.level = para_level;
+        } else {
+            break;
+        }
+    }
+}
+
+fn build_visual_clusters(chars: &[BidiChar]) -> Vec<VisualCluster> {
+    let mut clusters: Vec<VisualCluster> = Vec::with_capacity(chars.len());
+    for item in chars {
+        let is_rtl = !item.level.is_multiple_of(2);
+        let ch = if is_rtl { mirror_bidi_char(item.ch) } else { item.ch };
+        let direction = if is_rtl { TextDirection::Rtl } else { TextDirection::Ltr };
+        if item.orig_class == BidiClass::Nsm
+            && let Some(prev) = clusters.last_mut()
+            && prev.level == item.level
+            && prev.end_byte == item.byte_start
+        {
+            prev.text.push(ch);
+            prev.end_byte = item.byte_end;
+            continue;
+        }
+        let mut text = String::with_capacity(ch.len_utf8());
+        text.push(ch);
+        clusters.push(VisualCluster { text, direction, level: item.level, start_byte: item.byte_start, end_byte: item.byte_end });
+    }
+    clusters
+}
+
+fn reorder_clusters_l2(clusters: &mut [VisualCluster]) {
+    let max_level = clusters.iter().map(|c| c.level).max().unwrap_or(0);
+    for lvl in (1..=max_level).rev() {
+        let mut i = 0usize;
+        while i < clusters.len() {
+            if clusters[i].level < lvl {
+                i += 1;
+                continue;
+            }
+            let start = i;
+            while i < clusters.len() && clusters[i].level >= lvl {
+                i += 1;
+            }
+            clusters[start..i].reverse();
+        }
+    }
+}
+
+fn push_merged_run(runs: &mut Vec<BidiRun>, next: BidiRun) {
+    if next.text.is_empty() {
+        return;
+    }
+    if let Some(prev) = runs.last_mut()
+        && prev.direction == next.direction
+    {
+        match prev.direction {
+            TextDirection::Ltr if prev.end_byte == next.start_byte => {
+                prev.text.push_str(&next.text);
+                prev.end_byte = next.end_byte;
+                return;
+            }
+            TextDirection::Rtl if next.end_byte == prev.start_byte => {
+                prev.text.push_str(&next.text);
+                prev.start_byte = next.start_byte;
+                return;
+            }
+            _ => {}
+        }
+    }
+    runs.push(next);
+}
+
+const fn paired_bracket_closing(ch: char) -> Option<char> {
+    match ch {
+        '(' => Some(')'),
+        '[' => Some(']'),
+        '{' => Some('}'),
+        '\u{27E8}' => Some('\u{27E9}'),
+        '\u{3008}' => Some('\u{3009}'),
+        '\u{300A}' => Some('\u{300B}'),
+        '\u{300C}' => Some('\u{300D}'),
+        '\u{300E}' => Some('\u{300F}'),
+        '\u{3010}' => Some('\u{3011}'),
+        '\u{FF08}' => Some('\u{FF09}'),
+        '\u{FF3B}' => Some('\u{FF3D}'),
+        '\u{FF5B}' => Some('\u{FF5D}'),
+        _ => None,
+    }
+}
+
+const fn is_paired_closing_bracket(ch: char) -> bool {
+    matches!(ch, ')' | ']' | '}' | '\u{27E9}' | '\u{3009}' | '\u{300B}' | '\u{300D}' | '\u{300F}' | '\u{3011}' | '\u{FF09}' | '\u{FF3D}' | '\u{FF5D}')
+}
+
+const fn canonical_bracket_eq(a: char, b: char) -> bool {
+    matches!((a, b), ('\u{27E9}', '\u{3009}') | ('\u{3009}', '\u{27E9}'))
+}
+
+const fn mirror_bidi_char(ch: char) -> char {
+    match ch {
+        '(' => ')',
+        ')' => '(',
+        '[' => ']',
+        ']' => '[',
+        '{' => '}',
+        '}' => '{',
+        '<' => '>',
+        '>' => '<',
+        '\u{00AB}' => '\u{00BB}',
+        '\u{00BB}' => '\u{00AB}',
+        '\u{2039}' => '\u{203A}',
+        '\u{203A}' => '\u{2039}',
+        '\u{2264}' => '\u{2265}',
+        '\u{2265}' => '\u{2264}',
+        '\u{226A}' => '\u{226B}',
+        '\u{226B}' => '\u{226A}',
+        '\u{2282}' => '\u{2283}',
+        '\u{2283}' => '\u{2282}',
+        '\u{2286}' => '\u{2287}',
+        '\u{2287}' => '\u{2286}',
+        '\u{27E8}' => '\u{27E9}',
+        '\u{27E9}' => '\u{27E8}',
+        '\u{3008}' => '\u{3009}',
+        '\u{3009}' => '\u{3008}',
+        '\u{300A}' => '\u{300B}',
+        '\u{300B}' => '\u{300A}',
+        '\u{300C}' => '\u{300D}',
+        '\u{300D}' => '\u{300C}',
+        '\u{300E}' => '\u{300F}',
+        '\u{300F}' => '\u{300E}',
+        '\u{3010}' => '\u{3011}',
+        '\u{3011}' => '\u{3010}',
+        '\u{FF08}' => '\u{FF09}',
+        '\u{FF09}' => '\u{FF08}',
+        '\u{FF1C}' => '\u{FF1E}',
+        '\u{FF1E}' => '\u{FF1C}',
+        '\u{FF3B}' => '\u{FF3D}',
+        '\u{FF3D}' => '\u{FF3B}',
+        '\u{FF5B}' => '\u{FF5D}',
+        '\u{FF5D}' => '\u{FF5B}',
+        _ => ch,
+    }
+}
+
+const fn classify_bidi_char(ch: char) -> BidiClass {
+    let cp = ch as u32;
+    if matches!(cp, 0x0009 | 0x000B | 0x001F) {
+        return BidiClass::S;
+    }
+    if matches!(cp, 0x0020 | 0x000C | 0x1680 | 0x2000..=0x200A | 0x2028 | 0x205F | 0x3000) {
+        return BidiClass::Ws;
+    }
+    if is_bidi_nsm(cp) {
+        return BidiClass::Nsm;
+    }
+    if matches!(
+        cp,
+        0x0030..=0x0039 | 0x00B2 | 0x00B3 | 0x00B9 | 0x06F0..=0x06F9 | 0x2070 | 0x2074..=0x2079 | 0x2080..=0x2089
+    ) {
+        return BidiClass::En;
+    }
+    if matches!(cp, 0x0600..=0x0605 | 0x0660..=0x0669 | 0x066B..=0x066C | 0x06DD | 0x070F | 0x08E2) {
+        return BidiClass::An;
+    }
+    if matches!(cp, 0x002B | 0x002D | 0x207A..=0x207B | 0x208A..=0x208B | 0x2212) {
+        return BidiClass::Es;
+    }
+    if matches!(cp, 0x0023..=0x0025 | 0x00A2..=0x00A5 | 0x00B0 | 0x00B1 | 0x066A | 0x2030..=0x2034 | 0x20A0..=0x20CF) {
+        return BidiClass::Et;
+    }
+    if matches!(cp, 0x002C | 0x002E | 0x002F | 0x003A | 0x00A0 | 0x060C | 0x202F | 0x2044) {
+        return BidiClass::Cs;
+    }
+    if matches!(cp, 0x0590..=0x05FF | 0x0700..=0x074F | 0x0780..=0x085F | 0x200F | 0xFB1D..=0xFB4F) {
+        return BidiClass::R;
+    }
+    if matches!(
+        cp,
+        0x0600..=0x06FF | 0x0750..=0x077F | 0x0870..=0x08FF | 0xFB50..=0xFDFF | 0xFE70..=0xFEFF
+    ) {
+        return BidiClass::Al;
+    }
+    if is_bidi_other_neutral(cp) {
+        return BidiClass::On;
+    }
+    BidiClass::L
+}
+
+const fn is_bidi_nsm(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x0300..=0x036F
+            | 0x0483..=0x0489
+            | 0x0591..=0x05BD
+            | 0x05BF
+            | 0x05C1..=0x05C2
+            | 0x05C4..=0x05C5
+            | 0x05C7
+            | 0x0610..=0x061A
+            | 0x064B..=0x065F
+            | 0x0670
+            | 0x06D6..=0x06DC
+            | 0x06DF..=0x06E4
+            | 0x06E7..=0x06E8
+            | 0x06EA..=0x06ED
+            | 0x0711
+            | 0x0730..=0x074A
+            | 0x07A6..=0x07B0
+            | 0x07EB..=0x07F3
+            | 0x0816..=0x082D
+            | 0x0859..=0x085B
+            | 0x08D3..=0x08E1
+            | 0x08E3..=0x08FF
+            | 0x20D0..=0x20FF
+            | 0xFB1E
+            | 0xFE00..=0xFE0F
+            | 0xFE20..=0xFE2F
+    )
+}
+
+const fn is_bidi_other_neutral(cp: u32) -> bool {
+    matches!(
+        cp,
+        0x0021..=0x0022
+            | 0x0026..=0x002A
+            | 0x003B..=0x0040
+            | 0x005B..=0x0060
+            | 0x007B..=0x007E
+            | 0x00A1
+            | 0x00A6..=0x00A9
+            | 0x00AB..=0x00AF
+            | 0x00B4
+            | 0x00B6..=0x00B8
+            | 0x00BB..=0x00BF
+            | 0x00D7
+            | 0x00F7
+            | 0x2010..=0x2027
+            | 0x2035..=0x205E
+            | 0x2190..=0x2BFF
+            | 0x3001..=0x3020
+            | 0xFF01..=0xFF0F
+            | 0xFF1A..=0xFF20
+            | 0xFF3B..=0xFF40
+            | 0xFF5B..=0xFF65
+    )
+}

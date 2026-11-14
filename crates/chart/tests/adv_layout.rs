@@ -38,6 +38,9 @@ fn build_survival_doc(with_result_sheet: bool) -> TestResult<(ProjectDocument, G
             gehan_breslow_wilcoxon: false,
             trend_test: false,
             multiplicity: MultiplicitySpec::default(),
+            mv_time_column: None,
+            mv_status_column: None,
+            mv_group_column: None,
         };
         let mut spec = AnalysisSpec::new(SheetId::new("km-res"), ds.id.clone(), AnalysisKind::Survival(surv_spec.clone()))?;
         spec.selected_data_sets = vec![0, 1];

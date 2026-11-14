@@ -9,10 +9,44 @@ pub mod markup;
 pub mod metrics;
 pub mod number;
 
+use std::fmt;
+
 pub use glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, outline_rich_text};
-pub use markup::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, expand_template_hooks, parse_markup};
-pub use metrics::{TextMetricsPt, measure_text_pt};
+pub use markup::{
+    BidiRun, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, expand_template_hooks, is_rtl_locale,
+    parse_markup, reorder_visual_bidi, shape_bidi_runs,
+};
+pub use metrics::{
+    TextMetricsPt, TrueTypeFont, TrueTypeFontInfo, build_minimal_truetype_font, has_bundled_or_ttf_font, measure_text_pt, parse_truetype_font_info,
+    system_cjk_font_candidates,
+};
 pub use number::{LocaleNumberPolicy, format_axis_tick, format_pvalue_label};
+
+/// Errors produced when inspecting or validating SFNT / TrueType font binaries.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum TextError {
+    /// SFNT header, directory, or table payload is malformed or truncated.
+    InvalidSfnt { message: String },
+    /// Required SFNT table is missing.
+    MissingSfntTable { tag: [u8; 4] },
+    /// No supported Unicode `cmap` subtable (format 4, 12, or 0) is present.
+    UnsupportedCmap { message: String },
+}
+
+impl fmt::Display for TextError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidSfnt { message } => write!(f, "invalid SFNT font: {message}"),
+            Self::MissingSfntTable { tag } => {
+                let label = String::from_utf8_lossy(tag);
+                write!(f, "missing required SFNT table '{label}'")
+            }
+            Self::UnsupportedCmap { message } => write!(f, "unsupported SFNT cmap table: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for TextError {}
 
 include!(concat!(env!("OUT_DIR"), "/bundled_fonts.rs"));
 
