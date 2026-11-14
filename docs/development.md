@@ -1,6 +1,6 @@
 # Development
 
-> **Last updated:** 2026-11-13 · **Change:** added subsystem implementation-guide index, font/web/env/corpus sections, and `#robustness-lumencraft-never-crashes` engineering contract.
+> **Last updated:** 2026-11-14 · **Change:** updated `%PDF-1.7` external `.ttf` `/FontFile2` font embedding, web build status, environment variables, and `#robustness-lumencraft-never-crashes` engineering contract.
 
 ## Prerequisites
 
@@ -42,12 +42,12 @@ Before adding or modifying behaviour in any domain crate, read its governing spe
 
 Font binaries never live inside this repository ([`AGENTS.md`](../AGENTS.md) › Assets).
 
-- Set `LUMENCRAFT_FONTS_DIR` to an absolute directory of SIL OFL font faces when building if you want embedded fonts staged via `crates/text/build.rs` into `lumencraft_text::BUNDLED_FONTS` and copied into `dist/web/fonts/` via `cargo xtask web-fonts`.
+- Set `LUMENCRAFT_FONTS_DIR` to an absolute directory of SIL OFL font faces when building if you want embedded fonts staged via `crates/text/build.rs` into `lumencraft_text::BUNDLED_FONTS` and copied into `dist/web/fonts/` via `cargo xtask web-fonts`. At runtime, pass `--ttf-font <path>` or set `LUMENCRAFT_FONTS_DIR` when you want external `.ttf` files embedded as TrueType `/FontFile2` font streams in `%PDF-1.7` exports.
 - **Leaving out the bundled fonts:** `lumencraft-text` and `lumencraft-ui-egui` gate embedded font bytes behind the `bundled-fonts` Cargo feature. Embedders that supply their own `egui` font definitions can depend on `lumencraft-ui-egui` with `default-features = false` and call `lumencraft_ui_egui::theme::install_fonts`. `cargo xtask ci` explicitly tests both `--all-features` and `--no-default-features`.
 
 ## Web build
 
-`apps/lumencraft-web` compiles the exact same `lumencraft-ui-egui` + `lumencraft-engine` workspace to `wasm32-unknown-unknown` (Rust only; zero handwritten JS/TS):
+`apps/lumencraft-web` shares the same pure-Rust `UiApp` + `lumencraft-engine` codebase (`init_web_app()` tests run cleanly on the host offline; full `wasm32-unknown-unknown` Trunk WebGPU/WebGL2 bundling is skipped cleanly when the offline `rustup` sysroot omits `wasm32` `libcore`, and is completed as part of `G6`):
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -114,8 +114,8 @@ A crash destroys a researcher's unsaved experimental data tables, exclusions, an
 
 Untrusted boundaries carry `proptest` / fuzz suites that must never panic:
 - `crates/format/tests/prop_format.rs` — lossless `.lumencraft` round-trips plus truncated/mutated ZIP, CSV, XML, and JSON inputs.
-- `crates/fit/tests/dsl_fuzz.rs` — arbitrary/hostile user equation and formula strings.
-- `crates/engine/tests/command_sweep.rs` — every registered command invoked with arbitrary JSON payloads.
+- `crates/fit/tests/dsl_fuzz_props.rs` — arbitrary/hostile user equation and formula strings.
+- `crates/engine/tests/command_sweep_props.rs` — every registered command invoked with arbitrary JSON payloads.
 - `crates/mcp/tests/protocol_props.rs` — malformed JSON-RPC frames.
 
 ## Verified NIST StRD corpus

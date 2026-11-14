@@ -43,7 +43,7 @@ flowchart TD
 - **`lumencraft-chart`** *(may depend on `transform`, `stats`, `fit`, `text`)*: Compiles a `GraphSpec` + resolved upstream `DataSheet`/`ResultSheet` data into a resolution-independent 2D vector scene graph (axes, ticks, discontinuous axis breaks, data series, error bars, box/violin density kernels, fitted curve polylines/Béziers, confidence ribbons, legends, and significance brackets).
 
 ### L3 — Rendering & Persistence
-- **`lumencraft-render`**: Rasterizes and composites compiled chart scenes and multi-panel page layouts via GPU (`wgpu`) or deterministic CPU fallback for CLI/test golden snapshots.
+- **`lumencraft-render`**: Deterministic CPU rasterizer and compositor for compiled chart scenes and multi-panel page layouts (PNG/TIFF exports and golden snapshots; native GPU `wgpu` backend queued in `G6`).
 - **`lumencraft-format`**: Reads and writes the native `.lumencraft` and `.lctemplate` ZIP-based project containers (versioned manifest + structured JSON/columnar tables) and provides clean-room importers/exporters for CSV, TSV, and third-party `.pzfx` / `.prism` scientific files.
 - **`lumencraft-svg`**: Lossless vector SVG serializer for single graphs and multi-panel layouts (preserving editable `<text>` or optional outlined glyphs).
 - **`lumencraft-pdf`**: Direct PDF 1.7 vector writer for journal submission figures and print layouts.
@@ -55,11 +55,11 @@ flowchart TD
 - **`lumencraft-engine`**: Owns the live `Session`, undo/redo transaction log, topological dependency graph (`DataSheet -> LinkedDataRegion / Transform / Analysis -> ResultSheet -> Graph -> Layout`), incremental dirty-node invalidation and recalculation, in-place analysis parameter updates and cross-family dataset retargeting (`Change Data Analyzed`), and the JSON-serializable command dispatcher shared identically by the GUI, CLI, `--control` TCP server, and MCP server.
 
 ### L6 — Thin Front-Ends
-- **`lumencraft-ui-egui`**: Cross-platform `egui` desktop and WebAssembly interface (Project Navigator sidebar, Family pane, virtualized subcolumn spreadsheet grid, Analysis wizard dialogs, Result table viewer, Graph canvas, Format Inspector, and Page Layout composer). Contains zero statistical math; every mutation dispatches an engine command.
+- **`lumencraft-ui-egui`**: Pure-Rust `UiApp` state shell, `17` `UI_COMMANDS`, `16`-locale/RTL i18n, and deterministic software RGBA/PNG compositor (`render_workspace_rgba` / `render_workspace_frame_png`: Navigator sidebar, Family pane, virtualized subcolumn grid, Analysis/Result/Graph/Format inspectors, Page Layout composer, and `--control` JSONL server). Contains zero statistical math; every mutation dispatches an engine command. Live native OS `eframe`/`egui`/`wgpu` desktop & `wasm32` UI hosting is queued in `G6`.
 - **`lumencraft-mcp`**: Headless Model Context Protocol server over stdio exposing project inspection, data entry, statistical analysis execution, curve fitting, and SVG/PDF/PNG figure rendering to AI coding and research agents.
 
 ### L7 — Executables & Workspace Tooling
 - **`apps/lumencraft`**: Native desktop binary (`macOS`, `Linux`, `Windows`, `FreeBSD`).
 - **`apps/lumencraft-cli`**: Headless batch CLI, format converter, analysis runner, and `mcp` subcommand host.
-- **`apps/lumencraft-web`**: Trunk-powered WebAssembly SPA targeting WebGPU / WebGL2.
+- **`apps/lumencraft-web`**: Browser WebAssembly SPA crate (`init_web_app` tested on host; live `wasm32-unknown-unknown` Trunk + WebGPU/WebGL2 compilation queued in `G6`, external `wasm32` sysroot required).
 - **`xtask`**: Pure-`std` workspace task runner enforcing formatting, clippy, tests, layer rules, asset attribution, clean-room checks, brand hygiene, UI command catalog sync, and macOS `.app` bundling.

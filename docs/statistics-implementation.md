@@ -66,6 +66,7 @@ Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognorm
 2. **Shapiro–Wilk $W$** ($3 \le n \le 5000$): Royston (1992) polynomial approximations for $a_i$ weights and normalizing transformation of $W$, verified against the Royston (1995, AS R94) $n = 25$ lognormal benchmark ($W = 0.83467, p = 0.000914$).
 3. **Anderson–Darling $A^2$** ($n \ge 8$): Stephens small-sample modified statistic $A^{*2} = A^2 (1 + 0.75/n + 2.25/n^2)$.
 4. **Kolmogorov–Smirnov with Lilliefors $p$-value** ($n \ge 5$): Dallal & Wilkinson (1986) analytical polynomial approximation + Monte Carlo refinement in boundary regions.
+5. **Normal & lognormal Q–Q expected quantiles** (`qq_expected_quantiles`, `ResultTabKind::NormalQq`, and `DiagnosticPlotKind::NormalQqPlot`): Blom, Hazen, or Van der Waerden plotting positions mapped through $\Phi^{-1}(p_i)$ against observed order statistics.
 
 ### 2.3 Outlier Detection (`Grubbs` & `ROUT`)
 - **Grubbs' ESD test** ($n \ge 3$, $\alpha$): $G = \max_i |x_i - \bar{x}| / s$, compared against critical value $G_{\text{crit}}(\alpha, n) = \frac{n-1}{\sqrt{n}} \sqrt{\frac{t^2_{\alpha/(2n), n-2}}{n - 2 + t^2_{\alpha/(2n), n-2}}}$. Single-outlier or iterative mode.
@@ -89,6 +90,7 @@ Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognorm
   - **Mann–Whitney $U$:** Exact dynamic-programming distribution for small/medium samples (including exact tie permutation up to bounded state-space limit), normal approximation with tie variance correction beyond threshold, plus exact Hodges–Lehmann median difference and CI.
   - **Wilcoxon matched-pairs signed-rank:** Exact signed-rank distribution + Pratt vs. Wilcoxon zero-difference handling + Hodges–Lehmann pseudomedian.
   - **Kolmogorov–Smirnov two-sample:** Exact Smirnov lattice path count for small $n_1, n_2$ and Kolmogorov asymptotic series for large samples.
+- **Multiple Row *t*-tests (`MultipleRowTTests`):** Row-by-row unpaired, Welch, paired, or Mann–Whitney / Wilcoxon comparisons across `Grouped` or `MultipleVariables` tables with Holm–Šídák FWER or BH/BY/BKY FDR $q$-values and $(-\log_{10} p, -\log_{10} q, \Delta)$ Volcano plot coordinates.
 
 ### 3.2 One-Way, Two-Way, Three-Way & Multifactor ($N$-Way) ANOVA
 - **One-way designs:** Ordinary ANOVA (with Bartlett and Brown–Forsythe variance homogeneity tests), Brown–Forsythe & Welch unequal-variance one-way ANOVA, RM one-way ANOVA with Geisser–Greenhouse $\hat{\varepsilon}$ and Huynh–Feldt $\tilde{\varepsilon}$ sphericity adjustments, Kruskal–Wallis, and Friedman test.
@@ -110,7 +112,7 @@ Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognorm
 
 All multiplicity engines operate cleanly on contrast vectors $c_j^\top \hat{\beta}$ with covariance $V_{\hat{\beta}}$:
 - **Familywise Error Rate (FWER, $\alpha$):**
-  - **Tukey HSD** (all $\binom{k}{2}$ pairs, equal variance; Tukey–Kramer for unequal $n_i$),
+  - **Tukey HSD** (all $\binom{k}{2}$ pairs, equal variance; Tukey–Kramer for unequal $n_i$), **Student–Newman–Keuls (`NewmanKeuls`)** step-down Studentized range comparisons, and **Unprotected Fisher's LSD (`FisherLsd`)** pairwise *t* comparisons using pooled ANOVA $\text{MS}_{\text{error}}$,
   - **Dunnett** (each treatment vs. designated control, exact multivariate-$t$),
   - **Šídák** ($p_{\text{adj}} = 1 - (1 - p)^m$, simultaneous CIs at $1 - (1-\alpha)^{1/m}$) and **Bonferroni** ($p_{\text{adj}} = \min(1, m p)$),
   - **Holm–Šídák** step-down multiplicity-adjusted *p*-values (sequentially monotonic; does not produce fixed-width simultaneous CIs),
@@ -127,7 +129,7 @@ All multiplicity engines operate cleanly on contrast vectors $c_j^\top \hat{\bet
 ## 5. Contingency, Survival, ROC & Multivariate Analysis
 
 ### 5.1 Contingency Tables (`crates/stats::contingency`)
-- $2 \times 2$ and $R \times C$ Pearson $\chi^2$ (with optional Yates continuity correction on $2 \times 2$), likelihood-ratio $G^2$, Fisher's exact test ($2 \times 2$ hypergeometric tail sum via log-factorials; Freeman–Halton network/Monte Carlo extension for $R \times C$), Cochran–Armitage linear trend test on $2 \times C$, and McNemar's paired test.
+- $2 \times 2$ and $R \times C$ Pearson $\chi^2$ (with optional Yates continuity correction on $2 \times 2$), likelihood-ratio $G^2$, Fisher's exact test ($2 \times 2$ hypergeometric tail sum via log-factorials; Freeman–Halton network/Monte Carlo extension for $R \times C$), **Barnard's unconditional exact test** (`BarnardExact`: $2 \times 2$ nuisance-parameter grid supremum over $p \in [0, 1]$), Cochran–Armitage linear trend test on $2 \times C$, and McNemar's paired test.
 - **Exact & score confidence intervals:**
   - **Odds Ratio:** **Baptista–Pike** mid-*p* / exact hypergeometric interval (preferable to Woolf logit when cells are small or zero; Haldane–Anscombe $+0.5$ fallback noted when needed).
   - **Relative Risk:** **Koopman (1984)** asymptotic score interval via constrained maximum likelihood root-finding.
@@ -141,9 +143,11 @@ Supports both classic `Survival` sheets and `MultipleVariables` variable assignm
 - **Curve comparisons:** Log-rank (Mantel–Cox) $\chi^2$, Gehan–Breslow–Wilcoxon (early-event weighted), log-rank test for linear trend across $\ge 3$ ordered groups, pairwise post-hoc curve comparisons with multiplicity-adjusted *p*-values, and both Mantel–Haenszel and log-rank hazard ratios with $95\%$ CIs.
 - **Cox proportional hazards regression:** Partial likelihood maximization (Newton–Raphson) with **Breslow** and **Efron** tie approximations, profile-likelihood hazard-ratio CIs, omnibus likelihood-ratio / Wald / score tests, Schoenfeld proportional-hazards diagnostics, Martingale/deviance residuals, and baseline survival curves.
 
-### 5.3 ROC Curves, Multiple Regression, PCA & Clustering
+### 5.3 ROC Curves, Method Comparison, Multiple Regression, Imputation, PCA & Clustering
 - **ROC:** Empirical step curve across all distinct cutoffs, trapezoidal AUC, **Hanley–McNeil** and **DeLong** non-parametric SE & CIs, sensitivity/specificity/likelihood-ratio table with Youden's $J = \text{Sens} + \text{Spec} - 1$.
+- **Method Comparison (`BlandAltman` & `PassingBablok`):** Bland–Altman difference / ratio / percent-difference bias and $95\%$ limits of agreement ($\bar{d} \pm 1.96 s_d$) with exact CIs; Passing–Bablok nonparametric median shifted slope and intercept regression with rank-order CIs and CUSUM linearity test.
 - **Multiple Linear, Logistic & Poisson GLMs:** IRLS solver with configurable categorical **Reference-level contrast coding** (selecting reference level $r$ for a $K$-level predictor emits $K - 1$ named indicator columns `Var[Level vs. Ref]` in parameter and VIF tables), full Type I / Type III omnibus ANOVA / Deviance tables (including categorical $\times$ categorical interaction blocks), VIF multicollinearity diagnostics, AICc, pseudo-$R^2$ (Tjur, McFadden, Nagelkerke), Hosmer–Lemeshow goodness-of-fit, classification confusion matrices, and ROC curves.
+- **Multiple Imputation (`MultipleImputation`):** Multivariate Imputation by Chained Equations (MICE) using Type-1 Predictive Mean Matching (PMM) seeded via `DeterministicRng`, pooled across $M$ completed datasets with Rubin's rules and Barnard–Rubin small-sample degrees of freedom.
 - **PCA & Clustering:** Mean-centered / standardized correlation or covariance SVD, Kaiser criterion ($\lambda > 1$), Horn's parallel analysis (Monte Carlo random eigenvalues via `lumencraft_math::rng`), scree/loading/biplot coordinates, plus K-means++ and agglomerative hierarchical clustering (alphabetical cluster label normalization for deterministic palette mapping).
 
 ---
