@@ -18,7 +18,10 @@ use std::path::{Path, PathBuf};
 use lumencraft_chart::{ChartError, ChartScene};
 use lumencraft_doc::{DocError, ProjectDocument, SheetId};
 use lumencraft_fit::FitError;
+#[cfg(not(target_arch = "wasm32"))]
+use lumencraft_format::DirectoryJournalBackend;
 use lumencraft_format::FormatError;
+use lumencraft_format::recovery::{CrashRecoveryJournal, JournalBackend, RecoveryReport};
 use lumencraft_pdf::PdfError;
 use lumencraft_render::RenderError;
 use lumencraft_stats::StatsError;
@@ -152,6 +155,91 @@ pub struct Session {
     redo_stack: Vec<ProjectDocument>,
 }
 
+/// Optional crash-recovery WAL journal hooks backed by `lumencraft_format::recovery`.
+impl Session {
+    /// Open or crash-recover a [`Session`] from `backend`, sanitizing any circular hooks and
+    /// replaying committed journal commands on top of the latest snapshot.
+    pub fn open_with_recovery<B: JournalBackend>(
+        backend: B,
+        owner_id: impl Into<String>,
+        ttl_ms: u64,
+        now_epoch_ms: u64,
+    ) -> Result<(Self, CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
+        let (journal, report) = CrashRecoveryJournal::open_or_recover(backend, owner_id, ttl_ms, now_epoch_ms)?;
+        let doc = match &report.snapshot {
+            Some(bytes) => lumencraft_format::open_project_bytes(bytes)?,
+            None => ProjectDocument::default(),
+        };
+        let mut session = Self::from_document(doc);
+        for cmd in &report.recovered_commands {
+            let command_id = cmd
+                .get("command_id")
+                .or_else(|| cmd.get("id"))
+                .or_else(|| cmd.get("command"))
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| EngineError::new("recovered journal entry missing `command_id` string"))?;
+            let params = cmd.get("params").cloned().unwrap_or_else(|| json!({}));
+            let _ = session.execute(command_id, params)?;
+        }
+        Ok((session, journal, report))
+    }
+
+    /// Native-only helper opening a [`Session`] backed by [`DirectoryJournalBackend`] in `dir`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_dir_with_recovery(
+        dir: impl AsRef<Path>,
+        owner_id: impl Into<String>,
+        ttl_ms: u64,
+        now_epoch_ms: u64,
+    ) -> Result<(Self, CrashRecoveryJournal<DirectoryJournalBackend>, RecoveryReport), EngineError> {
+        let backend = DirectoryJournalBackend::open_dir(dir)?;
+        Self::open_with_recovery(backend, owner_id, ttl_ms, now_epoch_ms)
+    }
+
+    /// Record a command invocation `{ command_id, params }` into the WAL `journal`, returning its sequence number.
+    pub fn record_to_journal<B: JournalBackend>(
+        &self,
+        journal: &mut CrashRecoveryJournal<B>,
+        command_id: &str,
+        params: &serde_json::Value,
+    ) -> Result<u64, EngineError> {
+        let entry = json!({
+            "command_id": command_id,
+            "params": params,
+        });
+        Ok(journal.record_command(entry)?)
+    }
+
+    /// Execute `command_id` transactionally and append to `journal` only when the command succeeds and mutates state.
+    pub fn execute_and_record<B: JournalBackend>(
+        &mut self,
+        journal: &mut CrashRecoveryJournal<B>,
+        command_id: &str,
+        params: serde_json::Value,
+    ) -> Result<CommandOutcome, EngineError> {
+        let outcome = self.execute(command_id, params.clone())?;
+        if outcome.mutated {
+            let _ = self.record_to_journal(journal, command_id, &params)?;
+        }
+        Ok(outcome)
+    }
+
+    /// Persist a full `.lcproj` snapshot of the current document into `journal` and prune replayed WAL entries.
+    pub fn checkpoint_journal<B: JournalBackend>(&self, journal: &mut CrashRecoveryJournal<B>) -> Result<(), EngineError> {
+        let snapshot_bytes = lumencraft_format::save_project_bytes(&self.doc)?;
+        journal.checkpoint(&snapshot_bytes)?;
+        Ok(())
+    }
+
+    /// Flush a clean final snapshot, remove the WAL log and lease lockfile, and return the underlying backend.
+    pub fn close_journal_cleanly<B: JournalBackend>(&mut self, journal: CrashRecoveryJournal<B>) -> Result<B, EngineError> {
+        let final_snapshot_bytes = lumencraft_format::save_project_bytes(&self.doc)?;
+        let backend = journal.close_cleanly(&final_snapshot_bytes)?;
+        self.dirty = false;
+        Ok(backend)
+    }
+}
+
 impl Default for Session {
     fn default() -> Self {
         Self::new()
@@ -167,7 +255,8 @@ impl Session {
 
     /// Wrap an existing [`ProjectDocument`] in a clean session.
     #[must_use]
-    pub fn from_document(document: ProjectDocument) -> Self {
+    pub fn from_document(mut document: ProjectDocument) -> Self {
+        let _ = lumencraft_format::sanitize_circular_hooks(&mut document);
         Self { doc: document, file_path: None, dirty: false, undo_stack: Vec::new(), redo_stack: Vec::new() }
     }
 
@@ -277,7 +366,7 @@ impl Session {
     /// Re-evaluate all upstream-to-downstream dependencies in topological order.
     pub fn recalculate_all(&mut self) -> Result<(), EngineError> {
         guard::run_guarded("project.recalculate", || {
-            let _ = dag::recalculate_project(&mut self.doc)?;
+            let _ = dag::recalculate_project_sanitized(&mut self.doc)?;
             Ok(())
         })
     }

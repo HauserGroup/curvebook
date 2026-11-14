@@ -7,14 +7,14 @@ use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellCoord, CellValue, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ConstantValue,
     ContingencyTable, DataSetColumn, DataSheet, GraphAnnotation, GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec,
     ImportPlacementSpec, InfoSheet, InternalLinkKind, LayoutItem, LayoutSheet, LevelOrderKind, LevelOrderSpec, LinkSource, MultipleVariablesTable,
-    NestedTable, ParameterScope, PartsOfWholeTable, PlacementMode, ProjectDocument, ResultSheet, ResultStatus, SheetCellRange, SheetId, SheetSection,
-    SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, XColumnMode, XyTable,
-    validate_rows, validate_title,
+    NestedTable, ParameterScope, PartsOfWholeTable, PlacementMode, ProjectDocument, ResultSheet, ResultStatus, SheetCellRange, SheetFolderKind,
+    SheetId, SheetSection, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource,
+    XColumnMode, XyTable, validate_rows, validate_title,
 };
 use lumencraft_format::{
     CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes,
-    import_pzfx_str, instantiate_template_bytes, open_project_bytes, open_project_file, save_project_bytes, save_project_file, save_template_bytes,
-    save_template_file,
+    import_pzfx_str, instantiate_template_bytes, open_project_bytes, open_project_file, sanitize_circular_hooks, save_project_bytes,
+    save_project_file, save_template_bytes, save_template_file,
 };
 use lumencraft_transform::{
     ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, apply_import_link_pipeline, evaluate_data_sheet_calculated_variables,
@@ -302,7 +302,7 @@ fn cmd_project_new(doc: &mut ProjectDocument, command_id: &str, params: &Value) 
 }
 
 fn cmd_project_open(doc: &mut ProjectDocument, command_id: &str, params: &Value) -> Result<CommandOutcome, EngineError> {
-    let loaded = if let Some(path) = opt_str(params, &["path", "file_path", "filePath"]) {
+    let mut loaded = if let Some(path) = opt_str(params, &["path", "file_path", "filePath"]) {
         open_project_file(Path::new(path))?
     } else if let Some(b64) = opt_str(params, &["bytes_base64", "bytesBase64", "archive_base64"]) {
         let bytes = decode_base64(b64)?;
@@ -314,6 +314,7 @@ fn cmd_project_open(doc: &mut ProjectDocument, command_id: &str, params: &Value)
         return Err(EngineError::new("project.open requires `path` or `bytes_base64`"));
     };
 
+    let _ = sanitize_circular_hooks(&mut loaded);
     *doc = loaded;
     Ok(CommandOutcome::mutated(
         command_id,
@@ -1339,7 +1340,7 @@ fn cmd_sheet_set_frozen(doc: &mut ProjectDocument, command_id: &str, params: &Va
 
 fn cmd_sheet_reorder(doc: &mut ProjectDocument, command_id: &str, params: &Value) -> Result<CommandOutcome, EngineError> {
     if let Some(order_arr) = opt_array(params, &["order", "sheet_ids", "sheetIds"]) {
-        let section_str = req_str(params, &["section"])?;
+        let section_str = req_str(params, &["section", "folder"])?;
         let section = parse_sheet_section(section_str)?;
         let order: Vec<SheetId> = order_arr
             .iter()
@@ -1353,6 +1354,22 @@ fn cmd_sheet_reorder(doc: &mut ProjectDocument, command_id: &str, params: &Value
             command_id,
             "reordered section sheets",
             json!({ "section": format!("{section:?}"), "order": order.iter().map(SheetId::as_str).collect::<Vec<_>>() }),
+        ));
+    }
+
+    if opt_str(params, &["sheet_id", "sheetId", "id"]).is_none()
+        && (params.get("folder").is_some() || params.get("from_index").is_some() || params.get("fromIndex").is_some())
+    {
+        let folder_val =
+            params.get("folder").or_else(|| params.get("section")).ok_or_else(|| EngineError::new("`sheet.reorder` missing `folder`"))?;
+        let folder = parse_sheet_folder_kind(folder_val)?;
+        let from_index = req_usize(params, &["from_index", "fromIndex"])?;
+        let to_index = req_usize(params, &["to_index", "toIndex", "index", "position"])?;
+        doc.reorder_sheet(folder, from_index, to_index)?;
+        return Ok(CommandOutcome::mutated(
+            command_id,
+            "reordered sheet",
+            json!({ "folder": folder, "from_index": from_index, "to_index": to_index }),
         ));
     }
 
@@ -3024,14 +3041,32 @@ fn parse_column_design_hint(raw: &str) -> Result<ColumnDesignHint, EngineError> 
 }
 
 fn parse_sheet_section(raw: &str) -> Result<SheetSection, EngineError> {
+    match parse_sheet_folder_str(raw)? {
+        SheetFolderKind::Data => Ok(SheetSection::Data),
+        SheetFolderKind::Info => Ok(SheetSection::Info),
+        SheetFolderKind::Results => Ok(SheetSection::Analyses),
+        SheetFolderKind::Graphs => Ok(SheetSection::Graphs),
+        SheetFolderKind::Layouts => Ok(SheetSection::Layouts),
+    }
+}
+
+fn parse_sheet_folder_kind(val: &Value) -> Result<SheetFolderKind, EngineError> {
+    if let Ok(folder) = serde_json::from_value::<SheetFolderKind>(val.clone()) {
+        return Ok(folder);
+    }
+    let raw = val.as_str().ok_or_else(|| EngineError::new("`folder` must be a string or SheetFolderKind"))?;
+    parse_sheet_folder_str(raw)
+}
+
+fn parse_sheet_folder_str(raw: &str) -> Result<SheetFolderKind, EngineError> {
     let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
     match norm.as_str() {
-        "data" | "datatables" => Ok(SheetSection::Data),
-        "info" => Ok(SheetSection::Info),
-        "analyses" | "results" => Ok(SheetSection::Analyses),
-        "graphs" => Ok(SheetSection::Graphs),
-        "layouts" => Ok(SheetSection::Layouts),
-        _ => Err(EngineError::new(format!("unknown sheet section `{raw}`"))),
+        "data" | "datatables" => Ok(SheetFolderKind::Data),
+        "info" => Ok(SheetFolderKind::Info),
+        "analyses" | "results" => Ok(SheetFolderKind::Results),
+        "graphs" => Ok(SheetFolderKind::Graphs),
+        "layouts" => Ok(SheetFolderKind::Layouts),
+        _ => Err(EngineError::new(format!("unknown sheet folder `{raw}`"))),
     }
 }
 

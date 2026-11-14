@@ -3,7 +3,7 @@
 use lumencraft_chart::{ChartScene, PointPt, RectPt};
 use lumencraft_doc::{
     AxisSpec, BracketLabelMode, BracketStyle, GraphAnnotation, GraphSheet, GraphSpec, LayoutItem, LayoutSpec, PairwiseBracketSpec,
-    RectPt as DocRectPt, SheetId,
+    RectPt as DocRectPt, SheetFolderKind, SheetId,
 };
 use lumencraft_palette::{LineDashStyle, Rgba8};
 use serde::{Deserialize, Serialize};
@@ -27,6 +27,19 @@ const MAX_ZOOM: f64 = 16.0;
 const DEFAULT_CALLOUT_WIDTH_PT: f64 = 120.0;
 const DEFAULT_CALLOUT_HEIGHT_PT: f64 = 44.0;
 const MIN_HANDLE_SPAN_PT: f64 = 18.0;
+const INERTIA_MIN_ZOOM: f64 = 0.1;
+const INERTIA_MAX_ZOOM: f64 = 32.0;
+const DEFAULT_PAN_FRICTION_PER_SEC: f64 = 8.0;
+const INERTIA_STOP_SPEED_PT_PER_SEC: f64 = 0.5;
+const PAN_VELOCITY_SMOOTHING_RATE: f64 = 45.0;
+const MIN_PAN_DT_SEC: f64 = 1e-4;
+const PT_PER_INCH: f64 = 72.0;
+const PT_PER_MM: f64 = 72.0 / 25.4;
+const MIN_MAJOR_TICK_PX: f64 = 48.0;
+const MIN_MINOR_TICK_PX: f64 = 8.0;
+const MAX_RULER_SPAN_PT: f64 = 1_000_000.0;
+const MAX_RULER_MAJOR_TICKS: usize = 512;
+const MAX_RULER_TICKS: usize = 2_048;
 
 const fn default_snap_grid_pt() -> f64 {
     DEFAULT_SNAP_GRID_PT
@@ -927,6 +940,434 @@ fn point_to_segment_distance(pt: PointPt, a: PointPt, b: PointPt) -> f64 {
     let t = (((pt.x - a.x) * abx + (pt.y - a.y) * aby) / len_sq).clamp(0.0, 1.0);
     let proj = PointPt::new(a.x + t * abx, a.y + t * aby);
     distance(pt, proj)
+}
+
+const fn default_inertia_zoom() -> f64 {
+    1.0
+}
+
+const fn default_pan_friction() -> f64 {
+    DEFAULT_PAN_FRICTION_PER_SEC
+}
+
+fn finite_or_zero(value: f64) -> f64 {
+    if value.is_finite() { value } else { 0.0 }
+}
+
+fn finite_non_neg(value: f64) -> f64 {
+    if value.is_finite() && value > 0.0 { value } else { 0.0 }
+}
+
+fn sanitized_inertia_zoom(zoom: f64) -> f64 {
+    if zoom.is_finite() && zoom > 0.0 { zoom.clamp(INERTIA_MIN_ZOOM, INERTIA_MAX_ZOOM) } else { 1.0 }
+}
+
+/// Smooth trackpad pinch-to-zoom and exponential inertial pan state (`L4`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PanZoomInertiaState {
+    #[serde(default = "default_inertia_zoom")]
+    pub zoom: f64,
+    #[serde(default)]
+    pub pan_pt: [f64; 2],
+    #[serde(default)]
+    pub vel_pt_per_sec: [f64; 2],
+    #[serde(default = "default_pan_friction")]
+    pub friction_per_sec: f64,
+}
+
+impl Default for PanZoomInertiaState {
+    fn default() -> Self {
+        Self { zoom: 1.0, pan_pt: [0.0, 0.0], vel_pt_per_sec: [0.0, 0.0], friction_per_sec: DEFAULT_PAN_FRICTION_PER_SEC }
+    }
+}
+
+impl PanZoomInertiaState {
+    /// Scale `zoom` multiplicatively within `[0.1, 32.0]` while keeping `anchor_view_pt` stationary.
+    pub fn apply_pinch_zoom(&mut self, factor: f64, anchor_view_pt: [f64; 2]) {
+        if !factor.is_finite() || factor <= 0.0 || !anchor_view_pt[0].is_finite() || !anchor_view_pt[1].is_finite() {
+            return;
+        }
+        let old_zoom = sanitized_inertia_zoom(self.zoom);
+        let next_zoom = (old_zoom * factor).clamp(INERTIA_MIN_ZOOM, INERTIA_MAX_ZOOM);
+        let pan_x = finite_or_zero(self.pan_pt[0]);
+        let pan_y = finite_or_zero(self.pan_pt[1]);
+        if (next_zoom - old_zoom) == 0.0 {
+            self.zoom = next_zoom;
+            self.pan_pt = [pan_x, pan_y];
+            return;
+        }
+        let content_x = (anchor_view_pt[0] - pan_x) / old_zoom;
+        let content_y = (anchor_view_pt[1] - pan_y) / old_zoom;
+        let next_pan_x = anchor_view_pt[0] - content_x * next_zoom;
+        let next_pan_y = anchor_view_pt[1] - content_y * next_zoom;
+        if next_pan_x.is_finite() && next_pan_y.is_finite() {
+            self.zoom = next_zoom;
+            self.pan_pt = [next_pan_x, next_pan_y];
+        }
+    }
+
+    /// Apply a trackpad pan delta `(dx_pt, dy_pt)` over `dt_sec`, updating pan and smoothing velocity.
+    pub fn apply_pan_delta(&mut self, delta_pt: [f64; 2], dt_sec: f64) {
+        if !delta_pt[0].is_finite() || !delta_pt[1].is_finite() || !dt_sec.is_finite() || dt_sec < 0.0 {
+            return;
+        }
+        let next_pan_x = finite_or_zero(self.pan_pt[0]) + delta_pt[0];
+        let next_pan_y = finite_or_zero(self.pan_pt[1]) + delta_pt[1];
+        if next_pan_x.is_finite() && next_pan_y.is_finite() {
+            self.pan_pt = [next_pan_x, next_pan_y];
+        }
+        if dt_sec == 0.0 {
+            return;
+        }
+        let effective_dt = dt_sec.max(MIN_PAN_DT_SEC);
+        let inst_vx = delta_pt[0] / effective_dt;
+        let inst_vy = delta_pt[1] / effective_dt;
+        if !inst_vx.is_finite() || !inst_vy.is_finite() {
+            return;
+        }
+        let alpha = (1.0 - (-dt_sec * PAN_VELOCITY_SMOOTHING_RATE).exp()).clamp(0.25, 1.0);
+        let prev_vx = finite_or_zero(self.vel_pt_per_sec[0]);
+        let prev_vy = finite_or_zero(self.vel_pt_per_sec[1]);
+        let next_vx = prev_vx + (inst_vx - prev_vx) * alpha;
+        let next_vy = prev_vy + (inst_vy - prev_vy) * alpha;
+        if next_vx.is_finite() && next_vy.is_finite() {
+            self.vel_pt_per_sec = [next_vx, next_vy];
+        }
+    }
+
+    /// Advance inertial coasting by `dt_sec`, decaying exponentially until speed drops below `0.5 pt/s`.
+    /// Returns `true` while still moving and `false` once snapped cleanly to zero velocity.
+    pub fn step_inertia(&mut self, dt_sec: f64) -> bool {
+        let vx = finite_or_zero(self.vel_pt_per_sec[0]);
+        let vy = finite_or_zero(self.vel_pt_per_sec[1]);
+        let pan_x = finite_or_zero(self.pan_pt[0]);
+        let pan_y = finite_or_zero(self.pan_pt[1]);
+        self.pan_pt = [pan_x, pan_y];
+
+        if !dt_sec.is_finite() || dt_sec <= 0.0 {
+            let speed = vx.hypot(vy);
+            if !speed.is_finite() || speed < INERTIA_STOP_SPEED_PT_PER_SEC {
+                self.vel_pt_per_sec = [0.0, 0.0];
+            } else {
+                self.vel_pt_per_sec = [vx, vy];
+            }
+            return false;
+        }
+
+        let start_speed = vx.hypot(vy);
+        if !start_speed.is_finite() || start_speed < INERTIA_STOP_SPEED_PT_PER_SEC {
+            self.vel_pt_per_sec = [0.0, 0.0];
+            return false;
+        }
+
+        let friction = if self.friction_per_sec.is_finite() && self.friction_per_sec > 0.0 {
+            self.friction_per_sec.max(1e-3)
+        } else {
+            DEFAULT_PAN_FRICTION_PER_SEC
+        };
+        let decay = (-friction * dt_sec).exp();
+        let disp_scale = -((-friction * dt_sec).exp_m1()) / friction;
+        let next_pan_x = pan_x + vx * disp_scale;
+        let next_pan_y = pan_y + vy * disp_scale;
+        if next_pan_x.is_finite() && next_pan_y.is_finite() {
+            self.pan_pt = [next_pan_x, next_pan_y];
+        }
+
+        let next_vx = vx * decay;
+        let next_vy = vy * decay;
+        let next_speed = next_vx.hypot(next_vy);
+        if !next_speed.is_finite() || next_speed < INERTIA_STOP_SPEED_PT_PER_SEC {
+            self.vel_pt_per_sec = [0.0, 0.0];
+            false
+        } else {
+            self.vel_pt_per_sec = [next_vx, next_vy];
+            true
+        }
+    }
+
+    /// Fit `content_size_pt` centered inside `viewport_size_pt`, clearing residual velocity.
+    pub fn zoom_to_fit(&mut self, content_size_pt: [f64; 2], viewport_size_pt: [f64; 2]) {
+        let [cw, ch] = content_size_pt;
+        let [vw, vh] = viewport_size_pt;
+        if !cw.is_finite() || !ch.is_finite() || !vw.is_finite() || !vh.is_finite() || cw <= 0.0 || ch <= 0.0 || vw <= 0.0 || vh <= 0.0 {
+            return;
+        }
+        let fit_zoom = (vw / cw).min(vh / ch).clamp(INERTIA_MIN_ZOOM, INERTIA_MAX_ZOOM);
+        if !fit_zoom.is_finite() || fit_zoom <= 0.0 {
+            return;
+        }
+        let pan_x = (vw - cw * fit_zoom) * 0.5;
+        let pan_y = (vh - ch * fit_zoom) * 0.5;
+        if pan_x.is_finite() && pan_y.is_finite() {
+            self.zoom = fit_zoom;
+            self.pan_pt = [pan_x, pan_y];
+            self.vel_pt_per_sec = [0.0, 0.0];
+        }
+    }
+
+    /// Update zoom from a percentage (`100.0` = `1.0x`), clamped to `[0.1, 32.0]`.
+    pub fn set_zoom_percent(&mut self, pct: f64) {
+        if !pct.is_finite() || pct <= 0.0 {
+            return;
+        }
+        self.zoom = (pct / 100.0).clamp(INERTIA_MIN_ZOOM, INERTIA_MAX_ZOOM);
+    }
+
+    /// Transform a view-space point into content-space points.
+    #[must_use]
+    pub fn view_to_content(&self, view_pt: [f64; 2]) -> [f64; 2] {
+        let zoom = sanitized_inertia_zoom(self.zoom);
+        [(view_pt[0] - finite_or_zero(self.pan_pt[0])) / zoom, (view_pt[1] - finite_or_zero(self.pan_pt[1])) / zoom]
+    }
+
+    /// Transform a content-space point into view-space points.
+    #[must_use]
+    pub fn content_to_view(&self, content_pt: [f64; 2]) -> [f64; 2] {
+        let zoom = sanitized_inertia_zoom(self.zoom);
+        [content_pt[0] * zoom + finite_or_zero(self.pan_pt[0]), content_pt[1] * zoom + finite_or_zero(self.pan_pt[1])]
+    }
+}
+
+/// Physical measurement unit used by page layout rulers (`L4`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PhysicalUnit {
+    #[default]
+    Millimeters,
+    Inches,
+    Points,
+}
+
+impl PhysicalUnit {
+    /// Exact typographic points per physical unit (`1 in = 72 pt`, `1 mm = 72.0 / 25.4 pt`).
+    #[must_use]
+    pub const fn pt_per_unit(self) -> f64 {
+        match self {
+            Self::Millimeters => PT_PER_MM,
+            Self::Inches => PT_PER_INCH,
+            Self::Points => 1.0,
+        }
+    }
+
+    /// Convert `value` in this physical unit into typographic points (`0.0` on non-finite input).
+    #[must_use]
+    pub fn to_points(self, value: f64) -> f64 {
+        if value.is_finite() { value * self.pt_per_unit() } else { 0.0 }
+    }
+
+    /// Convert typographic `points` into this physical unit (`0.0` on non-finite input).
+    #[must_use]
+    pub fn from_points(self, points: f64) -> f64 {
+        if points.is_finite() { points / self.pt_per_unit() } else { 0.0 }
+    }
+}
+
+/// Standard journal figure-width and page presets in points (`L4`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum JournalWidthPreset {
+    SingleColumn85Mm,
+    OneHalfColumn114Mm,
+    DoubleColumn174Mm,
+    LetterHalf,
+    CustomPt(f64, f64),
+}
+
+impl JournalWidthPreset {
+    /// Return `(width_pt, height_pt)` in exact typographic points (`1 in = 72 pt`, `1 mm = 72.0 / 25.4 pt`).
+    #[must_use]
+    pub fn size_pt(self) -> (f64, f64) {
+        match self {
+            Self::SingleColumn85Mm => (85.0 * PT_PER_MM, 85.0 * PT_PER_MM),
+            Self::OneHalfColumn114Mm => (114.0 * PT_PER_MM, 90.0 * PT_PER_MM),
+            Self::DoubleColumn174Mm => (174.0 * PT_PER_MM, 120.0 * PT_PER_MM),
+            Self::LetterHalf => (5.5 * PT_PER_INCH, 8.5 * PT_PER_INCH),
+            Self::CustomPt(w, h) => (finite_non_neg(w), finite_non_neg(h)),
+        }
+    }
+}
+
+/// Single tick entry produced by [`build_ruler_ticks`] for a horizontal or vertical page ruler.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RulerTick {
+    pub pos_pt: f64,
+    pub view_px: f64,
+    pub major: bool,
+    pub label: Option<String>,
+}
+
+/// Build zoom-adaptive ruler ticks across `[0, doc_span_pt]` in `unit`, preventing overlapping labels
+/// and capping against zero, non-finite, or oversized inputs.
+#[must_use]
+pub fn build_ruler_ticks(unit: PhysicalUnit, doc_span_pt: f64, zoom: f64, pan_pt: f64, px_per_pt: f64) -> Vec<RulerTick> {
+    if !doc_span_pt.is_finite()
+        || doc_span_pt <= 0.0
+        || !zoom.is_finite()
+        || zoom <= 0.0
+        || !pan_pt.is_finite()
+        || !px_per_pt.is_finite()
+        || px_per_pt <= 0.0
+    {
+        return Vec::new();
+    }
+
+    let span_pt = doc_span_pt.min(MAX_RULER_SPAN_PT);
+    let pt_per_unit = unit.pt_per_unit();
+    let px_per_unit = pt_per_unit * zoom * px_per_pt;
+    if !px_per_unit.is_finite() || px_per_unit <= 0.0 {
+        return Vec::new();
+    }
+
+    let span_units = span_pt / pt_per_unit;
+    let min_major_for_zoom = MIN_MAJOR_TICK_PX / px_per_unit;
+    #[allow(clippy::cast_precision_loss)]
+    let min_major_for_cap = span_units / (MAX_RULER_MAJOR_TICKS as f64);
+    let min_major_units = min_major_for_zoom.max(min_major_for_cap);
+    if !min_major_units.is_finite() || min_major_units <= 0.0 {
+        return Vec::new();
+    }
+
+    let (major_step_units, subdivisions) = select_ruler_step(unit, min_major_units, px_per_unit);
+    let minor_step_units = major_step_units / f64::from(subdivisions);
+    let decimals = step_decimal_places(major_step_units);
+
+    let max_steps_f = (span_units / minor_step_units).floor();
+    if !max_steps_f.is_finite() || max_steps_f < 0.0 {
+        return Vec::new();
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let cap_u32 = MAX_RULER_TICKS.saturating_sub(1) as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let max_steps = if max_steps_f >= f64::from(cap_u32) { cap_u32 } else { max_steps_f as u32 };
+
+    let mut ticks = Vec::with_capacity((max_steps as usize).saturating_add(1).min(MAX_RULER_TICKS));
+    for step_idx in 0..=max_steps {
+        let is_major = step_idx % subdivisions == 0;
+        let value_units = f64::from(step_idx) * minor_step_units;
+        let pos_pt = value_units * pt_per_unit;
+        if pos_pt > span_pt * (1.0 + 1e-9) {
+            break;
+        }
+        let view_px = (pos_pt * zoom + pan_pt) * px_per_pt;
+        if !view_px.is_finite() {
+            break;
+        }
+        let label = is_major.then(|| format_tick_label(value_units, decimals));
+        ticks.push(RulerTick { pos_pt: pos_pt.min(span_pt), view_px, major: is_major, label });
+    }
+    ticks
+}
+
+fn select_ruler_step(unit: PhysicalUnit, min_major_units: f64, px_per_unit: f64) -> (f64, u32) {
+    let (major_step, mut subdivisions) = match unit {
+        PhysicalUnit::Inches if min_major_units < 1.0 - 1e-9 => select_binary_inch_step(min_major_units),
+        PhysicalUnit::Inches => select_decimal_step(min_major_units, true),
+        PhysicalUnit::Millimeters | PhysicalUnit::Points => select_decimal_step(min_major_units, false),
+    };
+    while subdivisions > 1 && (major_step / f64::from(subdivisions)) * px_per_unit < MIN_MINOR_TICK_PX {
+        subdivisions = match subdivisions {
+            5 | 4 => 2,
+            _ => 1,
+        };
+    }
+    (major_step, subdivisions)
+}
+
+fn select_binary_inch_step(min_major_units: f64) -> (f64, u32) {
+    const INCH_STEPS: &[(f64, u32)] = &[(0.015_625, 2), (0.031_25, 2), (0.062_5, 4), (0.125, 4), (0.25, 4), (0.5, 4), (1.0, 4)];
+    for &(step, subs) in INCH_STEPS {
+        if step >= min_major_units * (1.0 - 1e-9) {
+            return (step, subs);
+        }
+    }
+    (1.0, 4)
+}
+
+fn select_decimal_step(min_major_units: f64, quarter_ones: bool) -> (f64, u32) {
+    if min_major_units > 1e30 {
+        return (min_major_units, 1);
+    }
+    let clamped = min_major_units.clamp(1e-6, 1e30);
+    #[allow(clippy::cast_possible_truncation)]
+    let exp = clamped.log10().floor() as i32;
+    let base = 10.0_f64.powi(exp);
+    let ones_subs = if quarter_ones && exp == 0 { 4 } else { 5 };
+    let tens_subs = if quarter_ones && exp == -1 { 4 } else { 5 };
+    let candidates = [(1.0, ones_subs), (2.0, 4), (5.0, 5), (10.0, tens_subs), (20.0, 4), (50.0, 5)];
+    for (mult, subs) in candidates {
+        let step = mult * base;
+        if step >= clamped * (1.0 - 1e-9) {
+            return (step, subs);
+        }
+    }
+    (10.0 * base, 5)
+}
+
+fn step_decimal_places(step: f64) -> usize {
+    if !step.is_finite() || step <= 0.0 || step >= 1.0 - 1e-9 {
+        return 0;
+    }
+    let mut scaled = step;
+    for d in 1..=6 {
+        scaled *= 10.0;
+        if (scaled - scaled.round()).abs() < 1e-6 {
+            return d;
+        }
+    }
+    4
+}
+
+fn format_tick_label(value: f64, decimals: usize) -> String {
+    let clean = if value.abs() < 1e-12 { 0.0 } else { value };
+    if decimals == 0 {
+        return format!("{clean:.0}");
+    }
+    let mut s = format!("{clean:.decimals$}");
+    if s.contains('.') {
+        while s.ends_with('0') {
+            s.pop();
+        }
+        if s.ends_with('.') {
+            s.pop();
+        }
+    }
+    if s == "-0" { String::from("0") } else { s }
+}
+
+/// Drag-and-drop sheet reorder state within a Project Navigator folder (`L4`).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NavigatorDragState {
+    pub active_drag: Option<(SheetFolderKind, String, usize)>,
+    pub hover_target_index: Option<usize>,
+}
+
+impl NavigatorDragState {
+    /// Start dragging `sheet_id` from `from_index` inside `folder`.
+    pub fn begin_drag(&mut self, folder: SheetFolderKind, sheet_id: impl Into<String>, from_index: usize) {
+        self.active_drag = Some((folder, sheet_id.into(), from_index));
+        self.hover_target_index = None;
+    }
+
+    /// Update the hovered insertion index while a drag is active.
+    pub fn update_hover(&mut self, to_index: usize) {
+        if self.active_drag.is_some() {
+            self.hover_target_index = Some(to_index);
+        }
+    }
+
+    /// Commit an active drag-reorder drop, returning `(folder, from_index, to_index)` when moved.
+    pub fn commit_drop(&mut self) -> Option<(SheetFolderKind, usize, usize)> {
+        let (folder, _sheet_id, from_index) = self.active_drag.take()?;
+        let to_index = self.hover_target_index.take()?;
+        if from_index == to_index {
+            return None;
+        }
+        Some((folder, from_index, to_index))
+    }
+
+    /// Cancel any active drag operation and clear hover state.
+    pub fn cancel(&mut self) {
+        self.active_drag = None;
+        self.hover_target_index = None;
+    }
 }
 
 #[cfg(test)]

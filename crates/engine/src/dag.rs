@@ -39,6 +39,23 @@ impl RecalcReport {
     }
 }
 
+/// Break any circular `HookSource` loops in `doc` while preserving valid acyclic hooks.
+pub fn sanitize_circular_hooks(doc: &mut ProjectDocument) -> Vec<String> {
+    lumencraft_format::sanitize_circular_hooks(doc)
+}
+
+/// Sanitize circular `HookSource` loops on a staged copy of `doc` and recalculate the reactive DAG atomically.
+///
+/// If a structural data-link, self-reference, or formula cycle remains after hook sanitization,
+/// `doc` is rolled back untouched and an [`EngineError`] is returned.
+pub fn recalculate_project_sanitized(doc: &mut ProjectDocument) -> Result<(usize, Vec<String>), EngineError> {
+    let mut working = doc.clone();
+    let diagnostics = lumencraft_format::sanitize_circular_hooks(&mut working);
+    let recalculated = recalculate_project(&mut working)?;
+    *doc = working;
+    Ok((recalculated, diagnostics))
+}
+
 fn link_source_sheet_id(source: &LinkSource) -> Option<&SheetId> {
     match source {
         LinkSource::InternalSheet { sheet_id, .. } => Some(sheet_id),

@@ -11,7 +11,10 @@ pub mod grid;
 
 use serde::{Deserialize, Serialize};
 
-pub use canvas::{CanvasToolMode, CanvasToolState, ToolCommandIntent};
+pub use canvas::{
+    CanvasToolMode, CanvasToolState, JournalWidthPreset, NavigatorDragState, PanZoomInertiaState, PhysicalUnit, RulerTick, ToolCommandIntent,
+    build_ruler_ticks,
+};
 pub use grid::{GridCellCoord, GridToolState, GridViewportSpec, GridVisibleWindow, SelectionQuickStats};
 
 /// Logical cursor shapes requested by interactive tools. Every variant is documented in

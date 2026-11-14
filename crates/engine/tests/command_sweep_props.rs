@@ -417,6 +417,7 @@ fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSe
     run_valid(s, covered, "transform.run", json!({ "sheet_id": "res-xform", "source_sheet": "xy-1", "kind": "normalize" }))?;
     run_valid(s, covered, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet": "col-1", "kind": "one_way_anova" }))?;
     run_valid(s, covered, "fit.run", json!({ "sheet_id": "res-fit", "source_sheet": "xy-1", "kind": "linear_regression" }))?;
+    run_valid(s, covered, "analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-1", "kind": "stats.bland_altman" }))?;
     run_valid(s, covered, "analysis.run", json!({ "sheet_id": "res-col", "source_sheet": "col-1", "kind": "descriptive_stats" }))?;
     run_valid(s, covered, "analysis.updateParams", json!({ "sheet_id": "res-anova", "confidence_percent": 99.0 }))?;
     run_valid(s, covered, "analysis.retargetData", json!({ "sheet_id": "res-anova", "source_sheet": "col-2" }))?;
@@ -441,6 +442,16 @@ fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet
     run_valid(s, covered, "graph.setKind", json!({ "sheet_id": "gr-col", "kind": "column" }))?;
     run_valid(s, covered, "graph.setSpec", json!({ "sheet_id": "gr-col", "title": "Updated Column Title" }))?;
     run_valid(s, covered, "graph.setAxes", json!({ "sheet_id": "gr-1", "x_axis": { "scale": "log10" } }))?;
+    run_valid(
+        s,
+        covered,
+        "graph.setAdditionalTicks",
+        json!({
+            "sheet_id": "gr-1",
+            "axis": "x",
+            "ticks": [{ "value": 10.0, "label": "EC50", "draw_gridline": true }]
+        }),
+    )?;
     run_valid(s, covered, "graph.setSeries", json!({ "sheet_id": "gr-1", "series_index": 0, "color": "#1F77B4CC" }))?;
     run_valid(s, covered, "graph.setRegressionOverlay", json!({ "sheet_id": "gr-1", "result_sheet_id": "res-fit", "series_index": 0 }))?;
     run_valid(s, covered, "graph.addComparisonBrackets", json!({ "sheet_id": "gr-col", "result_sheet_id": "res-anova", "significant_only": false }))?;
