@@ -14,7 +14,7 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 
 | Order | Slice | Paths | Status | Findings (S1/S2/S3/S4) | Verdicts (C/P/R/D) | Updated |
 |---:|---|---|---|---|---|---|
-| 1 | `S01` Numerical foundations | `crates/math`, `crates/palette` | verifying | 1/2/4/1 | — | 2026-11-14 |
+| 1 | `S01` Numerical foundations | `crates/math`, `crates/palette` | done | 1/2/4/1 | 8/0/0/0 | 2026-11-14 |
 | 2 | `S05` Document model | `crates/doc` | done | 3/3/1/0 | 7/0/0/0 | 2026-11-14 |
 | 3 | `S02` Statistics | `crates/stats` | done | 6/5/2/0 | 13/0/0/0 | 2026-11-14 |
 | 4 | `S03` Curve fitting and equation language | `crates/fit` | reviewing | — | — | 2026-11-14 |
@@ -39,6 +39,8 @@ What each review actually read, so a later session can see what was and was not 
 | Slice | Files read in full | Files skimmed or skipped | Tests run |
 |---|---|---|---|
 | `S02` | see [`findings/S02.md`](findings/S02.md) › Scope read | — | reviewer: release probe crate (12 of 13 findings reproduced); verifier: `audit/r1/S02` `crates/stats/tests/audit_r1_s02.rs`, 9 tests, all fail at base (re-run by coordinator) |
+| `S01` | see [`findings/S01.md`](findings/S01.md) › Scope read | — | reviewer: probe crate + R 4.5.2 black-box oracle; verifier: `audit/r1/S01` `crates/math/tests/audit_r1_s01.rs`, `crates/palette/tests/audit_r1_s01.rs`, all 8 fail at base (R exact integrals, analytic eigenvalues) |
+| `S05` | see [`findings/S05.md`](findings/S05.md) › Scope read | — | `cargo test -p lumencraft-doc` pass; verifier: `audit/r1/S05` `audit_r1_s05.rs` in `crates/doc`, `crates/format`, `crates/stats` |
 | `S04` | see [`findings/S04.md`](findings/S04.md) › Scope read | — | reviewer: probe crate (11 of 13 reproduced); verifier: `audit/r1/S04` `crates/transform/tests/audit_r1_s04.rs` |
 | `S06` | see [`findings/S06.md`](findings/S06.md) › Scope read | — | `cargo test -p lumencraft-format` 43/43 pass; verifier: `audit/r1/S06` `crates/format/tests/audit_r1_s06.rs`, 5 fail at base (02, 03, 04, 06, 10) |
 
@@ -54,6 +56,7 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 
 | ID | Severity (agreed) | Title | Verdict | Basis | Slice |
 |---|---|---|---|---|---|
+| [R1-S01-01](findings/S01.md) | S1 | Noncentral *t* large-δ branch uses `E[U]·df/2` as the mean, so CDF/SF and Cohen's *d* CIs are wrong for \|δ\| > 447 | CONFIRMED | test | `S01` |
 | [R1-S02-01](findings/S02.md) | S1 | Contingency counts near `u64` range hang the 2×2 path and panic the R×C path | CONFIRMED | test | `S02` |
 | [R1-S02-02](findings/S02.md) | S1 | "Fisher's exact", "McNemar's" and "Cochran–Armitage" rows silently show the Pearson chi-square P | CONFIRMED | trace | `S02` |
 | [R1-S02-03](findings/S02.md) | S1 | ROC: perfectly separated groups report P = 1 and a zero-width CI for AUC = 1 | CONFIRMED | test | `S02` |
@@ -65,6 +68,8 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S05-02](findings/S05.md) | S1 | `transpose_cell_grid` turns a ragged grid into a dense `max_cols × rows` grid with no cap, so a ~200 KB CSV can abort the app | CONFIRMED | test | `S05` |
 | [R1-S05-03](findings/S05.md) | S1 | `XColumnMode::Numbers { subcolumn_mode: RawReplicates(n) }` is not bounded after load, so saving loops `n` times | CONFIRMED | test | `S05` |
 | [R1-S06-01](findings/S06.md) | S1 | `.prism` import has no project-wide cell budget: a 6 KB file allocates 1.5 GiB and scales to hundreds of GiB | CONFIRMED | trace | `S06` |
+| [R1-S01-02](findings/S01.md) | S2 | Noncentral F and χ² cap the Poisson mode at 500 000, so λ > 1e6 gives CDF = SF = 0 and a truncated upper CI limit | CONFIRMED | test | `S01` |
+| [R1-S01-03](findings/S01.md) | S2 | `sym_eigen` declares convergence against an absolute threshold floored at 1.0, so small-scale matrices stop after one Jacobi sweep | CONFIRMED | test | `S01` |
 | [R1-S02-07](findings/S02.md) | S2 | Zero residual variance gives F = 0, P = 1 in RM ANOVA, and P = 1 for every post-hoc pair after an F test with P < 0.0001 | CONFIRMED | test | `S02` |
 | [R1-S02-08](findings/S02.md) | S2 | ANOVA on mean/SD/N data reports a made-up Brown–Forsythe "F = 0.000, P = 1.0000 — Pass" | CONFIRMED | trace | `S02` |
 | [R1-S02-09](findings/S02.md) | S2 | Cox regression treats any non-zero status as an event; Kaplan–Meier rejects the same column | CONFIRMED | trace | `S02` |
@@ -85,6 +90,10 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S06-03](findings/S06.md) | S2 | One malformed interior journal line aborts all recovery, and the desktop app then refuses to start | CONFIRMED | test | `S06` |
 | [R1-S06-04](findings/S06.md) | S2 | PZFX import silently drops subcolumns beyond the resolved subcolumn mode | CONFIRMED | test | `S06` |
 | [R1-S06-05](findings/S06.md) | S2 | `.lumencraft` open parses `document.json` into a `serde_json::Value` tree first: a 61 KB archive drives 1.1 GiB of heap | CONFIRMED | trace | `S06` |
+| [R1-S01-04](findings/S01.md) | S3 | `cholesky` detects singularity only by `pivot <= 0`, so exactly collinear Gram matrices factor and invert to ~1e14 | CONFIRMED | test | `S01` |
+| [R1-S01-05](findings/S01.md) | S3 | Inverse incomplete gamma/beta solvers return the bracket midpoint as `Ok` after the iteration budget | CONFIRMED | test | `S01` |
+| [R1-S01-06](findings/S01.md) | S3 | `reg_beta_inv_pair` derives the second component as `1 − x`, losing all precision when the quantile is near 1 | CONFIRMED | test | `S01` |
+| [R1-S01-07](findings/S01.md) | S3 | `ColorRamp::Custom` copies and sorts every stop on every sample, and the stop count is unbounded | CONFIRMED | test | `S01` |
 | [R1-S02-12](findings/S02.md) | S3 | Mann–Whitney does not match its documented exactness: ties always use the normal approximation, and large-sample "Hodges–Lehmann" is a difference of medians | CONFIRMED | trace | `S02` |
 | [R1-S02-13](findings/S02.md) | S3 | RM one-way ANOVA, Friedman and Cox drop incomplete rows without saying so, and Cox ignores `reference_levels` | CONFIRMED | trace | `S02` |
 | [R1-S04-10](findings/S04.md) | S3 | Curve calculus pairs each data set's compacted series with data set A's X values | CONFIRMED | test | `S04` |
@@ -101,3 +110,4 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S06-13](findings/S06.md) | S3 | `apply_csv_import_link` header promotion maps header index to data-set index, ignoring subcolumns | CONFIRMED | trace | `S06` |
 | [R1-S06-07](findings/S06.md) | S3 | Stale-lock eviction is unlink-then-create: two concurrent recoverers can both acquire the lease | PLAUSIBLE | trace | `S06` |
 | [R1-S06-14](findings/S06.md) | S3 | Journal replay is unbounded in size and record count | PLAUSIBLE | trace | `S06` |
+| [R1-S01-08](findings/S01.md) | S4 | `gamma(-inf)` returns `Ok(NaN)` despite the documented error contract | CONFIRMED | test | `S01` |
