@@ -1,8 +1,8 @@
 # Post-Parity Quality-of-Life Enhancements (`M8+`)
 
-> **Status:** Deferred post-parity backlog (`M8+`) · **Last updated:** 2026-11-13 · **Prerequisite:** Alpha/Beta/1.0 parity gates ([`roadmap.md`](roadmap.md), [`gaps.md`](gaps.md) `G1`–`G14`)
+> **Status:** Implemented & verified across core crates, `lumencraft-engine`, `UiApp`, `lumencraft-cli`, `lumencraft-mcp`, and `WebWorkspaceHost` (Waves 5–7) · **Last updated:** 2026-11-14 · **Roadmap:** [`ROADMAP.md#r9`](ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) ([`STATUS.md`](STATUS.md); browser Trunk build & OS windowing remain in [`R8.3`](ROADMAP.md#r83-live-os-eframeeguiwgpu-desktop-windowing--interactive-event-loop)–[`R8.4`](ROADMAP.md#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting))
 
-This document scopes **non-breaking quality-of-life (QoL) improvements** planned after core scientific workflow parity (`G1`–`G14`). None of these items block Alpha, Beta, or `1.0` parity; however, documenting their scope and non-breaking invariants early ensures that foundational `L1`–`L6` schemas (`lumencraft-doc`, `lumencraft-format`, `lumencraft-engine`, `lumencraft-ui-egui`) remain forward-compatible without breaking migrations later.
+This document tracks **non-breaking quality-of-life (QoL) workflows** (`QOL-1`–`QOL-11`, mapped to [`ROADMAP.md#r9`](ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite)). Implemented and verified across foundational `L1`–`L6` schemas, domain crates, `lumencraft-engine`, `lumencraft-ui-egui` (`UiApp`), `lumencraft-cli`, `lumencraft-mcp`, and `WebWorkspaceHost` in Waves 5–7 ([`STATUS.md`](STATUS.md)).
 
 ---
 
@@ -22,20 +22,20 @@ Every item in this backlog must satisfy five invariants:
 
 Hours follow the single-agent calibration in [`target-app-parity.md`](target-app-parity.md#calibration).
 
-| ID | Enhancement | Area | Crates (`L0`–`L6`) | Est. hours | Earliest hook |
+| ID | Enhancement | Area | Crates (`L0`–`L6`) | Est. hours | Status (Waves 5–7) |
 |---|---|---|---|---:|---|
-| [QOL-1](#qol-1-non-destructive-table-archetype-conversion) | Non-destructive table archetype conversion (`Column` ↔ `Grouped` ↔ `XY`) | Data Tables | `doc`, `transform`, `engine`, `ui-egui` | 8–14 | `G2` / `G6` |
-| [QOL-2](#qol-2-plate-reader-8x12--16x24-and-tidy-long-to-subcolumn-paste-mapper) | 96/384-well plate & tidy long-to-wide paste mapper | Data Import | `doc`, `format`, `engine`, `ui-egui` | 12–20 | `G2` / `G6` |
-| [QOL-3](#qol-3-auditable-cell-exclusion-reasons-and-provenance-tags) | Auditable cell exclusion reasons & provenance tags | Data Integrity | `doc`, `format`, `engine`, `ui-egui` | 5–8 | `G2` |
-| [QOL-4](#qol-4-optional-side-by-side-split-workspace) | Optional side-by-side split workspace (Data/Results + live Graph) | Workspace UX | `ui-egui`, `mcp` | 8–14 | `G6` |
-| [QOL-5](#qol-5-two-way-data-to-graph-point-brushing) | Two-way point brushing (hover/click graph glyph ↔ source table cell) | Graphing & QC | `chart`, `render`, `tools`, `ui-egui` | 8–12 | `G5` / `G6` |
-| [QOL-6](#qol-6-one-click-methods-and-statistical-reporting-generator) | One-click Methods & statistical reporting paragraph (plain text / Markdown / LaTeX) | Biostatistics | `stats`, `fit`, `engine`, `ui-egui` | 6–10 | `G3` / `G4` |
-| [QOL-7](#qol-7-inline-assumption-diagnostic-banners-with-non-blocking-remediation) | Inline assumption diagnostic banners with one-click test alternatives | Biostatistics | `stats`, `ui-egui` | 5–9 | `G3` / `G6` |
-| [QOL-8](#qol-8-journal-figure-dimension-and-typography-lock-presets) | Journal column-width presets with locked print typography & stroke scaling | Graphing & Layouts | `doc`, `chart`, `ui-egui` | 6–10 | `G5` / `G11` |
-| [QOL-9](#qol-9-live-color-vision-deficiency-cvd-and-grayscale-canvas-preview) | Live colorblind (CVD) & grayscale print preflight toggle on canvas | Accessibility | `palette`, `render`, `ui-egui` | 4–7 | `G5` / `G6` |
-| [QOL-10](#qol-10-zero-install-client-side-wasm-viewer-and-browser-folder-workspaces) | Zero-install client-side WASM collaborator viewer & browser folder workspaces | Web / Collaboration | `format`, `ui-egui`, `lumencraft-web` | 10–16 | `G2` / `G6` |
-| [QOL-11](#qol-11-unpacked-git-friendly-project-directory-and-in-file-checkpoints) | Unpacked Git-friendly directory mode & lightweight named checkpoints | Persistence | `format`, `engine`, `ui-egui` | 10–16 | `G2` |
-| | **Total post-parity QoL backlog** | | | **82–136 h** | |
+| [QOL-1](#qol-1-non-destructive-table-archetype-conversion) | Non-destructive table archetype conversion (`Column` ↔ `Grouped` ↔ `XY`) | Data Tables | `doc`, `transform`, `engine`, `ui-egui` | 8–14 | **Done** (`R9.1`) |
+| [QOL-2](#qol-2-plate-reader-8x12--16x24-and-tidy-long-to-subcolumn-paste-mapper) | 96/384-well plate & tidy long-to-wide paste mapper | Data Import | `doc`, `format`, `transform`, `engine`, `ui-egui` | 12–20 | **Done** (`R9.2`) |
+| [QOL-3](#qol-3-auditable-cell-exclusion-reasons-and-provenance-tags) | Auditable cell exclusion reasons & provenance tags | Data Integrity | `doc`, `format`, `engine`, `ui-egui` | 5–8 | **Done** (`R9.3`) |
+| [QOL-4](#qol-4-optional-side-by-side-split-workspace) | Optional side-by-side split workspace (Data/Results + live Graph) | Workspace UX | `ui-egui`, `mcp` | 8–14 | **Done** (`R9.4`) |
+| [QOL-5](#qol-5-two-way-data-to-graph-point-brushing) | Two-way point brushing (hover/click graph glyph ↔ source table cell) | Graphing & QC | `chart`, `render`, `tools`, `ui-egui` | 8–12 | **Done** (`R9.5`) |
+| [QOL-6](#qol-6-one-click-methods-and-statistical-reporting-generator) | One-click Methods & statistical reporting paragraph (plain text / Markdown / LaTeX) | Biostatistics | `stats`, `fit`, `engine`, `ui-egui` | 6–10 | **Done** (`R9.6`) |
+| [QOL-7](#qol-7-inline-assumption-diagnostic-banners-with-non-blocking-remediation) | Inline assumption diagnostic banners with one-click test alternatives | Biostatistics | `stats`, `ui-egui` | 5–9 | **Done** (`R9.7`) |
+| [QOL-8](#qol-8-journal-figure-dimension-and-typography-lock-presets) | Journal column-width presets with locked print typography & stroke scaling | Graphing & Layouts | `doc`, `chart`, `engine`, `ui-egui` | 6–10 | **Done** (`R9.8`) |
+| [QOL-9](#qol-9-live-color-vision-deficiency-cvd-and-grayscale-canvas-preview) | Live colorblind (CVD) & grayscale print preflight toggle on canvas | Accessibility | `palette`, `render`, `ui-egui` | 4–7 | **Done** (`R9.9`) |
+| [QOL-10](#qol-10-zero-install-client-side-wasm-viewer-and-browser-folder-workspaces) | Zero-install client-side WASM collaborator viewer & browser folder workspaces | Web / Collaboration | `format`, `ui-egui`, `lumencraft-web` | 10–16 | **Done** (`R9.10`, Trunk deploy in `R8.4`) |
+| [QOL-11](#qol-11-unpacked-git-friendly-project-directory-and-in-file-checkpoints) | Unpacked Git-friendly directory mode & lightweight named checkpoints | Persistence | `format`, `engine`, `ui-egui` | 10–16 | **Done** (`R9.11`) |
+| | **Total post-parity QoL suite (`QOL-1`–`QOL-11`)** | | | **82–136 h** | **All 11 landed (`0 h` core remaining)** |
 
 ---
 

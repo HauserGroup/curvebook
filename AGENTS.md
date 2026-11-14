@@ -1,103 +1,197 @@
-# LumenCraft — Engineering & Agent Rules
+# LumenCraft Agent & Contributor Rules
 
-LumenCraft is a standalone, clean-room, open-source, Rust-native biostatistics, nonlinear regression (curve fitting), typed scientific data-table, and publication graphing application targeting GraphPad Prism parity (and beyond). It runs natively on macOS, Windows, Linux, and FreeBSD, and in the browser via WebAssembly.
+This file is the binding engineering and governance specification for **LumenCraft** (crate prefix `lumencraft-*`, repository root `lumencraft/`). Every contributor and AI coding agent must follow these rules.
 
-## Core Collaboration & Repository Rules
+For concrete extension checklists, common past mistakes, and subsystem details, also read:
+- [docs/pitfalls.md](docs/pitfalls.md) — five documented LumenCraft mistakes and the rules that prevent them
+- [docs/extending.md](docs/extending.md) — where and how to add commands, analyses, fit models, formats, cursors, locales, schema migrations, and assets
+- [docs/command-ids.md](docs/command-ids.md) — canonical command ID scheme, area prefixes, and replay stability rules
+- [docs/file-formats.md](docs/file-formats.md) — persisted formats, ownership, versioning policy, and migrations
+- [docs/licences.md](docs/licences.md) — crate & asset licence allowlist, `deny.toml`, `about.toml`, and attribution files
+- [docs/architecture.md](docs/architecture.md) and [docs/development.md](docs/development.md) — layer architecture, build prerequisites, and debug/test harnesses
 
-1. **A person is accountable.** Whoever runs an agent answers for what it opens and for its review comments.
-2. **Check, then claim.** Before writing code, read the issue comments, search pull requests for `#N` and keywords, and check recent commits on `main`. Comment on the issue first, and release a claim you will not finish.
-3. **Verify, don't guess.** Open a definition before using it. Confirm the cause in the code, even when someone names a location.
-4. **Keep fixes narrow and tested.** Fix what the issue describes, where the bug is. Add a test that fails without the fix.
-5. **Review the diff before opening a pull request.** Identifiers exist as used, the test fails without the fix, nothing unrelated changed, and the description is true.
-6. **Report only what ran.** Say what you tested and what you could not run. Without a local build or test, say so and rely on CI before marking ready.
-7. **`main` changes through a pull request.** Do not push directly to `main`.
-8. **Stop and ask only about** licensing outside the allowlist, publishing, releases, a new remote, secrets, spending money, destructive git, and anything else hard to undo. Otherwise keep working. `plan/` is a gitignored notebook, not rules; without it, do not ask for it and do not stop.
-9. **Keep secrets and personal details out** of the repository, logs, and requests.
-10. **Guards say why.** A check that looks removable says what it prevents. Read that before changing it.
-11. **Instructions must be readable by everyone.** No notes about one machine, and no links to files a reader cannot open.
-12. **No agent attribution.** A pull request does not say an agent wrote it.
-13. **Time goes through `chrono`.** Do not hand-roll calendar conversion.
+---
 
-## Licence Allowlist
+## 1. Non-Negotiable Principles
 
-Dependencies and assets use SPDX identifiers. An expression is allowed when every identifier is in this list:
+### Clean-Room Development (`xtask cleanroom`, `xtask brands`)
+1. **Strict clean-room implementation only.** Never copy, translate, decompile, disassemble, or inspect the binaries, memory, or bundled assets of proprietary commercial statistical, graphing, or curve-fitting applications. Only publicly observable file format behaviour (such as `.pzfx` and `.prism` files read/written by `crates/format`), public scientific specifications, and peer-reviewed statistical literature may inform our design.
+2. **No copyleft dependencies or translations.** Never depend on or translate code from `GPL`, `AGPL`, or `LGPL` projects—even permissive-looking ports of GPL codebases (e.g., R, GNU Scientific Library, JASP, PSPP, Veusz, LabPlot, SciDAVis).
+3. **Neutral terminology and original brand identity.** Write all code, UI labels, comments, examples, and documentation in LumenCraft's own words. Never reference other suite brands, placeholder template package names, or proprietary competitor product names anywhere in the repository (`cargo xtask brands` and `cargo xtask cleanroom` enforce this). Keep `.prism` and `.pzfx` naming strictly limited to file format parser/exporter boundaries.
 
-- `ISC`
-- `MIT`
-- `BSD-2-Clause`
-- `BSD-3-Clause`
-- `Apache-2.0`
-- `OFL-1.1`
-- `Ubuntu-font-1.0`
-- `Bitstream-Vera`
-- `CC0-1.0`
-- `CC-BY-4.0`
-- `CC-BY-SA-4.0`
-- `LicenseRef-Public-Domain`
+### Statistical Rigor & Verified Oracles (`D1` Rule)
+1. **Cite a published reference.** Every statistical test, probability distribution, numerical solver, transform, and curve-fitting routine in `crates/math`, `crates/stats`, `crates/fit`, and `crates/transform` must cite a peer-reviewed paper, standard textbook (e.g., Zar, Motulsky & Christopoulos, Press et al.), or NIST StRD specification in its doc comments.
+2. **Document edge cases.** Explicitly define and test behaviour for `NaN`, `±Inf`, empty slices, zero variance, unequal group sizes, degenerate tables, and singular matrices. Never silently fall back to heuristic approximations without documented error bounds.
+3. **Verified reference oracles (`D1`).** Every quantitative routine must be checked against published reference datasets (such as the 58 NIST StRD datasets in `crates/testkit` / `crates/fit` / `crates/stats`) or an independent verified implementation, with numerical tolerances documented directly alongside the tests. Never invent "reference" answers by eye or treat unverified estimates as ground truth.
 
-## Start Every Session Here
-1. Read [`ROADMAP.md`](ROADMAP.md) (stage, numbers by dimension, what's next) and the ranked work list in [`docs/gaps.md`](docs/gaps.md). Unless the user gives you a task, pick work from that list.
-2. `plan/` is an optional gitignored notebook. Behaviour notes and local reference material may live under `plan/prism/` and `plan/papers/`. Do not ask for it and do not stop when it is absent. Orient, implement, test, verify, then record in the public docs.
-3. Before touching a domain crate, read its governing implementation guide in [`docs/`](docs/): [`data-tables-and-transforms.md`](docs/data-tables-and-transforms.md), [`statistics-implementation.md`](docs/statistics-implementation.md), [`curve-fitting-implementation.md`](docs/curve-fitting-implementation.md), [`graphing-and-layouts.md`](docs/graphing-and-layouts.md), [`scripting-and-automation.md`](docs/scripting-and-automation.md), and [`development.md`](docs/development.md).
+### Assets & Zero Bundled Fonts (`xtask assets`)
+1. **Every asset needs attribution.** Every image, icon, SVG, cursor, sample file, or third-party data file in the repository must have a row in [ASSETS.md](ASSETS.md) (and an entry in [ATTRIBUTION.md](ATTRIBUTION.md) when third-party), verified by `cargo xtask assets`.
+2. **Zero bundled font files.** Do not commit `.ttf`, `.otf`, `.woff`, or `.woff2` files into the repository (`cargo xtask assets` fails if any font binaries are tracked). Native builds discover system fonts dynamically (overridable with `LUMENCRAFT_FONTS_DIR`), and optional `bundled-fonts` builds for local web/dev testing use untracked local fetches (`cargo xtask web-fonts`).
 
-## Non-Negotiables
-- **Clean-room: never use GraphPad or Dotmatics software (absolute rule).** Proprietary EULAs forbid reverse engineering, including driving or probing an installed binary to recreate it. So:
-  - Never launch, run, script, automate (Prism script, AppleScript, COM, UI automation), screenshot or measure GraphPad Prism or any Dotmatics application, and never compare our output against an installed copy. Don't generate test `.prism`, `.pzfx` or `.pzf` files with them, not even "synthetic" ones.
-  - Never read, disassemble or copy anything inside a GraphPad install (binaries, equation libraries, sample datasets, templates, colour schemes, help files, schemas, resources).
-  - Never copy vendor-authored text, equation wording, guidance checklists, or sample files into this repo, tests included. Build synthetic `.prism` / `.pzfx` / CSV test archives from scratch in Rust test builders (`lumencraft-testkit`), and verify statistical & curve-fitting accuracy against public peer-reviewed literature, standard textbooks (Motulsky, Zar, Montgomery, Klein & Moeschberger, Hosmer & Lemeshow), and public-domain reference benchmarks such as the **NIST Statistical Reference Datasets (StRD)**. Where none of these covers a method, use reference values from open-source statistical software under the rule below.
-  - Behaviour comes only from public documentation, textbooks, peer-reviewed statistical methods, cited by URL or citation, and from files users send us that they own (used locally, never committed).
-  - `cargo xtask cleanroom` and `cargo xtask brands` (run by `cargo xtask ci`) fail on vendor copyright notices, vendor-created fixtures, and competitor brand names in user-visible text.
-  - Never copy GPL/AGPL/LGPL code (R core `stats`, GNU Scientific Library, JASP, PSPP, Veusz, LabPlot, SciDAVis…). Every mathematical, statistical and optimization routine must be clean-room Rust or come from a dependency on the licence allowlist.
-  - **Reference values from open-source statistical software are allowed as test oracles.** You may run open-source statistical software (for example R or SciPy) and commit the numbers it prints as small text test fixtures. This copies no code. The limits:
-    - Run it only as a black box. Never read, port or paraphrase its source; the rule above on GPL/AGPL/LGPL code is unchanged.
-    - Never use GraphPad or Dotmatics software this way. The clean-room rule above stays absolute.
-    - Input data is synthetic, from NIST StRD, or from a cited publication. Do not commit datasets that ship with the software unless their licence is on the allowlist.
-    - Record provenance beside the values: software and package, version, the exact call, and the date.
-    - The software is never a build, test or CI dependency. Fixtures are static, and `cargo xtask ci` passes without it installed.
-    - A reference value checks our arithmetic; it does not define behaviour. Where the target's public documentation specifies a different convention, follow the documentation and note the difference in the test.
-- **Standalone repository: no external suite dependencies.**
-  - LumenCraft has no build, runtime, packaging, or CI dependency on external suite infrastructure or `craft-*` crates (enforced by `cargo xtask layers` and `cargo xtask brands`).
-- **Assets: no proprietary iconography, palettes or templates — ever.**
-  - Never add, copy, trace, redraw-from, embed or ship any icon, artwork, cursor, graph theme, colour scheme or template from GraphPad products or any unpermitted source.
-  - **Every asset file must have a row in [`ASSETS.md`](ASSETS.md)** (path, author, source, licence, notes) and be recorded in [`ATTRIBUTION.md`](ATTRIBUTION.md) when third-party. `cargo xtask assets` (run by `cargo xtask ci`) fails on any unattributed asset.
-  - **Font files are never committed to this repo.** Optional SIL OFL font faces may be supplied at build time via `LUMENCRAFT_FONTS_DIR` (`LUMENCRAFT_FONTS_DIR="/path/to/fonts-root" cargo xtask ci`), read by `crates/text/build.rs` into `lumencraft_text::BUNDLED_FONTS`; never add a font repository to `Cargo.toml`. Everything must build, test and run with `BUNDLED_FONTS` empty.
-  - Code and original assets are MIT OR Apache-2.0 (`LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`). Prefer procedural generation in code for palettes, markers, axis breaks, error bars and cursors.
-- **Never crash: no panics in shipped code.** A crash loses the researcher's unsaved data tables and analyses. Project archives, CSVs, pasted spreadsheets, user equations, MCP requests, control messages and command params are all untrusted input.
-  - Fallible work returns `Result` (or `Option`); callers handle it or propagate it with `?`. Singular matrices, non-convergent nonlinear fits, zero degrees of freedom, all-excluded columns, `NaN`/`±Inf` inputs and malformed archives must surface structured domain outcomes or `EngineError`, never abort.
-  - Workspace clippy lints ban these outside tests, so `cargo xtask ci` fails on them: `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!`, `unimplemented!`.
-  - Don't panic implicitly either: use `.get(i)` instead of `v[i]` or `&s[a..b]` when indexing from untrusted row/column/subcolumn coordinates; cap row/column/replicate counts, archive decompression sizes and iteration budgets; check `f64::is_finite()` before casting or sorting.
-  - Tests may unwrap and panic (`#[test]`, `#[cfg(test)]`, `tests/`, `testkit`). Integration-test files may declare test-scoped `#![allow(…)]` attributes where needed.
-  - `lumencraft_engine::guard` is the last line of defence at entry points, catching unexpected panics to roll the session back and report an internal error, though wasm aborts on panic so `Result` remains mandatory everywhere.
-- **Statistical & numerical rigor.**
-  - Never silently drop excluded cells (`*`), missing values, or tied ranks: every analysis must document how missingness, replicate subcolumns, ties and degrees of freedom are handled.
-  - Test every statistical test and curve-fitting model against analytical solutions and public-domain reference datasets (NIST StRD: Misra1a, Ratkowsky, Eckerle4, Thurber, Norris, Pontius, AtmWtAg…) with explicit relative tolerance bounds. Where no such reference exists, use reference values from open-source statistical software under the clean-room rule above; every numerical test names the reference it uses.
-- **Everything is a command.** User-visible behaviour = a `CommandSpec` in `crates/engine/src/cmd/*` (id, label, menu path, shortcut, params doc, `enabled`, `run`) + tests. Interactive spreadsheet/graph/layout tools emit commands (Begin/Preview/Commit). UI-only commands live in `crates/ui-egui/src/menus/ui_commands.rs` (`UI_COMMANDS`) and are mirrored to `crates/mcp/src/ui_catalog.rs` via `cargo xtask ui-commands`.
-- **Adding a cursor.** Add the `Cursor` variant in `crates/tools/src/lib.rs`, return it from the tool with a unit test, and add its `[[cursor]]` entry to `crates/tools/src/cursors.toml` (plain behaviour terms and hotspot; never another vendor's name). Checked by `cargo xtask cursors`.
-- **Layering** is enforced by `cargo xtask layers`. Nothing below L6 depends on egui/eframe/winit/rfd.
-- **The UI is thin**: panels read engine state and act through commands. Colours come from theme tokens.
-- **Rust only for native and web apps** (no handwritten JS/TS, Tauri, Electron or webview shells). **Never break wasm** (`cargo xtask wasm`).
-- **Shared test corpora.** Never commit large binary fixtures to this repo; fetch public reference corpora (such as NIST StRD ASCII tables) into the gitignored `corpus/` directory pinned by commit/URL and SHA-256 verified (`cargo xtask corpus`).
-- **Quality gates** before every commit: `cargo xtask ci` (fmt, clippy `-D warnings` including the no-panic lints, tests, doctests, assets, brands, cleanroom, cursors, ui-commands, layers, wasm). One task id per commit (`M1.1: XY data table model`).
+### LumenCraft Never Crashes
+1. **No panicking paths in shipped code.** Workspace `[lints.clippy]` in [Cargo.toml](Cargo.toml) denies:
+   - `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`
+   - `unsafe_code` (and every crate must include `#![forbid(unsafe_code)]` and `[lints] workspace = true`)
+   - `wildcard_imports`, `cognitive_complexity`, `too_many_arguments`
+2. **Validate every external boundary.** File I/O, `.lumencraft`/`.pzfx`/`.prism`/CSV parsing, RPC/MCP requests, user expressions, and slice indexing must use checked access (`.get(...)`, checked arithmetic, typed `Result` / `Option` returns) and surface actionable errors to the caller/user rather than crashing.
+3. **Last-resort UI/MCP guard.** Keep `crates/engine/src/guard.rs` in place at UI/MCP boundaries only as defence-in-depth—never rely on `catch_unwind` to excuse panics in libraries.
 
-## Running and Inspecting the App
-- `cargo run --release -p lumencraft -- --control 7979 [project.lumencraft|project.prism]` (pick a free port if 7979 is already bound).
-- Headless CLI & MCP: `cargo run --release -p lumencraft-cli -- --help` and `lumencraft-cli mcp` (see [`docs/mcp.md`](docs/mcp.md) and [`docs/control-protocol.md`](docs/control-protocol.md)).
-- Parallel agents: use separate `CARGO_TARGET_DIR` per agent; edit only the crates you own; write manifests atomically; clean up temporary target dirs when done.
+### Pure Rust, `wasm32` Clean Core, and No `chrono`
+1. **Rust only.** All production crates, applications, CLI, MCP server, and `xtask` build/verify automation are written in Rust (`edition = "2024"`, `rust-version = "1.95"`).
+2. **`wasm32-unknown-unknown` compatibility for headless layers.** Keep `L0`–`L5` headless logic (`math`, `palette`, `doc`, `transform`, `stats`, `fit`, `text`, `chart`, `svg`, `pdf`, `render`, `tools`, `engine`) free of unguarded OS/blocking assumptions so `cargo xtask wasm` continues to pass. Place OS/filesystem/process shims behind `lumencraft-platform` (`crates/platform`) or `apps/*`.
+3. **No `chrono` crate and no hand-rolled calendar math.** `chrono` is intentionally excluded from `Cargo.toml` to keep dependencies minimal and deterministic. Never add `chrono` to workspace manifests and never hand-roll Gregorian leap-year/calendar arithmetic. For native fallback timestamps use `std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)` (recording epoch milliseconds/seconds or `unix:<secs>`), and keep `wasm32`/deterministic library paths dependent on caller-supplied timestamps or `lumencraft-platform`.
 
-## Roadmap, Parity and Implementation Docs
-- [`ROADMAP.md`](ROADMAP.md): stage, headline numbers, dimensions, features, upcoming milestones, progress log.
-- [`docs/target-app-parity.md`](docs/target-app-parity.md): authoritative parity assessment (area table, methodology, evidence of what ships).
-- [`docs/gaps.md`](docs/gaps.md): ranked shortfall and work list (`G1`–`G14`). [`docs/roadmap.md`](docs/roadmap.md): Alpha/Beta gates and milestones M0–M7.
-- Implementation guides: [`architecture.md`](docs/architecture.md), [`development.md`](docs/development.md), [`data-tables-and-transforms.md`](docs/data-tables-and-transforms.md), [`statistics-implementation.md`](docs/statistics-implementation.md), [`curve-fitting-implementation.md`](docs/curve-fitting-implementation.md), [`graphing-and-layouts.md`](docs/graphing-and-layouts.md), [`scripting-and-automation.md`](docs/scripting-and-automation.md), [`control-protocol.md`](docs/control-protocol.md), [`mcp.md`](docs/mcp.md), [`releasing.md`](docs/releasing.md).
-- Checklists: [`stats-parity.md`](docs/stats-parity.md), [`fitting-parity.md`](docs/fitting-parity.md), [`graphing-parity.md`](docs/graphing-parity.md), [`ui-parity.md`](docs/ui-parity.md), [`file-format-parity.md`](docs/file-format-parity.md), [`hardware-parity.md`](docs/hardware-parity.md), [`localization-parity.md`](docs/localization-parity.md).
+### Licence Allowlist (Short Policy)
+Only permissive, compatible crate licences are allowed in Cargo dependencies:
+`MIT`, `Apache-2.0`, `BSD-2-Clause`, `BSD-3-Clause`, `ISC`, `Zlib`, `Unicode-3.0`, `CC0-1.0`.
+Copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) is strictly forbidden. See [docs/licences.md](docs/licences.md) for asset licences, `deny.toml`, `about.toml`, `THIRD-PARTY-LICENSES.html`, `ATTRIBUTION.md`, and `NOTICE`.
 
-When a task lands, update in the same PR: `docs/target-app-parity.md`, `docs/gaps.md`, the relevant parity checklist, `docs/roadmap.md`, and `ROADMAP.md` (plus `README.md` Status when headline numbers move). Grade by verified mathematical and interactive behaviour against public specifications, not by whether a menu stub exists.
+### Contributor Credits & Security
+Never delete, truncate, or omit contributor attributions in [docs/contributors.md](docs/contributors.md), `ATTRIBUTION.md`, or `NOTICE` (`cargo xtask contributors` keeps contributor records synced). Report or handle vulnerability details strictly per [SECURITY.md](SECURITY.md).
 
-## Contributor Credits (About Window)
-- About ▸ Contributors/Models read `contributors/contributors.json` (commit stats; refreshed via `cargo xtask contributors` — never hand-edit) and `contributors/people.toml` (opt-in display/real names). See [`docs/contributors.md`](docs/contributors.md).
-- Add or edit **only your own human's** entry in `contributors/people.toml` after asking them. Never guess a name or hand-edit `contributors.json`.
+---
 
-## CI Workflows
-- Self-contained GitHub Actions workflows live in `.github/workflows/` and invoke `cargo xtask` and `packaging/*` directly. Keep CI changes separate from feature or bugfix pull requests unless required by the change.
+## 2. Workspace Map (22 Crates)
 
-New workspace crates include `[lints] workspace = true` in `Cargo.toml`. Production crate roots declare `#![forbid(unsafe_code)]` (and inherit workspace clippy `deny` lints) before modules; crate-level `//!` documentation may precede them.
+Dependency direction strictly flows downward (`L0` -> `L1` -> ... -> `L6`), verified by `cargo xtask layers`:
+
+| Crate | Layer | Path | Purpose |
+| :--- | :--- | :--- | :--- |
+| `lumencraft-math` | `L0` | `crates/math` | Special functions, PRNG/distributions, linear algebra, numeric tolerances |
+| `lumencraft-palette` | `L0` | `crates/palette` | Accessible colour palettes, colour-blind-safe schemes, contrast checks |
+| `lumencraft-platform` | `L0` | `crates/platform` | Atomic file writes, bounded subprocesses, `WorkdirGuard`/`PathResolver`, wasm-safe shims *(added in `R0.10`; `layers.rs` & caller migration in Wave 8B)* |
+| `lumencraft-doc` | `L1` | `crates/doc` | Core project model (`Project`, tables, sheets, analyses, graphs, layouts, schema errors) |
+| `lumencraft-transform` | `L2` | `crates/transform` | Data table transforms, normalisation, baseline subtraction, derivatives, smoothing |
+| `lumencraft-stats` | `L2` | `crates/stats` | Descriptive statistics, t-tests, ANOVA, non-parametric tests, survival, correlation, diagnostics |
+| `lumencraft-fit` | `L2` | `crates/fit` | Nonlinear regression (Levenberg-Marquardt), parametric model library, bands, model comparison |
+| `lumencraft-text` | `L2` | `crates/text` | Rich text spans, scientific/statistical notation, glyph shaping abstractions |
+| `lumencraft-chart` | `L2` | `crates/chart` | Plot layouts, axes, scales, ticks, legends, plot primitives, themes *(may also depend on other `L2` math/text crates)* |
+| `lumencraft-format` | `L3` | `crates/format` | `.lumencraft` / `.lumencraft.d/` / `.lctemplate` archives, migrations, `ops.journal` recovery, `.pzfx`/`.prism`/CSV/text I/O |
+| `lumencraft-svg` | `L3` | `crates/svg` | Pure-Rust vector SVG renderer for graphs and multi-panel layouts |
+| `lumencraft-pdf` | `L3` | `crates/pdf` | Pure-Rust vector PDF exporter for publication figures and reports |
+| `lumencraft-render` | `L3` | `crates/render` | Deterministic CPU rasterizer, PNG/TIFF, and ECMA-234 `.emf` renderer |
+| `lumencraft-tools` | `L4` | `crates/tools` | Interactive canvas hit-testing, selection handles, annotation/zoom tools, `cursors.toml` |
+| `lumencraft-engine` | `L5` | `crates/engine` | Headless `Session` execution, undo/redo (`MAX_UNDO_ENTRIES = 64`), command registry, `guard.rs` boundary, journaling |
+| `lumencraft-ui-egui` | `L6` | `crates/ui-egui` | UI state shell (`UiApp`), software RGBA compositor, menus, inspectors, `UI_COMMANDS`, and `i18n.rs` driving `lumencraft-engine` *(live `egui`/`eframe`/`wgpu` windowing planned in `R8.3`)* |
+| `lumencraft-mcp` | `L6` | `crates/mcp` | Model Context Protocol server exposing document inspection, commands, and headless tools |
+| `lumencraft` | `L7` *(app)* | `apps/lumencraft` | Desktop application binary (`UiApp` shell, OS integration, `preferences.json`/`shortcuts.json`, crash recovery; live `eframe`/`egui`/`wgpu` windowing planned in `R8.3`) |
+| `lumencraft-cli` | `L7` *(app)* | `apps/lumencraft-cli` | Headless CLI (`convert`, `run-batch`, `lumencraft.batch.v1` execution, exports) |
+| `lumencraft-web` | `L7` *(app)* | `apps/lumencraft-web` | WebAssembly browser workspace host (`wasm32-unknown-unknown`; Trunk deploy tracked in `R8.4`) |
+| `lumencraft-testkit` | `dev-only` | `crates/testkit` | Shared fixtures, NIST StRD corpus helpers, and headless harnesses (`[dev-dependencies]` only) |
+| `xtask` | `exempt` | `xtask/` | Workspace verification, codegen, and release-prep CLI (`cargo xtask <cmd>`) |
+
+---
+
+## 3. Command Registries (Target Seam & Current Transition)
+
+One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came from describing an unimplemented command table. Always keep docs aligned with both the actual code and the active seam:
+
+- **Engine command registry:** The target architecture (`R0.8`) unifies command metadata, parameter schema, read-only classification, and dispatch in a single typed `CommandSpec` registry at `crates/engine/src/cmd/mod.rs`. Until `R0.8` lands, engine commands are declared in `COMMANDS: &[CommandDescriptor]` in `crates/engine/src/catalog.rs`, read-only classification lives in `is_read_only_command` (`crates/engine/src/lib.rs`), and dispatch runs through `crates/engine/src/{lib.rs,cmd_data.rs,cmd_sci.rs}`. Whenever adding or editing an engine command right now, update the table/handler/tests together in one PR and conform to [docs/command-ids.md](docs/command-ids.md).
+- **UI command registry:** UI-only actions live in `UI_COMMANDS` in `crates/ui-egui/src/menus/ui_commands.rs` (moving to a typed `UiCommandSpec` struct in `R0.8`; currently a 4-tuple slice `(id, label, shortcut, params_doc)`). `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and never destructure `UI_COMMANDS` tuples manually elsewhere (`cargo xtask ui-commands --check` verifies sync).
+
+---
+
+## 4. `xtask` Command Reference
+
+Run workspace checks through `cargo xtask <command>` (invokes `xtask/`):
+
+| Command | Purpose |
+| :--- | :--- |
+| `cargo xtask ci` | Full local CI gate suite (fmt, clippy, tests, doctests, layers, assets, brands, cleanroom, cursors, ui-commands, wasm, and active `R0` checks) |
+| `cargo xtask test` | Workspace unit tests, integration tests, and doctests |
+| `cargo xtask layers` | Verify crate layer DAG (`L0`–`L6`), `testkit` dev-only rule, and banned crate patterns |
+| `cargo xtask assets` | Verify every non-code asset against `ASSETS.md` / `ATTRIBUTION.md` and confirm zero bundled font files |
+| `cargo xtask brands` | Verify prohibited competitor or placeholder suite brand names do not appear |
+| `cargo xtask cleanroom` | Enforce clean-room boundaries and reject copyleft/copied headers |
+| `cargo xtask cursors` | Validate `crates/tools/src/cursors.toml` and cursor SVG/PNG assets |
+| `cargo xtask i18n-report` | Report missing, unused, or drifted keys in `crates/ui-egui/src/i18n.rs` |
+| `cargo xtask ui-commands [--check]` | Regenerate (or `--check`) `crates/mcp/src/ui_catalog.rs` from `UI_COMMANDS` |
+| `cargo xtask secrets [--history]` | Scan working tree (or `--history` across commits) for secrets, tokens, or private keys *(R0.3)* |
+| `cargo xtask pending [--count]` | List remaining uncompleted roadmap items/defects (or print counts with `--count`) *(R0.4)* |
+| `cargo xtask status` | Verify `docs/STATUS.md` live metrics and table Column 1 uniqueness *(R0.4)* |
+| `cargo xtask licenses` | Run licence allowlist audit (`cargo deny check licenses`) and generate `THIRD-PARTY-LICENSES.html` *(R0.5)* |
+| `cargo xtask commands [--check]` | Regenerate (or `--check`) `docs/commands.md` from engine & UI command registries *(R0.7)* |
+| `cargo xtask schemas [--check]` | Regenerate (or `--check`) `docs/schemas/*.schema.json` from persisted document/manifest schemas *(R0.7)* |
+| `cargo xtask wasm` | Verify `wasm32-unknown-unknown` builds for web and core headless crates |
+| `cargo xtask corpus [--fetch\|--fetch-only]` | Verify (or fetch locally) external NIST StRD & regression test corpora |
+| `cargo xtask bundle` | Assemble macOS `.app` bundle and run `plutil -lint` + ad-hoc `codesign` |
+| `cargo xtask ico` | Regenerate Windows `.ico` icon bundles from source SVGs |
+| `cargo xtask version [set <ver>]` | Print or update `[workspace.package] version` and synced packaging manifests |
+| `cargo xtask stats [--exact]` | Print workspace line, test, and command counts |
+| `cargo xtask contributors` | Verify or update `docs/contributors.md` from repository attribution metadata |
+| `cargo xtask web-fonts` | Download untracked dev/test fonts locally for optional `bundled-fonts` builds |
+
+---
+
+## 5. Working Rules (Mandatory)
+
+### Roles & Ownership
+- Roadmap items in `docs/ROADMAP.md` carry `Owner: maintainers` (maintainer-steered foundation, security, or release tasks) or `Owner: open` (available for any contributor or agent to pick up). Ownership is **never** assigned to an individual handle as a permanent lock.
+
+### Claim Before Starting
+1. Check `docs/ROADMAP.md` and open PRs/issues before starting work so two contributors do not duplicate the same `R<m>.<n>` item.
+2. Claim the item first—either by noting your claim in `docs/ROADMAP.md` / the tracking issue before branching—so others see it is in progress.
+3. If you stop without finishing, release the claim promptly and note partial findings cleanly.
+
+### Before You Write Code
+Read these before editing code:
+1. This file (`AGENTS.md`)
+2. [docs/pitfalls.md](docs/pitfalls.md)
+3. [docs/extending.md](docs/extending.md)
+4. The relevant domain/reference guide (`docs/architecture.md`, `docs/development.md`, `docs/command-ids.md`, `docs/file-formats.md`, `docs/licences.md`, or `docs/ROADMAP.md`).
+
+### Git Workflow
+- **Branch naming:** Use `<prefix>/<R<m>.<n>-short-slug>` with one of these prefixes:
+  `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`, `chore/`, `audit/`
+  Example: `feature/R0.10-platform-atomic-write`, `bugfix/R2.3-anova-unequal-n`.
+- **Pull requests & merge style:** PRs are **squash-merged** into `main`. Write a clear, plain-English PR title **ending with `(R<m>.<n>)`**, e.g.:
+  `Move atomic saves into lumencraft-platform (R0.10)`
+  *(This replaces the legacy `M1.1: ...` title-prefix convention.)*
+- Keep each PR focused on **one** roadmap item (`R<m>.<n>`) unless splitting/grouping is explicitly planned in `docs/ROADMAP.md`.
+
+### Architecture Rules
+1. **Headless first:** All document/data/analysis/graph mutations execute through `lumencraft-engine` (`Session::execute`), ensuring parity across GUI (`ui-egui`), CLI (`lumencraft-cli`), MCP (`lumencraft-mcp`), crash-recovery replay (`ops.journal`), and batch runs (`lumencraft.batch.v1`). UI layers must never mutate `Project` directly.
+2. **Extend through seams:** Register new commands, analyses, fit equations, file formats, cursors, locales, and schema steps through the canonical seams documented in [docs/extending.md](docs/extending.md).
+3. **Data over code:** Prefer declarative descriptor tables, schema definitions, and TOML/struct registries (`CommandSpec`, `UiCommandSpec`, `cursors.toml`, parametric model metadata, format descriptors) over copy-pasted match arms.
+4. **Structured results:** Commands, fits, statistical analyses, and imports return typed result structures and typed errors (`EngineError`, `DocError`, `FormatError`) rather than opaque strings.
+5. **Versioned files:** Every persisted document, template, settings file, lock/journal envelope, and batch schema has an explicit format version and migration step, and **refuses to overwrite newer versions** saved by a newer LumenCraft release ([docs/file-formats.md](docs/file-formats.md)).
+6. **Bounded processes & atomic writes via `lumencraft-platform`:** All persistent writes (projects, unpacked directories, templates, preferences, exports) must write via temp file + sync + atomic rename—never bare `std::fs::write` over an existing target—and subprocesses must use bounded timeouts and cleaned environments through `crates/platform` (`lumencraft-platform`, introduced in `R0.10`).
+
+### Done Means & "Before You Finish"
+A task is **Done** only when:
+- All requested code/docs/tests and any oracle assertions pass without skipped assertions or suppressed warnings.
+- Generated files (`crates/mcp/src/ui_catalog.rs`, and once `R0` generators land, `docs/commands.md` and `docs/schemas/*.schema.json`) match source definitions (`--check` passes).
+- Relevant roadmap/status entries accurately reflect what landed (never leave stale hardcoded counts in docs).
+
+Run the applicable verification checks before opening a PR or reporting completion:
+
+```sh
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings   # or `-p <touched-crate>` while iterating
+cargo xtask test
+cargo xtask layers
+cargo xtask assets
+cargo xtask brands
+cargo xtask cleanroom
+cargo xtask cursors
+cargo xtask ui-commands --check
+cargo xtask wasm
+```
+
+Once the `R0` `xtask` generators/gates are present on your branch, also run:
+
+```sh
+cargo xtask secrets
+cargo xtask commands --check
+cargo xtask schemas --check
+cargo xtask status
+cargo xtask pending
+```
+
+(Running `cargo xtask ci` executes the full workspace CI bundle.)
+
+### Parallel Agents
+When multiple agents work concurrently on the repository:
+1. **Isolate `CARGO_TARGET_DIR`:** Give every agent its own build directory (for example `CARGO_TARGET_DIR=/tmp/lc-<agent-name>`) so Cargo package locks and build artefacts never collide.
+2. **Strictly non-overlapping crate/file ownership:** Assign disjoint crates or files before starting. Two agents must never edit the same file simultaneously.
+3. **No shared-tree git mutations:** Never run `git add`, `git commit`, `git reset`, `git checkout`, or `git config` inside a shared working copy unless you are working in your own isolated git worktree/share.

@@ -1,0 +1,171 @@
+{
+  "$defs": {
+    "BatchCommand": {
+      "additionalProperties": false,
+      "properties": {
+        "cmd": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "command": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "id": {},
+        "method": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "params": {}
+      },
+      "title": "BatchCommand",
+      "type": "object"
+    },
+    "BatchExport": {
+      "additionalProperties": false,
+      "properties": {
+        "dpi": {
+          "maximum": 1200.0,
+          "minimum": 72.0,
+          "type": "number"
+        },
+        "format": {
+          "enum": [
+            "lumencraft",
+            "lumencraft.d",
+            "lctemplate",
+            "csv",
+            "tsv",
+            "json",
+            "svg",
+            "pdf",
+            "png",
+            "tiff",
+            "emf"
+          ],
+          "type": "string"
+        },
+        "out": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "pdf_version": {
+          "type": "string"
+        },
+        "pretty": {
+          "type": "boolean"
+        },
+        "sheet": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tab_index": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "ttf_font": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "title": "BatchExport",
+      "type": "object"
+    },
+    "BatchInput": {
+      "additionalProperties": false,
+      "properties": {
+        "csv": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "decimal_separator": {
+          "maxLength": 1,
+          "minLength": 1,
+          "type": "string"
+        },
+        "delimiter": {
+          "maxLength": 1,
+          "minLength": 1,
+          "type": "string"
+        },
+        "file": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "kind": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "path": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "sheet": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "subcolumn_mode": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "tsv": {
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "title": "BatchInput",
+      "type": "object"
+    }
+  },
+  "$id": "https://lumencraft.dev/schemas/batch-v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Draft 2020-12 schema for lumencraft.batch.v1 headless batch manifests.",
+  "not": {
+    "required": [
+      "template",
+      "project"
+    ]
+  },
+  "properties": {
+    "commands": {
+      "items": {
+        "$ref": "#/$defs/BatchCommand"
+      },
+      "type": "array"
+    },
+    "exports": {
+      "items": {
+        "$ref": "#/$defs/BatchExport"
+      },
+      "type": "array"
+    },
+    "inputs": {
+      "items": {
+        "$ref": "#/$defs/BatchInput"
+      },
+      "type": "array"
+    },
+    "project": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "schema": {
+      "const": "lumencraft.batch.v1",
+      "type": "string"
+    },
+    "template": {
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema"
+  ],
+  "title": "BatchManifestV1",
+  "type": "object"
+}

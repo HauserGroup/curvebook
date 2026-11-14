@@ -1,0 +1,104 @@
+{
+  "$defs": {
+    "SheetId": {
+      "minLength": 1,
+      "title": "SheetId",
+      "type": "string"
+    },
+    "SheetManifestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "crc32": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "csv_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "section": {
+          "$ref": "#/$defs/SheetSection"
+        },
+        "title": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "section",
+        "title",
+        "csv_path",
+        "crc32"
+      ],
+      "title": "SheetManifestEntry",
+      "type": "object"
+    },
+    "SheetSection": {
+      "enum": [
+        "Data",
+        "Info",
+        "Analyses",
+        "Graphs",
+        "Layouts"
+      ],
+      "type": "string"
+    }
+  },
+  "$id": "https://lumencraft.dev/schemas/archive-manifest.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Draft 2020-12 schema for LumenCraft .lumencraft / .lctemplate archive manifest.json files.",
+  "properties": {
+    "document_crc32": {
+      "maximum": 4294967295,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "format": {
+      "const": "lumencraft-archive",
+      "type": "string"
+    },
+    "kind": {
+      "enum": [
+        "Project",
+        "Template"
+      ],
+      "type": "string"
+    },
+    "schema_version": {
+      "maximum": 1,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sheets": {
+      "items": {
+        "$ref": "#/$defs/SheetManifestEntry"
+      },
+      "type": "array"
+    },
+    "title": {
+      "maxLength": 4096,
+      "type": "string"
+    }
+  },
+  "required": [
+    "format",
+    "schema_version",
+    "kind",
+    "title",
+    "document_crc32",
+    "sheets"
+  ],
+  "title": "ArchiveManifest",
+  "type": "object"
+}

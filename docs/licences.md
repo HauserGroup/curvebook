@@ -1,0 +1,48 @@
+# Licence & Attribution Policy
+
+LumenCraft is dual-licensed under **`MIT OR Apache-2.0`** ([Cargo.toml](../Cargo.toml)). Every dependency, asset, sample dataset, and contribution must remain compatible with this licence without introducing copyleft restrictions.
+
+---
+
+## 1. Crate Dependency Allowlist
+
+Only permissive, copy-left-free SPDX licences listed below are permitted for Rust crate dependencies across the workspace:
+
+| SPDX Identifier | Scope | Notes |
+| :--- | :--- | :--- |
+| `MIT` | Code dependencies | Standard permissive licence |
+| `Apache-2.0` | Code dependencies | Includes patent grant; check `NOTICE` propagation where present |
+| `BSD-2-Clause` | Code dependencies | Permissive 2-clause BSD |
+| `BSD-3-Clause` | Code dependencies | Permissive 3-clause BSD |
+| `ISC` | Code dependencies | Permissive ISC |
+| `Zlib` | Code dependencies | Permissive zlib compression/graphics crates |
+| `Unicode-3.0` | Unicode / ICU tables | Approved Unicode Consortium data/code licence |
+| `CC0-1.0` | Public-domain dedications | Public-domain equivalent crates/tables |
+
+### Prohibited Licences
+- **All copyleft licences are strictly banned** in runtime and build dependencies: `GPL-*`, `AGPL-*`, `LGPL-*` (regardless of version or "with classpath exception" variants), as well as clean-room ports/translations from copyleft projects ([AGENTS.md](../AGENTS.md)).
+- Any SPDX identifier not listed in the allowlist above requires explicit maintainer audit and update to `deny.toml` and this file before `Cargo.lock` may introduce it.
+
+---
+
+## 2. Asset & Corpus Licences
+
+Every non-code asset (icons, SVGs, cursor bitmaps, sample `.csv`/`.lumencraft`/reference fixtures) must record its source and SPDX licence in [ASSETS.md](../ASSETS.md) (and [ATTRIBUTION.md](../ATTRIBUTION.md) for third-party works). Allowed asset/data licences include:
+- `MIT`, `Apache-2.0`, `CC0-1.0`, `LicenseRef-Public-Domain` (e.g., NIST StRD statistical reference datasets)
+- `CC-BY-4.0` and `CC-BY-SA-4.0` (where attribution is recorded in `ATTRIBUTION.md` and content remains separate from MIT/Apache-2.0 source code)
+- `OFL-1.1`, `Ubuntu-font-1.0`, `Bitstream-Vera` (documentation/attribution references only; binary font files are **never** tracked in the git repository—see the zero-bundled-font rule in [AGENTS.md](../AGENTS.md))
+
+---
+
+## 3. Enforcement, Manifests, and Shipped Notice Files
+
+| File / Tool | Role |
+| :--- | :--- |
+| `deny.toml` | Configuration for `cargo deny check licenses`, restricting allowed crate SPDX expressions and flagging unapproved or banned licences (`R0.5`). |
+| `about.toml` | `cargo-about` template configuration (paired with `about.hbs`) used to assemble bundled third-party crate licence disclosures (`R0.5`). |
+| `cargo xtask licenses` | Runs licence verification (`cargo deny check licenses`) and generates `THIRD-PARTY-LICENSES.html` from resolved dependencies (`R0.5`). |
+| `THIRD-PARTY-LICENSES.html` | Generated third-party Rust dependency licence compendium included in release packages and installers ([docs/releasing.md](releasing.md)). |
+| [ATTRIBUTION.md](../ATTRIBUTION.md) | Third-party icon, palette, data, and scientific reference credits shipped alongside releases and checked against [ASSETS.md](../ASSETS.md). |
+| [NOTICE](../NOTICE) | Apache-2.0 / ecosystem attribution notice included in source archives and release artefacts. |
+
+Run `cargo xtask assets` on every PR that adds assets, and `cargo xtask licenses` before releasing or changing `Cargo.lock`.

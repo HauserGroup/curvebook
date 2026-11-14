@@ -1,22 +1,28 @@
 # LumenCraft
 
+[![CI](https://github.com/lumencraft/lumencraft/actions/workflows/ci.yml/badge.svg)](https://github.com/lumencraft/lumencraft/actions/workflows/ci.yml)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#clean-room--licensing)
+[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](#quick-start)
+
+[Capabilities](#capabilities) · [Workspace](#workspace-layout) · [Downloads](#downloads) · [Quick Start](#quick-start) · [Docs](#documentation--implementation-guides) · [Clean-Room](#clean-room--licensing)
+
 <p align="center">
   <img src="assets/app-icon/hicolor/256x256/apps/org.lumencraft.LumenCraft.png" alt="LumenCraft logo: an engraved mole holding a prism that splits a beam of light into a spectrum" width="160">
 </p>
 
 **LumenCraft** is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written in pure Rust — designed for experimental scientists who work with structured replicate tables, linked statistical analyses, curve fitting, and publication-ready figures on desktop and the web.
 
-> **Status:** Headless engine (`75` commands), statistical/fitting/graphing libraries (`< 50 ms` `96`-curve 4PL batch solve at `22.669 ms` fit / `26.25 ms` total `--release`), `%PDF-1.7` + optional `/FontFile2` SFNT embedding, WAL crash recovery, `Slice 0` CLI, MCP server (`17` synced `UI_COMMANDS`), `--control` binary protocol, `16`-locale localization (`2,672` translations + RTL `ar`/`he` BiDi/mirroring), Risk Spikes `S1`/`S2` (**GO**), and the pure-Rust `UiApp` UI state shell & software RGBA/PNG compositor are landed across the 21-member layered workspace (`17` library crates `L0`–`L7`, `3` apps, `xtask`; `602` unit/integration + `4` doc tests passing). Active remaining work focuses on live OS desktop `eframe`/`egui`/`wgpu` & `wasm32` UI hosting (`G6`), live PDF viewer TTF spot-check (`G5`), native OS vector pasteboard/print dialogs (`G11`), Tier-2/CJK desktop QA (`G13`), and `M7` release hardening (`37–60 h`). See [`ROADMAP.md`](ROADMAP.md) and [`docs/target-app-parity.md`](docs/target-app-parity.md).
+> **Status:** Headless engine, statistics, curve fitting, graphing, file formats, CLI/`--control`/MCP automation, `UiApp` state shell, and `QOL-1`–`QOL-11` engines are implemented and verified; live OS windowing and browser hosting remain in progress — see [`docs/STATUS.md`](docs/STATUS.md), [`docs/ROADMAP.md`](docs/ROADMAP.md), and [`docs/target-app-parity.md`](docs/target-app-parity.md) (generated `docs/commands.md` follows `R0.7`).
 
 ---
 
-## Capabilities & Roadmap Scope
+## Capabilities
 
-- **Structured scientific data tables** — Eight table archetypes tailored to experimental designs rather than untyped cells: **XY** (with replicate subcolumns or precomputed SD/SEM/CI), **Column**, **Grouped** (two-way factorial), **Contingency**, **Survival** (time-to-event + censoring), **Parts of Whole**, **Multiple Variables**, and **Nested** (hierarchical subcolumns).
-- **Reactive analysis DAG** — Analyses (`t`-tests, one-/two-/three-way ANOVA, mixed-effects models, nonparametric tests, multiplicity corrections, Kaplan–Meier & Cox survival, ROC curves, PCA, and nonlinear regression) link live to upstream data tables and automatically recompute downstream results and graphs when observations change or outliers are excluded.
-- **Nonlinear regression & curve fitting** — Dose–response (`log(agonist)` / `log(inhibitor)` 3PL, 4PL, 5PL, biphasic), enzyme kinetics (Michaelis–Menten, competitive/noncompetitive/uncompetitive/mixed inhibition, allosteric Hill), binding saturation & competition, exponential decay/association, polynomial, Gaussian/Lorentzian peaks, user-defined equations, parameter constraints, global shared-parameter fitting, robust regression, AICc / extra-sum-of-squares *F*-test model comparison, and profile-likelihood confidence bands.
-- **Publication-grade scientific graphing** — Scatter, line, dose–response curves with confidence/prediction bands, bar + individual replicate points, box-and-whisker, violin, volcano, Bland–Altman, Kaplan–Meier staircase with censored ticks and number-at-risk tables, heatmaps, discontinuous/broken axes, $\log_{10}$ / $\log_2$ / logit / probit scales, automatic pairwise significance brackets (`*`, `**`, `***`, *p*-values), and multi-panel figure **Layouts** exported cleanly to vector **SVG** and **PDF**.
-- **Automation-first headless CLI & MCP** — Every action in the GUI dispatches through a serializable engine command registry, exposed headlessly via `lumencraft-cli`, live TCP JSON-lines (`lumencraft --control <port>`), and Model Context Protocol (`lumencraft-cli mcp`) for reproducible pipelines and AI assistants.
+- **Structured scientific data tables** — Eight table archetypes tailored to experimental designs rather than untyped cells: **XY** (with replicate subcolumns or precomputed SD/SEM/CI), **Column**, **Grouped** (two-way factorial), **Contingency**, **Survival** (time-to-event + censoring), **Parts of Whole**, **Multiple Variables**, and **Nested** (hierarchical subcolumns), plus auditable exclusion notes and non-destructive archetype conversion.
+- **Reactive analysis DAG** — Analyses (`t`-tests, one-/two-/three-way & multifactor ANOVA, REML mixed-effects models, nonparametric tests, multiplicity corrections, Kaplan–Meier & Cox PH survival, contingency/method comparison, ROC curves, GLMs, PCA, and nonlinear regression) link live to upstream data tables and recompute downstream results and graphs automatically.
+- **Nonlinear regression & curve fitting** — Dose–response (3PL/4PL/5PL, biphasic), enzyme kinetics, receptor binding, exponential/growth/peak/wave equations, custom algebraic/implicit/RK45 ODE bytecode equations, parameter constraints, global shared-parameter fitting, robust/ROUT regression, AICc / extra-SS *F* / likelihood-ratio model comparison, and profile-likelihood confidence intervals.
+- **Publication-grade scientific graphing** — Scatter, dose–response with confidence/prediction bands, bar + replicate points, box/violin, volcano, Bland–Altman, Kaplan–Meier with censored ticks and number-at-risk tables, multivariable bubble/ellipse/hull plots, broken/nonlinear axes, auto-stacked live pairwise *p*/*q* brackets, two-way data-to-graph point brushing, CVD preview, journal figure presets, and multi-panel **Layouts** exported cleanly to SVG, `%PDF-1.7` + `/FontFile2`, PNG, Deflate/LZW TIFF, and ECMA-234 `.emf`.
+- **Automation-first headless CLI, `--control` & MCP** — Every action in the GUI dispatches through a serializable engine command registry, exposed headlessly via `lumencraft-cli`, live TCP JSON-lines (`lumencraft --control <port>`), and Model Context Protocol (`lumencraft-cli mcp`) for reproducible pipelines and AI assistants.
 
 ---
 
@@ -25,31 +31,46 @@
 ```text
 lumencraft/
 ├── crates/
+│   ├── platform/    # L0: Atomic file writes, deadline-bounded ProcessCommand, WorkdirGuard & PathResolver
 │   ├── math/        # L0: IEEE-754 helpers, special functions (beta/gamma/erf), dense linear algebra, RNG
 │   ├── palette/     # L0: OkLab/sRGB color math, colorblind-safe scientific palettes, CMYK/print helpers
 │   ├── doc/         # L1: Typed data tables, subcolumn schemas, analysis/graph/layout specs, SheetId DAG
-│   ├── transform/   # L2: Column transforms, normalization, baseline subtraction, row pruning/binning
-│   ├── stats/       # L2: Parametric/nonparametric tests, ANOVA, multiplicity, survival, contingency, ROC
-│   ├── fit/         # L2: Levenberg–Marquardt, robust/weighted NLLS, built-in & custom equation solvers
-│   ├── text/        # L2: Scientific label layout, sub/superscripts, Greek/math symbols, optional bundled fonts
+│   ├── transform/   # L2: Column transforms, normalization, baseline, plate/tidy reshape, archetype convert
+│   ├── stats/       # L2: Parametric/nonparametric tests, ANOVA/REML, survival/Cox, contingency, ROC, GLMs
+│   ├── fit/         # L2: Levenberg–Marquardt, robust/weighted NLLS, built-in & custom DSL/ODE solvers
+│   ├── text/        # L2: Scientific label layout, sub/superscripts, BiDi RTL, Greek/math symbols, TTF fonts
 │   ├── chart/       # L2: Axis scaling, broken axes, error bars, significance brackets, scene compilation
-│   ├── render/      # L3: CPU 2D chart & layout raster/PNG/TIFF renderer (wgpu GPU backend queued in G6)
-│   ├── format/      # L3: Native .lumencraft / .lctemplate archive + clean-room CSV/TSV/.pzfx/.prism I/O
+│   ├── render/      # L3: CPU 2D chart/layout raster/PNG/TIFF & ECMA-234 .emf renderer, CVD preview filter
+│   ├── format/      # L3: Native .lumencraft / .lctemplate / .lumencraft.d + CSV/TSV/.pzfx/.prism I/O
 │   ├── svg/         # L3: Publication SVG serializer
-│   ├── pdf/         # L3: Publication %PDF-1.7 (or 1.4) vector writer (optional /FontFile2 TTF embedding, Core-14 + outlined fallback)
+│   ├── pdf/         # L3: Publication %PDF-1.7 vector writer (optional /FontFile2 TTF embedding, Core-14 fallback)
 │   ├── tools/       # L4: Interactive table selection, graph annotation, bracket & layout tools
-│   ├── engine/      # L5: Project session, undo/redo journal, reactive recalculation DAG, command registry
-│   ├── ui-egui/     # L6: Pure-Rust UiApp state shell & software RGBA/PNG compositor (live OS/WASM egui/eframe hosting queued in G6)
-│   ├── mcp/         # L6: Stdio Model Context Protocol server over lumencraft-engine
+│   ├── engine/      # L5: Project session, bounded undo/redo, reactive DAG, Methods reports & command registry
+│   ├── ui-egui/     # L6: Pure-Rust UiApp state shell, HiDPI/RTL input, software RGBA compositor & QOL panels
+│   ├── mcp/         # L6: Stdio Model Context Protocol server over lumencraft-engine & UI_COMMANDS
 │   └── testkit/     # Dev-only numerical oracle assertions (NIST StRD), proptest strategies & builders
 ├── apps/
-│   ├── lumencraft/      # Native binary + --control JSONL server + portable/OS CLI adapters (live OS desktop windowing queued in G6)
-│   ├── lumencraft-cli/  # Headless batch runner, exporter, perf gate, and MCP server
-│   └── lumencraft-web/  # Browser WebAssembly app crate (Trunk + WebGPU/WebGL2 queued in G6; wasm32 sysroot external)
-├── xtask/           # Workspace quality gates, layer linter, clean-room/brand/asset checks, bundler
+│   ├── lumencraft/      # Native binary + --control JSONL server + OS/macOS pasteboard adapters (R8.3 GPU loop open)
+│   ├── lumencraft-cli/  # Headless batch runner, exporter, perf gate, checkpoints, and MCP server
+│   └── lumencraft-web/  # Client-side WASM WebWorkspaceHost crate (Trunk browser hosting queued in R8.4)
+├── xtask/           # Workspace quality gates, layer linter, clean-room/brand/asset/i18n checks, bundler
 ├── packaging/       # Signed installers & bundles (macOS DMG, Linux deb/rpm/AppImage/Flatpak, Windows MSI, Web)
-└── docs/            # Architecture, parity matrices, numerical verification & release guides
+└── docs/            # Roadmap, status, architecture, house guides, parity matrices & release guides
 ```
+
+---
+
+## Downloads
+
+Prebuilt release packages and checksums are published on [GitHub Releases](https://github.com/lumencraft/lumencraft/releases). Platform bundle layouts and signing/verification procedures are documented in [`docs/releasing.md`](docs/releasing.md).
+
+| Platform | Artifacts | Packaging Config / Notes |
+|---|---|---|
+| **macOS** (Apple Silicon & Intel) | Universal `.dmg` / `LumenCraft.app` + CLI tarball | [`packaging/macos/`](packaging/macos/) (`plutil` / `codesign` verify script) |
+| **Linux** (`x86_64` / `aarch64`) | `AppImage`, `.deb`, `.rpm`, `Flatpak` + CLI tarball | [`packaging/linux/`](packaging/linux/) (AppRun smoke test in CI) |
+| **Windows** (`x86_64`) | `.msi` installer + portable `.zip` | [`packaging/windows/`](packaging/windows/) |
+| **FreeBSD** (`x86_64`) | Portable tarball + desktop entry | [`packaging/freebsd/`](packaging/freebsd/) |
+| **Web (WASM)** | Client-side static bundle (zero server upload) | [`packaging/web/`](packaging/web/) (tracked under [`R8.4`](docs/ROADMAP.md#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting)) |
 
 ---
 
@@ -64,7 +85,7 @@ cargo xtask ci
 # Inspect workspace crate layers and line/test statistics
 cargo xtask stats
 
-# Run the desktop shell or headless CLI
+# Run the desktop/control binary or headless CLI
 cargo run -p lumencraft -- --help
 cargo run -p lumencraft-cli -- --help
 ```
@@ -73,13 +94,13 @@ cargo run -p lumencraft-cli -- --help
 
 ## Documentation & Implementation Guides
 
-- **Roadmap & Parity:** [`ROADMAP.md`](ROADMAP.md) · [`docs/target-app-parity.md`](docs/target-app-parity.md) · [`docs/gaps.md`](docs/gaps.md) · [`docs/roadmap.md`](docs/roadmap.md) · [`docs/qol-beyond-parity.md`](docs/qol-beyond-parity.md)
-- **Architecture & Engineering:** [`docs/architecture.md`](docs/architecture.md) · [`docs/development.md`](docs/development.md) · [`docs/releasing.md`](docs/releasing.md) · [`docs/contributors.md`](docs/contributors.md)
+- **Roadmap & Status:** [`docs/ROADMAP.md`](docs/ROADMAP.md) · [`docs/STATUS.md`](docs/STATUS.md) · [`docs/roadmap-history.md`](docs/roadmap-history.md) · [`docs/target-app-parity.md`](docs/target-app-parity.md) · [`docs/gaps.md`](docs/gaps.md) · [`docs/qol-beyond-parity.md`](docs/qol-beyond-parity.md)
+- **Engineering & Contributing:** [`AGENTS.md`](AGENTS.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`docs/architecture.md`](docs/architecture.md) · [`docs/development.md`](docs/development.md) · [`docs/extending.md`](docs/extending.md) · [`docs/pitfalls.md`](docs/pitfalls.md) · [`docs/command-ids.md`](docs/command-ids.md) · [`docs/file-formats.md`](docs/file-formats.md) · [`docs/licences.md`](docs/licences.md) · [`docs/releasing.md`](docs/releasing.md) · [`docs/contributors.md`](docs/contributors.md)
 - **Subsystem Implementation Guidelines:**
   - [`docs/data-tables-and-transforms.md`](docs/data-tables-and-transforms.md) — 8 data-table archetypes, subcolumns, exclusions, Info constants, Calculated Variables (`=`), and transforms
   - [`docs/statistics-implementation.md`](docs/statistics-implementation.md) — Special functions, *t*-tests, 1/2/3-way & Multifactor ANOVA, REML mixed models, multiplicity/FDR, survival, contingency, ROC & multivariate GLMs
   - [`docs/curve-fitting-implementation.md`](docs/curve-fitting-implementation.md) — Damped Levenberg–Marquardt, weighting, Cauchy robust & ROUT fitting, global parameters, profile-likelihood CIs, AICc/*F*-tests, equation library & custom equation VM
-  - [`docs/graphing-and-layouts.md`](docs/graphing-and-layouts.md) — `GraphSpec` scene compilation, nonlinear/broken axes, live pairwise *p*-value brackets, style cloning, Page Layouts & SVG/PDF/PNG/TIFF export
+  - [`docs/graphing-and-layouts.md`](docs/graphing-and-layouts.md) — `GraphSpec` scene compilation, nonlinear/broken axes, live pairwise *p*-value brackets, style cloning, Page Layouts & SVG/PDF/PNG/TIFF/`.emf` export
   - [`docs/scripting-and-automation.md`](docs/scripting-and-automation.md) · [`docs/control-protocol.md`](docs/control-protocol.md) · [`docs/mcp.md`](docs/mcp.md) — `.lctemplate` batch pipelines, CLI, `--control` TCP JSONL, and MCP server
 - **Domain Checklists:** [`stats-parity.md`](docs/stats-parity.md) · [`fitting-parity.md`](docs/fitting-parity.md) · [`graphing-parity.md`](docs/graphing-parity.md) · [`ui-parity.md`](docs/ui-parity.md) · [`file-format-parity.md`](docs/file-format-parity.md) · [`hardware-parity.md`](docs/hardware-parity.md) · [`localization-parity.md`](docs/localization-parity.md)
 
@@ -90,7 +111,7 @@ cargo run -p lumencraft-cli -- --help
 LumenCraft is a **100% clean-room implementation**:
 - Statistical and curve-fitting algorithms are derived strictly from peer-reviewed statistical literature, open textbooks, and validated against public reference datasets (such as the **NIST Statistical Reference Datasets (StRD)**).
 - No proprietary code, decompiled binaries, XML schemas, icons, equation libraries, or vendor-created sample files are used or committed.
-- Dual-licensed under **MIT OR Apache-2.0** ([`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE)). Dependency policy and third-party notices live in [`ATTRIBUTION.md`](ATTRIBUTION.md), [`NOTICE`](NOTICE), and [`ASSETS.md`](ASSETS.md).
+- Dual-licensed under **MIT OR Apache-2.0** ([`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE)). Dependency policy and third-party notices live in [`ATTRIBUTION.md`](ATTRIBUTION.md), [`NOTICE`](NOTICE), [`ASSETS.md`](ASSETS.md), and [`docs/licences.md`](docs/licences.md).
 
 ## Affiliation
 

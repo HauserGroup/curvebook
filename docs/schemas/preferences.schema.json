@@ -1,0 +1,36 @@
+{
+  "$id": "https://lumencraft.dev/schemas/preferences.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": true,
+  "description": "Draft 2020-12 schema for versioned user preferences files with forward-compatible extension fields.",
+  "properties": {
+    "locale": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "shortcuts": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "type": "object"
+    },
+    "theme": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "version": {
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "version"
+  ],
+  "title": "PreferencesFile",
+  "type": "object"
+}

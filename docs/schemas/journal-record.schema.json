@@ -1,0 +1,74 @@
+{
+  "$defs": {
+    "JournalLockLease": {
+      "additionalProperties": false,
+      "properties": {
+        "acquired_epoch_ms": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "format_version": {
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "owner_id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "ttl_ms": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "format_version",
+        "owner_id",
+        "acquired_epoch_ms",
+        "ttl_ms"
+      ],
+      "title": "JournalLockLease",
+      "type": "object"
+    },
+    "JournalOpRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "command_json": {},
+        "crc32": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "format_version": {
+          "maximum": 1,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "seq": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "format_version",
+        "seq",
+        "crc32",
+        "command_json"
+      ],
+      "title": "JournalOpRecord",
+      "type": "object"
+    }
+  },
+  "$id": "https://lumencraft.dev/schemas/journal-record.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Draft 2020-12 schema for crash-recovery ops.journal NDJSON lines and lumencraft.lock leases.",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/JournalOpRecord"
+    },
+    {
+      "$ref": "#/$defs/JournalLockLease"
+    }
+  ],
+  "title": "JournalPersistenceRecord"
+}

@@ -1,0 +1,533 @@
+{
+  "$defs": {
+    "ChecklistItem": {
+      "additionalProperties": false,
+      "properties": {
+        "assumption": {
+          "type": "string"
+        },
+        "diagnostic_metric": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "explanation": {
+          "type": "string"
+        },
+        "remediation": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/RemediationKind"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "status": {
+          "$ref": "#/$defs/ChecklistStatus"
+        }
+      },
+      "required": [
+        "assumption",
+        "status",
+        "diagnostic_metric",
+        "explanation"
+      ],
+      "title": "ChecklistItem",
+      "type": "object"
+    },
+    "ChecklistStatus": {
+      "enum": [
+        "Pass",
+        "Warn",
+        "Violated",
+        "Info"
+      ],
+      "title": "ChecklistStatus",
+      "type": "string"
+    },
+    "DataSheet": {
+      "additionalProperties": false,
+      "properties": {
+        "archetype": {},
+        "color_tag": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exclusion_notes": {
+          "items": {},
+          "type": "array"
+        },
+        "floating_notes": {
+          "items": {},
+          "type": "array"
+        },
+        "frozen": {
+          "type": "boolean"
+        },
+        "id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "info_sheet_id": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/SheetId"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "linked_regions": {
+          "items": {},
+          "type": "array"
+        },
+        "title": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "archetype",
+        "frozen",
+        "info_sheet_id",
+        "linked_regions",
+        "floating_notes",
+        "color_tag"
+      ],
+      "title": "DataSheet",
+      "type": "object"
+    },
+    "ErrorCategory": {
+      "enum": [
+        "input",
+        "state",
+        "format",
+        "io",
+        "policy",
+        "compute",
+        "internal"
+      ],
+      "title": "ErrorCategory",
+      "type": "string"
+    },
+    "ErrorCode": {
+      "enum": [
+        "bad_input",
+        "not_found",
+        "already_exists",
+        "conflict",
+        "frozen_sheet",
+        "cycle_detected",
+        "unsupported_format",
+        "unsupported_version",
+        "corrupt_data",
+        "io_error",
+        "path_escape",
+        "resource_limit",
+        "solver_failed",
+        "insufficient_data",
+        "cancelled",
+        "internal_panic",
+        "internal_error"
+      ],
+      "title": "ErrorCode",
+      "type": "string"
+    },
+    "GraphSheet": {
+      "additionalProperties": false,
+      "properties": {
+        "color_tag": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "floating_notes": {
+          "items": {},
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "initialized": {
+          "type": "boolean"
+        },
+        "spec": {},
+        "title": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "initialized",
+        "spec",
+        "floating_notes",
+        "color_tag"
+      ],
+      "title": "GraphSheet",
+      "type": "object"
+    },
+    "InfoSheet": {
+      "additionalProperties": false,
+      "properties": {
+        "color_tag": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "constants": {
+          "items": {},
+          "type": "array"
+        },
+        "floating_notes": {
+          "items": {},
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "linked_data_sheets": {
+          "items": {
+            "$ref": "#/$defs/SheetId"
+          },
+          "type": "array"
+        },
+        "notes_markdown": {
+          "type": "string"
+        },
+        "title": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "linked_data_sheets",
+        "constants",
+        "notes_markdown",
+        "floating_notes",
+        "color_tag"
+      ],
+      "title": "InfoSheet",
+      "type": "object"
+    },
+    "LayoutSheet": {
+      "additionalProperties": false,
+      "properties": {
+        "color_tag": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "floating_notes": {
+          "items": {},
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "spec": {},
+        "title": {
+          "maxLength": 4096,
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "title",
+        "spec",
+        "floating_notes",
+        "color_tag"
+      ],
+      "title": "LayoutSheet",
+      "type": "object"
+    },
+    "NamedCheckpoint": {
+      "additionalProperties": false,
+      "properties": {
+        "created_utc": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "id": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "name": {
+          "type": "string"
+        },
+        "note": {
+          "type": "string"
+        },
+        "snapshot_json": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "name",
+        "note",
+        "created_utc",
+        "snapshot_json"
+      ],
+      "title": "NamedCheckpoint",
+      "type": "object"
+    },
+    "RemediationKind": {
+      "enum": [
+        "WelchT",
+        "MannWhitneyU",
+        "WilcoxonSignedRank",
+        "OneSampleWilcoxon",
+        "WelchAnova",
+        "KruskalWallis",
+        "Friedman"
+      ],
+      "title": "RemediationKind",
+      "type": "string"
+    },
+    "ResultSheet": {
+      "additionalProperties": false,
+      "properties": {
+        "analysis": {},
+        "analyzable_data": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/DataSheet"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "checklist": {
+          "items": {
+            "$ref": "#/$defs/ChecklistItem"
+          },
+          "type": "array"
+        },
+        "color_tag": {
+          "anyOf": [
+            {},
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "fitted_curves": {
+          "items": {},
+          "type": "array"
+        },
+        "floating_notes": {
+          "items": {},
+          "type": "array"
+        },
+        "id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "pairwise_comparisons": {
+          "items": {},
+          "type": "array"
+        },
+        "scalars": {
+          "items": {},
+          "type": "array"
+        },
+        "status": {
+          "$ref": "#/$defs/ResultStatus"
+        },
+        "tabs": {
+          "items": {},
+          "type": "array"
+        }
+      },
+      "required": [
+        "id",
+        "analysis",
+        "status",
+        "analyzable_data",
+        "tabs",
+        "scalars",
+        "pairwise_comparisons",
+        "fitted_curves",
+        "checklist",
+        "floating_notes",
+        "color_tag"
+      ],
+      "title": "ResultSheet",
+      "type": "object"
+    },
+    "ResultStatus": {
+      "oneOf": [
+        {
+          "const": "Dirty",
+          "type": "string"
+        },
+        {
+          "const": "UpToDate",
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "Failed": {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "$ref": "#/$defs/ErrorCode"
+                },
+                "message": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "code",
+                "message"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "Failed"
+          ],
+          "type": "object"
+        }
+      ],
+      "title": "ResultStatus"
+    },
+    "SheetFolderKind": {
+      "enum": [
+        "Data",
+        "Info",
+        "Results",
+        "Graphs",
+        "Layouts"
+      ],
+      "title": "SheetFolderKind",
+      "type": "string"
+    },
+    "SheetId": {
+      "minLength": 1,
+      "title": "SheetId",
+      "type": "string"
+    },
+    "TableKind": {
+      "enum": [
+        "Xy",
+        "Column",
+        "Grouped",
+        "Contingency",
+        "Survival",
+        "PartsOfWhole",
+        "MultipleVariables",
+        "Nested"
+      ],
+      "title": "TableKind",
+      "type": "string"
+    }
+  },
+  "$id": "https://lumencraft.dev/schemas/project-document.v1.schema.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Canonical LumenCraft L1 ProjectDocument JSON schema (Draft 2020-12).",
+  "properties": {
+    "active_sheet_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SheetId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "checkpoints": {
+      "items": {
+        "$ref": "#/$defs/NamedCheckpoint"
+      },
+      "type": "array"
+    },
+    "data_sheets": {
+      "items": {
+        "$ref": "#/$defs/DataSheet"
+      },
+      "type": "array"
+    },
+    "family_anchor_sheet_id": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SheetId"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "graph_sheets": {
+      "items": {
+        "$ref": "#/$defs/GraphSheet"
+      },
+      "type": "array"
+    },
+    "info_sheets": {
+      "items": {
+        "$ref": "#/$defs/InfoSheet"
+      },
+      "type": "array"
+    },
+    "layout_sheets": {
+      "items": {
+        "$ref": "#/$defs/LayoutSheet"
+      },
+      "type": "array"
+    },
+    "result_sheets": {
+      "items": {
+        "$ref": "#/$defs/ResultSheet"
+      },
+      "type": "array"
+    },
+    "schema_version": {
+      "maximum": 1,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "title": {
+      "maxLength": 4096,
+      "type": "string"
+    }
+  },
+  "required": [
+    "schema_version",
+    "title",
+    "data_sheets",
+    "info_sheets",
+    "result_sheets",
+    "graph_sheets",
+    "layout_sheets",
+    "active_sheet_id",
+    "family_anchor_sheet_id"
+  ],
+  "title": "ProjectDocument",
+  "type": "object"
+}

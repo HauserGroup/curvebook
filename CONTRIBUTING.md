@@ -1,101 +1,83 @@
 # Contributing to LumenCraft
 
-Thank you for helping. This page tells you how to pick up work, what must never happen in this repository, and what a pull request needs before it can merge.
+Thank you for contributing to **LumenCraft**! This repository is built in Rust (`edition = "2024"`, `rust-version = "1.95"`) under `MIT OR Apache-2.0`.
 
-The rules of record are in [`AGENTS.md`](AGENTS.md). They apply equally to people and to AI agents. Where this page and `AGENTS.md` disagree, `AGENTS.md` wins.
+Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [docs/pitfalls.md](docs/pitfalls.md)—all engineering, clean-room, statistical, and verification rules apply equally to human contributors and AI coding agents.
 
-## Ways to help
+---
 
-You do not need to write Rust to be useful here.
+## 1. Where to Start
 
-- **Code:** take a step from the [execution order](docs/roadmap.md#execution-order).
-- **Reference values:** produce reference numbers for statistical methods that have no public benchmark yet. This needs R or SciPy and domain knowledge. See [Reference values](#reference-values).
-- **Review:** read open pull requests. Review, not writing code, limits how fast this project moves.
-- **Testing:** run the app or the CLI on data you own and report what breaks or looks wrong.
+- **Engineering & governance rules:** [AGENTS.md](AGENTS.md)
+- **Known pitfalls to avoid:** [docs/pitfalls.md](docs/pitfalls.md)
+- **How to add features cleanly:** [docs/extending.md](docs/extending.md)
+- **Current plan & claimable tasks (`R<m>.<n>`):** [docs/ROADMAP.md](docs/ROADMAP.md)
+- **Live project status & metrics:** [docs/STATUS.md](docs/STATUS.md)
+- **Build prerequisites & harnesses:** [docs/development.md](docs/development.md)
 
-## Before you start
+---
 
-1. Read [`AGENTS.md`](AGENTS.md), then [`ROADMAP.md`](ROADMAP.md) and the [execution order](docs/roadmap.md#execution-order).
-2. Pick work from the **current step** of the execution order, inside the scope of the next gate. Work the next gate does not need waits, however interesting it is.
-3. Before touching a crate, read its implementation guide in [`docs/`](docs/). The list is in [`docs/development.md`](docs/development.md#subsystem-implementation-guides).
+## 2. Rules Every PR Must Respect
 
-## Rules that cannot be broken
+1. **Strict clean-room development:** Never reference, reverse-engineer, copy UI/code/strings from, or use proprietary commercial statistical or curve-fitting applications as a source. Never depend on or translate copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) code. Write everything in LumenCraft's own words (`cargo xtask cleanroom` and `cargo xtask brands` verify this).
+2. **Never crash:** Workspace clippy lints deny `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`, and `unsafe_code`. Handle malformed files, empty selections, degenerate numerical inputs, and RPC/MCP calls via typed `Result` / `Option` errors and bounds-checked slices.
+3. **Statistical rigor & `D1` oracles:** Every routine in `crates/math`, `crates/stats`, `crates/fit`, and `crates/transform` must cite a peer-reviewed reference, document degenerate/edge cases, and validate against verified published/oracle datasets (such as NIST StRD) rather than unverified approximations.
+4. **Assets & zero bundled fonts:** Every asset added to the repository needs a row in [ASSETS.md](ASSETS.md) (and [ATTRIBUTION.md](ATTRIBUTION.md) if third-party). Never commit `.ttf`, `.otf`, `.woff`, or `.woff2` files (`cargo xtask assets`).
+5. **No `chrono` crate & no hardcoded prose counts:** Do not add `chrono` to `Cargo.toml` or hand-roll calendar math; use `std::time::SystemTime::UNIX_EPOCH` / `lumencraft-platform` timestamps (see [AGENTS.md](AGENTS.md)). Never hardcode volatile counts (commands, tests, lines) in prose outside machine-checked/generated files (`docs/STATUS.md`, `docs/commands.md`).
+6. **Permissive licences only:** New dependencies must conform to the allowlist in [docs/licences.md](docs/licences.md).
 
-These protect the project's legal standing and its users' data. A pull request that breaks one will be closed.
+---
 
-- **Clean room.** Never launch, script, screenshot, or measure GraphPad Prism or any Dotmatics application for this project, and never compare our output against it. Never read or copy anything from an installation of it, and never commit files it produced. Behaviour comes from public documentation, textbooks, and peer-reviewed methods, cited by URL or reference.
-- **No copyleft code.** Never copy or port GPL, AGPL, or LGPL source (R's `stats`, the GNU Scientific Library, JASP, PSPP, and similar). Dependencies and assets must be on the [licence allowlist](AGENTS.md#licence-allowlist).
-- **No panics in shipped code.** Fallible work returns `Result` or `Option`. `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!`, and `unimplemented!` are banned outside tests, and so is unchecked indexing on data from files, parameters, or messages. See [why and how](docs/development.md#robustness-lumencraft-never-crashes).
-- **Every asset is attributed.** A new asset file needs a row in [`ASSETS.md`](ASSETS.md), and in [`ATTRIBUTION.md`](ATTRIBUTION.md) when it is third-party. Font files are never committed.
-- **No secrets or personal details** in the repository, logs, issues, or requests to outside services. Do not attach unpublished or confidential research data to an issue.
+## 3. Claiming Work in `docs/ROADMAP.md`
 
-## Claiming work
+1. Browse [docs/ROADMAP.md](docs/ROADMAP.md) for an unclaimed `Owner: open` task (`R<m>.<n>`), and check open PRs/issues so nobody duplicates work.
+2. Claim the item first in `docs/ROADMAP.md` (and/or an issue referencing its `R<m>.<n>` ID) before branching.
+3. Keep each PR focused on a single `R<m>.<n>` task whenever practical.
+4. If you step away before finishing, unclaim the task in `docs/ROADMAP.md` or on the issue so others can pick it up cleanly.
 
-1. Find or open the issue for the step or gap you want.
-2. Search open pull requests and recent commits on `main` for the same work.
-3. Comment on the issue to claim it **before** you start.
-4. If you stop, say so on the issue so someone else can take it.
+---
 
-## Setting up
+## 4. Branching, Editing & Pull Requests
 
-You need Rust 1.95 or later. Optional tools and the full command list are in [`docs/development.md`](docs/development.md).
+1. **Read first:** [AGENTS.md](AGENTS.md), [docs/pitfalls.md](docs/pitfalls.md), [docs/extending.md](docs/extending.md), and the relevant guide ([docs/command-ids.md](docs/command-ids.md), [docs/file-formats.md](docs/file-formats.md), [docs/licences.md](docs/licences.md)).
+2. **Branch name:** Prefix with one of `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`, `chore/`, or `audit/` and include the roadmap ID (`R<m>.<n>`):
+   ```sh
+   git checkout -b feature/R0.10-atomic-platform-writes
+   ```
+3. **Regenerate derived files when touching source registries/schemas:**
+   - UI commands (`UI_COMMANDS`) -> `cargo xtask ui-commands`
+   - Engine / UI command catalog -> `cargo xtask commands` *(R0)*
+   - Persisted schemas -> `cargo xtask schemas` *(R0)*
+   - Windows icons -> `cargo xtask ico`
+4. **Pull request title & merge policy:** PRs are **squash-merged**. Use a plain-English PR title **ending with `(R<m>.<n>)`**, for example:
+   `Use atomic temp-and-rename saves via lumencraft-platform (R0.10)`
+5. **Before you finish:** Fill out [.github/pull_request_template.md](.github/pull_request_template.md) honestly and pass the verification suite:
+   ```sh
+   cargo fmt --all -- --check
+   cargo clippy --workspace --all-targets -- -D warnings
+   cargo xtask test
+   cargo xtask layers
+   cargo xtask assets
+   cargo xtask brands
+   cargo xtask cleanroom
+   cargo xtask cursors
+   cargo xtask ui-commands --check
+   cargo xtask wasm
+   # Plus R0 gates where active on your branch:
+   # cargo xtask secrets && cargo xtask commands --check && cargo xtask schemas --check && cargo xtask status && cargo xtask pending
+   ```
+   Or run `cargo xtask ci` for the workspace gate bundle.
 
-```sh
-cargo xtask ci        # every quality gate; run before each commit
-cargo xtask test      # unit, integration and doc tests only
-cargo xtask corpus    # verify the NIST StRD reference corpus (--fetch to download it)
-```
+---
 
-`cargo xtask ci` runs formatting, clippy with warnings denied, tests, doctests, and the asset, brand, clean-room, cursor, UI-command, layer, and WebAssembly checks. The WebAssembly check is skipped locally when the `wasm32-unknown-unknown` target is not installed, and is enforced in CI.
+## 5. AI Coding Agents
 
-If several people or agents build in the same checkout, give each its own `CARGO_TARGET_DIR`.
+AI assistants working in this repository must read [AGENTS.md](AGENTS.md) and [CLAUDE.md](CLAUDE.md) (which pulls in [docs/pitfalls.md](docs/pitfalls.md)) before making edits, respect non-overlapping crate ownership (`CARGO_TARGET_DIR` isolation for parallel agents), and never invent unimplemented abstractions in docs or skip failed checks.
 
-## Making a change
+---
 
-- **Keep it narrow.** One gap or one step per pull request. Fix what the issue describes, where the problem is.
-- **Test it.** A bug fix adds a test that fails without the fix. A statistical test or curve-fitting model is checked against an analytical solution or a named reference, with an explicit tolerance.
-- **Name the oracle.** A numerical pull request says which reference each test uses. The accepted references are listed under [verification oracles](docs/roadmap.md#verification-oracles).
-- **Everything is a command.** User-visible behaviour is a `CommandSpec` in `crates/engine` with tests. The UI stays thin and acts through commands.
-- **Respect the layers.** `cargo xtask layers` rejects upward dependencies. See [`docs/architecture.md`](docs/architecture.md).
-- **Update the docs in the same pull request** when a task lands: the roadmap files, the gap list, and the relevant parity checklist. `AGENTS.md` lists them.
-- **Read a guard before changing it.** A check that looks removable says what it prevents.
+## 6. Licensing, Attribution & Security
 
-## Pull requests
-
-- `main` changes only through a pull request. Do not push to it.
-- Fill in the [pull request template](.github/pull_request_template.md). Say what you tested and what you could not run.
-- Review your own diff first: identifiers exist as used, nothing unrelated changed, and the description is true.
-- Pull requests are squash-merged, and the pull request title becomes the commit title. Start it with the task id, for example `G3: paired t-test with effect sizes` or `docs: clarify corpus fetch`.
-- Keep changes to CI workflows in their own pull request unless the change requires them.
-- Answer review feedback, or say that you cannot. Do not stack new work in a crate while an earlier pull request there is unreviewed.
-
-More detail is in the [landing rules](docs/roadmap.md#landing-rules).
-
-## Using AI agents
-
-Agents are welcome, and the same rules apply to them.
-
-- **A person is accountable.** Whoever runs an agent answers for what it opens and for its review comments.
-- **Report only what ran.** If the agent could not build or test locally, the pull request says so and relies on CI.
-- **No agent attribution.** A pull request does not say that an agent wrote it.
-
-## Reference values
-
-Many statistical methods have no public benchmark dataset. For those, reference values produced by open-source statistical software such as R or SciPy may be committed as test fixtures. The limits are in the clean-room section of [`AGENTS.md`](AGENTS.md); in short:
-
-- Run the software only as a black box. Never read or port its source.
-- Use synthetic data, NIST StRD data, or data from a cited publication.
-- Record the software and package, the version, the exact call, and the date next to the values.
-- The software never becomes a build, test, or CI dependency.
-
-## Licensing of contributions
-
-LumenCraft is dual-licensed under [MIT](LICENSE-MIT) or [Apache-2.0](LICENSE-APACHE), at the user's option. Unless you state otherwise, any contribution you intentionally submit for inclusion is licensed the same way, without additional terms or conditions.
-
-## Credits
-
-The About window lists contributors from generated commit statistics. To set how your name appears, or to opt out, see [`docs/contributors.md`](docs/contributors.md). Only edit your own entry.
-
-## Security
-
-Do not report a vulnerability in a public issue. See [`SECURITY.md`](SECURITY.md).
+- **Contributions:** All contributions are licensed under **`MIT OR Apache-2.0`** ([Cargo.toml](Cargo.toml)); see [docs/licences.md](docs/licences.md) for dependency and asset rules.
+- **Contributor credits:** Never omit or remove existing credits in [docs/contributors.md](docs/contributors.md), [ATTRIBUTION.md](ATTRIBUTION.md), or [NOTICE](NOTICE).
+- **Security issues:** Report vulnerabilities privately according to [SECURITY.md](SECURITY.md)—do not open public issues with exploit details.

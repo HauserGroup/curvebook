@@ -1,6 +1,6 @@
 name: Roadmap task
 description: A claimable piece of planned work - a step of the execution order, a risk spike, or part of a gap. Usually opened by a maintainer.
-title: "<task id>: "
+title: "<short plain-English title> (R<m>.<n>)"
 labels: ["help wanted"]
 body:
   - type: markdown
@@ -12,8 +12,8 @@ body:
     id: task-id
     attributes:
       label: Task id
-      description: The step, spike, or gap id from docs/roadmap.md or docs/gaps.md. Commits and the pull request title start with it.
-      placeholder: Slice 0, S1, or G3
+      description: The `R<m>.<n>` item id from `docs/ROADMAP.md`. Squash-merged pull request titles use plain English ending in `(R<m>.<n>)`.
+      placeholder: R0.8
     validations:
       required: true
   - type: dropdown

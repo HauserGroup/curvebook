@@ -1,32 +1,84 @@
 # Releasing LumenCraft
 
-Releases are built, signed, notarized, and drafted automatically by [`.github/workflows/release.yml`](../.github/workflows/release.yml) when commits are pushed to the `release` branch (with a nightly unsigned dry run on `main`).
+Releases are built and published by [.github/workflows/release.yml](../.github/workflows/release.yml) when a version tag (`vX.Y.Z`) is pushed, with packaging metadata linted continuously by [.github/workflows/packaging-lint.yml](../.github/workflows/packaging-lint.yml).
 
-## Version Source of Truth
+Single source of truth for the release version: `[workspace.package] version` in [Cargo.toml](../Cargo.toml), updated via `cargo xtask version`.
 
-The workspace version lives in one place: `[workspace.package] version` in the root [`Cargo.toml`](../Cargo.toml).
+---
 
-```sh
-# Print current version
-cargo xtask version
+## 1. Pre-Publish Package Verification
 
-# Bump version atomically and update Cargo.lock
-cargo xtask version set 0.2.0
-```
+Before tagging or publishing a release, verify both source invariants and packaging outputs across target platforms:
 
-## Release Artifacts
+1. **Workspace gates & licences:**
+   - Bump version cleanly: `cargo xtask version set <X.Y.Z>` (check synced outputs with `git diff`).
+   - Run licence compliance & regenerate licence compendium:
+     ```sh
+     cargo xtask licenses
+     ```
+     This verifies crates against [docs/licences.md](licences.md) (`deny.toml`) and builds `THIRD-PARTY-LICENSES.html` (`about.toml`).
+   - Run the full CI gate suite:
+     ```sh
+     cargo xtask ci
+     ```
+2. **Cross-platform packaging integrity scripts:**
+   - Shared packaging metadata / brand hygiene check (verifies `packaging/env.sh` values and rejects stale template placeholders):
+     ```sh
+     sh packaging/check-app-specific.sh
+     ```
+   - **macOS:** Build `.app` & verify `Info.plist`, codesign, and bundle invariants (`cargo xtask bundle` on macOS, plus package verification):
+     ```sh
+     sh packaging/macos/verify.sh
+     ```
+   - **Linux:** Verify `.AppImage` startup / AppRun execution before upload:
+     ```sh
+     sh packaging/linux/apprun-test.sh
+     ```
+   - **Windows:** Verify Windows `.ico` completeness (`cargo xtask ico` if regenerating) and WiX installer policy:
+     ```powershell
+     pwsh packaging/windows/check-icons.ps1
+     pwsh packaging/windows/check-install-policy.ps1
+     ```
 
-| Platform | Packaging Script | Artifacts |
-|---|---|---|
-| macOS (`universal`) | `packaging/macos/package.sh` | `lumencraft-<ver>-macos-universal.dmg`, `lumencraft-cli-<ver>-macos-universal.zip` |
-| Linux (`x86_64`, `aarch64`, `riscv64`) | `packaging/linux/package.sh`, `flatpak-bundle.sh` | `.AppImage` (+ `.zsync`), `.deb`, `.rpm`, `.tar.gz`, `.flatpak`, GHCR OCI |
-| Windows (`x64`, `x86`, `arm64`) | `packaging/windows/package.ps1` | `.msi` (WiX v5 dual-scope) + `-portable.zip` |
-| FreeBSD (`x86_64`, `aarch64`) | `packaging/freebsd/package.sh` | `lumencraft-<ver>-freebsd-<arch>.tar.gz` |
-| Web (WASM) | `packaging/web/package.sh` | `lumencraft-web-<ver>.zip` |
+*(Notes: `packaging/macos/verify.sh`, `packaging/linux/apprun-test.sh`, and `packaging/windows/check-icons.ps1` live under `packaging/` as part of `R0.14`; run `packaging-lint.yml` cleanly before tagging, and `.github/workflows/release.yml` runs the `licenses` job via `cargo about` with `cargo xtask licenses --html` fallback to ship `THIRD-PARTY-LICENSES.html`.)*
 
-## Pre-Release Checklist
+---
 
-1. `cargo xtask ci` passes cleanly.
-2. `packaging/check-app-specific.sh` passes.
-3. All new crates/dependencies satisfy [`ATTRIBUTION.md`](../ATTRIBUTION.md) license policy (`MIT`, `Apache-2.0`, `BSD`, `ISC`, `Zlib`, `Unicode-3.0`, `CC0-1.0`) and [`NOTICE`](../NOTICE) is up to date.
-4. Bump version via `cargo xtask version set X.Y.Z`, merge to `main`, and fast-forward `release` to trigger the signed release workflow.
+## 2. Shipped Release Artefacts
+
+Every tagged release distributes binaries and archives alongside licence disclosures and integrity checksums:
+
+| Platform | Artefact / Format | Builder / Config | Notes |
+| :--- | :--- | :--- | :--- |
+| **macOS** | Signed/universal `.dmg` installer (`x86_64` + `aarch64` `.app`) and macOS archive(s) | `packaging/macos/package.sh`, `Info.plist.in`, `entitlements.plist` | Verified via `cargo xtask bundle` (`plutil -lint`, ad-hoc/release `codesign`) and `packaging/macos/verify.sh`. |
+| **Linux** | `.AppImage` + `.AppImage.zsync`, `.deb`, `.rpm`, portable `.tar.gz` | `packaging/linux/package.sh` | AppImage tested via `packaging/linux/apprun-test.sh`; includes desktop entry, AppStream metadata, and MIME associations. |
+| **Linux (Flatpak / OCI)** | `.flatpak` bundle and GHCR OCI image (`org.lumencraft.LumenCraft`) | `packaging/linux/flatpak-bundle.sh`, `packaging/linux/flatpak-oci.sh`, `packaging/linux/flatpak/org.lumencraft.LumenCraft.yml` | Sandboxed desktop distribution matching `packaging/env.sh` App ID. |
+| **Windows** | WiX v5 `.msi` installer and `-portable.zip` standalone archive | `packaging/windows/package.ps1`, `packaging/windows/INSTALLATION.md` | Dual-scope MSI (`PerUser` default, optional `PerMachine`); static MSVC CRT; checked via `check-icons.ps1` & `check-install-policy.ps1`. |
+| **FreeBSD** | `.tar.gz` binary archive | `packaging/freebsd/package.sh` | Desktop & headless CLI archive for FreeBSD builds. |
+| **Web (WASM)** | Trunk `web-release` static `.zip` bundle | `packaging/web/package.sh` | Built targeting `wasm32-unknown-unknown` with relative (`./`) asset URLs; verified via `cargo xtask wasm`. |
+| **Compliance & Checksums** | **`THIRD-PARTY-LICENSES.html`**, `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`, `ATTRIBUTION.md`, `SHA256SUMS.txt` | `cargo xtask licenses` (`about.toml`) & release workflow | Bundled inside packages / release assets so every binary download includes complete third-party dependency & asset notices. |
+
+---
+
+## 3. App-Specific Packaging Notes
+
+- **Canonical identity (`packaging/env.sh`):** All installers share App ID `org.lumencraft.LumenCraft`, binary/CLI slug `lumencraft` / `lumencraft-cli`, and project/template/interchange file associations (`.lumencraft`, `.lctemplate`, `.pzfx`, `.prism`). `packaging/check-app-specific.sh` must pass cleanly without template leftover strings.
+- **Zero bundled fonts:** Packages do **not** embed binary fonts by default (`cargo xtask assets` rejects tracked `.ttf`/`.otf`/`.woff`/`.woff2`). Desktop releases resolve OS fonts at runtime (`LUMENCRAFT_FONTS_DIR` override); web tests using `bundled-fonts` require explicit local font staging (`cargo xtask web-fonts`) with matching licence notice rules ([docs/licences.md](licences.md)).
+- **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.lumencraft`, `.lctemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`.
+- **Linux specifics:** `packaging/linux/` installs desktop, AppStream, icon sizes, and MIME definitions consistently for `.AppImage`, `.deb`, `.rpm`, and Flatpak (`org.lumencraft.LumenCraft`).
+- **Windows specifics:** WiX v5 dual-scope MSI supports unprivileged per-user installation by default and elevated per-machine deployment ([packaging/windows/INSTALLATION.md](../packaging/windows/INSTALLATION.md)). Both `.msi` and `-portable.zip` link the static CRT to avoid external redistributable prompts.
+- **Web specifics:** Built via Trunk under `web-release` with relative root paths so bundles deploy cleanly on subpath hosts without rebuilding.
+
+---
+
+## 4. Closing Roadmap Items After Release
+
+Once the release build passes verification and is published:
+
+1. Mark all shipped `R<m>.<n>` items **Done** in [docs/ROADMAP.md](ROADMAP.md) (moving milestone archival notes to `docs/roadmap-history.md` if retiring a milestone phase).
+2. Refresh and verify [docs/STATUS.md](STATUS.md) and open-item summaries:
+   ```sh
+   cargo xtask status
+   cargo xtask pending
+   ```
+3. Confirm release notes link only verified changes, `THIRD-PARTY-LICENSES.html` and `SHA256SUMS.txt` are published cleanly alongside installers, and open issues closed by `(R<m>.<n>)` PRs are updated.
