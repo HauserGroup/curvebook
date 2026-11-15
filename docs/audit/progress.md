@@ -26,8 +26,8 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 10 | `S07` Engine | `crates/engine` | reviewing | 5/5/4/0 | — | 2026-11-15 |
 | 11 | `S10` UI shell | `crates/ui-egui` | done | 2/3/3/1 | 8/1/0/0 | 2026-11-15 |
 | 12 | `S12` CLI and MCP | `apps/lumencraft-cli`, `crates/mcp` | done | 4/2/3/1 | 10/0/0/0 | 2026-11-15 |
-| 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | verifying | 0/2/8/0 | — | 2026-11-15 |
-| 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | reviewing | — | — | 2026-11-15 |
+| 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | done | 0/2/8/0 | 9/1/0/0 | 2026-11-15 |
+| 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | reviewing | 0/0/0/0 | — | 2026-11-15 |
 | 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | reviewing | 2/3/0/0 | — | 2026-11-15 |
 
 Status values: `pending` → `reviewing` → `verifying` → `done`. Verdicts: C = CONFIRMED, P = PLAUSIBLE, R = REFUTED, D = DUPLICATE.
@@ -48,6 +48,7 @@ What each review actually read, so a later session can see what was and was not 
 | `S10` | see [`findings/S10.md`](findings/S10.md) › Scope read | — | reviewer: probe crate `probe-S10` (8 of 9 reproduced); verifier: `audit/r1/S10` `crates/ui-egui/tests/audit_r1_s10.rs`, HTTP-POST-shaped byte stream over real loopback TCP |
 | `S11` | see [`findings/S11.md`](findings/S11.md) › Scope read | — | slice tests pass; reviewer: `--control` probe + scratch engine crate; verifier: `audit/r1/S11` `apps/lumencraft/tests/audit_r1_s11.rs` (02, 05, 13 fail at base; rest traced) |
 | `S12` | see [`findings/S12.md`](findings/S12.md) › Scope read (two reviewer runs; the first was interrupted after 3 findings) | — | reviewer: probes against the CLI built at base; verifier: `audit/r1/S12` (`2c31ce1`) `apps/lumencraft-cli/tests/audit_r1_s12.rs`, 01–06 and 08 fail at base (02, 04, 06 also on the release binary) |
+| `S13` | see [`findings/S13.md`](findings/S13.md) › Scope read | — | reviewer: scratch probe crates (01–06, 08); verifier: `audit/r1/S13` guard-bypass probe files + `r1_s13_08_anova_huge_df_between_returns_error_not_panic` |
 | `S06` | see [`findings/S06.md`](findings/S06.md) › Scope read | — | `cargo test -p lumencraft-format` 43/43 pass; verifier: `audit/r1/S06` `crates/format/tests/audit_r1_s06.rs`, 5 fail at base (02, 03, 04, 06, 10) |
 
 ## Coordinator notes
@@ -63,6 +64,8 @@ What each review actually read, so a later session can see what was and was not 
 - **`main` moved past the base during the audit.** After `a993740`, ten commits landed on `main` (`7b5bafa`..`47704e8`, 214 files, including "stats/fit remediation" and "Koopman/pharma parity"). The audit stays at `ebcc622`. Verdict lines reading "Still present on main: yes (main == base)" were true when written; re-check each finding against current `main` before fixing it, since some may already be fixed or moved. Audit bookkeeping moved to its own worktree on branch `audit/r1-local-2` so it no longer shares the main checkout.
 
 - **R1-S10-02 severity (coordinator).** Kept at S1. The verifier left S2 open on the assumption that browsers block the vector, but they do not: a cross-origin `POST` with `Content-Type: text/plain` is a CORS "simple request", sent without a preflight. The page cannot read the response, but the command still runs. The verifier showed that the byte stream such a request produces executes its JSON body line over loopback TCP. Not demonstrated: driving a real browser.
+
+- **`audit/r1/S13` must never be pushed or merged.** To prove guard bypasses it commits synthetic files the guards should reject (a made-up copyright line, a UTF-16 file with a vendor format tag, a `Proprietary` row in the asset table). They hold no vendor content, but they exist only to defeat the guards.
 
 ## Confirmed and plausible findings
 
@@ -141,6 +144,8 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S11-06](findings/S11.md) | S2 | `LUMENCRAFT_NO_PREFS` and `LUMENCRAFT_CONFIG_DIR` are documented but never read, so "isolated" automation runs share the user's real recovery directory | CONFIRMED | trace | `S11` |
 | [R1-S12-05](findings/S12.md) | S2 | MCP `open_file {append: true}` reports the session clean and drops its undo history | CONFIRMED | test | `S12` |
 | [R1-S12-06](findings/S12.md) | S2 | An over-limit `Content-Length` frame ends the MCP server instead of being skipped, losing the session | CONFIRMED | test | `S12` |
+| [R1-S13-01](findings/S13.md) | S2 | `repo_files` silently drops every path that `git ls-files` quotes, so `assets`, `brands` and `cleanroom` never scan non-ASCII file names | CONFIRMED | trace | `S13` |
+| [R1-S13-02](findings/S13.md) | S2 | `cleanroom` misses the standard vendor copyright-notice forms and cannot see inside UTF-16 or compressed project files | CONFIRMED | trace | `S13` |
 | [R1-S01-04](findings/S01.md) | S3 | `cholesky` detects singularity only by `pivot <= 0`, so exactly collinear Gram matrices factor and invert to ~1e14 | CONFIRMED | test | `S01` |
 | [R1-S01-05](findings/S01.md) | S3 | Inverse incomplete gamma/beta solvers return the bracket midpoint as `Ok` after the iteration budget | CONFIRMED | test | `S01` |
 | [R1-S01-06](findings/S01.md) | S3 | `reg_beta_inv_pair` derives the second component as `1 − x`, losing all precision when the quantile is near 1 | CONFIRMED | test | `S01` |
@@ -181,6 +186,13 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S12-07](findings/S12.md) | S3 | MCP `export {format: "csv", tab_id}` ignores `tab_id` unless `tidy: false` is also passed | CONFIRMED | trace | `S12` |
 | [R1-S12-08](findings/S12.md) | S3 | `lumencraft-cli info` prints sheet titles raw, so an archive can send terminal escape sequences | CONFIRMED | test | `S12` |
 | [R1-S12-09](findings/S12.md) | S3 | MCP live-attach mode is unreachable, yet `command_list` advertises 17 UI commands that therefore always fail; if wired up, file tools would act on an empty local session | CONFIRMED | trace | `S12` |
+| [R1-S13-03](findings/S13.md) | S3 | `brands` skips most of a Rust file after any `#[cfg(test)]`, misses multi-line string literals, and silently skips non-UTF-8 files | CONFIRMED | trace | `S13` |
+| [R1-S13-05](findings/S13.md) | S3 | `assets` accepts any backticked mention without checking the licence, and its extension list misses cursor, font-collection and palette files | CONFIRMED | trace | `S13` |
+| [R1-S13-06](findings/S13.md) | S3 | `layers` matches UI crates by exact name on direct dependencies only, and lets path dependencies and exempt apps bypass its checks | CONFIRMED | trace | `S13` |
+| [R1-S13-07](findings/S13.md) | S3 | `cursors` never fails and checks only one direction, contrary to `AGENTS.md` and `docs/development.md` | CONFIRMED | trace | `S13` |
+| [R1-S13-08](findings/S13.md) | S3 | NIST ANOVA parser allocates `df_between + 1` bools taken from the file header, so a 247-byte `.dat` aborts or panics `cargo xtask corpus` | CONFIRMED | test | `S13` |
+| [R1-S13-09](findings/S13.md) | S3 | `corpus --fetch` overwrites the cached files before checking the pinned hashes, and records a manifest built from whatever was downloaded | CONFIRMED | trace | `S13` |
+| [R1-S13-10](findings/S13.md) | S3 | `i18n-report` (in `ci`) is a substring test filter; if it matches no test, the gate passes with 0 tests run | CONFIRMED | test | `S13` |
 | [R1-S06-07](findings/S06.md) | S3 | Stale-lock eviction is unlink-then-create: two concurrent recoverers can both acquire the lease | PLAUSIBLE | trace | `S06` |
 | [R1-S06-14](findings/S06.md) | S3 | Journal replay is unbounded in size and record count | PLAUSIBLE | trace | `S06` |
 | [R1-S10-03](findings/S10.md) | S3 | Control requests outside `Session::execute` run with no panic boundary; one concrete overflow in the layout badge compositor | PLAUSIBLE | test | `S10` |
@@ -190,3 +202,4 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S10-09](findings/S10.md) | S4 | Control-protocol docs and `UI_COMMANDS` parameter docs disagree with what the handlers accept and do | CONFIRMED | test | `S10` |
 | [R1-S11-13](findings/S11.md) | S4 | Startup environment and flags: a malformed `LUMENCRAFT_CONTROL_PORT` aborts a launch that never asked for control; `--new-instance` and paths beginning with `-` are not handled | CONFIRMED | test | `S11` |
 | [R1-S12-10](findings/S12.md) | S4 | Batch manifest schema in the scripting guide disagrees with the parser | CONFIRMED | trace | `S12` |
+| [R1-S13-04](findings/S13.md) | S4 | `brands` does not include the target product's own name, and does not cover user-facing files outside its narrow path list; such mentions ship today without `brand-ok` | PLAUSIBLE | trace | `S13` |
