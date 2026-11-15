@@ -9,10 +9,13 @@ use std::collections::{BTreeMap, HashSet};
 use lumencraft_doc::{ConstantValue, DataSheet, InfoConstant, InfoSheet, ProjectDocument, SheetId, SubcolumnMode, TableKind};
 
 use crate::archive::{migrate_document_json, validate_project_document};
-use crate::csv::{CsvOptions, import_csv_to_datasheet, parse_delimited_records};
+use crate::csv::{CsvOptions, import_csv_to_datasheet_with_budget, parse_delimited_records};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
-use crate::pzfx::import_pzfx_bytes;
+use crate::pzfx::import_pzfx_bytes_with_used_cells;
 use crate::zip::{ZipArchive, ZipLimits};
+
+/// Maximum cumulative dense `Cell` entries allocated across all tables of a `.prism` import.
+pub const MAX_PROJECT_CELLS: usize = crate::csv::MAX_IMPORT_CELLS;
 
 /// Optional metadata sidecar describing a tabular CSV sheet inside a `.prism` ZIP archive.
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -122,7 +125,8 @@ pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
         }
     }
 
-    // Second pass: parse CSV / TSV data tables.
+    // Second pass: parse CSV / TSV data tables while enforcing cumulative project cell budget.
+    let mut used_cells: usize = 0;
     let mut data_idx = 1_usize;
     for (path, payload) in archive.iter() {
         if handled_paths.contains(path) || !(path.ends_with(".csv") || path.ends_with(".tsv")) {
@@ -141,7 +145,9 @@ pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
             }
         };
         let meta = meta_by_csv.get(path).or_else(|| meta_by_stem.get(stem_without_ext(path))).cloned().unwrap_or_default();
-        let ds = import_csv_entry(path, text, &meta, data_idx, &mut used_ids, &mut warnings)?;
+        let remaining_cells = MAX_PROJECT_CELLS.saturating_sub(used_cells);
+        let ds = import_csv_entry(path, text, &meta, data_idx, &mut used_ids, &mut warnings, remaining_cells)?;
+        used_cells = accumulate_project_cells(used_cells, &ds)?;
         doc.add_data_sheet(ds)?;
         data_idx += 1;
     }
@@ -152,7 +158,7 @@ pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
             continue;
         }
         handled_paths.insert(path.to_owned());
-        merge_embedded_pzfx(payload, &mut doc, &mut used_ids, &mut warnings)?;
+        merge_embedded_pzfx(payload, &mut doc, &mut used_ids, &mut warnings, &mut used_cells)?;
     }
 
     // Third pass: warn on any unrecognized binary/script/other chunks without panicking.
@@ -194,6 +200,7 @@ fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<Impor
     };
     let migrated = migrate_document_json(val, version)?;
     let doc: ProjectDocument = serde_json::from_value(migrated)?;
+    doc.data_sheets.iter().try_fold(0_usize, accumulate_project_cells)?;
     validate_project_document(&doc)?;
 
     for (path, _) in archive.iter() {
@@ -216,13 +223,31 @@ fn stem_without_ext(path: &str) -> &str {
     path.rsplit_once('.').map_or(path, |(stem, _)| stem)
 }
 
+fn accumulate_project_cells(used_cells: usize, ds: &DataSheet) -> Result<usize, FormatError> {
+    let actual_cells = ds.archetype.allocated_cell_slots();
+    let next_total = used_cells.checked_add(actual_cells).ok_or_else(|| FormatError::InvalidPipeline {
+        reason: format!("sheet `{}` cell allocation overflows project budget cap ({MAX_PROJECT_CELLS})", ds.id),
+    })?;
+    if next_total > MAX_PROJECT_CELLS {
+        let remaining = MAX_PROJECT_CELLS.saturating_sub(used_cells);
+        return Err(FormatError::InvalidPipeline {
+            reason: format!(
+                "sheet `{}` cell allocation ({actual_cells}) exceeds remaining project import budget ({remaining}, cap {MAX_PROJECT_CELLS})",
+                ds.id
+            ),
+        });
+    }
+    Ok(next_total)
+}
+
 fn merge_embedded_pzfx(
     payload: &[u8],
     doc: &mut ProjectDocument,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
+    used_cells: &mut usize,
 ) -> Result<(), FormatError> {
-    let sub = import_pzfx_bytes(payload)?;
+    let sub = import_pzfx_bytes_with_used_cells(payload, used_cells)?;
     warnings.extend(sub.warnings);
     for mut info in sub.document.info_sheets {
         let idx = doc.info_sheets.len() + 1;
@@ -306,6 +331,7 @@ fn import_csv_entry(
     idx: usize,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
+    remaining_cells: usize,
 ) -> Result<DataSheet, FormatError> {
     let fallback_title = path.rsplit('/').next().map(stem_without_ext).filter(|s| !s.is_empty()).unwrap_or("Table");
     let id = allocate_unique_id(meta.id.as_deref(), "data", idx, used_ids);
@@ -327,7 +353,7 @@ fn import_csv_entry(
         opts.has_row_titles = true;
     }
 
-    import_csv_to_datasheet(SheetId::new(id), title, text, kind, subcolumn_mode, &opts)
+    import_csv_to_datasheet_with_budget(SheetId::new(id), title, text, kind, subcolumn_mode, &opts, remaining_cells)
 }
 
 fn csv_has_explicit_row_title_header(text: &str, kind: TableKind, opts: &CsvOptions) -> bool {

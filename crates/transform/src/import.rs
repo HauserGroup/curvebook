@@ -6,11 +6,14 @@ use std::collections::{BTreeMap, BTreeSet};
 use lumencraft_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource,
     LinkedDataRegion, NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn,
-    default_column_label, transpose_cell_grid, validate_data_sets,
+    default_column_label, transpose_cell_grid, validate_data_sets, validate_rows,
 };
 
 use crate::error::TransformError;
 use crate::formula::{ScalarEnv, eval_scalar_expr, parse_formula};
+
+/// Maximum total dense `Cell` slots allowed in a target sheet during transform/import placement.
+pub const MAX_IMPORT_CELLS: usize = 10_000_000;
 
 /// Optional post-filter transformations applied during Stage 2/3 of import.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
@@ -169,8 +172,10 @@ pub fn apply_import_link_pipeline(
     if spec.placement.propagate_title_header {
         let base_col = target_range.start.col;
         for (offset, hdr) in header_row.iter().enumerate() {
-            if let Some(title) = hdr.active_text() {
-                set_column_title_if_possible(&mut target.archetype, base_col + offset, title);
+            if let Some(title) = hdr.active_text()
+                && let Some(col) = base_col.checked_add(offset)
+            {
+                set_column_title_if_possible(&mut target.archetype, col, title);
             }
         }
     }
@@ -345,6 +350,9 @@ fn unstack_grid_by_group(grid: &[Vec<Cell>], group_col: usize) -> Result<(Vec<Ve
 
     let max_rows = buckets.values().map(Vec::len).max().unwrap_or(0);
     let cols = group_order.len();
+    validate_rows(max_rows)?;
+    validate_data_sets(cols)?;
+    check_transform_cell_budget(max_rows.checked_mul(cols), "unstacked grid")?;
     let mut out = vec![vec![Cell::empty(); cols]; max_rows];
     for (c, key) in group_order.iter().enumerate() {
         if let Some(vals) = buckets.get(key) {
@@ -450,15 +458,15 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
         _ => anchor.col,
     };
 
-    let needed_rows = start_row + grid.len();
-    ensure_sheet_rows(&mut target.archetype, needed_rows)?;
-
+    let needed_rows =
+        start_row.checked_add(grid.len()).ok_or_else(|| TransformError::InvalidSpec { message: String::from("target row offset overflow") })?;
     let max_row_width = grid.iter().map(Vec::len).max().unwrap_or(0);
+    let needed_cols = validate_grid_col_bounds(&target.archetype, start_col, anchor.subcol, max_row_width)?;
     if mode == PlacementMode::AppendColumns && max_row_width > 0 {
-        let (last_col, _) = resolve_target_coord(&target.archetype, start_col, anchor.subcol, max_row_width - 1);
-        let needed_cols = last_col + 1;
-        let min_rows = target.archetype.row_count().max(needed_rows);
+        let min_rows = existing_rows.max(needed_rows);
         ensure_sheet_columns(&mut target.archetype, needed_cols, min_rows)?;
+    } else {
+        ensure_sheet_rows(&mut target.archetype, needed_rows)?;
     }
 
     let mut max_col = start_col;
@@ -466,7 +474,7 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
     for (dr, row_cells) in grid.iter().enumerate() {
         let r = start_row + dr;
         for (dc, cell) in row_cells.iter().enumerate() {
-            let (col, subcol) = resolve_target_coord(&target.archetype, start_col, anchor.subcol, dc);
+            let (col, subcol) = resolve_target_coord(&target.archetype, start_col, anchor.subcol, dc)?;
             let coord = CellCoord::new(r, col, subcol);
             if let Some(slot) = target.archetype.data_cell_mut(coord) {
                 *slot = cell.clone();
@@ -489,22 +497,109 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
     Ok(SheetCellRange::new(CellCoord::new(start_row, start_col, anchor.subcol), CellCoord::new(start_row + grid.len() - 1, max_col, max_sub)))
 }
 
-fn resolve_target_coord(arch: &TableArchetype, base_col: usize, base_sub: usize, offset: usize) -> (usize, usize) {
-    let subs_per_col = match arch {
+fn subcolumns_per_data_column(arch: &TableArchetype) -> usize {
+    match arch {
         TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
         TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
         TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
         _ => 1,
-    };
+    }
+}
+
+fn validate_grid_col_bounds(arch: &TableArchetype, base_col: usize, base_sub: usize, width: usize) -> Result<usize, TransformError> {
+    let subs_per_col = subcolumns_per_data_column(arch).max(1);
+    let span = width.max(1);
+    let total_flat = base_col
+        .checked_mul(subs_per_col)
+        .and_then(|v| v.checked_add(base_sub))
+        .and_then(|v| v.checked_add(span))
+        .ok_or_else(|| TransformError::InvalidSpec { message: String::from("target column/subcolumn offset overflow") })?;
+    if width == 0 { Ok(arch.column_count()) } else { Ok(total_flat.div_ceil(subs_per_col)) }
+}
+
+fn resolve_target_coord(arch: &TableArchetype, base_col: usize, base_sub: usize, offset: usize) -> Result<(usize, usize), TransformError> {
+    let subs_per_col = subcolumns_per_data_column(arch);
     if subs_per_col <= 1 {
-        (base_col + offset, 0)
+        let col =
+            base_col.checked_add(offset).ok_or_else(|| TransformError::InvalidSpec { message: String::from("target column offset overflow") })?;
+        Ok((col, 0))
     } else {
-        let flat = base_sub + offset;
-        (base_col + flat / subs_per_col, flat % subs_per_col)
+        let flat =
+            base_sub.checked_add(offset).ok_or_else(|| TransformError::InvalidSpec { message: String::from("target subcolumn offset overflow") })?;
+        let col = base_col
+            .checked_add(flat / subs_per_col)
+            .ok_or_else(|| TransformError::InvalidSpec { message: String::from("target column offset overflow") })?;
+        Ok((col, flat % subs_per_col))
+    }
+}
+
+fn check_transform_cell_budget(total_cells: Option<usize>, context: &str) -> Result<(), TransformError> {
+    let total = total_cells
+        .ok_or_else(|| TransformError::InvalidSpec { message: format!("{context} cell allocation overflows budget cap {MAX_IMPORT_CELLS}") })?;
+    if total > MAX_IMPORT_CELLS {
+        return Err(TransformError::InvalidSpec {
+            message: format!("{context} cell allocation {total} exceeds import budget limit {MAX_IMPORT_CELLS}"),
+        });
+    }
+    Ok(())
+}
+
+fn sum_column_growth_cells(
+    col_dims: impl Iterator<Item = (usize, usize)>,
+    existing_cols: usize,
+    effective_cols: usize,
+    effective_rows: usize,
+    extra_col_subs: usize,
+    initial_cells: Option<usize>,
+) -> Result<(), TransformError> {
+    let mut total = initial_cells;
+    for (col_rows, col_subs) in col_dims {
+        let rows = col_rows.max(effective_rows);
+        let col_cells = rows.checked_mul(col_subs);
+        total = total.and_then(|acc| col_cells.and_then(|c| acc.checked_add(c)));
+        check_transform_cell_budget(total, "target sheet")?;
+    }
+    let extra_cols = effective_cols.saturating_sub(existing_cols);
+    if extra_cols > 0 {
+        let added = extra_cols.checked_mul(effective_rows).and_then(|v| v.checked_mul(extra_col_subs));
+        total = total.and_then(|acc| added.and_then(|c| acc.checked_add(c)));
+    }
+    check_transform_cell_budget(total, "target sheet")
+}
+
+fn validate_archetype_growth_budget(arch: &TableArchetype, min_cols: usize, min_rows: usize) -> Result<(), TransformError> {
+    let effective_rows = arch.row_count().max(min_rows);
+    validate_rows(effective_rows)?;
+    let effective_cols = arch.column_count().max(min_cols);
+    validate_data_sets(effective_cols)?;
+    let sum_ds = |data_sets: &[DataSetColumn], default_subs: usize, initial: Option<usize>| {
+        let dims = data_sets.iter().map(|ds| (ds.row_count(), ds.subcolumn_count().max(default_subs)));
+        sum_column_growth_cells(dims, data_sets.len(), effective_cols, effective_rows, default_subs, initial)
+    };
+    match arch {
+        TableArchetype::Xy(t) => {
+            let x_cells = t.x_cells.len().max(effective_rows).checked_mul(t.x_mode.subcolumn_count());
+            sum_ds(&t.data_sets, t.y_subcolumn_mode.subcolumn_count(), x_cells)
+        }
+        TableArchetype::Column(t) => sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0)),
+        TableArchetype::Grouped(t) => sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0)),
+        TableArchetype::Contingency(t) => sum_ds(&t.data_sets, 1, Some(0)),
+        TableArchetype::Survival(t) => sum_ds(&t.cohorts, 1, Some(t.times.len().max(effective_rows))),
+        TableArchetype::PartsOfWhole(t) => sum_ds(&t.data_sets, 1, Some(0)),
+        TableArchetype::MultipleVariables(mv) => {
+            let dims = mv.variables.iter().map(|v| (v.cells.len(), 1));
+            sum_column_growth_cells(dims, mv.variables.len(), effective_cols, effective_rows, 1, Some(0))
+        }
+        TableArchetype::Nested(t) => {
+            let extra_units = t.groups.first().map_or(1, NestedGroupColumn::biological_unit_count).max(1);
+            let dims = t.groups.iter().map(|g| (g.cells.len(), g.biological_unit_count()));
+            sum_column_growth_cells(dims, t.groups.len(), effective_cols, effective_rows, extra_units, Some(0))
+        }
     }
 }
 
 fn ensure_sheet_rows(arch: &mut TableArchetype, min_rows: usize) -> Result<(), TransformError> {
+    validate_archetype_growth_budget(arch, arch.column_count(), min_rows)?;
     match arch {
         TableArchetype::Xy(t) => {
             let x_subs = t.x_mode.subcolumn_count();
@@ -598,8 +693,8 @@ fn push_dataset_columns(cols: &mut Vec<DataSetColumn>, min_cols: usize, row_coun
 }
 
 fn ensure_sheet_columns(arch: &mut TableArchetype, min_cols: usize, min_rows: usize) -> Result<(), TransformError> {
-    validate_data_sets(min_cols)?;
     let row_count = arch.row_count().max(min_rows);
+    validate_archetype_growth_budget(arch, min_cols, row_count)?;
     ensure_sheet_rows(arch, row_count)?;
     match arch {
         TableArchetype::Xy(t) => push_dataset_columns(&mut t.data_sets, min_cols, row_count, t.y_subcolumn_mode.subcolumn_count())?,

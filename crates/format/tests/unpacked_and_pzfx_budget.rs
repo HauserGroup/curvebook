@@ -7,10 +7,12 @@ use lumencraft_doc::{
     LayoutItem, LayoutSheet, LayoutSpec, NamedCheckpoint, NonlinearFitSpec, ParameterRule, ParameterScope, ProjectDocument, RectPt,
     ResultScalarEntry, ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
+use lumencraft_format::prism::MAX_PROJECT_CELLS;
 use lumencraft_format::pzfx::MAX_IMPORT_CELLS;
+use lumencraft_format::zip::ZipWriter;
 use lumencraft_format::{
-    ArchiveKind, ArchiveManifest, FormatError, import_pzfx_str, is_unpacked_project_dir, open_project_bytes, open_project_unpacked_dir,
-    save_project_bytes, save_project_unpacked_dir, save_template_bytes,
+    ArchiveKind, ArchiveManifest, FormatError, import_prism_bytes, import_pzfx_str, is_unpacked_project_dir, open_project_bytes,
+    open_project_unpacked_dir, save_project_bytes, save_project_unpacked_dir, save_template_bytes,
 };
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -423,4 +425,84 @@ fn pzfx_multi_table_cell_budget_enforcement() {
     assert_eq!(import_pzfx_str(&xerr_single).unwrap().document.data_sheets[0].archetype.allocated_cell_slots(), 6_007_500);
     let xerr_double = format!("<?xml version=\"1.0\" encoding=\"UTF-8\"?><PrismFile><TableSequence>{t1}{xerr}</TableSequence></PrismFile>");
     assert!(matches!(import_pzfx_str(&xerr_double), Err(FormatError::XmlParse { .. })));
+}
+
+#[test]
+fn prism_multi_entry_cumulative_project_cell_budget_enforcement() {
+    assert_eq!(MAX_PROJECT_CELLS, MAX_IMPORT_CELLS);
+
+    // Compact XY CSV with 1 header row (`X` + 2,400 Y columns -> 48 data sets * 50 replicates) and 2,500 data rows:
+    // 2,500 * (1 + 48 * 50) = 6,002,500 dense cells (~10 KB CSV payload).
+    let mut xy_csv = format!("X{}\n", ",Y".repeat(2_400));
+    xy_csv.push_str(&"0\n".repeat(2_500));
+
+    let make_manifest = |entries: &[(&str, &str, &str, usize)]| {
+        let sheets_json: Vec<String> = entries
+            .iter()
+            .map(|(csv_path, kind, mode, reps)| {
+                format!("{{\"csv_path\":\"{csv_path}\",\"kind\":\"{kind}\",\"subcolumn_mode\":\"{mode}\",\"replicates\":{reps}}}")
+            })
+            .collect();
+        format!("{{\"title\":\"Budget Test\",\"sheets\":[{}]}}", sheets_json.join(","))
+    };
+
+    // Single XY CSV (6,002,500 <= MAX_PROJECT_CELLS) succeeds.
+    let mut single_zip = ZipWriter::new();
+    single_zip.add_file("manifest.json", make_manifest(&[("tables/t1.csv", "xy", "replicates", 50)]).into_bytes()).unwrap();
+    single_zip.add_file("tables/t1.csv", xy_csv.as_bytes().to_vec()).unwrap();
+    let single_report = import_prism_bytes(&single_zip.finish().unwrap()).unwrap();
+    assert_eq!(single_report.document.data_sheets[0].archetype.allocated_cell_slots(), 6_002_500);
+
+    // Two XY CSVs totaling 12,005,000 > MAX_PROJECT_CELLS must fail before allocating the second sheet.
+    let mut multi_xy_zip = ZipWriter::new();
+    multi_xy_zip
+        .add_file(
+            "manifest.json",
+            make_manifest(&[("tables/t1.csv", "xy", "replicates", 50), ("tables/t2.csv", "xy", "replicates", 50)]).into_bytes(),
+        )
+        .unwrap();
+    multi_xy_zip.add_file("tables/t1.csv", xy_csv.as_bytes().to_vec()).unwrap();
+    multi_xy_zip.add_file("tables/t2.csv", xy_csv.as_bytes().to_vec()).unwrap();
+    let multi_xy_err = import_prism_bytes(&multi_xy_zip.finish().unwrap()).unwrap_err();
+    assert!(
+        matches!(multi_xy_err, FormatError::CsvParse { ref reason, .. } if reason.contains("budget")),
+        "unexpected error for multi-CSV .prism over MAX_PROJECT_CELLS: {multi_xy_err:?}"
+    );
+
+    // Five smaller Column CSVs (1,000 cols * 2,500 rows = 2,500,000 cells each -> 12,500,000 total) must also fail cleanly.
+    let mut col_csv = format!("C0{}\n", ",C".repeat(999));
+    col_csv.push_str(&"1\n".repeat(2_500));
+    let mut five_col_zip = ZipWriter::new();
+    for i in 1..=5 {
+        five_col_zip.add_file(&format!("tables/col_{i}.csv"), col_csv.as_bytes().to_vec()).unwrap();
+    }
+    let five_col_err = import_prism_bytes(&five_col_zip.finish().unwrap()).unwrap_err();
+    assert!(
+        matches!(five_col_err, FormatError::CsvParse { ref reason, .. } if reason.contains("budget")),
+        "unexpected error for 5-CSV .prism over MAX_PROJECT_CELLS: {five_col_err:?}"
+    );
+
+    // Combined CSV (6,002,500) + embedded .pzfx (16,000 rows * 251 = 4,016,000) -> 10,018,500 > MAX_PROJECT_CELLS.
+    let surv_xml = format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><PrismFile><TableSequence>{}</TableSequence></PrismFile>",
+        build_large_survival_table_xml("s1", 16_000, 250)
+    );
+    let mut mixed_over_zip = ZipWriter::new();
+    mixed_over_zip.add_file("manifest.json", make_manifest(&[("tables/t1.csv", "xy", "replicates", 50)]).into_bytes()).unwrap();
+    mixed_over_zip.add_file("tables/t1.csv", xy_csv.as_bytes().to_vec()).unwrap();
+    mixed_over_zip.add_file("embedded/extra.pzfx", surv_xml.into_bytes()).unwrap();
+    let mixed_over_err = import_prism_bytes(&mixed_over_zip.finish().unwrap()).unwrap_err();
+    assert!(
+        matches!(mixed_over_err, FormatError::XmlParse { ref reason, .. } if reason.contains("budget") || reason.contains("cap")),
+        "unexpected error for CSV + PZFX .prism over MAX_PROJECT_CELLS: {mixed_over_err:?}"
+    );
+
+    // Combined CSV (6,002,500) + small embedded .pzfx (2 cells) succeeds within budget.
+    let small_pzfx = "<?xml version=\"1.0\" encoding=\"UTF-8\"?><PrismFile><Table ID=\"p1\" TableType=\"Column\"><Column><Subcolumn><d>1</d><d>2</d></Subcolumn></Column></Table></PrismFile>";
+    let mut mixed_ok_zip = ZipWriter::new();
+    mixed_ok_zip.add_file("manifest.json", make_manifest(&[("tables/t1.csv", "xy", "replicates", 50)]).into_bytes()).unwrap();
+    mixed_ok_zip.add_file("tables/t1.csv", xy_csv.into_bytes()).unwrap();
+    mixed_ok_zip.add_file("embedded/small.pzfx", small_pzfx.as_bytes().to_vec()).unwrap();
+    let mixed_ok = import_prism_bytes(&mixed_ok_zip.finish().unwrap()).unwrap();
+    assert_eq!(mixed_ok.document.data_sheets.len(), 2);
 }

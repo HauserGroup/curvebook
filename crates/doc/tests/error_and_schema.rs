@@ -1,9 +1,10 @@
 //! Verification tests for structured L1 error codes, `RemediationKind`, and Draft 2020-12 JSON Schema helpers (`C2`).
 
+use lumencraft_doc::layout::{LayoutItemLimitError, MAX_LAYOUT_ITEMS};
 use lumencraft_doc::{
-    ChecklistItem, ChecklistStatus, DRAFT_2020_12_SCHEMA_URI, ErrorCategory, ErrorCode, JsonSchema, PROJECT_DOCUMENT_SCHEMA_ID, ProjectDocument,
-    RemediationKind, ResultStatus, array_schema, bool_schema, enum_schema, integer_schema, number_schema, object_schema, project_document_schema,
-    string_schema,
+    ChecklistItem, ChecklistStatus, DRAFT_2020_12_SCHEMA_URI, ErrorCategory, ErrorCode, JournalWidthPreset, JsonSchema, LayoutItem, LayoutSpec,
+    PROJECT_DOCUMENT_SCHEMA_ID, ProjectDocument, RectPt, RemediationKind, ResultStatus, SheetId, array_schema, bool_schema, enum_schema,
+    integer_schema, number_schema, object_schema, project_document_schema, string_schema,
 };
 use serde_json::json;
 
@@ -121,4 +122,48 @@ fn schema_helpers_produce_valid_draft_2020_12_json() {
     assert!(doc_val["$defs"]["RemediationKind"]["enum"].as_array().expect("RemediationKind enum").len() == RemediationKind::ALL.len());
     assert!(doc_val["$defs"]["ChecklistItem"]["properties"]["remediation"].is_object());
     assert!(doc_val["$defs"]["ResultStatus"]["oneOf"].is_array());
+}
+
+#[test]
+fn layout_spec_enforces_max_layout_items_in_methods_and_serde() {
+    let mut spec = LayoutSpec::from_preset(JournalWidthPreset::DoubleColumn174Mm);
+    let make_callout = |i: usize| LayoutItem::TextCallout {
+        id: format!("c-{i}"),
+        markdown: format!("Note {i}"),
+        bounds_pt: RectPt::new(10.0, 10.0, 40.0, 20.0),
+        font_size_pt: 9.0,
+    };
+
+    for i in 0..MAX_LAYOUT_ITEMS {
+        spec.add_item(make_callout(i)).expect("items up to MAX_LAYOUT_ITEMS should be accepted");
+    }
+    assert!(spec.validate_item_count().is_ok());
+
+    let add_err = spec.add_item(make_callout(MAX_LAYOUT_ITEMS)).unwrap_err();
+    assert_eq!(add_err, LayoutItemLimitError { count: MAX_LAYOUT_ITEMS + 1, max: MAX_LAYOUT_ITEMS });
+    assert_eq!(spec.items.len(), MAX_LAYOUT_ITEMS);
+
+    let at_limit_json = serde_json::to_value(&spec).expect("serialize LayoutSpec at limit");
+    let decoded_ok: LayoutSpec = serde_json::from_value(at_limit_json).expect("deserialize LayoutSpec at limit");
+    assert_eq!(decoded_ok.items.len(), MAX_LAYOUT_ITEMS);
+
+    let extra_item = LayoutItem::LiveGraph {
+        id: String::from("overflow-panel"),
+        graph_sheet_id: SheetId::new("g-1"),
+        bounds_pt: RectPt::new(0.0, 0.0, 50.0, 50.0),
+        scale_percent: 100.0,
+        badge_override: None,
+    };
+    spec.items.push(extra_item);
+    assert_eq!(spec.validate_item_count(), Err(LayoutItemLimitError { count: MAX_LAYOUT_ITEMS + 1, max: MAX_LAYOUT_ITEMS }));
+
+    let over_limit_json = serde_json::to_value(&spec).expect("serialize over-limit LayoutSpec");
+    let serde_err = serde_json::from_value::<LayoutSpec>(over_limit_json).unwrap_err();
+    assert!(serde_err.to_string().contains(&MAX_LAYOUT_ITEMS.to_string()), "unexpected serde error: {serde_err}");
+
+    for i in (MAX_LAYOUT_ITEMS + 1)..500 {
+        spec.items.push(make_callout(i));
+    }
+    let burst_json = serde_json::to_value(&spec).expect("serialize 500-item LayoutSpec");
+    assert!(serde_json::from_value::<LayoutSpec>(burst_json).is_err());
 }

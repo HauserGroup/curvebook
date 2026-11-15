@@ -3,10 +3,11 @@ use std::collections::BTreeMap;
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable,
     DataSheet, DocError, ErrorPropagationMode, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet,
-    InternalLinkKind, LinkSource, MathTransformPreset, MultipleVariablesTable, NestedTable, NormalizeAnchor, PartsOfWholeTable, PlacementMode,
-    SheetCellRange, SheetId, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, TransformAnalysisSpec, VariableRole,
-    XColumnMode, XyTable,
+    InternalLinkKind, LinkSource, MAX_ROWS, MathTransformPreset, MultipleVariablesTable, NestedTable, NormalizeAnchor, PartsOfWholeTable,
+    PlacementMode, SheetCellRange, SheetId, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, TransformAnalysisSpec,
+    VariableRole, XColumnMode, XyTable,
 };
+use lumencraft_transform::import::MAX_IMPORT_CELLS;
 use lumencraft_transform::{
     AucOptions, BaselineKind, CurveSheetOp, DependencyTarget, DerivativeOrder, FormulaValue, ImportPipelineOptions, ImportSourcePayload,
     MathTransformOp, PruneMethod, ScalarEnv, SelectRule, SmoothMethod, TransformContext, TransformError, apply_curve_calculus_to_sheet,
@@ -1085,4 +1086,162 @@ fn append_columns_grows_all_remaining_archetypes() {
             assert_approx(sheet.cell(CellCoord::new(1, 2, 0)).unwrap().active_number().unwrap(), 44.0, 1e-12);
         }
     }
+}
+
+#[test]
+fn import_pipeline_enforces_anchor_overflow_and_max_rows_across_archetypes() {
+    let tiny_payload = ImportSourcePayload::DelimitedText { text: "42", delimiter: ',', decimal_separator: '.' };
+    let opts = ImportPipelineOptions::default();
+
+    // Anchor overflow (`usize::MAX` row / col / subcol) must fail cleanly without panicking or growing sheets.
+    let mut xy_sheet =
+        DataSheet::new("xy-ovf", "XY Overflow", TableArchetype::Xy(XyTable::new(SubcolumnMode::RawReplicates(2), 1, 1).unwrap())).unwrap();
+    for bad_anchor in [CellCoord::new(usize::MAX, 0, 0), CellCoord::new(0, usize::MAX, 0), CellCoord::new(0, 0, usize::MAX)] {
+        let spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: bad_anchor, ..ImportPlacementSpec::default() },
+        };
+        let err = apply_import_link_pipeline(&mut xy_sheet, &spec, tiny_payload.clone(), &opts, None).unwrap_err();
+        assert!(matches!(err, TransformError::InvalidSpec { .. }), "unexpected overflow error: {err:?}");
+        assert_eq!(xy_sheet.archetype.row_count(), 1);
+    }
+
+    // MAX_ROWS pre-allocation rejection on MultipleVariables and Nested (must NOT resize row_titles or cell vecs).
+    let row_cap_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: CellCoord::new(MAX_ROWS, 0, 0), ..ImportPlacementSpec::default() },
+    };
+
+    let mut mv_row_cap = DataSheet::new("mv-rows", "MV Rows", TableArchetype::MultipleVariables(MultipleVariablesTable::new(2, 1).unwrap())).unwrap();
+    let mv_row_err = apply_import_link_pipeline(&mut mv_row_cap, &row_cap_spec, tiny_payload.clone(), &opts, None).unwrap_err();
+    assert!(matches!(mv_row_err, TransformError::Doc(DocError::TooManyRows { .. })));
+    if let TableArchetype::MultipleVariables(mv) = &mv_row_cap.archetype {
+        assert_eq!(mv.row_titles.len(), 1);
+        assert_eq!(mv.variables[0].cells.len(), 1);
+    }
+
+    let mut nested_row_cap = DataSheet::new("nst-rows", "Nested Rows", TableArchetype::Nested(NestedTable::new(2, 2, 1).unwrap())).unwrap();
+    let nested_row_err = apply_import_link_pipeline(&mut nested_row_cap, &row_cap_spec, tiny_payload, &opts, None).unwrap_err();
+    assert!(matches!(nested_row_err, TransformError::Doc(DocError::TooManyRows { .. })));
+    if let TableArchetype::Nested(nst) = &nested_row_cap.archetype {
+        assert_eq!(nst.row_titles.len(), 1);
+        assert_eq!(nst.groups[0].cells.len(), 1);
+    }
+}
+
+#[test]
+fn import_pipeline_enforces_cell_budget_before_allocation_across_archetypes() {
+    assert_eq!(MAX_IMPORT_CELLS, 10_000_000);
+    let tiny_payload = ImportSourcePayload::DelimitedText { text: "42", delimiter: ',', decimal_separator: '.' };
+    let opts = ImportPipelineOptions::default();
+
+    // Grouped: 25 datasets * 16 replicates = 400 slots/row; 30,001 rows <= MAX_ROWS yet 12,000,400 cells > MAX_IMPORT_CELLS.
+    let mut grp_budget =
+        DataSheet::new("grp-budget", "Grouped Budget", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(16), 25, 1).unwrap()))
+            .unwrap();
+    let grp_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: CellCoord::new(30_000, 0, 0), ..ImportPlacementSpec::default() },
+    };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut grp_budget, &grp_spec, tiny_payload.clone(), &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    assert_eq!(grp_budget.archetype.row_count(), 1);
+
+    // Column (MeanSdN): 120 datasets * 3 subcolumns = 360 slots/row; 30,001 rows -> 10,800,360 cells > MAX_IMPORT_CELLS.
+    let mut col_budget = DataSheet::new(
+        "col-budget",
+        "Col Budget",
+        TableArchetype::Column(ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, 120, 1).unwrap()),
+    )
+    .unwrap();
+    assert!(matches!(
+        apply_import_link_pipeline(&mut col_budget, &grp_spec, tiny_payload.clone(), &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    assert_eq!(col_budget.archetype.row_count(), 1);
+
+    // MultipleVariables: 20 vars * 600,001 rows = 12,000,020 > MAX_IMPORT_CELLS.
+    let mut mv_budget =
+        DataSheet::new("mv-budget", "MV Budget", TableArchetype::MultipleVariables(MultipleVariablesTable::new(20, 1).unwrap())).unwrap();
+    let mv_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: CellCoord::new(600_000, 0, 0), ..ImportPlacementSpec::default() },
+    };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut mv_budget, &mv_spec, tiny_payload.clone(), &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    if let TableArchetype::MultipleVariables(mv) = &mv_budget.archetype {
+        assert_eq!(mv.row_titles.len(), 1);
+        assert_eq!(mv.variables[0].cells.len(), 1);
+    }
+
+    // Nested: 5 groups * 10 biological units = 50 units/row; 250,001 rows -> 12,500,050 > MAX_IMPORT_CELLS.
+    let mut nested_budget = DataSheet::new("nst-budget", "Nested Budget", TableArchetype::Nested(NestedTable::new(5, 10, 1).unwrap())).unwrap();
+    let nested_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: CellCoord::new(250_000, 0, 0), ..ImportPlacementSpec::default() },
+    };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut nested_budget, &nested_spec, tiny_payload, &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    if let TableArchetype::Nested(nst) = &nested_budget.archetype {
+        assert_eq!(nst.row_titles.len(), 1);
+        assert_eq!(nst.groups[0].cells.len(), 1);
+    }
+}
+
+#[test]
+fn import_pipeline_enforces_atomic_append_columns_and_unstack_cell_budget() {
+    let opts = ImportPipelineOptions::default();
+
+    // AppendColumns combined row+col growth exceeding MAX_IMPORT_CELLS must leave rows & cols completely unchanged.
+    let mut mv_append =
+        DataSheet::new("mv-app-cap", "MV Append Cap", TableArchetype::MultipleVariables(MultipleVariablesTable::new(10, 1).unwrap())).unwrap();
+    let append_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec {
+            mode: PlacementMode::AppendColumns,
+            anchor: CellCoord::new(600_000, 0, 0),
+            ..ImportPlacementSpec::default()
+        },
+    };
+    let ten_cols_payload = ImportSourcePayload::DelimitedText { text: "1,2,3,4,5,6,7,8,9,10", delimiter: ',', decimal_separator: '.' };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut mv_append, &append_spec, ten_cols_payload, &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    assert_eq!(mv_append.archetype.row_count(), 1);
+    assert_eq!(mv_append.archetype.column_count(), 10);
+
+    // Unstack producing > MAX_IMPORT_CELLS rejected before dense grid allocation.
+    let mut unstack_csv = String::new();
+    for g in 0..1_001 {
+        unstack_csv.push_str(&format!("G{g},1\n"));
+    }
+    for _ in 0..10_005 {
+        unstack_csv.push_str("G0,2\n");
+    }
+    let mut unstack_target =
+        DataSheet::new("unstack-cap", "Unstack", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
+            .unwrap();
+    let unstack_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec { unstack_group_column: Some(0), ..ImportFilterSpec::default() },
+        placement: ImportPlacementSpec::default(),
+    };
+    let unstack_payload = ImportSourcePayload::DelimitedText { text: &unstack_csv, delimiter: ',', decimal_separator: '.' };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut unstack_target, &unstack_spec, unstack_payload, &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
 }

@@ -23,12 +23,23 @@ pub const MAX_IMPORT_CELLS: usize = crate::csv::MAX_IMPORT_CELLS;
 
 /// Import a `.pzfx` XML byte buffer into a [`ProjectDocument`] and compatibility warnings.
 pub fn import_pzfx_bytes(bytes: &[u8]) -> Result<ImportReport, FormatError> {
-    let text = std::str::from_utf8(bytes).map_err(|err| FormatError::XmlParse { offset: 0, reason: format!("invalid UTF-8 in XML: {err}") })?;
-    import_pzfx_str(text)
+    let mut used_cells = 0_usize;
+    import_pzfx_bytes_with_used_cells(bytes, &mut used_cells)
 }
 
 /// Import a `.pzfx` XML string into a [`ProjectDocument`] and compatibility warnings.
 pub fn import_pzfx_str(xml: &str) -> Result<ImportReport, FormatError> {
+    let mut used_cells = 0_usize;
+    import_pzfx_str_with_used_cells(xml, &mut used_cells)
+}
+
+/// Import `.pzfx` bytes while charging allocated cells against an accumulated project total.
+pub(crate) fn import_pzfx_bytes_with_used_cells(bytes: &[u8], used_cells: &mut usize) -> Result<ImportReport, FormatError> {
+    let text = std::str::from_utf8(bytes).map_err(|err| FormatError::XmlParse { offset: 0, reason: format!("invalid UTF-8 in XML: {err}") })?;
+    import_pzfx_str_with_used_cells(text, used_cells)
+}
+
+pub(crate) fn import_pzfx_str_with_used_cells(xml: &str, used_cells: &mut usize) -> Result<ImportReport, FormatError> {
     let root = parse_xml(xml)?;
     let local = root.local_name();
     if !(local == "PrismFile" || local.ends_with("PrismFile")) {
@@ -46,7 +57,7 @@ pub fn import_pzfx_str(xml: &str) -> Result<ImportReport, FormatError> {
     let mut used_ids = HashSet::new();
 
     import_info_sections(&root, &mut doc, &mut used_ids, &mut warnings)?;
-    import_table_sections(&root, &mut doc, &mut used_ids, &mut warnings)?;
+    import_table_sections(&root, &mut doc, &mut used_ids, &mut warnings, used_cells)?;
     warn_ignored_sections(&root, &mut warnings);
 
     validate_project_document(&doc)?;
@@ -117,6 +128,7 @@ fn import_table_sections(
     doc: &mut ProjectDocument,
     used_ids: &mut HashSet<String>,
     warnings: &mut Vec<ImportWarning>,
+    total_cells: &mut usize,
 ) -> Result<(), FormatError> {
     let mut table_nodes: Vec<&XmlElement> = Vec::new();
     for seq in root.children_named("TableSequence") {
@@ -125,16 +137,15 @@ fn import_table_sections(
     table_nodes.extend(root.children_named("Table"));
 
     let primary_info = doc.info_sheets.first().map(|s| s.id.clone());
-    let mut total_cells: usize = 0;
     for (idx, table_el) in table_nodes.iter().enumerate() {
-        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings, total_cells)?;
+        let mut ds = parse_table_element(table_el, idx + 1, used_ids, warnings, *total_cells)?;
         let actual_cells = ds.archetype.allocated_cell_slots();
         let next_total = total_cells.checked_add(actual_cells).ok_or_else(|| FormatError::XmlParse {
             offset: 0,
             reason: format!("table `{}` cell allocation overflows budget cap ({MAX_IMPORT_CELLS})", ds.id),
         })?;
         if next_total > MAX_IMPORT_CELLS {
-            let remaining = MAX_IMPORT_CELLS.saturating_sub(total_cells);
+            let remaining = MAX_IMPORT_CELLS.saturating_sub(*total_cells);
             return Err(FormatError::XmlParse {
                 offset: 0,
                 reason: format!(
@@ -143,7 +154,7 @@ fn import_table_sections(
                 ),
             });
         }
-        total_cells = next_total;
+        *total_cells = next_total;
         if ds.info_sheet_id.is_none() {
             ds.info_sheet_id = primary_info.clone();
         }

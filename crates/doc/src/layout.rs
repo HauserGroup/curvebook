@@ -194,8 +194,26 @@ pub enum LayoutItem {
     TextCallout { id: String, markdown: String, bounds_pt: RectPt, font_size_pt: f64 },
 }
 
+/// Maximum number of items allowed in a single [`LayoutSpec`] page layout.
+pub const MAX_LAYOUT_ITEMS: usize = 64;
+
+/// Error returned when a [`LayoutSpec`] exceeds [`MAX_LAYOUT_ITEMS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutItemLimitError {
+    pub count: usize,
+    pub max: usize,
+}
+
+impl std::fmt::Display for LayoutItemLimitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "layout item count {} exceeds maximum allowed {}", self.count, self.max)
+    }
+}
+
+impl std::error::Error for LayoutItemLimitError {}
+
 /// Multi-panel publication layout specification.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LayoutSpec {
     pub width: f64,
     pub height: f64,
@@ -235,6 +253,24 @@ impl LayoutSpec {
         SizePt::new(self.unit.to_points(self.width), self.unit.to_points(self.height))
     }
 
+    /// Validate that [`Self::items`] does not exceed [`MAX_LAYOUT_ITEMS`].
+    pub fn validate_item_count(&self) -> Result<(), LayoutItemLimitError> {
+        if self.items.len() > MAX_LAYOUT_ITEMS {
+            return Err(LayoutItemLimitError { count: self.items.len(), max: MAX_LAYOUT_ITEMS });
+        }
+        Ok(())
+    }
+
+    /// Append a [`LayoutItem`] while enforcing [`MAX_LAYOUT_ITEMS`].
+    pub fn add_item(&mut self, item: LayoutItem) -> Result<(), LayoutItemLimitError> {
+        let next = self.items.len().saturating_add(1);
+        if next > MAX_LAYOUT_ITEMS {
+            return Err(LayoutItemLimitError { count: next, max: MAX_LAYOUT_ITEMS });
+        }
+        self.items.push(item);
+        Ok(())
+    }
+
     /// Collect all inline template hooks (`{{info:...}}`, `{{result:...}}`) in layout callouts.
     #[must_use]
     pub fn inline_hooks(&self) -> Vec<HookSource> {
@@ -245,6 +281,41 @@ impl LayoutSpec {
             }
         }
         hooks
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RawLayoutSpec {
+    width: f64,
+    height: f64,
+    unit: PhysicalUnit,
+    orientation: PageOrientation,
+    grid_template: Option<(u8, u8)>,
+    align_plot_origins: bool,
+    panel_badges: PanelBadgeStyle,
+    background_fill: Option<Rgba8>,
+    items: Vec<LayoutItem>,
+}
+
+impl<'de> serde::Deserialize<'de> for LayoutSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawLayoutSpec::deserialize(deserializer)?;
+        let spec = Self {
+            width: raw.width,
+            height: raw.height,
+            unit: raw.unit,
+            orientation: raw.orientation,
+            grid_template: raw.grid_template,
+            align_plot_origins: raw.align_plot_origins,
+            panel_badges: raw.panel_badges,
+            background_fill: raw.background_fill,
+            items: raw.items,
+        };
+        spec.validate_item_count().map_err(serde::de::Error::custom)?;
+        Ok(spec)
     }
 }
 

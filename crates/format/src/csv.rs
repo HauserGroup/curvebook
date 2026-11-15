@@ -605,6 +605,19 @@ pub fn import_csv_to_datasheet(
     subcolumn_mode: SubcolumnMode,
     opts: &CsvOptions,
 ) -> Result<DataSheet, FormatError> {
+    import_csv_to_datasheet_with_budget(id, title, input, target_kind, subcolumn_mode, opts, MAX_IMPORT_CELLS)
+}
+
+/// Import delimited CSV/TSV text into a typed [`DataSheet`] bounded by `max_cells`.
+pub(crate) fn import_csv_to_datasheet_with_budget(
+    id: impl Into<SheetId>,
+    title: impl Into<String>,
+    input: &str,
+    target_kind: TableKind,
+    subcolumn_mode: SubcolumnMode,
+    opts: &CsvOptions,
+    max_cells: usize,
+) -> Result<DataSheet, FormatError> {
     let records = parse_delimited_records(input, opts)?;
     subcolumn_mode.validate()?;
     if !target_kind.allows_subcolumn_mode(subcolumn_mode) {
@@ -633,7 +646,7 @@ pub fn import_csv_to_datasheet(
             let data_cols = raw_col_count.saturating_sub(col_offset);
             let ds_count = data_cols.div_ceil(subs);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, subs, 1, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 1, err_line, max_cells)?;
             let mut xy = XyTable::new(subcolumn_mode, ds_count, row_count)?;
             xy.x_title = sanitize_title(&x_title)?;
             assign_row_titles(&mut xy.row_titles, data_rows, has_row_titles);
@@ -650,7 +663,7 @@ pub fn import_csv_to_datasheet(
             let subs = subcolumn_mode.subcolumn_count();
             let ds_count = raw_col_count.saturating_sub(col_offset).div_ceil(subs);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line, max_cells)?;
             let hint = if subcolumn_mode.is_pre_summarized() { ColumnDesignHint::PrecomputedError } else { ColumnDesignHint::UnpairedReplicates };
             let mut col = ColumnTable::new_with_subcolumns(hint, subcolumn_mode, ds_count, row_count)?;
             assign_row_titles(&mut col.row_titles, data_rows, has_row_titles);
@@ -662,7 +675,7 @@ pub fn import_csv_to_datasheet(
             let subs = subcolumn_mode.subcolumn_count();
             let ds_count = raw_col_count.saturating_sub(col_offset).div_ceil(subs);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line, max_cells)?;
             let mut grp = GroupedTable::new(subcolumn_mode, ds_count, row_count)?;
             assign_row_titles(&mut grp.row_titles, data_rows, has_row_titles);
             populate_datasets(&mut grp.data_sets, data_rows, &headers, col_offset, subs, opts)?;
@@ -671,7 +684,7 @@ pub fn import_csv_to_datasheet(
         TableKind::Contingency => {
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line, max_cells)?;
             let mut cont = ContingencyTable::new(ds_count, row_count)?;
             assign_row_titles(&mut cont.row_titles, data_rows, has_row_titles);
             populate_datasets(&mut cont.data_sets, data_rows, &headers, col_offset, 1, opts)?;
@@ -685,7 +698,7 @@ pub fn import_csv_to_datasheet(
             }
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, 1, 1, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 1, err_line, max_cells)?;
             let mut surv = SurvivalTable::new(ds_count, row_count)?;
             surv.time_title = sanitize_title(&time_title)?;
             assign_row_titles(&mut surv.row_titles, data_rows, has_row_titles);
@@ -705,7 +718,7 @@ pub fn import_csv_to_datasheet(
             }
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line, max_cells)?;
             let mut pow = PartsOfWholeTable::new(ds_count, row_count)?;
             if has_row_titles {
                 assign_row_titles(&mut pow.slice_labels, data_rows, true);
@@ -718,7 +731,7 @@ pub fn import_csv_to_datasheet(
         TableKind::MultipleVariables => {
             let var_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(var_count)?;
-            validate_csv_cell_budget(row_count, var_count, 1, 0, err_line)?;
+            validate_csv_cell_budget(row_count, var_count, 1, 0, err_line, max_cells)?;
             let mut mv = MultipleVariablesTable::new(var_count, row_count)?;
             assign_row_titles(&mut mv.row_titles, data_rows, has_row_titles);
             mv.row_titles_expanded = opts.has_row_titles;
@@ -743,20 +756,16 @@ pub fn import_csv_to_datasheet(
             validate_data_sets(group_count)?;
             let mut total_units: usize = 0;
             for spec in &groups_spec {
-                validate_subcolumns(spec.col_indices.len())?;
+                let units = spec.col_indices.len().max(1);
+                validate_subcolumns(units)?;
                 total_units = total_units
-                    .checked_add(spec.col_indices.len())
+                    .checked_add(units)
                     .ok_or_else(|| FormatError::CsvParse { line: err_line, reason: String::from("table cell count overflow") })?;
             }
             let total_cells = row_count
                 .checked_mul(total_units)
                 .ok_or_else(|| FormatError::CsvParse { line: err_line, reason: String::from("table cell count overflow") })?;
-            if total_cells > MAX_IMPORT_CELLS {
-                return Err(FormatError::CsvParse {
-                    line: err_line,
-                    reason: format!("dense cell allocation {total_cells} exceeds limit {MAX_IMPORT_CELLS}"),
-                });
-            }
+            check_csv_cell_limit(total_cells, err_line, max_cells)?;
 
             let mut nested = NestedTable::new(group_count, 1, row_count)?;
             assign_row_titles(&mut nested.row_titles, data_rows, has_row_titles);
@@ -868,16 +877,30 @@ fn group_nested_by_colon(value_headers: &[String], split_pairs: &[Option<(&str, 
     groups
 }
 
-fn validate_csv_cell_budget(rows: usize, cols: usize, subs: usize, extra_cols_per_row: usize, line: usize) -> Result<(), FormatError> {
+fn check_csv_cell_limit(total_cells: usize, line: usize, max_cells: usize) -> Result<(), FormatError> {
+    if total_cells > max_cells {
+        return Err(FormatError::CsvParse {
+            line,
+            reason: format!("dense cell allocation {total_cells} exceeds remaining import budget {max_cells} (cap {MAX_IMPORT_CELLS})"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_csv_cell_budget(
+    rows: usize,
+    cols: usize,
+    subs: usize,
+    extra_cols_per_row: usize,
+    line: usize,
+    max_cells: usize,
+) -> Result<(), FormatError> {
     let per_row = cols
         .checked_mul(subs)
         .and_then(|v| v.checked_add(extra_cols_per_row))
         .ok_or_else(|| FormatError::CsvParse { line, reason: String::from("table cell count overflow") })?;
     let total_cells = rows.checked_mul(per_row).ok_or_else(|| FormatError::CsvParse { line, reason: String::from("table cell count overflow") })?;
-    if total_cells > MAX_IMPORT_CELLS {
-        return Err(FormatError::CsvParse { line, reason: format!("dense cell allocation {total_cells} exceeds limit {MAX_IMPORT_CELLS}") });
-    }
-    Ok(())
+    check_csv_cell_limit(total_cells, line, max_cells)
 }
 
 fn assign_row_titles(dst: &mut [String], data_rows: &[Vec<String>], has_row_titles: bool) {
