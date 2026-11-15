@@ -6,7 +6,7 @@ use lumencraft_palette::Rgba8;
 use crate::TableKind;
 use crate::archetypes::{CellCoord, TableArchetype, default_column_label};
 use crate::cell::{Cell, SubcolumnMode};
-use crate::error::{DocError, MAX_SUBCOLUMNS, validate_subcolumns, validate_title};
+use crate::error::{DocError, MAX_SUBCOLUMNS, validate_cell_grid, validate_subcolumns, validate_title};
 use crate::ids::{FloatingNote, SheetId};
 
 /// Inclusive rectangular sub-grid range `(start ..= end)` inside a data or result sheet.
@@ -152,7 +152,7 @@ pub struct CellExclusionNote {
 
 /// Project data-table sheet pairing metadata, freeze state, live linked regions, and floating notes
 /// with one of the eight [`TableArchetype`] schemas (`docs/data-tables-and-transforms.md` §1).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DataSheet {
     pub id: SheetId,
     pub title: String,
@@ -168,16 +168,48 @@ pub struct DataSheet {
     pub exclusion_notes: Vec<CellExclusionNote>,
 }
 
+#[derive(serde::Deserialize)]
+struct RawDataSheet {
+    id: SheetId,
+    title: String,
+    archetype: TableArchetype,
+    frozen: bool,
+    info_sheet_id: Option<SheetId>,
+    linked_regions: Vec<LinkedDataRegion>,
+    floating_notes: Vec<FloatingNote>,
+    color_tag: Option<Rgba8>,
+    #[serde(default)]
+    exclusion_notes: Vec<CellExclusionNote>,
+}
+
+impl<'de> serde::Deserialize<'de> for DataSheet {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawDataSheet::deserialize(deserializer)?;
+        let sheet = Self {
+            id: raw.id,
+            title: raw.title,
+            archetype: raw.archetype,
+            frozen: raw.frozen,
+            info_sheet_id: raw.info_sheet_id,
+            linked_regions: raw.linked_regions,
+            floating_notes: raw.floating_notes,
+            color_tag: raw.color_tag,
+            exclusion_notes: raw.exclusion_notes,
+        };
+        sheet.validate().map_err(serde::de::Error::custom)?;
+        Ok(sheet)
+    }
+}
+
 impl DataSheet {
     /// Construct a validated, unfrozen `DataSheet`.
     pub fn new(id: impl Into<SheetId>, title: impl Into<String>, archetype: TableArchetype) -> Result<Self, DocError> {
         let id = id.into();
-        if id.as_str().trim().is_empty() {
-            return Err(DocError::EmptyIdentifier);
-        }
         let title = title.into();
-        validate_title(&title)?;
-        Ok(Self {
+        let sheet = Self {
             id,
             title,
             archetype,
@@ -187,7 +219,18 @@ impl DataSheet {
             floating_notes: Vec::new(),
             color_tag: None,
             exclusion_notes: Vec::new(),
-        })
+        };
+        sheet.validate()?;
+        Ok(sheet)
+    }
+
+    /// Validate identifier, title, and underlying table rectangularity/subcolumn invariants.
+    pub fn validate(&self) -> Result<(), DocError> {
+        if self.id.as_str().trim().is_empty() {
+            return Err(DocError::EmptyIdentifier);
+        }
+        validate_title(&self.title)?;
+        self.archetype.validate()
     }
 
     #[must_use]
@@ -389,13 +432,22 @@ pub struct CloneDataSheetOptions {
 }
 
 /// Losslessly transpose a 2D cell grid (`rows × cols` -> `cols × rows`) while preserving `excluded` flags.
+///
+/// Ragged inputs only pad each transposed row `c` up to `last_row_for_col[c] + 1`, avoiding
+/// quadratic output growth on sparse ragged grids.
 #[must_use]
 pub fn transpose_cell_grid(grid: &[Vec<Cell>]) -> Vec<Vec<Cell>> {
     let max_cols = grid.iter().map(Vec::len).max().unwrap_or(0);
     if max_cols == 0 {
         return Vec::new();
     }
-    let mut out = vec![vec![Cell::empty(); grid.len()]; max_cols];
+    let mut row_lens = vec![0usize; max_cols];
+    for (r, row) in grid.iter().enumerate() {
+        for len_slot in row_lens.iter_mut().take(row.len()) {
+            *len_slot = r + 1;
+        }
+    }
+    let mut out: Vec<Vec<Cell>> = row_lens.into_iter().map(|len| vec![Cell::empty(); len]).collect();
     for (r, row) in grid.iter().enumerate() {
         for (c, cell) in row.iter().enumerate() {
             if let Some(target_row) = out.get_mut(c)
@@ -419,9 +471,22 @@ fn subcolumn_upper_index(arch: &TableArchetype, col: usize) -> usize {
     count.min(MAX_SUBCOLUMNS).saturating_sub(1)
 }
 
+fn reject_incompatible_override(kind: TableKind, opts: &CloneDataSheetOptions) -> Result<(), DocError> {
+    if let Some(n) = opts.override_replicates {
+        return Err(DocError::IncompatibleSubcolumnMode { archetype: kind, mode: SubcolumnMode::RawReplicates(n) });
+    }
+    Ok(())
+}
+
 fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) -> Result<(), DocError> {
     match arch {
         TableArchetype::Xy(t) => {
+            if let Some(n) = opts.override_replicates {
+                if !opts.clear_y_values && t.y_subcolumn_mode.is_pre_summarized() {
+                    return Err(DocError::IncompatibleSubcolumnMode { archetype: TableKind::Xy, mode: SubcolumnMode::RawReplicates(n) });
+                }
+                validate_cell_grid(t.row_count(), t.data_sets.len(), n, t.x_mode.subcolumn_count())?;
+            }
             if !opts.keep_x_values {
                 clear_2d_cells(&mut t.x_cells);
             }
@@ -435,6 +500,7 @@ fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) 
             reset_data_sets(&mut t.data_sets, subs, opts.clear_y_values, opts.clear_column_titles)?;
         }
         TableArchetype::Column(t) => {
+            reject_incompatible_override(TableKind::Column, opts)?;
             if opts.clear_row_titles {
                 clear_strings(&mut t.row_titles);
             }
@@ -442,6 +508,12 @@ fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) 
             reset_data_sets(&mut t.data_sets, subs, opts.clear_y_values, opts.clear_column_titles)?;
         }
         TableArchetype::Grouped(t) => {
+            if let Some(n) = opts.override_replicates {
+                if !opts.clear_y_values && t.subcolumn_mode.is_pre_summarized() {
+                    return Err(DocError::IncompatibleSubcolumnMode { archetype: TableKind::Grouped, mode: SubcolumnMode::RawReplicates(n) });
+                }
+                validate_cell_grid(t.row_count(), t.data_sets.len(), n, 0)?;
+            }
             if opts.clear_row_titles {
                 clear_strings(&mut t.row_titles);
             }
@@ -452,12 +524,14 @@ fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) 
             reset_data_sets(&mut t.data_sets, subs, opts.clear_y_values, opts.clear_column_titles)?;
         }
         TableArchetype::Contingency(t) => {
+            reject_incompatible_override(TableKind::Contingency, opts)?;
             if opts.clear_row_titles {
                 clear_strings(&mut t.row_titles);
             }
             reset_data_sets(&mut t.data_sets, 1, opts.clear_y_values, opts.clear_column_titles)?;
         }
         TableArchetype::Survival(t) => {
+            reject_incompatible_override(TableKind::Survival, opts)?;
             if !opts.keep_x_values {
                 for c in &mut t.times {
                     *c = Cell::empty();
@@ -469,12 +543,14 @@ fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) 
             reset_data_sets(&mut t.cohorts, 1, opts.clear_y_values, opts.clear_column_titles)?;
         }
         TableArchetype::PartsOfWhole(t) => {
+            reject_incompatible_override(TableKind::PartsOfWhole, opts)?;
             if opts.clear_row_titles {
                 clear_strings(&mut t.slice_labels);
             }
             reset_data_sets(&mut t.data_sets, 1, opts.clear_y_values, opts.clear_column_titles)?;
         }
         TableArchetype::MultipleVariables(t) => {
+            reject_incompatible_override(TableKind::MultipleVariables, opts)?;
             if opts.clear_row_titles {
                 clear_strings(&mut t.row_titles);
             }
@@ -490,6 +566,9 @@ fn apply_clone_options(arch: &mut TableArchetype, opts: &CloneDataSheetOptions) 
             }
         }
         TableArchetype::Nested(t) => {
+            if let Some(n) = opts.override_replicates {
+                validate_cell_grid(t.row_count(), t.groups.len(), n, 0)?;
+            }
             if opts.clear_row_titles {
                 clear_strings(&mut t.row_titles);
             }
@@ -533,8 +612,12 @@ fn reset_data_sets(
         if clear_titles {
             ds.title = default_column_label(idx);
         }
-        if clear_values || ds.subcolumn_count() != subcolumn_count {
+        if clear_values {
             ds.cells = vec![vec![Cell::empty(); subcolumn_count]; ds.row_count()];
+        } else if ds.subcolumn_count() != subcolumn_count {
+            for row in &mut ds.cells {
+                row.resize(subcolumn_count, Cell::empty());
+            }
         }
     }
     Ok(())

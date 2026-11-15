@@ -84,6 +84,9 @@ impl FormulaValue {
 
 /// Read-only table & constant environment exposed to the formula evaluator.
 pub trait FormulaContext {
+    fn validate_context(&self) -> Result<(), TransformError> {
+        Ok(())
+    }
     fn row_count(&self) -> usize;
     fn resolve_column_index(&self, name: &str) -> Option<usize>;
     fn column_count(&self) -> usize;
@@ -154,6 +157,10 @@ impl<'a> TableEvalContext<'a> {
 }
 
 impl FormulaContext for TableEvalContext<'_> {
+    fn validate_context(&self) -> Result<(), TransformError> {
+        Ok(self.sheet.archetype.validate()?)
+    }
+
     fn row_count(&self) -> usize {
         self.sheet.archetype.row_count()
     }
@@ -192,6 +199,10 @@ pub struct MultipleVariablesContext<'a> {
 }
 
 impl FormulaContext for MultipleVariablesContext<'_> {
+    fn validate_context(&self) -> Result<(), TransformError> {
+        Ok(self.table.validate()?)
+    }
+
     fn row_count(&self) -> usize {
         self.table.row_count()
     }
@@ -371,24 +382,63 @@ pub fn eval_scalar_expr(expr: &Expr, ctx: &dyn FormulaContext) -> Result<Formula
     Ok(vals.into_iter().next().unwrap_or(FormulaValue::Missing))
 }
 
+fn normalize_col_len(mut vals: Vec<FormulaValue>, n: usize) -> Vec<FormulaValue> {
+    vals.resize(n, FormulaValue::Missing);
+    vals
+}
+
 /// Evaluate a parsed [`Expr`] across every row `0..ctx.row_count()` in `O(N)` vectorized passes.
 pub fn eval_column_expr(expr: &Expr, ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
+    ctx.validate_context()?;
+    eval_column_expr_inner(expr, ctx)
+}
+
+enum EvalStep<'a> {
+    Visit(&'a Expr),
+    ApplyUnary(UnaryOp),
+    ApplyBinary(BinaryOp),
+}
+
+fn eval_column_expr_inner(expr: &Expr, ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
     let n = ctx.row_count();
-    match expr {
-        Expr::Number(v) => Ok(vec![FormulaValue::from_f64(*v); n]),
-        Expr::Text(s) => Ok(vec![FormulaValue::Text(s.clone()); n]),
-        Expr::Var(vref) => eval_var_ref(vref, ctx),
-        Expr::Unary { op, expr: inner } => {
-            let vals = eval_column_expr(inner, ctx)?;
-            Ok(vals.into_iter().map(|v| apply_unary(*op, &v)).collect())
+    let mut steps = vec![EvalStep::Visit(expr)];
+    let mut stack: Vec<Vec<FormulaValue>> = Vec::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            EvalStep::Visit(node) => match node {
+                Expr::Number(v) => stack.push(vec![FormulaValue::from_f64(*v); n]),
+                Expr::Text(s) => stack.push(vec![FormulaValue::Text(s.clone()); n]),
+                Expr::Var(vref) => stack.push(eval_var_ref(vref, ctx)?),
+                Expr::Unary { op, expr: inner } => {
+                    steps.push(EvalStep::ApplyUnary(*op));
+                    steps.push(EvalStep::Visit(inner));
+                }
+                Expr::Binary { op, left, right } => {
+                    steps.push(EvalStep::ApplyBinary(*op));
+                    steps.push(EvalStep::Visit(right));
+                    steps.push(EvalStep::Visit(left));
+                }
+                Expr::Call { name, args } => stack.push(eval_call(name, args, ctx)?),
+            },
+            EvalStep::ApplyUnary(op) => {
+                let vals = stack.pop().ok_or_else(|| TransformError::InvalidSpec { message: String::from("formula evaluation stack underflow") })?;
+                stack.push(vals.into_iter().map(|v| apply_unary(op, &v)).collect());
+            }
+            EvalStep::ApplyBinary(op) => {
+                let rhs = stack.pop().ok_or_else(|| TransformError::InvalidSpec { message: String::from("formula evaluation stack underflow") })?;
+                let lhs = stack.pop().ok_or_else(|| TransformError::InvalidSpec { message: String::from("formula evaluation stack underflow") })?;
+                let combined = (0..n)
+                    .map(|r| {
+                        let a = lhs.get(r).unwrap_or(&FormulaValue::Missing);
+                        let b = rhs.get(r).unwrap_or(&FormulaValue::Missing);
+                        apply_binary(op, a, b)
+                    })
+                    .collect();
+                stack.push(combined);
+            }
         }
-        Expr::Binary { op, left, right } => {
-            let lhs = eval_column_expr(left, ctx)?;
-            let rhs = eval_column_expr(right, ctx)?;
-            Ok(lhs.into_iter().zip(rhs).map(|(a, b)| apply_binary(*op, &a, &b)).collect())
-        }
-        Expr::Call { name, args } => eval_call(name, args, ctx),
     }
+    stack.pop().ok_or_else(|| TransformError::InvalidSpec { message: String::from("formula evaluation produced no result") })
 }
 
 fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
@@ -404,17 +454,19 @@ fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaVa
             #[allow(clippy::cast_precision_loss)]
             Ok((0..n).map(|r| FormulaValue::Number(r as f64)).collect())
         }
-        VarRef::ColumnByIndex(idx) => ctx.column_values(*idx).ok_or_else(|| TransformError::UnknownVariable { name: format!("col({idx})") }),
+        VarRef::ColumnByIndex(idx) => {
+            ctx.column_values(*idx).map(|v| normalize_col_len(v, n)).ok_or_else(|| TransformError::UnknownVariable { name: format!("col({idx})") })
+        }
         VarRef::ColumnByName(name) => {
             if name.trim().eq_ignore_ascii_case("x")
                 && let Some(xs) = ctx.resolve_x_column()
             {
-                return Ok(xs);
+                return Ok(normalize_col_len(xs, n));
             }
             if let Some(idx) = ctx.resolve_column_index(name)
                 && let Some(vals) = ctx.column_values(idx)
             {
-                return Ok(vals);
+                return Ok(normalize_col_len(vals, n));
             }
             Err(TransformError::UnknownVariable { name: name.clone() })
         }
@@ -425,12 +477,12 @@ fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaVa
             if let Some(idx) = ctx.resolve_column_index(name)
                 && let Some(vals) = ctx.column_values(idx)
             {
-                return Ok(vals);
+                return Ok(normalize_col_len(vals, n));
             }
             if name.trim().eq_ignore_ascii_case("x")
                 && let Some(xs) = ctx.resolve_x_column()
             {
-                return Ok(xs);
+                return Ok(normalize_col_len(xs, n));
             }
             if let Some(v) = ctx.resolve_info_constant(name) {
                 return Ok(vec![v; n]);
@@ -449,23 +501,27 @@ fn resolve_ident_var(name: &str, ctx: &dyn FormulaContext) -> Result<Vec<Formula
     if let Some(v) = ctx.resolve_scalar(name) {
         return Ok(vec![v; n]);
     }
+    if let Some(c) = builtin_constant(name) {
+        return Ok(vec![c; n]);
+    }
     if name.eq_ignore_ascii_case("x")
         && let Some(xs) = ctx.resolve_x_column()
     {
-        return Ok(xs);
+        return Ok(normalize_col_len(xs, n));
     }
     if let Some(idx) = ctx.resolve_column_index(name)
         && let Some(vals) = ctx.column_values(idx)
     {
-        return Ok(vals);
+        return Ok(normalize_col_len(vals, n));
     }
     if let Some(v) = ctx.resolve_info_constant(name) {
         return Ok(vec![v; n]);
     }
-    if let Some(c) = builtin_constant(name) {
-        return Ok(vec![c; n]);
-    }
     Err(TransformError::UnknownVariable { name: name.to_owned() })
+}
+
+pub(crate) fn is_builtin_constant(name: &str) -> bool {
+    builtin_constant(name).is_some()
 }
 
 fn builtin_constant(name: &str) -> Option<FormulaValue> {
@@ -576,33 +632,40 @@ fn try_eval_special_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) -
     let n = ctx.row_count();
     match lower {
         "if" => {
-            check_arity("if", args, 3)?;
-            let cond = eval_column_expr(&args[0], ctx)?;
-            let t_vals = eval_column_expr(&args[1], ctx)?;
-            let f_vals = eval_column_expr(&args[2], ctx)?;
+            let [cond_expr, t_expr, f_expr] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("if"), expected: String::from("3"), actual: args.len() });
+            };
+            let cond = eval_column_expr_inner(cond_expr, ctx)?;
+            let t_vals = eval_column_expr_inner(t_expr, ctx)?;
+            let f_vals = eval_column_expr_inner(f_expr, ctx)?;
             let mut out = Vec::with_capacity(n);
-            for ((c, tv), fv) in cond.into_iter().zip(t_vals).zip(f_vals) {
-                match c.as_bool() {
-                    Some(true) => out.push(tv),
-                    Some(false) => out.push(fv),
-                    None => out.push(FormulaValue::Missing),
-                }
+            for r in 0..n {
+                let val = match cond.get(r).and_then(FormulaValue::as_bool) {
+                    Some(true) => t_vals.get(r).cloned().unwrap_or(FormulaValue::Missing),
+                    Some(false) => f_vals.get(r).cloned().unwrap_or(FormulaValue::Missing),
+                    None => FormulaValue::Missing,
+                };
+                out.push(val);
             }
             Ok(Some(out))
         }
         "isnan" => {
-            check_arity("isnan", args, 1)?;
-            let vals = eval_column_expr(&args[0], ctx)?;
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("isnan"), expected: String::from("1"), actual: args.len() });
+            };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
             Ok(Some(vals.into_iter().map(|v| FormulaValue::Number(if v.as_finite_f64().is_none() { 1.0 } else { 0.0 })).collect()))
         }
         "isvalid" | "is_defined" => {
-            check_arity(lower, args, 1)?;
-            let vals = eval_column_expr(&args[0], ctx)?;
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("1"), actual: args.len() });
+            };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
             Ok(Some(vals.into_iter().map(|v| FormulaValue::Number(if v.is_valid() { 1.0 } else { 0.0 })).collect()))
         }
         "coalesce" => {
             check_min_arity("coalesce", args, 1)?;
-            let cols: Vec<Vec<FormulaValue>> = args.iter().map(|a| eval_column_expr(a, ctx)).collect::<Result<_, _>>()?;
+            let cols: Vec<Vec<FormulaValue>> = args.iter().map(|a| eval_column_expr_inner(a, ctx)).collect::<Result<_, _>>()?;
             let mut out = vec![FormulaValue::Missing; n];
             for (r, slot) in out.iter_mut().enumerate() {
                 for col in &cols {
@@ -635,79 +698,116 @@ fn sorted_numbers(vals: &[FormulaValue]) -> Vec<f64> {
     nums
 }
 
+fn collect_filtered_finite(conds: &[FormulaValue], vals: &[FormulaValue]) -> Vec<f64> {
+    let len = conds.len().max(vals.len());
+    (0..len)
+        .filter_map(|r| {
+            let cond = conds.get(r).and_then(FormulaValue::as_bool);
+            if cond == Some(true) { vals.get(r).and_then(FormulaValue::as_finite_f64) } else { None }
+        })
+        .collect()
+}
+
 fn linear_percentile(sorted: &[f64], p_percent: f64) -> FormulaValue {
     if sorted.is_empty() || !p_percent.is_finite() || !(0.0..=100.0).contains(&p_percent) {
         return FormulaValue::Missing;
     }
     if sorted.len() == 1 {
-        return FormulaValue::from_f64(sorted[0]);
+        return sorted.first().copied().map_or(FormulaValue::Missing, FormulaValue::from_f64);
     }
     let pos = (p_percent / 100.0) * ((sorted.len() - 1) as f64);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let lo = (pos.floor() as usize).min(sorted.len() - 1);
     let hi = (lo + 1).min(sorted.len() - 1);
     let frac = pos - (lo as f64);
-    FormulaValue::from_f64(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+    let (Some(&lo_v), Some(&hi_v)) = (sorted.get(lo), sorted.get(hi)) else {
+        return FormulaValue::Missing;
+    };
+    FormulaValue::from_f64(lo_v + frac * (hi_v - lo_v))
 }
 
 fn try_eval_aggregate_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) -> Result<Option<Vec<FormulaValue>>, TransformError> {
     let n = ctx.row_count();
     let val = match lower {
-        "sum" if args.len() == 1 => {
-            let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
+        "sum" => {
+            let [arg0] = args else {
+                return Ok(None);
+            };
+            let nums = extract_finite_numbers(&eval_column_expr_inner(arg0, ctx)?);
             FormulaValue::from_f64(sum::sum(&nums))
         }
         "count" => {
-            check_arity("count", args, 1)?;
-            let cnt = eval_column_expr(&args[0], ctx)?.iter().filter(|v| v.is_valid()).count();
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("count"), expected: String::from("1"), actual: args.len() });
+            };
+            let cnt = eval_column_expr_inner(arg0, ctx)?.iter().filter(|v| v.is_valid()).count();
             #[allow(clippy::cast_precision_loss)]
             FormulaValue::Number(cnt as f64)
         }
-        "mean" if args.len() == 1 => {
-            let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
+        "mean" => {
+            let [arg0] = args else {
+                return Ok(None);
+            };
+            let nums = extract_finite_numbers(&eval_column_expr_inner(arg0, ctx)?);
             sum::mean(&nums).map_or(FormulaValue::Missing, FormulaValue::from_f64)
         }
         "sd" => {
-            check_arity("sd", args, 1)?;
-            let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("sd"), expected: String::from("1"), actual: args.len() });
+            };
+            let nums = extract_finite_numbers(&eval_column_expr_inner(arg0, ctx)?);
             sum::sample_sd(&nums).map_or(FormulaValue::Missing, FormulaValue::from_f64)
         }
         "sem" => {
-            check_arity("sem", args, 1)?;
-            let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("sem"), expected: String::from("1"), actual: args.len() });
+            };
+            let nums = extract_finite_numbers(&eval_column_expr_inner(arg0, ctx)?);
             sum::SummaryMoments::from_slice(&nums).and_then(|m| m.sem()).map_or(FormulaValue::Missing, FormulaValue::from_f64)
         }
         "var" => {
-            check_arity("var", args, 1)?;
-            let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("var"), expected: String::from("1"), actual: args.len() });
+            };
+            let nums = extract_finite_numbers(&eval_column_expr_inner(arg0, ctx)?);
             sum::sample_variance(&nums).map_or(FormulaValue::Missing, FormulaValue::from_f64)
         }
         "median" => {
-            check_arity("median", args, 1)?;
-            let sorted = sorted_numbers(&eval_column_expr(&args[0], ctx)?);
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("median"), expected: String::from("1"), actual: args.len() });
+            };
+            let sorted = sorted_numbers(&eval_column_expr_inner(arg0, ctx)?);
             linear_percentile(&sorted, 50.0)
         }
         "iqr" => {
-            check_arity("iqr", args, 1)?;
-            let sorted = sorted_numbers(&eval_column_expr(&args[0], ctx)?);
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("iqr"), expected: String::from("1"), actual: args.len() });
+            };
+            let sorted = sorted_numbers(&eval_column_expr_inner(arg0, ctx)?);
             match (linear_percentile(&sorted, 75.0).as_finite_f64(), linear_percentile(&sorted, 25.0).as_finite_f64()) {
                 (Some(q3), Some(q1)) => FormulaValue::from_f64(q3 - q1),
                 _ => FormulaValue::Missing,
             }
         }
         "min_col" | "col_min" => {
-            check_arity(lower, args, 1)?;
-            let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("1"), actual: args.len() });
+            };
+            let nums = extract_finite_numbers(&eval_column_expr_inner(arg0, ctx)?);
             nums.into_iter().reduce(f64::min).map_or(FormulaValue::Missing, FormulaValue::from_f64)
         }
         "max_col" | "col_max" => {
-            check_arity(lower, args, 1)?;
-            let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("1"), actual: args.len() });
+            };
+            let nums = extract_finite_numbers(&eval_column_expr_inner(arg0, ctx)?);
             nums.into_iter().reduce(f64::max).map_or(FormulaValue::Missing, FormulaValue::from_f64)
         }
         "geo_mean" => {
-            check_arity("geo_mean", args, 1)?;
-            let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("geo_mean"), expected: String::from("1"), actual: args.len() });
+            };
+            let nums = extract_finite_numbers(&eval_column_expr_inner(arg0, ctx)?);
             if nums.is_empty() || nums.iter().any(|&v| v <= 0.0) {
                 FormulaValue::Missing
             } else {
@@ -716,33 +816,39 @@ fn try_eval_aggregate_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext)
             }
         }
         "percentile" | "quantile" => {
-            check_arity(lower, args, 2)?;
-            let sorted = sorted_numbers(&eval_column_expr(&args[0], ctx)?);
-            let p_val = eval_scalar_const_arg(&args[1], ctx)?;
+            let [arg0, arg1] = args else {
+                return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("2"), actual: args.len() });
+            };
+            let sorted = sorted_numbers(&eval_column_expr_inner(arg0, ctx)?);
+            let p_val = eval_scalar_const_arg(arg1, ctx)?;
             let p_pct = if lower == "quantile" { p_val * 100.0 } else { p_val };
             linear_percentile(&sorted, p_pct)
         }
         "countif" => {
-            check_arity("countif", args, 1)?;
-            let conds = eval_column_expr(&args[0], ctx)?;
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("countif"), expected: String::from("1"), actual: args.len() });
+            };
+            let conds = eval_column_expr_inner(arg0, ctx)?;
             let cnt = conds.iter().filter(|v| v.as_bool() == Some(true)).count();
             #[allow(clippy::cast_precision_loss)]
             FormulaValue::Number(cnt as f64)
         }
         "sumif" => {
-            check_arity("sumif", args, 2)?;
-            let conds = eval_column_expr(&args[0], ctx)?;
-            let vals = eval_column_expr(&args[1], ctx)?;
-            let filtered: Vec<f64> =
-                conds.iter().zip(vals.iter()).filter_map(|(c, v)| (c.as_bool() == Some(true)).then(|| v.as_finite_f64()).flatten()).collect();
+            let [arg0, arg1] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("sumif"), expected: String::from("2"), actual: args.len() });
+            };
+            let conds = eval_column_expr_inner(arg0, ctx)?;
+            let vals = eval_column_expr_inner(arg1, ctx)?;
+            let filtered = collect_filtered_finite(&conds, &vals);
             FormulaValue::from_f64(sum::sum(&filtered))
         }
         "meanif" => {
-            check_arity("meanif", args, 2)?;
-            let conds = eval_column_expr(&args[0], ctx)?;
-            let vals = eval_column_expr(&args[1], ctx)?;
-            let filtered: Vec<f64> =
-                conds.iter().zip(vals.iter()).filter_map(|(c, v)| (c.as_bool() == Some(true)).then(|| v.as_finite_f64()).flatten()).collect();
+            let [arg0, arg1] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("meanif"), expected: String::from("2"), actual: args.len() });
+            };
+            let conds = eval_column_expr_inner(arg0, ctx)?;
+            let vals = eval_column_expr_inner(arg1, ctx)?;
+            let filtered = collect_filtered_finite(&conds, &vals);
             sum::mean(&filtered).map_or(FormulaValue::Missing, FormulaValue::from_f64)
         }
         _ => return Ok(None),
@@ -751,7 +857,7 @@ fn try_eval_aggregate_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext)
 }
 
 fn eval_scalar_const_arg(expr: &Expr, ctx: &dyn FormulaContext) -> Result<f64, TransformError> {
-    let vals = eval_column_expr(expr, ctx)?;
+    let vals = eval_column_expr_inner(expr, ctx)?;
     vals.first()
         .and_then(FormulaValue::as_finite_f64)
         .ok_or_else(|| TransformError::EvalError { message: String::from("expected finite numeric parameter") })
@@ -769,8 +875,10 @@ fn eval_nonneg_int_arg(expr: &Expr, ctx: &dyn FormulaContext, fn_name: &str) -> 
 fn try_eval_window_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) -> Result<Option<Vec<FormulaValue>>, TransformError> {
     match lower {
         "cumsum" => {
-            check_arity("cumsum", args, 1)?;
-            let vals = eval_column_expr(&args[0], ctx)?;
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("cumsum"), expected: String::from("1"), actual: args.len() });
+            };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
             let mut acc = sum::NeumaierSum::new();
             Ok(Some(
                 vals.into_iter()
@@ -785,8 +893,10 @@ fn try_eval_window_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) ->
             ))
         }
         "cumprod" => {
-            check_arity("cumprod", args, 1)?;
-            let vals = eval_column_expr(&args[0], ctx)?;
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("cumprod"), expected: String::from("1"), actual: args.len() });
+            };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
             let mut prod = 1.0_f64;
             Ok(Some(
                 vals.into_iter()
@@ -801,8 +911,10 @@ fn try_eval_window_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) ->
             ))
         }
         "cummean" => {
-            check_arity("cummean", args, 1)?;
-            let vals = eval_column_expr(&args[0], ctx)?;
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("cummean"), expected: String::from("1"), actual: args.len() });
+            };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
             let mut acc = sum::NeumaierSum::new();
             let mut count = 0_usize;
             Ok(Some(
@@ -819,38 +931,50 @@ fn try_eval_window_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) ->
             ))
         }
         "lag" | "lead" => {
-            if args.is_empty() || args.len() > 2 {
+            let (Some(arg0), opt_arg1) = (args.first(), args.get(1)) else {
+                return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("1 or 2"), actual: args.len() });
+            };
+            if args.len() > 2 {
                 return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("1 or 2"), actual: args.len() });
             }
-            let vals = eval_column_expr(&args[0], ctx)?;
-            let k = if args.len() == 2 { eval_nonneg_int_arg(&args[1], ctx, lower)? } else { 1 };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
+            let k = if let Some(arg1) = opt_arg1 { eval_nonneg_int_arg(arg1, ctx, lower)? } else { 1 };
             Ok(Some(eval_shift(&vals, k, lower == "lag")))
         }
         "diff" => {
-            if args.is_empty() || args.len() > 2 {
+            let (Some(arg0), opt_arg1) = (args.first(), args.get(1)) else {
+                return Err(TransformError::ArityMismatch { function: String::from("diff"), expected: String::from("1 or 2"), actual: args.len() });
+            };
+            if args.len() > 2 {
                 return Err(TransformError::ArityMismatch { function: String::from("diff"), expected: String::from("1 or 2"), actual: args.len() });
             }
-            let vals = eval_column_expr(&args[0], ctx)?;
-            let k = if args.len() == 2 { eval_nonneg_int_arg(&args[1], ctx, "diff")? } else { 1 };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
+            let k = if let Some(arg1) = opt_arg1 { eval_nonneg_int_arg(arg1, ctx, "diff")? } else { 1 };
             Ok(Some(eval_diff(&vals, k)))
         }
         "rolling_mean" | "moving_avg" | "rolling_sum" => {
-            check_arity(lower, args, 2)?;
-            let vals = eval_column_expr(&args[0], ctx)?;
-            let w = eval_nonneg_int_arg(&args[1], ctx, lower)?;
+            let [arg0, arg1] = args else {
+                return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("2"), actual: args.len() });
+            };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
+            let w = eval_nonneg_int_arg(arg1, ctx, lower)?;
             if w == 0 {
                 return Err(TransformError::InvalidSpec { message: format!("`{lower}` window width must be >= 1") });
             }
             Ok(Some(eval_rolling(&vals, w, lower != "rolling_sum")))
         }
         "zscore" => {
-            check_arity("zscore", args, 1)?;
-            let vals = eval_column_expr(&args[0], ctx)?;
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: String::from("zscore"), expected: String::from("1"), actual: args.len() });
+            };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
             Ok(Some(eval_zscore(&vals)))
         }
         "rank" | "dense_rank" => {
-            check_arity(lower, args, 1)?;
-            let vals = eval_column_expr(&args[0], ctx)?;
+            let [arg0] = args else {
+                return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("1"), actual: args.len() });
+            };
+            let vals = eval_column_expr_inner(arg0, ctx)?;
             Ok(Some(eval_rank(&vals, lower == "dense_rank")))
         }
         _ => Ok(None),
@@ -875,7 +999,7 @@ fn eval_diff(vals: &[FormulaValue], k: usize) -> Vec<FormulaValue> {
             out.push(FormulaValue::Missing);
             continue;
         };
-        match (vals[i].as_finite_f64(), vals[prev_idx].as_finite_f64()) {
+        match (vals.get(i).and_then(FormulaValue::as_finite_f64), vals.get(prev_idx).and_then(FormulaValue::as_finite_f64)) {
             (Some(cur), Some(prev)) => out.push(FormulaValue::from_f64(cur - prev)),
             _ => out.push(FormulaValue::Missing),
         }
@@ -887,12 +1011,12 @@ fn eval_rolling(vals: &[FormulaValue], window: usize, as_mean: bool) -> Vec<Form
     let n = vals.len();
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
-        if i + 1 < window || vals[i].as_finite_f64().is_none() {
+        if i + 1 < window || vals.get(i).and_then(FormulaValue::as_finite_f64).is_none() {
             out.push(FormulaValue::Missing);
             continue;
         }
         let start = i + 1 - window;
-        let slice_nums: Vec<f64> = vals[start..=i].iter().filter_map(FormulaValue::as_finite_f64).collect();
+        let slice_nums: Vec<f64> = vals.get(start..=i).unwrap_or(&[]).iter().filter_map(FormulaValue::as_finite_f64).collect();
         if slice_nums.is_empty() {
             out.push(FormulaValue::Missing);
         } else {
@@ -929,15 +1053,17 @@ fn eval_rank(vals: &[FormulaValue], dense: bool) -> Vec<FormulaValue> {
     let mut out = vec![FormulaValue::Missing; vals.len()];
     let mut pos = 0;
     let mut dense_level = 1_usize;
-    while pos < indexed.len() {
+    while let Some(&(_, pos_val)) = indexed.get(pos) {
         let mut end = pos + 1;
-        while end < indexed.len() && indexed[end].1 == indexed[pos].1 {
+        while indexed.get(end).is_some_and(|&(_, end_val)| end_val == pos_val) {
             end += 1;
         }
         #[allow(clippy::cast_precision_loss)]
         let rank_val = if dense { dense_level as f64 } else { ((pos + 1 + end) as f64) * 0.5 };
-        for &(orig_idx, _) in &indexed[pos..end] {
-            out[orig_idx] = FormulaValue::Number(rank_val);
+        for &(orig_idx, _) in indexed.get(pos..end).unwrap_or(&[]) {
+            if let Some(slot) = out.get_mut(orig_idx) {
+                *slot = FormulaValue::Number(rank_val);
+            }
         }
         pos = end;
         dense_level += 1;
@@ -947,7 +1073,7 @@ fn eval_rank(vals: &[FormulaValue], dense: bool) -> Vec<FormulaValue> {
 
 fn eval_scalar_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
     let n = ctx.row_count();
-    let evaled: Vec<Vec<FormulaValue>> = args.iter().map(|a| eval_column_expr(a, ctx)).collect::<Result<_, _>>()?;
+    let evaled: Vec<Vec<FormulaValue>> = args.iter().map(|a| eval_column_expr_inner(a, ctx)).collect::<Result<_, _>>()?;
     validate_scalar_call_arity(lower, args.len())?;
 
     let mut out = Vec::with_capacity(n);
@@ -998,19 +1124,19 @@ fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Resul
         "sum" | "mean" => return Ok(eval_variadic_sum_or_mean(cols, row, lower == "mean")),
         "and" | "or" => return Ok(eval_variadic_logic(cols, row, lower == "and")),
         "not" => {
-            let b = cols[0][row].as_bool();
+            let b = cols.first().and_then(|c| c.get(row)).and_then(FormulaValue::as_bool);
             return Ok(b.map_or(FormulaValue::Missing, |flag| FormulaValue::Number(if flag { 0.0 } else { 1.0 })));
         }
         _ => {}
     }
 
-    let Some(x) = cols[0][row].as_finite_f64() else {
+    let Some(x) = cols.first().and_then(|c| c.get(row)).and_then(FormulaValue::as_finite_f64) else {
         return Ok(FormulaValue::Missing);
     };
     if cols.len() == 1 {
         return Ok(FormulaValue::from_f64(eval_unary_math(lower, x)));
     }
-    let Some(y) = cols[1][row].as_finite_f64() else {
+    let Some(y) = cols.get(1).and_then(|c| c.get(row)).and_then(FormulaValue::as_finite_f64) else {
         return Ok(FormulaValue::Missing);
     };
     if cols.len() == 2 {
@@ -1023,7 +1149,7 @@ fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Resul
         };
         return Ok(FormulaValue::from_f64(out));
     }
-    let Some(z) = cols[2][row].as_finite_f64() else {
+    let Some(z) = cols.get(2).and_then(|c| c.get(row)).and_then(FormulaValue::as_finite_f64) else {
         return Ok(FormulaValue::Missing);
     };
     if lower == "clamp" {
@@ -1036,7 +1162,7 @@ fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Resul
 }
 
 fn eval_variadic_sum_or_mean(cols: &[Vec<FormulaValue>], row: usize, is_mean: bool) -> FormulaValue {
-    let nums: Vec<f64> = cols.iter().filter_map(|col| col[row].as_finite_f64()).collect();
+    let nums: Vec<f64> = cols.iter().filter_map(|col| col.get(row).and_then(FormulaValue::as_finite_f64)).collect();
     if nums.is_empty() {
         return FormulaValue::Missing;
     }
@@ -1069,7 +1195,7 @@ fn eval_round_digits(x: f64, digits: f64) -> f64 {
 fn eval_variadic_minmax(cols: &[Vec<FormulaValue>], row: usize, is_min: bool) -> FormulaValue {
     let mut acc: Option<f64> = None;
     for col in cols {
-        let Some(v) = col[row].as_finite_f64() else {
+        let Some(v) = col.get(row).and_then(FormulaValue::as_finite_f64) else {
             return FormulaValue::Missing;
         };
         acc = Some(match acc {
@@ -1089,7 +1215,7 @@ fn eval_variadic_minmax(cols: &[Vec<FormulaValue>], row: usize, is_min: bool) ->
 fn eval_variadic_logic(cols: &[Vec<FormulaValue>], row: usize, is_and: bool) -> FormulaValue {
     let mut acc = is_and;
     for col in cols {
-        let Some(b) = col[row].as_bool() else {
+        let Some(b) = col.get(row).and_then(FormulaValue::as_bool) else {
             return FormulaValue::Missing;
         };
         acc = if is_and { acc && b } else { acc || b };
