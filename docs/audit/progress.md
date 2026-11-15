@@ -10,6 +10,18 @@ Running overview of the Round 1 code audit run from one machine. It follows the 
 
 Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress log: numerical foundations, document model, statistics/fitting/transforms/formats, visual stack, tools and engine, shells (UI, CLI, MCP), build guards, then the cross-cutting slices.
 
+## Summary
+
+Round 1 is complete: all 15 slices were reviewed and independently verified at `ebcc622` (2026-11-14 to 2026-11-15).
+
+- **157 findings reported, none refuted.** 151 CONFIRMED, 5 PLAUSIBLE, 1 DUPLICATE.
+- **By agreed severity (confirmed + plausible):** S1 32, S2 60, S3 58, S4 6.
+- **Evidence:** 116 verdicts rest on a failing test committed to a local `audit/r1/<slice>` branch; 40 rest on a line-by-line trace. The coordinator spot-checked two trace-only S1 verdicts (R1-S02-02, R1-S11-01) and re-ran the S02 tests; both held.
+- **Themes.** (1) *Silent wrong statistics*: tests labelled exact or adjusted that report a different P (R1-S02-02, -04, -06), solver fallbacks reported as finite bounds (R1-S03-02, R1-S01-05), fits that ignore N on summarized data (R1-X2-02), and stale results kept after a failed recompute (R1-X2-01). (2) *No-panic and resource gaps on untrusted input*: missing total cell, pixel, page and item budgets (R1-S06-01, R1-S07-05, R1-S07-11, R1-X1-01), panics in release (R1-S08-02, R1-S10-01, R1-S12-02), hangs (R1-S07-10, R1-S08-01), and entry points outside the panic guard (R1-S12-04, R1-S10-03). (3) *Security boundaries*: an unauthenticated control socket reachable by a browser (R1-S10-02), and external-link paths escaping `--workdir` (R1-S12-01). (4) *Crash recovery that does not recover*: the desktop app never writes its journal (R1-S11-01), and checkpoint and replay are inconsistent (R1-S06-02, -03, R1-S07-06). (5) *Build guards that miss inputs* (S13).
+- **Not done:** no finding has been re-checked against current `main`, which has moved on (see the coordinator notes). No reviewer or verifier came from another model family, and no real browser, X11 clipboard, or `wasm32` build was exercised.
+
+**Next steps for the coordinator:** re-check each S1/S2 finding against current `main`, have a different model family or a person re-verify the S1 findings, then record the survivors in [Known defects](../gaps.md#known-defects), merging the cross-slice overlaps noted below.
+
 ## Status
 
 | Order | Slice | Paths | Status | Findings (S1/S2/S3/S4) | Verdicts (C/P/R/D) | Updated |
@@ -27,7 +39,7 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 11 | `S10` UI shell | `crates/ui-egui` | done | 2/3/3/1 | 8/1/0/0 | 2026-11-15 |
 | 12 | `S12` CLI and MCP | `apps/lumencraft-cli`, `crates/mcp` | done | 4/2/3/1 | 10/0/0/0 | 2026-11-15 |
 | 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | done | 0/2/8/0 | 9/1/0/0 | 2026-11-15 |
-| 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | verifying | 1/2/1/0 | — | 2026-11-15 |
+| 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | done | 1/2/1/0 | 4/0/0/0 | 2026-11-15 |
 | 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | done | 2/5/2/0 | 9/0/0/0 | 2026-11-15 |
 
 Status values: `pending` → `reviewing` → `verifying` → `done`. Verdicts: C = CONFIRMED, P = PLAUSIBLE, R = REFUTED, D = DUPLICATE.
@@ -50,6 +62,7 @@ What each review actually read, so a later session can see what was and was not 
 | `S11` | see [`findings/S11.md`](findings/S11.md) › Scope read | — | slice tests pass; reviewer: `--control` probe + scratch engine crate; verifier: `audit/r1/S11` `apps/lumencraft/tests/audit_r1_s11.rs` (02, 05, 13 fail at base; rest traced) |
 | `S12` | see [`findings/S12.md`](findings/S12.md) › Scope read (two reviewer runs; the first was interrupted after 3 findings) | — | reviewer: probes against the CLI built at base; verifier: `audit/r1/S12` (`2c31ce1`) `apps/lumencraft-cli/tests/audit_r1_s12.rs`, 01–06 and 08 fail at base (02, 04, 06 also on the release binary) |
 | `S13` | see [`findings/S13.md`](findings/S13.md) › Scope read | — | reviewer: scratch probe crates (01–06, 08); verifier: `audit/r1/S13` guard-bypass probe files + `r1_s13_08_anova_huge_df_between_returns_error_not_panic` |
+| `X1` | see [`findings/X1.md`](findings/X1.md) › Scope read and its entry-point → sink table (~45 rows; verifier spot-checked 6, all correct) | — | reviewer: scratch probes (≤ ~210 MB); verifier: `audit/r1/X1` (`a4b0100`) `crates/engine/tests/audit_r1_x1.rs`, `crates/format/tests/audit_r1_x1.rs` |
 | `X2` | see [`findings/X2.md`](findings/X2.md) › Scope read | — | reviewer: end-to-end engine probe crate `probe-X2`; verifier: `audit/r1/X2` (`ed8b23f`) `crates/engine/tests/audit_r1_x2.rs`, all 9 fail at base |
 | `S06` | see [`findings/S06.md`](findings/S06.md) › Scope read | — | `cargo test -p lumencraft-format` 43/43 pass; verifier: `audit/r1/S06` `crates/format/tests/audit_r1_s06.rs`, 5 fail at base (02, 03, 04, 06, 10) |
 
@@ -104,6 +117,7 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S12-02](findings/S12.md) | S1 | JSON project input skips `validate_project_document`; a 0.8 KB file panics `convert` | CONFIRMED | test | `S12` |
 | [R1-S12-03](findings/S12.md) | S1 | MCP `save_file` without `path` overwrites the previously opened file after a command replaced the document | CONFIRMED | test | `S12` |
 | [R1-S12-04](findings/S12.md) | S1 | MCP `render_preview` and `export` compile and render outside the engine panic guard; one bad graph ends the server and loses the session | CONFIRMED | test | `S12` |
+| [R1-X1-01](findings/X1.md) | S1 | Layout `LiveGraph` items have no count limit and each one compiles and keeps its own graph scene: a 44 KB project needs about 10 GB to show or export its layout | CONFIRMED | test | `X1` |
 | [R1-X2-01](findings/X2.md) | S1 | A result that fails to recompute keeps its old numbers, and hooks, chained analyses and graph overlays keep using them as current | CONFIRMED | test | `X2` |
 | [R1-X2-02](findings/X2.md) | S1 | Linear and nonlinear regression on Mean/SD/N (or Mean/SEM/N, Mean/%CV/N) data ignore N and the within-point scatter | CONFIRMED | test | `X2` |
 | [R1-S01-02](findings/S01.md) | S2 | Noncentral F and χ² cap the Poisson mode at 500 000, so λ > 1e6 gives CDF = SF = 0 and a truncated upper CI limit | CONFIRMED | test | `S01` |
@@ -159,6 +173,8 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S12-06](findings/S12.md) | S2 | An over-limit `Content-Length` frame ends the MCP server instead of being skipped, losing the session | CONFIRMED | test | `S12` |
 | [R1-S13-01](findings/S13.md) | S2 | `repo_files` silently drops every path that `git ls-files` quotes, so `assets`, `brands` and `cleanroom` never scan non-ASCII file names | CONFIRMED | trace | `S13` |
 | [R1-S13-02](findings/S13.md) | S2 | `cleanroom` misses the standard vendor copyright-notice forms and cannot see inside UTF-16 or compressed project files | CONFIRMED | trace | `S13` |
+| [R1-X1-02](findings/X1.md) | S2 | CSV import tokenizes the whole input into `Vec<Vec<String>>` before any column or cell limit, about 27 bytes of heap per input byte | CONFIRMED | test | `X1` |
+| [R1-X1-03](findings/X1.md) | S2 | No file read checks size or file type first: every limit applies after the whole file is in memory, a FIFO blocks forever, and a link to `/dev/zero` reads until the process aborts | CONFIRMED | test | `X1` |
 | [R1-X2-03](findings/X2.md) | S2 | Excluding an X value (or every Y in a row) turns that row into an "unknown" to interpolate | CONFIRMED | test | `X2` |
 | [R1-X2-04](findings/X2.md) | S2 | Paste and live CSV links split quoted fields and keep quoted numbers as text, while CSV import of the same text does not | CONFIRMED | test | `X2` |
 | [R1-X2-05](findings/X2.md) | S2 | Two-way/three-way ANOVA on Grouped tables, nested ANOVA and contingency analyses ignore "data sets to analyze" | CONFIRMED | test | `X2` |
@@ -215,6 +231,7 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S13-08](findings/S13.md) | S3 | NIST ANOVA parser allocates `df_between + 1` bools taken from the file header, so a 247-byte `.dat` aborts or panics `cargo xtask corpus` | CONFIRMED | test | `S13` |
 | [R1-S13-09](findings/S13.md) | S3 | `corpus --fetch` overwrites the cached files before checking the pinned hashes, and records a manifest built from whatever was downloaded | CONFIRMED | trace | `S13` |
 | [R1-S13-10](findings/S13.md) | S3 | `i18n-report` (in `ci`) is a substring test filter; if it matches no test, the gate passes with 0 tests run | CONFIRMED | test | `S13` |
+| [R1-X1-04](findings/X1.md) | S3 | The `--workdir` path guard exists only for CLI `run`/`batch`; MCP reads, writes and creates directories at any path through the same engine commands, and `docs/mcp.md` says nothing about it | CONFIRMED | trace | `X1` |
 | [R1-X2-08](findings/X2.md) | S3 | Text in a numeric data column is dropped from every analysis without being counted as missing or excluded | CONFIRMED | test | `X2` |
 | [R1-X2-09](findings/X2.md) | S3 | One non-finite number in any result sheet makes the whole project unsavable; Bland–Altman can produce one from finite data | CONFIRMED | test | `X2` |
 | [R1-S06-07](findings/S06.md) | S3 | Stale-lock eviction is unlink-then-create: two concurrent recoverers can both acquire the lease | PLAUSIBLE | trace | `S06` |
