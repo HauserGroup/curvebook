@@ -561,25 +561,56 @@ impl ColumnTable {
     /// Complete subject blocks across `cols` where every selected column has an active finite value at row `r`.
     #[must_use]
     pub fn complete_paired_rows(&self, cols: &[usize]) -> Vec<Vec<f64>> {
+        self.complete_paired_rows_with_report(cols).blocks
+    }
+
+    /// Complete subject blocks across `cols` plus counts of omitted incomplete/excluded subject rows
+    /// and non-numeric cells encountered in numeric columns.
+    #[must_use]
+    pub fn complete_paired_rows_with_report(&self, cols: &[usize]) -> PairedRowsReport {
         if cols.is_empty() {
-            return Vec::new();
+            return PairedRowsReport::default();
         }
         let rows = self.row_count();
+        let active_end = (0..rows)
+            .rfind(|&r| {
+                cols.iter().any(|&c| self.data_sets.get(c).and_then(|ds| ds.cell(r, 0)).is_some_and(|cell| cell.excluded || !cell.value.is_empty()))
+            })
+            .map_or(0, |last| last + 1);
         let mut blocks = Vec::new();
-        for r in 0..rows {
+        let mut skipped_incomplete_rows = 0_usize;
+        let mut non_numeric_cells = 0_usize;
+        for r in 0..active_end {
             let mut row_vals = Vec::with_capacity(cols.len());
+            let mut complete = true;
+            let mut row_has_entry = false;
             for &c in cols {
-                let Some(val) = self.data_sets.get(c).and_then(|ds| ds.cell(r, 0)).and_then(Cell::active_number) else {
-                    row_vals.clear();
-                    break;
-                };
-                row_vals.push(val);
+                let cell = self.data_sets.get(c).and_then(|ds| ds.cell(r, 0));
+                if let Some(cell) = cell {
+                    if cell.excluded || !cell.value.is_empty() {
+                        row_has_entry = true;
+                    }
+                    if !cell.excluded {
+                        match &cell.value {
+                            CellValue::Text(s) if !s.trim().is_empty() => non_numeric_cells += 1,
+                            CellValue::Number(v) if !v.is_finite() => non_numeric_cells += 1,
+                            _ => {}
+                        }
+                    }
+                }
+                if let Some(val) = cell.and_then(Cell::active_number) {
+                    row_vals.push(val);
+                } else {
+                    complete = false;
+                }
             }
-            if row_vals.len() == cols.len() {
+            if complete {
                 blocks.push(row_vals);
+            } else if row_has_entry {
+                skipped_incomplete_rows += 1;
             }
         }
-        blocks
+        PairedRowsReport { blocks, skipped_incomplete_rows, non_numeric_cells }
     }
 
     /// Validate rectangular row/subcolumn invariants, subcolumn mode compatibility, and dimension caps.
@@ -592,6 +623,15 @@ impl ColumnTable {
         validate_title_vec(TableKind::Column, &self.row_titles, row_count, "row title count does not match table row count")?;
         validate_dataset_column_grid(TableKind::Column, &self.data_sets, row_count, subs)
     }
+}
+
+/// Complete subject blocks and listwise-exclusion summary returned by
+/// [`ColumnTable::complete_paired_rows_with_report`].
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct PairedRowsReport {
+    pub blocks: Vec<Vec<f64>>,
+    pub skipped_incomplete_rows: usize,
+    pub non_numeric_cells: usize,
 }
 
 // ============================================================================

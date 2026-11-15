@@ -14,7 +14,9 @@ use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares}
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices,
+    append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell,
+    init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices,
+    sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
@@ -1007,7 +1009,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             mv_status_column,
             mv_group_column,
         } => {
-            let cohorts: Vec<(usize, String, Vec<SurvivalObservation>)> = match &sheet.archetype {
+            let (cohorts, skipped_mv_rows, ignored_non_numeric) = match &sheet.archetype {
                 TableArchetype::Survival(table) => {
                     let indices = resolve_selected_indices(&spec.selected_data_sets, table.cohorts.len());
                     if indices.is_empty() {
@@ -1018,10 +1020,11 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                         let obs = table.cohort_observations(c_idx)?;
                         list.push((c_idx, table.cohorts[c_idx].title.clone(), obs));
                     }
-                    list
+                    (list, 0_usize, Vec::new())
                 }
                 TableArchetype::MultipleVariables(mv) => {
-                    extract_mv_km_cohorts(mv, &spec.selected_data_sets, *mv_time_column, *mv_status_column, *mv_group_column)?
+                    let mv_ext = extract_mv_km_cohorts(mv, &spec.selected_data_sets, *mv_time_column, *mv_status_column, *mv_group_column)?;
+                    (mv_ext.cohorts, mv_ext.skipped_rows, mv_ext.ignored_non_numeric)
                 }
                 other => {
                     return Err(StatsError::IncompatibleTable { analysis: "Kaplan-Meier survival", actual: other.kind() });
@@ -1166,18 +1169,23 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             }
 
             let min_events = km_results.iter().map(|k| k.n_events).min().unwrap_or(0);
+            let total_kept: usize = cohort_obs.iter().map(Vec::len).sum();
             out.checklist.push(checklist_item(
                 "Event counts & censoring",
                 if min_events >= 5 { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
                 Some(format!("min cohort events = {min_events}")),
                 "Kaplan-Meier assumes non-informative censoring; medians cannot be estimated if survival remains above 0.5.",
             ));
+            append_listwise_filtered_checklist_and_footnote(&mut out, "Kaplan-Meier survival", skipped_mv_rows, total_kept);
+            append_ignored_text_checklist_and_footnote(&mut out, "Kaplan-Meier survival", &ignored_non_numeric);
         }
         SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, reference_levels, tie_method } => {
             let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
                 return Err(StatsError::IncompatibleTable { analysis: "Cox proportional hazards", actual: sheet.archetype.kind() });
             };
-            let (pred_names, subjects) = build_cox_design_subjects(mv, *time_column, *status_column, predictor_columns, reference_levels)?;
+            let extraction = build_cox_design_subjects(mv, *time_column, *status_column, predictor_columns, reference_levels)?;
+            let pred_names = extraction.pred_names;
+            let subjects = extraction.subjects;
 
             let cox = cox_ph_regression(&subjects, &pred_names, *tie_method, confidence)?;
             let aic = -2.0 * cox.log_lik_model + 2.0 * (cox.covariates.len() as f64);
@@ -1272,9 +1280,12 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 )
             };
             out.checklist.push(checklist_item("Proportional hazards assumption (Schoenfeld)", ph_status, ph_metric, ph_expl));
+            append_listwise_filtered_checklist_and_footnote(&mut out, "Cox proportional hazards", extraction.skipped_rows, subjects.len());
+            append_ignored_text_checklist_and_footnote(&mut out, "Cox proportional hazards", &extraction.ignored_non_numeric);
         }
     }
 
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
 
@@ -1322,13 +1333,24 @@ fn append_cox_baseline_tabs(out: &mut ResultSheet, baseline: &[CoxBaselinePoint]
 
 /// Build Cox PH predictor names and complete-case subjects, expanding categorical predictors
 /// into `"{title}[{level} vs {ref_level}]"` reference-coded dummy indicators.
+struct CoxDesignExtraction {
+    pred_names: Vec<String>,
+    subjects: Vec<CoxSubject>,
+    skipped_rows: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
+
+fn cell_has_entry(cell: Option<&Cell>) -> bool {
+    cell.is_some_and(|c| !c.is_empty() || c.excluded)
+}
+
 fn build_cox_design_subjects(
     mv: &MultipleVariablesTable,
     time_column: usize,
     status_column: usize,
     predictor_columns: &[usize],
     reference_levels: &[(usize, String)],
-) -> Result<(Vec<String>, Vec<CoxSubject>), StatsError> {
+) -> Result<CoxDesignExtraction, StatsError> {
     let time_var = mv.variables.get(time_column).ok_or(StatsError::MissingColumn { index: time_column })?;
     let status_var = mv.variables.get(status_column).ok_or(StatsError::MissingColumn { index: status_column })?;
 
@@ -1367,47 +1389,94 @@ fn build_cox_design_subjects(
         }
     }
 
+    let active_end = (0..mv.row_count()).rfind(|&r| {
+        cell_has_entry(time_var.cells.get(r))
+            || cell_has_entry(status_var.cells.get(r))
+            || predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)))
+    });
     let mut subjects = Vec::new();
-    for r in 0..mv.row_count() {
-        let Some(t) = time_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-        let Some(st) = status_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-        let status = parse_survival_status(st)?;
-        let mut x_vals = Vec::with_capacity(pred_names.len());
-        let mut ok = true;
-        for (pos, &pc) in predictor_columns.iter().enumerate() {
-            let Some(cell) = mv.variables[pc].cells.get(r) else {
-                ok = false;
-                break;
-            };
-            if cell.excluded {
-                ok = false;
-                break;
+    let mut skipped_rows = 0_usize;
+    let mut time_non_num = 0_usize;
+    let mut status_non_num = 0_usize;
+    let mut pred_non_num = vec![0_usize; predictor_columns.len()];
+
+    if let Some(end_row) = active_end {
+        for r in 0..=end_row {
+            let tc = time_var.cells.get(r);
+            let sc = status_var.cells.get(r);
+            let has_entry =
+                cell_has_entry(tc) || cell_has_entry(sc) || predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)));
+            if !has_entry {
+                continue;
             }
-            if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
-                let Some(tok) = mv_survival_token(cell) else {
+            if tc.is_some_and(is_ignored_non_numeric_cell) {
+                time_non_num += 1;
+            }
+            if sc.is_some_and(is_ignored_non_numeric_cell) {
+                status_non_num += 1;
+            }
+            for (pos, &pc) in predictor_columns.iter().enumerate() {
+                if cat_levels[pos].is_none() && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
+                    pred_non_num[pos] += 1;
+                }
+            }
+            let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
+                skipped_rows += 1;
+                continue;
+            };
+            let status = parse_survival_status(st)?;
+            let mut x_vals = Vec::with_capacity(pred_names.len());
+            let mut ok = true;
+            for (pos, &pc) in predictor_columns.iter().enumerate() {
+                let Some(cell) = mv.variables[pc].cells.get(r) else {
                     ok = false;
                     break;
                 };
-                if tok != *ref_lvl && !non_refs.contains(&tok) {
+                if cell.excluded {
                     ok = false;
                     break;
                 }
-                for lv in non_refs {
-                    x_vals.push(if &tok == lv { 1.0 } else { 0.0 });
+                if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
+                    let Some(tok) = mv_survival_token(cell) else {
+                        ok = false;
+                        break;
+                    };
+                    if tok != *ref_lvl && !non_refs.contains(&tok) {
+                        ok = false;
+                        break;
+                    }
+                    for lv in non_refs {
+                        x_vals.push(if &tok == lv { 1.0 } else { 0.0 });
+                    }
+                } else if let Some(xv) = cell.active_number() {
+                    x_vals.push(xv);
+                } else {
+                    ok = false;
+                    break;
                 }
-            } else if let Some(xv) = cell.active_number() {
-                x_vals.push(xv);
-            } else {
-                ok = false;
-                break;
             }
-        }
-        if ok {
-            subjects.push(CoxSubject { time: t, event: matches!(status, SurvivalStatus::Event), x: x_vals });
+            if ok {
+                subjects.push(CoxSubject { time: t, event: matches!(status, SurvivalStatus::Event), x: x_vals });
+            } else {
+                skipped_rows += 1;
+            }
         }
     }
 
-    Ok((pred_names, subjects))
+    let mut ignored_non_numeric = Vec::new();
+    if time_non_num > 0 {
+        ignored_non_numeric.push((time_var.title.clone(), time_non_num));
+    }
+    if status_non_num > 0 {
+        ignored_non_numeric.push((status_var.title.clone(), status_non_num));
+    }
+    for (pos, &count) in pred_non_num.iter().enumerate() {
+        if count > 0 {
+            ignored_non_numeric.push((mv.variables[predictor_columns[pos]].title.clone(), count));
+        }
+    }
+
+    Ok(CoxDesignExtraction { pred_names, subjects, skipped_rows, ignored_non_numeric })
 }
 
 /// Push Breslow/Efron baseline survival `S0(t) = exp(-H0(t))` and per-covariate unit-shift
@@ -1422,35 +1491,52 @@ fn append_cox_curve_overlays(out: &mut ResultSheet, cox: &CoxPhResult) {
         base_pts.push(CurveSamplePoint { x: 0.0, y: 1.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
     }
     for pt in &cox.baseline_survival {
+        if !pt.time.is_finite() || !pt.cum_hazard.is_finite() {
+            continue;
+        }
         let s0 = (-pt.cum_hazard).exp().clamp(0.0, 1.0);
-        base_pts.push(CurveSamplePoint { x: pt.time, y: s0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+        if s0.is_finite() {
+            base_pts.push(CurveSamplePoint { x: pt.time, y: s0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+        }
     }
-    out.fitted_curves.push(FittedCurveOverlay {
-        data_set_index: 0,
-        equation_id: String::from("cox_baseline"),
-        converged: cox.converged,
-        ambiguous: false,
-        points: base_pts,
-    });
+    if !base_pts.is_empty() {
+        out.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: 0,
+            equation_id: String::from("cox_baseline"),
+            converged: cox.converged,
+            ambiguous: false,
+            points: base_pts,
+        });
+    }
 
     for (j, cov) in cox.covariates.iter().enumerate() {
+        if !cov.beta.is_finite() {
+            continue;
+        }
         let hr_shift = cov.beta.clamp(-50.0, 50.0).exp();
         let mut cov_pts = Vec::with_capacity(cox.baseline_survival.len() + usize::from(prepend_zero));
         if prepend_zero {
             cov_pts.push(CurveSamplePoint { x: 0.0, y: 1.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
         }
         for pt in &cox.baseline_survival {
+            if !pt.time.is_finite() || !pt.cum_hazard.is_finite() {
+                continue;
+            }
             let s0 = (-pt.cum_hazard).exp().clamp(0.0, 1.0);
             let s_shifted = s0.powf(hr_shift).clamp(0.0, 1.0);
-            cov_pts.push(CurveSamplePoint { x: pt.time, y: s_shifted, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+            if s_shifted.is_finite() {
+                cov_pts.push(CurveSamplePoint { x: pt.time, y: s_shifted, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+            }
         }
-        out.fitted_curves.push(FittedCurveOverlay {
-            data_set_index: j + 1,
-            equation_id: String::from("cox_covariate"),
-            converged: cox.converged,
-            ambiguous: false,
-            points: cov_pts,
-        });
+        if !cov_pts.is_empty() {
+            out.fitted_curves.push(FittedCurveOverlay {
+                data_set_index: j + 1,
+                equation_id: String::from("cox_covariate"),
+                converged: cox.converged,
+                ambiguous: false,
+                points: cov_pts,
+            });
+        }
     }
 }
 
@@ -1503,13 +1589,19 @@ fn parse_survival_status(st: f64) -> Result<SurvivalStatus, StatsError> {
     }
 }
 
+struct MvKmExtraction {
+    cohorts: Vec<(usize, String, Vec<SurvivalObservation>)>,
+    skipped_rows: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
+
 fn extract_mv_km_cohorts(
     mv: &MultipleVariablesTable,
     selected: &[usize],
     mv_time_column: Option<usize>,
     mv_status_column: Option<usize>,
     mv_group_column: Option<usize>,
-) -> Result<Vec<(usize, String, Vec<SurvivalObservation>)>, StatsError> {
+) -> Result<MvKmExtraction, StatsError> {
     if let Some(t) = mv_time_column
         && t >= mv.variables.len()
     {
@@ -1586,24 +1678,53 @@ fn extract_mv_km_cohorts(
 
     let time_var = &mv.variables[time_col];
     let status_var = &mv.variables[status_col];
+    let active_end = (0..mv.row_count()).rfind(|&r| {
+        cell_has_entry(time_var.cells.get(r))
+            || cell_has_entry(status_var.cells.get(r))
+            || group_col.is_some_and(|gc| cell_has_entry(mv.variables[gc].cells.get(r)))
+    });
+    let mut skipped_rows = 0_usize;
+    let mut time_non_num = 0_usize;
+    let mut status_non_num = 0_usize;
 
-    if let Some(g_col) = group_col {
+    let cohorts = if let Some(g_col) = group_col {
         let g_var = &mv.variables[g_col];
         let levels: Vec<String> = g_var.ordered_levels().into_iter().filter(|l| l.included_count > 0).map(|l| l.level).collect();
         if levels.is_empty() {
             return Err(StatsError::EmptyInput);
         }
         let mut buckets: Vec<Vec<SurvivalObservation>> = vec![Vec::new(); levels.len()];
-        for r in 0..mv.row_count() {
-            let Some(t) = time_var.cells.get(r).and_then(Cell::active_number) else { continue };
-            let Some(st) = status_var.cells.get(r).and_then(Cell::active_number) else { continue };
-            if !t.is_finite() || t < 0.0 {
-                return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
-            }
-            let status = parse_survival_status(st)?;
-            let Some(tok) = g_var.cells.get(r).and_then(mv_survival_token) else { continue };
-            if let Some(pos) = levels.iter().position(|lvl| lvl == &tok) {
-                buckets[pos].push(SurvivalObservation { row: r, time: t, status });
+        if let Some(end_row) = active_end {
+            for r in 0..=end_row {
+                let tc = time_var.cells.get(r);
+                let sc = status_var.cells.get(r);
+                let gc = g_var.cells.get(r);
+                if !(cell_has_entry(tc) || cell_has_entry(sc) || cell_has_entry(gc)) {
+                    continue;
+                }
+                if tc.is_some_and(is_ignored_non_numeric_cell) {
+                    time_non_num += 1;
+                }
+                if sc.is_some_and(is_ignored_non_numeric_cell) {
+                    status_non_num += 1;
+                }
+                let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
+                    skipped_rows += 1;
+                    continue;
+                };
+                if !t.is_finite() || t < 0.0 {
+                    return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+                }
+                let status = parse_survival_status(st)?;
+                let Some(tok) = gc.and_then(mv_survival_token) else {
+                    skipped_rows += 1;
+                    continue;
+                };
+                if let Some(pos) = levels.iter().position(|lvl| lvl == &tok) {
+                    buckets[pos].push(SurvivalObservation { row: r, time: t, status });
+                } else {
+                    skipped_rows += 1;
+                }
             }
         }
         let cohorts: Vec<(usize, String, Vec<SurvivalObservation>)> =
@@ -1611,24 +1732,48 @@ fn extract_mv_km_cohorts(
         if cohorts.is_empty() {
             return Err(StatsError::EmptyInput);
         }
-        Ok(cohorts)
+        cohorts
     } else {
         let mut obs = Vec::new();
-        for r in 0..mv.row_count() {
-            let Some(t) = time_var.cells.get(r).and_then(Cell::active_number) else { continue };
-            let Some(st) = status_var.cells.get(r).and_then(Cell::active_number) else { continue };
-            if !t.is_finite() || t < 0.0 {
-                return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+        if let Some(end_row) = active_end {
+            for r in 0..=end_row {
+                let tc = time_var.cells.get(r);
+                let sc = status_var.cells.get(r);
+                if !(cell_has_entry(tc) || cell_has_entry(sc)) {
+                    continue;
+                }
+                if tc.is_some_and(is_ignored_non_numeric_cell) {
+                    time_non_num += 1;
+                }
+                if sc.is_some_and(is_ignored_non_numeric_cell) {
+                    status_non_num += 1;
+                }
+                let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
+                    skipped_rows += 1;
+                    continue;
+                };
+                if !t.is_finite() || t < 0.0 {
+                    return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+                }
+                let status = parse_survival_status(st)?;
+                obs.push(SurvivalObservation { row: r, time: t, status });
             }
-            let status = parse_survival_status(st)?;
-            obs.push(SurvivalObservation { row: r, time: t, status });
         }
         if obs.is_empty() {
             return Err(StatsError::EmptyInput);
         }
         let label = if time_var.title.trim().is_empty() { String::from("Overall") } else { time_var.title.clone() };
-        Ok(vec![(0, label, obs)])
+        vec![(0, label, obs)]
+    };
+
+    let mut ignored_non_numeric = Vec::new();
+    if time_non_num > 0 {
+        ignored_non_numeric.push((time_var.title.clone(), time_non_num));
     }
+    if status_non_num > 0 {
+        ignored_non_numeric.push((status_var.title.clone(), status_non_num));
+    }
+    Ok(MvKmExtraction { cohorts, skipped_rows, ignored_non_numeric })
 }
 
 fn append_survival_pairwise(

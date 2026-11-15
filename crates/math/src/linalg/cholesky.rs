@@ -28,26 +28,52 @@ pub fn cholesky(a: &DenseMatrix) -> Result<Cholesky, MathError> {
         return Err(MathError::DomainError { name: "matrix", value: f64::NAN });
     }
     let n = a.nrows();
-    let sym_tol = 1e-11 * a.frobenius_norm().max(1.0);
+    let mut max_diag = 0.0_f64;
+    let mut max_abs = 0.0_f64;
+    for i in 0..n {
+        let diag = a.entry(i, i);
+        if !diag.is_finite() {
+            return Err(MathError::DomainError { name: "non_finite", value: diag });
+        }
+        max_diag = max_diag.max(diag.abs());
+        max_abs = max_abs.max(diag.abs());
+        for j in (i + 1)..n {
+            let aij = a.entry(i, j);
+            let aji = a.entry(j, i);
+            if !aij.is_finite() || !aji.is_finite() {
+                return Err(MathError::DomainError { name: "non_finite", value: if aij.is_finite() { aji } else { aij } });
+            }
+            max_abs = max_abs.max(aij.abs()).max(aji.abs());
+        }
+    }
+
+    let frob = a.frobenius_norm();
+    let sym_tol = if frob.is_finite() { 1e-11 * frob } else { 1e-11 * max_abs };
     for i in 0..n {
         for j in (i + 1)..n {
-            if (a.entry(i, j) - a.entry(j, i)).abs() > sym_tol {
-                return Err(MathError::DomainError { name: "symmetry", value: (a.entry(i, j) - a.entry(j, i)).abs() });
+            let diff = (a.entry(i, j) - a.entry(j, i)).abs();
+            if !diff.is_finite() || diff > sym_tol {
+                return Err(MathError::DomainError { name: "symmetry", value: diff });
             }
         }
     }
 
+    // Reject numerically rank-deficient / semidefinite matrices whose Cholesky pivots are
+    // indistinguishable from floating-point roundoff relative to the largest diagonal entry.
+    let pivot_tol = 32.0 * (n.max(1) as f64) * f64::EPSILON * max_diag;
     let mut l = DenseMatrix::zeros(n, n)?;
     for i in 0..n {
         for j in 0..=i {
             let mut acc = NeumaierSum::new();
-            acc.add(0.5 * (a.entry(i, j) + a.entry(j, i)));
+            let aij = a.entry(i, j);
+            let aji = a.entry(j, i);
+            acc.add(0.5 * aij + 0.5 * aji);
             for k in 0..j {
                 acc.add(-l.entry(i, k) * l.entry(j, k));
             }
             let sum_val = acc.total();
             if i == j {
-                if !sum_val.is_finite() || sum_val <= 0.0 {
+                if !sum_val.is_finite() || sum_val <= pivot_tol {
                     return Err(MathError::NotPositiveDefinite { index: i, pivot: sum_val });
                 }
                 l.set_in_bounds(i, i, sum_val.sqrt());
