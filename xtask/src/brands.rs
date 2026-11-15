@@ -5,7 +5,12 @@ use std::collections::BTreeSet;
 use std::path::Path;
 
 /// Competitor vendor and product names checked on ASCII word boundaries (case-insensitive).
-const BRANDS: &[&str] = &["graphpad", "dotmatics", "instat", "statmate", "jmp", "spss", "minitab", "originlab", "originpro", "sigmaplot", "systat"];
+const BRANDS: &[&str] =
+    &["graphpad", "dotmatics", "prism", "instat", "statmate", "jmp", "spss", "minitab", "originlab", "originpro", "sigmaplot", "systat"];
+
+/// Optical modifiers that immediately precede `"prism"` inside `<title>`/`<desc>` icon metadata.
+const OPTICAL_PRISM_MODIFIERS: &[&str] =
+    &["optical", "refractive", "triangular", "glass", "crystal", "dispersive", "dispersion", "dichroic", "achromatic"];
 
 /// External suite branding and infrastructure forbidden across all non-xtask files in this standalone repository.
 const SUITE_BRANDS: &[&str] = &[
@@ -213,12 +218,23 @@ fn skip_path(path: &str) -> bool {
 
 fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     scan_suite_lines(path, text, out);
-    let is_non_md_doc = path.starts_with("docs/") && !Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md"));
-    if Path::new(path).extension().is_some_and(|ext| ext.eq_ignore_ascii_case("rs")) {
+    let ext = Path::new(path).extension();
+    let is_rs = ext.is_some_and(|e| e.eq_ignore_ascii_case("rs"));
+    let is_svg = ext.is_some_and(|e| e.eq_ignore_ascii_case("svg"));
+    let is_cargo_toml = path == "Cargo.toml" || path.ends_with("/Cargo.toml");
+    let is_non_md_doc = path.starts_with("docs/") && !ext.is_some_and(|e| e.eq_ignore_ascii_case("md"));
+    if is_rs {
         scan_rust(path, text, out);
-    } else if path.ends_with("Cargo.toml") {
+    } else if is_cargo_toml {
         scan_cargo_toml(path, text, out);
-    } else if path == "crates/tools/src/cursors.toml" || path.starts_with("packaging/") || path.starts_with(".github/workflows/") || is_non_md_doc {
+    } else if is_svg {
+        scan_svg(path, text, out);
+    } else if path == "crates/tools/src/cursors.toml"
+        || path.starts_with("packaging/")
+        || path.starts_with(".github/")
+        || path.starts_with("apps/")
+        || is_non_md_doc
+    {
         scan_plain_lines(path, text, out);
     }
 }
@@ -227,34 +243,606 @@ fn scan_suite_lines(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     for (idx, line) in text.lines().enumerate() {
         if path == SUITE_DISCLAIMER_PATH && line.contains(ALLOW_MARKER) {
             let strict: Vec<&'static str> = SUITE_BRANDS.iter().copied().filter(|brand| !SUITE_DISCLAIMER_NAMES.contains(brand)).collect();
-            collect_line_words(path, idx + 1, line, &strict, out);
+            collect_line_words(path, idx + 1, line, &strict, PrismPolicy::Strict, out);
         } else {
-            collect_line_words(path, idx + 1, line, SUITE_BRANDS, out);
+            collect_line_words(path, idx + 1, line, SUITE_BRANDS, PrismPolicy::Strict, out);
         }
     }
 }
 
-fn scan_cargo_toml(path: &str, text: &str, out: &mut Vec<BrandHit>) {
-    for (idx, line) in text.lines().enumerate() {
-        let trimmed = line.trim_start();
-        if trimmed.starts_with("description") && !line.contains(ALLOW_MARKER) {
-            collect_line_words(path, idx + 1, line, BRANDS, out);
-        }
+fn is_comment_allow_line(line: &str) -> bool {
+    if !line.contains(ALLOW_MARKER) {
+        return false;
     }
+    let trimmed = line.trim();
+    trimmed.starts_with('#')
+        || trimmed.starts_with("//")
+        || (trimmed.starts_with("<!--") && trimmed.ends_with("-->"))
+        || (trimmed.starts_with("/*") && trimmed.ends_with("*/"))
+}
+
+fn prev_line_allows(lines: &[&str], one_based_line: usize) -> bool {
+    one_based_line.checked_sub(2).and_then(|idx| lines.get(idx)).is_some_and(|prev| is_comment_allow_line(prev))
+}
+
+fn scan_cargo_toml(path: &str, text: &str, out: &mut Vec<BrandHit>) {
+    let mut scanner = TomlScanner::new(path, text, out);
+    scanner.run();
 }
 
 fn scan_plain_lines(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     let lines: Vec<&str> = text.lines().collect();
     for (idx, &line) in lines.iter().enumerate() {
-        if line.contains(ALLOW_MARKER) {
+        if line.contains(ALLOW_MARKER) || prev_line_allows(&lines, idx + 1) {
             continue;
         }
-        let prev_allows = idx > 0 && lines.get(idx - 1).is_some_and(|prev| prev.trim_start().starts_with('#') && prev.contains(ALLOW_MARKER));
-        if prev_allows {
-            continue;
-        }
-        collect_line_words(path, idx + 1, line, BRANDS, out);
+        collect_line_words(path, idx + 1, line, BRANDS, PrismPolicy::Standard, out);
     }
+}
+
+struct SvgChunk<'a> {
+    text: &'a str,
+    is_meta_text: bool,
+    prev_word: Option<String>,
+}
+
+#[derive(Default)]
+struct SvgState {
+    in_comment: bool,
+    in_tag: bool,
+    tag_buf: String,
+    in_meta: bool,
+    prev_meta_word: Option<String>,
+}
+
+impl SvgState {
+    fn split_line_chunks<'a>(&mut self, line: &'a str) -> Vec<SvgChunk<'a>> {
+        let mut chunks = Vec::new();
+        let bytes = line.as_bytes();
+        let mut i = 0usize;
+        let mut span_start = 0usize;
+        while i < bytes.len() {
+            if self.in_comment {
+                if bytes.get(i..i + 3) == Some(b"-->") {
+                    i += 3;
+                    self.in_comment = false;
+                    span_start = i;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if self.in_tag {
+                if bytes[i] == b'>' {
+                    self.tag_buf.push_str(&line[span_start..=i]);
+                    self.apply_completed_tag();
+                    chunks.push(SvgChunk { text: &line[span_start..=i], is_meta_text: false, prev_word: None });
+                    i += 1;
+                    span_start = i;
+                } else {
+                    i += 1;
+                }
+                continue;
+            }
+            if bytes.get(i..i + 4) == Some(b"<!--") {
+                self.push_text_chunk(line, span_start, i, &mut chunks);
+                self.in_comment = true;
+                i += 4;
+                span_start = i;
+                continue;
+            }
+            if bytes[i] == b'<' {
+                self.push_text_chunk(line, span_start, i, &mut chunks);
+                self.in_tag = true;
+                self.tag_buf.clear();
+                span_start = i;
+            }
+            i += 1;
+        }
+        if span_start < line.len() {
+            if self.in_tag {
+                self.tag_buf.push_str(&line[span_start..]);
+            }
+            if !self.in_comment && !self.in_tag {
+                self.push_text_chunk(line, span_start, line.len(), &mut chunks);
+            } else {
+                chunks.push(SvgChunk { text: &line[span_start..], is_meta_text: false, prev_word: None });
+            }
+        }
+        chunks
+    }
+
+    fn push_text_chunk<'a>(&mut self, line: &'a str, start: usize, end: usize, chunks: &mut Vec<SvgChunk<'a>>) {
+        if start >= end {
+            return;
+        }
+        let text = &line[start..end];
+        let prev_word = if self.in_meta { self.prev_meta_word.clone() } else { None };
+        chunks.push(SvgChunk { text, is_meta_text: self.in_meta, prev_word });
+        if self.in_meta && !text.trim().is_empty() {
+            let tail = trailing_ascii_word(text.trim_end()).to_ascii_lowercase();
+            self.prev_meta_word = if tail.is_empty() { None } else { Some(tail) };
+        }
+    }
+
+    fn apply_completed_tag(&mut self) {
+        self.in_tag = false;
+        let inner = self.tag_buf.trim_start_matches('<').trim_end_matches('>').trim();
+        let lower = inner.to_ascii_lowercase();
+        let is_close = lower.starts_with('/');
+        let name_src = lower.trim_start_matches('/');
+        let tag_name = name_src.split(|c: char| c.is_ascii_whitespace() || c == '/').next().unwrap_or("");
+        if matches!(tag_name, "title" | "desc") {
+            let self_closing = inner.ends_with('/');
+            if is_close {
+                self.in_meta = false;
+                self.prev_meta_word = None;
+            } else if !self_closing {
+                self.in_meta = true;
+                self.prev_meta_word = None;
+            }
+        }
+        self.tag_buf.clear();
+    }
+}
+
+fn scan_svg(path: &str, text: &str, out: &mut Vec<BrandHit>) {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut state = SvgState::default();
+    for (idx, &line) in lines.iter().enumerate() {
+        let chunks = state.split_line_chunks(line);
+        if line.contains(ALLOW_MARKER) || prev_line_allows(&lines, idx + 1) {
+            continue;
+        }
+        let mut line_brands: BTreeSet<&'static str> = BTreeSet::new();
+        for chunk in chunks {
+            let policy =
+                if chunk.is_meta_text { PrismPolicy::SvgTitleOrDesc { prev_word: chunk.prev_word.as_deref() } } else { PrismPolicy::Standard };
+            let lower = chunk.text.to_ascii_lowercase();
+            for &brand in BRANDS {
+                if !line_brands.contains(brand) && has_word_match(chunk.text, &lower, brand, policy) {
+                    line_brands.insert(brand);
+                    out.push(BrandHit { path: path.to_owned(), line: idx + 1, brand });
+                }
+            }
+        }
+    }
+}
+
+struct TomlScanner<'a> {
+    path: &'a str,
+    src: &'a str,
+    bytes: &'a [u8],
+    lines: Vec<&'a str>,
+    pos: usize,
+    line: usize,
+    in_metadata_section: bool,
+    in_workspace_section: bool,
+    seen: BTreeSet<(usize, &'static str)>,
+    out: &'a mut Vec<BrandHit>,
+}
+
+impl<'a> TomlScanner<'a> {
+    fn new(path: &'a str, src: &'a str, out: &'a mut Vec<BrandHit>) -> Self {
+        Self {
+            path,
+            src,
+            bytes: src.as_bytes(),
+            lines: src.lines().collect(),
+            pos: 0,
+            line: 1,
+            in_metadata_section: false,
+            in_workspace_section: false,
+            seen: BTreeSet::new(),
+            out,
+        }
+    }
+
+    fn run(&mut self) {
+        while self.pos < self.bytes.len() {
+            self.skip_ws_and_comments();
+            if self.pos >= self.bytes.len() {
+                break;
+            }
+            if self.bytes[self.pos] == b'[' {
+                self.read_table_header();
+            } else {
+                self.read_statement();
+            }
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.bytes.get(self.pos).copied()
+    }
+
+    fn advance_one(&mut self) -> Option<u8> {
+        let b = *self.bytes.get(self.pos)?;
+        self.pos += 1;
+        if b == b'\n' {
+            self.line += 1;
+        }
+        Some(b)
+    }
+
+    fn push_next_char(&mut self, text: &mut String, byte_lines: &mut Vec<usize>) {
+        if let Some(rest) = self.src.get(self.pos..)
+            && let Some(ch) = rest.chars().next()
+        {
+            let line = self.line;
+            push_char_with_line(text, byte_lines, ch, line);
+            self.pos += ch.len_utf8();
+            if ch == '\n' {
+                self.line += 1;
+            }
+        } else {
+            self.advance_one();
+        }
+    }
+
+    fn skip_comment(&mut self) {
+        while let Some(b) = self.peek() {
+            if b == b'\n' {
+                break;
+            }
+            self.pos += 1;
+        }
+    }
+
+    fn skip_ws_and_comments(&mut self) {
+        while let Some(b) = self.peek() {
+            match b {
+                b' ' | b'\t' | b'\r' | b'\n' => {
+                    self.advance_one();
+                }
+                b'#' => self.skip_comment(),
+                _ => break,
+            }
+        }
+    }
+
+    fn skip_inline_ws(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r')) {
+            self.pos += 1;
+        }
+    }
+
+    fn read_table_header(&mut self) {
+        let start_line = self.line;
+        let prev_allows = prev_line_allows(&self.lines, start_line);
+        let double = self.bytes.get(self.pos..self.pos + 2) == Some(b"[[");
+        self.pos += if double { 2 } else { 1 };
+        let (segments, key_lits) = self.read_dotted_key(true);
+        if self.peek() == Some(b']') {
+            self.pos += 1;
+            if double && self.peek() == Some(b']') {
+                self.pos += 1;
+            }
+        }
+        while let Some(b) = self.advance_one() {
+            if b == b'\n' {
+                break;
+            }
+        }
+        self.in_workspace_section = segments.len() == 1 && segments[0] == "workspace";
+        self.in_metadata_section = is_metadata_table_segments(&segments);
+        if self.in_metadata_section {
+            for lit in &key_lits {
+                self.check_literal(lit, prev_allows);
+            }
+        }
+    }
+
+    fn read_statement(&mut self) {
+        let stmt_prev_allow = prev_line_allows(&self.lines, self.line);
+        let (segments, key_lits) = self.read_dotted_key(false);
+        if self.peek() != Some(b'=') {
+            if let Some(b) = self.peek() {
+                if b == b'\n' {
+                    self.advance_one();
+                } else {
+                    while let Some(next) = self.advance_one() {
+                        if next == b'\n' {
+                            break;
+                        }
+                    }
+                }
+            }
+            return;
+        }
+        self.pos += 1; // '='
+        let is_meta = self.in_metadata_section || is_metadata_key_segments(&segments, self.in_workspace_section);
+        if is_meta {
+            for lit in &key_lits {
+                self.check_literal(lit, stmt_prev_allow);
+            }
+        }
+        self.scan_value(is_meta, stmt_prev_allow);
+    }
+
+    fn read_dotted_key(&mut self, in_header: bool) -> (Vec<String>, Vec<ExtractedLiteral>) {
+        let mut segments = Vec::new();
+        let mut lits = Vec::new();
+        while let Some(b) = self.peek() {
+            match b {
+                b'\n' | b'#' => break,
+                b']' if in_header => break,
+                b'=' if !in_header => break,
+                b'.' | b' ' | b'\t' | b'\r' => self.pos += 1,
+                b'"' => {
+                    let lit = self.read_basic_single_string();
+                    segments.push(lit.text.clone());
+                    lits.push(lit);
+                }
+                b'\'' => {
+                    let lit = self.read_literal_single_string();
+                    segments.push(lit.text.clone());
+                    lits.push(lit);
+                }
+                _ => {
+                    let lit = self.read_bare_token();
+                    if !lit.text.is_empty() {
+                        segments.push(lit.text.clone());
+                        lits.push(lit);
+                    }
+                }
+            }
+        }
+        (segments, lits)
+    }
+
+    fn scan_value(&mut self, is_meta: bool, stmt_prev_allow: bool) {
+        let mut depth = 0usize;
+        while let Some(b) = self.peek() {
+            match b {
+                b' ' | b'\t' | b'\r' => self.pos += 1,
+                b'\n' => {
+                    self.advance_one();
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                b'#' => self.skip_comment(),
+                b'[' | b'{' => {
+                    depth += 1;
+                    self.pos += 1;
+                }
+                b']' | b'}' => {
+                    depth = depth.saturating_sub(1);
+                    self.pos += 1;
+                }
+                b'"' => {
+                    let lit = if self.bytes.get(self.pos..self.pos + 3) == Some(b"\"\"\"") {
+                        self.read_basic_multiline_string()
+                    } else {
+                        self.read_basic_single_string()
+                    };
+                    if is_meta {
+                        self.check_literal(&lit, stmt_prev_allow);
+                    }
+                }
+                b'\'' => {
+                    let lit = if self.bytes.get(self.pos..self.pos + 3) == Some(b"'''") {
+                        self.read_literal_multiline_string()
+                    } else {
+                        self.read_literal_single_string()
+                    };
+                    if is_meta {
+                        self.check_literal(&lit, stmt_prev_allow);
+                    }
+                }
+                _ => {
+                    let lit = self.read_bare_token();
+                    if is_meta && !lit.text.is_empty() {
+                        self.check_literal(&lit, stmt_prev_allow);
+                    }
+                }
+            }
+        }
+    }
+
+    fn read_bare_token(&mut self) -> ExtractedLiteral {
+        let start_line = self.line;
+        let mut text = String::new();
+        let mut byte_lines = Vec::new();
+        while let Some(b) = self.peek() {
+            if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
+                self.push_next_char(&mut text, &mut byte_lines);
+            } else {
+                break;
+            }
+        }
+        if text.is_empty() && self.pos < self.bytes.len() {
+            self.advance_one();
+        }
+        ExtractedLiteral { text, byte_lines, start_line, end_line: self.line }
+    }
+
+    fn read_basic_single_string(&mut self) -> ExtractedLiteral {
+        let start_line = self.line;
+        self.pos += 1; // '"'
+        let mut text = String::new();
+        let mut byte_lines = Vec::new();
+        while let Some(b) = self.peek() {
+            if b == b'"' {
+                self.pos += 1;
+                break;
+            }
+            if b == b'\n' {
+                break;
+            }
+            if b == b'\\' {
+                self.read_toml_escape(&mut text, &mut byte_lines, false);
+                continue;
+            }
+            self.push_next_char(&mut text, &mut byte_lines);
+        }
+        ExtractedLiteral { text, byte_lines, start_line, end_line: self.line }
+    }
+
+    fn read_basic_multiline_string(&mut self) -> ExtractedLiteral {
+        let start_line = self.line;
+        self.pos += 3; // "\"\"\""
+        self.trim_opening_newline();
+        let mut text = String::new();
+        let mut byte_lines = Vec::new();
+        while let Some(b) = self.peek() {
+            if self.bytes.get(self.pos..self.pos + 3) == Some(b"\"\"\"") {
+                self.consume_closing_triple(b'"', &mut text, &mut byte_lines);
+                break;
+            }
+            if b == b'\\' {
+                self.read_toml_escape(&mut text, &mut byte_lines, true);
+                continue;
+            }
+            self.push_next_char(&mut text, &mut byte_lines);
+        }
+        ExtractedLiteral { text, byte_lines, start_line, end_line: self.line }
+    }
+
+    fn read_literal_single_string(&mut self) -> ExtractedLiteral {
+        let start_line = self.line;
+        self.pos += 1; // '\''
+        let mut text = String::new();
+        let mut byte_lines = Vec::new();
+        while let Some(b) = self.peek() {
+            if b == b'\'' {
+                self.pos += 1;
+                break;
+            }
+            if b == b'\n' {
+                break;
+            }
+            self.push_next_char(&mut text, &mut byte_lines);
+        }
+        ExtractedLiteral { text, byte_lines, start_line, end_line: self.line }
+    }
+
+    fn read_literal_multiline_string(&mut self) -> ExtractedLiteral {
+        let start_line = self.line;
+        self.pos += 3; // "'''"
+        self.trim_opening_newline();
+        let mut text = String::new();
+        let mut byte_lines = Vec::new();
+        while self.pos < self.bytes.len() {
+            if self.bytes.get(self.pos..self.pos + 3) == Some(b"'''") {
+                self.consume_closing_triple(b'\'', &mut text, &mut byte_lines);
+                break;
+            }
+            self.push_next_char(&mut text, &mut byte_lines);
+        }
+        ExtractedLiteral { text, byte_lines, start_line, end_line: self.line }
+    }
+
+    fn trim_opening_newline(&mut self) {
+        if self.bytes.get(self.pos..self.pos + 2) == Some(b"\r\n") {
+            self.pos += 2;
+            self.line += 1;
+        } else if self.peek() == Some(b'\n') {
+            self.pos += 1;
+            self.line += 1;
+        }
+    }
+
+    fn consume_closing_triple(&mut self, quote: u8, text: &mut String, byte_lines: &mut Vec<usize>) {
+        let mut run = 0usize;
+        while self.bytes.get(self.pos + run) == Some(&quote) && run < 5 {
+            run += 1;
+        }
+        let extra = run.saturating_sub(3);
+        let line = self.line;
+        for _ in 0..extra {
+            push_char_with_line(text, byte_lines, char::from(quote), line);
+        }
+        self.pos += run;
+    }
+
+    fn read_toml_escape(&mut self, text: &mut String, byte_lines: &mut Vec<usize>, multiline: bool) {
+        let esc_line = self.line;
+        self.pos += 1; // '\\'
+        let Some(next) = self.peek() else {
+            return;
+        };
+        if multiline && is_line_ending_backslash(self.bytes, self.pos) {
+            self.skip_inline_ws();
+            if self.peek() == Some(b'\n') {
+                self.advance_one();
+            }
+            self.skip_multiline_ws();
+            return;
+        }
+        self.advance_one();
+        match next {
+            b'b' => push_char_with_line(text, byte_lines, '\u{0008}', esc_line),
+            b't' => push_char_with_line(text, byte_lines, '\t', esc_line),
+            b'n' => push_char_with_line(text, byte_lines, '\n', esc_line),
+            b'f' => push_char_with_line(text, byte_lines, '\u{000C}', esc_line),
+            b'r' => push_char_with_line(text, byte_lines, '\r', esc_line),
+            b'"' => push_char_with_line(text, byte_lines, '"', esc_line),
+            b'\\' => push_char_with_line(text, byte_lines, '\\', esc_line),
+            b'u' => self.push_unicode_escape(text, byte_lines, 4, esc_line),
+            b'U' => self.push_unicode_escape(text, byte_lines, 8, esc_line),
+            other => push_char_with_line(text, byte_lines, char::from(other), esc_line),
+        }
+    }
+
+    fn skip_multiline_ws(&mut self) {
+        while matches!(self.peek(), Some(b' ' | b'\t' | b'\r' | b'\n')) {
+            self.advance_one();
+        }
+    }
+
+    fn push_unicode_escape(&mut self, text: &mut String, byte_lines: &mut Vec<usize>, digits: usize, line: usize) {
+        if let Some(hex) = self.src.get(self.pos..self.pos + digits)
+            && let Ok(code) = u32::from_str_radix(hex, 16)
+            && let Some(ch) = char::from_u32(code)
+        {
+            self.pos += digits;
+            push_char_with_line(text, byte_lines, ch, line);
+        }
+    }
+
+    fn check_literal(&mut self, lit: &ExtractedLiteral, stmt_prev_allow: bool) {
+        let allowed =
+            stmt_prev_allow || line_range_allows(&self.lines, lit.start_line, lit.end_line) || prev_line_allows(&self.lines, lit.start_line);
+        if !allowed {
+            collect_literal_words(self.path, lit, BRANDS, PrismPolicy::Standard, &mut self.seen, self.out);
+        }
+    }
+}
+
+fn line_range_allows(lines: &[&str], start_line: usize, end_line: usize) -> bool {
+    (start_line..=end_line).any(|ln| lines.get(ln.saturating_sub(1)).is_some_and(|src| src.contains(ALLOW_MARKER)))
+}
+
+fn is_line_ending_backslash(bytes: &[u8], mut pos: usize) -> bool {
+    while matches!(bytes.get(pos), Some(b' ' | b'\t' | b'\r')) {
+        pos += 1;
+    }
+    bytes.get(pos) == Some(&b'\n')
+}
+
+fn is_metadata_table_segments(segments: &[String]) -> bool {
+    match segments {
+        [first] => first == "package",
+        [first, second, ..] => {
+            (first == "package" || first == "workspace")
+                && (second == "package" && segments.len() == 2 && first == "workspace" || second == "metadata")
+        }
+        _ => false,
+    }
+}
+
+fn is_metadata_key_segments(segments: &[String], in_workspace_section: bool) -> bool {
+    let first = segments.first().map(String::as_str);
+    let second = segments.get(1).map(String::as_str);
+    if first == Some("package") {
+        return true;
+    }
+    if first == Some("workspace") && matches!(second, Some("package" | "metadata")) {
+        return true;
+    }
+    in_workspace_section && matches!(first, Some("package" | "metadata"))
 }
 
 struct ExtractedLiteral {
@@ -614,7 +1202,7 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
             let line_allows =
                 (lit.start_line..=lit.end_line).any(|ln| lines.get(ln.saturating_sub(1)).is_some_and(|src_line| src_line.contains(ALLOW_MARKER)));
             if !line_allows {
-                collect_literal_words(path, &lit, BRANDS, &mut seen, out);
+                collect_literal_words(path, &lit, BRANDS, PrismPolicy::RustLiteral, &mut seen, out);
             }
             continue;
         }
@@ -622,58 +1210,98 @@ fn scan_rust(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     }
 }
 
+#[derive(Clone, Copy)]
+enum PrismPolicy<'a> {
+    Strict,
+    Standard,
+    RustLiteral,
+    SvgTitleOrDesc { prev_word: Option<&'a str> },
+}
+
 fn collect_literal_words(
     path: &str,
     lit: &ExtractedLiteral,
     words: &[&'static str],
+    policy: PrismPolicy<'_>,
     seen: &mut BTreeSet<(usize, &'static str)>,
     out: &mut Vec<BrandHit>,
 ) {
     let lower = lit.text.to_ascii_lowercase();
-    let bytes = lower.as_bytes();
     for &brand in words {
-        let wlen = brand.len();
-        let mut start = 0;
-        while let Some(rel) = lower[start..].find(brand) {
-            let pos = start + rel;
-            let end = pos + wlen;
-            let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
-            let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
-            if left_ok && right_ok {
-                let line = lit.byte_lines.get(pos).copied().unwrap_or(lit.start_line);
-                if seen.insert((line, brand)) {
-                    out.push(BrandHit { path: path.to_owned(), line, brand });
-                }
+        collect_word_matches(&lit.text, &lower, brand, policy, |pos| {
+            let line = lit.byte_lines.get(pos).copied().unwrap_or(lit.start_line);
+            if seen.insert((line, brand)) {
+                out.push(BrandHit { path: path.to_owned(), line, brand });
             }
-            start = pos + 1;
-        }
+        });
     }
 }
 
-fn collect_line_words(path: &str, line_no: usize, haystack: &str, words: &[&'static str], out: &mut Vec<BrandHit>) {
+fn collect_line_words(path: &str, line_no: usize, haystack: &str, words: &[&'static str], policy: PrismPolicy<'_>, out: &mut Vec<BrandHit>) {
     let lower = haystack.to_ascii_lowercase();
     for &brand in words {
-        if contains_word(&lower, brand) {
+        if has_word_match(haystack, &lower, brand, policy) {
             out.push(BrandHit { path: path.to_owned(), line: line_no, brand });
         }
     }
 }
 
-fn contains_word(lower_haystack: &str, word: &str) -> bool {
-    let bytes = lower_haystack.as_bytes();
+fn has_word_match(raw: &str, lower: &str, word: &'static str, policy: PrismPolicy<'_>) -> bool {
+    let mut found = false;
+    collect_word_matches(raw, lower, word, policy, |_| {
+        found = true;
+    });
+    found
+}
+
+fn collect_word_matches(raw: &str, lower: &str, word: &'static str, policy: PrismPolicy<'_>, mut on_match: impl FnMut(usize)) {
+    let bytes = lower.as_bytes();
     let wlen = word.len();
     let mut start = 0;
-    while let Some(rel) = lower_haystack[start..].find(word) {
+    while let Some(rel) = lower[start..].find(word) {
         let pos = start + rel;
         let end = pos + wlen;
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
         let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
-        if left_ok && right_ok {
-            return true;
+        if left_ok && right_ok && !(word == "prism" && is_prism_match_exempt(raw, lower, pos, policy)) {
+            on_match(pos);
         }
         start = pos + 1;
     }
-    false
+}
+
+fn is_prism_match_exempt(raw: &str, lower: &str, pos: usize, policy: PrismPolicy<'_>) -> bool {
+    let end = pos + "prism".len();
+    let is_lower_dot_ext = raw.as_bytes().get(pos..end) == Some(b"prism") && is_prism_extension_token(lower.as_bytes(), pos, end);
+    match policy {
+        PrismPolicy::Strict => false,
+        PrismPolicy::Standard => is_lower_dot_ext,
+        PrismPolicy::RustLiteral => raw == "prism" || is_lower_dot_ext,
+        PrismPolicy::SvgTitleOrDesc { prev_word } => is_lower_dot_ext || is_preceded_by_optical_modifier(&lower[..pos], prev_word),
+    }
+}
+
+fn is_prism_extension_token(bytes: &[u8], pos: usize, end: usize) -> bool {
+    if pos == 0 || bytes[pos - 1] != b'.' {
+        return false;
+    }
+    let followed_by_domain_segment = bytes.get(end) == Some(&b'.') && bytes.get(end + 1).is_some_and(u8::is_ascii_alphanumeric);
+    !followed_by_domain_segment
+}
+
+fn is_preceded_by_optical_modifier(before_lower: &str, prev_word: Option<&str>) -> bool {
+    let trimmed = before_lower.trim_end();
+    let word = if trimmed.is_empty() { prev_word.unwrap_or("") } else { trailing_ascii_word(trimmed) };
+    OPTICAL_PRISM_MODIFIERS.contains(&word)
+}
+
+fn trailing_ascii_word(s: &str) -> &str {
+    let bytes = s.as_bytes();
+    let mut start = bytes.len();
+    while start > 0 && (bytes[start - 1].is_ascii_alphanumeric() || bytes[start - 1] == b'-') {
+        start -= 1;
+    }
+    &s[start..]
 }
 
 #[cfg(test)]
@@ -853,6 +1481,173 @@ Keywords=biostatistics;regression;GraphPad;
                 BrandHit { path: String::from("docs/releasing.md"), line: 1, brand: "artcraft" },
                 BrandHit { path: String::from("README.md"), line: 1, brand: "getartcraft" },
                 BrandHit { path: String::from("README.md"), line: 1, brand: "craft-ui" },
+            ]
+        );
+    }
+
+    #[test]
+    fn flags_unmarked_prism_mentions_while_allowing_extensions_and_format_tokens() {
+        let mut hits = Vec::new();
+        let rust_src = r#"
+pub fn ext_match(ext: &str) -> &'static str {
+    match ext {
+        "prism" | "pzfx" => "project.prism",
+        _ => "other",
+    }
+}
+pub const MSG_OK: &str = "Import *.prism or table.importPrism files";
+pub const MSG_BRAND: &str = "Import .prism or Prism project";
+pub const LABEL_BAD: &str = "Prism Archive";
+pub const DOMAIN_BAD: &str = "https://www.prism.com/download";
+pub const LABEL_MARKED: &str = "Prism Archive"; // brand-ok
+#[cfg(test)]
+mod tests {
+    const TEST_FIXTURE: &str = "GraphPad Prism";
+}
+"#;
+        scan_file("crates/format/src/registry.rs", rust_src, &mut hits);
+        assert_eq!(
+            hits,
+            vec![
+                BrandHit { path: String::from("crates/format/src/registry.rs"), line: 9, brand: "prism" },
+                BrandHit { path: String::from("crates/format/src/registry.rs"), line: 10, brand: "prism" },
+                BrandHit { path: String::from("crates/format/src/registry.rs"), line: 11, brand: "prism" },
+            ]
+        );
+    }
+
+    #[test]
+    fn svg_allows_optical_prism_metadata_and_flags_non_optical_uses() {
+        let mut hits = Vec::new();
+        let svg = r#"<svg xmlns="http://www.w3.org/2000/svg">
+  <title>LumenCraft icon — Mole holding a refractive prism</title>
+  <desc>Clean geometric vector icon holding a glowing triangular optical
+  prism dispersing light into a spectrum.</desc>
+  <title>Prism Scientific Studio</title>
+  <text x="0" y="10">optical prism</text>
+  <!-- Compatibility icon label: brand-ok -->
+  <title>Prism Archive</title>
+</svg>
+"#;
+        scan_file("assets/app-icon/lumencraft.svg", svg, &mut hits);
+        assert_eq!(
+            hits,
+            vec![
+                BrandHit { path: String::from("assets/app-icon/lumencraft.svg"), line: 5, brand: "prism" },
+                BrandHit { path: String::from("assets/app-icon/lumencraft.svg"), line: 6, brand: "prism" },
+            ]
+        );
+    }
+
+    #[test]
+    fn scans_github_issue_templates_and_apps_non_rust_files() {
+        let mut hits = Vec::new();
+        let template = "\
+name: Numerical discrepancy
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not attach screenshots from Prism or OriginPro.
+        Export `.prism` cleanly instead.
+        # brand-ok compatibility mention: Prism
+";
+        scan_file(".github/ISSUE_TEMPLATE/numerical_result.yml", template, &mut hits);
+
+        let html = "\
+<!doctype html>
+<html>
+  <head><title>LumenCraft</title></head>
+  <body>
+    <input accept=\".lcf,.prism,.pzfx\">
+    <p>Drop a Prism file here.</p>
+    <p>Drop a Prism file here.</p> <!-- brand-ok -->
+  </body>
+</html>
+";
+        scan_file("apps/lumencraft-web/index.html", html, &mut hits);
+
+        let web_rs = "\
+#[cfg(test)]
+mod tests {
+    const FIXTURE: &str = \"Prism\";
+}
+pub fn prod_format() -> &'static str { \"prism\" }
+";
+        scan_file("apps/lumencraft-web/src/lib.rs", web_rs, &mut hits);
+
+        assert_eq!(
+            hits,
+            vec![
+                BrandHit { path: String::from(".github/ISSUE_TEMPLATE/numerical_result.yml"), line: 6, brand: "prism" },
+                BrandHit { path: String::from(".github/ISSUE_TEMPLATE/numerical_result.yml"), line: 6, brand: "originpro" },
+                BrandHit { path: String::from("apps/lumencraft-web/index.html"), line: 6, brand: "prism" },
+            ]
+        );
+    }
+
+    #[test]
+    fn scans_cargo_toml_multiline_descriptions_keywords_categories_and_metadata() {
+        let mut hits = Vec::new();
+        let toml = r#"
+package.metadata.tool = "SPSS"
+
+[package]
+name = "demo"
+description = """
+Curve fitting for .prism files,
+unlike GraphPad
+or Prism."""
+keywords = [
+  "biostatistics",
+  "Prism", # brand-ok
+  "OriginPro",
+]
+categories = ["science", "prism"]
+# Allowed note: brand-ok
+homepage = """
+https://example.com/prism
+"""
+documentation = """
+Prism docs
+""" # brand-ok
+
+[package.metadata]
+short_desc = "JMP importer"
+
+[package.metadata.prism]
+enabled = true
+
+[workspace.package]
+description = '''
+Continuation
+Minitab note
+'''
+
+[workspace.metadata]
+suite_note = "Systat"
+
+[workspace]
+package = { description = "Prism workspace" }
+
+[dependencies]
+# Ignored dependency comment mentioning GraphPad and Prism
+serde = "1"
+"#;
+        scan_file("crates/demo/Cargo.toml", toml, &mut hits);
+        assert_eq!(
+            hits,
+            vec![
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 2, brand: "spss" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 8, brand: "graphpad" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 9, brand: "prism" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 13, brand: "originpro" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 15, brand: "prism" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 25, brand: "jmp" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 27, brand: "prism" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 33, brand: "minitab" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 37, brand: "systat" },
+                BrandHit { path: String::from("crates/demo/Cargo.toml"), line: 40, brand: "prism" },
             ]
         );
     }

@@ -9,7 +9,9 @@ Exec=lumencraft %F
 TryExec=lumencraft
 Terminal=false
 Categories=Science;Math;DataVisualization;NumericalAnalysis;
+# Compatibility MIME types for .prism/.pzfx import: brand-ok
 MimeType=application/vnd.lumencraft.project;application/vnd.lumencraft.template;application/x-prism-project;application/x-prism-xml;text/csv;text/tab-separated-values;
+# Compatibility search keyword for .prism import: brand-ok
 Keywords=biostatistics;regression;curve-fitting;anova;survival;graphing;plotting;prism;
 StartupNotify=true
 StartupWMClass=lumencraft
