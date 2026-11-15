@@ -6,6 +6,8 @@ pub mod dag;
 pub mod eval;
 pub mod parser;
 
-pub use dag::{DependencyTarget, evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, extract_dependencies};
+pub use dag::{
+    DependencyTarget, evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, extract_dependencies, validate_no_formula_cycle,
+};
 pub use eval::{FormulaContext, FormulaValue, ScalarEnv, TableEvalContext, eval_column_expr, eval_scalar_expr, evaluate_formula_for_sheet};
 pub use parser::{BinaryOp, Expr, UnaryOp, VarRef, parse_formula};

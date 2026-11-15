@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 
-use lumencraft_doc::{DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, VariableSource};
+use lumencraft_doc::{DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, VariableSource, default_column_label};
 
 use crate::error::TransformError;
 use crate::formula::eval::{MultipleVariablesContext, eval_column_expr, resolve_mv_column};
@@ -54,37 +54,29 @@ fn collect_deps(expr: &Expr, out: &mut BTreeSet<DependencyTarget>) {
     }
 }
 
+/// Validate that assigning `formula` to column `target_col` in `mv` introduces neither
+/// direct self-references nor multi-hop dependency cycles across calculated variables.
+pub fn validate_no_formula_cycle(mv: &MultipleVariablesTable, target_col: usize, formula: &str) -> Result<(), TransformError> {
+    let n_cols = mv.variables.len();
+    if target_col >= n_cols {
+        return Err(TransformError::InvalidSpec {
+            message: format!("target column index {target_col} out of bounds for table with {n_cols} variables"),
+        });
+    }
+    let target_expr = parse_formula(formula)?;
+    let _ = plan_calculated_variables(mv, Some((target_col, target_expr)))?;
+    Ok(())
+}
+
 /// Evaluate all `VariableSource::Calculated` columns in `table` in deterministic topological order.
 ///
 /// Rejects self-references and multi-column dependency cycles with [`TransformError::CircularDependency`].
 /// Returns the evaluated column indices in topological execution order.
 pub fn evaluate_calculated_variables(table: &mut MultipleVariablesTable, info_sheet: Option<&InfoSheet>) -> Result<Vec<usize>, TransformError> {
-    let n_cols = table.variables.len();
-    let mut parsed_cols: Vec<(usize, Expr)> = Vec::new();
-    let mut is_calc = vec![false; n_cols];
-
-    for (idx, var) in table.variables.iter().enumerate() {
-        if let VariableSource::Calculated { formula } = &var.source {
-            let expr = parse_formula(formula)?;
-            parsed_cols.push((idx, expr));
-            is_calc[idx] = true;
-        }
-    }
-
-    if parsed_cols.is_empty() {
+    let (order, expr_by_col) = plan_calculated_variables(table, None)?;
+    if order.is_empty() {
         return Ok(Vec::new());
     }
-
-    let (dependents, mut in_degree) = build_dependency_graph(table, &parsed_cols, &is_calc)?;
-    let order = topo_sort_columns(table, &parsed_cols, &dependents, &mut in_degree)?;
-
-    let expr_by_col: Vec<Option<Expr>> = {
-        let mut map = vec![None; n_cols];
-        for (idx, expr) in parsed_cols {
-            map[idx] = Some(expr);
-        }
-        map
-    };
 
     for &col_idx in &order {
         let Some(expr) = expr_by_col.get(col_idx).and_then(Option::as_ref) else {
@@ -113,6 +105,42 @@ pub fn evaluate_calculated_variables(table: &mut MultipleVariablesTable, info_sh
     Ok(order)
 }
 
+fn plan_calculated_variables(
+    table: &MultipleVariablesTable,
+    override_col: Option<(usize, Expr)>,
+) -> Result<(Vec<usize>, Vec<Option<Expr>>), TransformError> {
+    let n_cols = table.variables.len();
+    let mut parsed_cols: Vec<(usize, Expr)> = Vec::new();
+    let mut is_calc = vec![false; n_cols];
+    let mut expr_by_col: Vec<Option<Expr>> = vec![None; n_cols];
+
+    if let Some((target_idx, expr)) = override_col {
+        is_calc[target_idx] = true;
+        expr_by_col[target_idx] = Some(expr.clone());
+        parsed_cols.push((target_idx, expr));
+    }
+
+    for (idx, var) in table.variables.iter().enumerate() {
+        if is_calc[idx] {
+            continue;
+        }
+        if let VariableSource::Calculated { formula } = &var.source {
+            let expr = parse_formula(formula)?;
+            is_calc[idx] = true;
+            expr_by_col[idx] = Some(expr.clone());
+            parsed_cols.push((idx, expr));
+        }
+    }
+
+    if parsed_cols.is_empty() {
+        return Ok((Vec::new(), expr_by_col));
+    }
+
+    let (dependents, mut in_degree) = build_dependency_graph(table, &parsed_cols, &is_calc)?;
+    let order = topo_sort_columns(table, &parsed_cols, &dependents, &mut in_degree)?;
+    Ok((order, expr_by_col))
+}
+
 /// Evaluate calculated variables on a [`DataSheet`] if its archetype is `MultipleVariables`.
 pub fn evaluate_data_sheet_calculated_variables(sheet: &mut DataSheet, info_sheet: Option<&InfoSheet>) -> Result<Vec<usize>, TransformError> {
     sheet.ensure_mutable()?;
@@ -120,6 +148,11 @@ pub fn evaluate_data_sheet_calculated_variables(sheet: &mut DataSheet, info_shee
         TableArchetype::MultipleVariables(mv) => evaluate_calculated_variables(mv, info_sheet),
         _ => Ok(Vec::new()),
     }
+}
+
+fn col_display_name(table: &MultipleVariablesTable, idx: usize) -> String {
+    let title = &table.variables[idx].title;
+    if title.trim().is_empty() { default_column_label(idx) } else { title.clone() }
 }
 
 fn build_dependency_graph(
@@ -135,7 +168,7 @@ fn build_dependency_graph(
         let deps = resolve_col_deps(table, expr);
         for dep in deps {
             if dep == *col_idx {
-                let name = table.variables[*col_idx].title.clone();
+                let name = col_display_name(table, *col_idx);
                 return Err(TransformError::CircularDependency { cycle: vec![name.clone(), name] });
             }
             if is_calc[dep] && !dependents[dep].contains(col_idx) {
@@ -208,10 +241,10 @@ fn find_cycle_names(table: &MultipleVariablesTable, dependents: &[Vec<usize>], r
         if state[start] == 0
             && let Some(cycle_idxs) = dfs_cycle(start, dependents, &mut state, &mut stack)
         {
-            return cycle_idxs.into_iter().map(|i| table.variables[i].title.clone()).collect();
+            return cycle_idxs.into_iter().map(|i| col_display_name(table, i)).collect();
         }
     }
-    remaining.iter().map(|&i| table.variables[i].title.clone()).collect()
+    remaining.iter().map(|&i| col_display_name(table, i)).collect()
 }
 
 fn dfs_cycle(node: usize, adj: &[Vec<usize>], state: &mut [u8], stack: &mut Vec<usize>) -> Option<Vec<usize>> {

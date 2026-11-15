@@ -1,10 +1,11 @@
 use std::collections::BTreeMap;
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, DocError,
-    ErrorPropagationMode, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LinkSource,
-    MathTransformPreset, MultipleVariablesTable, NormalizeAnchor, PlacementMode, SheetCellRange, SheetId, SimulationNoise, SubcolumnMode,
-    TableArchetype, TableKind, TransformAnalysisSpec, XColumnMode, XyTable,
+    AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable,
+    DataSheet, DocError, ErrorPropagationMode, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet,
+    InternalLinkKind, LinkSource, MathTransformPreset, MultipleVariablesTable, NestedTable, NormalizeAnchor, PartsOfWholeTable, PlacementMode,
+    SheetCellRange, SheetId, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, TransformAnalysisSpec, VariableRole,
+    XColumnMode, XyTable,
 };
 use lumencraft_transform::{
     AucOptions, BaselineKind, CurveSheetOp, DependencyTarget, DerivativeOrder, FormulaValue, ImportPipelineOptions, ImportSourcePayload,
@@ -12,7 +13,7 @@ use lumencraft_transform::{
     apply_import_link_pipeline, compute_auc, compute_auc_with_se, compute_sheet_auc, detect_link_cycles, differentiate_xy, eval_scalar_expr,
     evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, evaluate_equation, evaluate_formula_for_sheet,
     execute_analysis_transform, execute_math_transform, execute_prune, execute_remove_baseline_kind, execute_select, execute_transform,
-    extract_dependencies, integrate_xy, parse_formula, simulate_xy_sheet, smooth_xy,
+    extract_dependencies, integrate_xy, parse_formula, simulate_xy_sheet, smooth_xy, validate_no_formula_cycle,
 };
 
 fn assert_approx(actual: f64, expected: f64, tol: f64) {
@@ -687,4 +688,401 @@ fn import_link_pipeline_four_stages_and_cycle_detection() {
 
     // Unused helper import check
     let _ = BTreeMap::<String, FormulaValue>::new();
+}
+
+#[allow(clippy::unwrap_used)]
+fn build_wf29_wf31_master_sheet() -> DataSheet {
+    let mut mv = MultipleVariablesTable::new(8, 5).unwrap();
+    let specs = [
+        ("SampleID", VariableRole::Label),
+        ("Group", VariableRole::Categorical),
+        ("RefGroup", VariableRole::Categorical),
+        ("Dose", VariableRole::Continuous),
+        ("Baseline", VariableRole::Continuous),
+        ("Response", VariableRole::Continuous),
+        ("CountYes", VariableRole::Continuous),
+        ("CountNo", VariableRole::Continuous),
+    ];
+    for (idx, (title, role)) in specs.iter().enumerate() {
+        mv.variables[idx].title = (*title).to_owned();
+        mv.variables[idx].role = *role;
+        mv.variables[idx].role_inferred = false;
+    }
+    mv.row_titles = vec!["R1", "R2", "R3", "R4", "R5"].into_iter().map(str::to_owned).collect();
+    mv.row_titles_expanded = true;
+
+    let rows = [
+        ("S1", "Ctrl", "Ctrl", 0.0, 10.0, 12.0, 5.0, 15.0),
+        ("S2", "Drug", "Drug", 10.0, 20.0, 18.0, 8.0, 12.0),
+        ("S3", "Drug", "Drug", 25.0, 20.0, 35.0, 14.0, 6.0),
+        ("S4", "Drug", "Alt", 50.0, 30.0, 52.0, 18.0, 2.0),
+        ("S5", "Drug", "Drug", 0.0, 15.0, 40.0, 9.0, 11.0),
+    ];
+    for (r, (sid, grp, rgrp, dose, base, resp, cy, cn)) in rows.into_iter().enumerate() {
+        mv.variables[0].cells[r] = Cell::text(sid);
+        mv.variables[1].cells[r] = Cell::text(grp);
+        mv.variables[2].cells[r] = Cell::text(rgrp);
+        mv.variables[3].cells[r] = Cell::number(dose);
+        mv.variables[4].cells[r] = Cell::number(base);
+        mv.variables[5].cells[r] = Cell::number(resp);
+        mv.variables[6].cells[r] = Cell::number(cy);
+        mv.variables[7].cells[r] = Cell::number(cn);
+    }
+    DataSheet::new("master", "Master MV", TableArchetype::MultipleVariables(mv)).unwrap()
+}
+
+#[test]
+fn select_and_transform_selected_columns_into_xy_column_and_grouped() {
+    let master = build_wf29_wf31_master_sheet();
+
+    let ctx_xy = TransformContext { selected_data_sets: vec![3, 5], ..Default::default() };
+    let xy_out = execute_transform(
+        &master,
+        &TransformAnalysisSpec::SelectAndTransform {
+            filter_formula: Some(String::from("Dose > 0 && Response > Baseline")),
+            target_archetype: TableKind::Xy,
+        },
+        &ctx_xy,
+    )
+    .unwrap();
+    let TableArchetype::Xy(xy) = &xy_out.data_sheet.archetype else {
+        panic!("expected Xy");
+    };
+    assert_eq!(xy.x_title, "Dose");
+    assert_eq!(xy.data_sets.len(), 1);
+    assert_eq!(xy.data_sets[0].title, "Response");
+    assert_eq!(xy.row_count(), 2);
+    assert_eq!(xy.row_titles, vec!["R3", "R4"]);
+    assert_approx(xy.x_value_at(0).unwrap(), 25.0, 1e-12);
+    assert_approx(xy.data_sets[0].cells[0][0].active_number().unwrap(), 35.0, 1e-12);
+
+    let ctx_cols = TransformContext { selected_data_sets: vec![4, 5], ..Default::default() };
+    let rule_cat = SelectRule::Predicate(String::from("Group == \"Drug\" AND Group == RefGroup AND Dose > 0"));
+    let col_out = execute_select(&master, std::slice::from_ref(&rule_cat), TableKind::Column, &ctx_cols).unwrap();
+    let TableArchetype::Column(col_tbl) = &col_out.data_sheet.archetype else {
+        panic!("expected Column");
+    };
+    assert_eq!(col_tbl.data_sets.len(), 2);
+    assert_eq!(col_tbl.data_sets[0].title, "Baseline");
+    assert_eq!(col_tbl.data_sets[1].title, "Response");
+    assert_eq!(col_tbl.row_titles, vec!["R2", "R3"]);
+
+    let grp_out = execute_select(&master, std::slice::from_ref(&rule_cat), TableKind::Grouped, &ctx_cols).unwrap();
+    let TableArchetype::Grouped(grp_tbl) = &grp_out.data_sheet.archetype else {
+        panic!("expected Grouped");
+    };
+    assert_eq!(grp_tbl.data_sets.len(), 2);
+    assert_eq!(grp_tbl.data_sets[0].title, "Baseline");
+    assert_eq!(grp_tbl.row_titles, vec!["R2", "R3"]);
+}
+
+#[test]
+fn select_and_transform_contingency_mv_subset_and_bounds() {
+    let master = build_wf29_wf31_master_sheet();
+
+    let ctx_cont = TransformContext { selected_data_sets: vec![6, 7], ..Default::default() };
+    let cont_out = execute_select(&master, &[SelectRule::RowRange(2, 3)], TableKind::Contingency, &ctx_cont).unwrap();
+    let TableArchetype::Contingency(cont_tbl) = &cont_out.data_sheet.archetype else {
+        panic!("expected Contingency");
+    };
+    assert_eq!(cont_tbl.data_sets.len(), 2);
+    assert_eq!(cont_tbl.data_sets[0].title, "CountYes");
+    assert_eq!(cont_tbl.data_sets[1].title, "CountNo");
+    assert_eq!(cont_tbl.row_titles, vec!["R3", "R4"]);
+    assert_eq!(cont_tbl.count_at(0, 0).unwrap(), Some(14));
+    assert_eq!(cont_tbl.count_at(1, 1).unwrap(), Some(2));
+
+    let ctx_bad_cont = TransformContext { selected_data_sets: vec![0, 5], ..Default::default() };
+    let cont_err = execute_select(&master, &[], TableKind::Contingency, &ctx_bad_cont).unwrap_err();
+    assert!(matches!(cont_err, TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::Contingency, .. })));
+
+    let ctx_mv = TransformContext { selected_data_sets: vec![1, 5], ..Default::default() };
+    let mv_sub = execute_select(&master, &[SelectRule::Predicate(String::from("Group != \"Ctrl\""))], TableKind::MultipleVariables, &ctx_mv).unwrap();
+    let TableArchetype::MultipleVariables(sub) = &mv_sub.data_sheet.archetype else {
+        panic!("expected MultipleVariables");
+    };
+    assert_eq!(sub.variables.len(), 2);
+    assert_eq!(sub.variables[0].title, "Group");
+    assert_eq!(sub.variables[0].role, VariableRole::Categorical);
+    assert_eq!(sub.variables[1].title, "Response");
+    assert_eq!(sub.row_count(), 4);
+
+    let all_cols = execute_select(&master, &[], TableKind::Column, &TransformContext::default()).unwrap();
+    assert_eq!(all_cols.data_sheet.archetype.column_count(), 8);
+
+    let ctx_oob = TransformContext { selected_data_sets: vec![99], ..Default::default() };
+    assert!(matches!(execute_select(&master, &[], TableKind::Column, &ctx_oob), Err(TransformError::InvalidSpec { .. })));
+}
+
+#[test]
+fn validate_no_formula_cycle_guards_and_errors() {
+    let mut mv = MultipleVariablesTable::new(4, 3).unwrap();
+    for (i, name) in ["ColA", "ColB", "ColC", "Raw"].iter().enumerate() {
+        mv.variables[i].title = (*name).to_owned();
+    }
+    for r in 0..3 {
+        mv.variables[3].cells[r] = Cell::number((r + 1) as f64 * 10.0);
+    }
+    mv.variables[1].set_calculated_formula("=ColA + 1");
+    mv.variables[2].set_calculated_formula("=ColB * 2");
+
+    validate_no_formula_cycle(&mv, 0, "=Raw / 2").unwrap();
+    assert!(matches!(mv.variables[0].source, lumencraft_doc::VariableSource::Entered));
+
+    assert!(matches!(validate_no_formula_cycle(&mv, 0, "=ColA + 1"), Err(TransformError::CircularDependency { .. })));
+    assert!(matches!(validate_no_formula_cycle(&mv, 0, "=A * 2"), Err(TransformError::CircularDependency { .. })));
+    assert!(matches!(validate_no_formula_cycle(&mv, 0, "=col(0) + Raw"), Err(TransformError::CircularDependency { .. })));
+
+    let err2 = validate_no_formula_cycle(&mv, 0, "=ColB + 5").unwrap_err();
+    match err2 {
+        TransformError::CircularDependency { cycle } => {
+            assert!(cycle.contains(&String::from("ColA")) && cycle.contains(&String::from("ColB")));
+        }
+        other => panic!("expected 2-hop CircularDependency, got {other:?}"),
+    }
+
+    let err3 = validate_no_formula_cycle(&mv, 0, "=ColC - 1").unwrap_err();
+    assert!(matches!(err3, TransformError::CircularDependency { .. }));
+
+    assert!(matches!(validate_no_formula_cycle(&mv, 9, "=1"), Err(TransformError::InvalidSpec { .. })));
+    assert!(matches!(validate_no_formula_cycle(&mv, 0, "=1 + * 2"), Err(TransformError::ParseError { .. })));
+}
+
+#[test]
+fn rowwise_round_sum_mean_if_log10_and_qpcr_ddct_chain() {
+    let env = ScalarEnv::default();
+    assert_approx(eval_scalar_expr(&parse_formula("ROUND(2.71828, 2)").unwrap(), &env).unwrap().as_finite_f64().unwrap(), 2.72, 1e-12);
+    assert_approx(eval_scalar_expr(&parse_formula("ROUND(1234, -2)").unwrap(), &env).unwrap().as_finite_f64().unwrap(), 1200.0, 1e-12);
+    assert_approx(eval_scalar_expr(&parse_formula("ROUND(2.6)").unwrap(), &env).unwrap().as_finite_f64().unwrap(), 3.0, 1e-12);
+    assert_approx(eval_scalar_expr(&parse_formula("SUM(1, 2, 3.5)").unwrap(), &env).unwrap().as_finite_f64().unwrap(), 6.5, 1e-12);
+    assert_approx(eval_scalar_expr(&parse_formula("MEAN(2, 4, 9)").unwrap(), &env).unwrap().as_finite_f64().unwrap(), 5.0, 1e-12);
+
+    let mut qpcr = MultipleVariablesTable::new(14, 4).unwrap();
+    let titles = [
+        "Group",
+        "Ct_T1",
+        "Ct_T2",
+        "Ct_T3",
+        "Ct_R1",
+        "Ct_R2",
+        "Ct_R3",
+        "TargetMean",
+        "RefMean",
+        "DeltaCt",
+        "CalDeltaCt",
+        "ddCt",
+        "FoldChange",
+        "NotesAndMetrics",
+    ];
+    for (i, t) in titles.iter().enumerate() {
+        qpcr.variables[i].title = (*t).to_owned();
+    }
+    qpcr.variables[0].role = VariableRole::Categorical;
+    let sample_rows = [
+        ("Control", [21.9, 22.1, 22.0], [18.0, 18.0, 99.0], true),
+        ("Control", [22.0, 22.0, 22.0], [17.8, 18.2, 18.0], false),
+        ("Treated", [19.8, 20.2, 20.0], [18.0, 18.0, 18.0], false),
+        ("Treated", [20.0, 20.0, 20.0], [17.9, 18.1, 18.0], false),
+    ];
+    for (r, (grp, ts, rs, excl_r3)) in sample_rows.into_iter().enumerate() {
+        qpcr.variables[0].cells[r] = Cell::text(grp);
+        qpcr.variables[1].cells[r] = Cell::number(ts[0]);
+        qpcr.variables[2].cells[r] = Cell::number(ts[1]);
+        qpcr.variables[3].cells[r] = Cell::number(ts[2]);
+        qpcr.variables[4].cells[r] = Cell::number(rs[0]);
+        qpcr.variables[5].cells[r] = Cell::number(rs[1]);
+        qpcr.variables[6].cells[r] = Cell { value: CellValue::Number(rs[2]), excluded: excl_r3 };
+    }
+    qpcr.variables[12].set_calculated_formula("=ROUND(2 ^ (-ddCt), 4)");
+    qpcr.variables[11].set_calculated_formula("=DeltaCt - CalDeltaCt");
+    qpcr.variables[10].set_calculated_formula("=MEANIF(Group == \"Control\", DeltaCt)");
+    qpcr.variables[9].set_calculated_formula("=TargetMean - RefMean");
+    qpcr.variables[8].set_calculated_formula("=MEAN(Ct_R1, Ct_R2, Ct_R3)");
+    qpcr.variables[7].set_calculated_formula("=MEAN(Ct_T1, Ct_T2, Ct_T3)");
+    qpcr.variables[13].set_calculated_formula("=IF(FoldChange > 2, ROUND(LOG10(SUM(Ct_T1, Ct_T2) / RefMean), 3), 0)");
+
+    for col_idx in 7..=13 {
+        if let lumencraft_doc::VariableSource::Calculated { formula } = &qpcr.variables[col_idx].source {
+            validate_no_formula_cycle(&qpcr, col_idx, formula).unwrap();
+        }
+    }
+
+    let order = evaluate_calculated_variables(&mut qpcr, None).unwrap();
+    assert_eq!(order.len(), 7);
+    assert_approx(qpcr.variables[8].cells[0].active_number().unwrap(), 18.0, 1e-12);
+    assert_approx(qpcr.variables[9].cells[0].active_number().unwrap(), 4.0, 1e-12);
+    assert_approx(qpcr.variables[12].cells[0].active_number().unwrap(), 1.0, 1e-12);
+    assert_approx(qpcr.variables[12].cells[2].active_number().unwrap(), 4.0, 1e-12);
+    assert_approx(qpcr.variables[13].cells[0].active_number().unwrap(), 0.0, 1e-12);
+    assert_approx(qpcr.variables[13].cells[2].active_number().unwrap(), 0.347, 1e-12);
+}
+
+#[test]
+fn append_columns_grows_multiple_variables_and_column_tables() {
+    // 1. MultipleVariables: 3 existing columns x 4 rows, append a 4th Cluster column at index 3.
+    let mut mv = MultipleVariablesTable::new(3, 4).unwrap();
+    for c in 0..3 {
+        for r in 0..4 {
+            mv.variables[c].cells[r] = Cell::number((c * 10 + r + 1) as f64);
+        }
+    }
+    let mut mv_sheet = DataSheet::new("mv-append", "MV Append", TableArchetype::MultipleVariables(mv)).unwrap();
+    let cluster_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec {
+            mode: PlacementMode::AppendColumns,
+            anchor: CellCoord::new(0, 0, 0),
+            propagate_title_header: false,
+            skip_contiguous_blanks: false,
+            transpose: false,
+        },
+    };
+    let cluster_tsv = "Cluster 1\nCluster 2\nCluster 1\nCluster 3";
+    let r1 = apply_import_link_pipeline(
+        &mut mv_sheet,
+        &cluster_spec,
+        ImportSourcePayload::DelimitedText { text: cluster_tsv, delimiter: '\t', decimal_separator: '.' },
+        &ImportPipelineOptions::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(r1.rows_placed, 4);
+    assert_eq!(r1.cols_placed, 1);
+    assert_eq!(r1.target_range, SheetCellRange::new(CellCoord::new(0, 3, 0), CellCoord::new(3, 3, 0)));
+
+    let TableArchetype::MultipleVariables(mv_after) = &mv_sheet.archetype else {
+        panic!("expected MultipleVariables");
+    };
+    assert_eq!(mv_after.variables.len(), 4);
+    assert_eq!(mv_after.variables[3].title, "D");
+    assert_eq!(mv_after.variables[3].role, VariableRole::Categorical);
+    let actual_clusters: Vec<Option<&str>> = mv_after.variables[3].cells.iter().map(Cell::active_text).collect();
+    assert_eq!(actual_clusters, vec![Some("Cluster 1"), Some("Cluster 2"), Some("Cluster 1"), Some("Cluster 3")]);
+    assert_approx(mv_after.variables[0].cells[0].active_number().unwrap(), 1.0, 1e-12);
+
+    // Append 2 shorter numeric columns (2 rows on a 4-row sheet) -> new columns still match row_count=4.
+    let r2 = apply_import_link_pipeline(
+        &mut mv_sheet,
+        &cluster_spec,
+        ImportSourcePayload::DelimitedText { text: "1.5\t2.5\n3.5\t4.5", delimiter: '\t', decimal_separator: '.' },
+        &ImportPipelineOptions::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(r2.target_range, SheetCellRange::new(CellCoord::new(0, 4, 0), CellCoord::new(1, 5, 0)));
+
+    let TableArchetype::MultipleVariables(mv_after2) = &mv_sheet.archetype else {
+        panic!("expected MultipleVariables");
+    };
+    assert_eq!(mv_after2.variables.len(), 6);
+    assert_eq!(mv_after2.variables[4].cells.len(), 4);
+    assert_eq!(mv_after2.variables[5].cells.len(), 4);
+    assert_eq!(mv_after2.variables[4].role, VariableRole::Continuous);
+    assert_approx(mv_after2.variables[4].cells[0].active_number().unwrap(), 1.5, 1e-12);
+    assert_approx(mv_after2.variables[5].cells[1].active_number().unwrap(), 4.5, 1e-12);
+    assert!(mv_after2.variables[4].cells[2].is_empty());
+
+    // Append with unstacking + propagate_title_header -> titles land on appended cols 6 and 7.
+    let unstack_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec { unstack_group_column: Some(0), ..ImportFilterSpec::default() },
+        placement: ImportPlacementSpec { mode: PlacementMode::AppendColumns, propagate_title_header: true, ..ImportPlacementSpec::default() },
+    };
+    let r3 = apply_import_link_pipeline(
+        &mut mv_sheet,
+        &unstack_spec,
+        ImportSourcePayload::DelimitedText { text: "G1\t10\nG2\t20", delimiter: '\t', decimal_separator: '.' },
+        &ImportPipelineOptions::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(r3.target_range, SheetCellRange::new(CellCoord::new(0, 6, 0), CellCoord::new(0, 7, 0)));
+    let TableArchetype::MultipleVariables(mv_after3) = &mv_sheet.archetype else {
+        panic!("expected MultipleVariables");
+    };
+    assert_eq!(mv_after3.variables[6].title, "G1");
+    assert_eq!(mv_after3.variables[7].title, "G2");
+    assert_approx(mv_after3.variables[6].cells[0].active_number().unwrap(), 10.0, 1e-12);
+    assert_approx(mv_after3.variables[7].cells[0].active_number().unwrap(), 20.0, 1e-12);
+
+    // 2. Column (Single): 2 existing cols x 3 rows, append 2 cols x 4 rows -> grows both cols and rows.
+    let mut col_sheet = make_col_single(
+        "col-append",
+        &[("Ctrl", &[Cell::number(1.0), Cell::number(2.0), Cell::number(3.0)]), ("Drug", &[Cell::empty(), Cell::empty(), Cell::empty()])],
+    );
+    let col_rep = apply_import_link_pipeline(
+        &mut col_sheet,
+        &cluster_spec,
+        ImportSourcePayload::DelimitedText { text: "10\t20\n30\t40\n50\t60\n70\t80", delimiter: '\t', decimal_separator: '.' },
+        &ImportPipelineOptions::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(col_rep.target_range, SheetCellRange::new(CellCoord::new(0, 2, 0), CellCoord::new(3, 3, 0)));
+    let TableArchetype::Column(col_after) = &col_sheet.archetype else {
+        panic!("expected Column");
+    };
+    assert_eq!(col_after.data_sets.len(), 4);
+    assert_eq!(col_after.row_count(), 4);
+    assert_eq!(col_after.data_sets[2].title, "C");
+    assert_eq!(col_after.data_sets[3].title, "D");
+    assert_eq!(col_after.data_sets[0].cells.len(), 4);
+    assert_approx(col_after.data_sets[2].cells[3][0].active_number().unwrap(), 70.0, 1e-12);
+    assert_approx(col_after.data_sets[3].cells[1][0].active_number().unwrap(), 40.0, 1e-12);
+
+    // 3. Column (MeanSdN, 3 subcolumns): 2 existing cols x 2 rows, append 4-cell-wide grid -> adds cols 2 & 3.
+    let rep_tbl = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, 2, 2).unwrap();
+    let mut rep_sheet = DataSheet::new("col-rep-append", "Col MeanSdN", TableArchetype::Column(rep_tbl)).unwrap();
+    let rep_res = apply_import_link_pipeline(
+        &mut rep_sheet,
+        &cluster_spec,
+        ImportSourcePayload::DelimitedText { text: "1\t2\t3\t4\n5\t6\t7\t8", delimiter: '\t', decimal_separator: '.' },
+        &ImportPipelineOptions::default(),
+        None,
+    )
+    .unwrap();
+    assert_eq!(rep_res.target_range, SheetCellRange::new(CellCoord::new(0, 2, 0), CellCoord::new(1, 3, 2)));
+    let TableArchetype::Column(rep_after) = &rep_sheet.archetype else {
+        panic!("expected Column");
+    };
+    assert_eq!(rep_after.data_sets.len(), 4);
+    assert_approx(rep_after.data_sets[2].cells[0][0].active_number().unwrap(), 1.0, 1e-12);
+    assert_approx(rep_after.data_sets[2].cells[0][1].active_number().unwrap(), 2.0, 1e-12);
+    assert_approx(rep_after.data_sets[2].cells[0][2].active_number().unwrap(), 3.0, 1e-12);
+    assert_approx(rep_after.data_sets[3].cells[0][0].active_number().unwrap(), 4.0, 1e-12);
+    assert_approx(rep_after.data_sets[3].cells[1][0].active_number().unwrap(), 8.0, 1e-12);
+}
+
+#[test]
+fn append_columns_grows_all_remaining_archetypes() {
+    let spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::AppendColumns, ..ImportPlacementSpec::default() },
+    };
+    let payload = ImportSourcePayload::DelimitedText { text: "11\t22\n33\t44", delimiter: '\t', decimal_separator: '.' };
+
+    let mut sheets = [
+        DataSheet::new("xy-app", "XY", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 2).unwrap())).unwrap(),
+        DataSheet::new("grp-app", "Grouped", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(2), 1, 2).unwrap())).unwrap(),
+        DataSheet::new("cnt-app", "Contingency", TableArchetype::Contingency(ContingencyTable::new(1, 2).unwrap())).unwrap(),
+        DataSheet::new("srv-app", "Survival", TableArchetype::Survival(SurvivalTable::new(1, 2).unwrap())).unwrap(),
+        DataSheet::new("pow-app", "PartsOfWhole", TableArchetype::PartsOfWhole(PartsOfWholeTable::new(1, 2).unwrap())).unwrap(),
+        DataSheet::new("nst-app", "Nested", TableArchetype::Nested(NestedTable::new(1, 2, 2).unwrap())).unwrap(),
+    ];
+
+    for sheet in &mut sheets {
+        let is_grouped = matches!(sheet.archetype, TableArchetype::Grouped(_));
+        let report = apply_import_link_pipeline(sheet, &spec, payload.clone(), &ImportPipelineOptions::default(), None).unwrap();
+        let expected_cols = if is_grouped { 2 } else { 3 };
+        assert_eq!(sheet.archetype.column_count(), expected_cols, "failed for {:?}", sheet.kind());
+        assert_eq!(report.target_range.start.col, 1, "failed start col for {:?}", sheet.kind());
+        assert_approx(sheet.cell(CellCoord::new(0, 1, 0)).unwrap().active_number().unwrap(), 11.0, 1e-12);
+        if is_grouped {
+            assert_approx(sheet.cell(CellCoord::new(1, 1, 1)).unwrap().active_number().unwrap(), 44.0, 1e-12);
+        } else {
+            assert_approx(sheet.cell(CellCoord::new(1, 2, 0)).unwrap().active_number().unwrap(), 44.0, 1e-12);
+        }
+    }
 }

@@ -1,6 +1,6 @@
 use lumencraft_doc::{
-    Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, FloatingNote, GroupedTable, MultipleVariablesTable,
-    RectPt, SheetId, SubcolumnMode, TableArchetype, TableKind, XColumnMode, XyTable,
+    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, FloatingNote, GroupedTable,
+    MultipleVariablesTable, RectPt, SheetId, SubcolumnMode, TableArchetype, TableKind, VariableRole, XColumnMode, XyTable,
 };
 use lumencraft_transform::{
     PlateGeometry, PlateMapTemplate, PlateWellRole, TargetArchetypeKind, TidyColumnMapping, TransformError, convert_datasheet_archetype,
@@ -480,4 +480,122 @@ fn qol2_tidy_long_ragged_and_missing_inputs_do_not_panic() {
     let no_x = TidyColumnMapping { x_col: None, group_col: 0, replicate_col: None, value_col: 2, excluded_col: None };
     let err = pivot_tidy_long_to_datasheet("Missing XCol", &headers, &ragged_rows, &no_x, TargetArchetypeKind::Xy, '.').expect_err("requires x_col");
     assert!(matches!(err, TransformError::InvalidSpec { .. }));
+}
+
+#[test]
+fn qol1_column_and_grouped_to_contingency_preserve_labels_and_exclusions() {
+    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, 2, 2).expect("col");
+    col.data_sets[0].title = "Exposed".into();
+    col.data_sets[1].title = "Unexposed".into();
+    col.row_titles = vec!["Outcome+".into(), "Outcome-".into()];
+    col.data_sets[0].cells[0][0] = Cell::number(18.0);
+    col.data_sets[0].cells[1][0] = Cell::number(7.0);
+    col.data_sets[1].cells[0][0] = Cell::number(4.0);
+    col.data_sets[1].cells[1][0] = Cell { value: CellValue::Number(21.0), excluded: true };
+    let mut col_sheet = DataSheet::new("col-cnt", "Counts", TableArchetype::Column(col)).expect("sheet");
+    col_sheet.exclusion_notes.push(CellExclusionNote {
+        coord: CellCoord::new(1, 1, 0),
+        reason_tag: "Audit".into(),
+        note: "Pending recount".into(),
+        timestamp_utc: "2026-01-01T00:00:00Z".into(),
+    });
+
+    let prev = preview_datasheet_conversion(&col_sheet, TargetArchetypeKind::Contingency).expect("preview");
+    assert!(!prev.lossy);
+    assert_eq!(prev.target_kind, TargetArchetypeKind::Contingency);
+    assert_eq!(prev.preserved_cells, 4);
+    assert_eq!(prev.preserved_exclusions, 1);
+
+    let (cont_sheet, conv_prev) = convert_datasheet_archetype(&col_sheet, TargetArchetypeKind::Contingency, false).expect("col->cont");
+    assert!(!conv_prev.lossy);
+    assert_eq!(cont_sheet.kind(), TableKind::Contingency);
+    assert_eq!(cont_sheet.exclusion_notes.len(), 1);
+    let TableArchetype::Contingency(cont) = &cont_sheet.archetype else {
+        panic!("expected Contingency");
+    };
+    assert_eq!(cont.row_titles, vec!["Outcome+", "Outcome-"]);
+    assert_eq!(cont.data_sets[0].title, "Exposed");
+    assert_eq!(cont.data_sets[1].title, "Unexposed");
+    assert_eq!(cont.count_at(0, 0).unwrap(), Some(18));
+    assert_eq!(cont.count_at(1, 1).unwrap(), None);
+
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).expect("grp");
+    grp.row_factor_title = "Response".into();
+    grp.column_factor_title = "Arm".into();
+    grp.row_titles = vec!["Responder".into(), "NonResponder".into()];
+    grp.data_sets[0].title = "Drug".into();
+    grp.data_sets[1].title = "Placebo".into();
+    grp.data_sets[0].cells[0] = vec![Cell::number(12.0), Cell::number(99.0)];
+    grp.data_sets[0].cells[1] = vec![Cell::number(8.0), Cell::empty()];
+    grp.data_sets[1].cells[0] = vec![Cell::number(5.0), Cell::empty()];
+    grp.data_sets[1].cells[1] = vec![Cell::number(15.0), Cell::empty()];
+    let grp_sheet = DataSheet::new("grp-cnt", "Grouped", TableArchetype::Grouped(grp)).expect("grp");
+    assert!(matches!(convert_datasheet_archetype(&grp_sheet, TargetArchetypeKind::Contingency, false), Err(TransformError::InvalidSpec { .. })));
+    let (grp_cont, grp_prev) = convert_datasheet_archetype(&grp_sheet, TargetArchetypeKind::Contingency, true).expect("grp->cont");
+    assert!(grp_prev.lossy);
+    assert_eq!(grp_prev.dropped_cells, 1);
+    let TableArchetype::Contingency(g_cont) = &grp_cont.archetype else {
+        panic!("expected Contingency");
+    };
+    assert_eq!(g_cont.row_factor_title, "Response");
+    assert_eq!(g_cont.column_factor_title, "Arm");
+    assert_eq!(g_cont.count_at(0, 0).unwrap(), Some(12));
+}
+
+#[test]
+fn qol1_mv_to_contingency_and_invalid_count_rejection() {
+    let mut mv_counts = MultipleVariablesTable::new(3, 2).expect("mv counts");
+    mv_counts.variables[0].title = "Genotype".into();
+    mv_counts.variables[0].role = VariableRole::Label;
+    mv_counts.variables[0].role_inferred = false;
+    mv_counts.variables[1].title = "Cases".into();
+    mv_counts.variables[2].title = "Controls".into();
+    mv_counts.variables[0].cells = vec![Cell::text("WildType"), Cell::text("Mutant")];
+    mv_counts.variables[1].cells = vec![Cell::number(10.0), Cell::number(25.0)];
+    mv_counts.variables[2].cells = vec![Cell::number(30.0), Cell::number(15.0)];
+    let mv_counts_sheet = DataSheet::new("mv-counts", "MVCounts", TableArchetype::MultipleVariables(mv_counts)).expect("sheet");
+    let (mv_cont_sheet, mv_prev) = convert_datasheet_archetype(&mv_counts_sheet, TargetArchetypeKind::Contingency, false).expect("mv->cont");
+    assert!(!mv_prev.lossy);
+    let TableArchetype::Contingency(mv_cont) = &mv_cont_sheet.archetype else {
+        panic!("expected Contingency");
+    };
+    assert_eq!(mv_cont.row_factor_title, "Genotype");
+    assert_eq!(mv_cont.row_titles, vec!["WildType", "Mutant"]);
+    assert_eq!(mv_cont.data_sets[0].title, "Cases");
+    assert_eq!(mv_cont.data_sets[1].title, "Controls");
+    assert_eq!(mv_cont.count_at(1, 0).unwrap(), Some(25));
+
+    let mut mv_cat = MultipleVariablesTable::new(2, 4).expect("mv cat");
+    mv_cat.variables[0].title = "Treatment".into();
+    mv_cat.variables[0].role = VariableRole::Categorical;
+    mv_cat.variables[0].role_inferred = false;
+    mv_cat.variables[1].title = "Status".into();
+    mv_cat.variables[1].role = VariableRole::Categorical;
+    mv_cat.variables[1].role_inferred = false;
+    for (r, (t, s)) in [("Drug", "Cured"), ("Drug", "Cured"), ("Drug", "Relapse"), ("Ctrl", "Relapse")].into_iter().enumerate() {
+        mv_cat.variables[0].cells[r] = Cell::text(t);
+        mv_cat.variables[1].cells[r] = Cell::text(s);
+    }
+    let mv_cat_sheet = DataSheet::new("mv-cat", "MVCat", TableArchetype::MultipleVariables(mv_cat)).expect("sheet");
+    let (xt_sheet, xt_prev) = convert_datasheet_archetype(&mv_cat_sheet, TargetArchetypeKind::Contingency, false).expect("mv cat->cont");
+    assert!(!xt_prev.lossy);
+    let TableArchetype::Contingency(xt) = &xt_sheet.archetype else {
+        panic!("expected Contingency");
+    };
+    assert_eq!(xt.row_titles, vec!["Drug", "Ctrl"]);
+    assert_eq!(xt.data_sets[0].title, "Cured");
+    assert_eq!(xt.data_sets[1].title, "Relapse");
+    assert_eq!(xt.count_at(0, 0).unwrap(), Some(2));
+    assert_eq!(xt.count_at(1, 0).unwrap(), Some(0));
+
+    for bad in [Cell::number(-1.0), Cell::number(2.5), Cell::text("bad")] {
+        let mut bad_col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, 2, 2).expect("bad");
+        bad_col.data_sets[0].cells[0][0] = Cell::number(5.0);
+        bad_col.data_sets[0].cells[1][0] = bad;
+        bad_col.data_sets[1].cells[0][0] = Cell::number(3.0);
+        bad_col.data_sets[1].cells[1][0] = Cell::number(4.0);
+        let bad_sheet = DataSheet::new("bad", "Bad", TableArchetype::Column(bad_col)).expect("sheet");
+        let err = preview_datasheet_conversion(&bad_sheet, TargetArchetypeKind::Contingency).expect_err("must reject invalid count");
+        assert!(matches!(err, TransformError::Doc(DocError::InvalidCellValue { archetype: TableKind::Contingency, .. })));
+    }
 }
