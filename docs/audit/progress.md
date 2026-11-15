@@ -12,16 +12,52 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 
 ## Summary
 
-Round 1 is complete at `ebcc622` (2026-11-14 to 2026-11-15) and Stage 1 re-verification against merged `main` (`fda1cc0106092834d97b53289ec2a99c1bf0439c`, `fda1cc0`) is complete (`#8`–`#13`):
+Round 1 is complete at `ebcc622` (2026-11-14 to 2026-11-15), Stage 1 re-verification against merged `main` (`fda1cc0106092834d97b53289ec2a99c1bf0439c`, `fda1cc0`) is complete (`#8`–`#13`), and Stages 2–5 remediation is complete on `audit/r1-local-2`:
 
 - **157 findings reported, none refuted.** `151` CONFIRMED, `5` PLAUSIBLE, `1` DUPLICATE (`R1-S07-02` merged into `R1-S12-01`) -> **`156` unique survivors**.
 - **Stage 1 re-check on `main` (`fda1cc0`):** **`0` `FIXED_ON_MAIN`**, **`13` `PARTIAL_ON_MAIN`** (partial commits leave live defects/gaps open), **`144` `LIVE_ON_MAIN`** (`143` unique + duplicate `R1-S07-02`; includes partial mitigations on `R1-S11-01` and `R1-S06-01`).
 - **By agreed severity (156 unique survivors):** `S1` 32, `S2` 60, `S3` 58, `S4` 6.
 - **Evidence:** 116 verdicts rest on a failing test committed to a local `audit/r1/<slice>` branch; 40 rest on a line-by-line trace (1 duplicate). Re-run suites and targeted probes verified Stage 1 status on `fda1cc0` (`S13` inspected clean-room without touching `audit/r1/S13`).
 - **Themes.** (1) *Silent wrong statistics*: tests labelled exact or adjusted that report a different P (R1-S02-02 partial, -04, -06), solver fallbacks reported as finite bounds (R1-S03-02, R1-S01-05), fits that ignore N on summarized data (R1-X2-02), and stale results kept after a failed recompute (R1-X2-01). (2) *No-panic and resource gaps on untrusted input*: missing total cell, pixel, page and item budgets (R1-S06-01, R1-S07-05, R1-S07-11, R1-X1-01), panics in release (R1-S08-02, R1-S10-01, R1-S12-02), hangs (R1-S07-10, R1-S08-01), and CLI batch/control entry points outside the panic guard (R1-S12-04 partial, R1-S10-03 partial). (3) *Security boundaries*: an unauthenticated control socket reachable by a browser (R1-S10-02), and external-link paths escaping `--workdir` (R1-S12-01 / R1-S07-02). (4) *Crash recovery that does not recover*: default desktop and `--control` launches still do not record to the journal (R1-S11-01), and checkpoint and replay are inconsistent (R1-S06-02, -03, R1-S07-06). (5) *Build guards that miss inputs* (S13).
-- **Remaining gaps:** No reviewer or verifier came from another model family, and no real browser, X11 clipboard, or `wasm32` build was exercised live.
+- **Stage 1 baseline note (`fda1cc0`):** No reviewer or verifier came from another model family, and live browser / X11 clipboard UI integration remains bounded by headless test coverage; `wasm32-unknown-unknown` builds across all 17 WASM crates were subsequently verified in Stage 2–4C gates.
 
-**Next steps:** Execute Stages 2–4 remediation of all `156` unique survivors tracked in [Known defects](../gaps.md#round-1-audit-survivors-on-main-fda1cc0), closing `R1-S07-02` alongside `R1-S12-01` and twin pairs together.
+**Status:** Stages 1–5 complete on `audit/r1-local-2`; all `156` unique survivors (`32` `S1`, `60` `S2`, `58` `S3`, `6` `S4`) plus duplicate `R1-S07-02` are fixed, regression-tested, and verified with `0` genuine live defects in Stage 5 sweeps (see [Known defects](../gaps.md#round-1-audit-survivors-on-main-fda1cc0) and [STATUS](../STATUS.md)).
+
+## Stage 2–5 remediation closure
+
+All Stage 1 survivors against `main` (`fda1cc0`, recorded at `678c144`) were remediated on `audit/r1-local-2` in the prescribed order (`d18ef1e1` code head; Stage 5 closure commit in `docs/`):
+
+| Stage | Scope closed | Anchor commit(s) on `audit/r1-local-2` | Notes |
+|---|---|---|---|
+| **Stage 1** | Re-check `main` (`fda1cc0`) | `678c144` | `0 FIXED_ON_MAIN`, `13 PARTIAL_ON_MAIN`, `144 LIVE_ON_MAIN` (`156` unique + dup `R1-S07-02`) |
+| **Stage 2** | Cross-cutting bundles | `05c87be`, `1423eee` | Link path policy (`R1-S12-01` / `R1-S07-02` / `R1-X1-04`), control socket auth (`R1-S10-02`), entry-point panic guards (`R1-S12-04` / `R1-S10-03` / `R1-S12-06`), total cell/item/page/pixel budgets (`R1-S06-01` / `R1-S07-05` / `R1-S07-11` / `R1-X1-01` / `R1-S04-03`), recovery WAL wiring (`R1-S11-01` / `R1-S06-02` / `R1-S06-03` / `R1-S07-06`), telemetry boundary fix |
+| **Stage 3A** | Silent wrong stats & core `S1`s | `9c20a85` | `R1-S02-02`, `-04`, `-06`, `R1-S03-01`/`02`/`03`, `R1-X2-01`/`02`, core stats/fit/X2 `S1` fixes |
+| **Stage 3B** | Remaining `S1`s (`32/32`) | `981a73f` | Closes all remaining `S1` items (`32/32` complete) |
+| **Stage 4A** | All `S2`s (`60/60`) | `32bf7c5` | Closes all `60` `S2` items including twin pairs (`R1-S04-01` <-> `R1-S05-01`, `R1-S06-12` <-> `R1-S04-06`) |
+| **Stage 4B** | All `S3`s (`58/58`) | `dd7241c5` | Closes all `58` `S3` items including clean-room, Bland-Altman, profile-CI, and ramp-cost fixes |
+| **Stage 4C** | All `S4`s (`6/6`) | `aa72c7d` (`e0aa5241`), `5caace6` (`4ccd4fd1`), `761ab11` (`70173106`), `87596e0` (`d47179fd`), `d18ef1e1` (`7502d626`) | `R1-S13-04` brand coverage, `R1-S01-08` & `R1-S09-10`, `R1-S12-10`, `R1-S11-13`, `R1-S10-09` |
+| **Stage 5** | External reproducer sweep & doc closure | `d18ef1e1` sweep + Stage 5 docs | `0` genuine live defects across all `22` external reproducer files (`S01`–`S12`, `X1`, `X2`; `audit/r1/S13` kept untouched) |
+
+### Stage 5 external reproducer sweep (`d18ef1e1`, `S01`–`S12`, `X1`, `X2`)
+
+Every local `audit/r1/<slice>` reproducer (`S13` excluded per scope boundary; `R1-S13-*` verified clean-room via Stage 4B/4C permanent tests) was re-run against `d18ef1e1`, confirming `0` genuine live defects:
+
+- **Direct full passes:** `S01` (`lumencraft-math` `7/7`, `lumencraft-palette` `1/1`), `S03` (`lumencraft-fit` `11/11` default + `1/1` ignored bounded by `DEFAULT_MAX_ODE_STEPS_PER_FIT = 300_000`), `S06` (`lumencraft-format` `6/6`; `>10M` `.prism` cap covered by `unpacked_and_pzfx_budget.rs:431`), `S07` hang (`audit_r1_s07_hang` `1/1`), `S08` (`lumencraft-chart` `11/11`), `S09` (`pdf` `3/3`, `render` `1/1`, `svg` `2/2`, `text` `3/3`), `S12` (`lumencraft-cli` `7/7`), and `X2` (`lumencraft-engine` `9/9`).
+- **Intentional contract-change / API-signature / sandbox notes (each covered by passing permanent regression tests):**
+  - `S02` (`8 passed, 1 failed`): `r1_s02_05_cox_monotone_likelihood_se` expected fallback SE `1000.0`, whereas `survival.rs:521-592` now sets `converged=false, cov_beta=None, SE=NaN`; covered by `stage3a_s02_fixes.rs::r1_s02_05_cox_monotone_likelihood_and_collinear_non_estimable`.
+  - `S04` (`15 passed, 2 failed`) & `S05` (`lumencraft-doc` `5/5`, `lumencraft-format` `0/4`, `lumencraft-stats` `0/1`): those legacy tests panic at `DataSheet::new(...).unwrap()` because `DataSheet::new` now enforces `sheet.validate()?` upfront; ragged/bypassed deserialization paths are covered by `unit_transform.rs::r1_s04_01_ragged_tables_and_mismatched_context_handled_cleanly`, `archive_and_csv.rs:480-576`, and `audit_r1_s4a_stats.rs:496-532`.
+  - `S07` (`13 passed, 3 failed`): `r1_s07_07` / `r1_s07_07b` `.unwrap()` linked-region edits that are now rejected upfront with `ErrorCode::Conflict` (`audit_r1_s4a_eng.rs:339`), and `r1_s07_08` `.unwrap()`s a `sheet.delete` breaking `Info("K")` that now rolls back cleanly with `ErrorCode::BadInput` (`audit_r1_s3b_eng_links.rs:284`).
+  - `X1` (`lumencraft-format` `0/1`, `lumencraft-engine` compile `E0432`): `r1_x1_02_csv_tokenizer_amplification` hits sandbox `ps` `PermissionDenied` at line 7 and intentional `max_fields` rejection at line 26 (`audit_r1_s4a r1_x1_02` passes `1/1`); `compile_sheet_scene` moved from `cmd_sci` to `cmd::helpers` (`budgets_and_guards x1_01` `1/1` and `audit_r1_s4a_x1_03` `2/2` pass).
+  - `S10` (compile `4× E0061`): `serve_control_listener` and `serve_control_stream` now require `auth: &ControlAuth` (`R1-S10-02`); permanent tests `lumencraft-ui-egui --lib r1_s10_` (`6/6`), `control_auth_and_panic` (`3/3`), `audit_r1_s4b_ui` (`3/3`), `audit_r1_s4c_s10_09` (`5/5`), and `lumencraft --test control_loopback` (`8/8`) pass.
+  - `S11` (`lumencraft` `2 passed, 1 failed`): `r1_s11_02` asserts launch aborts on invalid `shortcuts.json`, whereas `R1-S11-05` intentionally warns and falls back to defaults while `RuntimeShutdownGuard` releases locks on `Drop`; permanent tests `r1_s11_` (`7/7`), `recovery_wiring` (`5/5`), and `cli_startup_flags` (`3/3`) pass.
+
+### Workspace verification on `d18ef1e1`
+
+- **`cargo test --workspace --offline`**: `190` suites (`170` non-doc + `20` doc), **`1,315 passed`** (`1,311` non-doc + `4` doc: `lumencraft_doc` `1`, `lumencraft_math` `1`, `lumencraft_palette` `1`, `lumencraft_testkit` `1`), `0` failed, `0` ignored.
+- **`cargo fmt --all -- --check` & `cargo clippy --workspace --all-targets --offline -- -D warnings`**: PASS.
+- **`wasm32-unknown-unknown --offline`**: all `17` WASM-targeted crates compile cleanly.
+- **`--no-default-features --offline`**: `lumencraft-text` `40 passed, 0 failed` (`5` non-doc + `1` doc), `lumencraft-ui-egui` `176 passed, 0 failed` (`21` non-doc + `1` doc), `cargo check -p lumencraft-mcp` PASS.
+- **`cargo xtask`**: `15/16` gates PASS (`layers` `22` pkgs, `brands` `0` unapproved mentions across `547` tracked files, `cleanroom`, `assets` `22` files, `cursors` `5` variants, `telemetry` `0` violations, `schemas --check` `5` schemas, `commands --check`, `ui-commands --check`, `i18n-report` `16×307 = 4,912` keys / `0` missing, `status`, `stats --exact` = `368` files / `271,604` lines / `1,311` tests / `15` proptests, `pending --count` = `3` open sub-tasks across `3` items, `licenses`, `screenshots --check` `1440×900` OK). `cargo xtask secrets` exits `1` solely on two pre-existing Stage 1 audit findings docs (`docs/audit/findings/S13.md:165` and `docs/audit/findings/X2.md:124`); `0` Stage 2–4C remediation files flagged.
 
 
 ## Status

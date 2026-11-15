@@ -25,7 +25,7 @@
 
 ## Known defects
 
-> Maintained until Round 1 audit closes (referenced from [`docs/audit/README.md`](audit/README.md#L1)). All 6 Round-1 defects below were fixed with regression tests in Waves 5–6; see [`docs/STATUS.md`](STATUS.md) for verified suite outputs.
+> Reference table retained after Round 1 audit closure (`Stages 1–5` complete on `audit/r1-local-2`; referenced from [`docs/audit/README.md`](audit/README.md#L1)). All 6 pre-audit Waves 5–6 defects below (`G8`, `G11`, `G2`, etc.) and all 156 unique Stage 1 Round 1 survivors (plus duplicate `R1-S07-02`) are fixed with regression tests; see [`docs/audit/progress.md`](audit/progress.md#stage-25-remediation-closure) and [`docs/STATUS.md`](STATUS.md) for verified suite outputs.
 
 | Legacy ID | Location | Defect Summary | Wave 5–6 Fix & Regression Coverage | Roadmap ID |
 |---|---|---|---|---|
@@ -37,6 +37,8 @@
 | `G10` | `crates/format/src/pzfx.rs` — `estimate_table_cells` vs `build_table_archetype` | Pre-build cell budget estimation duplicated archetype sizing logic instead of measuring the built table's allocated cell slots. | Fixed in Wave 5: enforced `MAX_IMPORT_CELLS = 10_000_000` directly against `DataSheet::allocated_cell_slots()` post-build (`crates/format/tests/unpacked_and_pzfx_budget.rs`; `lumencraft-format`: `51 passed`). | [`R2.4`](ROADMAP.md#r24-clean-room-prism--pzfx-project-import-with-authoritative-cell-budget) |
 
 ### Round 1 audit survivors on `main` (`fda1cc0`)
+
+> **Stage 2–5 Remediation Closure (`audit/r1-local-2`):** All **156 unique surviving findings** (`32` `S1`, `60` `S2`, `58` `S3`, `6` `S4`), duplicate `R1-S07-02` (closed via the shared engine path policy for `R1-S12-01` and `R1-X1-04`), and cross-referenced twin pairs (`R1-S06-12` <-> `R1-S04-06`, `R1-S04-01` <-> `R1-S05-01`) are **fixed and regression-tested on `audit/r1-local-2`** (Stage 2 cross-cutting `05c87be` / `1423eee`, Stage 3A silent-stats/core-fit `9c20a85`, Stage 3B remaining `S1` `981a73f`, Stage 4A `S2` `32bf7c5`, Stage 4B `S3` `dd7241c5`, Stage 4C `S4` `d18ef1e1` merging `e0aa5241`, `4ccd4fd1`, `70173106`, `d47179fd`, `7502d626`). Stage 5 external reproducer sweeps across `S01`–`S12`, `X1`, and `X2` confirmed `0` genuine live defects (`audit/r1/S13` kept untouched; `R1-S13-*` verified clean-room from `docs/audit/findings/S13.md`). See [`docs/audit/progress.md`](audit/progress.md#stage-25-remediation-closure) and [`docs/STATUS.md`](STATUS.md).
 
 Stage 1 re-verification against `main` (`fda1cc0`, re-checking all 157 Round 1 findings from baseline `ebcc622`) left **156 unique surviving findings** open (`0` `FIXED_ON_MAIN`, `13` `PARTIAL_ON_MAIN`, `144` `LIVE_ON_MAIN` = `143` unique + `1` duplicate):
 
