@@ -4,24 +4,25 @@
 use std::f64::consts::PI;
 
 use lumencraft_doc::{
-    AnalysisKind, AxisSpec, AxisThreshold, CategoricalTickSource, DataSheet, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet,
-    GraphSpec, GraphicalDataObject, GroupedArrangement, PartsOfWholeLayout, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind,
-    SeriesSpec, SheetId, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, TableArchetype, TickLabelFormat,
+    AnalysisKind, AxisSpec, AxisThreshold, CategoricalTickSource, DataSheet, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GraphSpec,
+    GraphicalDataObject, GroupedArrangement, PartsOfWholeLayout, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind, SeriesSpec,
+    SheetId, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, TableArchetype, TickLabelFormat,
 };
 use lumencraft_math::{AxisScale, ConfidenceLevel};
 use lumencraft_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use lumencraft_stats::survival::kaplan_meier_curve;
-use lumencraft_text::{LocaleNumberPolicy, RichText, TextMetricsPt, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
+use lumencraft_text::{LocaleNumberPolicy, RichText, TextMetricsPt, expand_template_hooks, measure_text_pt, parse_markup};
 
 use crate::scales::{
-    AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, compute_additional_ticks_for_segments, emit_additional_tick_gridline_segments,
-    emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
+    AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, ResolvedSegment, compute_additional_ticks_for_segments, compute_segment_tick_values,
+    emit_additional_tick_gridline_segments, emit_additional_x_tick_primitives, emit_additional_y_tick_primitives, format_tick_markup,
+    resolve_exact_domain_with_warnings, sanitize_linear_range,
 };
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
     SourceCellId, StrokePaint, TextAnchor,
 };
-use crate::xy::{compute_safe_linear_ticks, format_point_value, generate_prob_ticks_for_range, prob_auto_domain_max, prob_auto_domain_min};
+use crate::xy::format_point_value;
 
 const CIRCLE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const COLORBAR_STEPS: usize = 48;
@@ -182,16 +183,7 @@ fn trim_trailing_zeros(buf: &mut String) {
 }
 
 pub(crate) fn sanitize_range(min_v: f64, max_v: f64, fallback: (f64, f64)) -> (f64, f64) {
-    if !min_v.is_finite() || !max_v.is_finite() {
-        return fallback;
-    }
-    let (lo, hi) = if min_v <= max_v { (min_v, max_v) } else { (max_v, min_v) };
-    if (hi - lo).abs() <= 1e-12 {
-        let pad = if lo.abs() > 1.0 { lo.abs() * 0.1 } else { 1.0 };
-        (lo - pad, hi + pad)
-    } else {
-        (lo, hi)
-    }
+    sanitize_linear_range(min_v, max_v, fallback)
 }
 
 pub(crate) fn resolve_axis_domain(axis: &AxisSpec, data_min: f64, data_max: f64) -> (f64, f64) {
@@ -199,122 +191,8 @@ pub(crate) fn resolve_axis_domain(axis: &AxisSpec, data_min: f64, data_max: f64)
     resolve_axis_domain_with_warnings(axis, data_min, data_max, &mut unused)
 }
 
-fn repair_prob_bound(
-    val: f64,
-    is_min: bool,
-    is_explicit: bool,
-    raw_fallback: f64,
-    upper: f64,
-    scale: AxisScale,
-    warnings: &mut Vec<ChartWarning>,
-) -> f64 {
-    if val.is_finite() && scale.transform(val).is_some() {
-        return val;
-    }
-    if is_explicit {
-        warnings.push(ChartWarning::new("invalid_axis_domain", format!("repaired out-of-domain bound {val} for {scale:?} axis")));
-    }
-    if !is_explicit && raw_fallback.is_finite() && scale.transform(raw_fallback).is_some() {
-        return if is_min { prob_auto_domain_min(raw_fallback, upper, scale) } else { prob_auto_domain_max(raw_fallback, upper, scale) };
-    }
-    let edge = 0.01 * (upper / 100.0);
-    if is_min { edge } else { upper - edge }
-}
-
 pub(crate) fn resolve_axis_domain_with_warnings(axis: &AxisSpec, data_min: f64, data_max: f64, warnings: &mut Vec<ChartWarning>) -> (f64, f64) {
-    let seg = axis.segments.first();
-    let scale = seg.map_or(GraphAxisScale::Linear, |s| s.scale);
-    let (raw_lo, raw_hi) = sanitize_range(data_min, data_max, (0.0, 1.0));
-
-    let explicit_min = match seg.and_then(|s| s.min) {
-        Some(v) if v.is_finite() => Some(v),
-        Some(v) => {
-            warnings.push(ChartWarning::new("invalid_axis_domain", format!("ignored non-finite minimum {v} for {scale:?} axis")));
-            None
-        }
-        None => None,
-    };
-    let explicit_max = match seg.and_then(|s| s.max) {
-        Some(v) if v.is_finite() => Some(v),
-        Some(v) => {
-            warnings.push(ChartWarning::new("invalid_axis_domain", format!("ignored non-finite maximum {v} for {scale:?} axis")));
-            None
-        }
-        None => None,
-    };
-
-    let mut lo = explicit_min.unwrap_or(raw_lo);
-    let mut hi = explicit_max.unwrap_or(raw_hi);
-    if (hi - lo).abs() <= 1e-12 {
-        if explicit_min.is_some() && explicit_max.is_some() {
-            warnings.push(ChartWarning::new("invalid_axis_domain", format!("expanded degenerate explicit domain [{lo}, {hi}] for {scale:?} axis")));
-        }
-        (lo, hi) = sanitize_range(lo, hi, (0.0, 1.0));
-    }
-
-    match scale {
-        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => {
-            if lo <= 0.0 || hi <= 0.0 || scale.transform(lo).is_none() || scale.transform(hi).is_none() {
-                if explicit_min.is_some() || explicit_max.is_some() {
-                    warnings.push(ChartWarning::new("invalid_axis_domain", format!("repaired non-positive domain [{lo}, {hi}] for {scale:?} axis")));
-                }
-                if lo <= 0.0 {
-                    lo = if raw_lo > 0.0 { raw_lo } else { 0.1 };
-                }
-                if hi <= 0.0 {
-                    hi = if raw_hi > 0.0 { raw_hi } else { lo * 10.0 };
-                }
-                if (hi - lo).abs() <= 1e-12 {
-                    hi = lo * 10.0;
-                }
-            }
-        }
-        AxisScale::Logit(domain) => {
-            let upper = match domain {
-                lumencraft_math::LogitDomain::Percent => 100.0,
-                lumencraft_math::LogitDomain::Proportion => 1.0,
-            };
-            lo = repair_prob_bound(lo, true, explicit_min.is_some(), raw_lo, upper, scale, warnings);
-            hi = repair_prob_bound(hi, false, explicit_max.is_some(), raw_hi, upper, scale, warnings);
-            if (hi - lo).abs() <= 1e-12 {
-                let edge = 0.01 * (upper / 100.0);
-                lo = edge;
-                hi = upper - edge;
-            }
-        }
-        AxisScale::Probit => {
-            lo = repair_prob_bound(lo, true, explicit_min.is_some(), raw_lo, 100.0, scale, warnings);
-            hi = repair_prob_bound(hi, false, explicit_max.is_some(), raw_hi, 100.0, scale, warnings);
-            if (hi - lo).abs() <= 1e-12 {
-                lo = 0.01;
-                hi = 99.99;
-            }
-        }
-        AxisScale::Reciprocal => {
-            if !lo.is_finite() || !hi.is_finite() || lo == 0.0 || hi == 0.0 || lo.signum() != hi.signum() || (hi - lo).abs() <= 1e-12 {
-                if explicit_min.is_some() || explicit_max.is_some() || (lo < 0.0 && hi > 0.0) || (lo > 0.0 && hi < 0.0) {
-                    warnings.push(ChartWarning::new(
-                        "invalid_axis_domain",
-                        format!("repaired zero-crossing or invalid domain [{lo}, {hi}] for Reciprocal axis"),
-                    ));
-                }
-                if hi > 0.0 && lo <= 0.0 {
-                    lo = if raw_lo > 0.0 && raw_lo < hi { raw_lo } else { (hi * 0.01).clamp(1e-6, hi * 0.5) };
-                } else if lo > 0.0 && hi <= 0.0 {
-                    hi = if raw_hi > 0.0 && raw_hi < lo { raw_hi } else { (lo * 0.01).clamp(1e-6, lo * 0.5) };
-                } else {
-                    lo = 1.0;
-                    hi = 100.0;
-                }
-                if (hi - lo).abs() <= 1e-12 {
-                    lo = 1.0;
-                    hi = 100.0;
-                }
-            }
-        }
-        AxisScale::Linear => {}
-    }
-    (lo, hi)
+    resolve_exact_domain_with_warnings(axis, data_min, data_max, warnings)
 }
 
 pub(crate) fn nice_axis_ticks(axis: &AxisSpec, domain_min: f64, domain_max: f64, target_count: usize) -> Vec<(f64, String)> {
@@ -329,70 +207,30 @@ pub(crate) fn nice_axis_ticks_with_warnings(
     target_count: usize,
     warnings: &mut Vec<ChartWarning>,
 ) -> Vec<(f64, String)> {
-    let seg = axis.segments.first();
-    let scale = seg.map_or(AxisScale::Linear, |s| s.scale);
-    let fmt = axis.tick_format;
-    let step_override = seg.and_then(|s| s.major_tick_interval).filter(|v| v.is_finite() && *v > 0.0);
-
-    let vals = match scale {
-        AxisScale::Log10 if step_override.is_none() => log10_ticks(domain_min, domain_max, warnings),
-        AxisScale::Probit | AxisScale::Logit(_) if step_override.is_none() => generate_prob_ticks_for_range(domain_min, domain_max, scale),
-        _ => linear_nice_ticks(domain_min, domain_max, step_override, target_count, warnings),
+    let seg_spec = axis.segments.first();
+    let scale = seg_spec.map_or(AxisScale::Linear, |s| s.scale);
+    let step_override = seg_spec.and_then(|s| s.major_tick_interval).filter(|v| v.is_finite() && *v > 0.0);
+    let minor_sub = seg_spec.map_or(0, |s| s.minor_ticks_per_interval);
+    let seg = ResolvedSegment {
+        segment_index: 0,
+        domain_min,
+        domain_max,
+        scale,
+        length_fraction: 1.0,
+        span_start_pt: 0.0,
+        span_end_pt: 100.0,
+        major_tick_interval: step_override,
+        minor_ticks_per_interval: minor_sub,
     };
-    vals.into_iter().map(|v| (v, format_tick_value(v, scale, fmt))).collect()
-}
-
-fn log10_ticks(domain_min: f64, domain_max: f64, warnings: &mut Vec<ChartWarning>) -> Vec<f64> {
-    let lo = domain_min.min(domain_max);
-    let hi = domain_min.max(domain_max);
-    if lo <= 0.0 || hi <= lo || !lo.is_finite() || !hi.is_finite() {
-        return vec![0.1, 1.0, 10.0];
-    }
-    let e_min = lo.log10().floor() as i32;
-    let e_max = hi.log10().ceil() as i32;
-    let mut out = Vec::new();
-    let span = (e_max - e_min).clamp(0, 12);
-    let step = if span > 6 { 2 } else { 1 };
-    let mut e = e_min;
-    while e <= e_max {
-        let v = 10.0_f64.powi(e);
-        if v >= lo * 0.999 && v <= hi * 1.001 {
-            out.push(v);
-        }
-        e += step;
-    }
-    if out.len() < 2 { linear_nice_ticks(lo, hi, None, 4, warnings) } else { out }
-}
-
-fn linear_nice_ticks(min_v: f64, max_v: f64, step_override: Option<f64>, target_count: usize, warnings: &mut Vec<ChartWarning>) -> Vec<f64> {
-    let (lo, hi) = sanitize_range(min_v, max_v, (0.0, 1.0));
-    compute_safe_linear_ticks(lo, hi, step_override, target_count.clamp(2, 12), warnings).0
+    let (vals, _) = compute_segment_tick_values(&seg, Some(target_count.clamp(2, 12)), false, warnings);
+    vals.into_iter().map(|v| (v, format_tick_value(v, scale, axis.tick_format))).collect()
 }
 
 pub(crate) fn format_tick_value(val: f64, scale: AxisScale, fmt: TickLabelFormat) -> String {
     if !val.is_finite() {
         return String::new();
     }
-    let clean = if val.abs() < 1e-12 { 0.0 } else { val };
-    let policy = LocaleNumberPolicy::default();
-    match fmt {
-        TickLabelFormat::ScientificE => format!("{clean:.2e}"),
-        TickLabelFormat::PowerOfTenSuperscript if clean > 0.0 => {
-            let exp = clean.log10();
-            if (exp - exp.round()).abs() < 1e-4 { format!("10<sup>{}</sup>", exp.round() as i32) } else { format_axis_tick(clean, scale, &policy) }
-        }
-        TickLabelFormat::EngineeringSi => {
-            let abs = clean.abs();
-            if abs >= 1_000_000.0 {
-                format!("{:.2}M", clean / 1_000_000.0)
-            } else if abs >= 1_000.0 {
-                format!("{:.2}k", clean / 1_000.0)
-            } else {
-                format_axis_tick(clean, scale, &policy)
-            }
-        }
-        _ => format_axis_tick(clean, scale, &policy),
-    }
+    format_tick_markup(val, scale, fmt, &LocaleNumberPolicy::default())
 }
 
 pub(crate) fn text_metrics(text: &str, font_size_pt: f64) -> TextMetricsPt {

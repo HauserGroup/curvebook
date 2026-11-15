@@ -1258,11 +1258,12 @@ fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab) -> HeatmapData {
             .collect();
         matrix.push(vals);
     }
+    let n_rows = matrix.len();
     let has_missing = matrix.iter().flatten().any(Option::is_none);
     let merges = if has_missing {
         Vec::new()
     } else {
-        res.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, extract_dendro_merges_from_tab)
+        res.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, |t| extract_dendro_merges_from_tab(t, n_rows))
     };
     HeatmapData {
         row_labels: tab.row_labels.clone(),
@@ -1425,7 +1426,11 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
         hm.clustering_cue = Some(format!("Clustered: {dist_lbl} / {link_lbl}"));
         let has_missing = hm.values.iter().flatten().any(Option::is_none);
         if !has_missing {
-            let tab_merges = cres.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, extract_dendro_merges_from_tab);
+            let tab_merges = cres
+                .tabs
+                .iter()
+                .find(|t| t.id == "hierarchical-dendrogram")
+                .map_or_else(Vec::new, |t| extract_dendro_merges_from_tab(t, expect_rows));
             if !tab_merges.is_empty() && tab_merges.len() + 1 == expect_rows {
                 hm.merges = tab_merges;
             }
@@ -1435,18 +1440,51 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
     Some(hm)
 }
 
-fn extract_dendro_merges_from_tab(tab: &ResultTab) -> Vec<DendrogramMerge> {
+fn parse_dendro_node_id(raw: f64, step: usize, n_leaves: usize) -> Option<isize> {
+    if !raw.is_finite() || raw.fract() != 0.0 || raw.abs() > 9_007_199_254_740_991.0 {
+        return None;
+    }
+    let min_leaf_id = isize::try_from(n_leaves).ok().and_then(isize::checked_neg)?;
+    let step_i = isize::try_from(step).ok()?;
+    let id = raw as isize;
+    ((id as f64) == raw && id >= min_leaf_id && id < step_i).then_some(id)
+}
+
+fn decode_dendro_leaf(id: isize, n_leaves: usize) -> Option<usize> {
+    if id >= 0 {
+        return None;
+    }
+    let pos = id.checked_neg()?;
+    let leaf = pos.checked_sub(1)?;
+    let idx = usize::try_from(leaf).ok()?;
+    (idx < n_leaves).then_some(idx)
+}
+
+fn extract_dendro_merges_from_tab(tab: &ResultTab, n_leaves: usize) -> Vec<DendrogramMerge> {
+    if n_leaves < 2 || tab.rows.len() + 1 != n_leaves {
+        return Vec::new();
+    }
     let mut merges = Vec::with_capacity(tab.rows.len());
-    for row in &tab.rows {
+    for (step, row) in tab.rows.iter().enumerate() {
         let (Some(l), Some(r), Some(d), Some(sz)) = (
             row.first().and_then(result_cell_num),
             row.get(1).and_then(result_cell_num),
             row.get(2).and_then(result_cell_num),
             row.get(3).and_then(result_cell_num),
         ) else {
-            continue;
+            return Vec::new();
         };
-        merges.push(DendrogramMerge { left: l as isize, right: r as isize, distance: d, cluster_size: sz.max(1.0) as usize });
+        let (Some(left), Some(right)) = (parse_dendro_node_id(l, step, n_leaves), parse_dendro_node_id(r, step, n_leaves)) else {
+            return Vec::new();
+        };
+        if !d.is_finite() || d < 0.0 || left == right || !sz.is_finite() || sz.fract() != 0.0 || sz < 1.0 || sz > 9_007_199_254_740_991.0 {
+            return Vec::new();
+        }
+        let cluster_size = sz as usize;
+        if (cluster_size as f64) != sz || cluster_size == 0 || cluster_size > n_leaves {
+            return Vec::new();
+        }
+        merges.push(DendrogramMerge { left, right, distance: d, cluster_size });
     }
     merges
 }
@@ -1614,7 +1652,8 @@ fn pairwise_hierarchical_clustering(
 
     let mut active = vec![true; n];
     let mut sizes = vec![1usize; n];
-    let mut node_ids: Vec<isize> = (0..n).map(|i| -((i as isize) + 1)).collect();
+    let mut node_ids: Vec<isize> =
+        (0..n).map(|i| isize::try_from(i).ok().and_then(|v| v.checked_add(1)).and_then(isize::checked_neg)).collect::<Option<Vec<isize>>>()?;
     let mut merges = Vec::with_capacity(n - 1);
 
     for step in 0..(n - 1) {
@@ -1659,7 +1698,7 @@ fn pairwise_hierarchical_clustering(
             *sz = n_i + n_j;
         }
         if let Some(id) = node_ids.get_mut(ci) {
-            *id = step as isize;
+            *id = isize::try_from(step).ok()?;
         }
         if let Some(act) = active.get_mut(cj) {
             *act = false;
@@ -1673,26 +1712,40 @@ fn dendrogram_leaf_order(merges: &[DendrogramMerge], n_leaves: usize) -> Vec<usi
     if merges.is_empty() || n_leaves == 0 {
         return (0..n_leaves).collect();
     }
+    let Ok(root_id) = isize::try_from(merges.len() - 1) else {
+        return (0..n_leaves).collect();
+    };
     let mut order = Vec::with_capacity(n_leaves);
-    let mut stack: Vec<isize> = vec![(merges.len() - 1) as isize];
+    let mut seen_leaves = vec![false; n_leaves];
+    let mut visited_merges = vec![false; merges.len()];
+    let mut stack: Vec<isize> = vec![root_id];
     let mut guard = 0_usize;
+    let max_steps = n_leaves.saturating_mul(4).saturating_add(16);
     while let Some(node) = stack.pop() {
         guard += 1;
-        if guard > n_leaves * 4 + 16 {
+        if guard > max_steps {
             break;
         }
         if node < 0 {
-            let leaf = ((-node) - 1) as usize;
-            if leaf < n_leaves && !order.contains(&leaf) {
+            if let Some(leaf) = decode_dendro_leaf(node, n_leaves)
+                && let Some(seen) = seen_leaves.get_mut(leaf)
+                && !*seen
+            {
+                *seen = true;
                 order.push(leaf);
             }
-        } else if let Some(m) = merges.get(node as usize) {
+        } else if let Ok(merge_idx) = usize::try_from(node)
+            && let Some(visited) = visited_merges.get_mut(merge_idx)
+            && !*visited
+            && let Some(m) = merges.get(merge_idx)
+        {
+            *visited = true;
             stack.push(m.right);
             stack.push(m.left);
         }
     }
-    for i in 0..n_leaves {
-        if !order.contains(&i) {
+    for (i, seen) in seen_leaves.iter().enumerate() {
+        if !*seen {
             order.push(i);
         }
     }
@@ -1700,8 +1753,10 @@ fn dendrogram_leaf_order(merges: &[DendrogramMerge], n_leaves: usize) -> Vec<usi
 }
 
 fn draw_left_dendrogram(scene: &mut ChartScene, box_rect: RectPt, merges: &[DendrogramMerge], leaf_order: &[usize], cell_h: f64) {
-    let max_dist = merges.iter().map(|m| m.distance).fold(0.0_f64, f64::max).max(1e-9);
-    let mut node_y = vec![0.0_f64; leaf_order.len()];
+    let max_dist =
+        merges.iter().filter_map(|m| (m.distance.is_finite() && m.distance >= 0.0).then_some(m.distance)).fold(0.0_f64, f64::max).max(1e-9);
+    let n_leaves = leaf_order.len();
+    let mut node_y = vec![0.0_f64; n_leaves];
     for (vis_idx, &orig_leaf) in leaf_order.iter().enumerate() {
         if let Some(slot) = node_y.get_mut(orig_leaf) {
             *slot = box_rect.y + ((vis_idx as f64) + 0.5) * cell_h;
@@ -1710,17 +1765,18 @@ fn draw_left_dendrogram(scene: &mut ChartScene, box_rect: RectPt, merges: &[Dend
     let mut merge_coords: Vec<(f64, f64)> = vec![(box_rect.right(), box_rect.y); merges.len()];
     let lookup_pos = |id: isize, mc: &[(f64, f64)]| -> (f64, f64) {
         if id < 0 {
-            let leaf = ((-id) - 1) as usize;
-            (box_rect.right(), node_y.get(leaf).copied().unwrap_or(box_rect.y))
+            let y = decode_dendro_leaf(id, n_leaves).and_then(|leaf| node_y.get(leaf).copied()).unwrap_or(box_rect.y);
+            (box_rect.right(), y)
         } else {
-            mc.get(id as usize).copied().unwrap_or((box_rect.right(), box_rect.y))
+            usize::try_from(id).ok().and_then(|idx| mc.get(idx).copied()).unwrap_or((box_rect.right(), box_rect.y))
         }
     };
     let stroke = solid_stroke(Rgba8::rgb(65, 70, 80), 0.9, LineDashStyle::Solid);
     for (step, m) in merges.iter().enumerate() {
         let (x_l, y_l) = lookup_pos(m.left, &merge_coords);
         let (x_r, y_r) = lookup_pos(m.right, &merge_coords);
-        let x_m = box_rect.right() - (m.distance / max_dist) * box_rect.width;
+        let dist_frac = if m.distance.is_finite() { (m.distance / max_dist).clamp(0.0, 1.0) } else { 0.0 };
+        let x_m = box_rect.right() - dist_frac * box_rect.width;
         let mut p = Path2D::new();
         path_move(&mut p, PointPt::new(x_l, y_l));
         path_line(&mut p, PointPt::new(x_m, y_l));
@@ -3432,5 +3488,70 @@ mod tests {
 
         // Ensure ColormapId & Rgba8 used in test are exercised
         assert_ne!(ColormapId::Cividis.sample(0.0), Rgba8::WHITE);
+    }
+
+    #[test]
+    fn dendrogram_node_conversion_guards_extreme_and_malformed_ids() {
+        use lumencraft_doc::{ResultCell, ResultTab, ResultTabKind};
+        use lumencraft_stats::multivariate::DendrogramMerge;
+
+        use super::{dendrogram_leaf_order, draw_left_dendrogram, extract_dendro_merges_from_tab};
+        use crate::scene::{PathCmd, RectPt};
+
+        for bad_row in [
+            vec![
+                ResultCell::Number { value: -1e300, prefix: None, units: None },
+                ResultCell::Number { value: 1e300, prefix: None, units: None },
+                ResultCell::Number { value: 0.5, prefix: None, units: None },
+                ResultCell::Number { value: 2.0, prefix: None, units: None },
+            ],
+            vec![
+                ResultCell::Number { value: -1.5, prefix: None, units: None },
+                ResultCell::Number { value: -2.0, prefix: None, units: None },
+                ResultCell::Number { value: 0.25, prefix: None, units: None },
+                ResultCell::Number { value: 2.0, prefix: None, units: None },
+            ],
+            vec![
+                ResultCell::Number { value: isize::MIN as f64, prefix: None, units: None },
+                ResultCell::Number { value: -1.0, prefix: None, units: None },
+                ResultCell::Number { value: f64::NAN, prefix: None, units: None },
+                ResultCell::Number { value: 2.0, prefix: None, units: None },
+            ],
+        ] {
+            let tab = ResultTab {
+                id: String::from("hierarchical-dendrogram"),
+                title: String::from("Dendrogram"),
+                kind: ResultTabKind::MainSummary,
+                column_headers: vec![],
+                row_labels: vec![],
+                rows: vec![bad_row],
+                footnotes: vec![],
+            };
+            assert!(extract_dendro_merges_from_tab(&tab, 2).is_empty());
+        }
+
+        let malformed = [
+            DendrogramMerge { left: isize::MIN, right: isize::MAX, distance: f64::NAN, cluster_size: usize::MAX },
+            DendrogramMerge { left: 0, right: 1, distance: f64::INFINITY, cluster_size: 2 },
+            DendrogramMerge { left: -999, right: 0, distance: -4.0, cluster_size: 3 },
+        ];
+        let order = dendrogram_leaf_order(&malformed, 4);
+        assert_eq!(order.len(), 4);
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2, 3]);
+
+        let mut scene = ChartScene::new("hm-bad", "Bad Dendro", 320.0, 240.0, None);
+        draw_left_dendrogram(&mut scene, RectPt::new(20.0, 20.0, 40.0, 120.0), &malformed, &order, 30.0);
+        assert!(!scene.primitives.is_empty());
+        for prim in &scene.primitives {
+            if let ScenePrimitive::Path { path, .. } = prim {
+                for cmd in &path.commands {
+                    if let PathCmd::MoveTo(pt) | PathCmd::LineTo(pt) = cmd {
+                        assert!(pt.x.is_finite() && pt.y.is_finite(), "non-finite dendrogram pt: {pt:?}");
+                    }
+                }
+            }
+        }
     }
 }
