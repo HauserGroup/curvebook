@@ -55,6 +55,7 @@ pub fn execute_transpose(source: &DataSheet, swap_titles: bool, ctx: &TransformC
 }
 
 fn transpose_archetype(arch: &TableArchetype, swap_titles: bool) -> Result<TableArchetype, TransformError> {
+    arch.validate()?;
     match arch {
         TableArchetype::Column(t) => {
             if t.subcolumn_mode != SubcolumnMode::Single {
@@ -158,8 +159,10 @@ fn transpose_single_columns(data_sets: &[DataSetColumn], row_titles: &[String], 
         let title = new_col_titles.get(c).cloned().unwrap_or_else(|| default_column_label(c));
         let mut ds = DataSetColumn::new(title, new_rows, 1)?;
         for r in 0..new_rows {
-            if let Some(cell) = transposed.get(r).and_then(|tr| tr.get(c)) {
-                ds.cells[r][0] = cell.clone();
+            if let Some(cell) = transposed.get(r).and_then(|tr| tr.get(c))
+                && let Some(slot) = ds.cells.get_mut(r).and_then(|row| row.first_mut())
+            {
+                *slot = cell.clone();
             }
         }
         out_cols.push(ds);
@@ -174,7 +177,9 @@ fn transpose_multivariate(mv: &MultipleVariablesTable, swap_titles: bool) -> Res
     let mut grid = vec![vec![Cell::empty(); cols]; rows];
     for (c, var) in mv.variables.iter().enumerate() {
         for (r, cell) in var.cells.iter().enumerate() {
-            grid[r][c] = cell.clone();
+            if let Some(slot) = grid.get_mut(r).and_then(|row| row.get_mut(c)) {
+                *slot = cell.clone();
+            }
         }
     }
     let transposed = transpose_cell_grid(&grid);
@@ -193,7 +198,9 @@ fn transpose_multivariate(mv: &MultipleVariablesTable, swap_titles: bool) -> Res
             };
             let mut var = VariableColumn::new(title, new_rows)?;
             for r in 0..new_rows {
-                var.cells[r] = transposed.get(r).and_then(|row| row.get(c)).cloned().unwrap_or_default();
+                if let Some(slot) = var.cells.get_mut(r) {
+                    *slot = transposed.get(r).and_then(|row| row.get(c)).cloned().unwrap_or_default();
+                }
             }
             var.refresh_inferred_role();
             out.variables.push(var);
@@ -214,8 +221,10 @@ fn transpose_grouped(t: &GroupedTable, swap_titles: bool) -> Result<TableArchety
         let mut grid = vec![vec![Cell::empty(); cols]; rows];
         for (c, ds) in t.data_sets.iter().enumerate() {
             for (r, row_cells) in ds.cells.iter().enumerate() {
-                if let Some(cell) = row_cells.get(s) {
-                    grid[r][c] = cell.clone();
+                if let Some(cell) = row_cells.get(s)
+                    && let Some(slot) = grid.get_mut(r).and_then(|row| row.get_mut(c))
+                {
+                    *slot = cell.clone();
                 }
             }
         }
@@ -228,13 +237,15 @@ fn transpose_grouped(t: &GroupedTable, swap_titles: bool) -> Result<TableArchety
     if new_cols == 0 {
         out.data_sets.clear();
     } else {
-        for c in 0..new_cols {
+        for (c, ds) in out.data_sets.iter_mut().enumerate() {
             if swap_titles {
-                out.data_sets[c].title = t.row_titles.get(c).cloned().unwrap_or_else(|| default_column_label(c));
+                ds.title = t.row_titles.get(c).cloned().unwrap_or_else(|| default_column_label(c));
             }
-            for r in 0..new_rows {
+            for (r, row_cells) in ds.cells.iter_mut().enumerate().take(new_rows) {
                 for (s, sub_grid) in sub_grids.iter().enumerate().take(subs) {
-                    out.data_sets[c].cells[r][s] = sub_grid.get(r).and_then(|row| row.get(c)).cloned().unwrap_or_default();
+                    if let Some(slot) = row_cells.get_mut(s) {
+                        *slot = sub_grid.get(r).and_then(|row| row.get(c)).cloned().unwrap_or_default();
+                    }
                 }
             }
         }
@@ -278,6 +289,7 @@ fn transpose_xy(t: &XyTable, swap_titles: bool) -> Result<TableArchetype, Transf
 
 /// Decimate or bin rows of a [`DataSheet`] according to [`PruneMethod`].
 pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformContext<'_>) -> Result<TransformOutput, TransformError> {
+    source.archetype.validate()?;
     let row_count = source.archetype.row_count();
     let (id, title) = ctx.derived_ids(source, "prune", "Pruned");
 
@@ -345,9 +357,11 @@ fn select_log_spaced_indices(arch: &TableArchetype, target_points: usize) -> Vec
     let mut out = Vec::new();
     if let TableArchetype::Xy(xy) = arch {
         let xs: Vec<(usize, f64)> = (0..n).filter_map(|r| xy.x_value_at(r).filter(|&x| x > 0.0).map(|x| (r, x))).collect();
-        if xs.len() >= 2 {
-            let log_min = xs[0].1.ln();
-            let log_max = xs[xs.len() - 1].1.ln();
+        if let (Some(&(_, first_x)), Some(&(_, last_x))) = (xs.first(), xs.last())
+            && xs.len() >= 2
+        {
+            let log_min = first_x.ln();
+            let log_max = last_x.ln();
             if log_max > log_min {
                 for step in 0..target_points {
                     let target_ln = log_min + ((step as f64) / ((target_points - 1) as f64)) * (log_max - log_min);
@@ -584,6 +598,7 @@ pub fn execute_select(
     target_archetype: TableKind,
     ctx: &TransformContext<'_>,
 ) -> Result<TransformOutput, TransformError> {
+    source.archetype.validate()?;
     let row_count = source.archetype.row_count();
     let mut keep_mask = vec![true; row_count];
 
@@ -659,15 +674,19 @@ fn apply_select_rule(source: &DataSheet, rule: &SelectRule, mask: &mut [bool], c
             if *column >= source.archetype.column_count() {
                 return Err(TransformError::InvalidSpec { message: format!("TopN/BottomN column {column} out of bounds") });
             }
-            let mut candidates: Vec<(usize, f64)> =
-                (0..n).filter(|&r| mask[r]).filter_map(|r| row_col_active_number(&source.archetype, r, *column).map(|v| (r, v))).collect();
+            let mut candidates: Vec<(usize, f64)> = (0..n)
+                .filter(|&r| mask.get(r).copied().unwrap_or(false))
+                .filter_map(|r| row_col_active_number(&source.archetype, r, *column).map(|v| (r, v)))
+                .collect();
             candidates.sort_by(|a, b| if is_top { b.1.total_cmp(&a.1) } else { a.1.total_cmp(&b.1) });
             let mut chosen = vec![false; n];
             for (r, _) in candidates.into_iter().take(*top_k) {
-                chosen[r] = true;
+                if let Some(slot) = chosen.get_mut(r) {
+                    *slot = true;
+                }
             }
             for (r, flag) in mask.iter_mut().enumerate() {
-                *flag = *flag && chosen[r];
+                *flag = *flag && chosen.get(r).copied().unwrap_or(false);
             }
         }
     }
@@ -771,36 +790,7 @@ fn project_archetype(arch: &TableArchetype, target: TableKind, selected: &[usize
             t.row_titles = row_titles;
             Ok(TableArchetype::Column(t))
         }
-        TableKind::Xy => {
-            let y_cols = cols.saturating_sub(1).max(1);
-            let mut t = XyTable::new(SubcolumnMode::Single, y_cols, rows)?;
-            if cols <= 1 {
-                for r in 0..rows {
-                    #[allow(clippy::cast_precision_loss)]
-                    t.set_x_cell(r, Cell::number((r + 1) as f64))?;
-                    if let Some(cell) = grid.get(r).and_then(|row| row.first()) {
-                        t.data_sets[0].cells[r][0] = cell.clone();
-                    }
-                }
-                if let Some(first_title) = titles.first() {
-                    t.data_sets[0].title = first_title.clone();
-                }
-            } else {
-                t.x_title = titles[0].clone();
-                for (r, row_vals) in grid.iter().enumerate().take(rows) {
-                    t.set_x_cell(r, row_vals[0].clone())?;
-                }
-                for (y_idx, ds) in t.data_sets.iter_mut().enumerate() {
-                    ds.title = titles[y_idx + 1].clone();
-                    for (r, row_vals) in grid.iter().enumerate().take(rows) {
-                        ds.cells[r][0] = row_vals[y_idx + 1].clone();
-                    }
-                }
-            }
-            t.row_titles_expanded = row_titles.iter().any(|s| !s.trim().is_empty());
-            t.row_titles = row_titles;
-            Ok(TableArchetype::Xy(t))
-        }
+        TableKind::Xy => project_into_xy(rows, &titles, row_titles, &grid),
         TableKind::Grouped => {
             let mut t = GroupedTable::new(SubcolumnMode::RawReplicates(1), cols.max(1), rows)?;
             if cols == 0 {
@@ -832,62 +822,149 @@ fn project_archetype(arch: &TableArchetype, target: TableKind, selected: &[usize
             t.slice_labels = row_titles;
             Ok(TableArchetype::PartsOfWhole(t))
         }
-        TableKind::Survival => {
-            let cohort_cols = cols.saturating_sub(1).max(1);
-            let mut t = SurvivalTable::new(cohort_cols, rows)?;
-            if cols >= 2 {
-                t.time_title = titles[0].clone();
-                for (r, row_vals) in grid.iter().enumerate().take(rows) {
-                    t.times[r] = row_vals[0].clone();
-                    for c in 0..cohort_cols {
-                        t.cohorts[c].title = titles[c + 1].clone();
-                        t.cohorts[c].cells[r][0] = row_vals[c + 1].clone();
-                    }
-                }
-            } else if cols == 1 {
-                t.cohorts[0].title = titles[0].clone();
-                for (r, row_vals) in grid.iter().enumerate().take(rows) {
-                    t.cohorts[0].cells[r][0] = row_vals[0].clone();
-                }
+        TableKind::Survival => project_into_survival(rows, &titles, row_titles, &grid),
+        TableKind::MultipleVariables => project_into_mv(rows, &titles, row_titles, &grid),
+        TableKind::Nested => project_into_nested(rows, &titles, row_titles, &grid),
+    }
+}
+
+fn project_into_xy(rows: usize, titles: &[String], row_titles: Vec<String>, grid: &[Vec<Cell>]) -> Result<TableArchetype, TransformError> {
+    let cols = titles.len();
+    let y_cols = cols.saturating_sub(1).max(1);
+    let mut t = XyTable::new(SubcolumnMode::Single, y_cols, rows)?;
+    if cols <= 1 {
+        for r in 0..rows {
+            #[allow(clippy::cast_precision_loss)]
+            t.set_x_cell(r, Cell::number((r + 1) as f64))?;
+            if let Some(cell) = grid.get(r).and_then(|row| row.first())
+                && let Some(slot) = t.data_sets.first_mut().and_then(|ds| ds.cells.get_mut(r)).and_then(|row| row.first_mut())
+            {
+                *slot = cell.clone();
             }
-            t.row_titles = row_titles;
-            Ok(TableArchetype::Survival(t))
         }
-        TableKind::MultipleVariables => {
-            let mut t = MultipleVariablesTable::new(cols.max(1), rows)?;
-            if cols == 0 {
-                t.variables.clear();
-            } else {
-                for (c, var) in t.variables.iter_mut().enumerate() {
-                    var.title = titles[c].clone();
-                    var.role = VariableRole::Continuous;
-                    for (r, row_vals) in grid.iter().enumerate().take(rows) {
-                        var.cells[r] = row_vals[c].clone();
-                    }
-                    var.refresh_inferred_role();
-                }
-            }
-            t.row_titles_expanded = row_titles.iter().any(|s| !s.trim().is_empty());
-            t.row_titles = row_titles;
-            Ok(TableArchetype::MultipleVariables(t))
+        if let Some(first_title) = titles.first()
+            && let Some(ds0) = t.data_sets.first_mut()
+        {
+            ds0.title = first_title.clone();
         }
-        TableKind::Nested => {
-            let mut t = NestedTable::new(cols.max(1), 1, rows)?;
-            if cols == 0 {
-                t.groups.clear();
-            } else {
-                for (c, grp) in t.groups.iter_mut().enumerate() {
-                    grp.title = titles[c].clone();
-                    grp.subcolumn_titles = vec![format!("{}:1", grp.title)];
-                    for (r, row_vals) in grid.iter().enumerate().take(rows) {
-                        grp.cells[r][0] = row_vals[c].clone();
-                    }
+    } else {
+        if let Some(x_title) = titles.first() {
+            t.x_title = x_title.clone();
+        }
+        for (r, row_vals) in grid.iter().enumerate().take(rows) {
+            if let Some(cell) = row_vals.first() {
+                t.set_x_cell(r, cell.clone())?;
+            }
+        }
+        for (y_idx, ds) in t.data_sets.iter_mut().enumerate() {
+            if let Some(title) = titles.get(y_idx + 1) {
+                ds.title = title.clone();
+            }
+            for (r, row_vals) in grid.iter().enumerate().take(rows) {
+                if let Some(cell) = row_vals.get(y_idx + 1)
+                    && let Some(slot) = ds.cells.get_mut(r).and_then(|row| row.first_mut())
+                {
+                    *slot = cell.clone();
                 }
             }
-            t.row_titles = row_titles;
-            Ok(TableArchetype::Nested(t))
         }
     }
+    t.row_titles_expanded = row_titles.iter().any(|s| !s.trim().is_empty());
+    t.row_titles = row_titles;
+    Ok(TableArchetype::Xy(t))
+}
+
+fn project_into_survival(rows: usize, titles: &[String], row_titles: Vec<String>, grid: &[Vec<Cell>]) -> Result<TableArchetype, TransformError> {
+    let cols = titles.len();
+    let cohort_cols = cols.saturating_sub(1).max(1);
+    let mut t = SurvivalTable::new(cohort_cols, rows)?;
+    if cols >= 2 {
+        if let Some(time_title) = titles.first() {
+            t.time_title = time_title.clone();
+        }
+        for (r, row_vals) in grid.iter().enumerate().take(rows) {
+            if let Some(cell) = row_vals.first()
+                && let Some(slot) = t.times.get_mut(r)
+            {
+                *slot = cell.clone();
+            }
+            for (c, ds) in t.cohorts.iter_mut().enumerate() {
+                if let Some(title) = titles.get(c + 1) {
+                    ds.title = title.clone();
+                }
+                if let Some(cell) = row_vals.get(c + 1)
+                    && let Some(slot) = ds.cells.get_mut(r).and_then(|row| row.first_mut())
+                {
+                    *slot = cell.clone();
+                }
+            }
+        }
+    } else if cols == 1 {
+        if let Some(title) = titles.first()
+            && let Some(ds0) = t.cohorts.first_mut()
+        {
+            ds0.title = title.clone();
+        }
+        for (r, row_vals) in grid.iter().enumerate().take(rows) {
+            if let Some(cell) = row_vals.first()
+                && let Some(slot) = t.cohorts.first_mut().and_then(|ds| ds.cells.get_mut(r)).and_then(|row| row.first_mut())
+            {
+                *slot = cell.clone();
+            }
+        }
+    }
+    t.row_titles = row_titles;
+    Ok(TableArchetype::Survival(t))
+}
+
+fn project_into_mv(rows: usize, titles: &[String], row_titles: Vec<String>, grid: &[Vec<Cell>]) -> Result<TableArchetype, TransformError> {
+    let cols = titles.len();
+    let mut t = MultipleVariablesTable::new(cols.max(1), rows)?;
+    if cols == 0 {
+        t.variables.clear();
+    } else {
+        for (c, var) in t.variables.iter_mut().enumerate() {
+            if let Some(title) = titles.get(c) {
+                var.title = title.clone();
+            }
+            var.role = VariableRole::Continuous;
+            for (r, row_vals) in grid.iter().enumerate().take(rows) {
+                if let Some(cell) = row_vals.get(c)
+                    && let Some(slot) = var.cells.get_mut(r)
+                {
+                    *slot = cell.clone();
+                }
+            }
+            var.refresh_inferred_role();
+        }
+    }
+    t.row_titles_expanded = row_titles.iter().any(|s| !s.trim().is_empty());
+    t.row_titles = row_titles;
+    Ok(TableArchetype::MultipleVariables(t))
+}
+
+fn project_into_nested(rows: usize, titles: &[String], row_titles: Vec<String>, grid: &[Vec<Cell>]) -> Result<TableArchetype, TransformError> {
+    let cols = titles.len();
+    let mut t = NestedTable::new(cols.max(1), 1, rows)?;
+    if cols == 0 {
+        t.groups.clear();
+    } else {
+        for (c, grp) in t.groups.iter_mut().enumerate() {
+            if let Some(title) = titles.get(c) {
+                grp.title = title.clone();
+            }
+            grp.subcolumn_titles = vec![format!("{}:1", grp.title)];
+            for (r, row_vals) in grid.iter().enumerate().take(rows) {
+                if let Some(cell) = row_vals.get(c)
+                    && let Some(slot) = grp.cells.get_mut(r).and_then(|row| row.first_mut())
+                {
+                    *slot = cell.clone();
+                }
+            }
+        }
+    }
+    t.row_titles = row_titles;
+    Ok(TableArchetype::Nested(t))
 }
 
 fn populate_single_datasets(data_sets: &mut [DataSetColumn], titles: &[String], grid: &[Vec<Cell>]) {
@@ -896,8 +973,10 @@ fn populate_single_datasets(data_sets: &mut [DataSetColumn], titles: &[String], 
             ds.title = title.clone();
         }
         for (r, row) in grid.iter().enumerate() {
-            if let Some(cell) = row.get(c) {
-                ds.cells[r][0] = cell.clone();
+            if let Some(cell) = row.get(c)
+                && let Some(slot) = ds.cells.get_mut(r).and_then(|cells_row| cells_row.first_mut())
+            {
+                *slot = cell.clone();
             }
         }
     }

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use lumencraft_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource,
     LinkedDataRegion, NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn,
-    default_column_label, transpose_cell_grid, validate_data_sets, validate_rows,
+    default_column_label, transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_subcolumns,
 };
 
 use crate::error::TransformError;
@@ -162,6 +162,13 @@ pub fn apply_import_link_pipeline(
         shaped = collapse_contiguous_blank_rows(shaped);
     }
     if spec.placement.transpose {
+        let transpose_rows = shaped.len();
+        let transpose_cols = shaped.iter().map(Vec::len).max().unwrap_or(0);
+        let dense_cells = transpose_rows.checked_mul(transpose_cols);
+        check_transform_cell_budget(dense_cells, "transposed import")?;
+        if let Some(total) = dense_cells {
+            validate_sheet_cells(total)?;
+        }
         shaped = transpose_cell_grid(&shaped);
     }
 
@@ -578,11 +585,19 @@ fn validate_archetype_growth_budget(arch: &TableArchetype, min_cols: usize, min_
     };
     match arch {
         TableArchetype::Xy(t) => {
+            t.x_mode.validate()?;
+            t.y_subcolumn_mode.validate()?;
             let x_cells = t.x_cells.len().max(effective_rows).checked_mul(t.x_mode.subcolumn_count());
             sum_ds(&t.data_sets, t.y_subcolumn_mode.subcolumn_count(), x_cells)
         }
-        TableArchetype::Column(t) => sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0)),
-        TableArchetype::Grouped(t) => sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0)),
+        TableArchetype::Column(t) => {
+            t.subcolumn_mode.validate()?;
+            sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0))
+        }
+        TableArchetype::Grouped(t) => {
+            t.subcolumn_mode.validate()?;
+            sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0))
+        }
         TableArchetype::Contingency(t) => sum_ds(&t.data_sets, 1, Some(0)),
         TableArchetype::Survival(t) => sum_ds(&t.cohorts, 1, Some(t.times.len().max(effective_rows))),
         TableArchetype::PartsOfWhole(t) => sum_ds(&t.data_sets, 1, Some(0)),
@@ -591,6 +606,9 @@ fn validate_archetype_growth_budget(arch: &TableArchetype, min_cols: usize, min_
             sum_column_growth_cells(dims, mv.variables.len(), effective_cols, effective_rows, 1, Some(0))
         }
         TableArchetype::Nested(t) => {
+            for g in &t.groups {
+                validate_subcolumns(g.biological_unit_count())?;
+            }
             let extra_units = t.groups.first().map_or(1, NestedGroupColumn::biological_unit_count).max(1);
             let dims = t.groups.iter().map(|g| (g.cells.len(), g.biological_unit_count()));
             sum_column_growth_cells(dims, t.groups.len(), effective_cols, effective_rows, extra_units, Some(0))
