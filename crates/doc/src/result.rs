@@ -428,6 +428,9 @@ impl ResultSheet {
     /// Resolve a hooked scalar by case-insensitive parameter key and optional dataset index.
     #[must_use]
     pub fn lookup_scalar(&self, key: &str, data_set_index: Option<usize>) -> Option<f64> {
+        if matches!(self.status, ResultStatus::Failed { .. }) {
+            return None;
+        }
         let needle = key.trim();
         self.scalars
             .iter()

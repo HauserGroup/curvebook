@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use lumencraft_doc::{Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, SheetId, TableArchetype};
+use lumencraft_doc::{Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, TableArchetype};
 
 use crate::error::FitError;
 
@@ -64,6 +64,32 @@ impl DataPoint {
     pub fn x0(&self) -> f64 {
         self.x.first().copied().unwrap_or(0.0)
     }
+}
+
+/// Validate optional summarized-point replicate count (`n`) and sample `sd`, returning
+/// `(n_f64, n_usize, (n - 1) * sd^2)` or defaulting to `(1.0, 1, 0.0)` for single raw points.
+pub(crate) fn validated_replicate_moments(pt: &DataPoint) -> Result<(f64, usize, f64), FitError> {
+    let Some(n_raw) = pt.n else {
+        return Ok((1.0, 1, 0.0));
+    };
+    if !n_raw.is_finite() || !(1.0..=1e9).contains(&n_raw) || (n_raw - n_raw.round()).abs() > 1e-6 {
+        return Err(FitError::InvalidParameter { name: "n", reason: format!("replicate count N must be a finite integer in 1..=1e9 (got {n_raw})") });
+    }
+    let n_usize = n_raw.round() as usize;
+    let n_f = n_usize as f64;
+    let ss_within = if let Some(sd) = pt.sd {
+        if !sd.is_finite() || sd < 0.0 {
+            return Err(FitError::InvalidParameter { name: "sd", reason: format!("standard deviation must be finite and non-negative (got {sd})") });
+        }
+        let ss = (n_f - 1.0) * sd * sd;
+        if !ss.is_finite() {
+            return Err(FitError::InvalidParameter { name: "sd", reason: String::from("within-replicate SS overflowed f64 range") });
+        }
+        ss
+    } else {
+        0.0
+    };
+    Ok((n_f, n_usize, ss_within))
 }
 
 /// Extracted dataset series ready for linear or nonlinear regression.
@@ -142,6 +168,9 @@ impl<'a> HookContext<'a> {
         let Some(rs) = self.result_sheets.iter().find(|r| &r.id == result_sheet_id) else {
             return Err(FitError::HookResolutionError { message: format!("result sheet `{result_sheet_id}` not found") });
         };
+        if let ResultStatus::Failed { message, .. } = &rs.status {
+            return Err(FitError::HookResolutionError { message: format!("upstream result sheet `{result_sheet_id}` failed: {message}") });
+        }
         rs.lookup_scalar(parameter_key, data_set_index).ok_or_else(|| FitError::HookResolutionError {
             message: format!("scalar `{parameter_key}` missing or non-finite on `{result_sheet_id}`"),
         })
@@ -349,7 +378,9 @@ fn extract_from_grouped(g: &lumencraft_doc::GroupedTable, selected_data_sets: &[
                 .or_else(|| g.row_titles.get(row).and_then(|t| parse_leading_number(t)))
                 .unwrap_or(row as f64);
             if g.subcolumn_mode.supports_parametric_moments() {
-                if let Ok(Some(pt)) = lumencraft_doc::SummarizedPoint::reconstruct(g.subcolumn_mode, subcells) {
+                let pt_opt = lumencraft_doc::SummarizedPoint::reconstruct(g.subcolumn_mode, subcells)
+                    .map_err(|e| FitError::InvalidParameter { name: "pre_summarized_y", reason: e.to_string() })?;
+                if let Some(pt) = pt_opt {
                     points.push(DataPoint {
                         x: vec![x_val],
                         y: pt.mean,

@@ -330,6 +330,10 @@ fn refresh_single_region(working: &ProjectDocument, target: &mut DataSheet, reg_
             if let Some(src_ds) = working.data_sheet(sheet_id) {
                 Some(apply_import_link_pipeline(target, &refresh_spec, ImportSourcePayload::InternalData(src_ds), &opts, None))
             } else if let Some(src_rs) = working.result_sheet(sheet_id) {
+                if let Err((_, detail)) = check_upstream_result_status(src_rs, sheet_id) {
+                    target.linked_regions = saved_regions;
+                    return Err(EngineError::new(format!("linked region `{}` refresh on sheet `{}` failed: {detail}", region.id, target.id)));
+                }
                 if *kind == InternalLinkKind::AnalyzableResultSheet
                     && tab_id.is_none()
                     && let Some(analyzable) = src_rs.analyzable_data.as_ref()
@@ -371,11 +375,34 @@ fn refresh_data_sheet_links(working: &mut ProjectDocument, ds_idx: usize) -> Res
     Ok(())
 }
 
-fn resolve_source_table(doc: &ProjectDocument, source_id: &SheetId) -> Option<DataSheet> {
-    if let Some(ds) = doc.data_sheet(source_id) {
-        return Some(ds.clone());
+fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCode, message: String) {
+    target.analyzable_data = None;
+    target.tabs.clear();
+    target.scalars.clear();
+    target.pairwise_comparisons.clear();
+    target.fitted_curves.clear();
+    target.checklist.clear();
+    target.floating_notes.clear();
+    target.status = ResultStatus::Failed { code, message };
+}
+
+fn check_upstream_result_status(res: &ResultSheet, context_id: &SheetId) -> Result<(), (ErrorCode, String)> {
+    match &res.status {
+        ResultStatus::UpToDate => Ok(()),
+        ResultStatus::Failed { message, .. } => Err((ErrorCode::BadInput, format!("upstream result sheet `{context_id}` failed: {message}"))),
+        ResultStatus::Dirty => Err((ErrorCode::BadInput, format!("upstream result sheet `{context_id}` is not up to date"))),
     }
-    doc.result_sheet(source_id).and_then(|res| res.analyzable_data.clone())
+}
+
+fn resolve_source_table(doc: &ProjectDocument, source_id: &SheetId) -> Result<DataSheet, (ErrorCode, String)> {
+    if let Some(ds) = doc.data_sheet(source_id) {
+        return Ok(ds.clone());
+    }
+    let Some(res) = doc.result_sheet(source_id) else {
+        return Err((ErrorCode::NotFound, format!("source sheet `{source_id}` not found")));
+    };
+    check_upstream_result_status(res, source_id)?;
+    res.analyzable_data.clone().ok_or_else(|| (ErrorCode::NotFound, format!("upstream result sheet `{source_id}` has no analyzable table")))
 }
 
 fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_ds: &'a DataSheet, analysis: &AnalysisSpec) -> Option<&'a SheetId> {
@@ -428,11 +455,22 @@ fn resolve_transform_info_sheet<'a>(doc: &'a ProjectDocument, source_ds: &'a Dat
 
 fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
     let existing = doc.result_sheets[res_idx].clone();
-    let Some(source_ds) = resolve_source_table(doc, &existing.analysis.source_sheet_id) else {
-        doc.result_sheets[res_idx].status =
-            ResultStatus::Failed { code: ErrorCode::NotFound, message: format!("source sheet `{}` not found", existing.analysis.source_sheet_id) };
-        return false;
+    let source_ds = match resolve_source_table(doc, &existing.analysis.source_sheet_id) {
+        Ok(ds) => ds,
+        Err((code, message)) => {
+            clear_failed_result_sheet(&mut doc.result_sheets[res_idx], code, message);
+            return false;
+        }
     };
+    for hook in existing.analysis.kind.hooked_sources() {
+        if let HookSource::ResultScalar { result_sheet_id, .. } = hook
+            && let Some(res) = doc.result_sheet(&result_sheet_id)
+            && let Err((code, message)) = check_upstream_result_status(res, &result_sheet_id)
+        {
+            clear_failed_result_sheet(&mut doc.result_sheets[res_idx], code, message);
+            return false;
+        }
+    }
 
     let output: Result<ResultSheet, String> = match &existing.analysis.kind {
         AnalysisKind::Transform(_) => {
@@ -473,7 +511,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             true
         }
         Err(message) => {
-            target.status = ResultStatus::Failed { code: ErrorCode::SolverFailed, message };
+            clear_failed_result_sheet(target, ErrorCode::SolverFailed, message);
             false
         }
     }

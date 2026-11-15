@@ -8,7 +8,7 @@ use lumencraft_math::sum::{NeumaierSum, SummaryMoments};
 
 use crate::diagnostics::{LackOfFitResult, RunsTestResult, replicates_lack_of_fit, runs_test};
 use crate::error::FitError;
-use crate::types::DataPoint;
+use crate::types::{DataPoint, validated_replicate_moments};
 
 /// Configuration for [`simple_linear_regression`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -129,6 +129,42 @@ pub struct DemingResult {
     pub residuals: Vec<LinearResidual>,
 }
 
+struct WeightedXySeries {
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    ns: Vec<f64>,
+    n_total: usize,
+    ss_within: f64,
+}
+
+fn extract_linear_series(points: &[DataPoint]) -> Result<WeightedXySeries, FitError> {
+    let mut xs = Vec::with_capacity(points.len());
+    let mut ys = Vec::with_capacity(points.len());
+    let mut ns = Vec::with_capacity(points.len());
+    let mut n_total = 0_usize;
+    let mut ss_within_acc = NeumaierSum::new();
+    for pt in points {
+        let x = pt.x0();
+        let y = pt.y;
+        if !x.is_finite() || !y.is_finite() {
+            return Err(FitError::InvalidParameter { name: "xy", reason: String::from("non-finite value") });
+        }
+        let (n_f, n_u, ss_i) = validated_replicate_moments(pt)?;
+        n_total = n_total
+            .checked_add(n_u)
+            .ok_or_else(|| FitError::InvalidParameter { name: "n", reason: String::from("total replicate count overflowed usize") })?;
+        ss_within_acc.add(ss_i);
+        xs.push(x);
+        ys.push(y);
+        ns.push(n_f);
+    }
+    let ss_within = ss_within_acc.total().max(0.0);
+    if !ss_within.is_finite() {
+        return Err(FitError::InvalidParameter { name: "sd", reason: String::from("within-replicate SS overflowed f64 range") });
+    }
+    Ok(WeightedXySeries { xs, ys, ns, n_total, ss_within })
+}
+
 /// Perform simple OLS linear regression (or origin-forced linear regression) on `(x, y)` pairs.
 ///
 /// # Errors
@@ -139,27 +175,30 @@ pub fn simple_linear_regression(points: &[DataPoint], opts: &SimpleLinearOptions
     if points.is_empty() {
         return Err(FitError::EmptyInput);
     }
-    if points.len() < min_n {
-        return Err(FitError::InsufficientData { required: min_n, actual: points.len() });
+    let series = extract_linear_series(points)?;
+    let n = series.n_total;
+    if n < min_n {
+        return Err(FitError::InsufficientData { required: min_n, actual: n });
     }
-    let xs: Vec<f64> = points.iter().map(DataPoint::x0).collect();
-    let ys: Vec<f64> = points.iter().map(|p| p.y).collect();
-    let n = points.len();
 
-    let (slope, intercept, se_slope, se_intercept, s_xx, s_yy, s_xy, x_mean) =
-        if opts.force_through_origin { fit_through_origin(&xs, &ys)? } else { fit_with_intercept(&xs, &ys)? };
+    let (slope, intercept, se_slope, se_intercept, s_xx, s_yy, s_xy, x_mean) = if opts.force_through_origin {
+        fit_through_origin(&series.xs, &series.ys, &series.ns, series.ss_within)?
+    } else {
+        fit_with_intercept(&series.xs, &series.ys, &series.ns, series.n_total, series.ss_within)?
+    };
 
     let df_res = if opts.force_through_origin { n - 1 } else { n - 2 };
     let mut rss_acc = NeumaierSum::new();
-    let mut residuals = Vec::with_capacity(n);
-    let mut raw_res = Vec::with_capacity(n);
-    for (&x, &y) in xs.iter().zip(ys.iter()) {
+    let mut residuals = Vec::with_capacity(series.xs.len());
+    let mut raw_res = Vec::with_capacity(series.xs.len());
+    for ((&x, &y), &w) in series.xs.iter().zip(series.ys.iter()).zip(series.ns.iter()) {
         let pred = intercept + slope * x;
         let res = y - pred;
-        rss_acc.add(res * res);
+        rss_acc.add(w * res * res);
         raw_res.push(res);
         residuals.push(LinearResidual { x, y, predicted: pred, residual: res });
     }
+    rss_acc.add(series.ss_within);
     let rss = rss_acc.total().max(0.0);
     let sy_x = (rss / (df_res as f64)).sqrt();
 
@@ -183,14 +222,14 @@ pub fn simple_linear_regression(points: &[DataPoint], opts: &SimpleLinearOptions
     let p_value = if f_stat.is_infinite() { 0.0 } else { f_sf(f_stat, 1.0, df_res as f64).unwrap_or(1.0) };
 
     // Sort residuals by X for runs test so sign ordering tracks predictor progression.
-    let mut ordered_pairs: Vec<(f64, f64)> = xs.iter().copied().zip(raw_res.iter().copied()).collect();
+    let mut ordered_pairs: Vec<(f64, f64)> = series.xs.iter().copied().zip(raw_res.iter().copied()).collect();
     ordered_pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
     let sorted_res: Vec<f64> = ordered_pairs.into_iter().map(|(_, r)| r).collect();
     let runs = runs_test(&sorted_res);
     let lack_of_fit = replicates_lack_of_fit(points, rss, df_res);
 
     let bands = if opts.compute_bands {
-        build_linear_bands(&xs, slope, intercept, sy_x, t_crit, x_mean, s_xx, opts.force_through_origin, opts.band_grid_points)
+        build_linear_bands(&series.xs, n, slope, intercept, sy_x, t_crit, x_mean, s_xx, opts.force_through_origin, opts.band_grid_points)
     } else {
         Vec::new()
     };
@@ -229,49 +268,71 @@ pub fn simple_linear_regression(points: &[DataPoint], opts: &SimpleLinearOptions
 }
 
 #[allow(clippy::type_complexity)]
-fn fit_with_intercept(xs: &[f64], ys: &[f64]) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), FitError> {
-    let mx = SummaryMoments::from_slice(xs)?;
-    let my = SummaryMoments::from_slice(ys)?;
-    if mx.css <= 0.0 {
-        return Err(FitError::InvalidParameter { name: "x", reason: String::from("predictor X has zero variance") });
+fn fit_with_intercept(
+    xs: &[f64],
+    ys: &[f64],
+    ns: &[f64],
+    n_total: usize,
+    ss_within: f64,
+) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), FitError> {
+    let nf = n_total as f64;
+    let mut sum_x = NeumaierSum::new();
+    let mut sum_y = NeumaierSum::new();
+    for ((&x, &y), &w) in xs.iter().zip(ys.iter()).zip(ns.iter()) {
+        sum_x.add(w * x);
+        sum_y.add(w * y);
     }
+    let x_mean = sum_x.total() / nf;
+    let y_mean = sum_y.total() / nf;
+
     let mut dx_acc = NeumaierSum::new();
     let mut dy_acc = NeumaierSum::new();
+    let mut sxx_acc = NeumaierSum::new();
+    let mut syy_acc = NeumaierSum::new();
     let mut xy_acc = NeumaierSum::new();
-    for (&x, &y) in xs.iter().zip(ys.iter()) {
-        let dx = x - mx.mean;
-        let dy = y - my.mean;
-        dx_acc.add(dx);
-        dy_acc.add(dy);
-        let p = dx * dy;
+    for ((&x, &y), &w) in xs.iter().zip(ys.iter()).zip(ns.iter()) {
+        let dx = x - x_mean;
+        let dy = y - y_mean;
+        dx_acc.add(w * dx);
+        dy_acc.add(w * dy);
+        sxx_acc.add(w * dx * dx);
+        syy_acc.add(w * dy * dy);
+        let p = w * dx * dy;
         xy_acc.add(p);
-        xy_acc.add(dx.mul_add(dy, -p));
+        xy_acc.add((w * dx).mul_add(dy, -p));
     }
-    let s_xy = xy_acc.total() - (dx_acc.total() * dy_acc.total()) / (xs.len() as f64);
-    let slope = s_xy / mx.css;
-    let intercept = my.mean - slope * mx.mean;
-    let se_slope_factor = (1.0 / mx.css).sqrt();
-    let se_intercept_factor = (1.0 / (xs.len() as f64) + (mx.mean * mx.mean) / mx.css).sqrt();
-    Ok((slope, intercept, se_slope_factor, se_intercept_factor, mx.css, my.css, s_xy, mx.mean))
+    let dx_tot = dx_acc.total();
+    let dy_tot = dy_acc.total();
+    let s_xx = (sxx_acc.total() - (dx_tot * dx_tot) / nf).max(0.0);
+    if s_xx <= 0.0 || !s_xx.is_finite() {
+        return Err(FitError::InvalidParameter { name: "x", reason: String::from("predictor X has zero variance") });
+    }
+    let s_yy = (syy_acc.total() - (dy_tot * dy_tot) / nf).max(0.0) + ss_within;
+    let s_xy = xy_acc.total() - (dx_tot * dy_tot) / nf;
+    let slope = s_xy / s_xx;
+    let intercept = y_mean - slope * x_mean;
+    let se_slope_factor = (1.0 / s_xx).sqrt();
+    let se_intercept_factor = (1.0 / nf + (x_mean * x_mean) / s_xx).sqrt();
+    Ok((slope, intercept, se_slope_factor, se_intercept_factor, s_xx, s_yy, s_xy, x_mean))
 }
 
 #[allow(clippy::type_complexity)]
-fn fit_through_origin(xs: &[f64], ys: &[f64]) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), FitError> {
+fn fit_through_origin(xs: &[f64], ys: &[f64], ns: &[f64], ss_within: f64) -> Result<(f64, f64, f64, f64, f64, f64, f64, f64), FitError> {
     let mut s_xx_acc = NeumaierSum::new();
     let mut s_yy_acc = NeumaierSum::new();
     let mut s_xy_acc = NeumaierSum::new();
-    for (&x, &y) in xs.iter().zip(ys.iter()) {
+    for ((&x, &y), &w) in xs.iter().zip(ys.iter()).zip(ns.iter()) {
         if !x.is_finite() || !y.is_finite() {
             return Err(FitError::InvalidParameter { name: "xy", reason: String::from("non-finite value") });
         }
-        s_xx_acc.add(x * x);
-        s_yy_acc.add(y * y);
-        s_xy_acc.add(x * y);
+        s_xx_acc.add(w * x * x);
+        s_yy_acc.add(w * y * y);
+        s_xy_acc.add(w * x * y);
     }
     let s_xx = s_xx_acc.total();
-    let s_yy = s_yy_acc.total();
+    let s_yy = s_yy_acc.total() + ss_within;
     let s_xy = s_xy_acc.total();
-    if s_xx <= 0.0 {
+    if s_xx <= 0.0 || !s_xx.is_finite() {
         return Err(FitError::InvalidParameter { name: "x", reason: String::from("sum of X^2 must be positive for origin-forced regression") });
     }
     let slope = s_xy / s_xx;
@@ -282,6 +343,7 @@ fn fit_through_origin(xs: &[f64], ys: &[f64]) -> Result<(f64, f64, f64, f64, f64
 #[allow(clippy::too_many_arguments)]
 fn build_linear_bands(
     xs: &[f64],
+    n_total: usize,
     slope: f64,
     intercept: f64,
     sy_x: f64,
@@ -294,7 +356,7 @@ fn build_linear_bands(
     let count = grid_points.max(2);
     let x_min = xs.iter().copied().fold(f64::INFINITY, f64::min);
     let x_max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
-    let n_inv = if origin { 0.0 } else { 1.0 / (xs.len() as f64) };
+    let n_inv = if origin { 0.0 } else { 1.0 / (n_total as f64) };
     let span = x_max - x_min;
     let mut out = Vec::with_capacity(count);
     for i in 0..count {
@@ -404,26 +466,36 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
     let min_per = if force_through_origin { 2 } else { 3 };
     let mut ss_unpooled = 0.0_f64;
     let mut n_total = 0_usize;
+    let mut ss_within_total = 0.0_f64;
     let mut s_xx_pool = 0.0_f64;
     let mut s_xy_pool = 0.0_f64;
     let mut s_yy_pool = 0.0_f64;
-    let mut all_points = Vec::new();
+    let mut all_xs = Vec::new();
+    let mut all_ys = Vec::new();
+    let mut all_ns = Vec::new();
 
     for &ds in datasets {
-        if ds.len() < min_per {
-            return Err(FitError::InsufficientData { required: min_per, actual: ds.len() });
+        let series = extract_linear_series(ds)?;
+        if series.n_total < min_per {
+            return Err(FitError::InsufficientData { required: min_per, actual: series.n_total });
         }
-        let xs: Vec<f64> = ds.iter().map(DataPoint::x0).collect();
-        let ys: Vec<f64> = ds.iter().map(|p| p.y).collect();
-        let (slope, intercept, _, _, s_xx, s_yy, s_xy, _) =
-            if force_through_origin { fit_through_origin(&xs, &ys)? } else { fit_with_intercept(&xs, &ys)? };
-        let rss_j: f64 = xs.iter().zip(ys.iter()).map(|(&x, &y)| (y - (intercept + slope * x)).powi(2)).sum();
+        let (slope, intercept, _, _, s_xx, s_yy, s_xy, _) = if force_through_origin {
+            fit_through_origin(&series.xs, &series.ys, &series.ns, series.ss_within)?
+        } else {
+            fit_with_intercept(&series.xs, &series.ys, &series.ns, series.n_total, series.ss_within)?
+        };
+        let rss_j: f64 =
+            series.xs.iter().zip(series.ys.iter()).zip(series.ns.iter()).map(|((&x, &y), &w)| w * (y - (intercept + slope * x)).powi(2)).sum::<f64>()
+                + series.ss_within;
         ss_unpooled += rss_j;
-        n_total += ds.len();
+        n_total += series.n_total;
+        ss_within_total += series.ss_within;
         s_xx_pool += s_xx;
         s_xy_pool += s_xy;
         s_yy_pool += s_yy;
-        all_points.extend_from_slice(ds);
+        all_xs.extend_from_slice(&series.xs);
+        all_ys.extend_from_slice(&series.ys);
+        all_ns.extend_from_slice(&series.ns);
     }
 
     let pooled_slope = s_xy_pool / s_xx_pool;
@@ -460,10 +532,10 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
         });
     }
 
-    let all_xs: Vec<f64> = all_points.iter().map(DataPoint::x0).collect();
-    let all_ys: Vec<f64> = all_points.iter().map(|p| p.y).collect();
-    let (all_slope, all_int, _, _, _, _, _, _) = fit_with_intercept(&all_xs, &all_ys)?;
-    let ss_total_line: f64 = all_xs.iter().zip(all_ys.iter()).map(|(&x, &y)| (y - (all_int + all_slope * x)).powi(2)).sum();
+    let (all_slope, all_int, _, _, _, _, _, _) = fit_with_intercept(&all_xs, &all_ys, &all_ns, n_total, ss_within_total)?;
+    let ss_total_line: f64 =
+        all_xs.iter().zip(all_ys.iter()).zip(all_ns.iter()).map(|((&x, &y), &w)| w * (y - (all_int + all_slope * x)).powi(2)).sum::<f64>()
+            + ss_within_total;
     let df_den_i = n_total - k - 1;
     let ms_den_i = ss_common / (df_den_i as f64);
     let ms_num_i = (ss_total_line - ss_common).max(0.0) / (df_num_s as f64);
