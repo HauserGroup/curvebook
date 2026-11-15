@@ -13,10 +13,11 @@ use lumencraft_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
 use lumencraft_palette::Rgba8;
+use lumencraft_text::glyph_paths::{outline_ttf_glyph, outline_visual_rich_text_rotated};
+use lumencraft_text::metrics::{core14_advance_em, reorder_rich_text_bidi, rich_contains_rtl, split_rich_text_lines};
 use lumencraft_text::{
-    BUNDLED_FONTS, GlyphOutlineCmd, PositionedGlyphOutline, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, TrueTypeFont,
-    TrueTypeFontInfo, contains_rtl_script, glyph_paths::outline_ttf_glyph, outline_rich_text, parse_truetype_font_info, reorder_visual_bidi,
-    shape_bidi_runs,
+    BUNDLED_FONTS, GlyphOutlineCmd, PositionedGlyphOutline, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TrueTypeFont, TrueTypeFontInfo,
+    parse_truetype_font_info,
 };
 use serde::{Deserialize, Serialize};
 
@@ -721,30 +722,41 @@ impl StreamCtx<'_> {
     }
 
     fn emit_selectable_text(&mut self, text: &PositionedText) -> Result<(), PdfError> {
-        let visual_rich: Cow<'_, RichText> =
-            if rich_contains_rtl(&text.rich) { Cow::Owned(reorder_rich_text_bidi(&text.rich)) } else { Cow::Borrowed(&text.rich) };
-        let total_width = measure_selectable_text_width_pt(&visual_rich, text.font_size_pt, self.embedded_info, self.embedded_ttf);
-        let u_start = anchor_offset_x(text.anchor, total_width);
+        let lines = split_rich_text_lines(&text.rich);
+        let line_step = text.font_size_pt * 1.20;
         let rad = text.rotation_deg.to_radians();
+        let (raw_sin, raw_cos) = rad.sin_cos();
         let mut state = SelectableTextState {
             anchor_pt: text.anchor_pt,
             base_color: text.color,
             font_size_pt: text.font_size_pt,
-            cos_a: norm_tiny(rad.cos()),
-            sin_a: norm_tiny(rad.sin()),
+            cos_a: norm_tiny(raw_cos),
+            sin_a: norm_tiny(raw_sin),
             active_alpha: if text.color.a > 0 { text.color.a } else { 255 },
             active_color: text.color,
             active_font: None,
             active_rise: 0.0,
-            pen_u: u_start,
+            pen_u: 0.0,
+            line_v: 0.0,
             in_text_block: false,
         };
 
-        for span in &visual_rich.spans {
-            self.emit_selectable_span(span, &mut state)?;
-        }
+        for (line_idx, line) in lines.iter().enumerate() {
+            let line_visible = line.spans.iter().any(|s| !s.text.is_empty() && s.color.unwrap_or(text.color).a > 0);
+            if !line_visible {
+                continue;
+            }
+            let visual_line: Cow<'_, RichText> = if rich_contains_rtl(line) { Cow::Owned(reorder_rich_text_bidi(line)) } else { Cow::Borrowed(line) };
+            let line_width = measure_selectable_text_width_pt(&visual_line, text.font_size_pt, self.embedded_info, self.embedded_ttf);
+            state.pen_u = anchor_offset_x(text.anchor, line_width);
+            state.line_v = (line_idx as f64) * line_step;
 
-        self.close_selectable_block(&mut state);
+            for span in &visual_line.spans {
+                self.emit_selectable_span(span, &mut state)?;
+            }
+
+            self.close_selectable_block(&mut state);
+        }
         Ok(())
     }
 
@@ -763,7 +775,7 @@ impl StreamCtx<'_> {
         state.active_color = color;
         state.active_font = None;
         state.active_rise = 0.0;
-        self.open_text_block(state.anchor_pt, state.pen_u, state.cos_a, state.sin_a);
+        self.open_text_block(state.anchor_pt, state.pen_u, state.line_v, state.cos_a, state.sin_a);
         state.in_text_block = true;
     }
 
@@ -847,6 +859,7 @@ impl StreamCtx<'_> {
             ax: state.anchor_pt.x,
             ay: state.anchor_pt.y,
             u_start: state.pen_u,
+            v_start: state.line_v,
             cos_a: state.cos_a,
             sin_a: state.sin_a,
             page_h: self.page_h,
@@ -858,28 +871,33 @@ impl StreamCtx<'_> {
         Ok(())
     }
 
-    fn open_text_block(&mut self, anchor_pt: PointPt, pen_u: f64, cos_a: f64, sin_a: f64) {
-        let tx = norm_zero(anchor_pt.x + pen_u * cos_a);
-        let ty = norm_zero(self.y_pdf(anchor_pt.y) - pen_u * sin_a);
+    fn open_text_block(&mut self, anchor_pt: PointPt, pen_u: f64, line_v: f64, cos_a: f64, sin_a: f64) {
+        let tx = norm_zero(anchor_pt.x + pen_u * cos_a - line_v * sin_a);
+        let ty = norm_zero(self.y_pdf(anchor_pt.y + pen_u * sin_a + line_v * cos_a));
         self.buf.push_str("BT\n");
         let _ = writeln!(self.buf, "{cos_a:.6} {:.6} {sin_a:.6} {cos_a:.6} {tx:.3} {ty:.3} Tm", norm_tiny(-sin_a));
     }
 
     fn emit_outlined_text(&mut self, text: &PositionedText) -> Result<(), PdfError> {
-        let visual_rich: Cow<'_, RichText> =
-            if rich_contains_rtl(&text.rich) { Cow::Owned(reorder_rich_text_bidi(&text.rich)) } else { Cow::Borrowed(&text.rich) };
-        let outlines = outline_rich_text(&visual_rich, 0.0, 0.0, text.font_size_pt);
-        if outlines.is_empty() {
-            return Ok(());
-        }
-        let total_width = outlines.last().map_or(0.0, |g| g.origin_x_pt + g.advance_x_pt);
-        let u_start = anchor_offset_x(text.anchor, total_width);
+        let lines = split_rich_text_lines(&text.rich);
+        let line_step = text.font_size_pt * 1.20;
         let rad = text.rotation_deg.to_radians();
-        let xform =
-            TextOutlineTransform { ax: text.anchor_pt.x, ay: text.anchor_pt.y, u_start, cos_a: rad.cos(), sin_a: rad.sin(), page_h: self.page_h };
+        let (sin_a, cos_a) = rad.sin_cos();
 
-        for glyph in &outlines {
-            self.emit_single_outlined_glyph(glyph, text.color, text.font_size_pt, &xform)?;
+        for (line_idx, line) in lines.iter().enumerate() {
+            let visual_line: Cow<'_, RichText> = if rich_contains_rtl(line) { Cow::Owned(reorder_rich_text_bidi(line)) } else { Cow::Borrowed(line) };
+            let outlines = outline_visual_rich_text_rotated(&visual_line, 0.0, 0.0, text.font_size_pt, 0.0);
+            if outlines.is_empty() {
+                continue;
+            }
+            let line_width: f64 = outlines.iter().map(|g| if g.advance_x_pt.is_finite() { g.advance_x_pt } else { 0.0 }).sum();
+            let u_start = anchor_offset_x(text.anchor, line_width);
+            let v_start = (line_idx as f64) * line_step;
+            let xform = TextOutlineTransform { ax: text.anchor_pt.x, ay: text.anchor_pt.y, u_start, v_start, cos_a, sin_a, page_h: self.page_h };
+
+            for glyph in &outlines {
+                self.emit_single_outlined_glyph(glyph, text.color, text.font_size_pt, &xform)?;
+            }
         }
         Ok(())
     }
@@ -986,6 +1004,7 @@ struct SelectableTextState {
     active_font: Option<(PdfFontId, f64)>,
     active_rise: f64,
     pen_u: f64,
+    line_v: f64,
     in_text_block: bool,
 }
 
@@ -1000,6 +1019,7 @@ struct TextOutlineTransform {
     ax: f64,
     ay: f64,
     u_start: f64,
+    v_start: f64,
     cos_a: f64,
     sin_a: f64,
     page_h: f64,
@@ -1011,8 +1031,9 @@ impl TextOutlineTransform {
             return Err(PdfError::InvalidScene { message: String::from("non-finite glyph outline coordinate") });
         }
         let u = self.u_start + local_x;
-        let x_scene = self.ax + u * self.cos_a - local_y * self.sin_a;
-        let y_scene = self.ay + u * self.sin_a + local_y * self.cos_a;
+        let v = self.v_start + local_y;
+        let x_scene = self.ax + u * self.cos_a - v * self.sin_a;
+        let y_scene = self.ay + u * self.sin_a + v * self.cos_a;
         Ok(PointPt::new(x_scene, self.page_h - y_scene))
     }
 }
@@ -1062,90 +1083,24 @@ enum SpanPdfSegment {
     Outlined(String),
 }
 
-fn rich_contains_rtl(rich: &RichText) -> bool {
-    rich.spans.iter().any(|span| contains_rtl_script(&span.text))
-}
-
-fn infer_base_direction(rich: &RichText) -> TextDirection {
-    let mut buf = [0u8; 4];
-    for span in &rich.spans {
-        for ch in span.text.chars() {
-            if contains_rtl_script(ch.encode_utf8(&mut buf)) {
-                return TextDirection::Rtl;
-            }
-            if ch.is_alphabetic() {
-                return TextDirection::Ltr;
-            }
-        }
-    }
-    TextDirection::Rtl
-}
-
-fn reorder_rich_text_bidi(rich: &RichText) -> RichText {
-    let base_dir = infer_base_direction(rich);
-    if rich.spans.len() == 1
-        && let Some(span) = rich.spans.first()
-    {
-        let visual_spans = shape_bidi_runs(&span.text, base_dir).into_iter().map(|run| RichSpan { text: run.text, ..span.clone() }).collect();
-        return RichText::new(visual_spans);
-    }
-
-    let mut plain = String::new();
-    let mut span_ranges = Vec::with_capacity(rich.spans.len());
-    for span in &rich.spans {
-        if span.text.is_empty() {
-            continue;
-        }
-        let start = plain.len();
-        plain.push_str(&span.text);
-        span_ranges.push((start, plain.len(), span));
-    }
-
-    let mut visual_spans = Vec::new();
-    for run in shape_bidi_runs(&plain, base_dir) {
-        if let Some(&(_, _, single_span)) = span_ranges.iter().find(|&&(s, e, _)| s <= run.start_byte && run.end_byte <= e) {
-            visual_spans.push(RichSpan { text: run.text, ..single_span.clone() });
-            continue;
-        }
-        match run.direction {
-            TextDirection::Ltr => {
-                for &(s_start, s_end, span) in &span_ranges {
-                    let o_start = run.start_byte.max(s_start);
-                    let o_end = run.end_byte.min(s_end);
-                    if o_start < o_end
-                        && let Some(slice) = plain.get(o_start..o_end)
-                    {
-                        visual_spans.push(RichSpan { text: slice.to_owned(), ..span.clone() });
-                    }
-                }
-            }
-            TextDirection::Rtl => {
-                for &(s_start, s_end, span) in span_ranges.iter().rev() {
-                    let o_start = run.start_byte.max(s_start);
-                    let o_end = run.end_byte.min(s_end);
-                    if o_start < o_end
-                        && let Some(slice) = plain.get(o_start..o_end)
-                    {
-                        let reordered = reorder_visual_bidi(slice, TextDirection::Rtl);
-                        visual_spans.push(RichSpan { text: reordered, ..span.clone() });
-                    }
-                }
-            }
-        }
-    }
-    RichText::new(visual_spans)
-}
-
 fn split_span_into_pdf_segments(span: &RichSpan, base_font_size_pt: f64, embedded_info: Option<&TrueTypeFontInfo>) -> Vec<SpanPdfSegment> {
     let size_pt = effective_span_font_size(base_font_size_pt, span);
     let base_font = PdfFontId::from_style_with_ttf(span.weight, span.slope, embedded_info.is_some());
     let mut segments: Vec<SpanPdfSegment> = Vec::new();
     for ch in span.text.chars() {
-        if let Some(sym_byte) = symbol_font_byte(ch) {
-            let w = size_pt * (f64::from(symbol_advance_thousandths(sym_byte)) / 1000.0);
+        if matches!(ch, '\n' | '\r') {
+            continue;
+        }
+        if ch == '\t' {
+            let w = winansi_char_width_pt(' ', span.weight, span.slope, base_font, size_pt, embedded_info);
+            for _ in 0..4 {
+                push_pdf_segment_byte(&mut segments, base_font, b' ', w);
+            }
+        } else if let Some(sym_byte) = symbol_font_byte(ch) {
+            let w = size_pt * core14_advance_em(ch, span.weight, span.slope);
             push_pdf_segment_byte(&mut segments, PdfFontId::Symbol, sym_byte, w);
         } else if let Some(win_byte) = try_winansi_font_byte(ch) {
-            let w = winansi_char_width_pt(ch, win_byte, base_font, size_pt, embedded_info);
+            let w = winansi_char_width_pt(ch, span.weight, span.slope, base_font, size_pt, embedded_info);
             push_pdf_segment_byte(&mut segments, base_font, win_byte, w);
         } else if let Some(SpanPdfSegment::Outlined(slice)) = segments.last_mut() {
             slice.push(ch);
@@ -1169,13 +1124,20 @@ fn push_pdf_segment_byte(segments: &mut Vec<SpanPdfSegment>, font: PdfFontId, by
     }
 }
 
-fn winansi_char_width_pt(ch: char, win_byte: u8, base_font: PdfFontId, size_pt: f64, embedded_info: Option<&TrueTypeFontInfo>) -> f64 {
+fn winansi_char_width_pt(
+    ch: char,
+    weight: SpanWeight,
+    slope: SpanSlope,
+    base_font: PdfFontId,
+    size_pt: f64,
+    embedded_info: Option<&TrueTypeFontInfo>,
+) -> f64 {
     if base_font == PdfFontId::EmbeddedTrueType
         && let Some(info) = embedded_info
     {
         info.width_pt(ch, size_pt)
     } else {
-        size_pt * (f64::from(helvetica_advance_thousandths(win_byte, base_font)) / 1000.0)
+        size_pt * core14_advance_em(ch, weight, slope)
     }
 }
 
@@ -1210,7 +1172,7 @@ fn append_outlined_char(
         return adv;
     }
     let single = RichText::new(vec![RichSpan { text: ch.to_string(), ..span.clone() }]);
-    let mut glyphs = outline_rich_text(&single, pen_x, 0.0, base_font_size_pt);
+    let mut glyphs = outline_visual_rich_text_rotated(&single, pen_x, 0.0, base_font_size_pt, 0.0);
     let adv = glyphs.iter().map(|g| g.advance_x_pt).sum();
     if let Some(dst) = out {
         dst.append(&mut glyphs);
@@ -1224,6 +1186,12 @@ fn build_outlined_fallback_glyphs(
     base_font_size_pt: f64,
     embedded_ttf: Option<&TrueTypeFont<'_>>,
 ) -> (Vec<PositionedGlyphOutline>, f64) {
+    if embedded_ttf.is_none() {
+        let single_span = RichText::new(vec![RichSpan { text: slice.to_owned(), ..span.clone() }]);
+        let glyphs = outline_visual_rich_text_rotated(&single_span, 0.0, 0.0, base_font_size_pt, 0.0);
+        let pen_x = glyphs.iter().map(|g| if g.advance_x_pt.is_finite() { g.advance_x_pt } else { 0.0 }).sum();
+        return (glyphs, pen_x);
+    }
     let mut glyphs = Vec::new();
     let mut pen_x = 0.0;
     for ch in slice.chars() {
@@ -1233,6 +1201,13 @@ fn build_outlined_fallback_glyphs(
 }
 
 fn outlined_slice_width_pt(slice: &str, span: &RichSpan, base_font_size_pt: f64, embedded_ttf: Option<&TrueTypeFont<'_>>) -> f64 {
+    if embedded_ttf.is_none() {
+        let single_span = RichText::new(vec![RichSpan { text: slice.to_owned(), ..span.clone() }]);
+        return outline_visual_rich_text_rotated(&single_span, 0.0, 0.0, base_font_size_pt, 0.0)
+            .iter()
+            .map(|g| if g.advance_x_pt.is_finite() { g.advance_x_pt } else { 0.0 })
+            .sum();
+    }
     let mut width = 0.0;
     for ch in slice.chars() {
         width += append_outlined_char(ch, width, span, base_font_size_pt, embedded_ttf, None);
@@ -1368,7 +1343,6 @@ fn symbol_font_byte(ch: char) -> Option<u8> {
 /// Returns `None` for characters outside Windows-1252 so non-WinAnsi glyphs render via vector outlines.
 fn try_winansi_font_byte(ch: char) -> Option<u8> {
     let byte = match ch {
-        '\t' | '\n' | '\r' => b' ',
         c if (' '..='~').contains(&c) => c as u8,
         '€' => 0x80,
         '‚' => 0x82,
@@ -1483,53 +1457,6 @@ fn measure_selectable_text_width_pt(
     embedded_ttf: Option<&TrueTypeFont<'_>>,
 ) -> f64 {
     rich.spans.iter().map(|span| measure_span_width_pt(span, base_font_size_pt, embedded_info, embedded_ttf)).sum()
-}
-
-/// Core-14 Helvetica advance widths in 1/1000 em units for accurate `Middle`/`End` alignment.
-fn helvetica_advance_thousandths(byte: u8, font: PdfFontId) -> u16 {
-    let bold_bonus = matches!(font, PdfFontId::HelveticaBold | PdfFontId::HelveticaBoldOblique);
-    let base = match byte {
-        b' ' => 278,
-        b'!' | b',' | b'.' | b':' | b';' | b'/' | b'[' | b']' | b'i' | b'j' | b'l' => 278,
-        b'\'' => 191,
-        b'"' => 355,
-        b'(' | b')' | b'-' | b'r' => 333,
-        b'f' | b't' => 278,
-        b'*' => 389,
-        b'I' => 278,
-        b'J' | b'c' | b'k' | b's' | b'v' | b'x' | b'y' | b'z' => 500,
-        b'L' | b'0'..=b'9' | b'_' => 556,
-        b'a' | b'b' | b'd' | b'e' | b'g' | b'h' | b'n' | b'o' | b'p' | b'q' | b'u' => 556,
-        b'+' | b'<' | b'=' | b'>' => 584,
-        b'F' | b'T' | b'Z' => 611,
-        b'A' | b'B' | b'E' | b'K' | b'P' | b'S' | b'V' | b'X' | b'Y' => 667,
-        b'C' | b'D' | b'H' | b'N' | b'R' | b'U' | b'w' => 722,
-        b'G' | b'O' | b'Q' => 778,
-        b'M' | b'm' => 833,
-        b'%' => 889,
-        b'W' => 944,
-        0xB2 | 0xB3 | 0xB9 => 333,
-        0xB7 => 278,
-        _ => 556,
-    };
-    if bold_bonus && !matches!(byte, b'0'..=b'9' | b' ') { base + (base / 18) } else { base }
-}
-
-/// Core-14 Symbol advance widths in 1/1000 em units.
-fn symbol_advance_thousandths(byte: u8) -> u16 {
-    match byte {
-        0x61 => 631, // α
-        0x62 => 549, // β
-        0x67 => 411, // γ
-        0x6D => 576, // µ / μ
-        0x63 => 549, // χ
-        0x44 => 612, // Δ
-        0x57 => 768, // Ω
-        0x2D | 0xA3 | 0xB1 | 0xB3 | 0xB4 | 0xBB => 549,
-        0xA5 => 713, // ∞
-        0xB0 => 400, // °
-        _ => 600,
-    }
 }
 
 fn format_fill_color(color: Rgba8, space: PdfColorSpace) -> String {
