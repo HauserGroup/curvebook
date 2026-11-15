@@ -19,7 +19,32 @@ use crate::metrics::{
 
 const MAX_TTF_CONTOURS: usize = 256;
 const MAX_TTF_POINTS: usize = 4096;
+const MAX_TTF_TOTAL_POINTS: usize = 16_384;
+const MAX_TTF_TOTAL_COMPONENTS: usize = 256;
 const MAX_TTF_COMPONENT_DEPTH: usize = 8;
+
+#[derive(Debug)]
+struct TtfDecodeState {
+    remaining_components: usize,
+    remaining_points: usize,
+    active_gids: [u16; MAX_TTF_COMPONENT_DEPTH],
+}
+
+impl TtfDecodeState {
+    const fn new() -> Self {
+        Self { remaining_components: MAX_TTF_TOTAL_COMPONENTS, remaining_points: MAX_TTF_TOTAL_POINTS, active_gids: [0; MAX_TTF_COMPONENT_DEPTH] }
+    }
+
+    fn consume_component(&mut self) -> Option<()> {
+        self.remaining_components = self.remaining_components.checked_sub(1)?;
+        Some(())
+    }
+
+    fn consume_points(&mut self, points: usize) -> Option<()> {
+        self.remaining_points = self.remaining_points.checked_sub(points)?;
+        Some(())
+    }
+}
 
 /// Vector path command representing a glyph contour in PostScript points (`pt`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -245,7 +270,8 @@ const fn is_below_combining_mark(ch: char) -> bool {
 }
 
 /// Decode a single glyph's TrueType `glyf` contour from `ttf` into Y-down `GlyphOutlineCmd`s.
-/// Returns `None` if `ch` is not mapped in `cmap` or `ttf` lacks valid `loca`/`glyf` tables.
+/// Returns `None` if `ch` is not mapped in `cmap`, `ttf` lacks valid `loca`/`glyf` tables, or
+/// compound decoding exceeds depth, cycle, component, or point budgets.
 #[must_use]
 pub fn outline_ttf_glyph(
     ttf: &TrueTypeFont<'_>,
@@ -266,7 +292,8 @@ pub fn outline_ttf_glyph(
     let scale = font_size_pt / upem;
     let mut cmds = Vec::new();
     let slant = if italic_slant { 0.2125 } else { 0.0 };
-    decode_ttf_glyph_recursive(ttf, gid, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], scale, origin_x_pt, origin_y_pt, slant, 0, &mut cmds)?;
+    let mut state = TtfDecodeState::new();
+    decode_ttf_glyph_recursive(ttf, gid, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0], scale, origin_x_pt, origin_y_pt, slant, 0, &mut state, &mut cmds)?;
     Some(cmds)
 }
 
@@ -328,11 +355,16 @@ fn decode_ttf_glyph_recursive(
     origin_y: f64,
     slant: f64,
     depth: usize,
+    state: &mut TtfDecodeState,
     out: &mut Vec<GlyphOutlineCmd>,
 ) -> Option<()> {
     if depth >= MAX_TTF_COMPONENT_DEPTH {
-        return Some(());
+        return None;
     }
+    if state.active_gids.get(..depth)?.contains(&gid) {
+        return None;
+    }
+    state.consume_component()?;
     let slice = ttf.glyf_slice(gid)?;
     if slice.is_empty() {
         return Some(());
@@ -346,9 +378,10 @@ fn decode_ttf_glyph_recursive(
     }
     if num_contours > 0 {
         let count = usize::try_from(num_contours).ok()?.min(MAX_TTF_CONTOURS);
-        return decode_simple_ttf_glyph(slice, count, affine, scale, origin_x, origin_y, slant, out);
+        return decode_simple_ttf_glyph(slice, count, affine, scale, origin_x, origin_y, slant, state, out);
     }
-    decode_compound_ttf_glyph(ttf, slice, affine, scale, origin_x, origin_y, slant, depth, out)
+    *state.active_gids.get_mut(depth)? = gid;
+    decode_compound_ttf_glyph(ttf, slice, affine, scale, origin_x, origin_y, slant, depth, state, out)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -360,6 +393,7 @@ fn decode_simple_ttf_glyph(
     origin_x: f64,
     origin_y: f64,
     slant: f64,
+    state: &mut TtfDecodeState,
     out: &mut Vec<GlyphOutlineCmd>,
 ) -> Option<()> {
     let mut end_pts = Vec::with_capacity(num_contours);
@@ -370,6 +404,7 @@ fn decode_simple_ttf_glyph(
     if total_points > MAX_TTF_POINTS {
         return None;
     }
+    state.consume_points(total_points)?;
 
     let inst_len_off = 10 + num_contours * 2;
     let inst_len = usize::from(read_u16_be(slice, inst_len_off)?);
@@ -497,6 +532,7 @@ fn decode_compound_ttf_glyph(
     origin_y: f64,
     slant: f64,
     depth: usize,
+    state: &mut TtfDecodeState,
     out: &mut Vec<GlyphOutlineCmd>,
 ) -> Option<()> {
     let mut cursor = 10usize;
@@ -547,7 +583,7 @@ fn decode_compound_ttf_glyph(
             parent[0] * dx + parent[2] * dy + parent[4],
             parent[1] * dx + parent[3] * dy + parent[5],
         ];
-        decode_ttf_glyph_recursive(ttf, comp_gid, combined, scale, origin_x, origin_y, slant, depth + 1, out)?;
+        decode_ttf_glyph_recursive(ttf, comp_gid, combined, scale, origin_x, origin_y, slant, depth + 1, state, out)?;
         if (flags & 0x0020) == 0 {
             break;
         }
