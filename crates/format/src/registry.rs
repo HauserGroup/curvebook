@@ -344,7 +344,7 @@ const DESC_PROJECT_DIR: FormatDescriptor =
 const DESC_TEMPLATE: FormatDescriptor =
     FormatDescriptor { id: "lctemplate", label: "LumenCraft Template", extensions: &["lctemplate"], kind: FormatKind::Template };
 const DESC_PRISM: FormatDescriptor =
-    FormatDescriptor { id: "prism", label: "Prism Archive", extensions: &["prism"], kind: FormatKind::ForeignProject };
+    FormatDescriptor { id: "prism", label: "Prism Archive", extensions: &["prism"], kind: FormatKind::ForeignProject }; // brand-ok
 const DESC_PZFX: FormatDescriptor =
     FormatDescriptor { id: "pzfx", label: "PZFX XML Document", extensions: &["pzfx"], kind: FormatKind::ForeignProject };
 const DESC_CSV: FormatDescriptor =

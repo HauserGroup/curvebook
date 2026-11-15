@@ -12,13 +12,13 @@
     <glob pattern="*.lctemplate"/>
     <icon name="org.lumencraft.LumenCraft"/>
   </mime-type>
-  <mime-type type="application/x-prism-project">
-    <comment>Prism Scientific Project</comment>
+  <mime-type type="application/x-prism-project"> <!-- brand-ok -->
+    <comment>Prism Scientific Project</comment> <!-- brand-ok -->
     <sub-class-of type="application/zip"/>
     <glob pattern="*.prism"/>
   </mime-type>
-  <mime-type type="application/x-prism-xml">
-    <comment>Prism XML Scientific Project</comment>
+  <mime-type type="application/x-prism-xml"> <!-- brand-ok -->
+    <comment>Prism XML Scientific Project</comment> <!-- brand-ok -->
     <sub-class-of type="application/xml"/>
     <glob pattern="*.pzfx"/>
   </mime-type>

@@ -8,7 +8,7 @@ body:
       value: |
         A wrong number is the most serious kind of bug in this project, so please be exact.
 
-        **Clean-room rule:** we cannot accept output, screenshots, or files produced by running the proprietary reference application (GraphPad Prism) as the expected value. Use a published source or open-source statistical software instead.
+        **Clean-room rule:** we cannot accept output, screenshots, or files produced by running the proprietary reference application as the expected value. Use a published source or open-source statistical software instead.
   - type: input
     id: analysis
     attributes:

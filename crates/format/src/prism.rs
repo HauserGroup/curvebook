@@ -78,11 +78,8 @@ pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
         }
     }
 
-    let proj_title = manifest_meta
-        .as_ref()
-        .and_then(|m| m.title.clone())
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| String::from("Imported Prism Project"));
+    let proj_title =
+        manifest_meta.as_ref().and_then(|m| m.title.clone()).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| String::from("Imported Project"));
     let mut doc = ProjectDocument::new(proj_title)?;
     let mut used_ids: HashSet<String> = HashSet::new();
 

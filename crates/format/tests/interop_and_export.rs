@@ -245,3 +245,13 @@ fn result_sheet_tidy_csv_and_structured_json_export() {
     assert_eq!(parsed["id"], "anova-1");
     assert_eq!(parsed["scalars"][0]["key"], "R2");
 }
+
+#[test]
+fn prism_zip_importer_uses_neutral_default_title_when_manifest_title_missing() {
+    let mut writer = ZipWriter::new();
+    writer.add_file("manifest.json", br#"{"title":"   "}"#.to_vec()).unwrap();
+    writer.add_file("data/values.csv", b"Group,Response\nA,1.5\nB,2.5\n".to_vec()).unwrap();
+    let zip_bytes = writer.finish().unwrap();
+    let report = import_prism_bytes(&zip_bytes).unwrap();
+    assert_eq!(report.document.title, "Imported Project");
+}
