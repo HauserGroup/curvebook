@@ -6,7 +6,8 @@ use lumencraft_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
 use lumencraft_palette::Rgba8;
-use lumencraft_text::{BUNDLED_FONTS, GlyphOutlineCmd, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
+use lumencraft_text::metrics::split_rich_text_lines;
+use lumencraft_text::{BUNDLED_FONTS, GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
 use serde::{Deserialize, Serialize};
 
 use crate::SVG_XMLNS;
@@ -353,7 +354,8 @@ fn write_editable_text(ctx: &mut SvgRenderCtx<'_>, text: &PositionedText) -> Res
         TextAnchor::End => "end",
     };
     let color = text.color.to_hex_rgb();
-    let preserve_space = needs_xml_space_preserve(text);
+    let lines = split_rich_text_lines(&text.rich);
+    let preserve_space = needs_xml_space_preserve_lines(&lines);
 
     ctx.push_indent(0);
     let _ = write!(
@@ -373,52 +375,62 @@ fn write_editable_text(ctx: &mut SvgRenderCtx<'_>, text: &PositionedText) -> Res
     }
     ctx.body.push('>');
 
+    let line_step = text.font_size_pt * 1.20;
     let mut current_y_offset = 0.0_f64;
-    for span in &text.rich.spans {
-        if span.text.is_empty() {
-            continue;
-        }
-        let target_y_offset = match span.script {
-            SpanScript::Baseline => 0.0,
-            SpanScript::Superscript => -0.35 * text.font_size_pt,
-            SpanScript::Subscript => 0.20 * text.font_size_pt,
-        };
-        let dy = target_y_offset - current_y_offset;
-        current_y_offset = target_y_offset;
-
-        let effective_scale = resolve_span_scale(span.scale, span.script);
-        ctx.body.push_str("<tspan");
-
-        let dy_str = format_scalar(dy, ctx.prec)?;
-        if !is_formatted_zero(&dy_str) {
-            let _ = write!(ctx.body, " dy=\"{dy_str}\"");
-        }
-        if (effective_scale - 1.0).abs() > 1e-6 {
-            let span_size = format_scalar(text.font_size_pt * effective_scale, ctx.prec)?;
-            let _ = write!(ctx.body, " font-size=\"{span_size}\"");
-        }
-        if span.weight == SpanWeight::Bold {
-            ctx.body.push_str(" font-weight=\"bold\"");
-        }
-        if span.slope == SpanSlope::Italic {
-            ctx.body.push_str(" font-style=\"italic\"");
-        }
-        if let Some(fam) = &span.font_family
-            && !fam.is_empty()
-        {
-            let escaped_fam = escape_xml(fam);
-            let _ = write!(ctx.body, " font-family=\"{escaped_fam}\"");
-        }
-        if let Some(c) = span.color {
-            let span_hex = c.to_hex_rgb();
-            let _ = write!(ctx.body, " fill=\"{span_hex}\"");
-            if c.a < u8::MAX {
-                let span_op = format_opacity(c.a, ctx.opacity_prec)?;
-                let _ = write!(ctx.body, " fill-opacity=\"{span_op}\"");
+    for (line_idx, line) in lines.iter().enumerate() {
+        let line_y = (line_idx as f64) * line_step;
+        let mut need_line_x = line_idx > 0;
+        for span in &line.spans {
+            if span.text.is_empty() {
+                continue;
             }
+            let script_y_offset = match span.script {
+                SpanScript::Baseline => 0.0,
+                SpanScript::Superscript => -0.35 * text.font_size_pt,
+                SpanScript::Subscript => 0.20 * text.font_size_pt,
+            };
+            let target_y_offset = line_y + script_y_offset;
+            let dy = target_y_offset - current_y_offset;
+            current_y_offset = target_y_offset;
+
+            let effective_scale = resolve_span_scale(span.scale, span.script);
+            ctx.body.push_str("<tspan");
+            if need_line_x {
+                let _ = write!(ctx.body, " x=\"{x}\"");
+                need_line_x = false;
+            }
+
+            let dy_str = format_scalar(dy, ctx.prec)?;
+            if !is_formatted_zero(&dy_str) {
+                let _ = write!(ctx.body, " dy=\"{dy_str}\"");
+            }
+            if (effective_scale - 1.0).abs() > 1e-6 {
+                let span_size = format_scalar(text.font_size_pt * effective_scale, ctx.prec)?;
+                let _ = write!(ctx.body, " font-size=\"{span_size}\"");
+            }
+            if span.weight == SpanWeight::Bold {
+                ctx.body.push_str(" font-weight=\"bold\"");
+            }
+            if span.slope == SpanSlope::Italic {
+                ctx.body.push_str(" font-style=\"italic\"");
+            }
+            if let Some(fam) = &span.font_family
+                && !fam.is_empty()
+            {
+                let escaped_fam = escape_xml(fam);
+                let _ = write!(ctx.body, " font-family=\"{escaped_fam}\"");
+            }
+            if let Some(c) = span.color {
+                let span_hex = c.to_hex_rgb();
+                let _ = write!(ctx.body, " fill=\"{span_hex}\"");
+                if c.a < u8::MAX {
+                    let span_op = format_opacity(c.a, ctx.opacity_prec)?;
+                    let _ = write!(ctx.body, " fill-opacity=\"{span_op}\"");
+                }
+            }
+            let escaped_text = escape_xml(&span.text);
+            let _ = write!(ctx.body, ">{escaped_text}</tspan>");
         }
-        let escaped_text = escape_xml(&span.text);
-        let _ = write!(ctx.body, ">{escaped_text}</tspan>");
     }
 
     ctx.body.push_str("</text>");
@@ -427,13 +439,8 @@ fn write_editable_text(ctx: &mut SvgRenderCtx<'_>, text: &PositionedText) -> Res
 }
 
 fn write_outlined_text(ctx: &mut SvgRenderCtx<'_>, text: &PositionedText) -> Result<(), SvgError> {
-    let glyphs = outline_rich_text(&text.rich, 0.0, 0.0, text.font_size_pt);
-    let total_width = glyphs.iter().map(|g| g.origin_x_pt + g.advance_x_pt).fold(0.0_f64, f64::max);
-    let dx_anchor = match text.anchor {
-        TextAnchor::Start => 0.0,
-        TextAnchor::Middle => -0.5 * total_width,
-        TextAnchor::End => -total_width,
-    };
+    let lines = split_rich_text_lines(&text.rich);
+    let line_step = text.font_size_pt * 1.20;
     let cos_sin = if text.rotation_deg != 0.0 {
         let rad = text.rotation_deg.to_radians();
         Some((rad.cos(), rad.sin()))
@@ -442,13 +449,23 @@ fn write_outlined_text(ctx: &mut SvgRenderCtx<'_>, text: &PositionedText) -> Res
     };
 
     let mut path_entries: Vec<(String, Rgba8)> = Vec::new();
-    for glyph in &glyphs {
-        if glyph.commands.is_empty() {
-            continue;
-        }
-        let d = build_glyph_path_d(&glyph.commands, dx_anchor, text.anchor_pt, cos_sin, ctx.prec)?;
-        if !d.is_empty() {
-            path_entries.push((d, glyph.color.unwrap_or(text.color)));
+    for (line_idx, line) in lines.iter().enumerate() {
+        let y_line = (line_idx as f64) * line_step;
+        let glyphs = outline_rich_text(line, 0.0, y_line, text.font_size_pt);
+        let total_width: f64 = glyphs.iter().map(|g| if g.advance_x_pt.is_finite() { g.advance_x_pt } else { 0.0 }).sum();
+        let dx_anchor = match text.anchor {
+            TextAnchor::Start => 0.0,
+            TextAnchor::Middle => -0.5 * total_width,
+            TextAnchor::End => -total_width,
+        };
+        for glyph in &glyphs {
+            if glyph.commands.is_empty() {
+                continue;
+            }
+            let d = build_glyph_path_d(&glyph.commands, dx_anchor, text.anchor_pt, cos_sin, ctx.prec)?;
+            if !d.is_empty() {
+                path_entries.push((d, glyph.color.unwrap_or(text.color)));
+            }
         }
     }
     if path_entries.is_empty() {
@@ -546,29 +563,34 @@ fn resolve_span_scale(scale: f64, script: SpanScript) -> f64 {
     }
 }
 
-fn needs_xml_space_preserve(text: &PositionedText) -> bool {
-    let mut prev_space = false;
-    let mut seen_non_empty = false;
-    for span in &text.rich.spans {
-        if span.text.is_empty() {
-            continue;
-        }
-        if !seen_non_empty && span.text.starts_with(char::is_whitespace) {
-            return true;
-        }
-        seen_non_empty = true;
-        for ch in span.text.chars() {
-            if ch.is_whitespace() {
-                if prev_space || ch != ' ' {
-                    return true;
+fn needs_xml_space_preserve_lines(lines: &[RichText]) -> bool {
+    for line in lines {
+        let mut prev_space = false;
+        let mut seen_non_empty = false;
+        for span in &line.spans {
+            if span.text.is_empty() {
+                continue;
+            }
+            if !seen_non_empty && span.text.starts_with(char::is_whitespace) {
+                return true;
+            }
+            seen_non_empty = true;
+            for ch in span.text.chars() {
+                if ch.is_whitespace() {
+                    if prev_space || ch != ' ' {
+                        return true;
+                    }
+                    prev_space = true;
+                } else {
+                    prev_space = false;
                 }
-                prev_space = true;
-            } else {
-                prev_space = false;
             }
         }
+        if prev_space {
+            return true;
+        }
     }
-    prev_space
+    false
 }
 
 fn format_pt(pt: PointPt, prec: usize) -> Result<(String, String), SvgError> {

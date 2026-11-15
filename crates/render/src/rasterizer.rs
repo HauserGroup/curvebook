@@ -2,6 +2,7 @@
 
 use lumencraft_chart::{ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
 use lumencraft_palette::{CanvasPreviewFilter, LineDashStyle, Rgba8, simulate_preview_filter};
+use lumencraft_text::metrics::split_rich_text_lines;
 use lumencraft_text::{GlyphOutlineCmd, outline_rich_text};
 use serde::{Deserialize, Serialize};
 
@@ -1322,31 +1323,42 @@ fn render_text(img: &mut RasterImage, text: &PositionedText, sx: f64, sy: f64, c
     if !text.font_size_pt.is_finite() || text.font_size_pt <= 0.0 || !text.anchor_pt.x.is_finite() || !text.anchor_pt.y.is_finite() {
         return;
     }
-    let outlines = outline_rich_text(&text.rich, 0.0, 0.0, text.font_size_pt);
-    if outlines.is_empty() {
+    let lines = split_rich_text_lines(&text.rich);
+    if lines.is_empty() {
         return;
     }
 
-    let total_advance: f64 = outlines.iter().map(|g| if g.advance_x_pt.is_finite() { g.advance_x_pt } else { 0.0 }).sum();
-    let anchor_dx = match text.anchor {
-        TextAnchor::Start => 0.0,
-        TextAnchor::Middle => -0.5 * total_advance,
-        TextAnchor::End => -total_advance,
-    };
+    let line_step = text.font_size_pt * 1.20;
     let rad = if text.rotation_deg.is_finite() { text.rotation_deg.to_radians() } else { 0.0 };
-    let xform = TextTransform { anchor_dx, anchor_x: text.anchor_pt.x, anchor_y: text.anchor_pt.y, cos_a: rad.cos(), sin_a: rad.sin(), sx, sy };
+    let (sin_a, cos_a) = rad.sin_cos();
 
-    for glyph in &outlines {
-        if glyph.commands.is_empty() {
+    for (line_idx, line) in lines.iter().enumerate() {
+        let y_line = (line_idx as f64) * line_step;
+        let outlines = outline_rich_text(line, 0.0, y_line, text.font_size_pt);
+        if outlines.is_empty() {
             continue;
         }
-        let color = glyph.color.unwrap_or(text.color);
-        if color.a == 0 {
-            continue;
-        }
-        let subpaths = flatten_glyph_commands(&glyph.commands, xform);
-        if !subpaths.is_empty() {
-            fill_subpaths(img, &subpaths, color, clip);
+
+        let total_advance: f64 = outlines.iter().map(|g| if g.advance_x_pt.is_finite() { g.advance_x_pt } else { 0.0 }).sum();
+        let anchor_dx = match text.anchor {
+            TextAnchor::Start => 0.0,
+            TextAnchor::Middle => -0.5 * total_advance,
+            TextAnchor::End => -total_advance,
+        };
+        let xform = TextTransform { anchor_dx, anchor_x: text.anchor_pt.x, anchor_y: text.anchor_pt.y, cos_a, sin_a, sx, sy };
+
+        for glyph in &outlines {
+            if glyph.commands.is_empty() {
+                continue;
+            }
+            let color = glyph.color.unwrap_or(text.color);
+            if color.a == 0 {
+                continue;
+            }
+            let subpaths = flatten_glyph_commands(&glyph.commands, xform);
+            if !subpaths.is_empty() {
+                fill_subpaths(img, &subpaths, color, clip);
+            }
         }
     }
 }
