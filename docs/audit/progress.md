@@ -24,11 +24,11 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 8 | `S09` Text, raster, SVG and PDF output | `crates/text`, `crates/render`, `crates/svg`, `crates/pdf` | done | 1/3/6/0 | 10/0/0/0 | 2026-11-15 |
 | 9 | `S11` Tools and app entry points | `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` | done | 1/5/6/1 | 12/1/0/0 | 2026-11-15 |
 | 10 | `S07` Engine | `crates/engine` | reviewing | 5/5/4/0 | — | 2026-11-15 |
-| 11 | `S10` UI shell | `crates/ui-egui` | verifying | 2/3/3/1 | — | 2026-11-15 |
+| 11 | `S10` UI shell | `crates/ui-egui` | done | 2/3/3/1 | 8/1/0/0 | 2026-11-15 |
 | 12 | `S12` CLI and MCP | `apps/lumencraft-cli`, `crates/mcp` | done | 4/2/3/1 | 10/0/0/0 | 2026-11-15 |
 | 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | verifying | 0/2/8/0 | — | 2026-11-15 |
 | 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | reviewing | — | — | 2026-11-15 |
-| 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | reviewing | 2/2/0/0 | — | 2026-11-15 |
+| 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | reviewing | 2/3/0/0 | — | 2026-11-15 |
 
 Status values: `pending` → `reviewing` → `verifying` → `done`. Verdicts: C = CONFIRMED, P = PLAUSIBLE, R = REFUTED, D = DUPLICATE.
 
@@ -45,6 +45,7 @@ What each review actually read, so a later session can see what was and was not 
 | `S04` | see [`findings/S04.md`](findings/S04.md) › Scope read | — | reviewer: probe crate (11 of 13 reproduced); verifier: `audit/r1/S04` `crates/transform/tests/audit_r1_s04.rs` |
 | `S08` | see [`findings/S08.md`](findings/S08.md) › Scope read | — | `cargo test -p lumencraft-chart` 35/35 pass; reviewer: probe crate (debug + release); verifier: `audit/r1/S08` (`c15abdc`) `crates/chart/tests/audit_r1_s08.rs`; 07 and 11 traced only |
 | `S09` | see [`findings/S09.md`](findings/S09.md) › Scope read | — | slice tests pass (55); reviewer: probe binary; verifier: `audit/r1/S09` (`5a0e8ee`), tests in `text`, `pdf`, `svg`, `render`; 08 and 10 traced only |
+| `S10` | see [`findings/S10.md`](findings/S10.md) › Scope read | — | reviewer: probe crate `probe-S10` (8 of 9 reproduced); verifier: `audit/r1/S10` `crates/ui-egui/tests/audit_r1_s10.rs`, HTTP-POST-shaped byte stream over real loopback TCP |
 | `S11` | see [`findings/S11.md`](findings/S11.md) › Scope read | — | slice tests pass; reviewer: `--control` probe + scratch engine crate; verifier: `audit/r1/S11` `apps/lumencraft/tests/audit_r1_s11.rs` (02, 05, 13 fail at base; rest traced) |
 | `S12` | see [`findings/S12.md`](findings/S12.md) › Scope read (two reviewer runs; the first was interrupted after 3 findings) | — | reviewer: probes against the CLI built at base; verifier: `audit/r1/S12` (`2c31ce1`) `apps/lumencraft-cli/tests/audit_r1_s12.rs`, 01–06 and 08 fail at base (02, 04, 06 also on the release binary) |
 | `S06` | see [`findings/S06.md`](findings/S06.md) › Scope read | — | `cargo test -p lumencraft-format` 43/43 pass; verifier: `audit/r1/S06` `crates/format/tests/audit_r1_s06.rs`, 5 fail at base (02, 03, 04, 06, 10) |
@@ -60,6 +61,8 @@ What each review actually read, so a later session can see what was and was not 
 - **Unrelated edits in the main checkout.** While this audit ran, another session left uncommitted feature edits (`QOL-5`, `QOL-8`, CLI, engine) in the main checkout's working tree on this branch. Audit commits stage only `docs/audit/`; reviewers read code only from the base worktree.
 
 - **`main` moved past the base during the audit.** After `a993740`, ten commits landed on `main` (`7b5bafa`..`47704e8`, 214 files, including "stats/fit remediation" and "Koopman/pharma parity"). The audit stays at `ebcc622`. Verdict lines reading "Still present on main: yes (main == base)" were true when written; re-check each finding against current `main` before fixing it, since some may already be fixed or moved. Audit bookkeeping moved to its own worktree on branch `audit/r1-local-2` so it no longer shares the main checkout.
+
+- **R1-S10-02 severity (coordinator).** Kept at S1. The verifier left S2 open on the assumption that browsers block the vector, but they do not: a cross-origin `POST` with `Content-Type: text/plain` is a CORS "simple request", sent without a preflight. The page cannot read the response, but the command still runs. The verifier showed that the byte stream such a request produces executes its JSON body line over loopback TCP. Not demonstrated: driving a real browser.
 
 ## Confirmed and plausible findings
 
@@ -85,6 +88,8 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S08-01](findings/S08.md) | S1 | Log-axis tick generator overflows and allocates without bound when a data value is near `f64::MAX` or the smallest subnormal | CONFIRMED | test | `S08` |
 | [R1-S08-02](findings/S08.md) | S1 | Y-axis title placement panics in `f64::clamp` on canvases narrower than about 40 pt | CONFIRMED | test | `S08` |
 | [R1-S09-01](findings/S09.md) | S1 | Raster dashing has no length budget: one long dashed annotation line allocates without bound and aborts the app | CONFIRMED | test | `S09` |
+| [R1-S10-01](findings/S10.md) | S1 | `ui.screenshot` with a small viewport and any open dialog panics in `Ord::clamp` and kills the control server | CONFIRMED | test | `S10` |
+| [R1-S10-02](findings/S10.md) | S1 | The control socket accepts unauthenticated requests from any local process and from browser HTTP POSTs, and several of them write to arbitrary host paths | CONFIRMED | test | `S10` |
 | [R1-S11-01](findings/S11.md) | S1 | The desktop app opens a crash-recovery journal but never records a command, so a crash loses all work since launch | CONFIRMED | test | `S11` |
 | [R1-S12-01](findings/S12.md) | S1 | `--workdir` sandbox is bypassed by external-link paths stored inside a project or template | CONFIRMED | test | `S12` |
 | [R1-S12-02](findings/S12.md) | S1 | JSON project input skips `validate_project_document`; a 0.8 KB file panics `convert` | CONFIRMED | test | `S12` |
@@ -127,6 +132,8 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S09-02](findings/S09.md) | S2 | `parse_markup` is quadratic on unmatched `*`: a large text-box annotation hangs every render | CONFIRMED | test | `S09` |
 | [R1-S09-03](findings/S09.md) | S2 | Default (selectable-text) PDF export replaces every non-WinAnsi, non-Symbol character with `?`, even with an embedded TrueType font | CONFIRMED | test | `S09` |
 | [R1-S09-04](findings/S09.md) | S2 | SVG export writes XML-forbidden control characters from labels, producing a file no XML parser accepts, while `validate_svg_structure` passes it | CONFIRMED | test | `S09` |
+| [R1-S10-04](findings/S10.md) | S2 | One idle or slow client blocks the control server for every other client, with no timeout | CONFIRMED | test | `S10` |
+| [R1-S10-05](findings/S10.md) | S2 | `command.batch` has no step limit and responses are not bounded, so one request can run for hours and build a response of tens of GB | CONFIRMED | test | `S10` |
 | [R1-S11-02](findings/S11.md) | S2 | Any crash or startup error leaves `lumencraft.lock` behind, and the app then refuses to start for 5 minutes | CONFIRMED | test | `S11` |
 | [R1-S11-03](findings/S11.md) | S2 | The lease is never renewed: a second instance steals it after 5 minutes, and whichever instance quits last overwrites the other's recovery snapshot | CONFIRMED | trace | `S11` |
 | [R1-S11-04](findings/S11.md) | S2 | Several files on the command line: earlier projects are silently dropped, and a CSV merged into a project is reported as unmodified | CONFIRMED | trace | `S11` |
@@ -163,6 +170,9 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S09-07](findings/S09.md) | S3 | With `BUNDLED_FONTS` empty, raster and outlined text draw every accented Latin letter as an empty box | CONFIRMED | test | `S09` |
 | [R1-S09-08](findings/S09.md) | S3 | BiDi reordering is applied only by the PDF writer; PNG/TIFF and outlined SVG draw RTL text in logical order | CONFIRMED | trace | `S09` |
 | [R1-S09-09](findings/S09.md) | S3 | cmap format 4 collection iterates every code of every segment even when nothing is kept: a 262 KB font takes 3.2 s to validate | CONFIRMED | test | `S09` |
+| [R1-S10-06](findings/S10.md) | S3 | Every atomic `command.batch` deep-clones the whole `UiApp`, including the session undo history | CONFIRMED | test | `S10` |
+| [R1-S10-07](findings/S10.md) | S3 | `ui.locale.set` reports a comma decimal separator but the grid keeps displaying and parsing with `.` | CONFIRMED | test | `S10` |
+| [R1-S10-08](findings/S10.md) | S3 | Wrong-typed `ui.*` parameters are silently ignored and trigger a different action, including resetting every custom shortcut | CONFIRMED | test | `S10` |
 | [R1-S11-07](findings/S11.md) | S3 | Shortcut and preference changes are never saved by the shipped app | CONFIRMED | test | `S11` |
 | [R1-S11-09](findings/S11.md) | S3 | With `HOME` unset, config and recovery fall back to fixed, shared paths under `/tmp` | CONFIRMED | trace | `S11` |
 | [R1-S11-10](findings/S11.md) | S3 | `GridToolState::emit_exclude_selection_intent` sends reading-order bounds that the engine reads as a 3-D box (latent over- and under-exclusion) | CONFIRMED | trace | `S11` |
@@ -173,8 +183,10 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S12-09](findings/S12.md) | S3 | MCP live-attach mode is unreachable, yet `command_list` advertises 17 UI commands that therefore always fail; if wired up, file tools would act on an empty local session | CONFIRMED | trace | `S12` |
 | [R1-S06-07](findings/S06.md) | S3 | Stale-lock eviction is unlink-then-create: two concurrent recoverers can both acquire the lease | PLAUSIBLE | trace | `S06` |
 | [R1-S06-14](findings/S06.md) | S3 | Journal replay is unbounded in size and record count | PLAUSIBLE | trace | `S06` |
+| [R1-S10-03](findings/S10.md) | S3 | Control requests outside `Session::execute` run with no panic boundary; one concrete overflow in the layout badge compositor | PLAUSIBLE | test | `S10` |
 | [R1-S11-08](findings/S11.md) | S3 | OS clipboard adapter waits for EOF on `xclip`/`wl-copy` stdout, which the backgrounded clipboard owner keeps open (latent hang) | PLAUSIBLE | trace | `S11` |
 | [R1-S01-08](findings/S01.md) | S4 | `gamma(-inf)` returns `Ok(NaN)` despite the documented error contract | CONFIRMED | test | `S01` |
 | [R1-S09-10](findings/S09.md) | S4 | Compound-glyph decoding has a depth cap but no total budget: 64 components per level × 8 levels is exponential (latent, bundled fonts only) | CONFIRMED | trace | `S09` |
+| [R1-S10-09](findings/S10.md) | S4 | Control-protocol docs and `UI_COMMANDS` parameter docs disagree with what the handlers accept and do | CONFIRMED | test | `S10` |
 | [R1-S11-13](findings/S11.md) | S4 | Startup environment and flags: a malformed `LUMENCRAFT_CONTROL_PORT` aborts a launch that never asked for control; `--new-instance` and paths beginning with `-` are not handled | CONFIRMED | test | `S11` |
 | [R1-S12-10](findings/S12.md) | S4 | Batch manifest schema in the scripting guide disagrees with the parser | CONFIRMED | trace | `S12` |
