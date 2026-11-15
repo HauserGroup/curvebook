@@ -12,7 +12,10 @@ fn macos_live_pasteboard_de_de_tsv_formula_and_bundle_roundtrip() {
 
     use lumencraft_doc::{Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphKind, GraphSheet, ProjectDocument, TableArchetype};
     use lumencraft_engine::Session;
-    use lumencraft_ui_egui::{ClipboardBundle, OsAdapterAvailability, read_os_pasteboard, write_os_clipboard_bundle, write_os_pasteboard};
+    use lumencraft_ui_egui::{
+        ClipboardBundle, OsAdapterAvailability, UiApp, read_os_clipboard_pdf_bytes, read_os_clipboard_text, read_os_pasteboard,
+        write_os_clipboard_bundle, write_os_pasteboard,
+    };
 
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let sentinel = format!("LC_W7_{}_{}", std::process::id(), nonce);
@@ -95,14 +98,53 @@ fn macos_live_pasteboard_de_de_tsv_formula_and_bundle_roundtrip() {
     graph.spec.kind = GraphKind::Column;
     doc.add_graph_sheet(graph).expect("add graph");
     let session = Session::from_document(doc);
+    let read_text = read_os_clipboard_text().expect("read_os_clipboard_text TSV roundtrip");
+    assert_eq!(read_text, payload);
+
     let bundle = ClipboardBundle::from_sheet(&session, &"g-clip".into(), 144).expect("bundle");
     assert!(bundle.emf_bytes.is_some());
+    assert!(bundle.pdf_bytes.starts_with(b"%PDF-1.7"));
     let bundle_status = write_os_clipboard_bundle(&bundle).expect("write_os_clipboard_bundle");
+    assert!(bundle_status.available, "expected delivered bundle status: {bundle_status:?}");
     assert_eq!(bundle_status.availability, OsAdapterAvailability::Submitted);
 
+    let live_pdf = read_os_clipboard_pdf_bytes().expect("read_os_clipboard_pdf_bytes immediately after write");
+    assert!(live_pdf.starts_with(b"%PDF-1.7"), "pasteboard PDF missing %PDF-1.7 header");
+    assert_eq!(live_pdf, bundle.pdf_bytes, "exact PDF byte roundtrip failed on macOS NSPasteboard");
+
+    let bundle_text = read_os_clipboard_text().expect("read_os_clipboard_text after bundle write");
+    assert_eq!(bundle_text, bundle.svg);
+
+    // Also verify a multi-panel LayoutSheet bundle via UiApp roundtrips exact %PDF-1.7 + text.
+    let mut app = UiApp::new();
+    app.execute_command("sheet.createData", serde_json::json!({ "sheet_id": "d-ui", "kind": "xy", "title": "Assay", "auto_graph": true }))
+        .expect("data");
+    app.execute_command("table.setCell", serde_json::json!({ "sheet_id": "d-ui", "row": 0, "col": 0, "value": 1.0 })).expect("x0");
+    app.execute_command("table.setCell", serde_json::json!({ "sheet_id": "d-ui", "row": 0, "col": 1, "value": 10.0 })).expect("y0");
+    app.execute_command("table.setCell", serde_json::json!({ "sheet_id": "d-ui", "row": 1, "col": 0, "value": 2.0 })).expect("x1");
+    app.execute_command("table.setCell", serde_json::json!({ "sheet_id": "d-ui", "row": 1, "col": 1, "value": 25.0 })).expect("y1");
+    let graph_id = app.session().document().graph_sheets.first().expect("graph sheet").id.clone();
+    app.execute_command("layout.create", serde_json::json!({ "sheet_id": "layout-ui", "title": "Figure Layout", "preset": "double_column" }))
+        .expect("create layout");
+    app.execute_command(
+        "layout.addPanel",
+        serde_json::json!({ "sheet_id": "layout-ui", "kind": "graph", "graph_sheet_id": graph_id, "bounds_pt": { "x": 12.0, "y": 12.0, "width": 180.0, "height": 140.0 } }),
+    )
+    .expect("add layout panel");
+    let layout_bundle = ClipboardBundle::from_sheet(app.session(), &"layout-ui".into(), 144).expect("layout bundle");
+    let layout_status = write_os_clipboard_bundle(&layout_bundle).expect("write layout bundle");
+    assert!(layout_status.available);
+    assert_eq!(layout_status.availability, OsAdapterAvailability::Submitted);
+    let layout_pdf = read_os_clipboard_pdf_bytes().expect("read layout pdf from pasteboard");
+    assert!(layout_pdf.starts_with(b"%PDF-1.7"));
+    assert_eq!(layout_pdf, layout_bundle.pdf_bytes);
+    assert_eq!(read_os_clipboard_text().expect("layout pasteboard text"), layout_bundle.svg);
+
     println!(
-        "macos_clipboard_live: EXECUTED_LIVE_ROUNDTRIP sentinel={sentinel} tsv_bytes={} emf_bytes={}",
+        "macos_clipboard_live: EXECUTED_LIVE_ROUNDTRIP sentinel={sentinel} tsv_bytes={} emf_bytes={} pdf_bytes={} layout_pdf_bytes={}",
         payload.len(),
-        bundle.emf_bytes.as_ref().map_or(0, Vec::len)
+        bundle.emf_bytes.as_ref().map_or(0, Vec::len),
+        live_pdf.len(),
+        layout_pdf.len(),
     );
 }

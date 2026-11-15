@@ -573,6 +573,7 @@ fn qol6_contingency_regression_and_multivariate_methods_reports() {
             compute_odds_and_risk_ratios: true,
             compute_sensitivity_specificity: true,
             compute_phi_and_cramers_v: true,
+            ..ContingencySpec::default()
         }),
     )
     .unwrap();
@@ -586,6 +587,7 @@ fn qol6_contingency_regression_and_multivariate_methods_reports() {
             compute_odds_and_risk_ratios: true,
             compute_sensitivity_specificity: false,
             compute_phi_and_cramers_v: false,
+            ..ContingencySpec::default()
         }),
     )
     .unwrap();

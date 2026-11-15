@@ -9,6 +9,7 @@ pub mod library;
 pub mod linear;
 pub mod result;
 pub mod solver;
+pub mod tex_format;
 pub mod types;
 
 pub use diagnostics::{
@@ -30,6 +31,7 @@ pub use solver::{
     FittedDatasetResult, FittedParameterSummary, InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models,
     fit_nonlinear,
 };
+pub use tex_format::{format_model_equation_tex, format_number_sig_figs, format_polynomial_equation_tex};
 pub use types::{
     DataPoint, DatasetSeries, DerivedScalar, EquationCategory, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet,
     extract_datasets_from_sheet_with_options, filter_datasets_by_range,

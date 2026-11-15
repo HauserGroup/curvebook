@@ -16,6 +16,7 @@ pub mod common;
 pub mod error;
 pub mod multiplicity;
 pub mod multivariate;
+pub mod power;
 pub mod regression;
 pub mod roc;
 pub mod survival;
@@ -24,6 +25,10 @@ pub mod two_group;
 use lumencraft_doc::{AnalysisKind, AnalysisSpec, DataSheet, ResultSheet};
 
 pub use error::StatsError;
+pub use power::{
+    CorrelationPowerMethod, OneSidedDirection, PowerAnalysisRequest, PowerAnalysisResult, PowerCurvePoint, PowerEffectSpec, PowerSolveTarget,
+    PowerTestFamily, SensitivityCell, TailMode, TwoProportionsMethod, compute_power_curve, compute_sensitivity_table, solve_power,
+};
 
 /// High-level families of statistical analyses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -38,6 +43,7 @@ pub enum AnalysisFamily {
     Survival,
     Correlation,
     Multivariate,
+    PowerAndSampleSize,
 }
 
 /// Dispatch any statistical [`AnalysisSpec`] handled by `lumencraft-stats` against a [`DataSheet`]

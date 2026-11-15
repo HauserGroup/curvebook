@@ -24,6 +24,7 @@ lumencraft-platform = { workspace = true }
 lumencraft-render = { workspace = true }
 lumencraft-svg = { workspace = true }
 lumencraft-text = { workspace = true }
+lumencraft-ui-egui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -3,6 +3,8 @@ name = "lumencraft"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 publish = false
 default-run = "lumencraft"
 description = "LumenCraft native desktop biostatistics, curve-fitting and scientific graphing application"
@@ -10,7 +12,13 @@ description = "LumenCraft native desktop biostatistics, curve-fitting and scient
 [lints]
 workspace = true
 
+[features]
+default = ["wgpu", "accessibility"]
+wgpu = ["eframe/wgpu"]
+accessibility = ["eframe/accesskit"]
+
 [dependencies]
+egui = { workspace = true }
 lumencraft-chart = { workspace = true }
 lumencraft-doc = { workspace = true }
 lumencraft-engine = { workspace = true, features = ["bundled-fonts"] }
@@ -23,3 +31,7 @@ lumencraft-text = { workspace = true }
 lumencraft-ui-egui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { workspace = true, features = ["wayland", "x11"] }
+rfd = { workspace = true }

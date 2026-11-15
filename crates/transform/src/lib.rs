@@ -12,6 +12,7 @@ pub mod formula;
 pub mod import;
 pub mod ops;
 pub mod plate_and_tidy;
+pub mod randomize;
 pub mod simulate;
 
 pub use archetype_convert::{ConversionPreview, TargetArchetypeKind, convert_datasheet_archetype, preview_datasheet_conversion};
@@ -23,6 +24,7 @@ pub use error::TransformError;
 pub use formula::{
     BinaryOp, DependencyTarget, Expr, FormulaContext, FormulaValue, ScalarEnv, TableEvalContext, UnaryOp, VarRef, eval_column_expr, eval_scalar_expr,
     evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, evaluate_formula_for_sheet, extract_dependencies, parse_formula,
+    validate_no_formula_cycle,
 };
 pub use import::{ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, apply_import_link_pipeline, detect_link_cycles};
 pub use ops::{
@@ -31,6 +33,11 @@ pub use ops::{
     execute_transform, execute_transpose,
 };
 pub use plate_and_tidy::{PlateGeometry, PlateMapTemplate, PlateWellRole, TidyColumnMapping, map_plate_to_datasheet, pivot_tidy_long_to_datasheet};
+pub use randomize::{
+    AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, RandomizationOutput, RowSampleConfig, SimulatedColumnSpec,
+    SimulatedDistribution, SubjectRandomizationConfig, random_sample_rows, randomize_subjects_to_groups, sample_row_indices,
+    simulate_distribution_columns,
+};
 pub use simulate::{evaluate_equation, simulate_xy_sheet};
 
 /// Built-in families of table transformations.

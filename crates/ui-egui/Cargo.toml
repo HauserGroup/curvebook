@@ -23,9 +23,11 @@ lumencraft-palette = { workspace = true }
 lumencraft-pdf = { workspace = true }
 lumencraft-platform = { workspace = true }
 lumencraft-render = { workspace = true }
+lumencraft-stats = { workspace = true }
 lumencraft-svg = { workspace = true }
 lumencraft-text = { workspace = true }
 lumencraft-tools = { workspace = true }
+lumencraft-transform = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

@@ -31,6 +31,7 @@ fn error_code_canonical_roundtrip_and_categories() {
     assert_eq!(ErrorCode::IoError.category(), ErrorCategory::Io);
     assert_eq!(ErrorCode::PathEscape.category(), ErrorCategory::Policy);
     assert_eq!(ErrorCode::ResourceLimit.category(), ErrorCategory::Policy);
+    assert_eq!(ErrorCode::GuiOnlyViolation.category(), ErrorCategory::Policy);
     assert_eq!(ErrorCode::SolverFailed.category(), ErrorCategory::Compute);
     assert_eq!(ErrorCode::InsufficientData.category(), ErrorCategory::Compute);
     assert_eq!(ErrorCode::Cancelled.category(), ErrorCategory::Compute);

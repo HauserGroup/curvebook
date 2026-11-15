@@ -653,8 +653,7 @@ fn linear_percentile(sorted: &[f64], p_percent: f64) -> FormulaValue {
 fn try_eval_aggregate_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) -> Result<Option<Vec<FormulaValue>>, TransformError> {
     let n = ctx.row_count();
     let val = match lower {
-        "sum" => {
-            check_arity("sum", args, 1)?;
+        "sum" if args.len() == 1 => {
             let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
             FormulaValue::from_f64(sum::sum(&nums))
         }
@@ -664,8 +663,7 @@ fn try_eval_aggregate_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext)
             #[allow(clippy::cast_precision_loss)]
             FormulaValue::Number(cnt as f64)
         }
-        "mean" => {
-            check_arity("mean", args, 1)?;
+        "mean" if args.len() == 1 => {
             let nums = extract_finite_numbers(&eval_column_expr(&args[0], ctx)?);
             sum::mean(&nums).map_or(FormulaValue::Missing, FormulaValue::from_f64)
         }
@@ -963,15 +961,15 @@ fn eval_scalar_call(lower: &str, args: &[Expr], ctx: &dyn FormulaContext) -> Res
 fn validate_scalar_call_arity(lower: &str, argc: usize) -> Result<(), TransformError> {
     match lower {
         "abs" | "sqrt" | "cbrt" | "sqr" | "ln" | "log10" | "log2" | "exp" | "exp10" | "sin" | "cos" | "tan" | "asin" | "arcsin" | "acos"
-        | "arccos" | "atan" | "arctan" | "sinh" | "cosh" | "tanh" | "floor" | "ceil" | "round" | "trunc" | "int" | "sign" | "sgn" | "erf"
-        | "erfc" | "lgamma" | "logit" | "probit" | "norm_ppf" | "norm_inv" | "qnorm" | "inv_norm" | "arcsin_sqrt" | "not" => {
+        | "arccos" | "atan" | "arctan" | "sinh" | "cosh" | "tanh" | "floor" | "ceil" | "trunc" | "int" | "sign" | "sgn" | "erf" | "erfc"
+        | "lgamma" | "logit" | "probit" | "norm_ppf" | "norm_inv" | "qnorm" | "inv_norm" | "arcsin_sqrt" | "not" => {
             if argc != 1 {
                 return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("1"), actual: argc });
             }
         }
-        "log" => {
+        "log" | "round" => {
             if argc != 1 && argc != 2 {
-                return Err(TransformError::ArityMismatch { function: String::from("log"), expected: String::from("1 or 2"), actual: argc });
+                return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("1 or 2"), actual: argc });
             }
         }
         "pow" | "atan2" | "arctan2" => {
@@ -984,7 +982,7 @@ fn validate_scalar_call_arity(lower: &str, argc: usize) -> Result<(), TransformE
                 return Err(TransformError::ArityMismatch { function: String::from("clamp"), expected: String::from("3"), actual: argc });
             }
         }
-        "min" | "max" | "and" | "or" => {
+        "min" | "max" | "sum" | "mean" | "and" | "or" => {
             if argc == 0 {
                 return Err(TransformError::ArityMismatch { function: lower.to_owned(), expected: String::from("at least 1"), actual: argc });
             }
@@ -997,6 +995,7 @@ fn validate_scalar_call_arity(lower: &str, argc: usize) -> Result<(), TransformE
 fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Result<FormulaValue, TransformError> {
     match lower {
         "min" | "max" => return Ok(eval_variadic_minmax(cols, row, lower == "min")),
+        "sum" | "mean" => return Ok(eval_variadic_sum_or_mean(cols, row, lower == "mean")),
         "and" | "or" => return Ok(eval_variadic_logic(cols, row, lower == "and")),
         "not" => {
             let b = cols[0][row].as_bool();
@@ -1018,6 +1017,7 @@ fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Resul
         let out = match lower {
             "pow" => x.powf(y),
             "log" => x.ln() / y.ln(),
+            "round" => eval_round_digits(x, y),
             "atan2" | "arctan2" => x.atan2(y),
             _ => f64::NAN,
         };
@@ -1033,6 +1033,37 @@ fn eval_scalar_row(lower: &str, cols: &[Vec<FormulaValue>], row: usize) -> Resul
         return Ok(FormulaValue::from_f64(x.clamp(y, z)));
     }
     Ok(FormulaValue::Missing)
+}
+
+fn eval_variadic_sum_or_mean(cols: &[Vec<FormulaValue>], row: usize, is_mean: bool) -> FormulaValue {
+    let nums: Vec<f64> = cols.iter().filter_map(|col| col[row].as_finite_f64()).collect();
+    if nums.is_empty() {
+        return FormulaValue::Missing;
+    }
+    if is_mean { sum::mean(&nums).map_or(FormulaValue::Missing, FormulaValue::from_f64) } else { FormulaValue::from_f64(sum::sum(&nums)) }
+}
+
+fn eval_round_digits(x: f64, digits: f64) -> f64 {
+    if !x.is_finite() || !digits.is_finite() {
+        return f64::NAN;
+    }
+    let d = digits.trunc();
+    if !(-308.0..=308.0).contains(&d) {
+        return if d > 0.0 { x } else { 0.0 };
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let d_i32 = d as i32;
+    if d_i32 == 0 {
+        return x.round();
+    }
+    if d_i32 > 0 {
+        let factor = 10.0_f64.powi(d_i32);
+        let scaled = x * factor;
+        if scaled.is_finite() && factor.is_finite() { scaled.round() / factor } else { x }
+    } else {
+        let factor = 10.0_f64.powi(-d_i32);
+        if factor.is_finite() { (x / factor).round() * factor } else { 0.0 }
+    }
 }
 
 fn eval_variadic_minmax(cols: &[Vec<FormulaValue>], row: usize, is_min: bool) -> FormulaValue {

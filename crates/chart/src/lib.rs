@@ -6,14 +6,15 @@
 #![forbid(unsafe_code)]
 
 pub mod column_grouped;
+pub mod equation_box;
 pub mod multivariate_layout;
 pub mod scales;
 pub mod scene;
 pub mod survival_cat;
 pub mod xy;
 
-use lumencraft_doc::{GraphKind, GraphSheet, LayoutSheet, ProjectDocument};
-use lumencraft_palette::Rgba8;
+use lumencraft_doc::{GraphKind, GraphSheet, GraphSpec, LayoutSheet, ProjectDocument};
+use lumencraft_palette::{MarkerStyle, Rgba8};
 use lumencraft_text::parse_markup;
 pub use scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, PreflightIssue,
@@ -21,6 +22,45 @@ pub use scene::{
 };
 
 use serde::{Deserialize, Serialize};
+
+/// Apply any [`lumencraft_doc::PointStyleOverride`] for `(series_index, point_index)` onto `base`.
+///
+/// Returns `None` when the point override hides the point (`hidden == true`).
+#[must_use]
+pub(crate) fn resolve_overridden_marker(spec: &GraphSpec, series_index: usize, point_index: usize, mut base: MarkerStyle) -> Option<MarkerStyle> {
+    let Some(ov) = spec.point_override(series_index, point_index) else {
+        return Some(base);
+    };
+    if ov.hidden {
+        return None;
+    }
+    if let Some(color) = ov.color {
+        base.fill_color = color;
+        base.stroke_color = color;
+    }
+    if let Some(fill_color) = ov.fill_color {
+        base.fill_color = fill_color;
+    }
+    if let Some(symbol) = ov.symbol {
+        base.shape = symbol;
+    }
+    if let Some(size_pt) = ov.size_pt
+        && size_pt.is_finite()
+        && size_pt > 0.0
+    {
+        base.size_pt = size_pt;
+    }
+    if let Some(border_width_pt) = ov.border_width_pt
+        && border_width_pt.is_finite()
+        && border_width_pt >= 0.0
+    {
+        base.stroke_width_pt = border_width_pt;
+    }
+    if let Some(fill_mode) = ov.fill_mode {
+        base.fill_mode = fill_mode;
+    }
+    Some(base)
+}
 
 /// High-level graph families corresponding to typed scientific data tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

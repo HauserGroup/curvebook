@@ -300,6 +300,12 @@ fn sweep_valid_sheet_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
     run_valid(s, covered, "sheet.reorder", json!({ "sheet_id": "xy-extra", "index": 0 }))?;
     run_valid(s, covered, "sheet.select", json!({ "sheet_id": "xy-1" }))?;
     run_valid(s, covered, "sheet.delete", json!({ "sheet_id": "xy-dup", "cascade": false }))?;
+    run_valid(
+        s,
+        covered,
+        "sheet.extractResultTab",
+        json!({ "result_sheet_id": "res-fit-seed", "sheet_id": "res-tab-sweep", "archetype": "column" }),
+    )?;
     Ok(())
 }
 
@@ -453,6 +459,44 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
             "mapping": { "group_col": "Group", "value_col": "Value" }
         }),
     )?;
+    run_valid(
+        s,
+        covered,
+        "table.randomizeGroups",
+        json!({
+            "sheet_id": "rand-1",
+            "groups": [{ "label": "Vehicle", "weight": 1 }, { "label": "Drug", "weight": 1 }],
+            "subject_count": 8,
+            "scheme": "permuted_block",
+            "block_sizes": [4],
+            "seed": 17
+        }),
+    )?;
+    run_valid(
+        s,
+        covered,
+        "table.randomSampleRows",
+        json!({
+            "sheet_id": "sample-1",
+            "source_sheet_id": "tidy-1",
+            "sample_size": 2,
+            "seed": 19
+        }),
+    )?;
+    run_valid(
+        s,
+        covered,
+        "table.simulateDistributions",
+        json!({
+            "sheet_id": "dist-1",
+            "n_rows": 8,
+            "seed": 23,
+            "columns": [
+                { "name": "Unif", "distribution": "uniform", "min": 0.0, "max": 1.0 },
+                { "name": "Norm", "distribution": "gaussian", "mean": 5.0, "sd": 1.5 }
+            ]
+        }),
+    )?;
     Ok(())
 }
 
@@ -514,6 +558,18 @@ fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet
         json!({ "sheet_id": "gr-col", "preset": "SingleColumn88mm", "resize_mode": "KeepTypographyPt" }),
     )?;
     run_valid(s, covered, "graph.preflightCheck", json!({ "sheet_id": "gr-col" }))?;
+    run_valid(
+        s,
+        covered,
+        "graph.formatSelectedPoints",
+        json!({
+            "sheet_id": "gr-1",
+            "points": [{ "series_index": 0, "point_index": 0 }],
+            "color": "#D55E00",
+            "symbol": "diamond",
+            "size_pt": 7.0
+        }),
+    )?;
 
     run_valid(
         s,

@@ -1,15 +1,16 @@
 //! Non-destructive table archetype preview and conversion (`QOL-1`).
 //!
-//! Supports lossless and lossy-guarded projections among `Column`, `Grouped`, `Xy`, and
-//! `MultipleVariables` tables while preserving sheet metadata, cell `excluded` masks, and
-//! remapping [`CellExclusionNote`] coordinates to their new [`CellCoord`] positions.
+//! Supports lossless and lossy-guarded projections among `Column`, `Grouped`, `Xy`,
+//! `MultipleVariables`, and `Contingency` (as a target) tables while preserving sheet metadata,
+//! cell `excluded` masks, and remapping [`CellExclusionNote`] coordinates to their new [`CellCoord`]
+//! positions.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use lumencraft_doc::{
-    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSetColumn, DataSheet, GroupedTable, MAX_DATA_SETS,
-    MultipleVariablesTable, SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, XColumnMode, XyTable,
-    default_column_label, validate_data_sets, validate_rows, validate_subcolumns,
+    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable,
+    MAX_DATA_SETS, MultipleVariablesTable, SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, XColumnMode,
+    XyTable, default_column_label, validate_data_sets, validate_rows, validate_subcolumns,
 };
 
 use crate::error::TransformError;
@@ -21,6 +22,7 @@ pub enum TargetArchetypeKind {
     Grouped,
     Xy,
     MultipleVariables,
+    Contingency,
 }
 
 impl TargetArchetypeKind {
@@ -32,6 +34,7 @@ impl TargetArchetypeKind {
             Self::Grouped => TableKind::Grouped,
             Self::Xy => TableKind::Xy,
             Self::MultipleVariables => TableKind::MultipleVariables,
+            Self::Contingency => TableKind::Contingency,
         }
     }
 
@@ -116,6 +119,10 @@ fn build_converted_datasheet(sheet: &DataSheet, target: TargetArchetypeKind) -> 
         (TableArchetype::MultipleVariables(mv), TargetArchetypeKind::Column) => convert_mv_to_column(mv)?,
         (TableArchetype::Grouped(grp), TargetArchetypeKind::Xy) => convert_grouped_to_xy(grp)?,
         (TableArchetype::Xy(xy), TargetArchetypeKind::Grouped) => convert_xy_to_grouped(xy)?,
+        (TableArchetype::Column(col), TargetArchetypeKind::Contingency) => convert_column_to_contingency(col)?,
+        (TableArchetype::Grouped(grp), TargetArchetypeKind::Contingency) => convert_grouped_to_contingency(grp)?,
+        (TableArchetype::Xy(xy), TargetArchetypeKind::Contingency) => convert_xy_to_contingency(xy)?,
+        (TableArchetype::MultipleVariables(mv), TargetArchetypeKind::Contingency) => convert_mv_to_contingency(mv)?,
         _ => return Err(TransformError::IncompatibleTable { operation: "convert_datasheet_archetype", kind: source_kind }),
     };
 
@@ -2142,6 +2149,330 @@ fn convert_xy_to_grouped(xy: &XyTable) -> Result<BuiltArchetype, TransformError>
 
 fn mv_row_count(mv: &MultipleVariablesTable) -> usize {
     mv.variables.iter().map(|v| v.cells.len()).max().unwrap_or(mv.row_titles.len()).max(mv.row_titles.len())
+}
+
+fn convert_column_to_contingency(col: &ColumnTable) -> Result<BuiltArchetype, TransformError> {
+    if col.data_sets.is_empty() {
+        return Err(TransformError::InvalidInput { message: String::from("Column table has no data columns") });
+    }
+    build_contingency_from_datasets(&col.data_sets, &col.row_titles, None, None)
+}
+
+fn convert_grouped_to_contingency(grp: &GroupedTable) -> Result<BuiltArchetype, TransformError> {
+    if grp.data_sets.is_empty() {
+        return Err(TransformError::InvalidInput { message: String::from("Grouped table has no data columns") });
+    }
+    build_contingency_from_datasets(&grp.data_sets, &grp.row_titles, Some(grp.row_factor_title.as_str()), Some(grp.column_factor_title.as_str()))
+}
+
+fn build_contingency_from_datasets(
+    data_sets: &[DataSetColumn],
+    row_titles: &[String],
+    row_factor: Option<&str>,
+    col_factor: Option<&str>,
+) -> Result<BuiltArchetype, TransformError> {
+    let cols = data_sets.len();
+    let rows = column_row_count(data_sets, row_titles.len());
+    let mut cont = ContingencyTable::new(cols, rows)?;
+    cont.row_titles = resized_titles(row_titles, rows);
+    if let Some(rf) = row_factor {
+        cont.row_factor_title = non_empty_or(rf, "Outcome / Exposure");
+    }
+    if let Some(cf) = col_factor {
+        cont.column_factor_title = non_empty_or(cf, "Group");
+    }
+
+    let mut coord_map = BTreeMap::new();
+    let mut preserved = 0_usize;
+    let mut dropped = 0_usize;
+    let mut schema_lossy = false;
+    let mut dropped_extra_subcols = false;
+
+    for (c, src_ds) in data_sets.iter().enumerate() {
+        cont.data_sets[c].title = src_ds.title.clone();
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
+            if let Some(cell) = row_cells.first() {
+                cont.data_sets[c].cells[r][0] = cell.clone();
+                coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, c, 0));
+                if is_occupied(cell) {
+                    preserved += 1;
+                }
+            }
+            for extra in row_cells.iter().skip(1) {
+                dropped_extra_subcols = true;
+                if is_occupied(extra) {
+                    dropped += 1;
+                }
+            }
+        }
+    }
+
+    let mut warnings = Vec::new();
+    if dropped_extra_subcols {
+        schema_lossy = true;
+        warnings.push(String::from("Extra subcolumns beyond primary value column cannot be stored in Contingency count cells and were dropped"));
+    }
+
+    cont.validate_counts()?;
+
+    Ok(BuiltArchetype {
+        archetype: TableArchetype::Contingency(cont),
+        coord_map,
+        preserved_cells: preserved,
+        dropped_cells: dropped,
+        warnings,
+        schema_lossy,
+        keep_links: false,
+    })
+}
+
+fn convert_xy_to_contingency(xy: &XyTable) -> Result<BuiltArchetype, TransformError> {
+    if xy.data_sets.is_empty() {
+        return Err(TransformError::InvalidInput { message: String::from("XY table has no Y data columns") });
+    }
+    let rows = xy.row_count();
+    let mut row_titles = Vec::with_capacity(rows);
+    let mut dropped = 0_usize;
+    let mut schema_lossy = false;
+    let mut warnings = Vec::new();
+    let mut x_used_as_label = false;
+
+    for r in 0..rows {
+        let explicit = xy.row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty());
+        let x_val = xy.x_value_at(r);
+        let lbl = match (explicit, x_val) {
+            (Some(s), _) => s.to_owned(),
+            (None, Some(v)) => {
+                x_used_as_label = true;
+                format!("{v}")
+            }
+            (None, None) => String::new(),
+        };
+        row_titles.push(lbl);
+    }
+
+    if !matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+        let mut x_extra = 0_usize;
+        for (r, x_row) in xy.x_cells.iter().enumerate().take(rows) {
+            for (s, cell) in x_row.iter().enumerate() {
+                if !is_occupied(cell) {
+                    continue;
+                }
+                let mapped_to_label = s == 0 && xy.row_titles.get(r).is_none_or(|t| t.trim().is_empty()) && cell.active_number().is_some();
+                if !mapped_to_label {
+                    dropped += 1;
+                    schema_lossy = true;
+                    if s > 0 {
+                        x_extra += 1;
+                    }
+                }
+            }
+        }
+        if x_used_as_label {
+            schema_lossy = true;
+            warnings.push(String::from("XY X values converted to Contingency row labels (numeric X spacing dropped)"));
+        }
+        if x_extra > 0 {
+            warnings.push(format!("Dropped {x_extra} X subcolumn cell(s) unsupported by Contingency row labels"));
+        }
+    }
+
+    let mut built = build_contingency_from_datasets(&xy.data_sets, &row_titles, Some(xy.x_title.as_str()), None)?;
+    built.dropped_cells += dropped;
+    built.schema_lossy |= schema_lossy;
+    built.warnings.extend(warnings);
+    Ok(built)
+}
+
+fn convert_mv_to_contingency(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, TransformError> {
+    if mv.variables.is_empty() {
+        return Err(TransformError::InvalidInput { message: String::from("MultipleVariables table has no variables") });
+    }
+    let rows = mv_row_count(mv);
+    let classes = classify_mv_variables(mv);
+    let cat_cols: Vec<usize> = classes.iter().enumerate().filter_map(|(i, &c)| (c == MvVarClass::Categorical).then_some(i)).collect();
+    let label_cols: Vec<usize> = classes.iter().enumerate().filter_map(|(i, &c)| (c == MvVarClass::Label).then_some(i)).collect();
+    let num_cols: Vec<usize> = classes.iter().enumerate().filter_map(|(i, &c)| (c == MvVarClass::Numeric).then_some(i)).collect();
+
+    if cat_cols.len() == 2
+        && mv.variables[cat_cols[0]].role == VariableRole::Categorical
+        && mv.variables[cat_cols[1]].role == VariableRole::Categorical
+    {
+        if num_cols.is_empty() {
+            return crosstab_mv_to_contingency(mv, cat_cols[0], cat_cols[1], &label_cols, None, rows);
+        }
+        if num_cols.len() == 1 && mv.variables.len() == 3 + label_cols.len() {
+            return crosstab_mv_to_contingency(mv, cat_cols[0], cat_cols[1], &label_cols, Some(num_cols[0]), rows);
+        }
+    }
+
+    let mv_has_empty_row_titles = mv.row_titles.iter().all(|s| s.trim().is_empty());
+    let label_col = (label_cols.len() == 1 && !num_cols.is_empty() && mv_has_empty_row_titles).then_some(label_cols[0]);
+    let data_indices: Vec<usize> = (0..mv.variables.len()).filter(|&i| Some(i) != label_col).collect();
+    if data_indices.is_empty() {
+        return Err(TransformError::InvalidSpec {
+            message: String::from("MultipleVariables table has no count variables to convert to Contingency"),
+        });
+    }
+    validate_data_sets(data_indices.len())?;
+
+    let mut cont = ContingencyTable::new(data_indices.len(), rows)?;
+    let mut preserved = 0_usize;
+    let mut warnings = Vec::new();
+    let mut coord_map = BTreeMap::new();
+
+    if let Some(lc) = label_col {
+        cont.row_factor_title = non_empty_or(&mv.variables[lc].title, "Outcome / Exposure");
+        for (r, slot) in cont.row_titles.iter_mut().enumerate().take(rows) {
+            *slot = mv_cell_level_token(mv.variables[lc].cells.get(r)).unwrap_or_default();
+        }
+        preserved += count_var_occupied(&mv.variables[lc], rows);
+    } else {
+        cont.row_titles = resized_titles(&mv.row_titles, rows);
+    }
+
+    for (dst_c, &src_c) in data_indices.iter().enumerate() {
+        let var = &mv.variables[src_c];
+        cont.data_sets[dst_c].title = var.title.clone();
+        if matches!(var.source, VariableSource::Calculated { .. }) {
+            warnings.push(format!("Calculated variable `{}` evaluated/frozen to static cells", var.title));
+        }
+        for (r, cell) in var.cells.iter().enumerate().take(rows) {
+            cont.data_sets[dst_c].cells[r][0] = cell.clone();
+            coord_map.insert(CellCoord::new(r, src_c, 0), CellCoord::new(r, dst_c, 0));
+            if is_occupied(cell) {
+                preserved += 1;
+            }
+        }
+    }
+
+    cont.validate_counts()?;
+
+    Ok(BuiltArchetype {
+        archetype: TableArchetype::Contingency(cont),
+        coord_map,
+        preserved_cells: preserved,
+        dropped_cells: 0,
+        warnings,
+        schema_lossy: false,
+        keep_links: false,
+    })
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
+fn validate_count_cell_value(cell: &Cell, row: usize, col: usize) -> Result<Option<u64>, TransformError> {
+    if cell.excluded || cell.is_empty() {
+        return Ok(None);
+    }
+    match &cell.value {
+        CellValue::Empty => Ok(None),
+        CellValue::Number(v) if v.is_finite() && *v >= 0.0 && v.fract() == 0.0 && *v <= (u64::MAX as f64) => Ok(Some(*v as u64)),
+        _ => Err(TransformError::Doc(DocError::InvalidCellValue {
+            archetype: TableKind::Contingency,
+            row,
+            col,
+            reason: "contingency table cells must be non-negative integer counts",
+        })),
+    }
+}
+
+fn crosstab_mv_to_contingency(
+    mv: &MultipleVariablesTable,
+    row_fac_col: usize,
+    col_fac_col: usize,
+    label_cols: &[usize],
+    count_col: Option<usize>,
+    rows: usize,
+) -> Result<BuiltArchetype, TransformError> {
+    let mut row_levels = Vec::new();
+    let mut row_index = BTreeMap::new();
+    let mut col_levels = Vec::new();
+    let mut col_index = BTreeMap::new();
+    let mut counts: BTreeMap<(usize, usize), u64> = BTreeMap::new();
+    let mut dropped = 0_usize;
+    let mut schema_lossy = false;
+    let mut warnings = Vec::new();
+
+    for &lc in label_cols {
+        dropped += count_var_occupied(&mv.variables[lc], rows);
+        schema_lossy = true;
+    }
+
+    for r in 0..rows {
+        let rc = mv.variables[row_fac_col].cells.get(r);
+        let cc = mv.variables[col_fac_col].cells.get(r);
+        let row_active = rc.filter(|c| !c.excluded).and_then(|c| mv_cell_level_token(Some(c)));
+        let col_active = cc.filter(|c| !c.excluded).and_then(|c| mv_cell_level_token(Some(c)));
+
+        let increment = match count_col {
+            Some(vc) => {
+                let cell = mv.variables[vc].cells.get(r).cloned().unwrap_or_default();
+                validate_count_cell_value(&cell, r, vc)?
+            }
+            None => Some(1),
+        };
+
+        let (Some(rk), Some(ck), Some(cnt)) = (row_active, col_active, increment) else {
+            if rc.is_some_and(is_occupied) {
+                dropped += 1;
+                schema_lossy = true;
+            }
+            if cc.is_some_and(is_occupied) {
+                dropped += 1;
+                schema_lossy = true;
+            }
+            if let Some(vc) = count_col
+                && mv.variables[vc].cells.get(r).is_some_and(is_occupied)
+            {
+                dropped += 1;
+                schema_lossy = true;
+            }
+            continue;
+        };
+
+        let ri = intern_level(&mut row_levels, &mut row_index, rk);
+        let ci = intern_level(&mut col_levels, &mut col_index, ck);
+        let entry = counts.entry((ri, ci)).or_insert(0);
+        *entry = entry.saturating_add(cnt);
+    }
+
+    if row_levels.is_empty() || col_levels.is_empty() {
+        return Err(TransformError::InvalidInput {
+            message: String::from("no complete (Row Factor, Column Factor) pairs found to cross-tabulate into Contingency"),
+        });
+    }
+    validate_rows(row_levels.len())?;
+    validate_data_sets(col_levels.len())?;
+
+    let mut cont = ContingencyTable::new(col_levels.len(), row_levels.len())?;
+    cont.row_factor_title = non_empty_or(&mv.variables[row_fac_col].title, "Outcome / Exposure");
+    cont.column_factor_title = non_empty_or(&mv.variables[col_fac_col].title, "Group");
+    cont.row_titles = row_levels;
+
+    let mut preserved = 0_usize;
+    for (ci, col_lbl) in col_levels.into_iter().enumerate() {
+        cont.data_sets[ci].title = col_lbl;
+        for ri in 0..cont.row_count() {
+            let val = counts.get(&(ri, ci)).copied().unwrap_or(0);
+            #[allow(clippy::cast_precision_loss)]
+            {
+                cont.data_sets[ci].cells[ri][0] = Cell::number(val as f64);
+            }
+            preserved += 1;
+        }
+    }
+    cont.validate_counts()?;
+    warnings.push(String::from("Cross-tabulated categorical MultipleVariables factors into Contingency counts"));
+
+    Ok(BuiltArchetype {
+        archetype: TableArchetype::Contingency(cont),
+        coord_map: BTreeMap::new(),
+        preserved_cells: preserved,
+        dropped_cells: dropped,
+        warnings,
+        schema_lossy,
+        keep_links: false,
+    })
 }
 
 fn count_var_occupied(var: &VariableColumn, rows: usize) -> usize {

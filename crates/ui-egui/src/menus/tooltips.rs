@@ -98,6 +98,7 @@ pub fn command_tooltip(app: &UiApp, command_id: &str) -> Option<CommandTooltip> 
     }
     UI_COMMANDS.iter().find(|spec| spec.id == command_id).map(|spec| {
         let shortcut = app.shortcuts.active_combo(spec.id).unwrap_or(spec.shortcut).to_owned();
+        let (_bucket, menu_path) = ui_command_menu_info(spec.id);
         CommandTooltip {
             command_id: spec.id,
             label: spec.label,
@@ -105,13 +106,79 @@ pub fn command_tooltip(app: &UiApp, command_id: &str) -> Option<CommandTooltip> 
             shortcut,
             summary: spec.summary,
             beginner: spec.beginner,
-            menu_path: if spec.id == "app.about" { "Help" } else { "UI" },
-            enabled: true,
+            menu_path,
+            enabled: ui_command_enabled(app, spec.id),
             read_only: true,
             destructive: false,
             needs_consent: false,
         }
     })
+}
+
+fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
+    match id {
+        "app.about" => ("menu.help", "Help"),
+        "ui.powerWizard.open" => ("menu.analyze", "Analyze/Power and Sample Size..."),
+        "ui.analyze.open" => ("menu.analyze", "Analyze/Analyze..."),
+        "ui.result.copyMethodsReport" => ("menu.analyze", "Analyze/Copy Methods Report"),
+        "ui.result.applyRemediation" => ("menu.analyze", "Analyze/Apply Assumption Remediation"),
+        "ui.result.inspectDiagnostics" => ("menu.analyze", "Analyze/Inspect Result Diagnostic Tabs"),
+        "ui.result.appendClusterColumn" => ("menu.analyze", "Analyze/Append Cluster Column to Source Table"),
+        "ui.formatPoints.open" => ("menu.graph", "Format/Format Selected Points..."),
+        "ui.graph.axes.open" => ("menu.graph", "Format/Format Axes..."),
+        "ui.graph.insertModelEquation" => ("menu.graph", "Draw/Insert Model Equation..."),
+        "ui.graph.bubblePlot.open" => ("menu.graph", "Graph/Bubble Plot Channels..."),
+        "ui.graph.format.open" => ("menu.graph", "Format/Format Graph..."),
+        "ui.graph.pairwise.open" => ("menu.graph", "Format/Pairwise Comparison Brackets..."),
+        "ui.layout.composer.open" => ("menu.graph", "Layout/Page Layout Composer..."),
+        "ui.changeGraphType.open" => ("menu.graph", "Graph/Change Graph Type..."),
+        "ui.canvas.applyPreset" => ("menu.graph", "Graph/Apply Canvas Preset"),
+        "ui.canvas.preflight" => ("menu.graph", "Graph/Preflight Check"),
+        "ui.brush.point" => ("menu.graph", "Graph/Brush Point"),
+        "ui.print.open" => ("menu.file", "File/Print..."),
+        "ui.export.figure.open" => ("menu.file", "File/Export Figure..."),
+        "ui.clonePipeline.open" => ("menu.file", "File/Clone Pipeline..."),
+        "ui.import.reshape.open" => ("menu.file", "File/Import Reshape..."),
+        "ui.table.convertArchetype.open" => ("menu.insert", "Data/Convert Table Archetype..."),
+        "ui.table.randomizeGroups" => ("menu.insert", "Data/Randomize Groups Dialog..."),
+        "ui.table.randomSampleRows" => ("menu.insert", "Data/Random Sample Rows Dialog..."),
+        "ui.table.simulateDistributions" => ("menu.insert", "Insert/Simulate Distributions Dialog..."),
+        "ui.table.openFormulaBar" => ("menu.insert", "Data/Open Formula Bar..."),
+        "ui.grid.excludeWithReason" => ("menu.edit", "Edit/Exclude with Reason..."),
+        _ => ("menu.view", "UI"),
+    }
+}
+
+fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
+    let doc = app.document();
+    match id {
+        "ui.analyze.open" => {
+            let active_analyzable = doc.active_sheet_id.as_ref().is_some_and(|sid| {
+                doc.data_sheet(sid).is_some()
+                    || doc
+                        .result_sheet(sid)
+                        .is_some_and(|rs| rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.column_headers.is_empty() && !t.rows.is_empty()))
+            });
+            active_analyzable || !doc.data_sheets.is_empty()
+        }
+        "ui.formatPoints.open"
+        | "ui.changeGraphType.open"
+        | "ui.graph.axes.open"
+        | "ui.graph.insertModelEquation"
+        | "ui.graph.bubblePlot.open"
+        | "ui.graph.format.open"
+        | "ui.graph.pairwise.open" => !doc.graph_sheets.is_empty(),
+        "ui.result.copyMethodsReport" | "ui.result.applyRemediation" | "ui.result.inspectDiagnostics" => !doc.result_sheets.is_empty(),
+        "ui.result.appendClusterColumn" => doc
+            .result_sheets
+            .iter()
+            .any(|rs| matches!(rs.analysis.kind, lumencraft_doc::AnalysisKind::Multivariate(lumencraft_doc::MultivariateSpec::Clustering { .. }))),
+        "ui.table.openFormulaBar" => doc.data_sheets.iter().any(|ds| matches!(ds.archetype, lumencraft_doc::TableArchetype::MultipleVariables(_))),
+        "ui.table.convertArchetype.open" | "ui.table.randomSampleRows" | "ui.grid.excludeWithReason" => !doc.data_sheets.is_empty(),
+        "ui.layout.composer.open" => !doc.layout_sheets.is_empty(),
+        "ui.canvas.applyPreset" | "ui.canvas.preflight" | "ui.export.figure.open" => !doc.graph_sheets.is_empty() || !doc.layout_sheets.is_empty(),
+        _ => true,
+    }
 }
 
 /// Resolved localized toolbar button entry paired with its hover [`CommandTooltip`].
@@ -175,7 +242,7 @@ pub fn menu_bar_tooltips(app: &UiApp) -> Vec<MenuSectionTooltips> {
         }
     }
     for spec in UI_COMMANDS {
-        let bucket = if spec.id == "app.about" { "menu.help" } else { "menu.view" };
+        let (bucket, _) = ui_command_menu_info(spec.id);
         if let (Some(section), Some(tip)) = (sections.iter_mut().find(|s| s.menu_key == bucket), command_tooltip(app, spec.id)) {
             section.items.push(tip);
         }
@@ -234,7 +301,7 @@ mod tests {
         let frame = crate::render_workspace_frame_png(&app, crate::RenderTargetSpec { width_px: 480, height_px: 320, dpi: 96 })?;
         assert!(frame.len() > 8);
 
-        // Menu bar covers all 90 engine + 29 UI commands with non-empty summary & beginner guidance.
+        // Menu bar covers all 95 engine + 42 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
         assert_eq!(sections.len(), 7);
         let mut seen = HashSet::new();
@@ -246,7 +313,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 119);
+        assert_eq!(seen.len(), 140);
         Ok(())
     }
 }

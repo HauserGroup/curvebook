@@ -1,0 +1,1948 @@
+//! Exact statistical power, sample-size, and minimum-detectable-effect calculation engine (`R8.7`).
+//!
+//! Backed by tail-safe noncentral *t*, noncentral *F*, noncentral chi-square, and normal
+//! distributions from [`lumencraft_math::dist`], plus Brent-Dekker root finding from
+//! [`lumencraft_math::roots`].
+//!
+//! Supported test families ([`PowerTestFamily`]):
+//! 1. `TwoSampleUnpairedT`: equal or unequal allocation ratio `k = n2 / n1`, Cohen's `d` or raw group means & pooled SD.
+//! 2. `TwoSamplePairedT`: direct paired `d_z` / `(mean_diff, sd_d)` or group SD + within-pair correlation `r` via `sigma_d = sigma * sqrt(2 * (1 - r))`.
+//! 3. `OneSampleT`: single-sample Student *t*-test against `mu_0`.
+//! 4. `OneWayAnova`: balanced `k >= 2` groups, Cohen's `f` or group means & within-group SD (`lambda = k * n * f^2`).
+//! 5. `TwoProportions`: normal approximation (`PooledNullUnpooledAlt` Fleiss/G*Power, `Unpooled` Wald, or `CohensH` arcsine) with optional continuity correction.
+//! 6. `Correlation`: Pearson `r` vs `H0: r_0 = 0` (Fisher *z*, R `pwr.r.test` hybrid, or conditional *t*-transform).
+//! 7. `ChiSquare`: goodness-of-fit / contingency test parameterized by Cohen's `w` and `df`.
+//! 8. `SimpleLinearRegression`: slope *t*-test / `u = 1` *F*-test parameterized by Cohen's `f^2 = R^2 / (1 - R^2)`, `R^2`, or `(beta1, sigma_x, sigma_eps)` (`lambda = n * f^2`, `df = n - 2`).
+
+use lumencraft_math::dist::{
+    chi2_isf, f_isf, ncchi2_sf, ncf_sf, nct_cdf, nct_sf, norm_cdf, norm_isf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_isf,
+    student_t_two_sided_isf,
+};
+use lumencraft_math::roots::{RootOptions, brent_root};
+use lumencraft_math::sum::SummaryMoments;
+use serde::{Deserialize, Serialize};
+
+use crate::error::StatsError;
+
+const MAX_CONTINUOUS_N: f64 = 1e12;
+const ROOT_TOL: RootOptions = RootOptions { rel_tol: 1e-12, abs_tol: 1e-12, max_iters: 128 };
+const DEFAULT_SENSITIVITY_ALPHAS: &[f64] = &[0.10, 0.05, 0.01, 0.001];
+const DEFAULT_SENSITIVITY_POWERS: &[f64] = &[0.70, 0.80, 0.90, 0.95];
+
+// ============================================================================
+// Domain Model & Configuration Types
+// ============================================================================
+
+/// Supported hypothesis test families for power and sample-size planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PowerTestFamily {
+    #[default]
+    TwoSampleUnpairedT,
+    TwoSamplePairedT,
+    OneSampleT,
+    OneWayAnova,
+    TwoProportions,
+    Correlation,
+    ChiSquare,
+    SimpleLinearRegression,
+}
+
+impl PowerTestFamily {
+    /// All eight supported power-analysis test families in canonical wizard order.
+    pub const ALL: [Self; 8] = [
+        Self::TwoSampleUnpairedT,
+        Self::TwoSamplePairedT,
+        Self::OneSampleT,
+        Self::OneWayAnova,
+        Self::TwoProportions,
+        Self::Correlation,
+        Self::ChiSquare,
+        Self::SimpleLinearRegression,
+    ];
+
+    /// Neutral display label for UI pickers and result summaries.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TwoSampleUnpairedT => "Unpaired t test",
+            Self::TwoSamplePairedT => "Paired t test",
+            Self::OneSampleT => "One-sample t test",
+            Self::OneWayAnova => "One-way ANOVA",
+            Self::TwoProportions => "Two proportions",
+            Self::Correlation => "Pearson correlation",
+            Self::ChiSquare => "Chi-square test",
+            Self::SimpleLinearRegression => "Simple linear regression",
+        }
+    }
+
+    /// Name of the canonical standardized effect size for this test family.
+    #[must_use]
+    pub const fn default_effect_label(self) -> &'static str {
+        match self {
+            Self::TwoSampleUnpairedT | Self::OneSampleT => "Cohen's d",
+            Self::TwoSamplePairedT => "Cohen's dz",
+            Self::OneWayAnova => "Cohen's f",
+            Self::TwoProportions => "Cohen's h",
+            Self::Correlation => "Pearson r",
+            Self::ChiSquare => "Cohen's w",
+            Self::SimpleLinearRegression => "Cohen's f^2",
+        }
+    }
+
+    /// Whether one-sided alternatives (`Greater` / `Less`) are meaningful for this family.
+    #[must_use]
+    pub const fn supports_one_sided(self) -> bool {
+        !matches!(self, Self::OneWayAnova | Self::ChiSquare)
+    }
+
+    /// Minimum valid integer primary sample size for this test family.
+    #[must_use]
+    pub const fn min_integer_n(self) -> usize {
+        match self {
+            Self::TwoSampleUnpairedT | Self::TwoSamplePairedT | Self::OneSampleT | Self::OneWayAnova => 2,
+            Self::SimpleLinearRegression => 3,
+            Self::Correlation => 4,
+            Self::TwoProportions | Self::ChiSquare => 1,
+        }
+    }
+}
+
+/// Direction for one-sided hypothesis tests (`H1: theta > theta_0` vs `H1: theta < theta_0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum OneSidedDirection {
+    #[default]
+    Greater,
+    Less,
+}
+
+/// Hypothesis tail mode for power calculations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TailMode {
+    #[default]
+    TwoSided,
+    OneSided(OneSidedDirection),
+}
+
+impl TailMode {
+    /// Convenience constant for upper-tail one-sided tests (`H1: effect > 0`).
+    pub const ONE_SIDED_GREATER: Self = Self::OneSided(OneSidedDirection::Greater);
+    /// Convenience constant for lower-tail one-sided tests (`H1: effect < 0`).
+    pub const ONE_SIDED_LESS: Self = Self::OneSided(OneSidedDirection::Less);
+}
+
+/// Unknown quantity solved by [`solve_power`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum PowerSolveTarget {
+    #[default]
+    SampleSize,
+    Power,
+    DetectableEffect,
+}
+
+/// Variance / standard-error approximation used by [`PowerTestFamily::TwoProportions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum TwoProportionsMethod {
+    /// Pooled proportion `p_bar` under `H0` and unpooled SE under `H1` (Fleiss / G*Power standard).
+    #[default]
+    PooledNullUnpooledAlt,
+    /// Unpooled Wald SE under both `H0` and `H1`.
+    Unpooled,
+    /// Arcsine-transformed Cohen's `h = 2 asin(sqrt(p1)) - 2 asin(sqrt(p2))` (`pwr::pwr.2p.test`).
+    CohensH,
+}
+
+/// Power-curve convention used by [`PowerTestFamily::Correlation`] (`H0: rho = 0`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum CorrelationPowerMethod {
+    /// Standard Fisher *z*-transformation (`z = atanh(r)`, `SE = 1 / sqrt(n - 3)`):
+    /// yields exact size `alpha` at `r = 0` and is strictly monotonic for all `n > 3`.
+    #[default]
+    FisherZ,
+    /// R `pwr::pwr.r.test` convention: exact *t*-transform critical threshold `r_c` under `H0`
+    /// paired with bias-corrected Fisher *z* (`atanh(r) + r / (2*(n-1))`, `SE = 1/sqrt(n-3)`).
+    FisherZWithTCrit,
+    /// Conditional noncentral-*t* transform (`df = n - 2`, `delta = (r / sqrt(1 - r^2)) * sqrt(n - 2)`).
+    ExactTTransform,
+}
+
+/// Effect-size input parameterization for [`PowerAnalysisRequest`].
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub enum PowerEffectSpec {
+    /// Omitted effect size (valid when `solve_target == PowerSolveTarget::DetectableEffect`).
+    #[default]
+    Unspecified,
+    /// Direct standardized effect size (`d`, `d_z`, `f`, `h`, `r`, `w`, or `f^2`).
+    Standardized(f64),
+    /// Group mean difference (`mu_1 - mu_2` or `mu - mu_0`) and common/group SD `sigma`.
+    /// For [`PowerTestFamily::TwoSamplePairedT`], `within_pair_correlation` converts `sigma` via
+    /// `sigma_d = sigma * sqrt(2 * (1 - r))` (or `sqrt(sd1^2 + sd2^2 - 2 * r * sd1 * sd2)`).
+    MeanDiffAndSd { mean_diff: f64, sd: f64, sd_group2: Option<f64>, within_pair_correlation: Option<f64> },
+    /// Direct paired-differences mean difference and SD of paired differences (`sigma_d`).
+    PairedDiff { mean_diff: f64, sd_diff: f64 },
+    /// Raw group means and common within-group SD (for `OneWayAnova` or `TwoSampleUnpairedT`).
+    GroupMeansAndSd { means: Vec<f64>, within_sd: f64 },
+    /// Group proportions `(p1, p2)` in `[0, 1]` for [`PowerTestFamily::TwoProportions`].
+    TwoProportions { p1: f64, p2: f64 },
+    /// Fixed baseline proportion `p1` when solving `DetectableEffect` for `p2` in [`PowerTestFamily::TwoProportions`].
+    BaselineProportion { p1: f64 },
+    /// Coefficient of determination `R^2` in `[0, 1)` for [`PowerTestFamily::SimpleLinearRegression`].
+    RSquared(f64),
+    /// Regression slope `beta1`, predictor SD `sigma_x`, and residual SD `sigma_eps`.
+    RegressionSlope { beta1: f64, sigma_x: f64, sigma_eps: f64 },
+}
+
+/// Typed input specification for [`solve_power`], [`compute_power_curve`], and [`compute_sensitivity_table`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PowerAnalysisRequest {
+    pub family: PowerTestFamily,
+    pub solve_target: PowerSolveTarget,
+    pub tail_mode: TailMode,
+    /// Significance level `alpha` in `(0, 1)` (default `0.05`).
+    pub alpha: f64,
+    /// Target statistical power `1 - beta` in `(0, 1)` (default `Some(0.80)`).
+    pub target_power: Option<f64>,
+    /// Primary sample size (`n1` per group for 2-group/ANOVA; total `N` for single-sample/correlation/chi2/regression).
+    pub sample_size: Option<f64>,
+    /// Optional explicit second-group sample size `n2` for two-sample designs.
+    pub sample_size_group2: Option<f64>,
+    /// Allocation ratio `k = n2 / n1 > 0` for two-sample designs when `sample_size_group2` is `None`.
+    pub allocation_ratio: f64,
+    /// Effect-size parameterization.
+    pub effect: PowerEffectSpec,
+    /// Group count `k >= 2` for `OneWayAnova` (inferred from `GroupMeansAndSd` when `None`).
+    pub num_groups: Option<usize>,
+    /// Degrees of freedom `df > 0` for `ChiSquare` (default `1.0`).
+    pub chi_square_df: f64,
+    /// Variance / SE convention for `TwoProportions` (default `PooledNullUnpooledAlt`).
+    pub two_proportions_mode: TwoProportionsMethod,
+    /// Yates / Fleiss continuity correction for `TwoProportions` normal approximations.
+    pub continuity_correction: bool,
+    /// Power-curve convention for `Correlation` (default `FisherZ`).
+    pub correlation_method: CorrelationPowerMethod,
+}
+
+impl Default for PowerAnalysisRequest {
+    fn default() -> Self {
+        Self {
+            family: PowerTestFamily::TwoSampleUnpairedT,
+            solve_target: PowerSolveTarget::SampleSize,
+            tail_mode: TailMode::TwoSided,
+            alpha: 0.05,
+            target_power: Some(0.80),
+            sample_size: None,
+            sample_size_group2: None,
+            allocation_ratio: 1.0,
+            effect: PowerEffectSpec::Unspecified,
+            num_groups: None,
+            chi_square_df: 1.0,
+            two_proportions_mode: TwoProportionsMethod::PooledNullUnpooledAlt,
+            continuity_correction: false,
+            correlation_method: CorrelationPowerMethod::FisherZ,
+        }
+    }
+}
+
+impl PowerAnalysisRequest {
+    /// Construct a default `SampleSize` request for `family` at `alpha = 0.05`, `power = 0.80`, two-sided.
+    #[must_use]
+    pub fn new(family: PowerTestFamily) -> Self {
+        Self { family, ..Self::default() }
+    }
+
+    /// Construct an unpaired *t*-test sample-size request from Cohen's `d`.
+    #[must_use]
+    pub fn unpaired_t(d: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::TwoSampleUnpairedT,
+            alpha,
+            target_power: Some(target_power),
+            effect: PowerEffectSpec::Standardized(d),
+            ..Self::default()
+        }
+    }
+
+    /// Construct a paired *t*-test sample-size request from standardized paired effect `d_z`.
+    #[must_use]
+    pub fn paired_t(dz: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::TwoSamplePairedT,
+            alpha,
+            target_power: Some(target_power),
+            effect: PowerEffectSpec::Standardized(dz),
+            ..Self::default()
+        }
+    }
+
+    /// Construct a paired *t*-test sample-size request from mean difference, common SD `sigma`,
+    /// and within-pair correlation `r` (`sigma_d = sigma * sqrt(2 * (1 - r))`).
+    #[must_use]
+    pub fn paired_t_correlated(mean_diff: f64, sd: f64, correlation_r: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::TwoSamplePairedT,
+            alpha,
+            target_power: Some(target_power),
+            effect: PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2: None, within_pair_correlation: Some(correlation_r) },
+            ..Self::default()
+        }
+    }
+
+    /// Construct a one-sample *t*-test sample-size request from Cohen's `d`.
+    #[must_use]
+    pub fn one_sample_t(d: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::OneSampleT,
+            alpha,
+            target_power: Some(target_power),
+            effect: PowerEffectSpec::Standardized(d),
+            ..Self::default()
+        }
+    }
+
+    /// Construct a balanced one-way ANOVA sample-size request for `num_groups >= 2` and Cohen's `f`.
+    #[must_use]
+    pub fn one_way_anova(num_groups: usize, f: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::OneWayAnova,
+            alpha,
+            target_power: Some(target_power),
+            num_groups: Some(num_groups),
+            effect: PowerEffectSpec::Standardized(f),
+            ..Self::default()
+        }
+    }
+
+    /// Construct a two-proportions sample-size request for `(p1, p2)`.
+    #[must_use]
+    pub fn two_proportions(p1: f64, p2: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::TwoProportions,
+            alpha,
+            target_power: Some(target_power),
+            effect: PowerEffectSpec::TwoProportions { p1, p2 },
+            ..Self::default()
+        }
+    }
+
+    /// Construct a Pearson correlation sample-size request against `H0: r = 0`.
+    #[must_use]
+    pub fn correlation(r: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::Correlation,
+            alpha,
+            target_power: Some(target_power),
+            effect: PowerEffectSpec::Standardized(r),
+            ..Self::default()
+        }
+    }
+
+    /// Construct a chi-square goodness-of-fit / contingency sample-size request from Cohen's `w` and `df`.
+    #[must_use]
+    pub fn chi_square(w: f64, df: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::ChiSquare,
+            alpha,
+            target_power: Some(target_power),
+            chi_square_df: df,
+            effect: PowerEffectSpec::Standardized(w),
+            ..Self::default()
+        }
+    }
+
+    /// Construct a simple linear regression (`u = 1`) sample-size request from Cohen's `f^2`.
+    #[must_use]
+    pub fn simple_linear_regression(f2: f64, alpha: f64, target_power: f64) -> Self {
+        Self {
+            family: PowerTestFamily::SimpleLinearRegression,
+            alpha,
+            target_power: Some(target_power),
+            effect: PowerEffectSpec::Standardized(f2),
+            ..Self::default()
+        }
+    }
+
+    #[must_use]
+    pub const fn with_target(mut self, target: PowerSolveTarget) -> Self {
+        self.solve_target = target;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_tail(mut self, tail_mode: TailMode) -> Self {
+        self.tail_mode = tail_mode;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_alpha(mut self, alpha: f64) -> Self {
+        self.alpha = alpha;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_target_power(mut self, target_power: f64) -> Self {
+        self.target_power = Some(target_power);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_sample_size(mut self, n: f64) -> Self {
+        self.sample_size = Some(n);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_sample_size_group2(mut self, n2: f64) -> Self {
+        self.sample_size_group2 = Some(n2);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_allocation_ratio(mut self, ratio: f64) -> Self {
+        self.allocation_ratio = ratio;
+        self
+    }
+
+    #[must_use]
+    pub fn with_effect(mut self, effect: PowerEffectSpec) -> Self {
+        self.effect = effect;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_num_groups(mut self, k: usize) -> Self {
+        self.num_groups = Some(k);
+        self
+    }
+
+    #[must_use]
+    pub const fn with_chi_square_df(mut self, df: f64) -> Self {
+        self.chi_square_df = df;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_two_proportions_mode(mut self, mode: TwoProportionsMethod) -> Self {
+        self.two_proportions_mode = mode;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_continuity_correction(mut self, enabled: bool) -> Self {
+        self.continuity_correction = enabled;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_correlation_method(mut self, method: CorrelationPowerMethod) -> Self {
+        self.correlation_method = method;
+        self
+    }
+}
+
+/// Single point on a power-vs-sample-size curve (`Stage 4` interactive chart).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PowerCurvePoint {
+    pub n: f64,
+    pub power: f64,
+    pub effect_size: f64,
+    pub total_n: f64,
+}
+
+/// Single cell in the multi-alpha by multi-power sensitivity table (`Stage 4`).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SensitivityCell {
+    pub alpha: f64,
+    pub target_power: f64,
+    pub sample_size: usize,
+    pub effect_size: f64,
+    pub total_n: usize,
+    pub continuous_n: f64,
+}
+
+/// Complete numerical output returned by [`solve_power`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PowerAnalysisResult {
+    pub family: PowerTestFamily,
+    pub solve_target: PowerSolveTarget,
+    pub tail_mode: TailMode,
+    pub alpha: f64,
+    pub target_power: Option<f64>,
+    /// Exact continuous primary sample size (`n1` or `n_per_group` or total `N`).
+    pub continuous_n: f64,
+    /// Ceiling integer primary sample size (`n1` or `n_per_group` or total `N`).
+    pub n_per_group: usize,
+    /// Ceiling integer second-group sample size for two-sample tests (`None` otherwise).
+    pub n_group2: Option<usize>,
+    /// Total integer sample size across all groups.
+    pub total_n: usize,
+    /// Exact power evaluated at `continuous_n` (matches `target_power` when solving `SampleSize`).
+    pub power_at_continuous_n: f64,
+    /// Exact achieved power evaluated at the ceiling integer sample size(s) (`n_per_group`, `n_group2`).
+    pub achieved_power: f64,
+    /// Standardized effect size on the family's canonical scale (`d`, `d_z`, `f`, `h`, `r`, `w`, or `f^2`).
+    pub effect_size: f64,
+    /// Raw-unit effect size when scale information was supplied (`mean_diff`, `p1 - p2`, `beta1`, or `f * within_sd`).
+    pub raw_effect_size: Option<f64>,
+    /// Implied or given second proportion `p2` for `TwoProportions`.
+    pub implied_p2: Option<f64>,
+    /// Implied Cohen's `h` for `TwoProportions`.
+    pub cohens_h: Option<f64>,
+    /// Implied `R^2 = f^2 / (1 + f^2)` for `SimpleLinearRegression`.
+    pub implied_r_squared: Option<f64>,
+    /// Denominator / test degrees of freedom evaluated at ceiling `n` (`None` for normal-approx two proportions).
+    pub actual_df: Option<f64>,
+    /// Numerator degrees of freedom (`Some(k - 1)` for ANOVA, `Some(1.0)` for SimpleLinearRegression).
+    pub numerator_df: Option<f64>,
+    /// Noncentrality parameter (`delta` for *t*/*z*, `lambda` for *F*/chi-square) at ceiling `n`.
+    pub noncentrality_param: f64,
+    /// Critical test-statistic threshold at ceiling `n` and `alpha`.
+    pub critical_value: f64,
+    /// Sampled power-vs-`N` curve around the computed design.
+    pub power_curve: Vec<PowerCurvePoint>,
+    /// Multi-`alpha` by multi-power sensitivity matrix for Stage 4 exploration.
+    pub sensitivity_table: Vec<SensitivityCell>,
+    /// Human-readable convention notes for UI / `ResultSheet` summaries.
+    pub notes: Vec<String>,
+}
+
+// ============================================================================
+// Standalone Effect-Size Conversion Helpers
+// ============================================================================
+
+/// Compute Cohen's `d = (mean_1 - mean_2) / pooled_sd`.
+pub fn cohens_d_from_means(mean_1: f64, mean_2: f64, pooled_sd: f64) -> Result<f64, StatsError> {
+    if !mean_1.is_finite() || !mean_2.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "mean", value: mean_1 + mean_2 });
+    }
+    if !pooled_sd.is_finite() || pooled_sd <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "pooled_sd", value: pooled_sd });
+    }
+    Ok((mean_1 - mean_2) / pooled_sd)
+}
+
+/// Compute paired-difference standard deviation `sigma_d = sigma * sqrt(2 * (1 - r))`.
+pub fn paired_sd_from_correlation(sd: f64, correlation_r: f64) -> Result<f64, StatsError> {
+    if !sd.is_finite() || sd <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "sd", value: sd });
+    }
+    if !correlation_r.is_finite() || !(-1.0..1.0).contains(&correlation_r) {
+        return Err(StatsError::InvalidParameter { name: "within_pair_correlation", value: correlation_r });
+    }
+    Ok(sd * (2.0 * (1.0 - correlation_r)).sqrt())
+}
+
+/// Compute paired Cohen's `d_z = mean_diff / (sd * sqrt(2 * (1 - r)))`.
+pub fn cohens_dz_from_correlation(mean_diff: f64, sd: f64, correlation_r: f64) -> Result<f64, StatsError> {
+    if !mean_diff.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "mean_diff", value: mean_diff });
+    }
+    let sd_d = paired_sd_from_correlation(sd, correlation_r)?;
+    Ok(mean_diff / sd_d)
+}
+
+/// Compute balanced one-way ANOVA Cohen's `f = sqrt(sum((mu_i - mu_bar)^2) / k) / within_sd`.
+pub fn cohens_f_from_means(group_means: &[f64], within_sd: f64) -> Result<f64, StatsError> {
+    if group_means.len() < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "one-way ANOVA means", required: 2, actual: group_means.len() });
+    }
+    if !within_sd.is_finite() || within_sd <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "within_sd", value: within_sd });
+    }
+    let moments = SummaryMoments::from_slice(group_means)?;
+    let sigma_m = (moments.css / (group_means.len() as f64)).sqrt();
+    Ok(sigma_m / within_sd)
+}
+
+/// Compute Cohen's `h = 2 * asin(sqrt(p1)) - 2 * asin(sqrt(p2))`.
+pub fn cohens_h(p1: f64, p2: f64) -> Result<f64, StatsError> {
+    if !p1.is_finite() || !(0.0..=1.0).contains(&p1) {
+        return Err(StatsError::InvalidParameter { name: "p1", value: p1 });
+    }
+    if !p2.is_finite() || !(0.0..=1.0).contains(&p2) {
+        return Err(StatsError::InvalidParameter { name: "p2", value: p2 });
+    }
+    Ok(2.0 * p1.sqrt().asin() - 2.0 * p2.sqrt().asin())
+}
+
+/// Compute Cohen's `f^2 = R^2 / (1 - R^2)` from coefficient of determination `R^2` in `[0, 1)`.
+pub fn cohens_f2_from_r_squared(r_squared: f64) -> Result<f64, StatsError> {
+    if !r_squared.is_finite() || !(0.0..1.0).contains(&r_squared) {
+        return Err(StatsError::InvalidParameter { name: "r_squared", value: r_squared });
+    }
+    Ok(r_squared / (1.0 - r_squared))
+}
+
+/// Compute Cohen's `f^2 = (beta1 * sigma_x / sigma_eps)^2` for simple linear regression.
+pub fn cohens_f2_from_slope(beta1: f64, sigma_x: f64, sigma_eps: f64) -> Result<f64, StatsError> {
+    if !beta1.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "beta1", value: beta1 });
+    }
+    if !sigma_x.is_finite() || sigma_x <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "sigma_x", value: sigma_x });
+    }
+    if !sigma_eps.is_finite() || sigma_eps <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "sigma_eps", value: sigma_eps });
+    }
+    let ratio = beta1 * sigma_x / sigma_eps;
+    Ok(ratio * ratio)
+}
+
+// ============================================================================
+// Internal Resolved Representation & Validation
+// ============================================================================
+
+#[derive(Debug, Clone)]
+enum ResolvedEffect {
+    UnpairedT { d: f64, raw_scale_sd: Option<f64> },
+    SingleT { d: f64, raw_scale_sd: Option<f64> },
+    Anova { k: usize, f: f64, within_sd: Option<f64> },
+    TwoProportions { p1: Option<f64>, p2: Option<f64>, h: f64 },
+    Correlation { r: f64 },
+    ChiSquare { df: f64, w: f64 },
+    LinearRegression { f2: f64, sign: f64, slope_scale: Option<f64> },
+}
+
+#[derive(Debug, Clone)]
+struct ResolvedContext {
+    family: PowerTestFamily,
+    solve_target: PowerSolveTarget,
+    tail_mode: TailMode,
+    alpha: f64,
+    target_power: Option<f64>,
+    allocation_ratio: f64,
+    two_proportions_mode: TwoProportionsMethod,
+    continuity_correction: bool,
+    correlation_method: CorrelationPowerMethod,
+    effect: ResolvedEffect,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PowerEval {
+    power: f64,
+    actual_df: Option<f64>,
+    numerator_df: Option<f64>,
+    noncentrality_param: f64,
+    critical_value: f64,
+}
+
+fn validate_prob_open(name: &'static str, v: f64) -> Result<f64, StatsError> {
+    if !v.is_finite() || v <= 0.0 || v >= 1.0 {
+        return Err(StatsError::InvalidParameter { name, value: v });
+    }
+    Ok(v)
+}
+
+fn validate_positive_finite(name: &'static str, v: f64) -> Result<f64, StatsError> {
+    if !v.is_finite() || v <= 0.0 {
+        return Err(StatsError::InvalidParameter { name, value: v });
+    }
+    Ok(v)
+}
+
+fn validate_tail_mode(family: PowerTestFamily, tail_mode: TailMode) -> Result<(), StatsError> {
+    if !family.supports_one_sided() && matches!(tail_mode, TailMode::OneSided(_)) {
+        return Err(StatsError::InvalidParameter { name: "tail_mode", value: 1.0 });
+    }
+    Ok(())
+}
+
+fn resolve_unpaired_t_effect(req: &PowerAnalysisRequest, k: f64) -> Result<ResolvedEffect, StatsError> {
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => Ok(ResolvedEffect::UnpairedT { d: 0.0, raw_scale_sd: None }),
+        PowerEffectSpec::Standardized(d) => {
+            if !d.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "cohens_d", value: *d });
+            }
+            Ok(ResolvedEffect::UnpairedT { d: *d, raw_scale_sd: None })
+        }
+        PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2, within_pair_correlation: None } => {
+            if !mean_diff.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "mean_diff", value: *mean_diff });
+            }
+            let sd1 = validate_positive_finite("sd", *sd)?;
+            let eff_sd = if let Some(sd2_raw) = sd_group2 {
+                let sd2 = validate_positive_finite("sd_group2", *sd2_raw)?;
+                ((k * sd1 * sd1 + sd2 * sd2) / (k + 1.0)).sqrt()
+            } else {
+                sd1
+            };
+            Ok(ResolvedEffect::UnpairedT { d: mean_diff / eff_sd, raw_scale_sd: Some(eff_sd) })
+        }
+        PowerEffectSpec::GroupMeansAndSd { means, within_sd } => {
+            if means.len() != 2 {
+                return Err(StatsError::DimensionMismatch { expected: 2, actual: means.len() });
+            }
+            let sd = validate_positive_finite("within_sd", *within_sd)?;
+            let d = cohens_d_from_means(means[0], means[1], sd)?;
+            Ok(ResolvedEffect::UnpairedT { d, raw_scale_sd: Some(sd) })
+        }
+        _ => Err(StatsError::IncompatibleAnalysisSpec { expected: "TwoSampleUnpairedT effect specification" }),
+    }
+}
+
+fn resolve_paired_t_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffect, StatsError> {
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => Ok(ResolvedEffect::SingleT { d: 0.0, raw_scale_sd: None }),
+        PowerEffectSpec::Standardized(dz) => {
+            if !dz.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "cohens_dz", value: *dz });
+            }
+            Ok(ResolvedEffect::SingleT { d: *dz, raw_scale_sd: None })
+        }
+        PowerEffectSpec::PairedDiff { mean_diff, sd_diff } => {
+            if !mean_diff.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "mean_diff", value: *mean_diff });
+            }
+            let sdd = validate_positive_finite("sd_diff", *sd_diff)?;
+            Ok(ResolvedEffect::SingleT { d: mean_diff / sdd, raw_scale_sd: Some(sdd) })
+        }
+        PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2, within_pair_correlation } => {
+            if !mean_diff.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "mean_diff", value: *mean_diff });
+            }
+            let sd1 = validate_positive_finite("sd", *sd)?;
+            let r = within_pair_correlation.unwrap_or(0.0);
+            if !r.is_finite() || !(-1.0..=1.0).contains(&r) {
+                return Err(StatsError::InvalidParameter { name: "within_pair_correlation", value: r });
+            }
+            let sdd = if let Some(sd2_raw) = sd_group2 {
+                let sd2 = validate_positive_finite("sd_group2", *sd2_raw)?;
+                (sd1 * sd1 + sd2 * sd2 - 2.0 * r * sd1 * sd2).max(0.0).sqrt()
+            } else {
+                sd1 * (2.0 * (1.0 - r)).max(0.0).sqrt()
+            };
+            if !sdd.is_finite() || sdd <= 0.0 {
+                return Err(StatsError::ZeroVariance { context: "paired difference SD" });
+            }
+            Ok(ResolvedEffect::SingleT { d: mean_diff / sdd, raw_scale_sd: Some(sdd) })
+        }
+        _ => Err(StatsError::IncompatibleAnalysisSpec { expected: "TwoSamplePairedT effect specification" }),
+    }
+}
+
+fn resolve_one_sample_t_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffect, StatsError> {
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => Ok(ResolvedEffect::SingleT { d: 0.0, raw_scale_sd: None }),
+        PowerEffectSpec::Standardized(d) => {
+            if !d.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "cohens_d", value: *d });
+            }
+            Ok(ResolvedEffect::SingleT { d: *d, raw_scale_sd: None })
+        }
+        PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2: None, within_pair_correlation: None } => {
+            if !mean_diff.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "mean_diff", value: *mean_diff });
+            }
+            let s = validate_positive_finite("sd", *sd)?;
+            Ok(ResolvedEffect::SingleT { d: mean_diff / s, raw_scale_sd: Some(s) })
+        }
+        PowerEffectSpec::GroupMeansAndSd { means, within_sd } => {
+            let s = validate_positive_finite("within_sd", *within_sd)?;
+            let diff = match means.as_slice() {
+                [mu] => *mu,
+                [mu, mu0] => *mu - *mu0,
+                other => return Err(StatsError::DimensionMismatch { expected: 2, actual: other.len() }),
+            };
+            if !diff.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "mean", value: diff });
+            }
+            Ok(ResolvedEffect::SingleT { d: diff / s, raw_scale_sd: Some(s) })
+        }
+        _ => Err(StatsError::IncompatibleAnalysisSpec { expected: "OneSampleT effect specification" }),
+    }
+}
+
+fn resolve_anova_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffect, StatsError> {
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => {
+            let k = req.num_groups.unwrap_or(0);
+            if k < 2 {
+                return Err(StatsError::InvalidParameter { name: "num_groups", value: k as f64 });
+            }
+            Ok(ResolvedEffect::Anova { k, f: 0.0, within_sd: None })
+        }
+        PowerEffectSpec::Standardized(f) => {
+            let k = req.num_groups.unwrap_or(0);
+            if k < 2 {
+                return Err(StatsError::InvalidParameter { name: "num_groups", value: k as f64 });
+            }
+            if !f.is_finite() || *f < 0.0 {
+                return Err(StatsError::InvalidParameter { name: "cohens_f", value: *f });
+            }
+            Ok(ResolvedEffect::Anova { k, f: *f, within_sd: None })
+        }
+        PowerEffectSpec::GroupMeansAndSd { means, within_sd } => {
+            if means.len() < 2 {
+                return Err(StatsError::InsufficientSampleSize { context: "one-way ANOVA groups", required: 2, actual: means.len() });
+            }
+            if let Some(k) = req.num_groups
+                && k != means.len()
+            {
+                return Err(StatsError::DimensionMismatch { expected: k, actual: means.len() });
+            }
+            let sd = validate_positive_finite("within_sd", *within_sd)?;
+            let f = cohens_f_from_means(means, sd)?;
+            Ok(ResolvedEffect::Anova { k: means.len(), f, within_sd: Some(sd) })
+        }
+        _ => Err(StatsError::IncompatibleAnalysisSpec { expected: "OneWayAnova effect specification" }),
+    }
+}
+
+fn resolve_two_proportions_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffect, StatsError> {
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => {
+            if req.two_proportions_mode != TwoProportionsMethod::CohensH {
+                return Err(StatsError::IncompatibleAnalysisSpec {
+                    expected: "TwoProportions DetectableEffect requires BaselineProportion { p1 } or CohensH mode",
+                });
+            }
+            Ok(ResolvedEffect::TwoProportions { p1: None, p2: None, h: 0.0 })
+        }
+        PowerEffectSpec::Standardized(h) => {
+            if !h.is_finite() {
+                return Err(StatsError::InvalidParameter { name: "cohens_h", value: *h });
+            }
+            Ok(ResolvedEffect::TwoProportions { p1: None, p2: None, h: *h })
+        }
+        PowerEffectSpec::BaselineProportion { p1 } => {
+            if !allow_unspecified {
+                return Err(StatsError::IncompatibleAnalysisSpec { expected: "BaselineProportion is valid only for DetectableEffect" });
+            }
+            if !p1.is_finite() || *p1 <= 0.0 || *p1 >= 1.0 {
+                return Err(StatsError::InvalidParameter { name: "p1", value: *p1 });
+            }
+            Ok(ResolvedEffect::TwoProportions { p1: Some(*p1), p2: None, h: 0.0 })
+        }
+        PowerEffectSpec::TwoProportions { p1, p2 } => {
+            let h = cohens_h(*p1, *p2)?;
+            if req.two_proportions_mode != TwoProportionsMethod::CohensH && !allow_unspecified {
+                let k = req.allocation_ratio;
+                let p_bar = (*p1 + k * *p2) / (1.0 + k);
+                let s0 = p_bar * (1.0 - p_bar);
+                let s1 = *p1 * (1.0 - *p1) + (*p2 * (1.0 - *p2)) / k;
+                if (req.two_proportions_mode == TwoProportionsMethod::PooledNullUnpooledAlt && s0 <= 0.0) || s1 <= 0.0 {
+                    return Err(StatsError::ZeroVariance { context: "two-proportions normal approximation" });
+                }
+            }
+            Ok(ResolvedEffect::TwoProportions { p1: Some(*p1), p2: Some(*p2), h })
+        }
+        _ => Err(StatsError::IncompatibleAnalysisSpec { expected: "TwoProportions effect specification" }),
+    }
+}
+
+fn resolve_correlation_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffect, StatsError> {
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => Ok(ResolvedEffect::Correlation { r: 0.0 }),
+        PowerEffectSpec::Standardized(r) => {
+            if !r.is_finite() || r.abs() >= 1.0 {
+                return Err(StatsError::InvalidParameter { name: "correlation_r", value: *r });
+            }
+            Ok(ResolvedEffect::Correlation { r: *r })
+        }
+        _ => Err(StatsError::IncompatibleAnalysisSpec { expected: "Correlation effect specification (Standardized(r))" }),
+    }
+}
+
+fn resolve_chi_square_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffect, StatsError> {
+    let df = validate_positive_finite("chi_square_df", req.chi_square_df)?;
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => Ok(ResolvedEffect::ChiSquare { df, w: 0.0 }),
+        PowerEffectSpec::Standardized(w) => {
+            if !w.is_finite() || *w < 0.0 {
+                return Err(StatsError::InvalidParameter { name: "cohens_w", value: *w });
+            }
+            Ok(ResolvedEffect::ChiSquare { df, w: *w })
+        }
+        _ => Err(StatsError::IncompatibleAnalysisSpec { expected: "ChiSquare effect specification (Standardized(w))" }),
+    }
+}
+
+fn resolve_regression_effect(req: &PowerAnalysisRequest) -> Result<ResolvedEffect, StatsError> {
+    let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
+    match &req.effect {
+        PowerEffectSpec::Unspecified if allow_unspecified => {
+            let sign = if matches!(req.tail_mode, TailMode::OneSided(OneSidedDirection::Less)) { -1.0 } else { 1.0 };
+            Ok(ResolvedEffect::LinearRegression { f2: 0.0, sign, slope_scale: None })
+        }
+        PowerEffectSpec::Standardized(f2) => {
+            if !f2.is_finite() || *f2 < 0.0 {
+                return Err(StatsError::InvalidParameter { name: "cohens_f2", value: *f2 });
+            }
+            if matches!(req.tail_mode, TailMode::OneSided(OneSidedDirection::Less)) && !allow_unspecified {
+                return Err(StatsError::InvalidParameter { name: "tail_mode", value: -1.0 });
+            }
+            let sign = if matches!(req.tail_mode, TailMode::OneSided(OneSidedDirection::Less)) { -1.0 } else { 1.0 };
+            Ok(ResolvedEffect::LinearRegression { f2: *f2, sign, slope_scale: None })
+        }
+        PowerEffectSpec::RSquared(r2) => {
+            let f2 = cohens_f2_from_r_squared(*r2)?;
+            if matches!(req.tail_mode, TailMode::OneSided(OneSidedDirection::Less)) && !allow_unspecified {
+                return Err(StatsError::InvalidParameter { name: "tail_mode", value: -1.0 });
+            }
+            let sign = if matches!(req.tail_mode, TailMode::OneSided(OneSidedDirection::Less)) { -1.0 } else { 1.0 };
+            Ok(ResolvedEffect::LinearRegression { f2, sign, slope_scale: None })
+        }
+        PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps } => {
+            let f2 = cohens_f2_from_slope(*beta1, *sigma_x, *sigma_eps)?;
+            let sign = if *beta1 < 0.0 { -1.0 } else { 1.0 };
+            let slope_scale = Some(*sigma_eps / *sigma_x);
+            Ok(ResolvedEffect::LinearRegression { f2, sign, slope_scale })
+        }
+        _ => Err(StatsError::IncompatibleAnalysisSpec { expected: "SimpleLinearRegression effect specification" }),
+    }
+}
+
+fn build_context(req: &PowerAnalysisRequest) -> Result<ResolvedContext, StatsError> {
+    let alpha = validate_prob_open("alpha", req.alpha)?;
+    validate_tail_mode(req.family, req.tail_mode)?;
+    let allocation_ratio = validate_positive_finite("allocation_ratio", req.allocation_ratio)?;
+    let target_power = match req.solve_target {
+        PowerSolveTarget::SampleSize | PowerSolveTarget::DetectableEffect => {
+            let tp = req.target_power.ok_or(StatsError::InvalidParameter { name: "target_power", value: f64::NAN })?;
+            Some(validate_prob_open("target_power", tp)?)
+        }
+        PowerSolveTarget::Power => req.target_power.map(|tp| validate_prob_open("target_power", tp)).transpose()?,
+    };
+
+    let effect = match req.family {
+        PowerTestFamily::TwoSampleUnpairedT => resolve_unpaired_t_effect(req, allocation_ratio)?,
+        PowerTestFamily::TwoSamplePairedT => resolve_paired_t_effect(req)?,
+        PowerTestFamily::OneSampleT => resolve_one_sample_t_effect(req)?,
+        PowerTestFamily::OneWayAnova => resolve_anova_effect(req)?,
+        PowerTestFamily::TwoProportions => resolve_two_proportions_effect(req)?,
+        PowerTestFamily::Correlation => resolve_correlation_effect(req)?,
+        PowerTestFamily::ChiSquare => resolve_chi_square_effect(req)?,
+        PowerTestFamily::SimpleLinearRegression => resolve_regression_effect(req)?,
+    };
+
+    Ok(ResolvedContext {
+        family: req.family,
+        solve_target: req.solve_target,
+        tail_mode: req.tail_mode,
+        alpha,
+        target_power,
+        allocation_ratio,
+        two_proportions_mode: req.two_proportions_mode,
+        continuity_correction: req.continuity_correction,
+        correlation_method: req.correlation_method,
+        effect,
+    })
+}
+
+// ============================================================================
+// Core Distribution & Power Evaluators
+// ============================================================================
+
+fn t_power(df: f64, delta: f64, alpha: f64, tail_mode: TailMode, numerator_df: Option<f64>) -> Result<PowerEval, StatsError> {
+    if !df.is_finite() || df <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "df", value: df });
+    }
+    let (t_crit, power) = match tail_mode {
+        TailMode::TwoSided => {
+            let tc = student_t_two_sided_isf(alpha, df)?;
+            let p = (nct_sf(tc, df, delta)? + nct_cdf(-tc, df, delta)?).clamp(0.0, 1.0);
+            (tc, p)
+        }
+        TailMode::OneSided(OneSidedDirection::Greater) => {
+            let tc = student_t_isf(alpha, df)?;
+            let p = nct_sf(tc, df, delta)?.clamp(0.0, 1.0);
+            (tc, p)
+        }
+        TailMode::OneSided(OneSidedDirection::Less) => {
+            let tc = student_t_isf(alpha, df)?;
+            let p = nct_cdf(-tc, df, delta)?.clamp(0.0, 1.0);
+            (-tc, p)
+        }
+    };
+    Ok(PowerEval { power, actual_df: Some(df), numerator_df, noncentrality_param: delta, critical_value: t_crit })
+}
+
+fn z_critical_value(alpha: f64, tail_mode: TailMode) -> Result<f64, StatsError> {
+    Ok(match tail_mode {
+        TailMode::TwoSided => norm_two_sided_isf(alpha)?,
+        TailMode::OneSided(_) => norm_isf(alpha)?,
+    })
+}
+
+fn two_proportions_h_power(n1: f64, n2: f64, h: f64, alpha: f64, tail_mode: TailMode) -> Result<PowerEval, StatsError> {
+    let n_eff = ((n1 * n2) / (n1 + n2)).sqrt();
+    let delta = h * n_eff;
+    let z_crit = z_critical_value(alpha, tail_mode)?;
+    let (crit_out, power) = match tail_mode {
+        TailMode::TwoSided => (z_crit, (norm_sf(z_crit - delta) + norm_cdf(-z_crit - delta)).clamp(0.0, 1.0)),
+        TailMode::OneSided(OneSidedDirection::Greater) => (z_crit, norm_sf(z_crit - delta).clamp(0.0, 1.0)),
+        TailMode::OneSided(OneSidedDirection::Less) => (-z_crit, norm_cdf(-z_crit - delta).clamp(0.0, 1.0)),
+    };
+    Ok(PowerEval { power, actual_df: None, numerator_df: None, noncentrality_param: delta, critical_value: crit_out })
+}
+
+fn two_proportions_p_power(ctx: &ResolvedContext, n1: f64, n2: f64, p1: f64, p2: f64) -> Result<PowerEval, StatsError> {
+    if ctx.two_proportions_mode == TwoProportionsMethod::CohensH {
+        let h = cohens_h(p1, p2)?;
+        return two_proportions_h_power(n1, n2, h, ctx.alpha, ctx.tail_mode);
+    }
+
+    let delta = p1 - p2;
+    let p_bar = (n1 * p1 + n2 * p2) / (n1 + n2);
+    let inv_n = 1.0 / n1 + 1.0 / n2;
+    let se1 = (p1 * (1.0 - p1) / n1 + p2 * (1.0 - p2) / n2).sqrt();
+    let se0 = match ctx.two_proportions_mode {
+        TwoProportionsMethod::PooledNullUnpooledAlt => (p_bar * (1.0 - p_bar) * inv_n).sqrt(),
+        TwoProportionsMethod::Unpooled => se1,
+        TwoProportionsMethod::CohensH => se1,
+    };
+    if !se0.is_finite() || se0 <= 0.0 || !se1.is_finite() || se1 <= 0.0 {
+        return Err(StatsError::ZeroVariance { context: "two-proportions standard error" });
+    }
+
+    let c = if ctx.continuity_correction { 0.5 * inv_n } else { 0.0 };
+    let z_crit = z_critical_value(ctx.alpha, ctx.tail_mode)?;
+    let (crit_out, power) = match ctx.tail_mode {
+        TailMode::TwoSided => {
+            let upper = norm_sf((z_crit * se0 + c - delta) / se1);
+            let lower = norm_sf((z_crit * se0 + c + delta) / se1);
+            (z_crit, (upper + lower).clamp(0.0, 1.0))
+        }
+        TailMode::OneSided(OneSidedDirection::Greater) => (z_crit, norm_sf((z_crit * se0 + c - delta) / se1).clamp(0.0, 1.0)),
+        TailMode::OneSided(OneSidedDirection::Less) => (-z_crit, norm_sf((z_crit * se0 + c + delta) / se1).clamp(0.0, 1.0)),
+    };
+    Ok(PowerEval { power, actual_df: None, numerator_df: None, noncentrality_param: delta / se0, critical_value: crit_out })
+}
+
+fn correlation_power(method: CorrelationPowerMethod, n: f64, r: f64, alpha: f64, tail_mode: TailMode) -> Result<PowerEval, StatsError> {
+    let df = n - 2.0;
+    match method {
+        CorrelationPowerMethod::FisherZ => {
+            if !n.is_finite() || n <= 3.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n });
+            }
+            let sqrt_n3 = (n - 3.0).sqrt();
+            let delta_z = r.atanh() * sqrt_n3;
+            let z_crit = z_critical_value(alpha, tail_mode)?;
+            let (crit_out, power) = match tail_mode {
+                TailMode::TwoSided => (z_crit, (norm_sf(z_crit - delta_z) + norm_cdf(-z_crit - delta_z)).clamp(0.0, 1.0)),
+                TailMode::OneSided(OneSidedDirection::Greater) => (z_crit, norm_sf(z_crit - delta_z).clamp(0.0, 1.0)),
+                TailMode::OneSided(OneSidedDirection::Less) => (-z_crit, norm_cdf(-z_crit - delta_z).clamp(0.0, 1.0)),
+            };
+            Ok(PowerEval { power, actual_df: Some(df), numerator_df: None, noncentrality_param: delta_z, critical_value: crit_out })
+        }
+        CorrelationPowerMethod::FisherZWithTCrit => {
+            if !n.is_finite() || n <= 3.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n });
+            }
+            let t_crit = match tail_mode {
+                TailMode::TwoSided => student_t_two_sided_isf(alpha, df)?,
+                TailMode::OneSided(_) => student_t_isf(alpha, df)?,
+            };
+            let rc = (t_crit * t_crit / (t_crit * t_crit + df)).sqrt();
+            let zrc = rc.atanh();
+            let zr = r.atanh() + r / (2.0 * (n - 1.0));
+            let sqrt_n3 = (n - 3.0).sqrt();
+            let (crit_out, power) = match tail_mode {
+                TailMode::TwoSided => {
+                    let p = norm_sf((zrc - zr) * sqrt_n3) + norm_cdf((-zrc - zr) * sqrt_n3);
+                    (t_crit, p.clamp(0.0, 1.0))
+                }
+                TailMode::OneSided(OneSidedDirection::Greater) => (t_crit, norm_sf((zrc - zr) * sqrt_n3).clamp(0.0, 1.0)),
+                TailMode::OneSided(OneSidedDirection::Less) => (-t_crit, norm_cdf((-zrc - zr) * sqrt_n3).clamp(0.0, 1.0)),
+            };
+            Ok(PowerEval { power, actual_df: Some(df), numerator_df: None, noncentrality_param: zr * sqrt_n3, critical_value: crit_out })
+        }
+        CorrelationPowerMethod::ExactTTransform => {
+            if !n.is_finite() || n <= 2.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n });
+            }
+            let delta = (r / (1.0 - r * r).sqrt()) * df.sqrt();
+            t_power(df, delta, alpha, tail_mode, None)
+        }
+    }
+}
+
+fn eval_power_at(ctx: &ResolvedContext, n1: f64, n2_explicit: Option<f64>) -> Result<PowerEval, StatsError> {
+    match &ctx.effect {
+        ResolvedEffect::UnpairedT { d, .. } => {
+            let n2 = n2_explicit.unwrap_or(ctx.allocation_ratio * n1);
+            let df = n1 + n2 - 2.0;
+            if n1 < 1.0 || n2 < 1.0 || df <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let delta = *d * ((n1 * n2) / (n1 + n2)).sqrt();
+            t_power(df, delta, ctx.alpha, ctx.tail_mode, None)
+        }
+        ResolvedEffect::SingleT { d, .. } => {
+            let df = n1 - 1.0;
+            if df <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let delta = *d * n1.sqrt();
+            t_power(df, delta, ctx.alpha, ctx.tail_mode, None)
+        }
+        ResolvedEffect::Anova { k, f, .. } => {
+            let df1 = (*k - 1) as f64;
+            let df2 = (*k as f64) * (n1 - 1.0);
+            if df2 <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let f_crit = f_isf(ctx.alpha, df1, df2)?;
+            let lambda = (*k as f64) * n1 * (*f) * (*f);
+            let power = ncf_sf(f_crit, df1, df2, lambda)?.clamp(0.0, 1.0);
+            Ok(PowerEval { power, actual_df: Some(df2), numerator_df: Some(df1), noncentrality_param: lambda, critical_value: f_crit })
+        }
+        ResolvedEffect::TwoProportions { p1: Some(p1), p2: Some(p2), .. } => {
+            let n2 = n2_explicit.unwrap_or(ctx.allocation_ratio * n1);
+            if n1 < 1.0 || n2 < 1.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            two_proportions_p_power(ctx, n1, n2, *p1, *p2)
+        }
+        ResolvedEffect::TwoProportions { h, .. } => {
+            let n2 = n2_explicit.unwrap_or(ctx.allocation_ratio * n1);
+            if n1 < 1.0 || n2 < 1.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            two_proportions_h_power(n1, n2, *h, ctx.alpha, ctx.tail_mode)
+        }
+        ResolvedEffect::Correlation { r } => correlation_power(ctx.correlation_method, n1, *r, ctx.alpha, ctx.tail_mode),
+        ResolvedEffect::ChiSquare { df, w } => {
+            if !n1.is_finite() || n1 <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let chi2_crit = chi2_isf(ctx.alpha, *df)?;
+            let lambda = n1 * (*w) * (*w);
+            let power = ncchi2_sf(chi2_crit, *df, lambda)?.clamp(0.0, 1.0);
+            Ok(PowerEval { power, actual_df: Some(*df), numerator_df: None, noncentrality_param: lambda, critical_value: chi2_crit })
+        }
+        ResolvedEffect::LinearRegression { f2, sign, .. } => {
+            let df = n1 - 2.0;
+            if df <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let delta = *sign * (n1 * (*f2)).sqrt();
+            t_power(df, delta, ctx.alpha, ctx.tail_mode, Some(1.0))
+        }
+    }
+}
+
+// ============================================================================
+// Root-Finding Solvers (SampleSize & DetectableEffect)
+// ============================================================================
+
+fn min_continuous_n(ctx: &ResolvedContext) -> f64 {
+    match ctx.family {
+        PowerTestFamily::TwoSampleUnpairedT => {
+            let k = ctx.allocation_ratio;
+            (2.25 / (1.0 + k)).max(1.0).max(1.0 / k)
+        }
+        PowerTestFamily::TwoSamplePairedT | PowerTestFamily::OneSampleT => 1.25,
+        PowerTestFamily::OneWayAnova => {
+            let k = match &ctx.effect {
+                ResolvedEffect::Anova { k, .. } => *k as f64,
+                _ => 2.0,
+            };
+            1.0 + 0.5 / k
+        }
+        PowerTestFamily::TwoProportions | PowerTestFamily::ChiSquare => 1.0,
+        PowerTestFamily::Correlation => match ctx.correlation_method {
+            CorrelationPowerMethod::ExactTTransform => 2.25,
+            CorrelationPowerMethod::FisherZ | CorrelationPowerMethod::FisherZWithTCrit => 3.005,
+        },
+        PowerTestFamily::SimpleLinearRegression => 2.25,
+    }
+}
+
+fn validate_directional_effect_for_sample_size(ctx: &ResolvedContext, target_power: f64) -> Result<(), StatsError> {
+    let signed = match &ctx.effect {
+        ResolvedEffect::UnpairedT { d, .. } | ResolvedEffect::SingleT { d, .. } => *d,
+        ResolvedEffect::Anova { f, .. } => *f,
+        ResolvedEffect::TwoProportions { p1: Some(p1), p2: Some(p2), .. } => *p1 - *p2,
+        ResolvedEffect::TwoProportions { p1: Some(_), p2: None, .. } => {
+            return Err(StatsError::InvalidParameter { name: "p2", value: f64::NAN });
+        }
+        ResolvedEffect::TwoProportions { h, .. } => *h,
+        ResolvedEffect::Correlation { r } => *r,
+        ResolvedEffect::ChiSquare { w, .. } => *w,
+        ResolvedEffect::LinearRegression { f2, sign, .. } => *sign * f2.sqrt(),
+    };
+
+    if signed == 0.0 {
+        return Err(StatsError::InvalidParameter { name: "effect_size", value: 0.0 });
+    }
+    if target_power > ctx.alpha {
+        match ctx.tail_mode {
+            TailMode::OneSided(OneSidedDirection::Greater) if signed < 0.0 => {
+                return Err(StatsError::InvalidParameter { name: "effect_size", value: signed });
+            }
+            TailMode::OneSided(OneSidedDirection::Less) if signed > 0.0 => {
+                return Err(StatsError::InvalidParameter { name: "effect_size", value: signed });
+            }
+            _ => {}
+        }
+    } else if matches!(ctx.tail_mode, TailMode::TwoSided) || !ctx.family.supports_one_sided() {
+        return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+    }
+    Ok(())
+}
+
+fn asymptotic_n_guess(ctx: &ResolvedContext, target_power: f64) -> f64 {
+    let z_alpha = z_critical_value(ctx.alpha, ctx.tail_mode).unwrap_or(1.96);
+    let z_beta = norm_ppf(target_power).unwrap_or(0.84);
+    let z_sum = (z_alpha + z_beta).abs().max(0.5);
+    let k = ctx.allocation_ratio;
+
+    match &ctx.effect {
+        ResolvedEffect::UnpairedT { d, .. } => ((z_sum / d.abs().max(1e-6)).powi(2) * (1.0 + k) / k).max(4.0),
+        ResolvedEffect::SingleT { d, .. } => ((z_sum / d.abs().max(1e-6)).powi(2) + 1.5).max(4.0),
+        ResolvedEffect::Anova { f, k: groups, .. } => {
+            let num = (z_sum + ((*groups - 1) as f64).sqrt()).powi(2);
+            (num / ((*groups as f64) * f.abs().max(1e-6).powi(2))).max(4.0)
+        }
+        ResolvedEffect::TwoProportions { p1: Some(p1), p2: Some(p2), .. } if ctx.two_proportions_mode != TwoProportionsMethod::CohensH => {
+            let delta = (p1 - p2).abs().max(1e-6);
+            let p_bar = (*p1 + k * *p2) / (1.0 + k);
+            let s0 = (p_bar * (1.0 - p_bar) * (1.0 + 1.0 / k)).sqrt();
+            let s1 = (*p1 * (1.0 - *p1) + *p2 * (1.0 - *p2) / k).sqrt();
+            ((z_alpha * s0 + z_beta * s1) / delta).powi(2).max(2.0)
+        }
+        ResolvedEffect::TwoProportions { p1: Some(_), p2: None, .. } => 10.0,
+        ResolvedEffect::TwoProportions { h, .. } => ((z_sum / h.abs().max(1e-6)).powi(2) * (1.0 + k) / k).max(2.0),
+        ResolvedEffect::Correlation { r } => ((z_sum / r.atanh().abs().max(1e-6)).powi(2) + 3.0).max(5.0),
+        ResolvedEffect::ChiSquare { w, df } => ((z_sum + df.sqrt()).powi(2) / w.abs().max(1e-6).powi(2)).max(2.0),
+        ResolvedEffect::LinearRegression { f2, .. } => ((z_sum * z_sum) / f2.abs().max(1e-8) + 2.0).max(4.0),
+    }
+}
+
+fn solve_continuous_n(ctx: &ResolvedContext) -> Result<f64, StatsError> {
+    let target_power = ctx.target_power.ok_or(StatsError::InvalidParameter { name: "target_power", value: f64::NAN })?;
+    validate_directional_effect_for_sample_size(ctx, target_power)?;
+
+    let n_min = min_continuous_n(ctx);
+    if ctx.family == PowerTestFamily::ChiSquare
+        && let ResolvedEffect::ChiSquare { df, w } = &ctx.effect
+    {
+        let chi2_crit = chi2_isf(ctx.alpha, *df)?;
+        let lambda = solve_chi2_lambda(chi2_crit, *df, target_power)?;
+        return Ok((lambda / (*w * *w)).max(n_min));
+    }
+
+    let guess = asymptotic_n_guess(ctx, target_power).max(n_min + 1.0);
+    let mut lo = (0.25 * guess).max(n_min);
+    let mut hi = (2.0 * guess).max(n_min + 4.0);
+
+    let eval = |n: f64| -> f64 { eval_power_at(ctx, n, None).map_or(f64::NAN, |e| e.power - target_power) };
+
+    let mut f_lo = eval(lo);
+    if !f_lo.is_finite() {
+        return Err(StatsError::NotConverged { algorithm: "solve_continuous_n" });
+    }
+    if f_lo > 0.0 {
+        lo = n_min;
+        f_lo = eval(lo);
+        if f_lo >= 0.0 {
+            return Ok(n_min);
+        }
+    }
+
+    let mut f_hi = eval(hi);
+    for _ in 0..48 {
+        if !f_hi.is_finite() {
+            return Err(StatsError::NotConverged { algorithm: "solve_continuous_n" });
+        }
+        if f_hi >= 0.0 {
+            return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
+        }
+        lo = hi;
+        hi *= 2.0;
+        if hi > MAX_CONTINUOUS_N {
+            return Err(StatsError::NotConverged { algorithm: "solve_continuous_n" });
+        }
+        f_hi = eval(hi);
+    }
+    Err(StatsError::NotConverged { algorithm: "solve_continuous_n" })
+}
+
+fn solve_chi2_lambda(chi2_crit: f64, df: f64, target_power: f64) -> Result<f64, StatsError> {
+    let eval = |lam: f64| -> f64 { ncchi2_sf(chi2_crit, df, lam).map_or(f64::NAN, |p| p - target_power) };
+    let mut lo = 0.0_f64;
+    let mut hi = (df + 8.0).max(4.0);
+    for _ in 0..48 {
+        if eval(hi) >= 0.0 {
+            return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
+        }
+        lo = hi;
+        hi *= 2.5;
+    }
+    Err(StatsError::NotConverged { algorithm: "solve_chi2_lambda" })
+}
+
+fn solve_t_delta(df: f64, alpha: f64, tail_mode: TailMode, target_power: f64) -> Result<f64, StatsError> {
+    let p_zero = t_power(df, 0.0, alpha, tail_mode, None)?.power;
+    if (p_zero - target_power).abs() <= 1e-13 && matches!(tail_mode, TailMode::OneSided(_)) {
+        return Ok(0.0);
+    }
+    if matches!(tail_mode, TailMode::TwoSided) && target_power <= p_zero {
+        return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+    }
+
+    let search_positive = match tail_mode {
+        TailMode::TwoSided | TailMode::OneSided(OneSidedDirection::Greater) => target_power >= p_zero,
+        TailMode::OneSided(OneSidedDirection::Less) => target_power < p_zero,
+    };
+
+    let eval = |delta: f64| -> f64 { t_power(df, delta, alpha, tail_mode, None).map_or(f64::NAN, |e| e.power - target_power) };
+    if search_positive {
+        let mut lo = 0.0_f64;
+        let mut hi = 2.0_f64;
+        for _ in 0..48 {
+            if eval(hi) >= 0.0 {
+                return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
+            }
+            lo = hi;
+            hi *= 2.0;
+        }
+    } else {
+        let mut hi = 0.0_f64;
+        let mut lo = -2.0_f64;
+        for _ in 0..48 {
+            if eval(lo) >= 0.0 {
+                return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
+            }
+            hi = lo;
+            lo *= 2.0;
+        }
+    }
+    Err(StatsError::NotConverged { algorithm: "solve_t_delta" })
+}
+
+fn solve_anova_f(k: usize, n_per_group: f64, alpha: f64, target_power: f64) -> Result<f64, StatsError> {
+    let df1 = (k - 1) as f64;
+    let df2 = (k as f64) * (n_per_group - 1.0);
+    if df2 <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "sample_size", value: n_per_group });
+    }
+    if target_power <= alpha {
+        return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+    }
+    let f_crit = f_isf(alpha, df1, df2)?;
+    let eval = |f: f64| -> f64 {
+        let lam = (k as f64) * n_per_group * f * f;
+        ncf_sf(f_crit, df1, df2, lam).map_or(f64::NAN, |p| p - target_power)
+    };
+    let mut lo = 0.0_f64;
+    let mut hi = 1.0_f64;
+    for _ in 0..48 {
+        if eval(hi) >= 0.0 {
+            return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
+        }
+        lo = hi;
+        hi *= 2.0;
+    }
+    Err(StatsError::NotConverged { algorithm: "solve_anova_f" })
+}
+
+fn solve_correlation_r(ctx: &ResolvedContext, n: f64, target_power: f64) -> Result<f64, StatsError> {
+    let p_zero = correlation_power(ctx.correlation_method, n, 0.0, ctx.alpha, ctx.tail_mode)?.power;
+    if matches!(ctx.tail_mode, TailMode::TwoSided) && target_power <= p_zero {
+        return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+    }
+    let search_positive = match ctx.tail_mode {
+        TailMode::TwoSided | TailMode::OneSided(OneSidedDirection::Greater) => target_power >= p_zero,
+        TailMode::OneSided(OneSidedDirection::Less) => target_power < p_zero,
+    };
+    let eval =
+        |r: f64| -> f64 { correlation_power(ctx.correlation_method, n, r, ctx.alpha, ctx.tail_mode).map_or(f64::NAN, |e| e.power - target_power) };
+    let max_r = 1.0 - 1e-12;
+    if search_positive {
+        if eval(max_r) < 0.0 {
+            return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+        }
+        Ok(brent_root(eval, 0.0, max_r, ROOT_TOL)?)
+    } else {
+        if eval(-max_r) < 0.0 {
+            return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+        }
+        Ok(brent_root(eval, -max_r, 0.0, ROOT_TOL)?)
+    }
+}
+
+fn solve_two_proportions_p2(
+    ctx: &ResolvedContext,
+    n1: f64,
+    n2: f64,
+    p1: f64,
+    hint_p2: Option<f64>,
+    target_power: f64,
+) -> Result<(f64, f64), StatsError> {
+    let eps = 1e-9;
+    let eval_p2 = |p2: f64| -> f64 { two_proportions_p_power(ctx, n1, n2, p1, p2).map_or(f64::NAN, |e| e.power - target_power) };
+
+    let solve_lower = || -> Option<f64> {
+        let f_lo = eval_p2(eps);
+        let f_hi = eval_p2(p1);
+        if f_lo.is_finite() && f_hi.is_finite() && f_lo >= 0.0 && f_hi <= 0.0 { brent_root(eval_p2, eps, p1, ROOT_TOL).ok() } else { None }
+    };
+    let solve_upper = || -> Option<f64> {
+        let f_lo = eval_p2(p1);
+        let f_hi = eval_p2(1.0 - eps);
+        if f_lo.is_finite() && f_hi.is_finite() && f_lo <= 0.0 && f_hi >= 0.0 { brent_root(eval_p2, p1, 1.0 - eps, ROOT_TOL).ok() } else { None }
+    };
+
+    let p2 = match ctx.tail_mode {
+        TailMode::OneSided(OneSidedDirection::Greater) => solve_lower(),
+        TailMode::OneSided(OneSidedDirection::Less) => solve_upper(),
+        TailMode::TwoSided => match hint_p2 {
+            Some(h2) if h2 < p1 => solve_lower().or_else(solve_upper),
+            Some(h2) if h2 > p1 => solve_upper().or_else(solve_lower),
+            _ if p1 <= 0.5 => solve_upper().or_else(solve_lower),
+            _ => solve_lower().or_else(solve_upper),
+        },
+    };
+    let p2_val = p2.ok_or(StatsError::InvalidParameter { name: "target_power", value: target_power })?;
+    Ok((p2_val, cohens_h(p1, p2_val)?))
+}
+
+fn solve_two_proportions_h(ctx: &ResolvedContext, n1: f64, n2: f64, target_power: f64) -> Result<f64, StatsError> {
+    let p_zero = two_proportions_h_power(n1, n2, 0.0, ctx.alpha, ctx.tail_mode)?.power;
+    if matches!(ctx.tail_mode, TailMode::TwoSided) && target_power <= p_zero {
+        return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+    }
+    let search_positive = match ctx.tail_mode {
+        TailMode::TwoSided | TailMode::OneSided(OneSidedDirection::Greater) => target_power >= p_zero,
+        TailMode::OneSided(OneSidedDirection::Less) => target_power < p_zero,
+    };
+    let eval = |h: f64| -> f64 { two_proportions_h_power(n1, n2, h, ctx.alpha, ctx.tail_mode).map_or(f64::NAN, |e| e.power - target_power) };
+    if search_positive {
+        let mut lo = 0.0_f64;
+        let mut hi = 2.0_f64;
+        for _ in 0..32 {
+            if eval(hi) >= 0.0 {
+                return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
+            }
+            lo = hi;
+            hi *= 2.0;
+        }
+    } else {
+        let mut hi = 0.0_f64;
+        let mut lo = -2.0_f64;
+        for _ in 0..32 {
+            if eval(lo) >= 0.0 {
+                return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
+            }
+            hi = lo;
+            lo *= 2.0;
+        }
+    }
+    Err(StatsError::NotConverged { algorithm: "solve_two_proportions_h" })
+}
+
+fn solve_detectable_effect(ctx: &mut ResolvedContext, n1: f64, n2_explicit: Option<f64>) -> Result<(), StatsError> {
+    let target_power = ctx.target_power.ok_or(StatsError::InvalidParameter { name: "target_power", value: f64::NAN })?;
+    let n2 = n2_explicit.unwrap_or(ctx.allocation_ratio * n1);
+
+    if let ResolvedEffect::TwoProportions { p1: Some(p1), p2: hint_p2, .. } = &ctx.effect {
+        if n1 < 1.0 || n2 < 1.0 {
+            return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+        }
+        let (solved_p2, solved_h) = solve_two_proportions_p2(ctx, n1, n2, *p1, *hint_p2, target_power)?;
+        if let ResolvedEffect::TwoProportions { p2, h, .. } = &mut ctx.effect {
+            *p2 = Some(solved_p2);
+            *h = solved_h;
+        }
+        return Ok(());
+    }
+    if matches!(&ctx.effect, ResolvedEffect::TwoProportions { p1: None, .. }) {
+        if n1 < 1.0 || n2 < 1.0 {
+            return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+        }
+        let solved_h = solve_two_proportions_h(ctx, n1, n2, target_power)?;
+        if let ResolvedEffect::TwoProportions { h, .. } = &mut ctx.effect {
+            *h = solved_h;
+        }
+        return Ok(());
+    }
+    if matches!(&ctx.effect, ResolvedEffect::Correlation { .. }) {
+        let solved_r = solve_correlation_r(ctx, n1, target_power)?;
+        if let ResolvedEffect::Correlation { r } = &mut ctx.effect {
+            *r = solved_r;
+        }
+        return Ok(());
+    }
+
+    match &mut ctx.effect {
+        ResolvedEffect::UnpairedT { d, .. } => {
+            let df = n1 + n2 - 2.0;
+            if n1 < 1.0 || n2 < 1.0 || df <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let delta = solve_t_delta(df, ctx.alpha, ctx.tail_mode, target_power)?;
+            *d = delta / ((n1 * n2) / (n1 + n2)).sqrt();
+        }
+        ResolvedEffect::SingleT { d, .. } => {
+            let df = n1 - 1.0;
+            if df <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let delta = solve_t_delta(df, ctx.alpha, ctx.tail_mode, target_power)?;
+            *d = delta / n1.sqrt();
+        }
+        ResolvedEffect::Anova { k, f, .. } => {
+            *f = solve_anova_f(*k, n1, ctx.alpha, target_power)?;
+        }
+        ResolvedEffect::TwoProportions { .. } | ResolvedEffect::Correlation { .. } => {}
+        ResolvedEffect::ChiSquare { df, w } => {
+            if !n1.is_finite() || n1 <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            if target_power <= ctx.alpha {
+                return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
+            }
+            let chi2_crit = chi2_isf(ctx.alpha, *df)?;
+            let lambda = solve_chi2_lambda(chi2_crit, *df, target_power)?;
+            *w = (lambda / n1).sqrt();
+        }
+        ResolvedEffect::LinearRegression { f2, sign, .. } => {
+            let df = n1 - 2.0;
+            if df <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+            }
+            let delta = solve_t_delta(df, ctx.alpha, ctx.tail_mode, target_power)?;
+            *f2 = (delta * delta) / n1;
+            *sign = if delta < 0.0 { -1.0 } else { 1.0 };
+        }
+    }
+    Ok(())
+}
+
+// ============================================================================
+// Integer Ceiling, Metadata Extraction & Public API
+// ============================================================================
+
+fn extract_input_n(req: &PowerAnalysisRequest, ctx: &ResolvedContext) -> Result<(f64, Option<f64>), StatsError> {
+    let n1 = req.sample_size.ok_or(StatsError::InvalidParameter { name: "sample_size", value: f64::NAN })?;
+    let n_min = min_continuous_n(ctx);
+    if !n1.is_finite() || n1 < n_min || n1 > MAX_CONTINUOUS_N {
+        return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
+    }
+    let n2 = match req.sample_size_group2 {
+        Some(v) => {
+            if !matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions) {
+                return Err(StatsError::IncompatibleAnalysisSpec { expected: "sample_size_group2 is only valid for two-sample designs" });
+            }
+            if !v.is_finite() || v < 1.0 || v > MAX_CONTINUOUS_N {
+                return Err(StatsError::InvalidParameter { name: "sample_size_group2", value: v });
+            }
+            Some(v)
+        }
+        None => None,
+    };
+    Ok((n1, n2))
+}
+
+fn ceiling_counts(ctx: &ResolvedContext, n1_cont: f64, n2_explicit: Option<f64>) -> (usize, Option<usize>, usize) {
+    let min_int = ctx.family.min_integer_n();
+    let n1_ceil = (n1_cont.ceil() as usize).max(min_int);
+    match ctx.family {
+        PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions => {
+            let n2_min = min_int;
+            let n2_ceil = match n2_explicit {
+                Some(n2v) => (n2v.ceil() as usize).max(n2_min),
+                None => (((n1_ceil as f64) * ctx.allocation_ratio).ceil() as usize).max(n2_min),
+            };
+            (n1_ceil, Some(n2_ceil), n1_ceil + n2_ceil)
+        }
+        PowerTestFamily::OneWayAnova => {
+            let k = match &ctx.effect {
+                ResolvedEffect::Anova { k, .. } => *k,
+                _ => 2,
+            };
+            (n1_ceil, None, k * n1_ceil)
+        }
+        _ => (n1_ceil, None, n1_ceil),
+    }
+}
+
+fn total_n_f64(ctx: &ResolvedContext, n1: f64) -> f64 {
+    match ctx.family {
+        PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions => n1 + ctx.allocation_ratio * n1,
+        PowerTestFamily::OneWayAnova => match &ctx.effect {
+            ResolvedEffect::Anova { k, .. } => (*k as f64) * n1,
+            _ => 2.0 * n1,
+        },
+        _ => n1,
+    }
+}
+
+struct DerivedEffectSummary {
+    canonical: f64,
+    raw: Option<f64>,
+    implied_p2: Option<f64>,
+    cohens_h: Option<f64>,
+    implied_r_squared: Option<f64>,
+}
+
+fn summarize_effect(effect: &ResolvedEffect) -> DerivedEffectSummary {
+    match effect {
+        ResolvedEffect::UnpairedT { d, raw_scale_sd } | ResolvedEffect::SingleT { d, raw_scale_sd } => {
+            DerivedEffectSummary { canonical: *d, raw: raw_scale_sd.map(|sd| d * sd), implied_p2: None, cohens_h: None, implied_r_squared: None }
+        }
+        ResolvedEffect::Anova { f, within_sd, .. } => {
+            DerivedEffectSummary { canonical: *f, raw: within_sd.map(|sd| f * sd), implied_p2: None, cohens_h: None, implied_r_squared: None }
+        }
+        ResolvedEffect::TwoProportions { p1, p2, h } => DerivedEffectSummary {
+            canonical: *h,
+            raw: match (p1, p2) {
+                (Some(a), Some(b)) => Some(a - b),
+                _ => None,
+            },
+            implied_p2: *p2,
+            cohens_h: Some(*h),
+            implied_r_squared: None,
+        },
+        ResolvedEffect::Correlation { r } => {
+            DerivedEffectSummary { canonical: *r, raw: Some(*r), implied_p2: None, cohens_h: None, implied_r_squared: Some(r * r) }
+        }
+        ResolvedEffect::ChiSquare { w, .. } => {
+            DerivedEffectSummary { canonical: *w, raw: None, implied_p2: None, cohens_h: None, implied_r_squared: None }
+        }
+        ResolvedEffect::LinearRegression { f2, sign, slope_scale } => DerivedEffectSummary {
+            canonical: *f2,
+            raw: slope_scale.map(|sc| *sign * f2.sqrt() * sc),
+            implied_p2: None,
+            cohens_h: None,
+            implied_r_squared: Some(*f2 / (1.0 + *f2)),
+        },
+    }
+}
+
+fn build_convention_notes(ctx: &ResolvedContext) -> Vec<String> {
+    let mut notes = Vec::new();
+    match ctx.family {
+        PowerTestFamily::TwoSampleUnpairedT => {
+            notes.push(format!("Unpaired Student t-test using exact noncentral-t distribution (n2/n1 = {:.3}).", ctx.allocation_ratio));
+        }
+        PowerTestFamily::TwoSamplePairedT => {
+            notes.push(String::from("Paired t-test using exact noncentral-t on paired differences (sigma_d = sigma * sqrt(2*(1 - r)))."));
+        }
+        PowerTestFamily::OneSampleT => {
+            notes.push(String::from("One-sample t-test using exact noncentral-t distribution (df = n - 1)."));
+        }
+        PowerTestFamily::OneWayAnova => {
+            notes.push(String::from("Balanced one-way ANOVA using exact noncentral-F distribution (lambda = k * n * f^2)."));
+        }
+        PowerTestFamily::TwoProportions => {
+            let mode_str = match ctx.two_proportions_mode {
+                TwoProportionsMethod::PooledNullUnpooledAlt => "pooled null SE / unpooled alternative SE",
+                TwoProportionsMethod::Unpooled => "unpooled Wald SE",
+                TwoProportionsMethod::CohensH => "arcsine Cohen's h approximation",
+            };
+            let cc = if ctx.continuity_correction { " with Yates/Fleiss continuity correction" } else { "" };
+            notes.push(format!("Two-proportions normal approximation ({mode_str}{cc})."));
+        }
+        PowerTestFamily::Correlation => {
+            let conv = match ctx.correlation_method {
+                CorrelationPowerMethod::FisherZ => "Fisher z-transformation (z = atanh(r), SE = 1/sqrt(n - 3)) vs H0: r0 = 0",
+                CorrelationPowerMethod::FisherZWithTCrit => "R pwr.r.test convention (exact t-transform r_c + bias-corrected Fisher z)",
+                CorrelationPowerMethod::ExactTTransform => "Conditional noncentral-t transform (df = n - 2)",
+            };
+            notes.push(format!("Pearson correlation power via {conv}."));
+        }
+        PowerTestFamily::ChiSquare => {
+            notes.push(String::from("Chi-square goodness-of-fit/contingency power via exact noncentral chi-square (lambda = N * w^2)."));
+        }
+        PowerTestFamily::SimpleLinearRegression => {
+            notes.push(String::from("Simple linear regression slope test (u = 1, df = n - 2, lambda = n * f^2)."));
+        }
+    }
+    notes
+}
+
+fn solve_power_core(req: &PowerAnalysisRequest) -> Result<PowerAnalysisResult, StatsError> {
+    let mut ctx = build_context(req)?;
+    let (continuous_n, n2_explicit, power_at_continuous_n) = match ctx.solve_target {
+        PowerSolveTarget::SampleSize => {
+            let n_cont = solve_continuous_n(&ctx)?;
+            let ev_cont = eval_power_at(&ctx, n_cont, None)?;
+            (n_cont, None, ev_cont.power)
+        }
+        PowerSolveTarget::Power => {
+            let (n1, n2) = extract_input_n(req, &ctx)?;
+            let ev_cont = eval_power_at(&ctx, n1, n2)?;
+            (n1, n2, ev_cont.power)
+        }
+        PowerSolveTarget::DetectableEffect => {
+            let (n1, n2) = extract_input_n(req, &ctx)?;
+            solve_detectable_effect(&mut ctx, n1, n2)?;
+            let ev_cont = eval_power_at(&ctx, n1, n2)?;
+            (n1, n2, ev_cont.power)
+        }
+    };
+
+    let (n_per_group, n_group2, total_n) = ceiling_counts(&ctx, continuous_n, n2_explicit);
+    let ceil_eval = eval_power_at(&ctx, n_per_group as f64, n_group2.map(|v| v as f64))?;
+    let eff = summarize_effect(&ctx.effect);
+
+    Ok(PowerAnalysisResult {
+        family: ctx.family,
+        solve_target: ctx.solve_target,
+        tail_mode: ctx.tail_mode,
+        alpha: ctx.alpha,
+        target_power: ctx.target_power,
+        continuous_n,
+        n_per_group,
+        n_group2,
+        total_n,
+        power_at_continuous_n,
+        achieved_power: ceil_eval.power,
+        effect_size: eff.canonical,
+        raw_effect_size: eff.raw,
+        implied_p2: eff.implied_p2,
+        cohens_h: eff.cohens_h,
+        implied_r_squared: eff.implied_r_squared,
+        actual_df: ceil_eval.actual_df,
+        numerator_df: ceil_eval.numerator_df,
+        noncentrality_param: ceil_eval.noncentrality_param,
+        critical_value: ceil_eval.critical_value,
+        power_curve: Vec::new(),
+        sensitivity_table: Vec::new(),
+        notes: build_convention_notes(&ctx),
+    })
+}
+
+/// Solve a power, sample-size, or minimum-detectable-effect request across any of the 8 test
+/// families, populating Stage 4 power curves and sensitivity tables.
+///
+/// # Errors
+/// Returns [`StatsError`] if `alpha`, `target_power`, `sample_size`, `tail_mode`, or effect-size
+/// parameters are invalid, incompatible, or cannot achieve the requested power.
+pub fn solve_power(req: &PowerAnalysisRequest) -> Result<PowerAnalysisResult, StatsError> {
+    let mut res = solve_power_core(req)?;
+
+    let mut curve_req = req.clone();
+    if req.solve_target == PowerSolveTarget::DetectableEffect {
+        curve_req.effect = resolved_effect_to_spec(&res);
+    }
+    let min_n = req.family.min_integer_n();
+    let center_n = res.n_per_group.max(min_n);
+    let max_n = center_n.saturating_mul(2).max(min_n + 20).min(1_000_000);
+    let min_curve_n = min_n.min(center_n);
+    let mut curve = compute_power_curve(&curve_req, min_curve_n, max_n, 41)?;
+    if !curve.iter().any(|pt| (pt.n - (center_n as f64)).abs() < 0.5) {
+        let mut ctx = build_context(&curve_req)?;
+        ctx.solve_target = PowerSolveTarget::Power;
+        if let Ok(ev) = eval_power_at(&ctx, center_n as f64, res.n_group2.map(|v| v as f64)) {
+            curve.push(PowerCurvePoint { n: center_n as f64, power: ev.power, effect_size: res.effect_size, total_n: res.total_n as f64 });
+            curve.sort_by(|a, b| a.n.total_cmp(&b.n));
+        }
+    }
+    res.power_curve = curve;
+
+    let can_build_sensitivity = match req.solve_target {
+        PowerSolveTarget::DetectableEffect => true,
+        _ => res.effect_size != 0.0,
+    };
+    if can_build_sensitivity {
+        let valid_alphas: Vec<f64> = DEFAULT_SENSITIVITY_ALPHAS.iter().copied().filter(|&a| a < 0.70).collect();
+        if let Ok(table) = compute_sensitivity_table(&curve_req, &valid_alphas, DEFAULT_SENSITIVITY_POWERS) {
+            res.sensitivity_table = table;
+        }
+    }
+
+    Ok(res)
+}
+
+fn resolved_effect_to_spec(res: &PowerAnalysisResult) -> PowerEffectSpec {
+    match res.family {
+        PowerTestFamily::TwoProportions => match res.implied_p2 {
+            Some(p2) => PowerEffectSpec::TwoProportions { p1: derive_p1_from_p2_and_h(p2, res.effect_size), p2 },
+            None => PowerEffectSpec::Standardized(res.effect_size),
+        },
+        _ => PowerEffectSpec::Standardized(res.effect_size),
+    }
+}
+
+fn derive_p1_from_p2_and_h(p2: f64, h: f64) -> f64 {
+    let angle = p2.sqrt().asin() + 0.5 * h;
+    let s = angle.clamp(0.0, std::f64::consts::FRAC_PI_2).sin();
+    (s * s).clamp(0.0, 1.0)
+}
+
+/// Evaluate the power-vs-sample-size curve across `[n_min, n_max]` using up to `num_points`
+/// deduplicated integer sample sizes.
+pub fn compute_power_curve(req: &PowerAnalysisRequest, n_min: usize, n_max: usize, num_points: usize) -> Result<Vec<PowerCurvePoint>, StatsError> {
+    let mut curve_req = req.clone();
+    curve_req.solve_target = PowerSolveTarget::Power;
+    let ctx = build_context(&curve_req)?;
+    let eff = summarize_effect(&ctx.effect);
+
+    let min_allowed = ctx.family.min_integer_n();
+    let lo = n_min.max(min_allowed);
+    if n_max < lo {
+        return Err(StatsError::InvalidParameter { name: "n_max", value: n_max as f64 });
+    }
+    if num_points == 0 {
+        return Ok(Vec::new());
+    }
+
+    let n_values = sample_integer_grid(lo, n_max, num_points);
+    let mut points = Vec::with_capacity(n_values.len());
+    for n in n_values {
+        let nf = n as f64;
+        let ev = eval_power_at(&ctx, nf, None)?;
+        let tot = if matches!(ctx.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions) {
+            (n + (((nf * ctx.allocation_ratio).ceil() as usize).max(min_allowed))) as f64
+        } else {
+            total_n_f64(&ctx, nf)
+        };
+        points.push(PowerCurvePoint { n: nf, power: ev.power, effect_size: eff.canonical, total_n: tot });
+    }
+    Ok(points)
+}
+
+fn sample_integer_grid(lo: usize, hi: usize, num_points: usize) -> Vec<usize> {
+    if lo >= hi || num_points <= 1 {
+        return vec![lo];
+    }
+    let span = hi - lo;
+    if span < num_points {
+        return (lo..=hi).collect();
+    }
+    let mut out = Vec::with_capacity(num_points);
+    let denom = (num_points - 1) as f64;
+    for i in 0..num_points {
+        let frac = (i as f64) / denom;
+        let val = lo + ((frac * (span as f64)).round() as usize);
+        if out.last().copied() != Some(val) {
+            out.push(val);
+        }
+    }
+    if out.last().copied() != Some(hi) {
+        out.push(hi);
+    }
+    out
+}
+
+/// Compute a Stage 4 sensitivity matrix across every `(alpha, target_power)` combination.
+///
+/// When `req.solve_target == PowerSolveTarget::DetectableEffect`, each cell reports the
+/// minimum detectable effect size at `req.sample_size`; otherwise each cell reports the required
+/// sample size (`sample_size`, `total_n`, `continuous_n`) at the configured effect size.
+pub fn compute_sensitivity_table(req: &PowerAnalysisRequest, alphas: &[f64], target_powers: &[f64]) -> Result<Vec<SensitivityCell>, StatsError> {
+    let mut out = Vec::with_capacity(alphas.len().saturating_mul(target_powers.len()));
+    let mode = if req.solve_target == PowerSolveTarget::DetectableEffect { PowerSolveTarget::DetectableEffect } else { PowerSolveTarget::SampleSize };
+
+    for &alpha in alphas {
+        let _ = validate_prob_open("alpha", alpha)?;
+        for &tp in target_powers {
+            let _ = validate_prob_open("target_power", tp)?;
+            let mut cell_req = req.clone();
+            cell_req.solve_target = mode;
+            cell_req.alpha = alpha;
+            cell_req.target_power = Some(tp);
+            let solved = solve_power_core(&cell_req)?;
+            out.push(SensitivityCell {
+                alpha,
+                target_power: tp,
+                sample_size: solved.n_per_group,
+                effect_size: solved.effect_size,
+                total_n: solved.total_n,
+                continuous_n: solved.continuous_n,
+            });
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CorrelationPowerMethod, OneSidedDirection, PowerAnalysisRequest, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, TailMode,
+        TwoProportionsMethod, cohens_d_from_means, cohens_dz_from_correlation, cohens_f_from_means, cohens_f2_from_r_squared, cohens_f2_from_slope,
+        cohens_h, compute_power_curve, compute_sensitivity_table, paired_sd_from_correlation, solve_power,
+    };
+
+    #[test]
+    fn effect_size_conversions_match_analytical_identities() {
+        assert!((cohens_d_from_means(12.0, 10.0, 4.0).unwrap() - 0.5).abs() < 1e-14);
+        let sd_d = paired_sd_from_correlation(4.0, 0.7).unwrap();
+        assert!((sd_d - 4.0 * (2.0 * 0.3_f64).sqrt()).abs() < 1e-14);
+        let dz = cohens_dz_from_correlation(2.0, 4.0, 0.7).unwrap();
+        assert!((dz - 2.0 / sd_d).abs() < 1e-14);
+
+        let f = cohens_f_from_means(&[10.0, 10.0, 12.0, 12.0], 4.0).unwrap();
+        assert!((f - 0.25).abs() < 1e-14);
+
+        let h = cohens_h(0.5, 0.3).unwrap();
+        assert!((h - (2.0 * 0.5_f64.sqrt().asin() - 2.0 * 0.3_f64.sqrt().asin())).abs() < 1e-14);
+
+        assert!((cohens_f2_from_r_squared(0.2).unwrap() - 0.25).abs() < 1e-14);
+        assert!((cohens_f2_from_slope(0.5, 2.0, 2.0).unwrap() - 0.25).abs() < 1e-14);
+    }
+
+    #[test]
+    fn family_catalog_and_invalid_inputs_handled_cleanly() {
+        assert_eq!(PowerTestFamily::ALL.len(), 8);
+        assert!(!PowerTestFamily::OneWayAnova.supports_one_sided());
+        assert!(!PowerTestFamily::ChiSquare.supports_one_sided());
+        assert!(PowerTestFamily::TwoSampleUnpairedT.supports_one_sided());
+
+        let bad_tail = PowerAnalysisRequest::one_way_anova(3, 0.25, 0.05, 0.80).with_tail(TailMode::ONE_SIDED_GREATER);
+        assert!(solve_power(&bad_tail).is_err());
+
+        let bad_alpha = PowerAnalysisRequest::unpaired_t(0.5, 1.2, 0.80);
+        assert!(solve_power(&bad_alpha).is_err());
+
+        let zero_eff = PowerAnalysisRequest::unpaired_t(0.0, 0.05, 0.80);
+        assert!(solve_power(&zero_eff).is_err());
+
+        let wrong_dir = PowerAnalysisRequest::unpaired_t(0.5, 0.05, 0.80).with_tail(TailMode::OneSided(OneSidedDirection::Less));
+        assert!(solve_power(&wrong_dir).is_err());
+
+        let zero_power = PowerAnalysisRequest::unpaired_t(0.0, 0.05, 0.80).with_target(PowerSolveTarget::Power).with_sample_size(25.0);
+        let res_null = solve_power(&zero_power).unwrap();
+        assert!((res_null.achieved_power - 0.05).abs() < 1e-12);
+    }
+
+    #[test]
+    fn power_curve_and_sensitivity_table_work_across_targets() {
+        let req = PowerAnalysisRequest::unpaired_t(0.5, 0.05, 0.80);
+        let res = solve_power(&req).unwrap();
+        assert!(!res.power_curve.is_empty());
+        assert_eq!(res.sensitivity_table.len(), 16);
+
+        let curve = compute_power_curve(&req, 5, 100, 20).unwrap();
+        assert_eq!(curve.first().unwrap().n, 5.0);
+        assert_eq!(curve.last().unwrap().n, 100.0);
+        for w in curve.windows(2) {
+            assert!(w[1].n > w[0].n);
+            assert!(w[1].power > w[0].power);
+        }
+
+        let mde_req = PowerAnalysisRequest::new(PowerTestFamily::TwoSampleUnpairedT)
+            .with_target(PowerSolveTarget::DetectableEffect)
+            .with_sample_size(64.0)
+            .with_alpha(0.05)
+            .with_target_power(0.80);
+        let table = compute_sensitivity_table(&mde_req, &[0.05, 0.01], &[0.80, 0.90]).unwrap();
+        assert_eq!(table.len(), 4);
+        assert!(table[0].effect_size < table[1].effect_size); // higher power needs larger detectable d
+        assert!(table[0].effect_size < table[2].effect_size); // stricter alpha needs larger detectable d
+
+        let p2_req = PowerAnalysisRequest::new(PowerTestFamily::TwoProportions)
+            .with_target(PowerSolveTarget::DetectableEffect)
+            .with_sample_size(100.0)
+            .with_effect(PowerEffectSpec::BaselineProportion { p1: 0.30 })
+            .with_two_proportions_mode(TwoProportionsMethod::PooledNullUnpooledAlt);
+        let p2_res = solve_power(&p2_req).unwrap();
+        assert!(p2_res.implied_p2.is_some());
+
+        let r_pwr = PowerAnalysisRequest::correlation(0.3, 0.05, 0.80).with_correlation_method(CorrelationPowerMethod::FisherZWithTCrit);
+        let r_res = solve_power(&r_pwr).unwrap();
+        assert_eq!(r_res.n_per_group, 85);
+    }
+}

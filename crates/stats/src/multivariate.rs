@@ -7,6 +7,7 @@
 use lumencraft_doc::{
     AnalysisSpec, ChecklistStatus, DataSheet, MultivariateSpec, ResultCell, ResultSheet, ResultTabKind, TableArchetype, VariableRole,
 };
+pub use lumencraft_doc::{ClusterDistance, ClusterLinkage};
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_p};
 use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, svd, sym_eigen};
@@ -591,12 +592,230 @@ pub fn kmeans_pp(rows: &[Vec<f64>], k: usize, seed: u64) -> Result<KMeansResult,
     Ok(KMeansResult { k, assignments, centroids, wcss, mean_silhouette })
 }
 
-fn compute_mean_silhouette(rows: &[Vec<f64>], assignments: &[usize], k: usize) -> f64 {
+/// Pairwise dissimilarity between two equal-length finite feature vectors under [`ClusterDistance`].
+pub fn pairwise_distance_value(a: &[f64], b: &[f64], metric: ClusterDistance) -> Result<f64, StatsError> {
+    if a.len() != b.len() {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: a.len(), actual: b.len() }));
+    }
+    if a.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    validate_finite_slice(a)?;
+    validate_finite_slice(b)?;
+    Ok(pairwise_distance_unchecked(a, b, metric))
+}
+
+#[inline]
+fn pairwise_distance_unchecked(a: &[f64], b: &[f64], metric: ClusterDistance) -> f64 {
+    match metric {
+        ClusterDistance::Euclidean => a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt(),
+        ClusterDistance::Manhattan => a.iter().zip(b.iter()).map(|(x, y)| (x - y).abs()).sum(),
+        ClusterDistance::Pearson => {
+            let d = a.len() as f64;
+            let ma = a.iter().sum::<f64>() / d;
+            let mb = b.iter().sum::<f64>() / d;
+            let mut sxx = 0.0_f64;
+            let mut syy = 0.0_f64;
+            let mut sxy = 0.0_f64;
+            for (x, y) in a.iter().zip(b.iter()) {
+                let dx = *x - ma;
+                let dy = *y - mb;
+                sxx += dx * dx;
+                syy += dy * dy;
+                sxy += dx * dy;
+            }
+            let denom = (sxx * syy).sqrt();
+            if denom <= 1e-15 {
+                if a == b { 0.0 } else { 1.0 }
+            } else {
+                let r = (sxy / denom).clamp(-1.0, 1.0);
+                (1.0 - r).clamp(0.0, 2.0)
+            }
+        }
+        ClusterDistance::Cosine => {
+            let mut na2 = 0.0_f64;
+            let mut nb2 = 0.0_f64;
+            let mut dot = 0.0_f64;
+            for (x, y) in a.iter().zip(b.iter()) {
+                na2 += x * x;
+                nb2 += y * y;
+                dot += x * y;
+            }
+            let denom = (na2 * nb2).sqrt();
+            if denom <= 1e-15 {
+                if a == b || (na2 <= 1e-30 && nb2 <= 1e-30) { 0.0 } else { 1.0 }
+            } else {
+                let cos = (dot / denom).clamp(-1.0, 1.0);
+                (1.0 - cos).clamp(0.0, 2.0)
+            }
+        }
+    }
+}
+
+/// Compute the symmetric `n x n` pairwise dissimilarity matrix for `rows` under `metric`.
+pub fn pairwise_distance_matrix(rows: &[Vec<f64>], metric: ClusterDistance) -> Result<Vec<Vec<f64>>, StatsError> {
     let n = rows.len();
-    if k < 2 || n <= k {
+    let d = rows.first().map_or(0, Vec::len);
+    if n < 2 || d == 0 {
+        return Err(StatsError::InsufficientSampleSize { context: "pairwise distance matrix", required: 2, actual: n });
+    }
+    for r in rows {
+        if r.len() != d {
+            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: d, actual: r.len() }));
+        }
+        validate_finite_slice(r)?;
+    }
+    let mut mat = vec![vec![0.0_f64; n]; n];
+    for i in 0..n {
+        for j in (i + 1)..n {
+            let val = pairwise_distance_unchecked(&rows[i], &rows[j], metric);
+            mat[i][j] = val;
+            mat[j][i] = val;
+        }
+    }
+    Ok(mat)
+}
+
+fn transform_row_for_centroid(row: &[f64], metric: ClusterDistance) -> Vec<f64> {
+    let d = row.len();
+    match metric {
+        ClusterDistance::Euclidean | ClusterDistance::Manhattan => row.to_vec(),
+        ClusterDistance::Cosine => {
+            let norm = row.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if norm > 1e-15 { row.iter().map(|x| x / norm).collect() } else { vec![0.0; d] }
+        }
+        ClusterDistance::Pearson => {
+            let mean = row.iter().sum::<f64>() / (d as f64);
+            let centered: Vec<f64> = row.iter().map(|x| x - mean).collect();
+            let norm = centered.iter().map(|x| x * x).sum::<f64>().sqrt();
+            if norm > 1e-15 { centered.into_iter().map(|x| x / norm).collect() } else { row.to_vec() }
+        }
+    }
+}
+
+/// *k*-means++ clustering parameterized by [`ClusterDistance`] (`Euclidean`, `Manhattan`, `Pearson`, or `Cosine`).
+pub fn kmeans_pp_with_distance(rows: &[Vec<f64>], k: usize, distance: ClusterDistance, seed: u64) -> Result<KMeansResult, StatsError> {
+    if distance == ClusterDistance::Euclidean {
+        return kmeans_pp(rows, k, seed);
+    }
+    let n = rows.len();
+    let d = rows.first().map_or(0, Vec::len);
+    if n < 2 || d == 0 || k == 0 || k > n {
+        return Err(StatsError::InvalidParameter { name: "k_means_k", value: k as f64 });
+    }
+    let dist_mat = pairwise_distance_matrix(rows, distance)?;
+    let sq_dist = |a: &[f64], b: &[f64]| -> f64 {
+        let v = pairwise_distance_unchecked(a, b, distance);
+        v * v
+    };
+
+    let mut rng = DeterministicRng::from_seed(seed);
+    let mut centroids = Vec::with_capacity(k);
+    centroids.push(rows[rng.gen_index(n).unwrap_or(0)].clone());
+
+    let mut min_d2 = vec![f64::INFINITY; n];
+    for _ in 1..k {
+        let last = centroids.last().map_or(&rows[0], |c| c);
+        let mut total_d2 = 0.0_f64;
+        for (i, r) in rows.iter().enumerate() {
+            let d2 = sq_dist(r, last);
+            if d2 < min_d2[i] {
+                min_d2[i] = d2;
+            }
+            total_d2 += min_d2[i];
+        }
+        let chosen = if total_d2 <= 0.0 {
+            rng.gen_index(n).unwrap_or(0)
+        } else {
+            let target = rng.next_open_f64() * total_d2;
+            let mut acc = 0.0_f64;
+            let mut pick = n - 1;
+            for (i, &w) in min_d2.iter().enumerate() {
+                acc += w;
+                if acc >= target {
+                    pick = i;
+                    break;
+                }
+            }
+            pick
+        };
+        centroids.push(rows[chosen].clone());
+    }
+
+    let mut assignments = vec![0_usize; n];
+    for _iter in 0..100 {
+        let mut changed = false;
+        for (i, r) in rows.iter().enumerate() {
+            let mut best_c = 0;
+            let mut best_d = f64::INFINITY;
+            for (c_idx, cent) in centroids.iter().enumerate() {
+                let dv = pairwise_distance_unchecked(r, cent, distance);
+                if dv < best_d {
+                    best_d = dv;
+                    best_c = c_idx;
+                }
+            }
+            if assignments[i] != best_c {
+                assignments[i] = best_c;
+                changed = true;
+            }
+        }
+        for (c_idx, cent) in centroids.iter_mut().enumerate() {
+            let members: Vec<&Vec<f64>> = rows.iter().zip(assignments.iter()).filter(|(_, a)| **a == c_idx).map(|(r, _)| r).collect();
+            if members.is_empty() {
+                continue;
+            }
+            match distance {
+                ClusterDistance::Manhattan => {
+                    for (j, slot) in cent.iter_mut().enumerate() {
+                        let mut col: Vec<f64> = members.iter().map(|r| r[j]).collect();
+                        col.sort_by(f64::total_cmp);
+                        *slot = quantile_sorted(&col, 0.5).unwrap_or(0.0);
+                    }
+                }
+                ClusterDistance::Cosine | ClusterDistance::Pearson | ClusterDistance::Euclidean => {
+                    let mut sum_vec = vec![0.0_f64; d];
+                    for r in &members {
+                        let t = transform_row_for_centroid(r, distance);
+                        for j in 0..d {
+                            sum_vec[j] += t[j];
+                        }
+                    }
+                    let count_f = members.len() as f64;
+                    for slot in &mut sum_vec {
+                        *slot /= count_f;
+                    }
+                    *cent = sum_vec;
+                }
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    let mut wcss = 0.0_f64;
+    for (r, &c_idx) in rows.iter().zip(assignments.iter()) {
+        wcss += sq_dist(r, &centroids[c_idx]);
+    }
+    let mean_silhouette = compute_mean_silhouette_from_dist(&dist_mat, &assignments, k);
+    Ok(KMeansResult { k, assignments, centroids, wcss, mean_silhouette })
+}
+
+fn compute_mean_silhouette(rows: &[Vec<f64>], assignments: &[usize], k: usize) -> f64 {
+    let Ok(dist_mat) = pairwise_distance_matrix(rows, ClusterDistance::Euclidean) else {
+        return 0.0;
+    };
+    compute_mean_silhouette_from_dist(&dist_mat, assignments, k)
+}
+
+/// Compute mean silhouette width in `[-1, 1]` directly from a precomputed `n x n` distance matrix.
+#[must_use]
+pub fn compute_mean_silhouette_from_dist(dist_mat: &[Vec<f64>], assignments: &[usize], k: usize) -> f64 {
+    let n = dist_mat.len();
+    if k < 2 || n <= k || assignments.len() != n {
         return 0.0;
     }
-    let dist = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt() };
     let mut sum_s = 0.0_f64;
     for i in 0..n {
         let ci = assignments[i];
@@ -608,12 +827,12 @@ fn compute_mean_silhouette(rows: &[Vec<f64>], assignments: &[usize], k: usize) -
             if i == j {
                 continue;
             }
-            let d = dist(&rows[i], &rows[j]);
+            let d = dist_mat[i][j];
             let cj = assignments[j];
             if cj == ci {
                 intra_sum += d;
                 intra_cnt += 1;
-            } else {
+            } else if cj < k {
                 cluster_sums[cj] += d;
                 cluster_cnts[cj] += 1;
             }
@@ -634,33 +853,35 @@ fn compute_mean_silhouette(rows: &[Vec<f64>], assignments: &[usize], k: usize) -
     sum_s / (n as f64)
 }
 
-/// Agglomerative hierarchical clustering supporting Single, Complete, Average (UPGMA), and Ward.D2
-/// linkage via Lance–Williams dissimilarity updates.
-pub fn hierarchical_clustering(rows: &[Vec<f64>], linkage: LinkageMethod) -> Result<Vec<DendrogramMerge>, StatsError> {
-    let n = rows.len();
-    let d = rows.first().map_or(0, Vec::len);
-    if n < 2 || d == 0 {
-        return Err(StatsError::InsufficientSampleSize { context: "hierarchical clustering", required: 2, actual: n });
+#[inline]
+const fn map_legacy_linkage(linkage: LinkageMethod) -> ClusterLinkage {
+    match linkage {
+        LinkageMethod::Single => ClusterLinkage::Single,
+        LinkageMethod::Complete => ClusterLinkage::Complete,
+        LinkageMethod::Average => ClusterLinkage::Upgma,
+        LinkageMethod::WardD2 => ClusterLinkage::Ward,
     }
-    for r in rows {
-        if r.len() != d {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: d, actual: r.len() }));
-        }
-        validate_finite_slice(r)?;
-    }
+}
 
+/// Agglomerative hierarchical clustering supporting Euclidean Single, Complete, Average (UPGMA),
+/// and Ward.D2 linkage via Lance–Williams dissimilarity updates.
+pub fn hierarchical_clustering(rows: &[Vec<f64>], linkage: LinkageMethod) -> Result<Vec<DendrogramMerge>, StatsError> {
+    hierarchical_clustering_with_metrics(rows, ClusterDistance::Euclidean, map_legacy_linkage(linkage))
+}
+
+/// Agglomerative hierarchical clustering across all [`ClusterDistance`] metrics (`Euclidean`,
+/// `Manhattan`, `Pearson`, `Cosine`) and all 7 [`ClusterLinkage`] criteria (`Ward`, `Complete`,
+/// `Single`, `Upgma`, `Wpgma`, `Centroid`, `Median`) via Lance–Williams updates.
+pub fn hierarchical_clustering_with_metrics(
+    rows: &[Vec<f64>],
+    distance: ClusterDistance,
+    linkage: ClusterLinkage,
+) -> Result<Vec<DendrogramMerge>, StatsError> {
+    let mut dist_mat = pairwise_distance_matrix(rows, distance)?;
+    let n = rows.len();
     let mut active = vec![true; n];
     let mut ids: Vec<isize> = (0..n).map(|i| -((i as isize) + 1)).collect();
     let mut sizes = vec![1_usize; n];
-    let mut dist_mat = vec![vec![0.0_f64; n]; n];
-
-    for i in 0..n {
-        for j in (i + 1)..n {
-            let dist = rows[i].iter().zip(rows[j].iter()).map(|(x, y)| (x - y).powi(2)).sum::<f64>().sqrt();
-            dist_mat[i][j] = dist;
-            dist_mat[j][i] = dist;
-        }
-    }
 
     let mut merges = Vec::with_capacity(n - 1);
     for step in 0..(n - 1) {
@@ -685,7 +906,7 @@ pub fn hierarchical_clustering(rows: &[Vec<f64>], linkage: LinkageMethod) -> Res
         let new_size = sizes[best_i] + sizes[best_j];
         merges.push(DendrogramMerge { left: ids[best_i], right: ids[best_j], distance: best_d, cluster_size: new_size });
 
-        // Lance-Williams update into slot `best_i`, deactivate `best_j`.
+        // Lance-Williams dissimilarity update into slot `best_i`, deactivate `best_j`.
         for k in 0..n {
             if !active[k] || k == best_i || k == best_j {
                 continue;
@@ -693,12 +914,22 @@ pub fn hierarchical_clustering(rows: &[Vec<f64>], linkage: LinkageMethod) -> Res
             let dik = dist_mat[best_i][k];
             let djk = dist_mat[best_j][k];
             let nk = sizes[k] as f64;
+            let nij = ni + nj;
             let updated = match linkage {
-                LinkageMethod::Single => dik.min(djk),
-                LinkageMethod::Complete => dik.max(djk),
-                LinkageMethod::Average => (ni * dik + nj * djk) / (ni + nj),
-                LinkageMethod::WardD2 => {
-                    let denom = ni + nj + nk;
+                ClusterLinkage::Single => dik.min(djk),
+                ClusterLinkage::Complete => dik.max(djk),
+                ClusterLinkage::Upgma => (ni * dik + nj * djk) / nij,
+                ClusterLinkage::Wpgma => 0.5 * (dik + djk),
+                ClusterLinkage::Centroid => {
+                    let sq = (ni * dik * dik + nj * djk * djk) / nij - (ni * nj * best_d * best_d) / (nij * nij);
+                    sq.max(0.0).sqrt()
+                }
+                ClusterLinkage::Median => {
+                    let sq = 0.5 * dik * dik + 0.5 * djk * djk - 0.25 * best_d * best_d;
+                    sq.max(0.0).sqrt()
+                }
+                ClusterLinkage::Ward => {
+                    let denom = nij + nk;
                     let sq = ((ni + nk) * dik * dik + (nj + nk) * djk * djk - nk * best_d * best_d) / denom;
                     sq.max(0.0).sqrt()
                 }
@@ -712,6 +943,106 @@ pub fn hierarchical_clustering(rows: &[Vec<f64>], linkage: LinkageMethod) -> Res
     }
 
     Ok(merges)
+}
+
+fn resolve_node_members(node_id: isize, leaf_n: usize, merged_members: &[Vec<usize>]) -> Result<&[usize], StatsError> {
+    if node_id < 0 {
+        let leaf = (-node_id - 1) as usize;
+        if leaf >= leaf_n {
+            return Err(StatsError::InvalidParameter { name: "dendrogram_node", value: node_id as f64 });
+        }
+        Ok(&merged_members[leaf])
+    } else {
+        let step_idx = node_id as usize;
+        merged_members
+            .get(leaf_n + step_idx)
+            .map(Vec::as_slice)
+            .ok_or(StatsError::InvalidParameter { name: "dendrogram_merge_step", value: node_id as f64 })
+    }
+}
+
+/// Compute the symmetric `n x n` cophenetic distance matrix from a dendrogram merge schedule.
+pub fn cophenetic_distance_matrix(n: usize, merges: &[DendrogramMerge]) -> Result<Vec<Vec<f64>>, StatsError> {
+    if n < 2 || merges.len() != n - 1 {
+        return Err(StatsError::DimensionMismatch { expected: n.saturating_sub(1), actual: merges.len() });
+    }
+    let mut coph = vec![vec![0.0_f64; n]; n];
+    let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    members.reserve(merges.len());
+    for merge in merges {
+        let left_m = resolve_node_members(merge.left, n, &members)?.to_vec();
+        let right_m = resolve_node_members(merge.right, n, &members)?.to_vec();
+        for &u in &left_m {
+            for &v in &right_m {
+                coph[u][v] = merge.distance;
+                coph[v][u] = merge.distance;
+            }
+        }
+        let mut union_m = left_m;
+        union_m.extend(right_m);
+        members.push(union_m);
+    }
+    Ok(coph)
+}
+
+/// Compute the cophenetic correlation coefficient (`Pearson r` over upper-triangular pairs `i < j`)
+/// comparing original pairwise dissimilarities `dist_mat` against cophenetic heights `coph_mat`.
+#[must_use]
+pub fn cophenetic_correlation(dist_mat: &[Vec<f64>], coph_mat: &[Vec<f64>]) -> Option<f64> {
+    let n = dist_mat.len();
+    if n < 3 || coph_mat.len() != n {
+        return None;
+    }
+    let m = n * (n - 1) / 2;
+    let mut orig = Vec::with_capacity(m);
+    let mut coph = Vec::with_capacity(m);
+    for i in 0..n {
+        if dist_mat[i].len() != n || coph_mat[i].len() != n {
+            return None;
+        }
+        for j in (i + 1)..n {
+            orig.push(dist_mat[i][j]);
+            coph.push(coph_mat[i][j]);
+        }
+    }
+    pearson_r(&orig, &coph).ok()
+}
+
+/// Cut an `n`-leaf hierarchical merge schedule into `k` disjoint flat clusters (`1 <= k <= n`).
+pub fn cut_dendrogram(n: usize, merges: &[DendrogramMerge], k: usize) -> Result<Vec<usize>, StatsError> {
+    if n < 2 || merges.len() != n - 1 {
+        return Err(StatsError::DimensionMismatch { expected: n.saturating_sub(1), actual: merges.len() });
+    }
+    if k == 0 || k > n {
+        return Err(StatsError::InvalidParameter { name: "cut_k", value: k as f64 });
+    }
+    let mut node_members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
+    let mut active_roots: Vec<bool> = vec![true; n + merges.len()];
+    let n_merges = n - k;
+    for (step, merge) in merges.iter().take(n_merges).enumerate() {
+        let left_slot = if merge.left < 0 { (-merge.left - 1) as usize } else { n + (merge.left as usize) };
+        let right_slot = if merge.right < 0 { (-merge.right - 1) as usize } else { n + (merge.right as usize) };
+        if left_slot >= node_members.len() || right_slot >= node_members.len() {
+            return Err(StatsError::InvalidParameter { name: "dendrogram_merge_ref", value: step as f64 });
+        }
+        let mut combined = node_members[left_slot].clone();
+        combined.extend_from_slice(&node_members[right_slot]);
+        active_roots[left_slot] = false;
+        active_roots[right_slot] = false;
+        node_members.push(combined);
+    }
+
+    let mut assignments = vec![0_usize; n];
+    let mut cluster_id = 0_usize;
+    for (slot, members) in node_members.iter().enumerate() {
+        if active_roots.get(slot).copied().unwrap_or(false) {
+            for &leaf in members {
+                assignments[leaf] = cluster_id;
+            }
+            cluster_id += 1;
+        }
+    }
+    Ok(assignments)
 }
 
 // ============================================================================
@@ -823,47 +1154,113 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 "Horn's parallel analysis compares empirical eigenvalues to 95th-percentile eigenvalues of uncorrelated Gaussian matrices.",
             ));
         }
-        MultivariateSpec::Clustering { k_means_k } => {
-            let (labels, rows) = extract_complete_matrix_rows(sheet, &spec.selected_data_sets)?;
+        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
+            if let Some(k_max_req) = k_sweep_max
+                && *k_max_req < 2
+            {
+                return Err(StatsError::InvalidParameter { name: "k_sweep_max", value: *k_max_req as f64 });
+            }
+            let (var_labels, obs_labels, rows) = extract_complete_matrix_rows_with_names(sheet, &spec.selected_data_sets)?;
             let n = rows.len();
-            let k_chosen = match k_means_k {
-                Some(k) => *k,
-                None => {
-                    let max_k = 6.min(n - 1).max(2);
-                    let mut best_k = 2;
-                    let mut best_sil = f64::NEG_INFINITY;
-                    for k_try in 2..=max_k {
-                        if let Ok(km) = kmeans_pp(&rows, k_try, 0xC105_7E57)
-                            && km.mean_silhouette > best_sil
-                        {
-                            best_sil = km.mean_silhouette;
-                            best_k = k_try;
-                        }
-                    }
-                    best_k
-                }
+            let p = var_labels.len();
+            let dist_metric = *distance;
+            let link_rule = *linkage;
+
+            let dist_mat = pairwise_distance_matrix(&rows, dist_metric)?;
+            let merges = hierarchical_clustering_with_metrics(&rows, dist_metric, link_rule)?;
+            let coph_mat = cophenetic_distance_matrix(n, &merges)?;
+            let cophenetic_r = cophenetic_correlation(&dist_mat, &coph_mat);
+
+            let k_max = match k_sweep_max {
+                Some(req) => (*req).min(n).max(2.min(n)),
+                None => 6.min(n.saturating_sub(1)).max(2).min(n),
             };
-            let km = kmeans_pp(&rows, k_chosen, 0xC105_7E57)?;
-            let merges = hierarchical_clustering(&rows, LinkageMethod::WardD2)?;
+            let mut sweep_results: Vec<KMeansResult> = Vec::new();
+            for k_try in 2..=k_max {
+                if let Ok(res) = kmeans_pp_with_distance(&rows, k_try, dist_metric, 0xC105_7E57) {
+                    sweep_results.push(res);
+                }
+            }
+
+            let km = if let Some(k) = k_means_k {
+                if let Some(found) = sweep_results.iter().find(|r| r.k == *k) {
+                    found.clone()
+                } else {
+                    kmeans_pp_with_distance(&rows, *k, dist_metric, 0xC105_7E57)?
+                }
+            } else if let Some(best) = sweep_results
+                .iter()
+                .filter(|r| n < 3 || r.k < n)
+                .max_by(|a, b| a.mean_silhouette.total_cmp(&b.mean_silhouette))
+                .or_else(|| sweep_results.first())
+            {
+                best.clone()
+            } else {
+                kmeans_pp_with_distance(&rows, 2.min(n), dist_metric, 0xC105_7E57)?
+            };
 
             push_scalar(&mut out, "Clusters (k)", None, km.k as f64);
             push_scalar(&mut out, "Total WCSS", None, km.wcss);
             push_scalar(&mut out, "Mean silhouette", None, km.mean_silhouette);
-
-            let mut c_headers = vec![String::from("Cluster"), String::from("Size")];
-            c_headers.extend(labels.iter().map(|l| format!("Centroid ({l})")));
-            let mut c_labels = Vec::with_capacity(km.k);
-            let mut c_rows = Vec::with_capacity(km.k);
-            for (c_idx, cent) in km.centroids.iter().enumerate() {
-                c_labels.push(format!("Cluster {}", c_idx + 1));
-                let cnt = km.assignments.iter().filter(|&&a| a == c_idx).count();
-                let mut r = vec![num_cell((c_idx + 1) as f64), num_cell(cnt as f64)];
-                r.extend(cent.iter().map(|&v| num_cell(v)));
-                c_rows.push(r);
+            if let Some(r_coph) = cophenetic_r {
+                push_scalar(&mut out, "cophenetic_r", None, r_coph);
             }
-            out.tabs.push(build_tab("kmeans-clusters", "k-means++ cluster centroids", ResultTabKind::MainSummary, c_headers, c_labels, c_rows));
 
-            let d_headers = vec![String::from("Left"), String::from("Right"), String::from("Ward.D2 distance"), String::from("Cluster size")];
+            let dist_label = cluster_distance_label(dist_metric);
+            let link_label = cluster_linkage_label(link_rule);
+
+            if k_means_k.is_some() || k_sweep_max.is_some() || !sweep_results.is_empty() {
+                let mut c_headers = vec![String::from("Cluster"), String::from("Size")];
+                c_headers.extend(var_labels.iter().map(|l| format!("Centroid ({l})")));
+                let mut c_labels = Vec::with_capacity(km.k);
+                let mut c_rows = Vec::with_capacity(km.k);
+                for (c_idx, cent) in km.centroids.iter().enumerate() {
+                    c_labels.push(format!("Cluster {}", c_idx + 1));
+                    let cnt = km.assignments.iter().filter(|&&a| a == c_idx).count();
+                    let mut r = vec![num_cell((c_idx + 1) as f64), num_cell(cnt as f64)];
+                    r.extend(cent.iter().map(|&v| num_cell(v)));
+                    c_rows.push(r);
+                }
+                out.tabs.push(build_tab(
+                    "kmeans-clusters",
+                    format!("k-means++ cluster centroids ({dist_label})"),
+                    ResultTabKind::MainSummary,
+                    c_headers,
+                    c_labels,
+                    c_rows,
+                ));
+
+                let mut assign_rows = Vec::with_capacity(n);
+                for (i, row_vec) in rows.iter().enumerate() {
+                    let c_idx = km.assignments[i];
+                    let dist_c = pairwise_distance_unchecked(row_vec, &km.centroids[c_idx], dist_metric);
+                    assign_rows.push(vec![num_cell((c_idx + 1) as f64), num_cell(dist_c)]);
+                }
+                out.tabs.push(build_tab(
+                    "kmeans-assignments",
+                    "k-means++ observation cluster assignments",
+                    ResultTabKind::ParametersAndConfidenceIntervals,
+                    vec![String::from("Assigned cluster"), format!("Distance to centroid ({dist_label})")],
+                    obs_labels.clone(),
+                    assign_rows,
+                ));
+
+                if !sweep_results.is_empty() {
+                    let s_labels: Vec<String> = sweep_results.iter().map(|r| format!("k = {}", r.k)).collect();
+                    let s_rows: Vec<Vec<ResultCell>> =
+                        sweep_results.iter().map(|r| vec![num_cell(r.k as f64), num_cell(r.wcss), num_cell(r.mean_silhouette)]).collect();
+                    out.tabs.push(build_tab(
+                        "kmeans-sweep-curve",
+                        "Candidate-k elbow (WCSS) & silhouette curve",
+                        ResultTabKind::ModelComparison,
+                        vec![String::from("Clusters (k)"), String::from("WCSS"), String::from("Mean silhouette")],
+                        s_labels,
+                        s_rows,
+                    ));
+                }
+            }
+
+            let d_headers = vec![String::from("Left"), String::from("Right"), format!("{link_label} distance"), String::from("Cluster size")];
             let d_labels: Vec<String> = (1..=merges.len()).map(|s| format!("Merge {s}")).collect();
             let d_rows: Vec<Vec<ResultCell>> = merges
                 .iter()
@@ -871,18 +1268,100 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 .collect();
             out.tabs.push(build_tab(
                 "hierarchical-dendrogram",
-                "Ward.D2 dendrogram linkage",
+                format!("{link_label} dendrogram linkage ({dist_label})"),
                 ResultTabKind::ModelComparison,
                 d_headers,
                 d_labels,
                 d_rows,
             ));
 
+            let max_hier_k = n.saturating_sub(1).min(8);
+            if max_hier_k >= 2 {
+                let mut h_labels = Vec::with_capacity(max_hier_k - 1);
+                let mut h_rows = Vec::with_capacity(max_hier_k - 1);
+                for k_cut in 2..=max_hier_k {
+                    let assigns = cut_dendrogram(n, &merges, k_cut)?;
+                    let sil = compute_mean_silhouette_from_dist(&dist_mat, &assigns, k_cut);
+                    let mut counts = vec![0_usize; k_cut];
+                    for &c in &assigns {
+                        counts[c] += 1;
+                    }
+                    let min_sz = counts.iter().copied().min().unwrap_or(0);
+                    let max_sz = counts.iter().copied().max().unwrap_or(0);
+                    let cut_height = merges.get(n - k_cut).map_or(0.0, |m| m.distance);
+                    h_labels.push(format!("k = {k_cut}"));
+                    h_rows.push(vec![num_cell(k_cut as f64), num_cell(cut_height), num_cell(sil), num_cell(min_sz as f64), num_cell(max_sz as f64)]);
+                }
+                out.tabs.push(build_tab(
+                    "hierarchical-cut-silhouettes",
+                    format!("Hierarchical cut silhouette widths ({link_label}, {dist_label})"),
+                    ResultTabKind::Diagnostics,
+                    vec![
+                        String::from("Clusters (k)"),
+                        String::from("Cut height"),
+                        String::from("Mean silhouette"),
+                        String::from("Min cluster size"),
+                        String::from("Max cluster size"),
+                    ],
+                    h_labels,
+                    h_rows,
+                ));
+            }
+
+            let dist_rows: Vec<Vec<ResultCell>> = dist_mat.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+            out.tabs.push(build_tab(
+                "clustering-distance-matrix",
+                format!("Pairwise dissimilarity matrix ({dist_label})"),
+                ResultTabKind::CovarianceMatrix,
+                obs_labels.clone(),
+                obs_labels.clone(),
+                dist_rows,
+            ));
+
+            let coph_rows: Vec<Vec<ResultCell>> = coph_mat.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+            out.tabs.push(build_tab(
+                "cophenetic-distance-matrix",
+                format!("Cophenetic distance matrix ({link_label})"),
+                ResultTabKind::CovarianceMatrix,
+                obs_labels.clone(),
+                obs_labels,
+                coph_rows,
+            ));
+
+            out.tabs.push(build_tab(
+                "clustering-diagnostics",
+                "Clustering configuration & cophenetic diagnostics",
+                ResultTabKind::Diagnostics,
+                vec![String::from("Value")],
+                vec![
+                    String::from("Cophenetic correlation (r)"),
+                    String::from("Distance metric"),
+                    String::from("Linkage rule"),
+                    String::from("Complete observations (n)"),
+                    String::from("Variables (p)"),
+                ],
+                vec![
+                    vec![opt_num_cell(cophenetic_r)],
+                    vec![ResultCell::Text(dist_label.to_owned())],
+                    vec![ResultCell::Text(link_label.to_owned())],
+                    vec![num_cell(n as f64)],
+                    vec![num_cell(p as f64)],
+                ],
+            ));
+
             out.checklist.push(checklist_item(
-                "Cluster separation quality (Silhouette)",
+                "Cluster separation quality & cophenetic fit",
                 if km.mean_silhouette >= 0.25 { ChecklistStatus::Pass } else { ChecklistStatus::Info },
-                Some(format!("k = {}, silhouette = {:.3}, WCSS = {:.2}", km.k, km.mean_silhouette, km.wcss)),
-                "Mean silhouette near +1 indicates tight, well-separated clusters; Ward.D2 dendrogram captures nested agglomerative hierarchy.",
+                Some(format!(
+                    "k = {}, silhouette = {:.3}, WCSS = {:.2}, cophenetic r = {}",
+                    km.k,
+                    km.mean_silhouette,
+                    km.wcss,
+                    cophenetic_r.map_or_else(|| String::from("n/a"), |r| format!("{r:.3}"))
+                )),
+                format!(
+                    "Mean silhouette near +1 indicates tight, well-separated clusters under {dist_label} dissimilarity; {link_label} dendrogram cophenetic r measures ultrametric tree fidelity."
+                ),
             ));
         }
         MultivariateSpec::MultipleImputation { imputations_m, max_iters, seed, response_column, predictor_columns } => {
@@ -1709,8 +2188,31 @@ fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResul
         "Multiple imputation pooling & FMI",
         adequacy_status,
         Some(format!("m = {}, {} missing cell(s), max FMI = {:.3}", res.m, res.total_missing, max_fmi)),
-        "Chained equations use Type-1 predictive mean matching with posterior parameter draws and Barnard–Rubin small-sample df; higher FMI warrants larger m.",
+        "Chained equations use Type-1 predictive mean matching with posterior parameter draws and Barnard–Rubin small-sample df; higher FMI indicates greater between-imputation missingness uncertainty.",
     ));
+}
+
+#[inline]
+const fn cluster_distance_label(distance: ClusterDistance) -> &'static str {
+    match distance {
+        ClusterDistance::Euclidean => "Euclidean",
+        ClusterDistance::Manhattan => "Manhattan",
+        ClusterDistance::Pearson => "Pearson (1 - r)",
+        ClusterDistance::Cosine => "Cosine (1 - cos)",
+    }
+}
+
+#[inline]
+const fn cluster_linkage_label(linkage: ClusterLinkage) -> &'static str {
+    match linkage {
+        ClusterLinkage::Ward => "Ward.D2",
+        ClusterLinkage::Complete => "Complete",
+        ClusterLinkage::Single => "Single",
+        ClusterLinkage::Upgma => "UPGMA",
+        ClusterLinkage::Wpgma => "WPGMA",
+        ClusterLinkage::Centroid => "Centroid",
+        ClusterLinkage::Median => "Median",
+    }
 }
 
 type OptionalColumnsPair = (Vec<String>, Vec<Vec<Option<f64>>>);
@@ -1752,12 +2254,21 @@ fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Opt
     }
 }
 
-fn extract_complete_matrix_rows(sheet: &DataSheet, selected: &[usize]) -> Result<(Vec<String>, Vec<Vec<f64>>), StatsError> {
+type CompleteMatrixWithNames = (Vec<String>, Vec<String>, Vec<Vec<f64>>);
+
+fn extract_complete_matrix_rows_with_names(sheet: &DataSheet, selected: &[usize]) -> Result<CompleteMatrixWithNames, StatsError> {
     let (labels, opt_cols) = extract_optional_columns(sheet, selected)?;
     if labels.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "multivariate variables", required: 2, actual: labels.len() });
     }
+    let sheet_row_titles: Option<&[String]> = match &sheet.archetype {
+        TableArchetype::MultipleVariables(mv) => Some(&mv.row_titles),
+        TableArchetype::Column(col) => Some(&col.row_titles),
+        TableArchetype::Xy(xy) => Some(&xy.row_titles),
+        _ => None,
+    };
     let n_rows = opt_cols[0].len();
+    let mut obs_labels = Vec::new();
     let mut rows = Vec::new();
     for r in 0..n_rows {
         let mut row = Vec::with_capacity(labels.len());
@@ -1773,6 +2284,12 @@ fn extract_complete_matrix_rows(sheet: &DataSheet, selected: &[usize]) -> Result
             }
         }
         if ok {
+            let r_label = sheet_row_titles
+                .and_then(|t| t.get(r))
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map_or_else(|| format!("Obs {}", r + 1), ToOwned::to_owned);
+            obs_labels.push(r_label);
             rows.push(row);
         }
     }
@@ -1780,6 +2297,11 @@ fn extract_complete_matrix_rows(sheet: &DataSheet, selected: &[usize]) -> Result
         return Err(StatsError::InsufficientSampleSize { context: "multivariate complete rows", required: 3, actual: rows.len() });
     }
     let _ = extract_numeric_columns;
+    Ok((labels, obs_labels, rows))
+}
+
+fn extract_complete_matrix_rows(sheet: &DataSheet, selected: &[usize]) -> Result<(Vec<String>, Vec<Vec<f64>>), StatsError> {
+    let (labels, _obs_labels, rows) = extract_complete_matrix_rows_with_names(sheet, selected)?;
     Ok((labels, rows))
 }
 

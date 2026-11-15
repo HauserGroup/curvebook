@@ -1108,8 +1108,11 @@ fn collect_graph_deps(gs: &GraphSheet, default_info: Option<&SheetId>) -> Vec<Sh
         deps.push(cmp.result_sheet_id.clone());
     }
     for ann in &gs.spec.annotations {
-        if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } = ann {
-            deps.push(result_sheet_id.clone());
+        match ann {
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                deps.push(result_sheet_id.clone());
+            }
+            GraphAnnotation::TextBox { .. } | GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => {}
         }
     }
     for hook in gs.spec.inline_hooks() {

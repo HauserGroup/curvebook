@@ -2,7 +2,7 @@
 //! before/after paired lines, and auto-stacked collision-free significance brackets.
 
 use lumencraft_doc::{
-    BracketLabelMode, BracketStyle, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec, GraphSheet, GraphicalDataObject,
+    BracketLabelMode, BracketStyle, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec, GraphSheet, GraphSpec, GraphicalDataObject,
     GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, ProjectDocument, ReplicateOverlayStyle, SheetId,
     SummaryMeasure, TableArchetype, TickLabelFormat, WhiskerMethod,
 };
@@ -84,7 +84,10 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
     let has_y2 = graph.spec.y2_axis.is_some()
         || graph.spec.series.iter().any(|s| s.bind_to_right_y2)
         || matches!(graph.spec.frame_preset, lumencraft_doc::FramePreset::DualYSecondaryRight);
-    let active_bracket_est = count_active_brackets(graph, doc);
+    let mut tick_positions: Vec<(f64, String)> = Vec::new();
+    let mut items = primary_opt.map(|primary| extract_items(graph, primary, &mut tick_positions, &mut scene.warnings)).unwrap_or_default();
+
+    let active_bracket_est = count_active_brackets(graph, doc, &items);
     let bracket_margin_pt = if active_bracket_est > 0 { ((active_bracket_est.min(4) as f64) * 16.0).min(64.0) } else { 0.0 };
     configure_plot_rect(graph, scene, has_y2, bracket_margin_pt);
 
@@ -93,12 +96,13 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
         return Ok(());
     };
 
-    let mut tick_positions: Vec<(f64, String)> = Vec::new();
-    let mut items = extract_items(graph, primary, &mut tick_positions, &mut scene.warnings);
     let (x_vals, y_vals, y2_vals) = collect_domain_values(graph, &items, &tick_positions, &mut scene.warnings);
+    if matches!(graph.spec.grouped_arrangement, GroupedArrangement::Superimposed) {
+        prepare_superimposed_items(&mut items);
+    }
 
     let include_zero_y = items.iter().any(|it| matches!(it.gdo, GraphicalDataObject::BarWithReplicates { .. }));
-    let headroom = if active_bracket_est > 0 { 0.14 } else { 0.05 };
+    let headroom = if active_bracket_est > 0 { (0.14 + 0.04 * (active_bracket_est.saturating_sub(1).min(3) as f64)).min(0.26) } else { 0.05 };
     let r = scene.plot_rect_pt;
     let x_axis = SegmentedAxis::build(&graph.spec.x_axis, r.x, r.right(), &x_vals, false, 0.0);
     let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &y_vals, include_zero_y, headroom);
@@ -114,7 +118,8 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
     render_cartesian_chrome(scene, graph, doc, &x_axis, &y_axis, y2_axis.as_ref(), cat_ticks_opt);
 
     let mut bounds: Vec<RenderedSlotBound> = Vec::with_capacity(items.len());
-    render_before_after_connectors(scene, primary, &items, &x_axis, &y_axis, y2_axis.as_ref(), &mut bounds);
+    let connector_axes = ConnectorAxes { x: &x_axis, y: &y_axis, y2: y2_axis.as_ref() };
+    render_before_after_connectors(scene, &graph.spec, primary, &items, connector_axes, &mut bounds);
 
     // Track cumulative positive/negative stack heights per row for Stacked arrangement.
     let mut stacks = StackAccum::default();
@@ -124,7 +129,7 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
             continue;
         }
         let target_y = if item.bind_to_right_y2 { y2_axis.as_ref().unwrap_or(&y_axis) } else { &y_axis };
-        let top_y = render_single_item(scene, item, &x_axis, target_y, &mut stacks);
+        let top_y = render_single_item(scene, &graph.spec, item, &x_axis, target_y, &mut stacks);
         if let Some((_, x_pt)) = x_axis.map_value(item.x_pos) {
             bounds.push(RenderedSlotBound {
                 group_key: item.group_key,
@@ -155,21 +160,89 @@ fn render_empty_axes(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Char
     render_cartesian_chrome(scene, graph, doc, &x_axis, &y_axis, y2_axis.as_ref(), None);
 }
 
-fn count_active_brackets(graph: &GraphSheet, doc: &ProjectDocument) -> usize {
+fn count_active_brackets(graph: &GraphSheet, doc: &ProjectDocument, items: &[CategorySlotItem]) -> usize {
     graph
         .spec
         .comparisons
         .iter()
         .filter(|b| {
-            if !b.hide_if_non_significant {
-                return true;
-            }
-            let Some(res) = doc.result_sheet(&b.result_sheet_id) else {
+            let rec_opt =
+                doc.result_sheet(&b.result_sheet_id).and_then(|res| find_comparison_record(&res.pairwise_comparisons, b.group_a, b.group_b));
+            if b.hide_if_non_significant && !rec_opt.is_some_and(|rec| rec.significant) {
                 return false;
-            };
-            find_comparison_record(&res.pairwise_comparisons, b.group_a, b.group_b).is_some_and(|rec| rec.significant)
+            }
+            if matches!(graph.spec.grouped_arrangement, GroupedArrangement::Stacked)
+                && !items.is_empty()
+                && let (Some(slot_a), Some(slot_b)) = (
+                    find_item_for_group(items, b.group_a, rec_opt.map(|r| r.label_a.as_str())),
+                    find_item_for_group(items, b.group_b, rec_opt.map(|r| r.label_b.as_str())),
+                )
+                && (slot_a.x_pos - slot_b.x_pos).abs() < 1e-6
+            {
+                return false;
+            }
+            true
         })
         .count()
+}
+
+fn find_item_for_group<'a>(items: &'a [CategorySlotItem], group_idx: usize, label_hint: Option<&str>) -> Option<&'a CategorySlotItem> {
+    let idx = find_matched_index(items, group_idx, label_hint, |it| (it.group_key, it.match_label.as_str(), it.alt_label.as_str()))?;
+    items.get(idx)
+}
+
+fn find_matched_index<T>(slice: &[T], group_idx: usize, label_hint: Option<&str>, meta: impl Fn(&T) -> (usize, &str, &str)) -> Option<usize> {
+    if let Some(hint) = label_hint {
+        let needle = hint.trim();
+        if !needle.is_empty()
+            && let Some((pos, _)) = slice.iter().enumerate().find(|(_, item)| {
+                let (_, lbl, alt) = meta(item);
+                lbl.trim() == needle || alt.trim() == needle
+            })
+        {
+            return Some(pos);
+        }
+    }
+    if let Some((pos, _)) = slice.iter().enumerate().find(|(_, item)| meta(item).0 == group_idx) {
+        return Some(pos);
+    }
+    (group_idx < slice.len()).then_some(group_idx)
+}
+
+fn item_z_footprint(item: &CategorySlotItem) -> (f64, f64) {
+    let val_extent = match &item.payload {
+        ExtractedKind::PreSummarized { center, upper, .. } => center.abs().max(upper.abs()),
+        ExtractedKind::Raw(obs) => {
+            let mut tmp_warnings = Vec::new();
+            let vals = raw_values(obs);
+            compute_central_tendency(&vals, gdo_summary_measure(&item.gdo), &mut tmp_warnings).map_or(0.0, f64::abs)
+        }
+    };
+    let marker_size = match &item.gdo {
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => marker.size_pt,
+        GraphicalDataObject::ScatterAndLine { marker: Some(m), .. } | GraphicalDataObject::BeforeAfterLines { marker: Some(m), .. } => m.size_pt,
+        _ => 0.0,
+    };
+    if matches!(item.gdo, GraphicalDataObject::AlignedDotPlot { .. } | GraphicalDataObject::ScatterAndLine { .. }) {
+        (marker_size, val_extent)
+    } else {
+        (val_extent, marker_size)
+    }
+}
+
+fn prepare_superimposed_items(items: &mut [CategorySlotItem]) {
+    items.sort_by(|a, b| {
+        let za = item_z_footprint(a);
+        let zb = item_z_footprint(b);
+        zb.0.total_cmp(&za.0).then_with(|| zb.1.total_cmp(&za.1)).then_with(|| a.group_key.cmp(&b.group_key))
+    });
+    for i in 0..items.len() {
+        let x = items[i].x_pos;
+        let rank_at_x = items[..i].iter().filter(|prev| (prev.x_pos - x).abs() < 1e-6).count();
+        if rank_at_x > 0 && matches!(items[i].gdo, GraphicalDataObject::BarWithReplicates { .. } | GraphicalDataObject::FloatingBar { .. }) {
+            items[i].slot_width_data *= (1.0 - 0.12 * (rank_at_x as f64).min(4.0)).max(0.35);
+        }
+    }
 }
 
 fn find_comparison_record(records: &[PairwiseComparisonRecord], a: usize, b: usize) -> Option<&PairwiseComparisonRecord> {
@@ -409,14 +482,15 @@ fn extract_grouped_items(
                 }
             }
         }
-        GroupedArrangement::Stacked => {
+        GroupedArrangement::Stacked | GroupedArrangement::Superimposed => {
+            let stack_for_row = matches!(arrangement, GroupedArrangement::Stacked);
             for (r, &cx) in numeric_rows.iter().enumerate().take(nrows) {
                 let row_label = row_display_label(&table.row_titles, r);
                 if matches!(graph.spec.x_axis.tick_format, TickLabelFormat::Categorical(_)) || table.row_numeric_spacing.is_none() {
                     tick_positions.push((cx, row_label));
                 }
                 for c in 0..ncols {
-                    let slot = GroupedSlotPlacement { r, c, x_pos: cx, slot_w: 0.62, stack_group: Some(r) };
+                    let slot = GroupedSlotPlacement { r, c, x_pos: cx, slot_w: 0.62, stack_group: stack_for_row.then_some(r) };
                     push_grouped_cell(&mut items, graph, sheet_id, table, slot, warnings);
                 }
             }
@@ -619,13 +693,18 @@ struct SlotGeom {
     width_pt: f64,
 }
 
+struct ConnectorAxes<'a> {
+    x: &'a SegmentedAxis,
+    y: &'a SegmentedAxis,
+    y2: Option<&'a SegmentedAxis>,
+}
+
 fn render_before_after_connectors(
     scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
     sheet: &lumencraft_doc::DataSheet,
     items: &[CategorySlotItem],
-    x_axis: &SegmentedAxis,
-    y_axis: &SegmentedAxis,
-    y2_axis: Option<&SegmentedAxis>,
+    axes: ConnectorAxes<'_>,
     bounds: &mut Vec<RenderedSlotBound>,
 ) {
     let ba_cols: Vec<(usize, &CategorySlotItem)> =
@@ -651,8 +730,8 @@ fn render_before_after_connectors(
             let Some(val) = col_table.data_sets.get(col_idx).and_then(|d| d.cell(row, 0)).and_then(lumencraft_doc::Cell::active_number) else {
                 continue;
             };
-            let target_y = if item.bind_to_right_y2 { y2_axis.unwrap_or(y_axis) } else { y_axis };
-            if let (Some((_, px)), Some((_, py))) = (x_axis.map_value(item.x_pos), target_y.map_value(val)) {
+            let target_y = if item.bind_to_right_y2 { axes.y2.unwrap_or(axes.y) } else { axes.y };
+            if let (Some((_, px)), Some((_, py))) = (axes.x.map_value(item.x_pos), target_y.map_value(val)) {
                 pts.push((col_idx, PointPt::new(px, py), val));
                 if let Some(slot_top) = top_per_col.get_mut(col_idx) {
                     *slot_top = slot_top.min(py);
@@ -669,10 +748,13 @@ fn render_before_after_connectors(
         }
         if let Some(m) = marker_opt {
             for &(col_idx, p, val) in &pts {
-                emit_marker(&mut scene.primitives, p, &m, Some(clip));
+                let Some(resolved) = crate::resolve_overridden_marker(graph_spec, col_idx, row, m) else {
+                    continue;
+                };
+                emit_marker(&mut scene.primitives, p, &resolved, Some(clip));
                 scene.plotted_points.push(PlottedPointMeta {
                     center_pt: p,
-                    radius_pt: (m.size_pt * 0.5).max(3.0),
+                    radius_pt: (resolved.size_pt * 0.5).max(3.0),
                     source_cell: SourceCellId { sheet_id: sheet.id.clone(), row, col: col_idx, subcol: 0 },
                     series_label: items[col_idx].match_label.clone(),
                     value_summary: format_point_value(val),
@@ -682,7 +764,7 @@ fn render_before_after_connectors(
     }
 
     for &(col_idx, item) in &ba_cols {
-        if let Some((_, x_pt)) = x_axis.map_value(item.x_pos) {
+        if let Some((_, x_pt)) = axes.x.map_value(item.x_pos) {
             bounds.push(RenderedSlotBound {
                 group_key: item.group_key,
                 label: item.match_label.clone(),
@@ -696,6 +778,7 @@ fn render_before_after_connectors(
 
 fn render_single_item(
     scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
     item: &CategorySlotItem,
     x_axis: &SegmentedAxis,
     y_axis: &SegmentedAxis,
@@ -708,16 +791,25 @@ fn render_single_item(
 
     match &item.gdo {
         GraphicalDataObject::BeforeAfterLines { .. } => None,
-        GraphicalDataObject::BarWithReplicates { .. } => render_bar_item(scene, item, slot, y_axis, stacks),
-        GraphicalDataObject::AlignedDotPlot { .. } | GraphicalDataObject::ScatterAndLine { .. } => render_aligned_dot_item(scene, item, slot, y_axis),
-        GraphicalDataObject::BoxAndWhisker { .. } => render_box_whisker_item(scene, item, slot, y_axis),
-        GraphicalDataObject::Violin { .. } => render_violin_item(scene, item, slot, y_axis),
+        GraphicalDataObject::BarWithReplicates { .. } => render_bar_item(scene, graph_spec, item, slot, y_axis, stacks),
+        GraphicalDataObject::AlignedDotPlot { .. } | GraphicalDataObject::ScatterAndLine { .. } => {
+            render_aligned_dot_item(scene, graph_spec, item, slot, y_axis)
+        }
+        GraphicalDataObject::BoxAndWhisker { .. } => render_box_whisker_item(scene, graph_spec, item, slot, y_axis),
+        GraphicalDataObject::Violin { .. } => render_violin_item(scene, graph_spec, item, slot, y_axis),
         GraphicalDataObject::FloatingBar { .. } => render_floating_bar_item(scene, item, slot, y_axis),
         GraphicalDataObject::KaplanMeierStep { .. } | GraphicalDataObject::PartsOfWhole { .. } => None,
     }
 }
 
-fn render_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGeom, y_axis: &SegmentedAxis, stacks: &mut StackAccum) -> Option<f64> {
+fn render_bar_item(
+    scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
+    item: &CategorySlotItem,
+    slot: SlotGeom,
+    y_axis: &SegmentedAxis,
+    stacks: &mut StackAccum,
+) -> Option<f64> {
     let GraphicalDataObject::BarWithReplicates { summary, fill_color, border_color, border_width_pt, replicate_overlay } = item.gdo else {
         return None;
     };
@@ -819,7 +911,15 @@ fn render_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGe
             stroke_color: Rgba8::WHITE,
             stroke_width_pt: 0.4,
         };
-        let ctx = ReplicateDotCtx { cx, max_half_w: slot_w_pt * 0.40, y_axis, style: overlay, marker: &dot_style, series_label: &item.match_label };
+        let ctx = ReplicateDotCtx {
+            spec: graph_spec,
+            cx,
+            max_half_w: slot_w_pt * 0.40,
+            y_axis,
+            style: overlay,
+            marker: &dot_style,
+            series_label: &item.match_label,
+        };
         let top_dot = emit_replicate_dots(scene, &raw_obs, &ctx);
         highest_pt = highest_pt.min(top_dot);
     }
@@ -827,7 +927,13 @@ fn render_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGe
     Some(highest_pt)
 }
 
-fn render_aligned_dot_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGeom, y_axis: &SegmentedAxis) -> Option<f64> {
+fn render_aligned_dot_item(
+    scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
+    item: &CategorySlotItem,
+    slot: SlotGeom,
+    y_axis: &SegmentedAxis,
+) -> Option<f64> {
     let (summary, marker, show_crossbar) = match &item.gdo {
         GraphicalDataObject::AlignedDotPlot { summary, marker, show_crossbar } => (*summary, *marker, *show_crossbar),
         GraphicalDataObject::ScatterAndLine { marker, .. } => {
@@ -844,6 +950,7 @@ fn render_aligned_dot_item(scene: &mut ChartScene, item: &CategorySlotItem, slot
         ExtractedKind::PreSummarized { center, source, .. } => vec![RawObs { value: *center, source: source.clone() }],
     };
     let dot_ctx = ReplicateDotCtx {
+        spec: graph_spec,
         cx,
         max_half_w: slot_w_pt * 0.42,
         y_axis,
@@ -889,7 +996,13 @@ fn render_aligned_dot_item(scene: &mut ChartScene, item: &CategorySlotItem, slot
     Some(highest_pt)
 }
 
-fn render_box_whisker_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGeom, y_axis: &SegmentedAxis) -> Option<f64> {
+fn render_box_whisker_item(
+    scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
+    item: &CategorySlotItem,
+    slot: SlotGeom,
+    y_axis: &SegmentedAxis,
+) -> Option<f64> {
     let GraphicalDataObject::BoxAndWhisker { whiskers, fill_color, stroke_color, show_outliers, show_all_points } = item.gdo else {
         return None;
     };
@@ -975,6 +1088,7 @@ fn render_box_whisker_item(scene: &mut ChartScene, item: &CategorySlotItem, slot
     };
     if show_all_points {
         let dot_ctx = ReplicateDotCtx {
+            spec: graph_spec,
             cx,
             max_half_w: box_w * 0.42,
             y_axis,
@@ -987,10 +1101,13 @@ fn render_box_whisker_item(scene: &mut ChartScene, item: &CategorySlotItem, slot
     } else if show_outliers {
         for idx in outlier_indices {
             let obs = &sorted_obs[idx];
+            let Some(resolved) = crate::resolve_overridden_marker(graph_spec, obs.source.col, obs.source.row, dot_style) else {
+                continue;
+            };
             if let Some((_, py)) = y_axis.map_value(obs.value) {
                 let dot_pt = PointPt::new(cx, py);
-                emit_marker(&mut scene.primitives, dot_pt, &dot_style, Some(clip));
-                push_col_point_meta(scene, dot_pt, dot_style.size_pt, obs, &item.match_label);
+                emit_marker(&mut scene.primitives, dot_pt, &resolved, Some(clip));
+                push_col_point_meta(scene, dot_pt, resolved.size_pt, obs, &item.match_label);
                 highest_pt = highest_pt.min(py);
             }
         }
@@ -1026,7 +1143,13 @@ fn percentile_whiskers(sorted: &[f64], p_lo: f64, p_hi: f64) -> (f64, f64, Vec<u
     (w_lo, w_hi, outliers)
 }
 
-fn render_violin_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGeom, y_axis: &SegmentedAxis) -> Option<f64> {
+fn render_violin_item(
+    scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
+    item: &CategorySlotItem,
+    slot: SlotGeom,
+    y_axis: &SegmentedAxis,
+) -> Option<f64> {
     let GraphicalDataObject::Violin { fill_color, stroke_color, clip_to_observed_range, show_median_and_quartiles, half_violin_with_points } =
         item.gdo
     else {
@@ -1116,6 +1239,7 @@ fn render_violin_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: Slo
         };
         let half_center = cx - 0.52 * half_max_w;
         let dot_ctx = ReplicateDotCtx {
+            spec: graph_spec,
             cx: half_center,
             max_half_w: 0.40 * half_max_w,
             y_axis,
@@ -1241,6 +1365,7 @@ fn render_floating_bar_item(scene: &mut ChartScene, item: &CategorySlotItem, slo
 }
 
 struct ReplicateDotCtx<'a> {
+    spec: &'a GraphSpec,
     cx: f64,
     max_half_w: f64,
     y_axis: &'a SegmentedAxis,
@@ -1262,12 +1387,16 @@ fn push_col_point_meta(scene: &mut ChartScene, center_pt: PointPt, marker_size_p
 fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDotCtx<'_>) -> f64 {
     let clip = scene.plot_rect_pt;
     let mut top_pt = clip.bottom();
-    let dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
-    let mut mapped: Vec<(f64, &RawObs)> = Vec::with_capacity(obs.len());
+    let mut mapped: Vec<(f64, &RawObs, MarkerStyle)> = Vec::with_capacity(obs.len());
     let mut pts_y: Vec<f64> = Vec::with_capacity(obs.len());
+    let mut max_dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
     for o in obs {
+        let Some(resolved) = crate::resolve_overridden_marker(ctx.spec, o.source.col, o.source.row, *ctx.marker) else {
+            continue;
+        };
         if let Some((_, py)) = ctx.y_axis.map_value(o.value) {
-            mapped.push((py, o));
+            max_dot_r = max_dot_r.max(resolved.size_pt * 0.5);
+            mapped.push((py, o, resolved));
             pts_y.push(py);
             top_pt = top_pt.min(py);
         }
@@ -1278,14 +1407,14 @@ fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDo
 
     let offsets = match ctx.style {
         ReplicateOverlayStyle::AlignedColumn => vec![0.0; mapped.len()],
-        ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_y, ctx.max_half_w, dot_r),
+        ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_y, ctx.max_half_w, max_dot_r),
     };
-    for (&(py, raw), dx) in mapped.iter().zip(offsets.iter()) {
+    for (&(py, raw, resolved), dx) in mapped.iter().zip(offsets.iter()) {
         let dot_pt = PointPt::new(ctx.cx + dx, py);
-        emit_marker(&mut scene.primitives, dot_pt, ctx.marker, Some(clip));
-        push_col_point_meta(scene, dot_pt, ctx.marker.size_pt, raw, ctx.series_label);
+        emit_marker(&mut scene.primitives, dot_pt, &resolved, Some(clip));
+        push_col_point_meta(scene, dot_pt, resolved.size_pt, raw, ctx.series_label);
     }
-    top_pt - dot_r
+    top_pt - max_dot_r
 }
 
 fn deterministic_beeswarm_offsets(ys: &[f64], max_half_w: f64, dot_r: f64) -> Vec<f64> {
@@ -1344,15 +1473,20 @@ fn render_pairwise_brackets(scene: &mut ChartScene, graph: &GraphSheet, doc: &Pr
     });
 
     let mut placed: Vec<(f64, f64, f64)> = Vec::with_capacity(resolved.len());
-    let title_floor_y = if graph.spec.title.trim().is_empty() { 8.0 } else { 26.0 };
+    let title_floor_y = if graph.spec.title.trim().is_empty() { 4.0 } else { 24.0 };
 
     for br in resolved {
-        let lo_idx = br.slot_a_idx.min(br.slot_b_idx);
-        let hi_idx = br.slot_a_idx.max(br.slot_b_idx);
-        let data_top_y = bounds[lo_idx..=hi_idx].iter().map(|b| b.top_y_pt).fold(f64::INFINITY, f64::min);
+        let data_top_y = bounds
+            .iter()
+            .filter(|b| b.x_pt >= br.x_lo - 1.0 && b.x_pt <= br.x_hi + 1.0)
+            .map(|b| b.top_y_pt)
+            .fold(f64::INFINITY, f64::min)
+            .min(scene.plot_rect_pt.bottom());
         let metrics = measure_text_pt(&br.label, br.font_size_pt);
         let label_h = metrics.height_pt().max(br.font_size_pt);
         let min_step = br.step_pt.max(label_h + 7.0);
+        let min_bar_y = title_floor_y + label_h + 4.0;
+        let max_bar_y = (scene.plot_rect_pt.bottom() - 8.0).max(min_bar_y);
 
         let mut bar_y = (data_top_y - 8.0).min(scene.plot_rect_pt.bottom() - 12.0);
         for &(px0, px1, p_top) in &placed {
@@ -1360,7 +1494,7 @@ fn render_pairwise_brackets(scene: &mut ChartScene, graph: &GraphSheet, doc: &Pr
                 bar_y = bar_y.min(p_top - min_step);
             }
         }
-        bar_y = bar_y.max(title_floor_y + label_h + 4.0);
+        bar_y = bar_y.clamp(min_bar_y, max_bar_y);
 
         emit_bracket_geometry(&mut scene.primitives, &br, bar_y);
         let label_y = bar_y - 3.5;
@@ -1407,6 +1541,12 @@ fn resolve_brackets(
             continue;
         };
         if (slot_a.x_pt - slot_b.x_pt).abs() < 1e-6 {
+            if matches!(graph.spec.grouped_arrangement, GroupedArrangement::Stacked) {
+                warnings.push(ChartWarning::new(
+                    "stacked_bracket_guarded",
+                    format!("skipped intra-stack comparison bracket ({}, {}) at X={:.1}", spec.group_a, spec.group_b, slot_a.x_pt),
+                ));
+            }
             continue;
         }
         out.push(ResolvedBracket {
@@ -1465,18 +1605,8 @@ fn build_bracket_label(
 }
 
 fn find_slot_for_group<'a>(bounds: &'a [RenderedSlotBound], group_idx: usize, label_hint: Option<&str>) -> Option<(usize, &'a RenderedSlotBound)> {
-    if let Some(hint) = label_hint {
-        let needle = hint.trim();
-        if !needle.is_empty()
-            && let Some((pos, b)) = bounds.iter().enumerate().find(|(_, b)| b.label.trim() == needle || b.alt_label.trim() == needle)
-        {
-            return Some((pos, b));
-        }
-    }
-    if let Some((pos, b)) = bounds.iter().enumerate().find(|(_, b)| b.group_key == group_idx) {
-        return Some((pos, b));
-    }
-    bounds.get(group_idx).map(|b| (group_idx, b))
+    let pos = find_matched_index(bounds, group_idx, label_hint, |b| (b.group_key, b.label.as_str(), b.alt_label.as_str()))?;
+    bounds.get(pos).map(|b| (pos, b))
 }
 
 fn emit_bracket_geometry(primitives: &mut Vec<ScenePrimitive>, br: &ResolvedBracket, bar_y: f64) {
@@ -1575,5 +1705,157 @@ fn legend_item_from_gdo(label: String, gdo: &GraphicalDataObject) -> LegendItem 
             swatch_border: None,
         },
         _ => LegendItem { label, marker: None, line_color: None, line_dash: LineDashStyle::Solid, swatch_fill: None, swatch_border: None },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_doc::{
+        BracketLabelMode, BracketStyle, Cell, ColumnDesignHint, ColumnTable, DataSheet, GraphSheet, GraphicalDataObject, GroupedArrangement,
+        GroupedTable, PairwiseBracketSpec, PointStyleOverride, ProjectDocument, ReplicateOverlayStyle, SheetId, SubcolumnMode, SummaryMeasure,
+        TableArchetype,
+    };
+    use lumencraft_palette::{MarkerShape, Rgba8};
+
+    use crate::{ScenePrimitive, compile_graph};
+
+    #[test]
+    fn column_point_overrides_restyle_and_hide_individual_points() {
+        let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 3).expect("column table");
+        table.data_sets[0].cells = vec![vec![Cell::number(4.0)], vec![Cell::number(7.0)], vec![Cell::number(11.0)]];
+        let ds = DataSheet::new(SheetId::new("col_1"), "Samples", TableArchetype::Column(table)).expect("data sheet");
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_1"), &ds).expect("graph sheet");
+        gs.spec.series[0].gdo = GraphicalDataObject::AlignedDotPlot {
+            summary: SummaryMeasure::Mean,
+            marker: lumencraft_palette::MarkerStyle::default(),
+            show_crossbar: false,
+        };
+        let custom_color = Rgba8::rgb(204, 121, 167);
+        gs.spec.point_overrides = vec![
+            PointStyleOverride {
+                series_index: 0,
+                point_index: 1,
+                color: Some(custom_color),
+                symbol: Some(MarkerShape::Diamond),
+                size_pt: Some(9.0),
+                ..PointStyleOverride::default()
+            },
+            PointStyleOverride { series_index: 0, point_index: 2, hidden: true, ..PointStyleOverride::default() },
+        ];
+
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds).expect("add data");
+        doc.add_graph_sheet(gs.clone()).expect("add graph");
+        let scene = compile_graph(&gs, &doc).expect("compile graph");
+
+        assert_eq!(scene.plotted_points.len(), 2, "hidden row should not emit plotted point metadata");
+        assert!(scene.plotted_points.iter().all(|p| p.source_cell.row != 2));
+        let overridden_meta = scene.plotted_points.iter().find(|p| p.source_cell.row == 1).expect("row 1 plotted");
+        assert!((overridden_meta.radius_pt - 4.5).abs() < 1e-6);
+        assert!(scene.primitives.iter().any(|prim| { matches!(prim, ScenePrimitive::Path { fill: Some(f), .. } if f.color == custom_color) }));
+    }
+
+    #[test]
+    fn stacked_grouped_guards_intra_stack_brackets_and_clamps_inter_stack_brackets() {
+        let mut g = GroupedTable::new(SubcolumnMode::RawReplicates(1), 2, 2).expect("grouped");
+        g.row_titles = vec![String::from("Day 1"), String::from("Day 2")];
+        g.data_sets[0].title = String::from("Drug A");
+        g.data_sets[0].cells = vec![vec![Cell::number(10.0)], vec![Cell::number(20.0)]];
+        g.data_sets[1].title = String::from("Drug B");
+        g.data_sets[1].cells = vec![vec![Cell::number(15.0)], vec![Cell::number(25.0)]];
+        let ds = DataSheet::new(SheetId::new("grp_1"), "Grouped", TableArchetype::Grouped(g)).expect("sheet");
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_1"), &ds).expect("graph");
+        gs.spec.grouped_arrangement = GroupedArrangement::Stacked;
+        gs.spec.comparisons = vec![
+            // Intra-stack (Day 1 Drug A vs Day 1 Drug B at same X): must be guarded cleanly.
+            PairwiseBracketSpec {
+                result_sheet_id: SheetId::new("res_missing"),
+                group_a: 0,
+                group_b: 1,
+                style: BracketStyle::Square,
+                label_mode: BracketLabelMode::Custom(String::from("intra")),
+                hide_if_non_significant: false,
+                stroke_width_pt: 1.0,
+                font_size_pt: 8.5,
+                bracket_step_pt: 14.0,
+            },
+            // Inter-stack (Day 1 vs Day 2 across distinct X positions): placed cleanly above stack summit inside canvas.
+            PairwiseBracketSpec {
+                result_sheet_id: SheetId::new("res_missing"),
+                group_a: 0,
+                group_b: 2,
+                style: BracketStyle::Square,
+                label_mode: BracketLabelMode::Custom(String::from("p=0.01")),
+                hide_if_non_significant: false,
+                stroke_width_pt: 1.0,
+                font_size_pt: 8.5,
+                bracket_step_pt: 14.0,
+            },
+        ];
+
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds).expect("add data");
+        doc.add_graph_sheet(gs.clone()).expect("add graph");
+        let scene = compile_graph(&gs, &doc).expect("compile stacked");
+
+        assert!(scene.warnings.iter().any(|w| w.code == "stacked_bracket_guarded"));
+        assert!(!scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text() == "intra")));
+        let inter_label = scene
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                ScenePrimitive::Text(t) if t.rich.plain_text() == "p=0.01" => Some(t.anchor_pt.y),
+                _ => None,
+            })
+            .expect("inter-stack bracket label rendered");
+        assert!(inter_label >= 24.0 && inter_label < scene.plot_rect_pt.bottom(), "bracket y={inter_label} out of panel frame");
+    }
+
+    #[test]
+    fn superimposed_grouped_draws_larger_bars_behind_smaller_bars() {
+        let mut g = GroupedTable::new(SubcolumnMode::RawReplicates(1), 2, 1).expect("grouped");
+        g.row_titles = vec![String::from("Baseline")];
+        // Series 0 is shorter (10.0) than Series 1 (30.0); in Superimposed order Series 1 renders BEFORE Series 0 so Series 0 is in front.
+        g.data_sets[0].title = String::from("Short");
+        g.data_sets[0].cells = vec![vec![Cell::number(10.0)]];
+        g.data_sets[1].title = String::from("Tall");
+        g.data_sets[1].cells = vec![vec![Cell::number(30.0)]];
+        let ds = DataSheet::new(SheetId::new("grp_sup"), "Superimposed", TableArchetype::Grouped(g)).expect("sheet");
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_sup"), &ds).expect("graph");
+        gs.spec.grouped_arrangement = GroupedArrangement::Superimposed;
+        gs.spec.series[0].gdo = GraphicalDataObject::BarWithReplicates {
+            summary: SummaryMeasure::Mean,
+            fill_color: Rgba8::rgb(0, 114, 178),
+            border_color: Rgba8::rgb(0, 114, 178),
+            border_width_pt: 1.0,
+            replicate_overlay: Some(ReplicateOverlayStyle::DeterministicBeeswarm),
+        };
+        gs.spec.series[1].gdo = GraphicalDataObject::BarWithReplicates {
+            summary: SummaryMeasure::Mean,
+            fill_color: Rgba8::rgb(213, 94, 0),
+            border_color: Rgba8::rgb(213, 94, 0),
+            border_width_pt: 1.0,
+            replicate_overlay: Some(ReplicateOverlayStyle::DeterministicBeeswarm),
+        };
+
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds).expect("add data");
+        doc.add_graph_sheet(gs.clone()).expect("add graph");
+        let scene = compile_graph(&gs, &doc).expect("compile superimposed");
+
+        let bar_colors: Vec<Rgba8> = scene
+            .primitives
+            .iter()
+            .filter_map(|prim| match prim {
+                ScenePrimitive::Path { fill: Some(f), clip: Some(_), .. }
+                    if f.color == Rgba8::rgb(0, 114, 178) || f.color == Rgba8::rgb(213, 94, 0) =>
+                {
+                    Some(f.color)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(bar_colors.first().copied(), Some(Rgba8::rgb(213, 94, 0)));
+        assert_eq!(bar_colors.last().copied(), Some(Rgba8::rgb(0, 114, 178)));
     }
 }

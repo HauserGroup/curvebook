@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use lumencraft_doc::{
-    BaselineOperation, Cell, CellCoord, CellValue, DataSheet, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource, LinkedDataRegion,
-    PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, transpose_cell_grid,
+    BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource,
+    LinkedDataRegion, NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn,
+    default_column_label, transpose_cell_grid, validate_data_sets,
 };
 
 use crate::error::TransformError;
@@ -452,6 +453,14 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
     let needed_rows = start_row + grid.len();
     ensure_sheet_rows(&mut target.archetype, needed_rows)?;
 
+    let max_row_width = grid.iter().map(Vec::len).max().unwrap_or(0);
+    if mode == PlacementMode::AppendColumns && max_row_width > 0 {
+        let (last_col, _) = resolve_target_coord(&target.archetype, start_col, anchor.subcol, max_row_width - 1);
+        let needed_cols = last_col + 1;
+        let min_rows = target.archetype.row_count().max(needed_rows);
+        ensure_sheet_columns(&mut target.archetype, needed_cols, min_rows)?;
+    }
+
     let mut max_col = start_col;
     let mut max_sub = anchor.subcol;
     for (dr, row_cells) in grid.iter().enumerate() {
@@ -463,6 +472,16 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
                 *slot = cell.clone();
                 max_col = max_col.max(col);
                 max_sub = max_sub.max(subcol);
+            }
+        }
+    }
+
+    if max_row_width > 0
+        && let TableArchetype::MultipleVariables(mv) = &mut target.archetype
+    {
+        for col in start_col..=max_col {
+            if let Some(var) = mv.variables.get_mut(col) {
+                var.refresh_inferred_role();
             }
         }
     }
@@ -570,6 +589,42 @@ fn ensure_sheet_rows(arch: &mut TableArchetype, min_rows: usize) -> Result<(), T
     Ok(())
 }
 
+fn push_dataset_columns(cols: &mut Vec<DataSetColumn>, min_cols: usize, row_count: usize, subs: usize) -> Result<(), TransformError> {
+    while cols.len() < min_cols {
+        let idx = cols.len();
+        cols.push(DataSetColumn::new(default_column_label(idx), row_count, subs)?);
+    }
+    Ok(())
+}
+
+fn ensure_sheet_columns(arch: &mut TableArchetype, min_cols: usize, min_rows: usize) -> Result<(), TransformError> {
+    validate_data_sets(min_cols)?;
+    let row_count = arch.row_count().max(min_rows);
+    ensure_sheet_rows(arch, row_count)?;
+    match arch {
+        TableArchetype::Xy(t) => push_dataset_columns(&mut t.data_sets, min_cols, row_count, t.y_subcolumn_mode.subcolumn_count())?,
+        TableArchetype::Column(t) => push_dataset_columns(&mut t.data_sets, min_cols, row_count, t.subcolumn_mode.subcolumn_count())?,
+        TableArchetype::Grouped(t) => push_dataset_columns(&mut t.data_sets, min_cols, row_count, t.subcolumn_mode.subcolumn_count())?,
+        TableArchetype::Contingency(t) => push_dataset_columns(&mut t.data_sets, min_cols, row_count, 1)?,
+        TableArchetype::Survival(t) => push_dataset_columns(&mut t.cohorts, min_cols, row_count, 1)?,
+        TableArchetype::PartsOfWhole(t) => push_dataset_columns(&mut t.data_sets, min_cols, row_count, 1)?,
+        TableArchetype::MultipleVariables(mv) => {
+            while mv.variables.len() < min_cols {
+                let idx = mv.variables.len();
+                mv.variables.push(VariableColumn::new(default_column_label(idx), row_count)?);
+            }
+        }
+        TableArchetype::Nested(t) => {
+            let units = t.groups.first().map_or(1, NestedGroupColumn::biological_unit_count).max(1);
+            while t.groups.len() < min_cols {
+                let idx = t.groups.len();
+                t.groups.push(NestedGroupColumn::new(default_column_label(idx), units, row_count)?);
+            }
+        }
+    }
+    Ok(())
+}
+
 fn set_column_title_if_possible(arch: &mut TableArchetype, col: usize, title: &str) {
     match arch {
         TableArchetype::Xy(t) => {
@@ -587,12 +642,31 @@ fn set_column_title_if_possible(arch: &mut TableArchetype, col: usize, title: &s
                 ds.title = title.to_owned();
             }
         }
+        TableArchetype::Contingency(t) => {
+            if let Some(ds) = t.data_sets.get_mut(col) {
+                ds.title = title.to_owned();
+            }
+        }
+        TableArchetype::Survival(t) => {
+            if let Some(ds) = t.cohorts.get_mut(col) {
+                ds.title = title.to_owned();
+            }
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            if let Some(ds) = t.data_sets.get_mut(col) {
+                ds.title = title.to_owned();
+            }
+        }
         TableArchetype::MultipleVariables(mv) => {
             if let Some(var) = mv.variables.get_mut(col) {
                 var.title = title.to_owned();
             }
         }
-        _ => {}
+        TableArchetype::Nested(t) => {
+            if let Some(grp) = t.groups.get_mut(col) {
+                grp.title = title.to_owned();
+            }
+        }
     }
 }
 

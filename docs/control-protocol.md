@@ -1,10 +1,10 @@
 # Live TCP Control Protocol (`--control`)
 
-When launched with `lumencraft --control <port>`, the desktop application binds strictly to loopback (`127.0.0.1:<port>`) and serves a line-delimited JSON (`JSONL`) automation channel backed by the same command registry as `lumencraft-cli` and `lumencraft-mcp`.
+When launched with `lumencraft --control <port>`, the desktop application binds strictly to loopback (`127.0.0.1:<port>`) and serves a line-delimited JSON (`JSONL`) automation channel (`crates/ui-egui/src/control_io.rs`) backed by the same typed command registries as `lumencraft-cli` and `lumencraft-mcp` ([`commands.md`](commands.md), [`mcp.md`](mcp.md), [`STATUS.md`](STATUS.md)).
 
 ## Framing
 
-Each client request is a single UTF-8 JSON object terminated by `\n`, using either `"method"` or `"op"` (`ControlRequest` aliases `"op"` to `"method"`):
+Each client request is a single UTF-8 JSON object terminated by `\n` (bounded by `MAX_CONTROL_LINE_BYTES = 16 MiB`), using either `"method"` or `"op"` (`ControlRequest` aliases `"op"` to `"method"`):
 
 ```json
 {"id": 1, "op": "command.list"}
@@ -16,21 +16,45 @@ Each client request is a single UTF-8 JSON object terminated by `\n`, using eith
 {"id": 7, "op": "render.pdf", "sheet_id": "graph-1", "color_space": "srgb"}
 ```
 
-Supported built-in methods are `"ping"`, `"command.list"` (`75` engine commands + `17` `UI_COMMANDS`), `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"render.svg"`, `"render.pdf"`, `"ui.state"` (alias `"state.snapshot"`), `"app.quit"`, or any registered engine / `ui.*` command ID passed directly as `"method"`/`"op"`.
+Supported built-in methods today are `"ping"` (includes `"gui_only"`), `"command.list"` (all registered engine commands in [`commands.md`](commands.md) plus the `32` synced `UI_COMMANDS` in `crates/mcp/src/ui_catalog.rs`), `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"render.svg"`, `"render.pdf"`, `"ui.state"` (alias `"state.snapshot"`, includes `"gui_only"`), `"app.quit"`, the 8 interactive GUI actions (`"ui.inspect"`, `"ui.screenshot"`, `"ui.pointer_gesture"`, `"ui.type_text"`, `"ui.press_key"`, `"ui.invoke_menu"`, `"ui.switch_tab"`, `"ui.answer_dialog"`), or any registered engine / `ui.*` command ID (`"ui.canvas.preflight"`, `"ui.event.dispatch"`, etc.) passed directly as `"method"`/`"op"` (`MAX_CONTROL_LINE_BYTES = 16 MiB` in `crates/ui-egui/src/control_io.rs`).
 
 Each response (`ControlResponse`) is a single UTF-8 JSON object terminated by `\n`:
 
 ```json
-{"id": 1, "ok": true, "result": {"commands": [...], "engine_count": 75, "ui_count": 17}, "error": null}
+{"id": 1, "ok": true, "result": {"commands": [...]}, "error": null}
 ```
 
-Errors return `ok: false` with `"result": null` and `"error"` set to a plain string without disconnecting the socket or crashing the session:
+Errors return `ok: false` with `"result": null`, `"error"` set to a human-readable string, and optional structured `"error_detail"` (`ErrorCode`, `category`, `retryable`, `remediation`, `details`) without disconnecting the socket or crashing the session:
 
 ```json
 {"id": 99, "ok": false, "result": null, "error": "unknown command `foo.bar`"}
 ```
 
+## Interactive `ui.*` Actions & `--gui-only` Lock (`R8.6`)
+
+Implemented in `crates/ui-egui/src/{control_io.rs, gui_actions.rs, inspect.rs}` and `crates/engine/src/lib.rs` ([`gui-workflows.md`](gui-workflows.md)):
+
+### 1. Strict `--gui-only` Enforcement (`Caller::Control` vs. `Caller::Ui`)
+- Passing `--gui-only` on launch (`lumencraft --control <port> --gui-only` or via `LUMENCRAFT_CONTROL_PORT`) configures every `DesktopHostRuntime` window with `GuiOnlyPolicy::Strict` (`app.set_gui_only(true)`).
+- **Direct domain commands (`Caller::Control`):** `command.run`, `command.batch`, `engine.execute`, and raw domain command IDs run through `app.execute_control_command` (`Caller::Control`). Under `GuiOnlyPolicy::Strict`, `Session::execute_with_caller` blocks any command called by `Caller::Control` (as well as `Caller::Mcp` or `Caller::Cli`) unless it is read-only without `Effects::READS_FILESYSTEM` (or `table.convertArchetype` with `preview_only` / `previewOnly` / `preview` / `dry_run` / `dryRun: true`), returning `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`, `ErrorCategory::Policy`).
+- **Direct `ui.*` / menu bypasses:** Under `--gui-only`, `dispatch_command_by_id` in `control_io.rs` rejects direct `ui.*` commands, `"app.about"`, and `"file.print"` with `ErrorCode::GuiOnlyViolation`, **except** the 8 interactive GUI JSON-lines actions below and the read-only `"ui.canvas.preflight"` check.
+- **Internal UI execution (`Caller::Ui`):** Visible menus, shortcuts, palette actions, and modal commit handlers inside `UiApp` execute via `Caller::Ui` (`app.execute_command` / `dispatch_ui_command_as_ui`), remaining permitted so human-equivalent UI actions drive the live `Session`.
+- **Allowed read-only RPCs under `--gui-only`:** `"ping"`, `"doc.inspect"`, `"ui.state"` (alias `"state.snapshot"`), `"command.list"`, `"ui.inspect"`, `"ui.canvas.preflight"`, and in-memory `"ui.screenshot"` (without `path`).
+- **Disk-write restriction (`ui.screenshot` & `render.pdf`):** Under `--gui-only`, `ui.screenshot` returns `data_base64` PNG bytes in memory (`path` is `null`); supplying a non-empty `path` to `"ui.screenshot"` or `"render.pdf"` fails with `ErrorCode::GuiOnlyViolation`.
+
+### 2. The 8 `ui.*` Interactive GUI JSON-Lines Actions
+| Method | Purpose & Behavior (`crates/ui-egui/src/gui_actions.rs`) |
+|---|---|
+| `"ui.inspect"` | Returns a scoped [`UiTreeSnapshot`](../crates/ui-egui/src/inspect.rs) (`scope`: `all`/`workspace`, `menus`, `toolbar`, `navigator`, `tabs`, `canvas`, `grid`, `dialog`; `include_bounds`, `sheet_id`), including widget `bounds`, `enabled` / `disabled_reason` predicates, `grid_selection`, `brushed_points`, visible `grid_cells` (`grid.cell.*` and XY/Survival `grid.xcell.*`), and canvas hit targets. |
+| `"ui.screenshot"` | Renders an in-memory PNG (`data_base64`, `bytes_len`, `width_px`, `height_px`, `dpi`) for `target` (`full_window`/`full`/`window`/`workspace`/`viewport`, `canvas`/`main`, `dialog`/`modal`; `64..=4096` px, default `1024x640`; `72..=600` dpi, default `144`). Rejects non-empty `path` under `--gui-only` with `ErrorCode::GuiOnlyViolation`. |
+| `"ui.pointer_gesture"` | Dispatches `click`, `double_click`, `right_click`, `drag`, `hover`, `scroll`, or `wheel` on a `widget_id` (checking `node.enabled`) or viewport `(x, y)` coordinates, including `power.curve_hover`, Shift/Meta multi-row grid selection, graph point brushing, and layout panel drags. |
+| `"ui.type_text"` | Focuses an optional `widget_id` and enters UTF-8 text or multi-cell TSV payloads into active `DataSheet` cells (`grid.cell.*` / `grid.xcell.*`), `InfoSheet` notes, or modal inputs. |
+| `"ui.press_key"` | Dispatches key presses and shortcut combos (`Enter` dialog confirm/next, `Escape` cancel, `Cmd/Ctrl+T` on `ResultSheet` to open `EditAnalysisParameters`, `ShortcutRegistry` combos, or `UiInputEvent::KeyDown`). |
+| `"ui.invoke_menu"` | Invokes a visible menu bar item by `command_id` or `path` (string or string array), returning `ErrorCode::Conflict` if disabled. |
+| `"ui.switch_tab"` | Switches navigator sheets (`sheet_id` / `nav.sheet.*`), `EditAnalysisParameters` tabs (guarded by `evaluate_edit_params_tab`), `PowerWizardStage` tabs (`can_advance`), or `ResultSheet` sub-tabs. |
+| `"ui.answer_dialog"` | Patches active modal/wizard `fields` / `values` / `patches` and/or triggers footer buttons (`ok`, `cancel`, `apply`, `back`, `next`, `create`, `preview` via `evaluate_dialog_button`), extracting tabular `ResultSheet` tabs via `sheet.extractResultTab` when invoking `AnalyzeSheet` from a `ResultSheet`. |
+
 ## Security Invariants
 
-- Never binds to `0.0.0.0` or `::`; loopback (`127.0.0.1`) only.
+- Never binds to `0.0.0.0` or `::`; loopback (`127.0.0.1` / `::1` via `validate_loopback_addr`) only (`cargo xtask telemetry`).
 - Disabled by default unless `--control <port>` (`1..=65535`) is explicitly passed on the command line.

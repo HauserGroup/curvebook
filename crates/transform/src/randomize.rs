@@ -1,0 +1,1407 @@
+//! Seeded experimental subject randomization, uniform/stratified row sampling, and probability
+//! distribution column simulation (`R9.14` / `QOL-14`, `docs/calculators-and-quick-stats.md` §4).
+
+use std::collections::HashMap;
+
+use lumencraft_doc::{
+    Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, MultipleVariablesTable, SheetId,
+    TableArchetype, VariableRole, validate_data_sets, validate_rows, validate_title,
+};
+use lumencraft_math::{DeterministicRng, special::ln_choose};
+
+use crate::error::TransformError;
+use crate::ops::reshape_select::retain_rows;
+
+const fn default_group_weight() -> usize {
+    1
+}
+
+/// Experimental subject-to-treatment allocation scheme for [`randomize_subjects_to_groups`].
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum AllocationScheme {
+    /// Assign counts across arms as evenly as possible preserving `weights` ratios, then shuffle
+    /// globally across all `N` subjects.
+    #[default]
+    CompleteBalanced,
+    /// Sequential permuted blocks whose sizes are fixed (`block_sizes.len() == 1`) or drawn
+    /// uniformly per block from `block_sizes` (`block_sizes.len() > 1`). Every block size must be
+    /// a positive multiple of `sum(weights)`.
+    PermutedBlock { block_sizes: Vec<usize> },
+}
+
+/// Named treatment arm and relative allocation weight for [`SubjectRandomizationConfig`].
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct GroupAllocationWeight {
+    pub label: String,
+    #[serde(default = "default_group_weight")]
+    pub weight: usize,
+}
+
+impl GroupAllocationWeight {
+    /// Create a treatment arm with default allocation weight `1`.
+    #[must_use]
+    pub fn new(label: impl Into<String>) -> Self {
+        Self { label: label.into(), weight: 1 }
+    }
+
+    /// Create a treatment arm with explicit integer allocation weight.
+    #[must_use]
+    pub fn with_weight(label: impl Into<String>, weight: usize) -> Self {
+        Self { label: label.into(), weight }
+    }
+}
+
+/// Configuration for seeded subject-to-group randomization ([`randomize_subjects_to_groups`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct SubjectRandomizationConfig {
+    pub sheet_id: String,
+    pub title: String,
+    pub subject_ids: Vec<String>,
+    pub groups: Vec<GroupAllocationWeight>,
+    pub scheme: AllocationScheme,
+    pub seed: u64,
+}
+
+impl SubjectRandomizationConfig {
+    /// Construct a configuration for `subject_count` sequentially numbered subjects (`"1"..=N`).
+    #[must_use]
+    pub fn from_subject_count(
+        sheet_id: impl Into<String>,
+        title: impl Into<String>,
+        subject_count: usize,
+        groups: Vec<GroupAllocationWeight>,
+        scheme: AllocationScheme,
+        seed: u64,
+    ) -> Self {
+        let subject_ids = (1..=subject_count).map(|i| i.to_string()).collect();
+        Self { sheet_id: sheet_id.into(), title: title.into(), subject_ids, groups, scheme, seed }
+    }
+}
+
+/// Generated randomization schedule sheet alongside ARRIVE guideline metadata constants.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct RandomizationOutput {
+    pub data_sheet: DataSheet,
+    pub arrive_constants: Vec<(String, String)>,
+}
+
+/// Configuration for deterministic row sampling without replacement ([`random_sample_rows`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct RowSampleConfig {
+    pub seed: u64,
+    pub sample_size: usize,
+    #[serde(default)]
+    pub stratify_column: Option<usize>,
+    #[serde(default)]
+    pub proportional_allocation: bool,
+    #[serde(default)]
+    pub output_id: Option<String>,
+    #[serde(default)]
+    pub output_title: Option<String>,
+}
+
+/// Probability distribution family supported by [`simulate_distribution_columns`].
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SimulatedDistribution {
+    Uniform { min: f64, max: f64 },
+    Gaussian { mean: f64, sd: f64 },
+    LogNormal { mean_log: f64, sd_log: f64 },
+    Binomial { trials: u64, p: f64 },
+    Poisson { lambda: f64 },
+    Exponential { rate: f64 },
+}
+
+/// Single named output column specification for [`DistributionSimulationConfig`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct SimulatedColumnSpec {
+    pub name: String,
+    pub distribution: SimulatedDistribution,
+}
+
+/// Configuration for seeded multi-distribution column simulation ([`simulate_distribution_columns`]).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct DistributionSimulationConfig {
+    pub sheet_id: String,
+    pub title: String,
+    pub n_rows: usize,
+    pub seed: u64,
+    pub columns: Vec<SimulatedColumnSpec>,
+    #[serde(default)]
+    pub use_multiple_variables: bool,
+}
+
+/// Deterministically randomize subjects across treatment arms and emit an ARRIVE-compliant
+/// `MultipleVariables` schedule sheet (`Subject_ID`, `Allocation_Order`, `Block_Index`,
+/// `Block_Size`, `Assigned_Group`).
+///
+/// # Errors
+/// Returns [`TransformError::InvalidSpec`] when subjects/groups are empty, weights are zero, or
+/// permuted block sizes are not positive multiples of the sum of weights.
+#[allow(clippy::cast_precision_loss)]
+pub fn randomize_subjects_to_groups(config: &SubjectRandomizationConfig) -> Result<RandomizationOutput, TransformError> {
+    let sum_weights = validate_randomization_config(config)?;
+    let n = config.subject_ids.len();
+    let assignments = assign_subject_groups(config, sum_weights)?;
+
+    let mut mv = MultipleVariablesTable::new(5, n)?;
+    let titles = ["Subject_ID", "Allocation_Order", "Block_Index", "Block_Size", "Assigned_Group"];
+    let roles = [VariableRole::Categorical, VariableRole::Continuous, VariableRole::Continuous, VariableRole::Continuous, VariableRole::Categorical];
+    for (col_idx, (col_title, role)) in titles.iter().zip(roles.iter()).enumerate() {
+        if let Some(var) = mv.variables.get_mut(col_idx) {
+            var.title = (*col_title).to_owned();
+            var.lock_role(*role);
+        }
+    }
+
+    for (r, (group_idx, block_idx, block_size)) in assignments.iter().enumerate() {
+        let Some(subject_id) = config.subject_ids.get(r) else {
+            continue;
+        };
+        let Some(group) = config.groups.get(*group_idx) else {
+            continue;
+        };
+        set_mv_cell(&mut mv, 0, r, Cell::text(subject_id.clone()));
+        set_mv_cell(&mut mv, 1, r, Cell::number((r + 1) as f64));
+        set_mv_cell(&mut mv, 2, r, Cell::number(*block_idx as f64));
+        set_mv_cell(&mut mv, 3, r, Cell::number(*block_size as f64));
+        set_mv_cell(&mut mv, 4, r, Cell::text(group.label.clone()));
+    }
+
+    let data_sheet = DataSheet::new(config.sheet_id.as_str(), config.title.as_str(), TableArchetype::MultipleVariables(mv))?;
+    let arrive_constants = build_arrive_constants(config, n);
+    Ok(RandomizationOutput { data_sheet, arrive_constants })
+}
+
+/// Deterministically sample `config.sample_size` unique rows from `source` **without replacement**
+/// via partial Fisher–Yates shuffling (optionally stratified proportionally or equally across
+/// `config.stratify_column`).
+///
+/// Selected row indices are sorted in ascending original row order to preserve row-paired
+/// semantics on `Xy`, `Survival`, and matched `Column` tables while keeping source observations
+/// unmutated.
+///
+/// # Errors
+/// Returns [`TransformError::InvalidSpec`] when `sample_size == 0`, `sample_size > row_count`,
+/// `stratify_column` is out of bounds, or `output_id` / `output_title` is invalid.
+pub fn random_sample_rows(source: &DataSheet, config: &RowSampleConfig) -> Result<DataSheet, TransformError> {
+    let selected = sample_row_indices(source, config)?;
+    let id = config.output_id.clone().unwrap_or_else(|| format!("{}-sample", source.id.as_str()));
+    if id.trim().is_empty() {
+        return Err(TransformError::Doc(DocError::EmptyIdentifier));
+    }
+    let title = config.output_title.clone().unwrap_or_else(|| format!("{} (Random Sample)", source.title));
+    validate_title(&title)?;
+
+    let mut out = source.clone();
+    out.id = SheetId::new(id);
+    out.title = title;
+    out.frozen = false;
+    out.linked_regions.clear();
+    retain_rows(&mut out.archetype, &selected);
+    out.exclusion_notes = remap_exclusion_notes(&source.exclusion_notes, &selected);
+    Ok(out)
+}
+
+/// Compute the sorted, strictly distinct sampled row indices for [`random_sample_rows`].
+///
+/// # Errors
+/// Returns [`TransformError::InvalidSpec`] when `sample_size == 0`, `sample_size > row_count`, or
+/// `stratify_column` is out of bounds.
+pub fn sample_row_indices(source: &DataSheet, config: &RowSampleConfig) -> Result<Vec<usize>, TransformError> {
+    let row_count = source.archetype.row_count();
+    if config.sample_size == 0 {
+        return Err(TransformError::InvalidSpec { message: String::from("random sample_size must be >= 1") });
+    }
+    if config.sample_size > row_count {
+        return Err(TransformError::InvalidSpec {
+            message: format!("random sample_size ({}) exceeds table row count ({row_count})", config.sample_size),
+        });
+    }
+    if let Some(col_idx) = config.stratify_column {
+        let col_count = source.archetype.column_count();
+        if col_idx >= col_count {
+            return Err(TransformError::InvalidSpec {
+                message: format!("stratify_column index {col_idx} out of bounds for table with {col_count} column(s)"),
+            });
+        }
+        return sample_stratified_indices(source, col_idx, config);
+    }
+
+    let mut rng = DeterministicRng::from_seed(config.seed);
+    let mut pool: Vec<usize> = (0..row_count).collect();
+    partial_fisher_yates(&mut pool, config.sample_size, &mut rng);
+    pool.truncate(config.sample_size);
+    pool.sort_unstable();
+    Ok(pool)
+}
+
+/// Generate a synthetic `Column` or `MultipleVariables` [`DataSheet`] populated from independent
+/// seeded probability distribution streams per column.
+///
+/// # Errors
+/// Returns [`TransformError::InvalidSpec`] when `n_rows == 0`, `columns` is empty, or any
+/// distribution parameter violates its mathematical domain.
+pub fn simulate_distribution_columns(config: &DistributionSimulationConfig) -> Result<DataSheet, TransformError> {
+    validate_simulation_config(config)?;
+
+    let mut master_rng = DeterministicRng::from_seed(config.seed);
+    let mut col_values: Vec<Vec<f64>> = Vec::with_capacity(config.columns.len());
+    for col in &config.columns {
+        let col_seed = master_rng.next_u64();
+        let mut col_rng = DeterministicRng::from_seed(col_seed);
+        col_values.push(sample_distribution_column(&mut col_rng, config.n_rows, col.distribution)?);
+    }
+
+    let archetype = if config.use_multiple_variables {
+        let mut mv = MultipleVariablesTable::new(config.columns.len(), config.n_rows)?;
+        for (c, (spec, vals)) in config.columns.iter().zip(col_values.iter()).enumerate() {
+            if let Some(var) = mv.variables.get_mut(c) {
+                var.title = spec.name.clone();
+                var.lock_role(VariableRole::Continuous);
+                for (r, &v) in vals.iter().enumerate() {
+                    if let Some(cell) = var.cells.get_mut(r) {
+                        *cell = Cell::number(v);
+                    }
+                }
+            }
+        }
+        TableArchetype::MultipleVariables(mv)
+    } else {
+        let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, config.columns.len(), config.n_rows)?;
+        for (c, (spec, vals)) in config.columns.iter().zip(col_values.iter()).enumerate() {
+            if let Some(ds) = table.data_sets.get_mut(c) {
+                ds.title = spec.name.clone();
+                for (r, &v) in vals.iter().enumerate() {
+                    if let Some(cell) = ds.cells.get_mut(r).and_then(|row| row.get_mut(0)) {
+                        *cell = Cell::number(v);
+                    }
+                }
+            }
+        }
+        TableArchetype::Column(table)
+    };
+
+    Ok(DataSheet::new(config.sheet_id.as_str(), config.title.as_str(), archetype)?)
+}
+
+fn set_mv_cell(mv: &mut MultipleVariablesTable, col: usize, row: usize, cell: Cell) {
+    if let Some(slot) = mv.variables.get_mut(col).and_then(|v| v.cells.get_mut(row)) {
+        *slot = cell;
+    }
+}
+
+fn validate_randomization_config(config: &SubjectRandomizationConfig) -> Result<usize, TransformError> {
+    if config.sheet_id.trim().is_empty() {
+        return Err(TransformError::Doc(DocError::EmptyIdentifier));
+    }
+    validate_title(&config.title)?;
+    if config.subject_ids.is_empty() {
+        return Err(TransformError::InvalidSpec { message: String::from("subject_ids must not be empty") });
+    }
+    validate_rows(config.subject_ids.len())?;
+    for (idx, sid) in config.subject_ids.iter().enumerate() {
+        if sid.trim().is_empty() {
+            return Err(TransformError::InvalidSpec { message: format!("subject_ids[{idx}] must not be blank") });
+        }
+        validate_title(sid)?;
+    }
+    if config.groups.is_empty() {
+        return Err(TransformError::InvalidSpec { message: String::from("groups must not be empty") });
+    }
+    let mut sum_weights = 0_usize;
+    for (idx, g) in config.groups.iter().enumerate() {
+        if g.label.trim().is_empty() {
+            return Err(TransformError::InvalidSpec { message: format!("groups[{idx}].label must not be blank") });
+        }
+        validate_title(&g.label)?;
+        if g.weight == 0 {
+            return Err(TransformError::InvalidSpec { message: format!("groups[{idx}] (`{}`) weight must be >= 1", g.label) });
+        }
+        sum_weights = sum_weights
+            .checked_add(g.weight)
+            .ok_or_else(|| TransformError::InvalidSpec { message: String::from("sum of group weights overflows") })?;
+    }
+    if let AllocationScheme::PermutedBlock { block_sizes } = &config.scheme {
+        if block_sizes.is_empty() {
+            return Err(TransformError::InvalidSpec { message: String::from("PermutedBlock block_sizes must not be empty") });
+        }
+        for &b in block_sizes {
+            if b == 0 || b % sum_weights != 0 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("PermutedBlock size {b} must be a positive multiple of sum(weights) = {sum_weights}"),
+                });
+            }
+        }
+    }
+    Ok(sum_weights)
+}
+
+fn assign_subject_groups(config: &SubjectRandomizationConfig, sum_weights: usize) -> Result<Vec<(usize, usize, usize)>, TransformError> {
+    let n = config.subject_ids.len();
+    let mut rng = DeterministicRng::from_seed(config.seed);
+
+    match &config.scheme {
+        AllocationScheme::CompleteBalanced => {
+            let weights: Vec<usize> = config.groups.iter().map(|g| g.weight).collect();
+            let counts = hamilton_apportion(n, &weights);
+            let mut pool = Vec::with_capacity(n);
+            for (g_idx, &count) in counts.iter().enumerate() {
+                pool.resize(pool.len() + count, g_idx);
+            }
+            rng.shuffle(&mut pool);
+            Ok(pool.into_iter().map(|g_idx| (g_idx, 1, n)).collect())
+        }
+        AllocationScheme::PermutedBlock { block_sizes } => {
+            let mut out = Vec::with_capacity(n);
+            let mut block_idx = 0_usize;
+            while out.len() < n {
+                block_idx += 1;
+                let block_size = if block_sizes.len() == 1 {
+                    block_sizes[0]
+                } else {
+                    let picked = rng.gen_index(block_sizes.len()).unwrap_or(0);
+                    block_sizes.get(picked).copied().unwrap_or(block_sizes[0])
+                };
+                let mult = block_size / sum_weights;
+                let mut block = Vec::with_capacity(block_size);
+                for (g_idx, g) in config.groups.iter().enumerate() {
+                    let count = g
+                        .weight
+                        .checked_mul(mult)
+                        .ok_or_else(|| TransformError::InvalidSpec { message: String::from("block slot count overflow") })?;
+                    block.resize(block.len() + count, g_idx);
+                }
+                rng.shuffle(&mut block);
+                let take = (n - out.len()).min(block_size);
+                for g_idx in block.into_iter().take(take) {
+                    out.push((g_idx, block_idx, block_size));
+                }
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn build_arrive_constants(config: &SubjectRandomizationConfig, total_subjects: usize) -> Vec<(String, String)> {
+    let method = match &config.scheme {
+        AllocationScheme::CompleteBalanced => String::from("complete_balanced"),
+        AllocationScheme::PermutedBlock { .. } => String::from("permuted_block"),
+    };
+    let ratio = config.groups.iter().map(|g| g.weight.to_string()).collect::<Vec<_>>().join(":");
+    let block_sizes = match &config.scheme {
+        AllocationScheme::CompleteBalanced => total_subjects.to_string(),
+        AllocationScheme::PermutedBlock { block_sizes } => block_sizes.iter().map(ToString::to_string).collect::<Vec<_>>().join(", "),
+    };
+    vec![
+        (String::from("randomization.seed"), config.seed.to_string()),
+        (String::from("randomization.method"), method),
+        (String::from("randomization.allocation_ratio"), ratio),
+        (String::from("randomization.block_sizes"), block_sizes),
+        (String::from("randomization.total_subjects"), total_subjects.to_string()),
+    ]
+}
+
+fn hamilton_apportion(total: usize, weights: &[usize]) -> Vec<usize> {
+    let k = weights.len();
+    let mut alloc = vec![0_usize; k];
+    if total == 0 || k == 0 {
+        return alloc;
+    }
+    let total_weight: u128 = weights.iter().map(|&w| w as u128).sum();
+    if total_weight == 0 {
+        return alloc;
+    }
+    let total_u128 = total as u128;
+    let mut remainders: Vec<(usize, u128)> = Vec::with_capacity(k);
+    let mut assigned = 0_usize;
+
+    for (idx, &w) in weights.iter().enumerate() {
+        let num = total_u128 * (w as u128);
+        #[allow(clippy::cast_possible_truncation)]
+        let base = (num / total_weight) as usize;
+        let rem = num % total_weight;
+        alloc[idx] = base;
+        assigned += base;
+        remainders.push((idx, rem));
+    }
+
+    let leftover = total.saturating_sub(assigned);
+    remainders.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    for &(idx, _) in remainders.iter().take(leftover) {
+        alloc[idx] += 1;
+    }
+    alloc
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum StratumKey {
+    Value(String),
+    Missing,
+}
+
+fn extract_stratum_key(arch: &TableArchetype, row: usize, col: usize) -> StratumKey {
+    let Some(cell) = arch.data_cell(CellCoord::new(row, col, 0)) else {
+        return StratumKey::Missing;
+    };
+    if cell.excluded {
+        return StratumKey::Missing;
+    }
+    match &cell.value {
+        CellValue::Empty => StratumKey::Missing,
+        CellValue::Text(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() { StratumKey::Missing } else { StratumKey::Value(trimmed.to_owned()) }
+        }
+        CellValue::Number(v) if v.is_finite() => {
+            let normalized = if *v == 0.0 { 0.0 } else { *v };
+            StratumKey::Value(format!("{normalized}"))
+        }
+        CellValue::Number(_) => StratumKey::Missing,
+    }
+}
+
+fn sample_stratified_indices(source: &DataSheet, col_idx: usize, config: &RowSampleConfig) -> Result<Vec<usize>, TransformError> {
+    let row_count = source.archetype.row_count();
+    let mut strata: Vec<Vec<usize>> = Vec::new();
+    let mut key_to_stratum: HashMap<StratumKey, usize> = HashMap::new();
+
+    for r in 0..row_count {
+        let key = extract_stratum_key(&source.archetype, r, col_idx);
+        if let Some(&s_idx) = key_to_stratum.get(&key) {
+            if let Some(bucket) = strata.get_mut(s_idx) {
+                bucket.push(r);
+            }
+        } else {
+            let s_idx = strata.len();
+            key_to_stratum.insert(key, s_idx);
+            strata.push(vec![r]);
+        }
+    }
+
+    let sizes: Vec<usize> = strata.iter().map(Vec::len).collect();
+    let targets = if config.proportional_allocation {
+        apportion_stratified_proportional(config.sample_size, &sizes)
+    } else {
+        apportion_stratified_equal(config.sample_size, &sizes)
+    };
+
+    let mut rng = DeterministicRng::from_seed(config.seed);
+    let mut selected = Vec::with_capacity(config.sample_size);
+    for (bucket, &take) in strata.iter_mut().zip(targets.iter()) {
+        if take == 0 {
+            continue;
+        }
+        partial_fisher_yates(bucket, take, &mut rng);
+        selected.extend_from_slice(&bucket[..take]);
+    }
+    selected.sort_unstable();
+    Ok(selected)
+}
+
+fn apportion_stratified_proportional(sample_size: usize, stratum_sizes: &[usize]) -> Vec<usize> {
+    let s_count = stratum_sizes.len();
+    let mut alloc = vec![0_usize; s_count];
+    if sample_size == 0 || s_count == 0 {
+        return alloc;
+    }
+
+    let enforce_min_one = sample_size >= s_count;
+    let mut active: Vec<usize> = (0..s_count).collect();
+    let mut remaining = sample_size;
+
+    loop {
+        if active.is_empty() || remaining == 0 {
+            break;
+        }
+        let active_weights: Vec<usize> = active.iter().map(|&idx| stratum_sizes[idx]).collect();
+        let proposal = hamilton_apportion(remaining, &active_weights);
+
+        let mut clamped_any = false;
+        let mut next_active = Vec::with_capacity(active.len());
+
+        for (&stratum_idx, &proposed) in active.iter().zip(proposal.iter()) {
+            let cap = stratum_sizes[stratum_idx];
+            if enforce_min_one && proposed == 0 && cap >= 1 {
+                alloc[stratum_idx] = 1;
+                remaining = remaining.saturating_sub(1);
+                clamped_any = true;
+            } else if proposed > cap {
+                alloc[stratum_idx] = cap;
+                remaining = remaining.saturating_sub(cap);
+                clamped_any = true;
+            } else {
+                next_active.push(stratum_idx);
+            }
+        }
+
+        if !clamped_any {
+            for (&stratum_idx, &proposed) in active.iter().zip(proposal.iter()) {
+                alloc[stratum_idx] = proposed;
+            }
+            break;
+        }
+        active = next_active;
+    }
+
+    alloc
+}
+
+fn apportion_stratified_equal(sample_size: usize, stratum_sizes: &[usize]) -> Vec<usize> {
+    let s_count = stratum_sizes.len();
+    let mut alloc = vec![0_usize; s_count];
+    let mut remaining = sample_size;
+
+    while remaining > 0 {
+        let unsaturated: Vec<usize> = (0..s_count).filter(|&i| alloc[i] < stratum_sizes[i]).collect();
+        if unsaturated.is_empty() {
+            break;
+        }
+        let step = remaining / unsaturated.len();
+        if step == 0 {
+            for &idx in unsaturated.iter().take(remaining) {
+                alloc[idx] += 1;
+            }
+            break;
+        }
+        for idx in unsaturated {
+            let add = step.min(stratum_sizes[idx] - alloc[idx]);
+            alloc[idx] += add;
+            remaining -= add;
+        }
+    }
+    alloc
+}
+
+fn partial_fisher_yates(pool: &mut [usize], k: usize, rng: &mut DeterministicRng) {
+    let n = pool.len();
+    let take = k.min(n);
+    for i in 0..take {
+        if let Some(offset) = rng.gen_index(n - i) {
+            pool.swap(i, i + offset);
+        }
+    }
+}
+
+fn remap_exclusion_notes(notes: &[CellExclusionNote], selected_rows: &[usize]) -> Vec<CellExclusionNote> {
+    if notes.is_empty() {
+        return Vec::new();
+    }
+    let mut old_to_new: HashMap<usize, usize> = HashMap::with_capacity(selected_rows.len());
+    for (new_row, &old_row) in selected_rows.iter().enumerate() {
+        old_to_new.insert(old_row, new_row);
+    }
+    let mut remapped: Vec<CellExclusionNote> = notes
+        .iter()
+        .filter_map(|note| {
+            old_to_new.get(&note.coord.row).map(|&new_row| CellExclusionNote {
+                coord: CellCoord::new(new_row, note.coord.col, note.coord.subcol),
+                reason_tag: note.reason_tag.clone(),
+                note: note.note.clone(),
+                timestamp_utc: note.timestamp_utc.clone(),
+            })
+        })
+        .collect();
+    remapped.sort_by_key(|n| n.coord);
+    remapped
+}
+
+fn validate_simulation_config(config: &DistributionSimulationConfig) -> Result<(), TransformError> {
+    if config.sheet_id.trim().is_empty() {
+        return Err(TransformError::Doc(DocError::EmptyIdentifier));
+    }
+    validate_title(&config.title)?;
+    if config.n_rows == 0 {
+        return Err(TransformError::InvalidSpec { message: String::from("distribution simulation n_rows must be >= 1") });
+    }
+    validate_rows(config.n_rows)?;
+    if config.columns.is_empty() {
+        return Err(TransformError::InvalidSpec { message: String::from("distribution simulation columns must not be empty") });
+    }
+    validate_data_sets(config.columns.len())?;
+
+    for (idx, col) in config.columns.iter().enumerate() {
+        validate_title(&col.name)?;
+        validate_distribution(idx, col.distribution)?;
+    }
+    Ok(())
+}
+
+fn validate_distribution(col_idx: usize, dist: SimulatedDistribution) -> Result<(), TransformError> {
+    match dist {
+        SimulatedDistribution::Uniform { min, max } => {
+            if !min.is_finite() || !max.is_finite() || min >= max {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("column {col_idx} Uniform requires finite min < max, got [{min}, {max}]"),
+                });
+            }
+        }
+        SimulatedDistribution::Gaussian { mean, sd } => {
+            if !mean.is_finite() || !sd.is_finite() || sd < 0.0 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("column {col_idx} Gaussian requires finite mean and sd >= 0, got mean={mean}, sd={sd}"),
+                });
+            }
+        }
+        SimulatedDistribution::LogNormal { mean_log, sd_log } => {
+            if !mean_log.is_finite() || !sd_log.is_finite() || sd_log < 0.0 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("column {col_idx} LogNormal requires finite mean_log and sd_log >= 0, got mean_log={mean_log}, sd_log={sd_log}"),
+                });
+            }
+        }
+        SimulatedDistribution::Binomial { p, .. } => {
+            if !p.is_finite() || !(0.0..=1.0).contains(&p) {
+                return Err(TransformError::InvalidSpec { message: format!("column {col_idx} Binomial probability p must lie in [0, 1], got {p}") });
+            }
+        }
+        SimulatedDistribution::Poisson { lambda } => {
+            if !lambda.is_finite() || !(0.0..=1e15).contains(&lambda) {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("column {col_idx} Poisson lambda must be finite in [0, 1e15], got {lambda}"),
+                });
+            }
+        }
+        SimulatedDistribution::Exponential { rate } => {
+            if !rate.is_finite() || rate <= 0.0 {
+                return Err(TransformError::InvalidSpec { message: format!("column {col_idx} Exponential rate must be finite and > 0, got {rate}") });
+            }
+        }
+    }
+    Ok(())
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sample_distribution_column(rng: &mut DeterministicRng, n_rows: usize, dist: SimulatedDistribution) -> Result<Vec<f64>, TransformError> {
+    let mut out = Vec::with_capacity(n_rows);
+    for _ in 0..n_rows {
+        let val = match dist {
+            SimulatedDistribution::Uniform { min, max } => {
+                let u = rng.next_f64();
+                (1.0 - u) * min + u * max
+            }
+            SimulatedDistribution::Gaussian { mean, sd } => {
+                if sd == 0.0 {
+                    mean
+                } else {
+                    rng.normal(mean, sd)?
+                }
+            }
+            SimulatedDistribution::LogNormal { mean_log, sd_log } => {
+                let z = if sd_log == 0.0 { mean_log } else { rng.normal(mean_log, sd_log)? };
+                let exp_z = z.exp();
+                if !exp_z.is_finite() {
+                    return Err(TransformError::EvalError { message: format!("LogNormal sample exp({z}) overflowed finite f64 range") });
+                }
+                exp_z
+            }
+            SimulatedDistribution::Binomial { trials, p } => sample_binomial(rng, trials, p)? as f64,
+            SimulatedDistribution::Poisson { lambda } => rng.poisson(lambda)? as f64,
+            SimulatedDistribution::Exponential { rate } => -rng.next_open_f64().ln() / rate,
+        };
+        out.push(val);
+    }
+    Ok(out)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn sample_binomial(rng: &mut DeterministicRng, trials: u64, p: f64) -> Result<u64, TransformError> {
+    if trials == 0 || p == 0.0 {
+        return Ok(0);
+    }
+    if p == 1.0 {
+        return Ok(trials);
+    }
+    let flip = p > 0.5;
+    let q = if flip { 1.0 - p } else { p };
+    if q == 0.0 {
+        return Ok(if flip { trials } else { 0 });
+    }
+
+    let drawn = if trials <= 32 {
+        let mut count = 0_u64;
+        for _ in 0..trials {
+            if rng.next_f64() < q {
+                count += 1;
+            }
+        }
+        count
+    } else if (trials as f64) * q < 10.0 {
+        sample_binomial_geo(rng, trials, q)
+    } else {
+        sample_binomial_btrs(rng, trials, q)?
+    };
+
+    Ok(if flip { trials - drawn } else { drawn })
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn sample_binomial_geo(rng: &mut DeterministicRng, trials: u64, q: f64) -> u64 {
+    let ln_1_q = (-q).ln_1p();
+    let mut sum = 0_u64;
+    let mut k = 0_u64;
+    loop {
+        let u = rng.next_open_f64();
+        let gap_minus_one = (u.ln() / ln_1_q).floor();
+        let remaining = trials - sum;
+        if !gap_minus_one.is_finite() || gap_minus_one < 0.0 || gap_minus_one >= (remaining as f64) {
+            break;
+        }
+        let step_minus_one = gap_minus_one as u64;
+        if step_minus_one >= remaining {
+            break;
+        }
+        sum += step_minus_one + 1;
+        k += 1;
+    }
+    k
+}
+
+// Hörmann (1993) BTRS transformed rejection for binomial with n * q >= 10, q <= 0.5.
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn sample_binomial_btrs(rng: &mut DeterministicRng, trials: u64, q: f64) -> Result<u64, TransformError> {
+    let n = trials as f64;
+    let s = (n * q * (1.0 - q)).sqrt();
+    let b = 1.15 + 2.53 * s;
+    let a = -0.0873 + 0.0248 * b + 0.01 * q;
+    let c = n * q + 0.5;
+    let alpha = (2.83 + 5.1 / b) * s;
+    let mode = (((n + 1.0) * q).floor() as u64).min(trials);
+    let ln_pm = ln_binomial_pmf(trials, mode, q)?;
+
+    for _ in 0..10_000 {
+        let u = rng.next_open_f64() - 0.5;
+        let v = rng.next_open_f64();
+        let us = 0.5 - u.abs();
+        let k_f = ((2.0 * a / us + b) * u + c).floor();
+        if !k_f.is_finite() || k_f < 0.0 || k_f > n {
+            continue;
+        }
+        let k = k_f as u64;
+        if k > trials {
+            continue;
+        }
+        let lhs = (v * alpha / (a / (us * us) + b)).ln();
+        let rhs = ln_binomial_pmf(trials, k, q)? - ln_pm;
+        if lhs <= rhs {
+            return Ok(k);
+        }
+    }
+    Ok(mode)
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn ln_binomial_pmf(trials: u64, k: u64, q: f64) -> Result<f64, TransformError> {
+    let lc = ln_choose(trials, k)?;
+    let term_q = if k == 0 { 0.0 } else { (k as f64) * q.ln() };
+    let term_1_q = if k == trials { 0.0 } else { ((trials - k) as f64) * (-q).ln_1p() };
+    Ok(lc + term_q + term_1_q)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    use lumencraft_doc::{
+        AnalysisKind, AnalysisSpec, Cell, CellCoord, CellExclusionNote, ColumnTable, ContingencyTable, DataSheet, GroupedTable,
+        MultipleVariablesTable, NestedTable, PartsOfWholeTable, SubcolumnMode, SurvivalTable, TableArchetype, TransformAnalysisSpec, VariableRole,
+        XyTable,
+    };
+    use lumencraft_math::sum::SummaryMoments;
+    use serde::Deserialize;
+
+    use super::{
+        AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, RowSampleConfig, SimulatedColumnSpec, SimulatedDistribution,
+        SubjectRandomizationConfig, random_sample_rows, randomize_subjects_to_groups, sample_row_indices, simulate_distribution_columns,
+    };
+    use crate::error::TransformError;
+    use crate::ops::{TransformContext, execute_analysis_transform};
+
+    fn group_counts_from_schedule(sheet: &DataSheet) -> BTreeMap<String, usize> {
+        let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
+            panic!("expected MultipleVariables schedule");
+        };
+        let mut counts = BTreeMap::new();
+        for cell in &mv.variables[4].cells {
+            let label = cell.active_text().unwrap().to_owned();
+            *counts.entry(label).or_insert(0) += 1;
+        }
+        counts
+    }
+
+    #[test]
+    fn complete_balanced_weighted_randomization_is_reproducible_and_exact() {
+        let cfg = SubjectRandomizationConfig::from_subject_count(
+            "rand-1",
+            "Study Arm Schedule",
+            20,
+            vec![
+                GroupAllocationWeight::with_weight("HighDose", 2),
+                GroupAllocationWeight::with_weight("LowDose", 1),
+                GroupAllocationWeight::new("Vehicle"),
+            ],
+            AllocationScheme::CompleteBalanced,
+            202_601,
+        );
+
+        let out_a = randomize_subjects_to_groups(&cfg).unwrap();
+        let out_b = randomize_subjects_to_groups(&cfg).unwrap();
+        assert_eq!(out_a, out_b);
+
+        let mut cfg_other = cfg.clone();
+        cfg_other.seed = 9999;
+        let out_c = randomize_subjects_to_groups(&cfg_other).unwrap();
+        assert_ne!(out_a.data_sheet, out_c.data_sheet);
+
+        let counts = group_counts_from_schedule(&out_a.data_sheet);
+        assert_eq!(counts.get("HighDose").copied(), Some(10));
+        assert_eq!(counts.get("LowDose").copied(), Some(5));
+        assert_eq!(counts.get("Vehicle").copied(), Some(5));
+
+        let TableArchetype::MultipleVariables(mv) = &out_a.data_sheet.archetype else {
+            panic!("expected MultipleVariables");
+        };
+        let titles: Vec<&str> = mv.variables.iter().map(|v| v.title.as_str()).collect();
+        assert_eq!(titles, ["Subject_ID", "Allocation_Order", "Block_Index", "Block_Size", "Assigned_Group"]);
+        assert_eq!(mv.variables[0].role, VariableRole::Categorical);
+        assert_eq!(mv.variables[1].role, VariableRole::Continuous);
+        assert_eq!(mv.variables[4].role, VariableRole::Categorical);
+        assert_eq!(mv.variables[1].cells[0].active_number(), Some(1.0));
+        assert_eq!(mv.variables[1].cells[19].active_number(), Some(20.0));
+        assert_eq!(mv.variables[2].cells[0].active_number(), Some(1.0));
+        assert_eq!(mv.variables[3].cells[0].active_number(), Some(20.0));
+
+        let arrive: BTreeMap<String, String> = out_a.arrive_constants.into_iter().collect();
+        assert_eq!(arrive.get("randomization.seed").map(String::as_str), Some("202601"));
+        assert_eq!(arrive.get("randomization.method").map(String::as_str), Some("complete_balanced"));
+        assert_eq!(arrive.get("randomization.allocation_ratio").map(String::as_str), Some("2:1:1"));
+        assert_eq!(arrive.get("randomization.block_sizes").map(String::as_str), Some("20"));
+        assert_eq!(arrive.get("randomization.total_subjects").map(String::as_str), Some("20"));
+    }
+
+    #[test]
+    fn permuted_block_fixed_and_variable_sizes_balance_per_block_and_trim_cleanly() {
+        let subjects: Vec<String> = (1..=14).map(|i| format!("M-{i:02}")).collect();
+        let fixed_cfg = SubjectRandomizationConfig {
+            sheet_id: String::from("rand-fixed"),
+            title: String::from("Fixed Block"),
+            subject_ids: subjects.clone(),
+            groups: vec![GroupAllocationWeight::new("A"), GroupAllocationWeight::new("B")],
+            scheme: AllocationScheme::PermutedBlock { block_sizes: vec![4] },
+            seed: 77,
+        };
+        let fixed_out = randomize_subjects_to_groups(&fixed_cfg).unwrap();
+        let TableArchetype::MultipleVariables(fmv) = &fixed_out.data_sheet.archetype else {
+            panic!("expected MultipleVariables");
+        };
+        assert_eq!(fmv.row_count(), 14);
+        for blk in 0..3 {
+            let start = blk * 4;
+            let mut a_count = 0;
+            let mut b_count = 0;
+            for r in start..start + 4 {
+                assert_eq!(fmv.variables[2].cells[r].active_number(), Some((blk + 1) as f64));
+                assert_eq!(fmv.variables[3].cells[r].active_number(), Some(4.0));
+                match fmv.variables[4].cells[r].active_text() {
+                    Some("A") => a_count += 1,
+                    Some("B") => b_count += 1,
+                    other => panic!("unexpected group {other:?}"),
+                }
+            }
+            assert_eq!(a_count, 2);
+            assert_eq!(b_count, 2);
+        }
+        assert_eq!(fmv.variables[2].cells[12].active_number(), Some(4.0));
+        assert_eq!(fmv.variables[2].cells[13].active_number(), Some(4.0));
+
+        let multi_cfg = SubjectRandomizationConfig {
+            sheet_id: String::from("rand-var"),
+            title: String::from("Variable Block"),
+            subject_ids: (1..=32).map(|i| format!("S{i}")).collect(),
+            groups: vec![GroupAllocationWeight::with_weight("Drug", 2), GroupAllocationWeight::with_weight("Placebo", 2)],
+            scheme: AllocationScheme::PermutedBlock { block_sizes: vec![4, 8] },
+            seed: 4242,
+        };
+        let multi_out = randomize_subjects_to_groups(&multi_cfg).unwrap();
+        let TableArchetype::MultipleVariables(mmv) = &multi_out.data_sheet.archetype else {
+            panic!("expected MultipleVariables");
+        };
+        let mut seen_sizes = BTreeSet::new();
+        let mut row = 0;
+        while row < mmv.row_count() {
+            let b_idx = mmv.variables[2].cells[row].active_number().unwrap() as usize;
+            let b_sz = mmv.variables[3].cells[row].active_number().unwrap() as usize;
+            assert!(b_sz == 4 || b_sz == 8);
+            seen_sizes.insert(b_sz);
+            let end = (row + b_sz).min(mmv.row_count());
+            let mut drug = 0;
+            let mut placebo = 0;
+            for r in row..end {
+                assert_eq!(mmv.variables[2].cells[r].active_number().unwrap() as usize, b_idx);
+                assert_eq!(mmv.variables[3].cells[r].active_number().unwrap() as usize, b_sz);
+                match mmv.variables[4].cells[r].active_text() {
+                    Some("Drug") => drug += 1,
+                    Some("Placebo") => placebo += 1,
+                    other => panic!("unexpected group {other:?}"),
+                }
+            }
+            if end - row == b_sz {
+                assert_eq!(drug, b_sz / 2);
+                assert_eq!(placebo, b_sz / 2);
+            }
+            row = end;
+        }
+        assert_eq!(seen_sizes.len(), 2);
+
+        let arrive: BTreeMap<String, String> = multi_out.arrive_constants.into_iter().collect();
+        assert_eq!(arrive.get("randomization.method").map(String::as_str), Some("permuted_block"));
+        assert_eq!(arrive.get("randomization.block_sizes").map(String::as_str), Some("4, 8"));
+        assert_eq!(arrive.get("randomization.allocation_ratio").map(String::as_str), Some("2:2"));
+    }
+
+    #[test]
+    fn group_weight_serde_defaults_omitted_weight_to_one_and_validates_errors() {
+        let de = serde::de::value::MapDeserializer::<_, serde::de::value::Error>::new([("label", "Control")].into_iter());
+        let parsed = GroupAllocationWeight::deserialize(de).unwrap();
+        assert_eq!(parsed.label, "Control");
+        assert_eq!(parsed.weight, 1);
+
+        let empty_subj = SubjectRandomizationConfig {
+            sheet_id: String::from("r"),
+            title: String::from("R"),
+            subject_ids: Vec::new(),
+            groups: vec![GroupAllocationWeight::new("A")],
+            scheme: AllocationScheme::CompleteBalanced,
+            seed: 1,
+        };
+        assert!(matches!(randomize_subjects_to_groups(&empty_subj), Err(TransformError::InvalidSpec { .. })));
+
+        let bad_block = SubjectRandomizationConfig::from_subject_count(
+            "r",
+            "R",
+            10,
+            vec![GroupAllocationWeight::with_weight("A", 2), GroupAllocationWeight::with_weight("B", 1)],
+            AllocationScheme::PermutedBlock { block_sizes: vec![4] },
+            1,
+        );
+        assert!(matches!(randomize_subjects_to_groups(&bad_block), Err(TransformError::InvalidSpec { .. })));
+
+        let zero_weight = SubjectRandomizationConfig::from_subject_count(
+            "r",
+            "R",
+            10,
+            vec![GroupAllocationWeight::with_weight("A", 0), GroupAllocationWeight::new("B")],
+            AllocationScheme::CompleteBalanced,
+            1,
+        );
+        assert!(matches!(randomize_subjects_to_groups(&zero_weight), Err(TransformError::InvalidSpec { .. })));
+    }
+
+    #[test]
+    fn uniform_and_stratified_row_sampling_preserves_metadata_and_strata() {
+        // XY table with 20 rows and exclusion note
+        let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 20).unwrap();
+        xy.x_title = String::from("Dose");
+        xy.data_sets[0].title = String::from("Response");
+        for r in 0..20 {
+            xy.set_x_cell(r, Cell::number((r + 1) as f64)).unwrap();
+            xy.row_titles[r] = format!("R{r}");
+            xy.data_sets[0].cells[r][0] = Cell::number((r * 10) as f64);
+            xy.data_sets[0].cells[r][1] = Cell::number((r * 10 + 1) as f64);
+        }
+        let mut xy_sheet = DataSheet::new("xy-pop", "XY Pop", TableArchetype::Xy(xy)).unwrap();
+        xy_sheet.exclusion_notes.push(CellExclusionNote {
+            coord: CellCoord::new(5, 0, 0),
+            reason_tag: String::from("outlier"),
+            note: String::from("bubble"),
+            timestamp_utc: String::from("2026-11-14T00:00:00Z"),
+        });
+
+        let cfg =
+            RowSampleConfig { seed: 555, sample_size: 8, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
+        let idx1 = sample_row_indices(&xy_sheet, &cfg).unwrap();
+        let idx2 = sample_row_indices(&xy_sheet, &cfg).unwrap();
+        assert_eq!(idx1, idx2);
+        assert_eq!(idx1.len(), 8);
+        assert_eq!(idx1.iter().copied().collect::<BTreeSet<_>>().len(), 8);
+
+        let sampled_xy = random_sample_rows(&xy_sheet, &cfg).unwrap();
+        let TableArchetype::Xy(sxy) = &sampled_xy.archetype else {
+            panic!("expected Xy");
+        };
+        assert_eq!(sxy.row_count(), 8);
+        assert_eq!(sxy.y_subcolumn_mode, SubcolumnMode::RawReplicates(2));
+        for (new_r, &orig_r) in idx1.iter().enumerate() {
+            assert_eq!(sxy.x_value_at(new_r), Some((orig_r + 1) as f64));
+            assert_eq!(sxy.row_titles[new_r], format!("R{orig_r}"));
+            assert_eq!(sxy.data_sets[0].cells[new_r][1].active_number(), Some((orig_r * 10 + 1) as f64));
+        }
+        let expected_note_row = idx1.iter().position(|&r| r == 5);
+        assert_eq!(sampled_xy.exclusion_notes.first().map(|n| n.coord.row), expected_note_row);
+
+        // MultipleVariables stratified sampling (strata sizes 50, 30, 20)
+        let mut mv = MultipleVariablesTable::new(2, 100).unwrap();
+        mv.variables[0].title = String::from("Cohort");
+        mv.variables[0].lock_role(VariableRole::Categorical);
+        mv.variables[1].title = String::from("Biomarker");
+        mv.variables[1].lock_role(VariableRole::Continuous);
+        for r in 0..100 {
+            let stratum = if r < 50 {
+                "North"
+            } else if r < 80 {
+                "South"
+            } else {
+                "West"
+            };
+            mv.variables[0].cells[r] = Cell::text(stratum);
+            mv.variables[1].cells[r] = Cell::number(r as f64);
+        }
+        let mv_sheet = DataSheet::new("mv-pop", "MV Pop", TableArchetype::MultipleVariables(mv)).unwrap();
+
+        // Proportional: 20 rows -> 10 North, 6 South, 4 West
+        let prop_spec = AnalysisSpec::new(
+            "an-sample-prop",
+            "mv-pop",
+            AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
+                seed: 1234,
+                sample_size: 20,
+                stratify_column: Some(0),
+                proportional_allocation: true,
+            }),
+        )
+        .unwrap();
+        let prop_res = execute_analysis_transform(&mv_sheet, &prop_spec, &TransformContext::default()).unwrap();
+        assert_eq!(prop_res.lookup_scalar("sample_size", None), Some(20.0));
+        assert_eq!(prop_res.lookup_scalar("population_size", None), Some(100.0));
+        assert_eq!(prop_res.lookup_scalar("seed", None), Some(1234.0));
+        let prop_data = prop_res.analyzable_data.as_ref().unwrap();
+        let TableArchetype::MultipleVariables(pmv) = &prop_data.archetype else {
+            panic!("expected MultipleVariables");
+        };
+        let mut prop_counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for c in &pmv.variables[0].cells {
+            *prop_counts.entry(c.active_text().unwrap()).or_insert(0) += 1;
+        }
+        assert_eq!(prop_counts.get("North").copied(), Some(10));
+        assert_eq!(prop_counts.get("South").copied(), Some(6));
+        assert_eq!(prop_counts.get("West").copied(), Some(4));
+
+        // Equal allocation across strata: 18 rows -> 6 North, 6 South, 6 West
+        let equal_cfg = RowSampleConfig {
+            seed: 1234,
+            sample_size: 18,
+            stratify_column: Some(0),
+            proportional_allocation: false,
+            output_id: None,
+            output_title: None,
+        };
+        let eq_sheet = random_sample_rows(&mv_sheet, &equal_cfg).unwrap();
+        let TableArchetype::MultipleVariables(emv) = &eq_sheet.archetype else {
+            panic!("expected MultipleVariables");
+        };
+        let mut eq_counts: BTreeMap<&str, usize> = BTreeMap::new();
+        for c in &emv.variables[0].cells {
+            *eq_counts.entry(c.active_text().unwrap()).or_insert(0) += 1;
+        }
+        assert_eq!(eq_counts.get("North").copied(), Some(6));
+        assert_eq!(eq_counts.get("South").copied(), Some(6));
+        assert_eq!(eq_counts.get("West").copied(), Some(6));
+    }
+
+    #[test]
+    fn row_sampling_supports_remaining_archetypes_and_validates_inputs() {
+        let sample_four = |sheet: &DataSheet, seed: u64| -> usize {
+            random_sample_rows(
+                sheet,
+                &RowSampleConfig { seed, sample_size: 4, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None },
+            )
+            .unwrap()
+            .archetype
+            .row_count()
+        };
+
+        let col_sheet = DataSheet::new(
+            "col-pop",
+            "Col",
+            TableArchetype::Column(ColumnTable::new(lumencraft_doc::ColumnDesignHint::UnpairedReplicates, 2, 10).unwrap()),
+        )
+        .unwrap();
+        assert_eq!(sample_four(&col_sheet, 1), 4);
+
+        let grp_sheet =
+            DataSheet::new("grp-pop", "Grp", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(3), 2, 12).unwrap())).unwrap();
+        assert_eq!(sample_four(&grp_sheet, 2), 4);
+
+        let mut ctg = ContingencyTable::new(2, 8).unwrap();
+        for r in 0..8 {
+            ctg.row_titles[r] = format!("Cat{r}");
+            ctg.data_sets[0].cells[r][0] = Cell::number((r + 1) as f64);
+            ctg.data_sets[1].cells[r][0] = Cell::number((r + 2) as f64);
+        }
+        let ctg_sheet = DataSheet::new("ctg-pop", "Ctg", TableArchetype::Contingency(ctg)).unwrap();
+        assert_eq!(sample_four(&ctg_sheet, 3), 4);
+
+        let pow_sheet = DataSheet::new("pow-pop", "PoW", TableArchetype::PartsOfWhole(PartsOfWholeTable::new(1, 9).unwrap())).unwrap();
+        assert_eq!(sample_four(&pow_sheet, 4), 4);
+
+        let srv_sheet = DataSheet::new("srv-pop", "Srv", TableArchetype::Survival(SurvivalTable::new(2, 10).unwrap())).unwrap();
+        assert_eq!(sample_four(&srv_sheet, 5), 4);
+
+        let nst_sheet = DataSheet::new("nst-pop", "Nst", TableArchetype::Nested(NestedTable::new(2, 3, 11).unwrap())).unwrap();
+        assert_eq!(sample_four(&nst_sheet, 6), 4);
+
+        let too_big =
+            RowSampleConfig { seed: 1, sample_size: 11, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
+        assert!(matches!(random_sample_rows(&col_sheet, &too_big), Err(TransformError::InvalidSpec { .. })));
+
+        let zero_sz =
+            RowSampleConfig { seed: 1, sample_size: 0, stratify_column: None, proportional_allocation: false, output_id: None, output_title: None };
+        assert!(matches!(random_sample_rows(&col_sheet, &zero_sz), Err(TransformError::InvalidSpec { .. })));
+
+        let bad_col =
+            RowSampleConfig { seed: 1, sample_size: 4, stratify_column: Some(9), proportional_allocation: true, output_id: None, output_title: None };
+        assert!(matches!(random_sample_rows(&col_sheet, &bad_col), Err(TransformError::InvalidSpec { .. })));
+    }
+
+    #[test]
+    fn proportional_apportionment_clamps_small_stratum_to_one_and_equal_handles_saturation() {
+        let mut mv = MultipleVariablesTable::new(1, 100).unwrap();
+        mv.variables[0].title = String::from("Group");
+        for r in 0..100 {
+            let label = if r < 90 {
+                "Major"
+            } else if r < 99 {
+                "Minor"
+            } else {
+                "Tiny"
+            };
+            mv.variables[0].cells[r] = Cell::text(label);
+        }
+        let sheet = DataSheet::new("stratum-edge", "Stratum Edge", TableArchetype::MultipleVariables(mv)).unwrap();
+
+        let prop_5 = random_sample_rows(
+            &sheet,
+            &RowSampleConfig {
+                seed: 11,
+                sample_size: 5,
+                stratify_column: Some(0),
+                proportional_allocation: true,
+                output_id: None,
+                output_title: None,
+            },
+        )
+        .unwrap();
+        let TableArchetype::MultipleVariables(pmv) = &prop_5.archetype else {
+            panic!("expected MultipleVariables");
+        };
+        let mut counts = BTreeMap::new();
+        for c in &pmv.variables[0].cells {
+            *counts.entry(c.active_text().unwrap()).or_insert(0_usize) += 1;
+        }
+        assert_eq!(counts.get("Major").copied(), Some(3));
+        assert_eq!(counts.get("Minor").copied(), Some(1));
+        assert_eq!(counts.get("Tiny").copied(), Some(1));
+
+        // Equal allocation of 15 across [90, 9, 1] -> Tiny caps at 1, leaving 14 split 7 & 7
+        let eq_15 = random_sample_rows(
+            &sheet,
+            &RowSampleConfig {
+                seed: 12,
+                sample_size: 15,
+                stratify_column: Some(0),
+                proportional_allocation: false,
+                output_id: None,
+                output_title: None,
+            },
+        )
+        .unwrap();
+        let TableArchetype::MultipleVariables(emv) = &eq_15.archetype else {
+            panic!("expected MultipleVariables");
+        };
+        let mut eq_counts = BTreeMap::new();
+        for c in &emv.variables[0].cells {
+            *eq_counts.entry(c.active_text().unwrap()).or_insert(0_usize) += 1;
+        }
+        assert_eq!(eq_counts.get("Tiny").copied(), Some(1));
+        assert_eq!(eq_counts.get("Minor").copied(), Some(7));
+        assert_eq!(eq_counts.get("Major").copied(), Some(7));
+    }
+
+    #[test]
+    fn continuous_simulated_distributions_match_moments_and_mv_mode() {
+        let n = 5_000_usize;
+        let cfg = DistributionSimulationConfig {
+            sheet_id: String::from("sim-cont"),
+            title: String::from("Continuous"),
+            n_rows: n,
+            seed: 2026,
+            columns: vec![
+                SimulatedColumnSpec { name: String::from("Unif"), distribution: SimulatedDistribution::Uniform { min: -2.0, max: 6.0 } },
+                SimulatedColumnSpec { name: String::from("Gauss"), distribution: SimulatedDistribution::Gaussian { mean: 10.0, sd: 2.5 } },
+                SimulatedColumnSpec { name: String::from("LogN"), distribution: SimulatedDistribution::LogNormal { mean_log: 0.5, sd_log: 0.4 } },
+                SimulatedColumnSpec { name: String::from("Exp"), distribution: SimulatedDistribution::Exponential { rate: 0.5 } },
+            ],
+            use_multiple_variables: false,
+        };
+
+        let sheet_a = simulate_distribution_columns(&cfg).unwrap();
+        let sheet_b = simulate_distribution_columns(&cfg).unwrap();
+        assert_eq!(sheet_a, sheet_b);
+
+        let TableArchetype::Column(col_tbl) = &sheet_a.archetype else {
+            panic!("expected Column table");
+        };
+        assert_eq!(col_tbl.data_sets.len(), 4);
+        assert_eq!(col_tbl.row_count(), n);
+
+        // Uniform(-2, 6): mean = 2.0, var = 64/12
+        let u = col_tbl.active_column_values(0);
+        assert!(u.iter().all(|&x| (-2.0..6.0).contains(&x)));
+        let mu = SummaryMoments::from_slice(&u).unwrap();
+        assert!((mu.mean - 2.0).abs() < 0.16, "uniform mean={}", mu.mean);
+        assert!((mu.sample_variance().unwrap() - (64.0 / 12.0)).abs() < 0.35);
+
+        // Gaussian(10, 2.5): mean = 10.0, var = 6.25
+        let g = col_tbl.active_column_values(1);
+        let mg = SummaryMoments::from_slice(&g).unwrap();
+        assert!((mg.mean - 10.0).abs() < 0.18, "gauss mean={}", mg.mean);
+        assert!((mg.sample_variance().unwrap() - 6.25).abs() < 0.63);
+
+        // LogNormal(0.5, 0.4): mean = exp(0.58), var = (exp(0.16)-1)*exp(1.16)
+        let ln_vals = col_tbl.active_column_values(2);
+        assert!(ln_vals.iter().all(|&x| x > 0.0));
+        let mln = SummaryMoments::from_slice(&ln_vals).unwrap();
+        let exp_mean = (0.58_f64).exp();
+        let exp_var = (0.16_f64.exp() - 1.0) * (1.16_f64).exp();
+        assert!((mln.mean - exp_mean).abs() < 0.06, "logn mean={} vs {exp_mean}", mln.mean);
+        assert!((mln.sample_variance().unwrap() - exp_var).abs() < 0.10);
+
+        // Exponential(0.5): mean = 2.0, var = 4.0
+        let ex = col_tbl.active_column_values(3);
+        assert!(ex.iter().all(|&x| x > 0.0));
+        let mex = SummaryMoments::from_slice(&ex).unwrap();
+        assert!((mex.mean - 2.0).abs() < 0.15, "exp mean={}", mex.mean);
+        assert!((mex.sample_variance().unwrap() - 4.0).abs() < 0.80);
+
+        // MultipleVariables output mode
+        let mut mv_cfg = cfg;
+        mv_cfg.use_multiple_variables = true;
+        mv_cfg.n_rows = 12;
+        let mv_sheet = simulate_distribution_columns(&mv_cfg).unwrap();
+        let TableArchetype::MultipleVariables(mv) = &mv_sheet.archetype else {
+            panic!("expected MultipleVariables");
+        };
+        assert_eq!(mv.variables.len(), 4);
+        assert_eq!(mv.row_count(), 12);
+        assert_eq!(mv.variables[0].role, VariableRole::Continuous);
+    }
+
+    #[test]
+    fn discrete_simulated_distributions_match_moments_and_bounds() {
+        let n = 5_000_usize;
+        let cfg = DistributionSimulationConfig {
+            sheet_id: String::from("sim-disc"),
+            title: String::from("Discrete"),
+            n_rows: n,
+            seed: 271_828,
+            columns: vec![
+                SimulatedColumnSpec { name: String::from("BinomSmall"), distribution: SimulatedDistribution::Binomial { trials: 20, p: 0.3 } },
+                SimulatedColumnSpec { name: String::from("BinomLarge"), distribution: SimulatedDistribution::Binomial { trials: 500, p: 0.72 } },
+                SimulatedColumnSpec { name: String::from("BinomGeo"), distribution: SimulatedDistribution::Binomial { trials: 10_000, p: 0.0005 } },
+                SimulatedColumnSpec { name: String::from("PoisSmall"), distribution: SimulatedDistribution::Poisson { lambda: 4.5 } },
+                SimulatedColumnSpec { name: String::from("PoisLarge"), distribution: SimulatedDistribution::Poisson { lambda: 1_000.0 } },
+                SimulatedColumnSpec { name: String::from("PoisZero"), distribution: SimulatedDistribution::Poisson { lambda: 0.0 } },
+                SimulatedColumnSpec { name: String::from("BinomZero"), distribution: SimulatedDistribution::Binomial { trials: 50, p: 0.0 } },
+                SimulatedColumnSpec { name: String::from("BinomOne"), distribution: SimulatedDistribution::Binomial { trials: 50, p: 1.0 } },
+            ],
+            use_multiple_variables: false,
+        };
+
+        let sheet = simulate_distribution_columns(&cfg).unwrap();
+        let TableArchetype::Column(col_tbl) = &sheet.archetype else {
+            panic!("expected Column table");
+        };
+
+        let bs = col_tbl.active_column_values(0);
+        assert!(bs.iter().all(|&x| (0.0..=20.0).contains(&x) && x.fract() == 0.0));
+        let mbs = SummaryMoments::from_slice(&bs).unwrap();
+        assert!((mbs.mean - 6.0).abs() < 0.15, "binom small mean={}", mbs.mean);
+        assert!((mbs.sample_variance().unwrap() - 4.2).abs() < 0.42);
+
+        let bl = col_tbl.active_column_values(1);
+        assert!(bl.iter().all(|&x| (0.0..=500.0).contains(&x) && x.fract() == 0.0));
+        let mbl = SummaryMoments::from_slice(&bl).unwrap();
+        assert!((mbl.mean - 360.0).abs() < 0.71, "binom large mean={}", mbl.mean);
+        assert!((mbl.sample_variance().unwrap() - 100.8).abs() < 10.1);
+
+        let bg = col_tbl.active_column_values(2);
+        assert!(bg.iter().all(|&x| (0.0..=10_000.0).contains(&x) && x.fract() == 0.0));
+        let mbg = SummaryMoments::from_slice(&bg).unwrap();
+        assert!((mbg.mean - 5.0).abs() < 0.16, "binom geo mean={}", mbg.mean);
+        assert!((mbg.sample_variance().unwrap() - 4.9975).abs() < 0.55);
+
+        let ps = col_tbl.active_column_values(3);
+        assert!(ps.iter().all(|&x| x >= 0.0 && x.fract() == 0.0));
+        let mps = SummaryMoments::from_slice(&ps).unwrap();
+        assert!((mps.mean - 4.5).abs() < 0.15, "pois small mean={}", mps.mean);
+        assert!((mps.sample_variance().unwrap() - 4.5).abs() < 0.48);
+
+        let pl = col_tbl.active_column_values(4);
+        assert!(pl.iter().all(|&x| x >= 0.0 && x.fract() == 0.0));
+        let mpl = SummaryMoments::from_slice(&pl).unwrap();
+        assert!((mpl.mean - 1000.0).abs() < 2.24, "pois large mean={}", mpl.mean);
+        assert!((mpl.sample_variance().unwrap() - 1000.0).abs() < 100.0);
+
+        assert!(col_tbl.active_column_values(5).iter().all(|&x| x == 0.0));
+        assert!(col_tbl.active_column_values(6).iter().all(|&x| x == 0.0));
+        assert!(col_tbl.active_column_values(7).iter().all(|&x| x == 50.0));
+    }
+
+    #[test]
+    fn simulated_distribution_parameter_validation_errors() {
+        let base = |dist: SimulatedDistribution| DistributionSimulationConfig {
+            sheet_id: String::from("bad"),
+            title: String::from("Bad"),
+            n_rows: 10,
+            seed: 1,
+            columns: vec![SimulatedColumnSpec { name: String::from("X"), distribution: dist }],
+            use_multiple_variables: false,
+        };
+
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::Uniform { min: 5.0, max: 5.0 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::Uniform { min: 6.0, max: 2.0 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::Gaussian { mean: 0.0, sd: -1.0 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::LogNormal { mean_log: 0.0, sd_log: -0.1 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::Binomial { trials: 10, p: 1.2 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::Binomial { trials: 10, p: -0.01 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::Poisson { lambda: -0.5 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::Exponential { rate: 0.0 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+        assert!(matches!(
+            simulate_distribution_columns(&base(SimulatedDistribution::Exponential { rate: -2.0 })),
+            Err(TransformError::InvalidSpec { .. })
+        ));
+    }
+}

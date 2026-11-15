@@ -13,8 +13,8 @@ use std::fmt;
 
 pub use glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, outline_rich_text};
 pub use markup::{
-    BidiRun, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, expand_template_hooks, is_rtl_locale,
-    parse_markup, reorder_visual_bidi, shape_bidi_runs,
+    BidiRun, EquationSegment, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, expand_template_hooks,
+    is_rtl_locale, parse_equation_segments, parse_markup, reorder_visual_bidi, shape_bidi_runs,
 };
 pub use metrics::{
     TextMetricsPt, TrueTypeFont, TrueTypeFontInfo, build_minimal_truetype_font, has_bundled_or_ttf_font, measure_text_pt, parse_truetype_font_info,

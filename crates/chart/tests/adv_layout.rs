@@ -5,11 +5,12 @@ use lumencraft_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
 use lumencraft_chart::{compile_graph, compile_layout};
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, AxisSpec, AxisThreshold, Cell, ColorChannelMapping, ColumnDesignHint, ColumnTable, ConstantValue,
-    ContingencyTable, DataSheet, DiagnosticPlotKind, ErrorBarSpec, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject, GroupedArrangement,
-    InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LevelOrderKind, LevelOrderSpec, MultipleVariablesTable, MultiplicitySpec,
-    MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, PartsOfWholeLayout, PartsOfWholeTable, ProjectDocument, RectPt as DocRectPt,
-    ReplicateOverlayStyle, RocCiMethod, RocSpec, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, SurvivalAnalysisSpec, SurvivalTable,
-    TableArchetype, VariableRole, WhiskerMethod, XyTable,
+    ContingencyTable, DataSheet, DiagnosticPlotKind, EquationDisplayMode, ErrorBarSpec, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject,
+    GroupedArrangement, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LevelOrderKind, LevelOrderSpec, LinearRegressionSpec,
+    MultipleVariablesTable, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, PartsOfWholeLayout,
+    PartsOfWholeTable, ProjectDocument, RectPt as DocRectPt, ReplicateOverlayStyle, ResultScalarEntry, ResultSheet, ResultStatus, RocCiMethod,
+    RocSpec, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, SurvivalAnalysisSpec, SurvivalTable, TableArchetype, VariableRole,
+    WhiskerMethod, XyTable,
 };
 use lumencraft_palette::{ColorRamp, ColormapId, LineDashStyle, PaletteId, Rgba8};
 use lumencraft_stats::{multivariate::run_multivariate_analysis, roc::run_roc_analysis, survival::run_survival_analysis};
@@ -584,4 +585,37 @@ fn find_vertical_spine_x(scene: &ChartScene, y_min: f64, y_max: f64) -> Option<f
         }
         _ => None,
     })
+}
+
+#[test]
+fn survival_graph_renders_model_equation_annotation() -> TestResult {
+    let (mut doc, mut g) = build_survival_doc(false)?;
+    let lin_spec = AnalysisSpec::new("res-surv-lin", "surv-data", AnalysisKind::LinearRegression(LinearRegressionSpec::default()))?;
+    let mut lin_res = ResultSheet::new(lin_spec)?;
+    lin_res.status = ResultStatus::UpToDate;
+    lin_res.scalars = vec![
+        ResultScalarEntry { key: String::from("Slope"), data_set_index: Some(0), value: -0.045, units: None },
+        ResultScalarEntry { key: String::from("YIntercept"), data_set_index: Some(0), value: 0.98, units: None },
+    ];
+    doc.result_sheets.push(lin_res);
+    g.spec.annotations.push(GraphAnnotation::ModelEquation {
+        result_sheet_id: SheetId::new("res-surv-lin"),
+        data_set_index: 0,
+        mode: EquationDisplayMode::Substituted,
+        bounds_pt: DocRectPt::new(140.0, 50.0, 150.0, 26.0),
+        font_size_pt: 9.0,
+        bordered: true,
+    });
+    let scene = compile_graph(&g, &doc)?;
+    let joined: String = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join(" | ");
+    assert!(joined.contains("0.045") && joined.contains("0.98"), "joined={joined}");
+    Ok(())
 }

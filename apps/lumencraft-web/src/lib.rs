@@ -13,6 +13,14 @@ use lumencraft_format::{
 use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use lumencraft_ui_egui::serde_json::{self, Value, json};
 use lumencraft_ui_egui::theme::install_fonts;
+pub mod host_adapters;
+
+pub use host_adapters::{
+    AUTOSAVE_KEY_PREFIX, AutosaveSaveOutcome, DEFAULT_LOCK_LEASE_TTL_MS, DirectorySyncPlan, FileSystemAccessBridge, LockAcquisition,
+    LockReleaseOutcome, MemoryWebStorage, PREFERENCES_STORAGE_KEY, QUOTA_BUDGET_BYTES, TabAccessMode, TouchGestureRecognizer, TouchPoint,
+    WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebClipboardPayload, WebLockCoordinator, WebStorageBackend,
+    WebStorageManager,
+};
 pub use lumencraft_ui_egui::{
     CanvasPreviewFilter, KeyModifiers, PointerButton, RasterImage, RenderError, RenderTargetSpec, UiApp, UiEventOutcome, UiInputEvent,
     ViewportMetrics, VirtualWorkspaceFolder, WorkspaceHitTarget, WorkspaceLayoutMap,
@@ -41,6 +49,7 @@ pub struct WorkspaceSummary {
 
 /// Pure-Rust in-memory web & WASM host wrapping [`UiApp`], [`ViewportMetrics`], and
 /// [`VirtualWorkspaceFolder`].
+#[derive(Debug, Clone)]
 pub struct WebWorkspaceHost {
     app: UiApp,
     viewport: ViewportMetrics,

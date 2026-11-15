@@ -695,12 +695,36 @@ fn is_preview_only_convert(params: &serde_json::Value) -> bool {
         .any(|key| params.get(key).and_then(serde_json::Value::as_bool) == Some(true))
 }
 
+/// Execution channel restriction for interactive vs. direct automation callers (`docs/gui-workflows.md` §1).
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GuiOnlyPolicy {
+    /// Default mode: all callers (`Ui`, `Mcp`, `Control`, `Cli`, `Replay`) may invoke commands directly.
+    #[default]
+    Disabled,
+    /// Strict GUI-only mode: non-UI automation callers (`Mcp`, `Control`, `Cli`) may invoke only
+    /// strictly read-only inspection commands; direct domain mutations, computes, and file writes
+    /// return [`ErrorCode::GuiOnlyViolation`].
+    Strict,
+}
+
+fn is_strict_gui_only_allowed(spec: &cmd::CommandSpec, caller: Caller, params: &serde_json::Value) -> bool {
+    if !matches!(caller, Caller::Mcp | Caller::Control | Caller::Cli) {
+        return true;
+    }
+    if spec.id == "table.convertArchetype" && is_preview_only_convert(params) {
+        return true;
+    }
+    spec.effects.read_only_hint() && !spec.effects.contains(cmd::Effects::READS_FILESYSTEM)
+}
+
 /// Stateful project session owning undo/redo history, dirty tracking, and guarded command execution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Session {
     doc: ProjectDocument,
     file_path: Option<PathBuf>,
     dirty: bool,
+    gui_only: GuiOnlyPolicy,
     undo_stack: VecDeque<UndoEntry>,
     redo_stack: Vec<ProjectDocument>,
 }
@@ -807,7 +831,34 @@ impl Session {
     #[must_use]
     pub fn from_document(mut document: ProjectDocument) -> Self {
         let _ = lumencraft_format::sanitize_circular_hooks(&mut document);
-        Self { doc: document, file_path: None, dirty: false, undo_stack: VecDeque::new(), redo_stack: Vec::new() }
+        Self { doc: document, file_path: None, dirty: false, gui_only: GuiOnlyPolicy::Disabled, undo_stack: VecDeque::new(), redo_stack: Vec::new() }
+    }
+
+    /// Return the active [`GuiOnlyPolicy`] restricting direct non-UI command execution.
+    #[must_use]
+    pub const fn gui_only(&self) -> GuiOnlyPolicy {
+        self.gui_only
+    }
+
+    /// Set the active [`GuiOnlyPolicy`] on this session.
+    pub fn set_gui_only(&mut self, policy: GuiOnlyPolicy) {
+        self.gui_only = policy;
+    }
+
+    /// Builder helper returning this session configured with `policy`.
+    #[must_use]
+    pub const fn with_gui_only(mut self, policy: GuiOnlyPolicy) -> Self {
+        self.gui_only = policy;
+        self
+    }
+
+    /// Execute an engine command explicitly on behalf of the GUI (`Caller::Ui`), bypassing `GuiOnlyPolicy::Strict`.
+    ///
+    /// # Errors
+    /// Returns [`EngineError`] if the command fails validation, preconditions, or panics inside the guard boundary.
+    pub fn execute_as_ui(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
+        let cancelled = AtomicBool::new(false);
+        self.execute_with_caller(command_id, params, Caller::Ui, &cancelled)
     }
 
     /// Borrow the active [`ProjectDocument`].
@@ -910,6 +961,14 @@ impl Session {
         caller: Caller,
         cancelled: &AtomicBool,
     ) -> Result<CommandOutcome, EngineError> {
+        if self.gui_only == GuiOnlyPolicy::Strict && !is_strict_gui_only_allowed(spec, caller, &params) {
+            return Err(EngineError::with_code(
+                ErrorCode::GuiOnlyViolation,
+                format!("command `{}` cannot be executed directly by `{caller:?}` under strict gui_only policy", spec.id),
+            )
+            .with_remediation("Blocked by --gui-only: drive the interface through GUI actions instead of direct domain commands.")
+            .with_details(json!({ "command_id": spec.id, "caller": caller })));
+        }
         if !(spec.enabled)(self) {
             return Err(EngineError::with_code(ErrorCode::Conflict, format!("command `{}` is currently disabled", spec.id))
                 .with_details(json!({ "command_id": spec.id })));
@@ -994,10 +1053,12 @@ impl Session {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::SheetId;
+    use std::sync::atomic::AtomicBool;
+
+    use lumencraft_doc::{ErrorCode, SheetId};
     use serde_json::json;
 
-    use super::{EngineError, Session, cmd};
+    use super::{Caller, EngineError, GuiOnlyPolicy, Session, cmd};
 
     #[test]
     fn engine_error_formats_message() {
@@ -1025,5 +1086,42 @@ mod tests {
         assert!(session.undo().expect("undo cell"));
         assert!(session.redo().expect("redo cell"));
         session.recalculate_all().expect("recalculate");
+    }
+
+    #[test]
+    fn gui_only_policy_blocks_non_ui_mutations_while_allowing_ui_and_inspection() {
+        let mut session = Session::new().with_gui_only(GuiOnlyPolicy::Strict);
+        assert_eq!(session.gui_only(), GuiOnlyPolicy::Strict);
+        let cancelled = AtomicBool::new(false);
+
+        for blocked_caller in [Caller::Mcp, Caller::Control, Caller::Cli] {
+            let err = session
+                .execute_with_caller("sheet.createData", json!({ "sheet_id": "d1" }), blocked_caller, &cancelled)
+                .expect_err("mutating command should fail in Strict mode");
+            assert_eq!(err.code, ErrorCode::GuiOnlyViolation);
+            assert!(err.remediation.as_deref().unwrap_or("").contains("Blocked by --gui-only"));
+
+            let inspect = session
+                .execute_with_caller("project.inspect", json!({}), blocked_caller, &cancelled)
+                .expect("read-only project inspection remains permitted");
+            assert!(!inspect.mutated);
+        }
+
+        let created = session
+            .execute_as_ui("sheet.createData", json!({ "sheet_id": "d1", "title": "UI Created", "graph_sheet_id": "g1" }))
+            .expect("UI caller always allowed");
+        assert!(created.mutated);
+
+        // Compute and export commands are also blocked for non-UI callers under Strict policy.
+        let compute_err = session
+            .execute_with_caller("analysis.run", json!({ "data_sheet_id": "d1", "kind": "descriptive_stats" }), Caller::Mcp, &cancelled)
+            .expect_err("direct analysis compute blocked for MCP");
+        assert_eq!(compute_err.code, ErrorCode::GuiOnlyViolation);
+
+        session.set_gui_only(GuiOnlyPolicy::Disabled);
+        assert_eq!(session.gui_only(), GuiOnlyPolicy::Disabled);
+        session
+            .execute_with_caller("table.setCell", json!({ "sheet_id": "d1", "row": 0, "col": 0, "value": 3.5 }), Caller::Cli, &cancelled)
+            .expect("Disabled policy allows Cli again");
     }
 }

@@ -155,9 +155,31 @@ pub fn handle_list_toolsets(state: &McpServerState) -> Result<ToolCallResult, To
         }));
     }
 
-    let enabled_groups: Vec<&'static str> = enabled.iter().copied().map(CommandGroup::as_str).collect();
+    let gui_list = crate::gui_tools::list_gui_tools();
+    let gui_summaries: Vec<Value> = gui_list
+        .iter()
+        .map(|tool| {
+            json!({
+                "name": tool.name,
+                "description": tool.description,
+                "annotations": tool.annotations,
+            })
+        })
+        .collect();
+
+    let mut enabled_groups: Vec<&'static str> = enabled.iter().copied().map(CommandGroup::as_str).collect();
+    if state.is_gui_toolset_enabled() {
+        enabled_groups.push("gui");
+    }
     ToolCallResult::ok_json(&json!({
         "toolsets": toolsets,
+        "gui_toolset": {
+            "group": "gui",
+            "title": "GUI Automation",
+            "enabled": state.is_gui_toolset_enabled(),
+            "tool_count": gui_summaries.len(),
+            "tools": gui_summaries,
+        },
         "enabled_groups": enabled_groups,
         "total_engine_commands": reg.len(),
     }))
@@ -170,19 +192,28 @@ pub fn handle_enable_toolset(state: &mut McpServerState, args: &Map<String, Valu
     let requested = collect_requested_groups(args)?;
 
     let mut any_changed = false;
-    let mut target_names = Vec::with_capacity(requested.len());
-    for group in requested {
+    let mut target_names = Vec::with_capacity(requested.groups.len() + usize::from(requested.include_gui));
+    for group in requested.groups {
         if state.set_toolset_enabled(group, enable_flag) {
             any_changed = true;
         }
         target_names.push(group.as_str());
+    }
+    if requested.include_gui {
+        if state.set_gui_toolset_enabled(enable_flag) {
+            any_changed = true;
+        }
+        target_names.push("gui");
     }
 
     if any_changed {
         state.queue_tools_list_changed();
     }
 
-    let enabled_groups: Vec<&'static str> = state.enabled_toolsets().iter().copied().map(CommandGroup::as_str).collect();
+    let mut enabled_groups: Vec<&'static str> = state.enabled_toolsets().iter().copied().map(CommandGroup::as_str).collect();
+    if state.is_gui_toolset_enabled() {
+        enabled_groups.push("gui");
+    }
     ToolCallResult::ok_json(&json!({
         "changed": any_changed,
         "enabled": enable_flag,
@@ -191,17 +222,31 @@ pub fn handle_enable_toolset(state: &mut McpServerState, args: &Map<String, Valu
     }))
 }
 
-fn collect_requested_groups(args: &Map<String, Value>) -> Result<Vec<CommandGroup>, ToolCallError> {
+struct RequestedToolsets {
+    groups: Vec<CommandGroup>,
+    include_gui: bool,
+}
+
+fn push_group_token(raw: &str, selected: &mut BTreeSet<CommandGroup>, include_gui: &mut bool) -> Result<(), ToolCallError> {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("all") {
+        for &group in CommandGroup::all() {
+            selected.insert(group);
+        }
+    } else if trimmed.eq_ignore_ascii_case("gui") {
+        *include_gui = true;
+    } else {
+        selected.insert(parse_command_group(trimmed)?);
+    }
+    Ok(())
+}
+
+fn collect_requested_groups(args: &Map<String, Value>) -> Result<RequestedToolsets, ToolCallError> {
     let mut selected = BTreeSet::new();
+    let mut include_gui = false;
 
     if let Some(single) = crate::tools::optional_non_empty_str(args, "group")? {
-        if single.eq_ignore_ascii_case("all") {
-            for &group in CommandGroup::all() {
-                selected.insert(group);
-            }
-        } else {
-            selected.insert(parse_command_group(&single)?);
-        }
+        push_group_token(&single, &mut selected, &mut include_gui)?;
     }
 
     if let Some(raw_arr) = args.get("groups")
@@ -210,19 +255,13 @@ fn collect_requested_groups(args: &Map<String, Value>) -> Result<Vec<CommandGrou
         let arr = raw_arr.as_array().ok_or_else(|| ToolCallError::InvalidParams(String::from("parameter \"groups\" must be an array")))?;
         for (idx, item) in arr.iter().enumerate() {
             let s = item.as_str().ok_or_else(|| ToolCallError::InvalidParams(format!("groups[{idx}] must be a string")))?;
-            if s.trim().eq_ignore_ascii_case("all") {
-                for &group in CommandGroup::all() {
-                    selected.insert(group);
-                }
-            } else {
-                selected.insert(parse_command_group(s)?);
-            }
+            push_group_token(s, &mut selected, &mut include_gui)?;
         }
     }
 
-    if selected.is_empty() {
+    if selected.is_empty() && !include_gui {
         return Err(ToolCallError::InvalidParams(String::from("enable_toolset requires \"group\" or non-empty \"groups\"")));
     }
 
-    Ok(selected.into_iter().collect())
+    Ok(RequestedToolsets { groups: selected.into_iter().collect(), include_gui })
 }

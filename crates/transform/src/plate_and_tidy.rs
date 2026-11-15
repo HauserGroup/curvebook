@@ -6,7 +6,7 @@ use std::fmt::{self, Write as _};
 
 use lumencraft_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, FloatingNote, GroupedTable, MultipleVariablesTable,
-    RectPt, SubcolumnMode, TableArchetype, XColumnMode, XyTable, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    RectPt, SubcolumnMode, TableArchetype, TableKind, XColumnMode, XyTable, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 use lumencraft_math::sum::SummaryMoments;
 use serde::de::{self, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
@@ -264,6 +264,9 @@ pub fn map_plate_to_datasheet(
         TargetArchetypeKind::Grouped => build_plate_grouped_sheet(title, template, &collected),
         TargetArchetypeKind::Column => build_plate_column_sheet(title, template, &collected, subtract_blank_mean),
         TargetArchetypeKind::MultipleVariables => build_plate_mv_sheet(title, geometry, values, template, &collected),
+        TargetArchetypeKind::Contingency => {
+            Err(TransformError::IncompatibleTable { operation: "map_plate_to_datasheet", kind: TableKind::Contingency })
+        }
     }
 }
 
@@ -700,6 +703,9 @@ pub fn pivot_tidy_long_to_datasheet(
         TargetArchetypeKind::Xy => pivot_tidy_to_xy(title, headers, mapping, &records),
         TargetArchetypeKind::Grouped => pivot_tidy_to_grouped(title, headers, mapping, &records),
         TargetArchetypeKind::MultipleVariables => pivot_tidy_to_mv(title, headers, mapping, &records),
+        TargetArchetypeKind::Contingency => {
+            Err(TransformError::IncompatibleTable { operation: "pivot_tidy_long_to_datasheet", kind: TableKind::Contingency })
+        }
     }
 }
 

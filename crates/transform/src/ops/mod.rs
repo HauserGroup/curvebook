@@ -1,4 +1,4 @@
-//! Execution engine for all seven [`TransformAnalysisSpec`] operations (`docs/data-tables-and-transforms.md` §5).
+//! Execution engine for all eight [`TransformAnalysisSpec`] operations (`docs/data-tables-and-transforms.md` §5, `docs/calculators-and-quick-stats.md` §4).
 
 pub mod math;
 pub mod normalize_baseline;
@@ -14,6 +14,7 @@ use lumencraft_doc::{
 };
 
 use crate::error::TransformError;
+use crate::randomize::{RowSampleConfig, random_sample_rows};
 use crate::simulate::simulate_xy_sheet;
 
 /// External context (linked `InfoSheet`, upstream `ResultSheet`s, `DataSheet`s, and column slice)
@@ -168,6 +169,38 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
                 Vec::new(),
             );
             Ok(TransformOutput { data_sheet, summary_tab, scalars: Vec::new(), warnings: Vec::new() })
+        }
+        TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation } => {
+            let (id, title) = ctx.derived_ids(source, "sample", "Random sample");
+            let population_size = source.archetype.row_count();
+            let config = RowSampleConfig {
+                seed: *seed,
+                sample_size: *sample_size,
+                stratify_column: *stratify_column,
+                proportional_allocation: *proportional_allocation,
+                output_id: Some(id),
+                output_title: Some(title),
+            };
+            let data_sheet = random_sample_rows(source, &config)?;
+            let stratify_label = stratify_column
+                .map_or_else(|| String::from("None"), |c| column_title_at(&source.archetype, c).map_or_else(|| format!("Column {c}"), str::to_owned));
+            let summary_tab = build_summary_tab(
+                "Random sample summary",
+                vec![
+                    ("Sample size", ResultCell::Number { value: *sample_size as f64, prefix: None, units: None }),
+                    ("Population size", ResultCell::Number { value: population_size as f64, prefix: None, units: None }),
+                    ("Seed", ResultCell::Number { value: *seed as f64, prefix: None, units: None }),
+                    ("Stratify column", ResultCell::Text(stratify_label)),
+                    ("Proportional allocation", ResultCell::Boolean(*proportional_allocation)),
+                ],
+                Vec::new(),
+            );
+            let scalars = vec![
+                ResultScalarEntry { key: String::from("sample_size"), data_set_index: None, value: *sample_size as f64, units: None },
+                ResultScalarEntry { key: String::from("population_size"), data_set_index: None, value: population_size as f64, units: None },
+                ResultScalarEntry { key: String::from("seed"), data_set_index: None, value: *seed as f64, units: None },
+            ];
+            Ok(TransformOutput { data_sheet, summary_tab, scalars, warnings: Vec::new() })
         }
     }
 }

@@ -191,6 +191,94 @@ pub fn write_os_pasteboard(text: &str) -> Result<OsAdapterStatus, String> {
 ///
 /// # Errors
 /// Returns an error if the bundle contains no valid payload or if an available clipboard adapter fails.
+/// Build a Windows `CF_HTML` clipboard payload (`Version:0.9`) with 10-digit UTF-8 byte offsets.
+#[must_use]
+pub fn build_cf_html_payload(html_fragment: &str) -> String {
+    const START_MARK: &str = "<!--StartFragment-->";
+    const END_MARK: &str = "<!--EndFragment-->";
+    const HEADER_TEMPLATE_LEN: usize = 105;
+
+    let (body_html, frag_start_rel, frag_end_rel) = if let Some(s) = html_fragment.find(START_MARK)
+        && let Some(e_rel) = html_fragment[s + START_MARK.len()..].find(END_MARK)
+    {
+        let fs = s + START_MARK.len();
+        (html_fragment.to_owned(), fs, fs + e_rel)
+    } else {
+        let lower = html_fragment.to_ascii_lowercase();
+        if let Some(body_open) = lower.find("<body")
+            && let Some(gt_rel) = lower[body_open..].find('>')
+            && let Some(body_close) = lower.rfind("</body>")
+            && body_open + gt_rel < body_close
+        {
+            let insert_start = body_open + gt_rel + 1;
+            let inner = &html_fragment[insert_start..body_close];
+            let wrapped = format!("{}{}{START_MARK}{inner}{END_MARK}{}", &html_fragment[..insert_start], "", &html_fragment[body_close..]);
+            let fs = insert_start + START_MARK.len();
+            let fe = fs + inner.len();
+            (wrapped, fs, fe)
+        } else {
+            let prefix = "<!DOCTYPE html>\r\n<html>\r\n<body>\r\n<!--StartFragment-->";
+            let suffix = "<!--EndFragment-->\r\n</body>\r\n</html>";
+            let wrapped = format!("{prefix}{html_fragment}{suffix}");
+            let fs = prefix.len();
+            let fe = fs + html_fragment.len();
+            (wrapped, fs, fe)
+        }
+    };
+
+    let start_html = HEADER_TEMPLATE_LEN;
+    let end_html = start_html + body_html.len();
+    let start_fragment = start_html + frag_start_rel;
+    let end_fragment = start_html + frag_end_rel;
+    let header = format!(
+        "Version:0.9\r\nStartHTML:{start_html:010}\r\nEndHTML:{end_html:010}\r\nStartFragment:{start_fragment:010}\r\nEndFragment:{end_fragment:010}\r\n"
+    );
+    debug_assert_eq!(header.len(), HEADER_TEMPLATE_LEN);
+    format!("{header}{body_html}")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+static STAGE_DIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(not(target_arch = "wasm32"))]
+struct StageDirGuard {
+    path: std::path::PathBuf,
+    disarmed: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl StageDirGuard {
+    fn create(prefix: &str) -> Result<Self, String> {
+        let seq = STAGE_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!("lumencraft-{prefix}-{pid}-{seq}"));
+        std::fs::create_dir_all(&path).map_err(|err| format!("failed to create staging dir '{}': {err}", path.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+        }
+        Ok(Self { path, disarmed: false })
+    }
+
+    fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for StageDirGuard {
+    fn drop(&mut self) {
+        if !self.disarmed {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 pub fn write_os_clipboard_bundle(bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
     let flavors = bundle.available_flavors();
@@ -198,11 +286,539 @@ pub fn write_os_clipboard_bundle(bundle: &ClipboardBundle) -> Result<OsAdapterSt
         return Err(String::from("cannot write empty clipboard bundle to OS pasteboard"));
     }
     let primary_text = if !bundle.svg.is_empty() { bundle.svg.as_str() } else { bundle.html.as_str() };
-    let candidates = os_pasteboard_write_candidates();
-    if candidates.is_empty() {
+    write_os_clipboard_bundle_platform(bundle, primary_text, &flavors)
+}
+
+#[cfg(target_os = "macos")]
+fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &str, flavors: &[&str]) -> Result<OsAdapterStatus, String> {
+    const JXA_WRITE_PASTEBOARD: &str = "\
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+function run(argv) {
+  var mapping = [
+    ['com.adobe.pdf', argv[0]],
+    ['public.png', argv[1]],
+    ['public.svg-image', argv[2]],
+    ['public.html', argv[3]],
+    ['public.utf8-plain-text', argv[4]]
+  ];
+  var types = $.NSMutableArray.alloc.init;
+  var payloads = [];
+  for (var i = 0; i < mapping.length; i++) {
+    var uti = mapping[i][0];
+    var path = mapping[i][1];
+    if (!path || path.length === 0) continue;
+    var data = $.NSData.dataWithContentsOfFile($(path));
+    if (data && !data.isNil() && Number(data.length) > 0) {
+      types.addObject($(uti));
+      payloads.push([uti, data]);
+    }
+  }
+  if (payloads.length === 0) return '0';
+  var pb = $.NSPasteboard.generalPasteboard;
+  pb.clearContents;
+  pb.declareTypesOwner(types, $());
+  var wrote = 0;
+  for (var j = 0; j < payloads.length; j++) {
+    if (pb.setDataForType(payloads[j][1], $(payloads[j][0]))) {
+      wrote++;
+    }
+  }
+  return String(wrote);
+}";
+
+    let stage_dir = StageDirGuard::create("pb-write")?;
+    let pdf_arg = stage_optional_file(stage_dir.path(), "clip.pdf", &bundle.pdf_bytes)?;
+    let png_arg = stage_optional_file(stage_dir.path(), "clip.png", &bundle.png_bytes)?;
+    let svg_arg = stage_optional_file(stage_dir.path(), "clip.svg", bundle.svg.as_bytes())?;
+    let html_arg = stage_optional_file(stage_dir.path(), "clip.html", bundle.html.as_bytes())?;
+    let txt_arg = stage_optional_file(stage_dir.path(), "clip.txt", primary_text.as_bytes())?;
+
+    let candidate = OsCommandCandidate {
+        program: String::from("/usr/bin/osascript"),
+        args: vec![
+            String::from("-l"),
+            String::from("JavaScript"),
+            String::from("-e"),
+            String::from(JXA_WRITE_PASTEBOARD),
+            pdf_arg,
+            png_arg,
+            svg_arg,
+            html_arg,
+            txt_arg,
+        ],
+    };
+    if let Ok(CandidateOutcome::Completed(output)) = run_candidate(&candidate, None, ProcessBounds::default()) {
+        let wrote_count = String::from_utf8_lossy(&output.stdout).trim().parse::<usize>().unwrap_or(0);
+        if wrote_count > 0 {
+            return Ok(OsAdapterStatus {
+                available: true,
+                availability: OsAdapterAvailability::Submitted,
+                backend: String::from("osascript-nspasteboard"),
+                detail: format!("wrote {} pasteboard flavors ({wrote_count} UTIs: {})", flavors.len(), flavors.join(", ")),
+                text: None,
+                job_id: None,
+            });
+        }
+    }
+
+    drop(stage_dir);
+    let fallback_candidates = os_pasteboard_write_candidates();
+    if fallback_candidates.is_empty() {
         return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
     }
-    write_os_clipboard_bundle_with(&candidates, bundle, primary_text, &flavors)
+    write_os_clipboard_bundle_with(&fallback_candidates, bundle, primary_text, flavors)
+}
+
+#[cfg(target_os = "windows")]
+fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &str, flavors: &[&str]) -> Result<OsAdapterStatus, String> {
+    const PS_WRITE_PASTEBOARD: &str = r#"param(
+  [string]$EmfPath,
+  [string]$PngPath,
+  [string]$HtmlPath,
+  [string]$SvgPath,
+  [string]$TxtPath
+)
+Add-Type -AssemblyName System.Windows.Forms
+$dataObj = New-Object System.Windows.Forms.DataObject
+$wrote = 0
+if ($TxtPath -and (Test-Path -LiteralPath $TxtPath)) {
+  $txt = [System.IO.File]::ReadAllText($TxtPath, [System.Text.Encoding]::UTF8)
+  $dataObj.SetText($txt, [System.Windows.Forms.TextDataFormat]::UnicodeText)
+  $wrote++
+}
+if ($HtmlPath -and (Test-Path -LiteralPath $HtmlPath)) {
+  $htmlBytes = [System.IO.File]::ReadAllBytes($HtmlPath)
+  $htmlStream = New-Object System.IO.MemoryStream(, $htmlBytes)
+  $dataObj.SetData('HTML Format', $false, $htmlStream)
+  $wrote++
+}
+if ($SvgPath -and (Test-Path -LiteralPath $SvgPath)) {
+  $svgBytes = [System.IO.File]::ReadAllBytes($SvgPath)
+  $svgStream = New-Object System.IO.MemoryStream(, $svgBytes)
+  $dataObj.SetData('image/svg+xml', $false, $svgStream)
+  $wrote++
+}
+if ($PngPath -and (Test-Path -LiteralPath $PngPath)) {
+  $pngBytes = [System.IO.File]::ReadAllBytes($PngPath)
+  $pngStream = New-Object System.IO.MemoryStream(, $pngBytes)
+  $dataObj.SetData('PNG', $false, $pngStream)
+  $wrote++
+}
+if ($wrote -gt 0) {
+  [System.Windows.Forms.Clipboard]::SetDataObject($dataObj, $true)
+}
+if ($EmfPath -and (Test-Path -LiteralPath $EmfPath)) {
+  $emfBytes = [System.IO.File]::ReadAllBytes($EmfPath)
+  if ($emfBytes.Length -gt 0) {
+    $src = @"
+using System;
+using System.Runtime.InteropServices;
+public static class LcEmfClip {
+  [DllImport("gdi32.dll")] public static extern IntPtr SetEnhMetaFileBits(uint cbBuffer, byte[] lpData);
+  [DllImport("user32.dll")] public static extern bool OpenClipboard(IntPtr hWndNewOwner);
+  [DllImport("user32.dll")] public static extern IntPtr SetClipboardData(uint uFormat, IntPtr hMem);
+  [DllImport("user32.dll")] public static extern bool CloseClipboard();
+}
+"@
+    Add-Type -TypeDefinition $src -ErrorAction Stop
+    $hemf = [LcEmfClip]::SetEnhMetaFileBits([uint32]$emfBytes.Length, $emfBytes)
+    if ($hemf -ne [IntPtr]::Zero -and [LcEmfClip]::OpenClipboard([IntPtr]::Zero)) {
+      try {
+        [void][LcEmfClip]::SetClipboardData(14, $hemf)
+        $wrote++
+      } finally {
+        [void][LcEmfClip]::CloseClipboard()
+      }
+    }
+  }
+}
+Write-Output $wrote
+"#;
+
+    let stage_dir = StageDirGuard::create("pb-win")?;
+    let emf_bytes = bundle.emf_bytes.as_deref().unwrap_or(&[]);
+    let emf_arg = stage_optional_file(stage_dir.path(), "clip.emf", emf_bytes)?;
+    let png_arg = stage_optional_file(stage_dir.path(), "clip.png", &bundle.png_bytes)?;
+    let cf_html = if bundle.html.is_empty() { String::new() } else { build_cf_html_payload(&bundle.html) };
+    let html_arg = stage_optional_file(stage_dir.path(), "clip.html", cf_html.as_bytes())?;
+    let svg_arg = stage_optional_file(stage_dir.path(), "clip.svg", bundle.svg.as_bytes())?;
+    let txt_arg = stage_optional_file(stage_dir.path(), "clip.txt", primary_text.as_bytes())?;
+    let ps1_path = stage_dir.path().join("write_bundle.ps1");
+    lumencraft_platform::write_atomic(&ps1_path, PS_WRITE_PASTEBOARD.as_bytes())
+        .map_err(|err| format!("failed to stage PowerShell clipboard helper: {err}"))?;
+
+    let candidate = OsCommandCandidate {
+        program: String::from("powershell"),
+        args: vec![
+            String::from("-NoProfile"),
+            String::from("-NonInteractive"),
+            String::from("-STA"),
+            String::from("-ExecutionPolicy"),
+            String::from("Bypass"),
+            String::from("-File"),
+            ps1_path.to_string_lossy().into_owned(),
+            emf_arg,
+            png_arg,
+            html_arg,
+            svg_arg,
+            txt_arg,
+        ],
+    };
+    if let Ok(CandidateOutcome::Completed(output)) = run_candidate(&candidate, None, ProcessBounds::default()) {
+        let wrote_count = String::from_utf8_lossy(&output.stdout).trim().parse::<usize>().unwrap_or(0);
+        if wrote_count > 0 {
+            return Ok(OsAdapterStatus {
+                available: true,
+                availability: OsAdapterAvailability::Submitted,
+                backend: String::from("powershell-win32-clipboard"),
+                detail: format!("wrote {} clipboard flavors ({wrote_count} formats: {})", flavors.len(), flavors.join(", ")),
+                text: None,
+                job_id: None,
+            });
+        }
+    }
+
+    drop(stage_dir);
+    let fallback_candidates = vec![OsCommandCandidate::new("clip", &[])];
+    write_os_clipboard_bundle_with(&fallback_candidates, bundle, primary_text, flavors)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), all(unix, not(target_os = "macos"))))]
+fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &str, flavors: &[&str]) -> Result<OsAdapterStatus, String> {
+    let fallback_candidates = os_pasteboard_write_candidates();
+    if fallback_candidates.is_empty() {
+        return Ok(OsAdapterStatus::unavailable("os-pasteboard", "no desktop clipboard display session is active in this environment"));
+    }
+
+    if !bundle.pdf_bytes.is_empty() {
+        let mut pdf_candidates = Vec::new();
+        if has_nonempty_env("WAYLAND_DISPLAY") {
+            pdf_candidates.push(OsCommandCandidate::new("wl-copy", &["--type", "application/pdf"]));
+        }
+        if has_nonempty_env("DISPLAY") {
+            pdf_candidates.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-t", "application/pdf"]));
+        }
+        for candidate in &pdf_candidates {
+            if let Ok(Some(_output)) = spawn_candidate_with_stdin(candidate, Some(&bundle.pdf_bytes)) {
+                return Ok(OsAdapterStatus {
+                    available: true,
+                    availability: OsAdapterAvailability::Submitted,
+                    backend: candidate.program.clone(),
+                    detail: format!("wrote {} bytes as application/pdf (flavors: {})", bundle.pdf_bytes.len(), flavors.join(", ")),
+                    text: None,
+                    job_id: None,
+                });
+            }
+        }
+    }
+
+    if !bundle.svg.is_empty() {
+        let mut svg_candidates = Vec::new();
+        if has_nonempty_env("WAYLAND_DISPLAY") {
+            svg_candidates.push(OsCommandCandidate::new("wl-copy", &["--type", "image/svg+xml"]));
+        }
+        if has_nonempty_env("DISPLAY") {
+            svg_candidates.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-t", "image/svg+xml"]));
+        }
+        for candidate in &svg_candidates {
+            if let Ok(Some(_output)) = spawn_candidate_with_stdin(candidate, Some(bundle.svg.as_bytes())) {
+                return Ok(OsAdapterStatus {
+                    available: true,
+                    availability: OsAdapterAvailability::Submitted,
+                    backend: candidate.program.clone(),
+                    detail: format!("wrote {} bytes as image/svg+xml (flavors: {})", bundle.svg.len(), flavors.join(", ")),
+                    text: None,
+                    job_id: None,
+                });
+            }
+        }
+    }
+
+    write_os_clipboard_bundle_with(&fallback_candidates, bundle, primary_text, flavors)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_optional_file(dir: &std::path::Path, filename: &str, bytes: &[u8]) -> Result<String, String> {
+    if bytes.is_empty() {
+        return Ok(String::new());
+    }
+    let path = dir.join(filename);
+    lumencraft_platform::write_atomic(&path, bytes).map_err(|err| format!("failed to stage '{filename}': {err}"))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Read binary `%PDF-` bytes from the host OS clipboard when a PDF representation is available.
+///
+/// # Errors
+/// Returns a descriptive error string when the clipboard lacks PDF data or the host OS backend is unavailable.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_os_clipboard_pdf_bytes() -> Result<Vec<u8>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        const JXA_READ_PDF: &str = "\
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+function run(argv) {
+  var outPath = argv[0];
+  var pb = $.NSPasteboard.generalPasteboard;
+  var data = pb.dataForType($('com.adobe.pdf'));
+  if (!data || data.isNil() || Number(data.length) === 0) return 'EMPTY';
+  return data.writeToFileAtomically($(outPath), true) ? String(data.length) : 'ERR';
+}";
+        let stage_dir = StageDirGuard::create("pb-read-pdf")?;
+        let out_path = stage_dir.path().join("read.pdf");
+        let candidate = OsCommandCandidate {
+            program: String::from("/usr/bin/osascript"),
+            args: vec![
+                String::from("-l"),
+                String::from("JavaScript"),
+                String::from("-e"),
+                String::from(JXA_READ_PDF),
+                out_path.to_string_lossy().into_owned(),
+            ],
+        };
+        let CandidateOutcome::Completed(output) = run_candidate(&candidate, None, ProcessBounds::default())? else {
+            return Err(String::from("macOS osascript clipboard reader is unavailable"));
+        };
+        let marker = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if marker == "EMPTY" {
+            return Err(String::from("OS pasteboard does not contain a `com.adobe.pdf` entry"));
+        }
+        if marker == "ERR" {
+            return Err(String::from("failed to write pasteboard PDF bytes to staging file"));
+        }
+        let bytes = std::fs::read(&out_path).map_err(|err| format!("failed to read staged pasteboard PDF: {err}"))?;
+        if bytes.is_empty() {
+            return Err(String::from("staged pasteboard `com.adobe.pdf` entry was empty"));
+        }
+        Ok(bytes)
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut candidates = Vec::new();
+        if has_nonempty_env("WAYLAND_DISPLAY") {
+            candidates.push(OsCommandCandidate::new("wl-paste", &["--type", "application/pdf"]));
+        }
+        if has_nonempty_env("DISPLAY") {
+            candidates.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-t", "application/pdf", "-o"]));
+        }
+        for candidate in &candidates {
+            if let Ok(Some(output)) = spawn_candidate_with_stdin(candidate, None)
+                && !output.stdout.is_empty()
+            {
+                return Ok(output.stdout);
+            }
+        }
+        Err(String::from("OS clipboard does not contain `application/pdf` data or no display session is active"))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Err(String::from("reading binary PDF clipboard entries is not supported on Windows without a host PDF consumer"))
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn read_os_clipboard_pdf_bytes() -> Result<Vec<u8>, String> {
+    Err(String::from("OS clipboard PDF read is unavailable in wasm32 builds"))
+}
+
+/// Read UTF-8 plain-text payload from the host OS clipboard.
+///
+/// # Errors
+/// Returns a descriptive error string if the OS clipboard adapter is unavailable or holds no UTF-8 text.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_os_clipboard_text() -> Result<String, String> {
+    let status = read_os_pasteboard()?;
+    if status.availability != OsAdapterAvailability::Read {
+        return Err(status.detail);
+    }
+    status.text.ok_or_else(|| String::from("OS clipboard returned no UTF-8 text payload"))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn read_os_clipboard_text() -> Result<String, String> {
+    Err(String::from("OS clipboard text read is unavailable in wasm32 builds"))
+}
+
+/// Discover configured OS print queue names (`lpstat -a` on Unix/macOS, `Get-Printer` on Windows),
+/// returning an empty `Vec` gracefully when no spooler is available.
+#[must_use]
+pub fn discover_os_printers() -> Vec<String> {
+    #[cfg(all(not(target_arch = "wasm32"), unix))]
+    {
+        let bounds =
+            ProcessBounds { wall_timeout: Duration::from_secs(3), idle_timeout: Duration::from_secs(2), max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES };
+        for prog in ["lpstat", "/usr/bin/lpstat"] {
+            let candidate = OsCommandCandidate::new(prog, &["-a"]);
+            if let Ok(CandidateOutcome::Completed(output)) = run_candidate(&candidate, None, bounds) {
+                let parsed = parse_lpstat_printers(&String::from_utf8_lossy(&output.stdout));
+                if !parsed.is_empty() {
+                    return parsed;
+                }
+                return Vec::new();
+            }
+        }
+        Vec::new()
+    }
+    #[cfg(all(not(target_arch = "wasm32"), target_os = "windows"))]
+    {
+        let bounds =
+            ProcessBounds { wall_timeout: Duration::from_secs(4), idle_timeout: Duration::from_secs(3), max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES };
+        let candidate =
+            OsCommandCandidate::new("powershell", &["-NoProfile", "-NonInteractive", "-Command", "Get-Printer | ForEach-Object { $_.Name }"]);
+        if let Ok(CandidateOutcome::Completed(output)) = run_candidate(&candidate, None, bounds) {
+            return parse_windows_printers(&String::from_utf8_lossy(&output.stdout));
+        }
+        Vec::new()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        Vec::new()
+    }
+}
+
+fn parse_lpstat_printers(stdout: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let lower = trimmed.to_ascii_lowercase();
+        if lower.starts_with("lpstat:") || lower.starts_with("no destinations") {
+            continue;
+        }
+        if let Some(name) = trimmed.split_whitespace().next()
+            && validate_printer_name_value(name).is_ok()
+            && !out.iter().any(|existing: &String| existing == name)
+        {
+            out.push(name.to_owned());
+        }
+    }
+    out
+}
+
+#[cfg(any(target_os = "windows", test))]
+fn parse_windows_printers(stdout: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let name = line.trim();
+        if !name.is_empty() && validate_printer_name_value(name).is_ok() && !out.iter().any(|existing: &String| existing == name) {
+            out.push(name.to_owned());
+        }
+    }
+    out
+}
+
+fn validate_printer_name_value(name: &str) -> Result<&str, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("printer name must not be empty"));
+    }
+    if trimmed.starts_with('-') {
+        return Err(String::from("printer name must not begin with '-'"));
+    }
+    if trimmed.chars().any(|ch| ch.is_control() || matches!(ch, '\n' | '\r' | '\0')) {
+        return Err(String::from("printer name contains invalid control characters"));
+    }
+    Ok(trimmed)
+}
+
+fn sanitize_print_title(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len().min(64));
+    for ch in raw.chars() {
+        if out.len() >= 64 {
+            break;
+        }
+        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+            out.push(ch);
+        } else if (ch.is_whitespace() || ch == '.') && !out.ends_with('-') && !out.is_empty() {
+            out.push('-');
+        }
+    }
+    let trimmed = out.trim_matches('-');
+    if trimmed.is_empty() { String::from("lumencraft-print") } else { trimmed.to_owned() }
+}
+
+/// Stage a print spool PDF cleanly via `lumencraft_platform::write_atomic` and launch OS print preview
+/// only when `LUMENCRAFT_ALLOW_OS_GUI_DIALOG` is set in the environment.
+///
+/// # Errors
+/// Returns an error if `spool` does not contain a valid `%PDF-` payload or if atomic staging fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_os_print_preview_dialog(spool: &crate::PrintSpoolOutput) -> Result<OsAdapterStatus, String> {
+    open_os_print_preview_dialog_titled(spool, "lumencraft-print")
+}
+
+/// Stage a print spool PDF cleanly under `<safe_title>.pdf` and open host print preview when enabled.
+///
+/// # Errors
+/// Returns an error if `spool` does not contain a valid `%PDF-` payload or if atomic staging fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_os_print_preview_dialog_titled(spool: &crate::PrintSpoolOutput, title: &str) -> Result<OsAdapterStatus, String> {
+    if !spool.pdf_bytes.starts_with(b"%PDF-") {
+        return Err(String::from("print preview payload must start with `%PDF-` signature"));
+    }
+    let safe_title = sanitize_print_title(title);
+    let mut stage_dir = StageDirGuard::create("print-preview")?;
+    let pdf_path = stage_dir.path().join(format!("{safe_title}.pdf"));
+    lumencraft_platform::write_atomic(&pdf_path, &spool.pdf_bytes)
+        .map_err(|err| format!("failed to stage print preview PDF '{}': {err}", pdf_path.display()))?;
+
+    if std::env::var_os("LUMENCRAFT_ALLOW_OS_GUI_DIALOG").is_none() {
+        return Ok(OsAdapterStatus::unavailable(
+            "os-print-preview",
+            format!(
+                "staged {} PDF bytes as `{safe_title}.pdf` (GUI launch disabled unless LUMENCRAFT_ALLOW_OS_GUI_DIALOG is set)",
+                spool.pdf_bytes.len()
+            ),
+        ));
+    }
+
+    let path_str = pdf_path.to_string_lossy().into_owned();
+    #[cfg(target_os = "macos")]
+    let candidate = OsCommandCandidate { program: String::from("/usr/bin/open"), args: vec![String::from("-a"), String::from("Preview"), path_str] };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let candidate = OsCommandCandidate { program: String::from("xdg-open"), args: vec![path_str] };
+    #[cfg(target_os = "windows")]
+    let candidate = OsCommandCandidate {
+        program: String::from("powershell"),
+        args: vec![
+            String::from("-NoProfile"),
+            String::from("-NonInteractive"),
+            String::from("-Command"),
+            String::from("Start-Process -FilePath $args[0]"),
+            path_str,
+        ],
+    };
+
+    match run_candidate(&candidate, None, ProcessBounds::default())? {
+        CandidateOutcome::Completed(_output) => {
+            stage_dir.disarm();
+            Ok(OsAdapterStatus {
+                available: true,
+                availability: OsAdapterAvailability::Submitted,
+                backend: candidate.program,
+                detail: format!("opened print preview `{safe_title}.pdf` ({} bytes)", spool.pdf_bytes.len()),
+                text: None,
+                job_id: None,
+            })
+        }
+        CandidateOutcome::NotFound => {
+            Ok(OsAdapterStatus::unavailable(candidate.program, format!("OS print preview launcher not found after staging `{safe_title}.pdf`")))
+        }
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn open_os_print_preview_dialog(_spool: &crate::PrintSpoolOutput) -> Result<OsAdapterStatus, String> {
+    Ok(OsAdapterStatus::unavailable("wasm-print-preview", "OS print preview is unavailable in wasm32 builds"))
+}
+
+#[cfg(target_arch = "wasm32")]
+pub fn open_os_print_preview_dialog_titled(_spool: &crate::PrintSpoolOutput, _title: &str) -> Result<OsAdapterStatus, String> {
+    Ok(OsAdapterStatus::unavailable("wasm-print-preview", "OS print preview is unavailable in wasm32 builds"))
 }
 
 /// Read UTF-8 text from the host OS clipboard using platform tools (`pbpaste` on macOS,
@@ -256,14 +872,7 @@ fn validate_printer_name(printer: Option<&str>) -> Result<Option<&str>, String> 
     let Some(raw) = printer else {
         return Ok(None);
     };
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(String::from("printer name must not be empty"));
-    }
-    if trimmed.starts_with('-') {
-        return Err(format!("invalid printer name `{trimmed}`: must not start with '-'"));
-    }
-    Ok(Some(trimmed))
+    validate_printer_name_value(raw).map(Some)
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -624,5 +1233,77 @@ mod tests {
         let cap_bounds = ProcessBounds { wall_timeout: Duration::from_secs(2), idle_timeout: Duration::from_secs(2), max_output_bytes: 512 };
         let cap_err = run_candidate(&noisy, None, cap_bounds).unwrap_err();
         assert!(cap_err.contains("output cap"), "unexpected cap err: {cap_err}");
+    }
+
+    #[test]
+    fn build_cf_html_payload_computes_exact_utf8_byte_offsets() {
+        let frag = "<b>IC<sub>50</sub> αβγ 日本語</b>";
+        let payload = super::build_cf_html_payload(frag);
+        assert!(payload.starts_with("Version:0.9\r\n"));
+
+        let parse_offset = |label: &str| -> usize {
+            let line = payload.lines().find(|l| l.starts_with(label)).unwrap_or_else(|| panic!("missing {label}"));
+            let digits = line.trim_start_matches(label).trim();
+            assert_eq!(digits.len(), 10, "expected 10-digit zero-padded offset for {label}, got {digits:?}");
+            digits.parse::<usize>().expect("valid usize offset")
+        };
+
+        let start_html = parse_offset("StartHTML:");
+        let end_html = parse_offset("EndHTML:");
+        let start_frag = parse_offset("StartFragment:");
+        let end_frag = parse_offset("EndFragment:");
+
+        assert_eq!(end_html, payload.len());
+        assert!(payload[start_html..end_html].starts_with("<!DOCTYPE html>"));
+        assert!(payload[start_html..end_html].ends_with("</html>"));
+        assert_eq!(&payload[start_frag..end_frag], frag);
+
+        let wrapped_doc = "<!DOCTYPE html><html><head></head><body><div>α</div></body></html>";
+        let wrapped_cf = super::build_cf_html_payload(wrapped_doc);
+        let ws = wrapped_cf
+            .lines()
+            .find(|l| l.starts_with("StartFragment:"))
+            .and_then(|l| l.trim_start_matches("StartFragment:").trim().parse::<usize>().ok())
+            .expect("StartFragment");
+        let we = wrapped_cf
+            .lines()
+            .find(|l| l.starts_with("EndFragment:"))
+            .and_then(|l| l.trim_start_matches("EndFragment:").trim().parse::<usize>().ok())
+            .expect("EndFragment");
+        assert_eq!(&wrapped_cf[ws..we], "<div>α</div>");
+    }
+
+    #[test]
+    fn printer_discovery_parsers_and_print_preview_staging_are_clean() {
+        let lp_sample = "\
+lpstat: warning
+Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
+PDF_Printer accepting requests since Mon Nov 14 10:00:00 2026
+Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
+-badflag accepting requests
+";
+        assert_eq!(super::parse_lpstat_printers(lp_sample), vec!["Laser_Lab_01", "PDF_Printer"]);
+        assert_eq!(
+            super::parse_windows_printers("Microsoft Print to PDF\r\nCanon Pro\r\nMicrosoft Print to PDF\r\n"),
+            vec!["Microsoft Print to PDF", "Canon Pro"]
+        );
+        assert_eq!(super::sanitize_print_title("  ../../Figure 1 (Final).pdf  "), "Figure-1-Final-pdf");
+
+        let _ = super::discover_os_printers();
+
+        let bad_spool = PrintSpoolOutput { pdf_bytes: b"bad".to_vec(), page_count: 1, page_sizes_pt: vec![(612.0, 792.0)], scale_percent: 100.0 };
+        assert!(super::open_os_print_preview_dialog(&bad_spool).is_err());
+
+        let valid_spool = PrintSpoolOutput {
+            pdf_bytes: b"%PDF-1.7\n1 0 obj\n<<>>\nendobj\n%%EOF\n".to_vec(),
+            page_count: 1,
+            page_sizes_pt: vec![(612.0, 792.0)],
+            scale_percent: 100.0,
+        };
+        if std::env::var_os("LUMENCRAFT_ALLOW_OS_GUI_DIALOG").is_none() {
+            let status = super::open_os_print_preview_dialog_titled(&valid_spool, "Dose Response Figure").expect("stage print preview");
+            assert_eq!(status.availability, OsAdapterAvailability::Unavailable);
+            assert!(status.detail.contains("Dose-Response-Figure.pdf"));
+        }
     }
 }

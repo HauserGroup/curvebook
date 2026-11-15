@@ -1,12 +1,13 @@
 //! Scientific transform, statistical test, curve fit, and result reporting/export commands.
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ContingencyMethod, ContingencySpec, CoxTieMethod, DescriptiveSpec, ErrorCode,
-    ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, LinearRegressionSpec, MathTransformPreset,
-    ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument,
-    RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec,
-    TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
+    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
+    CoxTieMethod, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting,
+    LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, ParameterRule, ParameterScope,
+    PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise,
+    SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole,
+    WeightingScheme,
 };
 use lumencraft_fit::get_builtin_model;
 use lumencraft_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
@@ -15,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use super::export::{de_opt_usize, write_atomic_output_file};
-use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_data_sheet, require_result_sheet};
+use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_analyzable_data_sheet, require_result_sheet};
 use super::params::{
     any_json_schema, array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema_with_aliases, parse_params,
     str_schema,
@@ -195,7 +196,7 @@ fn always_enabled(_session: &Session) -> bool {
 }
 
 fn has_data_sheet(session: &Session) -> bool {
-    !session.document().data_sheets.is_empty()
+    !session.document().data_sheets.is_empty() || session.document().result_sheets.iter().any(|r| r.analyzable_data.is_some())
 }
 
 fn has_result_sheet(session: &Session) -> bool {
@@ -393,7 +394,7 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
 
 fn schema_transform_run() -> Value {
     schema_analysis_base(
-        "Transform kind (`math`, `normalize`, `remove_baseline`, `transpose`, `prune_rows`, `select_and_transform`, `simulate`) or typed object",
+        "Transform kind (`math`, `normalize`, `remove_baseline`, `transpose`, `prune_rows`, `select_and_transform`, `simulate`, `random_sample`) or typed object",
         false,
         false,
     )
@@ -699,7 +700,7 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let doc = &mut ctx.session.doc;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let mut updated = require_result_sheet(doc, &id)?.analysis.clone();
-    let source_kind = require_data_sheet(doc, &updated.source_sheet_id)?.kind();
+    let source_kind = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?.kind();
 
     let combined = update_params_to_value(&parsed);
     apply_metadata_updates(
@@ -778,7 +779,7 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let doc = &mut ctx.session.doc;
     let id = parse_sheet_id(&parsed.sheet_id)?;
     let new_source = parse_sheet_id(&parsed.source_sheet_id)?;
-    let new_table_kind = require_data_sheet(doc, &new_source)?.kind();
+    let new_table_kind = require_analyzable_data_sheet(doc, &new_source)?.kind();
     let mut updated = require_result_sheet(doc, &id)?.analysis.clone();
 
     let next_selected = if parsed.clear_selected_data_sets == Some(true) {
@@ -933,7 +934,7 @@ fn try_raw_analysis_spec(
         let spec: AnalysisSpec = serde_json::from_value(spec_val.clone()).map_err(|err| {
             EngineError::with_code(ErrorCode::BadInput, format!("invalid `spec` object: {err}")).with_details(json!({ "pointer": "/spec" }))
         })?;
-        let table_kind = require_data_sheet(doc, &spec.source_sheet_id)?.kind();
+        let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
         validate_domain_and_compat(&spec.kind, domain, table_kind)?;
         return Ok(Some(spec));
     }
@@ -945,7 +946,7 @@ fn try_raw_analysis_spec(
         obj.insert(String::from("id"), Value::String(id_str.to_owned()));
         obj.insert(String::from("source_sheet_id"), Value::String(src_str.to_owned()));
         if let Ok(spec) = serde_json::from_value::<AnalysisSpec>(Value::Object(obj)) {
-            let table_kind = require_data_sheet(doc, &spec.source_sheet_id)?.kind();
+            let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
             validate_domain_and_compat(&spec.kind, domain, table_kind)?;
             return Ok(Some(spec));
         }
@@ -969,7 +970,7 @@ fn build_analysis_spec(
             .with_details(json!({ "pointer": "/source_sheet_id" }))
     })?;
     let source_sheet_id = parse_sheet_id(raw_source)?;
-    let table_kind = require_data_sheet(doc, &source_sheet_id)?.kind();
+    let table_kind = require_analyzable_data_sheet(doc, &source_sheet_id)?.kind();
     let id = match parsed.sheet_id.as_deref() {
         Some(raw) => parse_sheet_id(raw)?,
         None => next_unique_sheet_id(doc, domain_prefix(domain))?,
@@ -993,7 +994,7 @@ fn build_analysis_spec(
 }
 
 fn default_multivariate_numeric_columns(doc: &ProjectDocument, sheet_id: &SheetId) -> Vec<usize> {
-    let Some(sheet) = doc.data_sheet(sheet_id) else {
+    let Ok(sheet) = require_analyzable_data_sheet(doc, sheet_id) else {
         return Vec::new();
     };
     let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
@@ -1181,6 +1182,25 @@ fn resolve_transform_shorthand(name: &str, params: &Value) -> Result<Option<Anal
             parameters: parse_named_params_vec(params.get("params"))?,
             noise: SimulationNoise::None,
         },
+        "random_sample" | "sample" | "transform.random_sample" => {
+            let sample_size = match params.get("sample_size").or_else(|| params.get("n_samples")) {
+                Some(v) => {
+                    let n = parse_usize_json_value(v, "sample_size")?;
+                    if n == 0 {
+                        return Err(EngineError::with_code(ErrorCode::BadInput, "`sample_size` must be >= 1"));
+                    }
+                    n
+                }
+                None => 10,
+            };
+            let stratify_column = opt_usize_checked(params, &["stratify_column"])?.and_then(|(col, is_null)| if is_null { None } else { Some(col) });
+            TransformAnalysisSpec::RandomSample {
+                seed: params.get("seed").and_then(Value::as_u64).unwrap_or(42),
+                sample_size,
+                stratify_column,
+                proportional_allocation: params.get("proportional_allocation").and_then(Value::as_bool).unwrap_or(true),
+            }
+        }
         _ => return Ok(None),
     };
     Ok(Some(AnalysisKind::Transform(tr)))
@@ -1196,6 +1216,7 @@ fn resolve_two_group_or_anova_shorthand(name: &str, params: &Value) -> Result<Op
         "lognormal_t" | "lognormal_unpaired_t" => two_group_kind(TwoGroupMethod::LognormalUnpairedT),
         "mann_whitney" | "mann_whitney_u" => two_group_kind(TwoGroupMethod::MannWhitneyU),
         "wilcoxon" | "wilcoxon_matched_pairs" | "wilcoxon_signed_rank" => two_group_kind(TwoGroupMethod::WilcoxonSignedRank),
+        "paired_sign_test" | "paired_sign" | "sign_test" => two_group_kind(TwoGroupMethod::PairedSignTest),
         "kolmogorov_smirnov" | "ks" | "ks_two_sample" => two_group_kind(TwoGroupMethod::KolmogorovSmirnov),
         "one_sample_t" => two_group_kind(TwoGroupMethod::OneSampleT { hypothetical: hyp }),
         "one_sample_wilcoxon" => two_group_kind(TwoGroupMethod::OneSampleWilcoxon { hypothetical: hyp }),
@@ -1232,10 +1253,22 @@ fn resolve_other_stats_shorthand(name: &str, params: &Value) -> Result<Option<An
         }
         "bland_altman" | "stats.bland_altman" => AnalysisKind::BlandAltman(BlandAltmanSpec::default()),
         "passing_bablok" | "stats.passing_bablok" => AnalysisKind::PassingBablok(PassingBablokSpec::default()),
-        "contingency" | "chi_square" | "fisher_exact" | "barnard_exact" | "stats.barnard_exact" => {
+        "contingency"
+        | "chi_square"
+        | "fisher_exact"
+        | "barnard_exact"
+        | "stats.barnard_exact"
+        | "cohen_kappa"
+        | "kappa"
+        | "fleiss_kappa"
+        | "exact_binomial"
+        | "binomial" => {
             let method = match name {
                 "fisher_exact" => ContingencyMethod::FisherExact,
                 "barnard_exact" | "stats.barnard_exact" => ContingencyMethod::BarnardExact,
+                "cohen_kappa" | "kappa" => ContingencyMethod::CohenKappa { weighting: parse_kappa_weighting_opt(params)?.unwrap_or_default() },
+                "fleiss_kappa" => ContingencyMethod::FleissKappa,
+                "exact_binomial" | "binomial" => ContingencyMethod::ExactBinomial,
                 _ => match opt_str(params, &["method", "contingency_method"]) {
                     Some(raw) => parse_contingency_method(raw)?,
                     None => ContingencyMethod::PearsonChiSquare { yates_continuity: false },
@@ -1254,7 +1287,33 @@ fn resolve_other_stats_shorthand(name: &str, params: &Value) -> Result<Option<An
             spearman_rank: params.get("spearman").and_then(Value::as_bool).unwrap_or(false),
         }),
         "clustering" | "kmeans" => {
-            AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: Some(usize_opt(params, "k_clusters").unwrap_or(3).max(2)) })
+            let k_means_k = if let Some(v) = params.get("k_clusters").or_else(|| params.get("k_means_k")) {
+                if v.is_null() {
+                    None
+                } else {
+                    let k = parse_usize_json_value(v, "k_means_k")?;
+                    if k < 2 {
+                        return Err(EngineError::with_code(ErrorCode::BadInput, "`k_means_k` must be >= 2"));
+                    }
+                    Some(k)
+                }
+            } else if name == "kmeans" {
+                Some(3)
+            } else {
+                None
+            };
+            let k_sweep_max = opt_usize_checked(params, &["k_sweep_max"])?.and_then(|(v, is_null)| if is_null { None } else { Some(v) });
+            if let Some(k_max) = k_sweep_max
+                && k_max < 2
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`k_sweep_max` must be >= 2"));
+            }
+            AnalysisKind::Multivariate(MultivariateSpec::Clustering {
+                k_means_k,
+                distance: parse_cluster_distance_opt(params)?.unwrap_or_default(),
+                linkage: parse_cluster_linkage_opt(params)?.unwrap_or_default(),
+                k_sweep_max,
+            })
         }
         "multiple_imputation" | "stats.multiple_imputation" | "mice" => AnalysisKind::Multivariate(default_multiple_imputation()),
         _ => return Ok(None),
@@ -1299,6 +1358,7 @@ fn resolve_fit_shorthand(name: &str, params: &Value) -> Result<AnalysisKind, Eng
 
 fn apply_shorthand_kind_overrides(kind: &mut AnalysisKind, params: &Value) -> Result<(), EngineError> {
     match kind {
+        AnalysisKind::Transform(spec) => apply_transform_overrides(spec, params)?,
         AnalysisKind::OneWayAnova(spec) => apply_multiplicity_override(&mut spec.multiplicity, params)?,
         AnalysisKind::FactorialAnova(spec) => apply_multiplicity_override(&mut spec.multiplicity, params)?,
         AnalysisKind::NestedComparison(spec) => apply_multiplicity_override(&mut spec.multiplicity, params)?,
@@ -1359,6 +1419,23 @@ fn apply_passing_bablok_overrides(spec: &mut PassingBablokSpec, params: &Value) 
     Ok(())
 }
 
+fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -> Result<(), EngineError> {
+    if let TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation } = spec {
+        if let Some(seed_val) = params.get("seed")
+            && !seed_val.is_null()
+        {
+            *seed = seed_val.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`seed` must be an unsigned integer"))?;
+        }
+        apply_usize_field(params, &["sample_size", "n_samples"], sample_size)?;
+        if *sample_size == 0 {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`sample_size` must be >= 1"));
+        }
+        apply_opt_usize_field(params, &["stratify_column"], stratify_column)?;
+        apply_bool_opt(params, &["proportional_allocation"], proportional_allocation);
+    }
+    Ok(())
+}
+
 fn apply_contingency_overrides(spec: &mut ContingencySpec, params: &Value) -> Result<(), EngineError> {
     if let Some(m_val) = params.get("method").or_else(|| params.get("contingency_method")) {
         if let Ok(parsed) = serde_json::from_value::<ContingencyMethod>(m_val.clone()) {
@@ -1371,6 +1448,20 @@ fn apply_contingency_overrides(spec: &mut ContingencySpec, params: &Value) -> Re
     }
     if let ContingencyMethod::PearsonChiSquare { yates_continuity } = &mut spec.method {
         apply_bool_opt(params, &["yates_continuity", "yates"], yates_continuity);
+    }
+    if let ContingencyMethod::CohenKappa { weighting } = &mut spec.method
+        && let Some(w) = parse_kappa_weighting_opt(params)?
+    {
+        *weighting = w;
+    }
+    apply_opt_f64_field(params, &["null_proportion"], &mut spec.null_proportion)?;
+    if let Some(p0) = spec.null_proportion
+        && (p0 <= 0.0 || p0 >= 1.0)
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`null_proportion` must lie strictly in (0, 1)"));
+    }
+    if let Some(ep_val) = params.get("expected_proportions") {
+        spec.expected_proportions = parse_opt_expected_proportions(ep_val)?;
     }
     Ok(())
 }
@@ -1426,9 +1517,29 @@ fn apply_multivariate_overrides(spec: &mut MultivariateSpec, params: &Value) -> 
         MultivariateSpec::CorrelationMatrix { spearman_rank } => {
             apply_bool_opt(params, &["spearman", "spearman_rank"], spearman_rank);
         }
-        MultivariateSpec::Clustering { k_means_k } => {
-            if let Some(k) = usize_opt(params, "k_clusters").or_else(|| usize_opt(params, "k_means_k")) {
-                *k_means_k = Some(k.max(2));
+        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
+            if let Some(v) = params.get("k_clusters").or_else(|| params.get("k_means_k")) {
+                if v.is_null() {
+                    *k_means_k = None;
+                } else {
+                    let k = parse_usize_json_value(v, "k_means_k")?;
+                    if k < 2 {
+                        return Err(EngineError::with_code(ErrorCode::BadInput, "`k_means_k` must be >= 2"));
+                    }
+                    *k_means_k = Some(k);
+                }
+            }
+            if let Some(d) = parse_cluster_distance_opt(params)? {
+                *distance = d;
+            }
+            if let Some(l) = parse_cluster_linkage_opt(params)? {
+                *linkage = l;
+            }
+            apply_opt_usize_field(params, &["k_sweep_max"], k_sweep_max)?;
+            if let Some(k_max) = *k_sweep_max
+                && k_max < 2
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`k_sweep_max` must be >= 2"));
             }
         }
         MultivariateSpec::MultipleImputation { imputations_m, max_iters, seed, response_column, predictor_columns } => {
@@ -1623,7 +1734,113 @@ fn parse_contingency_method(raw: &str) -> Result<ContingencyMethod, EngineError>
         "barnard" | "barnard_exact" => Ok(ContingencyMethod::BarnardExact),
         "trend" | "chi_square_for_trend" | "cochran_armitage" | "cochran_armitage_trend" => Ok(ContingencyMethod::CochranArmitageTrend),
         "mcnemar" | "mcnemar_paired" => Ok(ContingencyMethod::McNemarPaired),
+        "cohen_kappa" | "kappa" | "cohen_kappa_unweighted" => Ok(ContingencyMethod::CohenKappa { weighting: KappaWeighting::Unweighted }),
+        "cohen_kappa_linear" => Ok(ContingencyMethod::CohenKappa { weighting: KappaWeighting::Linear }),
+        "cohen_kappa_quadratic" => Ok(ContingencyMethod::CohenKappa { weighting: KappaWeighting::Quadratic }),
+        "fleiss_kappa" => Ok(ContingencyMethod::FleissKappa),
+        "exact_binomial" | "binomial" => Ok(ContingencyMethod::ExactBinomial),
         other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown contingency method `{other}`"))),
+    }
+}
+
+fn parse_kappa_weighting_opt(params: &Value) -> Result<Option<KappaWeighting>, EngineError> {
+    let Some(val) = params.get("weighting").or_else(|| params.get("kappa_weighting")) else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let raw = val
+        .as_str()
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`weighting` must be a string (`unweighted`, `linear`, or `quadratic`)"))?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "unweighted" | "none" => Ok(Some(KappaWeighting::Unweighted)),
+        "linear" => Ok(Some(KappaWeighting::Linear)),
+        "quadratic" => Ok(Some(KappaWeighting::Quadratic)),
+        other => {
+            Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown kappa weighting `{other}`; use `unweighted`, `linear`, or `quadratic`")))
+        }
+    }
+}
+
+fn parse_opt_expected_proportions(val: &Value) -> Result<Option<Vec<f64>>, EngineError> {
+    if val.is_null() {
+        return Ok(None);
+    }
+    let arr = val
+        .as_array()
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`expected_proportions` must be an array of non-negative numbers or null"))?;
+    if arr.is_empty() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`expected_proportions` must not be empty"));
+    }
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx, item) in arr.iter().enumerate() {
+        let num = item
+            .as_f64()
+            .filter(|x| x.is_finite() && *x >= 0.0)
+            .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`expected_proportions[{idx}]` must be finite and >= 0")))?;
+        out.push(num);
+    }
+    let sum: f64 = out.iter().sum();
+    if !sum.is_finite() || sum <= 0.0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`expected_proportions` must have positive sum"));
+    }
+    Ok(Some(out))
+}
+
+fn parse_cluster_distance_opt(params: &Value) -> Result<Option<ClusterDistance>, EngineError> {
+    let Some(val) = params.get("distance").or_else(|| params.get("distance_metric")) else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    if let Ok(parsed) = serde_json::from_value::<ClusterDistance>(val.clone()) {
+        return Ok(Some(parsed));
+    }
+    let raw = val
+        .as_str()
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`distance` must be a string (`euclidean`, `manhattan`, `pearson`, `cosine`)"))?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "euclidean" | "l2" => Ok(Some(ClusterDistance::Euclidean)),
+        "manhattan" | "l1" => Ok(Some(ClusterDistance::Manhattan)),
+        "pearson" | "correlation" => Ok(Some(ClusterDistance::Pearson)),
+        "cosine" => Ok(Some(ClusterDistance::Cosine)),
+        other => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("unknown cluster distance `{other}`; use `euclidean`, `manhattan`, `pearson`, or `cosine`"),
+        )),
+    }
+}
+
+fn parse_cluster_linkage_opt(params: &Value) -> Result<Option<ClusterLinkage>, EngineError> {
+    let Some(val) = params.get("linkage").or_else(|| params.get("linkage_method")) else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    if let Ok(parsed) = serde_json::from_value::<ClusterLinkage>(val.clone()) {
+        return Ok(Some(parsed));
+    }
+    let raw = val.as_str().ok_or_else(|| {
+        EngineError::with_code(
+            ErrorCode::BadInput,
+            "`linkage` must be a string (`ward`, `complete`, `single`, `upgma`, `wpgma`, `centroid`, `median`)",
+        )
+    })?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "ward" | "ward_d2" | "ward.d2" => Ok(Some(ClusterLinkage::Ward)),
+        "complete" => Ok(Some(ClusterLinkage::Complete)),
+        "single" => Ok(Some(ClusterLinkage::Single)),
+        "upgma" | "average" => Ok(Some(ClusterLinkage::Upgma)),
+        "wpgma" | "weighted_average" => Ok(Some(ClusterLinkage::Wpgma)),
+        "centroid" | "upgmc" => Ok(Some(ClusterLinkage::Centroid)),
+        "median" | "wpgmc" => Ok(Some(ClusterLinkage::Median)),
+        other => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("unknown cluster linkage `{other}`; use `ward`, `complete`, `single`, `upgma`, `wpgma`, `centroid`, or `median`"),
+        )),
     }
 }
 

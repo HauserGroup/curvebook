@@ -2,16 +2,17 @@
 //! multi-panel publication layout scene compilation.
 
 use lumencraft_doc::{
-    AnalysisKind, ColorChannelMapping, DataSheet, DiagnosticPlotKind, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, LayoutItem, LayoutSheet,
-    LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultTab,
-    ResultTabKind, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn, VariableRole, WhiskerMethod,
+    AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, GraphKind, GraphSheet, GraphSpec,
+    GraphicalDataObject, LayoutItem, LayoutSheet, LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument,
+    ResultCell, ResultSheet, ResultTab, ResultTabKind, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn, VariableRole,
+    WhiskerMethod,
 };
 use lumencraft_math::dist::{chi2_isf, norm_ppf};
 use lumencraft_math::sum::{covariance, sample_sd};
 use lumencraft_math::{AxisScale, ConfidenceLevel};
 use lumencraft_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 use lumencraft_stats::common::quartiles_hinge;
-use lumencraft_stats::multivariate::{DendrogramMerge, LinkageMethod, hierarchical_clustering};
+use lumencraft_stats::multivariate::{DendrogramMerge, hierarchical_clustering_with_metrics};
 use lumencraft_stats::roc::{RocCiMethod, roc_curve_analysis};
 use lumencraft_stats::two_group::bland_altman;
 use lumencraft_text::{RichText, parse_markup};
@@ -237,23 +238,22 @@ fn compile_bubble_scatter(
         };
         let radius = bubble_radius_pt(enc.size, pt.size_scalar, max_abs_s);
         let shape = if cat_levels.is_empty() { MarkerShape::Circle } else { GROUP_SHAPES[pt.color_cat_idx % GROUP_SHAPES.len()] };
+        let base_marker = MarkerStyle {
+            shape,
+            fill_mode: MarkerFillMode::Filled,
+            size_pt: radius * 2.0,
+            fill_color: Rgba8::rgba(fill.r, fill.g, fill.b, 210),
+            stroke_color: Rgba8::rgba(25, 25, 25, 210),
+            stroke_width_pt: 0.75,
+        };
+        let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, pt.row, base_marker) else {
+            continue;
+        };
         let center_pt = PointPt::new(px, py);
-        emit_marker(
-            scene,
-            center_pt,
-            MarkerStyle {
-                shape,
-                fill_mode: MarkerFillMode::Filled,
-                size_pt: radius * 2.0,
-                fill_color: Rgba8::rgba(fill.r, fill.g, fill.b, 210),
-                stroke_color: Rgba8::rgba(25, 25, 25, 210),
-                stroke_width_pt: 0.75,
-            },
-            Some(r),
-        );
+        emit_marker(scene, center_pt, marker, Some(r));
         scene.plotted_points.push(PlottedPointMeta {
             center_pt,
-            radius_pt: radius.max(3.0),
+            radius_pt: (marker.size_pt * 0.5).max(3.0),
             source_cell: SourceCellId { sheet_id: graph.spec.primary_source_sheet_id.clone(), row: pt.row, col: enc.y_column, subcol: 0 },
             series_label: cat_levels.get(pt.color_cat_idx).cloned().unwrap_or_else(|| y_col.title.clone()),
             value_summary: format!("X={}, Y={}", format_point_value(pt.x), format_point_value(pt.y)),
@@ -1008,7 +1008,7 @@ fn find_header_col(headers: &[String], pred: impl Fn(&str) -> bool) -> Option<us
     headers.iter().position(|h| pred(&h.to_ascii_lowercase()))
 }
 
-fn extract_residuals_cols(headers: &[String]) -> (Option<usize>, Option<usize>, Option<usize>) {
+fn extract_residuals_cols(headers: &[String]) -> (Option<usize>, Option<usize>, Option<usize>, Option<usize>) {
     let ds_col = find_header_col(headers, |h| h == "data set" || h == "dataset" || h == "group");
     let y_col = find_header_col(headers, |h| {
         (h.contains("residual") || h.contains("resid"))
@@ -1027,7 +1027,7 @@ fn extract_residuals_cols(headers: &[String]) -> (Option<usize>, Option<usize>, 
         })
     });
     let x_col = find_header_col(headers, |h| {
-        h.contains("predicted")
+        (h.contains("predicted") && !h.contains("class"))
             || h.contains("fitted")
             || h.contains("y_hat")
             || h.contains("yhat")
@@ -1035,8 +1035,44 @@ fn extract_residuals_cols(headers: &[String]) -> (Option<usize>, Option<usize>, 
             || h.contains('\u{0177}')
             || h.contains("model y")
     })
+    .or_else(|| find_header_col(headers, |h| h.contains("predicted")))
     .or_else(|| find_header_col(headers, |h| h == "x" || h.starts_with("x ") || h.ends_with(" (x)")));
-    (ds_col, x_col, y_col)
+    let obs_col = find_header_col(headers, |h| h.contains("observed"));
+    (ds_col, x_col, y_col, obs_col)
+}
+
+fn extract_residuals_tab_pairs(tab: &ResultTab, graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64)> {
+    let (ds_col, x_col, y_col, obs_col) = extract_residuals_cols(&tab.column_headers);
+    let target_label = selected_dataset_label_in_tab(tab, ds_col, graph, doc);
+    tab.rows
+        .iter()
+        .enumerate()
+        .filter_map(|(i, row)| {
+            if let (Some(dc), Some(lbl)) = (ds_col, target_label.as_deref())
+                && matches!(row.get(dc), Some(ResultCell::Text(t)) if t != lbl)
+            {
+                return None;
+            }
+            match (x_col, y_col, obs_col) {
+                (Some(xc), Some(yc), _) => Some((result_cell_num(row.get(xc)?)?, result_cell_num(row.get(yc)?)?)),
+                (Some(xc), None, Some(oc)) if xc != oc => {
+                    let fitted = result_cell_num(row.get(xc)?)?;
+                    let observed = result_cell_num(row.get(oc)?)?;
+                    Some((fitted, observed - fitted))
+                }
+                (None, Some(yc), _) => {
+                    let yv = result_cell_num(row.get(yc)?)?;
+                    let xv = row.iter().enumerate().find_map(|(ci, c)| if ci != yc { result_cell_num(c) } else { None }).unwrap_or((i + 1) as f64);
+                    Some((xv, yv))
+                }
+                _ => match (row.first().and_then(result_cell_num), row.get(1).and_then(result_cell_num)) {
+                    (Some(a), Some(b)) => Some((a, b)),
+                    (Some(r), None) => Some(((i + 1) as f64, r)),
+                    _ => None,
+                },
+            }
+        })
+        .collect()
 }
 
 // 2a. Heatmap (+ Perceptual Colorbar + Optional Hierarchical Dendrogram)
@@ -1046,6 +1082,28 @@ struct HeatmapData {
     col_labels: Vec<String>,
     values: Vec<Vec<f64>>,
     merges: Vec<DendrogramMerge>,
+    cluster_distance: ClusterDistance,
+    cluster_linkage: ClusterLinkage,
+    clustering_cue: Option<String>,
+}
+
+fn cluster_metric_labels(distance: ClusterDistance, linkage: ClusterLinkage) -> (&'static str, &'static str) {
+    let d = match distance {
+        ClusterDistance::Euclidean => "Euclidean",
+        ClusterDistance::Manhattan => "Manhattan",
+        ClusterDistance::Pearson => "Pearson",
+        ClusterDistance::Cosine => "Cosine",
+    };
+    let l = match linkage {
+        ClusterLinkage::Ward => "Ward",
+        ClusterLinkage::Complete => "Complete",
+        ClusterLinkage::Single => "Single",
+        ClusterLinkage::Upgma => "UPGMA",
+        ClusterLinkage::Wpgma => "WPGMA",
+        ClusterLinkage::Centroid => "Centroid",
+        ClusterLinkage::Median => "Median",
+    };
+    (d, l)
 }
 
 fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
@@ -1065,7 +1123,7 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     if hm.merges.is_empty()
         && (2..=128).contains(&n_rows)
         && n_cols >= 2
-        && let Ok(m) = hierarchical_clustering(&hm.values, LinkageMethod::WardD2)
+        && let Ok(m) = hierarchical_clustering_with_metrics(&hm.values, hm.cluster_distance, hm.cluster_linkage)
     {
         hm.merges = m;
     }
@@ -1093,7 +1151,7 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         &graph.spec,
         &[],
         PlotMarginConfig {
-            extra_bottom_pt: 18.0,
+            extra_bottom_pt: if has_dendro && hm.clustering_cue.is_some() { 26.0 } else { 18.0 },
             extra_left_pt: (max_row_lbl_w + if has_dendro { 34.0 } else { 8.0 }).clamp(12.0, 90.0),
             has_colorbar: true,
             suppress_y_axis_labels: true,
@@ -1148,6 +1206,16 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
 
     if has_dendro {
         draw_left_dendrogram(scene, RectPt::new(r.x, r.y, dendro_w - 3.0, grid.height), &hm.merges, &row_order, cell_h);
+        if let Some(cue) = &hm.clustering_cue {
+            scene.primitives.push(ScenePrimitive::Text(PositionedText {
+                rich: RichText::plain(cue.clone()),
+                anchor_pt: PointPt::new(grid.x + grid.width * 0.5, grid.bottom() + 21.5),
+                anchor: TextAnchor::Middle,
+                font_size_pt: 7.0,
+                rotation_deg: 0.0,
+                color: Rgba8::rgb(85, 92, 102),
+            }));
+        }
     }
 
     scene.primitives.push(ScenePrimitive::Path {
@@ -1160,28 +1228,54 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     Ok(())
 }
 
+fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab) -> HeatmapData {
+    let mut matrix = Vec::with_capacity(tab.rows.len());
+    for row in &tab.rows {
+        let vals: Vec<f64> = row
+            .iter()
+            .map(|c| match c {
+                ResultCell::Number { value, .. } if value.is_finite() => *value,
+                _ => 0.0,
+            })
+            .collect();
+        matrix.push(vals);
+    }
+    let merges = res.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, extract_dendro_merges_from_tab);
+    HeatmapData {
+        row_labels: tab.row_labels.clone(),
+        col_labels: tab.column_headers.clone(),
+        values: matrix,
+        merges,
+        cluster_distance: ClusterDistance::Euclidean,
+        cluster_linkage: ClusterLinkage::Ward,
+        clustering_cue: None,
+    }
+}
+
 fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<HeatmapData> {
-    if let Some(res) = find_matching_result(graph, doc)
+    let direct_res = doc.result_sheet(&graph.spec.primary_source_sheet_id);
+    if let Some(res) = direct_res
         && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary)
         && matches!(res.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
     {
-        let mut matrix = Vec::with_capacity(tab.rows.len());
-        for row in &tab.rows {
-            let vals: Vec<f64> = row
-                .iter()
-                .map(|c| match c {
-                    ResultCell::Number { value, .. } if value.is_finite() => *value,
-                    _ => 0.0,
-                })
-                .collect();
-            matrix.push(vals);
-        }
-        let merges = res.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, extract_dendro_merges_from_tab);
-        return Some(HeatmapData { row_labels: tab.row_labels.clone(), col_labels: tab.column_headers.clone(), values: matrix, merges });
+        return Some(correlation_heatmap_data(res, tab));
     }
 
-    let ds = doc.data_sheet(&graph.spec.primary_source_sheet_id)?;
-    match &ds.archetype {
+    let clustering_res =
+        find_matching_result_where(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })))
+            .filter(|r| matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })));
+
+    if clustering_res.is_none()
+        && direct_res.is_none()
+        && let Some(res) = find_matching_result(graph, doc)
+        && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary)
+        && matches!(res.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
+    {
+        return Some(correlation_heatmap_data(res, tab));
+    }
+
+    let ds = resolve_source_data_sheet(graph, doc)?;
+    let (mut hm, expect_rows) = match &ds.archetype {
         TableArchetype::MultipleVariables(mv) => {
             let num_cols: Vec<(usize, String)> = mv
                 .variables
@@ -1214,8 +1308,20 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
                 row_labels.push(lbl);
                 values.push(row_vals);
             }
+            let n_rows = values.len();
             let col_labels = num_cols.into_iter().map(|(_, t)| t).collect();
-            Some(HeatmapData { row_labels, col_labels, values, merges: Vec::new() })
+            (
+                HeatmapData {
+                    row_labels,
+                    col_labels,
+                    values,
+                    merges: Vec::new(),
+                    cluster_distance: ClusterDistance::Euclidean,
+                    cluster_linkage: ClusterLinkage::Ward,
+                    clustering_cue: None,
+                },
+                n_rows,
+            )
         }
         TableArchetype::Column(col) => {
             let col_labels: Vec<String> = col.data_sets.iter().map(|d| d.title.clone()).collect();
@@ -1227,7 +1333,18 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
                     col.data_sets.iter().map(|d| d.cells.get(r).and_then(|s| s.first()).and_then(|c| c.active_number()).unwrap_or(0.0)).collect()
                 })
                 .collect();
-            Some(HeatmapData { row_labels, col_labels, values, merges: Vec::new() })
+            (
+                HeatmapData {
+                    row_labels,
+                    col_labels,
+                    values,
+                    merges: Vec::new(),
+                    cluster_distance: ClusterDistance::Euclidean,
+                    cluster_linkage: ClusterLinkage::Ward,
+                    clustering_cue: None,
+                },
+                nrows,
+            )
         }
         TableArchetype::Grouped(g) => {
             let col_labels: Vec<String> = g.data_sets.iter().map(|d| d.title.clone()).collect();
@@ -1244,10 +1361,36 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
                         .collect()
                 })
                 .collect();
-            Some(HeatmapData { row_labels, col_labels, values, merges: Vec::new() })
+            (
+                HeatmapData {
+                    row_labels,
+                    col_labels,
+                    values,
+                    merges: Vec::new(),
+                    cluster_distance: ClusterDistance::Euclidean,
+                    cluster_linkage: ClusterLinkage::Ward,
+                    clustering_cue: None,
+                },
+                nrows,
+            )
         }
-        _ => None,
+        _ => return None,
+    };
+
+    if let Some(cres) = clustering_res
+        && let AnalysisKind::Multivariate(MultivariateSpec::Clustering { distance, linkage, .. }) = cres.analysis.kind
+    {
+        hm.cluster_distance = distance;
+        hm.cluster_linkage = linkage;
+        let (dist_lbl, link_lbl) = cluster_metric_labels(distance, linkage);
+        hm.clustering_cue = Some(format!("Clustered: {dist_lbl} / {link_lbl}"));
+        let tab_merges = cres.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, extract_dendro_merges_from_tab);
+        if !tab_merges.is_empty() && tab_merges.len() + 1 == expect_rows {
+            hm.merges = tab_merges;
+        }
     }
+
+    Some(hm)
 }
 
 fn extract_dendro_merges_from_tab(tab: &ResultTab) -> Vec<DendrogramMerge> {
@@ -1413,7 +1556,7 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     let up_col = Rgba8::rgb(213, 94, 0);
     let down_col = Rgba8::rgb(0, 114, 178);
     let ns_col = Rgba8::rgb(145, 153, 163);
-    for (fc, neg_log_p, opt_lbl) in &pts {
+    for (idx, (fc, neg_log_p, opt_lbl)) in pts.iter().enumerate() {
         let (Some(px), Some(py)) = (x_map.map_value(*fc, r.x, r.right()), y_map.map_value(*neg_log_p, r.bottom(), r.y)) else {
             continue;
         };
@@ -1425,19 +1568,18 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         } else {
             ns_col
         };
-        emit_marker(
-            scene,
-            PointPt::new(px, py),
-            MarkerStyle {
-                shape: MarkerShape::Circle,
-                fill_mode: MarkerFillMode::Filled,
-                size_pt: if is_sig { 5.0 } else { 3.8 },
-                fill_color: col,
-                stroke_color: Rgba8::WHITE,
-                stroke_width_pt: 0.4,
-            },
-            Some(r),
-        );
+        let base_marker = MarkerStyle {
+            shape: MarkerShape::Circle,
+            fill_mode: MarkerFillMode::Filled,
+            size_pt: if is_sig { 5.0 } else { 3.8 },
+            fill_color: col,
+            stroke_color: Rgba8::WHITE,
+            stroke_width_pt: 0.4,
+        };
+        let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) else {
+            continue;
+        };
+        emit_marker(scene, PointPt::new(px, py), marker, Some(r));
         if is_sig
             && (*fc >= fc_pos || *fc <= fc_neg)
             && let Some(lbl) = opt_lbl
@@ -1625,21 +1767,19 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
     draw_cartesian_frame(scene, &frame);
 
     let color = graph.spec.palette.color_at(0);
-    for &(avg, diff) in &pts {
+    for (idx, &(avg, diff)) in pts.iter().enumerate() {
         if let (Some(px), Some(py)) = (x_map.map_value(avg, r.x, r.right()), y_map.map_value(diff, r.bottom(), r.y)) {
-            emit_marker(
-                scene,
-                PointPt::new(px, py),
-                MarkerStyle {
-                    shape: MarkerShape::Circle,
-                    fill_mode: MarkerFillMode::Filled,
-                    size_pt: 5.0,
-                    fill_color: color,
-                    stroke_color: Rgba8::WHITE,
-                    stroke_width_pt: 0.6,
-                },
-                Some(r),
-            );
+            let base_marker = MarkerStyle {
+                shape: MarkerShape::Circle,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 5.0,
+                fill_color: color,
+                stroke_color: Rgba8::WHITE,
+                stroke_width_pt: 0.6,
+            };
+            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
+                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            }
         }
     }
 
@@ -2292,21 +2432,19 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
     }
 
     let color = graph.spec.palette.color_at(0);
-    for &(xv, yv) in &pts {
+    for (idx, &(xv, yv)) in pts.iter().enumerate() {
         if let (Some(px), Some(py)) = (x_map.map_value(xv, r.x, r.right()), y_map.map_value(yv, r.bottom(), r.y)) {
-            emit_marker(
-                scene,
-                PointPt::new(px, py),
-                MarkerStyle {
-                    shape: MarkerShape::Circle,
-                    fill_mode: MarkerFillMode::Filled,
-                    size_pt: 4.8,
-                    fill_color: color,
-                    stroke_color: Rgba8::WHITE,
-                    stroke_width_pt: 0.5,
-                },
-                Some(r),
-            );
+            let base_marker = MarkerStyle {
+                shape: MarkerShape::Circle,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 4.8,
+                fill_color: color,
+                stroke_color: Rgba8::WHITE,
+                stroke_width_pt: 0.5,
+            };
+            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
+                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            }
         }
     }
     Ok(())
@@ -2317,34 +2455,7 @@ fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f6
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
     {
-        let (ds_col, x_col, y_col) = extract_residuals_cols(&tab.column_headers);
-        let target_label = selected_dataset_label_in_tab(tab, ds_col, graph, doc);
-        let pts: Vec<(f64, f64)> = tab
-            .rows
-            .iter()
-            .enumerate()
-            .filter_map(|(i, row)| {
-                if let (Some(dc), Some(lbl)) = (ds_col, target_label.as_deref())
-                    && matches!(row.get(dc), Some(ResultCell::Text(t)) if t != lbl)
-                {
-                    return None;
-                }
-                match (x_col, y_col) {
-                    (Some(xc), Some(yc)) => Some((result_cell_num(row.get(xc)?)?, result_cell_num(row.get(yc)?)?)),
-                    (None, Some(yc)) => {
-                        let yv = result_cell_num(row.get(yc)?)?;
-                        let xv =
-                            row.iter().enumerate().find_map(|(ci, c)| if ci != yc { result_cell_num(c) } else { None }).unwrap_or((i + 1) as f64);
-                        Some((xv, yv))
-                    }
-                    _ => match (row.first().and_then(result_cell_num), row.get(1).and_then(result_cell_num)) {
-                        (Some(a), Some(b)) => Some((a, b)),
-                        (Some(r), None) => Some(((i + 1) as f64, r)),
-                        _ => None,
-                    },
-                }
-            })
-            .collect();
+        let pts = extract_residuals_tab_pairs(tab, graph, doc);
         if !pts.is_empty() {
             return pts;
         }
@@ -2458,21 +2569,19 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
     }
 
     let color = graph.spec.palette.color_at(0);
-    for &(z, y) in &pts {
+    for (idx, &(z, y)) in pts.iter().enumerate() {
         if let (Some(px), Some(py)) = (x_map.map_value(z, r.x, r.right()), y_map.map_value(y, r.bottom(), r.y)) {
-            emit_marker(
-                scene,
-                PointPt::new(px, py),
-                MarkerStyle {
-                    shape: MarkerShape::Circle,
-                    fill_mode: MarkerFillMode::Filled,
-                    size_pt: 4.8,
-                    fill_color: color,
-                    stroke_color: Rgba8::WHITE,
-                    stroke_width_pt: 0.5,
-                },
-                Some(r),
-            );
+            let base_marker = MarkerStyle {
+                shape: MarkerShape::Circle,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 4.8,
+                fill_color: color,
+                stroke_color: Rgba8::WHITE,
+                stroke_width_pt: 0.5,
+            };
+            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
+                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            }
         }
     }
     Ok(())
@@ -2613,24 +2722,7 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
     {
-        let (ds_col, _, y_col) = extract_residuals_cols(&tab.column_headers);
-        let target_label = selected_dataset_label_in_tab(tab, ds_col, graph, doc);
-        let vals: Vec<f64> = tab
-            .rows
-            .iter()
-            .filter_map(|row| {
-                if let (Some(dc), Some(lbl)) = (ds_col, target_label.as_deref())
-                    && matches!(row.get(dc), Some(ResultCell::Text(t)) if t != lbl)
-                {
-                    return None;
-                }
-                let cell = match y_col {
-                    Some(yc) => row.get(yc),
-                    None => row.get(1).or_else(|| row.first()),
-                };
-                result_cell_num(cell?)
-            })
-            .collect();
+        let vals: Vec<f64> = extract_residuals_tab_pairs(tab, graph, doc).into_iter().map(|(_, resid)| resid).collect();
         let pairs = values_to_qq_pairs(vals);
         if pairs.len() >= 3 {
             return pairs;

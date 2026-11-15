@@ -1,6 +1,6 @@
 # LumenCraft Command Reference
 
-Registered commands: 90
+Registered commands: 95
 
 ## Project & Files (`project`)
 
@@ -166,6 +166,14 @@ Registered commands: 90
 - **Beginner note:** Clones a complete linked family of sheets so all formulas, analyses, and figures remain wired to the copied table.
 - **Parameters:** `clear_data` (any), `new_sheet_id` (any), `prefix` (any), `sheet_id*` (string), `title` (any)
 
+### `sheet.extractResultTab` — Extract Result Tab to Data Table
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Insert/Extract Result Tab...`
+- **Summary:** Create a reactive linked DataSheet from a ResultSheet sub-tab (such as PC scores, residuals, or cleaned data).
+- **Beginner note:** Copies a computed result table tab into a new linked data table so you can analyze or graph it.
+- **Parameters:** `archetype` (any), `auto_graph` (boolean), `result_sheet_id*` (string), `sheet_id` (any), `tab_id` (any), `title` (any)
+
 ### `sheet.freeze` — Freeze Sheet
 
 - **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
@@ -314,6 +322,22 @@ Registered commands: 90
 - **Beginner note:** Link a range from another sheet or CSV/TSV file so updates flow through automatically.
 - **Parameters:** `anchor` (object), `baseline` (any), `decimal_separator` (any), `delimiter` (any), `exclude_row_predicate` (any), `filter` (any), `link_id` (any), `link_spec` (any), `mode` (string), `normalize_decimal` (boolean), `propagate_title_header` (boolean), `provenance` (any), `skip_contiguous_blanks` (boolean), `source_kind` (any), `source_path` (any), `source_range` (any), `source_sheet_id` (any), `start_col` (integer), `start_row` (integer), `start_subcol` (integer), `tab_id` (any), `target_sheet_id*` (string), `transpose` (boolean)
 
+### `table.randomSampleRows` — Random Sample Rows
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Data/Random Sample Rows...`
+- **Summary:** Draw a reproducible Fisher-Yates random sample of rows (optional stratification) into a new data sheet.
+- **Beginner note:** Creates a new table containing a seeded simple or stratified random subset of rows from a source sheet.
+- **Parameters:** `info_sheet_id` (any), `proportional_allocation` (any), `sample_size*` (integer), `seed` (any), `sheet_id` (any), `source_sheet_id*` (string), `stratify_column` (any), `title` (any)
+
+### `table.randomizeGroups` — Randomize Subjects to Groups
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Data/Randomize Groups...`
+- **Summary:** Deterministically allocate subjects across treatment groups (complete-balanced or permuted-block) and upsert ARRIVE constants on an InfoSheet.
+- **Beginner note:** Randomizes subjects into balanced or blocked treatment arms and stores reproducibility metadata on an Info sheet.
+- **Parameters:** `block_sizes` (any), `groups*` (array), `info_sheet_id` (any), `scheme` (any), `seed` (any), `sheet_id` (any), `subject_count` (any), `subject_ids` (any), `title` (any)
+
 ### `table.recodeLevels` — Recode Categorical Levels
 
 - **Effects:** `MUTATES_DOCUMENT`
@@ -401,6 +425,14 @@ Registered commands: 90
 - **Summary:** Set one or more X or elapsed-time column cells on an XY or Survival table.
 - **Beginner note:** Fill or edit values in the X (or Survival time) column.
 - **Parameters:** `decimal_separator` (any), `edits` (array), `excluded` (boolean), `parse_asterisk_exclusion` (boolean), `row` (integer), `sheet_id*` (string), `start_row` (integer), `subcol` (integer), `value` (any), `values` (array)
+
+### `table.simulateDistributions` — Simulate Distributions
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Insert/Simulate Distributions...`
+- **Summary:** Generate a Column or MultipleVariables table with columns sampled from Uniform, Gaussian, LogNormal, Binomial, Poisson, or Exponential distributions.
+- **Beginner note:** Creates a new table of seeded random variates drawn from parametric statistical distributions.
+- **Parameters:** `columns*` (array), `n_rows*` (integer), `seed` (any), `sheet_id` (any), `title` (any), `use_multiple_variables` (any)
 
 ### `table.simulateXy` — Simulate XY Data
 
@@ -533,9 +565,9 @@ Registered commands: 90
 
 - **Effects:** `MUTATES_DOCUMENT`
 - **Menu:** `Draw/Annotation...`
-- **Summary:** Add a text box, line/arrow, shape, or live embedded result table annotation to a graph.
-- **Beginner note:** Places labels, arrows, geometric callouts, or embedded result summaries onto a graph.
-- **Parameters:** `annotation` (any), `bounds_pt` (any), `kind` (any), `result_sheet_id` (any), `sheet_id*` (string), `text` (any)
+- **Summary:** Add a text box, line/arrow, shape, live embedded result table, or live fitted model equation annotation to a graph.
+- **Beginner note:** Places labels, arrows, geometric callouts, embedded result summaries, or model equations onto a graph.
+- **Parameters:** `annotation` (any), `bordered` (any), `bounds_pt` (any), `data_set_index` (any), `font_size_pt` (any), `kind` (any), `mode` (any), `result_sheet_id` (any), `sheet_id*` (string), `text` (any)
 
 ### `graph.addComparisonBrackets` — Add Pairwise Significance Brackets
 
@@ -568,6 +600,14 @@ Registered commands: 90
 - **Summary:** Create a new graph sheet bound to an input data sheet with optional kind, title, and initialization state.
 - **Beginner note:** Creates a new graph linked to one of your data tables.
 - **Parameters:** `data_sheet_id*` (string), `initialized` (any), `kind` (any), `sheet_id` (any), `title` (any)
+
+### `graph.formatSelectedPoints` — Format Selected Points
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Format/Selected Points...`
+- **Summary:** Apply, merge, replace, or clear per-point visual overrides across one or more selected graph points.
+- **Beginner note:** Highlights or hides specific data points (changing color, symbol, size, border, or visibility) without modifying the whole series.
+- **Parameters:** `border_width_pt` (any), `clear` (boolean), `color` (any), `fill_color` (any), `fill_mode` (any), `hidden` (boolean), `mode` (string), `overrides` (array), `points` (array), `shape` (any), `sheet_id*` (string), `size_pt` (any), `stroke_width_pt` (any), `symbol` (any)
 
 ### `graph.initialize` — Initialize Graph
 

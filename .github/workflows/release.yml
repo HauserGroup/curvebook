@@ -8,6 +8,7 @@ on:
     - cron: "37 3 * * *"
   push:
     branches: [release]
+    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -159,8 +160,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build Linux packages
         env:
-          LUMENCRAFT_VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            export LUMENCRAFT_VERSION="$INPUT_VERSION"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+            export LUMENCRAFT_VERSION="${GITHUB_REF_NAME#v}"
+          fi
           ./packaging/linux/package.sh
           ./packaging/linux/flatpak-bundle.sh --no-test
       - uses: actions/upload-artifact@v7
@@ -209,7 +217,16 @@ jobs:
           security set-keychain-settings -lut 21600 "$kc"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
           security import "$cert" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
-          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          existing_kcs=()
+          while IFS= read -r kc_line; do
+            kc_line="${kc_line#"${kc_line%%[![:space:]]*}"}"
+            kc_line="${kc_line%\"}"
+            kc_line="${kc_line#\"}"
+            if [[ -n "$kc_line" ]]; then
+              existing_kcs+=("$kc_line")
+            fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$kc" "${existing_kcs[@]}"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$kc"
           identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' 'NR==1{print $2}')"
           echo "MACOS_KEYCHAIN=$kc" >> "$GITHUB_ENV"
@@ -217,11 +234,19 @@ jobs:
           rm -f "$cert"
       - name: Build macOS universal DMG & CLI zip
         env:
-          LUMENCRAFT_VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
           APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        run: ./packaging/macos/package.sh --arch universal
+        run: |
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            export LUMENCRAFT_VERSION="$INPUT_VERSION"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+            export LUMENCRAFT_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          ./packaging/macos/package.sh --arch universal
       - uses: actions/upload-artifact@v7
         with:
           name: release-macos-universal
@@ -264,7 +289,10 @@ jobs:
       - name: Build Windows MSI & portable zip
         shell: pwsh
         env:
-          LUMENCRAFT_VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+          MATRIX_ARCH: ${{ matrix.arch }}
           WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
           WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
           AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
@@ -273,7 +301,13 @@ jobs:
           AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
           AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
           AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
-        run: ./packaging/windows/package.ps1 -Arch ${{ matrix.arch }}
+        run: |
+          if ($env:INPUT_VERSION) {
+            $env:LUMENCRAFT_VERSION = $env:INPUT_VERSION
+          } elseif ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME.StartsWith('v')) {
+            $env:LUMENCRAFT_VERSION = $env:GITHUB_REF_NAME.Substring(1)
+          }
+          ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH
       - uses: actions/upload-artifact@v7
         with:
           name: release-windows-${{ matrix.arch }}
@@ -301,8 +335,16 @@ jobs:
         run: cargo install trunk --locked
       - name: Package WebAssembly app
         env:
-          LUMENCRAFT_VERSION: ${{ inputs.version }}
-        run: ./packaging/web/package.sh
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [ -n "${INPUT_VERSION:-}" ]; then
+            export LUMENCRAFT_VERSION="$INPUT_VERSION"
+          elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+            export LUMENCRAFT_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          ./packaging/web/package.sh
       - uses: actions/upload-artifact@v7
         with:
           name: release-web
@@ -362,10 +404,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           . ./packaging/env.sh
-          ver="${INPUT_VERSION:-$VERSION}"
+          tag_ver=""
+          if [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+            tag_ver="${GITHUB_REF_NAME#v}"
+          fi
+          ver="${INPUT_VERSION:-${tag_ver:-$VERSION}}"
           tag="v$ver"
           title="LumenCraft $tag"
           (cd dist/release && sha256sum -- * > SHA256SUMS.txt)

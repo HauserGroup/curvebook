@@ -4,8 +4,8 @@
 
 use lumencraft_doc::{
     Cell, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedTable,
-    PartsOfWholeTable, ResultCell, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, XColumnMode,
-    XyTable, default_column_label, transpose_cell_grid,
+    PartsOfWholeTable, ResultCell, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource,
+    XColumnMode, XyTable, default_column_label, transpose_cell_grid,
 };
 use lumencraft_math::sum;
 
@@ -510,10 +510,10 @@ fn average_cell_grid_bins(rows: &[Vec<Cell>], k: usize) -> Vec<Vec<Cell>> {
         .collect()
 }
 
-fn retain_rows(arch: &mut TableArchetype, indices: &[usize]) {
+pub(crate) fn retain_rows(arch: &mut TableArchetype, indices: &[usize]) {
     match arch {
         TableArchetype::Xy(t) => {
-            if !matches!(t.x_mode, XColumnMode::Numbers { .. }) {
+            if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. }) {
                 let mat: Vec<Vec<Cell>> = (0..t.row_count()).map(|r| vec![t.x_value_at(r).map_or_else(Cell::empty, Cell::number)]).collect();
                 t.x_cells = mat;
                 t.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
@@ -532,6 +532,9 @@ fn retain_rows(arch: &mut TableArchetype, indices: &[usize]) {
         }
         TableArchetype::Grouped(t) => {
             t.row_titles = retain_strings(&t.row_titles, indices);
+            if let Some(spacing) = &mut t.row_numeric_spacing {
+                *spacing = indices.iter().map(|&r| spacing.get(r).copied().flatten()).collect();
+            }
             for ds in &mut t.data_sets {
                 ds.cells = indices.iter().filter_map(|&r| ds.cells.get(r).cloned()).collect();
             }
@@ -593,7 +596,15 @@ pub fn execute_select(
     retain_rows(&mut filtered.archetype, &kept_indices);
 
     let (id, title) = ctx.derived_ids(source, "select", "Selected");
-    let projected = if filtered.kind() == target_archetype { filtered.archetype } else { project_archetype(&filtered.archetype, target_archetype)? };
+    let selected_cols = ctx.active_columns(filtered.archetype.column_count())?;
+    let projected = if filtered.kind() == target_archetype {
+        if !ctx.selected_data_sets.is_empty() {
+            retain_columns(&mut filtered.archetype, &selected_cols)?;
+        }
+        filtered.archetype
+    } else {
+        project_archetype(&filtered.archetype, target_archetype, &selected_cols)?
+    };
     let out = DataSheet::new(id, title, projected)?;
 
     let summary_tab = build_summary_tab(
@@ -709,10 +720,44 @@ fn row_col_active_number(arch: &TableArchetype, row: usize, col: usize) -> Optio
     }
 }
 
-fn project_archetype(arch: &TableArchetype, target: TableKind) -> Result<TableArchetype, TransformError> {
+fn retain_col_vec<T: Clone>(items: &[T], selected: &[usize]) -> Vec<T> {
+    selected.iter().filter_map(|&c| items.get(c).cloned()).collect()
+}
+
+fn retain_columns(arch: &mut TableArchetype, selected: &[usize]) -> Result<(), TransformError> {
+    match arch {
+        TableArchetype::Xy(t) => t.data_sets = retain_col_vec(&t.data_sets, selected),
+        TableArchetype::Column(t) => t.data_sets = retain_col_vec(&t.data_sets, selected),
+        TableArchetype::Grouped(t) => t.data_sets = retain_col_vec(&t.data_sets, selected),
+        TableArchetype::Contingency(t) => {
+            t.data_sets = retain_col_vec(&t.data_sets, selected);
+            t.validate_counts()?;
+        }
+        TableArchetype::Survival(t) => t.cohorts = retain_col_vec(&t.cohorts, selected),
+        TableArchetype::PartsOfWhole(t) => t.data_sets = retain_col_vec(&t.data_sets, selected),
+        TableArchetype::MultipleVariables(mv) => {
+            let full_keep = selected.len() == mv.variables.len() && selected.iter().enumerate().all(|(i, &c)| i == c);
+            mv.variables = selected
+                .iter()
+                .filter_map(|&c| {
+                    let mut var = mv.variables.get(c)?.clone();
+                    if !full_keep && matches!(var.source, VariableSource::Calculated { .. }) {
+                        // Subsetting/reordering variables can drop or re-index formula inputs; snapshot evaluated cells.
+                        var.source = VariableSource::Entered;
+                    }
+                    Some(var)
+                })
+                .collect();
+        }
+        TableArchetype::Nested(t) => t.groups = retain_col_vec(&t.groups, selected),
+    }
+    Ok(())
+}
+
+fn project_archetype(arch: &TableArchetype, target: TableKind, selected: &[usize]) -> Result<TableArchetype, TransformError> {
     let rows = arch.row_count();
-    let cols = arch.column_count();
-    let (titles, row_titles, grid) = flatten_primary_columns(arch);
+    let (titles, row_titles, grid) = flatten_primary_columns(arch, selected);
+    let cols = titles.len();
 
     match target {
         TableKind::Column => {
@@ -722,6 +767,7 @@ fn project_archetype(arch: &TableArchetype, target: TableKind) -> Result<TableAr
             } else {
                 populate_single_datasets(&mut t.data_sets, &titles, &grid);
             }
+            t.row_titles_expanded = row_titles.iter().any(|s| !s.trim().is_empty());
             t.row_titles = row_titles;
             Ok(TableArchetype::Column(t))
         }
@@ -751,6 +797,7 @@ fn project_archetype(arch: &TableArchetype, target: TableKind) -> Result<TableAr
                     }
                 }
             }
+            t.row_titles_expanded = row_titles.iter().any(|s| !s.trim().is_empty());
             t.row_titles = row_titles;
             Ok(TableArchetype::Xy(t))
         }
@@ -798,6 +845,7 @@ fn project_archetype(arch: &TableArchetype, target: TableKind) -> Result<TableAr
                     }
                 }
             } else if cols == 1 {
+                t.cohorts[0].title = titles[0].clone();
                 for (r, row_vals) in grid.iter().enumerate().take(rows) {
                     t.cohorts[0].cells[r][0] = row_vals[0].clone();
                 }
@@ -819,6 +867,7 @@ fn project_archetype(arch: &TableArchetype, target: TableKind) -> Result<TableAr
                     var.refresh_inferred_role();
                 }
             }
+            t.row_titles_expanded = row_titles.iter().any(|s| !s.trim().is_empty());
             t.row_titles = row_titles;
             Ok(TableArchetype::MultipleVariables(t))
         }
@@ -854,10 +903,9 @@ fn populate_single_datasets(data_sets: &mut [DataSetColumn], titles: &[String], 
     }
 }
 
-fn flatten_primary_columns(arch: &TableArchetype) -> (Vec<String>, Vec<String>, Vec<Vec<Cell>>) {
+fn flatten_primary_columns(arch: &TableArchetype, selected: &[usize]) -> (Vec<String>, Vec<String>, Vec<Vec<Cell>>) {
     let rows = arch.row_count();
-    let cols = arch.column_count();
-    let titles: Vec<String> = match arch {
+    let all_titles: Vec<String> = match arch {
         TableArchetype::Xy(t) => t.data_sets.iter().map(|d| d.title.clone()).collect(),
         TableArchetype::Column(t) => t.data_sets.iter().map(|d| d.title.clone()).collect(),
         TableArchetype::Grouped(t) => t.data_sets.iter().map(|d| d.title.clone()).collect(),
@@ -867,6 +915,7 @@ fn flatten_primary_columns(arch: &TableArchetype) -> (Vec<String>, Vec<String>, 
         TableArchetype::MultipleVariables(mv) => mv.variables.iter().map(|v| v.title.clone()).collect(),
         TableArchetype::Nested(t) => t.groups.iter().map(|g| g.title.clone()).collect(),
     };
+    let titles: Vec<String> = selected.iter().filter_map(|&c| all_titles.get(c).cloned()).collect();
     let row_titles: Vec<String> = match arch {
         TableArchetype::Xy(t) => t.row_titles.clone(),
         TableArchetype::Column(t) => t.row_titles.clone(),
@@ -879,8 +928,8 @@ fn flatten_primary_columns(arch: &TableArchetype) -> (Vec<String>, Vec<String>, 
     };
     let mut grid = Vec::with_capacity(rows);
     for r in 0..rows {
-        let mut row = Vec::with_capacity(cols);
-        for c in 0..cols {
+        let mut row = Vec::with_capacity(selected.len());
+        for &c in selected {
             let cell = arch.data_cell(lumencraft_doc::CellCoord::new(r, c, 0)).cloned().unwrap_or_default();
             row.push(cell);
         }

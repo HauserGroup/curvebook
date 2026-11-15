@@ -107,11 +107,12 @@ struct StyleState {
     italic_depth: usize,
     base_script: SpanScript,
     script_stack: Vec<SpanScript>,
+    in_math: bool,
 }
 
 impl StyleState {
     fn from_script(base_script: SpanScript) -> Self {
-        Self { bold_depth: 0, italic_depth: 0, base_script, script_stack: Vec::new() }
+        Self { bold_depth: 0, italic_depth: 0, base_script, script_stack: Vec::new(), in_math: false }
     }
 
     fn current_weight(&self) -> SpanWeight {
@@ -127,7 +128,7 @@ impl StyleState {
     }
 
     fn with_script(&self, script: SpanScript) -> Self {
-        Self { bold_depth: self.bold_depth, italic_depth: self.italic_depth, base_script: script, script_stack: Vec::new() }
+        Self { bold_depth: self.bold_depth, italic_depth: self.italic_depth, base_script: script, script_stack: Vec::new(), in_math: self.in_math }
     }
 
     fn with_bold(&self) -> Self {
@@ -139,7 +140,15 @@ impl StyleState {
     }
 
     fn with_upright(&self) -> Self {
-        Self { bold_depth: 0, italic_depth: 0, base_script: self.current_script(), script_stack: Vec::new() }
+        Self { bold_depth: 0, italic_depth: 0, base_script: self.current_script(), script_stack: Vec::new(), in_math: self.in_math }
+    }
+
+    fn with_roman_operator(&self) -> Self {
+        Self { bold_depth: self.bold_depth, italic_depth: 0, base_script: self.current_script(), script_stack: Vec::new(), in_math: self.in_math }
+    }
+
+    fn with_math(&self) -> Self {
+        Self { in_math: true, ..self.clone() }
     }
 }
 
@@ -148,10 +157,12 @@ impl StyleState {
 /// Supports:
 /// - Inline tags: `<b>`..`</b>`, `<i>`..`</i>`, `<sup>`..`</sup>`, `<sub>`..`</sub>` (case-insensitive).
 /// - Markdown emphasis: `**bold**`, `*italic*`, `***bold italic***` (preserving unpaired significance stars).
+/// - Balanced inline TeX math delimiters (`$...$` / `$$...$$`, preserving currency like `"$100"` or `"Costs $5 to $10"`).
 /// - Braced and token super/subscripts: `^{...}`, `^token`, `_{...}`, `_token`.
-/// - LaTeX and HTML named Greek/math escapes (`\alpha`..`\omega`, `\Alpha`..`\Omega`, `\pm`, `\mu`,
-///   `\le`, `\ge`, `\times`, `\approx`, `\infty`, `\Delta`, `\chi`, `&alpha;`, etc.), plus `\textbf{...}`,
-///   `\textit{...}`, `\text{...}`, `\mathrm{...}`.
+/// - TeX-subset commands: `\frac{num}{den}`, `\sqrt{expr}`, roman operators (`\log`, `\ln`, `\exp`,
+///   `\sin`, `\cos`, `\tan`, `\max`, `\min`, etc.), `\textbf{...}`, `\textit{...}`, `\text{...}`, `\mathrm{...}`,
+///   plus LaTeX and HTML named Greek/math escapes (`\alpha`..`\omega`, `\Alpha`..`\Omega`, `\pm`, `\mu`,
+///   `\cdot`, `\le`, `\ge`, `\times`, `\approx`, `\infty`, `\neq`, `\Delta`, `\chi`, `&alpha;`, etc.).
 #[must_use]
 pub fn parse_markup(input: &str) -> RichText {
     let mut spans = Vec::new();
@@ -199,7 +210,16 @@ fn parse_segment(input: &str, state: &mut StyleState, spans: &mut Vec<RichSpan>,
             continue;
         }
 
+        if ch == '$'
+            && let Some((consumed, next_prev)) = handle_dollar_math(rest, state, spans, depth)
+        {
+            idx += consumed;
+            prev_char = next_prev;
+            continue;
+        }
+
         if ch == '*'
+            && !state.in_math
             && let Some((consumed, next_prev)) = handle_asterisk_run(rest, prev_char, state, spans, depth)
         {
             idx += consumed;
@@ -212,6 +232,17 @@ fn parse_segment(input: &str, state: &mut StyleState, spans: &mut Vec<RichSpan>,
         {
             idx += consumed;
             prev_char = next_prev;
+            continue;
+        }
+
+        if ch == '{'
+            && state.in_math
+            && let Some((inner, consumed)) = extract_braced(rest)
+        {
+            let mut inner_state = state.clone();
+            parse_segment(inner, &mut inner_state, spans, depth + 1);
+            idx += consumed;
+            prev_char = Some('}');
             continue;
         }
 
@@ -303,9 +334,20 @@ fn handle_backslash(rest: &str, state: &StyleState, spans: &mut Vec<RichSpan>, d
         let name = &after[..name_len];
         let tail = &after[name_len..];
 
-        if tail.starts_with('{')
-            && matches!(name, "textbf" | "mathbf" | "textit" | "mathit" | "text" | "mathrm")
-            && let Some((inner, brace_consumed)) = extract_braced(tail)
+        if matches!(name, "frac" | "dfrac" | "tfrac")
+            && let Some((num, den, args_consumed)) = extract_frac_args(tail)
+        {
+            return emit_parsed_fraction(num, den, state, spans, depth, 1 + name_len + args_consumed);
+        }
+
+        if name == "sqrt"
+            && let Some((inner, brace_consumed)) = extract_braced_opt_ws(tail)
+        {
+            return emit_parsed_sqrt(inner, state, spans, depth, 1 + name_len + brace_consumed);
+        }
+
+        if matches!(name, "textbf" | "mathbf" | "textit" | "mathit" | "text" | "mathrm" | "textrm" | "operatorname" | "mbox")
+            && let Some((inner, brace_consumed)) = extract_braced_opt_ws(tail)
         {
             let mut inner_state = match name {
                 "textbf" | "mathbf" => state.with_bold(),
@@ -314,6 +356,19 @@ fn handle_backslash(rest: &str, state: &StyleState, spans: &mut Vec<RichSpan>, d
             };
             parse_segment(inner, &mut inner_state, spans, depth + 1);
             return Some((1 + name_len + brace_consumed, Some('}')));
+        }
+
+        if matches!(name, "left" | "right")
+            && let Some((delim, delim_consumed)) = parse_tex_delimiter(tail)
+        {
+            push_styled(spans, delim, state);
+            return Some((1 + name_len + delim_consumed, delim.chars().last()));
+        }
+
+        if let Some(op) = lookup_roman_operator(name) {
+            let op_state = state.with_roman_operator();
+            push_styled(spans, op, &op_state);
+            return Some((1 + name_len, op.chars().last()));
         }
 
         if let Some(sym) = lookup_latex_escape(name) {
@@ -331,7 +386,109 @@ fn handle_backslash(rest: &str, state: &StyleState, spans: &mut Vec<RichSpan>, d
         return Some((1 + first.len_utf8(), Some(first)));
     }
 
+    if matches!(first, ',' | ';' | ':' | ' ') {
+        push_styled(spans, " ", state);
+        return Some((1 + first.len_utf8(), Some(' ')));
+    }
+
+    if first == '!' {
+        return Some((2, None));
+    }
+
     None
+}
+
+fn handle_dollar_math(rest: &str, state: &StyleState, spans: &mut Vec<RichSpan>, depth: usize) -> Option<(usize, Option<char>)> {
+    let delim_len = if rest.starts_with("$$") { 2 } else { 1 };
+    let (inner, consumed) = match_balanced_math_delimiters(rest, delim_len)?;
+    let mut math_state = state.with_math();
+    parse_segment(inner, &mut math_state, spans, depth + 1);
+    Some((consumed, Some('$')))
+}
+
+fn match_balanced_math_delimiters(rest: &str, delim_len: usize) -> Option<(&str, usize)> {
+    let after_open = rest.get(delim_len..)?;
+    if delim_len == 1 && after_open.starts_with('$') {
+        return None;
+    }
+
+    let bytes = after_open.as_bytes();
+    let mut i = 0usize;
+    let mut brace_depth = 0usize;
+
+    while i < bytes.len() {
+        let ch = after_open[i..].chars().next()?;
+        if ch == '\\' {
+            i += 1;
+            if let Some(next_ch) = after_open[i..].chars().next() {
+                i += next_ch.len_utf8();
+            }
+            continue;
+        }
+        if ch == '{' {
+            brace_depth += 1;
+            if brace_depth > MAX_MARKUP_DEPTH {
+                return None;
+            }
+            i += 1;
+            continue;
+        }
+        if ch == '}' {
+            if brace_depth == 0 {
+                return None;
+            }
+            brace_depth -= 1;
+            i += 1;
+            continue;
+        }
+        if brace_depth == 0 && ((delim_len == 1 && ch == '$') || (delim_len == 2 && after_open[i..].starts_with("$$"))) {
+            let inner = &after_open[..i];
+            let after_close = &after_open[i + delim_len..];
+            if is_math_mode_content(inner, after_close) {
+                return Some((inner, delim_len + i + delim_len));
+            }
+            return None;
+        }
+        i += ch.len_utf8();
+    }
+
+    None
+}
+
+fn is_math_mode_content(inner: &str, after_close: &str) -> bool {
+    if inner.trim().is_empty() {
+        return false;
+    }
+    if after_close.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    if inner.ends_with(char::is_whitespace) && after_close.chars().next().is_some_and(char::is_alphanumeric) {
+        return false;
+    }
+    has_math_indicator(inner) || is_pure_math_identifier(inner)
+}
+
+fn has_math_indicator(s: &str) -> bool {
+    s.chars().any(is_math_indicator_char)
+}
+
+const fn is_math_indicator_char(ch: char) -> bool {
+    if matches!(ch, '=' | '\\' | '^' | '_' | '+' | '-' | '/' | '*' | '<' | '>' | '{' | '}') {
+        return true;
+    }
+    let cp = ch as u32;
+    matches!(
+        cp,
+        0x00B0..=0x00B3 | 0x00B5 | 0x00B7 | 0x00B9 | 0x00D7 | 0x00F7 | 0x0370..=0x03FF | 0x2032..=0x2033 | 0x2190..=0x22FF
+    )
+}
+
+fn is_pure_math_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic() && chars.all(|c| c.is_ascii_alphanumeric() || c == '\'')
 }
 
 fn handle_asterisk_run(
@@ -416,21 +573,17 @@ fn handle_script_marker(rest: &str, marker: char, state: &StyleState, spans: &mu
 
     if first == '{' {
         let (inner, consumed) = extract_braced(after)?;
-        let mut inner_state = state.with_script(target_script);
+        let mut inner_state = state.with_script(target_script).with_math();
         parse_segment(inner, &mut inner_state, spans, depth + 1);
         return Some((1 + consumed, Some('}')));
     }
 
     if first == '\\' {
         let after_bs = after.get(1..)?;
-        let name_len = after_bs.bytes().take_while(u8::is_ascii_alphabetic).count();
-        if name_len > 0 {
-            let name = &after_bs[..name_len];
-            if let Some(sym) = lookup_latex_escape(name) {
-                let script_state = state.with_script(target_script);
-                push_styled(spans, sym, &script_state);
-                return Some((2 + name_len, sym.chars().last()));
-            }
+        if after_bs.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+            let script_state = state.with_script(target_script);
+            let (consumed, next_prev) = handle_backslash(after, &script_state, spans, depth + 1)?;
+            return Some((1 + consumed, next_prev));
         }
         return None;
     }
@@ -498,6 +651,216 @@ fn extract_braced(s: &str) -> Option<(&str, usize)> {
     None
 }
 
+fn extract_braced_opt_ws(s: &str) -> Option<(&str, usize)> {
+    let trimmed = s.trim_start_matches([' ', '\t']);
+    let ws_len = s.len() - trimmed.len();
+    let (inner, consumed) = extract_braced(trimmed)?;
+    Some((inner, ws_len + consumed))
+}
+
+fn extract_frac_args(s: &str) -> Option<(&str, &str, usize)> {
+    let (num, num_consumed) = extract_braced_opt_ws(s)?;
+    let (den, den_consumed) = extract_braced_opt_ws(&s[num_consumed..])?;
+    Some((num, den, num_consumed + den_consumed))
+}
+
+fn trim_horiz_ws_nonempty(s: &str) -> &str {
+    let trimmed = s.trim_matches([' ', '\t']);
+    if trimmed.is_empty() { s } else { trimmed }
+}
+
+fn spans_plain_text(spans: &[RichSpan]) -> String {
+    let mut out = String::new();
+    for span in spans {
+        out.push_str(&span.text);
+    }
+    out
+}
+
+fn is_enclosed_in_parens(s: &str) -> bool {
+    if !(s.starts_with('(') && s.ends_with(')')) {
+        return false;
+    }
+    let mut depth = 0usize;
+    for (idx, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return idx + ch.len_utf8() == s.len();
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn is_simple_fraction_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '.' | '\u{2032}' | '\u{2033}')
+}
+
+fn needs_fraction_parens(spans: &[RichSpan]) -> bool {
+    let plain = spans_plain_text(spans);
+    if plain.is_empty() {
+        return true;
+    }
+    if is_enclosed_in_parens(&plain) {
+        return false;
+    }
+    !(plain.chars().all(is_simple_fraction_char) && plain.chars().any(char::is_alphanumeric))
+}
+
+fn emit_parsed_fraction(
+    num: &str,
+    den: &str,
+    state: &StyleState,
+    spans: &mut Vec<RichSpan>,
+    depth: usize,
+    total_consumed: usize,
+) -> Option<(usize, Option<char>)> {
+    let mut math_state = state.with_math();
+    let mut num_spans = Vec::new();
+    parse_segment(trim_horiz_ws_nonempty(num), &mut math_state, &mut num_spans, depth + 1);
+    let mut den_spans = Vec::new();
+    parse_segment(trim_horiz_ws_nonempty(den), &mut math_state, &mut den_spans, depth + 1);
+
+    let wrap_num = needs_fraction_parens(&num_spans);
+    let wrap_den = needs_fraction_parens(&den_spans);
+
+    if wrap_num {
+        push_styled(spans, "(", state);
+    }
+    for span in num_spans {
+        push_rich_span(spans, span);
+    }
+    if wrap_num {
+        push_styled(spans, ")", state);
+    }
+    push_styled(spans, "/", state);
+    if wrap_den {
+        push_styled(spans, "(", state);
+    }
+    for span in den_spans {
+        push_rich_span(spans, span);
+    }
+    if wrap_den {
+        push_styled(spans, ")", state);
+    }
+
+    let last_ch = spans.last().and_then(|s| s.text.chars().last());
+    Some((total_consumed, last_ch))
+}
+
+fn emit_parsed_sqrt(
+    inner: &str,
+    state: &StyleState,
+    spans: &mut Vec<RichSpan>,
+    depth: usize,
+    total_consumed: usize,
+) -> Option<(usize, Option<char>)> {
+    let mut math_state = state.with_math();
+    let mut inner_spans = Vec::new();
+    parse_segment(trim_horiz_ws_nonempty(inner), &mut math_state, &mut inner_spans, depth + 1);
+
+    push_styled(spans, "\u{221A}", state);
+    let plain = spans_plain_text(&inner_spans);
+    if !plain.is_empty() {
+        let single_token = inner_spans.len() == 1 && plain.chars().count() == 1 && plain.chars().all(char::is_alphanumeric);
+        let wrap = !single_token && !is_enclosed_in_parens(&plain);
+        if wrap {
+            push_styled(spans, "(", state);
+        }
+        for span in inner_spans {
+            push_rich_span(spans, span);
+        }
+        if wrap {
+            push_styled(spans, ")", state);
+        }
+    }
+
+    let last_ch = spans.last().and_then(|s| s.text.chars().last());
+    Some((total_consumed, last_ch))
+}
+
+fn parse_tex_delimiter(s: &str) -> Option<(&'static str, usize)> {
+    let trimmed = s.trim_start_matches([' ', '\t']);
+    let ws = s.len() - trimmed.len();
+    if trimmed.starts_with('(') {
+        Some(("(", ws + 1))
+    } else if trimmed.starts_with(')') {
+        Some((")", ws + 1))
+    } else if trimmed.starts_with('[') {
+        Some(("[", ws + 1))
+    } else if trimmed.starts_with(']') {
+        Some(("]", ws + 1))
+    } else if trimmed.starts_with('|') {
+        Some(("|", ws + 1))
+    } else if trimmed.starts_with('.') {
+        Some(("", ws + 1))
+    } else if trimmed.starts_with("\\{") {
+        Some(("{", ws + 2))
+    } else if trimmed.starts_with("\\}") {
+        Some(("}", ws + 2))
+    } else if trimmed.starts_with("\\|") {
+        Some(("\u{2016}", ws + 2))
+    } else {
+        None
+    }
+}
+
+fn lookup_roman_operator(name: &str) -> Option<&'static str> {
+    match name {
+        "log" => Some("log"),
+        "ln" => Some("ln"),
+        "exp" => Some("exp"),
+        "sin" => Some("sin"),
+        "cos" => Some("cos"),
+        "tan" => Some("tan"),
+        "sinh" => Some("sinh"),
+        "cosh" => Some("cosh"),
+        "tanh" => Some("tanh"),
+        "arcsin" => Some("arcsin"),
+        "arccos" => Some("arccos"),
+        "arctan" => Some("arctan"),
+        "sec" => Some("sec"),
+        "csc" => Some("csc"),
+        "cot" => Some("cot"),
+        "max" => Some("max"),
+        "min" => Some("min"),
+        "lim" => Some("lim"),
+        "sup" => Some("sup"),
+        "inf" => Some("inf"),
+        "arg" => Some("arg"),
+        "det" => Some("det"),
+        "dim" => Some("dim"),
+        "gcd" => Some("gcd"),
+        "lg" => Some("lg"),
+        "erf" => Some("erf"),
+        "erfc" => Some("erfc"),
+        _ => None,
+    }
+}
+
+fn push_rich_span(spans: &mut Vec<RichSpan>, span: RichSpan) {
+    if span.text.is_empty() {
+        return;
+    }
+    if let Some(last) = spans.last_mut()
+        && last.script == span.script
+        && last.weight == span.weight
+        && last.slope == span.slope
+        && last.color == span.color
+        && last.font_family == span.font_family
+        && (last.scale - span.scale).abs() <= 1e-9
+    {
+        last.text.push_str(&span.text);
+        return;
+    }
+    spans.push(span);
+}
+
 fn push_styled(spans: &mut Vec<RichSpan>, text: &str, state: &StyleState) {
     if text.is_empty() {
         return;
@@ -505,21 +868,11 @@ fn push_styled(spans: &mut Vec<RichSpan>, text: &str, state: &StyleState) {
     let script = state.current_script();
     let weight = state.current_weight();
     let slope = state.current_slope();
-    if let Some(last) = spans.last_mut()
-        && last.script == script
-        && last.weight == weight
-        && last.slope == slope
-        && last.color.is_none()
-        && last.font_family.is_none()
-    {
-        last.text.push_str(text);
-        return;
-    }
     let scale = match script {
         SpanScript::Baseline => 1.0,
         SpanScript::Superscript | SpanScript::Subscript => 0.7,
     };
-    spans.push(RichSpan { text: text.to_owned(), script, weight, slope, color: None, font_family: None, scale });
+    push_rich_span(spans, RichSpan { text: text.to_owned(), script, weight, slope, color: None, font_family: None, scale });
 }
 
 fn lookup_latex_escape(name: &str) -> Option<&'static str> {
@@ -647,6 +1000,8 @@ fn lookup_math_escape(name: &str) -> Option<&'static str> {
         "mdash" => Some("\u{2014}"),
         "percent" => Some("%"),
         "space" => Some(" "),
+        "quad" => Some("  "),
+        "qquad" => Some("    "),
         _ => None,
     }
 }
@@ -776,6 +1131,146 @@ where
     }
     out.push_str(rest);
     out
+}
+
+// ---------------------------------------------------------------------------
+// Structured 2D Equation Segmentation (for stacked fraction vinculum layout)
+// ---------------------------------------------------------------------------
+
+/// A segment of a structured 2D mathematical equation supporting stacked fractions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum EquationSegment {
+    /// An inline styled rich-text run (variables, operators, scripts, Greek/math symbols).
+    Inline(RichText),
+    /// A stacked 2D fraction with a horizontal vinculum bar between `numerator` and `denominator`.
+    Fraction { numerator: Vec<EquationSegment>, denominator: Vec<EquationSegment> },
+}
+
+/// Parse a TeX-subset equation into structured [`EquationSegment`] nodes for 2D layout.
+///
+/// Unwraps enclosing balanced `$...$` / `$$...$$` math delimiters (preserving currency literals
+/// such as `"$100"` or `"Costs $5 to $10"`), splits top-level `\frac{num}{den}` sequences into
+/// recursive [`EquationSegment::Fraction`] nodes, and parses inline runs via [`parse_markup`].
+/// Empty inline segments are omitted.
+#[must_use]
+pub fn parse_equation_segments(input: &str) -> Vec<EquationSegment> {
+    let mut out = Vec::new();
+    let trimmed = input.trim();
+    let source = unwrap_outer_math_delimiters(trimmed).unwrap_or(input);
+    parse_equation_segments_inner(source, &mut out, 0);
+    out
+}
+
+fn unwrap_outer_math_delimiters(trimmed: &str) -> Option<&str> {
+    if trimmed.starts_with("$$") {
+        let (inner, consumed) = match_balanced_math_delimiters(trimmed, 2)?;
+        return (consumed == trimmed.len()).then_some(inner);
+    }
+    if trimmed.starts_with('$') {
+        let (inner, consumed) = match_balanced_math_delimiters(trimmed, 1)?;
+        return (consumed == trimmed.len()).then_some(inner);
+    }
+    None
+}
+
+fn match_math_for_segments(rest: &str) -> Option<(&str, usize)> {
+    let delim_len = if rest.starts_with("$$") { 2 } else { 1 };
+    match_balanced_math_delimiters(rest, delim_len)
+}
+
+fn parse_equation_segments_inner(input: &str, out: &mut Vec<EquationSegment>, depth: usize) {
+    if depth >= MAX_MARKUP_DEPTH {
+        push_inline_segment(out, parse_markup(input));
+        return;
+    }
+    let mut idx = 0usize;
+    let mut inline_start = 0usize;
+    let mut brace_depth = 0usize;
+
+    while idx < input.len() {
+        let rest = &input[idx..];
+        if brace_depth == 0
+            && rest.starts_with('$')
+            && let Some((inner, consumed)) = match_math_for_segments(rest)
+        {
+            push_inline_segment(out, parse_markup(&input[inline_start..idx]));
+            parse_equation_segments_inner(inner, out, depth + 1);
+            idx += consumed;
+            inline_start = idx;
+            continue;
+        }
+
+        if rest.starts_with('\\') {
+            if brace_depth == 0
+                && let Some((frac_seg, consumed)) = try_parse_frac_segment(rest, depth)
+            {
+                push_inline_segment(out, parse_markup(&input[inline_start..idx]));
+                out.push(frac_seg);
+                idx += consumed;
+                inline_start = idx;
+                continue;
+            }
+            idx += step_backslash_in_segment(rest);
+            continue;
+        }
+
+        let Some(ch) = rest.chars().next() else {
+            break;
+        };
+        if ch == '{' {
+            brace_depth = brace_depth.saturating_add(1);
+        } else if ch == '}' {
+            brace_depth = brace_depth.saturating_sub(1);
+        }
+        idx += ch.len_utf8();
+    }
+
+    if inline_start < input.len() {
+        push_inline_segment(out, parse_markup(&input[inline_start..]));
+    }
+}
+
+fn try_parse_frac_segment(rest: &str, depth: usize) -> Option<(EquationSegment, usize)> {
+    let after = rest.get(1..)?;
+    let name_len = after.bytes().take_while(u8::is_ascii_alphabetic).count();
+    let name = after.get(..name_len)?;
+    if !matches!(name, "frac" | "dfrac" | "tfrac") {
+        return None;
+    }
+    let tail = &after[name_len..];
+    let (num, den, args_consumed) = extract_frac_args(tail)?;
+    let mut numerator = Vec::new();
+    parse_equation_segments_inner(trim_horiz_ws_nonempty(num), &mut numerator, depth + 1);
+    let mut denominator = Vec::new();
+    parse_equation_segments_inner(trim_horiz_ws_nonempty(den), &mut denominator, depth + 1);
+    Some((EquationSegment::Fraction { numerator, denominator }, 1 + name_len + args_consumed))
+}
+
+fn step_backslash_in_segment(rest: &str) -> usize {
+    let Some(after) = rest.get(1..) else {
+        return rest.len();
+    };
+    let name_len = after.bytes().take_while(u8::is_ascii_alphabetic).count();
+    if name_len > 0 {
+        return 1 + name_len;
+    }
+    match after.chars().next() {
+        Some(ch) => 1 + ch.len_utf8(),
+        None => 1,
+    }
+}
+
+fn push_inline_segment(out: &mut Vec<EquationSegment>, rich: RichText) {
+    if rich.is_empty() {
+        return;
+    }
+    if let Some(EquationSegment::Inline(prev)) = out.last_mut() {
+        for span in rich.spans {
+            push_rich_span(&mut prev.spans, span);
+        }
+        return;
+    }
+    out.push(EquationSegment::Inline(rich));
 }
 
 // ---------------------------------------------------------------------------
@@ -1444,4 +1939,147 @@ const fn is_bidi_other_neutral(cp: u32) -> bool {
             | 0xFF3B..=0xFF40
             | 0xFF5B..=0xFF65
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EquationSegment, RichText, SpanScript, SpanSlope, SpanWeight, parse_equation_segments, parse_markup};
+
+    fn concat_segment_plain(segments: &[EquationSegment]) -> String {
+        let mut out = String::new();
+        for seg in segments {
+            match seg {
+                EquationSegment::Inline(rich) => out.push_str(&rich.plain_text()),
+                EquationSegment::Fraction { numerator, denominator } => {
+                    out.push('(');
+                    out.push_str(&concat_segment_plain(numerator));
+                    out.push_str(")/(");
+                    out.push_str(&concat_segment_plain(denominator));
+                    out.push(')');
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn parse_markup_strips_math_dollars_and_preserves_currency_and_unpaired_dollars() {
+        assert_eq!(parse_markup("$100").plain_text(), "$100");
+        assert_eq!(parse_markup("Costs $5 to $10").plain_text(), "Costs $5 to $10");
+        assert_eq!(parse_markup("Costs $5 - $10 or $20").plain_text(), "Costs $5 - $10 or $20");
+        assert_eq!(parse_markup("$50 + $100 = $150").plain_text(), "$50 + $100 = $150");
+        assert_eq!(parse_markup("Costs $5 + tax, or $x = 1$").plain_text(), "Costs $5 + tax, or x = 1");
+        assert_eq!(parse_markup(r"\$5 + \$10").plain_text(), "$5 + $10");
+        assert_eq!(parse_markup("$$").plain_text(), "$$");
+        assert_eq!(parse_markup("$x$ + $y$").plain_text(), "x + y");
+        assert_eq!(parse_markup(r"$\alpha + \beta = \gamma$").plain_text(), "α + β = γ");
+        assert_eq!(parse_markup(r"$$Y = \frac{1}{2}$$").plain_text(), "Y = 1/2");
+    }
+
+    #[test]
+    fn parse_markup_renders_dose_response_4pl_and_michaelis_menten_and_decay() {
+        let eq_4pl = r"$Y = \text{Bottom} + \frac{\text{Top} - \text{Bottom}}{1 + 10^{(\log\text{EC}_{50} - X) \cdot \text{HillSlope}}}$";
+        let rich_4pl = parse_markup(eq_4pl);
+        assert_eq!(rich_4pl.plain_text(), "Y = Bottom + (Top - Bottom)/(1 + 10(logEC50 - X) · HillSlope)");
+        assert!(rich_4pl.spans.iter().any(|s| s.text == "50" && s.script == SpanScript::Subscript));
+        assert!(rich_4pl.spans.iter().any(|s| s.text.contains("HillSlope") && s.script == SpanScript::Superscript));
+        assert!(rich_4pl.spans.iter().all(|s| !s.text.contains('$') && !s.text.contains('\\')));
+
+        let mm = r"Y = \frac{V_{\max} \cdot X}{K_m + X}";
+        let rich_mm = parse_markup(mm);
+        assert_eq!(rich_mm.plain_text(), "Y = (Vmax · X)/(Km + X)");
+        assert!(rich_mm.spans.iter().any(|s| s.text == "max" && s.script == SpanScript::Subscript && s.slope == SpanSlope::Upright));
+        assert!(rich_mm.spans.iter().any(|s| s.text == "m" && s.script == SpanScript::Subscript));
+
+        let decay = r"Y = (Y_0 - \text{Plateau}) \cdot \exp(-K \cdot X) + \text{Plateau}";
+        let rich_decay = parse_markup(decay);
+        assert_eq!(rich_decay.plain_text(), "Y = (Y0 - Plateau) · exp(-K · X) + Plateau");
+        assert!(rich_decay.spans.iter().any(|s| s.text == "0" && s.script == SpanScript::Subscript));
+        assert!(rich_decay.spans.iter().any(|s| s.text.contains("exp") && s.slope == SpanSlope::Upright));
+    }
+
+    #[test]
+    fn parse_markup_handles_sqrt_roman_operators_math_symbols_and_nested_braces() {
+        let sq_multi = parse_markup(r"\sqrt{a^2 + b^2}");
+        assert_eq!(sq_multi.plain_text(), "√(a2 + b2)");
+        assert!(sq_multi.spans.iter().any(|s| s.text == "2" && s.script == SpanScript::Superscript));
+
+        assert_eq!(parse_markup(r"\sqrt{x}").plain_text(), "√x");
+        assert_eq!(parse_markup(r"\sqrt{(a + b)}").plain_text(), "√(a + b)");
+        assert_eq!(parse_markup(r"\sqrt").plain_text(), "√");
+
+        let ops = parse_markup(r"<i>\log x + \ln y + \exp z + \sin\theta + \cos\phi + \tan\psi + \max(a) + \min(b)</i>");
+        assert_eq!(ops.plain_text(), "log x + ln y + exp z + sinθ + cosφ + tanψ + max(a) + min(b)");
+        for op in ["log", "ln", "exp", "sin", "cos", "tan", "max", "min"] {
+            assert!(ops.spans.iter().any(|s| s.text.contains(op) && s.slope == SpanSlope::Upright), "missing upright op {op}");
+        }
+
+        let bold_max = parse_markup(r"\textbf{V_{\max}}");
+        assert_eq!(bold_max.plain_text(), "Vmax");
+        assert!(bold_max.spans.iter().any(|s| s.text == "max" && s.weight == SpanWeight::Bold && s.script == SpanScript::Subscript));
+
+        let nested_frac = parse_markup(r"\frac{1 + \frac{a}{b}}{c + {d + e}}");
+        assert_eq!(nested_frac.plain_text(), "(1 + a/b)/(c + d + e)");
+
+        let simple_frac = parse_markup(r"\frac{a}{b}");
+        assert_eq!(simple_frac.plain_text(), "a/b");
+
+        let symbols = parse_markup(r"$a \cdot b \times c \pm d \le e \leq f \ge g \geq h \infty \approx i \ne j \neq k$");
+        assert_eq!(symbols.plain_text(), "a · b × c ± d ≤ e ≤ f ≥ g ≥ h ∞ ≈ i ≠ j ≠ k");
+
+        let left_right = parse_markup(r"$\left(\frac{a + b}{c}\right)$");
+        assert_eq!(left_right.plain_text(), "((a + b)/c)");
+    }
+
+    #[test]
+    fn parse_equation_segments_builds_stacked_ast_for_models() {
+        let eq_4pl = r"$Y = \text{Bottom} + \frac{\text{Top} - \text{Bottom}}{1 + 10^{(\log\text{EC}_{50} - X) \cdot \text{HillSlope}}}$";
+        let segs_4pl = parse_equation_segments(eq_4pl);
+        assert_eq!(segs_4pl.len(), 2);
+        assert!(matches!(&segs_4pl[0], EquationSegment::Inline(rich) if rich.plain_text() == "Y = Bottom + "));
+        let EquationSegment::Fraction { numerator, denominator } = &segs_4pl[1] else {
+            panic!("expected fraction segment, got {:?}", segs_4pl[1]);
+        };
+        assert_eq!(numerator, &[EquationSegment::Inline(RichText::plain("Top - Bottom"))]);
+        assert_eq!(denominator.len(), 1);
+        let EquationSegment::Inline(rich) = &denominator[0] else {
+            panic!("expected inline denominator, got {:?}", denominator[0]);
+        };
+        assert_eq!(rich.plain_text(), "1 + 10(logEC50 - X) · HillSlope");
+        assert!(rich.spans.iter().any(|s| s.text == "50" && s.script == SpanScript::Subscript));
+
+        let mm = r"Y = \frac{V_{\max} \cdot X}{K_m + X}";
+        let segs_mm = parse_equation_segments(mm);
+        assert_eq!(segs_mm.len(), 2);
+        assert_eq!(concat_segment_plain(&segs_mm), "Y = (Vmax · X)/(Km + X)");
+
+        let nested = parse_equation_segments(r"$Y = \frac{1}{1 + \frac{a}{b}}$");
+        assert_eq!(nested.len(), 2);
+        let EquationSegment::Fraction { numerator, denominator } = &nested[1] else {
+            panic!("expected outer fraction, got {:?}", nested[1]);
+        };
+        assert_eq!(numerator, &[EquationSegment::Inline(RichText::plain("1"))]);
+        assert_eq!(denominator.len(), 2);
+        assert!(matches!(&denominator[0], EquationSegment::Inline(r) if r.plain_text() == "1 + "));
+        assert!(matches!(&denominator[1], EquationSegment::Fraction { .. }));
+    }
+
+    #[test]
+    fn parse_equation_segments_handles_braced_scripts_currency_and_empty_inputs() {
+        // Top-level frac inside superscript stays inline rather than splitting braced scripts.
+        let exp_frac = parse_equation_segments(r"$Y = e^{\frac{-x}{2}}$");
+        assert_eq!(exp_frac.len(), 1);
+        assert!(matches!(&exp_frac[0], EquationSegment::Inline(r) if r.plain_text() == "Y = e(-x)/2"));
+
+        // Currency and empty inputs.
+        assert_eq!(parse_equation_segments("$100"), vec![EquationSegment::Inline(RichText::plain("$100"))]);
+        assert_eq!(parse_equation_segments("Costs $5 to $10"), vec![EquationSegment::Inline(RichText::plain("Costs $5 to $10"))]);
+        assert!(parse_equation_segments("").is_empty());
+        assert!(parse_equation_segments("<b></b>").is_empty());
+
+        // Omit empty inline segments when fraction is standalone.
+        let standalone = parse_equation_segments(r"\frac{a}{b}");
+        assert_eq!(standalone.len(), 1);
+        assert!(matches!(standalone[0], EquationSegment::Fraction { .. }));
+    }
 }

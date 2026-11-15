@@ -1564,7 +1564,7 @@ fn apply_locale_chars(raw: &str, policy: &LocaleNumberPolicy) -> String {
 #[must_use]
 pub fn resolve_template_hooks(template: &str, doc: &ProjectDocument, primary_data_id: Option<&SheetId>) -> String {
     let paired_info = primary_data_id
-        .and_then(|id| doc.data_sheet(id))
+        .and_then(|id| doc.data_sheet(id).or_else(|| doc.result_sheet(id).and_then(|res| res.analyzable_data.as_ref())))
         .and_then(|ds| ds.info_sheet_id.as_ref())
         .and_then(|info_id| doc.info_sheet(info_id))
         .or_else(|| doc.info_sheets.first());
@@ -2424,6 +2424,7 @@ pub fn legend_entries_from_graph_spec(graph: &GraphSpec, doc: &ProjectDocument) 
             .filter(|s| !s.trim().is_empty())
             .or_else(|| {
                 doc.data_sheet(&series.source_sheet_id)
+                    .or_else(|| doc.result_sheet(&series.source_sheet_id).and_then(|res| res.analyzable_data.as_ref()))
                     .and_then(|ds| data_set_title(&ds.archetype, series.data_set_index))
                     .map(str::to_owned)
                     .filter(|s| !s.trim().is_empty())
@@ -2638,8 +2639,8 @@ fn swatch_marker_path(c: PointPt, r: f64, shape: MarkerShape) -> Path2D {
     }
 }
 
-/// Render all [`GraphAnnotation`] items (`TextBox`, `LineOrArrow`, `Shape`, `EmbeddedResultTable`)
-/// onto `scene`.
+/// Render all [`GraphAnnotation`] items (`TextBox`, `LineOrArrow`, `Shape`, `EmbeddedResultTable`,
+/// `ModelEquation`) onto `scene`.
 pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument, primary_id: Option<&SheetId>, scene: &mut ChartScene) {
     for ann in annotations {
         match ann {
@@ -2654,6 +2655,20 @@ pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument
             }
             GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt } => {
                 render_embedded_result_table(result_sheet_id, tab_id.as_deref(), RectPt::from(*bounds_pt), doc, scene);
+            }
+            GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
+                crate::equation_box::render_model_equation_annotation(
+                    scene,
+                    doc,
+                    &crate::equation_box::ModelEquationParams {
+                        result_sheet_id,
+                        data_set_index: *data_set_index,
+                        mode: *mode,
+                        bounds_pt: *bounds_pt,
+                        font_size_pt: *font_size_pt,
+                        bordered: *bordered,
+                    },
+                );
             }
         }
     }

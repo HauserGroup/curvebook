@@ -3,9 +3,9 @@
 
 use lumencraft_doc::{
     AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CurveSamplePoint, DataSheet, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec,
-    FittedCurveOverlay, FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, LineConnectionKind, ProjectDocument,
-    RegressionOverlaySpec, ResultCell, SeriesSpec, SheetId, SubcolumnMode, SummarizedPoint, SummaryMeasure, TableArchetype, TickLabelFormat,
-    XColumnMode, XyTable,
+    FittedCurveOverlay, FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LineConnectionKind,
+    ProjectDocument, RegressionOverlaySpec, ResultCell, SeriesSpec, SheetId, SubcolumnMode, SummarizedPoint, SummaryMeasure, TableArchetype,
+    TickLabelFormat, XColumnMode, XyTable,
 };
 use lumencraft_math::dist::student_t_two_sided_isf;
 use lumencraft_math::sum::SummaryMoments;
@@ -1346,6 +1346,20 @@ fn render_annotation(scene: &mut ChartScene, doc: &ProjectDocument, info_id: Opt
         GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt } => {
             render_embedded_result_table(scene, doc, result_sheet_id, tab_id.as_deref(), RectPt::from(*bounds_pt));
         }
+        GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
+            crate::equation_box::render_model_equation_annotation(
+                scene,
+                doc,
+                &crate::equation_box::ModelEquationParams {
+                    result_sheet_id,
+                    data_set_index: *data_set_index,
+                    mode: *mode,
+                    bounds_pt: *bounds_pt,
+                    font_size_pt: *font_size_pt,
+                    bordered: *bordered,
+                },
+            );
+        }
     }
 }
 
@@ -1558,10 +1572,23 @@ pub fn compile_xy_graph(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
 
     render_cartesian_chrome(scene, graph, doc, &x_axis, &y_axis, y2_axis.as_ref(), None);
 
+    let mut render_order: Vec<usize> = (0..graph.spec.series.len().min(extracted.len())).collect();
+    if matches!(graph.spec.grouped_arrangement, GroupedArrangement::Superimposed) {
+        render_order.sort_by(|&a, &b| {
+            let (ma, la) = series_z_size(&graph.spec.series[a].gdo);
+            let (mb, lb) = series_z_size(&graph.spec.series[b].gdo);
+            mb.total_cmp(&ma).then_with(|| lb.total_cmp(&la)).then_with(|| a.cmp(&b))
+        });
+    }
+    for idx in render_order {
+        let series_spec = &graph.spec.series[idx];
+        let data = &extracted[idx];
+        let target_y = if series_spec.bind_to_right_y2 { y2_axis.as_ref().unwrap_or(&y_axis) } else { &y_axis };
+        render_xy_series(scene, &graph.spec, series_spec, data, &x_axis, target_y);
+    }
+
     let mut legend_items = Vec::new();
     for (series_spec, data) in graph.spec.series.iter().zip(extracted.iter()) {
-        let target_y = if series_spec.bind_to_right_y2 { y2_axis.as_ref().unwrap_or(&y_axis) } else { &y_axis };
-        render_xy_series(scene, series_spec, data, &x_axis, target_y);
         legend_items.push(LegendItem {
             label: data.label.clone(),
             marker: match &series_spec.gdo {
@@ -1758,7 +1785,14 @@ fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -
     (x_vals, y_vals, y2_vals)
 }
 
-fn render_xy_series(scene: &mut ChartScene, spec: &SeriesSpec, data: &ExtractedXySeries, x_axis: &SegmentedAxis, y_axis: &SegmentedAxis) {
+fn render_xy_series(
+    scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
+    spec: &SeriesSpec,
+    data: &ExtractedXySeries,
+    x_axis: &SegmentedAxis,
+    y_axis: &SegmentedAxis,
+) {
     let clip = scene.plot_rect_pt;
     let (marker_opt, line_opt, area_opt) = match &spec.gdo {
         GraphicalDataObject::ScatterAndLine { marker, line, area_fill } => (*marker, *line, *area_fill),
@@ -1875,6 +1909,7 @@ fn render_xy_series(scene: &mut ChartScene, spec: &SeriesSpec, data: &ExtractedX
     // 6. Markers (either raw individual replicates when y_error_bars is None, or summarized centers)
     if let Some(marker) = marker_opt {
         let ctx = XyMarkerCtx {
+            spec: graph_spec,
             x_axis,
             y_axis,
             marker,
@@ -1887,7 +1922,19 @@ fn render_xy_series(scene: &mut ChartScene, spec: &SeriesSpec, data: &ExtractedX
     }
 }
 
+fn series_z_size(gdo: &GraphicalDataObject) -> (f64, f64) {
+    match gdo {
+        GraphicalDataObject::ScatterAndLine { marker, line, .. } => {
+            (marker.as_ref().map_or(0.0, |m| m.size_pt), line.as_ref().map_or(0.0, |l| l.stroke_width_pt))
+        }
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => (marker.size_pt, 0.0),
+        GraphicalDataObject::BeforeAfterLines { marker, stroke_width_pt, .. } => (marker.as_ref().map_or(0.0, |m| m.size_pt), *stroke_width_pt),
+        _ => (0.0, 0.0),
+    }
+}
+
 struct XyMarkerCtx<'a> {
+    spec: &'a GraphSpec,
     x_axis: &'a SegmentedAxis,
     y_axis: &'a SegmentedAxis,
     marker: MarkerStyle,
@@ -1919,6 +1966,9 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
     let mut warned_y = ctx.warned_y_domain;
     if ctx.use_replicates {
         for &(rx, ry, row, subcol) in &data.replicates {
+            let Some(marker) = crate::resolve_overridden_marker(ctx.spec, data.col_index, row, ctx.marker) else {
+                continue;
+            };
             let Some((_, px)) = ctx.x_axis.map_value(rx) else {
                 if !warned_x && is_out_of_axis_domain(ctx.x_axis, rx) {
                     warned_x = true;
@@ -1934,13 +1984,16 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
                 continue;
             };
             let pt = PointPt::new(px, py);
-            emit_marker(&mut scene.primitives, pt, &ctx.marker, Some(ctx.clip));
-            push_xy_point_meta(scene, data, pt, ctx.marker.size_pt, (row, subcol, rx, ry));
+            emit_marker(&mut scene.primitives, pt, &marker, Some(ctx.clip));
+            push_xy_point_meta(scene, data, pt, marker.size_pt, (row, subcol, rx, ry));
         }
     } else {
         for &(pt, row, vx, vy) in summary_markers {
-            emit_marker(&mut scene.primitives, pt, &ctx.marker, Some(ctx.clip));
-            push_xy_point_meta(scene, data, pt, ctx.marker.size_pt, (row, 0, vx, vy));
+            let Some(marker) = crate::resolve_overridden_marker(ctx.spec, data.col_index, row, ctx.marker) else {
+                continue;
+            };
+            emit_marker(&mut scene.primitives, pt, &marker, Some(ctx.clip));
+            push_xy_point_meta(scene, data, pt, marker.size_pt, (row, 0, vx, vy));
         }
     }
 }
@@ -2307,5 +2360,74 @@ fn emit_band_geometry(
                 primitives.push(ScenePrimitive::Path { path, fill: None, stroke, clip: Some(clip) });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_doc::{
+        Cell, DataSheet, GraphSheet, GraphicalDataObject, GroupedArrangement, PointStyleOverride, ProjectDocument, SheetId, SubcolumnMode,
+        TableArchetype, XColumnMode, XyTable,
+    };
+    use lumencraft_palette::{MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
+
+    use crate::{ScenePrimitive, compile_graph};
+
+    #[test]
+    fn xy_point_overrides_and_superimposed_z_order() {
+        let mut xy = XyTable::new(SubcolumnMode::Single, 2, 3).expect("xy");
+        xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
+        xy.x_cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)], vec![Cell::number(3.0)]];
+        xy.data_sets[0].title = String::from("SmallMarkers");
+        xy.data_sets[0].cells = vec![vec![Cell::number(5.0)], vec![Cell::number(6.0)], vec![Cell::number(7.0)]];
+        xy.data_sets[1].title = String::from("BigMarkers");
+        xy.data_sets[1].cells = vec![vec![Cell::number(5.0)], vec![Cell::number(6.0)], vec![Cell::number(7.0)]];
+
+        let ds = DataSheet::new(SheetId::new("xy_1"), "XY", TableArchetype::Xy(xy)).expect("sheet");
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_xy"), &ds).expect("graph");
+        gs.spec.grouped_arrangement = GroupedArrangement::Superimposed;
+
+        let small_c = Rgba8::rgb(0, 114, 178);
+        let big_c = Rgba8::rgb(213, 94, 0);
+        gs.spec.series[0].gdo = GraphicalDataObject::ScatterAndLine {
+            marker: Some(MarkerStyle {
+                shape: MarkerShape::Circle,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 4.0,
+                fill_color: small_c,
+                stroke_color: small_c,
+                stroke_width_pt: 0.5,
+            }),
+            line: None,
+            area_fill: None,
+        };
+        gs.spec.series[1].gdo = GraphicalDataObject::ScatterAndLine {
+            marker: Some(MarkerStyle {
+                shape: MarkerShape::Square,
+                fill_mode: MarkerFillMode::Filled,
+                size_pt: 9.0,
+                fill_color: big_c,
+                stroke_color: big_c,
+                stroke_width_pt: 0.5,
+            }),
+            line: None,
+            area_fill: None,
+        };
+
+        let highlight = Rgba8::rgb(0, 158, 115);
+        gs.spec.point_overrides = vec![
+            PointStyleOverride { series_index: 0, point_index: 1, color: Some(highlight), ..PointStyleOverride::default() },
+            PointStyleOverride { series_index: 0, point_index: 2, hidden: true, ..PointStyleOverride::default() },
+        ];
+
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds).expect("add data");
+        doc.add_graph_sheet(gs.clone()).expect("add graph");
+        let scene = compile_graph(&gs, &doc).expect("compile xy");
+
+        // BigMarkers (size 9.0) must precede SmallMarkers (size 4.0) in plotted_points z-order.
+        let cols_in_draw_order: Vec<usize> = scene.plotted_points.iter().map(|p| p.source_cell.col).collect();
+        assert_eq!(cols_in_draw_order, vec![1, 1, 1, 0, 0]);
+        assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { fill: Some(f), .. } if f.color == highlight)));
     }
 }

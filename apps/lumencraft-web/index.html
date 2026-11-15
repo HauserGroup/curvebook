@@ -15,22 +15,1044 @@
   <link rel="icon" type="image/svg+xml" href="icons/org.lumencraft.LumenCraft.svg">
   <link rel="icon" type="image/png" sizes="32x32" href="icons/32/org.lumencraft.LumenCraft.png">
   <link rel="apple-touch-icon" href="icons/256/org.lumencraft.LumenCraft.png">
-  <link data-trunk rel="rust" data-bin="lumencraft-web" data-wasm-opt="z" data-weak-refs />
+  <link data-trunk rel="rust" data-bin="lumencraft-web" data-wasm-opt="z" data-wasm-opt-params="--enable-bulk-memory --enable-simd --enable-nontrapping-float-to-int --enable-sign-ext --enable-mutable-globals --enable-reference-types" data-weak-refs />
   <style>
-    html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background: #181c28;
-      overscroll-behavior: none; -webkit-user-select: none; user-select: none; -webkit-touch-callout: none;
-      -webkit-tap-highlight-color: transparent; -webkit-text-size-adjust: 100%; }
-    #lumencraft_canvas { position: absolute; top: env(safe-area-inset-top, 0); right: env(safe-area-inset-right, 0);
-      bottom: env(safe-area-inset-bottom, 0); left: env(safe-area-inset-left, 0);
+    html, body {
+      margin: 0;
+      padding: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #181c28;
+      overscroll-behavior: none;
+      -webkit-user-select: none;
+      user-select: none;
+      -webkit-touch-callout: none;
+      -webkit-tap-highlight-color: transparent;
+      -webkit-text-size-adjust: 100%;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    #lumencraft_canvas {
+      position: absolute;
+      top: env(safe-area-inset-top, 0);
+      right: env(safe-area-inset-right, 0);
+      bottom: env(safe-area-inset-bottom, 0);
+      left: env(safe-area-inset-left, 0);
       width: calc(100% - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px));
       height: calc(100% - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px));
-      display: block; touch-action: none; }
-    #lumencraft_loading { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
-      color: #c2c8d6; font: 14px system-ui, sans-serif; pointer-events: none; }
+      display: block;
+      touch-action: none;
+    }
+
+    #lumencraft_loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      color: #c2c8d6;
+      font-size: 14px;
+      pointer-events: none;
+    }
+
+    #lumencraft_readonly_banner {
+      position: fixed;
+      top: env(safe-area-inset-top, 10px);
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 20;
+      display: none;
+      align-items: center;
+      gap: 10px;
+      max-width: min(720px, calc(100vw - 32px));
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 1px solid #d99b26;
+      background: rgba(33, 27, 16, 0.94);
+      color: #fde6b4;
+      font-size: 13px;
+      line-height: 1.35;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+    }
+
+    #lumencraft_readonly_banner[data-visible="true"] {
+      display: flex;
+    }
+
+    #lumencraft_readonly_badge {
+      padding: 2px 7px;
+      border-radius: 4px;
+      background: #d99b26;
+      color: #181c28;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      flex-shrink: 0;
+    }
+
+    #lumencraft_drop_overlay {
+      position: fixed;
+      inset: 12px;
+      z-index: 15;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      border: 2px dashed #6da4ff;
+      border-radius: 12px;
+      background: rgba(24, 28, 40, 0.82);
+      color: #e6eefc;
+      font-size: 15px;
+      font-weight: 600;
+      pointer-events: none;
+    }
+
+    #lumencraft_drop_overlay[data-active="true"] {
+      display: flex;
+    }
+
+    #lumencraft_print_stage {
+      display: none;
+    }
+
+    @media print {
+      @page {
+        margin: 0;
+      }
+
+      html, body {
+        width: auto;
+        height: auto;
+        overflow: visible;
+        background: #ffffff;
+      }
+
+      #lumencraft_canvas,
+      #lumencraft_loading,
+      #lumencraft_readonly_banner,
+      #lumencraft_drop_overlay {
+        display: none !important;
+      }
+
+      #lumencraft_print_stage {
+        display: block;
+      }
+
+      .lumencraft-print-page {
+        page-break-after: always;
+        break-after: page;
+      }
+
+      .lumencraft-print-page:last-child {
+        page-break-after: auto;
+        break-after: auto;
+      }
+
+      #lumencraft_print_stage svg {
+        display: block;
+        max-width: 100%;
+        height: auto;
+      }
+    }
   </style>
 </head>
 <body>
-  <canvas id="lumencraft_canvas"></canvas>
+  <canvas id="lumencraft_canvas" aria-label="LumenCraft workspace canvas"></canvas>
   <div id="lumencraft_loading">Loading LumenCraft&hellip;</div>
+  <div id="lumencraft_readonly_banner" role="status" aria-live="polite" data-visible="false">
+    <span id="lumencraft_readonly_badge">Read-Only</span>
+    <span id="lumencraft_readonly_text"></span>
+  </div>
+  <div id="lumencraft_drop_overlay" data-active="false">
+    Drop .lumencraft, .lumencraft.d, .pzfx, .prism, .csv, or .tsv files to open locally
+  </div>
+  <div id="lumencraft_print_stage" aria-hidden="true"></div>
+
+  <script>
+    (() => {
+      "use strict";
+
+      const PREFERENCES_KEY = "lumencraft.v1.preferences";
+      const AUTOSAVE_PREFIX = "lumencraft.v1.autosave.";
+      const TAB_CHANNEL_NAME = "lumencraft.v1.tab_locks";
+
+      const canvas = document.getElementById("lumencraft_canvas");
+      const loadingEl = document.getElementById("lumencraft_loading");
+      const bannerEl = document.getElementById("lumencraft_readonly_banner");
+      const bannerTextEl = document.getElementById("lumencraft_readonly_text");
+      const dropOverlayEl = document.getElementById("lumencraft_drop_overlay");
+      const printStageEl = document.getElementById("lumencraft_print_stage");
+      let ctx2d = null;
+      const glState = initWebGl2Presenter(canvas);
+      if (!glState && canvas) {
+        ctx2d = canvas.getContext("2d");
+      }
+
+      const tabId = (window.crypto && typeof window.crypto.randomUUID === "function")
+        ? "tab-" + window.crypto.randomUUID()
+        : "tab-" + String(Date.now()) + "-" + String(Math.floor(Math.random() * 1e6));
+
+      let activeDirectoryHandle = null;
+      let activeLockDocId = "default";
+      let lockChannel = null;
+      let releaseCurrentWebLock = null;
+      let dispatchFn = null;
+      const pendingEvents = [];
+
+      function initWebGl2Presenter(targetCanvas) {
+        if (!targetCanvas) {
+          return null;
+        }
+        const gl = targetCanvas.getContext("webgl2", {
+          alpha: false,
+          antialias: false,
+          depth: false,
+          stencil: false,
+          preserveDrawingBuffer: true
+        });
+        if (!gl) {
+          return null;
+        }
+        const vsSrc = [
+          "#version 300 es",
+          "in vec2 a_pos;",
+          "in vec2 a_uv;",
+          "out vec2 v_uv;",
+          "void main() {",
+          "  gl_Position = vec4(a_pos, 0.0, 1.0);",
+          "  v_uv = a_uv;",
+          "}"
+        ].join("\n");
+        const fsSrc = [
+          "#version 300 es",
+          "precision mediump float;",
+          "in vec2 v_uv;",
+          "uniform sampler2D u_tex;",
+          "out vec4 out_color;",
+          "void main() {",
+          "  out_color = texture(u_tex, v_uv);",
+          "}"
+        ].join("\n");
+
+        const compile = (type, src) => {
+          const shader = gl.createShader(type);
+          if (!shader) return null;
+          gl.shaderSource(shader, src);
+          gl.compileShader(shader);
+          if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+            gl.deleteShader(shader);
+            return null;
+          }
+          return shader;
+        };
+
+        const vs = compile(gl.VERTEX_SHADER, vsSrc);
+        const fs = compile(gl.FRAGMENT_SHADER, fsSrc);
+        if (!vs || !fs) {
+          if (vs) gl.deleteShader(vs);
+          if (fs) gl.deleteShader(fs);
+          return null;
+        }
+        const program = gl.createProgram();
+        if (!program) {
+          gl.deleteShader(vs);
+          gl.deleteShader(fs);
+          return null;
+        }
+        gl.attachShader(program, vs);
+        gl.attachShader(program, fs);
+        gl.linkProgram(program);
+        gl.deleteShader(vs);
+        gl.deleteShader(fs);
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+          gl.deleteProgram(program);
+          return null;
+        }
+
+        const vao = gl.createVertexArray();
+        const vbo = gl.createBuffer();
+        const tex = gl.createTexture();
+        if (!vao || !vbo || !tex) {
+          if (vao) gl.deleteVertexArray(vao);
+          if (vbo) gl.deleteBuffer(vbo);
+          if (tex) gl.deleteTexture(tex);
+          gl.deleteProgram(program);
+          return null;
+        }
+
+        // Row 0 of RGBA framebuffer maps to UV y=0 (top of quad at NDC y=+1).
+        const quad = new Float32Array([
+          -1.0, -1.0, 0.0, 1.0,
+           1.0, -1.0, 1.0, 1.0,
+          -1.0,  1.0, 0.0, 0.0,
+           1.0,  1.0, 1.0, 0.0
+        ]);
+        gl.bindVertexArray(vao);
+        gl.bindBuffer(gl.ARRAY_BUFFER, vbo);
+        gl.bufferData(gl.ARRAY_BUFFER, quad, gl.STATIC_DRAW);
+
+        const posLoc = gl.getAttribLocation(program, "a_pos");
+        const uvLoc = gl.getAttribLocation(program, "a_uv");
+        if (posLoc >= 0) {
+          gl.enableVertexAttribArray(posLoc);
+          gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 16, 0);
+        }
+        if (uvLoc >= 0) {
+          gl.enableVertexAttribArray(uvLoc);
+          gl.vertexAttribPointer(uvLoc, 2, gl.FLOAT, false, 16, 8);
+        }
+
+        gl.bindTexture(gl.TEXTURE_2D, tex);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+
+        return {
+          gl,
+          program,
+          vao,
+          tex,
+          texLoc: gl.getUniformLocation(program, "u_tex")
+        };
+      }
+
+      function bytesToBase64(uint8) {
+        let binary = "";
+        const chunkSize = 0x8000;
+        for (let i = 0; i < uint8.length; i += chunkSize) {
+          const slice = uint8.subarray(i, i + chunkSize);
+          binary += String.fromCharCode.apply(null, slice);
+        }
+        return btoa(binary);
+      }
+
+      function base64ToBytes(b64) {
+        if (!b64) {
+          return new Uint8Array(0);
+        }
+        const binary = atob(b64);
+        const out = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i += 1) {
+          out[i] = binary.charCodeAt(i);
+        }
+        return out;
+      }
+
+      function emitEvent(eventObj) {
+        if (typeof dispatchFn !== "function") {
+          pendingEvents.push(eventObj);
+          return;
+        }
+        try {
+          const reply = dispatchFn(JSON.stringify(eventObj));
+          if (reply) {
+            const cmds = typeof reply === "string" ? JSON.parse(reply) : reply;
+            if (Array.isArray(cmds)) {
+              for (const cmd of cmds) {
+                void applyBridgeCommand(cmd);
+              }
+            }
+          }
+        } catch (err) {
+          console.error("LumenCraft bridge dispatch error:", err);
+        }
+      }
+
+      function renderRgbaCommand(cmd) {
+        if (!canvas || !cmd.width_px || !cmd.height_px || !cmd.rgba_base64) {
+          return;
+        }
+        if (canvas.width !== cmd.width_px) {
+          canvas.width = cmd.width_px;
+        }
+        if (canvas.height !== cmd.height_px) {
+          canvas.height = cmd.height_px;
+        }
+        const rgba = base64ToBytes(cmd.rgba_base64);
+        if (rgba.length === cmd.width_px * cmd.height_px * 4) {
+          if (glState) {
+            const { gl, program, vao, tex, texLoc } = glState;
+            gl.viewport(0, 0, cmd.width_px, cmd.height_px);
+            gl.useProgram(program);
+            gl.activeTexture(gl.TEXTURE0);
+            gl.bindTexture(gl.TEXTURE_2D, tex);
+            gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
+            gl.texImage2D(
+              gl.TEXTURE_2D,
+              0,
+              gl.RGBA,
+              cmd.width_px,
+              cmd.height_px,
+              0,
+              gl.RGBA,
+              gl.UNSIGNED_BYTE,
+              rgba
+            );
+            if (texLoc !== null) {
+              gl.uniform1i(texLoc, 0);
+            }
+            gl.bindVertexArray(vao);
+            gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+          } else if (ctx2d) {
+            const imgData = new ImageData(new Uint8ClampedArray(rgba.buffer), cmd.width_px, cmd.height_px);
+            ctx2d.putImageData(imgData, 0, 0);
+          }
+        }
+        if (loadingEl) {
+          loadingEl.style.display = "none";
+        }
+      }
+
+      function applyLocalStorageCommand(cmd) {
+        if (!window.localStorage) {
+          return;
+        }
+        if (Array.isArray(cmd.removals)) {
+          for (const key of cmd.removals) {
+            if (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX)) {
+              window.localStorage.removeItem(key);
+            }
+          }
+        }
+        if (Array.isArray(cmd.writes)) {
+          for (const entry of cmd.writes) {
+            if (entry && typeof entry.key === "string" && typeof entry.value === "string") {
+              if (entry.key === PREFERENCES_KEY || entry.key.startsWith(AUTOSAVE_PREFIX)) {
+                window.localStorage.setItem(entry.key, entry.value);
+              }
+            }
+          }
+        }
+      }
+
+      function applyReadOnlyBannerCommand(cmd) {
+        if (!bannerEl || !bannerTextEl) {
+          return;
+        }
+        const isReadOnly = Boolean(cmd.read_only);
+        bannerEl.setAttribute("data-visible", isReadOnly ? "true" : "false");
+        bannerTextEl.textContent = isReadOnly
+          ? (cmd.message || ("Read-only mode: document locked by " + (cmd.holder_tab_id || "another tab")))
+          : "";
+      }
+
+      async function applyClipboardCommand(cmd) {
+        const payload = cmd && cmd.payload ? cmd.payload : null;
+        if (!payload || !navigator.clipboard) {
+          return;
+        }
+        if (typeof window.ClipboardItem === "function" && typeof navigator.clipboard.write === "function") {
+          const itemMap = {};
+          if (payload.png_base64) {
+            itemMap["image/png"] = new Blob([base64ToBytes(payload.png_base64)], { type: "image/png" });
+          }
+          if (payload.html) {
+            itemMap["text/html"] = new Blob([payload.html], { type: "text/html" });
+          }
+          const plain = payload.plain_text || payload.tsv;
+          if (plain) {
+            itemMap["text/plain"] = new Blob([plain], { type: "text/plain" });
+          }
+          if (payload.svg) {
+            itemMap["image/svg+xml"] = new Blob([payload.svg], { type: "image/svg+xml" });
+          }
+          if (Object.keys(itemMap).length > 0) {
+            try {
+              await navigator.clipboard.write([new window.ClipboardItem(itemMap)]);
+              return;
+            } catch (_err) {
+              // Fallback when a browser rejects optional ClipboardItem MIME flavors.
+              const safeMap = {};
+              if (itemMap["image/png"]) safeMap["image/png"] = itemMap["image/png"];
+              if (itemMap["text/html"]) safeMap["text/html"] = itemMap["text/html"];
+              if (itemMap["text/plain"]) safeMap["text/plain"] = itemMap["text/plain"];
+              if (Object.keys(safeMap).length > 0) {
+                try {
+                  await navigator.clipboard.write([new window.ClipboardItem(safeMap)]);
+                  return;
+                } catch (_innerErr) {
+                  // Fall through to plain text fallback below.
+                }
+              }
+            }
+          }
+        }
+        const textFallback = payload.plain_text || payload.tsv || payload.svg || "";
+        if (textFallback && typeof navigator.clipboard.writeText === "function") {
+          await navigator.clipboard.writeText(textFallback);
+        }
+      }
+
+      function applyPrintCommand(cmd) {
+        if (!printStageEl || !Array.isArray(cmd.svg_pages)) {
+          return;
+        }
+        printStageEl.replaceChildren();
+        const parser = new DOMParser();
+        for (const svgText of cmd.svg_pages) {
+          const section = document.createElement("section");
+          section.className = "lumencraft-print-page";
+          const doc = parser.parseFromString(svgText, "image/svg+xml");
+          const svgEl = doc.documentElement;
+          if (svgEl && svgEl.nodeName.toLowerCase() === "svg") {
+            section.appendChild(document.importNode(svgEl, true));
+          }
+          printStageEl.appendChild(section);
+        }
+        window.print();
+      }
+
+      async function writePathToDirectory(dirHandle, relPath, bytes) {
+        const parts = relPath.split("/").filter(Boolean);
+        if (parts.length === 0) {
+          return;
+        }
+        let cursor = dirHandle;
+        for (let i = 0; i < parts.length - 1; i += 1) {
+          cursor = await cursor.getDirectoryHandle(parts[i], { create: true });
+        }
+        const fileHandle = await cursor.getFileHandle(parts[parts.length - 1], { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(bytes);
+        await writable.close();
+      }
+
+      async function removePathFromDirectory(dirHandle, relPath) {
+        const parts = relPath.split("/").filter(Boolean);
+        if (parts.length === 0) {
+          return;
+        }
+        let cursor = dirHandle;
+        for (let i = 0; i < parts.length - 1; i += 1) {
+          cursor = await cursor.getDirectoryHandle(parts[i], { create: false });
+        }
+        await cursor.removeEntry(parts[parts.length - 1], { recursive: false });
+      }
+
+      async function applyDirectorySyncCommand(cmd) {
+        if (!activeDirectoryHandle) {
+          return;
+        }
+        if (Array.isArray(cmd.writes)) {
+          for (const entry of cmd.writes) {
+            if (entry && entry.path && typeof entry.bytes_base64 === "string") {
+              await writePathToDirectory(activeDirectoryHandle, entry.path, base64ToBytes(entry.bytes_base64));
+            }
+          }
+        }
+        if (Array.isArray(cmd.removals)) {
+          for (const relPath of cmd.removals) {
+            await removePathFromDirectory(activeDirectoryHandle, relPath);
+          }
+        }
+      }
+
+      async function applyBridgeCommand(cmd) {
+        if (!cmd || !cmd.kind) {
+          return;
+        }
+        switch (cmd.kind) {
+          case "render_rgba_frame":
+            renderRgbaCommand(cmd);
+            break;
+          case "persist_local_storage":
+            applyLocalStorageCommand(cmd);
+            break;
+          case "set_read_only_banner":
+            applyReadOnlyBannerCommand(cmd);
+            break;
+          case "write_clipboard_items":
+            await applyClipboardCommand(cmd);
+            break;
+          case "trigger_print_html":
+            applyPrintCommand(cmd);
+            break;
+          case "apply_directory_sync":
+            await applyDirectorySyncCommand(cmd);
+            break;
+          default:
+            break;
+        }
+      }
+
+      function syncCanvasViewport() {
+        if (!canvas) {
+          return;
+        }
+        const rect = canvas.getBoundingClientRect();
+        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const width = Math.max(1, rect.width || window.innerWidth || 1280);
+        const height = Math.max(1, rect.height || window.innerHeight || 800);
+        const physW = Math.max(1, Math.round(width * dpr));
+        const physH = Math.max(1, Math.round(height * dpr));
+        if (canvas.width !== physW) canvas.width = physW;
+        if (canvas.height !== physH) canvas.height = physH;
+        emitEvent({
+          kind: "resize_viewport",
+          logical_width: width,
+          logical_height: height,
+          scale_factor: dpr
+        });
+      }
+
+      if (canvas) {
+        if (typeof ResizeObserver === "function") {
+          const observer = new ResizeObserver(() => syncCanvasViewport());
+          observer.observe(canvas);
+        }
+        window.addEventListener("resize", () => syncCanvasViewport());
+
+        const toTouchList = (touches) => {
+          const rect = canvas.getBoundingClientRect();
+          const out = [];
+          for (let i = 0; i < touches.length; i += 1) {
+            const t = touches[i];
+            out.push({ id: t.identifier, x: t.clientX - rect.left, y: t.clientY - rect.top });
+          }
+          return out;
+        };
+
+        let lastTouchTimeMs = performance.now();
+        const nextDtSec = () => {
+          const now = performance.now();
+          const dt = Math.max(1 / 240, Math.min(0.25, (now - lastTouchTimeMs) / 1000));
+          lastTouchTimeMs = now;
+          return dt;
+        };
+
+        canvas.addEventListener("touchstart", (ev) => {
+          ev.preventDefault();
+          emitEvent({ kind: "touch_start", points: toTouchList(ev.changedTouches), dt_sec: nextDtSec() });
+        }, { passive: false });
+
+        canvas.addEventListener("touchmove", (ev) => {
+          ev.preventDefault();
+          emitEvent({ kind: "touch_move", points: toTouchList(ev.touches), dt_sec: nextDtSec() });
+        }, { passive: false });
+
+        canvas.addEventListener("touchend", (ev) => {
+          ev.preventDefault();
+          const releasedIds = [];
+          for (let i = 0; i < ev.changedTouches.length; i += 1) {
+            releasedIds.push(ev.changedTouches[i].identifier);
+          }
+          emitEvent({ kind: "touch_end", released_ids: releasedIds, dt_sec: nextDtSec() });
+        }, { passive: false });
+
+        canvas.addEventListener("touchcancel", (ev) => {
+          ev.preventDefault();
+          emitEvent({ kind: "touch_cancel" });
+        }, { passive: false });
+
+        const toEventPoint = (ev) => {
+          const rect = canvas.getBoundingClientRect();
+          return { x: ev.clientX - rect.left, y: ev.clientY - rect.top };
+        };
+
+        const toModifiers = (ev) => ({
+          shift: Boolean(ev.shiftKey),
+          ctrl: Boolean(ev.ctrlKey),
+          alt: Boolean(ev.altKey),
+          meta: Boolean(ev.metaKey)
+        });
+
+        const toPointerButton = (ev) => {
+          if (ev.button === 2) return "Secondary";
+          if (ev.button === 1) return "Middle";
+          return "Primary";
+        };
+
+        canvas.addEventListener("contextmenu", (ev) => {
+          ev.preventDefault();
+        });
+
+        canvas.addEventListener("mousedown", (ev) => {
+          const pt = toEventPoint(ev);
+          emitEvent({
+            kind: "ui_input",
+            event: {
+              PointerDown: {
+                x: pt.x,
+                y: pt.y,
+                button: toPointerButton(ev),
+                modifiers: toModifiers(ev)
+              }
+            }
+          });
+        });
+
+        canvas.addEventListener("dblclick", (ev) => {
+          const pt = toEventPoint(ev);
+          emitEvent({
+            kind: "ui_input",
+            event: {
+              DoubleClick: {
+                x: pt.x,
+                y: pt.y,
+                button: "Primary",
+                modifiers: toModifiers(ev)
+              }
+            }
+          });
+        });
+
+        window.addEventListener("mousemove", (ev) => {
+          const rect = canvas.getBoundingClientRect();
+          if (
+            ev.clientX < rect.left
+            || ev.clientX > rect.right
+            || ev.clientY < rect.top
+            || ev.clientY > rect.bottom
+          ) {
+            return;
+          }
+          const pt = toEventPoint(ev);
+          emitEvent({
+            kind: "ui_input",
+            event: {
+              PointerMove: {
+                x: pt.x,
+                y: pt.y,
+                modifiers: toModifiers(ev)
+              }
+            }
+          });
+        });
+
+        window.addEventListener("mouseup", (ev) => {
+          const pt = toEventPoint(ev);
+          emitEvent({
+            kind: "ui_input",
+            event: {
+              PointerUp: {
+                x: pt.x,
+                y: pt.y,
+                button: toPointerButton(ev),
+                modifiers: toModifiers(ev)
+              }
+            }
+          });
+        });
+
+        canvas.addEventListener("wheel", (ev) => {
+          ev.preventDefault();
+          const pt = toEventPoint(ev);
+          if (ev.ctrlKey || ev.metaKey) {
+            emitEvent({
+              kind: "ui_input",
+              event: {
+                WheelZoom: {
+                  x: pt.x,
+                  y: pt.y,
+                  delta_y: -ev.deltaY,
+                  modifiers: toModifiers(ev)
+                }
+              }
+            });
+          } else {
+            emitEvent({
+              kind: "ui_input",
+              event: {
+                InertialPan: {
+                  delta_x: -ev.deltaX,
+                  delta_y: -ev.deltaY,
+                  dt_sec: 1 / 60,
+                  step_coast: false
+                }
+              }
+            });
+          }
+        }, { passive: false });
+
+        window.addEventListener("keydown", (ev) => {
+          if (ev.isComposing) {
+            return;
+          }
+          const lower = (ev.key || "").toLowerCase();
+          if ((ev.metaKey || ev.ctrlKey) && !ev.altKey) {
+            if (lower === "c") {
+              ev.preventDefault();
+              const dpr = Math.max(1, window.devicePixelRatio || 1);
+              emitEvent({ kind: "copy_clipboard", sheet_id: null, dpi: Math.round(144 * dpr) });
+              return;
+            }
+            if (lower === "p") {
+              ev.preventDefault();
+              emitEvent({ kind: "print_current_sheet", sheet_id: null, scale_percent: 100.0 });
+              return;
+            }
+          }
+          if (ev.key === "Tab") {
+            ev.preventDefault();
+          }
+          emitEvent({
+            kind: "ui_input",
+            event: {
+              KeyDown: {
+                key: ev.key,
+                modifiers: toModifiers(ev)
+              }
+            }
+          });
+        });
+
+        window.addEventListener("compositionend", (ev) => {
+          if (ev.data) {
+            emitEvent({
+              kind: "ui_input",
+              event: {
+                TextInput: {
+                  text: ev.data
+                }
+              }
+            });
+          }
+        });
+
+        window.addEventListener("paste", (ev) => {
+          const text = ev.clipboardData ? ev.clipboardData.getData("text/plain") : "";
+          if (text) {
+            ev.preventDefault();
+            emitEvent({
+              kind: "ui_input",
+              event: {
+                TextInput: {
+                  text
+                }
+              }
+            });
+          }
+        });
+      }
+
+      async function readDirectoryHandleEntries(dirHandle, prefix, out) {
+        for await (const [name, handle] of dirHandle.entries()) {
+          const rel = prefix ? (prefix + "/" + name) : name;
+          if (handle.kind === "file") {
+            const file = await handle.getFile();
+            const buf = new Uint8Array(await file.arrayBuffer());
+            out.push({ path: rel, bytes_base64: bytesToBase64(buf) });
+          } else if (handle.kind === "directory") {
+            await readDirectoryHandleEntries(handle, rel, out);
+          }
+        }
+      }
+
+      async function openWithFilePicker() {
+        if (typeof window.showOpenFilePicker !== "function") {
+          return false;
+        }
+        const [handle] = await window.showOpenFilePicker({
+          multiple: false,
+          types: [{
+            description: "LumenCraft Projects and Scientific Data",
+            accept: {
+              "application/octet-stream": [".lumencraft", ".lctemplate", ".pzfx", ".prism"],
+              "text/csv": [".csv", ".tsv"]
+            }
+          }]
+        });
+        const file = await handle.getFile();
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
+        return true;
+      }
+
+      async function saveWithFilePicker(bytes) {
+        if (typeof window.showSaveFilePicker !== "function") {
+          return false;
+        }
+        const handle = await window.showSaveFilePicker({
+          suggestedName: "project.lumencraft",
+          types: [{ description: "LumenCraft Archive", accept: { "application/octet-stream": [".lumencraft"] } }]
+        });
+        const writable = await handle.createWritable();
+        await writable.write(bytes);
+        await writable.close();
+        return true;
+      }
+
+      async function openDirectoryPickerTree() {
+        if (typeof window.showDirectoryPicker !== "function") {
+          return false;
+        }
+        const dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+        activeDirectoryHandle = dirHandle;
+        const entries = [];
+        await readDirectoryHandleEntries(dirHandle, "", entries);
+        emitEvent({ kind: "import_directory_entries", root_name: dirHandle.name, entries });
+        return true;
+      }
+
+      async function collectDroppedEntry(entry, prefix, out) {
+        if (entry.isFile) {
+          await new Promise((resolve, reject) => {
+            entry.file(async (file) => {
+              const bytes = new Uint8Array(await file.arrayBuffer());
+              const rel = prefix ? (prefix + "/" + file.name) : file.name;
+              out.push({ path: rel, bytes_base64: bytesToBase64(bytes) });
+              resolve();
+            }, reject);
+          });
+        } else if (entry.isDirectory) {
+          const reader = entry.createReader();
+          const dirPrefix = prefix ? (prefix + "/" + entry.name) : entry.name;
+          const readBatch = () => new Promise((resolve, reject) => reader.readEntries(resolve, reject));
+          let batch = await readBatch();
+          while (batch.length > 0) {
+            for (const child of batch) {
+              await collectDroppedEntry(child, dirPrefix, out);
+            }
+            batch = await readBatch();
+          }
+        }
+      }
+
+      window.addEventListener("dragover", (ev) => {
+        ev.preventDefault();
+        if (dropOverlayEl) {
+          dropOverlayEl.setAttribute("data-active", "true");
+        }
+      });
+
+      window.addEventListener("dragleave", (ev) => {
+        if (ev.relatedTarget === null && dropOverlayEl) {
+          dropOverlayEl.setAttribute("data-active", "false");
+        }
+      });
+
+      window.addEventListener("drop", async (ev) => {
+        ev.preventDefault();
+        if (dropOverlayEl) {
+          dropOverlayEl.setAttribute("data-active", "false");
+        }
+        const dt = ev.dataTransfer;
+        if (!dt) {
+          return;
+        }
+        const collected = [];
+        if (dt.items && dt.items.length > 0) {
+          for (let i = 0; i < dt.items.length; i += 1) {
+            const item = dt.items[i];
+            if (typeof item.webkitGetAsEntry === "function") {
+              const entry = item.webkitGetAsEntry();
+              if (entry) {
+                await collectDroppedEntry(entry, "", collected);
+                continue;
+              }
+            }
+            const file = item.getAsFile();
+            if (file) {
+              const bytes = new Uint8Array(await file.arrayBuffer());
+              collected.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
+            }
+          }
+        } else if (dt.files && dt.files.length > 0) {
+          for (let i = 0; i < dt.files.length; i += 1) {
+            const file = dt.files[i];
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            collected.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
+          }
+        }
+        if (collected.length > 0) {
+          emitEvent({ kind: "import_dropped_files", files: collected });
+        }
+      });
+
+      function coordinateDocumentLock(docId) {
+        activeLockDocId = docId || "default";
+        if (typeof releaseCurrentWebLock === "function") {
+          releaseCurrentWebLock();
+          releaseCurrentWebLock = null;
+        }
+        if (typeof BroadcastChannel === "function") {
+          if (!lockChannel) {
+            lockChannel = new BroadcastChannel(TAB_CHANNEL_NAME);
+            lockChannel.addEventListener("message", (msg) => {
+              const data = msg.data;
+              if (!data || data.docId !== activeLockDocId || data.tabId === tabId) {
+                return;
+              }
+              if (data.type === "holder") {
+                emitEvent({
+                  kind: "observe_external_lock",
+                  doc_id: activeLockDocId,
+                  holder_tab_id: data.tabId,
+                  now_ms: Date.now()
+                });
+              } else if (data.type === "release") {
+                coordinateDocumentLock(activeLockDocId);
+              }
+            });
+          }
+        }
+
+        if (navigator.locks && typeof navigator.locks.request === "function") {
+          const lockName = "lumencraft.doc." + activeLockDocId;
+          void navigator.locks.request(lockName, { ifAvailable: true }, (lock) => {
+            if (!lock) {
+              emitEvent({
+                kind: "observe_external_lock",
+                doc_id: activeLockDocId,
+                holder_tab_id: "active-tab",
+                now_ms: Date.now()
+              });
+              return Promise.resolve();
+            }
+            emitEvent({ kind: "acquire_lock", doc_id: activeLockDocId, tab_id: tabId, now_ms: Date.now() });
+            if (lockChannel) {
+              lockChannel.postMessage({ type: "holder", docId: activeLockDocId, tabId });
+            }
+            return new Promise((resolve) => {
+              releaseCurrentWebLock = resolve;
+            });
+          });
+        } else {
+          emitEvent({ kind: "acquire_lock", doc_id: activeLockDocId, tab_id: tabId, now_ms: Date.now() });
+        }
+      }
+
+      window.addEventListener("afterprint", () => {
+        if (printStageEl) {
+          printStageEl.replaceChildren();
+        }
+      });
+
+      window.addEventListener("beforeunload", () => {
+        if (lockChannel) {
+          lockChannel.postMessage({ type: "release", docId: activeLockDocId, tabId });
+        }
+        if (typeof releaseCurrentWebLock === "function") {
+          releaseCurrentWebLock();
+          releaseCurrentWebLock = null;
+        }
+      });
+
+      window.LumenCraftHost = {
+        tabId,
+        connectBridge(fn) {
+          dispatchFn = fn;
+          syncCanvasViewport();
+          coordinateDocumentLock(activeLockDocId);
+          while (pendingEvents.length > 0) {
+            emitEvent(pendingEvents.shift());
+          }
+        },
+        dispatchEvent: emitEvent,
+        openWithFilePicker,
+        saveWithFilePicker,
+        openDirectoryPickerTree,
+        coordinateDocumentLock,
+        readLocalPreferences() {
+          return window.localStorage ? window.localStorage.getItem(PREFERENCES_KEY) : null;
+        }
+      };
+
+      syncCanvasViewport();
+    })();
+  </script>
 </body>
 </html>

@@ -7,13 +7,13 @@
 use std::fmt::Write as _;
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound, ContingencyMethod, ContingencySpec,
-    CoxTieMethod, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, LinearRegressionSpec,
-    MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
-    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument,
-    RepeatedMeasuresDesign, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId, SimulationNoise,
-    SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    WeightingScheme,
+    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage,
+    ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
+    GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod,
+    MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
+    ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResultCell, ResultSheet, ResultStatus, ResultTab,
+    ResultTabKind, RocCiMethod, RocSpec, SheetId, SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype,
+    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
 };
 use lumencraft_fit::get_builtin_model;
 
@@ -280,6 +280,9 @@ fn describe_two_group(s: &TwoGroupSpec, source_ds: Option<&DataSheet>) -> Vec<Re
             "A one-sample Wilcoxon signed-rank test compared the observed sample median against the hypothetical reference median {}.",
             format_exact_float(hypothetical)
         ),
+        TwoGroupMethod::PairedSignTest => String::from(
+            "An exact two-sample paired sign test evaluated positive versus negative within-pair differences against a binomial null proportion of 0.5 and reported the median difference with an exact order-statistic confidence interval (excluding zero-difference ties from the binomial trial count).",
+        ),
     };
 
     let mut runs = vec![plain(format!("Hypothesis testing was {tail_text}. {method_desc}"))];
@@ -410,6 +413,27 @@ fn describe_passing_bablok(s: &PassingBablokSpec, source_ds: Option<&DataSheet>)
 
 fn describe_contingency(s: &ContingencySpec) -> Vec<ReportBlock> {
     let test_desc = match s.method {
+        ContingencyMethod::CohenKappa { weighting } => {
+            let weight_desc = match weighting {
+                KappaWeighting::Unweighted => "unweighted nominal agreement (identity weights)",
+                KappaWeighting::Linear => "linear ordinal agreement weights (1 - |i - j| / (K - 1))",
+                KappaWeighting::Quadratic => "quadratic Fleiss-Cohen ordinal agreement weights (1 - ((i - j) / (K - 1))^2)",
+            };
+            return vec![ReportBlock::Paragraph(vec![plain(format!(
+                "Inter-rater agreement across square K x K classifications was quantified using Cohen's kappa with {weight_desc}, reporting observed agreement P_o, chance-expected agreement P_e, asymptotic standard error, Wald confidence interval, and a normal Z-test against kappa = 0."
+            ))])];
+        }
+        ContingencyMethod::FleissKappa => {
+            return vec![ReportBlock::Paragraph(vec![plain(
+                "Multi-rater nominal agreement across fixed rater counts per subject was evaluated using Fleiss' chance-corrected kappa (reporting overall P_bar, chance-expected agreement P_e, asymptotic standard error, confidence interval, and Z-test against kappa = 0, alongside category-wise conditional kappa estimates).",
+            )])];
+        }
+        ContingencyMethod::ExactBinomial => {
+            let p0 = format_exact_float(s.null_proportion.unwrap_or(0.5));
+            return vec![ReportBlock::Paragraph(vec![plain(format!(
+                "Binary successes versus total trials were compared against the null proportion p0 = {p0} using an exact one-sample binomial test (reporting Sterne and doubled-tail two-sided P values alongside one-sided lower/upper exact tail probabilities), with exact Clopper-Pearson, Wilson score, and Agresti-Coull binomial proportion confidence intervals."
+            ))])];
+        }
         ContingencyMethod::PearsonChiSquare { yates_continuity: true } => {
             "Pearson's chi-square contingency test with Yates' continuity correction for 2x2 tables"
         }
@@ -424,6 +448,13 @@ fn describe_contingency(s: &ContingencySpec) -> Vec<ReportBlock> {
     };
 
     let mut runs = vec![plain(format!("Categorical counts were evaluated using {test_desc}."))];
+    if let Some(props) = &s.expected_proportions {
+        let formatted: Vec<String> = props.iter().map(|&p| format_exact_float(p)).collect();
+        runs.push(plain(format!(
+            " One-way goodness-of-fit expected counts were parameterized from custom ratios ({}, normalized to unit sum).",
+            formatted.join(", ")
+        )));
+    }
     if s.compute_odds_and_risk_ratios {
         runs.push(plain(
             " For 2x2 tables, effect sizes included the odds ratio (Baptista-Pike exact CI), relative risk (Koopman asymptotic score CI), risk difference (Newcombe score CI), and number needed to treat (NNT).",
@@ -555,12 +586,33 @@ fn describe_multivariate(s: &MultivariateSpec, source_ds: Option<&DataSheet>) ->
                 "Pairwise associations were quantified via {corr_kind} using pairwise complete observations, with upper-triangle P values adjusted for false discovery rate via the Benjamini-Hochberg procedure."
             ))])]
         }
-        MultivariateSpec::Clustering { k_means_k } => {
-            let mode = match k_means_k {
-                Some(k) => format!("k-means++ partitioning into k = {k} clusters"),
-                None => String::from("hierarchical agglomerative clustering"),
+        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
+            let dist_desc = match distance {
+                ClusterDistance::Euclidean => "Euclidean distance",
+                ClusterDistance::Manhattan => "Manhattan (L1) distance",
+                ClusterDistance::Pearson => "Pearson correlation dissimilarity (1 - r)",
+                ClusterDistance::Cosine => "cosine dissimilarity (1 - cos)",
             };
-            vec![ReportBlock::Paragraph(vec![plain(format!("Unsupervised multivariate clustering was performed via {mode}."))])]
+            let link_desc = match linkage {
+                ClusterLinkage::Ward => "Ward.D2 minimum-variance",
+                ClusterLinkage::Complete => "complete (furthest-neighbor)",
+                ClusterLinkage::Single => "single (nearest-neighbor)",
+                ClusterLinkage::Upgma => "UPGMA (unweighted average)",
+                ClusterLinkage::Wpgma => "WPGMA (weighted average)",
+                ClusterLinkage::Centroid => "UPGMC centroid",
+                ClusterLinkage::Median => "WPGMC median",
+            };
+            let sweep_desc = k_sweep_max.map_or_else(
+                || String::from("a candidate-k WCSS elbow and mean-silhouette sweep (k >= 2)"),
+                |k_max| format!("a candidate-k WCSS elbow and mean-silhouette sweep up to k = {k_max}"),
+            );
+            let mode = match k_means_k {
+                Some(k) => format!("with k-means++ partitioning into k = {k} clusters alongside {sweep_desc}"),
+                None => format!("with k-means++ partitioning selecting the cluster count maximizing mean silhouette across {sweep_desc}"),
+            };
+            vec![ReportBlock::Paragraph(vec![plain(format!(
+                "Unsupervised multivariate clustering was performed on complete observations using {dist_desc} and {link_desc} hierarchical agglomerative linkage (with cophenetic correlation), paired {mode}."
+            ))])]
         }
         MultivariateSpec::MultipleImputation { imputations_m, max_iters, seed, response_column, predictor_columns } => {
             let mut extra = String::new();
@@ -872,6 +924,18 @@ fn describe_transform(s: &TransformAnalysisSpec) -> Vec<ReportBlock> {
                 "Monte Carlo curve simulation for `{equation_id}` ({row_count} rows x {replicates} replicates, X in [{}, {}], {noise_str}, RNG seed = {seed}).",
                 format_exact_float(*x_min),
                 format_exact_float(*x_max)
+            )
+        }
+        TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation } => {
+            let strat_desc = match stratify_column {
+                Some(col_idx) => {
+                    let alloc = if *proportional_allocation { "proportional" } else { "equal-quota" };
+                    format!(" stratified by column {} using {alloc} allocation", col_idx + 1)
+                }
+                None => String::from(" without stratification"),
+            };
+            format!(
+                "Seeded deterministic Fisher-Yates random sampling without replacement selected n = {sample_size} rows{strat_desc} (RNG seed = {seed})."
             )
         }
     };

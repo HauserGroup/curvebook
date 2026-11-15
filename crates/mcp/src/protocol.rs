@@ -5,11 +5,12 @@
 
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 
+use lumencraft_doc::ErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::SERVER_NAME;
-use crate::errors;
+use crate::errors::{self, StructuredErrorPayload};
 use crate::prompts::{get_prompt, list_prompts};
 use crate::resources::{ResourceError, list_resources, read_resource};
 use crate::tools::{McpServerState, ToolCallError, call_tool, list_tools_for_state};
@@ -23,6 +24,12 @@ LumenCraft MCP server for scientific tables, statistical analysis, curve fitting
 Use `doc_inspect` or MCP resources (`resources/list`, `resources/read` with `sheet://<id>` or `result://<id>`) to inspect active sheets and results. \
 Core tools are available immediately; call `list_toolsets` and `enable_toolset` to dynamically load per-command CommandGroup tools (which emits `notifications/tools/list_changed`). \
 Inspect each tool's `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) before executing mutating or filesystem commands, and use `prompts/list` + `prompts/get` for guided analysis workflows.";
+
+/// Guidance string advertised during `initialize` when strict `--gui-only` policy is active.
+pub const GUI_ONLY_SERVER_INSTRUCTIONS: &str = "\
+LumenCraft MCP server running under strict `--gui-only` policy. \
+Only the 8 human-equivalent GUI tools are exposed (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`). \
+Direct engine commands (`command_run`, `command_batch`, `enable_toolset`), `doc_inspect`, file shortcuts (`open_file`, `save_file`, `export`, `render_preview`), and `resources/read` are blocked with `gui_only_violation`.";
 
 /// Newer MCP protocol revision accepted when explicitly requested by a client.
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] = ["2024-11-05", "2025-03-26"];
@@ -119,23 +126,31 @@ enum NextFrame {
 
 /// Run the MCP server on process stdin/stdout using a fresh headless `Session`.
 pub fn run_stdio() -> io::Result<()> {
+    let mut state = McpServerState::new();
+    run_stdio_with_state(&mut state)
+}
+
+/// Run the MCP server on process stdin/stdout driven by an explicit [`McpServerState`].
+pub fn run_stdio_with_state(state: &mut McpServerState) -> io::Result<()> {
     let stdin = io::stdin();
     let stdout = io::stdout();
     let mut reader = BufReader::new(stdin.lock());
     let mut writer = BufWriter::new(stdout.lock());
-    let mut state = McpServerState::new();
-    serve(&mut reader, &mut writer, &mut state)
+    serve(&mut reader, &mut writer, state)
 }
 
 /// Run the MCP server on process stdin/stdout attached to a live desktop `--control <port>` loop.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_stdio_with_control_port(port: u16) -> Result<(), String> {
-    let mut state = McpServerState::with_control_port(port)?;
-    let stdin = io::stdin();
-    let stdout = io::stdout();
-    let mut reader = BufReader::new(stdin.lock());
-    let mut writer = BufWriter::new(stdout.lock());
-    serve(&mut reader, &mut writer, &mut state).map_err(|err| format!("stdio transport error: {err}"))
+    run_stdio_with_control_port_gui_only(port, false)
+}
+
+/// Run the MCP server on process stdin/stdout attached to a live desktop `--control <port>` loop
+/// with explicit `--gui-only` policy state.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_stdio_with_control_port_gui_only(port: u16, gui_only: bool) -> Result<(), String> {
+    let mut state = McpServerState::with_control_port_and_gui_only(port, gui_only)?;
+    run_stdio_with_state(&mut state).map_err(|err| format!("stdio transport error: {err}"))
 }
 
 /// Serve MCP JSON-RPC 2.0 requests until EOF using [`MAX_REQUEST_BYTES`].
@@ -292,6 +307,7 @@ fn handle_initialize(id: Value, params: &Value, state: &mut McpServerState) -> J
     }
     let requested = params.get("protocolVersion").and_then(Value::as_str);
     let negotiated = negotiate_protocol_version(requested);
+    let instructions = if state.is_gui_only() { GUI_ONLY_SERVER_INSTRUCTIONS } else { SERVER_INSTRUCTIONS };
     state.mark_initialized();
     JsonRpcResponse::ok(
         id,
@@ -313,7 +329,7 @@ fn handle_initialize(id: Value, params: &Value, state: &mut McpServerState) -> J
                 "name": SERVER_NAME,
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": SERVER_INSTRUCTIONS
+            "instructions": instructions
         }),
     )
 }
@@ -372,6 +388,9 @@ fn handle_resources_list(id: Value, params: &Value, state: &McpServerState) -> J
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/list params must be an object", None);
     }
+    if state.is_gui_only() {
+        return JsonRpcResponse::ok(id, json!({ "resources": [] }));
+    }
     JsonRpcResponse::ok(id, json!({ "resources": list_resources(state.session().document()) }))
 }
 
@@ -382,6 +401,12 @@ fn handle_resources_read(id: Value, params: &Value, state: &McpServerState) -> J
     let Some(uri) = map.get("uri").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) else {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/read requires a non-empty string \"uri\"", None);
     };
+    if state.is_gui_only() {
+        let payload = StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, "resources/read is forbidden under --gui-only policy")
+            .with_remediation("Inspect visible sheets via `ui_inspect` or `ui_screenshot` instead.")
+            .with_details(json!({ "uri": uri, "policy": "gui_only" }));
+        return JsonRpcResponse::err(id, ERR_INVALID_REQUEST, payload.message.clone(), Some(payload.to_value()));
+    }
 
     match read_resource(state.session().document(), uri) {
         Ok(contents) => JsonRpcResponse::ok(id, json!({ "contents": contents })),

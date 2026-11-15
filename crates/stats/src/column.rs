@@ -3,9 +3,9 @@
 
 use lumencraft_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveSpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet, ResultTab,
-    ResultTabKind, SubcolumnAggregation, SummarizedPoint, TableArchetype,
+    ResultTabKind, SubcolumnAggregation, SummarizedPoint, TableArchetype, VariableRole,
 };
-use lumencraft_math::dist::{chi2_sf, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf, student_t_two_sided_p};
+use lumencraft_math::dist::{chi2_isf, chi2_ppf, chi2_sf, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf, student_t_two_sided_p};
 use lumencraft_math::noncentral_t_ci;
 use lumencraft_math::special::{gamma::gamma, inc_beta::reg_beta};
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments, lag1_autocorrelation};
@@ -99,6 +99,8 @@ pub struct DescriptiveSummary {
     pub sum: f64,
     pub mean: f64,
     pub sd: Option<f64>,
+    #[serde(default)]
+    pub sd_ci: Option<(f64, f64)>,
     pub sem: Option<f64>,
     pub mean_ci: Option<(f64, f64)>,
     pub median_ci: Option<MedianCi>,
@@ -137,6 +139,7 @@ pub fn summarize_column(
 
     let moments = SummaryMoments::from_slice(values)?;
     let sd = moments.sample_sd().ok();
+    let sd_ci = compute_sd_ci(sd, n, confidence)?;
     let sem = moments.sem().ok();
     let mean_ci = compute_mean_ci(moments.mean, sem, n, confidence)?;
     let median_ci = exact_binomial_median_ci(values, confidence).ok();
@@ -168,6 +171,7 @@ pub fn summarize_column(
         sum: moments.sum,
         mean: moments.mean,
         sd,
+        sd_ci,
         sem,
         mean_ci,
         median_ci,
@@ -212,6 +216,26 @@ fn compute_mean_ci(mean: f64, sem: Option<f64>, n: usize, confidence: Confidence
     let t_crit = t_crit_two_sided(confidence, (n - 1) as f64)?;
     let half = t_crit * se;
     Ok(Some((mean - half, mean + half)))
+}
+
+fn compute_sd_ci(sd: Option<f64>, n: usize, confidence: ConfidenceLevel) -> Result<Option<(f64, f64)>, StatsError> {
+    if n < 2 {
+        return Ok(None);
+    }
+    compute_sd_ci_df(sd, (n - 1) as f64, confidence)
+}
+
+fn compute_sd_ci_df(sd: Option<f64>, df: f64, confidence: ConfidenceLevel) -> Result<Option<(f64, f64)>, StatsError> {
+    if !df.is_finite() || df < 1.0 {
+        return Ok(None);
+    }
+    let Some(s) = sd else {
+        return Ok(None);
+    };
+    let half_alpha = 0.5 * confidence.alpha();
+    let upper_chi2 = chi2_isf(half_alpha, df)?;
+    let lower_chi2 = chi2_ppf(half_alpha, df)?;
+    if upper_chi2 > 0.0 && lower_chi2 > 0.0 { Ok(Some((s * (df / upper_chi2).sqrt(), s * (df / lower_chi2).sqrt()))) } else { Ok(None) }
 }
 
 type GeomStats = (Option<f64>, Option<f64>, Option<(f64, f64)>);
@@ -297,6 +321,8 @@ pub struct PooledSummaryResult {
     pub total_n: f64,
     pub mean: f64,
     pub sd: Option<f64>,
+    #[serde(default)]
+    pub sd_ci: Option<(f64, f64)>,
     pub sem: Option<f64>,
     pub mean_ci: Option<(f64, f64)>,
 }
@@ -329,15 +355,16 @@ pub fn summarize_pre_summarized_points(
         ss_between_acc.add(pt.n * d * d);
     }
     let ss_total = (ss_within_acc.total() + ss_between_acc.total()).max(0.0);
-    let (sd, sem, mean_ci) = if total_n > 1.0 {
+    let (sd, sd_ci, sem, mean_ci) = if total_n > 1.0 {
         let s = (ss_total / (total_n - 1.0)).sqrt();
         let se = s / total_n.sqrt();
         let t_crit = t_crit_two_sided(confidence, total_n - 1.0)?;
-        (Some(s), Some(se), Some((grand_mean - t_crit * se, grand_mean + t_crit * se)))
+        let s_ci = compute_sd_ci_df(Some(s), total_n - 1.0, confidence)?;
+        (Some(s), s_ci, Some(se), Some((grand_mean - t_crit * se, grand_mean + t_crit * se)))
     } else {
-        (None, None, None)
+        (None, None, None, None)
     };
-    Ok(PooledSummaryResult { label: label.into(), point_count: points.len(), total_n, mean: grand_mean, sd, sem, mean_ci })
+    Ok(PooledSummaryResult { label: label.into(), point_count: points.len(), total_n, mean: grand_mean, sd, sd_ci, sem, mean_ci })
 }
 
 /// Extract series from `DataSheet` under the configured [`SubcolumnAggregation`] mode.
@@ -1353,6 +1380,8 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
         return Err(StatsError::EmptyInput);
     }
 
+    append_xy_trapezoidal_auc(&mut res, sheet, &spec.selected_data_sets)?;
+
     let p_fmt = spec.p_value_format;
     let conf = spec.confidence_level;
     if !pooled_series.is_empty() {
@@ -1395,6 +1424,8 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
         res.tabs.push(qq_tab);
     }
 
+    append_row_descriptive_stats(&mut res, sheet, &spec.selected_data_sets, desc.aggregation)?;
+
     if summaries.iter().all(|s| s.n < 3) {
         res.checklist.push(checklist_item(
             "Sample size adequacy",
@@ -1412,6 +1443,157 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     }
 
     Ok(res)
+}
+
+/// Compute per-dataset trapezoidal area under curve (`sum_i 0.5 * (x_{i+1} - x_i) * (y_i + y_{i+1})`)
+/// for [`TableArchetype::Xy`] when at least 2 sorted finite `(x, mean_y)` points exist.
+fn append_xy_trapezoidal_auc(res: &mut ResultSheet, sheet: &DataSheet, selected: &[usize]) -> Result<(), StatsError> {
+    let TableArchetype::Xy(xy) = &sheet.archetype else {
+        return Ok(());
+    };
+    let ds_indices = resolve_selected_indices(selected, xy.data_sets.len());
+    for ds_idx in ds_indices {
+        let ds = &xy.data_sets[ds_idx];
+        let mut pts: Vec<(f64, f64)> = Vec::new();
+        for r in 0..xy.row_count() {
+            let Some(x) = xy.x_value_at(r) else { continue };
+            if !x.is_finite() {
+                continue;
+            }
+            let mean_y = if xy.y_subcolumn_mode.supports_parametric_moments() {
+                xy.summarized_y_point(r, ds_idx)?.map(|p| p.mean).filter(|v| v.is_finite())
+            } else if !xy.y_subcolumn_mode.is_pre_summarized() {
+                let y_vals: Vec<f64> = ds.cells.get(r).map(|row| row.iter().filter_map(|c| c.active_number()).collect()).unwrap_or_default();
+                if y_vals.is_empty() { None } else { Some(SummaryMoments::from_slice(&y_vals)?.mean) }
+            } else {
+                None
+            };
+            if let Some(y) = mean_y {
+                pts.push((x, y));
+            }
+        }
+        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if pts.len() >= 2 {
+            let mut auc_acc = NeumaierSum::new();
+            for w in pts.windows(2) {
+                auc_acc.add(0.5 * (w[1].0 - w[0].0) * (w[0].1 + w[1].1));
+            }
+            push_scalar(res, "Trapezoidal AUC", Some(ds_idx), auc_acc.total());
+        }
+    }
+    Ok(())
+}
+
+/// Emit per-row `N`, `Mean`, `SD`, `Min`, `Max` in `"row-descriptive-stats"` when `>= 2`
+/// active numeric columns exist on `MultipleVariables`, `Column`, or `Grouped` tables.
+fn append_row_descriptive_stats(
+    res: &mut ResultSheet,
+    sheet: &DataSheet,
+    selected: &[usize],
+    aggregation: SubcolumnAggregation,
+) -> Result<(), StatsError> {
+    let row_entries: Vec<(String, Vec<f64>)> = match &sheet.archetype {
+        TableArchetype::MultipleVariables(mv) => {
+            let indices = resolve_selected_indices(selected, mv.variables.len());
+            let active_cols: Vec<usize> = indices
+                .into_iter()
+                .filter(|&idx| {
+                    let var = &mv.variables[idx];
+                    var.role != VariableRole::Categorical && var.cells.iter().any(|c| c.active_number().is_some())
+                })
+                .collect();
+            if active_cols.len() < 2 {
+                return Ok(());
+            }
+            (0..mv.row_count())
+                .map(|r| {
+                    let label = mv
+                        .row_titles
+                        .get(r)
+                        .map(|s| s.trim())
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| format!("Row {}", r + 1));
+                    let vals: Vec<f64> =
+                        active_cols.iter().filter_map(|&c_idx| mv.variables[c_idx].cells.get(r).and_then(|c| c.active_number())).collect();
+                    (label, vals)
+                })
+                .collect()
+        }
+        TableArchetype::Column(col_tbl) => {
+            if col_tbl.subcolumn_mode.is_pre_summarized() {
+                return Ok(());
+            }
+            collect_dataset_rows_for_desc(&col_tbl.data_sets, &col_tbl.row_titles, selected, aggregation)?
+        }
+        TableArchetype::Grouped(grp_tbl) => {
+            if grp_tbl.subcolumn_mode.is_pre_summarized() {
+                return Ok(());
+            }
+            collect_dataset_rows_for_desc(&grp_tbl.data_sets, &grp_tbl.row_titles, selected, aggregation)?
+        }
+        _ => return Ok(()),
+    };
+
+    let mut row_labels = Vec::new();
+    let mut rows = Vec::new();
+    for (label, vals) in row_entries {
+        if vals.is_empty() {
+            continue;
+        }
+        let moments = SummaryMoments::from_slice(&vals)?;
+        let sd = if vals.len() >= 2 { moments.sample_sd().ok() } else { None };
+        let min_v = vals.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_v = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        row_labels.push(label);
+        rows.push(vec![num_cell(vals.len() as f64), num_cell(moments.mean), opt_num_cell(sd), num_cell(min_v), num_cell(max_v)]);
+    }
+
+    if !rows.is_empty() {
+        res.tabs.push(build_tab(
+            "row-descriptive-stats",
+            "Row-wise descriptive statistics",
+            ResultTabKind::Diagnostics,
+            vec![String::from("N"), String::from("Mean"), String::from("SD"), String::from("Min"), String::from("Max")],
+            row_labels,
+            rows,
+        ));
+    }
+    Ok(())
+}
+
+fn collect_dataset_rows_for_desc(
+    data_sets: &[lumencraft_doc::DataSetColumn],
+    row_titles: &[String],
+    selected: &[usize],
+    aggregation: SubcolumnAggregation,
+) -> Result<Vec<(String, Vec<f64>)>, StatsError> {
+    let indices = resolve_selected_indices(selected, data_sets.len());
+    let active_cols: Vec<usize> =
+        indices.into_iter().filter(|&idx| data_sets[idx].cells.iter().any(|row| row.iter().any(|c| c.active_number().is_some()))).collect();
+    if active_cols.len() < 2 {
+        return Ok(Vec::new());
+    }
+    let n_rows = active_cols.iter().map(|&idx| data_sets[idx].row_count()).max().unwrap_or(0);
+    let mut out = Vec::with_capacity(n_rows);
+    for r in 0..n_rows {
+        let label = row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("Row {}", r + 1));
+        let mut vals = Vec::new();
+        for &c_idx in &active_cols {
+            let Some(cell_row) = data_sets[c_idx].cells.get(r) else { continue };
+            let nums: Vec<f64> = cell_row.iter().filter_map(|c| c.active_number()).collect();
+            if nums.is_empty() {
+                continue;
+            }
+            if matches!(aggregation, SubcolumnAggregation::RowMeans) {
+                vals.push(SummaryMoments::from_slice(&nums)?.mean);
+            } else {
+                vals.extend_from_slice(&nums);
+            }
+        }
+        out.push((label, vals));
+    }
+    Ok(out)
 }
 
 fn build_normal_qq_tab(raw_series: &[(String, Vec<f64>, usize)]) -> Result<Option<ResultTab>, StatsError> {
@@ -1519,6 +1701,7 @@ fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel
         String::from("IQR"),
         String::from("Mean"),
         String::from("Std. Deviation"),
+        String::from("CI of SD"),
         String::from("Std. Error of Mean"),
         format!("{}% CI of Mean", conf.percent()),
         format!("{}% CI of Median", conf.percent()),
@@ -1545,20 +1728,26 @@ fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel
         rows[8].push(num_cell(s.iqr));
         rows[9].push(num_cell(s.mean));
         rows[10].push(opt_num_cell(s.sd));
-        rows[11].push(opt_num_cell(s.sem));
-        rows[12].push(opt_ci_cell(s.mean_ci));
-        rows[13].push(opt_ci_cell(s.median_ci.map(|m| (m.lower, m.upper))));
-        rows[14].push(opt_num_cell(s.median_ci.map(|m| m.actual_confidence_percent)));
-        rows[15].push(opt_num_cell(s.cv_percent));
-        rows[16].push(opt_num_cell(s.geometric_mean));
-        rows[17].push(opt_num_cell(s.geometric_sd_factor));
-        rows[18].push(opt_num_cell(s.harmonic_mean));
-        rows[19].push(num_cell(s.quadratic_mean));
-        rows[20].push(opt_num_cell(s.skewness));
-        rows[21].push(opt_num_cell(s.excess_kurtosis));
-        rows[22].push(num_cell(s.sum));
+        rows[11].push(opt_ci_cell(s.sd_ci));
+        rows[12].push(opt_num_cell(s.sem));
+        rows[13].push(opt_ci_cell(s.mean_ci));
+        rows[14].push(opt_ci_cell(s.median_ci.map(|m| (m.lower, m.upper))));
+        rows[15].push(opt_num_cell(s.median_ci.map(|m| m.actual_confidence_percent)));
+        rows[16].push(opt_num_cell(s.cv_percent));
+        rows[17].push(opt_num_cell(s.geometric_mean));
+        rows[18].push(opt_num_cell(s.geometric_sd_factor));
+        rows[19].push(opt_num_cell(s.harmonic_mean));
+        rows[20].push(num_cell(s.quadratic_mean));
+        rows[21].push(opt_num_cell(s.skewness));
+        rows[22].push(opt_num_cell(s.excess_kurtosis));
+        rows[23].push(num_cell(s.sum));
     }
-    build_tab("desc-summary", "Descriptive Statistics", ResultTabKind::DescriptiveSummary, headers, row_labels, rows)
+    let mut tab = build_tab("desc-summary", "Descriptive Statistics", ResultTabKind::DescriptiveSummary, headers, row_labels, rows);
+    tab.footnotes.push(format!(
+        "{}% CI of SD uses exact chi-square variance bounds under a normal-theory Gaussian assumption; skewed or heavy-tailed distributions are sensitive to non-normality.",
+        conf.percent()
+    ));
+    tab
 }
 
 fn build_normality_tab(summaries: &[DescriptiveSummary], batteries: &[NormalityBatteryResult], p_fmt: PValueFormat) -> ResultTab {
@@ -1613,7 +1802,10 @@ fn append_normality_checklist(
                     format!("Normality ({})", s.label),
                     ChecklistStatus::Warn,
                     Some(format!("Shapiro-Wilk W = {:.4}, p = {:.4}", sw.statistic, sw.p_value)),
-                    "Sample deviates significantly from a Gaussian distribution; consider nonparametric or lognormal summaries.",
+                    format!(
+                        "Shapiro-Wilk W = {:.4}, p = {:.4} indicates significant departure from Gaussian normality; inspect the Normal Q-Q and Normality & Lognormality Tests tabs.",
+                        sw.statistic, sw.p_value
+                    ),
                 ));
             } else {
                 checklist.push(checklist_item(
@@ -1715,7 +1907,7 @@ pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec
         if total_flagged > 0 { ChecklistStatus::Info } else { ChecklistStatus::Pass },
         Some(format!("{total_flagged} flagged")),
         if total_flagged > 0 {
-            "Outlier candidates were flagged; verify experimental provenance before excluding observations."
+            "Observations exceeded the configured outlier threshold and are listed in the Identified Outliers tab; experimental provenance determines data validity."
         } else {
             "No observations exceeded the configured outlier threshold."
         },

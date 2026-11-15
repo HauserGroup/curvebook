@@ -35,7 +35,7 @@ commands:
                     measure parse, recalculation, compilation and export timings
   perf [--json]
                     run synthetic G12 performance checks
-  mcp [--control-port <port>]
+  mcp [--control-port <port>] [--gui-only]
                     run the Model Context Protocol (MCP) server over stdio
 
 options:
@@ -90,34 +90,103 @@ fn dispatch(args: &[String]) -> Result<(), CliError> {
     }
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct McpCliConfig {
+    control_port: Option<u16>,
+    gui_only: bool,
+}
+
+/// In-process desktop UI host backing `lumencraft-cli mcp --gui-only`.
+struct InProcessUiGuiHost {
+    app: lumencraft_ui_egui::UiApp,
+}
+
+impl InProcessUiGuiHost {
+    fn new(gui_only: bool) -> Self {
+        let mut app = lumencraft_ui_egui::UiApp::new();
+        app.set_gui_only(gui_only);
+        Self { app }
+    }
+}
+
+fn normalize_in_process_gui_params(method: &str, mut params: serde_json::Value) -> serde_json::Value {
+    if let Some(obj) = params.as_object_mut() {
+        match method {
+            "ui.screenshot" => {
+                if matches!(obj.get("target").and_then(serde_json::Value::as_str), Some("workspace" | "viewport")) {
+                    obj.insert(String::from("target"), serde_json::Value::String(String::from("full_window")));
+                }
+            }
+            "ui.pointer_gesture" => {
+                if matches!(obj.get("action").and_then(serde_json::Value::as_str), Some("wheel")) {
+                    obj.insert(String::from("action"), serde_json::Value::String(String::from("scroll")));
+                }
+            }
+            "ui.invoke_menu" => {
+                if let Some(arr) = obj.get("path").and_then(serde_json::Value::as_array) {
+                    let segments: Vec<&str> = arr.iter().filter_map(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).collect();
+                    if !segments.is_empty() {
+                        obj.insert(String::from("path"), serde_json::Value::String(segments.join("/")));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    params
+}
+
+impl lumencraft_mcp::GuiSessionHost for InProcessUiGuiHost {
+    fn call_gui(&mut self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, lumencraft_engine::EngineError> {
+        let normalized = normalize_in_process_gui_params(method, params);
+        lumencraft_ui_egui::dispatch_gui_action(&mut self.app, method, normalized)
+    }
+
+    fn set_gui_only(&mut self, gui_only: bool) {
+        self.app.set_gui_only(gui_only);
+    }
+
+    fn is_gui_only(&self) -> bool {
+        self.app.is_gui_only()
+    }
+}
+
 fn run_mcp(args: &[String]) -> Result<(), CliError> {
-    let control_port = parse_mcp_args(args)?;
+    let cfg = parse_mcp_args(args)?;
     let _ = lumencraft_mcp::SERVER_NAME;
-    let res = match control_port {
-        Some(port) => lumencraft_mcp::run_stdio_with_control_port(port),
-        None => lumencraft_mcp::run_stdio().map_err(|err| err.to_string()),
+    let res = match (cfg.control_port, cfg.gui_only) {
+        (Some(port), true) => lumencraft_mcp::run_stdio_with_control_port_gui_only(port, true),
+        (Some(port), false) => lumencraft_mcp::run_stdio_with_control_port(port),
+        (None, true) => {
+            let host = InProcessUiGuiHost::new(true);
+            let mut state = lumencraft_mcp::McpServerState::with_gui_host(Box::new(host)).with_gui_only(true);
+            lumencraft_mcp::run_stdio_with_state(&mut state).map_err(|err| err.to_string())
+        }
+        (None, false) => lumencraft_mcp::run_stdio().map_err(|err| err.to_string()),
     };
     res.map_err(|err| CliError::Runtime(format!("MCP stdio server failed: {err}")))
 }
 
-fn parse_mcp_args(args: &[String]) -> Result<Option<u16>, CliError> {
-    const MCP_USAGE: &str = "usage: lumencraft-cli mcp [--control-port <1..=65535>]";
-    let mut control_port = None;
+fn parse_mcp_args(args: &[String]) -> Result<McpCliConfig, CliError> {
+    const MCP_USAGE: &str = "usage: lumencraft-cli mcp [--control-port <1..=65535>] [--gui-only]";
+    let mut cfg = McpCliConfig::default();
     let mut idx = 0usize;
     while idx < args.len() {
         let arg = args[idx].as_str();
         if let Some(raw) = arg.strip_prefix("--control-port=") {
-            control_port = Some(parse_control_port_value(raw)?);
+            cfg.control_port = Some(parse_control_port_value(raw)?);
         } else if arg == "--control-port" {
             idx += 1;
             let raw = args.get(idx).ok_or_else(|| CliError::Usage(String::from(MCP_USAGE)))?;
-            control_port = Some(parse_control_port_value(raw)?);
+            cfg.control_port = Some(parse_control_port_value(raw)?);
+        } else if arg == "--gui-only" {
+            cfg.gui_only = true;
         } else {
             return Err(CliError::Usage(String::from(MCP_USAGE)));
         }
         idx += 1;
     }
-    Ok(control_port)
+    Ok(cfg)
 }
 
 fn parse_control_port_value(raw: &str) -> Result<u16, CliError> {
@@ -167,10 +236,26 @@ mod tests {
 
     #[test]
     fn mcp_control_port_validation_rejects_zero_overflow_and_unknown_flags() {
-        assert_eq!(parse_mcp_args(&[]).unwrap(), None);
-        assert_eq!(parse_mcp_args(&[String::from("--control-port"), String::from("49152")]).unwrap(), Some(49152));
-        assert_eq!(parse_mcp_args(&[String::from("--control-port=1")]).unwrap(), Some(1));
-        assert_eq!(parse_mcp_args(&[String::from("--control-port=65535")]).unwrap(), Some(65535));
+        assert_eq!(parse_mcp_args(&[]).unwrap(), super::McpCliConfig { control_port: None, gui_only: false });
+        assert_eq!(
+            parse_mcp_args(&[String::from("--control-port"), String::from("49152")]).unwrap(),
+            super::McpCliConfig { control_port: Some(49152), gui_only: false }
+        );
+        assert_eq!(parse_mcp_args(&[String::from("--control-port=1")]).unwrap(), super::McpCliConfig { control_port: Some(1), gui_only: false });
+        assert_eq!(
+            parse_mcp_args(&[String::from("--control-port=65535")]).unwrap(),
+            super::McpCliConfig { control_port: Some(65535), gui_only: false }
+        );
+        assert_eq!(parse_mcp_args(&[String::from("--gui-only")]).unwrap(), super::McpCliConfig { control_port: None, gui_only: true });
+        assert_eq!(
+            parse_mcp_args(&[String::from("--control-port"), String::from("49152"), String::from("--gui-only")]).unwrap(),
+            super::McpCliConfig { control_port: Some(49152), gui_only: true }
+        );
+        assert_eq!(
+            parse_mcp_args(&[String::from("--gui-only"), String::from("--control-port=49153")]).unwrap(),
+            super::McpCliConfig { control_port: Some(49153), gui_only: true }
+        );
+        assert!(super::USAGE.contains("--gui-only"));
 
         for bad in [
             vec!["--control-port", "0"],
@@ -179,6 +264,7 @@ mod tests {
             vec!["--control-port", "-1"],
             vec!["--control-port", "abc"],
             vec!["--control-port"],
+            vec!["--gui-only=true"],
             vec!["--unknown"],
             vec!["extra-arg"],
         ] {
@@ -187,6 +273,28 @@ mod tests {
             assert!(matches!(err, CliError::Usage(_)), "expected Usage for {owned:?}, got {err:?}");
             assert_eq!(err.exit_code(), EXIT_USAGE_OR_POLICY);
         }
+    }
+
+    #[test]
+    fn in_process_ui_gui_host_toggles_policy_and_dispatches_normalized_actions() {
+        use lumencraft_mcp::GuiSessionHost;
+
+        let mut host = super::InProcessUiGuiHost::new(true);
+        assert!(host.is_gui_only());
+
+        let inspect = host.call_gui("ui.inspect", serde_json::json!({"scope": "all"})).unwrap();
+        assert_eq!(inspect["gui_only"], serde_json::json!(true));
+
+        let shot = host.call_gui("ui.screenshot", serde_json::json!({"target": "workspace"})).unwrap();
+        assert!(shot["width_px"].as_u64().is_some_and(|w| w > 0));
+        assert!(shot["height_px"].as_u64().is_some_and(|h| h > 0));
+        let png_b64 = shot["data_base64"].as_str().unwrap();
+        assert!(png_b64.starts_with("iVBORw0KGgo"));
+
+        host.set_gui_only(false);
+        assert!(!host.is_gui_only());
+        let inspect_relaxed = host.call_gui("ui.inspect", serde_json::json!({})).unwrap();
+        assert_eq!(inspect_relaxed["gui_only"], serde_json::json!(false));
     }
 
     #[test]

@@ -4,7 +4,7 @@
 //! (`docs/graphing-and-layouts.md` §1–§5).
 
 pub use lumencraft_math::{AxisScale, LogitDomain};
-use lumencraft_palette::{ColorRamp, LineDashStyle, MarkerShape, MarkerStyle, PaletteId, Rgba8};
+use lumencraft_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 
 use crate::archetypes::{ColumnDesignHint, LevelOrderSpec, TableArchetype};
 use crate::error::{DocError, validate_title};
@@ -363,6 +363,28 @@ pub enum GroupedArrangement {
     Interleaved,
     Separated,
     Stacked,
+    Superimposed,
+}
+
+/// Per-point visual style override (`graph.formatSelectedPoints`).
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub struct PointStyleOverride {
+    pub series_index: usize,
+    pub point_index: usize,
+    #[serde(default)]
+    pub color: Option<Rgba8>,
+    #[serde(default)]
+    pub symbol: Option<MarkerShape>,
+    #[serde(default)]
+    pub size_pt: Option<f64>,
+    #[serde(default)]
+    pub border_width_pt: Option<f64>,
+    #[serde(default)]
+    pub fill_color: Option<Rgba8>,
+    #[serde(default)]
+    pub fill_mode: Option<MarkerFillMode>,
+    #[serde(default)]
+    pub hidden: bool,
 }
 
 /// Fill-colour visual channel in a five-channel `MultipleVariables` plot (`docs/graphing-and-layouts.md` §2.5).
@@ -447,13 +469,58 @@ pub enum AnnotationShapeKind {
     Ellipse,
 }
 
+/// Display mode for a fitted model equation callout on a graph canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum EquationDisplayMode {
+    #[default]
+    Substituted,
+    Symbolic,
+}
+
+const fn default_model_equation_font_size() -> f64 {
+    10.0
+}
+
 /// Canvas annotation primitive placed on a [`GraphSpec`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GraphAnnotation {
-    TextBox { bounds_pt: RectPt, markdown: String, bordered: bool },
-    LineOrArrow { start_pt: (f64, f64), end_pt: (f64, f64), arrowhead: bool, dash: LineDashStyle, color: Rgba8 },
-    Shape { kind: AnnotationShapeKind, bounds_pt: RectPt, stroke_color: Rgba8, stroke_width_pt: f64, dash: LineDashStyle, fill_color: Option<Rgba8> },
-    EmbeddedResultTable { result_sheet_id: SheetId, tab_id: Option<String>, bounds_pt: RectPt },
+    TextBox {
+        bounds_pt: RectPt,
+        markdown: String,
+        bordered: bool,
+    },
+    LineOrArrow {
+        start_pt: (f64, f64),
+        end_pt: (f64, f64),
+        arrowhead: bool,
+        dash: LineDashStyle,
+        color: Rgba8,
+    },
+    Shape {
+        kind: AnnotationShapeKind,
+        bounds_pt: RectPt,
+        stroke_color: Rgba8,
+        stroke_width_pt: f64,
+        dash: LineDashStyle,
+        fill_color: Option<Rgba8>,
+    },
+    EmbeddedResultTable {
+        result_sheet_id: SheetId,
+        tab_id: Option<String>,
+        bounds_pt: RectPt,
+    },
+    ModelEquation {
+        result_sheet_id: SheetId,
+        #[serde(default)]
+        data_set_index: usize,
+        #[serde(default)]
+        mode: EquationDisplayMode,
+        bounds_pt: RectPt,
+        #[serde(default = "default_model_equation_font_size")]
+        font_size_pt: f64,
+        #[serde(default)]
+        bordered: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -488,6 +555,8 @@ pub struct GraphSpec {
     pub multivariate: Option<MultivariateGraphEncoding>,
     pub comparisons: Vec<PairwiseBracketSpec>,
     pub annotations: Vec<GraphAnnotation>,
+    #[serde(default)]
+    pub point_overrides: Vec<PointStyleOverride>,
     pub legend: LegendSpec,
 }
 
@@ -579,8 +648,15 @@ impl GraphSpec {
             multivariate,
             comparisons: Vec::new(),
             annotations: Vec::new(),
+            point_overrides: Vec::new(),
             legend: LegendSpec::default(),
         }
+    }
+
+    /// Look up the effective per-point override for `(series_index, point_index)`, if present.
+    #[must_use]
+    pub fn point_override(&self, series_index: usize, point_index: usize) -> Option<&PointStyleOverride> {
+        self.point_overrides.iter().rfind(|ov| ov.series_index == series_index && ov.point_index == point_index)
     }
 
     /// Copy visual styling tokens (`palette`, `frame_preset`, `paper_fill`, axis stroke widths,
@@ -763,5 +839,44 @@ impl GraphSheet {
             floating_notes: Vec::new(),
             color_tag: None,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GraphSpec, GroupedArrangement, PointStyleOverride};
+    use crate::{ColumnDesignHint, ColumnTable, DataSheet, SheetId, TableArchetype};
+    use lumencraft_palette::{MarkerFillMode, MarkerShape, Rgba8};
+
+    #[test]
+    fn graph_spec_point_overrides_round_trip_and_backward_compat() {
+        let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 1).expect("column table");
+        let ds = DataSheet::new(SheetId::new("col_1"), "Dose Response", TableArchetype::Column(col)).expect("data sheet");
+        let mut spec = GraphSpec::default_for_data_sheet(&ds);
+        spec.grouped_arrangement = GroupedArrangement::Superimposed;
+        spec.point_overrides.push(PointStyleOverride {
+            series_index: 0,
+            point_index: 2,
+            color: Some(Rgba8::rgb(213, 94, 0)),
+            symbol: Some(MarkerShape::Diamond),
+            size_pt: Some(6.5),
+            border_width_pt: Some(1.5),
+            fill_color: Some(Rgba8::rgb(255, 255, 255)),
+            fill_mode: Some(MarkerFillMode::Open),
+            hidden: false,
+        });
+        spec.point_overrides.push(PointStyleOverride { series_index: 1, point_index: 0, hidden: true, ..PointStyleOverride::default() });
+
+        let serialized = serde_json::to_value(&spec).expect("serialize GraphSpec");
+        let decoded: GraphSpec = serde_json::from_value(serialized.clone()).expect("deserialize GraphSpec");
+        assert_eq!(decoded, spec);
+        assert_eq!(decoded.point_override(0, 2).and_then(|ov| ov.symbol), Some(MarkerShape::Diamond));
+        assert_eq!(decoded.point_override(1, 0).map(|ov| ov.hidden), Some(true));
+
+        let mut legacy = serialized.as_object().cloned().expect("object JSON");
+        legacy.remove("point_overrides");
+        let legacy_decoded: GraphSpec = serde_json::from_value(serde_json::Value::Object(legacy)).expect("deserialize legacy GraphSpec");
+        assert!(legacy_decoded.point_overrides.is_empty());
+        assert_eq!(legacy_decoded.grouped_arrangement, GroupedArrangement::Superimposed);
     }
 }
