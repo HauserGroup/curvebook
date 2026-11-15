@@ -4,8 +4,8 @@
 use lumencraft_doc::{
     AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CurveSamplePoint, DataSheet, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec,
     FittedCurveOverlay, FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LineConnectionKind,
-    ProjectDocument, RegressionOverlaySpec, ResultCell, SeriesSpec, SheetId, SubcolumnMode, SummarizedPoint, SummaryMeasure, TableArchetype,
-    TickLabelFormat, XColumnMode, XyTable,
+    ProjectDocument, RegressionOverlaySpec, ResultCell, ResultStatus, SeriesSpec, SheetId, SubcolumnMode, SummarizedPoint, SummaryMeasure,
+    TableArchetype, TickLabelFormat, XColumnMode, XyTable,
 };
 use lumencraft_math::dist::student_t_two_sided_isf;
 use lumencraft_math::sum::SummaryMoments;
@@ -328,7 +328,9 @@ fn nice_ceil(val: f64, span: f64) -> f64 {
 
 /// Resolve a `DataSheet` from either top-level `data_sheets` or an analyzable `ResultSheet`.
 pub(crate) fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: &SheetId) -> Option<&'a DataSheet> {
-    doc.data_sheet(id).or_else(|| doc.result_sheet(id).and_then(|res| res.analyzable_data.as_ref()))
+    doc.data_sheet(id).or_else(|| {
+        doc.result_sheet(id).filter(|res| !matches!(res.status, ResultStatus::Failed { .. })).and_then(|res| res.analyzable_data.as_ref())
+    })
 }
 
 /// Resolve inline `{{info:...}}` and `{{result:...}}` template hooks and parse markup into `RichText`.
@@ -1410,6 +1412,9 @@ fn render_embedded_result_table(scene: &mut ChartScene, doc: &ProjectDocument, s
     let Some(res) = doc.result_sheet(sheet_id) else {
         return;
     };
+    if matches!(res.status, ResultStatus::Failed { .. }) {
+        return;
+    }
     let Some(tab) = tab_id.and_then(|tid| res.tabs.iter().find(|t| t.id == tid)).or_else(|| res.tabs.first()) else {
         return;
     };
@@ -1728,6 +1733,10 @@ fn resolve_fitted_overlay(doc: &ProjectDocument, series: &SeriesSpec, warnings: 
         warnings.push(ChartWarning::new("missing_regression_result", format!("regression result sheet '{}' not found", spec.result_sheet_id)));
         return None;
     };
+    if let ResultStatus::Failed { message, .. } = &res.status {
+        warnings.push(ChartWarning::new("failed_regression_result", format!("regression result sheet '{}' failed: {message}", spec.result_sheet_id)));
+        return None;
+    }
     let curve = res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index).or_else(|| res.fitted_curves.first())?;
     if !curve.converged {
         warnings.push(ChartWarning::new("unconverged_fitted_curve", format!("fitted curve '{}' did not converge", curve.equation_id)));

@@ -63,6 +63,9 @@ impl<'a> TransformContext<'a> {
                     .iter()
                     .find(|r| &r.id == result_sheet_id)
                     .ok_or_else(|| TransformError::MissingHook { description: format!("ResultSheet `{result_sheet_id}` not found") })?;
+                if let ResultStatus::Failed { message, .. } = &res.status {
+                    return Err(TransformError::MissingHook { description: format!("upstream ResultSheet `{result_sheet_id}` failed: {message}") });
+                }
                 res.lookup_scalar(parameter_key, *data_set_index).ok_or_else(|| TransformError::MissingHook {
                     description: format!("scalar `{parameter_key}` not found on ResultSheet `{result_sheet_id}`"),
                 })
