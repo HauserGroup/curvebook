@@ -67,6 +67,8 @@ pub struct ProcessCommand {
     wall_timeout: Duration,
     idle_timeout: Duration,
     max_output_bytes: usize,
+    capture_stdout: bool,
+    capture_stderr: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -85,6 +87,8 @@ impl ProcessCommand {
             wall_timeout: DEFAULT_WALL_TIMEOUT,
             idle_timeout: DEFAULT_IDLE_TIMEOUT,
             max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            capture_stdout: true,
+            capture_stderr: true,
         }
     }
 
@@ -178,6 +182,31 @@ impl ProcessCommand {
         self
     }
 
+    /// Redirect child `stdout` and `stderr` to [`Stdio::null()`] instead of reading pipes.
+    ///
+    /// Useful for clipboard owners such as `wl-copy` or `xclip` that fork a background
+    /// selection server inheriting open pipe descriptors.
+    #[must_use]
+    pub const fn discard_output(mut self) -> Self {
+        self.capture_stdout = false;
+        self.capture_stderr = false;
+        self
+    }
+
+    /// Configure whether child `stdout` is captured via a pipe (`true`) or redirected to [`Stdio::null()`] (`false`).
+    #[must_use]
+    pub const fn capture_stdout(mut self, capture: bool) -> Self {
+        self.capture_stdout = capture;
+        self
+    }
+
+    /// Configure whether child `stderr` is captured via a pipe (`true`) or redirected to [`Stdio::null()`] (`false`).
+    #[must_use]
+    pub const fn capture_stderr(mut self, capture: bool) -> Self {
+        self.capture_stderr = capture;
+        self
+    }
+
     /// Spawn the child process, drain streams concurrently, enforce deadlines/caps, and wait for exit.
     ///
     /// # Errors
@@ -218,7 +247,11 @@ impl ProcessCommand {
 
     fn spawn_child(&self) -> Result<Child, PlatformError> {
         let mut cmd = Command::new(&self.program);
-        cmd.args(&self.args).stdout(Stdio::piped()).stderr(Stdio::piped());
+        cmd.args(&self.args).stdout(if self.capture_stdout { Stdio::piped() } else { Stdio::null() }).stderr(if self.capture_stderr {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        });
         if self.stdin_bytes.is_some() {
             cmd.stdin(Stdio::piped());
         } else {
@@ -579,5 +612,22 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, PlatformError::OutputLimitExceeded { stream: "stdout", limit_bytes: 1024, .. }));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discard_output_returns_immediately_when_backgrounded_child_stays_alive() {
+        let start = Instant::now();
+        let output = ProcessCommand::new("sh")
+            .args(["-c", "(sleep 5) &"])
+            .wall_timeout(Duration::from_secs(4))
+            .idle_timeout(Duration::from_millis(200))
+            .discard_output()
+            .run()
+            .expect("discard_output should not block on backgrounded grandchild");
+        assert!(output.success);
+        assert!(output.stdout.is_empty());
+        assert!(output.stderr.is_empty());
+        assert!(start.elapsed() < Duration::from_secs(2), "elapsed too long: {:?}", start.elapsed());
     }
 }

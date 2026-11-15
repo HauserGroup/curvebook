@@ -1708,6 +1708,16 @@ fn build_exclusion_ranges(arch: &TableArchetype, r0: usize, r1: usize, c0: usize
     ranges
 }
 
+impl GridViewState {
+    /// Synchronize active decimal separators across the grid view, underlying tool, and import wizards.
+    pub fn apply_locale_preset(&mut self, preset: &crate::i18n::LocalePreset) {
+        self.decimal_separator = preset.decimal_separator;
+        self.tool.decimal_separator = preset.decimal_separator;
+        self.import_wizard.decimal_separator = preset.decimal_separator;
+        self.import_reshape.decimal_separator = preset.decimal_separator;
+    }
+}
+
 fn build_visible_headers(arch: &TableArchetype, start_flat: usize, end_flat: usize) -> (Vec<Tier1GroupHeader>, Vec<Tier2SubcolumnHeader>) {
     if start_flat >= end_flat {
         return (Vec::new(), Vec::new());

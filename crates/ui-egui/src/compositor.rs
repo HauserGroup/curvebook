@@ -117,6 +117,33 @@ fn shift_luma(color: Rgba8, delta: i16) -> Rgba8 {
     Rgba8::rgba(shift(color.r), shift(color.g), shift(color.b), color.a)
 }
 
+/// Clamp `value` into `[min, max]` without panicking when `min > max`.
+const fn clamp_u32_safe(value: u32, min: u32, max: u32) -> u32 {
+    let lo = if min < max { min } else { max };
+    if value < lo {
+        lo
+    } else if value > max {
+        max
+    } else {
+        value
+    }
+}
+
+/// Clamp `value` into `[min, max]` without panicking when bounds invert or include `NaN`.
+fn clamp_f64_safe(value: f64, min: f64, max: f64) -> f64 {
+    if min.is_nan() && max.is_nan() {
+        return if value.is_nan() { 0.0 } else { value };
+    }
+    if min.is_nan() {
+        return if value.is_nan() { max } else { value.min(max) };
+    }
+    if max.is_nan() {
+        return if value.is_nan() { min } else { value.max(min) };
+    }
+    let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+    if value.is_nan() { lo } else { value.clamp(lo, hi) }
+}
+
 /// Compute deterministic UI region bounds for a frame of `(width_px, height_px)`.
 ///
 /// Mirrors horizontal Navigator / Canvas / Inspector panes via [`crate::i18n::mirror_x_for_rtl`]
@@ -139,13 +166,13 @@ pub fn compute_workspace_layout(app: &UiApp, width_px: u32, height_px: u32) -> W
     }
 
     let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    let toolbar_h = (height_px / 14).clamp(20, 38).min(height_px);
-    let status_h = (height_px / 22).clamp(16, 26).min(height_px.saturating_sub(toolbar_h));
+    let toolbar_h = clamp_u32_safe(height_px / 14, 20, 38).min(height_px);
+    let status_h = clamp_u32_safe(height_px / 22, 16, 26).min(height_px.saturating_sub(toolbar_h));
     let mid_y = toolbar_h;
     let mid_h = height_px.saturating_sub(toolbar_h).saturating_sub(status_h);
 
-    let nav_w = if app.nav.navigator_open && width_px >= 320 { (width_px / 5).clamp(136, 240) } else { 0 };
-    let insp_w = if app.nav.inspector_open && width_px >= 420 { (width_px / 4).clamp(176, 280) } else { 0 };
+    let nav_w = if app.nav.navigator_open && width_px >= 320 { clamp_u32_safe(width_px / 5, 136, 240) } else { 0 };
+    let insp_w = if app.nav.inspector_open && width_px >= 420 { clamp_u32_safe(width_px / 4, 176, 280) } else { 0 };
     let canvas_w = width_px.saturating_sub(nav_w).saturating_sub(insp_w);
 
     let nav_x = crate::i18n::mirror_x_for_rtl(0, nav_w, width_px, is_rtl);
@@ -153,8 +180,10 @@ pub fn compute_workspace_layout(app: &UiApp, width_px: u32, height_px: u32) -> W
     let insp_x = crate::i18n::mirror_x_for_rtl(nav_w.saturating_add(canvas_w), insp_w, width_px, is_rtl);
 
     let modal_overlay = if app.canvas_dialogs.active_dialog != ActiveDialog::None {
-        let mw = (width_px * 3 / 5).clamp(180, width_px.saturating_sub(24).max(1));
-        let mh = (height_px * 3 / 5).clamp(120, height_px.saturating_sub(24).max(1));
+        let max_mw = width_px.saturating_sub(24).max(1).min(width_px);
+        let max_mh = height_px.saturating_sub(24).max(1).min(height_px);
+        let mw = clamp_u32_safe(width_px.saturating_mul(3) / 5, 180, max_mw);
+        let mh = clamp_u32_safe(height_px.saturating_mul(3) / 5, 120, max_mh);
         let mx = crate::i18n::mirror_x_for_rtl((width_px.saturating_sub(mw)) / 2, mw, width_px, is_rtl);
         Some(WorkspacePixelRect::new(mx, (height_px.saturating_sub(mh)) / 2, mw, mh))
     } else {
@@ -276,7 +305,7 @@ fn compute_split_panes(
         return (None, None, None);
     }
     let usable = rect.width.saturating_sub(divider_w);
-    let clamped = if ratio.is_finite() { ratio.clamp(0.2, 0.8) } else { 0.5 };
+    let clamped = if ratio.is_finite() { clamp_f64_safe(ratio, 0.2, 0.8) } else { 0.5 };
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let raw_primary = (f64::from(usable) * clamped).round() as u32;
     let primary_w = raw_primary.max(24).min(usable.saturating_sub(24));
@@ -938,7 +967,7 @@ fn draw_portfolio_gallery(img: &mut RasterImage, rect: WorkspacePixelRect, app: 
     }
 
     let gap = 10u32;
-    let cols = (body.width / 132).clamp(1, 4);
+    let cols = clamp_u32_safe(body.width / 132, 1, 4);
     let card_w = body.width.saturating_sub(gap.saturating_mul(cols.saturating_sub(1))) / cols;
     let card_h = 74u32.min(body.height);
     for (idx, card) in app.nav.gallery.cards.iter().enumerate() {
@@ -1353,7 +1382,7 @@ fn clamp_to_u32(val: f64, lo: u32, hi: u32) -> u32 {
         return lo;
     }
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let rounded = val.round().clamp(f64::from(lo), f64::from(hi.max(lo))) as u32;
+    let rounded = clamp_f64_safe(val.round(), f64::from(lo), f64::from(hi.max(lo))) as u32;
     rounded
 }
 
@@ -1518,8 +1547,9 @@ fn draw_visible_grid_cells(
             let (raw_text, fg) = if is_inline_edited {
                 (app.inline_editor.buffer.clone(), pal.text)
             } else if is_generated_x {
+                let dec = app.locale_preset.decimal_separator;
                 let text = match &ds.archetype {
-                    TableArchetype::Xy(xy) => xy.x_value_at(row).map_or_else(String::new, format_compact_f64),
+                    TableArchetype::Xy(xy) => xy.x_value_at(row).map_or_else(String::new, |v| format_localized_compact_f64(v, dec)),
                     _ => String::new(),
                 };
                 (text, pal.muted)
@@ -1940,7 +1970,7 @@ fn draw_status_bar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp,
         .grid
         .quick_stats
         .filter(|s| s.numeric_count > 0)
-        .and_then(|s| s.mean.map(|m| format!("n={} Mean={}", s.numeric_count, format_compact_f64(m))))
+        .and_then(|s| s.mean.map(|m| format!("n={} Mean={}", s.numeric_count, format_localized_compact_f64(m, app.locale_preset.decimal_separator))))
         .unwrap_or_default();
     let banner = app.canvas_dialogs.status_banner.as_deref().unwrap_or("");
     let left_text = [cursor_str, stats_str, String::from(banner)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<String>>().join(" | ");
@@ -1957,26 +1987,38 @@ fn draw_status_bar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp,
     );
 }
 
+fn format_localized_compact_f64(value: f64, decimal_separator: char) -> String {
+    let text = format_compact_f64(value);
+    if decimal_separator != '.' {
+        let mut buf = [0u8; 4];
+        text.replace('.', decimal_separator.encode_utf8(&mut buf))
+    } else {
+        text
+    }
+}
+
 fn draw_modal_overlay(img: &mut RasterImage, backdrop: WorkspacePixelRect, modal: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {
     let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
     dim_rect(img, backdrop);
     fill_rect(img, modal, pal.surface);
     stroke_rect(img, modal, pal.accent);
 
-    let header = WorkspacePixelRect::new(modal.x, modal.y, modal.width, 24);
+    let header = WorkspacePixelRect::new(modal.x, modal.y, modal.width, 24u32.min(modal.height));
     fill_rect(img, header, pal.accent);
-    let title = modal_title(&app.canvas_dialogs.active_dialog);
-    draw_text_clipped_dir(
-        img,
-        DrawTextClipped {
-            x: header.x + 10,
-            y: header.y + 8,
-            text: title,
-            color: Rgba8::WHITE,
-            max_width_px: header.width.saturating_sub(20),
-            rtl: is_rtl,
-        },
-    );
+    if header.height >= 12 && header.width > 20 {
+        let title = modal_title(&app.canvas_dialogs.active_dialog);
+        draw_text_clipped_dir(
+            img,
+            DrawTextClipped {
+                x: header.x + 10,
+                y: header.y + 8,
+                text: title,
+                color: Rgba8::WHITE,
+                max_width_px: header.width.saturating_sub(20),
+                rtl: is_rtl,
+            },
+        );
+    }
 
     let body_y = header.bottom().saturating_add(8);
     let lines = modal_preview_lines(app);
@@ -2003,7 +2045,7 @@ fn draw_power_wizard_curve_preview(img: &mut RasterImage, modal: WorkspacePixelR
     let Some(res) = app.canvas_dialogs.power_wizard.result.as_ref() else {
         return;
     };
-    if res.power_curve.len() < 2 || top_y + 36 >= modal.bottom() {
+    if res.power_curve.len() < 2 || modal.width <= 34 || top_y + 36 >= modal.bottom() {
         return;
     }
     let plot_h = (modal.bottom().saturating_sub(top_y + 12)).min(84);
@@ -2015,8 +2057,8 @@ fn draw_power_wizard_curve_preview(img: &mut RasterImage, modal: WorkspacePixelR
     let n_lo = res.power_curve.first().map_or(2.0, |p| p.n);
     let n_hi = res.power_curve.last().map_or(n_lo + 1.0, |p| p.n).max(n_lo + 1e-6);
     for pt in &res.power_curve {
-        let fx = ((pt.n - n_lo) / (n_hi - n_lo)).clamp(0.0, 1.0);
-        let fy = (1.0 - pt.power.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let fx = clamp_f64_safe((pt.n - n_lo) / (n_hi - n_lo), 0.0, 1.0);
+        let fy = clamp_f64_safe(1.0 - clamp_f64_safe(pt.power, 0.0, 1.0), 0.0, 1.0);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let px = plot.x + (fx * f64::from(plot.width.saturating_sub(6))).round() as u32 + 2;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -2024,8 +2066,8 @@ fn draw_power_wizard_curve_preview(img: &mut RasterImage, modal: WorkspacePixelR
         fill_rect(img, WorkspacePixelRect::new(px.saturating_sub(1), py.saturating_sub(1), 3, 3), pal.accent);
     }
     if let (Some(hn), Some(hp)) = (app.canvas_dialogs.power_wizard.hover_n, app.canvas_dialogs.power_wizard.hover_power) {
-        let fx = ((hn - n_lo) / (n_hi - n_lo)).clamp(0.0, 1.0);
-        let fy = (1.0 - hp.clamp(0.0, 1.0)).clamp(0.0, 1.0);
+        let fx = clamp_f64_safe((hn - n_lo) / (n_hi - n_lo), 0.0, 1.0);
+        let fy = clamp_f64_safe(1.0 - clamp_f64_safe(hp, 0.0, 1.0), 0.0, 1.0);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let px = plot.x + (fx * f64::from(plot.width.saturating_sub(6))).round() as u32 + 2;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -2332,4 +2374,42 @@ fn glyph_5x7(ch: char) -> [u8; 7] {
     }
     let byte = ch as u8;
     FONT_5X7.iter().find(|(k, _)| *k == byte).map_or([0b00000, 0b01110, 0b01010, 0b01010, 0b01110, 0b00000, 0b00000], |(_, rows)| *rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn small_viewport_with_open_dialog_does_not_panic() {
+        assert_eq!(clamp_u32_safe(38, 180, 40), 40);
+        assert_eq!(clamp_u32_safe(0, 180, 0), 0);
+
+        let mut app = UiApp::default();
+        app.canvas_dialogs.active_dialog = ActiveDialog::CommandPalette;
+
+        let degenerate = compute_workspace_layout(&app, 0, 0);
+        assert_eq!(degenerate.modal_overlay, Some(WorkspacePixelRect::new(0, 0, 0, 0)));
+
+        for (w, h) in [(10, 10), (64, 64), (160, 100), (200, 400), (400, 140), (204, 144)] {
+            let layout = compute_workspace_layout(&app, w, h);
+            let modal = layout.modal_overlay.expect("dialog overlay must exist");
+            assert!(modal.right() <= w);
+            assert!(modal.bottom() <= h);
+
+            let (png, cw, ch) =
+                render_workspace_region_png(&app, RenderTargetSpec { width_px: w, height_px: h, dpi: 96 }, ScreenshotRegionTarget::Dialog)
+                    .expect("small viewport screenshot should succeed");
+            assert!(!png.is_empty());
+            assert!(cw <= w && ch <= h && cw > 0 && ch > 0);
+        }
+
+        let mut ctrl_app = UiApp::new();
+        let _ = crate::control_io::handle_control_line(&mut ctrl_app, r#"{"id":1,"op":"ui.palette.open"}"#);
+        for (w, h) in [(64u32, 64u32), (200, 400), (400, 140), (204, 144)] {
+            let req = format!(r#"{{"id":2,"op":"ui.screenshot","params":{{"width_px":{w},"height_px":{h}}}}}"#);
+            let resp = crate::control_io::handle_control_line(&mut ctrl_app, &req);
+            assert!(resp.contains("\"ok\":true"), "expected ok response for {w}x{h}: {resp}");
+        }
+    }
 }

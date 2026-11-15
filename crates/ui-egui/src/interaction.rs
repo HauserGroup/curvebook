@@ -20,7 +20,8 @@ use crate::UiApp;
 use crate::compositor::{WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout_map};
 use crate::dialogs_canvas::ActiveDialog;
 use crate::grid_view::{GridViewState, format_cell_display, parse_localized_number_input, resolve_flat_coord};
-use crate::workspace_nav::{ActiveWorkspacePane, build_set_info_constant_command, build_set_info_notes_command};
+use crate::workspace_nav::{ActiveWorkspacePane, build_set_info_constant_command, build_set_info_notes_command, live_sheet_index_in_folder};
+use lumencraft_doc::GraphSheet;
 
 const MIN_SCALE_FACTOR: f64 = 0.5;
 const MAX_SCALE_FACTOR: f64 = 8.0;
@@ -979,7 +980,8 @@ fn handle_pointer_down(
             let _ = app.execute_command("sheet.select", json!({ "sheet_id": sheet_id.as_str() }));
             app.nav.sync_from_document(app.session.document());
             app.canvas_dialogs.on_sheet_selected(app.session.document(), &sheet_id);
-            app.nav.begin_sheet_drag(folder, sheet_id.as_str(), index_in_folder);
+            let live_index = live_sheet_index_in_folder(app.session.document(), folder, sheet_id.as_str()).unwrap_or(index_in_folder);
+            app.nav.begin_sheet_drag(folder, sheet_id.as_str(), live_index);
             app.interaction.dragging_navigator_sheet = Some(sheet_id.clone());
             Ok(UiEventOutcome {
                 handled: true,
@@ -1219,8 +1221,9 @@ fn handle_pointer_move(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
     }
 
     if app.interaction.dragging_navigator_sheet.is_some() {
-        if let WorkspaceHitTarget::NavigatorEntry { index_in_folder, .. } = layout.hit_test_physical(phys_x, phys_y) {
-            app.nav.update_sheet_hover(index_in_folder);
+        if let WorkspaceHitTarget::NavigatorEntry { sheet_id: target_sheet_id, folder, index_in_folder } = layout.hit_test_physical(phys_x, phys_y) {
+            let target_idx = live_sheet_index_in_folder(app.session.document(), folder, target_sheet_id.as_str()).unwrap_or(index_in_folder);
+            app.nav.update_sheet_hover_in_folder(folder, target_idx);
         }
         return UiEventOutcome { handled: true, action: String::from("navigator.drag_hover"), ..Default::default() };
     }
@@ -1329,10 +1332,14 @@ fn handle_pointer_up(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [f6
     }
 
     if app.interaction.dragging_navigator_sheet.take().is_some() {
-        if let WorkspaceHitTarget::NavigatorEntry { index_in_folder, .. } = layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
-            app.nav.update_sheet_hover(index_in_folder);
+        if let WorkspaceHitTarget::NavigatorEntry { sheet_id: target_sheet_id, folder, index_in_folder } =
+            layout.hit_test_logical(logical_pos[0], logical_pos[1])
+        {
+            let target_idx = live_sheet_index_in_folder(app.session.document(), folder, target_sheet_id.as_str()).unwrap_or(index_in_folder);
+            app.nav.update_sheet_hover_in_folder(folder, target_idx);
         }
-        if let Some((cmd_id, params)) = app.nav.commit_sheet_drop_command() {
+        let doc_snapshot = app.session.document().clone();
+        if let Some((cmd_id, params)) = app.nav.commit_sheet_drop_command_for_doc(&doc_snapshot) {
             let res = execute_engine_value(app, cmd_id, params)?;
             app.nav.sync_from_document(app.session.document());
             return Ok(UiEventOutcome {
@@ -1354,19 +1361,75 @@ fn handle_pointer_up(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [f6
         return commit_canvas_object_drag(app, &layout, logical_pos, drag_target);
     }
 
-    if let WorkspaceHitTarget::ScenePaper { sheet_id, scene_pt } = layout.hit_test_logical(logical_pos[0], logical_pos[1])
-        && let Some(intent) = app.canvas_dialogs.canvas.end_drag(&sheet_id, scene_pt)
-    {
-        let res = execute_engine_value(app, &intent.command_id, intent.params)?;
-        return Ok(UiEventOutcome {
-            handled: true,
-            action: String::from("canvas.tool_intent_committed"),
-            command_id: Some(intent.command_id),
-            command_result: Some(res),
-        });
+    if let WorkspaceHitTarget::ScenePaper { sheet_id, scene_pt } = layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
+        if app.canvas_dialogs.canvas.mode == CanvasToolMode::Bracket {
+            return commit_bracket_drag_on_graph(app, &sheet_id, scene_pt);
+        }
+        if let Some(intent) = app.canvas_dialogs.canvas.end_drag(&sheet_id, scene_pt) {
+            let res = execute_engine_value(app, &intent.command_id, intent.params)?;
+            return Ok(UiEventOutcome {
+                handled: true,
+                action: String::from("canvas.tool_intent_committed"),
+                command_id: Some(intent.command_id),
+                command_result: Some(res),
+            });
+        }
     }
     app.canvas_dialogs.canvas.drag_start_pt = None;
     Ok(UiEventOutcome { handled: true, action: String::from("pointer_up"), ..Default::default() })
+}
+
+fn commit_bracket_drag_on_graph(app: &mut UiApp, sheet_id: &SheetId, end_pt: PointPt) -> Result<UiEventOutcome, String> {
+    let Some(graph) = app.session.document().graph_sheet(sheet_id).cloned() else {
+        app.canvas_dialogs.canvas.drag_start_pt = None;
+        return Ok(UiEventOutcome { handled: true, action: String::from("canvas.bracket_cancelled"), ..Default::default() });
+    };
+    let scene = match app.session.render_sheet_scene(sheet_id) {
+        Ok(scene) => scene,
+        Err(_) => {
+            app.canvas_dialogs.canvas.drag_start_pt = None;
+            return Ok(UiEventOutcome { handled: true, action: String::from("canvas.bracket_cancelled"), ..Default::default() });
+        }
+    };
+    let Some((group_a, group_b)) = app.canvas_dialogs.canvas.resolve_bracket_drag_pair(&scene, &graph, app.session.document(), end_pt) else {
+        return Ok(UiEventOutcome { handled: true, action: String::from("canvas.bracket_cancelled"), ..Default::default() });
+    };
+    let Some(result_sheet_id) = resolve_pairwise_result_sheet_id(app.session.document(), &graph, group_a, group_b) else {
+        return Ok(UiEventOutcome { handled: true, action: String::from("canvas.bracket_no_result_sheet"), ..Default::default() });
+    };
+    let params = json!({
+        "sheet_id": sheet_id.as_str(),
+        "result_sheet_id": result_sheet_id.as_str(),
+        "group_a": group_a,
+        "group_b": group_b,
+        "style": "square",
+        "label_mode": "stars",
+        "hide_if_non_significant": false,
+    });
+    let res = execute_engine_value(app, "graph.addComparisonBrackets", params)?;
+    Ok(UiEventOutcome {
+        handled: true,
+        action: String::from("canvas.bracket_added"),
+        command_id: Some(String::from("graph.addComparisonBrackets")),
+        command_result: Some(res),
+    })
+}
+
+fn resolve_pairwise_result_sheet_id(doc: &ProjectDocument, graph: &GraphSheet, group_a: usize, group_b: usize) -> Option<SheetId> {
+    let matches_pair = |res: &&lumencraft_doc::ResultSheet| {
+        res.pairwise_comparisons.iter().any(|c| (c.group_a == group_a && c.group_b == group_b) || (c.group_a == group_b && c.group_b == group_a))
+    };
+    doc.result_sheets
+        .iter()
+        .find(|res| res.analysis.source_sheet_id == graph.spec.primary_source_sheet_id && matches_pair(res))
+        .or_else(|| {
+            doc.result_sheets
+                .iter()
+                .find(|res| res.analysis.source_sheet_id == graph.spec.primary_source_sheet_id && !res.pairwise_comparisons.is_empty())
+        })
+        .or_else(|| doc.result_sheets.iter().find(|res| matches_pair(res)))
+        .or_else(|| doc.result_sheets.iter().find(|res| !res.pairwise_comparisons.is_empty()))
+        .map(|res| res.id.clone())
 }
 
 fn commit_canvas_object_drag(
