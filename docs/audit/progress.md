@@ -27,7 +27,7 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 11 | `S10` UI shell | `crates/ui-egui` | done | 2/3/3/1 | 8/1/0/0 | 2026-11-15 |
 | 12 | `S12` CLI and MCP | `apps/lumencraft-cli`, `crates/mcp` | done | 4/2/3/1 | 10/0/0/0 | 2026-11-15 |
 | 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | done | 0/2/8/0 | 9/1/0/0 | 2026-11-15 |
-| 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | reviewing | 0/0/0/0 | — | 2026-11-15 |
+| 14 | `X1` Untrusted input, end to end | entry points → engine → I/O | verifying | 1/2/1/0 | — | 2026-11-15 |
 | 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | verifying | 2/5/2/0 | — | 2026-11-15 |
 
 Status values: `pending` → `reviewing` → `verifying` → `done`. Verdicts: C = CONFIRMED, P = PLAUSIBLE, R = REFUTED, D = DUPLICATE.
