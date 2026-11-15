@@ -9,7 +9,8 @@
 //! wizards, and modal dialogs identically to an interactive desktop user.
 
 use lumencraft_doc::{
-    AnalysisKind, Cell, CellValue, ContingencyMethod, ErrorBarMetric, ErrorCode, OneWayMethod, SheetId, SummaryMeasure, TableArchetype, XColumnMode,
+    AnalysisKind, Cell, CellValue, ContingencyMethod, EquationDisplayMode, ErrorBarMetric, ErrorCode, MultivariateSpec, OneWayMethod, SheetId,
+    SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableSource, XColumnMode,
 };
 use lumencraft_engine::{EngineError, cmd};
 use lumencraft_render::RenderTargetSpec;
@@ -22,12 +23,14 @@ use crate::control_io::{
     DEFAULT_SCREENSHOT_DPI, DEFAULT_SCREENSHOT_HEIGHT_PX, DEFAULT_SCREENSHOT_WIDTH_PX, MAX_SCREENSHOT_DIM_PX, MIN_DPI, MIN_SCREENSHOT_DIM_PX,
     dispatch_ui_command_as_ui, encode_base64, parse_bounded_u32, write_host_file,
 };
-use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice};
+use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, equation_display_mode_str};
 use crate::inspect::inspect_ui_tree;
 use crate::interaction::{KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, dispatch_ui_event};
 use crate::menus::tooltips::menu_bar_tooltips;
 use crate::menus::ui_commands::UI_COMMANDS;
-use crate::modal_predicates::{ControlEnablement, evaluate_dialog_button, evaluate_edit_params_tab, r1_paired_or_matched_allowed};
+use crate::modal_predicates::{
+    ControlEnablement, evaluate_dialog_button, evaluate_edit_params_tab, r1_paired_or_matched_allowed, r2_assume_gaussian_allowed,
+};
 use crate::power_wizard::PowerWizardStage;
 
 /// Returns `true` when `method` is one of the 8 interactive GUI action entry points allowed
@@ -265,11 +268,36 @@ fn try_activate_semantic_widget(app: &mut UiApp, wid: &str) -> Result<Option<Val
     if let Some(cmd_id) = wid.strip_prefix("menu.") {
         return handle_invoke_menu(app, &json!({ "command_id": cmd_id })).map(Some);
     }
+    if wid == "result.diagnostic_banner" {
+        return dispatch_ui_command_as_ui(app, "ui.result.inspectDiagnostics", &Value::Null);
+    }
+    if let Some(tab_id) = wid.strip_prefix("result.diagnostic_banner.tab.") {
+        return dispatch_ui_command_as_ui(app, "ui.result.inspectDiagnostics", &json!({ "tab_id": tab_id }));
+    }
     if wid.starts_with("result.tab.") || wid.starts_with("edit.tab.") || wid.starts_with("power.stage.") {
         return handle_switch_tab(app, &json!({ "widget_id": wid })).map(Some);
     }
     if let Some(sheet_id) = wid.strip_prefix("nav.sheet.") {
         return handle_switch_tab(app, &json!({ "sheet_id": sheet_id })).map(Some);
+    }
+    if wid == "toolbar.axes" || wid == "tb.toolbar.axes" {
+        return handle_invoke_menu(app, &json!({ "command_id": "ui.graph.axes.open" })).map(Some);
+    }
+    if let Some(raw_col) = wid.strip_prefix("formula_bar.open_col.")
+        && let Ok(col) = raw_col.parse::<usize>()
+    {
+        return handle_invoke_menu(app, &json!({ "command_id": "ui.table.openFormulaBar", "params": { "column": col } })).map(Some);
+    }
+    if wid == "formula_bar.input" {
+        app.focus_widget_id = Some(String::from("formula_bar.input"));
+        return Ok(Some(json!({ "focused": "formula_bar.input", "active": app.grid.formula_bar.active })));
+    }
+    if wid == "formula_bar.commit" {
+        return commit_formula_bar(app).map(Some);
+    }
+    if wid == "formula_bar.cancel" {
+        cancel_formula_bar(app);
+        return Ok(Some(json!({ "formula_bar_active": false, "cancelled": true })));
     }
     if wid.starts_with("tb.")
         && let Some(btn) = inspect_ui_tree(app, Some("toolbar"), false).find_widget(wid)
@@ -285,75 +313,7 @@ fn try_activate_semantic_widget(app: &mut UiApp, wid: &str) -> Result<Option<Val
 
 fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
     match &app.canvas_dialogs.active_dialog {
-        ActiveDialog::EditAnalysisParameters { .. } => {
-            let mut patch = Map::new();
-            let ep = &app.canvas_dialogs.edit_params;
-            let cont_spec = match ep.draft.as_ref().map(|d| &d.kind) {
-                Some(AnalysisKind::Contingency(c)) => *c,
-                _ => lumencraft_doc::ContingencySpec::default(),
-            };
-            let gg_checked = ep.draft.as_ref().is_none_or(|d| {
-                !matches!(
-                    d.kind,
-                    AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false })
-                )
-            });
-            match wid {
-                "edit.assume_gaussian" => {
-                    patch.insert(String::from("assume_gaussian"), json!(!ep.assume_gaussian));
-                }
-                "edit.paired_or_matched" => {
-                    if !ep.paired_or_matched {
-                        let gate = r1_paired_or_matched_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
-                        if !gate.enabled {
-                            return Err(disabled_err(
-                                gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2")),
-                            ));
-                        }
-                    }
-                    patch.insert(String::from("paired_or_matched"), json!(!ep.paired_or_matched));
-                }
-                "edit.sphericity.geisser_greenhouse" => {
-                    if !ep.paired_or_matched {
-                        return Err(disabled_err("Geisser-Greenhouse / REML requires Matched or Repeated Measures mode."));
-                    }
-                    patch.insert(String::from("edit.sphericity.geisser_greenhouse"), json!(!gg_checked));
-                }
-                "edit.post_hoc.tukey" => {
-                    patch.insert(String::from("multiplicity_method"), json!("tukey"));
-                }
-                "edit.post_hoc.dunn" => {
-                    patch.insert(String::from("multiplicity_method"), json!("dunn"));
-                }
-                "edit.two_group.welch" => {
-                    patch.insert(String::from("welch_correction"), json!(!ep.welch_correction));
-                }
-                "edit.contingency.odds_ratio" => {
-                    patch.insert(String::from("compute_odds_and_risk_ratios"), json!(!ep.contingency_odds_ratio_checked));
-                }
-                "edit.contingency.attributable_risk" => {
-                    patch.insert(String::from("attributable_risk"), json!(!ep.contingency_attributable_risk_checked));
-                }
-                "edit.contingency.sensitivity_specificity" => {
-                    patch.insert(String::from("sensitivity_specificity"), json!(!cont_spec.compute_sensitivity_specificity));
-                }
-                "edit.contingency.fisher" => {
-                    patch.insert(String::from("fisher"), json!(cont_spec.method != ContingencyMethod::FisherExact));
-                }
-                "edit.contingency.mcnemar" => {
-                    patch.insert(String::from("mcnemar"), json!(cont_spec.method != ContingencyMethod::McNemarPaired));
-                }
-                "edit.contingency.cochran_armitage" => {
-                    patch.insert(String::from("cochran_armitage"), json!(true));
-                }
-                "edit.correlation.heatmap" => {
-                    patch.insert(String::from("correlation_heatmap"), json!(!ep.correlation_heatmap));
-                }
-                _ => return Ok(None),
-            }
-            app.canvas_dialogs.edit_params.apply_field_patch(&patch).map_err(disabled_err)?;
-            Ok(Some(json!({ "clicked": wid, "updated": true })))
-        }
+        ActiveDialog::EditAnalysisParameters { .. } => try_toggle_edit_params_click(app, wid),
         ActiveDialog::ImportReshape if wid == "import.subtract_blank_mean" => {
             app.grid.import_reshape.subtract_blank_mean = !app.grid.import_reshape.subtract_blank_mean;
             Ok(Some(json!({ "clicked": wid, "updated": true })))
@@ -366,38 +326,256 @@ fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<V
             }
             Ok(Some(json!({ "clicked": wid, "updated": true })))
         }
-        ActiveDialog::FormatGraph { .. }
-            if matches!(wid, "format_graph.show_legend" | "format_graph.legend_bordered" | "format_graph.error_bar_enabled") =>
+        ActiveDialog::FormatGraph { .. } => try_toggle_format_graph_click(app, wid),
+        ActiveDialog::InsertModelEquation { .. } => try_toggle_insert_equation_click(app, wid),
+        ActiveDialog::PairwiseComparisons { .. } if matches!(wid, "pairwise.hide_non_significant" | "pairwise.auto_add") => {
+            if wid == "pairwise.auto_add" {
+                let doc = app.document().clone();
+                let added = app.canvas_dialogs.pairwise.auto_add_from_analysis(&doc);
+                return Ok(Some(json!({ "clicked": wid, "added": added, "updated": true })));
+            }
+            app.canvas_dialogs.pairwise.hide_non_significant = !app.canvas_dialogs.pairwise.hide_non_significant;
+            Ok(Some(json!({ "clicked": wid, "updated": true })))
+        }
+        ActiveDialog::BubblePlotInspector { .. } if matches!(wid, "bubble.show_convex_hulls" | "bubble.show_confidence_ellipses") => {
+            if wid == "bubble.show_convex_hulls" {
+                app.canvas_dialogs.bubble_plot.show_convex_hulls = !app.canvas_dialogs.bubble_plot.show_convex_hulls;
+            } else {
+                app.canvas_dialogs.bubble_plot.show_confidence_ellipses = !app.canvas_dialogs.bubble_plot.show_confidence_ellipses;
+            }
+            Ok(Some(json!({ "clicked": wid, "updated": true })))
+        }
+        ActiveDialog::ApplyStyleFrom { .. }
+            if matches!(wid, "apply_style.clone_palette" | "apply_style.clone_frame_and_axes" | "apply_style.clone_error_bars_and_legend") =>
         {
             match wid {
-                "format_graph.show_legend" => {
-                    app.canvas_dialogs.format_graph.show_legend = !app.canvas_dialogs.format_graph.show_legend;
-                }
-                "format_graph.legend_bordered" => {
-                    app.canvas_dialogs.format_graph.legend_bordered = !app.canvas_dialogs.format_graph.legend_bordered;
+                "apply_style.clone_palette" => app.canvas_dialogs.apply_style.clone_palette = !app.canvas_dialogs.apply_style.clone_palette,
+                "apply_style.clone_frame_and_axes" => {
+                    app.canvas_dialogs.apply_style.clone_frame_and_axes = !app.canvas_dialogs.apply_style.clone_frame_and_axes;
                 }
                 _ => {
-                    app.canvas_dialogs.format_graph.error_bar_enabled = !app.canvas_dialogs.format_graph.error_bar_enabled;
+                    app.canvas_dialogs.apply_style.clone_error_bars_and_legend = !app.canvas_dialogs.apply_style.clone_error_bars_and_legend;
                 }
             }
+            Ok(Some(json!({ "clicked": wid, "updated": true })))
+        }
+        ActiveDialog::PageLayoutComposer { .. } if wid == "layout.align_plot_origins" => {
+            app.canvas_dialogs.page_layout.align_plot_origins = !app.canvas_dialogs.page_layout.align_plot_origins;
+            Ok(Some(json!({ "clicked": wid, "updated": true })))
+        }
+        ActiveDialog::FormatAxes { .. } if wid == "axes.enable_y2" => {
+            app.canvas_dialogs.format_axes.enable_y2 = !app.canvas_dialogs.format_axes.enable_y2;
+            Ok(Some(json!({ "clicked": wid, "updated": true })))
+        }
+        ActiveDialog::RandomSampleRows { .. } if wid == "sample.proportional_allocation" => {
+            app.canvas_dialogs.random_sample_rows.proportional_allocation = !app.canvas_dialogs.random_sample_rows.proportional_allocation;
+            Ok(Some(json!({ "clicked": wid, "updated": true })))
+        }
+        ActiveDialog::SimulateDistributions if wid == "simulate.use_multiple_variables" => {
+            app.canvas_dialogs.simulate_distributions.use_multiple_variables = !app.canvas_dialogs.simulate_distributions.use_multiple_variables;
             Ok(Some(json!({ "clicked": wid, "updated": true })))
         }
         ActiveDialog::Print { .. } if wid == "print.crop_marks" => {
             app.canvas_dialogs.print.job.crop_marks = !app.canvas_dialogs.print.job.crop_marks;
             Ok(Some(json!({ "clicked": wid, "updated": true })))
         }
-        ActiveDialog::AnalyzeSheet { .. } if wid == "analyze.correlation_all_pairs" || wid == "analyze.correlation.heatmap" => {
-            let mut patch = Map::new();
-            if wid == "analyze.correlation_all_pairs" {
-                patch.insert(String::from("correlation_all_pairs"), json!(!app.canvas_dialogs.analyze.correlation_all_pairs));
-            } else {
-                patch.insert(String::from("correlation_heatmap"), json!(!app.canvas_dialogs.analyze.correlation_heatmap));
-            }
-            app.canvas_dialogs.analyze.apply_field_patch(&patch).map_err(disabled_err)?;
-            Ok(Some(json!({ "clicked": wid, "updated": true })))
-        }
+        ActiveDialog::AnalyzeSheet { .. } => try_toggle_analyze_click(app, wid),
         _ => Ok(None),
     }
+}
+
+fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
+    let mut patch = Map::new();
+    let ep = &app.canvas_dialogs.edit_params;
+    let cont_spec = match ep.draft.as_ref().map(|d| &d.kind) {
+        Some(AnalysisKind::Contingency(c)) => c.clone(),
+        _ => lumencraft_doc::ContingencySpec::default(),
+    };
+    let gg_checked = ep.draft.as_ref().is_none_or(|d| {
+        !matches!(
+            d.kind,
+            AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false })
+        )
+    });
+    match wid {
+        "edit.assume_gaussian" => {
+            if ep.assume_gaussian {
+                let gate = r2_assume_gaussian_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
+                if !gate.enabled {
+                    return Err(disabled_err(
+                        gate.disabled_reason
+                            .unwrap_or_else(|| String::from("Nonparametric rank tests are disabled for pre-summarized Column tables.")),
+                    ));
+                }
+            }
+            patch.insert(String::from("assume_gaussian"), json!(!ep.assume_gaussian));
+        }
+        "edit.paired_or_matched" => {
+            if !ep.paired_or_matched {
+                let gate = r1_paired_or_matched_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
+                if !gate.enabled {
+                    return Err(disabled_err(
+                        gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2")),
+                    ));
+                }
+            }
+            patch.insert(String::from("paired_or_matched"), json!(!ep.paired_or_matched));
+        }
+        "edit.two_group.paired_sign_test" => {
+            let paired_gate = r1_paired_or_matched_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
+            if !paired_gate.enabled {
+                return Err(disabled_err(
+                    paired_gate.disabled_reason.unwrap_or_else(|| String::from("Paired Sign test requires equal paired replicates >= 2")),
+                ));
+            }
+            let gauss_gate = r2_assume_gaussian_allowed(app.document(), ep.draft.as_ref().map(|d| &d.source_sheet_id));
+            if !gauss_gate.enabled {
+                return Err(disabled_err(
+                    gauss_gate.disabled_reason.unwrap_or_else(|| String::from("Nonparametric tests are disabled for pre-summarized Column tables.")),
+                ));
+            }
+            patch.insert(String::from("two_group_method"), json!("paired_sign_test"));
+        }
+        "edit.sphericity.geisser_greenhouse" => {
+            if !ep.paired_or_matched {
+                return Err(disabled_err("Geisser-Greenhouse / REML requires Matched or Repeated Measures mode."));
+            }
+            patch.insert(String::from("edit.sphericity.geisser_greenhouse"), json!(!gg_checked));
+        }
+        "edit.post_hoc.tukey" => {
+            patch.insert(String::from("multiplicity_method"), json!("tukey"));
+        }
+        "edit.post_hoc.dunn" => {
+            patch.insert(String::from("multiplicity_method"), json!("dunn"));
+        }
+        "edit.two_group.welch" => {
+            patch.insert(String::from("welch_correction"), json!(!ep.welch_correction));
+        }
+        "edit.contingency.odds_ratio" => {
+            patch.insert(String::from("compute_odds_and_risk_ratios"), json!(!ep.contingency_odds_ratio_checked));
+        }
+        "edit.contingency.attributable_risk" => {
+            patch.insert(String::from("attributable_risk"), json!(!ep.contingency_attributable_risk_checked));
+        }
+        "edit.contingency.sensitivity_specificity" => {
+            patch.insert(String::from("sensitivity_specificity"), json!(!cont_spec.compute_sensitivity_specificity));
+        }
+        "edit.contingency.fisher" => {
+            patch.insert(String::from("fisher"), json!(cont_spec.method != ContingencyMethod::FisherExact));
+        }
+        "edit.contingency.mcnemar" => {
+            patch.insert(String::from("mcnemar"), json!(cont_spec.method != ContingencyMethod::McNemarPaired));
+        }
+        "edit.contingency.cochran_armitage" => {
+            patch.insert(String::from("cochran_armitage"), json!(true));
+        }
+        "edit.contingency.fleiss_kappa" => {
+            patch.insert(String::from("contingency_method"), json!("fleiss_kappa"));
+        }
+        "edit.contingency.exact_binomial" => {
+            patch.insert(String::from("contingency_method"), json!("exact_binomial"));
+        }
+        "edit.contingency.barnard_exact" => {
+            patch.insert(String::from("contingency_method"), json!("barnard_exact"));
+        }
+        "edit.contingency.likelihood_g2" => {
+            patch.insert(String::from("contingency_method"), json!("likelihood_ratio_g2"));
+        }
+        "edit.factorial.three_way" => {
+            let cur = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::FactorialAnova(f)) if f.three_way);
+            patch.insert(String::from("three_way"), json!(!cur));
+        }
+        "edit.pca.standardize" => {
+            let cur = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, .. })));
+            patch.insert(String::from("standardize"), json!(!cur));
+        }
+        "edit.correlation.spearman_rank" => {
+            let cur = matches!(
+                ep.draft.as_ref().map(|d| &d.kind),
+                Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: true, .. }))
+            );
+            patch.insert(String::from("spearman_rank"), json!(!cur));
+        }
+        "edit.glm.compute_vif" => {
+            let cur = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::GeneralizedLinearModel(g)) if g.compute_vif);
+            patch.insert(String::from("compute_vif"), json!(!cur));
+        }
+        "edit.km.trend_test" => {
+            let cur = matches!(
+                ep.draft.as_ref().map(|d| &d.kind),
+                Some(AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { trend_test: true, .. }))
+            );
+            patch.insert(String::from("trend_test"), json!(!cur));
+        }
+        "edit.sample.proportional_allocation" => {
+            let cur = matches!(
+                ep.draft.as_ref().map(|d| &d.kind),
+                Some(AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { proportional_allocation: true, .. }))
+            );
+            patch.insert(String::from("proportional_allocation"), json!(!cur));
+        }
+        "edit.correlation.heatmap" => {
+            patch.insert(String::from("correlation_heatmap"), json!(!ep.correlation_heatmap));
+        }
+        _ => return Ok(None),
+    }
+    app.canvas_dialogs.edit_params.apply_field_patch(&patch).map_err(disabled_err)?;
+    Ok(Some(json!({ "clicked": wid, "updated": true })))
+}
+
+fn try_toggle_format_graph_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
+    match wid {
+        "format_graph.show_legend" => app.canvas_dialogs.format_graph.show_legend = !app.canvas_dialogs.format_graph.show_legend,
+        "format_graph.legend_bordered" => app.canvas_dialogs.format_graph.legend_bordered = !app.canvas_dialogs.format_graph.legend_bordered,
+        "format_graph.half_violin_with_points" => {
+            app.canvas_dialogs.format_graph.half_violin_with_points = !app.canvas_dialogs.format_graph.half_violin_with_points;
+        }
+        "format_graph.error_bar_enabled" => app.canvas_dialogs.format_graph.error_bar_enabled = !app.canvas_dialogs.format_graph.error_bar_enabled,
+        "format_graph.toggle_model_equation_mode" => {
+            let Some(cur) = app.canvas_dialogs.format_graph.model_equation_mode else {
+                return Err(disabled_err("Graph has no ModelEquation annotation."));
+            };
+            let next = if cur == EquationDisplayMode::Substituted { EquationDisplayMode::Symbolic } else { EquationDisplayMode::Substituted };
+            app.canvas_dialogs.format_graph.set_model_equation_mode(next);
+            return Ok(Some(json!({ "clicked": wid, "mode": equation_display_mode_str(next), "updated": true })));
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(json!({ "clicked": wid, "updated": true })))
+}
+
+fn try_toggle_insert_equation_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
+    match wid {
+        "equation.toggle_mode" | "insert_equation.toggle_mode" => {
+            let next = app.canvas_dialogs.insert_model_equation.toggle_mode();
+            return Ok(Some(json!({ "clicked": wid, "mode": equation_display_mode_str(next), "updated": true })));
+        }
+        "equation.bordered" => {
+            app.canvas_dialogs.insert_model_equation.bordered = !app.canvas_dialogs.insert_model_equation.bordered;
+        }
+        "equation.update_existing" => {
+            app.canvas_dialogs.insert_model_equation.update_existing = !app.canvas_dialogs.insert_model_equation.update_existing;
+        }
+        _ => return Ok(None),
+    }
+    Ok(Some(json!({ "clicked": wid, "updated": true })))
+}
+
+fn try_toggle_analyze_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
+    let mut patch = Map::new();
+    let an = &app.canvas_dialogs.analyze;
+    match wid {
+        "analyze.correlation_all_pairs" => patch.insert(String::from("correlation_all_pairs"), json!(!an.correlation_all_pairs)),
+        "analyze.correlation.heatmap" => patch.insert(String::from("correlation_heatmap"), json!(!an.correlation_heatmap)),
+        "analyze.factorial.three_way" => patch.insert(String::from("three_way"), json!(!an.factorial_three_way)),
+        "analyze.pca.standardize" => patch.insert(String::from("standardize"), json!(!an.pca_standardize)),
+        "analyze.correlation.spearman_rank" => patch.insert(String::from("spearman_rank"), json!(!an.corr_spearman_rank)),
+        "analyze.glm.compute_vif" => patch.insert(String::from("compute_vif"), json!(!an.glm_compute_vif)),
+        "analyze.sample.proportional_allocation" => patch.insert(String::from("proportional_allocation"), json!(!an.sample_proportional)),
+        _ => return Ok(None),
+    };
+    app.canvas_dialogs.analyze.apply_field_patch(&patch).map_err(disabled_err)?;
+    Ok(Some(json!({ "clicked": wid, "updated": true })))
 }
 
 fn dispatch_physical_pointer(app: &mut UiApp, input: &PointerDispatchInput<'_>) -> Result<Value, EngineError> {
@@ -490,6 +668,7 @@ fn handle_type_text(app: &mut UiApp, params: &Value) -> Result<Value, EngineErro
     let text = params.get("text").and_then(Value::as_str).ok_or_else(|| bad_input("ui.type_text requires `text` string"))?;
     let clear_existing = params.get("clear_existing").and_then(Value::as_bool).unwrap_or(true);
     let commit_enter = params.get("commit_enter").and_then(Value::as_bool).unwrap_or(true);
+    let explicit_formula_commit = params.get("commit_enter").and_then(Value::as_bool);
     if let Some(wid) = params.get("widget_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
         app.focus_widget_id = Some(wid.to_owned());
     }
@@ -501,6 +680,12 @@ fn handle_type_text(app: &mut UiApp, params: &Value) -> Result<Value, EngineErro
         && parse_x_cell_widget_id(field_id).is_none()
     {
         return apply_type_text_to_dialog(app, field_id, text, commit_enter);
+    }
+
+    let is_formula_target = wid.as_deref() == Some("formula_bar.input")
+        || (app.grid.formula_bar.active && wid.as_deref().is_none_or(|w| !w.starts_with("grid.") && parse_x_cell_widget_id(w).is_none()));
+    if app.canvas_dialogs.active_dialog == ActiveDialog::None && is_formula_target {
+        return apply_type_text_to_formula_bar(app, text, clear_existing, explicit_formula_commit);
     }
 
     let doc = app.document();
@@ -559,6 +744,12 @@ fn apply_type_text_to_grid(
     }
 
     let coord = wid.and_then(parse_grid_cell_widget_id).or(app.grid.tool.active).unwrap_or_else(|| GridCellCoord::new(0, 0, 0));
+
+    if let Some(TableArchetype::MultipleVariables(mv)) = app.document().data_sheet(sheet_id).map(|ds| &ds.archetype)
+        && mv.variables.get(coord.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. }))
+    {
+        return Err(disabled_err("Calculated variable cells are formula-derived (read-only)."));
+    }
 
     if text.contains('\t') || text.contains('\n') {
         let out = app.execute_command(
@@ -823,6 +1014,27 @@ fn handle_press_key(app: &mut UiApp, params: &Value) -> Result<Value, EngineErro
     }
 
     if app.canvas_dialogs.active_dialog == ActiveDialog::None
+        && !modifiers.meta
+        && !modifiers.ctrl
+        && !modifiers.alt
+        && (app.grid.formula_bar.active || app.focus_widget_id.as_deref() == Some("formula_bar.input"))
+    {
+        match key.to_ascii_lowercase().as_str() {
+            "enter" | "return" => return commit_formula_bar(app),
+            "escape" | "esc" => {
+                cancel_formula_bar(app);
+                return Ok(json!({ "combo": combo, "formula_bar_active": false, "cancelled": true }));
+            }
+            "tab" if app.grid.formula_bar.active => {
+                let doc = app.document().clone();
+                let accepted = app.grid.formula_bar.accept_completion(&doc);
+                return Ok(json!({ "combo": combo, "completion_accepted": accepted, "input": app.grid.formula_bar.input }));
+            }
+            _ => {}
+        }
+    }
+
+    if app.canvas_dialogs.active_dialog == ActiveDialog::None
         && let Some(exec) = app.handle_key_combo(&combo).map_err(|e| EngineError::with_code(ErrorCode::Conflict, e))?
     {
         return Ok(json!({ "combo": combo, "shortcut_executed": exec.command_id, "ui": exec.ui, "result": exec.result }));
@@ -1053,19 +1265,14 @@ fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::PowerAndSampleSize => app.canvas_dialogs.power_wizard.apply_field_patch(fields).map_err(disabled_err)?,
         ActiveDialog::FormatSelectedPoints { .. } => app.canvas_dialogs.format_points.apply_field_patch(fields).map_err(disabled_err)?,
-        ActiveDialog::AnalyzeSheet { .. } => app.canvas_dialogs.analyze.apply_field_patch(fields).map_err(disabled_err)?,
+        ActiveDialog::AnalyzeSheet { .. } => {
+            let src = app.canvas_dialogs.analyze.source_sheet_id.as_ref();
+            validate_pre_summarized_patch(app.document(), src, fields)?;
+            app.canvas_dialogs.analyze.apply_field_patch(fields).map_err(disabled_err)?;
+        }
         ActiveDialog::EditAnalysisParameters { .. } => {
-            let wants_paired =
-                fields.get("paired_or_matched").or_else(|| fields.get("edit.paired_or_matched")).and_then(Value::as_bool) == Some(true);
-            if wants_paired {
-                let src = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id);
-                let gate = r1_paired_or_matched_allowed(app.document(), src);
-                if !gate.enabled {
-                    return Err(disabled_err(
-                        gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2")),
-                    ));
-                }
-            }
+            let src = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id);
+            validate_pre_summarized_patch(app.document(), src, fields)?;
             app.canvas_dialogs.edit_params.apply_field_patch(fields).map_err(disabled_err)?;
         }
         ActiveDialog::ChangeDataAnalyzed { .. } => {
@@ -1121,10 +1328,84 @@ fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(
         ActiveDialog::FormatGraph { .. } => {
             app.canvas_dialogs.format_graph.apply_field_patch(fields).map_err(bad_input)?;
         }
+        ActiveDialog::FormatAxes { .. } => {
+            let doc = app.document().clone();
+            app.canvas_dialogs.format_axes.apply_field_patch(fields, Some(&doc)).map_err(bad_input)?;
+        }
+        ActiveDialog::PairwiseComparisons { .. } => {
+            let doc = app.document().clone();
+            app.canvas_dialogs.pairwise.apply_field_patch(fields, Some(&doc)).map_err(bad_input)?;
+        }
+        ActiveDialog::BubblePlotInspector { .. } => {
+            app.canvas_dialogs.bubble_plot.apply_field_patch(fields).map_err(bad_input)?;
+        }
+        ActiveDialog::ApplyStyleFrom { .. } => {
+            app.canvas_dialogs.apply_style.apply_field_patch(fields).map_err(bad_input)?;
+        }
+        ActiveDialog::PageLayoutComposer { .. } => {
+            let doc = app.document().clone();
+            app.canvas_dialogs.page_layout.apply_field_patch(fields, Some(&doc)).map_err(bad_input)?;
+        }
+        ActiveDialog::ExportFigure { .. } => {
+            app.canvas_dialogs.export_figure.apply_field_patch(fields).map_err(bad_input)?;
+        }
+        ActiveDialog::RandomizeGroups => {
+            app.canvas_dialogs.randomize_groups.apply_field_patch(fields).map_err(bad_input)?;
+        }
+        ActiveDialog::RandomSampleRows { .. } => {
+            app.canvas_dialogs.random_sample_rows.apply_field_patch(fields).map_err(bad_input)?;
+        }
+        ActiveDialog::SimulateDistributions => {
+            app.canvas_dialogs.simulate_distributions.apply_field_patch(fields).map_err(bad_input)?;
+        }
+        ActiveDialog::InsertModelEquation { .. } => {
+            app.canvas_dialogs.insert_model_equation.apply_field_patch(fields).map_err(bad_input)?;
+        }
         ActiveDialog::Print { .. } => {
             app.canvas_dialogs.print.apply_field_patch(fields).map_err(bad_input)?;
         }
         _ => {}
+    }
+    Ok(())
+}
+
+fn validate_pre_summarized_patch(
+    doc: &lumencraft_doc::ProjectDocument,
+    src: Option<&SheetId>,
+    fields: &Map<String, Value>,
+) -> Result<(), EngineError> {
+    let wants_paired =
+        fields.get("paired_or_matched").or_else(|| fields.get("edit.paired_or_matched")).or_else(|| fields.get("matched")).and_then(Value::as_bool)
+            == Some(true);
+    let two_method_norm = fields
+        .get("two_group_method")
+        .or_else(|| fields.get("edit.two_group.method"))
+        .or_else(|| fields.get("analyze.two_group.method"))
+        .and_then(Value::as_str)
+        .map(|s| s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect::<String>());
+    let wants_paired_method = two_method_norm
+        .as_deref()
+        .is_some_and(|m| matches!(m, "pairedt" | "ratiopairedt" | "wilcoxon" | "wilcoxonsignedrank" | "pairedsigntest" | "signtest"));
+    if wants_paired || wants_paired_method {
+        let gate = r1_paired_or_matched_allowed(doc, src);
+        if !gate.enabled {
+            return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2"))));
+        }
+    }
+    let wants_nonparam = fields.get("assume_gaussian").or_else(|| fields.get("edit.assume_gaussian")).and_then(Value::as_bool) == Some(false)
+        || two_method_norm.as_deref().is_some_and(|m| {
+            matches!(
+                m,
+                "mannwhitney" | "mannwhitneyu" | "wilcoxon" | "wilcoxonsignedrank" | "pairedsigntest" | "signtest" | "ks" | "kolmogorovsmirnov"
+            )
+        });
+    if wants_nonparam {
+        let gate = r2_assume_gaussian_allowed(doc, src);
+        if !gate.enabled {
+            return Err(disabled_err(
+                gate.disabled_reason.unwrap_or_else(|| String::from("Nonparametric rank tests are disabled for pre-summarized Column tables.")),
+            ));
+        }
     }
     Ok(())
 }
@@ -1181,6 +1462,13 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
             let out = app.execute_print_dialog_spool(false).map_err(bad_input)?;
             app.canvas_dialogs.close_dialog();
             Ok(json!({ "action": action, "printed": true, "page_count": out.page_count }))
+        }
+        ActiveDialog::RandomizeGroups => commit_single_intent(app, app.canvas_dialogs.randomize_groups.commit_intent(), true),
+        ActiveDialog::RandomSampleRows { .. } => commit_single_intent(app, app.canvas_dialogs.random_sample_rows.commit_intent(), true),
+        ActiveDialog::SimulateDistributions => commit_single_intent(app, app.canvas_dialogs.simulate_distributions.commit_intent(), true),
+        ActiveDialog::InsertModelEquation { .. } => {
+            let doc = app.document().clone();
+            commit_single_intent(app, app.canvas_dialogs.insert_model_equation.commit_intent(Some(&doc)), true)
         }
         ActiveDialog::CommandPalette => commit_command_palette_action(app),
         ActiveDialog::ConstantHookPicker { .. } => commit_single_intent(app, app.canvas_dialogs.hook_picker.commit_intent(), true),
@@ -1371,5 +1659,78 @@ fn parse_error_bar_metric_str(raw: &str) -> Result<ErrorBarMetric, String> {
         "range" | "minmax" => Ok(ErrorBarMetric::Range),
         "explicitsubcolumns" | "explicit" => Ok(ErrorBarMetric::ExplicitSubcolumns),
         _ => Err(format!("unsupported error_bar_metric `{raw}`")),
+    }
+}
+
+fn apply_type_text_to_formula_bar(app: &mut UiApp, text: &str, clear_existing: bool, explicit_commit: Option<bool>) -> Result<Value, EngineError> {
+    if !app.grid.formula_bar.active {
+        let doc = app.document().clone();
+        let Some(ds) = doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)) else {
+            return Err(disabled_err("formula bar requires an active MultipleVariables sheet"));
+        };
+        let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+            return Err(disabled_err("formula bar requires an active MultipleVariables sheet"));
+        };
+        if mv.variables.is_empty() {
+            return Err(disabled_err("MultipleVariables sheet has no variable columns"));
+        }
+        let col = app.grid.tool.active.map(|c| c.col).filter(|c| *c < mv.variables.len()).unwrap_or(0);
+        app.grid.formula_bar.open_for_column(ds, col, Some(&doc));
+    }
+
+    let next_text = if clear_existing { text.to_owned() } else { format!("{}{}", app.grid.formula_bar.input, text) };
+    let doc = app.document().clone();
+    app.grid.formula_bar.set_input(next_text, None, &doc);
+    app.focus_widget_id = Some(String::from("formula_bar.input"));
+
+    if explicit_commit == Some(true) {
+        return commit_formula_bar(app);
+    }
+
+    Ok(json!({
+        "target": "formula_bar.input",
+        "active": app.grid.formula_bar.active,
+        "target_column": app.grid.formula_bar.target_column,
+        "target_title": app.grid.formula_bar.target_title,
+        "input": app.grid.formula_bar.input,
+        "is_valid": app.grid.formula_bar.is_valid,
+        "parse_error": app.grid.formula_bar.parse_error,
+    }))
+}
+
+fn commit_formula_bar(app: &mut UiApp) -> Result<Value, EngineError> {
+    if !app.grid.formula_bar.active {
+        return Err(disabled_err("formula bar is not active"));
+    }
+    if let Some(err) = app.grid.formula_bar.parse_error.clone() {
+        return Err(disabled_err(err));
+    }
+    if !app.grid.formula_bar.is_valid {
+        return Err(disabled_err("calculated variable formula is empty or invalid"));
+    }
+    let doc = app.document().clone();
+    let sheet_id = app
+        .grid
+        .formula_bar
+        .target_sheet_id
+        .clone()
+        .or_else(|| doc.active_sheet_id.clone())
+        .filter(|id| doc.data_sheet(id).is_some())
+        .ok_or_else(|| bad_input("no active MultipleVariables sheet for formula bar"))?;
+    let intent = app.grid.formula_bar.commit_intent(&sheet_id).map_err(disabled_err)?;
+    let out = app.execute_command(&intent.command_id, intent.params)?;
+    cancel_formula_bar(app);
+    Ok(json!({
+        "committed": true,
+        "command_id": out.command_id,
+        "mutated": out.mutated,
+        "payload": out.payload,
+    }))
+}
+
+fn cancel_formula_bar(app: &mut UiApp) {
+    app.grid.formula_bar.cancel();
+    if app.focus_widget_id.as_deref() == Some("formula_bar.input") {
+        app.focus_widget_id = None;
     }
 }

@@ -4,22 +4,26 @@
 //! declarative enablement (`enabled`, `disabled_reason`) from [`crate::modal_predicates`] and
 //! deterministic `[x, y, width, height]` screen bounds from [`compute_workspace_layout_map`].
 
-use lumencraft_doc::{AnalysisKind, OneWayMethod, PValueFormat, ProjectDocument, SheetId, TableArchetype, TransformAnalysisSpec, XColumnMode};
+use lumencraft_doc::{
+    AnalysisKind, ColorChannelMapping, ContingencyMethod, MultivariateSpec, OneWayMethod, PValueFormat, ProjectDocument, SheetId, SizeChannelMapping,
+    SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, VariableSource, XColumnMode,
+};
 use lumencraft_tools::GridCellCoord;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::compositor::{WorkspacePixelRect, compute_workspace_layout_map};
-use crate::dialogs_canvas::{ActiveDialog, format_compact_f64};
+use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, equation_display_mode_str, format_compact_f64};
 use crate::grid_view::format_cell_display;
 use crate::interaction::{ViewportMetrics, WorkspaceLayoutMap};
 use crate::menus::tooltips::{menu_bar_tooltips, toolbar_tooltips};
 use crate::modal_predicates::{
     ControlEnablement, evaluate_dialog_button, evaluate_edit_params_tab, r1_paired_or_matched_allowed, r1_sphericity_or_reml_control,
-    r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences, r4_two_group_nonparametric_options,
-    r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector,
-    r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column, source_table_shape,
+    r2_assume_gaussian_allowed, r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences,
+    r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
+    r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column,
+    source_table_shape,
 };
 use crate::power_wizard::PowerWizardStage;
 use lumencraft_tools::SelectionQuickStats;
@@ -134,6 +138,8 @@ pub struct UiTreeSnapshot {
     pub status_banner: Option<String>,
     pub context_menu_target: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result_diagnostic_banner: Option<AssumptionDiagnosticBanner>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub menus: Option<Vec<UiMenuSnapshot>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toolbar: Option<Vec<UiWidgetNode>>,
@@ -222,6 +228,7 @@ pub fn inspect_ui_tree(app: &UiApp, scope: Option<&str>, include_bounds: bool) -
 
     let grid_sel = build_grid_selection_snapshot(app, doc);
     let brushed_points = collect_brushed_points(app);
+    let result_diagnostic_banner = active_id.and_then(|id| doc.result_sheet(id)).and_then(AssumptionDiagnosticBanner::from_result);
     let scope_norm = scope.map(|s| s.trim().to_ascii_lowercase());
     let want = |name: &str| match scope_norm.as_deref() {
         None | Some("" | "all" | "workspace") => true,
@@ -243,6 +250,7 @@ pub fn inspect_ui_tree(app: &UiApp, scope: Option<&str>, include_bounds: bool) -
         brushed_points,
         status_banner: app.canvas_dialogs.status_banner.clone(),
         context_menu_target: app.interaction.context_menu_target.clone(),
+        result_diagnostic_banner,
         menus: want("menus").then(|| build_menus_snapshot(app, &layout, include_bounds)),
         toolbar: want("toolbar").then(|| build_toolbar_snapshot(app, &layout, include_bounds)),
         navigator_sheets: want("navigator").then(|| build_navigator_snapshot(app, doc, &layout, include_bounds)),
@@ -455,6 +463,49 @@ fn build_canvas_snapshot(app: &UiApp, doc: &ProjectDocument, layout: &WorkspaceL
             });
         }
     }
+    if let Some(rs) = doc.result_sheet(active_id)
+        && let Some(banner) = AssumptionDiagnosticBanner::from_result(rs)
+    {
+        let canvas = layout.frame.canvas;
+        let banner_bounds = include_bounds.then(|| {
+            [f64::from(canvas.x) / scale + 14.0, f64::from(canvas.y) / scale + 38.0, (f64::from(canvas.width) / scale - 28.0).max(240.0), 60.0]
+        });
+        nodes.push(UiWidgetNode {
+            widget_id: String::from("result.diagnostic_banner"),
+            role: String::from("banner"),
+            label: banner.summary.clone(),
+            command_id: Some(String::from("ui.result.inspectDiagnostics")),
+            value: Some(json!({
+                "source_result_id": banner.source_result_id.as_str(),
+                "severity": format!("{:?}", banner.severity).to_ascii_lowercase(),
+                "summary": banner.summary,
+                "diagnostic_metric": banner.diagnostic_metric,
+                "limitation_note": banner.limitation_note,
+                "detail_tab_ids": banner.detail_tab_ids,
+            })),
+            enabled: !banner.detail_tab_ids.is_empty(),
+            disabled_reason: banner.detail_tab_ids.is_empty().then(|| String::from("No detail tabs available.")),
+            bounds: banner_bounds,
+        });
+        for (idx, tab_id) in banner.detail_tab_ids.iter().enumerate() {
+            let tab_label = rs.tabs.iter().find(|t| &t.id == tab_id).map_or_else(|| tab_id.clone(), |t| t.title.clone());
+            let tab_bounds =
+                include_bounds.then(|| [f64::from(canvas.x) / scale + 18.0 + (idx as f64) * 116.0, f64::from(canvas.y) / scale + 76.0, 110.0, 20.0]);
+            nodes.push(UiWidgetNode {
+                widget_id: format!("result.diagnostic_banner.tab.{tab_id}"),
+                role: String::from("link"),
+                label: tab_label,
+                command_id: Some(String::from("ui.result.inspectDiagnostics")),
+                value: Some(json!({
+                    "source_result_id": banner.source_result_id.as_str(),
+                    "tab_id": tab_id,
+                })),
+                enabled: true,
+                disabled_reason: None,
+                bounds: tab_bounds,
+            });
+        }
+    }
     nodes
 }
 
@@ -487,6 +538,19 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, layout: &Worksp
                     18.0,
                 ]
             });
+            let is_calculated = matches!(
+                &ds.archetype,
+                TableArchetype::MultipleVariables(mv)
+                    if mv.variables.get(cell.coord.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. }))
+            );
+            let enabled = !ds.frozen && !is_calculated;
+            let disabled_reason = if ds.frozen {
+                Some(String::from("Data sheet is frozen (read-only)."))
+            } else if is_calculated {
+                Some(String::from("Calculated variable cells are formula-derived (read-only)."))
+            } else {
+                None
+            };
             UiWidgetNode {
                 widget_id: format!("grid.cell.{}.{}.{}", cell.coord.row, cell.coord.col, cell.coord.subcol),
                 role: String::from("gridcell"),
@@ -500,8 +564,8 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, layout: &Worksp
                     "excluded": cell.excluded,
                     "selected": cell.is_selected,
                 })),
-                enabled: !ds.frozen,
-                disabled_reason: ds.frozen.then(|| String::from("Data sheet is frozen (read-only).")),
+                enabled,
+                disabled_reason,
                 bounds,
             }
         })
@@ -567,6 +631,89 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, layout: &Worksp
             }
         }
     }
+    if let TableArchetype::MultipleVariables(mv) = &ds.archetype {
+        for (col_idx, var) in mv.variables.iter().enumerate() {
+            let bounds = include_bounds.then(|| {
+                [
+                    f64::from(layout.frame.canvas.x) / scale + 52.0 + (col_idx as f64) * 76.0,
+                    f64::from(layout.frame.canvas.y) / scale + 6.0,
+                    74.0,
+                    18.0,
+                ]
+            });
+            nodes.push(UiWidgetNode {
+                widget_id: format!("formula_bar.open_col.{col_idx}"),
+                role: String::from("button"),
+                label: format!("Formula for {}", var.title),
+                command_id: Some(String::from("ui.table.openFormulaBar")),
+                value: Some(json!({
+                    "column": col_idx,
+                    "title": var.title,
+                    "calculated": matches!(var.source, VariableSource::Calculated { .. }),
+                })),
+                enabled: !ds.frozen,
+                disabled_reason: ds.frozen.then(|| String::from("Data sheet is frozen (read-only).")),
+                bounds,
+            });
+        }
+        let fb = &app.grid.formula_bar;
+        nodes.push(UiWidgetNode {
+            widget_id: String::from("formula_bar.input"),
+            role: String::from("textbox"),
+            label: String::from("Formula bar"),
+            command_id: None,
+            value: Some(json!({
+                "active": fb.active,
+                "target_column": fb.target_column,
+                "target_title": fb.target_title,
+                "input": fb.input,
+                "is_valid": fb.is_valid,
+                "parse_error": fb.parse_error,
+            })),
+            enabled: !ds.frozen,
+            disabled_reason: ds.frozen.then(|| String::from("Data sheet is frozen (read-only).")),
+            bounds: include_bounds
+                .then(|| [f64::from(layout.frame.canvas.x) / scale + 52.0, f64::from(layout.frame.canvas.y) / scale + 26.0, 320.0, 20.0]),
+        });
+        let commit_enabled = !ds.frozen && fb.active && fb.target_column.is_some() && fb.is_valid && fb.parse_error.is_none();
+        let commit_disabled_reason = if ds.frozen {
+            Some(String::from("Data sheet is frozen (read-only)."))
+        } else if !fb.active || fb.target_column.is_none() {
+            Some(String::from("Formula bar is not active."))
+        } else if let Some(err) = &fb.parse_error {
+            Some(err.clone())
+        } else if !fb.is_valid {
+            Some(String::from("Formula cannot be empty or invalid."))
+        } else {
+            None
+        };
+        nodes.push(UiWidgetNode {
+            widget_id: String::from("formula_bar.commit"),
+            role: String::from("button"),
+            label: String::from("Apply formula"),
+            command_id: Some(String::from("table.setCalculatedVariable")),
+            value: Some(json!({
+                "target_column": fb.target_column,
+                "is_valid": fb.is_valid,
+                "parse_error": fb.parse_error,
+            })),
+            enabled: commit_enabled,
+            disabled_reason: commit_disabled_reason,
+            bounds: include_bounds
+                .then(|| [f64::from(layout.frame.canvas.x) / scale + 378.0, f64::from(layout.frame.canvas.y) / scale + 26.0, 56.0, 20.0]),
+        });
+        nodes.push(UiWidgetNode {
+            widget_id: String::from("formula_bar.cancel"),
+            role: String::from("button"),
+            label: String::from("Cancel formula"),
+            command_id: None,
+            value: Some(json!({ "active": fb.active })),
+            enabled: fb.active,
+            disabled_reason: (!fb.active).then(|| String::from("Formula bar is not active.")),
+            bounds: include_bounds
+                .then(|| [f64::from(layout.frame.canvas.x) / scale + 438.0, f64::from(layout.frame.canvas.y) / scale + 26.0, 56.0, 20.0]),
+        });
+    }
     nodes
 }
 
@@ -593,6 +740,18 @@ fn build_dialog_snapshot(app: &UiApp, doc: &ProjectDocument, layout: &WorkspaceL
         ActiveDialog::ConvertArchetype { sheet_id } => build_convert_archetype_nodes(app, sheet_id, base_x, base_y, include_bounds),
         ActiveDialog::ChangeGraphType { graph_sheet_id } => build_change_graph_type_nodes(app, graph_sheet_id, base_x, base_y, include_bounds),
         ActiveDialog::FormatGraph { graph_sheet_id } => build_format_graph_nodes(app, graph_sheet_id, base_x, base_y, include_bounds),
+        ActiveDialog::FormatAxes { sheet_id } => build_format_axes_nodes(app, sheet_id, base_x, base_y, include_bounds),
+        ActiveDialog::PairwiseComparisons { graph_sheet_id } => build_pairwise_nodes(app, graph_sheet_id, base_x, base_y, include_bounds),
+        ActiveDialog::BubblePlotInspector { graph_sheet_id } => build_bubble_plot_nodes(app, graph_sheet_id, base_x, base_y, include_bounds),
+        ActiveDialog::ApplyStyleFrom { target_graph_id } => build_apply_style_nodes(app, target_graph_id, base_x, base_y, include_bounds),
+        ActiveDialog::PageLayoutComposer { layout_sheet_id } => build_page_layout_nodes(app, layout_sheet_id, base_x, base_y, include_bounds),
+        ActiveDialog::ExportFigure { sheet_id } => build_export_figure_nodes(app, sheet_id, base_x, base_y, include_bounds),
+        ActiveDialog::RandomizeGroups => build_randomize_groups_nodes(app, base_x, base_y, include_bounds),
+        ActiveDialog::RandomSampleRows { .. } => build_random_sample_rows_nodes(app, base_x, base_y, include_bounds),
+        ActiveDialog::SimulateDistributions => build_simulate_distributions_nodes(app, base_x, base_y, include_bounds),
+        ActiveDialog::InsertModelEquation { graph_sheet_id } => {
+            build_insert_model_equation_nodes(app, graph_sheet_id, base_x, base_y, include_bounds)
+        }
         ActiveDialog::Print { sheet_id } => build_print_dialog_nodes(app, sheet_id.as_ref(), base_x, base_y, include_bounds),
         other => build_generic_dialog_nodes(other, base_x, base_y, include_bounds),
     };
@@ -821,6 +980,61 @@ fn build_analyze_dialog_nodes(
             pos(base_row + 3),
         ));
     }
+    if st.selected_entry_id.as_deref() == Some("transform.select") {
+        let base_row = controls.len();
+        controls.push(node(
+            "analyze.transform.filter_formula",
+            "textbox",
+            "Filter formula",
+            json!(st.transform_formula),
+            ControlEnablement::enabled(),
+            pos(base_row),
+        ));
+        controls.push(node(
+            "analyze.transform.target_archetype",
+            "combobox",
+            "Target table archetype",
+            json!(format!("{:?}", st.transform_target_archetype)),
+            ControlEnablement::enabled(),
+            pos(base_row + 1),
+        ));
+        controls.push(node(
+            "analyze.transform.selected_data_sets",
+            "textbox",
+            "Selected data sets",
+            json!(st.selected_data_sets),
+            ControlEnablement::enabled(),
+            pos(base_row + 2),
+        ));
+    }
+    if st.selected_entry_id.as_deref() == Some("transform.baseline") {
+        let base_row = controls.len();
+        controls.push(node(
+            "analyze.transform.baseline_columns",
+            "textbox",
+            "Baseline columns",
+            json!(st.baseline_columns),
+            ControlEnablement::enabled(),
+            pos(base_row),
+        ));
+        controls.push(node(
+            "analyze.transform.baseline_operation",
+            "combobox",
+            "Baseline operation",
+            json!(format!("{:?}", st.baseline_operation)),
+            ControlEnablement::enabled(),
+            pos(base_row + 1),
+        ));
+        controls.push(node(
+            "analyze.transform.selected_data_sets",
+            "textbox",
+            "Selected data sets",
+            json!(st.selected_data_sets),
+            ControlEnablement::enabled(),
+            pos(base_row + 2),
+        ));
+    }
+    push_r9_analyze_controls(st, doc, source_sheet_id, &mut controls, &pos);
     (
         "Analyze...",
         Some(source_sheet_id.as_str().to_owned()),
@@ -829,6 +1043,119 @@ fn build_analyze_dialog_nodes(
         controls,
         vec![("ok", "OK"), ("cancel", "Cancel")],
     )
+}
+
+fn push_r9_analyze_controls(
+    st: &crate::dialogs_canvas::AnalyzeDialogState,
+    doc: &ProjectDocument,
+    source_sheet_id: &SheetId,
+    controls: &mut Vec<UiWidgetNode>,
+    pos: &impl Fn(usize) -> Option<[f64; 4]>,
+) {
+    let mut row = controls.len();
+    let mut push = |id: &str, role: &str, label: &str, value: Value, gate: ControlEnablement| {
+        controls.push(node(id, role, label, value, gate, pos(row)));
+        row += 1;
+    };
+    push(
+        "analyze.assume_gaussian",
+        "checkbox",
+        "Assume Gaussian",
+        json!(!matches!(
+            st.two_group_method,
+            Some(
+                TwoGroupMethod::MannWhitneyU
+                    | TwoGroupMethod::WilcoxonSignedRank
+                    | TwoGroupMethod::PairedSignTest
+                    | TwoGroupMethod::KolmogorovSmirnov
+            )
+        )),
+        r2_assume_gaussian_allowed(doc, Some(source_sheet_id)),
+    );
+    push(
+        "analyze.paired_or_matched",
+        "checkbox",
+        "Paired / Matched",
+        json!(matches!(st.two_group_method, Some(TwoGroupMethod::PairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest))),
+        r1_paired_or_matched_allowed(doc, Some(source_sheet_id)),
+    );
+    push(
+        "analyze.two_group_method",
+        "combobox",
+        "Two-group method",
+        json!(st.two_group_method.map(|m| format!("{m:?}"))),
+        ControlEnablement::enabled(),
+    );
+    push(
+        "analyze.contingency_method",
+        "combobox",
+        "Contingency / Agreement method",
+        json!(st.contingency_method.as_ref().map(|m| format!("{m:?}"))),
+        ControlEnablement::enabled(),
+    );
+    push("analyze.null_proportion", "spinbutton", "Binomial null proportion", json!(st.contingency_null_proportion), ControlEnablement::enabled());
+    push("analyze.expected_proportions", "textbox", "Expected proportions", json!(st.contingency_expected_proportions), ControlEnablement::enabled());
+    push("analyze.factorial.three_way", "checkbox", "Three-way ANOVA", json!(st.factorial_three_way), ControlEnablement::enabled());
+    push(
+        "analyze.factorial.repeated_measures",
+        "combobox",
+        "Repeated measures factor",
+        json!(format!("{:?}", st.factorial_repeated_measures)),
+        ControlEnablement::enabled(),
+    );
+    push(
+        "analyze.factorial.multiplicity",
+        "combobox",
+        "Factorial multiplicity",
+        json!(format!("{:?}", st.factorial_multiplicity)),
+        ControlEnablement::enabled(),
+    );
+    push("analyze.cluster.distance", "combobox", "Cluster distance", json!(format!("{:?}", st.cluster_distance)), ControlEnablement::enabled());
+    push("analyze.cluster.linkage", "combobox", "Cluster linkage", json!(format!("{:?}", st.cluster_linkage)), ControlEnablement::enabled());
+    push("analyze.cluster.k_means_k", "spinbutton", "K-means k", json!(st.cluster_k_means_k), ControlEnablement::enabled());
+    push("analyze.cluster.k_sweep_max", "spinbutton", "K-means sweep max", json!(st.cluster_k_sweep_max), ControlEnablement::enabled());
+    push("analyze.pca.standardize", "checkbox", "Standardize PCA variables", json!(st.pca_standardize), ControlEnablement::enabled());
+    push("analyze.correlation.spearman_rank", "checkbox", "Spearman rank correlation", json!(st.corr_spearman_rank), ControlEnablement::enabled());
+    push("analyze.imputation.m", "spinbutton", "Imputed datasets (m)", json!(st.imputation_m), ControlEnablement::enabled());
+    push("analyze.glm.family", "combobox", "GLM family", json!(format!("{:?}", st.glm_family)), ControlEnablement::enabled());
+    push("analyze.glm.compute_vif", "checkbox", "Compute VIF", json!(st.glm_compute_vif), ControlEnablement::enabled());
+    push("analyze.cox.tie_method", "combobox", "Cox tie method", json!(format!("{:?}", st.cox_tie_method)), ControlEnablement::enabled());
+    push("analyze.km.mv_time_column", "combobox", "Time variable column", json!(st.km_mv_time_column), ControlEnablement::enabled());
+    push("analyze.km.mv_status_column", "combobox", "Event / status column", json!(st.km_mv_status_column), ControlEnablement::enabled());
+    push("analyze.km.mv_group_column", "combobox", "Group / strata column", json!(st.mv_group_column), ControlEnablement::enabled());
+    push("analyze.km.log_rank_mantel_cox", "checkbox", "Log-rank (Mantel-Cox)", json!(st.km_log_rank_mantel_cox), ControlEnablement::enabled());
+    push(
+        "analyze.km.gehan_breslow_wilcoxon",
+        "checkbox",
+        "Gehan-Breslow-Wilcoxon",
+        json!(st.km_gehan_breslow_wilcoxon),
+        ControlEnablement::enabled(),
+    );
+    push("analyze.km.trend_test", "checkbox", "Log-rank trend test", json!(st.km_trend_test), ControlEnablement::enabled());
+    push("analyze.km.log_rank_for_trend", "checkbox", "Log-rank test for trend", json!(st.km_trend_test), ControlEnablement::enabled());
+    push(
+        "analyze.km.multiplicity_method",
+        "combobox",
+        "Multiplicity correction",
+        json!(format!("{:?}", st.km_multiplicity_method)),
+        ControlEnablement::enabled(),
+    );
+    push("analyze.fit.equation_id", "textbox", "Model equation ID", json!(st.equation_id), ControlEnablement::enabled());
+    push("analyze.fit.method", "combobox", "Fit method", json!(format!("{:?}", st.fit_method)), ControlEnablement::enabled());
+    push("analyze.fit.weighting", "combobox", "Weighting scheme", json!(format!("{:?}", st.fit_weighting)), ControlEnablement::enabled());
+    push("analyze.fit.custom_dsl", "textbox", "Custom DSL equation", json!(st.custom_dsl), ControlEnablement::enabled());
+    if st.selected_entry_id.as_deref() == Some("transform.random_sample") {
+        push("analyze.sample.sample_size", "spinbutton", "Sample size", json!(st.sample_size), ControlEnablement::enabled());
+        push("analyze.sample.seed", "spinbutton", "RNG seed", json!(st.sample_seed), ControlEnablement::enabled());
+        push("analyze.sample.stratify_column", "combobox", "Stratify column", json!(st.sample_stratify_column), ControlEnablement::enabled());
+        push(
+            "analyze.sample.proportional_allocation",
+            "checkbox",
+            "Proportional allocation",
+            json!(st.sample_proportional),
+            ControlEnablement::enabled(),
+        );
+    }
 }
 
 fn build_edit_params_dialog_nodes(
@@ -872,7 +1199,14 @@ fn build_edit_params_dialog_nodes(
         )
     });
     let mut controls = vec![
-        node("edit.assume_gaussian", "checkbox", "Assume Gaussian", json!(ep.assume_gaussian), ControlEnablement::enabled(), pos(1)),
+        node(
+            "edit.assume_gaussian",
+            "checkbox",
+            "Assume Gaussian",
+            json!(ep.assume_gaussian),
+            r2_assume_gaussian_allowed(doc, source_sheet_id),
+            pos(1),
+        ),
         node(
             "edit.paired_or_matched",
             "checkbox",
@@ -1088,17 +1422,60 @@ fn build_edit_params_dialog_nodes(
                     pos(24),
                 ));
                 controls.push(node(
+                    "edit.transform.filter_formula",
+                    "textbox",
+                    "Filter formula",
+                    json!(filter_formula),
+                    ControlEnablement::enabled(),
+                    pos(25),
+                ));
+                controls.push(node(
                     "edit.transform.target_archetype",
                     "combobox",
                     "Target archetype",
                     json!(target_archetype),
                     ControlEnablement::enabled(),
+                    pos(26),
+                ));
+                controls.push(node(
+                    "edit.transform.selected_data_sets",
+                    "textbox",
+                    "Selected data sets",
+                    json!(ep.draft.as_ref().map(|d| &d.selected_data_sets)),
+                    ControlEnablement::enabled(),
+                    pos(27),
+                ));
+            }
+            TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation } => {
+                controls.push(node(
+                    "edit.transform.baseline_columns",
+                    "textbox",
+                    "Baseline columns",
+                    json!(baseline_columns),
+                    ControlEnablement::enabled(),
+                    pos(24),
+                ));
+                controls.push(node(
+                    "edit.transform.baseline_operation",
+                    "combobox",
+                    "Baseline operation",
+                    json!(format!("{operation:?}")),
+                    ControlEnablement::enabled(),
                     pos(25),
+                ));
+                controls.push(node(
+                    "edit.transform.selected_data_sets",
+                    "textbox",
+                    "Selected data sets",
+                    json!(ep.draft.as_ref().map(|d| &d.selected_data_sets)),
+                    ControlEnablement::enabled(),
+                    pos(26),
                 ));
             }
             _ => {}
         }
     }
+    push_r9_edit_params_controls(ep, &mut controls, &pos);
 
     (
         "Edit Analysis Parameters (Cmd+T)",
@@ -1108,6 +1485,109 @@ fn build_edit_params_dialog_nodes(
         controls,
         vec![("ok", "OK"), ("apply", "Apply"), ("cancel", "Cancel")],
     )
+}
+
+fn push_r9_edit_params_controls(
+    ep: &crate::dialogs_canvas::EditAnalysisParametersState,
+    controls: &mut Vec<UiWidgetNode>,
+    pos: &impl Fn(usize) -> Option<[f64; 4]>,
+) {
+    let Some(spec) = ep.draft.as_ref() else {
+        return;
+    };
+    let mut row = controls.len() + 2;
+    let mut push = |id: &str, role: &str, label: &str, value: Value| {
+        controls.push(node(id, role, label, value, ControlEnablement::enabled(), pos(row)));
+        row += 1;
+    };
+    match &spec.kind {
+        AnalysisKind::TwoGroupComparison(t) => {
+            push("edit.two_group.paired_sign_test", "radio", "Paired Sign test", json!(t.method == TwoGroupMethod::PairedSignTest));
+        }
+        AnalysisKind::Contingency(c) => {
+            let kappa_weight = match c.method {
+                ContingencyMethod::CohenKappa { weighting } => Some(format!("{weighting:?}").to_ascii_lowercase()),
+                _ => None,
+            };
+            push("edit.contingency.kappa_weighting", "combobox", "Cohen's Kappa weighting", json!(kappa_weight));
+            push("edit.contingency.fleiss_kappa", "radio", "Fleiss's Kappa", json!(c.method == ContingencyMethod::FleissKappa));
+            push("edit.contingency.exact_binomial", "radio", "Exact binomial", json!(c.method == ContingencyMethod::ExactBinomial));
+            push("edit.contingency.barnard_exact", "radio", "Barnard's exact test", json!(c.method == ContingencyMethod::BarnardExact));
+            push("edit.contingency.likelihood_g2", "radio", "Likelihood-ratio G2", json!(c.method == ContingencyMethod::LikelihoodRatioG2));
+            push("edit.contingency.null_proportion", "spinbutton", "Null proportion", json!(c.null_proportion));
+            push("edit.contingency.expected_proportions", "textbox", "Expected proportions", json!(c.expected_proportions));
+        }
+        AnalysisKind::FactorialAnova(f) => {
+            push("edit.factorial.three_way", "checkbox", "Three-way ANOVA", json!(f.three_way));
+            push("edit.factorial.repeated_measures", "combobox", "Repeated measures design", json!(format!("{:?}", f.repeated_measures)));
+            push("edit.factorial.ss_type", "combobox", "Sum of squares", json!(format!("{:?}", f.ss_type)));
+            push("edit.factorial.multiplicity", "combobox", "Factorial multiplicity", json!(format!("{:?}", f.multiplicity.method)));
+        }
+        AnalysisKind::Multivariate(m) => match m {
+            MultivariateSpec::Clustering { distance, linkage, k_means_k, k_sweep_max, .. } => {
+                push("edit.cluster.distance", "combobox", "Cluster distance", json!(format!("{distance:?}")));
+                push("edit.cluster.linkage", "combobox", "Cluster linkage", json!(format!("{linkage:?}")));
+                push("edit.cluster.k_means_k", "spinbutton", "K-means k", json!(k_means_k));
+                push("edit.cluster.k_sweep_max", "spinbutton", "K-means sweep max", json!(k_sweep_max));
+            }
+            MultivariateSpec::Pca { standardize, .. } => {
+                push("edit.pca.standardize", "checkbox", "Standardize variables", json!(standardize));
+            }
+            MultivariateSpec::CorrelationMatrix { spearman_rank, .. } => {
+                push("edit.correlation.spearman_rank", "checkbox", "Spearman rank correlation", json!(spearman_rank));
+            }
+            MultivariateSpec::MultipleImputation { imputations_m, .. } => {
+                push("edit.imputation.m", "spinbutton", "Imputed datasets (m)", json!(imputations_m));
+            }
+        },
+        AnalysisKind::GeneralizedLinearModel(g) => {
+            push("edit.glm.family", "combobox", "GLM family", json!(format!("{:?}", g.family)));
+            push("edit.glm.response_column", "combobox", "GLM response column", json!(g.response_column));
+            push("edit.glm.predictor_columns", "textbox", "GLM predictor columns", json!(g.predictor_columns));
+            push("edit.glm.compute_vif", "checkbox", "Compute VIF", json!(g.compute_vif));
+        }
+        AnalysisKind::Survival(s) => match s {
+            SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, tie_method, .. } => {
+                push("edit.cox.time_column", "combobox", "Time column", json!(time_column));
+                push("edit.cox.status_column", "combobox", "Status column", json!(status_column));
+                push("edit.cox.predictor_columns", "textbox", "Predictor columns", json!(predictor_columns));
+                push("edit.cox.tie_method", "combobox", "Cox tie method", json!(format!("{tie_method:?}")));
+            }
+            SurvivalAnalysisSpec::KaplanMeier {
+                log_rank_mantel_cox,
+                gehan_breslow_wilcoxon,
+                trend_test,
+                multiplicity,
+                mv_time_column,
+                mv_status_column,
+                mv_group_column,
+                ..
+            } => {
+                push("edit.km.log_rank_mantel_cox", "checkbox", "Log-rank (Mantel-Cox)", json!(log_rank_mantel_cox));
+                push("edit.km.gehan_breslow_wilcoxon", "checkbox", "Gehan-Breslow-Wilcoxon", json!(gehan_breslow_wilcoxon));
+                push("edit.km.trend_test", "checkbox", "Log-rank trend test", json!(trend_test));
+                push("edit.km.log_rank_for_trend", "checkbox", "Log-rank test for trend", json!(trend_test));
+                push("edit.km.multiplicity_method", "combobox", "Multiplicity correction", json!(format!("{:?}", multiplicity.method)));
+                push("edit.km.mv_time_column", "combobox", "Time variable column", json!(mv_time_column));
+                push("edit.km.mv_status_column", "combobox", "Event / status column", json!(mv_status_column));
+                push("edit.km.mv_group_column", "combobox", "Group / strata column", json!(mv_group_column));
+            }
+        },
+        AnalysisKind::NonlinearRegression(nl) => {
+            push("edit.fit.model_id", "textbox", "Model equation ID", json!(nl.equation_id));
+            push("edit.fit.method", "combobox", "Fit method", json!(format!("{:?}", nl.method)));
+            push("edit.fit.weighting", "combobox", "Weighting scheme", json!(format!("{:?}", nl.weighting)));
+            push("edit.fit.custom_dsl", "textbox", "Custom DSL equation", json!(nl.custom_dsl));
+            push("edit.fit.parameter_rules_count", "readonly", "Parameter rules", json!(nl.parameter_rules.len()));
+        }
+        AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation }) => {
+            push("edit.sample.sample_size", "spinbutton", "Sample size", json!(sample_size));
+            push("edit.sample.seed", "spinbutton", "RNG seed", json!(seed));
+            push("edit.sample.stratify_column", "combobox", "Stratify column", json!(stratify_column));
+            push("edit.sample.proportional_allocation", "checkbox", "Proportional allocation", json!(proportional_allocation));
+        }
+        _ => {}
+    }
 }
 
 fn extract_edit_params_details(
@@ -1122,7 +1602,7 @@ fn extract_edit_params_details(
         _ => lumencraft_doc::MultiplicityMethod::None,
     };
     let cont = match &spec.kind {
-        AnalysisKind::Contingency(c) => *c,
+        AnalysisKind::Contingency(c) => c.clone(),
         _ => lumencraft_doc::ContingencySpec::default(),
     };
     let two = match &spec.kind {
@@ -1201,6 +1681,11 @@ fn build_change_graph_type_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64,
 fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
     let st = &app.canvas_dialogs.format_graph;
     let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let eq_gate = if st.model_equation_mode.is_some() {
+        ControlEnablement::enabled()
+    } else {
+        ControlEnablement::disabled("Graph has no ModelEquation annotation.")
+    };
     let controls = vec![
         node("format_graph.graph_kind", "combobox", "Graph kind", json!(st.graph_kind), ControlEnablement::enabled(), pos(0)),
         node(
@@ -1217,6 +1702,30 @@ fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: 
         node("format_graph.legend_bordered", "checkbox", "Legend border", json!(st.legend_bordered), ControlEnablement::enabled(), pos(5)),
         node("format_graph.error_bar_enabled", "checkbox", "Show error bars", json!(st.error_bar_enabled), ControlEnablement::enabled(), pos(6)),
         node("format_graph.marker_size_pt", "spinbutton", "Marker size (pt)", json!(st.marker_size_pt), ControlEnablement::enabled(), pos(7)),
+        node(
+            "format_graph.half_violin_with_points",
+            "checkbox",
+            "Raincloud half-violin + points",
+            json!(st.half_violin_with_points),
+            ControlEnablement::enabled(),
+            pos(8),
+        ),
+        node(
+            "format_graph.model_equation_mode",
+            "combobox",
+            "Model equation mode",
+            json!(st.model_equation_mode.map(equation_display_mode_str)),
+            eq_gate.clone(),
+            pos(9),
+        ),
+        node(
+            "format_graph.toggle_model_equation_mode",
+            "button",
+            "Toggle equation display mode",
+            json!(st.model_equation_mode.map(equation_display_mode_str)),
+            eq_gate,
+            pos(10),
+        ),
     ];
     (
         "Format Graph",
@@ -1226,6 +1735,267 @@ fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: 
         controls,
         vec![("ok", "OK"), ("apply", "Apply"), ("cancel", "Cancel")],
     )
+}
+
+fn build_format_axes_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.format_axes;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let primary_seg = st.axis_draft.segments.first();
+    let controls = vec![
+        node("axes.target_axis", "combobox", "Target axis", json!(format!("{:?}", st.target_axis)), ControlEnablement::enabled(), pos(0)),
+        node("axes.enable_y2", "checkbox", "Enable secondary Y2 axis", json!(st.enable_y2), ControlEnablement::enabled(), pos(1)),
+        node("axes.title", "textbox", "Axis title", json!(st.axis_draft.title), ControlEnablement::enabled(), pos(2)),
+        node("axes.scale", "combobox", "Axis scale", json!(primary_seg.map(|s| format!("{:?}", s.scale))), ControlEnablement::enabled(), pos(3)),
+        node("axes.min", "spinbutton", "Minimum", json!(primary_seg.and_then(|s| s.min)), ControlEnablement::enabled(), pos(4)),
+        node("axes.max", "spinbutton", "Maximum", json!(primary_seg.and_then(|s| s.max)), ControlEnablement::enabled(), pos(5)),
+        node("axes.segment_count", "readonly", "Axis segments", json!(st.axis_draft.segments.len()), ControlEnablement::enabled(), pos(6)),
+        node("axes.thresholds", "textbox", "Active axis thresholds", json!(st.axis_draft.thresholds), ControlEnablement::enabled(), pos(7)),
+        node("axes.x_thresholds", "textbox", "X axis thresholds", json!(st.effective_x_thresholds()), ControlEnablement::enabled(), pos(8)),
+        node("axes.y_thresholds", "textbox", "Y axis thresholds", json!(st.effective_y_thresholds()), ControlEnablement::enabled(), pos(9)),
+    ];
+    ("Format Axes", Some(sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+}
+
+fn build_pairwise_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.pairwise;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let controls = vec![
+        node(
+            "pairwise.result_sheet_id",
+            "combobox",
+            "Source ResultSheet",
+            json!(st.selected_result_sheet_id.as_ref().map(SheetId::as_str)),
+            ControlEnablement::enabled(),
+            pos(0),
+        ),
+        node("pairwise.bracket_style", "combobox", "Bracket style", json!(format!("{:?}", st.bracket_style)), ControlEnablement::enabled(), pos(1)),
+        node("pairwise.label_mode", "combobox", "Label mode", json!(format!("{:?}", st.label_mode)), ControlEnablement::enabled(), pos(2)),
+        node(
+            "pairwise.hide_non_significant",
+            "checkbox",
+            "Hide non-significant comparisons",
+            json!(st.hide_non_significant),
+            ControlEnablement::enabled(),
+            pos(3),
+        ),
+        node("pairwise.bracket_count", "readonly", "Comparison brackets", json!(st.brackets.len()), ControlEnablement::enabled(), pos(4)),
+        node("pairwise.auto_add", "button", "Auto-add brackets from analysis", json!(st.brackets.len()), ControlEnablement::enabled(), pos(5)),
+    ];
+    ("Pairwise Comparisons", Some(graph_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+}
+
+fn build_bubble_plot_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.bubble_plot;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let (color_mode, color_col) = match &st.color_channel {
+        ColorChannelMapping::Constant(_) => ("Constant", None),
+        ColorChannelMapping::Categorical { column, .. } => ("Categorical", Some(*column)),
+        ColorChannelMapping::Continuous { column, .. } => ("Continuous", Some(*column)),
+    };
+    let size_col = match st.size_channel {
+        SizeChannelMapping::Constant { .. } => None,
+        SizeChannelMapping::Variable { column, .. } => Some(column),
+    };
+    let avail: Vec<Value> = st.available_columns.iter().map(|c| json!({ "index": c.col_index, "title": c.title, "role": c.role })).collect();
+    let controls = vec![
+        node("bubble.plot_mode", "combobox", "Plot mode", json!(format!("{:?}", st.plot_mode)), ControlEnablement::enabled(), pos(0)),
+        node("bubble.x_column", "combobox", "X / Category column", json!(st.x_column), ControlEnablement::enabled(), pos(1)),
+        node("bubble.y_column", "combobox", "Y column", json!(st.y_column), ControlEnablement::enabled(), pos(2)),
+        node("bubble.color_channel", "combobox", "Color channel", json!(st.color_channel), ControlEnablement::enabled(), pos(3)),
+        node("bubble.size_channel", "combobox", "Size channel", json!(st.size_channel), ControlEnablement::enabled(), pos(4)),
+        node("bubble.label_column", "combobox", "Label / Group column", json!(st.label_column), ControlEnablement::enabled(), pos(5)),
+        node("bubble.show_convex_hulls", "checkbox", "Show convex hulls", json!(st.show_convex_hulls), ControlEnablement::enabled(), pos(6)),
+        node(
+            "bubble.show_confidence_ellipses",
+            "checkbox",
+            "Show confidence ellipses",
+            json!(st.show_confidence_ellipses),
+            ControlEnablement::enabled(),
+            pos(7),
+        ),
+        node("bubble.color_mode", "combobox", "Color channel mode", json!(color_mode), ControlEnablement::enabled(), pos(8)),
+        node("bubble.color_column", "combobox", "Color column", json!(color_col), ControlEnablement::enabled(), pos(9)),
+        node("bubble.size_column", "combobox", "Size column", json!(size_col), ControlEnablement::enabled(), pos(10)),
+        node("bubble.available_columns", "readonly", "Available columns", json!(avail), ControlEnablement::enabled(), pos(11)),
+    ];
+    ("Bubble Plot Channels", Some(graph_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+}
+
+fn build_apply_style_nodes(app: &UiApp, target_graph_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.apply_style;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let controls = vec![
+        node(
+            "apply_style.donor_graph_id",
+            "combobox",
+            "Donor graph",
+            json!(st.donor_graph_id.as_ref().map(SheetId::as_str)),
+            ControlEnablement::enabled(),
+            pos(0),
+        ),
+        node("apply_style.clone_palette", "checkbox", "Clone palette", json!(st.clone_palette), ControlEnablement::enabled(), pos(1)),
+        node(
+            "apply_style.clone_frame_and_axes",
+            "checkbox",
+            "Clone frame & axes",
+            json!(st.clone_frame_and_axes),
+            ControlEnablement::enabled(),
+            pos(2),
+        ),
+        node(
+            "apply_style.clone_error_bars_and_legend",
+            "checkbox",
+            "Clone error bars & legend",
+            json!(st.clone_error_bars_and_legend),
+            ControlEnablement::enabled(),
+            pos(3),
+        ),
+    ];
+    ("Apply Style From...", Some(target_graph_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+}
+
+fn build_page_layout_nodes(app: &UiApp, layout_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.page_layout;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let controls = vec![
+        node("layout.preset", "combobox", "Journal width preset", json!(format!("{:?}", st.preset)), ControlEnablement::enabled(), pos(0)),
+        node("layout.orientation", "combobox", "Orientation", json!(format!("{:?}", st.orientation)), ControlEnablement::enabled(), pos(1)),
+        node("layout.rows", "spinbutton", "Grid rows", json!(st.rows), ControlEnablement::enabled(), pos(2)),
+        node("layout.cols", "spinbutton", "Grid columns", json!(st.cols), ControlEnablement::enabled(), pos(3)),
+        node("layout.align_plot_origins", "checkbox", "Align plot origins", json!(st.align_plot_origins), ControlEnablement::enabled(), pos(4)),
+        node("layout.panel_badges", "combobox", "Panel badges", json!(format!("{:?}", st.panel_badges)), ControlEnablement::enabled(), pos(5)),
+        node("layout.item_count", "readonly", "Placed items", json!(st.items.len()), ControlEnablement::enabled(), pos(6)),
+    ];
+    ("Page Layout Composer", Some(layout_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+}
+
+fn build_export_figure_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.export_figure;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let controls = vec![
+        node("export.format", "combobox", "Format", json!(format!("{:?}", st.format).to_ascii_lowercase()), ControlEnablement::enabled(), pos(0)),
+        node("export.width_px", "spinbutton", "Width (px)", json!(st.width_px), ControlEnablement::enabled(), pos(1)),
+        node("export.height_px", "spinbutton", "Height (px)", json!(st.height_px), ControlEnablement::enabled(), pos(2)),
+        node("export.dpi", "spinbutton", "DPI", json!(st.dpi), ControlEnablement::enabled(), pos(3)),
+    ];
+    ("Export Publication Figure", Some(sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "Export"), ("cancel", "Cancel")])
+}
+
+fn build_randomize_groups_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.randomize_groups;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let groups_text: Vec<String> = st.groups.iter().map(|(label, w)| if *w == 1 { label.clone() } else { format!("{label}:{w}") }).collect();
+    let controls = vec![
+        node("randomize.groups", "textbox", "Treatment arms", json!(groups_text.join(", ")), ControlEnablement::enabled(), pos(0)),
+        node("randomize.subject_count", "spinbutton", "Subject count", json!(st.subject_count), ControlEnablement::enabled(), pos(1)),
+        node("randomize.scheme", "combobox", "Randomization scheme", json!(format!("{:?}", st.scheme)), ControlEnablement::enabled(), pos(2)),
+        node("randomize.block_sizes", "textbox", "Block sizes", json!(st.block_sizes), ControlEnablement::enabled(), pos(3)),
+        node("randomize.seed", "spinbutton", "RNG seed", json!(st.seed), ControlEnablement::enabled(), pos(4)),
+        node("randomize.title", "textbox", "Sheet title", json!(st.title), ControlEnablement::enabled(), pos(5)),
+        node(
+            "randomize.info_sheet_id",
+            "combobox",
+            "ARRIVE Info sheet",
+            json!(st.target_info_sheet_id.as_ref().map(SheetId::as_str)),
+            ControlEnablement::enabled(),
+            pos(6),
+        ),
+    ];
+    ("Randomize Groups...", None, None, Vec::new(), controls, vec![("ok", "Generate"), ("cancel", "Cancel")])
+}
+
+fn build_random_sample_rows_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.random_sample_rows;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let controls = vec![
+        node(
+            "sample.source_sheet_id",
+            "combobox",
+            "Source sheet",
+            json!(st.source_sheet_id.as_ref().map(SheetId::as_str)),
+            ControlEnablement::enabled(),
+            pos(0),
+        ),
+        node("sample.sample_size", "spinbutton", "Sample size", json!(st.sample_size), ControlEnablement::enabled(), pos(1)),
+        node("sample.seed", "spinbutton", "RNG seed", json!(st.seed), ControlEnablement::enabled(), pos(2)),
+        node("sample.stratify_column", "combobox", "Stratify column", json!(st.stratify_column), ControlEnablement::enabled(), pos(3)),
+        node(
+            "sample.proportional_allocation",
+            "checkbox",
+            "Proportional allocation",
+            json!(st.proportional_allocation),
+            ControlEnablement::enabled(),
+            pos(4),
+        ),
+        node("sample.title", "textbox", "Sample sheet title", json!(st.title), ControlEnablement::enabled(), pos(5)),
+    ];
+    (
+        "Random Sample Rows...",
+        st.source_sheet_id.as_ref().map(|id| id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", "Sample"), ("cancel", "Cancel")],
+    )
+}
+
+fn build_simulate_distributions_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.simulate_distributions;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let first = st.columns.first();
+    let controls = vec![
+        node("simulate.n_rows", "spinbutton", "Rows (N)", json!(st.n_rows), ControlEnablement::enabled(), pos(0)),
+        node("simulate.seed", "spinbutton", "RNG seed", json!(st.seed), ControlEnablement::enabled(), pos(1)),
+        node(
+            "simulate.use_multiple_variables",
+            "checkbox",
+            "Create MultipleVariables table",
+            json!(st.use_multiple_variables),
+            ControlEnablement::enabled(),
+            pos(2),
+        ),
+        node("simulate.title", "textbox", "Sheet title", json!(st.title), ControlEnablement::enabled(), pos(3)),
+        node(
+            "simulate.distribution",
+            "combobox",
+            "Distribution",
+            json!(first.map(|c| c.distribution.as_str())),
+            ControlEnablement::enabled(),
+            pos(4),
+        ),
+        node("simulate.column_name", "textbox", "Primary column name", json!(first.map(|c| c.name.as_str())), ControlEnablement::enabled(), pos(5)),
+        node("simulate.columns", "readonly", "Configured columns", json!(st.columns.len()), ControlEnablement::enabled(), pos(6)),
+    ];
+    ("Simulate Distributions...", None, None, Vec::new(), controls, vec![("ok", "Simulate"), ("cancel", "Cancel")])
+}
+
+fn build_insert_model_equation_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let st = &app.canvas_dialogs.insert_model_equation;
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let controls = vec![
+        node(
+            "equation.result_sheet_id",
+            "combobox",
+            "Regression ResultSheet",
+            json!(st.result_sheet_id.as_ref().map(SheetId::as_str)),
+            ControlEnablement::enabled(),
+            pos(0),
+        ),
+        node("equation.data_set_index", "spinbutton", "Data set index", json!(st.data_set_index), ControlEnablement::enabled(), pos(1)),
+        node("equation.mode", "combobox", "Equation display mode", json!(equation_display_mode_str(st.mode)), ControlEnablement::enabled(), pos(2)),
+        node(
+            "equation.toggle_mode",
+            "button",
+            "Toggle Symbolic / Substituted",
+            json!(equation_display_mode_str(st.mode)),
+            ControlEnablement::enabled(),
+            pos(3),
+        ),
+        node("equation.font_size_pt", "spinbutton", "Font size (pt)", json!(st.font_size_pt), ControlEnablement::enabled(), pos(4)),
+        node("equation.bordered", "checkbox", "Draw border", json!(st.bordered), ControlEnablement::enabled(), pos(5)),
+        node("equation.update_existing", "checkbox", "Update existing equation", json!(st.update_existing), ControlEnablement::enabled(), pos(6)),
+    ];
+    ("Insert Model Equation", Some(graph_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "Insert"), ("cancel", "Cancel")])
 }
 
 fn build_print_dialog_nodes(app: &UiApp, sheet_id: Option<&SheetId>, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -1258,6 +2028,10 @@ fn build_generic_dialog_nodes(dialog: &ActiveDialog, _bx: f64, _by: f64, _includ
         ActiveDialog::ConvertArchetype { sheet_id } => ("Convert Table Archetype...", Some(sheet_id)),
         ActiveDialog::ImportReshape => ("Import Reshape (Plate Map / Tidy Long)", None),
         ActiveDialog::ExcludeWithReason { sheet_id } => ("Exclude Selection with Reason", Some(sheet_id)),
+        ActiveDialog::RandomizeGroups => ("Randomize Groups...", None),
+        ActiveDialog::RandomSampleRows { .. } => ("Random Sample Rows...", None),
+        ActiveDialog::SimulateDistributions => ("Simulate Distributions...", None),
+        ActiveDialog::InsertModelEquation { graph_sheet_id } => ("Insert Model Equation", Some(graph_sheet_id)),
         ActiveDialog::Print { sheet_id } => ("Print...", sheet_id.as_ref()),
         ActiveDialog::CommandPalette => ("Command Palette (Cmd+K)", None),
         ActiveDialog::About => ("About LumenCraft", None),
@@ -1298,6 +2072,10 @@ fn active_dialog_slug(dialog: &ActiveDialog) -> String {
         ActiveDialog::ExcludeWithReason { .. } => String::from("exclude_with_reason"),
         ActiveDialog::FormatSelectedPoints { .. } => String::from("format_selected_points"),
         ActiveDialog::PowerAndSampleSize => String::from("power_and_sample_size"),
+        ActiveDialog::RandomizeGroups => String::from("randomize_groups"),
+        ActiveDialog::RandomSampleRows { .. } => String::from("random_sample_rows"),
+        ActiveDialog::SimulateDistributions => String::from("simulate_distributions"),
+        ActiveDialog::InsertModelEquation { .. } => String::from("insert_model_equation"),
         ActiveDialog::Print { .. } => String::from("print"),
         ActiveDialog::CommandPalette => String::from("command_palette"),
         ActiveDialog::About => String::from("about"),

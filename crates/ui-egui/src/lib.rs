@@ -9,6 +9,7 @@
 pub mod compositor;
 pub mod control_io;
 pub mod dialogs_canvas;
+pub mod dialogs_r9;
 pub mod grid_view;
 mod gui_actions;
 pub mod i18n;
@@ -44,6 +45,7 @@ pub use dialogs_canvas::{
     ActiveDialog, AssumptionDiagnosticBanner, CanvasDialogState, ConvertArchetypeDialogState, ExcludeWithReasonDialogState, PrintDialogState,
     RemediationKind, SplitWorkspaceState,
 };
+pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use i18n::{LOCALES, LocalePreset, locale_display_name, normalize_locale, tr};
 pub use inspect::{UiTreeSnapshot, inspect_ui_tree};
@@ -478,7 +480,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 32);
+        assert_eq!(UI_COMMANDS.len(), 45);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",

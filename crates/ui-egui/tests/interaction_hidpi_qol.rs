@@ -7,14 +7,14 @@
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, ChecklistItem, ChecklistStatus, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet,
     GraphAnnotation, GraphKind, GraphSheet, GroupedTable, InfoConstant, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec,
-    ProjectDocument, RectPt, ResultSheet, ResultStatus, SheetFolderKind, SheetId, SubcolumnMode, TableArchetype, TableKind, TwoGroupMethod,
-    TwoGroupSpec, XyTable,
+    ProjectDocument, RectPt, RemediationKind, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetFolderKind, SheetId,
+    SubcolumnMode, TableArchetype, TableKind, TwoGroupMethod, TwoGroupSpec, XyTable,
 };
 use lumencraft_engine::Session;
 use lumencraft_palette::CanvasPreviewFilter;
 use lumencraft_tools::canvas::SnapOrientation;
 use lumencraft_tools::{CanvasToolMode, GridCellCoord};
-use lumencraft_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, RemediationKind, compute_workspace_layout};
+use lumencraft_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, compute_workspace_layout};
 use lumencraft_ui_egui::{
     ClipboardBundle, GridViewState, KeyModifiers, PointerButton, UiApp, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, WorkspacePixelRect,
     write_os_clipboard_bundle,
@@ -69,11 +69,29 @@ fn build_qol_test_project() -> ProjectDocument {
     spec.selected_data_sets = vec![0, 1];
     let mut res = ResultSheet::new(spec).expect("res");
     res.status = ResultStatus::UpToDate;
+    res.tabs.push(ResultTab {
+        id: String::from("summary"),
+        title: String::from("Tabular Results"),
+        kind: ResultTabKind::MainSummary,
+        column_headers: vec![String::from("Metric"), String::from("Value")],
+        row_labels: vec![String::from("1")],
+        rows: vec![vec![ResultCell::Text(String::from("p value")), ResultCell::Number { value: 0.04, prefix: None, units: None }]],
+        footnotes: vec![],
+    });
+    res.tabs.push(ResultTab {
+        id: String::from("diagnostics"),
+        title: String::from("Diagnostics"),
+        kind: ResultTabKind::Diagnostics,
+        column_headers: vec![String::from("Check"), String::from("Statistic")],
+        row_labels: vec![String::from("1")],
+        rows: vec![vec![ResultCell::Text(String::from("Levene's test")), ResultCell::Text(String::from("F = 8.42, p = 0.008"))]],
+        footnotes: vec![],
+    });
     res.checklist = vec![ChecklistItem {
         assumption: String::from("Equal variances (Levene's test)"),
         status: ChecklistStatus::Violated,
         diagnostic_metric: Some(String::from("F = 8.42, p = 0.008")),
-        explanation: String::from("Groups show unequal variance; consider Welch's t test."),
+        explanation: String::from("Group variance spread dispersion differed across samples; consider Welch's t test."),
         remediation: Some(RemediationKind::WelchT),
     }];
     doc.add_result_sheet(res).expect("add res");
@@ -570,11 +588,21 @@ fn qol3_qol6_qol7_exclude_reason_report_and_remediation_sibling() {
         assert!(!text.is_empty(), "empty report for format {fmt}");
     }
 
-    // QOL-7: AssumptionDiagnosticBanner + clicking banner executes non-destructive sibling Welch t-test.
+    // QOL-7: AssumptionDiagnosticBanner is strictly diagnostics-only: clicking banner switches to
+    // the Diagnostics/Residuals tab on the SAME ResultSheet without creating sibling ResultSheets
+    // or mutating ProjectDocument, and `ui.result.applyRemediation` is rejected by policy.
     let rs_before = app.document().result_sheet(&"res-t".into()).expect("res-t");
     let banner = AssumptionDiagnosticBanner::from_result(rs_before).expect("diagnostic banner");
-    assert_eq!(banner.remediation_kind, RemediationKind::WelchT);
+    assert_eq!(banner.source_result_id.as_str(), "res-t");
+    assert_eq!(banner.severity, ChecklistStatus::Violated);
+    assert!(banner.diagnostic_metric.is_some(), "expected numeric diagnostic_metric on banner: {banner:?}");
+    assert!(!banner.detail_tab_ids.is_empty(), "expected detail tab link on same ResultSheet: {banner:?}");
+    assert!(
+        !banner.summary.to_ascii_lowercase().contains("consider") && !banner.limitation_note.to_ascii_lowercase().contains("consider"),
+        "banner must be diagnostics-only without prescribing tests: {banner:?}"
+    );
     let initial_result_count = app.document().result_sheets.len();
+    let initial_undo_depth = app.session().undo_depth();
 
     let rmap = app.layout_map(metrics);
     let brect = rmap.result_banner_rect.expect("banner rect rendered on ResultSheet");
@@ -584,30 +612,35 @@ fn qol3_qol6_qol7_exclude_reason_report_and_remediation_sibling() {
             UiInputEvent::PointerDown { x: bpos[0], y: bpos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
             metrics,
         )
-        .expect("banner remediation click");
-    assert_eq!(banner_click.command_id.as_deref(), Some("ui.result.applyRemediation"));
-    assert_eq!(app.document().result_sheets.len(), initial_result_count + 1);
+        .expect("banner diagnostics click");
+    assert_eq!(banner_click.command_id.as_deref(), Some("ui.result.inspectDiagnostics"));
+    assert_eq!(app.document().result_sheets.len(), initial_result_count, "zero sibling ResultSheet creation");
+    assert_eq!(app.session().undo_depth(), initial_undo_depth, "inspectDiagnostics must not mutate undo stack");
+    assert_eq!(app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("res-t"));
+    assert_eq!(banner_click.command_result.as_ref().unwrap()["tab_id"], json!(banner.detail_tab_ids[0]));
 
-    // Original analysis must remain untouched (UnpairedT), while new sibling uses WelchT!
+    // Deprecated `ui.result.applyRemediation` must fail with clear `diagnostics_only_policy` error & zero mutation.
+    let rem_err = lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
+        .expect_err("QOL-7 diagnostics-only must reject applyRemediation");
+    assert!(rem_err.contains("diagnostics_only_policy"));
+    assert_eq!(app.document().result_sheets.len(), initial_result_count);
+
+    // Original analysis remains untouched until user switches explicitly via Cmd+T / EditParameters.
     let orig_after = app.document().result_sheet(&"res-t".into()).unwrap();
     assert!(matches!(orig_after.analysis.kind, AnalysisKind::TwoGroupComparison(ref s) if s.method == TwoGroupMethod::UnpairedT));
-    let sibling_id = banner_click.command_result.as_ref().unwrap()["sibling_result_id"].as_str().unwrap();
-    let sibling = app.document().result_sheet(&SheetId::try_new(sibling_id).unwrap()).unwrap();
-    assert!(matches!(sibling.analysis.kind, AnalysisKind::TwoGroupComparison(ref s) if s.method == TwoGroupMethod::WelchT));
 }
 
 #[test]
-fn qol7_assumption_banner_honors_structured_remediation_when_wording_changes() {
+fn qol7_assumption_banner_reports_small_n_info_and_blocks_remediation_mutation() {
     let mut doc = build_qol_test_project();
     {
         let res_t = doc.result_sheet_mut(&"res-t".into()).expect("res-t");
-        // Replace English wording completely (zero keywords like variance/Levene/Welch) while
-        // assigning a different structured remediation (`MannWhitneyU`).
+        // Small-N / inconclusive Info checklist entry even without heuristic keywords triggers diagnostics-only banner.
         res_t.checklist = vec![ChecklistItem {
-            assumption: String::from("Diagnostische Verteilungspruefung"),
-            status: ChecklistStatus::Warn,
-            diagnostic_metric: Some(String::from("p = 0.012")),
-            explanation: String::from("Nichtparametrische Alternative verwenden."),
+            assumption: String::from("Shapiro-Wilk normality check"),
+            status: ChecklistStatus::Info,
+            diagnostic_metric: Some(String::from("n = 4")),
+            explanation: String::from("Inconclusive normality power due to small sample size (n = 4); consider Mann-Whitney U."),
             remediation: Some(RemediationKind::MannWhitneyU),
         }];
     }
@@ -615,16 +648,26 @@ fn qol7_assumption_banner_honors_structured_remediation_when_wording_changes() {
     let mut app = UiApp::from_session(Session::from_document(doc));
     app.execute_command("sheet.select", json!({ "sheet_id": "res-t" })).expect("select res-t");
     let rs = app.document().result_sheet(&"res-t".into()).expect("res-t");
-    let banner = AssumptionDiagnosticBanner::from_result(rs).expect("banner from structured remediation");
-    assert_eq!(banner.remediation_kind, RemediationKind::MannWhitneyU);
+    let banner = AssumptionDiagnosticBanner::from_result(rs).expect("banner from inconclusive small-N Info item");
+    assert_eq!(banner.severity, ChecklistStatus::Info);
+    assert_eq!(banner.diagnostic_metric.as_deref(), Some("n = 4"));
+    assert!(
+        !banner.limitation_note.to_ascii_lowercase().contains("consider"),
+        "limitation_note must omit prescriptive test advice: {}",
+        banner.limitation_note
+    );
 
-    let applied = lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
-        .expect("apply remediation")
+    let inspected = lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.result.inspectDiagnostics", &json!({ "result_sheet_id": "res-t" }))
+        .expect("inspectDiagnostics ok")
         .expect("handled");
-    assert_eq!(applied["remediation_kind"], "mann_whitney");
-    let sibling_id = applied["sibling_result_id"].as_str().expect("sibling id");
-    let sibling = app.document().result_sheet(&SheetId::try_new(sibling_id).unwrap()).expect("sibling sheet");
-    assert!(matches!(sibling.analysis.kind, AnalysisKind::TwoGroupComparison(ref s) if s.method == TwoGroupMethod::MannWhitneyU));
+    assert_eq!(inspected["mutated"], false);
+    assert_eq!(inspected["tab_id"], "diagnostics");
+
+    let initial_count = app.document().result_sheets.len();
+    let err = lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
+        .expect_err("applyRemediation must reject under QOL-7 diagnostics-only policy");
+    assert!(err.contains("diagnostics_only_policy"));
+    assert_eq!(app.document().result_sheets.len(), initial_count);
 }
 
 #[test]

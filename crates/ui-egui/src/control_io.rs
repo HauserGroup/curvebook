@@ -6,7 +6,10 @@ use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpListener};
 
 use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
-use lumencraft_doc::{CanvasResizeMode, ChecklistStatus, ErrorCode, FigureCanvasPreset, ProjectDocument, SheetFolderKind, SheetId, SheetSection};
+use lumencraft_doc::{
+    AnalysisKind, CanvasResizeMode, ErrorCode, FigureCanvasPreset, MultipleVariablesTable, MultivariateSpec, ProjectDocument, ResultCell,
+    ResultSheet, SheetFolderKind, SheetId, SheetSection, TableArchetype,
+};
 use lumencraft_engine::{EngineError, Session, cmd};
 use lumencraft_palette::{CanvasPreviewFilter, Rgba8};
 use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
@@ -16,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
-use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, RemediationKind};
+use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, AxisTarget};
 use crate::grid_view::ImportReshapeMode;
 use crate::gui_actions::{dispatch as dispatch_gui_action_impl, is_gui_action_method};
 use crate::i18n::{LocalePreset, is_rtl_locale, locale_display_name, normalize_locale};
@@ -427,12 +430,25 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
         "ui.brush.point" => map_ui_result(dispatch_ui_brush_point(app, params)),
         "ui.result.copyMethodsReport" => dispatch_ui_result_copy_methods_report(app, params).map(Some),
         "ui.result.applyRemediation" => dispatch_ui_result_apply_remediation(app, params).map(Some),
+        "ui.result.inspectDiagnostics" => map_ui_result(dispatch_ui_result_inspect_diagnostics(app, params)),
         "ui.canvas.applyPreset" => dispatch_ui_canvas_apply_preset(app, params).map(Some),
         "ui.canvas.preflight" => dispatch_ui_canvas_preflight(app, params).map(Some),
         "ui.previewFilter.set" => map_ui_result(dispatch_ui_preview_filter_set(app, params)),
         "ui.presentation.toggle" => map_ui_result(dispatch_ui_presentation_toggle(app, params)),
         "ui.grid.excludeWithReason" => dispatch_ui_grid_exclude_with_reason(app, params).map(Some),
         "ui.table.convertArchetype.open" => map_ui_result(dispatch_ui_table_convert_archetype_open(app, params)),
+        "ui.table.randomizeGroups" => map_ui_result(dispatch_ui_randomize_groups_open(app, params)),
+        "ui.table.randomSampleRows" => map_ui_result(dispatch_ui_random_sample_rows_open(app, params)),
+        "ui.table.simulateDistributions" => map_ui_result(dispatch_ui_simulate_distributions_open(app, params)),
+        "ui.table.openFormulaBar" => map_ui_result(dispatch_ui_open_formula_bar(app, params)),
+        "ui.result.appendClusterColumn" => dispatch_ui_append_cluster_column(app, params).map(Some),
+        "ui.graph.insertModelEquation" => map_ui_result(dispatch_ui_insert_model_equation_open(app, params)),
+        "ui.graph.bubblePlot.open" => map_ui_result(dispatch_ui_bubble_plot_open(app, params)),
+        "ui.graph.format.open" => map_ui_result(dispatch_ui_format_graph_open(app, params)),
+        "ui.graph.axes.open" => map_ui_result(dispatch_ui_format_axes_open(app, params)),
+        "ui.graph.pairwise.open" => map_ui_result(dispatch_ui_pairwise_open(app, params)),
+        "ui.layout.composer.open" => map_ui_result(dispatch_ui_layout_composer_open(app, params)),
+        "ui.export.figure.open" => map_ui_result(dispatch_ui_export_figure_open(app, params)),
         "ui.import.reshape.open" => map_ui_result(dispatch_ui_import_reshape_open(app, params)),
         "ui.print.open" | "file.print" => map_ui_result(dispatch_ui_print_open(app, params)),
         "app.about" => {
@@ -482,7 +498,7 @@ fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, C
 }
 
 fn is_control_readonly_ui_command(command_id: &str) -> bool {
-    command_id == "ui.canvas.preflight"
+    matches!(command_id, "ui.canvas.preflight" | "ui.result.inspectDiagnostics" | "result.inspect_diagnostics")
 }
 
 fn dispatch_command_by_id(app: &mut UiApp, command_id: &str, params: Value) -> Result<Value, ControlCallError> {
@@ -1153,64 +1169,83 @@ fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Re
     }))
 }
 
-fn dispatch_ui_result_apply_remediation(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
-    let doc = app.document().clone();
-    let rs_id = if let Some(raw) = params.get("result_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
-        SheetId::try_new(raw).map_err(|e| e.to_string())?
-    } else if let Some(explicit) = resolve_sheet_id_param(params)? {
-        explicit
-    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
-        active.clone()
-    } else {
-        doc.result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("no result sheet available for remediation"))?
-    };
-
-    let rs = doc.result_sheet(&rs_id).ok_or_else(|| format!("result sheet `{}` not found", rs_id.as_str()))?;
-    let mut banner = AssumptionDiagnosticBanner::from_result(rs).unwrap_or_else(|| AssumptionDiagnosticBanner {
-        source_result_id: rs.id.clone(),
-        severity: ChecklistStatus::Warn,
-        summary: String::from("Manual remediation requested"),
-        recommendation_label: String::from("Run robust non-parametric alternative"),
-        remediation_kind: RemediationKind::WelchT,
-    });
-    if let Some(raw_kind) = params.get("kind").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
-        banner.remediation_kind = match raw_kind.to_ascii_lowercase().as_str() {
-            "welch_t" | "welcht" => RemediationKind::WelchT,
-            "mann_whitney" | "mannwhitney" => RemediationKind::MannWhitneyU,
-            "wilcoxon" | "wilcoxon_signed_rank" => RemediationKind::WilcoxonSignedRank,
-            "one_sample_wilcoxon" => RemediationKind::OneSampleWilcoxon,
-            "welch_anova" => RemediationKind::WelchAnova,
-            "kruskal_wallis" | "kruskalwallis" => RemediationKind::KruskalWallis,
-            "friedman" => RemediationKind::Friedman,
-            other => return Err(ControlCallError::from(format!("unsupported remediation kind `{other}`"))),
-        };
-    } else if AssumptionDiagnosticBanner::from_result(rs).is_none() {
-        return Err(ControlCallError::from(format!("no assumption violation banner active for result sheet `{}`", rs_id.as_str())));
+fn resolve_target_result_sheet_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    if let Some(raw) = params.get("result_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        return SheetId::try_new(raw).map_err(|e| e.to_string());
     }
-
-    let sibling_id = next_sibling_result_id(&doc, rs_id.as_str())?;
-    let intent = banner.build_sibling_analysis_intent(rs, &sibling_id);
-    app.execute_command(&intent.command_id, intent.params)?;
-    let doc_after = app.document().clone();
-    app.canvas_dialogs.on_sheet_selected(&doc_after, &sibling_id);
-    Ok(json!({
-        "source_result_id": rs_id.as_str(),
-        "sibling_result_id": sibling_id.as_str(),
-        "remediation_kind": banner.remediation_kind.engine_kind(),
-        "label": banner.remediation_kind.label(),
-    }))
+    if let Some(explicit) = resolve_sheet_id_param(params)? {
+        return Ok(explicit);
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
+        return Ok(active.clone());
+    }
+    doc.result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("no result sheet available"))
 }
 
-fn next_sibling_result_id(doc: &ProjectDocument, base: &str) -> Result<SheetId, String> {
-    let mut suffix = 1usize;
-    loop {
-        let candidate_raw = format!("{base}-remediation-{suffix}");
-        let candidate = SheetId::try_new(&candidate_raw).map_err(|err| err.to_string())?;
-        if doc.sheet_section(&candidate).is_none() {
-            return Ok(candidate);
-        }
-        suffix = suffix.saturating_add(1);
+fn dispatch_ui_result_apply_remediation(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    let rs_id = resolve_target_result_sheet_id(app.document(), params).ok();
+    Err(EngineError::with_code(
+        ErrorCode::Conflict,
+        "automatic assumption remediation is disabled under QOL-7 diagnostics-only policy (diagnostics_only_policy); zero document mutation performed",
+    )
+    .with_details(json!({
+        "code": "diagnostics_only_policy",
+        "policy": "QOL-7",
+        "result_sheet_id": rs_id.as_ref().map(SheetId::as_str),
+        "mutated": false,
+    }))
+    .with_remediation("Use `ui.result.inspectDiagnostics` to inspect Residuals/Diagnostics tabs or press Cmd+T to change test parameters explicitly.")
+    .into())
+}
+
+fn dispatch_ui_result_inspect_diagnostics(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let rs_id = resolve_target_result_sheet_id(&doc, params)?;
+    let rs = doc.result_sheet(&rs_id).ok_or_else(|| format!("result sheet `{}` not found", rs_id.as_str()))?;
+    app.canvas_dialogs.result_view.sync_with_result(rs);
+    let banner = AssumptionDiagnosticBanner::from_result(rs);
+
+    let requested_tab = params.get("tab_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let mut detail_tab_ids: Vec<String> = banner.as_ref().map(|b| b.detail_tab_ids.clone()).unwrap_or_else(|| {
+        rs.tabs
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.kind,
+                    lumencraft_doc::ResultTabKind::Diagnostics
+                        | lumencraft_doc::ResultTabKind::NormalQq
+                        | lumencraft_doc::ResultTabKind::Residuals
+                        | lumencraft_doc::ResultTabKind::CovarianceMatrix
+                        | lumencraft_doc::ResultTabKind::LogMinusLog
+                )
+            })
+            .map(|t| t.id.clone())
+            .collect()
+    });
+    if detail_tab_ids.is_empty() {
+        detail_tab_ids = rs.tabs.iter().map(|t| t.id.clone()).collect();
     }
+
+    let target_tab_id = requested_tab
+        .or_else(|| detail_tab_ids.first().map(String::as_str))
+        .or_else(|| params.get("tab_index").and_then(Value::as_u64).and_then(|i| rs.tabs.get(i as usize).map(|t| t.id.as_str())));
+
+    if let Some(tab_id) = target_tab_id {
+        let _ = app.canvas_dialogs.result_view.select_tab_by_id(rs, tab_id);
+    } else if let Some(idx) = params.get("tab_index").and_then(Value::as_u64) {
+        app.canvas_dialogs.result_view.select_tab(idx as usize, rs.tabs.len());
+    }
+    let active_tab_id = app.canvas_dialogs.result_view.active_tab(rs).map(|t| t.id.clone());
+
+    Ok(json!({
+        "result_sheet_id": rs_id.as_str(),
+        "active_tab_index": app.canvas_dialogs.result_view.active_tab_index,
+        "tab_id": active_tab_id,
+        "active_tab_id": active_tab_id,
+        "detail_tab_ids": detail_tab_ids,
+        "banner": banner,
+        "mutated": false,
+    }))
 }
 
 fn dispatch_ui_canvas_apply_preset(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
@@ -1329,6 +1364,381 @@ fn dispatch_ui_table_convert_archetype_open(app: &mut UiApp, params: &Value) -> 
     Ok(json!({
         "dialog": "ConvertArchetype",
         "sheet_id": sheet_id.as_str(),
+    }))
+}
+
+fn resolve_target_graph_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    if let Some(id) = resolve_sheet_id_param(params)? {
+        if doc.graph_sheet(&id).is_some() {
+            return Ok(id);
+        }
+        return Err(format!("graph sheet `{}` not found", id.as_str()));
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some()) {
+        return Ok(active.clone());
+    }
+    doc.graph_sheets.first().map(|g| g.id.clone()).ok_or_else(|| String::from("no graph sheet available"))
+}
+
+fn resolve_target_data_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    if let Some(raw) = params.get("source_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+        let id = SheetId::try_new(raw).map_err(|e| e.to_string())?;
+        if doc.data_sheet(&id).is_some() {
+            return Ok(id);
+        }
+        return Err(format!("data sheet `{}` not found", id.as_str()));
+    }
+    if let Some(id) = resolve_sheet_id_param(params)? {
+        if doc.data_sheet(&id).is_some() {
+            return Ok(id);
+        }
+        return Err(format!("data sheet `{}` not found", id.as_str()));
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        return Ok(active.clone());
+    }
+    doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available"))
+}
+
+fn dispatch_ui_randomize_groups_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    app.canvas_dialogs.open_randomize_groups(&doc);
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.randomize_groups.apply_field_patch(fields)?;
+    }
+    Ok(json!({
+        "dialog": "RandomizeGroups",
+        "groups": app.canvas_dialogs.randomize_groups.groups,
+        "subject_count": app.canvas_dialogs.randomize_groups.subject_count,
+    }))
+}
+
+fn dispatch_ui_random_sample_rows_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let sheet_id = resolve_target_data_id(&doc, params)?;
+    if !app.canvas_dialogs.open_random_sample_rows(&doc, Some(&sheet_id)) {
+        return Err(format!("data sheet `{}` not found", sheet_id.as_str()));
+    }
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.random_sample_rows.apply_field_patch(fields)?;
+    }
+    Ok(json!({
+        "dialog": "RandomSampleRows",
+        "source_sheet_id": sheet_id.as_str(),
+        "sample_size": app.canvas_dialogs.random_sample_rows.sample_size,
+    }))
+}
+
+fn dispatch_ui_simulate_distributions_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    app.canvas_dialogs.open_simulate_distributions();
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.simulate_distributions.apply_field_patch(fields)?;
+    }
+    Ok(json!({
+        "dialog": "SimulateDistributions",
+        "n_rows": app.canvas_dialogs.simulate_distributions.n_rows,
+        "column_count": app.canvas_dialogs.simulate_distributions.columns.len(),
+    }))
+}
+
+fn dispatch_ui_insert_model_equation_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    if !app.canvas_dialogs.open_insert_model_equation(&doc, &graph_id) {
+        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
+    }
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.insert_model_equation.apply_field_patch(fields)?;
+    }
+    Ok(json!({
+        "dialog": "InsertModelEquation",
+        "graph_sheet_id": graph_id.as_str(),
+        "result_sheet_id": app.canvas_dialogs.insert_model_equation.result_sheet_id.as_ref().map(SheetId::as_str),
+        "mode": app.canvas_dialogs.insert_model_equation.mode,
+    }))
+}
+
+fn dispatch_ui_bubble_plot_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    if !app.canvas_dialogs.open_bubble_plot(&doc, &graph_id) {
+        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
+    }
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.bubble_plot.apply_field_patch(fields)?;
+    }
+    Ok(json!({ "dialog": "BubblePlotInspector", "graph_sheet_id": graph_id.as_str() }))
+}
+
+fn dispatch_ui_format_graph_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    if !app.canvas_dialogs.open_format_graph(&doc, &graph_id) {
+        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
+    }
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.format_graph.apply_field_patch(fields)?;
+    }
+    Ok(json!({ "dialog": "FormatGraph", "graph_sheet_id": graph_id.as_str() }))
+}
+
+fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    let graph = doc.graph_sheet(&graph_id).ok_or_else(|| format!("graph sheet `{}` not found", graph_id.as_str()))?;
+    let initial_target = match params.get("target_axis").and_then(Value::as_str).map(str::trim).unwrap_or("y").to_ascii_lowercase().as_str() {
+        "x" => AxisTarget::X,
+        "y2" => AxisTarget::Y2,
+        _ => AxisTarget::Y,
+    };
+    app.canvas_dialogs.format_axes.sync_from_graph(graph, initial_target);
+    app.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: graph_id.clone() };
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.format_axes.apply_field_patch(fields, Some(&doc))?;
+    }
+    Ok(json!({
+        "dialog": "FormatAxes",
+        "sheet_id": graph_id.as_str(),
+        "target_axis": format!("{:?}", app.canvas_dialogs.format_axes.target_axis),
+    }))
+}
+
+fn dispatch_ui_open_formula_bar(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let ds_id = if let Some(explicit) = resolve_sheet_id_param(params)? {
+        explicit
+    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        active.clone()
+    } else {
+        doc.data_sheets.first().map(|s| s.id.clone()).ok_or_else(|| String::from("no data sheet available"))?
+    };
+    let ds = doc.data_sheet(&ds_id).ok_or_else(|| format!("data sheet `{}` not found", ds_id.as_str()))?;
+    let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+        return Err(format!("formula bar requires a Multiple Variables sheet (`{}` is {:?})", ds_id.as_str(), ds.kind()));
+    };
+
+    let req_title = params.get("title").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let req_col = params.get("column").or_else(|| params.get("col")).and_then(Value::as_u64).map(|n| n as usize);
+
+    match (req_col, req_title) {
+        (Some(col), maybe_title) if col < mv.variables.len() => {
+            app.grid.formula_bar.open_for_column(ds, col, Some(&doc));
+            if let Some(t) = maybe_title {
+                app.grid.formula_bar.target_title = t.to_owned();
+            }
+        }
+        (Some(col), Some(t)) if col == mv.variables.len() => {
+            app.grid.formula_bar.open_for_new_column(ds, t, Some(&doc));
+        }
+        (Some(col), _) => {
+            return Err(format!("variable column {col} out of range (sheet has {} variables)", mv.variables.len()));
+        }
+        (None, Some(t)) => {
+            if let Some(col) = mv.find_variable(t) {
+                app.grid.formula_bar.open_for_column(ds, col, Some(&doc));
+            } else {
+                app.grid.formula_bar.open_for_new_column(ds, t, Some(&doc));
+            }
+        }
+        (None, None) => {
+            let fallback_col = app.grid.tool.active.map(|c| c.col).filter(|c| *c < mv.variables.len()).unwrap_or(0);
+            if fallback_col < mv.variables.len() {
+                app.grid.formula_bar.open_for_column(ds, fallback_col, Some(&doc));
+            } else {
+                return Err(String::from("MultipleVariables sheet has no variables to target"));
+            }
+        }
+    }
+
+    app.focus_widget_id = Some(String::from("formula_bar.input"));
+
+    Ok(json!({
+        "sheet_id": ds_id.as_str(),
+        "active": app.grid.formula_bar.active,
+        "target_column": app.grid.formula_bar.target_column,
+        "target_title": app.grid.formula_bar.target_title,
+        "input": app.grid.formula_bar.input,
+        "is_valid": app.grid.formula_bar.is_valid,
+        "parse_error": app.grid.formula_bar.parse_error,
+    }))
+}
+
+fn dispatch_ui_append_cluster_column(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    let doc = app.document().clone();
+    let rs_id = resolve_target_result_sheet_id(&doc, params)?;
+    let rs = doc.result_sheet(&rs_id).ok_or_else(|| format!("result sheet `{}` not found", rs_id.as_str()))?.clone();
+    if !matches!(rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })) {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("result sheet `{}` is not a Cluster analysis", rs_id.as_str())).into());
+    }
+    let source_id = rs.analysis.source_sheet_id.clone();
+    let ds = doc.data_sheet(&source_id).ok_or_else(|| format!("source data sheet `{}` not found", source_id.as_str()))?;
+    let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("cluster column append requires a MultipleVariables source table (`{}`)", source_id.as_str()),
+        )
+        .into());
+    };
+    let col_title = params
+        .get("column_title")
+        .or_else(|| params.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("Cluster");
+    let (assigned, assigned_count) = resolve_cluster_assignment_column_labels(&rs, mv)?;
+    if assigned_count == 0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "clustering `kmeans-assignments` tab has no cluster assignments").into());
+    }
+
+    if let Some(col_idx) = mv.find_variable(col_title) {
+        let edits: Vec<Value> =
+            assigned.iter().enumerate().map(|(row, label_opt)| json!({ "row": row, "col": col_idx, "value": label_opt.as_deref() })).collect();
+        app.execute_command("table.setCells", json!({ "sheet_id": source_id.as_str(), "edits": edits }))?;
+        app.execute_command("table.setVariableRole", json!({ "sheet_id": source_id.as_str(), "col": col_idx, "role": "categorical" }))?;
+        return Ok(json!({
+            "result_sheet_id": rs_id.as_str(),
+            "source_sheet_id": source_id.as_str(),
+            "column": col_idx,
+            "title": col_title,
+            "updated_existing": true,
+            "assigned_rows": assigned_count,
+        }));
+    }
+
+    let target_col = mv.variables.len();
+    let rows: Vec<Vec<Value>> = assigned.iter().map(|opt| vec![opt.as_ref().map_or(Value::Null, |s| Value::String(s.clone()))]).collect();
+    app.execute_command("table.paste", json!({ "sheet_id": source_id.as_str(), "mode": "append_columns", "rows": rows }))?;
+    app.execute_command("table.setGroupTitles", json!({ "sheet_id": source_id.as_str(), "col": target_col, "title": col_title }))?;
+    app.execute_command("table.setVariableRole", json!({ "sheet_id": source_id.as_str(), "col": target_col, "role": "categorical" }))?;
+
+    Ok(json!({
+        "result_sheet_id": rs_id.as_str(),
+        "source_sheet_id": source_id.as_str(),
+        "column": target_col,
+        "title": col_title,
+        "updated_existing": false,
+        "assigned_rows": assigned_count,
+    }))
+}
+
+fn resolve_cluster_assignment_column_labels(rs: &ResultSheet, mv: &MultipleVariablesTable) -> Result<(Vec<Option<String>>, usize), String> {
+    let tab = rs
+        .tabs
+        .iter()
+        .find(|t| t.id == "kmeans-assignments")
+        .ok_or_else(|| String::from("Clustering result sheet has no `kmeans-assignments` tab; enable K-means (`k_means_k`) first"))?;
+    let row_count = mv.row_count();
+    let mut assigned = vec![None; row_count];
+    let mut assigned_count = 0usize;
+    for (k, row) in tab.rows.iter().enumerate() {
+        let Some(cluster_label) = format_cluster_assignment_cell(row.first()) else {
+            continue;
+        };
+        let Some(target_row) = map_cluster_row_label_to_mv_row(tab.row_labels.get(k).map(String::as_str), k, mv) else {
+            continue;
+        };
+        if let Some(slot) = assigned.get_mut(target_row) {
+            if slot.is_none() {
+                assigned_count += 1;
+            }
+            *slot = Some(cluster_label);
+        }
+    }
+    Ok((assigned, assigned_count))
+}
+
+fn format_cluster_assignment_cell(cell: Option<&ResultCell>) -> Option<String> {
+    match cell? {
+        ResultCell::Number { value, .. } if value.is_finite() => {
+            let cluster_num = (*value).round() as i64;
+            (cluster_num >= 1).then(|| format!("Cluster {cluster_num}"))
+        }
+        ResultCell::Text(s) => {
+            let trimmed = s.trim();
+            if trimmed.is_empty() { None } else { Some(trimmed.to_owned()) }
+        }
+        _ => None,
+    }
+}
+
+fn map_cluster_row_label_to_mv_row(label: Option<&str>, fallback_idx: usize, mv: &MultipleVariablesTable) -> Option<usize> {
+    let row_count = mv.row_count();
+    if let Some(lbl) = label.map(str::trim).filter(|s| !s.is_empty()) {
+        if let Some(pos) = mv.row_titles.iter().position(|t| !t.trim().is_empty() && t.trim() == lbl) {
+            return Some(pos);
+        }
+        if let Some(obs) = lbl.strip_prefix("Obs ").and_then(|s| s.trim().parse::<usize>().ok())
+            && obs >= 1
+            && obs <= row_count
+        {
+            return Some(obs - 1);
+        }
+    }
+    (fallback_idx < row_count).then_some(fallback_idx)
+}
+
+fn dispatch_ui_pairwise_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    if !app.canvas_dialogs.open_pairwise_comparisons(&doc, &graph_id) {
+        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
+    }
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.pairwise.apply_field_patch(fields, Some(&doc))?;
+    }
+    Ok(json!({ "dialog": "PairwiseComparisons", "graph_sheet_id": graph_id.as_str() }))
+}
+
+fn dispatch_ui_layout_composer_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let layout_id = if let Some(id) = resolve_sheet_id_param(params)? {
+        if doc.layout_sheet(&id).is_none() {
+            return Err(format!("layout sheet `{}` not found", id.as_str()));
+        }
+        id
+    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()) {
+        active.clone()
+    } else {
+        doc.layout_sheets.first().map(|l| l.id.clone()).ok_or_else(|| String::from("no layout sheet available"))?
+    };
+    let _ = app.canvas_dialogs.open_page_layout_composer(&doc, &layout_id);
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.page_layout.apply_field_patch(fields, Some(&doc))?;
+    }
+    Ok(json!({ "dialog": "PageLayoutComposer", "layout_sheet_id": layout_id.as_str() }))
+}
+
+fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
+    app.canvas_dialogs.open_export_figure(&sheet_id);
+    if let Some(fields) = params.as_object()
+        && !fields.is_empty()
+    {
+        app.canvas_dialogs.export_figure.apply_field_patch(fields)?;
+    }
+    Ok(json!({
+        "dialog": "ExportFigure",
+        "sheet_id": sheet_id.as_str(),
+        "format": app.canvas_dialogs.export_figure.format,
     }))
 }
 
@@ -1880,6 +2290,10 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::FormatSelectedPoints { .. } => "FormatSelectedPoints",
         ActiveDialog::PowerAndSampleSize => "PowerAndSampleSize",
         ActiveDialog::Print { .. } => "Print",
+        ActiveDialog::RandomizeGroups => "RandomizeGroups",
+        ActiveDialog::RandomSampleRows { .. } => "RandomSampleRows",
+        ActiveDialog::SimulateDistributions => "SimulateDistributions",
+        ActiveDialog::InsertModelEquation { .. } => "InsertModelEquation",
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::About => "About",
     }

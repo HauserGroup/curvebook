@@ -5,15 +5,16 @@
 use lumencraft_chart::{ChartScene, PreflightIssue};
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
-    CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ConnectingLineStyle, ContingencyMethod,
-    ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode,
-    FactorialAnovaSpec, FigureCanvasPreset, FramePreset, GlmFamily, GlmSpec, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject,
-    GroupedArrangement, HookSource, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec,
-    MathTransformPreset, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode,
-    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat,
-    PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument,
-    RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, RocSpec, SheetId, SizeChannelMapping, SummaryMeasure,
-    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WhiskerMethod,
+    CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint,
+    ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind, EquationDisplayMode,
+    ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod, FramePreset, GlmFamily, GlmSpec,
+    GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource, JournalWidthPreset,
+    LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec,
+    MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
+    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule,
+    ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResultCell,
+    ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec,
+    TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
 };
 use lumencraft_engine::{EngineError, Session, cmd};
 use lumencraft_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -22,6 +23,7 @@ use lumencraft_tools::{CanvasToolState, GridCellCoord, PanZoomInertiaState, Phys
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+pub use crate::dialogs_r9::*;
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::power_wizard::PowerWizardState;
 use crate::theme::UiThemeSpec;
@@ -92,6 +94,14 @@ pub enum ActiveDialog {
     PowerAndSampleSize,
     Print {
         sheet_id: Option<SheetId>,
+    },
+    RandomizeGroups,
+    RandomSampleRows {
+        source_sheet_id: Option<SheetId>,
+    },
+    SimulateDistributions,
+    InsertModelEquation {
+        graph_sheet_id: SheetId,
     },
     CommandPalette,
     About,
@@ -220,6 +230,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         category: AnalysisCategory::Transform,
         keywords: "simulate monte carlo synthetic equation noise",
         summary: "Generate deterministic or noisy replicate data from a parametric curve.",
+    },
+    AnalysisCatalogItem {
+        id: "transform.random_sample",
+        label: "Random Sample Rows",
+        category: AnalysisCategory::Transform,
+        keywords: "sample random stratified subset rows seed reproducible",
+        summary: "Draw a reproducible simple or stratified random sample of rows.",
     },
     AnalysisCatalogItem {
         id: "stats.descriptive",
@@ -402,6 +419,12 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             ],
             noise: lumencraft_doc::SimulationNoise::Gaussian { sd: 4.0 },
         })),
+        "transform.random_sample" => Some(AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
+            seed: 1,
+            sample_size: 10,
+            stratify_column: None,
+            proportional_allocation: true,
+        })),
         "stats.descriptive" => Some(AnalysisKind::DescriptiveStats(DescriptiveSpec::default())),
         "stats.outliers" => Some(AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 })),
         "stats.two_group" => Some(AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())),
@@ -440,7 +463,12 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         })),
         "stats.pca" => Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(7) })),
         "stats.corr_matrix" => Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
-        "stats.clustering" => Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: Some(3) })),
+        "stats.clustering" => Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering {
+            k_means_k: Some(3),
+            distance: lumencraft_doc::ClusterDistance::default(),
+            linkage: lumencraft_doc::ClusterLinkage::default(),
+            k_sweep_max: None,
+        })),
         "stats.multiple_row_t_tests" => Some(AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec::default())),
         "stats.bland_altman" => Some(AnalysisKind::BlandAltman(BlandAltmanSpec::default())),
         "stats.passing_bablok" => Some(AnalysisKind::PassingBablok(PassingBablokSpec::default())),
@@ -563,10 +591,126 @@ pub struct AnalyzeDialogState {
     pub transform_error_propagation: ErrorPropagationMode,
     #[serde(default)]
     pub transform_formula: Option<String>,
+    #[serde(default = "default_transform_target_archetype")]
+    pub transform_target_archetype: TableKind,
+    #[serde(default = "default_baseline_columns")]
+    pub baseline_columns: Vec<usize>,
+    #[serde(default = "default_baseline_operation")]
+    pub baseline_operation: BaselineOperation,
+    #[serde(default)]
+    pub two_group_method: Option<TwoGroupMethod>,
+    #[serde(default)]
+    pub two_group_hypothetical: f64,
+    #[serde(default)]
+    pub mv_group_column: Option<usize>,
+    #[serde(default)]
+    pub mv_response_column: Option<usize>,
+    #[serde(default)]
+    pub contingency_method: Option<ContingencyMethod>,
+    #[serde(default)]
+    pub contingency_null_proportion: Option<f64>,
+    #[serde(default)]
+    pub contingency_expected_proportions: Option<Vec<f64>>,
+    #[serde(default)]
+    pub factorial_three_way: bool,
+    #[serde(default)]
+    pub factorial_repeated_measures: RepeatedMeasuresDesign,
+    #[serde(default)]
+    pub factorial_ss_type: SumOfSquaresType,
+    #[serde(default)]
+    pub factorial_multiplicity: MultiplicityMethod,
+    #[serde(default)]
+    pub cluster_distance: ClusterDistance,
+    #[serde(default)]
+    pub cluster_linkage: ClusterLinkage,
+    #[serde(default)]
+    pub cluster_k_means_k: Option<usize>,
+    #[serde(default)]
+    pub cluster_k_sweep_max: Option<usize>,
+    #[serde(default = "default_true_flag")]
+    pub pca_standardize: bool,
+    #[serde(default)]
+    pub corr_spearman_rank: bool,
+    #[serde(default = "default_imputation_m")]
+    pub imputation_m: usize,
+    #[serde(default)]
+    pub glm_family: GlmFamily,
+    #[serde(default)]
+    pub glm_reference_levels: Vec<(usize, String)>,
+    #[serde(default = "default_true_flag")]
+    pub glm_compute_vif: bool,
+    #[serde(default)]
+    pub cox_time_column: Option<usize>,
+    #[serde(default)]
+    pub cox_status_column: Option<usize>,
+    #[serde(default)]
+    pub cox_predictor_columns: Vec<usize>,
+    #[serde(default)]
+    pub cox_tie_method: CoxTieMethod,
+    #[serde(default)]
+    pub cox_reference_levels: Vec<(usize, String)>,
+    #[serde(default)]
+    pub km_mv_time_column: Option<usize>,
+    #[serde(default)]
+    pub km_mv_status_column: Option<usize>,
+    #[serde(default = "default_true_flag")]
+    pub km_log_rank_mantel_cox: bool,
+    #[serde(default)]
+    pub km_gehan_breslow_wilcoxon: bool,
+    #[serde(default)]
+    pub km_trend_test: bool,
+    #[serde(default)]
+    pub km_multiplicity_method: MultiplicityMethod,
+    #[serde(default)]
+    pub custom_dsl: Option<String>,
+    #[serde(default)]
+    pub fit_method: FitMethod,
+    #[serde(default)]
+    pub fit_weighting: WeightingScheme,
+    #[serde(default)]
+    pub parameter_rules: Vec<ParameterRule>,
+    #[serde(default)]
+    pub mv_x_columns: Vec<usize>,
+    #[serde(default)]
+    pub mv_y_column: Option<usize>,
+    #[serde(default)]
+    pub mv_group_columns: Vec<usize>,
+    #[serde(default = "default_sample_seed")]
+    pub sample_seed: u64,
+    #[serde(default = "default_sample_size")]
+    pub sample_size: usize,
+    #[serde(default)]
+    pub sample_stratify_column: Option<usize>,
+    #[serde(default = "default_true_flag")]
+    pub sample_proportional: bool,
 }
 
 const fn default_transform_y() -> Option<MathTransformPreset> {
     Some(MathTransformPreset::Log10)
+}
+
+const fn default_transform_target_archetype() -> TableKind {
+    TableKind::Column
+}
+
+fn default_baseline_columns() -> Vec<usize> {
+    vec![0]
+}
+
+const fn default_baseline_operation() -> BaselineOperation {
+    BaselineOperation::Difference
+}
+
+const fn default_imputation_m() -> usize {
+    5
+}
+
+const fn default_sample_seed() -> u64 {
+    1
+}
+
+const fn default_sample_size() -> usize {
+    10
 }
 
 impl Default for AnalyzeDialogState {
@@ -590,11 +734,106 @@ impl Default for AnalyzeDialogState {
             transform_y: Some(MathTransformPreset::Log10),
             transform_error_propagation: ErrorPropagationMode::ReplicateEndpoints,
             transform_formula: None,
+            transform_target_archetype: TableKind::Column,
+            baseline_columns: vec![0],
+            baseline_operation: BaselineOperation::Difference,
+            two_group_method: None,
+            two_group_hypothetical: 0.0,
+            mv_group_column: None,
+            mv_response_column: None,
+            contingency_method: None,
+            contingency_null_proportion: None,
+            contingency_expected_proportions: None,
+            factorial_three_way: false,
+            factorial_repeated_measures: RepeatedMeasuresDesign::None,
+            factorial_ss_type: SumOfSquaresType::TypeIII,
+            factorial_multiplicity: MultiplicityMethod::None,
+            cluster_distance: ClusterDistance::Euclidean,
+            cluster_linkage: ClusterLinkage::Ward,
+            cluster_k_means_k: Some(3),
+            cluster_k_sweep_max: None,
+            pca_standardize: true,
+            corr_spearman_rank: false,
+            imputation_m: 5,
+            glm_family: GlmFamily::Linear,
+            glm_reference_levels: Vec::new(),
+            glm_compute_vif: true,
+            cox_time_column: None,
+            cox_status_column: None,
+            cox_predictor_columns: Vec::new(),
+            cox_tie_method: CoxTieMethod::Efron,
+            cox_reference_levels: Vec::new(),
+            km_mv_time_column: None,
+            km_mv_status_column: None,
+            km_log_rank_mantel_cox: true,
+            km_gehan_breslow_wilcoxon: false,
+            km_trend_test: false,
+            km_multiplicity_method: MultiplicityMethod::None,
+            custom_dsl: None,
+            fit_method: FitMethod::LeastSquares,
+            fit_weighting: WeightingScheme::None,
+            parameter_rules: Vec::new(),
+            mv_x_columns: Vec::new(),
+            mv_y_column: None,
+            mv_group_columns: Vec::new(),
+            sample_seed: 1,
+            sample_size: 10,
+            sample_stratify_column: None,
+            sample_proportional: true,
         }
     }
 }
 
 impl AnalyzeDialogState {
+    fn reset_r9_options(&mut self) {
+        self.two_group_method = None;
+        self.two_group_hypothetical = 0.0;
+        self.mv_group_column = None;
+        self.mv_response_column = None;
+        self.contingency_method = None;
+        self.contingency_null_proportion = None;
+        self.contingency_expected_proportions = None;
+        self.factorial_three_way = false;
+        self.factorial_repeated_measures = RepeatedMeasuresDesign::None;
+        self.factorial_ss_type = SumOfSquaresType::TypeIII;
+        self.factorial_multiplicity = MultiplicityMethod::None;
+        self.cluster_distance = ClusterDistance::Euclidean;
+        self.cluster_linkage = ClusterLinkage::Ward;
+        self.cluster_k_means_k = Some(3);
+        self.cluster_k_sweep_max = None;
+        self.pca_standardize = true;
+        self.corr_spearman_rank = false;
+        self.imputation_m = 5;
+        self.glm_family = GlmFamily::Linear;
+        self.glm_reference_levels.clear();
+        self.glm_compute_vif = true;
+        self.cox_time_column = None;
+        self.cox_status_column = None;
+        self.cox_predictor_columns.clear();
+        self.cox_tie_method = CoxTieMethod::Efron;
+        self.cox_reference_levels.clear();
+        self.km_mv_time_column = None;
+        self.km_mv_status_column = None;
+        self.km_log_rank_mantel_cox = true;
+        self.km_gehan_breslow_wilcoxon = false;
+        self.km_trend_test = false;
+        self.km_multiplicity_method = MultiplicityMethod::None;
+        self.transform_target_archetype = TableKind::Column;
+        self.baseline_columns = vec![0];
+        self.baseline_operation = BaselineOperation::Difference;
+        self.custom_dsl = None;
+        self.fit_method = FitMethod::LeastSquares;
+        self.fit_weighting = WeightingScheme::None;
+        self.parameter_rules.clear();
+        self.mv_x_columns.clear();
+        self.mv_y_column = None;
+        self.mv_group_columns.clear();
+        self.sample_seed = 1;
+        self.sample_size = 10;
+        self.sample_stratify_column = None;
+        self.sample_proportional = true;
+    }
+
     /// Populate defaults and variable candidates for `sheet`.
     pub fn open_for_data_sheet(&mut self, sheet: &DataSheet) {
         self.source_sheet_id = Some(sheet.id.clone());
@@ -612,6 +851,7 @@ impl AnalyzeDialogState {
         self.transform_y = Some(MathTransformPreset::Log10);
         self.transform_error_propagation = ErrorPropagationMode::ReplicateEndpoints;
         self.transform_formula = None;
+        self.reset_r9_options();
         if self.equation_id.is_empty() {
             self.equation_id = String::from("log_agonist_vs_response_4pl");
         }
@@ -642,6 +882,7 @@ impl AnalyzeDialogState {
         self.transform_y = Some(MathTransformPreset::Log10);
         self.transform_error_propagation = ErrorPropagationMode::ReplicateEndpoints;
         self.transform_formula = None;
+        self.reset_r9_options();
         if self.equation_id.is_empty() {
             self.equation_id = String::from("log_agonist_vs_response_4pl");
         }
@@ -685,16 +926,18 @@ impl AnalyzeDialogState {
                         self.correlation_heatmap = b;
                     }
                 }
-                "selected_data_sets" | "pca_predictors" | "analyze.pca_predictors" => {
-                    if let Some(arr) = val.as_array() {
-                        let cols: Vec<usize> = arr.iter().filter_map(|v| v.as_u64().map(|n| n as usize)).collect();
-                        self.selected_data_sets = cols.clone();
-                        if key != "selected_data_sets" {
-                            self.pca_predictors = cols;
-                        }
-                        for cand in &mut self.variable_candidates {
-                            cand.selected = self.selected_data_sets.contains(&cand.col_index);
-                        }
+                "selected_data_sets"
+                | "analyze.selected_data_sets"
+                | "analyze.transform.selected_data_sets"
+                | "pca_predictors"
+                | "analyze.pca_predictors" => {
+                    let cols = parse_usize_list(val, key)?;
+                    self.selected_data_sets = cols.clone();
+                    if matches!(key.as_str(), "pca_predictors" | "analyze.pca_predictors") {
+                        self.pca_predictors = cols;
+                    }
+                    for cand in &mut self.variable_candidates {
+                        cand.selected = self.selected_data_sets.contains(&cand.col_index);
                     }
                 }
                 "pcr_outcome_column" | "response_column" | "analyze.pcr_outcome_column" => {
@@ -708,7 +951,7 @@ impl AnalyzeDialogState {
                         self.set_response_column(col);
                     }
                 }
-                "formula" | "transform_formula" | "analyze.transform.formula" | "filter_formula" => {
+                "formula" | "transform_formula" | "analyze.transform.formula" | "filter_formula" | "analyze.transform.filter_formula" => {
                     if val.is_null() {
                         self.transform_formula = None;
                     } else {
@@ -723,6 +966,17 @@ impl AnalyzeDialogState {
                         }
                     }
                 }
+                "target_archetype" | "analyze.transform.target_archetype" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`target_archetype` must be a string"))?;
+                    self.transform_target_archetype = parse_table_kind_str(raw)?;
+                }
+                "baseline_columns" | "analyze.transform.baseline_columns" => {
+                    self.baseline_columns = parse_usize_list(val, key)?;
+                }
+                "baseline_operation" | "operation" | "analyze.transform.baseline_operation" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`baseline_operation` must be a string"))?;
+                    self.baseline_operation = parse_baseline_operation_str(raw)?;
+                }
                 "x_transform" | "analyze.transform.x_transform" | "transform_x" => {
                     self.transform_x = parse_math_preset_opt(val)?;
                 }
@@ -732,8 +986,167 @@ impl AnalyzeDialogState {
                 "error_propagation" | "analyze.transform.error_propagation" => {
                     self.transform_error_propagation = parse_error_prop_value(val)?;
                 }
-                _ => {}
+                _ => self.apply_r9_analyze_field(key, val)?,
             }
+        }
+        Ok(())
+    }
+
+    fn apply_r9_analyze_field(&mut self, key: &str, val: &Value) -> Result<(), String> {
+        match key {
+            "two_group_method" | "analyze.two_group.method" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`two_group_method` must be a string"))?;
+                self.two_group_method = Some(parse_two_group_method_str(raw, self.two_group_hypothetical)?);
+            }
+            "hypothetical" | "two_group_hypothetical" | "analyze.two_group.hypothetical" => {
+                self.two_group_hypothetical = parse_finite_f64(val, key)?;
+            }
+            "mv_group_column" | "analyze.mv_group_column" | "analyze.km.mv_group_column" => {
+                self.mv_group_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+            }
+            "mv_response_column" | "analyze.mv_response_column" => {
+                self.mv_response_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+            }
+            "contingency_method" | "analyze.contingency.method" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`contingency_method` must be a string"))?;
+                self.contingency_method = Some(parse_contingency_method_name(raw)?);
+            }
+            "kappa_weighting" | "analyze.contingency.kappa_weighting" => {
+                let w = parse_kappa_weighting(val)?;
+                self.contingency_method = Some(ContingencyMethod::CohenKappa { weighting: w });
+            }
+            "weighting" => {
+                if self.selected_entry_id.as_deref() == Some("stats.contingency") {
+                    let w = parse_kappa_weighting(val)?;
+                    self.contingency_method = Some(ContingencyMethod::CohenKappa { weighting: w });
+                } else {
+                    self.fit_weighting = parse_weighting_scheme(val)?;
+                }
+            }
+            "fit_weighting" | "analyze.fit.weighting" => {
+                self.fit_weighting = parse_weighting_scheme(val)?;
+            }
+            "null_proportion" | "analyze.contingency.null_proportion" => {
+                self.contingency_null_proportion = parse_opt_finite_f64(val, key)?;
+            }
+            "expected_proportions" | "analyze.contingency.expected_proportions" => {
+                self.contingency_expected_proportions = if val.is_null() { None } else { Some(parse_f64_list(val, key)?) };
+            }
+            "three_way" | "analyze.factorial.three_way" => {
+                self.factorial_three_way = val.as_bool().ok_or_else(|| String::from("`three_way` must be boolean"))?;
+            }
+            "repeated_measures" | "analyze.factorial.repeated_measures" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`repeated_measures` must be a string"))?;
+                self.factorial_repeated_measures = parse_rm_design_str(raw)?;
+            }
+            "ss_type" | "sum_of_squares" | "analyze.factorial.ss_type" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`ss_type` must be a string"))?;
+                self.factorial_ss_type = parse_ss_type_str(raw)?;
+            }
+            "multiplicity_method" | "analyze.multiplicity_method" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`multiplicity_method` must be a string"))?;
+                let parsed = parse_multiplicity_method_name(raw, 0)?;
+                self.factorial_multiplicity = parsed;
+                self.km_multiplicity_method = parsed;
+            }
+            "distance" | "cluster_distance" | "analyze.cluster.distance" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`distance` must be a string"))?;
+                self.cluster_distance = parse_cluster_distance_str(raw)?;
+            }
+            "linkage" | "cluster_linkage" | "analyze.cluster.linkage" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`linkage` must be a string"))?;
+                self.cluster_linkage = parse_cluster_linkage_str(raw)?;
+            }
+            "k_means_k" | "k" | "analyze.cluster.k_means_k" => {
+                self.cluster_k_means_k = if val.is_null() { None } else { Some(parse_usize_min(val, key, 1)?) };
+            }
+            "k_sweep_max" | "analyze.cluster.k_sweep_max" => {
+                self.cluster_k_sweep_max = if val.is_null() { None } else { Some(parse_usize_min(val, key, 2)?) };
+            }
+            "standardize" | "pca_standardize" | "analyze.pca.standardize" => {
+                self.pca_standardize = val.as_bool().ok_or_else(|| String::from("`standardize` must be boolean"))?;
+            }
+            "spearman_rank" | "analyze.corr.spearman_rank" => {
+                self.corr_spearman_rank = val.as_bool().ok_or_else(|| String::from("`spearman_rank` must be boolean"))?;
+            }
+            "imputations_m" | "m" | "analyze.mi.imputations_m" => {
+                self.imputation_m = parse_usize_min(val, key, 1)?;
+            }
+            "family" | "glm_family" | "analyze.glm.family" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`glm_family` must be a string"))?;
+                self.glm_family = parse_glm_family_str(raw)?;
+            }
+            "reference_levels" | "analyze.reference_levels" => {
+                let refs = parse_reference_levels(val)?;
+                self.glm_reference_levels.clone_from(&refs);
+                self.cox_reference_levels = refs;
+            }
+            "compute_vif" | "analyze.glm.compute_vif" => {
+                self.glm_compute_vif = val.as_bool().ok_or_else(|| String::from("`compute_vif` must be boolean"))?;
+            }
+            "time_column" | "cox_time_column" | "analyze.cox.time_column" => {
+                self.cox_time_column = Some(parse_usize_min(val, key, 0)?);
+            }
+            "status_column" | "cox_status_column" | "analyze.cox.status_column" => {
+                self.cox_status_column = Some(parse_usize_min(val, key, 0)?);
+            }
+            "predictor_columns" | "cox_predictor_columns" | "analyze.cox.predictor_columns" => {
+                self.cox_predictor_columns = parse_usize_list(val, key)?;
+            }
+            "tie_method" | "cox_tie_method" | "analyze.cox.tie_method" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`tie_method` must be a string"))?;
+                self.cox_tie_method = parse_cox_tie_method_str(raw)?;
+            }
+            "trend_test" | "km_trend_test" | "analyze.km.trend_test" | "log_rank_for_trend" | "analyze.km.log_rank_for_trend" => {
+                self.km_trend_test = val.as_bool().ok_or_else(|| String::from("`trend_test` must be boolean"))?;
+            }
+            "mv_time_column" | "km_mv_time_column" | "analyze.km.mv_time_column" => {
+                self.km_mv_time_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+            }
+            "mv_status_column" | "km_mv_status_column" | "analyze.km.mv_status_column" => {
+                self.km_mv_status_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+            }
+            "log_rank_mantel_cox" | "km_log_rank_mantel_cox" | "analyze.km.log_rank_mantel_cox" => {
+                self.km_log_rank_mantel_cox = val.as_bool().ok_or_else(|| String::from("`log_rank_mantel_cox` must be boolean"))?;
+            }
+            "gehan_breslow_wilcoxon" | "km_gehan_breslow_wilcoxon" | "analyze.km.gehan_breslow_wilcoxon" => {
+                self.km_gehan_breslow_wilcoxon = val.as_bool().ok_or_else(|| String::from("`gehan_breslow_wilcoxon` must be boolean"))?;
+            }
+            "km_multiplicity_method" | "analyze.km.multiplicity_method" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`multiplicity_method` must be a string"))?;
+                self.km_multiplicity_method = parse_multiplicity_method_name(raw, 0)?;
+            }
+            "custom_dsl" | "analyze.fit.custom_dsl" => {
+                self.custom_dsl = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned);
+            }
+            "fit_method" | "analyze.fit.method" => {
+                self.fit_method = parse_fit_method(val)?;
+            }
+            "parameter_rules" | "analyze.fit.parameter_rules" => {
+                self.parameter_rules = parse_parameter_rules(val)?;
+            }
+            "mv_x_columns" | "analyze.fit.mv_x_columns" => {
+                self.mv_x_columns = parse_usize_list(val, key)?;
+            }
+            "mv_y_column" | "analyze.fit.mv_y_column" => {
+                self.mv_y_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+            }
+            "mv_group_columns" | "analyze.fit.mv_group_columns" => {
+                self.mv_group_columns = parse_usize_list(val, key)?;
+            }
+            "sample_size" | "analyze.sample.sample_size" => {
+                self.sample_size = parse_usize_min(val, key, 1)?;
+            }
+            "seed" | "sample_seed" | "analyze.sample.seed" => {
+                self.sample_seed = parse_u64_val(val, key)?;
+            }
+            "stratify_column" | "analyze.sample.stratify_column" => {
+                self.sample_stratify_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+            }
+            "proportional_allocation" | "analyze.sample.proportional_allocation" => {
+                self.sample_proportional = val.as_bool().ok_or_else(|| String::from("`proportional_allocation` must be boolean"))?;
+            }
+            _ => {}
         }
         Ok(())
     }
@@ -818,12 +1231,56 @@ impl AnalyzeDialogState {
             .collect();
 
         match &mut kind {
+            AnalysisKind::TwoGroupComparison(tg) => {
+                if let Some(m) = self.two_group_method {
+                    tg.method = m;
+                }
+                if self.mv_group_column.is_some() {
+                    tg.mv_group_column = self.mv_group_column;
+                }
+                if self.mv_response_column.is_some() {
+                    tg.mv_response_column = self.mv_response_column;
+                }
+            }
+            AnalysisKind::Contingency(cont) => {
+                if let Some(m) = self.contingency_method {
+                    cont.method = m;
+                }
+                if self.contingency_null_proportion.is_some() {
+                    cont.null_proportion = self.contingency_null_proportion;
+                }
+                if self.contingency_expected_proportions.is_some() {
+                    cont.expected_proportions.clone_from(&self.contingency_expected_proportions);
+                }
+            }
             AnalysisKind::NonlinearRegression(fit) => {
                 if !self.equation_id.trim().is_empty() {
                     fit.equation_id = self.equation_id.trim().to_owned();
                 }
+                if self.custom_dsl.is_some() {
+                    fit.custom_dsl.clone_from(&self.custom_dsl);
+                }
+                fit.method = self.fit_method;
+                fit.weighting = self.fit_weighting;
+                if !self.parameter_rules.is_empty() {
+                    fit.parameter_rules.clone_from(&self.parameter_rules);
+                }
+                if !self.mv_x_columns.is_empty() {
+                    fit.mv_x_columns.clone_from(&self.mv_x_columns);
+                }
+                if self.mv_y_column.is_some() {
+                    fit.mv_y_column = self.mv_y_column;
+                }
+                if !self.mv_group_columns.is_empty() {
+                    fit.mv_group_columns.clone_from(&self.mv_group_columns);
+                }
             }
             AnalysisKind::GeneralizedLinearModel(glm) => {
+                glm.family = self.glm_family;
+                glm.compute_vif = self.glm_compute_vif;
+                if !self.glm_reference_levels.is_empty() {
+                    glm.reference_levels.clone_from(&self.glm_reference_levels);
+                }
                 if let Some(resp) = response_col {
                     glm.response_column = resp;
                 }
@@ -831,22 +1288,73 @@ impl AnalyzeDialogState {
                     glm.predictor_columns = predictor_cols;
                 }
             }
-            AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, .. }) => {
-                if let Some(resp) = response_col {
-                    *time_column = resp;
+            AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
+                time_column,
+                status_column,
+                predictor_columns,
+                reference_levels,
+                tie_method,
+            }) => {
+                if let Some(tc) = self.cox_time_column.or(response_col) {
+                    *time_column = tc;
                 }
-                if let Some(&first_pred) = predictor_cols.first() {
-                    *status_column = first_pred;
+                if let Some(sc) = self.cox_status_column.or_else(|| predictor_cols.first().copied()) {
+                    *status_column = sc;
                 }
-                if predictor_cols.len() > 1 {
+                if !self.cox_predictor_columns.is_empty() {
+                    predictor_columns.clone_from(&self.cox_predictor_columns);
+                } else if predictor_cols.len() > 1 {
                     *predictor_columns = predictor_cols.get(1..).map_or_else(Vec::new, |s| s.to_vec());
                 }
+                if !self.cox_reference_levels.is_empty() {
+                    reference_levels.clone_from(&self.cox_reference_levels);
+                }
+                *tie_method = self.cox_tie_method;
             }
-            AnalysisKind::FactorialAnova(fac) if !predictor_cols.is_empty() => {
-                fac.multifactor_columns = predictor_cols;
-                fac.response_column = response_col;
+            AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
+                log_rank_mantel_cox,
+                gehan_breslow_wilcoxon,
+                trend_test,
+                multiplicity,
+                mv_time_column,
+                mv_status_column,
+                mv_group_column,
+                ..
+            }) => {
+                *log_rank_mantel_cox = self.km_log_rank_mantel_cox;
+                *gehan_breslow_wilcoxon = self.km_gehan_breslow_wilcoxon;
+                *trend_test = self.km_trend_test;
+                multiplicity.method = self.km_multiplicity_method;
+                *mv_time_column = self.km_mv_time_column;
+                *mv_status_column = self.km_mv_status_column;
+                if self.mv_group_column.is_some() {
+                    *mv_group_column = self.mv_group_column;
+                }
             }
-            AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { response_column, predictor_columns, .. }) => {
+            AnalysisKind::FactorialAnova(fac) => {
+                fac.three_way = self.factorial_three_way;
+                fac.repeated_measures = self.factorial_repeated_measures;
+                fac.ss_type = self.factorial_ss_type;
+                fac.multiplicity.method = self.factorial_multiplicity;
+                if !predictor_cols.is_empty() {
+                    fac.multifactor_columns = predictor_cols;
+                    fac.response_column = response_col;
+                }
+            }
+            AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max }) => {
+                *k_means_k = self.cluster_k_means_k;
+                *distance = self.cluster_distance;
+                *linkage = self.cluster_linkage;
+                *k_sweep_max = self.cluster_k_sweep_max;
+            }
+            AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize, .. }) => {
+                *standardize = self.pca_standardize;
+            }
+            AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank }) => {
+                *spearman_rank = self.corr_spearman_rank;
+            }
+            AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { imputations_m, response_column, predictor_columns, .. }) => {
+                *imputations_m = self.imputation_m.max(1);
                 *response_column = response_col;
                 if !predictor_cols.is_empty() {
                     *predictor_columns = predictor_cols;
@@ -857,8 +1365,19 @@ impl AnalyzeDialogState {
                 *y_transform = self.transform_y;
                 *error_propagation = self.transform_error_propagation;
             }
-            AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, .. }) => {
+            AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation }) => {
+                *baseline_columns = self.baseline_columns.clone();
+                *operation = self.baseline_operation;
+            }
+            AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype }) => {
                 *filter_formula = self.transform_formula.clone();
+                *target_archetype = self.transform_target_archetype;
+            }
+            AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation }) => {
+                *seed = self.sample_seed;
+                *sample_size = self.sample_size.max(1);
+                *stratify_column = self.sample_stratify_column;
+                *proportional_allocation = self.sample_proportional;
             }
             _ => {}
         }
@@ -1095,9 +1614,12 @@ impl EditAnalysisParametersState {
                         | TwoGroupMethod::WilcoxonSignedRank
                         | TwoGroupMethod::KolmogorovSmirnov
                         | TwoGroupMethod::OneSampleWilcoxon { .. }
+                        | TwoGroupMethod::PairedSignTest
                 );
-                self.paired_or_matched =
-                    matches!(spec.method, TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank);
+                self.paired_or_matched = matches!(
+                    spec.method,
+                    TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest
+                );
                 self.welch_correction = spec.method == TwoGroupMethod::WelchT;
             }
             AnalysisKind::Contingency(spec) => {
@@ -1164,7 +1686,7 @@ impl EditAnalysisParametersState {
     }
 
     fn apply_single_param_patch(&mut self, key: &str, val: &Value) -> Result<(), String> {
-        if self.apply_contingency_param_patch(key, val)? || self.apply_transform_param_patch(key, val)? {
+        if self.apply_contingency_param_patch(key, val)? || self.apply_transform_param_patch(key, val)? || self.apply_r9_param_patch(key, val)? {
             return Ok(());
         }
         match key {
@@ -1268,6 +1790,12 @@ impl EditAnalysisParametersState {
             "custom_title" | "edit.custom_title" => {
                 self.set_custom_title(val.as_str().map(ToOwned::to_owned))?;
             }
+            "selected_data_sets" | "edit.selected_data_sets" | "edit.transform.selected_data_sets" => {
+                let cols = parse_usize_list(val, key)?;
+                if let Some(spec) = &mut self.draft {
+                    spec.selected_data_sets = cols;
+                }
+            }
             "geisser_greenhouse" | "edit.geisser_greenhouse" | "edit.sphericity.geisser_greenhouse" => {
                 if !self.paired_or_matched {
                     return Err(String::from("Geisser-Greenhouse sphericity control is disabled when No matching is selected."));
@@ -1289,6 +1817,24 @@ impl EditAnalysisParametersState {
                     self.set_anova_multiplicity(method);
                 }
             }
+            "anova_method" | "one_way_method" | "edit.anova_method" | "edit.one_way_method" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`anova_method` must be a string"))?.trim().to_ascii_lowercase();
+                let next_method = match raw.as_str() {
+                    "ordinary" | "ordinary_anova" | "anova" => OneWayMethod::OrdinaryAnova,
+                    "welch" | "brown_forsythe" | "brown_forsythe_welch" | "brown_forsythe_and_welch" => OneWayMethod::BrownForsytheAndWelch,
+                    "kruskal" | "kruskal_wallis" => OneWayMethod::KruskalWallis,
+                    "friedman" => OneWayMethod::Friedman,
+                    "rm" | "repeated_measures" => OneWayMethod::RepeatedMeasures { geisser_greenhouse: true },
+                    _ => return Err(format!("unknown one-way ANOVA method `{raw}`")),
+                };
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::OneWayAnova(mut a) = spec.kind.clone()
+                {
+                    a.method = next_method;
+                    spec.update_kind(AnalysisKind::OneWayAnova(a));
+                    self.sync_rule_flags_from_kind();
+                }
+            }
             _ => {}
         }
         Ok(())
@@ -1298,8 +1844,15 @@ impl EditAnalysisParametersState {
     fn apply_contingency_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
         let method_flag = match key {
             "fisher" | "edit.contingency.fisher" => Some(ContingencyMethod::FisherExact),
+            "barnard" | "edit.contingency.barnard" => Some(ContingencyMethod::BarnardExact),
+            "likelihood_ratio_g2" | "g2" | "edit.contingency.g2" => Some(ContingencyMethod::LikelihoodRatioG2),
             "mcnemar" | "edit.contingency.mcnemar" => Some(ContingencyMethod::McNemarPaired),
             "cochran_armitage" | "edit.contingency.cochran_armitage" => Some(ContingencyMethod::CochranArmitageTrend),
+            "cohen_kappa" | "edit.contingency.cohen_kappa" => {
+                Some(ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Unweighted })
+            }
+            "fleiss_kappa" | "edit.contingency.fleiss_kappa" => Some(ContingencyMethod::FleissKappa),
+            "exact_binomial" | "edit.contingency.exact_binomial" => Some(ContingencyMethod::ExactBinomial),
             _ => None,
         };
         if let Some(target_method) = method_flag {
@@ -1310,6 +1863,27 @@ impl EditAnalysisParametersState {
             return Ok(true);
         }
         match key {
+            "kappa_weighting" | "edit.contingency.kappa_weighting" => {
+                let w = parse_kappa_weighting(val)?;
+                self.update_contingency_spec(|c| c.method = ContingencyMethod::CohenKappa { weighting: w });
+            }
+            "weighting" if self.draft.as_ref().is_some_and(|s| matches!(s.kind, AnalysisKind::Contingency(_))) => {
+                let w = parse_kappa_weighting(val)?;
+                self.update_contingency_spec(|c| c.method = ContingencyMethod::CohenKappa { weighting: w });
+            }
+            "null_proportion" | "edit.contingency.null_proportion" => {
+                let p = parse_opt_finite_f64(val, key)?;
+                if let Some(v) = p
+                    && !(0.0 < v && v < 1.0)
+                {
+                    return Err(format!("`null_proportion` ({v}) must be strictly between 0 and 1"));
+                }
+                self.update_contingency_spec(|c| c.null_proportion = p);
+            }
+            "expected_proportions" | "edit.contingency.expected_proportions" => {
+                let props = if val.is_null() { None } else { Some(parse_f64_list(val, key)?) };
+                self.update_contingency_spec(|c| c.expected_proportions = props);
+            }
             "compute_odds_and_risk_ratios" | "contingency_odds_ratio_checked" | "edit.contingency.odds_ratio" => {
                 if let Some(b) = val.as_bool() {
                     self.contingency_odds_ratio_checked = b;
@@ -1374,7 +1948,7 @@ impl EditAnalysisParametersState {
                     spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation: ep_mode }));
                 }
             }
-            "formula" | "transform_formula" | "edit.transform.formula" | "filter_formula" => {
+            "formula" | "transform_formula" | "edit.transform.formula" | "filter_formula" | "edit.transform.filter_formula" => {
                 if let Some(spec) = &mut self.draft {
                     match spec.kind.clone() {
                         AnalysisKind::Transform(TransformAnalysisSpec::Math { mut x_transform, mut y_transform, error_propagation }) => {
@@ -1391,18 +1965,39 @@ impl EditAnalysisParametersState {
                             let filter_formula = if val.is_null() {
                                 None
                             } else {
-                                Some(
-                                    val.as_str()
-                                        .map(str::trim)
-                                        .filter(|s| !s.is_empty())
-                                        .ok_or_else(|| String::from("`formula` must be a string"))?
-                                        .to_owned(),
-                                )
+                                let s = val.as_str().ok_or_else(|| String::from("`filter_formula` must be a string or null"))?.trim();
+                                (!s.is_empty()).then(|| s.to_owned())
                             };
                             spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype }));
                         }
                         _ => {}
                     }
+                }
+            }
+            "target_archetype" | "edit.transform.target_archetype" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`target_archetype` must be a string"))?;
+                let parsed = parse_table_kind_str(raw)?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, .. }) = spec.kind.clone()
+                {
+                    spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype: parsed }));
+                }
+            }
+            "baseline_columns" | "edit.transform.baseline_columns" => {
+                let cols = parse_usize_list(val, key)?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { operation, .. }) = spec.kind.clone()
+                {
+                    spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns: cols, operation }));
+                }
+            }
+            "baseline_operation" | "operation" | "edit.transform.baseline_operation" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`baseline_operation` must be a string"))?;
+                let op = parse_baseline_operation_str(raw)?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, .. }) = spec.kind.clone()
+                {
+                    spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation: op }));
                 }
             }
             _ => return Ok(false),
@@ -1445,12 +2040,338 @@ impl EditAnalysisParametersState {
             return;
         };
         let mut updated = spec.kind.clone();
-        if let AnalysisKind::OneWayAnova(a) = &mut updated {
-            a.multiplicity.method = method;
-        } else if let AnalysisKind::FactorialAnova(f) = &mut updated {
-            f.multiplicity.method = method;
+        match &mut updated {
+            AnalysisKind::OneWayAnova(a) => a.multiplicity.method = method,
+            AnalysisKind::FactorialAnova(f) => f.multiplicity.method = method,
+            AnalysisKind::NestedComparison(n) => n.multiplicity.method = method,
+            AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => multiplicity.method = method,
+            _ => {}
         }
         spec.update_kind(updated);
+    }
+
+    fn apply_r9_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+        let Some(spec) = &mut self.draft else {
+            return Ok(false);
+        };
+        let mut updated = spec.kind.clone();
+        let handled = match (key, &mut updated) {
+            ("two_group_method" | "edit.two_group.method", AnalysisKind::TwoGroupComparison(t)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`two_group_method` must be a string"))?;
+                let hyp = match t.method {
+                    TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => hypothetical,
+                    _ => 0.0,
+                };
+                t.method = parse_two_group_method_str(raw, hyp)?;
+                true
+            }
+            ("paired_sign_test" | "edit.two_group.paired_sign_test", AnalysisKind::TwoGroupComparison(t)) => {
+                let b = val.as_bool().ok_or_else(|| String::from("`paired_sign_test` must be boolean"))?;
+                t.method = if b { TwoGroupMethod::PairedSignTest } else { TwoGroupMethod::WilcoxonSignedRank };
+                true
+            }
+            ("two_tailed" | "edit.two_group.two_tailed", AnalysisKind::TwoGroupComparison(t)) => {
+                t.two_tailed = val.as_bool().ok_or_else(|| String::from("`two_tailed` must be boolean"))?;
+                true
+            }
+            ("compute_effect_sizes" | "edit.compute_effect_sizes", AnalysisKind::TwoGroupComparison(t)) => {
+                t.compute_effect_sizes = val.as_bool().ok_or_else(|| String::from("`compute_effect_sizes` must be boolean"))?;
+                true
+            }
+            ("compute_effect_sizes" | "edit.compute_effect_sizes", AnalysisKind::FactorialAnova(f)) => {
+                f.compute_effect_sizes = val.as_bool().ok_or_else(|| String::from("`compute_effect_sizes` must be boolean"))?;
+                true
+            }
+            ("mv_group_column" | "edit.two_group.mv_group_column", AnalysisKind::TwoGroupComparison(t)) => {
+                t.mv_group_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            ("mv_response_column" | "edit.two_group.mv_response_column", AnalysisKind::TwoGroupComparison(t)) => {
+                t.mv_response_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            ("three_way" | "edit.factorial.three_way", AnalysisKind::FactorialAnova(f)) => {
+                f.three_way = val.as_bool().ok_or_else(|| String::from("`three_way` must be boolean"))?;
+                true
+            }
+            ("repeated_measures" | "edit.factorial.repeated_measures", AnalysisKind::FactorialAnova(f)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`repeated_measures` must be a string"))?;
+                f.repeated_measures = parse_rm_design_str(raw)?;
+                true
+            }
+            ("ss_type" | "sum_of_squares" | "edit.factorial.ss_type", AnalysisKind::FactorialAnova(f)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`ss_type` must be a string"))?;
+                f.ss_type = parse_ss_type_str(raw)?;
+                true
+            }
+            ("max_interaction_order" | "edit.factorial.max_interaction_order", AnalysisKind::FactorialAnova(f)) => {
+                f.max_interaction_order = parse_usize_min(val, key, 1)?;
+                true
+            }
+            ("fit_reml_on_missing" | "edit.factorial.fit_reml_on_missing", AnalysisKind::FactorialAnova(f)) => {
+                f.fit_reml_on_missing = val.as_bool().ok_or_else(|| String::from("`fit_reml_on_missing` must be boolean"))?;
+                true
+            }
+            ("multifactor_columns" | "edit.factorial.multifactor_columns", AnalysisKind::FactorialAnova(f)) => {
+                f.multifactor_columns = parse_usize_list(val, key)?;
+                true
+            }
+            ("response_column" | "factorial_response_column" | "edit.factorial.response_column", AnalysisKind::FactorialAnova(f)) => {
+                f.response_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            (
+                "distance" | "cluster_distance" | "edit.cluster.distance",
+                AnalysisKind::Multivariate(MultivariateSpec::Clustering { distance, .. }),
+            ) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`distance` must be a string"))?;
+                *distance = parse_cluster_distance_str(raw)?;
+                true
+            }
+            ("linkage" | "cluster_linkage" | "edit.cluster.linkage", AnalysisKind::Multivariate(MultivariateSpec::Clustering { linkage, .. })) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`linkage` must be a string"))?;
+                *linkage = parse_cluster_linkage_str(raw)?;
+                true
+            }
+            ("k_means_k" | "k" | "edit.cluster.k_means_k", AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, .. })) => {
+                *k_means_k = if val.is_null() { None } else { Some(parse_usize_min(val, key, 1)?) };
+                true
+            }
+            ("k_sweep_max" | "edit.cluster.k_sweep_max", AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_sweep_max, .. })) => {
+                *k_sweep_max = if val.is_null() { None } else { Some(parse_usize_min(val, key, 2)?) };
+                true
+            }
+            ("standardize" | "edit.pca.standardize", AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize, .. })) => {
+                *standardize = val.as_bool().ok_or_else(|| String::from("`standardize` must be boolean"))?;
+                true
+            }
+            (
+                "parallel_analysis_seed" | "edit.pca.parallel_analysis_seed",
+                AnalysisKind::Multivariate(MultivariateSpec::Pca { parallel_analysis_seed, .. }),
+            ) => {
+                *parallel_analysis_seed = if val.is_null() { None } else { Some(parse_u64_val(val, key)?) };
+                true
+            }
+            ("spearman_rank" | "edit.corr.spearman_rank", AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank })) => {
+                *spearman_rank = val.as_bool().ok_or_else(|| String::from("`spearman_rank` must be boolean"))?;
+                true
+            }
+            (
+                "imputations_m" | "m" | "edit.mi.imputations_m",
+                AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { imputations_m, .. }),
+            ) => {
+                *imputations_m = parse_usize_min(val, key, 1)?;
+                true
+            }
+            ("max_iters" | "edit.mi.max_iters", AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { max_iters, .. })) => {
+                *max_iters = parse_usize_min(val, key, 1)?;
+                true
+            }
+            ("seed" | "edit.mi.seed", AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { seed, .. })) => {
+                *seed = parse_u64_val(val, key)?;
+                true
+            }
+            (
+                "response_column" | "edit.mi.response_column",
+                AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { response_column, .. }),
+            ) => {
+                *response_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            (
+                "predictor_columns" | "edit.mi.predictor_columns",
+                AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { predictor_columns, .. }),
+            ) => {
+                *predictor_columns = parse_usize_list(val, key)?;
+                true
+            }
+            ("family" | "glm_family" | "edit.glm.family", AnalysisKind::GeneralizedLinearModel(glm)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`family` must be a string"))?;
+                glm.family = parse_glm_family_str(raw)?;
+                true
+            }
+            ("response_column" | "edit.glm.response_column", AnalysisKind::GeneralizedLinearModel(glm)) => {
+                glm.response_column = parse_usize_min(val, key, 0)?;
+                true
+            }
+            ("predictor_columns" | "edit.glm.predictor_columns", AnalysisKind::GeneralizedLinearModel(glm)) => {
+                glm.predictor_columns = parse_usize_list(val, key)?;
+                true
+            }
+            ("reference_levels" | "edit.glm.reference_levels", AnalysisKind::GeneralizedLinearModel(glm)) => {
+                glm.reference_levels = parse_reference_levels(val)?;
+                true
+            }
+            ("compute_vif" | "edit.glm.compute_vif", AnalysisKind::GeneralizedLinearModel(glm)) => {
+                glm.compute_vif = val.as_bool().ok_or_else(|| String::from("`compute_vif` must be boolean"))?;
+                true
+            }
+            ("time_column" | "edit.cox.time_column", AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { time_column, .. })) => {
+                *time_column = parse_usize_min(val, key, 0)?;
+                true
+            }
+            (
+                "status_column" | "edit.cox.status_column",
+                AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { status_column, .. }),
+            ) => {
+                *status_column = parse_usize_min(val, key, 0)?;
+                true
+            }
+            (
+                "predictor_columns" | "edit.cox.predictor_columns",
+                AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { predictor_columns, .. }),
+            ) => {
+                *predictor_columns = parse_usize_list(val, key)?;
+                true
+            }
+            (
+                "reference_levels" | "edit.cox.reference_levels",
+                AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { reference_levels, .. }),
+            ) => {
+                *reference_levels = parse_reference_levels(val)?;
+                true
+            }
+            ("tie_method" | "edit.cox.tie_method", AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { tie_method, .. })) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`tie_method` must be a string"))?;
+                *tie_method = parse_cox_tie_method_str(raw)?;
+                true
+            }
+            (
+                "log_rank_mantel_cox" | "edit.km.log_rank_mantel_cox",
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { log_rank_mantel_cox, .. }),
+            ) => {
+                *log_rank_mantel_cox = val.as_bool().ok_or_else(|| String::from("`log_rank_mantel_cox` must be boolean"))?;
+                true
+            }
+            (
+                "gehan_breslow_wilcoxon" | "edit.km.gehan_breslow_wilcoxon",
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { gehan_breslow_wilcoxon, .. }),
+            ) => {
+                *gehan_breslow_wilcoxon = val.as_bool().ok_or_else(|| String::from("`gehan_breslow_wilcoxon` must be boolean"))?;
+                true
+            }
+            (
+                "trend_test" | "edit.km.trend_test" | "log_rank_for_trend" | "edit.km.log_rank_for_trend",
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { trend_test, .. }),
+            ) => {
+                *trend_test = val.as_bool().ok_or_else(|| String::from("`trend_test` must be boolean"))?;
+                true
+            }
+            (
+                "multiplicity_method" | "edit.km.multiplicity_method",
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }),
+            ) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`multiplicity_method` must be a string"))?;
+                multiplicity.method = parse_multiplicity_method_name(raw, self.control_column)?;
+                true
+            }
+            (
+                "asymmetrical_greenwood_ci" | "edit.km.asymmetrical_greenwood_ci",
+                AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { asymmetrical_greenwood_ci, .. }),
+            ) => {
+                *asymmetrical_greenwood_ci = val.as_bool().ok_or_else(|| String::from("`asymmetrical_greenwood_ci` must be boolean"))?;
+                true
+            }
+            ("mv_time_column" | "edit.km.mv_time_column", AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_time_column, .. })) => {
+                *mv_time_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            ("mv_status_column" | "edit.km.mv_status_column", AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_status_column, .. })) => {
+                *mv_status_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            ("mv_group_column" | "edit.km.mv_group_column", AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_group_column, .. })) => {
+                *mv_group_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            ("equation_id" | "edit.fit.equation_id", AnalysisKind::NonlinearRegression(fit)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`equation_id` must be a string"))?.trim();
+                if !raw.is_empty() {
+                    fit.equation_id = raw.to_owned();
+                }
+                true
+            }
+            ("custom_dsl" | "edit.fit.custom_dsl", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.custom_dsl = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned);
+                true
+            }
+            ("weighting" | "fit_weighting" | "edit.fit.weighting", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.weighting = parse_weighting_scheme(val)?;
+                true
+            }
+            ("fit_method" | "edit.fit.method", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.method = parse_fit_method(val)?;
+                true
+            }
+            ("parameter_rules" | "edit.fit.parameter_rules", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.parameter_rules = parse_parameter_rules(val)?;
+                true
+            }
+            ("profile_likelihood_ci" | "edit.fit.profile_likelihood_ci", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.profile_likelihood_ci = val.as_bool().ok_or_else(|| String::from("`profile_likelihood_ci` must be boolean"))?;
+                true
+            }
+            ("confidence_bands" | "edit.fit.confidence_bands", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.confidence_bands = val.as_bool().ok_or_else(|| String::from("`confidence_bands` must be boolean"))?;
+                true
+            }
+            ("prediction_bands" | "edit.fit.prediction_bands", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.prediction_bands = val.as_bool().ok_or_else(|| String::from("`prediction_bands` must be boolean"))?;
+                true
+            }
+            ("homoscedasticity_test" | "edit.fit.homoscedasticity_test", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.homoscedasticity_test = val.as_bool().ok_or_else(|| String::from("`homoscedasticity_test` must be boolean"))?;
+                true
+            }
+            ("emit_residuals_tab" | "edit.fit.emit_residuals_tab", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.emit_residuals_tab = val.as_bool().ok_or_else(|| String::from("`emit_residuals_tab` must be boolean"))?;
+                true
+            }
+            ("emit_covariance_tab" | "edit.fit.emit_covariance_tab", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.emit_covariance_tab = val.as_bool().ok_or_else(|| String::from("`emit_covariance_tab` must be boolean"))?;
+                true
+            }
+            ("mv_x_columns" | "edit.fit.mv_x_columns", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.mv_x_columns = parse_usize_list(val, key)?;
+                true
+            }
+            ("mv_y_column" | "edit.fit.mv_y_column", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.mv_y_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            ("mv_group_columns" | "edit.fit.mv_group_columns", AnalysisKind::NonlinearRegression(fit)) => {
+                fit.mv_group_columns = parse_usize_list(val, key)?;
+                true
+            }
+            ("sample_size" | "edit.sample.sample_size", AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { sample_size, .. })) => {
+                *sample_size = parse_usize_min(val, key, 1)?;
+                true
+            }
+            ("seed" | "edit.sample.seed", AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { seed, .. })) => {
+                *seed = parse_u64_val(val, key)?;
+                true
+            }
+            (
+                "stratify_column" | "edit.sample.stratify_column",
+                AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { stratify_column, .. }),
+            ) => {
+                *stratify_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            (
+                "proportional_allocation" | "edit.sample.proportional_allocation",
+                AnalysisKind::Transform(TransformAnalysisSpec::RandomSample { proportional_allocation, .. }),
+            ) => {
+                *proportional_allocation = val.as_bool().ok_or_else(|| String::from("`proportional_allocation` must be boolean"))?;
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            spec.update_kind(updated);
+            self.sync_rule_flags_from_kind();
+        }
+        Ok(handled)
     }
 
     /// Effective displayed title reflecting auto-title vs custom title rules.
@@ -1487,7 +2408,16 @@ fn parse_multiplicity_method_name(raw: &str, control_col: usize) -> Result<Multi
         "sidak" => Ok(MultiplicityMethod::Sidak),
         "bonferroni" => Ok(MultiplicityMethod::Bonferroni),
         "holmsidak" => Ok(MultiplicityMethod::HolmSidak),
+        "dunnettt3" => Ok(MultiplicityMethod::DunnettT3),
+        "gameshowell" => Ok(MultiplicityMethod::GamesHowell),
+        "tamhanet2" | "tamhane" => Ok(MultiplicityMethod::TamhaneT2),
         "dunn" | "dunnranksum" => Ok(MultiplicityMethod::DunnRankSum),
+        "lineartrend" => Ok(MultiplicityMethod::LinearTrend),
+        "benjaminihochbergfdr" | "bh" | "fdr" => Ok(MultiplicityMethod::BenjaminiHochbergFdr),
+        "benjaminiyekutielifdr" | "by" => Ok(MultiplicityMethod::BenjaminiYekutieliFdr),
+        "twostagebkyfdr" | "bky" => Ok(MultiplicityMethod::TwoStageBkyFdr),
+        "newmankeuls" | "snk" => Ok(MultiplicityMethod::NewmanKeuls),
+        "fisherlsd" | "lsd" => Ok(MultiplicityMethod::FisherLsd),
         _ => Err(format!("unknown multiplicity method `{raw}`")),
     }
 }
@@ -1497,9 +2427,16 @@ fn parse_contingency_method_name(raw: &str) -> Result<ContingencyMethod, String>
     match norm.as_str() {
         "chisquare" | "pearsonchisquare" => Ok(ContingencyMethod::PearsonChiSquare { yates_continuity: false }),
         "yates" => Ok(ContingencyMethod::PearsonChiSquare { yates_continuity: true }),
+        "likelihoodratiog2" | "g2" | "likelihoodratio" => Ok(ContingencyMethod::LikelihoodRatioG2),
         "fisher" | "fisherexact" => Ok(ContingencyMethod::FisherExact),
+        "barnard" | "barnardexact" => Ok(ContingencyMethod::BarnardExact),
         "cochranarmitage" | "cochranarmitagetrend" | "trend" => Ok(ContingencyMethod::CochranArmitageTrend),
-        "mcnemar" => Ok(ContingencyMethod::McNemarPaired),
+        "mcnemar" | "mcnemarpaired" => Ok(ContingencyMethod::McNemarPaired),
+        "cohenkappa" | "kappa" | "unweightedkappa" => Ok(ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Unweighted }),
+        "linearkappa" => Ok(ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Linear }),
+        "quadratickappa" => Ok(ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Quadratic }),
+        "fleisskappa" => Ok(ContingencyMethod::FleissKappa),
+        "exactbinomial" | "binomial" => Ok(ContingencyMethod::ExactBinomial),
         _ => Err(format!("unknown contingency test method `{raw}`")),
     }
 }
@@ -1521,6 +2458,17 @@ pub(crate) fn parse_table_kind_str(raw: &str) -> Result<TableKind, String> {
         "partsofwhole" | "parts" => Ok(TableKind::PartsOfWhole),
         "nested" => Ok(TableKind::Nested),
         _ => Err(format!("unknown table archetype `{raw}`")),
+    }
+}
+
+fn parse_baseline_operation_str(raw: &str) -> Result<BaselineOperation, String> {
+    let norm = norm_key(raw);
+    match norm.as_str() {
+        "difference" | "subtract" => Ok(BaselineOperation::Difference),
+        "ratio" | "divide" => Ok(BaselineOperation::Ratio),
+        "percentchange" | "pctchange" | "percent" => Ok(BaselineOperation::PercentChange),
+        "fractionalchange" | "fraction" => Ok(BaselineOperation::FractionalChange),
+        _ => Err(format!("unknown baseline operation `{raw}`")),
     }
 }
 
@@ -2100,6 +3048,8 @@ pub enum ThumbnailGlyphKind {
     BlandAltman,
     RocCurve,
     ForestPlot,
+    ResidualPlot,
+    NormalQqPlot,
 }
 
 /// Entry in the `Change Graph Type` schematic thumbnail chooser.
@@ -2158,6 +3108,14 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
         id: "col.violin",
         label: "Violin Plot",
         subtitle: "Kernel density contour clipped to observed data range",
+        graph_kind: GraphKind::Column,
+        thumbnail: ThumbnailGlyphKind::Violin,
+        compatible_tables: &[TableKind::Column, TableKind::Grouped],
+    },
+    GraphTypeOption {
+        id: "col.raincloud",
+        label: "Raincloud Plot (Half-Violin + Points)",
+        subtitle: "Half-violin kernel density with aligned individual replicate points",
         graph_kind: GraphKind::Column,
         thumbnail: ThumbnailGlyphKind::Violin,
         compatible_tables: &[TableKind::Column, TableKind::Grouped],
@@ -2249,6 +3207,22 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
         graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot),
         thumbnail: ThumbnailGlyphKind::ForestPlot,
         compatible_tables: &[TableKind::Grouped, TableKind::MultipleVariables],
+    },
+    GraphTypeOption {
+        id: "diag.residual",
+        label: "Residual Diagnostic Plot",
+        subtitle: "Fitted/predicted vs residual scatter diagnostic",
+        graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::ResidualPlot),
+        thumbnail: ThumbnailGlyphKind::ResidualPlot,
+        compatible_tables: &[TableKind::Xy, TableKind::Column, TableKind::Grouped, TableKind::MultipleVariables],
+    },
+    GraphTypeOption {
+        id: "diag.normal_qq",
+        label: "Normal Q-Q Plot",
+        subtitle: "Theoretical normal quantiles vs standardized residuals",
+        graph_kind: GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot),
+        thumbnail: ThumbnailGlyphKind::NormalQqPlot,
+        compatible_tables: &[TableKind::Xy, TableKind::Column, TableKind::Grouped, TableKind::MultipleVariables],
     },
 ];
 
@@ -2388,15 +3362,15 @@ impl ChangeGraphTypeState {
         spec.kind = self.resolved_graph_kind(opt, Some(doc));
 
         let mut intents = vec![ToolCommandIntent::new(
-            "graph.setSpec",
+            "graph.setKind",
             json!({
                 "sheet_id": id.as_str(),
+                "option_id": opt.id,
                 "kind": spec.kind,
-                "grouped_arrangement": spec.grouped_arrangement,
-                "initialized": true,
+                "reset_series_style": true,
             }),
         )];
-        if !spec.series.is_empty() {
+        if !matches!(spec.kind, GraphKind::Diagnostic(_)) && !spec.series.is_empty() {
             let series_patches: Vec<Value> = spec
                 .series
                 .iter()
@@ -2441,6 +3415,13 @@ fn build_gdo_for_option(option_id: &str, color: Rgba8, marker: MarkerStyle, summ
             show_median_and_quartiles: true,
             half_violin_with_points: false,
         },
+        "col.raincloud" => GraphicalDataObject::Violin {
+            fill_color: color.with_alpha(190),
+            stroke_color: color,
+            clip_to_observed_range: true,
+            show_median_and_quartiles: true,
+            half_violin_with_points: true,
+        },
         "col.aligned_dot" => GraphicalDataObject::AlignedDotPlot { summary, marker, show_crossbar: true },
         "col.bar_replicates" | "grouped.interleaved" | "grouped.stacked" => GraphicalDataObject::BarWithReplicates {
             summary,
@@ -2479,6 +3460,14 @@ pub struct FormatGraphState {
     pub line_dash: LineDashStyle,
     pub show_legend: bool,
     pub legend_bordered: bool,
+    #[serde(default)]
+    pub half_violin_with_points: bool,
+    #[serde(default)]
+    pub model_equation_mode: Option<EquationDisplayMode>,
+    #[serde(default)]
+    pub model_equation_annotations: Vec<GraphAnnotation>,
+    #[serde(default)]
+    pub annotations_dirty: bool,
 }
 
 impl Default for FormatGraphState {
@@ -2498,6 +3487,10 @@ impl Default for FormatGraphState {
             line_dash: LineDashStyle::Solid,
             show_legend: true,
             legend_bordered: false,
+            half_violin_with_points: false,
+            model_equation_mode: None,
+            model_equation_annotations: Vec::new(),
+            annotations_dirty: false,
         }
     }
 }
@@ -2512,11 +3505,18 @@ impl FormatGraphState {
         self.graph_kind = Some(graph.spec.kind);
         self.show_legend = graph.spec.legend.visible;
         self.legend_bordered = graph.spec.legend.bordered;
+        self.model_equation_annotations.clone_from(&graph.spec.annotations);
+        self.model_equation_mode = graph.spec.annotations.iter().find_map(|ann| match ann {
+            GraphAnnotation::ModelEquation { mode, .. } => Some(*mode),
+            _ => None,
+        });
+        self.annotations_dirty = false;
         let series_idx = self.selected_series_index.min(graph.spec.series.len().saturating_sub(1));
         self.selected_series_index = series_idx;
         if let Some(series) = graph.spec.series.get(series_idx) {
             self.error_bar_enabled = series.y_error_bars.is_some();
             self.error_bar_spec = series.y_error_bars.unwrap_or_default();
+            self.half_violin_with_points = matches!(series.gdo, GraphicalDataObject::Violin { half_violin_with_points: true, .. });
             self.extract_series_marker_and_dash(&series.gdo);
         }
     }
@@ -2563,9 +3563,15 @@ impl FormatGraphState {
             spec.kind = kind;
         }
         spec.legend = LegendSpec { visible: self.show_legend, bordered: self.legend_bordered, ..spec.legend };
+        if self.annotations_dirty {
+            spec.annotations.clone_from(&self.model_equation_annotations);
+        }
         if let Some(series) = spec.series.get_mut(self.selected_series_index) {
             series.y_error_bars = self.error_bar_enabled.then_some(self.error_bar_spec);
             let swatch = self.palette.color_at(self.selected_series_index);
+            if let GraphicalDataObject::Violin { half_violin_with_points, .. } = &mut series.gdo {
+                *half_violin_with_points = self.half_violin_with_points;
+            }
             apply_marker_and_dash(&mut series.gdo, swatch, self.marker_size_pt, self.marker_fill_mode, self.line_dash);
         }
     }
@@ -2617,10 +3623,36 @@ impl FormatGraphState {
                     let raw = val.as_str().ok_or_else(|| String::from("`frame_preset` must be a string"))?;
                     self.frame_preset = parse_frame_preset_str(raw)?;
                 }
+                "half_violin_with_points" | "raincloud" | "format_graph.half_violin_with_points" => {
+                    self.half_violin_with_points = val.as_bool().ok_or_else(|| String::from("`half_violin_with_points` must be boolean"))?;
+                }
+                "model_equation_mode" | "equation_mode" | "format_graph.model_equation_mode" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`model_equation_mode` must be `substituted` or `symbolic`"))?;
+                    let mode = parse_equation_display_mode_str(raw)?;
+                    self.set_model_equation_mode(mode);
+                }
+                "toggle_model_equation_mode" | "format_graph.toggle_model_equation_mode" => {
+                    let next = match self.model_equation_mode.unwrap_or_default() {
+                        EquationDisplayMode::Substituted => EquationDisplayMode::Symbolic,
+                        EquationDisplayMode::Symbolic => EquationDisplayMode::Substituted,
+                    };
+                    self.set_model_equation_mode(next);
+                }
                 _ => {}
             }
         }
         Ok(())
+    }
+
+    /// Switch all [`GraphAnnotation::ModelEquation`] annotations on this graph to `mode`.
+    pub fn set_model_equation_mode(&mut self, next_mode: EquationDisplayMode) {
+        self.model_equation_mode = Some(next_mode);
+        for ann in &mut self.model_equation_annotations {
+            if let GraphAnnotation::ModelEquation { mode, .. } = ann {
+                *mode = next_mode;
+                self.annotations_dirty = true;
+            }
+        }
     }
 
     /// Emit declarative `graph.setSpec` and `graph.setSeries` engine command intents.
@@ -2638,25 +3670,38 @@ impl FormatGraphState {
         if let Some(kind) = self.graph_kind {
             spec_patch.insert(String::from("kind"), json!(kind));
         }
+        if self.annotations_dirty {
+            spec_patch.insert(String::from("annotations"), json!(self.model_equation_annotations));
+        }
         spec_patch.insert(String::from("legend"), json!({ "visible": self.show_legend, "bordered": self.legend_bordered }));
-        vec![
-            ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch)),
-            ToolCommandIntent::new(
-                "graph.setSeries",
-                json!({
-                    "sheet_id": id.as_str(),
-                    "series_index": self.selected_series_index,
-                    "y_error_bars": error_bars,
-                    "marker": {
-                        "size_pt": self.marker_size_pt,
-                        "fill_mode": self.marker_fill_mode,
-                    },
-                    "connecting_line": {
-                        "dash_style": self.line_dash,
-                    },
+        let mut series_obj = json!({
+            "sheet_id": id.as_str(),
+            "series_index": self.selected_series_index,
+            "y_error_bars": error_bars,
+            "marker": {
+                "size_pt": self.marker_size_pt,
+                "fill_mode": self.marker_fill_mode,
+            },
+            "connecting_line": {
+                "dash_style": self.line_dash,
+            },
+        });
+        if self.half_violin_with_points
+            && let Some(obj) = series_obj.as_object_mut()
+        {
+            let swatch = self.palette.color_at(self.selected_series_index);
+            obj.insert(
+                String::from("gdo"),
+                json!(GraphicalDataObject::Violin {
+                    fill_color: swatch.with_alpha(190),
+                    stroke_color: swatch,
+                    clip_to_observed_range: true,
+                    show_median_and_quartiles: true,
+                    half_violin_with_points: true,
                 }),
-            ),
-        ]
+            );
+        }
+        vec![ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch)), ToolCommandIntent::new("graph.setSeries", series_obj)]
     }
 }
 
@@ -2706,11 +3751,28 @@ pub struct FormatAxesState {
     pub target_axis: AxisTarget,
     pub enable_y2: bool,
     pub axis_draft: AxisSpec,
+    #[serde(default)]
+    pub base_x_thresholds: Vec<AxisThreshold>,
+    #[serde(default)]
+    pub base_y_thresholds: Vec<AxisThreshold>,
+    #[serde(default)]
+    pub pending_x_thresholds: Option<Vec<AxisThreshold>>,
+    #[serde(default)]
+    pub pending_y_thresholds: Option<Vec<AxisThreshold>>,
 }
 
 impl Default for FormatAxesState {
     fn default() -> Self {
-        Self { graph_sheet_id: None, target_axis: AxisTarget::Y, enable_y2: false, axis_draft: AxisSpec::linear("Y") }
+        Self {
+            graph_sheet_id: None,
+            target_axis: AxisTarget::Y,
+            enable_y2: false,
+            axis_draft: AxisSpec::linear("Y"),
+            base_x_thresholds: Vec::new(),
+            base_y_thresholds: Vec::new(),
+            pending_x_thresholds: None,
+            pending_y_thresholds: None,
+        }
     }
 }
 
@@ -2720,11 +3782,98 @@ impl FormatAxesState {
         self.graph_sheet_id = Some(graph.id.clone());
         self.target_axis = target;
         self.enable_y2 = graph.spec.y2_axis.is_some();
+        self.base_x_thresholds = graph.spec.x_axis.thresholds.clone();
+        self.base_y_thresholds = graph.spec.y_axis.thresholds.clone();
+        self.pending_x_thresholds = None;
+        self.pending_y_thresholds = None;
         self.axis_draft = match target {
             AxisTarget::X => graph.spec.x_axis.clone(),
             AxisTarget::Y => graph.spec.y_axis.clone(),
             AxisTarget::Y2 => graph.spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Y2")),
         };
+    }
+
+    /// Return the effective X-axis reference thresholds including un-committed inspector edits.
+    #[must_use]
+    pub fn effective_x_thresholds(&self) -> &[AxisThreshold] {
+        if self.target_axis == AxisTarget::X {
+            &self.axis_draft.thresholds
+        } else if let Some(ref xs) = self.pending_x_thresholds {
+            xs
+        } else {
+            &self.base_x_thresholds
+        }
+    }
+
+    /// Return the effective Y-axis reference thresholds including un-committed inspector edits.
+    #[must_use]
+    pub fn effective_y_thresholds(&self) -> &[AxisThreshold] {
+        if self.target_axis == AxisTarget::Y {
+            &self.axis_draft.thresholds
+        } else if let Some(ref ys) = self.pending_y_thresholds {
+            ys
+        } else {
+            &self.base_y_thresholds
+        }
+    }
+
+    fn set_x_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
+        if self.target_axis == AxisTarget::X {
+            self.axis_draft.thresholds = thresholds.clone();
+        }
+        self.pending_x_thresholds = Some(thresholds);
+    }
+
+    fn set_y_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
+        if self.target_axis == AxisTarget::Y {
+            self.axis_draft.thresholds = thresholds.clone();
+        }
+        self.pending_y_thresholds = Some(thresholds);
+    }
+
+    fn set_active_thresholds(&mut self, thresholds: Vec<AxisThreshold>) {
+        self.axis_draft.thresholds = thresholds.clone();
+        match self.target_axis {
+            AxisTarget::X => self.pending_x_thresholds = Some(thresholds),
+            AxisTarget::Y => self.pending_y_thresholds = Some(thresholds),
+            AxisTarget::Y2 => {}
+        }
+    }
+
+    fn append_thresholds_for_target(&mut self, target: AxisTarget, mut items: Vec<AxisThreshold>) {
+        match target {
+            AxisTarget::X => {
+                let mut next = self.effective_x_thresholds().to_vec();
+                next.append(&mut items);
+                self.set_x_thresholds(next);
+            }
+            AxisTarget::Y => {
+                let mut next = self.effective_y_thresholds().to_vec();
+                next.append(&mut items);
+                self.set_y_thresholds(next);
+            }
+            AxisTarget::Y2 => {
+                self.axis_draft.thresholds.append(&mut items);
+            }
+        }
+    }
+
+    fn switch_target_axis_preserving_thresholds(&mut self, next: AxisTarget, doc: Option<&ProjectDocument>) {
+        let saved_x = (self.target_axis == AxisTarget::X).then(|| self.axis_draft.thresholds.clone()).or_else(|| self.pending_x_thresholds.clone());
+        let saved_y = (self.target_axis == AxisTarget::Y).then(|| self.axis_draft.thresholds.clone()).or_else(|| self.pending_y_thresholds.clone());
+        if let (Some(d), Some(gid)) = (doc, &self.graph_sheet_id)
+            && let Some(gs) = d.graph_sheet(gid)
+        {
+            self.sync_from_graph(gs, next);
+        } else {
+            self.target_axis = next;
+        }
+        if let Some(xs) = saved_x {
+            self.set_x_thresholds(xs);
+        }
+        if let Some(ys) = saved_y {
+            self.set_y_thresholds(ys);
+        }
     }
 
     /// Add a discontinuous [`AxisSegment`], enforcing `1..=3` bounds. Returns `false` if already at `3`.
@@ -2794,10 +3943,20 @@ impl FormatAxesState {
                 }
             }
         }
+        if self.target_axis != AxisTarget::X
+            && let Some(ref xs) = self.pending_x_thresholds
+        {
+            spec.x_axis.thresholds = xs.clone();
+        }
+        if self.target_axis != AxisTarget::Y
+            && let Some(ref ys) = self.pending_y_thresholds
+        {
+            spec.y_axis.thresholds = ys.clone();
+        }
         Ok(())
     }
 
-    /// Emit `graph.setAxes` intent carrying axis target, validated segments, and break ornament.
+    /// Emit `graph.setAxes` intent carrying axis target, validated segments, break ornament, and thresholds.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
         let id = self.graph_sheet_id.as_ref()?;
@@ -2822,8 +3981,199 @@ impl FormatAxesState {
                 }
             }
         }
+        if self.target_axis != AxisTarget::X
+            && let Some(ref xs) = self.pending_x_thresholds
+        {
+            payload.insert(String::from("x_axis"), serde_json::json!({ "thresholds": xs }));
+        }
+        if self.target_axis != AxisTarget::Y
+            && let Some(ref ys) = self.pending_y_thresholds
+        {
+            payload.insert(String::from("y_axis"), serde_json::json!({ "thresholds": ys }));
+        }
         Some(ToolCommandIntent::new("graph.setAxes", Value::Object(payload)))
     }
+
+    /// Apply modal/inspector field updates to the axis draft (`WF-37`, `WF-44..48`).
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
+        if let Some(target_val) = fields.get("target_axis").or_else(|| fields.get("axes.target_axis"))
+            && let Some(raw) = target_val.as_str()
+        {
+            let next = parse_axis_target_str(raw)?;
+            self.switch_target_axis_preserving_thresholds(next, doc);
+        }
+        let mut pending_min = self.axis_draft.segments.first().and_then(|s| s.min);
+        let mut pending_max = self.axis_draft.segments.first().and_then(|s| s.max);
+        let mut bounds_changed = false;
+        for (key, val) in fields {
+            match key.as_str() {
+                "enable_y2" | "axes.enable_y2" => {
+                    self.enable_y2 = val.as_bool().ok_or_else(|| String::from("`enable_y2` must be boolean"))?;
+                }
+                "title" | "axis_title" | "axes.title" => {
+                    self.axis_draft.title = val.as_str().ok_or_else(|| String::from("`title` must be a string"))?.to_owned();
+                }
+                "scale" | "axes.scale" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`scale` must be a string"))?;
+                    let scale = parse_axis_scale_str(raw)?;
+                    let _ = self.set_segment_scale(0, scale);
+                }
+                "min" | "axis_min" | "axes.min" => {
+                    pending_min = parse_opt_finite_f64(val, key)?;
+                    bounds_changed = true;
+                }
+                "max" | "axis_max" | "axes.max" => {
+                    pending_max = parse_opt_finite_f64(val, key)?;
+                    bounds_changed = true;
+                }
+                "break_ornament" | "axes.break_ornament" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`break_ornament` must be a string"))?;
+                    self.axis_draft.break_ornament = parse_break_ornament_str(raw)?;
+                }
+                "gap_width_pt" | "axes.gap_width_pt" => {
+                    self.axis_draft.gap_width_pt = parse_finite_f64(val, key)?.clamp(1.0, 48.0);
+                }
+                "stroke_width_pt" | "axes.stroke_width_pt" => {
+                    self.axis_draft.stroke_width_pt = parse_finite_f64(val, key)?.clamp(0.2, 8.0);
+                }
+                "add_segment" | "axes.add_segment" if val.as_bool() == Some(true) => {
+                    let _ = self.add_segment();
+                }
+                "remove_segment" | "axes.remove_segment" => {
+                    if let Some(idx) = val.as_u64().map(|n| n as usize) {
+                        let _ = self.remove_segment(idx);
+                    }
+                }
+                "thresholds" | "axes.thresholds" => {
+                    let items = parse_axis_thresholds_value(val, key)?;
+                    self.set_active_thresholds(items);
+                }
+                "x_thresholds" | "axes.x_thresholds" => {
+                    let items = parse_axis_thresholds_value(val, key)?;
+                    self.set_x_thresholds(items);
+                }
+                "y_thresholds" | "axes.y_thresholds" => {
+                    let items = parse_axis_thresholds_value(val, key)?;
+                    self.set_y_thresholds(items);
+                }
+                "add_threshold" | "axes.add_threshold" => {
+                    let axis = val.get("axis").and_then(Value::as_str).map(parse_axis_target_str).transpose()?.unwrap_or(self.target_axis);
+                    let items = parse_axis_thresholds_value(val, key)?;
+                    self.append_thresholds_for_target(axis, items);
+                }
+                "add_x_threshold" | "axes.add_x_threshold" => {
+                    let items = parse_axis_thresholds_value(val, key)?;
+                    self.append_thresholds_for_target(AxisTarget::X, items);
+                }
+                "add_y_threshold" | "axes.add_y_threshold" => {
+                    let items = parse_axis_thresholds_value(val, key)?;
+                    self.append_thresholds_for_target(AxisTarget::Y, items);
+                }
+                "clear_thresholds" | "axes.clear_thresholds" if val.as_bool() == Some(true) => {
+                    self.set_active_thresholds(Vec::new());
+                }
+                _ => {}
+            }
+        }
+        if bounds_changed {
+            self.set_segment_bounds(0, pending_min, pending_max)?;
+        }
+        Ok(())
+    }
+}
+
+fn parse_axis_target_str(raw: &str) -> Result<AxisTarget, String> {
+    match norm_key(raw).as_str() {
+        "x" => Ok(AxisTarget::X),
+        "y" => Ok(AxisTarget::Y),
+        "y2" => Ok(AxisTarget::Y2),
+        _ => Err(format!("unknown target_axis `{raw}`")),
+    }
+}
+
+fn parse_axis_thresholds_value(val: &Value, key: &str) -> Result<Vec<AxisThreshold>, String> {
+    match val {
+        Value::Null => Ok(Vec::new()),
+        Value::Array(arr) => arr.iter().map(|item| parse_single_axis_threshold(item, key)).collect(),
+        _ => Ok(vec![parse_single_axis_threshold(val, key)?]),
+    }
+}
+
+fn parse_single_axis_threshold(val: &Value, key: &str) -> Result<AxisThreshold, String> {
+    if let Some(num) = val.as_f64() {
+        if !num.is_finite() {
+            return Err(format!("`{key}` threshold value must be finite"));
+        }
+        return Ok(AxisThreshold {
+            value: num,
+            shade_to: None,
+            color: Rgba8::rgb(120, 120, 120),
+            dash_style: LineDashStyle::Dashed,
+            stroke_width_pt: 1.0,
+            label: None,
+        });
+    }
+    if let Ok(mut parsed) = serde_json::from_value::<AxisThreshold>(val.clone()) {
+        if !parsed.value.is_finite() || parsed.shade_to.is_some_and(|v| !v.is_finite()) {
+            return Err(format!("`{key}` threshold bounds must be finite"));
+        }
+        parsed.stroke_width_pt = parsed.stroke_width_pt.clamp(0.2, 8.0);
+        return Ok(parsed);
+    }
+    let obj = val.as_object().ok_or_else(|| format!("`{key}` entries must be objects or numbers"))?;
+    let val_num = obj.get("value").ok_or_else(|| format!("`{key}` threshold missing `value`"))?;
+    let value = parse_finite_f64(val_num, key)?;
+    let shade_to = obj.get("shade_to").map(|v| parse_opt_finite_f64(v, "shade_to")).transpose()?.flatten();
+    let label = match obj.get("label") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(v.as_str().ok_or_else(|| format!("`{key}` `label` must be a string"))?.to_owned()),
+    };
+    let color = match obj.get("color") {
+        None | Some(Value::Null) => Rgba8::rgb(120, 120, 120),
+        Some(v) => parse_threshold_color(v, key)?,
+    };
+    let dash_style = match obj.get("dash_style") {
+        None | Some(Value::Null) => LineDashStyle::Dashed,
+        Some(v) => parse_threshold_dash_style(v, key)?,
+    };
+    let stroke_width_pt = match obj.get("stroke_width_pt") {
+        None | Some(Value::Null) => 1.0,
+        Some(v) => parse_finite_f64(v, "stroke_width_pt")?.clamp(0.2, 8.0),
+    };
+    Ok(AxisThreshold { value, shade_to, color, dash_style, stroke_width_pt, label })
+}
+
+fn parse_threshold_color(val: &Value, key: &str) -> Result<Rgba8, String> {
+    if let Ok(c) = serde_json::from_value::<Rgba8>(val.clone()) {
+        return Ok(c);
+    }
+    if let Some(hex) = val.as_str() {
+        let s = hex.trim().trim_start_matches('#');
+        if s.is_ascii() && (s.len() == 6 || s.len() == 8) {
+            let r = u8::from_str_radix(&s[0..2], 16).map_err(|_| format!("invalid `{key}` hex color `{hex}`"))?;
+            let g = u8::from_str_radix(&s[2..4], 16).map_err(|_| format!("invalid `{key}` hex color `{hex}`"))?;
+            let b = u8::from_str_radix(&s[4..6], 16).map_err(|_| format!("invalid `{key}` hex color `{hex}`"))?;
+            let a = if s.len() == 8 { u8::from_str_radix(&s[6..8], 16).map_err(|_| format!("invalid `{key}` hex color `{hex}`"))? } else { 255 };
+            return Ok(Rgba8::rgba(r, g, b, a));
+        }
+    }
+    Err(format!("invalid `{key}` color value"))
+}
+
+fn parse_threshold_dash_style(val: &Value, key: &str) -> Result<LineDashStyle, String> {
+    if let Ok(d) = serde_json::from_value::<LineDashStyle>(val.clone()) {
+        return Ok(d);
+    }
+    if let Some(raw) = val.as_str() {
+        return match norm_key(raw).as_str() {
+            "solid" => Ok(LineDashStyle::Solid),
+            "dashed" | "dash" => Ok(LineDashStyle::Dashed),
+            "dotted" | "dot" => Ok(LineDashStyle::Dotted),
+            "dashdot" | "dash_dot" => Ok(LineDashStyle::DashDot),
+            _ => Err(format!("unknown `{key}` dash_style `{raw}`")),
+        };
+    }
+    Err(format!("`{key}` dash_style must be a string"))
 }
 
 /// Live Pairwise Comparison Bracket inspector (`Auto-add from analysis`).
@@ -2936,6 +4286,44 @@ impl PairwiseComparisonsState {
         }
         Some(ToolCommandIntent::new("graph.addComparisonBrackets", payload))
     }
+
+    /// Apply field patches for `Pairwise Comparisons` bracket styling & source binding (`WF-46`).
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
+        let mut auto_add = false;
+        for (key, val) in fields {
+            match key.as_str() {
+                "result_sheet_id" | "selected_result_sheet_id" | "pairwise.result_sheet_id" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`result_sheet_id` must be a string"))?.trim();
+                    if !s.is_empty() {
+                        self.selected_result_sheet_id = Some(SheetId::from(s));
+                    }
+                }
+                "bracket_style" | "style" | "pairwise.style" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`bracket_style` must be a string"))?;
+                    self.bracket_style = parse_bracket_style_str(raw)?;
+                }
+                "label_mode" | "pairwise.label_mode" => {
+                    self.label_mode = parse_bracket_label_mode(val)?;
+                }
+                "hide_non_significant" | "hide_if_non_significant" | "pairwise.hide_non_significant" => {
+                    self.hide_non_significant = val.as_bool().ok_or_else(|| String::from("`hide_non_significant` must be boolean"))?;
+                }
+                "auto_add" | "pairwise.auto_add" if val.as_bool() == Some(true) => {
+                    auto_add = true;
+                }
+                _ => {}
+            }
+        }
+        for b in &mut self.brackets {
+            b.style = self.bracket_style;
+            b.label_mode = self.label_mode.clone();
+            b.hide_if_non_significant = self.hide_non_significant;
+        }
+        if auto_add && let Some(d) = doc {
+            let _ = self.auto_add_from_analysis(d);
+        }
+        Ok(())
+    }
 }
 
 /// 5-channel `MultipleVariables` Bubble Plot inspector (`X`, `Y`, `Color`, `Size`, `Label`).
@@ -3039,6 +4427,88 @@ impl BubblePlotInspectorState {
             }),
         ))
     }
+
+    /// Apply field patches for 5-channel `MultipleVariables` bubble & categorical summary plots (`WF-44`).
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        let mut color_mode: Option<String> = None;
+        let mut color_col: Option<usize> = None;
+        let mut palette_override: Option<PaletteId> = None;
+        let mut colormap_override: Option<ColormapId> = None;
+        for (key, val) in fields {
+            match key.as_str() {
+                "x_column" | "bubble.x_column" => self.x_column = parse_usize_min(val, key, 0)?,
+                "y_column" | "bubble.y_column" => self.y_column = parse_usize_min(val, key, 0)?,
+                "size_column" | "bubble.size_column" => {
+                    if val.is_null() {
+                        self.size_channel = SizeChannelMapping::Constant { radius_pt: 5.0 };
+                    } else {
+                        self.set_size_variable(parse_usize_min(val, key, 0)?, 2.5, 14.0);
+                    }
+                }
+                "label_column" | "group_column" | "bubble.label_column" => {
+                    self.label_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                }
+                "color_mode" | "bubble.color_mode" => {
+                    color_mode = val.as_str().map(norm_key);
+                }
+                "color_column" | "bubble.color_column" => {
+                    color_col = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                }
+                "palette" | "bubble.palette" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`palette` must be a string"))?;
+                    palette_override = Some(parse_palette_str(raw)?);
+                }
+                "colormap" | "bubble.colormap" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`colormap` must be a string"))?;
+                    colormap_override = Some(parse_colormap_id_str(raw)?);
+                }
+                "show_convex_hulls" | "bubble.show_convex_hulls" => {
+                    self.show_convex_hulls = val.as_bool().ok_or_else(|| String::from("`show_convex_hulls` must be boolean"))?;
+                }
+                "show_confidence_ellipses" | "bubble.show_confidence_ellipses" => {
+                    self.show_confidence_ellipses = val.as_bool().ok_or_else(|| String::from("`show_confidence_ellipses` must be boolean"))?;
+                }
+                "plot_mode" | "categorical_summary" | "bubble.plot_mode" => {
+                    let is_cat = val.as_bool().unwrap_or_else(|| val.as_str().is_some_and(|s| norm_key(s).contains("categorical")));
+                    self.plot_mode = if is_cat {
+                        MultivariatePlotMode::CategoricalSummary {
+                            gdo: build_gdo_for_option("col.box_whisker", self.palette_fallback(), MarkerStyle::default(), SummaryMeasure::Mean),
+                            y_error_bars: None,
+                        }
+                    } else {
+                        MultivariatePlotMode::BubbleScatter
+                    };
+                }
+                _ => {}
+            }
+        }
+        if color_mode.is_some() || color_col.is_some() || palette_override.is_some() || colormap_override.is_some() {
+            match color_mode.as_deref() {
+                Some("constant") => self.color_channel = ColorChannelMapping::Constant(PaletteId::OkabeIto.color_at(0)),
+                Some("continuous") => {
+                    let col = color_col.unwrap_or(self.y_column);
+                    self.set_color_continuous(col, colormap_override.unwrap_or(ColormapId::Viridis), None);
+                }
+                Some("categorical") => {
+                    let col = color_col.unwrap_or(self.label_column.unwrap_or(0));
+                    self.set_color_categorical(col, palette_override.unwrap_or(PaletteId::OkabeIto));
+                }
+                _ if colormap_override.is_some() => {
+                    let col = color_col.unwrap_or(self.y_column);
+                    self.set_color_continuous(col, colormap_override.unwrap_or(ColormapId::Viridis), None);
+                }
+                _ if color_col.is_some() => {
+                    self.set_color_categorical(color_col.unwrap_or(0), palette_override.unwrap_or(PaletteId::OkabeIto));
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    fn palette_fallback(&self) -> Rgba8 {
+        PaletteId::OkabeIto.color_at(0)
+    }
 }
 
 /// `Apply Style From...` cross-graph style cloning dialog (`graph.applyStyleFrom`).
@@ -3101,6 +4571,31 @@ impl ApplyStyleFromState {
                 "clone_error_bars_and_legend": self.clone_error_bars_and_legend,
             }),
         ))
+    }
+
+    /// Apply modal field patches for `Apply Style From...` (`WF-48`).
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "donor_graph_id" | "donor_sheet_id" | "style.donor_graph_id" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`donor_graph_id` must be a string"))?.trim();
+                    if !s.is_empty() {
+                        self.donor_graph_id = Some(SheetId::from(s));
+                    }
+                }
+                "clone_palette" | "style.clone_palette" => {
+                    self.clone_palette = val.as_bool().ok_or_else(|| String::from("`clone_palette` must be boolean"))?;
+                }
+                "clone_frame_and_axes" | "style.clone_frame_and_axes" => {
+                    self.clone_frame_and_axes = val.as_bool().ok_or_else(|| String::from("`clone_frame_and_axes` must be boolean"))?;
+                }
+                "clone_error_bars_and_legend" | "style.clone_error_bars_and_legend" => {
+                    self.clone_error_bars_and_legend = val.as_bool().ok_or_else(|| String::from("`clone_error_bars_and_legend` must be boolean"))?;
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3226,6 +4721,49 @@ impl PageLayoutComposerState {
         }
         out
     }
+
+    /// Apply modal/inspector field patches for `Page Layout` (`WF-48`).
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
+        let mut grid_changed = false;
+        for (key, val) in fields {
+            match key.as_str() {
+                "preset" | "layout.preset" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`preset` must be a string"))?;
+                    self.apply_preset(parse_journal_preset_str(raw)?);
+                }
+                "orientation" | "layout.orientation" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`orientation` must be a string"))?;
+                    self.orientation = parse_page_orientation_str(raw)?;
+                }
+                "rows" | "layout.rows" => {
+                    self.rows = u8::try_from(parse_usize_min(val, key, 1)?.min(12)).unwrap_or(12);
+                    grid_changed = true;
+                }
+                "cols" | "columns" | "layout.cols" => {
+                    self.cols = u8::try_from(parse_usize_min(val, key, 1)?.min(12)).unwrap_or(12);
+                    grid_changed = true;
+                }
+                "align_plot_origins" | "layout.align_plot_origins" => {
+                    self.align_plot_origins = val.as_bool().ok_or_else(|| String::from("`align_plot_origins` must be boolean"))?;
+                }
+                "panel_badges" | "layout.panel_badges" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`panel_badges` must be a string"))?;
+                    self.panel_badges = parse_panel_badge_style_str(raw)?;
+                }
+                "new_callout_markdown" | "callout" | "layout.new_callout_markdown" => {
+                    if let Some(s) = val.as_str() {
+                        self.new_callout_markdown = s.to_owned();
+                    }
+                }
+                _ => {}
+            }
+        }
+        if grid_changed && let Some(d) = doc {
+            let graph_ids: Vec<SheetId> = d.graph_sheets.iter().map(|g| g.id.clone()).collect();
+            self.arrange_grid(&graph_ids, 18.0, 12.0);
+        }
+        Ok(())
+    }
 }
 
 /// Output format for [`ExportFigureState`].
@@ -3280,6 +4818,29 @@ impl ExportFigureState {
                 }),
             ),
         }
+    }
+
+    /// Apply modal field patches for `Export Figure...` (`WF-48`).
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "format" | "export.format" => self.format = parse_export_format(val)?,
+                "width_px" | "export.width_px" => {
+                    let w = parse_usize_min(val, key, 16)?;
+                    self.width_px = u32::try_from(w).unwrap_or(u32::MAX);
+                }
+                "height_px" | "export.height_px" => {
+                    let h = parse_usize_min(val, key, 16)?;
+                    self.height_px = u32::try_from(h).unwrap_or(u32::MAX);
+                }
+                "dpi" | "export.dpi" => {
+                    let d = parse_usize_min(val, key, 72)?;
+                    self.dpi = u16::try_from(d.clamp(72, 2400)).unwrap_or(600);
+                }
+                _ => {}
+            }
+        }
+        Ok(())
     }
 }
 
@@ -3575,7 +5136,7 @@ impl ConvertArchetypeDialogState {
     /// Supported conversion destination archetypes for `table.convertArchetype`.
     #[must_use]
     pub const fn supported_targets() -> &'static [TableKind] {
-        &[TableKind::Column, TableKind::Grouped, TableKind::Xy, TableKind::MultipleVariables]
+        &[TableKind::Column, TableKind::Grouped, TableKind::Xy, TableKind::MultipleVariables, TableKind::Contingency]
     }
 
     /// Initialize conversion dialog state for `sheet`.
@@ -3694,6 +5255,7 @@ fn convert_target_wire_name(kind: TableKind) -> &'static str {
         TableKind::Grouped => "Grouped",
         TableKind::Xy => "Xy",
         TableKind::MultipleVariables => "MultipleVariables",
+        TableKind::Contingency => "Contingency",
         _ => "Column",
     }
 }
@@ -3833,61 +5395,99 @@ impl SplitWorkspaceState {
 
 pub use lumencraft_doc::RemediationKind;
 
-/// Interactive assumption warning strip displayed above a [`ResultSheet`] when diagnostics flag
-/// unequal variance or non-normality (`QOL-7`).
+/// Non-prescriptive assumption diagnostic strip displayed above a [`ResultSheet`] (`QOL-7`).
+///
+/// Surfaces checked assumptions, numeric diagnostic metrics, statistical/sample-size limitations,
+/// and detail-tab navigation links on the *same* [`ResultSheet`] without prescribing alternative
+/// tests, data transforms, or outlier exclusion, and never creates sibling sheets automatically.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AssumptionDiagnosticBanner {
     pub source_result_id: SheetId,
     pub severity: ChecklistStatus,
     pub summary: String,
-    pub recommendation_label: String,
-    pub remediation_kind: RemediationKind,
+    pub diagnostic_metric: Option<String>,
+    pub limitation_note: String,
+    pub detail_tab_ids: Vec<String>,
 }
 
 impl AssumptionDiagnosticBanner {
-    /// Derive an actionable remediation banner from structured `ChecklistItem::remediation` diagnostics.
-    ///
-    /// Never modifies `rs`; remediation creates a fresh non-destructive sibling analysis sheet.
+    /// Derive a strictly diagnostics-only banner from `rs.checklist` (`Violated`, `Warn`, or
+    /// inconclusive/small-sample `Info`) and collect same-sheet detail tab IDs from `rs.tabs`.
     #[must_use]
     pub fn from_result(rs: &ResultSheet) -> Option<Self> {
-        let supports_sibling = matches!(&rs.analysis.kind, AnalysisKind::TwoGroupComparison(_) | AnalysisKind::OneWayAnova(_));
-        if !supports_sibling {
-            return None;
-        }
+        let rank = |status: ChecklistStatus| -> u8 {
+            match status {
+                ChecklistStatus::Violated => 3,
+                ChecklistStatus::Warn => 2,
+                ChecklistStatus::Info => 1,
+                ChecklistStatus::Pass => 0,
+            }
+        };
         let flagged = rs
             .checklist
             .iter()
-            .filter(|c| matches!(c.status, ChecklistStatus::Violated | ChecklistStatus::Warn) && c.remediation.is_some())
-            .max_by_key(|c| if c.status == ChecklistStatus::Violated { 2u8 } else { 1u8 })?;
-        let remediation_kind = flagged.remediation?;
+            .filter(|c| matches!(c.status, ChecklistStatus::Violated | ChecklistStatus::Warn) || is_inconclusive_info_item(c))
+            .max_by_key(|c| rank(c.status))?;
+
+        let mut detail_tab_ids: Vec<String> = rs
+            .tabs
+            .iter()
+            .filter(|tab| {
+                matches!(
+                    tab.kind,
+                    ResultTabKind::Diagnostics
+                        | ResultTabKind::NormalQq
+                        | ResultTabKind::Residuals
+                        | ResultTabKind::CovarianceMatrix
+                        | ResultTabKind::LogMinusLog
+                )
+            })
+            .map(|tab| tab.id.clone())
+            .collect();
+        if detail_tab_ids.is_empty() {
+            detail_tab_ids = rs.tabs.iter().map(|tab| tab.id.clone()).collect();
+        }
+
+        let status_label = match flagged.status {
+            ChecklistStatus::Violated => "assumption violated",
+            ChecklistStatus::Warn => "assumption warning",
+            ChecklistStatus::Info => "inconclusive / sample-size limitation",
+            ChecklistStatus::Pass => "checked",
+        };
+        let checked_count = rs
+            .checklist
+            .iter()
+            .filter(|c| matches!(c.status, ChecklistStatus::Violated | ChecklistStatus::Warn) || is_inconclusive_info_item(c))
+            .count();
+        let summary = if checked_count > 1 {
+            format!("{} ({status_label}; {checked_count} checks flagged)", flagged.assumption)
+        } else {
+            format!("{} ({status_label})", flagged.assumption)
+        };
 
         Some(Self {
             source_result_id: rs.id.clone(),
             severity: flagged.status,
-            summary: format!("{}: {}", flagged.assumption, flagged.explanation),
-            recommendation_label: format!("Run {} (sibling)", remediation_kind.label()),
-            remediation_kind,
+            summary,
+            diagnostic_metric: flagged.diagnostic_metric.clone(),
+            limitation_note: sanitize_diagnostics_only_text(flagged),
+            detail_tab_ids,
         })
     }
 
-    /// Build a non-destructive `analysis.run` intent creating a new sibling [`ResultSheet`] (`sibling_id`).
+    /// Preferred same-sheet diagnostic detail tab ID (`Diagnostics`, `NormalQq`, `Residuals`, ...).
     #[must_use]
-    pub fn build_sibling_analysis_intent(&self, original: &ResultSheet, sibling_id: &SheetId) -> ToolCommandIntent {
-        let title = format!("{} ({})", original.title(), self.remediation_kind.label());
-        let mut params = json!({
-            "sheet_id": sibling_id.as_str(),
-            "source_sheet": original.analysis.source_sheet_id.as_str(),
-            "kind": self.remediation_kind.engine_kind(),
-            "title": title,
-            "confidence_percent": original.analysis.confidence_level.percent(),
-            "overwrite": false,
-        });
-        if !original.analysis.selected_data_sets.is_empty()
-            && let Some(obj) = params.as_object_mut()
-        {
-            obj.insert(String::from("selected_data_sets"), json!(original.analysis.selected_data_sets));
+    pub fn preferred_diagnostic_tab_id(&self) -> Option<&str> {
+        self.detail_tab_ids.first().map(String::as_str)
+    }
+
+    /// Single-line diagnostics-only banner text rendered above the result sheet grid.
+    #[must_use]
+    pub fn format_banner_line(&self) -> String {
+        match &self.diagnostic_metric {
+            Some(metric) => format!("! {} [{}]: {} — Inspect Diagnostics", self.summary, metric, self.limitation_note),
+            None => format!("! {}: {} — Inspect Diagnostics", self.summary, self.limitation_note),
         }
-        ToolCommandIntent::new("analysis.run", params)
     }
 }
 
@@ -4107,6 +5707,14 @@ pub struct CanvasDialogState {
     pub power_wizard: PowerWizardState,
     #[serde(default)]
     pub format_points: FormatSelectedPointsState,
+    #[serde(default)]
+    pub randomize_groups: RandomizeGroupsDialogState,
+    #[serde(default)]
+    pub random_sample_rows: RandomSampleRowsDialogState,
+    #[serde(default)]
+    pub simulate_distributions: SimulateDistributionsDialogState,
+    #[serde(default)]
+    pub insert_model_equation: InsertModelEquationDialogState,
 }
 
 /// Interactive state for the `Print...` setup and OS print-spool dialog (`R5.4`).
@@ -4355,6 +5963,89 @@ impl CanvasDialogState {
         true
     }
 
+    /// Open `Randomize Subjects to Groups...` dialog (`R9.14`, `table.randomizeGroups`).
+    pub fn open_randomize_groups(&mut self, doc: &ProjectDocument) {
+        self.randomize_groups.open_for_document(doc);
+        self.active_dialog = ActiveDialog::RandomizeGroups;
+    }
+
+    /// Open `Random Sample Rows...` dialog (`R9.14`, `table.randomSampleRows`).
+    pub fn open_random_sample_rows(&mut self, doc: &ProjectDocument, source_sheet_id: Option<&SheetId>) -> bool {
+        let target_id = source_sheet_id.cloned().or_else(|| doc.data_sheets.first().map(|d| d.id.clone()));
+        let Some(id) = target_id else {
+            return false;
+        };
+        if !self.random_sample_rows.open_for_sheet(doc, &id) {
+            return false;
+        }
+        self.active_dialog = ActiveDialog::RandomSampleRows { source_sheet_id: Some(id) };
+        true
+    }
+
+    /// Open `Simulate Distributions...` dialog (`R9.14`, `table.simulateDistributions`).
+    pub fn open_simulate_distributions(&mut self) {
+        self.active_dialog = ActiveDialog::SimulateDistributions;
+    }
+
+    /// Open `Insert Model Equation...` dialog targeting `graph_sheet_id` (`R9.16`, strictly equations only).
+    pub fn open_insert_model_equation(&mut self, doc: &ProjectDocument, graph_sheet_id: &SheetId) -> bool {
+        let Some(gs) = doc.graph_sheet(graph_sheet_id) else {
+            return false;
+        };
+        self.insert_model_equation.open_for_graph(gs, doc);
+        self.active_dialog = ActiveDialog::InsertModelEquation { graph_sheet_id: gs.id.clone() };
+        true
+    }
+
+    /// Open `Bubble Plot Channels` dialog & inspector targeting `graph_sheet_id` (`WF-44`).
+    pub fn open_bubble_plot(&mut self, doc: &ProjectDocument, graph_sheet_id: &SheetId) -> bool {
+        let Some(gs) = doc.graph_sheet(graph_sheet_id) else {
+            return false;
+        };
+        self.bubble_plot.sync_from_graph(gs, doc);
+        self.active_inspector = ActiveInspector::BubblePlot;
+        self.active_dialog = ActiveDialog::BubblePlotInspector { graph_sheet_id: gs.id.clone() };
+        true
+    }
+
+    /// Open `Format Graph` dialog & inspector targeting `graph_sheet_id` (`WF-45`).
+    pub fn open_format_graph(&mut self, doc: &ProjectDocument, graph_sheet_id: &SheetId) -> bool {
+        let Some(gs) = doc.graph_sheet(graph_sheet_id) else {
+            return false;
+        };
+        self.format_graph.sync_from_graph(gs);
+        self.active_inspector = ActiveInspector::FormatGraph;
+        self.active_dialog = ActiveDialog::FormatGraph { graph_sheet_id: gs.id.clone() };
+        true
+    }
+
+    /// Open `Pairwise Comparisons` dialog & inspector targeting `graph_sheet_id` (`WF-46`).
+    pub fn open_pairwise_comparisons(&mut self, doc: &ProjectDocument, graph_sheet_id: &SheetId) -> bool {
+        let Some(gs) = doc.graph_sheet(graph_sheet_id) else {
+            return false;
+        };
+        self.pairwise.sync_from_graph(gs, doc);
+        self.active_inspector = ActiveInspector::PairwiseComparisons;
+        self.active_dialog = ActiveDialog::PairwiseComparisons { graph_sheet_id: gs.id.clone() };
+        true
+    }
+
+    /// Open `Page Layout Composer` dialog & inspector targeting `layout_sheet_id` (`WF-48`).
+    pub fn open_page_layout_composer(&mut self, doc: &ProjectDocument, layout_sheet_id: &SheetId) -> bool {
+        let Some(ls) = doc.layout_sheet(layout_sheet_id) else {
+            return false;
+        };
+        self.page_layout.sync_from_layout(ls);
+        self.active_inspector = ActiveInspector::PageLayout;
+        self.active_dialog = ActiveDialog::PageLayoutComposer { layout_sheet_id: ls.id.clone() };
+        true
+    }
+
+    /// Open `Export Figure...` dialog targeting `sheet_id` (`WF-48`).
+    pub fn open_export_figure(&mut self, sheet_id: &SheetId) {
+        self.active_dialog = ActiveDialog::ExportFigure { sheet_id: sheet_id.clone() };
+    }
+
     /// Open `Analyze...` for `source_sheet_id` (`DataSheet`, analyzable `ResultSheet`, or tabular `ResultSheet`).
     pub fn open_analyze_dialog(&mut self, doc: &ProjectDocument, source_sheet_id: &SheetId) -> bool {
         if let Some(ds) = doc.data_sheet(source_sheet_id) {
@@ -4594,56 +6285,76 @@ mod tests {
     }
 
     #[test]
-    fn assumption_banner_reads_structured_remediation_ignoring_checklist_wording() {
+    fn assumption_banner_is_diagnostics_only_without_remediation_or_prescriptions() {
         let tg_spec = AnalysisSpec::new("res-t", "d1", AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())).expect("spec");
         let mut res = ResultSheet::new(tg_spec).expect("result");
         res.status = ResultStatus::UpToDate;
-        // Reworded non-English text without any English keywords ("variance", "levene", "welch")
-        // should still resolve directly from `ChecklistItem::remediation`.
+        res.tabs.push(lumencraft_doc::ResultTab {
+            id: String::from("diagnostics"),
+            title: String::from("Diagnostics"),
+            kind: lumencraft_doc::ResultTabKind::Diagnostics,
+            column_headers: vec![String::from("Check")],
+            row_labels: Vec::new(),
+            rows: Vec::new(),
+            footnotes: Vec::new(),
+        });
         res.checklist = vec![
             ChecklistItem {
-                assumption: String::from("Streuung der Stichproben"),
+                assumption: String::from("Variance homogeneity"),
                 status: ChecklistStatus::Violated,
                 diagnostic_metric: Some(String::from("F = 8.42, p = 0.008")),
-                explanation: String::from("Die Gruppen zeigen stark unterschiedliche Streuungen."),
+                explanation: String::from("Sample variances differ materially across groups."),
                 remediation: Some(RemediationKind::WelchT),
             },
             ChecklistItem {
-                assumption: String::from("Normalverteilung"),
+                assumption: String::from("Normality"),
                 status: ChecklistStatus::Warn,
                 diagnostic_metric: Some(String::from("p = 0.03")),
-                explanation: String::from("Schiefe Verteilung."),
+                explanation: String::from("Moderate right skew observed."),
                 remediation: Some(RemediationKind::MannWhitneyU),
             },
         ];
-        let banner = AssumptionDiagnosticBanner::from_result(&res).expect("banner from Violated remediation");
-        assert_eq!(banner.remediation_kind, RemediationKind::WelchT);
+        let banner = AssumptionDiagnosticBanner::from_result(&res).expect("banner from Violated check");
+        assert_eq!(banner.severity, ChecklistStatus::Violated);
+        assert_eq!(banner.diagnostic_metric.as_deref(), Some("F = 8.42, p = 0.008"));
+        assert!(banner.limitation_note.contains("Sample variances differ"));
+        assert_eq!(banner.detail_tab_ids, vec![String::from("diagnostics")]);
 
-        // Switching the checklist wording while carrying `MannWhitneyU` selects `MannWhitneyU`.
+        // Prescriptive phrases inside raw item explanations are neutralized (QOL-7).
         res.checklist = vec![ChecklistItem {
-            assumption: String::from("Even if text mentions variance or Levene or Brown-Forsythe"),
+            assumption: String::from("Normality"),
             status: ChecklistStatus::Warn,
-            diagnostic_metric: None,
-            explanation: String::from("Text wording must not override structured remediation."),
+            diagnostic_metric: Some(String::from("W = 0.81, p = 0.02")),
+            explanation: String::from("Switch to Mann-Whitney U or transform data or exclude outlier."),
             remediation: Some(RemediationKind::MannWhitneyU),
         }];
-        let banner_mw = AssumptionDiagnosticBanner::from_result(&res).expect("banner from structured field");
-        assert_eq!(banner_mw.remediation_kind, RemediationKind::MannWhitneyU);
+        let neutralized = AssumptionDiagnosticBanner::from_result(&res).expect("neutralized banner");
+        assert!(!neutralized.limitation_note.to_ascii_lowercase().contains("mann-whitney"));
+        assert!(!neutralized.limitation_note.to_ascii_lowercase().contains("exclude outlier"));
 
-        // Conversely, an ANOVA checklist item with keywords but `remediation: None` yields no banner.
+        // Inconclusive / small-N `ChecklistStatus::Info` items also surface diagnostics-only banners,
+        // whereas routine `Pass` items yield `None`.
         let anova_spec = AnalysisSpec::new("res-a", "d1", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).expect("anova spec");
         let mut anova_res = ResultSheet::new(anova_spec).expect("anova res");
         anova_res.checklist = vec![ChecklistItem {
-            assumption: String::from("Equal variance check with Welch keyword"),
-            status: ChecklistStatus::Warn,
-            diagnostic_metric: None,
-            explanation: String::from("Informational only when remediation is None."),
+            assumption: String::from("Normality test power"),
+            status: ChecklistStatus::Pass,
+            diagnostic_metric: Some(String::from("p = 0.42")),
+            explanation: String::from("Passed Shapiro-Wilk."),
             remediation: None,
         }];
         assert!(AssumptionDiagnosticBanner::from_result(&anova_res).is_none());
 
-        anova_res.checklist[0].remediation = Some(RemediationKind::KruskalWallis);
-        assert_eq!(AssumptionDiagnosticBanner::from_result(&anova_res).expect("kruskal wallis").remediation_kind, RemediationKind::KruskalWallis);
+        anova_res.checklist = vec![ChecklistItem {
+            assumption: String::from("Normality check"),
+            status: ChecklistStatus::Info,
+            diagnostic_metric: Some(String::from("n = 4")),
+            explanation: String::from("Sample size is too small (n < 5) for reliable normality testing."),
+            remediation: None,
+        }];
+        let info_banner = AssumptionDiagnosticBanner::from_result(&anova_res).expect("small-N Info banner");
+        assert_eq!(info_banner.severity, ChecklistStatus::Info);
+        assert!(info_banner.limitation_note.contains("too small"));
     }
 
     #[test]

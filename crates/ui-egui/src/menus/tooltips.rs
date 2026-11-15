@@ -122,15 +122,28 @@ fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.analyze.open" => ("menu.analyze", "Analyze/Analyze..."),
         "ui.result.copyMethodsReport" => ("menu.analyze", "Analyze/Copy Methods Report"),
         "ui.result.applyRemediation" => ("menu.analyze", "Analyze/Apply Assumption Remediation"),
+        "ui.result.inspectDiagnostics" => ("menu.analyze", "Analyze/Inspect Result Diagnostic Tabs"),
+        "ui.result.appendClusterColumn" => ("menu.analyze", "Analyze/Append Cluster Column to Source Table"),
         "ui.formatPoints.open" => ("menu.graph", "Format/Format Selected Points..."),
+        "ui.graph.axes.open" => ("menu.graph", "Format/Format Axes..."),
+        "ui.graph.insertModelEquation" => ("menu.graph", "Draw/Insert Model Equation..."),
+        "ui.graph.bubblePlot.open" => ("menu.graph", "Graph/Bubble Plot Channels..."),
+        "ui.graph.format.open" => ("menu.graph", "Format/Format Graph..."),
+        "ui.graph.pairwise.open" => ("menu.graph", "Format/Pairwise Comparison Brackets..."),
+        "ui.layout.composer.open" => ("menu.graph", "Layout/Page Layout Composer..."),
         "ui.changeGraphType.open" => ("menu.graph", "Graph/Change Graph Type..."),
         "ui.canvas.applyPreset" => ("menu.graph", "Graph/Apply Canvas Preset"),
         "ui.canvas.preflight" => ("menu.graph", "Graph/Preflight Check"),
         "ui.brush.point" => ("menu.graph", "Graph/Brush Point"),
         "ui.print.open" => ("menu.file", "File/Print..."),
+        "ui.export.figure.open" => ("menu.file", "File/Export Figure..."),
         "ui.clonePipeline.open" => ("menu.file", "File/Clone Pipeline..."),
         "ui.import.reshape.open" => ("menu.file", "File/Import Reshape..."),
         "ui.table.convertArchetype.open" => ("menu.insert", "Data/Convert Table Archetype..."),
+        "ui.table.randomizeGroups" => ("menu.insert", "Data/Randomize Groups Dialog..."),
+        "ui.table.randomSampleRows" => ("menu.insert", "Data/Random Sample Rows Dialog..."),
+        "ui.table.simulateDistributions" => ("menu.insert", "Insert/Simulate Distributions Dialog..."),
+        "ui.table.openFormulaBar" => ("menu.insert", "Data/Open Formula Bar..."),
         "ui.grid.excludeWithReason" => ("menu.edit", "Edit/Exclude with Reason..."),
         _ => ("menu.view", "UI"),
     }
@@ -148,10 +161,22 @@ fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
             });
             active_analyzable || !doc.data_sheets.is_empty()
         }
-        "ui.formatPoints.open" | "ui.changeGraphType.open" => !doc.graph_sheets.is_empty(),
-        "ui.result.copyMethodsReport" | "ui.result.applyRemediation" => !doc.result_sheets.is_empty(),
-        "ui.table.convertArchetype.open" | "ui.grid.excludeWithReason" => !doc.data_sheets.is_empty(),
-        "ui.canvas.applyPreset" | "ui.canvas.preflight" => !doc.graph_sheets.is_empty() || !doc.layout_sheets.is_empty(),
+        "ui.formatPoints.open"
+        | "ui.changeGraphType.open"
+        | "ui.graph.axes.open"
+        | "ui.graph.insertModelEquation"
+        | "ui.graph.bubblePlot.open"
+        | "ui.graph.format.open"
+        | "ui.graph.pairwise.open" => !doc.graph_sheets.is_empty(),
+        "ui.result.copyMethodsReport" | "ui.result.applyRemediation" | "ui.result.inspectDiagnostics" => !doc.result_sheets.is_empty(),
+        "ui.result.appendClusterColumn" => doc
+            .result_sheets
+            .iter()
+            .any(|rs| matches!(rs.analysis.kind, lumencraft_doc::AnalysisKind::Multivariate(lumencraft_doc::MultivariateSpec::Clustering { .. }))),
+        "ui.table.openFormulaBar" => doc.data_sheets.iter().any(|ds| matches!(ds.archetype, lumencraft_doc::TableArchetype::MultipleVariables(_))),
+        "ui.table.convertArchetype.open" | "ui.table.randomSampleRows" | "ui.grid.excludeWithReason" => !doc.data_sheets.is_empty(),
+        "ui.layout.composer.open" => !doc.layout_sheets.is_empty(),
+        "ui.canvas.applyPreset" | "ui.canvas.preflight" | "ui.export.figure.open" => !doc.graph_sheets.is_empty() || !doc.layout_sheets.is_empty(),
         _ => true,
     }
 }
@@ -276,7 +301,7 @@ mod tests {
         let frame = crate::render_workspace_frame_png(&app, crate::RenderTargetSpec { width_px: 480, height_px: 320, dpi: 96 })?;
         assert!(frame.len() > 8);
 
-        // Menu bar covers all 92 engine + 32 UI commands with non-empty summary & beginner guidance.
+        // Menu bar covers all 95 engine + 42 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
         assert_eq!(sections.len(), 7);
         let mut seen = HashSet::new();
@@ -288,7 +313,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 124);
+        assert_eq!(seen.len(), 140);
         Ok(())
     }
 }

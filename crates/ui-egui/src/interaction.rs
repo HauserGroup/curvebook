@@ -1046,12 +1046,12 @@ fn handle_pointer_down(
         }
         WorkspaceHitTarget::ResultBannerAction { result_sheet_id } => {
             let res =
-                crate::control_io::dispatch_ui_command(app, "ui.result.applyRemediation", &json!({ "result_sheet_id": result_sheet_id.as_str() }))?
+                crate::control_io::dispatch_ui_command(app, "ui.result.inspectDiagnostics", &json!({ "result_sheet_id": result_sheet_id.as_str() }))?
                     .unwrap_or(Value::Null);
             Ok(UiEventOutcome {
                 handled: true,
-                action: String::from("result.apply_remediation"),
-                command_id: Some(String::from("ui.result.applyRemediation")),
+                action: String::from("result.inspect_diagnostics"),
+                command_id: Some(String::from("ui.result.inspectDiagnostics")),
                 command_result: Some(res),
             })
         }
@@ -1950,7 +1950,8 @@ fn graph_annotation_bounds(ann: &GraphAnnotation) -> Option<RectPt> {
     match ann {
         GraphAnnotation::TextBox { bounds_pt, .. }
         | GraphAnnotation::Shape { bounds_pt, .. }
-        | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => Some(*bounds_pt),
+        | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. }
+        | GraphAnnotation::ModelEquation { bounds_pt, .. } => Some(*bounds_pt),
         GraphAnnotation::LineOrArrow { start_pt, end_pt, .. } => {
             let x = start_pt.0.min(end_pt.0);
             let y = start_pt.1.min(end_pt.1);
@@ -1963,7 +1964,8 @@ fn set_graph_annotation_bounds(ann: &mut GraphAnnotation, bounds: RectPt) {
     match ann {
         GraphAnnotation::TextBox { bounds_pt, .. }
         | GraphAnnotation::Shape { bounds_pt, .. }
-        | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => *bounds_pt = bounds,
+        | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. }
+        | GraphAnnotation::ModelEquation { bounds_pt, .. } => *bounds_pt = bounds,
         GraphAnnotation::LineOrArrow { start_pt, end_pt, .. } => {
             *start_pt = (bounds.x, bounds.y);
             *end_pt = (bounds.x + bounds.width, bounds.y + bounds.height);

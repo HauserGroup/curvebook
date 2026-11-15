@@ -122,7 +122,10 @@ pub fn r3_control_column_picker(compare_against_control: bool, method: Multiplic
 /// R4a: Two-group test mode -> `Graph differences` (paired designs only).
 #[must_use]
 pub fn r4_two_group_graph_differences(method: TwoGroupMethod) -> ControlEnablement {
-    let is_paired = matches!(method, TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank);
+    let is_paired = matches!(
+        method,
+        TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest
+    );
     if is_paired {
         ControlEnablement::enabled()
     } else {
@@ -139,6 +142,7 @@ pub fn r4_two_group_nonparametric_options(method: TwoGroupMethod) -> ControlEnab
             | TwoGroupMethod::WilcoxonSignedRank
             | TwoGroupMethod::KolmogorovSmirnov
             | TwoGroupMethod::OneSampleWilcoxon { .. }
+            | TwoGroupMethod::PairedSignTest
     );
     if is_nonparametric {
         ControlEnablement::enabled()
@@ -278,26 +282,53 @@ pub fn source_table_shape(doc: &ProjectDocument, source_sheet_id: Option<&SheetI
 fn max_subcolumn_count(arch: &TableArchetype) -> usize {
     match arch {
         TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
-        TableArchetype::Column(_)
-        | TableArchetype::Contingency(_)
-        | TableArchetype::PartsOfWhole(_)
-        | TableArchetype::MultipleVariables(_)
-        | TableArchetype::Survival(_) => 1,
+        TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
+        TableArchetype::Contingency(_) | TableArchetype::PartsOfWhole(_) | TableArchetype::MultipleVariables(_) | TableArchetype::Survival(_) => 1,
         TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
         TableArchetype::Nested(t) => t.groups.first().map_or(1, |g| g.subcolumn_titles.len().max(1)),
     }
 }
 
-/// R1 predicate for `edit.paired_or_matched`: on `Column` tables, requires `>= 2` data columns
-/// with equal active replicate counts (`>= 2` rows / complete paired blocks).
+fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: Option<&SheetId>) -> Option<&'a lumencraft_doc::DataSheet> {
+    let id = id?;
+    doc.data_sheet(id)
+        .or_else(|| doc.result_sheet(id).and_then(|rs| rs.analyzable_data.as_ref()))
+        .or_else(|| doc.result_sheet(id).and_then(|rs| doc.data_sheet(&rs.analysis.source_sheet_id)))
+}
+
+/// Whether `source_sheet_id` (data sheet or result sheet source) is a pre-summarized `Column` table (`MeanSdN`, `MeanSemN`, `MeanCvN`).
+#[must_use]
+pub fn is_pre_summarized_column_table(doc: &ProjectDocument, source_sheet_id: Option<&SheetId>) -> bool {
+    matches!(resolve_data_sheet(doc, source_sheet_id).map(|ds| &ds.archetype), Some(TableArchetype::Column(col)) if col.subcolumn_mode.is_pre_summarized())
+}
+
+/// Pre-summarized Column table gate for nonparametric mode (`assume_gaussian = false`).
+#[must_use]
+pub fn r2_assume_gaussian_allowed(doc: &ProjectDocument, source_sheet_id: Option<&SheetId>) -> ControlEnablement {
+    if is_pre_summarized_column_table(doc, source_sheet_id) {
+        ControlEnablement::disabled(
+            "Nonparametric rank tests are disabled for pre-summarized (Mean +/- SD/SEM/%CV + n) Column tables; use raw replicates.",
+        )
+    } else {
+        ControlEnablement::enabled()
+    }
+}
+
+/// R1 predicate for `edit.paired_or_matched`: on `Column` tables, requires raw replicates and `>= 2`
+/// data columns with equal active replicate counts (`>= 2` rows / complete paired blocks).
 #[must_use]
 pub fn r1_paired_or_matched_allowed(doc: &ProjectDocument, source_sheet_id: Option<&SheetId>) -> ControlEnablement {
-    let Some(ds) = source_sheet_id.and_then(|id| doc.data_sheet(id)) else {
+    let Some(ds) = resolve_data_sheet(doc, source_sheet_id) else {
         return ControlEnablement::enabled();
     };
     let TableArchetype::Column(col) = &ds.archetype else {
         return ControlEnablement::enabled();
     };
+    if col.subcolumn_mode.is_pre_summarized() {
+        return ControlEnablement::disabled(
+            "Paired and repeated-measures designs are disabled for pre-summarized (Mean +/- SD/SEM/%CV + n) Column tables.",
+        );
+    }
     if col.data_sets.len() < 2 {
         return ControlEnablement::disabled("Paired or repeated-measures analysis requires at least 2 data columns.");
     }
@@ -357,6 +388,34 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
             }
         }
         ActiveDialog::DuplicateAnalysisPrompt { .. } => ControlEnablement::enabled(),
+        ActiveDialog::InsertModelEquation { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.insert_model_equation.result_sheet_id.is_none() {
+                ControlEnablement::disabled("Select an upstream linear, nonlinear, or GLM result sheet first.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
+        ActiveDialog::RandomizeGroups => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.randomize_groups.commit_intent().is_none() {
+                ControlEnablement::disabled("Specify at least one group arm and subject count >= 1.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
+        ActiveDialog::RandomSampleRows { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.random_sample_rows.commit_intent().is_none() {
+                ControlEnablement::disabled("Select a valid source table and positive sample size.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
+        ActiveDialog::SimulateDistributions => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.simulate_distributions.commit_intent().is_none() {
+                ControlEnablement::disabled("Specify at least one simulated column and n_rows >= 1.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
         ActiveDialog::FormatAxes { .. }
         | ActiveDialog::FormatGraph { .. }
         | ActiveDialog::ChangeGraphType { .. }
@@ -483,6 +542,9 @@ fn evaluate_edit_params_widget(
     if norm == "editpairedormatched" || norm == "pairedormatched" || norm == "matched" {
         return r1_paired_or_matched_allowed(doc, edit.draft.as_ref().map(|d| &d.source_sheet_id));
     }
+    if norm == "editassumegaussian" || norm == "assumegaussian" {
+        return r2_assume_gaussian_allowed(doc, edit.draft.as_ref().map(|d| &d.source_sheet_id));
+    }
     if norm.contains("repeatedmeasures") && norm.contains("tab") {
         return r1_repeated_measures_tab(edit.paired_or_matched);
     }
@@ -515,7 +577,7 @@ fn evaluate_edit_params_widget(
     }
     if norm.contains("contingency") || norm.contains("cochranarmitage") || norm.contains("ci") {
         let cont = match edit.draft.as_ref().map(|s| &s.kind) {
-            Some(AnalysisKind::Contingency(c)) => *c,
+            Some(AnalysisKind::Contingency(c)) => c.clone(),
             _ => ContingencySpec::default(),
         };
         if norm.contains("cochranarmitage") || norm.contains("trend") {
@@ -570,6 +632,12 @@ fn evaluate_analyze_widget(
 ) -> ControlEnablement {
     let norm = normalize_key(widget_id);
     let (_rows, _cols, max_sub) = source_table_shape(doc, source_sheet_id);
+    if norm == "analyzepairedormatched" || norm == "pairedormatched" || norm == "matched" {
+        return r1_paired_or_matched_allowed(doc, source_sheet_id);
+    }
+    if norm == "analyzeassumegaussian" || norm == "assumegaussian" {
+        return r2_assume_gaussian_allowed(doc, source_sheet_id);
+    }
     if norm.contains("heatmap") {
         return r7_correlation_heatmap_toggle(analyze.correlation_all_pairs);
     }

@@ -1637,9 +1637,13 @@ fn draw_result_view(
     if let Some(banner) = AssumptionDiagnosticBanner::from_result(rs)
         && let Some(banner_rect) = compute_result_banner_rect(rect, rs)
     {
-        let bg = if banner.severity == ChecklistStatus::Violated { pal.link_red } else { Rgba8::rgb(0xD5, 0x5E, 0x00) };
+        let bg = match banner.severity {
+            ChecklistStatus::Violated => pal.link_red,
+            ChecklistStatus::Warn => Rgba8::rgb(0xD5, 0x5E, 0x00),
+            ChecklistStatus::Info | ChecklistStatus::Pass => pal.link_blue,
+        };
         fill_rect(img, banner_rect, bg);
-        let msg = format!("! {} -> {}", banner.summary, banner.recommendation_label);
+        let msg = banner.format_banner_line();
         draw_text_clipped_dir(
             img,
             DrawTextClipped {
@@ -2053,6 +2057,10 @@ fn modal_title(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::FormatSelectedPoints { .. } => "Format Selected Points...",
         ActiveDialog::PowerAndSampleSize => "Power and Sample Size",
         ActiveDialog::Print { .. } => "Print...",
+        ActiveDialog::RandomizeGroups => "Randomize Subjects to Groups...",
+        ActiveDialog::RandomSampleRows { .. } => "Random Sample Rows...",
+        ActiveDialog::SimulateDistributions => "Simulate Distributions...",
+        ActiveDialog::InsertModelEquation { .. } => "Insert Model Equation...",
         ActiveDialog::CommandPalette => "Command Palette (Cmd+K)",
         ActiveDialog::About => "About LumenCraft",
     }
@@ -2127,6 +2135,31 @@ fn modal_preview_lines(app: &UiApp) -> Vec<String> {
                 lines.push(format!("Status: {status}"));
             }
             lines
+        }
+        ActiveDialog::RandomizeGroups => {
+            let rg = &state.randomize_groups;
+            vec![format!("Groups: {} | Subjects: {}", rg.groups.len(), rg.subject_count), format!("Scheme: {:?} | Seed: {}", rg.scheme, rg.seed)]
+        }
+        ActiveDialog::RandomSampleRows { source_sheet_id } => {
+            let rs = &state.random_sample_rows;
+            vec![
+                format!("Source: {} | Sample N: {}", source_sheet_id.as_ref().map_or("None", SheetId::as_str), rs.sample_size),
+                format!("Seed: {} | Stratify: {:?}", rs.seed, rs.stratify_column),
+            ]
+        }
+        ActiveDialog::SimulateDistributions => {
+            let sd = &state.simulate_distributions;
+            vec![
+                format!("Columns: {} | Rows: {}", sd.columns.len(), sd.n_rows),
+                format!("Seed: {} | MV table: {}", sd.seed, sd.use_multiple_variables),
+            ]
+        }
+        ActiveDialog::InsertModelEquation { graph_sheet_id } => {
+            let eq = &state.insert_model_equation;
+            vec![
+                format!("Graph: {} | Result: {}", graph_sheet_id.as_str(), eq.result_sheet_id.as_ref().map_or("None", SheetId::as_str)),
+                format!("Mode: {:?} | Dataset: {}", eq.mode, eq.data_set_index),
+            ]
         }
         _ => vec![String::from("Active scientific dialog ready")],
     }

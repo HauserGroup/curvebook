@@ -477,6 +477,7 @@ dependencies = [
  "lumencraft-testkit",
  "lumencraft-text",
  "lumencraft-tools",
+ "lumencraft-transform",
  "proptest",
  "serde",
  "serde_json",

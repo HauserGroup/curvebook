@@ -11,8 +11,8 @@
 #![forbid(unsafe_code)]
 
 use lumencraft_doc::{
-    AnalysisKind, ChecklistStatus, GraphKind, GroupedArrangement, MultiplicityMethod, OneWayMethod, PValueFormat, RemediationKind, ResultCell,
-    ResultSheet, ResultStatus, ResultTab, SheetId, TwoGroupMethod,
+    AnalysisKind, ChecklistStatus, GraphKind, GroupedArrangement, MultiplicityMethod, OneWayMethod, PValueFormat, ResultCell, ResultSheet,
+    ResultStatus, ResultTab, SheetId, TwoGroupMethod,
 };
 use lumencraft_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
 use lumencraft_ui_egui::power_wizard::PowerWizardStage;
@@ -664,24 +664,39 @@ fn wf10_one_way_anova_welch_remediation_dunnett_tukey_and_brackets() -> TestRes 
         scalar(rs, "F")?
     };
 
-    // Assumption remediation banner -> creates Brown-Forsythe & Welch ANOVA sibling ResultSheet
+    // QOL-7 diagnostics-only assumption banner: surfaces status + metric without creating sibling ResultSheets,
+    // rejects `ui.result.applyRemediation` with `diagnostics_only_policy`, and switches via explicit Cmd+T when desired.
+    let result_count_before = app.document().result_sheets.len();
     let banner = AssumptionDiagnosticBanner::from_result(result_sheet(&app, &res_id)?).ok_or_else(|| {
         format!("expected diagnostic banner on heteroscedastic one-way ANOVA, checklist: {:?}", result_sheet(&app, &res_id).map(|r| &r.checklist))
     })?;
-    if banner.remediation_kind != RemediationKind::WelchAnova {
-        return Err(format!("expected WelchAnova remediation, got {:?}", banner.remediation_kind));
+    if !matches!(banner.severity, ChecklistStatus::Violated | ChecklistStatus::Warn) || banner.source_result_id.as_str() != res_id {
+        return Err(format!("unexpected diagnostics-only banner: {banner:?}"));
     }
-    let sibling = act(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.result.applyRemediation", "params": { "result_sheet_id": res_id } }))?;
-    let welch_id = sibling
-        .get("result")
-        .and_then(|r| r.get("sibling_result_id"))
-        .or_else(|| sibling.get("sibling_result_id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("missing sibling_result_id: {sibling}"))?;
+    let inspect_res =
+        act(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.result.inspectDiagnostics", "params": { "result_sheet_id": res_id } }))?;
+    if inspect_res.get("result").and_then(|r| r.get("mutated")).and_then(Value::as_bool) != Some(false) {
+        return Err(format!("expected inspectDiagnostics mutated=false: {inspect_res}"));
+    }
+    let rem_err = dispatch_gui_action(
+        &mut app,
+        "ui.invoke_menu",
+        json!({ "command_id": "ui.result.applyRemediation", "params": { "result_sheet_id": res_id } }),
+    )
+    .expect_err("QOL-7 diagnostics-only must reject ui.result.applyRemediation");
+    if !rem_err.message().contains("diagnostics_only_policy") {
+        return Err(format!("expected diagnostics_only_policy error, got: {rem_err}"));
+    }
+    if app.document().result_sheets.len() != result_count_before {
+        return Err(String::from("ui.result.applyRemediation must not create sibling ResultSheets"));
+    }
+    // Explicit user switching via Cmd+T (`anova_method: "welch"`) remains available
+    let _ = open_cmd_t_dialog(&mut app)?;
+    act(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "anova_method": "welch" } }))?;
     {
-        let wrs = result_sheet(&app, welch_id)?;
+        let wrs = result_sheet(&app, &res_id)?;
         if !matches!(wrs.analysis.kind, AnalysisKind::OneWayAnova(ref s) if s.method == OneWayMethod::BrownForsytheAndWelch) {
-            return Err(format!("expected BrownForsytheAndWelch sibling, got {:?}", wrs.analysis.kind));
+            return Err(format!("expected BrownForsytheAndWelch via explicit Cmd+T, got {:?}", wrs.analysis.kind));
         }
         let w_val = scalar(wrs, "Welch W")?;
         let bf_val = scalar(wrs, "Brown-Forsythe F*")?;
@@ -690,6 +705,9 @@ fn wf10_one_way_anova_welch_remediation_dunnett_tukey_and_brackets() -> TestRes 
         }
         let _ = find_tab(wrs, "unequal-var-anova")?;
     }
+    // Restore original OrdinaryAnova + TukeyHsd before proceeding to live edit check
+    let _ = open_cmd_t_dialog(&mut app)?;
+    act(&mut app, "ui.answer_dialog", json!({ "action": "ok", "fields": { "anova_method": "ordinary", "multiplicity_method": "tukey" } }))?;
 
     // Add Tukey pairwise comparison brackets onto linked Column Graph + verify live update on cell edit
     let graph_id = find_linked_graph_id(&app, &col_id)?;
@@ -1005,47 +1023,44 @@ fn wf14_friedman_and_apply_remediation_flow() -> TestRes {
     click_widget(&mut app, "edit.paired_or_matched")?;
     act(&mut app, "ui.answer_dialog", json!({ "action": "ok" }))?;
 
+    // QOL-7 diagnostics-only assumption banner: zero automatic sibling sheets, `applyRemediation` rejected
+    let result_count_before = app.document().result_sheets.len();
     let banner = AssumptionDiagnosticBanner::from_result(result_sheet(&app, &rm_res_id)?).ok_or_else(|| {
-        format!("expected diagnostic banner for Friedman remediation, checklist: {:?}", result_sheet(&app, &rm_res_id).map(|r| &r.checklist))
+        format!("expected diagnostic banner on skewed RM-ANOVA, checklist: {:?}", result_sheet(&app, &rm_res_id).map(|r| &r.checklist))
     })?;
-    if banner.remediation_kind != RemediationKind::Friedman {
-        return Err(format!("expected RemediationKind::Friedman, got {:?}", banner.remediation_kind));
+    if !matches!(banner.severity, ChecklistStatus::Violated | ChecklistStatus::Warn) || banner.source_result_id.as_str() != rm_res_id {
+        return Err(format!("unexpected RM diagnostics-only banner: {banner:?}"));
     }
-
-    // Apply Remediation flow (non-destructive sibling creation)
-    let rem = act(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.result.applyRemediation", "params": { "result_sheet_id": rm_res_id } }))?;
-    let fried_id = rem
-        .get("result")
-        .and_then(|r| r.get("sibling_result_id"))
-        .or_else(|| rem.get("sibling_result_id"))
-        .and_then(Value::as_str)
-        .ok_or_else(|| format!("missing sibling_result_id: {rem}"))?;
-
-    // Verify original RM-ANOVA untouched while sibling Friedman sheet is complete
+    let rem_err = dispatch_gui_action(
+        &mut app,
+        "ui.invoke_menu",
+        json!({ "command_id": "ui.result.applyRemediation", "params": { "result_sheet_id": rm_res_id } }),
+    )
+    .expect_err("QOL-7 diagnostics-only must reject applyRemediation on RM-ANOVA");
+    if !rem_err.message().contains("diagnostics_only_policy") || app.document().result_sheets.len() != result_count_before {
+        return Err(format!("unexpected QOL-7 rejection: {rem_err}"));
+    }
+    // Original RM-ANOVA remains untouched until explicit Cmd+T change
     if !matches!(result_sheet(&app, &rm_res_id)?.analysis.kind, AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { .. }))
     {
-        return Err(String::from("original RM one-way ANOVA should remain untouched after Apply Remediation"));
+        return Err(String::from("original RM one-way ANOVA should remain untouched after QOL-7 banner/applyRemediation rejection"));
     }
 
+    // Explicit Cmd+T path: switch RM one-way ANOVA to Friedman via `edit.assume_gaussian` click
+    select_sheet_via_nav(&mut app, &rm_res_id)?;
+    let _ = open_cmd_t_dialog(&mut app)?;
+    click_widget(&mut app, "edit.assume_gaussian")?;
+    act(&mut app, "ui.answer_dialog", json!({ "action": "ok" }))?;
     {
-        let frs = result_sheet(&app, fried_id)?;
-        if !matches!(frs.analysis.kind, AnalysisKind::OneWayAnova(ref a) if a.method == OneWayMethod::Friedman) || !frs.title().contains("Friedman") {
-            return Err(format!("expected Friedman sibling ResultSheet, got title=`{}` kind={:?}", frs.title(), frs.analysis.kind));
+        let frs = result_sheet(&app, &rm_res_id)?;
+        if !matches!(frs.analysis.kind, AnalysisKind::OneWayAnova(ref a) if a.method == OneWayMethod::Friedman) {
+            return Err(format!("expected Cmd+T assume_gaussian=false on RM ANOVA to switch to Friedman, got {:?}", frs.analysis.kind));
         }
         // Consistent ranking 1 < 2 < 3 across all n=6 blocks with zero ties: Q = 12*6*( (1-2)^2 + 0 + (3-2)^2 ) / ... = 12.0, W = 1.0
         assert_close(scalar(frs, "Friedman Q")?, 12.0, 1e-6, "Friedman Q")?;
         assert_close(scalar(frs, "Kendall's W")?, 1.0, 1e-9, "Kendall W")?;
         let tab = find_tab(frs, "friedman")?;
         assert_close(cell_number(&tab.rows[0][4])?, 6.0, 1e-9, "Friedman blocks")?;
-    }
-
-    // Direct Cmd+T path: switch RM one-way ANOVA to Friedman via `edit.assume_gaussian` click
-    select_sheet_via_nav(&mut app, &rm_res_id)?;
-    let _ = open_cmd_t_dialog(&mut app)?;
-    click_widget(&mut app, "edit.assume_gaussian")?;
-    act(&mut app, "ui.answer_dialog", json!({ "action": "ok" }))?;
-    if !matches!(result_sheet(&app, &rm_res_id)?.analysis.kind, AnalysisKind::OneWayAnova(ref a) if a.method == OneWayMethod::Friedman) {
-        return Err(String::from("expected Cmd+T assume_gaussian=false on RM ANOVA to switch to Friedman"));
     }
     assert_screenshot_png(&mut app, "full_window")?;
     Ok(())

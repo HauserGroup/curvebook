@@ -459,6 +459,8 @@ const FORMULA_BUILTINS: &[(&str, &str, FormulaAutocompleteKind, &str)] = &[
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FormulaBarState {
     pub active: bool,
+    #[serde(default)]
+    pub target_sheet_id: Option<SheetId>,
     pub target_column: Option<usize>,
     pub target_title: String,
     pub input: String,
@@ -473,6 +475,7 @@ impl FormulaBarState {
     /// Focus the formula bar on column `col_idx` of `sheet`.
     pub fn open_for_column(&mut self, sheet: &DataSheet, col_idx: usize, doc: Option<&ProjectDocument>) {
         self.active = true;
+        self.target_sheet_id = Some(sheet.id.clone());
         self.target_column = Some(col_idx);
         self.selected_completion = 0;
 
@@ -492,14 +495,30 @@ impl FormulaBarState {
         self.refresh_validation_and_completions(doc, Some(sheet));
     }
 
+    /// Open the formula bar targeting a new calculated variable named `title` on `sheet`.
+    pub fn open_for_new_column(&mut self, sheet: &DataSheet, title: impl Into<String>, doc: Option<&ProjectDocument>) {
+        self.active = true;
+        self.target_sheet_id = Some(sheet.id.clone());
+        self.target_column = None;
+        self.selected_completion = 0;
+        self.target_title = title.into();
+        self.input = String::from("=");
+        self.cursor_byte = self.input.len();
+        self.refresh_validation_and_completions(doc, Some(sheet));
+    }
+
     /// Update the edited formula buffer and cursor offset (safe for arbitrary UTF-8 positions).
     pub fn set_input(&mut self, text: impl Into<String>, cursor_byte: Option<usize>, doc: &ProjectDocument) {
         self.input = text.into();
         let raw_pos = cursor_byte.unwrap_or(self.input.len()).min(self.input.len());
         self.cursor_byte = clamp_char_boundary(&self.input, raw_pos);
         self.selected_completion = 0;
-        let active_sheet = doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id));
-        self.refresh_validation_and_completions(Some(doc), active_sheet);
+        let target_sheet = self
+            .target_sheet_id
+            .as_ref()
+            .and_then(|id| doc.data_sheet(id))
+            .or_else(|| doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)));
+        self.refresh_validation_and_completions(Some(doc), target_sheet);
     }
 
     /// Accept the currently highlighted autocomplete item into `self.input`.
@@ -519,9 +538,9 @@ impl FormulaBarState {
 
     /// Emit a canonical `"table.setCalculatedVariable"` command intent if the formula parses cleanly.
     pub fn commit_intent(&self, sheet_id: &SheetId) -> Result<ToolCommandIntent, String> {
-        let Some(col) = self.target_column else {
+        if self.target_column.is_none() && self.target_title.trim().is_empty() {
             return Err(String::from("no target variable column selected"));
-        };
+        }
         if let Some(err) = &self.parse_error {
             return Err(err.clone());
         }
@@ -529,15 +548,16 @@ impl FormulaBarState {
         if normalized.is_empty() {
             return Err(String::from("calculated variable formula cannot be empty"));
         }
-        Ok(ToolCommandIntent {
-            command_id: String::from("table.setCalculatedVariable"),
-            params: json!({
-                "sheet_id": sheet_id.as_str(),
-                "column": col,
-                "title": self.target_title,
-                "formula": normalized,
-            }),
-        })
+        let mut params = serde_json::Map::new();
+        params.insert(String::from("sheet_id"), Value::String(sheet_id.as_str().to_owned()));
+        if let Some(col) = self.target_column {
+            params.insert(String::from("column"), json!(col));
+        }
+        if !self.target_title.trim().is_empty() {
+            params.insert(String::from("title"), json!(self.target_title));
+        }
+        params.insert(String::from("formula"), json!(normalized));
+        Ok(ToolCommandIntent { command_id: String::from("table.setCalculatedVariable"), params: Value::Object(params) })
     }
 
     fn refresh_validation_and_completions(&mut self, doc: Option<&ProjectDocument>, sheet: Option<&DataSheet>) {
@@ -549,8 +569,15 @@ impl FormulaBarState {
         } else {
             match validate_formula_syntax(body) {
                 Ok(()) => {
-                    self.parse_error = None;
-                    self.is_valid = true;
+                    if let (Some(TableArchetype::MultipleVariables(mv)), Some(col)) = (sheet.map(|s| &s.archetype), self.target_column)
+                        && let Err(err) = lumencraft_transform::validate_no_formula_cycle(mv, col, body)
+                    {
+                        self.parse_error = Some(err.to_string());
+                        self.is_valid = false;
+                    } else {
+                        self.parse_error = None;
+                        self.is_valid = true;
+                    }
                 }
                 Err(err) => {
                     self.parse_error = Some(err);
@@ -563,6 +590,20 @@ impl FormulaBarState {
         if self.selected_completion >= self.completions.len() {
             self.selected_completion = 0;
         }
+    }
+
+    /// Close and reset the formula bar without committing changes.
+    pub fn cancel(&mut self) {
+        self.active = false;
+        self.target_sheet_id = None;
+        self.target_column = None;
+        self.target_title.clear();
+        self.input.clear();
+        self.cursor_byte = 0;
+        self.completions.clear();
+        self.selected_completion = 0;
+        self.parse_error = None;
+        self.is_valid = false;
     }
 }
 
