@@ -166,6 +166,14 @@ pub enum TransformAnalysisSpec {
         parameters: Vec<(String, f64)>,
         noise: SimulationNoise,
     },
+    RandomSample {
+        seed: u64,
+        sample_size: usize,
+        #[serde(default)]
+        stratify_column: Option<usize>,
+        #[serde(default)]
+        proportional_allocation: bool,
+    },
 }
 
 // ============================================================================
@@ -213,6 +221,7 @@ pub enum TwoGroupMethod {
     KolmogorovSmirnov,
     OneSampleT { hypothetical: f64 },
     OneSampleWilcoxon { hypothetical: f64 },
+    PairedSignTest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -354,14 +363,31 @@ pub struct NestedAnalysisSpec {
     pub multiplicity: MultiplicitySpec,
 }
 
+/// Weighting scheme for Cohen's kappa (`Unweighted`, `Linear`, or `Quadratic`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum KappaWeighting {
+    #[default]
+    Unweighted,
+    Linear,
+    Quadratic,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ContingencyMethod {
-    PearsonChiSquare { yates_continuity: bool },
+    PearsonChiSquare {
+        yates_continuity: bool,
+    },
     LikelihoodRatioG2,
     FisherExact,
     BarnardExact,
     CochranArmitageTrend,
     McNemarPaired,
+    CohenKappa {
+        #[serde(default)]
+        weighting: KappaWeighting,
+    },
+    FleissKappa,
+    ExactBinomial,
 }
 
 impl Default for ContingencyMethod {
@@ -370,12 +396,16 @@ impl Default for ContingencyMethod {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ContingencySpec {
     pub method: ContingencyMethod,
     pub compute_odds_and_risk_ratios: bool,
     pub compute_sensitivity_specificity: bool,
     pub compute_phi_and_cramers_v: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_proportions: Option<Vec<f64>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub null_proportion: Option<f64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
@@ -438,6 +468,29 @@ pub struct GlmSpec {
     pub compute_vif: bool,
 }
 
+/// Pairwise distance metric for hierarchical and multivariate clustering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ClusterDistance {
+    #[default]
+    Euclidean,
+    Manhattan,
+    Pearson,
+    Cosine,
+}
+
+/// Agglomerative linkage criterion for hierarchical clustering.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ClusterLinkage {
+    #[default]
+    Ward,
+    Complete,
+    Single,
+    Upgma,
+    Wpgma,
+    Centroid,
+    Median,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MultivariateSpec {
     Pca {
@@ -449,6 +502,12 @@ pub enum MultivariateSpec {
     },
     Clustering {
         k_means_k: Option<usize>,
+        #[serde(default)]
+        distance: ClusterDistance,
+        #[serde(default)]
+        linkage: ClusterLinkage,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        k_sweep_max: Option<usize>,
     },
     MultipleImputation {
         imputations_m: usize,
@@ -666,6 +725,7 @@ impl AnalysisKind {
                 TransformAnalysisSpec::PruneRows { .. } => String::from("Prune rows"),
                 TransformAnalysisSpec::SelectAndTransform { .. } => String::from("Select and transform"),
                 TransformAnalysisSpec::Simulate { .. } => String::from("Simulated data"),
+                TransformAnalysisSpec::RandomSample { .. } => String::from("Random sample"),
             },
             Self::DescriptiveStats(_) => String::from("Descriptive statistics"),
             Self::OutlierDetection(OutlierSpec::Grubbs { .. }) => String::from("Identify outliers (Grubbs)"),
@@ -681,6 +741,7 @@ impl AnalysisKind {
                 TwoGroupMethod::KolmogorovSmirnov => String::from("Kolmogorov-Smirnov test"),
                 TwoGroupMethod::OneSampleT { .. } => String::from("One-sample t test"),
                 TwoGroupMethod::OneSampleWilcoxon { .. } => String::from("One-sample Wilcoxon test"),
+                TwoGroupMethod::PairedSignTest => String::from("Sign test"),
             },
             Self::BlandAltman(_) => String::from("Bland-Altman method comparison"),
             Self::MultipleRowTTests(s) => match (s.nonparametric, s.paired) {
@@ -722,6 +783,9 @@ impl AnalysisKind {
                 ContingencyMethod::BarnardExact => String::from("Barnard's exact test"),
                 ContingencyMethod::CochranArmitageTrend => String::from("Chi-square test for trend"),
                 ContingencyMethod::McNemarPaired => String::from("McNemar's test"),
+                ContingencyMethod::CohenKappa { .. } => String::from("Cohen's kappa"),
+                ContingencyMethod::FleissKappa => String::from("Fleiss' kappa"),
+                ContingencyMethod::ExactBinomial => String::from("Exact binomial test"),
             },
             Self::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }) => String::from("Survival curve analysis"),
             Self::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }) => String::from("Cox proportional hazards"),
@@ -760,7 +824,10 @@ impl AnalysisKind {
             }
             Self::FactorialAnova(_) => matches!(table_kind, TableKind::Grouped | TableKind::MultipleVariables),
             Self::NestedComparison(_) => matches!(table_kind, TableKind::Nested),
-            Self::Contingency(_) => matches!(table_kind, TableKind::Contingency | TableKind::PartsOfWhole),
+            Self::Contingency(s) => {
+                matches!(table_kind, TableKind::Contingency | TableKind::PartsOfWhole)
+                    || (matches!(s.method, ContingencyMethod::ExactBinomial) && table_kind == TableKind::Column)
+            }
             Self::Survival(_) => matches!(table_kind, TableKind::Survival | TableKind::MultipleVariables),
             Self::GeneralizedLinearModel(_) | Self::Multivariate(_) => {
                 matches!(table_kind, TableKind::MultipleVariables | TableKind::Xy | TableKind::Column)

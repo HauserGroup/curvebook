@@ -469,13 +469,58 @@ pub enum AnnotationShapeKind {
     Ellipse,
 }
 
+/// Display mode for a fitted model equation callout on a graph canvas.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum EquationDisplayMode {
+    #[default]
+    Substituted,
+    Symbolic,
+}
+
+const fn default_model_equation_font_size() -> f64 {
+    10.0
+}
+
 /// Canvas annotation primitive placed on a [`GraphSpec`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GraphAnnotation {
-    TextBox { bounds_pt: RectPt, markdown: String, bordered: bool },
-    LineOrArrow { start_pt: (f64, f64), end_pt: (f64, f64), arrowhead: bool, dash: LineDashStyle, color: Rgba8 },
-    Shape { kind: AnnotationShapeKind, bounds_pt: RectPt, stroke_color: Rgba8, stroke_width_pt: f64, dash: LineDashStyle, fill_color: Option<Rgba8> },
-    EmbeddedResultTable { result_sheet_id: SheetId, tab_id: Option<String>, bounds_pt: RectPt },
+    TextBox {
+        bounds_pt: RectPt,
+        markdown: String,
+        bordered: bool,
+    },
+    LineOrArrow {
+        start_pt: (f64, f64),
+        end_pt: (f64, f64),
+        arrowhead: bool,
+        dash: LineDashStyle,
+        color: Rgba8,
+    },
+    Shape {
+        kind: AnnotationShapeKind,
+        bounds_pt: RectPt,
+        stroke_color: Rgba8,
+        stroke_width_pt: f64,
+        dash: LineDashStyle,
+        fill_color: Option<Rgba8>,
+    },
+    EmbeddedResultTable {
+        result_sheet_id: SheetId,
+        tab_id: Option<String>,
+        bounds_pt: RectPt,
+    },
+    ModelEquation {
+        result_sheet_id: SheetId,
+        #[serde(default)]
+        data_set_index: usize,
+        #[serde(default)]
+        mode: EquationDisplayMode,
+        bounds_pt: RectPt,
+        #[serde(default = "default_model_equation_font_size")]
+        font_size_pt: f64,
+        #[serde(default)]
+        bordered: bool,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]

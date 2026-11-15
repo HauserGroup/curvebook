@@ -2,19 +2,20 @@
 
 use lumencraft_doc::{
     AdditionalTick, AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, BlandAltmanSpec, Cell, CellCoord, CellValue, ChecklistItem,
-    ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint, ColumnTable, ConfidenceLevel, ConstantValue, ContingencyMethod, ContingencySpec,
-    ContingencyTable, CurveSamplePoint, DataSheet, DescriptiveSpec, DiagnosticPlotKind, DocError, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec,
-    FactorialAnovaSpec, FitMethod, FittedCurveOverlay, FloatingNote, GlmFamily, GlmSpec, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject,
-    GroupedArrangement, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, JournalWidthPreset, LayoutItem,
-    LayoutSheet, LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LinearRegressionSpec, LinkSource, LinkedDataRegion, LogitDomain,
-    MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
-    MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NestedTable, NonlinearFitSpec, NormalizeAnchor, NoteId,
-    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PairwiseBracketSpec, PairwiseComparisonRecord, PanelBadgeStyle, ParameterRule,
-    ParameterScope, PartsOfWholeLayout, PartsOfWholeTable, PassingBablokSpec, PhysicalUnit, PlacementMode, ProjectDocument, RectPt,
-    RegressionOverlaySpec, RepeatedMeasuresDesign, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod,
-    RocSpec, SequenceProgression, SheetCellRange, SheetFolderKind, SheetId, SimulationNoise, SizeChannelMapping, SizePt, SubcolumnMode,
-    SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, SurvivalTable, TableArchetype, TableKind, TickLabelFormat, TransformAnalysisSpec,
-    TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod, XColumnMode, XyTable,
+    ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint, ColumnTable, ConfidenceLevel, ConstantValue,
+    ContingencyMethod, ContingencySpec, ContingencyTable, CurveSamplePoint, DataSheet, DescriptiveSpec, DiagnosticPlotKind, DocError,
+    EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FactorialAnovaSpec, FitMethod, FittedCurveOverlay, FloatingNote, GlmFamily,
+    GlmSpec, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject, GroupedArrangement, GroupedTable, HookSource, ImportFilterSpec,
+    ImportLinkSpec, ImportPlacementSpec, InfoSheet, JournalWidthPreset, KappaWeighting, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec,
+    LevelOrderKind, LevelOrderSpec, LinearRegressionSpec, LinkSource, LinkedDataRegion, LogitDomain, MathTransformPreset, ModelComparisonSpec,
+    MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode,
+    MultivariateSpec, NestedAnalysisSpec, NestedTable, NonlinearFitSpec, NormalizeAnchor, NoteId, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
+    PValueFormat, PairwiseBracketSpec, PairwiseComparisonRecord, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
+    PartsOfWholeTable, PassingBablokSpec, PhysicalUnit, PlacementMode, ProjectDocument, RectPt, RegressionOverlaySpec, RepeatedMeasuresDesign,
+    ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SequenceProgression, SheetCellRange,
+    SheetFolderKind, SheetId, SimulationNoise, SizeChannelMapping, SizePt, SubcolumnMode, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec,
+    SurvivalTable, TableArchetype, TableKind, TickLabelFormat, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
+    WhiskerMethod, XColumnMode, XyTable,
 };
 use lumencraft_palette::{
     CategoricalPalette, Cmyk, ColorRamp, ColorStop, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8,
@@ -733,6 +734,175 @@ fn legacy_json_deserializes_without_new_schema_fields() {
     assert_eq!(serde_json::from_str::<MultipleRowTestsSpec>("{}").unwrap(), MultipleRowTestsSpec::default());
     assert_eq!(serde_json::from_str::<PassingBablokSpec>("{}").unwrap(), PassingBablokSpec::default());
     assert_eq!(serde_json::from_str::<AdditionalTick>(r#"{"value":3.5}"#).unwrap(), AdditionalTick { value: 3.5, label: None, draw_gridline: false });
+}
+
+#[test]
+fn wave20_contingency_and_two_group_seams() {
+    assert_eq!(KappaWeighting::default(), KappaWeighting::Unweighted);
+    for w in [KappaWeighting::Unweighted, KappaWeighting::Linear, KappaWeighting::Quadratic] {
+        assert_json_roundtrip(&w);
+        assert_json_roundtrip(&ContingencyMethod::CohenKappa { weighting: w });
+    }
+    let legacy_kappa: ContingencyMethod = serde_json::from_str(r#"{"CohenKappa":{}}"#).unwrap();
+    assert_eq!(legacy_kappa, ContingencyMethod::CohenKappa { weighting: KappaWeighting::Unweighted });
+
+    assert_json_roundtrip(&ContingencyMethod::FleissKappa);
+    assert_json_roundtrip(&ContingencyMethod::ExactBinomial);
+
+    let default_cont = ContingencySpec::default();
+    assert_eq!(default_cont.expected_proportions, None);
+    assert_eq!(default_cont.null_proportion, None);
+    let default_cont_json = serde_json::to_value(&default_cont).unwrap();
+    assert!(default_cont_json.get("expected_proportions").is_none());
+    assert!(default_cont_json.get("null_proportion").is_none());
+    assert_eq!(serde_json::from_value::<ContingencySpec>(default_cont_json).unwrap(), default_cont);
+
+    let legacy_cont_json = r#"{
+        "method":"FisherExact",
+        "compute_odds_and_risk_ratios":true,
+        "compute_sensitivity_specificity":false,
+        "compute_phi_and_cramers_v":true
+    }"#;
+    let legacy_cont: ContingencySpec = serde_json::from_str(legacy_cont_json).unwrap();
+    assert_eq!(legacy_cont.method, ContingencyMethod::FisherExact);
+    assert!(legacy_cont.compute_odds_and_risk_ratios);
+    assert!(legacy_cont.compute_phi_and_cramers_v);
+    assert_eq!(legacy_cont.expected_proportions, None);
+    assert_eq!(legacy_cont.null_proportion, None);
+
+    let custom_cont = ContingencySpec {
+        method: ContingencyMethod::ExactBinomial,
+        compute_odds_and_risk_ratios: false,
+        compute_sensitivity_specificity: false,
+        compute_phi_and_cramers_v: false,
+        expected_proportions: Some(vec![0.25, 0.75]),
+        null_proportion: Some(0.5),
+    };
+    assert_json_roundtrip(&custom_cont);
+
+    let sign_spec = TwoGroupSpec { method: TwoGroupMethod::PairedSignTest, ..TwoGroupSpec::default() };
+    assert_json_roundtrip(&TwoGroupMethod::PairedSignTest);
+    assert_json_roundtrip(&sign_spec);
+    assert_eq!(AnalysisKind::TwoGroupComparison(sign_spec).derive_auto_title(), "Sign test");
+
+    let ak_cohen = AnalysisKind::Contingency(ContingencySpec {
+        method: ContingencyMethod::CohenKappa { weighting: KappaWeighting::Quadratic },
+        ..ContingencySpec::default()
+    });
+    assert_eq!(ak_cohen.derive_auto_title(), "Cohen's kappa");
+    assert!(ak_cohen.is_compatible_with(TableKind::Contingency));
+    assert!(ak_cohen.is_compatible_with(TableKind::PartsOfWhole));
+    assert!(!ak_cohen.is_compatible_with(TableKind::Column));
+
+    let ak_fleiss = AnalysisKind::Contingency(ContingencySpec { method: ContingencyMethod::FleissKappa, ..ContingencySpec::default() });
+    assert_eq!(ak_fleiss.derive_auto_title(), "Fleiss' kappa");
+    assert!(ak_fleiss.is_compatible_with(TableKind::Contingency));
+    assert!(ak_fleiss.is_compatible_with(TableKind::PartsOfWhole));
+    assert!(!ak_fleiss.is_compatible_with(TableKind::Column));
+
+    let ak_binom = AnalysisKind::Contingency(custom_cont);
+    assert_eq!(ak_binom.derive_auto_title(), "Exact binomial test");
+    assert!(ak_binom.is_compatible_with(TableKind::Contingency));
+    assert!(ak_binom.is_compatible_with(TableKind::PartsOfWhole));
+    assert!(ak_binom.is_compatible_with(TableKind::Column));
+    for incompatible in [TableKind::Xy, TableKind::Grouped, TableKind::Survival, TableKind::MultipleVariables, TableKind::Nested] {
+        assert!(!ak_binom.is_compatible_with(incompatible));
+    }
+}
+
+#[test]
+fn wave20_random_sample_and_clustering_seams() {
+    let sample_full = TransformAnalysisSpec::RandomSample { seed: 42, sample_size: 25, stratify_column: Some(1), proportional_allocation: true };
+    assert_json_roundtrip(&sample_full);
+    let legacy_sample: TransformAnalysisSpec = serde_json::from_str(r#"{"RandomSample":{"seed":7,"sample_size":10}}"#).unwrap();
+    assert_eq!(
+        legacy_sample,
+        TransformAnalysisSpec::RandomSample { seed: 7, sample_size: 10, stratify_column: None, proportional_allocation: false }
+    );
+
+    let ak_sample = AnalysisKind::Transform(sample_full);
+    assert_eq!(ak_sample.derive_auto_title(), "Random sample");
+    for kind in TableKind::ALL {
+        assert!(ak_sample.is_compatible_with(kind));
+    }
+
+    assert_eq!(ClusterDistance::default(), ClusterDistance::Euclidean);
+    for d in [ClusterDistance::Euclidean, ClusterDistance::Manhattan, ClusterDistance::Pearson, ClusterDistance::Cosine] {
+        assert_json_roundtrip(&d);
+    }
+    assert_eq!(ClusterLinkage::default(), ClusterLinkage::Ward);
+    for l in [
+        ClusterLinkage::Ward,
+        ClusterLinkage::Complete,
+        ClusterLinkage::Single,
+        ClusterLinkage::Upgma,
+        ClusterLinkage::Wpgma,
+        ClusterLinkage::Centroid,
+        ClusterLinkage::Median,
+    ] {
+        assert_json_roundtrip(&l);
+    }
+
+    let full_cluster =
+        MultivariateSpec::Clustering { k_means_k: Some(4), distance: ClusterDistance::Cosine, linkage: ClusterLinkage::Upgma, k_sweep_max: Some(8) };
+    assert_json_roundtrip(&full_cluster);
+    let default_cluster =
+        MultivariateSpec::Clustering { k_means_k: None, distance: ClusterDistance::default(), linkage: ClusterLinkage::default(), k_sweep_max: None };
+    let default_cluster_val = serde_json::to_value(&default_cluster).unwrap();
+    assert!(default_cluster_val["Clustering"].get("k_sweep_max").is_none());
+
+    let legacy_cluster: MultivariateSpec = serde_json::from_str(r#"{"Clustering":{"k_means_k":3}}"#).unwrap();
+    assert_eq!(
+        legacy_cluster,
+        MultivariateSpec::Clustering { k_means_k: Some(3), distance: ClusterDistance::Euclidean, linkage: ClusterLinkage::Ward, k_sweep_max: None }
+    );
+}
+
+#[test]
+fn wave20_model_equation_annotation_seam() {
+    assert_eq!(EquationDisplayMode::default(), EquationDisplayMode::Substituted);
+    assert_json_roundtrip(&EquationDisplayMode::Substituted);
+    assert_json_roundtrip(&EquationDisplayMode::Symbolic);
+
+    let eq_ann = GraphAnnotation::ModelEquation {
+        result_sheet_id: SheetId::new("fit-1"),
+        data_set_index: 2,
+        mode: EquationDisplayMode::Symbolic,
+        bounds_pt: RectPt::new(24.0, 36.0, 180.0, 48.0),
+        font_size_pt: 12.5,
+        bordered: true,
+    };
+    assert_json_roundtrip(&eq_ann);
+
+    let minimal_eq_json = r#"{
+        "ModelEquation":{
+            "result_sheet_id":"fit-2",
+            "bounds_pt":{"x":10.0,"y":20.0,"width":140.0,"height":32.0}
+        }
+    }"#;
+    let decoded_eq: GraphAnnotation = serde_json::from_str(minimal_eq_json).unwrap();
+    assert_eq!(
+        decoded_eq,
+        GraphAnnotation::ModelEquation {
+            result_sheet_id: SheetId::new("fit-2"),
+            data_set_index: 0,
+            mode: EquationDisplayMode::Substituted,
+            bounds_pt: RectPt::new(10.0, 20.0, 140.0, 32.0),
+            font_size_pt: 10.0,
+            bordered: false,
+        }
+    );
+
+    // Verify ProjectDocument::upstream_dependencies tracks ModelEquation result_sheet_id.
+    let mut proj = ProjectDocument::new("ModelEquation DAG").unwrap();
+    let ds = DataSheet::new("data-1", "XY", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 2).unwrap())).unwrap();
+    proj.add_data_sheet(ds.clone()).unwrap();
+    let fit_spec = AnalysisSpec::new("fit-1", "data-1", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("four_pl"))).unwrap();
+    proj.add_result_sheet(ResultSheet::new(fit_spec).unwrap()).unwrap();
+    let mut gs = GraphSheet::new_uninitialized_for_data("graph-1", &ds).unwrap();
+    gs.spec.annotations.push(eq_ann);
+    proj.add_graph_sheet(gs).unwrap();
+    assert_eq!(proj.upstream_dependencies(&SheetId::new("graph-1")), vec![SheetId::new("data-1"), SheetId::new("fit-1")]);
 }
 
 #[test]
