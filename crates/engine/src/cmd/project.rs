@@ -19,7 +19,7 @@ use crate::cmd::params::{
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, ExternalPathPolicy, Session, dag};
 
-/// Summary returned by [`recalculate_with_links`].
+/// Summary returned by project link/recalculation helpers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub(super) struct RecalcSummary {
     pub recalculated_sheets: usize,
@@ -41,9 +41,16 @@ pub(super) fn recalculate_with_links_under_policy(
     Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links })
 }
 
-/// Refresh internal linked regions and run full DAG recalculation (no external file refreshes).
-pub(super) fn recalculate_with_links(doc: &mut ProjectDocument, include_external_links: bool) -> Result<RecalcSummary, EngineError> {
-    recalculate_with_links_under_policy(doc, include_external_links, &ExternalPathPolicy::Unconstrained)
+/// Incrementally recalculate the dirty transitive closure of `dirty_seeds` (plus any pending
+/// `ResultStatus::Dirty` sheets) and refresh internal links without recomputing unrelated branches.
+pub(super) fn recalculate_dirty_with_links(
+    doc: &mut ProjectDocument,
+    dirty_seeds: &[SheetId],
+    include_external_links: bool,
+) -> Result<RecalcSummary, EngineError> {
+    let external_policy = include_external_links.then_some(&ExternalPathPolicy::Unconstrained);
+    let (report, refreshed_links) = dag::recalculate_dirty_with_links_report(doc, dirty_seeds, external_policy)?;
+    Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links })
 }
 
 /// Format current system wall-clock time as `"unix:<seconds>"`.

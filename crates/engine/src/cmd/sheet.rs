@@ -21,7 +21,7 @@ use crate::cmd::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases,
     parse_params, str_schema,
 };
-use crate::cmd::project::{RecalcSummary, recalculate_with_links};
+use crate::cmd::project::{RecalcSummary, recalculate_dirty_with_links};
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
 
@@ -586,7 +586,7 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
                 ensure_sheet_not_frozen(ds)?;
                 ds.set_title(title.clone())?;
             }
-            let _ = recalculate_with_links(&mut ctx.session.doc, false)?;
+            let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&id), false)?;
         }
         SheetSection::Info => {
             let info = ctx
@@ -809,9 +809,20 @@ fn run_sheet_delete(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
     }
 
     let deleted_any_info = to_delete.iter().any(|sid| ctx.session.doc.info_sheet(sid).is_some());
+    let surviving_dependents: Vec<SheetId> = ctx
+        .session
+        .doc
+        .data_sheets
+        .iter()
+        .map(|s| &s.id)
+        .chain(ctx.session.doc.result_sheets.iter().map(|s| &s.id))
+        .filter(|sid| !to_delete.contains(*sid))
+        .filter(|sid| ctx.session.doc.upstream_dependencies(sid).iter().any(|up| to_delete.contains(up)))
+        .cloned()
+        .collect();
     let deleted_ids = prune_deleted_sheets(&mut ctx.session.doc, &to_delete);
     if deleted_any_info || matches!(section, SheetSection::Data | SheetSection::Analyses) {
-        let _ = recalculate_with_links(&mut ctx.session.doc, false)?;
+        let _ = recalculate_dirty_with_links(&mut ctx.session.doc, &surviving_dependents, false)?;
     }
 
     Ok(CommandOutcome::mutated(
@@ -933,7 +944,7 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
             copy.title = title;
             copy.frozen = parsed.frozen.unwrap_or(false);
             ctx.session.doc.add_data_sheet(copy)?;
-            let _ = recalculate_with_links(&mut ctx.session.doc, false)?;
+            let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&new_id), false)?;
         }
         SheetSection::Info => {
             let mut copy = ctx
@@ -1282,7 +1293,8 @@ fn clone_family_into_doc(doc: &mut ProjectDocument, req: &FamilyCloneOptions<'_>
     let layout_ids = if req.clone_layouts { clone_downstream_layouts(doc, &id_map, &mut reserved, id_prefix, req.suffix_label)? } else { Vec::new() };
 
     if !req.clear_results {
-        let _ = recalculate_with_links(doc, false)?;
+        let dirty_seeds: Vec<SheetId> = id_map.values().cloned().collect();
+        let _ = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
     }
     doc.select_in_navigator(&new_data_id)?;
 
@@ -1603,7 +1615,8 @@ fn set_sheet_frozen(ctx: &mut Ctx<'_>, command_id: &str, params: Value, frozen: 
         ds.frozen = frozen;
     }
 
-    let recalc = if frozen { RecalcSummary::default() } else { recalculate_with_links(&mut ctx.session.doc, false)? };
+    let recalc =
+        if frozen { RecalcSummary::default() } else { recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&id), false)? };
     let message = if frozen { "froze data sheet" } else { "unfroze data sheet" };
     Ok(CommandOutcome::mutated(
         command_id,
@@ -1821,7 +1834,7 @@ fn run_sheet_select(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
             .with_remediation("Use `navigator` or `family`."));
     }
 
-    Ok(CommandOutcome::mutated(
+    Ok(CommandOutcome::read_only(
         "sheet.select",
         "selected sheet",
         json!({
@@ -2171,7 +2184,7 @@ static SPECS: [CommandSpec; 11] = [
         summary: "Select the active sheet in the navigator or family pane.",
         beginner: "Focuses a sheet in the navigator (`mode: \"navigator\"`) or sub-sheet family view (`mode: \"family\"`).",
         group: CommandGroup::Sheet,
-        effects: Effects::MUTATES_DOCUMENT.with(Effects::CHANGES_UI_STATE).with(Effects::IDEMPOTENT),
+        effects: Effects::CHANGES_UI_STATE.with(Effects::IDEMPOTENT),
         input_schema: select_sheet_schema,
         enabled: always_enabled,
         run: run_sheet_select,

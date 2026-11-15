@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSetColumn, DataSheet, ErrorCode, HookSource, ImportLinkSpec, InfoSheet, InternalLinkKind,
-    LayoutItem, LinkSource, PlacementMode, ProjectDocument, ResultSheet, ResultStatus, SheetCellRange, SheetId, TableArchetype,
+    AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, CiBound, DataSetColumn, DataSheet, ErrorCode, HookSource, ImportLinkSpec, InfoSheet,
+    InternalLinkKind, LayoutItem, LinkSource, PlacementMode, ProjectDocument, ResultCell, ResultSheet, ResultStatus, SheetCellRange, SheetId,
+    TableArchetype, XColumnMode,
 };
 use lumencraft_fit::HookContext;
 use lumencraft_format::MAX_CSV_FILE_BYTES;
@@ -362,6 +363,8 @@ pub(crate) fn validate_layout_spec_acyclic(doc: &ProjectDocument, layout_id: &Sh
 
 /// Recalculate linked data regions, calculated variables, and analytical result sheets in topological order.
 ///
+/// Direct Rust callers modifying `ProjectDocument` structs outside `Session` commands use this
+/// full pass; incremental dirty-node recalculation is exposed via [`recalculate_dirty_with_report`].
 /// Freezing, cycle detection, and atomic rollback guarantee `doc` is not corrupted if an error occurs.
 ///
 /// # Errors
@@ -381,6 +384,19 @@ pub fn recalculate_project_with_report(doc: &mut ProjectDocument) -> Result<Reca
     Ok(report)
 }
 
+/// Incrementally recalculate the dirty transitive closure seeded by `dirty_seeds` (plus any
+/// [`ResultStatus::Dirty`] sheets) in deterministic topological order.
+///
+/// Unrelated branches of the DAG are skipped so edits do not recompute unaffected analyses.
+///
+/// # Errors
+/// Returns [`EngineError`] on cyclic dependencies or failing linked/calculated updates; `doc` remains
+/// unmodified on error.
+pub fn recalculate_dirty_with_report(doc: &mut ProjectDocument, dirty_seeds: &[SheetId]) -> Result<RecalcReport, EngineError> {
+    let (report, _) = recalculate_dirty_with_links_report(doc, dirty_seeds, None)?;
+    Ok(report)
+}
+
 /// Recalculate the full project DAG, optionally refreshing external delimited file links under `external_policy`,
 /// and return the [`RecalcReport`] alongside the number of linked regions refreshed.
 ///
@@ -391,12 +407,41 @@ pub(crate) fn recalculate_project_with_links_report(
     doc: &mut ProjectDocument,
     external_policy: Option<&ExternalPathPolicy>,
 ) -> Result<(RecalcReport, usize), EngineError> {
+    recalculate_project_scoped(doc, external_policy, None)
+}
+
+/// Incrementally recalculate the dirty transitive closure of `dirty_seeds` (plus any [`ResultStatus::Dirty`]
+/// sheets and external-link sheets when `external_policy` is `Some`), optionally refreshing external
+/// delimited file links under `external_policy`.
+///
+/// # Errors
+/// Returns [`EngineError`] on cyclic dependencies, unreadable/blocked external links, or failing linked refreshes /
+/// calculated variables; `doc` remains unmodified on error.
+pub(crate) fn recalculate_dirty_with_links_report(
+    doc: &mut ProjectDocument,
+    dirty_seeds: &[SheetId],
+    external_policy: Option<&ExternalPathPolicy>,
+) -> Result<(RecalcReport, usize), EngineError> {
+    recalculate_project_scoped(doc, external_policy, Some(dirty_seeds))
+}
+
+fn recalculate_project_scoped(
+    doc: &mut ProjectDocument,
+    external_policy: Option<&ExternalPathPolicy>,
+    dirty_seeds: Option<&[SheetId]>,
+) -> Result<(RecalcReport, usize), EngineError> {
     let order = topological_order(doc)?;
+    let dirty_closure = dirty_seeds.map(|seeds| compute_dirty_closure(doc, &order, seeds, external_policy));
     let mut working = doc.clone();
     let mut report = RecalcReport { evaluated_order: order.clone(), ..RecalcReport::default() };
     let mut refreshed_links = 0usize;
 
     for sheet_id in order {
+        if let Some(ref dirty) = dirty_closure
+            && !dirty.contains(&sheet_id)
+        {
+            continue;
+        }
         if let Some(ds_idx) = working.data_sheets.iter().position(|s| s.id == sheet_id) {
             let refreshed = evaluate_data_sheet_node(&mut working, ds_idx, &mut report, external_policy)?;
             refreshed_links = refreshed_links.saturating_add(refreshed);
@@ -414,6 +459,72 @@ pub(crate) fn recalculate_project_with_links_report(
 
     *doc = working;
     Ok((report, refreshed_links))
+}
+
+fn compute_dirty_closure(
+    doc: &ProjectDocument,
+    order: &[SheetId],
+    seeds: &[SheetId],
+    external_policy: Option<&ExternalPathPolicy>,
+) -> HashSet<SheetId> {
+    let known: HashSet<&SheetId> = order.iter().collect();
+    let mut dependents: BTreeMap<SheetId, Vec<SheetId>> = BTreeMap::new();
+    for id in order {
+        for dep in doc.upstream_dependencies(id) {
+            dependents.entry(dep).or_default().push(id.clone());
+        }
+    }
+
+    // Chained ResultSheets with unpinned InfoConstant hooks resolve their InfoSheet by walking
+    // back to the origin DataSheet; keep that edge explicit even if intermediate sheets are frozen.
+    for rs in &doc.result_sheets {
+        if rs.analysis.kind.hooked_sources().iter().any(|h| matches!(h, HookSource::InfoConstant { info_sheet_id: None, .. }))
+            && let Some(origin_info) = walk_origin_info_sheet_id(doc, &rs.analysis.source_sheet_id)
+        {
+            dependents.entry(origin_info.clone()).or_default().push(rs.id.clone());
+        }
+    }
+
+    let mut dirty: HashSet<SheetId> = HashSet::new();
+    let mut queue: VecDeque<SheetId> = VecDeque::new();
+    let mut enqueue = |id: &SheetId| {
+        if known.contains(id) && dirty.insert(id.clone()) {
+            queue.push_back(id.clone());
+        }
+    };
+
+    for seed in seeds {
+        enqueue(seed);
+    }
+    for rs in &doc.result_sheets {
+        if matches!(rs.status, ResultStatus::Dirty) {
+            enqueue(&rs.id);
+        }
+    }
+    if external_policy.is_some() {
+        for ds in &doc.data_sheets {
+            if !ds.frozen && ds.linked_regions.iter().any(|r| matches!(r.spec.source, LinkSource::ExternalDelimitedFile { .. })) {
+                enqueue(&ds.id);
+            }
+        }
+    }
+
+    while let Some(curr) = queue.pop_front() {
+        // Frozen DataSheets are skipped by evaluation so their stored values remain unchanged;
+        // do not propagate stale invalidation past a frozen table (direct upstream edges still reach dependents).
+        if doc.data_sheet(&curr).is_some_and(|ds| ds.frozen) {
+            continue;
+        }
+        if let Some(children) = dependents.get(&curr) {
+            for child in children {
+                if dirty.insert(child.clone()) {
+                    queue.push_back(child.clone());
+                }
+            }
+        }
+    }
+
+    dirty
 }
 
 fn evaluate_data_sheet_node(
@@ -702,15 +813,8 @@ fn resolve_source_table(doc: &ProjectDocument, source_id: &SheetId) -> Result<Da
     res.analyzable_data.clone().ok_or_else(|| (ErrorCode::NotFound, format!("upstream result sheet `{source_id}` has no analyzable table")))
 }
 
-fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_ds: &'a DataSheet, analysis: &AnalysisSpec) -> Option<&'a SheetId> {
-    if let Some(ref id) = source_ds.info_sheet_id
-        && doc.info_sheet(id).is_some()
-    {
-        return Some(id);
-    }
-
-    // Walk back through chained ResultSheets if `source_ds` came from `analyzable_data`.
-    let mut cursor = &analysis.source_sheet_id;
+fn walk_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, start_id: &SheetId) -> Option<&'a SheetId> {
+    let mut cursor = start_id;
     let mut seen: HashSet<&SheetId> = HashSet::new();
     while seen.insert(cursor) {
         if let Some(ds) = doc.data_sheet(cursor) {
@@ -727,8 +831,18 @@ fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_ds: &'a Dat
             break;
         }
     }
-
     None
+}
+
+fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_ds: &'a DataSheet, analysis: &AnalysisSpec) -> Option<&'a SheetId> {
+    if let Some(ref id) = source_ds.info_sheet_id
+        && doc.info_sheet(id).is_some()
+    {
+        return Some(id);
+    }
+
+    // Walk back through chained ResultSheets if `source_ds` came from `analyzable_data`.
+    walk_origin_info_sheet_id(doc, &analysis.source_sheet_id)
 }
 
 fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &AnalysisSpec, primary_info_id: Option<&SheetId>) -> Result<(), String> {
@@ -818,6 +932,10 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
     let target = &mut doc.result_sheets[res_idx];
     match output {
         Ok(mut computed) => {
+            if let Err(reason) = validate_result_sheet_finite(&computed, &existing.id) {
+                clear_failed_result_sheet(target, ErrorCode::SolverFailed, reason);
+                return false;
+            }
             computed.id = existing.id;
             computed.analysis = existing.analysis;
             computed.floating_notes = existing.floating_notes;
@@ -831,6 +949,120 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             false
         }
     }
+}
+
+fn validate_result_sheet_finite(res: &ResultSheet, sheet_id: &SheetId) -> Result<(), String> {
+    for (idx, scalar) in res.scalars.iter().enumerate() {
+        if !scalar.value.is_finite() {
+            return Err(format!("result sheet `{sheet_id}` produced non-finite value in scalar `{}` (index {idx}): {}", scalar.key, scalar.value));
+        }
+    }
+    for (tab_idx, tab) in res.tabs.iter().enumerate() {
+        for (r, row) in tab.rows.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                if !result_cell_is_finite(cell) {
+                    return Err(format!("result sheet `{sheet_id}` produced non-finite value at tab[{tab_idx}].rows[{r}][{c}]"));
+                }
+            }
+        }
+    }
+    for (idx, cmp) in res.pairwise_comparisons.iter().enumerate() {
+        if cmp.estimate_diff.is_some_and(|v| !v.is_finite()) || !cmp.raw_p_or_q.is_finite() {
+            return Err(format!("result sheet `{sheet_id}` produced non-finite value at pairwise_comparisons[{idx}]"));
+        }
+    }
+    for (c_idx, curve) in res.fitted_curves.iter().enumerate() {
+        for (p_idx, pt) in curve.points.iter().enumerate() {
+            if [Some(pt.x), Some(pt.y), pt.ci_lower, pt.ci_upper, pt.pred_lower, pt.pred_upper].into_iter().flatten().any(|v| !v.is_finite()) {
+                return Err(format!("result sheet `{sheet_id}` produced non-finite value at fitted_curves[{c_idx}].points[{p_idx}]"));
+            }
+        }
+    }
+    if let Some(ref data) = res.analyzable_data
+        && let Some(loc) = first_non_finite_data_location(data)
+    {
+        return Err(format!("result sheet `{sheet_id}` produced non-finite value in analyzable_data.{loc}"));
+    }
+    Ok(())
+}
+
+fn result_cell_is_finite(cell: &ResultCell) -> bool {
+    match cell {
+        ResultCell::Number { value, .. } => value.is_finite(),
+        ResultCell::PValue { raw, .. } => raw.is_finite(),
+        ResultCell::ConfidenceInterval { lower, upper } => ci_bound_is_finite(*lower) && ci_bound_is_finite(*upper),
+        ResultCell::Empty | ResultCell::Text(_) | ResultCell::Boolean(_) => true,
+    }
+}
+
+const fn ci_bound_is_finite(bound: CiBound) -> bool {
+    match bound {
+        CiBound::Finite(v) => v.is_finite(),
+        CiBound::Open => true,
+    }
+}
+
+fn first_non_finite_data_location(data: &DataSheet) -> Option<String> {
+    match &data.archetype {
+        TableArchetype::Xy(t) => {
+            if let XColumnMode::GeneratedSequence { start, step, .. } = t.x_mode
+                && (!start.is_finite() || !step.is_finite())
+            {
+                return Some(String::from("x_mode"));
+            }
+            first_non_finite_rows(&t.x_cells, "x_cells").or_else(|| first_non_finite_columns(&t.data_sets, "data_sets"))
+        }
+        TableArchetype::Column(t) => first_non_finite_columns(&t.data_sets, "data_sets"),
+        TableArchetype::Grouped(t) => first_non_finite_columns(&t.data_sets, "data_sets"),
+        TableArchetype::Contingency(t) => first_non_finite_columns(&t.data_sets, "data_sets"),
+        TableArchetype::PartsOfWhole(t) => first_non_finite_columns(&t.data_sets, "data_sets"),
+        TableArchetype::Survival(t) => first_non_finite_1d(&t.times, "times").or_else(|| first_non_finite_columns(&t.cohorts, "cohorts")),
+        TableArchetype::MultipleVariables(t) => {
+            for (v_idx, var) in t.variables.iter().enumerate() {
+                if let Some(loc) = first_non_finite_1d(&var.cells, &format!("variables[{v_idx}]")) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+        TableArchetype::Nested(t) => {
+            for (g_idx, grp) in t.groups.iter().enumerate() {
+                if let Some(loc) = first_non_finite_rows(&grp.cells, &format!("groups[{g_idx}]")) {
+                    return Some(loc);
+                }
+            }
+            None
+        }
+    }
+}
+
+fn first_non_finite_columns(cols: &[DataSetColumn], prefix: &str) -> Option<String> {
+    for (c_idx, col) in cols.iter().enumerate() {
+        if let Some(loc) = first_non_finite_rows(&col.cells, &format!("{prefix}[{c_idx}]")) {
+            return Some(loc);
+        }
+    }
+    None
+}
+
+fn first_non_finite_rows(rows: &[Vec<Cell>], prefix: &str) -> Option<String> {
+    for (r_idx, row) in rows.iter().enumerate() {
+        for (s_idx, cell) in row.iter().enumerate() {
+            if matches!(cell.value, CellValue::Number(v) if !v.is_finite()) {
+                return Some(format!("{prefix}[{r_idx}][{s_idx}]"));
+            }
+        }
+    }
+    None
+}
+
+fn first_non_finite_1d(cells: &[Cell], prefix: &str) -> Option<String> {
+    for (r_idx, cell) in cells.iter().enumerate() {
+        if matches!(cell.value, CellValue::Number(v) if !v.is_finite()) {
+            return Some(format!("{prefix}[{r_idx}]"));
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -876,5 +1108,73 @@ mod tests {
         assert_eq!(report.evaluated_order, vec![SheetId::new("data-1")]);
         assert!(report.updated_data_sheets.is_empty());
         assert_eq!(report.total_updated(), 0);
+    }
+
+    #[test]
+    fn validate_result_sheet_finite_rejects_non_finite_outputs() {
+        use lumencraft_doc::{
+            CiBound, CurveSamplePoint, FittedCurveOverlay, LinearRegressionSpec, PairwiseComparisonRecord, ResultCell, ResultScalarEntry, ResultTab,
+            ResultTabKind, SequenceProgression, XColumnMode, XyTable,
+        };
+
+        let make_base = || -> ResultSheet {
+            let spec = AnalysisSpec::new("res-nf", "data-1", AnalysisKind::LinearRegression(LinearRegressionSpec::default())).expect("spec");
+            ResultSheet::new(spec).expect("res")
+        };
+        let id = SheetId::new("res-nf");
+
+        assert!(validate_result_sheet_finite(&make_base(), &id).is_ok());
+
+        let mut r_scalar = make_base();
+        r_scalar.scalars.push(ResultScalarEntry { key: String::from("Slope"), data_set_index: None, value: f64::NAN, units: None });
+        assert!(validate_result_sheet_finite(&r_scalar, &id).is_err());
+
+        let mut r_tab = make_base();
+        r_tab.tabs.push(ResultTab {
+            id: String::from("summary"),
+            title: String::from("Summary"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("CI")],
+            row_labels: vec![String::from("Top")],
+            rows: vec![vec![ResultCell::ConfidenceInterval { lower: CiBound::Finite(f64::NEG_INFINITY), upper: CiBound::Open }]],
+            footnotes: Vec::new(),
+        });
+        assert!(validate_result_sheet_finite(&r_tab, &id).is_err());
+
+        let mut r_cmp = make_base();
+        r_cmp.pairwise_comparisons.push(PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 1,
+            label_a: String::from("A"),
+            label_b: String::from("B"),
+            estimate_diff: Some(f64::INFINITY),
+            raw_p_or_q: 0.05,
+            is_fdr_q: false,
+            significant: true,
+        });
+        assert!(validate_result_sheet_finite(&r_cmp, &id).is_err());
+
+        let mut r_curve = make_base();
+        r_curve.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: 0,
+            equation_id: String::from("ba"),
+            converged: true,
+            ambiguous: false,
+            points: vec![CurveSamplePoint { x: 1.0, y: f64::INFINITY, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None }],
+        });
+        assert!(validate_result_sheet_finite(&r_curve, &id).is_err());
+
+        let mut r_data = make_base();
+        let mut xy = XyTable::new(lumencraft_doc::SubcolumnMode::RawReplicates(1), 1, 1).expect("xy");
+        xy.x_mode = XColumnMode::GeneratedSequence { start: 0.0, step: f64::NAN, progression: SequenceProgression::Arithmetic };
+        r_data.analyzable_data = Some(DataSheet::new("res-nf-out", "Out", TableArchetype::Xy(xy)).expect("ds"));
+        assert!(validate_result_sheet_finite(&r_data, &id).is_err());
+
+        clear_failed_result_sheet(&mut r_curve, ErrorCode::SolverFailed, String::from("non-finite"));
+        assert!(matches!(r_curve.status, ResultStatus::Failed { code: ErrorCode::SolverFailed, .. }));
+        assert!(r_curve.fitted_curves.is_empty());
+        assert!(r_curve.scalars.is_empty());
+        assert!(r_curve.tabs.is_empty());
+        assert!(r_curve.analyzable_data.is_none());
     }
 }
