@@ -167,7 +167,7 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
                     ("Equation", ResultCell::Text(equation_id.clone())),
                     ("Rows", ResultCell::Number { value: *row_count as f64, prefix: None, units: None }),
                     ("Replicates", ResultCell::Number { value: *replicates as f64, prefix: None, units: None }),
-                    ("Seed", ResultCell::Number { value: *seed as f64, prefix: None, units: None }),
+                    ("Seed", ResultCell::Text(seed.to_string())),
                 ],
                 Vec::new(),
             );
@@ -192,7 +192,7 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
                 vec![
                     ("Sample size", ResultCell::Number { value: *sample_size as f64, prefix: None, units: None }),
                     ("Population size", ResultCell::Number { value: population_size as f64, prefix: None, units: None }),
-                    ("Seed", ResultCell::Number { value: *seed as f64, prefix: None, units: None }),
+                    ("Seed", ResultCell::Text(seed.to_string())),
                     ("Stratify column", ResultCell::Text(stratify_label)),
                     ("Proportional allocation", ResultCell::Boolean(*proportional_allocation)),
                 ],

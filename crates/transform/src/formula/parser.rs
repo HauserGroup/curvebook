@@ -124,12 +124,14 @@ struct Token {
 ///
 /// Strips any leading `=`, enforces nesting and token bounds, and rejects trailing tokens.
 pub fn parse_formula(input: &str) -> Result<Expr, TransformError> {
-    let trimmed = input.trim();
-    let body = trimmed.strip_prefix('=').unwrap_or(trimmed).trim();
+    let after_leading_ws = input.trim_start();
+    let after_eq = after_leading_ws.strip_prefix('=').unwrap_or(after_leading_ws);
+    let body_with_tail = after_eq.trim_start();
+    let body = body_with_tail.trim_end();
     if body.is_empty() {
         return Err(TransformError::ParseError { position: 0, message: String::from("empty formula") });
     }
-    let offset = input.len() - body.len();
+    let offset = input.len() - body_with_tail.len();
     let tokens = tokenize(body, offset)?;
     let mut parser = Parser { tokens, cursor: 0, depth: 0 };
     let expr = parser.parse_expr(0)?;
@@ -271,6 +273,10 @@ impl<'a> Lexer<'a> {
             }
         }
         let ident = &self.src[start..self.pos];
+        if ident.is_empty() {
+            let ch = self.next_char().unwrap_or('?');
+            return Err(self.err(start, format!("unexpected character `{ch}`")));
+        }
         if ident == "$" {
             return Err(self.err(start, "expected variable name after `$`"));
         }
@@ -279,7 +285,9 @@ impl<'a> Lexer<'a> {
 
     fn lex_operator(&mut self) -> Result<Token, TransformError> {
         let start = self.pos;
-        let b0 = self.bytes[self.pos];
+        let Some(b0) = self.peek_byte() else {
+            return Err(self.err(start, "unexpected end of formula"));
+        };
         let b1 = self.bytes.get(self.pos + 1).copied();
         let (kind, advance) = match (b0, b1) {
             (b'=', Some(b'=')) => (TokenKind::Eq, 2),
@@ -329,7 +337,11 @@ fn tokenize(src: &str, base_offset: usize) -> Result<Vec<Token>, TransformError>
             lexer.lex_string(b)?
         } else if b == b'[' {
             lexer.lex_bracket_ident()?
-        } else if b == b'$' || b == b'_' || b.is_ascii_alphabetic() || !b.is_ascii() {
+        } else if b == b'$'
+            || b == b'_'
+            || b.is_ascii_alphabetic()
+            || (!b.is_ascii() && lexer.next_char().is_some_and(|ch| ch.is_alphabetic() || ch == '_'))
+        {
             lexer.lex_ident()?
         } else {
             lexer.lex_operator()?
