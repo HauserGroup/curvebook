@@ -209,7 +209,16 @@ jobs:
           security set-keychain-settings -lut 21600 "$kc"
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
           security import "$cert" -P "$APPLE_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$kc"
-          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          existing_kcs=()
+          while IFS= read -r kc_line; do
+            kc_line="${kc_line#"${kc_line%%[![:space:]]*}"}"
+            kc_line="${kc_line%\"}"
+            kc_line="${kc_line#\"}"
+            if [[ -n "$kc_line" ]]; then
+              existing_kcs+=("$kc_line")
+            fi
+          done < <(security list-keychains -d user)
+          security list-keychains -d user -s "$kc" "${existing_kcs[@]}"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$kc"
           identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' 'NR==1{print $2}')"
           echo "MACOS_KEYCHAIN=$kc" >> "$GITHUB_ENV"

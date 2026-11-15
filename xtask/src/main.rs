@@ -23,6 +23,7 @@ mod telemetry;
 mod ui_commands;
 mod version;
 mod web_fonts;
+mod workflows;
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
@@ -39,6 +40,7 @@ commands:
   status                verify STATUS.md and ROADMAP.md tables have unique first-column keys
   licenses [--html [out]] verify deny policy/lockfile sources offline and optionally emit HTML report
   telemetry             verify zero-telemetry policy across crates, Rust sources, workflows, and web headers
+  workflows             lint GitHub Actions workflows (actionlint) and shell scripts (shellcheck)
   screenshots [--check] generate (or verify) clean-room 1440x900 README workspace PNGs in docs/images/
   assets                verify all non-code assets are attributed in ASSETS.md
   brands                verify user-facing strings and packaging contain no competitor trademarks
@@ -88,6 +90,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "status" => status::run(&root),
         "licenses" => licenses::run(&root, rest),
         "telemetry" => telemetry::run(&root, rest),
+        "workflows" => workflows::run(&root, rest),
         "screenshots" => screenshots::run(&root, rest),
         "assets" => assets::run(&root),
         "brands" => brands::run(&root),
@@ -202,6 +205,7 @@ fn cmd_ci(root: &Path) -> Result<(), String> {
     secrets::run(root)?;
     licenses::run(root, &[])?;
     telemetry::run(root, &[])?;
+    workflows::run(root, &[])?;
     screenshots::run(root, &[String::from("--check")])?;
     pending::run_count(root)?;
     status::run(root)?;

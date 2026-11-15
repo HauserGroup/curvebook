@@ -37,6 +37,7 @@ jobs:
           script="$RUNNER_TEMP/download-actionlint.bash"
           curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash -o "$script"
           bash "$script" latest "$RUNNER_TEMP/actionlint-bin"
+          echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/actionlint-bin/actionlint" -config-file .github/actionlint.yaml
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
