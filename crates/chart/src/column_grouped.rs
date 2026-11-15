@@ -3,8 +3,8 @@
 
 use lumencraft_doc::{
     BracketLabelMode, BracketStyle, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec, GraphSheet, GraphSpec, GraphicalDataObject,
-    GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, ProjectDocument, ReplicateOverlayStyle, SheetId,
-    SummaryMeasure, TableArchetype, TickLabelFormat, WhiskerMethod,
+    GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, ProjectDocument, ReplicateOverlayStyle,
+    ResultStatus, SheetId, SummaryMeasure, TableArchetype, TickLabelFormat, WhiskerMethod,
 };
 use lumencraft_math::sum::SummaryMoments;
 use lumencraft_palette::{LineDashStyle, MarkerShape, MarkerStyle, Rgba8};
@@ -166,20 +166,24 @@ fn count_active_brackets(graph: &GraphSheet, doc: &ProjectDocument, items: &[Cat
         .comparisons
         .iter()
         .filter(|b| {
-            let rec_opt =
-                doc.result_sheet(&b.result_sheet_id).and_then(|res| find_comparison_record(&res.pairwise_comparisons, b.group_a, b.group_b));
+            let res_opt = doc.result_sheet(&b.result_sheet_id);
+            if res_opt.is_some_and(|res| matches!(res.status, ResultStatus::Failed { .. })) {
+                return false;
+            }
+            let rec_opt = res_opt.and_then(|res| find_comparison_record(&res.pairwise_comparisons, b.group_a, b.group_b));
             if b.hide_if_non_significant && !rec_opt.is_some_and(|rec| rec.significant) {
                 return false;
             }
-            if matches!(graph.spec.grouped_arrangement, GroupedArrangement::Stacked)
-                && !items.is_empty()
-                && let (Some(slot_a), Some(slot_b)) = (
-                    find_item_for_group(items, b.group_a, rec_opt.map(|r| r.label_a.as_str())),
-                    find_item_for_group(items, b.group_b, rec_opt.map(|r| r.label_b.as_str())),
-                )
-                && (slot_a.x_pos - slot_b.x_pos).abs() < 1e-6
-            {
-                return false;
+            if !items.is_empty() {
+                let Some(slot_a) = find_item_for_group(items, b.group_a, rec_opt.map(|r| r.label_a.as_str())) else {
+                    return false;
+                };
+                let Some(slot_b) = find_item_for_group(items, b.group_b, rec_opt.map(|r| r.label_b.as_str())) else {
+                    return false;
+                };
+                if matches!(graph.spec.grouped_arrangement, GroupedArrangement::Stacked) && (slot_a.x_pos - slot_b.x_pos).abs() < 1e-6 {
+                    return false;
+                }
             }
             true
         })
@@ -203,10 +207,7 @@ fn find_matched_index<T>(slice: &[T], group_idx: usize, label_hint: Option<&str>
             return Some(pos);
         }
     }
-    if let Some((pos, _)) = slice.iter().enumerate().find(|(_, item)| meta(item).0 == group_idx) {
-        return Some(pos);
-    }
-    (group_idx < slice.len()).then_some(group_idx)
+    slice.iter().enumerate().find(|(_, item)| meta(item).0 == group_idx).map(|(pos, _)| pos)
 }
 
 fn item_z_footprint(item: &CategorySlotItem) -> (f64, f64) {
@@ -1384,6 +1385,19 @@ fn push_col_point_meta(scene: &mut ChartScene, center_pt: PointPt, marker_size_p
     });
 }
 
+const MAX_REPLICATE_MARKERS: usize = 4_096;
+
+fn subsample_sorted_indices(pts_y: &[f64], cap: usize) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..pts_y.len()).collect();
+    order.sort_by(|&a, &b| pts_y[a].total_cmp(&pts_y[b]).then_with(|| a.cmp(&b)));
+    if order.len() <= cap || cap < 2 {
+        return order.into_iter().take(cap).collect();
+    }
+    let last = (order.len() - 1) as u64;
+    let denom = (cap - 1) as u64;
+    (0..cap).map(|i| order[((i as u64 * last) / denom) as usize]).collect()
+}
+
 fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDotCtx<'_>) -> f64 {
     let clip = scene.plot_rect_pt;
     let mut top_pt = clip.bottom();
@@ -1405,6 +1419,19 @@ fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDo
         return top_pt;
     }
 
+    if mapped.len() > MAX_REPLICATE_MARKERS {
+        let total = mapped.len();
+        let keep = subsample_sorted_indices(&pts_y, MAX_REPLICATE_MARKERS);
+        mapped = keep.iter().map(|&idx| mapped[idx]).collect();
+        pts_y = keep.iter().map(|&idx| pts_y[idx]).collect();
+        if !scene.warnings.iter().any(|w| w.code == "replicate_markers_capped") {
+            scene.warnings.push(ChartWarning::new(
+                "replicate_markers_capped",
+                format!("replicate overlay capped to {MAX_REPLICATE_MARKERS} representative markers (from {total} points)"),
+            ));
+        }
+    }
+
     let offsets = match ctx.style {
         ReplicateOverlayStyle::AlignedColumn => vec![0.0; mapped.len()],
         ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_y, ctx.max_half_w, max_dot_r),
@@ -1417,47 +1444,103 @@ fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDo
     top_pt - max_dot_r
 }
 
-fn deterministic_beeswarm_offsets(ys: &[f64], max_half_w: f64, dot_r: f64) -> Vec<f64> {
-    let mut order: Vec<usize> = (0..ys.len()).collect();
-    order.sort_by(|&a, &b| ys[a].total_cmp(&ys[b]).then_with(|| a.cmp(&b)));
+struct BeeswarmState {
+    lane_last_y: Vec<f64>,
+    fallback_last_y: [f64; 2],
+    fallback_x: [f64; 2],
+    max_steps: isize,
+    neighbor_span: isize,
+    step: f64,
+    min_dist: f64,
+}
 
-    let min_dist = (2.15 * dot_r).max(2.0);
-    let step = min_dist * 0.85;
-    let max_steps = ((max_half_w / step).floor() as i32).max(1);
-    let mut placed: Vec<(f64, f64)> = Vec::with_capacity(ys.len());
-    let mut out = vec![0.0; ys.len()];
-
-    for &idx in &order {
-        let y = ys[idx];
-        let mut chosen = 0.0;
-        let mut found = false;
-        'search: for k in 0..=max_steps {
-            let candidates: [f64; 2] = if k == 0 { [0.0, 0.0] } else { [-(k as f64) * step, (k as f64) * step] };
-            let limit = if k == 0 { 1 } else { 2 };
-            for &dx in &candidates[..limit] {
-                if dx.abs() > max_half_w + 1e-6 {
-                    continue;
-                }
-                let hits = placed.iter().any(|&(px, py)| (dx - px).hypot(y - py) < min_dist);
-                if !hits {
-                    chosen = dx;
-                    found = true;
-                    break 'search;
+impl BeeswarmState {
+    fn hits(&self, dx: f64, y: f64, lane: isize) -> bool {
+        let min_dist_sq = self.min_dist * self.min_dist;
+        let lo = (lane - self.neighbor_span).max(-self.max_steps);
+        let hi = (lane + self.neighbor_span).min(self.max_steps);
+        for m in lo..=hi {
+            let py = self.lane_last_y[(m + self.max_steps) as usize];
+            let dy = y - py;
+            if py.is_finite() && dy < self.min_dist {
+                let ddx = dx - (m as f64) * self.step;
+                if ddx * ddx + dy * dy < min_dist_sq {
+                    return true;
                 }
             }
         }
-        if !found {
-            let parity = if placed.len().is_multiple_of(2) { 1.0 } else { -1.0 };
-            chosen = parity * max_half_w * 0.75;
+        self.fallback_x.iter().zip(self.fallback_last_y.iter()).any(|(&fx, &py)| {
+            let dy = y - py;
+            py.is_finite() && dy < self.min_dist && {
+                let ddx = dx - fx;
+                ddx * ddx + dy * dy < min_dist_sq
+            }
+        })
+    }
+}
+
+fn deterministic_beeswarm_offsets(ys: &[f64], max_half_w: f64, dot_r: f64) -> Vec<f64> {
+    if ys.is_empty() {
+        return Vec::new();
+    }
+    if !max_half_w.is_finite() || max_half_w <= 0.0 {
+        return vec![0.0; ys.len()];
+    }
+
+    let mut order: Vec<usize> = (0..ys.len()).filter(|&i| ys[i].is_finite()).collect();
+    order.sort_by(|&a, &b| ys[a].total_cmp(&ys[b]).then_with(|| a.cmp(&b)));
+
+    let safe_r = if dot_r.is_finite() && dot_r > 0.0 { dot_r } else { 1.0 };
+    let min_dist = (2.15 * safe_r).max(2.0);
+    let step = min_dist * 0.85;
+    let max_steps = ((max_half_w / step).floor() as isize).clamp(1, 128);
+    let mut state = BeeswarmState {
+        lane_last_y: vec![f64::NEG_INFINITY; (max_steps * 2 + 1) as usize],
+        fallback_last_y: [f64::NEG_INFINITY; 2],
+        fallback_x: [max_half_w * 0.75, -max_half_w * 0.75],
+        max_steps,
+        neighbor_span: (min_dist / step).ceil() as isize + 1,
+        step,
+        min_dist,
+    };
+
+    let mut out = vec![0.0; ys.len()];
+    let mut last_saturated_y: Option<f64> = None;
+
+    for (placed_count, idx) in order.into_iter().enumerate() {
+        let y = ys[idx];
+        let mut chosen_lane: Option<(isize, f64)> = None;
+
+        if last_saturated_y != Some(y) {
+            'search: for k in 0..=state.max_steps {
+                let candidates: [isize; 2] = if k == 0 { [0, 0] } else { [-k, k] };
+                let limit = if k == 0 { 1 } else { 2 };
+                for &lane in &candidates[..limit] {
+                    let dx = (lane as f64) * state.step;
+                    if dx.abs() <= max_half_w + 1e-6 && !state.hits(dx, y, lane) {
+                        chosen_lane = Some((lane, dx));
+                        break 'search;
+                    }
+                }
+            }
         }
-        placed.push((chosen, y));
-        out[idx] = chosen;
+
+        let chosen_dx = if let Some((lane, dx)) = chosen_lane {
+            state.lane_last_y[(lane + state.max_steps) as usize] = y;
+            dx
+        } else {
+            last_saturated_y = Some(y);
+            let fi = if placed_count.is_multiple_of(2) { 0 } else { 1 };
+            state.fallback_last_y[fi] = y;
+            state.fallback_x[fi]
+        };
+        out[idx] = chosen_dx;
     }
     out
 }
 
 fn render_pairwise_brackets(scene: &mut ChartScene, graph: &GraphSheet, doc: &ProjectDocument, bounds: &[RenderedSlotBound]) {
-    if graph.spec.comparisons.is_empty() || bounds.is_empty() {
+    if graph.spec.comparisons.is_empty() {
         return;
     }
     let mut resolved = resolve_brackets(graph, doc, bounds, &mut scene.warnings);
@@ -1520,6 +1603,13 @@ fn resolve_brackets(
     let mut out = Vec::with_capacity(graph.spec.comparisons.len());
     for spec in &graph.spec.comparisons {
         let res_opt = doc.result_sheet(&spec.result_sheet_id);
+        if let Some(res) = res_opt
+            && let ResultStatus::Failed { message, .. } = &res.status
+        {
+            let detail = if message.trim().is_empty() { "result sheet failed" } else { message.trim() };
+            warnings.push(ChartWarning::new("failed_comparison_result", format!("comparison bracket skipped: {detail}")));
+            continue;
+        }
         let rec_opt = res_opt.and_then(|res| find_comparison_record(&res.pairwise_comparisons, spec.group_a, spec.group_b));
 
         if spec.hide_if_non_significant {
@@ -1534,10 +1624,13 @@ fn resolve_brackets(
         let Some(label) = build_bracket_label(spec, res_opt, rec_opt, doc, info_id, warnings) else {
             continue;
         };
-        let Some((idx_a, slot_a)) = find_slot_for_group(bounds, spec.group_a, rec_opt.map(|r| r.label_a.as_str())) else {
-            continue;
-        };
-        let Some((idx_b, slot_b)) = find_slot_for_group(bounds, spec.group_b, rec_opt.map(|r| r.label_b.as_str())) else {
+        let slot_a_opt = find_slot_for_group(bounds, spec.group_a, rec_opt.map(|r| r.label_a.as_str()));
+        let slot_b_opt = find_slot_for_group(bounds, spec.group_b, rec_opt.map(|r| r.label_b.as_str()));
+        let (Some((idx_a, slot_a)), Some((idx_b, slot_b))) = (slot_a_opt, slot_b_opt) else {
+            warnings.push(ChartWarning::new(
+                "missing_comparison_group",
+                format!("comparison bracket {} vs {} skipped: target group not plotted", spec.group_a, spec.group_b),
+            ));
             continue;
         };
         if (slot_a.x_pt - slot_b.x_pt).abs() < 1e-6 {
