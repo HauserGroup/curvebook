@@ -10,9 +10,11 @@ use lumencraft_doc::{
 };
 use lumencraft_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry, ImportOptions, ImportPayload};
 use lumencraft_format::{
-    ArchiveKind, CsvOptions, ImportReport, export_result_tab_csv, import_prism_bytes, import_pzfx_bytes, is_unpacked_project_dir, open_archive_bytes,
+    ArchiveKind, CsvOptions, ImportReport, MAX_ARCHIVE_FILE_BYTES, export_result_tab_csv, import_prism_bytes, import_pzfx_bytes,
+    is_unpacked_project_dir, open_archive_bytes,
 };
 use lumencraft_pdf::{PdfExportOptions, PdfVersion, render_pdf};
+use lumencraft_platform::PlatformError;
 use lumencraft_platform::fs::write_atomic;
 use lumencraft_render::{RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
 use lumencraft_svg::{SvgExportOptions, render_svg};
@@ -26,6 +28,9 @@ const DEFAULT_RASTER_DPI: u16 = 300;
 
 /// Maximum raster canvas edge in pixels (`16_384`).
 const MAX_RASTER_EDGE_PX: f64 = 16_384.0;
+
+/// Maximum TrueType SFNT font file read size (`64 MiB`).
+const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 /// Loaded project document paired with its detected container format tag and import warnings.
 #[derive(Debug, Clone)]
@@ -216,7 +221,10 @@ pub const fn pdf_version_str(version: PdfVersion) -> &'static str {
 
 /// Read and validate TrueType SFNT bytes from `path` via [`parse_truetype_font_info`].
 pub fn load_validated_ttf_font(path: &Path) -> Result<Vec<u8>, CliError> {
-    let bytes = fs::read(path).map_err(|err| CliError::Runtime(format!("failed to read TrueType font `{}`: {err}", path.display())))?;
+    let bytes = lumencraft_platform::fs::read_regular_file_bytes(path, MAX_FONT_FILE_BYTES).map_err(|err| match err {
+        PlatformError::FileTooLarge { .. } => CliError::from(err),
+        other => CliError::Runtime(format!("failed to read TrueType font `{}`: {other}", path.display())),
+    })?;
     let _info = parse_truetype_font_info(&bytes).map_err(|err| CliError::Runtime(format!("invalid TrueType font `{}`: {err}", path.display())))?;
     if !matches!(bytes.get(0..4), Some([0x00, 0x01, 0x00, 0x00] | b"true")) {
         return Err(CliError::Runtime(format!(
@@ -320,7 +328,11 @@ pub fn load_project_from_path(path: &Path, allow_delimited: bool) -> Result<(Loa
         let total_bytes = dir_size_bytes(path)?;
         return Ok((LoadedProject { doc, format_tag: "lumencraft.d", warnings: Vec::new() }, total_bytes));
     }
-    let bytes = fs::read(path).map_err(|err| CliError::Runtime(format!("failed to read `{}`: {err}", path.display())))?;
+    let limit = FormatRegistry::default_registry().importer_for_path(path).map_or(MAX_ARCHIVE_FILE_BYTES, |importer| importer.max_input_bytes());
+    let bytes = lumencraft_platform::fs::read_regular_file_bytes(path, limit).map_err(|err| match err {
+        PlatformError::FileTooLarge { .. } => CliError::from(err),
+        other => CliError::Runtime(format!("failed to read `{}`: {other}", path.display())),
+    })?;
     let loaded = load_project_from_bytes(path, &bytes, allow_delimited)?;
     Ok((loaded, bytes.len()))
 }

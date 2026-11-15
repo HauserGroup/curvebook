@@ -94,12 +94,36 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
     };
 
     let format_id = importer.descriptor().id;
-    let payload = match importer.import_path(&resolved_path, &import_opts) {
+    if format_id == "lumencraft.d" {
+        let payload = match importer.import_path(&resolved_path, &import_opts) {
+            Ok(p) => p,
+            Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+        };
+        return apply_imported_payload(state, &resolved_path, format_id, payload, None, title_override.as_deref(), &import_opts, append);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    let raw_bytes = match lumencraft_platform::fs::read_regular_file_bytes(&resolved_path, importer.max_input_bytes()) {
+        Ok(bytes) => bytes,
+        Err(lumencraft_platform::PlatformError::InvalidPath { reason }) => {
+            return Ok(errors::result_from_engine_error(&EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("invalid file `{}`: {reason}", resolved_path.display()),
+            )));
+        }
+        Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+    };
+    #[cfg(target_arch = "wasm32")]
+    let raw_bytes: Vec<u8> = {
+        return Ok(errors::result_from_code(ErrorCode::IoError, "filesystem operations are not supported on wasm32"));
+    };
+
+    let payload = match importer.import_bytes(&raw_bytes, &import_opts) {
         Ok(p) => p,
         Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
     };
 
-    apply_imported_payload(state, &resolved_path, format_id, payload, title_override.as_deref(), &import_opts, append)
+    apply_imported_payload(state, &resolved_path, format_id, payload, Some(raw_bytes), title_override.as_deref(), &import_opts, append)
 }
 
 fn resolve_importer<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &Path) -> Result<&'a dyn Importer, ToolCallError> {
@@ -148,11 +172,13 @@ fn build_import_options(path: &Path, args: &Map<String, Value>) -> Result<Import
     Ok(ImportOptions { sheet_id: SheetId::new(sheet_id_str), title: sheet_title, table_kind: target_kind, subcolumn_mode, csv: csv_override })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_imported_payload(
     state: &mut McpServerState,
     resolved_path: &Path,
     format_id: &str,
     payload: ImportPayload,
+    raw_bytes: Option<Vec<u8>>,
     title_override: Option<&str>,
     import_opts: &ImportOptions,
     append: bool,
@@ -195,29 +221,37 @@ fn apply_imported_payload(
             }))
         }
         ("prism" | "pzfx", ImportPayload::Report(report)) => {
+            let Some(bytes) = raw_bytes else {
+                return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
+            };
             let warnings = match serde_json::to_value(&report.warnings) {
                 Ok(v) => v,
                 Err(err) => {
                     return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
                 }
             };
-            apply_report_import(state, resolved_path, format_id, warnings)
+            apply_report_import(state, resolved_path, format_id, &bytes, warnings)
         }
-        ("csv" | "tsv", ImportPayload::DataSheet(_)) => apply_csv_import(state, resolved_path, format_id, import_opts, append),
+        ("csv" | "tsv", ImportPayload::DataSheet(_)) => {
+            let Some(bytes) = raw_bytes else {
+                return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
+            };
+            apply_csv_import(state, resolved_path, format_id, bytes, import_opts, append)
+        }
         _ => Ok(errors::result_from_code(ErrorCode::UnsupportedFormat, format!("unexpected payload returned by importer '{format_id}'"))),
     }
 }
 
-fn apply_report_import(state: &mut McpServerState, resolved_path: &Path, format_id: &str, warnings: Value) -> Result<ToolCallResult, ToolCallError> {
-    let bytes = match std::fs::read(resolved_path) {
-        Ok(b) => b,
-        Err(err) => {
-            return Ok(errors::result_from_code(ErrorCode::IoError, format!("failed to read '{}': {err}", resolved_path.display())));
-        }
-    };
+fn apply_report_import(
+    state: &mut McpServerState,
+    resolved_path: &Path,
+    format_id: &str,
+    bytes: &[u8],
+    warnings: Value,
+) -> Result<ToolCallResult, ToolCallError> {
     let command_id = if format_id == "prism" { "table.importPrism" } else { "table.importPzfx" };
     let params = json!({
-        "bytes_base64": encode_base64(&bytes),
+        "bytes_base64": encode_base64(bytes),
         "merge": false,
     });
 
@@ -244,6 +278,7 @@ fn apply_csv_import(
     state: &mut McpServerState,
     resolved_path: &Path,
     format_id: &str,
+    raw_bytes: Vec<u8>,
     import_opts: &ImportOptions,
     append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
@@ -253,10 +288,10 @@ fn apply_csv_import(
         })));
     }
 
-    let csv_text = match std::fs::read_to_string(resolved_path) {
+    let csv_text = match String::from_utf8(raw_bytes) {
         Ok(text) => text,
         Err(err) => {
-            return Ok(errors::result_from_code(ErrorCode::IoError, format!("failed to read '{}': {err}", resolved_path.display())));
+            return Ok(errors::result_from_code(ErrorCode::IoError, format!("failed to decode '{}' as UTF-8: {err}", resolved_path.display())));
         }
     };
     let csv_opts = import_opts.csv.clone().unwrap_or_else(|| if format_id == "tsv" { CsvOptions::tsv() } else { CsvOptions::detect(&csv_text) });

@@ -9,8 +9,8 @@ use lumencraft_doc::{
     VariableRole, VariableSource, validate_rows, validate_title,
 };
 use lumencraft_format::{
-    CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes,
-    import_pzfx_str, parse_delimited_records,
+    CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, export_datasheet_to_csv, export_result_sheet_tidy_csv,
+    import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes, import_pzfx_str, parse_delimited_records,
 };
 use lumencraft_transform::{
     AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload,
@@ -457,7 +457,7 @@ fn resolve_initial_link_source_payload(
             }
         },
         LinkSource::ExternalDelimitedFile { path, delimiter, decimal_separator } => {
-            let text = policy.read_utf8_file(path, "linked file")?;
+            let text = policy.read_utf8_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
             Ok(Some(OwnedSourcePayload::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
     }
@@ -2679,7 +2679,7 @@ fn build_paste_link_spec(
         };
         LinkSource::InternalSheet { sheet_id: src_id, kind, tab_id, range }
     } else if let Some(path) = p.source_path.as_deref() {
-        let preview_text = policy.read_utf8_file(path, "external link file")?;
+        let preview_text = policy.read_utf8_file(path, "external link file", MAX_CSV_FILE_BYTES)?;
         let delimiter = resolve_delimiter(p.delimiter.as_deref(), &preview_text)?;
         let decimal_separator = resolve_decimal_char(p.decimal_separator.as_deref(), p.normalize_decimal.unwrap_or(false), &preview_text, delimiter)?;
         let mut src = LinkSource::ExternalDelimitedFile { path: path.to_owned(), delimiter, decimal_separator };
@@ -2928,7 +2928,7 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     let text = if let Some(inline) = &p.csv {
         inline.clone()
     } else if let Some(path) = &p.path {
-        policy.read_utf8_file(path, "CSV")?
+        policy.read_utf8_file(path, "CSV", MAX_CSV_FILE_BYTES)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importCsv requires `path` or `csv`/`text`")
             .with_remediation("Provide a CSV/TSV file `path` or inline `csv` text."));
@@ -3067,7 +3067,7 @@ fn merge_imported_document(doc: &mut ProjectDocument, imported: ProjectDocument)
 fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportPrismParams = parse_params(&schema_import_prism(), raw)?;
     let bytes = if let Some(path) = p.path.as_deref() {
-        ctx.session.path_policy.read_binary_file(path, "archive")?
+        ctx.session.path_policy.read_binary_file(path, "archive", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         decode_base64(b64)?
     } else if let Some(raw_bytes) = p.bytes {
@@ -3126,7 +3126,7 @@ fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let report = if let Some(xml) = p.xml.as_deref() {
         import_pzfx_str(xml)?
     } else if let Some(path) = p.path.as_deref() {
-        let bytes = ctx.session.path_policy.read_binary_file(path, "XML file")?;
+        let bytes = ctx.session.path_policy.read_binary_file(path, "XML file", MAX_XML_BYTES)?;
         import_pzfx_bytes(&bytes)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         let bytes = decode_base64(b64)?;
@@ -4360,7 +4360,7 @@ fn extract_tidy_data(p: &ImportTidyLongParams, policy: &ExternalPathPolicy) -> R
     let text = if let Some(inline) = &p.csv {
         inline.clone()
     } else if let Some(path) = &p.path {
-        policy.read_utf8_file(path, "tidy file")?
+        policy.read_utf8_file(path, "tidy file", MAX_CSV_FILE_BYTES)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importTidyLong requires `rows` or `csv`")
             .with_remediation("Supply `rows`, inline `csv` text, or a file `path`."));

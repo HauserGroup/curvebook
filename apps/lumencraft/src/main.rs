@@ -11,7 +11,9 @@ use std::process::ExitCode;
 use lumencraft::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowSession, open_document_from_files};
 use lumencraft_engine::Session;
 use lumencraft_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, RecoveryReport};
-use lumencraft_format::versioned::{CURRENT_PREFERENCES_VERSION, PreferencesFile, load_preferences_file, save_preferences_file};
+use lumencraft_format::versioned::{
+    CURRENT_PREFERENCES_VERSION, MAX_PREFERENCES_FILE_BYTES, PreferencesFile, load_preferences_file, save_preferences_file,
+};
 use lumencraft_render::RenderTargetSpec;
 use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use lumencraft_ui_egui::dialogs_canvas::render_workspace_frame_png;
@@ -22,6 +24,8 @@ use lumencraft_ui_egui::{
 };
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
+const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
+const MAX_EVENT_SCRIPT_BYTES: usize = 64 * 1024 * 1024;
 
 const USAGE: &str = "\
 usage: lumencraft [options] [file...]
@@ -337,7 +341,10 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         let extra_ttf_bytes = cfg
             .ttf_font
             .as_deref()
-            .map(|path| std::fs::read(path).map_err(|err| format!("failed to read `--ttf-font` `{}`: {err}", path.display())))
+            .map(|path| {
+                lumencraft_platform::fs::read_regular_file_bytes(path, MAX_FONT_FILE_BYTES)
+                    .map_err(|err| format!("failed to read `--ttf-font` `{}`: {err}", path.display()))
+            })
             .transpose()?;
         let cleanup_paths = app_paths.clone();
         let cleanup = Box::new(move |rt: &mut DesktopHostRuntime| -> Result<(), String> {
@@ -352,8 +359,8 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
     }
 
     if let Some(script_path) = cfg.event_script.as_deref() {
-        let script =
-            std::fs::read_to_string(script_path).map_err(|err| format!("failed to read --event-script `{}`: {err}", script_path.display()))?;
+        let script = lumencraft_platform::fs::read_regular_file_utf8(script_path, MAX_EVENT_SCRIPT_BYTES)
+            .map_err(|err| format!("failed to read --event-script `{}`: {err}", script_path.display()))?;
         let _ = runtime_guard.get_mut()?.run_event_script_jsonl(&script)?;
     }
 
@@ -610,7 +617,8 @@ fn resolve_platform_standard_dirs(env_get: &impl Fn(&str) -> Option<OsString>) -
 }
 
 fn load_validated_ttf_font(path: &Path) -> Result<(Vec<u8>, TrueTypeFontInfo), String> {
-    let bytes = std::fs::read(path).map_err(|err| format!("failed to read --ttf-font `{}`: {err}", path.display()))?;
+    let bytes = lumencraft_platform::fs::read_regular_file_bytes(path, MAX_FONT_FILE_BYTES)
+        .map_err(|err| format!("failed to read --ttf-font `{}`: {err}", path.display()))?;
     let info = parse_truetype_font_info(&bytes).map_err(|err| format!("invalid --ttf-font `{}`: {err}", path.display()))?;
     Ok((bytes, info))
 }
@@ -626,7 +634,7 @@ fn load_shortcut_preferences(app: &mut UiApp, paths: &AppPaths) -> Result<usize,
         return app.shortcuts.import_overrides_json(&text);
     }
     if paths.shortcuts_file.is_file() {
-        let raw = std::fs::read_to_string(&paths.shortcuts_file)
+        let raw = lumencraft_platform::fs::read_regular_file_utf8(&paths.shortcuts_file, MAX_PREFERENCES_FILE_BYTES)
             .map_err(|err| format!("failed to read shortcuts file `{}`: {err}", paths.shortcuts_file.display()))?;
         return app.shortcuts.import_overrides_json(&raw);
     }

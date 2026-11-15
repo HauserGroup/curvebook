@@ -246,6 +246,12 @@ impl From<FormatError> for EngineError {
             FormatError::ZipBomb { reason } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "reason": reason })), Some("Archive exceeds decompression safety limits."), false)
             }
+            FormatError::FileTooLarge { path, actual_bytes, limit_bytes } => (
+                ErrorCode::ResourceLimit,
+                Some(json!({ "path": path, "actual_bytes": actual_bytes, "limit_bytes": limit_bytes })),
+                Some("Reduce the input file size below the format limit."),
+                false,
+            ),
             FormatError::UnsafePath { path } => {
                 (ErrorCode::PathEscape, Some(json!({ "path": path })), Some("Ensure all archive or file paths stay inside the allowed root."), false)
             }
@@ -491,6 +497,12 @@ impl From<PlatformError> for EngineError {
             PlatformError::OutputLimitExceeded { program, stream, limit_bytes } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "program": program, "stream": stream, "limit_bytes": limit_bytes })), None, false)
             }
+            PlatformError::FileTooLarge { path, actual_bytes, limit_bytes } => (
+                ErrorCode::ResourceLimit,
+                Some(json!({ "path": path, "actual_bytes": actual_bytes, "limit_bytes": limit_bytes })),
+                Some("Reduce the input file size below the format limit."),
+                false,
+            ),
             PlatformError::InvalidPath { reason } => (ErrorCode::BadInput, Some(json!({ "reason": reason })), None, false),
             PlatformError::PathEscape { path, workdir } => (
                 ErrorCode::PathEscape,

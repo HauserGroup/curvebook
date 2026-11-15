@@ -15,6 +15,9 @@ use crate::error::FormatError;
 /// Maximum dense `Cell` entries allocated by delimited table import, filtering, or growth.
 pub const MAX_IMPORT_CELLS: usize = 10_000_000;
 
+/// Maximum byte length permitted when reading a CSV/TSV or delimited text file from disk.
+pub const MAX_CSV_FILE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Configuration for RFC-4180 CSV/TSV parsing and formatting.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CsvOptions {

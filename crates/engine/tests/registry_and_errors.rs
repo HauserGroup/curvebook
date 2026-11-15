@@ -218,7 +218,7 @@ fn check_format_error(err: FormatError) {
         FormatError::UnsupportedCompression { .. } | FormatError::InvalidArchiveKind { .. } | FormatError::UnsupportedFormat { .. } => {
             ErrorCode::UnsupportedFormat
         }
-        FormatError::ZipBomb { .. } | FormatError::XmlDepthExceeded { .. } => ErrorCode::ResourceLimit,
+        FormatError::ZipBomb { .. } | FormatError::FileTooLarge { .. } | FormatError::XmlDepthExceeded { .. } => ErrorCode::ResourceLimit,
         FormatError::UnsafePath { .. } => ErrorCode::PathEscape,
         FormatError::DuplicateEntry { .. } => ErrorCode::AlreadyExists,
         FormatError::UnsupportedSchemaVersion { .. } => ErrorCode::UnsupportedVersion,
@@ -340,6 +340,7 @@ fn all_format_errors() -> Vec<FormatError> {
         FormatError::CorruptCrc { entry: String::from("doc.json"), expected: 1, actual: 2 },
         FormatError::UnsupportedCompression { entry: String::from("doc.json"), method: 99 },
         FormatError::ZipBomb { reason: String::from("ratio") },
+        FormatError::FileTooLarge { path: String::from("big.csv"), actual_bytes: Some(2048), limit_bytes: 1024 },
         FormatError::UnsafePath { path: String::from("../x") },
         FormatError::DuplicateEntry { path: String::from("doc.json") },
         FormatError::MissingArchiveEntry { path: String::from("doc.json") },

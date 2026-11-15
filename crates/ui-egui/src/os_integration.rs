@@ -588,7 +588,9 @@ function run(argv) {
         if marker == "ERR" {
             return Err(String::from("failed to write pasteboard PDF bytes to staging file"));
         }
-        let bytes = std::fs::read(&out_path).map_err(|err| format!("failed to read staged pasteboard PDF: {err}"))?;
+        const MAX_PASTEBOARD_PDF_BYTES: usize = 128 * 1024 * 1024;
+        let bytes = lumencraft_platform::fs::read_regular_file_bytes(&out_path, MAX_PASTEBOARD_PDF_BYTES)
+            .map_err(|err| format!("failed to read staged pasteboard PDF: {err}"))?;
         if bytes.is_empty() {
             return Err(String::from("staged pasteboard `com.adobe.pdf` entry was empty"));
         }

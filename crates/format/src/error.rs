@@ -14,6 +14,7 @@ pub enum FormatError {
     CorruptCrc { entry: String, expected: u32, actual: u32 },
     UnsupportedCompression { entry: String, method: u16 },
     ZipBomb { reason: String },
+    FileTooLarge { path: String, actual_bytes: Option<u64>, limit_bytes: usize },
     UnsafePath { path: String },
     DuplicateEntry { path: String },
     MissingArchiveEntry { path: String },
@@ -42,6 +43,10 @@ impl fmt::Display for FormatError {
                 write!(f, "unsupported ZIP compression method {method} for entry `{entry}`")
             }
             Self::ZipBomb { reason } => write!(f, "archive security limit exceeded: {reason}"),
+            Self::FileTooLarge { path, actual_bytes, limit_bytes } => match actual_bytes {
+                Some(actual) => write!(f, "file `{path}` size {actual} bytes exceeds limit of {limit_bytes} bytes"),
+                None => write!(f, "file `{path}` exceeds limit of {limit_bytes} bytes"),
+            },
             Self::UnsafePath { path } => write!(f, "unsafe archive entry path `{path}`"),
             Self::DuplicateEntry { path } => write!(f, "duplicate archive entry `{path}`"),
             Self::MissingArchiveEntry { path } => write!(f, "missing required archive entry `{path}`"),
@@ -89,6 +94,10 @@ impl From<lumencraft_platform::PlatformError> for FormatError {
     fn from(value: lumencraft_platform::PlatformError) -> Self {
         match value {
             lumencraft_platform::PlatformError::PathEscape { path, .. } => Self::UnsafePath { path },
+            lumencraft_platform::PlatformError::FileTooLarge { path, actual_bytes, limit_bytes } => {
+                Self::FileTooLarge { path, actual_bytes, limit_bytes }
+            }
+            lumencraft_platform::PlatformError::InvalidPath { reason } => Self::Io(reason),
             other => Self::Io(other.to_string()),
         }
     }
