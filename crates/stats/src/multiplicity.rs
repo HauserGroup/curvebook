@@ -286,14 +286,20 @@ pub fn adjust_two_stage_bky(raw_p: &[f64], fdr_q: f64) -> Vec<f64> {
 #[must_use]
 pub fn adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshold: f64) -> (Vec<f64>, bool) {
     match procedure {
-        MultiplicityProcedure::Bonferroni => (adjust_bonferroni(raw_p), false),
-        MultiplicityProcedure::Sidak => (adjust_sidak(raw_p), false),
+        MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => (raw_p.iter().map(|p| p.clamp(0.0, 1.0)).collect(), false),
+        MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::TukeyKramer
+        | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::Dunnett { .. }
+        | MultiplicityProcedure::DunnettT3
+        | MultiplicityProcedure::GamesHowell
+        | MultiplicityProcedure::DunnRankSum => (adjust_bonferroni(raw_p), false),
+        MultiplicityProcedure::Sidak | MultiplicityProcedure::TamhaneT2 => (adjust_sidak(raw_p), false),
         MultiplicityProcedure::HolmBonferroni => (adjust_holm_bonferroni(raw_p), false),
         MultiplicityProcedure::HolmSidak => (adjust_holm_sidak(raw_p), false),
         MultiplicityProcedure::BenjaminiHochbergFdr => (adjust_benjamini_hochberg(raw_p), true),
         MultiplicityProcedure::BenjaminiYekutieliFdr => (adjust_benjamini_yekutieli(raw_p), true),
         MultiplicityProcedure::TwoStageBkyFdr => (adjust_two_stage_bky(raw_p, threshold), true),
-        _ => (raw_p.iter().map(|p| p.clamp(0.0, 1.0)).collect(), false),
     }
 }
 
@@ -335,7 +341,18 @@ pub fn compare_groups_with_procedure(
         MultiplicityProcedure::GamesHowell => compare_games_howell(groups, threshold, report_ci),
         MultiplicityProcedure::TamhaneT2 => compare_tamhane_t2(groups, threshold, report_ci),
         MultiplicityProcedure::DunnettT3 => compare_dunnett_t3(groups, threshold, report_ci),
-        _ => compare_pooled_or_fdr(groups, mse, df_error, procedure, threshold, report_ci),
+        MultiplicityProcedure::DunnRankSum => {
+            Err(StatsError::InvalidParameter { name: "multiplicity_procedure_dunn_requires_kruskal_wallis", value: 0.0 })
+        }
+        MultiplicityProcedure::None
+        | MultiplicityProcedure::Sidak
+        | MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::HolmSidak
+        | MultiplicityProcedure::HolmBonferroni
+        | MultiplicityProcedure::FisherLsd
+        | MultiplicityProcedure::BenjaminiHochbergFdr
+        | MultiplicityProcedure::BenjaminiYekutieliFdr
+        | MultiplicityProcedure::TwoStageBkyFdr => compare_pooled_or_fdr(groups, mse, df_error, procedure, threshold, report_ci),
     }
 }
 
@@ -732,8 +749,8 @@ fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci
 }
 
 /// Dunn's nonparametric rank-sum pairwise comparison with tie correction and configurable
-/// post-adjustment (Bonferroni, Šídák, Holm, or BH/BY/BKY FDR; defaults to Bonferroni when
-/// `DunnRankSum` or `None` is specified on nonparametric ANOVA).
+/// post-adjustment (Bonferroni, Šídák, Holm, or BH/BY/BKY FDR; `DunnRankSum` and parametric FWER
+/// defaults map to Dunn–Bonferroni or Šídák, while explicit `None` or `FisherLsd` stays unadjusted).
 pub fn compare_dunn_ranks(
     group_labels: &[(usize, String)],
     group_n: &[usize],
@@ -746,32 +763,59 @@ pub fn compare_dunn_ranks(
     if k < 2 || total_n < 2 {
         return Ok(Vec::new());
     }
+    let proc_req = MultiplicityProcedure::from(spec.method);
+    let pair_indices: Vec<(usize, usize)> = if let MultiplicityProcedure::Dunnett { control_column } = proc_req {
+        if control_column >= k {
+            return Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 });
+        }
+        (0..k).filter(|&i| i != control_column).map(|i| (i, control_column)).collect()
+    } else {
+        let mut pairs = Vec::with_capacity(k * (k - 1) / 2);
+        for i in 0..k {
+            for j in (i + 1)..k {
+                pairs.push((i, j));
+            }
+        }
+        pairs
+    };
+
     let nf = total_n as f64;
     let tie_factor = (nf * (nf + 1.0) / 12.0 - tie_sum_t3_minus_t / (12.0 * (nf - 1.0))).max(0.0);
-    let m = k * (k - 1) / 2;
+    let m = pair_indices.len();
     let mut raw_p = Vec::with_capacity(m);
     let mut entries = Vec::with_capacity(m);
 
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let ni = group_n[i] as f64;
-            let nj = group_n[j] as f64;
-            let diff = mean_ranks[i] - mean_ranks[j];
-            let se = (tie_factor * (1.0 / ni + 1.0 / nj)).sqrt();
-            let (z_stat, p_val) = if se > 0.0 {
-                let z = diff / se;
-                (z, norm_two_sided_p(z.abs()))
-            } else {
-                (0.0, 1.0)
-            };
-            raw_p.push(p_val);
-            entries.push((&group_labels[i], &group_labels[j], diff, se, z_stat, p_val));
-        }
+    for &(i, j) in &pair_indices {
+        let ni = group_n[i] as f64;
+        let nj = group_n[j] as f64;
+        let diff = mean_ranks[i] - mean_ranks[j];
+        let se = (tie_factor * (1.0 / ni + 1.0 / nj)).sqrt();
+        let (z_stat, p_val) = if se > 0.0 {
+            let z = diff / se;
+            (z, norm_two_sided_p(z.abs()))
+        } else {
+            (0.0, 1.0)
+        };
+        raw_p.push(p_val);
+        entries.push((&group_labels[i], &group_labels[j], diff, se, z_stat, p_val));
     }
 
-    let proc_eff = match MultiplicityProcedure::from(spec.method) {
-        MultiplicityProcedure::DunnRankSum | MultiplicityProcedure::None => MultiplicityProcedure::Bonferroni,
-        other => other,
+    let proc_eff = match proc_req {
+        MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => MultiplicityProcedure::None,
+        MultiplicityProcedure::DunnRankSum
+        | MultiplicityProcedure::TukeyKramer
+        | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::GamesHowell
+        | MultiplicityProcedure::DunnettT3
+        | MultiplicityProcedure::Dunnett { .. } => MultiplicityProcedure::Bonferroni,
+        MultiplicityProcedure::TamhaneT2 => MultiplicityProcedure::Sidak,
+        MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::Sidak
+        | MultiplicityProcedure::HolmBonferroni
+        | MultiplicityProcedure::HolmSidak
+        | MultiplicityProcedure::BenjaminiHochbergFdr
+        | MultiplicityProcedure::BenjaminiYekutieliFdr
+        | MultiplicityProcedure::TwoStageBkyFdr => proc_req,
     };
     let (adj, is_fdr) = adjust_p_values(&raw_p, proc_eff, spec.threshold);
     let out = entries

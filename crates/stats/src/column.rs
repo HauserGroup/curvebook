@@ -1248,8 +1248,8 @@ pub fn one_sample_wilcoxon(
             let cc = (w_plus - mean_w).abs() - 0.5;
             if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_w)).min(1.0) }
         } else {
-            let z = (w_plus - mean_w - 0.5) / sd_w;
-            norm_sf(z)
+            let cc = ((w_plus - mean_w).abs() - 0.5).max(0.0);
+            norm_sf(cc / sd_w).clamp(0.0, 1.0)
         };
         (p.clamp(0.0, 1.0), false)
     };
@@ -1283,12 +1283,8 @@ pub(crate) fn wilcoxon_exact_p(n: usize, w_plus: usize, max_sum: usize, two_tail
     let total = 2.0_f64.powi(n as i32);
     let upper_tail: u64 = ways.iter().skip(w_plus).sum();
     let lower_tail: u64 = ways.iter().take(w_plus + 1).sum();
-    if two_tailed {
-        let min_tail = (upper_tail as f64).min(lower_tail as f64);
-        (2.0 * min_tail / total).clamp(0.0, 1.0)
-    } else {
-        ((upper_tail as f64) / total).clamp(0.0, 1.0)
-    }
+    let min_tail = (upper_tail as f64).min(lower_tail as f64);
+    if two_tailed { (2.0 * min_tail / total).clamp(0.0, 1.0) } else { (min_tail / total).clamp(0.0, 1.0) }
 }
 
 /// Hodges–Lehmann one-sample pseudomedian (median of Walsh averages `(x_i + x_j) / 2, i <= j`)

@@ -464,7 +464,7 @@ pub fn cox_ph_regression(
     let mut beta = vec![0.0_f64; p];
     let mut ll_curr = ll_null;
     let mut grad = grad_null;
-    let mut info = info_null;
+    let mut info = info_null.clone();
     let mut converged = false;
     let mut iterations = 0_usize;
 
@@ -511,46 +511,71 @@ pub fn cox_ph_regression(
         }
     }
 
+    let (lp_min, lp_max) = ordered.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), s| {
+        let lp: f64 = s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
+        (mn.min(lp), mx.max(lp))
+    });
+    let lp_span = lp_max - lp_min;
+    let separation_or_diverged = !converged || !lp_span.is_finite() || lp_span > 35.0 || beta.iter().any(|b| !b.is_finite());
+
     let info_mat = DenseMatrix::from_row_major(p, p, info.clone())?;
-    let cov_beta = if let Ok(chol) = cholesky(&info_mat) {
-        chol.inverse()?
-    } else {
-        let mut damped = info.clone();
-        for j in 0..p {
-            damped[j * p + j] += 1e-6;
-        }
-        let dm = DenseMatrix::from_row_major(p, p, damped)?;
-        match cholesky(&dm).and_then(|c| c.inverse()) {
-            Ok(inv) => inv,
-            Err(_) => DenseMatrix::identity(p)?,
-        }
-    };
+    let chol_opt = cholesky(&info_mat).ok();
+    let well_conditioned = chol_opt.as_ref().is_some_and(|chol| {
+        (0..p).all(|j| {
+            let diag_null = info_null[j * p + j];
+            let diag_curr = info[j * p + j];
+            let piv = chol.l().get(j, j).unwrap_or(0.0);
+            let piv_sq = piv * piv;
+            diag_null.is_finite()
+                && diag_null > 0.0
+                && diag_curr.is_finite()
+                && diag_curr > 1e-8 * diag_null
+                && piv.is_finite()
+                && piv_sq > 1e-10 * diag_curr
+        })
+    });
+
+    // Never regularize (info + 1e-6*I) or substitute I when covariance is singular/separated.
+    if separation_or_diverged || !well_conditioned {
+        converged = false;
+    }
+    let cov_beta = if converged { chol_opt.and_then(|chol| chol.inverse().ok()) } else { None };
+    if cov_beta.is_none() {
+        converged = false;
+    }
 
     let lr_chi2 = (2.0 * (ll_curr - ll_null)).max(0.0);
-    let wald_chi2 = (0..p)
-        .map(|j| {
-            let row_dot: f64 = (0..p).map(|k| info[j * p + k] * beta[k]).sum();
-            beta[j] * row_dot
-        })
-        .sum::<f64>()
-        .max(0.0);
     let df = p as f64;
     let lr_p = chi2_sf(lr_chi2, df)?;
-    let wald_p = chi2_sf(wald_chi2, df)?;
+    let (wald_chi2, wald_p) = if cov_beta.is_some() {
+        let w = (0..p)
+            .map(|j| {
+                let row_dot: f64 = (0..p).map(|k| info[j * p + k] * beta[k]).sum();
+                beta[j] * row_dot
+            })
+            .sum::<f64>()
+            .max(0.0);
+        (w, chi2_sf(w, df)?)
+    } else {
+        (f64::NAN, f64::NAN)
+    };
     let score_p = chi2_sf(score_chi2, df)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let (schoenfeld_rhos, schoenfeld_ps, global_sch_chi2) = schoenfeld_diagnostics(&ordered, &beta, &cov_beta, tie_method, p)?;
-    let global_sch_p = chi2_sf(global_sch_chi2, df)?;
+    let (schoenfeld_rhos, schoenfeld_ps, global_sch_chi2) = schoenfeld_diagnostics(&ordered, &beta, cov_beta.as_ref(), tie_method, p)?;
+    let global_sch_p = if global_sch_chi2.is_finite() { chi2_sf(global_sch_chi2, df)? } else { f64::NAN };
 
     let mut covariates = Vec::with_capacity(p);
     for j in 0..p {
-        let se = cov_beta.get(j, j).unwrap_or(0.0).max(0.0).sqrt();
-        let z_stat = if se > 0.0 { beta[j] / se } else { 0.0 };
-        let p_val = norm_two_sided_p(z_stat);
+        let var_j = cov_beta.as_ref().and_then(|cov| cov.get(j, j)).filter(|v| v.is_finite() && *v > 0.0);
+        let (se, z_stat, p_val, hr_lo, hr_hi) = if let Some(vj) = var_j {
+            let s = vj.sqrt();
+            let z = beta[j] / s;
+            (s, z, norm_two_sided_p(z), (beta[j] - z_crit * s).exp(), (beta[j] + z_crit * s).exp())
+        } else {
+            (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+        };
         let hr = beta[j].exp();
-        let hr_lo = (beta[j] - z_crit * se).exp();
-        let hr_hi = (beta[j] + z_crit * se).exp();
         covariates.push(CoxCovariateResult {
             name: covariate_names[j].clone(),
             beta: beta[j],
@@ -566,7 +591,7 @@ pub fn cox_ph_regression(
 
     let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &beta, tie_method, n);
     let concordance = harrell_c_index(&ordered, &beta);
-    let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(&cov_beta, p);
+    let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(cov_beta.as_ref(), p);
 
     Ok(CoxPhResult {
         n_subjects: n,
@@ -595,20 +620,23 @@ pub fn cox_ph_regression(
     })
 }
 
-fn cox_cov_and_corr_matrices(cov_beta: &DenseMatrix, p: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+fn cox_cov_and_corr_matrices(cov_beta: Option<&DenseMatrix>, p: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    let Some(cov) = cov_beta else {
+        return (vec![vec![f64::NAN; p]; p], vec![vec![f64::NAN; p]; p]);
+    };
     let mut cov_rows = vec![vec![0.0_f64; p]; p];
     let mut corr_rows = vec![vec![0.0_f64; p]; p];
     let inv_sds: Vec<f64> = (0..p)
         .map(|j| {
-            let var = cov_beta.get(j, j).unwrap_or(0.0).max(0.0);
+            let var = cov.get(j, j).unwrap_or(0.0).max(0.0);
             if var > 0.0 { 1.0 / var.sqrt() } else { 0.0 }
         })
         .collect();
     for j in 0..p {
         for k in 0..p {
-            let c = cov_beta.get(j, k).unwrap_or(0.0);
+            let c = cov.get(j, k).unwrap_or(0.0);
             cov_rows[j][k] = c;
-            corr_rows[j][k] = if j == k { if inv_sds[j] > 0.0 { 1.0 } else { 0.0 } } else { (c * inv_sds[j] * inv_sds[k]).clamp(-1.0, 1.0) };
+            corr_rows[j][k] = if j == k { if inv_sds[j] > 0.0 { 1.0 } else { f64::NAN } } else { (c * inv_sds[j] * inv_sds[k]).clamp(-1.0, 1.0) };
         }
     }
     (cov_rows, corr_rows)
@@ -621,11 +649,22 @@ fn cox_eval(
     p: usize,
 ) -> Result<(f64, Vec<f64>, Vec<f64>), StatsError> {
     let n = ordered.len();
+    let mut raw_lp = vec![0.0_f64; n];
+    let mut lp_max = f64::NEG_INFINITY;
+    for i in 0..n {
+        let lp: f64 = ordered[i].2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
+        if !lp.is_finite() {
+            return Err(StatsError::NotConverged { algorithm: "cox_eval_non_finite_lp" });
+        }
+        raw_lp[i] = lp;
+        if lp > lp_max {
+            lp_max = lp;
+        }
+    }
     let mut eta = vec![0.0_f64; n];
     let mut w = vec![0.0_f64; n];
     for i in 0..n {
-        let lp: f64 = ordered[i].2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
-        eta[i] = lp.clamp(-50.0, 50.0);
+        eta[i] = raw_lp[i] - lp_max;
         w[i] = eta[i].exp();
     }
 
@@ -695,7 +734,11 @@ fn cox_eval(
                 CoxTieMethod::Breslow => 0.0,
                 CoxTieMethod::Efron => (m as f64) / df_f,
             };
-            let denom = (s0_risk - frac * s0_evt).max(1e-18);
+            let raw_denom = s0_risk - frac * s0_evt;
+            if !raw_denom.is_finite() || raw_denom <= 0.0 {
+                return Err(StatsError::NotConverged { algorithm: "cox_eval_risk_underflow" });
+            }
+            let denom = raw_denom;
             ll -= denom.ln();
             for j in 0..p {
                 let s1_eff = s1_risk[j] - frac * s1_evt[j];
@@ -734,10 +777,13 @@ fn solve_quad_form(mat_data: &[f64], vec: &[f64], p: usize) -> Result<f64, Stats
 fn schoenfeld_diagnostics(
     ordered: &[(f64, bool, Vec<f64>, usize)],
     beta: &[f64],
-    cov_beta: &DenseMatrix,
+    cov_beta: Option<&DenseMatrix>,
     tie_method: CoxTieMethod,
     p: usize,
 ) -> Result<(Vec<f64>, Vec<f64>, f64), StatsError> {
+    let Some(cov_beta) = cov_beta else {
+        return Ok((vec![f64::NAN; p], vec![f64::NAN; p], f64::NAN));
+    };
     let n = ordered.len();
     let w: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum::<f64>().clamp(-50.0, 50.0).exp()).collect();
     let mut s0_rev = vec![0.0_f64; n + 1];
@@ -1135,6 +1181,9 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
 
             let cox = cox_ph_regression(&subjects, &pred_names, *tie_method, confidence)?;
             let aic = -2.0 * cox.log_lik_model + 2.0 * (cox.covariates.len() as f64);
+            let has_non_estimable = cox.covariates.iter().any(|c| !c.se.is_finite());
+            push_scalar(&mut out, "Converged", None, if cox.converged { 1.0 } else { 0.0 });
+            push_scalar(&mut out, "Iterations", None, cox.iterations as f64);
             push_scalar(&mut out, "Concordance (C-index)", None, cox.concordance);
             push_scalar(&mut out, "Likelihood ratio chi2", None, cox.likelihood_ratio_chi2);
             push_scalar(&mut out, "Likelihood ratio P", None, cox.likelihood_ratio_p);
@@ -1164,14 +1213,20 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                     p_cell(cov.schoenfeld_p, p_fmt),
                 ]);
             }
-            out.tabs.push(build_tab(
+            let mut cox_tab = build_tab(
                 "cox-ph",
                 "Cox proportional hazards estimates",
                 ResultTabKind::ParametersAndConfidenceIntervals,
                 headers,
                 labels.clone(),
                 rows,
-            ));
+            );
+            if !cox.converged || has_non_estimable {
+                cox_tab.footnotes.push(String::from(
+                    "Model did not converge or exhibited separation/collinearity; non-estimable SE, Wald Z/P, and HR CI bounds are omitted. Refer to Likelihood ratio P for the omnibus test.",
+                ));
+            }
+            out.tabs.push(cox_tab);
 
             append_cox_baseline_tabs(&mut out, &cox.baseline_survival);
 
@@ -1187,17 +1242,36 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
 
             append_cox_curve_overlays(&mut out, &cox);
 
-            let ph_ok = cox.global_schoenfeld_p >= 0.05;
             out.checklist.push(checklist_item(
-                "Proportional hazards assumption (Schoenfeld)",
-                if ph_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
-                Some(format!("Global chi2 = {:.3}, P = {:.4}", cox.global_schoenfeld_chi2, cox.global_schoenfeld_p)),
-                if ph_ok {
-                    "Scaled Schoenfeld residuals show no significant time-varying slope (PH assumption satisfied)."
+                "Cox PH convergence & estimability",
+                if cox.converged && !has_non_estimable { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+                Some(format!("Converged = {}, iterations = {}", cox.converged, cox.iterations)),
+                if cox.converged && !has_non_estimable {
+                    "Partial-likelihood Newton-Raphson converged with a positive-definite covariate information matrix."
                 } else {
-                    "Schoenfeld residual test indicates time-varying hazard ratios (P < 0.05), violating the proportional hazards assumption."
+                    "Partial-likelihood Newton-Raphson failed to converge or encountered monotone-likelihood separation / covariate collinearity; non-estimable Wald SE, Z, P, and HR CI entries are omitted, while Likelihood ratio P tests the omnibus fit."
                 },
             ));
+
+            let (ph_status, ph_metric, ph_expl) = if cox.global_schoenfeld_p.is_finite() {
+                let ph_ok = cox.global_schoenfeld_p >= 0.05;
+                (
+                    if ph_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+                    Some(format!("Global chi2 = {:.3}, P = {:.4}", cox.global_schoenfeld_chi2, cox.global_schoenfeld_p)),
+                    if ph_ok {
+                        "Scaled Schoenfeld residuals show no significant time-varying slope (PH assumption satisfied)."
+                    } else {
+                        "Schoenfeld residual test indicates time-varying hazard ratios (P < 0.05), violating the proportional hazards assumption."
+                    },
+                )
+            } else {
+                (
+                    ChecklistStatus::Warn,
+                    Some(String::from("Global Schoenfeld test unavailable")),
+                    "Global Schoenfeld proportional-hazards test cannot be computed when the covariate covariance matrix is non-estimable.",
+                )
+            };
+            out.checklist.push(checklist_item("Proportional hazards assumption (Schoenfeld)", ph_status, ph_metric, ph_expl));
         }
     }
 

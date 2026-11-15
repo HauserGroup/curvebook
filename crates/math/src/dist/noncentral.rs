@@ -94,17 +94,108 @@ pub fn nct_sf(t: f64, df: f64, delta: f64) -> Result<f64, MathError> {
 }
 
 /// Evaluate `P(T <= t)` (`upper = false`) or `P(T > t)` (`upper = true`) for `t > 0`.
+fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> Result<f64, MathError> {
+    if df > 1e6 || delta.abs() > 1e9 {
+        // For df > 1e6, U = sqrt(chi2_df / df) is within O(1/df) of Gaussian and Stirling expansion
+        // avoids catastrophic cancellation in ln_gamma differences and 1 - E[U]^2.
+        let (eu, var_u) = if df > 1e5 {
+            let inv_df = 1.0 / df;
+            let inv_df2 = inv_df * inv_df;
+            let eu = 1.0 - 0.25 * inv_df + (1.0 / 32.0) * inv_df2;
+            let var_u = (0.5 * inv_df - 0.125 * inv_df2).max(0.0);
+            (eu, var_u)
+        } else {
+            let half_df = 0.5 * df;
+            let eu = half_df.sqrt() * (ln_gamma(half_df + 0.5)? - ln_gamma(half_df)?).exp() / half_df;
+            (eu, (1.0 - eu * eu).max(0.0))
+        };
+        let z_eff = (t * eu - delta) / (1.0 + t * t * var_u).sqrt();
+        return Ok(if upper { norm_sf(z_eff) } else { norm_cdf(z_eff) });
+    }
+
+    // Exact 1D quadrature in s = 0.5 * ln(chi2_df / df) so U = e^s > 0:
+    // P(T <= t) = int Phi(t * e^s - delta) f_S(s) ds, preserving exact chi skewness for moderate df.
+    let half_df = 0.5 * df;
+    let ln_norm = if half_df >= 10.0 {
+        0.5 * (df / std::f64::consts::PI).ln() - crate::special::stirling_err(half_df)
+    } else {
+        std::f64::consts::LN_2 + half_df * (half_df.ln() - 1.0) - ln_gamma(half_df)?
+    };
+    let log_factor = |s: f64| -> f64 {
+        let y = 2.0 * s;
+        if y.abs() < 1e-4 { -y * y * (0.5 + y * (1.0 / 6.0 + y * (1.0 / 24.0 + y * (1.0 / 120.0 + y / 720.0)))) } else { y - y.exp_m1() }
+    };
+
+    // Support [s_lo, s_hi] where log_chi_density drops by exp(-45) (~3e-20).
+    let tau = 45.0 / half_df;
+    let mut lo_a = 0.0_f64;
+    let mut lo_b = (4.0 * tau.sqrt()).min(tau + 1.0);
+    for _ in 0..32 {
+        let mid = 0.5 * (lo_a + lo_b);
+        if (-mid).exp() - 1.0 + mid >= tau {
+            lo_b = mid;
+        } else {
+            lo_a = mid;
+        }
+    }
+    let s_lo = -0.5 * lo_b;
+
+    let mut hi_a = 0.0_f64;
+    let mut hi_b = (2.0 * tau).sqrt().min(tau.ln_1p() + 3.0);
+    for _ in 0..32 {
+        let mid = 0.5 * (hi_a + hi_b);
+        if mid.exp_m1() - mid >= tau {
+            hi_b = mid;
+        } else {
+            hi_a = mid;
+        }
+    }
+    let s_hi = 0.5 * hi_b;
+
+    let mut pts = Vec::with_capacity(4);
+    pts.push(s_lo);
+    if delta > 0.0 {
+        let s0 = (delta / t).ln();
+        let w = (14.0 / delta).max(1e-7);
+        let a = s0 - w;
+        let b = s0 + w;
+        if a > s_lo && a < s_hi {
+            pts.push(a);
+        }
+        if b > s_lo && b < s_hi {
+            pts.push(b);
+        }
+    }
+    pts.push(s_hi);
+
+    let opts = crate::quad::QuadOptions { abs_tol: 1e-13, rel_tol: 1e-12, max_subdivisions: 256 };
+    let mut total = 0.0_f64;
+    for win in pts.windows(2) {
+        let a = win[0];
+        let b = win[1];
+        if b - a <= 0.0 {
+            continue;
+        }
+        let sub = crate::quad::integrate_adaptive(
+            |s| {
+                let u = s.exp();
+                let dens = (ln_norm + half_df * log_factor(s)).exp();
+                let prob = if upper { norm_sf(t * u - delta) } else { norm_cdf(t * u - delta) };
+                dens * prob
+            },
+            a,
+            b,
+            opts,
+        )?;
+        total += sub;
+    }
+    Ok(total.clamp(0.0, 1.0))
+}
+
 fn nct_positive_t_eval(t: f64, df: f64, delta: f64, upper: bool) -> Result<f64, MathError> {
     let lambda_half = 0.5 * delta * delta;
     if lambda_half > 1e5 {
-        // Normalized asymptotic approximation when delta^2 > 200,000:
-        // T_{df, delta} = (Z + delta) / U; P((Z + delta)/U <= t) = P(Z - t U <= -delta).
-        // Mean of Z - t U is -t * E[U], variance is 1 + t^2 * Var(U).
-        let c_df = (0.5 * df).sqrt() * (ln_gamma(0.5 * (df + 1.0))? - ln_gamma(0.5 * df)?).exp() / (0.5 * df);
-        let eu = c_df * (0.5 * df);
-        let var_u = (1.0 - eu * eu).max(0.0);
-        let z_eff = (t * eu - delta) / (1.0 + t * t * var_u).sqrt();
-        return Ok(if upper { norm_sf(z_eff) } else { norm_cdf(z_eff) });
+        return nct_positive_t_large_delta_quad(t, df, delta, upper);
     }
 
     let r = t / df.sqrt();
