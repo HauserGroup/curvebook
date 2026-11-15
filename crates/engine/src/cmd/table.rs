@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 
 use lumencraft_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, GraphSheet, ImportFilterSpec, ImportLinkSpec,
-    ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MultipleVariablesTable, NestedTable, PlacementMode,
-    ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise, SubcolumnMode, TableArchetype, TableKind, VariableColumn,
-    VariableRole, VariableSource, validate_rows, validate_title,
+    ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MultipleVariablesTable, NestedGroupColumn,
+    NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise, SubcolumnMode, TableArchetype,
+    TableKind, VariableColumn, VariableRole, VariableSource, validate_rows, validate_title,
 };
 use lumencraft_format::{
     CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes,
@@ -1015,18 +1015,25 @@ fn set_ds_title(sets: &mut [DataSetColumn], col: usize, title: &str) -> Result<(
 }
 
 fn set_nested_subcol_title(nested: &mut NestedTable, col_opt: Option<usize>, subcol: usize, title: &str) -> Result<(), EngineError> {
+    validate_title(title)?;
     if let Some(col) = col_opt {
         let grp = nested.groups.get_mut(col).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("group {col} out of range")))?;
-        assign_subcol_title(&mut grp.subcolumn_titles, grp.cells.len(), subcol, title)?;
+        assign_nested_group_subcol_title(grp, subcol, title)?;
     } else {
         for grp in &mut nested.groups {
-            assign_subcol_title(&mut grp.subcolumn_titles, grp.cells.len(), subcol, title)?;
+            assign_nested_group_subcol_title(grp, subcol, title)?;
         }
     }
     Ok(())
 }
 
+fn assign_nested_group_subcol_title(grp: &mut NestedGroupColumn, subcol: usize, title: &str) -> Result<(), EngineError> {
+    let width = grp.cells.first().map_or(grp.subcolumn_titles.len(), Vec::len);
+    assign_subcol_title(&mut grp.subcolumn_titles, width, subcol, title)
+}
+
 fn assign_subcol_title(titles: &mut Vec<String>, width: usize, subcol: usize, title: &str) -> Result<(), EngineError> {
+    validate_title(title)?;
     if subcol >= width {
         return Err(EngineError::with_code(ErrorCode::BadInput, format!("subcolumn {subcol} out of range (width {width})")));
     }
@@ -4912,5 +4919,59 @@ mod tests {
             }),
         )
         .expect("importTidyLong");
+    }
+
+    #[test]
+    fn nested_subcolumn_titles_preserve_biological_unit_width_and_checkpoint_roundtrip() -> Result<(), String> {
+        let mut s = Session::new();
+        // rows (4) > biological_units (2)
+        s.execute("sheet.createData", json!({ "sheet_id": "nest-tall", "archetype": "nested", "cols": 2, "rows": 4, "replicates": 2 }))
+            .map_err(|e| e.to_string())?;
+        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "titles": ["Unit 1", "Unit 2"] }))
+            .map_err(|e| e.to_string())?;
+        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "subcol": 1, "title": "Shared Bio 2" })).map_err(|e| e.to_string())?;
+
+        // Out-of-bounds subcolumn must be rejected against biological-unit width (2), not row count (4).
+        let oob = s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 2, "title": "Bad" }));
+        assert!(oob.as_ref().is_err_and(|e| e.code == ErrorCode::BadInput), "expected BadInput for subcol >= width, got {oob:?}");
+
+        // Oversized title must be rejected by validate_title.
+        let oversized = "T".repeat(lumencraft_doc::MAX_TITLE_BYTES + 1);
+        let too_long = s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": oversized }));
+        assert!(too_long.is_err(), "expected oversized subcolumn title to fail validation");
+
+        let ds = s.document().data_sheet(&SheetId::new("nest-tall")).ok_or_else(|| String::from("missing nest-tall"))?;
+        let TableArchetype::Nested(nt) = &ds.archetype else {
+            return Err(String::from("expected Nested archetype"));
+        };
+        nt.validate().map_err(|e| e.to_string())?;
+        assert_eq!(nt.groups[0].subcolumn_titles, vec!["Unit 1", "Shared Bio 2"]);
+        assert_eq!(nt.groups[1].subcolumn_titles.len(), 2);
+        assert_eq!(nt.groups[1].subcolumn_titles[1], "Shared Bio 2");
+
+        // Checkpoint save + mutate + restore exercises NestedTable::deserialize -> validate().
+        s.execute("project.createCheckpoint", json!({ "name": "cp-nested" })).map_err(|e| e.to_string())?;
+        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": "Temp" }))
+            .map_err(|e| e.to_string())?;
+        s.execute("project.restoreCheckpoint", json!({ "name": "cp-nested" })).map_err(|e| e.to_string())?;
+        let ds_restored = s.document().data_sheet(&SheetId::new("nest-tall")).ok_or_else(|| String::from("missing restored nest-tall"))?;
+        let TableArchetype::Nested(nt_restored) = &ds_restored.archetype else {
+            return Err(String::from("expected Nested archetype after restore"));
+        };
+        assert_eq!(nt_restored.groups[0].subcolumn_titles, vec!["Unit 1", "Shared Bio 2"]);
+
+        // rows (2) < biological_units (4)
+        s.execute("sheet.createData", json!({ "sheet_id": "nest-wide", "archetype": "nested", "cols": 1, "rows": 2, "replicates": 4 }))
+            .map_err(|e| e.to_string())?;
+        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-wide", "col": 0, "subcol": 3, "title": "Unit 4" }))
+            .map_err(|e| e.to_string())?;
+        let ds_wide = s.document().data_sheet(&SheetId::new("nest-wide")).ok_or_else(|| String::from("missing nest-wide"))?;
+        let TableArchetype::Nested(nt_wide) = &ds_wide.archetype else {
+            return Err(String::from("expected Nested archetype for nest-wide"));
+        };
+        nt_wide.validate().map_err(|e| e.to_string())?;
+        assert_eq!(nt_wide.groups[0].subcolumn_titles.len(), 4);
+        assert_eq!(nt_wide.groups[0].subcolumn_titles[3], "Unit 4");
+        Ok(())
     }
 }
