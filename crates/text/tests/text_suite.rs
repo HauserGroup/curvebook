@@ -18,7 +18,7 @@ use lumencraft_text::metrics::{
     measure_text_pt, parse_truetype_font_info, system_cjk_font_candidates,
 };
 use lumencraft_text::number::{AxisTickFormat, LocaleNumberPolicy, format_axis_tick, format_axis_tick_with_format, format_pvalue_label};
-use lumencraft_text::{BUNDLED_FONTS, TextError, has_bundled_fonts_feature};
+use lumencraft_text::{BUNDLED_FONTS, EquationSegment, TextError, has_bundled_fonts_feature, parse_equation_segments};
 use proptest::{prelude::any, prop_assert, prop_assert_eq, proptest};
 
 // ---------------------------------------------------------------------------
@@ -188,6 +188,40 @@ fn expand_template_hooks_resolves_single_pass_and_preserves_missing_or_literal_b
     // Unclosed hook stays literal.
     let unclosed = expand_template_hooks("open {{incomplete", |_| Some(String::from("ignored")));
     assert_eq!(unclosed, "open {{incomplete");
+}
+
+#[test]
+fn tex_math_delimiters_fractions_sqrt_and_equation_segments_layout_cleanly() {
+    // 4PL Dose-response equation renders both flat RichText and stacked EquationSegment tree.
+    let eq_4pl = r"$Y = \text{Bottom} + \frac{\text{Top} - \text{Bottom}}{1 + 10^{(\log\text{EC}_{50} - X) \cdot \text{HillSlope}}}$";
+    let rich_4pl = parse_markup(eq_4pl);
+    assert_eq!(rich_4pl.plain_text(), "Y = Bottom + (Top - Bottom)/(1 + 10(logEC50 - X) · HillSlope)");
+    let metrics_4pl = measure_text_pt(&rich_4pl, 10.0);
+    assert!(metrics_4pl.width_pt > 0.0 && metrics_4pl.height_pt() > 0.0);
+    let outlines_4pl = outline_rich_text(&rich_4pl, 0.0, 20.0, 10.0);
+    assert_eq!(outlines_4pl.len(), rich_4pl.plain_text().chars().count());
+    assert_valid_closed_outlines(&outlines_4pl);
+
+    let segs_4pl = parse_equation_segments(eq_4pl);
+    assert_eq!(segs_4pl.len(), 2);
+    assert!(matches!(&segs_4pl[0], EquationSegment::Inline(r) if r.plain_text() == "Y = Bottom + "));
+    assert!(matches!(&segs_4pl[1], EquationSegment::Fraction { numerator, denominator } if numerator.len() == 1 && denominator.len() == 1));
+
+    // Michaelis-Menten, Exponential decay, and square roots.
+    let mm = parse_markup(r"Y = \frac{V_{\max} \cdot X}{K_m + X}");
+    assert_eq!(mm.plain_text(), "Y = (Vmax · X)/(Km + X)");
+
+    let decay = parse_markup(r"Y = (Y_0 - \text{Plateau}) \cdot \exp(-K \cdot X) + \text{Plateau}");
+    assert_eq!(decay.plain_text(), "Y = (Y0 - Plateau) · exp(-K · X) + Plateau");
+
+    let sqrt_multi = parse_markup(r"\sqrt{a^2 + b^2}");
+    assert_eq!(sqrt_multi.plain_text(), "√(a2 + b2)");
+    assert_valid_closed_outlines(&outline_rich_text(&sqrt_multi, 0.0, 20.0, 10.0));
+
+    // Currency and unpaired dollar delimiters remain intact.
+    assert_eq!(parse_markup("$100").plain_text(), "$100");
+    assert_eq!(parse_markup("Costs $5 to $10").plain_text(), "Costs $5 to $10");
+    assert_eq!(parse_equation_segments("$100"), vec![EquationSegment::Inline(RichText::plain("$100"))]);
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +793,13 @@ proptest! {
 
         let expanded = expand_template_hooks(&s, |key| Some(format!("[{key}]")));
         prop_assert!(expanded.is_ascii() || !expanded.is_empty() || s.is_empty());
+
+        let segments = parse_equation_segments(&s);
+        for seg in &segments {
+            if let EquationSegment::Inline(inner) = seg {
+                prop_assert!(!inner.is_empty());
+            }
+        }
     }
 
     #[test]
