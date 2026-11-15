@@ -80,10 +80,10 @@ fn parse_local_lumencraft_pid(owner_id: &str) -> Option<u32> {
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 fn is_unix_pid_absent(pid: u32) -> bool {
     let pid_arg = pid.to_string();
-    let Ok(output) = std::process::Command::new("/bin/kill").args(["-0", &pid_arg]).output() else {
+    let Ok(output) = lumencraft_platform::ProcessCommand::new("/bin/kill").args(["-0", &pid_arg]).run() else {
         return false;
     };
-    if output.status.success() {
+    if output.success {
         return false;
     }
     let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
