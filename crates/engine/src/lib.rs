@@ -1080,6 +1080,9 @@ impl Session {
             });
         }
 
+        let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
+            || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
+            || (spec.id == "project.open" && !params.get("path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()));
         let before = self.doc.clone();
         let before_path = self.file_path.clone();
         let before_dirty = self.dirty;
@@ -1091,6 +1094,9 @@ impl Session {
         match outcome {
             Ok(res) => {
                 if res.mutated {
+                    if clears_file_path_on_mutate {
+                        self.file_path = None;
+                    }
                     self.push_undo_snapshot(before);
                     self.redo_stack.clear();
                     self.dirty = true;

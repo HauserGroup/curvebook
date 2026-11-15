@@ -4,7 +4,10 @@ use std::fs;
 use std::path::Path;
 
 use lumencraft_chart::{ChartScene, compile_graph, compile_layout};
-use lumencraft_doc::{DataSheet, GraphSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
+use lumencraft_doc::{
+    DataSheet, GraphSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableArchetype, TableKind, XColumnMode, validate_project_cells,
+    validate_sheet_cells,
+};
 use lumencraft_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry, ImportOptions, ImportPayload};
 use lumencraft_format::{
     ArchiveKind, CsvOptions, ImportReport, export_result_tab_csv, import_prism_bytes, import_pzfx_bytes, is_unpacked_project_dir, open_archive_bytes,
@@ -476,8 +479,36 @@ fn load_import_report(report: ImportReport, format_tag: &'static str) -> Result<
 }
 
 fn load_project_json(bytes: &[u8]) -> Result<LoadedProject, CliError> {
-    let doc: ProjectDocument = serde_json::from_slice(bytes).map_err(|err| CliError::Runtime(format!("invalid project JSON: {err}")))?;
+    let raw_value: serde_json::Value = serde_json::from_slice(bytes).map_err(|err| CliError::Runtime(format!("invalid project JSON: {err}")))?;
+    if !raw_value.is_object() {
+        return Err(CliError::Runtime(String::from("invalid project JSON: expected top-level JSON object")));
+    }
+    let doc_version = match raw_value.get("schema_version") {
+        None | Some(serde_json::Value::Null) => 0,
+        Some(v) => {
+            v.as_u64().and_then(|n| u32::try_from(n).ok()).ok_or_else(|| CliError::Runtime(format!("invalid project `schema_version`: {v}")))?
+        }
+    };
+    let migrated_value = lumencraft_format::archive::migrate_document_json(raw_value, doc_version)?;
+    let doc: ProjectDocument = serde_json::from_value(migrated_value).map_err(|err| CliError::Runtime(format!("invalid project JSON: {err}")))?;
+    validate_loaded_project_document(&doc)?;
     Ok(LoadedProject { doc, format_tag: "json", warnings: Vec::new() })
+}
+
+fn validate_loaded_project_document(doc: &ProjectDocument) -> Result<(), CliError> {
+    lumencraft_format::archive::validate_project_document(doc)?;
+    let mut total_cells = 0_usize;
+    for sheet in &doc.data_sheets {
+        if let TableArchetype::Xy(xy) = &sheet.archetype
+            && let XColumnMode::Numbers { subcolumn_mode } = xy.x_mode
+        {
+            subcolumn_mode.validate()?;
+        }
+        let slots = sheet.archetype.allocated_cell_slots();
+        validate_sheet_cells(slots)?;
+        total_cells = validate_project_cells(total_cells, slots)?;
+    }
+    Ok(())
 }
 
 fn load_delimited_with_importer(
