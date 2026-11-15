@@ -23,7 +23,7 @@ Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress l
 | 7 | `S08` Chart compiler and scales | `crates/chart` | done | 2/6/3/0 | 11/0/0/0 | 2026-11-15 |
 | 8 | `S09` Text, raster, SVG and PDF output | `crates/text`, `crates/render`, `crates/svg`, `crates/pdf` | done | 1/3/6/0 | 10/0/0/0 | 2026-11-15 |
 | 9 | `S11` Tools and app entry points | `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` | done | 1/5/6/1 | 12/1/0/0 | 2026-11-15 |
-| 10 | `S07` Engine | `crates/engine` | verifying | 5/5/4/0 | — | 2026-11-15 |
+| 10 | `S07` Engine | `crates/engine` | done | 5/5/4/0 | 13/0/0/1 | 2026-11-15 |
 | 11 | `S10` UI shell | `crates/ui-egui` | done | 2/3/3/1 | 8/1/0/0 | 2026-11-15 |
 | 12 | `S12` CLI and MCP | `apps/lumencraft-cli`, `crates/mcp` | done | 4/2/3/1 | 10/0/0/0 | 2026-11-15 |
 | 13 | `S13` Build guards and test kit | `xtask`, `crates/testkit` | done | 0/2/8/0 | 9/1/0/0 | 2026-11-15 |
@@ -43,6 +43,7 @@ What each review actually read, so a later session can see what was and was not 
 | `S05` | see [`findings/S05.md`](findings/S05.md) › Scope read | — | `cargo test -p lumencraft-doc` pass; verifier: `audit/r1/S05` `audit_r1_s05.rs` in `crates/doc`, `crates/format`, `crates/stats` |
 | `S03` | see [`findings/S03.md`](findings/S03.md) › Scope read (`linear.rs` not read; reviewer interrupted by a rate limit after writing its file) | Bessel functions, pharma/curves/NIST library skimmed | reviewer: probe crate, 12 probes; verifier: `audit/r1/S03` `crates/fit/tests/audit_r1_s03.rs`, all 12 fail at base (R1-S03-10 `#[ignore]`, 195 s) |
 | `S04` | see [`findings/S04.md`](findings/S04.md) › Scope read | — | reviewer: probe crate (11 of 13 reproduced); verifier: `audit/r1/S04` `crates/transform/tests/audit_r1_s04.rs` |
+| `S07` | see [`findings/S07.md`](findings/S07.md) › Scope read (three reviewer runs; the second was interrupted after 7 findings and the third continued it) | — | reviewer: release probes; verifier: `audit/r1/S07` `crates/engine/tests/audit_r1_s07.rs` + `audit_r1_s07_hang.rs`; 05 and 11 traced only |
 | `S08` | see [`findings/S08.md`](findings/S08.md) › Scope read | — | `cargo test -p lumencraft-chart` 35/35 pass; reviewer: probe crate (debug + release); verifier: `audit/r1/S08` (`c15abdc`) `crates/chart/tests/audit_r1_s08.rs`; 07 and 11 traced only |
 | `S09` | see [`findings/S09.md`](findings/S09.md) › Scope read | — | slice tests pass (55); reviewer: probe binary; verifier: `audit/r1/S09` (`5a0e8ee`), tests in `text`, `pdf`, `svg`, `render`; 08 and 10 traced only |
 | `S10` | see [`findings/S10.md`](findings/S10.md) › Scope read | — | reviewer: probe crate `probe-S10` (8 of 9 reproduced); verifier: `audit/r1/S10` `crates/ui-egui/tests/audit_r1_s10.rs`, HTTP-POST-shaped byte stream over real loopback TCP |
@@ -54,7 +55,7 @@ What each review actually read, so a later session can see what was and was not 
 ## Coordinator notes
 
 - **R1-S02-02 spot check (trace-only S1).** Confirmed by the coordinator at `crates/stats/src/categorical.rs:1370`–`:1378`: Fisher, Cochran–Armitage and McNemar fall back with `unwrap_or(res.chi_square_p)` under the requested test's label. `BarnardExact` at `:1371`–`:1374` does the same through `map_or(res.chi_square_p, …)` when Barnard is not computed; fix it with the same change.
-- **Cross-slice overlaps to merge when recording.** R1-S07-02 and R1-S12-01 are one defect seen from the engine and the CLI (external-link paths stored in a project escape `--workdir`); one engine path-policy fix closes both. R1-S04-06 (`transform/src/import.rs`, live path) and R1-S06-12 (`format/src/csv.rs`, an unused copy) both report `PlacementMode::InsertRows` overwriting rows: fix together; R1-S04-01 and R1-S05-01 share a root cause (ragged tables pass load validation).
+- **Cross-slice overlaps to merge when recording.** R1-S07-02 and R1-S12-01 are one defect seen from the engine and the CLI (external-link paths stored in a project escape `--workdir`); one engine path-policy fix closes both. The S07 verifier recorded R1-S07-02 as a DUPLICATE of R1-S12-01. R1-S04-06 (`transform/src/import.rs`, live path) and R1-S06-12 (`format/src/csv.rs`, an unused copy) both report `PlacementMode::InsertRows` overwriting rows: fix together; R1-S04-01 and R1-S05-01 share a root cause (ragged tables pass load validation).
 - **Verifier depth.** The S02 and S06 verifiers each ran in about two minutes. Their failing tests were re-run and hold; their trace-only verdicts are marked `trace` below.
 
 - **R1-S11-01 spot check (trace-only S1).** Confirmed by the coordinator: the only non-test callers of the journal write path are the engine wrappers in `crates/engine/src/lib.rs:162`–`:237`; their one caller in `apps/lumencraft/src/main.rs:574` sits inside `mod tests` (`:448`). The desktop app never records a command.
@@ -88,6 +89,10 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S05-02](findings/S05.md) | S1 | `transpose_cell_grid` turns a ragged grid into a dense `max_cols × rows` grid with no cap, so a ~200 KB CSV can abort the app | CONFIRMED | test | `S05` |
 | [R1-S05-03](findings/S05.md) | S1 | `XColumnMode::Numbers { subcolumn_mode: RawReplicates(n) }` is not bounded after load, so saving loops `n` times | CONFIRMED | test | `S05` |
 | [R1-S06-01](findings/S06.md) | S1 | `.prism` import has no project-wide cell budget: a 6 KB file allocates 1.5 GiB and scales to hundreds of GiB | CONFIRMED | trace | `S06` |
+| [R1-S07-01](findings/S07.md) | S1 | Link refresh in `cmd_data` rewrites Append-mode links at the original anchor, overwriting the user's own rows | CONFIRMED | test | `S07` |
+| [R1-S07-05](findings/S07.md) | S1 | `sheet.createData` has no total cell budget: a 100-byte request can ask for 5×10¹¹ cells and abort the process | CONFIRMED | trace | `S07` |
+| [R1-S07-08](findings/S07.md) | S1 | Deleting a table's Info sheet silently rebinds its calculated variables to another table's Info constants | CONFIRMED | test | `S07` |
+| [R1-S07-10](findings/S07.md) | S1 | `sheet.duplicateFamily` / `sheet.clonePipeline` on a graph whose source chain loops never returns (release: 100 % CPU hang) | CONFIRMED | test | `S07` |
 | [R1-S08-01](findings/S08.md) | S1 | Log-axis tick generator overflows and allocates without bound when a data value is near `f64::MAX` or the smallest subnormal | CONFIRMED | test | `S08` |
 | [R1-S08-02](findings/S08.md) | S1 | Y-axis title placement panics in `f64::clamp` on canvases narrower than about 40 pt | CONFIRMED | test | `S08` |
 | [R1-S09-01](findings/S09.md) | S1 | Raster dashing has no length budget: one long dashed annotation line allocates without bound and aborts the app | CONFIRMED | test | `S09` |
@@ -126,6 +131,11 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S06-03](findings/S06.md) | S2 | One malformed interior journal line aborts all recovery, and the desktop app then refuses to start | CONFIRMED | test | `S06` |
 | [R1-S06-04](findings/S06.md) | S2 | PZFX import silently drops subcolumns beyond the resolved subcolumn mode | CONFIRMED | test | `S06` |
 | [R1-S06-05](findings/S06.md) | S2 | `.lumencraft` open parses `document.json` into a `serde_json::Value` tree first: a 61 KB archive drives 1.1 GiB of heap | CONFIRMED | trace | `S06` |
+| [R1-S07-03](findings/S07.md) | S2 | Refreshing an external file link never clears the previous block, so a shorter file leaves stale rows from the old file in the table | CONFIRMED | test | `S07` |
+| [R1-S07-04](findings/S07.md) | S2 | `graph.setSpec` accepts a spec that references the graph itself; afterwards every save fails (or every data edit fails) | CONFIRMED | test | `S07` |
+| [R1-S07-07](findings/S07.md) | S2 | Edits and exclusions inside a live-linked region report success but are reverted by the same command's link refresh | CONFIRMED | test | `S07` |
+| [R1-S07-09](findings/S07.md) | S2 | `sheet.rename` and `table.setGroupTitles` accept titles the save validator rejects, so every later save fails | CONFIRMED | test | `S07` |
+| [R1-S07-11](findings/S07.md) | S2 | `export.pdf { sheet_ids }` has no page or size cap: an 815-byte request built a 228 MB PDF in 66 s at 2.5 GB RSS | CONFIRMED | trace | `S07` |
 | [R1-S08-03](findings/S08.md) | S2 | Default replicate beeswarm is quadratic: a 16,000-value column takes 8 s per render, a 100,000-value column several minutes | CONFIRMED | test | `S08` |
 | [R1-S08-04](findings/S08.md) | S2 | XY/Column auto ranges on probit, logit and reciprocal axes exclude valid data, and the omitted points raise no warning | CONFIRMED | test | `S08` |
 | [R1-S08-05](findings/S08.md) | S2 | An explicit reversed axis range (`min > max`) is silently replaced, hiding data | CONFIRMED | test | `S08` |
@@ -167,6 +177,10 @@ Candidates for [Known defects](../gaps.md#known-defects), most severe first, gen
 | [R1-S06-11](findings/S06.md) | S3 | XML node cap counts elements only; text nodes and attributes give about 10× memory amplification | CONFIRMED | trace | `S06` |
 | [R1-S06-12](findings/S06.md) | S3 | `PlacementMode::InsertRows` overwrites the rows at the anchor instead of inserting | CONFIRMED | trace | `S06` |
 | [R1-S06-13](findings/S06.md) | S3 | `apply_csv_import_link` header promotion maps header index to data-set index, ignoring subcolumns | CONFIRMED | trace | `S06` |
+| [R1-S07-06](findings/S07.md) | S3 | WAL replay re-executes `edit.undo`/`edit.redo` and file-reading commands by parameters, so recovery diverges from the live session or fails outright (latent) | CONFIRMED | test | `S07` |
+| [R1-S07-12](findings/S07.md) | S3 | Every data edit recomputes every analysis in the project, contrary to the documented incremental dirty-node recalculation | CONFIRMED | test | `S07` |
+| [R1-S07-13](findings/S07.md) | S3 | `sheet.select` is recorded as an undoable edit: selecting a sheet wipes the redo history, consumes undo steps and marks a clean project dirty | CONFIRMED | test | `S07` |
+| [R1-S07-14](findings/S07.md) | S3 | `table.importPzfx` / `table.importPrism` with `merge: true` fail whenever an imported sheet ID already exists, which is the default case | CONFIRMED | test | `S07` |
 | [R1-S08-09](findings/S08.md) | S3 | The guarded axis engine in `scales.rs` that the tests and parity checklist verify is not the one `compile_graph` runs | CONFIRMED | trace | `S08` |
 | [R1-S08-10](findings/S08.md) | S3 | `scales.rs` reciprocal error-bar clamp uses +1e-12 as the floor on a negative axis, producing coordinates near 1e14 pt | CONFIRMED | test | `S08` |
 | [R1-S08-11](findings/S08.md) | S3 | Dendrogram node ids from a result tab are negated without overflow checks | CONFIRMED | test | `S08` |
