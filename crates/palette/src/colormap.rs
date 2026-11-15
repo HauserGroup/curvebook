@@ -400,39 +400,38 @@ fn sample_normalized_stops(stops: &[ColorStop], t: f64) -> Rgba8 {
 
 #[inline(always)]
 fn stop_word(s: &ColorStop) -> u64 {
-    let col = u64::from(s.color.r) ^ (u64::from(s.color.g) << 8) ^ (u64::from(s.color.b) << 16) ^ (u64::from(s.color.a) << 24);
-    s.position.to_bits() ^ (col << 17)
+    let col = (s.color.r as u64) | ((s.color.g as u64) << 8) | ((s.color.b as u64) << 16) | ((s.color.a as u64) << 24);
+    s.position.to_bits() ^ col.rotate_left(17)
 }
 
 fn fingerprint_stops(stops: &[ColorStop]) -> (u64, u64) {
     let mut a0 = (stops.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
     let mut a1 = 0xBF58_476D_1CE4_E5B9_u64;
-    let mut a2 = 0x94D0_49BB_1331_11EB_u64;
-    let mut a3 = 0xD6E8_FEB8_6659_FD93_u64;
-    let mut b0 = 0xA076_1D64_78BD_642F_u64;
+    let mut b0 = (stops.as_ptr() as usize as u64).wrapping_mul(0xA076_1D64_78BD_642F);
     let mut b1 = 0xE703_7ED1_A0B4_28DB_u64;
-    let mut b2 = 0x8EBC_6AF0_9C88_C6E3_u64;
-    let mut b3 = 0x5899_65CC_7537_4CC3_u64;
-
-    let (chunks, rem) = stops.as_chunks::<8>();
-    for chunk in chunks {
-        let [s0, s1, s2, s3, s4, s5, s6, s7] = chunk;
-        a0 = a0.rotate_left(5).wrapping_add(stop_word(s0));
-        a1 = a1.rotate_left(7).wrapping_add(stop_word(s1));
-        a2 = a2.rotate_left(11).wrapping_add(stop_word(s2));
-        a3 = a3.rotate_left(13).wrapping_add(stop_word(s3));
-        b0 = b0.rotate_left(17) ^ stop_word(s4);
-        b1 = b1.rotate_left(19) ^ stop_word(s5);
-        b2 = b2.rotate_left(23) ^ stop_word(s6);
-        b3 = b3.rotate_left(29) ^ stop_word(s7);
-    }
-    for s in rem {
+    let mut fold = |s: &ColorStop| {
         let w = stop_word(s);
         a0 = a0.rotate_left(7).wrapping_add(w);
+        a1 = a1.rotate_left(11) ^ w.wrapping_mul(0x94D0_49BB_1331_11EB);
         b0 = b0.rotate_left(13) ^ w;
+        b1 = b1.rotate_left(19).wrapping_add(w.rotate_left(29));
+    };
+
+    if stops.len() <= MAX_CUSTOM_STOPS {
+        for s in stops {
+            fold(s);
+        }
+    } else {
+        let last = stops.len() - 1;
+        for k in 0..MAX_CUSTOM_STOPS {
+            let idx = (k * last) / (MAX_CUSTOM_STOPS - 1);
+            if let Some(s) = stops.get(idx) {
+                fold(s);
+            }
+        }
     }
-    let h0 = (a0 ^ a1.rotate_left(19) ^ a2.rotate_left(37) ^ a3.rotate_left(53)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let h1 = (b0 ^ b1.rotate_left(23) ^ b2.rotate_left(41) ^ b3.rotate_left(59)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    let h0 = (a0 ^ a1.rotate_left(31)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let h1 = (b0 ^ b1.rotate_left(37)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
     (h0, h1)
 }
 

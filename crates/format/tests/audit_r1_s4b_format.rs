@@ -11,7 +11,7 @@ fn r1_s06_10_pzfx_overlong_row_titles_and_pow_slice_labels_truncate_safely() {
 
     let pzfx_row_titles = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<GraphPadPrismFile PrismXMLVersion="5.00">
+<PrismFile PrismXMLVersion="5.00">
   <Table Sequence="0" TableType="OneWay">
     <Title>Row Title Truncation</Title>
     <RowTitlesColumn>
@@ -22,7 +22,7 @@ fn r1_s06_10_pzfx_overlong_row_titles_and_pow_slice_labels_truncate_safely() {
       <Subcolumn><d>10.5</d></Subcolumn>
     </YColumn>
   </Table>
-</GraphPadPrismFile>"#
+</PrismFile>"#
     );
     let report = import_pzfx_str(&pzfx_row_titles);
     assert!(report.is_ok(), "import with overlong row title should truncate, not fail: {report:?}");
@@ -44,7 +44,7 @@ fn r1_s06_10_pzfx_overlong_row_titles_and_pow_slice_labels_truncate_safely() {
     let overlong_slice: String = "切片".repeat(MAX_TITLE_BYTES / 2);
     let pzfx_pow = format!(
         r#"<?xml version="1.0" encoding="UTF-8"?>
-<GraphPadPrismFile PrismXMLVersion="5.00">
+<PrismFile PrismXMLVersion="5.00">
   <Table Sequence="1" TableType="PartsOfWhole">
     <Title>PoW Slice Truncation</Title>
     <XColumn>
@@ -55,7 +55,7 @@ fn r1_s06_10_pzfx_overlong_row_titles_and_pow_slice_labels_truncate_safely() {
       <Subcolumn><d>42</d></Subcolumn>
     </YColumn>
   </Table>
-</GraphPadPrismFile>"#
+</PrismFile>"#
     );
     let pow_report = import_pzfx_str(&pzfx_pow);
     assert!(pow_report.is_ok(), "import PoW with overlong slice label should truncate: {pow_report:?}");

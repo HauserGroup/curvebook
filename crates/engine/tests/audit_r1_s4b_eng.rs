@@ -525,14 +525,32 @@ fn assert_remapped_archive_refs(merged: &ProjectDocument) {
 
 #[test]
 fn r1_x2_09_overflowing_bland_altman_fails_cleanly_and_never_blocks_save() {
-    // Case 1: Adding Bland-Altman directly onto already-overflowing 1e300 data must fail cleanly
-    // rather than committing non-finite floats that poison `project.save`.
+    // Case 0: Differences around 1e300 stay finite after `bland_altman` SD scaling and must save cleanly.
+    let mut scaled_doc = ProjectDocument::new("Scaled Extreme Check").unwrap();
+    let mut scaled_tbl = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 2, 3).unwrap();
+    scaled_tbl.data_sets[0].title = String::from("Method A");
+    scaled_tbl.data_sets[1].title = String::from("Method B");
+    let col_a_scaled = [1e300_f64, 1.1e300, 1.2e300];
+    let col_b_scaled = [-1e300_f64, 1e300, 1.5e300];
+    for r in 0..3 {
+        scaled_tbl.data_sets[0].cells[r][0] = Cell::number(col_a_scaled[r]);
+        scaled_tbl.data_sets[1].cells[r][0] = Cell::number(col_b_scaled[r]);
+    }
+    scaled_doc.add_data_sheet(DataSheet::new("col-ba", "Scaled Extreme Pair", TableArchetype::Column(scaled_tbl)).unwrap()).unwrap();
+    let mut scaled_session = Session::from_document(scaled_doc);
+    let scaled_res = scaled_session.execute("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-ba", "kind": "stats.bland_altman" }));
+    assert!(scaled_res.is_ok(), "scaled 1e300 Bland-Altman should succeed finitely: {scaled_res:?}");
+    assert_eq!(scaled_session.document().result_sheet(&SheetId::new("res-ba")).unwrap().status, ResultStatus::UpToDate);
+    assert!(lumencraft_format::save_project_bytes(scaled_session.document()).is_ok());
+
+    // Case 1: Adding Bland-Altman directly onto difference-overflowing 1e308 data (`1e308 - (-1e308) = +inf`)
+    // must fail cleanly rather than committing non-finite floats that poison `project.save`.
     let mut overflow_doc = ProjectDocument::new("Overflow Add Check").unwrap();
     let mut tbl = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 2, 3).unwrap();
     tbl.data_sets[0].title = String::from("Method A");
     tbl.data_sets[1].title = String::from("Method B");
-    let col_a = [1e300_f64, 1.1e300, 1.2e300];
-    let col_b = [-1e300_f64, 1e300, 1.5e300];
+    let col_a = [1e308_f64, 1.1e308, 1.2e308];
+    let col_b = [-1e308_f64, 1e308, 1.5e308];
     for r in 0..3 {
         tbl.data_sets[0].cells[r][0] = Cell::number(col_a[r]);
         tbl.data_sets[1].cells[r][0] = Cell::number(col_b[r]);
