@@ -13,9 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use lumencraft_testkit::nist_strd::{
-    MAX_STRD_BYTES, PINNED_NIST_STRD_CORPUS, parse_anova_dat, parse_linear_regression_dat, parse_nonlinear_dat, parse_univariate_dat,
+    MAX_STRD_BYTES, PINNED_NIST_STRD_CORPUS, PinnedStrdSpec, parse_anova_dat, parse_linear_regression_dat, parse_nonlinear_dat, parse_univariate_dat,
 };
-use lumencraft_testkit::{CorpusManifestEntry, load_verified_corpus_file, sha256_hex, verify_blob};
+use lumencraft_testkit::{CorpusManifestEntry, load_verified_corpus_file, verify_blob};
 
 const NIST_STRD_BASE_URL: &str = "https://www.itl.nist.gov/div898/strd";
 const MANIFEST_FILENAME: &str = "sha256sums.txt";
@@ -187,15 +187,15 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if opts.fetch || opts.fetch_only {
         let fetched = fetch_nist_strd(&nist_root)?;
         println!("corpus: fetched and recorded {fetched} NIST StRD .dat files in {}", nist_root.display());
-        if opts.fetch_only {
-            return Ok(());
-        }
     }
     if nist_root.exists() {
         let verified = verify_corpus_dir(&nist_root)?;
         println!("corpus: verified {verified} cached NIST StRD .dat file(s) in {}", nist_root.display());
     } else {
         println!("corpus: optional external directory {} not present; running offline suites (pass `--fetch` to populate)", nist_root.display());
+    }
+    if opts.fetch_only {
+        return Ok(());
     }
 
     let require_corpus = nist_root.exists() || opts.fetch;
@@ -260,7 +260,7 @@ fn validate_dat_text(rel_path: &str, text: &str) -> Result<(), String> {
     Err(format!("{rel_path}: file did not match any NIST StRD ASCII suite format"))
 }
 
-fn verify_manifest_file(nist_root: &Path, manifest_path: &Path, verified_paths: &mut BTreeSet<String>) -> Result<(), String> {
+fn verify_manifest_file(nist_root: &Path, manifest_path: &Path, enforce_pinned: bool, verified_paths: &mut BTreeSet<String>) -> Result<(), String> {
     let manifest_text = fs::read_to_string(manifest_path).map_err(|e| format!("read {}: {e}", manifest_path.display()))?;
     for (idx, raw_line) in manifest_text.lines().enumerate() {
         let line = raw_line.trim();
@@ -271,6 +271,9 @@ fn verify_manifest_file(nist_root: &Path, manifest_path: &Path, verified_paths: 
         let parts: Vec<&str> = line.split_whitespace().collect();
         let (rel_path, text) = match parts.as_slice() {
             [sha_hex, size_tok, rel] => {
+                if enforce_pinned && rel.ends_with(".dat") && pinned_spec_for_rel(rel).is_none() {
+                    return Err(format!("{rel}: unexpected `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"));
+                }
                 let expected_bytes =
                     size_tok.parse::<usize>().map_err(|_| format!("{}:{line_no}: invalid byte count `{size_tok}`", manifest_path.display()))?;
                 let entry = CorpusManifestEntry { relative_path: rel, expected_bytes, sha256_hex: sha_hex };
@@ -280,6 +283,9 @@ fn verify_manifest_file(nist_root: &Path, manifest_path: &Path, verified_paths: 
             }
             [sha_hex, rel] => {
                 let clean_rel = rel.strip_prefix('*').unwrap_or(rel);
+                if enforce_pinned && clean_rel.ends_with(".dat") && pinned_spec_for_rel(clean_rel).is_none() {
+                    return Err(format!("{clean_rel}: unexpected `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"));
+                }
                 let bytes = fs::read(nist_root.join(clean_rel)).map_err(|e| format!("read {clean_rel}: {e}"))?;
                 verify_blob(&bytes, bytes.len(), sha_hex).map_err(|e| format!("{}:{line_no} ({clean_rel}): {e}", manifest_path.display()))?;
                 let loaded = String::from_utf8(bytes).map_err(|_| format!("{clean_rel}: invalid UTF-8"))?;
@@ -336,6 +342,10 @@ fn verify_pinned_catalog_entries(nist_root: &Path, verified_paths: &BTreeSet<Str
     Ok(())
 }
 
+fn pinned_spec_for_rel(rel_path: &str) -> Option<&'static PinnedStrdSpec> {
+    PINNED_NIST_STRD_CORPUS.iter().find(|spec| spec.manifest.relative_path == rel_path)
+}
+
 /// Verify all manifest entries and `.dat` files present under `nist_root`.
 pub fn verify_corpus_dir(nist_root: &Path) -> Result<usize, String> {
     if !nist_root.exists() {
@@ -343,8 +353,9 @@ pub fn verify_corpus_dir(nist_root: &Path) -> Result<usize, String> {
     }
     let mut verified_paths = BTreeSet::new();
     let manifest_path = nist_root.join(MANIFEST_FILENAME);
+    let enforce_pinned = nist_root.file_name().and_then(|s| s.to_str()) == Some("nist-strd");
     if manifest_path.is_file() {
-        verify_manifest_file(nist_root, &manifest_path, &mut verified_paths)?;
+        verify_manifest_file(nist_root, &manifest_path, enforce_pinned, &mut verified_paths)?;
     }
 
     let mut dat_files = Vec::new();
@@ -357,22 +368,106 @@ pub fn verify_corpus_dir(nist_root: &Path) -> Result<usize, String> {
         if verified_paths.contains(&rel) {
             continue;
         }
+        let Some(spec) = pinned_spec_for_rel(&rel) else {
+            return Err(format!("{rel}: unmanifested `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"));
+        };
         let bytes = fs::read(&full_path).map_err(|e| format!("read {}: {e}", full_path.display()))?;
         if bytes.len() > MAX_STRD_BYTES {
             return Err(format!("{rel}: size {} exceeds {MAX_STRD_BYTES} bytes", bytes.len()));
         }
-        let digest = sha256_hex(&bytes);
-        verify_blob(&bytes, bytes.len(), &digest).map_err(|e| format!("{rel}: {e}"))?;
+        verify_blob(&bytes, spec.manifest.expected_bytes, spec.manifest.sha256_hex).map_err(|e| format!("{rel}: {e}"))?;
         let text = String::from_utf8(bytes).map_err(|_| format!("{rel}: corpus .dat file is not valid UTF-8"))?;
         validate_dat_text(&rel, &text)?;
         verified_paths.insert(rel);
     }
 
     if should_verify_pinned_catalog(nist_root, &manifest_path, &verified_paths) {
+        for rel in &verified_paths {
+            if pinned_spec_for_rel(rel).is_none() {
+                return Err(format!("{rel}: unexpected `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"));
+            }
+        }
         verify_pinned_catalog_entries(nist_root, &verified_paths)?;
     }
 
     Ok(verified_paths.len())
+}
+
+fn verify_candidate_dat(item: StrdDatasetSpec, bytes: &[u8]) -> Result<(), String> {
+    let rel = item.relative_path();
+    if bytes.len() > MAX_STRD_BYTES {
+        return Err(format!("{rel}: downloaded file ({} bytes) exceeds {MAX_STRD_BYTES}", bytes.len()));
+    }
+    let Some(pinned) = pinned_spec_for_rel(&rel) else {
+        return Err(format!("{rel}: missing pinned SHA-256 entry in `PINNED_NIST_STRD_CORPUS`"));
+    };
+    verify_blob(bytes, pinned.manifest.expected_bytes, pinned.manifest.sha256_hex).map_err(|e| format!("{rel}: pinned verification failed: {e}"))?;
+    let text = String::from_utf8(bytes.to_vec()).map_err(|_| format!("{rel}: downloaded file is not valid UTF-8"))?;
+    validate_dat_by_suite(item.suite, &text, &rel)
+}
+
+fn commit_verified_download(tmp_dest: &Path, dest: &Path, item: StrdDatasetSpec) -> Result<(), String> {
+    let bytes = match fs::read(tmp_dest) {
+        Ok(b) => b,
+        Err(e) => {
+            let _ = fs::remove_file(tmp_dest);
+            return Err(format!("read {}: {e}", tmp_dest.display()));
+        }
+    };
+    if let Err(err) = verify_candidate_dat(item, &bytes) {
+        let _ = fs::remove_file(tmp_dest);
+        return Err(err);
+    }
+    fs::rename(tmp_dest, dest).map_err(|e| format!("rename {} -> {}: {e}", tmp_dest.display(), dest.display()))
+}
+
+fn fetch_single_dataset(item: StrdDatasetSpec, dest: &Path, max_filesize: &str) -> Result<(), String> {
+    let rel = item.relative_path();
+    let tmp_dest = dest.with_extension("dat.part");
+    let mut last_err = format!("{rel}: no candidate download URLs configured");
+
+    for url in item.candidate_urls() {
+        println!("+ curl -fsSL {url}");
+        let status = Command::new("curl")
+            .arg("-fsSL")
+            .arg("--proto")
+            .arg("=https")
+            .arg("--proto-redir")
+            .arg("=https")
+            .arg("--max-time")
+            .arg("30")
+            .arg("--max-filesize")
+            .arg(max_filesize)
+            .arg("-o")
+            .arg(&tmp_dest)
+            .arg(&url)
+            .status()
+            .map_err(|e| format!("failed to execute `curl` for {url}: {e}"))?;
+        if !status.success() {
+            let _ = fs::remove_file(&tmp_dest);
+            last_err = format!("`curl -fsSL {url}` failed with {status}");
+            continue;
+        }
+        match commit_verified_download(&tmp_dest, dest, item) {
+            Ok(()) => return Ok(()),
+            Err(err) => {
+                last_err = format!("{err} (from {url})");
+            }
+        }
+    }
+
+    Err(last_err)
+}
+
+fn build_pinned_manifest_body() -> String {
+    let mut lines = Vec::with_capacity(PINNED_NIST_STRD_CORPUS.len() + 1);
+    lines.push(String::from("# NIST StRD SHA-256 + byte-size manifest generated by `cargo xtask corpus --fetch`"));
+    for spec in PINNED_NIST_STRD_CORPUS {
+        lines.push(format!("{}  {}  {}", spec.manifest.sha256_hex, spec.manifest.expected_bytes, spec.manifest.relative_path));
+    }
+    let mut body = lines.join("\n");
+    body.push('\n');
+    body
 }
 
 fn fetch_nist_strd(nist_root: &Path) -> Result<usize, String> {
@@ -381,67 +476,16 @@ fn fetch_nist_strd(nist_root: &Path) -> Result<usize, String> {
         fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all {}: {e}", dir.display()))?;
     }
 
-    let mut manifest_lines = Vec::with_capacity(CATALOG.len() + 2);
-    manifest_lines.push(String::from("# NIST StRD SHA-256 + byte-size manifest generated by `cargo xtask corpus --fetch`"));
-
+    let max_filesize = MAX_STRD_BYTES.to_string();
     for item in CATALOG {
-        let rel = item.relative_path();
-        let dest = nist_root.join(&rel);
-        let tmp_dest = dest.with_extension("dat.part");
-
-        let mut downloaded: Option<Vec<u8>> = None;
-        let mut last_err = String::new();
-        for url in item.candidate_urls() {
-            println!("+ curl -fsSL {url}");
-            let status = Command::new("curl")
-                .arg("-fsSL")
-                .arg("--max-time")
-                .arg("30")
-                .arg("-o")
-                .arg(&tmp_dest)
-                .arg(&url)
-                .status()
-                .map_err(|e| format!("failed to execute `curl` for {url}: {e}"))?;
-            if !status.success() {
-                let _ = fs::remove_file(&tmp_dest);
-                last_err = format!("`curl -fsSL {url}` failed with {status}");
-                continue;
-            }
-            let bytes = fs::read(&tmp_dest).map_err(|e| format!("read {}: {e}", tmp_dest.display()))?;
-            if bytes.len() > MAX_STRD_BYTES {
-                let _ = fs::remove_file(&tmp_dest);
-                return Err(format!("{rel}: downloaded file ({} bytes) exceeds {MAX_STRD_BYTES}", bytes.len()));
-            }
-            let text = match String::from_utf8(bytes.clone()) {
-                Ok(s) => s,
-                Err(_) => {
-                    let _ = fs::remove_file(&tmp_dest);
-                    last_err = format!("{rel}: downloaded file from {url} is not valid UTF-8");
-                    continue;
-                }
-            };
-            if !text.contains("Dataset Name:") {
-                let _ = fs::remove_file(&tmp_dest);
-                last_err = format!("{rel}: response from {url} does not look like a NIST StRD .dat file");
-                continue;
-            }
-            downloaded = Some(bytes);
-            break;
-        }
-
-        let Some(bytes) = downloaded else {
-            return Err(last_err);
-        };
-
-        fs::rename(&tmp_dest, &dest).map_err(|e| format!("rename {} -> {}: {e}", tmp_dest.display(), dest.display()))?;
-        let digest = sha256_hex(&bytes);
-        manifest_lines.push(format!("{digest}  {}  {rel}", bytes.len()));
+        let dest = nist_root.join(item.relative_path());
+        fetch_single_dataset(*item, &dest, &max_filesize)?;
     }
 
-    let mut manifest_body = manifest_lines.join("\n");
-    manifest_body.push('\n');
     let manifest_path = nist_root.join(MANIFEST_FILENAME);
-    fs::write(&manifest_path, manifest_body).map_err(|e| format!("write {}: {e}", manifest_path.display()))?;
+    let manifest_tmp = nist_root.join(format!("{MANIFEST_FILENAME}.part"));
+    fs::write(&manifest_tmp, build_pinned_manifest_body()).map_err(|e| format!("write {}: {e}", manifest_tmp.display()))?;
+    fs::rename(&manifest_tmp, &manifest_path).map_err(|e| format!("rename {} -> {}: {e}", manifest_tmp.display(), manifest_path.display()))?;
 
     Ok(CATALOG.len())
 }
@@ -452,9 +496,10 @@ mod tests {
     use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use lumencraft_testkit::sha256_hex;
-
-    use super::{CATALOG, CorpusOptions, MANIFEST_FILENAME, StrdSuite, parse_args, verify_corpus_dir};
+    use super::{
+        CATALOG, CorpusOptions, MANIFEST_FILENAME, MAX_STRD_BYTES, PINNED_NIST_STRD_CORPUS, StrdSuite, build_pinned_manifest_body,
+        commit_verified_download, parse_args, verify_candidate_dat, verify_corpus_dir,
+    };
 
     #[test]
     fn catalog_covers_all_58_nist_strd_datasets_with_unique_paths() {
@@ -524,9 +569,9 @@ Data:  y   x
 
         let manifest = format!(
             "# test manifest\n{}  {}  univ/NumAcc1.dat\n{}  {}  anova/SiRstv.dat\n",
-            sha256_hex(uni_dat.as_bytes()),
+            lumencraft_testkit::sha256_hex(uni_dat.as_bytes()),
             uni_dat.len(),
-            sha256_hex(anova_dat.as_bytes()),
+            lumencraft_testkit::sha256_hex(anova_dat.as_bytes()),
             anova_dat.len(),
         );
         fs::write(temp_root.join(MANIFEST_FILENAME), manifest).unwrap();
@@ -559,5 +604,85 @@ Data:  y   x
         if lumencraft_testkit::nist_strd::corpus_available(&repo_corpus) {
             assert_eq!(verify_corpus_dir(&repo_corpus).unwrap(), 58);
         }
+    }
+
+    #[test]
+    fn pinned_catalog_matches_fetch_catalog_and_manifest_builder() {
+        assert_eq!(CATALOG.len(), PINNED_NIST_STRD_CORPUS.len());
+        let pinned_paths: BTreeSet<&str> = PINNED_NIST_STRD_CORPUS.iter().map(|s| s.manifest.relative_path).collect();
+        for item in CATALOG {
+            assert!(pinned_paths.contains(item.relative_path().as_str()), "missing pinned entry for {}", item.relative_path());
+        }
+
+        let body = build_pinned_manifest_body();
+        let data_lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty() && !l.starts_with('#')).collect();
+        assert_eq!(data_lines.len(), PINNED_NIST_STRD_CORPUS.len());
+        for (line, spec) in data_lines.iter().zip(PINNED_NIST_STRD_CORPUS.iter()) {
+            let expected = format!("{}  {}  {}", spec.manifest.sha256_hex, spec.manifest.expected_bytes, spec.manifest.relative_path);
+            assert_eq!(*line, expected);
+        }
+    }
+
+    #[test]
+    fn commit_verified_download_rejects_mismatch_and_preserves_existing_file() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lumencraft-xtask-fetch-pin-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(dir.join("univ")).unwrap();
+
+        let dest = dir.join("univ/NumAcc1.dat");
+        let tmp = dest.with_extension("dat.part");
+        let original = b"preserved-original-corpus-bytes";
+        fs::write(&dest, original).unwrap();
+
+        // Syntactically valid NIST header, wrong SHA-256 digest vs pinned NumAcc1.dat.
+        let spoofed = b"Dataset Name:  NumAcc1\nData:  y\n 1\n 2\n";
+        fs::write(&tmp, spoofed).unwrap();
+
+        let err = commit_verified_download(&tmp, &dest, CATALOG[5]).unwrap_err();
+        assert!(err.contains("pinned verification failed"), "unexpected error: {err}");
+        assert!(!tmp.exists(), "staged temp file should be deleted on pin mismatch");
+        assert_eq!(fs::read(&dest).unwrap(), original, "existing destination file must not be overwritten");
+
+        // Oversized buffer rejected before touching filesystem.
+        let oversized = vec![b' '; MAX_STRD_BYTES + 1];
+        assert!(verify_candidate_dat(CATALOG[5], &oversized).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn verify_corpus_dir_rejects_unmanifested_stray_dat_and_tampered_unmanifested_pinned_dat() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lumencraft-xtask-stray-dat-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(dir.join("anova")).unwrap();
+
+        // Unmanifested stray .dat file even in a non-nist-strd folder must fail instead of passing a self-digest tautology.
+        let stray = dir.join("anova/stray.dat");
+        fs::write(&stray, "Dataset Name:  Stray\nCertified Analysis of Variance Table:\nBetween Treatments   999999999   1.0   1.0   1.0\n").unwrap();
+        let err = verify_corpus_dir(&dir).unwrap_err();
+        assert!(err.contains("not in `PINNED_NIST_STRD_CORPUS`"), "unexpected error: {err}");
+        let _ = fs::remove_file(&stray);
+
+        // Even inside an `nist-strd` directory with a matching manifest line, unpinned `.dat` entries are rejected.
+        let nist_stray_dir = dir.join("nist-strd");
+        fs::create_dir_all(nist_stray_dir.join("anova")).unwrap();
+        let valid_anova = "Dataset Name:  SiRstv\nCertified Analysis of Variance Table:\nBetween Treatments   1   4.0   4.0   4.0\nWithin Treatments    2   2.0   1.0\nR-Squared: 0.66666666666667\nResidual Standard Deviation: 1.0\nData:  y   x\n 10.0   1\n 12.0   1\n 12.0   2\n 14.0   2\n";
+        fs::write(nist_stray_dir.join("anova/stray.dat"), valid_anova).unwrap();
+        let manifest =
+            format!("# NIST StRD SHA-256\n{}  {}  anova/stray.dat\n", lumencraft_testkit::sha256_hex(valid_anova.as_bytes()), valid_anova.len(),);
+        fs::write(nist_stray_dir.join(MANIFEST_FILENAME), manifest).unwrap();
+        let err_manifested = verify_corpus_dir(&nist_stray_dir).unwrap_err();
+        assert!(
+            err_manifested.contains("anova/stray.dat: unexpected `.dat` file is not in `PINNED_NIST_STRD_CORPUS`"),
+            "unexpected error: {err_manifested}"
+        );
+
+        // An unmanifested file whose relative path IS in PINNED_NIST_STRD_CORPUS still must match its pinned SHA-256.
+        let unmanifested_pinned = dir.join("anova/SiRstv.dat");
+        fs::write(&unmanifested_pinned, "Dataset Name:  SiRstv\nData: y x\n 1 1\n").unwrap();
+        let err2 = verify_corpus_dir(&dir).unwrap_err();
+        assert!(err2.contains("anova/SiRstv.dat"), "unexpected error: {err2}");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

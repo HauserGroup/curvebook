@@ -8,6 +8,7 @@
 //! - NIST Information Technology Laboratory, Statistical Engineering Division:
 //!   *Statistical Reference Datasets (StRD)*, <https://www.itl.nist.gov/div898/strd/> (public domain).
 
+use std::collections::BTreeSet;
 use std::fmt;
 
 /// Maximum input payload accepted by the NIST StRD ASCII parser (`16 MiB`).
@@ -358,7 +359,16 @@ pub fn parse_anova_dat(text: &str) -> Result<AnovaDataset, StrdParseError> {
     let difficulty = extract_difficulty(&header);
     let summary = parse_anova_header_summary(&header)?;
 
-    let expected_groups = summary.df_between.saturating_add(1);
+    let Some(expected_groups) = summary.df_between.checked_add(1) else {
+        return Err(StrdParseError::InputTooLarge {
+            kind: "ANOVA between-group df",
+            actual: summary.df_between,
+            max: data_rows.len().saturating_sub(1),
+        });
+    };
+    if expected_groups > MAX_STRD_ROWS {
+        return Err(StrdParseError::InputTooLarge { kind: "ANOVA groups", actual: expected_groups, max: MAX_STRD_ROWS });
+    }
     let mut observations = parse_anova_rows(&data_rows, false);
     let needs_group_first = match &observations {
         Err(_) => true,
@@ -371,6 +381,9 @@ pub fn parse_anova_dat(text: &str) -> Result<AnovaDataset, StrdParseError> {
         observations = Ok(alt);
     }
     let observations = observations?;
+    if expected_groups > observations.len() {
+        return Err(StrdParseError::InputTooLarge { kind: "ANOVA groups", actual: expected_groups, max: observations.len() });
+    }
 
     Ok(AnovaDataset {
         name,
@@ -402,17 +415,17 @@ fn parse_anova_rows(data_rows: &[NumberedLine<'_>], group_first: bool) -> Result
 }
 
 fn anova_groups_cover_range(observations: &[(usize, f64)], expected_groups: usize) -> bool {
-    if expected_groups == 0 || observations.is_empty() {
+    if expected_groups == 0 || observations.len() < expected_groups {
         return false;
     }
-    let mut seen = vec![false; expected_groups];
+    let mut seen = BTreeSet::new();
     for &(group, _) in observations {
-        let Some(slot) = group.checked_sub(1).and_then(|idx| seen.get_mut(idx)) else {
+        if group == 0 || group > expected_groups {
             return false;
-        };
-        *slot = true;
+        }
+        seen.insert(group);
     }
-    seen.into_iter().all(|present| present)
+    seen.len() == expected_groups
 }
 
 fn trailing_tokens(line: &str, count: usize) -> Option<Vec<&str>> {
@@ -706,7 +719,8 @@ fn extract_nonlinear_param_numbers(parts: &[&str]) -> Option<[f64; 4]> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_STRD_BYTES, NistDifficulty, StrdParseError, parse_anova_dat, parse_linear_regression_dat, parse_nonlinear_dat, parse_univariate_dat,
+        MAX_STRD_BYTES, MAX_STRD_ROWS, NistDifficulty, StrdParseError, anova_groups_cover_range, parse_anova_dat, parse_linear_regression_dat,
+        parse_nonlinear_dat, parse_univariate_dat,
     };
 
     #[test]
@@ -820,5 +834,106 @@ Data:  y   x
 
         let oversized = "x".repeat(MAX_STRD_BYTES + 1);
         assert!(matches!(parse_univariate_dat(&oversized), Err(StrdParseError::InputTooLarge { kind: "input bytes", .. })));
+    }
+
+    #[test]
+    fn anova_parser_rejects_excessive_df_between_without_allocating() {
+        for bad_df in ["18446744073709551615", "100000000000000", "5"] {
+            let text = format!(
+                "\
+Dataset Name:  BadDf              (BadDf.dat)
+Level of Difficulty:  Lower
+Certified Analysis of Variance Table:
+Between Treatments   {bad_df}   4.0   4.0   4.0
+Within Treatments    1   4.0   1.0
+R-Squared: 0.5
+Residual Standard Deviation: 1.0
+Data:  y   x
+ 10.0   1
+ 12.0   2
+"
+            );
+            let err = parse_anova_dat(&text).unwrap_err();
+            assert!(matches!(err, StrdParseError::InputTooLarge { .. }), "expected InputTooLarge for df_between={bad_df}, got {err:?}");
+        }
+
+        // Direct call to anova_groups_cover_range with huge expected_groups must short-circuit without allocating.
+        assert!(!anova_groups_cover_range(&[(1, 10.0), (2, 12.0)], MAX_STRD_ROWS + 1));
+    }
+
+    #[test]
+    fn parsers_reject_malformed_nist_inputs() {
+        // Missing Data section / empty data section.
+        assert!(matches!(parse_univariate_dat("Dataset Name: X\n"), Err(StrdParseError::EmptyDataSection)));
+        assert!(matches!(parse_univariate_dat("Dataset Name: X\nData: y\n"), Err(StrdParseError::EmptyDataSection)));
+
+        // Missing Dataset Name.
+        let no_name = "\
+Sample Mean : 1.0
+Sample Standard Deviation : 0.0
+Sample Autocorrelation Coefficient : 0.0
+Data: y
+ 1.0
+";
+        assert!(matches!(parse_univariate_dat(no_name), Err(StrdParseError::MissingField("Dataset Name"))));
+
+        // Non-finite value in univariate observation (`NaN` is skipped as non-numeric footer -> EmptyDataSection;
+        // `+inf` / `-inf` / overflow `1e999` enters data parsing -> InvalidNumber).
+        let bad_univ_nan = "\
+Dataset Name: BadVal
+Sample Mean : 1.0
+Sample Standard Deviation : 0.0
+Sample Autocorrelation Coefficient : 0.0
+Data: y
+ NaN
+";
+        assert!(matches!(parse_univariate_dat(bad_univ_nan), Err(StrdParseError::EmptyDataSection)));
+
+        let bad_univ_inf = "\
+Dataset Name: BadVal
+Sample Mean : 1.0
+Sample Standard Deviation : 0.0
+Sample Autocorrelation Coefficient : 0.0
+Data: y
+ 1e999
+";
+        assert!(matches!(parse_univariate_dat(bad_univ_inf), Err(StrdParseError::InvalidNumber { context: "univariate observation", .. })));
+
+        // Malformed ANOVA data row (only 1 column).
+        let bad_anova_row = "\
+Dataset Name: BadRow
+Certified Analysis of Variance Table:
+Between Treatments   0   0.0   0.0   0.0
+Within Treatments    0   0.0   0.0
+R-Squared: 0.0
+Residual Standard Deviation: 0.0
+Data: y x
+ 10.0
+";
+        assert!(parse_anova_dat(bad_anova_row).is_err());
+
+        // Malformed linear regression row (missing predictor column).
+        let bad_lin_row = "\
+Dataset Name: BadLin
+Certified Regression Statistics:
+  B0   1.0   0.0
+  B1   2.0   0.0
+Residual Standard Deviation 0.0
+R-Squared 1.0
+Model 1 1.0 1.0 1.0
+Residual 1 0.0 0.0
+Data:
+ 5.0
+";
+        assert!(matches!(parse_linear_regression_dat(bad_lin_row), Err(StrdParseError::MalformedDataRow { .. })));
+
+        // Missing nonlinear summary field.
+        let bad_nl = "\
+Dataset Name: BadNl
+  b1 = 1.0 2.0 1.5 0.1
+Data:
+ 1.0 2.0
+";
+        assert!(matches!(parse_nonlinear_dat(bad_nl), Err(StrdParseError::MissingField("Residual Sum of Squares"))));
     }
 }
