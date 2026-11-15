@@ -3,18 +3,18 @@ use std::collections::BTreeMap;
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable,
     DataSheet, DocError, ErrorPropagationMode, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet,
-    InternalLinkKind, LinkSource, MAX_ROWS, MathTransformPreset, MultipleVariablesTable, NestedTable, NormalizeAnchor, PartsOfWholeTable,
-    PlacementMode, SheetCellRange, SheetId, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, TransformAnalysisSpec,
-    VariableRole, XColumnMode, XyTable,
+    InternalLinkKind, LinkSource, MAX_ROWS, MAX_SUBCOLUMNS, MathTransformPreset, MultipleVariablesTable, NestedTable, NormalizeAnchor,
+    PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind,
+    TransformAnalysisSpec, VariableRole, XColumnMode, XyTable,
 };
 use lumencraft_transform::import::MAX_IMPORT_CELLS;
 use lumencraft_transform::{
-    AucOptions, BaselineKind, CurveSheetOp, DependencyTarget, DerivativeOrder, FormulaValue, ImportPipelineOptions, ImportSourcePayload,
-    MathTransformOp, PruneMethod, ScalarEnv, SelectRule, SmoothMethod, TransformContext, TransformError, apply_curve_calculus_to_sheet,
-    apply_import_link_pipeline, compute_auc, compute_auc_with_se, compute_sheet_auc, detect_link_cycles, differentiate_xy, eval_scalar_expr,
-    evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, evaluate_equation, evaluate_formula_for_sheet,
-    execute_analysis_transform, execute_math_transform, execute_prune, execute_remove_baseline_kind, execute_select, execute_transform,
-    extract_dependencies, integrate_xy, parse_formula, simulate_xy_sheet, smooth_xy, validate_no_formula_cycle,
+    AucOptions, BaselineKind, CurveSheetOp, DependencyTarget, DerivativeOrder, FormulaContext, FormulaValue, ImportPipelineOptions,
+    ImportSourcePayload, MathTransformOp, PruneMethod, ScalarEnv, SelectRule, SmoothMethod, TransformContext, TransformError,
+    apply_curve_calculus_to_sheet, apply_import_link_pipeline, compute_auc, compute_auc_with_se, compute_sheet_auc, detect_link_cycles,
+    differentiate_xy, eval_column_expr, eval_scalar_expr, evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, evaluate_equation,
+    evaluate_formula_for_sheet, execute_analysis_transform, execute_math_transform, execute_prune, execute_remove_baseline_kind, execute_select,
+    execute_transform, execute_transpose, extract_dependencies, integrate_xy, parse_formula, simulate_xy_sheet, smooth_xy, validate_no_formula_cycle,
 };
 
 fn assert_approx(actual: f64, expected: f64, tol: f64) {
@@ -1244,4 +1244,162 @@ fn import_pipeline_enforces_atomic_append_columns_and_unstack_cell_budget() {
         apply_import_link_pipeline(&mut unstack_target, &unstack_spec, unstack_payload, &opts, None),
         Err(TransformError::InvalidSpec { .. })
     ));
+}
+
+fn raw_datasheet_for_test(id: &str, archetype: TableArchetype) -> DataSheet {
+    DataSheet {
+        id: SheetId::new(id),
+        title: format!("Sheet {id}"),
+        archetype,
+        frozen: false,
+        info_sheet_id: None,
+        linked_regions: Vec::new(),
+        floating_notes: Vec::new(),
+        color_tag: None,
+        exclusion_notes: Vec::new(),
+    }
+}
+
+#[test]
+fn r1_s04_01_ragged_tables_and_mismatched_context_handled_cleanly() {
+    // 1. Ragged MultipleVariables rejected cleanly without panic or column truncation.
+    let mut mv = MultipleVariablesTable::new(3, 5).expect("mv");
+    mv.variables[0].title = String::from("A");
+    mv.variables[1].title = String::from("B");
+    mv.variables[2].title = String::from("C");
+    mv.variables[1].cells.truncate(2);
+    for (r, cell) in mv.variables[0].cells.iter_mut().enumerate() {
+        *cell = Cell::number((r + 1) as f64);
+    }
+    let ragged_sheet = raw_datasheet_for_test("mv-rag", TableArchetype::MultipleVariables(mv.clone()));
+
+    assert!(matches!(evaluate_formula_for_sheet("abs(B)", &ragged_sheet, None), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+
+    let mut calc_mv = mv;
+    calc_mv.variables[2].set_calculated_formula("=B + 1");
+    assert!(matches!(evaluate_calculated_variables(&mut calc_mv, None), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+    assert_eq!(calc_mv.variables[0].cells.len(), 5, "ragged DAG validation must fail before shrinking columns");
+
+    let tctx = TransformContext::default();
+    assert!(matches!(execute_transpose(&ragged_sheet, true, &tctx), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+    assert!(matches!(execute_prune(&ragged_sheet, PruneMethod::EveryNth(2), &tctx), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+    assert!(matches!(
+        execute_select(&ragged_sheet, &[SelectRule::ExcludeMissing], TableKind::Column, &tctx),
+        Err(TransformError::Doc(DocError::InvalidCellValue { .. }))
+    ));
+
+    // 2. Ragged Grouped table rejected cleanly by execute_transpose without panic.
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3).expect("grp");
+    grp.data_sets[1].cells.truncate(1);
+    let ragged_grp = raw_datasheet_for_test("grp-rag", TableArchetype::Grouped(grp));
+    assert!(matches!(execute_transpose(&ragged_grp, false, &tctx), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+
+    // 3. Defense-in-depth: custom FormulaContext returning short column vectors never panics.
+    struct RaggedContext;
+    impl FormulaContext for RaggedContext {
+        fn row_count(&self) -> usize {
+            5
+        }
+        fn resolve_column_index(&self, name: &str) -> Option<usize> {
+            match name {
+                "A" => Some(0),
+                "B" => Some(1),
+                _ => None,
+            }
+        }
+        fn column_count(&self) -> usize {
+            2
+        }
+        fn column_values(&self, col_idx: usize) -> Option<Vec<FormulaValue>> {
+            match col_idx {
+                0 => Some(vec![
+                    FormulaValue::Number(1.0),
+                    FormulaValue::Number(2.0),
+                    FormulaValue::Number(3.0),
+                    FormulaValue::Number(4.0),
+                    FormulaValue::Number(5.0),
+                ]),
+                1 => Some(vec![FormulaValue::Number(-2.0), FormulaValue::Number(4.0)]),
+                _ => None,
+            }
+        }
+        fn resolve_info_constant(&self, _name: &str) -> Option<FormulaValue> {
+            None
+        }
+    }
+
+    for formula in [
+        "abs(B)",
+        "A + B",
+        "min(A, B)",
+        "max(A, B)",
+        "sum(A, B)",
+        "mean(A, B)",
+        "and(A, B)",
+        "or(A, B)",
+        "not(B)",
+        "clamp(B, 0, 10)",
+        "if(B > 0, A, B)",
+        "sumif(A > 0, B)",
+        "meanif(B > 0, A)",
+        "diff(B, 1)",
+        "rolling_mean(B, 2)",
+        "rank(B)",
+        "percentile(B, 50)",
+    ] {
+        let expr = parse_formula(formula).expect("parse formula");
+        let out = eval_column_expr(&expr, &RaggedContext).expect("eval ragged context safely");
+        assert_eq!(out.len(), 5, "formula `{formula}` changed row length");
+    }
+}
+
+#[test]
+fn r1_s05_02_import_transpose_and_x_mode_enforce_budgets() {
+    let opts = ImportPipelineOptions::default();
+
+    // 1. Sparse ragged transposed import whose rectangular envelope (4,000 * 4,001 > MAX_IMPORT_CELLS) rejects before allocation.
+    let mut wide_first_row = (0..4_000).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    wide_first_row.push('\n');
+    for r in 0..4_000 {
+        wide_first_row.push_str(&format!("{r}\n"));
+    }
+    let mut target =
+        DataSheet::new("imp-rag", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
+            .expect("sheet");
+    let spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { transpose: true, ..ImportPlacementSpec::default() },
+    };
+    let payload = ImportSourcePayload::DelimitedText { text: &wide_first_row, delimiter: ',', decimal_separator: '.' };
+    assert!(matches!(apply_import_link_pipeline(&mut target, &spec, payload, &opts, None), Err(TransformError::InvalidSpec { .. })));
+
+    // 2. Bounded ragged transposed import within MAX_IMPORT_CELLS (1 row of 1,000 + 50 rows of 1) succeeds cleanly.
+    let mut bounded_csv = (0..1_000).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    bounded_csv.push('\n');
+    for r in 0..50 {
+        bounded_csv.push_str(&format!("{}\n", 1_000 + r));
+    }
+    let bounded_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::AppendColumns, transpose: true, ..ImportPlacementSpec::default() },
+    };
+    let bounded_payload = ImportSourcePayload::DelimitedText { text: &bounded_csv, delimiter: ',', decimal_separator: '.' };
+    let report = apply_import_link_pipeline(&mut target, &bounded_spec, bounded_payload, &opts, None).expect("bounded ragged transpose");
+    assert_eq!(report.rows_placed, 1_000);
+    assert_eq!(report.cols_placed, 51);
+    assert_eq!(target.cell(CellCoord::new(999, 1, 0)).and_then(Cell::active_number), Some(999.0));
+    assert_eq!(target.cell(CellCoord::new(0, 51, 0)).and_then(Cell::active_number), Some(1_049.0));
+
+    // 3. Invalid XColumnMode::Numbers { RawReplicates(usize::MAX) | RawReplicates(0) } rejected cleanly on import growth.
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 1).expect("xy");
+    xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(usize::MAX) };
+    let mut bad_xy = raw_datasheet_for_test("bad-xy", TableArchetype::Xy(xy));
+    let simple_spec =
+        ImportLinkSpec { source: LinkSource::Clipboard, filter: ImportFilterSpec::default(), placement: ImportPlacementSpec::default() };
+    let tiny = ImportSourcePayload::DelimitedText { text: "1,2\n3,4\n", delimiter: ',', decimal_separator: '.' };
+    assert!(matches!(apply_import_link_pipeline(&mut bad_xy, &simple_spec, tiny, &opts, None), Err(TransformError::Doc(_))));
+    let _ = MAX_SUBCOLUMNS;
+    let _ = MAX_IMPORT_CELLS;
 }

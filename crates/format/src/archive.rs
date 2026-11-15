@@ -841,10 +841,15 @@ fn register_unique_sheet_id(seen: &mut HashSet<SheetId>, id: &SheetId) -> Result
 }
 
 fn validate_data_sheet(ds: &DataSheet) -> Result<(), FormatError> {
-    validate_title(&ds.title)?;
+    ds.validate()?;
     let ctx = ds.id.as_str();
     match &ds.archetype {
         TableArchetype::Xy(t) => {
+            if let lumencraft_doc::XColumnMode::GeneratedSequence { start, step, .. } = t.x_mode
+                && (!start.is_finite() || !step.is_finite())
+            {
+                return Err(FormatError::NonFiniteFloat { location: format!("{ctx}.x_mode") });
+            }
             validate_title(&t.x_title)?;
             validate_rows(t.row_count())?;
             validate_data_sets(t.data_sets.len())?;

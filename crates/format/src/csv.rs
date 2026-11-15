@@ -390,6 +390,7 @@ pub fn write_delimited_records(rows: &[Vec<String>], opts: &CsvOptions) -> Strin
 
 /// Export a [`DataSheet`] into RFC-4180 CSV/TSV text, preserving headers, titles, and `*` exclusions.
 pub fn export_datasheet_to_csv(sheet: &DataSheet, opts: &CsvOptions) -> Result<String, FormatError> {
+    sheet.archetype.validate()?;
     let rows = match &sheet.archetype {
         TableArchetype::Xy(t) => export_xy_rows(t, opts),
         TableArchetype::Column(t) => export_dataset_table_rows(
@@ -1327,6 +1328,8 @@ fn ensure_sheet_capacity(
 ) -> Result<(), FormatError> {
     match &mut target.archetype {
         TableArchetype::Xy(t) => {
+            t.x_mode.validate()?;
+            t.y_subcolumn_mode.validate()?;
             let subs = t.y_subcolumn_mode.subcolumn_count();
             let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
@@ -1341,6 +1344,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::Column(t) => {
+            t.subcolumn_mode.validate()?;
             let subs = t.subcolumn_mode.subcolumn_count();
             let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
@@ -1351,6 +1355,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::Grouped(t) => {
+            t.subcolumn_mode.validate()?;
             let subs = t.subcolumn_mode.subcolumn_count();
             let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
@@ -1418,6 +1423,7 @@ fn ensure_sheet_capacity(
             }
             for g in &mut t.groups {
                 let units = g.biological_unit_count();
+                validate_subcolumns(units)?;
                 if g.cells.len() < needed_rows {
                     g.cells.resize_with(needed_rows, || vec![Cell::empty(); units]);
                 }
