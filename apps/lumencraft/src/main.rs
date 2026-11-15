@@ -206,8 +206,9 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     let app_paths = resolve_app_paths(exe_dir.as_deref(), cfg.portable_dir.as_deref());
     let _validated_font = cfg.ttf_font.as_deref().map(load_validated_ttf_font).transpose()?;
 
+    let interactive_gui = !cfg.headless_once && cfg.event_script.is_none() && cfg.control_port.is_none();
     let enable_recovery = app_paths.portable || !cfg.headless_once;
-    let initial_viewport = ViewportMetrics::new(400.0, 260.0, 2.0);
+    let initial_viewport = if interactive_gui { ViewportMetrics::new(1280.0, 800.0, 2.0) } else { ViewportMetrics::new(400.0, 260.0, 2.0) };
     let recovery_root = if cfg.new_instance && enable_recovery && can_create_recovery_root(&app_paths.recovery_dir)? {
         Some(app_paths.recovery_dir.clone())
     } else {
@@ -244,6 +245,31 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     for win_id in runtime.window_ids() {
         let win = runtime.window_mut(win_id)?;
         configure_window_preferences(win.app_mut(), &app_paths, cfg)?;
+    }
+
+    if interactive_gui {
+        let extra_ttf_bytes = cfg
+            .ttf_font
+            .as_deref()
+            .map(|path| std::fs::read(path).map_err(|err| format!("failed to read `--ttf-font` `{}`: {err}", path.display())))
+            .transpose()?;
+        let cleanup = Box::new(move |rt: &mut DesktopHostRuntime| -> Result<(), String> {
+            let mut journal = single_instance_journal;
+            if let Some(focused_id) = rt.focused_window_id() {
+                let win = rt.window_mut(focused_id)?;
+                if should_persist_preferences(win.app(), &app_paths)? {
+                    save_shortcut_preferences(win.app(), &app_paths)?;
+                }
+                close_startup_recovery_cleanly(win.app_mut(), journal.take())?;
+            } else if let Some(pending_journal) = journal.take() {
+                let mut fallback = Session::new();
+                let _backend = fallback
+                    .close_journal_cleanly(pending_journal)
+                    .map_err(|err| format!("failed to close crash-recovery journal cleanly: {err}"))?;
+            }
+            Ok(())
+        });
+        return lumencraft::gui_window::run_native_desktop(runtime, extra_ttf_bytes, cleanup);
     }
 
     if let Some(script_path) = cfg.event_script.as_deref() {
