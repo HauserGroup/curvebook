@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 
 use crate::TableKind;
 use crate::cell::{Cell, CellValue, ReplicateStacking, SubcolumnMode, SummarizedPoint};
-use crate::error::{DocError, SummaryPointError, validate_data_sets, validate_rows, validate_subcolumns, validate_title};
+use crate::error::{DocError, SummaryPointError, validate_cell_grid, validate_data_sets, validate_rows, validate_subcolumns, validate_title};
 
 /// Zero-based 3D cell address `(row, col, subcol)` inside a data table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
@@ -53,6 +53,7 @@ impl DataSetColumn {
         validate_title(&title)?;
         validate_rows(row_count)?;
         validate_subcolumns(subcolumn_count)?;
+        validate_cell_grid(row_count, 1, subcolumn_count, 0)?;
         Ok(Self { title, cells: vec![vec![Cell::empty(); subcolumn_count]; row_count] })
     }
 
@@ -79,6 +80,7 @@ impl DataSetColumn {
     pub fn ensure_rows(&mut self, min_rows: usize, subcolumn_count: usize) -> Result<(), DocError> {
         validate_rows(min_rows)?;
         validate_subcolumns(subcolumn_count)?;
+        validate_cell_grid(min_rows, 1, subcolumn_count, 0)?;
         if self.cells.len() < min_rows {
             self.cells.resize_with(min_rows, || vec![Cell::empty(); subcolumn_count]);
         }
@@ -155,6 +157,7 @@ impl XyTable {
         validate_rows(row_count)?;
         let x_subs = x_mode.subcolumn_count();
         let y_subs = y_subcolumn_mode.subcolumn_count();
+        validate_cell_grid(row_count, data_set_count, y_subs, x_subs)?;
         let mut data_sets = Vec::with_capacity(data_set_count);
         for idx in 0..data_set_count {
             data_sets.push(DataSetColumn::new(default_column_label(idx), row_count, y_subs)?);
@@ -314,6 +317,7 @@ impl ColumnTable {
         validate_data_sets(data_set_count)?;
         validate_rows(row_count)?;
         let subs = subcolumn_mode.subcolumn_count();
+        validate_cell_grid(row_count, data_set_count, subs, 0)?;
         let mut data_sets = Vec::with_capacity(data_set_count);
         for idx in 0..data_set_count {
             data_sets.push(DataSetColumn::new(default_column_label(idx), row_count, subs)?);
@@ -413,6 +417,7 @@ impl GroupedTable {
         validate_data_sets(data_set_count)?;
         validate_rows(row_count)?;
         let subs = subcolumn_mode.subcolumn_count();
+        validate_cell_grid(row_count, data_set_count, subs, 0)?;
         let mut data_sets = Vec::with_capacity(data_set_count);
         for idx in 0..data_set_count {
             data_sets.push(DataSetColumn::new(default_column_label(idx), row_count, subs)?);
@@ -485,6 +490,7 @@ impl ContingencyTable {
     pub fn new(column_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(column_count)?;
         validate_rows(row_count)?;
+        validate_cell_grid(row_count, column_count, 1, 0)?;
         let mut data_sets = Vec::with_capacity(column_count);
         for idx in 0..column_count {
             data_sets.push(DataSetColumn::new(default_column_label(idx), row_count, 1)?);
@@ -569,6 +575,7 @@ impl SurvivalTable {
     pub fn new(cohort_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(cohort_count)?;
         validate_rows(row_count)?;
+        validate_cell_grid(row_count, cohort_count, 1, 1)?;
         let mut cohorts = Vec::with_capacity(cohort_count);
         for idx in 0..cohort_count {
             cohorts.push(DataSetColumn::new(default_column_label(idx), row_count, 1)?);
@@ -679,6 +686,7 @@ impl PartsOfWholeTable {
     pub fn new(series_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(series_count)?;
         validate_rows(row_count)?;
+        validate_cell_grid(row_count, series_count, 1, 0)?;
         let mut data_sets = Vec::with_capacity(series_count);
         for idx in 0..series_count {
             data_sets.push(DataSetColumn::new(default_column_label(idx), row_count, 1)?);
@@ -992,6 +1000,7 @@ impl MultipleVariablesTable {
     pub fn new(variable_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(variable_count)?;
         validate_rows(row_count)?;
+        validate_cell_grid(row_count, variable_count, 1, 0)?;
         let mut variables = Vec::with_capacity(variable_count);
         for idx in 0..variable_count {
             variables.push(VariableColumn::new(format!("Variable {}", default_column_label(idx)), row_count)?);
@@ -1031,6 +1040,7 @@ impl NestedGroupColumn {
         validate_title(&title)?;
         validate_subcolumns(biological_unit_count)?;
         validate_rows(row_count)?;
+        validate_cell_grid(row_count, 1, biological_unit_count, 0)?;
         let subcolumn_titles = (1..=biological_unit_count).map(|i| format!("{title}:{i}")).collect();
         Ok(Self { title, subcolumn_titles, cells: vec![vec![Cell::empty(); biological_unit_count]; row_count] })
     }
@@ -1054,6 +1064,7 @@ impl NestedTable {
         validate_data_sets(group_count)?;
         validate_subcolumns(biological_units_per_group)?;
         validate_rows(row_count)?;
+        validate_cell_grid(row_count, group_count, biological_units_per_group, 0)?;
         let mut groups = Vec::with_capacity(group_count);
         for idx in 0..group_count {
             groups.push(NestedGroupColumn::new(default_column_label(idx), biological_units_per_group, row_count)?);

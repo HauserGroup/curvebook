@@ -119,65 +119,78 @@ pub fn run_export(args: &[String]) -> Result<(), CliError> {
     run_convert_or_export(args, "export", "exported")
 }
 
-fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Result<(), CliError> {
-    let parsed = parse_export_or_convert_args(args, command_name)?;
-    let in_path = Path::new(&parsed.input_path);
-    let out_path = Path::new(&parsed.output_path);
-    let font_bytes = parsed.ttf_font.as_deref().map(Path::new).map(load_validated_ttf_font).transpose()?;
-
-    let (loaded, _input_bytes) = load_project_from_path(in_path, true)?;
-    let format = match parsed.format {
-        Some(fmt) => fmt,
-        None => detect_export_format_from_path(out_path)?,
-    };
-
-    let summary = export_from_document(&ExportRequest {
-        doc: &loaded.doc,
-        out_path,
-        format,
-        sheet: parsed.sheet.as_deref(),
-        dpi: parsed.dpi,
-        pretty: true,
-        tab_index: None,
-        pdf_version: parsed.pdf_version,
-        embedded_truetype_font: font_bytes.as_deref(),
-    })?;
-
-    if parsed.json {
-        let payload = if format == ExportFormat::Pdf {
-            json!({
-                "ok": true,
-                "input": parsed.input_path,
-                "input_format": loaded.format_tag,
-                "output": summary.out_path,
-                "format": summary.format,
-                "sheet_id": summary.sheet_id,
-                "bytes_written": summary.bytes_written,
-                "pdf_version": pdf_version_str(parsed.pdf_version),
-                "ttf_font_embedded": font_bytes.is_some(),
-                "warnings": loaded.warnings,
-            })
-        } else {
-            json!({
-                "ok": true,
-                "input": parsed.input_path,
-                "input_format": loaded.format_tag,
-                "output": summary.out_path,
-                "format": summary.format,
-                "sheet_id": summary.sheet_id,
-                "bytes_written": summary.bytes_written,
-                "warnings": loaded.warnings,
-            })
-        };
-        let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
-        println!("{text}");
-    } else {
-        println!(
-            "{verb} `{}` ({}) -> `{}` ({}, {} bytes)",
-            parsed.input_path, loaded.format_tag, summary.out_path, summary.format, summary.bytes_written
-        );
+pub(crate) fn run_guarded_cli<T, F>(op: &str, f: F) -> Result<T, CliError>
+where
+    F: FnOnce() -> Result<T, CliError>,
+{
+    match lumencraft_engine::guard::run_guarded(op, || Ok(f())) {
+        Ok(res) => res,
+        Err(engine_err) => Err(CliError::Engine(engine_err)),
     }
-    Ok(())
+}
+
+fn run_convert_or_export(args: &[String], command_name: &str, verb: &str) -> Result<(), CliError> {
+    let guard_op = if command_name == "export" { "cli.export" } else { "cli.convert" };
+    run_guarded_cli(guard_op, || {
+        let parsed = parse_export_or_convert_args(args, command_name)?;
+        let in_path = Path::new(&parsed.input_path);
+        let out_path = Path::new(&parsed.output_path);
+        let font_bytes = parsed.ttf_font.as_deref().map(Path::new).map(load_validated_ttf_font).transpose()?;
+
+        let (loaded, _input_bytes) = load_project_from_path(in_path, true)?;
+        let format = match parsed.format {
+            Some(fmt) => fmt,
+            None => detect_export_format_from_path(out_path)?,
+        };
+
+        let summary = export_from_document(&ExportRequest {
+            doc: &loaded.doc,
+            out_path,
+            format,
+            sheet: parsed.sheet.as_deref(),
+            dpi: parsed.dpi,
+            pretty: true,
+            tab_index: None,
+            pdf_version: parsed.pdf_version,
+            embedded_truetype_font: font_bytes.as_deref(),
+        })?;
+
+        if parsed.json {
+            let payload = if format == ExportFormat::Pdf {
+                json!({
+                    "ok": true,
+                    "input": parsed.input_path,
+                    "input_format": loaded.format_tag,
+                    "output": summary.out_path,
+                    "format": summary.format,
+                    "sheet_id": summary.sheet_id,
+                    "bytes_written": summary.bytes_written,
+                    "pdf_version": pdf_version_str(parsed.pdf_version),
+                    "ttf_font_embedded": font_bytes.is_some(),
+                    "warnings": loaded.warnings,
+                })
+            } else {
+                json!({
+                    "ok": true,
+                    "input": parsed.input_path,
+                    "input_format": loaded.format_tag,
+                    "output": summary.out_path,
+                    "format": summary.format,
+                    "sheet_id": summary.sheet_id,
+                    "bytes_written": summary.bytes_written,
+                    "warnings": loaded.warnings,
+                })
+            };
+            let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
+            println!("{text}");
+        } else {
+            println!(
+                "{verb} `{}` ({}) -> `{}` ({}, {} bytes)",
+                parsed.input_path, loaded.format_tag, summary.out_path, summary.format, summary.bytes_written
+            );
+        }
+        Ok(())
+    })
 }
 
 /// Parse a PDF specification version string (`1.4` or `1.7`).
@@ -365,83 +378,86 @@ fn import_with_registered_adapter(
 
 /// Write an exported sheet or whole document to `req.out_path` using atomic writes and [`FormatRegistry`].
 pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSummary, CliError> {
-    if let Some(dpi) = req.dpi
-        && dpi == 0
-    {
-        return Err(CliError::Usage(String::from("--dpi must be >= 1")));
-    }
+    run_guarded_cli("cli.export_from_document", || {
+        if let Some(dpi) = req.dpi
+            && dpi == 0
+        {
+            return Err(CliError::Usage(String::from("--dpi must be >= 1")));
+        }
 
-    let registry = FormatRegistry::default_registry();
-    if req.format == ExportFormat::LumencraftDir {
-        let exporter = registry
-            .exporter_by_format("lumencraft.d")
-            .ok_or_else(|| CliError::Runtime(String::from("missing `lumencraft.d` exporter in FormatRegistry")))?;
-        exporter.export_path(ExportSource::Document(req.doc), req.out_path, &ExportOptions::default())?;
-        let bytes_written = dir_size_bytes(req.out_path)?;
-        return Ok(ExportOutcomeSummary {
+        let registry = FormatRegistry::default_registry();
+        if req.format == ExportFormat::LumencraftDir {
+            let exporter = registry
+                .exporter_by_format("lumencraft.d")
+                .ok_or_else(|| CliError::Runtime(String::from("missing `lumencraft.d` exporter in FormatRegistry")))?;
+            exporter.export_path(ExportSource::Document(req.doc), req.out_path, &ExportOptions::default())?;
+            let bytes_written = dir_size_bytes(req.out_path)?;
+            return Ok(ExportOutcomeSummary {
+                out_path: req.out_path.to_string_lossy().into_owned(),
+                format: req.format.as_str(),
+                sheet_id: None,
+                bytes_written,
+            });
+        }
+
+        let (bytes, sheet_id) = match req.format {
+            ExportFormat::Lumencraft => {
+                let exporter = registry
+                    .exporter_by_format("lumencraft")
+                    .ok_or_else(|| CliError::Runtime(String::from("missing `lumencraft` exporter in FormatRegistry")))?;
+                (exporter.export_bytes(ExportSource::Document(req.doc), &ExportOptions::default())?, None)
+            }
+            ExportFormat::LumencraftDir => (Vec::new(), None),
+            ExportFormat::Svg => {
+                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
+                let svg = render_svg(&scene, &SvgExportOptions::default())?;
+                (svg.into_bytes(), Some(id))
+            }
+            ExportFormat::Pdf => {
+                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
+                let pdf_opts = PdfExportOptions {
+                    version: req.pdf_version,
+                    embedded_truetype_font: req.embedded_truetype_font.map(<[u8]>::to_vec),
+                    ..PdfExportOptions::default()
+                };
+                let pdf = render_pdf(&scene, &pdf_opts)?;
+                (pdf, Some(id))
+            }
+            ExportFormat::Emf => {
+                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
+                let emf = encode_emf(&scene)?;
+                (emf, Some(id))
+            }
+            ExportFormat::Png => {
+                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
+                let img = rasterize_scene(&scene, req.dpi.unwrap_or(DEFAULT_RASTER_DPI))?;
+                (encode_png(&img)?, Some(id))
+            }
+            ExportFormat::Tiff => {
+                let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
+                let img = rasterize_scene(&scene, req.dpi.unwrap_or(DEFAULT_RASTER_DPI))?;
+                (encode_tiff(&img, TiffCompression::Deflate)?, Some(id))
+            }
+            ExportFormat::Csv => export_tabular_csv(&registry, req.doc, req.sheet, req.tab_index, "csv", &CsvOptions::csv())?,
+            ExportFormat::Tsv => export_tabular_csv(&registry, req.doc, req.sheet, req.tab_index, "tsv", &CsvOptions::tsv())?,
+            ExportFormat::Json => export_json_target(&registry, req.doc, req.sheet, req.pretty)?,
+        };
+
+        if let Some(parent) = req.out_path.parent()
+            && !parent.as_os_str().is_empty()
+            && !parent.exists()
+        {
+            fs::create_dir_all(parent)
+                .map_err(|err| CliError::Runtime(format!("failed to create output directory `{}`: {err}", parent.display())))?;
+        }
+        write_atomic(req.out_path, &bytes)?;
+
+        Ok(ExportOutcomeSummary {
             out_path: req.out_path.to_string_lossy().into_owned(),
             format: req.format.as_str(),
-            sheet_id: None,
-            bytes_written,
-        });
-    }
-
-    let (bytes, sheet_id) = match req.format {
-        ExportFormat::Lumencraft => {
-            let exporter = registry
-                .exporter_by_format("lumencraft")
-                .ok_or_else(|| CliError::Runtime(String::from("missing `lumencraft` exporter in FormatRegistry")))?;
-            (exporter.export_bytes(ExportSource::Document(req.doc), &ExportOptions::default())?, None)
-        }
-        ExportFormat::LumencraftDir => (Vec::new(), None),
-        ExportFormat::Svg => {
-            let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-            let svg = render_svg(&scene, &SvgExportOptions::default())?;
-            (svg.into_bytes(), Some(id))
-        }
-        ExportFormat::Pdf => {
-            let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-            let pdf_opts = PdfExportOptions {
-                version: req.pdf_version,
-                embedded_truetype_font: req.embedded_truetype_font.map(<[u8]>::to_vec),
-                ..PdfExportOptions::default()
-            };
-            let pdf = render_pdf(&scene, &pdf_opts)?;
-            (pdf, Some(id))
-        }
-        ExportFormat::Emf => {
-            let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-            let emf = encode_emf(&scene)?;
-            (emf, Some(id))
-        }
-        ExportFormat::Png => {
-            let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-            let img = rasterize_scene(&scene, req.dpi.unwrap_or(DEFAULT_RASTER_DPI))?;
-            (encode_png(&img)?, Some(id))
-        }
-        ExportFormat::Tiff => {
-            let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
-            let img = rasterize_scene(&scene, req.dpi.unwrap_or(DEFAULT_RASTER_DPI))?;
-            (encode_tiff(&img, TiffCompression::Deflate)?, Some(id))
-        }
-        ExportFormat::Csv => export_tabular_csv(&registry, req.doc, req.sheet, req.tab_index, "csv", &CsvOptions::csv())?,
-        ExportFormat::Tsv => export_tabular_csv(&registry, req.doc, req.sheet, req.tab_index, "tsv", &CsvOptions::tsv())?,
-        ExportFormat::Json => export_json_target(&registry, req.doc, req.sheet, req.pretty)?,
-    };
-
-    if let Some(parent) = req.out_path.parent()
-        && !parent.as_os_str().is_empty()
-        && !parent.exists()
-    {
-        fs::create_dir_all(parent).map_err(|err| CliError::Runtime(format!("failed to create output directory `{}`: {err}", parent.display())))?;
-    }
-    write_atomic(req.out_path, &bytes)?;
-
-    Ok(ExportOutcomeSummary {
-        out_path: req.out_path.to_string_lossy().into_owned(),
-        format: req.format.as_str(),
-        sheet_id,
-        bytes_written: bytes.len(),
+            sheet_id,
+            bytes_written: bytes.len(),
+        })
     })
 }
 
@@ -922,5 +938,20 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn run_guarded_cli_converts_panic_into_internal_panic_cli_error() {
+        let err = super::run_guarded_cli::<(), _>("cli.test_export", || panic!("simulated svg panic"))
+            .expect_err("panic must be caught by run_guarded_cli");
+        assert_eq!(err.exit_code(), 1);
+        let env = err.to_json_envelope();
+        assert_eq!(env.error.code, lumencraft_doc::ErrorCode::InternalPanic);
+        assert!(env.error.message.contains("simulated svg panic"));
+
+        let usage = super::run_guarded_cli::<(), _>("cli.test_usage", || Err(crate::error::CliError::Usage(String::from("bad flag"))))
+            .expect_err("non-panic CliError must pass through unchanged");
+        assert_eq!(usage.exit_code(), 2);
     }
 }

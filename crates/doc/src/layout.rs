@@ -343,6 +343,7 @@ impl LayoutSheet {
         }
         let title = title.into();
         validate_title(&title)?;
+        spec.validate_item_count()?;
         Ok(Self { id, title, spec, floating_notes: Vec::new(), color_tag: None })
     }
 }

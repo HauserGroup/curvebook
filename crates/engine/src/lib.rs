@@ -126,6 +126,14 @@ impl From<DocError> for EngineError {
                 Some(json!({ "count": count, "max": max })),
                 Some("Reduce replicate subcolumn count below the project maximum."),
             ),
+            DocError::TooManyCells { count, max } => (
+                ErrorCode::ResourceLimit,
+                Some(json!({ "count": count, "max": max })),
+                Some("Reduce rows, data sets, or replicate subcolumns below the cell limit."),
+            ),
+            DocError::TooManyLayoutItems { count, max } => {
+                (ErrorCode::ResourceLimit, Some(json!({ "count": count, "max": max })), Some("Reduce layout item count below the project maximum."))
+            }
             DocError::TooManySheets { count, max } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "count": count, "max": max })), Some("Delete unused sheets before adding more."))
             }
@@ -419,6 +427,7 @@ impl From<ChartError> for EngineError {
         let (code, details) = match err {
             ChartError::SheetNotFound { sheet_id } => (ErrorCode::NotFound, Some(json!({ "sheet_id": sheet_id }))),
             ChartError::InvalidSpec { message } => (ErrorCode::BadInput, Some(json!({ "reason": message }))),
+            ChartError::ResourceLimit { message } => (ErrorCode::ResourceLimit, Some(json!({ "reason": message }))),
             ChartError::CompileFailed { message } => (ErrorCode::InternalError, Some(json!({ "reason": message }))),
         };
         build_mapped_error(code, msg, details, None, false)
@@ -442,6 +451,9 @@ impl From<PdfError> for EngineError {
         let (code, details, remediation) = match err {
             PdfError::EmptyDocument => (ErrorCode::BadInput, None, Some("Add at least one page before exporting PDF.")),
             PdfError::InvalidScene { message } => (ErrorCode::BadInput, Some(json!({ "reason": message })), None),
+            PdfError::ResourceLimit { message } => {
+                (ErrorCode::ResourceLimit, Some(json!({ "reason": message })), Some("Reduce the number of PDF pages or chart complexity."))
+            }
             PdfError::CompressionFailed { message } => (ErrorCode::InternalError, Some(json!({ "reason": message })), None),
         };
         build_mapped_error(code, msg, details, remediation, false)
@@ -1079,7 +1091,7 @@ impl Session {
 
     /// Compile a graph or layout sheet into a resolution-independent [`ChartScene`].
     pub fn render_sheet_scene(&self, sheet_id: &SheetId) -> Result<ChartScene, EngineError> {
-        cmd::helpers::compile_sheet_scene(&self.doc, sheet_id)
+        guard::run_guarded("session.render_sheet_scene", || cmd::helpers::compile_sheet_scene(&self.doc, sheet_id))
     }
 }
 

@@ -273,13 +273,17 @@ fn direct_command_execution_supports_schema_typed_flags_and_atomic_save() -> Tes
 }
 
 #[test]
-fn mcp_control_port_flag_validation_rejects_invalid_and_unexpected_args() -> TestResult {
+fn mcp_control_port_and_token_flag_validation_reject_invalid_and_unexpected_args() -> TestResult {
     for args in [
         &["mcp", "--control-port", "0"][..],
         &["mcp", "--control-port=0"][..],
         &["mcp", "--control-port", "65536"][..],
         &["mcp", "--control-port", "not-a-port"][..],
         &["mcp", "--control-port"][..],
+        &["mcp", "--control-token", ""][..],
+        &["mcp", "--control-token="][..],
+        &["mcp", "--control-token", "has space"][..],
+        &["mcp", "--control-token"][..],
         &["mcp", "--unexpected-flag"][..],
         &["mcp", "extra-arg"][..],
     ] {
@@ -288,6 +292,37 @@ fn mcp_control_port_flag_validation_rejects_invalid_and_unexpected_args() -> Tes
     }
 
     let _ = assert_structured_json_error(&["mcp", "--control-port", "0", "--json"], 2, "bad_input", "input")?;
+    let _ = assert_structured_json_error(&["mcp", "--control-token", "bad token", "--json"], 2, "bad_input", "input")?;
+
+    let help = run_cli(&["--help"], None)?;
+    assert!(help.status.success());
+    let help_text = String::from_utf8_lossy(&help.stdout);
+    assert!(help_text.contains("mcp [--control-port <port>] [--gui-only] [--workdir <dir>] [--control-token <token>]"));
+    Ok(())
+}
+
+#[test]
+fn live_mcp_stdio_recovers_after_oversized_content_length_request() -> TestResult {
+    let mut script = Vec::new();
+    script.extend(frame_content_length(
+        r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"cli-drain","version":"0.1.0"}}}"#,
+    ));
+    let pad = "x".repeat(16 * 1024 * 1024 + 512);
+    let huge = format!(r#"{{"jsonrpc":"2.0","id":"huge-1","method":"ping","params":{{"blob":"{pad}"}}}}"#);
+    script.extend(frame_content_length(&huge));
+    script.extend(frame_content_length(r#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#));
+
+    let out = run_cli(&["mcp"], Some(&script))?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert_eq!(out.status.code(), Some(0), "expected clean exit 0 after bounded frame drain, stderr:\n{stderr}");
+
+    let responses = parse_content_length_frames(&out.stdout)?;
+    assert_eq!(responses.len(), 3);
+    assert_eq!(responses[0]["id"], json!(0));
+    assert_eq!(responses[1]["id"], json!("huge-1"));
+    assert_eq!(responses[1]["error"]["code"], json!(-32600));
+    assert_eq!(responses[2]["id"], json!(2));
+    assert_eq!(responses[2]["result"], json!({}));
     Ok(())
 }
 

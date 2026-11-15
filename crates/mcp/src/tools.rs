@@ -42,6 +42,8 @@ pub struct McpServerState {
     #[cfg(not(target_arch = "wasm32"))]
     control_port: Option<u16>,
     #[cfg(not(target_arch = "wasm32"))]
+    control_token: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
     workdir_guard: Option<WorkdirGuard>,
     gui_host: Option<Box<dyn GuiSessionHost>>,
     gui_only: bool,
@@ -56,7 +58,9 @@ impl fmt::Debug for McpServerState {
         let mut s = f.debug_struct("McpServerState");
         s.field("session", &self.session);
         #[cfg(not(target_arch = "wasm32"))]
-        s.field("control_port", &self.control_port).field("workdir_guard", &self.workdir_guard);
+        s.field("control_port", &self.control_port)
+            .field("has_control_token", &self.control_token.is_some())
+            .field("workdir_guard", &self.workdir_guard);
         s.field("has_gui_host", &self.gui_host.is_some())
             .field("gui_only", &self.gui_only)
             .field("gui_toolset_enabled", &self.gui_toolset_enabled)
@@ -82,6 +86,8 @@ impl McpServerState {
             #[cfg(not(target_arch = "wasm32"))]
             control_port: None,
             #[cfg(not(target_arch = "wasm32"))]
+            control_token: None,
+            #[cfg(not(target_arch = "wasm32"))]
             workdir_guard: None,
             gui_host: None,
             gui_only: false,
@@ -103,6 +109,8 @@ impl McpServerState {
             #[cfg(not(target_arch = "wasm32"))]
             control_port: None,
             #[cfg(not(target_arch = "wasm32"))]
+            control_token: None,
+            #[cfg(not(target_arch = "wasm32"))]
             workdir_guard,
             gui_host: None,
             gui_only,
@@ -123,6 +131,7 @@ impl McpServerState {
         Ok(Self {
             session: Session::new(),
             control_port: Some(port),
+            control_token: None,
             workdir_guard: None,
             gui_host: None,
             gui_only: false,
@@ -150,6 +159,7 @@ impl McpServerState {
         Ok(Self {
             session,
             control_port: None,
+            control_token: None,
             workdir_guard: Some(guard),
             gui_host: None,
             gui_only: false,
@@ -170,6 +180,8 @@ impl McpServerState {
             session,
             #[cfg(not(target_arch = "wasm32"))]
             control_port: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            control_token: None,
             #[cfg(not(target_arch = "wasm32"))]
             workdir_guard: None,
             gui_host: Some(host),
@@ -264,6 +276,35 @@ impl McpServerState {
         }
         self.control_port = port;
         Ok(())
+    }
+
+    /// Explicit authentication token configured for live `--control` connections, if set.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn control_token(&self) -> Option<&str> {
+        self.control_token.as_deref()
+    }
+
+    /// Fluent builder to attach an explicit `ControlAuth` token for live `--control` requests.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_control_token(mut self, token: impl AsRef<str>) -> Result<Self, String> {
+        self.set_control_token(Some(token.as_ref()))?;
+        Ok(self)
+    }
+
+    /// Attach or clear an explicit `ControlAuth` token for live `--control` requests.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_control_token(&mut self, token: Option<&str>) -> Result<(), String> {
+        self.control_token = token.map(live_control::validate_control_token).transpose()?;
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn resolved_control_token(&self, port: u16) -> Result<Option<String>, StructuredErrorPayload> {
+        if let Some(ref explicit) = self.control_token {
+            return Ok(Some(explicit.clone()));
+        }
+        live_control::resolve_default_control_token(port)
     }
 
     /// Borrow the set of currently enabled per-command toolset groups.
@@ -747,7 +788,8 @@ pub(crate) fn dispatch_gui_backend(state: &mut McpServerState, method: &str, par
     }
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
-        return live_control::send_control_detailed(port, method, params);
+        let token = state.resolved_control_token(port)?;
+        return live_control::send_control_detailed_with_token(port, token.as_deref(), method, params);
     }
     Err(StructuredErrorPayload::new(
         ErrorCode::Conflict,
@@ -775,13 +817,17 @@ fn handle_doc_inspect(state: &McpServerState, args: &Map<String, Value>) -> Resu
     if let Some(port) = state.control_port()
         && sheet_id.is_none()
     {
-        return match live_control::send_control(port, "state.snapshot", json!({})) {
+        let token = match state.resolved_control_token(port) {
+            Ok(tok) => tok,
+            Err(payload) => return Ok(errors::result_from_payload(&payload)),
+        };
+        return match live_control::send_control_detailed_with_token(port, token.as_deref(), "state.snapshot", json!({})) {
             Ok(snapshot) => ToolCallResult::ok_json(&json!({
                 "mode": "live_attach",
                 "control_port": port,
                 "snapshot": snapshot,
             })),
-            Err(err) => Ok(errors::result_from_error_message(err)),
+            Err(payload) => Ok(errors::result_from_payload(&payload)),
         };
     }
 
@@ -1187,9 +1233,19 @@ fn rollback_batch(state: &mut McpServerState, snapshot: Option<Session>, remote_
     }
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
+        let Ok(token) = state.resolved_control_token(port) else {
+            return false;
+        };
         let mut all_undone = true;
         for _ in 0..remote_mutated_steps {
-            if live_control::send_control(port, "engine.execute", json!({ "command_id": "edit.undo", "params": {} })).is_err() {
+            if live_control::send_control_detailed_with_token(
+                port,
+                token.as_deref(),
+                "engine.execute",
+                json!({ "command_id": "edit.undo", "params": {} }),
+            )
+            .is_err()
+            {
                 all_undone = false;
                 break;
             }
@@ -1205,11 +1261,8 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
 
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
-        return execute_remote_command(port, command_id, params).map_err(|msg| {
-            let mut err = EngineError::with_code(ErrorCode::IoError, msg);
-            err = err.with_retryable(true).with_remediation("Ensure the desktop control server is running and reachable.");
-            err
-        });
+        let token = state.resolved_control_token(port).map_err(engine_error_from_payload)?;
+        return execute_remote_command(port, token.as_deref(), command_id, params).map_err(engine_error_from_payload);
     }
 
     if is_ui_catalog_command(command_id) {
@@ -1232,9 +1285,18 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn execute_remote_command(port: u16, command_id: &str, params: Value) -> Result<Value, String> {
+fn engine_error_from_payload(payload: StructuredErrorPayload) -> EngineError {
+    let mut err = EngineError::with_code(payload.code, payload.message);
+    err.retryable = payload.retryable;
+    err.remediation = payload.remediation;
+    err.details = payload.details;
+    err
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn execute_remote_command(port: u16, token: Option<&str>, command_id: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
     if command_id == "ping" || is_ui_catalog_command(command_id) {
-        let res = live_control::send_control(port, command_id, params)?;
+        let res = live_control::send_control_detailed_with_token(port, token, command_id, params)?;
         return Ok(json!({
             "command_id": command_id,
             "mutated": false,
@@ -1242,7 +1304,7 @@ fn execute_remote_command(port: u16, command_id: &str, params: Value) -> Result<
             "result": res,
         }));
     }
-    live_control::send_control(port, "engine.execute", json!({ "command_id": command_id, "params": params }))
+    live_control::send_control_detailed_with_token(port, token, "engine.execute", json!({ "command_id": command_id, "params": params }))
 }
 
 fn is_ui_catalog_command(command_id: &str) -> bool {
@@ -1346,20 +1408,25 @@ pub(crate) fn encode_base64(input: &[u8]) -> String {
 
 #[cfg(not(target_arch = "wasm32"))]
 mod live_control {
-    use std::io::{BufRead, BufReader, Read, Write};
+    use std::ffi::OsString;
+    use std::fs::File;
+    use std::io::{self, BufRead, BufReader, Read, Write};
     use std::net::{SocketAddr, TcpStream};
+    use std::path::PathBuf;
     use std::time::Duration;
 
     use lumencraft_doc::ErrorCode;
     use lumencraft_engine::EngineError;
     use serde::Deserialize;
-    use serde_json::{Value, json};
+    use serde_json::{Map, Value};
 
     use crate::errors::StructuredErrorPayload;
 
     const CONNECT_TIMEOUT: Duration = Duration::from_secs(2);
     const IO_TIMEOUT: Duration = Duration::from_secs(5);
     pub(crate) const MAX_CONTROL_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+    const MAX_CONTROL_TOKEN_BYTES: usize = 512;
+    const MAX_CONTROL_TOKEN_FILE_BYTES: usize = 1024;
 
     #[derive(Debug, Deserialize)]
     struct ControlResponse {
@@ -1372,11 +1439,98 @@ mod live_control {
         error_detail: Option<Value>,
     }
 
-    pub fn send_control(port: u16, method: &str, params: Value) -> Result<Value, String> {
-        send_control_detailed(port, method, params).map_err(|payload| payload.message)
+    pub(crate) fn validate_control_token(raw: &str) -> Result<String, String> {
+        if raw.is_empty() {
+            return Err(String::from("control token must not be empty"));
+        }
+        if raw.len() > MAX_CONTROL_TOKEN_BYTES {
+            return Err(format!("control token length {} exceeds maximum {MAX_CONTROL_TOKEN_BYTES} bytes", raw.len()));
+        }
+        if raw.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+            return Err(String::from("control token must not contain whitespace or control characters"));
+        }
+        Ok(raw.to_owned())
     }
 
-    pub fn send_control_detailed(port: u16, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
+    pub(crate) fn resolve_config_dir_with_env(env_get: &impl Fn(&str) -> Option<OsString>) -> PathBuf {
+        let nonempty_path = |key: &str| env_get(key).filter(|v| !v.is_empty()).map(PathBuf::from);
+
+        #[cfg(target_os = "macos")]
+        {
+            nonempty_path("HOME")
+                .map(|h| h.join("Library").join("Application Support").join("LumenCraft"))
+                .unwrap_or_else(|| std::env::temp_dir().join("lumencraft"))
+        }
+        #[cfg(target_os = "windows")]
+        {
+            let fallback_base = nonempty_path("USERPROFILE")
+                .map(|h| h.join("AppData").join("Roaming").join("LumenCraft"))
+                .unwrap_or_else(|| std::env::temp_dir().join("lumencraft"));
+            nonempty_path("APPDATA").map(|p| p.join("LumenCraft")).unwrap_or(fallback_base)
+        }
+        #[cfg(all(unix, not(target_os = "macos")))]
+        {
+            let home = nonempty_path("HOME");
+            nonempty_path("XDG_CONFIG_HOME")
+                .map(|p| p.join("lumencraft"))
+                .or_else(|| home.map(|h| h.join(".config").join("lumencraft")))
+                .unwrap_or_else(|| std::env::temp_dir().join("lumencraft-config"))
+        }
+    }
+
+    pub(crate) fn control_token_file_path_with_env(port: u16, env_get: &impl Fn(&str) -> Option<OsString>) -> PathBuf {
+        resolve_config_dir_with_env(env_get).join(format!("control-{port}.token"))
+    }
+
+    pub(crate) fn resolve_default_control_token(port: u16) -> Result<Option<String>, StructuredErrorPayload> {
+        resolve_default_control_token_with_env(port, &|key| std::env::var_os(key))
+    }
+
+    pub(crate) fn resolve_default_control_token_with_env(
+        port: u16,
+        env_get: &impl Fn(&str) -> Option<OsString>,
+    ) -> Result<Option<String>, StructuredErrorPayload> {
+        if let Some(raw_env) = env_get("LUMENCRAFT_CONTROL_TOKEN") {
+            let text =
+                raw_env.to_str().ok_or_else(|| StructuredErrorPayload::new(ErrorCode::BadInput, "LUMENCRAFT_CONTROL_TOKEN must be valid UTF-8"))?;
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                let tok = validate_control_token(trimmed)
+                    .map_err(|err| StructuredErrorPayload::new(ErrorCode::BadInput, format!("invalid LUMENCRAFT_CONTROL_TOKEN: {err}")))?;
+                return Ok(Some(tok));
+            }
+        }
+
+        let path = control_token_file_path_with_env(port, env_get);
+        let file = match File::open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(StructuredErrorPayload::new(
+                    ErrorCode::IoError,
+                    format!("failed to read control token file `{}`: {err}", path.display()),
+                ));
+            }
+        };
+        let mut buf = Vec::new();
+        file.take(MAX_CONTROL_TOKEN_FILE_BYTES as u64 + 1).read_to_end(&mut buf).map_err(|err| {
+            StructuredErrorPayload::new(ErrorCode::IoError, format!("failed to read control token file `{}`: {err}", path.display()))
+        })?;
+        if buf.len() > MAX_CONTROL_TOKEN_FILE_BYTES {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("control token file `{}` exceeds maximum {MAX_CONTROL_TOKEN_FILE_BYTES} bytes", path.display()),
+            ));
+        }
+        let text = std::str::from_utf8(&buf)
+            .map_err(|_| StructuredErrorPayload::new(ErrorCode::BadInput, format!("control token file `{}` is not valid UTF-8", path.display())))?;
+        let trimmed = text.trim();
+        let tok = validate_control_token(trimmed)
+            .map_err(|err| StructuredErrorPayload::new(ErrorCode::BadInput, format!("invalid control token file `{}`: {err}", path.display())))?;
+        Ok(Some(tok))
+    }
+
+    pub fn send_control_detailed_with_token(port: u16, token: Option<&str>, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
         if port == 0 {
             return Err(StructuredErrorPayload::new(ErrorCode::BadInput, "control port must be in 1..=65535"));
         }
@@ -1392,7 +1546,7 @@ mod live_control {
         let mut writer = stream
             .try_clone()
             .map_err(|err| StructuredErrorPayload::new(ErrorCode::IoError, format!("control stream clone failed: {err}")).with_retryable(true))?;
-        send_control_envelope_on_io(&mut stream, &mut writer, method, params, MAX_CONTROL_RESPONSE_BYTES)
+        send_control_envelope_on_io(&mut stream, &mut writer, token, method, params, MAX_CONTROL_RESPONSE_BYTES)
     }
 
     #[cfg(test)]
@@ -1403,23 +1557,41 @@ mod live_control {
         params: Value,
         max_response_bytes: usize,
     ) -> Result<Value, String> {
-        send_control_envelope_on_io(reader_io, writer_io, method, params, max_response_bytes).map_err(|payload| payload.message)
+        send_control_envelope_on_io(reader_io, writer_io, None, method, params, max_response_bytes).map_err(|payload| payload.message)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn send_control_with_token_on_io<R: Read, W: Write>(
+        reader_io: &mut R,
+        writer_io: &mut W,
+        token: Option<&str>,
+        method: &str,
+        params: Value,
+        max_response_bytes: usize,
+    ) -> Result<Value, StructuredErrorPayload> {
+        send_control_envelope_on_io(reader_io, writer_io, token, method, params, max_response_bytes)
     }
 
     pub(crate) fn send_control_envelope_on_io<R: Read, W: Write>(
         reader_io: &mut R,
         writer_io: &mut W,
+        token: Option<&str>,
         method: &str,
         params: Value,
         max_response_bytes: usize,
     ) -> Result<Value, StructuredErrorPayload> {
         let req_id = String::from("mcp-1");
-        let payload = serde_json::to_vec(&json!({
-            "id": req_id,
-            "method": method,
-            "params": params,
-        }))
-        .map_err(|err| StructuredErrorPayload::new(ErrorCode::InternalError, format!("failed to encode control request: {err}")))?;
+        let mut envelope = Map::new();
+        envelope.insert(String::from("id"), Value::String(req_id.clone()));
+        if let Some(tok) = token {
+            let validated = validate_control_token(tok).map_err(|err| StructuredErrorPayload::new(ErrorCode::BadInput, err))?;
+            envelope.insert(String::from("token"), Value::String(validated));
+        }
+        envelope.insert(String::from("method"), Value::String(method.to_owned()));
+        envelope.insert(String::from("params"), params);
+
+        let payload = serde_json::to_vec(&Value::Object(envelope))
+            .map_err(|err| StructuredErrorPayload::new(ErrorCode::InternalError, format!("failed to encode control request: {err}")))?;
 
         writer_io
             .write_all(&payload)
@@ -1450,7 +1622,7 @@ mod live_control {
                 return StructuredErrorPayload::from_engine_error(&engine_err);
             }
             if let Some(code_str) = detail.get("code").and_then(Value::as_str) {
-                let code = ErrorCode::from_code_str(code_str);
+                let code = if code_str == "unauthorized" { ErrorCode::BadInput } else { ErrorCode::from_code_str(code_str) };
                 let msg = detail
                     .get("message")
                     .and_then(Value::as_str)
@@ -1463,6 +1635,10 @@ mod live_control {
                 }
                 if let Some(rem) = detail.get("remediation").and_then(Value::as_str) {
                     payload = payload.with_remediation(rem);
+                } else if code_str == "unauthorized" {
+                    payload = payload.with_remediation(
+                        "Pass matching --control-token <token>, set LUMENCRAFT_CONTROL_TOKEN, or verify control-<port>.token in the config directory.",
+                    );
                 }
                 if let Some(extra) = detail.get("details") {
                     payload = payload.with_details(extra.clone());
@@ -1472,6 +1648,11 @@ mod live_control {
         }
         let msg = error.unwrap_or_else(|| String::from("desktop control command failed"));
         let lower = msg.to_ascii_lowercase();
+        if lower.contains("unauthorized") || lower.contains("invalid or missing control authentication token") {
+            return StructuredErrorPayload::new(ErrorCode::BadInput, msg).with_remediation(
+                "Pass matching --control-token <token>, set LUMENCRAFT_CONTROL_TOKEN, or verify control-<port>.token in the config directory.",
+            );
+        }
         if lower.contains("gui_only_violation") || lower.contains("gui-only") || lower.contains("gui_only") {
             return StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, msg);
         }
@@ -1665,15 +1846,82 @@ mod tests {
         let mut gui_err = Cursor::new(
             br#"{"id":"mcp-1","ok":false,"error":"blocked","error_detail":{"code":"gui_only_violation","category":"policy","message":"forbidden shortcut","retryable":false,"remediation":"Use visible UI","details":{"remote":true}}}"#.as_slice(),
         );
-        let parsed = super::live_control::send_control_envelope_on_io(&mut gui_err, &mut outbound, "ui.invoke_menu", json!({}), 4096)
+        let parsed = super::live_control::send_control_envelope_on_io(&mut gui_err, &mut outbound, None, "ui.invoke_menu", json!({}), 4096)
             .expect_err("structured detail err");
         assert_eq!(parsed.code, lumencraft_doc::ErrorCode::GuiOnlyViolation);
         assert_eq!(parsed.remediation.as_deref(), Some("Use visible UI"));
 
         let mut outbound = Vec::new();
         let mut disabled_err = Cursor::new(br#"{"id":"mcp-1","ok":false,"error":"control is disabled"}"#.as_slice());
-        let fallback = super::live_control::send_control_envelope_on_io(&mut disabled_err, &mut outbound, "ui.switch_tab", json!({}), 4096)
+        let fallback = super::live_control::send_control_envelope_on_io(&mut disabled_err, &mut outbound, None, "ui.switch_tab", json!({}), 4096)
             .expect_err("disabled heuristic");
         assert_eq!(fallback.code, lumencraft_doc::ErrorCode::Conflict);
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn live_control_token_validation_file_discovery_and_wire_envelope() {
+        use std::ffi::OsString;
+        use std::io::Cursor;
+
+        assert!(McpServerState::with_control_port(41234).expect("control port").with_control_token("").is_err());
+        assert!(McpServerState::with_control_port(41234).expect("control port").with_control_token("bad token with space").is_err());
+        assert!(McpServerState::with_control_port(41234).expect("control port").with_control_token("bad\nline").is_err());
+        let mut state = McpServerState::with_control_port(41234).expect("control port");
+        state.set_control_token(Some("secret-token-42")).expect("valid token");
+        assert_eq!(state.control_token(), Some("secret-token-42"));
+        assert!(!format!("{state:?}").contains("secret-token-42"), "Debug output must not leak token");
+
+        let mut outbound = Vec::new();
+        let mut inbound = Cursor::new(br#"{"id":"mcp-1","ok":true,"result":{"ok":true}}"#.as_slice());
+        let res = super::live_control::send_control_with_token_on_io(&mut inbound, &mut outbound, Some("secret-token-42"), "ping", json!({}), 1024)
+            .expect("token ok");
+        assert_eq!(res["ok"], json!(true));
+        let sent: Value = serde_json::from_slice(&outbound).expect("sent json");
+        assert_eq!(sent, json!({"id": "mcp-1", "token": "secret-token-42", "method": "ping", "params": {}}));
+
+        // Unauthorized control response maps cleanly to PermissionDenied.
+        let mut outbound = Vec::new();
+        let mut unauth = Cursor::new(
+            br#"{"id":"mcp-1","ok":false,"error":"invalid token","error_detail":{"code":"unauthorized","message":"invalid or missing control authentication token"}}"#
+                .as_slice(),
+        );
+        let err = super::live_control::send_control_with_token_on_io(&mut unauth, &mut outbound, Some("wrong-token"), "ping", json!({}), 4096)
+            .expect_err("unauthorized");
+        assert_eq!(err.code, lumencraft_doc::ErrorCode::BadInput);
+        assert!(err.remediation.as_deref().is_some_and(|r| r.contains("--control-token")));
+
+        // Platform token file discovery and LUMENCRAFT_CONTROL_TOKEN precedence.
+        let tmp_dir = std::env::temp_dir().join(format!("lc_mcp_tok_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir).expect("tempdir");
+        let port = 52411;
+        let fake_env = |key: &str| -> Option<OsString> {
+            match key {
+                "HOME" | "USERPROFILE" | "APPDATA" | "XDG_CONFIG_HOME" => Some(tmp_dir.as_os_str().to_os_string()),
+                _ => None,
+            }
+        };
+        assert_eq!(super::live_control::resolve_default_control_token_with_env(port, &fake_env).expect("missing file ok"), None);
+
+        let tok_path = super::live_control::control_token_file_path_with_env(port, &fake_env);
+        std::fs::create_dir_all(tok_path.parent().expect("parent")).expect("mkdir");
+        std::fs::write(&tok_path, "file-token-99\n").expect("write token file");
+        assert_eq!(
+            super::live_control::resolve_default_control_token_with_env(port, &fake_env).expect("read token file"),
+            Some(String::from("file-token-99"))
+        );
+
+        let env_override = |key: &str| -> Option<OsString> {
+            if key == "LUMENCRAFT_CONTROL_TOKEN" {
+                return Some(OsString::from("env-token-77"));
+            }
+            fake_env(key)
+        };
+        assert_eq!(
+            super::live_control::resolve_default_control_token_with_env(port, &env_override).expect("env token"),
+            Some(String::from("env-token-77"))
+        );
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

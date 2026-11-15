@@ -65,92 +65,96 @@ struct ParsedManifest {
 
 /// Execute `lumencraft-cli run <script> [--workdir <dir>] [--json]`.
 pub fn run_script(args: &[String]) -> Result<(), CliError> {
-    let parsed = parse_runner_args(args, "usage: lumencraft-cli run <script> [--workdir <dir>] [--json]")?;
-    let resolver = build_resolver(parsed.workdir.as_deref(), Path::new("."))?;
-    let raw_text = read_text_source(&parsed.source_path)?;
-    let commands = parse_script_commands(&raw_text, &resolver)?;
+    crate::cmd_convert::run_guarded_cli("cli.run", || {
+        let parsed = parse_runner_args(args, "usage: lumencraft-cli run <script> [--workdir <dir>] [--json]")?;
+        let resolver = build_resolver(parsed.workdir.as_deref(), Path::new("."))?;
+        let raw_text = read_text_source(&parsed.source_path)?;
+        let commands = parse_script_commands(&raw_text, &resolver)?;
 
-    let mut session = Session::new();
-    if let Some(dir) = parsed.workdir.as_deref() {
-        session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
-    }
-    let results = execute_commands(&mut session, &commands, parsed.workdir.is_some())?;
+        let mut session = Session::new();
+        if let Some(dir) = parsed.workdir.as_deref() {
+            session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
+        }
+        let results = execute_commands(&mut session, &commands, parsed.workdir.is_some())?;
 
-    if parsed.json {
-        let payload = json!({
-            "ok": true,
-            "script": parsed.source_path,
-            "commands_executed": results.len(),
-            "total_sheets": session.document().total_sheet_count(),
-            "results": results,
-        });
-        let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
-        println!("{text}");
-    } else {
-        println!("executed {} command(s) cleanly (sheets: {})", results.len(), session.document().total_sheet_count());
-    }
-    Ok(())
+        if parsed.json {
+            let payload = json!({
+                "ok": true,
+                "script": parsed.source_path,
+                "commands_executed": results.len(),
+                "total_sheets": session.document().total_sheet_count(),
+                "results": results,
+            });
+            let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
+            println!("{text}");
+        } else {
+            println!("executed {} command(s) cleanly (sheets: {})", results.len(), session.document().total_sheet_count());
+        }
+        Ok(())
+    })
 }
 
 /// Execute `lumencraft-cli batch <manifest> [--workdir <dir>] [--json]`.
 pub fn run_batch(args: &[String]) -> Result<(), CliError> {
-    let parsed = parse_runner_args(args, "usage: lumencraft-cli batch <manifest> [--workdir <dir>] [--json]")?;
-    let manifest_base = if parsed.source_path == "-" {
-        Path::new(".").to_path_buf()
-    } else {
-        Path::new(&parsed.source_path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new(".")).to_path_buf()
-    };
-    let resolver = build_resolver(parsed.workdir.as_deref(), &manifest_base)?;
-    let raw_text = read_text_source(&parsed.source_path)?;
-    let manifest = parse_batch_manifest(&raw_text, &resolver)?;
+    crate::cmd_convert::run_guarded_cli("cli.batch", || {
+        let parsed = parse_runner_args(args, "usage: lumencraft-cli batch <manifest> [--workdir <dir>] [--json]")?;
+        let manifest_base = if parsed.source_path == "-" {
+            Path::new(".").to_path_buf()
+        } else {
+            Path::new(&parsed.source_path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new(".")).to_path_buf()
+        };
+        let resolver = build_resolver(parsed.workdir.as_deref(), &manifest_base)?;
+        let raw_text = read_text_source(&parsed.source_path)?;
+        let manifest = parse_batch_manifest(&raw_text, &resolver)?;
 
-    let mut session = open_manifest_base_session(&manifest)?;
-    if let Some(dir) = parsed.workdir.as_deref() {
-        session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
-    }
-    load_manifest_inputs(&mut session, &manifest.inputs)?;
-    let results = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
-    session.recalculate_all()?;
+        let mut session = open_manifest_base_session(&manifest)?;
+        if let Some(dir) = parsed.workdir.as_deref() {
+            session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
+        }
+        load_manifest_inputs(&mut session, &manifest.inputs)?;
+        let results = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
+        session.recalculate_all()?;
 
-    let mut export_summaries = Vec::with_capacity(manifest.exports.len());
-    for exp in &manifest.exports {
-        let ttf_font_bytes = exp.ttf_font_path.as_deref().map(load_validated_ttf_font).transpose()?;
-        let summary = export_from_document(&ExportRequest {
-            doc: session.document(),
-            out_path: &exp.out_path,
-            format: exp.format,
-            sheet: exp.sheet.as_deref(),
-            dpi: exp.dpi,
-            pretty: exp.pretty,
-            tab_index: exp.tab_index,
-            pdf_version: exp.pdf_version,
-            embedded_truetype_font: ttf_font_bytes.as_deref(),
-        })?;
-        export_summaries.push(json!({
-            "out": summary.out_path,
-            "format": summary.format,
-            "sheet_id": summary.sheet_id,
-            "bytes_written": summary.bytes_written,
-        }));
-    }
+        let mut export_summaries = Vec::with_capacity(manifest.exports.len());
+        for exp in &manifest.exports {
+            let ttf_font_bytes = exp.ttf_font_path.as_deref().map(load_validated_ttf_font).transpose()?;
+            let summary = export_from_document(&ExportRequest {
+                doc: session.document(),
+                out_path: &exp.out_path,
+                format: exp.format,
+                sheet: exp.sheet.as_deref(),
+                dpi: exp.dpi,
+                pretty: exp.pretty,
+                tab_index: exp.tab_index,
+                pdf_version: exp.pdf_version,
+                embedded_truetype_font: ttf_font_bytes.as_deref(),
+            })?;
+            export_summaries.push(json!({
+                "out": summary.out_path,
+                "format": summary.format,
+                "sheet_id": summary.sheet_id,
+                "bytes_written": summary.bytes_written,
+            }));
+        }
 
-    if parsed.json {
-        let payload = json!({
-            "ok": true,
-            "schema": BATCH_SCHEMA_V1,
-            "manifest": parsed.source_path,
-            "inputs_loaded": manifest.inputs.len(),
-            "commands_executed": results.len(),
-            "exports_written": export_summaries.len(),
-            "exports": export_summaries,
-            "results": results,
-        });
-        let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
-        println!("{text}");
-    } else {
-        println!("batch completed: {} input(s), {} command(s), {} export(s)", manifest.inputs.len(), results.len(), export_summaries.len());
-    }
-    Ok(())
+        if parsed.json {
+            let payload = json!({
+                "ok": true,
+                "schema": BATCH_SCHEMA_V1,
+                "manifest": parsed.source_path,
+                "inputs_loaded": manifest.inputs.len(),
+                "commands_executed": results.len(),
+                "exports_written": export_summaries.len(),
+                "exports": export_summaries,
+                "results": results,
+            });
+            let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
+            println!("{text}");
+        } else {
+            println!("batch completed: {} input(s), {} command(s), {} export(s)", manifest.inputs.len(), results.len(), export_summaries.len());
+        }
+        Ok(())
+    })
 }
 
 fn build_resolver(workdir: Option<&str>, fallback_base: &Path) -> Result<PathResolver, CliError> {

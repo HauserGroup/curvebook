@@ -7,7 +7,8 @@ use lumencraft_doc::{
     GraphAnnotation, GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
     LayoutItem, LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, ParameterScope, PartsOfWholeTable, PlacementMode, ProjectDocument,
     ResultCell, ResultSheet, ResultStatus, ResultTab, SheetCellRange, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
-    TableArchetype, TableKind, VariableRole, XColumnMode, XyTable, validate_title,
+    TableArchetype, TableKind, VariableRole, XColumnMode, XyTable, validate_cell_grid, validate_data_sets, validate_project_cells, validate_rows,
+    validate_sheet_cells, validate_subcolumns, validate_title,
 };
 use lumencraft_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 use serde::Deserialize;
@@ -267,7 +268,53 @@ fn parse_variable_role(raw: &str) -> Result<VariableRole, EngineError> {
     }
 }
 
-fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchetype, EngineError> {
+fn document_used_cells(doc: &ProjectDocument) -> usize {
+    doc.data_sheets.iter().fold(0usize, |acc, sheet| acc.saturating_add(sheet.archetype.allocated_cell_slots()))
+}
+
+fn validate_sheet_and_project_budget(
+    existing_cells: usize,
+    rows: usize,
+    cols: usize,
+    subcolumns: usize,
+    extra_cols_per_row: usize,
+) -> Result<(), EngineError> {
+    validate_rows(rows)?;
+    validate_data_sets(cols)?;
+    let sheet_cells = validate_cell_grid(rows, cols, subcolumns, extra_cols_per_row)?;
+    validate_project_cells(existing_cells, sheet_cells)?;
+    Ok(())
+}
+
+fn projected_cloned_sheet_cells(arch: &TableArchetype, override_replicates: Option<usize>) -> Result<usize, DocError> {
+    if let Some(n) = override_replicates {
+        validate_subcolumns(n)?;
+        return match arch {
+            TableArchetype::Xy(t) => {
+                let rows = t.x_cells.len().max(t.data_sets.first().map_or(0, |d| d.cells.len()));
+                validate_cell_grid(rows, t.data_sets.len(), n, t.x_mode.subcolumn_count())
+            }
+            TableArchetype::Grouped(t) => {
+                let rows = t.data_sets.first().map_or(0, |d| d.cells.len());
+                validate_cell_grid(rows, t.data_sets.len(), n, 0)
+            }
+            TableArchetype::Nested(t) => {
+                let rows = t.groups.first().map_or(0, |g| g.cells.len());
+                validate_cell_grid(rows, t.groups.len(), n, 0)
+            }
+            _ => {
+                let cells = arch.allocated_cell_slots();
+                validate_sheet_cells(cells)?;
+                Ok(cells)
+            }
+        };
+    }
+    let cells = arch.allocated_cell_slots();
+    validate_sheet_cells(cells)?;
+    Ok(cells)
+}
+
+fn build_archetype_from_params(parsed: &CreateDataParams, existing_cells: usize) -> Result<TableArchetype, EngineError> {
     let kind = parse_table_kind(parsed.kind.as_deref().unwrap_or("xy"))?;
     let default_rows = match kind {
         TableKind::Contingency => 2,
@@ -287,6 +334,7 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
         TableKind::Xy => {
             let submode = parse_subcolumn_mode(parsed.subcolumn_mode.as_ref(), replicates)?;
             let x_mode = parse_x_mode(parsed.x_mode.as_ref())?;
+            validate_sheet_and_project_budget(existing_cells, rows, cols, submode.subcolumn_count(), x_mode.subcolumn_count())?;
             let mut xy = XyTable::new_with_x_mode(x_mode, submode, cols, rows)?;
             if let Some(ref xt) = parsed.x_title {
                 validate_title(xt)?;
@@ -298,14 +346,17 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
             let design = parse_column_design_hint(parsed.design_hint.as_ref())?;
             let col = if parsed.subcolumn_mode.is_some() || replicates > 1 {
                 let submode = parse_subcolumn_mode(parsed.subcolumn_mode.as_ref(), replicates)?;
+                validate_sheet_and_project_budget(existing_cells, rows, cols, submode.subcolumn_count(), 0)?;
                 ColumnTable::new_with_subcolumns(design, submode, cols, rows)?
             } else {
+                validate_sheet_and_project_budget(existing_cells, rows, cols, 1, 0)?;
                 ColumnTable::new(design, cols, rows)?
             };
             Ok(TableArchetype::Column(col))
         }
         TableKind::Grouped => {
             let submode = parse_subcolumn_mode(parsed.subcolumn_mode.as_ref(), replicates)?;
+            validate_sheet_and_project_budget(existing_cells, rows, cols, submode.subcolumn_count(), 0)?;
             let mut grp = GroupedTable::new(submode, cols, rows)?;
             if let Some(ref rf) = parsed.row_factor_title {
                 validate_title(rf)?;
@@ -318,6 +369,7 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
             Ok(TableArchetype::Grouped(grp))
         }
         TableKind::Contingency => {
+            validate_sheet_and_project_budget(existing_cells, rows, cols, 1, 0)?;
             let mut cont = ContingencyTable::new(cols, rows)?;
             if let Some(ref rf) = parsed.row_factor_title {
                 validate_title(rf)?;
@@ -330,6 +382,7 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
             Ok(TableArchetype::Contingency(cont))
         }
         TableKind::Survival => {
+            validate_sheet_and_project_budget(existing_cells, rows, cols, 1, 1)?;
             let mut surv = SurvivalTable::new(cols, rows)?;
             if let Some(ref tt) = parsed.time_title {
                 validate_title(tt)?;
@@ -337,14 +390,27 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
             }
             Ok(TableArchetype::Survival(surv))
         }
-        TableKind::PartsOfWhole => Ok(TableArchetype::PartsOfWhole(PartsOfWholeTable::new(cols, rows)?)),
-        TableKind::MultipleVariables => build_multivariate_archetype(cols, rows, parsed.variables.as_deref()),
-        TableKind::Nested => Ok(TableArchetype::Nested(NestedTable::new(cols, replicates, rows)?)),
+        TableKind::PartsOfWhole => {
+            validate_sheet_and_project_budget(existing_cells, rows, cols, 1, 0)?;
+            Ok(TableArchetype::PartsOfWhole(PartsOfWholeTable::new(cols, rows)?))
+        }
+        TableKind::MultipleVariables => build_multivariate_archetype(cols, rows, parsed.variables.as_deref(), existing_cells),
+        TableKind::Nested => {
+            validate_subcolumns(replicates)?;
+            validate_sheet_and_project_budget(existing_cells, rows, cols, replicates, 0)?;
+            Ok(TableArchetype::Nested(NestedTable::new(cols, replicates, rows)?))
+        }
     }
 }
 
-fn build_multivariate_archetype(cols: usize, rows: usize, vars: Option<&[VariableInitInput]>) -> Result<TableArchetype, EngineError> {
+fn build_multivariate_archetype(
+    cols: usize,
+    rows: usize,
+    vars: Option<&[VariableInitInput]>,
+    existing_cells: usize,
+) -> Result<TableArchetype, EngineError> {
     let count = vars.map_or(cols, |v| cols.max(v.len()));
+    validate_sheet_and_project_budget(existing_cells, rows, count, 1, 0)?;
     let mut mv = MultipleVariablesTable::new(count, rows)?;
     if let Some(items) = vars {
         for (idx, item) in items.iter().enumerate() {
@@ -414,7 +480,8 @@ fn run_sheet_create_data(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
 
     let default_title = format!("Data {}", ctx.session.doc.data_sheets.len() + 1);
     let title = parsed.title.as_deref().unwrap_or(&default_title).to_owned();
-    let archetype = build_archetype_from_params(&parsed)?;
+    let existing_cells = document_used_cells(&ctx.session.doc);
+    let archetype = build_archetype_from_params(&parsed, existing_cells)?;
     let mut sheet = DataSheet::new(id.clone(), title.clone(), archetype)?;
 
     let mut reserved = HashSet::new();
@@ -810,12 +877,16 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
 
     match section {
         SheetSection::Data => {
-            let mut copy = ctx
+            let existing_cells = document_used_cells(&ctx.session.doc);
+            let src = ctx
                 .session
                 .doc
                 .data_sheet(&id)
-                .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", id.as_str())))?;
+            let needed = src.archetype.allocated_cell_slots();
+            validate_sheet_cells(needed)?;
+            validate_project_cells(existing_cells, needed)?;
+            let mut copy = src.clone();
             copy.id = new_id.clone();
             copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
             copy.frozen = parsed.frozen.unwrap_or(false);
@@ -1071,10 +1142,15 @@ fn resolve_family_root_data_id(doc: &ProjectDocument, raw_id: &SheetId) -> Resul
 fn clone_family_into_doc(doc: &mut ProjectDocument, req: &FamilyCloneOptions<'_>) -> Result<CommandOutcome, EngineError> {
     let raw_id = parse_sheet_id(req.raw_sheet_id)?;
     let root_data_id = resolve_family_root_data_id(doc, &raw_id)?;
-    let src_ds = doc
-        .data_sheet(&root_data_id)
-        .cloned()
-        .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", root_data_id.as_str())))?;
+    let existing_cells = document_used_cells(doc);
+    let src_ds = {
+        let src_ref = doc
+            .data_sheet(&root_data_id)
+            .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", root_data_id.as_str())))?;
+        let projected_cells = projected_cloned_sheet_cells(&src_ref.archetype, req.override_replicates)?;
+        validate_project_cells(existing_cells, projected_cells)?;
+        src_ref.clone()
+    };
 
     let mut reserved: HashSet<String> = HashSet::new();
     let id_prefix = req.prefix.unwrap_or(root_data_id.as_str());

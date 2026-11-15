@@ -279,14 +279,16 @@ pub fn column_subcolumn_count(arch: &TableArchetype, col: usize) -> usize {
 /// # Errors
 /// Returns [`EngineError`] if the sheet is missing, invalid, or fails compilation.
 pub fn compile_sheet_scene(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<ChartScene, EngineError> {
-    if let Some(graph) = doc.graph_sheet(sheet_id) {
-        return Ok(lumencraft_chart::compile_graph(graph, doc)?);
-    }
-    if let Some(layout) = doc.layout_sheet(sheet_id) {
-        return Ok(lumencraft_chart::compile_layout(layout, doc)?);
-    }
-    Err(EngineError::with_code(ErrorCode::NotFound, format!("sheet `{sheet_id}` is not a graph or layout sheet"))
-        .with_details(json!({ "sheet_id": sheet_id.as_str() })))
+    crate::guard::run_guarded("compile_sheet_scene", || {
+        if let Some(graph) = doc.graph_sheet(sheet_id) {
+            return Ok(lumencraft_chart::compile_graph(graph, doc)?);
+        }
+        if let Some(layout) = doc.layout_sheet(sheet_id) {
+            return Ok(lumencraft_chart::compile_layout(layout, doc)?);
+        }
+        Err(EngineError::with_code(ErrorCode::NotFound, format!("sheet `{sheet_id}` is not a graph or layout sheet"))
+            .with_details(json!({ "sheet_id": sheet_id.as_str() })))
+    })
 }
 
 /// Write exported bytes to a filesystem path, mapping I/O errors to structured [`EngineError`].

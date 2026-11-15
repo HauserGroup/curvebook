@@ -36,7 +36,7 @@ commands:
                     measure parse, recalculation, compilation and export timings
   perf [--json]
                     run synthetic G12 performance checks
-  mcp [--control-port <port>] [--gui-only] [--workdir <dir>]
+  mcp [--control-port <port>] [--gui-only] [--workdir <dir>] [--control-token <token>]
                     run the Model Context Protocol (MCP) server over stdio
 
 options:
@@ -64,7 +64,7 @@ fn wants_json_output(args: &[String]) -> bool {
 }
 
 fn dispatch(args: &[String]) -> Result<(), CliError> {
-    match args.first().map(String::as_str) {
+    cmd_convert::run_guarded_cli("cli.dispatch", || match args.first().map(String::as_str) {
         None | Some("-h" | "--help" | "help") => {
             print!("{USAGE}");
             Ok(())
@@ -88,12 +88,13 @@ fn dispatch(args: &[String]) -> Result<(), CliError> {
             }
             Err(CliError::Usage(format!("unknown command `{other}`\n\n{USAGE}")))
         }
-    }
+    })
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct McpCliConfig {
     control_port: Option<u16>,
+    control_token: Option<String>,
     gui_only: bool,
     workdir: Option<PathBuf>,
 }
@@ -168,6 +169,9 @@ fn run_mcp(args: &[String]) -> Result<(), CliError> {
         }
         (None, false) => lumencraft_mcp::McpServerState::new(),
     };
+    if let Some(ref token) = cfg.control_token {
+        state.set_control_token(Some(token)).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
+    }
     if let Some(ref workdir) = cfg.workdir {
         let _ = sandbox::WorkdirGuard::new(workdir)?;
         state.set_workdir(Some(workdir)).map_err(|err| CliError::Runtime(format!("MCP workdir setup failed: {err}")))?;
@@ -176,7 +180,7 @@ fn run_mcp(args: &[String]) -> Result<(), CliError> {
 }
 
 fn parse_mcp_args(args: &[String]) -> Result<McpCliConfig, CliError> {
-    const MCP_USAGE: &str = "usage: lumencraft-cli mcp [--control-port <1..=65535>] [--gui-only] [--workdir <dir>]";
+    const MCP_USAGE: &str = "usage: lumencraft-cli mcp [--control-port <1..=65535>] [--gui-only] [--workdir <dir>] [--control-token <token>]";
     let mut cfg = McpCliConfig::default();
     let mut idx = 0usize;
     while idx < args.len() {
@@ -187,6 +191,14 @@ fn parse_mcp_args(args: &[String]) -> Result<McpCliConfig, CliError> {
             idx += 1;
             let raw = args.get(idx).ok_or_else(|| CliError::Usage(String::from(MCP_USAGE)))?;
             cfg.control_port = Some(parse_control_port_value(raw)?);
+        } else if let Some(raw) = arg.strip_prefix("--control-token=") {
+            let auth = lumencraft_ui_egui::ControlAuth::from_token(raw).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
+            cfg.control_token = Some(auth.as_str().to_owned());
+        } else if arg == "--control-token" {
+            idx += 1;
+            let raw = args.get(idx).ok_or_else(|| CliError::Usage(String::from(MCP_USAGE)))?;
+            let auth = lumencraft_ui_egui::ControlAuth::from_token(raw).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
+            cfg.control_token = Some(auth.as_str().to_owned());
         } else if let Some(raw) = arg.strip_prefix("--workdir=") {
             if raw.trim().is_empty() {
                 return Err(CliError::Usage(String::from("--workdir= requires a non-empty directory path")));
@@ -256,38 +268,55 @@ mod tests {
 
     #[test]
     fn mcp_control_port_validation_rejects_zero_overflow_and_unknown_flags() {
-        assert_eq!(parse_mcp_args(&[]).unwrap(), super::McpCliConfig { control_port: None, gui_only: false, workdir: None });
+        assert_eq!(parse_mcp_args(&[]).unwrap(), super::McpCliConfig { control_port: None, gui_only: false, workdir: None, control_token: None });
         assert_eq!(
             parse_mcp_args(&[String::from("--control-port"), String::from("49152")]).unwrap(),
-            super::McpCliConfig { control_port: Some(49152), gui_only: false, workdir: None }
+            super::McpCliConfig { control_port: Some(49152), gui_only: false, workdir: None, control_token: None }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--control-port=1")]).unwrap(),
-            super::McpCliConfig { control_port: Some(1), gui_only: false, workdir: None }
+            super::McpCliConfig { control_port: Some(1), gui_only: false, workdir: None, control_token: None }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--control-port=65535")]).unwrap(),
-            super::McpCliConfig { control_port: Some(65535), gui_only: false, workdir: None }
+            super::McpCliConfig { control_port: Some(65535), gui_only: false, workdir: None, control_token: None }
         );
-        assert_eq!(parse_mcp_args(&[String::from("--gui-only")]).unwrap(), super::McpCliConfig { control_port: None, gui_only: true, workdir: None });
+        assert_eq!(
+            parse_mcp_args(&[String::from("--gui-only")]).unwrap(),
+            super::McpCliConfig { control_port: None, gui_only: true, workdir: None, control_token: None }
+        );
         assert_eq!(
             parse_mcp_args(&[String::from("--control-port"), String::from("49152"), String::from("--gui-only")]).unwrap(),
-            super::McpCliConfig { control_port: Some(49152), gui_only: true, workdir: None }
+            super::McpCliConfig { control_port: Some(49152), gui_only: true, workdir: None, control_token: None }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--gui-only"), String::from("--control-port=49153")]).unwrap(),
-            super::McpCliConfig { control_port: Some(49153), gui_only: true, workdir: None }
+            super::McpCliConfig { control_port: Some(49153), gui_only: true, workdir: None, control_token: None }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--workdir"), String::from("/tmp/ws")]).unwrap(),
-            super::McpCliConfig { control_port: None, gui_only: false, workdir: Some(std::path::PathBuf::from("/tmp/ws")) }
+            super::McpCliConfig { control_port: None, gui_only: false, workdir: Some(std::path::PathBuf::from("/tmp/ws")), control_token: None }
         );
         assert_eq!(
             parse_mcp_args(&[String::from("--gui-only"), String::from("--workdir=/tmp/ws"), String::from("--control-port=49154")]).unwrap(),
-            super::McpCliConfig { control_port: Some(49154), gui_only: true, workdir: Some(std::path::PathBuf::from("/tmp/ws")) }
+            super::McpCliConfig {
+                control_port: Some(49154),
+                gui_only: true,
+                workdir: Some(std::path::PathBuf::from("/tmp/ws")),
+                control_token: None,
+            }
+        );
+        assert_eq!(
+            parse_mcp_args(&[String::from("--control-token"), String::from("secret-tok")]).unwrap(),
+            super::McpCliConfig { control_port: None, gui_only: false, workdir: None, control_token: Some(String::from("secret-tok")) }
+        );
+        assert_eq!(
+            parse_mcp_args(&[String::from("--control-port=49155"), String::from("--control-token=tok-2")]).unwrap(),
+            super::McpCliConfig { control_port: Some(49155), gui_only: false, workdir: None, control_token: Some(String::from("tok-2")) }
         );
         assert!(super::USAGE.contains("--gui-only"));
         assert!(super::USAGE.contains("mcp [--control-port <port>] [--gui-only] [--workdir <dir>]"));
+        assert!(super::USAGE.contains("--control-token <token>"));
 
         for bad in [
             vec!["--control-port", "0"],
@@ -299,6 +328,10 @@ mod tests {
             vec!["--workdir"],
             vec!["--workdir="],
             vec!["--workdir", "   "],
+            vec!["--control-token"],
+            vec!["--control-token="],
+            vec!["--control-token", "   "],
+            vec!["--control-token", "has space"],
             vec!["--gui-only=true"],
             vec!["--unknown"],
             vec!["extra-arg"],
