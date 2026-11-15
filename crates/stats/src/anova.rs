@@ -1718,7 +1718,36 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             let labels: Vec<(usize, String)> = group_inputs.iter().map(|g| (g.index, g.label.clone())).collect();
             let ns: Vec<usize> = raw_slices_owned.iter().map(Vec::len).collect();
             let details = compare_dunn_ranks(&labels, &ns, &kw.group_mean_ranks, kw.total_n, ranked.tie_sum_t3_minus_t, &anova_spec.multiplicity)?;
-            push_pairwise_outputs(&mut out, &details, "Dunn's multiple comparisons", p_fmt, confidence);
+            let (dunn_title, dunn_footnote) = match MultiplicityProcedure::from(anova_spec.multiplicity.method) {
+                MultiplicityProcedure::TukeyKramer
+                | MultiplicityProcedure::NewmanKeuls
+                | MultiplicityProcedure::GamesHowell
+                | MultiplicityProcedure::DunnettT3 => (
+                    "Dunn's multiple comparisons (Bonferroni fallback)",
+                    Some("Parametric FWER post-hoc method mapped to Dunn's rank-sum comparisons with Bonferroni adjustment for Kruskal-Wallis."),
+                ),
+                MultiplicityProcedure::TamhaneT2 => (
+                    "Dunn's multiple comparisons (Sidak fallback)",
+                    Some("Tamhane's T2 mapped to Dunn's rank-sum comparisons with Sidak adjustment for Kruskal-Wallis."),
+                ),
+                MultiplicityProcedure::Dunnett { .. } => (
+                    "Dunn's vs-control comparisons (Bonferroni fallback)",
+                    Some(
+                        "Dunnett vs-control selection mapped to Dunn's rank-sum comparisons vs control with Bonferroni adjustment over k - 1 pairs.",
+                    ),
+                ),
+                MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => (
+                    "Dunn's multiple comparisons (uncorrected)",
+                    Some("Unadjusted Dunn's rank-sum pairwise z tests (no multiplicity correction applied)."),
+                ),
+                _ => ("Dunn's multiple comparisons", None),
+            };
+            push_pairwise_outputs(&mut out, &details, dunn_title, p_fmt, confidence);
+            if let Some(note) = dunn_footnote
+                && let Some(tab) = out.tabs.last_mut()
+            {
+                tab.footnotes.push(String::from(note));
+            }
             out.checklist.push(checklist_item(
                 "Rank-based omnibus test",
                 ChecklistStatus::Pass,

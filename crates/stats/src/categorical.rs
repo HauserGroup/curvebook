@@ -758,10 +758,9 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
 
     // Build flat vector of column assignments and permute deterministically across 10,000 draws.
     if total > 50_000 {
-        // Fallback asymptotic chi-square if total count exceeds reasonable permutation vector size.
-        let (chi2, _, _) = chi_square_stats(counts, false)?;
-        let df = ((n_rows - 1) * (n_cols - 1)) as f64;
-        return Ok(chi2_sf(chi2, df)?);
+        // Reject tables exceeding the deterministic Monte Carlo permutation cap rather than silently
+        // substituting asymptotic chi-square under a Fisher exact label.
+        return Err(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 });
     }
     let mut col_pool = Vec::with_capacity(total as usize);
     for (c_idx, &cnt) in c_sums.iter().enumerate() {
@@ -849,8 +848,9 @@ fn chi_square_stats(counts: &[Vec<u64>], yates: bool) -> Result<(f64, f64, f64),
 pub fn cochran_armitage_trend(counts: &[Vec<u64>]) -> Result<(f64, f64), StatsError> {
     let n_rows = counts.len();
     let n_cols = counts.first().map_or(0, Vec::len);
-    if !((n_cols == 2 && n_rows >= 2) || (n_rows == 2 && n_cols >= 2)) {
-        return Err(StatsError::InvalidParameter { name: "dimensions", value: n_rows.min(n_cols) as f64 });
+    if !((n_cols == 2 && n_rows >= 3) || (n_rows == 2 && n_cols >= 3)) {
+        let bad = if n_rows == 2 || n_cols == 2 { n_rows.max(n_cols) } else { n_rows.min(n_cols) };
+        return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 });
     }
     // Orient as k ordered levels x 2 outcomes.
     let oriented: Vec<[f64; 2]> = if n_cols == 2 {
@@ -999,7 +999,7 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
     let cells_lt5_fraction = (lt5 as f64) / ((n_rows * n_cols) as f64);
 
     let fisher_exact_p = if n_rows == 2 && n_cols == 2 {
-        Some(fisher_exact_2x2(counts[0][0], counts[0][1], counts[1][0], counts[1][1])?)
+        if total_count <= 5_000_000 { Some(fisher_exact_2x2(counts[0][0], counts[0][1], counts[1][0], counts[1][1])?) } else { None }
     } else if n_rows <= 6 && n_cols <= 6 && total_count <= 20_000 {
         Some(fisher_exact_rxc(counts)?)
     } else {
@@ -1013,7 +1013,7 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
         (None, None)
     };
 
-    let (cochran_armitage_z, cochran_armitage_p) = if (n_rows == 2 && n_cols >= 2) || (n_cols == 2 && n_rows >= 2) {
+    let (cochran_armitage_z, cochran_armitage_p) = if (n_rows == 2 && n_cols >= 3) || (n_cols == 2 && n_rows >= 3) {
         let (z, p) = cochran_armitage_trend(counts)?;
         (Some(z), Some(p))
     } else {
@@ -1539,6 +1539,105 @@ pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> R
 // ResultSheet Builder
 // ============================================================================
 
+fn validate_and_run_barnard_if_requested(counts: &[Vec<u64>], method: ContingencyMethod) -> Result<Option<BarnardExactResult>, StatsError> {
+    let n_rows = counts.len();
+    let n_cols = counts.first().map_or(0, Vec::len);
+    match method {
+        ContingencyMethod::McNemarPaired if n_rows != 2 || n_cols != 2 => {
+            Err(StatsError::InvalidParameter { name: "mcnemar_dimensions", value: n_rows.max(n_cols) as f64 })
+        }
+        ContingencyMethod::CochranArmitageTrend if !((n_rows == 2 && n_cols >= 3) || (n_cols == 2 && n_rows >= 3)) => {
+            let bad = if n_rows == 2 || n_cols == 2 { n_rows.max(n_cols) } else { n_rows.min(n_cols) };
+            Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 })
+        }
+        ContingencyMethod::BarnardExact => {
+            if n_rows != 2 || n_cols != 2 {
+                return Err(StatsError::InvalidParameter { name: "barnard_exact_dimensions", value: n_rows.max(n_cols) as f64 });
+            }
+            let n1 = counts[0][0].saturating_add(counts[0][1]);
+            let n2 = counts[1][0].saturating_add(counts[1][1]);
+            let total = n1.saturating_add(n2);
+            let grid_cells = n1.saturating_add(1).saturating_mul(n2.saturating_add(1));
+            if total > BARNARD_MAX_TOTAL || grid_cells > BARNARD_MAX_GRID_CELLS {
+                return Err(StatsError::InvalidParameter { name: "barnard_exact_max_total", value: total as f64 });
+            }
+            let br = barnard_exact_2x2(counts[0][0], counts[0][1], counts[1][0], counts[1][1])?;
+            if br.used_asymptotic_fallback {
+                return Err(StatsError::InvalidParameter { name: "barnard_exact_max_total", value: total as f64 });
+            }
+            Ok(Some(br))
+        }
+        _ => Ok(None),
+    }
+}
+
+struct ContingencyPrimaryOutcome {
+    name: &'static str,
+    stat: Option<f64>,
+    p_value: f64,
+    footnote: Option<&'static str>,
+}
+
+impl ContingencyPrimaryOutcome {
+    fn plain(name: &'static str, stat: Option<f64>, p_value: f64) -> Self {
+        Self { name, stat, p_value, footnote: None }
+    }
+}
+
+fn resolve_contingency_primary(
+    out: &mut ResultSheet,
+    sheet: &DataSheet,
+    counts: &[Vec<u64>],
+    res: &ContingencyResult,
+    barnard_res: Option<&BarnardExactResult>,
+    method: ContingencyMethod,
+) -> Result<ContingencyPrimaryOutcome, StatsError> {
+    let n_rows = counts.len();
+    let n_cols = counts.first().map_or(0, Vec::len);
+    match method {
+        ContingencyMethod::PearsonChiSquare { yates_continuity } => {
+            let lbl = if yates_continuity { "Chi-square (Yates)" } else { "Pearson chi-square" };
+            Ok(ContingencyPrimaryOutcome::plain(lbl, Some(res.chi_square), res.chi_square_p))
+        }
+        ContingencyMethod::LikelihoodRatioG2 => Ok(ContingencyPrimaryOutcome::plain("Likelihood-ratio G2", Some(res.g_squared), res.g_squared_p)),
+        ContingencyMethod::FisherExact => {
+            if n_rows == 2 && n_cols == 2 {
+                let fp = res.fisher_exact_p.ok_or(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: res.total_count as f64 })?;
+                Ok(ContingencyPrimaryOutcome::plain("Fisher's exact test", None, fp))
+            } else {
+                let mc_p = match res.fisher_exact_p {
+                    Some(fp) => fp,
+                    None => {
+                        let p = fisher_exact_rxc(counts)?;
+                        push_scalar(out, "Fisher's exact P", None, p);
+                        p
+                    }
+                };
+                push_scalar(out, "Fisher's exact Monte Carlo draws", None, 10_000.0);
+                let note = "R x C Fisher's exact test uses a deterministic Monte Carlo permutation test (10,000 draws; max N = 50,000).";
+                Ok(ContingencyPrimaryOutcome { name: "Fisher's exact test (Monte Carlo)", stat: None, p_value: mc_p, footnote: Some(note) })
+            }
+        }
+        ContingencyMethod::BarnardExact => {
+            let br = barnard_res.ok_or(StatsError::InvalidParameter { name: "barnard_exact_dimensions", value: n_rows.max(n_cols) as f64 })?;
+            Ok(ContingencyPrimaryOutcome::plain("Barnard's exact test", Some(br.statistic), br.p_value))
+        }
+        ContingencyMethod::CochranArmitageTrend => {
+            let ca_p = res
+                .cochran_armitage_p
+                .ok_or(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: n_rows.max(n_cols) as f64 })?;
+            Ok(ContingencyPrimaryOutcome::plain("Cochran-Armitage trend", res.cochran_armitage_z, ca_p))
+        }
+        ContingencyMethod::McNemarPaired => {
+            let mc_p = res.mcnemar_exact_p.ok_or(StatsError::InvalidParameter { name: "mcnemar_dimensions", value: n_rows.max(n_cols) as f64 })?;
+            Ok(ContingencyPrimaryOutcome::plain("McNemar's test", res.mcnemar_chi2, mc_p))
+        }
+        ContingencyMethod::CohenKappa { .. } | ContingencyMethod::FleissKappa | ContingencyMethod::ExactBinomial => {
+            Err(StatsError::IncompatibleTable { analysis: "contingency analysis", actual: sheet.archetype.kind() })
+        }
+    }
+}
+
 /// Execute a [`ContingencySpec`] against a `Contingency`, `PartsOfWhole`, or binary `Column` [`DataSheet`].
 pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spec: &ContingencySpec) -> Result<ResultSheet, StatsError> {
     let mut out = init_result_sheet(spec)?;
@@ -1576,19 +1675,8 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
         _ => {}
     }
 
-    if matches!(cont_spec.method, ContingencyMethod::McNemarPaired) && (n_rows != 2 || n_cols != 2) {
-        return Err(StatsError::InvalidParameter { name: "mcnemar_dimensions", value: n_rows.max(n_cols) as f64 });
-    }
-
     let yates = matches!(cont_spec.method, ContingencyMethod::PearsonChiSquare { yates_continuity: true });
-    let barnard_res = if matches!(cont_spec.method, ContingencyMethod::BarnardExact) {
-        if n_rows != 2 || n_cols != 2 {
-            return Err(StatsError::InvalidParameter { name: "barnard_exact_dimensions", value: n_rows.max(n_cols) as f64 });
-        }
-        Some(barnard_exact_2x2(counts[0][0], counts[0][1], counts[1][0], counts[1][1])?)
-    } else {
-        None
-    };
+    let barnard_res = validate_and_run_barnard_if_requested(&counts, cont_spec.method)?;
 
     let res = analyze_contingency(&counts, yates, confidence)?;
     push_scalar(&mut out, "Chi-square", None, res.chi_square);
@@ -1620,32 +1708,14 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
         None
     };
 
-    let (primary_name, primary_stat, primary_p) = match cont_spec.method {
-        ContingencyMethod::PearsonChiSquare { yates_continuity } => {
-            let lbl = if yates_continuity { "Chi-square (Yates)" } else { "Pearson chi-square" };
-            (lbl, Some(res.chi_square), res.chi_square_p)
-        }
-        ContingencyMethod::LikelihoodRatioG2 => ("Likelihood-ratio G2", Some(res.g_squared), res.g_squared_p),
-        ContingencyMethod::FisherExact => ("Fisher's exact test", None, res.fisher_exact_p.unwrap_or(res.chi_square_p)),
-        ContingencyMethod::BarnardExact => {
-            let br = barnard_res.as_ref();
-            ("Barnard's exact test", br.map(|b| b.statistic), br.map_or(res.chi_square_p, |b| b.p_value))
-        }
-        ContingencyMethod::CochranArmitageTrend => {
-            ("Cochran-Armitage trend", res.cochran_armitage_z, res.cochran_armitage_p.unwrap_or(res.chi_square_p))
-        }
-        ContingencyMethod::McNemarPaired => ("McNemar's test", res.mcnemar_chi2, res.mcnemar_exact_p.unwrap_or(res.chi_square_p)),
-        ContingencyMethod::CohenKappa { .. } | ContingencyMethod::FleissKappa | ContingencyMethod::ExactBinomial => {
-            return Err(StatsError::IncompatibleTable { analysis: "contingency analysis", actual: sheet.archetype.kind() });
-        }
-    };
+    let primary = resolve_contingency_primary(&mut out, sheet, &counts, &res, barnard_res.as_ref(), cont_spec.method)?;
 
     let mut headers = vec![String::from("Statistic"), String::from("df"), String::from("P value")];
     if cont_spec.compute_phi_and_cramers_v {
         headers.push(String::from("Cramer's V / Phi"));
         headers.push(format!("{}% CI", confidence.percent()));
     }
-    let mut row_main = vec![opt_num_cell(primary_stat), num_cell(res.df), p_cell(primary_p, p_fmt)];
+    let mut row_main = vec![opt_num_cell(primary.stat), num_cell(res.df), p_cell(primary.p_value, p_fmt)];
     if cont_spec.compute_phi_and_cramers_v {
         row_main.push(num_cell(res.phi.unwrap_or(res.cramers_v)));
         row_main.push(opt_ci_cell(res.cramers_v_ci));
@@ -1655,9 +1725,14 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
         "Contingency analysis",
         ResultTabKind::MainSummary,
         headers,
-        vec![primary_name.to_owned()],
+        vec![primary.name.to_owned()],
         vec![row_main],
     ));
+    if let Some(note) = primary.footnote
+        && let Some(tab) = out.tabs.last_mut()
+    {
+        tab.footnotes.push(String::from(note));
+    }
 
     if let Some(mc) = &mcnemar_res {
         let or_cell = match mc.discordant_odds_ratio {

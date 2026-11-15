@@ -693,12 +693,8 @@ fn mann_whitney_exact_p(n1: usize, n2: usize, u_obs: usize, two_tailed: bool) ->
     }
     let lower_tail: f64 = dp[n1].iter().take(u_obs + 1).sum();
     let upper_tail: f64 = dp[n1].iter().skip(u_obs).sum();
-    if two_tailed {
-        let min_tail = lower_tail.min(upper_tail);
-        (2.0 * min_tail / total_ways).clamp(0.0, 1.0)
-    } else {
-        (upper_tail / total_ways).clamp(0.0, 1.0)
-    }
+    let min_tail = lower_tail.min(upper_tail);
+    if two_tailed { (2.0 * min_tail / total_ways).clamp(0.0, 1.0) } else { (min_tail / total_ways).clamp(0.0, 1.0) }
 }
 
 /// Mann–Whitney *U* test comparing `a` and `b`, with exact DP *p*-values for `n_a + n_b <= 40`
@@ -738,7 +734,8 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
             let cc = (u_a - mean_u).abs() - 0.5;
             if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_u)).min(1.0) }
         } else {
-            norm_sf((u_a - mean_u - 0.5) / sd_u)
+            let cc = ((u_a - mean_u).abs() - 0.5).max(0.0);
+            norm_sf(cc / sd_u).clamp(0.0, 1.0)
         };
         (p.clamp(0.0, 1.0), false)
     };
@@ -878,7 +875,8 @@ pub fn wilcoxon_matched_pairs(
             let cc = (w_plus - mean_w).abs() - 0.5;
             if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_w)).min(1.0) }
         } else {
-            norm_sf((w_plus - mean_w - 0.5) / sd_w)
+            let cc = ((w_plus - mean_w).abs() - 0.5).max(0.0);
+            norm_sf(cc / sd_w).clamp(0.0, 1.0)
         };
         (p.clamp(0.0, 1.0), false)
     };
