@@ -848,11 +848,11 @@ fn render_bar_item(
                     scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("bar value {center} omitted on log axis")));
                     return None;
                 }
-                seg.min
-            } else if seg.min <= 0.0 && seg.max >= 0.0 {
+                seg.domain_min
+            } else if seg.domain_min <= 0.0 && seg.domain_max >= 0.0 {
                 0.0
             } else {
-                seg.min
+                seg.domain_min
             }
         } else {
             0.0
@@ -1274,9 +1274,9 @@ fn build_kde_profile(sorted: &[f64], q1: f64, q3: f64, clip_to_observed: bool, y
     let mut hi = if clip_to_observed { max_v } else { max_v + 2.0 * h };
     if let Some(seg0) = y_axis.segments.first() {
         if is_log_like(seg0.scale) {
-            lo = lo.max(seg0.min.max(min_v * 0.85));
+            lo = lo.max(seg0.domain_min.max(min_v * 0.85));
         }
-        hi = hi.min(y_axis.segments.last().map_or(hi, |s| s.max));
+        hi = hi.min(y_axis.segments.last().map_or(hi, |s| s.domain_max));
     }
     if hi <= lo {
         return Vec::new();
