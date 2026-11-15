@@ -58,6 +58,13 @@ fn default_preferences_version() -> u32 {
     CURRENT_PREFERENCES_VERSION
 }
 
+fn deserialize_null_default_shortcuts<'de, D>(deserializer: D) -> Result<BTreeMap<String, String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<BTreeMap<String, String>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
 /// Persisted user preferences payload (`preferences.json`) with forward-safe schema versioning.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PreferencesFile {
@@ -71,7 +78,7 @@ pub struct PreferencesFile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub theme: Option<String>,
     /// User-customized command shortcut bindings keyed by action identifier.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_default_shortcuts")]
     pub shortcuts: BTreeMap<String, String>,
     /// Preserved forward-compatible extension properties not modeled in the typed fields above.
     #[serde(flatten, default)]

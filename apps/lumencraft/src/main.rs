@@ -20,7 +20,8 @@ use lumencraft_ui_egui::dialogs_canvas::render_workspace_frame_png;
 use lumencraft_ui_egui::interaction::ViewportMetrics;
 use lumencraft_ui_egui::theme::install_fonts;
 use lumencraft_ui_egui::{
-    ControlAuth, UiApp, bind_control_tcp_listener, parse_control_port, serve_control_listener_with_hook, validate_loopback_addr,
+    ControlAuth, ControlPostRequestContext, UiApp, UiThemeMode, bind_control_tcp_listener, normalize_locale, parse_control_port,
+    serve_control_listener_with_hook, validate_loopback_addr,
 };
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
@@ -253,7 +254,7 @@ impl Drop for RuntimeShutdownGuard {
 
 fn configure_window_preferences(app: &mut UiApp, app_paths: &AppPaths, cfg: &LaunchConfig, no_prefs: bool) {
     if !no_prefs && let Err(err) = load_shortcut_preferences(app, app_paths) {
-        eprintln!("lumencraft preferences warning: {err}; using default shortcuts");
+        eprintln!("lumencraft preferences warning: {err}; using default preferences");
         app.shortcuts.reset_all();
     }
     if cfg.rulers {
@@ -292,7 +293,7 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
 
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
     let no_prefs = is_no_prefs_enabled(&env_get);
-    let app_paths = resolve_app_paths_with_env(exe_dir.as_deref(), cfg.portable_dir.as_deref(), &env_get);
+    let app_paths = resolve_app_paths_with_env(exe_dir.as_deref(), cfg.portable_dir.as_deref(), &env_get)?;
     let _validated_font = cfg.ttf_font.as_deref().map(load_validated_ttf_font).transpose()?;
 
     let interactive_gui = !cfg.headless_once && cfg.event_script.is_none() && cfg.control_port.is_none();
@@ -335,6 +336,12 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
     for win_id in window_ids {
         let win = runtime_guard.get_mut()?.window_mut(win_id)?;
         configure_window_preferences(win.app_mut(), &app_paths, cfg, no_prefs);
+    }
+    if !no_prefs {
+        let persist_paths = app_paths.clone();
+        runtime_guard.get_mut()?.set_preferences_persist_hook(move |app| {
+            persist_window_preferences_best_effort(app, &persist_paths, false);
+        });
     }
 
     if interactive_gui {
@@ -386,7 +393,7 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         let rt = runtime_guard.get_mut()?;
         let focused_id = rt.focused_window_id().ok_or_else(|| String::from("no open window available for --control server"))?;
         let win = rt.window_mut(focused_id)?;
-        run_authenticated_control_server(win, port, cfg, &app_paths)?;
+        run_authenticated_control_server(win, port, cfg, &app_paths, no_prefs)?;
     }
 
     {
@@ -439,7 +446,50 @@ fn write_control_token_file(path: &Path, auth: &ControlAuth) -> Result<(), Strin
     .map_err(|err| format!("failed to write control token file `{}`: {err}", path.display()))
 }
 
-fn run_authenticated_control_server(win: &mut DesktopWindowSession, port: u16, cfg: &LaunchConfig, app_paths: &AppPaths) -> Result<(), String> {
+fn capture_control_pref_fingerprint(app: &UiApp) -> (String, UiThemeMode, Option<String>) {
+    (normalize_locale(&app.locale).to_owned(), app.theme.mode, app.shortcuts.export_overrides_json().ok())
+}
+
+fn theme_mode_pref_str(mode: UiThemeMode) -> &'static str {
+    match mode {
+        UiThemeMode::Light => "light",
+        UiThemeMode::Dark => "dark",
+        UiThemeMode::HighContrast => "high-contrast",
+    }
+}
+
+fn serve_control_with_pref_persistence<F>(win: &mut DesktopWindowSession, app_paths: &AppPaths, no_prefs: bool, mut runner: F) -> Result<(), String>
+where
+    F: FnMut(&mut UiApp, &mut dyn FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>) -> std::io::Result<()>,
+{
+    let mut prev_prefs: Option<(String, UiThemeMode, Option<String>)> = None;
+    win.with_control_journal_hook(|app, on_post_request| {
+        if !no_prefs && prev_prefs.is_none() {
+            prev_prefs = Some(capture_control_pref_fingerprint(app));
+        }
+        let mut persist_after_control = |app: &UiApp, ctx: &ControlPostRequestContext<'_>| -> Result<(), String> {
+            on_post_request(app, ctx)?;
+            if !no_prefs && ctx.request_ok && !ctx.rolled_back {
+                let current = capture_control_pref_fingerprint(app);
+                if prev_prefs.as_ref() != Some(&current) {
+                    prev_prefs = Some(current);
+                    persist_window_preferences_best_effort(app, app_paths, false);
+                }
+            }
+            Ok(())
+        };
+        runner(app, &mut persist_after_control)
+    })
+    .map_err(|err| format!("control server I/O error: {err}"))
+}
+
+fn run_authenticated_control_server(
+    win: &mut DesktopWindowSession,
+    port: u16,
+    cfg: &LaunchConfig,
+    app_paths: &AppPaths,
+    no_prefs: bool,
+) -> Result<(), String> {
     let auth = resolve_control_auth(cfg)?;
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let checked = validate_loopback_addr(addr)?;
@@ -447,12 +497,14 @@ fn run_authenticated_control_server(win: &mut DesktopWindowSession, port: u16, c
     let token_path = control_token_file_path(&app_paths.config_dir, port);
     write_control_token_file(&token_path, &auth)?;
     let _token_guard = ControlTokenFileGuard { path: token_path };
-    win.with_control_journal_hook(|app, on_post_request| serve_control_listener_with_hook(app, &listener, &auth, on_post_request))
-        .map_err(|err| format!("control server I/O error: {err}"))
+    serve_control_with_pref_persistence(win, app_paths, no_prefs, |app, hook| serve_control_listener_with_hook(app, &listener, &auth, hook))
 }
 
 fn should_persist_preferences(app: &UiApp, paths: &AppPaths) -> Result<bool, String> {
     if paths.preferences_file.is_file() {
+        return Ok(true);
+    }
+    if normalize_locale(&app.locale) != "en" || app.theme.mode != UiThemeMode::default() {
         return Ok(true);
     }
     let raw = app.shortcuts.export_overrides_json()?;
@@ -533,40 +585,44 @@ fn is_no_prefs_enabled(env_get: &impl Fn(&str) -> Option<OsString>) -> bool {
 }
 
 #[cfg(test)]
-fn resolve_app_paths(exe_dir: Option<&Path>, explicit_portable: Option<&Path>) -> AppPaths {
+fn resolve_app_paths(exe_dir: Option<&Path>, explicit_portable: Option<&Path>) -> Result<AppPaths, String> {
     resolve_app_paths_with_env(exe_dir, explicit_portable, |_| None)
 }
 
-fn resolve_app_paths_with_env(exe_dir: Option<&Path>, explicit_portable: Option<&Path>, env_get: impl Fn(&str) -> Option<OsString>) -> AppPaths {
+fn resolve_app_paths_with_env(
+    exe_dir: Option<&Path>,
+    explicit_portable: Option<&Path>,
+    env_get: impl Fn(&str) -> Option<OsString>,
+) -> Result<AppPaths, String> {
     if let Some(dir) = explicit_portable {
-        return portable_app_paths(dir);
+        return Ok(portable_app_paths(dir));
     }
     if let Some(raw_cfg) = env_get("LUMENCRAFT_CONFIG_DIR").filter(|v| !v.to_string_lossy().trim().is_empty()) {
         let base = PathBuf::from(raw_cfg);
-        return AppPaths {
+        return Ok(AppPaths {
             portable: false,
             preferences_file: base.join("preferences.json"),
             shortcuts_file: base.join("shortcuts.json"),
             recovery_dir: base.join("recovery"),
             config_dir: base.clone(),
             data_dir: base,
-        };
+        });
     }
     if let Some(dir) = exe_dir
         && dir.join("portable.txt").is_file()
     {
-        return portable_app_paths(dir);
+        return Ok(portable_app_paths(dir));
     }
 
-    let (config_dir, data_dir) = resolve_platform_standard_dirs(&env_get);
-    AppPaths {
+    let (config_dir, data_dir) = resolve_platform_standard_dirs(&env_get)?;
+    Ok(AppPaths {
         portable: false,
         preferences_file: config_dir.join("preferences.json"),
         shortcuts_file: config_dir.join("shortcuts.json"),
         recovery_dir: data_dir.join("recovery"),
         config_dir,
         data_dir,
-    }
+    })
 }
 
 fn portable_app_paths(base_dir: &Path) -> AppPaths {
@@ -582,37 +638,141 @@ fn portable_app_paths(base_dir: &Path) -> AppPaths {
     }
 }
 
-fn resolve_platform_standard_dirs(env_get: &impl Fn(&str) -> Option<OsString>) -> (PathBuf, PathBuf) {
+#[cfg(unix)]
+fn current_unix_uid() -> Result<u32, String> {
+    use std::os::unix::fs::MetadataExt;
+    static CACHED_UID: std::sync::OnceLock<Result<u32, String>> = std::sync::OnceLock::new();
+    CACHED_UID
+        .get_or_init(|| {
+            if let Ok(meta) = std::fs::metadata("/proc/self") {
+                return Ok(meta.uid());
+            }
+            for bin in ["/usr/bin/id", "/bin/id", "id"] {
+                if let Ok(output) = lumencraft_platform::ProcessCommand::new(bin).arg("-u").run()
+                    && output.success
+                {
+                    let text = String::from_utf8_lossy(&output.stdout);
+                    if let Ok(uid) = text.trim().parse::<u32>() {
+                        return Ok(uid);
+                    }
+                }
+            }
+            Err(String::from("unable to resolve current OS UID for private user directory fallback"))
+        })
+        .clone()
+}
+
+#[cfg(unix)]
+fn verify_private_existing_dir(path: &Path, expected_uid: u32, label: &str) -> Result<(), String> {
+    use std::os::unix::fs::MetadataExt;
+    let meta = std::fs::symlink_metadata(path).map_err(|err| format!("failed to inspect {label} `{}`: {err}", path.display()))?;
+    if meta.file_type().is_symlink() || !meta.is_dir() {
+        return Err(format!("refusing unsafe non-directory or symlink {label} `{}`", path.display()));
+    }
+    if meta.uid() != expected_uid {
+        return Err(format!("refusing {label} `{}` owned by uid {} (expected uid {expected_uid})", path.display(), meta.uid()));
+    }
+    if (meta.mode() & 0o077) != 0 {
+        return Err(format!("refusing {label} `{}` with group/world permissions {:04o} (must be private 0700)", path.display(), meta.mode() & 0o777));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn ensure_private_uid_dir(path: &Path, expected_uid: u32, label: &str) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+    match std::fs::symlink_metadata(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let mut builder = std::fs::DirBuilder::new();
+            builder.mode(0o700);
+            match builder.create(path) {
+                Ok(()) => {}
+                Err(create_err) if create_err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(create_err) => {
+                    return Err(format!("failed to create private {label} `{}`: {create_err}", path.display()));
+                }
+            }
+        }
+        Err(err) => return Err(format!("failed to inspect {label} `{}`: {err}", path.display())),
+        Ok(_) => {}
+    }
+    verify_private_existing_dir(path, expected_uid, label)
+}
+
+#[cfg(unix)]
+fn resolve_unix_private_fallback_root(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<(u32, PathBuf), String> {
+    let uid = current_unix_uid()?;
+    if let Some(raw_xdg_rt) = env_get("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+        let rt_dir = PathBuf::from(raw_xdg_rt);
+        verify_private_existing_dir(&rt_dir, uid, "XDG_RUNTIME_DIR")?;
+        let app_root = rt_dir.join("lumencraft");
+        ensure_private_uid_dir(&app_root, uid, "runtime directory")?;
+        return Ok((uid, app_root));
+    }
+    let tmp_base = env_get("TMPDIR").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    let uid_root = tmp_base.join(format!("lumencraft-uid-{uid}"));
+    ensure_private_uid_dir(&uid_root, uid, "per-user fallback directory")?;
+    Ok((uid, uid_root))
+}
+
+fn resolve_platform_standard_dirs(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<(PathBuf, PathBuf), String> {
     let nonempty_path = |key: &str| env_get(key).filter(|v| !v.is_empty()).map(PathBuf::from);
 
     #[cfg(target_os = "macos")]
     {
-        let base = nonempty_path("HOME")
-            .map(|h| h.join("Library").join("Application Support").join("LumenCraft"))
-            .unwrap_or_else(|| std::env::temp_dir().join("lumencraft"));
-        (base.clone(), base)
+        if let Some(home) = nonempty_path("HOME") {
+            let base = home.join("Library").join("Application Support").join("LumenCraft");
+            return Ok((base.clone(), base));
+        }
+        let (_uid, fallback_base) = resolve_unix_private_fallback_root(env_get)?;
+        Ok((fallback_base.clone(), fallback_base))
     }
     #[cfg(target_os = "windows")]
     {
-        let fallback_base = nonempty_path("USERPROFILE")
-            .map(|h| h.join("AppData").join("Roaming").join("LumenCraft"))
-            .unwrap_or_else(|| std::env::temp_dir().join("lumencraft"));
-        let config_dir = nonempty_path("APPDATA").map(|p| p.join("LumenCraft")).unwrap_or(fallback_base);
+        let fallback_base = nonempty_path("USERPROFILE").map(|h| h.join("AppData").join("Roaming").join("LumenCraft"));
+        let config_dir = nonempty_path("APPDATA").map(|p| p.join("LumenCraft")).or(fallback_base).ok_or_else(|| {
+            String::from("cannot determine LumenCraft config directory: APPDATA and USERPROFILE are unset (set LUMENCRAFT_CONFIG_DIR or --portable)")
+        })?;
         let data_dir = nonempty_path("LOCALAPPDATA").map(|p| p.join("LumenCraft")).unwrap_or_else(|| config_dir.clone());
-        (config_dir, data_dir)
+        Ok((config_dir, data_dir))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let home = nonempty_path("HOME");
-        let config_dir = nonempty_path("XDG_CONFIG_HOME")
+        let mut fallback: Option<(u32, PathBuf)> = None;
+        let mut get_fallback = || -> Result<(u32, PathBuf), String> {
+            if let Some(ref existing) = fallback {
+                return Ok(existing.clone());
+            }
+            let resolved = resolve_unix_private_fallback_root(env_get)?;
+            fallback = Some(resolved.clone());
+            Ok(resolved)
+        };
+        let config_dir = match nonempty_path("XDG_CONFIG_HOME")
             .map(|p| p.join("lumencraft"))
             .or_else(|| home.as_ref().map(|h| h.join(".config").join("lumencraft")))
-            .unwrap_or_else(|| std::env::temp_dir().join("lumencraft-config"));
-        let data_dir = nonempty_path("XDG_DATA_HOME")
+        {
+            Some(dir) => dir,
+            None => {
+                let (uid, root) = get_fallback()?;
+                let dir = root.join("config");
+                ensure_private_uid_dir(&dir, uid, "per-user config fallback directory")?;
+                dir
+            }
+        };
+        let data_dir = match nonempty_path("XDG_DATA_HOME")
             .map(|p| p.join("lumencraft"))
             .or_else(|| home.as_ref().map(|h| h.join(".local").join("share").join("lumencraft")))
-            .unwrap_or_else(|| std::env::temp_dir().join("lumencraft-data"));
-        (config_dir, data_dir)
+        {
+            Some(dir) => dir,
+            None => {
+                let (uid, root) = get_fallback()?;
+                let dir = root.join("data");
+                ensure_private_uid_dir(&dir, uid, "per-user data fallback directory")?;
+                dir
+            }
+        };
+        Ok((config_dir, data_dir))
     }
 }
 
@@ -627,6 +787,20 @@ fn load_shortcut_preferences(app: &mut UiApp, paths: &AppPaths) -> Result<usize,
     if paths.preferences_file.is_file() {
         let prefs = load_preferences_file(&paths.preferences_file)
             .map_err(|err| format!("failed to load preferences `{}`: {err}", paths.preferences_file.display()))?;
+        if let Some(ref raw_locale) = prefs.locale {
+            let trimmed = raw_locale.trim();
+            if !trimmed.is_empty() {
+                app.set_locale(trimmed);
+            }
+        }
+        if let Some(ref raw_theme) = prefs.theme {
+            match lumencraft::desktop_host::parse_theme_mode(raw_theme) {
+                Ok(mode) => app.set_theme_mode(mode),
+                Err(err) => {
+                    eprintln!("lumencraft preferences warning: ignoring invalid theme in `{}`: {err}", paths.preferences_file.display());
+                }
+            }
+        }
         if prefs.shortcuts.is_empty() {
             return Ok(0);
         }
@@ -648,6 +822,22 @@ fn save_shortcut_preferences(app: &UiApp, paths: &AppPaths) -> Result<(), String
     } else {
         PreferencesFile::default()
     };
+    let current_locale = normalize_locale(&app.locale);
+    match prefs.locale.as_deref() {
+        Some(existing) if normalize_locale(existing) == current_locale => {}
+        Some(_) => prefs.locale = Some(current_locale.to_owned()),
+        None if current_locale != "en" => prefs.locale = Some(current_locale.to_owned()),
+        None => {}
+    }
+    let current_theme = app.theme.mode;
+    match prefs.theme.as_deref() {
+        Some(existing) if lumencraft::desktop_host::parse_theme_mode(existing).ok() == Some(current_theme) => {}
+        Some(_) => prefs.theme = Some(theme_mode_pref_str(current_theme).to_owned()),
+        None if current_theme != UiThemeMode::default() => {
+            prefs.theme = Some(theme_mode_pref_str(current_theme).to_owned());
+        }
+        None => {}
+    }
     let raw_shortcuts = app.shortcuts.export_overrides_json()?;
     let shortcuts: BTreeMap<String, String> = serde_json::from_str(&raw_shortcuts).map_err(|err| err.to_string())?;
     prefs.version = CURRENT_PREFERENCES_VERSION;
@@ -771,13 +961,13 @@ mod tests {
             "APPDATA" => Some(OsString::from("/mock/appdata")),
             "LOCALAPPDATA" => Some(OsString::from("/mock/localappdata")),
             _ => None,
-        });
+        })?;
         assert!(!std_paths.portable);
         assert!(!std_paths.config_dir.ends_with("lumencraft-data"));
 
         // Explicit --portable-dir routes config, shortcuts, preferences, and recovery into ./lumencraft-data/
         let explicit_dir = dir.join("usb-stick");
-        let explicit_paths = super::resolve_app_paths(Some(&exe_dir), Some(&explicit_dir));
+        let explicit_paths = super::resolve_app_paths(Some(&exe_dir), Some(&explicit_dir))?;
         assert!(explicit_paths.portable);
         let expected_explicit_root = explicit_dir.join("lumencraft-data");
         assert_eq!(explicit_paths.config_dir, expected_explicit_root);
@@ -788,7 +978,7 @@ mod tests {
 
         // portable.txt next to executable activates ./lumencraft-data/
         std::fs::write(exe_dir.join("portable.txt"), "LumenCraft portable mode\n")?;
-        let marker_paths = super::resolve_app_paths(Some(&exe_dir), None);
+        let marker_paths = super::resolve_app_paths(Some(&exe_dir), None)?;
         assert!(marker_paths.portable);
         assert_eq!(marker_paths.config_dir, exe_dir.join("lumencraft-data"));
         assert_eq!(marker_paths.recovery_dir, exe_dir.join("lumencraft-data").join("recovery"));
@@ -818,7 +1008,7 @@ mod tests {
 
         // Portable-dir recovery journal startup -> simulated crash -> WAL recovery -> clean shutdown
         let recovery_root = dir.join("portable-recovery");
-        let rec_paths = super::resolve_app_paths(None, Some(&recovery_root));
+        let rec_paths = super::resolve_app_paths(None, Some(&recovery_root))?;
         let mut s1 = super::open_startup_session_with_recovery(&[], &rec_paths, true, 1_000)?;
         let mut journal1 = s1.journal.ok_or("portable recovery should attach journal")?;
         assert!(s1.report.is_some_and(|r| r.recovered_commands.is_empty()));
@@ -931,7 +1121,7 @@ mod tests {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let dir = std::env::temp_dir().join(format!("lc-main-prefs-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir)?;
-        let paths = super::resolve_app_paths(None, Some(&dir));
+        let paths = super::resolve_app_paths(None, Some(&dir))?;
         std::fs::create_dir_all(&paths.config_dir)?;
 
         // 1. Legacy v0 preferences file without explicit `version` upgrades and preserves metadata.
@@ -996,7 +1186,7 @@ mod tests {
 
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let dir = std::env::temp_dir().join(format!("lc-ctrl-tok-file-{}-{nanos}", std::process::id()));
-        let paths = super::resolve_app_paths(None, Some(&dir));
+        let paths = super::resolve_app_paths(None, Some(&dir))?;
         let token_path = super::control_token_file_path(&paths.config_dir, 9127);
         let auth = super::resolve_control_auth(&LaunchConfig::default())?;
         assert_eq!(auth.as_str().len(), lumencraft_ui_egui::CONTROL_AUTH_TOKEN_BYTES * 2);
@@ -1102,7 +1292,7 @@ mod tests {
         // Swapped shortcuts.json loads cleanly through configure_window_preferences.
         std::fs::remove_file(data_dir.join("preferences.json"))?;
         std::fs::write(data_dir.join("shortcuts.json"), r#"{"ui.palette.open":"F6","ui.pane.cycle":"Cmd+K"}"#)?;
-        let app_paths = super::resolve_app_paths(None, Some(&dir));
+        let app_paths = super::resolve_app_paths(None, Some(&dir))?;
         let mut app = lumencraft_ui_egui::UiApp::new();
         super::configure_window_preferences(&mut app, &app_paths, &LaunchConfig::default(), false);
         assert_eq!(app.shortcuts.active_combo("ui.palette.open"), Some("F6"));
@@ -1129,7 +1319,7 @@ mod tests {
                 |key| {
                     if key == "LUMENCRAFT_CONFIG_DIR" { Some(OsString::from(&env_cfg_dir)) } else { None }
                 },
-            );
+            )?;
         assert_eq!(paths.config_dir, env_cfg_dir);
         assert_eq!(paths.preferences_file, env_cfg_dir.join("preferences.json"));
         assert_eq!(paths.shortcuts_file, env_cfg_dir.join("shortcuts.json"));
@@ -1159,7 +1349,7 @@ mod tests {
         // Verify a customized app does NOT write preferences when LUMENCRAFT_NO_PREFS is true.
         let mut custom_app = lumencraft_ui_egui::UiApp::new();
         custom_app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+Y")?;
-        let fresh_paths = super::resolve_app_paths(None, Some(&dir.join("unused-portable")));
+        let fresh_paths = super::resolve_app_paths(None, Some(&dir.join("unused-portable")))?;
         super::persist_window_preferences_best_effort(&custom_app, &fresh_paths, true);
         assert!(!fresh_paths.preferences_file.exists());
 
@@ -1172,6 +1362,181 @@ mod tests {
             },
         )?;
         assert!(paths.recovery_dir.is_dir(), "expected LUMENCRAFT_CONFIG_DIR/recovery when LUMENCRAFT_NO_PREFS is unset");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s11_07_persists_locale_theme_and_shortcuts_across_control_and_gui_close() -> Result<(), Box<dyn std::error::Error>> {
+        use lumencraft::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime};
+        use lumencraft_ui_egui::{ControlAuth, UiThemeMode, ViewportMetrics, serve_control_stream_with_quit_and_hook};
+
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-s11-07-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let app_paths = super::resolve_app_paths(None, Some(&dir))?;
+        std::fs::create_dir_all(&app_paths.config_dir)?;
+
+        // Part A: Versioned PreferencesFile handles `"shortcuts": null` and swapped shortcuts + locale/theme cleanly.
+        std::fs::write(&app_paths.preferences_file, r#"{"version":1,"locale":"fr","theme":"dark","shortcuts":null}"#)?;
+        let mut reloaded_null = lumencraft_ui_egui::UiApp::new();
+        super::configure_window_preferences(&mut reloaded_null, &app_paths, &LaunchConfig::default(), false);
+        assert_eq!(reloaded_null.locale, "fr");
+        assert_eq!(reloaded_null.theme.mode, UiThemeMode::Dark);
+        reloaded_null.shortcuts.set_shortcut("ui.palette.open", "Ctrl+Shift+F9")?;
+        reloaded_null.shortcuts.set_shortcut("ui.pane.cycle", "Cmd+K")?;
+        reloaded_null.shortcuts.set_shortcut("ui.palette.open", "F6")?;
+        super::persist_window_preferences_best_effort(&reloaded_null, &app_paths, false);
+
+        let mut swapped_app = lumencraft_ui_egui::UiApp::new();
+        super::configure_window_preferences(&mut swapped_app, &app_paths, &LaunchConfig::default(), false);
+        assert_eq!(swapped_app.locale, "fr");
+        assert_eq!(swapped_app.theme.mode, UiThemeMode::Dark);
+        assert_eq!(swapped_app.shortcuts.active_combo("ui.palette.open"), Some("F6"));
+        assert_eq!(swapped_app.shortcuts.active_combo("ui.pane.cycle"), Some("Cmd+K"));
+
+        // Part B: GUI DesktopHostRuntime close path persists locale, theme, and shortcuts even on dirty close ("Don't Save").
+        let mut rt =
+            DesktopHostRuntime::new(DesktopHostConfig { initial_viewport: ViewportMetrics::new(800.0, 600.0, 2.0), ..DesktopHostConfig::default() });
+        let win_id = rt.open_window(None, ViewportMetrics::new(800.0, 600.0, 2.0))?;
+        let hook_paths = app_paths.clone();
+        rt.set_preferences_persist_hook(move |app| {
+            super::persist_window_preferences_best_effort(app, &hook_paths, false);
+        });
+        {
+            let win = rt.window_mut(win_id)?;
+            win.app_mut().set_locale("de");
+            win.app_mut().set_theme_mode(UiThemeMode::HighContrast);
+            win.app_mut().shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+U")?;
+            let _ = win.app_mut().session_mut().execute("sheet.createData", serde_json::json!({ "sheet_id": "dirty-s11", "title": "DirtyTable" }))?;
+        }
+        let _ = rt.dispatch(DesktopHostEvent::WindowCloseRequested { window_id: win_id, force: false })?;
+        let mut post_gui = lumencraft_ui_egui::UiApp::new();
+        super::configure_window_preferences(&mut post_gui, &app_paths, &LaunchConfig::default(), false);
+        assert_eq!(post_gui.locale, "de");
+        assert_eq!(post_gui.theme.mode, UiThemeMode::HighContrast);
+        assert_eq!(post_gui.shortcuts.active_combo("ui.gallery.toggle"), Some("Ctrl+Shift+U"));
+
+        // Discard dirty prompt via close_all_force after another preference change; must still persist.
+        rt.window_mut(win_id)?.app_mut().set_theme_mode(UiThemeMode::Light);
+        rt.close_all_force()?;
+        let mut post_force = lumencraft_ui_egui::UiApp::new();
+        super::configure_window_preferences(&mut post_force, &app_paths, &LaunchConfig::default(), false);
+        assert_eq!(post_force.theme.mode, UiThemeMode::Light);
+        assert_eq!(post_force.locale, "de");
+
+        // Part C: Authenticated `--control` post-request hook immediately persists locale, theme, and shortcuts.
+        let mut ctrl_rt =
+            DesktopHostRuntime::new(DesktopHostConfig { initial_viewport: ViewportMetrics::new(800.0, 600.0, 2.0), ..DesktopHostConfig::default() });
+        let ctrl_win_id = ctrl_rt.open_window(None, ViewportMetrics::new(800.0, 600.0, 2.0))?;
+        let auth_tok = ControlAuth::generate()?;
+        let script = [
+            serde_json::json!({"id": 1, "method": "auth", "params": {"token": auth_tok.as_str()}}).to_string(),
+            String::from(r#"{"id":2,"method":"ui.locale.set","params":{"locale":"ja"}}"#),
+            String::from(r#"{"id":3,"method":"ui.theme.set","params":{"mode":"dark"}}"#),
+            String::from(r#"{"id":4,"method":"ui.shortcut.set","params":{"command_id":"ui.palette.open","shortcut":"F7"}}"#),
+            String::from(r#"{"id":5,"method":"app.quit","params":{}}"#),
+        ]
+        .join("\n")
+            + "\n";
+        let mut out_bytes = Vec::new();
+        let mut observed_immediate_pre_quit = false;
+        super::serve_control_with_pref_persistence(ctrl_rt.window_mut(ctrl_win_id)?, &app_paths, false, |app, hook| {
+            let mut reader = std::io::BufReader::new(std::io::Cursor::new(script.as_bytes()));
+            let quit = serve_control_stream_with_quit_and_hook(app, &mut reader, &mut out_bytes, &auth_tok, |app_ref, ctx| {
+                hook(app_ref, ctx)?;
+                if ctx.method == "ui.shortcut.set" {
+                    let saved = std::fs::read_to_string(&app_paths.preferences_file).map_err(|e| e.to_string())?;
+                    if saved.contains("\"ja\"") && saved.contains("\"dark\"") && saved.contains("\"F7\"") {
+                        observed_immediate_pre_quit = true;
+                    }
+                }
+                Ok(())
+            })
+            .map_err(std::io::Error::other)?;
+            assert!(quit, "expected app.quit to stop control stream");
+            Ok(())
+        })?;
+        assert!(observed_immediate_pre_quit, "expected immediate pre-quit preference persistence during control stream");
+        let resp_text = String::from_utf8(out_bytes)?;
+        assert_eq!(resp_text.lines().count(), 5);
+        for line in resp_text.lines() {
+            assert!(line.contains("\"ok\":true"), "control response error: {line}");
+        }
+        ctrl_rt.close_all_force()?;
+
+        let mut post_ctrl = lumencraft_ui_egui::UiApp::new();
+        super::configure_window_preferences(&mut post_ctrl, &app_paths, &LaunchConfig::default(), false);
+        assert_eq!(post_ctrl.locale, "ja");
+        assert_eq!(post_ctrl.theme.mode, UiThemeMode::Dark);
+        assert_eq!(post_ctrl.shortcuts.active_combo("ui.palette.open"), Some("F7"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn r1_s11_09_unset_home_uses_private_uid_dirs_and_rejects_symlinks() -> Result<(), Box<dyn std::error::Error>> {
+        use std::ffi::OsString;
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-s11-09-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+
+        let uid = super::current_unix_uid()?;
+        let uid_dir_name = format!("lumencraft-uid-{uid}");
+
+        // Case 1: HOME/XDG unset creates per-UID 0700 dirs (never fixed shared /tmp/lumencraft).
+        let tmp_ok = dir.join("tmp-ok");
+        std::fs::create_dir_all(&tmp_ok)?;
+        let tmp_ok_os = OsString::from(&tmp_ok);
+        let paths = super::resolve_app_paths_with_env(None, None, |key| if key == "TMPDIR" { Some(tmp_ok_os.clone()) } else { None })?;
+        assert!(paths.config_dir.to_string_lossy().contains(&uid_dir_name));
+        assert!(paths.recovery_dir.to_string_lossy().contains(&uid_dir_name));
+        assert_ne!(paths.config_dir, std::env::temp_dir().join("lumencraft"));
+        let uid_root = tmp_ok.join(&uid_dir_name);
+        let root_meta = std::fs::symlink_metadata(&uid_root)?;
+        assert!(!root_meta.file_type().is_symlink());
+        assert!(root_meta.is_dir());
+        assert_eq!(root_meta.uid(), uid);
+        assert_eq!(root_meta.mode() & 0o777, 0o700);
+
+        // Case 2: Pre-planted symlink at lumencraft-uid-<uid> is rejected explicitly.
+        let tmp_sym = dir.join("tmp-sym");
+        std::fs::create_dir_all(&tmp_sym)?;
+        let decoy = dir.join("decoy");
+        std::fs::create_dir_all(&decoy)?;
+        std::os::unix::fs::symlink(&decoy, tmp_sym.join(&uid_dir_name))?;
+        let tmp_sym_os = OsString::from(&tmp_sym);
+        assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "TMPDIR" { Some(tmp_sym_os.clone()) } else { None }).is_err());
+
+        // Case 3: Permissive 0755 fallback dir is rejected explicitly.
+        let tmp_perm = dir.join("tmp-perm");
+        std::fs::create_dir_all(&tmp_perm)?;
+        let bad_dir = tmp_perm.join(&uid_dir_name);
+        std::fs::create_dir_all(&bad_dir)?;
+        std::fs::set_permissions(&bad_dir, std::fs::Permissions::from_mode(0o755))?;
+        let tmp_perm_os = OsString::from(&tmp_perm);
+        assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "TMPDIR" { Some(tmp_perm_os.clone()) } else { None }).is_err());
+
+        // Case 4: Valid 0700 XDG_RUNTIME_DIR works; permissive or symlinked XDG_RUNTIME_DIR fails explicitly.
+        let xdg_ok = dir.join("xdg-ok");
+        std::fs::create_dir_all(&xdg_ok)?;
+        std::fs::set_permissions(&xdg_ok, std::fs::Permissions::from_mode(0o700))?;
+        let xdg_ok_os = OsString::from(&xdg_ok);
+        let xdg_paths = super::resolve_app_paths_with_env(None, None, |key| if key == "XDG_RUNTIME_DIR" { Some(xdg_ok_os.clone()) } else { None })?;
+        assert!(xdg_paths.config_dir.starts_with(xdg_ok.join("lumencraft")));
+
+        std::fs::set_permissions(&xdg_ok, std::fs::Permissions::from_mode(0o755))?;
+        assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "XDG_RUNTIME_DIR" { Some(xdg_ok_os.clone()) } else { None }).is_err());
+
+        let xdg_sym = dir.join("xdg-sym");
+        std::os::unix::fs::symlink(&decoy, &xdg_sym)?;
+        let xdg_sym_os = OsString::from(&xdg_sym);
+        assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "XDG_RUNTIME_DIR" { Some(xdg_sym_os.clone()) } else { None }).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

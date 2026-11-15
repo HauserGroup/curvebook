@@ -155,7 +155,7 @@ impl lumencraft_mcp::GuiSessionHost for InProcessUiGuiHost {
 }
 
 fn run_mcp(args: &[String]) -> Result<(), CliError> {
-    let cfg = parse_mcp_args(args)?;
+    let cfg = parse_mcp_args_with_env(args, &|key| std::env::var_os(key))?;
     let _ = lumencraft_mcp::SERVER_NAME;
     let mut state = match (cfg.control_port, cfg.gui_only) {
         (Some(port), true) => lumencraft_mcp::McpServerState::with_control_port_and_gui_only(port, true)
@@ -179,7 +179,12 @@ fn run_mcp(args: &[String]) -> Result<(), CliError> {
     lumencraft_mcp::run_stdio_with_state(&mut state).map_err(|err| CliError::Runtime(format!("MCP stdio server failed: {err}")))
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn parse_mcp_args(args: &[String]) -> Result<McpCliConfig, CliError> {
+    parse_mcp_args_with_env(args, &|_| None)
+}
+
+fn parse_mcp_args_with_env(args: &[String], env_lookup: &dyn Fn(&str) -> Option<std::ffi::OsString>) -> Result<McpCliConfig, CliError> {
     const MCP_USAGE: &str = "usage: lumencraft-cli mcp [--control-port <1..=65535>] [--gui-only] [--workdir <dir>] [--control-token <token>]";
     let mut cfg = McpCliConfig::default();
     let mut idx = 0usize;
@@ -217,6 +222,16 @@ fn parse_mcp_args(args: &[String]) -> Result<McpCliConfig, CliError> {
             return Err(CliError::Usage(String::from(MCP_USAGE)));
         }
         idx += 1;
+    }
+    if cfg.control_port.is_none()
+        && let Some(raw_os) = env_lookup("LUMENCRAFT_CONTROL_PORT")
+    {
+        let raw = raw_os
+            .to_str()
+            .ok_or_else(|| CliError::Usage(String::from("invalid LUMENCRAFT_CONTROL_PORT: expected valid UTF-8 integer in 1..=65535")))?;
+        if !raw.trim().is_empty() {
+            cfg.control_port = Some(parse_control_port_value(raw).map_err(|err| CliError::Usage(format!("invalid LUMENCRAFT_CONTROL_PORT: {err}")))?);
+        }
     }
     Ok(cfg)
 }
@@ -340,6 +355,37 @@ mod tests {
             let err = parse_mcp_args(&owned).unwrap_err();
             assert!(matches!(err, CliError::Usage(_)), "expected Usage for {owned:?}, got {err:?}");
             assert_eq!(err.exit_code(), EXIT_USAGE_OR_POLICY);
+        }
+    }
+
+    #[test]
+    fn r1_s12_09_mcp_args_fall_back_to_env_control_port_with_cli_precedence() {
+        use std::ffi::OsString;
+
+        let from_env = super::parse_mcp_args_with_env(&[], &|k| {
+            if k == "LUMENCRAFT_CONTROL_PORT" { Some(OsString::from("49201")) } else { None }
+        })
+        .unwrap();
+        assert_eq!(from_env.control_port, Some(49201));
+
+        let cli_wins = super::parse_mcp_args_with_env(&[String::from("--control-port=49202")], &|k| {
+            if k == "LUMENCRAFT_CONTROL_PORT" { Some(OsString::from("49201")) } else { None }
+        })
+        .unwrap();
+        assert_eq!(cli_wins.control_port, Some(49202));
+
+        let empty_env = super::parse_mcp_args_with_env(&[], &|k| {
+            if k == "LUMENCRAFT_CONTROL_PORT" { Some(OsString::from("   ")) } else { None }
+        })
+        .unwrap();
+        assert_eq!(empty_env.control_port, None);
+
+        for bad in ["0", "abc", "70000"] {
+            let err = super::parse_mcp_args_with_env(&[], &|k| {
+                if k == "LUMENCRAFT_CONTROL_PORT" { Some(OsString::from(bad)) } else { None }
+            })
+            .unwrap_err();
+            assert!(matches!(err, CliError::Usage(_)), "expected Usage for `{bad}`, got {err:?}");
         }
     }
 

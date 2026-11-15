@@ -18,7 +18,11 @@ use lumencraft_svg::{SvgExportOptions, render_svg};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
-use crate::errors::{self, StructuredErrorPayload};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::errors::StructuredErrorPayload;
+use crate::errors::{self};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::tools::decode_base64;
 use crate::tools::{
     ContentBlock, McpServerState, ToolCallError, ToolCallResult, encode_base64, optional_bool, optional_non_empty_str, optional_u32_bounded,
     required_non_empty_str,
@@ -126,6 +130,36 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
     apply_imported_payload(state, &resolved_path, format_id, payload, Some(raw_bytes), title_override.as_deref(), &import_opts, append)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn live_attach_import_error(payload: StructuredErrorPayload) -> ToolCallResult {
+    errors::result_from_payload(&payload)
+}
+
+fn build_csv_import_params(resolved_path: &Path, format_id: &str, raw_bytes: Vec<u8>, import_opts: &ImportOptions) -> Result<Value, ToolCallResult> {
+    let csv_text = match String::from_utf8(raw_bytes) {
+        Ok(text) => text,
+        Err(err) => {
+            return Err(errors::result_from_code(ErrorCode::IoError, format!("failed to decode '{}' as UTF-8: {err}", resolved_path.display())));
+        }
+    };
+    let csv_opts = import_opts.csv.clone().unwrap_or_else(|| if format_id == "tsv" { CsvOptions::tsv() } else { CsvOptions::detect(&csv_text) });
+    let subcolumn_mode = match serde_json::to_value(import_opts.subcolumn_mode) {
+        Ok(v) => v,
+        Err(err) => {
+            return Err(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize subcolumn mode: {err}")));
+        }
+    };
+    Ok(json!({
+        "sheet_id": import_opts.sheet_id.as_str(),
+        "csv": csv_text,
+        "title": import_opts.title,
+        "archetype": import_opts.table_kind.label(),
+        "subcolumn_mode": subcolumn_mode,
+        "delimiter": csv_opts.delimiter.to_string(),
+        "decimal_separator": csv_opts.decimal_separator.to_string(),
+    }))
+}
+
 fn resolve_importer<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &Path) -> Result<&'a dyn Importer, ToolCallError> {
     if let Some(fmt) = explicit {
         return reg.importer_by_format(fmt).ok_or_else(|| ToolCallError::InvalidParams(format!("unsupported open format '{fmt}'")));
@@ -183,6 +217,11 @@ fn apply_imported_payload(
     import_opts: &ImportOptions,
     append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(port) = state.control_port() {
+        return apply_imported_payload_live(state, port, resolved_path, format_id, payload, raw_bytes, title_override, import_opts, append);
+    }
+
     match (format_id, payload) {
         ("lumencraft" | "lumencraft.d", ImportPayload::Document(doc)) => {
             let sheets = doc.total_sheet_count();
@@ -242,6 +281,154 @@ fn apply_imported_payload(
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[allow(clippy::too_many_arguments)]
+fn apply_imported_payload_live(
+    state: &mut McpServerState,
+    port: u16,
+    resolved_path: &Path,
+    format_id: &str,
+    payload: ImportPayload,
+    raw_bytes: Option<Vec<u8>>,
+    title_override: Option<&str>,
+    import_opts: &ImportOptions,
+    append: bool,
+) -> Result<ToolCallResult, ToolCallError> {
+    match (format_id, payload) {
+        ("lumencraft" | "lumencraft.d", ImportPayload::Document(_)) => {
+            let params = json!({
+                "path": resolved_path.display().to_string(),
+                "unpacked": format_id == "lumencraft.d",
+            });
+            let res = match state.send_live_control("engine.execute", json!({ "command_id": "project.open", "params": params })) {
+                Ok(v) => v,
+                Err(err) => return Ok(live_attach_import_error(err)),
+            };
+            let title = res.pointer("/payload/title").and_then(Value::as_str).unwrap_or("");
+            let sheet_count = res.pointer("/payload/sheet_count").and_then(Value::as_u64).unwrap_or(0);
+            ToolCallResult::ok_json(&json!({
+                "opened": true,
+                "mode": "live_attach",
+                "control_port": port,
+                "format": format_id,
+                "path": resolved_path.display().to_string(),
+                "title": title,
+                "total_sheet_count": sheet_count,
+            }))
+        }
+        ("lctemplate", ImportPayload::Document(_)) => {
+            let mut params = Map::new();
+            params.insert(String::from("path"), json!(resolved_path.display().to_string()));
+            if let Some(title) = title_override {
+                params.insert(String::from("title"), json!(title));
+            }
+            let res = match state
+                .send_live_control("engine.execute", json!({ "command_id": "project.instantiateTemplate", "params": Value::Object(params) }))
+            {
+                Ok(v) => v,
+                Err(err) => return Ok(live_attach_import_error(err)),
+            };
+            let title = res.pointer("/payload/title").and_then(Value::as_str).unwrap_or("");
+            let sheet_count = res.pointer("/payload/sheet_count").and_then(Value::as_u64).unwrap_or(0);
+            ToolCallResult::ok_json(&json!({
+                "opened": true,
+                "mode": "live_attach",
+                "control_port": port,
+                "format": "lctemplate",
+                "path": resolved_path.display().to_string(),
+                "title": title,
+                "total_sheet_count": sheet_count,
+            }))
+        }
+        ("prism" | "pzfx", ImportPayload::Report(report)) => {
+            let Some(bytes) = raw_bytes else {
+                return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
+            };
+            let warnings = match serde_json::to_value(&report.warnings) {
+                Ok(v) => v,
+                Err(err) => {
+                    return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
+                }
+            };
+            let cmd_id = if format_id == "prism" { "table.importPrism" } else { "table.importPzfx" };
+            let import_params = json!({ "bytes_base64": encode_base64(&bytes), "merge": append });
+            let send_res = if append {
+                state.send_live_control("engine.execute", json!({ "command_id": cmd_id, "params": import_params }))
+            } else {
+                state.send_live_control(
+                    "command.batch",
+                    json!({
+                        "atomic": true,
+                        "commands": [
+                            { "command": "file.new", "params": {} },
+                            { "command": cmd_id, "params": import_params },
+                        ]
+                    }),
+                )
+            };
+            if let Err(err) = send_res {
+                return Ok(live_attach_import_error(err));
+            }
+            let snap = state.send_live_control("doc.inspect", json!({})).ok();
+            let title = snap.as_ref().and_then(|v| v.get("title")).and_then(Value::as_str).unwrap_or("");
+            let sheet_count = snap.as_ref().and_then(|v| v.pointer("/counts/total")).and_then(Value::as_u64).unwrap_or(0);
+            ToolCallResult::ok_json(&json!({
+                "opened": true,
+                "mode": "live_attach",
+                "control_port": port,
+                "format": format_id,
+                "path": resolved_path.display().to_string(),
+                "title": title,
+                "total_sheet_count": sheet_count,
+                "warnings": warnings,
+            }))
+        }
+        ("csv" | "tsv", ImportPayload::DataSheet(_)) => {
+            let Some(bytes) = raw_bytes else {
+                return Ok(errors::result_from_code(ErrorCode::InternalError, format!("missing buffered bytes for '{format_id}'")));
+            };
+            let params = match build_csv_import_params(resolved_path, format_id, bytes, import_opts) {
+                Ok(p) => p,
+                Err(err_res) => return Ok(err_res),
+            };
+            let send_res = if append {
+                state.send_live_control("engine.execute", json!({ "command_id": "table.importCsv", "params": params }))
+            } else {
+                state.send_live_control(
+                    "command.batch",
+                    json!({
+                        "atomic": true,
+                        "commands": [
+                            { "command": "file.new", "params": { "title": import_opts.title } },
+                            { "command": "table.importCsv", "params": params },
+                        ]
+                    }),
+                )
+            };
+            if let Err(err) = send_res {
+                return Ok(live_attach_import_error(err));
+            }
+            let inspect = match state.send_live_control("doc.inspect", json!({ "sheet_id": import_opts.sheet_id.as_str() })) {
+                Ok(v) => v,
+                Err(err) => return Ok(live_attach_import_error(err)),
+            };
+            ToolCallResult::ok_json(&json!({
+                "opened": true,
+                "mode": "live_attach",
+                "control_port": port,
+                "format": format_id,
+                "path": resolved_path.display().to_string(),
+                "sheet_id": import_opts.sheet_id.as_str(),
+                "title": inspect.get("title").and_then(Value::as_str).unwrap_or(&import_opts.title),
+                "table_kind": inspect.get("kind").and_then(Value::as_str).unwrap_or(import_opts.table_kind.label()),
+                "rows": inspect.get("rows").and_then(Value::as_u64).unwrap_or(0),
+                "columns": inspect.get("cols").and_then(Value::as_u64).unwrap_or(0),
+            }))
+        }
+        _ => Ok(errors::result_from_code(ErrorCode::UnsupportedFormat, format!("unexpected payload returned by importer '{format_id}'"))),
+    }
+}
+
 fn apply_report_import(
     state: &mut McpServerState,
     resolved_path: &Path,
@@ -288,28 +475,10 @@ fn apply_csv_import(
         })));
     }
 
-    let csv_text = match String::from_utf8(raw_bytes) {
-        Ok(text) => text,
-        Err(err) => {
-            return Ok(errors::result_from_code(ErrorCode::IoError, format!("failed to decode '{}' as UTF-8: {err}", resolved_path.display())));
-        }
+    let params = match build_csv_import_params(resolved_path, format_id, raw_bytes, import_opts) {
+        Ok(p) => p,
+        Err(err_res) => return Ok(err_res),
     };
-    let csv_opts = import_opts.csv.clone().unwrap_or_else(|| if format_id == "tsv" { CsvOptions::tsv() } else { CsvOptions::detect(&csv_text) });
-    let subcolumn_mode = match serde_json::to_value(import_opts.subcolumn_mode) {
-        Ok(v) => v,
-        Err(err) => {
-            return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize subcolumn mode: {err}")));
-        }
-    };
-    let params = json!({
-        "sheet_id": import_opts.sheet_id.as_str(),
-        "csv": csv_text,
-        "title": import_opts.title,
-        "archetype": import_opts.table_kind.label(),
-        "subcolumn_mode": subcolumn_mode,
-        "delimiter": csv_opts.delimiter.to_string(),
-        "decimal_separator": csv_opts.decimal_separator.to_string(),
-    });
 
     if append {
         return execute_csv_import_on_session(&mut state.session, format_id, resolved_path, &import_opts.sheet_id, params);
@@ -359,6 +528,60 @@ fn sheet_summary_json(format_id: &str, resolved_path: &Path, ds: &DataSheet) -> 
 
 /// Handle `save_file` dispatched via [`FormatRegistry`] (which persists atomically via `write_atomic`).
 pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(port) = state.control_port() {
+        let raw_path = match optional_non_empty_str(args, "path")? {
+            Some(p) => p,
+            None => {
+                let snap = match state.send_live_control("doc.inspect", json!({})) {
+                    Ok(v) => v,
+                    Err(err) => return Ok(errors::result_from_payload(&err)),
+                };
+                match snap.get("file_path").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) {
+                    Some(p) => p.to_owned(),
+                    None => {
+                        return Err(ToolCallError::InvalidParams(String::from(
+                            "save_file requires \"path\" when live session has no associated file_path",
+                        )));
+                    }
+                }
+            }
+        };
+        let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
+        let reg = FormatRegistry::default_registry();
+        let exporter = resolve_save_exporter(&reg, explicit_format.as_deref(), Path::new(&raw_path))?;
+        let format_id = exporter.descriptor().id;
+        let resolved_path = match resolve_mcp_path(state, &raw_path) {
+            Ok(p) => p,
+            Err(err) => return Ok(errors::result_from_engine_error(&err)),
+        };
+        let cmd_id = if format_id == "lctemplate" { "project.saveTemplate" } else { "project.save" };
+        let mut cmd_params = json!({
+            "path": resolved_path.display().to_string(),
+            "return_bytes": false,
+        });
+        if format_id == "lumencraft.d"
+            && let Some(obj) = cmd_params.as_object_mut()
+        {
+            obj.insert(String::from("unpacked"), json!(true));
+        }
+        if let Err(err) = state.send_live_control("engine.execute", json!({ "command_id": cmd_id, "params": cmd_params })) {
+            return Ok(errors::result_from_payload(&err));
+        }
+        let snap = state.send_live_control("doc.inspect", json!({})).ok();
+        let schema_version = snap.as_ref().and_then(|v| v.get("schema_version")).and_then(Value::as_u64).unwrap_or(0);
+        let total_sheet_count = snap.as_ref().and_then(|v| v.pointer("/counts/total")).and_then(Value::as_u64).unwrap_or(0);
+        return ToolCallResult::ok_json(&json!({
+            "saved": true,
+            "mode": "live_attach",
+            "control_port": port,
+            "format": format_id,
+            "path": resolved_path.display().to_string(),
+            "schema_version": schema_version,
+            "total_sheet_count": total_sheet_count,
+        }));
+    }
+
     let raw_path = match optional_non_empty_str(args, "path")? {
         Some(p) => p,
         None => match state.session.file_path() {
@@ -413,11 +636,42 @@ fn resolve_save_exporter<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, pa
 }
 
 /// Handle `render_preview`: compile GraphSheet/LayoutSheet and rasterize PNG preview with metadata.
-pub(crate) fn handle_render_preview(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let dpi = parse_dpi(args)?;
     let requested_w = optional_u32_bounded(args, "width_px", 1, MAX_RASTER_DIM_PX)?;
     let requested_h = optional_u32_bounded(args, "height_px", 1, MAX_RASTER_DIM_PX)?;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(port) = state.control_port() {
+        let mut remote = match state.send_live_control(
+            "render.preview",
+            json!({
+                "sheet_id": sheet_id,
+                "dpi": dpi,
+                "width_px": requested_w,
+                "height_px": requested_h,
+            }),
+        ) {
+            Ok(v) => v,
+            Err(err) => return Ok(errors::result_from_payload(&err)),
+        };
+        let Some(b64) = remote.get("data_base64").and_then(Value::as_str).map(str::to_owned) else {
+            return Ok(errors::result_from_code(ErrorCode::InternalError, "live render.preview response missing data_base64"));
+        };
+        if let Some(obj) = remote.as_object_mut() {
+            obj.remove("data_base64");
+            obj.remove("encoding");
+            obj.insert(String::from("mode"), Value::String(String::from("live_attach")));
+            obj.insert(String::from("control_port"), json!(port));
+        }
+        let metadata_text = serde_json::to_string_pretty(&remote).unwrap_or_default();
+        return Ok(ToolCallResult {
+            content: vec![ContentBlock::Image { data: b64, mime_type: String::from("image/png") }, ContentBlock::Text { text: metadata_text }],
+            is_error: false,
+            structured_content: Some(remote),
+        });
+    }
 
     let (target_id, sheet_kind, scene) = match compile_visual_sheet(state.session.document(), sheet_id.as_deref()) {
         Ok(compiled) => compiled,
@@ -461,7 +715,7 @@ pub(crate) fn handle_render_preview(state: &McpServerState, args: &Map<String, V
 
 /// Handle `export` dispatched through a populated [`FormatRegistry`] with `WorkdirGuard` path checks
 /// and atomic writes (`write_atomic`).
-pub(crate) fn handle_export(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let format = required_non_empty_str(args, "format")?.to_ascii_lowercase();
     if !matches!(format.as_str(), "svg" | "pdf" | "png" | "tiff" | "csv" | "json") {
         return Err(ToolCallError::InvalidParams(format!("unsupported export format '{format}'")));
@@ -480,6 +734,60 @@ pub(crate) fn handle_export(state: &McpServerState, args: &Map<String, Value>) -
     };
 
     let recorder = Arc::new(ExportArtifactRecorder::default());
+    #[cfg(not(target_arch = "wasm32"))]
+    if state.control_port().is_some() {
+        let pdf_cs = match cfg.pdf_color_space {
+            PdfColorSpace::Srgb => "srgb",
+            PdfColorSpace::Cmyk => "cmyk",
+            PdfColorSpace::Grayscale => "grayscale",
+        };
+        let tiff_comp = match cfg.tiff_compression {
+            TiffCompression::None => "none",
+            TiffCompression::Deflate => "deflate",
+            TiffCompression::Lzw => "lzw",
+        };
+        let remote = match state.send_live_control(
+            "doc.export",
+            json!({
+                "format": format,
+                "sheet_id": cfg.sheet_id,
+                "pretty": cfg.pretty,
+                "tidy": cfg.tidy,
+                "tab_id": cfg.tab_id,
+                "csv_delimiter": cfg.csv_opts.as_ref().map(|c| c.delimiter.to_string()),
+                "svg_precision": cfg.svg_precision,
+                "pdf_color_space": pdf_cs,
+                "all_graphs": cfg.all_graphs,
+                "dpi": cfg.dpi,
+                "width_px": cfg.width_px,
+                "height_px": cfg.height_px,
+                "tiff_compression": tiff_comp,
+            }),
+        ) {
+            Ok(v) => v,
+            Err(err) => return Ok(errors::result_from_payload(&err)),
+        };
+        let target_id = remote.get("sheet_id").and_then(Value::as_str).unwrap_or("project").to_owned();
+        let Some(b64) = remote.get("data_base64").and_then(Value::as_str) else {
+            return Ok(errors::result_from_code(ErrorCode::InternalError, "live doc.export response missing data_base64"));
+        };
+        let bytes = match decode_base64(b64) {
+            Ok(b) => b,
+            Err(err) => return Ok(errors::result_from_code(ErrorCode::InternalError, format!("invalid base64 from live doc.export: {err}"))),
+        };
+        let _ = recorder.target_id.set(target_id.clone());
+        if let (Some(w), Some(h)) = (remote.get("width_px").and_then(Value::as_u64), remote.get("height_px").and_then(Value::as_u64)) {
+            let w32 = u32::try_from(w).unwrap_or(0);
+            let h32 = u32::try_from(h).unwrap_or(0);
+            let dpi_u16 = remote.get("dpi").and_then(Value::as_u64).and_then(|d| u16::try_from(d).ok()).unwrap_or(cfg.dpi);
+            let _ = recorder.raster_meta.set((w32, h32, dpi_u16));
+        }
+        if let Some(dest) = resolved_path {
+            return write_atomic_export(&dest, &format, &target_id, &bytes);
+        }
+        return format_inline_export_result(&format, &target_id, &bytes, &recorder);
+    }
+
     let reg = build_mcp_export_registry(&cfg, Arc::clone(&recorder));
     let Some(exporter) = reg.exporter_by_format(&format) else {
         return Err(ToolCallError::InvalidParams(format!("unsupported export format '{format}'")));
@@ -606,8 +914,14 @@ struct ExportArtifactConfig {
 impl ExportArtifactConfig {
     fn parse(args: &Map<String, Value>, sheet_id: Option<String>) -> Result<Self, ToolCallError> {
         let pretty = optional_bool(args, "pretty")?.unwrap_or(true);
-        let tidy = optional_bool(args, "tidy")?.unwrap_or(true);
+        let explicit_tidy = optional_bool(args, "tidy")?;
         let tab_id = optional_non_empty_str(args, "tab_id")?;
+        if explicit_tidy == Some(true) && tab_id.is_some() {
+            return Err(ToolCallError::InvalidParams(String::from(
+                "export `tidy: true` cannot be combined with `tab_id`; omit `tidy` or pass `tidy: false` to export a specific tab",
+            )));
+        }
+        let tidy = explicit_tidy.unwrap_or(tab_id.is_none());
         let csv_opts = match optional_non_empty_str(args, "csv_delimiter")? {
             Some(delim) => {
                 let mut chars = delim.chars();
@@ -803,26 +1117,27 @@ impl Exporter for McpCsvExporter {
     fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
         let doc = expect_document(source, DESC_CSV.id)?;
         let csv_opts = self.cfg.csv_opts.clone().unwrap_or_else(CsvOptions::csv);
-        let (target_id, csv_text) = match resolve_tabular_export_target(doc, self.cfg.sheet_id.as_deref()).map_err(FormatError::Io)? {
-            TabularTarget::Data(ds) => (ds.id.as_str().to_owned(), export_datasheet_to_csv(ds, &csv_opts)?),
-            TabularTarget::Result(rs) => {
-                let text = if self.cfg.tidy {
-                    export_result_sheet_tidy_csv(rs, &csv_opts)
-                } else if let Some(tid) = self.cfg.tab_id.as_deref() {
-                    let tab = rs
-                        .tabs
-                        .iter()
-                        .find(|t| t.id == tid)
-                        .ok_or_else(|| FormatError::Io(format!("tab '{tid}' not found on result sheet '{}'", rs.id)))?;
-                    export_result_tab_csv(tab, &csv_opts)
-                } else if let Some(first_tab) = rs.tabs.first() {
-                    export_result_tab_csv(first_tab, &csv_opts)
-                } else {
-                    export_result_sheet_tidy_csv(rs, &csv_opts)
-                };
-                (rs.id.as_str().to_owned(), text)
-            }
-        };
+        let (target_id, csv_text) =
+            match resolve_tabular_export_target(doc, self.cfg.sheet_id.as_deref(), self.cfg.tab_id.as_deref()).map_err(FormatError::Io)? {
+                TabularTarget::Data(ds) => (ds.id.as_str().to_owned(), export_datasheet_to_csv(ds, &csv_opts)?),
+                TabularTarget::Result(rs) => {
+                    let text = if self.cfg.tidy {
+                        export_result_sheet_tidy_csv(rs, &csv_opts)
+                    } else if let Some(tid) = self.cfg.tab_id.as_deref() {
+                        let tab = rs
+                            .tabs
+                            .iter()
+                            .find(|t| t.id == tid)
+                            .ok_or_else(|| FormatError::Io(format!("tab '{tid}' not found on result sheet '{}'", rs.id)))?;
+                        export_result_tab_csv(tab, &csv_opts)
+                    } else if let Some(first_tab) = rs.tabs.first() {
+                        export_result_tab_csv(first_tab, &csv_opts)
+                    } else {
+                        export_result_sheet_tidy_csv(rs, &csv_opts)
+                    };
+                    (rs.id.as_str().to_owned(), text)
+                }
+            };
         let _ = self.recorder.target_id.set(target_id);
         Ok(csv_text.into_bytes())
     }
@@ -919,16 +1234,32 @@ enum TabularTarget<'a> {
     Result(&'a ResultSheet),
 }
 
-fn resolve_tabular_export_target<'a>(doc: &'a ProjectDocument, sheet_id: Option<&str>) -> Result<TabularTarget<'a>, String> {
+fn resolve_tabular_export_target<'a>(doc: &'a ProjectDocument, sheet_id: Option<&str>, tab_id: Option<&str>) -> Result<TabularTarget<'a>, String> {
     if let Some(id_str) = sheet_id {
         let id = SheetId::new(id_str);
         if let Some(rs) = doc.result_sheet(&id) {
             return Ok(TabularTarget::Result(rs));
         }
         if let Some(ds) = doc.data_sheet(&id) {
+            if let Some(tid) = tab_id {
+                return Err(format!("tab '{tid}' requires a ResultSheet, but '{id_str}' is a DataSheet"));
+            }
             return Ok(TabularTarget::Data(ds));
         }
         return Err(format!("data or result sheet '{id_str}' not found"));
+    }
+
+    if let Some(tid) = tab_id {
+        if let Some(active) = &doc.active_sheet_id
+            && let Some(rs) = doc.result_sheet(active)
+            && rs.tabs.iter().any(|t| t.id == tid)
+        {
+            return Ok(TabularTarget::Result(rs));
+        }
+        if let Some(rs) = doc.result_sheets.iter().find(|rs| rs.tabs.iter().any(|t| t.id == tid)) {
+            return Ok(TabularTarget::Result(rs));
+        }
+        return Err(format!("tab '{tid}' not found on any result sheet"));
     }
 
     if let Some(active) = &doc.active_sheet_id {

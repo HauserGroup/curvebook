@@ -687,13 +687,17 @@ impl PowerWizardState {
     }
 
     /// Execute Stage 4 `Create` through `Session::execute_as_ui` (`Caller::Ui`), creating both
-    /// a Power & Sample Size `ResultSheet` and a linked `GraphSheet` (plus XY `DataSheet` + `InfoSheet`).
-    pub fn execute_create(&mut self, session: &mut Session) -> Result<PowerWizardCreatedSheets, EngineError> {
+    /// Build the Power Curve DataSheet, ResultSheet, InfoSheet, and GraphSheet using a caller-provided
+    /// command executor so batched UI transactions can record each engine step.
+    pub fn execute_create_with(
+        &mut self,
+        exec: &mut dyn FnMut(&str, Value) -> Result<lumencraft_engine::CommandOutcome, EngineError>,
+    ) -> Result<PowerWizardCreatedSheets, EngineError> {
         self.recalculate().map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
         let res = self.result.clone().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "power calculation produced no result"))?;
 
         let curve_rows = build_power_curve_table_rows(&res);
-        let create_data_outcome = session.execute_as_ui(
+        let create_data_outcome = exec(
             "sheet.createData",
             json!({
                 "title": format!("{} — Power Curve Data", res.family.label()),
@@ -713,7 +717,7 @@ impl PowerWizardState {
         let x_values: Vec<f64> = res.power_curve.iter().map(|pt| pt.n).collect();
         let y_rows: Vec<Vec<f64>> = res.power_curve.iter().map(|pt| vec![pt.power, pt.total_n]).collect();
 
-        session.execute_as_ui(
+        exec(
             "table.setTitles",
             json!({
                 "sheet_id": &data_id_str,
@@ -721,17 +725,17 @@ impl PowerWizardState {
                 "titles": ["Statistical Power (1 - beta)", "Total N"],
             }),
         )?;
-        session.execute_as_ui("table.setXCells", json!({ "sheet_id": &data_id_str, "values": x_values }))?;
-        session.execute_as_ui("table.setCells", json!({ "sheet_id": &data_id_str, "rows": y_rows }))?;
+        exec("table.setXCells", json!({ "sheet_id": &data_id_str, "values": x_values }))?;
+        exec("table.setCells", json!({ "sheet_id": &data_id_str, "rows": y_rows }))?;
 
         if let Some(ref info_id) = info_id_str {
-            populate_power_info_sheet(session, info_id, &res)?;
+            populate_power_info_sheet(exec, info_id, &res)?;
         }
         if let Some(ref graph_id) = graph_id_str {
-            configure_power_graph_sheet(session, graph_id, &res)?;
+            configure_power_graph_sheet(exec, graph_id, &res)?;
         }
 
-        let res_outcome = session.execute_as_ui(
+        let res_outcome = exec(
             "analysis.run",
             json!({
                 "source_sheet_id": &data_id_str,
@@ -747,7 +751,7 @@ impl PowerWizardState {
             }),
         )?;
         let result_id_str = extract_str_field(&res_outcome.payload, "sheet_id", "result sheet")?;
-        let _ = session.execute_as_ui("sheet.select", json!({ "sheet_id": &result_id_str }));
+        let _ = exec("sheet.select", json!({ "sheet_id": &result_id_str }));
 
         let created = PowerWizardCreatedSheets {
             data_sheet_id: SheetId::try_new(&data_id_str).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?,
@@ -764,9 +768,18 @@ impl PowerWizardState {
         self.created_sheets = Some(created.clone());
         Ok(created)
     }
+
+    /// Build the Power Curve DataSheet, ResultSheet, InfoSheet, and GraphSheet into `session`.
+    pub fn execute_create(&mut self, session: &mut Session) -> Result<PowerWizardCreatedSheets, EngineError> {
+        self.execute_create_with(&mut |command_id, params| session.execute_as_ui(command_id, params))
+    }
 }
 
-fn populate_power_info_sheet(session: &mut Session, info_id: &str, res: &PowerAnalysisResult) -> Result<(), EngineError> {
+fn populate_power_info_sheet(
+    exec: &mut dyn FnMut(&str, Value) -> Result<lumencraft_engine::CommandOutcome, EngineError>,
+    info_id: &str,
+    res: &PowerAnalysisResult,
+) -> Result<(), EngineError> {
     let entries = [
         ("Test Family", json!(res.family.label()), "text"),
         ("Solve Target", json!(solve_target_label(res.solve_target)), "text"),
@@ -778,10 +791,10 @@ fn populate_power_info_sheet(session: &mut Session, info_id: &str, res: &PowerAn
         ("Critical Value", json!(res.critical_value), "number"),
     ];
     for (name, value, kind) in entries {
-        session.execute_as_ui("info.setConstant", json!({ "sheet_id": info_id, "name": name, "value": value, "kind": kind }))?;
+        exec("info.setConstant", json!({ "sheet_id": info_id, "name": name, "value": value, "kind": kind }))?;
     }
     if let Some(n2) = res.n_group2 {
-        session.execute_as_ui("info.setConstant", json!({ "sheet_id": info_id, "name": "N group 2", "value": n2 as f64, "kind": "number" }))?;
+        exec("info.setConstant", json!({ "sheet_id": info_id, "name": "N group 2", "value": n2 as f64, "kind": "number" }))?;
     }
     let sensitivity_summary: Vec<String> = res
         .sensitivity_table
@@ -789,16 +802,17 @@ fn populate_power_info_sheet(session: &mut Session, info_id: &str, res: &PowerAn
         .map(|cell| format!("alpha={:.3}, power={:.2} -> n={}, N={}", cell.alpha, cell.target_power, cell.sample_size, cell.total_n))
         .collect();
     let note = format!("{}\n\nSensitivity Table:\n{}", res.notes.join("\n"), sensitivity_summary.join("\n"));
-    session.execute_as_ui("info.setNote", json!({ "sheet_id": info_id, "text": note }))?;
+    exec("info.setNote", json!({ "sheet_id": info_id, "text": note }))?;
     Ok(())
 }
 
-fn configure_power_graph_sheet(session: &mut Session, graph_id: &str, res: &PowerAnalysisResult) -> Result<(), EngineError> {
-    session.execute_as_ui(
-        "graph.setKind",
-        json!({ "sheet_id": graph_id, "kind": "xy", "reset_series_style": false, "option_id": "xy_points_connecting" }),
-    )?;
-    session.execute_as_ui(
+fn configure_power_graph_sheet(
+    exec: &mut dyn FnMut(&str, Value) -> Result<lumencraft_engine::CommandOutcome, EngineError>,
+    graph_id: &str,
+    res: &PowerAnalysisResult,
+) -> Result<(), EngineError> {
+    exec("graph.setKind", json!({ "sheet_id": graph_id, "kind": "xy", "reset_series_style": false, "option_id": "xy_points_connecting" }))?;
+    exec(
         "graph.setSpec",
         json!({
             "sheet_id": graph_id,
@@ -806,7 +820,7 @@ fn configure_power_graph_sheet(session: &mut Session, graph_id: &str, res: &Powe
             "initialized": true
         }),
     )?;
-    session.execute_as_ui(
+    exec(
         "graph.setAxes",
         json!({
             "sheet_id": graph_id,
@@ -815,7 +829,7 @@ fn configure_power_graph_sheet(session: &mut Session, graph_id: &str, res: &Powe
         }),
     )?;
     if let Some(tp) = res.target_power {
-        session.execute_as_ui(
+        exec(
             "graph.setAdditionalTicks",
             json!({
                 "sheet_id": graph_id,

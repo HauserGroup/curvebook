@@ -25,11 +25,16 @@ Every handler executes inside `run_guarded` with structured error payloads (`Err
 
 | Surface | Purpose |
 |---|---|
-| `doc_inspect` / `open_file` / `save_file` | Inspect project sheets (`Data`, `Info`, `Results`, `Graphs`, `Layouts`) or live `--control` state snapshots, open `.lumencraft` / `.lumencraft.d` / `.lctemplate` / `.prism` / `.pzfx` / `.csv` / `.tsv`, and atomically save `.lumencraft`, `.lumencraft.d`, or `.lctemplate` projects. |
-| `command_list` / `command_run` / `command_batch` | Discover and execute typed engine commands ([`commands.md`](commands.md)) plus the `32` synced UI commands (`crates/mcp/src/ui_catalog.rs`), optionally with `atomic: true` batch rollback. |
+| `doc_inspect` / `open_file` / `save_file` | Inspect project sheets (`Data`, `Info`, `Results`, `Graphs`, `Layouts`) or live `--control` state snapshots (including per-sheet cell previews when `sheet_id` or `include_cells` is given), open `.lumencraft` / `.lumencraft.d` / `.lctemplate` / `.prism` / `.pzfx` / `.csv` / `.tsv`, and atomically save `.lumencraft`, `.lumencraft.d`, or `.lctemplate` projects — forwarding directly to the attached desktop session when `--control-port` is configured. |
+| `command_list` / `command_run` / `command_batch` | Discover and execute typed engine commands ([`commands.md`](commands.md)) plus the `32` synced UI commands (`crates/mcp/src/ui_catalog.rs`), optionally with `atomic: true` batch rollback. `command_list` reports `"live_attached"`, `"mode"` (`"live_attach"` vs `"headless"`), and per-command `"available"` (`ui.*` commands report `"available": false`, `"requires_live_attach": true` when headless). |
 | `list_toolsets` / `enable_toolset` | Progressively enable or disable per-command MCP tools grouped by `CommandGroup` — plus the `"gui"` toolset (`gui_toolset` in `list_toolsets`: 8 `GUI Automation` tools) — emitting `notifications/tools/list_changed`. |
-| `render_preview` / `export` | Compile and rasterize any `GraphSheet` or `LayoutSheet` to PNG preview bytes, or export `SVG` / `%PDF-1.7` / `PNG` / `TIFF` / `CSV` / `JSON`. |
-| MCP Resources & Prompts | Read `sheet://<id>` and `result://<id>` resources and guided statistical/curve-fitting workflow prompts. |
+| `render_preview` / `export` | Compile and rasterize any `GraphSheet` or `LayoutSheet` to PNG preview bytes, or export `SVG` / `%PDF-1.7` / `PNG` / `TIFF` / `CSV` / `JSON` (forwarded to the live window when attached; for CSV, specifying `tab_id` defaults `tidy` to `false` so the requested sheet is exported, while explicit `tidy: true` + `tab_id` fails with `InvalidParams`). |
+| MCP Resources & Prompts | Read `sheet://<id>` and `result://<id>` resources (from the live desktop session when `--control-port` is attached, or the local session in headless mode) and guided statistical/curve-fitting workflow prompts. |
+
+### Live-Attach Mode (`--control-port` / `LUMENCRAFT_CONTROL_PORT`)
+- Pass `--control-port <port>` (or set `LUMENCRAFT_CONTROL_PORT=<port>`, overridden by `--control-port`) to attach MCP to a running `lumencraft --control <port>` desktop window over `127.0.0.1:<port>`.
+- Authentication uses `--control-token <token>`, `LUMENCRAFT_CONTROL_TOKEN`, or the per-UID `control-<port>.token` file located under `$LUMENCRAFT_CONFIG_DIR`, `$XDG_CONFIG_HOME/lumencraft` / `$HOME` config directories, or (when `HOME` is unset on Unix) a validated `0700` non-symlink `$XDG_RUNTIME_DIR/lumencraft` or `$TMPDIR/lumencraft-uid-<uid>` directory.
+- When attached, `doc_inspect`, `open_file`, `save_file`, `render_preview`, `export`, `command_list`, `command_run`, `command_batch`, `resources/list`, and `resources/read` operate against the live desktop window session rather than a disconnected local `Session`, while local `--workdir` containment is still enforced for file paths.
 
 ## `gui` Toolset, `GuiSessionHost` & `--gui-only` Mode (`R8.6`–`R8.8`)
 
