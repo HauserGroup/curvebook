@@ -18,9 +18,10 @@ use crate::column::{
     summarize_pre_summarized_points, wilcoxon_exact_p,
 };
 use crate::common::{
-    build_tab, checklist_item, ci_cell, extract_numeric_columns, extract_paired_values, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell,
-    p_cell, push_scalar, quantile_type6_sorted, quartiles_hinge, rank_with_ties, resolve_selected_indices, sorted_finite, t_crit_two_sided,
-    validate_finite_slice,
+    append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell,
+    extract_numeric_columns, extract_paired_values_with_report, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell,
+    p_cell, push_scalar, quantile_type6_sorted, quartiles_hinge, rank_with_ties, resolve_selected_indices, sanitize_result_sheet_floats,
+    select_kth_pairwise_sum, sorted_finite, t_crit_two_sided, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
@@ -697,9 +698,45 @@ fn mann_whitney_exact_p(n1: usize, n2: usize, u_obs: usize, two_tailed: bool) ->
     if two_tailed { (2.0 * min_tail / total_ways).clamp(0.0, 1.0) } else { (min_tail / total_ways).clamp(0.0, 1.0) }
 }
 
-/// Mann–Whitney *U* test comparing `a` and `b`, with exact DP *p*-values for `n_a + n_b <= 40`
-/// without ties, Hodges–Lehmann median difference `a - b` + Moses CI, Cliff's `delta`, and
-/// rank-biserial `r`.
+/// Exact conditional permutation DP for Mann–Whitney with tied ranks (`n_a + n_b <= 18`).
+/// Computes exact permutation counts over doubled integer ranks `2 * r_i`.
+fn mann_whitney_exact_ties_p(ranks: &[f64], na: usize, two_tailed: bool) -> f64 {
+    let n = ranks.len();
+    let two_ranks: Vec<usize> = ranks.iter().map(|&r| (2.0 * r).round() as usize).collect();
+    let max_sum: usize = two_ranks.iter().sum();
+    let mut dp = vec![vec![0_u64; max_sum + 1]; na + 1];
+    dp[0][0] = 1;
+    let mut running_max = 0_usize;
+    for (idx, &tr) in two_ranks.iter().enumerate() {
+        let i_max = na.min(idx + 1);
+        running_max += tr;
+        for i in (1..=i_max).rev() {
+            for s in tr..=running_max {
+                dp[i][s] += dp[i - 1][s - tr];
+            }
+        }
+    }
+    let total_ways: u64 = dp[na].iter().sum();
+    if total_ways == 0 {
+        return 1.0;
+    }
+    let two_r1_obs: usize = two_ranks.iter().take(na).sum();
+    if two_tailed {
+        let expected_two_r1 = na * (n + 1);
+        let obs_dev = two_r1_obs.abs_diff(expected_two_r1);
+        let tail_ways: u64 = dp[na].iter().enumerate().filter(|&(s, _)| s.abs_diff(expected_two_r1) >= obs_dev).map(|(_, &c)| c).sum();
+        ((tail_ways as f64) / (total_ways as f64)).clamp(0.0, 1.0)
+    } else {
+        let lower_tail: u64 = dp[na].iter().take(two_r1_obs + 1).sum();
+        let upper_tail: u64 = dp[na].iter().skip(two_r1_obs).sum();
+        let min_tail = lower_tail.min(upper_tail);
+        ((min_tail as f64) / (total_ways as f64)).clamp(0.0, 1.0)
+    }
+}
+
+/// Mann–Whitney *U* test comparing `a` and `b`, with exact DP *p*-values for untied samples
+/// (`n_a + n_b <= 40`) and exact conditional permutation DP for tied samples (`n_a + n_b <= 18`),
+/// exact Hodges–Lehmann median difference `a - b` + Moses CI, Cliff's `delta`, and rank-biserial `r`.
 pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<MannWhitneyResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -726,6 +763,8 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
     let (p_value, exact_p_used) = if na + nb <= 40 && ranked.tie_counts.is_empty() {
         let u_int = u_a.round() as usize;
         (mann_whitney_exact_p(na, nb, u_int, two_tailed), true)
+    } else if !ranked.tie_counts.is_empty() && na + nb <= 18 {
+        (mann_whitney_exact_ties_p(&ranked.ranks, na, two_tailed), true)
     } else {
         let mean_u = 0.5 * naf * nbf;
         let var_u = ((naf * nbf / 12.0) * (nf + 1.0 - ranked.tie_sum_t3_minus_t / (nf * (nf - 1.0)))).max(1e-30);
@@ -766,36 +805,62 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
     let na = a.len();
     let nb = b.len();
     let m = na.saturating_mul(nb);
-    if m == 0 {
+    if na == 0 || nb == 0 {
         return Err(StatsError::EmptyInput);
     }
-    if m > 40_000 {
+    let (hl, lo_ci_val, hi_ci_val) = if m > 40_000 {
         let sa = sorted_finite(a);
-        let sb = sorted_finite(b);
-        let ma = quantile_type6_sorted(&sa, 0.5).unwrap_or(sa[0]);
-        let mb = quantile_type6_sorted(&sb, 0.5).unwrap_or(sb[0]);
-        return Ok((ma - mb, None));
-    }
-    let mut diffs = Vec::with_capacity(m);
-    for &va in a {
-        for &vb in b {
-            diffs.push(va - vb);
+        let mut neg_b: Vec<f64> = b.iter().map(|&v| -v).collect();
+        neg_b.sort_by(f64::total_cmp);
+        let m_u64 = (na as u64) * (nb as u64);
+        let hl = if m_u64 % 2 == 1 {
+            select_kth_pairwise_sum(&sa, &neg_b, m_u64 / 2)?
+        } else {
+            let mid_lo = select_kth_pairwise_sum(&sa, &neg_b, m_u64 / 2 - 1)?;
+            let mid_hi = select_kth_pairwise_sum(&sa, &neg_b, m_u64 / 2)?;
+            0.5 * mid_lo + 0.5 * mid_hi
+        };
+        if na + nb < 4 {
+            return Ok((hl, None));
         }
-    }
-    diffs.sort_by(f64::total_cmp);
-    let hl = quantile_type6_sorted(&diffs, 0.5).unwrap_or(diffs[0]);
-    if na + nb < 4 {
-        return Ok((hl, None));
-    }
-    let z = norm_two_sided_isf(confidence.alpha())?;
-    let naf = na as f64;
-    let nbf = nb as f64;
-    let mu = 0.5 * naf * nbf;
-    let sd = (naf * nbf * (naf + nbf + 1.0) / 12.0).sqrt();
-    let k = (mu - z * sd).floor().max(1.0) as usize;
-    let lo_idx = k.saturating_sub(1).min(m - 1);
-    let hi_idx = (m - k).min(m - 1);
-    Ok((hl, Some((diffs[lo_idx], diffs[hi_idx]))))
+        let z = norm_two_sided_isf(confidence.alpha())?;
+        let naf = na as f64;
+        let nbf = nb as f64;
+        let mu = 0.5 * naf * nbf;
+        let sd = (naf * nbf * (naf + nbf + 1.0) / 12.0).sqrt();
+        let k = (mu - z * sd).floor().max(1.0) as u64;
+        let lo_idx = k.saturating_sub(1).min(m_u64 - 1);
+        let hi_idx = (m_u64 - k).min(m_u64 - 1);
+        let ci_lo = select_kth_pairwise_sum(&sa, &neg_b, lo_idx)?;
+        let ci_hi = select_kth_pairwise_sum(&sa, &neg_b, hi_idx)?;
+        (hl, ci_lo, ci_hi)
+    } else {
+        let mut diffs = Vec::with_capacity(m);
+        for &va in a {
+            for &vb in b {
+                diffs.push(va - vb);
+            }
+        }
+        diffs.sort_by(f64::total_cmp);
+        let hl = quantile_type6_sorted(&diffs, 0.5).unwrap_or(diffs[0]);
+        if !hl.is_finite() {
+            return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
+        }
+        if na + nb < 4 {
+            return Ok((hl, None));
+        }
+        let z = norm_two_sided_isf(confidence.alpha())?;
+        let naf = na as f64;
+        let nbf = nb as f64;
+        let mu = 0.5 * naf * nbf;
+        let sd = (naf * nbf * (naf + nbf + 1.0) / 12.0).sqrt();
+        let k = (mu - z * sd).floor().max(1.0) as usize;
+        let lo_idx = k.saturating_sub(1).min(m - 1);
+        let hi_idx = (m - k).min(m - 1);
+        (hl, diffs[lo_idx], diffs[hi_idx])
+    };
+    let ci = if lo_ci_val.is_finite() && hi_ci_val.is_finite() { Some((lo_ci_val, hi_ci_val)) } else { None };
+    Ok((hl, ci))
 }
 
 /// Output of Wilcoxon matched-pairs signed-rank test.
@@ -869,16 +934,25 @@ pub fn wilcoxon_matched_pairs(
         let nf = n_eff as f64;
         let zf = n_zeros as f64;
         let mean_w = 0.25 * (nf * (nf + 1.0) - zf * (zf + 1.0));
-        let var_w = ((nf * (nf + 1.0) * (2.0 * nf + 1.0) - zf * (zf + 1.0) * (2.0 * zf + 1.0) - 0.5 * ranked.tie_sum_t3_minus_t) / 24.0).max(1e-30);
-        let sd_w = var_w.sqrt();
-        let p = if two_tailed {
-            let cc = (w_plus - mean_w).abs() - 0.5;
-            if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_w)).min(1.0) }
+        // Subtract any zero-difference tie group (t_0^3 - t_0) so zeros are not double-counted
+        // alongside the Pratt -d_0(d_0+1)(2d_0+1) term.
+        let zero_tie_corr = if n_zeros > 1 { zf * (zf * zf - 1.0) } else { 0.0 };
+        let nonzero_tie_sum = (ranked.tie_sum_t3_minus_t - zero_tie_corr).max(0.0);
+        let var_w = ((nf * (nf + 1.0) * (2.0 * nf + 1.0) - zf * (zf + 1.0) * (2.0 * zf + 1.0) - 0.5 * nonzero_tie_sum) / 24.0).max(0.0);
+        if n_zeros == n_eff || var_w <= 0.0 {
+            let p = if (w_plus - mean_w).abs() <= 1e-12 { 1.0 } else { 0.0 };
+            (p, false)
         } else {
-            let cc = ((w_plus - mean_w).abs() - 0.5).max(0.0);
-            norm_sf(cc / sd_w).clamp(0.0, 1.0)
-        };
-        (p.clamp(0.0, 1.0), false)
+            let sd_w = var_w.sqrt();
+            let p = if two_tailed {
+                let cc = (w_plus - mean_w).abs() - 0.5;
+                if cc <= 0.0 { 1.0 } else { (2.0 * norm_sf(cc / sd_w)).min(1.0) }
+            } else {
+                let cc = ((w_plus - mean_w).abs() - 0.5).max(0.0);
+                norm_sf(cc / sd_w).clamp(0.0, 1.0)
+            };
+            (p.clamp(0.0, 1.0), false)
+        }
     };
 
     let (hl, hl_ci) = hodges_lehmann_one_sample(&diffs_all, confidence)?;
@@ -1094,44 +1168,55 @@ pub fn bland_altman(
     let mut points = Vec::with_capacity(n);
     let mut diffs = Vec::with_capacity(n);
     for (&a, &b) in method_a.iter().zip(method_b.iter()) {
-        let avg = 0.5 * (a + b);
+        let avg = if (a + b).is_finite() { 0.5 * (a + b) } else { 0.5 * a + 0.5 * b };
         let d = if percent_difference {
             if avg == 0.0 {
                 return Err(StatsError::InvalidParameter { name: "average", value: 0.0 });
             }
-            100.0 * (a - b) / avg
+            if (a - b).is_finite() {
+                (100.0 / avg) * (a - b)
+            } else {
+                let scale = a.abs().max(b.abs());
+                100.0 * ((a / scale - b / scale) / (avg / scale))
+            }
         } else {
             a - b
         };
+        if !avg.is_finite() || !d.is_finite() {
+            return Err(StatsError::InvalidParameter { name: "bland_altman_overflow", value: if !avg.is_finite() { avg } else { d } });
+        }
         points.push((avg, d));
         diffs.push(d);
     }
 
-    let md = SummaryMoments::from_slice(&diffs)?;
-    let sd_bias = md.sample_sd()?;
-    let se_bias = md.sem()?;
+    let max_abs = diffs.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    let (bias, sd_bias, se_bias) = if max_abs == 0.0 {
+        (0.0, 0.0, 0.0)
+    } else {
+        let scaled: Vec<f64> = diffs.iter().map(|&d| d / max_abs).collect();
+        let md = SummaryMoments::from_slice(&scaled)?;
+        (md.mean * max_abs, md.sample_sd()? * max_abs, md.sem()? * max_abs)
+    };
     let nf = n as f64;
     let df = nf - 1.0;
     let z_loa = norm_two_sided_isf(confidence.alpha())?;
     let t_crit = t_crit_two_sided(confidence, df)?;
 
-    let loa_lower = md.mean - z_loa * sd_bias;
-    let loa_upper = md.mean + z_loa * sd_bias;
+    let loa_lower = bias - z_loa * sd_bias;
+    let loa_upper = bias + z_loa * sd_bias;
     let se_loa = sd_bias * (1.0 / nf + (z_loa * z_loa) / (2.0 * df)).sqrt();
+    let bias_ci = (bias - t_crit * se_bias, bias + t_crit * se_bias);
+    let loa_lower_ci = (loa_lower - t_crit * se_loa, loa_lower + t_crit * se_loa);
+    let loa_upper_ci = (loa_upper - t_crit * se_loa, loa_upper + t_crit * se_loa);
+    let outputs_finite =
+        [bias, sd_bias, se_bias, loa_lower, loa_upper, bias_ci.0, bias_ci.1, loa_lower_ci.0, loa_lower_ci.1, loa_upper_ci.0, loa_upper_ci.1]
+            .iter()
+            .all(|v| v.is_finite());
+    if !outputs_finite {
+        return Err(StatsError::InvalidParameter { name: "bland_altman_overflow", value: loa_upper });
+    }
 
-    Ok(BlandAltmanResult {
-        n,
-        percent_difference,
-        bias: md.mean,
-        sd_bias,
-        se_bias,
-        bias_ci: (md.mean - t_crit * se_bias, md.mean + t_crit * se_bias),
-        loa_lower,
-        loa_upper,
-        loa_lower_ci: (loa_lower - t_crit * se_loa, loa_lower + t_crit * se_loa),
-        loa_upper_ci: (loa_upper - t_crit * se_loa, loa_upper + t_crit * se_loa),
-        points,
-    })
+    Ok(BlandAltmanResult { n, percent_difference, bias, sd_bias, se_bias, bias_ci, loa_lower, loa_upper, loa_lower_ci, loa_upper_ci, points })
 }
 
 // ============================================================================
@@ -1229,6 +1314,12 @@ fn extract_pre_summarized_group(
 
 /// Execute [`TwoGroupSpec`] on a [`DataSheet`] and emit a complete [`ResultSheet`].
 pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGroupSpec) -> Result<ResultSheet, StatsError> {
+    let mut res = run_two_group_analysis_inner(sheet, spec, tg)?;
+    sanitize_result_sheet_floats(&mut res)?;
+    Ok(res)
+}
+
+fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGroupSpec) -> Result<ResultSheet, StatsError> {
     let mut res = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;
@@ -1275,6 +1366,9 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = crate::column::one_sample_t_test(&first.values, hypothetical, tg.two_tailed, conf)?;
             populate_one_sample_t_sheet_impl(&mut res, &first.label, Some(&first.values), &out, conf, p_fmt);
+            if first.non_numeric_count > 0 {
+                append_ignored_text_checklist_and_footnote(&mut res, "one-sample t test", &[(first.label.clone(), first.non_numeric_count)]);
+            }
             return Ok(res);
         }
         TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
@@ -1283,12 +1377,16 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = crate::column::one_sample_wilcoxon(&first.values, hypothetical, tg.two_tailed, conf)?;
             populate_one_sample_w_sheet(&mut res, &first.label, &out, conf, p_fmt);
+            if first.non_numeric_count > 0 {
+                append_ignored_text_checklist_and_footnote(&mut res, "one-sample Wilcoxon test", &[(first.label.clone(), first.non_numeric_count)]);
+            }
             return Ok(res);
         }
         _ => {}
     }
 
-    if let Some((lvl_a, lvl_b, skipped_missing)) = resolve_mv_two_group_inputs(sheet, spec, tg)? {
+    if let Some(mv_in) = resolve_mv_two_group_inputs(sheet, spec, tg)? {
+        let MvTwoGroupExtraction { group_a: lvl_a, group_b: lvl_b, skipped_missing, ignored_non_numeric } = mv_in;
         if matches!(
             tg.method,
             TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest
@@ -1326,14 +1424,8 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
             | TwoGroupMethod::OneSampleT { .. }
             | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
         }
-        if skipped_missing > 0 {
-            res.checklist.push(checklist_item(
-                "Complete-case row filtering",
-                ChecklistStatus::Info,
-                Some(format!("{skipped_missing} incomplete or excluded row(s) skipped")),
-                "Rows with missing or excluded group/response cells were omitted prior to two-group comparison.",
-            ));
-        }
+        append_listwise_filtered_checklist_and_footnote(&mut res, "Two-group comparison", skipped_missing, lvl_a.values.len() + lvl_b.values.len());
+        append_ignored_text_checklist_and_footnote(&mut res, "two-group comparison", &ignored_non_numeric);
         return Ok(res);
     }
 
@@ -1343,56 +1435,75 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
     }
     let cols = extract_numeric_columns(sheet, &indices[..2])?;
     let (ca, cb) = (&cols[0], &cols[1]);
+    let unpaired_ignored = |cols: &[crate::common::ExtractedColumn]| -> Vec<(String, usize)> {
+        cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect()
+    };
 
     match tg.method {
         TwoGroupMethod::UnpairedT => {
             let out = unpaired_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
             append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, false, conf.alpha());
+            append_ignored_text_checklist_and_footnote(&mut res, "unpaired t test", &unpaired_ignored(&cols));
         }
         TwoGroupMethod::WelchT => {
             let out = welch_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
             append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, false, conf.alpha());
+            append_ignored_text_checklist_and_footnote(&mut res, "Welch t test", &unpaired_ignored(&cols));
         }
         TwoGroupMethod::LognormalUnpairedT => {
             let out = lognormal_unpaired_t_test(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_unpaired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
             append_unpaired_normality_checklist(&mut res.checklist, &ca.values, &cb.values, true, conf.alpha());
+            append_ignored_text_checklist_and_footnote(&mut res, "lognormal unpaired t test", &unpaired_ignored(&cols));
         }
         TwoGroupMethod::PairedT => {
-            let (xa, xb) = extract_paired_values(sheet, ca.index, cb.index)?;
-            let out = paired_t_test(&xa, &xb, tg.two_tailed, conf)?;
+            let report = extract_paired_values_with_report(sheet, ca.index, cb.index)?;
+            let out = paired_t_test(&report.xs, &report.ys, tg.two_tailed, conf)?;
             populate_paired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
-            append_paired_normality_checklist(&mut res.checklist, &xa, &xb, false, conf.alpha());
+            append_paired_normality_checklist(&mut res.checklist, &report.xs, &report.ys, false, conf.alpha());
+            report_paired_extraction(&mut res, "Paired t test", &ca.label, &cb.label, &report);
         }
         TwoGroupMethod::RatioPairedT => {
-            let (xa, xb) = extract_paired_values(sheet, ca.index, cb.index)?;
-            let out = ratio_paired_t_test(&xa, &xb, tg.two_tailed, conf)?;
+            let report = extract_paired_values_with_report(sheet, ca.index, cb.index)?;
+            let out = ratio_paired_t_test(&report.xs, &report.ys, tg.two_tailed, conf)?;
             populate_paired_t_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, tg.compute_effect_sizes, conf, p_fmt);
-            append_paired_normality_checklist(&mut res.checklist, &xa, &xb, true, conf.alpha());
+            append_paired_normality_checklist(&mut res.checklist, &report.xs, &report.ys, true, conf.alpha());
+            report_paired_extraction(&mut res, "Ratio paired t test", &ca.label, &cb.label, &report);
         }
         TwoGroupMethod::MannWhitneyU => {
             let out = mann_whitney_u(&ca.values, &cb.values, tg.two_tailed, conf)?;
             populate_mann_whitney_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, conf, p_fmt);
+            append_ignored_text_checklist_and_footnote(&mut res, "Mann-Whitney test", &unpaired_ignored(&cols));
         }
         TwoGroupMethod::WilcoxonSignedRank => {
-            let (xa, xb) = extract_paired_values(sheet, ca.index, cb.index)?;
-            let out = wilcoxon_matched_pairs(&xa, &xb, tg.two_tailed, conf, false)?;
+            let report = extract_paired_values_with_report(sheet, ca.index, cb.index)?;
+            let out = wilcoxon_matched_pairs(&report.xs, &report.ys, tg.two_tailed, conf, false)?;
             populate_wilcoxon_paired_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, conf, p_fmt);
+            report_paired_extraction(&mut res, "Wilcoxon signed-rank test", &ca.label, &cb.label, &report);
         }
         TwoGroupMethod::PairedSignTest => {
-            let (xa, xb) = extract_paired_values(sheet, ca.index, cb.index)?;
-            let out = paired_sign_test(&xa, &xb, tg.two_tailed, conf)?;
+            let report = extract_paired_values_with_report(sheet, ca.index, cb.index)?;
+            let out = paired_sign_test(&report.xs, &report.ys, tg.two_tailed, conf)?;
             populate_paired_sign_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, conf, p_fmt);
+            report_paired_extraction(&mut res, "Paired sign test", &ca.label, &cb.label, &report);
         }
         TwoGroupMethod::KolmogorovSmirnov => {
             let out = ks_two_sample(&ca.values, &cb.values)?;
             populate_ks_sheet(&mut res, (ca.index, cb.index), (&ca.label, &cb.label), &out, conf, p_fmt);
+            append_ignored_text_checklist_and_footnote(&mut res, "Kolmogorov-Smirnov test", &unpaired_ignored(&cols));
         }
         TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
     }
     Ok(res)
+}
+
+fn report_paired_extraction(res: &mut ResultSheet, analysis: &str, lbl_a: &str, lbl_b: &str, report: &crate::common::PairedValuesReport) {
+    append_listwise_filtered_checklist_and_footnote(res, analysis, report.skipped_incomplete_rows, report.xs.len());
+    if report.non_numeric_cells > 0 {
+        append_ignored_text_checklist_and_footnote(res, analysis, &[(format!("{lbl_a} / {lbl_b}"), report.non_numeric_cells)]);
+    }
 }
 
 /// Execute [`BlandAltmanSpec`] on a `Column`, `MultipleVariables`, or `Xy` [`DataSheet`] and emit a
@@ -1400,7 +1511,8 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
 pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &BlandAltmanSpec) -> Result<ResultSheet, StatsError> {
     let mut res = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
-    let (lbl_a, lbl_b, vals_a, vals_b) = extract_bland_altman_pairs(sheet, ba)?;
+    let ba_report = extract_bland_altman_pairs(sheet, ba)?;
+    let (lbl_a, lbl_b, vals_a, vals_b) = (ba_report.label_a, ba_report.label_b, ba_report.xs, ba_report.ys);
     let out = bland_altman(&vals_a, &vals_b, ba.percent_difference, conf)?;
 
     let mode_text = if out.percent_difference { "Percent difference (100 * (A - B) / Mean)" } else { "Absolute difference (A - B)" };
@@ -1482,6 +1594,15 @@ pub fn run_bland_altman_analysis(sheet: &DataSheet, spec: &AnalysisSpec, ba: &Bl
         Some(format!("n = {} pairs", out.n)),
         "Limits of Agreement assume differences follow an approximately normal distribution with constant variance across the measurement range.",
     ));
+    append_listwise_filtered_checklist_and_footnote(&mut res, "Bland-Altman agreement", ba_report.skipped_incomplete_rows, out.n);
+    if ba_report.non_numeric_cells > 0 {
+        append_ignored_text_checklist_and_footnote(
+            &mut res,
+            "Bland-Altman agreement",
+            &[(format!("{lbl_a} / {lbl_b}"), ba_report.non_numeric_cells)],
+        );
+    }
+    sanitize_result_sheet_floats(&mut res)?;
     Ok(res)
 }
 
@@ -1633,6 +1754,7 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
         Some(format!("{discoveries} / {} rows significant at threshold {threshold}", entries.len())),
         "Per-row test statistics and multiplicity-adjusted P/q values are available for Volcano plotting.",
     ));
+    sanitize_result_sheet_floats(&mut res)?;
     Ok(res)
 }
 
@@ -1640,6 +1762,13 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
 struct LabeledGroupSample {
     label: String,
     values: Vec<f64>,
+}
+
+struct MvTwoGroupExtraction {
+    group_a: LabeledGroupSample,
+    group_b: LabeledGroupSample,
+    skipped_missing: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
 }
 
 fn resolve_mv_one_sample_selection(sheet: &DataSheet, selected: &[usize], mv_response: Option<usize>) -> Result<Vec<usize>, StatsError> {
@@ -1691,11 +1820,7 @@ fn infer_mv_response_column(mv: &MultipleVariablesTable, group_col: usize, selec
     }
 }
 
-fn resolve_mv_two_group_inputs(
-    sheet: &DataSheet,
-    spec: &AnalysisSpec,
-    tg: &TwoGroupSpec,
-) -> Result<Option<(LabeledGroupSample, LabeledGroupSample, usize)>, StatsError> {
+fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGroupSpec) -> Result<Option<MvTwoGroupExtraction>, StatsError> {
     let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
         return Ok(None);
     };
@@ -1735,6 +1860,7 @@ fn resolve_mv_two_group_inputs(
     let mut vals_a = Vec::new();
     let mut vals_b = Vec::new();
     let mut skipped_missing = 0_usize;
+    let mut non_numeric_response = 0_usize;
     for r in 0..mv.row_count() {
         let Some(gc) = g_var.cells.get(r) else {
             continue;
@@ -1742,13 +1868,16 @@ fn resolve_mv_two_group_inputs(
         let Some(rc) = r_var.cells.get(r) else {
             continue;
         };
+        if is_ignored_non_numeric_cell(rc) {
+            non_numeric_response += 1;
+        }
         let tok = mv_cell_token(gc);
         let num = rc.active_number();
         match (tok, num) {
             (Some(t), Some(y)) if t == levels[0] => vals_a.push(y),
             (Some(t), Some(y)) if t == levels[1] => vals_b.push(y),
             _ => {
-                if !gc.is_empty() || !rc.is_empty() {
+                if !gc.is_empty() || !rc.is_empty() || gc.excluded || rc.excluded {
                     skipped_missing += 1;
                 }
             }
@@ -1763,14 +1892,25 @@ fn resolve_mv_two_group_inputs(
         });
     }
 
-    Ok(Some((
-        LabeledGroupSample { label: levels[0].clone(), values: vals_a },
-        LabeledGroupSample { label: levels[1].clone(), values: vals_b },
+    let ignored = if non_numeric_response > 0 { vec![(r_var.title.clone(), non_numeric_response)] } else { Vec::new() };
+    Ok(Some(MvTwoGroupExtraction {
+        group_a: LabeledGroupSample { label: levels[0].clone(), values: vals_a },
+        group_b: LabeledGroupSample { label: levels[1].clone(), values: vals_b },
         skipped_missing,
-    )))
+        ignored_non_numeric: ignored,
+    }))
 }
 
-fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result<(String, String, Vec<f64>, Vec<f64>), StatsError> {
+struct BlandAltmanExtractedPairs {
+    label_a: String,
+    label_b: String,
+    xs: Vec<f64>,
+    ys: Vec<f64>,
+    skipped_incomplete_rows: usize,
+    non_numeric_cells: usize,
+}
+
+fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result<BlandAltmanExtractedPairs, StatsError> {
     match &sheet.archetype {
         TableArchetype::Column(col) => {
             if col.subcolumn_mode.is_pre_summarized() {
@@ -1779,19 +1919,33 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
             if ba.column_a == ba.column_b {
                 return Err(StatsError::InvalidParameter { name: "column_b", value: ba.column_b as f64 });
             }
-            let (xs, ys) = extract_paired_values(sheet, ba.column_a, ba.column_b)?;
+            let report = extract_paired_values_with_report(sheet, ba.column_a, ba.column_b)?;
             let la = col.data_sets[ba.column_a].title.clone();
             let lb = col.data_sets[ba.column_b].title.clone();
-            Ok((la, lb, xs, ys))
+            Ok(BlandAltmanExtractedPairs {
+                label_a: la,
+                label_b: lb,
+                xs: report.xs,
+                ys: report.ys,
+                skipped_incomplete_rows: report.skipped_incomplete_rows,
+                non_numeric_cells: report.non_numeric_cells,
+            })
         }
         TableArchetype::MultipleVariables(mv) => {
             if ba.column_a == ba.column_b {
                 return Err(StatsError::InvalidParameter { name: "column_b", value: ba.column_b as f64 });
             }
-            let (xs, ys) = extract_paired_values(sheet, ba.column_a, ba.column_b)?;
+            let report = extract_paired_values_with_report(sheet, ba.column_a, ba.column_b)?;
             let la = mv.variables[ba.column_a].title.clone();
             let lb = mv.variables[ba.column_b].title.clone();
-            Ok((la, lb, xs, ys))
+            Ok(BlandAltmanExtractedPairs {
+                label_a: la,
+                label_b: lb,
+                xs: report.xs,
+                ys: report.ys,
+                skipped_incomplete_rows: report.skipped_incomplete_rows,
+                non_numeric_cells: report.non_numeric_cells,
+            })
         }
         TableArchetype::Xy(xy) => {
             if xy.y_subcolumn_mode.is_pre_summarized() {
@@ -1802,19 +1956,36 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                 let dsb = xy.data_sets.get(ba.column_b).ok_or(StatsError::MissingColumn { index: ba.column_b })?;
                 let mut xs = Vec::new();
                 let mut ys = Vec::new();
+                let mut non_numeric_cells = 0_usize;
+                let mut skipped_incomplete_rows = 0_usize;
                 for r in 0..xy.row_count() {
-                    if let (Some(a), Some(b)) = (
-                        dsa.cells.get(r).and_then(|s| s.first()).and_then(Cell::active_number),
-                        dsb.cells.get(r).and_then(|s| s.first()).and_then(Cell::active_number),
-                    ) {
+                    let ca = dsa.cells.get(r).and_then(|s| s.first());
+                    let cb = dsb.cells.get(r).and_then(|s| s.first());
+                    if ca.is_some_and(is_ignored_non_numeric_cell) {
+                        non_numeric_cells += 1;
+                    }
+                    if cb.is_some_and(is_ignored_non_numeric_cell) {
+                        non_numeric_cells += 1;
+                    }
+                    let has_entry = ca.is_some_and(|c| !c.is_empty() || c.excluded) || cb.is_some_and(|c| !c.is_empty() || c.excluded);
+                    if let (Some(a), Some(b)) = (ca.and_then(Cell::active_number), cb.and_then(Cell::active_number)) {
                         xs.push(a);
                         ys.push(b);
+                    } else if has_entry {
+                        skipped_incomplete_rows += 1;
                     }
                 }
                 if xs.is_empty() {
                     return Err(StatsError::EmptyInput);
                 }
-                Ok((dsa.title.clone(), dsb.title.clone(), xs, ys))
+                Ok(BlandAltmanExtractedPairs {
+                    label_a: dsa.title.clone(),
+                    label_b: dsb.title.clone(),
+                    xs,
+                    ys,
+                    skipped_incomplete_rows,
+                    non_numeric_cells,
+                })
             } else {
                 let y_idx = if ba.column_a < xy.data_sets.len() { ba.column_a } else { 0 };
                 let ds = xy.data_sets.get(y_idx).ok_or(StatsError::MissingColumn { index: y_idx })?;
@@ -1823,7 +1994,14 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                     return Err(StatsError::EmptyInput);
                 }
                 let (xs, ys) = pairs.into_iter().unzip();
-                Ok((xy.x_title.clone(), ds.title.clone(), xs, ys))
+                Ok(BlandAltmanExtractedPairs {
+                    label_a: xy.x_title.clone(),
+                    label_b: ds.title.clone(),
+                    xs,
+                    ys,
+                    skipped_incomplete_rows: 0,
+                    non_numeric_cells: 0,
+                })
             }
         }
         other => Err(StatsError::IncompatibleTable { analysis: "Bland-Altman", actual: other.kind() }),
@@ -2340,8 +2518,12 @@ fn populate_mann_whitney_sheet(
     res.checklist.push(checklist_item(
         "Nonparametric rank comparison",
         ChecklistStatus::Pass,
-        Some(format!("n_A = {}, n_B = {}", out.n_a, out.n_b)),
-        "Does not assume Gaussian normality; checks distributional shift under independence.",
+        Some(format!("n_A = {}, n_B = {}, exact P = {}", out.n_a, out.n_b, out.exact_p_used)),
+        if out.exact_p_used {
+            "Exact permutation DP computed under the conditional null rank distribution; does not assume Gaussian normality."
+        } else {
+            "Asymptotic continuity-corrected tie-adjusted normal approximation used; does not assume Gaussian normality."
+        },
     ));
 }
 

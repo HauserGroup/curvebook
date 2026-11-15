@@ -558,7 +558,10 @@ fn compare_dunnett(
     threshold: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
-    let ctrl_pos = groups.iter().position(|g| g.index == control_column).unwrap_or(0);
+    let ctrl_pos = groups
+        .iter()
+        .position(|g| g.index == control_column)
+        .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
     let ctrl = &groups[ctrl_pos];
     let treatments: Vec<&GroupComparisonInput> = groups.iter().enumerate().filter(|&(i, _)| i != ctrl_pos).map(|(_, g)| g).collect();
     if treatments.is_empty() {

@@ -12,7 +12,7 @@ use lumencraft_doc::{
     SubcolumnMode, TableArchetype,
 };
 use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, noncentral_chi2_ci, norm_cdf, norm_sf, norm_two_sided_isf};
+use lumencraft_math::dist::{chi2_sf, noncentral_chi2_ci, norm_sf, norm_two_sided_isf};
 use lumencraft_math::rng::DeterministicRng;
 use lumencraft_math::roots::{RootOptions, brent_root};
 use lumencraft_math::special::{ln_choose, ln_factorial, reg_beta_inv};
@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{
     build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices,
+    sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
 
@@ -1108,7 +1109,8 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
 // 2 x 2 Effect Ratios & Score / Exact CIs (Baptista-Pike, Koopman, Newcombe)
 // ============================================================================
 
-/// Noncentral hypergeometric exact two-sided *p*-value as a function of log-odds ratio `theta`.
+/// Noncentral hypergeometric exact two-sided *p*-value as a function of odds ratio `or_val`.
+#[cfg(test)]
 fn noncentral_hypergeom_p(a_obs: u64, r1: u64, r2: u64, c1: u64, or_val: f64) -> Result<f64, StatsError> {
     let total = r1.checked_add(r2).ok_or(StatsError::InvalidParameter { name: "noncentral_hypergeom_total", value: f64::INFINITY })?;
     if total > NONCENTRAL_HYPERGEOM_MAX_TOTAL {
@@ -1130,8 +1132,27 @@ fn noncentral_hypergeom_p(a_obs: u64, r1: u64, r2: u64, c1: u64, or_val: f64) ->
         return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_max_span", value: span as f64 });
     }
     let span_usize = usize::try_from(span).map_err(|_| StatsError::InvalidParameter { name: "noncentral_hypergeom_max_span", value: span as f64 })?;
+    if or_val == 0.0 {
+        return Ok(if a_obs == lo { 1.0 } else { 0.0 });
+    }
+    let (p_sum, _) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, or_val.ln())?;
+    Ok(p_sum)
+}
 
-    let log_or = or_val.max(1e-18).ln();
+#[allow(clippy::too_many_arguments)]
+fn noncentral_hypergeom_p_and_mean_log_or(
+    a_obs: u64,
+    r1: u64,
+    r2: u64,
+    c1: u64,
+    lo: u64,
+    hi: u64,
+    span_usize: usize,
+    log_or: f64,
+) -> Result<(f64, f64), StatsError> {
+    if !log_or.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_or", value: log_or });
+    }
     let mut log_weights = Vec::with_capacity(span_usize);
     let mut max_lw = f64::NEG_INFINITY;
     for x in lo..=hi {
@@ -1143,10 +1164,12 @@ fn noncentral_hypergeom_p(a_obs: u64, r1: u64, r2: u64, c1: u64, or_val: f64) ->
         log_weights.push((x, lw));
     }
     let mut norm = 0.0_f64;
+    let mut mean_num = 0.0_f64;
     let mut probs = Vec::with_capacity(log_weights.len());
     for (x, lw) in log_weights {
         let w = (lw - max_lw).exp();
         norm += w;
+        mean_num += (x as f64) * w;
         probs.push((x, w));
     }
     if !norm.is_finite() || norm <= 0.0 {
@@ -1160,7 +1183,101 @@ fn noncentral_hypergeom_p(a_obs: u64, r1: u64, r2: u64, c1: u64, or_val: f64) ->
         }
     }
     let p_sum: f64 = probs.iter().map(|(_, w)| w / norm).filter(|&p| p <= obs_p + 1e-12).sum();
-    Ok(p_sum.clamp(0.0, 1.0))
+    Ok((p_sum.clamp(0.0, 1.0), mean_num / norm))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn baptista_pike_anchor_log_or(a_obs: u64, r1: u64, r2: u64, c1: u64, lo: u64, hi: u64, span_usize: usize, alpha: f64, or_pt: f64) -> Option<f64> {
+    if or_pt.is_finite() && or_pt > 0.0 {
+        let u_try = or_pt.ln();
+        if let Ok((p, _)) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u_try)
+            && p >= alpha
+        {
+            return Some(u_try);
+        }
+    }
+    // Locate the conditional MLE log-OR where E[X | e^u] == a_obs; by discrete log-concavity,
+    // an integer mean equals the mode so p(u_mle) == 1.0 >= alpha.
+    let target = a_obs as f64;
+    let mut u_lo = -40.0_f64;
+    let mut u_hi = 40.0_f64;
+    while u_lo > -640.0 {
+        let (_, m) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u_lo).ok()?;
+        if m <= target {
+            break;
+        }
+        u_lo *= 2.0;
+    }
+    while u_hi < 640.0 {
+        let (_, m) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u_hi).ok()?;
+        if m >= target {
+            break;
+        }
+        u_hi *= 2.0;
+    }
+    let mut best_u = 0.5 * (u_lo + u_hi);
+    for _ in 0..64 {
+        let mid = 0.5 * (u_lo + u_hi);
+        best_u = mid;
+        let (p, m) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, mid).ok()?;
+        if (m - target).abs() <= 1e-12 && p >= alpha {
+            return Some(mid);
+        }
+        if m < target {
+            u_lo = mid;
+        } else {
+            u_hi = mid;
+        }
+    }
+    let (p_best, _) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, best_u).ok()?;
+    (p_best >= alpha).then_some(best_u)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn baptista_pike_solve_side(
+    a_obs: u64,
+    r1: u64,
+    r2: u64,
+    c1: u64,
+    lo: u64,
+    hi: u64,
+    span_usize: usize,
+    alpha: f64,
+    u_center: f64,
+    lower_branch: bool,
+) -> Option<f64> {
+    let mut u_in = u_center;
+    let mut step = 1.0_f64;
+    let mut bracket = None;
+    for _ in 0..16 {
+        let u_out = if lower_branch { (u_center - step).max(-700.0) } else { (u_center + step).min(700.0) };
+        if u_out == u_in {
+            break;
+        }
+        let (p_out, _) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u_out).ok()?;
+        if p_out < alpha {
+            bracket = Some(if lower_branch { (u_out, u_in) } else { (u_in, u_out) });
+            break;
+        }
+        u_in = u_out;
+        if u_out.abs() >= 700.0 {
+            break;
+        }
+        step *= 2.0;
+    }
+    let (u_a, u_b) = bracket?;
+    let u_root = brent_root(
+        |u| match noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u) {
+            Ok((p, _)) => p - alpha,
+            Err(_) => f64::NAN,
+        },
+        u_a,
+        u_b,
+        RootOptions { rel_tol: 1e-9, abs_tol: 1e-11, max_iters: 100 },
+    )
+    .ok()?;
+    let val = u_root.exp();
+    (val.is_finite() && val >= 0.0).then_some(val)
 }
 
 /// Baptista–Pike (1977) exact conditional odds-ratio confidence interval for `2 x 2` table `[[a, b], [c, d]]`.
@@ -1175,8 +1292,9 @@ pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: Confidenc
     if r1 == 0 || r2 == 0 || lo_x >= hi_x || total > NONCENTRAL_HYPERGEOM_MAX_TOTAL || span > NONCENTRAL_HYPERGEOM_MAX_SPAN {
         return None;
     }
+    let span_usize = usize::try_from(span).ok()?;
     let alpha = confidence.alpha();
-    // Point OR estimate with Haldane correction only for locating search bracket.
+    // Point OR estimate with Haldane correction only as an initial hint for locating an interior point.
     let or_pt = if b == 0 || c == 0 {
         ((a as f64 + 0.5) * (d as f64 + 0.5)) / ((b as f64 + 0.5) * (c as f64 + 0.5))
     } else if a == 0 || d == 0 {
@@ -1185,43 +1303,12 @@ pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: Confidenc
         ((a as f64) * (d as f64)) / ((b as f64) * (c as f64))
     };
 
-    let lo_bound = if a <= lo_x {
-        0.0
-    } else {
-        let mut l = or_pt.max(1e-6);
-        for _ in 0..40 {
-            if noncentral_hypergeom_p(a, r1, r2, c1, l).ok()? < alpha {
-                break;
-            }
-            l *= 0.5;
-        }
-        brent_root(
-            |theta| noncentral_hypergeom_p(a, r1, r2, c1, theta).unwrap_or(0.0) - alpha,
-            l,
-            or_pt.max(l * 1.1),
-            RootOptions { rel_tol: 1e-7, abs_tol: 1e-8, max_iters: 64 },
-        )
-        .unwrap_or(l)
-    };
-
-    let hi_bound = if a >= hi_x {
-        f64::INFINITY
-    } else {
-        let mut h = or_pt.max(1.0);
-        for _ in 0..40 {
-            if noncentral_hypergeom_p(a, r1, r2, c1, h).ok()? < alpha {
-                break;
-            }
-            h *= 2.0;
-        }
-        brent_root(
-            |theta| noncentral_hypergeom_p(a, r1, r2, c1, theta).unwrap_or(0.0) - alpha,
-            or_pt.min(h * 0.9),
-            h,
-            RootOptions { rel_tol: 1e-7, abs_tol: 1e-8, max_iters: 64 },
-        )
-        .unwrap_or(h)
-    };
+    let u_center = baptista_pike_anchor_log_or(a, r1, r2, c1, lo_x, hi_x, span_usize, alpha, or_pt)?;
+    let lo_bound = if a <= lo_x { 0.0 } else { baptista_pike_solve_side(a, r1, r2, c1, lo_x, hi_x, span_usize, alpha, u_center, true)? };
+    let hi_bound = if a >= hi_x { f64::INFINITY } else { baptista_pike_solve_side(a, r1, r2, c1, lo_x, hi_x, span_usize, alpha, u_center, false)? };
+    if lo_bound > hi_bound {
+        return None;
+    }
 
     Some((lo_bound, hi_bound))
 }
@@ -1526,7 +1613,10 @@ pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: 
         }
     }
 
-    let kappa = if (1.0 - pe).abs() > 1e-12 { (po - pe) / (1.0 - pe) } else { 1.0 };
+    if (1.0 - pe).abs() <= 1e-12 {
+        return Err(StatsError::ZeroVariance { context: "Cohen's kappa (expected agreement p_e = 1)" });
+    }
+    let kappa = (po - pe) / (1.0 - pe);
 
     // Asymptotic SE (Fleiss, Cohen & Everitt 1969).
     let mut var_sum = 0.0_f64;
@@ -1537,9 +1627,7 @@ pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: 
             var_sum += pij * term * term;
         }
     }
-    let c_const = po * pe - 2.0 * pe + po;
-    let _ = c_const;
-    let denom_sq = (1.0 - pe).powi(2).max(1e-18);
+    let denom_sq = (1.0 - pe) * (1.0 - pe);
     let se = ((var_sum - (kappa * (1.0 - pe) - (po - pe)).powi(2)).max(0.0) / (nf * denom_sq)).sqrt();
 
     let z_crit = norm_two_sided_isf(confidence.alpha()).unwrap_or(1.959_963_984_540_054);
@@ -1555,9 +1643,9 @@ pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: 
     }
     let se0 = ((var0 - pe * pe).max(0.0) / (nf * denom_sq)).sqrt();
     let z_stat = if se0 > 0.0 { kappa / se0 } else { 0.0 };
-    let p_val = 2.0 * (1.0 - norm_cdf(z_stat.abs()));
+    let p_val = (2.0 * norm_sf(z_stat.abs())).clamp(0.0, 1.0);
 
-    Ok(KappaResult { kappa, observed_agreement: po, expected_agreement: pe, se, ci, z_statistic: z_stat, p_value: p_val.clamp(0.0, 1.0) })
+    Ok(KappaResult { kappa, observed_agreement: po, expected_agreement: pe, se, ci, z_statistic: z_stat, p_value: p_val })
 }
 
 /// Fleiss' multi-rater kappa across `N` subjects (`rows`) and `K` categories (`cols`), where each
@@ -1596,7 +1684,10 @@ pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> R
     let total_assignments = nf * mf;
     let p_j: Vec<f64> = col_sums.iter().map(|&s| s / total_assignments).collect();
     let pe: f64 = p_j.iter().map(|&pj| pj * pj).sum();
-    let kappa = if (1.0 - pe).abs() > 1e-12 { (p_bar - pe) / (1.0 - pe) } else { 1.0 };
+    if (1.0 - pe).abs() <= 1e-12 {
+        return Err(StatsError::ZeroVariance { context: "Fleiss' kappa (expected agreement p_e = 1)" });
+    }
+    let kappa = (p_bar - pe) / (1.0 - pe);
 
     // Fleiss exact asymptotic variance under H0.
     let sum_pj3: f64 = p_j.iter().map(|&pj| pj * pj * pj).sum();
@@ -1725,6 +1816,12 @@ fn resolve_contingency_primary(
 
 /// Execute a [`ContingencySpec`] against a `Contingency`, `PartsOfWhole`, or binary `Column` [`DataSheet`].
 pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spec: &ContingencySpec) -> Result<ResultSheet, StatsError> {
+    let mut result = run_contingency_analysis_inner(sheet, spec, cont_spec)?;
+    sanitize_result_sheet_floats(&mut result)?;
+    Ok(result)
+}
+
+fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_spec: &ContingencySpec) -> Result<ResultSheet, StatsError> {
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;
@@ -2356,8 +2453,8 @@ mod tests {
     use lumencraft_math::dist::norm_two_sided_isf;
 
     use super::{
-        StatsError, checked_table_margins, fisher_exact_2x2, koopman_chi2_score, koopman_rr_ci, koopman_solve_lower, koopman_solve_lower_c_zero,
-        koopman_solve_upper, koopman_solve_upper_a_zero, noncentral_hypergeom_p,
+        StatsError, baptista_pike_or_ci, checked_table_margins, fisher_exact_2x2, koopman_chi2_score, koopman_rr_ci, koopman_solve_lower,
+        koopman_solve_lower_c_zero, koopman_solve_upper, koopman_solve_upper_a_zero, noncentral_hypergeom_p,
     };
 
     #[test]
@@ -2599,5 +2696,46 @@ mod tests {
             checked_table_margins(&[vec![1, 2], vec![3]]),
             Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: 2, actual: 1 }))
         ));
+    }
+
+    #[test]
+    fn baptista_pike_extreme_or_and_zero_cell_root_roundtrip() {
+        let alpha = ConfidenceLevel::DEFAULT_95.alpha();
+        let assert_inf_sup_bracket = |a: u64, r1: u64, r2: u64, c1: u64, lo: Option<f64>, hi: Option<f64>| {
+            if let Some(l) = lo {
+                let p_out = noncentral_hypergeom_p(a, r1, r2, c1, l * (1.0 - 1e-6)).unwrap();
+                let p_in = noncentral_hypergeom_p(a, r1, r2, c1, l * (1.0 + 1e-6)).unwrap();
+                assert!(p_out <= alpha + 1e-9 && p_in + 1e-9 >= alpha, "lower bound {l} not at threshold: p_out={p_out}, p_in={p_in}");
+            }
+            if let Some(h) = hi {
+                let p_in = noncentral_hypergeom_p(a, r1, r2, c1, h * (1.0 - 1e-6)).unwrap();
+                let p_out = noncentral_hypergeom_p(a, r1, r2, c1, h * (1.0 + 1e-6)).unwrap();
+                assert!(p_in + 1e-9 >= alpha && p_out <= alpha + 1e-9, "upper bound {h} not at threshold: p_in={p_in}, p_out={p_out}");
+            }
+        };
+
+        // Interior extreme tiny OR (`[[1, 1000], [1000, 1]]`): finite CI on {theta: p(theta) >= alpha}.
+        let (lo_tiny, hi_tiny) = baptista_pike_or_ci(1, 1000, 1000, 1, ConfidenceLevel::DEFAULT_95).expect("interior tiny OR CI");
+        assert!(lo_tiny > 0.0 && lo_tiny < 1e-6 && hi_tiny > 1e-6 && hi_tiny < 1.0, "got ({lo_tiny}, {hi_tiny})");
+        assert_inf_sup_bracket(1, 1001, 1001, 1001, Some(lo_tiny), Some(hi_tiny));
+
+        // Zero-cell upper boundary (`a == hi_x`): finite lower bound, infinite upper bound.
+        let (lo_b0, hi_b0) = baptista_pike_or_ci(2, 0, 50, 50, ConfidenceLevel::DEFAULT_95).expect("b=0 CI");
+        assert!(lo_b0 > 0.0 && hi_b0.is_infinite(), "got ({lo_b0}, {hi_b0})");
+        assert_inf_sup_bracket(2, 2, 100, 52, Some(lo_b0), None);
+
+        // Zero-cell lower boundary (`a == lo_x`): lower bound == 0.0, finite upper bound.
+        let (lo_a0, hi_a0) = baptista_pike_or_ci(0, 50, 2, 100, ConfidenceLevel::DEFAULT_95).expect("a=0 CI");
+        assert_eq!(lo_a0, 0.0);
+        assert!(hi_a0.is_finite() && hi_a0 > 0.0);
+        assert_inf_sup_bracket(0, 50, 102, 2, None, Some(hi_a0));
+
+        // Explicit or_val == 0.0 handling in noncentral_hypergeom_p.
+        assert_eq!(noncentral_hypergeom_p(0, 5, 5, 4, 0.0).unwrap(), 1.0);
+        assert_eq!(noncentral_hypergeom_p(1, 5, 5, 4, 0.0).unwrap(), 0.0);
+
+        // Balanced moderate table roundtrip.
+        let (lo_bal, hi_bal) = baptista_pike_or_ci(10, 5, 3, 12, ConfidenceLevel::DEFAULT_95).expect("balanced CI");
+        assert_inf_sup_bracket(10, 15, 15, 13, Some(lo_bal), Some(hi_bal));
     }
 }

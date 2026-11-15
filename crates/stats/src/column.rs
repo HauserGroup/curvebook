@@ -13,8 +13,9 @@ use lumencraft_math::{ConfidenceLevel, MathError};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, quantile_sorted, quantile_type6_sorted,
-    quartiles_hinge, rank_with_ties, resolve_selected_indices, sorted_finite, t_crit_two_sided, validate_finite_slice,
+    append_ignored_text_checklist_and_footnote, build_tab, checklist_item, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell,
+    opt_num_cell, p_cell, push_scalar, quantile_sorted, quantile_type6_sorted, quartiles_hinge, rank_with_ties, resolve_selected_indices,
+    sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, validate_finite_slice,
 };
 use crate::error::StatsError;
 
@@ -198,6 +199,7 @@ struct IndexedRawSeries {
     label: String,
     values: Vec<f64>,
     excluded_count: usize,
+    non_numeric_count: usize,
     /// Original 0-based table row index for each active observation in `values`.
     row_indices: Vec<usize>,
 }
@@ -208,7 +210,11 @@ struct IndexedPooledSeries {
     points: Vec<SummarizedPoint>,
 }
 
-type IndexedSeriesPair = (Vec<IndexedRawSeries>, Vec<IndexedPooledSeries>);
+struct DescriptiveSeriesExtraction {
+    raw: Vec<IndexedRawSeries>,
+    pooled: Vec<IndexedPooledSeries>,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
 
 fn compute_custom_percentiles(sorted: &[f64], custom_upper: Option<f64>) -> Result<OptionalCiPair, StatsError> {
     let Some(p_hi) = custom_upper else {
@@ -274,25 +280,41 @@ fn compute_harmonic_stats(values: &[f64], confidence: ConfidenceLevel) -> Result
     if values.iter().any(|&v| v <= 0.0) {
         return Ok((None, None));
     }
-    let invs: Vec<f64> = values.iter().map(|v| 1.0 / v).collect();
+    let min_v = values.iter().copied().fold(f64::INFINITY, f64::min);
+    let invs: Vec<f64> = values.iter().map(|v| min_v / v).collect();
     let im = SummaryMoments::from_slice(&invs)?;
-    let hm = 1.0 / im.mean;
+    let hm = (min_v / im.mean).is_finite().then_some(min_v / im.mean);
     let ci = if let Some((lo_inv, hi_inv)) = compute_mean_ci(im.mean, im.sem().ok(), values.len(), confidence)? {
-        if lo_inv > 0.0 && hi_inv > 0.0 { Some((1.0 / hi_inv, 1.0 / lo_inv)) } else { None }
+        if lo_inv > 0.0 && hi_inv > 0.0 {
+            let lo = min_v / hi_inv;
+            let hi = min_v / lo_inv;
+            (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+        } else {
+            None
+        }
     } else {
         None
     };
-    Ok((Some(hm), ci))
+    Ok((hm, ci))
 }
 
 fn compute_quadratic_stats(values: &[f64], confidence: ConfidenceLevel) -> Result<(f64, Option<(f64, f64)>), StatsError> {
     let n = values.len();
-    let sqs: Vec<f64> = values.iter().map(|v| v * v).collect();
+    let max_abs = values.iter().fold(0.0_f64, |acc, &v| acc.max(v.abs()));
+    if max_abs == 0.0 {
+        return Ok((0.0, (n >= 2).then_some((0.0, 0.0))));
+    }
+    let sqs: Vec<f64> = values.iter().map(|v| (v / max_abs).powi(2)).collect();
     let sm = SummaryMoments::from_slice(&sqs)?;
-    let rms = sm.mean.max(0.0).sqrt();
+    let rms = max_abs * sm.mean.max(0.0).sqrt();
+    if !rms.is_finite() {
+        return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "quadratic_mean", value: rms }));
+    }
     let ci = if n >= 2 {
         if let Some((lo_sq, hi_sq)) = compute_mean_ci(sm.mean, sm.sem().ok(), n, confidence)? {
-            Some((lo_sq.max(0.0).sqrt(), hi_sq.max(0.0).sqrt()))
+            let lo = max_abs * lo_sq.max(0.0).sqrt();
+            let hi = max_abs * hi_sq.max(0.0).sqrt();
+            (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
         } else {
             None
         }
@@ -390,17 +412,21 @@ pub fn extract_series_for_descriptive(
     selected: &[usize],
     aggregation: SubcolumnAggregation,
 ) -> Result<ExtractedSeriesPair, StatsError> {
-    let (raw, pooled) = extract_indexed_series_for_descriptive(sheet, selected, aggregation)?;
-    let raw_out = raw.into_iter().map(|s| (s.label, s.values, s.excluded_count)).collect();
-    let pooled_out = pooled.into_iter().map(|p| (p.label, p.points)).collect();
+    let extracted = extract_indexed_series_for_descriptive(sheet, selected, aggregation)?;
+    let raw_out = extracted.raw.into_iter().map(|s| (s.label, s.values, s.excluded_count)).collect();
+    let pooled_out = extracted.pooled.into_iter().map(|p| (p.label, p.points)).collect();
     Ok((raw_out, pooled_out))
+}
+
+fn collect_ignored_non_numeric(raw: &[IndexedRawSeries]) -> Vec<(String, usize)> {
+    raw.iter().filter(|s| s.non_numeric_count > 0).map(|s| (s.label.clone(), s.non_numeric_count)).collect()
 }
 
 fn extract_indexed_series_for_descriptive(
     sheet: &DataSheet,
     selected: &[usize],
     aggregation: SubcolumnAggregation,
-) -> Result<IndexedSeriesPair, StatsError> {
+) -> Result<DescriptiveSeriesExtraction, StatsError> {
     match &sheet.archetype {
         TableArchetype::Column(t) => extract_column_table_for_desc(t, selected),
         TableArchetype::Xy(t) => extract_xy_table_for_desc(t, selected, aggregation),
@@ -408,30 +434,44 @@ fn extract_indexed_series_for_descriptive(
         TableArchetype::MultipleVariables(t) => {
             let indices = resolve_selected_indices(selected, t.variables.len());
             let mut raw = Vec::new();
+            let mut ignored = Vec::new();
             for idx in indices {
                 let var = &t.variables[idx];
                 let mut vals = Vec::new();
                 let mut row_indices = Vec::new();
                 let mut ex = 0_usize;
+                let mut non_num = 0_usize;
                 for (r_idx, c) in var.cells.iter().enumerate() {
                     if c.excluded {
                         ex += 1;
                     } else if let Some(v) = c.active_number() {
                         vals.push(v);
                         row_indices.push(r_idx);
+                    } else if is_ignored_non_numeric_cell(c) {
+                        non_num += 1;
                     }
                 }
+                if non_num > 0 {
+                    ignored.push((var.title.clone(), non_num));
+                }
                 if !vals.is_empty() {
-                    raw.push(IndexedRawSeries { data_set_index: idx, label: var.title.clone(), values: vals, excluded_count: ex, row_indices });
+                    raw.push(IndexedRawSeries {
+                        data_set_index: idx,
+                        label: var.title.clone(),
+                        values: vals,
+                        excluded_count: ex,
+                        non_numeric_count: non_num,
+                        row_indices,
+                    });
                 }
             }
-            Ok((raw, Vec::new()))
+            Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), ignored_non_numeric: ignored })
         }
         other => Err(StatsError::IncompatibleTable { analysis: "descriptive statistics", actual: other.kind() }),
     }
 }
 
-fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[usize]) -> Result<IndexedSeriesPair, StatsError> {
+fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[usize]) -> Result<DescriptiveSeriesExtraction, StatsError> {
     let indices = resolve_selected_indices(selected, t.data_sets.len());
     if t.subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
@@ -447,17 +487,19 @@ fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[us
                 pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
-        return Ok((Vec::new(), pooled));
+        return Ok(DescriptiveSeriesExtraction { raw: Vec::new(), pooled, ignored_non_numeric: Vec::new() });
     }
     if t.subcolumn_mode.is_pre_summarized() {
         return Err(StatsError::RequiresRawReplicates);
     }
     let mut raw = Vec::new();
+    let mut ignored = Vec::new();
     for idx in indices {
         let ds = &t.data_sets[idx];
         let mut vals = Vec::new();
         let mut row_indices = Vec::new();
         let mut ex = 0_usize;
+        let mut non_num = 0_usize;
         for (r_idx, row) in ds.cells.iter().enumerate() {
             if let Some(c) = row.first() {
                 if c.excluded {
@@ -465,21 +507,33 @@ fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[us
                 } else if let Some(v) = c.active_number() {
                     vals.push(v);
                     row_indices.push(r_idx);
+                } else if is_ignored_non_numeric_cell(c) {
+                    non_num += 1;
                 }
             }
         }
+        if non_num > 0 {
+            ignored.push((ds.title.clone(), non_num));
+        }
         if !vals.is_empty() {
-            raw.push(IndexedRawSeries { data_set_index: idx, label: ds.title.clone(), values: vals, excluded_count: ex, row_indices });
+            raw.push(IndexedRawSeries {
+                data_set_index: idx,
+                label: ds.title.clone(),
+                values: vals,
+                excluded_count: ex,
+                non_numeric_count: non_num,
+                row_indices,
+            });
         }
     }
-    Ok((raw, Vec::new()))
+    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), ignored_non_numeric: ignored })
 }
 
 fn extract_xy_table_for_desc(
     t: &lumencraft_doc::XyTable,
     selected: &[usize],
     aggregation: SubcolumnAggregation,
-) -> Result<IndexedSeriesPair, StatsError> {
+) -> Result<DescriptiveSeriesExtraction, StatsError> {
     let indices = resolve_selected_indices(selected, t.data_sets.len());
     if t.y_subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
@@ -495,20 +549,21 @@ fn extract_xy_table_for_desc(
                 pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
-        return Ok((Vec::new(), pooled));
+        return Ok(DescriptiveSeriesExtraction { raw: Vec::new(), pooled, ignored_non_numeric: Vec::new() });
     }
     if t.y_subcolumn_mode.is_pre_summarized() {
         return Err(StatsError::RequiresRawReplicates);
     }
     let raw = aggregate_replicate_datasets(&t.data_sets, &indices, aggregation);
-    Ok((raw, Vec::new()))
+    let ignored_non_numeric = collect_ignored_non_numeric(&raw);
+    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), ignored_non_numeric })
 }
 
 fn extract_grouped_table_for_desc(
     t: &lumencraft_doc::GroupedTable,
     selected: &[usize],
     aggregation: SubcolumnAggregation,
-) -> Result<IndexedSeriesPair, StatsError> {
+) -> Result<DescriptiveSeriesExtraction, StatsError> {
     let indices = resolve_selected_indices(selected, t.data_sets.len());
     if t.subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
@@ -524,13 +579,14 @@ fn extract_grouped_table_for_desc(
                 pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
-        return Ok((Vec::new(), pooled));
+        return Ok(DescriptiveSeriesExtraction { raw: Vec::new(), pooled, ignored_non_numeric: Vec::new() });
     }
     if t.subcolumn_mode.is_pre_summarized() {
         return Err(StatsError::RequiresRawReplicates);
     }
     let raw = aggregate_replicate_datasets(&t.data_sets, &indices, aggregation);
-    Ok((raw, Vec::new()))
+    let ignored_non_numeric = collect_ignored_non_numeric(&raw);
+    Ok(DescriptiveSeriesExtraction { raw, pooled: Vec::new(), ignored_non_numeric })
 }
 
 fn aggregate_replicate_datasets(
@@ -547,6 +603,7 @@ fn aggregate_replicate_datasets(
                 let mut vals = Vec::new();
                 let mut row_indices = Vec::new();
                 let mut ex = 0_usize;
+                let mut non_num = 0_usize;
                 for (r_idx, row) in ds.cells.iter().enumerate() {
                     let mut row_vals = Vec::new();
                     for c in row {
@@ -554,6 +611,8 @@ fn aggregate_replicate_datasets(
                             ex += 1;
                         } else if let Some(v) = c.active_number() {
                             row_vals.push(v);
+                        } else if is_ignored_non_numeric_cell(c) {
+                            non_num += 1;
                         }
                     }
                     if let Ok(m) = SummaryMoments::from_slice(&row_vals) {
@@ -562,7 +621,14 @@ fn aggregate_replicate_datasets(
                     }
                 }
                 if !vals.is_empty() {
-                    out.push(IndexedRawSeries { data_set_index: idx, label: ds.title.clone(), values: vals, excluded_count: ex, row_indices });
+                    out.push(IndexedRawSeries {
+                        data_set_index: idx,
+                        label: ds.title.clone(),
+                        values: vals,
+                        excluded_count: ex,
+                        non_numeric_count: non_num,
+                        row_indices,
+                    });
                 }
             }
             SubcolumnAggregation::PerSubcolumn => {
@@ -570,6 +636,7 @@ fn aggregate_replicate_datasets(
                     let mut vals = Vec::new();
                     let mut row_indices = Vec::new();
                     let mut ex = 0_usize;
+                    let mut non_num = 0_usize;
                     for (r_idx, row) in ds.cells.iter().enumerate() {
                         if let Some(c) = row.get(s) {
                             if c.excluded {
@@ -577,12 +644,21 @@ fn aggregate_replicate_datasets(
                             } else if let Some(v) = c.active_number() {
                                 vals.push(v);
                                 row_indices.push(r_idx);
+                            } else if is_ignored_non_numeric_cell(c) {
+                                non_num += 1;
                             }
                         }
                     }
                     if !vals.is_empty() {
                         let lbl = if subs > 1 { format!("{}:{}", ds.title, s + 1) } else { ds.title.clone() };
-                        out.push(IndexedRawSeries { data_set_index: idx, label: lbl, values: vals, excluded_count: ex, row_indices });
+                        out.push(IndexedRawSeries {
+                            data_set_index: idx,
+                            label: lbl,
+                            values: vals,
+                            excluded_count: ex,
+                            non_numeric_count: non_num,
+                            row_indices,
+                        });
                     }
                 }
             }
@@ -590,6 +666,7 @@ fn aggregate_replicate_datasets(
                 let mut vals = Vec::new();
                 let mut row_indices = Vec::new();
                 let mut ex = 0_usize;
+                let mut non_num = 0_usize;
                 for (r_idx, row) in ds.cells.iter().enumerate() {
                     for c in row {
                         if c.excluded {
@@ -597,11 +674,20 @@ fn aggregate_replicate_datasets(
                         } else if let Some(v) = c.active_number() {
                             vals.push(v);
                             row_indices.push(r_idx);
+                        } else if is_ignored_non_numeric_cell(c) {
+                            non_num += 1;
                         }
                     }
                 }
                 if !vals.is_empty() {
-                    out.push(IndexedRawSeries { data_set_index: idx, label: ds.title.clone(), values: vals, excluded_count: ex, row_indices });
+                    out.push(IndexedRawSeries {
+                        data_set_index: idx,
+                        label: ds.title.clone(),
+                        values: vals,
+                        excluded_count: ex,
+                        non_numeric_count: non_num,
+                        row_indices,
+                    });
                 }
             }
         }
@@ -1341,35 +1427,55 @@ pub(crate) fn wilcoxon_exact_p(n: usize, w_plus: usize, max_sum: usize, two_tail
 /// Hodges–Lehmann one-sample pseudomedian (median of Walsh averages `(x_i + x_j) / 2, i <= j`)
 /// and exact/normal confidence interval.
 pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLevel) -> Result<(f64, Option<(f64, f64)>), StatsError> {
+    validate_finite_slice(values)?;
     let n = values.len();
-    if n == 0 {
-        return Err(StatsError::EmptyInput);
-    }
-    if n > 2_000 {
+    let (hl, m_u64, lo_ci_val, hi_ci_val) = if n > 2_000 {
         let sorted = sorted_finite(values);
-        let med = quantile_type6_sorted(&sorted, 0.5).unwrap_or(sorted[0]);
-        return Ok((med, None));
-    }
-    let m = n * (n + 1) / 2;
-    let mut walsh = Vec::with_capacity(m);
-    for i in 0..n {
-        for j in i..n {
-            walsh.push(0.5 * (values[i] + values[j]));
+        let m_u64 = (n as u64) * ((n as u64) + 1) / 2;
+        let hl = if m_u64 % 2 == 1 {
+            select_kth_upper_triangle_half_sum(&sorted, m_u64 / 2)?
+        } else {
+            let mid_lo = select_kth_upper_triangle_half_sum(&sorted, m_u64 / 2 - 1)?;
+            let mid_hi = select_kth_upper_triangle_half_sum(&sorted, m_u64 / 2)?;
+            0.5 * mid_lo + 0.5 * mid_hi
+        };
+        if n < 4 {
+            return Ok((hl, None));
         }
-    }
-    walsh.sort_by(f64::total_cmp);
-    let hl = quantile_type6_sorted(&walsh, 0.5).unwrap_or(walsh[0]);
-    if n < 4 {
-        return Ok((hl, None));
-    }
-    let z = lumencraft_math::dist::norm_two_sided_isf(confidence.alpha())?;
-    let nf = n as f64;
-    let mu = nf * (nf + 1.0) / 4.0;
-    let sd = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0).sqrt();
-    let k = (mu - z * sd).floor().max(1.0) as usize;
-    let lo_idx = k.saturating_sub(1).min(m - 1);
-    let hi_idx = (m - k).min(m - 1);
-    Ok((hl, Some((walsh[lo_idx], walsh[hi_idx]))))
+        let z = lumencraft_math::dist::norm_two_sided_isf(confidence.alpha())?;
+        let nf = n as f64;
+        let mu = nf * (nf + 1.0) / 4.0;
+        let sd = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0).sqrt();
+        let k = (mu - z * sd).floor().max(1.0) as u64;
+        let lo_idx = k.saturating_sub(1).min(m_u64 - 1);
+        let hi_idx = (m_u64 - k).min(m_u64 - 1);
+        let ci_lo = select_kth_upper_triangle_half_sum(&sorted, lo_idx)?;
+        let ci_hi = select_kth_upper_triangle_half_sum(&sorted, hi_idx)?;
+        (hl, m_u64, ci_lo, ci_hi)
+    } else {
+        let m = n * (n + 1) / 2;
+        let mut walsh = Vec::with_capacity(m);
+        for i in 0..n {
+            for j in i..n {
+                walsh.push(0.5 * values[i] + 0.5 * values[j]);
+            }
+        }
+        walsh.sort_by(f64::total_cmp);
+        let hl = quantile_type6_sorted(&walsh, 0.5).unwrap_or(walsh[0]);
+        if n < 4 {
+            return Ok((hl, None));
+        }
+        let z = lumencraft_math::dist::norm_two_sided_isf(confidence.alpha())?;
+        let nf = n as f64;
+        let mu = nf * (nf + 1.0) / 4.0;
+        let sd = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0).sqrt();
+        let k = (mu - z * sd).floor().max(1.0) as usize;
+        let lo_idx = k.saturating_sub(1).min(m - 1);
+        let hi_idx = (m - k).min(m - 1);
+        (hl, m as u64, walsh[lo_idx], walsh[hi_idx])
+    };
+    let _ = m_u64;
+    Ok((hl, Some((lo_ci_val, hi_ci_val))))
 }
 
 /// Kolmogorov–Smirnov one-sample test against a known theoretical `Normal(mean, sd^2)`.
@@ -1422,7 +1528,9 @@ pub(crate) fn ks_asymptotic_p(lambda: f64) -> f64 {
 /// Execute [`DescriptiveSpec`] on a [`DataSheet`] and emit a complete [`ResultSheet`].
 pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &DescriptiveSpec) -> Result<ResultSheet, StatsError> {
     let mut res = init_result_sheet(spec)?;
-    let (raw_series, pooled_series) = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, desc.aggregation)?;
+    let extracted = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, desc.aggregation)?;
+    let raw_series = extracted.raw;
+    let pooled_series = extracted.pooled;
     if raw_series.is_empty() && pooled_series.is_empty() {
         return Err(StatsError::EmptyInput);
     }
@@ -1433,6 +1541,7 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     let conf = spec.confidence_level;
     if !pooled_series.is_empty() {
         populate_pooled_descriptive_sheet(&mut res, &pooled_series, conf)?;
+        sanitize_result_sheet_floats(&mut res)?;
         return Ok(res);
     }
 
@@ -1490,6 +1599,8 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
         ));
     }
 
+    append_ignored_text_checklist_and_footnote(&mut res, "descriptive statistics", &extracted.ignored_non_numeric);
+    sanitize_result_sheet_floats(&mut res)?;
     Ok(res)
 }
 
@@ -1910,7 +2021,8 @@ fn append_one_sample_tab(
 /// Execute [`OutlierSpec`] on a [`DataSheet`] and emit a [`ResultSheet`].
 pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec: OutlierSpec) -> Result<ResultSheet, StatsError> {
     let mut res = init_result_sheet(spec)?;
-    let (raw_series, _) = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, SubcolumnAggregation::PooledGrandSample)?;
+    let extracted = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, SubcolumnAggregation::PooledGrandSample)?;
+    let raw_series = extracted.raw;
     if raw_series.is_empty() {
         return Err(StatsError::EmptyInput);
     }
@@ -1964,5 +2076,7 @@ pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec
             "No observations exceeded the configured outlier threshold."
         },
     ));
+    append_ignored_text_checklist_and_footnote(&mut res, "outlier analysis", &extracted.ignored_non_numeric);
+    sanitize_result_sheet_floats(&mut res)?;
     Ok(res)
 }

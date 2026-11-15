@@ -212,6 +212,13 @@ pub fn resolve_selected_indices(selected: &[usize], total: usize) -> Vec<usize> 
     if selected.is_empty() { (0..total).collect() } else { selected.iter().copied().filter(|&i| i < total).collect() }
 }
 
+/// Return `true` when an unexcluded, non-empty cell in a numeric column contains non-numeric
+/// (e.g. `CellValue::Text`) or non-finite content and is ignored by numeric extraction.
+#[must_use]
+pub fn is_ignored_non_numeric_cell(cell: &Cell) -> bool {
+    !cell.excluded && !cell.is_empty() && cell.active_number().is_none()
+}
+
 /// Extracted labeled numeric sample column from a `DataSheet`.
 #[derive(Debug, Clone)]
 pub struct ExtractedColumn {
@@ -219,6 +226,7 @@ pub struct ExtractedColumn {
     pub label: String,
     pub values: Vec<f64>,
     pub excluded_count: usize,
+    pub non_numeric_count: usize,
 }
 
 /// Extract active numeric columns from `Column` or `MultipleVariables` sheets.
@@ -234,16 +242,19 @@ pub fn extract_numeric_columns(sheet: &DataSheet, selected: &[usize]) -> Result<
                 let ds = &col_tab.data_sets[idx];
                 let mut values = Vec::new();
                 let mut excluded_count = 0_usize;
+                let mut non_numeric_count = 0_usize;
                 for subs in &ds.cells {
                     if let Some(cell) = subs.first() {
                         if cell.excluded {
                             excluded_count += 1;
                         } else if let Some(v) = cell.active_number() {
                             values.push(v);
+                        } else if is_ignored_non_numeric_cell(cell) {
+                            non_numeric_count += 1;
                         }
                     }
                 }
-                out.push(ExtractedColumn { index: idx, label: ds.title.clone(), values, excluded_count });
+                out.push(ExtractedColumn { index: idx, label: ds.title.clone(), values, excluded_count, non_numeric_count });
             }
             Ok(out)
         }
@@ -254,14 +265,17 @@ pub fn extract_numeric_columns(sheet: &DataSheet, selected: &[usize]) -> Result<
                 let var = &mv.variables[idx];
                 let mut values = Vec::new();
                 let mut excluded_count = 0_usize;
+                let mut non_numeric_count = 0_usize;
                 for cell in &var.cells {
                     if cell.excluded {
                         excluded_count += 1;
                     } else if let Some(v) = cell.active_number() {
                         values.push(v);
+                    } else if is_ignored_non_numeric_cell(cell) {
+                        non_numeric_count += 1;
                     }
                 }
-                out.push(ExtractedColumn { index: idx, label: var.title.clone(), values, excluded_count });
+                out.push(ExtractedColumn { index: idx, label: var.title.clone(), values, excluded_count, non_numeric_count });
             }
             Ok(out)
         }
@@ -269,8 +283,18 @@ pub fn extract_numeric_columns(sheet: &DataSheet, selected: &[usize]) -> Result<
     }
 }
 
-/// Extract paired numeric values `(row_label, x, y)` across two columns of `Column` or `MultipleVariables`.
-pub fn extract_paired_values(sheet: &DataSheet, col_a: usize, col_b: usize) -> Result<(Vec<f64>, Vec<f64>), StatsError> {
+/// Extracted paired numeric series together with counts of omitted rows and ignored non-numeric cells.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairedValuesReport {
+    pub xs: Vec<f64>,
+    pub ys: Vec<f64>,
+    pub skipped_incomplete_rows: usize,
+    pub non_numeric_cells: usize,
+}
+
+/// Extract paired numeric values `(x, y)` across two columns of `Column` or `MultipleVariables`,
+/// reporting any incomplete/excluded rows and ignored non-numeric cells in the active range.
+pub fn extract_paired_values_with_report(sheet: &DataSheet, col_a: usize, col_b: usize) -> Result<PairedValuesReport, StatsError> {
     let get_cell = |row: usize, col: usize| -> Option<&Cell> {
         match &sheet.archetype {
             TableArchetype::Column(t) => t.data_sets.get(col)?.cell(row, 0),
@@ -291,18 +315,44 @@ pub fn extract_paired_values(sheet: &DataSheet, col_a: usize, col_b: usize) -> R
     {
         return Err(StatsError::RequiresRawReplicates);
     }
+    let active_end = (0..rows).rfind(|&r| {
+        get_cell(r, col_a).is_some_and(|c| !c.is_empty() || c.excluded) || get_cell(r, col_b).is_some_and(|c| !c.is_empty() || c.excluded)
+    });
+    let Some(end_row) = active_end else {
+        return Err(StatsError::EmptyInput);
+    };
+
     let mut xs = Vec::new();
     let mut ys = Vec::new();
-    for r in 0..rows {
-        if let (Some(a), Some(b)) = (get_cell(r, col_a).and_then(Cell::active_number), get_cell(r, col_b).and_then(Cell::active_number)) {
+    let mut skipped_incomplete_rows = 0_usize;
+    let mut non_numeric_cells = 0_usize;
+    for r in 0..=end_row {
+        let ca = get_cell(r, col_a);
+        let cb = get_cell(r, col_b);
+        if ca.is_some_and(is_ignored_non_numeric_cell) {
+            non_numeric_cells += 1;
+        }
+        if cb.is_some_and(is_ignored_non_numeric_cell) {
+            non_numeric_cells += 1;
+        }
+        let has_entry = ca.is_some_and(|c| !c.is_empty() || c.excluded) || cb.is_some_and(|c| !c.is_empty() || c.excluded);
+        if let (Some(a), Some(b)) = (ca.and_then(Cell::active_number), cb.and_then(Cell::active_number)) {
             xs.push(a);
             ys.push(b);
+        } else if has_entry {
+            skipped_incomplete_rows += 1;
         }
     }
     if xs.is_empty() {
         return Err(StatsError::EmptyInput);
     }
-    Ok((xs, ys))
+    Ok(PairedValuesReport { xs, ys, skipped_incomplete_rows, non_numeric_cells })
+}
+
+/// Extract paired numeric values `(row_label, x, y)` across two columns of `Column` or `MultipleVariables`.
+pub fn extract_paired_values(sheet: &DataSheet, col_a: usize, col_b: usize) -> Result<(Vec<f64>, Vec<f64>), StatsError> {
+    let report = extract_paired_values_with_report(sheet, col_a, col_b)?;
+    Ok((report.xs, report.ys))
 }
 
 /// Build a simple summary `ResultTab`.
@@ -327,4 +377,248 @@ pub fn t_crit_two_sided(confidence: ConfidenceLevel, df: f64) -> Result<f64, Sta
 #[must_use]
 pub const fn is_parametric_summary_mode(mode: SubcolumnMode) -> bool {
     mode.supports_parametric_moments()
+}
+
+/// Append a warning checklist entry and tab footnote when unexcluded non-numeric or non-finite
+/// cells were ignored while reading numeric data columns (`R1-X2-08`).
+pub fn append_ignored_text_checklist_and_footnote(sheet: &mut ResultSheet, context: &str, details: &[(String, usize)]) {
+    let total: usize = details.iter().map(|(_, count)| *count).sum();
+    if total == 0 {
+        return;
+    }
+    let summary: String =
+        details.iter().filter(|(_, count)| *count > 0).take(6).map(|(label, count)| format!("{label}: {count}")).collect::<Vec<_>>().join(", ");
+    let suffix = if details.iter().filter(|(_, c)| *c > 0).count() > 6 { ", ..." } else { "" };
+    let msg = format!("Non-numeric values ignored: {total} in {context} ({summary}{suffix}).");
+    sheet.checklist.push(checklist_item(
+        "Numeric input validation",
+        ChecklistStatus::Warn,
+        Some(format!("{total} non-numeric cell(s) ignored")),
+        msg.clone(),
+    ));
+    if let Some(tab) = sheet.tabs.first_mut() {
+        tab.footnotes.push(msg);
+    }
+}
+
+/// Append an informational checklist entry and tab footnote when complete-case listwise row
+/// alignment drops incomplete or excluded rows (`R1-S02-13`).
+pub fn append_listwise_filtered_checklist_and_footnote(sheet: &mut ResultSheet, analysis: &str, skipped_rows: usize, kept_rows: usize) {
+    if skipped_rows == 0 {
+        return;
+    }
+    let msg = format!(
+        "{analysis} uses complete-case listwise alignment and omitted {skipped_rows} incomplete or excluded row(s) ({kept_rows} complete row(s) retained)."
+    );
+    sheet.checklist.push(checklist_item(
+        "Complete-case row alignment",
+        ChecklistStatus::Info,
+        Some(format!("{skipped_rows} row(s) omitted; {kept_rows} retained")),
+        msg.clone(),
+    ));
+    if let Some(tab) = sheet.tabs.first_mut() {
+        tab.footnotes.push(msg);
+    }
+}
+
+/// Defense-in-depth sanitizer ensuring a produced `ResultSheet` never emits non-finite floats
+/// into scalars, tabs, pairwise records, or curve overlays (`R1-X2-09`).
+pub fn sanitize_result_sheet_floats(sheet: &mut ResultSheet) -> Result<(), StatsError> {
+    sheet.scalars.retain(|s| s.value.is_finite());
+    for tab in &mut sheet.tabs {
+        for row in &mut tab.rows {
+            for cell in row {
+                match cell {
+                    ResultCell::Number { value, .. } if !value.is_finite() => *cell = ResultCell::Empty,
+                    ResultCell::PValue { raw, .. } if !raw.is_finite() => *cell = ResultCell::Empty,
+                    ResultCell::ConfidenceInterval { lower, upper } => {
+                        if let CiBound::Finite(v) = lower
+                            && !v.is_finite()
+                        {
+                            *lower = CiBound::Open;
+                        }
+                        if let CiBound::Finite(v) = upper
+                            && !v.is_finite()
+                        {
+                            *upper = CiBound::Open;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    for rec in &mut sheet.pairwise_comparisons {
+        if rec.estimate_diff.is_some_and(|v| !v.is_finite()) {
+            rec.estimate_diff = None;
+        }
+        if !rec.raw_p_or_q.is_finite() {
+            return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "non_finite_pairwise_p", value: rec.raw_p_or_q }));
+        }
+    }
+    for curve in &mut sheet.fitted_curves {
+        for pt in &mut curve.points {
+            if !pt.x.is_finite() || !pt.y.is_finite() {
+                let bad = if !pt.x.is_finite() { pt.x } else { pt.y };
+                return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "non_finite_curve_point", value: bad }));
+            }
+            if pt.ci_lower.is_some_and(|v| !v.is_finite()) {
+                pt.ci_lower = None;
+            }
+            if pt.ci_upper.is_some_and(|v| !v.is_finite()) {
+                pt.ci_upper = None;
+            }
+            if pt.pred_lower.is_some_and(|v| !v.is_finite()) {
+                pt.pred_lower = None;
+            }
+            if pt.pred_upper.is_some_and(|v| !v.is_finite()) {
+                pt.pred_upper = None;
+            }
+        }
+    }
+    Ok(())
+}
+
+fn weighted_median_pivot(candidates: &mut [(f64, usize)], total_weight: u64) -> Option<f64> {
+    if candidates.is_empty() || total_weight == 0 {
+        return None;
+    }
+    candidates.sort_by(|a, b| a.0.total_cmp(&b.0));
+    let target = total_weight.div_ceil(2);
+    let mut acc = 0_u64;
+    for &(val, w) in candidates.iter() {
+        acc += w as u64;
+        if acc >= target {
+            return Some(val);
+        }
+    }
+    candidates.last().map(|&(val, _)| val)
+}
+
+struct MonotoneMatrixState {
+    n_rows: usize,
+    n_cols: usize,
+    left: Vec<usize>,
+    right: Vec<usize>,
+    cut_lt: Vec<usize>,
+    cut_le: Vec<usize>,
+    rem: u64,
+}
+
+impl MonotoneMatrixState {
+    fn new(init_left: &[usize], n_cols: usize) -> Self {
+        let n_rows = init_left.len();
+        let right = vec![n_cols; n_rows];
+        let rem = (0..n_rows).map(|i| (n_cols.saturating_sub(init_left[i])) as u64).sum();
+        Self { n_rows, n_cols, left: init_left.to_vec(), right, cut_lt: vec![0; n_rows], cut_le: vec![0; n_rows], rem }
+    }
+
+    fn collect_pivots<F: Fn(usize, usize) -> f64>(&self, eval: &F, buf: &mut Vec<(f64, usize)>) {
+        buf.clear();
+        for i in 0..self.n_rows {
+            let l = self.left[i];
+            let r = self.right[i];
+            if l < r {
+                let mid = l + (r - l) / 2;
+                buf.push((eval(i, mid), r - l));
+            }
+        }
+    }
+
+    fn partition_counts<F: Fn(usize, usize) -> f64>(&mut self, pivot: f64, eval: &F) -> (u64, u64) {
+        let mut j_lt = self.n_cols;
+        let mut j_le = self.n_cols;
+        let mut count_lt = 0_u64;
+        let mut count_le = 0_u64;
+        for i in 0..self.n_rows {
+            let l = self.left[i];
+            let r = self.right[i];
+            while j_lt > 0 && eval(i, j_lt - 1) >= pivot {
+                j_lt -= 1;
+            }
+            let clt = j_lt.clamp(l, r);
+            self.cut_lt[i] = clt;
+            count_lt += (clt - l) as u64;
+
+            while j_le > 0 && eval(i, j_le - 1) > pivot {
+                j_le -= 1;
+            }
+            let cle = j_le.clamp(l, r);
+            self.cut_le[i] = cle;
+            count_le += (cle - l) as u64;
+        }
+        (count_lt, count_le)
+    }
+
+    fn collect_tail<F: Fn(usize, usize) -> f64>(&self, eval: &F) -> Vec<f64> {
+        let mut tail = Vec::with_capacity(self.rem as usize);
+        for i in 0..self.n_rows {
+            for j in self.left[i]..self.right[i] {
+                tail.push(eval(i, j));
+            }
+        }
+        tail
+    }
+}
+
+fn select_kth_monotone_matrix<F: Fn(usize, usize) -> f64>(init_left: &[usize], n_cols: usize, k_target: u64, eval: F) -> Result<f64, StatsError> {
+    let mut state = MonotoneMatrixState::new(init_left, n_cols);
+    if k_target >= state.rem {
+        return Err(StatsError::InvalidParameter { name: "k_target", value: k_target as f64 });
+    }
+    let mut k_rem = k_target;
+    let mut pivots = Vec::with_capacity(state.n_rows);
+    while state.rem > 256 {
+        state.collect_pivots(&eval, &mut pivots);
+        let pivot = weighted_median_pivot(&mut pivots, state.rem).ok_or(StatsError::EmptyInput)?;
+        let (count_lt, count_le) = state.partition_counts(pivot, &eval);
+        if k_rem < count_lt {
+            state.right.copy_from_slice(&state.cut_lt);
+            state.rem = count_lt;
+        } else if k_rem < count_le {
+            return Ok(pivot);
+        } else {
+            k_rem -= count_le;
+            state.left.copy_from_slice(&state.cut_le);
+            state.rem -= count_le;
+        }
+    }
+    let mut tail = state.collect_tail(&eval);
+    let idx = usize::try_from(k_rem).map_err(|_| StatsError::InvalidParameter { name: "k_target", value: k_rem as f64 })?;
+    let (_, nth, _) = tail.select_nth_unstable_by(idx, f64::total_cmp);
+    Ok(*nth)
+}
+
+#[inline]
+fn normalize_zero(v: f64) -> f64 {
+    if v == 0.0 { 0.0 } else { v }
+}
+
+/// Exact `k`-th smallest (`0`-based) pairwise sum `sorted_xs[i] + sorted_ys[j]` across all pairs
+/// in `O((n + m) log(n + m))` without materializing `O(n * m)` pairs. Both inputs must be sorted ascending and finite.
+pub fn select_kth_pairwise_sum(sorted_xs: &[f64], sorted_ys: &[f64], k: u64) -> Result<f64, StatsError> {
+    validate_finite_slice(sorted_xs)?;
+    validate_finite_slice(sorted_ys)?;
+    let max_x = sorted_xs.first().map_or(0.0, |v| v.abs()).max(sorted_xs.last().map_or(0.0, |v| v.abs()));
+    let max_y = sorted_ys.first().map_or(0.0, |v| v.abs()).max(sorted_ys.last().map_or(0.0, |v| v.abs()));
+    let scale_half = max_x >= 1e300 || max_y >= 1e300;
+    let init_left = vec![0_usize; sorted_xs.len()];
+    let raw = select_kth_monotone_matrix(&init_left, sorted_ys.len(), k, |i, j| {
+        let sum = if scale_half { 0.5 * sorted_xs[i] + 0.5 * sorted_ys[j] } else { sorted_xs[i] + sorted_ys[j] };
+        normalize_zero(sum)
+    })?;
+    let out = if scale_half { 2.0 * raw } else { raw };
+    if !out.is_finite() {
+        return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "pairwise_sum_overflow", value: out }));
+    }
+    Ok(out)
+}
+
+/// Exact `k`-th smallest (`0`-based) upper-triangular Walsh average `0.5 * (sorted_x[i] + sorted_x[j])`
+/// for `0 <= i <= j < n` in `O(n log n)` without materializing `O(n^2)` pairs. Input must be sorted ascending and finite.
+pub fn select_kth_upper_triangle_half_sum(sorted_x: &[f64], k: u64) -> Result<f64, StatsError> {
+    validate_finite_slice(sorted_x)?;
+    let n = sorted_x.len();
+    let init_left: Vec<usize> = (0..n).collect();
+    select_kth_monotone_matrix(&init_left, n, k, |i, j| normalize_zero(0.5 * sorted_x[i] + 0.5 * sorted_x[j]))
 }

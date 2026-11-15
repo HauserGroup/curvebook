@@ -16,8 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::column::shapiro_wilk;
 use crate::common::{
-    build_tab, checklist_item, extract_numeric_columns, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar,
-    quantile_type6_sorted, rank_with_ties, resolve_selected_indices, sorted_finite, validate_finite_slice,
+    append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, extract_numeric_columns,
+    init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, quantile_type6_sorted, rank_with_ties, resolve_selected_indices,
+    sanitize_result_sheet_floats, sorted_finite, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{
@@ -1675,7 +1676,7 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
     }
 
     // Handle pre-summarized ColumnTable (`MeanSdN`, `MeanSemN`, `MeanCvN`) vs raw replicates.
-    let (group_inputs, raw_res_opt, raw_slices_owned) = extract_one_way_inputs(sheet, &spec.selected_data_sets)?;
+    let (group_inputs, raw_res_opt, raw_slices_owned, ignored_non_numeric) = extract_one_way_inputs(sheet, &spec.selected_data_sets)?;
 
     match anova_spec.method {
         OneWayMethod::OrdinaryAnova => {
@@ -1825,6 +1826,8 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
         OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::Friedman => {}
     }
 
+    append_ignored_text_checklist_and_footnote(&mut out, "one-way ANOVA", &ignored_non_numeric);
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
 
@@ -1839,14 +1842,21 @@ fn run_rm_one_way_anova_sheet(
         return Err(StatsError::IncompatibleTable { analysis: "RM one-way ANOVA", actual: sheet.archetype.kind() });
     };
     let indices = resolve_selected_indices(&spec_selected_from_sheet(out), col_tab.data_sets.len());
-    let blocks = col_tab.complete_paired_rows(&indices);
-    if blocks.is_empty() {
+    let report = col_tab.complete_paired_rows_with_report(&indices);
+    if report.blocks.is_empty() {
         return Err(StatsError::EmptyInput);
     }
+    let blocks = &report.blocks;
+
+    let rm_analysis_name = match anova_spec.method {
+        OneWayMethod::RepeatedMeasures { .. } => "Repeated-measures one-way ANOVA",
+        OneWayMethod::Friedman => "Friedman test",
+        _ => "Repeated-measures analysis",
+    };
 
     match anova_spec.method {
         OneWayMethod::RepeatedMeasures { geisser_greenhouse } => {
-            let rm = rm_one_way_anova(&blocks)?;
+            let rm = rm_one_way_anova(blocks)?;
             let p_eff = if geisser_greenhouse { rm.p_greenhouse_geisser } else { rm.p_uncorrected };
             push_scalar(out, "F (treatment)", None, rm.f_treatment);
             push_scalar(out, "P value", None, p_eff);
@@ -1947,7 +1957,7 @@ fn run_rm_one_way_anova_sheet(
             );
         }
         OneWayMethod::Friedman => {
-            let fr = friedman_test(&blocks)?;
+            let fr = friedman_test(blocks)?;
             push_scalar(out, "Friedman Q", None, fr.q_statistic);
             push_scalar(out, "P value", None, fr.p_value);
             push_scalar(out, "Kendall's W", None, fr.kendalls_w);
@@ -1975,6 +1985,11 @@ fn run_rm_one_way_anova_sheet(
         }
         _ => {}
     }
+    append_listwise_filtered_checklist_and_footnote(out, rm_analysis_name, report.skipped_incomplete_rows, report.blocks.len());
+    if report.non_numeric_cells > 0 {
+        append_ignored_text_checklist_and_footnote(out, rm_analysis_name, &[(String::from("Selected columns"), report.non_numeric_cells)]);
+    }
+    sanitize_result_sheet_floats(out)?;
     Ok(out.clone())
 }
 
@@ -1982,7 +1997,7 @@ fn spec_selected_from_sheet(sheet: &ResultSheet) -> Vec<usize> {
     sheet.analysis.selected_data_sets.clone()
 }
 
-type ExtractedOneWayInputs = (Vec<GroupComparisonInput>, Option<OneWayAnovaResult>, Vec<Vec<f64>>);
+type ExtractedOneWayInputs = (Vec<GroupComparisonInput>, Option<OneWayAnovaResult>, Vec<Vec<f64>>, Vec<(String, usize)>);
 
 fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<ExtractedOneWayInputs, StatsError> {
     if let TableArchetype::Column(col_tab) = &sheet.archetype
@@ -2018,10 +2033,12 @@ fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<Extra
             };
             inputs.push(GroupComparisonInput { index: idx, label: ds.title.clone(), n, mean, sd });
         }
-        return Ok((inputs, None, Vec::new()));
+        return Ok((inputs, None, Vec::new(), Vec::new()));
     }
 
     let cols = extract_numeric_columns(sheet, selected)?;
+    let ignored_non_numeric: Vec<(String, usize)> =
+        cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect();
     let raw_slices: Vec<Vec<f64>> = cols.iter().map(|c| c.values.clone()).collect();
     let paired: Vec<(&str, &[f64])> = cols.iter().map(|c| (c.label.as_str(), c.values.as_slice())).collect();
     let res = ordinary_one_way_anova(&paired, ConfidenceLevel::DEFAULT_95)?;
@@ -2036,7 +2053,7 @@ fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<Extra
             sd: res.group_sds[i],
         })
         .collect();
-    Ok((inputs, Some(res), raw_slices))
+    Ok((inputs, Some(res), raw_slices, ignored_non_numeric))
 }
 
 fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityResult, p_fmt: PValueFormat) -> ResultTab {
@@ -2317,6 +2334,7 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
         },
     ));
 
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
 
@@ -2854,5 +2872,6 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
         Some(format!("ICC = {:.3}, KR df = {:.2}", res.icc_subclusters, res.df2_groups_kenward_roger)),
         "Nested REML prevents pseudoreplication by separating biological-unit variance from technical replicate variance.",
     ));
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
