@@ -281,6 +281,9 @@ fn r1_s02_10_outlier_row_indices_and_dataset_scalar_indices() {
     // Pooled summary DescriptiveStats preserves original column index too.
     let mut sum_tab = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 1).unwrap();
     sum_tab.subcolumn_mode = SubcolumnMode::MeanSdN;
+    for ds in &mut sum_tab.data_sets {
+        ds.cells = vec![vec![Cell::empty(); 3]];
+    }
     sum_tab.data_sets[2].cells = vec![vec![Cell::number(42.0), Cell::number(2.0), Cell::number(6.0)]];
     let sum_sheet = DataSheet::new(SheetId::new("sum-idx"), "SumIdx", TableArchetype::Column(sum_tab)).unwrap();
     let sum_spec =
@@ -499,9 +502,11 @@ fn r1_s05_01_ragged_mv_rows_return_clean_err() {
         mv.variables[1].cells[r] = Cell::text(if r % 2 == 0 { "X" } else { "Y" });
         mv.variables[2].cells[r] = Cell::number((r + 1) as f64);
     }
-    // Truncate predictor/factor column 1 to simulate a malformed/ragged table.
-    mv.variables[1].cells.pop();
-    let sheet = DataSheet::new(SheetId::new("mv-rag"), "Ragged", TableArchetype::MultipleVariables(mv)).unwrap();
+    let mut sheet = DataSheet::new(SheetId::new("mv-rag"), "Ragged", TableArchetype::MultipleVariables(mv)).unwrap();
+    // Simulate post-construction malformed/ragged variable length before analysis dispatch.
+    if let TableArchetype::MultipleVariables(ref mut inner) = sheet.archetype {
+        inner.variables[1].cells.pop();
+    }
 
     let fac_spec = AnalysisSpec::new(
         SheetId::new("a-rag-fac"),
