@@ -787,7 +787,41 @@ impl Session {
         Ok(journal.record_command(entry)?)
     }
 
-    /// Execute `command_id` transactionally and append to `journal` only when the command succeeds and mutates state.
+    /// Whether replaying `command_id` from `{ command_id, params }` alone is unsafe across crash
+    /// recovery (undo/redo depend on ephemeral stacks; `READS_FILESYSTEM` commands depend on
+    /// external files that may change or disappear before recovery) and must instead checkpoint an
+    /// atomic document snapshot.
+    #[must_use]
+    pub fn command_requires_wal_checkpoint(command_id: &str) -> bool {
+        if command_id == "edit.undo" || command_id == "edit.redo" {
+            return true;
+        }
+        cmd::registry().get(command_id).is_some_and(|spec| spec.effects.contains(cmd::Effects::READS_FILESYSTEM))
+    }
+
+    /// Record an already-executed command's effect to `journal` cleanly when `mutated` is true:
+    /// checkpoints a full snapshot for undo/redo or external-file-reading commands, or appends a
+    /// checksummed WAL record for deterministic mutations.
+    pub fn record_outcome_to_journal<B: JournalBackend>(
+        &self,
+        journal: &mut CrashRecoveryJournal<B>,
+        command_id: &str,
+        params: &serde_json::Value,
+        mutated: bool,
+    ) -> Result<(), EngineError> {
+        if !mutated {
+            return Ok(());
+        }
+        if Self::command_requires_wal_checkpoint(command_id) {
+            return self.checkpoint_journal(journal);
+        }
+        let _ = self.record_to_journal(journal, command_id, params)?;
+        Ok(())
+    }
+
+    /// Execute `command_id` transactionally and persist its effect to `journal` only when the
+    /// command succeeds and mutates state (atomically checkpointing undo/redo and external-file
+    /// readers, or appending deterministic commands to `ops.journal`).
     pub fn execute_and_record<B: JournalBackend>(
         &mut self,
         journal: &mut CrashRecoveryJournal<B>,
@@ -795,9 +829,22 @@ impl Session {
         params: serde_json::Value,
     ) -> Result<CommandOutcome, EngineError> {
         let outcome = self.execute(command_id, params.clone())?;
-        if outcome.mutated {
-            let _ = self.record_to_journal(journal, command_id, &params)?;
-        }
+        self.record_outcome_to_journal(journal, command_id, &params, outcome.mutated)?;
+        Ok(outcome)
+    }
+
+    /// Execute `command_id` on behalf of `caller` and persist its effect to `journal` when it
+    /// mutates state.
+    pub fn execute_with_caller_and_record<B: JournalBackend>(
+        &mut self,
+        journal: &mut CrashRecoveryJournal<B>,
+        command_id: &str,
+        params: serde_json::Value,
+        caller: Caller,
+        cancelled: &AtomicBool,
+    ) -> Result<CommandOutcome, EngineError> {
+        let outcome = self.execute_with_caller(command_id, params.clone(), caller, cancelled)?;
+        self.record_outcome_to_journal(journal, command_id, &params, outcome.mutated)?;
         Ok(outcome)
     }
 

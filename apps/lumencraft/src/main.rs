@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use lumencraft::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, open_document_from_files};
+use lumencraft::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowSession, open_document_from_files};
 use lumencraft_engine::Session;
 use lumencraft_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, RecoveryReport};
 use lumencraft_format::versioned::{CURRENT_PREFERENCES_VERSION, PreferencesFile, load_preferences_file, save_preferences_file};
@@ -17,7 +17,7 @@ use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use lumencraft_ui_egui::dialogs_canvas::render_workspace_frame_png;
 use lumencraft_ui_egui::interaction::ViewportMetrics;
 use lumencraft_ui_egui::theme::install_fonts;
-use lumencraft_ui_egui::{ControlAuth, UiApp, bind_control_tcp_listener, parse_control_port, serve_control_listener, validate_loopback_addr};
+use lumencraft_ui_egui::{ControlAuth, UiApp, bind_control_tcp_listener, parse_control_port, validate_loopback_addr};
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
 
@@ -229,11 +229,8 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     let interactive_gui = !cfg.headless_once && cfg.event_script.is_none() && cfg.control_port.is_none();
     let enable_recovery = app_paths.portable || !cfg.headless_once;
     let initial_viewport = if interactive_gui { ViewportMetrics::new(1280.0, 800.0, 2.0) } else { ViewportMetrics::new(400.0, 260.0, 2.0) };
-    let recovery_root = if cfg.new_instance && enable_recovery && can_create_recovery_root(&app_paths.recovery_dir)? {
-        Some(app_paths.recovery_dir.clone())
-    } else {
-        None
-    };
+    let recovery_root =
+        if enable_recovery && can_create_recovery_root(&app_paths.recovery_dir)? { Some(app_paths.recovery_dir.clone()) } else { None };
 
     let host_cfg = DesktopHostConfig {
         in_window_menus: cfg.in_window_menus,
@@ -245,7 +242,6 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
         initial_viewport,
     };
     let mut runtime = DesktopHostRuntime::new(host_cfg);
-    let mut single_instance_journal: Option<CrashRecoveryJournal<DirectoryJournalBackend>> = None;
 
     if cfg.new_instance {
         if cfg.files.is_empty() {
@@ -257,9 +253,11 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
         }
     } else {
         let startup = open_startup_session_with_recovery(&cfg.files, &app_paths, enable_recovery, now_epoch_ms())?;
-        let _recovered_session = startup.report.as_ref().is_some_and(|r| r.recovered_from_stale_lock.is_some() || !r.recovered_commands.is_empty());
-        single_instance_journal = startup.journal;
-        let _ = runtime.open_window_with_session(startup.session, initial_viewport, false)?;
+        if let Some(journal) = startup.journal {
+            let _ = runtime.open_window_with_recovery(startup.session, initial_viewport, app_paths.recovery_dir.clone(), journal, startup.report)?;
+        } else {
+            let _ = runtime.open_window_with_session(startup.session, initial_viewport, false)?;
+        }
     }
 
     for win_id in runtime.window_ids() {
@@ -274,18 +272,11 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
             .map(|path| std::fs::read(path).map_err(|err| format!("failed to read `--ttf-font` `{}`: {err}", path.display())))
             .transpose()?;
         let cleanup = Box::new(move |rt: &mut DesktopHostRuntime| -> Result<(), String> {
-            let mut journal = single_instance_journal;
             if let Some(focused_id) = rt.focused_window_id() {
                 let win = rt.window_mut(focused_id)?;
                 if should_persist_preferences(win.app(), &app_paths)? {
                     save_shortcut_preferences(win.app(), &app_paths)?;
                 }
-                close_startup_recovery_cleanly(win.app_mut(), journal.take())?;
-            } else if let Some(pending_journal) = journal.take() {
-                let mut fallback = Session::new();
-                let _backend = fallback
-                    .close_journal_cleanly(pending_journal)
-                    .map_err(|err| format!("failed to close crash-recovery journal cleanly: {err}"))?;
             }
             Ok(())
         });
@@ -317,7 +308,7 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     if let Some(port) = cfg.control_port {
         let focused_id = runtime.focused_window_id().ok_or_else(|| String::from("no open window available for --control server"))?;
         let win = runtime.window_mut(focused_id)?;
-        run_authenticated_control_server(win.app_mut(), port, cfg, &app_paths)?;
+        run_authenticated_control_server(win, port, cfg, &app_paths)?;
     }
 
     if let Some(focused_id) = runtime.focused_window_id() {
@@ -325,10 +316,6 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
         if should_persist_preferences(win.app(), &app_paths)? {
             save_shortcut_preferences(win.app(), &app_paths)?;
         }
-        close_startup_recovery_cleanly(win.app_mut(), single_instance_journal.take())?;
-    } else if let Some(journal) = single_instance_journal.take() {
-        let mut fallback = Session::new();
-        let _backend = fallback.close_journal_cleanly(journal).map_err(|err| format!("failed to close crash-recovery journal cleanly: {err}"))?;
     }
 
     runtime.close_all_force()?;
@@ -373,7 +360,7 @@ fn write_control_token_file(path: &Path, auth: &ControlAuth) -> Result<(), Strin
     .map_err(|err| format!("failed to write control token file `{}`: {err}", path.display()))
 }
 
-fn run_authenticated_control_server(app: &mut UiApp, port: u16, cfg: &LaunchConfig, app_paths: &AppPaths) -> Result<(), String> {
+fn run_authenticated_control_server(win: &mut DesktopWindowSession, port: u16, cfg: &LaunchConfig, app_paths: &AppPaths) -> Result<(), String> {
     let auth = resolve_control_auth(cfg)?;
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     let checked = validate_loopback_addr(addr)?;
@@ -381,7 +368,7 @@ fn run_authenticated_control_server(app: &mut UiApp, port: u16, cfg: &LaunchConf
     let token_path = control_token_file_path(&app_paths.config_dir, port);
     write_control_token_file(&token_path, &auth)?;
     let _token_guard = ControlTokenFileGuard { path: token_path };
-    serve_control_listener(app, &listener, &auth).map_err(|err| format!("control server I/O error: {err}"))
+    win.serve_control_listener(&listener, &auth).map_err(|err| format!("control server I/O error: {err}"))
 }
 
 fn should_persist_preferences(app: &UiApp, paths: &AppPaths) -> Result<bool, String> {
@@ -421,6 +408,7 @@ fn open_startup_session_with_recovery(
     if app_paths.portable || app_paths.recovery_dir.exists() {
         let (session, journal, report) = Session::open_dir_with_recovery(&app_paths.recovery_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
             .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", app_paths.recovery_dir.display()))?;
+        log_recovery_warnings(&app_paths.recovery_dir, &report);
         return Ok(StartupRecoveryState { session, journal: Some(journal), report: Some(report) });
     }
 
@@ -429,6 +417,7 @@ fn open_startup_session_with_recovery(
             let (session, journal, report) =
                 Session::open_dir_with_recovery(&app_paths.recovery_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
                     .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", app_paths.recovery_dir.display()))?;
+            log_recovery_warnings(&app_paths.recovery_dir, &report);
             Ok(StartupRecoveryState { session, journal: Some(journal), report: Some(report) })
         }
         Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
@@ -438,6 +427,13 @@ fn open_startup_session_with_recovery(
     }
 }
 
+fn log_recovery_warnings(dir: &Path, report: &RecoveryReport) {
+    for warning in &report.warnings {
+        eprintln!("lumencraft recovery warning in `{}` (line {}): {}", dir.display(), warning.line, warning.message);
+    }
+}
+
+#[cfg(test)]
 fn close_startup_recovery_cleanly(app: &mut UiApp, recovery_journal: Option<CrashRecoveryJournal<DirectoryJournalBackend>>) -> Result<(), String> {
     if let Some(journal) = recovery_journal {
         let _backend =
