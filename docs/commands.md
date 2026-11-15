@@ -200,7 +200,7 @@ Registered commands: 95
 
 ### `sheet.select` — Select Sheet
 
-- **Effects:** `MUTATES_DOCUMENT | CHANGES_UI_STATE | IDEMPOTENT`
+- **Effects:** `CHANGES_UI_STATE | IDEMPOTENT`
 - **Menu:** `View/Select Sheet`
 - **Summary:** Select the active sheet in the navigator or family pane.
 - **Beginner note:** Focuses a sheet in the navigator (`mode: "navigator"`) or sub-sheet family view (`mode: "family"`).

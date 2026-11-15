@@ -1,12 +1,12 @@
 //! Data-table cell, title, exclusion, paste/link, CSV/project import, and archetype commands (Wave 9B).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use lumencraft_doc::{
-    BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, GraphSheet, ImportFilterSpec, ImportLinkSpec,
-    ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MultipleVariablesTable, NestedTable, PlacementMode,
-    ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise, SubcolumnMode, TableArchetype, TableKind, VariableColumn,
-    VariableRole, VariableSource, validate_rows, validate_title,
+    BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, DocError, GraphSheet, ImportFilterSpec, ImportLinkSpec,
+    ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_SHEETS_PER_PROJECT, MultipleVariablesTable,
+    NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise, SubcolumnMode, TableArchetype,
+    TableKind, VariableColumn, VariableRole, VariableSource, validate_project_cells, validate_rows, validate_title,
 };
 use lumencraft_format::{
     CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, export_datasheet_to_csv, export_result_sheet_tidy_csv,
@@ -24,14 +24,15 @@ use serde_json::{Value, json};
 
 use super::helpers::{
     column_subcolumn_count, decode_base64, ensure_sheet_not_frozen, locate_target_and_info_indices, next_unique_sheet_id,
-    next_unique_sheet_id_excluding, parse_sheet_id, require_analyzable_data_sheet, require_data_sheet, require_info_sheet_mut,
+    next_unique_sheet_id_excluding, parse_sheet_id, remap_analysis_hooks, remap_data_sheet_links, remap_graph_spec_references,
+    remap_layout_spec_references, remap_sheet_id, require_analyzable_data_sheet, require_data_sheet, require_info_sheet_mut,
     require_unfrozen_data_sheet_mut, select_result_tab, sheet_id_exists, x_subcolumn_count,
 };
 use super::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     obj_schema_with_aliases, parse_params, str_schema,
 };
-use super::project::recalculate_with_links;
+use super::project::recalculate_dirty_with_links;
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, ErrorCode, ExternalPathPolicy, Session, dag};
 
@@ -1199,7 +1200,7 @@ fn run_set_cell(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineE
     ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
     ensure_coord_outside_linked_regions(ds, coord, "edit")?;
     ds.set_cell(coord, cell)?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCell",
         "updated cell",
@@ -1317,7 +1318,7 @@ fn run_set_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engine
     for (coord, cell) in &edits {
         ds.set_cell(*coord, cell.clone())?;
     }
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCells",
         "updated cells",
@@ -1434,7 +1435,7 @@ fn run_set_x_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     for (row, subcol, cell) in &updates {
         ds.set_x_or_time_cell(*row, *subcol, cell.clone())?;
     }
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setXCells",
         "updated X/time cells",
@@ -1501,7 +1502,7 @@ fn run_set_row_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
         updated = 1;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setRowTitles",
         "updated row titles",
@@ -1627,7 +1628,7 @@ fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Re
         }
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         command_id,
         "updated group titles",
@@ -1713,7 +1714,7 @@ fn run_set_subcolumn_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
         updated = 1;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setSubcolumnTitles",
         "updated subcolumn titles",
@@ -1882,7 +1883,7 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         updated = 1;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.excludeCells",
         "updated exclusion mask",
@@ -2050,7 +2051,7 @@ fn run_exclude_cells_with_reason(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comman
     for &coord in &coords {
         ds.set_excluded_with_reason(coord, &p.reason_tag, &note, &timestamp_utc)?;
     }
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
     Ok(CommandOutcome::mutated(
         "table.excludeCellsWithReason",
         format!("excluded {} cell(s) with reason `{}`", coords.len(), p.reason_tag),
@@ -2292,7 +2293,7 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     if unlink {
         ds.linked_regions.clear();
     }
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.clearCells",
         "cleared cells",
@@ -2481,7 +2482,7 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
     };
 
     ds.linked_regions.truncate(existing_links);
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.paste",
         "pasted table data",
@@ -2742,7 +2743,13 @@ fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
         }
     };
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let mut dirty_seeds = vec![target_id.clone()];
+    if info_idx.is_some()
+        && let Some(ref iid) = info_id
+    {
+        dirty_seeds.push(iid.clone());
+    }
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
     Ok(CommandOutcome::mutated(
         "table.pasteLink",
         "created live linked region",
@@ -2858,7 +2865,7 @@ fn import_into_existing_sheet(
     csv_opts: &CsvOptions,
     subcolumn_mode: SubcolumnMode,
     policy: &ExternalPathPolicy,
-) -> Result<(), EngineError> {
+) -> Result<Option<SheetId>, EngineError> {
     let delimiter = csv_opts.delimiter;
     let decimal_separator = csv_opts.decimal_separator;
     let (info_id, cur_title, cur_kind) = {
@@ -2877,7 +2884,7 @@ fn import_into_existing_sheet(
         if let Some(slot) = doc.data_sheet_mut(id) {
             *slot = imported;
         }
-        return Ok(());
+        return Ok(None);
     }
     let filter = parse_import_filter_val(p.filter.as_ref())?;
     let placement = p.placement.to_placement_spec(false)?;
@@ -2911,7 +2918,7 @@ fn import_into_existing_sheet(
     if !keep_link && let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
         target_ds.linked_regions.truncate(link_before);
     }
-    Ok(())
+    Ok(info_idx.and(info_id))
 }
 
 fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -2945,8 +2952,11 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     }
     let subcolumn_mode = resolve_subcolumn_mode(p.subcolumn_mode.as_ref(), p.replicates.unwrap_or(1))?;
 
+    let mut dirty_seeds = vec![id.clone()];
     if doc.data_sheet(&id).is_some() {
-        import_into_existing_sheet(doc, &id, &p, text, &csv_opts, subcolumn_mode, &policy)?;
+        if let Some(updated_info) = import_into_existing_sheet(doc, &id, &p, text, &csv_opts, subcolumn_mode, &policy)? {
+            dirty_seeds.push(updated_info);
+        }
     } else {
         let title = p.title.as_deref().unwrap_or("Imported CSV");
         let kind = parse_table_kind(p.archetype.as_deref().unwrap_or("xy"))?;
@@ -2954,7 +2964,7 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
         doc.add_data_sheet(imported)?;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
     Ok(CommandOutcome::mutated(
         "table.importCsv",
         "imported CSV into data sheet",
@@ -3045,7 +3055,102 @@ fn schema_import_prism() -> Value {
     )
 }
 
-fn merge_imported_document(doc: &mut ProjectDocument, imported: ProjectDocument) -> Result<(), EngineError> {
+fn collect_all_sheet_ids(doc: &ProjectDocument) -> HashSet<String> {
+    let mut ids = HashSet::with_capacity(doc.total_sheet_count());
+    for id in doc
+        .data_sheets
+        .iter()
+        .map(|s| &s.id)
+        .chain(doc.info_sheets.iter().map(|s| &s.id))
+        .chain(doc.result_sheets.iter().map(|s| &s.id))
+        .chain(doc.graph_sheets.iter().map(|s| &s.id))
+        .chain(doc.layout_sheets.iter().map(|s| &s.id))
+    {
+        ids.insert(id.as_str().to_owned());
+    }
+    ids
+}
+
+fn next_collision_free_sheet_id(original: &SheetId, reserved: &mut HashSet<String>) -> Result<SheetId, EngineError> {
+    let raw = original.as_str().trim();
+    let base = if raw.is_empty() { "sheet" } else { raw };
+    for suffix in 2..=100_000_usize {
+        let candidate = SheetId::try_new(format!("{base}-{suffix}"))?;
+        if reserved.insert(candidate.as_str().to_owned()) {
+            return Ok(candidate);
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("exhausted collision-free sheet IDs for `{raw}`")))
+}
+
+fn plan_imported_id_remap(doc: &ProjectDocument, imported: &ProjectDocument) -> Result<HashMap<SheetId, SheetId>, EngineError> {
+    let doc_ids = collect_all_sheet_ids(doc);
+    let mut reserved = doc_ids.clone();
+    reserved.extend(collect_all_sheet_ids(imported));
+
+    let mut seen_imported: HashSet<String> = HashSet::with_capacity(imported.total_sheet_count());
+    let mut id_map: HashMap<SheetId, SheetId> = HashMap::new();
+
+    for orig_id in imported
+        .data_sheets
+        .iter()
+        .map(|s| &s.id)
+        .chain(imported.info_sheets.iter().map(|s| &s.id))
+        .chain(imported.result_sheets.iter().map(|s| &s.id))
+        .chain(imported.graph_sheets.iter().map(|s| &s.id))
+        .chain(imported.layout_sheets.iter().map(|s| &s.id))
+    {
+        let key = orig_id.as_str();
+        let needs_remap = doc_ids.contains(key) || !seen_imported.insert(key.to_owned());
+        if needs_remap {
+            let new_id = next_collision_free_sheet_id(orig_id, &mut reserved)?;
+            id_map.entry(orig_id.clone()).or_insert(new_id);
+        }
+    }
+    Ok(id_map)
+}
+
+fn merge_imported_document(doc: &mut ProjectDocument, mut imported: ProjectDocument) -> Result<(), EngineError> {
+    let total_sheets = doc.total_sheet_count().saturating_add(imported.total_sheet_count());
+    if total_sheets > MAX_SHEETS_PER_PROJECT {
+        return Err(EngineError::from(DocError::TooManySheets { count: total_sheets, max: MAX_SHEETS_PER_PROJECT }));
+    }
+    let existing_cells: usize = doc.data_sheets.iter().map(|s| s.archetype.allocated_cell_slots()).sum();
+    let added_cells: usize = imported.data_sheets.iter().map(|s| s.archetype.allocated_cell_slots()).sum();
+    validate_project_cells(existing_cells, added_cells)?;
+
+    let id_map = plan_imported_id_remap(doc, &imported)?;
+    if !id_map.is_empty() {
+        for ds in &mut imported.data_sheets {
+            remap_sheet_id(&mut ds.id, &id_map);
+            remap_data_sheet_links(ds, &id_map);
+        }
+        for info in &mut imported.info_sheets {
+            remap_sheet_id(&mut info.id, &id_map);
+            for linked in &mut info.linked_data_sheets {
+                remap_sheet_id(linked, &id_map);
+            }
+        }
+        for res in &mut imported.result_sheets {
+            remap_sheet_id(&mut res.id, &id_map);
+            res.analysis.id = res.id.clone();
+            remap_sheet_id(&mut res.analysis.source_sheet_id, &id_map);
+            remap_analysis_hooks(&mut res.analysis, &id_map);
+            if let Some(ref mut ad) = res.analyzable_data {
+                ad.id = res.id.clone();
+                remap_data_sheet_links(ad, &id_map);
+            }
+        }
+        for gs in &mut imported.graph_sheets {
+            remap_sheet_id(&mut gs.id, &id_map);
+            remap_graph_spec_references(&mut gs.spec, &id_map);
+        }
+        for ls in &mut imported.layout_sheets {
+            remap_sheet_id(&mut ls.id, &id_map);
+            remap_layout_spec_references(&mut ls.spec, &id_map);
+        }
+    }
+
     for ds in imported.data_sheets {
         doc.add_data_sheet(ds)?;
     }
@@ -3061,6 +3166,7 @@ fn merge_imported_document(doc: &mut ProjectDocument, imported: ProjectDocument)
     for ls in imported.layout_sheets {
         doc.add_layout_sheet(ls)?;
     }
+    let _ = dag::topological_order(doc)?;
     Ok(())
 }
 
@@ -3236,7 +3342,7 @@ fn run_set_variable_role(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
     let final_role = var.role;
     let role_inferred = var.role_inferred;
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setVariableRole",
         "updated variable role",
@@ -3418,7 +3524,7 @@ fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         .get_mut(col_idx)
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
     let recoded_count = var.recode_levels(&pairs);
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.recodeLevels",
         "recoded variable levels",
@@ -3540,7 +3646,7 @@ fn run_set_categorical_order(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         .get_mut(col_idx)
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
     var.level_order = spec;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCategoricalOrder",
         "updated categorical level order",
@@ -3630,7 +3736,7 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     mv.variables[col_idx].set_calculated_formula(&p.formula);
 
     evaluate_data_sheet_calculated_variables(ds, info_snapshot.as_ref())?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCalculatedVariable",
         "updated calculated variable",
@@ -3815,7 +3921,7 @@ fn run_simulate_xy(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
         doc.select_in_navigator(&id)?;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.simulateXy",
         "simulated XY data sheet",
@@ -3912,7 +4018,7 @@ fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
     let (mut converted, preview) = convert_datasheet_archetype(&doc.data_sheets[idx], target_kind, allow_lossy)?;
     converted.id = sheet_id.clone();
     doc.data_sheets[idx] = converted;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
     Ok(CommandOutcome::mutated(
         "table.convertArchetype",
         format!("converted `{}` to {:?}", sheet_id.as_str(), target_kind),
@@ -4636,7 +4742,7 @@ fn run_randomize_groups(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "failed resolving InfoSheet for ARRIVE constants"))?;
     rand_out.data_sheet.info_sheet_id = Some(info_id.clone());
     doc.add_data_sheet(rand_out.data_sheet)?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, &[id.clone(), info_id.clone()], false)?;
 
     let constants_map: serde_json::Map<String, Value> = rand_out.arrive_constants.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
     Ok(CommandOutcome::mutated(
@@ -4742,7 +4848,11 @@ fn run_random_sample_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcom
         sampled.info_sheet_id = Some(iid.clone());
     }
     doc.add_data_sheet(sampled)?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let mut dirty_seeds = vec![id.clone()];
+    if let Some(ref iid) = info_id {
+        dirty_seeds.push(iid.clone());
+    }
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
 
     Ok(CommandOutcome::mutated(
         "table.randomSampleRows",
@@ -4935,7 +5045,7 @@ fn run_simulate_distributions(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let sheet = simulate_distribution_columns(&cfg)?;
     let kind = sheet.archetype.kind();
     doc.add_data_sheet(sheet)?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
 
     Ok(CommandOutcome::mutated(
         "table.simulateDistributions",

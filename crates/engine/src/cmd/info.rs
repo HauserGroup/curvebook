@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 
 use crate::cmd::helpers::{require_info_sheet_mut, resolve_target_info_sheet_id};
 use crate::cmd::params::{any_json_schema, bool_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema};
-use crate::cmd::project::recalculate_with_links;
+use crate::cmd::project::recalculate_dirty_with_links;
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
 
@@ -136,7 +136,7 @@ fn run_info_set_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
         info.set_constant(name.clone(), constant_value, units)?;
     }
 
-    let recalc = recalculate_with_links(&mut ctx.session.doc, false)?;
+    let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), false)?;
     Ok(CommandOutcome::mutated(
         "info.setConstant",
         "updated info constant",
@@ -189,7 +189,7 @@ fn run_info_remove_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
         return Err(EngineError::with_code(ErrorCode::NotFound, format!("constant `{name}` not found in info sheet `{}`", info_id.as_str()))
             .with_remediation("Verify the constant name or pass `if_exists: true` to ignore missing constants."));
     }
-    let recalc = recalculate_with_links(&mut ctx.session.doc, false)?;
+    let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), false)?;
 
     let message = if removed { "removed info constant" } else { "info constant was not present" };
     Ok(CommandOutcome {

@@ -1,10 +1,12 @@
 //! Shared sheet lookup, table geometry, color, base64, and export helpers for engine commands.
 
+use std::collections::HashMap;
 use std::path::Path;
 
 use lumencraft_chart::ChartScene;
 use lumencraft_doc::{
-    DataSetColumn, DataSheet, GraphSheet, InfoSheet, LayoutSheet, ProjectDocument, ResultSheet, ResultTab, SheetId, TableArchetype,
+    AnalysisKind, AnalysisSpec, DataSetColumn, DataSheet, GraphAnnotation, GraphSheet, GraphSpec, HookSource, InfoSheet, LayoutItem, LayoutSheet,
+    LayoutSpec, LinkSource, NormalizeAnchor, ParameterScope, ProjectDocument, ResultSheet, ResultTab, SheetId, TableArchetype, TransformAnalysisSpec,
 };
 use lumencraft_palette::Rgba8;
 use serde_json::json;
@@ -441,6 +443,150 @@ fn parse_long_hex(hex: &str, orig: &str) -> Result<Rgba8, EngineError> {
     let b = pair(4)?;
     let a = if hex.len() == 8 { pair(6)? } else { 255 };
     Ok(Rgba8::rgba(r, g, b, a))
+}
+
+/// Replace `id` in place if `id_map` contains a mapping for it.
+pub(super) fn remap_sheet_id(id: &mut SheetId, id_map: &HashMap<SheetId, SheetId>) {
+    if let Some(mapped) = id_map.get(id) {
+        *id = mapped.clone();
+    }
+}
+
+/// Remap explicit upstream `SheetId` targets inside a [`HookSource`].
+pub(super) fn remap_hook_source(source: &mut HookSource, id_map: &HashMap<SheetId, SheetId>) {
+    match source {
+        HookSource::InfoConstant { info_sheet_id: Some(iid), .. } => remap_sheet_id(iid, id_map),
+        HookSource::ResultScalar { result_sheet_id, .. } => remap_sheet_id(result_sheet_id, id_map),
+        HookSource::ColumnTitleValue { data_sheet_id, .. } => remap_sheet_id(data_sheet_id, id_map),
+        HookSource::InfoConstant { info_sheet_id: None, .. } => {}
+    }
+}
+
+/// Remap embedded [`HookSource`] references inside `spec` (`Normalize` anchors and `NonlinearRegression` rules).
+pub(super) fn remap_analysis_hooks(spec: &mut AnalysisSpec, id_map: &HashMap<SheetId, SheetId>) {
+    match &mut spec.kind {
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. }) => {
+            if let NormalizeAnchor::Hooked(hook) = zero_anchor {
+                remap_hook_source(hook, id_map);
+            }
+            if let NormalizeAnchor::Hooked(hook) = hundred_anchor {
+                remap_hook_source(hook, id_map);
+            }
+        }
+        AnalysisKind::NonlinearRegression(nl) => {
+            for rule in &mut nl.parameter_rules {
+                if let ParameterScope::HookedConstant(source) = &mut rule.scope {
+                    remap_hook_source(source, id_map);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Remap [`LinkSource::InternalSheet`] references on a [`DataSheet`] (`info_sheet_id` and `linked_regions`).
+pub(super) fn remap_data_sheet_links(ds: &mut DataSheet, id_map: &HashMap<SheetId, SheetId>) {
+    if let Some(ref mut info_id) = ds.info_sheet_id {
+        remap_sheet_id(info_id, id_map);
+    }
+    for region in &mut ds.linked_regions {
+        if let LinkSource::InternalSheet { sheet_id, .. } = &mut region.spec.source {
+            remap_sheet_id(sheet_id, id_map);
+        }
+    }
+}
+
+/// Rewrite explicit `{{info:<sheet_id>:<name>}}` and `{{result:<sheet_id>:...}}` template tokens using `id_map`.
+pub(super) fn remap_inline_hook_tokens(text: &mut String, id_map: &HashMap<SheetId, SheetId>) {
+    if id_map.is_empty() || !text.contains("{{") {
+        return;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    let mut changed = false;
+
+    while let Some(open) = rest.find("{{") {
+        out.push_str(&rest[..open]);
+        let after_open = &rest[open + 2..];
+        let Some(close) = after_open.find("}}") else {
+            out.push_str(&rest[open..]);
+            rest = "";
+            break;
+        };
+        let inner = &after_open[..close];
+        if let Some(rewritten) = rewrite_single_hook_token(inner.trim(), id_map) {
+            out.push_str("{{");
+            out.push_str(&rewritten);
+            out.push_str("}}");
+            changed = true;
+        } else {
+            out.push_str(&rest[open..open + 2 + close + 2]);
+        }
+        rest = &after_open[close + 2..];
+    }
+    out.push_str(rest);
+    if changed {
+        *text = out;
+    }
+}
+
+fn rewrite_single_hook_token(token: &str, id_map: &HashMap<SheetId, SheetId>) -> Option<String> {
+    let parts: Vec<&str> = token.split(':').map(str::trim).collect();
+    match parts.as_slice() {
+        ["info", sheet, name] if !sheet.is_empty() && !name.is_empty() => {
+            let mapped = id_map.get(&SheetId::new(*sheet))?;
+            Some(format!("info:{}:{}", mapped.as_str(), name))
+        }
+        ["result", sheet, param] if !sheet.is_empty() && !param.is_empty() => {
+            let mapped = id_map.get(&SheetId::new(*sheet))?;
+            Some(format!("result:{}:{}", mapped.as_str(), param))
+        }
+        ["result", sheet, ds_str, param] if !sheet.is_empty() && !param.is_empty() && ds_str.parse::<usize>().is_ok() => {
+            let mapped = id_map.get(&SheetId::new(*sheet))?;
+            Some(format!("result:{}:{}:{}", mapped.as_str(), ds_str, param))
+        }
+        _ => None,
+    }
+}
+
+/// Remap all internal sheet IDs and inline template hook tokens inside a [`GraphSpec`].
+pub(super) fn remap_graph_spec_references(spec: &mut GraphSpec, id_map: &HashMap<SheetId, SheetId>) {
+    remap_sheet_id(&mut spec.primary_source_sheet_id, id_map);
+    for series in &mut spec.series {
+        remap_sheet_id(&mut series.source_sheet_id, id_map);
+        if let Some(ov) = &mut series.regression_overlay {
+            remap_sheet_id(&mut ov.result_sheet_id, id_map);
+        }
+    }
+    for cmp in &mut spec.comparisons {
+        remap_sheet_id(&mut cmp.result_sheet_id, id_map);
+    }
+    for ann in &mut spec.annotations {
+        match ann {
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                remap_sheet_id(result_sheet_id, id_map);
+            }
+            GraphAnnotation::TextBox { markdown, .. } => remap_inline_hook_tokens(markdown, id_map),
+            GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => {}
+        }
+    }
+    remap_inline_hook_tokens(&mut spec.title, id_map);
+    remap_inline_hook_tokens(&mut spec.x_axis.title, id_map);
+    remap_inline_hook_tokens(&mut spec.y_axis.title, id_map);
+    if let Some(y2) = &mut spec.y2_axis {
+        remap_inline_hook_tokens(&mut y2.title, id_map);
+    }
+}
+
+/// Remap all internal sheet IDs and inline template hook tokens inside a [`LayoutSpec`].
+pub(super) fn remap_layout_spec_references(spec: &mut LayoutSpec, id_map: &HashMap<SheetId, SheetId>) {
+    for item in &mut spec.items {
+        match item {
+            LayoutItem::LiveGraph { graph_sheet_id, .. } => remap_sheet_id(graph_sheet_id, id_map),
+            LayoutItem::LiveTable { source_sheet_id, .. } => remap_sheet_id(source_sheet_id, id_map),
+            LayoutItem::TextCallout { markdown, .. } => remap_inline_hook_tokens(markdown, id_map),
+        }
+    }
 }
 
 #[cfg(test)]

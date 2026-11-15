@@ -667,7 +667,7 @@ fn run_analysis_with_domain(
         doc.add_result_sheet(ResultSheet::new(spec)?)?;
     }
 
-    let recalculated = dag::recalculate_project(doc)?;
+    let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&sheet_id))?.total_updated();
     let res = require_result_sheet(doc, &sheet_id)?;
     ensure_result_succeeded(res)?;
 
@@ -685,7 +685,7 @@ fn run_existing_or_project_analysis(doc: &mut ProjectDocument, command_id: &str,
             .with_remediation("Supply `source_sheet` and `kind` to create a new result sheet, or verify the existing `sheet_id`.")
             .with_details(json!({ "sheet_id": id.as_str() })));
         }
-        let recalculated = dag::recalculate_project(doc)?;
+        let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&id))?.total_updated();
         let res = require_result_sheet(doc, &id)?;
         ensure_result_succeeded(res)?;
         return Ok(CommandOutcome::mutated(command_id, "recalculated result sheet", result_summary_payload(res, recalculated)));
@@ -749,7 +749,7 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     if let Some(res) = doc.result_sheet_mut(&id) {
         res.analysis = updated;
     }
-    let recalculated = dag::recalculate_project(doc)?;
+    let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&id))?.total_updated();
     let res = require_result_sheet(doc, &id)?;
     ensure_result_succeeded(res)?;
 
@@ -798,7 +798,7 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     if let Some(res) = doc.result_sheet_mut(&id) {
         res.analysis = updated;
     }
-    let recalculated = dag::recalculate_project(doc)?;
+    let recalculated = dag::recalculate_dirty_with_report(doc, std::slice::from_ref(&id))?.total_updated();
     let res = require_result_sheet(doc, &id)?;
     ensure_result_succeeded(res)?;
 
