@@ -11,11 +11,13 @@
   "mcpServers": {
     "lumencraft": {
       "command": "lumencraft-cli",
-      "args": ["mcp"]
+      "args": ["mcp", "--workdir", "/path/to/workspace"]
     }
   }
 }
 ```
+
+Pass `--workdir <dir>` to confine `open_file`, `save_file`, `export`, engine command path parameters, and stored `ExternalDelimitedFile` link refreshes strictly inside a canonicalized workspace root (propagated to `McpServerState` and the underlying `engine::Session::path_policy()`).
 
 ## Shipped Surface (`R7.1`, `R0.13`)
 

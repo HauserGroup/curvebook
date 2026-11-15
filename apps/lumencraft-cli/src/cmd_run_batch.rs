@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use lumencraft_doc::ProjectDocument;
-use lumencraft_engine::Session;
 use lumencraft_engine::cmd::Caller;
+use lumencraft_engine::{ExternalPathPolicy, Session};
 use lumencraft_format::instantiate_template_bytes;
 use lumencraft_pdf::PdfVersion;
 use serde_json::{Map, Value, json};
@@ -71,6 +71,9 @@ pub fn run_script(args: &[String]) -> Result<(), CliError> {
     let commands = parse_script_commands(&raw_text, &resolver)?;
 
     let mut session = Session::new();
+    if let Some(dir) = parsed.workdir.as_deref() {
+        session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
+    }
     let results = execute_commands(&mut session, &commands, parsed.workdir.is_some())?;
 
     if parsed.json {
@@ -102,6 +105,9 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
     let manifest = parse_batch_manifest(&raw_text, &resolver)?;
 
     let mut session = open_manifest_base_session(&manifest)?;
+    if let Some(dir) = parsed.workdir.as_deref() {
+        session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
+    }
     load_manifest_inputs(&mut session, &manifest.inputs)?;
     let results = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
     session.recalculate_all()?;

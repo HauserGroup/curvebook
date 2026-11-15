@@ -11,6 +11,8 @@ pub use cmd::Caller;
 pub mod dag;
 pub mod guard;
 pub mod methods_report;
+pub mod path_policy;
+pub use path_policy::ExternalPathPolicy;
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -725,6 +727,7 @@ pub struct Session {
     file_path: Option<PathBuf>,
     dirty: bool,
     gui_only: GuiOnlyPolicy,
+    path_policy: ExternalPathPolicy,
     undo_stack: VecDeque<UndoEntry>,
     redo_stack: Vec<ProjectDocument>,
 }
@@ -831,7 +834,15 @@ impl Session {
     #[must_use]
     pub fn from_document(mut document: ProjectDocument) -> Self {
         let _ = lumencraft_format::sanitize_circular_hooks(&mut document);
-        Self { doc: document, file_path: None, dirty: false, gui_only: GuiOnlyPolicy::Disabled, undo_stack: VecDeque::new(), redo_stack: Vec::new() }
+        Self {
+            doc: document,
+            file_path: None,
+            dirty: false,
+            gui_only: GuiOnlyPolicy::Disabled,
+            path_policy: ExternalPathPolicy::Unconstrained,
+            undo_stack: VecDeque::new(),
+            redo_stack: Vec::new(),
+        }
     }
 
     /// Return the active [`GuiOnlyPolicy`] restricting direct non-UI command execution.
@@ -849,6 +860,24 @@ impl Session {
     #[must_use]
     pub const fn with_gui_only(mut self, policy: GuiOnlyPolicy) -> Self {
         self.gui_only = policy;
+        self
+    }
+
+    /// Active external filesystem path policy on this session.
+    #[must_use]
+    pub const fn path_policy(&self) -> &ExternalPathPolicy {
+        &self.path_policy
+    }
+
+    /// Replace the active external filesystem path policy on this session.
+    pub fn set_path_policy(&mut self, policy: ExternalPathPolicy) {
+        self.path_policy = policy;
+    }
+
+    /// Fluent builder setting the active external filesystem path policy on this session.
+    #[must_use]
+    pub fn with_path_policy(mut self, policy: ExternalPathPolicy) -> Self {
+        self.path_policy = policy;
         self
     }
 
@@ -957,7 +986,7 @@ impl Session {
     fn execute_registered_spec(
         &mut self,
         spec: &cmd::CommandSpec,
-        params: Value,
+        mut params: Value,
         caller: Caller,
         cancelled: &AtomicBool,
     ) -> Result<CommandOutcome, EngineError> {
@@ -972,6 +1001,9 @@ impl Session {
         if !(spec.enabled)(self) {
             return Err(EngineError::with_code(ErrorCode::Conflict, format!("command `{}` is currently disabled", spec.id))
                 .with_details(json!({ "command_id": spec.id })));
+        }
+        if self.path_policy.is_constrained() && spec.effects.intersects(cmd::Effects::READS_FILESYSTEM.with(cmd::Effects::WRITES_FILESYSTEM)) {
+            self.path_policy.enforce_command_path_params(&mut params)?;
         }
         if spec.id == "edit.undo" || spec.id == "edit.redo" {
             return guard::run_guarded(spec.id, || {
