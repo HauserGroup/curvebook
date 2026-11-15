@@ -8,6 +8,7 @@ mod cleanroom;
 mod commands;
 mod contributors;
 mod corpus;
+mod coverage;
 mod cursors;
 mod ico;
 mod json;
@@ -52,6 +53,7 @@ commands:
   schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from lumencraft-format
   wasm                  check wasm32-unknown-unknown compilation across web-targeted crates
   corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
+  coverage [-p <crate>] write a local cargo-llvm-cov lcov + HTML report (diagnostic; no threshold)
   bundle                build release binaries and assemble dist/LumenCraft.app
   ico <out> <png...>    pack PNG frames (<=256px) into a Windows .ico container
   version [set <ver>]   print or update [workspace.package] version
@@ -102,6 +104,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "schemas" => schemas::run_cli(&root, rest),
         "wasm" => cmd_wasm(&root),
         "corpus" => corpus::run(&root, rest),
+        "coverage" => coverage::run(&root, rest),
         "bundle" => bundle::run(&root),
         "ico" => ico::run(rest),
         "version" => version::run(&root, rest),

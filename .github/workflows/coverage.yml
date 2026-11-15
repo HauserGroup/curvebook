@@ -1,0 +1,57 @@
+name: Coverage
+
+# Diagnostic source-coverage report (`cargo xtask coverage`, R0.16). Runs on demand and weekly,
+# never on pull requests, and has no threshold. The report is kept only as a workflow artifact;
+# it is not sent to any third-party service.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: coverage-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  coverage:
+    name: Workspace coverage report
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Install system libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev \
+            libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers \
+            libgl1-mesa-dev
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.95"
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-llvm-cov
+        run: |
+          if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
+            cargo install --locked cargo-llvm-cov
+          fi
+      - name: Run cargo xtask coverage
+        run: cargo run --locked -p xtask -- coverage
+      - name: Keep coverage report
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: coverage-report
+          path: |
+            target/llvm-cov/lcov.info
+            target/llvm-cov/summary.json
+            target/llvm-cov/html/
+          if-no-files-found: warn
+          retention-days: 30

@@ -123,6 +123,7 @@ Run workspace checks through `cargo xtask <command>` (invokes `xtask/`):
 | `cargo xtask schemas [--check]` | Regenerate (or `--check`) `docs/schemas/*.schema.json` from persisted document/manifest schemas *(R0.7)* |
 | `cargo xtask wasm` | Verify `wasm32-unknown-unknown` builds for web and core headless crates |
 | `cargo xtask corpus [--fetch\|--fetch-only]` | Verify (or fetch locally) external NIST StRD & regression test corpora |
+| `cargo xtask coverage [-p <crate>]` | Write a local `cargo-llvm-cov` lcov + HTML coverage report; diagnostic only, no threshold, never uploaded *(R0.16)* |
 | `cargo xtask bundle` | Assemble macOS `.app` bundle and run `plutil -lint` + ad-hoc `codesign` |
 | `cargo xtask ico` | Regenerate Windows `.ico` icon bundles from source SVGs |
 | `cargo xtask version [set <ver>]` | Print or update `[workspace.package] version` and synced packaging manifests |

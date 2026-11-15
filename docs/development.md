@@ -1,6 +1,6 @@
 # Development
 
-> **Last updated:** 2026-11-14 · **Change:** updated `%PDF-1.7` external `.ttf` `/FontFile2` font embedding, web build status, environment variables, and `#robustness-lumencraft-never-crashes` engineering contract.
+> **Last updated:** 2026-11-15 · **Change:** added `cargo xtask coverage` (`R0.16`) and the coverage-report policy.
 
 ## Prerequisites
 
@@ -8,6 +8,7 @@
 - Optional tools:
   - [`cargo-nextest`](https://nexte.st/) — used automatically by `cargo xtask test` when installed; falls back to `cargo test`.
   - `wasm32-unknown-unknown` target + [`trunk`](https://trunkrs.dev/) — for `cargo xtask wasm` and browser builds in `apps/lumencraft-web`.
+  - [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install --locked cargo-llvm-cov`) + the `llvm-tools-preview` rustup component — for `cargo xtask coverage` ([Coverage reports](#coverage-reports)).
   - `resvg` (or `rsvg-convert`) + `iconutil` (macOS) — only when regenerating `assets/app-icon/` via `packaging/icons.sh`.
 
 ## Everyday commands
@@ -25,6 +26,7 @@
 | Sync desktop UI commands to MCP catalog | `cargo xtask ui-commands` |
 | Verify offline corpus & NIST StRD suites (`--fetch` to download) | `cargo xtask corpus` |
 | Print per-crate LOC and test statistics | `cargo xtask stats` |
+| Write a local source-coverage report (lcov + HTML) | `cargo xtask coverage [-p <crate>]` |
 | Build macOS `dist/LumenCraft.app` bundle | `cargo xtask bundle` |
 
 ## Subsystem implementation guides
@@ -81,6 +83,28 @@ trunk serve --release   # serves on http://127.0.0.1:8767
 
 - `cargo xtask test` runs workspace unit and integration tests (`cargo nextest run` when installed, else `cargo test --workspace --lib --bins --tests`) followed by workspace doctests (`cargo test --workspace --doc`).
 - Every statistical test (`crates/stats`) and regression model (`crates/fit`) must carry analytical unit tests, certified reference-dataset tests (NIST StRD) with explicit relative/ULP tolerances in `lumencraft-testkit`, and property tests covering degenerate inputs.
+
+### Coverage reports
+
+`cargo xtask coverage` (`R0.16`) runs the tests once under [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) instrumentation (through `cargo-nextest` when installed) and writes, under `<target dir>/llvm-cov/`:
+
+- `lcov.info` — for editor gutters and other lcov tools;
+- `html/index.html` — browsable per-file line and region report;
+- `summary.json` — workspace totals, also printed at the end of the run.
+
+```sh
+cargo xtask coverage                        # whole workspace (slow: rebuilds everything instrumented)
+cargo xtask coverage -p lumencraft-stats    # one crate's tests
+cargo xtask coverage -p lumencraft-fit -- solver   # forward a test filter to the runner
+```
+
+- `-p` limits which tests run; the report still includes every workspace crate those tests reach. `xtask` and `lumencraft-testkit` are always left out.
+- The instrumented build lives in `<target dir>/llvm-cov-target`, separate from normal builds, and follows `CARGO_TARGET_DIR`, so parallel agents stay isolated.
+- `rustup` toolchains need `rustup component add llvm-tools-preview`. Toolchains without that component (for example Homebrew Rust) can set `LLVM_COV` and `LLVM_PROFDATA` to the `llvm-cov` / `llvm-profdata` of an LLVM with the same major version as `rustc -vV` reports.
+- Doctests and the `wasm32` build are not measured (doctest coverage needs nightly). Inline `#[cfg(test)]` modules count towards the totals.
+- [`.github/workflows/coverage.yml`](../.github/workflows/coverage.yml) runs the same command weekly and on demand, and keeps the report as a workflow artifact. It is not a pull-request gate.
+
+**Policy.** Coverage is a diagnostic for finding untested edge-case and error paths: `NaN`/`±Inf`, empty or degenerate input, singular matrices, and malformed-file branches in `crates/format`. It is not evidence that a routine is correct; only the `D1` oracle checks are. There is no coverage threshold, coverage reports are never uploaded to third-party services (`cargo xtask telemetry`), and coverage percentages are never written into hand-maintained docs ([pitfall #2](pitfalls.md#2-hardcoded-headline-counts-going-stale)). Do not add tests whose only purpose is to execute lines.
 
 ## Robustness: LumenCraft never crashes
 
