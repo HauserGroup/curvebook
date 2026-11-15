@@ -91,8 +91,8 @@ Dependency direction strictly flows downward (`L0` -> `L1` -> ... -> `L6`), veri
 
 One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came from describing an unimplemented command table before it landed and deserializing raw positional tuples. Keep docs and generated files synchronized with the landed typed registries:
 
-- **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`92` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `MUTATES_DOCUMENT` / `READ_ONLY` / `IDEMPOTENT`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
-- **UI command registry:** UI-only actions use the typed `UiCommandSpec` struct slice `UI_COMMANDS` (`32` entries) in `crates/ui-egui/src/menus/ui_commands.rs`. `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and always check sync with `cargo xtask ui-commands --check`.
+- **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`95` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `MUTATES_DOCUMENT` / `READ_ONLY` / `IDEMPOTENT`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
+- **UI command registry:** UI-only actions use the typed `UiCommandSpec` struct slice `UI_COMMANDS` (`45` entries) in `crates/ui-egui/src/menus/ui_commands.rs`. `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and always check sync with `cargo xtask ui-commands --check`.
 - **Strict `--gui-only` channel lock:** Under `lumencraft --control <port> --gui-only` or `lumencraft-cli mcp [--control-port <p>] --gui-only` (`GuiOnlyPolicy::Strict` in `crates/engine/src/lib.rs`), direct `Caller::Control` / `Caller::Mcp` engine mutations, `doc_inspect`, `resources/read`, and disk-path `ui.screenshot` writes are rejected with `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`), while the 8 `gui` tools (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`) drive `UiApp` widgets that commit internally via `Caller::Ui`.
 
 ---
@@ -117,6 +117,7 @@ Run workspace checks through `cargo xtask <command>` (invokes `xtask/`):
 | `cargo xtask status` | Verify `docs/STATUS.md` live metrics and table Column 1 uniqueness *(R0.4)* |
 | `cargo xtask licenses [--html [out]]` | Verify crate licences offline against `deny.toml` / `Cargo.lock` (plus `cargo deny check licenses` when installed / `CI=true`) and optionally generate `THIRD-PARTY-LICENSES.html` *(R0.5)* |
 | `cargo xtask telemetry` | Enforce zero telemetry/egress crates, loopback-only sockets, workflow hygiene, and web security headers *(R0.6)* |
+| `cargo xtask workflows` | Lint GitHub Actions workflows (`actionlint -config-file .github/actionlint.yaml`) and shell scripts (`shellcheck -x`) *(R0.6)* |
 | `cargo xtask screenshots [--check]` | Regenerate (or `--check` in-process PNG magic/dimensions/CRCs & `ASSETS.md` attribution for) `docs/images/*.png` *(R0.14)* |
 | `cargo xtask commands [--check]` | Regenerate (or `--check`) `docs/commands.md` from engine `CommandSpec` registry *(R0.7)* |
 | `cargo xtask schemas [--check]` | Regenerate (or `--check`) `docs/schemas/*.schema.json` from persisted document/manifest schemas *(R0.7)* |
@@ -199,7 +200,7 @@ cargo xtask status
 cargo xtask pending
 ```
 
-(Running `cargo xtask ci` executes the full workspace CI bundle. For strict `--gui-only` MCP/control/UI workflow checks, run integration targets `gui_only_workflows`, `gui_wf_foundations_and_data`, `gui_wf_group_comparisons_and_power`, `gui_wf_regression_contingency_multivariate`, and `gui_wf_statistical_graphs` in `lumencraft-ui-egui`, `gui_only_surface` in `lumencraft-mcp`, `mcp_gui_only_parity` in `lumencraft-cli`, and `gui_only_wiring` in `lumencraft`.)
+(Running `cargo xtask ci` executes the full workspace CI bundle. For strict `--gui-only` MCP/control/UI workflow checks, run integration targets `gui_only_workflows`, `gui_w22b_qol_and_r9`, `gui_wf_foundations_and_data`, `gui_wf_group_comparisons_and_power`, `gui_wf_regression_contingency_multivariate`, `gui_wf_statistical_graphs`, `gui_wf_multivariable_and_transforms`, `gui_wf_clustering_glm_and_pharma`, and `gui_wf_advanced_statistical_graphs` in `lumencraft-ui-egui`, `gui_only_surface` in `lumencraft-mcp`, `mcp_gui_only_parity` in `lumencraft-cli`, and `gui_only_wiring` in `lumencraft`.)
 
 ### Parallel Agents
 When multiple agents work concurrently on the repository:

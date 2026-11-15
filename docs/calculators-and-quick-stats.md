@@ -2,11 +2,11 @@
 
 > Related specifications: [`statistics-implementation.md`](statistics-implementation.md), [`curve-fitting-implementation.md`](curve-fitting-implementation.md), [`data-tables-and-transforms.md`](data-tables-and-transforms.md), [`graphing-and-layouts.md`](graphing-and-layouts.md), [`qol-beyond-parity.md`](qol-beyond-parity.md), [`gui-workflows.md`](gui-workflows.md) · Roadmap: [`ROADMAP.md`](ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) (`R9.12`–`R9.16` / `QOL-12`–`QOL-16`) · Live metrics: [`STATUS.md`](STATUS.md)
 
-Active scope covers categorical/continuous table-analysis completions (`R9.12`), seeded randomization and sampling (`R9.14`), and symbolic/live best-fit equation annotations only (`R9.16`). Statistical/distribution/Bayesian calculators (`R9.13`) and bench-chemistry/radiochemical calculators (`R9.15`) are deferred without scheduled milestones. Their detailed designs remain as inactive reference material. Compact Letter Display (`CLD`) is excluded from this plan, including optional calculator outputs.
+Active scope covers categorical/continuous table-analysis completions (`R9.12`), seeded randomization and sampling (`R9.14`), and symbolic/live best-fit equation annotations only (`R9.16`) — all implemented across Waves 21–22b. Statistical/distribution/Bayesian calculators (`R9.13`) and bench-chemistry/radiochemical calculators (`R9.15`) remain deferred without scheduled milestones; their detailed designs remain as inactive reference material. Compact Letter Display (`CLD`) remains excluded from product scope, including optional calculator outputs.
 
-> **Status Note (Existing implementation vs. active and deferred scope):**
-> - **Shipped end-to-end today (`R1`–`R7`):** $2 \times 2$ & $R \times C$ contingency ($\chi^2$, Yates, $G^2$, Fisher's exact, Barnard's exact, Baptista–Pike OR, Koopman RR, Newcombe RD, point NNT, McNemar's test), uniform goodness-of-fit $\chi^2$, descriptive statistics + arbitrary $0.01\%\text{–}99.99\%$ mean CIs (`RawReplicates` and `Mean + SD/SEM + N`), Grubbs/ROUT outliers, unpaired/Welch/paired/ratio/one-sample *t*-tests, simple/Deming linear regression, extra-sum-of-squares *F* & $\text{AIC}_c$ fit comparisons, `log_agonist_vs_response_ecf` ($\log\text{EC}_F$ curve fitting), live pairwise significance brackets (`GraphSpec::comparisons`), and seeded XY Monte Carlo simulation (`table.simulateXy`), plus library-tested `cohens_kappa` / `fleiss_kappa` (`crates/stats/src/categorical.rs`) and `norm`/`student_t`/`f`/`chi2`/Beta/Gamma distributions (`crates/math/src/dist/`).
-> - **Active additive scope (non-blocking for `1.0`):** Table-analysis completions (`R9.12`, including factorial post-hoc work shared with `R8.7`), randomization/sampling (`R9.14`), and equations-only annotations (`R9.16`). `R9.13` and `R9.15` are deferred; their reference sections are not implementation assignments or prerequisites for active items. Existing statistical routines remain supported.
+> **Status Note (Implemented scope vs. deferred calculators):**
+> - **Shipped end-to-end (`R1`–`R7` & Waves 21–22b `R9.12`/`R9.14`/`R9.16`):** $2 \times 2$ & $R \times C$ contingency ($\chi^2$, Yates, $G^2$, Fisher's exact, Barnard's exact, Baptista–Pike OR, Koopman RR, Newcombe RD, inverted Altman `NNTB`/`NNTH` CIs via `altman_nnt_from_rd`, McNemar's test + discordant-pair OR CIs via `mcnemar_detailed`, weighted Cohen's `cohens_kappa` & Fleiss' `fleiss_kappa`, exact binomial `ContingencyMethod::ExactBinomial`), uniform & custom expected proportion goodness-of-fit $\chi^2$, descriptive statistics + arbitrary $0.01\%\text{–}99.99\%$ mean CIs & exact $\chi^2$ `sd_ci` (`RawReplicates` and pre-summarized `Mean + SD/SEM + N`), Grubbs/ROUT outliers, unpaired/Welch/paired/ratio/one-sample *t*-tests (with direct `Mean + SD/SEM + N` in `run_two_group_analysis`) + paired exact Sign test (`TwoGroupMethod::PairedSignTest`), simple/Deming linear regression, factorial ANOVA main/simple-effect multiplicity post-hoc tabs (`run_factorial_anova`), extra-sum-of-squares *F* & $\text{AIC}_c$ fit comparisons, `log_agonist_vs_response_ecf` ($\log\text{EC}_F$ curve fitting), live pairwise significance brackets (`GraphSpec::comparisons`), seeded XY Monte Carlo simulation (`table.simulateXy`), seeded group randomization/row sampling/distribution simulation (`crates/transform/src/randomize.rs`: `table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions`), and linked symbolic/live-substituted $\TeX$ model equation annotations (`crates/fit/src/tex_format.rs`, `crates/chart/src/equation_box.rs`, `GraphAnnotation::ModelEquation`, `ui.graph.insertModelEquation`).
+> - **Deferred (outside active backlog):** `R9.13` (`QOL-13` instant statistical/distribution/Bayesian calculators) and `R9.15` (`QOL-15` bench molarity/dilution/radiochemical calculators) remain deferred without milestones; their reference sections below are not active implementation assignments. Existing core probability distribution modules (`norm`/`student_t`/`f`/`chi2`/Beta/Gamma in `crates/math/src/dist/`) and statistical routines remain supported.
 
 ---
 
@@ -24,13 +24,15 @@ Calculator-specific design rules below apply only if deferred work is explicitly
 
 ---
 
-## 2. Categorical & Continuous Table-Analysis Completions (`R9.12` / `QOL-12`)
+## 2. Categorical & Continuous Table-Analysis Completions (`R9.12` / `QOL-12` — Implemented, Wave 21)
+
+Implemented across `crates/doc/src/analysis.rs`, `crates/stats/src/{categorical,column,two_group,anova}.rs`, `crates/engine/src/{cmd/analysis.rs,methods_report.rs}`, and `crates/ui-egui` (verified by `crates/stats/tests/wave21_r97_r912_clustering.rs` [`9 passed`] and `crates/ui-egui/tests/gui_w22b_qol_and_r9.rs`):
 
 ### 2.1 Factorial & Multifactor ANOVA Post-Hoc Multiplicity Tabs (`crates/stats/src/anova.rs`)
-- Wire `FactorialAnovaSpec::multiplicity` (`crates/doc/src/analysis.rs`) inside `run_factorial_anova` to emit `ResultTabKind::MultipleComparisons` tabs (Tukey, Šídák, Bonferroni, Dunnett, Holm–Šídák, Newman–Keuls, Fisher LSD, and BH/BY/BKY FDR) across main-effect marginal means and simple-effect cell means using `compare_groups_with_procedure(&groups, ms_residual, df_residual, ...)` (or Satterthwaite/Kenward–Roger cell $df$ under REML mixed models), completing the backend tab seam required by `WF-09` and `WF-10` ([`gui-workflows.md`](gui-workflows.md)).
+- Wired `FactorialAnovaSpec::multiplicity` (`crates/doc/src/analysis.rs`) inside `run_factorial_anova` to emit `ResultTabKind::MultipleComparisons` tabs (Tukey, Šídák, Bonferroni, Dunnett, Holm–Šídák, Newman–Keuls, Fisher LSD, and BH/BY/BKY FDR) across main-effect marginal means and simple-effect cell means using `compare_groups_with_procedure(&groups, ms_residual, df_residual, ...)` (or Satterthwaite/Kenward–Roger cell $df$ under REML mixed models), completing the backend tab seam used by `WF-09`, `WF-10`, and `WF-33` ([`gui-workflows.md`](gui-workflows.md)).
 
 ### 2.2 Inter-Rater Agreement ($\kappa$), NNT CIs & Custom Goodness-of-Fit (`crates/stats/src/categorical.rs`)
-- **Cohen's & Fleiss' $\kappa$ Wiring:** Expose the existing `cohens_kappa` (`Unweighted`, `Linear`, `Quadratic` weights; Cohen 1960, <https://doi.org/10.1177/001316446002000104>; Fleiss, Cohen & Everitt 1969, <https://doi.org/10.1037/h0028106>) and `fleiss_kappa` (Fleiss 1971, <https://doi.org/10.1037/h0031619>) implementations as `ContingencyMethod::CohenKappa { weighting }` and `ContingencyMethod::FleissKappa`, emitting observed agreement $p_o$, chance agreement $p_e$, asymptotic SE, confidence bounds, $z$-statistic, two-sided $p$-value, and `methods_report.rs` summary prose.
+- **Cohen's & Fleiss' $\kappa$ Wiring:** Exposed `cohens_kappa` (`Unweighted`, `Linear`, `Quadratic` weights; Cohen 1960, <https://doi.org/10.1177/001316446002000104>; Fleiss, Cohen & Everitt 1969, <https://doi.org/10.1037/h0028106>) and `fleiss_kappa` (Fleiss 1971, <https://doi.org/10.1037/h0031619>) via `ContingencyMethod::CohenKappa { weighting }` and `ContingencyMethod::FleissKappa`, emitting observed agreement $p_o$, chance agreement $p_e$, asymptotic SE, confidence bounds, $z$-statistic, two-sided $p$-value, and `methods_report.rs` summary prose.
 - **Number Needed to Treat (`NNT`) Confidence Intervals:** Invert the Newcombe (1998, <https://doi.org/10.1002/(SICI)1097-0258(19980430)17:8%3C873::AID-SIM779%3E3.0.CO;2-I>) Wilson-score risk-difference interval $[\Delta_L, \Delta_U]$ following Altman (1998, <https://doi.org/10.1136/bmj.317.7168.1309>):
   - When $\Delta_L$ and $\Delta_U$ share the same strict sign, report finite `NNTB` or `NNTH` bounds $[1 / |\Delta_{\text{far}}|, 1 / |\Delta_{\text{near}}|]$.
   - When $[\Delta_L, \Delta_U]$ spans $0$, report the exact continuous union through $\text{ARR} = 0$ ($\infty$): $\text{NNTH } 1/|\Delta_L| \text{ to } \infty \text{ to NNTB } 1/\Delta_U$ (e.g., $\text{ARR} = -0.08\ [-0.27, 0.11] \to \text{NNTH } 12.5\ [\text{NNTH } 3.7 \text{ to } \infty \text{ to NNTB } 9.1]$), never collapsing disjoint benefit/harm rays into a misleading finite interval.
@@ -41,10 +43,10 @@ Calculator-specific design rules below apply only if deferred work is explicitly
   - Nonparametric paired Sign test on non-zero paired differences $d_i = x_i - y_i \ne 0$ via exact $\text{Binomial}(n_+, n_+ + n_-, 0.5)$.
 
 ### 2.3 Exact $\chi^2$ Standard-Deviation CI & Summary-Input *t*-Tests (`column.rs`, `two_group.rs`)
-- **Confidence Interval of a Standard Deviation:** Add `sd_ci: Option<(f64, f64)>` to `DescriptiveSummary` under Gaussian sampling:
+- **Confidence Interval of a Standard Deviation:** Added `sd_ci: Option<(f64, f64)>` to `DescriptiveSummary` / `PooledSummaryResult` under Gaussian sampling:
   $$\left[s \sqrt{\frac{n - 1}{\chi^2_{1 - \alpha/2,\, n - 1}}},\; s \sqrt{\frac{n - 1}{\chi^2_{\alpha/2,\, n - 1}}}\right]$$
   evaluated via `chi2_isf` / `chi2_ppf` (`crates/math/src/dist/core.rs`).
-- **Pre-Summarized Two-Group & One-Sample *t*-Tests:** Extend `run_two_group_analysis` (`UnpairedT`, `WelchT`, `OneSampleT`) to accept `SubcolumnMode::{MeanSdN, MeanSemN}` summary rows directly without requiring raw individual replicates.
+- **Pre-Summarized Two-Group & One-Sample *t*-Tests:** Extended `run_two_group_analysis` (`UnpairedT`, `WelchT`, `OneSampleT`) to accept `SubcolumnMode::{MeanSdN, MeanSemN}` summary rows directly without requiring raw individual replicates.
 
 ---
 
@@ -67,9 +69,9 @@ If resumed, the proposed design would use pure domain functions in `crates/stats
 
 ---
 
-## 4. Experimental Randomization & Subset Sampling (`R9.14` / `QOL-14`)
+## 4. Experimental Randomization & Subset Sampling (`R9.14` / `QOL-14` — Implemented, Wave 22)
 
-Implemented in `crates/transform/src/randomize.rs` over `lumencraft_math::DeterministicRng` so every experimental allocation or subsample is 100% reproducible from its recorded 64-bit seed:
+Implemented in `crates/transform/src/randomize.rs` over `lumencraft_math::DeterministicRng`, wired into `crates/engine/src/cmd/table.rs` (`table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions`), `crates/ui-egui/src/dialogs_r9.rs` (`RandomizeGroupsDialogState`, `RandomSampleRowsDialogState`, `SimulateDistributionsDialogState`), and `crates/ui-egui/src/menus/ui_commands.rs` (`ui.table.{randomizeGroups,randomSampleRows,simulateDistributions}`) so every experimental allocation or subsample is 100% reproducible from its recorded 64-bit seed:
 
 1. **Subject-to-Group Randomization (`table.randomizeGroups`):**
    - Assigns $N$ subjects (numeric `1..=N` or custom identifier labels) across $k \ge 2$ treatment arms with equal or weighted allocation ratios $(w_1 : \dots : w_k)$.
@@ -116,10 +118,10 @@ Stateless wet-lab preparation calculators in `crates/stats/src/calculators.rs` (
 
 <a id="qol16-equations"></a>
 
-## 6. Live Best-Fit Equation Annotations (`R9.16` / `QOL-16`, Equations Only)
+## 6. Live Best-Fit Equation Annotations (`R9.16` / `QOL-16`, Equations Only — Implemented, Wave 22b)
 
-- Provide one-click placement of a linked model equation on a fitted `XY` graph, in symbolic form or with live-substituted best-fit parameter estimates.
-- Use canonical $\TeX$-subset templates for built-in models and supported custom DSL expressions (`\frac{...}{...}`, superscripts, subscripts, Greek letters, and `\log_{10}`), with deterministic rendering across RGBA, SVG, and `%PDF-1.7`.
-- Keep the annotation linked to the selected fit and update substituted coefficients after upstream edits and fit recalculation. Use versioned graph metadata and existing command seams.
+- Implemented across `crates/doc/src/graph.rs` (`GraphAnnotation::ModelEquation`), `crates/fit/src/tex_format.rs` (`format_model_equation_tex`, `format_polynomial_equation_tex`, `format_number_sig_figs`), `crates/chart/src/equation_box.rs` (`ModelEquationParams`, `render_model_equation_annotation`, `EquationDisplayMode::{Symbolic, Substituted}`), `crates/engine/src/cmd/graph.rs`, `crates/ui-egui/src/dialogs_r9.rs` (`InsertModelEquationDialogState`), and `crates/ui-egui/src/menus/ui_commands.rs` (`ui.graph.insertModelEquation`): provides one-click placement of a linked model equation on a fitted `XY` graph in symbolic or live-substituted form.
+- Renders canonical $\TeX$-subset templates for built-in models (`NonlinearRegression`, `LinearRegression`, `PassingBablok`) and supported custom `fitted_curves` DSL expressions (`\frac{...}{...}`, superscripts, subscripts, Greek letters, and `\log_{10}`), with deterministic rendering across RGBA, SVG, and `%PDF-1.7`.
+- Stays linked to the selected fit and updates substituted coefficients automatically after upstream edits and fit recalculation, using versioned graph metadata and existing command seams.
 - **Excluded:** Compact Letter Display, group letters, significance-matrix algorithms, pairwise-display modes, and additional $R^2$ / $\text{AIC}_c$ callouts. Existing significance brackets remain unchanged.
-- **Acceptance:** Symbolic and substituted equations remain accurate after recalculation and agree between screen and export rendering. Re-estimate the equations-only scope; the previous combined estimate no longer applies.
+- **Verification:** Symbolic and live-substituted equations stay synced after recalculation and match across screen and export rendering (`gui_w22b_qol_and_r9` [`9 passed`], `WF-49`).
