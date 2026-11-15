@@ -1312,7 +1312,7 @@ fn interpolate_profile_width(profile: &[(f64, f64)], target_y: f64) -> f64 {
     let (y0, d0) = profile[idx - 1];
     let (y1, d1) = profile[idx];
     let span = y1 - y0;
-    let w = if span.abs() > 1e-12 { ((target_y - y0) / span).clamp(0.0, 1.0) } else { 0.0 };
+    let w = if span.abs() > 1e-12 { crate::clamp_f64_safe((target_y - y0) / span, 0.0, 1.0) } else { 0.0 };
     d0 + w * (d1 - d0)
 }
 
@@ -1494,7 +1494,7 @@ fn render_pairwise_brackets(scene: &mut ChartScene, graph: &GraphSheet, doc: &Pr
                 bar_y = bar_y.min(p_top - min_step);
             }
         }
-        bar_y = bar_y.clamp(min_bar_y, max_bar_y);
+        bar_y = crate::clamp_f64_safe(bar_y, min_bar_y, max_bar_y);
 
         emit_bracket_geometry(&mut scene.primitives, &br, bar_y);
         let label_y = bar_y - 3.5;

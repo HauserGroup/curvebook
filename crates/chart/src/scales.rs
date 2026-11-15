@@ -875,8 +875,8 @@ fn compute_nice_bounds_for_scale(lo: f64, hi: f64, scale: AxisScale) -> (f64, f6
         AxisScale::Log10 => nice_log_bounds(lo, hi, 10.0),
         AxisScale::Log2 => nice_log_bounds(lo, hi, 2.0),
         AxisScale::Ln => nice_log_bounds(lo, hi, std::f64::consts::E),
-        AxisScale::Logit(LogitDomain::Proportion) => (lo.clamp(0.001, 0.49), hi.clamp(0.51, 0.999)),
-        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => (lo.clamp(0.1, 49.0), hi.clamp(51.0, 99.9)),
+        AxisScale::Logit(LogitDomain::Proportion) => (crate::clamp_f64_safe(lo, 0.001, 0.49), crate::clamp_f64_safe(hi, 0.51, 0.999)),
+        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => (crate::clamp_f64_safe(lo, 0.1, 49.0), crate::clamp_f64_safe(hi, 51.0, 99.9)),
         AxisScale::Reciprocal => {
             if lo > 0.0 && hi > 0.0 {
                 (lo, if hi > lo { hi } else { lo * 10.0 })
@@ -1088,7 +1088,7 @@ pub(crate) fn compute_additional_ticks_for_segments(
             if let Some(raw_coord) = mapping.map_value(tick.value, span_start, span_end) {
                 let lo_pt = span_start.min(span_end);
                 let hi_pt = span_start.max(span_end);
-                let coord_pt = raw_coord.clamp(lo_pt, hi_pt);
+                let coord_pt = crate::clamp_f64_safe(raw_coord, lo_pt, hi_pt);
                 let label = match &tick.label {
                     Some(raw) => {
                         let expanded = doc.map_or_else(|| raw.clone(), |d| resolve_template_hooks(raw, d, primary_id));
@@ -1720,7 +1720,7 @@ fn estimate_y_margin(spec: &AxisSpec, cats: Option<&[CategoricalTick]>, options:
         26.0
     };
     let title_space = if spec.title.trim().is_empty() { 6.0 } else { options.title_font_size_pt + 10.0 };
-    (sample_w + options.major_tick_len_pt + title_space + extra_offset + 8.0).clamp(32.0, 120.0)
+    crate::clamp_f64_safe(sample_w + options.major_tick_len_pt + title_space + extra_offset + 8.0, 32.0, 120.0)
 }
 
 fn estimate_x_margin(spec: &AxisSpec, cats: Option<&[CategoricalTick]>, options: &AxisRenderOptions, extra_offset: f64) -> f64 {
@@ -1732,7 +1732,7 @@ fn estimate_x_margin(spec: &AxisSpec, cats: Option<&[CategoricalTick]>, options:
     let angle_rad = spec.tick_angle_deg.to_radians().abs();
     let label_h = options.tick_font_size_pt * angle_rad.cos().abs() + max_label_w * angle_rad.sin().abs();
     let title_space = if spec.title.trim().is_empty() { 6.0 } else { options.title_font_size_pt + 10.0 };
-    (label_h + options.major_tick_len_pt + title_space + extra_offset + 10.0).clamp(28.0, 120.0)
+    crate::clamp_f64_safe(label_h + options.major_tick_len_pt + title_space + extra_offset + 10.0, 28.0, 120.0)
 }
 
 /// Render background threshold zones (`shade_to: Some(...)`) and optional gridlines behind data.
@@ -2804,7 +2804,7 @@ pub fn ellipse_path(r: RectPt) -> Path2D {
 }
 
 fn rounded_rect_path(r: RectPt) -> Path2D {
-    let rad = (r.width.min(r.height) * 0.15).clamp(1.0, 8.0);
+    let rad = crate::clamp_f64_safe(r.width.min(r.height) * 0.15, 1.0, 8.0);
     let x0 = r.x;
     let x1 = r.right();
     let y0 = r.y;
