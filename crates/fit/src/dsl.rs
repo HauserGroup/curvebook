@@ -10,8 +10,10 @@
 //! - Rich scalar math + statistical/special functions (Bessel J/Y/I/K, Kummer 1F1, Gauss 2F1,
 //!   `erf`, `gamma`, `normcdf`, etc.) executed in a bounded, WASM-safe stack VM.
 
+use std::cell::RefCell;
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lumencraft_math::dist::{norm_cdf, norm_ppf};
 use lumencraft_math::roots::{RootOptions, brent_root};
@@ -23,6 +25,9 @@ use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 
 const MAX_VM_STEPS: usize = 100_000;
 const MAX_ODE_STEPS: usize = 50_000;
+pub(crate) const DEFAULT_MAX_ODE_STEPS_PER_FIT: usize = 300_000;
+const MAX_CACHED_ODE_TRAJECTORIES: usize = 4;
+const MAX_CACHED_ODE_KNOTS: usize = 4_096;
 const MAX_PARSE_DEPTH: usize = 128;
 const MAX_AST_NODES: usize = 4_096;
 const MAX_DATASET_EXPANSION: usize = 10_000;
@@ -421,10 +426,185 @@ struct CompiledInitRule {
     prog: CompiledProgram,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct OdeFitBudgetState {
+    used_steps: usize,
+    max_steps: usize,
+    exceeded: bool,
+}
+
+std::thread_local! {
+    static ACTIVE_ODE_BUDGET: RefCell<Option<OdeFitBudgetState>> = const { RefCell::new(None) };
+}
+
+/// RAII scope bounding total adaptive RK45 steps across a single nonlinear fit execution.
+pub(crate) struct OdeFitBudgetGuard {
+    prev: Option<OdeFitBudgetState>,
+}
+
+impl Drop for OdeFitBudgetGuard {
+    fn drop(&mut self) {
+        let _ = ACTIVE_ODE_BUDGET.try_with(|slot| {
+            if let Ok(mut cell) = slot.try_borrow_mut() {
+                *cell = self.prev;
+            }
+        });
+    }
+}
+
+pub(crate) fn enter_ode_fit_budget(max_steps: usize) -> OdeFitBudgetGuard {
+    let mut prev = None;
+    let _ = ACTIVE_ODE_BUDGET.try_with(|slot| {
+        if let Ok(mut cell) = slot.try_borrow_mut() {
+            prev = cell.replace(OdeFitBudgetState { used_steps: 0, max_steps, exceeded: false });
+        }
+    });
+    OdeFitBudgetGuard { prev }
+}
+
+pub(crate) fn ode_fit_budget_exceeded() -> Option<usize> {
+    let mut out = None;
+    let _ = ACTIVE_ODE_BUDGET.try_with(|slot| {
+        if let Ok(cell) = slot.try_borrow()
+            && let Some(state) = *cell
+            && state.exceeded
+        {
+            out = Some(state.max_steps);
+        }
+    });
+    out
+}
+
+fn consume_ode_fit_step() -> bool {
+    let mut allowed = true;
+    let _ = ACTIVE_ODE_BUDGET.try_with(|slot| {
+        if let Ok(mut cell) = slot.try_borrow_mut()
+            && let Some(state) = cell.as_mut()
+        {
+            if state.exceeded || state.used_steps >= state.max_steps {
+                state.exceeded = true;
+                allowed = false;
+            } else {
+                state.used_steps += 1;
+            }
+        }
+    });
+    allowed
+}
+
+#[derive(Debug, Clone)]
+struct OdeKnot {
+    dist: f64,
+    t: f64,
+    y: f64,
+    h: f64,
+}
+
+#[derive(Debug, Clone, Default)]
+struct TrajectorySide {
+    knots: Vec<OdeKnot>,
+    steps: usize,
+    failed_beyond_dist: Option<f64>,
+}
+
+impl TrajectorySide {
+    fn thin_if_needed(&mut self) {
+        if self.knots.len() <= MAX_CACHED_ODE_KNOTS {
+            return;
+        }
+        let n = self.knots.len();
+        let mut thinned = Vec::with_capacity(MAX_CACHED_ODE_KNOTS / 2 + 2);
+        for (idx, knot) in self.knots.iter().enumerate() {
+            if idx == 0 || idx + 1 == n || idx % 2 == 0 {
+                thinned.push(knot.clone());
+            }
+        }
+        self.knots = thinned;
+    }
+
+    fn insert_knots(&mut self, insert_at: usize, new_knots: Vec<OdeKnot>) {
+        if new_knots.is_empty() {
+            return;
+        }
+        self.knots.splice(insert_at..insert_at, new_knots);
+        self.thin_if_needed();
+    }
+}
+
+#[derive(Debug, Clone)]
+struct CachedOdeTrajectory {
+    model_id: u64,
+    ds_idx: usize,
+    t0: f64,
+    y0: f64,
+    params: Vec<f64>,
+    x_tail: Vec<f64>,
+    pos: TrajectorySide,
+    neg: TrajectorySide,
+}
+
+fn slice_bits_eq(a: &[f64], b: &[f64]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x.to_bits() == y.to_bits())
+}
+
+impl CachedOdeTrajectory {
+    fn new(model_id: u64, ds_idx: usize, t0: f64, y0: f64, params: &[f64], x_tail: &[f64]) -> Self {
+        let init_knot = OdeKnot { dist: 0.0, t: t0, y: y0, h: 0.0 };
+        Self {
+            model_id,
+            ds_idx,
+            t0,
+            y0,
+            params: params.to_vec(),
+            x_tail: x_tail.to_vec(),
+            pos: TrajectorySide { knots: vec![init_knot.clone()], steps: 0, failed_beyond_dist: None },
+            neg: TrajectorySide { knots: vec![init_knot], steps: 0, failed_beyond_dist: None },
+        }
+    }
+
+    fn matches(&self, model_id: u64, ds_idx: usize, t0: f64, y0: f64, params: &[f64], x_tail: &[f64]) -> bool {
+        self.model_id == model_id
+            && self.ds_idx == ds_idx
+            && self.t0.to_bits() == t0.to_bits()
+            && self.y0.to_bits() == y0.to_bits()
+            && slice_bits_eq(&self.params, params)
+            && slice_bits_eq(&self.x_tail, x_tail)
+    }
+}
+
+static NEXT_ODE_MODEL_ID: AtomicU64 = AtomicU64::new(1);
+
+std::thread_local! {
+    static ODE_TRAJECTORY_CACHE: RefCell<Vec<CachedOdeTrajectory>> = const { RefCell::new(Vec::new()) };
+}
+
+fn take_cached_ode_trajectory(model_id: u64, ds_idx: usize, t0: f64, y0: f64, params: &[f64], x_tail: &[f64]) -> CachedOdeTrajectory {
+    let mut found = None;
+    let _ = ODE_TRAJECTORY_CACHE.try_with(|slot| {
+        if let Ok(mut entries) = slot.try_borrow_mut()
+            && let Some(pos) = entries.iter().position(|e| e.matches(model_id, ds_idx, t0, y0, params, x_tail))
+        {
+            found = Some(entries.remove(pos));
+        }
+    });
+    found.unwrap_or_else(|| CachedOdeTrajectory::new(model_id, ds_idx, t0, y0, params, x_tail))
+}
+
+fn store_cached_ode_trajectory(entry: CachedOdeTrajectory) {
+    let _ = ODE_TRAJECTORY_CACHE.try_with(|slot| {
+        if let Ok(mut entries) = slot.try_borrow_mut() {
+            entries.retain(|e| !e.matches(entry.model_id, entry.ds_idx, entry.t0, entry.y0, &entry.params, &entry.x_tail));
+            entries.insert(0, entry);
+            entries.truncate(MAX_CACHED_ODE_TRAJECTORIES);
+        }
+    });
+}
+
 /// Compiled custom equation implementing [`ParametricModel`] safely inside a bounded VM.
 #[derive(Debug, Clone)]
 pub struct CompiledDslModel {
     id: String,
+    model_id: u64,
     name: String,
     kind: DslEquationKind,
     param_names: Vec<String>,
@@ -622,6 +802,7 @@ impl CompiledDslModel {
         Ok(Self {
             name: id.clone(),
             id,
+            model_id: NEXT_ODE_MODEL_ID.fetch_add(1, Ordering::Relaxed),
             kind,
             param_names: param_order,
             programs,
@@ -722,26 +903,111 @@ impl CompiledDslModel {
         implicit_newton_fallback(&f, &brent_scaled, &best_starts, anchor_scale)
     }
 
-    /// Integrate ODE `dy/dt = f(t, y; theta)` from `t0` to target `t_end` using adaptive Dormand–Prince RK45.
+    /// Integrate ODE `dy/dt = f(t, y; theta)` from `t0` to target `t_end` using adaptive Dormand–Prince RK45
+    /// with per-trajectory continuation caching so sweeps reuse work across points.
     fn eval_ode_single(&self, t_end: f64, x_tail: &[f64], params: &[f64], ds_idx: usize) -> Option<f64> {
+        if ode_fit_budget_exceeded().is_some() {
+            return None;
+        }
         let prog = self.select_program(ds_idx)?;
         let init_prog = self.ode_init_program.as_ref()?;
         if !self.ode_t0.is_finite() || !t_end.is_finite() {
             return None;
         }
-        let y0 = eval_bytecode(init_prog, &[self.ode_t0], 0.0, params, ds_idx)?;
+
+        let mut xv = Vec::with_capacity(1 + x_tail.len());
+        xv.push(self.ode_t0);
+        xv.extend_from_slice(x_tail);
+        let mut stack = Vec::with_capacity(32);
+        let mut init_locals = vec![None; init_prog.local_count];
+        let y0 = eval_bytecode_with_bufs(init_prog, &xv, 0.0, params, ds_idx, &mut init_locals, &mut stack)?;
         if !y0.is_finite() {
             return None;
         }
         if (t_end - self.ode_t0).abs() < 1e-15 {
             return Some(y0);
         }
-        integrate_rk45(self.ode_t0, t_end, y0, |t, y| {
-            let mut xv = Vec::with_capacity(1 + x_tail.len());
-            xv.push(t);
-            xv.extend_from_slice(x_tail);
-            eval_bytecode(prog, &xv, y, params, ds_idx)
-        })
+
+        let dir = if t_end >= self.ode_t0 { 1.0 } else { -1.0 };
+        let target_dist = (t_end - self.ode_t0) * dir;
+        if target_dist <= 0.0 || !target_dist.is_finite() {
+            return None;
+        }
+
+        let mut traj = take_cached_ode_trajectory(self.model_id, ds_idx, self.ode_t0, y0, params, x_tail);
+        let side = if dir > 0.0 { &mut traj.pos } else { &mut traj.neg };
+
+        if side.failed_beyond_dist.is_some_and(|fail_d| target_dist > fail_d) {
+            store_cached_ode_trajectory(traj);
+            return None;
+        }
+
+        let idx = side.knots.partition_point(|k| k.dist <= target_dist);
+        let cached_y = [idx.checked_sub(1).and_then(|i| side.knots.get(i)), side.knots.get(idx)]
+            .into_iter()
+            .flatten()
+            .find(|c| (target_dist - c.dist).abs() <= 1e-14 * target_dist || (t_end - c.t).abs() <= 4.0 * f64::EPSILON * t_end.abs())
+            .map(|c| c.y);
+        if let Some(y) = cached_y {
+            store_cached_ode_trajectory(traj);
+            return Some(y);
+        }
+
+        let start_knot = idx.checked_sub(1).and_then(|i| side.knots.get(i).cloned()).unwrap_or(OdeKnot { dist: 0.0, t: self.ode_t0, y: y0, h: 0.0 });
+        let advancing_frontier = idx == side.knots.len();
+        let rem_steps = if advancing_frontier { MAX_ODE_STEPS.saturating_sub(side.steps) } else { MAX_ODE_STEPS.saturating_sub(side.steps).max(64) };
+        if rem_steps == 0 {
+            if advancing_frontier {
+                side.failed_beyond_dist = Some(side.failed_beyond_dist.map_or(start_knot.dist, |prev| prev.min(start_knot.dist)));
+            }
+            store_cached_ode_trajectory(traj);
+            return None;
+        }
+
+        let mut rhs_locals = vec![None; prog.local_count];
+        let mut collected = Vec::new();
+        let outcome =
+            integrate_rk45_segment(start_knot.t, t_end, start_knot.y, start_knot.h, target_dist, rem_steps, true, &mut collected, |t, y| {
+                xv[0] = t;
+                rhs_locals.fill(None);
+                stack.clear();
+                eval_bytecode_with_bufs(prog, &xv, y, params, ds_idx, &mut rhs_locals, &mut stack)
+            });
+
+        let mut last_kd = start_knot.dist;
+        let mut new_knots = Vec::with_capacity(collected.len() + 1);
+        for (kt, ky, kh) in collected {
+            let kd = (kt - self.ode_t0) * dir;
+            if kd > last_kd && kd < target_dist {
+                new_knots.push(OdeKnot { dist: kd, t: kt, y: ky, h: kh });
+                last_kd = kd;
+            }
+        }
+
+        let result = match outcome {
+            Rk45Outcome::Reached { y, h, steps_taken } => {
+                side.steps = side.steps.saturating_add(steps_taken);
+                new_knots.push(OdeKnot { dist: target_dist, t: t_end, y, h });
+                side.insert_knots(idx, new_knots);
+                Some(y)
+            }
+            Rk45Outcome::IntrinsicFailed { last_t, steps_taken } => {
+                side.steps = side.steps.saturating_add(steps_taken);
+                let last_accepted_dist = new_knots.last().map_or(start_knot.dist, |k| k.dist).max((last_t - self.ode_t0) * dir);
+                side.insert_knots(idx, new_knots);
+                if advancing_frontier {
+                    side.failed_beyond_dist = Some(side.failed_beyond_dist.map_or(last_accepted_dist, |prev| prev.min(last_accepted_dist)));
+                }
+                None
+            }
+            Rk45Outcome::BudgetExceeded { steps_taken } => {
+                side.steps = side.steps.saturating_add(steps_taken);
+                side.insert_knots(idx, new_knots);
+                None
+            }
+        };
+        store_cached_ode_trajectory(traj);
+        result
     }
 }
 
@@ -952,32 +1218,62 @@ impl ParametricModel for CompiledDslModel {
     }
 }
 
+enum Rk45Outcome {
+    Reached { y: f64, h: f64, steps_taken: usize },
+    IntrinsicFailed { last_t: f64, steps_taken: usize },
+    BudgetExceeded { steps_taken: usize },
+}
+
 /// Adaptive Dormand–Prince 5(4) Runge–Kutta integrator from `t0` to `t_end` for scalar `y`.
-pub fn integrate_rk45<F>(t0: f64, t_end: f64, y0: f64, mut rhs: F) -> Option<f64>
+pub fn integrate_rk45<F>(t0: f64, t_end: f64, y0: f64, rhs: F) -> Option<f64>
 where
     F: FnMut(f64, f64) -> Option<f64>,
 {
-    if !t0.is_finite() || !t_end.is_finite() || !y0.is_finite() {
-        return None;
+    let span = (t_end - t0).abs();
+    let mut unused_knots = Vec::new();
+    match integrate_rk45_segment(t0, t_end, y0, 0.0, span, MAX_ODE_STEPS, true, &mut unused_knots, rhs) {
+        Rk45Outcome::Reached { y, .. } => Some(y),
+        Rk45Outcome::IntrinsicFailed { .. } | Rk45Outcome::BudgetExceeded { .. } => None,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn integrate_rk45_segment<F>(
+    t0: f64,
+    t_end: f64,
+    y0: f64,
+    h_hint: f64,
+    total_span: f64,
+    step_cap: usize,
+    enforce_fit_budget: bool,
+    knots_out: &mut Vec<(f64, f64, f64)>,
+    mut rhs: F,
+) -> Rk45Outcome
+where
+    F: FnMut(f64, f64) -> Option<f64>,
+{
+    if !t0.is_finite() || !t_end.is_finite() || !y0.is_finite() || !total_span.is_finite() {
+        return Rk45Outcome::IntrinsicFailed { last_t: t0, steps_taken: 0 };
     }
     let dir = if t_end >= t0 { 1.0 } else { -1.0 };
     let span = (t_end - t0).abs();
     if span == 0.0 {
-        return Some(y0);
+        return Rk45Outcome::Reached { y: y0, h: h_hint, steps_taken: 0 };
     }
     if !span.is_finite() {
-        return None;
+        return Rk45Outcome::IntrinsicFailed { last_t: t0, steps_taken: 0 };
     }
+    let scale_span = total_span.max(span);
     let rtol = 1e-8_f64;
     let atol = 1e-10_f64;
 
     let mut t = t0;
     let mut y = y0;
     let min_init_h = (span * 1e-6).max(1e-18).min(span);
-    let mut h = (span * 0.05).max(min_init_h).min(span);
-    let min_h = (1e-13 * span.max(1.0)).min(span * 0.5);
+    let mut h = if h_hint > 0.0 && h_hint.is_finite() { h_hint.max(min_init_h).min(span) } else { (span * 0.05).max(min_init_h).min(span) };
+    let min_h = (1e-13 * scale_span.max(1.0)).min(span * 0.5);
     if min_h <= 0.0 {
-        return None;
+        return Rk45Outcome::IntrinsicFailed { last_t: t0, steps_taken: 0 };
     }
 
     // Dormand-Prince Butcher tableau coefficients.
@@ -1010,38 +1306,62 @@ where
     const E6: f64 = 22.0 / 525.0;
     const E7: f64 = -1.0 / 40.0;
 
-    for _ in 0..MAX_ODE_STEPS {
+    let mut steps_taken = 0_usize;
+    let mut resume_h = h;
+
+    for _ in 0..step_cap {
         let rem = (t_end - t) * dir;
-        if rem <= 1e-14 * span || rem <= 4.0 * f64::EPSILON * t_end.abs() {
-            return Some(y);
+        if rem <= 1e-14 * scale_span || rem <= 4.0 * f64::EPSILON * t_end.abs() {
+            return Rk45Outcome::Reached { y, h: resume_h, steps_taken };
         }
-        if h > rem {
+        if enforce_fit_budget && !consume_ode_fit_step() {
+            return Rk45Outcome::BudgetExceeded { steps_taken };
+        }
+        steps_taken += 1;
+
+        let natural_h = h;
+        let was_clipped = h > rem;
+        if was_clipped {
             h = rem;
         }
         let dt = dir * h;
-        let k1 = rhs(t, y)?;
-        let k2 = rhs(t + 0.2 * dt, y + dt * A21 * k1)?;
-        let k3 = rhs(t + 0.3 * dt, y + dt * (A31 * k1 + A32 * k2))?;
-        let k4 = rhs(t + 0.8 * dt, y + dt * (A41 * k1 + A42 * k2 + A43 * k3))?;
-        let k5 = rhs(t + (8.0 / 9.0) * dt, y + dt * (A51 * k1 + A52 * k2 + A53 * k3 + A54 * k4))?;
-        let k6 = rhs(t + dt, y + dt * (A61 * k1 + A62 * k2 + A63 * k3 + A64 * k4 + A65 * k5))?;
+        let Some(k1) = rhs(t, y) else {
+            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
+        };
+        let Some(k2) = rhs(t + 0.2 * dt, y + dt * A21 * k1) else {
+            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
+        };
+        let Some(k3) = rhs(t + 0.3 * dt, y + dt * (A31 * k1 + A32 * k2)) else {
+            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
+        };
+        let Some(k4) = rhs(t + 0.8 * dt, y + dt * (A41 * k1 + A42 * k2 + A43 * k3)) else {
+            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
+        };
+        let Some(k5) = rhs(t + (8.0 / 9.0) * dt, y + dt * (A51 * k1 + A52 * k2 + A53 * k3 + A54 * k4)) else {
+            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
+        };
+        let Some(k6) = rhs(t + dt, y + dt * (A61 * k1 + A62 * k2 + A63 * k3 + A64 * k4 + A65 * k5)) else {
+            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
+        };
 
         let y_next = y + dt * (B1 * k1 + B3 * k3 + B4 * k4 + B5 * k5 + B6 * k6);
         if !y_next.is_finite() {
             h *= 0.25;
             if h < min_h {
-                return None;
+                return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
             }
             continue;
         }
-        let k7 = rhs(t + dt, y_next)?;
+        let Some(k7) = rhs(t + dt, y_next) else {
+            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
+        };
         let err = (dt * (E1 * k1 + E3 * k3 + E4 * k4 + E5 * k5 + E6 * k6 + E7 * k7)).abs();
         let tol = atol + rtol * y.abs().max(y_next.abs());
         let ratio = err / tol;
         if !err.is_finite() || !tol.is_finite() || !ratio.is_finite() {
             h *= 0.25;
             if h < min_h {
-                return None;
+                return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
             }
             continue;
         }
@@ -1049,21 +1369,36 @@ where
         if ratio <= 1.0 {
             let t_next = t + dt;
             if t_next == t {
-                return if h >= rem { Some(y_next) } else { None };
+                return if h >= rem {
+                    Rk45Outcome::Reached { y: y_next, h: natural_h, steps_taken }
+                } else {
+                    Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken }
+                };
             }
             t = t_next;
             y = y_next;
             let factor = if ratio < 1e-12 { 5.0 } else { (0.9 * ratio.powf(-0.2)).clamp(0.2, 5.0) };
             h = (h * factor).max(min_h);
+            resume_h = if was_clipped { natural_h } else { h };
+            let after_rem = (t_end - t) * dir;
+            if after_rem > 1e-14 * scale_span && after_rem > 4.0 * f64::EPSILON * t_end.abs() {
+                knots_out.push((t, y, h));
+            }
         } else {
             let factor = (0.9 * ratio.powf(-0.25)).clamp(0.1, 0.5);
             h *= factor;
             if h < min_h {
-                return None;
+                return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
             }
         }
     }
-    None
+
+    let rem = (t_end - t) * dir;
+    if rem <= 1e-14 * scale_span || rem <= 4.0 * f64::EPSILON * t_end.abs() {
+        Rk45Outcome::Reached { y, h: resume_h, steps_taken }
+    } else {
+        Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken }
+    }
 }
 
 // ============================================================================
@@ -2544,6 +2879,19 @@ fn eval_bytecode(prog: &CompiledProgram, x: &[f64], y: f64, params: &[f64], ds_i
 
 fn eval_bytecode_with_locals(prog: &CompiledProgram, x: &[f64], y: f64, params: &[f64], ds_idx: usize, locals: &mut [Option<f64>]) -> Option<f64> {
     let mut stack: Vec<f64> = Vec::with_capacity(32);
+    eval_bytecode_with_bufs(prog, x, y, params, ds_idx, locals, &mut stack)
+}
+
+fn eval_bytecode_with_bufs(
+    prog: &CompiledProgram,
+    x: &[f64],
+    y: f64,
+    params: &[f64],
+    ds_idx: usize,
+    locals: &mut [Option<f64>],
+    stack: &mut Vec<f64>,
+) -> Option<f64> {
+    stack.clear();
     let mut ip = 0_usize;
     let mut steps = 0_usize;
 
@@ -2555,7 +2903,7 @@ fn eval_bytecode_with_locals(prog: &CompiledProgram, x: &[f64], y: f64, params: 
         match prog.code[ip] {
             OpCode::PushConst(v) => stack.push(v),
             OpCode::LoadPredictor(idx) => {
-                stack.push(x.get(idx).copied().unwrap_or(0.0));
+                stack.push(*x.get(idx)?);
             }
             OpCode::LoadY => stack.push(y),
             OpCode::LoadDatasetIndex => stack.push(ds_idx as f64),

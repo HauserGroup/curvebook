@@ -17,6 +17,7 @@ use crate::diagnostics::{
     compute_information_criteria, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test,
     homoscedasticity_spearman_test, lilliefors_ks_test, replicates_lack_of_fit, rout_detect_outliers, runs_test, shapiro_wilk_test,
 };
+use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget, ode_fit_budget_exceeded};
 use crate::error::{FitError, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::types::{
@@ -510,28 +511,90 @@ fn build_observations(datasets: &[DatasetSeries], scheme: WeightingScheme, honor
     Ok(obs)
 }
 
+fn ode_budget_error() -> Option<FitError> {
+    ode_fit_budget_exceeded().map(|max_steps| FitError::OdeIntegrationFailed {
+        reason: format!("ODE integration step budget exceeded ({max_steps} adaptive RK45 steps per fit)"),
+    })
+}
+
+fn obs_is_sweep_ordered(obs: &[ObsRecord], slot_ds: Option<usize>) -> bool {
+    let mut prev: Option<(usize, f64)> = None;
+    for rec in obs {
+        if slot_ds.is_some_and(|d| d != rec.ds_local_idx) {
+            continue;
+        }
+        let curr = (rec.ds_local_idx, rec.point.x0());
+        if let Some(p) = prev
+            && (curr.0 < p.0 || (curr.0 == p.0 && curr.1.total_cmp(&p.1).is_lt()))
+        {
+            return false;
+        }
+        prev = Some(curr);
+    }
+    true
+}
+
+fn eval_predictions_ordered(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta: &[f64],
+    flat_params: &mut [f64],
+    slot_ds: Option<usize>,
+    y_hat_out: &mut [f64],
+) -> bool {
+    layout.fill_all_params(theta, flat_params);
+    let p_m = layout.p_model;
+
+    if obs_is_sweep_ordered(obs, slot_ds) {
+        for (dst, rec) in y_hat_out.iter_mut().zip(obs.iter()) {
+            if slot_ds.is_none_or(|d| d == rec.ds_local_idx) {
+                let start = rec.ds_local_idx * p_m;
+                let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
+                    return false;
+                };
+                if !pred.is_finite() {
+                    return false;
+                }
+                *dst = pred;
+            }
+        }
+        return true;
+    }
+
+    // Evaluate unsorted observations in per-dataset ascending X order so stateful/ODE sweeps reuse
+    // integration trajectories across points while writing back into original observation indices.
+    let mut order: Vec<usize> = obs.iter().enumerate().filter(|(_, rec)| slot_ds.is_none_or(|d| d == rec.ds_local_idx)).map(|(i, _)| i).collect();
+    order.sort_by(|&a, &b| obs[a].ds_local_idx.cmp(&obs[b].ds_local_idx).then_with(|| obs[a].point.x0().total_cmp(&obs[b].point.x0())));
+    for idx in order {
+        let rec = &obs[idx];
+        let start = rec.ds_local_idx * p_m;
+        let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
+            return false;
+        };
+        if !pred.is_finite() {
+            return false;
+        }
+        y_hat_out[idx] = pred;
+    }
+    true
+}
+
 /// Evaluate weighted residual vector `r_i = sqrt_w_i * (y_i - f(x_i; theta))` and predictions.
 fn eval_residuals(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[ObsRecord], theta: &[f64]) -> Option<(Vec<f64>, Vec<f64>, f64)> {
     let mut flat_params = vec![0.0_f64; layout.n_datasets * layout.p_model];
-    layout.fill_all_params(theta, &mut flat_params);
+    let mut y_hat = vec![0.0_f64; obs.len()];
+    if !eval_predictions_ordered(model, layout, obs, theta, &mut flat_params, None, &mut y_hat) {
+        return None;
+    }
 
     let mut weighted_res = Vec::with_capacity(obs.len());
-    let mut y_hat = Vec::with_capacity(obs.len());
     let mut ss = NeumaierSum::new();
-    let p_m = layout.p_model;
-
-    for rec in obs {
-        let start = rec.ds_local_idx * p_m;
-        let p = &flat_params[start..(start + p_m)];
-        let pred = model.eval(&rec.point.x, p, rec.point.data_set_index)?;
-        if !pred.is_finite() {
-            return None;
-        }
+    for (rec, &pred) in obs.iter().zip(y_hat.iter()) {
         let r = rec.sqrt_weight * (rec.point.y - pred);
         if !r.is_finite() {
             return None;
         }
-        y_hat.push(pred);
         weighted_res.push(r);
         ss.add(r * r);
     }
@@ -547,19 +610,7 @@ fn eval_predictions_into(
     flat_params: &mut [f64],
     y_hat_out: &mut [f64],
 ) -> bool {
-    layout.fill_all_params(theta, flat_params);
-    let p_m = layout.p_model;
-    for (dst, rec) in y_hat_out.iter_mut().zip(obs.iter()) {
-        let start = rec.ds_local_idx * p_m;
-        let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
-            return false;
-        };
-        if !pred.is_finite() {
-            return false;
-        }
-        *dst = pred;
-    }
-    true
+    eval_predictions_ordered(model, layout, obs, theta, flat_params, None, y_hat_out)
 }
 
 fn mat_get(m: &DenseMatrix, r: usize, c: usize) -> f64 {
@@ -679,21 +730,7 @@ fn eval_predictions_for_slot_into(
     slot_ds: Option<usize>,
     out: &mut [f64],
 ) -> bool {
-    layout.fill_all_params(theta, flat_params);
-    let p_m = layout.p_model;
-    for (dst, rec) in out.iter_mut().zip(obs.iter()) {
-        if slot_ds.is_none_or(|d| d == rec.ds_local_idx) {
-            let start = rec.ds_local_idx * p_m;
-            let Some(v) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
-                return false;
-            };
-            if !v.is_finite() {
-                return false;
-            }
-            *dst = v;
-        }
-    }
-    true
+    eval_predictions_ordered(model, layout, obs, theta, flat_params, slot_ds, out)
 }
 
 #[derive(Debug, Clone)]
@@ -724,6 +761,9 @@ fn run_trust_region_lm(
     project_theta(&mut theta, &bounds);
 
     let Some((mut w_res, mut y_hat, mut ss_curr)) = eval_residuals(model, layout, obs, &theta) else {
+        if let Some(err) = ode_budget_error() {
+            return Err(err);
+        }
         return Err(FitError::BadInitialValues { reason: "Initial parameters evaluate outside model domain".to_owned() });
     };
 
@@ -750,8 +790,15 @@ fn run_trust_region_lm(
     let mut damp_ws = LmDampWorkspace::new(n, k)?;
 
     while iter < max_iters {
-        j_mat = compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds)
-            .ok_or_else(|| FitError::BadInitialValues { reason: "Jacobian evaluation returned non-finite values".to_owned() })?;
+        j_mat = match compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds) {
+            Some(jm) => jm,
+            None => {
+                if let Some(err) = ode_budget_error() {
+                    return Err(err);
+                }
+                return Err(FitError::BadInitialValues { reason: "Jacobian evaluation returned non-finite values".to_owned() });
+            }
+        };
 
         // Update column scaling D_j = max(D_j, ||J_{:, j}||_2).
         for (j, d_j) in diag.iter_mut().enumerate() {
@@ -845,7 +892,12 @@ fn run_trust_region_lm(
                     let act = if ss_t < ss_curr { 1.0 - ss_t / ss_curr } else { -1.0 };
                     (act, Some((r_t, y_t, ss_t)))
                 }
-                None => (-1.0, None),
+                None => {
+                    if let Some(err) = ode_budget_error() {
+                        return Err(err);
+                    }
+                    (-1.0, None)
+                }
             };
 
             let rho = if pred_red > 0.0 && trial_eval.is_some() {
@@ -1055,6 +1107,9 @@ fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs
     }
     let bounds = layout.bounds();
     let eval_obj = |th: &[f64]| -> f64 {
+        if ode_fit_budget_exceeded().is_some() {
+            return f64::INFINITY;
+        }
         let mut clamped = th.to_vec();
         project_theta(&mut clamped, &bounds);
         eval_residuals(model, layout, obs, &clamped).map_or(f64::INFINITY, |(_, _, ss)| ss)
@@ -1064,6 +1119,9 @@ fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs
     let mut v0 = seed.to_vec();
     project_theta(&mut v0, &bounds);
     let f0 = eval_obj(&v0);
+    if ode_fit_budget_exceeded().is_some() {
+        return None;
+    }
     simplex.push((v0.clone(), f0));
 
     for j in 0..k {
@@ -1072,11 +1130,17 @@ fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs
         vj[j] += step;
         project_theta(&mut vj, &bounds);
         let fj = eval_obj(&vj);
+        if ode_fit_budget_exceeded().is_some() {
+            return None;
+        }
         simplex.push((vj, fj));
     }
 
     let mut evals = k + 1;
     while evals < max_evals {
+        if ode_fit_budget_exceeded().is_some() {
+            return None;
+        }
         simplex.sort_by(|a, b| a.1.total_cmp(&b.1));
         if simplex[0].1.is_finite() && simplex[k].1.is_finite() {
             let spread = (simplex[k].1 - simplex[0].1).abs();
@@ -1150,10 +1214,15 @@ fn solve_with_warm_start(
 ) -> Result<LmRunOutput, FitError> {
     let mut start = theta_init.to_vec();
     if eval_residuals(model, layout, obs, &start).is_none() {
+        if let Some(err) = ode_budget_error() {
+            return Err(err);
+        }
         if config.use_simplex_warm_start
             && let Some(rescued) = nelder_mead_rescue(model, layout, obs, &start, 240)
         {
             start = rescued;
+        } else if let Some(err) = ode_budget_error() {
+            return Err(err);
         } else {
             return Err(FitError::BadInitialValues { reason: "Starting parameters evaluate outside model domain".to_owned() });
         }
@@ -1163,23 +1232,30 @@ fn solve_with_warm_start(
     // If primary run hit max iters or suspiciously poor gradient / flat plateau, try smaller step
     // trust-region factor `1.0` and optional Nelder-Mead restart purely from `start` or `best.theta`.
     if config.use_simplex_warm_start && (best.status != FitStatus::Converged || best.weighted_ss > 1e-3 * obs_y_ss(obs)) {
-        if let Ok(alt1) = run_trust_region_lm(model, layout, obs, &start, config.max_iters, 1.0)
-            && alt1.weighted_ss < best.weighted_ss
-        {
-            best = alt1;
+        match run_trust_region_lm(model, layout, obs, &start, config.max_iters, 1.0) {
+            Ok(alt1) if alt1.weighted_ss < best.weighted_ss => best = alt1,
+            Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
+            _ => {}
         }
-        if let Some(nm) = nelder_mead_rescue(model, layout, obs, &best.theta, 400)
-            && let Ok(alt2) = run_trust_region_lm(model, layout, obs, &nm, config.max_iters, 1.0)
-            && alt2.weighted_ss < best.weighted_ss
-        {
-            best = alt2;
+        if let Some(nm) = nelder_mead_rescue(model, layout, obs, &best.theta, 400) {
+            match run_trust_region_lm(model, layout, obs, &nm, config.max_iters, 1.0) {
+                Ok(alt2) if alt2.weighted_ss < best.weighted_ss => best = alt2,
+                Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
+                _ => {}
+            }
+        } else if let Some(err) = ode_budget_error() {
+            return Err(err);
         }
-        if best.weighted_ss > 1e-2 * obs_y_ss(obs)
-            && let Some(nm_start) = nelder_mead_rescue(model, layout, obs, &start, 600)
-            && let Ok(alt3) = run_trust_region_lm(model, layout, obs, &nm_start, config.max_iters, 0.5)
-            && alt3.weighted_ss < best.weighted_ss
-        {
-            best = alt3;
+        if best.weighted_ss > 1e-2 * obs_y_ss(obs) {
+            if let Some(nm_start) = nelder_mead_rescue(model, layout, obs, &start, 600) {
+                match run_trust_region_lm(model, layout, obs, &nm_start, config.max_iters, 0.5) {
+                    Ok(alt3) if alt3.weighted_ss < best.weighted_ss => best = alt3,
+                    Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
+                    _ => {}
+                }
+            } else if let Some(err) = ode_budget_error() {
+                return Err(err);
+            }
         }
     }
     Ok(best)
@@ -1313,6 +1389,7 @@ pub fn fit_nonlinear(
     if datasets.is_empty() {
         return Err(FitError::EmptyInput);
     }
+    let _ode_budget = enter_ode_fit_budget(DEFAULT_MAX_ODE_STEPS_PER_FIT.saturating_mul(datasets.len().clamp(1, 4)));
     if config.plot_function_only {
         return fit_plot_function_only(model, datasets, hooks, config);
     }
@@ -1390,7 +1467,12 @@ fn fit_plot_function_only(
         let mut ds_res = Vec::with_capacity(ds.points.len());
         let mut ds_rss = NeumaierSum::new();
         for pt in &ds.points {
-            let yh = model.eval(&pt.x, &ds_params, ds.data_set_index).unwrap_or(f64::NAN);
+            let Some(yh) = model.eval(&pt.x, &ds_params, ds.data_set_index) else {
+                if let Some(err) = ode_budget_error() {
+                    return Err(err);
+                }
+                continue;
+            };
             if yh.is_finite() && pt.y.is_finite() {
                 let r = pt.y - yh;
                 ds_yh.push(yh);
@@ -2801,8 +2883,84 @@ fn quadratic_form(m: &DenseMatrix, v: &[f64]) -> f64 {
     acc.total()
 }
 
+struct DatasetXBounds {
+    real_bounds: Option<(f64, f64)>,
+    single_x: Option<f64>,
+    scan_x_min: f64,
+    scan_x_max: f64,
+    span: f64,
+}
+
+fn dataset_x_bounds(ds: &DatasetSeries) -> DatasetXBounds {
+    let mut d_min = f64::INFINITY;
+    let mut d_max = f64::NEG_INFINITY;
+    for pt in &ds.points {
+        let xv = pt.x0();
+        if xv.is_finite() {
+            d_min = d_min.min(xv);
+            d_max = d_max.max(xv);
+        }
+    }
+    if d_min.is_finite() && d_max.is_finite() && (d_max - d_min).abs() >= 1e-12 {
+        DatasetXBounds { real_bounds: Some((d_min, d_max)), single_x: None, scan_x_min: d_min, scan_x_max: d_max, span: (d_max - d_min).max(1.0) }
+    } else if d_min.is_finite() {
+        DatasetXBounds { real_bounds: None, single_x: Some(d_min), scan_x_min: -10.0, scan_x_max: 10.0, span: 20.0 }
+    } else {
+        DatasetXBounds { real_bounds: None, single_x: None, scan_x_min: -10.0, scan_x_max: 10.0, span: 20.0 }
+    }
+}
+
+fn extrapolation_note_for_x(bounds: &DatasetXBounds, x_val: f64, plateau_hint: Option<&'static str>) -> Option<String> {
+    let prefix = plateau_hint.map(|tag| format!("{tag}: ")).unwrap_or_default();
+    match (bounds.real_bounds, bounds.single_x) {
+        (Some((d_min, d_max)), _) => {
+            let tol = 1e-9 * bounds.span.max(1.0);
+            if x_val < d_min - tol {
+                Some(format!("{prefix}Extrapolated below measured standard X range [{d_min}, {d_max}]"))
+            } else if x_val > d_max + tol {
+                Some(format!("{prefix}Extrapolated above measured standard X range [{d_min}, {d_max}]"))
+            } else {
+                None
+            }
+        }
+        (None, Some(x0)) => {
+            if (x_val - x0).abs() > 1e-9 * x0.abs().max(1.0) {
+                Some(format!("{prefix}Extrapolated outside single-X standard data"))
+            } else {
+                None
+            }
+        }
+        (None, None) => Some(format!("{prefix}Extrapolated without finite standard X range")),
+    }
+}
+
+fn plateau_tag_for_target(
+    model: &dyn ParametricModel,
+    ds_params: &[f64],
+    ds_index: usize,
+    y_target: f64,
+    x_a: f64,
+    x_b: f64,
+) -> Option<&'static str> {
+    let ya = model.eval(&[x_a], ds_params, ds_index)?;
+    let yb = model.eval(&[x_b], ds_params, ds_index)?;
+    if !ya.is_finite() || !yb.is_finite() {
+        return None;
+    }
+    let y_lo = ya.min(yb);
+    let y_hi = ya.max(yb);
+    if y_target > y_hi + 1e-12 {
+        Some("AboveTopPlateau")
+    } else if y_target < y_lo - 1e-12 {
+        Some("BelowBottomPlateau")
+    } else {
+        None
+    }
+}
+
 /// Interpolate unknown `X` from target `Y` along the fitted curve using scan + `brent_root`,
-/// returning inverse confidence bounds (`CiBound::Open` when plateauing beyond band limits).
+/// preferring roots within measured `[x_min, x_max]`, flagging out-of-range extrapolation and
+/// plateau violations (`AboveTopPlateau` / `BelowBottomPlateau`), and returning inverse CIs.
 #[allow(clippy::too_many_arguments)]
 fn interpolate_x_from_y(
     model: &dyn ParametricModel,
@@ -2817,22 +2975,54 @@ fn interpolate_x_from_y(
     sigma: f64,
     t_crit: f64,
 ) -> InterpolatedUnknown {
-    let mut x_min = f64::INFINITY;
-    let mut x_max = f64::NEG_INFINITY;
-    for pt in &ds.points {
-        x_min = x_min.min(pt.x0());
-        x_max = x_max.max(pt.x0());
-    }
-    if !x_min.is_finite() || !x_max.is_finite() || (x_max - x_min).abs() < 1e-12 {
-        x_min = -10.0;
-        x_max = 10.0;
-    }
-    let span = (x_max - x_min).max(1.0);
-    let scan_lo = x_min - 0.5 * span;
-    let scan_hi = x_max + 0.5 * span;
+    let xb = dataset_x_bounds(ds);
+    let scan_lo = xb.scan_x_min - 0.5 * xb.span;
+    let scan_hi = xb.scan_x_max + 0.5 * xb.span;
 
     let f_diff = |x: f64| -> f64 { model.eval(&[x], ds_params, ds.data_set_index).map_or(f64::NAN, |y| y - y_target) };
-    let Some(x_hat) = find_first_root_in_scan(f_diff, scan_lo, scan_hi) else {
+    let (in_range_root, in_range_flips) = scan_interval_first_root_and_crossings(&f_diff, xb.scan_x_min, xb.scan_x_max);
+
+    let x_hat_opt = in_range_root.or_else(|| {
+        let (lo_root, _) = scan_interval_first_root_and_crossings(&f_diff, scan_lo, xb.scan_x_min);
+        let (hi_root, _) = scan_interval_first_root_and_crossings(&f_diff, xb.scan_x_max, scan_hi);
+        match (lo_root, hi_root) {
+            (Some(rl), Some(rh)) => {
+                if (xb.scan_x_min - rl).abs() <= (rh - xb.scan_x_max).abs() {
+                    Some(rl)
+                } else {
+                    Some(rh)
+                }
+            }
+            (Some(rl), None) => Some(rl),
+            (None, Some(rh)) => Some(rh),
+            (None, None) => None,
+        }
+    });
+
+    let Some(x_hat) = x_hat_opt else {
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        let samples = 40_usize;
+        for i in 0..=samples {
+            let x = scan_lo + (i as f64) / (samples as f64) * (scan_hi - scan_lo);
+            if let Some(y) = model.eval(&[x], ds_params, ds.data_set_index)
+                && y.is_finite()
+            {
+                y_min = y_min.min(y);
+                y_max = y_max.max(y);
+            }
+        }
+        let note = if y_min.is_finite() && y_max.is_finite() {
+            if y_target > y_max {
+                "AboveTopPlateau: Target Y falls outside fitted curve range".to_owned()
+            } else if y_target < y_min {
+                "BelowBottomPlateau: Target Y falls outside fitted curve range".to_owned()
+            } else {
+                "Target Y falls outside fitted curve range".to_owned()
+            }
+        } else {
+            "Target Y falls outside fitted curve range".to_owned()
+        };
         return InterpolatedUnknown {
             data_set_index: ds.data_set_index,
             row,
@@ -2840,7 +3030,7 @@ fn interpolate_x_from_y(
             output_estimate: f64::NAN,
             ci_lower: CiBound::Open,
             ci_upper: CiBound::Open,
-            note: Some("Target Y falls outside fitted curve range".to_owned()),
+            note: Some(note),
         };
     };
 
@@ -2887,7 +3077,13 @@ fn interpolate_x_from_y(
         (CiBound::Open, CiBound::Open)
     };
 
-    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: y_target, output_estimate: x_hat, ci_lower, ci_upper, note: None }
+    let plateau_hint = plateau_tag_for_target(model, ds_params, ds.data_set_index, y_target, xb.scan_x_min, xb.scan_x_max);
+    let mut note = extrapolation_note_for_x(&xb, x_hat, plateau_hint);
+    if note.is_none() && in_range_flips > 1 {
+        note = Some("Non-monotone fitted curve: multiple X roots exist inside measured standard range".to_owned());
+    }
+
+    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: y_target, output_estimate: x_hat, ci_lower, ci_upper, note }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2904,6 +3100,7 @@ fn interpolate_y_from_x(
     sigma: f64,
     t_crit: f64,
 ) -> InterpolatedUnknown {
+    let xb = dataset_x_bounds(ds);
     let Some(y_hat) = model.eval(&[x_val], ds_params, ds.data_set_index) else {
         return InterpolatedUnknown {
             data_set_index: ds.data_set_index,
@@ -2924,30 +3121,45 @@ fn interpolate_y_from_x(
     } else {
         (CiBound::Open, CiBound::Open)
     };
-    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: x_val, output_estimate: y_hat, ci_lower, ci_upper, note: None }
+    let note = extrapolation_note_for_x(&xb, x_val, None);
+    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: x_val, output_estimate: y_hat, ci_lower, ci_upper, note }
 }
 
-fn find_first_root_in_scan<F: Fn(f64) -> f64>(f: F, lo: f64, hi: f64) -> Option<f64> {
+fn scan_interval_first_root_and_crossings<F: Fn(f64) -> f64>(f: &F, lo: f64, hi: f64) -> (Option<f64>, usize) {
     let steps = 200_usize;
     let mut prev_x = lo;
     let mut prev_y = f(prev_x);
+    let mut prev_nz = if prev_y.is_finite() && prev_y.abs() > 1e-12 { Some(prev_y) } else { None };
+    let mut first_root = if prev_y.is_finite() && prev_y.abs() < 1e-13 { Some(prev_x) } else { None };
+    let mut sign_flips = 0_usize;
+
     for i in 1..=steps {
         let x = lo + (i as f64) / (steps as f64) * (hi - lo);
         let y = f(x);
-        if prev_y.is_finite() && y.is_finite() {
-            if prev_y.abs() < 1e-13 {
-                return Some(prev_x);
-            }
-            if prev_y * y <= 0.0
-                && let Ok(root) = brent_root(&f, prev_x, x, RootOptions { abs_tol: 1e-11, rel_tol: 1e-11, max_iters: 80 })
+        if y.is_finite() && y.abs() > 1e-12 {
+            if let Some(pnz) = prev_nz
+                && pnz * y < 0.0
             {
-                return Some(root);
+                sign_flips += 1;
+            }
+            prev_nz = Some(y);
+        }
+        if first_root.is_none() && prev_y.is_finite() && y.is_finite() {
+            if prev_y.abs() < 1e-13 {
+                first_root = Some(prev_x);
+            } else if prev_y * y <= 0.0
+                && let Ok(root) = brent_root(f, prev_x, x, RootOptions { abs_tol: 1e-11, rel_tol: 1e-11, max_iters: 80 })
+            {
+                first_root = Some(root);
             }
         }
         prev_x = x;
         prev_y = y;
     }
-    None
+    if first_root.is_none() && prev_y.is_finite() && prev_y.abs() < 1e-13 {
+        first_root = Some(prev_x);
+    }
+    (first_root, sign_flips)
 }
 
 fn find_nearest_root<F: Fn(f64) -> f64>(f: F, anchor: f64, lo: f64, hi: f64) -> Option<f64> {
