@@ -17,7 +17,7 @@ use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use lumencraft_ui_egui::dialogs_canvas::render_workspace_frame_png;
 use lumencraft_ui_egui::interaction::ViewportMetrics;
 use lumencraft_ui_egui::theme::install_fonts;
-use lumencraft_ui_egui::{UiApp, parse_control_port, run_control_tcp_server};
+use lumencraft_ui_egui::{ControlAuth, UiApp, bind_control_tcp_listener, parse_control_port, serve_control_listener, validate_loopback_addr};
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
 
@@ -25,8 +25,9 @@ const USAGE: &str = "\
 usage: lumencraft [options] [file...]
 
 options:
-  --control <port>      listen on 127.0.0.1:<port> for JSON-lines automation
-  --gui-only            restrict automation (--control) to interactive GUI actions only
+  --control <port>         listen on 127.0.0.1:<port> for authenticated JSON-lines automation
+  --control-token <token>  bearer token for --control authentication (or LUMENCRAFT_CONTROL_TOKEN)
+  --gui-only               restrict automation (--control) to interactive GUI actions only
   --in-window-menus     render the menu bar inside the window on macOS
   --new-instance        open files in a separate application window
   --headless-once       render one software compositor frame and exit
@@ -48,6 +49,7 @@ enum CliAction {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct LaunchConfig {
     control_port: Option<u16>,
+    control_token: Option<String>,
     gui_only: bool,
     in_window_menus: bool,
     new_instance: bool,
@@ -72,7 +74,8 @@ struct AppPaths {
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let env_port = std::env::var("LUMENCRAFT_CONTROL_PORT").ok();
-    match run_with_env_port(&args, env_port.as_deref()) {
+    let env_token = std::env::var("LUMENCRAFT_CONTROL_TOKEN").ok();
+    match run_with_env(&args, env_port.as_deref(), env_token.as_deref()) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err}");
@@ -83,11 +86,11 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 fn run(args: &[String]) -> Result<(), String> {
-    run_with_env_port(args, None)
+    run_with_env(args, None, None)
 }
 
-fn run_with_env_port(args: &[String], env_port: Option<&str>) -> Result<(), String> {
-    let action = parse_args(args, env_port)?;
+fn run_with_env(args: &[String], env_port: Option<&str>, env_token: Option<&str>) -> Result<(), String> {
+    let action = parse_args_with_env(args, env_port, env_token)?;
     match action {
         CliAction::PrintVersion => {
             println!("LumenCraft {}", env!("CARGO_PKG_VERSION"));
@@ -101,7 +104,12 @@ fn run_with_env_port(args: &[String], env_port: Option<&str>) -> Result<(), Stri
     }
 }
 
+#[cfg(test)]
 fn parse_args(args: &[String], env_port: Option<&str>) -> Result<CliAction, String> {
+    parse_args_with_env(args, env_port, None)
+}
+
+fn parse_args_with_env(args: &[String], env_port: Option<&str>, env_token: Option<&str>) -> Result<CliAction, String> {
     let mut cfg = LaunchConfig::default();
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
@@ -111,6 +119,12 @@ fn parse_args(args: &[String], env_port: Option<&str>) -> Result<CliAction, Stri
             "--control" => {
                 let raw = args.get(i + 1).ok_or_else(|| String::from("--control requires a TCP port (1..=65535)"))?;
                 cfg.control_port = Some(parse_port(raw)?);
+                i += 2;
+            }
+            "--control-token" => {
+                let raw = args.get(i + 1).ok_or_else(|| String::from("--control-token requires a non-empty token"))?;
+                let validated = ControlAuth::from_token(raw.as_str()).map_err(|err| format!("invalid --control-token: {err}"))?;
+                cfg.control_token = Some(validated.as_str().to_owned());
                 i += 2;
             }
             "--gui-only" => {
@@ -171,6 +185,12 @@ fn parse_args(args: &[String], env_port: Option<&str>) -> Result<CliAction, Stri
         && let Some(raw_env) = env_port.map(str::trim).filter(|s| !s.is_empty())
     {
         cfg.control_port = Some(parse_port(raw_env)?);
+    }
+    if cfg.control_token.is_none()
+        && let Some(raw_tok) = env_token.map(str::trim).filter(|s| !s.is_empty())
+    {
+        let validated = ControlAuth::from_token(raw_tok).map_err(|err| format!("invalid LUMENCRAFT_CONTROL_TOKEN: {err}"))?;
+        cfg.control_token = Some(validated.as_str().to_owned());
     }
 
     Ok(CliAction::Launch(cfg))
@@ -295,10 +315,9 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     }
 
     if let Some(port) = cfg.control_port {
-        let addr = SocketAddr::from(([127, 0, 0, 1], port));
         let focused_id = runtime.focused_window_id().ok_or_else(|| String::from("no open window available for --control server"))?;
         let win = runtime.window_mut(focused_id)?;
-        run_control_tcp_server(win.app_mut(), addr)?;
+        run_authenticated_control_server(win.app_mut(), port, cfg, &app_paths)?;
     }
 
     if let Some(focused_id) = runtime.focused_window_id() {
@@ -314,6 +333,55 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
 
     runtime.close_all_force()?;
     Ok(())
+}
+
+struct ControlTokenFileGuard {
+    path: PathBuf,
+}
+
+impl Drop for ControlTokenFileGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+fn control_token_file_path(config_dir: &Path, port: u16) -> PathBuf {
+    config_dir.join(format!("control-{port}.token"))
+}
+
+fn resolve_control_auth(cfg: &LaunchConfig) -> Result<ControlAuth, String> {
+    match cfg.control_token.as_deref() {
+        Some(token) => ControlAuth::from_token(token).map_err(|err| format!("invalid control token: {err}")),
+        None => ControlAuth::generate().map_err(|err| format!("failed to generate control authentication token: {err}")),
+    }
+}
+
+fn write_control_token_file(path: &Path, auth: &ControlAuth) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| format!("failed to create control token directory `{}`: {err}", parent.display()))?;
+    }
+    lumencraft_platform::fs::write_atomic_with_hook(path, auth.as_str().as_bytes(), |tmp_path| {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(tmp_path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        #[cfg(not(unix))]
+        let _ = tmp_path;
+        Ok(())
+    })
+    .map_err(|err| format!("failed to write control token file `{}`: {err}", path.display()))
+}
+
+fn run_authenticated_control_server(app: &mut UiApp, port: u16, cfg: &LaunchConfig, app_paths: &AppPaths) -> Result<(), String> {
+    let auth = resolve_control_auth(cfg)?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let checked = validate_loopback_addr(addr)?;
+    let listener = bind_control_tcp_listener(checked).map_err(|err| format!("failed to bind control socket {checked}: {err}"))?;
+    let token_path = control_token_file_path(&app_paths.config_dir, port);
+    write_control_token_file(&token_path, &auth)?;
+    let _token_guard = ControlTokenFileGuard { path: token_path };
+    serve_control_listener(app, &listener, &auth).map_err(|err| format!("control server I/O error: {err}"))
 }
 
 fn should_persist_preferences(app: &UiApp, paths: &AppPaths) -> Result<bool, String> {
@@ -528,6 +596,7 @@ mod tests {
             parse_args(&args, None).ok(),
             Some(CliAction::Launch(LaunchConfig {
                 control_port: Some(9123),
+                control_token: None,
                 gui_only: false,
                 in_window_menus: true,
                 new_instance: true,
@@ -545,6 +614,7 @@ mod tests {
             parse_args(&gui_only_args, None).ok(),
             Some(CliAction::Launch(LaunchConfig {
                 control_port: Some(9124),
+                control_token: None,
                 gui_only: true,
                 in_window_menus: false,
                 new_instance: false,
@@ -571,6 +641,7 @@ mod tests {
             parse_args(&portable_args, None).ok(),
             Some(CliAction::Launch(LaunchConfig {
                 control_port: None,
+                control_token: None,
                 gui_only: false,
                 in_window_menus: false,
                 new_instance: false,
@@ -798,6 +869,51 @@ mod tests {
         future_app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+X")?;
         assert!(super::save_shortcut_preferences(&future_app, &paths).is_err());
         assert_eq!(std::fs::read_to_string(&paths.preferences_file)?, future_text, "newer-version preferences file must remain untouched");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn control_token_cli_env_override_and_restricted_file_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+        let env_only = super::parse_args_with_env(&[String::from("--control"), String::from("9125")], None, Some("  sample-env-token  "));
+        let Ok(CliAction::Launch(env_cfg)) = env_only else {
+            return Err(String::from("expected launch config from env token").into());
+        };
+        assert_eq!(env_cfg.control_port, Some(9125));
+        assert_eq!(env_cfg.control_token.as_deref(), Some("sample-env-token"));
+
+        let cli_wins = super::parse_args_with_env(
+            &[String::from("--control"), String::from("9126"), String::from("--control-token"), String::from("sample-cli-token")],
+            None,
+            Some("sample-env-token"),
+        );
+        let Ok(CliAction::Launch(cli_cfg)) = cli_wins else {
+            return Err(String::from("expected launch config from cli token").into());
+        };
+        assert_eq!(cli_cfg.control_token.as_deref(), Some("sample-cli-token"));
+        assert!(super::parse_args_with_env(&[String::from("--control-token"), String::from("")], None, None).is_err());
+        assert!(super::parse_args_with_env(&[String::from("--control-token")], None, None).is_err());
+
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-ctrl-tok-file-{}-{nanos}", std::process::id()));
+        let paths = super::resolve_app_paths(None, Some(&dir));
+        let token_path = super::control_token_file_path(&paths.config_dir, 9127);
+        let auth = super::resolve_control_auth(&LaunchConfig::default())?;
+        assert_eq!(auth.as_str().len(), lumencraft_ui_egui::CONTROL_AUTH_TOKEN_BYTES * 2);
+
+        super::write_control_token_file(&token_path, &auth)?;
+        {
+            let _guard = super::ControlTokenFileGuard { path: token_path.clone() };
+            assert_eq!(std::fs::read_to_string(&token_path)?, auth.as_str());
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(&token_path)?.permissions().mode() & 0o777;
+                assert_eq!(mode, 0o600, "control token file must use 0600 permissions");
+            }
+        }
+        assert!(!token_path.exists(), "ControlTokenFileGuard must remove token file on drop");
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

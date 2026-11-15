@@ -35,9 +35,10 @@ pub use compositor::{
     render_workspace_rgba,
 };
 pub use control_io::{
-    ControlLoopAction, ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_gui_action,
-    dispatch_ui_command, handle_control_line, handle_control_line_with_action, parse_control_port, serve_control_stream,
-    serve_control_stream_with_quit,
+    CONTROL_AUTH_TOKEN_BYTES, CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, ControlLoopAction, ControlRequest, ControlResponse,
+    MAX_CONTROL_LINE_BYTES, MAX_CONTROL_TOKEN_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_gui_action, dispatch_ui_command, handle_control_line,
+    handle_control_line_with_action, is_http_request_line, parse_control_port, serve_control_stream, serve_control_stream_with_quit,
+    serve_control_stream_with_quit_and_token,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use control_io::{bind_control_tcp_listener, run_control_tcp_server, serve_control_listener, validate_loopback_addr};
@@ -476,7 +477,7 @@ mod tests {
     use serde_json::{Value, json};
 
     use super::menus::ui_commands::UI_COMMANDS;
-    use super::{ClipboardBundle, PrintJobSpec, UiApp, parse_control_port, serve_control_stream};
+    use super::{ClipboardBundle, ControlAuth, PrintJobSpec, UiApp, parse_control_port, serve_control_stream};
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
@@ -569,7 +570,8 @@ mod tests {
             json!({"id": 22, "op": "app.quit"}),
         ];
 
-        let mut input = String::new();
+        let auth = ControlAuth::from_token("sample-lib-parity-token")?;
+        let mut input = format!("{{\"id\": 0, \"method\": \"auth\", \"params\": {{\"token\": \"{}\"}}}}\n", auth.as_str());
         for req in &script {
             input.push_str(&serde_json::to_string(req)?);
             input.push('\n');
@@ -578,25 +580,25 @@ mod tests {
 
         let mut reader = BufReader::new(Cursor::new(input.as_bytes()));
         let mut output = Vec::new();
-        serve_control_stream(&mut app, &mut reader, &mut output)?;
+        serve_control_stream(&mut app, &mut reader, &mut output, &auth)?;
 
         let out_str = String::from_utf8(output)?;
         let lines: Vec<&str> = out_str.lines().collect();
-        assert_eq!(lines.len(), script.len(), "stream must stop immediately after app.quit");
+        assert_eq!(lines.len(), script.len() + 1, "stream must stop immediately after app.quit");
         for line in &lines {
             let parsed: Value = serde_json::from_str(line)?;
             assert_eq!(parsed["ok"], json!(true), "unexpected error response: {parsed}");
         }
 
-        let screenshot: Value = serde_json::from_str(lines[15])?;
+        let screenshot: Value = serde_json::from_str(lines[16])?;
         assert_eq!(screenshot["result"]["format"], json!("png"));
         assert_eq!(screenshot["result"]["width_px"], json!(256));
         assert!(screenshot["result"]["data_base64"].as_str().is_some_and(|b64| b64.starts_with("iVBORw0K")));
 
-        let svg_resp: Value = serde_json::from_str(lines[16])?;
+        let svg_resp: Value = serde_json::from_str(lines[17])?;
         assert!(svg_resp["result"]["svg"].as_str().is_some_and(|s| s.contains("<svg")));
 
-        let ui_state: Value = serde_json::from_str(lines[19])?;
+        let ui_state: Value = serde_json::from_str(lines[20])?;
         assert_eq!(ui_state["result"]["locale"], json!("de"));
         assert_eq!(ui_state["result"]["theme_mode"], json!("dark"));
         assert_eq!(ui_state["result"]["family_open"], json!(false));
