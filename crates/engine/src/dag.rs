@@ -3,8 +3,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSheet, ErrorCode, HookSource, ImportLinkSpec, InfoSheet, InternalLinkKind, LayoutItem,
-    LinkSource, PlacementMode, ProjectDocument, ResultSheet, ResultStatus, SheetCellRange, SheetId,
+    AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSetColumn, DataSheet, ErrorCode, HookSource, ImportLinkSpec, InfoSheet, InternalLinkKind,
+    LayoutItem, LinkSource, PlacementMode, ProjectDocument, ResultSheet, ResultStatus, SheetCellRange, SheetId, TableArchetype,
 };
 use lumencraft_fit::HookContext;
 use lumencraft_transform::{
@@ -12,7 +12,7 @@ use lumencraft_transform::{
     evaluate_data_sheet_calculated_variables, execute_analysis_transform,
 };
 
-use crate::EngineError;
+use crate::{EngineError, ExternalPathPolicy};
 
 /// Summary of a deterministic topological recalculation pass across a [`ProjectDocument`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -221,13 +221,29 @@ pub fn recalculate_project(doc: &mut ProjectDocument) -> Result<usize, EngineErr
 /// # Errors
 /// Returns [`EngineError`] on cyclic sheet/link/formula dependencies; `doc` remains unmodified on error.
 pub fn recalculate_project_with_report(doc: &mut ProjectDocument) -> Result<RecalcReport, EngineError> {
+    let (report, _) = recalculate_project_with_links_report(doc, None)?;
+    Ok(report)
+}
+
+/// Recalculate the full project DAG, optionally refreshing external delimited file links under `external_policy`,
+/// and return the [`RecalcReport`] alongside the number of linked regions refreshed.
+///
+/// # Errors
+/// Returns [`EngineError`] on cyclic dependencies, unreadable/blocked external links, or failing linked refreshes /
+/// calculated variables; `doc` remains unmodified on error.
+pub(crate) fn recalculate_project_with_links_report(
+    doc: &mut ProjectDocument,
+    external_policy: Option<&ExternalPathPolicy>,
+) -> Result<(RecalcReport, usize), EngineError> {
     let order = topological_order(doc)?;
     let mut working = doc.clone();
     let mut report = RecalcReport { evaluated_order: order.clone(), ..RecalcReport::default() };
+    let mut refreshed_links = 0usize;
 
     for sheet_id in order {
         if let Some(ds_idx) = working.data_sheets.iter().position(|s| s.id == sheet_id) {
-            evaluate_data_sheet_node(&mut working, ds_idx, &mut report)?;
+            let refreshed = evaluate_data_sheet_node(&mut working, ds_idx, &mut report, external_policy)?;
+            refreshed_links = refreshed_links.saturating_add(refreshed);
         } else if let Some(res_idx) = working.result_sheets.iter().position(|s| s.id == sheet_id) {
             let succeeded = recompute_result_sheet(&mut working, res_idx);
             if succeeded {
@@ -241,21 +257,26 @@ pub fn recalculate_project_with_report(doc: &mut ProjectDocument) -> Result<Reca
     }
 
     *doc = working;
-    Ok(report)
+    Ok((report, refreshed_links))
 }
 
-fn evaluate_data_sheet_node(working: &mut ProjectDocument, ds_idx: usize, report: &mut RecalcReport) -> Result<(), EngineError> {
+fn evaluate_data_sheet_node(
+    working: &mut ProjectDocument,
+    ds_idx: usize,
+    report: &mut RecalcReport,
+    external_policy: Option<&ExternalPathPolicy>,
+) -> Result<usize, EngineError> {
     let sheet_id = working.data_sheets[ds_idx].id.clone();
     if working.data_sheets[ds_idx].frozen {
         report.skipped_frozen_sheets.push(sheet_id);
-        return Ok(());
+        return Ok(0);
     }
 
     let had_links = !working.data_sheets[ds_idx].linked_regions.is_empty();
-    refresh_data_sheet_links(working, ds_idx)?;
+    let refreshed = refresh_data_sheet_links(working, ds_idx, external_policy)?;
 
-    let info_opt =
-        working.data_sheets[ds_idx].info_sheet_id.as_ref().and_then(|id| working.info_sheet(id)).or_else(|| working.info_sheets.first()).cloned();
+    // Resolve Info constants strictly from this sheet's bound `info_sheet_id` (never fall back to `info_sheets.first()`).
+    let info_opt = working.data_sheets[ds_idx].info_sheet_id.as_ref().and_then(|id| working.info_sheet(id)).cloned();
 
     let eval_cols = evaluate_data_sheet_calculated_variables(&mut working.data_sheets[ds_idx], info_opt.as_ref())
         .map_err(|err| EngineError::new(format!("calculated variables on sheet `{sheet_id}` failed: {err}")))?;
@@ -263,7 +284,7 @@ fn evaluate_data_sheet_node(working: &mut ProjectDocument, ds_idx: usize, report
     if had_links || !eval_cols.is_empty() {
         report.updated_data_sheets.push(sheet_id);
     }
-    Ok(())
+    Ok(refreshed)
 }
 
 fn clear_cell_range(target: &mut DataSheet, range: SheetCellRange) {
@@ -273,20 +294,25 @@ fn clear_cell_range(target: &mut DataSheet, range: SheetCellRange) {
     }
     let min_row = range.start.row.min(range.end.row);
     let max_row = range.start.row.max(range.end.row).min(row_count - 1);
-    let min_col = range.start.col.min(range.end.col);
-    let max_col = range.start.col.max(range.end.col);
-    let min_sub = range.start.subcol.min(range.end.subcol);
-    let max_sub = range.start.subcol.max(range.end.subcol);
+    let ((min_col, start_sub), (max_col, end_sub)) = if range.start.col <= range.end.col {
+        ((range.start.col, range.start.subcol), (range.end.col, range.end.subcol))
+    } else {
+        ((range.end.col, range.end.subcol), (range.start.col, range.start.subcol))
+    };
 
     for r in min_row..=max_row {
         for c in min_col..=max_col {
-            if target.archetype.data_cell(CellCoord::new(r, c, min_sub)).is_none() {
-                break;
-            }
-            for s in min_sub..=max_sub {
+            let s_start = if c == min_col { if min_col == max_col { start_sub.min(end_sub) } else { start_sub } } else { 0 };
+            let s_end = if c == max_col { Some(if min_col == max_col { start_sub.max(end_sub) } else { end_sub }) } else { None };
+            let mut s = s_start;
+            while s_end.is_none_or(|end_s| s <= end_s) {
+                if target.archetype.data_cell(CellCoord::new(r, c, s)).is_none() {
+                    break;
+                }
                 if target.set_cell(CellCoord::new(r, c, s), Cell::empty()).is_err() {
                     break;
                 }
+                s = s.saturating_add(1);
             }
         }
     }
@@ -294,18 +320,145 @@ fn clear_cell_range(target: &mut DataSheet, range: SheetCellRange) {
 
 fn make_refresh_spec(spec: &ImportLinkSpec, existing_range_start: CellCoord) -> ImportLinkSpec {
     let mut refresh = spec.clone();
-    match refresh.placement.mode {
-        PlacementMode::AppendRows | PlacementMode::AppendColumns | PlacementMode::InsertRows => {
-            refresh.placement.mode = PlacementMode::Overwrite;
-            refresh.placement.anchor = existing_range_start;
-        }
-        PlacementMode::Overwrite => {}
-    }
+    refresh.placement.mode = PlacementMode::Overwrite;
+    refresh.placement.anchor = existing_range_start;
     refresh
 }
 
-fn refresh_single_region(working: &ProjectDocument, target: &mut DataSheet, reg_idx: usize) -> Result<(), EngineError> {
+/// Propagate column or row titles from an internal source [`DataSheet`] into `target_ds` starting at `base_col`.
+pub(crate) fn propagate_internal_source_titles(target_ds: &mut DataSheet, spec: &ImportLinkSpec, base_col: usize, src: &DataSheet) {
+    if !spec.placement.propagate_title_header {
+        return;
+    }
+    let LinkSource::InternalSheet { range, .. } = &spec.source else {
+        return;
+    };
+
+    let titles: Vec<String> = if spec.placement.transpose {
+        let r0 = spec.filter.row_window.map_or(range.start.row, |(lo, _)| lo.max(range.start.row));
+        let r1 = spec.filter.row_window.map_or(range.end.row, |(_, hi)| hi.min(range.end.row));
+        (r0..=r1).filter_map(|r| source_row_title(&src.archetype, r)).collect()
+    } else {
+        let c0 = spec.filter.col_window.map_or(range.start.col, |(lo, _)| lo.max(range.start.col));
+        let c1 = spec.filter.col_window.map_or(range.end.col, |(_, hi)| hi.min(range.end.col));
+        (c0..=c1).filter_map(|c| source_col_title(&src.archetype, c)).collect()
+    };
+
+    for (offset, title) in titles.into_iter().enumerate() {
+        if !title.is_empty() {
+            set_target_group_title(&mut target_ds.archetype, base_col.saturating_add(offset), &title);
+        }
+    }
+}
+
+fn source_col_title(arch: &TableArchetype, col: usize) -> Option<String> {
+    match arch {
+        TableArchetype::Xy(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::Column(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::Grouped(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::Contingency(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::PartsOfWhole(t) => t.data_sets.get(col).map(|d| d.title.clone()),
+        TableArchetype::Survival(t) => t.cohorts.get(col).map(|d| d.title.clone()),
+        TableArchetype::MultipleVariables(t) => t.variables.get(col).map(|v| v.title.clone()),
+        TableArchetype::Nested(t) => t.groups.get(col).map(|g| g.title.clone()),
+    }
+}
+
+fn source_row_title(arch: &TableArchetype, row: usize) -> Option<String> {
+    let titles = match arch {
+        TableArchetype::Xy(t) => &t.row_titles,
+        TableArchetype::Column(t) => &t.row_titles,
+        TableArchetype::Grouped(t) => &t.row_titles,
+        TableArchetype::Contingency(t) => &t.row_titles,
+        TableArchetype::Survival(t) => &t.row_titles,
+        TableArchetype::PartsOfWhole(t) => &t.slice_labels,
+        TableArchetype::MultipleVariables(t) => &t.row_titles,
+        TableArchetype::Nested(t) => &t.row_titles,
+    };
+    titles.get(row).cloned()
+}
+
+fn set_target_group_title(arch: &mut TableArchetype, col: usize, title: &str) {
+    match arch {
+        TableArchetype::Xy(t) => assign_ds_title(&mut t.data_sets, col, title),
+        TableArchetype::Column(t) => assign_ds_title(&mut t.data_sets, col, title),
+        TableArchetype::Grouped(t) => assign_ds_title(&mut t.data_sets, col, title),
+        TableArchetype::Contingency(t) => assign_ds_title(&mut t.data_sets, col, title),
+        TableArchetype::PartsOfWhole(t) => assign_ds_title(&mut t.data_sets, col, title),
+        TableArchetype::Survival(t) => assign_ds_title(&mut t.cohorts, col, title),
+        TableArchetype::MultipleVariables(t) => {
+            if let Some(var) = t.variables.get_mut(col) {
+                var.title = title.to_owned();
+            }
+        }
+        TableArchetype::Nested(t) => {
+            if let Some(grp) = t.groups.get_mut(col) {
+                grp.title = title.to_owned();
+            }
+        }
+    }
+}
+
+fn assign_ds_title(sets: &mut [DataSetColumn], col: usize, title: &str) {
+    if let Some(ds) = sets.get_mut(col) {
+        ds.title = title.to_owned();
+    }
+}
+
+enum ResolvedRefreshSource<'a> {
+    InternalData { sheet: &'a DataSheet, propagate_titles: bool },
+    InternalResult(&'a ResultSheet),
+    Delimited { text: String, delimiter: char, decimal_separator: char },
+}
+
+fn resolve_refresh_source<'a>(
+    working: &'a ProjectDocument,
+    target_id: &SheetId,
+    region_id: &str,
+    source: &LinkSource,
+    external_policy: Option<&ExternalPathPolicy>,
+) -> Result<Option<ResolvedRefreshSource<'a>>, EngineError> {
+    match source {
+        LinkSource::Clipboard => Ok(None),
+        LinkSource::InternalSheet { sheet_id, kind, tab_id, .. } => {
+            if let Some(src_ds) = working.data_sheet(sheet_id) {
+                return Ok(Some(ResolvedRefreshSource::InternalData { sheet: src_ds, propagate_titles: true }));
+            }
+            let Some(src_rs) = working.result_sheet(sheet_id) else {
+                return Ok(None);
+            };
+            if let Err((_, detail)) = check_upstream_result_status(src_rs, sheet_id) {
+                return Err(EngineError::new(format!("linked region `{region_id}` refresh on sheet `{target_id}` failed: {detail}")));
+            }
+            if *kind == InternalLinkKind::AnalyzableResultSheet
+                && tab_id.is_none()
+                && let Some(analyzable) = src_rs.analyzable_data.as_ref()
+            {
+                return Ok(Some(ResolvedRefreshSource::InternalData { sheet: analyzable, propagate_titles: false }));
+            }
+            Ok(Some(ResolvedRefreshSource::InternalResult(src_rs)))
+        }
+        LinkSource::ExternalDelimitedFile { path, delimiter, decimal_separator } => {
+            let Some(policy) = external_policy else {
+                return Ok(None);
+            };
+            let text = policy.read_utf8_file(path, "linked file")?;
+            Ok(Some(ResolvedRefreshSource::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
+        }
+    }
+}
+
+fn refresh_single_region(
+    working: &ProjectDocument,
+    target: &mut DataSheet,
+    reg_idx: usize,
+    external_policy: Option<&ExternalPathPolicy>,
+) -> Result<bool, EngineError> {
     let region = target.linked_regions[reg_idx].clone();
+    let Some(resolved) = resolve_refresh_source(working, &target.id, &region.id, &region.spec.source, external_policy)? else {
+        return Ok(false);
+    };
+
     let refresh_spec = make_refresh_spec(&region.spec, region.target_range.start);
     let opts = ImportPipelineOptions {
         baseline: None,
@@ -315,64 +468,52 @@ fn refresh_single_region(working: &ProjectDocument, target: &mut DataSheet, reg_
         provenance_summary: Some(region.provenance_summary.clone()),
     };
 
-    let has_internal_source = matches!(
-        &region.spec.source,
-        LinkSource::InternalSheet { sheet_id, .. }
-            if working.data_sheet(sheet_id).is_some() || working.result_sheet(sheet_id).is_some()
-    );
-    if has_internal_source && region.target_range.start == refresh_spec.placement.anchor {
-        clear_cell_range(target, region.target_range);
-    }
+    clear_cell_range(target, region.target_range);
 
     let saved_regions = std::mem::take(&mut target.linked_regions);
-    let result = match &region.spec.source {
-        LinkSource::InternalSheet { sheet_id, kind, tab_id, .. } => {
-            if let Some(src_ds) = working.data_sheet(sheet_id) {
-                Some(apply_import_link_pipeline(target, &refresh_spec, ImportSourcePayload::InternalData(src_ds), &opts, None))
-            } else if let Some(src_rs) = working.result_sheet(sheet_id) {
-                if let Err((_, detail)) = check_upstream_result_status(src_rs, sheet_id) {
-                    target.linked_regions = saved_regions;
-                    return Err(EngineError::new(format!("linked region `{}` refresh on sheet `{}` failed: {detail}", region.id, target.id)));
-                }
-                if *kind == InternalLinkKind::AnalyzableResultSheet
-                    && tab_id.is_none()
-                    && let Some(analyzable) = src_rs.analyzable_data.as_ref()
-                {
-                    Some(apply_import_link_pipeline(target, &refresh_spec, ImportSourcePayload::InternalData(analyzable), &opts, None))
-                } else {
-                    Some(apply_import_link_pipeline(target, &refresh_spec, ImportSourcePayload::InternalResult(src_rs), &opts, None))
-                }
-            } else {
-                None
-            }
+    let pipe_res = match &resolved {
+        ResolvedRefreshSource::InternalData { sheet, .. } => {
+            apply_import_link_pipeline(target, &refresh_spec, ImportSourcePayload::InternalData(sheet), &opts, None)
         }
-        LinkSource::Clipboard | LinkSource::ExternalDelimitedFile { .. } => None,
+        ResolvedRefreshSource::InternalResult(src_rs) => {
+            apply_import_link_pipeline(target, &refresh_spec, ImportSourcePayload::InternalResult(src_rs), &opts, None)
+        }
+        ResolvedRefreshSource::Delimited { text, delimiter, decimal_separator } => {
+            let payload = ImportSourcePayload::DelimitedText { text, delimiter: *delimiter, decimal_separator: *decimal_separator };
+            apply_import_link_pipeline(target, &refresh_spec, payload, &opts, None)
+        }
     };
     target.linked_regions = saved_regions;
 
-    if let Some(pipe_res) = result {
-        let report =
-            pipe_res.map_err(|err| EngineError::new(format!("linked region `{}` refresh on sheet `{}` failed: {err}", region.id, target.id)))?;
-        target.linked_regions[reg_idx].target_range = report.target_range;
-        target.linked_regions[reg_idx].provenance_summary = report.provenance_summary;
+    let report = pipe_res.map_err(|err| EngineError::new(format!("linked region `{}` refresh on sheet `{}` failed: {err}", region.id, target.id)))?;
+    if let ResolvedRefreshSource::InternalData { sheet, propagate_titles: true } = resolved {
+        propagate_internal_source_titles(target, &refresh_spec, report.target_range.start.col, sheet);
     }
-
-    Ok(())
+    target.linked_regions[reg_idx].target_range = report.target_range;
+    target.linked_regions[reg_idx].provenance_summary = report.provenance_summary;
+    Ok(true)
 }
 
-fn refresh_data_sheet_links(working: &mut ProjectDocument, ds_idx: usize) -> Result<(), EngineError> {
+fn refresh_data_sheet_links(
+    working: &mut ProjectDocument,
+    ds_idx: usize,
+    external_policy: Option<&ExternalPathPolicy>,
+) -> Result<usize, EngineError> {
     let region_count = working.data_sheets[ds_idx].linked_regions.len();
     if region_count == 0 {
-        return Ok(());
+        return Ok(0);
     }
 
     // Clone target temporarily so `working` can be read immutably to resolve upstream payloads.
     let mut target = working.data_sheets[ds_idx].clone();
+    let mut refreshed = 0usize;
     for reg_idx in 0..region_count {
-        refresh_single_region(working, &mut target, reg_idx)?;
+        if refresh_single_region(working, &mut target, reg_idx, external_policy)? {
+            refreshed = refreshed.saturating_add(1);
+        }
     }
     working.data_sheets[ds_idx] = target;
-    Ok(())
+    Ok(refreshed)
 }
 
 fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCode, message: String) {
@@ -431,15 +572,28 @@ fn resolve_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, source_ds: &'a Dat
         }
     }
 
+    None
+}
+
+fn validate_info_constant_hooks(doc: &ProjectDocument, analysis: &AnalysisSpec, primary_info_id: Option<&SheetId>) -> Result<(), String> {
     for hook in analysis.kind.hooked_sources() {
-        if let HookSource::InfoConstant { info_sheet_id: Some(id), .. } = hook
-            && doc.info_sheet(&id).is_some()
-        {
-            return doc.info_sheet(&id).map(|info| &info.id);
+        if let HookSource::InfoConstant { info_sheet_id, constant_name } = hook {
+            let target_id = info_sheet_id.as_ref().or(primary_info_id);
+            match target_id {
+                None => {
+                    return Err(format!(
+                        "info constant hook `{constant_name}` requires a bound Info sheet on source sheet `{}`",
+                        analysis.source_sheet_id
+                    ));
+                }
+                Some(iid) if doc.info_sheet(iid).is_none() => {
+                    return Err(format!("referenced Info sheet `{iid}` for constant `{constant_name}` was not found"));
+                }
+                _ => {}
+            }
         }
     }
-
-    doc.info_sheets.first().map(|info| &info.id)
+    Ok(())
 }
 
 fn resolve_transform_info_sheet<'a>(doc: &'a ProjectDocument, source_ds: &'a DataSheet, analysis: &AnalysisSpec) -> Option<&'a InfoSheet> {
@@ -487,14 +641,20 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
         }
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
             let primary_info_id = resolve_origin_info_sheet_id(doc, &source_ds, &existing.analysis);
-            let hooks = HookContext {
-                info_sheets: &doc.info_sheets,
-                result_sheets: &doc.result_sheets,
-                data_sheets: &doc.data_sheets,
-                primary_info_sheet_id: primary_info_id,
-                visited_sheets: HashSet::new(),
-            };
-            lumencraft_fit::execute_analysis(&existing.analysis, &source_ds, &hooks).map_err(|err| err.to_string())
+            if let Err(message) = validate_info_constant_hooks(doc, &existing.analysis, primary_info_id) {
+                Err(message)
+            } else {
+                let has_explicit_info_hook =
+                    existing.analysis.kind.hooked_sources().iter().any(|h| matches!(h, HookSource::InfoConstant { info_sheet_id: Some(_), .. }));
+                let hooks = HookContext {
+                    info_sheets: if primary_info_id.is_some() || has_explicit_info_hook { &doc.info_sheets } else { &[] },
+                    result_sheets: &doc.result_sheets,
+                    data_sheets: &doc.data_sheets,
+                    primary_info_sheet_id: primary_info_id,
+                    visited_sheets: HashSet::new(),
+                };
+                lumencraft_fit::execute_analysis(&existing.analysis, &source_ds, &hooks).map_err(|err| err.to_string())
+            }
         }
         _ => lumencraft_stats::run_analysis(&source_ds, &existing.analysis).map_err(|err| err.to_string()),
     };

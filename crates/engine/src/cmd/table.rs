@@ -31,6 +31,7 @@ use super::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     obj_schema_with_aliases, parse_params, str_schema,
 };
+use super::project::recalculate_with_links;
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, ErrorCode, ExternalPathPolicy, Session, dag};
 
@@ -433,13 +434,8 @@ fn has_multivar_sheet(session: &Session) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Shared Reactive Link Refresh & Title Propagation
+// Initial Link Payload Loading & Title Propagation Helpers
 // ---------------------------------------------------------------------------
-
-struct RecalcSummary {
-    recalculated_sheets: usize,
-    refreshed_links: usize,
-}
 
 enum OwnedSourcePayload {
     Data(Box<DataSheet>),
@@ -447,64 +443,9 @@ enum OwnedSourcePayload {
     Delimited { text: String, delimiter: char, decimal_separator: char },
 }
 
-fn recalculate_with_links(doc: &mut ProjectDocument, include_external_links: bool) -> Result<RecalcSummary, EngineError> {
-    let mut refreshed = refresh_linked_regions(doc, include_external_links, &ExternalPathPolicy::Unconstrained)?;
-    let mut recalculated = dag::recalculate_project(doc)?;
-    let max_hops = doc.data_sheets.len().saturating_add(1);
-    for _ in 0..max_hops {
-        let hop_refreshed = refresh_linked_regions(doc, include_external_links, &ExternalPathPolicy::Unconstrained)?;
-        if hop_refreshed == 0 {
-            break;
-        }
-        refreshed = refreshed.saturating_add(hop_refreshed);
-        recalculated = recalculated.saturating_add(dag::recalculate_project(doc)?);
-    }
-    Ok(RecalcSummary { recalculated_sheets: recalculated, refreshed_links: refreshed })
-}
-
-fn refresh_linked_regions(doc: &mut ProjectDocument, include_external_links: bool, policy: &ExternalPathPolicy) -> Result<usize, EngineError> {
-    let order = dag::topological_order(doc)?;
-    let mut updated_count = 0usize;
-
-    for target_id in order {
-        let Some(target_idx) = doc.data_sheets.iter().position(|s| s.id == target_id) else {
-            continue;
-        };
-        if doc.data_sheets.get(target_idx).is_none_or(|ds| ds.frozen) {
-            continue;
-        }
-        let regions = doc.data_sheets.get(target_idx).map(|ds| ds.linked_regions.clone()).unwrap_or_default();
-        if regions.is_empty() {
-            continue;
-        }
-
-        let mut target_changed = false;
-        for region in regions {
-            let Some(source_payload) = resolve_link_source_payload(doc, &region.spec.source, include_external_links, policy)? else {
-                continue;
-            };
-            let Some(target_ds) = doc.data_sheets.get_mut(target_idx) else {
-                continue;
-            };
-            if apply_refresh_to_target(target_ds, &region.spec, &source_payload)? {
-                target_changed = true;
-                updated_count = updated_count.saturating_add(1);
-            }
-        }
-        if target_changed {
-            let info_snapshot = doc.data_sheets.get(target_idx).and_then(|ds| ds.info_sheet_id.as_ref()).and_then(|iid| doc.info_sheet(iid)).cloned();
-            if let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
-                evaluate_data_sheet_calculated_variables(target_ds, info_snapshot.as_ref())?;
-            }
-        }
-    }
-    Ok(updated_count)
-}
-
-fn resolve_link_source_payload(
+fn resolve_initial_link_source_payload(
     doc: &ProjectDocument,
     source: &LinkSource,
-    include_external_links: bool,
     policy: &ExternalPathPolicy,
 ) -> Result<Option<OwnedSourcePayload>, EngineError> {
     match source {
@@ -516,84 +457,9 @@ fn resolve_link_source_payload(
             }
         },
         LinkSource::ExternalDelimitedFile { path, delimiter, decimal_separator } => {
-            if !include_external_links {
-                return Ok(None);
-            }
             let text = policy.read_utf8_file(path, "linked file")?;
             Ok(Some(OwnedSourcePayload::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
-    }
-}
-
-fn apply_refresh_to_target(target_ds: &mut DataSheet, spec: &ImportLinkSpec, payload: &OwnedSourcePayload) -> Result<bool, EngineError> {
-    let before = target_ds.clone();
-    let existing_links = target_ds.linked_regions.len();
-    let mut refresh_spec = spec.clone();
-    refresh_spec.placement.mode = PlacementMode::Overwrite;
-
-    let opts = ImportPipelineOptions::default();
-    run_import_pipeline(target_ds, &refresh_spec, payload, &opts, None)?;
-    propagate_internal_source_titles(target_ds, &refresh_spec, payload);
-    target_ds.linked_regions.truncate(existing_links);
-    Ok(target_ds != &before)
-}
-
-fn propagate_internal_source_titles(target_ds: &mut DataSheet, spec: &ImportLinkSpec, payload: &OwnedSourcePayload) {
-    if !spec.placement.propagate_title_header {
-        return;
-    }
-    let LinkSource::InternalSheet { range, .. } = &spec.source else {
-        return;
-    };
-    let OwnedSourcePayload::Data(src_ds) = payload else {
-        return;
-    };
-    let base_col = spec.placement.anchor.col;
-    if spec.placement.transpose {
-        for (offset, row) in (range.start.row..=range.end.row).enumerate() {
-            if let Some(title) = src_row_title(&src_ds.archetype, row)
-                && !title.is_empty()
-                && base_col.saturating_add(offset) < target_ds.archetype.column_count()
-            {
-                let _ = set_group_title(&mut target_ds.archetype, base_col.saturating_add(offset), title);
-            }
-        }
-    } else {
-        for (offset, col) in (range.start.col..=range.end.col).enumerate() {
-            if let Some(title) = src_group_title(&src_ds.archetype, col)
-                && !title.is_empty()
-                && base_col.saturating_add(offset) < target_ds.archetype.column_count()
-            {
-                let _ = set_group_title(&mut target_ds.archetype, base_col.saturating_add(offset), title);
-            }
-        }
-    }
-}
-
-fn src_row_title(arch: &TableArchetype, row: usize) -> Option<&str> {
-    let slice = match arch {
-        TableArchetype::Xy(t) => &t.row_titles,
-        TableArchetype::Column(t) => &t.row_titles,
-        TableArchetype::Grouped(t) => &t.row_titles,
-        TableArchetype::Contingency(t) => &t.row_titles,
-        TableArchetype::Survival(t) => &t.row_titles,
-        TableArchetype::PartsOfWhole(t) => &t.slice_labels,
-        TableArchetype::MultipleVariables(t) => &t.row_titles,
-        TableArchetype::Nested(t) => &t.row_titles,
-    };
-    slice.get(row).map(String::as_str)
-}
-
-fn src_group_title(arch: &TableArchetype, col: usize) -> Option<&str> {
-    match arch {
-        TableArchetype::Xy(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::Column(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::Grouped(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::Contingency(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::PartsOfWhole(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::Survival(t) => t.cohorts.get(col).map(|d| d.title.as_str()),
-        TableArchetype::MultipleVariables(t) => t.variables.get(col).map(|v| v.title.as_str()),
-        TableArchetype::Nested(t) => t.groups.get(col).map(|g| g.title.as_str()),
     }
 }
 
@@ -629,7 +495,9 @@ fn apply_pipeline_with_split_info(
         data_sheets.get_mut(target_idx).ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "target data sheet index out of bounds"))?;
     let target_info = info_idx.and_then(|idx| info_sheets.get_mut(idx));
     let report = run_import_pipeline(target_ds, spec, payload, opts, target_info)?;
-    propagate_internal_source_titles(target_ds, spec, payload);
+    if let OwnedSourcePayload::Data(src) = payload {
+        dag::propagate_internal_source_titles(target_ds, spec, report.target_range.start.col, src);
+    }
     Ok(report)
 }
 
@@ -2740,7 +2608,7 @@ fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     };
 
     let spec = build_paste_link_spec(doc, &target_id, &p, &policy)?;
-    let payload = resolve_link_source_payload(doc, &spec.source, true, &policy)?
+    let payload = resolve_initial_link_source_payload(doc, &spec.source, &policy)?
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "table.pasteLink requires an internal sheet or external delimited file source"))?;
     let (target_idx, info_idx) = locate_target_and_info_indices(doc, &target_id, info_id.as_ref())?;
     let prev_ds = doc.data_sheets.get(target_idx).cloned();
