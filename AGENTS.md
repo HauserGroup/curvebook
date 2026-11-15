@@ -77,11 +77,11 @@ Dependency direction strictly flows downward (`L0` -> `L1` -> ... -> `L6`), veri
 | `lumencraft-render` | `L3` | `crates/render` | Deterministic CPU rasterizer, PNG/TIFF, and ECMA-234 `.emf` renderer |
 | `lumencraft-tools` | `L4` | `crates/tools` | Interactive canvas hit-testing, selection handles, annotation/zoom tools, `cursors.toml` |
 | `lumencraft-engine` | `L5` | `crates/engine` | Headless `Session` execution, undo/redo (`MAX_UNDO_ENTRIES = 64`), command registry, `guard.rs` boundary, journaling |
-| `lumencraft-ui-egui` | `L6` | `crates/ui-egui` | UI state shell (`UiApp`), software RGBA compositor, `ui.inspect` (`UiTreeSnapshot`), Power wizard, modal predicates, menus, inspectors, `UI_COMMANDS`, and `i18n.rs` driving `lumencraft-engine` *(live `egui`/`eframe`/`wgpu` windowing planned in `R8.3`)* |
+| `lumencraft-ui-egui` | `L6` | `crates/ui-egui` | UI state shell (`UiApp`), software RGBA compositor, `ui.inspect` (`UiTreeSnapshot`), Power wizard, modal predicates, menus, inspectors, `UI_COMMANDS`, and `i18n.rs` driving `lumencraft-engine` |
 | `lumencraft-mcp` | `L6` | `crates/mcp` | Model Context Protocol server exposing document inspection, commands, headless tools, and the 8-tool `gui` / `--gui-only` UI surface (`GuiSessionHost`) |
-| `lumencraft` | `L7` *(app)* | `apps/lumencraft` | Desktop application binary (`UiApp` shell, `--control [--gui-only]` JSONL server, OS integration, `preferences.json`/`shortcuts.json`, crash recovery; live `eframe`/`egui`/`wgpu` windowing planned in `R8.3`) |
+| `lumencraft` | `L7` *(app)* | `apps/lumencraft` | Native `eframe`/`egui`/`wgpu` desktop GUI application (`gui_window.rs` + `rfd`, `UiApp` shell, `--control [--gui-only]` JSONL server, OS integration, `preferences.json`/`shortcuts.json`, crash recovery) |
 | `lumencraft-cli` | `L7` *(app)* | `apps/lumencraft-cli` | Headless CLI (`convert`, `run-batch`, `lumencraft.batch.v1`, exports, and `mcp [--control-port <p>] [--gui-only]` via `InProcessUiGuiHost`) |
-| `lumencraft-web` | `L7` *(app)* | `apps/lumencraft-web` | WebAssembly browser workspace host (`wasm32-unknown-unknown`; Trunk deploy tracked in `R8.4`) |
+| `lumencraft-web` | `L7` *(app)* | `apps/lumencraft-web` | WebAssembly browser workspace host (`wasm32-unknown-unknown` `+simd128` + `wasm-bindgen`/WebGL2/2D Trunk bundle, `R8.4`) |
 | `lumencraft-testkit` | `dev-only` | `crates/testkit` | Shared fixtures, NIST StRD corpus helpers, and headless harnesses (`[dev-dependencies]` only) |
 | `xtask` | `exempt` | `xtask/` | Workspace verification, codegen, and release-prep CLI (`cargo xtask <cmd>`) |
 

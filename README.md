@@ -12,7 +12,7 @@
 
 **LumenCraft** is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written in pure Rust — designed for experimental scientists who work with structured replicate tables, linked statistical analyses, curve fitting, and publication-ready figures on desktop and the web.
 
-> **Status:** Headless engine, statistics, curve fitting, graphing, file formats, CLI/`--control`/MCP automation, `UiApp` state shell, active `R9` QoL suite (`QOL-1`–`QOL-9` incl. diagnostics-only `QOL-7`, `QOL-12` table-analysis completions, `QOL-14` randomization/sampling, equations-only `QOL-16`, and `R9.17` / `QOL-17`; `QOL-10`, `QOL-11`, `QOL-13`, `QOL-15` deferred), native OS clipboard/print/layout-drag adapters (`R5.4`), desktop/browser host runtimes, and strict `--gui-only` GUI-agent parity (`R8.6`–`R8.8` & `R9.17`: `ui.inspect`, 8-tool `gui` MCP mode, 4-stage Power & Sample Size wizard, and 49-workflow acceptance suite across Shards 1–7) are implemented and verified; final GPU window binding (`eframe`/`wgpu`), `wasm32` Trunk bundling, and cross-OS CI/installer QA remain in progress — see [`docs/STATUS.md`](docs/STATUS.md), [`docs/ROADMAP.md`](docs/ROADMAP.md), [`docs/target-app-parity.md`](docs/target-app-parity.md), and generated [`docs/commands.md`](docs/commands.md).
+> **Status:** Complete local **1.0** workspace implementation: headless engine, statistics, curve fitting, graphing, file formats, CLI/`--control`/MCP automation, `UiApp` state shell, active `R9` QoL suite (`QOL-1`–`QOL-9` incl. diagnostics-only `QOL-7`, `QOL-12` table-analysis completions, `QOL-14` randomization/sampling, equations-only `QOL-16`, and `R9.17` / `QOL-17`; `QOL-10`, `QOL-11`, `QOL-13`, `QOL-15` deferred), native OS clipboard/print/layout-drag adapters (`R5.4`), native `eframe`/`egui`/`wgpu` desktop windowing (`R8.3`), `wasm32-unknown-unknown` + Trunk WebGL2 browser bundling (`R8.4`), strict `--gui-only` GUI-agent parity (`R8.6`–`R8.8` & `R9.17`: `ui.inspect`, 8-tool `gui` MCP mode, 4-stage Power & Sample Size wizard, and 49-workflow acceptance suite across Shards 1–7), and local universal macOS + web release packaging (`R8.5` / `R0.14` local) are implemented and verified; only external hosted CI runner execution, Apple Developer ID notarization, and non-macOS hardware/browser VM QA remain open — see [`docs/STATUS.md`](docs/STATUS.md), [`docs/ROADMAP.md`](docs/ROADMAP.md), [`docs/target-app-parity.md`](docs/target-app-parity.md), and generated [`docs/commands.md`](docs/commands.md).
 
 > **Zero Telemetry & Offline Privacy:** LumenCraft collects **zero telemetry, analytics, crash reports, or background network traffic**. Desktop, CLI, MCP, and browser bundles operate strictly offline (only `--control <port>` binds `127.0.0.1` loopback on explicit user opt-in), enforced automatically in `cargo xtask ci` via [`cargo xtask telemetry`](AGENTS.md#zero-telemetry-xtask-telemetry) and strict CSP / `Referrer-Policy` / `COOP` / `COEP` headers in [`packaging/web/`](packaging/web/).
 
@@ -65,9 +65,9 @@ lumencraft/
 │   ├── mcp/         # L6: Stdio MCP server over lumencraft-engine, UI_COMMANDS & 8-tool gui (--gui-only) surface
 │   └── testkit/     # Dev-only numerical oracle assertions (NIST StRD), proptest strategies & builders
 ├── apps/
-│   ├── lumencraft/      # Native binary + --control [--gui-only] JSONL server + OS/macOS pasteboard adapters (R8.3 GPU loop open)
+│   ├── lumencraft/      # Native eframe/egui/wgpu desktop GUI + --control [--gui-only] JSONL server + OS/macOS pasteboard adapters
 │   ├── lumencraft-cli/  # Headless batch runner, exporter, perf gate, checkpoints, and MCP (--gui-only / --control-port) server
-│   └── lumencraft-web/  # Client-side WASM WebWorkspaceHost crate (Trunk browser hosting queued in R8.4)
+│   └── lumencraft-web/  # Client-side WASM WebWorkspaceHost + Trunk WebGL2/2D browser bundle (`packaging/web/package.sh`)
 ├── xtask/           # Workspace quality gates, layer linter, clean-room/brand/asset/i18n checks, bundler
 ├── packaging/       # Signed installers & bundles (macOS DMG, Linux deb/rpm/AppImage/Flatpak, Windows MSI, Web)
 └── docs/            # Roadmap, status, architecture, house guides, parity matrices & release guides
@@ -85,7 +85,7 @@ Prebuilt release packages and checksums are published on [GitHub Releases](https
 | **Linux** (`x86_64` / `aarch64`) | `AppImage`, `.deb`, `.rpm`, `Flatpak` + CLI tarball | [`packaging/linux/`](packaging/linux/) (AppRun smoke test in CI) |
 | **Windows** (`x86_64`) | `.msi` installer + portable `.zip` | [`packaging/windows/`](packaging/windows/) |
 | **FreeBSD** (`x86_64`) | Portable tarball + desktop entry | [`packaging/freebsd/`](packaging/freebsd/) |
-| **Web (WASM)** | Client-side static bundle (zero server upload) | [`packaging/web/`](packaging/web/) (tracked under [`R8.4`](docs/ROADMAP.md#r84-live-wasm32-unknown-unknown-trunk-webgpuwebgl2-browser-hosting)) |
+| **Web (WASM)** | Client-side static bundle (zero server upload) | [`packaging/web/`](packaging/web/) (Trunk `web-release` WebGL2 bundle via `packaging/web/package.sh`; `R8.4` done) |
 
 ---
 
