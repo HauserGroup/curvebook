@@ -194,8 +194,26 @@ pub enum LayoutItem {
     TextCallout { id: String, markdown: String, bounds_pt: RectPt, font_size_pt: f64 },
 }
 
+/// Maximum number of items allowed in a single [`LayoutSpec`] page layout.
+pub const MAX_LAYOUT_ITEMS: usize = 64;
+
+/// Error returned when a [`LayoutSpec`] exceeds [`MAX_LAYOUT_ITEMS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LayoutItemLimitError {
+    pub count: usize,
+    pub max: usize,
+}
+
+impl std::fmt::Display for LayoutItemLimitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "layout item count {} exceeds maximum allowed {}", self.count, self.max)
+    }
+}
+
+impl std::error::Error for LayoutItemLimitError {}
+
 /// Multi-panel publication layout specification.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LayoutSpec {
     pub width: f64,
     pub height: f64,
@@ -235,6 +253,70 @@ impl LayoutSpec {
         SizePt::new(self.unit.to_points(self.width), self.unit.to_points(self.height))
     }
 
+    /// Validate that [`Self::items`] does not exceed [`MAX_LAYOUT_ITEMS`].
+    pub fn validate_item_count(&self) -> Result<(), LayoutItemLimitError> {
+        if self.items.len() > MAX_LAYOUT_ITEMS {
+            return Err(LayoutItemLimitError { count: self.items.len(), max: MAX_LAYOUT_ITEMS });
+        }
+        Ok(())
+    }
+
+    /// Return the first non-finite float field path in this layout specification, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<&'static str> {
+        if !self.width.is_finite() {
+            return Some("spec.width");
+        }
+        if !self.height.is_finite() {
+            return Some("spec.height");
+        }
+        for item in &self.items {
+            match item {
+                LayoutItem::LiveGraph { bounds_pt, scale_percent, .. } => {
+                    if !rect_is_finite(*bounds_pt) {
+                        return Some("spec.items.live_graph.bounds_pt");
+                    }
+                    if !scale_percent.is_finite() {
+                        return Some("spec.items.live_graph.scale_percent");
+                    }
+                }
+                LayoutItem::LiveTable { bounds_pt, .. } => {
+                    if !rect_is_finite(*bounds_pt) {
+                        return Some("spec.items.live_table.bounds_pt");
+                    }
+                }
+                LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
+                    if !rect_is_finite(*bounds_pt) {
+                        return Some("spec.items.text_callout.bounds_pt");
+                    }
+                    if !font_size_pt.is_finite() {
+                        return Some("spec.items.text_callout.font_size_pt");
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Validate item budget and float finiteness for this layout specification.
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.validate_item_count()?;
+        if let Some(reason) = self.first_non_finite_float() {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason });
+        }
+        Ok(())
+    }
+
+    /// Append a [`LayoutItem`] while enforcing [`MAX_LAYOUT_ITEMS`].
+    pub fn add_item(&mut self, item: LayoutItem) -> Result<(), LayoutItemLimitError> {
+        let next = self.items.len().saturating_add(1);
+        if next > MAX_LAYOUT_ITEMS {
+            return Err(LayoutItemLimitError { count: next, max: MAX_LAYOUT_ITEMS });
+        }
+        self.items.push(item);
+        Ok(())
+    }
+
     /// Collect all inline template hooks (`{{info:...}}`, `{{result:...}}`) in layout callouts.
     #[must_use]
     pub fn inline_hooks(&self) -> Vec<HookSource> {
@@ -245,6 +327,41 @@ impl LayoutSpec {
             }
         }
         hooks
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct RawLayoutSpec {
+    width: f64,
+    height: f64,
+    unit: PhysicalUnit,
+    orientation: PageOrientation,
+    grid_template: Option<(u8, u8)>,
+    align_plot_origins: bool,
+    panel_badges: PanelBadgeStyle,
+    background_fill: Option<Rgba8>,
+    items: Vec<LayoutItem>,
+}
+
+impl<'de> serde::Deserialize<'de> for LayoutSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawLayoutSpec::deserialize(deserializer)?;
+        let spec = Self {
+            width: raw.width,
+            height: raw.height,
+            unit: raw.unit,
+            orientation: raw.orientation,
+            grid_template: raw.grid_template,
+            align_plot_origins: raw.align_plot_origins,
+            panel_badges: raw.panel_badges,
+            background_fill: raw.background_fill,
+            items: raw.items,
+        };
+        spec.validate_item_count().map_err(serde::de::Error::custom)?;
+        Ok(spec)
     }
 }
 
@@ -264,6 +381,10 @@ pub struct LayoutSheet {
     pub color_tag: Option<Rgba8>,
 }
 
+fn rect_is_finite(rect: RectPt) -> bool {
+    rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite()
+}
+
 impl LayoutSheet {
     pub fn new(id: impl Into<SheetId>, title: impl Into<String>, spec: LayoutSpec) -> Result<Self, DocError> {
         let id = id.into();
@@ -272,6 +393,32 @@ impl LayoutSheet {
         }
         let title = title.into();
         validate_title(&title)?;
+        spec.validate()?;
         Ok(Self { id, title, spec, floating_notes: Vec::new(), color_tag: None })
+    }
+
+    /// Return the first non-finite float field path in this layout sheet, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<&'static str> {
+        if let Some(field) = self.spec.first_non_finite_float() {
+            return Some(field);
+        }
+        if self.floating_notes.iter().any(|note| !rect_is_finite(note.bounds_pt)) {
+            return Some("floating_notes.bounds_pt");
+        }
+        None
+    }
+
+    /// Validate sheet identity, title, layout specification, and floating-note geometry.
+    pub fn validate(&self) -> Result<(), DocError> {
+        if self.id.as_str().trim().is_empty() {
+            return Err(DocError::EmptyIdentifier);
+        }
+        validate_title(&self.title)?;
+        self.spec.validate()?;
+        if self.floating_notes.iter().any(|note| !rect_is_finite(note.bounds_pt)) {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason: "floating_notes.bounds_pt" });
+        }
+        Ok(())
     }
 }

@@ -409,7 +409,7 @@ impl GridToolState {
         self.editing_buffer = None;
     }
 
-    /// Return `(min_coord, max_coord)` bounds of the active selection, if any.
+    /// Return `(min_coord, max_coord)` bounds of the active selection in flat reading order, if any.
     #[must_use]
     pub fn selection_bounds(&self) -> Option<(GridCellCoord, GridCellCoord)> {
         let a = self.active?;
@@ -419,6 +419,17 @@ impl GridToolState {
         let (min_col, min_sub, max_col, max_sub) =
             if (a.col, a.subcol) <= (b.col, b.subcol) { (a.col, a.subcol, b.col, b.subcol) } else { (b.col, b.subcol, a.col, a.subcol) };
         Some((GridCellCoord::new(min_row, min_col, min_sub), GridCellCoord::new(max_row, max_col, max_sub)))
+    }
+
+    /// Return exact component-wise 3-D bounding box `(min_coord, max_coord)` matching engine box semantics.
+    #[must_use]
+    pub fn selection_box_bounds(&self) -> Option<(GridCellCoord, GridCellCoord)> {
+        let a = self.active?;
+        let b = self.anchor.unwrap_or(a);
+        Some((
+            GridCellCoord::new(a.row.min(b.row), a.col.min(b.col), a.subcol.min(b.subcol)),
+            GridCellCoord::new(a.row.max(b.row), a.col.max(b.col), a.subcol.max(b.subcol)),
+        ))
     }
 
     /// Compute the currently visible `[start, end)` row/column window clamped to table bounds in O(1).
@@ -893,25 +904,43 @@ impl GridToolState {
         intent
     }
 
-    /// Emit a `table.excludeCells` command intent over the active selection, if one exists.
+    /// Emit a `table.excludeCells` command intent over the active 3-D box selection, if one exists.
     pub fn emit_exclude_selection_intent(&mut self, sheet_id: &SheetId, excluded: bool) -> Option<ToolCommandIntent> {
-        let (start, end) = self.selection_bounds()?;
-        let intent = ToolCommandIntent::new(
-            "table.excludeCells",
-            json!({
-                "sheet_id": sheet_id.as_str(),
-                "row": start.row,
-                "col": start.col,
-                "subcol": start.subcol,
-                "range": {
-                    "start": { "row": start.row, "col": start.col, "subcol": start.subcol },
-                    "end": { "row": end.row, "col": end.col, "subcol": end.subcol },
-                },
-                "excluded": excluded,
-            }),
-        );
+        let (start, end) = self.selection_box_bounds()?;
+        let intent = build_exclude_box_intent(sheet_id, start, end, excluded);
         self.pending_intents.push(intent.clone());
         Some(intent)
+    }
+
+    /// Emit exact per-column-group `table.excludeCells` 3-D box intents matching the visual flat selection on `sheet`.
+    pub fn emit_exclude_selection_intents_for_sheet(&mut self, sheet: &DataSheet, excluded: bool) -> Vec<ToolCommandIntent> {
+        let Some(a) = self.active else {
+            return Vec::new();
+        };
+        let b = self.anchor.unwrap_or(a);
+        let Some((start_row, end_row, start_flat, end_flat)) = normalized_flat_rect(sheet, a, b) else {
+            return Vec::new();
+        };
+        let col_count = sheet.archetype.column_count();
+        let mut intents = Vec::new();
+        let mut offset = 0usize;
+        for col_idx in 0..col_count {
+            let subcols = Self::sheet_subcolumn_count_for_group(sheet, col_idx);
+            if subcols == 0 {
+                continue;
+            }
+            let lo = start_flat.max(offset);
+            let hi = end_flat.min(offset + subcols - 1);
+            if lo <= hi {
+                let start = GridCellCoord::new(start_row, col_idx, lo - offset);
+                let end = GridCellCoord::new(end_row, col_idx, hi - offset);
+                let intent = build_exclude_box_intent(&sheet.id, start, end, excluded);
+                self.pending_intents.push(intent.clone());
+                intents.push(intent);
+            }
+            offset += subcols;
+        }
+        intents
     }
 
     /// Parse TSV clipboard text and emit a `table.paste` command intent anchored at `active`/`anchor`.
@@ -964,6 +993,23 @@ impl GridToolState {
     pub fn drain_intents(&mut self) -> Vec<ToolCommandIntent> {
         std::mem::take(&mut self.pending_intents)
     }
+}
+
+fn build_exclude_box_intent(sheet_id: &SheetId, start: GridCellCoord, end: GridCellCoord, excluded: bool) -> ToolCommandIntent {
+    ToolCommandIntent::new(
+        "table.excludeCells",
+        json!({
+            "sheet_id": sheet_id.as_str(),
+            "row": start.row,
+            "col": start.col,
+            "subcol": start.subcol,
+            "range": {
+                "start": { "row": start.row, "col": start.col, "subcol": start.subcol },
+                "end": { "row": end.row, "col": end.col, "subcol": end.subcol },
+            },
+            "excluded": excluded,
+        }),
+    )
 }
 
 /// Format a single [`Cell`] into its TSV token string, normalizing `-0.0` and marking exclusions with `*`.

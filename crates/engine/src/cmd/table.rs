@@ -1,17 +1,16 @@
 //! Data-table cell, title, exclusion, paste/link, CSV/project import, and archetype commands (Wave 9B).
 
-use std::collections::BTreeMap;
-use std::path::Path;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use lumencraft_doc::{
-    BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, GraphSheet, ImportFilterSpec, ImportLinkSpec,
-    ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MultipleVariablesTable, NestedTable, PlacementMode,
-    ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise, SubcolumnMode, TableArchetype, TableKind, VariableColumn,
-    VariableRole, VariableSource, validate_rows, validate_title,
+    BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, DocError, GraphSheet, ImportFilterSpec, ImportLinkSpec,
+    ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_SHEETS_PER_PROJECT, MultipleVariablesTable,
+    NestedGroupColumn, NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise,
+    SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, validate_project_cells, validate_rows, validate_title,
 };
 use lumencraft_format::{
-    CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes,
-    import_pzfx_str, parse_delimited_records,
+    CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, export_datasheet_to_csv, export_result_sheet_tidy_csv,
+    import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes, import_pzfx_str, parse_delimited_records,
 };
 use lumencraft_transform::{
     AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload,
@@ -25,15 +24,17 @@ use serde_json::{Value, json};
 
 use super::helpers::{
     column_subcolumn_count, decode_base64, ensure_sheet_not_frozen, locate_target_and_info_indices, next_unique_sheet_id,
-    next_unique_sheet_id_excluding, parse_sheet_id, require_analyzable_data_sheet, require_data_sheet, require_info_sheet_mut,
+    next_unique_sheet_id_excluding, parse_sheet_id, remap_analysis_hooks, remap_data_sheet_links, remap_graph_spec_references,
+    remap_layout_spec_references, remap_sheet_id, require_analyzable_data_sheet, require_data_sheet, require_info_sheet_mut,
     require_unfrozen_data_sheet_mut, select_result_tab, sheet_id_exists, x_subcolumn_count,
 };
 use super::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     obj_schema_with_aliases, parse_params, str_schema,
 };
+use super::project::recalculate_dirty_with_links;
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
-use crate::{CommandOutcome, EngineError, ErrorCode, Session, dag};
+use crate::{CommandOutcome, EngineError, ErrorCode, ExternalPathPolicy, Session, dag};
 
 /// Registered command specifications for the `table` group (28 commands).
 #[must_use]
@@ -434,13 +435,8 @@ fn has_multivar_sheet(session: &Session) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// Shared Reactive Link Refresh & Title Propagation
+// Initial Link Payload Loading & Title Propagation Helpers
 // ---------------------------------------------------------------------------
-
-struct RecalcSummary {
-    recalculated_sheets: usize,
-    refreshed_links: usize,
-}
 
 enum OwnedSourcePayload {
     Data(Box<DataSheet>),
@@ -448,64 +444,10 @@ enum OwnedSourcePayload {
     Delimited { text: String, delimiter: char, decimal_separator: char },
 }
 
-fn recalculate_with_links(doc: &mut ProjectDocument, include_external_links: bool) -> Result<RecalcSummary, EngineError> {
-    let mut refreshed = refresh_linked_regions(doc, include_external_links)?;
-    let mut recalculated = dag::recalculate_project(doc)?;
-    let max_hops = doc.data_sheets.len().saturating_add(1);
-    for _ in 0..max_hops {
-        let hop_refreshed = refresh_linked_regions(doc, include_external_links)?;
-        if hop_refreshed == 0 {
-            break;
-        }
-        refreshed = refreshed.saturating_add(hop_refreshed);
-        recalculated = recalculated.saturating_add(dag::recalculate_project(doc)?);
-    }
-    Ok(RecalcSummary { recalculated_sheets: recalculated, refreshed_links: refreshed })
-}
-
-fn refresh_linked_regions(doc: &mut ProjectDocument, include_external_links: bool) -> Result<usize, EngineError> {
-    let order = dag::topological_order(doc)?;
-    let mut updated_count = 0usize;
-
-    for target_id in order {
-        let Some(target_idx) = doc.data_sheets.iter().position(|s| s.id == target_id) else {
-            continue;
-        };
-        if doc.data_sheets.get(target_idx).is_none_or(|ds| ds.frozen) {
-            continue;
-        }
-        let regions = doc.data_sheets.get(target_idx).map(|ds| ds.linked_regions.clone()).unwrap_or_default();
-        if regions.is_empty() {
-            continue;
-        }
-
-        let mut target_changed = false;
-        for region in regions {
-            let Some(source_payload) = resolve_link_source_payload(doc, &region.spec.source, include_external_links)? else {
-                continue;
-            };
-            let Some(target_ds) = doc.data_sheets.get_mut(target_idx) else {
-                continue;
-            };
-            if apply_refresh_to_target(target_ds, &region.spec, &source_payload)? {
-                target_changed = true;
-                updated_count = updated_count.saturating_add(1);
-            }
-        }
-        if target_changed {
-            let info_snapshot = doc.data_sheets.get(target_idx).and_then(|ds| ds.info_sheet_id.as_ref()).and_then(|iid| doc.info_sheet(iid)).cloned();
-            if let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
-                evaluate_data_sheet_calculated_variables(target_ds, info_snapshot.as_ref())?;
-            }
-        }
-    }
-    Ok(updated_count)
-}
-
-fn resolve_link_source_payload(
+fn resolve_initial_link_source_payload(
     doc: &ProjectDocument,
     source: &LinkSource,
-    include_external_links: bool,
+    policy: &ExternalPathPolicy,
 ) -> Result<Option<OwnedSourcePayload>, EngineError> {
     match source {
         LinkSource::Clipboard => Ok(None),
@@ -516,84 +458,9 @@ fn resolve_link_source_payload(
             }
         },
         LinkSource::ExternalDelimitedFile { path, delimiter, decimal_separator } => {
-            if !include_external_links {
-                return Ok(None);
-            }
-            let text = read_utf8_file(path, "linked file")?;
+            let text = policy.read_utf8_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
             Ok(Some(OwnedSourcePayload::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
-    }
-}
-
-fn apply_refresh_to_target(target_ds: &mut DataSheet, spec: &ImportLinkSpec, payload: &OwnedSourcePayload) -> Result<bool, EngineError> {
-    let before = target_ds.clone();
-    let existing_links = target_ds.linked_regions.len();
-    let mut refresh_spec = spec.clone();
-    refresh_spec.placement.mode = PlacementMode::Overwrite;
-
-    let opts = ImportPipelineOptions::default();
-    run_import_pipeline(target_ds, &refresh_spec, payload, &opts, None)?;
-    propagate_internal_source_titles(target_ds, &refresh_spec, payload);
-    target_ds.linked_regions.truncate(existing_links);
-    Ok(target_ds != &before)
-}
-
-fn propagate_internal_source_titles(target_ds: &mut DataSheet, spec: &ImportLinkSpec, payload: &OwnedSourcePayload) {
-    if !spec.placement.propagate_title_header {
-        return;
-    }
-    let LinkSource::InternalSheet { range, .. } = &spec.source else {
-        return;
-    };
-    let OwnedSourcePayload::Data(src_ds) = payload else {
-        return;
-    };
-    let base_col = spec.placement.anchor.col;
-    if spec.placement.transpose {
-        for (offset, row) in (range.start.row..=range.end.row).enumerate() {
-            if let Some(title) = src_row_title(&src_ds.archetype, row)
-                && !title.is_empty()
-                && base_col.saturating_add(offset) < target_ds.archetype.column_count()
-            {
-                let _ = set_group_title(&mut target_ds.archetype, base_col.saturating_add(offset), title);
-            }
-        }
-    } else {
-        for (offset, col) in (range.start.col..=range.end.col).enumerate() {
-            if let Some(title) = src_group_title(&src_ds.archetype, col)
-                && !title.is_empty()
-                && base_col.saturating_add(offset) < target_ds.archetype.column_count()
-            {
-                let _ = set_group_title(&mut target_ds.archetype, base_col.saturating_add(offset), title);
-            }
-        }
-    }
-}
-
-fn src_row_title(arch: &TableArchetype, row: usize) -> Option<&str> {
-    let slice = match arch {
-        TableArchetype::Xy(t) => &t.row_titles,
-        TableArchetype::Column(t) => &t.row_titles,
-        TableArchetype::Grouped(t) => &t.row_titles,
-        TableArchetype::Contingency(t) => &t.row_titles,
-        TableArchetype::Survival(t) => &t.row_titles,
-        TableArchetype::PartsOfWhole(t) => &t.slice_labels,
-        TableArchetype::MultipleVariables(t) => &t.row_titles,
-        TableArchetype::Nested(t) => &t.row_titles,
-    };
-    slice.get(row).map(String::as_str)
-}
-
-fn src_group_title(arch: &TableArchetype, col: usize) -> Option<&str> {
-    match arch {
-        TableArchetype::Xy(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::Column(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::Grouped(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::Contingency(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::PartsOfWhole(t) => t.data_sets.get(col).map(|d| d.title.as_str()),
-        TableArchetype::Survival(t) => t.cohorts.get(col).map(|d| d.title.as_str()),
-        TableArchetype::MultipleVariables(t) => t.variables.get(col).map(|v| v.title.as_str()),
-        TableArchetype::Nested(t) => t.groups.get(col).map(|g| g.title.as_str()),
     }
 }
 
@@ -629,72 +496,10 @@ fn apply_pipeline_with_split_info(
         data_sheets.get_mut(target_idx).ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "target data sheet index out of bounds"))?;
     let target_info = info_idx.and_then(|idx| info_sheets.get_mut(idx));
     let report = run_import_pipeline(target_ds, spec, payload, opts, target_info)?;
-    propagate_internal_source_titles(target_ds, spec, payload);
+    if let OwnedSourcePayload::Data(src) = payload {
+        dag::propagate_internal_source_titles(target_ds, spec, report.target_range.start.col, src);
+    }
     Ok(report)
-}
-
-// ---------------------------------------------------------------------------
-// Platform File Helpers
-// ---------------------------------------------------------------------------
-
-fn read_utf8_file(path: &str, label: &str) -> Result<String, EngineError> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path;
-        Err(EngineError::with_code(ErrorCode::UnsupportedFormat, format!("reading {label} `{path}` from filesystem is unavailable on wasm32"))
-            .with_remediation("Supply inline text content or run on a native target."))
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::fs::read_to_string(Path::new(path)).map_err(|err| {
-            EngineError::with_code(ErrorCode::IoError, format!("failed reading {label} `{path}`: {err}"))
-                .with_remediation("Verify the file path exists and is readable.")
-        })
-    }
-}
-
-fn read_binary_file(path: &str, label: &str) -> Result<Vec<u8>, EngineError> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path;
-        Err(EngineError::with_code(ErrorCode::UnsupportedFormat, format!("reading {label} `{path}` from filesystem is unavailable on wasm32"))
-            .with_remediation("Supply `bytes_base64` or inline content on wasm32."))
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::fs::read(Path::new(path)).map_err(|err| {
-            EngineError::with_code(ErrorCode::IoError, format!("failed reading {label} `{path}`: {err}"))
-                .with_remediation("Verify the file path exists and is readable.")
-        })
-    }
-}
-
-fn write_atomic_text_file(path: &str, text: &str) -> Result<(), EngineError> {
-    if path.trim().is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "`path` cannot be empty").with_remediation("Provide a non-empty output file path."));
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = text;
-        Err(EngineError::with_code(ErrorCode::UnsupportedFormat, "writing CSV files directly to disk is unavailable on wasm32")
-            .with_remediation("Omit `path` and consume the returned `csv` string directly."))
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let target = Path::new(path);
-        if let Some(parent) = target.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                EngineError::with_code(ErrorCode::IoError, format!("failed creating parent directory for `{path}`: {err}"))
-                    .with_remediation("Ensure the output directory path is valid and writable.")
-            })?;
-        }
-        lumencraft_platform::fs::write_atomic(target, text.as_bytes()).map_err(|err| {
-            EngineError::with_code(ErrorCode::IoError, format!("failed writing CSV `{path}`: {err}"))
-                .with_remediation("Verify disk space and write permissions for the target path.")
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1184,6 +989,7 @@ fn validate_row_title_batch(arch: &TableArchetype, start_row: usize, titles: &[O
 }
 
 fn set_group_title(arch: &mut TableArchetype, col: usize, title: &str) -> Result<(), EngineError> {
+    validate_title(title)?;
     match arch {
         TableArchetype::Xy(t) => set_ds_title(&mut t.data_sets, col, title),
         TableArchetype::Column(t) => set_ds_title(&mut t.data_sets, col, title),
@@ -1205,24 +1011,32 @@ fn set_group_title(arch: &mut TableArchetype, col: usize, title: &str) -> Result
 }
 
 fn set_ds_title(sets: &mut [DataSetColumn], col: usize, title: &str) -> Result<(), EngineError> {
+    validate_title(title)?;
     let ds = sets.get_mut(col).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("column {col} out of range")))?;
     ds.title = title.to_owned();
     Ok(())
 }
 
 fn set_nested_subcol_title(nested: &mut NestedTable, col_opt: Option<usize>, subcol: usize, title: &str) -> Result<(), EngineError> {
+    validate_title(title)?;
     if let Some(col) = col_opt {
         let grp = nested.groups.get_mut(col).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("group {col} out of range")))?;
-        assign_subcol_title(&mut grp.subcolumn_titles, grp.cells.len(), subcol, title)?;
+        assign_nested_group_subcol_title(grp, subcol, title)?;
     } else {
         for grp in &mut nested.groups {
-            assign_subcol_title(&mut grp.subcolumn_titles, grp.cells.len(), subcol, title)?;
+            assign_nested_group_subcol_title(grp, subcol, title)?;
         }
     }
     Ok(())
 }
 
+fn assign_nested_group_subcol_title(grp: &mut NestedGroupColumn, subcol: usize, title: &str) -> Result<(), EngineError> {
+    let width = grp.cells.first().map_or(grp.subcolumn_titles.len(), Vec::len);
+    assign_subcol_title(&mut grp.subcolumn_titles, width, subcol, title)
+}
+
 fn assign_subcol_title(titles: &mut Vec<String>, width: usize, subcol: usize, title: &str) -> Result<(), EngineError> {
+    validate_title(title)?;
     if subcol >= width {
         return Err(EngineError::with_code(ErrorCode::BadInput, format!("subcolumn {subcol} out of range (width {width})")));
     }
@@ -1241,6 +1055,15 @@ fn set_x_or_factor_title(
     row_factor: Option<&str>,
     col_factor: Option<&str>,
 ) -> Result<(), EngineError> {
+    if let Some(xt) = x_title {
+        validate_title(xt)?;
+    }
+    if let Some(rf) = row_factor {
+        validate_title(rf)?;
+    }
+    if let Some(cf) = col_factor {
+        validate_title(cf)?;
+    }
     if let Some(xt) = x_title {
         match arch {
             TableArchetype::Xy(t) => t.x_title = xt.to_owned(),
@@ -1380,8 +1203,9 @@ fn run_set_cell(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineE
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
+    ensure_coord_outside_linked_regions(ds, coord, "edit")?;
     ds.set_cell(coord, cell)?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCell",
         "updated cell",
@@ -1495,10 +1319,11 @@ fn run_set_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engine
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     ensure_mv_columns_editable(ds, edits.iter().map(|(c, _)| c.col))?;
+    ensure_coords_outside_linked_regions(ds, edits.iter().map(|(c, _)| *c), "edit")?;
     for (coord, cell) in &edits {
         ds.set_cell(*coord, cell.clone())?;
     }
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCells",
         "updated cells",
@@ -1615,7 +1440,7 @@ fn run_set_x_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     for (row, subcol, cell) in &updates {
         ds.set_x_or_time_cell(*row, *subcol, cell.clone())?;
     }
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setXCells",
         "updated X/time cells",
@@ -1659,6 +1484,9 @@ fn schema_set_row_titles() -> Value {
 fn run_set_row_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetRowTitlesParams = parse_params(&schema_set_row_titles(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
@@ -1679,7 +1507,7 @@ fn run_set_row_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
         updated = 1;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setRowTitles",
         "updated row titles",
@@ -1748,8 +1576,30 @@ fn run_set_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
 fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetTitlesParams = parse_params(&schema_set_titles(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
+    if let Some(xt) = p.x_title.as_deref() {
+        validate_title(xt)?;
+    }
+    if let Some(rf) = p.row_factor_title.as_deref() {
+        validate_title(rf)?;
+    }
+    if let Some(cf) = p.column_factor_title.as_deref() {
+        validate_title(cf)?;
+    }
+    if let Some(titles) = p.titles.as_deref() {
+        for title in titles {
+            validate_title(title)?;
+        }
+    } else if let Some(title) = p.title.as_deref() {
+        validate_title(title)?;
+    }
+    if let Some(row_titles) = p.row_titles.as_deref() {
+        validate_row_title_batch(&ds.archetype, 0, row_titles)?;
+    }
 
     let mut updated = 0usize;
     if let Some(xt) = p.x_title.as_deref() {
@@ -1783,7 +1633,7 @@ fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Re
         }
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         command_id,
         "updated group titles",
@@ -1835,6 +1685,14 @@ fn schema_set_subcolumn_titles() -> Value {
 fn run_set_subcolumn_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetSubcolumnTitlesParams = parse_params(&schema_set_subcolumn_titles(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
+    if let Some(ref titles) = p.titles {
+        for title in titles {
+            validate_title(title)?;
+        }
+    }
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
@@ -1861,7 +1719,7 @@ fn run_set_subcolumn_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
         updated = 1;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setSubcolumnTitles",
         "updated subcolumn titles",
@@ -1976,8 +1834,18 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
     let mut updated = 0usize;
+    let action = if excluded { "exclude" } else { "unexclude" };
     if let Some(range) = range_opt {
         validate_cell_range_bounds(ds, range, target_x)?;
+        if !target_x {
+            for r in range.start.row..=range.end.row {
+                for c in range.start.col..=range.end.col {
+                    for s in range.start.subcol..=range.end.subcol {
+                        ensure_coord_outside_linked_regions(ds, CellCoord::new(r, c, s), action)?;
+                    }
+                }
+            }
+        }
         for r in range.start.row..=range.end.row {
             for c in range.start.col..=range.end.col {
                 for s in range.start.subcol..=range.end.subcol {
@@ -1991,14 +1859,23 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
             }
         }
     } else if let Some(coords) = p.cells {
-        for item in coords {
-            if target_x {
+        if target_x {
+            let mut x_coords = Vec::with_capacity(coords.len());
+            for item in coords {
                 let row = item.coord.row.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing required X cell `row`"))?;
-                ds.set_x_or_time_excluded(row, item.coord.subcol.unwrap_or(0), excluded)?;
-            } else {
-                ds.set_excluded(item.coord.resolve()?, excluded)?;
+                x_coords.push((row, item.coord.subcol.unwrap_or(0)));
             }
-            updated = updated.saturating_add(1);
+            for (row, subcol) in x_coords {
+                ds.set_x_or_time_excluded(row, subcol, excluded)?;
+                updated = updated.saturating_add(1);
+            }
+        } else {
+            let resolved: Vec<CellCoord> = coords.iter().map(|item| item.coord.resolve()).collect::<Result<_, _>>()?;
+            ensure_coords_outside_linked_regions(ds, resolved.iter().copied(), action)?;
+            for coord in resolved {
+                ds.set_excluded(coord, excluded)?;
+                updated = updated.saturating_add(1);
+            }
         }
     } else if target_x {
         let row = p.bounds.row.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing required X cell `row`"))?;
@@ -2006,11 +1883,12 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         updated = 1;
     } else {
         let coord = CoordInput { coord: p.coord, row: p.bounds.row, col: p.bounds.col, subcol: p.bounds.subcol }.resolve()?;
+        ensure_coord_outside_linked_regions(ds, coord, action)?;
         ds.set_excluded(coord, excluded)?;
         updated = 1;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.excludeCells",
         "updated exclusion mask",
@@ -2174,10 +2052,11 @@ fn run_exclude_cells_with_reason(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comman
             ));
         }
     }
+    ensure_coords_outside_linked_regions(ds, coords.iter().copied(), "exclude")?;
     for &coord in &coords {
         ds.set_excluded_with_reason(coord, &p.reason_tag, &note, &timestamp_utc)?;
     }
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
     Ok(CommandOutcome::mutated(
         "table.excludeCellsWithReason",
         format!("excluded {} cell(s) with reason `{}`", coords.len(), p.reason_tag),
@@ -2369,12 +2248,25 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
+    let unlink = p.unlink.unwrap_or(false);
     let mut cleared = 0usize;
     if p.all.unwrap_or(false) {
+        if !unlink && let Some(region) = ds.linked_regions.first() {
+            return Err(linked_region_conflict_error(&ds.id, region, "clear", None));
+        }
         cleared = clear_all_cells_in_sheet(ds, p.clear_x.unwrap_or(false))?;
     } else if let Some(range) = range_opt {
         validate_cell_range_bounds(ds, range, false)?;
         ensure_mv_columns_editable(ds, range.start.col..=range.end.col)?;
+        if !unlink {
+            for r in range.start.row..=range.end.row {
+                for c in range.start.col..=range.end.col {
+                    for s in range.start.subcol..=range.end.subcol {
+                        ensure_coord_outside_linked_regions(ds, CellCoord::new(r, c, s), "clear")?;
+                    }
+                }
+            }
+        }
         for r in range.start.row..=range.end.row {
             for c in range.start.col..=range.end.col {
                 for s in range.start.subcol..=range.end.subcol {
@@ -2386,6 +2278,9 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     } else if let Some(coords) = p.cells {
         let resolved: Vec<CellCoord> = coords.iter().map(CoordInput::resolve).collect::<Result<_, _>>()?;
         ensure_mv_columns_editable(ds, resolved.iter().map(|c| c.col))?;
+        if !unlink {
+            ensure_coords_outside_linked_regions(ds, resolved.iter().copied(), "clear")?;
+        }
         for coord in resolved {
             ds.set_cell(coord, Cell::empty())?;
             cleared = cleared.saturating_add(1);
@@ -2393,14 +2288,17 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     } else {
         let coord = CoordInput { coord: p.coord, row: p.bounds.row, col: p.bounds.col, subcol: p.bounds.subcol }.resolve()?;
         ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
+        if !unlink {
+            ensure_coord_outside_linked_regions(ds, coord, "clear")?;
+        }
         ds.set_cell(coord, Cell::empty())?;
         cleared = 1;
     }
 
-    if p.unlink.unwrap_or(false) {
+    if unlink {
         ds.linked_regions.clear();
     }
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.clearCells",
         "cleared cells",
@@ -2539,13 +2437,23 @@ fn apply_paste_payload(
         &ds.archetype,
         TableArchetype::MultipleVariables(mv) if mv.variables.iter().any(|v| matches!(v.source, VariableSource::Calculated { .. }))
     );
-    if !has_calc_mv {
+    if !has_calc_mv && ds.linked_regions.is_empty() {
         return Ok(apply_import_link_pipeline(ds, spec, payload, opts, None)?);
     }
     let mut staged = ds.clone();
     let report = apply_import_link_pipeline(&mut staged, spec, payload, opts, None)?;
     if report.rows_placed > 0 && report.cols_placed > 0 {
-        ensure_mv_columns_editable(ds, report.target_range.start.col..=report.target_range.end.col)?;
+        if has_calc_mv {
+            ensure_mv_columns_editable(ds, report.target_range.start.col..=report.target_range.end.col)?;
+        }
+        ensure_range_outside_linked_regions(ds, report.target_range, "paste")?;
+        if matches!(spec.placement.mode, lumencraft_doc::PlacementMode::InsertRows) {
+            let shift_span = lumencraft_doc::SheetCellRange::new(
+                CellCoord::new(spec.placement.anchor.row, report.target_range.start.col, report.target_range.start.subcol),
+                CellCoord::new(usize::MAX, report.target_range.end.col, report.target_range.end.subcol),
+            );
+            ensure_range_outside_linked_regions(ds, shift_span, "insert rows into")?;
+        }
     }
     *ds = staged;
     Ok(report)
@@ -2579,7 +2487,7 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
     };
 
     ds.linked_regions.truncate(existing_links);
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.paste",
         "pasted table data",
@@ -2735,10 +2643,16 @@ fn default_full_source_range(
     }
 }
 
-fn build_paste_link_spec(doc: &ProjectDocument, target_id: &SheetId, p: &PasteLinkParams) -> Result<ImportLinkSpec, EngineError> {
+fn build_paste_link_spec(
+    doc: &ProjectDocument,
+    target_id: &SheetId,
+    p: &PasteLinkParams,
+    policy: &ExternalPathPolicy,
+) -> Result<ImportLinkSpec, EngineError> {
     if let Some(raw_spec) = &p.link_spec
         && let Ok(mut parsed) = serde_json::from_value::<ImportLinkSpec>(raw_spec.clone())
     {
+        policy.normalize_stored_link_source(&mut parsed.source)?;
         if p.placement.anchor.is_some() {
             parsed.placement.anchor = p.placement.resolve_anchor();
         }
@@ -2771,10 +2685,12 @@ fn build_paste_link_spec(doc: &ProjectDocument, target_id: &SheetId, p: &PasteLi
         };
         LinkSource::InternalSheet { sheet_id: src_id, kind, tab_id, range }
     } else if let Some(path) = p.source_path.as_deref() {
-        let preview_text = read_utf8_file(path, "external link file")?;
+        let preview_text = policy.read_utf8_file(path, "external link file", MAX_CSV_FILE_BYTES)?;
         let delimiter = resolve_delimiter(p.delimiter.as_deref(), &preview_text)?;
         let decimal_separator = resolve_decimal_char(p.decimal_separator.as_deref(), p.normalize_decimal.unwrap_or(false), &preview_text, delimiter)?;
-        LinkSource::ExternalDelimitedFile { path: path.to_owned(), delimiter, decimal_separator }
+        let mut src = LinkSource::ExternalDelimitedFile { path: path.to_owned(), delimiter, decimal_separator };
+        policy.normalize_stored_link_source(&mut src)?;
+        src
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.pasteLink requires `link_spec`, `source_sheet_id`, or `path`")
             .with_remediation("Specify an internal `source_sheet_id` or an external `path`."));
@@ -2786,6 +2702,7 @@ fn build_paste_link_spec(doc: &ProjectDocument, target_id: &SheetId, p: &PasteLi
 fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: PasteLinkParams = parse_params(&schema_paste_link(), raw)?;
     let target_id = parse_sheet_id(&p.target_sheet_id)?;
+    let policy = ctx.session.path_policy.clone();
     let doc = &mut ctx.session.doc;
 
     let info_id = {
@@ -2794,8 +2711,8 @@ fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
         target_ds.info_sheet_id.clone()
     };
 
-    let spec = build_paste_link_spec(doc, &target_id, &p)?;
-    let payload = resolve_link_source_payload(doc, &spec.source, true)?
+    let spec = build_paste_link_spec(doc, &target_id, &p, &policy)?;
+    let payload = resolve_initial_link_source_payload(doc, &spec.source, &policy)?
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "table.pasteLink requires an internal sheet or external delimited file source"))?;
     let (target_idx, info_idx) = locate_target_and_info_indices(doc, &target_id, info_id.as_ref())?;
     let prev_ds = doc.data_sheets.get(target_idx).cloned();
@@ -2831,7 +2748,13 @@ fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
         }
     };
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let mut dirty_seeds = vec![target_id.clone()];
+    if info_idx.is_some()
+        && let Some(ref iid) = info_id
+    {
+        dirty_seeds.push(iid.clone());
+    }
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
     Ok(CommandOutcome::mutated(
         "table.pasteLink",
         "created live linked region",
@@ -2946,7 +2869,8 @@ fn import_into_existing_sheet(
     text: String,
     csv_opts: &CsvOptions,
     subcolumn_mode: SubcolumnMode,
-) -> Result<(), EngineError> {
+    policy: &ExternalPathPolicy,
+) -> Result<Option<SheetId>, EngineError> {
     let delimiter = csv_opts.delimiter;
     let decimal_separator = csv_opts.decimal_separator;
     let (info_id, cur_title, cur_kind) = {
@@ -2965,15 +2889,16 @@ fn import_into_existing_sheet(
         if let Some(slot) = doc.data_sheet_mut(id) {
             *slot = imported;
         }
-        return Ok(());
+        return Ok(None);
     }
     let filter = parse_import_filter_val(p.filter.as_ref())?;
     let placement = p.placement.to_placement_spec(false)?;
     let keep_link = p.link.unwrap_or(false);
-    let source = match p.path.as_deref() {
+    let mut source = match p.path.as_deref() {
         Some(path) if keep_link => LinkSource::ExternalDelimitedFile { path: path.to_owned(), delimiter, decimal_separator },
         _ => LinkSource::Clipboard,
     };
+    policy.normalize_stored_link_source(&mut source)?;
     let link_spec = ImportLinkSpec { source, filter, placement };
     let (target_idx, info_idx) = locate_target_and_info_indices(doc, id, info_id.as_ref())?;
     let opts = ImportPipelineOptions {
@@ -2982,16 +2907,31 @@ fn import_into_existing_sheet(
         ..ImportPipelineOptions::default()
     };
     let link_before = doc.data_sheets.get(target_idx).map_or(0, |d| d.linked_regions.len());
+    let pre_linked_snapshot = if !keep_link && link_before > 0 { doc.data_sheets.get(target_idx).cloned() } else { None };
     let payload = OwnedSourcePayload::Delimited { text, delimiter, decimal_separator };
-    apply_pipeline_with_split_info(doc, target_idx, info_idx, &link_spec, &payload, &opts)?;
+    let report = apply_pipeline_with_split_info(doc, target_idx, info_idx, &link_spec, &payload, &opts)?;
+    if let Some(prev_ds) = pre_linked_snapshot
+        && report.rows_placed > 0
+        && report.cols_placed > 0
+        && let Err(err) = ensure_range_outside_linked_regions(&prev_ds, report.target_range, "import into")
+    {
+        if let Some(slot) = doc.data_sheets.get_mut(target_idx) {
+            *slot = prev_ds;
+        }
+        return Err(err);
+    }
     if !keep_link && let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
         target_ds.linked_regions.truncate(link_before);
     }
-    Ok(())
+    Ok(info_idx.and(info_id))
 }
 
 fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportCsvParams = parse_params(&schema_import_csv(), raw)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
+    let policy = ctx.session.path_policy.clone();
     let doc = &mut ctx.session.doc;
     let id = match p.sheet_id.as_deref() {
         Some(raw_id) => parse_sheet_id(raw_id)?,
@@ -3000,7 +2940,7 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     let text = if let Some(inline) = &p.csv {
         inline.clone()
     } else if let Some(path) = &p.path {
-        read_utf8_file(path, "CSV")?
+        policy.read_utf8_file(path, "CSV", MAX_CSV_FILE_BYTES)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importCsv requires `path` or `csv`/`text`")
             .with_remediation("Provide a CSV/TSV file `path` or inline `csv` text."));
@@ -3017,8 +2957,11 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     }
     let subcolumn_mode = resolve_subcolumn_mode(p.subcolumn_mode.as_ref(), p.replicates.unwrap_or(1))?;
 
+    let mut dirty_seeds = vec![id.clone()];
     if doc.data_sheet(&id).is_some() {
-        import_into_existing_sheet(doc, &id, &p, text, &csv_opts, subcolumn_mode)?;
+        if let Some(updated_info) = import_into_existing_sheet(doc, &id, &p, text, &csv_opts, subcolumn_mode, &policy)? {
+            dirty_seeds.push(updated_info);
+        }
     } else {
         let title = p.title.as_deref().unwrap_or("Imported CSV");
         let kind = parse_table_kind(p.archetype.as_deref().unwrap_or("xy"))?;
@@ -3026,7 +2969,7 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
         doc.add_data_sheet(imported)?;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
     Ok(CommandOutcome::mutated(
         "table.importCsv",
         "imported CSV into data sheet",
@@ -3086,7 +3029,7 @@ fn run_export_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     };
 
     if let Some(path) = p.path.as_deref() {
-        write_atomic_text_file(path, &csv_text)?;
+        ctx.session.path_policy.write_atomic_bytes(path, csv_text.as_bytes())?;
     }
     Ok(CommandOutcome::read_only("table.exportCsv", "exported CSV", json!({ "sheet_id": id.as_str(), "path": p.path, "csv": csv_text })))
 }
@@ -3117,7 +3060,102 @@ fn schema_import_prism() -> Value {
     )
 }
 
-fn merge_imported_document(doc: &mut ProjectDocument, imported: ProjectDocument) -> Result<(), EngineError> {
+fn collect_all_sheet_ids(doc: &ProjectDocument) -> HashSet<String> {
+    let mut ids = HashSet::with_capacity(doc.total_sheet_count());
+    for id in doc
+        .data_sheets
+        .iter()
+        .map(|s| &s.id)
+        .chain(doc.info_sheets.iter().map(|s| &s.id))
+        .chain(doc.result_sheets.iter().map(|s| &s.id))
+        .chain(doc.graph_sheets.iter().map(|s| &s.id))
+        .chain(doc.layout_sheets.iter().map(|s| &s.id))
+    {
+        ids.insert(id.as_str().to_owned());
+    }
+    ids
+}
+
+fn next_collision_free_sheet_id(original: &SheetId, reserved: &mut HashSet<String>) -> Result<SheetId, EngineError> {
+    let raw = original.as_str().trim();
+    let base = if raw.is_empty() { "sheet" } else { raw };
+    for suffix in 2..=100_000_usize {
+        let candidate = SheetId::try_new(format!("{base}-{suffix}"))?;
+        if reserved.insert(candidate.as_str().to_owned()) {
+            return Ok(candidate);
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("exhausted collision-free sheet IDs for `{raw}`")))
+}
+
+fn plan_imported_id_remap(doc: &ProjectDocument, imported: &ProjectDocument) -> Result<HashMap<SheetId, SheetId>, EngineError> {
+    let doc_ids = collect_all_sheet_ids(doc);
+    let mut reserved = doc_ids.clone();
+    reserved.extend(collect_all_sheet_ids(imported));
+
+    let mut seen_imported: HashSet<String> = HashSet::with_capacity(imported.total_sheet_count());
+    let mut id_map: HashMap<SheetId, SheetId> = HashMap::new();
+
+    for orig_id in imported
+        .data_sheets
+        .iter()
+        .map(|s| &s.id)
+        .chain(imported.info_sheets.iter().map(|s| &s.id))
+        .chain(imported.result_sheets.iter().map(|s| &s.id))
+        .chain(imported.graph_sheets.iter().map(|s| &s.id))
+        .chain(imported.layout_sheets.iter().map(|s| &s.id))
+    {
+        let key = orig_id.as_str();
+        let needs_remap = doc_ids.contains(key) || !seen_imported.insert(key.to_owned());
+        if needs_remap {
+            let new_id = next_collision_free_sheet_id(orig_id, &mut reserved)?;
+            id_map.entry(orig_id.clone()).or_insert(new_id);
+        }
+    }
+    Ok(id_map)
+}
+
+fn merge_imported_document(doc: &mut ProjectDocument, mut imported: ProjectDocument) -> Result<(), EngineError> {
+    let total_sheets = doc.total_sheet_count().saturating_add(imported.total_sheet_count());
+    if total_sheets > MAX_SHEETS_PER_PROJECT {
+        return Err(EngineError::from(DocError::TooManySheets { count: total_sheets, max: MAX_SHEETS_PER_PROJECT }));
+    }
+    let existing_cells: usize = doc.data_sheets.iter().map(|s| s.archetype.allocated_cell_slots()).sum();
+    let added_cells: usize = imported.data_sheets.iter().map(|s| s.archetype.allocated_cell_slots()).sum();
+    validate_project_cells(existing_cells, added_cells)?;
+
+    let id_map = plan_imported_id_remap(doc, &imported)?;
+    if !id_map.is_empty() {
+        for ds in &mut imported.data_sheets {
+            remap_sheet_id(&mut ds.id, &id_map);
+            remap_data_sheet_links(ds, &id_map);
+        }
+        for info in &mut imported.info_sheets {
+            remap_sheet_id(&mut info.id, &id_map);
+            for linked in &mut info.linked_data_sheets {
+                remap_sheet_id(linked, &id_map);
+            }
+        }
+        for res in &mut imported.result_sheets {
+            remap_sheet_id(&mut res.id, &id_map);
+            res.analysis.id = res.id.clone();
+            remap_sheet_id(&mut res.analysis.source_sheet_id, &id_map);
+            remap_analysis_hooks(&mut res.analysis, &id_map);
+            if let Some(ref mut ad) = res.analyzable_data {
+                ad.id = res.id.clone();
+                remap_data_sheet_links(ad, &id_map);
+            }
+        }
+        for gs in &mut imported.graph_sheets {
+            remap_sheet_id(&mut gs.id, &id_map);
+            remap_graph_spec_references(&mut gs.spec, &id_map);
+        }
+        for ls in &mut imported.layout_sheets {
+            remap_sheet_id(&mut ls.id, &id_map);
+            remap_layout_spec_references(&mut ls.spec, &id_map);
+        }
+    }
+
     for ds in imported.data_sheets {
         doc.add_data_sheet(ds)?;
     }
@@ -3133,13 +3171,14 @@ fn merge_imported_document(doc: &mut ProjectDocument, imported: ProjectDocument)
     for ls in imported.layout_sheets {
         doc.add_layout_sheet(ls)?;
     }
+    let _ = dag::topological_order(doc)?;
     Ok(())
 }
 
 fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportPrismParams = parse_params(&schema_import_prism(), raw)?;
     let bytes = if let Some(path) = p.path.as_deref() {
-        read_binary_file(path, "archive")?
+        ctx.session.path_policy.read_binary_file(path, "archive", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         decode_base64(b64)?
     } else if let Some(raw_bytes) = p.bytes {
@@ -3198,7 +3237,7 @@ fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let report = if let Some(xml) = p.xml.as_deref() {
         import_pzfx_str(xml)?
     } else if let Some(path) = p.path.as_deref() {
-        let bytes = read_binary_file(path, "XML file")?;
+        let bytes = ctx.session.path_policy.read_binary_file(path, "XML file", MAX_XML_BYTES)?;
         import_pzfx_bytes(&bytes)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         let bytes = decode_base64(b64)?;
@@ -3308,7 +3347,7 @@ fn run_set_variable_role(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
     let final_role = var.role;
     let role_inferred = var.role_inferred;
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setVariableRole",
         "updated variable role",
@@ -3385,11 +3424,104 @@ fn schema_recode_levels() -> Value {
     )
 }
 
+struct NormalizedRangeBounds {
+    min_row: usize,
+    max_row: usize,
+    min_cs: (usize, usize),
+    max_cs: (usize, usize),
+}
+
+fn normalize_range_bounds(range: lumencraft_doc::SheetCellRange) -> NormalizedRangeBounds {
+    let min_row = range.start.row.min(range.end.row);
+    let max_row = range.start.row.max(range.end.row);
+    let a = (range.start.col, range.start.subcol);
+    let b = (range.end.col, range.end.subcol);
+    NormalizedRangeBounds { min_row, max_row, min_cs: a.min(b), max_cs: a.max(b) }
+}
+
+fn coord_in_sheet_range(range: lumencraft_doc::SheetCellRange, coord: CellCoord) -> bool {
+    let bounds = normalize_range_bounds(range);
+    let cs = (coord.col, coord.subcol);
+    coord.row >= bounds.min_row && coord.row <= bounds.max_row && cs >= bounds.min_cs && cs <= bounds.max_cs
+}
+
+fn ranges_overlap(a: lumencraft_doc::SheetCellRange, b: lumencraft_doc::SheetCellRange) -> bool {
+    let ab = normalize_range_bounds(a);
+    let bb = normalize_range_bounds(b);
+    ab.min_row <= bb.max_row && bb.min_row <= ab.max_row && ab.min_cs <= bb.max_cs && bb.min_cs <= ab.max_cs
+}
+
+fn linked_region_conflict_error(
+    sheet_id: &SheetId,
+    region: &lumencraft_doc::LinkedDataRegion,
+    action: &str,
+    coord: Option<CellCoord>,
+) -> EngineError {
+    let detail = match coord {
+        Some(c) => json!({
+            "sheet_id": sheet_id.as_str(),
+            "region_id": region.id,
+            "row": c.row,
+            "col": c.col,
+            "subcol": c.subcol,
+        }),
+        None => json!({
+            "sheet_id": sheet_id.as_str(),
+            "region_id": region.id,
+        }),
+    };
+    EngineError::with_code(
+        ErrorCode::Conflict,
+        format!("cannot {action} cells inside live linked region `{}` on `{sheet_id}`", region.id),
+    )
+    .with_remediation("Detach the link first (`table.clearCells` with `unlink: true` or re-import with `link: false`) before editing cells inside the linked region.")
+    .with_details(detail)
+}
+
+fn ensure_coord_outside_linked_regions(ds: &DataSheet, coord: CellCoord, action: &str) -> Result<(), EngineError> {
+    for region in &ds.linked_regions {
+        if coord_in_sheet_range(region.target_range, coord) {
+            return Err(linked_region_conflict_error(&ds.id, region, action, Some(coord)));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_coords_outside_linked_regions(ds: &DataSheet, coords: impl IntoIterator<Item = CellCoord>, action: &str) -> Result<(), EngineError> {
+    if ds.linked_regions.is_empty() {
+        return Ok(());
+    }
+    for coord in coords {
+        ensure_coord_outside_linked_regions(ds, coord, action)?;
+    }
+    Ok(())
+}
+
+fn ensure_range_outside_linked_regions(ds: &DataSheet, range: lumencraft_doc::SheetCellRange, action: &str) -> Result<(), EngineError> {
+    for region in &ds.linked_regions {
+        if ranges_overlap(region.target_range, range) {
+            return Err(linked_region_conflict_error(&ds.id, region, action, None));
+        }
+    }
+    Ok(())
+}
+
 fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: RecodeLevelsParams = parse_params(&schema_recode_levels(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
     let pairs = p.mappings.into_pairs();
     let doc = &mut ctx.session.doc;
+    if let Some(ds) = doc.data_sheet(&id)
+        && let TableArchetype::MultipleVariables(ref mv) = ds.archetype
+        && let Ok(col_idx) = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())
+    {
+        ensure_sheet_not_frozen(ds)?;
+        let rows = ds.archetype.row_count();
+        if rows > 0 {
+            let col_range = lumencraft_doc::SheetCellRange::new(CellCoord::new(0, col_idx, 0), CellCoord::new(rows - 1, col_idx, 0));
+            ensure_range_outside_linked_regions(ds, col_range, "recode")?;
+        }
+    }
     let mv = require_mv_table_mut(doc, &id)?;
     let col_idx = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())?;
     let var = mv
@@ -3397,7 +3529,7 @@ fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         .get_mut(col_idx)
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
     let recoded_count = var.recode_levels(&pairs);
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.recodeLevels",
         "recoded variable levels",
@@ -3519,7 +3651,7 @@ fn run_set_categorical_order(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         .get_mut(col_idx)
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
     var.level_order = spec;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCategoricalOrder",
         "updated categorical level order",
@@ -3561,6 +3693,9 @@ fn schema_set_calculated_variable() -> Value {
 fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetCalculatedVariableParams = parse_params(&schema_set_calculated_variable(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
     let doc = &mut ctx.session.doc;
 
     let info_snapshot = doc.data_sheet(&id).and_then(|ds| ds.info_sheet_id.as_ref()).and_then(|iid| doc.info_sheet(iid)).cloned();
@@ -3606,7 +3741,7 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     mv.variables[col_idx].set_calculated_formula(&p.formula);
 
     evaluate_data_sheet_calculated_variables(ds, info_snapshot.as_ref())?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCalculatedVariable",
         "updated calculated variable",
@@ -3791,7 +3926,7 @@ fn run_simulate_xy(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
         doc.select_in_navigator(&id)?;
     }
 
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.simulateXy",
         "simulated XY data sheet",
@@ -3888,7 +4023,7 @@ fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
     let (mut converted, preview) = convert_datasheet_archetype(&doc.data_sheets[idx], target_kind, allow_lossy)?;
     converted.id = sheet_id.clone();
     doc.data_sheets[idx] = converted;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
     Ok(CommandOutcome::mutated(
         "table.convertArchetype",
         format!("converted `{}` to {:?}", sheet_id.as_str(), target_kind),
@@ -4315,7 +4450,7 @@ struct TidyInputData {
     decimal_sep: char,
 }
 
-fn extract_tidy_data(p: &ImportTidyLongParams) -> Result<TidyInputData, EngineError> {
+fn extract_tidy_data(p: &ImportTidyLongParams, policy: &ExternalPathPolicy) -> Result<TidyInputData, EngineError> {
     let explicit_dec = parse_explicit_tidy_decimal(p.decimal_sep.as_deref())?;
     if let Some(rows_arr) = &p.rows {
         let mut rows = Vec::with_capacity(rows_arr.len());
@@ -4336,7 +4471,7 @@ fn extract_tidy_data(p: &ImportTidyLongParams) -> Result<TidyInputData, EngineEr
     let text = if let Some(inline) = &p.csv {
         inline.clone()
     } else if let Some(path) = &p.path {
-        read_utf8_file(path, "tidy file")?
+        policy.read_utf8_file(path, "tidy file", MAX_CSV_FILE_BYTES)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importTidyLong requires `rows` or `csv`")
             .with_remediation("Supply `rows`, inline `csv` text, or a file `path`."));
@@ -4394,7 +4529,7 @@ fn run_import_tidy_long(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         Some(raw_kind) => parse_target_archetype_kind(raw_kind)?,
         None => TargetArchetypeKind::Grouped,
     };
-    let tidy = extract_tidy_data(&p)?;
+    let tidy = extract_tidy_data(&p, &ctx.session.path_policy)?;
     let mapping = resolve_tidy_mapping(&p, &tidy.headers)?;
 
     let imported = pivot_tidy_long_to_datasheet(title, &tidy.headers, &tidy.rows, &mapping, target_kind, tidy.decimal_sep)?;
@@ -4612,7 +4747,7 @@ fn run_randomize_groups(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "failed resolving InfoSheet for ARRIVE constants"))?;
     rand_out.data_sheet.info_sheet_id = Some(info_id.clone());
     doc.add_data_sheet(rand_out.data_sheet)?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, &[id.clone(), info_id.clone()], false)?;
 
     let constants_map: serde_json::Map<String, Value> = rand_out.arrive_constants.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
     Ok(CommandOutcome::mutated(
@@ -4718,7 +4853,11 @@ fn run_random_sample_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcom
         sampled.info_sheet_id = Some(iid.clone());
     }
     doc.add_data_sheet(sampled)?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let mut dirty_seeds = vec![id.clone()];
+    if let Some(ref iid) = info_id {
+        dirty_seeds.push(iid.clone());
+    }
+    let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
 
     Ok(CommandOutcome::mutated(
         "table.randomSampleRows",
@@ -4911,7 +5050,7 @@ fn run_simulate_distributions(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let sheet = simulate_distribution_columns(&cfg)?;
     let kind = sheet.archetype.kind();
     doc.add_data_sheet(sheet)?;
-    let recalc = recalculate_with_links(doc, false)?;
+    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
 
     Ok(CommandOutcome::mutated(
         "table.simulateDistributions",
@@ -5096,5 +5235,59 @@ mod tests {
             }),
         )
         .expect("importTidyLong");
+    }
+
+    #[test]
+    fn nested_subcolumn_titles_preserve_biological_unit_width_and_checkpoint_roundtrip() -> Result<(), String> {
+        let mut s = Session::new();
+        // rows (4) > biological_units (2)
+        s.execute("sheet.createData", json!({ "sheet_id": "nest-tall", "archetype": "nested", "cols": 2, "rows": 4, "replicates": 2 }))
+            .map_err(|e| e.to_string())?;
+        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "titles": ["Unit 1", "Unit 2"] }))
+            .map_err(|e| e.to_string())?;
+        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "subcol": 1, "title": "Shared Bio 2" })).map_err(|e| e.to_string())?;
+
+        // Out-of-bounds subcolumn must be rejected against biological-unit width (2), not row count (4).
+        let oob = s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 2, "title": "Bad" }));
+        assert!(oob.as_ref().is_err_and(|e| e.code == ErrorCode::BadInput), "expected BadInput for subcol >= width, got {oob:?}");
+
+        // Oversized title must be rejected by validate_title.
+        let oversized = "T".repeat(lumencraft_doc::MAX_TITLE_BYTES + 1);
+        let too_long = s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": oversized }));
+        assert!(too_long.is_err(), "expected oversized subcolumn title to fail validation");
+
+        let ds = s.document().data_sheet(&SheetId::new("nest-tall")).ok_or_else(|| String::from("missing nest-tall"))?;
+        let TableArchetype::Nested(nt) = &ds.archetype else {
+            return Err(String::from("expected Nested archetype"));
+        };
+        nt.validate().map_err(|e| e.to_string())?;
+        assert_eq!(nt.groups[0].subcolumn_titles, vec!["Unit 1", "Shared Bio 2"]);
+        assert_eq!(nt.groups[1].subcolumn_titles.len(), 2);
+        assert_eq!(nt.groups[1].subcolumn_titles[1], "Shared Bio 2");
+
+        // Checkpoint save + mutate + restore exercises NestedTable::deserialize -> validate().
+        s.execute("project.createCheckpoint", json!({ "name": "cp-nested" })).map_err(|e| e.to_string())?;
+        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": "Temp" }))
+            .map_err(|e| e.to_string())?;
+        s.execute("project.restoreCheckpoint", json!({ "name": "cp-nested" })).map_err(|e| e.to_string())?;
+        let ds_restored = s.document().data_sheet(&SheetId::new("nest-tall")).ok_or_else(|| String::from("missing restored nest-tall"))?;
+        let TableArchetype::Nested(nt_restored) = &ds_restored.archetype else {
+            return Err(String::from("expected Nested archetype after restore"));
+        };
+        assert_eq!(nt_restored.groups[0].subcolumn_titles, vec!["Unit 1", "Shared Bio 2"]);
+
+        // rows (2) < biological_units (4)
+        s.execute("sheet.createData", json!({ "sheet_id": "nest-wide", "archetype": "nested", "cols": 1, "rows": 2, "replicates": 4 }))
+            .map_err(|e| e.to_string())?;
+        s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-wide", "col": 0, "subcol": 3, "title": "Unit 4" }))
+            .map_err(|e| e.to_string())?;
+        let ds_wide = s.document().data_sheet(&SheetId::new("nest-wide")).ok_or_else(|| String::from("missing nest-wide"))?;
+        let TableArchetype::Nested(nt_wide) = &ds_wide.archetype else {
+            return Err(String::from("expected Nested archetype for nest-wide"));
+        };
+        nt_wide.validate().map_err(|e| e.to_string())?;
+        assert_eq!(nt_wide.groups[0].subcolumn_titles.len(), 4);
+        assert_eq!(nt_wide.groups[0].subcolumn_titles[3], "Unit 4");
+        Ok(())
     }
 }

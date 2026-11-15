@@ -2,7 +2,6 @@
 //! schema migration, dimension/float validation, and circular dependency guards.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use lumencraft_doc::{
@@ -21,6 +20,9 @@ const MANIFEST_PATH: &str = "manifest.json";
 const DOCUMENT_PATH: &str = "document.json";
 const SHEETS_DIR: &str = "sheets";
 const FORMAT_MAGIC: &str = "lumencraft-archive";
+
+/// Maximum byte length permitted when reading a `.lumencraft`, `.lctemplate`, or `.prism` archive file.
+pub const MAX_ARCHIVE_FILE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Kind of native LumenCraft ZIP archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -146,6 +148,16 @@ fn platform_write_atomic(_path: &Path, _bytes: &[u8]) -> Result<(), FormatError>
     Err(FormatError::Io(String::from("atomic file writes are not supported on wasm32")))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn platform_read_regular_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, FormatError> {
+    Ok(lumencraft_platform::fs::read_regular_file_bytes(path, max_bytes)?)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn platform_read_regular_file(_path: &Path, _max_bytes: usize) -> Result<Vec<u8>, FormatError> {
+    Err(FormatError::Io(String::from("filesystem reads are not supported on wasm32")))
+}
+
 /// Write a `.lumencraft` archive to disk.
 pub fn save_project_file(path: &Path, doc: &ProjectDocument) -> Result<(), FormatError> {
     let bytes = save_project_bytes(doc)?;
@@ -155,7 +167,7 @@ pub fn save_project_file(path: &Path, doc: &ProjectDocument) -> Result<(), Forma
 
 /// Read a `.lumencraft` archive from disk.
 pub fn open_project_file(path: &Path) -> Result<ProjectDocument, FormatError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = platform_read_regular_file(path, MAX_ARCHIVE_FILE_BYTES)?;
     open_project_bytes(&bytes)
 }
 
@@ -168,7 +180,7 @@ pub fn save_template_file(path: &Path, doc: &ProjectDocument) -> Result<(), Form
 
 /// Read a `.lctemplate` archive from disk.
 pub fn open_template_file(path: &Path) -> Result<ProjectDocument, FormatError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = platform_read_regular_file(path, MAX_ARCHIVE_FILE_BYTES)?;
     open_template_bytes(&bytes)
 }
 
@@ -265,15 +277,146 @@ fn parse_and_validate_manifest(manifest_text: &str) -> Result<ArchiveManifest, F
     Ok(manifest)
 }
 
+const MAX_MIGRATION_JSON_NODES: usize = 1_000_000;
+const MIN_MIGRATION_JSON_BYTES: usize = 1_048_576;
+const MAX_MIGRATION_JSON_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct DocumentSchemaPeek {
+    #[serde(default)]
+    schema_version: Option<u32>,
+}
+
+struct JsonDomBudget {
+    remaining_nodes: usize,
+    remaining_bytes: usize,
+}
+
+impl JsonDomBudget {
+    fn charge(&mut self, nodes: usize, bytes: usize) -> Result<(), String> {
+        if nodes > self.remaining_nodes {
+            return Err(format!("JSON DOM node count exceeds migration limit {MAX_MIGRATION_JSON_NODES}"));
+        }
+        if bytes > self.remaining_bytes {
+            return Err(String::from("JSON DOM allocation exceeds migration memory budget"));
+        }
+        self.remaining_nodes -= nodes;
+        self.remaining_bytes -= bytes;
+        Ok(())
+    }
+}
+
+struct BoundedValueSeed<'a>(&'a mut JsonDomBudget);
+
+impl<'de> serde::de::DeserializeSeed<'de> for BoundedValueSeed<'_> {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(BoundedValueVisitor(self.0))
+    }
+}
+
+struct BoundedValueVisitor<'a>(&'a mut JsonDomBudget);
+
+impl<'de> serde::de::Visitor<'de> for BoundedValueVisitor<'_> {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("any valid bounded JSON value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::Bool(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::from(v))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::from(v))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        serde_json::Number::from_f64(v).map(serde_json::Value::Number).ok_or_else(|| serde::de::Error::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>().saturating_add(v.len())).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::String(v.to_owned()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>().saturating_add(v.len())).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::String(v))
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        serde::de::DeserializeSeed::deserialize(BoundedValueSeed(self.0), deserializer)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        let mut vec = Vec::new();
+        while let Some(elem) = seq.next_element_seed(BoundedValueSeed(self.0))? {
+            vec.push(elem);
+        }
+        Ok(serde_json::Value::Array(vec))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        let mut obj = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            self.0.charge(0, key.len().saturating_add(64)).map_err(serde::de::Error::custom)?;
+            let val = map.next_value_seed(BoundedValueSeed(self.0))?;
+            obj.insert(key, val);
+        }
+        Ok(serde_json::Value::Object(obj))
+    }
+}
+
+fn parse_bounded_json_value(doc_bytes: &[u8]) -> Result<serde_json::Value, FormatError> {
+    let max_bytes = doc_bytes.len().saturating_mul(6).clamp(MIN_MIGRATION_JSON_BYTES, MAX_MIGRATION_JSON_BYTES);
+    let mut budget = JsonDomBudget { remaining_nodes: MAX_MIGRATION_JSON_NODES, remaining_bytes: max_bytes };
+    let mut de = serde_json::Deserializer::from_slice(doc_bytes);
+    let val = serde::de::DeserializeSeed::deserialize(BoundedValueSeed(&mut budget), &mut de)?;
+    de.end()?;
+    Ok(val)
+}
+
 fn decode_and_validate_document(doc_bytes: &[u8], manifest_schema_version: u32) -> Result<ProjectDocument, FormatError> {
-    let raw_value: serde_json::Value = serde_json::from_slice(doc_bytes)?;
-    let doc_version =
-        raw_value.get("schema_version").and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(manifest_schema_version);
+    let peek: DocumentSchemaPeek = serde_json::from_slice(doc_bytes)?;
+    let doc_version = peek.schema_version.unwrap_or(manifest_schema_version);
     if doc_version > CURRENT_SCHEMA_VERSION {
         return Err(FormatError::UnsupportedSchemaVersion { version: doc_version, max_supported: CURRENT_SCHEMA_VERSION });
     }
-    let migrated_value = migrate_document_json(raw_value, doc_version)?;
-    let doc: ProjectDocument = serde_json::from_value(migrated_value)?;
+    let doc: ProjectDocument = if doc_version == CURRENT_SCHEMA_VERSION && peek.schema_version.is_some() {
+        let mut parsed: ProjectDocument = serde_json::from_slice(doc_bytes)?;
+        parsed.schema_version = CURRENT_SCHEMA_VERSION;
+        parsed
+    } else {
+        let raw_value = parse_bounded_json_value(doc_bytes)?;
+        let migrated_value = migrate_document_json(raw_value, doc_version)?;
+        serde_json::from_value(migrated_value)?
+    };
     validate_project_document(&doc)?;
     Ok(doc)
 }
@@ -407,21 +550,18 @@ fn resolve_contained_path(canon_root: &Path, rel: &str, must_exist: bool) -> Res
 
 fn read_contained_file(canon_root: &Path, rel: &str, max_entry_bytes: u64, remaining_budget: &mut u64) -> Result<Vec<u8>, FormatError> {
     let resolved = resolve_contained_path(canon_root, rel, true)?;
-    let meta = std::fs::metadata(&resolved)?;
-    if !meta.is_file() {
-        return Err(FormatError::Io(format!("entry `{rel}` is not a regular file")));
-    }
     let entry_cap = max_entry_bytes.min(*remaining_budget);
-    if meta.len() > entry_cap {
-        return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` size {} exceeds security limit {entry_cap}", meta.len()) });
-    }
-    let file = std::fs::File::open(&resolved)?;
-    let mut reader = file.take(entry_cap.saturating_add(1));
-    let mut buf = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    reader.read_to_end(&mut buf)?;
-    if (buf.len() as u64) > entry_cap {
-        return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` payload exceeds security limit") });
-    }
+    let cap_usize = usize::try_from(entry_cap).unwrap_or(usize::MAX);
+    let buf = match platform_read_regular_file(&resolved, cap_usize) {
+        Ok(bytes) => bytes,
+        Err(FormatError::FileTooLarge { actual_bytes: Some(actual), .. }) => {
+            return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` size {actual} exceeds security limit {entry_cap}") });
+        }
+        Err(FormatError::FileTooLarge { actual_bytes: None, .. }) => {
+            return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` payload exceeds security limit") });
+        }
+        Err(err) => return Err(err),
+    };
     *remaining_budget = remaining_budget.saturating_sub(buf.len() as u64);
     Ok(buf)
 }
@@ -481,13 +621,8 @@ fn collect_prior_manifest_csv_paths(canon_root: &Path) -> Result<Vec<String>, Fo
     let Ok(manifest_path) = resolve_contained_path(canon_root, MANIFEST_PATH, true) else {
         return Ok(Vec::new());
     };
-    let Ok(meta) = std::fs::metadata(&manifest_path) else {
-        return Ok(Vec::new());
-    };
-    if !meta.is_file() || meta.len() > crate::zip::MAX_ZIP_ENTRY_BYTES {
-        return Ok(Vec::new());
-    }
-    let Ok(bytes) = std::fs::read(&manifest_path) else {
+    let cap = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
+    let Ok(bytes) = platform_read_regular_file(&manifest_path, cap) else {
         return Ok(Vec::new());
     };
     let Ok(manifest) = serde_json::from_slice::<ArchiveManifest>(&bytes) else {
@@ -508,7 +643,7 @@ fn write_file_atomically(canon_root: &Path, rel: &str, bytes: &[u8]) -> Result<(
         && !meta.file_type().is_symlink()
         && meta.is_file()
         && meta.len() == bytes.len() as u64
-        && let Ok(existing) = std::fs::read(&target)
+        && let Ok(existing) = platform_read_regular_file(&target, bytes.len())
         && existing == bytes
     {
         return Ok(());
@@ -809,25 +944,241 @@ pub fn validate_project_document(doc: &ProjectDocument) -> Result<(), FormatErro
     for ds in &doc.data_sheets {
         register_unique_sheet_id(&mut seen_ids, &ds.id)?;
         validate_data_sheet(ds)?;
+        validate_archetype_extra_floats(&ds.archetype, ds.id.as_str())?;
+        validate_floating_notes(&ds.floating_notes, ds.id.as_str())?;
     }
     for info in &doc.info_sheets {
         register_unique_sheet_id(&mut seen_ids, &info.id)?;
         validate_info_sheet(info)?;
+        validate_floating_notes(&info.floating_notes, info.id.as_str())?;
     }
     for res in &doc.result_sheets {
         register_unique_sheet_id(&mut seen_ids, &res.id)?;
         validate_result_sheet(res)?;
+        if let Some(data) = &res.analyzable_data {
+            validate_archetype_extra_floats(&data.archetype, res.id.as_str())?;
+            validate_floating_notes(&data.floating_notes, res.id.as_str())?;
+        }
+        validate_analysis_kind_floats(&res.analysis, res.id.as_str())?;
+        validate_floating_notes(&res.floating_notes, res.id.as_str())?;
     }
     for graph in &doc.graph_sheets {
         register_unique_sheet_id(&mut seen_ids, &graph.id)?;
-        graph.spec.validate()?;
+        if let Some(field) = graph.first_non_finite_float() {
+            return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", graph.id) });
+        }
+        graph.validate()?;
     }
     for layout in &doc.layout_sheets {
         register_unique_sheet_id(&mut seen_ids, &layout.id)?;
-        validate_title(&layout.title)?;
+        if let Some(field) = layout.first_non_finite_float() {
+            return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", layout.id) });
+        }
+        layout.validate()?;
     }
 
     detect_dependency_cycles(doc)
+}
+
+fn check_finite(value: f64, location: impl FnOnce() -> String) -> Result<(), FormatError> {
+    if value.is_finite() { Ok(()) } else { Err(FormatError::NonFiniteFloat { location: location() }) }
+}
+
+fn check_opt_finite(value: Option<f64>, location: impl FnOnce() -> String) -> Result<(), FormatError> {
+    if let Some(v) = value { check_finite(v, location) } else { Ok(()) }
+}
+
+fn validate_floating_notes(notes: &[lumencraft_doc::FloatingNote], sheet_id: &str) -> Result<(), FormatError> {
+    for (idx, note) in notes.iter().enumerate() {
+        let b = note.bounds_pt;
+        if !b.x.is_finite() || !b.y.is_finite() || !b.width.is_finite() || !b.height.is_finite() {
+            return Err(FormatError::NonFiniteFloat { location: format!("{sheet_id}.floating_notes[{idx}].bounds_pt") });
+        }
+    }
+    Ok(())
+}
+
+fn validate_archetype_extra_floats(arch: &lumencraft_doc::TableArchetype, ctx: &str) -> Result<(), FormatError> {
+    if let lumencraft_doc::TableArchetype::Grouped(t) = arch
+        && let Some(spacing) = &t.row_numeric_spacing
+    {
+        for (row, maybe_v) in spacing.iter().enumerate() {
+            check_opt_finite(*maybe_v, || format!("{ctx}.row_numeric_spacing[{row}]"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_math_transform_preset(preset: &lumencraft_doc::MathTransformPreset, location_prefix: &str) -> Result<(), FormatError> {
+    match preset {
+        lumencraft_doc::MathTransformPreset::LinearScale { slope, intercept } => {
+            check_finite(*slope, || format!("{location_prefix}.slope"))?;
+            check_finite(*intercept, || format!("{location_prefix}.intercept"))?;
+        }
+        lumencraft_doc::MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor } => {
+            check_finite(*molar_unit_factor, || format!("{location_prefix}.molar_unit_factor"))?;
+        }
+        lumencraft_doc::MathTransformPreset::Ln
+        | lumencraft_doc::MathTransformPreset::Log10
+        | lumencraft_doc::MathTransformPreset::Log2
+        | lumencraft_doc::MathTransformPreset::Exp10
+        | lumencraft_doc::MathTransformPreset::Exp
+        | lumencraft_doc::MathTransformPreset::Reciprocal
+        | lumencraft_doc::MathTransformPreset::Sqrt
+        | lumencraft_doc::MathTransformPreset::Square
+        | lumencraft_doc::MathTransformPreset::Logit
+        | lumencraft_doc::MathTransformPreset::Probit
+        | lumencraft_doc::MathTransformPreset::ArcsinSqrt => {}
+    }
+    Ok(())
+}
+
+fn validate_normalize_anchor(anchor: &lumencraft_doc::NormalizeAnchor, location: &str) -> Result<(), FormatError> {
+    if let lumencraft_doc::NormalizeAnchor::FixedValue(v) = anchor {
+        check_finite(*v, || location.to_owned())?;
+    }
+    Ok(())
+}
+
+fn validate_transform_floats(transform: &lumencraft_doc::TransformAnalysisSpec, sheet_id: &str) -> Result<(), FormatError> {
+    match transform {
+        lumencraft_doc::TransformAnalysisSpec::Math { x_transform, y_transform, .. } => {
+            if let Some(p) = x_transform {
+                validate_math_transform_preset(p, &format!("{sheet_id}.analysis.x_transform"))?;
+            }
+            if let Some(p) = y_transform {
+                validate_math_transform_preset(p, &format!("{sheet_id}.analysis.y_transform"))?;
+            }
+        }
+        lumencraft_doc::TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. } => {
+            validate_normalize_anchor(zero_anchor, &format!("{sheet_id}.analysis.zero_anchor"))?;
+            validate_normalize_anchor(hundred_anchor, &format!("{sheet_id}.analysis.hundred_anchor"))?;
+        }
+        lumencraft_doc::TransformAnalysisSpec::Simulate { x_min, x_max, parameters, noise, .. } => {
+            check_finite(*x_min, || format!("{sheet_id}.analysis.simulate.x_min"))?;
+            check_finite(*x_max, || format!("{sheet_id}.analysis.simulate.x_max"))?;
+            for (idx, (_, val)) in parameters.iter().enumerate() {
+                check_finite(*val, || format!("{sheet_id}.analysis.simulate.parameters[{idx}]"))?;
+            }
+            match noise {
+                lumencraft_doc::SimulationNoise::Gaussian { sd } => {
+                    check_finite(*sd, || format!("{sheet_id}.analysis.simulate.noise.sd"))?;
+                }
+                lumencraft_doc::SimulationNoise::RelativePercent { cv_percent } => {
+                    check_finite(*cv_percent, || format!("{sheet_id}.analysis.simulate.noise.cv_percent"))?;
+                }
+                lumencraft_doc::SimulationNoise::None | lumencraft_doc::SimulationNoise::Poisson => {}
+            }
+        }
+        lumencraft_doc::TransformAnalysisSpec::RemoveBaseline { .. }
+        | lumencraft_doc::TransformAnalysisSpec::Transpose { .. }
+        | lumencraft_doc::TransformAnalysisSpec::PruneRows { .. }
+        | lumencraft_doc::TransformAnalysisSpec::SelectAndTransform { .. }
+        | lumencraft_doc::TransformAnalysisSpec::RandomSample { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_nonlinear_fit_floats(fit: &lumencraft_doc::NonlinearFitSpec, sheet_id: &str) -> Result<(), FormatError> {
+    if let lumencraft_doc::FitMethod::RoutOutlierElimination { fdr_q_percent } = fit.method {
+        check_finite(fdr_q_percent, || format!("{sheet_id}.analysis.fit_method.fdr_q_percent"))?;
+    }
+    if let lumencraft_doc::WeightingScheme::GeneralPowerY(k) = fit.weighting {
+        check_finite(k, || format!("{sheet_id}.analysis.weighting.power"))?;
+    }
+    for (idx, rule) in fit.parameter_rules.iter().enumerate() {
+        check_opt_finite(rule.initial_override, || format!("{sheet_id}.parameter_rules[{idx}].initial_override"))?;
+        check_opt_finite(rule.lower_bound, || format!("{sheet_id}.parameter_rules[{idx}].lower_bound"))?;
+        check_opt_finite(rule.upper_bound, || format!("{sheet_id}.parameter_rules[{idx}].upper_bound"))?;
+        match &rule.scope {
+            lumencraft_doc::ParameterScope::Constant(v) => {
+                check_finite(*v, || format!("{sheet_id}.parameter_rules[{idx}].constant"))?;
+            }
+            lumencraft_doc::ParameterScope::PerDatasetConstant(entries) => {
+                for (entry_idx, (_, val)) in entries.iter().enumerate() {
+                    check_finite(*val, || format!("{sheet_id}.parameter_rules[{idx}].per_dataset[{entry_idx}]"))?;
+                }
+            }
+            lumencraft_doc::ParameterScope::Local
+            | lumencraft_doc::ParameterScope::SharedGlobal
+            | lumencraft_doc::ParameterScope::HookedConstant(_)
+            | lumencraft_doc::ParameterScope::ColumnTitleConstant => {}
+        }
+    }
+    if let Some((lo, hi)) = fit.x_range_filter {
+        check_opt_finite(lo, || format!("{sheet_id}.analysis.x_range_filter.min"))?;
+        check_opt_finite(hi, || format!("{sheet_id}.analysis.x_range_filter.max"))?;
+    }
+    if let Some((lo, hi)) = fit.y_range_filter {
+        check_opt_finite(lo, || format!("{sheet_id}.analysis.y_range_filter.min"))?;
+        check_opt_finite(hi, || format!("{sheet_id}.analysis.y_range_filter.max"))?;
+    }
+    check_opt_finite(fit.plot_x_min, || format!("{sheet_id}.analysis.plot_x_min"))?;
+    check_opt_finite(fit.plot_x_max, || format!("{sheet_id}.analysis.plot_x_max"))
+}
+
+fn validate_analysis_kind_floats(spec: &lumencraft_doc::AnalysisSpec, sheet_id: &str) -> Result<(), FormatError> {
+    check_finite(spec.confidence_level.percent(), || format!("{sheet_id}.analysis.confidence_level"))?;
+    match &spec.kind {
+        lumencraft_doc::AnalysisKind::Transform(transform) => validate_transform_floats(transform, sheet_id),
+        lumencraft_doc::AnalysisKind::DescriptiveStats(d) => {
+            check_opt_finite(d.custom_upper_percentile, || format!("{sheet_id}.analysis.custom_upper_percentile"))?;
+            check_opt_finite(d.hypothetical_value, || format!("{sheet_id}.analysis.hypothetical_value"))
+        }
+        lumencraft_doc::AnalysisKind::OutlierDetection(o) => match o {
+            lumencraft_doc::OutlierSpec::Grubbs { alpha, .. } => check_finite(*alpha, || format!("{sheet_id}.analysis.outlier.alpha")),
+            lumencraft_doc::OutlierSpec::Rout { fdr_q_percent } => {
+                check_finite(*fdr_q_percent, || format!("{sheet_id}.analysis.outlier.fdr_q_percent"))
+            }
+        },
+        lumencraft_doc::AnalysisKind::TwoGroupComparison(t) => match t.method {
+            lumencraft_doc::TwoGroupMethod::OneSampleT { hypothetical } | lumencraft_doc::TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
+                check_finite(hypothetical, || format!("{sheet_id}.analysis.hypothetical"))
+            }
+            lumencraft_doc::TwoGroupMethod::UnpairedT
+            | lumencraft_doc::TwoGroupMethod::WelchT
+            | lumencraft_doc::TwoGroupMethod::PairedT
+            | lumencraft_doc::TwoGroupMethod::RatioPairedT
+            | lumencraft_doc::TwoGroupMethod::LognormalUnpairedT
+            | lumencraft_doc::TwoGroupMethod::MannWhitneyU
+            | lumencraft_doc::TwoGroupMethod::WilcoxonSignedRank
+            | lumencraft_doc::TwoGroupMethod::KolmogorovSmirnov
+            | lumencraft_doc::TwoGroupMethod::PairedSignTest => Ok(()),
+        },
+        lumencraft_doc::AnalysisKind::MultipleRowTTests(s) => {
+            check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+        }
+        lumencraft_doc::AnalysisKind::OneWayAnova(s) => {
+            check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+        }
+        lumencraft_doc::AnalysisKind::FactorialAnova(s) => {
+            check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+        }
+        lumencraft_doc::AnalysisKind::NestedComparison(s) => {
+            check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+        }
+        lumencraft_doc::AnalysisKind::Contingency(c) => {
+            if let Some(props) = &c.expected_proportions {
+                for (idx, p) in props.iter().enumerate() {
+                    check_finite(*p, || format!("{sheet_id}.analysis.expected_proportions[{idx}]"))?;
+                }
+            }
+            check_opt_finite(c.null_proportion, || format!("{sheet_id}.analysis.null_proportion"))
+        }
+        lumencraft_doc::AnalysisKind::Survival(s) => match s {
+            lumencraft_doc::SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. } => {
+                check_finite(multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+            }
+            lumencraft_doc::SurvivalAnalysisSpec::CoxProportionalHazards { .. } => Ok(()),
+        },
+        lumencraft_doc::AnalysisKind::NonlinearRegression(fit) => validate_nonlinear_fit_floats(fit, sheet_id),
+        lumencraft_doc::AnalysisKind::BlandAltman(_)
+        | lumencraft_doc::AnalysisKind::PassingBablok(_)
+        | lumencraft_doc::AnalysisKind::RocCurve(_)
+        | lumencraft_doc::AnalysisKind::GeneralizedLinearModel(_)
+        | lumencraft_doc::AnalysisKind::Multivariate(_)
+        | lumencraft_doc::AnalysisKind::LinearRegression(_) => Ok(()),
+    }
 }
 
 fn register_unique_sheet_id(seen: &mut HashSet<SheetId>, id: &SheetId) -> Result<(), FormatError> {
@@ -841,10 +1192,15 @@ fn register_unique_sheet_id(seen: &mut HashSet<SheetId>, id: &SheetId) -> Result
 }
 
 fn validate_data_sheet(ds: &DataSheet) -> Result<(), FormatError> {
-    validate_title(&ds.title)?;
+    ds.validate()?;
     let ctx = ds.id.as_str();
     match &ds.archetype {
         TableArchetype::Xy(t) => {
+            if let lumencraft_doc::XColumnMode::GeneratedSequence { start, step, .. } = t.x_mode
+                && (!start.is_finite() || !step.is_finite())
+            {
+                return Err(FormatError::NonFiniteFloat { location: format!("{ctx}.x_mode") });
+            }
             validate_title(&t.x_title)?;
             validate_rows(t.row_count())?;
             validate_data_sets(t.data_sets.len())?;

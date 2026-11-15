@@ -63,6 +63,9 @@ impl<'a> TransformContext<'a> {
                     .iter()
                     .find(|r| &r.id == result_sheet_id)
                     .ok_or_else(|| TransformError::MissingHook { description: format!("ResultSheet `{result_sheet_id}` not found") })?;
+                if let ResultStatus::Failed { message, .. } = &res.status {
+                    return Err(TransformError::MissingHook { description: format!("upstream ResultSheet `{result_sheet_id}` failed: {message}") });
+                }
                 res.lookup_scalar(parameter_key, *data_set_index).ok_or_else(|| TransformError::MissingHook {
                     description: format!("scalar `{parameter_key}` not found on ResultSheet `{result_sheet_id}`"),
                 })
@@ -164,7 +167,7 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
                     ("Equation", ResultCell::Text(equation_id.clone())),
                     ("Rows", ResultCell::Number { value: *row_count as f64, prefix: None, units: None }),
                     ("Replicates", ResultCell::Number { value: *replicates as f64, prefix: None, units: None }),
-                    ("Seed", ResultCell::Number { value: *seed as f64, prefix: None, units: None }),
+                    ("Seed", ResultCell::Text(seed.to_string())),
                 ],
                 Vec::new(),
             );
@@ -189,7 +192,7 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
                 vec![
                     ("Sample size", ResultCell::Number { value: *sample_size as f64, prefix: None, units: None }),
                     ("Population size", ResultCell::Number { value: population_size as f64, prefix: None, units: None }),
-                    ("Seed", ResultCell::Number { value: *seed as f64, prefix: None, units: None }),
+                    ("Seed", ResultCell::Text(seed.to_string())),
                     ("Stratify column", ResultCell::Text(stratify_label)),
                     ("Proportional allocation", ResultCell::Boolean(*proportional_allocation)),
                 ],

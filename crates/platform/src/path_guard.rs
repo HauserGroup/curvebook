@@ -51,7 +51,7 @@ pub const PATH_PARAM_KEYS: &[&str] = &[
 
 /// Canonicalized `--workdir` guard rejecting parent traversal (`..`), outside paths, and symlink escapes.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkdirGuard {
     canonical_root: PathBuf,
 }
@@ -97,11 +97,43 @@ impl WorkdirGuard {
         }
         Ok(resolved)
     }
+
+    /// Resolve `raw_path` inside [`Self::canonical_root`] and verify it names an existing regular file.
+    ///
+    /// Inspects file metadata without opening the target, rejecting directories, FIFOs, sockets, and
+    /// device nodes cleanly before any read begins.
+    ///
+    /// # Errors
+    /// Returns [`PlatformError::InvalidPath`] for blank paths, NUL bytes, or non-regular files,
+    /// [`PlatformError::PathEscape`] if `raw_path` traverses or symlinks outside the workdir, or
+    /// [`PlatformError::Io`] if metadata inspection fails.
+    pub fn resolve_existing_file(&self, raw_path: &str) -> Result<PathBuf, PlatformError> {
+        let resolved = self.resolve(raw_path)?;
+        ensure_regular_file(&resolved)?;
+        Ok(resolved)
+    }
+}
+
+/// Verify via non-blocking metadata inspection that `path` points to an existing regular file.
+///
+/// Follows symlinks at OS metadata level without opening FIFOs or special device files.
+///
+/// # Errors
+/// Returns [`PlatformError::Io`] if `path` cannot be inspected, or [`PlatformError::InvalidPath`]
+/// if `path` refers to a directory, FIFO, socket, or device node rather than a regular file.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn ensure_regular_file(path: &Path) -> Result<(), PlatformError> {
+    let meta =
+        fs::metadata(path).map_err(|err| PlatformError::Io { context: format!("inspect file `{}`", path.display()), message: err.to_string() })?;
+    if !meta.is_file() {
+        return Err(PlatformError::InvalidPath { reason: format!("path `{}` must be a regular file", path.display()) });
+    }
+    Ok(())
 }
 
 /// Strategy for resolving file paths in headless scripts, manifests, and guarded host adapters.
 #[cfg(not(target_arch = "wasm32"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PathResolver {
     /// Strict containment inside `--workdir`.
     Sandboxed(WorkdirGuard),
@@ -238,7 +270,7 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{PathResolver, WorkdirGuard};
+    use super::{PathResolver, WorkdirGuard, ensure_regular_file};
     use crate::PlatformError;
 
     static TEST_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -303,6 +335,53 @@ mod tests {
         symlink(outside.join("does_not_exist"), &dangling_link).unwrap();
         assert!(matches!(guard.resolve("dangling_link"), Err(PlatformError::PathEscape { .. })));
         assert!(matches!(guard.resolve("dangling_link/child.txt"), Err(PlatformError::PathEscape { .. })));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&outside);
+    }
+
+    #[test]
+    fn resolve_existing_file_allows_regular_files_and_rejects_directories_and_non_regular_targets() {
+        let dir = temp_dir("regular-file");
+        let outside = temp_dir("regular-outside");
+        let guard = WorkdirGuard::new(&dir).unwrap();
+
+        let good_file = dir.join("inside.csv");
+        std::fs::write(&good_file, "a,b\n1,2\n").unwrap();
+        let resolved = guard.resolve_existing_file("inside.csv").unwrap();
+        assert_eq!(resolved, std::fs::canonicalize(&good_file).unwrap());
+
+        let subdir = dir.join("subdir");
+        std::fs::create_dir_all(&subdir).unwrap();
+        assert!(matches!(guard.resolve_existing_file("subdir"), Err(PlatformError::InvalidPath { .. })));
+        assert!(matches!(guard.resolve_existing_file("missing.csv"), Err(PlatformError::Io { .. })));
+
+        let outside_file = outside.join("secret.csv");
+        std::fs::write(&outside_file, "secret").unwrap();
+        assert!(matches!(guard.resolve_existing_file(&outside_file.to_string_lossy()), Err(PlatformError::PathEscape { .. })));
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            let link_to_outside = dir.join("escape.csv");
+            symlink(&outside_file, &link_to_outside).unwrap();
+            assert!(matches!(guard.resolve_existing_file("escape.csv"), Err(PlatformError::PathEscape { .. })));
+
+            let dev_null = std::path::Path::new("/dev/null");
+            if dev_null.exists() {
+                assert!(matches!(ensure_regular_file(dev_null), Err(PlatformError::InvalidPath { .. })));
+                let link_to_dev_null = dir.join("devnull_link");
+                symlink(dev_null, &link_to_dev_null).unwrap();
+                assert!(matches!(guard.resolve_existing_file("devnull_link"), Err(PlatformError::PathEscape { .. })));
+            }
+
+            let fifo = dir.join("pipe.csv");
+            if let Ok(status) = std::process::Command::new("mkfifo").arg(&fifo).status()
+                && status.success()
+            {
+                assert!(matches!(guard.resolve_existing_file("pipe.csv"), Err(PlatformError::InvalidPath { .. })));
+            }
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
         let _ = std::fs::remove_dir_all(&outside);

@@ -53,7 +53,7 @@
 
 use lumencraft_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
 use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::student_t_two_sided_isf;
+use lumencraft_math::dist::{norm_two_sided_isf, student_t_two_sided_isf};
 use lumencraft_math::linalg::{DenseMatrix, qr, qr_col_pivoted};
 use lumencraft_math::roots::{RootOptions, brent_root};
 use lumencraft_math::special::deviance_bd0;
@@ -62,13 +62,16 @@ use lumencraft_math::sum::NeumaierSum;
 use crate::diagnostics::{
     AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, HomoscedasticityResult, LackOfFitResult, LikelihoodRatioResult,
     NormalityTestResult, RoutDetectionResult, RunsTestResult, anderson_darling_test, compare_models_aicc, compare_models_f_test, compare_models_lrt,
-    compare_models_lrt_deviance, compute_covariance_diagnostics, compute_hougaard_skewness_into, compute_information_criteria,
-    compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test, lilliefors_ks_test, replicates_lack_of_fit,
-    rout_detect_outliers, runs_test, shapiro_wilk_test,
+    compare_models_lrt_deviance, compute_covariance_diagnostics, compute_deviance_profile_likelihood_cis, compute_hougaard_skewness_into,
+    compute_information_criteria, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test,
+    homoscedasticity_spearman_test, lilliefors_ks_test, replicates_lack_of_fit, rout_detect_outliers, runs_test, shapiro_wilk_test,
 };
+use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget, ode_fit_budget_exceeded};
 use crate::error::{FitError, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
-use crate::types::{DataPoint, DatasetSeries, DerivedScalar, HookContext, filter_datasets_by_range, parse_leading_number};
+use crate::types::{
+    DataPoint, DatasetSeries, DerivedScalar, HookContext, filter_datasets_by_range, parse_leading_number, validated_replicate_moments,
+};
 
 /// Configuration for executing nonlinear regression via [`fit_nonlinear`].
 #[derive(Debug, Clone)]
@@ -441,6 +444,24 @@ struct ObsRecord {
     point: DataPoint,
     ds_local_idx: usize,
     sqrt_weight: f64,
+    rep_n: usize,
+    ss_within: f64,
+}
+
+fn uses_replicate_summary_moments(config: &SolverConfig) -> bool {
+    config.method == FitMethod::LeastSquares && config.weighting == WeightingScheme::None
+}
+
+fn obs_replicate_count(obs: &[ObsRecord]) -> usize {
+    obs.iter().map(|o| o.rep_n).sum()
+}
+
+fn obs_ss_within(obs: &[ObsRecord]) -> f64 {
+    let mut acc = NeumaierSum::new();
+    for o in obs {
+        acc.add(o.ss_within);
+    }
+    acc.total().max(0.0)
 }
 
 fn clamp_to_bounds(val: f64, lb: Option<f64>, ub: Option<f64>) -> f64 {
@@ -526,12 +547,18 @@ fn compute_point_weight(pt: &DataPoint, scheme: WeightingScheme) -> Result<f64, 
 }
 
 /// Flatten datasets into active observations with verified square-root weights.
-fn build_observations(datasets: &[DatasetSeries], scheme: WeightingScheme) -> Result<Vec<ObsRecord>, FitError> {
+fn build_observations(datasets: &[DatasetSeries], scheme: WeightingScheme, honor_rep_moments: bool) -> Result<Vec<ObsRecord>, FitError> {
     let mut obs = Vec::new();
     for (ds_local_idx, ds) in datasets.iter().enumerate() {
         for pt in &ds.points {
-            let w = compute_point_weight(pt, scheme)?;
-            obs.push(ObsRecord { point: pt.clone(), ds_local_idx, sqrt_weight: w.sqrt() });
+            let (sqrt_weight, rep_n, ss_within) = if honor_rep_moments && pt.explicit_weight.is_none() {
+                let (n_f, n_u, ss_i) = validated_replicate_moments(pt)?;
+                (n_f.sqrt(), n_u, ss_i)
+            } else {
+                let w = compute_point_weight(pt, scheme)?;
+                (w.sqrt(), 1, 0.0)
+            };
+            obs.push(ObsRecord { point: pt.clone(), ds_local_idx, sqrt_weight, rep_n, ss_within });
         }
     }
     if obs.is_empty() {
@@ -540,28 +567,90 @@ fn build_observations(datasets: &[DatasetSeries], scheme: WeightingScheme) -> Re
     Ok(obs)
 }
 
+fn ode_budget_error() -> Option<FitError> {
+    ode_fit_budget_exceeded().map(|max_steps| FitError::OdeIntegrationFailed {
+        reason: format!("ODE integration step budget exceeded ({max_steps} adaptive RK45 steps per fit)"),
+    })
+}
+
+fn obs_is_sweep_ordered(obs: &[ObsRecord], slot_ds: Option<usize>) -> bool {
+    let mut prev: Option<(usize, f64)> = None;
+    for rec in obs {
+        if slot_ds.is_some_and(|d| d != rec.ds_local_idx) {
+            continue;
+        }
+        let curr = (rec.ds_local_idx, rec.point.x0());
+        if let Some(p) = prev
+            && (curr.0 < p.0 || (curr.0 == p.0 && curr.1.total_cmp(&p.1).is_lt()))
+        {
+            return false;
+        }
+        prev = Some(curr);
+    }
+    true
+}
+
+fn eval_predictions_ordered(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta: &[f64],
+    flat_params: &mut [f64],
+    slot_ds: Option<usize>,
+    y_hat_out: &mut [f64],
+) -> bool {
+    layout.fill_all_params(theta, flat_params);
+    let p_m = layout.p_model;
+
+    if obs_is_sweep_ordered(obs, slot_ds) {
+        for (dst, rec) in y_hat_out.iter_mut().zip(obs.iter()) {
+            if slot_ds.is_none_or(|d| d == rec.ds_local_idx) {
+                let start = rec.ds_local_idx * p_m;
+                let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
+                    return false;
+                };
+                if !pred.is_finite() {
+                    return false;
+                }
+                *dst = pred;
+            }
+        }
+        return true;
+    }
+
+    // Evaluate unsorted observations in per-dataset ascending X order so stateful/ODE sweeps reuse
+    // integration trajectories across points while writing back into original observation indices.
+    let mut order: Vec<usize> = obs.iter().enumerate().filter(|(_, rec)| slot_ds.is_none_or(|d| d == rec.ds_local_idx)).map(|(i, _)| i).collect();
+    order.sort_by(|&a, &b| obs[a].ds_local_idx.cmp(&obs[b].ds_local_idx).then_with(|| obs[a].point.x0().total_cmp(&obs[b].point.x0())));
+    for idx in order {
+        let rec = &obs[idx];
+        let start = rec.ds_local_idx * p_m;
+        let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
+            return false;
+        };
+        if !pred.is_finite() {
+            return false;
+        }
+        y_hat_out[idx] = pred;
+    }
+    true
+}
+
 /// Evaluate weighted residual vector `r_i = sqrt_w_i * (y_i - f(x_i; theta))` and predictions.
 fn eval_residuals(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[ObsRecord], theta: &[f64]) -> Option<(Vec<f64>, Vec<f64>, f64)> {
     let mut flat_params = vec![0.0_f64; layout.n_datasets * layout.p_model];
-    layout.fill_all_params(theta, &mut flat_params);
+    let mut y_hat = vec![0.0_f64; obs.len()];
+    if !eval_predictions_ordered(model, layout, obs, theta, &mut flat_params, None, &mut y_hat) {
+        return None;
+    }
 
     let mut weighted_res = Vec::with_capacity(obs.len());
-    let mut y_hat = Vec::with_capacity(obs.len());
     let mut ss = NeumaierSum::new();
-    let p_m = layout.p_model;
-
-    for rec in obs {
-        let start = rec.ds_local_idx * p_m;
-        let p = &flat_params[start..(start + p_m)];
-        let pred = model.eval(&rec.point.x, p, rec.point.data_set_index)?;
-        if !pred.is_finite() {
-            return None;
-        }
+    for (rec, &pred) in obs.iter().zip(y_hat.iter()) {
         let r = rec.sqrt_weight * (rec.point.y - pred);
         if !r.is_finite() {
             return None;
         }
-        y_hat.push(pred);
         weighted_res.push(r);
         ss.add(r * r);
     }
@@ -577,19 +666,7 @@ fn eval_predictions_into(
     flat_params: &mut [f64],
     y_hat_out: &mut [f64],
 ) -> bool {
-    layout.fill_all_params(theta, flat_params);
-    let p_m = layout.p_model;
-    for (dst, rec) in y_hat_out.iter_mut().zip(obs.iter()) {
-        let start = rec.ds_local_idx * p_m;
-        let Some(pred) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
-            return false;
-        };
-        if !pred.is_finite() {
-            return false;
-        }
-        *dst = pred;
-    }
-    true
+    eval_predictions_ordered(model, layout, obs, theta, flat_params, None, y_hat_out)
 }
 
 fn mat_get(m: &DenseMatrix, r: usize, c: usize) -> f64 {
@@ -713,21 +790,7 @@ fn eval_predictions_for_slot_into(
     slot_ds: Option<usize>,
     out: &mut [f64],
 ) -> bool {
-    layout.fill_all_params(theta, flat_params);
-    let p_m = layout.p_model;
-    for (dst, rec) in out.iter_mut().zip(obs.iter()) {
-        if slot_ds.is_none_or(|d| d == rec.ds_local_idx) {
-            let start = rec.ds_local_idx * p_m;
-            let Some(v) = model.eval(&rec.point.x, &flat_params[start..(start + p_m)], rec.point.data_set_index) else {
-                return false;
-            };
-            if !v.is_finite() {
-                return false;
-            }
-            *dst = v;
-        }
-    }
-    true
+    eval_predictions_ordered(model, layout, obs, theta, flat_params, slot_ds, out)
 }
 
 #[derive(Debug, Clone)]
@@ -770,6 +833,9 @@ fn run_trust_region_lm(
     project_theta(&mut theta, &bounds);
 
     let Some((mut w_res, mut y_hat, mut ss_curr)) = eval_residuals(model, layout, obs, &theta) else {
+        if let Some(err) = ode_budget_error() {
+            return Err(err);
+        }
         return Err(FitError::BadInitialValues { reason: "Initial parameters evaluate outside model domain".to_owned() });
     };
 
@@ -796,8 +862,15 @@ fn run_trust_region_lm(
     let mut damp_ws = LmDampWorkspace::new(n, k)?;
 
     while iter < max_iters {
-        j_mat = compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds)
-            .ok_or_else(|| FitError::BadInitialValues { reason: "Jacobian evaluation returned non-finite values".to_owned() })?;
+        j_mat = match compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds) {
+            Some(jm) => jm,
+            None => {
+                if let Some(err) = ode_budget_error() {
+                    return Err(err);
+                }
+                return Err(FitError::BadInitialValues { reason: "Jacobian evaluation returned non-finite values".to_owned() });
+            }
+        };
 
         // Update column scaling D_j = max(D_j, ||J_{:, j}||_2).
         for (j, d_j) in diag.iter_mut().enumerate() {
@@ -891,7 +964,12 @@ fn run_trust_region_lm(
                     let act = if ss_t < ss_curr { 1.0 - ss_t / ss_curr } else { -1.0 };
                     (act, Some((r_t, y_t, ss_t)))
                 }
-                None => (-1.0, None),
+                None => {
+                    if let Some(err) = ode_budget_error() {
+                        return Err(err);
+                    }
+                    (-1.0, None)
+                }
             };
 
             let rho = if pred_red > 0.0 && trial_eval.is_some() {
@@ -1115,6 +1193,9 @@ fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs
     }
     let bounds = layout.bounds();
     let eval_obj = |th: &[f64]| -> f64 {
+        if ode_fit_budget_exceeded().is_some() {
+            return f64::INFINITY;
+        }
         let mut clamped = th.to_vec();
         project_theta(&mut clamped, &bounds);
         eval_residuals(model, layout, obs, &clamped).map_or(f64::INFINITY, |(_, _, ss)| ss)
@@ -1124,6 +1205,9 @@ fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs
     let mut v0 = seed.to_vec();
     project_theta(&mut v0, &bounds);
     let f0 = eval_obj(&v0);
+    if ode_fit_budget_exceeded().is_some() {
+        return None;
+    }
     simplex.push((v0.clone(), f0));
 
     for j in 0..k {
@@ -1132,11 +1216,17 @@ fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs
         vj[j] += step;
         project_theta(&mut vj, &bounds);
         let fj = eval_obj(&vj);
+        if ode_fit_budget_exceeded().is_some() {
+            return None;
+        }
         simplex.push((vj, fj));
     }
 
     let mut evals = k + 1;
     while evals < max_evals {
+        if ode_fit_budget_exceeded().is_some() {
+            return None;
+        }
         simplex.sort_by(|a, b| a.1.total_cmp(&b.1));
         if simplex[0].1.is_finite() && simplex[k].1.is_finite() {
             let spread = (simplex[k].1 - simplex[0].1).abs();
@@ -1210,10 +1300,15 @@ fn solve_with_warm_start(
 ) -> Result<LmRunOutput, FitError> {
     let mut start = theta_init.to_vec();
     if eval_residuals(model, layout, obs, &start).is_none() {
+        if let Some(err) = ode_budget_error() {
+            return Err(err);
+        }
         if config.use_simplex_warm_start
             && let Some(rescued) = nelder_mead_rescue(model, layout, obs, &start, 240)
         {
             start = rescued;
+        } else if let Some(err) = ode_budget_error() {
+            return Err(err);
         } else {
             return Err(FitError::BadInitialValues { reason: "Starting parameters evaluate outside model domain".to_owned() });
         }
@@ -1223,23 +1318,30 @@ fn solve_with_warm_start(
     // If primary run hit max iters or suspiciously poor gradient / flat plateau, try smaller step
     // trust-region factor `1.0` and optional Nelder-Mead restart purely from `start` or `best.theta`.
     if config.use_simplex_warm_start && (best.status != FitStatus::Converged || best.weighted_ss > 1e-3 * obs_y_ss(obs)) {
-        if let Ok(alt1) = run_trust_region_lm(model, layout, obs, &start, config.max_iters, 1.0)
-            && alt1.weighted_ss < best.weighted_ss
-        {
-            best = alt1;
+        match run_trust_region_lm(model, layout, obs, &start, config.max_iters, 1.0) {
+            Ok(alt1) if alt1.weighted_ss < best.weighted_ss => best = alt1,
+            Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
+            _ => {}
         }
-        if let Some(nm) = nelder_mead_rescue(model, layout, obs, &best.theta, 400)
-            && let Ok(alt2) = run_trust_region_lm(model, layout, obs, &nm, config.max_iters, 1.0)
-            && alt2.weighted_ss < best.weighted_ss
-        {
-            best = alt2;
+        if let Some(nm) = nelder_mead_rescue(model, layout, obs, &best.theta, 400) {
+            match run_trust_region_lm(model, layout, obs, &nm, config.max_iters, 1.0) {
+                Ok(alt2) if alt2.weighted_ss < best.weighted_ss => best = alt2,
+                Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
+                _ => {}
+            }
+        } else if let Some(err) = ode_budget_error() {
+            return Err(err);
         }
-        if best.weighted_ss > 1e-2 * obs_y_ss(obs)
-            && let Some(nm_start) = nelder_mead_rescue(model, layout, obs, &start, 600)
-            && let Ok(alt3) = run_trust_region_lm(model, layout, obs, &nm_start, config.max_iters, 0.5)
-            && alt3.weighted_ss < best.weighted_ss
-        {
-            best = alt3;
+        if best.weighted_ss > 1e-2 * obs_y_ss(obs) {
+            if let Some(nm_start) = nelder_mead_rescue(model, layout, obs, &start, 600) {
+                match run_trust_region_lm(model, layout, obs, &nm_start, config.max_iters, 0.5) {
+                    Ok(alt3) if alt3.weighted_ss < best.weighted_ss => best = alt3,
+                    Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
+                    _ => {}
+                }
+            } else if let Some(err) = ode_budget_error() {
+                return Err(err);
+            }
         }
     }
     Ok(best)
@@ -1388,6 +1490,7 @@ pub fn fit_nonlinear(
     if datasets.is_empty() {
         return Err(FitError::EmptyInput);
     }
+    let _ode_budget = enter_ode_fit_budget(DEFAULT_MAX_ODE_STEPS_PER_FIT.saturating_mul(datasets.len().clamp(1, 4)));
     if config.plot_function_only {
         return fit_plot_function_only(model, datasets, hooks, config);
     }
@@ -1411,10 +1514,12 @@ pub fn fit_nonlinear(
 
     let layout = ParameterLayout::build(model, active_datasets, hooks, &config.parameter_rules)?;
     let k_free = layout.k_free();
-    let obs = build_observations(active_datasets, config.weighting)?;
+    let use_rep_moments = uses_replicate_summary_moments(config);
+    let obs = build_observations(active_datasets, config.weighting, use_rep_moments)?;
+    let n_total_obs = obs_replicate_count(&obs);
     let min_required = if matches!(config.method, FitMethod::RoutOutlierElimination { .. }) { k_free + 1 } else { k_free };
-    if obs.len() < min_required {
-        return Err(FitError::InsufficientData { required: min_required, actual: obs.len() });
+    if n_total_obs < min_required {
+        return Err(FitError::InsufficientData { required: min_required, actual: n_total_obs });
     }
 
     if active_datasets.len() > 1 && !uses_shared_global(&config.parameter_rules) {
@@ -1463,7 +1568,12 @@ fn fit_plot_function_only(
         let mut ds_res = Vec::with_capacity(ds.points.len());
         let mut ds_rss = NeumaierSum::new();
         for pt in &ds.points {
-            let yh = model.eval(&pt.x, &ds_params, ds.data_set_index).unwrap_or(f64::NAN);
+            let Some(yh) = model.eval(&pt.x, &ds_params, ds.data_set_index) else {
+                if let Some(err) = ode_budget_error() {
+                    return Err(err);
+                }
+                continue;
+            };
             if yh.is_finite() && pt.y.is_finite() {
                 let r = pt.y - yh;
                 ds_yh.push(yh);
@@ -1507,7 +1617,7 @@ fn fit_plot_function_only(
 
     let raw_rss = raw_rss_acc.total();
     let df = total_obs.saturating_sub(k_free);
-    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
+    let rsd = if df > 0 && config.method != FitMethod::RobustCauchy { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
     let r_squared = if y_vals_all.len() > 1 {
         let ym = y_vals_all.iter().sum::<f64>() / (y_vals_all.len() as f64);
         let tss: f64 = y_vals_all.iter().map(|v| (v - ym) * (v - ym)).sum();
@@ -1593,34 +1703,78 @@ fn solve_lm_by_method(
     }
 }
 
-fn fit_single_or_shared(
+struct FinalizedUncertainty {
+    cov: CovarianceDiagnostics,
+    cov_unscaled: Option<DenseMatrix>,
+    hougaard: Vec<f64>,
+    profile_cis: Vec<(CiBound, CiBound)>,
+    t_crit: f64,
+    sigma_w: f64,
+}
+
+fn finalize_fit_uncertainty(
     model: &dyn ParametricModel,
-    datasets: &[DatasetSeries],
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    lm_out: &mut LmRunOutput,
+    df: usize,
+    ss_within_total: f64,
     config: &SolverConfig,
-    layout: ParameterLayout,
-    mut obs: Vec<ObsRecord>,
-) -> Result<NonlinearFitResult, FitError> {
+) -> Result<FinalizedUncertainty, FitError> {
     let k_free = layout.k_free();
-    let init_theta: Vec<f64> = layout.free_slots.iter().map(|s| s.init).collect();
-    let (mut lm_out, rout_result, n_outliers_excluded) = solve_lm_by_method(model, &layout, &mut obs, &init_theta, config)?;
-
-    let n_obs = obs.len();
-    let df = n_obs - k_free;
-    let mut cov = compute_covariance_diagnostics(&lm_out.j_mat, lm_out.weighted_ss, df, &lm_out.theta, config.confidence)?;
-
+    if config.method == FitMethod::RobustCauchy {
+        return Ok(FinalizedUncertainty {
+            cov: CovarianceDiagnostics {
+                standard_errors: vec![f64::NAN; k_free],
+                symmetric_ci_lower: vec![f64::NAN; k_free],
+                symmetric_ci_upper: vec![f64::NAN; k_free],
+                covariance_matrix: Vec::new(),
+                correlation_matrix: Vec::new(),
+                dependencies: vec![f64::NAN; k_free],
+                numerical_rank: 0,
+                ambiguous: false,
+            },
+            cov_unscaled: None,
+            hougaard: vec![f64::NAN; k_free],
+            profile_cis: vec![(CiBound::Open, CiBound::Open); k_free],
+            t_crit: f64::NAN,
+            sigma_w: f64::NAN,
+        });
+    }
+    let is_poisson = config.method == FitMethod::PoissonDeviance;
+    let cov = if is_poisson {
+        compute_poisson_covariance_diagnostics(&lm_out.j_mat, df, &lm_out.theta, config.confidence)?
+    } else {
+        compute_covariance_diagnostics(&lm_out.j_mat, lm_out.weighted_ss, df, &lm_out.theta, config.confidence)?
+    };
     if cov.ambiguous && lm_out.status == FitStatus::Converged {
         lm_out.status = FitStatus::Ambiguous;
     }
 
-    let cov_unscaled = unscaled_cov_from_diag_or_j(&cov, df, lm_out.weighted_ss, &lm_out.j_mat);
+    let (cov_unscaled, sigma_w, t_crit) = if is_poisson {
+        (
+            unscaled_cov_from_diag_or_j(&cov, 1, 1.0, &lm_out.j_mat),
+            if df > 0 { 1.0 } else { f64::NAN },
+            if df > 0 { norm_two_sided_isf(config.confidence.alpha()).unwrap_or(1.96) } else { f64::NAN },
+        )
+    } else {
+        (
+            unscaled_cov_from_diag_or_j(&cov, df, lm_out.weighted_ss, &lm_out.j_mat),
+            if df > 0 { (lm_out.weighted_ss / (df as f64)).sqrt() } else { f64::NAN },
+            if df > 0 { student_t_two_sided_isf(config.confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN },
+        )
+    };
 
     let hougaard = if config.compute_hougaard && k_free > 0 && k_free <= 10 && !cov.ambiguous && df > 0 {
         if let Some(cov_u) = cov_unscaled.as_ref() {
-            let sqrt_w: Vec<f64> = obs.iter().map(|o| o.sqrt_weight).collect();
-            let sigma = (lm_out.weighted_ss / (df as f64)).sqrt();
+            let sqrt_w: Vec<f64> = if is_poisson {
+                lm_out.y_hat.iter().map(|&yh| 1.0 / yh.max(1e-8).sqrt()).collect()
+            } else {
+                obs.iter().map(|o| o.sqrt_weight).collect()
+            };
             let mut flat_p = vec![0.0_f64; layout.n_datasets * layout.p_model];
-            compute_hougaard_skewness_into(&lm_out.theta, &sqrt_w, &lm_out.j_mat, cov_u, sigma, |th, out| {
-                eval_predictions_into(model, &layout, &obs, th, &mut flat_p, out)
+            compute_hougaard_skewness_into(&lm_out.theta, &sqrt_w, &lm_out.j_mat, cov_u, sigma_w, |th, out| {
+                eval_predictions_into(model, layout, obs, th, &mut flat_p, out)
             })
         } else {
             vec![0.0; k_free]
@@ -1630,40 +1784,89 @@ fn fit_single_or_shared(
     };
 
     let bounds = layout.bounds();
-    let profile_cis = if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
-        compute_profile_likelihood_cis(&lm_out.theta, lm_out.weighted_ss, df, &cov, &bounds, config.confidence, |fixed_idx, fixed_val, seed| {
-            solve_profile_subproblem(model, &layout, &obs, seed, fixed_idx, fixed_val)
-        })
-    } else {
-        wald_ci_bounds(&cov, df)
+    let profile_cis = match config.method {
+        FitMethod::RobustCauchy => vec![(CiBound::Open, CiBound::Open); k_free],
+        FitMethod::PoissonDeviance => {
+            if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
+                compute_deviance_profile_likelihood_cis(
+                    &lm_out.theta,
+                    lm_out.weighted_ss,
+                    &cov,
+                    &bounds,
+                    config.confidence,
+                    |fixed_idx, fixed_val, seed| solve_profile_subproblem_poisson(model, layout, obs, seed, fixed_idx, fixed_val),
+                )
+            } else {
+                wald_ci_bounds(&cov, df)
+            }
+        }
+        FitMethod::LeastSquares | FitMethod::RoutOutlierElimination { .. } => {
+            if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
+                compute_profile_likelihood_cis(
+                    &lm_out.theta,
+                    lm_out.weighted_ss,
+                    df,
+                    &cov,
+                    &bounds,
+                    config.confidence,
+                    |fixed_idx, fixed_val, seed| solve_profile_subproblem(model, layout, obs, seed, fixed_idx, fixed_val, ss_within_total),
+                )
+            } else {
+                wald_ci_bounds(&cov, df)
+            }
+        }
     };
 
-    let parameters = build_fitted_parameter_summaries(&layout, &lm_out.theta, &cov, &hougaard, &profile_cis);
-    let _ = &mut cov;
+    Ok(FinalizedUncertainty { cov, cov_unscaled, hougaard, profile_cis, t_crit, sigma_w })
+}
+
+fn fit_single_or_shared(
+    model: &dyn ParametricModel,
+    datasets: &[DatasetSeries],
+    config: &SolverConfig,
+    layout: ParameterLayout,
+    mut obs: Vec<ObsRecord>,
+) -> Result<NonlinearFitResult, FitError> {
+    let k_free = layout.k_free();
+    let use_rep_moments = uses_replicate_summary_moments(config);
+    let init_theta: Vec<f64> = layout.free_slots.iter().map(|s| s.init).collect();
+    let (mut lm_out, rout_result, n_outliers_excluded) = solve_lm_by_method(model, &layout, &mut obs, &init_theta, config)?;
+
+    let ss_within_total = if use_rep_moments { obs_ss_within(&obs) } else { 0.0 };
+    lm_out.weighted_ss += ss_within_total;
+    let n_obs = obs_replicate_count(&obs);
+    let df = n_obs.saturating_sub(k_free);
+
+    let unc = finalize_fit_uncertainty(model, &layout, &obs, &mut lm_out, df, ss_within_total, config)?;
+    let parameters =
+        build_fitted_parameter_summaries(&layout, &lm_out.theta, &unc.cov, &unc.hougaard, &unc.profile_cis, config.method == FitMethod::RobustCauchy);
 
     let mut raw_rss_acc = NeumaierSum::new();
     let mut y_mean_acc = NeumaierSum::new();
     for (rec, &yh) in obs.iter().zip(lm_out.y_hat.iter()) {
         let diff = rec.point.y - yh;
-        raw_rss_acc.add(diff * diff);
-        y_mean_acc.add(rec.point.y);
+        let w_rep = rec.rep_n as f64;
+        raw_rss_acc.add(w_rep * diff * diff);
+        raw_rss_acc.add(rec.ss_within);
+        y_mean_acc.add(w_rep * rec.point.y);
     }
     let raw_rss = raw_rss_acc.total();
     let y_mean = y_mean_acc.total() / (n_obs as f64);
     let mut tss_acc = NeumaierSum::new();
     for rec in &obs {
         let d = rec.point.y - y_mean;
-        tss_acc.add(d * d);
+        tss_acc.add((rec.rep_n as f64) * d * d);
+        tss_acc.add(rec.ss_within);
     }
     let tss = tss_acc.total();
+    let is_robust = config.method == FitMethod::RobustCauchy;
     let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
-    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
+    let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
 
-    let ic = compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok();
-    let t_crit = if df > 0 { student_t_two_sided_isf(config.confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN };
-    let sigma_w = if df > 0 { (lm_out.weighted_ss / (df as f64)).sqrt() } else { 0.0 };
+    let ic = if is_robust { None } else { compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok() };
+    let cov = unc.cov;
 
-    let all_stud = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, cov_unscaled.as_ref(), sigma_w, cov.ambiguous);
+    let all_stud = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous);
     let assembled = assemble_dataset_results(
         model,
         &layout,
@@ -1672,9 +1875,9 @@ fn fit_single_or_shared(
         &lm_out,
         &all_stud,
         &DatasetAssemblyConfig {
-            cov_unscaled: if df > 0 { cov_unscaled.as_ref() } else { None },
-            sigma_w,
-            t_crit,
+            cov_unscaled: if df > 0 { unc.cov_unscaled.as_ref() } else { None },
+            sigma_w: unc.sigma_w,
+            t_crit: unc.t_crit,
             rsd,
             ambiguous: cov.ambiguous,
             solver: config,
@@ -1730,6 +1933,7 @@ struct SingleDatasetOutcome {
     derived_scalars: Vec<DerivedScalar>,
     interpolated_x: Vec<InterpolatedUnknown>,
     interpolated_y: Vec<InterpolatedUnknown>,
+    rep_moments: Vec<(usize, f64)>,
 }
 
 fn solve_single_dataset_unit(
@@ -1743,8 +1947,14 @@ fn solve_single_dataset_unit(
     let ds_slice = std::slice::from_ref(ds);
     let ds_layout = ParameterLayout::build(model, ds_slice, hooks, ds_rules)?;
     let p_d = ds_layout.k_free();
-    let ds_obs = build_observations(ds_slice, config.weighting)?;
-    let n_d = ds_obs.len();
+    let use_rep_moments = uses_replicate_summary_moments(config);
+    let ds_obs = build_observations(ds_slice, config.weighting, use_rep_moments)?;
+    let n_d = obs_replicate_count(&ds_obs);
+    let min_d = if matches!(config.method, FitMethod::RoutOutlierElimination { .. }) { p_d + 1 } else { p_d };
+    if n_d < min_d {
+        return Err(FitError::InsufficientData { required: min_d, actual: n_d });
+    }
+    let ss_within_d = if use_rep_moments { obs_ss_within(&ds_obs) } else { 0.0 };
     let init_theta: Vec<f64> = seed_override.map_or_else(|| ds_layout.free_slots.iter().map(|s| s.init).collect(), |s| s.to_vec());
 
     let mut lm_out = match config.method {
@@ -1753,46 +1963,19 @@ fn solve_single_dataset_unit(
         FitMethod::RobustCauchy => fit_cauchy_irls(model, &ds_layout, &ds_obs, &init_theta, config)?,
     };
 
+    lm_out.weighted_ss += ss_within_d;
     let df_d = n_d.saturating_sub(p_d);
-    let cov = compute_covariance_diagnostics(&lm_out.j_mat, lm_out.weighted_ss, df_d, &lm_out.theta, config.confidence)?;
-    if cov.ambiguous && lm_out.status == FitStatus::Converged {
-        lm_out.status = FitStatus::Ambiguous;
-    }
+    let unc = finalize_fit_uncertainty(model, &ds_layout, &ds_obs, &mut lm_out, df_d, ss_within_d, config)?;
+    let cov = unc.cov;
 
-    let cov_unscaled = unscaled_cov_from_diag_or_j(&cov, df_d, lm_out.weighted_ss, &lm_out.j_mat);
-    let hougaard = if config.compute_hougaard && p_d > 0 && p_d <= 10 && df_d > 0 && !cov.ambiguous {
-        if let Some(cov_u) = cov_unscaled.as_ref() {
-            let sqrt_w: Vec<f64> = ds_obs.iter().map(|o| o.sqrt_weight).collect();
-            let sigma = (lm_out.weighted_ss / (df_d as f64)).sqrt();
-            let mut flat_p = vec![0.0_f64; ds_layout.p_model];
-            compute_hougaard_skewness_into(&lm_out.theta, &sqrt_w, &lm_out.j_mat, cov_u, sigma, |th, out| {
-                eval_predictions_into(model, &ds_layout, &ds_obs, th, &mut flat_p, out)
-            })
-        } else {
-            vec![0.0; p_d]
-        }
-    } else {
-        vec![0.0; p_d]
-    };
-
-    let bounds = ds_layout.bounds();
-    let profile_cis = if config.compute_profile_ci && p_d > 0 && df_d > 0 && !cov.ambiguous {
-        compute_profile_likelihood_cis(&lm_out.theta, lm_out.weighted_ss, df_d, &cov, &bounds, config.confidence, |fixed_idx, fixed_val, seed| {
-            solve_profile_subproblem(model, &ds_layout, &ds_obs, seed, fixed_idx, fixed_val)
-        })
-    } else {
-        wald_ci_bounds(&cov, df_d)
-    };
-
-    let t_crit = if df_d > 0 { student_t_two_sided_isf(config.confidence.alpha(), df_d as f64).unwrap_or(1.96) } else { f64::NAN };
-    let sigma_w = if df_d > 0 { (lm_out.weighted_ss / (df_d as f64)).sqrt() } else { 0.0 };
     let mut raw_rss_d = NeumaierSum::new();
     for (rec, &yh) in ds_obs.iter().zip(lm_out.y_hat.iter()) {
         let diff = rec.point.y - yh;
-        raw_rss_d.add(diff * diff);
+        raw_rss_d.add((rec.rep_n as f64) * diff * diff);
+        raw_rss_d.add(rec.ss_within);
     }
-    let rsd_d = if df_d > 0 { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { 0.0 };
-    let stud_d = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, cov_unscaled.as_ref(), sigma_w, cov.ambiguous);
+    let rsd_d = if df_d > 0 && config.method != FitMethod::RobustCauchy { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { f64::NAN };
+    let stud_d = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous);
 
     let assembled = assemble_dataset_results(
         model,
@@ -1802,9 +1985,9 @@ fn solve_single_dataset_unit(
         &lm_out,
         &stud_d,
         &DatasetAssemblyConfig {
-            cov_unscaled: if df_d > 0 { cov_unscaled.as_ref() } else { None },
-            sigma_w,
-            t_crit,
+            cov_unscaled: if df_d > 0 { unc.cov_unscaled.as_ref() } else { None },
+            sigma_w: unc.sigma_w,
+            t_crit: unc.t_crit,
             rsd: rsd_d,
             ambiguous: cov.ambiguous,
             solver: config,
@@ -1813,6 +1996,7 @@ fn solve_single_dataset_unit(
 
     let ds_result = assembled.ds_results.into_iter().next().ok_or(FitError::EmptyInput)?;
     let derived = assembled.derived_scalars.into_iter().next().unwrap_or_default();
+    let rep_moments = ds_obs.iter().map(|o| (o.rep_n, o.ss_within)).collect();
 
     Ok(SingleDatasetOutcome {
         layout: ds_layout,
@@ -1821,12 +2005,13 @@ fn solve_single_dataset_unit(
         iterations: lm_out.iterations,
         weighted_ss: lm_out.weighted_ss,
         cov,
-        hougaard,
-        profile_cis,
+        hougaard: unc.hougaard,
+        profile_cis: unc.profile_cis,
         ds_result,
         derived_scalars: derived,
         interpolated_x: assembled.interpolated_x,
         interpolated_y: assembled.interpolated_y,
+        rep_moments,
     })
 }
 
@@ -1847,46 +2032,58 @@ fn fit_independent_datasets(
         cauchy_cfg.compute_bands = false;
         cauchy_cfg.interpolate_unknowns = false;
 
+        let mut cleaned = Vec::with_capacity(datasets.len());
         let mut seeds = Vec::with_capacity(datasets.len());
-        let mut pts = Vec::new();
-        let mut raw_res = Vec::new();
-        let mut origins = Vec::new();
-        for (d_idx, ds) in datasets.iter().enumerate() {
+        let mut combined_outliers = Vec::new();
+        let mut combined_audit = Vec::new();
+        let mut rsdr_weighted_sq = 0.0_f64;
+        let mut total_rout_df = 0_usize;
+        let mut remaining_obs = 0_usize;
+        let mut total_pts = 0_usize;
+        let mut pt_offset = 0_usize;
+
+        for ds in datasets {
             let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
             let sub = solve_single_dataset_unit(model, ds, hooks, &ds_rules, &cauchy_cfg, None)?;
-            for (pt_idx, (pt, &res)) in ds.points.iter().zip(sub.ds_result.residuals.iter()).enumerate() {
-                pts.push(pt.clone());
-                raw_res.push(res);
-                origins.push((d_idx, pt_idx));
+            let p_d = sub.layout.k_free();
+            let rout_d = rout_detect_outliers(&ds.points, &sub.ds_result.residuals, p_d, fdr_q_percent)?;
+
+            let mut is_out = vec![false; ds.points.len()];
+            for &local_idx in &rout_d.outlier_indices {
+                is_out[local_idx] = true;
+                combined_outliers.push(pt_offset + local_idx);
             }
+            for mut entry in rout_d.audit {
+                entry.index += pt_offset;
+                combined_audit.push(entry);
+            }
+            if rout_d.df > 0 && rout_d.rsdr.is_finite() {
+                rsdr_weighted_sq += (rout_d.df as f64) * rout_d.rsdr * rout_d.rsdr;
+                total_rout_df += rout_d.df;
+            }
+
+            let mut ds_c = ds.clone();
+            let mut idx_iter = is_out.iter().copied();
+            ds_c.points.retain(|_| !idx_iter.next().unwrap_or(false));
+            if ds_c.points.len() <= p_d {
+                return Err(FitError::InsufficientData { required: p_d + 1, actual: ds_c.points.len() });
+            }
+            total_pts += ds.points.len();
+            remaining_obs += ds_c.points.len();
+            pt_offset += ds.points.len();
+            cleaned.push(ds_c);
             seeds.push(sub.theta);
         }
-        let rout = rout_detect_outliers(&pts, &raw_res, k_free, fdr_q_percent)?;
-        let mut is_out = vec![false; pts.len()];
-        for &idx in &rout.outlier_indices {
-            is_out[idx] = true;
-        }
-        let mut cleaned = datasets.to_vec();
-        let mut per_ds_keep: Vec<Vec<bool>> = datasets.iter().map(|d| vec![true; d.points.len()]).collect();
-        for (global_i, &out_flag) in is_out.iter().enumerate() {
-            if out_flag {
-                let (d_idx, p_idx) = origins[global_i];
-                per_ds_keep[d_idx][p_idx] = false;
-            }
-        }
-        let mut remaining_obs = 0_usize;
-        for (ds_c, keeps) in cleaned.iter_mut().zip(per_ds_keep.iter()) {
-            let mut idx_iter = keeps.iter().copied();
-            ds_c.points.retain(|_| idx_iter.next().unwrap_or(true));
-            if ds_c.points.is_empty() {
-                return Err(FitError::InsufficientData { required: k_free + 1, actual: remaining_obs });
-            }
-            remaining_obs += ds_c.points.len();
-        }
-        if remaining_obs <= k_free {
-            return Err(FitError::InsufficientData { required: k_free + 1, actual: remaining_obs });
-        }
-        let excluded = pts.len() - remaining_obs;
+
+        let combined_rsdr = if total_rout_df > 0 { (rsdr_weighted_sq / (total_rout_df as f64)).sqrt() } else { 0.0 };
+        let rout = RoutDetectionResult {
+            rsdr: combined_rsdr,
+            df: total_rout_df,
+            q_threshold_percent: fdr_q_percent,
+            outlier_indices: combined_outliers,
+            audit: combined_audit,
+        };
+        let excluded = total_pts - remaining_obs;
         (Some(cleaned), Some(seeds), Some(rout), excluded)
     } else {
         (None, None, None, 0)
@@ -1900,15 +2097,16 @@ fn fit_independent_datasets(
         sub_fits.push(solve_single_dataset_unit(model, ds, hooks, &ds_rules, config, seed)?);
     }
 
+    let is_robust = config.method == FitMethod::RobustCauchy;
     let mut global_theta = vec![0.0_f64; k_free];
-    let mut global_se = vec![0.0_f64; k_free];
+    let mut global_se = vec![f64::NAN; k_free];
     let mut global_sym_lo = vec![f64::NAN; k_free];
     let mut global_sym_hi = vec![f64::NAN; k_free];
-    let mut global_deps = vec![0.0_f64; k_free];
-    let mut global_hougaard = vec![0.0_f64; k_free];
+    let mut global_deps = vec![f64::NAN; k_free];
+    let mut global_hougaard = vec![f64::NAN; k_free];
     let mut global_profile_cis = vec![(CiBound::Open, CiBound::Open); k_free];
-    let mut global_cov_mat = vec![vec![0.0_f64; k_free]; k_free];
-    let mut global_corr_mat = vec![vec![0.0_f64; k_free]; k_free];
+    let mut global_cov_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
+    let mut global_corr_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
 
     let mut total_rank = 0_usize;
     let mut any_ambiguous = false;
@@ -1924,6 +2122,7 @@ fn fit_independent_datasets(
     let mut interpolated_x = Vec::new();
     let mut interpolated_y = Vec::new();
     let mut all_points = Vec::new();
+    let mut all_moments = Vec::new();
     let mut all_y_hat = Vec::new();
     let mut all_raw_residuals = Vec::new();
 
@@ -1943,10 +2142,12 @@ fn fit_independent_datasets(
                 global_profile_cis[*g_slot] = sub.profile_cis[*l_slot];
             }
         }
-        for (a, &g_a) in l2g.iter().enumerate() {
-            for (b, &g_b) in l2g.iter().enumerate() {
-                global_cov_mat[g_a][g_b] = sub.cov.covariance_matrix[a][b];
-                global_corr_mat[g_a][g_b] = sub.cov.correlation_matrix[a][b];
+        if !is_robust && !sub.cov.covariance_matrix.is_empty() {
+            for (a, &g_a) in l2g.iter().enumerate() {
+                for (b, &g_b) in l2g.iter().enumerate() {
+                    global_cov_mat[g_a][g_b] = sub.cov.covariance_matrix[a][b];
+                    global_corr_mat[g_a][g_b] = sub.cov.correlation_matrix[a][b];
+                }
             }
         }
 
@@ -1957,12 +2158,15 @@ fn fit_independent_datasets(
         total_weighted_ss.add(sub.weighted_ss);
         total_raw_rss.add(sub.ds_result.ss_residual);
 
-        for ((pt, &yh), &res) in ds.points.iter().zip(sub.ds_result.y_hat.iter()).zip(sub.ds_result.residuals.iter()) {
+        for (((pt, &yh), &res), &rep_mom) in
+            ds.points.iter().zip(sub.ds_result.y_hat.iter()).zip(sub.ds_result.residuals.iter()).zip(sub.rep_moments.iter())
+        {
             all_points.push(pt.clone());
             all_y_hat.push(yh);
             all_raw_residuals.push(res);
-            total_y_sum.add(pt.y);
-            n_obs += 1;
+            all_moments.push(rep_mom);
+            total_y_sum.add((rep_mom.0 as f64) * pt.y);
+            n_obs += rep_mom.0;
         }
 
         ds_results.push(sub.ds_result);
@@ -1988,21 +2192,29 @@ fn fit_independent_datasets(
         numerical_rank: total_rank,
         ambiguous: any_ambiguous,
     };
-    let parameters = build_fitted_parameter_summaries(&global_layout, &global_theta, &cov, &global_hougaard, &global_profile_cis);
+    let parameters = build_fitted_parameter_summaries(
+        &global_layout,
+        &global_theta,
+        &cov,
+        &global_hougaard,
+        &global_profile_cis,
+        config.method == FitMethod::RobustCauchy,
+    );
 
     let raw_rss = total_raw_rss.total();
     let weighted_ss = total_weighted_ss.total();
     let df = n_obs.saturating_sub(k_free);
     let y_mean = if n_obs > 0 { total_y_sum.total() / (n_obs as f64) } else { 0.0 };
     let mut tss_acc = NeumaierSum::new();
-    for pt in &all_points {
+    for (pt, &(rep_n, ss_w)) in all_points.iter().zip(all_moments.iter()) {
         let d = pt.y - y_mean;
-        tss_acc.add(d * d);
+        tss_acc.add((rep_n as f64) * d * d);
+        tss_acc.add(ss_w);
     }
     let tss = tss_acc.total();
     let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
-    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
-    let ic = compute_information_criteria(weighted_ss, n_obs, k_free).ok();
+    let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
+    let ic = if is_robust { None } else { compute_information_criteria(weighted_ss, n_obs, k_free).ok() };
 
     let res_diag = compute_residual_diagnostics(&all_points, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
 
@@ -2044,6 +2256,7 @@ fn build_fitted_parameter_summaries(
     cov: &CovarianceDiagnostics,
     hougaard: &[f64],
     profile_cis: &[(CiBound, CiBound)],
+    suppress_unbounded_ci_note: bool,
 ) -> Vec<FittedParameterSummary> {
     let mut parameters = Vec::with_capacity(layout.k_free());
     for (idx, slot) in layout.free_slots.iter().enumerate() {
@@ -2061,7 +2274,7 @@ fn build_fitted_parameter_summaries(
         if cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
             notes.push(ParameterNote::Ambiguous);
         }
-        if matches!(profile_cis[idx].0, CiBound::Open) || matches!(profile_cis[idx].1, CiBound::Open) {
+        if !suppress_unbounded_ci_note && (matches!(profile_cis[idx].0, CiBound::Open) || matches!(profile_cis[idx].1, CiBound::Open)) {
             notes.push(ParameterNote::UnboundedCi);
         }
 
@@ -2075,8 +2288,8 @@ fn build_fitted_parameter_summaries(
             ci_upper: profile_cis[idx].1,
             symmetric_ci_lower: cov.symmetric_ci_lower.get(idx).copied().unwrap_or(f64::NAN),
             symmetric_ci_upper: cov.symmetric_ci_upper.get(idx).copied().unwrap_or(f64::NAN),
-            dependency: cov.dependencies.get(idx).copied().unwrap_or(0.0),
-            hougaard_g1: hougaard.get(idx).copied().unwrap_or(0.0),
+            dependency: cov.dependencies.get(idx).copied().unwrap_or(f64::NAN),
+            hougaard_g1: hougaard.get(idx).copied().unwrap_or(f64::NAN),
             notes,
         });
     }
@@ -2123,28 +2336,46 @@ fn assemble_dataset_results(
         let mut ds_w_res = Vec::new();
         let mut ds_stud_res = Vec::new();
         let mut ds_rss = NeumaierSum::new();
-        let mut ds_y_vals = Vec::new();
+        let mut ds_y_vals: Vec<(f64, usize, f64)> = Vec::new();
+        let mut ds_n = 0_usize;
+        let mut ds_y_sum = NeumaierSum::new();
         for (i, rec) in obs.iter().enumerate() {
             if rec.ds_local_idx == ds_local_idx {
                 let yh = lm_out.y_hat[i];
                 let r = rec.point.y - yh;
+                let w_rep = rec.rep_n as f64;
                 ds_y_hat.push(yh);
                 ds_res.push(r);
                 ds_w_res.push(lm_out.weighted_res[i]);
                 ds_stud_res.push(studentized_all.get(i).copied().unwrap_or(0.0));
-                ds_rss.add(r * r);
-                ds_y_vals.push(rec.point.y);
+                ds_rss.add(w_rep * r * r);
+                ds_rss.add(rec.ss_within);
+                ds_n += rec.rep_n;
+                ds_y_sum.add(w_rep * rec.point.y);
+                ds_y_vals.push((rec.point.y, rec.rep_n, rec.ss_within));
             }
         }
         let ds_ss = ds_rss.total();
-        let ds_r2 = if ds_y_vals.len() > 1 {
-            let m = ds_y_vals.iter().sum::<f64>() / (ds_y_vals.len() as f64);
-            let dtss: f64 = ds_y_vals.iter().map(|v| (v - m) * (v - m)).sum();
+        let ds_r2 = if ds_n > 1 {
+            let m = ds_y_sum.total() / (ds_n as f64);
+            let mut dtss_acc = NeumaierSum::new();
+            for &(v, rep_n, ss_w) in &ds_y_vals {
+                let d = v - m;
+                dtss_acc.add((rep_n as f64) * d * d);
+                dtss_acc.add(ss_w);
+            }
+            let dtss = dtss_acc.total();
             if dtss > 0.0 { 1.0 - ds_ss / dtss } else { 1.0 }
         } else {
             1.0
         };
-        let ds_sy_x = if ds_y_vals.len() > k_free { (ds_ss / ((ds_y_vals.len() - k_free) as f64)).sqrt() } else { cfg.rsd };
+        let ds_sy_x = if cfg.solver.method == FitMethod::RobustCauchy {
+            f64::NAN
+        } else if ds_n > k_free {
+            (ds_ss / ((ds_n - k_free) as f64)).sqrt()
+        } else {
+            cfg.rsd
+        };
 
         let converged_or_ambig = lm_out.status == FitStatus::Converged || lm_out.status == FitStatus::Ambiguous;
         let curve_overlay = (cfg.solver.curve_overlay_segments > 0).then(|| {
@@ -2235,6 +2466,12 @@ pub fn compare_models(
     config: &SolverConfig,
     spec: &ModelComparisonSpec,
 ) -> Result<(NonlinearFitResult, ModelComparisonOutcome), FitError> {
+    if config.method == FitMethod::RobustCauchy {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: "NotApplicableInRobustMode: F, AICc, and LRT model comparisons are not applicable under Robust (Cauchy) regression".to_owned(),
+        });
+    }
     let alt = fit_nonlinear(alt_model, datasets, hooks, config)?;
     let outcome = match spec {
         ModelComparisonSpec::ExtraSumOfSquaresF { .. } => {
@@ -2308,6 +2545,17 @@ fn fit_poisson_irls(
             break;
         }
     }
+    for (rec, &yh) in work_obs.iter_mut().zip(last_out.y_hat.iter()) {
+        let mu = yh.max(1e-8);
+        rec.sqrt_weight = 1.0 / mu.sqrt();
+    }
+    if let (Some((wr, _, _)), Some(jm)) = (
+        eval_residuals(model, layout, &work_obs, &last_out.theta),
+        compute_jacobian(model, layout, &work_obs, &last_out.theta, &last_out.y_hat, &layout.bounds()),
+    ) {
+        last_out.weighted_res = wr;
+        last_out.j_mat = jm;
+    }
     last_out.weighted_ss = poisson_deviance(&work_obs, &last_out.y_hat);
     Ok(last_out)
 }
@@ -2373,47 +2621,22 @@ fn compute_unscaled_cov(j_mat: &DenseMatrix) -> Option<DenseMatrix> {
     pqr.xtx_inverse().ok()
 }
 
-/// Optimize the remaining `K - 1` nuisance parameters with `theta[fixed_idx] = fixed_val` held constant.
-///
-/// Returns the profile sum of squares `S~(theta_k)` of Bates & Watts (1988). Uses a simplified
-/// trust-region LM (Moré 1978 subproblem solver, but accepts any non-increasing step and
-/// shrinks the radius by 4 otherwise, with no gain-ratio test).
-fn solve_profile_subproblem(
+struct ReducedLmState {
+    y_hat: Vec<f64>,
+    ss_curr: f64,
+}
+
+fn run_reduced_lm(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
     obs: &[ObsRecord],
-    seed: &[f64],
-    fixed_idx: usize,
-    fixed_val: f64,
-) -> Option<(f64, Vec<f64>)> {
-    let k = layout.k_free();
-    if k == 0 || fixed_idx >= k {
-        return None;
-    }
-    let full_bounds = layout.bounds();
-    if let Some(lb) = full_bounds[fixed_idx].0
-        && fixed_val < lb
-    {
-        return None;
-    }
-    if let Some(ub) = full_bounds[fixed_idx].1
-        && fixed_val > ub
-    {
-        return None;
-    }
-
-    let mut work = seed.to_vec();
-    work[fixed_idx] = fixed_val;
-    if k == 1 {
-        let (_, _, ss) = eval_residuals(model, layout, obs, &work)?;
-        return Some((ss, work));
-    }
-
-    // Build reduced slot mapping (excluding `fixed_idx`).
-    let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
+    work: &mut [f64],
+    map_indices: &[usize],
+    full_bounds: &[(Option<f64>, Option<f64>)],
+    max_iters: usize,
+) -> Option<ReducedLmState> {
     let sub_k = map_indices.len();
     let sub_bounds: Vec<(Option<f64>, Option<f64>)> = map_indices.iter().map(|&i| full_bounds[i]).collect();
-
     let mut sub_theta: Vec<f64> = map_indices.iter().map(|&i| work[i]).collect();
     project_theta(&mut sub_theta, &sub_bounds);
 
@@ -2423,13 +2646,13 @@ fn solve_profile_subproblem(
     for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
         work[orig] = v;
     }
-    let (mut w_res, mut y_hat, mut ss_curr) = eval_residuals(model, layout, obs, &work)?;
+    let (mut w_res, mut y_hat, mut ss_curr) = eval_residuals(model, layout, obs, work)?;
 
-    for iter in 0..40 {
+    for iter in 0..max_iters {
         for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
             work[orig] = v;
         }
-        let j_full = compute_jacobian(model, layout, obs, &work, &y_hat, &full_bounds)?;
+        let j_full = compute_jacobian(model, layout, obs, work, &y_hat, full_bounds)?;
         let mut j_sub = DenseMatrix::zeros(obs.len(), sub_k).ok()?;
         for (sub_j, &orig_j) in map_indices.iter().enumerate() {
             let mut col_ss = 0.0_f64;
@@ -2460,7 +2683,7 @@ fn solve_profile_subproblem(
             for (&orig, &v) in map_indices.iter().zip(trial.iter()) {
                 work[orig] = v;
             }
-            if let Some((r_t, y_t, ss_t)) = eval_residuals(model, layout, obs, &work) {
+            if let Some((r_t, y_t, ss_t)) = eval_residuals(model, layout, obs, work) {
                 let act = ss_curr - ss_t;
                 if act >= 0.0 {
                     sub_theta = trial;
@@ -2473,7 +2696,7 @@ fn solve_profile_subproblem(
                         for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
                             work[orig] = v;
                         }
-                        return Some((ss_curr, work));
+                        return Some(ReducedLmState { y_hat, ss_curr });
                     }
                     break;
                 }
@@ -2488,7 +2711,128 @@ fn solve_profile_subproblem(
     for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
         work[orig] = v;
     }
-    Some((ss_curr, work))
+    Some(ReducedLmState { y_hat, ss_curr })
+}
+
+fn check_profile_fixed_param(layout: &ParameterLayout, fixed_idx: usize, fixed_val: f64) -> Option<Vec<(Option<f64>, Option<f64>)>> {
+    let k = layout.k_free();
+    if k == 0 || fixed_idx >= k || !fixed_val.is_finite() {
+        return None;
+    }
+    let full_bounds = layout.bounds();
+    if let Some(lb) = full_bounds[fixed_idx].0
+        && fixed_val < lb
+    {
+        return None;
+    }
+    if let Some(ub) = full_bounds[fixed_idx].1
+        && fixed_val > ub
+    {
+        return None;
+    }
+    Some(full_bounds)
+}
+
+/// Optimize the remaining `K - 1` nuisance parameters with `theta[fixed_idx] = fixed_val` held constant.
+///
+/// Returns the profile sum of squares `S~(theta_k)` of Bates & Watts (1988). Delegates to
+/// `run_reduced_lm`, a simplified trust-region LM (Moré 1978 subproblem solver, accepting any
+/// non-increasing step and shrinking the radius by 4 otherwise, with no gain-ratio test).
+fn solve_profile_subproblem(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    seed: &[f64],
+    fixed_idx: usize,
+    fixed_val: f64,
+    ss_within: f64,
+) -> Option<(f64, Vec<f64>)> {
+    let full_bounds = check_profile_fixed_param(layout, fixed_idx, fixed_val)?;
+    let k = layout.k_free();
+    let mut work = seed.to_vec();
+    work[fixed_idx] = fixed_val;
+    if k == 1 {
+        let (_, _, ss) = eval_residuals(model, layout, obs, &work)?;
+        return Some((ss + ss_within, work));
+    }
+
+    let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
+    let state = run_reduced_lm(model, layout, obs, &mut work, &map_indices, &full_bounds, 40)?;
+    Some((state.ss_curr + ss_within, work))
+}
+
+/// Optimize the remaining `K - 1` nuisance parameters under Poisson deviance with `theta[fixed_idx] = fixed_val`
+/// held constant via reduced IRLS + deviance monotonicity guard.
+fn solve_profile_subproblem_poisson(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    seed: &[f64],
+    fixed_idx: usize,
+    fixed_val: f64,
+) -> Option<(f64, Vec<f64>)> {
+    let full_bounds = check_profile_fixed_param(layout, fixed_idx, fixed_val)?;
+    let k = layout.k_free();
+    let mut work = seed.to_vec();
+    work[fixed_idx] = fixed_val;
+    let (_, init_y_hat, _) = eval_residuals(model, layout, obs, &work)?;
+    if k == 1 {
+        let dev = poisson_deviance(obs, &init_y_hat);
+        return dev.is_finite().then_some((dev, work));
+    }
+
+    let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
+    let mut work_obs = obs.to_vec();
+    let mut curr_y_hat = init_y_hat;
+    let mut curr_dev = poisson_deviance(&work_obs, &curr_y_hat);
+    if !curr_dev.is_finite() {
+        return None;
+    }
+
+    for _ in 0..12 {
+        for (rec, &yh) in work_obs.iter_mut().zip(curr_y_hat.iter()) {
+            rec.sqrt_weight = 1.0 / yh.max(1e-8).sqrt();
+        }
+        let mut trial = work.clone();
+        let Some(state) = run_reduced_lm(model, layout, &work_obs, &mut trial, &map_indices, &full_bounds, 30) else {
+            break;
+        };
+        let next_dev = poisson_deviance(&work_obs, &state.y_hat);
+        if next_dev.is_finite() && next_dev <= curr_dev {
+            let rel_change = (curr_dev - next_dev).abs() / curr_dev.max(1.0);
+            work = trial;
+            curr_y_hat = state.y_hat;
+            curr_dev = next_dev;
+            if rel_change < 1e-10 {
+                break;
+            }
+            continue;
+        }
+        // Step-halving line search on IRLS step if linearization briefly overshot deviance.
+        let mut improved = false;
+        let mut alpha = 0.5_f64;
+        for _ in 0..5 {
+            let mut blended = work.clone();
+            for &idx in &map_indices {
+                blended[idx] = work[idx] + alpha * (trial[idx] - work[idx]);
+            }
+            if let Some((_, blend_yh, _)) = eval_residuals(model, layout, &work_obs, &blended) {
+                let blend_dev = poisson_deviance(&work_obs, &blend_yh);
+                if blend_dev.is_finite() && blend_dev < curr_dev {
+                    work = blended;
+                    curr_y_hat = blend_yh;
+                    curr_dev = blend_dev;
+                    improved = true;
+                    break;
+                }
+            }
+            alpha *= 0.5;
+        }
+        if !improved {
+            break;
+        }
+    }
+    curr_dev.is_finite().then_some((curr_dev, work))
 }
 
 struct CurveOverlayContext<'a> {
@@ -2677,8 +3021,85 @@ fn quadratic_form(m: &DenseMatrix, v: &[f64]) -> f64 {
     acc.total()
 }
 
+struct DatasetXBounds {
+    real_bounds: Option<(f64, f64)>,
+    single_x: Option<f64>,
+    scan_x_min: f64,
+    scan_x_max: f64,
+    span: f64,
+}
+
+fn dataset_x_bounds(ds: &DatasetSeries) -> DatasetXBounds {
+    let mut d_min = f64::INFINITY;
+    let mut d_max = f64::NEG_INFINITY;
+    for pt in &ds.points {
+        let xv = pt.x0();
+        if xv.is_finite() {
+            d_min = d_min.min(xv);
+            d_max = d_max.max(xv);
+        }
+    }
+    if d_min.is_finite() && d_max.is_finite() && (d_max - d_min).abs() >= 1e-12 {
+        DatasetXBounds { real_bounds: Some((d_min, d_max)), single_x: None, scan_x_min: d_min, scan_x_max: d_max, span: (d_max - d_min).max(1.0) }
+    } else if d_min.is_finite() {
+        DatasetXBounds { real_bounds: None, single_x: Some(d_min), scan_x_min: -10.0, scan_x_max: 10.0, span: 20.0 }
+    } else {
+        DatasetXBounds { real_bounds: None, single_x: None, scan_x_min: -10.0, scan_x_max: 10.0, span: 20.0 }
+    }
+}
+
+fn extrapolation_note_for_x(bounds: &DatasetXBounds, x_val: f64, plateau_hint: Option<&'static str>) -> Option<String> {
+    let prefix = plateau_hint.map(|tag| format!("{tag}: ")).unwrap_or_default();
+    match (bounds.real_bounds, bounds.single_x) {
+        (Some((d_min, d_max)), _) => {
+            let tol = 1e-9 * bounds.span.max(1.0);
+            if x_val < d_min - tol {
+                Some(format!("{prefix}Extrapolated below measured standard X range [{d_min}, {d_max}]"))
+            } else if x_val > d_max + tol {
+                Some(format!("{prefix}Extrapolated above measured standard X range [{d_min}, {d_max}]"))
+            } else {
+                None
+            }
+        }
+        (None, Some(x0)) => {
+            if (x_val - x0).abs() > 1e-9 * x0.abs().max(1.0) {
+                Some(format!("{prefix}Extrapolated outside single-X standard data"))
+            } else {
+                None
+            }
+        }
+        (None, None) => Some(format!("{prefix}Extrapolated without finite standard X range")),
+    }
+}
+
+fn plateau_tag_for_target(
+    model: &dyn ParametricModel,
+    ds_params: &[f64],
+    ds_index: usize,
+    y_target: f64,
+    x_a: f64,
+    x_b: f64,
+) -> Option<&'static str> {
+    let ya = model.eval(&[x_a], ds_params, ds_index)?;
+    let yb = model.eval(&[x_b], ds_params, ds_index)?;
+    if !ya.is_finite() || !yb.is_finite() {
+        return None;
+    }
+    let y_lo = ya.min(yb);
+    let y_hi = ya.max(yb);
+    if y_target > y_hi + 1e-12 {
+        Some("AboveTopPlateau")
+    } else if y_target < y_lo - 1e-12 {
+        Some("BelowBottomPlateau")
+    } else {
+        None
+    }
+}
+
 /// Interpolate unknown `X` from target `Y` along the fitted curve using scan + `brent_root`,
-/// returning inverse confidence bounds (`CiBound::Open` when plateauing beyond band limits).
+/// preferring roots within measured `[x_min, x_max]`, flagging out-of-range extrapolation and
+/// plateau violations (`AboveTopPlateau` / `BelowBottomPlateau`), and returning inverse CIs
+/// (`CiBound::Open` when plateauing beyond band limits).
 ///
 /// Roots are bracketed by a 200-point scan and refined with Brent (1973). The interval is where
 /// the pointwise mean-response confidence band (see `build_curve_overlay`) crosses `y_target`,
@@ -2699,22 +3120,54 @@ fn interpolate_x_from_y(
     sigma: f64,
     t_crit: f64,
 ) -> InterpolatedUnknown {
-    let mut x_min = f64::INFINITY;
-    let mut x_max = f64::NEG_INFINITY;
-    for pt in &ds.points {
-        x_min = x_min.min(pt.x0());
-        x_max = x_max.max(pt.x0());
-    }
-    if !x_min.is_finite() || !x_max.is_finite() || (x_max - x_min).abs() < 1e-12 {
-        x_min = -10.0;
-        x_max = 10.0;
-    }
-    let span = (x_max - x_min).max(1.0);
-    let scan_lo = x_min - 0.5 * span;
-    let scan_hi = x_max + 0.5 * span;
+    let xb = dataset_x_bounds(ds);
+    let scan_lo = xb.scan_x_min - 0.5 * xb.span;
+    let scan_hi = xb.scan_x_max + 0.5 * xb.span;
 
     let f_diff = |x: f64| -> f64 { model.eval(&[x], ds_params, ds.data_set_index).map_or(f64::NAN, |y| y - y_target) };
-    let Some(x_hat) = find_first_root_in_scan(f_diff, scan_lo, scan_hi) else {
+    let (in_range_root, in_range_flips) = scan_interval_first_root_and_crossings(&f_diff, xb.scan_x_min, xb.scan_x_max);
+
+    let x_hat_opt = in_range_root.or_else(|| {
+        let (lo_root, _) = scan_interval_first_root_and_crossings(&f_diff, scan_lo, xb.scan_x_min);
+        let (hi_root, _) = scan_interval_first_root_and_crossings(&f_diff, xb.scan_x_max, scan_hi);
+        match (lo_root, hi_root) {
+            (Some(rl), Some(rh)) => {
+                if (xb.scan_x_min - rl).abs() <= (rh - xb.scan_x_max).abs() {
+                    Some(rl)
+                } else {
+                    Some(rh)
+                }
+            }
+            (Some(rl), None) => Some(rl),
+            (None, Some(rh)) => Some(rh),
+            (None, None) => None,
+        }
+    });
+
+    let Some(x_hat) = x_hat_opt else {
+        let mut y_min = f64::INFINITY;
+        let mut y_max = f64::NEG_INFINITY;
+        let samples = 40_usize;
+        for i in 0..=samples {
+            let x = scan_lo + (i as f64) / (samples as f64) * (scan_hi - scan_lo);
+            if let Some(y) = model.eval(&[x], ds_params, ds.data_set_index)
+                && y.is_finite()
+            {
+                y_min = y_min.min(y);
+                y_max = y_max.max(y);
+            }
+        }
+        let note = if y_min.is_finite() && y_max.is_finite() {
+            if y_target > y_max {
+                "AboveTopPlateau: Target Y falls outside fitted curve range".to_owned()
+            } else if y_target < y_min {
+                "BelowBottomPlateau: Target Y falls outside fitted curve range".to_owned()
+            } else {
+                "Target Y falls outside fitted curve range".to_owned()
+            }
+        } else {
+            "Target Y falls outside fitted curve range".to_owned()
+        };
         return InterpolatedUnknown {
             data_set_index: ds.data_set_index,
             row,
@@ -2722,7 +3175,7 @@ fn interpolate_x_from_y(
             output_estimate: f64::NAN,
             ci_lower: CiBound::Open,
             ci_upper: CiBound::Open,
-            note: Some("Target Y falls outside fitted curve range".to_owned()),
+            note: Some(note),
         };
     };
 
@@ -2769,7 +3222,13 @@ fn interpolate_x_from_y(
         (CiBound::Open, CiBound::Open)
     };
 
-    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: y_target, output_estimate: x_hat, ci_lower, ci_upper, note: None }
+    let plateau_hint = plateau_tag_for_target(model, ds_params, ds.data_set_index, y_target, xb.scan_x_min, xb.scan_x_max);
+    let mut note = extrapolation_note_for_x(&xb, x_hat, plateau_hint);
+    if note.is_none() && in_range_flips > 1 {
+        note = Some("Non-monotone fitted curve: multiple X roots exist inside measured standard range".to_owned());
+    }
+
+    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: y_target, output_estimate: x_hat, ci_lower, ci_upper, note }
 }
 
 /// Predict `Y` at `x_val` with the pointwise delta-method confidence interval for the mean
@@ -2788,6 +3247,7 @@ fn interpolate_y_from_x(
     sigma: f64,
     t_crit: f64,
 ) -> InterpolatedUnknown {
+    let xb = dataset_x_bounds(ds);
     let Some(y_hat) = model.eval(&[x_val], ds_params, ds.data_set_index) else {
         return InterpolatedUnknown {
             data_set_index: ds.data_set_index,
@@ -2808,30 +3268,45 @@ fn interpolate_y_from_x(
     } else {
         (CiBound::Open, CiBound::Open)
     };
-    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: x_val, output_estimate: y_hat, ci_lower, ci_upper, note: None }
+    let note = extrapolation_note_for_x(&xb, x_val, None);
+    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: x_val, output_estimate: y_hat, ci_lower, ci_upper, note }
 }
 
-fn find_first_root_in_scan<F: Fn(f64) -> f64>(f: F, lo: f64, hi: f64) -> Option<f64> {
+fn scan_interval_first_root_and_crossings<F: Fn(f64) -> f64>(f: &F, lo: f64, hi: f64) -> (Option<f64>, usize) {
     let steps = 200_usize;
     let mut prev_x = lo;
     let mut prev_y = f(prev_x);
+    let mut prev_nz = if prev_y.is_finite() && prev_y.abs() > 1e-12 { Some(prev_y) } else { None };
+    let mut first_root = if prev_y.is_finite() && prev_y.abs() < 1e-13 { Some(prev_x) } else { None };
+    let mut sign_flips = 0_usize;
+
     for i in 1..=steps {
         let x = lo + (i as f64) / (steps as f64) * (hi - lo);
         let y = f(x);
-        if prev_y.is_finite() && y.is_finite() {
-            if prev_y.abs() < 1e-13 {
-                return Some(prev_x);
-            }
-            if prev_y * y <= 0.0
-                && let Ok(root) = brent_root(&f, prev_x, x, RootOptions { abs_tol: 1e-11, rel_tol: 1e-11, max_iters: 80 })
+        if y.is_finite() && y.abs() > 1e-12 {
+            if let Some(pnz) = prev_nz
+                && pnz * y < 0.0
             {
-                return Some(root);
+                sign_flips += 1;
+            }
+            prev_nz = Some(y);
+        }
+        if first_root.is_none() && prev_y.is_finite() && y.is_finite() {
+            if prev_y.abs() < 1e-13 {
+                first_root = Some(prev_x);
+            } else if prev_y * y <= 0.0
+                && let Ok(root) = brent_root(f, prev_x, x, RootOptions { abs_tol: 1e-11, rel_tol: 1e-11, max_iters: 80 })
+            {
+                first_root = Some(root);
             }
         }
         prev_x = x;
         prev_y = y;
     }
-    None
+    if first_root.is_none() && prev_y.is_finite() && prev_y.abs() < 1e-13 {
+        first_root = Some(prev_x);
+    }
+    (first_root, sign_flips)
 }
 
 fn find_nearest_root<F: Fn(f64) -> f64>(f: F, anchor: f64, lo: f64, hi: f64) -> Option<f64> {

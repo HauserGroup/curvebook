@@ -187,9 +187,9 @@ pub fn ln_gamma(x: f64) -> Result<f64, MathError> {
 /// Euler's Gamma function `Gamma(x)` supporting all real `x` except non-positive integer poles.
 ///
 /// # Errors
-/// Returns [`MathError::DomainError`] at poles `x in {0, -1, -2, ...}` or `NaN`.
+/// Returns [`MathError::DomainError`] at poles `x in {0, -1, -2, ...}`, `-inf`, or `NaN`.
 pub fn gamma(x: f64) -> Result<f64, MathError> {
-    if x.is_nan() {
+    if x.is_nan() || (!x.is_finite() && x < 0.0) {
         return Err(MathError::DomainError { name: "x", value: x });
     }
     if x <= 0.0 {

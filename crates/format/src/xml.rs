@@ -170,14 +170,19 @@ impl<'a> XmlParser<'a> {
         Ok(false)
     }
 
+    fn bump_node_count(&mut self, kind: &str) -> Result<(), FormatError> {
+        self.node_count += 1;
+        if self.node_count > self.limits.max_nodes {
+            return Err(FormatError::XmlParse { offset: self.pos, reason: format!("XML {kind} count exceeds node limit {}", self.limits.max_nodes) });
+        }
+        Ok(())
+    }
+
     fn parse_element(&mut self, depth: usize) -> Result<XmlElement, FormatError> {
         if depth > self.limits.max_depth {
             return Err(FormatError::XmlDepthExceeded { depth, max: self.limits.max_depth });
         }
-        self.node_count += 1;
-        if self.node_count > self.limits.max_nodes {
-            return Err(FormatError::XmlParse { offset: self.pos, reason: format!("XML element count exceeds limit {}", self.limits.max_nodes) });
-        }
+        self.bump_node_count("element")?;
         if !self.rest().starts_with('<') {
             return Err(FormatError::XmlParse { offset: self.pos, reason: String::from("expected `<` opening tag") });
         }
@@ -230,6 +235,7 @@ impl<'a> XmlParser<'a> {
                 let cdata = &self.rest()[..end];
                 self.pos += end + 3;
                 if !cdata.is_empty() {
+                    self.bump_node_count("CDATA node")?;
                     children.push(XmlNode::Text(cdata.to_owned()));
                 }
                 continue;
@@ -242,6 +248,7 @@ impl<'a> XmlParser<'a> {
             } else {
                 let text = self.read_text_until_lt()?;
                 if !text.is_empty() {
+                    self.bump_node_count("text node")?;
                     children.push(XmlNode::Text(text));
                 }
             }
@@ -261,7 +268,8 @@ impl<'a> XmlParser<'a> {
     }
 
     fn read_attributes(&mut self) -> Result<Vec<(String, String)>, FormatError> {
-        let mut attrs = Vec::new();
+        let mut attrs: Vec<(String, String)> = Vec::new();
+        let mut seen: Option<std::collections::HashSet<String>> = None;
         loop {
             self.skip_whitespace();
             let r = self.rest();
@@ -271,6 +279,8 @@ impl<'a> XmlParser<'a> {
             if r.is_empty() {
                 return Err(FormatError::XmlParse { offset: self.pos, reason: String::from("unexpected EOF in tag attributes") });
             }
+            self.bump_node_count("attribute")?;
+            let attr_offset = self.pos;
             let key = self.read_name()?;
             if key.is_empty() {
                 return Err(FormatError::XmlParse { offset: self.pos, reason: String::from("expected attribute name") });
@@ -297,8 +307,26 @@ impl<'a> XmlParser<'a> {
             let raw_val = &self.rest()[..end];
             let decoded = decode_xml_entities(raw_val, self.pos)?;
             self.pos += end + 1;
+            if Self::is_duplicate_attr(&attrs, &mut seen, &key) {
+                return Err(FormatError::XmlParse { offset: attr_offset, reason: format!("duplicate attribute `{key}`") });
+            }
             attrs.push((key, decoded));
         }
+    }
+
+    fn is_duplicate_attr(attrs: &[(String, String)], seen: &mut Option<std::collections::HashSet<String>>, key: &str) -> bool {
+        if let Some(set) = seen.as_mut() {
+            return !set.insert(key.to_owned());
+        }
+        if attrs.iter().any(|(existing, _)| existing == key) {
+            return true;
+        }
+        if attrs.len() >= 16 {
+            let mut set: std::collections::HashSet<String> = attrs.iter().map(|(k, _)| k.clone()).collect();
+            set.insert(key.to_owned());
+            *seen = Some(set);
+        }
+        false
     }
 
     fn read_text_until_lt(&mut self) -> Result<String, FormatError> {

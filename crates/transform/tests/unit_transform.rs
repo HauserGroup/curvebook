@@ -3,17 +3,18 @@ use std::collections::BTreeMap;
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable,
     DataSheet, DocError, ErrorPropagationMode, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet,
-    InternalLinkKind, LinkSource, MathTransformPreset, MultipleVariablesTable, NestedTable, NormalizeAnchor, PartsOfWholeTable, PlacementMode,
-    SheetCellRange, SheetId, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, TransformAnalysisSpec, VariableRole,
-    XColumnMode, XyTable,
+    InternalLinkKind, LinkSource, MAX_ROWS, MAX_SUBCOLUMNS, MathTransformPreset, MultipleVariablesTable, NestedTable, NormalizeAnchor,
+    PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind,
+    TransformAnalysisSpec, VariableRole, XColumnMode, XyTable,
 };
+use lumencraft_transform::import::MAX_IMPORT_CELLS;
 use lumencraft_transform::{
-    AucOptions, BaselineKind, CurveSheetOp, DependencyTarget, DerivativeOrder, FormulaValue, ImportPipelineOptions, ImportSourcePayload,
-    MathTransformOp, PruneMethod, ScalarEnv, SelectRule, SmoothMethod, TransformContext, TransformError, apply_curve_calculus_to_sheet,
-    apply_import_link_pipeline, compute_auc, compute_auc_with_se, compute_sheet_auc, detect_link_cycles, differentiate_xy, eval_scalar_expr,
-    evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, evaluate_equation, evaluate_formula_for_sheet,
-    execute_analysis_transform, execute_math_transform, execute_prune, execute_remove_baseline_kind, execute_select, execute_transform,
-    extract_dependencies, integrate_xy, parse_formula, simulate_xy_sheet, smooth_xy, validate_no_formula_cycle,
+    AucOptions, BaselineKind, CurveSheetOp, DependencyTarget, DerivativeOrder, FormulaContext, FormulaValue, ImportPipelineOptions,
+    ImportSourcePayload, MathTransformOp, PruneMethod, ScalarEnv, SelectRule, SmoothMethod, TransformContext, TransformError,
+    apply_curve_calculus_to_sheet, apply_import_link_pipeline, compute_auc, compute_auc_with_se, compute_sheet_auc, detect_link_cycles,
+    differentiate_xy, eval_column_expr, eval_scalar_expr, evaluate_calculated_variables, evaluate_data_sheet_calculated_variables, evaluate_equation,
+    evaluate_formula_for_sheet, execute_analysis_transform, execute_math_transform, execute_prune, execute_remove_baseline_kind, execute_select,
+    execute_transform, execute_transpose, extract_dependencies, integrate_xy, parse_formula, simulate_xy_sheet, smooth_xy, validate_no_formula_cycle,
 };
 
 fn assert_approx(actual: f64, expected: f64, tol: f64) {
@@ -1085,4 +1086,320 @@ fn append_columns_grows_all_remaining_archetypes() {
             assert_approx(sheet.cell(CellCoord::new(1, 2, 0)).unwrap().active_number().unwrap(), 44.0, 1e-12);
         }
     }
+}
+
+#[test]
+fn import_pipeline_enforces_anchor_overflow_and_max_rows_across_archetypes() {
+    let tiny_payload = ImportSourcePayload::DelimitedText { text: "42", delimiter: ',', decimal_separator: '.' };
+    let opts = ImportPipelineOptions::default();
+
+    // Anchor overflow (`usize::MAX` row / col / subcol) must fail cleanly without panicking or growing sheets.
+    let mut xy_sheet =
+        DataSheet::new("xy-ovf", "XY Overflow", TableArchetype::Xy(XyTable::new(SubcolumnMode::RawReplicates(2), 1, 1).unwrap())).unwrap();
+    for bad_anchor in [CellCoord::new(usize::MAX, 0, 0), CellCoord::new(0, usize::MAX, 0), CellCoord::new(0, 0, usize::MAX)] {
+        let spec = ImportLinkSpec {
+            source: LinkSource::Clipboard,
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: bad_anchor, ..ImportPlacementSpec::default() },
+        };
+        let err = apply_import_link_pipeline(&mut xy_sheet, &spec, tiny_payload.clone(), &opts, None).unwrap_err();
+        assert!(matches!(err, TransformError::InvalidSpec { .. }), "unexpected overflow error: {err:?}");
+        assert_eq!(xy_sheet.archetype.row_count(), 1);
+    }
+
+    // MAX_ROWS pre-allocation rejection on MultipleVariables and Nested (must NOT resize row_titles or cell vecs).
+    let row_cap_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: CellCoord::new(MAX_ROWS, 0, 0), ..ImportPlacementSpec::default() },
+    };
+
+    let mut mv_row_cap = DataSheet::new("mv-rows", "MV Rows", TableArchetype::MultipleVariables(MultipleVariablesTable::new(2, 1).unwrap())).unwrap();
+    let mv_row_err = apply_import_link_pipeline(&mut mv_row_cap, &row_cap_spec, tiny_payload.clone(), &opts, None).unwrap_err();
+    assert!(matches!(mv_row_err, TransformError::Doc(DocError::TooManyRows { .. })));
+    if let TableArchetype::MultipleVariables(mv) = &mv_row_cap.archetype {
+        assert_eq!(mv.row_titles.len(), 1);
+        assert_eq!(mv.variables[0].cells.len(), 1);
+    }
+
+    let mut nested_row_cap = DataSheet::new("nst-rows", "Nested Rows", TableArchetype::Nested(NestedTable::new(2, 2, 1).unwrap())).unwrap();
+    let nested_row_err = apply_import_link_pipeline(&mut nested_row_cap, &row_cap_spec, tiny_payload, &opts, None).unwrap_err();
+    assert!(matches!(nested_row_err, TransformError::Doc(DocError::TooManyRows { .. })));
+    if let TableArchetype::Nested(nst) = &nested_row_cap.archetype {
+        assert_eq!(nst.row_titles.len(), 1);
+        assert_eq!(nst.groups[0].cells.len(), 1);
+    }
+}
+
+#[test]
+fn import_pipeline_enforces_cell_budget_before_allocation_across_archetypes() {
+    assert_eq!(MAX_IMPORT_CELLS, 10_000_000);
+    let tiny_payload = ImportSourcePayload::DelimitedText { text: "42", delimiter: ',', decimal_separator: '.' };
+    let opts = ImportPipelineOptions::default();
+
+    // Grouped: 25 datasets * 16 replicates = 400 slots/row; 30,001 rows <= MAX_ROWS yet 12,000,400 cells > MAX_IMPORT_CELLS.
+    let mut grp_budget =
+        DataSheet::new("grp-budget", "Grouped Budget", TableArchetype::Grouped(GroupedTable::new(SubcolumnMode::RawReplicates(16), 25, 1).unwrap()))
+            .unwrap();
+    let grp_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: CellCoord::new(30_000, 0, 0), ..ImportPlacementSpec::default() },
+    };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut grp_budget, &grp_spec, tiny_payload.clone(), &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    assert_eq!(grp_budget.archetype.row_count(), 1);
+
+    // Column (MeanSdN): 120 datasets * 3 subcolumns = 360 slots/row; 30,001 rows -> 10,800,360 cells > MAX_IMPORT_CELLS.
+    let mut col_budget = DataSheet::new(
+        "col-budget",
+        "Col Budget",
+        TableArchetype::Column(ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, 120, 1).unwrap()),
+    )
+    .unwrap();
+    assert!(matches!(
+        apply_import_link_pipeline(&mut col_budget, &grp_spec, tiny_payload.clone(), &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    assert_eq!(col_budget.archetype.row_count(), 1);
+
+    // MultipleVariables: 20 vars * 600,001 rows = 12,000,020 > MAX_IMPORT_CELLS.
+    let mut mv_budget =
+        DataSheet::new("mv-budget", "MV Budget", TableArchetype::MultipleVariables(MultipleVariablesTable::new(20, 1).unwrap())).unwrap();
+    let mv_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: CellCoord::new(600_000, 0, 0), ..ImportPlacementSpec::default() },
+    };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut mv_budget, &mv_spec, tiny_payload.clone(), &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    if let TableArchetype::MultipleVariables(mv) = &mv_budget.archetype {
+        assert_eq!(mv.row_titles.len(), 1);
+        assert_eq!(mv.variables[0].cells.len(), 1);
+    }
+
+    // Nested: 5 groups * 10 biological units = 50 units/row; 250,001 rows -> 12,500,050 > MAX_IMPORT_CELLS.
+    let mut nested_budget = DataSheet::new("nst-budget", "Nested Budget", TableArchetype::Nested(NestedTable::new(5, 10, 1).unwrap())).unwrap();
+    let nested_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::Overwrite, anchor: CellCoord::new(250_000, 0, 0), ..ImportPlacementSpec::default() },
+    };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut nested_budget, &nested_spec, tiny_payload, &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    if let TableArchetype::Nested(nst) = &nested_budget.archetype {
+        assert_eq!(nst.row_titles.len(), 1);
+        assert_eq!(nst.groups[0].cells.len(), 1);
+    }
+}
+
+#[test]
+fn import_pipeline_enforces_atomic_append_columns_and_unstack_cell_budget() {
+    let opts = ImportPipelineOptions::default();
+
+    // AppendColumns combined row+col growth exceeding MAX_IMPORT_CELLS must leave rows & cols completely unchanged.
+    let mut mv_append =
+        DataSheet::new("mv-app-cap", "MV Append Cap", TableArchetype::MultipleVariables(MultipleVariablesTable::new(10, 1).unwrap())).unwrap();
+    let append_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec {
+            mode: PlacementMode::AppendColumns,
+            anchor: CellCoord::new(600_000, 0, 0),
+            ..ImportPlacementSpec::default()
+        },
+    };
+    let ten_cols_payload = ImportSourcePayload::DelimitedText { text: "1,2,3,4,5,6,7,8,9,10", delimiter: ',', decimal_separator: '.' };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut mv_append, &append_spec, ten_cols_payload, &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+    assert_eq!(mv_append.archetype.row_count(), 1);
+    assert_eq!(mv_append.archetype.column_count(), 10);
+
+    // Unstack producing > MAX_IMPORT_CELLS rejected before dense grid allocation.
+    let mut unstack_csv = String::new();
+    for g in 0..1_001 {
+        unstack_csv.push_str(&format!("G{g},1\n"));
+    }
+    for _ in 0..10_005 {
+        unstack_csv.push_str("G0,2\n");
+    }
+    let mut unstack_target =
+        DataSheet::new("unstack-cap", "Unstack", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
+            .unwrap();
+    let unstack_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec { unstack_group_column: Some(0), ..ImportFilterSpec::default() },
+        placement: ImportPlacementSpec::default(),
+    };
+    let unstack_payload = ImportSourcePayload::DelimitedText { text: &unstack_csv, delimiter: ',', decimal_separator: '.' };
+    assert!(matches!(
+        apply_import_link_pipeline(&mut unstack_target, &unstack_spec, unstack_payload, &opts, None),
+        Err(TransformError::InvalidSpec { .. })
+    ));
+}
+
+fn raw_datasheet_for_test(id: &str, archetype: TableArchetype) -> DataSheet {
+    DataSheet {
+        id: SheetId::new(id),
+        title: format!("Sheet {id}"),
+        archetype,
+        frozen: false,
+        info_sheet_id: None,
+        linked_regions: Vec::new(),
+        floating_notes: Vec::new(),
+        color_tag: None,
+        exclusion_notes: Vec::new(),
+    }
+}
+
+#[test]
+fn r1_s04_01_ragged_tables_and_mismatched_context_handled_cleanly() {
+    // 1. Ragged MultipleVariables rejected cleanly without panic or column truncation.
+    let mut mv = MultipleVariablesTable::new(3, 5).expect("mv");
+    mv.variables[0].title = String::from("A");
+    mv.variables[1].title = String::from("B");
+    mv.variables[2].title = String::from("C");
+    mv.variables[1].cells.truncate(2);
+    for (r, cell) in mv.variables[0].cells.iter_mut().enumerate() {
+        *cell = Cell::number((r + 1) as f64);
+    }
+    let ragged_sheet = raw_datasheet_for_test("mv-rag", TableArchetype::MultipleVariables(mv.clone()));
+
+    assert!(matches!(evaluate_formula_for_sheet("abs(B)", &ragged_sheet, None), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+
+    let mut calc_mv = mv;
+    calc_mv.variables[2].set_calculated_formula("=B + 1");
+    assert!(matches!(evaluate_calculated_variables(&mut calc_mv, None), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+    assert_eq!(calc_mv.variables[0].cells.len(), 5, "ragged DAG validation must fail before shrinking columns");
+
+    let tctx = TransformContext::default();
+    assert!(matches!(execute_transpose(&ragged_sheet, true, &tctx), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+    assert!(matches!(execute_prune(&ragged_sheet, PruneMethod::EveryNth(2), &tctx), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+    assert!(matches!(
+        execute_select(&ragged_sheet, &[SelectRule::ExcludeMissing], TableKind::Column, &tctx),
+        Err(TransformError::Doc(DocError::InvalidCellValue { .. }))
+    ));
+
+    // 2. Ragged Grouped table rejected cleanly by execute_transpose without panic.
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3).expect("grp");
+    grp.data_sets[1].cells.truncate(1);
+    let ragged_grp = raw_datasheet_for_test("grp-rag", TableArchetype::Grouped(grp));
+    assert!(matches!(execute_transpose(&ragged_grp, false, &tctx), Err(TransformError::Doc(DocError::InvalidCellValue { .. }))));
+
+    // 3. Defense-in-depth: custom FormulaContext returning short column vectors never panics.
+    struct RaggedContext;
+    impl FormulaContext for RaggedContext {
+        fn row_count(&self) -> usize {
+            5
+        }
+        fn resolve_column_index(&self, name: &str) -> Option<usize> {
+            match name {
+                "A" => Some(0),
+                "B" => Some(1),
+                _ => None,
+            }
+        }
+        fn column_count(&self) -> usize {
+            2
+        }
+        fn column_values(&self, col_idx: usize) -> Option<Vec<FormulaValue>> {
+            match col_idx {
+                0 => Some(vec![
+                    FormulaValue::Number(1.0),
+                    FormulaValue::Number(2.0),
+                    FormulaValue::Number(3.0),
+                    FormulaValue::Number(4.0),
+                    FormulaValue::Number(5.0),
+                ]),
+                1 => Some(vec![FormulaValue::Number(-2.0), FormulaValue::Number(4.0)]),
+                _ => None,
+            }
+        }
+        fn resolve_info_constant(&self, _name: &str) -> Option<FormulaValue> {
+            None
+        }
+    }
+
+    for formula in [
+        "abs(B)",
+        "A + B",
+        "min(A, B)",
+        "max(A, B)",
+        "sum(A, B)",
+        "mean(A, B)",
+        "and(A, B)",
+        "or(A, B)",
+        "not(B)",
+        "clamp(B, 0, 10)",
+        "if(B > 0, A, B)",
+        "sumif(A > 0, B)",
+        "meanif(B > 0, A)",
+        "diff(B, 1)",
+        "rolling_mean(B, 2)",
+        "rank(B)",
+        "percentile(B, 50)",
+    ] {
+        let expr = parse_formula(formula).expect("parse formula");
+        let out = eval_column_expr(&expr, &RaggedContext).expect("eval ragged context safely");
+        assert_eq!(out.len(), 5, "formula `{formula}` changed row length");
+    }
+}
+
+#[test]
+fn r1_s05_02_import_transpose_and_x_mode_enforce_budgets() {
+    let opts = ImportPipelineOptions::default();
+
+    // 1. Sparse ragged transposed import whose rectangular envelope (4,000 * 4,001 > MAX_IMPORT_CELLS) rejects before allocation.
+    let mut wide_first_row = (0..4_000).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    wide_first_row.push('\n');
+    for r in 0..4_000 {
+        wide_first_row.push_str(&format!("{r}\n"));
+    }
+    let mut target =
+        DataSheet::new("imp-rag", "Target", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap()))
+            .expect("sheet");
+    let spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { transpose: true, ..ImportPlacementSpec::default() },
+    };
+    let payload = ImportSourcePayload::DelimitedText { text: &wide_first_row, delimiter: ',', decimal_separator: '.' };
+    assert!(matches!(apply_import_link_pipeline(&mut target, &spec, payload, &opts, None), Err(TransformError::InvalidSpec { .. })));
+
+    // 2. Bounded ragged transposed import within MAX_IMPORT_CELLS (1 row of 1,000 + 50 rows of 1) succeeds cleanly.
+    let mut bounded_csv = (0..1_000).map(|i| i.to_string()).collect::<Vec<_>>().join(",");
+    bounded_csv.push('\n');
+    for r in 0..50 {
+        bounded_csv.push_str(&format!("{}\n", 1_000 + r));
+    }
+    let bounded_spec = ImportLinkSpec {
+        source: LinkSource::Clipboard,
+        filter: ImportFilterSpec::default(),
+        placement: ImportPlacementSpec { mode: PlacementMode::AppendColumns, transpose: true, ..ImportPlacementSpec::default() },
+    };
+    let bounded_payload = ImportSourcePayload::DelimitedText { text: &bounded_csv, delimiter: ',', decimal_separator: '.' };
+    let report = apply_import_link_pipeline(&mut target, &bounded_spec, bounded_payload, &opts, None).expect("bounded ragged transpose");
+    assert_eq!(report.rows_placed, 1_000);
+    assert_eq!(report.cols_placed, 51);
+    assert_eq!(target.cell(CellCoord::new(999, 1, 0)).and_then(Cell::active_number), Some(999.0));
+    assert_eq!(target.cell(CellCoord::new(0, 51, 0)).and_then(Cell::active_number), Some(1_049.0));
+
+    // 3. Invalid XColumnMode::Numbers { RawReplicates(usize::MAX) | RawReplicates(0) } rejected cleanly on import growth.
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 1).expect("xy");
+    xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(usize::MAX) };
+    let mut bad_xy = raw_datasheet_for_test("bad-xy", TableArchetype::Xy(xy));
+    let simple_spec =
+        ImportLinkSpec { source: LinkSource::Clipboard, filter: ImportFilterSpec::default(), placement: ImportPlacementSpec::default() };
+    let tiny = ImportSourcePayload::DelimitedText { text: "1,2\n3,4\n", delimiter: ',', decimal_separator: '.' };
+    assert!(matches!(apply_import_link_pipeline(&mut bad_xy, &simple_spec, tiny, &opts, None), Err(TransformError::Doc(_))));
+    let _ = MAX_SUBCOLUMNS;
+    let _ = MAX_IMPORT_CELLS;
 }

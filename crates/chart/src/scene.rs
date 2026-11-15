@@ -229,6 +229,7 @@ impl ChartWarning {
 pub enum ChartError {
     SheetNotFound { sheet_id: String },
     InvalidSpec { message: String },
+    ResourceLimit { message: String },
     CompileFailed { message: String },
 }
 
@@ -237,6 +238,7 @@ impl fmt::Display for ChartError {
         match self {
             Self::SheetNotFound { sheet_id } => write!(f, "sheet not found: {sheet_id}"),
             Self::InvalidSpec { message } => write!(f, "invalid graph or layout spec: {message}"),
+            Self::ResourceLimit { message } => write!(f, "chart resource limit exceeded: {message}"),
             Self::CompileFailed { message } => write!(f, "chart compilation failed: {message}"),
         }
     }

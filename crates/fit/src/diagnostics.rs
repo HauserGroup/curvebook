@@ -64,7 +64,9 @@ use std::collections::BTreeMap;
 
 use lumencraft_doc::CiBound;
 use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, f_sf, norm_cdf, norm_ppf, norm_sf, student_t_two_sided_isf, student_t_two_sided_p};
+use lumencraft_math::dist::{
+    chi2_isf, chi2_sf, f_sf, norm_cdf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p,
+};
 use lumencraft_math::linalg::{DenseMatrix, parameter_dependencies, qr_col_pivoted, svd};
 use lumencraft_math::roots::{RootOptions, brent_root};
 use lumencraft_math::special::ln_choose;
@@ -215,6 +217,28 @@ pub fn compute_covariance_diagnostics(
     theta: &[f64],
     confidence: ConfidenceLevel,
 ) -> Result<CovarianceDiagnostics, FitError> {
+    let sigma2 = if df > 0 { (rss / (df as f64)).max(0.0) } else { f64::NAN };
+    let t_crit = if df > 0 { student_t_two_sided_isf(confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN };
+    compute_covariance_from_scale(j_mat, sigma2, t_crit, theta)
+}
+
+/// Compute asymptotic covariance, standard errors, and symmetric normal Wald CIs for Poisson deviance
+/// regression with fixed dispersion $\phi = 1$ using Fisher information $J^\top J$.
+///
+/// # Errors
+/// Returns [`FitError::Math`] if matrix allocation or linear algebra fails.
+pub(crate) fn compute_poisson_covariance_diagnostics(
+    j_mat: &DenseMatrix,
+    df: usize,
+    theta: &[f64],
+    confidence: ConfidenceLevel,
+) -> Result<CovarianceDiagnostics, FitError> {
+    let sigma2 = if df > 0 { 1.0 } else { f64::NAN };
+    let z_crit = if df > 0 { norm_two_sided_isf(confidence.alpha()).unwrap_or(1.96) } else { f64::NAN };
+    compute_covariance_from_scale(j_mat, sigma2, z_crit, theta)
+}
+
+fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, theta: &[f64]) -> Result<CovarianceDiagnostics, FitError> {
     let p = theta.len();
     if p == 0 {
         return Ok(CovarianceDiagnostics {
@@ -231,7 +255,6 @@ pub fn compute_covariance_diagnostics(
 
     let pqr = qr_col_pivoted(j_mat)?;
     let rank = pqr.rank();
-    let sigma2 = if df > 0 { (rss / (df as f64)).max(0.0) } else { 0.0 };
 
     let (xtx_inv, deps, mut ambiguous) = if rank == p && j_mat.nrows() >= p {
         let inv = pqr.xtx_inverse()?;
@@ -244,7 +267,6 @@ pub fn compute_covariance_diagnostics(
         (inv, vec![1.0; p], true)
     };
 
-    let t_crit = if df > 0 { student_t_two_sided_isf(confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN };
     let mut se = Vec::with_capacity(p);
     let mut ci_lo = Vec::with_capacity(p);
     let mut ci_hi = Vec::with_capacity(p);
@@ -252,24 +274,31 @@ pub fn compute_covariance_diagnostics(
     let mut corr_vec = vec![vec![0.0; p]; p];
 
     for i in 0..p {
-        let var_i = (sigma2 * xtx_inv.get(i, i).unwrap_or(0.0)).max(0.0);
-        let se_i = var_i.sqrt();
-        if !se_i.is_finite() {
-            ambiguous = true;
-        }
+        let se_i = if sigma2.is_finite() {
+            let var_i = (sigma2 * xtx_inv.get(i, i).unwrap_or(0.0)).max(0.0);
+            let s = var_i.sqrt();
+            if !s.is_finite() {
+                ambiguous = true;
+            }
+            s
+        } else {
+            f64::NAN
+        };
         se.push(se_i);
-        let half = if t_crit.is_finite() && se_i.is_finite() { t_crit * se_i } else { f64::NAN };
+        let half = if crit.is_finite() && se_i.is_finite() { crit * se_i } else { f64::NAN };
         ci_lo.push(theta[i] - half);
         ci_hi.push(theta[i] + half);
         for (j, cell) in cov_vec[i].iter_mut().enumerate().take(p) {
-            *cell = sigma2 * xtx_inv.get(i, j).unwrap_or(0.0);
+            *cell = if sigma2.is_finite() { sigma2 * xtx_inv.get(i, j).unwrap_or(0.0) } else { f64::NAN };
         }
     }
 
     for i in 0..p {
         for j in 0..p {
             let denom = se[i] * se[j];
-            corr_vec[i][j] = if i == j {
+            corr_vec[i][j] = if !sigma2.is_finite() {
+                f64::NAN
+            } else if i == j {
                 1.0
             } else if denom > 0.0 && denom.is_finite() {
                 (cov_vec[i][j] / denom).clamp(-1.0, 1.0)
@@ -509,7 +538,7 @@ pub fn compute_profile_likelihood_cis<F>(
     cov_diag: &CovarianceDiagnostics,
     bounds: &[(Option<f64>, Option<f64>)],
     confidence: ConfidenceLevel,
-    mut profile_solve: F,
+    profile_solve: F,
 ) -> Vec<(CiBound, CiBound)>
 where
     F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
@@ -526,17 +555,102 @@ where
     };
     let f_crit = t_crit * t_crit;
     let ss_crit = ss_min * (1.0 + f_crit / (df as f64));
+    trace_all_profile_bounds(theta_hat, ss_min, ss_crit, t_crit, cov_diag, bounds, profile_solve)
+}
+
+/// Trace Venzon–Moolgavkar asymmetrical profile-deviance confidence intervals for Poisson
+/// deviance regression (fixed dispersion $\phi = 1$) against
+/// `D_crit = D_min + chi2_{1}(alpha)`.
+pub fn compute_deviance_profile_likelihood_cis<F>(
+    theta_hat: &[f64],
+    dev_min: f64,
+    cov_diag: &CovarianceDiagnostics,
+    bounds: &[(Option<f64>, Option<f64>)],
+    confidence: ConfidenceLevel,
+    profile_solve: F,
+) -> Vec<(CiBound, CiBound)>
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+{
+    let p = theta_hat.len();
+    if p == 0 || !dev_min.is_finite() || dev_min < 0.0 {
+        return vec![(CiBound::Open, CiBound::Open); p];
+    }
+    let Ok(chi2_crit) = chi2_isf(confidence.alpha(), 1.0) else {
+        return vec![(CiBound::Open, CiBound::Open); p];
+    };
+    let z_crit = chi2_crit.sqrt();
+    let dev_crit = dev_min + chi2_crit;
+    trace_all_profile_bounds(theta_hat, dev_min, dev_crit, z_crit, cov_diag, bounds, profile_solve)
+}
+
+fn trace_all_profile_bounds<F>(
+    theta_hat: &[f64],
+    ss_min: f64,
+    ss_crit: f64,
+    step_crit: f64,
+    cov_diag: &CovarianceDiagnostics,
+    bounds: &[(Option<f64>, Option<f64>)],
+    mut profile_solve: F,
+) -> Vec<(CiBound, CiBound)>
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+{
+    let p = theta_hat.len();
     let mut out = Vec::with_capacity(p);
 
     for k in 0..p {
         let se_k = cov_diag.standard_errors.get(k).copied().unwrap_or(f64::NAN);
-        let base_step = if se_k.is_finite() && se_k > 0.0 { t_crit * se_k } else { 0.1 * theta_hat[k].abs().max(1.0) };
+        let base_step = if se_k.is_finite() && se_k > 0.0 { step_crit * se_k } else { 0.1 * theta_hat[k].abs().max(1.0) };
         let (lb, ub) = bounds.get(k).copied().unwrap_or((None, None));
         let lo = trace_profile_endpoint(k, -1.0, theta_hat, ss_min, ss_crit, base_step, lb, &cov_diag.covariance_matrix, &mut profile_solve);
         let hi = trace_profile_endpoint(k, 1.0, theta_hat, ss_min, ss_crit, base_step, ub, &cov_diag.covariance_matrix, &mut profile_solve);
         out.push((lo, hi));
     }
     out
+}
+
+struct ProfileBracket {
+    x_neg: f64,
+    f_neg: f64,
+    w_neg: Vec<f64>,
+    x_pos: f64,
+    f_pos: f64,
+    w_pos: Vec<f64>,
+}
+
+fn refine_profile_bracket<F>(k: usize, ss_crit: f64, base_step: f64, br: &ProfileBracket, profile_solve: &mut F) -> CiBound
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+{
+    let (a, b) = if br.x_neg <= br.x_pos { (br.x_neg, br.x_pos) } else { (br.x_pos, br.x_neg) };
+    let span = br.x_pos - br.x_neg;
+    let tol = 1e-7 * base_step.max(1e-12);
+    let opts = RootOptions { rel_tol: 1e-7, abs_tol: tol, max_iters: 48 };
+    let mut interp_w = Vec::with_capacity(br.w_pos.len());
+    let root = brent_root(
+        |val| {
+            if val == br.x_neg {
+                return br.f_neg;
+            }
+            if val == br.x_pos {
+                return br.f_pos;
+            }
+            let t = if span.abs() > 0.0 { ((val - br.x_neg) / span).clamp(0.0, 1.0) } else { 0.5 };
+            interp_w.clear();
+            for (j, (&wn, &wp)) in br.w_neg.iter().zip(br.w_pos.iter()).enumerate() {
+                interp_w.push(if j == k { val } else { wn + t * (wp - wn) });
+            }
+            profile_solve(k, val, &interp_w).map_or(f64::NAN, |(ss_v, _)| ss_v - ss_crit)
+        },
+        a,
+        b,
+        opts,
+    );
+    match root {
+        Ok(r) if r.is_finite() => CiBound::Finite(r),
+        _ => CiBound::Open,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -554,13 +668,15 @@ fn trace_profile_endpoint<F>(
 where
     F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
 {
+    let target_rise = (ss_crit - ss_min).max(0.0);
     let mut prev_val = theta_hat[k];
     let mut prev_diff = ss_min - ss_crit;
+    let mut prev_warm = theta_hat.to_vec();
     let mut warm_theta = theta_hat.to_vec();
     let cov_kk = cov.get(k).and_then(|r| r.get(k)).copied().unwrap_or(0.0);
 
     let mut step = base_step.max(1e-8 * theta_hat[k].abs().max(1.0));
-    let mut bracket: Option<(f64, f64)> = None;
+    let mut bracket: Option<ProfileBracket> = None;
     let mut last_ss = ss_min;
 
     for iter in 0..24 {
@@ -594,8 +710,11 @@ where
         };
         warm_theta = best_nuisance;
         let diff = ss_cand - ss_crit;
+        if target_rise > 0.0 && diff.abs() <= 1e-11 * target_rise {
+            return CiBound::Finite(cand);
+        }
         if diff >= 0.0 {
-            bracket = Some(if prev_val <= cand { (prev_val, cand) } else { (cand, prev_val) });
+            bracket = Some(ProfileBracket { x_neg: prev_val, f_neg: prev_diff, w_neg: prev_warm, x_pos: cand, f_pos: diff, w_pos: warm_theta });
             break;
         }
         // Detect flat asymptote plateau below ss_crit after expanding far beyond 16x SE.
@@ -607,35 +726,15 @@ where
         }
         prev_val = cand;
         prev_diff = diff;
+        prev_warm = warm_theta.clone();
         last_ss = ss_cand;
         step *= if iter < 4 { 1.8 } else { 2.5 };
     }
 
-    let _ = prev_diff;
-    let Some((a, b)) = bracket else {
+    let Some(br) = bracket else {
         return CiBound::Open;
     };
-
-    let tol = 1e-7 * base_step.max(1e-12);
-    let opts = RootOptions { rel_tol: 1e-7, abs_tol: tol, max_iters: 48 };
-    let mut warm_brent = warm_theta;
-    let root = brent_root(
-        |val| {
-            if let Some((ss_v, next_w)) = profile_solve(k, val, &warm_brent) {
-                warm_brent = next_w;
-                ss_v - ss_crit
-            } else {
-                f64::NAN
-            }
-        },
-        a,
-        b,
-        opts,
-    );
-    match root {
-        Ok(r) if r.is_finite() => CiBound::Finite(r),
-        _ => CiBound::Finite(0.5 * (a + b)),
-    }
+    refine_profile_bracket(k, ss_crit, base_step, &br, profile_solve)
 }
 
 /// Compare two nested regression models using the Extra-Sum-of-Squares *F*-test (`model_1` simpler

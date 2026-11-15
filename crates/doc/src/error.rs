@@ -6,6 +6,7 @@ use std::fmt;
 pub use lumencraft_math::ConfidenceLevel;
 
 use crate::ids::SheetId;
+use crate::layout::LayoutItemLimitError;
 use crate::project::SheetFolderKind;
 use crate::{SubcolumnMode, TableKind};
 
@@ -23,6 +24,12 @@ pub const MAX_TITLE_BYTES: usize = 4_096;
 
 /// Maximum total sheets across all five navigator sections in a single project.
 pub const MAX_SHEETS_PER_PROJECT: usize = 500;
+
+/// Hard ceiling on total allocated [`crate::Cell`] slots within a single data table sheet.
+pub const MAX_SHEET_CELLS: usize = 30_000_000;
+
+/// Hard ceiling on cumulative allocated [`crate::Cell`] slots across all data sheets in one project.
+pub const MAX_PROJECT_CELLS: usize = 50_000_000;
 
 /// Current `.lumencraft` document schema version.
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -60,6 +67,36 @@ pub fn validate_subcolumns(count: usize) -> Result<(), DocError> {
         return Err(DocError::TooManySubcolumns { count, max: MAX_SUBCOLUMNS });
     }
     Ok(())
+}
+
+/// Validate a total cell count against [`MAX_SHEET_CELLS`].
+pub fn validate_sheet_cells(count: usize) -> Result<(), DocError> {
+    if count > MAX_SHEET_CELLS {
+        return Err(DocError::TooManyCells { count, max: MAX_SHEET_CELLS });
+    }
+    Ok(())
+}
+
+/// Validate a rectangular table allocation `(rows * cols * subcolumns) + (rows * extra_cols_per_row)`
+/// against [`MAX_SHEET_CELLS`] with overflow-checked arithmetic prior to heap allocation.
+pub fn validate_cell_grid(rows: usize, cols: usize, subcolumns: usize, extra_cols_per_row: usize) -> Result<usize, DocError> {
+    let overflow = || DocError::TooManyCells { count: usize::MAX, max: MAX_SHEET_CELLS };
+    let per_col = rows.checked_mul(subcolumns).ok_or_else(overflow)?;
+    let data_cells = per_col.checked_mul(cols).ok_or_else(overflow)?;
+    let extra_cells = rows.checked_mul(extra_cols_per_row).ok_or_else(overflow)?;
+    let total = data_cells.checked_add(extra_cells).ok_or_else(overflow)?;
+    validate_sheet_cells(total)?;
+    Ok(total)
+}
+
+/// Validate that adding `added_cells` to a project already holding `existing_cells`
+/// remains within [`MAX_PROJECT_CELLS`].
+pub fn validate_project_cells(existing_cells: usize, added_cells: usize) -> Result<usize, DocError> {
+    let total = existing_cells.checked_add(added_cells).ok_or(DocError::TooManyCells { count: usize::MAX, max: MAX_PROJECT_CELLS })?;
+    if total > MAX_PROJECT_CELLS {
+        return Err(DocError::TooManyCells { count: total, max: MAX_PROJECT_CELLS });
+    }
+    Ok(total)
 }
 
 /// Construct a validated [`ConfidenceLevel`] in `[0.01%, 99.99%]`, mapping invalid inputs to
@@ -107,6 +144,8 @@ pub enum DocError {
     TooManyRows { count: usize, max: usize },
     TooManyDataSets { count: usize, max: usize },
     TooManySubcolumns { count: usize, max: usize },
+    TooManyCells { count: usize, max: usize },
+    TooManyLayoutItems { count: usize, max: usize },
     TooManySheets { count: usize, max: usize },
     TitleTooLong { byte_len: usize, max: usize },
     InvalidSubcolumnCount { count: usize },
@@ -129,6 +168,8 @@ impl fmt::Display for DocError {
             Self::TooManyRows { count, max } => write!(f, "row count {count} exceeds maximum {max}"),
             Self::TooManyDataSets { count, max } => write!(f, "column count {count} exceeds maximum {max}"),
             Self::TooManySubcolumns { count, max } => write!(f, "subcolumn count {count} exceeds maximum {max}"),
+            Self::TooManyCells { count, max } => write!(f, "sheet cell count {count} exceeds maximum {max}"),
+            Self::TooManyLayoutItems { count, max } => write!(f, "layout item count {count} exceeds maximum {max}"),
             Self::TooManySheets { count, max } => write!(f, "project sheet count {count} exceeds maximum {max}"),
             Self::TitleTooLong { byte_len, max } => write!(f, "title length {byte_len} bytes exceeds maximum {max}"),
             Self::InvalidSubcolumnCount { count } => write!(f, "subcolumn count must be >= 1, got {count}"),
@@ -161,3 +202,9 @@ impl fmt::Display for DocError {
 }
 
 impl std::error::Error for DocError {}
+
+impl From<LayoutItemLimitError> for DocError {
+    fn from(err: LayoutItemLimitError) -> Self {
+        Self::TooManyLayoutItems { count: err.count, max: err.max }
+    }
+}

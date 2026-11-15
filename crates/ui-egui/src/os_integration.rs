@@ -500,7 +500,7 @@ fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &s
             pdf_candidates.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-t", "application/pdf"]));
         }
         for candidate in &pdf_candidates {
-            if let Ok(Some(_output)) = spawn_candidate_with_stdin(candidate, Some(&bundle.pdf_bytes)) {
+            if let Ok(Some(_output)) = spawn_candidate_discard_output(candidate, Some(&bundle.pdf_bytes)) {
                 return Ok(OsAdapterStatus {
                     available: true,
                     availability: OsAdapterAvailability::Submitted,
@@ -522,7 +522,7 @@ fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &s
             svg_candidates.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-t", "image/svg+xml"]));
         }
         for candidate in &svg_candidates {
-            if let Ok(Some(_output)) = spawn_candidate_with_stdin(candidate, Some(bundle.svg.as_bytes())) {
+            if let Ok(Some(_output)) = spawn_candidate_discard_output(candidate, Some(bundle.svg.as_bytes())) {
                 return Ok(OsAdapterStatus {
                     available: true,
                     availability: OsAdapterAvailability::Submitted,
@@ -588,7 +588,9 @@ function run(argv) {
         if marker == "ERR" {
             return Err(String::from("failed to write pasteboard PDF bytes to staging file"));
         }
-        let bytes = std::fs::read(&out_path).map_err(|err| format!("failed to read staged pasteboard PDF: {err}"))?;
+        const MAX_PASTEBOARD_PDF_BYTES: usize = 128 * 1024 * 1024;
+        let bytes = lumencraft_platform::fs::read_regular_file_bytes(&out_path, MAX_PASTEBOARD_PDF_BYTES)
+            .map_err(|err| format!("failed to read staged pasteboard PDF: {err}"))?;
         if bytes.is_empty() {
             return Err(String::from("staged pasteboard `com.adobe.pdf` entry was empty"));
         }
@@ -895,7 +897,7 @@ fn write_os_clipboard_bundle_with(
 fn write_os_pasteboard_with(candidates: &[OsCommandCandidate], text: &str) -> Result<OsAdapterStatus, String> {
     let mut missing = Vec::new();
     for candidate in candidates {
-        match spawn_candidate_with_stdin(candidate, Some(text.as_bytes()))? {
+        match spawn_candidate_discard_output(candidate, Some(text.as_bytes()))? {
             Some(output) => {
                 let detail = String::from_utf8_lossy(&output.stdout).trim().to_owned();
                 return Ok(OsAdapterStatus {
@@ -992,12 +994,33 @@ fn spawn_candidate_with_stdin(candidate: &OsCommandCandidate, stdin_bytes: Optio
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn spawn_candidate_discard_output(candidate: &OsCommandCandidate, stdin_bytes: Option<&[u8]>) -> Result<Option<ProcessOutput>, String> {
+    match run_candidate_with_stdio(candidate, stdin_bytes, ProcessBounds::default(), false)? {
+        CandidateOutcome::NotFound => Ok(None),
+        CandidateOutcome::Completed(output) => Ok(Some(output)),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn run_candidate(candidate: &OsCommandCandidate, stdin_bytes: Option<&[u8]>, bounds: ProcessBounds) -> Result<CandidateOutcome, String> {
+    run_candidate_with_stdio(candidate, stdin_bytes, bounds, true)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_candidate_with_stdio(
+    candidate: &OsCommandCandidate,
+    stdin_bytes: Option<&[u8]>,
+    bounds: ProcessBounds,
+    capture_output: bool,
+) -> Result<CandidateOutcome, String> {
     let mut cmd = ProcessCommand::new(&candidate.program)
         .args(&candidate.args)
         .wall_timeout(bounds.wall_timeout)
         .idle_timeout(bounds.idle_timeout)
         .max_output_bytes(bounds.max_output_bytes);
+    if !capture_output {
+        cmd = cmd.discard_output();
+    }
     if let Some(bytes) = stdin_bytes {
         cmd = cmd.stdin_bytes(bytes);
     }
@@ -1305,5 +1328,22 @@ Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
             assert_eq!(status.availability, OsAdapterAvailability::Unavailable);
             assert!(status.detail.contains("Dose-Response-Figure.pdf"));
         }
+    }
+
+    #[cfg(all(unix, not(target_arch = "wasm32")))]
+    #[test]
+    fn r1_s11_08_write_os_pasteboard_with_does_not_wait_on_backgrounded_child_stdio() -> Result<(), String> {
+        let candidates =
+            [OsCommandCandidate { program: String::from("sh"), args: vec![String::from("-c"), String::from("cat >/dev/null; (sleep 5) &")] }];
+        let start = std::time::Instant::now();
+        let status = super::write_os_pasteboard_with(&candidates, "hello clipboard")?;
+        let elapsed = start.elapsed();
+        if status.availability != OsAdapterAvailability::Submitted {
+            return Err(format!("expected Submitted status, got {:?}", status));
+        }
+        if elapsed >= std::time::Duration::from_secs(2) {
+            return Err(format!("pasteboard write blocked {elapsed:?} waiting for backgrounded child"));
+        }
+        Ok(())
     }
 }

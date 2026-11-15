@@ -1,14 +1,15 @@
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, CURRENT_SCHEMA_VERSION, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet,
-    DocError, FloatingNote, GraphSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, JournalWidthPreset,
-    LayoutItem, LayoutSheet, LayoutSpec, LinkBorderColor, LinkSource, LinkedDataRegion, MAX_TITLE_BYTES, NonlinearFitSpec, OneWayAnovaSpec,
-    ParameterRule, ParameterScope, PlacementMode, ProjectDocument, RectPt, ResultScalarEntry, ResultSheet, ResultStatus, SheetCellRange, SheetId,
-    SubcolumnMode, TableArchetype, TableKind, XyTable,
+    DocError, FloatingNote, GraphSheet, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
+    JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LinkBorderColor, LinkSource, LinkedDataRegion, MAX_SUBCOLUMNS, MAX_TITLE_BYTES,
+    MultipleVariablesTable, NestedTable, NonlinearFitSpec, OneWayAnovaSpec, ParameterRule, ParameterScope, PartsOfWholeTable, PlacementMode,
+    ProjectDocument, RectPt, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetCellRange, SheetId, SubcolumnMode,
+    SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use lumencraft_format::{
     ArchiveKind, CsvOptions, FormatError, ImportBaselineAdjustment, ZipLimits, ZipWriter, apply_csv_import_link, export_datasheet_to_csv,
     filter_delimited_text, import_csv_to_datasheet, instantiate_template_bytes, open_archive_bytes, open_project_bytes, open_template_bytes,
-    parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, save_project_bytes, save_template_bytes,
+    parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, save_project_bytes, save_template_bytes, validate_project_document,
 };
 
 fn build_sample_project() -> Result<ProjectDocument, FormatError> {
@@ -443,4 +444,162 @@ fn tsv_and_csv_round_trip_multiple_archetypes() {
     let mv_back =
         import_csv_to_datasheet("mv-2", "Cohort", &mv_out, TableKind::MultipleVariables, SubcolumnMode::Single, &CsvOptions::csv()).unwrap();
     assert_eq!(mv_sheet.archetype, mv_back.archetype);
+}
+
+fn raw_datasheet(id: &str, archetype: TableArchetype) -> DataSheet {
+    DataSheet {
+        id: SheetId::new(id),
+        title: format!("Sheet {id}"),
+        archetype,
+        frozen: false,
+        info_sheet_id: None,
+        linked_regions: Vec::new(),
+        floating_notes: Vec::new(),
+        color_tag: None,
+        exclusion_notes: Vec::new(),
+    }
+}
+
+fn wrap_project_zip(doc_json: &serde_json::Value) -> Result<Vec<u8>, FormatError> {
+    let doc_bytes = serde_json::to_vec(doc_json)?;
+    let manifest = serde_json::json!({
+        "format": "lumencraft-archive",
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "kind": "Project",
+        "title": "Forged",
+        "document_crc32": crc32fast::hash(&doc_bytes),
+        "sheets": []
+    });
+    let mut w = ZipWriter::new();
+    w.add_file("document.json", doc_bytes)?;
+    w.add_file("manifest.json", serde_json::to_vec(&manifest)?)?;
+    w.finish()
+}
+
+#[test]
+fn r1_s05_01_archive_validation_and_open_reject_ragged_and_disallowed_tables() {
+    let mut mv = MultipleVariablesTable::new(2, 4).expect("mv");
+    mv.variables[1].cells.truncate(2);
+    let mut doc = ProjectDocument::new("Ragged").expect("doc");
+    doc.data_sheets.push(raw_datasheet("mv-1", TableArchetype::MultipleVariables(mv)));
+    assert!(matches!(validate_project_document(&doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
+
+    let mut xy = XyTable::new(SubcolumnMode::Single, 2, 1).expect("xy");
+    xy.data_sets[1].cells.push(vec![Cell::number(3.0)]);
+    let mut xy_doc = ProjectDocument::new("RaggedXY").expect("doc");
+    xy_doc.data_sheets.push(raw_datasheet("xy-1", TableArchetype::Xy(xy)));
+    assert!(matches!(validate_project_document(&xy_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
+
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 1, 2).expect("grp");
+    grp.data_sets[0].cells[1].pop();
+    let mut grp_doc = ProjectDocument::new("RaggedGrp").expect("doc");
+    grp_doc.data_sheets.push(raw_datasheet("grp-1", TableArchetype::Grouped(grp)));
+    assert!(matches!(validate_project_document(&grp_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
+
+    let mut nested = NestedTable::new(1, 2, 2).expect("nested");
+    nested.groups[0].cells[0].pop();
+    let mut nest_doc = ProjectDocument::new("RaggedNest").expect("doc");
+    nest_doc.data_sheets.push(raw_datasheet("nest-1", TableArchetype::Nested(nested)));
+    assert!(matches!(validate_project_document(&nest_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
+
+    let mut surv = SurvivalTable::new(1, 2).expect("surv");
+    surv.times.pop();
+    let mut surv_doc = ProjectDocument::new("RaggedSurv").expect("doc");
+    surv_doc.data_sheets.push(raw_datasheet("surv-1", TableArchetype::Survival(surv)));
+    assert!(matches!(validate_project_document(&surv_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
+
+    let mut pow = PartsOfWholeTable::new(1, 2).expect("pow");
+    pow.slice_labels.pop();
+    let mut pow_doc = ProjectDocument::new("RaggedPow").expect("doc");
+    pow_doc.data_sheets.push(raw_datasheet("pow-1", TableArchetype::PartsOfWhole(pow)));
+    assert!(matches!(validate_project_document(&pow_doc), Err(FormatError::Doc(DocError::InvalidCellValue { .. }))));
+
+    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).expect("col");
+    col.subcolumn_mode = SubcolumnMode::RawReplicates(3);
+    let mut col_doc = ProjectDocument::new("BadColMode").expect("doc");
+    col_doc.data_sheets.push(raw_datasheet("col-1", TableArchetype::Column(col)));
+    assert!(matches!(validate_project_document(&col_doc), Err(FormatError::Doc(DocError::IncompatibleSubcolumnMode { .. }))));
+
+    let mut xy_nan_seq = XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy");
+    xy_nan_seq.x_mode = XColumnMode::GeneratedSequence { start: f64::NAN, step: 1.0, progression: SequenceProgression::Arithmetic };
+    let mut seq_doc = ProjectDocument::new("NanSeq").expect("doc");
+    seq_doc.data_sheets.push(raw_datasheet("seq-1", TableArchetype::Xy(xy_nan_seq)));
+    assert!(matches!(validate_project_document(&seq_doc), Err(FormatError::NonFiniteFloat { .. })));
+
+    // Crafted archive JSON with ragged MultipleVariables must be rejected by open_project_bytes.
+    let forged_mv_bytes = wrap_project_zip(&serde_json::json!({
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "title": "Forged",
+        "data_sheets": [{
+            "id": "d1",
+            "title": "MV",
+            "archetype": {
+                "MultipleVariables": {
+                    "row_titles": ["a", "b"],
+                    "row_titles_expanded": false,
+                    "variables": [
+                        { "title": "Y", "role": "Continuous", "source": "Entered", "cells": [{"value":"Empty","excluded":false}, {"value":"Empty","excluded":false}], "category_order": null },
+                        { "title": "G", "role": "Categorical", "source": "Entered", "cells": [{"value":"Empty","excluded":false}], "category_order": null }
+                    ]
+                }
+            }
+        }],
+        "info_sheets": [],
+        "result_sheets": [],
+        "graph_sheets": [],
+        "layout_sheets": []
+    }))
+    .expect("wrap mv zip");
+    assert!(open_project_bytes(&forged_mv_bytes).is_err());
+}
+
+#[test]
+fn r1_s05_03_x_column_mode_rejected_by_archive_csv_export_and_placement() {
+    for bad_sub in [0_usize, MAX_SUBCOLUMNS + 1, usize::MAX] {
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy");
+        xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(bad_sub) };
+        let mut sheet = raw_datasheet("xy-bad-x", TableArchetype::Xy(xy));
+
+        let mut doc = ProjectDocument::new("BadXMode").expect("doc");
+        doc.data_sheets.push(sheet.clone());
+        assert!(matches!(validate_project_document(&doc), Err(FormatError::Doc(_))));
+        assert!(matches!(export_datasheet_to_csv(&sheet, &CsvOptions::csv()), Err(FormatError::Doc(_))));
+
+        let spec = ImportLinkSpec {
+            source: LinkSource::ExternalDelimitedFile { path: String::from("x.csv"), delimiter: ',', decimal_separator: '.' },
+            filter: ImportFilterSpec::default(),
+            placement: ImportPlacementSpec::default(),
+        };
+        assert!(matches!(
+            apply_csv_import_link(&mut sheet, "X,Y\n1,2\n3,4\n", &spec, true, ImportBaselineAdjustment::None, "lnk", "test"),
+            Err(FormatError::Doc(_))
+        ));
+    }
+
+    // Archive JSON containing RawReplicates(usize::MAX) in x_mode is rejected cleanly on open_project_bytes.
+    let forged_xmode_bytes = wrap_project_zip(&serde_json::json!({
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "title": "ForgedX",
+        "data_sheets": [{
+            "id": "xy1",
+            "title": "XY",
+            "archetype": {
+                "Xy": {
+                    "x_title": "X",
+                    "x_mode": { "Numbers": { "subcolumn_mode": { "RawReplicates": usize::MAX } } },
+                    "y_subcolumn_mode": "Single",
+                    "row_titles": ["", ""],
+                    "row_titles_expanded": false,
+                    "x_cells": [[{"value":"Empty","excluded":false}], [{"value":"Empty","excluded":false}]],
+                    "data_sets": [{ "title": "A", "cells": [[{"value":"Empty","excluded":false}], [{"value":"Empty","excluded":false}]] }]
+                }
+            }
+        }],
+        "info_sheets": [],
+        "result_sheets": [],
+        "graph_sheets": [],
+        "layout_sheets": []
+    }))
+    .expect("wrap xmode zip");
+    assert!(open_project_bytes(&forged_xmode_bytes).is_err());
 }

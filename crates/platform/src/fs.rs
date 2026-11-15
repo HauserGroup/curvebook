@@ -1,9 +1,9 @@
-//! Crash-safe atomic file writes via unique sibling temp file, `sync_all`, and `rename`.
+//! Filesystem safety primitives: crash-safe atomic writes and bounded regular-file reads.
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::fs::{File, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions};
 #[cfg(not(target_arch = "wasm32"))]
-use std::io::{ErrorKind, Write};
+use std::io::{ErrorKind, Read, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
@@ -125,6 +125,93 @@ fn create_unique_sibling_temp(parent: &Path, stem: &str) -> Result<(File, PathBu
     })
 }
 
+/// Read all bytes from an existing regular file at `path`, enforcing a hard `max_bytes` cap.
+///
+/// Inspects file metadata before opening (rejecting directories, FIFOs, sockets, and device
+/// nodes without blocking, and oversized files before allocating), re-validates the open
+/// descriptor's metadata against TOCTOU swaps, and reads through [`Read::take`] capped at
+/// `max_bytes + 1`.
+///
+/// # Errors
+/// Returns [`PlatformError::InvalidPath`] when `path` is empty or does not refer to a regular
+/// file, [`PlatformError::FileTooLarge`] when the file size exceeds `max_bytes`, or
+/// [`PlatformError::Io`] on OS inspection, open, or read failure.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_regular_file_bytes(path: &Path, max_bytes: usize) -> Result<Vec<u8>, PlatformError> {
+    let Some(bytes) = read_regular_file_inner(path, max_bytes, false)? else {
+        return Err(PlatformError::Io { context: format!("inspect file `{}`", path.display()), message: String::from("file not found") });
+    };
+    Ok(bytes)
+}
+
+/// Read all bytes from `path` if it exists, enforcing regular-file and `max_bytes` checks.
+///
+/// Returns `Ok(None)` when `path` does not exist. Non-regular files (directories, FIFOs,
+/// character/block devices, sockets) and oversized files return explicit errors without blocking
+/// or unbounded allocation.
+///
+/// # Errors
+/// Returns [`PlatformError::InvalidPath`] when `path` is empty or non-regular,
+/// [`PlatformError::FileTooLarge`] when size exceeds `max_bytes`, or [`PlatformError::Io`] on
+/// non-`NotFound` OS failures.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_regular_file_bytes_if_exists(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, PlatformError> {
+    read_regular_file_inner(path, max_bytes, true)
+}
+
+/// Read valid UTF-8 text from an existing regular file at `path`, bounded by `max_bytes`.
+///
+/// # Errors
+/// Returns the same errors as [`read_regular_file_bytes`], or [`PlatformError::Io`] if the file
+/// content is not valid UTF-8.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_regular_file_utf8(path: &Path, max_bytes: usize) -> Result<String, PlatformError> {
+    let bytes = read_regular_file_bytes(path, max_bytes)?;
+    String::from_utf8(bytes).map_err(|err| PlatformError::Io { context: format!("decode UTF-8 file `{}`", path.display()), message: err.to_string() })
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_regular_file_inner(path: &Path, max_bytes: usize, allow_missing: bool) -> Result<Option<Vec<u8>>, PlatformError> {
+    if path.as_os_str().is_empty() {
+        return Err(PlatformError::InvalidPath { reason: String::from("file path must not be empty") });
+    }
+    let pre_meta = match std::fs::metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if allow_missing && err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(io_err(&format!("inspect file `{}`", path.display()), &err)),
+    };
+    validate_regular_file_meta(path, &pre_meta, max_bytes)?;
+
+    let file = match File::open(path) {
+        Ok(file) => file,
+        Err(err) if allow_missing && err.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(err) => return Err(io_err(&format!("open file `{}`", path.display()), &err)),
+    };
+    let fd_meta = file.metadata().map_err(|err| io_err(&format!("inspect open file `{}`", path.display()), &err))?;
+    validate_regular_file_meta(path, &fd_meta, max_bytes)?;
+
+    let reserve = usize::try_from(fd_meta.len()).unwrap_or(0).min(max_bytes);
+    let mut bytes = Vec::with_capacity(reserve);
+    let read_cap = u64::try_from(max_bytes).unwrap_or(u64::MAX).saturating_add(1);
+    file.take(read_cap).read_to_end(&mut bytes).map_err(|err| io_err(&format!("read file `{}`", path.display()), &err))?;
+    if bytes.len() > max_bytes {
+        return Err(PlatformError::FileTooLarge { path: path.display().to_string(), actual_bytes: None, limit_bytes: max_bytes });
+    }
+    Ok(Some(bytes))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn validate_regular_file_meta(path: &Path, meta: &Metadata, max_bytes: usize) -> Result<(), PlatformError> {
+    if !meta.file_type().is_file() {
+        return Err(PlatformError::InvalidPath { reason: format!("path `{}` must be a regular file", path.display()) });
+    }
+    let max_u64 = u64::try_from(max_bytes).unwrap_or(u64::MAX);
+    if meta.len() > max_u64 {
+        return Err(PlatformError::FileTooLarge { path: path.display().to_string(), actual_bytes: Some(meta.len()), limit_bytes: max_bytes });
+    }
+    Ok(())
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn sync_parent_dir_best_effort(parent: &Path) {
     if let Ok(dir) = File::open(parent) {
@@ -144,7 +231,9 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use super::{resolve_parent_dir, write_atomic, write_atomic_with_hook};
+    use super::{
+        read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, resolve_parent_dir, write_atomic, write_atomic_with_hook,
+    };
     use crate::PlatformError;
 
     static TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -204,5 +293,59 @@ mod tests {
         assert_eq!(resolve_parent_dir(Path::new("relative.txt")), Path::new("."));
         assert!(matches!(write_atomic(Path::new(""), b"x"), Err(PlatformError::InvalidPath { .. })));
         assert!(matches!(write_atomic(Path::new("/"), b"x"), Err(PlatformError::InvalidPath { .. })));
+    }
+
+    #[test]
+    fn read_regular_file_enforces_bounds_type_and_non_blocking_checks() {
+        let dir = temp_dir("bounded-read");
+        let file_path = dir.join("small.txt");
+        std::fs::write(&file_path, b"hello").unwrap();
+
+        assert_eq!(read_regular_file_bytes(&file_path, 5).unwrap(), b"hello");
+        assert_eq!(read_regular_file_utf8(&file_path, 5).unwrap(), "hello");
+        assert!(matches!(read_regular_file_bytes(&file_path, 4), Err(PlatformError::FileTooLarge { actual_bytes: Some(5), limit_bytes: 4, .. })));
+
+        let sparse_path = dir.join("sparse.bin");
+        let sparse = std::fs::File::create(&sparse_path).unwrap();
+        sparse.set_len(64 * 1024 * 1024 + 1).unwrap();
+        assert!(matches!(
+            read_regular_file_bytes(&sparse_path, 1024),
+            Err(PlatformError::FileTooLarge { actual_bytes: Some(67_108_865), limit_bytes: 1024, .. })
+        ));
+
+        let missing_path = dir.join("missing.txt");
+        assert_eq!(read_regular_file_bytes_if_exists(&missing_path, 128).unwrap(), None);
+        assert!(matches!(read_regular_file_bytes(&missing_path, 128), Err(PlatformError::Io { .. })));
+        assert!(matches!(read_regular_file_bytes(Path::new(""), 128), Err(PlatformError::InvalidPath { .. })));
+        assert!(matches!(read_regular_file_bytes(&dir, 128), Err(PlatformError::InvalidPath { .. })));
+
+        let invalid_utf8 = dir.join("invalid.bin");
+        std::fs::write(&invalid_utf8, [0xff, 0xfe, 0x00]).unwrap();
+        assert!(matches!(read_regular_file_utf8(&invalid_utf8, 16), Err(PlatformError::Io { .. })));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn read_regular_file_rejects_fifo_symlink_to_fifo_and_char_device_without_blocking() {
+        let dir = temp_dir("unix-special");
+        let fifo = dir.join("input.pipe");
+        let mkfifo_status = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+        assert!(mkfifo_status.success());
+
+        assert!(matches!(read_regular_file_bytes(&fifo, 1024), Err(PlatformError::InvalidPath { .. })));
+        assert!(matches!(read_regular_file_bytes_if_exists(&fifo, 1024), Err(PlatformError::InvalidPath { .. })));
+
+        let fifo_link = dir.join("link_to_fifo.csv");
+        std::os::unix::fs::symlink(&fifo, &fifo_link).unwrap();
+        assert!(matches!(read_regular_file_bytes(&fifo_link, 1024), Err(PlatformError::InvalidPath { .. })));
+
+        let dev_zero = Path::new("/dev/zero");
+        if dev_zero.exists() {
+            assert!(matches!(read_regular_file_bytes(dev_zero, 1024), Err(PlatformError::InvalidPath { .. })));
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

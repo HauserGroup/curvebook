@@ -11,7 +11,7 @@
   "mcpServers": {
     "lumencraft": {
       "command": "lumencraft-cli",
-      "args": ["mcp"]
+      "args": ["mcp", "--workdir", "/path/to/workspace"]
     }
   }
 }
@@ -23,7 +23,7 @@ MCP is currently the most complete way to drive LumenCraft; the rendered GUI is 
 
 | Mode | Reach |
 |---|---|
-| `lumencraft-cli mcp` (in-process, headless) | Every engine command in `cmd::registry()` through `command_run`, `command_batch`, and per-command toolset tools, plus open/save/export and previews. All document work is reachable. `ui.*` UI commands are listed by `command_list` but not executable in this mode. |
+| `lumencraft-cli mcp` (in-process, headless) | Every engine command in `cmd::registry()` through `command_run`, `command_batch`, and per-command toolset tools, plus open/save/export and previews. All document work is reachable. `ui.*` UI commands report `"available": false`, `"requires_live_attach": true` in `command_list` and are not executable in headless mode. |
 | `--control-port <port>` | Same, forwarded to a running `lumencraft --control`; adds the UI-only `ui.*` commands. |
 | `--gui-only` | Only the 8 `gui` tools, driving `UiApp` through the semantic agent harness used by the `WF-01`–`WF-49` tests. |
 
@@ -31,17 +31,24 @@ Limits: "Analyze a stack of *P* values" ([`R10.10`](ROADMAP.md#r1010-standalone-
 
 **Roadmap priority:** [`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window) is the next feature priority after the Rust 1.99.1 upgrade (`R0.18`) and before new human-operable GUI work (`R10`). Completion requires real MCP transport coverage of existing engine capabilities and an opt-in shared visible session. Tests for later engine features are added when those features land and do not postpone this gate. This is a sequencing decision, not a claim that the remaining MCP gaps are fixed. After implementation is verified, [`R7.4`](ROADMAP.md#r74-accessible-mcp-guide-and-minimal-readme) adds a short beginner guide to a simplified README; this document remains the detailed reference.
 
+Pass `--workdir <dir>` to confine `open_file`, `save_file`, `export`, engine command path parameters, and stored `ExternalDelimitedFile` link refreshes strictly inside a canonicalized workspace root (propagated to `McpServerState` and the underlying `engine::Session::path_policy()`).
+
 ## Shipped Surface (`R7.1`, `R0.13`)
 
 Every handler executes inside `run_guarded` with structured error payloads (`ErrorCode`, `category`, `retryable`, `remediation`, `details`), `Effects`-derived MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`), and optional `WorkdirGuard` path containment:
 
 | Surface | Purpose |
 |---|---|
-| `doc_inspect` / `open_file` / `save_file` | Inspect project sheets (`Data`, `Info`, `Results`, `Graphs`, `Layouts`) or live `--control` state snapshots, open `.lumencraft` / `.lumencraft.d` / `.lctemplate` / `.prism` / `.pzfx` / `.csv` / `.tsv`, and atomically save `.lumencraft`, `.lumencraft.d`, or `.lctemplate` projects. |
-| `command_list` / `command_run` / `command_batch` | Discover and execute typed engine commands ([`commands.md`](commands.md)) plus the synced UI commands (generated `crates/mcp/src/ui_catalog.rs`), optionally with `atomic: true` batch rollback. |
+| `doc_inspect` / `open_file` / `save_file` | Inspect project sheets (`Data`, `Info`, `Results`, `Graphs`, `Layouts`) or live `--control` state snapshots (including per-sheet cell previews when `sheet_id` or `include_cells` is given), open `.lumencraft` / `.lumencraft.d` / `.lctemplate` / `.prism` / `.pzfx` / `.csv` / `.tsv`, and atomically save `.lumencraft`, `.lumencraft.d`, or `.lctemplate` projects — forwarding directly to the attached desktop session when `--control-port` is configured. |
+| `command_list` / `command_run` / `command_batch` | Discover and execute typed engine commands ([`commands.md`](commands.md)) plus the `45` synced UI commands (generated `crates/mcp/src/ui_catalog.rs`), optionally with `atomic: true` batch rollback. `command_list` reports `"live_attached"`, `"mode"` (`"live_attach"` vs `"headless"`), and per-command `"available"` (`ui.*` commands report `"available": false`, `"requires_live_attach": true` when headless). |
 | `list_toolsets` / `enable_toolset` | Progressively enable or disable per-command MCP tools grouped by `CommandGroup` — plus the `"gui"` toolset (`gui_toolset` in `list_toolsets`: 8 `GUI Automation` tools) — emitting `notifications/tools/list_changed`. |
-| `render_preview` / `export` | Compile and rasterize any `GraphSheet` or `LayoutSheet` to PNG preview bytes, or export `SVG` / `%PDF-1.7` / `PNG` / `TIFF` / `CSV` / `JSON`. |
-| MCP Resources & Prompts | Read `sheet://<id>` and `result://<id>` resources and guided statistical/curve-fitting workflow prompts. |
+| `render_preview` / `export` | Compile and rasterize any `GraphSheet` or `LayoutSheet` to PNG preview bytes, or export `SVG` / `%PDF-1.7` / `PNG` / `TIFF` / `CSV` / `JSON` (forwarded to the live window when attached; for CSV, specifying `tab_id` defaults `tidy` to `false` so the requested sheet is exported, while explicit `tidy: true` + `tab_id` fails with `InvalidParams`). |
+| MCP Resources & Prompts | Read `sheet://<id>` and `result://<id>` resources (from the live desktop session when `--control-port` is attached, or the local session in headless mode) and guided statistical/curve-fitting workflow prompts. |
+
+### Live-Attach Mode (`--control-port` / `LUMENCRAFT_CONTROL_PORT`)
+- Pass `--control-port <port>` (or set `LUMENCRAFT_CONTROL_PORT=<port>`, overridden by `--control-port`) to attach MCP to a running `lumencraft --control <port>` desktop window over `127.0.0.1:<port>`.
+- Authentication uses `--control-token <token>`, `LUMENCRAFT_CONTROL_TOKEN`, or the per-UID `control-<port>.token` file located under `$LUMENCRAFT_CONFIG_DIR`, `$XDG_CONFIG_HOME/lumencraft` / `$HOME` config directories, or (when `HOME` is unset on Unix) a validated `0700` non-symlink `$XDG_RUNTIME_DIR/lumencraft` or `$TMPDIR/lumencraft-uid-<uid>` directory.
+- When attached, `doc_inspect`, `open_file`, `save_file`, `render_preview`, `export`, `command_list`, `command_run`, `command_batch`, `resources/list`, and `resources/read` operate against the live desktop window session rather than a disconnected local `Session`, while local `--workdir` containment is still enforced for file paths.
 
 ## `gui` Toolset, `GuiSessionHost` & `--gui-only` Mode (`R8.6`–`R8.8`)
 

@@ -1,18 +1,22 @@
 //! Local JSON-lines control channel and publication clipboard/print payload builders
 //! (`docs/control-protocol.md`, `docs/hardware-parity.md`).
 
+use std::fmt;
 use std::io::{self, BufRead, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{SocketAddr, TcpListener};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
 use lumencraft_doc::{
-    AnalysisKind, CanvasResizeMode, ErrorCode, FigureCanvasPreset, MultipleVariablesTable, MultivariateSpec, ProjectDocument, ResultCell,
+    AnalysisKind, CanvasResizeMode, DataSheet, ErrorCode, FigureCanvasPreset, MultipleVariablesTable, MultivariateSpec, ProjectDocument, ResultCell,
     ResultSheet, SheetFolderKind, SheetId, SheetSection, TableArchetype,
 };
 use lumencraft_engine::{EngineError, Session, cmd};
+use lumencraft_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
 use lumencraft_palette::{CanvasPreviewFilter, Rgba8};
 use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
+use lumencraft_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
 use lumencraft_svg::{SvgExportOptions, render_svg};
 use lumencraft_tools::{GridCellCoord, PhysicalUnit};
 use serde::{Deserialize, Serialize};
@@ -22,7 +26,7 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, AxisTarget};
 use crate::grid_view::ImportReshapeMode;
 use crate::gui_actions::{dispatch as dispatch_gui_action_impl, is_gui_action_method};
-use crate::i18n::{LocalePreset, is_rtl_locale, locale_display_name, normalize_locale};
+use crate::i18n::{is_rtl_locale, locale_display_name, normalize_locale};
 use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
 use crate::menus::ui_commands::UI_COMMANDS;
 pub use crate::os_integration::ClipboardBundle;
@@ -31,6 +35,166 @@ use crate::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 
 /// Hard bound per JSON-lines control request/response frame (16 MiB).
 pub const MAX_CONTROL_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Hard bound on steps accepted in a single `command.batch` control request.
+pub const MAX_CONTROL_BATCH_STEPS: usize = 1_000;
+
+/// Idle read/write timeout applied to each accepted local control TCP connection so stalled clients
+/// cannot starve subsequent callers (`R1-S10-04`).
+#[cfg(not(target_arch = "wasm32"))]
+pub const CONTROL_CLIENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Number of random bytes encoded into an auto-generated control authentication token (256 bits).
+pub const CONTROL_AUTH_TOKEN_BYTES: usize = 32;
+
+/// Hard upper bound on accepted control token length in bytes.
+pub const MAX_CONTROL_TOKEN_BYTES: usize = 512;
+
+/// HTTP 403 response emitted immediately when an HTTP client hits the raw control socket.
+pub const CONTROL_HTTP_FORBIDDEN_RESPONSE: &str = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden\n";
+
+const HTTP_REQUEST_METHODS: &[&str] = &["POST", "GET", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT", "PRI"];
+
+/// Per-instance bearer secret enforcing authentication on local control sockets and streams.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ControlAuth {
+    token: String,
+}
+
+impl fmt::Debug for ControlAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ControlAuth([REDACTED])")
+    }
+}
+
+impl ControlAuth {
+    /// Generate a fresh 256-bit cryptographically random control authentication token.
+    ///
+    /// # Errors
+    /// Returns an I/O error if OS entropy cannot be read, or `Unsupported` on `wasm32`.
+    pub fn generate() -> io::Result<Self> {
+        let bytes = generate_entropy_bytes()?;
+        Ok(Self { token: encode_lower_hex(&bytes) })
+    }
+
+    /// Validate and wrap a caller-supplied control authentication token.
+    ///
+    /// # Errors
+    /// Returns a descriptive error when `token` is empty, contains whitespace or control
+    /// characters, or exceeds [`MAX_CONTROL_TOKEN_BYTES`].
+    pub fn from_token(token: impl Into<String>) -> Result<Self, String> {
+        let candidate = token.into();
+        if candidate.is_empty() {
+            return Err(String::from("control token must not be empty"));
+        }
+        if candidate.len() > MAX_CONTROL_TOKEN_BYTES {
+            return Err(format!("control token exceeds {MAX_CONTROL_TOKEN_BYTES} bytes"));
+        }
+        if candidate.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+            return Err(String::from("control token must not contain whitespace or control characters"));
+        }
+        Ok(Self { token: candidate })
+    }
+
+    /// Borrow the raw secret token string for writing to a restricted local token file or client.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.token
+    }
+
+    /// Verify `candidate` against the secret token using constant-time byte comparison.
+    #[must_use]
+    pub fn verify(&self, candidate: &str) -> bool {
+        constant_time_eq(self.token.as_bytes(), candidate.as_bytes())
+    }
+}
+
+fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
+    let max_len = expected.len().max(actual.len());
+    let mut diff: u8 = u8::from(expected.len() != actual.len());
+    for idx in 0..max_len {
+        let a = expected.get(idx).copied().unwrap_or(0);
+        let b = actual.get(idx).copied().unwrap_or(0);
+        diff |= core::hint::black_box(a ^ b);
+    }
+    core::hint::black_box(diff) == 0
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+#[cfg(unix)]
+fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open("/dev/urandom")?;
+    let mut buf = [0u8; CONTROL_AUTH_TOKEN_BYTES];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |dur| dur.as_nanos());
+    let pid = u64::from(std::process::id());
+    let mut buf = [0u8; CONTROL_AUTH_TOKEN_BYTES];
+    for (chunk_idx, chunk) in buf.chunks_exact_mut(8).enumerate() {
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let state = RandomState::new();
+        let mixed = state.hash_one((nanos, pid, seq, chunk_idx as u64, b"lumencraft-control-auth"));
+        chunk.copy_from_slice(&mixed.to_le_bytes());
+    }
+    Ok(buf)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "OS entropy generation for TCP control auth tokens is unavailable on wasm32"))
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let n = needle.as_bytes();
+    !n.is_empty() && haystack.as_bytes().windows(n.len()).any(|win| win.eq_ignore_ascii_case(n))
+}
+
+fn has_http_method_prefix(trimmed: &str) -> bool {
+    let bytes = trimmed.as_bytes();
+    HTTP_REQUEST_METHODS.iter().any(|method| {
+        let len = method.len();
+        bytes.get(..len).is_some_and(|head| head.eq_ignore_ascii_case(method.as_bytes()))
+            && bytes.get(len).is_some_and(|next| *next == b' ' || *next == b'\t')
+    })
+}
+
+/// Detect whether `line` looks like an HTTP request line (e.g. `POST / HTTP/1.1` from browser `fetch`/form).
+#[must_use]
+pub fn is_http_request_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if has_http_method_prefix(trimmed) {
+        return true;
+    }
+    if trimmed.starts_with('{') {
+        return false;
+    }
+    contains_ascii_case_insensitive(trimmed, "HTTP/1.")
+        || contains_ascii_case_insensitive(trimmed, "HTTP/2.")
+        || contains_ascii_case_insensitive(trimmed, "HTTP/0.")
+        || contains_ascii_case_insensitive(trimmed, "HTTP/2 ")
+        || trimmed.eq_ignore_ascii_case("HTTP/2")
+}
 
 pub(crate) const DEFAULT_SCREENSHOT_WIDTH_PX: u32 = 1024;
 pub(crate) const DEFAULT_SCREENSHOT_HEIGHT_PX: u32 = 640;
@@ -59,6 +223,27 @@ pub struct ControlRequest {
     pub method: String,
     #[serde(default)]
     pub params: Value,
+}
+
+/// Recorded execution summary for a single engine command invoked by a control request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlRecordedStep {
+    pub command_id: String,
+    pub params: Value,
+    pub mutated: bool,
+}
+
+/// Snapshot of recorded command steps and pre-request session state passed to post-request
+/// persistence hooks (e.g. WAL journaling and snapshot checkpoints).
+#[derive(Debug, Clone)]
+pub struct ControlPostRequestContext<'a> {
+    pub method: &'a str,
+    pub steps: &'a [ControlRecordedStep],
+    pub prev_undo_depth: usize,
+    pub prev_redo_depth: usize,
+    pub prev_dirty: bool,
+    pub rolled_back: bool,
+    pub request_ok: bool,
 }
 
 /// JSON-lines control response emitted by [`handle_control_line`].
@@ -263,62 +448,186 @@ pub fn bind_control_tcp_listener(addr: SocketAddr) -> io::Result<TcpListener> {
 /// # Errors
 /// Propagates listener accept errors.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn serve_control_listener(app: &mut UiApp, listener: &TcpListener) -> io::Result<()> {
+pub fn serve_control_listener(app: &mut UiApp, listener: &TcpListener, auth: &ControlAuth) -> io::Result<()> {
+    serve_control_listener_with_handler(app, listener, auth, dispatch_request)
+}
+
+/// Serve authenticated loopback JSON-lines requests from `listener` while invoking `on_post_request`
+/// before each response is flushed (for example to flush WAL entries or checkpoints).
+///
+/// # Errors
+/// Propagates listener accept errors.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn serve_control_listener_with_hook<F>(app: &mut UiApp, listener: &TcpListener, auth: &ControlAuth, mut on_post_request: F) -> io::Result<()>
+where
+    F: FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>,
+{
+    serve_control_listener_with_handler(app, listener, auth, |app_ref, req| dispatch_request_with_hook(app_ref, req, &mut on_post_request))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn serve_control_listener_with_handler<F>(app: &mut UiApp, listener: &TcpListener, auth: &ControlAuth, mut handler: F) -> io::Result<()>
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
     for incoming in listener.incoming() {
         let stream = incoming?;
-        match serve_control_connection(app, stream) {
-            Ok(true) => break,
-            Ok(false) => {}
-            Err(err) => eprintln!("control connection closed after error: {err}"),
+        let guarded = catch_unwind(AssertUnwindSafe(|| serve_control_connection_with_handler(app, stream, auth, &mut handler)));
+        match guarded {
+            Ok(Ok(true)) => break,
+            Ok(Ok(false)) => {}
+            Ok(Err(err)) => eprintln!("control connection closed after error: {err}"),
+            Err(payload) => {
+                let panic_msg = extract_panic_message(&*payload);
+                eprintln!("control connection closed after internal panic: {panic_msg}");
+            }
         }
     }
     Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn serve_control_connection(app: &mut UiApp, mut stream: std::net::TcpStream) -> io::Result<bool> {
-    let reader_stream = stream.try_clone()?;
-    let mut reader = io::BufReader::new(reader_stream);
-    serve_control_stream_with_quit(app, &mut reader, &mut stream)
+fn serve_control_connection_with_handler<F>(app: &mut UiApp, stream: std::net::TcpStream, auth: &ControlAuth, handler: &mut F) -> io::Result<bool>
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    serve_control_connection_with_timeout(app, stream, auth, Some(CONTROL_CLIENT_IDLE_TIMEOUT), handler)
 }
 
-/// Bind `addr` (loopback-only) and run the JSON-lines TCP control server until `app.quit`.
+#[cfg(not(target_arch = "wasm32"))]
+fn serve_control_connection_with_timeout<F>(
+    app: &mut UiApp,
+    mut stream: std::net::TcpStream,
+    auth: &ControlAuth,
+    idle_timeout: Option<std::time::Duration>,
+    handler: &mut F,
+) -> io::Result<bool>
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    stream.set_read_timeout(idle_timeout)?;
+    stream.set_write_timeout(idle_timeout)?;
+    let reader_stream = stream.try_clone()?;
+    let mut reader = io::BufReader::new(reader_stream);
+    serve_control_stream_with_handler(app, &mut reader, &mut stream, auth, handler)
+}
+
+/// Bind `addr` (loopback-only) and run the authenticated JSON-lines TCP control server until `app.quit`.
 ///
 /// # Errors
 /// Returns an error if `addr` is non-loopback or socket bind/accept fails.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run_control_tcp_server(app: &mut UiApp, addr: SocketAddr) -> Result<(), String> {
+pub fn run_control_tcp_server(app: &mut UiApp, addr: SocketAddr, auth: &ControlAuth) -> Result<(), String> {
     let checked = validate_loopback_addr(addr)?;
     let listener = bind_control_tcp_listener(checked).map_err(|err| format!("failed to bind control socket {checked}: {err}"))?;
-    serve_control_listener(app, &listener).map_err(|err| format!("control server I/O error: {err}"))
+    serve_control_listener(app, &listener, auth).map_err(|err| format!("control server I/O error: {err}"))
 }
 
-/// Serve JSON-lines control requests from `reader` and emit serialized responses to `writer`,
-/// stopping cleanly on EOF or `app.quit`.
+/// Serve authenticated JSON-lines control requests from `reader` and emit serialized responses to `writer`,
+/// stopping cleanly on EOF, HTTP `403` rejection, or `app.quit`.
 ///
 /// # Errors
 /// Returns an I/O error if reading, exceeding [`MAX_CONTROL_LINE_BYTES`], or writing fails.
-pub fn serve_control_stream<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W) -> io::Result<()> {
-    let _ = serve_control_stream_with_quit(app, reader, writer)?;
+pub fn serve_control_stream<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth) -> io::Result<()> {
+    let _ = serve_control_stream_with_quit(app, reader, writer, auth)?;
     Ok(())
 }
 
-/// Serve JSON-lines requests over `reader`/`writer` and return `Ok(true)` when `app.quit` stopped the stream.
+/// Serve authenticated JSON-lines requests over `reader`/`writer` and return `Ok(true)` when `app.quit` stopped the stream.
 ///
 /// # Errors
 /// Returns an I/O error on underlying stream failure or oversized lines exceeding [`MAX_CONTROL_LINE_BYTES`].
-pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W) -> io::Result<bool> {
+pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth) -> io::Result<bool> {
+    serve_control_stream_with_handler(app, reader, writer, auth, dispatch_request)
+}
+
+/// Serve authenticated JSON-lines requests over `reader`/`writer` while invoking `on_post_request`
+/// before emitting each response, returning `Ok(true)` when `app.quit` stopped the stream.
+///
+/// # Errors
+/// Returns an I/O error on underlying stream failure or oversized lines exceeding [`MAX_CONTROL_LINE_BYTES`].
+pub fn serve_control_stream_with_quit_and_hook<R: BufRead, W: Write, F>(
+    app: &mut UiApp,
+    reader: &mut R,
+    writer: &mut W,
+    auth: &ControlAuth,
+    mut on_post_request: F,
+) -> io::Result<bool>
+where
+    F: FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>,
+{
+    serve_control_stream_with_handler(app, reader, writer, auth, |app_ref, req| dispatch_request_with_hook(app_ref, req, &mut on_post_request))
+}
+
+/// Convenience wrapper around [`serve_control_stream_with_quit`] that validates a raw token string.
+///
+/// # Errors
+/// Returns `InvalidInput` if `token` is invalid, or any underlying stream I/O error.
+pub fn serve_control_stream_with_quit_and_token<R: BufRead, W: Write>(
+    app: &mut UiApp,
+    reader: &mut R,
+    writer: &mut W,
+    token: &str,
+) -> io::Result<bool> {
+    let auth = ControlAuth::from_token(token).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    serve_control_stream_with_quit(app, reader, writer, &auth)
+}
+
+fn serve_control_stream_with_handler<R, W, F>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth, handler: F) -> io::Result<bool>
+where
+    R: BufRead,
+    W: Write,
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    match serve_control_stream_loop(app, reader, writer, auth, handler) {
+        Ok(quit) => Ok(quit),
+        // Drop only the stalled/idle client connection so subsequent clients can connect promptly.
+        Err(err) if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn serve_control_stream_loop<R, W, F>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth, mut handler: F) -> io::Result<bool>
+where
+    R: BufRead,
+    W: Write,
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    let mut connection_authenticated = false;
     loop {
-        let Some(raw_bytes) = read_bounded_control_line(reader, MAX_CONTROL_LINE_BYTES)? else {
-            return Ok(false);
+        let raw_bytes = match read_bounded_control_line(reader, MAX_CONTROL_LINE_BYTES) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(false),
+            Err(err) => {
+                if err.kind() == io::ErrorKind::InvalidData {
+                    let resp = ControlResponse::err(Value::String(String::new()), err.to_string());
+                    let _ = writer.write_all(serialize_response(&resp).as_bytes());
+                    let _ = writer.write_all(b"\n");
+                    let _ = writer.flush();
+                }
+                return Err(err);
+            }
         };
-        let line = std::str::from_utf8(&raw_bytes)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("control line is not valid UTF-8: {err}")))?;
+        let line = match std::str::from_utf8(&raw_bytes) {
+            Ok(line) => line,
+            Err(err) => {
+                let resp = ControlResponse::err(Value::String(String::new()), format!("control line is not valid UTF-8: {err}"));
+                writer.write_all(serialize_response(&resp).as_bytes())?;
+                writer.write_all(b"\n")?;
+                writer.flush()?;
+                continue;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        let (response_json, action) = handle_control_line_with_action(app, trimmed);
+        if is_http_request_line(trimmed) {
+            writer.write_all(CONTROL_HTTP_FORBIDDEN_RESPONSE.as_bytes())?;
+            writer.flush()?;
+            return Ok(false);
+        }
+        let (response_json, action) = handle_authenticated_control_line(app, trimmed, auth, &mut connection_authenticated, &mut handler);
         writer.write_all(response_json.as_bytes())?;
         writer.write_all(b"\n")?;
         writer.flush()?;
@@ -328,25 +637,180 @@ pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(app: &mut UiApp, rea
     }
 }
 
-/// Handle a single JSON-lines request against `app` and return serialized JSON response text.
+fn handle_authenticated_control_line<F>(
+    app: &mut UiApp,
+    line: &str,
+    auth: &ControlAuth,
+    connection_authenticated: &mut bool,
+    handler: &mut F,
+) -> (String, ControlLoopAction)
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    let best_effort_id = extract_best_effort_request_id(line);
+    let guarded = catch_unwind(AssertUnwindSafe(|| process_authenticated_line(app, line, auth, connection_authenticated, handler)));
+    match guarded {
+        Ok(output) => output,
+        Err(payload) => (serialize_response(&panic_control_response(best_effort_id, &*payload)), ControlLoopAction::Continue),
+    }
+}
+
+fn process_authenticated_line<F>(
+    app: &mut UiApp,
+    line: &str,
+    auth: &ControlAuth,
+    connection_authenticated: &mut bool,
+    handler: &mut F,
+) -> (String, ControlLoopAction)
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    let raw: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(err) => {
+            let resp = if *connection_authenticated {
+                ControlResponse::err(Value::String(String::new()), format!("invalid control JSON: {err}"))
+            } else {
+                unauthorized_control_response(Value::String(String::new()), "authentication required")
+            };
+            return (serialize_response(&resp), ControlLoopAction::Continue);
+        }
+    };
+    let Some(obj) = raw.as_object() else {
+        let resp = if *connection_authenticated {
+            ControlResponse::err(Value::String(String::new()), "control request must be a JSON object")
+        } else {
+            unauthorized_control_response(Value::String(String::new()), "authentication required")
+        };
+        return (serialize_response(&resp), ControlLoopAction::Continue);
+    };
+
+    let id = obj.get("id").cloned().unwrap_or_else(|| Value::String(String::new()));
+    let raw_method = obj.get("method").or_else(|| obj.get("op")).and_then(Value::as_str).map(str::trim);
+
+    if raw_method == Some("auth") {
+        let valid = extract_auth_handshake_token(obj).is_some_and(|tok| auth.verify(tok));
+        *connection_authenticated = valid;
+        let resp = if valid {
+            ControlResponse::ok(id, json!({ "authenticated": true }))
+        } else {
+            unauthorized_control_response(id, "invalid or missing control authentication token")
+        };
+        return (serialize_response(&resp), ControlLoopAction::Continue);
+    }
+
+    if let Err(reason) = authorize_request_envelope(obj, auth, *connection_authenticated) {
+        return (serialize_response(&unauthorized_control_response(id, reason)), ControlLoopAction::Continue);
+    }
+
+    let Some(method) = raw_method.filter(|s| !s.is_empty()) else {
+        let resp = ControlResponse::err(id, "missing non-empty 'method' or 'op' field");
+        return (serialize_response(&resp), ControlLoopAction::Continue);
+    };
+
+    let params = normalize_request_params(method, obj);
+    let req = ControlRequest { id, method: method.to_owned(), params };
+    let (response, action) = handler(app, req);
+    (serialize_response(&response), action)
+}
+
+fn extract_auth_handshake_token(obj: &Map<String, Value>) -> Option<&str> {
+    let top = obj.get("token");
+    let nested = obj.get("params").and_then(Value::as_object).and_then(|params| params.get("token"));
+    match (top, nested) {
+        (Some(a), Some(b)) => {
+            let sa = a.as_str()?;
+            let sb = b.as_str()?;
+            if sa == sb { Some(sa) } else { None }
+        }
+        (Some(val), None) | (None, Some(val)) => val.as_str(),
+        (None, None) => None,
+    }
+}
+
+fn authorize_request_envelope(obj: &Map<String, Value>, auth: &ControlAuth, connection_authenticated: bool) -> Result<(), &'static str> {
+    if let Some(token_val) = obj.get("token") {
+        let matched = token_val.as_str().is_some_and(|candidate| auth.verify(candidate));
+        if matched {
+            return Ok(());
+        }
+        return Err("invalid control authentication token");
+    }
+    if connection_authenticated {
+        return Ok(());
+    }
+    Err("authentication required")
+}
+
+fn unauthorized_control_response(id: Value, detail: &str) -> ControlResponse {
+    let message = format!("unauthorized: {detail}");
+    ControlResponse {
+        id,
+        ok: false,
+        result: Value::Null,
+        error: Some(message.clone()),
+        error_detail: Some(json!({
+            "code": "unauthorized",
+            "category": "policy",
+            "message": message,
+            "retryable": false,
+            "remediation": "Authenticate with `{\"method\":\"auth\",\"params\":{\"token\":\"<token>\"}}` or include top-level `\"token\"`.",
+        })),
+    }
+}
+
+fn extract_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        if msg.trim().is_empty() { String::from("empty panic payload") } else { (*msg).to_owned() }
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        if msg.trim().is_empty() { String::from("empty panic payload") } else { msg.clone() }
+    } else {
+        String::from("unknown panic payload")
+    }
+}
+
+fn panic_control_response(id: Value, payload: &(dyn std::any::Any + Send)) -> ControlResponse {
+    let panic_msg = extract_panic_message(payload);
+    let err = EngineError::with_code(ErrorCode::InternalPanic, format!("internal control panic: {panic_msg}"))
+        .with_remediation("Inspect application state before retrying the control command.");
+    ControlResponse::err_with_detail(id, err.into())
+}
+
+fn extract_best_effort_request_id(line: &str) -> Value {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|val| val.as_object().and_then(|obj| obj.get("id")).cloned())
+        .unwrap_or_else(|| Value::String(String::new()))
+}
+
+/// Handle a single in-process JSON-lines request against `app` and return serialized JSON response text.
+///
+/// Always emits a structured JSON [`ControlResponse`] even on parse, validation, or handler-panic failures.
 #[must_use]
 pub fn handle_control_line(app: &mut UiApp, line: &str) -> String {
     handle_control_line_with_action(app, line).0
 }
 
-/// Handle a single JSON-lines request against `app` and return `(response_json, loop_action)`.
+/// Handle a single in-process JSON-lines request against `app` and return `(response_json, loop_action)`.
 #[must_use]
 pub fn handle_control_line_with_action(app: &mut UiApp, line: &str) -> (String, ControlLoopAction) {
-    let req = match parse_control_request(line) {
-        Ok(parsed) => parsed,
-        Err((id, message)) => {
-            let resp = ControlResponse::err(id, message);
-            return (serialize_response(&resp), ControlLoopAction::Continue);
-        }
-    };
+    let best_effort_id = extract_best_effort_request_id(line);
+    let guarded = catch_unwind(AssertUnwindSafe(|| {
+        let req = match parse_control_request(line) {
+            Ok(parsed) => parsed,
+            Err((id, message)) => {
+                let resp = ControlResponse::err(id, message);
+                return (serialize_response(&resp), ControlLoopAction::Continue);
+            }
+        };
 
-    let (response, action) = dispatch_request(app, req);
-    (serialize_response(&response), action)
+        let (response, action) = dispatch_request(app, req);
+        (serialize_response(&response), action)
+    }));
+    match guarded {
+        Ok(output) => output,
+        Err(payload) => (serialize_response(&panic_control_response(best_effort_id, &*payload)), ControlLoopAction::Continue),
+    }
 }
 
 /// Dispatch one front-end UI command from [`UI_COMMANDS`].
@@ -387,7 +851,135 @@ pub fn dispatch_ui_command(app: &mut UiApp, command_id: &str, params: &Value) ->
     dispatch_ui_command_detailed(app, command_id, params).map_err(|err| err.message)
 }
 
+pub(crate) fn require_params_object_or_null(params: &Value, context: &str) -> Result<(), String> {
+    if params.is_null() || params.is_object() { Ok(()) } else { Err(format!("{context} expects a JSON object `params`")) }
+}
+
+fn opt_field_entry<'a, 'b>(params: &'a Value, fields: &[&'b str]) -> Option<(&'b str, &'a Value)> {
+    fields.iter().find_map(|&key| params.get(key).map(|val| (key, val)))
+}
+
+pub(crate) fn opt_bool_param(params: &Value, fields: &[&str]) -> Result<Option<bool>, String> {
+    match opt_field_entry(params, fields) {
+        None | Some((_, Value::Null)) => Ok(None),
+        Some((_, Value::Bool(b))) => Ok(Some(*b)),
+        Some((field, _)) => Err(format!("`{field}` must be a boolean")),
+    }
+}
+
+pub(crate) fn opt_usize_param(params: &Value, fields: &[&str]) -> Result<Option<usize>, String> {
+    match opt_field_entry(params, fields) {
+        None | Some((_, Value::Null)) => Ok(None),
+        Some((field, val)) => {
+            let n = val.as_u64().ok_or_else(|| format!("`{field}` must be a non-negative integer"))?;
+            usize::try_from(n).map(Some).map_err(|_| format!("`{field}` exceeds supported index range"))
+        }
+    }
+}
+
+pub(crate) fn opt_finite_f64_param(params: &Value, fields: &[&str]) -> Result<Option<f64>, String> {
+    match opt_field_entry(params, fields) {
+        None | Some((_, Value::Null)) => Ok(None),
+        Some((field, val)) => {
+            let n = val.as_f64().filter(|x| x.is_finite()).ok_or_else(|| format!("`{field}` must be a finite number"))?;
+            Ok(Some(n))
+        }
+    }
+}
+
+pub(crate) fn opt_str_param<'a>(params: &'a Value, fields: &[&str]) -> Result<Option<&'a str>, String> {
+    match opt_field_entry(params, fields) {
+        None | Some((_, Value::Null)) => Ok(None),
+        Some((field, val)) => val.as_str().map(Some).ok_or_else(|| format!("`{field}` must be a string")),
+    }
+}
+
+pub(crate) fn opt_non_empty_str_param<'a>(params: &'a Value, fields: &[&str]) -> Result<Option<&'a str>, String> {
+    match opt_str_param(params, fields)? {
+        None => Ok(None),
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                let field = opt_field_entry(params, fields).map_or("param", |(name, _)| name);
+                Err(format!("`{field}` must be a non-empty string"))
+            } else {
+                Ok(Some(trimmed))
+            }
+        }
+    }
+}
+
+pub(crate) fn parse_selected_points_array(val: &Value, field: &str) -> Result<Vec<(usize, usize)>, String> {
+    let arr = val.as_array().ok_or_else(|| format!("`{field}` must be an array of `{{series_index, point_index}}` objects"))?;
+    let mut pts = Vec::with_capacity(arr.len());
+    for (idx, item) in arr.iter().enumerate() {
+        let Some(obj) = item.as_object() else {
+            return Err(format!("`{field}[{idx}]` must be an object with `series_index` and `point_index`"));
+        };
+        let s_u64 =
+            obj.get("series_index").and_then(Value::as_u64).ok_or_else(|| format!("`{field}[{idx}].series_index` must be a non-negative integer"))?;
+        let p_u64 =
+            obj.get("point_index").and_then(Value::as_u64).ok_or_else(|| format!("`{field}[{idx}].point_index` must be a non-negative integer"))?;
+        let s = usize::try_from(s_u64).map_err(|_| format!("`{field}[{idx}].series_index` exceeds usize"))?;
+        let p = usize::try_from(p_u64).map_err(|_| format!("`{field}[{idx}].point_index` exceeds usize"))?;
+        pts.push((s, p));
+    }
+    Ok(pts)
+}
+
 fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, ControlCallError> {
+    if !matches!(
+        command_id,
+        "ui.navigator.toggle"
+            | "ui.inspector.toggle"
+            | "ui.family.toggle"
+            | "ui.palette.open"
+            | "ui.analyze.open"
+            | "ui.powerWizard.open"
+            | "ui.formatPoints.open"
+            | "ui.changeGraphType.open"
+            | "ui.clonePipeline.open"
+            | "ui.zoom.fitSheet"
+            | "ui.gallery.toggle"
+            | "ui.pane.cycle"
+            | "ui.rulers.toggle"
+            | "ui.shortcut.set"
+            | "ui.shortcut.reset"
+            | "ui.locale.set"
+            | "ui.theme.set"
+            | "ui.screenshot"
+            | "ui.event.dispatch"
+            | "ui.split.toggle"
+            | "ui.brush.point"
+            | "ui.result.copyMethodsReport"
+            | "ui.result.applyRemediation"
+            | "ui.result.inspectDiagnostics"
+            | "ui.canvas.applyPreset"
+            | "ui.canvas.preflight"
+            | "ui.previewFilter.set"
+            | "ui.presentation.toggle"
+            | "ui.grid.excludeWithReason"
+            | "ui.table.convertArchetype.open"
+            | "ui.table.randomizeGroups"
+            | "ui.table.randomSampleRows"
+            | "ui.table.simulateDistributions"
+            | "ui.table.openFormulaBar"
+            | "ui.result.appendClusterColumn"
+            | "ui.graph.insertModelEquation"
+            | "ui.graph.bubblePlot.open"
+            | "ui.graph.format.open"
+            | "ui.graph.axes.open"
+            | "ui.graph.pairwise.open"
+            | "ui.layout.composer.open"
+            | "ui.export.figure.open"
+            | "ui.import.reshape.open"
+            | "ui.print.open"
+            | "file.print"
+            | "app.about"
+    ) {
+        return Ok(None);
+    }
+    require_params_object_or_null(params, command_id).map_err(ControlCallError::from)?;
     match command_id {
         "ui.navigator.toggle" => {
             app.nav.navigator_open = !app.nav.navigator_open;
@@ -403,6 +995,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
         }
         "ui.palette.open" => {
             app.canvas_dialogs.open_command_palette();
+            app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
             Ok(Some(json!({
                 "palette_open": matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette),
                 "dialog": "CommandPalette",
@@ -463,6 +1056,44 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
 }
 
 fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, ControlLoopAction) {
+    dispatch_request_inner(app, req, None, None)
+}
+
+fn dispatch_request_with_hook<F>(app: &mut UiApp, req: ControlRequest, on_post_request: &mut F) -> (ControlResponse, ControlLoopAction)
+where
+    F: FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>,
+{
+    let prev_undo_depth = app.session().undo_depth();
+    let prev_redo_depth = app.session().redo_depth();
+    let prev_dirty = app.session().is_dirty();
+    let method = req.method.clone();
+    let id = req.id.clone();
+    let mut steps = Vec::new();
+    let mut rolled_back = false;
+    let (mut response, action) = dispatch_request_inner(app, req, Some(&mut steps), Some(&mut rolled_back));
+    if action != ControlLoopAction::Quit {
+        let hook_ctx = ControlPostRequestContext {
+            method: &method,
+            steps: &steps,
+            prev_undo_depth,
+            prev_redo_depth,
+            prev_dirty,
+            rolled_back,
+            request_ok: response.ok,
+        };
+        if let Err(err) = on_post_request(app, &hook_ctx) {
+            response = ControlResponse::err(id, err);
+        }
+    }
+    (response, action)
+}
+
+fn dispatch_request_inner(
+    app: &mut UiApp,
+    req: ControlRequest,
+    mut recorded: Option<&mut Vec<ControlRecordedStep>>,
+    rolled_back: Option<&mut bool>,
+) -> (ControlResponse, ControlLoopAction) {
     let ControlRequest { id, method, params } = req;
     if method == "app.quit" {
         return (ControlResponse::ok(id, json!({ "quit": true })), ControlLoopAction::Quit);
@@ -479,14 +1110,17 @@ fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, C
                 "gui_only": app.is_gui_only(),
             })),
             "command.list" => Ok(handle_command_list(app)),
-            "command.run" => handle_command_run(app, &params),
-            "command.batch" => handle_command_batch(app, &params),
-            "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), &params).map_err(ControlCallError::from),
+            "command.run" => handle_command_run(app, &params, recorded.as_deref_mut()),
+            "command.batch" => handle_command_batch(app, &params, recorded, rolled_back),
+            "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), app.session().file_path(), &params)
+                .map_err(ControlCallError::from),
+            "doc.export" => handle_doc_export(app, &params),
             "render.svg" => handle_render_svg(app, &params),
             "render.pdf" => handle_render_pdf(app, &params),
+            "render.preview" => handle_render_preview(app, &params),
             "ui.state" | "state.snapshot" => Ok(handle_ui_state(app)),
-            "engine.execute" => handle_engine_execute(app, &params),
-            _ => dispatch_command_by_id(app, &method, params),
+            "engine.execute" => handle_engine_execute(app, &params, recorded),
+            _ => dispatch_command_by_id(app, &method, params, recorded),
         }
     };
 
@@ -501,7 +1135,12 @@ fn is_control_readonly_ui_command(command_id: &str) -> bool {
     matches!(command_id, "ui.canvas.preflight" | "ui.result.inspectDiagnostics" | "result.inspect_diagnostics")
 }
 
-fn dispatch_command_by_id(app: &mut UiApp, command_id: &str, params: Value) -> Result<Value, ControlCallError> {
+fn dispatch_command_by_id(
+    app: &mut UiApp,
+    command_id: &str,
+    params: Value,
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
+) -> Result<Value, ControlCallError> {
     if is_gui_action_method(command_id) {
         return dispatch_gui_action(app, command_id, params).map_err(ControlCallError::from);
     }
@@ -519,7 +1158,10 @@ fn dispatch_command_by_id(app: &mut UiApp, command_id: &str, params: Value) -> R
     if let Some(ui_value) = dispatch_ui_command_detailed(app, command_id, &params)? {
         return Ok(ui_value);
     }
-    let outcome = app.execute_control_command(command_id, params)?;
+    let outcome = app.execute_control_command(command_id, params.clone())?;
+    if let Some(steps) = recorded {
+        steps.push(ControlRecordedStep { command_id: command_id.to_owned(), params, mutated: outcome.mutated });
+    }
     serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize command outcome: {err}")))
 }
 
@@ -551,7 +1193,7 @@ fn normalize_request_params(method: &str, obj: &Map<String, Value>) -> Value {
         } else {
             let mut inner = Map::new();
             for (key, value) in obj {
-                if !matches!(key.as_str(), "id" | "method" | "op" | "command" | "command_id" | "params") {
+                if !matches!(key.as_str(), "id" | "method" | "op" | "command" | "command_id" | "params" | "token" | "auth_token") {
                     inner.insert(key.clone(), value.clone());
                 }
             }
@@ -568,7 +1210,7 @@ fn normalize_request_params(method: &str, obj: &Map<String, Value>) -> Value {
         _ => Map::new(),
     };
     for (key, value) in obj {
-        if matches!(key.as_str(), "id" | "method" | "op" | "params") {
+        if matches!(key.as_str(), "id" | "method" | "op" | "params" | "token" | "auth_token") {
             continue;
         }
         base.entry(key.clone()).or_insert_with(|| value.clone());
@@ -577,7 +1219,27 @@ fn normalize_request_params(method: &str, obj: &Map<String, Value>) -> Value {
 }
 
 fn serialize_response(resp: &ControlResponse) -> String {
-    serde_json::to_string(resp).unwrap_or_else(|_| String::from("{\"id\":\"\",\"ok\":false,\"result\":null,\"error\":\"serialization failure\"}"))
+    const FALLBACK: &str = "{\"id\":\"\",\"ok\":false,\"result\":null,\"error\":\"serialization failure\"}";
+    let max_json_bytes = MAX_CONTROL_LINE_BYTES.saturating_sub(1);
+    let Ok(encoded) = serde_json::to_string(resp) else {
+        return String::from(FALLBACK);
+    };
+    if encoded.len() <= max_json_bytes {
+        return encoded;
+    }
+
+    let bounded_id = match serde_json::to_string(&resp.id) {
+        Ok(id_json) if id_json.len() <= 1024 => resp.id.clone(),
+        _ => Value::String(String::new()),
+    };
+    let overflow = ControlResponse::err(
+        bounded_id,
+        format!("control response ({} bytes) exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes", encoded.len()),
+    );
+    match serde_json::to_string(&overflow) {
+        Ok(text) if text.len() <= max_json_bytes => text,
+        _ => String::from(FALLBACK),
+    }
 }
 
 fn handle_command_list(app: &UiApp) -> Value {
@@ -622,46 +1284,159 @@ fn handle_command_list(app: &UiApp) -> Value {
     })
 }
 
-fn handle_command_run(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+fn handle_command_run(app: &mut UiApp, params: &Value, recorded: Option<&mut Vec<ControlRecordedStep>>) -> Result<Value, ControlCallError> {
     let command_id = extract_command_id(params)?;
     let cmd_params = extract_nested_params(params);
     if command_id == "app.quit" {
         return Err(ControlCallError::from("use top-level method 'app.quit' to shut down the control server"));
     }
-    dispatch_command_by_id(app, &command_id, cmd_params)
+    dispatch_command_by_id(app, &command_id, cmd_params, recorded)
 }
 
-fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+struct AtomicBatchRollbackState {
+    active: bool,
+    prev_tracker: Option<crate::BatchUndoTracker>,
+    ui_shell: Option<crate::UiShellSnapshot>,
+}
+
+fn is_batch_readonly_step(cmd_id: &str) -> bool {
+    matches!(
+        cmd_id,
+        "ping"
+            | "command.list"
+            | "doc.inspect"
+            | "doc.export"
+            | "ui.state"
+            | "state.snapshot"
+            | "render.svg"
+            | "render.pdf"
+            | "render.preview"
+            | "ui.canvas.preflight"
+            | "ui.result.inspectDiagnostics"
+            | "result.inspect_diagnostics"
+            | "project.inspect"
+            | "table.exportCsv"
+    )
+}
+
+fn rollback_or_commit_partial_batch(
+    app: &mut UiApp,
+    rollback: AtomicBatchRollbackState,
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
+    batch_steps: Vec<ControlRecordedStep>,
+    rolled_back: Option<&mut bool>,
+) {
+    if rollback.active {
+        let child_tracker = app.batch_undo_log.take();
+        app.batch_undo_log = rollback.prev_tracker;
+        if let Some(tracker) = child_tracker {
+            if let Some(fallback) = tracker.fallback_session {
+                app.session = fallback;
+            } else {
+                if tracker.net_batch_depth > 0 {
+                    for _ in 0..tracker.net_batch_depth {
+                        let _ = app.session.undo();
+                    }
+                } else if tracker.net_batch_depth < 0 {
+                    for _ in 0..(-tracker.net_batch_depth) {
+                        let _ = app.session.redo();
+                    }
+                }
+                app.session.set_file_path(tracker.baseline_file_path, !tracker.baseline_dirty);
+            }
+        }
+        if let Some(ui_snap) = rollback.ui_shell {
+            app.restore_ui_shell(ui_snap);
+        } else {
+            app.sync_views();
+        }
+        if let Some(flag) = rolled_back {
+            *flag = true;
+        }
+    } else if let Some(out_steps) = recorded {
+        out_steps.extend(batch_steps);
+    }
+}
+
+fn finish_committed_atomic_batch(app: &mut UiApp, rollback: AtomicBatchRollbackState) {
+    if !rollback.active {
+        return;
+    }
+    let child_tracker = app.batch_undo_log.take();
+    app.batch_undo_log = rollback.prev_tracker;
+    if let (Some(parent), Some(child)) = (app.batch_undo_log.as_mut(), child_tracker) {
+        parent.merge_committed_child(child);
+    }
+}
+
+fn handle_command_batch(
+    app: &mut UiApp,
+    params: &Value,
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
+    rolled_back: Option<&mut bool>,
+) -> Result<Value, ControlCallError> {
     let Some(items) = params.get("commands").and_then(Value::as_array) else {
         return Err(ControlCallError::from("command.batch requires a 'commands' array"));
     };
-    let atomic = params.get("atomic").and_then(Value::as_bool).unwrap_or(false);
-    let rollback_snapshot = atomic.then(|| app.clone());
+    if items.len() > MAX_CONTROL_BATCH_STEPS {
+        return Err(ControlCallError::from(format!("command.batch exceeds maximum step limit of {MAX_CONTROL_BATCH_STEPS} (got {})", items.len())));
+    }
+    let atomic = match params.get("atomic") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(ControlCallError::from("command.batch 'atomic' must be a boolean")),
+    };
+    let mut rollback = if atomic {
+        let prev_tracker = app.batch_undo_log.take();
+        app.batch_undo_log = Some(crate::BatchUndoTracker::for_session(app.session()));
+        AtomicBatchRollbackState { active: true, prev_tracker, ui_shell: None }
+    } else {
+        AtomicBatchRollbackState { active: false, prev_tracker: None, ui_shell: None }
+    };
+    let mut batch_steps: Vec<ControlRecordedStep> = Vec::new();
+    let max_payload_bytes = MAX_CONTROL_LINE_BYTES.saturating_sub(512);
+    let mut accumulated_bytes: usize = 64;
 
     let mut results = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
         let cmd_id = match extract_command_id(item) {
             Ok(id) => id,
             Err(err) => {
-                if let Some(snapshot) = rollback_snapshot {
-                    *app = snapshot;
-                }
+                rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
                 return Err(ControlCallError::from(format!("batch step {idx}: {err}")));
             }
         };
+        if rollback.active && rollback.ui_shell.is_none() && !is_batch_readonly_step(&cmd_id) {
+            rollback.ui_shell = Some(app.snapshot_ui_shell());
+        }
         let cmd_params = extract_nested_params(item);
-        match dispatch_command_by_id(app, &cmd_id, cmd_params) {
-            Ok(val) => results.push(json!({ "index": idx, "command": cmd_id, "result": val })),
-            Err(err) => {
-                if let Some(snapshot) = rollback_snapshot {
-                    *app = snapshot;
+        let step_sink = recorded.as_ref().map(|_| &mut batch_steps);
+        match dispatch_command_by_id(app, &cmd_id, cmd_params, step_sink) {
+            Ok(val) => {
+                let entry = json!({ "index": idx, "command": cmd_id, "result": val });
+                let entry_bytes = serde_json::to_string(&entry).map(|s| s.len().saturating_add(1)).unwrap_or(MAX_CONTROL_LINE_BYTES);
+                accumulated_bytes = accumulated_bytes.saturating_add(entry_bytes);
+                if accumulated_bytes > max_payload_bytes {
+                    rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
+                    return Err(ControlCallError::from(format!(
+                        "command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes"
+                    )));
                 }
+                results.push(entry);
+            }
+            Err(err) => {
+                rollback_or_commit_partial_batch(app, rollback, recorded, batch_steps, rolled_back);
                 return Err(ControlCallError {
                     message: format!("batch step {idx} ({cmd_id}) failed (rolled_back={atomic}): {}", err.message),
                     detail: err.detail,
                 });
             }
         }
+    }
+
+    finish_committed_atomic_batch(app, rollback);
+    if let Some(out_steps) = recorded {
+        out_steps.extend(batch_steps);
     }
 
     Ok(json!({
@@ -671,16 +1446,19 @@ fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, Contro
     }))
 }
 
-fn handle_engine_execute(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
-    let cmd_id = params
-        .get("command_id")
-        .or_else(|| params.get("command"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+fn handle_engine_execute(app: &mut UiApp, params: &Value, recorded: Option<&mut Vec<ControlRecordedStep>>) -> Result<Value, ControlCallError> {
+    require_params_object_or_null(params, "engine.execute")?;
+    let cmd_id = opt_non_empty_str_param(params, &["command_id", "command"])?
         .ok_or_else(|| ControlCallError::from("engine.execute requires non-empty 'command_id'"))?;
-    let cmd_params = params.get("params").cloned().unwrap_or(Value::Null);
-    let outcome = app.execute_control_command(cmd_id, cmd_params)?;
+    let cmd_params = match params.get("params") {
+        None | Some(Value::Null) => Value::Null,
+        Some(other @ Value::Object(_)) => other.clone(),
+        Some(_) => return Err(ControlCallError::from("engine.execute 'params' must be a JSON object or null")),
+    };
+    let outcome = app.execute_control_command(cmd_id, cmd_params.clone())?;
+    if let Some(steps) = recorded {
+        steps.push(ControlRecordedStep { command_id: cmd_id.to_owned(), params: cmd_params, mutated: outcome.mutated });
+    }
     serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize engine outcome: {err}")))
 }
 
@@ -724,9 +1502,11 @@ fn handle_ui_state(app: &mut UiApp) -> Value {
     })
 }
 
-fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, params: &Value) -> Result<Value, String> {
+fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, file_path: Option<&std::path::Path>, params: &Value) -> Result<Value, String> {
+    require_params_object_or_null(params, "doc.inspect")?;
+    let include_cells = opt_bool_param(params, &["include_cells"])?.unwrap_or(false);
     if let Some(sheet_id) = resolve_sheet_id_param(params)? {
-        return inspect_single_sheet(doc, &sheet_id);
+        return inspect_single_sheet(doc, &sheet_id, include_cells);
     }
 
     let data_sheets: Vec<Value> = doc
@@ -793,6 +1573,7 @@ fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, params: &Value) -> Res
         "title": doc.title,
         "schema_version": doc.schema_version,
         "dirty": dirty,
+        "file_path": file_path.map(|p| p.display().to_string()),
         "active_sheet_id": doc.active_sheet_id.as_ref().map(SheetId::as_str),
         "family_anchor_sheet_id": doc.family_anchor_sheet_id.as_ref().map(SheetId::as_str),
         "counts": {
@@ -811,12 +1592,13 @@ fn handle_doc_inspect(doc: &ProjectDocument, dirty: bool, params: &Value) -> Res
     }))
 }
 
-fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<Value, String> {
+fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId, include_cells: bool) -> Result<Value, String> {
+    let deps = include_cells.then(|| doc.upstream_dependencies(sheet_id));
     match doc.sheet_section(sheet_id) {
         Some(SheetSection::Data) => doc
             .data_sheet(sheet_id)
             .map(|s| {
-                json!({
+                let mut val = json!({
                     "section": "Data",
                     "id": s.id.as_str(),
                     "title": s.title,
@@ -825,25 +1607,43 @@ fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<Val
                     "cols": s.archetype.column_count(),
                     "frozen": s.frozen,
                     "linked_regions": s.linked_regions.len(),
-                })
+                });
+                if include_cells && let Some(obj) = val.as_object_mut() {
+                    obj.insert(String::from("columns"), json!(s.archetype.column_count()));
+                    obj.insert(String::from("info_sheet_id"), serde_json::to_value(&s.info_sheet_id).unwrap_or(Value::Null));
+                    if let Some(ref upstream) = deps {
+                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
+                    }
+                    let csv = export_datasheet_to_csv(s, &CsvOptions::csv()).unwrap_or_default();
+                    obj.insert(String::from("csv_preview"), Value::String(csv));
+                }
+                val
             })
             .ok_or_else(|| format!("data sheet `{}` not found", sheet_id.as_str())),
         Some(SheetSection::Info) => doc
             .info_sheet(sheet_id)
             .map(|s| {
-                json!({
+                let mut val = json!({
                     "section": "Info",
                     "id": s.id.as_str(),
                     "title": s.title,
                     "constants": s.constants.len(),
                     "linked_data_sheets": s.linked_data_sheets.iter().map(SheetId::as_str).collect::<Vec<_>>(),
-                })
+                });
+                if include_cells && let Some(obj) = val.as_object_mut() {
+                    obj.insert(String::from("constants_entries"), serde_json::to_value(&s.constants).unwrap_or(Value::Null));
+                    obj.insert(String::from("notes_markdown"), serde_json::to_value(&s.notes_markdown).unwrap_or(Value::Null));
+                    if let Some(ref upstream) = deps {
+                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
+                    }
+                }
+                val
             })
             .ok_or_else(|| format!("info sheet `{}` not found", sheet_id.as_str())),
         Some(SheetSection::Analyses) => doc
             .result_sheet(sheet_id)
             .map(|s| {
-                json!({
+                let mut val = json!({
                     "section": "Results",
                     "id": s.id.as_str(),
                     "title": s.analysis.effective_title(),
@@ -852,13 +1652,22 @@ fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<Val
                     "tabs": s.tabs.len(),
                     "scalars": s.scalars.len(),
                     "checklist": s.checklist.len(),
-                })
+                });
+                if include_cells && let Some(obj) = val.as_object_mut() {
+                    obj.insert(String::from("tabs_data"), serde_json::to_value(&s.tabs).unwrap_or(Value::Null));
+                    obj.insert(String::from("scalars_data"), serde_json::to_value(&s.scalars).unwrap_or(Value::Null));
+                    obj.insert(String::from("checklist_entries"), serde_json::to_value(&s.checklist).unwrap_or(Value::Null));
+                    if let Some(ref upstream) = deps {
+                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
+                    }
+                }
+                val
             })
             .ok_or_else(|| format!("result sheet `{}` not found", sheet_id.as_str())),
         Some(SheetSection::Graphs) => doc
             .graph_sheet(sheet_id)
             .map(|s| {
-                json!({
+                let mut val = json!({
                     "section": "Graphs",
                     "id": s.id.as_str(),
                     "title": s.title,
@@ -866,21 +1675,35 @@ fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<Val
                     "kind": format!("{:?}", s.spec.kind),
                     "width_pt": s.spec.canvas_size_pt.width,
                     "height_pt": s.spec.canvas_size_pt.height,
-                })
+                });
+                if include_cells && let Some(obj) = val.as_object_mut() {
+                    obj.insert(String::from("spec"), serde_json::to_value(&s.spec).unwrap_or(Value::Null));
+                    if let Some(ref upstream) = deps {
+                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
+                    }
+                }
+                val
             })
             .ok_or_else(|| format!("graph sheet `{}` not found", sheet_id.as_str())),
         Some(SheetSection::Layouts) => doc
             .layout_sheet(sheet_id)
             .map(|s| {
                 let size = s.spec.page_size_pt();
-                json!({
+                let mut val = json!({
                     "section": "Layouts",
                     "id": s.id.as_str(),
                     "title": s.title,
                     "items": s.spec.items.len(),
                     "width_pt": size.width,
                     "height_pt": size.height,
-                })
+                });
+                if include_cells && let Some(obj) = val.as_object_mut() {
+                    obj.insert(String::from("spec"), serde_json::to_value(&s.spec).unwrap_or(Value::Null));
+                    if let Some(ref upstream) = deps {
+                        obj.insert(String::from("upstream_dependencies"), serde_json::to_value(upstream).unwrap_or(Value::Null));
+                    }
+                }
+                val
             })
             .ok_or_else(|| format!("layout sheet `{}` not found", sheet_id.as_str())),
         None => Err(format!("sheet `{}` not found", sheet_id.as_str())),
@@ -888,11 +1711,12 @@ fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<Val
 }
 
 fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    require_params_object_or_null(params, "render.svg")?;
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
     let scene = app.session().render_sheet_scene(&sheet_id)?;
     let opts = SvgExportOptions {
-        pretty: params.get("pretty").and_then(Value::as_bool).unwrap_or(true),
-        outline_text: params.get("outline_text").and_then(Value::as_bool).unwrap_or(false),
+        pretty: opt_bool_param(params, &["pretty"])?.unwrap_or(true),
+        outline_text: opt_bool_param(params, &["outline_text"])?.unwrap_or(false),
         ..SvgExportOptions::default()
     };
     let svg = render_svg(&scene, &opts).map_err(|err| format!("SVG render failed: {err}"))?;
@@ -906,8 +1730,9 @@ fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
 }
 
 fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    require_params_object_or_null(params, "render.pdf")?;
     let doc = app.document();
-    let all = params.get("all").and_then(Value::as_bool).unwrap_or(false);
+    let all = opt_bool_param(params, &["all"])?.unwrap_or(false);
     let sheet_ids = if all { collect_all_renderable_ids(doc)? } else { vec![resolve_renderable_sheet_id(doc, params)?] };
 
     let color_space = parse_pdf_color_space(params)?;
@@ -923,7 +1748,7 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         render_pdf_pages(&scenes, &opts).map_err(|err| format!("PDF render failed: {err}"))?
     };
 
-    if let Some(path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|p| !p.is_empty()) {
+    if let Some(path) = opt_str_param(params, &["path"])?.map(str::trim).filter(|p| !p.is_empty()) {
         if app.is_gui_only() {
             return Err(EngineError::with_code(
                 ErrorCode::GuiOnlyViolation,
@@ -944,6 +1769,324 @@ fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         "encoding": "base64",
         "bytes_len": pdf_bytes.len(),
         "data_base64": data_base64,
+    }))
+}
+
+fn reject_control_if_gui_only(app: &UiApp, method: &str) -> Result<(), ControlCallError> {
+    if app.is_gui_only() {
+        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, format!("direct `{method}` control request is blocked under --gui-only"))
+            .with_remediation("Inspect visible UI via GUI tools/screenshot or restart without --gui-only.")
+            .into());
+    }
+    Ok(())
+}
+
+fn opt_u32_bounded_param(params: &Value, key: &str, min: u32, max: u32) -> Result<Option<u32>, String> {
+    let Some(raw) = opt_usize_param(params, &[key])? else {
+        return Ok(None);
+    };
+    let val = u32::try_from(raw).map_err(|_| format!("`{key}` exceeds u32 range"))?;
+    if val < min || val > max {
+        return Err(format!("`{key}` must be in {min}..={max} (got {val})"));
+    }
+    Ok(Some(val))
+}
+
+fn opt_u16_bounded_param(params: &Value, key: &str, min: u16, max: u16) -> Result<Option<u16>, String> {
+    let Some(raw) = opt_u32_bounded_param(params, key, u32::from(min), u32::from(max))? else {
+        return Ok(None);
+    };
+    u16::try_from(raw).map(Some).map_err(|_| format!("`{key}` out of range"))
+}
+
+fn build_control_render_spec(scene: &ChartScene, requested_w: Option<u32>, requested_h: Option<u32>, dpi: u16) -> RenderTargetSpec {
+    const MAX_DIM: f64 = 8192.0;
+    let default_w = if scene.width_pt.is_finite() && scene.width_pt > 0.0 {
+        let scaled = (scene.width_pt * f64::from(dpi) / 72.0).round();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            scaled.clamp(64.0, MAX_DIM) as u32
+        }
+    } else {
+        960
+    };
+    let default_h = if scene.height_pt.is_finite() && scene.height_pt > 0.0 {
+        let scaled = (scene.height_pt * f64::from(dpi) / 72.0).round();
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            scaled.clamp(64.0, MAX_DIM) as u32
+        }
+    } else {
+        640
+    };
+    RenderTargetSpec { width_px: requested_w.unwrap_or(default_w), height_px: requested_h.unwrap_or(default_h), dpi }
+}
+
+fn enforce_control_payload_budget(bytes_len: usize) -> Result<(), ControlCallError> {
+    let max_raw_bytes = (MAX_CONTROL_LINE_BYTES.saturating_mul(3)) / 4 - 4096;
+    if bytes_len > max_raw_bytes {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("encoded payload ({bytes_len} bytes) exceeds control frame limit"))
+            .with_remediation("Specify a lower DPI/resolution or export smaller targets.")
+            .into());
+    }
+    Ok(())
+}
+
+fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    reject_control_if_gui_only(app, "render.preview")?;
+    require_params_object_or_null(params, "render.preview").map_err(ControlCallError::from)?;
+    let doc = app.document();
+    let sheet_id = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
+    let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400).map_err(ControlCallError::from)?.unwrap_or(144);
+    let width_px = opt_u32_bounded_param(params, "width_px", 1, 8192).map_err(ControlCallError::from)?;
+    let height_px = opt_u32_bounded_param(params, "height_px", 1, 8192).map_err(ControlCallError::from)?;
+
+    let sheet_kind = if doc.graph_sheet(&sheet_id).is_some() { "graph" } else { "layout" };
+    let scene = app.session().render_sheet_scene(&sheet_id)?;
+    let spec = build_control_render_spec(&scene, width_px, height_px, dpi);
+    let raster = render_scene(&scene, spec).map_err(|err| format!("preview rasterization failed: {err}"))?;
+    let png_bytes = encode_png(&raster).map_err(|err| format!("PNG encode failed: {err}"))?;
+    enforce_control_payload_budget(png_bytes.len())?;
+
+    Ok(json!({
+        "sheet_id": sheet_id.as_str(),
+        "sheet_kind": sheet_kind,
+        "title": scene.title,
+        "width_px": raster.width_px,
+        "height_px": raster.height_px,
+        "dpi": raster.dpi,
+        "width_pt": scene.width_pt,
+        "height_pt": scene.height_pt,
+        "png_bytes": png_bytes.len(),
+        "primitives_count": scene.primitives.len(),
+        "warnings": scene.warnings,
+        "encoding": "base64",
+        "data_base64": encode_base64(&png_bytes),
+    }))
+}
+
+fn resolve_tabular_export_target<'a>(
+    doc: &'a ProjectDocument,
+    sheet_id: Option<&str>,
+    tab_id: Option<&str>,
+) -> Result<(&'a str, Option<&'a DataSheet>, Option<&'a ResultSheet>), String> {
+    if let Some(id_str) = sheet_id {
+        let id = SheetId::new(id_str);
+        if let Some(rs) = doc.result_sheet(&id) {
+            return Ok((rs.id.as_str(), None, Some(rs)));
+        }
+        if let Some(ds) = doc.data_sheet(&id) {
+            if let Some(tid) = tab_id {
+                return Err(format!("tab '{tid}' requires a ResultSheet, but '{id_str}' is a DataSheet"));
+            }
+            return Ok((ds.id.as_str(), Some(ds), None));
+        }
+        return Err(format!("data or result sheet '{id_str}' not found"));
+    }
+    if let Some(tid) = tab_id {
+        if let Some(active) = &doc.active_sheet_id
+            && let Some(rs) = doc.result_sheet(active)
+            && rs.tabs.iter().any(|t| t.id == tid)
+        {
+            return Ok((rs.id.as_str(), None, Some(rs)));
+        }
+        if let Some(rs) = doc.result_sheets.iter().find(|rs| rs.tabs.iter().any(|t| t.id == tid)) {
+            return Ok((rs.id.as_str(), None, Some(rs)));
+        }
+        return Err(format!("tab '{tid}' not found on any result sheet"));
+    }
+    if let Some(active) = &doc.active_sheet_id {
+        if let Some(rs) = doc.result_sheet(active) {
+            return Ok((rs.id.as_str(), None, Some(rs)));
+        }
+        if let Some(ds) = doc.data_sheet(active) {
+            return Ok((ds.id.as_str(), Some(ds), None));
+        }
+    }
+    if let Some(rs) = doc.result_sheets.first() {
+        return Ok((rs.id.as_str(), None, Some(rs)));
+    }
+    if let Some(ds) = doc.data_sheets.first() {
+        return Ok((ds.id.as_str(), Some(ds), None));
+    }
+    Err(String::from("no DataSheet or ResultSheet exists in the current document"))
+}
+
+fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    reject_control_if_gui_only(app, "doc.export")?;
+    require_params_object_or_null(params, "doc.export").map_err(ControlCallError::from)?;
+    let raw_fmt = opt_non_empty_str_param(params, &["format"])
+        .map_err(ControlCallError::from)?
+        .ok_or_else(|| ControlCallError::from("doc.export requires a non-empty string 'format'"))?;
+    let format = raw_fmt.to_ascii_lowercase();
+    if !matches!(format.as_str(), "svg" | "pdf" | "png" | "tiff" | "csv" | "json") {
+        return Err(ControlCallError::from(format!("unsupported export format '{format}'")));
+    }
+
+    let sheet_id_str = opt_non_empty_str_param(params, &["sheet_id", "sheetId"]).map_err(ControlCallError::from)?;
+    let pretty = opt_bool_param(params, &["pretty"]).map_err(ControlCallError::from)?.unwrap_or(true);
+    let explicit_tidy = opt_bool_param(params, &["tidy"]).map_err(ControlCallError::from)?;
+    let tab_id = opt_non_empty_str_param(params, &["tab_id", "tabId"]).map_err(ControlCallError::from)?;
+    if explicit_tidy == Some(true) && tab_id.is_some() {
+        return Err(ControlCallError::from(
+            "export `tidy: true` cannot be combined with `tab_id`; omit `tidy` or pass `tidy: false` to export a specific tab",
+        ));
+    }
+    let tidy = explicit_tidy.unwrap_or(tab_id.is_none());
+    let csv_opts = match opt_non_empty_str_param(params, &["csv_delimiter"]).map_err(ControlCallError::from)? {
+        Some(delim) => {
+            let mut chars = delim.chars();
+            let Some(ch) = chars.next() else {
+                return Err(ControlCallError::from("csv_delimiter must not be empty"));
+            };
+            if chars.next().is_some() {
+                return Err(ControlCallError::from("csv_delimiter must be a single character"));
+            }
+            let mut opts = CsvOptions::csv();
+            opts.delimiter = ch;
+            opts
+        }
+        None => CsvOptions::csv(),
+    };
+    let svg_precision = opt_u16_bounded_param(params, "svg_precision", 1, 8).map_err(ControlCallError::from)?;
+    let pdf_color_space = parse_pdf_color_space_fields(params, &["pdf_color_space", "color_space"]).map_err(ControlCallError::from)?;
+    let all_graphs = opt_bool_param(params, &["all_graphs", "all"]).map_err(ControlCallError::from)?.unwrap_or(false);
+    let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400).map_err(ControlCallError::from)?.unwrap_or(144);
+    let width_px = opt_u32_bounded_param(params, "width_px", 1, 8192).map_err(ControlCallError::from)?;
+    let height_px = opt_u32_bounded_param(params, "height_px", 1, 8192).map_err(ControlCallError::from)?;
+    let tiff_compression = match opt_non_empty_str_param(params, &["tiff_compression"]).map_err(ControlCallError::from)? {
+        Some(raw) => match raw.to_ascii_lowercase().as_str() {
+            "none" => TiffCompression::None,
+            "deflate" => TiffCompression::Deflate,
+            "lzw" => TiffCompression::Lzw,
+            other => return Err(ControlCallError::from(format!("unsupported tiff_compression '{other}'"))),
+        },
+        None => TiffCompression::Lzw,
+    };
+
+    let doc = app.document();
+    let mut raster_meta: Option<(u32, u32, u16)> = None;
+    let (target_id, bytes): (String, Vec<u8>) = match format.as_str() {
+        "svg" => {
+            let target_sheet = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
+            let scene = app.session().render_sheet_scene(&target_sheet)?;
+            let mut opts = SvgExportOptions { pretty, ..SvgExportOptions::default() };
+            if let Some(p) = svg_precision {
+                opts.precision = u8::try_from(p).map_err(|_| ControlCallError::from("svg_precision out of range"))?;
+            }
+            let svg = render_svg(&scene, &opts).map_err(|err| format!("SVG export failed: {err}"))?;
+            (target_sheet.as_str().to_owned(), svg.into_bytes())
+        }
+        "pdf" => {
+            let mut opts = PdfExportOptions { color_space: pdf_color_space, ..PdfExportOptions::default() };
+            if all_graphs && sheet_id_str.is_none() {
+                let sheet_ids = collect_all_renderable_ids(doc).map_err(ControlCallError::from)?;
+                if sheet_ids.len() > lumencraft_pdf::MAX_PDF_PAGES {
+                    return Err(ControlCallError::from(format!(
+                        "PDF page count {} exceeds maximum {}",
+                        sheet_ids.len(),
+                        lumencraft_pdf::MAX_PDF_PAGES
+                    )));
+                }
+                let mut scenes = Vec::with_capacity(sheet_ids.len());
+                let mut total_primitives: usize = 0;
+                for sid in &sheet_ids {
+                    let scene = app.session().render_sheet_scene(sid)?;
+                    total_primitives = total_primitives.saturating_add(scene.primitives.len());
+                    if total_primitives > lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES {
+                        return Err(ControlCallError::from(format!(
+                            "PDF primitive count {total_primitives} exceeds maximum {}",
+                            lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES
+                        )));
+                    }
+                    scenes.push(scene);
+                }
+                opts.title = Some(doc.title.clone());
+                let pdf = render_pdf_pages(&scenes, &opts).map_err(|err| format!("PDF export failed: {err}"))?;
+                (String::from("all"), pdf)
+            } else {
+                let target_sheet = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
+                let scene = app.session().render_sheet_scene(&target_sheet)?;
+                opts.title = Some(scene.title.clone());
+                let pdf = render_pdf(&scene, &opts).map_err(|err| format!("PDF export failed: {err}"))?;
+                (target_sheet.as_str().to_owned(), pdf)
+            }
+        }
+        "png" | "tiff" => {
+            let target_sheet = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
+            let scene = app.session().render_sheet_scene(&target_sheet)?;
+            let spec = build_control_render_spec(&scene, width_px, height_px, dpi);
+            let raster = render_scene(&scene, spec).map_err(|err| format!("rasterization failed: {err}"))?;
+            raster_meta = Some((raster.width_px, raster.height_px, raster.dpi));
+            let encoded = if format == "png" {
+                encode_png(&raster).map_err(|err| format!("PNG encoding failed: {err}"))?
+            } else {
+                encode_tiff(&raster, tiff_compression).map_err(|err| format!("TIFF encoding failed: {err}"))?
+            };
+            (target_sheet.as_str().to_owned(), encoded)
+        }
+        "csv" => {
+            let (id_str, ds_opt, rs_opt) = resolve_tabular_export_target(doc, sheet_id_str, tab_id).map_err(ControlCallError::from)?;
+            let text = if let Some(ds) = ds_opt {
+                export_datasheet_to_csv(ds, &csv_opts).map_err(|err| format!("CSV export failed: {err}"))?
+            } else if let Some(rs) = rs_opt {
+                if tidy {
+                    export_result_sheet_tidy_csv(rs, &csv_opts)
+                } else if let Some(tid) = tab_id {
+                    let tab = rs
+                        .tabs
+                        .iter()
+                        .find(|t| t.id == tid)
+                        .ok_or_else(|| ControlCallError::from(format!("tab '{tid}' not found on result sheet '{}'", rs.id)))?;
+                    export_result_tab_csv(tab, &csv_opts)
+                } else if let Some(first_tab) = rs.tabs.first() {
+                    export_result_tab_csv(first_tab, &csv_opts)
+                } else {
+                    export_result_sheet_tidy_csv(rs, &csv_opts)
+                }
+            } else {
+                return Err(ControlCallError::from("no tabular sheet available to export"));
+            };
+            (id_str.to_owned(), text.into_bytes())
+        }
+        "json" => {
+            let serialize_val = |val_res: Result<String, serde_json::Error>| {
+                val_res.map(|s| s.into_bytes()).map_err(|err| ControlCallError::from(format!("JSON export failed: {err}")))
+            };
+            if let Some(id_str) = sheet_id_str {
+                let id = SheetId::new(id_str);
+                let json_bytes = if let Some(rs) = doc.result_sheet(&id) {
+                    export_result_sheet_json(rs, pretty).map(|s| s.into_bytes()).map_err(|err| ControlCallError::from(err.to_string()))?
+                } else if let Some(ds) = doc.data_sheet(&id) {
+                    serialize_val(if pretty { serde_json::to_string_pretty(ds) } else { serde_json::to_string(ds) })?
+                } else if let Some(info) = doc.info_sheet(&id) {
+                    serialize_val(if pretty { serde_json::to_string_pretty(info) } else { serde_json::to_string(info) })?
+                } else if let Some(gs) = doc.graph_sheet(&id) {
+                    serialize_val(if pretty { serde_json::to_string_pretty(gs) } else { serde_json::to_string(gs) })?
+                } else if let Some(ls) = doc.layout_sheet(&id) {
+                    serialize_val(if pretty { serde_json::to_string_pretty(ls) } else { serde_json::to_string(ls) })?
+                } else {
+                    return Err(ControlCallError::from(format!("sheet '{id_str}' not found")));
+                };
+                (id_str.to_owned(), json_bytes)
+            } else {
+                let json_bytes = serialize_val(if pretty { serde_json::to_string_pretty(doc) } else { serde_json::to_string(doc) })?;
+                (String::from("project"), json_bytes)
+            }
+        }
+        _ => return Err(ControlCallError::from(format!("unsupported export format '{format}'"))),
+    };
+
+    enforce_control_payload_budget(bytes.len())?;
+    Ok(json!({
+        "format": format,
+        "sheet_id": target_id,
+        "width_px": raster_meta.map(|(w, _, _)| w),
+        "height_px": raster_meta.map(|(_, h, _)| h),
+        "dpi": raster_meta.map(|(_, _, d)| d),
+        "bytes_len": bytes.len(),
+        "encoding": "base64",
+        "data_base64": encode_base64(&bytes),
     }))
 }
 
@@ -998,20 +2141,16 @@ fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Val
         doc.graph_sheets.first().ok_or_else(|| String::from("no graph sheet available to format points"))?
     };
 
-    let mut points: Vec<(usize, usize)> = if let Some(arr) = params.get("points").and_then(Value::as_array) {
-        arr.iter()
-            .filter_map(|item| {
-                let s = item.get("series_index").and_then(Value::as_u64)? as usize;
-                let p = item.get("point_index").and_then(Value::as_u64)? as usize;
-                Some((s, p))
-            })
-            .collect()
-    } else if !app.brushed_points.is_empty() {
-        app.brushed_points.iter().map(|pt| (pt.col, pt.row)).collect()
-    } else if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) {
-        app.grid.selected_graph_point_indices(ds, graph.spec.series.len().max(1))
-    } else {
-        Vec::new()
+    let mut points: Vec<(usize, usize)> = match params.get("points") {
+        Some(v) if !v.is_null() => parse_selected_points_array(v, "points")?,
+        _ if !app.brushed_points.is_empty() => app.brushed_points.iter().map(|pt| (pt.col, pt.row)).collect(),
+        _ => {
+            if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) {
+                app.grid.selected_graph_point_indices(ds, graph.spec.series.len().max(1))
+            } else {
+                Vec::new()
+            }
+        }
     };
     points.sort_unstable();
     points.dedup();
@@ -1090,18 +2229,18 @@ fn dispatch_ui_event_cmd(app: &mut UiApp, params: &Value) -> Result<Value, Strin
 }
 
 fn dispatch_ui_split_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(enabled) = params.get("enabled").and_then(Value::as_bool) {
+    if let Some(enabled) = opt_bool_param(params, &["enabled"])? {
         app.split.enabled = enabled;
     } else {
         app.split.enabled = !app.split.enabled;
     }
-    if let Some(ratio) = params.get("ratio").and_then(Value::as_f64) {
+    if let Some(ratio) = opt_finite_f64_param(params, &["ratio"])? {
         app.split.set_ratio(ratio);
     }
-    if let Some(raw_p) = params.get("primary_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(raw_p) = opt_non_empty_str_param(params, &["primary_sheet_id"])? {
         app.split.primary_sheet_id = Some(SheetId::try_new(raw_p).map_err(|e| e.to_string())?);
     }
-    if let Some(raw_s) = params.get("secondary_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(raw_s) = opt_non_empty_str_param(params, &["secondary_sheet_id"])? {
         app.split.secondary_sheet_id = Some(SheetId::try_new(raw_s).map_err(|e| e.to_string())?);
     }
     let (primary, secondary) = app.split.resolve_sheets(app.document());
@@ -1114,7 +2253,7 @@ fn dispatch_ui_split_toggle(app: &mut UiApp, params: &Value) -> Result<Value, St
 }
 
 fn dispatch_ui_brush_point(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if params.get("clear").and_then(Value::as_bool) == Some(true) {
+    if opt_bool_param(params, &["clear"])? == Some(true) {
         app.clear_brush();
         return Ok(json!({ "brushed_cell": Value::Null }));
     }
@@ -1126,16 +2265,16 @@ fn dispatch_ui_brush_point(app: &mut UiApp, params: &Value) -> Result<Value, Str
     } else {
         doc.data_sheets.first().map(|d| d.id.clone()).ok_or_else(|| String::from("no data sheet available to brush"))?
     };
-    let row = usize::try_from(params.get("row").and_then(Value::as_u64).unwrap_or(0)).map_err(|_| String::from("`row` exceeds usize"))?;
-    let col = usize::try_from(params.get("col").and_then(Value::as_u64).unwrap_or(0)).map_err(|_| String::from("`col` exceeds usize"))?;
-    let subcol = usize::try_from(params.get("subcol").and_then(Value::as_u64).unwrap_or(0)).map_err(|_| String::from("`subcol` exceeds usize"))?;
+    let row = opt_usize_param(params, &["row"])?.unwrap_or(0);
+    let col = opt_usize_param(params, &["col"])?.unwrap_or(0);
+    let subcol = opt_usize_param(params, &["subcol"])?.unwrap_or(0);
     app.brush_from_grid_cell(&sheet_id, GridCellCoord::new(row, col, subcol));
     Ok(json!({ "brushed_cell": app.brushed_cell }))
 }
 
 fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
     let doc = app.document();
-    let rs_id = if let Some(raw) = params.get("result_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    let rs_id = if let Some(raw) = opt_non_empty_str_param(params, &["result_sheet_id"])? {
         SheetId::try_new(raw).map_err(|e| e.to_string())?
     } else if let Some(explicit) = resolve_sheet_id_param(params)? {
         explicit
@@ -1145,21 +2284,26 @@ fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Re
         doc.result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("no result sheet available for methods report"))?
     };
 
-    if let Some(fmt) = params.get("format").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(fmt) = opt_non_empty_str_param(params, &["format"])? {
         app.canvas_dialogs.result_view.report_format = fmt.to_owned();
     }
+    let skip_os_clipboard = opt_bool_param(params, &["skip_os_clipboard"])? == Some(true);
     let intent = app.canvas_dialogs.result_view.generate_report_intent(&rs_id);
     let outcome = app.execute_command(&intent.command_id, intent.params)?;
     let report = outcome.payload.get("report").and_then(Value::as_str).unwrap_or_default().to_owned();
     app.canvas_dialogs.result_view.last_methods_report = Some(report.clone());
 
-    let mut clipboard_status = Value::Null;
     #[cfg(not(target_arch = "wasm32"))]
-    if params.get("skip_os_clipboard").and_then(Value::as_bool) != Some(true)
-        && let Ok(status) = write_os_pasteboard(&report)
-    {
-        clipboard_status = serde_json::to_value(status).unwrap_or(Value::Null);
-    }
+    let clipboard_status = if !skip_os_clipboard && let Ok(status) = write_os_pasteboard(&report) {
+        serde_json::to_value(status).unwrap_or(Value::Null)
+    } else {
+        Value::Null
+    };
+    #[cfg(target_arch = "wasm32")]
+    let clipboard_status = {
+        let _ = skip_os_clipboard;
+        Value::Null
+    };
 
     Ok(json!({
         "sheet_id": rs_id.as_str(),
@@ -1170,7 +2314,7 @@ fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Re
 }
 
 fn resolve_target_result_sheet_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
-    if let Some(raw) = params.get("result_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(raw) = opt_non_empty_str_param(params, &["result_sheet_id"])? {
         return SheetId::try_new(raw).map_err(|e| e.to_string());
     }
     if let Some(explicit) = resolve_sheet_id_param(params)? {
@@ -1183,6 +2327,8 @@ fn resolve_target_result_sheet_id(doc: &ProjectDocument, params: &Value) -> Resu
 }
 
 fn dispatch_ui_result_apply_remediation(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    let _ = opt_non_empty_str_param(params, &["result_sheet_id"])?;
+    let _ = resolve_sheet_id_param(params)?;
     let rs_id = resolve_target_result_sheet_id(app.document(), params).ok();
     Err(EngineError::with_code(
         ErrorCode::Conflict,
@@ -1205,7 +2351,8 @@ fn dispatch_ui_result_inspect_diagnostics(app: &mut UiApp, params: &Value) -> Re
     app.canvas_dialogs.result_view.sync_with_result(rs);
     let banner = AssumptionDiagnosticBanner::from_result(rs);
 
-    let requested_tab = params.get("tab_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let requested_tab = opt_non_empty_str_param(params, &["tab_id"])?;
+    let requested_tab_index = opt_usize_param(params, &["tab_index"])?;
     let mut detail_tab_ids: Vec<String> = banner.as_ref().map(|b| b.detail_tab_ids.clone()).unwrap_or_else(|| {
         rs.tabs
             .iter()
@@ -1226,14 +2373,17 @@ fn dispatch_ui_result_inspect_diagnostics(app: &mut UiApp, params: &Value) -> Re
         detail_tab_ids = rs.tabs.iter().map(|t| t.id.clone()).collect();
     }
 
-    let target_tab_id = requested_tab
-        .or_else(|| detail_tab_ids.first().map(String::as_str))
-        .or_else(|| params.get("tab_index").and_then(Value::as_u64).and_then(|i| rs.tabs.get(i as usize).map(|t| t.id.as_str())));
-
-    if let Some(tab_id) = target_tab_id {
-        let _ = app.canvas_dialogs.result_view.select_tab_by_id(rs, tab_id);
-    } else if let Some(idx) = params.get("tab_index").and_then(Value::as_u64) {
-        app.canvas_dialogs.result_view.select_tab(idx as usize, rs.tabs.len());
+    if let Some(tab_id) = requested_tab {
+        if !app.canvas_dialogs.result_view.select_tab_by_id(rs, tab_id) {
+            return Err(format!("result sheet `{}` has no tab `{tab_id}`", rs_id.as_str()));
+        }
+    } else if let Some(idx) = requested_tab_index {
+        if idx >= rs.tabs.len() {
+            return Err(format!("tab_index {idx} out of range (sheet has {} tabs)", rs.tabs.len()));
+        }
+        app.canvas_dialogs.result_view.select_tab(idx, rs.tabs.len());
+    } else if let Some(first_detail) = detail_tab_ids.first() {
+        let _ = app.canvas_dialogs.result_view.select_tab_by_id(rs, first_detail);
     }
     let active_tab_id = app.canvas_dialogs.result_view.active_tab(rs).map(|t| t.id.clone());
 
@@ -1250,14 +2400,9 @@ fn dispatch_ui_result_inspect_diagnostics(app: &mut UiApp, params: &Value) -> Re
 
 fn dispatch_ui_canvas_apply_preset(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
-    let preset_raw = params
-        .get("preset")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| String::from("missing required `preset` string parameter"))?;
+    let preset_raw = opt_non_empty_str_param(params, &["preset"])?.ok_or_else(|| String::from("missing required `preset` string parameter"))?;
     let preset = FigureCanvasPreset::from_name(preset_raw).ok_or_else(|| format!("unknown canvas preset `{preset_raw}`"))?;
-    if let Some(mode_raw) = params.get("resize_mode").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(mode_raw) = opt_non_empty_str_param(params, &["resize_mode"])? {
         app.canvas_dialogs.canvas_resize_mode =
             CanvasResizeMode::from_name(mode_raw).ok_or_else(|| format!("unknown canvas resize_mode `{mode_raw}`"))?;
     }
@@ -1288,19 +2433,14 @@ fn dispatch_ui_canvas_preflight(app: &mut UiApp, params: &Value) -> Result<Value
 }
 
 fn dispatch_ui_preview_filter_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let raw = params
-        .get("filter")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| String::from("missing non-empty `filter` string"))?;
+    let raw = opt_non_empty_str_param(params, &["filter"])?.ok_or_else(|| String::from("missing non-empty `filter` string"))?;
     let filter = CanvasPreviewFilter::from_name(raw).ok_or_else(|| format!("unknown preview filter `{raw}`"))?;
     app.preview_filter = filter;
     Ok(json!({ "preview_filter": app.preview_filter.as_str() }))
 }
 
 fn dispatch_ui_presentation_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(enabled) = params.get("enabled").and_then(Value::as_bool) {
+    if let Some(enabled) = opt_bool_param(params, &["enabled"])? {
         app.presentation_mode = enabled;
     } else {
         app.presentation_mode = !app.presentation_mode;
@@ -1324,14 +2464,17 @@ fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Resu
     {
         coords.push(active);
     }
+    let tag_override = opt_non_empty_str_param(params, &["reason_tag"])?.map(str::to_owned);
+    let note_override = opt_str_param(params, &["note"])?.map(str::to_owned);
+    let should_commit = opt_bool_param(params, &["commit"])? == Some(true);
     app.canvas_dialogs.open_exclude_with_reason(sheet_id.clone(), coords.clone());
-    if let Some(tag) = params.get("reason_tag").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
-        app.canvas_dialogs.exclude_with_reason.reason_tag = tag.to_owned();
+    if let Some(tag) = tag_override {
+        app.canvas_dialogs.exclude_with_reason.reason_tag = tag;
     }
-    if let Some(note) = params.get("note").and_then(Value::as_str) {
-        app.canvas_dialogs.exclude_with_reason.note = note.to_owned();
+    if let Some(note) = note_override {
+        app.canvas_dialogs.exclude_with_reason.note = note;
     }
-    if params.get("commit").and_then(Value::as_bool) == Some(true) {
+    if should_commit {
         let intent = app.canvas_dialogs.exclude_with_reason.commit_intent()?;
         app.execute_command(&intent.command_id, intent.params)?;
         app.canvas_dialogs.close_dialog();
@@ -1381,7 +2524,7 @@ fn resolve_target_graph_id(doc: &ProjectDocument, params: &Value) -> Result<Shee
 }
 
 fn resolve_target_data_id(doc: &ProjectDocument, params: &Value) -> Result<SheetId, String> {
-    if let Some(raw) = params.get("source_sheet_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(raw) = opt_non_empty_str_param(params, &["source_sheet_id"])? {
         let id = SheetId::try_new(raw).map_err(|e| e.to_string())?;
         if doc.data_sheet(&id).is_some() {
             return Ok(id);
@@ -1498,10 +2641,11 @@ fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value
     let doc = app.document().clone();
     let graph_id = resolve_target_graph_id(&doc, params)?;
     let graph = doc.graph_sheet(&graph_id).ok_or_else(|| format!("graph sheet `{}` not found", graph_id.as_str()))?;
-    let initial_target = match params.get("target_axis").and_then(Value::as_str).map(str::trim).unwrap_or("y").to_ascii_lowercase().as_str() {
+    let initial_target = match opt_non_empty_str_param(params, &["target_axis"])?.unwrap_or("y").to_ascii_lowercase().as_str() {
         "x" => AxisTarget::X,
+        "y" => AxisTarget::Y,
         "y2" => AxisTarget::Y2,
-        _ => AxisTarget::Y,
+        other => return Err(format!("unsupported target_axis `{other}`; expected x, y, or y2")),
     };
     app.canvas_dialogs.format_axes.sync_from_graph(graph, initial_target);
     app.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: graph_id.clone() };
@@ -1531,8 +2675,8 @@ fn dispatch_ui_open_formula_bar(app: &mut UiApp, params: &Value) -> Result<Value
         return Err(format!("formula bar requires a Multiple Variables sheet (`{}` is {:?})", ds_id.as_str(), ds.kind()));
     };
 
-    let req_title = params.get("title").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
-    let req_col = params.get("column").or_else(|| params.get("col")).and_then(Value::as_u64).map(|n| n as usize);
+    let req_title = opt_non_empty_str_param(params, &["title"])?;
+    let req_col = opt_usize_param(params, &["column", "col"])?;
 
     match (req_col, req_title) {
         (Some(col), maybe_title) if col < mv.variables.len() => {
@@ -1593,13 +2737,7 @@ fn dispatch_ui_append_cluster_column(app: &mut UiApp, params: &Value) -> Result<
         )
         .into());
     };
-    let col_title = params
-        .get("column_title")
-        .or_else(|| params.get("title"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or("Cluster");
+    let col_title = opt_non_empty_str_param(params, &["column_title", "title"])?.unwrap_or("Cluster");
     let (assigned, assigned_count) = resolve_cluster_assignment_column_labels(&rs, mv)?;
     if assigned_count == 0 {
         return Err(EngineError::with_code(ErrorCode::BadInput, "clustering `kmeans-assignments` tab has no cluster assignments").into());
@@ -1743,7 +2881,7 @@ fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Val
 }
 
 fn dispatch_ui_import_reshape_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(mode_raw) = params.get("mode").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    if let Some(mode_raw) = opt_non_empty_str_param(params, &["mode"])? {
         app.grid.import_reshape.mode = match mode_raw.to_ascii_lowercase().as_str() {
             "plate96" | "plate_96" | "96" => ImportReshapeMode::Plate96,
             "plate384" | "plate_384" | "384" => ImportReshapeMode::Plate384,
@@ -1760,27 +2898,34 @@ fn dispatch_ui_import_reshape_open(app: &mut UiApp, params: &Value) -> Result<Va
 
 fn dispatch_ui_print_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let sheet_override = resolve_sheet_id_param(params)?;
+    let copies_opt = opt_usize_param(params, &["copies"])?;
+    let printer_present = params.get("printer").is_some();
+    let printer_opt =
+        if printer_present { opt_str_param(params, &["printer"])?.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned) } else { None };
+    let scale_opt = opt_finite_f64_param(params, &["scale_percent"])?;
+    let crop_marks_opt = opt_bool_param(params, &["crop_marks"])?;
+    let bleed_pt_opt = opt_finite_f64_param(params, &["bleed_pt"])?;
+    let spool = opt_bool_param(params, &["spool"])?.unwrap_or(false);
+    let submit = opt_bool_param(params, &["submit_to_os"])?.unwrap_or(false);
+
     let active = app.session.document().active_sheet_id.clone();
     app.open_print_dialog_for(sheet_override.as_ref().or(active.as_ref()));
 
-    if let Some(copies) = params.get("copies").and_then(Value::as_u64) {
+    if let Some(copies) = copies_opt {
         let clamped = u16::try_from(copies.clamp(1, 999)).unwrap_or(999);
         app.update_print_dialog_copies(clamped);
     }
-    if let Some(printer_val) = params.get("printer") {
-        let printer = printer_val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned);
-        app.select_print_dialog_printer(printer);
+    if printer_present {
+        app.select_print_dialog_printer(printer_opt);
     }
-    if let Some(scale) = params.get("scale_percent").and_then(Value::as_f64) {
+    if let Some(scale) = scale_opt {
         app.update_print_dialog_scale(scale);
     }
-    if let Some(crop_marks) = params.get("crop_marks").and_then(Value::as_bool) {
-        let bleed_pt = params.get("bleed_pt").and_then(Value::as_f64);
-        app.update_print_dialog_crop_marks(crop_marks, bleed_pt);
+    if let Some(crop_marks) = crop_marks_opt {
+        app.update_print_dialog_crop_marks(crop_marks, bleed_pt_opt);
     }
 
-    if params.get("spool").and_then(Value::as_bool).unwrap_or(false) {
-        let submit = params.get("submit_to_os").and_then(Value::as_bool).unwrap_or(false);
+    if spool {
         let _ = app.execute_print_dialog_spool(submit)?;
     }
 
@@ -1879,15 +3024,20 @@ fn dispatch_ui_pane_cycle(app: &mut UiApp, params: &Value) -> Result<Value, Stri
 }
 
 fn dispatch_ui_rulers_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(raw_unit) = params.get("unit").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
-        app.canvas_dialogs.ruler_unit = match raw_unit.to_ascii_lowercase().as_str() {
+    let unit_override = match opt_non_empty_str_param(params, &["unit"])? {
+        Some(raw_unit) => Some(match raw_unit.to_ascii_lowercase().as_str() {
             "mm" | "millimeters" | "millimeter" => PhysicalUnit::Millimeters,
             "in" | "inch" | "inches" => PhysicalUnit::Inches,
             "pt" | "points" | "point" => PhysicalUnit::Points,
             other => return Err(format!("unsupported ruler unit `{other}`; expected pt, in, or mm")),
-        };
+        }),
+        None => None,
+    };
+    let visible_override = opt_bool_param(params, &["visible"])?;
+    if let Some(unit) = unit_override {
+        app.canvas_dialogs.ruler_unit = unit;
     }
-    if let Some(explicit) = params.get("visible").and_then(Value::as_bool) {
+    if let Some(explicit) = visible_override {
         app.canvas_dialogs.rulers_visible = explicit;
     } else {
         app.canvas_dialogs.rulers_visible = !app.canvas_dialogs.rulers_visible;
@@ -1899,14 +3049,14 @@ fn dispatch_ui_rulers_toggle(app: &mut UiApp, params: &Value) -> Result<Value, S
 }
 
 fn dispatch_ui_shortcut_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let Some(command_id) = params.get("command_id").or_else(|| params.get("id")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
-    else {
+    let Some(command_id) = opt_non_empty_str_param(params, &["command_id", "id"])? else {
         return Err(String::from("ui.shortcut.set requires non-empty string 'command_id'"));
     };
-    let Some(shortcut) = params.get("shortcut").or_else(|| params.get("combo")).and_then(Value::as_str) else {
+    let Some(shortcut) = opt_str_param(params, &["shortcut", "combo"])? else {
         return Err(String::from("ui.shortcut.set requires string 'shortcut'"));
     };
     app.shortcuts.set_shortcut(command_id, shortcut)?;
+    app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
     let active = app.shortcuts.active_combo(command_id).unwrap_or("");
     Ok(json!({
         "command_id": command_id,
@@ -1915,9 +3065,10 @@ fn dispatch_ui_shortcut_set(app: &mut UiApp, params: &Value) -> Result<Value, St
 }
 
 fn dispatch_ui_shortcut_reset(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let target = params.get("command_id").or_else(|| params.get("id")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let target = opt_non_empty_str_param(params, &["command_id", "id"])?;
     if let Some(command_id) = target {
         app.shortcuts.reset_shortcut(command_id)?;
+        app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
         let active = app.shortcuts.active_combo(command_id).unwrap_or("");
         Ok(json!({
             "command_id": command_id,
@@ -1926,6 +3077,7 @@ fn dispatch_ui_shortcut_reset(app: &mut UiApp, params: &Value) -> Result<Value, 
         }))
     } else {
         app.shortcuts.reset_all();
+        app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
         Ok(json!({
             "reset_all": true,
         }))
@@ -1933,7 +3085,7 @@ fn dispatch_ui_shortcut_reset(app: &mut UiApp, params: &Value) -> Result<Value, 
 }
 
 fn dispatch_ui_locale_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let Some(raw_locale) = params.get("locale").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(raw_locale) = opt_non_empty_str_param(params, &["locale"])? else {
         return Err(String::from("ui.locale.set requires non-empty string 'locale'"));
     };
     let lower = raw_locale.replace('_', "-").to_ascii_lowercase();
@@ -1950,12 +3102,11 @@ fn dispatch_ui_locale_set(app: &mut UiApp, params: &Value) -> Result<Value, Stri
         "display_name": locale_display_name(&app.locale),
         "decimal_separator": app.locale_preset.decimal_separator.to_string(),
         "csv_delimiter": app.locale_preset.csv_delimiter.to_string(),
-        "preset_applied": app.locale_preset == LocalePreset::for_locale(&app.locale),
     }))
 }
 
 fn dispatch_ui_theme_set(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    let Some(raw_mode) = params.get("mode").or_else(|| params.get("theme")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+    let Some(raw_mode) = opt_non_empty_str_param(params, &["mode", "theme"])? else {
         return Err(String::from("ui.theme.set requires non-empty 'mode' (light | dark | high_contrast)"));
     };
 
@@ -1997,12 +3148,10 @@ pub(crate) fn parse_bounded_u32(raw: Option<&Value>, default: u32, min: u32, max
 }
 
 fn extract_command_id(params: &Value) -> Result<String, String> {
-    params
-        .get("command")
-        .or_else(|| params.get("command_id"))
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
+    if !params.is_object() {
+        return Err(String::from("command descriptor must be a JSON object with 'command' or 'command_id'"));
+    }
+    opt_non_empty_str_param(params, &["command", "command_id"])?
         .map(ToOwned::to_owned)
         .ok_or_else(|| String::from("missing non-empty 'command' or 'command_id' field"))
 }
@@ -2065,7 +3214,11 @@ fn resolve_print_sheet_ids(requested: &[SheetId], doc: &ProjectDocument) -> Resu
 }
 
 fn parse_pdf_color_space(params: &Value) -> Result<PdfColorSpace, String> {
-    let Some(raw) = params.get("color_space").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) else {
+    parse_pdf_color_space_fields(params, &["color_space"])
+}
+
+fn parse_pdf_color_space_fields(params: &Value, fields: &[&str]) -> Result<PdfColorSpace, String> {
+    let Some(raw) = opt_non_empty_str_param(params, fields)? else {
         return Ok(PdfColorSpace::Srgb);
     };
     match raw.to_ascii_lowercase().as_str() {
@@ -2497,6 +3650,576 @@ mod tests {
         let legacy: ControlResponse = serde_json::from_str(r#"{"id":1,"ok":false,"result":null,"error":"legacy"}"#)?;
         assert_eq!(legacy.error.as_deref(), Some("legacy"));
         assert_eq!(legacy.error_detail, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn control_auth_token_generation_validation_and_constant_time_verify() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{CONTROL_AUTH_TOKEN_BYTES, ControlAuth};
+
+        let a = ControlAuth::generate()?;
+        let b = ControlAuth::generate()?;
+        assert_eq!(a.as_str().len(), CONTROL_AUTH_TOKEN_BYTES * 2);
+        assert!(a.as_str().bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
+        assert_ne!(a.as_str(), b.as_str());
+        assert!(a.verify(a.as_str()));
+        assert!(!a.verify(b.as_str()));
+        assert!(!a.verify(""));
+        assert!(!a.verify(&format!("{}x", a.as_str())));
+        assert_eq!(format!("{a:?}"), "ControlAuth([REDACTED])");
+
+        assert!(ControlAuth::from_token("").is_err());
+        assert!(ControlAuth::from_token("has space").is_err());
+        assert!(ControlAuth::from_token("has\nnewline").is_err());
+        assert!(ControlAuth::from_token("a".repeat(600)).is_err());
+        let explicit = ControlAuth::from_token("sample-explicit-secret")?;
+        assert!(explicit.verify("sample-explicit-secret"));
+        assert!(!explicit.verify("sample-explicit-secre"));
+        Ok(())
+    }
+
+    #[test]
+    fn control_stream_rejects_http_and_unauthenticated_before_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{BufReader, Cursor};
+
+        use super::{CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, serve_control_stream_with_quit};
+        use crate::UiApp;
+
+        let auth = ControlAuth::from_token("sample-stream-secret")?;
+        let mut app = UiApp::new();
+
+        let http_attack = concat!(
+            "POST / HTTP/1.1\r\n",
+            "Host: 127.0.0.1:9001\r\n",
+            "Origin: https://attacker.example\r\n",
+            "Content-Type: text/plain\r\n",
+            "Content-Length: 74\r\n",
+            "\r\n",
+            "{\"id\":\"pwn\",\"method\":\"sheet.createData\",\"params\":{\"sheet_id\":\"s1\"}}\n"
+        );
+        let mut http_reader = BufReader::new(Cursor::new(http_attack.as_bytes()));
+        let mut http_out = Vec::new();
+        let quit = serve_control_stream_with_quit(&mut app, &mut http_reader, &mut http_out, &auth)?;
+        assert!(!quit);
+        assert_eq!(String::from_utf8(http_out)?, CONTROL_HTTP_FORBIDDEN_RESPONSE);
+        assert!(app.document().data_sheets.is_empty(), "HTTP body command must never run");
+
+        let script = concat!(
+            "{\"id\":1,\"method\":\"ping\"}\n",
+            "{\"id\":2,\"method\":\"sheet.createData\",\"token\":\"wrong\",\"params\":{\"sheet_id\":\"s1\"}}\n",
+            "{\"id\":3,\"method\":\"app.quit\"}\n",
+            "{\"id\":4,\"method\":\"ping\",\"token\":\"sample-stream-secret\"}\n",
+            "{\"id\":5,\"method\":\"ping\"}\n",
+            "{\"id\":6,\"method\":\"auth\",\"params\":{\"token\":\"wrong\"}}\n",
+            "{\"id\":7,\"method\":\"auth\",\"params\":{\"token\":\"sample-stream-secret\"}}\n",
+            "{\"id\":8,\"method\":\"ping\",\"token\":\"wrong\"}\n",
+            "{\"id\":9,\"method\":\"sheet.createData\",\"params\":{\"sheet_id\":\"s-ok\",\"title\":\"OK\"}}\n",
+            "{\"id\":10,\"method\":\"app.quit\"}\n"
+        );
+        let mut reader = BufReader::new(Cursor::new(script.as_bytes()));
+        let mut out = Vec::new();
+        let quit = serve_control_stream_with_quit(&mut app, &mut reader, &mut out, &auth)?;
+        assert!(quit);
+
+        let lines: Vec<serde_json::Value> = String::from_utf8(out)?.lines().map(serde_json::from_str).collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(lines.len(), 10);
+        for unauth_idx in [0usize, 1, 2, 4, 5, 7] {
+            assert_eq!(lines[unauth_idx]["ok"], serde_json::json!(false), "expected failure at idx {unauth_idx}");
+            assert!(
+                lines[unauth_idx]["error"].as_str().is_some_and(|e| e.contains("unauthorized")),
+                "expected unauthorized error at idx {unauth_idx}: {}",
+                lines[unauth_idx]
+            );
+            assert_eq!(lines[unauth_idx]["error_detail"]["code"], serde_json::json!("unauthorized"));
+        }
+        assert_eq!(lines[3]["ok"], serde_json::json!(true));
+        assert_eq!(lines[6]["ok"], serde_json::json!(true));
+        assert_eq!(lines[6]["result"]["authenticated"], serde_json::json!(true));
+        assert_eq!(lines[8]["ok"], serde_json::json!(true));
+        assert_eq!(lines[9]["result"]["quit"], serde_json::json!(true));
+        assert_eq!(app.document().data_sheets.len(), 1);
+        assert_eq!(app.document().data_sheets[0].id.as_str(), "s-ok");
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn control_server_panic_guard_keeps_stream_and_tcp_listener_alive() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{BufReader, BufWriter, Cursor, ErrorKind, Write};
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::Duration;
+
+        use super::{
+            ControlAuth, ControlLoopAction, ControlRequest, ControlResponse, bind_control_tcp_listener, dispatch_request,
+            serve_control_listener_with_handler, serve_control_stream_with_handler,
+        };
+        use crate::UiApp;
+
+        let auth = ControlAuth::from_token("sample-panic-guard-token")?;
+        let mut app = UiApp::new();
+        let stream_input = concat!(
+            "{\"id\":\"a\",\"method\":\"auth\",\"params\":{\"token\":\"sample-panic-guard-token\"}}\n",
+            "{\"id\":\"boom-1\",\"method\":\"test.panic\"}\n",
+            "{\"id\":\"ok-after\",\"method\":\"ping\"}\n",
+            "{\"id\":\"q\",\"method\":\"app.quit\"}\n"
+        );
+        let mut reader = BufReader::new(Cursor::new(stream_input.as_bytes()));
+        let mut out = Vec::new();
+        let quit = serve_control_stream_with_handler(&mut app, &mut reader, &mut out, &auth, |ui, req: ControlRequest| {
+            if req.method == "test.panic" {
+                panic!("simulated handler panic for R1-S10-03");
+            }
+            dispatch_request(ui, req)
+        })?;
+        assert!(quit);
+
+        let stream_lines: Vec<serde_json::Value> = String::from_utf8(out)?.lines().map(serde_json::from_str).collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(stream_lines.len(), 4);
+        assert_eq!(stream_lines[0]["ok"], serde_json::json!(true));
+        assert_eq!(stream_lines[1]["id"], serde_json::json!("boom-1"));
+        assert_eq!(stream_lines[1]["ok"], serde_json::json!(false));
+        assert_eq!(stream_lines[1]["error_detail"]["code"], serde_json::json!("internal_panic"));
+        assert!(stream_lines[1]["error"].as_str().is_some_and(|e| e.contains("simulated handler panic for R1-S10-03")));
+        assert_eq!(stream_lines[2]["id"], serde_json::json!("ok-after"));
+        assert_eq!(stream_lines[2]["ok"], serde_json::json!(true));
+        assert_eq!(stream_lines[3]["result"]["quit"], serde_json::json!(true));
+
+        let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+            other => other?,
+        };
+        let addr = listener.local_addr()?;
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+            Ok(probe) => {
+                drop(probe);
+                let _ = listener.accept();
+            }
+            Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => return Ok(()),
+            Err(err) => return Err(Box::new(err)),
+        }
+
+        let token_owned = auth.as_str().to_owned();
+        let client = std::thread::spawn(move || -> Result<Vec<serde_json::Value>, String> {
+            let mut results = Vec::new();
+            {
+                let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
+                let mut r = BufReader::new(reader_stream);
+                let mut w = BufWriter::new(stream);
+                for req in [
+                    format!("{{\"id\":1,\"method\":\"auth\",\"params\":{{\"token\":\"{token_owned}\"}}}}\n"),
+                    String::from("{\"id\":2,\"method\":\"test.panic\"}\n"),
+                    String::from("{\"id\":3,\"method\":\"ping\"}\n"),
+                ] {
+                    w.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+                    w.flush().map_err(|e| e.to_string())?;
+                    let mut line = String::new();
+                    std::io::BufRead::read_line(&mut r, &mut line).map_err(|e| e.to_string())?;
+                    results.push(serde_json::from_str(&line).map_err(|e| e.to_string())?);
+                }
+            }
+            {
+                let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
+                let mut r = BufReader::new(reader_stream);
+                let mut w = BufWriter::new(stream);
+                for req in [
+                    format!("{{\"id\":4,\"method\":\"ping\",\"token\":\"{token_owned}\"}}\n"),
+                    format!("{{\"id\":5,\"method\":\"app.quit\",\"token\":\"{token_owned}\"}}\n"),
+                ] {
+                    w.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+                    w.flush().map_err(|e| e.to_string())?;
+                    let mut line = String::new();
+                    std::io::BufRead::read_line(&mut r, &mut line).map_err(|e| e.to_string())?;
+                    results.push(serde_json::from_str(&line).map_err(|e| e.to_string())?);
+                }
+            }
+            Ok(results)
+        });
+
+        let mut tcp_app = UiApp::new();
+        serve_control_listener_with_handler(&mut tcp_app, &listener, &auth, |ui, req| -> (ControlResponse, ControlLoopAction) {
+            if req.method == "test.panic" {
+                panic!("tcp handler boom");
+            }
+            dispatch_request(ui, req)
+        })?;
+        let responses = client.join().map_err(|_| "client thread panicked")??;
+        assert_eq!(responses.len(), 5);
+        assert_eq!(responses[0]["ok"], serde_json::json!(true));
+        assert_eq!(responses[1]["ok"], serde_json::json!(false));
+        assert_eq!(responses[1]["error_detail"]["code"], serde_json::json!("internal_panic"));
+        assert_eq!(responses[2]["ok"], serde_json::json!(true));
+        assert_eq!(responses[3]["ok"], serde_json::json!(true));
+        assert_eq!(responses[4]["result"]["quit"], serde_json::json!(true));
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s10_04_idle_client_timeout_drops_only_stalled_connection() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{self, BufRead, Read};
+
+        use super::{ControlAuth, dispatch_request, serve_control_stream_with_handler};
+        use crate::UiApp;
+
+        struct PartialThenTimeoutReader {
+            step: usize,
+        }
+
+        impl Read for PartialThenTimeoutReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "simulated idle read timeout"))
+            }
+        }
+
+        impl BufRead for PartialThenTimeoutReader {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                match self.step {
+                    0 => {
+                        self.step = 1;
+                        Ok(b"{\"id\":1")
+                    }
+                    _ => Err(io::Error::new(io::ErrorKind::TimedOut, "simulated idle read timeout")),
+                }
+            }
+
+            fn consume(&mut self, _amt: usize) {}
+        }
+
+        let auth = ControlAuth::from_token("timeout-stream-secret")?;
+        let mut app = UiApp::new();
+        let mut reader = PartialThenTimeoutReader { step: 0 };
+        let mut out = Vec::new();
+        let quit = serve_control_stream_with_handler(&mut app, &mut reader, &mut out, &auth, dispatch_request)?;
+        assert!(!quit, "idle client timeout must close only the stalled stream, not quit server");
+        assert!(out.is_empty(), "partial unframed JSON must not produce a response");
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::{BufReader, BufWriter, ErrorKind, Write};
+            use std::net::{SocketAddr, TcpStream};
+            use std::time::Duration;
+
+            use super::{bind_control_tcp_listener, serve_control_listener};
+
+            let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+                Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+                other => other?,
+            };
+            let addr = listener.local_addr()?;
+            match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+                Ok(probe) => {
+                    drop(probe);
+                    let _ = listener.accept();
+                }
+                Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => return Ok(()),
+                Err(err) => return Err(Box::new(err)),
+            }
+
+            let server_auth = auth.clone();
+            let server = std::thread::spawn(move || {
+                let mut srv_app = UiApp::new();
+                serve_control_listener(&mut srv_app, &listener, &server_auth)
+            });
+
+            let mut stalled = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
+            stalled.write_all(b"{\"id\":1")?;
+            stalled.flush()?;
+            std::thread::sleep(Duration::from_millis(150));
+
+            let client_b = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
+            let _ = client_b.set_read_timeout(Some(Duration::from_secs(4)));
+            let mut r = BufReader::new(client_b.try_clone()?);
+            let mut w = BufWriter::new(client_b);
+            let tok = auth.as_str();
+            w.write_all(format!("{{\"id\":2,\"method\":\"ping\",\"token\":\"{tok}\"}}\n").as_bytes())?;
+            w.flush()?;
+            let mut reply = String::new();
+            std::io::BufRead::read_line(&mut r, &mut reply)?;
+            let parsed: serde_json::Value = serde_json::from_str(&reply)?;
+            assert_eq!(parsed["ok"], serde_json::json!(true), "second client should succeed once stalled client times out: {parsed}");
+
+            w.write_all(format!("{{\"id\":3,\"method\":\"app.quit\",\"token\":\"{tok}\"}}\n").as_bytes())?;
+            w.flush()?;
+            drop(stalled);
+            let server_res = server.join().map_err(|_| "server thread panicked")?;
+            assert!(server_res.is_ok(), "server should exit cleanly after app.quit: {server_res:?}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s10_05_batch_step_limit_and_max_frame_size_enforced() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{ControlResponse, MAX_CONTROL_BATCH_STEPS, MAX_CONTROL_LINE_BYTES, handle_control_line, serialize_response};
+        use crate::UiApp;
+
+        let mut app = UiApp::new();
+        let initial_rulers = app.canvas_dialogs.rulers_visible;
+
+        // 1. Reject batches exceeding MAX_CONTROL_BATCH_STEPS immediately without executing/mutating.
+        let mut too_many = vec![serde_json::json!({"command": "ui.rulers.toggle"})];
+        too_many.extend((0..MAX_CONTROL_BATCH_STEPS).map(|_| serde_json::json!({"command": "ui.zoom.fitSheet"})));
+        assert_eq!(too_many.len(), MAX_CONTROL_BATCH_STEPS + 1);
+        let req = serde_json::json!({
+            "id": "too-many",
+            "method": "command.batch",
+            "params": { "atomic": true, "commands": too_many }
+        })
+        .to_string();
+        let raw_resp = handle_control_line(&mut app, &req);
+        let parsed: serde_json::Value = serde_json::from_str(&raw_resp)?;
+        assert_eq!(parsed["id"], serde_json::json!("too-many"));
+        assert_eq!(parsed["ok"], serde_json::json!(false));
+        assert!(parsed["error"].as_str().is_some_and(|e| e.contains("maximum step limit")));
+        assert_eq!(app.canvas_dialogs.rulers_visible, initial_rulers);
+
+        // 2. Reject cumulative batch payloads exceeding MAX_CONTROL_LINE_BYTES and preserve atomic rollback.
+        let mut big_csv = String::from("Label\n");
+        let row_text = "value-0123456789abcdef-0123456789abcdef\n";
+        for _ in 0..1_200 {
+            big_csv.push_str(row_text);
+        }
+        app.execute_command("table.importCsv", serde_json::json!({ "sheet_id": "d-big", "archetype": "column", "csv": big_csv }))?;
+        let mut overflowing_cmds = vec![serde_json::json!({"command": "ui.rulers.toggle"})];
+        overflowing_cmds.extend((0..500).map(|_| serde_json::json!({"command": "table.exportCsv", "params": {"sheet_id": "d-big"}})));
+        let overflow_req = serde_json::json!({
+            "id": "overflow-batch",
+            "method": "command.batch",
+            "params": { "atomic": true, "commands": overflowing_cmds }
+        })
+        .to_string();
+        let overflow_resp = handle_control_line(&mut app, &overflow_req);
+        assert!(overflow_resp.len() < MAX_CONTROL_LINE_BYTES);
+        let overflow_parsed: serde_json::Value = serde_json::from_str(&overflow_resp)?;
+        assert_eq!(overflow_parsed["id"], serde_json::json!("overflow-batch"));
+        assert_eq!(overflow_parsed["ok"], serde_json::json!(false));
+        assert!(overflow_parsed["error"].as_str().is_some_and(|e| e.contains("maximum control line size")));
+        assert_eq!(app.canvas_dialogs.rulers_visible, initial_rulers, "atomic batch must roll back before returning frame overflow");
+
+        // 3. Enforce MAX_CONTROL_LINE_BYTES directly in serialize_response, preserving bounded ID.
+        let oversized = ControlResponse::ok(serde_json::json!("big-frame"), serde_json::json!({ "blob": "x".repeat(MAX_CONTROL_LINE_BYTES) }));
+        let bounded = serialize_response(&oversized);
+        assert!(bounded.len() < MAX_CONTROL_LINE_BYTES);
+        let bounded_val: serde_json::Value = serde_json::from_str(&bounded)?;
+        assert_eq!(bounded_val["id"], serde_json::json!("big-frame"));
+        assert_eq!(bounded_val["ok"], serde_json::json!(false));
+        assert!(bounded_val["error"].as_str().is_some_and(|e| e.contains("exceeds maximum control line size")));
+
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s10_06_atomic_batch_rollback_preserves_multi_entry_undo_and_clean_state() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{ControlRequest, dispatch_request_with_hook, handle_control_line};
+        use crate::UiApp;
+
+        let mut app = UiApp::new();
+        app.execute_command("sheet.createData", serde_json::json!({ "sheet_id": "ds-base", "title": "Base", "cols": 2, "rows": 10 }))?;
+        for step in 0..12 {
+            app.execute_command(
+                "table.setCells",
+                serde_json::json!({
+                    "sheet_id": "ds-base",
+                    "edits": [{ "row": 0, "col": 0, "value": f64::from(step + 1) }]
+                }),
+            )?;
+        }
+        // Mark session saved/clean at undo_depth = 13 while retaining full prior undo stack.
+        app.session_mut().set_file_path(Some(std::path::PathBuf::from("project.lumen")), true);
+        let baseline_undo_depth = app.session().undo_depth();
+        assert!(baseline_undo_depth >= 13);
+        assert!(!app.session().is_dirty());
+        let baseline_doc = app.document().clone();
+        let baseline_locale = app.locale.clone();
+        let baseline_rulers = app.canvas_dialogs.rulers_visible;
+
+        // 1. Read-only atomic batch succeeds without mutating dirty/undo state.
+        let ro_req = ControlRequest {
+            id: serde_json::json!("ro-1"),
+            method: String::from("command.batch"),
+            params: serde_json::json!({
+                "atomic": true,
+                "commands": [
+                    { "command": "project.inspect", "params": {} },
+                    { "command": "table.exportCsv", "params": { "sheet_id": "ds-base" } }
+                ]
+            }),
+        };
+        let mut ro_rolled_back = true;
+        let (ro_resp, _) = dispatch_request_with_hook(&mut app, ro_req, &mut |_app_ref, ctx| {
+            ro_rolled_back = ctx.rolled_back;
+            Ok(())
+        });
+        assert!(ro_resp.ok, "unexpected ro_resp failure: {:?}", ro_resp.error);
+        assert!(!ro_rolled_back);
+        assert_eq!(app.session().undo_depth(), baseline_undo_depth);
+        assert!(!app.session().is_dirty());
+
+        // 2. Mixed document + UI atomic batch rolls back via session undo without dropping prior undo history.
+        let fail_req = ControlRequest {
+            id: serde_json::json!("fail-1"),
+            method: String::from("command.batch"),
+            params: serde_json::json!({
+                "atomic": true,
+                "commands": [
+                    { "command": "sheet.createData", "params": { "sheet_id": "temp-fail", "title": "Temp" } },
+                    { "command": "table.setCells", "params": { "sheet_id": "ds-base", "edits": [{ "row": 0, "col": 0, "value": 999.0 }] } },
+                    { "command": "ui.locale.set", "params": { "locale": "de" } },
+                    { "command": "ui.rulers.toggle", "params": { "visible": !baseline_rulers } },
+                    { "command": "nonexistent.command", "params": {} }
+                ]
+            }),
+        };
+        let mut saw_rolled_back = false;
+        let mut saw_steps = usize::MAX;
+        let (fail_resp, _) = dispatch_request_with_hook(&mut app, fail_req, &mut |_app_ref, ctx| {
+            saw_rolled_back = ctx.rolled_back;
+            saw_steps = ctx.steps.len();
+            Ok(())
+        });
+        assert!(!fail_resp.ok);
+        assert!(saw_rolled_back, "hook must observe rolled_back=true so WAL ignores undo-driven redo depth change");
+        assert_eq!(saw_steps, 0);
+        assert_eq!(app.document(), &baseline_doc);
+        assert_eq!(app.session().undo_depth(), baseline_undo_depth);
+        assert!(!app.session().is_dirty());
+        assert_eq!(app.session().file_path(), Some(std::path::Path::new("project.lumen")));
+        assert_eq!(app.locale, baseline_locale);
+        assert_eq!(app.canvas_dialogs.rulers_visible, baseline_rulers);
+
+        // 3. Atomic rollback when session was already dirty + batch undoes pre-batch entry then mutates forward.
+        app.execute_command("table.setCells", serde_json::json!({ "sheet_id": "ds-base", "edits": [{ "row": 1, "col": 0, "value": 42.0 }] }))?;
+        assert!(app.session().is_dirty());
+        let dirty_doc = app.document().clone();
+        let dirty_undo = app.session().undo_depth();
+        let undo_then_mutate_req = serde_json::json!({
+            "id": "fail-undo-mutate",
+            "method": "command.batch",
+            "params": {
+                "atomic": true,
+                "commands": [
+                    { "command": "edit.undo", "params": {} },
+                    { "command": "sheet.createData", "params": { "sheet_id": "temp-2", "title": "Temp2" } },
+                    { "command": "nonexistent.command", "params": {} }
+                ]
+            }
+        })
+        .to_string();
+        let undo_mutate_resp: serde_json::Value = serde_json::from_str(&handle_control_line(&mut app, &undo_then_mutate_req))?;
+        assert_eq!(undo_mutate_resp["ok"], serde_json::json!(false));
+        assert_eq!(app.document(), &dirty_doc);
+        assert_eq!(app.session().undo_depth(), dirty_undo);
+        assert!(app.session().is_dirty());
+
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s10_08_strict_ui_parameter_validation_rejects_wrong_types() -> Result<(), Box<dyn std::error::Error>> {
+        use super::handle_control_line;
+        use crate::{ActiveDialog, UiApp};
+
+        let mut app = UiApp::new();
+        app.execute_command("sheet.createData", serde_json::json!({ "sheet_id": "ds-1", "title": "Data", "cols": 2, "rows": 4 }))?;
+        app.execute_command(
+            "table.setCells",
+            serde_json::json!({
+                "sheet_id": "ds-1",
+                "edits": [
+                    { "row": 0, "col": 0, "value": 1.0 },
+                    { "row": 1, "col": 0, "value": 2.0 },
+                    { "row": 2, "col": 0, "value": 3.0 },
+                    { "row": 0, "col": 1, "value": 4.0 },
+                    { "row": 1, "col": 1, "value": 5.0 },
+                    { "row": 2, "col": 1, "value": 7.0 }
+                ]
+            }),
+        )?;
+        let g = app.execute_command("graph.create", serde_json::json!({ "source_sheet_id": "ds-1", "kind": "column", "title": "G1" }))?;
+        let graph_id = g.payload["sheet_id"].as_str().ok_or("missing graph_id")?.to_owned();
+        let an = app.execute_command(
+            "analysis.run",
+            serde_json::json!({
+                "source_sheet_id": "ds-1",
+                "kind": {
+                    "DescriptiveStats": {
+                        "aggregation": "RowMeans",
+                        "custom_upper_percentile": null,
+                        "run_normality_battery": true,
+                        "hypothetical_value": null
+                    }
+                }
+            }),
+        )?;
+        let res_id = an.payload["sheet_id"].as_str().ok_or("missing result_id")?.to_owned();
+
+        // Set recognizable shortcut + ruler + presentation state that wrong-typed params must NOT clobber.
+        app.shortcuts.set_shortcut("ui.gallery.toggle", "Alt+Shift+G")?;
+        let custom_shortcut = app.shortcuts.active_combo("ui.gallery.toggle").ok_or("missing shortcut")?.to_owned();
+        let initial_rulers = app.canvas_dialogs.rulers_visible;
+        let initial_pres = app.presentation_mode;
+
+        let bad_cases = [
+            serde_json::json!({"id": 1, "method": "ui.rulers.toggle", "params": {"visible": "false"}}),
+            serde_json::json!({"id": 2, "method": "ui.rulers.toggle", "params": {"unit": 123}}),
+            serde_json::json!({"id": 3, "method": "ui.shortcut.reset", "params": {"command_id": 123}}),
+            serde_json::json!({"id": 4, "method": "ui.shortcut.reset", "params": {"command_id": ""}}),
+            serde_json::json!({"id": 5, "method": "ui.shortcut.set", "params": {"command_id": "ui.gallery.toggle", "shortcut": 99}}),
+            serde_json::json!({"id": 6, "method": "ui.presentation.toggle", "params": {"enabled": "no"}}),
+            serde_json::json!({"id": 7, "method": "ui.split.toggle", "params": {"enabled": "no"}}),
+            serde_json::json!({"id": 8, "method": "ui.split.toggle", "params": {"ratio": "half"}}),
+            serde_json::json!({"id": 9, "method": "ui.result.inspectDiagnostics", "params": {"result_sheet_id": res_id, "tab_index": "foo"}}),
+            serde_json::json!({"id": 10, "method": "ui.graph.axes.open", "params": {"sheet_id": graph_id, "target_axis": 123}}),
+            serde_json::json!({"id": 11, "method": "ui.graph.axes.open", "params": {"sheet_id": graph_id, "target_axis": "z"}}),
+            serde_json::json!({"id": 12, "method": "ui.print.open", "params": {"printer": 123}}),
+            serde_json::json!({"id": 13, "method": "ui.print.open", "params": {"copies": "two"}}),
+            serde_json::json!({"id": 14, "method": "ui.formatPoints.open", "params": {"sheet_id": graph_id, "points": [{"series_index": "foo", "point_index": 0}]}}),
+            serde_json::json!({"id": 15, "method": "ui.formatPoints.open", "params": {"sheet_id": graph_id, "points": "bad"}}),
+            serde_json::json!({"id": 16, "method": "ui.navigator.toggle", "params": "wrong-type"}),
+            serde_json::json!({"id": 17, "method": "ui.invoke_menu", "params": {"command_id": 123, "path": "File"}}),
+            serde_json::json!({"id": 18, "method": "ui.invoke_menu", "params": {"command_id": "ui.gallery.toggle", "params": "not-an-object"}}),
+            serde_json::json!({"id": 19, "method": "ui.inspect", "params": {"include_bounds": "yes"}}),
+            serde_json::json!({"id": 20, "method": "command.batch", "params": {"atomic": "yes", "commands": []}}),
+        ];
+
+        for req in bad_cases {
+            let reply_str = handle_control_line(&mut app, &req.to_string());
+            let parsed: serde_json::Value = serde_json::from_str(&reply_str)?;
+            assert_eq!(parsed["ok"], serde_json::json!(false), "expected validation failure for request {req}: {reply_str}");
+        }
+
+        // Verify none of the rejected requests silently triggered defaults or reset_all().
+        assert_eq!(app.shortcuts.active_combo("ui.gallery.toggle"), Some(custom_shortcut.as_str()));
+        assert_eq!(app.canvas_dialogs.rulers_visible, initial_rulers);
+        assert_eq!(app.presentation_mode, initial_pres);
+
+        // Open FormatSelectedPoints dialog and reject invalid ui.answer_dialog action/fields types.
+        let open_reply: serde_json::Value = serde_json::from_str(&handle_control_line(
+            &mut app,
+            &serde_json::json!({
+                "id": "open-fp",
+                "method": "ui.formatPoints.open",
+                "params": { "sheet_id": graph_id, "points": [{ "series_index": 0, "point_index": 0 }] }
+            })
+            .to_string(),
+        ))?;
+        assert_eq!(open_reply["ok"], serde_json::json!(true));
+
+        let bad_answer_cases = [
+            serde_json::json!({"id": "ans1", "method": "ui.answer_dialog", "params": {"action": 123}}),
+            serde_json::json!({"id": "ans2", "method": "ui.answer_dialog", "params": {"fields": "bad", "action": "cancel"}}),
+            serde_json::json!({"id": "ans3", "method": "ui.answer_dialog", "params": {"fields": {"size_pt": "huge"}}}),
+            serde_json::json!({"id": "ans4", "method": "ui.answer_dialog", "params": {"fields": {"points": [{"series_index": "bad", "point_index": 1}]}}}),
+        ];
+        for req in bad_answer_cases {
+            let parsed: serde_json::Value = serde_json::from_str(&handle_control_line(&mut app, &req.to_string()))?;
+            assert_eq!(parsed["ok"], serde_json::json!(false), "expected ui.answer_dialog rejection for {req}: {parsed}");
+        }
+        assert_ne!(app.canvas_dialogs.active_dialog, ActiveDialog::None, "invalid ui.answer_dialog must not commit/close dialog");
 
         Ok(())
     }

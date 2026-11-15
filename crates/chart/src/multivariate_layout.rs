@@ -1,11 +1,13 @@
 //! Multivariate bubble/categorical figures, all seven diagnostic plot subtypes, and
 //! multi-panel publication layout scene compilation.
 
+use std::collections::BTreeMap;
+
 use lumencraft_doc::{
     AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, GraphKind, GraphSheet, GraphSpec,
     GraphicalDataObject, LayoutItem, LayoutSheet, LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument,
-    ResultCell, ResultSheet, ResultTab, ResultTabKind, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn, VariableRole,
-    WhiskerMethod,
+    ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn,
+    VariableRole, WhiskerMethod,
 };
 use lumencraft_math::dist::{chi2_isf, norm_ppf};
 use lumencraft_math::sum::{covariance, sample_sd};
@@ -229,7 +231,7 @@ fn compile_bubble_scatter(
         let fill = match (&continuous_ramp, pt.color_scalar) {
             (Some(ramp), Some(v)) => {
                 let denom = (col_hi - col_lo).abs().max(1e-12);
-                ramp.sample(((v - col_lo) / denom).clamp(0.0, 1.0))
+                ramp.sample(crate::clamp_f64_safe((v - col_lo) / denom, 0.0, 1.0))
             }
             _ => match enc.color {
                 ColorChannelMapping::Constant(c) => c,
@@ -365,7 +367,7 @@ fn bubble_radius_pt(size: SizeChannelMapping, scalar: f64, max_abs_s: f64) -> f6
         SizeChannelMapping::Variable { min_radius_pt, max_radius_pt, .. } => {
             let lo = min_radius_pt.min(max_radius_pt).max(1.2);
             let hi = max_radius_pt.max(min_radius_pt).max(lo);
-            if max_abs_s <= 1e-12 { 0.5 * (lo + hi) } else { (hi * (scalar.abs() / max_abs_s).sqrt()).clamp(lo, hi) }
+            if max_abs_s <= 1e-12 { 0.5 * (lo + hi) } else { crate::clamp_f64_safe(hi * (scalar.abs() / max_abs_s).sqrt(), lo, hi) }
         }
     }
 }
@@ -543,7 +545,7 @@ fn compile_categorical_summary(
     draw_cartesian_frame(scene, &frame);
     draw_categorical_x_ticks(scene, &graph.spec, &cats, doc);
 
-    let y_zero = y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()).clamp(r.y, r.bottom());
+    let y_zero = crate::clamp_f64_safe(y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
     let mut line_centers = Vec::new();
     for (idx, values) in groups.iter().enumerate() {
         if values.is_empty() {
@@ -700,7 +702,7 @@ fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
     if n == 1 {
         return sorted.first().copied().unwrap_or(0.0);
     }
-    let idx_f = q.clamp(0.0, 1.0) * ((n - 1) as f64);
+    let idx_f = crate::clamp_f64_safe(q, 0.0, 1.0) * ((n - 1) as f64);
     let lo = idx_f.floor() as usize;
     let hi = idx_f.ceil() as usize;
     let frac = idx_f - (lo as f64);
@@ -1080,7 +1082,7 @@ fn extract_residuals_tab_pairs(tab: &ResultTab, graph: &GraphSheet, doc: &Projec
 struct HeatmapData {
     row_labels: Vec<String>,
     col_labels: Vec<String>,
-    values: Vec<Vec<f64>>,
+    values: Vec<Vec<Option<f64>>>,
     merges: Vec<DendrogramMerge>,
     cluster_distance: ClusterDistance,
     cluster_linkage: ClusterLinkage,
@@ -1120,12 +1122,14 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         return Ok(());
     }
 
-    if hm.merges.is_empty()
-        && (2..=128).contains(&n_rows)
-        && n_cols >= 2
-        && let Ok(m) = hierarchical_clustering_with_metrics(&hm.values, hm.cluster_distance, hm.cluster_linkage)
-    {
-        hm.merges = m;
+    if !hm.values.iter().flatten().any(|v| v.is_some_and(f64::is_finite)) {
+        scene.warnings.push(ChartWarning::new("empty_heatmap", "no finite numeric values available for heatmap"));
+        draw_empty_open_frame(scene);
+        return Ok(());
+    }
+
+    if hm.merges.is_empty() && (2..=128).contains(&n_rows) && n_cols >= 2 {
+        hm.merges = cluster_heatmap_rows(&hm.values, n_cols, hm.cluster_distance, hm.cluster_linkage, &mut scene.warnings);
     }
 
     let row_order = if !hm.merges.is_empty() { dendrogram_leaf_order(&hm.merges, n_rows) } else { (0..n_rows).collect() };
@@ -1152,7 +1156,7 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         &[],
         PlotMarginConfig {
             extra_bottom_pt: if has_dendro && hm.clustering_cue.is_some() { 26.0 } else { 18.0 },
-            extra_left_pt: (max_row_lbl_w + if has_dendro { 34.0 } else { 8.0 }).clamp(12.0, 90.0),
+            extra_left_pt: crate::clamp_f64_safe(max_row_lbl_w + if has_dendro { 34.0 } else { 8.0 }, 12.0, 90.0),
             has_colorbar: true,
             suppress_y_axis_labels: true,
             ..PlotMarginConfig::default()
@@ -1160,26 +1164,40 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     );
 
     let r = scene.plot_rect_pt;
-    let dendro_w = if has_dendro { (r.width * 0.16).clamp(20.0, 48.0) } else { 0.0 };
+    let dendro_w = if has_dendro { crate::clamp_f64_safe(r.width * 0.16, 20.0, 48.0) } else { 0.0 };
     let grid = RectPt::new(r.x + dendro_w, r.y, (r.width - dendro_w).max(20.0), r.height);
     let cell_w = grid.width / (n_cols as f64);
     let cell_h = grid.height / (n_rows as f64);
     let cell_border = solid_stroke(Rgba8::rgba(255, 255, 255, 160), 0.5, LineDashStyle::Solid);
+    let missing_border = solid_stroke(Rgba8::rgba(170, 176, 186, 180), 0.5, LineDashStyle::Solid);
+    let missing_hatch = solid_stroke(Rgba8::rgba(150, 156, 166, 175), 0.65, LineDashStyle::Solid);
     let denom = (dom_hi - dom_lo).abs().max(1e-12);
 
     for (vis_row, &orig_row) in row_order.iter().enumerate() {
         let Some(row_vals) = hm.values.get(orig_row) else { continue };
         let y = grid.y + (vis_row as f64) * cell_h;
         for c in 0..n_cols {
-            let val = row_vals.get(c).copied().unwrap_or(dom_lo);
-            let t = ((val - dom_lo) / denom).clamp(0.0, 1.0);
             let x = grid.x + (c as f64) * cell_w;
-            scene.primitives.push(ScenePrimitive::Path {
-                path: Path2D::rect(RectPt::new(x, y, cell_w, cell_h)),
-                fill: Some(FillPaint::solid(ramp.sample(t))),
-                stroke: Some(cell_border),
-                clip: None,
-            });
+            if let Some(val) = row_vals.get(c).copied().flatten().filter(|v| v.is_finite()) {
+                let t = crate::clamp_f64_safe((val - dom_lo) / denom, 0.0, 1.0);
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::rect(RectPt::new(x, y, cell_w, cell_h)),
+                    fill: Some(FillPaint::solid(ramp.sample(t))),
+                    stroke: Some(cell_border),
+                    clip: None,
+                });
+            } else {
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::rect(RectPt::new(x, y, cell_w, cell_h)),
+                    fill: None,
+                    stroke: Some(missing_border),
+                    clip: None,
+                });
+                let mut slash = Path2D::new();
+                path_move(&mut slash, PointPt::new(x, y + cell_h));
+                path_line(&mut slash, PointPt::new(x + cell_w, y));
+                scene.primitives.push(ScenePrimitive::Path { path: slash, fill: None, stroke: Some(missing_hatch), clip: None });
+            }
         }
         let lbl = hm.row_labels.get(orig_row).map(String::as_str).unwrap_or("");
         scene.primitives.push(ScenePrimitive::Text(PositionedText {
@@ -1231,16 +1249,22 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
 fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab) -> HeatmapData {
     let mut matrix = Vec::with_capacity(tab.rows.len());
     for row in &tab.rows {
-        let vals: Vec<f64> = row
+        let vals: Vec<Option<f64>> = row
             .iter()
             .map(|c| match c {
-                ResultCell::Number { value, .. } if value.is_finite() => *value,
-                _ => 0.0,
+                ResultCell::Number { value, .. } if value.is_finite() => Some(*value),
+                _ => None,
             })
             .collect();
         matrix.push(vals);
     }
-    let merges = res.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, extract_dendro_merges_from_tab);
+    let n_rows = matrix.len();
+    let has_missing = matrix.iter().flatten().any(Option::is_none);
+    let merges = if has_missing {
+        Vec::new()
+    } else {
+        res.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, |t| extract_dendro_merges_from_tab(t, n_rows))
+    };
     HeatmapData {
         row_labels: tab.row_labels.clone(),
         col_labels: tab.column_headers.clone(),
@@ -1255,19 +1279,27 @@ fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab) -> HeatmapData {
 fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<HeatmapData> {
     let direct_res = doc.result_sheet(&graph.spec.primary_source_sheet_id);
     if let Some(res) = direct_res
-        && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary)
         && matches!(res.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
     {
-        return Some(correlation_heatmap_data(res, tab));
+        if matches!(res.status, ResultStatus::Failed { .. }) {
+            return None;
+        }
+        if let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary) {
+            return Some(correlation_heatmap_data(res, tab));
+        }
     }
 
-    let clustering_res =
-        find_matching_result_where(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })))
-            .filter(|r| matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })));
+    let clustering_res = find_matching_result_where(graph, doc, |r| {
+        !matches!(r.status, ResultStatus::Failed { .. }) && matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }))
+    })
+    .filter(|r| {
+        !matches!(r.status, ResultStatus::Failed { .. }) && matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }))
+    });
 
     if clustering_res.is_none()
         && direct_res.is_none()
         && let Some(res) = find_matching_result(graph, doc)
+        && !matches!(res.status, ResultStatus::Failed { .. })
         && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::MainSummary)
         && matches!(res.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
     {
@@ -1296,9 +1328,9 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
             let mut row_labels = Vec::new();
             let mut values = Vec::new();
             for r in 0..mv.row_count() {
-                let row_vals: Vec<f64> = num_cols
+                let row_vals: Vec<Option<f64>> = num_cols
                     .iter()
-                    .map(|(ci, _)| mv.variables.get(*ci).and_then(|v| v.cells.get(r)).and_then(|c| c.active_number()).unwrap_or(0.0))
+                    .map(|(ci, _)| mv.variables.get(*ci).and_then(|v| v.cells.get(r)).and_then(|c| c.active_number()).filter(|x| x.is_finite()))
                     .collect();
                 let lbl = label_col
                     .and_then(|lc| mv.variables.get(lc))
@@ -1330,7 +1362,10 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
                 (0..nrows).map(|r| col.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("R{}", r + 1))).collect();
             let values = (0..nrows)
                 .map(|r| {
-                    col.data_sets.iter().map(|d| d.cells.get(r).and_then(|s| s.first()).and_then(|c| c.active_number()).unwrap_or(0.0)).collect()
+                    col.data_sets
+                        .iter()
+                        .map(|d| d.cells.get(r).and_then(|s| s.first()).and_then(|c| c.active_number()).filter(|x| x.is_finite()))
+                        .collect()
                 })
                 .collect();
             (
@@ -1355,8 +1390,13 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
                 .map(|r| {
                     (0..g.data_sets.len())
                         .map(|c| {
-                            let reps = g.active_replicates(r, c);
-                            if reps.is_empty() { 0.0 } else { reps.iter().sum::<f64>() / (reps.len() as f64) }
+                            let reps: Vec<f64> = g.active_replicates(r, c).into_iter().filter(|x| x.is_finite()).collect();
+                            if reps.is_empty() {
+                                None
+                            } else {
+                                let mean = reps.iter().sum::<f64>() / (reps.len() as f64);
+                                mean.is_finite().then_some(mean)
+                            }
                         })
                         .collect()
                 })
@@ -1384,65 +1424,328 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
         hm.cluster_linkage = linkage;
         let (dist_lbl, link_lbl) = cluster_metric_labels(distance, linkage);
         hm.clustering_cue = Some(format!("Clustered: {dist_lbl} / {link_lbl}"));
-        let tab_merges = cres.tabs.iter().find(|t| t.id == "hierarchical-dendrogram").map_or_else(Vec::new, extract_dendro_merges_from_tab);
-        if !tab_merges.is_empty() && tab_merges.len() + 1 == expect_rows {
-            hm.merges = tab_merges;
+        let has_missing = hm.values.iter().flatten().any(Option::is_none);
+        if !has_missing {
+            let tab_merges = cres
+                .tabs
+                .iter()
+                .find(|t| t.id == "hierarchical-dendrogram")
+                .map_or_else(Vec::new, |t| extract_dendro_merges_from_tab(t, expect_rows));
+            if !tab_merges.is_empty() && tab_merges.len() + 1 == expect_rows {
+                hm.merges = tab_merges;
+            }
         }
     }
 
     Some(hm)
 }
 
-fn extract_dendro_merges_from_tab(tab: &ResultTab) -> Vec<DendrogramMerge> {
+fn parse_dendro_node_id(raw: f64, step: usize, n_leaves: usize) -> Option<isize> {
+    if !raw.is_finite() || raw.fract() != 0.0 || raw.abs() > 9_007_199_254_740_991.0 {
+        return None;
+    }
+    let min_leaf_id = isize::try_from(n_leaves).ok().and_then(isize::checked_neg)?;
+    let step_i = isize::try_from(step).ok()?;
+    let id = raw as isize;
+    ((id as f64) == raw && id >= min_leaf_id && id < step_i).then_some(id)
+}
+
+fn decode_dendro_leaf(id: isize, n_leaves: usize) -> Option<usize> {
+    if id >= 0 {
+        return None;
+    }
+    let pos = id.checked_neg()?;
+    let leaf = pos.checked_sub(1)?;
+    let idx = usize::try_from(leaf).ok()?;
+    (idx < n_leaves).then_some(idx)
+}
+
+fn extract_dendro_merges_from_tab(tab: &ResultTab, n_leaves: usize) -> Vec<DendrogramMerge> {
+    if n_leaves < 2 || tab.rows.len() + 1 != n_leaves {
+        return Vec::new();
+    }
     let mut merges = Vec::with_capacity(tab.rows.len());
-    for row in &tab.rows {
+    for (step, row) in tab.rows.iter().enumerate() {
         let (Some(l), Some(r), Some(d), Some(sz)) = (
             row.first().and_then(result_cell_num),
             row.get(1).and_then(result_cell_num),
             row.get(2).and_then(result_cell_num),
             row.get(3).and_then(result_cell_num),
         ) else {
-            continue;
+            return Vec::new();
         };
-        merges.push(DendrogramMerge { left: l as isize, right: r as isize, distance: d, cluster_size: sz.max(1.0) as usize });
+        let (Some(left), Some(right)) = (parse_dendro_node_id(l, step, n_leaves), parse_dendro_node_id(r, step, n_leaves)) else {
+            return Vec::new();
+        };
+        if !d.is_finite() || d < 0.0 || left == right || !sz.is_finite() || sz.fract() != 0.0 || sz < 1.0 || sz > 9_007_199_254_740_991.0 {
+            return Vec::new();
+        }
+        let cluster_size = sz as usize;
+        if (cluster_size as f64) != sz || cluster_size == 0 || cluster_size > n_leaves {
+            return Vec::new();
+        }
+        merges.push(DendrogramMerge { left, right, distance: d, cluster_size });
     }
     merges
 }
 
-fn heatmap_min_max(values: &[Vec<f64>]) -> (f64, f64) {
+fn heatmap_min_max(values: &[Vec<Option<f64>>]) -> (f64, f64) {
     let (lo, hi) = values
         .iter()
         .flat_map(|r| r.iter())
+        .flatten()
         .copied()
         .filter(|v| v.is_finite())
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| (a.min(v), b.max(v)));
     sanitize_range(lo, hi, (0.0, 1.0))
 }
 
+fn cluster_heatmap_rows(
+    rows: &[Vec<Option<f64>>],
+    n_cols: usize,
+    distance: ClusterDistance,
+    linkage: ClusterLinkage,
+    warnings: &mut Vec<ChartWarning>,
+) -> Vec<DendrogramMerge> {
+    let is_complete = rows.iter().all(|r| r.len() >= n_cols && r[..n_cols].iter().all(|v| v.is_some_and(f64::is_finite)));
+    if is_complete {
+        let dense: Vec<Vec<f64>> = rows.iter().map(|r| r.iter().take(n_cols).flatten().copied().collect()).collect();
+        return hierarchical_clustering_with_metrics(&dense, distance, linkage).unwrap_or_default();
+    }
+    if let Some(merges) = pairwise_hierarchical_clustering(rows, n_cols, distance, linkage) {
+        return merges;
+    }
+    warnings.push(ChartWarning::new(
+        "clustering_skipped_missing_data",
+        "hierarchical clustering skipped because rows lack overlapping finite observations",
+    ));
+    Vec::new()
+}
+
+fn pairwise_row_distance(a: &[Option<f64>], b: &[Option<f64>], n_cols: usize, metric: ClusterDistance) -> Option<f64> {
+    match metric {
+        ClusterDistance::Euclidean | ClusterDistance::Manhattan => {
+            let mut count = 0usize;
+            let mut sum = 0.0;
+            for c in 0..n_cols {
+                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
+                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
+                let diff = (va - vb).abs();
+                sum += if matches!(metric, ClusterDistance::Euclidean) { diff * diff } else { diff };
+                count += 1;
+            }
+            if count == 0 {
+                return None;
+            }
+            let scaled = sum * ((n_cols as f64) / (count as f64));
+            let dist = if matches!(metric, ClusterDistance::Euclidean) { scaled.sqrt() } else { scaled };
+            dist.is_finite().then_some(dist)
+        }
+        ClusterDistance::Cosine => {
+            let (mut count, mut dot, mut norm_a, mut norm_b) = (0usize, 0.0, 0.0, 0.0);
+            for c in 0..n_cols {
+                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
+                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
+                dot += va * vb;
+                norm_a += va * va;
+                norm_b += vb * vb;
+                count += 1;
+            }
+            if count == 0 {
+                return None;
+            }
+            let dist = if norm_a <= 1e-30 && norm_b <= 1e-30 {
+                0.0
+            } else if norm_a <= 1e-30 || norm_b <= 1e-30 {
+                1.0
+            } else {
+                let cos = (dot / (norm_a * norm_b).sqrt()).clamp(-1.0, 1.0);
+                (1.0 - cos).clamp(0.0, 2.0)
+            };
+            dist.is_finite().then_some(dist)
+        }
+        ClusterDistance::Pearson => {
+            let (mut count, mut sum_a, mut sum_b) = (0usize, 0.0, 0.0);
+            for c in 0..n_cols {
+                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
+                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
+                sum_a += va;
+                sum_b += vb;
+                count += 1;
+            }
+            if count < 2 {
+                return None;
+            }
+            let mean_a = sum_a / (count as f64);
+            let mean_b = sum_b / (count as f64);
+            let (mut num, mut da, mut db, mut max_diff) = (0.0, 0.0, 0.0, 0.0_f64);
+            for c in 0..n_cols {
+                let Some(va) = a.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
+                let Some(vb) = b.get(c).copied().flatten().filter(|x| x.is_finite()) else { continue };
+                let xa = va - mean_a;
+                let xb = vb - mean_b;
+                num += xa * xb;
+                da += xa * xa;
+                db += xb * xb;
+                max_diff = max_diff.max((va - vb).abs());
+            }
+            let denom = (da * db).sqrt();
+            let dist = if !denom.is_finite() || denom <= 1e-30 {
+                if max_diff < 1e-12 { 0.0 } else { 1.0 }
+            } else {
+                let r = (num / denom).clamp(-1.0, 1.0);
+                (1.0 - r).clamp(0.0, 2.0)
+            };
+            dist.is_finite().then_some(dist)
+        }
+    }
+}
+
+fn lance_williams_distance(linkage: ClusterLinkage, d_iu: f64, d_ju: f64, d_ij: f64, n_i: f64, n_j: f64, n_u: f64) -> f64 {
+    match linkage {
+        ClusterLinkage::Single => d_iu.min(d_ju),
+        ClusterLinkage::Complete => d_iu.max(d_ju),
+        ClusterLinkage::Upgma => (n_i * d_iu + n_j * d_ju) / (n_i + n_j),
+        ClusterLinkage::Wpgma => 0.5 * (d_iu + d_ju),
+        ClusterLinkage::Centroid => {
+            let n_k = n_i + n_j;
+            let sq = (n_i * d_iu * d_iu + n_j * d_ju * d_ju) / n_k - (n_i * n_j * d_ij * d_ij) / (n_k * n_k);
+            sq.max(0.0).sqrt()
+        }
+        ClusterLinkage::Median => (0.5 * d_iu * d_iu + 0.5 * d_ju * d_ju - 0.25 * d_ij * d_ij).max(0.0).sqrt(),
+        ClusterLinkage::Ward => {
+            let denom = n_i + n_j + n_u;
+            let sq = ((n_i + n_u) * d_iu * d_iu + (n_j + n_u) * d_ju * d_ju - n_u * d_ij * d_ij) / denom;
+            sq.max(0.0).sqrt()
+        }
+    }
+}
+
+fn pairwise_hierarchical_clustering(
+    rows: &[Vec<Option<f64>>],
+    n_cols: usize,
+    distance: ClusterDistance,
+    linkage: ClusterLinkage,
+) -> Option<Vec<DendrogramMerge>> {
+    let n = rows.len();
+    if n < 2 || n_cols < 2 {
+        return None;
+    }
+
+    let mut dist = vec![0.0_f64; n * n];
+    for i in 0..n {
+        let row_i = rows.get(i)?;
+        for j in (i + 1)..n {
+            let row_j = rows.get(j)?;
+            let d = pairwise_row_distance(row_i, row_j, n_cols, distance)?;
+            if !d.is_finite() {
+                return None;
+            }
+            if let Some(s) = dist.get_mut(i * n + j) {
+                *s = d;
+            }
+            if let Some(s) = dist.get_mut(j * n + i) {
+                *s = d;
+            }
+        }
+    }
+
+    let mut active = vec![true; n];
+    let mut sizes = vec![1usize; n];
+    let mut node_ids: Vec<isize> =
+        (0..n).map(|i| isize::try_from(i).ok().and_then(|v| v.checked_add(1)).and_then(isize::checked_neg)).collect::<Option<Vec<isize>>>()?;
+    let mut merges = Vec::with_capacity(n - 1);
+
+    for step in 0..(n - 1) {
+        let mut best: Option<(usize, usize, f64)> = None;
+        for i in 0..n {
+            if !active.get(i).copied().unwrap_or(false) {
+                continue;
+            }
+            for j in (i + 1)..n {
+                if !active.get(j).copied().unwrap_or(false) {
+                    continue;
+                }
+                let d = dist.get(i * n + j).copied().unwrap_or(f64::INFINITY);
+                if best.is_none_or(|(_, _, bd)| d < bd) {
+                    best = Some((i, j, d));
+                }
+            }
+        }
+        let (ci, cj, min_d) = best?;
+        let n_i = sizes.get(ci).copied().unwrap_or(1);
+        let n_j = sizes.get(cj).copied().unwrap_or(1);
+        let left = node_ids.get(ci).copied().unwrap_or(0);
+        let right = node_ids.get(cj).copied().unwrap_or(0);
+        merges.push(DendrogramMerge { left, right, distance: min_d, cluster_size: n_i + n_j });
+
+        for u in 0..n {
+            if u == ci || u == cj || !active.get(u).copied().unwrap_or(false) {
+                continue;
+            }
+            let d_iu = dist.get(ci * n + u).copied().unwrap_or(0.0);
+            let d_ju = dist.get(cj * n + u).copied().unwrap_or(0.0);
+            let n_u = sizes.get(u).copied().unwrap_or(1) as f64;
+            let d_new = lance_williams_distance(linkage, d_iu, d_ju, min_d, n_i as f64, n_j as f64, n_u);
+            if let Some(s) = dist.get_mut(ci * n + u) {
+                *s = d_new;
+            }
+            if let Some(s) = dist.get_mut(u * n + ci) {
+                *s = d_new;
+            }
+        }
+        if let Some(sz) = sizes.get_mut(ci) {
+            *sz = n_i + n_j;
+        }
+        if let Some(id) = node_ids.get_mut(ci) {
+            *id = isize::try_from(step).ok()?;
+        }
+        if let Some(act) = active.get_mut(cj) {
+            *act = false;
+        }
+    }
+
+    Some(merges)
+}
+
 fn dendrogram_leaf_order(merges: &[DendrogramMerge], n_leaves: usize) -> Vec<usize> {
     if merges.is_empty() || n_leaves == 0 {
         return (0..n_leaves).collect();
     }
+    let Ok(root_id) = isize::try_from(merges.len() - 1) else {
+        return (0..n_leaves).collect();
+    };
     let mut order = Vec::with_capacity(n_leaves);
-    let mut stack: Vec<isize> = vec![(merges.len() - 1) as isize];
+    let mut seen_leaves = vec![false; n_leaves];
+    let mut visited_merges = vec![false; merges.len()];
+    let mut stack: Vec<isize> = vec![root_id];
     let mut guard = 0_usize;
+    let max_steps = n_leaves.saturating_mul(4).saturating_add(16);
     while let Some(node) = stack.pop() {
         guard += 1;
-        if guard > n_leaves * 4 + 16 {
+        if guard > max_steps {
             break;
         }
         if node < 0 {
-            let leaf = ((-node) - 1) as usize;
-            if leaf < n_leaves && !order.contains(&leaf) {
+            if let Some(leaf) = decode_dendro_leaf(node, n_leaves)
+                && let Some(seen) = seen_leaves.get_mut(leaf)
+                && !*seen
+            {
+                *seen = true;
                 order.push(leaf);
             }
-        } else if let Some(m) = merges.get(node as usize) {
+        } else if let Ok(merge_idx) = usize::try_from(node)
+            && let Some(visited) = visited_merges.get_mut(merge_idx)
+            && !*visited
+            && let Some(m) = merges.get(merge_idx)
+        {
+            *visited = true;
             stack.push(m.right);
             stack.push(m.left);
         }
     }
-    for i in 0..n_leaves {
-        if !order.contains(&i) {
+    for (i, seen) in seen_leaves.iter().enumerate() {
+        if !*seen {
             order.push(i);
         }
     }
@@ -1450,8 +1753,10 @@ fn dendrogram_leaf_order(merges: &[DendrogramMerge], n_leaves: usize) -> Vec<usi
 }
 
 fn draw_left_dendrogram(scene: &mut ChartScene, box_rect: RectPt, merges: &[DendrogramMerge], leaf_order: &[usize], cell_h: f64) {
-    let max_dist = merges.iter().map(|m| m.distance).fold(0.0_f64, f64::max).max(1e-9);
-    let mut node_y = vec![0.0_f64; leaf_order.len()];
+    let max_dist =
+        merges.iter().filter_map(|m| (m.distance.is_finite() && m.distance >= 0.0).then_some(m.distance)).fold(0.0_f64, f64::max).max(1e-9);
+    let n_leaves = leaf_order.len();
+    let mut node_y = vec![0.0_f64; n_leaves];
     for (vis_idx, &orig_leaf) in leaf_order.iter().enumerate() {
         if let Some(slot) = node_y.get_mut(orig_leaf) {
             *slot = box_rect.y + ((vis_idx as f64) + 0.5) * cell_h;
@@ -1460,17 +1765,18 @@ fn draw_left_dendrogram(scene: &mut ChartScene, box_rect: RectPt, merges: &[Dend
     let mut merge_coords: Vec<(f64, f64)> = vec![(box_rect.right(), box_rect.y); merges.len()];
     let lookup_pos = |id: isize, mc: &[(f64, f64)]| -> (f64, f64) {
         if id < 0 {
-            let leaf = ((-id) - 1) as usize;
-            (box_rect.right(), node_y.get(leaf).copied().unwrap_or(box_rect.y))
+            let y = decode_dendro_leaf(id, n_leaves).and_then(|leaf| node_y.get(leaf).copied()).unwrap_or(box_rect.y);
+            (box_rect.right(), y)
         } else {
-            mc.get(id as usize).copied().unwrap_or((box_rect.right(), box_rect.y))
+            usize::try_from(id).ok().and_then(|idx| mc.get(idx).copied()).unwrap_or((box_rect.right(), box_rect.y))
         }
     };
     let stroke = solid_stroke(Rgba8::rgb(65, 70, 80), 0.9, LineDashStyle::Solid);
     for (step, m) in merges.iter().enumerate() {
         let (x_l, y_l) = lookup_pos(m.left, &merge_coords);
         let (x_r, y_r) = lookup_pos(m.right, &merge_coords);
-        let x_m = box_rect.right() - (m.distance / max_dist) * box_rect.width;
+        let dist_frac = if m.distance.is_finite() { (m.distance / max_dist).clamp(0.0, 1.0) } else { 0.0 };
+        let x_m = box_rect.right() - dist_frac * box_rect.width;
         let mut p = Path2D::new();
         path_move(&mut p, PointPt::new(x_l, y_l));
         path_line(&mut p, PointPt::new(x_m, y_l));
@@ -1646,7 +1952,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64
                 if !diff.is_finite() || !rec.raw_p_or_q.is_finite() || rec.raw_p_or_q < 0.0 {
                     return None;
                 }
-                let neg_log_p = -(rec.raw_p_or_q.clamp(1e-300, 1.0)).log10();
+                let neg_log_p = -crate::clamp_f64_safe(rec.raw_p_or_q, 1e-300, 1.0).log10();
                 let lbl = (!rec.label_a.trim().is_empty()).then(|| rec.label_a.clone());
                 Some((diff, neg_log_p, lbl))
             })
@@ -1680,7 +1986,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64
                         let neg_log_p = if already_neg_log {
                             p_raw
                         } else if p_raw >= 0.0 {
-                            -(p_raw.clamp(1e-300, 1.0)).log10()
+                            -crate::clamp_f64_safe(p_raw, 1e-300, 1.0).log10()
                         } else {
                             return None;
                         };
@@ -2001,8 +2307,10 @@ fn compile_roc_curve(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Char
     let mut area_p = Path2D::new();
     let mut started = false;
     for &(fpr, tpr) in &points {
-        let (Some(px), Some(py)) = (x_map.map_value(fpr.clamp(0.0, 1.0), r.x, r.right()), y_map.map_value(tpr.clamp(0.0, 1.0), r.bottom(), r.y))
-        else {
+        let (Some(px), Some(py)) = (
+            x_map.map_value(crate::clamp_f64_safe(fpr, 0.0, 1.0), r.x, r.right()),
+            y_map.map_value(crate::clamp_f64_safe(tpr, 0.0, 1.0), r.bottom(), r.y),
+        ) else {
             continue;
         };
         if !started {
@@ -2105,7 +2413,7 @@ fn trapezoidal_auc(pts: &[(f64, f64)]) -> f64 {
             auc += (x1 - x0) * 0.5 * (y0 + y1);
         }
     }
-    auc.clamp(0.0, 1.0)
+    crate::clamp_f64_safe(auc, 0.0, 1.0)
 }
 
 // 2e. Forest Plot (OR/HR CIs + Diamond Pooled Estimate)
@@ -2161,7 +2469,7 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
         &graph.spec,
         &[],
         PlotMarginConfig {
-            extra_left_pt: (max_lbl_w + 10.0).clamp(32.0, 96.0),
+            extra_left_pt: crate::clamp_f64_safe(max_lbl_w + 10.0, 32.0, 96.0),
             has_legend: true,
             suppress_y_axis_labels: true,
             ..PlotMarginConfig::default()
@@ -2210,7 +2518,7 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
         };
 
         if entry.is_pooled {
-            let dh = (row_h * 0.28).clamp(3.5, 7.0);
+            let dh = crate::clamp_f64_safe(row_h * 0.28, 3.5, 7.0);
             scene.primitives.push(ScenePrimitive::Path {
                 path: polygon_path(&[(x_lo_pt, cy), (x_est_pt, cy - dh), (x_hi_pt, cy), (x_est_pt, cy + dh)]),
                 fill: Some(FillPaint::solid(pooled_col)),
@@ -2756,21 +3064,41 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64
 // 3. Multi-Panel LayoutSheet Compilation (Gap G11)
 // ============================================================================
 
+/// Hard ceiling on total emitted scene primitives within a compiled multi-panel layout.
+pub const MAX_LAYOUT_PRIMITIVES: usize = 500_000;
+
+struct CompiledGraphEntry {
+    scene: Option<ChartScene>,
+    warning: Option<(&'static str, String)>,
+}
+
 struct PlacedPanel {
     panel_idx: usize,
     bounds: RectPt,
     badge: Option<String>,
-    sub_scene: Option<ChartScene>,
+    cache_idx: Option<usize>,
     scale: f64,
     tx: f64,
     ty: f64,
 }
 
+fn check_layout_primitive_budget(current: usize, added: usize, context: &str) -> Result<(), ChartError> {
+    let next = current.saturating_add(added);
+    if next > MAX_LAYOUT_PRIMITIVES {
+        return Err(ChartError::ResourceLimit { message: format!("{context} primitive count {next} exceeds layout budget {MAX_LAYOUT_PRIMITIVES}") });
+    }
+    Ok(())
+}
+
 /// Compile a multi-panel [`LayoutSheet`] into a unified physical-page [`ChartScene`].
 pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Result<ChartScene, ChartError> {
+    layout.spec.validate_item_count().map_err(|err| ChartError::ResourceLimit { message: err.to_string() })?;
+
     let page_pt = layout.spec.page_size_pt();
     let mut scene = ChartScene::new(layout.id.as_str(), layout.title.clone(), page_pt.width, page_pt.height, layout.spec.background_fill);
 
+    let mut compiled_graphs: Vec<CompiledGraphEntry> = Vec::new();
+    let mut graph_cache: BTreeMap<&SheetId, usize> = BTreeMap::new();
     let mut panels: Vec<PlacedPanel> = Vec::new();
     let mut other_items: Vec<&LayoutItem> = Vec::new();
     let mut panel_counter = 0_usize;
@@ -2780,27 +3108,35 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
             LayoutItem::LiveGraph { graph_sheet_id, bounds_pt, scale_percent, badge_override, .. } => {
                 let bounds = RectPt::from(*bounds_pt);
                 let badge = badge_override.clone().or_else(|| layout.spec.panel_badges.badge_for(panel_counter));
-                let sub_scene = match doc.graph_sheet(graph_sheet_id) {
-                    Some(gs) => match crate::compile_graph(gs, doc) {
-                        Ok(compiled) => Some(compiled),
-                        Err(e) => {
-                            scene.warnings.push(ChartWarning::new("panel_compile_error", e.to_string()));
-                            None
-                        }
-                    },
-                    None => {
-                        scene
-                            .warnings
-                            .push(ChartWarning::new("missing_layout_graph", format!("referenced graph sheet '{graph_sheet_id}' not found")));
-                        None
-                    }
+                let cache_idx = if let Some(&existing) = graph_cache.get(graph_sheet_id) {
+                    existing
+                } else {
+                    let entry = match doc.graph_sheet(graph_sheet_id) {
+                        Some(gs) => match crate::compile_graph(gs, doc) {
+                            Ok(compiled) => CompiledGraphEntry { scene: Some(compiled), warning: None },
+                            Err(e) => CompiledGraphEntry { scene: None, warning: Some(("panel_compile_error", e.to_string())) },
+                        },
+                        None => CompiledGraphEntry {
+                            scene: None,
+                            warning: Some(("missing_layout_graph", format!("referenced graph sheet '{graph_sheet_id}' not found"))),
+                        },
+                    };
+                    let idx = compiled_graphs.len();
+                    compiled_graphs.push(entry);
+                    graph_cache.insert(graph_sheet_id, idx);
+                    idx
                 };
-                let scale = sub_scene.as_ref().map_or(1.0, |sub| {
+                if let Some(entry) = compiled_graphs.get(cache_idx)
+                    && let Some((code, message)) = &entry.warning
+                {
+                    scene.warnings.push(ChartWarning::new(*code, message.clone()));
+                }
+                let scale = compiled_graphs.get(cache_idx).and_then(|entry| entry.scene.as_ref()).map_or(1.0, |sub| {
                     let pct = if scale_percent.is_finite() && *scale_percent > 0.0 { *scale_percent / 100.0 } else { 1.0 };
                     let fit = (bounds.width / sub.width_pt.max(1.0)).min(bounds.height / sub.height_pt.max(1.0));
                     (fit * pct).max(0.05)
                 });
-                panels.push(PlacedPanel { panel_idx: panel_counter, bounds, badge, sub_scene, scale, tx: bounds.x, ty: bounds.y });
+                panels.push(PlacedPanel { panel_idx: panel_counter, bounds, badge, cache_idx: Some(cache_idx), scale, tx: bounds.x, ty: bounds.y });
                 panel_counter += 1;
             }
             LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } => {
@@ -2810,11 +3146,12 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
     }
 
     if layout.spec.align_plot_origins {
-        align_placed_panel_origins(&mut panels);
+        align_placed_panel_origins(&mut panels, &compiled_graphs);
     }
 
     for panel in &panels {
-        emit_placed_panel(&mut scene, panel);
+        let sub = panel.cache_idx.and_then(|idx| compiled_graphs.get(idx)).and_then(|entry| entry.scene.as_ref());
+        emit_placed_panel(&mut scene, panel, sub)?;
     }
 
     for item in other_items {
@@ -2822,8 +3159,12 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
             LayoutItem::LiveTable { source_sheet_id, tab_id, bounds_pt, .. } => {
                 let bounds = RectPt::from(*bounds_pt);
                 if let Some(grid) = extract_sheet_grid(doc, source_sheet_id, tab_id.as_deref()) {
+                    let est_cells = grid.rows.len().saturating_mul(grid.headers.len().saturating_add(1));
+                    check_layout_primitive_budget(scene.primitives.len(), est_cells, "layout table")?;
                     render_data_grid_table(&mut scene, bounds, &grid.headers, &grid.row_labels, &grid.rows, Rgba8::rgb(130, 136, 145));
+                    check_layout_primitive_budget(scene.primitives.len(), 0, "layout table")?;
                 } else {
+                    check_layout_primitive_budget(scene.primitives.len(), 1, "layout missing table placeholder")?;
                     scene.warnings.push(ChartWarning::new("missing_layout_table", format!("referenced table sheet '{source_sheet_id}' not found")));
                     scene.primitives.push(ScenePrimitive::Path {
                         path: Path2D::rect(bounds),
@@ -2838,6 +3179,8 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
                 let bounds = RectPt::from(*bounds_pt);
                 let fs = if font_size_pt.is_finite() && *font_size_pt > 0.0 { *font_size_pt } else { 10.0 };
                 let line_h = fs * 1.3;
+                let line_count = expanded.lines().count();
+                check_layout_primitive_budget(scene.primitives.len(), line_count.saturating_add(2), "layout text callout")?;
                 scene.primitives.push(ScenePrimitive::PushClip { rect: bounds });
                 for (line_idx, line) in expanded.lines().enumerate() {
                     scene.primitives.push(ScenePrimitive::Text(PositionedText {
@@ -2859,18 +3202,20 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
 }
 
 /// Align inner `plot_rect_pt` origins across panels sharing a layout column (X) or layout row (Y).
-fn align_placed_panel_origins(panels: &mut [PlacedPanel]) {
+fn align_placed_panel_origins(panels: &mut [PlacedPanel], compiled_graphs: &[CompiledGraphEntry]) {
+    let sub_scene_of = |panel: &PlacedPanel| -> Option<&ChartScene> {
+        panel.cache_idx.and_then(|idx| compiled_graphs.get(idx)).and_then(|entry| entry.scene.as_ref())
+    };
     let mut col_targets: Vec<Option<f64>> = vec![None; panels.len()];
     for i in 0..panels.len() {
-        let Some(sub_i) = panels.get(i).and_then(|p| p.sub_scene.as_ref()) else { continue };
+        let Some(sub_i) = sub_scene_of(&panels[i]) else { continue };
         let bx_i = panels[i].bounds.x;
-        let peers: Vec<usize> = (0..panels.len())
-            .filter(|&j| panels.get(j).and_then(|p| p.sub_scene.as_ref()).is_some() && (panels[j].bounds.x - bx_i).abs() <= 16.0)
-            .collect();
+        let peers: Vec<usize> =
+            (0..panels.len()).filter(|&j| sub_scene_of(&panels[j]).is_some() && (panels[j].bounds.x - bx_i).abs() <= 16.0).collect();
         if peers.len() >= 2 {
             let max_origin_x = peers
                 .iter()
-                .filter_map(|&j| panels.get(j).and_then(|p| p.sub_scene.as_ref().map(|s| p.bounds.x + p.scale * s.plot_rect_pt.x)))
+                .filter_map(|&j| sub_scene_of(&panels[j]).map(|s| panels[j].bounds.x + panels[j].scale * s.plot_rect_pt.x))
                 .fold(bx_i + panels[i].scale * sub_i.plot_rect_pt.x, f64::max);
             col_targets[i] = Some(max_origin_x);
             let avail_right = (panels[i].bounds.right() - max_origin_x).max(8.0);
@@ -2881,15 +3226,14 @@ fn align_placed_panel_origins(panels: &mut [PlacedPanel]) {
 
     let mut row_targets: Vec<Option<f64>> = vec![None; panels.len()];
     for i in 0..panels.len() {
-        let Some(sub_i) = panels.get(i).and_then(|p| p.sub_scene.as_ref()) else { continue };
+        let Some(sub_i) = sub_scene_of(&panels[i]) else { continue };
         let by_i = panels[i].bounds.y;
-        let peers: Vec<usize> = (0..panels.len())
-            .filter(|&j| panels.get(j).and_then(|p| p.sub_scene.as_ref()).is_some() && (panels[j].bounds.y - by_i).abs() <= 16.0)
-            .collect();
+        let peers: Vec<usize> =
+            (0..panels.len()).filter(|&j| sub_scene_of(&panels[j]).is_some() && (panels[j].bounds.y - by_i).abs() <= 16.0).collect();
         if peers.len() >= 2 {
             let max_origin_y = peers
                 .iter()
-                .filter_map(|&j| panels.get(j).and_then(|p| p.sub_scene.as_ref().map(|s| p.bounds.y + p.scale * s.plot_rect_pt.y)))
+                .filter_map(|&j| sub_scene_of(&panels[j]).map(|s| panels[j].bounds.y + panels[j].scale * s.plot_rect_pt.y))
                 .fold(by_i + panels[i].scale * sub_i.plot_rect_pt.y, f64::max);
             row_targets[i] = Some(max_origin_y);
             let avail_bot = (panels[i].bounds.bottom() - max_origin_y).max(8.0);
@@ -2899,7 +3243,7 @@ fn align_placed_panel_origins(panels: &mut [PlacedPanel]) {
     }
 
     for (i, panel) in panels.iter_mut().enumerate() {
-        let Some(sub) = &panel.sub_scene else { continue };
+        let Some(sub) = sub_scene_of(panel) else { continue };
         if let Some(target_x) = col_targets.get(i).copied().flatten() {
             panel.tx = target_x - panel.scale * sub.plot_rect_pt.x;
         }
@@ -2909,11 +3253,25 @@ fn align_placed_panel_origins(panels: &mut [PlacedPanel]) {
     }
 }
 
-fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel) {
+fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel, sub_scene: Option<&ChartScene>) -> Result<(), ChartError> {
+    let badge_prims = usize::from(panel.badge.is_some());
+    let content_prims = sub_scene.map_or(1, |sub| usize::from(sub.background.is_some()).saturating_add(sub.primitives.len()));
+    let added_prims = 2_usize.saturating_add(content_prims).saturating_add(badge_prims);
+    check_layout_primitive_budget(scene.primitives.len(), added_prims, "layout panel")?;
+
+    if let Some(sub) = sub_scene {
+        let next_points = scene.plotted_points.len().saturating_add(sub.plotted_points.len());
+        if next_points > MAX_LAYOUT_PRIMITIVES {
+            return Err(ChartError::ResourceLimit {
+                message: format!("layout plotted point metadata count {next_points} exceeds layout budget {MAX_LAYOUT_PRIMITIVES}"),
+            });
+        }
+    }
+
     let bounds = panel.bounds;
     scene.primitives.push(ScenePrimitive::PushClip { rect: bounds });
 
-    if let Some(sub) = &panel.sub_scene {
+    if let Some(sub) = sub_scene {
         if let Some(bg) = sub.background {
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::rect(RectPt::new(panel.tx, panel.ty, sub.width_pt * panel.scale, sub.height_pt * panel.scale)),
@@ -2958,6 +3316,7 @@ fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel) {
             color: Rgba8::BLACK,
         }));
     }
+    Ok(())
 }
 
 fn transform_point(p: PointPt, tx: f64, ty: f64, s: f64) -> PointPt {
@@ -3129,5 +3488,70 @@ mod tests {
 
         // Ensure ColormapId & Rgba8 used in test are exercised
         assert_ne!(ColormapId::Cividis.sample(0.0), Rgba8::WHITE);
+    }
+
+    #[test]
+    fn dendrogram_node_conversion_guards_extreme_and_malformed_ids() {
+        use lumencraft_doc::{ResultCell, ResultTab, ResultTabKind};
+        use lumencraft_stats::multivariate::DendrogramMerge;
+
+        use super::{dendrogram_leaf_order, draw_left_dendrogram, extract_dendro_merges_from_tab};
+        use crate::scene::{PathCmd, RectPt};
+
+        for bad_row in [
+            vec![
+                ResultCell::Number { value: -1e300, prefix: None, units: None },
+                ResultCell::Number { value: 1e300, prefix: None, units: None },
+                ResultCell::Number { value: 0.5, prefix: None, units: None },
+                ResultCell::Number { value: 2.0, prefix: None, units: None },
+            ],
+            vec![
+                ResultCell::Number { value: -1.5, prefix: None, units: None },
+                ResultCell::Number { value: -2.0, prefix: None, units: None },
+                ResultCell::Number { value: 0.25, prefix: None, units: None },
+                ResultCell::Number { value: 2.0, prefix: None, units: None },
+            ],
+            vec![
+                ResultCell::Number { value: isize::MIN as f64, prefix: None, units: None },
+                ResultCell::Number { value: -1.0, prefix: None, units: None },
+                ResultCell::Number { value: f64::NAN, prefix: None, units: None },
+                ResultCell::Number { value: 2.0, prefix: None, units: None },
+            ],
+        ] {
+            let tab = ResultTab {
+                id: String::from("hierarchical-dendrogram"),
+                title: String::from("Dendrogram"),
+                kind: ResultTabKind::MainSummary,
+                column_headers: vec![],
+                row_labels: vec![],
+                rows: vec![bad_row],
+                footnotes: vec![],
+            };
+            assert!(extract_dendro_merges_from_tab(&tab, 2).is_empty());
+        }
+
+        let malformed = [
+            DendrogramMerge { left: isize::MIN, right: isize::MAX, distance: f64::NAN, cluster_size: usize::MAX },
+            DendrogramMerge { left: 0, right: 1, distance: f64::INFINITY, cluster_size: 2 },
+            DendrogramMerge { left: -999, right: 0, distance: -4.0, cluster_size: 3 },
+        ];
+        let order = dendrogram_leaf_order(&malformed, 4);
+        assert_eq!(order.len(), 4);
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, vec![0, 1, 2, 3]);
+
+        let mut scene = ChartScene::new("hm-bad", "Bad Dendro", 320.0, 240.0, None);
+        draw_left_dendrogram(&mut scene, RectPt::new(20.0, 20.0, 40.0, 120.0), &malformed, &order, 30.0);
+        assert!(!scene.primitives.is_empty());
+        for prim in &scene.primitives {
+            if let ScenePrimitive::Path { path, .. } = prim {
+                for cmd in &path.commands {
+                    if let PathCmd::MoveTo(pt) | PathCmd::LineTo(pt) = cmd {
+                        assert!(pt.x.is_finite() && pt.y.is_finite(), "non-finite dendrogram pt: {pt:?}");
+                    }
+                }
+            }
+        }
     }
 }

@@ -6,10 +6,11 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
 use lumencraft_doc::ProjectDocument;
-use lumencraft_engine::Session;
 use lumencraft_engine::cmd::Caller;
-use lumencraft_format::instantiate_template_bytes;
+use lumencraft_engine::{ExternalPathPolicy, Session};
+use lumencraft_format::{MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, instantiate_template_bytes};
 use lumencraft_pdf::PdfVersion;
+use lumencraft_platform::PlatformError;
 use serde_json::{Map, Value, json};
 
 use crate::cmd_convert::{
@@ -20,6 +21,42 @@ use crate::error::CliError;
 use crate::sandbox::{PathResolver, WorkdirGuard};
 
 const BATCH_SCHEMA_V1: &str = "lumencraft.batch.v1";
+const MAX_SCRIPT_FILE_BYTES: usize = 64 * 1024 * 1024;
+const MANIFEST_ROOT_KEYS: &[&str] = &["schema", "template", "project", "inputs", "commands", "exports"];
+const MANIFEST_INPUT_KEYS: &[&str] = &[
+    "csv",
+    "tsv",
+    "path",
+    "file",
+    "sheet",
+    "sheet_id",
+    "sheetId",
+    "kind",
+    "table_kind",
+    "tableKind",
+    "subcolumn_mode",
+    "subcolumnMode",
+    "delimiter",
+    "decimal_separator",
+    "decimalSeparator",
+];
+const MANIFEST_COMMAND_KEYS: &[&str] = &["cmd", "command", "method", "id", "params"];
+const MANIFEST_EXPORT_KEYS: &[&str] = &[
+    "out",
+    "path",
+    "format",
+    "sheet",
+    "sheet_id",
+    "sheetId",
+    "dpi",
+    "pretty",
+    "tab_index",
+    "tabIndex",
+    "pdf_version",
+    "pdfVersion",
+    "ttf_font",
+    "ttfFont",
+];
 
 struct RunnerArgs {
     source_path: String,
@@ -65,86 +102,96 @@ struct ParsedManifest {
 
 /// Execute `lumencraft-cli run <script> [--workdir <dir>] [--json]`.
 pub fn run_script(args: &[String]) -> Result<(), CliError> {
-    let parsed = parse_runner_args(args, "usage: lumencraft-cli run <script> [--workdir <dir>] [--json]")?;
-    let resolver = build_resolver(parsed.workdir.as_deref(), Path::new("."))?;
-    let raw_text = read_text_source(&parsed.source_path)?;
-    let commands = parse_script_commands(&raw_text, &resolver)?;
+    crate::cmd_convert::run_guarded_cli("cli.run", || {
+        let parsed = parse_runner_args(args, "usage: lumencraft-cli run <script> [--workdir <dir>] [--json]")?;
+        let resolver = build_resolver(parsed.workdir.as_deref(), Path::new("."))?;
+        let raw_text = read_text_source(&parsed.source_path)?;
+        let commands = parse_script_commands(&raw_text, &resolver)?;
 
-    let mut session = Session::new();
-    let results = execute_commands(&mut session, &commands, parsed.workdir.is_some())?;
+        let mut session = Session::new();
+        if let Some(dir) = parsed.workdir.as_deref() {
+            session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
+        }
+        let results = execute_commands(&mut session, &commands, parsed.workdir.is_some())?;
 
-    if parsed.json {
-        let payload = json!({
-            "ok": true,
-            "script": parsed.source_path,
-            "commands_executed": results.len(),
-            "total_sheets": session.document().total_sheet_count(),
-            "results": results,
-        });
-        let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
-        println!("{text}");
-    } else {
-        println!("executed {} command(s) cleanly (sheets: {})", results.len(), session.document().total_sheet_count());
-    }
-    Ok(())
+        if parsed.json {
+            let payload = json!({
+                "ok": true,
+                "script": parsed.source_path,
+                "commands_executed": results.len(),
+                "total_sheets": session.document().total_sheet_count(),
+                "results": results,
+            });
+            let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
+            println!("{text}");
+        } else {
+            println!("executed {} command(s) cleanly (sheets: {})", results.len(), session.document().total_sheet_count());
+        }
+        Ok(())
+    })
 }
 
 /// Execute `lumencraft-cli batch <manifest> [--workdir <dir>] [--json]`.
 pub fn run_batch(args: &[String]) -> Result<(), CliError> {
-    let parsed = parse_runner_args(args, "usage: lumencraft-cli batch <manifest> [--workdir <dir>] [--json]")?;
-    let manifest_base = if parsed.source_path == "-" {
-        Path::new(".").to_path_buf()
-    } else {
-        Path::new(&parsed.source_path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new(".")).to_path_buf()
-    };
-    let resolver = build_resolver(parsed.workdir.as_deref(), &manifest_base)?;
-    let raw_text = read_text_source(&parsed.source_path)?;
-    let manifest = parse_batch_manifest(&raw_text, &resolver)?;
+    crate::cmd_convert::run_guarded_cli("cli.batch", || {
+        let parsed = parse_runner_args(args, "usage: lumencraft-cli batch <manifest> [--workdir <dir>] [--json]")?;
+        let manifest_base = if parsed.source_path == "-" {
+            Path::new(".").to_path_buf()
+        } else {
+            Path::new(&parsed.source_path).parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or_else(|| Path::new(".")).to_path_buf()
+        };
+        let resolver = build_resolver(parsed.workdir.as_deref(), &manifest_base)?;
+        let raw_text = read_text_source(&parsed.source_path)?;
+        let manifest = parse_batch_manifest(&raw_text, &resolver)?;
 
-    let mut session = open_manifest_base_session(&manifest)?;
-    load_manifest_inputs(&mut session, &manifest.inputs)?;
-    let results = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
-    session.recalculate_all()?;
+        let mut session = open_manifest_base_session(&manifest)?;
+        if let Some(dir) = parsed.workdir.as_deref() {
+            session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
+        }
+        load_manifest_inputs(&mut session, &manifest.inputs)?;
+        let results = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
+        session.recalculate_all()?;
 
-    let mut export_summaries = Vec::with_capacity(manifest.exports.len());
-    for exp in &manifest.exports {
-        let ttf_font_bytes = exp.ttf_font_path.as_deref().map(load_validated_ttf_font).transpose()?;
-        let summary = export_from_document(&ExportRequest {
-            doc: session.document(),
-            out_path: &exp.out_path,
-            format: exp.format,
-            sheet: exp.sheet.as_deref(),
-            dpi: exp.dpi,
-            pretty: exp.pretty,
-            tab_index: exp.tab_index,
-            pdf_version: exp.pdf_version,
-            embedded_truetype_font: ttf_font_bytes.as_deref(),
-        })?;
-        export_summaries.push(json!({
-            "out": summary.out_path,
-            "format": summary.format,
-            "sheet_id": summary.sheet_id,
-            "bytes_written": summary.bytes_written,
-        }));
-    }
+        let mut export_summaries = Vec::with_capacity(manifest.exports.len());
+        for exp in &manifest.exports {
+            let ttf_font_bytes = exp.ttf_font_path.as_deref().map(load_validated_ttf_font).transpose()?;
+            let summary = export_from_document(&ExportRequest {
+                doc: session.document(),
+                out_path: &exp.out_path,
+                format: exp.format,
+                sheet: exp.sheet.as_deref(),
+                dpi: exp.dpi,
+                pretty: exp.pretty,
+                tab_index: exp.tab_index,
+                pdf_version: exp.pdf_version,
+                embedded_truetype_font: ttf_font_bytes.as_deref(),
+            })?;
+            export_summaries.push(json!({
+                "out": summary.out_path,
+                "format": summary.format,
+                "sheet_id": summary.sheet_id,
+                "bytes_written": summary.bytes_written,
+            }));
+        }
 
-    if parsed.json {
-        let payload = json!({
-            "ok": true,
-            "schema": BATCH_SCHEMA_V1,
-            "manifest": parsed.source_path,
-            "inputs_loaded": manifest.inputs.len(),
-            "commands_executed": results.len(),
-            "exports_written": export_summaries.len(),
-            "exports": export_summaries,
-            "results": results,
-        });
-        let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
-        println!("{text}");
-    } else {
-        println!("batch completed: {} input(s), {} command(s), {} export(s)", manifest.inputs.len(), results.len(), export_summaries.len());
-    }
-    Ok(())
+        if parsed.json {
+            let payload = json!({
+                "ok": true,
+                "schema": BATCH_SCHEMA_V1,
+                "manifest": parsed.source_path,
+                "inputs_loaded": manifest.inputs.len(),
+                "commands_executed": results.len(),
+                "exports_written": export_summaries.len(),
+                "exports": export_summaries,
+                "results": results,
+            });
+            let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
+            println!("{text}");
+        } else {
+            println!("batch completed: {} input(s), {} command(s), {} export(s)", manifest.inputs.len(), results.len(), export_summaries.len());
+        }
+        Ok(())
+    })
 }
 
 fn build_resolver(workdir: Option<&str>, fallback_base: &Path) -> Result<PathResolver, CliError> {
@@ -156,11 +203,22 @@ fn build_resolver(workdir: Option<&str>, fallback_base: &Path) -> Result<PathRes
 
 fn read_text_source(source: &str) -> Result<String, CliError> {
     if source == "-" {
-        let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf).map_err(|err| CliError::Runtime(format!("failed to read stdin: {err}")))?;
-        return Ok(buf);
+        let mut bytes = Vec::new();
+        let cap = (MAX_SCRIPT_FILE_BYTES as u64).saturating_add(1);
+        std::io::stdin().take(cap).read_to_end(&mut bytes).map_err(|err| CliError::Runtime(format!("failed to read stdin: {err}")))?;
+        if bytes.len() > MAX_SCRIPT_FILE_BYTES {
+            return Err(CliError::from(PlatformError::FileTooLarge {
+                path: String::from("<stdin>"),
+                actual_bytes: None,
+                limit_bytes: MAX_SCRIPT_FILE_BYTES,
+            }));
+        }
+        return String::from_utf8(bytes).map_err(|err| CliError::Runtime(format!("failed to read stdin as UTF-8: {err}")));
     }
-    fs::read_to_string(source).map_err(|err| CliError::Runtime(format!("failed to read `{source}`: {err}")))
+    lumencraft_platform::fs::read_regular_file_utf8(Path::new(source), MAX_SCRIPT_FILE_BYTES).map_err(|err| match err {
+        PlatformError::FileTooLarge { .. } => CliError::from(err),
+        other => CliError::Runtime(format!("failed to read `{source}`: {other}")),
+    })
 }
 
 fn parse_script_commands(raw_text: &str, resolver: &PathResolver) -> Result<Vec<ParsedCommand>, CliError> {
@@ -225,6 +283,7 @@ fn parse_batch_manifest(raw_text: &str, resolver: &PathResolver) -> Result<Parse
     if schema != BATCH_SCHEMA_V1 {
         return Err(CliError::Schema(format!("manifest `schema` must be `{BATCH_SCHEMA_V1}` (got `{schema}`)")));
     }
+    reject_unknown_keys(obj, MANIFEST_ROOT_KEYS, "manifest")?;
 
     let template_path = parse_optional_resolved_path(obj, "template", resolver)?;
     let project_path = parse_optional_resolved_path(obj, "project", resolver)?;
@@ -264,19 +323,21 @@ fn parse_manifest_inputs(val: Option<&Value>, resolver: &PathResolver) -> Result
     };
     let mut out = Vec::with_capacity(arr.len());
     for (idx, item) in arr.iter().enumerate() {
+        let context = format!("manifest `inputs[{idx}]`");
         let Some(obj) = item.as_object() else {
-            return Err(CliError::Schema(format!("manifest `inputs[{idx}]` must be an object")));
+            return Err(CliError::Schema(format!("{context} must be an object")));
         };
-        let raw_path = opt_obj_str(obj, &["csv", "tsv", "path", "file"])
-            .ok_or_else(|| CliError::Schema(format!("manifest `inputs[{idx}]` requires a string `csv` (or `path`) field")))?;
+        reject_unknown_keys(obj, MANIFEST_INPUT_KEYS, &context)?;
+        let raw_path = opt_obj_str(obj, &["csv", "tsv", "path", "file"], &context)?
+            .ok_or_else(|| CliError::Schema(format!("{context} requires a string `csv` (or `path`) field")))?;
         let csv_path = resolver.resolve(raw_path)?;
         out.push(BatchInputSpec {
             csv_path,
-            sheet: opt_obj_str(obj, &["sheet", "sheet_id", "sheetId"]).map(str::to_owned),
-            kind: opt_obj_str(obj, &["kind", "table_kind", "tableKind"]).map(str::to_owned),
-            subcolumn_mode: opt_obj_str(obj, &["subcolumn_mode", "subcolumnMode"]).map(str::to_owned),
-            delimiter: opt_obj_str(obj, &["delimiter"]).map(str::to_owned),
-            decimal_separator: opt_obj_str(obj, &["decimal_separator", "decimalSeparator"]).map(str::to_owned),
+            sheet: opt_obj_str(obj, &["sheet", "sheet_id", "sheetId"], &context)?.map(str::to_owned),
+            kind: opt_obj_str(obj, &["kind", "table_kind", "tableKind"], &context)?.map(str::to_owned),
+            subcolumn_mode: opt_obj_str(obj, &["subcolumn_mode", "subcolumnMode"], &context)?.map(str::to_owned),
+            delimiter: opt_obj_str(obj, &["delimiter"], &context)?.map(str::to_owned),
+            decimal_separator: opt_obj_str(obj, &["decimal_separator", "decimalSeparator"], &context)?.map(str::to_owned),
         });
     }
     Ok(out)
@@ -292,7 +353,15 @@ fn parse_manifest_commands(val: Option<&Value>, resolver: &PathResolver) -> Resu
     let Some(arr) = val.as_array() else {
         return Err(CliError::Schema(String::from("manifest `commands` must be an array")));
     };
-    arr.iter().enumerate().map(|(idx, item)| parse_command_value(idx, item.clone(), resolver)).collect()
+    let mut out = Vec::with_capacity(arr.len());
+    for (idx, item) in arr.iter().enumerate() {
+        let Some(obj) = item.as_object() else {
+            return Err(CliError::Schema(format!("command #{} must be a JSON object", idx + 1)));
+        };
+        reject_unknown_keys(obj, MANIFEST_COMMAND_KEYS, &format!("manifest `commands[{idx}]`"))?;
+        out.push(parse_command_value(idx, item.clone(), resolver)?);
+    }
+    Ok(out)
 }
 
 fn parse_manifest_exports(val: Option<&Value>, resolver: &PathResolver) -> Result<Vec<BatchExportSpec>, CliError> {
@@ -313,19 +382,21 @@ fn parse_manifest_exports(val: Option<&Value>, resolver: &PathResolver) -> Resul
 }
 
 fn parse_single_export_entry(idx: usize, item: &Value, resolver: &PathResolver) -> Result<BatchExportSpec, CliError> {
+    let context = format!("manifest `exports[{idx}]`");
     let Some(obj) = item.as_object() else {
-        return Err(CliError::Schema(format!("manifest `exports[{idx}]` must be an object")));
+        return Err(CliError::Schema(format!("{context} must be an object")));
     };
+    reject_unknown_keys(obj, MANIFEST_EXPORT_KEYS, &context)?;
     let raw_out =
-        opt_obj_str(obj, &["out", "path"]).ok_or_else(|| CliError::Schema(format!("manifest `exports[{idx}]` requires string `out` (or `path`)")))?;
+        opt_obj_str(obj, &["out", "path"], &context)?.ok_or_else(|| CliError::Schema(format!("{context} requires string `out` (or `path`)")))?;
     let out_path = resolver.resolve(raw_out)?;
     let format = match obj.get("format") {
-        Some(Value::String(s)) => parse_export_format(s).map_err(|e| CliError::Schema(e.to_string()))?,
-        None | Some(Value::Null) => detect_export_format_from_path(&out_path).map_err(|e| CliError::Schema(e.to_string()))?,
+        Some(Value::String(s)) => parse_export_format(s).map_err(cli_error_as_schema)?,
+        None | Some(Value::Null) => detect_export_format_from_path(&out_path).map_err(cli_error_as_schema)?,
         Some(_) => return Err(CliError::Schema(format!("manifest `exports[{idx}].format` must be a string"))),
     };
     let dpi = parse_export_dpi(idx, obj.get("dpi"))?;
-    let pretty = obj.get("pretty").and_then(Value::as_bool).unwrap_or(true);
+    let pretty = parse_export_pretty(idx, obj.get("pretty"))?;
     let tab_index = parse_export_tab_index(idx, obj.get("tab_index").or_else(|| obj.get("tabIndex")))?;
     let pdf_version = parse_export_pdf_version(idx, obj.get("pdf_version").or_else(|| obj.get("pdfVersion")))?;
     let ttf_font_path = parse_export_ttf_font(idx, obj.get("ttf_font").or_else(|| obj.get("ttfFont")), resolver)?;
@@ -333,13 +404,21 @@ fn parse_single_export_entry(idx: usize, item: &Value, resolver: &PathResolver) 
     Ok(BatchExportSpec {
         out_path,
         format,
-        sheet: opt_obj_str(obj, &["sheet", "sheet_id", "sheetId"]).map(str::to_owned),
+        sheet: opt_obj_str(obj, &["sheet", "sheet_id", "sheetId"], &context)?.map(str::to_owned),
         dpi,
         pretty,
         tab_index,
         pdf_version,
         ttf_font_path,
     })
+}
+
+fn parse_export_pretty(idx: usize, val: Option<&Value>) -> Result<bool, CliError> {
+    match val {
+        None | Some(Value::Null) => Ok(true),
+        Some(Value::Bool(b)) => Ok(*b),
+        Some(_) => Err(CliError::Schema(format!("manifest `exports[{idx}].pretty` must be a boolean"))),
+    }
 }
 
 fn parse_export_dpi(idx: usize, val: Option<&Value>) -> Result<Option<u16>, CliError> {
@@ -372,7 +451,7 @@ fn parse_export_tab_index(idx: usize, val: Option<&Value>) -> Result<Option<usiz
 fn parse_export_pdf_version(idx: usize, val: Option<&Value>) -> Result<PdfVersion, CliError> {
     match val {
         None | Some(Value::Null) => Ok(PdfVersion::Pdf17),
-        Some(Value::String(s)) => parse_pdf_version(s).map_err(|e| CliError::Schema(e.to_string())),
+        Some(Value::String(s)) => parse_pdf_version(s).map_err(cli_error_as_schema),
         Some(_) => Err(CliError::Schema(format!("manifest `exports[{idx}].pdf_version` must be a string (`1.4` or `1.7`)"))),
     }
 }
@@ -387,7 +466,10 @@ fn parse_export_ttf_font(idx: usize, val: Option<&Value>, resolver: &PathResolve
 
 fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<Session, CliError> {
     if let Some(tpl_path) = &manifest.template_path {
-        let bytes = fs::read(tpl_path).map_err(|err| CliError::Runtime(format!("failed to read template `{}`: {err}", tpl_path.display())))?;
+        let bytes = lumencraft_platform::fs::read_regular_file_bytes(tpl_path, MAX_ARCHIVE_FILE_BYTES).map_err(|err| match err {
+            PlatformError::FileTooLarge { .. } => CliError::from(err),
+            other => CliError::Runtime(format!("failed to read template `{}`: {other}", tpl_path.display())),
+        })?;
         let doc = instantiate_template_bytes(&bytes, None)?;
         return Ok(Session::from_document(doc));
     }
@@ -400,8 +482,10 @@ fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<Session, CliE
 
 fn load_manifest_inputs(session: &mut Session, inputs: &[BatchInputSpec]) -> Result<(), CliError> {
     for (idx, input) in inputs.iter().enumerate() {
-        let csv_text = fs::read_to_string(&input.csv_path)
-            .map_err(|err| CliError::Runtime(format!("failed to read input `{}`: {err}", input.csv_path.display())))?;
+        let csv_text = lumencraft_platform::fs::read_regular_file_utf8(&input.csv_path, MAX_CSV_FILE_BYTES).map_err(|err| match err {
+            PlatformError::FileTooLarge { .. } => CliError::from(err),
+            other => CliError::Runtime(format!("failed to read input `{}`: {other}", input.csv_path.display())),
+        })?;
 
         let matched_sheet_id = resolve_existing_data_sheet_id(session.document(), input.sheet.as_deref());
         let target_sheet_id = matched_sheet_id.clone().or_else(|| input.sheet.clone()).unwrap_or_else(|| format!("data_{}", idx + 1));
@@ -512,13 +596,42 @@ fn ensure_parent_dir_exists(params: &Value) -> Result<(), CliError> {
     Ok(())
 }
 
-fn opt_obj_str<'a>(obj: &'a Map<String, Value>, keys: &[&str]) -> Option<&'a str> {
-    for key in keys {
-        if let Some(s) = obj.get(*key).and_then(Value::as_str) {
-            return Some(s);
+fn reject_unknown_keys(obj: &Map<String, Value>, allowed: &[&str], context: &str) -> Result<(), CliError> {
+    for key in obj.keys() {
+        if !allowed.contains(&key.as_str()) {
+            let hint = match (context, key.as_str()) {
+                (ctx, "mode") if ctx.starts_with("manifest `inputs[") => {
+                    " (sheet replacement is automatic when `sheet` matches an existing sheet by ID or title)"
+                }
+                (ctx, "kind") if ctx.starts_with("manifest `exports[") => {
+                    " (use `format` with `lumencraft`, `lumencraft.d`, `svg`, `pdf`, `emf`, `png`, `tiff`, `csv`, `tsv`, or `json`)"
+                }
+                _ => "",
+            };
+            return Err(CliError::Schema(format!("{context} contains unknown field `{key}`{hint}")));
         }
     }
-    None
+    Ok(())
+}
+
+fn cli_error_as_schema(err: CliError) -> CliError {
+    match err {
+        CliError::Usage(msg) | CliError::Schema(msg) => CliError::Schema(msg),
+        other => other,
+    }
+}
+
+fn opt_obj_str<'a>(obj: &'a Map<String, Value>, keys: &[&str], context: &str) -> Result<Option<&'a str>, CliError> {
+    for key in keys {
+        if let Some(val) = obj.get(*key) {
+            match val {
+                Value::String(s) => return Ok(Some(s.as_str())),
+                Value::Null => continue,
+                _ => return Err(CliError::Schema(format!("{context} field `{key}` must be a string"))),
+            }
+        }
+    }
+    Ok(None)
 }
 
 fn parse_runner_args(args: &[String], usage: &str) -> Result<RunnerArgs, CliError> {
@@ -569,7 +682,7 @@ mod tests {
     use lumencraft_pdf::PdfVersion;
     use serde_json::json;
 
-    use super::parse_manifest_exports;
+    use super::{parse_batch_manifest, parse_manifest_exports};
     use crate::error::CliError;
     use crate::sandbox::{PathResolver, WorkdirGuard};
 
@@ -595,6 +708,35 @@ mod tests {
             { "format": "pdf", "out": "out/esc.pdf", "ttf_font": "../outside.ttf" }
         ]);
         assert!(matches!(parse_manifest_exports(Some(&escape), &resolver), Err(CliError::PathEscape(_))));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn batch_manifest_rejects_unknown_fields_with_schema_error() {
+        let dir = std::env::temp_dir().join(format!("lc_batch_strict_{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let resolver = PathResolver::Sandboxed(WorkdirGuard::new(&dir).unwrap());
+
+        let stale_export_kind = json!({
+            "schema": "lumencraft.batch.v1",
+            "exports": [{ "kind": "results_csv", "sheet": "4PL Fit", "out": "out/params.txt" }]
+        });
+        let err = parse_batch_manifest(&stale_export_kind.to_string(), &resolver).err().unwrap();
+        assert!(matches!(err, CliError::Schema(ref msg) if msg.contains("`kind`") && msg.contains("`format`")));
+
+        let stale_input_mode = json!({
+            "schema": "lumencraft.batch.v1",
+            "inputs": [{ "sheet": "Dose Response", "csv": "plates/plate_01.csv", "mode": "replace_data" }]
+        });
+        let err = parse_batch_manifest(&stale_input_mode.to_string(), &resolver).err().unwrap();
+        assert!(matches!(err, CliError::Schema(ref msg) if msg.contains("`mode`")));
+
+        let unknown_root = json!({
+            "schema": "lumencraft.batch.v1",
+            "unexpected": true
+        });
+        assert!(matches!(parse_batch_manifest(&unknown_root.to_string(), &resolver), Err(CliError::Schema(_))));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

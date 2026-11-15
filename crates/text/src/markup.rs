@@ -178,6 +178,7 @@ fn parse_segment(input: &str, state: &mut StyleState, spans: &mut Vec<RichSpan>,
     }
     let mut idx = 0usize;
     let mut prev_char: Option<char> = None;
+    let mut no_more_closing = [false; 4];
 
     while idx < input.len() {
         let rest = &input[idx..];
@@ -220,7 +221,7 @@ fn parse_segment(input: &str, state: &mut StyleState, spans: &mut Vec<RichSpan>,
 
         if ch == '*'
             && !state.in_math
-            && let Some((consumed, next_prev)) = handle_asterisk_run(rest, prev_char, state, spans, depth)
+            && let Some((consumed, next_prev)) = handle_asterisk_run(rest, prev_char, state, spans, depth, &mut no_more_closing)
         {
             idx += consumed;
             prev_char = next_prev;
@@ -497,6 +498,7 @@ fn handle_asterisk_run(
     state: &StyleState,
     spans: &mut Vec<RichSpan>,
     depth: usize,
+    no_more_closing: &mut [bool; 4],
 ) -> Option<(usize, Option<char>)> {
     let run_len = rest.bytes().take_while(|&b| b == b'*').count();
     let after_open = &rest[run_len..];
@@ -506,34 +508,36 @@ fn handle_asterisk_run(
         return None;
     }
 
-    if run_len == 3 {
-        let close_offset = find_closing_star_run(after_open, 3, true)?;
-        let inner = &after_open[..close_offset];
-        let mut inner_state = state.with_bold().with_italic();
-        parse_segment(inner, &mut inner_state, spans, depth + 1);
-        return Some((3 + close_offset + 3, Some('*')));
-    }
-
-    if run_len == 2 {
-        if prev_char.is_some_and(|c| c.is_ascii_digit()) && next_char.is_ascii_digit() {
-            return None;
-        }
-        let close_offset = find_closing_star_run(after_open, 2, false)?;
-        let inner = &after_open[..close_offset];
-        let mut inner_state = state.with_bold();
-        parse_segment(inner, &mut inner_state, spans, depth + 1);
-        return Some((2 + close_offset + 2, Some('*')));
-    }
-
-    // Single '*' italic delimiter: avoid splitting numeric multiplication like `1*10^3 + 2*10^4`.
-    if prev_char.is_some_and(|c| c.is_ascii_digit()) && next_char.is_ascii_digit() {
+    if no_more_closing.get(run_len).copied().unwrap_or(false) {
         return None;
     }
-    let close_offset = find_closing_star_run(after_open, 1, false)?;
+
+    let (needed, exact) = match run_len {
+        3 => (3, true),
+        2 | 1 => {
+            if prev_char.is_some_and(|c| c.is_ascii_digit()) && next_char.is_ascii_digit() {
+                return None;
+            }
+            (run_len, false)
+        }
+        _ => return None,
+    };
+
+    let Some(close_offset) = find_closing_star_run(after_open, needed, exact) else {
+        if let Some(slot) = no_more_closing.get_mut(run_len) {
+            *slot = true;
+        }
+        return None;
+    };
+
     let inner = &after_open[..close_offset];
-    let mut inner_state = state.with_italic();
+    let mut inner_state = match run_len {
+        3 => state.with_bold().with_italic(),
+        2 => state.with_bold(),
+        _ => state.with_italic(),
+    };
     parse_segment(inner, &mut inner_state, spans, depth + 1);
-    Some((1 + close_offset + 1, Some('*')))
+    Some((run_len + close_offset + run_len, Some('*')))
 }
 
 fn find_closing_star_run(s: &str, needed: usize, exact: bool) -> Option<usize> {
@@ -2081,5 +2085,59 @@ mod tests {
         let standalone = parse_equation_segments(r"\frac{a}{b}");
         assert_eq!(standalone.len(), 1);
         assert!(matches!(standalone[0], EquationSegment::Fraction { .. }));
+    }
+
+    #[test]
+    fn parse_markup_unmatched_asterisks_scale_linearly() {
+        fn min_parse_secs(input: &str) -> (RichText, f64) {
+            let mut best = f64::INFINITY;
+            let mut out = RichText::plain("");
+            for _ in 0..3 {
+                let t0 = std::time::Instant::now();
+                out = parse_markup(input);
+                best = best.min(t0.elapsed().as_secs_f64());
+            }
+            (out, best)
+        }
+
+        for pattern in ["*a ", "**a ", "***a ", "****a "] {
+            let small = pattern.repeat(4_000);
+            let big = pattern.repeat(16_000);
+
+            let (parsed_small, dt_small) = min_parse_secs(&small);
+            let (parsed_big, dt_big) = min_parse_secs(&big);
+
+            assert_eq!(parsed_small.plain_text(), small);
+            assert_eq!(parsed_big.plain_text(), big);
+            assert!(dt_big / dt_small.max(1e-6) < 8.0, "non-linear growth for `{pattern}`: small={dt_small:.6}s, big={dt_big:.6}s");
+        }
+
+        let large_120kb = "*a ".repeat(40_000);
+        let t_large = std::time::Instant::now();
+        let parsed_large = parse_markup(&large_120kb);
+        let elapsed_large = t_large.elapsed();
+        assert_eq!(parsed_large.plain_text(), large_120kb);
+        assert!(elapsed_large.as_millis() < 50, "expected 120 KB unmatched `*a ` input < 50 ms, took {elapsed_large:?}");
+    }
+
+    #[test]
+    fn parse_markup_mixed_matched_and_unmatched_asterisks() {
+        // Leading `**` without closing `**` drops first `*` and second `*` pairs with `italic*`.
+        let mixed = parse_markup("**unmatched *italic* and *unmatched");
+        assert_eq!(mixed.plain_text(), "*unmatched *italic and *unmatched");
+        assert!(mixed.spans.iter().any(|s| s.text == "unmatched *italic" && s.slope == SpanSlope::Italic && s.weight == SpanWeight::Regular));
+
+        let bold_then_unmatched = parse_markup("**boldok** and *u1 *u2 **u3 ***u4");
+        assert_eq!(bold_then_unmatched.plain_text(), "boldok and *u1 *u2 **u3 ***u4");
+        assert!(bold_then_unmatched.spans.iter().any(|s| s.text == "boldok" && s.weight == SpanWeight::Bold));
+
+        let triple_fallback = parse_markup("***doublefallback** *tail* *end");
+        assert_eq!(triple_fallback.plain_text(), "*doublefallback tail *end");
+        assert!(triple_fallback.spans.iter().any(|s| s.text == "doublefallback" && s.weight == SpanWeight::Bold));
+        assert!(triple_fallback.spans.iter().any(|s| s.text == "tail" && s.slope == SpanSlope::Italic));
+
+        let escaped = parse_markup(r"\*plain *yes* **unmatched");
+        assert_eq!(escaped.plain_text(), "*plain yes **unmatched");
+        assert!(escaped.spans.iter().any(|s| s.text == "yes" && s.slope == SpanSlope::Italic));
     }
 }

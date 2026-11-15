@@ -63,7 +63,9 @@ use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares}
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices,
+    append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell,
+    init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices,
+    sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
@@ -582,7 +584,7 @@ pub fn cox_ph_regression(
     let mut beta = vec![0.0_f64; p];
     let mut ll_curr = ll_null;
     let mut grad = grad_null;
-    let mut info = info_null;
+    let mut info = info_null.clone();
     let mut converged = false;
     let mut iterations = 0_usize;
 
@@ -629,46 +631,71 @@ pub fn cox_ph_regression(
         }
     }
 
+    let (lp_min, lp_max) = ordered.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), s| {
+        let lp: f64 = s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
+        (mn.min(lp), mx.max(lp))
+    });
+    let lp_span = lp_max - lp_min;
+    let separation_or_diverged = !converged || !lp_span.is_finite() || lp_span > 35.0 || beta.iter().any(|b| !b.is_finite());
+
     let info_mat = DenseMatrix::from_row_major(p, p, info.clone())?;
-    let cov_beta = if let Ok(chol) = cholesky(&info_mat) {
-        chol.inverse()?
-    } else {
-        let mut damped = info.clone();
-        for j in 0..p {
-            damped[j * p + j] += 1e-6;
-        }
-        let dm = DenseMatrix::from_row_major(p, p, damped)?;
-        match cholesky(&dm).and_then(|c| c.inverse()) {
-            Ok(inv) => inv,
-            Err(_) => DenseMatrix::identity(p)?,
-        }
-    };
+    let chol_opt = cholesky(&info_mat).ok();
+    let well_conditioned = chol_opt.as_ref().is_some_and(|chol| {
+        (0..p).all(|j| {
+            let diag_null = info_null[j * p + j];
+            let diag_curr = info[j * p + j];
+            let piv = chol.l().get(j, j).unwrap_or(0.0);
+            let piv_sq = piv * piv;
+            diag_null.is_finite()
+                && diag_null > 0.0
+                && diag_curr.is_finite()
+                && diag_curr > 1e-8 * diag_null
+                && piv.is_finite()
+                && piv_sq > 1e-10 * diag_curr
+        })
+    });
+
+    // Never regularize (info + 1e-6*I) or substitute I when covariance is singular/separated.
+    if separation_or_diverged || !well_conditioned {
+        converged = false;
+    }
+    let cov_beta = if converged { chol_opt.and_then(|chol| chol.inverse().ok()) } else { None };
+    if cov_beta.is_none() {
+        converged = false;
+    }
 
     let lr_chi2 = (2.0 * (ll_curr - ll_null)).max(0.0);
-    let wald_chi2 = (0..p)
-        .map(|j| {
-            let row_dot: f64 = (0..p).map(|k| info[j * p + k] * beta[k]).sum();
-            beta[j] * row_dot
-        })
-        .sum::<f64>()
-        .max(0.0);
     let df = p as f64;
     let lr_p = chi2_sf(lr_chi2, df)?;
-    let wald_p = chi2_sf(wald_chi2, df)?;
+    let (wald_chi2, wald_p) = if cov_beta.is_some() {
+        let w = (0..p)
+            .map(|j| {
+                let row_dot: f64 = (0..p).map(|k| info[j * p + k] * beta[k]).sum();
+                beta[j] * row_dot
+            })
+            .sum::<f64>()
+            .max(0.0);
+        (w, chi2_sf(w, df)?)
+    } else {
+        (f64::NAN, f64::NAN)
+    };
     let score_p = chi2_sf(score_chi2, df)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let (schoenfeld_rhos, schoenfeld_ps, global_sch_chi2) = schoenfeld_diagnostics(&ordered, &beta, &cov_beta, tie_method, p)?;
-    let global_sch_p = chi2_sf(global_sch_chi2, df)?;
+    let (schoenfeld_rhos, schoenfeld_ps, global_sch_chi2) = schoenfeld_diagnostics(&ordered, &beta, cov_beta.as_ref(), tie_method, p)?;
+    let global_sch_p = if global_sch_chi2.is_finite() { chi2_sf(global_sch_chi2, df)? } else { f64::NAN };
 
     let mut covariates = Vec::with_capacity(p);
     for j in 0..p {
-        let se = cov_beta.get(j, j).unwrap_or(0.0).max(0.0).sqrt();
-        let z_stat = if se > 0.0 { beta[j] / se } else { 0.0 };
-        let p_val = norm_two_sided_p(z_stat);
+        let var_j = cov_beta.as_ref().and_then(|cov| cov.get(j, j)).filter(|v| v.is_finite() && *v > 0.0);
+        let (se, z_stat, p_val, hr_lo, hr_hi) = if let Some(vj) = var_j {
+            let s = vj.sqrt();
+            let z = beta[j] / s;
+            (s, z, norm_two_sided_p(z), (beta[j] - z_crit * s).exp(), (beta[j] + z_crit * s).exp())
+        } else {
+            (f64::NAN, f64::NAN, f64::NAN, f64::NAN, f64::NAN)
+        };
         let hr = beta[j].exp();
-        let hr_lo = (beta[j] - z_crit * se).exp();
-        let hr_hi = (beta[j] + z_crit * se).exp();
         covariates.push(CoxCovariateResult {
             name: covariate_names[j].clone(),
             beta: beta[j],
@@ -684,7 +711,7 @@ pub fn cox_ph_regression(
 
     let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &beta, tie_method, n);
     let concordance = harrell_c_index(&ordered, &beta);
-    let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(&cov_beta, p);
+    let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(cov_beta.as_ref(), p);
 
     Ok(CoxPhResult {
         n_subjects: n,
@@ -713,20 +740,23 @@ pub fn cox_ph_regression(
     })
 }
 
-fn cox_cov_and_corr_matrices(cov_beta: &DenseMatrix, p: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+fn cox_cov_and_corr_matrices(cov_beta: Option<&DenseMatrix>, p: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    let Some(cov) = cov_beta else {
+        return (vec![vec![f64::NAN; p]; p], vec![vec![f64::NAN; p]; p]);
+    };
     let mut cov_rows = vec![vec![0.0_f64; p]; p];
     let mut corr_rows = vec![vec![0.0_f64; p]; p];
     let inv_sds: Vec<f64> = (0..p)
         .map(|j| {
-            let var = cov_beta.get(j, j).unwrap_or(0.0).max(0.0);
+            let var = cov.get(j, j).unwrap_or(0.0).max(0.0);
             if var > 0.0 { 1.0 / var.sqrt() } else { 0.0 }
         })
         .collect();
     for j in 0..p {
         for k in 0..p {
-            let c = cov_beta.get(j, k).unwrap_or(0.0);
+            let c = cov.get(j, k).unwrap_or(0.0);
             cov_rows[j][k] = c;
-            corr_rows[j][k] = if j == k { if inv_sds[j] > 0.0 { 1.0 } else { 0.0 } } else { (c * inv_sds[j] * inv_sds[k]).clamp(-1.0, 1.0) };
+            corr_rows[j][k] = if j == k { if inv_sds[j] > 0.0 { 1.0 } else { f64::NAN } } else { (c * inv_sds[j] * inv_sds[k]).clamp(-1.0, 1.0) };
         }
     }
     (cov_rows, corr_rows)
@@ -741,11 +771,22 @@ fn cox_eval(
     p: usize,
 ) -> Result<(f64, Vec<f64>, Vec<f64>), StatsError> {
     let n = ordered.len();
+    let mut raw_lp = vec![0.0_f64; n];
+    let mut lp_max = f64::NEG_INFINITY;
+    for i in 0..n {
+        let lp: f64 = ordered[i].2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
+        if !lp.is_finite() {
+            return Err(StatsError::NotConverged { algorithm: "cox_eval_non_finite_lp" });
+        }
+        raw_lp[i] = lp;
+        if lp > lp_max {
+            lp_max = lp;
+        }
+    }
     let mut eta = vec![0.0_f64; n];
     let mut w = vec![0.0_f64; n];
     for i in 0..n {
-        let lp: f64 = ordered[i].2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
-        eta[i] = lp.clamp(-50.0, 50.0);
+        eta[i] = raw_lp[i] - lp_max;
         w[i] = eta[i].exp();
     }
 
@@ -815,7 +856,11 @@ fn cox_eval(
                 CoxTieMethod::Breslow => 0.0,
                 CoxTieMethod::Efron => (m as f64) / df_f,
             };
-            let denom = (s0_risk - frac * s0_evt).max(1e-18);
+            let raw_denom = s0_risk - frac * s0_evt;
+            if !raw_denom.is_finite() || raw_denom <= 0.0 {
+                return Err(StatsError::NotConverged { algorithm: "cox_eval_risk_underflow" });
+            }
+            let denom = raw_denom;
             ll -= denom.ln();
             for j in 0..p {
                 let s1_eff = s1_risk[j] - frac * s1_evt[j];
@@ -865,10 +910,13 @@ fn solve_quad_form(mat_data: &[f64], vec: &[f64], p: usize) -> Result<f64, Stats
 fn schoenfeld_diagnostics(
     ordered: &[(f64, bool, Vec<f64>, usize)],
     beta: &[f64],
-    cov_beta: &DenseMatrix,
+    cov_beta: Option<&DenseMatrix>,
     tie_method: CoxTieMethod,
     p: usize,
 ) -> Result<(Vec<f64>, Vec<f64>, f64), StatsError> {
+    let Some(cov_beta) = cov_beta else {
+        return Ok((vec![f64::NAN; p], vec![f64::NAN; p], f64::NAN));
+    };
     let n = ordered.len();
     let w: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum::<f64>().clamp(-50.0, 50.0).exp()).collect();
     let mut s0_rev = vec![0.0_f64; n + 1];
@@ -1103,7 +1151,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             mv_status_column,
             mv_group_column,
         } => {
-            let cohorts: Vec<(usize, String, Vec<SurvivalObservation>)> = match &sheet.archetype {
+            let (cohorts, skipped_mv_rows, ignored_non_numeric) = match &sheet.archetype {
                 TableArchetype::Survival(table) => {
                     let indices = resolve_selected_indices(&spec.selected_data_sets, table.cohorts.len());
                     if indices.is_empty() {
@@ -1114,10 +1162,11 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                         let obs = table.cohort_observations(c_idx)?;
                         list.push((c_idx, table.cohorts[c_idx].title.clone(), obs));
                     }
-                    list
+                    (list, 0_usize, Vec::new())
                 }
                 TableArchetype::MultipleVariables(mv) => {
-                    extract_mv_km_cohorts(mv, &spec.selected_data_sets, *mv_time_column, *mv_status_column, *mv_group_column)?
+                    let mv_ext = extract_mv_km_cohorts(mv, &spec.selected_data_sets, *mv_time_column, *mv_status_column, *mv_group_column)?;
+                    (mv_ext.cohorts, mv_ext.skipped_rows, mv_ext.ignored_non_numeric)
                 }
                 other => {
                     return Err(StatsError::IncompatibleTable { analysis: "Kaplan-Meier survival", actual: other.kind() });
@@ -1262,21 +1311,29 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             }
 
             let min_events = km_results.iter().map(|k| k.n_events).min().unwrap_or(0);
+            let total_kept: usize = cohort_obs.iter().map(Vec::len).sum();
             out.checklist.push(checklist_item(
                 "Event counts & censoring",
                 if min_events >= 5 { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
                 Some(format!("min cohort events = {min_events}")),
                 "Kaplan-Meier assumes non-informative censoring; medians cannot be estimated if survival remains above 0.5.",
             ));
+            append_listwise_filtered_checklist_and_footnote(&mut out, "Kaplan-Meier survival", skipped_mv_rows, total_kept);
+            append_ignored_text_checklist_and_footnote(&mut out, "Kaplan-Meier survival", &ignored_non_numeric);
         }
         SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, reference_levels, tie_method } => {
             let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
                 return Err(StatsError::IncompatibleTable { analysis: "Cox proportional hazards", actual: sheet.archetype.kind() });
             };
-            let (pred_names, subjects) = build_cox_design_subjects(mv, *time_column, *status_column, predictor_columns, reference_levels)?;
+            let extraction = build_cox_design_subjects(mv, *time_column, *status_column, predictor_columns, reference_levels)?;
+            let pred_names = extraction.pred_names;
+            let subjects = extraction.subjects;
 
             let cox = cox_ph_regression(&subjects, &pred_names, *tie_method, confidence)?;
             let aic = -2.0 * cox.log_lik_model + 2.0 * (cox.covariates.len() as f64);
+            let has_non_estimable = cox.covariates.iter().any(|c| !c.se.is_finite());
+            push_scalar(&mut out, "Converged", None, if cox.converged { 1.0 } else { 0.0 });
+            push_scalar(&mut out, "Iterations", None, cox.iterations as f64);
             push_scalar(&mut out, "Concordance (C-index)", None, cox.concordance);
             push_scalar(&mut out, "Likelihood ratio chi2", None, cox.likelihood_ratio_chi2);
             push_scalar(&mut out, "Likelihood ratio P", None, cox.likelihood_ratio_p);
@@ -1306,14 +1363,20 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                     p_cell(cov.schoenfeld_p, p_fmt),
                 ]);
             }
-            out.tabs.push(build_tab(
+            let mut cox_tab = build_tab(
                 "cox-ph",
                 "Cox proportional hazards estimates",
                 ResultTabKind::ParametersAndConfidenceIntervals,
                 headers,
                 labels.clone(),
                 rows,
-            ));
+            );
+            if !cox.converged || has_non_estimable {
+                cox_tab.footnotes.push(String::from(
+                    "Model did not converge or exhibited separation/collinearity; non-estimable SE, Wald Z/P, and HR CI bounds are omitted. Refer to Likelihood ratio P for the omnibus test.",
+                ));
+            }
+            out.tabs.push(cox_tab);
 
             append_cox_baseline_tabs(&mut out, &cox.baseline_survival);
 
@@ -1329,20 +1392,42 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
 
             append_cox_curve_overlays(&mut out, &cox);
 
-            let ph_ok = cox.global_schoenfeld_p >= 0.05;
             out.checklist.push(checklist_item(
-                "Proportional hazards assumption (Schoenfeld)",
-                if ph_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
-                Some(format!("Global chi2 = {:.3}, P = {:.4}", cox.global_schoenfeld_chi2, cox.global_schoenfeld_p)),
-                if ph_ok {
-                    "Scaled Schoenfeld residuals show no significant time-varying slope (PH assumption satisfied)."
+                "Cox PH convergence & estimability",
+                if cox.converged && !has_non_estimable { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+                Some(format!("Converged = {}, iterations = {}", cox.converged, cox.iterations)),
+                if cox.converged && !has_non_estimable {
+                    "Partial-likelihood Newton-Raphson converged with a positive-definite covariate information matrix."
                 } else {
-                    "Schoenfeld residual test indicates time-varying hazard ratios (P < 0.05), violating the proportional hazards assumption."
+                    "Partial-likelihood Newton-Raphson failed to converge or encountered monotone-likelihood separation / covariate collinearity; non-estimable Wald SE, Z, P, and HR CI entries are omitted, while Likelihood ratio P tests the omnibus fit."
                 },
             ));
+
+            let (ph_status, ph_metric, ph_expl) = if cox.global_schoenfeld_p.is_finite() {
+                let ph_ok = cox.global_schoenfeld_p >= 0.05;
+                (
+                    if ph_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+                    Some(format!("Global chi2 = {:.3}, P = {:.4}", cox.global_schoenfeld_chi2, cox.global_schoenfeld_p)),
+                    if ph_ok {
+                        "Scaled Schoenfeld residuals show no significant time-varying slope (PH assumption satisfied)."
+                    } else {
+                        "Schoenfeld residual test indicates time-varying hazard ratios (P < 0.05), violating the proportional hazards assumption."
+                    },
+                )
+            } else {
+                (
+                    ChecklistStatus::Warn,
+                    Some(String::from("Global Schoenfeld test unavailable")),
+                    "Global Schoenfeld proportional-hazards test cannot be computed when the covariate covariance matrix is non-estimable.",
+                )
+            };
+            out.checklist.push(checklist_item("Proportional hazards assumption (Schoenfeld)", ph_status, ph_metric, ph_expl));
+            append_listwise_filtered_checklist_and_footnote(&mut out, "Cox proportional hazards", extraction.skipped_rows, subjects.len());
+            append_ignored_text_checklist_and_footnote(&mut out, "Cox proportional hazards", &extraction.ignored_non_numeric);
         }
     }
 
+    sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }
 
@@ -1390,13 +1475,24 @@ fn append_cox_baseline_tabs(out: &mut ResultSheet, baseline: &[CoxBaselinePoint]
 
 /// Build Cox PH predictor names and complete-case subjects, expanding categorical predictors
 /// into `"{title}[{level} vs {ref_level}]"` reference-coded dummy indicators.
+struct CoxDesignExtraction {
+    pred_names: Vec<String>,
+    subjects: Vec<CoxSubject>,
+    skipped_rows: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
+
+fn cell_has_entry(cell: Option<&Cell>) -> bool {
+    cell.is_some_and(|c| !c.is_empty() || c.excluded)
+}
+
 fn build_cox_design_subjects(
     mv: &MultipleVariablesTable,
     time_column: usize,
     status_column: usize,
     predictor_columns: &[usize],
     reference_levels: &[(usize, String)],
-) -> Result<(Vec<String>, Vec<CoxSubject>), StatsError> {
+) -> Result<CoxDesignExtraction, StatsError> {
     let time_var = mv.variables.get(time_column).ok_or(StatsError::MissingColumn { index: time_column })?;
     let status_var = mv.variables.get(status_column).ok_or(StatsError::MissingColumn { index: status_column })?;
 
@@ -1435,46 +1531,94 @@ fn build_cox_design_subjects(
         }
     }
 
+    let active_end = (0..mv.row_count()).rfind(|&r| {
+        cell_has_entry(time_var.cells.get(r))
+            || cell_has_entry(status_var.cells.get(r))
+            || predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)))
+    });
     let mut subjects = Vec::new();
-    for r in 0..mv.row_count() {
-        let Some(t) = time_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-        let Some(st) = status_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-        let mut x_vals = Vec::with_capacity(pred_names.len());
-        let mut ok = true;
-        for (pos, &pc) in predictor_columns.iter().enumerate() {
-            let Some(cell) = mv.variables[pc].cells.get(r) else {
-                ok = false;
-                break;
-            };
-            if cell.excluded {
-                ok = false;
-                break;
+    let mut skipped_rows = 0_usize;
+    let mut time_non_num = 0_usize;
+    let mut status_non_num = 0_usize;
+    let mut pred_non_num = vec![0_usize; predictor_columns.len()];
+
+    if let Some(end_row) = active_end {
+        for r in 0..=end_row {
+            let tc = time_var.cells.get(r);
+            let sc = status_var.cells.get(r);
+            let has_entry =
+                cell_has_entry(tc) || cell_has_entry(sc) || predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)));
+            if !has_entry {
+                continue;
             }
-            if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
-                let Some(tok) = mv_survival_token(cell) else {
+            if tc.is_some_and(is_ignored_non_numeric_cell) {
+                time_non_num += 1;
+            }
+            if sc.is_some_and(is_ignored_non_numeric_cell) {
+                status_non_num += 1;
+            }
+            for (pos, &pc) in predictor_columns.iter().enumerate() {
+                if cat_levels[pos].is_none() && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
+                    pred_non_num[pos] += 1;
+                }
+            }
+            let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
+                skipped_rows += 1;
+                continue;
+            };
+            let status = parse_survival_status(st)?;
+            let mut x_vals = Vec::with_capacity(pred_names.len());
+            let mut ok = true;
+            for (pos, &pc) in predictor_columns.iter().enumerate() {
+                let Some(cell) = mv.variables[pc].cells.get(r) else {
                     ok = false;
                     break;
                 };
-                if tok != *ref_lvl && !non_refs.contains(&tok) {
+                if cell.excluded {
                     ok = false;
                     break;
                 }
-                for lv in non_refs {
-                    x_vals.push(if &tok == lv { 1.0 } else { 0.0 });
+                if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
+                    let Some(tok) = mv_survival_token(cell) else {
+                        ok = false;
+                        break;
+                    };
+                    if tok != *ref_lvl && !non_refs.contains(&tok) {
+                        ok = false;
+                        break;
+                    }
+                    for lv in non_refs {
+                        x_vals.push(if &tok == lv { 1.0 } else { 0.0 });
+                    }
+                } else if let Some(xv) = cell.active_number() {
+                    x_vals.push(xv);
+                } else {
+                    ok = false;
+                    break;
                 }
-            } else if let Some(xv) = cell.active_number() {
-                x_vals.push(xv);
-            } else {
-                ok = false;
-                break;
             }
-        }
-        if ok {
-            subjects.push(CoxSubject { time: t, event: st != 0.0, x: x_vals });
+            if ok {
+                subjects.push(CoxSubject { time: t, event: matches!(status, SurvivalStatus::Event), x: x_vals });
+            } else {
+                skipped_rows += 1;
+            }
         }
     }
 
-    Ok((pred_names, subjects))
+    let mut ignored_non_numeric = Vec::new();
+    if time_non_num > 0 {
+        ignored_non_numeric.push((time_var.title.clone(), time_non_num));
+    }
+    if status_non_num > 0 {
+        ignored_non_numeric.push((status_var.title.clone(), status_non_num));
+    }
+    for (pos, &count) in pred_non_num.iter().enumerate() {
+        if count > 0 {
+            ignored_non_numeric.push((mv.variables[predictor_columns[pos]].title.clone(), count));
+        }
+    }
+
+    Ok(CoxDesignExtraction { pred_names, subjects, skipped_rows, ignored_non_numeric })
 }
 
 /// Push Breslow/Efron baseline survival `S0(t) = exp(-H0(t))` and per-covariate unit-shift
@@ -1489,35 +1633,52 @@ fn append_cox_curve_overlays(out: &mut ResultSheet, cox: &CoxPhResult) {
         base_pts.push(CurveSamplePoint { x: 0.0, y: 1.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
     }
     for pt in &cox.baseline_survival {
+        if !pt.time.is_finite() || !pt.cum_hazard.is_finite() {
+            continue;
+        }
         let s0 = (-pt.cum_hazard).exp().clamp(0.0, 1.0);
-        base_pts.push(CurveSamplePoint { x: pt.time, y: s0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+        if s0.is_finite() {
+            base_pts.push(CurveSamplePoint { x: pt.time, y: s0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+        }
     }
-    out.fitted_curves.push(FittedCurveOverlay {
-        data_set_index: 0,
-        equation_id: String::from("cox_baseline"),
-        converged: cox.converged,
-        ambiguous: false,
-        points: base_pts,
-    });
+    if !base_pts.is_empty() {
+        out.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: 0,
+            equation_id: String::from("cox_baseline"),
+            converged: cox.converged,
+            ambiguous: false,
+            points: base_pts,
+        });
+    }
 
     for (j, cov) in cox.covariates.iter().enumerate() {
+        if !cov.beta.is_finite() {
+            continue;
+        }
         let hr_shift = cov.beta.clamp(-50.0, 50.0).exp();
         let mut cov_pts = Vec::with_capacity(cox.baseline_survival.len() + usize::from(prepend_zero));
         if prepend_zero {
             cov_pts.push(CurveSamplePoint { x: 0.0, y: 1.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
         }
         for pt in &cox.baseline_survival {
+            if !pt.time.is_finite() || !pt.cum_hazard.is_finite() {
+                continue;
+            }
             let s0 = (-pt.cum_hazard).exp().clamp(0.0, 1.0);
             let s_shifted = s0.powf(hr_shift).clamp(0.0, 1.0);
-            cov_pts.push(CurveSamplePoint { x: pt.time, y: s_shifted, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+            if s_shifted.is_finite() {
+                cov_pts.push(CurveSamplePoint { x: pt.time, y: s_shifted, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+            }
         }
-        out.fitted_curves.push(FittedCurveOverlay {
-            data_set_index: j + 1,
-            equation_id: String::from("cox_covariate"),
-            converged: cox.converged,
-            ambiguous: false,
-            points: cov_pts,
-        });
+        if !cov_pts.is_empty() {
+            out.fitted_curves.push(FittedCurveOverlay {
+                data_set_index: j + 1,
+                equation_id: String::from("cox_covariate"),
+                converged: cox.converged,
+                ambiguous: false,
+                points: cov_pts,
+            });
+        }
     }
 }
 
@@ -1560,13 +1721,29 @@ fn title_has_any(title: &str, hints: &[&str]) -> bool {
     hints.iter().any(|h| lower.contains(h))
 }
 
+fn parse_survival_status(st: f64) -> Result<SurvivalStatus, StatsError> {
+    if st == 1.0 {
+        Ok(SurvivalStatus::Event)
+    } else if st == 0.0 {
+        Ok(SurvivalStatus::Censored)
+    } else {
+        Err(StatsError::InvalidParameter { name: "survival_status", value: st })
+    }
+}
+
+struct MvKmExtraction {
+    cohorts: Vec<(usize, String, Vec<SurvivalObservation>)>,
+    skipped_rows: usize,
+    ignored_non_numeric: Vec<(String, usize)>,
+}
+
 fn extract_mv_km_cohorts(
     mv: &MultipleVariablesTable,
     selected: &[usize],
     mv_time_column: Option<usize>,
     mv_status_column: Option<usize>,
     mv_group_column: Option<usize>,
-) -> Result<Vec<(usize, String, Vec<SurvivalObservation>)>, StatsError> {
+) -> Result<MvKmExtraction, StatsError> {
     if let Some(t) = mv_time_column
         && t >= mv.variables.len()
     {
@@ -1643,30 +1820,53 @@ fn extract_mv_km_cohorts(
 
     let time_var = &mv.variables[time_col];
     let status_var = &mv.variables[status_col];
+    let active_end = (0..mv.row_count()).rfind(|&r| {
+        cell_has_entry(time_var.cells.get(r))
+            || cell_has_entry(status_var.cells.get(r))
+            || group_col.is_some_and(|gc| cell_has_entry(mv.variables[gc].cells.get(r)))
+    });
+    let mut skipped_rows = 0_usize;
+    let mut time_non_num = 0_usize;
+    let mut status_non_num = 0_usize;
 
-    if let Some(g_col) = group_col {
+    let cohorts = if let Some(g_col) = group_col {
         let g_var = &mv.variables[g_col];
         let levels: Vec<String> = g_var.ordered_levels().into_iter().filter(|l| l.included_count > 0).map(|l| l.level).collect();
         if levels.is_empty() {
             return Err(StatsError::EmptyInput);
         }
         let mut buckets: Vec<Vec<SurvivalObservation>> = vec![Vec::new(); levels.len()];
-        for r in 0..mv.row_count() {
-            let Some(t) = time_var.cells.get(r).and_then(Cell::active_number) else { continue };
-            let Some(st) = status_var.cells.get(r).and_then(Cell::active_number) else { continue };
-            if !t.is_finite() || t < 0.0 {
-                return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
-            }
-            let status = if st == 1.0 {
-                SurvivalStatus::Event
-            } else if st == 0.0 {
-                SurvivalStatus::Censored
-            } else {
-                return Err(StatsError::InvalidParameter { name: "survival_status", value: st });
-            };
-            let Some(tok) = g_var.cells.get(r).and_then(mv_survival_token) else { continue };
-            if let Some(pos) = levels.iter().position(|lvl| lvl == &tok) {
-                buckets[pos].push(SurvivalObservation { row: r, time: t, status });
+        if let Some(end_row) = active_end {
+            for r in 0..=end_row {
+                let tc = time_var.cells.get(r);
+                let sc = status_var.cells.get(r);
+                let gc = g_var.cells.get(r);
+                if !(cell_has_entry(tc) || cell_has_entry(sc) || cell_has_entry(gc)) {
+                    continue;
+                }
+                if tc.is_some_and(is_ignored_non_numeric_cell) {
+                    time_non_num += 1;
+                }
+                if sc.is_some_and(is_ignored_non_numeric_cell) {
+                    status_non_num += 1;
+                }
+                let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
+                    skipped_rows += 1;
+                    continue;
+                };
+                if !t.is_finite() || t < 0.0 {
+                    return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+                }
+                let status = parse_survival_status(st)?;
+                let Some(tok) = gc.and_then(mv_survival_token) else {
+                    skipped_rows += 1;
+                    continue;
+                };
+                if let Some(pos) = levels.iter().position(|lvl| lvl == &tok) {
+                    buckets[pos].push(SurvivalObservation { row: r, time: t, status });
+                } else {
+                    skipped_rows += 1;
+                }
             }
         }
         let cohorts: Vec<(usize, String, Vec<SurvivalObservation>)> =
@@ -1674,30 +1874,48 @@ fn extract_mv_km_cohorts(
         if cohorts.is_empty() {
             return Err(StatsError::EmptyInput);
         }
-        Ok(cohorts)
+        cohorts
     } else {
         let mut obs = Vec::new();
-        for r in 0..mv.row_count() {
-            let Some(t) = time_var.cells.get(r).and_then(Cell::active_number) else { continue };
-            let Some(st) = status_var.cells.get(r).and_then(Cell::active_number) else { continue };
-            if !t.is_finite() || t < 0.0 {
-                return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+        if let Some(end_row) = active_end {
+            for r in 0..=end_row {
+                let tc = time_var.cells.get(r);
+                let sc = status_var.cells.get(r);
+                if !(cell_has_entry(tc) || cell_has_entry(sc)) {
+                    continue;
+                }
+                if tc.is_some_and(is_ignored_non_numeric_cell) {
+                    time_non_num += 1;
+                }
+                if sc.is_some_and(is_ignored_non_numeric_cell) {
+                    status_non_num += 1;
+                }
+                let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
+                    skipped_rows += 1;
+                    continue;
+                };
+                if !t.is_finite() || t < 0.0 {
+                    return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
+                }
+                let status = parse_survival_status(st)?;
+                obs.push(SurvivalObservation { row: r, time: t, status });
             }
-            let status = if st == 1.0 {
-                SurvivalStatus::Event
-            } else if st == 0.0 {
-                SurvivalStatus::Censored
-            } else {
-                return Err(StatsError::InvalidParameter { name: "survival_status", value: st });
-            };
-            obs.push(SurvivalObservation { row: r, time: t, status });
         }
         if obs.is_empty() {
             return Err(StatsError::EmptyInput);
         }
         let label = if time_var.title.trim().is_empty() { String::from("Overall") } else { time_var.title.clone() };
-        Ok(vec![(0, label, obs)])
+        vec![(0, label, obs)]
+    };
+
+    let mut ignored_non_numeric = Vec::new();
+    if time_non_num > 0 {
+        ignored_non_numeric.push((time_var.title.clone(), time_non_num));
     }
+    if status_non_num > 0 {
+        ignored_non_numeric.push((status_var.title.clone(), status_non_num));
+    }
+    Ok(MvKmExtraction { cohorts, skipped_rows, ignored_non_numeric })
 }
 
 fn append_survival_pairwise(

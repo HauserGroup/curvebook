@@ -186,6 +186,8 @@ fn expected_doc_code(err: &DocError) -> ErrorCode {
         DocError::TooManyRows { .. }
         | DocError::TooManyDataSets { .. }
         | DocError::TooManySubcolumns { .. }
+        | DocError::TooManyCells { .. }
+        | DocError::TooManyLayoutItems { .. }
         | DocError::TooManySheets { .. }
         | DocError::TitleTooLong { .. } => ErrorCode::ResourceLimit,
         DocError::SheetFrozen { .. } => ErrorCode::FrozenSheet,
@@ -216,7 +218,7 @@ fn check_format_error(err: FormatError) {
         FormatError::UnsupportedCompression { .. } | FormatError::InvalidArchiveKind { .. } | FormatError::UnsupportedFormat { .. } => {
             ErrorCode::UnsupportedFormat
         }
-        FormatError::ZipBomb { .. } | FormatError::XmlDepthExceeded { .. } => ErrorCode::ResourceLimit,
+        FormatError::ZipBomb { .. } | FormatError::FileTooLarge { .. } | FormatError::XmlDepthExceeded { .. } => ErrorCode::ResourceLimit,
         FormatError::UnsafePath { .. } => ErrorCode::PathEscape,
         FormatError::DuplicateEntry { .. } => ErrorCode::AlreadyExists,
         FormatError::UnsupportedSchemaVersion { .. } => ErrorCode::UnsupportedVersion,
@@ -311,6 +313,8 @@ fn all_doc_errors() -> Vec<DocError> {
         DocError::TooManyRows { count: 10, max: 5 },
         DocError::TooManyDataSets { count: 10, max: 5 },
         DocError::TooManySubcolumns { count: 10, max: 5 },
+        DocError::TooManyCells { count: 50_000_000, max: 30_000_000 },
+        DocError::TooManyLayoutItems { count: 65, max: 64 },
         DocError::TooManySheets { count: 10, max: 5 },
         DocError::TitleTooLong { byte_len: 300, max: 128 },
         DocError::InvalidSubcolumnCount { count: 0 },
@@ -336,6 +340,7 @@ fn all_format_errors() -> Vec<FormatError> {
         FormatError::CorruptCrc { entry: String::from("doc.json"), expected: 1, actual: 2 },
         FormatError::UnsupportedCompression { entry: String::from("doc.json"), method: 99 },
         FormatError::ZipBomb { reason: String::from("ratio") },
+        FormatError::FileTooLarge { path: String::from("big.csv"), actual_bytes: Some(2048), limit_bytes: 1024 },
         FormatError::UnsafePath { path: String::from("../x") },
         FormatError::DuplicateEntry { path: String::from("doc.json") },
         FormatError::MissingArchiveEntry { path: String::from("doc.json") },
@@ -428,11 +433,13 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
     for err in [
         ChartError::SheetNotFound { sheet_id: String::from("g1") },
         ChartError::InvalidSpec { message: String::from("neg") },
+        ChartError::ResourceLimit { message: String::from("budget") },
         ChartError::CompileFailed { message: String::from("fail") },
     ] {
         let code = match &err {
             ChartError::SheetNotFound { .. } => ErrorCode::NotFound,
             ChartError::InvalidSpec { .. } => ErrorCode::BadInput,
+            ChartError::ResourceLimit { .. } => ErrorCode::ResourceLimit,
             ChartError::CompileFailed { .. } => ErrorCode::InternalError,
         };
         let eng = lumencraft_engine::EngineError::from(err);
@@ -453,10 +460,12 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
     for err in [
         PdfError::EmptyDocument,
         PdfError::InvalidScene { message: String::from("bad") },
+        PdfError::ResourceLimit { message: String::from("cap") },
         PdfError::CompressionFailed { message: String::from("zlib") },
     ] {
         let code = match &err {
             PdfError::EmptyDocument | PdfError::InvalidScene { .. } => ErrorCode::BadInput,
+            PdfError::ResourceLimit { .. } => ErrorCode::ResourceLimit,
             PdfError::CompressionFailed { .. } => ErrorCode::InternalError,
         };
         let eng = lumencraft_engine::EngineError::from(err);

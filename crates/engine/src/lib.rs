@@ -11,6 +11,8 @@ pub use cmd::Caller;
 pub mod dag;
 pub mod guard;
 pub mod methods_report;
+pub mod path_policy;
+pub use path_policy::ExternalPathPolicy;
 
 use std::collections::VecDeque;
 use std::fmt;
@@ -124,6 +126,14 @@ impl From<DocError> for EngineError {
                 Some(json!({ "count": count, "max": max })),
                 Some("Reduce replicate subcolumn count below the project maximum."),
             ),
+            DocError::TooManyCells { count, max } => (
+                ErrorCode::ResourceLimit,
+                Some(json!({ "count": count, "max": max })),
+                Some("Reduce rows, data sets, or replicate subcolumns below the cell limit."),
+            ),
+            DocError::TooManyLayoutItems { count, max } => {
+                (ErrorCode::ResourceLimit, Some(json!({ "count": count, "max": max })), Some("Reduce layout item count below the project maximum."))
+            }
             DocError::TooManySheets { count, max } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "count": count, "max": max })), Some("Delete unused sheets before adding more."))
             }
@@ -236,6 +246,12 @@ impl From<FormatError> for EngineError {
             FormatError::ZipBomb { reason } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "reason": reason })), Some("Archive exceeds decompression safety limits."), false)
             }
+            FormatError::FileTooLarge { path, actual_bytes, limit_bytes } => (
+                ErrorCode::ResourceLimit,
+                Some(json!({ "path": path, "actual_bytes": actual_bytes, "limit_bytes": limit_bytes })),
+                Some("Reduce the input file size below the format limit."),
+                false,
+            ),
             FormatError::UnsafePath { path } => {
                 (ErrorCode::PathEscape, Some(json!({ "path": path })), Some("Ensure all archive or file paths stay inside the allowed root."), false)
             }
@@ -417,6 +433,7 @@ impl From<ChartError> for EngineError {
         let (code, details) = match err {
             ChartError::SheetNotFound { sheet_id } => (ErrorCode::NotFound, Some(json!({ "sheet_id": sheet_id }))),
             ChartError::InvalidSpec { message } => (ErrorCode::BadInput, Some(json!({ "reason": message }))),
+            ChartError::ResourceLimit { message } => (ErrorCode::ResourceLimit, Some(json!({ "reason": message }))),
             ChartError::CompileFailed { message } => (ErrorCode::InternalError, Some(json!({ "reason": message }))),
         };
         build_mapped_error(code, msg, details, None, false)
@@ -440,6 +457,9 @@ impl From<PdfError> for EngineError {
         let (code, details, remediation) = match err {
             PdfError::EmptyDocument => (ErrorCode::BadInput, None, Some("Add at least one page before exporting PDF.")),
             PdfError::InvalidScene { message } => (ErrorCode::BadInput, Some(json!({ "reason": message })), None),
+            PdfError::ResourceLimit { message } => {
+                (ErrorCode::ResourceLimit, Some(json!({ "reason": message })), Some("Reduce the number of PDF pages or chart complexity."))
+            }
             PdfError::CompressionFailed { message } => (ErrorCode::InternalError, Some(json!({ "reason": message })), None),
         };
         build_mapped_error(code, msg, details, remediation, false)
@@ -477,6 +497,12 @@ impl From<PlatformError> for EngineError {
             PlatformError::OutputLimitExceeded { program, stream, limit_bytes } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "program": program, "stream": stream, "limit_bytes": limit_bytes })), None, false)
             }
+            PlatformError::FileTooLarge { path, actual_bytes, limit_bytes } => (
+                ErrorCode::ResourceLimit,
+                Some(json!({ "path": path, "actual_bytes": actual_bytes, "limit_bytes": limit_bytes })),
+                Some("Reduce the input file size below the format limit."),
+                false,
+            ),
             PlatformError::InvalidPath { reason } => (ErrorCode::BadInput, Some(json!({ "reason": reason })), None, false),
             PlatformError::PathEscape { path, workdir } => (
                 ErrorCode::PathEscape,
@@ -725,6 +751,7 @@ pub struct Session {
     file_path: Option<PathBuf>,
     dirty: bool,
     gui_only: GuiOnlyPolicy,
+    path_policy: ExternalPathPolicy,
     undo_stack: VecDeque<UndoEntry>,
     redo_stack: Vec<ProjectDocument>,
 }
@@ -784,7 +811,41 @@ impl Session {
         Ok(journal.record_command(entry)?)
     }
 
-    /// Execute `command_id` transactionally and append to `journal` only when the command succeeds and mutates state.
+    /// Whether replaying `command_id` from `{ command_id, params }` alone is unsafe across crash
+    /// recovery (undo/redo depend on ephemeral stacks; `READS_FILESYSTEM` commands depend on
+    /// external files that may change or disappear before recovery) and must instead checkpoint an
+    /// atomic document snapshot.
+    #[must_use]
+    pub fn command_requires_wal_checkpoint(command_id: &str) -> bool {
+        if command_id == "edit.undo" || command_id == "edit.redo" {
+            return true;
+        }
+        cmd::registry().get(command_id).is_some_and(|spec| spec.effects.contains(cmd::Effects::READS_FILESYSTEM))
+    }
+
+    /// Record an already-executed command's effect to `journal` cleanly when `mutated` is true:
+    /// checkpoints a full snapshot for undo/redo or external-file-reading commands, or appends a
+    /// checksummed WAL record for deterministic mutations.
+    pub fn record_outcome_to_journal<B: JournalBackend>(
+        &self,
+        journal: &mut CrashRecoveryJournal<B>,
+        command_id: &str,
+        params: &serde_json::Value,
+        mutated: bool,
+    ) -> Result<(), EngineError> {
+        if !mutated {
+            return Ok(());
+        }
+        if Self::command_requires_wal_checkpoint(command_id) {
+            return self.checkpoint_journal(journal);
+        }
+        let _ = self.record_to_journal(journal, command_id, params)?;
+        Ok(())
+    }
+
+    /// Execute `command_id` transactionally and persist its effect to `journal` only when the
+    /// command succeeds and mutates state (atomically checkpointing undo/redo and external-file
+    /// readers, or appending deterministic commands to `ops.journal`).
     pub fn execute_and_record<B: JournalBackend>(
         &mut self,
         journal: &mut CrashRecoveryJournal<B>,
@@ -792,9 +853,22 @@ impl Session {
         params: serde_json::Value,
     ) -> Result<CommandOutcome, EngineError> {
         let outcome = self.execute(command_id, params.clone())?;
-        if outcome.mutated {
-            let _ = self.record_to_journal(journal, command_id, &params)?;
-        }
+        self.record_outcome_to_journal(journal, command_id, &params, outcome.mutated)?;
+        Ok(outcome)
+    }
+
+    /// Execute `command_id` on behalf of `caller` and persist its effect to `journal` when it
+    /// mutates state.
+    pub fn execute_with_caller_and_record<B: JournalBackend>(
+        &mut self,
+        journal: &mut CrashRecoveryJournal<B>,
+        command_id: &str,
+        params: serde_json::Value,
+        caller: Caller,
+        cancelled: &AtomicBool,
+    ) -> Result<CommandOutcome, EngineError> {
+        let outcome = self.execute_with_caller(command_id, params.clone(), caller, cancelled)?;
+        self.record_outcome_to_journal(journal, command_id, &params, outcome.mutated)?;
         Ok(outcome)
     }
 
@@ -831,7 +905,15 @@ impl Session {
     #[must_use]
     pub fn from_document(mut document: ProjectDocument) -> Self {
         let _ = lumencraft_format::sanitize_circular_hooks(&mut document);
-        Self { doc: document, file_path: None, dirty: false, gui_only: GuiOnlyPolicy::Disabled, undo_stack: VecDeque::new(), redo_stack: Vec::new() }
+        Self {
+            doc: document,
+            file_path: None,
+            dirty: false,
+            gui_only: GuiOnlyPolicy::Disabled,
+            path_policy: ExternalPathPolicy::Unconstrained,
+            undo_stack: VecDeque::new(),
+            redo_stack: Vec::new(),
+        }
     }
 
     /// Return the active [`GuiOnlyPolicy`] restricting direct non-UI command execution.
@@ -849,6 +931,24 @@ impl Session {
     #[must_use]
     pub const fn with_gui_only(mut self, policy: GuiOnlyPolicy) -> Self {
         self.gui_only = policy;
+        self
+    }
+
+    /// Active external filesystem path policy on this session.
+    #[must_use]
+    pub const fn path_policy(&self) -> &ExternalPathPolicy {
+        &self.path_policy
+    }
+
+    /// Replace the active external filesystem path policy on this session.
+    pub fn set_path_policy(&mut self, policy: ExternalPathPolicy) {
+        self.path_policy = policy;
+    }
+
+    /// Fluent builder setting the active external filesystem path policy on this session.
+    #[must_use]
+    pub fn with_path_policy(mut self, policy: ExternalPathPolicy) -> Self {
+        self.path_policy = policy;
         self
     }
 
@@ -957,7 +1057,7 @@ impl Session {
     fn execute_registered_spec(
         &mut self,
         spec: &cmd::CommandSpec,
-        params: Value,
+        mut params: Value,
         caller: Caller,
         cancelled: &AtomicBool,
     ) -> Result<CommandOutcome, EngineError> {
@@ -972,6 +1072,9 @@ impl Session {
         if !(spec.enabled)(self) {
             return Err(EngineError::with_code(ErrorCode::Conflict, format!("command `{}` is currently disabled", spec.id))
                 .with_details(json!({ "command_id": spec.id })));
+        }
+        if self.path_policy.is_constrained() && spec.effects.intersects(cmd::Effects::READS_FILESYSTEM.with(cmd::Effects::WRITES_FILESYSTEM)) {
+            self.path_policy.enforce_command_path_params(&mut params)?;
         }
         if spec.id == "edit.undo" || spec.id == "edit.redo" {
             return guard::run_guarded(spec.id, || {
@@ -989,6 +1092,9 @@ impl Session {
             });
         }
 
+        let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
+            || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
+            || (spec.id == "project.open" && !params.get("path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()));
         let before = self.doc.clone();
         let before_path = self.file_path.clone();
         let before_dirty = self.dirty;
@@ -1000,6 +1106,15 @@ impl Session {
         match outcome {
             Ok(res) => {
                 if res.mutated {
+                    if let Err(err) = lumencraft_format::validate_project_document(&self.doc) {
+                        self.doc = before;
+                        self.file_path = before_path;
+                        self.dirty = before_dirty;
+                        return Err(err.into());
+                    }
+                    if clears_file_path_on_mutate {
+                        self.file_path = None;
+                    }
                     self.push_undo_snapshot(before);
                     self.redo_stack.clear();
                     self.dirty = true;
@@ -1047,7 +1162,7 @@ impl Session {
 
     /// Compile a graph or layout sheet into a resolution-independent [`ChartScene`].
     pub fn render_sheet_scene(&self, sheet_id: &SheetId) -> Result<ChartScene, EngineError> {
-        cmd::helpers::compile_sheet_scene(&self.doc, sheet_id)
+        guard::run_guarded("session.render_sheet_scene", || cmd::helpers::compile_sheet_scene(&self.doc, sheet_id))
     }
 }
 

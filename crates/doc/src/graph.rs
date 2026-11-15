@@ -152,8 +152,53 @@ impl AxisSpec {
         }
     }
 
+    /// Return the first non-finite float field name on this axis specification, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<&'static str> {
+        if !self.gap_width_pt.is_finite() {
+            return Some("axis.gap_width_pt");
+        }
+        if !self.tick_angle_deg.is_finite() {
+            return Some("axis.tick_angle_deg");
+        }
+        if !self.stroke_width_pt.is_finite() {
+            return Some("axis.stroke_width_pt");
+        }
+        for seg in &self.segments {
+            if seg.min.is_some_and(|v| !v.is_finite()) {
+                return Some("axis.segments.min");
+            }
+            if seg.max.is_some_and(|v| !v.is_finite()) {
+                return Some("axis.segments.max");
+            }
+            if !seg.length_share.is_finite() {
+                return Some("axis.segments.length_share");
+            }
+            if seg.major_tick_interval.is_some_and(|v| !v.is_finite()) {
+                return Some("axis.segments.major_tick_interval");
+            }
+        }
+        for threshold in &self.thresholds {
+            if !threshold.value.is_finite() {
+                return Some("axis.thresholds.value");
+            }
+            if threshold.shade_to.is_some_and(|v| !v.is_finite()) {
+                return Some("axis.thresholds.shade_to");
+            }
+            if !threshold.stroke_width_pt.is_finite() {
+                return Some("axis.thresholds.stroke_width_pt");
+            }
+        }
+        for tick in &self.additional_ticks {
+            if !tick.value.is_finite() {
+                return Some("axis.additional_ticks.value");
+            }
+        }
+        None
+    }
+
     /// Enforce that discontinuous axes carry `1`, `2`, or `3` segments (`docs/graphing-and-layouts.md` §3.2)
-    /// and validate axis and custom tick labels.
+    /// and validate axis labels, custom tick labels, and float finiteness.
     pub fn validate(&self) -> Result<(), DocError> {
         validate_title(&self.title)?;
         if !(1..=3).contains(&self.segments.len()) {
@@ -163,6 +208,9 @@ impl AxisSpec {
             if let Some(label) = &tick.label {
                 validate_title(label)?;
             }
+        }
+        if let Some(reason) = self.first_non_finite_float() {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason });
         }
         Ok(())
     }
@@ -711,13 +759,68 @@ impl GraphSpec {
         }
     }
 
-    /// Validate axis segment counts and title byte ceilings.
+    /// Return the first non-finite float field path in this graph specification, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<&'static str> {
+        if !self.canvas_size_pt.width.is_finite() || !self.canvas_size_pt.height.is_finite() {
+            return Some("spec.canvas_size_pt");
+        }
+        if let Some(field) = self.x_axis.first_non_finite_float() {
+            return Some(field);
+        }
+        if let Some(field) = self.y_axis.first_non_finite_float() {
+            return Some(field);
+        }
+        if let Some(field) = self.y2_axis.as_ref().and_then(AxisSpec::first_non_finite_float) {
+            return Some(field);
+        }
+        for series in &self.series {
+            if let Some(field) = gdo_non_finite(&series.gdo) {
+                return Some(field);
+            }
+            if let Some(field) = series.y_error_bars.as_ref().and_then(error_bars_non_finite) {
+                return Some(field);
+            }
+            if let Some(field) = series.x_error_bars.as_ref().and_then(error_bars_non_finite) {
+                return Some(field);
+            }
+        }
+        if let Some(mv) = &self.multivariate
+            && let Some(field) = multivariate_non_finite(mv)
+        {
+            return Some(field);
+        }
+        for cmp in &self.comparisons {
+            if !cmp.stroke_width_pt.is_finite() || !cmp.font_size_pt.is_finite() || !cmp.bracket_step_pt.is_finite() {
+                return Some("spec.comparisons");
+            }
+        }
+        for ann in &self.annotations {
+            if let Some(field) = annotation_non_finite(ann) {
+                return Some(field);
+            }
+        }
+        for ov in &self.point_overrides {
+            if ov.size_pt.is_some_and(|v| !v.is_finite()) || ov.border_width_pt.is_some_and(|v| !v.is_finite()) {
+                return Some("spec.point_overrides");
+            }
+        }
+        if self.legend.position_pt.is_some_and(|(x, y)| !x.is_finite() || !y.is_finite()) {
+            return Some("spec.legend.position_pt");
+        }
+        None
+    }
+
+    /// Validate axis segment counts, title byte ceilings, and float finiteness.
     pub fn validate(&self) -> Result<(), DocError> {
         validate_title(&self.title)?;
         self.x_axis.validate()?;
         self.y_axis.validate()?;
         if let Some(y2) = &self.y2_axis {
             y2.validate()?;
+        }
+        if let Some(reason) = self.first_non_finite_float() {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason });
         }
         Ok(())
     }
@@ -812,6 +915,116 @@ fn recolor_gdo(gdo: &mut GraphicalDataObject, swatch: Rgba8) {
     }
 }
 
+fn rect_is_finite(rect: RectPt) -> bool {
+    rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite()
+}
+
+fn marker_non_finite(marker: &MarkerStyle) -> Option<&'static str> {
+    if !marker.size_pt.is_finite() || !marker.stroke_width_pt.is_finite() {
+        return Some("spec.series.marker");
+    }
+    None
+}
+
+fn error_bars_non_finite(bars: &ErrorBarSpec) -> Option<&'static str> {
+    if !bars.stroke_width_pt.is_finite() || !bars.cap_width_pt.is_finite() {
+        return Some("spec.series.error_bars");
+    }
+    None
+}
+
+fn gdo_non_finite(gdo: &GraphicalDataObject) -> Option<&'static str> {
+    match gdo {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill } => {
+            if let Some(m) = marker
+                && let Some(field) = marker_non_finite(m)
+            {
+                return Some(field);
+            }
+            if let Some(l) = line
+                && !l.stroke_width_pt.is_finite()
+            {
+                return Some("spec.series.line.stroke_width_pt");
+            }
+            if let Some(area) = area_fill
+                && !area.baseline_y.is_finite()
+            {
+                return Some("spec.series.area_fill.baseline_y");
+            }
+            None
+        }
+        GraphicalDataObject::BarWithReplicates { border_width_pt, .. } | GraphicalDataObject::FloatingBar { border_width_pt, .. } => {
+            (!border_width_pt.is_finite()).then_some("spec.series.border_width_pt")
+        }
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => marker_non_finite(marker),
+        GraphicalDataObject::BeforeAfterLines { marker, stroke_width_pt, .. } => {
+            if let Some(m) = marker
+                && let Some(field) = marker_non_finite(m)
+            {
+                return Some(field);
+            }
+            (!stroke_width_pt.is_finite()).then_some("spec.series.stroke_width_pt")
+        }
+        GraphicalDataObject::KaplanMeierStep { stroke_width_pt, .. } => (!stroke_width_pt.is_finite()).then_some("spec.series.stroke_width_pt"),
+        GraphicalDataObject::BoxAndWhisker { .. } | GraphicalDataObject::Violin { .. } | GraphicalDataObject::PartsOfWhole { .. } => None,
+    }
+}
+
+fn multivariate_non_finite(mv: &MultivariateGraphEncoding) -> Option<&'static str> {
+    if let ColorChannelMapping::Continuous { ramp, domain_clamp, .. } = &mv.color {
+        if domain_clamp.is_some_and(|(lo, hi)| !lo.is_finite() || !hi.is_finite()) {
+            return Some("spec.multivariate.color.domain_clamp");
+        }
+        if let ColorRamp::Custom { stops } = ramp
+            && stops.iter().any(|s| !s.position.is_finite())
+        {
+            return Some("spec.multivariate.color.ramp.stops");
+        }
+    }
+    match mv.size {
+        SizeChannelMapping::Constant { radius_pt } => {
+            if !radius_pt.is_finite() {
+                return Some("spec.multivariate.size.radius_pt");
+            }
+        }
+        SizeChannelMapping::Variable { min_radius_pt, max_radius_pt, .. } => {
+            if !min_radius_pt.is_finite() || !max_radius_pt.is_finite() {
+                return Some("spec.multivariate.size.radius_range");
+            }
+        }
+    }
+    match &mv.plot_mode {
+        MultivariatePlotMode::BubbleScatter => None,
+        MultivariatePlotMode::CategoricalSummary { gdo, y_error_bars } => {
+            gdo_non_finite(gdo).or_else(|| y_error_bars.as_ref().and_then(error_bars_non_finite))
+        }
+    }
+}
+
+fn annotation_non_finite(ann: &GraphAnnotation) -> Option<&'static str> {
+    match ann {
+        GraphAnnotation::TextBox { bounds_pt, .. } | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => {
+            (!rect_is_finite(*bounds_pt)).then_some("spec.annotations.bounds_pt")
+        }
+        GraphAnnotation::LineOrArrow { start_pt, end_pt, .. } => {
+            (!start_pt.0.is_finite() || !start_pt.1.is_finite() || !end_pt.0.is_finite() || !end_pt.1.is_finite())
+                .then_some("spec.annotations.line_endpoints")
+        }
+        GraphAnnotation::Shape { bounds_pt, stroke_width_pt, .. } => {
+            if !rect_is_finite(*bounds_pt) || !stroke_width_pt.is_finite() {
+                return Some("spec.annotations.shape");
+            }
+            None
+        }
+        GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, .. } => {
+            if !rect_is_finite(*bounds_pt) || !font_size_pt.is_finite() {
+                return Some("spec.annotations.model_equation");
+            }
+            None
+        }
+    }
+}
+
 /// Navigator sheet wrapping a [`GraphSpec`] and tracking first-visit gallery initialization.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GraphSheet {
@@ -823,6 +1036,33 @@ pub struct GraphSheet {
     pub spec: GraphSpec,
     pub floating_notes: Vec<FloatingNote>,
     pub color_tag: Option<Rgba8>,
+}
+
+impl GraphSheet {
+    /// Return the first non-finite float field path in this graph sheet, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<&'static str> {
+        if let Some(field) = self.spec.first_non_finite_float() {
+            return Some(field);
+        }
+        if self.floating_notes.iter().any(|note| !rect_is_finite(note.bounds_pt)) {
+            return Some("floating_notes.bounds_pt");
+        }
+        None
+    }
+
+    /// Validate sheet identity, title, graph specification, and floating-note geometry.
+    pub fn validate(&self) -> Result<(), DocError> {
+        if self.id.as_str().trim().is_empty() {
+            return Err(DocError::EmptyIdentifier);
+        }
+        validate_title(&self.title)?;
+        self.spec.validate()?;
+        if self.floating_notes.iter().any(|note| !rect_is_finite(note.bounds_pt)) {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason: "floating_notes.bounds_pt" });
+        }
+        Ok(())
+    }
 }
 
 impl GraphSheet {

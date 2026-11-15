@@ -4,18 +4,19 @@
 use std::f64::consts::PI;
 
 use lumencraft_doc::{
-    AnalysisKind, AxisSpec, AxisThreshold, CategoricalTickSource, DataSheet, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet,
-    GraphSpec, GraphicalDataObject, GroupedArrangement, PartsOfWholeLayout, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind,
-    SeriesSpec, SheetId, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, TableArchetype, TickLabelFormat,
+    AnalysisKind, AxisSpec, AxisThreshold, CategoricalTickSource, DataSheet, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GraphSpec,
+    GraphicalDataObject, GroupedArrangement, PartsOfWholeLayout, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind, SeriesSpec,
+    SheetId, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, TableArchetype, TickLabelFormat,
 };
 use lumencraft_math::{AxisScale, ConfidenceLevel};
 use lumencraft_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 use lumencraft_stats::survival::kaplan_meier_curve;
-use lumencraft_text::{LocaleNumberPolicy, RichText, TextMetricsPt, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
+use lumencraft_text::{LocaleNumberPolicy, RichText, TextMetricsPt, expand_template_hooks, measure_text_pt, parse_markup};
 
 use crate::scales::{
-    AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, compute_additional_ticks_for_segments, emit_additional_tick_gridline_segments,
-    emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
+    AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, ResolvedSegment, compute_additional_ticks_for_segments, compute_segment_tick_values,
+    emit_additional_tick_gridline_segments, emit_additional_x_tick_primitives, emit_additional_y_tick_primitives, format_tick_markup,
+    resolve_exact_domain_with_warnings, sanitize_linear_range,
 };
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
@@ -182,153 +183,54 @@ fn trim_trailing_zeros(buf: &mut String) {
 }
 
 pub(crate) fn sanitize_range(min_v: f64, max_v: f64, fallback: (f64, f64)) -> (f64, f64) {
-    if !min_v.is_finite() || !max_v.is_finite() {
-        return fallback;
-    }
-    let (lo, hi) = if min_v <= max_v { (min_v, max_v) } else { (max_v, min_v) };
-    if (hi - lo).abs() <= 1e-12 {
-        let pad = if lo.abs() > 1.0 { lo.abs() * 0.1 } else { 1.0 };
-        (lo - pad, hi + pad)
-    } else {
-        (lo, hi)
-    }
+    sanitize_linear_range(min_v, max_v, fallback)
 }
 
 pub(crate) fn resolve_axis_domain(axis: &AxisSpec, data_min: f64, data_max: f64) -> (f64, f64) {
-    let seg = axis.segments.first();
-    let scale = seg.map_or(GraphAxisScale::Linear, |s| s.scale);
-    let (raw_lo, raw_hi) = sanitize_range(data_min, data_max, (0.0, 1.0));
-    let mut lo = seg.and_then(|s| s.min).filter(|v| v.is_finite()).unwrap_or(raw_lo);
-    let mut hi = seg.and_then(|s| s.max).filter(|v| v.is_finite()).unwrap_or(raw_hi);
-    if lo >= hi {
-        (lo, hi) = sanitize_range(lo, hi, (0.0, 1.0));
-    }
-    match scale {
-        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => {
-            if lo <= 0.0 {
-                lo = if raw_lo > 0.0 { raw_lo } else { 0.1 };
-            }
-            if hi <= lo {
-                hi = lo * 10.0;
-            }
-        }
-        AxisScale::Logit(domain) => {
-            let (bound_lo, bound_hi) = match domain {
-                lumencraft_math::LogitDomain::Percent => (0.01, 99.99),
-                lumencraft_math::LogitDomain::Proportion => (0.0001, 0.9999),
-            };
-            lo = lo.clamp(bound_lo, bound_hi * 0.5);
-            hi = hi.clamp((lo + bound_lo).min(bound_hi), bound_hi);
-        }
-        AxisScale::Linear | AxisScale::Probit | AxisScale::Reciprocal => {}
-    }
-    (lo, hi)
+    let mut unused = Vec::new();
+    resolve_axis_domain_with_warnings(axis, data_min, data_max, &mut unused)
+}
+
+pub(crate) fn resolve_axis_domain_with_warnings(axis: &AxisSpec, data_min: f64, data_max: f64, warnings: &mut Vec<ChartWarning>) -> (f64, f64) {
+    resolve_exact_domain_with_warnings(axis, data_min, data_max, warnings)
 }
 
 pub(crate) fn nice_axis_ticks(axis: &AxisSpec, domain_min: f64, domain_max: f64, target_count: usize) -> Vec<(f64, String)> {
-    let seg = axis.segments.first();
-    let scale = seg.map_or(AxisScale::Linear, |s| s.scale);
-    let fmt = axis.tick_format;
-    let step_override = seg.and_then(|s| s.major_tick_interval).filter(|v| v.is_finite() && *v > 0.0);
+    let mut unused = Vec::new();
+    nice_axis_ticks_with_warnings(axis, domain_min, domain_max, target_count, &mut unused)
+}
 
-    let vals = match scale {
-        AxisScale::Log10 if step_override.is_none() => log10_ticks(domain_min, domain_max),
-        _ => linear_nice_ticks(domain_min, domain_max, step_override, target_count),
+pub(crate) fn nice_axis_ticks_with_warnings(
+    axis: &AxisSpec,
+    domain_min: f64,
+    domain_max: f64,
+    target_count: usize,
+    warnings: &mut Vec<ChartWarning>,
+) -> Vec<(f64, String)> {
+    let seg_spec = axis.segments.first();
+    let scale = seg_spec.map_or(AxisScale::Linear, |s| s.scale);
+    let step_override = seg_spec.and_then(|s| s.major_tick_interval).filter(|v| v.is_finite() && *v > 0.0);
+    let minor_sub = seg_spec.map_or(0, |s| s.minor_ticks_per_interval);
+    let seg = ResolvedSegment {
+        segment_index: 0,
+        domain_min,
+        domain_max,
+        scale,
+        length_fraction: 1.0,
+        span_start_pt: 0.0,
+        span_end_pt: 100.0,
+        major_tick_interval: step_override,
+        minor_ticks_per_interval: minor_sub,
     };
-    vals.into_iter().map(|v| (v, format_tick_value(v, scale, fmt))).collect()
-}
-
-fn log10_ticks(domain_min: f64, domain_max: f64) -> Vec<f64> {
-    if domain_min <= 0.0 || domain_max <= domain_min {
-        return vec![0.1, 1.0, 10.0];
-    }
-    let e_min = domain_min.log10().floor() as i32;
-    let e_max = domain_max.log10().ceil() as i32;
-    let mut out = Vec::new();
-    let span = (e_max - e_min).clamp(0, 12);
-    let step = if span > 6 { 2 } else { 1 };
-    let mut e = e_min;
-    while e <= e_max {
-        let v = 10.0_f64.powi(e);
-        if v >= domain_min * 0.999 && v <= domain_max * 1.001 {
-            out.push(v);
-        }
-        e += step;
-    }
-    if out.len() < 2 { linear_nice_ticks(domain_min, domain_max, None, 4) } else { out }
-}
-
-fn linear_nice_ticks(min_v: f64, max_v: f64, step_override: Option<f64>, target_count: usize) -> Vec<f64> {
-    let (lo, hi) = sanitize_range(min_v, max_v, (0.0, 1.0));
-    let span = hi - lo;
-    let desired = target_count.clamp(2, 12) as f64;
-    let step = step_override.unwrap_or_else(|| nice_step(span / (desired - 1.0).max(1.0)));
-    if !step.is_finite() || step <= 0.0 {
-        return vec![lo, hi];
-    }
-    let start_k = (lo / step - 1e-9).ceil() as i64;
-    let end_k = (hi / step + 1e-9).floor() as i64;
-    let mut ticks = Vec::new();
-    let max_iters = 32_i64;
-    let mut k = start_k;
-    let mut count = 0_i64;
-    while k <= end_k && count < max_iters {
-        let mut v = (k as f64) * step;
-        if v.abs() < step * 1e-9 {
-            v = 0.0;
-        }
-        if v >= lo - step * 1e-6 && v <= hi + step * 1e-6 {
-            ticks.push(v);
-        }
-        k += 1;
-        count += 1;
-    }
-    if ticks.is_empty() { vec![lo, 0.5 * (lo + hi), hi] } else { ticks }
-}
-
-fn nice_step(raw_step: f64) -> f64 {
-    if !raw_step.is_finite() || raw_step <= 0.0 {
-        return 1.0;
-    }
-    let exp = raw_step.log10().floor();
-    let base = 10.0_f64.powf(exp);
-    let frac = raw_step / base;
-    let nice_mult = if frac <= 1.2 {
-        1.0
-    } else if frac <= 2.2 {
-        2.0
-    } else if frac <= 5.2 {
-        5.0
-    } else {
-        10.0
-    };
-    nice_mult * base
+    let (vals, _) = compute_segment_tick_values(&seg, Some(target_count.clamp(2, 12)), false, warnings);
+    vals.into_iter().map(|v| (v, format_tick_value(v, scale, axis.tick_format))).collect()
 }
 
 pub(crate) fn format_tick_value(val: f64, scale: AxisScale, fmt: TickLabelFormat) -> String {
     if !val.is_finite() {
         return String::new();
     }
-    let clean = if val.abs() < 1e-12 { 0.0 } else { val };
-    let policy = LocaleNumberPolicy::default();
-    match fmt {
-        TickLabelFormat::ScientificE => format!("{clean:.2e}"),
-        TickLabelFormat::PowerOfTenSuperscript if clean > 0.0 => {
-            let exp = clean.log10();
-            if (exp - exp.round()).abs() < 1e-4 { format!("10<sup>{}</sup>", exp.round() as i32) } else { format_axis_tick(clean, scale, &policy) }
-        }
-        TickLabelFormat::EngineeringSi => {
-            let abs = clean.abs();
-            if abs >= 1_000_000.0 {
-                format!("{:.2}M", clean / 1_000_000.0)
-            } else if abs >= 1_000.0 {
-                format!("{:.2}k", clean / 1_000.0)
-            } else {
-                format_axis_tick(clean, scale, &policy)
-            }
-        }
-        _ => format_axis_tick(clean, scale, &policy),
-    }
+    format_tick_markup(val, scale, fmt, &LocaleNumberPolicy::default())
 }
 
 pub(crate) fn text_metrics(text: &str, font_size_pt: f64) -> TextMetricsPt {
@@ -386,8 +288,8 @@ pub(crate) fn draw_cartesian_frame(scene: &mut ChartScene, frame: &CartesianFram
             scene.primitives.push(ScenePrimitive::Path { path: Path2D::rect(r), fill: None, stroke: Some(axis_stroke), clip: None });
         }
         FramePreset::OriginCrossing => {
-            let y0 = frame.y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()).clamp(r.y, r.bottom());
-            let x0 = frame.x_map.map_value(0.0, r.x, r.right()).unwrap_or(r.x).clamp(r.x, r.right());
+            let y0 = crate::clamp_f64_safe(frame.y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
+            let x0 = crate::clamp_f64_safe(frame.x_map.map_value(0.0, r.x, r.right()).unwrap_or(r.x), r.x, r.right());
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::line(PointPt::new(x0, r.y), PointPt::new(x0, r.bottom())),
                 fill: None,
@@ -466,8 +368,8 @@ fn emit_vertical_threshold(scene: &mut ChartScene, r: RectPt, x_pt: f64, thr: &A
     if let Some(end_v) = thr.shade_to
         && let Some(x_end) = map.map_value(end_v, r.x, r.right())
     {
-        let lo = x_pt.min(x_end).clamp(r.x, r.right());
-        let hi = x_pt.max(x_end).clamp(r.x, r.right());
+        let lo = crate::clamp_f64_safe(x_pt.min(x_end), r.x, r.right());
+        let hi = crate::clamp_f64_safe(x_pt.max(x_end), r.x, r.right());
         if hi > lo {
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::rect(RectPt::new(lo, r.y, hi - lo, r.height)),
@@ -491,8 +393,8 @@ fn emit_horizontal_threshold(scene: &mut ChartScene, r: RectPt, y_pt: f64, thr: 
     if let Some(end_v) = thr.shade_to
         && let Some(y_end) = map.map_value(end_v, r.bottom(), r.y)
     {
-        let lo = y_pt.min(y_end).clamp(r.y, r.bottom());
-        let hi = y_pt.max(y_end).clamp(r.y, r.bottom());
+        let lo = crate::clamp_f64_safe(y_pt.min(y_end), r.y, r.bottom());
+        let hi = crate::clamp_f64_safe(y_pt.max(y_end), r.y, r.bottom());
         if hi > lo {
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::rect(RectPt::new(r.x, lo, r.width, hi - lo)),
@@ -629,7 +531,9 @@ pub(crate) fn emit_y_title(scene: &mut ChartScene, spec: &GraphSpec, max_y_label
         return;
     }
     let r = scene.plot_rect_pt;
-    let x = (r.x - max_y_label_w - 14.0).clamp(11.0, r.x - 8.0);
+    let max_x = (r.x - 8.0).max(0.0);
+    let min_x = 11.0_f64.min(max_x);
+    let x = crate::clamp_f64_safe(r.x - max_y_label_w - 14.0, min_x, max_x);
     scene.primitives.push(ScenePrimitive::Text(PositionedText {
         rich: parse_markup(&y_title),
         anchor_pt: PointPt::new(x, r.y + r.height * 0.5),
@@ -825,7 +729,7 @@ pub(crate) fn draw_legend_entries(scene: &mut ChartScene, spec: &GraphSpec, entr
     }
     let r = scene.plot_rect_pt;
     let max_label_w = entries.iter().map(|e| text_metrics(&e.label, 8.0).width_pt).fold(0.0_f64, f64::max);
-    let box_w = (max_label_w + 26.0).clamp(54.0, (scene.width_pt - r.right() - 8.0).max(56.0));
+    let box_w = crate::clamp_f64_safe(max_label_w + 26.0, 54.0, (scene.width_pt - r.right() - 8.0).max(56.0));
     let row_h = 13.0;
     let box_h = (entries.len() as f64) * row_h + 8.0;
     let (lx, ly) = if let Some((px, py)) = spec.legend.position_pt {
@@ -1255,11 +1159,11 @@ fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Chart
 
     let scale_pct = survival_y_scale_factor(&graph.spec);
     let max_time = cohorts.iter().flat_map(|c| c.steps.iter().map(|s| s.time)).fold(1.0_f64, f64::max).max(1.0);
-    let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, 0.0, max_time * 1.05);
-    let (y_lo, y_hi) = resolve_axis_domain(&graph.spec.y_axis, 0.0, scale_pct);
+    let (x_lo, x_hi) = resolve_axis_domain_with_warnings(&graph.spec.x_axis, 0.0, max_time * 1.05, &mut scene.warnings);
+    let (y_lo, y_hi) = resolve_axis_domain_with_warnings(&graph.spec.y_axis, 0.0, scale_pct, &mut scene.warnings);
 
-    let x_ticks = nice_axis_ticks(&graph.spec.x_axis, x_lo, x_hi, 6);
-    let y_ticks = nice_axis_ticks(&graph.spec.y_axis, y_lo, y_hi, 5);
+    let x_ticks = nice_axis_ticks_with_warnings(&graph.spec.x_axis, x_lo, x_hi, 6, &mut scene.warnings);
+    let y_ticks = nice_axis_ticks_with_warnings(&graph.spec.y_axis, y_lo, y_hi, 5, &mut scene.warnings);
     let show_nar = graph.spec.survival_number_at_risk && cohorts.iter().any(|c| c.n_total > 0 || !c.observations.is_empty());
     let extra_bottom = if show_nar { 20.0 + (cohorts.len() as f64) * 13.0 } else { 0.0 };
     let max_cohort_lbl_w = if show_nar { cohorts.iter().map(|c| text_metrics(&c.label, 8.0).width_pt + 10.0).fold(0.0_f64, f64::max) } else { 0.0 };
@@ -1286,7 +1190,7 @@ fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Chart
     let r = scene.plot_rect_pt;
     let mut legend_entries = Vec::with_capacity(cohorts.len());
     for cohort in &cohorts {
-        draw_single_km_cohort(scene, cohort, x_map, y_map, x_hi, scale_pct);
+        draw_single_km_cohort(scene, cohort, x_map, y_map, x_lo.max(x_hi), scale_pct);
         legend_entries.push(LegendEntry {
             label: cohort.label.clone(),
             color: cohort.color,
@@ -1790,8 +1694,13 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
         values.iter().flat_map(|r| r.iter()).copied().fold(0.0_f64, f64::max).max(1.0)
     };
 
-    let (y_lo, y_hi) = resolve_axis_domain(&graph.spec.y_axis, 0.0, if proportion_scale.is_some() && is_stacked { data_max } else { data_max * 1.1 });
-    let y_ticks = nice_axis_ticks(&graph.spec.y_axis, y_lo, y_hi, 5);
+    let (y_lo, y_hi) = resolve_axis_domain_with_warnings(
+        &graph.spec.y_axis,
+        0.0,
+        if proportion_scale.is_some() && is_stacked { data_max } else { data_max * 1.1 },
+        &mut scene.warnings,
+    );
+    let y_ticks = nice_axis_ticks_with_warnings(&graph.spec.y_axis, y_lo, y_hi, 5, &mut scene.warnings);
     let max_y_w = update_plot_rect_for_labels(
         scene,
         &graph.spec,
@@ -1814,7 +1723,7 @@ fn compile_contingency(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
     draw_categorical_x_ticks(scene, &graph.spec, &x_cat_positions, doc);
 
     let bar_border = solid_stroke(Rgba8::rgb(40, 40, 40), 0.75, LineDashStyle::Solid);
-    let y_base_pt = y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()).clamp(r.y, r.bottom());
+    let y_base_pt = crate::clamp_f64_safe(y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
 
     for (cat_idx, row_vals) in values.iter().enumerate() {
         let center_x = r.x + ((cat_idx as f64) + 0.5) * slot_w;
@@ -2106,7 +2015,7 @@ fn render_pie_or_donut(
 
 fn render_stacked_fraction_bar(scene: &mut ChartScene, spec: &GraphSpec, slices: &[lumencraft_doc::SliceFraction]) {
     let r = scene.plot_rect_pt;
-    let bar_h = (r.height * 0.36).clamp(24.0, 56.0);
+    let bar_h = crate::clamp_f64_safe(r.height * 0.36, 24.0, 56.0);
     let bar_y = r.y + (r.height - bar_h) * 0.5;
     let border = solid_stroke(Rgba8::WHITE, 0.9, LineDashStyle::Solid);
 
@@ -2206,7 +2115,7 @@ fn largest_remainder_100(slices: &[lumencraft_doc::SliceFraction]) -> Vec<usize>
     let mut assigned = 0_usize;
     for (i, s) in slices.iter().enumerate() {
         let exact = (s.fraction.max(0.0) / sum_frac) * 100.0;
-        let floor_i = exact.floor().clamp(0.0, 100.0) as usize;
+        let floor_i = crate::clamp_f64_safe(exact.floor(), 0.0, 100.0) as usize;
         base.push(floor_i);
         assigned += floor_i;
         remainders.push((i, exact - (floor_i as f64)));
@@ -2321,5 +2230,43 @@ mod tests {
         let mut scene = ChartScene::new("g-c", "Contingency", 420.0, 300.0, None);
         compile_survival_or_categorical_graph(&gs, &doc, &mut scene).expect("compile");
         assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text() == "100")));
+    }
+
+    #[test]
+    fn narrow_and_tiny_canvases_do_not_panic() {
+        assert!((crate::clamp_f64_safe(5.0, 11.0, 6.4) - 6.4).abs() < 1e-12);
+        assert!((crate::clamp_f64_safe(f64::NAN, 11.0, 6.4) - 6.4).abs() < 1e-12);
+        assert!(crate::clamp_f64_safe(f64::NAN, f64::NAN, f64::NAN).abs() < 1e-12);
+
+        let mut cont = ContingencyTable::new(2, 2).expect("cont");
+        cont.row_titles = vec![String::from("Control"), String::from("Treated")];
+        cont.data_sets[0].title = String::from("A");
+        cont.data_sets[1].title = String::from("B");
+        cont.data_sets[0].cells[0][0] = lumencraft_doc::Cell::number(10.0);
+        cont.data_sets[1].cells[0][0] = lumencraft_doc::Cell::number(20.0);
+        cont.data_sets[0].cells[1][0] = lumencraft_doc::Cell::number(15.0);
+        cont.data_sets[1].cells[1][0] = lumencraft_doc::Cell::number(25.0);
+        let ds = DataSheet::new(SheetId::new("c-narrow"), "Contingency", TableArchetype::Contingency(cont)).expect("ds");
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds.clone()).expect("add");
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-narrow"), &ds).expect("gs");
+        gs.spec.kind = GraphKind::Contingency;
+        gs.spec.grouped_arrangement = GroupedArrangement::Stacked;
+        gs.spec.y_axis = GraphSpec::default_for_data_sheet(&ds).y_axis;
+        gs.spec.y_axis.title = String::from("Count");
+
+        for (w, h) in [(30.0, 200.0), (10.0, 200.0), (200.0, 10.0), (1.0, 1.0)] {
+            gs.initialized = true;
+            gs.spec = GraphSpec::default_for_data_sheet(&ds);
+            gs.spec.y_axis.title = String::from("Count");
+            gs.spec.canvas_size_pt = lumencraft_doc::SizePt::new(w, h);
+            let default_scene = crate::compile_graph(&gs, &doc).expect("narrow default canvas should compile cleanly");
+            assert!(!default_scene.primitives.is_empty());
+
+            gs.spec.kind = GraphKind::Contingency;
+            gs.spec.grouped_arrangement = GroupedArrangement::Stacked;
+            let stacked_scene = crate::compile_graph(&gs, &doc).expect("narrow stacked canvas should compile cleanly");
+            assert!(!stacked_scene.primitives.is_empty());
+        }
     }
 }

@@ -21,6 +21,9 @@ use crate::special::gamma::{deviance_bd0, ln_gamma, stirling_err};
 
 const TEMME_A_THRESHOLD: f64 = 4096.0;
 const MAX_GAMMA_ITERS: usize = 8192;
+const MAX_GAMMA_INV_ITERS: usize = 64;
+const MIN_LN_X: f64 = -740.0;
+const MAX_LN_X: f64 = 709.0;
 
 fn validate_gamma_args(a: f64, x: f64) -> Result<(), MathError> {
     if !a.is_finite() || a <= 0.0 {
@@ -32,9 +35,89 @@ fn validate_gamma_args(a: f64, x: f64) -> Result<(), MathError> {
     Ok(())
 }
 
+fn zeta_series_coeffs() -> &'static [f64; 11] {
+    static COEFFS: std::sync::OnceLock<[f64; 11]> = std::sync::OnceLock::new();
+    COEFFS.get_or_init(|| {
+        let mut table = [0.0_f64; 11];
+        for (idx, slot) in table.iter_mut().enumerate() {
+            let s = (idx + 2) as i32;
+            let sf = f64::from(s);
+            let mut sum = 0.0_f64;
+            for n in (2..128_u32).rev() {
+                sum += f64::from(n).powi(-s);
+            }
+            let n_tail = 128.0_f64;
+            let n_pow = n_tail.powi(-s);
+            let inv_n2 = 1.0 / (n_tail * n_tail);
+            let em0 = n_tail * n_pow / (sf - 1.0) + 0.5 * n_pow;
+            let em1 = (sf / 12.0) * (n_pow / n_tail);
+            let em2 = -(sf * (sf + 1.0) * (sf + 2.0) / 720.0) * (n_pow / n_tail) * inv_n2;
+            let em3 = (sf * (sf + 1.0) * (sf + 2.0) * (sf + 3.0) * (sf + 4.0) / 30_240.0) * (n_pow / n_tail) * inv_n2 * inv_n2;
+            let zeta_s = 1.0 + sum + em0 + em1 + em2 + em3;
+            let sign = if s % 2 == 0 { 1.0 } else { -1.0 };
+            *slot = sign * zeta_s / sf;
+        }
+        table
+    })
+}
+
+/// Cancellation-free `ln Gamma(1 + a)` for `0 < a <= 0.05`.
+fn ln_gamma_1p_small(a: f64) -> f64 {
+    let coeffs = zeta_series_coeffs();
+    let mut poly = coeffs[10];
+    for &c in coeffs[..10].iter().rev() {
+        poly = poly.mul_add(a, c);
+    }
+    (-std::f64::consts::EULER_GAMMA).mul_add(a, a * a * poly)
+}
+
+/// Series deviance `bd0(a, x) = a * ln(a / x) + x - a` keeping full accuracy for `|a - x| < 0.45 (a + x)`.
+fn gamma_deviance(a: f64, x: f64) -> f64 {
+    if (a - x).abs() < 0.45 * (a + x) {
+        let v = (a - x) / (a + x);
+        let v2 = v * v;
+        let mut s = (a - x) * v;
+        let mut ej = 2.0 * a * v * v2;
+        for j in 1..64_u32 {
+            let term = ej / f64::from(2 * j + 1);
+            let next = s + term;
+            if term.abs() <= 0.25 * f64::EPSILON * next.abs() {
+                return next.max(0.0);
+            }
+            s = next;
+            ej *= v2;
+        }
+        return s.max(0.0);
+    }
+    deviance_bd0(a, x)
+}
+
 /// Cancellation-free evaluation of `ln(x^a * exp(-x) / Gamma(a))` for `a > 0, x > 0`.
 fn ln_gamma_kernel(a: f64, x: f64) -> Result<f64, MathError> {
-    if a >= 12.0 { Ok(-deviance_bd0(a, x) + 0.5 * (a / std::f64::consts::TAU).ln() - stirling_err(a)) } else { Ok(a * x.ln() - x - ln_gamma(a)?) }
+    if a >= 12.0 { Ok(-gamma_deviance(a, x) + 0.5 * (a / std::f64::consts::TAU).ln() - stirling_err(a)) } else { Ok(a * x.ln() - x - ln_gamma(a)?) }
+}
+
+/// Cancellation-free `ln P(a, x)` for small `a <= 0.05` and `x < a + 1`:
+/// `P(a, x) = (x^a / Gamma(1 + a)) * (1 + a * sum_{k>=1} (-x)^k / (k! (a + k)))`.
+fn ln_p_small_a_series(a: f64, x: f64) -> Result<f64, MathError> {
+    let mut sum = 0.0_f64;
+    let mut pow_neg_x_over_fact = 1.0_f64;
+    for k in 1..=MAX_GAMMA_ITERS {
+        let kf = k as f64;
+        pow_neg_x_over_fact *= -x / kf;
+        let term = pow_neg_x_over_fact / (a + kf);
+        let next = sum + term;
+        if term.abs() <= 0.25 * f64::EPSILON * sum.abs().max(f64::MIN_POSITIVE) && k > 4 {
+            let delta = (a * next).max(-0.999_999_999_999_999_9);
+            return Ok((a * x.ln() - ln_gamma_1p_small(a) + delta.ln_1p()).min(0.0));
+        }
+        sum = next;
+    }
+    Err(MathError::NotConverged { algorithm: "inc_gamma_small_a_series", iterations: MAX_GAMMA_ITERS })
+}
+
+fn ln_p_series(a: f64, x: f64) -> Result<f64, MathError> {
+    if a <= 0.05 { ln_p_small_a_series(a, x) } else { Ok((ln_gamma_kernel(a, x)? + ln_series_sum(a, x)?).min(0.0)) }
 }
 
 /// Power series for `P(a, x) = (x^a e^{-x} / Gamma(a)) * sum_{k>=0} x^k / (a (a+1) ... (a+k))`
@@ -125,6 +208,17 @@ fn use_temme(a: f64, x: f64) -> bool {
     a >= TEMME_A_THRESHOLD && (x - a).abs() <= 6.0 * a.sqrt()
 }
 
+/// Cancellation-free evaluation of `ln(1 - exp(ln_val))` for `ln_val <= 0`.
+fn ln_one_minus_exp(ln_val: f64) -> f64 {
+    if ln_val >= 0.0 {
+        f64::NEG_INFINITY
+    } else if ln_val > -std::f64::consts::LN_2 {
+        (-ln_val.exp_m1()).ln()
+    } else {
+        (-ln_val.exp()).ln_1p()
+    }
+}
+
 /// Lower regularized incomplete gamma function `P(a, x) = gamma(a, x) / Gamma(a)` in `[0, 1]`.
 ///
 /// # Errors
@@ -142,11 +236,11 @@ pub fn reg_gamma_p(a: f64, x: f64) -> Result<f64, MathError> {
         return Ok(temme_uniform_pq(a, x).0);
     }
     if x < a + 1.0 {
-        let ln_p = ln_gamma_kernel(a, x)? + ln_series_sum(a, x)?;
+        let ln_p = ln_p_series(a, x)?;
         Ok(ln_p.exp().clamp(0.0, 1.0))
     } else {
         let ln_q = ln_gamma_kernel(a, x)? + ln_legendre_cf_reciprocal(a, x)?;
-        Ok((1.0 - ln_q.exp()).clamp(0.0, 1.0))
+        Ok((-ln_q.min(0.0).exp_m1()).clamp(0.0, 1.0))
     }
 }
 
@@ -171,8 +265,8 @@ pub fn reg_gamma_q(a: f64, x: f64) -> Result<f64, MathError> {
         let ln_q = ln_gamma_kernel(a, x)? + ln_legendre_cf_reciprocal(a, x)?;
         Ok(ln_q.exp().clamp(0.0, 1.0))
     } else {
-        let ln_p = ln_gamma_kernel(a, x)? + ln_series_sum(a, x)?;
-        Ok((1.0 - ln_p.exp()).clamp(0.0, 1.0))
+        let ln_p = ln_p_series(a, x)?;
+        Ok((-ln_p.min(0.0).exp_m1()).clamp(0.0, 1.0))
     }
 }
 
@@ -194,10 +288,10 @@ pub fn ln_reg_gamma_p(a: f64, x: f64) -> Result<f64, MathError> {
         return Ok(if p >= 0.5 { (-q).ln_1p() } else { p.ln() });
     }
     if x < a + 1.0 {
-        Ok((ln_gamma_kernel(a, x)? + ln_series_sum(a, x)?).min(0.0))
+        ln_p_series(a, x)
     } else {
         let ln_q = ln_gamma_kernel(a, x)? + ln_legendre_cf_reciprocal(a, x)?;
-        Ok((-ln_q.exp()).ln_1p())
+        Ok(ln_one_minus_exp(ln_q))
     }
 }
 
@@ -229,8 +323,8 @@ pub fn ln_reg_gamma_q(a: f64, x: f64) -> Result<f64, MathError> {
     if x >= a + 1.0 {
         Ok((ln_gamma_kernel(a, x)? + ln_legendre_cf_reciprocal(a, x)?).min(0.0))
     } else {
-        let ln_p = ln_gamma_kernel(a, x)? + ln_series_sum(a, x)?;
-        Ok((-ln_p.exp()).ln_1p())
+        let ln_p = ln_p_series(a, x)?;
+        Ok(ln_one_minus_exp(ln_p))
     }
 }
 
@@ -263,34 +357,79 @@ pub fn reg_gamma_q_inv(a: f64, q: f64) -> Result<f64, MathError> {
     invert_reg_gamma_pair(a, 1.0 - q, q)
 }
 
-fn initial_gamma_quantile_guess(a: f64, p: f64, q: f64) -> Result<f64, MathError> {
-    let lg_a1 = ln_gamma(a + 1.0)?;
-    // Small-x asymptotic: P(a, x) ~ x^a / Gamma(a + 1).
-    if p < 0.2 {
-        let x_small = ((p.ln() + lg_a1) / a).exp();
-        if x_small > 0.0 && x_small < 0.35 * (a + 1.0) {
-            return Ok(x_small * (1.0 + x_small / (a + 1.0)));
+#[derive(Clone, Copy)]
+enum GammaTarget {
+    LowerProb(f64),
+    UpperProb(f64),
+    DeepLowerLn(f64),
+    DeepUpperLn(f64),
+}
+
+impl GammaTarget {
+    fn is_increasing(self) -> bool {
+        matches!(self, Self::LowerProb(_) | Self::DeepLowerLn(_))
+    }
+
+    fn is_root_below_one(self, f_at_one: f64) -> bool {
+        if self.is_increasing() { f_at_one > 0.0 } else { f_at_one < 0.0 }
+    }
+
+    fn is_below_root(self, fx: f64) -> bool {
+        if self.is_increasing() { fx < 0.0 } else { fx > 0.0 }
+    }
+}
+
+fn eval_gamma_objective(a: f64, x: f64, target: GammaTarget) -> Result<(f64, f64, f64), MathError> {
+    let ln_k = ln_gamma_kernel(a, x)?;
+    match target {
+        GammaTarget::LowerProb(p) => Ok((reg_gamma_p(a, x)? - p, ln_k.exp(), a - x)),
+        GammaTarget::UpperProb(q) => Ok((reg_gamma_q(a, x)? - q, -ln_k.exp(), a - x)),
+        GammaTarget::DeepLowerLn(target_ln) => {
+            let ln_p = ln_reg_gamma_p(a, x)?;
+            let df_du = if ln_p.is_finite() { (ln_k - ln_p).exp() } else { 0.0 };
+            Ok((ln_p - target_ln, df_du, a - x - df_du))
+        }
+        GammaTarget::DeepUpperLn(target_ln) => {
+            let ln_q = ln_reg_gamma_q(a, x)?;
+            let df_du = if ln_q.is_finite() { -(ln_k - ln_q).exp() } else { 0.0 };
+            Ok((ln_q - target_ln, df_du, a - x - df_du))
         }
     }
-    // Large-x asymptotic when a <= 1 and q is very small: Q(a, x) ~ x^{a-1} e^{-x} / Gamma(a).
+}
+
+fn initial_gamma_quantile_guess_ln(a: f64, p: f64, q: f64) -> Result<f64, MathError> {
+    let ln_p = if p <= 0.5 { p.ln() } else { (-q).ln_1p() };
+    let ln_q = if q <= 0.5 { q.ln() } else { (-p).ln_1p() };
+    let lg_a1 = ln_gamma(a + 1.0)?;
+    let u_small = (ln_p + lg_a1) / a;
+
+    // Small-x asymptotic: P(a, x) ~ x^a / Gamma(a + 1).
+    if u_small < (0.35 * (a + 1.0)).ln() {
+        if u_small > -40.0 {
+            let x_small = u_small.exp();
+            return Ok(u_small + (x_small / (a + 1.0)).ln_1p());
+        }
+        return Ok(u_small);
+    }
+    // Large-x asymptotic when a <= 1.2 and q is very small: Q(a, x) ~ x^{a-1} e^{-x} / Gamma(a).
     if a <= 1.2 && q < 1e-3 {
         let lg_a = lg_a1 - a.ln();
-        let u = -q.ln() - lg_a;
+        let u = -ln_q - lg_a;
         let x0 = (u + (a - 1.0) * u.max(1.0).ln()).max(1e-12);
-        return Ok(x0);
+        return Ok(x0.ln());
     }
     // Wilson-Hilferty cube-root normal approximation using tail-safe z.
     let z = if q <= p { norm_isf_raw(q)? } else { -norm_isf_raw(p)? };
     let w = 1.0 - 1.0 / (9.0 * a) + z / (3.0 * a.sqrt());
     if w > 0.15 {
-        return Ok((a * w * w * w).max(f64::MIN_POSITIVE));
+        return Ok((a.ln() + 3.0 * w.ln()).max(MIN_LN_X));
     }
     if p <= q {
-        Ok((((p.ln() + lg_a1) / a).exp()).max(f64::MIN_POSITIVE))
+        Ok(u_small)
     } else {
         let lg_a = lg_a1 - a.ln();
-        let u = (-q.ln() - lg_a).max(1.0);
-        Ok(a + u + (a - 1.0) * u.ln())
+        let u = (-ln_q - lg_a).max(1.0);
+        Ok((a + u + (a - 1.0) * u.ln()).ln())
     }
 }
 
@@ -301,134 +440,160 @@ fn invert_reg_gamma_pair(a: f64, p: f64, q: f64) -> Result<f64, MathError> {
     if q == 0.0 {
         return Ok(f64::INFINITY);
     }
-    if p < 1e-8 {
-        return invert_reg_gamma_deep_lower(a, p);
-    }
-    if q < 1e-8 {
-        return invert_reg_gamma_deep_upper(a, q);
-    }
+    let target = if p < 1e-8 {
+        GammaTarget::DeepLowerLn(p.ln())
+    } else if q < 1e-8 {
+        GammaTarget::DeepUpperLn(q.ln())
+    } else if q < p {
+        GammaTarget::UpperProb(q)
+    } else {
+        GammaTarget::LowerProb(p)
+    };
 
-    let mut x = initial_gamma_quantile_guess(a, p, q)?;
-    let mut lo = 0.0_f64;
-    let mut hi = (x * 8.0 + a + 64.0).max(16.0);
-    for _ in 0..32 {
-        if reg_gamma_q(a, hi)? < q {
-            break;
-        }
-        lo = hi;
-        hi *= 4.0;
+    let u_guess = initial_gamma_quantile_guess_ln(a, p, q)?;
+    let (f1, _, _) = eval_gamma_objective(a, 1.0, target)?;
+    if f1 == 0.0 {
+        return Ok(1.0);
     }
+    if target.is_root_below_one(f1) { solve_gamma_log_space(a, u_guess, target) } else { solve_gamma_lin_space(a, u_guess, target) }
+}
 
-    let solve_upper = q < p;
-    for _ in 0..32 {
-        let fx = if solve_upper { reg_gamma_q(a, x)? - q } else { reg_gamma_p(a, x)? - p };
+fn polish_gamma_log_root(a: f64, x_init: f64, mut x_lo: f64, mut x_hi: f64, target: GammaTarget) -> Result<f64, MathError> {
+    if !x_init.is_finite() || x_init < f64::MIN_POSITIVE || !x_lo.is_finite() || !x_hi.is_finite() || x_lo >= x_hi {
+        return Ok(x_init);
+    }
+    let mut x = x_init.clamp(x_lo, x_hi);
+    for _ in 0..4 {
+        let (fx, df_du, d2_du) = eval_gamma_objective(a, x, target)?;
         if fx == 0.0 {
             return Ok(x);
         }
-        let x_below_root = if solve_upper { fx > 0.0 } else { fx < 0.0 };
-        if x_below_root {
-            lo = lo.max(x);
+        if target.is_below_root(fx) {
+            x_lo = x_lo.max(x);
         } else {
-            hi = hi.min(x);
+            x_hi = x_hi.min(x);
         }
-        if (hi - lo) <= 2.0 * f64::EPSILON * x.max(f64::MIN_POSITIVE) {
-            return Ok(0.5 * (lo + hi));
-        }
-
-        let ln_pdf = ln_gamma_kernel(a, x)? - x.ln();
-        let pdf = ln_pdf.exp();
-        let dfx = if solve_upper { -pdf } else { pdf };
-        let d2_over_d1 = (a - 1.0) / x - 1.0;
-        let next = safeguarded_halley_step(x, fx, dfx, d2_over_d1, lo, hi);
-        if (next - x).abs() <= 1.5 * f64::EPSILON * next.max(f64::MIN_POSITIVE) {
-            return Ok(next);
-        }
-        x = next;
-    }
-    Ok(0.5 * (lo + hi))
-}
-
-fn invert_reg_gamma_deep_upper(a: f64, q: f64) -> Result<f64, MathError> {
-    let target_ln = q.ln();
-    let mut x = initial_gamma_quantile_guess(a, 1.0 - q, q)?;
-    let mut lo = 0.0_f64;
-    let mut hi = (x * 4.0 + a + 64.0).max(16.0);
-    for _ in 0..32 {
-        if ln_reg_gamma_q(a, hi)? < target_ln {
+        if !df_du.is_finite() || df_du.abs() <= f64::MIN_POSITIVE {
             break;
         }
-        lo = hi;
-        hi *= 4.0;
+        let rel_newton = fx / df_du;
+        let denom = (1.0 - 0.5 * rel_newton * (d2_du - 1.0)).clamp(0.2, 5.0);
+        let step = x * (rel_newton / denom);
+        let cand = x - step;
+        if !cand.is_finite() || cand <= x_lo || cand >= x_hi {
+            break;
+        }
+        if step.abs() <= 1.5 * f64::EPSILON * cand {
+            return Ok(cand);
+        }
+        x = cand;
     }
-
-    for _ in 0..40 {
-        let ln_q = ln_reg_gamma_q(a, x)?;
-        let g = ln_q - target_ln;
-        if g == 0.0 {
-            return Ok(x);
-        }
-        if g > 0.0 {
-            lo = lo.max(x);
-        } else {
-            hi = hi.min(x);
-        }
-        if (hi - lo) <= 2.0 * f64::EPSILON * x.max(f64::MIN_POSITIVE) {
-            return Ok(0.5 * (lo + hi));
-        }
-        let ln_pdf = ln_gamma_kernel(a, x)? - x.ln();
-        let g1 = -(ln_pdf - ln_q).exp();
-        let d2_over_d1 = (a - 1.0) / x - 1.0 - g1;
-        let next = safeguarded_halley_step(x, g, g1, d2_over_d1, lo, hi);
-        if (next - x).abs() <= 1.5 * f64::EPSILON * next.max(f64::MIN_POSITIVE) {
-            return Ok(next);
-        }
-        x = next;
-    }
-    Ok(0.5 * (lo + hi))
+    Ok(x)
 }
 
-fn invert_reg_gamma_deep_lower(a: f64, p: f64) -> Result<f64, MathError> {
-    let target_ln = p.ln();
-    let x0 = initial_gamma_quantile_guess(a, p, 1.0 - p)?;
-    let mut u = x0.ln();
-    let mut u_lo = u - 16.0;
-    let mut u_hi = (u + 16.0).max((a + 16.0).ln());
-    while ln_reg_gamma_p(a, u_lo.exp())? > target_ln && u_lo > -740.0 {
-        u_hi = u_lo;
-        u_lo -= 16.0;
+fn solve_gamma_log_space(a: f64, u_guess: f64, target: GammaTarget) -> Result<f64, MathError> {
+    let mut u_lo = MIN_LN_X;
+    let mut u_hi = 0.0_f64;
+    let x_min = u_lo.exp();
+    let (f_lo, _, _) = eval_gamma_objective(a, x_min, target)?;
+    if f_lo == 0.0 {
+        return Ok(x_min);
     }
-    while ln_reg_gamma_p(a, u_hi.exp())? < target_ln {
-        u_lo = u_hi;
-        u_hi += 16.0;
+    if !target.is_below_root(f_lo) {
+        return Err(MathError::NotConverged { algorithm: "solve_gamma_log_space", iterations: 0 });
     }
 
-    for _ in 0..40 {
+    let mut u = if u_guess.is_finite() && u_guess > u_lo && u_guess < u_hi { u_guess } else { 0.5 * (u_lo + u_hi) };
+
+    for _ in 0..MAX_GAMMA_INV_ITERS {
         let x = u.exp();
-        if x == 0.0 {
-            return Ok(0.0);
+        if !x.is_finite() || x <= 0.0 {
+            return Err(MathError::NotConverged { algorithm: "solve_gamma_log_space", iterations: MAX_GAMMA_INV_ITERS });
         }
-        let ln_p = ln_reg_gamma_p(a, x)?;
-        let h = ln_p - target_ln;
-        if h == 0.0 {
+        let (fx, df_du, d2_du) = eval_gamma_objective(a, x, target)?;
+        if fx == 0.0 {
             return Ok(x);
         }
-        if h < 0.0 {
+        if target.is_below_root(fx) {
             u_lo = u_lo.max(u);
         } else {
             u_hi = u_hi.min(u);
         }
         if (u_hi - u_lo) <= 2.0 * f64::EPSILON * u.abs().max(1.0) {
-            return Ok((0.5 * (u_lo + u_hi)).exp());
+            let u_mid = 0.5 * (u_lo + u_hi);
+            return polish_gamma_log_root(a, u_mid.exp(), u_lo.exp(), u_hi.exp(), target);
         }
-        let h1 = (ln_gamma_kernel(a, x)? - ln_p).exp();
-        let d2_over_d1 = a - x - h1;
-        let next_u = safeguarded_halley_step(u, h, h1, d2_over_d1, u_lo, u_hi);
-        if (next_u - u).abs() <= 1.5 * f64::EPSILON * next_u.abs().max(1.0) {
-            return Ok(next_u.exp());
+        let mut next_u = safeguarded_halley_step(u, fx, df_du, d2_du, u_lo, u_hi);
+        let used_halley = next_u > u_lo && next_u < u_hi;
+        if !used_halley {
+            next_u = 0.5 * (u_lo + u_hi);
+            if next_u <= u_lo || next_u >= u_hi {
+                return polish_gamma_log_root(a, next_u.exp(), u_lo.exp(), u_hi.exp(), target);
+            }
+        } else if (next_u - u).abs() <= 1.5 * f64::EPSILON * next_u.abs().max(1.0) {
+            return polish_gamma_log_root(a, next_u.exp(), u_lo.exp(), u_hi.exp(), target);
         }
         u = next_u;
     }
-    Ok((0.5 * (u_lo + u_hi)).exp())
+
+    Err(MathError::NotConverged { algorithm: "solve_gamma_log_space", iterations: MAX_GAMMA_INV_ITERS })
+}
+
+fn solve_gamma_lin_space(a: f64, u_guess: f64, target: GammaTarget) -> Result<f64, MathError> {
+    let x_guess = if u_guess.is_finite() && u_guess > 0.0 && u_guess < MAX_LN_X { u_guess.exp() } else { 2.0 };
+    let mut lo = 1.0_f64;
+    let mut hi = (x_guess * 2.0).clamp(2.0, f64::MAX);
+    let mut bracketed = false;
+
+    for _ in 0..MAX_GAMMA_INV_ITERS {
+        let (f_hi, _, _) = eval_gamma_objective(a, hi, target)?;
+        if f_hi == 0.0 {
+            return Ok(hi);
+        }
+        if !target.is_below_root(f_hi) {
+            bracketed = true;
+            break;
+        }
+        lo = hi;
+        if hi >= f64::MAX {
+            break;
+        }
+        hi = if hi <= f64::MAX / 4.0 { hi * 4.0 } else { f64::MAX };
+    }
+    if !bracketed {
+        return Err(MathError::NotConverged { algorithm: "solve_gamma_lin_space", iterations: MAX_GAMMA_INV_ITERS });
+    }
+
+    let mut x = if x_guess > lo && x_guess < hi { x_guess } else { 0.5 * (lo + hi) };
+    for _ in 0..MAX_GAMMA_INV_ITERS {
+        let (fx, df_du, d2_du) = eval_gamma_objective(a, x, target)?;
+        if fx == 0.0 {
+            return Ok(x);
+        }
+        if target.is_below_root(fx) {
+            lo = lo.max(x);
+        } else {
+            hi = hi.min(x);
+        }
+        if (hi - lo) <= 2.0 * f64::EPSILON * x.max(1.0) {
+            return Ok(0.5 * (lo + hi));
+        }
+        let df_dx = df_du / x;
+        let d2_dx = (d2_du - 1.0) / x;
+        let mut next = safeguarded_halley_step(x, fx, df_dx, d2_dx, lo, hi);
+        let used_halley = next > lo && next < hi;
+        if !used_halley {
+            next = 0.5 * (lo + hi);
+            if next <= lo || next >= hi {
+                return Ok(next);
+            }
+        } else if (next - x).abs() <= 1.5 * f64::EPSILON * next.max(1.0) {
+            return Ok(next);
+        }
+        x = next;
+    }
+
+    Err(MathError::NotConverged { algorithm: "solve_gamma_lin_space", iterations: MAX_GAMMA_INV_ITERS })
 }
 
 #[cfg(test)]

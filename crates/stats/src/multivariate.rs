@@ -2220,7 +2220,11 @@ type OptionalColumnsPair = (Vec<String>, Vec<Vec<Option<f64>>>);
 fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<OptionalColumnsPair, StatsError> {
     match &sheet.archetype {
         TableArchetype::MultipleVariables(mv) => {
-            let indices = resolve_selected_indices(selected, mv.variables.len());
+            let indices = if selected.is_empty() {
+                (0..mv.variables.len()).filter(|&idx| !matches!(mv.variables[idx].role, VariableRole::Categorical | VariableRole::Label)).collect()
+            } else {
+                resolve_selected_indices(selected, mv.variables.len())
+            };
             let mut labels = Vec::with_capacity(indices.len());
             let mut cols = Vec::with_capacity(indices.len());
             for idx in indices {
@@ -2311,5 +2315,58 @@ pub fn ci_cell_from_option(ci: Option<(f64, f64)>) -> ResultCell {
     match ci {
         Some((lo, hi)) => ci_cell(lo, hi),
         None => ResultCell::Empty,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_doc::{
+        AnalysisKind, AnalysisSpec, Cell, ClusterDistance, ClusterLinkage, DataSheet, MultipleVariablesTable, MultivariateSpec, SheetId,
+        TableArchetype, VariableRole,
+    };
+
+    use super::{extract_optional_columns, run_multivariate_analysis};
+
+    #[test]
+    fn empty_selection_excludes_categorical_and_label_columns_including_appended_cluster() -> Result<(), Box<dyn std::error::Error>> {
+        let mut mv = MultipleVariablesTable::new(5, 6)?;
+        mv.variables[0].title = String::from("SampleLabel");
+        mv.variables[0].role = VariableRole::Label;
+        mv.variables[1].title = String::from("F1");
+        mv.variables[1].role = VariableRole::Continuous;
+        mv.variables[2].title = String::from("F2");
+        mv.variables[2].role = VariableRole::Continuous;
+        mv.variables[3].title = String::from("F3Calc");
+        mv.variables[3].role = VariableRole::Calculated;
+        mv.variables[4].title = String::from("Cluster");
+        mv.variables[4].role = VariableRole::Categorical;
+
+        let coords = [[1.0, 1.0, 2.0], [1.1, 0.9, 2.1], [0.9, 1.1, 1.9], [10.0, 10.0, 8.0], [10.2, 9.8, 8.2], [9.9, 10.1, 7.9]];
+        for (r, vals) in coords.iter().enumerate() {
+            mv.variables[0].cells[r] = Cell::text(format!("S{}", r + 1));
+            mv.variables[1].cells[r] = Cell::number(vals[0]);
+            mv.variables[2].cells[r] = Cell::number(vals[1]);
+            mv.variables[3].cells[r] = Cell::number(vals[2]);
+            mv.variables[4].cells[r] = Cell::text(if r < 3 { "Cluster 1" } else { "Cluster 2" });
+        }
+
+        let sheet = DataSheet::new(SheetId::new("mv-cluster"), "Cluster MV", TableArchetype::MultipleVariables(mv))?;
+        let (labels, cols) = extract_optional_columns(&sheet, &[])?;
+        assert_eq!(labels, vec![String::from("F1"), String::from("F2"), String::from("F3Calc")]);
+        assert_eq!(cols.len(), 3);
+
+        let explicit = extract_optional_columns(&sheet, &[1, 4])?;
+        assert_eq!(explicit.0, vec![String::from("F1"), String::from("Cluster")]);
+
+        let mv_spec = MultivariateSpec::Clustering {
+            k_means_k: Some(2),
+            distance: ClusterDistance::Euclidean,
+            linkage: ClusterLinkage::Ward,
+            k_sweep_max: None,
+        };
+        let spec = AnalysisSpec::new(SheetId::new("res-cl"), SheetId::new("mv-cluster"), AnalysisKind::Multivariate(mv_spec.clone()))?;
+        let res = run_multivariate_analysis(&sheet, &spec, &mv_spec)?;
+        assert!(res.tabs.iter().any(|t| t.id == "kmeans-assignments"));
+        Ok(())
     }
 }

@@ -1,13 +1,14 @@
 //! Sheet creation, renaming, deletion, duplication, pipeline cloning, freezing, reordering, and selection commands.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode,
     GraphAnnotation, GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
     LayoutItem, LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, ParameterScope, PartsOfWholeTable, PlacementMode, ProjectDocument,
     ResultCell, ResultSheet, ResultStatus, ResultTab, SheetCellRange, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
-    TableArchetype, TableKind, VariableRole, XColumnMode, XyTable, validate_title,
+    TableArchetype, TableKind, VariableRole, XColumnMode, XyTable, validate_cell_grid, validate_data_sets, validate_project_cells, validate_rows,
+    validate_sheet_cells, validate_subcolumns, validate_title,
 };
 use lumencraft_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 use serde::Deserialize;
@@ -20,7 +21,7 @@ use crate::cmd::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases,
     parse_params, str_schema,
 };
-use crate::cmd::project::{RecalcSummary, recalculate_with_links};
+use crate::cmd::project::{RecalcSummary, recalculate_dirty_with_links};
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
 
@@ -267,7 +268,53 @@ fn parse_variable_role(raw: &str) -> Result<VariableRole, EngineError> {
     }
 }
 
-fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchetype, EngineError> {
+fn document_used_cells(doc: &ProjectDocument) -> usize {
+    doc.data_sheets.iter().fold(0usize, |acc, sheet| acc.saturating_add(sheet.archetype.allocated_cell_slots()))
+}
+
+fn validate_sheet_and_project_budget(
+    existing_cells: usize,
+    rows: usize,
+    cols: usize,
+    subcolumns: usize,
+    extra_cols_per_row: usize,
+) -> Result<(), EngineError> {
+    validate_rows(rows)?;
+    validate_data_sets(cols)?;
+    let sheet_cells = validate_cell_grid(rows, cols, subcolumns, extra_cols_per_row)?;
+    validate_project_cells(existing_cells, sheet_cells)?;
+    Ok(())
+}
+
+fn projected_cloned_sheet_cells(arch: &TableArchetype, override_replicates: Option<usize>) -> Result<usize, DocError> {
+    if let Some(n) = override_replicates {
+        validate_subcolumns(n)?;
+        return match arch {
+            TableArchetype::Xy(t) => {
+                let rows = t.x_cells.len().max(t.data_sets.first().map_or(0, |d| d.cells.len()));
+                validate_cell_grid(rows, t.data_sets.len(), n, t.x_mode.subcolumn_count())
+            }
+            TableArchetype::Grouped(t) => {
+                let rows = t.data_sets.first().map_or(0, |d| d.cells.len());
+                validate_cell_grid(rows, t.data_sets.len(), n, 0)
+            }
+            TableArchetype::Nested(t) => {
+                let rows = t.groups.first().map_or(0, |g| g.cells.len());
+                validate_cell_grid(rows, t.groups.len(), n, 0)
+            }
+            _ => {
+                let cells = arch.allocated_cell_slots();
+                validate_sheet_cells(cells)?;
+                Ok(cells)
+            }
+        };
+    }
+    let cells = arch.allocated_cell_slots();
+    validate_sheet_cells(cells)?;
+    Ok(cells)
+}
+
+fn build_archetype_from_params(parsed: &CreateDataParams, existing_cells: usize) -> Result<TableArchetype, EngineError> {
     let kind = parse_table_kind(parsed.kind.as_deref().unwrap_or("xy"))?;
     let default_rows = match kind {
         TableKind::Contingency => 2,
@@ -287,6 +334,7 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
         TableKind::Xy => {
             let submode = parse_subcolumn_mode(parsed.subcolumn_mode.as_ref(), replicates)?;
             let x_mode = parse_x_mode(parsed.x_mode.as_ref())?;
+            validate_sheet_and_project_budget(existing_cells, rows, cols, submode.subcolumn_count(), x_mode.subcolumn_count())?;
             let mut xy = XyTable::new_with_x_mode(x_mode, submode, cols, rows)?;
             if let Some(ref xt) = parsed.x_title {
                 validate_title(xt)?;
@@ -298,14 +346,17 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
             let design = parse_column_design_hint(parsed.design_hint.as_ref())?;
             let col = if parsed.subcolumn_mode.is_some() || replicates > 1 {
                 let submode = parse_subcolumn_mode(parsed.subcolumn_mode.as_ref(), replicates)?;
+                validate_sheet_and_project_budget(existing_cells, rows, cols, submode.subcolumn_count(), 0)?;
                 ColumnTable::new_with_subcolumns(design, submode, cols, rows)?
             } else {
+                validate_sheet_and_project_budget(existing_cells, rows, cols, 1, 0)?;
                 ColumnTable::new(design, cols, rows)?
             };
             Ok(TableArchetype::Column(col))
         }
         TableKind::Grouped => {
             let submode = parse_subcolumn_mode(parsed.subcolumn_mode.as_ref(), replicates)?;
+            validate_sheet_and_project_budget(existing_cells, rows, cols, submode.subcolumn_count(), 0)?;
             let mut grp = GroupedTable::new(submode, cols, rows)?;
             if let Some(ref rf) = parsed.row_factor_title {
                 validate_title(rf)?;
@@ -318,6 +369,7 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
             Ok(TableArchetype::Grouped(grp))
         }
         TableKind::Contingency => {
+            validate_sheet_and_project_budget(existing_cells, rows, cols, 1, 0)?;
             let mut cont = ContingencyTable::new(cols, rows)?;
             if let Some(ref rf) = parsed.row_factor_title {
                 validate_title(rf)?;
@@ -330,6 +382,7 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
             Ok(TableArchetype::Contingency(cont))
         }
         TableKind::Survival => {
+            validate_sheet_and_project_budget(existing_cells, rows, cols, 1, 1)?;
             let mut surv = SurvivalTable::new(cols, rows)?;
             if let Some(ref tt) = parsed.time_title {
                 validate_title(tt)?;
@@ -337,14 +390,27 @@ fn build_archetype_from_params(parsed: &CreateDataParams) -> Result<TableArchety
             }
             Ok(TableArchetype::Survival(surv))
         }
-        TableKind::PartsOfWhole => Ok(TableArchetype::PartsOfWhole(PartsOfWholeTable::new(cols, rows)?)),
-        TableKind::MultipleVariables => build_multivariate_archetype(cols, rows, parsed.variables.as_deref()),
-        TableKind::Nested => Ok(TableArchetype::Nested(NestedTable::new(cols, replicates, rows)?)),
+        TableKind::PartsOfWhole => {
+            validate_sheet_and_project_budget(existing_cells, rows, cols, 1, 0)?;
+            Ok(TableArchetype::PartsOfWhole(PartsOfWholeTable::new(cols, rows)?))
+        }
+        TableKind::MultipleVariables => build_multivariate_archetype(cols, rows, parsed.variables.as_deref(), existing_cells),
+        TableKind::Nested => {
+            validate_subcolumns(replicates)?;
+            validate_sheet_and_project_budget(existing_cells, rows, cols, replicates, 0)?;
+            Ok(TableArchetype::Nested(NestedTable::new(cols, replicates, rows)?))
+        }
     }
 }
 
-fn build_multivariate_archetype(cols: usize, rows: usize, vars: Option<&[VariableInitInput]>) -> Result<TableArchetype, EngineError> {
+fn build_multivariate_archetype(
+    cols: usize,
+    rows: usize,
+    vars: Option<&[VariableInitInput]>,
+    existing_cells: usize,
+) -> Result<TableArchetype, EngineError> {
     let count = vars.map_or(cols, |v| cols.max(v.len()));
+    validate_sheet_and_project_budget(existing_cells, rows, count, 1, 0)?;
     let mut mv = MultipleVariablesTable::new(count, rows)?;
     if let Some(items) = vars {
         for (idx, item) in items.iter().enumerate() {
@@ -388,12 +454,16 @@ fn provision_paired_info_sheet(
         if sheet_id_exists(doc, &iid) {
             return Err(EngineError::with_code(ErrorCode::AlreadyExists, format!("sheet id `{}` already exists in another section", iid.as_str())));
         }
-        let info = InfoSheet::new_preseeded(iid.clone(), format!("{data_title} Info"))?;
+        let info_title = format!("{data_title} Info");
+        validate_title(&info_title)?;
+        let info = InfoSheet::new_preseeded(iid.clone(), info_title)?;
         reserved.insert(iid.as_str().to_owned());
         return Ok((iid, Some(info)));
     }
     let iid = next_unique_id_with_reserved(doc, &format!("info-{}", data_id.as_str()), reserved)?;
-    let info = InfoSheet::new_preseeded(iid.clone(), format!("{data_title} Info"))?;
+    let info_title = format!("{data_title} Info");
+    validate_title(&info_title)?;
+    let info = InfoSheet::new_preseeded(iid.clone(), info_title)?;
     reserved.insert(iid.as_str().to_owned());
     Ok((iid, Some(info)))
 }
@@ -414,7 +484,8 @@ fn run_sheet_create_data(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
 
     let default_title = format!("Data {}", ctx.session.doc.data_sheets.len() + 1);
     let title = parsed.title.as_deref().unwrap_or(&default_title).to_owned();
-    let archetype = build_archetype_from_params(&parsed)?;
+    let existing_cells = document_used_cells(&ctx.session.doc);
+    let archetype = build_archetype_from_params(&parsed, existing_cells)?;
     let mut sheet = DataSheet::new(id.clone(), title.clone(), archetype)?;
 
     let mut reserved = HashSet::new();
@@ -507,6 +578,7 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         .sheet_section(&id)
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("sheet `{}` not found", id.as_str())))?;
 
+    validate_title(&title)?;
     match section {
         SheetSection::Data => {
             {
@@ -514,7 +586,7 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
                 ensure_sheet_not_frozen(ds)?;
                 ds.set_title(title.clone())?;
             }
-            let _ = recalculate_with_links(&mut ctx.session.doc, false)?;
+            let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&id), false)?;
         }
         SheetSection::Info => {
             let info = ctx
@@ -609,15 +681,45 @@ fn has_live_dependents(doc: &ProjectDocument, id: &SheetId, section: SheetSectio
             format!("cannot delete `{}` while layout `{}` embeds it", id.as_str(), ls.id.as_str()),
         ));
     }
-    if section == SheetSection::Info
-        && let Some(ds) = doc.data_sheets.iter().find(|d| d.info_sheet_id.as_ref() == Some(id))
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::Conflict,
-            format!("cannot delete info sheet `{}` while data sheet `{}` references it", id.as_str(), ds.id.as_str()),
-        ));
+    if section == SheetSection::Info {
+        if let Some(ds) = doc.data_sheets.iter().find(|d| d.info_sheet_id.as_ref() == Some(id)) {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("cannot delete info sheet `{}` while data sheet `{}` references it", id.as_str(), ds.id.as_str()),
+            ));
+        }
+        if let Some(rs) = doc.result_sheets.iter().find(|r| result_hooks_info_sheet(doc, r, id)) {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("cannot delete info sheet `{}` while analysis `{}` hooks constants from it", id.as_str(), rs.id.as_str()),
+            ));
+        }
     }
     Ok(())
+}
+
+fn result_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, rs: &'a ResultSheet) -> Option<&'a SheetId> {
+    let mut cursor = &rs.analysis.source_sheet_id;
+    let mut seen: HashSet<&SheetId> = HashSet::new();
+    while seen.insert(cursor) {
+        if let Some(ds) = doc.data_sheet(cursor) {
+            return ds.info_sheet_id.as_ref();
+        }
+        if let Some(upstream) = doc.result_sheet(cursor) {
+            cursor = &upstream.analysis.source_sheet_id;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+fn result_hooks_info_sheet(doc: &ProjectDocument, rs: &ResultSheet, info_id: &SheetId) -> bool {
+    rs.analysis.kind.hooked_sources().into_iter().any(|hook| match hook {
+        HookSource::InfoConstant { info_sheet_id: Some(iid), .. } => &iid == info_id,
+        HookSource::InfoConstant { info_sheet_id: None, .. } => result_origin_info_sheet_id(doc, rs) == Some(info_id),
+        _ => false,
+    })
 }
 
 fn graph_references_sheet(gs: &GraphSheet, id: &SheetId) -> bool {
@@ -666,7 +768,8 @@ fn collect_downstream_for_delete(doc: &ProjectDocument, root_id: &SheetId, inclu
                 && let Some(ref iid) = ds.info_sheet_id
             {
                 let shared_elsewhere =
-                    doc.data_sheets.iter().any(|other| !to_delete.contains(&other.id) && other.info_sheet_id.as_ref() == Some(iid));
+                    doc.data_sheets.iter().any(|other| !to_delete.contains(&other.id) && other.info_sheet_id.as_ref() == Some(iid))
+                        || doc.result_sheets.iter().any(|rs| !to_delete.contains(&rs.id) && result_hooks_info_sheet(doc, rs, iid));
                 if !shared_elsewhere && !to_delete.contains(iid) && iid != root_id {
                     to_delete.insert(iid.clone());
                 }
@@ -705,7 +808,22 @@ fn run_sheet_delete(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         }
     }
 
+    let deleted_any_info = to_delete.iter().any(|sid| ctx.session.doc.info_sheet(sid).is_some());
+    let surviving_dependents: Vec<SheetId> = ctx
+        .session
+        .doc
+        .data_sheets
+        .iter()
+        .map(|s| &s.id)
+        .chain(ctx.session.doc.result_sheets.iter().map(|s| &s.id))
+        .filter(|sid| !to_delete.contains(*sid))
+        .filter(|sid| ctx.session.doc.upstream_dependencies(sid).iter().any(|up| to_delete.contains(up)))
+        .cloned()
+        .collect();
     let deleted_ids = prune_deleted_sheets(&mut ctx.session.doc, &to_delete);
+    if deleted_any_info || matches!(section, SheetSection::Data | SheetSection::Analyses) {
+        let _ = recalculate_dirty_with_links(&mut ctx.session.doc, &surviving_dependents, false)?;
+    }
 
     Ok(CommandOutcome::mutated(
         "sheet.delete",
@@ -810,17 +928,23 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
 
     match section {
         SheetSection::Data => {
-            let mut copy = ctx
+            let existing_cells = document_used_cells(&ctx.session.doc);
+            let src = ctx
                 .session
                 .doc
                 .data_sheet(&id)
-                .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", id.as_str())))?;
+            let needed = src.archetype.allocated_cell_slots();
+            validate_sheet_cells(needed)?;
+            validate_project_cells(existing_cells, needed)?;
+            let mut copy = src.clone();
             copy.id = new_id.clone();
-            copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            validate_title(&title)?;
+            copy.title = title;
             copy.frozen = parsed.frozen.unwrap_or(false);
             ctx.session.doc.add_data_sheet(copy)?;
-            let _ = recalculate_with_links(&mut ctx.session.doc, false)?;
+            let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&new_id), false)?;
         }
         SheetSection::Info => {
             let mut copy = ctx
@@ -830,7 +954,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("info sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
-            copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            validate_title(&title)?;
+            copy.title = title;
             ctx.session.doc.add_info_sheet(copy)?;
         }
         SheetSection::Analyses => {
@@ -842,7 +968,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
             copy.analysis.id = new_id.clone();
-            copy.analysis.custom_title = Some(parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.analysis.effective_title())));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.analysis.effective_title()));
+            validate_title(&title)?;
+            copy.analysis.custom_title = Some(title);
             if let Some(ref mut ad) = copy.analyzable_data {
                 ad.id = new_id.clone();
             }
@@ -856,7 +984,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("graph sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
-            copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            validate_title(&title)?;
+            copy.title = title;
             ctx.session.doc.add_graph_sheet(copy)?;
         }
         SheetSection::Layouts => {
@@ -867,7 +997,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("layout sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
-            copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            validate_title(&title)?;
+            copy.title = title;
             ctx.session.doc.add_layout_sheet(copy)?;
         }
     }
@@ -1005,6 +1137,36 @@ struct FamilyCloneOptions<'a> {
 }
 
 fn resolve_family_root_data_id(doc: &ProjectDocument, raw_id: &SheetId) -> Result<SheetId, EngineError> {
+    let mut active = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    resolve_family_root_data_id_with_visited(doc, raw_id, &mut active, &mut visited)
+}
+
+fn resolve_family_root_data_id_with_visited(
+    doc: &ProjectDocument,
+    raw_id: &SheetId,
+    active: &mut BTreeSet<SheetId>,
+    visited: &mut BTreeSet<SheetId>,
+) -> Result<SheetId, EngineError> {
+    if !active.insert(raw_id.clone()) {
+        return Err(EngineError::with_code(ErrorCode::CycleDetected, format!("circular sheet reference detected at `{}`", raw_id.as_str())));
+    }
+    if !visited.insert(raw_id.clone()) {
+        active.remove(raw_id);
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("sheet `{}` cannot trace back to a data sheet", raw_id.as_str())));
+    }
+
+    let outcome = resolve_family_root_data_id_inner(doc, raw_id, active, visited);
+    active.remove(raw_id);
+    outcome
+}
+
+fn resolve_family_root_data_id_inner(
+    doc: &ProjectDocument,
+    raw_id: &SheetId,
+    active: &mut BTreeSet<SheetId>,
+    visited: &mut BTreeSet<SheetId>,
+) -> Result<SheetId, EngineError> {
     let section =
         doc.sheet_section(raw_id).ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("sheet `{}` not found", raw_id.as_str())))?;
 
@@ -1017,19 +1179,20 @@ fn resolve_family_root_data_id(doc: &ProjectDocument, raw_id: &SheetId) -> Resul
             .map(|ds| ds.id.clone())
             .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("info sheet `{}` has no owning data sheet", raw_id.as_str()))),
         SheetSection::Analyses => {
-            let mut cur = raw_id.clone();
-            for _ in 0..=doc.result_sheets.len() {
-                if let Some(rs) = doc.result_sheet(&cur) {
-                    let up = &rs.analysis.source_sheet_id;
-                    if doc.data_sheet(up).is_some() {
-                        return Ok(up.clone());
-                    }
-                    cur = up.clone();
-                } else {
-                    break;
-                }
+            let Some(rs) = doc.result_sheet(raw_id) else {
+                return Err(EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` not found", raw_id.as_str())));
+            };
+            let up = &rs.analysis.source_sheet_id;
+            if doc.data_sheet(up).is_some() {
+                return Ok(up.clone());
             }
-            Err(EngineError::with_code(ErrorCode::BadInput, format!("result sheet `{}` cannot trace back to a data sheet", raw_id.as_str())))
+            if doc.sheet_section(up).is_none() {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("result sheet `{}` cannot trace back to a data sheet", raw_id.as_str()),
+                ));
+            }
+            resolve_family_root_data_id_with_visited(doc, up, active, visited)
         }
         SheetSection::Graphs => {
             let gs = doc
@@ -1039,31 +1202,36 @@ fn resolve_family_root_data_id(doc: &ProjectDocument, raw_id: &SheetId) -> Resul
             if doc.data_sheet(primary).is_some() {
                 return Ok(primary.clone());
             }
-            resolve_family_root_data_id(doc, primary)
+            resolve_family_root_data_id_with_visited(doc, primary, active, visited)
         }
         SheetSection::Layouts => {
             let ls = doc
                 .layout_sheet(raw_id)
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("layout sheet `{}` not found", raw_id.as_str())))?;
+            let mut cycle_err: Option<EngineError> = None;
             for item in &ls.spec.items {
-                match item {
+                let target_id = match item {
                     LayoutItem::LiveTable { source_sheet_id, .. } => {
                         if doc.data_sheet(source_sheet_id).is_some() {
                             return Ok(source_sheet_id.clone());
                         }
-                        if let Ok(found) = resolve_family_root_data_id(doc, source_sheet_id) {
-                            return Ok(found);
+                        source_sheet_id
+                    }
+                    LayoutItem::LiveGraph { graph_sheet_id, .. } => graph_sheet_id,
+                    LayoutItem::TextCallout { .. } => continue,
+                };
+                match resolve_family_root_data_id_with_visited(doc, target_id, active, visited) {
+                    Ok(found) => return Ok(found),
+                    Err(err) if err.code == ErrorCode::CycleDetected => {
+                        if cycle_err.is_none() {
+                            cycle_err = Some(err);
                         }
                     }
-                    LayoutItem::LiveGraph { graph_sheet_id, .. } => {
-                        if let Ok(found) = resolve_family_root_data_id(doc, graph_sheet_id) {
-                            return Ok(found);
-                        }
-                    }
-                    LayoutItem::TextCallout { .. } => {}
+                    Err(_) => {}
                 }
             }
-            Err(EngineError::with_code(ErrorCode::BadInput, format!("layout `{}` has no data sheet family", raw_id.as_str())))
+            Err(cycle_err
+                .unwrap_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("layout `{}` has no data sheet family", raw_id.as_str()))))
         }
     }
 }
@@ -1071,10 +1239,15 @@ fn resolve_family_root_data_id(doc: &ProjectDocument, raw_id: &SheetId) -> Resul
 fn clone_family_into_doc(doc: &mut ProjectDocument, req: &FamilyCloneOptions<'_>) -> Result<CommandOutcome, EngineError> {
     let raw_id = parse_sheet_id(req.raw_sheet_id)?;
     let root_data_id = resolve_family_root_data_id(doc, &raw_id)?;
-    let src_ds = doc
-        .data_sheet(&root_data_id)
-        .cloned()
-        .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", root_data_id.as_str())))?;
+    let existing_cells = document_used_cells(doc);
+    let src_ds = {
+        let src_ref = doc
+            .data_sheet(&root_data_id)
+            .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", root_data_id.as_str())))?;
+        let projected_cells = projected_cloned_sheet_cells(&src_ref.archetype, req.override_replicates)?;
+        validate_project_cells(existing_cells, projected_cells)?;
+        src_ref.clone()
+    };
 
     let mut reserved: HashSet<String> = HashSet::new();
     let id_prefix = req.prefix.unwrap_or(root_data_id.as_str());
@@ -1120,7 +1293,8 @@ fn clone_family_into_doc(doc: &mut ProjectDocument, req: &FamilyCloneOptions<'_>
     let layout_ids = if req.clone_layouts { clone_downstream_layouts(doc, &id_map, &mut reserved, id_prefix, req.suffix_label)? } else { Vec::new() };
 
     if !req.clear_results {
-        let _ = recalculate_with_links(doc, false)?;
+        let dirty_seeds: Vec<SheetId> = id_map.values().cloned().collect();
+        let _ = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
     }
     doc.select_in_navigator(&new_data_id)?;
 
@@ -1159,7 +1333,9 @@ fn clone_paired_info(
     let new_info_id = next_unique_id_with_reserved(doc, &candidate, reserved)?;
     reserved.insert(new_info_id.as_str().to_owned());
     cloned_info.id = new_info_id.clone();
-    cloned_info.title = format!("{} Info", cloned_ds.title);
+    let info_title = format!("{} Info", cloned_ds.title);
+    validate_title(&info_title)?;
+    cloned_info.title = info_title;
     doc.add_info_sheet(cloned_info)?;
     cloned_ds.info_sheet_id = Some(new_info_id.clone());
     Ok(Some(new_info_id))
@@ -1183,7 +1359,7 @@ fn clone_downstream_results(
             }
             let new_res_id = next_unique_id_with_reserved(doc, &format!("{id_prefix}-res"), reserved)?;
             reserved.insert(new_res_id.as_str().to_owned());
-            let new_rs = remap_result_sheet(rs.clone(), new_res_id.clone(), id_map, clear_results, suffix_label);
+            let new_rs = remap_result_sheet(rs.clone(), new_res_id.clone(), id_map, clear_results, suffix_label)?;
             id_map.insert(rs.id.clone(), new_res_id.clone());
             created.push(new_res_id.as_str().to_owned());
             doc.add_result_sheet(new_rs)?;
@@ -1202,18 +1378,20 @@ fn remap_result_sheet(
     id_map: &HashMap<SheetId, SheetId>,
     clear_results: bool,
     suffix_label: &str,
-) -> ResultSheet {
+) -> Result<ResultSheet, EngineError> {
     let orig_title = res.title().to_owned();
     res.id = new_id.clone();
     res.analysis.id = new_id;
     if let Some(mapped) = id_map.get(&res.analysis.source_sheet_id) {
         res.analysis.source_sheet_id = mapped.clone();
     }
-    if let Some(custom) = res.analysis.custom_title.take() {
-        res.analysis.custom_title = Some(format!("{custom} ({suffix_label})"));
+    let next_title = if let Some(custom) = res.analysis.custom_title.take() {
+        format!("{custom} ({suffix_label})")
     } else {
-        res.analysis.custom_title = Some(format!("{orig_title} ({suffix_label})"));
-    }
+        format!("{orig_title} ({suffix_label})")
+    };
+    validate_title(&next_title)?;
+    res.analysis.custom_title = Some(next_title);
     remap_analysis_hooks(&mut res.analysis, id_map);
     if clear_results {
         res.status = ResultStatus::Dirty;
@@ -1226,7 +1404,7 @@ fn remap_result_sheet(
     } else if let Some(analyzable) = &mut res.analyzable_data {
         analyzable.id = res.id.clone();
     }
-    res
+    Ok(res)
 }
 
 fn remap_analysis_hooks(spec: &mut AnalysisSpec, id_map: &HashMap<SheetId, SheetId>) {
@@ -1279,7 +1457,9 @@ fn clone_downstream_graphs(
         reserved.insert(new_graph_id.as_str().to_owned());
         let mut cloned = gs.clone();
         cloned.id = new_graph_id.clone();
-        cloned.title = format!("{} ({suffix_label})", gs.title);
+        let next_title = format!("{} ({suffix_label})", gs.title);
+        validate_title(&next_title)?;
+        cloned.title = next_title;
         if let Some(mapped) = id_map.get(&gs.spec.primary_source_sheet_id) {
             cloned.spec.primary_source_sheet_id = mapped.clone();
         }
@@ -1328,7 +1508,9 @@ fn clone_downstream_layouts(
         reserved.insert(new_layout_id.as_str().to_owned());
         let mut cloned = ls.clone();
         cloned.id = new_layout_id.clone();
-        cloned.title = format!("{} ({suffix_label})", ls.title);
+        let next_title = format!("{} ({suffix_label})", ls.title);
+        validate_title(&next_title)?;
+        cloned.title = next_title;
         for item in &mut cloned.spec.items {
             match item {
                 LayoutItem::LiveGraph { graph_sheet_id, .. } => {
@@ -1433,7 +1615,8 @@ fn set_sheet_frozen(ctx: &mut Ctx<'_>, command_id: &str, params: Value, frozen: 
         ds.frozen = frozen;
     }
 
-    let recalc = if frozen { RecalcSummary::default() } else { recalculate_with_links(&mut ctx.session.doc, false)? };
+    let recalc =
+        if frozen { RecalcSummary::default() } else { recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&id), false)? };
     let message = if frozen { "froze data sheet" } else { "unfroze data sheet" };
     Ok(CommandOutcome::mutated(
         command_id,
@@ -1651,7 +1834,7 @@ fn run_sheet_select(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
             .with_remediation("Use `navigator` or `family`."));
     }
 
-    Ok(CommandOutcome::mutated(
+    Ok(CommandOutcome::read_only(
         "sheet.select",
         "selected sheet",
         json!({
@@ -2001,7 +2184,7 @@ static SPECS: [CommandSpec; 11] = [
         summary: "Select the active sheet in the navigator or family pane.",
         beginner: "Focuses a sheet in the navigator (`mode: \"navigator\"`) or sub-sheet family view (`mode: \"family\"`).",
         group: CommandGroup::Sheet,
-        effects: Effects::MUTATES_DOCUMENT.with(Effects::CHANGES_UI_STATE).with(Effects::IDEMPOTENT),
+        effects: Effects::CHANGES_UI_STATE.with(Effects::IDEMPOTENT),
         input_schema: select_sheet_schema,
         enabled: always_enabled,
         run: run_sheet_select,

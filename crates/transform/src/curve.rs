@@ -535,30 +535,30 @@ pub fn apply_curve_calculus_to_sheet(sheet: &DataSheet, op: CurveSheetOp) -> Res
 
     let mut series_curves = Vec::with_capacity(xy.data_sets.len());
     for ds_idx in 0..xy.data_sets.len() {
-        let pairs = extract_xy_mean_series(xy, ds_idx);
-        let transformed = match op {
-            CurveSheetOp::Smooth(m) => smooth_xy(&pairs, m)?,
-            CurveSheetOp::Differentiate(order) => differentiate_xy(&pairs, order)?,
-            CurveSheetOp::Integrate { baseline } => integrate_xy(&pairs, baseline)?,
-        };
-        series_curves.push(transformed);
+        series_curves.push(transform_dataset_curve(xy, ds_idx, op)?);
     }
 
-    let max_rows = series_curves.iter().map(Vec::len).max().unwrap_or(0);
+    let (x_grid, row_map) = build_aligned_x_grid(&series_curves);
     let mut out_xy = XyTable::new_with_x_mode(
         XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single },
         SubcolumnMode::Single,
         xy.data_sets.len(),
-        max_rows,
+        x_grid.len(),
     )?;
     out_xy.x_title = xy.x_title.clone();
+    for (out_row, &(_, x)) in x_grid.iter().enumerate() {
+        out_xy.set_x_cell(out_row, Cell::number(x))?;
+    }
     for (ds_idx, curve) in series_curves.iter().enumerate() {
-        out_xy.data_sets[ds_idx].title = xy.data_sets[ds_idx].title.clone();
-        for (row, &(x, y)) in curve.iter().enumerate() {
-            if ds_idx == 0 {
-                out_xy.set_x_cell(row, Cell::number(x))?;
+        if let (Some(src_ds), Some(dst_ds)) = (xy.data_sets.get(ds_idx), out_xy.data_sets.get_mut(ds_idx)) {
+            dst_ds.title = src_ds.title.clone();
+            for &(src_row, _, y) in curve {
+                if let Some(&out_row) = row_map.get(&src_row)
+                    && let Some(cell) = dst_ds.cells.get_mut(out_row).and_then(|sub| sub.first_mut())
+                {
+                    *cell = Cell::number(y);
+                }
             }
-            out_xy.data_sets[ds_idx].cells[row][0] = Cell::number(y);
         }
     }
 
@@ -573,27 +573,57 @@ pub enum CurveSheetOp {
     Integrate { baseline: f64 },
 }
 
-fn extract_xy_mean_series(xy: &XyTable, ds_idx: usize) -> Vec<(f64, f64)> {
+fn transform_dataset_curve(xy: &XyTable, ds_idx: usize, op: CurveSheetOp) -> Result<Vec<(usize, f64, f64)>, TransformError> {
+    let entries = extract_xy_mean_entries(xy, ds_idx);
+    let pairs: Vec<(f64, f64)> = entries.iter().map(|&(_, x, y)| (x, y)).collect();
+    let transformed = match op {
+        CurveSheetOp::Smooth(m) => smooth_xy(&pairs, m)?,
+        CurveSheetOp::Differentiate(order) => differentiate_xy(&pairs, order)?,
+        CurveSheetOp::Integrate { baseline } => integrate_xy(&pairs, baseline)?,
+    };
+    if transformed.len() != entries.len() {
+        return Err(TransformError::InvalidInput {
+            message: format!("curve calculus point count mismatch: expected {}, got {}", entries.len(), transformed.len()),
+        });
+    }
+    Ok(entries.into_iter().zip(transformed).map(|((row, _, _), (tx, ty))| (row, tx, ty)).collect())
+}
+
+fn build_aligned_x_grid(curves: &[Vec<(usize, f64, f64)>]) -> (Vec<(usize, f64)>, std::collections::HashMap<usize, usize>) {
+    let mut all_rows: Vec<(usize, f64)> = curves.iter().flat_map(|c| c.iter().map(|&(row, x, _)| (row, x))).collect();
+    all_rows.sort_by_key(|&(row, _)| row);
+    all_rows.dedup_by_key(|&mut (row, _)| row);
+    all_rows.sort_by(|&(r_a, x_a), &(r_b, x_b)| x_a.total_cmp(&x_b).then_with(|| r_a.cmp(&r_b)));
+    let mut row_map = std::collections::HashMap::with_capacity(all_rows.len());
+    for (out_row, &(src_row, _)) in all_rows.iter().enumerate() {
+        row_map.insert(src_row, out_row);
+    }
+    (all_rows, row_map)
+}
+
+fn extract_xy_mean_entries(xy: &XyTable, ds_idx: usize) -> Vec<(usize, f64, f64)> {
     let Some(ds) = xy.data_sets.get(ds_idx) else {
         return Vec::new();
     };
-    let mut pairs = Vec::new();
+    let mut entries = Vec::new();
     for (row, subcells) in ds.cells.iter().enumerate() {
         let Some(x) = xy.x_value_at(row) else {
             continue;
         };
         if xy.y_subcolumn_mode.is_pre_summarized() {
             if let Some(m) = subcells.first().and_then(Cell::active_number) {
-                pairs.push((x, m));
+                entries.push((row, x, m));
             }
         } else {
             let active: Vec<f64> = subcells.iter().filter_map(Cell::active_number).collect();
             if !active.is_empty()
                 && let Ok(m) = sum::mean(&active)
             {
-                pairs.push((x, m));
+                entries.push((row, x, m));
             }
         }
     }
-    pairs
+    // Match `prepare_sorted_points` ordering so `transformed` aligns 1:1 with `entries`.
+    entries.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+    entries
 }

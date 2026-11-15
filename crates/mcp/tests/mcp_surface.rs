@@ -468,3 +468,78 @@ fn workdir_guard_blocks_parent_traversal_and_outside_paths_on_all_io_surfaces() 
     assert_eq!(cmd_escape.structured_content.expect("sc")["code"], json!("path_escape"));
     assert!(!outside_dir.join("cmd_escape.lumencraft").exists());
 }
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn mcp_workdir_persists_across_open_file_and_blocks_stored_external_link_recalculate() {
+    use lumencraft_doc::{
+        CellCoord, CellValue, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange,
+        SheetId,
+    };
+    use lumencraft_engine::Session;
+    use lumencraft_format::save_project_file;
+
+    let dir = TempDirGuard::new("mcp-stored-link");
+    let sandbox_root = dir.path.join("sandbox");
+    let outside_dir = dir.path.join("outside");
+    fs::create_dir_all(&sandbox_root).expect("sandbox dir");
+    fs::create_dir_all(&outside_dir).expect("outside dir");
+
+    let outside_secret = outside_dir.join("secret.csv");
+    fs::write(&outside_secret, "999.0\n").expect("write outside");
+    let inside_csv = sandbox_root.join("nested").join("allowed.csv");
+    fs::create_dir_all(inside_csv.parent().expect("parent")).expect("mkdir nested");
+    fs::write(&inside_csv, "77.5\n").expect("write inside");
+
+    let build_archive = |archive_path: &Path, link_target: &str| {
+        let mut builder = Session::from_document(ProjectDocument::new("Linked").expect("doc"));
+        builder
+            .execute("sheet.createData", json!({ "sheet_id": "col-1", "title": "Target", "kind": "Column", "rows": 2, "cols": 1 }))
+            .expect("create sheet");
+        builder.execute("table.setCells", json!({ "sheet_id": "col-1", "edits": [{ "row": 0, "col": 0, "value": 10.0 }] })).expect("seed cell");
+        let mut doc = builder.document().clone();
+        doc.data_sheet_mut(&SheetId::new("col-1")).expect("col-1").linked_regions.push(LinkedDataRegion {
+            id: String::from("link-1"),
+            spec: ImportLinkSpec {
+                source: LinkSource::ExternalDelimitedFile { path: link_target.to_owned(), delimiter: ',', decimal_separator: '.' },
+                filter: ImportFilterSpec::default(),
+                placement: ImportPlacementSpec::default(),
+            },
+            target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
+            provenance_summary: String::from("external link"),
+        });
+        save_project_file(archive_path, &doc).expect("save archive");
+    };
+
+    let escaping_archive = sandbox_root.join("escape_link.lumencraft");
+    build_archive(&escaping_archive, &outside_secret.display().to_string());
+    let allowed_archive = sandbox_root.join("inside_link.lumencraft");
+    build_archive(&allowed_archive, "nested/allowed.csv");
+
+    let mut state = McpServerState::with_workdir(&sandbox_root).expect("with_workdir");
+
+    // Opening a valid archive inside workdir must preserve ExternalPathPolicy::Workdir on Session.
+    let open_esc = call_tool(&mut state, "open_file", json!({ "path": "escape_link.lumencraft" })).expect("open escape_link");
+    assert!(!open_esc.is_error, "open_file inside workdir failed: {open_esc:?}");
+    assert!(state.session().path_policy().is_constrained(), "path_policy must survive open_file");
+
+    let recalc_bad =
+        call_tool(&mut state, "command_run", json!({ "command_id": "project.recalculate", "params": { "include_external_links": true } }))
+            .expect("recalc escape");
+    assert!(recalc_bad.is_error, "project.recalculate must block stored external link escape");
+    assert_eq!(recalc_bad.structured_content.expect("sc")["code"], json!("path_escape"));
+    let cell_after_bad =
+        state.session().document().data_sheet(&SheetId::new("col-1")).expect("col-1").archetype.data_cell(CellCoord::new(0, 0, 0)).map(|c| &c.value);
+    assert_eq!(cell_after_bad, Some(&CellValue::Number(10.0)));
+
+    // Opening an archive whose stored external link stays inside workdir recalculates cleanly.
+    let open_ok = call_tool(&mut state, "open_file", json!({ "path": "inside_link.lumencraft" })).expect("open inside_link");
+    assert!(!open_ok.is_error);
+    let recalc_ok =
+        call_tool(&mut state, "command_run", json!({ "command_id": "project.recalculate", "params": { "include_external_links": true } }))
+            .expect("recalc allowed");
+    assert!(!recalc_ok.is_error, "expected inside link recalc to succeed: {recalc_ok:?}");
+    let cell_after_ok =
+        state.session().document().data_sheet(&SheetId::new("col-1")).expect("col-1").archetype.data_cell(CellCoord::new(0, 0, 0)).map(|c| &c.value);
+    assert_eq!(cell_after_ok, Some(&CellValue::Number(77.5)));
+}

@@ -9,8 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use lumencraft_doc::{CellCoord, SheetCellRange, SheetId};
 use lumencraft_format::save_project_file;
 use lumencraft_ui_egui::{
-    ClipboardBundle, PrintJobSpec, UiApp, bind_control_tcp_listener, parse_control_port, serve_control_listener, serve_control_stream,
-    validate_loopback_addr,
+    CONTROL_HTTP_FORBIDDEN_RESPONSE, ClipboardBundle, ControlAuth, PrintJobSpec, UiApp, bind_control_tcp_listener, parse_control_port,
+    serve_control_listener, serve_control_stream, validate_loopback_addr,
 };
 use serde_json::{Value, json};
 
@@ -100,7 +100,8 @@ fn jsonl_control_protocol_end_to_end_over_in_memory_stream() -> Result<(), Box<d
         json!({"id": "c-25", "op": "app.quit"}),
     ];
 
-    let mut payload = String::new();
+    let auth = ControlAuth::from_token("sample-stream-loopback-token")?;
+    let mut payload = format!("{{\"id\":\"c-0\",\"method\":\"auth\",\"params\":{{\"token\":\"{}\"}}}}\n", auth.as_str());
     for item in &requests {
         payload.push_str(&serde_json::to_string(item)?);
         payload.push('\n');
@@ -110,16 +111,17 @@ fn jsonl_control_protocol_end_to_end_over_in_memory_stream() -> Result<(), Box<d
 
     let mut reader = BufReader::new(Cursor::new(payload.as_bytes()));
     let mut output = Vec::new();
-    serve_control_stream(&mut app, &mut reader, &mut output)?;
+    serve_control_stream(&mut app, &mut reader, &mut output, &auth)?;
 
     let text = String::from_utf8(output)?;
-    let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), requests.len(), "stream must exit cleanly on app.quit");
+    let all_lines: Vec<&str> = text.lines().collect();
+    assert_eq!(all_lines.len(), requests.len() + 1, "stream must exit cleanly on app.quit");
 
-    for (idx, line) in lines.iter().enumerate() {
+    for (idx, line) in all_lines.iter().enumerate() {
         let resp: Value = serde_json::from_str(line)?;
         assert_eq!(resp["ok"], json!(true), "step {idx} failed: {resp}");
     }
+    let lines = &all_lines[1..];
 
     let cmd_list: Value = serde_json::from_str(lines[1])?;
     let listed = cmd_list["result"]["commands"].as_array().ok_or("commands array missing")?;
@@ -257,6 +259,8 @@ fn loopback_validation_and_ephemeral_tcp_check() -> Result<(), Box<dyn std::erro
                 Err(err) => return Err(Box::new(err)),
             }
 
+            let auth = ControlAuth::generate()?;
+            let token_owned = auth.as_str().to_owned();
             let client = std::thread::spawn(move || -> Result<Vec<Value>, String> {
                 let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
@@ -266,9 +270,10 @@ fn loopback_validation_and_ephemeral_tcp_check() -> Result<(), Box<dyn std::erro
                 let mut reader = BufReader::new(reader_stream);
 
                 let cmds = [
-                    r#"{"id":"t1","method":"ping"}"#,
-                    r#"{"id":"t2","method":"sheet.createData","params":{"sheet_id":"tcp-1","title":"TCP"}}"#,
-                    r#"{"id":"t3","method":"app.quit"}"#,
+                    format!(r#"{{"id":"t0","method":"auth","params":{{"token":"{token_owned}"}}}}"#),
+                    String::from(r#"{"id":"t1","method":"ping"}"#),
+                    String::from(r#"{"id":"t2","method":"sheet.createData","params":{"sheet_id":"tcp-1","title":"TCP"}}"#),
+                    String::from(r#"{"id":"t3","method":"app.quit"}"#),
                 ];
                 let mut responses = Vec::new();
                 for cmd in cmds {
@@ -285,12 +290,13 @@ fn loopback_validation_and_ephemeral_tcp_check() -> Result<(), Box<dyn std::erro
             });
 
             let mut app = UiApp::new();
-            serve_control_listener(&mut app, &listener)?;
+            serve_control_listener(&mut app, &listener, &auth)?;
             let responses = client.join().map_err(|_| "client thread panicked")??;
-            assert_eq!(responses.len(), 3);
+            assert_eq!(responses.len(), 4);
             assert_eq!(responses[0]["ok"], json!(true));
             assert_eq!(responses[1]["ok"], json!(true));
-            assert_eq!(responses[2]["result"]["quit"], json!(true));
+            assert_eq!(responses[2]["ok"], json!(true));
+            assert_eq!(responses[3]["result"]["quit"], json!(true));
             assert_eq!(app.document().data_sheets.len(), 1);
         }
     }
@@ -349,6 +355,8 @@ fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::
         Err(err) => return Err(Box::new(err)),
     }
 
+    let auth = ControlAuth::generate()?;
+    let token_owned = auth.as_str().to_owned();
     let client = std::thread::spawn(move || -> Result<Value, String> {
         // First connection sends a line that is not valid UTF-8, which fails that connection.
         {
@@ -357,23 +365,307 @@ fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::
             bad.flush().map_err(|e| e.to_string())?;
             let _ = bad.shutdown(std::net::Shutdown::Both);
         }
-        // A second connection must still be served.
+        // A second connection must still be served when authenticated.
         let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
         let mut writer = BufWriter::new(stream);
-        writer.write_all(b"{\"id\":\"p\",\"method\":\"ping\"}\n").map_err(|e| e.to_string())?;
+        writer.write_all(format!("{{\"id\":\"p\",\"method\":\"ping\",\"token\":\"{token_owned}\"}}\n").as_bytes()).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
         let mut line = String::new();
         std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
-        writer.write_all(b"{\"id\":\"q\",\"method\":\"app.quit\"}\n").map_err(|e| e.to_string())?;
+        writer.write_all(format!("{{\"id\":\"q\",\"method\":\"app.quit\",\"token\":\"{token_owned}\"}}\n").as_bytes()).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
         serde_json::from_str(&line).map_err(|e| e.to_string())
     });
 
     let mut app = UiApp::new();
-    serve_control_listener(&mut app, &listener)?;
+    serve_control_listener(&mut app, &listener, &auth)?;
     let ping = client.join().map_err(|_| "client thread panicked")??;
     assert_eq!(ping["ok"], json!(true));
+    Ok(())
+}
+
+#[test]
+fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    use std::io::Read;
+
+    let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        other => other?,
+    };
+    let local_addr = listener.local_addr()?;
+    match TcpStream::connect_timeout(&local_addr, Duration::from_millis(250)) {
+        Ok(probe) => {
+            drop(probe);
+            let _ = listener.accept();
+        }
+        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+            return Ok(());
+        }
+        Err(err) => return Err(Box::new(err)),
+    }
+
+    let unique = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let temp_dir = std::env::temp_dir().join(format!("lc-ctrl-http-auth-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir)?;
+    let forbidden_shot = temp_dir.join("csrf-shot.png");
+    let forbidden_shot_str = forbidden_shot.to_string_lossy().into_owned();
+
+    let auth = ControlAuth::generate()?;
+    let token_owned = auth.as_str().to_owned();
+
+    let client = std::thread::spawn(move || -> Result<(Value, Value, String, Value), String> {
+        // 1. Raw TCP unauthenticated command must be rejected with "unauthorized".
+        let unauth_resp: Value = {
+            let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+            let mut writer = BufWriter::new(stream);
+            writer
+                .write_all(b"{\"id\":\"unauth-1\",\"method\":\"sheet.createData\",\"params\":{\"sheet_id\":\"bad-1\"}}\n")
+                .map_err(|e| e.to_string())?;
+            writer.flush().map_err(|e| e.to_string())?;
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
+            serde_json::from_str(&line).map_err(|e| e.to_string())?
+        };
+
+        // 2. Wrong token must be rejected with "unauthorized".
+        let wrong_resp: Value = {
+            let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+            let mut writer = BufWriter::new(stream);
+            writer
+                .write_all(b"{\"id\":\"wrong-1\",\"method\":\"sheet.createData\",\"token\":\"wrong-secret\",\"params\":{\"sheet_id\":\"bad-2\"}}\n")
+                .map_err(|e| e.to_string())?;
+            writer.flush().map_err(|e| e.to_string())?;
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
+            serde_json::from_str(&line).map_err(|e| e.to_string())?
+        };
+
+        // 3. Browser-style cross-origin HTTP POST with JSON-RPC body must receive 403 and execute NOTHING.
+        let http_reply = {
+            let mut stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let body = format!(
+                "{{\"id\":\"http-pwn\",\"method\":\"ui.screenshot\",\"params\":{{\"width_px\":320,\"height_px\":200,\"path\":{}}}}}\n",
+                serde_json::to_string(&forbidden_shot_str).map_err(|e| e.to_string())?
+            );
+            let http_req = format!(
+                "POST / HTTP/1.1\r\nHost: {local_addr}\r\nOrigin: https://evil.example\r\nContent-Type: text/plain\r\nContent-Length: {}\r\n\r\n{}",
+                body.len(),
+                body
+            );
+            stream.write_all(http_req.as_bytes()).map_err(|e| e.to_string())?;
+            stream.flush().map_err(|e| e.to_string())?;
+            let mut raw = String::new();
+            stream.read_to_string(&mut raw).map_err(|e| e.to_string())?;
+            raw
+        };
+
+        // 4. Valid token succeeds and shuts server down cleanly.
+        let ok_resp: Value = {
+            let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+            let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+            let mut writer = BufWriter::new(stream);
+            writer
+                .write_all(
+                    format!("{{\"id\":\"ok-1\",\"method\":\"sheet.createData\",\"token\":\"{token_owned}\",\"params\":{{\"sheet_id\":\"good-1\",\"title\":\"Valid\"}}}}\n")
+                        .as_bytes(),
+                )
+                .map_err(|e| e.to_string())?;
+            writer.flush().map_err(|e| e.to_string())?;
+            let mut line = String::new();
+            std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
+            writer
+                .write_all(format!("{{\"id\":\"quit-1\",\"method\":\"app.quit\",\"token\":\"{token_owned}\"}}\n").as_bytes())
+                .map_err(|e| e.to_string())?;
+            writer.flush().map_err(|e| e.to_string())?;
+            serde_json::from_str(&line).map_err(|e| e.to_string())?
+        };
+
+        Ok((unauth_resp, wrong_resp, http_reply, ok_resp))
+    });
+
+    let mut app = UiApp::new();
+    serve_control_listener(&mut app, &listener, &auth)?;
+    let (unauth_resp, wrong_resp, http_reply, ok_resp) = client.join().map_err(|_| "client thread panicked")??;
+
+    assert_eq!(unauth_resp["ok"], json!(false));
+    assert!(unauth_resp["error"].as_str().is_some_and(|e| e.contains("unauthorized")));
+    assert_eq!(unauth_resp["error_detail"]["code"], json!("unauthorized"));
+
+    assert_eq!(wrong_resp["ok"], json!(false));
+    assert!(wrong_resp["error"].as_str().is_some_and(|e| e.contains("unauthorized")));
+    assert_eq!(wrong_resp["error_detail"]["code"], json!("unauthorized"));
+
+    assert_eq!(http_reply, CONTROL_HTTP_FORBIDDEN_RESPONSE);
+    assert!(!forbidden_shot.exists(), "HTTP POST attack must never write screenshot file");
+
+    assert_eq!(ok_resp["ok"], json!(true));
+    assert_eq!(app.document().data_sheets.len(), 1);
+    assert_eq!(app.document().data_sheets[0].id.as_str(), "good-1");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
+    Ok(())
+}
+
+#[test]
+fn control_server_survives_small_viewport_dialog_screenshot_and_continues() -> Result<(), Box<dyn std::error::Error>> {
+    let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        other => other?,
+    };
+    let local_addr = listener.local_addr()?;
+    match TcpStream::connect_timeout(&local_addr, Duration::from_millis(250)) {
+        Ok(probe) => {
+            drop(probe);
+            let _ = listener.accept();
+        }
+        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+            return Ok(());
+        }
+        Err(err) => return Err(Box::new(err)),
+    }
+
+    let auth = ControlAuth::generate()?;
+    let token_owned = auth.as_str().to_owned();
+    let client = std::thread::spawn(move || -> Result<(Value, Value, Value), String> {
+        let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+        let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+        let mut writer = BufWriter::new(stream);
+
+        let send = |writer: &mut BufWriter<TcpStream>, reader: &mut BufReader<TcpStream>, payload: &str| -> Result<Value, String> {
+            writer.write_all(payload.as_bytes()).map_err(|e| e.to_string())?;
+            writer.write_all(b"\n").map_err(|e| e.to_string())?;
+            writer.flush().map_err(|e| e.to_string())?;
+            let mut line = String::new();
+            std::io::BufRead::read_line(reader, &mut line).map_err(|e| e.to_string())?;
+            serde_json::from_str(&line).map_err(|e| e.to_string())
+        };
+
+        let _auth_ok = send(&mut writer, &mut reader, &format!(r#"{{"id":0,"method":"auth","params":{{"token":"{token_owned}"}}}}"#))?;
+        let _palette = send(&mut writer, &mut reader, r#"{"id":1,"method":"ui.palette.open"}"#)?;
+        let small_shot = send(&mut writer, &mut reader, r#"{"id":2,"method":"ui.screenshot","params":{"width_px":64,"height_px":64}}"#)?;
+        let next_ping = send(&mut writer, &mut reader, r#"{"id":3,"method":"ping"}"#)?;
+        let quit_resp = send(&mut writer, &mut reader, r#"{"id":4,"method":"app.quit"}"#)?;
+        Ok((small_shot, next_ping, quit_resp))
+    });
+
+    let mut app = UiApp::new();
+    serve_control_listener(&mut app, &listener, &auth)?;
+    let (small_shot, next_ping, quit_resp) = client.join().map_err(|_| "client thread panicked")??;
+    if small_shot["ok"] == json!(false) {
+        assert_eq!(small_shot["error_detail"]["code"], json!("internal_panic"));
+    }
+    assert_eq!(next_ping["ok"], json!(true));
+    assert_eq!(quit_resp["result"]["quit"], json!(true));
+    Ok(())
+}
+
+#[test]
+fn cli_control_token_file_created_0600_enforced_and_cleaned_up_on_quit() -> Result<(), Box<dyn std::error::Error>> {
+    let probe = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+        Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+        other => other?,
+    };
+    let port = probe.local_addr()?.port();
+    drop(probe);
+
+    let bin = env!("CARGO_BIN_EXE_lumencraft");
+    let unique = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+    let temp_dir = std::env::temp_dir().join(format!("lc-cli-ctrl-tok-{}-{unique}", std::process::id()));
+    std::fs::create_dir_all(&temp_dir)?;
+    let token_path = temp_dir.join("lumencraft-data").join(format!("control-{port}.token"));
+
+    struct ChildGuard(std::process::Child);
+    impl Drop for ChildGuard {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+
+    let child = Command::new(bin).env("HOME", &temp_dir).args(["--portable-dir"]).arg(&temp_dir).args(["--control", &port.to_string()]).spawn()?;
+    let mut guard = ChildGuard(child);
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while !token_path.exists() {
+        if let Some(status) = guard.0.try_wait()? {
+            return Err(format!("lumencraft --control exited early with {status}").into());
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(format!("timed out waiting for token file `{}`", token_path.display()).into());
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+
+    let token = std::fs::read_to_string(&token_path)?;
+    assert_eq!(token.len(), lumencraft_ui_egui::CONTROL_AUTH_TOKEN_BYTES * 2);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&token_path)?.permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "control token file must have 0600 Unix permissions");
+    }
+
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    // Restricted sandboxes may permit bind() in probe while denying outbound connect().
+    let first_stream = match TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+        Ok(stream) => stream,
+        Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+            let _ = guard.0.kill();
+            let _ = guard.0.wait();
+            let _ = std::fs::remove_dir_all(&temp_dir);
+            return Ok(());
+        }
+        Err(err) => return Err(Box::new(err)),
+    };
+
+    // Unauthenticated request rejected.
+    {
+        let _ = first_stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut r = BufReader::new(first_stream.try_clone()?);
+        let mut w = BufWriter::new(first_stream);
+        w.write_all(b"{\"id\":\"c1\",\"method\":\"ping\"}\n")?;
+        w.flush()?;
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut r, &mut line)?;
+        let resp: Value = serde_json::from_str(&line)?;
+        assert_eq!(resp["ok"], json!(false));
+        assert!(resp["error"].as_str().is_some_and(|e| e.contains("unauthorized")));
+    }
+
+    // Authenticated request succeeds and shuts process down cleanly, cleaning up token file.
+    {
+        let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
+        let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+        let mut r = BufReader::new(stream.try_clone()?);
+        let mut w = BufWriter::new(stream);
+        w.write_all(format!("{{\"id\":\"c2\",\"method\":\"ping\",\"token\":\"{token}\"}}\n").as_bytes())?;
+        w.flush()?;
+        let mut line = String::new();
+        std::io::BufRead::read_line(&mut r, &mut line)?;
+        let ping_resp: Value = serde_json::from_str(&line)?;
+        assert_eq!(ping_resp["ok"], json!(true));
+
+        w.write_all(format!("{{\"id\":\"c3\",\"method\":\"app.quit\",\"token\":\"{token}\"}}\n").as_bytes())?;
+        w.flush()?;
+        line.clear();
+        std::io::BufRead::read_line(&mut r, &mut line)?;
+        let quit_resp: Value = serde_json::from_str(&line)?;
+        assert_eq!(quit_resp["result"]["quit"], json!(true));
+    }
+
+    let status = guard.0.wait()?;
+    assert!(status.success(), "lumencraft --control exited with {status}");
+    assert!(!token_path.exists(), "token file must be removed on clean shutdown");
+
+    let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
 }

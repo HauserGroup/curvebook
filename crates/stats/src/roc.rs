@@ -166,8 +166,33 @@ pub fn roc_curve_analysis(controls: &[f64], cases: &[f64], ci_method: RocCiMetho
     };
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let ci = ((auc - z_crit * se).clamp(0.0, 1.0), (auc + z_crit * se).clamp(0.0, 1.0));
-    let p_value_vs_05 = if se > 0.0 { norm_two_sided_p((auc - 0.5) / se) } else { 1.0 };
+    let ci = if se > 0.0 {
+        ((auc - z_crit * se).clamp(0.0, 1.0), (auc + z_crit * se).clamp(0.0, 1.0))
+    } else {
+        // Complete separation or degenerate zero-variance ROC curve: Wald SE collapses to 0.0.
+        // Fall back to a boundary-aware Wilson score interval using n_eff = min(n0, n1).
+        let n_eff = (n0.min(n1) as f64).max(1.0);
+        let z2 = z_crit * z_crit;
+        let denom = 1.0 + z2 / n_eff;
+        let center = (auc + z2 / (2.0 * n_eff)) / denom;
+        let half = (z_crit / denom) * ((auc * (1.0 - auc) / n_eff) + z2 / (4.0 * n_eff * n_eff)).sqrt();
+        ((center - half).clamp(0.0, 1.0), (center + half).clamp(0.0, 1.0))
+    };
+    let p_value_vs_05 = if se > 0.0 {
+        norm_two_sided_p((auc - 0.5) / se)
+    } else if (auc - 0.5).abs() <= 1e-12 {
+        1.0
+    } else {
+        // Exact / tie-adjusted two-sided Mann-Whitney P against H0: AUC = 0.5 under separation.
+        match crate::two_group::mann_whitney_u(controls, cases, true, confidence) {
+            Ok(mw) => mw.p_value,
+            Err(_) => {
+                // If n0 == 1 or n1 == 1 and Mann-Whitney rejects small n, use exact rank-sum tail 2 / C(n0 + n1, n0).
+                let total = n0 + n1;
+                if n0 == 1 || n1 == 1 { (2.0 / (total as f64)).clamp(0.0, 1.0) } else { 1.0 }
+            }
+        }
+    };
 
     let optimal_cutoff = points.iter().skip(1).max_by(|a, b| a.youden_j.total_cmp(&b.youden_j)).cloned().unwrap_or_else(|| points[0].clone());
 

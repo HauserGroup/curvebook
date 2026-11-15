@@ -8,7 +8,9 @@ pub mod writer;
 
 use serde::{Deserialize, Serialize};
 
-pub use writer::{PdfError, PdfExportOptions, render_pdf, render_pdf_pages};
+pub use writer::{
+    MAX_PDF_OUTPUT_BYTES, MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfError, PdfExportOptions, render_pdf, render_pdf_page_refs, render_pdf_pages,
+};
 
 /// Supported PDF specification version headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]

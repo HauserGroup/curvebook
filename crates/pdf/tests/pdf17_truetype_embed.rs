@@ -406,20 +406,35 @@ fn rtl_arabic_and_hebrew_labels_shape_in_visual_order() {
         .map(|(_, _, decoded)| String::from_utf8(decoded.clone()).expect("UTF-8 page stream"))
         .expect("page stream");
 
-    // In "שלום 2026" (RTL base), "2026" renders visually to the left of the Hebrew word.
+    // Selectable mode must NEVER silently replace non-WinAnsi glyphs with `?`.
+    assert!(!sel_stream.contains('?'), "non-WinAnsi characters must never produce `?` placeholders in PDF stream:\n{sel_stream}");
+
+    // In "שלום 2026" (RTL base), "2026" renders visually to the left of the outlined Hebrew glyphs.
     let pos_2026 = sel_stream.find("(2026) Tj").expect("2026 literal");
-    let pos_hebrew_after_2026 = sel_stream[pos_2026..].find("( ????) Tj").expect("RTL word after 2026");
-    assert!(pos_hebrew_after_2026 > 0);
-
-    // In "مرحبا (12.5)" (RTL base), "(12.5)" renders visually to the left of the Arabic word.
     let pos_12_5 = sel_stream.find("(12.5) Tj").expect("12.5 literal");
-    let pos_arabic_after_12_5 = sel_stream[pos_12_5..].find("(\\) ?????) Tj").expect("Arabic word after (12.5)");
-    assert!(pos_arabic_after_12_5 > 0);
+    let pos_ic = sel_stream.find("(IC) Tj").expect("IC literal");
+    assert!(pos_2026 < pos_12_5 && pos_12_5 < pos_ic);
 
-    // In "<b>שלום</b> <i>עולם</i>" (RTL base), italic "עולם" comes visually first (left), then bold "שלום" (right).
-    let italic_pos = sel_stream.find("/F3 11.00 Tf").expect("italic span font");
-    let bold_pos = sel_stream.find("/F2 11.00 Tf").expect("bold span font");
-    assert!(italic_pos < bold_pos, "visual RTL order must emit italic second-logical word before bold first-logical word");
+    let hebrew_num_seg = &sel_stream[pos_2026..pos_12_5];
+    assert!(hebrew_num_seg.contains(" m\n"), "Hebrew word after 2026 must emit vector glyph outlines");
+
+    // Between "12.5" and "IC", we have outlined Arabic glyphs for "مرحبا", then the
+    // "<b>שלום</b> <i>עולם</i>" line at y=140.0 (PDF y=120.000) containing outlined "עולם",
+    // selectable space `( ) Tj`, and outlined "שלום".
+    let mid_seg = &sel_stream[pos_12_5..pos_ic];
+    let pos_120 = mid_seg.find("120.000 Tm").expect("space Tm at PDF y=120");
+    let before_space = &mid_seg[..pos_120];
+    let after_space = &mid_seg[pos_120..];
+    assert!(before_space.contains(" m\n"), "outlined glyphs for Arabic and italic Hebrew word must precede `( ) Tj`");
+    assert!(mid_seg[pos_120..].contains("( ) Tj"), "separating space between visual RTL words");
+    assert!(after_space.contains(" m\n"), "bold Hebrew word must emit outlined glyphs after separating space");
+
+    // In "IC<sub>50</sub> = שלום", "IC", subscript "50", and " = " stay selectable while Hebrew outlines follow.
+    let ic_seg = &sel_stream[pos_ic..];
+    let pos_50 = ic_seg.find("(50) Tj").expect("50 literal");
+    let pos_eq = ic_seg.find("( = ) Tj").expect("= literal");
+    assert!(pos_50 < pos_eq);
+    assert!(ic_seg[pos_eq..].contains(" m\n"), "Hebrew word after `IC_50 = ` must emit outlined glyphs");
 
     // Outlined text mode: with `TextAnchor::Start` at x=20, visual RTL reordering places `"2026"` at x=20
     // (identical to rendering `"2026"` alone) followed to the right by the 4 Hebrew glyphs.
@@ -454,4 +469,60 @@ fn rtl_arabic_and_hebrew_labels_shape_in_visual_order() {
     assert_eq!(q_count, big_q_count, "graphics state stack must stay balanced");
     assert!(out_stream.starts_with(&digits_stream), "RTL outlined stream must emit '2026' first (at left anchor x=20)");
     assert!(out_stream.len() > digits_stream.len(), "RTL outlined stream must append Hebrew glyphs to the right of '2026'");
+}
+
+#[test]
+fn non_winansi_cjk_cyrillic_and_hebrew_never_substitute_question_marks() {
+    let mut scene = ChartScene::new("non-winansi", "Non-WinAnsi Labels", 420.0, 260.0, Some(Rgba8::WHITE));
+    for (idx, (label, anchor, rot, color)) in [
+        ("濃度 (nM)", TextAnchor::Start, 0.0, Rgba8::BLACK),
+        ("Концентрация", TextAnchor::Middle, 0.0, OKABE_ITO_BLUE),
+        ("שלום", TextAnchor::End, 0.0, Rgba8::BLACK.with_alpha(128)),
+        ("Why? 濃度<sup>2</sup>", TextAnchor::Start, 35.0, Rgba8::BLACK),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich: parse_markup(label),
+            anchor_pt: PointPt::new(80.0, 45.0 + (idx as f64) * 45.0),
+            anchor,
+            font_size_pt: 12.0,
+            rotation_deg: rot,
+            color,
+        }));
+    }
+
+    for embedded in [None, Some(build_minimal_truetype_font())] {
+        let opts = PdfExportOptions { compress_streams: false, outline_text: false, embedded_truetype_font: embedded, ..PdfExportOptions::default() };
+        let bytes = render_pdf(&scene, &opts).expect("render non-WinAnsi selectable PDF");
+        let parsed = parse_pdf_strict(&bytes, b"%PDF-1.7\n").expect("strict PDF parse");
+        let stream = parsed
+            .streams
+            .iter()
+            .find(|(_, dict, _)| !dict.contains("/Length1 "))
+            .map(|(_, _, decoded)| String::from_utf8(decoded.clone()).expect("UTF-8 stream"))
+            .expect("page stream");
+
+        // Never emit `?` placeholder substitutions for non-WinAnsi/non-Symbol scripts.
+        for bad in ["(??) Tj", "(????) Tj", "(????????????) Tj", "(? ) Tj"] {
+            assert!(!stream.contains(bad), "unexpected placeholder {bad} in stream:\n{stream}");
+        }
+
+        // Literal WinAnsi ASCII runs remain selectable (including literal `?` in `Why?`).
+        assert!(stream.contains("( \\(nM\\)) Tj"), "expected selectable ` (nM)` suffix:\n{stream}");
+        assert!(stream.contains("(Why? ) Tj"), "expected literal `?` preserved in `Why? `:\n{stream}");
+        assert!(stream.contains("(2) Tj"), "expected selectable superscript `2`:\n{stream}");
+        assert!(stream.contains("/GSa128 gs"), "expected semi-transparent outlined alpha state:\n{stream}");
+
+        // Outlined glyph contours must be emitted outside `BT ... ET` with balanced `q`/`Q`.
+        assert!(stream.contains(" m\n") && (stream.contains("f\n") || stream.contains("S\n")));
+        let q_count = stream.lines().filter(|l| *l == "q").count();
+        let big_q_count = stream.lines().filter(|l| *l == "Q").count();
+        assert_eq!(q_count, big_q_count, "graphics state `q`/`Q` must balance");
+        let bt_count = stream.lines().filter(|l| *l == "BT").count();
+        let et_count = stream.lines().filter(|l| *l == "ET").count();
+        assert_eq!(bt_count, et_count, "text block `BT`/`ET` must balance");
+        assert!(bt_count > 0);
+    }
 }

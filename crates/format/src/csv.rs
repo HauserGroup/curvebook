@@ -15,6 +15,9 @@ use crate::error::FormatError;
 /// Maximum dense `Cell` entries allocated by delimited table import, filtering, or growth.
 pub const MAX_IMPORT_CELLS: usize = 10_000_000;
 
+/// Maximum byte length permitted when reading a CSV/TSV or delimited text file from disk.
+pub const MAX_CSV_FILE_BYTES: usize = 64 * 1024 * 1024;
+
 /// Configuration for RFC-4180 CSV/TSV parsing and formatting.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CsvOptions {
@@ -146,17 +149,30 @@ enum CsvState {
 /// Strips optional UTF-8 BOM, handles `\r\n` / `\n` / `\r`, quoted delimiters/newlines, and
 /// doubled quote escapes (`""`).
 pub fn parse_delimited_records(input: &str, opts: &CsvOptions) -> Result<Vec<Vec<String>>, FormatError> {
+    let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
+    let slot_bytes = std::mem::size_of::<String>().max(1);
+    let max_fields_by_bytes = input.len().saturating_mul(4).max(12 * 1024 * 1024) / slot_bytes;
+    let max_fields = MAX_IMPORT_CELLS.saturating_add(65_536).min(max_fields_by_bytes);
+    parse_delimited_records_with_limits(input, opts, max_cols, max_fields)
+}
+
+pub(crate) fn parse_delimited_records_with_limits(
+    input: &str,
+    opts: &CsvOptions,
+    max_cols: usize,
+    max_fields: usize,
+) -> Result<Vec<Vec<String>>, FormatError> {
     let text = input.strip_prefix('\u{FEFF}').unwrap_or(input);
     if text.is_empty() {
         return Ok(Vec::new());
     }
 
-    let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
     let mut records: Vec<Vec<String>> = Vec::new();
     let mut current_row: Vec<String> = Vec::new();
     let mut field = String::new();
     let mut state = CsvState::FieldStart;
     let mut line_no = 1_usize;
+    let mut total_fields = 0_usize;
     let mut chars = text.chars().peekable();
 
     while let Some(ch) = chars.next() {
@@ -165,13 +181,13 @@ pub fn parse_delimited_records(input: &str, opts: &CsvOptions) -> Result<Vec<Vec
                 if ch == opts.quote_char {
                     state = CsvState::Quoted;
                 } else if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, max_cols, line_no)?;
+                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
                     state = CsvState::FieldStart;
                 } else if ch == '\r' || ch == '\n' {
                     if ch == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    push_field(&mut current_row, &mut field, max_cols, line_no)?;
+                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
                     push_record(&mut records, &mut current_row, line_no)?;
                     line_no += 1;
                     state = CsvState::FieldStart;
@@ -182,13 +198,13 @@ pub fn parse_delimited_records(input: &str, opts: &CsvOptions) -> Result<Vec<Vec
             }
             CsvState::Unquoted => {
                 if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, max_cols, line_no)?;
+                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
                     state = CsvState::FieldStart;
                 } else if ch == '\r' || ch == '\n' {
                     if ch == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    push_field(&mut current_row, &mut field, max_cols, line_no)?;
+                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
                     push_record(&mut records, &mut current_row, line_no)?;
                     line_no += 1;
                     state = CsvState::FieldStart;
@@ -215,13 +231,13 @@ pub fn parse_delimited_records(input: &str, opts: &CsvOptions) -> Result<Vec<Vec
             }
             CsvState::AfterQuote => {
                 if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, max_cols, line_no)?;
+                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
                     state = CsvState::FieldStart;
                 } else if ch == '\r' || ch == '\n' {
                     if ch == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    push_field(&mut current_row, &mut field, max_cols, line_no)?;
+                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
                     push_record(&mut records, &mut current_row, line_no)?;
                     line_no += 1;
                     state = CsvState::FieldStart;
@@ -238,12 +254,12 @@ pub fn parse_delimited_records(input: &str, opts: &CsvOptions) -> Result<Vec<Vec
         }
         CsvState::FieldStart => {
             if !current_row.is_empty() || !field.is_empty() {
-                push_field(&mut current_row, &mut field, max_cols, line_no)?;
+                push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
                 push_record(&mut records, &mut current_row, line_no)?;
             }
         }
         CsvState::Unquoted | CsvState::AfterQuote => {
-            push_field(&mut current_row, &mut field, max_cols, line_no)?;
+            push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
             push_record(&mut records, &mut current_row, line_no)?;
         }
     }
@@ -251,10 +267,22 @@ pub fn parse_delimited_records(input: &str, opts: &CsvOptions) -> Result<Vec<Vec
     Ok(records)
 }
 
-fn push_field(row: &mut Vec<String>, field: &mut String, max_cols: usize, line_no: usize) -> Result<(), FormatError> {
+fn push_field(
+    row: &mut Vec<String>,
+    field: &mut String,
+    max_cols: usize,
+    total_fields: &mut usize,
+    max_fields: usize,
+    line_no: usize,
+) -> Result<(), FormatError> {
     if row.len() >= max_cols {
         return Err(FormatError::CsvParse { line: line_no, reason: format!("column count exceeds limit {max_cols}") });
     }
+    let next_total = total_fields.saturating_add(1);
+    if next_total > max_fields {
+        return Err(FormatError::CsvParse { line: line_no, reason: format!("delimited field count exceeds limit {max_fields}") });
+    }
+    *total_fields = next_total;
     row.push(std::mem::take(field));
     Ok(())
 }
@@ -390,6 +418,7 @@ pub fn write_delimited_records(rows: &[Vec<String>], opts: &CsvOptions) -> Strin
 
 /// Export a [`DataSheet`] into RFC-4180 CSV/TSV text, preserving headers, titles, and `*` exclusions.
 pub fn export_datasheet_to_csv(sheet: &DataSheet, opts: &CsvOptions) -> Result<String, FormatError> {
+    sheet.archetype.validate()?;
     let rows = match &sheet.archetype {
         TableArchetype::Xy(t) => export_xy_rows(t, opts),
         TableArchetype::Column(t) => export_dataset_table_rows(
@@ -605,11 +634,36 @@ pub fn import_csv_to_datasheet(
     subcolumn_mode: SubcolumnMode,
     opts: &CsvOptions,
 ) -> Result<DataSheet, FormatError> {
-    let records = parse_delimited_records(input, opts)?;
+    import_csv_to_datasheet_with_budget(id, title, input, target_kind, subcolumn_mode, opts, MAX_IMPORT_CELLS)
+}
+
+/// Import delimited CSV/TSV text into a typed [`DataSheet`] bounded by `max_cells`.
+pub(crate) fn import_csv_to_datasheet_with_budget(
+    id: impl Into<SheetId>,
+    title: impl Into<String>,
+    input: &str,
+    target_kind: TableKind,
+    subcolumn_mode: SubcolumnMode,
+    opts: &CsvOptions,
+    max_cells: usize,
+) -> Result<DataSheet, FormatError> {
     subcolumn_mode.validate()?;
     if !target_kind.allows_subcolumn_mode(subcolumn_mode) {
         return Err(FormatError::Doc(lumencraft_doc::DocError::IncompatibleSubcolumnMode { archetype: target_kind, mode: subcolumn_mode }));
     }
+    let prefix_cols = usize::from(opts.has_row_titles)
+        + usize::from(
+            matches!(target_kind, TableKind::Xy | TableKind::Survival) || (matches!(target_kind, TableKind::PartsOfWhole) && !opts.has_row_titles),
+        );
+    let data_col_limit = if matches!(target_kind, TableKind::Nested) {
+        MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS)
+    } else {
+        MAX_DATA_SETS.saturating_mul(subcolumn_mode.subcolumn_count())
+    };
+    let max_cols = prefix_cols.saturating_add(data_col_limit);
+    let header_slack = opts.header_rows.saturating_mul(max_cols).min(65_536);
+    let max_fields = max_cells.saturating_add(max_cells.min(MAX_ROWS).saturating_mul(prefix_cols)).saturating_add(header_slack).max(4_096);
+    let records = parse_delimited_records_with_limits(input, opts, max_cols, max_fields)?;
 
     let header_count = opts.header_rows.min(records.len());
     let headers = if header_count > 0 { records[header_count - 1].clone() } else { Vec::new() };
@@ -633,7 +687,7 @@ pub fn import_csv_to_datasheet(
             let data_cols = raw_col_count.saturating_sub(col_offset);
             let ds_count = data_cols.div_ceil(subs);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, subs, 1, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 1, err_line, max_cells)?;
             let mut xy = XyTable::new(subcolumn_mode, ds_count, row_count)?;
             xy.x_title = sanitize_title(&x_title)?;
             assign_row_titles(&mut xy.row_titles, data_rows, has_row_titles);
@@ -650,7 +704,7 @@ pub fn import_csv_to_datasheet(
             let subs = subcolumn_mode.subcolumn_count();
             let ds_count = raw_col_count.saturating_sub(col_offset).div_ceil(subs);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line, max_cells)?;
             let hint = if subcolumn_mode.is_pre_summarized() { ColumnDesignHint::PrecomputedError } else { ColumnDesignHint::UnpairedReplicates };
             let mut col = ColumnTable::new_with_subcolumns(hint, subcolumn_mode, ds_count, row_count)?;
             assign_row_titles(&mut col.row_titles, data_rows, has_row_titles);
@@ -662,7 +716,7 @@ pub fn import_csv_to_datasheet(
             let subs = subcolumn_mode.subcolumn_count();
             let ds_count = raw_col_count.saturating_sub(col_offset).div_ceil(subs);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, subs, 0, err_line, max_cells)?;
             let mut grp = GroupedTable::new(subcolumn_mode, ds_count, row_count)?;
             assign_row_titles(&mut grp.row_titles, data_rows, has_row_titles);
             populate_datasets(&mut grp.data_sets, data_rows, &headers, col_offset, subs, opts)?;
@@ -671,7 +725,7 @@ pub fn import_csv_to_datasheet(
         TableKind::Contingency => {
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line, max_cells)?;
             let mut cont = ContingencyTable::new(ds_count, row_count)?;
             assign_row_titles(&mut cont.row_titles, data_rows, has_row_titles);
             populate_datasets(&mut cont.data_sets, data_rows, &headers, col_offset, 1, opts)?;
@@ -685,7 +739,7 @@ pub fn import_csv_to_datasheet(
             }
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, 1, 1, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 1, err_line, max_cells)?;
             let mut surv = SurvivalTable::new(ds_count, row_count)?;
             surv.time_title = sanitize_title(&time_title)?;
             assign_row_titles(&mut surv.row_titles, data_rows, has_row_titles);
@@ -705,7 +759,7 @@ pub fn import_csv_to_datasheet(
             }
             let ds_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(ds_count)?;
-            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line)?;
+            validate_csv_cell_budget(row_count, ds_count, 1, 0, err_line, max_cells)?;
             let mut pow = PartsOfWholeTable::new(ds_count, row_count)?;
             if has_row_titles {
                 assign_row_titles(&mut pow.slice_labels, data_rows, true);
@@ -718,7 +772,7 @@ pub fn import_csv_to_datasheet(
         TableKind::MultipleVariables => {
             let var_count = raw_col_count.saturating_sub(col_offset);
             validate_data_sets(var_count)?;
-            validate_csv_cell_budget(row_count, var_count, 1, 0, err_line)?;
+            validate_csv_cell_budget(row_count, var_count, 1, 0, err_line, max_cells)?;
             let mut mv = MultipleVariablesTable::new(var_count, row_count)?;
             assign_row_titles(&mut mv.row_titles, data_rows, has_row_titles);
             mv.row_titles_expanded = opts.has_row_titles;
@@ -743,20 +797,16 @@ pub fn import_csv_to_datasheet(
             validate_data_sets(group_count)?;
             let mut total_units: usize = 0;
             for spec in &groups_spec {
-                validate_subcolumns(spec.col_indices.len())?;
+                let units = spec.col_indices.len().max(1);
+                validate_subcolumns(units)?;
                 total_units = total_units
-                    .checked_add(spec.col_indices.len())
+                    .checked_add(units)
                     .ok_or_else(|| FormatError::CsvParse { line: err_line, reason: String::from("table cell count overflow") })?;
             }
             let total_cells = row_count
                 .checked_mul(total_units)
                 .ok_or_else(|| FormatError::CsvParse { line: err_line, reason: String::from("table cell count overflow") })?;
-            if total_cells > MAX_IMPORT_CELLS {
-                return Err(FormatError::CsvParse {
-                    line: err_line,
-                    reason: format!("dense cell allocation {total_cells} exceeds limit {MAX_IMPORT_CELLS}"),
-                });
-            }
+            check_csv_cell_limit(total_cells, err_line, max_cells)?;
 
             let mut nested = NestedTable::new(group_count, 1, row_count)?;
             assign_row_titles(&mut nested.row_titles, data_rows, has_row_titles);
@@ -868,16 +918,30 @@ fn group_nested_by_colon(value_headers: &[String], split_pairs: &[Option<(&str, 
     groups
 }
 
-fn validate_csv_cell_budget(rows: usize, cols: usize, subs: usize, extra_cols_per_row: usize, line: usize) -> Result<(), FormatError> {
+fn check_csv_cell_limit(total_cells: usize, line: usize, max_cells: usize) -> Result<(), FormatError> {
+    if total_cells > max_cells {
+        return Err(FormatError::CsvParse {
+            line,
+            reason: format!("dense cell allocation {total_cells} exceeds remaining import budget {max_cells} (cap {MAX_IMPORT_CELLS})"),
+        });
+    }
+    Ok(())
+}
+
+fn validate_csv_cell_budget(
+    rows: usize,
+    cols: usize,
+    subs: usize,
+    extra_cols_per_row: usize,
+    line: usize,
+    max_cells: usize,
+) -> Result<(), FormatError> {
     let per_row = cols
         .checked_mul(subs)
         .and_then(|v| v.checked_add(extra_cols_per_row))
         .ok_or_else(|| FormatError::CsvParse { line, reason: String::from("table cell count overflow") })?;
     let total_cells = rows.checked_mul(per_row).ok_or_else(|| FormatError::CsvParse { line, reason: String::from("table cell count overflow") })?;
-    if total_cells > MAX_IMPORT_CELLS {
-        return Err(FormatError::CsvParse { line, reason: format!("dense cell allocation {total_cells} exceeds limit {MAX_IMPORT_CELLS}") });
-    }
-    Ok(())
+    check_csv_cell_limit(total_cells, line, max_cells)
 }
 
 fn assign_row_titles(dst: &mut [String], data_rows: &[Vec<String>], has_row_titles: bool) {
@@ -1198,21 +1262,30 @@ fn place_grid_in_datasheet(
         return Ok(SheetCellRange::new(placement.anchor, placement.anchor));
     }
 
+    let existing_rows = target.archetype.row_count();
     let start_row = match placement.mode {
         PlacementMode::Overwrite | PlacementMode::InsertRows | PlacementMode::AppendColumns => placement.anchor.row,
-        PlacementMode::AppendRows => target.archetype.row_count(),
+        PlacementMode::AppendRows => existing_rows,
     };
     let start_col = match placement.mode {
         PlacementMode::Overwrite | PlacementMode::InsertRows | PlacementMode::AppendRows => placement.anchor.col,
         PlacementMode::AppendColumns => target.archetype.column_count(),
     };
 
-    let needed_rows = start_row.checked_add(grid_rows).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("row offset overflow") })?;
+    let needed_rows = if placement.mode == PlacementMode::InsertRows {
+        existing_rows.max(start_row).checked_add(grid_rows)
+    } else {
+        start_row.checked_add(grid_rows)
+    }
+    .ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("row offset overflow") })?;
     validate_rows(needed_rows)?;
 
     ensure_sheet_capacity(target, needed_rows, start_col, placement.anchor.subcol, grid_cols)?;
+    if placement.mode == PlacementMode::InsertRows && start_row < existing_rows {
+        shift_archetype_rows_down(&mut target.archetype, start_row, grid_rows, existing_rows);
+    }
     if let Some(hdrs) = headers {
-        apply_headers_to_sheet(target, start_col, hdrs)?;
+        apply_headers_to_sheet(target, start_col, placement.anchor.subcol, hdrs)?;
     }
 
     let mut end_coord = CellCoord::new(start_row, start_col, placement.anchor.subcol);
@@ -1304,6 +1377,8 @@ fn ensure_sheet_capacity(
 ) -> Result<(), FormatError> {
     match &mut target.archetype {
         TableArchetype::Xy(t) => {
+            t.x_mode.validate()?;
+            t.y_subcolumn_mode.validate()?;
             let subs = t.y_subcolumn_mode.subcolumn_count();
             let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
@@ -1318,6 +1393,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::Column(t) => {
+            t.subcolumn_mode.validate()?;
             let subs = t.subcolumn_mode.subcolumn_count();
             let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
@@ -1328,6 +1404,7 @@ fn ensure_sheet_capacity(
             }
         }
         TableArchetype::Grouped(t) => {
+            t.subcolumn_mode.validate()?;
             let subs = t.subcolumn_mode.subcolumn_count();
             let needed_cols = compute_needed_cols_with_subs(start_col, start_subcol, grid_cols, subs)?;
             validate_data_sets(needed_cols)?;
@@ -1335,6 +1412,11 @@ fn ensure_sheet_capacity(
             grow_datasets(&mut t.data_sets, needed_cols, needed_rows, subs)?;
             if t.row_titles.len() < needed_rows {
                 t.row_titles.resize(needed_rows, String::new());
+            }
+            if let Some(spacing) = &mut t.row_numeric_spacing
+                && spacing.len() < needed_rows
+            {
+                spacing.resize(needed_rows, None);
             }
         }
         TableArchetype::Contingency(t) => {
@@ -1395,6 +1477,7 @@ fn ensure_sheet_capacity(
             }
             for g in &mut t.groups {
                 let units = g.biological_unit_count();
+                validate_subcolumns(units)?;
                 if g.cells.len() < needed_rows {
                     g.cells.resize_with(needed_rows, || vec![Cell::empty(); units]);
                 }
@@ -1405,6 +1488,76 @@ fn ensure_sheet_capacity(
         }
     }
     Ok(())
+}
+
+fn rotate_rows_down<T>(rows: &mut [T], start_row: usize, shift: usize, end_row: usize) {
+    if let Some(slice) = rows.get_mut(start_row..end_row)
+        && shift < slice.len()
+    {
+        slice.rotate_right(shift);
+    }
+}
+
+fn shift_archetype_rows_down(arch: &mut TableArchetype, start_row: usize, insert_rows: usize, existing_rows: usize) {
+    if insert_rows == 0 || start_row >= existing_rows {
+        return;
+    }
+    let end = existing_rows + insert_rows;
+    match arch {
+        TableArchetype::Xy(t) => {
+            rotate_rows_down(&mut t.x_cells, start_row, insert_rows, end);
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Column(t) => {
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Grouped(t) => {
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            if let Some(spacing) = &mut t.row_numeric_spacing {
+                rotate_rows_down(spacing, start_row, insert_rows, end);
+            }
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Contingency(t) => {
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Survival(t) => {
+            rotate_rows_down(&mut t.times, start_row, insert_rows, end);
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for ds in &mut t.cohorts {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            rotate_rows_down(&mut t.slice_labels, start_row, insert_rows, end);
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            rotate_rows_down(&mut mv.row_titles, start_row, insert_rows, end);
+            for var in &mut mv.variables {
+                rotate_rows_down(&mut var.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Nested(t) => {
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for grp in &mut t.groups {
+                rotate_rows_down(&mut grp.cells, start_row, insert_rows, end);
+            }
+        }
+    }
 }
 
 fn grow_datasets(data_sets: &mut Vec<DataSetColumn>, needed_cols: usize, needed_rows: usize, subs: usize) -> Result<(), FormatError> {
@@ -1435,54 +1588,25 @@ fn resolve_target_coord(arch: &TableArchetype, start_col: usize, start_subcol: u
     Ok((flat / subs, flat % subs))
 }
 
-fn apply_headers_to_sheet(target: &mut DataSheet, start_col: usize, headers: &[String]) -> Result<(), FormatError> {
+fn apply_headers_to_sheet(target: &mut DataSheet, start_col: usize, start_subcol: usize, headers: &[String]) -> Result<(), FormatError> {
     for (idx, title) in headers.iter().enumerate() {
-        if title.trim().is_empty() {
+        let (col, subcol) = resolve_target_coord(&target.archetype, start_col, start_subcol, idx)?;
+        if subcol != 0 || title.trim().is_empty() {
             continue;
         }
         validate_title(title)?;
-        let col = start_col.checked_add(idx).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("header column offset overflow") })?;
-        match &mut target.archetype {
-            TableArchetype::Xy(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Column(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Grouped(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Contingency(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Survival(t) => {
-                if let Some(ds) = t.cohorts.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::PartsOfWhole(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::MultipleVariables(t) => {
-                if let Some(var) = t.variables.get_mut(col) {
-                    var.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Nested(t) => {
-                if let Some(g) = t.groups.get_mut(col) {
-                    g.title = title.trim().to_owned();
-                }
-            }
+        let slot = match &mut target.archetype {
+            TableArchetype::Xy(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::Column(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::Grouped(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::Contingency(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::Survival(t) => t.cohorts.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::PartsOfWhole(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::MultipleVariables(t) => t.variables.get_mut(col).map(|var| &mut var.title),
+            TableArchetype::Nested(t) => t.groups.get_mut(col).map(|g| &mut g.title),
+        };
+        if let Some(target_title) = slot {
+            *target_title = title.trim().to_owned();
         }
     }
     Ok(())
