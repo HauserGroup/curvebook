@@ -6,6 +6,7 @@
 #![forbid(unsafe_code)]
 
 pub mod column_grouped;
+pub mod equation_box;
 pub mod multivariate_layout;
 pub mod scales;
 pub mod scene;

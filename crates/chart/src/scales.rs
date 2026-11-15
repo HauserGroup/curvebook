@@ -2639,8 +2639,8 @@ fn swatch_marker_path(c: PointPt, r: f64, shape: MarkerShape) -> Path2D {
     }
 }
 
-/// Render all [`GraphAnnotation`] items (`TextBox`, `LineOrArrow`, `Shape`, `EmbeddedResultTable`)
-/// onto `scene`.
+/// Render all [`GraphAnnotation`] items (`TextBox`, `LineOrArrow`, `Shape`, `EmbeddedResultTable`,
+/// `ModelEquation`) onto `scene`.
 pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument, primary_id: Option<&SheetId>, scene: &mut ChartScene) {
     for ann in annotations {
         match ann {
@@ -2655,6 +2655,20 @@ pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument
             }
             GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt } => {
                 render_embedded_result_table(result_sheet_id, tab_id.as_deref(), RectPt::from(*bounds_pt), doc, scene);
+            }
+            GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
+                crate::equation_box::render_model_equation_annotation(
+                    scene,
+                    doc,
+                    &crate::equation_box::ModelEquationParams {
+                        result_sheet_id,
+                        data_set_index: *data_set_index,
+                        mode: *mode,
+                        bounds_pt: *bounds_pt,
+                        font_size_pt: *font_size_pt,
+                        bordered: *bordered,
+                    },
+                );
             }
         }
     }

@@ -9,8 +9,9 @@ use lumencraft_chart::scales::{
 use lumencraft_chart::{ChartScene, FillPaint, PathCmd, PointPt, RectPt, ScenePrimitive, TextAnchor};
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CiBound, ConstantValue, DataSheet,
-    DescriptiveSpec, FramePreset, GraphAnnotation, GraphSheet, InfoSheet, LegendSpec, LogitDomain, ProjectDocument, RectPt as DocRectPt, ResultCell,
-    ResultScalarEntry, ResultSheet, ResultTab, ResultTabKind, SheetId, SizePt, SubcolumnMode, TableArchetype, TickLabelFormat, XyTable,
+    DescriptiveSpec, EquationDisplayMode, FramePreset, GraphAnnotation, GraphSheet, InfoSheet, LegendSpec, LogitDomain, NonlinearFitSpec,
+    ProjectDocument, RectPt as DocRectPt, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizePt,
+    SubcolumnMode, TableArchetype, TickLabelFormat, XyTable,
 };
 use lumencraft_math::{AxisScale, dist::norm_ppf};
 use lumencraft_palette::{LineDashStyle, MarkerFillMode, MarkerShape, Rgba8};
@@ -766,6 +767,60 @@ fn thresholds_shaded_zones_legends_and_all_graph_annotations_compile() {
         &mut s_leg,
     );
     assert!(!s_leg.primitives.is_empty());
+}
+
+#[test]
+fn render_annotations_supports_model_equation_boxes_with_stacked_fractions() {
+    let mut doc = ProjectDocument::default();
+    let nl = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+    let mut res =
+        ResultSheet::new(AnalysisSpec::new(SheetId::new("fit-eq"), SheetId::new("d1"), AnalysisKind::NonlinearRegression(nl)).unwrap()).unwrap();
+    res.status = ResultStatus::UpToDate;
+    res.scalars = vec![
+        ResultScalarEntry { key: String::from("Bottom"), data_set_index: Some(0), value: 5.0, units: None },
+        ResultScalarEntry { key: String::from("Top"), data_set_index: Some(0), value: 95.0, units: None },
+        ResultScalarEntry { key: String::from("LogEC50"), data_set_index: Some(0), value: -7.0, units: None },
+        ResultScalarEntry { key: String::from("HillSlope"), data_set_index: Some(0), value: 1.2, units: None },
+    ];
+    doc.result_sheets.push(res);
+
+    let anns = [GraphAnnotation::ModelEquation {
+        result_sheet_id: SheetId::new("fit-eq"),
+        data_set_index: 0,
+        mode: EquationDisplayMode::Substituted,
+        bounds_pt: DocRectPt::new(50.0, 30.0, 240.0, 56.0),
+        font_size_pt: 9.5,
+        bordered: true,
+    }];
+    let mut scene = ChartScene::new("s-eq", "Equation Annotation", 400.0, 300.0, Some(Rgba8::WHITE));
+    render_annotations(&anns, &doc, None, &mut scene);
+
+    let texts: Vec<String> = scene
+        .primitives
+        .iter()
+        .filter_map(|p| match p {
+            ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
+            _ => None,
+        })
+        .collect();
+    let joined = texts.join(" ");
+    assert!(joined.contains("95"), "expected substituted Top=95 in {joined}");
+    assert!(joined.contains("1.2"), "expected substituted HillSlope=1.2 in {joined}");
+
+    // Verify at least one horizontal vinculum line path inside the box
+    let vinculum_y = scene.primitives.iter().find_map(|p| match p {
+        ScenePrimitive::Path { path, fill: None, stroke: Some(_), clip: None } if path.commands.len() == 2 => {
+            match (path.commands.first(), path.commands.get(1)) {
+                (Some(PathCmd::MoveTo(a)), Some(PathCmd::LineTo(b))) if (a.y - b.y).abs() < 1e-6 && b.x > a.x + 5.0 => Some(a.y),
+                _ => None,
+            }
+        }
+        _ => None,
+    });
+    let vin_y = vinculum_y.expect("expected horizontal vinculum rule");
+    let has_num_above = scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.anchor_pt.y < vin_y));
+    let has_den_below = scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.anchor_pt.y > vin_y));
+    assert!(has_num_above && has_den_below, "numerator and denominator must bracket vinculum at y={vin_y}");
 }
 
 proptest! {

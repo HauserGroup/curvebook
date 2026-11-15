@@ -1346,6 +1346,20 @@ fn render_annotation(scene: &mut ChartScene, doc: &ProjectDocument, info_id: Opt
         GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt } => {
             render_embedded_result_table(scene, doc, result_sheet_id, tab_id.as_deref(), RectPt::from(*bounds_pt));
         }
+        GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
+            crate::equation_box::render_model_equation_annotation(
+                scene,
+                doc,
+                &crate::equation_box::ModelEquationParams {
+                    result_sheet_id,
+                    data_set_index: *data_set_index,
+                    mode: *mode,
+                    bounds_pt: *bounds_pt,
+                    font_size_pt: *font_size_pt,
+                    bordered: *bordered,
+                },
+            );
+        }
     }
 }
 

@@ -1,13 +1,14 @@
 use lumencraft_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AnnotationShapeKind, AreaFillSpec, AxisSegment, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament,
-    CategoricalTickSource, Cell, ColumnDesignHint, ColumnTable, ConnectingLineStyle, ConstantValue, DataSheet, ErrorBarDirection, ErrorBarMetric,
-    ErrorBarSpec, FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, GroupedTable, InfoConstant,
-    InfoSheet, LineConnectionKind, MultiplicityMethod, MultiplicitySpec, NestedTable, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod,
-    PairwiseBracketSpec, ProjectDocument, RegressionOverlaySpec, ReplicateOverlayStyle, SheetId, SubcolumnMode, SummaryMeasure, TableArchetype,
-    TickLabelFormat, WhiskerMethod, XColumnMode, XyTable,
+    CategoricalTickSource, Cell, ColumnDesignHint, ColumnTable, ConnectingLineStyle, ConstantValue, DataSheet, EquationDisplayMode,
+    ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement,
+    GroupedTable, InfoConstant, InfoSheet, LineConnectionKind, LinearRegressionSpec, MultiplicityMethod, MultiplicitySpec, NestedTable,
+    NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, PairwiseBracketSpec, ProjectDocument, RectPt as DocRectPt, RegressionOverlaySpec,
+    ReplicateOverlayStyle, ResultScalarEntry, ResultSheet, ResultStatus, SheetId, SubcolumnMode, SummaryMeasure, TableArchetype, TickLabelFormat,
+    WhiskerMethod, XColumnMode, XyTable,
 };
-use lumencraft_fit::HookContext;
+use lumencraft_fit::{HookContext, execute_analysis};
 use lumencraft_math::{AxisScale, ConfidenceLevel, PValueFormat};
 use lumencraft_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 
@@ -714,4 +715,88 @@ fn frames_thresholds_dual_y2_tick_formats_and_annotations() {
     let s_rn = compile_graph(&g_rn, &doc).unwrap();
     let texts = find_texts(&s_rn);
     assert!(texts.iter().any(|t| t == "1") && texts.iter().any(|t| t == "2"), "expected RowNumbers ticks 1, 2 in {texts:?}");
+}
+
+#[test]
+fn model_equation_box_live_refresh_across_xy_and_column_graphs() {
+    let mut doc = ProjectDocument::new("LiveEq").unwrap();
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 6).unwrap();
+    for (r, (x, y)) in [(-8.0, 8.0), (-7.0, 20.0), (-6.0, 52.0), (-5.0, 84.0), (-4.0, 96.0), (-3.0, 99.0)].into_iter().enumerate() {
+        xy.set_x_cell(r, Cell::number(x)).unwrap();
+        xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let xy_ds = DataSheet::new("ds-xy", "Dose", TableArchetype::Xy(xy)).unwrap();
+    doc.add_data_sheet(xy_ds.clone()).unwrap();
+
+    let nl_spec =
+        AnalysisSpec::new("res-nl", "ds-xy", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("log_agonist_vs_response_4pl"))).unwrap();
+    let nl_res = execute_analysis(&nl_spec, &xy_ds, &HookContext::default()).unwrap();
+    assert_eq!(nl_res.status, ResultStatus::UpToDate);
+    doc.add_result_sheet(nl_res).unwrap();
+
+    let lin_spec = AnalysisSpec::new("res-lin", "ds-xy", AnalysisKind::LinearRegression(LinearRegressionSpec::default())).unwrap();
+    let mut lin_res = ResultSheet::new(lin_spec).unwrap();
+    lin_res.status = ResultStatus::UpToDate;
+    lin_res.scalars = vec![
+        ResultScalarEntry { key: String::from("Slope"), data_set_index: Some(0), value: 14.5, units: None },
+        ResultScalarEntry { key: String::from("YIntercept"), data_set_index: Some(0), value: 3.25, units: None },
+    ];
+    doc.add_result_sheet(lin_res).unwrap();
+
+    let mut g = GraphSheet::new_uninitialized_for_data("g-eq", doc.data_sheet(&SheetId::new("ds-xy")).unwrap()).unwrap();
+    g.spec.annotations.push(GraphAnnotation::ModelEquation {
+        result_sheet_id: SheetId::new("res-nl"),
+        data_set_index: 0,
+        mode: EquationDisplayMode::Substituted,
+        bounds_pt: DocRectPt::new(90.0, 40.0, 230.0, 54.0),
+        font_size_pt: 9.0,
+        bordered: true,
+    });
+    g.spec.annotations.push(GraphAnnotation::ModelEquation {
+        result_sheet_id: SheetId::new("res-lin"),
+        data_set_index: 0,
+        mode: EquationDisplayMode::Symbolic,
+        bounds_pt: DocRectPt::new(90.0, 105.0, 160.0, 24.0),
+        font_size_pt: 8.5,
+        bordered: false,
+    });
+
+    let scene_before = compile_graph(&g, &doc).unwrap();
+    assert!(all_points_finite(&scene_before));
+    let texts_before = find_texts(&scene_before).join(" | ");
+    assert!(texts_before.contains("Slope") && texts_before.contains("Intercept"), "symbolic linear missing: {texts_before}");
+    assert!(!texts_before.contains("777"), "sentinel should not exist before mutation: {texts_before}");
+
+    // Mutate Top scalar directly without touching GraphSpec and re-compile -> live refresh!
+    let top_entry =
+        doc.result_sheets.iter_mut().find(|r| r.id == SheetId::new("res-nl")).unwrap().scalars.iter_mut().find(|s| s.key == "Top").unwrap();
+    top_entry.value = 777.0;
+
+    let scene_after = compile_graph(&g, &doc).unwrap();
+    assert!(all_points_finite(&scene_after));
+    let texts_after = find_texts(&scene_after).join(" | ");
+    assert!(texts_after.contains("777"), "live scalar refresh failed: {texts_after}");
+
+    // Column family also compiles ModelEquation annotations via xy::render_legend_and_annotations.
+    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).unwrap();
+    for c in 0..2 {
+        for r in 0..3 {
+            col.data_sets[c].cells[r][0] = Cell::number((c * 3 + r + 1) as f64);
+        }
+    }
+    doc.add_data_sheet(DataSheet::new("ds-col", "Groups", TableArchetype::Column(col)).unwrap()).unwrap();
+    let mut g_col = GraphSheet::new_uninitialized_for_data("g-col", doc.data_sheet(&SheetId::new("ds-col")).unwrap()).unwrap();
+    g_col.spec.annotations.push(GraphAnnotation::ModelEquation {
+        result_sheet_id: SheetId::new("res-lin"),
+        data_set_index: 0,
+        mode: EquationDisplayMode::Substituted,
+        bounds_pt: DocRectPt::new(80.0, 40.0, 160.0, 26.0),
+        font_size_pt: 9.0,
+        bordered: true,
+    });
+    let col_scene = compile_graph(&g_col, &doc).unwrap();
+    assert!(all_points_finite(&col_scene));
+    let col_texts = find_texts(&col_scene).join(" | ");
+    assert!(col_texts.contains("14.5"), "col_texts={col_texts}");
+    assert!(col_texts.contains("3.25"), "col_texts={col_texts}");
 }

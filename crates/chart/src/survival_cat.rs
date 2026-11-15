@@ -994,6 +994,20 @@ pub(crate) fn draw_graph_annotations(scene: &mut ChartScene, annotations: &[Grap
                     render_data_grid_table(scene, RectPt::from(*bounds_pt), &grid.headers, &grid.row_labels, &grid.rows, Rgba8::rgb(120, 120, 120));
                 }
             }
+            GraphAnnotation::ModelEquation { result_sheet_id, data_set_index, mode, bounds_pt, font_size_pt, bordered } => {
+                crate::equation_box::render_model_equation_annotation(
+                    scene,
+                    doc,
+                    &crate::equation_box::ModelEquationParams {
+                        result_sheet_id,
+                        data_set_index: *data_set_index,
+                        mode: *mode,
+                        bounds_pt: *bounds_pt,
+                        font_size_pt: *font_size_pt,
+                        bordered: *bordered,
+                    },
+                );
+            }
         }
     }
 }
@@ -1246,12 +1260,9 @@ fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Chart
 
     let x_ticks = nice_axis_ticks(&graph.spec.x_axis, x_lo, x_hi, 6);
     let y_ticks = nice_axis_ticks(&graph.spec.y_axis, y_lo, y_hi, 5);
-    let extra_bottom = if graph.spec.survival_number_at_risk { 20.0 + (cohorts.len() as f64) * 13.0 } else { 0.0 };
-    let max_cohort_lbl_w = if graph.spec.survival_number_at_risk {
-        cohorts.iter().map(|c| text_metrics(&c.label, 8.0).width_pt + 10.0).fold(0.0_f64, f64::max)
-    } else {
-        0.0
-    };
+    let show_nar = graph.spec.survival_number_at_risk && cohorts.iter().any(|c| c.n_total > 0 || !c.observations.is_empty());
+    let extra_bottom = if show_nar { 20.0 + (cohorts.len() as f64) * 13.0 } else { 0.0 };
+    let max_cohort_lbl_w = if show_nar { cohorts.iter().map(|c| text_metrics(&c.label, 8.0).width_pt + 10.0).fold(0.0_f64, f64::max) } else { 0.0 };
 
     let max_y_w = update_plot_rect_for_labels(
         scene,
@@ -1285,7 +1296,7 @@ fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Chart
         });
     }
 
-    if graph.spec.survival_number_at_risk {
+    if show_nar {
         draw_number_at_risk_table(scene, r, &cohorts, &x_ticks, x_map);
     }
     draw_legend_entries(scene, &graph.spec, &legend_entries, doc);
@@ -1308,11 +1319,20 @@ fn survival_y_scale_factor(spec: &GraphSpec) -> f64 {
 }
 
 fn extract_km_cohorts(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<KmCurveData> {
-    let km_result = doc.result_sheet(&graph.spec.primary_source_sheet_id).or_else(|| {
-        doc.result_sheets.iter().find(|r| {
-            r.analysis.source_sheet_id == graph.spec.primary_source_sheet_id
-                && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
-        })
+    let primary = &graph.spec.primary_source_sheet_id;
+    let km_result = doc.result_sheet(primary).or_else(|| {
+        doc.result_sheets
+            .iter()
+            .find(|r| {
+                r.analysis.source_sheet_id == *primary && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. }))
+            })
+            .or_else(|| {
+                doc.result_sheets.iter().find(|r| {
+                    r.analysis.source_sheet_id == *primary
+                        && matches!(r.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }))
+                        && !r.fitted_curves.is_empty()
+                })
+            })
     });
 
     if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id)
@@ -1426,12 +1446,39 @@ fn build_km_from_survival_table(
     out
 }
 
+fn result_curve_label(res: &ResultSheet, fc: &lumencraft_doc::FittedCurveOverlay, idx: usize) -> String {
+    match fc.equation_id.as_str() {
+        "cox_baseline" => String::from("Baseline"),
+        "cox_covariate" => {
+            let param_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::ParametersAndConfidenceIntervals || t.id == "cox-ph");
+            fc.data_set_index
+                .checked_sub(1)
+                .and_then(|cov_idx| param_tab.and_then(|t| t.row_labels.get(cov_idx)))
+                .filter(|s| !s.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| format!("Covariate {}", fc.data_set_index))
+        }
+        _ => res
+            .tabs
+            .iter()
+            .find(|t| t.kind == ResultTabKind::MainSummary)
+            .and_then(|t| t.row_labels.get(idx))
+            .filter(|s| !s.trim().is_empty())
+            .cloned()
+            .unwrap_or_else(|| format!("Cohort {}", fc.data_set_index + 1)),
+    }
+}
+
 fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCurveData> {
     let nar_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::NumberAtRisk);
     let mut out = Vec::with_capacity(res.fitted_curves.len());
     for (idx, fc) in res.fitted_curves.iter().enumerate() {
+        if fc.points.is_empty() {
+            continue;
+        }
         let (color, stroke_w, show_censor, show_ci, ci_dashed, label_override) = km_series_style(graph, fc.data_set_index, idx);
-        let label = label_override.unwrap_or_else(|| format!("Cohort {}", fc.data_set_index + 1));
+        let label = label_override.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| result_curve_label(res, fc, idx));
+        let has_ci = fc.points.iter().any(|p| p.ci_lower.is_some() && p.ci_upper.is_some());
         let steps: Vec<KmPointStep> = fc
             .points
             .iter()
@@ -1455,7 +1502,7 @@ fn build_km_from_result_sheet(graph: &GraphSheet, res: &ResultSheet) -> Vec<KmCu
             color,
             stroke_width_pt: stroke_w,
             show_censored_ticks: show_censor,
-            show_greenwood_ci: show_ci,
+            show_greenwood_ci: show_ci && has_ci,
             ci_dashed,
             n_total,
             steps,
