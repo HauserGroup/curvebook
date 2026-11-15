@@ -26,7 +26,7 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, AxisTarget};
 use crate::grid_view::ImportReshapeMode;
 use crate::gui_actions::{dispatch as dispatch_gui_action_impl, is_gui_action_method};
-use crate::i18n::{LocalePreset, is_rtl_locale, locale_display_name, normalize_locale};
+use crate::i18n::{is_rtl_locale, locale_display_name, normalize_locale};
 use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
 use crate::menus::ui_commands::UI_COMMANDS;
 pub use crate::os_integration::ClipboardBundle;
@@ -595,11 +595,29 @@ where
 {
     let mut connection_authenticated = false;
     loop {
-        let Some(raw_bytes) = read_bounded_control_line(reader, MAX_CONTROL_LINE_BYTES)? else {
-            return Ok(false);
+        let raw_bytes = match read_bounded_control_line(reader, MAX_CONTROL_LINE_BYTES) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(false),
+            Err(err) => {
+                if err.kind() == io::ErrorKind::InvalidData {
+                    let resp = ControlResponse::err(Value::String(String::new()), err.to_string());
+                    let _ = writer.write_all(serialize_response(&resp).as_bytes());
+                    let _ = writer.write_all(b"\n");
+                    let _ = writer.flush();
+                }
+                return Err(err);
+            }
         };
-        let line = std::str::from_utf8(&raw_bytes)
-            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, format!("control line is not valid UTF-8: {err}")))?;
+        let line = match std::str::from_utf8(&raw_bytes) {
+            Ok(line) => line,
+            Err(err) => {
+                let resp = ControlResponse::err(Value::String(String::new()), format!("control line is not valid UTF-8: {err}"));
+                writer.write_all(serialize_response(&resp).as_bytes())?;
+                writer.write_all(b"\n")?;
+                writer.flush()?;
+                continue;
+            }
+        };
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
@@ -977,6 +995,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
         }
         "ui.palette.open" => {
             app.canvas_dialogs.open_command_palette();
+            app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
             Ok(Some(json!({
                 "palette_open": matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette),
                 "dialog": "CommandPalette",
@@ -3037,6 +3056,7 @@ fn dispatch_ui_shortcut_set(app: &mut UiApp, params: &Value) -> Result<Value, St
         return Err(String::from("ui.shortcut.set requires string 'shortcut'"));
     };
     app.shortcuts.set_shortcut(command_id, shortcut)?;
+    app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
     let active = app.shortcuts.active_combo(command_id).unwrap_or("");
     Ok(json!({
         "command_id": command_id,
@@ -3048,6 +3068,7 @@ fn dispatch_ui_shortcut_reset(app: &mut UiApp, params: &Value) -> Result<Value, 
     let target = opt_non_empty_str_param(params, &["command_id", "id"])?;
     if let Some(command_id) = target {
         app.shortcuts.reset_shortcut(command_id)?;
+        app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
         let active = app.shortcuts.active_combo(command_id).unwrap_or("");
         Ok(json!({
             "command_id": command_id,
@@ -3056,6 +3077,7 @@ fn dispatch_ui_shortcut_reset(app: &mut UiApp, params: &Value) -> Result<Value, 
         }))
     } else {
         app.shortcuts.reset_all();
+        app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
         Ok(json!({
             "reset_all": true,
         }))
@@ -3080,7 +3102,6 @@ fn dispatch_ui_locale_set(app: &mut UiApp, params: &Value) -> Result<Value, Stri
         "display_name": locale_display_name(&app.locale),
         "decimal_separator": app.locale_preset.decimal_separator.to_string(),
         "csv_delimiter": app.locale_preset.csv_delimiter.to_string(),
-        "preset_applied": app.locale_preset == LocalePreset::for_locale(&app.locale),
     }))
 }
 
