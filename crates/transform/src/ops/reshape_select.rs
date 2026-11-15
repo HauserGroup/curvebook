@@ -4,8 +4,8 @@
 
 use lumencraft_doc::{
     Cell, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedTable,
-    PartsOfWholeTable, ResultCell, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource,
-    XColumnMode, XyTable, default_column_label, transpose_cell_grid,
+    PartsOfWholeTable, ResultCell, SheetId, SubcolumnMode, SummarizedPoint, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole,
+    VariableSource, XColumnMode, XyTable, default_column_label, transpose_cell_grid, validate_data_sets, validate_rows,
 };
 use lumencraft_math::sum;
 
@@ -40,7 +40,7 @@ pub enum SelectRule {
 /// Transpose rows and data-set columns using [`lumencraft_doc::transpose_cell_grid`].
 pub fn execute_transpose(source: &DataSheet, swap_titles: bool, ctx: &TransformContext<'_>) -> Result<TransformOutput, TransformError> {
     let (id, title) = ctx.derived_ids(source, "transpose", "Transposed");
-    let archetype = transpose_archetype(&source.archetype, swap_titles)?;
+    let (archetype, warnings) = transpose_archetype(&source.archetype, swap_titles)?;
     let out = DataSheet::new(id, title, archetype)?;
     let summary_tab = build_summary_tab(
         "Transpose summary",
@@ -51,10 +51,10 @@ pub fn execute_transpose(source: &DataSheet, swap_titles: bool, ctx: &TransformC
         ],
         Vec::new(),
     );
-    Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings: Vec::new() })
+    Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings })
 }
 
-fn transpose_archetype(arch: &TableArchetype, swap_titles: bool) -> Result<TableArchetype, TransformError> {
+fn transpose_archetype(arch: &TableArchetype, swap_titles: bool) -> Result<(TableArchetype, Vec<String>), TransformError> {
     arch.validate()?;
     match arch {
         TableArchetype::Column(t) => {
@@ -75,7 +75,7 @@ fn transpose_archetype(arch: &TableArchetype, swap_titles: bool) -> Result<Table
             }
             out.row_titles = tc.row_titles;
             out.row_titles_expanded = !out.row_titles.iter().all(String::is_empty);
-            Ok(TableArchetype::Column(out))
+            Ok((TableArchetype::Column(out), Vec::new()))
         }
         TableArchetype::Contingency(t) => {
             let tc = transpose_single_columns(&t.data_sets, &t.row_titles, swap_titles)?;
@@ -93,7 +93,7 @@ fn transpose_archetype(arch: &TableArchetype, swap_titles: bool) -> Result<Table
             out.row_titles = tc.row_titles;
             out.row_factor_title = t.column_factor_title.clone();
             out.column_factor_title = t.row_factor_title.clone();
-            Ok(TableArchetype::Contingency(out))
+            Ok((TableArchetype::Contingency(out), Vec::new()))
         }
         TableArchetype::PartsOfWhole(t) => {
             let tc = transpose_single_columns(&t.data_sets, &t.slice_labels, swap_titles)?;
@@ -109,10 +109,10 @@ fn transpose_archetype(arch: &TableArchetype, swap_titles: bool) -> Result<Table
                 }
             }
             out.slice_labels = tc.row_titles;
-            Ok(TableArchetype::PartsOfWhole(out))
+            Ok((TableArchetype::PartsOfWhole(out), Vec::new()))
         }
-        TableArchetype::MultipleVariables(mv) => transpose_multivariate(mv, swap_titles),
-        TableArchetype::Grouped(t) => transpose_grouped(t, swap_titles),
+        TableArchetype::MultipleVariables(mv) => Ok((transpose_multivariate(mv, swap_titles)?, Vec::new())),
+        TableArchetype::Grouped(t) => Ok((transpose_grouped(t, swap_titles)?, Vec::new())),
         TableArchetype::Xy(t) => transpose_xy(t, swap_titles),
         TableArchetype::Survival(_) | TableArchetype::Nested(_) => {
             Err(TransformError::IncompatibleTable { operation: "Transpose", kind: arch.kind() })
@@ -126,49 +126,58 @@ struct TransposedColumns {
     row_titles: Vec<String>,
 }
 
-fn transpose_single_columns(data_sets: &[DataSetColumn], row_titles: &[String], swap_titles: bool) -> Result<TransposedColumns, TransformError> {
+fn transpose_subcolumn_datasets(
+    data_sets: &[DataSetColumn],
+    row_titles: &[String],
+    subs: usize,
+    swap_titles: bool,
+) -> Result<TransposedColumns, TransformError> {
     let rows = data_sets.first().map_or(row_titles.len(), DataSetColumn::row_count);
     let cols = data_sets.len();
-    let mut grid = vec![vec![Cell::empty(); cols]; rows];
-    for (c, ds) in data_sets.iter().enumerate() {
-        for (r, row_cells) in ds.cells.iter().enumerate() {
-            if let Some(cell) = row_cells.first()
-                && let Some(slot) = grid.get_mut(r).and_then(|gr| gr.get_mut(c))
-            {
-                *slot = cell.clone();
+
+    let mut sub_grids = Vec::with_capacity(subs);
+    for s in 0..subs {
+        let mut grid = vec![vec![Cell::empty(); cols]; rows];
+        for (c, ds) in data_sets.iter().enumerate() {
+            for (r, row_cells) in ds.cells.iter().enumerate() {
+                if let Some(cell) = row_cells.get(s)
+                    && let Some(slot) = grid.get_mut(r).and_then(|gr| gr.get_mut(c))
+                {
+                    *slot = cell.clone();
+                }
             }
         }
+        sub_grids.push(transpose_cell_grid(&grid));
     }
-    let transposed = transpose_cell_grid(&grid);
+
     let new_rows = cols;
     let new_cols = rows;
-
     let new_col_titles: Vec<String> = if swap_titles {
         (0..new_cols).map(|c| row_titles.get(c).cloned().unwrap_or_else(|| default_column_label(c))).collect()
     } else {
         (0..new_cols).map(default_column_label).collect()
     };
-    let new_row_titles: Vec<String> = if swap_titles {
-        (0..new_rows).map(|r| data_sets.get(r).map_or_else(String::new, |ds| ds.title.clone())).collect()
-    } else {
-        vec![String::new(); new_rows]
-    };
+    let new_row_titles: Vec<String> = if swap_titles { data_sets.iter().map(|ds| ds.title.clone()).collect() } else { vec![String::new(); new_rows] };
 
-    let mut out_cols = Vec::with_capacity(new_cols);
+    let mut out_sets = Vec::with_capacity(new_cols);
     for c in 0..new_cols {
         let title = new_col_titles.get(c).cloned().unwrap_or_else(|| default_column_label(c));
-        let mut ds = DataSetColumn::new(title, new_rows, 1)?;
-        for r in 0..new_rows {
-            if let Some(cell) = transposed.get(r).and_then(|tr| tr.get(c))
-                && let Some(slot) = ds.cells.get_mut(r).and_then(|row| row.first_mut())
-            {
-                *slot = cell.clone();
+        let mut ds = DataSetColumn::new(title, new_rows, subs)?;
+        for (r, row_cells) in ds.cells.iter_mut().enumerate().take(new_rows) {
+            for (s, sub_grid) in sub_grids.iter().enumerate().take(subs) {
+                if let Some(slot) = row_cells.get_mut(s) {
+                    *slot = sub_grid.get(r).and_then(|gr| gr.get(c)).cloned().unwrap_or_default();
+                }
             }
         }
-        out_cols.push(ds);
+        out_sets.push(ds);
     }
 
-    Ok(TransposedColumns { data_sets: out_cols, col_titles: new_col_titles, row_titles: new_row_titles })
+    Ok(TransposedColumns { data_sets: out_sets, col_titles: new_col_titles, row_titles: new_row_titles })
+}
+
+fn transpose_single_columns(data_sets: &[DataSetColumn], row_titles: &[String], swap_titles: bool) -> Result<TransposedColumns, TransformError> {
+    transpose_subcolumn_datasets(data_sets, row_titles, 1, swap_titles)
 }
 
 fn transpose_multivariate(mv: &MultipleVariablesTable, swap_titles: bool) -> Result<TableArchetype, TransformError> {
@@ -212,51 +221,22 @@ fn transpose_multivariate(mv: &MultipleVariablesTable, swap_titles: bool) -> Res
 }
 
 fn transpose_grouped(t: &GroupedTable, swap_titles: bool) -> Result<TableArchetype, TransformError> {
-    let rows = t.row_count();
-    let cols = t.data_sets.len();
     let subs = t.subcolumn_mode.subcolumn_count();
-
-    let mut sub_grids = Vec::with_capacity(subs);
-    for s in 0..subs {
-        let mut grid = vec![vec![Cell::empty(); cols]; rows];
-        for (c, ds) in t.data_sets.iter().enumerate() {
-            for (r, row_cells) in ds.cells.iter().enumerate() {
-                if let Some(cell) = row_cells.get(s)
-                    && let Some(slot) = grid.get_mut(r).and_then(|row| row.get_mut(c))
-                {
-                    *slot = cell.clone();
-                }
-            }
-        }
-        sub_grids.push(transpose_cell_grid(&grid));
-    }
-
-    let new_rows = cols;
-    let new_cols = rows;
-    let mut out = GroupedTable::new(t.subcolumn_mode, new_cols.max(1), new_rows)?;
-    if new_cols == 0 {
+    let tc = transpose_subcolumn_datasets(&t.data_sets, &t.row_titles, subs, swap_titles)?;
+    let new_rows = t.data_sets.len();
+    let mut out = GroupedTable::new(t.subcolumn_mode, tc.data_sets.len().max(1), new_rows)?;
+    if tc.data_sets.is_empty() {
         out.data_sets.clear();
     } else {
-        for (c, ds) in out.data_sets.iter_mut().enumerate() {
-            if swap_titles {
-                ds.title = t.row_titles.get(c).cloned().unwrap_or_else(|| default_column_label(c));
-            }
-            for (r, row_cells) in ds.cells.iter_mut().enumerate().take(new_rows) {
-                for (s, sub_grid) in sub_grids.iter().enumerate().take(subs) {
-                    if let Some(slot) = row_cells.get_mut(s) {
-                        *slot = sub_grid.get(r).and_then(|row| row.get(c)).cloned().unwrap_or_default();
-                    }
-                }
-            }
-        }
+        out.data_sets = tc.data_sets;
     }
-    out.row_titles = if swap_titles { t.data_sets.iter().map(|ds| ds.title.clone()).collect() } else { vec![String::new(); new_rows] };
+    out.row_titles = tc.row_titles;
     out.row_factor_title = t.column_factor_title.clone();
     out.column_factor_title = t.row_factor_title.clone();
     Ok(TableArchetype::Grouped(out))
 }
 
-fn transpose_xy(t: &XyTable, swap_titles: bool) -> Result<TableArchetype, TransformError> {
+fn transpose_xy(t: &XyTable, swap_titles: bool) -> Result<(TableArchetype, Vec<String>), TransformError> {
     let row_labels: Vec<String> = (0..t.row_count())
         .map(|r| {
             let rt = t.row_titles.get(r).map(String::as_str).unwrap_or("");
@@ -269,22 +249,97 @@ fn transpose_xy(t: &XyTable, swap_titles: bool) -> Result<TableArchetype, Transf
             }
         })
         .collect();
-    let tc = transpose_single_columns(&t.data_sets, &row_labels, swap_titles)?;
-    let mut out =
-        ColumnTable::new(ColumnDesignHint::UnpairedReplicates, tc.data_sets.len().max(1), tc.data_sets.first().map_or(0, DataSetColumn::row_count))?;
-    if tc.data_sets.is_empty() {
-        out.data_sets.clear();
-    } else {
-        out.data_sets = tc.data_sets;
-        for (i, ds) in out.data_sets.iter_mut().enumerate() {
-            if let Some(ct) = tc.col_titles.get(i) {
-                ds.title = ct.clone();
+    let mut warnings = Vec::new();
+    match t.y_subcolumn_mode {
+        SubcolumnMode::Single | SubcolumnMode::RawReplicates(1) => {
+            let tc = transpose_single_columns(&t.data_sets, &row_labels, swap_titles)?;
+            let mut out = ColumnTable::new(
+                ColumnDesignHint::UnpairedReplicates,
+                tc.data_sets.len().max(1),
+                tc.data_sets.first().map_or(0, DataSetColumn::row_count),
+            )?;
+            if tc.data_sets.is_empty() {
+                out.data_sets.clear();
+            } else {
+                out.data_sets = tc.data_sets;
             }
+            out.row_titles = tc.row_titles;
+            out.row_titles_expanded = !out.row_titles.iter().all(String::is_empty);
+            Ok((TableArchetype::Column(out), warnings))
+        }
+        SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
+            let tc = transpose_subcolumn_datasets(&t.data_sets, &row_labels, 3, swap_titles)?;
+            let new_rows = tc.data_sets.first().map_or(0, DataSetColumn::row_count);
+            let mut out =
+                ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, t.y_subcolumn_mode, tc.data_sets.len().max(1), new_rows)?;
+            if tc.data_sets.is_empty() {
+                out.data_sets.clear();
+            } else {
+                out.data_sets = tc.data_sets;
+            }
+            out.row_titles = tc.row_titles;
+            out.row_titles_expanded = !out.row_titles.iter().all(String::is_empty);
+            Ok((TableArchetype::Column(out), warnings))
+        }
+        SubcolumnMode::RawReplicates(n) => {
+            let rows = t.row_count();
+            let cols = t.data_sets.len();
+            let new_rows = cols
+                .checked_mul(n)
+                .ok_or_else(|| TransformError::InvalidSpec { message: String::from("transposed replicate row count overflow") })?;
+            validate_rows(new_rows)?;
+            validate_data_sets(rows)?;
+            let mut out = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, rows.max(1), new_rows)?;
+            if rows == 0 {
+                out.data_sets.clear();
+            } else {
+                for (r, ds_out) in out.data_sets.iter_mut().enumerate().take(rows) {
+                    ds_out.title =
+                        if swap_titles { row_labels.get(r).cloned().unwrap_or_else(|| default_column_label(r)) } else { default_column_label(r) };
+                    for (c, ds_in) in t.data_sets.iter().enumerate() {
+                        for s in 0..n {
+                            if let Some(cell) = ds_in.cell(r, s)
+                                && let Some(slot) = ds_out.cell_mut(c * n + s, 0)
+                            {
+                                *slot = cell.clone();
+                            }
+                        }
+                    }
+                }
+            }
+            out.row_titles = if swap_titles {
+                let mut rtitles = Vec::with_capacity(new_rows);
+                for ds_in in &t.data_sets {
+                    for s in 0..n {
+                        rtitles.push(format!("{} (Y{})", ds_in.title, s + 1));
+                    }
+                }
+                rtitles
+            } else {
+                vec![String::new(); new_rows]
+            };
+            out.row_titles_expanded = !out.row_titles.iter().all(String::is_empty);
+            warnings.push(format!("transposed XY RawReplicates({n}) into {new_rows} stacked Column rows to preserve all replicate observations"));
+            Ok((TableArchetype::Column(out), warnings))
+        }
+        SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
+            let tc = transpose_single_columns(&t.data_sets, &row_labels, swap_titles)?;
+            let mut out = ColumnTable::new(
+                ColumnDesignHint::UnpairedReplicates,
+                tc.data_sets.len().max(1),
+                tc.data_sets.first().map_or(0, DataSetColumn::row_count),
+            )?;
+            if tc.data_sets.is_empty() {
+                out.data_sets.clear();
+            } else {
+                out.data_sets = tc.data_sets;
+            }
+            out.row_titles = tc.row_titles;
+            out.row_titles_expanded = !out.row_titles.iter().all(String::is_empty);
+            warnings.push(format!("Column tables do not support {:?} error subcolumns; transpose retained primary values only", t.y_subcolumn_mode));
+            Ok((TableArchetype::Column(out), warnings))
         }
     }
-    out.row_titles = tc.row_titles;
-    out.row_titles_expanded = !out.row_titles.iter().all(String::is_empty);
-    Ok(TableArchetype::Column(out))
 }
 
 /// Decimate or bin rows of a [`DataSheet`] according to [`PruneMethod`].
@@ -299,14 +354,14 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
     out.frozen = false;
     out.linked_regions.clear();
 
-    let kept_rows = match method {
+    let (kept_rows, warnings) = match method {
         PruneMethod::EveryNth(k) => {
             if k == 0 {
                 return Err(TransformError::InvalidSpec { message: String::from("EveryNth step k must be >= 1") });
             }
             let idxs: Vec<usize> = (0..row_count).step_by(k).collect();
             retain_rows(&mut out.archetype, &idxs);
-            idxs.len()
+            (idxs.len(), Vec::new())
         }
         PruneMethod::LogarithmicSpacing { target_points } => {
             if target_points == 0 {
@@ -314,7 +369,7 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
             }
             let idxs = select_log_spaced_indices(&source.archetype, target_points);
             retain_rows(&mut out.archetype, &idxs);
-            idxs.len()
+            (idxs.len(), Vec::new())
         }
         PruneMethod::AverageBins(k) => {
             if k == 0 {
@@ -328,7 +383,7 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
             }
             let idxs = select_minmax_bin_indices(&source.archetype, k);
             retain_rows(&mut out.archetype, &idxs);
-            idxs.len()
+            (idxs.len(), Vec::new())
         }
     };
 
@@ -341,7 +396,7 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
         Vec::new(),
     );
 
-    Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings: Vec::new() })
+    Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings })
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
@@ -438,86 +493,237 @@ fn primary_row_scalar(arch: &TableArchetype, row: usize) -> Option<f64> {
     }
 }
 
-fn average_bins_archetype(arch: &mut TableArchetype, k: usize) -> usize {
+fn average_bins_archetype(arch: &mut TableArchetype, k: usize) -> (usize, Vec<String>) {
     let n = arch.row_count();
+    let mut warnings = Vec::new();
     if n == 0 {
-        return 0;
+        return (0, warnings);
     }
     let bin_count = n.div_ceil(k);
     match arch {
         TableArchetype::Xy(t) => {
-            if !matches!(t.x_mode, XColumnMode::Numbers { .. }) {
-                let mat: Vec<Vec<Cell>> = (0..n).map(|r| vec![t.x_value_at(r).map_or_else(Cell::empty, Cell::number)]).collect();
-                t.x_cells = mat;
-                t.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
-            }
-            t.x_cells = average_cell_grid_bins(&t.x_cells, k);
+            let x_mode = match &t.x_mode {
+                XColumnMode::Numbers { subcolumn_mode } => *subcolumn_mode,
+                _ => {
+                    let mat: Vec<Vec<Cell>> = (0..n).map(|r| vec![t.x_value_at(r).map_or_else(Cell::empty, Cell::number)]).collect();
+                    t.x_cells = mat;
+                    t.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
+                    SubcolumnMode::Single
+                }
+            };
+            t.x_cells = average_cell_grid_bins_with_mode(&t.x_cells, k, x_mode, &t.x_title, &mut warnings);
             t.row_titles = bin_titles(&t.row_titles, k);
             for ds in &mut t.data_sets {
-                ds.cells = average_cell_grid_bins(&ds.cells, k);
+                ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, t.y_subcolumn_mode, &ds.title, &mut warnings);
             }
         }
         TableArchetype::Column(t) => {
             t.row_titles = bin_titles(&t.row_titles, k);
             for ds in &mut t.data_sets {
-                ds.cells = average_cell_grid_bins(&ds.cells, k);
+                ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, t.subcolumn_mode, &ds.title, &mut warnings);
             }
         }
         TableArchetype::Grouped(t) => {
             t.row_titles = bin_titles(&t.row_titles, k);
+            if let Some(spacing) = &mut t.row_numeric_spacing {
+                *spacing = spacing
+                    .chunks(k)
+                    .map(|chunk| {
+                        let nums: Vec<f64> = chunk.iter().filter_map(|v| v.filter(|x| x.is_finite())).collect();
+                        (!nums.is_empty()).then(|| sum::sum(&nums) / (nums.len() as f64))
+                    })
+                    .collect();
+            }
             for ds in &mut t.data_sets {
-                ds.cells = average_cell_grid_bins(&ds.cells, k);
+                ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, t.subcolumn_mode, &ds.title, &mut warnings);
             }
         }
         TableArchetype::Contingency(t) => {
             t.row_titles = bin_titles(&t.row_titles, k);
             for ds in &mut t.data_sets {
-                ds.cells = average_cell_grid_bins(&ds.cells, k);
+                ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, SubcolumnMode::Single, &ds.title, &mut warnings);
             }
         }
         TableArchetype::PartsOfWhole(t) => {
             t.slice_labels = bin_titles(&t.slice_labels, k);
             for ds in &mut t.data_sets {
-                ds.cells = average_cell_grid_bins(&ds.cells, k);
+                ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, SubcolumnMode::Single, &ds.title, &mut warnings);
             }
         }
         TableArchetype::Survival(t) => {
             let time_grid: Vec<Vec<Cell>> = t.times.iter().map(|c| vec![c.clone()]).collect();
-            t.times = average_cell_grid_bins(&time_grid, k).into_iter().map(|r| r.into_iter().next().unwrap_or_default()).collect();
+            t.times = average_cell_grid_bins_with_mode(&time_grid, k, SubcolumnMode::Single, &t.time_title, &mut warnings)
+                .into_iter()
+                .map(|r| r.into_iter().next().unwrap_or_default())
+                .collect();
             t.row_titles = bin_titles(&t.row_titles, k);
             for ds in &mut t.cohorts {
-                ds.cells = average_cell_grid_bins(&ds.cells, k);
+                ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, SubcolumnMode::Single, &ds.title, &mut warnings);
             }
         }
         TableArchetype::MultipleVariables(mv) => {
             mv.row_titles = bin_titles(&mv.row_titles, k);
             for var in &mut mv.variables {
                 let grid: Vec<Vec<Cell>> = var.cells.iter().map(|c| vec![c.clone()]).collect();
-                var.cells = average_cell_grid_bins(&grid, k).into_iter().map(|r| r.into_iter().next().unwrap_or_default()).collect();
+                var.cells = average_cell_grid_bins_with_mode(&grid, k, SubcolumnMode::Single, &var.title, &mut warnings)
+                    .into_iter()
+                    .map(|r| r.into_iter().next().unwrap_or_default())
+                    .collect();
+                var.refresh_inferred_role();
             }
         }
         TableArchetype::Nested(t) => {
             t.row_titles = bin_titles(&t.row_titles, k);
             for grp in &mut t.groups {
-                grp.cells = average_cell_grid_bins(&grp.cells, k);
+                grp.cells = average_cell_grid_bins_with_mode(&grp.cells, k, SubcolumnMode::Single, &grp.title, &mut warnings);
             }
         }
     }
-    bin_count
+    (bin_count, warnings)
 }
 
 fn bin_titles(titles: &[String], k: usize) -> Vec<String> {
     titles.chunks(k).map(|chunk| chunk.first().cloned().unwrap_or_default()).collect()
 }
 
-fn average_cell_grid_bins(rows: &[Vec<Cell>], k: usize) -> Vec<Vec<Cell>> {
+fn pool_parametric_bin(
+    chunk: &[Vec<Cell>],
+    mode: SubcolumnMode,
+    subcols: usize,
+    col_label: &str,
+    warned_incomplete: &mut bool,
+    warnings: &mut Vec<String>,
+) -> Vec<Cell> {
+    let active_rows: Vec<&[Cell]> = chunk.iter().filter_map(|row| row.first().and_then(Cell::active_number).map(|_| row.as_slice())).collect();
+    if active_rows.is_empty() {
+        return vec![Cell::empty(); subcols];
+    }
+
+    let mut points = Vec::with_capacity(active_rows.len());
+    for row in &active_rows {
+        match SummarizedPoint::reconstruct(mode, row) {
+            Ok(Some(pt)) => points.push(pt),
+            _ => {
+                if !*warned_incomplete {
+                    warnings.push(format!(
+                        "could not pool incomplete pre-summarized {mode:?} rows in `{col_label}`; averaged primary means and cleared spread/N subcolumns"
+                    ));
+                    *warned_incomplete = true;
+                }
+                let means: Vec<f64> = active_rows.iter().filter_map(|r| r.first().and_then(Cell::active_number)).collect();
+                let mut out = vec![Cell::empty(); subcols];
+                if !means.is_empty()
+                    && let Some(slot) = out.first_mut()
+                {
+                    *slot = Cell::number(sum::sum(&means) / (means.len() as f64));
+                }
+                return out;
+            }
+        }
+    }
+
+    let mut n_tot = 0.0_f64;
+    let mut weighted_sum = 0.0_f64;
+    let mut ss_within = 0.0_f64;
+    for pt in &points {
+        n_tot += pt.n;
+        weighted_sum += pt.n * pt.mean;
+        ss_within += pt.ss_within;
+    }
+    if n_tot <= 0.0 || !n_tot.is_finite() {
+        return vec![Cell::empty(); subcols];
+    }
+
+    let mean_p = weighted_sum / n_tot;
+    let mut ss_between = 0.0_f64;
+    for pt in &points {
+        let diff = pt.mean - mean_p;
+        ss_between += pt.n * diff * diff;
+    }
+    let sd_p = if n_tot > 1.0 { ((ss_within + ss_between) / (n_tot - 1.0)).max(0.0).sqrt() } else { 0.0 };
+
+    let spread_cell = match mode {
+        SubcolumnMode::MeanSdN => Cell::number(sd_p),
+        SubcolumnMode::MeanSemN => Cell::number(sd_p / n_tot.sqrt()),
+        SubcolumnMode::MeanCvN => {
+            if mean_p.abs() > 0.0 {
+                Cell::number(100.0 * sd_p / mean_p.abs())
+            } else if sd_p == 0.0 {
+                Cell::number(0.0)
+            } else {
+                if !*warned_incomplete {
+                    warnings.push(format!("pooled mean is zero in `{col_label}`; %CV subcolumn is undefined and left empty"));
+                    *warned_incomplete = true;
+                }
+                Cell::empty()
+            }
+        }
+        _ => Cell::empty(),
+    };
+
+    vec![Cell::number(mean_p), spread_cell, Cell::number(n_tot)]
+}
+
+fn average_cell_grid_bins_with_mode(
+    rows: &[Vec<Cell>],
+    k: usize,
+    mode: SubcolumnMode,
+    col_label: &str,
+    warnings: &mut Vec<String>,
+) -> Vec<Vec<Cell>> {
     let subcols = rows.first().map_or(0, Vec::len);
+    if mode.supports_parametric_moments() && subcols == 3 {
+        let mut warned_incomplete = false;
+        return rows.chunks(k).map(|chunk| pool_parametric_bin(chunk, mode, subcols, col_label, &mut warned_incomplete, warnings)).collect();
+    }
+    if mode.is_pre_summarized() {
+        warnings.push(format!(
+            "cannot pool non-parametric summary mode {mode:?} in `{col_label}`; averaged primary subcolumn 0 and cleared unpoolable interval subcolumns"
+        ));
+        return rows
+            .chunks(k)
+            .map(|chunk| {
+                let mut out = vec![Cell::empty(); subcols];
+                let nums: Vec<f64> = chunk.iter().filter_map(|r| r.first().and_then(Cell::active_number)).collect();
+                if !nums.is_empty()
+                    && let Some(slot) = out.first_mut()
+                {
+                    *slot = Cell::number(sum::sum(&nums) / (nums.len() as f64));
+                }
+                out
+            })
+            .collect();
+    }
+
+    let mut warned_mixed = false;
+    let mut warned_text_conflict = false;
     rows.chunks(k)
         .map(|chunk| {
             (0..subcols)
                 .map(|s| {
                     let nums: Vec<f64> = chunk.iter().filter_map(|r| r.get(s).and_then(Cell::active_number)).collect();
-                    if nums.is_empty() { Cell::empty() } else { Cell::number(sum::sum(&nums) / (nums.len() as f64)) }
+                    let texts: Vec<&str> = chunk.iter().filter_map(|r| r.get(s).and_then(Cell::active_text)).collect();
+                    if !nums.is_empty() {
+                        if !texts.is_empty() && !warned_mixed {
+                            warnings.push(format!("column `{col_label}` contains mixed text and numeric cells in binned rows; ignored text values"));
+                            warned_mixed = true;
+                        }
+                        Cell::number(sum::sum(&nums) / (nums.len() as f64))
+                    } else if let Some(&first_text) = texts.first() {
+                        if texts.iter().all(|&t| t == first_text) {
+                            Cell::text(first_text)
+                        } else {
+                            if !warned_text_conflict {
+                                warnings.push(format!(
+                                    "column `{col_label}` contains conflicting non-numeric/text values in binned rows; cleared ambiguous binned cell"
+                                ));
+                                warned_text_conflict = true;
+                            }
+                            Cell::empty()
+                        }
+                    } else {
+                        Cell::empty()
+                    }
                 })
                 .collect()
         })
@@ -612,12 +818,28 @@ pub fn execute_select(
 
     let (id, title) = ctx.derived_ids(source, "select", "Selected");
     let selected_cols = ctx.active_columns(filtered.archetype.column_count())?;
+    let mut warnings = Vec::new();
     let projected = if filtered.kind() == target_archetype {
         if !ctx.selected_data_sets.is_empty() {
             retain_columns(&mut filtered.archetype, &selected_cols)?;
         }
         filtered.archetype
     } else {
+        let max_subs = match &filtered.archetype {
+            TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
+            TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
+            TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
+            TableArchetype::Nested(t) => {
+                selected_cols.iter().filter_map(|&c| t.groups.get(c).map(lumencraft_doc::NestedGroupColumn::biological_unit_count)).max().unwrap_or(1)
+            }
+            _ => 1,
+        };
+        if max_subs > 1 {
+            warnings.push(format!(
+                "source table carries {max_subs} subcolumns per column; projecting to {} retained primary subcolumn 0 only",
+                target_archetype.label()
+            ));
+        }
         project_archetype(&filtered.archetype, target_archetype, &selected_cols)?
     };
     let out = DataSheet::new(id, title, projected)?;
@@ -631,7 +853,7 @@ pub fn execute_select(
         ],
         Vec::new(),
     );
-    Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings: Vec::new() })
+    Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings })
 }
 
 fn apply_select_rule(source: &DataSheet, rule: &SelectRule, mask: &mut [bool], ctx: &TransformContext<'_>) -> Result<(), TransformError> {

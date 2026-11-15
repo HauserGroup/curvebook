@@ -265,15 +265,146 @@ fn parse_and_validate_manifest(manifest_text: &str) -> Result<ArchiveManifest, F
     Ok(manifest)
 }
 
+const MAX_MIGRATION_JSON_NODES: usize = 1_000_000;
+const MIN_MIGRATION_JSON_BYTES: usize = 1_048_576;
+const MAX_MIGRATION_JSON_BYTES: usize = 64 * 1024 * 1024;
+
+#[derive(serde::Deserialize)]
+struct DocumentSchemaPeek {
+    #[serde(default)]
+    schema_version: Option<u32>,
+}
+
+struct JsonDomBudget {
+    remaining_nodes: usize,
+    remaining_bytes: usize,
+}
+
+impl JsonDomBudget {
+    fn charge(&mut self, nodes: usize, bytes: usize) -> Result<(), String> {
+        if nodes > self.remaining_nodes {
+            return Err(format!("JSON DOM node count exceeds migration limit {MAX_MIGRATION_JSON_NODES}"));
+        }
+        if bytes > self.remaining_bytes {
+            return Err(String::from("JSON DOM allocation exceeds migration memory budget"));
+        }
+        self.remaining_nodes -= nodes;
+        self.remaining_bytes -= bytes;
+        Ok(())
+    }
+}
+
+struct BoundedValueSeed<'a>(&'a mut JsonDomBudget);
+
+impl<'de> serde::de::DeserializeSeed<'de> for BoundedValueSeed<'_> {
+    type Value = serde_json::Value;
+
+    fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        deserializer.deserialize_any(BoundedValueVisitor(self.0))
+    }
+}
+
+struct BoundedValueVisitor<'a>(&'a mut JsonDomBudget);
+
+impl<'de> serde::de::Visitor<'de> for BoundedValueVisitor<'_> {
+    type Value = serde_json::Value;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("any valid bounded JSON value")
+    }
+
+    fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::Bool(v))
+    }
+
+    fn visit_i64<E: serde::de::Error>(self, v: i64) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::from(v))
+    }
+
+    fn visit_u64<E: serde::de::Error>(self, v: u64) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::from(v))
+    }
+
+    fn visit_f64<E: serde::de::Error>(self, v: f64) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        serde_json::Number::from_f64(v).map(serde_json::Value::Number).ok_or_else(|| serde::de::Error::custom("non-finite JSON number"))
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>().saturating_add(v.len())).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::String(v.to_owned()))
+    }
+
+    fn visit_string<E: serde::de::Error>(self, v: String) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>().saturating_add(v.len())).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::String(v))
+    }
+
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self::Value, E> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        Ok(serde_json::Value::Null)
+    }
+
+    fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self::Value, D::Error> {
+        serde::de::DeserializeSeed::deserialize(BoundedValueSeed(self.0), deserializer)
+    }
+
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        let mut vec = Vec::new();
+        while let Some(elem) = seq.next_element_seed(BoundedValueSeed(self.0))? {
+            vec.push(elem);
+        }
+        Ok(serde_json::Value::Array(vec))
+    }
+
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+        self.0.charge(1, std::mem::size_of::<serde_json::Value>()).map_err(serde::de::Error::custom)?;
+        let mut obj = serde_json::Map::new();
+        while let Some(key) = map.next_key::<String>()? {
+            self.0.charge(0, key.len().saturating_add(64)).map_err(serde::de::Error::custom)?;
+            let val = map.next_value_seed(BoundedValueSeed(self.0))?;
+            obj.insert(key, val);
+        }
+        Ok(serde_json::Value::Object(obj))
+    }
+}
+
+fn parse_bounded_json_value(doc_bytes: &[u8]) -> Result<serde_json::Value, FormatError> {
+    let max_bytes = doc_bytes.len().saturating_mul(6).clamp(MIN_MIGRATION_JSON_BYTES, MAX_MIGRATION_JSON_BYTES);
+    let mut budget = JsonDomBudget { remaining_nodes: MAX_MIGRATION_JSON_NODES, remaining_bytes: max_bytes };
+    let mut de = serde_json::Deserializer::from_slice(doc_bytes);
+    let val = serde::de::DeserializeSeed::deserialize(BoundedValueSeed(&mut budget), &mut de)?;
+    de.end()?;
+    Ok(val)
+}
+
 fn decode_and_validate_document(doc_bytes: &[u8], manifest_schema_version: u32) -> Result<ProjectDocument, FormatError> {
-    let raw_value: serde_json::Value = serde_json::from_slice(doc_bytes)?;
-    let doc_version =
-        raw_value.get("schema_version").and_then(serde_json::Value::as_u64).and_then(|v| u32::try_from(v).ok()).unwrap_or(manifest_schema_version);
+    let peek: DocumentSchemaPeek = serde_json::from_slice(doc_bytes)?;
+    let doc_version = peek.schema_version.unwrap_or(manifest_schema_version);
     if doc_version > CURRENT_SCHEMA_VERSION {
         return Err(FormatError::UnsupportedSchemaVersion { version: doc_version, max_supported: CURRENT_SCHEMA_VERSION });
     }
-    let migrated_value = migrate_document_json(raw_value, doc_version)?;
-    let doc: ProjectDocument = serde_json::from_value(migrated_value)?;
+    let doc: ProjectDocument = if doc_version == CURRENT_SCHEMA_VERSION && peek.schema_version.is_some() {
+        let mut parsed: ProjectDocument = serde_json::from_slice(doc_bytes)?;
+        parsed.schema_version = CURRENT_SCHEMA_VERSION;
+        parsed
+    } else {
+        let raw_value = parse_bounded_json_value(doc_bytes)?;
+        let migrated_value = migrate_document_json(raw_value, doc_version)?;
+        serde_json::from_value(migrated_value)?
+    };
     validate_project_document(&doc)?;
     Ok(doc)
 }

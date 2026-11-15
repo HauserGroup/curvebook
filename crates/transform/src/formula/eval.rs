@@ -393,29 +393,52 @@ pub fn eval_column_expr(expr: &Expr, ctx: &dyn FormulaContext) -> Result<Vec<For
     eval_column_expr_inner(expr, ctx)
 }
 
+enum EvalStep<'a> {
+    Visit(&'a Expr),
+    ApplyUnary(UnaryOp),
+    ApplyBinary(BinaryOp),
+}
+
 fn eval_column_expr_inner(expr: &Expr, ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
     let n = ctx.row_count();
-    match expr {
-        Expr::Number(v) => Ok(vec![FormulaValue::from_f64(*v); n]),
-        Expr::Text(s) => Ok(vec![FormulaValue::Text(s.clone()); n]),
-        Expr::Var(vref) => eval_var_ref(vref, ctx),
-        Expr::Unary { op, expr: inner } => {
-            let vals = eval_column_expr_inner(inner, ctx)?;
-            Ok(vals.into_iter().map(|v| apply_unary(*op, &v)).collect())
+    let mut steps = vec![EvalStep::Visit(expr)];
+    let mut stack: Vec<Vec<FormulaValue>> = Vec::new();
+    while let Some(step) = steps.pop() {
+        match step {
+            EvalStep::Visit(node) => match node {
+                Expr::Number(v) => stack.push(vec![FormulaValue::from_f64(*v); n]),
+                Expr::Text(s) => stack.push(vec![FormulaValue::Text(s.clone()); n]),
+                Expr::Var(vref) => stack.push(eval_var_ref(vref, ctx)?),
+                Expr::Unary { op, expr: inner } => {
+                    steps.push(EvalStep::ApplyUnary(*op));
+                    steps.push(EvalStep::Visit(inner));
+                }
+                Expr::Binary { op, left, right } => {
+                    steps.push(EvalStep::ApplyBinary(*op));
+                    steps.push(EvalStep::Visit(right));
+                    steps.push(EvalStep::Visit(left));
+                }
+                Expr::Call { name, args } => stack.push(eval_call(name, args, ctx)?),
+            },
+            EvalStep::ApplyUnary(op) => {
+                let vals = stack.pop().ok_or_else(|| TransformError::InvalidSpec { message: String::from("formula evaluation stack underflow") })?;
+                stack.push(vals.into_iter().map(|v| apply_unary(op, &v)).collect());
+            }
+            EvalStep::ApplyBinary(op) => {
+                let rhs = stack.pop().ok_or_else(|| TransformError::InvalidSpec { message: String::from("formula evaluation stack underflow") })?;
+                let lhs = stack.pop().ok_or_else(|| TransformError::InvalidSpec { message: String::from("formula evaluation stack underflow") })?;
+                let combined = (0..n)
+                    .map(|r| {
+                        let a = lhs.get(r).unwrap_or(&FormulaValue::Missing);
+                        let b = rhs.get(r).unwrap_or(&FormulaValue::Missing);
+                        apply_binary(op, a, b)
+                    })
+                    .collect();
+                stack.push(combined);
+            }
         }
-        Expr::Binary { op, left, right } => {
-            let lhs = eval_column_expr_inner(left, ctx)?;
-            let rhs = eval_column_expr_inner(right, ctx)?;
-            Ok((0..n)
-                .map(|r| {
-                    let a = lhs.get(r).unwrap_or(&FormulaValue::Missing);
-                    let b = rhs.get(r).unwrap_or(&FormulaValue::Missing);
-                    apply_binary(*op, a, b)
-                })
-                .collect())
-        }
-        Expr::Call { name, args } => eval_call(name, args, ctx),
     }
+    stack.pop().ok_or_else(|| TransformError::InvalidSpec { message: String::from("formula evaluation produced no result") })
 }
 
 fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
@@ -478,6 +501,9 @@ fn resolve_ident_var(name: &str, ctx: &dyn FormulaContext) -> Result<Vec<Formula
     if let Some(v) = ctx.resolve_scalar(name) {
         return Ok(vec![v; n]);
     }
+    if let Some(c) = builtin_constant(name) {
+        return Ok(vec![c; n]);
+    }
     if name.eq_ignore_ascii_case("x")
         && let Some(xs) = ctx.resolve_x_column()
     {
@@ -491,10 +517,11 @@ fn resolve_ident_var(name: &str, ctx: &dyn FormulaContext) -> Result<Vec<Formula
     if let Some(v) = ctx.resolve_info_constant(name) {
         return Ok(vec![v; n]);
     }
-    if let Some(c) = builtin_constant(name) {
-        return Ok(vec![c; n]);
-    }
     Err(TransformError::UnknownVariable { name: name.to_owned() })
+}
+
+pub(crate) fn is_builtin_constant(name: &str) -> bool {
+    builtin_constant(name).is_some()
 }
 
 fn builtin_constant(name: &str) -> Option<FormulaValue> {

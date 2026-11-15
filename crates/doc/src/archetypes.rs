@@ -1261,11 +1261,14 @@ impl VariableColumn {
     #[must_use]
     pub fn ordered_levels_with(&self, spec: &LevelOrderSpec) -> Vec<CategoricalLevelSummary> {
         let mut entries: Vec<(usize, CategoricalLevelSummary)> = Vec::new();
+        let mut index_by_level: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for cell in &self.cells {
             let Some(tok) = cell_categorical_token(&cell.value) else {
                 continue;
             };
-            if let Some((_, existing)) = entries.iter_mut().find(|(_, item)| item.level == tok) {
+            if let Some(&idx) = index_by_level.get(&tok)
+                && let Some((_, existing)) = entries.get_mut(idx)
+            {
                 if cell.excluded {
                     existing.excluded_count += 1;
                 } else {
@@ -1273,6 +1276,7 @@ impl VariableColumn {
                 }
             } else {
                 let rank = entries.len();
+                index_by_level.insert(tok.clone(), rank);
                 entries.push((
                     rank,
                     CategoricalLevelSummary { level: tok, included_count: usize::from(!cell.excluded), excluded_count: usize::from(cell.excluded) },
@@ -1292,9 +1296,13 @@ impl VariableColumn {
                 entries.sort_by(|(ra, a), (rb, b)| a.included_count.cmp(&b.included_count).then_with(|| ra.cmp(rb)));
             }
             LevelOrderKind::Explicit(order_list) => {
+                let mut rank_by_level: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(order_list.len());
+                for (pos, level) in order_list.iter().enumerate() {
+                    rank_by_level.entry(level.as_str()).or_insert(pos);
+                }
                 entries.sort_by(|(ra, a), (rb, b)| {
-                    let pa = order_list.iter().position(|x| x == &a.level);
-                    let pb = order_list.iter().position(|x| x == &b.level);
+                    let pa = rank_by_level.get(a.level.as_str()).copied();
+                    let pb = rank_by_level.get(b.level.as_str()).copied();
                     match (pa, pb) {
                         (Some(ia), Some(ib)) => ia.cmp(&ib),
                         (Some(_), None) => Ordering::Less,
