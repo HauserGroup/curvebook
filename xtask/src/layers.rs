@@ -5,6 +5,7 @@
 //! `eframe`, `winit`, `rfd`, `bevy*`) never appear below L6, and that `lumencraft-testkit` is used
 //! solely as a `[dev-dependencies]` entry.
 
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
 use crate::json::Json;
@@ -81,7 +82,7 @@ fn intra_layer_allowed(from: &str, to: &str) -> bool {
 }
 
 /// External crates that constitute a UI toolkit or windowing dependency.
-pub const UI_CRATES: &[&str] = &["egui", "eframe", "winit", "egui_kittest", "rfd", "bevy*"];
+pub const UI_CRATES: &[&str] = &["egui*", "epaint*", "emath", "ecolor", "eframe", "winit", "rfd", "wgpu*", "bevy*"];
 
 /// First layer permitted to depend on [`UI_CRATES`].
 pub const UI_MIN_LAYER: u8 = 6;
@@ -108,7 +109,7 @@ fn is_suite_crate(name: &str) -> bool {
     name.starts_with("craft-") || name.starts_with("craft_")
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DepKind {
     Normal,
     Dev,
@@ -180,10 +181,14 @@ pub fn check(crates: &[Crate]) -> Vec<Violation> {
                 out.push(Violation::SuiteCrate { krate: c.name.clone(), dep: d.name.clone() });
                 continue;
             }
-            if class != Class::Exempt {
-                let layer = class.layer().unwrap_or(0);
-                check_dep(c, class, layer, d, &mut out);
+            if class == Class::Exempt {
+                if classify(&d.name) == Some(Class::Testkit) && d.kind != DepKind::Dev && short_name(&c.name) != "xtask" {
+                    out.push(Violation::TestkitAsNormalDep { krate: c.name.clone() });
+                }
+                continue;
             }
+            let layer = class.layer().unwrap_or(0);
+            check_dep(c, class, layer, d, &mut out);
         }
     }
     out.sort_by_key(ToString::to_string);
@@ -192,6 +197,9 @@ pub fn check(crates: &[Crate]) -> Vec<Violation> {
 }
 
 fn check_dep(c: &Crate, class: Class, layer: u8, d: &Dep, out: &mut Vec<Violation>) {
+    if layer < UI_MIN_LAYER && is_ui_crate(&d.name) {
+        out.push(Violation::UiBelowL6 { krate: c.name.clone(), dep: d.name.clone(), layer });
+    }
     if d.workspace {
         if class == Class::Standalone {
             out.push(Violation::StandaloneHasWorkspaceDep { krate: c.name.clone(), dep: d.name.clone() });
@@ -216,34 +224,210 @@ fn check_dep(c: &Crate, class: Class, layer: u8, d: &Dep, out: &mut Vec<Violatio
                 }
             }
         }
-    } else if layer < UI_MIN_LAYER && is_ui_crate(&d.name) {
-        out.push(Violation::UiBelowL6 { krate: c.name.clone(), dep: d.name.clone(), layer });
     }
 }
 
-/// Build the crate graph from `cargo metadata --format-version 1 --no-deps`.
+/// Build the crate graph from `cargo metadata --format-version 1` (resolved graph when present,
+/// or direct manifest dependencies for minimal synthetic test JSON).
 pub fn from_metadata(meta: &Json) -> Result<Vec<Crate>, String> {
     let pkgs = meta.get("packages").and_then(Json::as_array).ok_or_else(|| String::from("metadata: no packages array"))?;
-    let members: Vec<&str> = pkgs.iter().filter_map(|p| p.get("name").and_then(Json::as_str)).collect();
+    if let Some(resolve_nodes) = meta.get("resolve").and_then(|r| r.get("nodes")).and_then(Json::as_array) {
+        return from_resolved_metadata(meta, pkgs, resolve_nodes);
+    }
+    from_declared_metadata(meta, pkgs)
+}
+
+fn from_declared_metadata(meta: &Json, pkgs: &[Json]) -> Result<Vec<Crate>, String> {
+    let member_ids: Option<BTreeSet<&str>> =
+        meta.get("workspace_members").and_then(Json::as_array).map(|arr| arr.iter().filter_map(Json::as_str).collect());
+    let mut member_names = BTreeSet::new();
+    for p in pkgs {
+        let name = p.get("name").and_then(Json::as_str).ok_or_else(|| String::from("package without name"))?;
+        let id = p.get("id").and_then(Json::as_str);
+        let is_member = match (&member_ids, id) {
+            (Some(ids), Some(pid)) => ids.contains(pid),
+            _ => true,
+        };
+        if is_member {
+            member_names.insert(name);
+        }
+    }
+
     let mut out = Vec::new();
     for p in pkgs {
         let name = p.get("name").and_then(Json::as_str).ok_or_else(|| String::from("package without name"))?.to_owned();
-        let mut deps = Vec::new();
-        for d in p.get("dependencies").and_then(Json::as_array).into_iter().flatten() {
-            let dname = d.get("name").and_then(Json::as_str).unwrap_or_default().to_owned();
-            let kind = match d.get("kind").and_then(Json::as_str) {
-                Some("dev") => DepKind::Dev,
-                Some("build") => DepKind::Build,
-                _ => DepKind::Normal,
-            };
-            let has_path = d.get("path").is_some_and(Json::is_string);
-            let workspace = members.contains(&dname.as_str()) || has_path;
-            deps.push(Dep { name: dname, kind, workspace });
+        if !member_names.contains(name.as_str()) {
+            continue;
         }
+        let deps = collect_declared_deps(p, &member_names);
         out.push(Crate { name, deps });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
+}
+
+fn collect_declared_deps(pkg: &Json, member_names: &BTreeSet<&str>) -> Vec<Dep> {
+    let mut deps = Vec::new();
+    for d in pkg.get("dependencies").and_then(Json::as_array).into_iter().flatten() {
+        let dname = d.get("name").and_then(Json::as_str).unwrap_or_default().to_owned();
+        let kind = parse_dep_kind_str(d.get("kind").and_then(Json::as_str));
+        let is_local_lumencraft = d.get("path").is_some_and(Json::is_string) && dname.starts_with("lumencraft-");
+        let workspace = member_names.contains(dname.as_str()) || classify(&dname).is_some() || is_local_lumencraft;
+        deps.push(Dep { name: dname, kind, workspace });
+    }
+    deps
+}
+
+fn parse_dep_kind_str(kind: Option<&str>) -> DepKind {
+    match kind {
+        Some("dev") => DepKind::Dev,
+        Some("build") => DepKind::Build,
+        _ => DepKind::Normal,
+    }
+}
+
+fn from_resolved_metadata(meta: &Json, pkgs: &[Json], resolve_nodes: &[Json]) -> Result<Vec<Crate>, String> {
+    let mut pkg_by_id = BTreeMap::new();
+    let mut pkg_name_by_id = BTreeMap::new();
+    for p in pkgs {
+        let id = p.get("id").and_then(Json::as_str).ok_or_else(|| String::from("package without id"))?;
+        let name = p.get("name").and_then(Json::as_str).ok_or_else(|| String::from("package without name"))?;
+        pkg_by_id.insert(id, p);
+        pkg_name_by_id.insert(id, name);
+    }
+
+    let member_ids: Vec<&str> = match meta.get("workspace_members").and_then(Json::as_array) {
+        Some(arr) => arr.iter().filter_map(Json::as_str).collect(),
+        None => pkg_by_id.keys().copied().collect(),
+    };
+    let member_id_set: BTreeSet<&str> = member_ids.iter().copied().collect();
+    let member_names: BTreeSet<&str> = member_ids.iter().filter_map(|id| pkg_name_by_id.get(id).copied()).collect();
+
+    let mut node_by_id = BTreeMap::new();
+    for node in resolve_nodes {
+        if let Some(id) = node.get("id").and_then(Json::as_str) {
+            node_by_id.insert(id, node);
+        }
+    }
+
+    let mut out = Vec::with_capacity(member_ids.len());
+    for mid in member_ids {
+        let Some(&mname) = pkg_name_by_id.get(mid) else {
+            continue;
+        };
+        let mut seen_deps: BTreeSet<(String, DepKind, bool)> = BTreeSet::new();
+        if let Some(&pkg) = pkg_by_id.get(mid) {
+            for dep in collect_declared_deps(pkg, &member_names) {
+                seen_deps.insert((dep.name, dep.kind, dep.workspace));
+            }
+        }
+        collect_resolved_transitive_deps(mid, &node_by_id, &pkg_name_by_id, &member_id_set, &mut seen_deps);
+        let deps = seen_deps.into_iter().map(|(name, kind, workspace)| Dep { name, kind, workspace }).collect();
+        out.push(Crate { name: mname.to_owned(), deps });
+    }
+    out.sort_by(|a, b| a.name.cmp(&b.name));
+    Ok(out)
+}
+
+fn collect_resolved_transitive_deps(
+    root_id: &str,
+    node_by_id: &BTreeMap<&str, &Json>,
+    pkg_name_by_id: &BTreeMap<&str, &str>,
+    member_id_set: &BTreeSet<&str>,
+    out: &mut BTreeSet<(String, DepKind, bool)>,
+) {
+    let Some(&root_node) = node_by_id.get(root_id) else {
+        return;
+    };
+    let mut queue: VecDeque<(&str, DepKind)> = VecDeque::new();
+    for (dep_id, kinds) in node_edges(root_node) {
+        for kind in kinds {
+            queue.push_back((dep_id, kind));
+        }
+    }
+    let mut visited: BTreeSet<(&str, DepKind)> = BTreeSet::new();
+    while let Some((pid, root_kind)) = queue.pop_front() {
+        if pid == root_id || !visited.insert((pid, root_kind)) {
+            continue;
+        }
+        let Some(&pname) = pkg_name_by_id.get(pid) else {
+            continue;
+        };
+        let is_ws = member_id_set.contains(pid) || classify(pname).is_some();
+        out.insert((pname.to_owned(), root_kind, is_ws));
+
+        // Do not walk past Testkit or Exempt boundaries: a lower layer dev-depending on testkit
+        // does not inherit testkit's own dependencies on higher layers.
+        if matches!(classify(pname), Some(Class::Testkit | Class::Exempt)) {
+            continue;
+        }
+        if let Some(&sub_node) = node_by_id.get(pid) {
+            for (sub_id, skinds) in node_edges(sub_node) {
+                if skinds.into_iter().any(|k| k != DepKind::Dev) {
+                    queue.push_back((sub_id, root_kind));
+                }
+            }
+        }
+    }
+}
+
+fn node_edges(node: &Json) -> Vec<(&str, Vec<DepKind>)> {
+    if let Some(deps) = node.get("deps").and_then(Json::as_array) {
+        let mut edges = Vec::with_capacity(deps.len());
+        for d in deps {
+            let Some(pkg) = d.get("pkg").and_then(Json::as_str) else {
+                continue;
+            };
+            let mut kinds = Vec::new();
+            for dk in d.get("dep_kinds").and_then(Json::as_array).into_iter().flatten() {
+                kinds.push(parse_dep_kind_str(dk.get("kind").and_then(Json::as_str)));
+            }
+            if kinds.is_empty() {
+                kinds.push(DepKind::Normal);
+            }
+            edges.push((pkg, kinds));
+        }
+        return edges;
+    }
+    node.get("dependencies").and_then(Json::as_array).into_iter().flatten().filter_map(Json::as_str).map(|id| (id, vec![DepKind::Normal])).collect()
+}
+
+/// Inspect workspace `Cargo.toml` `[patch]` and `[replace]` sections for banned suite crates
+/// or attempts to patch UI/workspace crates invisibly.
+#[must_use]
+pub fn check_manifest_patches(root: &Path) -> Vec<Violation> {
+    let Ok(text) = std::fs::read_to_string(root.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    scan_patch_sections(&text)
+}
+
+#[must_use]
+pub fn scan_patch_sections(cargo_toml: &str) -> Vec<Violation> {
+    let mut violations = Vec::new();
+    let mut in_patch_or_replace = false;
+    for raw in cargo_toml.lines() {
+        let line = raw.split('#').next().unwrap_or_default().trim();
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with('[') && line.ends_with(']') {
+            let sec = line[1..line.len() - 1].trim();
+            in_patch_or_replace = sec == "replace" || sec.starts_with("patch.");
+            continue;
+        }
+        if !in_patch_or_replace {
+            continue;
+        }
+        if let Some((lhs, _)) = line.split_once('=') {
+            let pkg_spec = lhs.trim().trim_matches('"').trim_matches('\'');
+            let pkg_name = pkg_spec.split(':').next().unwrap_or(pkg_spec).trim();
+            if is_suite_crate(pkg_name) {
+                violations.push(Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: pkg_name.to_owned() });
+            }
+        }
+    }
+    violations
 }
 
 #[must_use]
@@ -669,7 +853,7 @@ fn find_item_end(bytes: &[u8], mut pos: usize) -> usize {
 mod tests {
     use super::{
         ALLOWED_RAW_PROCESS_BASELINE, ALLOWED_UI_IO_BASELINE, Class, Crate, Dep, DepKind, TABLE, Violation, check, check_source_hygiene, classify,
-        from_metadata,
+        from_metadata, scan_patch_sections,
     };
     use crate::json::parse;
 
@@ -730,6 +914,122 @@ mod tests {
         let g = from_metadata(&meta).unwrap();
         assert_eq!(g.len(), 2);
         assert!(check(&g).is_empty());
+    }
+
+    #[test]
+    fn ui_crate_family_and_vendored_path_deps_below_l6_are_flagged() {
+        for ui_dep in
+            ["egui", "egui_extras", "epaint", "epaint_default_fonts", "emath", "ecolor", "eframe", "winit", "rfd", "wgpu", "wgpu-core", "bevy_math"]
+        {
+            let hits = check(&[c("lumencraft-engine", &[(ui_dep, DepKind::Build, true)])]);
+            assert!(matches!(hits[..], [Violation::UiBelowL6 { layer: 5, .. }]), "expected UiBelowL6 for {ui_dep}, got {hits:?}");
+        }
+        // L6 crates may depend on UI crates.
+        assert!(check(&[c("lumencraft-ui-egui", &[("egui-winit", DepKind::Normal, false)])]).is_empty());
+
+        // Vendored path dependency in metadata JSON has a `"path"` field without making it a workspace crate,
+        // and UI checks still flag it below L6 (e.g., `egui = { path = "/x/vendor/egui" }`).
+        let meta = parse(
+            r#"{"packages":[
+                {"name":"lumencraft-fit","id":"fit 0.1.0","dependencies":[
+                    {"name":"egui","kind":null,"path":"/x/vendor/egui"}
+                ]}
+            ],"workspace_members":["fit 0.1.0"]}"#,
+        )
+        .unwrap();
+        let g = from_metadata(&meta).unwrap();
+        let hits = check(&g);
+        assert!(matches!(hits[..], [Violation::UiBelowL6 { layer: 2, .. }]), "got {hits:?}");
+    }
+
+    #[test]
+    fn resolved_metadata_catches_transitive_ui_and_skips_dev_testkit_propagation() {
+        let meta = parse(
+            r#"{
+                "packages": [
+                    {"name":"lumencraft-math","id":"math 0.1.0","dependencies":[]},
+                    {"name":"lumencraft-doc","id":"doc 0.1.0","dependencies":[]},
+                    {"name":"lumencraft-stats","id":"stats 0.1.0","dependencies":[]},
+                    {"name":"lumencraft-testkit","id":"testkit 0.1.0","dependencies":[]},
+                    {"name":"helper-crate","id":"helper 0.1.0","dependencies":[]},
+                    {"name":"winit","id":"winit 0.30.0","dependencies":[]}
+                ],
+                "workspace_members": ["math 0.1.0", "doc 0.1.0", "stats 0.1.0", "testkit 0.1.0"],
+                "resolve": {
+                    "nodes": [
+                        {
+                            "id": "math 0.1.0",
+                            "deps": [
+                                {"pkg": "testkit 0.1.0", "dep_kinds": [{"kind": "dev"}]}
+                            ]
+                        },
+                        {
+                            "id": "testkit 0.1.0",
+                            "deps": [
+                                {"pkg": "doc 0.1.0", "dep_kinds": [{"kind": null}]}
+                            ]
+                        },
+                        {"id": "doc 0.1.0", "deps": []},
+                        {
+                            "id": "stats 0.1.0",
+                            "deps": [
+                                {"pkg": "helper 0.1.0", "dep_kinds": [{"kind": null}]}
+                            ]
+                        },
+                        {
+                            "id": "helper 0.1.0",
+                            "deps": [
+                                {"pkg": "winit 0.30.0", "dep_kinds": [{"kind": null}]}
+                            ]
+                        },
+                        {"id": "winit 0.30.0", "deps": []}
+                    ]
+                }
+            }"#,
+        )
+        .unwrap();
+        let g = from_metadata(&meta).unwrap();
+        let hits = check(&g);
+        assert_eq!(hits.len(), 1, "expected only transitive stats->winit violation, got {hits:?}");
+        assert!(matches!(&hits[0], Violation::UiBelowL6 { krate, dep, layer: 2 } if krate == "lumencraft-stats" && dep == "winit"));
+    }
+
+    #[test]
+    fn exempt_apps_forbid_testkit_as_normal_dep_except_xtask() {
+        let app_hit = check(&[c("lumencraft", &[("lumencraft-testkit", DepKind::Normal, true)])]);
+        assert!(matches!(app_hit[..], [Violation::TestkitAsNormalDep { .. }]), "got {app_hit:?}");
+
+        let cli_hit = check(&[c("lumencraft-cli", &[("lumencraft-testkit", DepKind::Build, true)])]);
+        assert!(matches!(cli_hit[..], [Violation::TestkitAsNormalDep { .. }]), "got {cli_hit:?}");
+
+        assert!(check(&[c("lumencraft", &[("lumencraft-testkit", DepKind::Dev, true)])]).is_empty());
+        assert!(check(&[c("xtask", &[("lumencraft-testkit", DepKind::Normal, true)])]).is_empty());
+    }
+
+    #[test]
+    fn scan_patch_sections_flags_suite_crates_in_patch_and_replace() {
+        let toml = r#"
+[workspace]
+members = ["crates/math"]
+
+[patch.crates-io]
+craft-core = { path = "vendor/craft-core" }
+
+[replace]
+"craft_ui:0.1.0" = { path = "vendor/craft_ui" }
+
+[workspace.dependencies]
+serde = "1"
+"#;
+        let hits = scan_patch_sections(toml);
+        assert_eq!(
+            hits,
+            vec![
+                Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: String::from("craft-core") },
+                Violation::SuiteCrate { krate: String::from("Cargo.toml[patch/replace]"), dep: String::from("craft_ui") },
+            ]
+        );
+        assert!(scan_patch_sections("[workspace.dependencies]\nserde = \"1\"\n").is_empty());
     }
 
     #[test]
