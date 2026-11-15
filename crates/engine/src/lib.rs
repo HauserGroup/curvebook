@@ -1094,6 +1094,12 @@ impl Session {
         match outcome {
             Ok(res) => {
                 if res.mutated {
+                    if let Err(err) = lumencraft_format::validate_project_document(&self.doc) {
+                        self.doc = before;
+                        self.file_path = before_path;
+                        self.dirty = before_dirty;
+                        return Err(err.into());
+                    }
                     if clears_file_path_on_mutate {
                         self.file_path = None;
                     }

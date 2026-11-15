@@ -71,9 +71,11 @@ fn make_col_sheet(id: &str) -> Result<DataSheet, String> {
 fn r1_s07_10_duplicate_family_and_clone_pipeline_terminate_on_self_and_mutual_graph_cycles() -> TestResult {
     // 1. Self-referential GraphSheet via graph.setSpec (`g -> g`).
     run_with_small_stack("s07-10-self-graph", || {
-        let mut session = Session::new();
-        session.execute("sheet.createData", json!({ "sheet_id": "d", "graph_sheet_id": "g" })).map_err(|e| e.to_string())?;
-        session.execute("graph.setSpec", json!({ "sheet_id": "g", "primary_source_sheet_id": "g" })).map_err(|e| e.to_string())?;
+        let mut base = Session::new();
+        base.execute("sheet.createData", json!({ "sheet_id": "d", "graph_sheet_id": "g" })).map_err(|e| e.to_string())?;
+        let mut doc = base.document().clone();
+        doc.graph_sheets[0].spec.primary_source_sheet_id = "g".into();
+        let mut session = Session::from_document(doc);
 
         let err_dup = session
             .execute("sheet.duplicateFamily", json!({ "sheet_id": "g" }))

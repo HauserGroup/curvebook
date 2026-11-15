@@ -296,6 +296,7 @@ fn run_layout_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
     apply_layout_spec_fields(&mut spec, &params.fields)?;
 
     let layout = LayoutSheet::new(id.clone(), title.clone(), spec)?;
+    validate_layout_spec_in_doc(doc, &id, &layout.spec)?;
     let page_pt = layout.spec.page_size_pt();
     doc.add_layout_sheet(layout)?;
 
@@ -304,6 +305,48 @@ fn run_layout_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         format!("created layout `{id}`"),
         json!({ "sheet_id": id.as_str(), "title": title, "width_pt": page_pt.width, "height_pt": page_pt.height }),
     ))
+}
+
+fn validate_layout_spec_in_doc(
+    doc: &lumencraft_doc::ProjectDocument,
+    layout_id: &lumencraft_doc::SheetId,
+    spec: &LayoutSpec,
+) -> Result<(), EngineError> {
+    spec.validate_item_count().map_err(DocError::from)?;
+    for (idx, item) in spec.items.iter().enumerate() {
+        match item {
+            LayoutItem::LiveGraph { graph_sheet_id, .. } => {
+                if graph_sheet_id == layout_id {
+                    return Err(EngineError::with_code(
+                        ErrorCode::CycleDetected,
+                        format!("self-referential layout item[{idx}] graph `{graph_sheet_id}` on `{layout_id}`"),
+                    ));
+                }
+                let _ = crate::cmd::helpers::require_graph_sheet(doc, graph_sheet_id)?;
+            }
+            LayoutItem::LiveTable { source_sheet_id, .. } => {
+                if source_sheet_id == layout_id {
+                    return Err(EngineError::with_code(
+                        ErrorCode::CycleDetected,
+                        format!("self-referential layout item[{idx}] source `{source_sheet_id}` on `{layout_id}`"),
+                    ));
+                }
+                match doc.sheet_section(source_sheet_id) {
+                    Some(lumencraft_doc::SheetSection::Data | lumencraft_doc::SheetSection::Info | lumencraft_doc::SheetSection::Analyses) => {}
+                    Some(_) => {
+                        return Err(EngineError::with_code(
+                            ErrorCode::BadInput,
+                            format!("layout item[{idx}] source `{source_sheet_id}` must reference a data, info, or result sheet"),
+                        ));
+                    }
+                    None => return Err(DocError::SheetNotFound { sheet_id: source_sheet_id.clone() }.into()),
+                }
+            }
+            LayoutItem::TextCallout { .. } => {}
+        }
+    }
+    crate::dag::validate_inline_hook_refs(doc, layout_id, &spec.inline_hooks())?;
+    crate::dag::validate_layout_spec_acyclic(doc, layout_id, spec)
 }
 
 fn run_layout_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -330,7 +373,10 @@ fn run_layout_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, 
     } else {
         apply_layout_spec_fields(&mut spec, &params.fields)?;
     }
-    spec.validate_item_count().map_err(DocError::from)?;
+    if let Some(ref title) = params.title {
+        lumencraft_doc::validate_title(title)?;
+    }
+    validate_layout_spec_in_doc(doc, &id, &spec)?;
 
     let page_pt = spec.page_size_pt();
     let items_len = spec.items.len();
@@ -427,8 +473,11 @@ fn run_layout_add_panel(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         }
     };
 
+    let mut candidate_spec = require_layout_sheet(doc, &id)?.spec.clone();
+    candidate_spec.add_item(item).map_err(DocError::from)?;
+    validate_layout_spec_in_doc(doc, &id, &candidate_spec)?;
     let layout_mut = require_layout_sheet_mut(doc, &id)?;
-    layout_mut.spec.add_item(item).map_err(DocError::from)?;
+    layout_mut.spec = candidate_spec;
     let panel_count = layout_mut.spec.items.len();
 
     Ok(CommandOutcome::mutated(

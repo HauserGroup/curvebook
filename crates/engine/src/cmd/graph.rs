@@ -845,8 +845,9 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
     for series in &mut graph.spec.series {
         series.source_sheet_id = data_id.clone();
     }
-    if let Some(title) = params.title {
-        graph.title = title;
+    if let Some(ref title) = params.title {
+        lumencraft_doc::validate_title(title)?;
+        graph.title = title.clone();
     }
     if let Some(ref kind_val) = params.kind {
         let kind = parse_graph_kind(kind_val)?;
@@ -855,7 +856,8 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
     } else if let Some(init) = params.initialized {
         graph.initialized = init;
     }
-    graph.spec.validate()?;
+    lumencraft_doc::validate_title(&graph.title)?;
+    validate_graph_spec_in_doc(doc, &graph.id, &graph.spec)?;
 
     let title = graph.title.clone();
     let initialized = graph.initialized;
@@ -874,16 +876,22 @@ fn run_graph_initialize(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     let params: GraphInitializeParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
     let kind_opt = params.kind.as_ref().map(parse_graph_kind).transpose()?;
+    if let Some(ref title) = params.title {
+        lumencraft_doc::validate_title(title)?;
+    }
+
+    let mut updated_spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
+    if let Some(kind) = kind_opt {
+        apply_graph_kind(&mut updated_spec, kind, true);
+    }
+    validate_graph_spec_in_doc(ctx.session.document(), &id, &updated_spec)?;
 
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
     graph.initialized = true;
     if let Some(title) = params.title {
         graph.title = title;
     }
-    if let Some(kind) = kind_opt {
-        apply_graph_kind(&mut graph.spec, kind, true);
-    }
-    graph.spec.validate()?;
+    graph.spec = updated_spec;
 
     Ok(CommandOutcome::mutated(
         "graph.initialize",
@@ -1107,6 +1115,69 @@ fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
     ))
 }
 
+fn validate_source_sheet_ref(
+    doc: &lumencraft_doc::ProjectDocument,
+    graph_id: &lumencraft_doc::SheetId,
+    source_id: &lumencraft_doc::SheetId,
+    role: &str,
+) -> Result<(), EngineError> {
+    if source_id == graph_id {
+        return Err(EngineError::with_code(
+            ErrorCode::CycleDetected,
+            format!("self-referential {role} `{source_id}` is not allowed on graph `{graph_id}`"),
+        ));
+    }
+    match doc.sheet_section(source_id) {
+        Some(lumencraft_doc::SheetSection::Data | lumencraft_doc::SheetSection::Analyses) => Ok(()),
+        Some(_) => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("{role} `{source_id}` on graph `{graph_id}` must reference a data or result sheet"),
+        )),
+        None => Err(lumencraft_doc::DocError::SheetNotFound { sheet_id: source_id.clone() }.into()),
+    }
+}
+
+fn validate_result_sheet_ref(
+    doc: &lumencraft_doc::ProjectDocument,
+    graph_id: &lumencraft_doc::SheetId,
+    result_id: &lumencraft_doc::SheetId,
+    role: &str,
+) -> Result<(), EngineError> {
+    if result_id == graph_id {
+        return Err(EngineError::with_code(
+            ErrorCode::CycleDetected,
+            format!("self-referential {role} `{result_id}` is not allowed on graph `{graph_id}`"),
+        ));
+    }
+    let _ = crate::cmd::helpers::require_result_sheet(doc, result_id)?;
+    Ok(())
+}
+
+fn validate_graph_spec_in_doc(
+    doc: &lumencraft_doc::ProjectDocument,
+    graph_id: &lumencraft_doc::SheetId,
+    spec: &GraphSpec,
+) -> Result<(), EngineError> {
+    spec.validate()?;
+    validate_source_sheet_ref(doc, graph_id, &spec.primary_source_sheet_id, "primary_source_sheet_id")?;
+    for (idx, series) in spec.series.iter().enumerate() {
+        validate_source_sheet_ref(doc, graph_id, &series.source_sheet_id, &format!("series[{idx}].source_sheet_id"))?;
+        if let Some(ov) = &series.regression_overlay {
+            validate_result_sheet_ref(doc, graph_id, &ov.result_sheet_id, &format!("series[{idx}].regression_overlay.result_sheet_id"))?;
+        }
+    }
+    for (idx, cmp) in spec.comparisons.iter().enumerate() {
+        validate_result_sheet_ref(doc, graph_id, &cmp.result_sheet_id, &format!("comparisons[{idx}].result_sheet_id"))?;
+    }
+    for (idx, ann) in spec.annotations.iter().enumerate() {
+        if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann {
+            validate_result_sheet_ref(doc, graph_id, result_sheet_id, &format!("annotations[{idx}].result_sheet_id"))?;
+        }
+    }
+    crate::dag::validate_inline_hook_refs(doc, graph_id, &spec.inline_hooks())?;
+    crate::dag::validate_graph_spec_acyclic(doc, graph_id, spec)
+}
+
 fn run_graph_set_kind(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_graph_set_kind();
     let params: GraphSetKindParams = parse_params(&schema, raw)?;
@@ -1120,10 +1191,12 @@ fn run_graph_set_kind(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     let id = parse_sheet_id(&params.sheet_id)?;
     let reset_series = params.reset_series_style.unwrap_or(true);
 
+    let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
+    apply_graph_kind_with_option(&mut spec, kind, opt_arrangement, gdo_preset, reset_series);
+    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
     graph.initialized = true;
-    apply_graph_kind_with_option(&mut graph.spec, kind, opt_arrangement, gdo_preset, reset_series);
-    graph.spec.validate()?;
+    graph.spec = spec;
 
     let payload = match option_id {
         Some(opt) => json!({ "sheet_id": id.as_str(), "kind": kind, "option_id": opt }),
@@ -1151,7 +1224,10 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     if let Some(nar) = params.survival_number_at_risk {
         new_spec.survival_number_at_risk = nar;
     }
-    new_spec.validate()?;
+    if let Some(ref title) = params.title {
+        lumencraft_doc::validate_title(title)?;
+    }
+    validate_graph_spec_in_doc(ctx.session.document(), &id, &new_spec)?;
 
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
     graph.spec = new_spec;
@@ -1212,7 +1288,7 @@ fn run_graph_set_axes(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
         }
     }
 
-    spec.validate()?;
+    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
     let x_segs = spec.x_axis.segments.len();
     let y_segs = spec.y_axis.segments.len();
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
@@ -1301,7 +1377,7 @@ fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         spec.multivariate = Some(parse_multivariate_encoding(mv_val, spec.multivariate.as_ref())?);
     }
 
-    spec.validate()?;
+    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
     let count = spec.series.len();
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
     graph.spec = spec;
@@ -1356,7 +1432,7 @@ fn run_graph_set_regression_overlay(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
         }
     }
 
-    spec.validate()?;
+    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
     graph.spec = spec;
     graph.initialized = true;
@@ -1425,7 +1501,7 @@ fn run_graph_add_comparison_brackets(ctx: &mut Ctx<'_>, raw: Value) -> Result<Co
         count
     };
 
-    spec.validate()?;
+    validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
     let total = spec.comparisons.len();
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
     graph.spec = spec;
@@ -1459,7 +1535,7 @@ fn run_graph_add_annotation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
 
     let mut spec = require_graph_sheet(doc, &id)?.spec.clone();
     spec.annotations.push(annotation);
-    spec.validate()?;
+    validate_graph_spec_in_doc(doc, &id, &spec)?;
     let total = spec.annotations.len();
 
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
@@ -1481,10 +1557,10 @@ fn run_graph_apply_style_from(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let donor_id = parse_sheet_id(&params.donor_sheet_id)?;
     let donor_spec = require_graph_sheet(ctx.session.document(), &donor_id)?.spec.clone();
 
-    let target = require_graph_sheet_mut(&mut ctx.session.doc, &target_id)?;
-    let mut updated = target.spec.clone();
+    let mut updated = require_graph_sheet(ctx.session.document(), &target_id)?.spec.clone();
     updated.apply_style_from(&donor_spec);
-    updated.validate()?;
+    validate_graph_spec_in_doc(ctx.session.document(), &target_id, &updated)?;
+    let target = require_graph_sheet_mut(&mut ctx.session.doc, &target_id)?;
     target.spec = updated;
     target.initialized = true;
 
@@ -1927,6 +2003,24 @@ fn apply_segment_updates(seg: &mut AxisSegment, val: &Value) -> Result<(), Engin
 }
 
 fn apply_single_series_patch(series: &mut SeriesSpec, val: &Value) -> Result<(), EngineError> {
+    if let Some(src) = opt_str(val, &["source_sheet_id", "source_sheet", "data_sheet_id"]) {
+        series.source_sheet_id = parse_sheet_id(src)?;
+    }
+    if let Some(ds_val) = val.get("data_set_index") {
+        let ds_u64 = ds_val.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`data_set_index` must be a non-negative integer"))?;
+        series.data_set_index =
+            usize::try_from(ds_u64).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`data_set_index` is out of range"))?;
+    }
+    if let Some(overlay_val) = val.get("regression_overlay") {
+        series.regression_overlay = if overlay_val.is_null() {
+            None
+        } else {
+            Some(
+                serde_json::from_value(overlay_val.clone())
+                    .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `regression_overlay`: {err}")))?,
+            )
+        };
+    }
     if let Some(label) = opt_str(val, &["legend_label", "label"]) {
         series.legend_label = Some(label.to_owned());
     }
@@ -2132,6 +2226,10 @@ fn resolve_series_target_index(spec: &GraphSpec, series_index: Option<usize>, da
 
 fn has_series_patch_keys(map: &Map<String, Value>) -> bool {
     const KEYS: &[&str] = &[
+        "source_sheet_id",
+        "source_sheet",
+        "data_sheet_id",
+        "regression_overlay",
         "legend_label",
         "label",
         "bind_to_right_y2",
