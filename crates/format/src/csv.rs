@@ -1285,7 +1285,7 @@ fn place_grid_in_datasheet(
         shift_archetype_rows_down(&mut target.archetype, start_row, grid_rows, existing_rows);
     }
     if let Some(hdrs) = headers {
-        apply_headers_to_sheet(target, start_col, hdrs)?;
+        apply_headers_to_sheet(target, start_col, placement.anchor.subcol, hdrs)?;
     }
 
     let mut end_coord = CellCoord::new(start_row, start_col, placement.anchor.subcol);
@@ -1588,54 +1588,25 @@ fn resolve_target_coord(arch: &TableArchetype, start_col: usize, start_subcol: u
     Ok((flat / subs, flat % subs))
 }
 
-fn apply_headers_to_sheet(target: &mut DataSheet, start_col: usize, headers: &[String]) -> Result<(), FormatError> {
+fn apply_headers_to_sheet(target: &mut DataSheet, start_col: usize, start_subcol: usize, headers: &[String]) -> Result<(), FormatError> {
     for (idx, title) in headers.iter().enumerate() {
-        if title.trim().is_empty() {
+        let (col, subcol) = resolve_target_coord(&target.archetype, start_col, start_subcol, idx)?;
+        if subcol != 0 || title.trim().is_empty() {
             continue;
         }
         validate_title(title)?;
-        let col = start_col.checked_add(idx).ok_or_else(|| FormatError::InvalidPipeline { reason: String::from("header column offset overflow") })?;
-        match &mut target.archetype {
-            TableArchetype::Xy(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Column(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Grouped(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Contingency(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Survival(t) => {
-                if let Some(ds) = t.cohorts.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::PartsOfWhole(t) => {
-                if let Some(ds) = t.data_sets.get_mut(col) {
-                    ds.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::MultipleVariables(t) => {
-                if let Some(var) = t.variables.get_mut(col) {
-                    var.title = title.trim().to_owned();
-                }
-            }
-            TableArchetype::Nested(t) => {
-                if let Some(g) = t.groups.get_mut(col) {
-                    g.title = title.trim().to_owned();
-                }
-            }
+        let slot = match &mut target.archetype {
+            TableArchetype::Xy(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::Column(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::Grouped(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::Contingency(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::Survival(t) => t.cohorts.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::PartsOfWhole(t) => t.data_sets.get_mut(col).map(|ds| &mut ds.title),
+            TableArchetype::MultipleVariables(t) => t.variables.get_mut(col).map(|var| &mut var.title),
+            TableArchetype::Nested(t) => t.groups.get_mut(col).map(|g| &mut g.title),
+        };
+        if let Some(target_title) = slot {
+            *target_title = title.trim().to_owned();
         }
     }
     Ok(())

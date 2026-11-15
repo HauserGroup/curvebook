@@ -944,25 +944,241 @@ pub fn validate_project_document(doc: &ProjectDocument) -> Result<(), FormatErro
     for ds in &doc.data_sheets {
         register_unique_sheet_id(&mut seen_ids, &ds.id)?;
         validate_data_sheet(ds)?;
+        validate_archetype_extra_floats(&ds.archetype, ds.id.as_str())?;
+        validate_floating_notes(&ds.floating_notes, ds.id.as_str())?;
     }
     for info in &doc.info_sheets {
         register_unique_sheet_id(&mut seen_ids, &info.id)?;
         validate_info_sheet(info)?;
+        validate_floating_notes(&info.floating_notes, info.id.as_str())?;
     }
     for res in &doc.result_sheets {
         register_unique_sheet_id(&mut seen_ids, &res.id)?;
         validate_result_sheet(res)?;
+        if let Some(data) = &res.analyzable_data {
+            validate_archetype_extra_floats(&data.archetype, res.id.as_str())?;
+            validate_floating_notes(&data.floating_notes, res.id.as_str())?;
+        }
+        validate_analysis_kind_floats(&res.analysis, res.id.as_str())?;
+        validate_floating_notes(&res.floating_notes, res.id.as_str())?;
     }
     for graph in &doc.graph_sheets {
         register_unique_sheet_id(&mut seen_ids, &graph.id)?;
-        graph.spec.validate()?;
+        if let Some(field) = graph.first_non_finite_float() {
+            return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", graph.id) });
+        }
+        graph.validate()?;
     }
     for layout in &doc.layout_sheets {
         register_unique_sheet_id(&mut seen_ids, &layout.id)?;
-        validate_title(&layout.title)?;
+        if let Some(field) = layout.first_non_finite_float() {
+            return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", layout.id) });
+        }
+        layout.validate()?;
     }
 
     detect_dependency_cycles(doc)
+}
+
+fn check_finite(value: f64, location: impl FnOnce() -> String) -> Result<(), FormatError> {
+    if value.is_finite() { Ok(()) } else { Err(FormatError::NonFiniteFloat { location: location() }) }
+}
+
+fn check_opt_finite(value: Option<f64>, location: impl FnOnce() -> String) -> Result<(), FormatError> {
+    if let Some(v) = value { check_finite(v, location) } else { Ok(()) }
+}
+
+fn validate_floating_notes(notes: &[lumencraft_doc::FloatingNote], sheet_id: &str) -> Result<(), FormatError> {
+    for (idx, note) in notes.iter().enumerate() {
+        let b = note.bounds_pt;
+        if !b.x.is_finite() || !b.y.is_finite() || !b.width.is_finite() || !b.height.is_finite() {
+            return Err(FormatError::NonFiniteFloat { location: format!("{sheet_id}.floating_notes[{idx}].bounds_pt") });
+        }
+    }
+    Ok(())
+}
+
+fn validate_archetype_extra_floats(arch: &lumencraft_doc::TableArchetype, ctx: &str) -> Result<(), FormatError> {
+    if let lumencraft_doc::TableArchetype::Grouped(t) = arch
+        && let Some(spacing) = &t.row_numeric_spacing
+    {
+        for (row, maybe_v) in spacing.iter().enumerate() {
+            check_opt_finite(*maybe_v, || format!("{ctx}.row_numeric_spacing[{row}]"))?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_math_transform_preset(preset: &lumencraft_doc::MathTransformPreset, location_prefix: &str) -> Result<(), FormatError> {
+    match preset {
+        lumencraft_doc::MathTransformPreset::LinearScale { slope, intercept } => {
+            check_finite(*slope, || format!("{location_prefix}.slope"))?;
+            check_finite(*intercept, || format!("{location_prefix}.intercept"))?;
+        }
+        lumencraft_doc::MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor } => {
+            check_finite(*molar_unit_factor, || format!("{location_prefix}.molar_unit_factor"))?;
+        }
+        lumencraft_doc::MathTransformPreset::Ln
+        | lumencraft_doc::MathTransformPreset::Log10
+        | lumencraft_doc::MathTransformPreset::Log2
+        | lumencraft_doc::MathTransformPreset::Exp10
+        | lumencraft_doc::MathTransformPreset::Exp
+        | lumencraft_doc::MathTransformPreset::Reciprocal
+        | lumencraft_doc::MathTransformPreset::Sqrt
+        | lumencraft_doc::MathTransformPreset::Square
+        | lumencraft_doc::MathTransformPreset::Logit
+        | lumencraft_doc::MathTransformPreset::Probit
+        | lumencraft_doc::MathTransformPreset::ArcsinSqrt => {}
+    }
+    Ok(())
+}
+
+fn validate_normalize_anchor(anchor: &lumencraft_doc::NormalizeAnchor, location: &str) -> Result<(), FormatError> {
+    if let lumencraft_doc::NormalizeAnchor::FixedValue(v) = anchor {
+        check_finite(*v, || location.to_owned())?;
+    }
+    Ok(())
+}
+
+fn validate_transform_floats(transform: &lumencraft_doc::TransformAnalysisSpec, sheet_id: &str) -> Result<(), FormatError> {
+    match transform {
+        lumencraft_doc::TransformAnalysisSpec::Math { x_transform, y_transform, .. } => {
+            if let Some(p) = x_transform {
+                validate_math_transform_preset(p, &format!("{sheet_id}.analysis.x_transform"))?;
+            }
+            if let Some(p) = y_transform {
+                validate_math_transform_preset(p, &format!("{sheet_id}.analysis.y_transform"))?;
+            }
+        }
+        lumencraft_doc::TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. } => {
+            validate_normalize_anchor(zero_anchor, &format!("{sheet_id}.analysis.zero_anchor"))?;
+            validate_normalize_anchor(hundred_anchor, &format!("{sheet_id}.analysis.hundred_anchor"))?;
+        }
+        lumencraft_doc::TransformAnalysisSpec::Simulate { x_min, x_max, parameters, noise, .. } => {
+            check_finite(*x_min, || format!("{sheet_id}.analysis.simulate.x_min"))?;
+            check_finite(*x_max, || format!("{sheet_id}.analysis.simulate.x_max"))?;
+            for (idx, (_, val)) in parameters.iter().enumerate() {
+                check_finite(*val, || format!("{sheet_id}.analysis.simulate.parameters[{idx}]"))?;
+            }
+            match noise {
+                lumencraft_doc::SimulationNoise::Gaussian { sd } => {
+                    check_finite(*sd, || format!("{sheet_id}.analysis.simulate.noise.sd"))?;
+                }
+                lumencraft_doc::SimulationNoise::RelativePercent { cv_percent } => {
+                    check_finite(*cv_percent, || format!("{sheet_id}.analysis.simulate.noise.cv_percent"))?;
+                }
+                lumencraft_doc::SimulationNoise::None | lumencraft_doc::SimulationNoise::Poisson => {}
+            }
+        }
+        lumencraft_doc::TransformAnalysisSpec::RemoveBaseline { .. }
+        | lumencraft_doc::TransformAnalysisSpec::Transpose { .. }
+        | lumencraft_doc::TransformAnalysisSpec::PruneRows { .. }
+        | lumencraft_doc::TransformAnalysisSpec::SelectAndTransform { .. }
+        | lumencraft_doc::TransformAnalysisSpec::RandomSample { .. } => {}
+    }
+    Ok(())
+}
+
+fn validate_nonlinear_fit_floats(fit: &lumencraft_doc::NonlinearFitSpec, sheet_id: &str) -> Result<(), FormatError> {
+    if let lumencraft_doc::FitMethod::RoutOutlierElimination { fdr_q_percent } = fit.method {
+        check_finite(fdr_q_percent, || format!("{sheet_id}.analysis.fit_method.fdr_q_percent"))?;
+    }
+    if let lumencraft_doc::WeightingScheme::GeneralPowerY(k) = fit.weighting {
+        check_finite(k, || format!("{sheet_id}.analysis.weighting.power"))?;
+    }
+    for (idx, rule) in fit.parameter_rules.iter().enumerate() {
+        check_opt_finite(rule.initial_override, || format!("{sheet_id}.parameter_rules[{idx}].initial_override"))?;
+        check_opt_finite(rule.lower_bound, || format!("{sheet_id}.parameter_rules[{idx}].lower_bound"))?;
+        check_opt_finite(rule.upper_bound, || format!("{sheet_id}.parameter_rules[{idx}].upper_bound"))?;
+        match &rule.scope {
+            lumencraft_doc::ParameterScope::Constant(v) => {
+                check_finite(*v, || format!("{sheet_id}.parameter_rules[{idx}].constant"))?;
+            }
+            lumencraft_doc::ParameterScope::PerDatasetConstant(entries) => {
+                for (entry_idx, (_, val)) in entries.iter().enumerate() {
+                    check_finite(*val, || format!("{sheet_id}.parameter_rules[{idx}].per_dataset[{entry_idx}]"))?;
+                }
+            }
+            lumencraft_doc::ParameterScope::Local
+            | lumencraft_doc::ParameterScope::SharedGlobal
+            | lumencraft_doc::ParameterScope::HookedConstant(_)
+            | lumencraft_doc::ParameterScope::ColumnTitleConstant => {}
+        }
+    }
+    if let Some((lo, hi)) = fit.x_range_filter {
+        check_opt_finite(lo, || format!("{sheet_id}.analysis.x_range_filter.min"))?;
+        check_opt_finite(hi, || format!("{sheet_id}.analysis.x_range_filter.max"))?;
+    }
+    if let Some((lo, hi)) = fit.y_range_filter {
+        check_opt_finite(lo, || format!("{sheet_id}.analysis.y_range_filter.min"))?;
+        check_opt_finite(hi, || format!("{sheet_id}.analysis.y_range_filter.max"))?;
+    }
+    check_opt_finite(fit.plot_x_min, || format!("{sheet_id}.analysis.plot_x_min"))?;
+    check_opt_finite(fit.plot_x_max, || format!("{sheet_id}.analysis.plot_x_max"))
+}
+
+fn validate_analysis_kind_floats(spec: &lumencraft_doc::AnalysisSpec, sheet_id: &str) -> Result<(), FormatError> {
+    check_finite(spec.confidence_level.percent(), || format!("{sheet_id}.analysis.confidence_level"))?;
+    match &spec.kind {
+        lumencraft_doc::AnalysisKind::Transform(transform) => validate_transform_floats(transform, sheet_id),
+        lumencraft_doc::AnalysisKind::DescriptiveStats(d) => {
+            check_opt_finite(d.custom_upper_percentile, || format!("{sheet_id}.analysis.custom_upper_percentile"))?;
+            check_opt_finite(d.hypothetical_value, || format!("{sheet_id}.analysis.hypothetical_value"))
+        }
+        lumencraft_doc::AnalysisKind::OutlierDetection(o) => match o {
+            lumencraft_doc::OutlierSpec::Grubbs { alpha, .. } => check_finite(*alpha, || format!("{sheet_id}.analysis.outlier.alpha")),
+            lumencraft_doc::OutlierSpec::Rout { fdr_q_percent } => {
+                check_finite(*fdr_q_percent, || format!("{sheet_id}.analysis.outlier.fdr_q_percent"))
+            }
+        },
+        lumencraft_doc::AnalysisKind::TwoGroupComparison(t) => match t.method {
+            lumencraft_doc::TwoGroupMethod::OneSampleT { hypothetical } | lumencraft_doc::TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
+                check_finite(hypothetical, || format!("{sheet_id}.analysis.hypothetical"))
+            }
+            lumencraft_doc::TwoGroupMethod::UnpairedT
+            | lumencraft_doc::TwoGroupMethod::WelchT
+            | lumencraft_doc::TwoGroupMethod::PairedT
+            | lumencraft_doc::TwoGroupMethod::RatioPairedT
+            | lumencraft_doc::TwoGroupMethod::LognormalUnpairedT
+            | lumencraft_doc::TwoGroupMethod::MannWhitneyU
+            | lumencraft_doc::TwoGroupMethod::WilcoxonSignedRank
+            | lumencraft_doc::TwoGroupMethod::KolmogorovSmirnov
+            | lumencraft_doc::TwoGroupMethod::PairedSignTest => Ok(()),
+        },
+        lumencraft_doc::AnalysisKind::MultipleRowTTests(s) => {
+            check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+        }
+        lumencraft_doc::AnalysisKind::OneWayAnova(s) => {
+            check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+        }
+        lumencraft_doc::AnalysisKind::FactorialAnova(s) => {
+            check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+        }
+        lumencraft_doc::AnalysisKind::NestedComparison(s) => {
+            check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+        }
+        lumencraft_doc::AnalysisKind::Contingency(c) => {
+            if let Some(props) = &c.expected_proportions {
+                for (idx, p) in props.iter().enumerate() {
+                    check_finite(*p, || format!("{sheet_id}.analysis.expected_proportions[{idx}]"))?;
+                }
+            }
+            check_opt_finite(c.null_proportion, || format!("{sheet_id}.analysis.null_proportion"))
+        }
+        lumencraft_doc::AnalysisKind::Survival(s) => match s {
+            lumencraft_doc::SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. } => {
+                check_finite(multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
+            }
+            lumencraft_doc::SurvivalAnalysisSpec::CoxProportionalHazards { .. } => Ok(()),
+        },
+        lumencraft_doc::AnalysisKind::NonlinearRegression(fit) => validate_nonlinear_fit_floats(fit, sheet_id),
+        lumencraft_doc::AnalysisKind::BlandAltman(_)
+        | lumencraft_doc::AnalysisKind::PassingBablok(_)
+        | lumencraft_doc::AnalysisKind::RocCurve(_)
+        | lumencraft_doc::AnalysisKind::GeneralizedLinearModel(_)
+        | lumencraft_doc::AnalysisKind::Multivariate(_)
+        | lumencraft_doc::AnalysisKind::LinearRegression(_) => Ok(()),
+    }
 }
 
 fn register_unique_sheet_id(seen: &mut HashSet<SheetId>, id: &SheetId) -> Result<(), FormatError> {

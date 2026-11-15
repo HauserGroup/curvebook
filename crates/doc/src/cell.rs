@@ -221,28 +221,46 @@ impl SubcolumnMode {
     #[must_use]
     pub fn explicit_bounds(self, subcells: &[Cell]) -> Option<ExplicitErrorBounds> {
         let center = subcells.first()?.active_number()?;
+        if !center.is_finite() {
+            return None;
+        }
         match self {
             Self::Single | Self::RawReplicates(_) => None,
             Self::MeanSdN | Self::MeanSemN => {
                 let d = subcells.get(1)?.active_number()?;
-                (d >= 0.0).then_some(ExplicitErrorBounds { center, lower: center - d, upper: center + d })
+                if !d.is_finite() || d < 0.0 {
+                    return None;
+                }
+                let lower = center - d;
+                let upper = center + d;
+                (lower.is_finite() && upper.is_finite()).then_some(ExplicitErrorBounds { center, lower, upper })
             }
             Self::MeanCvN => {
                 let cv = subcells.get(1)?.active_number()?;
-                if cv < 0.0 {
+                if !cv.is_finite() || cv < 0.0 || center == 0.0 {
                     return None;
                 }
                 let sd = (cv / 100.0) * center.abs();
-                Some(ExplicitErrorBounds { center, lower: center - sd, upper: center + sd })
+                let lower = center - sd;
+                let upper = center + sd;
+                (sd.is_finite() && lower.is_finite() && upper.is_finite()).then_some(ExplicitErrorBounds { center, lower, upper })
             }
             Self::MeanLowHigh => {
                 let down = subcells.get(1)?.active_number()?;
                 let up = subcells.get(2)?.active_number()?;
-                (down >= 0.0 && up >= 0.0).then_some(ExplicitErrorBounds { center, lower: center - down, upper: center + up })
+                if !down.is_finite() || !up.is_finite() || down < 0.0 || up < 0.0 {
+                    return None;
+                }
+                let lower = center - down;
+                let upper = center + up;
+                (lower.is_finite() && upper.is_finite()).then_some(ExplicitErrorBounds { center, lower, upper })
             }
             Self::UpperLowerLimits | Self::MedianIqr => {
                 let low = subcells.get(1)?.active_number()?;
                 let high = subcells.get(2)?.active_number()?;
+                if !low.is_finite() || !high.is_finite() {
+                    return None;
+                }
                 let (lower, upper) = if low <= high { (low, high) } else { (high, low) };
                 Some(ExplicitErrorBounds { center, lower, upper })
             }
@@ -282,8 +300,9 @@ pub struct SummarizedPoint {
 impl SummarizedPoint {
     /// Reconstruct `(mean, sd, n, ss_within, df_within)` from a 3-cell subcolumn slice.
     ///
-    /// Returns `Ok(None)` when the mean cell is empty or excluded. Flags missing `N`, `N < 1`, or
-    /// negative spread as explicit [`SummaryPointError`] diagnostics rather than silently assuming `N = 1`.
+    /// Returns `Ok(None)` when the mean cell is empty or excluded. Flags missing `N`, `N < 1`,
+    /// fractional `N`, negative/non-finite spread, undefined `%CV` at `mean == 0`, or overflowing
+    /// `sd`/`ss_within` as explicit [`SummaryPointError`] diagnostics rather than silently assuming `N = 1`.
     pub fn reconstruct(mode: SubcolumnMode, subcells: &[Cell]) -> Result<Option<Self>, SummaryPointError> {
         if !mode.supports_parametric_moments() {
             return Err(SummaryPointError::NotParametricSummaryMode { mode });
@@ -291,22 +310,34 @@ impl SummarizedPoint {
         let Some(mean) = subcells.first().and_then(Cell::active_number) else {
             return Ok(None);
         };
+        if !mean.is_finite() {
+            return Err(SummaryPointError::MissingSpread);
+        }
         let spread = subcells.get(1).and_then(Cell::active_number).ok_or(SummaryPointError::MissingSpread)?;
-        if spread < 0.0 {
+        if !spread.is_finite() || spread < 0.0 {
             return Err(SummaryPointError::NegativeSpread { spread });
         }
         let n = subcells.get(2).and_then(Cell::active_number).ok_or(SummaryPointError::MissingSampleSize)?;
-        if n < 1.0 {
+        if !n.is_finite() || n < 1.0 || n.fract() != 0.0 {
             return Err(SummaryPointError::SampleSizeBelowOne { n });
         }
         let sd = match mode {
             SubcolumnMode::MeanSdN => spread,
             SubcolumnMode::MeanSemN => spread * n.sqrt(),
-            SubcolumnMode::MeanCvN => (spread / 100.0) * mean.abs(),
+            SubcolumnMode::MeanCvN => {
+                if mean == 0.0 {
+                    return Err(SummaryPointError::MissingSpread);
+                }
+                (spread / 100.0) * mean.abs()
+            }
             _ => return Err(SummaryPointError::NotParametricSummaryMode { mode }),
         };
         let df_within = n - 1.0;
-        let ss_within = df_within * sd * sd;
+        let sd_sq = sd * sd;
+        let ss_within = df_within * sd_sq;
+        if !sd.is_finite() || !sd_sq.is_finite() || !df_within.is_finite() || !ss_within.is_finite() || ss_within < 0.0 {
+            return Err(SummaryPointError::NegativeSpread { spread });
+        }
         Ok(Some(Self { mean, sd, n, ss_within, df_within }))
     }
 }
