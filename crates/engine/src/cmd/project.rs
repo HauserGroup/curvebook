@@ -4,19 +4,15 @@ use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, DataSetColumn, DataSheet, ErrorCode, ImportLinkSpec, InternalLinkKind, LinkSource, NamedCheckpoint, ParameterScope,
-    ProjectDocument, ResultSheet, SheetId, TableArchetype,
-};
+use lumencraft_doc::{AnalysisKind, AnalysisSpec, ErrorCode, NamedCheckpoint, ParameterScope, ProjectDocument, SheetId};
 use lumencraft_format::{
     instantiate_template_bytes, open_project_bytes, open_project_file, open_project_unpacked_dir, save_project_bytes, save_project_unpacked_dir,
     save_template_bytes,
 };
-use lumencraft_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline, evaluate_data_sheet_calculated_variables};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::cmd::helpers::{decode_base64, encode_base64, locate_target_and_info_indices, parse_sheet_id};
+use crate::cmd::helpers::{decode_base64, encode_base64, parse_sheet_id};
 use crate::cmd::params::{
     bool_schema, empty_object_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
 };
@@ -30,12 +26,6 @@ pub(super) struct RecalcSummary {
     pub refreshed_links: usize,
 }
 
-enum OwnedSourcePayload {
-    Data(Box<DataSheet>),
-    Result(Box<ResultSheet>),
-    Delimited { text: String, delimiter: char, decimal_separator: char },
-}
-
 fn always_enabled(_session: &Session) -> bool {
     true
 }
@@ -46,193 +36,14 @@ pub(super) fn recalculate_with_links_under_policy(
     include_external_links: bool,
     policy: &ExternalPathPolicy,
 ) -> Result<RecalcSummary, EngineError> {
-    let mut refreshed = refresh_linked_regions(doc, include_external_links, policy)?;
-    let mut recalculated = dag::recalculate_project(doc)?;
-    let extra_refreshed = refresh_linked_regions(doc, false, policy)?;
-    refreshed = refreshed.saturating_add(extra_refreshed);
-    if extra_refreshed > 0 {
-        recalculated = recalculated.saturating_add(dag::recalculate_project(doc)?);
-    }
-    Ok(RecalcSummary { recalculated_sheets: recalculated, refreshed_links: refreshed })
+    let external_policy = include_external_links.then_some(policy);
+    let (report, refreshed_links) = dag::recalculate_project_with_links_report(doc, external_policy)?;
+    Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links })
 }
 
 /// Refresh internal linked regions and run full DAG recalculation (no external file refreshes).
 pub(super) fn recalculate_with_links(doc: &mut ProjectDocument, include_external_links: bool) -> Result<RecalcSummary, EngineError> {
     recalculate_with_links_under_policy(doc, include_external_links, &ExternalPathPolicy::Unconstrained)
-}
-
-fn refresh_linked_regions(doc: &mut ProjectDocument, include_external_links: bool, policy: &ExternalPathPolicy) -> Result<usize, EngineError> {
-    let target_ids: Vec<SheetId> = doc.data_sheets.iter().filter(|ds| !ds.frozen && !ds.linked_regions.is_empty()).map(|ds| ds.id.clone()).collect();
-    let mut refreshed = 0usize;
-
-    for target_id in target_ids {
-        refreshed = refreshed.saturating_add(refresh_single_sheet_links(doc, &target_id, include_external_links, policy)?);
-    }
-
-    Ok(refreshed)
-}
-
-fn refresh_single_sheet_links(
-    doc: &mut ProjectDocument,
-    target_id: &SheetId,
-    include_external_links: bool,
-    policy: &ExternalPathPolicy,
-) -> Result<usize, EngineError> {
-    let regions = doc.data_sheet(target_id).map(|ds| ds.linked_regions.clone()).unwrap_or_default();
-    let mut count = 0usize;
-
-    for region in regions {
-        let Some(payload) = load_link_source_payload(doc, &region.spec.source, include_external_links, policy)? else {
-            continue;
-        };
-        let opts = ImportPipelineOptions {
-            link_id: Some(region.id.clone()),
-            provenance_summary: Some(region.provenance_summary.clone()),
-            ..ImportPipelineOptions::default()
-        };
-        let info_id = doc.data_sheet(target_id).and_then(|ds| ds.info_sheet_id.clone());
-        let (target_idx, info_idx) = locate_target_and_info_indices(doc, target_id, info_id.as_ref())?;
-        let info_snapshot = info_idx.and_then(|idx| doc.info_sheets.get(idx)).cloned();
-        apply_owned_link_refresh(doc, target_idx, &region.spec, &payload, &opts)?;
-        if let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
-            evaluate_data_sheet_calculated_variables(target_ds, info_snapshot.as_ref())?;
-        }
-        count = count.saturating_add(1);
-    }
-
-    Ok(count)
-}
-
-fn load_link_source_payload(
-    doc: &ProjectDocument,
-    source: &LinkSource,
-    include_external_links: bool,
-    policy: &ExternalPathPolicy,
-) -> Result<Option<OwnedSourcePayload>, EngineError> {
-    match source {
-        LinkSource::Clipboard => Ok(None),
-        LinkSource::InternalSheet { sheet_id, kind, .. } => match kind {
-            InternalLinkKind::DataSheet => Ok(doc.data_sheet(sheet_id).cloned().map(Box::new).map(OwnedSourcePayload::Data)),
-            InternalLinkKind::AnalyzableResultSheet | InternalLinkKind::TerminalResultSheet => {
-                Ok(doc.result_sheet(sheet_id).cloned().map(Box::new).map(OwnedSourcePayload::Result))
-            }
-        },
-        LinkSource::ExternalDelimitedFile { path, delimiter, decimal_separator } => {
-            if !include_external_links {
-                return Ok(None);
-            }
-            let text = policy.read_utf8_file(path, "linked file")?;
-            Ok(Some(OwnedSourcePayload::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
-        }
-    }
-}
-
-fn apply_owned_link_refresh(
-    doc: &mut ProjectDocument,
-    target_idx: usize,
-    spec: &ImportLinkSpec,
-    payload: &OwnedSourcePayload,
-    opts: &ImportPipelineOptions,
-) -> Result<(), EngineError> {
-    let target_ds =
-        doc.data_sheets.get_mut(target_idx).ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, "target data sheet index out of bounds"))?;
-    match payload {
-        OwnedSourcePayload::Data(src) => {
-            let _ = apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalData(src), opts, None)?;
-        }
-        OwnedSourcePayload::Result(src) => {
-            let _ = apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalResult(src), opts, None)?;
-        }
-        OwnedSourcePayload::Delimited { text, delimiter, decimal_separator } => {
-            let src = ImportSourcePayload::DelimitedText { text, delimiter: *delimiter, decimal_separator: *decimal_separator };
-            let _ = apply_import_link_pipeline(target_ds, spec, src, opts, None)?;
-        }
-    }
-    propagate_internal_source_titles(target_ds, spec, payload);
-    Ok(())
-}
-
-fn propagate_internal_source_titles(target_ds: &mut DataSheet, spec: &ImportLinkSpec, payload: &OwnedSourcePayload) {
-    if !spec.placement.propagate_title_header {
-        return;
-    }
-    let OwnedSourcePayload::Data(src) = payload else {
-        return;
-    };
-    let base_col = spec.placement.anchor.col;
-    let LinkSource::InternalSheet { range, .. } = &spec.source else {
-        return;
-    };
-
-    let titles: Vec<String> = if spec.placement.transpose {
-        let r0 = spec.filter.row_window.map_or(range.start.row, |(lo, _)| lo.max(range.start.row));
-        let r1 = spec.filter.row_window.map_or(range.end.row, |(_, hi)| hi.min(range.end.row));
-        (r0..=r1).filter_map(|r| source_row_title(&src.archetype, r)).collect()
-    } else {
-        let c0 = spec.filter.col_window.map_or(range.start.col, |(lo, _)| lo.max(range.start.col));
-        let c1 = spec.filter.col_window.map_or(range.end.col, |(_, hi)| hi.min(range.end.col));
-        (c0..=c1).filter_map(|c| source_col_title(&src.archetype, c)).collect()
-    };
-
-    for (offset, title) in titles.into_iter().enumerate() {
-        if !title.is_empty() {
-            set_target_group_title(&mut target_ds.archetype, base_col.saturating_add(offset), &title);
-        }
-    }
-}
-
-fn source_col_title(arch: &TableArchetype, col: usize) -> Option<String> {
-    match arch {
-        TableArchetype::Xy(t) => t.data_sets.get(col).map(|d| d.title.clone()),
-        TableArchetype::Column(t) => t.data_sets.get(col).map(|d| d.title.clone()),
-        TableArchetype::Grouped(t) => t.data_sets.get(col).map(|d| d.title.clone()),
-        TableArchetype::Contingency(t) => t.data_sets.get(col).map(|d| d.title.clone()),
-        TableArchetype::PartsOfWhole(t) => t.data_sets.get(col).map(|d| d.title.clone()),
-        TableArchetype::Survival(t) => t.cohorts.get(col).map(|d| d.title.clone()),
-        TableArchetype::MultipleVariables(t) => t.variables.get(col).map(|v| v.title.clone()),
-        TableArchetype::Nested(t) => t.groups.get(col).map(|g| g.title.clone()),
-    }
-}
-
-fn source_row_title(arch: &TableArchetype, row: usize) -> Option<String> {
-    let titles = match arch {
-        TableArchetype::Xy(t) => &t.row_titles,
-        TableArchetype::Column(t) => &t.row_titles,
-        TableArchetype::Grouped(t) => &t.row_titles,
-        TableArchetype::Contingency(t) => &t.row_titles,
-        TableArchetype::Survival(t) => &t.row_titles,
-        TableArchetype::PartsOfWhole(t) => &t.slice_labels,
-        TableArchetype::MultipleVariables(t) => &t.row_titles,
-        TableArchetype::Nested(t) => &t.row_titles,
-    };
-    titles.get(row).cloned()
-}
-
-fn set_target_group_title(arch: &mut TableArchetype, col: usize, title: &str) {
-    match arch {
-        TableArchetype::Xy(t) => assign_ds_title(&mut t.data_sets, col, title),
-        TableArchetype::Column(t) => assign_ds_title(&mut t.data_sets, col, title),
-        TableArchetype::Grouped(t) => assign_ds_title(&mut t.data_sets, col, title),
-        TableArchetype::Contingency(t) => assign_ds_title(&mut t.data_sets, col, title),
-        TableArchetype::PartsOfWhole(t) => assign_ds_title(&mut t.data_sets, col, title),
-        TableArchetype::Survival(t) => assign_ds_title(&mut t.cohorts, col, title),
-        TableArchetype::MultipleVariables(t) => {
-            if let Some(var) = t.variables.get_mut(col) {
-                var.title = title.to_owned();
-            }
-        }
-        TableArchetype::Nested(t) => {
-            if let Some(grp) = t.groups.get_mut(col) {
-                grp.title = title.to_owned();
-            }
-        }
-    }
-}
-
-fn assign_ds_title(sets: &mut [DataSetColumn], col: usize, title: &str) {
-    if let Some(ds) = sets.get_mut(col) {
-        ds.title = title.to_owned();
-    }
 }
 
 /// Format current system wall-clock time as `"unix:<seconds>"`.

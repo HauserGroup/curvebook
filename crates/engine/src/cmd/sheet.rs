@@ -676,15 +676,45 @@ fn has_live_dependents(doc: &ProjectDocument, id: &SheetId, section: SheetSectio
             format!("cannot delete `{}` while layout `{}` embeds it", id.as_str(), ls.id.as_str()),
         ));
     }
-    if section == SheetSection::Info
-        && let Some(ds) = doc.data_sheets.iter().find(|d| d.info_sheet_id.as_ref() == Some(id))
-    {
-        return Err(EngineError::with_code(
-            ErrorCode::Conflict,
-            format!("cannot delete info sheet `{}` while data sheet `{}` references it", id.as_str(), ds.id.as_str()),
-        ));
+    if section == SheetSection::Info {
+        if let Some(ds) = doc.data_sheets.iter().find(|d| d.info_sheet_id.as_ref() == Some(id)) {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("cannot delete info sheet `{}` while data sheet `{}` references it", id.as_str(), ds.id.as_str()),
+            ));
+        }
+        if let Some(rs) = doc.result_sheets.iter().find(|r| result_hooks_info_sheet(doc, r, id)) {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("cannot delete info sheet `{}` while analysis `{}` hooks constants from it", id.as_str(), rs.id.as_str()),
+            ));
+        }
     }
     Ok(())
+}
+
+fn result_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, rs: &'a ResultSheet) -> Option<&'a SheetId> {
+    let mut cursor = &rs.analysis.source_sheet_id;
+    let mut seen: HashSet<&SheetId> = HashSet::new();
+    while seen.insert(cursor) {
+        if let Some(ds) = doc.data_sheet(cursor) {
+            return ds.info_sheet_id.as_ref();
+        }
+        if let Some(upstream) = doc.result_sheet(cursor) {
+            cursor = &upstream.analysis.source_sheet_id;
+        } else {
+            break;
+        }
+    }
+    None
+}
+
+fn result_hooks_info_sheet(doc: &ProjectDocument, rs: &ResultSheet, info_id: &SheetId) -> bool {
+    rs.analysis.kind.hooked_sources().into_iter().any(|hook| match hook {
+        HookSource::InfoConstant { info_sheet_id: Some(iid), .. } => &iid == info_id,
+        HookSource::InfoConstant { info_sheet_id: None, .. } => result_origin_info_sheet_id(doc, rs) == Some(info_id),
+        _ => false,
+    })
 }
 
 fn graph_references_sheet(gs: &GraphSheet, id: &SheetId) -> bool {
@@ -733,7 +763,8 @@ fn collect_downstream_for_delete(doc: &ProjectDocument, root_id: &SheetId, inclu
                 && let Some(ref iid) = ds.info_sheet_id
             {
                 let shared_elsewhere =
-                    doc.data_sheets.iter().any(|other| !to_delete.contains(&other.id) && other.info_sheet_id.as_ref() == Some(iid));
+                    doc.data_sheets.iter().any(|other| !to_delete.contains(&other.id) && other.info_sheet_id.as_ref() == Some(iid))
+                        || doc.result_sheets.iter().any(|rs| !to_delete.contains(&rs.id) && result_hooks_info_sheet(doc, rs, iid));
                 if !shared_elsewhere && !to_delete.contains(iid) && iid != root_id {
                     to_delete.insert(iid.clone());
                 }
@@ -772,7 +803,11 @@ fn run_sheet_delete(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         }
     }
 
+    let deleted_any_info = to_delete.iter().any(|sid| ctx.session.doc.info_sheet(sid).is_some());
     let deleted_ids = prune_deleted_sheets(&mut ctx.session.doc, &to_delete);
+    if deleted_any_info || matches!(section, SheetSection::Data | SheetSection::Analyses) {
+        let _ = recalculate_with_links(&mut ctx.session.doc, false)?;
+    }
 
     Ok(CommandOutcome::mutated(
         "sheet.delete",
