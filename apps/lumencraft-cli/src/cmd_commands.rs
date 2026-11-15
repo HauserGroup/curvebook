@@ -5,8 +5,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use lumencraft_engine::Session;
 use lumencraft_engine::cmd::{Caller, CommandGroup, CommandSpec, registry};
+use lumencraft_engine::{ExternalPathPolicy, Session};
 use lumencraft_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry};
 use serde_json::{Map, Value, json};
 
@@ -142,6 +142,10 @@ pub fn run_direct_command_with_cancel(spec: &CommandSpec, args: &[String], cance
         }
         None => Session::new(),
     };
+
+    if let Some(dir) = parsed.workdir.as_deref() {
+        session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
+    }
 
     let outcome = session.execute_with_caller(spec.id, parsed.params, Caller::Cli, cancelled)?;
 

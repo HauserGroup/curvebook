@@ -1,7 +1,6 @@
 //! Project lifecycle, file I/O, template, inspection, recalculation, and checkpoint commands.
 
 use std::collections::HashSet;
-use std::path::Path;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,8 +9,8 @@ use lumencraft_doc::{
     ProjectDocument, ResultSheet, SheetId, TableArchetype,
 };
 use lumencraft_format::{
-    instantiate_template_bytes, is_unpacked_project_dir, open_project_bytes, open_project_file, open_project_unpacked_dir, save_project_bytes,
-    save_project_unpacked_dir, save_template_bytes,
+    instantiate_template_bytes, open_project_bytes, open_project_file, open_project_unpacked_dir, save_project_bytes, save_project_unpacked_dir,
+    save_template_bytes,
 };
 use lumencraft_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline, evaluate_data_sheet_calculated_variables};
 use serde::Deserialize;
@@ -22,7 +21,7 @@ use crate::cmd::params::{
     bool_schema, empty_object_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
 };
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
-use crate::{CommandOutcome, EngineError, Session, dag};
+use crate::{CommandOutcome, EngineError, ExternalPathPolicy, Session, dag};
 
 /// Summary returned by [`recalculate_with_links`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -41,11 +40,15 @@ fn always_enabled(_session: &Session) -> bool {
     true
 }
 
-/// Refresh internal/external linked regions and run full DAG recalculation.
-pub(super) fn recalculate_with_links(doc: &mut ProjectDocument, include_external_links: bool) -> Result<RecalcSummary, EngineError> {
-    let mut refreshed = refresh_linked_regions(doc, include_external_links)?;
+/// Refresh internal/external linked regions and run full DAG recalculation under an explicit policy.
+pub(super) fn recalculate_with_links_under_policy(
+    doc: &mut ProjectDocument,
+    include_external_links: bool,
+    policy: &ExternalPathPolicy,
+) -> Result<RecalcSummary, EngineError> {
+    let mut refreshed = refresh_linked_regions(doc, include_external_links, policy)?;
     let mut recalculated = dag::recalculate_project(doc)?;
-    let extra_refreshed = refresh_linked_regions(doc, false)?;
+    let extra_refreshed = refresh_linked_regions(doc, false, policy)?;
     refreshed = refreshed.saturating_add(extra_refreshed);
     if extra_refreshed > 0 {
         recalculated = recalculated.saturating_add(dag::recalculate_project(doc)?);
@@ -53,23 +56,33 @@ pub(super) fn recalculate_with_links(doc: &mut ProjectDocument, include_external
     Ok(RecalcSummary { recalculated_sheets: recalculated, refreshed_links: refreshed })
 }
 
-fn refresh_linked_regions(doc: &mut ProjectDocument, include_external_links: bool) -> Result<usize, EngineError> {
+/// Refresh internal linked regions and run full DAG recalculation (no external file refreshes).
+pub(super) fn recalculate_with_links(doc: &mut ProjectDocument, include_external_links: bool) -> Result<RecalcSummary, EngineError> {
+    recalculate_with_links_under_policy(doc, include_external_links, &ExternalPathPolicy::Unconstrained)
+}
+
+fn refresh_linked_regions(doc: &mut ProjectDocument, include_external_links: bool, policy: &ExternalPathPolicy) -> Result<usize, EngineError> {
     let target_ids: Vec<SheetId> = doc.data_sheets.iter().filter(|ds| !ds.frozen && !ds.linked_regions.is_empty()).map(|ds| ds.id.clone()).collect();
     let mut refreshed = 0usize;
 
     for target_id in target_ids {
-        refreshed = refreshed.saturating_add(refresh_single_sheet_links(doc, &target_id, include_external_links)?);
+        refreshed = refreshed.saturating_add(refresh_single_sheet_links(doc, &target_id, include_external_links, policy)?);
     }
 
     Ok(refreshed)
 }
 
-fn refresh_single_sheet_links(doc: &mut ProjectDocument, target_id: &SheetId, include_external_links: bool) -> Result<usize, EngineError> {
+fn refresh_single_sheet_links(
+    doc: &mut ProjectDocument,
+    target_id: &SheetId,
+    include_external_links: bool,
+    policy: &ExternalPathPolicy,
+) -> Result<usize, EngineError> {
     let regions = doc.data_sheet(target_id).map(|ds| ds.linked_regions.clone()).unwrap_or_default();
     let mut count = 0usize;
 
     for region in regions {
-        let Some(payload) = load_link_source_payload(doc, &region.spec.source, include_external_links)? else {
+        let Some(payload) = load_link_source_payload(doc, &region.spec.source, include_external_links, policy)? else {
             continue;
         };
         let opts = ImportPipelineOptions {
@@ -94,6 +107,7 @@ fn load_link_source_payload(
     doc: &ProjectDocument,
     source: &LinkSource,
     include_external_links: bool,
+    policy: &ExternalPathPolicy,
 ) -> Result<Option<OwnedSourcePayload>, EngineError> {
     match source {
         LinkSource::Clipboard => Ok(None),
@@ -107,26 +121,10 @@ fn load_link_source_payload(
             if !include_external_links {
                 return Ok(None);
             }
-            let text = read_external_text_file(path)?;
+            let text = policy.read_utf8_file(path, "linked file")?;
             Ok(Some(OwnedSourcePayload::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
     }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn read_external_text_file(path: &str) -> Result<String, EngineError> {
-    std::fs::read_to_string(path).map_err(|err| {
-        EngineError::with_code(ErrorCode::IoError, format!("failed reading linked file `{path}`: {err}"))
-            .with_remediation("Verify the linked file exists and is readable UTF-8 text.")
-            .with_retryable(true)
-            .with_details(json!({ "path": path }))
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn read_external_text_file(path: &str) -> Result<String, EngineError> {
-    Err(EngineError::with_code(ErrorCode::UnsupportedFormat, format!("reading external linked file `{path}` is unavailable on wasm32"))
-        .with_details(json!({ "path": path })))
 }
 
 fn apply_owned_link_refresh(
@@ -251,57 +249,6 @@ pub(super) fn current_utc_timestamp() -> String {
     }
 }
 
-#[cfg(not(target_arch = "wasm32"))]
-fn write_atomic_output(path: &str, bytes: &[u8]) -> Result<(), EngineError> {
-    if path.trim().is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "output path must not be empty"));
-    }
-    let out = Path::new(path);
-    if let Some(parent) = out.parent().filter(|p| !p.as_os_str().is_empty()) {
-        std::fs::create_dir_all(parent).map_err(|err| {
-            EngineError::with_code(ErrorCode::IoError, format!("failed to create output directory `{}`: {err}", parent.display()))
-                .with_remediation("Check parent directory permissions and path validity.")
-                .with_retryable(true)
-                .with_details(json!({ "path": path }))
-        })?;
-    }
-    lumencraft_platform::fs::write_atomic(out, bytes).map_err(|err| {
-        EngineError::with_code(ErrorCode::IoError, format!("failed writing file `{path}`: {err}"))
-            .with_remediation("Ensure the target directory is writable and has sufficient disk space.")
-            .with_retryable(true)
-            .with_details(json!({ "path": path }))
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn write_atomic_output(path: &str, _bytes: &[u8]) -> Result<(), EngineError> {
-    Err(EngineError::with_code(ErrorCode::UnsupportedFormat, format!("writing `{path}` to local filesystem is unsupported on wasm32"))
-        .with_details(json!({ "path": path })))
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn read_binary_input(path: &str) -> Result<Vec<u8>, EngineError> {
-    if path.trim().is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "input path must not be empty"));
-    }
-    std::fs::read(path).map_err(|err| {
-        EngineError::with_code(ErrorCode::IoError, format!("failed reading `{path}`: {err}"))
-            .with_remediation("Check that the file exists and is readable.")
-            .with_retryable(true)
-            .with_details(json!({ "path": path }))
-    })
-}
-
-#[cfg(target_arch = "wasm32")]
-fn read_binary_input(path: &str) -> Result<Vec<u8>, EngineError> {
-    Err(EngineError::with_code(ErrorCode::UnsupportedFormat, format!("reading `{path}` from local filesystem is unsupported on wasm32"))
-        .with_details(json!({ "path": path })))
-}
-
-fn has_unpacked_dir_suffix(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.to_ascii_lowercase().ends_with(".lumencraft.d"))
-}
-
 #[derive(Debug, Deserialize)]
 struct NewProjectParams {
     #[serde(alias = "name")]
@@ -368,9 +315,8 @@ fn run_project_open(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         if path.trim().is_empty() {
             return Err(EngineError::with_code(ErrorCode::BadInput, "project.open `path` must not be empty"));
         }
-        let path_ref = Path::new(path);
-        let use_unpacked = explicit_unpacked || has_unpacked_dir_suffix(path_ref) || is_unpacked_project_dir(path_ref) || path_ref.is_dir();
-        let opened = if use_unpacked { open_project_unpacked_dir(path_ref)? } else { open_project_file(path_ref)? };
+        let (resolved, use_unpacked) = ctx.session.path_policy.resolve_project_open_target(path, explicit_unpacked)?;
+        let opened = if use_unpacked { open_project_unpacked_dir(&resolved)? } else { open_project_file(&resolved)? };
         (opened, use_unpacked)
     } else if explicit_unpacked {
         return Err(EngineError::with_code(ErrorCode::BadInput, "project.open with `unpacked: true` requires `path`")
@@ -440,15 +386,14 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         if path.trim().is_empty() {
             return Err(EngineError::with_code(ErrorCode::BadInput, "project.save `path` must not be empty"));
         }
-        let path_ref = Path::new(path);
-        let use_unpacked = explicit_unpacked || has_unpacked_dir_suffix(path_ref) || is_unpacked_project_dir(path_ref) || path_ref.is_dir();
+        let (resolved, use_unpacked) = ctx.session.path_policy.resolve_project_save_target(path, explicit_unpacked)?;
         if use_unpacked {
-            save_project_unpacked_dir(&ctx.session.doc, path_ref)?;
+            save_project_unpacked_dir(&ctx.session.doc, &resolved)?;
             let bytes = if return_bytes { save_project_bytes(&ctx.session.doc)? } else { Vec::new() };
             (true, bytes)
         } else {
             let bytes = save_project_bytes(&ctx.session.doc)?;
-            write_atomic_output(path, &bytes)?;
+            ctx.session.path_policy.write_atomic_bytes(path, &bytes)?;
             (false, bytes)
         }
     } else {
@@ -499,7 +444,7 @@ fn run_project_save_template(ctx: &mut Ctx<'_>, params: Value) -> Result<Command
     let return_bytes = parsed.return_bytes.unwrap_or(parsed.path.is_none());
     let bytes = save_template_bytes(&ctx.session.doc)?;
     if let Some(ref path) = parsed.path {
-        write_atomic_output(path, &bytes)?;
+        ctx.session.path_policy.write_atomic_bytes(path, &bytes)?;
     }
     let encoded = if return_bytes { Some(encode_base64(&bytes)) } else { None };
     Ok(CommandOutcome::read_only(
@@ -544,7 +489,7 @@ fn instantiate_template_schema() -> Value {
 fn run_project_instantiate_template(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let parsed: InstantiateTemplateParams = parse_params(&instantiate_template_schema(), params)?;
     let bytes = if let Some(ref path) = parsed.path {
-        read_binary_input(path)?
+        ctx.session.path_policy.read_binary_file(path, "template file")?
     } else if let Some(ref b64) = parsed.bytes_base64 {
         decode_base64(b64)?
     } else {
@@ -717,7 +662,8 @@ fn recalculate_schema() -> Value {
 fn run_project_recalculate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let parsed: RecalculateParams = parse_params(&recalculate_schema(), params)?;
     let include_external = parsed.include_external_links.unwrap_or(true);
-    let summary = recalculate_with_links(&mut ctx.session.doc, include_external)?;
+    let recalc_policy = ctx.session.path_policy.clone();
+    let summary = recalculate_with_links_under_policy(&mut ctx.session.doc, include_external, &recalc_policy)?;
     Ok(CommandOutcome::mutated(
         "project.recalculate",
         "recalculated project",

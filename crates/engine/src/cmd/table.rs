@@ -1,7 +1,6 @@
 //! Data-table cell, title, exclusion, paste/link, CSV/project import, and archetype commands (Wave 9B).
 
 use std::collections::BTreeMap;
-use std::path::Path;
 
 use lumencraft_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, GraphSheet, ImportFilterSpec, ImportLinkSpec,
@@ -33,7 +32,7 @@ use super::params::{
     obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
-use crate::{CommandOutcome, EngineError, ErrorCode, Session, dag};
+use crate::{CommandOutcome, EngineError, ErrorCode, ExternalPathPolicy, Session, dag};
 
 /// Registered command specifications for the `table` group (28 commands).
 #[must_use]
@@ -449,11 +448,11 @@ enum OwnedSourcePayload {
 }
 
 fn recalculate_with_links(doc: &mut ProjectDocument, include_external_links: bool) -> Result<RecalcSummary, EngineError> {
-    let mut refreshed = refresh_linked_regions(doc, include_external_links)?;
+    let mut refreshed = refresh_linked_regions(doc, include_external_links, &ExternalPathPolicy::Unconstrained)?;
     let mut recalculated = dag::recalculate_project(doc)?;
     let max_hops = doc.data_sheets.len().saturating_add(1);
     for _ in 0..max_hops {
-        let hop_refreshed = refresh_linked_regions(doc, include_external_links)?;
+        let hop_refreshed = refresh_linked_regions(doc, include_external_links, &ExternalPathPolicy::Unconstrained)?;
         if hop_refreshed == 0 {
             break;
         }
@@ -463,7 +462,7 @@ fn recalculate_with_links(doc: &mut ProjectDocument, include_external_links: boo
     Ok(RecalcSummary { recalculated_sheets: recalculated, refreshed_links: refreshed })
 }
 
-fn refresh_linked_regions(doc: &mut ProjectDocument, include_external_links: bool) -> Result<usize, EngineError> {
+fn refresh_linked_regions(doc: &mut ProjectDocument, include_external_links: bool, policy: &ExternalPathPolicy) -> Result<usize, EngineError> {
     let order = dag::topological_order(doc)?;
     let mut updated_count = 0usize;
 
@@ -481,7 +480,7 @@ fn refresh_linked_regions(doc: &mut ProjectDocument, include_external_links: boo
 
         let mut target_changed = false;
         for region in regions {
-            let Some(source_payload) = resolve_link_source_payload(doc, &region.spec.source, include_external_links)? else {
+            let Some(source_payload) = resolve_link_source_payload(doc, &region.spec.source, include_external_links, policy)? else {
                 continue;
             };
             let Some(target_ds) = doc.data_sheets.get_mut(target_idx) else {
@@ -506,6 +505,7 @@ fn resolve_link_source_payload(
     doc: &ProjectDocument,
     source: &LinkSource,
     include_external_links: bool,
+    policy: &ExternalPathPolicy,
 ) -> Result<Option<OwnedSourcePayload>, EngineError> {
     match source {
         LinkSource::Clipboard => Ok(None),
@@ -519,7 +519,7 @@ fn resolve_link_source_payload(
             if !include_external_links {
                 return Ok(None);
             }
-            let text = read_utf8_file(path, "linked file")?;
+            let text = policy.read_utf8_file(path, "linked file")?;
             Ok(Some(OwnedSourcePayload::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
     }
@@ -631,70 +631,6 @@ fn apply_pipeline_with_split_info(
     let report = run_import_pipeline(target_ds, spec, payload, opts, target_info)?;
     propagate_internal_source_titles(target_ds, spec, payload);
     Ok(report)
-}
-
-// ---------------------------------------------------------------------------
-// Platform File Helpers
-// ---------------------------------------------------------------------------
-
-fn read_utf8_file(path: &str, label: &str) -> Result<String, EngineError> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path;
-        Err(EngineError::with_code(ErrorCode::UnsupportedFormat, format!("reading {label} `{path}` from filesystem is unavailable on wasm32"))
-            .with_remediation("Supply inline text content or run on a native target."))
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::fs::read_to_string(Path::new(path)).map_err(|err| {
-            EngineError::with_code(ErrorCode::IoError, format!("failed reading {label} `{path}`: {err}"))
-                .with_remediation("Verify the file path exists and is readable.")
-        })
-    }
-}
-
-fn read_binary_file(path: &str, label: &str) -> Result<Vec<u8>, EngineError> {
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = path;
-        Err(EngineError::with_code(ErrorCode::UnsupportedFormat, format!("reading {label} `{path}` from filesystem is unavailable on wasm32"))
-            .with_remediation("Supply `bytes_base64` or inline content on wasm32."))
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        std::fs::read(Path::new(path)).map_err(|err| {
-            EngineError::with_code(ErrorCode::IoError, format!("failed reading {label} `{path}`: {err}"))
-                .with_remediation("Verify the file path exists and is readable.")
-        })
-    }
-}
-
-fn write_atomic_text_file(path: &str, text: &str) -> Result<(), EngineError> {
-    if path.trim().is_empty() {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "`path` cannot be empty").with_remediation("Provide a non-empty output file path."));
-    }
-    #[cfg(target_arch = "wasm32")]
-    {
-        let _ = text;
-        Err(EngineError::with_code(ErrorCode::UnsupportedFormat, "writing CSV files directly to disk is unavailable on wasm32")
-            .with_remediation("Omit `path` and consume the returned `csv` string directly."))
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        let target = Path::new(path);
-        if let Some(parent) = target.parent()
-            && !parent.as_os_str().is_empty()
-        {
-            std::fs::create_dir_all(parent).map_err(|err| {
-                EngineError::with_code(ErrorCode::IoError, format!("failed creating parent directory for `{path}`: {err}"))
-                    .with_remediation("Ensure the output directory path is valid and writable.")
-            })?;
-        }
-        lumencraft_platform::fs::write_atomic(target, text.as_bytes()).map_err(|err| {
-            EngineError::with_code(ErrorCode::IoError, format!("failed writing CSV `{path}`: {err}"))
-                .with_remediation("Verify disk space and write permissions for the target path.")
-        })
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2735,10 +2671,16 @@ fn default_full_source_range(
     }
 }
 
-fn build_paste_link_spec(doc: &ProjectDocument, target_id: &SheetId, p: &PasteLinkParams) -> Result<ImportLinkSpec, EngineError> {
+fn build_paste_link_spec(
+    doc: &ProjectDocument,
+    target_id: &SheetId,
+    p: &PasteLinkParams,
+    policy: &ExternalPathPolicy,
+) -> Result<ImportLinkSpec, EngineError> {
     if let Some(raw_spec) = &p.link_spec
         && let Ok(mut parsed) = serde_json::from_value::<ImportLinkSpec>(raw_spec.clone())
     {
+        policy.normalize_stored_link_source(&mut parsed.source)?;
         if p.placement.anchor.is_some() {
             parsed.placement.anchor = p.placement.resolve_anchor();
         }
@@ -2771,10 +2713,12 @@ fn build_paste_link_spec(doc: &ProjectDocument, target_id: &SheetId, p: &PasteLi
         };
         LinkSource::InternalSheet { sheet_id: src_id, kind, tab_id, range }
     } else if let Some(path) = p.source_path.as_deref() {
-        let preview_text = read_utf8_file(path, "external link file")?;
+        let preview_text = policy.read_utf8_file(path, "external link file")?;
         let delimiter = resolve_delimiter(p.delimiter.as_deref(), &preview_text)?;
         let decimal_separator = resolve_decimal_char(p.decimal_separator.as_deref(), p.normalize_decimal.unwrap_or(false), &preview_text, delimiter)?;
-        LinkSource::ExternalDelimitedFile { path: path.to_owned(), delimiter, decimal_separator }
+        let mut src = LinkSource::ExternalDelimitedFile { path: path.to_owned(), delimiter, decimal_separator };
+        policy.normalize_stored_link_source(&mut src)?;
+        src
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.pasteLink requires `link_spec`, `source_sheet_id`, or `path`")
             .with_remediation("Specify an internal `source_sheet_id` or an external `path`."));
@@ -2786,6 +2730,7 @@ fn build_paste_link_spec(doc: &ProjectDocument, target_id: &SheetId, p: &PasteLi
 fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: PasteLinkParams = parse_params(&schema_paste_link(), raw)?;
     let target_id = parse_sheet_id(&p.target_sheet_id)?;
+    let policy = ctx.session.path_policy.clone();
     let doc = &mut ctx.session.doc;
 
     let info_id = {
@@ -2794,8 +2739,8 @@ fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
         target_ds.info_sheet_id.clone()
     };
 
-    let spec = build_paste_link_spec(doc, &target_id, &p)?;
-    let payload = resolve_link_source_payload(doc, &spec.source, true)?
+    let spec = build_paste_link_spec(doc, &target_id, &p, &policy)?;
+    let payload = resolve_link_source_payload(doc, &spec.source, true, &policy)?
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "table.pasteLink requires an internal sheet or external delimited file source"))?;
     let (target_idx, info_idx) = locate_target_and_info_indices(doc, &target_id, info_id.as_ref())?;
     let prev_ds = doc.data_sheets.get(target_idx).cloned();
@@ -2946,6 +2891,7 @@ fn import_into_existing_sheet(
     text: String,
     csv_opts: &CsvOptions,
     subcolumn_mode: SubcolumnMode,
+    policy: &ExternalPathPolicy,
 ) -> Result<(), EngineError> {
     let delimiter = csv_opts.delimiter;
     let decimal_separator = csv_opts.decimal_separator;
@@ -2970,10 +2916,11 @@ fn import_into_existing_sheet(
     let filter = parse_import_filter_val(p.filter.as_ref())?;
     let placement = p.placement.to_placement_spec(false)?;
     let keep_link = p.link.unwrap_or(false);
-    let source = match p.path.as_deref() {
+    let mut source = match p.path.as_deref() {
         Some(path) if keep_link => LinkSource::ExternalDelimitedFile { path: path.to_owned(), delimiter, decimal_separator },
         _ => LinkSource::Clipboard,
     };
+    policy.normalize_stored_link_source(&mut source)?;
     let link_spec = ImportLinkSpec { source, filter, placement };
     let (target_idx, info_idx) = locate_target_and_info_indices(doc, id, info_id.as_ref())?;
     let opts = ImportPipelineOptions {
@@ -2992,6 +2939,7 @@ fn import_into_existing_sheet(
 
 fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportCsvParams = parse_params(&schema_import_csv(), raw)?;
+    let policy = ctx.session.path_policy.clone();
     let doc = &mut ctx.session.doc;
     let id = match p.sheet_id.as_deref() {
         Some(raw_id) => parse_sheet_id(raw_id)?,
@@ -3000,7 +2948,7 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     let text = if let Some(inline) = &p.csv {
         inline.clone()
     } else if let Some(path) = &p.path {
-        read_utf8_file(path, "CSV")?
+        policy.read_utf8_file(path, "CSV")?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importCsv requires `path` or `csv`/`text`")
             .with_remediation("Provide a CSV/TSV file `path` or inline `csv` text."));
@@ -3018,7 +2966,7 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     let subcolumn_mode = resolve_subcolumn_mode(p.subcolumn_mode.as_ref(), p.replicates.unwrap_or(1))?;
 
     if doc.data_sheet(&id).is_some() {
-        import_into_existing_sheet(doc, &id, &p, text, &csv_opts, subcolumn_mode)?;
+        import_into_existing_sheet(doc, &id, &p, text, &csv_opts, subcolumn_mode, &policy)?;
     } else {
         let title = p.title.as_deref().unwrap_or("Imported CSV");
         let kind = parse_table_kind(p.archetype.as_deref().unwrap_or("xy"))?;
@@ -3086,7 +3034,7 @@ fn run_export_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     };
 
     if let Some(path) = p.path.as_deref() {
-        write_atomic_text_file(path, &csv_text)?;
+        ctx.session.path_policy.write_atomic_bytes(path, csv_text.as_bytes())?;
     }
     Ok(CommandOutcome::read_only("table.exportCsv", "exported CSV", json!({ "sheet_id": id.as_str(), "path": p.path, "csv": csv_text })))
 }
@@ -3139,7 +3087,7 @@ fn merge_imported_document(doc: &mut ProjectDocument, imported: ProjectDocument)
 fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportPrismParams = parse_params(&schema_import_prism(), raw)?;
     let bytes = if let Some(path) = p.path.as_deref() {
-        read_binary_file(path, "archive")?
+        ctx.session.path_policy.read_binary_file(path, "archive")?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         decode_base64(b64)?
     } else if let Some(raw_bytes) = p.bytes {
@@ -3198,7 +3146,7 @@ fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let report = if let Some(xml) = p.xml.as_deref() {
         import_pzfx_str(xml)?
     } else if let Some(path) = p.path.as_deref() {
-        let bytes = read_binary_file(path, "XML file")?;
+        let bytes = ctx.session.path_policy.read_binary_file(path, "XML file")?;
         import_pzfx_bytes(&bytes)?
     } else if let Some(b64) = p.bytes_base64.as_deref() {
         let bytes = decode_base64(b64)?;
@@ -4315,7 +4263,7 @@ struct TidyInputData {
     decimal_sep: char,
 }
 
-fn extract_tidy_data(p: &ImportTidyLongParams) -> Result<TidyInputData, EngineError> {
+fn extract_tidy_data(p: &ImportTidyLongParams, policy: &ExternalPathPolicy) -> Result<TidyInputData, EngineError> {
     let explicit_dec = parse_explicit_tidy_decimal(p.decimal_sep.as_deref())?;
     if let Some(rows_arr) = &p.rows {
         let mut rows = Vec::with_capacity(rows_arr.len());
@@ -4336,7 +4284,7 @@ fn extract_tidy_data(p: &ImportTidyLongParams) -> Result<TidyInputData, EngineEr
     let text = if let Some(inline) = &p.csv {
         inline.clone()
     } else if let Some(path) = &p.path {
-        read_utf8_file(path, "tidy file")?
+        policy.read_utf8_file(path, "tidy file")?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.importTidyLong requires `rows` or `csv`")
             .with_remediation("Supply `rows`, inline `csv` text, or a file `path`."));
@@ -4394,7 +4342,7 @@ fn run_import_tidy_long(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         Some(raw_kind) => parse_target_archetype_kind(raw_kind)?,
         None => TargetArchetypeKind::Grouped,
     };
-    let tidy = extract_tidy_data(&p)?;
+    let tidy = extract_tidy_data(&p, &ctx.session.path_policy)?;
     let mapping = resolve_tidy_mapping(&p, &tidy.headers)?;
 
     let imported = pivot_tidy_long_to_datasheet(title, &tidy.headers, &tidy.rows, &mapping, target_kind, tidy.decimal_sep)?;

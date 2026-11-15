@@ -15,7 +15,7 @@ use std::fmt;
 pub use fs::{write_atomic, write_atomic_with_hook};
 pub use path_guard::PATH_PARAM_KEYS;
 #[cfg(not(target_arch = "wasm32"))]
-pub use path_guard::{PathResolver, WorkdirGuard};
+pub use path_guard::{PathResolver, WorkdirGuard, ensure_regular_file};
 #[cfg(not(target_arch = "wasm32"))]
 pub use process::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_WALL_TIMEOUT, ProcessCommand, ProcessOutput};
 

@@ -8,7 +8,7 @@ use std::sync::atomic::AtomicBool;
 
 use lumencraft_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
 use lumencraft_engine::cmd::{Caller, CommandGroup, Effects, registry};
-use lumencraft_engine::{EngineError, GuiOnlyPolicy, Session};
+use lumencraft_engine::{EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
 use lumencraft_format::{CsvOptions, export_datasheet_to_csv};
 #[cfg(not(target_arch = "wasm32"))]
 use lumencraft_platform::{PlatformError, WorkdirGuard};
@@ -96,12 +96,14 @@ impl McpServerState {
     #[must_use]
     pub fn from_session(session: Session) -> Self {
         let gui_only = session.gui_only() == GuiOnlyPolicy::Strict;
+        #[cfg(not(target_arch = "wasm32"))]
+        let workdir_guard = session.path_policy().workdir_guard().cloned();
         Self {
             session,
             #[cfg(not(target_arch = "wasm32"))]
             control_port: None,
             #[cfg(not(target_arch = "wasm32"))]
-            workdir_guard: None,
+            workdir_guard,
             gui_host: None,
             gui_only,
             gui_toolset_enabled: false,
@@ -144,8 +146,9 @@ impl McpServerState {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_workdir(workdir: &Path) -> Result<Self, PlatformError> {
         let guard = WorkdirGuard::new(workdir)?;
+        let session = Session::new().with_path_policy(ExternalPathPolicy::from_guard(guard.clone()));
         Ok(Self {
-            session: Session::new(),
+            session,
             control_port: None,
             workdir_guard: Some(guard),
             gui_host: None,
@@ -188,11 +191,37 @@ impl McpServerState {
     /// Attach or clear a canonical [`WorkdirGuard`] confinement root on this server state.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_workdir(&mut self, workdir: Option<&Path>) -> Result<(), PlatformError> {
-        self.workdir_guard = match workdir {
-            Some(dir) => Some(WorkdirGuard::new(dir)?),
-            None => None,
+        let policy = match workdir {
+            Some(dir) => {
+                let guard = WorkdirGuard::new(dir)?;
+                self.workdir_guard = Some(guard.clone());
+                ExternalPathPolicy::from_guard(guard)
+            }
+            None => {
+                self.workdir_guard = None;
+                ExternalPathPolicy::Unconstrained
+            }
         };
+        self.session.set_path_policy(policy);
         Ok(())
+    }
+
+    /// Replace the active headless [`Session`] while preserving configured `--gui-only` and
+    /// `--workdir` policies across `open_file` reloads.
+    pub(crate) fn install_session(&mut self, mut session: Session) {
+        let gui_policy = if self.gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled };
+        session.set_gui_only(gui_policy);
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(guard) = self.workdir_guard.as_ref() {
+            session.set_path_policy(ExternalPathPolicy::from_guard(guard.clone()));
+        } else if *self.session.path_policy() == ExternalPathPolicy::RejectExternal {
+            session.set_path_policy(ExternalPathPolicy::RejectExternal);
+        }
+        #[cfg(target_arch = "wasm32")]
+        if *self.session.path_policy() == ExternalPathPolicy::RejectExternal {
+            session.set_path_policy(ExternalPathPolicy::RejectExternal);
+        }
+        self.session = session;
     }
 
     /// Active [`WorkdirGuard`] confinement root, when configured.

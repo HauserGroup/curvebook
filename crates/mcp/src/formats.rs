@@ -160,7 +160,7 @@ fn apply_imported_payload(
         ("lumencraft" | "lumencraft.d", ImportPayload::Document(doc)) => {
             let sheets = doc.total_sheet_count();
             let title = doc.title.clone();
-            state.session = Session::from_document(doc);
+            state.install_session(Session::from_document(doc));
             state.session.set_file_path(Some(resolved_path.to_path_buf()), true);
             ToolCallResult::ok_json(&json!({
                 "opened": true,
@@ -183,7 +183,7 @@ fn apply_imported_payload(
             }
             let sheets = doc.total_sheet_count();
             let title = doc.title.clone();
-            state.session = Session::from_document(doc);
+            state.install_session(Session::from_document(doc));
             state.session.set_file_path(None, true);
             ToolCallResult::ok_json(&json!({
                 "opened": true,
@@ -196,7 +196,7 @@ fn apply_imported_payload(
         ("prism" | "pzfx", ImportPayload::Report(report)) => {
             let sheets = report.document.total_sheet_count();
             let title = report.document.title.clone();
-            state.session = Session::from_document(report.document);
+            state.install_session(Session::from_document(report.document));
             state.session.set_file_path(None, false);
             ToolCallResult::ok_json(&json!({
                 "opened": true,
@@ -232,7 +232,7 @@ fn apply_imported_datasheet(
         }
         let is_dirty = state.session.is_dirty();
         let existing_path = state.session.file_path().map(Path::to_path_buf);
-        state.session = Session::from_document(doc);
+        state.install_session(Session::from_document(doc));
         state.session.set_file_path(existing_path, !is_dirty);
     } else {
         let mut doc = match ProjectDocument::new(sheet_title.clone()) {
@@ -242,7 +242,7 @@ fn apply_imported_datasheet(
         if let Err(err) = doc.add_data_sheet(ds) {
             return Ok(errors::result_from_engine_error(&EngineError::from(err)));
         }
-        state.session = Session::from_document(doc);
+        state.install_session(Session::from_document(doc));
         state.session.set_file_path(None, false);
     }
 
