@@ -16,8 +16,21 @@ use crate::error::MathError;
 use crate::roots::safeguarded_halley_step;
 use crate::special::erf::norm_isf_raw;
 use crate::special::gamma::{aln1p_minus_arg, deviance_bd0, ln_beta, ln_gamma, stirling_err};
+use crate::special::inc_gamma::reg_gamma_q_inv;
 
 const MAX_BETA_CF_ITERS: usize = 20_000;
+const MAX_BETA_INV_ITERS: usize = 64;
+const MIN_LN_X: f64 = -740.0;
+
+fn ln_one_minus_exp(ln_val: f64) -> f64 {
+    if ln_val >= 0.0 {
+        f64::NEG_INFINITY
+    } else if ln_val > -std::f64::consts::LN_2 {
+        (-ln_val.exp_m1()).ln()
+    } else {
+        (-ln_val.exp()).ln_1p()
+    }
+}
 
 fn validate_beta_params(a: f64, b: f64) -> Result<(), MathError> {
     if !a.is_finite() || a <= 0.0 {
@@ -156,12 +169,12 @@ pub fn reg_beta_xy(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> {
     let xn = x / sum;
     let yn = y / sum;
 
-    if xn * (a + b + 2.0) <= a + 1.0 {
+    if xn * (b + 1.0) <= yn * (a + 1.0) {
         let ln_val = ln_beta_kernel(xn, yn, a, b)? - a.ln() + ln_beta_continued_fraction(xn, yn, a, b)?;
         Ok(ln_val.exp().clamp(0.0, 1.0))
     } else {
         let ln_comp = ln_beta_kernel(yn, xn, b, a)? - b.ln() + ln_beta_continued_fraction(yn, xn, b, a)?;
-        Ok((1.0 - ln_comp.exp()).clamp(0.0, 1.0))
+        Ok((-ln_comp.min(0.0).exp_m1()).clamp(0.0, 1.0))
     }
 }
 
@@ -188,11 +201,11 @@ pub fn ln_reg_beta_xy(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> 
     let xn = x / sum;
     let yn = y / sum;
 
-    if xn * (a + b + 2.0) <= a + 1.0 {
+    if xn * (b + 1.0) <= yn * (a + 1.0) {
         Ok((ln_beta_kernel(xn, yn, a, b)? - a.ln() + ln_beta_continued_fraction(xn, yn, a, b)?).min(0.0))
     } else {
         let ln_comp = ln_beta_kernel(yn, xn, b, a)? - b.ln() + ln_beta_continued_fraction(yn, xn, b, a)?;
-        Ok((-ln_comp.exp()).ln_1p())
+        Ok(ln_one_minus_exp(ln_comp))
     }
 }
 
@@ -239,142 +252,198 @@ pub fn reg_beta_inv_pair(a: f64, b: f64, p: f64, q: f64) -> Result<(f64, f64), M
     if q == 0.0 {
         return Ok((1.0, 0.0));
     }
-    // Always solve for the smaller-probability variable via symmetry I_x(a, b) = p <=> I_y(b, a) = q.
+    // Normalize so we always solve against the smaller probability via I_x(a, b) = p <=> I_y(b, a) = q.
     if q < p {
-        let (y, x) = solve_lower_beta_quantile(b, a, q)?;
+        let (y, x) = solve_beta_for_smaller_prob(b, a, q, p)?;
         Ok((x, y))
     } else {
-        solve_lower_beta_quantile(a, b, p)
+        solve_beta_for_smaller_prob(a, b, p, q)
     }
 }
 
-fn initial_beta_lower_guess(a: f64, b: f64, p: f64) -> Result<f64, MathError> {
-    let lb = ln_beta(a, b)?;
-    if a >= 1.0 && b >= 1.0 {
-        // Carter (1947) / Cran-Martin-Thomas normal-F approximation.
-        let y = norm_isf_raw(p)?; // since p <= 0.5, y >= 0, and we want -y below mean.
-        let z = -y;
+#[derive(Clone, Copy)]
+enum BetaTarget {
+    Prob { val: f64, solve_for_y: bool },
+    DeepLn { target_ln: f64, solve_for_y: bool },
+}
+
+impl BetaTarget {
+    fn solve_for_y(self) -> bool {
+        match self {
+            Self::Prob { solve_for_y, .. } | Self::DeepLn { solve_for_y, .. } => solve_for_y,
+        }
+    }
+
+    fn is_below_root(self, fx: f64) -> bool {
+        if self.solve_for_y() { fx > 0.0 } else { fx < 0.0 }
+    }
+}
+
+fn eval_beta_w_objective(a: f64, b: f64, t: f64, target: BetaTarget) -> Result<(f64, f64, f64), MathError> {
+    let comp = (1.0 - t).max(0.5);
+    let (x, y) = if target.solve_for_y() { (comp, t) } else { (t, comp) };
+    let ln_k = ln_beta_kernel(x, y, a, b)?;
+    let ln_comp = (-t).ln_1p();
+    let d2_base = if target.solve_for_y() { b - (a - 1.0) * (t / comp) } else { a - (b - 1.0) * (t / comp) };
+    match target {
+        BetaTarget::Prob { val, solve_for_y } => {
+            let fx = reg_beta_xy(x, y, a, b)? - val;
+            let mag = (ln_k - ln_comp).exp();
+            let df_dw = if solve_for_y { -mag } else { mag };
+            Ok((fx, df_dw, d2_base))
+        }
+        BetaTarget::DeepLn { target_ln, solve_for_y } => {
+            let ln_i = ln_reg_beta_xy(x, y, a, b)?;
+            let mag = if ln_i.is_finite() { (ln_k - ln_comp - ln_i).exp() } else { 0.0 };
+            let df_dw = if solve_for_y { -mag } else { mag };
+            Ok((ln_i - target_ln, df_dw, d2_base - df_dw))
+        }
+    }
+}
+
+fn initial_beta_w_guess(a: f64, b: f64, p: f64, q: f64, solve_for_y: bool) -> Result<f64, MathError> {
+    if solve_for_y
+        && a >= 2.0
+        && b < 1.0
+        && let Ok(g) = reg_gamma_q_inv(b, p)
+        && g.is_finite()
+        && g > 0.0
+        && g < 0.9 * a
+    {
+        return Ok((g / a).ln());
+    }
+    if a >= 1.0 && b >= 1.0 && p >= 1e-12 {
+        // Carter (1947) / Cran-Martin-Thomas normal-F approximation directly for the smaller quantile.
+        let z = -norm_isf_raw(p)?;
         let lam = (z * z - 3.0) / 6.0;
-        let h = 2.0 / (1.0 / (2.0 * a - 1.0) + 1.0 / (2.0 * b - 1.0));
-        let w = (z * (h + lam).sqrt() / h) - (1.0 / (2.0 * b - 1.0) - 1.0 / (2.0 * a - 1.0)) * (lam + 5.0 / 6.0 - 2.0 / (3.0 * h));
-        let exp_2w = (2.0 * w).clamp(-600.0, 600.0).exp();
-        let guess = a / (a + b * exp_2w);
-        if guess > 0.0 && guess < 1.0 {
-            return Ok(guess);
+        let inv_a = 1.0 / (2.0 * a - 1.0);
+        let inv_b = 1.0 / (2.0 * b - 1.0);
+        let h = 2.0 / (inv_a + inv_b);
+        let w = (z * (h + lam).sqrt() / h) - (inv_b - inv_a) * (lam + 5.0 / 6.0 - 2.0 / (3.0 * h));
+        let log_ratio = if solve_for_y { a.ln() - b.ln() - 2.0 * w } else { b.ln() - a.ln() + 2.0 * w };
+        if log_ratio.is_finite() {
+            return Ok(if log_ratio > 60.0 { -log_ratio } else { -(log_ratio.exp().ln_1p()) });
         }
     }
-    // Power-law asymptotic tail: I_x(a, b) ~ x^a / (a B(a, b)) as x -> 0.
-    let ln_x0 = ((p * a).ln() + lb) / a;
-    if ln_x0 < -0.2 {
-        let x0 = ln_x0.exp();
-        // First-order correction for (1 - x)^{b - 1}:
-        let corr = (1.0 + ((b - 1.0) * a / (a + 1.0)) * x0 / a).max(0.5);
-        return Ok((x0 * corr).clamp(f64::MIN_POSITIVE, 0.9));
-    }
-    let t1 = (a * p).powf(1.0 / a);
-    let t2 = (b * (1.0 - p)).powf(1.0 / b);
-    Ok((t1 / (t1 + t2)).clamp(f64::MIN_POSITIVE, 1.0 - f64::EPSILON))
-}
-
-fn solve_lower_beta_quantile(a: f64, b: f64, p: f64) -> Result<(f64, f64), MathError> {
-    if p < 1e-8 {
-        return solve_deep_lower_beta_quantile(a, b, p);
-    }
-    let mut x = initial_beta_lower_guess(a, b, p)?;
-    let mut lo = 0.0_f64;
-    let mut hi = 1.0_f64;
-
-    for _ in 0..40 {
-        let y = 1.0 - x;
-        let val = reg_beta_xy(x, y, a, b)?;
-        let fx = val - p;
-        if fx == 0.0 {
-            return Ok((x, 1.0 - x));
-        }
-        if fx < 0.0 {
-            lo = lo.max(x);
-        } else {
-            hi = hi.min(x);
-        }
-        if (hi - lo) <= 2.0 * f64::EPSILON * x.max(f64::MIN_POSITIVE) {
-            let xm = 0.5 * (lo + hi);
-            return Ok((xm, 1.0 - xm));
-        }
-        let ln_pdf = ln_beta_kernel(x, y, a, b)? - x.ln() - y.ln();
-        let pdf = ln_pdf.exp();
-        let d2_over_d1 = (a - 1.0) / x - (b - 1.0) / y;
-        let next = safeguarded_halley_step(x, fx, pdf, d2_over_d1, lo, hi);
-        if (next - x).abs() <= 1.5 * f64::EPSILON * next.max(f64::MIN_POSITIVE) {
-            return Ok((next, 1.0 - next));
-        }
-        x = next;
-    }
-    let xm = 0.5 * (lo + hi);
-    Ok((xm, 1.0 - xm))
-}
-
-/// Deep lower-tail solver parameterized in `u = ln(x) < 0` so `h(u) = ln I_{e^u}(a, b) - ln p` is
-/// nearly linear (`h'(u) ~ a`), completely free of overflow/underflow down to `x = 1e-308`.
-fn solve_deep_lower_beta_quantile(a: f64, b: f64, p: f64) -> Result<(f64, f64), MathError> {
-    let target_ln = p.ln();
     let lb = ln_beta(a, b)?;
-    let u_asymp = (target_ln + a.ln() + lb) / a;
-    let x_init = initial_beta_lower_guess(a, b, p)?;
-    let mut u = if u_asymp < -0.5 { u_asymp } else { x_init.ln() }.clamp(-744.0, -f64::EPSILON);
-
-    let mut u_lo = (u - 8.0).max(-744.0);
-    let mut u_hi = (u + 8.0).min(-f64::EPSILON);
-    while u_lo > -744.0 {
-        let xl = u_lo.exp();
-        if ln_reg_beta_xy(xl, 1.0 - xl, a, b)? < target_ln {
-            break;
-        }
-        u_hi = u_lo;
-        u_lo = (u_lo - 16.0).max(-744.0);
+    if solve_for_y {
+        let ln_q = if q <= 0.5 { q.ln() } else { (-p).ln_1p() };
+        return Ok((ln_q + b.ln() + lb) / b);
     }
-    while u_hi < -f64::EPSILON {
-        let xh = u_hi.exp();
-        if ln_reg_beta_xy(xh, 1.0 - xh, a, b)? > target_ln {
-            break;
-        }
-        u_lo = u_hi;
-        u_hi = (0.5 * u_hi).min(-f64::EPSILON);
-        if (u_hi - u_lo).abs() <= f64::EPSILON {
-            break;
+    let ln_p = if p <= 0.5 { p.ln() } else { (-q).ln_1p() };
+    let w_asymp = (ln_p + a.ln() + lb) / a;
+    if w_asymp < -0.2 && w_asymp > -40.0 {
+        let x0 = w_asymp.exp();
+        let corr = 1.0 + ((b - 1.0) / (a + 1.0)) * x0;
+        if corr > 0.5 {
+            return Ok(w_asymp + corr.ln());
         }
     }
+    Ok(w_asymp)
+}
 
-    for _ in 0..48 {
-        let x = u.exp();
-        if x == 0.0 {
-            return Ok((0.0, 1.0));
+fn solve_beta_for_smaller_prob(a: f64, b: f64, p: f64, q: f64) -> Result<(f64, f64), MathError> {
+    if p == 0.5 && (a - b) == 0.0 {
+        return Ok((0.5, 0.5));
+    }
+    let val_half = if p < 1e-8 { ln_reg_beta_xy(0.5, 0.5, a, b)? - p.ln() } else { reg_beta_xy(0.5, 0.5, a, b)? - p };
+    if val_half == 0.0 {
+        return Ok((0.5, 0.5));
+    }
+    let solve_for_y = val_half < 0.0;
+    let target = if p < 1e-8 { BetaTarget::DeepLn { target_ln: p.ln(), solve_for_y } } else { BetaTarget::Prob { val: p, solve_for_y } };
+    let w_guess = initial_beta_w_guess(a, b, p, q, solve_for_y)?;
+    let t = solve_beta_log_space(a, b, w_guess, target)?;
+    if solve_for_y { Ok((1.0 - t, t)) } else { Ok((t, 1.0 - t)) }
+}
+
+fn polish_beta_log_root(a: f64, b: f64, t_init: f64, mut t_lo: f64, mut t_hi: f64, target: BetaTarget) -> Result<f64, MathError> {
+    if !t_init.is_finite() || t_init <= 0.0 {
+        return Err(MathError::NotConverged { algorithm: "solve_beta_log_space", iterations: MAX_BETA_INV_ITERS });
+    }
+    if t_init < f64::MIN_POSITIVE || !t_lo.is_finite() || !t_hi.is_finite() || t_lo >= t_hi {
+        return Ok(t_init);
+    }
+    let mut t = t_init.clamp(t_lo, t_hi);
+    for _ in 0..4 {
+        let (fx, df_dw, d2_dw) = eval_beta_w_objective(a, b, t, target)?;
+        if fx == 0.0 {
+            return Ok(t);
         }
-        let y = (1.0 - x).max(f64::MIN_POSITIVE);
-        let ln_i = ln_reg_beta_xy(x, y, a, b)?;
-        let h = ln_i - target_ln;
-        if h == 0.0 {
-            return Ok((x, 1.0 - x));
-        }
-        if h < 0.0 {
-            u_lo = u_lo.max(u);
+        if target.is_below_root(fx) {
+            t_lo = t_lo.max(t);
         } else {
-            u_hi = u_hi.min(u);
+            t_hi = t_hi.min(t);
         }
-        if (u_hi - u_lo) <= 2.0 * f64::EPSILON * u.abs().max(1.0) {
-            let xm = (0.5 * (u_lo + u_hi)).exp();
-            return Ok((xm, 1.0 - xm));
+        if !df_dw.is_finite() || df_dw.abs() <= f64::MIN_POSITIVE {
+            break;
         }
-        let h1 = (ln_beta_kernel(x, y, a, b)? - y.ln() - ln_i).exp();
-        let d2_over_d1 = a - (b - 1.0) * (x / y) - h1;
-        let next_u = safeguarded_halley_step(u, h, h1, d2_over_d1, u_lo, u_hi);
-        if (next_u - u).abs() <= 1.5 * f64::EPSILON * next_u.abs().max(1.0) {
-            let xm = next_u.exp();
-            return Ok((xm, 1.0 - xm));
+        let rel_newton = fx / df_dw;
+        let denom = (1.0 - 0.5 * rel_newton * (d2_dw - 1.0)).clamp(0.2, 5.0);
+        let step = t * (rel_newton / denom);
+        let cand = t - step;
+        if !cand.is_finite() || cand <= t_lo || cand >= t_hi {
+            break;
         }
-        u = next_u;
+        if step.abs() <= 1.5 * f64::EPSILON * cand {
+            return Ok(cand);
+        }
+        t = cand;
     }
-    let xm = (0.5 * (u_lo + u_hi)).exp();
-    Ok((xm, 1.0 - xm))
+    Ok(t)
+}
+
+/// Tail-safe log-quantile solver parameterized in `w = ln(t) <= ln(0.5)` for whichever of
+/// `t = x` (`x <= 0.5`) or `t = y = 1 - x` (`y < 0.5`) is smaller, avoiding both `1 - x`
+/// cancellation and sub-`f64` midpoint false positives.
+fn solve_beta_log_space(a: f64, b: f64, w_guess: f64, target: BetaTarget) -> Result<f64, MathError> {
+    let w_top = (0.5_f64).ln();
+    let mut w_lo = MIN_LN_X;
+    let mut w_hi = w_top;
+    let t_min = w_lo.exp();
+    let (f_lo, _, _) = eval_beta_w_objective(a, b, t_min, target)?;
+    if f_lo == 0.0 {
+        return Ok(t_min);
+    }
+    if !target.is_below_root(f_lo) {
+        return Err(MathError::NotConverged { algorithm: "solve_beta_log_space", iterations: 0 });
+    }
+
+    let mut w = if w_guess.is_finite() && w_guess > w_lo && w_guess < w_hi { w_guess } else { 0.5 * (w_lo + w_hi) };
+    let t_of_w = |w_val: f64| if w_val >= w_top { 0.5 } else { w_val.exp() };
+
+    for _ in 0..MAX_BETA_INV_ITERS {
+        let t = t_of_w(w);
+        if !t.is_finite() || t <= 0.0 {
+            return Err(MathError::NotConverged { algorithm: "solve_beta_log_space", iterations: MAX_BETA_INV_ITERS });
+        }
+        let (fx, df_dw, d2_dw) = eval_beta_w_objective(a, b, t, target)?;
+        if fx == 0.0 {
+            return Ok(t);
+        }
+        if target.is_below_root(fx) {
+            w_lo = w_lo.max(w);
+        } else {
+            w_hi = w_hi.min(w);
+        }
+        if (w_hi - w_lo) <= 2.0 * f64::EPSILON * w.abs().max(1.0) {
+            let w_mid = 0.5 * (w_lo + w_hi);
+            return polish_beta_log_root(a, b, t_of_w(w_mid), t_of_w(w_lo), t_of_w(w_hi), target);
+        }
+        let mut next_w = safeguarded_halley_step(w, fx, df_dw, d2_dw, w_lo, w_hi);
+        let used_halley = next_w > w_lo && next_w < w_hi;
+        if !used_halley {
+            next_w = 0.5 * (w_lo + w_hi);
+            if next_w <= w_lo || next_w >= w_hi {
+                return polish_beta_log_root(a, b, t_of_w(next_w), t_of_w(w_lo), t_of_w(w_hi), target);
+            }
+        } else if (next_w - w).abs() <= 1.5 * f64::EPSILON * next_w.abs().max(1.0) {
+            return polish_beta_log_root(a, b, t_of_w(next_w), t_of_w(w_lo), t_of_w(w_hi), target);
+        }
+        w = next_w;
+    }
+
+    Err(MathError::NotConverged { algorithm: "solve_beta_log_space", iterations: MAX_BETA_INV_ITERS })
 }
 
 #[cfg(test)]
