@@ -34,6 +34,14 @@ use crate::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 /// Hard bound per JSON-lines control request/response frame (16 MiB).
 pub const MAX_CONTROL_LINE_BYTES: usize = 16 * 1024 * 1024;
 
+/// Hard bound on steps accepted in a single `command.batch` control request.
+pub const MAX_CONTROL_BATCH_STEPS: usize = 1_000;
+
+/// Idle read/write timeout applied to each accepted local control TCP connection so stalled clients
+/// cannot starve subsequent callers (`R1-S10-04`).
+#[cfg(not(target_arch = "wasm32"))]
+pub const CONTROL_CLIENT_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
 /// Number of random bytes encoded into an auto-generated control authentication token (256 bits).
 pub const CONTROL_AUTH_TOKEN_BYTES: usize = 32;
 
@@ -475,10 +483,26 @@ where
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn serve_control_connection_with_handler<F>(app: &mut UiApp, mut stream: std::net::TcpStream, auth: &ControlAuth, handler: &mut F) -> io::Result<bool>
+fn serve_control_connection_with_handler<F>(app: &mut UiApp, stream: std::net::TcpStream, auth: &ControlAuth, handler: &mut F) -> io::Result<bool>
 where
     F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
 {
+    serve_control_connection_with_timeout(app, stream, auth, Some(CONTROL_CLIENT_IDLE_TIMEOUT), handler)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn serve_control_connection_with_timeout<F>(
+    app: &mut UiApp,
+    mut stream: std::net::TcpStream,
+    auth: &ControlAuth,
+    idle_timeout: Option<std::time::Duration>,
+    handler: &mut F,
+) -> io::Result<bool>
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    stream.set_read_timeout(idle_timeout)?;
+    stream.set_write_timeout(idle_timeout)?;
     let reader_stream = stream.try_clone()?;
     let mut reader = io::BufReader::new(reader_stream);
     serve_control_stream_with_handler(app, &mut reader, &mut stream, auth, handler)
@@ -545,7 +569,21 @@ pub fn serve_control_stream_with_quit_and_token<R: BufRead, W: Write>(
     serve_control_stream_with_quit(app, reader, writer, &auth)
 }
 
-fn serve_control_stream_with_handler<R, W, F>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth, mut handler: F) -> io::Result<bool>
+fn serve_control_stream_with_handler<R, W, F>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth, handler: F) -> io::Result<bool>
+where
+    R: BufRead,
+    W: Write,
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    match serve_control_stream_loop(app, reader, writer, auth, handler) {
+        Ok(quit) => Ok(quit),
+        // Drop only the stalled/idle client connection so subsequent clients can connect promptly.
+        Err(err) if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => Ok(false),
+        Err(err) => Err(err),
+    }
+}
+
+fn serve_control_stream_loop<R, W, F>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth, mut handler: F) -> io::Result<bool>
 where
     R: BufRead,
     W: Write,
@@ -1017,7 +1055,27 @@ fn normalize_request_params(method: &str, obj: &Map<String, Value>) -> Value {
 }
 
 fn serialize_response(resp: &ControlResponse) -> String {
-    serde_json::to_string(resp).unwrap_or_else(|_| String::from("{\"id\":\"\",\"ok\":false,\"result\":null,\"error\":\"serialization failure\"}"))
+    const FALLBACK: &str = "{\"id\":\"\",\"ok\":false,\"result\":null,\"error\":\"serialization failure\"}";
+    let max_json_bytes = MAX_CONTROL_LINE_BYTES.saturating_sub(1);
+    let Ok(encoded) = serde_json::to_string(resp) else {
+        return String::from(FALLBACK);
+    };
+    if encoded.len() <= max_json_bytes {
+        return encoded;
+    }
+
+    let bounded_id = match serde_json::to_string(&resp.id) {
+        Ok(id_json) if id_json.len() <= 1024 => resp.id.clone(),
+        _ => Value::String(String::new()),
+    };
+    let overflow = ControlResponse::err(
+        bounded_id,
+        format!("control response ({} bytes) exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes", encoded.len()),
+    );
+    match serde_json::to_string(&overflow) {
+        Ok(text) if text.len() <= max_json_bytes => text,
+        _ => String::from(FALLBACK),
+    }
 }
 
 fn handle_command_list(app: &UiApp) -> Value {
@@ -1071,37 +1129,58 @@ fn handle_command_run(app: &mut UiApp, params: &Value, recorded: Option<&mut Vec
     dispatch_command_by_id(app, &command_id, cmd_params, recorded)
 }
 
-fn handle_command_batch(app: &mut UiApp, params: &Value, mut recorded: Option<&mut Vec<ControlRecordedStep>>) -> Result<Value, ControlCallError> {
+fn rollback_or_commit_partial_batch(
+    app: &mut UiApp,
+    rollback_snapshot: Option<UiApp>,
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
+    batch_steps: Vec<ControlRecordedStep>,
+) {
+    if let Some(snapshot) = rollback_snapshot {
+        *app = snapshot;
+    } else if let Some(out_steps) = recorded {
+        out_steps.extend(batch_steps);
+    }
+}
+
+fn handle_command_batch(app: &mut UiApp, params: &Value, recorded: Option<&mut Vec<ControlRecordedStep>>) -> Result<Value, ControlCallError> {
     let Some(items) = params.get("commands").and_then(Value::as_array) else {
         return Err(ControlCallError::from("command.batch requires a 'commands' array"));
     };
+    if items.len() > MAX_CONTROL_BATCH_STEPS {
+        return Err(ControlCallError::from(format!("command.batch exceeds maximum step limit of {MAX_CONTROL_BATCH_STEPS} (got {})", items.len())));
+    }
     let atomic = params.get("atomic").and_then(Value::as_bool).unwrap_or(false);
     let rollback_snapshot = atomic.then(|| app.clone());
     let mut batch_steps: Vec<ControlRecordedStep> = Vec::new();
+    let max_payload_bytes = MAX_CONTROL_LINE_BYTES.saturating_sub(512);
+    let mut accumulated_bytes: usize = 64;
 
     let mut results = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
         let cmd_id = match extract_command_id(item) {
             Ok(id) => id,
             Err(err) => {
-                if let Some(snapshot) = rollback_snapshot {
-                    *app = snapshot;
-                } else if let Some(out_steps) = recorded.as_deref_mut() {
-                    out_steps.extend(batch_steps);
-                }
+                rollback_or_commit_partial_batch(app, rollback_snapshot, recorded, batch_steps);
                 return Err(ControlCallError::from(format!("batch step {idx}: {err}")));
             }
         };
         let cmd_params = extract_nested_params(item);
         let step_sink = recorded.as_ref().map(|_| &mut batch_steps);
         match dispatch_command_by_id(app, &cmd_id, cmd_params, step_sink) {
-            Ok(val) => results.push(json!({ "index": idx, "command": cmd_id, "result": val })),
-            Err(err) => {
-                if let Some(snapshot) = rollback_snapshot {
-                    *app = snapshot;
-                } else if let Some(out_steps) = recorded.as_deref_mut() {
-                    out_steps.extend(batch_steps);
+            Ok(val) => {
+                let entry = json!({ "index": idx, "command": cmd_id, "result": val });
+                let entry_bytes = serde_json::to_string(&entry).map(|s| s.len().saturating_add(1)).unwrap_or(MAX_CONTROL_LINE_BYTES);
+                accumulated_bytes = accumulated_bytes.saturating_add(entry_bytes);
+                if accumulated_bytes > max_payload_bytes {
+                    rollback_or_commit_partial_batch(app, rollback_snapshot, recorded, batch_steps);
+                    return Err(ControlCallError::from(format!(
+                        "command.batch serialized payload exceeds maximum control line size of {MAX_CONTROL_LINE_BYTES} bytes"
+                    )));
                 }
+                results.push(entry);
+            }
+            Err(err) => {
+                rollback_or_commit_partial_batch(app, rollback_snapshot, recorded, batch_steps);
                 return Err(ControlCallError {
                     message: format!("batch step {idx} ({cmd_id}) failed (rolled_back={atomic}): {}", err.message),
                     detail: err.detail,
@@ -3155,6 +3234,160 @@ mod tests {
         assert_eq!(responses[2]["ok"], serde_json::json!(true));
         assert_eq!(responses[3]["ok"], serde_json::json!(true));
         assert_eq!(responses[4]["result"]["quit"], serde_json::json!(true));
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s10_04_idle_client_timeout_drops_only_stalled_connection() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{self, BufRead, Read};
+
+        use super::{ControlAuth, dispatch_request, serve_control_stream_with_handler};
+        use crate::UiApp;
+
+        struct PartialThenTimeoutReader {
+            step: usize,
+        }
+
+        impl Read for PartialThenTimeoutReader {
+            fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::new(io::ErrorKind::TimedOut, "simulated idle read timeout"))
+            }
+        }
+
+        impl BufRead for PartialThenTimeoutReader {
+            fn fill_buf(&mut self) -> io::Result<&[u8]> {
+                match self.step {
+                    0 => {
+                        self.step = 1;
+                        Ok(b"{\"id\":1")
+                    }
+                    _ => Err(io::Error::new(io::ErrorKind::TimedOut, "simulated idle read timeout")),
+                }
+            }
+
+            fn consume(&mut self, _amt: usize) {}
+        }
+
+        let auth = ControlAuth::from_token("timeout-stream-secret")?;
+        let mut app = UiApp::new();
+        let mut reader = PartialThenTimeoutReader { step: 0 };
+        let mut out = Vec::new();
+        let quit = serve_control_stream_with_handler(&mut app, &mut reader, &mut out, &auth, dispatch_request)?;
+        assert!(!quit, "idle client timeout must close only the stalled stream, not quit server");
+        assert!(out.is_empty(), "partial unframed JSON must not produce a response");
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            use std::io::{BufReader, BufWriter, ErrorKind, Write};
+            use std::net::{SocketAddr, TcpStream};
+            use std::time::Duration;
+
+            use super::{bind_control_tcp_listener, serve_control_listener};
+
+            let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+                Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+                other => other?,
+            };
+            let addr = listener.local_addr()?;
+            match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+                Ok(probe) => {
+                    drop(probe);
+                    let _ = listener.accept();
+                }
+                Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => return Ok(()),
+                Err(err) => return Err(Box::new(err)),
+            }
+
+            let server_auth = auth.clone();
+            let server = std::thread::spawn(move || {
+                let mut srv_app = UiApp::new();
+                serve_control_listener(&mut srv_app, &listener, &server_auth)
+            });
+
+            let mut stalled = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
+            stalled.write_all(b"{\"id\":1")?;
+            stalled.flush()?;
+            std::thread::sleep(Duration::from_millis(150));
+
+            let client_b = TcpStream::connect_timeout(&addr, Duration::from_secs(2))?;
+            let _ = client_b.set_read_timeout(Some(Duration::from_secs(4)));
+            let mut r = BufReader::new(client_b.try_clone()?);
+            let mut w = BufWriter::new(client_b);
+            let tok = auth.as_str();
+            w.write_all(format!("{{\"id\":2,\"method\":\"ping\",\"token\":\"{tok}\"}}\n").as_bytes())?;
+            w.flush()?;
+            let mut reply = String::new();
+            std::io::BufRead::read_line(&mut r, &mut reply)?;
+            let parsed: serde_json::Value = serde_json::from_str(&reply)?;
+            assert_eq!(parsed["ok"], serde_json::json!(true), "second client should succeed once stalled client times out: {parsed}");
+
+            w.write_all(format!("{{\"id\":3,\"method\":\"app.quit\",\"token\":\"{tok}\"}}\n").as_bytes())?;
+            w.flush()?;
+            drop(stalled);
+            let server_res = server.join().map_err(|_| "server thread panicked")?;
+            assert!(server_res.is_ok(), "server should exit cleanly after app.quit: {server_res:?}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s10_05_batch_step_limit_and_max_frame_size_enforced() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{ControlResponse, MAX_CONTROL_BATCH_STEPS, MAX_CONTROL_LINE_BYTES, handle_control_line, serialize_response};
+        use crate::UiApp;
+
+        let mut app = UiApp::new();
+        let initial_rulers = app.canvas_dialogs.rulers_visible;
+
+        // 1. Reject batches exceeding MAX_CONTROL_BATCH_STEPS immediately without executing/mutating.
+        let mut too_many = vec![serde_json::json!({"command": "ui.rulers.toggle"})];
+        too_many.extend((0..MAX_CONTROL_BATCH_STEPS).map(|_| serde_json::json!({"command": "ui.zoom.fitSheet"})));
+        assert_eq!(too_many.len(), MAX_CONTROL_BATCH_STEPS + 1);
+        let req = serde_json::json!({
+            "id": "too-many",
+            "method": "command.batch",
+            "params": { "atomic": true, "commands": too_many }
+        })
+        .to_string();
+        let raw_resp = handle_control_line(&mut app, &req);
+        let parsed: serde_json::Value = serde_json::from_str(&raw_resp)?;
+        assert_eq!(parsed["id"], serde_json::json!("too-many"));
+        assert_eq!(parsed["ok"], serde_json::json!(false));
+        assert!(parsed["error"].as_str().is_some_and(|e| e.contains("maximum step limit")));
+        assert_eq!(app.canvas_dialogs.rulers_visible, initial_rulers);
+
+        // 2. Reject cumulative batch payloads exceeding MAX_CONTROL_LINE_BYTES and preserve atomic rollback.
+        let mut big_csv = String::from("Label\n");
+        let row_text = "value-0123456789abcdef-0123456789abcdef\n";
+        for _ in 0..1_200 {
+            big_csv.push_str(row_text);
+        }
+        app.execute_command("table.importCsv", serde_json::json!({ "sheet_id": "d-big", "archetype": "column", "csv": big_csv }))?;
+        let mut overflowing_cmds = vec![serde_json::json!({"command": "ui.rulers.toggle"})];
+        overflowing_cmds.extend((0..500).map(|_| serde_json::json!({"command": "table.exportCsv", "params": {"sheet_id": "d-big"}})));
+        let overflow_req = serde_json::json!({
+            "id": "overflow-batch",
+            "method": "command.batch",
+            "params": { "atomic": true, "commands": overflowing_cmds }
+        })
+        .to_string();
+        let overflow_resp = handle_control_line(&mut app, &overflow_req);
+        assert!(overflow_resp.len() < MAX_CONTROL_LINE_BYTES);
+        let overflow_parsed: serde_json::Value = serde_json::from_str(&overflow_resp)?;
+        assert_eq!(overflow_parsed["id"], serde_json::json!("overflow-batch"));
+        assert_eq!(overflow_parsed["ok"], serde_json::json!(false));
+        assert!(overflow_parsed["error"].as_str().is_some_and(|e| e.contains("maximum control line size")));
+        assert_eq!(app.canvas_dialogs.rulers_visible, initial_rulers, "atomic batch must roll back before returning frame overflow");
+
+        // 3. Enforce MAX_CONTROL_LINE_BYTES directly in serialize_response, preserving bounded ID.
+        let oversized = ControlResponse::ok(serde_json::json!("big-frame"), serde_json::json!({ "blob": "x".repeat(MAX_CONTROL_LINE_BYTES) }));
+        let bounded = serialize_response(&oversized);
+        assert!(bounded.len() < MAX_CONTROL_LINE_BYTES);
+        let bounded_val: serde_json::Value = serde_json::from_str(&bounded)?;
+        assert_eq!(bounded_val["id"], serde_json::json!("big-frame"));
+        assert_eq!(bounded_val["ok"], serde_json::json!(false));
+        assert!(bounded_val["error"].as_str().is_some_and(|e| e.contains("exceeds maximum control line size")));
+
         Ok(())
     }
 }

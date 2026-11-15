@@ -5,8 +5,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lumencraft_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource,
-    LinkedDataRegion, NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn,
-    default_column_label, transpose_cell_grid, validate_data_sets, validate_rows,
+    LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId,
+    TableArchetype, VariableColumn, default_column_label, transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells,
+    validate_subcolumns,
 };
 
 use crate::error::TransformError;
@@ -162,6 +163,13 @@ pub fn apply_import_link_pipeline(
         shaped = collapse_contiguous_blank_rows(shaped);
     }
     if spec.placement.transpose {
+        let transpose_rows = shaped.len();
+        let transpose_cols = shaped.iter().map(Vec::len).max().unwrap_or(0);
+        let dense_cells = transpose_rows.checked_mul(transpose_cols);
+        check_transform_cell_budget(dense_cells, "transposed import")?;
+        if let Some(total) = dense_cells {
+            validate_sheet_cells(total)?;
+        }
         shaped = transpose_cell_grid(&shaped);
     }
 
@@ -227,10 +235,10 @@ fn extract_stage1(
             Ok((grid, Vec::new()))
         }
         (LinkSource::ExternalDelimitedFile { delimiter, decimal_separator, .. }, ImportSourcePayload::DelimitedText { text, .. }) => {
-            Ok((parse_delimited_text(text, *delimiter, *decimal_separator, filter.parse_asterisk_exclusions), Vec::new()))
+            Ok((parse_delimited_text(text, *delimiter, *decimal_separator, filter.parse_asterisk_exclusions)?, Vec::new()))
         }
         (LinkSource::Clipboard, ImportSourcePayload::DelimitedText { text, delimiter, decimal_separator }) => {
-            Ok((parse_delimited_text(text, delimiter, decimal_separator, filter.parse_asterisk_exclusions), Vec::new()))
+            Ok((parse_delimited_text(text, delimiter, decimal_separator, filter.parse_asterisk_exclusions)?, Vec::new()))
         }
         (LinkSource::Clipboard, ImportSourcePayload::InternalData(sheet)) => {
             let full = SheetCellRange::new(CellCoord::default(), CellCoord::new(usize::MAX, usize::MAX, usize::MAX));
@@ -251,16 +259,149 @@ fn result_cell_to_cell(rc: &ResultCell) -> Cell {
     }
 }
 
-fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_asterisk: bool) -> Vec<Vec<Cell>> {
-    let mut rows = Vec::new();
-    for line in text.lines() {
-        if line.is_empty() {
-            continue;
-        }
-        let cells: Vec<Cell> = line.split(delimiter).map(|tok| Cell::parse_import_token(tok, decimal_sep, parse_asterisk)).collect();
-        rows.push(cells);
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DelimState {
+    FieldStart,
+    Unquoted,
+    Quoted,
+    AfterQuote,
+}
+
+fn push_parsed_cell(
+    row: &mut Vec<Cell>,
+    field: &mut String,
+    decimal_sep: char,
+    parse_asterisk: bool,
+    total_cells: &mut usize,
+    max_cols: usize,
+    max_cells: usize,
+) -> Result<(), TransformError> {
+    if row.len() >= max_cols {
+        return Err(TransformError::InvalidSpec { message: format!("delimited column count exceeds limit {max_cols}") });
     }
-    rows
+    let next_total = total_cells.saturating_add(1);
+    if next_total > max_cells {
+        return Err(TransformError::InvalidSpec { message: format!("delimited cell count exceeds limit {max_cells}") });
+    }
+    *total_cells = next_total;
+    let tok = std::mem::take(field);
+    row.push(Cell::parse_import_token(&tok, decimal_sep, parse_asterisk));
+    Ok(())
+}
+
+fn push_parsed_row(rows: &mut Vec<Vec<Cell>>, row: &mut Vec<Cell>) -> Result<(), TransformError> {
+    if rows.len() >= MAX_ROWS + 16 {
+        return Err(TransformError::InvalidSpec { message: format!("delimited row count exceeds limit {MAX_ROWS}") });
+    }
+    rows.push(std::mem::take(row));
+    Ok(())
+}
+
+fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_asterisk: bool) -> Result<Vec<Vec<Cell>>, TransformError> {
+    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let quote_char = '"';
+    let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
+    let max_cells = MAX_IMPORT_CELLS.saturating_add(65_536);
+
+    let mut rows: Vec<Vec<Cell>> = Vec::new();
+    let mut current_row: Vec<Cell> = Vec::new();
+    let mut field = String::new();
+    let mut state = DelimState::FieldStart;
+    let mut total_cells = 0_usize;
+    let mut chars = text.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        match state {
+            DelimState::FieldStart => {
+                if ch == quote_char && delimiter != quote_char {
+                    state = DelimState::Quoted;
+                } else if ch == delimiter {
+                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
+                    state = DelimState::FieldStart;
+                } else if ch == '\r' || ch == '\n' {
+                    if ch == '\r' && chars.peek() == Some(&'\n') {
+                        let _ = chars.next();
+                    }
+                    if !current_row.is_empty() || !field.is_empty() {
+                        push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
+                        push_parsed_row(&mut rows, &mut current_row)?;
+                    }
+                    state = DelimState::FieldStart;
+                } else {
+                    field.push(ch);
+                    state = DelimState::Unquoted;
+                }
+            }
+            DelimState::Unquoted => {
+                if ch == delimiter {
+                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
+                    state = DelimState::FieldStart;
+                } else if ch == '\r' || ch == '\n' {
+                    if ch == '\r' && chars.peek() == Some(&'\n') {
+                        let _ = chars.next();
+                    }
+                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
+                    push_parsed_row(&mut rows, &mut current_row)?;
+                    state = DelimState::FieldStart;
+                } else if ch == quote_char && delimiter != quote_char {
+                    return Err(TransformError::InvalidInput { message: String::from("unexpected quote inside unquoted delimited field") });
+                } else {
+                    field.push(ch);
+                }
+            }
+            DelimState::Quoted => {
+                if ch == quote_char {
+                    if chars.peek() == Some(&quote_char) {
+                        let _ = chars.next();
+                        field.push(quote_char);
+                    } else {
+                        state = DelimState::AfterQuote;
+                    }
+                } else {
+                    field.push(ch);
+                }
+            }
+            DelimState::AfterQuote => {
+                if ch == delimiter {
+                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
+                    state = DelimState::FieldStart;
+                } else if ch == '\r' || ch == '\n' {
+                    if ch == '\r' && chars.peek() == Some(&'\n') {
+                        let _ = chars.next();
+                    }
+                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
+                    push_parsed_row(&mut rows, &mut current_row)?;
+                    state = DelimState::FieldStart;
+                } else {
+                    return Err(TransformError::InvalidInput {
+                        message: format!("unexpected character `{ch}` after closing quote in delimited text"),
+                    });
+                }
+            }
+        }
+    }
+
+    match state {
+        DelimState::Quoted => {
+            return Err(TransformError::InvalidInput { message: String::from("unclosed quoted field at end of delimited text") });
+        }
+        DelimState::FieldStart => {
+            if !current_row.is_empty() || !field.is_empty() {
+                push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
+                push_parsed_row(&mut rows, &mut current_row)?;
+            }
+        }
+        DelimState::Unquoted | DelimState::AfterQuote => {
+            push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
+            push_parsed_row(&mut rows, &mut current_row)?;
+        }
+    }
+
+    Ok(rows)
 }
 
 fn apply_stage2_filter(
@@ -459,14 +600,19 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
     };
 
     let needed_rows =
-        start_row.checked_add(grid.len()).ok_or_else(|| TransformError::InvalidSpec { message: String::from("target row offset overflow") })?;
+        if mode == PlacementMode::InsertRows { existing_rows.max(start_row).checked_add(grid.len()) } else { start_row.checked_add(grid.len()) }
+            .ok_or_else(|| TransformError::InvalidSpec { message: String::from("target row offset overflow") })?;
     let max_row_width = grid.iter().map(Vec::len).max().unwrap_or(0);
     let needed_cols = validate_grid_col_bounds(&target.archetype, start_col, anchor.subcol, max_row_width)?;
-    if mode == PlacementMode::AppendColumns && max_row_width > 0 {
-        let min_rows = existing_rows.max(needed_rows);
-        ensure_sheet_columns(&mut target.archetype, needed_cols, min_rows)?;
+    let target_rows = existing_rows.max(needed_rows);
+    if max_row_width > 0 {
+        let min_cols = needed_cols.max(target.archetype.column_count());
+        ensure_sheet_columns(&mut target.archetype, min_cols, target_rows)?;
     } else {
-        ensure_sheet_rows(&mut target.archetype, needed_rows)?;
+        ensure_sheet_rows(&mut target.archetype, target_rows)?;
+    }
+    if mode == PlacementMode::InsertRows && start_row < existing_rows {
+        shift_archetype_rows_down(&mut target.archetype, start_row, grid.len(), existing_rows);
     }
 
     let mut max_col = start_col;
@@ -578,11 +724,19 @@ fn validate_archetype_growth_budget(arch: &TableArchetype, min_cols: usize, min_
     };
     match arch {
         TableArchetype::Xy(t) => {
+            t.x_mode.validate()?;
+            t.y_subcolumn_mode.validate()?;
             let x_cells = t.x_cells.len().max(effective_rows).checked_mul(t.x_mode.subcolumn_count());
             sum_ds(&t.data_sets, t.y_subcolumn_mode.subcolumn_count(), x_cells)
         }
-        TableArchetype::Column(t) => sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0)),
-        TableArchetype::Grouped(t) => sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0)),
+        TableArchetype::Column(t) => {
+            t.subcolumn_mode.validate()?;
+            sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0))
+        }
+        TableArchetype::Grouped(t) => {
+            t.subcolumn_mode.validate()?;
+            sum_ds(&t.data_sets, t.subcolumn_mode.subcolumn_count(), Some(0))
+        }
         TableArchetype::Contingency(t) => sum_ds(&t.data_sets, 1, Some(0)),
         TableArchetype::Survival(t) => sum_ds(&t.cohorts, 1, Some(t.times.len().max(effective_rows))),
         TableArchetype::PartsOfWhole(t) => sum_ds(&t.data_sets, 1, Some(0)),
@@ -591,6 +745,9 @@ fn validate_archetype_growth_budget(arch: &TableArchetype, min_cols: usize, min_
             sum_column_growth_cells(dims, mv.variables.len(), effective_cols, effective_rows, 1, Some(0))
         }
         TableArchetype::Nested(t) => {
+            for g in &t.groups {
+                validate_subcolumns(g.biological_unit_count())?;
+            }
             let extra_units = t.groups.first().map_or(1, NestedGroupColumn::biological_unit_count).max(1);
             let dims = t.groups.iter().map(|g| (g.cells.len(), g.biological_unit_count()));
             sum_column_growth_cells(dims, t.groups.len(), effective_cols, effective_rows, extra_units, Some(0))
@@ -626,6 +783,11 @@ fn ensure_sheet_rows(arch: &mut TableArchetype, min_rows: usize) -> Result<(), T
         TableArchetype::Grouped(t) => {
             if t.row_titles.len() < min_rows {
                 t.row_titles.resize_with(min_rows, String::new);
+            }
+            if let Some(spacing) = &mut t.row_numeric_spacing
+                && spacing.len() < min_rows
+            {
+                spacing.resize_with(min_rows, || None);
             }
             let subs = t.subcolumn_mode.subcolumn_count();
             for ds in &mut t.data_sets {
@@ -682,6 +844,76 @@ fn ensure_sheet_rows(arch: &mut TableArchetype, min_rows: usize) -> Result<(), T
         }
     }
     Ok(())
+}
+
+fn rotate_rows_down<T>(rows: &mut [T], start_row: usize, shift: usize, end_row: usize) {
+    if let Some(slice) = rows.get_mut(start_row..end_row)
+        && shift < slice.len()
+    {
+        slice.rotate_right(shift);
+    }
+}
+
+fn shift_archetype_rows_down(arch: &mut TableArchetype, start_row: usize, insert_rows: usize, existing_rows: usize) {
+    if insert_rows == 0 || start_row >= existing_rows {
+        return;
+    }
+    let end = existing_rows + insert_rows;
+    match arch {
+        TableArchetype::Xy(t) => {
+            rotate_rows_down(&mut t.x_cells, start_row, insert_rows, end);
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Column(t) => {
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Grouped(t) => {
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            if let Some(spacing) = &mut t.row_numeric_spacing {
+                rotate_rows_down(spacing, start_row, insert_rows, end);
+            }
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Contingency(t) => {
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Survival(t) => {
+            rotate_rows_down(&mut t.times, start_row, insert_rows, end);
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for ds in &mut t.cohorts {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            rotate_rows_down(&mut t.slice_labels, start_row, insert_rows, end);
+            for ds in &mut t.data_sets {
+                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            rotate_rows_down(&mut mv.row_titles, start_row, insert_rows, end);
+            for var in &mut mv.variables {
+                rotate_rows_down(&mut var.cells, start_row, insert_rows, end);
+            }
+        }
+        TableArchetype::Nested(t) => {
+            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+            for grp in &mut t.groups {
+                rotate_rows_down(&mut grp.cells, start_row, insert_rows, end);
+            }
+        }
+    }
 }
 
 fn push_dataset_columns(cols: &mut Vec<DataSetColumn>, min_cols: usize, row_count: usize, subs: usize) -> Result<(), TransformError> {

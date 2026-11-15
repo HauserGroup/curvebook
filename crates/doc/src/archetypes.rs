@@ -6,7 +6,10 @@ use std::cmp::Ordering;
 
 use crate::TableKind;
 use crate::cell::{Cell, CellValue, ReplicateStacking, SubcolumnMode, SummarizedPoint};
-use crate::error::{DocError, SummaryPointError, validate_cell_grid, validate_data_sets, validate_rows, validate_subcolumns, validate_title};
+use crate::error::{
+    DocError, MAX_SUBCOLUMNS, SummaryPointError, validate_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_subcolumns,
+    validate_title,
+};
 
 /// Zero-based 3D cell address `(row, col, subcol)` inside a data table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
@@ -102,8 +105,61 @@ pub enum SequenceProgression {
     Geometric,
 }
 
+/// Check that `titles` is either empty (omitted/legacy) or matches `row_count` and every string is within `MAX_TITLE_BYTES`.
+fn validate_title_vec(kind: TableKind, titles: &[String], row_count: usize, mismatch_reason: &'static str) -> Result<(), DocError> {
+    if !titles.is_empty() && titles.len() != row_count {
+        return Err(DocError::InvalidCellValue { archetype: kind, row: titles.len(), col: 0, reason: mismatch_reason });
+    }
+    for title in titles {
+        validate_title(title)?;
+    }
+    Ok(())
+}
+
+/// Check that every [`DataSetColumn`] has rectangular dimensions `(row_count × expected_subcols)`
+/// and valid titles and subcolumn bounds.
+fn validate_dataset_column_grid(kind: TableKind, columns: &[DataSetColumn], row_count: usize, expected_subcols: usize) -> Result<(), DocError> {
+    validate_data_sets(columns.len())?;
+    validate_subcolumns(expected_subcols)?;
+    for (col_idx, col) in columns.iter().enumerate() {
+        validate_title(&col.title)?;
+        validate_rows(col.cells.len())?;
+        if col.cells.len() != row_count {
+            return Err(DocError::InvalidCellValue {
+                archetype: kind,
+                row: col.cells.len(),
+                col: col_idx,
+                reason: "column row count does not match table row count",
+            });
+        }
+        for (row_idx, row) in col.cells.iter().enumerate() {
+            if row.len() > MAX_SUBCOLUMNS {
+                return Err(DocError::TooManySubcolumns { count: row.len(), max: MAX_SUBCOLUMNS });
+            }
+            if row.len() != expected_subcols {
+                return Err(DocError::InvalidCellValue {
+                    archetype: kind,
+                    row: row_idx,
+                    col: col_idx,
+                    reason: "row subcolumn count does not match table subcolumn mode",
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate a primary `SubcolumnMode` against `kind` and subcolumn count caps.
+fn validate_table_subcolumn_mode(kind: TableKind, mode: SubcolumnMode) -> Result<(), DocError> {
+    mode.validate()?;
+    if !kind.allows_subcolumn_mode(mode) {
+        return Err(DocError::IncompatibleSubcolumnMode { archetype: kind, mode });
+    }
+    Ok(())
+}
+
 /// Independent X-column configuration for an [`XyTable`] (`docs/data-tables-and-transforms.md` §2).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum XColumnMode {
     /// Explicit numeric X coordinates with optional error subcolumns (`Single`, `MeanSdN`, etc.).
     Numbers { subcolumn_mode: SubcolumnMode },
@@ -111,6 +167,29 @@ pub enum XColumnMode {
     DateOrElapsedTime { unit_label: String },
     /// Automatically generated arithmetic or geometric series (`X0`, `Delta X`).
     GeneratedSequence { start: f64, step: f64, progression: SequenceProgression },
+}
+
+#[derive(serde::Deserialize)]
+enum RawXColumnMode {
+    Numbers { subcolumn_mode: SubcolumnMode },
+    DateOrElapsedTime { unit_label: String },
+    GeneratedSequence { start: f64, step: f64, progression: SequenceProgression },
+}
+
+impl<'de> serde::Deserialize<'de> for XColumnMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawXColumnMode::deserialize(deserializer)?;
+        let mode = match raw {
+            RawXColumnMode::Numbers { subcolumn_mode } => Self::Numbers { subcolumn_mode },
+            RawXColumnMode::DateOrElapsedTime { unit_label } => Self::DateOrElapsedTime { unit_label },
+            RawXColumnMode::GeneratedSequence { start, step, progression } => Self::GeneratedSequence { start, step, progression },
+        };
+        mode.validate().map_err(serde::de::Error::custom)?;
+        Ok(mode)
+    }
 }
 
 impl Default for XColumnMode {
@@ -128,10 +207,19 @@ impl XColumnMode {
             Self::GeneratedSequence { .. } => 0,
         }
     }
+
+    /// Validate X-column mode constraints (`MAX_SUBCOLUMNS`, non-zero raw replicates, unit label length).
+    pub fn validate(&self) -> Result<(), DocError> {
+        match self {
+            Self::Numbers { subcolumn_mode } => subcolumn_mode.validate(),
+            Self::DateOrElapsedTime { unit_label } => validate_title(unit_label),
+            Self::GeneratedSequence { .. } => Ok(()),
+        }
+    }
 }
 
 /// Archetype 1: Continuous independent X variable paired with one or more Y response series.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct XyTable {
     pub x_title: String,
     pub x_mode: XColumnMode,
@@ -142,6 +230,37 @@ pub struct XyTable {
     pub data_sets: Vec<DataSetColumn>,
 }
 
+#[derive(serde::Deserialize)]
+struct RawXyTable {
+    x_title: String,
+    x_mode: XColumnMode,
+    x_cells: Vec<Vec<Cell>>,
+    row_titles: Vec<String>,
+    row_titles_expanded: bool,
+    y_subcolumn_mode: SubcolumnMode,
+    data_sets: Vec<DataSetColumn>,
+}
+
+impl<'de> serde::Deserialize<'de> for XyTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawXyTable::deserialize(deserializer)?;
+        let table = Self {
+            x_title: raw.x_title,
+            x_mode: raw.x_mode,
+            x_cells: raw.x_cells,
+            row_titles: raw.row_titles,
+            row_titles_expanded: raw.row_titles_expanded,
+            y_subcolumn_mode: raw.y_subcolumn_mode,
+            data_sets: raw.data_sets,
+        };
+        table.validate().map_err(serde::de::Error::custom)?;
+        Ok(table)
+    }
+}
+
 impl XyTable {
     pub fn new(y_subcolumn_mode: SubcolumnMode, data_set_count: usize, row_count: usize) -> Result<Self, DocError> {
         Self::new_with_x_mode(XColumnMode::default(), y_subcolumn_mode, data_set_count, row_count)
@@ -149,10 +268,8 @@ impl XyTable {
 
     /// Construct an `XyTable` with explicit X-column mode (including optional X error subcolumns).
     pub fn new_with_x_mode(x_mode: XColumnMode, y_subcolumn_mode: SubcolumnMode, data_set_count: usize, row_count: usize) -> Result<Self, DocError> {
-        if let XColumnMode::Numbers { subcolumn_mode } = x_mode {
-            subcolumn_mode.validate()?;
-        }
-        y_subcolumn_mode.validate()?;
+        x_mode.validate()?;
+        validate_table_subcolumn_mode(TableKind::Xy, y_subcolumn_mode)?;
         validate_data_sets(data_set_count)?;
         validate_rows(row_count)?;
         let x_subs = x_mode.subcolumn_count();
@@ -263,6 +380,67 @@ impl XyTable {
         }
         pairs
     }
+
+    /// Validate rectangular row/subcolumn invariants, X-column mode, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        validate_title(&self.x_title)?;
+        self.x_mode.validate()?;
+        validate_table_subcolumn_mode(TableKind::Xy, self.y_subcolumn_mode)?;
+        let row_count = self.row_count();
+        validate_rows(row_count)?;
+        validate_rows(self.x_cells.len())?;
+        if self.x_cells.len() != row_count {
+            return Err(DocError::InvalidCellValue {
+                archetype: TableKind::Xy,
+                row: self.x_cells.len(),
+                col: 0,
+                reason: "X column row count does not match table row count",
+            });
+        }
+        let x_subs = match &self.x_mode {
+            XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
+                let expected = self.x_mode.subcolumn_count();
+                for (row_idx, row) in self.x_cells.iter().enumerate() {
+                    if row.len() > MAX_SUBCOLUMNS {
+                        return Err(DocError::TooManySubcolumns { count: row.len(), max: MAX_SUBCOLUMNS });
+                    }
+                    if row.len() != expected {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: TableKind::Xy,
+                            row: row_idx,
+                            col: 0,
+                            reason: "X row subcolumn count does not match X column mode",
+                        });
+                    }
+                }
+                expected
+            }
+            XColumnMode::GeneratedSequence { .. } => {
+                let width = self.x_cells.first().map_or(0, Vec::len);
+                if width > MAX_SUBCOLUMNS {
+                    return Err(DocError::TooManySubcolumns { count: width, max: MAX_SUBCOLUMNS });
+                }
+                for (row_idx, row) in self.x_cells.iter().enumerate() {
+                    if row.len() > MAX_SUBCOLUMNS {
+                        return Err(DocError::TooManySubcolumns { count: row.len(), max: MAX_SUBCOLUMNS });
+                    }
+                    if row.len() != width {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: TableKind::Xy,
+                            row: row_idx,
+                            col: 0,
+                            reason: "X cell row widths are not rectangular",
+                        });
+                    }
+                }
+                width
+            }
+        };
+        let y_subs = self.y_subcolumn_mode.subcolumn_count();
+        validate_cell_grid(row_count, self.data_sets.len(), y_subs, x_subs)?;
+        validate_title_vec(TableKind::Xy, &self.row_titles, row_count, "row title count does not match table row count")?;
+        validate_dataset_column_grid(TableKind::Xy, &self.data_sets, row_count, y_subs)
+    }
 }
 
 // ============================================================================
@@ -284,13 +462,40 @@ pub enum ColumnDesignHint {
 }
 
 /// Archetype 2: One-factor group comparison table (one treatment/group per column).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ColumnTable {
     pub design_hint: ColumnDesignHint,
     pub subcolumn_mode: SubcolumnMode,
     pub row_titles: Vec<String>,
     pub row_titles_expanded: bool,
     pub data_sets: Vec<DataSetColumn>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawColumnTable {
+    design_hint: ColumnDesignHint,
+    subcolumn_mode: SubcolumnMode,
+    row_titles: Vec<String>,
+    row_titles_expanded: bool,
+    data_sets: Vec<DataSetColumn>,
+}
+
+impl<'de> serde::Deserialize<'de> for ColumnTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawColumnTable::deserialize(deserializer)?;
+        let table = Self {
+            design_hint: raw.design_hint,
+            subcolumn_mode: raw.subcolumn_mode,
+            row_titles: raw.row_titles,
+            row_titles_expanded: raw.row_titles_expanded,
+            data_sets: raw.data_sets,
+        };
+        table.validate().map_err(serde::de::Error::custom)?;
+        Ok(table)
+    }
 }
 
 impl ColumnTable {
@@ -310,10 +515,7 @@ impl ColumnTable {
         data_set_count: usize,
         row_count: usize,
     ) -> Result<Self, DocError> {
-        subcolumn_mode.validate()?;
-        if !TableKind::Column.allows_subcolumn_mode(subcolumn_mode) {
-            return Err(DocError::IncompatibleSubcolumnMode { archetype: TableKind::Column, mode: subcolumn_mode });
-        }
+        validate_table_subcolumn_mode(TableKind::Column, subcolumn_mode)?;
         validate_data_sets(data_set_count)?;
         validate_rows(row_count)?;
         let subs = subcolumn_mode.subcolumn_count();
@@ -379,6 +581,17 @@ impl ColumnTable {
         }
         blocks
     }
+
+    /// Validate rectangular row/subcolumn invariants, subcolumn mode compatibility, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        validate_table_subcolumn_mode(TableKind::Column, self.subcolumn_mode)?;
+        let row_count = self.row_count();
+        validate_rows(row_count)?;
+        let subs = self.subcolumn_mode.subcolumn_count();
+        validate_cell_grid(row_count, self.data_sets.len(), subs, 0)?;
+        validate_title_vec(TableKind::Column, &self.row_titles, row_count, "row title count does not match table row count")?;
+        validate_dataset_column_grid(TableKind::Column, &self.data_sets, row_count, subs)
+    }
 }
 
 // ============================================================================
@@ -396,7 +609,7 @@ pub struct ThreeWayColumnGrouping {
 }
 
 /// Archetype 3: Two-factor (or `2 × 2 × K` three-factor) tensor `(Row r × Column c × Subcolumn s)`.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GroupedTable {
     pub row_factor_title: String,
     pub column_factor_title: String,
@@ -408,12 +621,42 @@ pub struct GroupedTable {
     pub data_sets: Vec<DataSetColumn>,
 }
 
+#[derive(serde::Deserialize)]
+struct RawGroupedTable {
+    row_factor_title: String,
+    column_factor_title: String,
+    row_titles: Vec<String>,
+    row_numeric_spacing: Option<Vec<Option<f64>>>,
+    subcolumn_mode: SubcolumnMode,
+    replicate_stacking: ReplicateStacking,
+    three_way_grouping: Option<ThreeWayColumnGrouping>,
+    data_sets: Vec<DataSetColumn>,
+}
+
+impl<'de> serde::Deserialize<'de> for GroupedTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawGroupedTable::deserialize(deserializer)?;
+        let table = Self {
+            row_factor_title: raw.row_factor_title,
+            column_factor_title: raw.column_factor_title,
+            row_titles: raw.row_titles,
+            row_numeric_spacing: raw.row_numeric_spacing,
+            subcolumn_mode: raw.subcolumn_mode,
+            replicate_stacking: raw.replicate_stacking,
+            three_way_grouping: raw.three_way_grouping,
+            data_sets: raw.data_sets,
+        };
+        table.validate().map_err(serde::de::Error::custom)?;
+        Ok(table)
+    }
+}
+
 impl GroupedTable {
     pub fn new(subcolumn_mode: SubcolumnMode, data_set_count: usize, row_count: usize) -> Result<Self, DocError> {
-        subcolumn_mode.validate()?;
-        if matches!(subcolumn_mode, SubcolumnMode::Single) {
-            return Err(DocError::IncompatibleSubcolumnMode { archetype: TableKind::Grouped, mode: subcolumn_mode });
-        }
+        validate_table_subcolumn_mode(TableKind::Grouped, subcolumn_mode)?;
         validate_data_sets(data_set_count)?;
         validate_rows(row_count)?;
         let subs = subcolumn_mode.subcolumn_count();
@@ -471,6 +714,39 @@ impl GroupedTable {
         }
         false
     }
+
+    /// Validate rectangular row/subcolumn invariants, factor metadata, subcolumn mode, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        validate_title(&self.row_factor_title)?;
+        validate_title(&self.column_factor_title)?;
+        if let Some(ref three_way) = self.three_way_grouping {
+            validate_title(&three_way.factor_1_name)?;
+            validate_title(&three_way.factor_2_name)?;
+            for lbl in &three_way.factor_1_levels {
+                validate_title(lbl)?;
+            }
+            for lbl in &three_way.factor_2_levels {
+                validate_title(lbl)?;
+            }
+        }
+        validate_table_subcolumn_mode(TableKind::Grouped, self.subcolumn_mode)?;
+        let row_count = self.row_count();
+        validate_rows(row_count)?;
+        let subs = self.subcolumn_mode.subcolumn_count();
+        validate_cell_grid(row_count, self.data_sets.len(), subs, 0)?;
+        validate_title_vec(TableKind::Grouped, &self.row_titles, row_count, "row title count does not match table row count")?;
+        if let Some(ref spacing) = self.row_numeric_spacing
+            && spacing.len() != row_count
+        {
+            return Err(DocError::InvalidCellValue {
+                archetype: TableKind::Grouped,
+                row: spacing.len(),
+                col: 0,
+                reason: "row numeric spacing count does not match table row count",
+            });
+        }
+        validate_dataset_column_grid(TableKind::Grouped, &self.data_sets, row_count, subs)
+    }
 }
 
 // ============================================================================
@@ -478,12 +754,37 @@ impl GroupedTable {
 // ============================================================================
 
 /// Archetype 4: Categorical cross-tabulation of non-negative integer counts (`R × C`).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ContingencyTable {
     pub row_factor_title: String,
     pub column_factor_title: String,
     pub row_titles: Vec<String>,
     pub data_sets: Vec<DataSetColumn>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawContingencyTable {
+    row_factor_title: String,
+    column_factor_title: String,
+    row_titles: Vec<String>,
+    data_sets: Vec<DataSetColumn>,
+}
+
+impl<'de> serde::Deserialize<'de> for ContingencyTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawContingencyTable::deserialize(deserializer)?;
+        let table = Self {
+            row_factor_title: raw.row_factor_title,
+            column_factor_title: raw.column_factor_title,
+            row_titles: raw.row_titles,
+            data_sets: raw.data_sets,
+        };
+        table.validate().map_err(serde::de::Error::custom)?;
+        Ok(table)
+    }
 }
 
 impl ContingencyTable {
@@ -538,6 +839,17 @@ impl ContingencyTable {
         }
         Ok(())
     }
+
+    /// Validate rectangular row/subcolumn invariants, factor titles, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        validate_title(&self.row_factor_title)?;
+        validate_title(&self.column_factor_title)?;
+        let row_count = self.row_count();
+        validate_rows(row_count)?;
+        validate_cell_grid(row_count, self.data_sets.len(), 1, 0)?;
+        validate_title_vec(TableKind::Contingency, &self.row_titles, row_count, "row title count does not match table row count")?;
+        validate_dataset_column_grid(TableKind::Contingency, &self.data_sets, row_count, 1)
+    }
 }
 
 // ============================================================================
@@ -560,7 +872,7 @@ pub struct SurvivalObservation {
 }
 
 /// Archetype 5: Time-to-event survival table (`t >= 0`, configurable event/censored status codes).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SurvivalTable {
     pub time_title: String,
     pub times: Vec<Cell>,
@@ -569,6 +881,37 @@ pub struct SurvivalTable {
     pub row_titles: Vec<String>,
     pub row_titles_expanded: bool,
     pub cohorts: Vec<DataSetColumn>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawSurvivalTable {
+    time_title: String,
+    times: Vec<Cell>,
+    event_code: i64,
+    censored_code: i64,
+    row_titles: Vec<String>,
+    row_titles_expanded: bool,
+    cohorts: Vec<DataSetColumn>,
+}
+
+impl<'de> serde::Deserialize<'de> for SurvivalTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawSurvivalTable::deserialize(deserializer)?;
+        let table = Self {
+            time_title: raw.time_title,
+            times: raw.times,
+            event_code: raw.event_code,
+            censored_code: raw.censored_code,
+            row_titles: raw.row_titles,
+            row_titles_expanded: raw.row_titles_expanded,
+            cohorts: raw.cohorts,
+        };
+        table.validate().map_err(serde::de::Error::custom)?;
+        Ok(table)
+    }
 }
 
 impl SurvivalTable {
@@ -660,6 +1003,16 @@ impl SurvivalTable {
         }
         Ok(out)
     }
+
+    /// Validate rectangular row/subcolumn invariants, time title, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        validate_title(&self.time_title)?;
+        let row_count = self.row_count();
+        validate_rows(row_count)?;
+        validate_cell_grid(row_count, self.cohorts.len(), 1, 1)?;
+        validate_title_vec(TableKind::Survival, &self.row_titles, row_count, "row title count does not match table row count")?;
+        validate_dataset_column_grid(TableKind::Survival, &self.cohorts, row_count, 1)
+    }
 }
 
 // ============================================================================
@@ -676,10 +1029,28 @@ pub struct SliceFraction {
 }
 
 /// Archetype 6: Mutually exclusive categorical slices summing to a whole.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PartsOfWholeTable {
     pub slice_labels: Vec<String>,
     pub data_sets: Vec<DataSetColumn>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawPartsOfWholeTable {
+    slice_labels: Vec<String>,
+    data_sets: Vec<DataSetColumn>,
+}
+
+impl<'de> serde::Deserialize<'de> for PartsOfWholeTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawPartsOfWholeTable::deserialize(deserializer)?;
+        let table = Self { slice_labels: raw.slice_labels, data_sets: raw.data_sets };
+        table.validate().map_err(serde::de::Error::custom)?;
+        Ok(table)
+    }
 }
 
 impl PartsOfWholeTable {
@@ -725,6 +1096,15 @@ impl PartsOfWholeTable {
             .into_iter()
             .map(|(row, label, value)| SliceFraction { row, label, value, fraction: if total > 0.0 { value / total } else { 0.0 } })
             .collect())
+    }
+
+    /// Validate rectangular row/subcolumn invariants, slice labels, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        let row_count = self.row_count();
+        validate_rows(row_count)?;
+        validate_cell_grid(row_count, self.data_sets.len(), 1, 0)?;
+        validate_title_vec(TableKind::PartsOfWhole, &self.slice_labels, row_count, "slice label count does not match table row count")?;
+        validate_dataset_column_grid(TableKind::PartsOfWhole, &self.data_sets, row_count, 1)
     }
 }
 
@@ -881,11 +1261,14 @@ impl VariableColumn {
     #[must_use]
     pub fn ordered_levels_with(&self, spec: &LevelOrderSpec) -> Vec<CategoricalLevelSummary> {
         let mut entries: Vec<(usize, CategoricalLevelSummary)> = Vec::new();
+        let mut index_by_level: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for cell in &self.cells {
             let Some(tok) = cell_categorical_token(&cell.value) else {
                 continue;
             };
-            if let Some((_, existing)) = entries.iter_mut().find(|(_, item)| item.level == tok) {
+            if let Some(&idx) = index_by_level.get(&tok)
+                && let Some((_, existing)) = entries.get_mut(idx)
+            {
                 if cell.excluded {
                     existing.excluded_count += 1;
                 } else {
@@ -893,6 +1276,7 @@ impl VariableColumn {
                 }
             } else {
                 let rank = entries.len();
+                index_by_level.insert(tok.clone(), rank);
                 entries.push((
                     rank,
                     CategoricalLevelSummary { level: tok, included_count: usize::from(!cell.excluded), excluded_count: usize::from(cell.excluded) },
@@ -912,9 +1296,13 @@ impl VariableColumn {
                 entries.sort_by(|(ra, a), (rb, b)| a.included_count.cmp(&b.included_count).then_with(|| ra.cmp(rb)));
             }
             LevelOrderKind::Explicit(order_list) => {
+                let mut rank_by_level: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(order_list.len());
+                for (pos, level) in order_list.iter().enumerate() {
+                    rank_by_level.entry(level.as_str()).or_insert(pos);
+                }
                 entries.sort_by(|(ra, a), (rb, b)| {
-                    let pa = order_list.iter().position(|x| x == &a.level);
-                    let pb = order_list.iter().position(|x| x == &b.level);
+                    let pa = rank_by_level.get(a.level.as_str()).copied();
+                    let pb = rank_by_level.get(b.level.as_str()).copied();
                     match (pa, pb) {
                         (Some(ia), Some(ib)) => ia.cmp(&ib),
                         (Some(_), None) => Ordering::Less,
@@ -989,11 +1377,30 @@ fn take_digits<I: Iterator<Item = char>>(iter: &mut std::iter::Peekable<I>) -> S
 }
 
 /// Archetype 7: Tidy observational dataframe (`rows = observational units`, `columns = typed variables`).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MultipleVariablesTable {
     pub row_titles: Vec<String>,
     pub row_titles_expanded: bool,
     pub variables: Vec<VariableColumn>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawMultipleVariablesTable {
+    row_titles: Vec<String>,
+    row_titles_expanded: bool,
+    variables: Vec<VariableColumn>,
+}
+
+impl<'de> serde::Deserialize<'de> for MultipleVariablesTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawMultipleVariablesTable::deserialize(deserializer)?;
+        let table = Self { row_titles: raw.row_titles, row_titles_expanded: raw.row_titles_expanded, variables: raw.variables };
+        table.validate().map_err(serde::de::Error::custom)?;
+        Ok(table)
+    }
 }
 
 impl MultipleVariablesTable {
@@ -1018,6 +1425,28 @@ impl MultipleVariablesTable {
     pub fn find_variable(&self, name: &str) -> Option<usize> {
         let needle = name.trim();
         self.variables.iter().position(|v| v.title.trim() == needle)
+    }
+
+    /// Validate rectangular row invariants across variables, row titles, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        let row_count = self.row_count();
+        validate_rows(row_count)?;
+        validate_data_sets(self.variables.len())?;
+        validate_cell_grid(row_count, self.variables.len(), 1, 0)?;
+        validate_title_vec(TableKind::MultipleVariables, &self.row_titles, row_count, "row title count does not match table row count")?;
+        for (col_idx, var) in self.variables.iter().enumerate() {
+            validate_title(&var.title)?;
+            validate_rows(var.cells.len())?;
+            if var.cells.len() != row_count {
+                return Err(DocError::InvalidCellValue {
+                    archetype: TableKind::MultipleVariables,
+                    row: var.cells.len(),
+                    col: col_idx,
+                    reason: "variable row count does not match table row count",
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1052,11 +1481,30 @@ impl NestedGroupColumn {
 }
 
 /// Archetype 8: Hierarchical two-level design (experimental groups -> biological units -> technical replicates).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NestedTable {
     pub row_titles: Vec<String>,
     pub row_titles_expanded: bool,
     pub groups: Vec<NestedGroupColumn>,
+}
+
+#[derive(serde::Deserialize)]
+struct RawNestedTable {
+    row_titles: Vec<String>,
+    row_titles_expanded: bool,
+    groups: Vec<NestedGroupColumn>,
+}
+
+impl<'de> serde::Deserialize<'de> for NestedTable {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawNestedTable::deserialize(deserializer)?;
+        let table = Self { row_titles: raw.row_titles, row_titles_expanded: raw.row_titles_expanded, groups: raw.groups };
+        table.validate().map_err(serde::de::Error::custom)?;
+        Ok(table)
+    }
 }
 
 impl NestedTable {
@@ -1084,6 +1532,52 @@ impl NestedTable {
             return Vec::new();
         };
         group.cells.iter().filter_map(|row| row.get(bio_unit_idx).and_then(Cell::active_number)).collect()
+    }
+
+    /// Validate rectangular row/subcolumn invariants across groups, unit headers, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        let row_count = self.row_count();
+        validate_rows(row_count)?;
+        validate_data_sets(self.groups.len())?;
+        validate_title_vec(TableKind::Nested, &self.row_titles, row_count, "row title count does not match table row count")?;
+        let mut total_cells: usize = 0;
+        for (g_idx, grp) in self.groups.iter().enumerate() {
+            validate_title(&grp.title)?;
+            let units = grp.biological_unit_count();
+            validate_subcolumns(units)?;
+            for sub_title in &grp.subcolumn_titles {
+                validate_title(sub_title)?;
+            }
+            validate_rows(grp.cells.len())?;
+            if grp.cells.len() != row_count {
+                return Err(DocError::InvalidCellValue {
+                    archetype: TableKind::Nested,
+                    row: grp.cells.len(),
+                    col: g_idx,
+                    reason: "nested group row count does not match table row count",
+                });
+            }
+            let group_cells = row_count
+                .checked_mul(units)
+                .and_then(|c| total_cells.checked_add(c))
+                .ok_or(DocError::TooManyCells { count: usize::MAX, max: crate::error::MAX_SHEET_CELLS })?;
+            validate_sheet_cells(group_cells)?;
+            total_cells = group_cells;
+            for (row_idx, row) in grp.cells.iter().enumerate() {
+                if row.len() > MAX_SUBCOLUMNS {
+                    return Err(DocError::TooManySubcolumns { count: row.len(), max: MAX_SUBCOLUMNS });
+                }
+                if row.len() != units {
+                    return Err(DocError::InvalidCellValue {
+                        archetype: TableKind::Nested,
+                        row: row_idx,
+                        col: g_idx,
+                        reason: "nested group subcolumn count does not match biological unit count",
+                    });
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -1117,6 +1611,20 @@ impl TableArchetype {
             Self::PartsOfWhole(_) => TableKind::PartsOfWhole,
             Self::MultipleVariables(_) => TableKind::MultipleVariables,
             Self::Nested(_) => TableKind::Nested,
+        }
+    }
+
+    /// Validate rectangular row/subcolumn invariants, subcolumn mode rules, and dimension caps.
+    pub fn validate(&self) -> Result<(), DocError> {
+        match self {
+            Self::Xy(t) => t.validate(),
+            Self::Column(t) => t.validate(),
+            Self::Grouped(t) => t.validate(),
+            Self::Contingency(t) => t.validate(),
+            Self::Survival(t) => t.validate(),
+            Self::PartsOfWhole(t) => t.validate(),
+            Self::MultipleVariables(t) => t.validate(),
+            Self::Nested(t) => t.validate(),
         }
     }
 

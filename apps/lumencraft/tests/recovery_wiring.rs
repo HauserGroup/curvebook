@@ -285,3 +285,101 @@ fn r1_s11_01_and_s06_03_binary_default_launch_and_control_recovery() -> Result<(
     let _ = rec_tcp.close_journal_cleanly(rec_tcp_journal)?;
     Ok(())
 }
+
+#[test]
+fn r1_s11_03_lease_renewal_new_instance_isolation_and_multiwindow_close_all_force() -> Result<(), Box<dyn std::error::Error>> {
+    use lumencraft_format::{DirectoryJournalBackend, JournalBackend};
+
+    let dir = TempDirGuard::new("s11-03-renewal-and-new-instance")?;
+    let recovery_root = dir.path.join("recovery-root");
+    let viewport = ViewportMetrics::new(800.0, 520.0, 2.0);
+
+    // 1. Primary instance opens recovery_root and renews its lease timestamp per executed command.
+    let mut primary_rt = DesktopHostRuntime::new(DesktopHostConfig {
+        recovery_root: Some(recovery_root.clone()),
+        new_instance: false,
+        ..DesktopHostConfig::default()
+    });
+    let w1 = primary_rt.open_window(None, viewport)?;
+    let initial_acquired = DirectoryJournalBackend::open_dir(&recovery_root)?.read_lease()?.ok_or("missing primary lease")?.acquired_epoch_ms;
+
+    std::thread::sleep(Duration::from_millis(15));
+    let _ = primary_rt
+        .window_mut(w1)?
+        .execute_and_journal("sheet.createData", json!({ "sheet_id": "renew-ds", "title": "Renew", "archetype": "column", "cols": 1, "rows": 1 }))?;
+    let renewed_acquired = DirectoryJournalBackend::open_dir(&recovery_root)?.read_lease()?.ok_or("missing renewed primary lease")?.acquired_epoch_ms;
+    assert!(renewed_acquired >= initial_acquired + 10, "lease timestamp should renew per command");
+
+    // 2. Second runtime with --new-instance gets isolated recovery dir without conflicting on primary lock.
+    let mut isolated_rt =
+        DesktopHostRuntime::new(DesktopHostConfig { recovery_root: Some(recovery_root.clone()), new_instance: true, ..DesktopHostConfig::default() });
+    let iso_w = isolated_rt.open_window(None, viewport)?;
+    let iso_dir = isolated_rt.window(iso_w)?.recovery_dir().ok_or("missing isolated dir")?.to_path_buf();
+    assert_ne!(iso_dir, recovery_root);
+    assert!(iso_dir.join(LOCKFILE_NAME).is_file());
+    assert!(recovery_root.join(LOCKFILE_NAME).is_file());
+
+    isolated_rt.close_all_force()?;
+    assert!(!iso_dir.join(LOCKFILE_NAME).exists());
+    assert!(recovery_root.join(LOCKFILE_NAME).is_file(), "closing --new-instance must leave primary lock intact");
+
+    // 3. Multi-window close_all_force cleans remaining windows even if one window lost lock ownership.
+    let w2 = primary_rt.open_window(None, viewport)?;
+    let w2_dir = primary_rt.window(w2)?.recovery_dir().ok_or("missing w2 dir")?.to_path_buf();
+    assert!(w2_dir.join(LOCKFILE_NAME).is_file());
+    // Steal w1's lock so closing w1 fails; close_all_force must still release w2's lock cleanly.
+    fs::write(
+        recovery_root.join(LOCKFILE_NAME),
+        serde_json::to_vec(&lumencraft_format::JournalLockLease::new("external-owner", now_epoch_ms(), 300_000)?)?,
+    )?;
+    let close_err = primary_rt.close_all_force().expect_err("stolen lock on w1 must report error");
+    assert!(close_err.contains("external-owner"));
+    assert!(!w2_dir.join(LOCKFILE_NAME).exists(), "close_all_force must still close healthy window 2");
+    assert!(recovery_root.join(LOCKFILE_NAME).is_file(), "external-owner lock on w1 must not be unlinked");
+
+    Ok(())
+}
+
+#[test]
+fn r1_s11_02_install_window_error_releases_recovery_lock() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDirGuard::new("s11-02-install-rollback")?;
+    let recovery_root = dir.path.join("recovery-root");
+    let viewport = ViewportMetrics::new(800.0, 520.0, 2.0);
+
+    let mut bad_rt = DesktopHostRuntime::new(DesktopHostConfig {
+        recovery_root: Some(recovery_root.clone()),
+        theme_override: Some(String::from("nonexistent-theme")),
+        ..DesktopHostConfig::default()
+    });
+    assert!(bad_rt.open_window(None, viewport).is_err(), "invalid theme override must abort window open");
+    assert!(!recovery_root.join(LOCKFILE_NAME).exists(), "failed window open must release recovery lock");
+
+    Ok(())
+}
+
+#[test]
+fn r1_s11_05_and_06_binary_corrupt_prefs_config_dir_and_no_prefs() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDirGuard::new("s11-05-06-binary")?;
+    let cfg_dir = dir.path.join("cfg");
+    fs::create_dir_all(&cfg_dir)?;
+    fs::write(cfg_dir.join("shortcuts.json"), "{not json")?;
+    fs::write(cfg_dir.join("preferences.json"), "{also not json")?;
+
+    // Corrupt shortcuts.json & preferences.json warn and launch cleanly with LUMENCRAFT_CONFIG_DIR.
+    let bin = env!("CARGO_BIN_EXE_lumencraft");
+    let ok_corrupt = Command::new(bin).env("LUMENCRAFT_CONFIG_DIR", &cfg_dir).args(["--headless-once"]).output()?;
+    assert!(ok_corrupt.status.success(), "corrupt prefs must not abort launch: {}", String::from_utf8_lossy(&ok_corrupt.stderr));
+
+    // With LUMENCRAFT_NO_PREFS=1, even an --event-script launch avoids reading/writing prefs or recovery_dir.
+    let script = dir.path.join("script.jsonl");
+    fs::write(&script, "{\"WindowFocused\":{\"window_id\":1}}\n")?;
+    let no_prefs = Command::new(bin)
+        .env("LUMENCRAFT_CONFIG_DIR", &cfg_dir)
+        .env("LUMENCRAFT_NO_PREFS", "1")
+        .args(["--event-script", &script.display().to_string()])
+        .output()?;
+    assert!(no_prefs.status.success(), "LUMENCRAFT_NO_PREFS=1 launch failed: {}", String::from_utf8_lossy(&no_prefs.stderr));
+    assert!(!cfg_dir.join("recovery").exists(), "LUMENCRAFT_NO_PREFS=1 must skip shared recovery dir");
+
+    Ok(())
+}

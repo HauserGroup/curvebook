@@ -779,3 +779,79 @@ impl DirBackendBytesExt for DirectoryJournalBackend {
         self.read_journal_bytes().unwrap_or_default()
     }
 }
+
+#[test]
+fn r1_s11_02_dead_local_pid_lock_reclaimed_without_waiting_ttl() {
+    use lumencraft_format::recovery::{is_dead_local_owner, is_lease_reclaimable};
+
+    // Synthetic non-PID owner IDs and live current PID must NOT be classified as dead.
+    assert!(!is_dead_local_owner("writer-1"));
+    assert!(!is_dead_local_owner("lumencraft-pid-0"));
+    let self_owner = format!("lumencraft-pid-{}", std::process::id());
+    assert!(!is_dead_local_owner(&self_owner));
+
+    let dir_live = TempRecoveryDir::new("s11-02-live-pid");
+    let (live_journal, _) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir_live.path).expect("dir"), &self_owner, 300_000, 1_000_000)
+            .expect("acquire self lock");
+    let err = CrashRecoveryJournal::open_or_recover(
+        DirectoryJournalBackend::open_dir(&dir_live.path).expect("dir"),
+        format!("{self_owner}-win-2"),
+        300_000,
+        1_000_050,
+    )
+    .expect_err("live same-host PID with fresh TTL must still block concurrent writer");
+    assert!(err.to_string().contains("actively held"));
+    drop(live_journal.abandon());
+
+    #[cfg(unix)]
+    {
+        let dead_owner = "lumencraft-pid-999999999";
+        assert!(is_dead_local_owner(dead_owner), "nonexistent PID must be detected cleanly without unsafe");
+        let dir_dead = TempRecoveryDir::new("s11-02-dead-pid");
+        let (mut crashed, _) =
+            CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir_dead.path).expect("dir"), dead_owner, 300_000, 1_000_000)
+                .expect("acquire dead pid lock");
+        crashed.record_command(serde_json::json!({ "op": "edit" })).expect("record command");
+        let stale_lease = crashed.lease().clone();
+        assert!(!stale_lease.is_stale(1_000_050), "TTL should not be expired yet");
+        assert!(is_lease_reclaimable(&stale_lease, 1_000_050));
+        drop(crashed.abandon());
+
+        let (reclaimed, report) =
+            CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir_dead.path).expect("dir"), &self_owner, 300_000, 1_000_050)
+                .expect("dead PID lock must be reclaimed immediately before TTL expires");
+        assert_eq!(report.recovered_from_stale_lock.as_ref().map(|l| l.owner_id.as_str()), Some(dead_owner));
+        assert_eq!(report.recovered_commands, vec![serde_json::json!({ "op": "edit" })]);
+        let _ = reclaimed.close_cleanly(b"RECLAIMED");
+    }
+}
+
+#[test]
+fn r1_s11_03_stale_owner_cannot_clobber_active_owner_snapshot_or_journal() {
+    let dir = TempRecoveryDir::new("s11-03-clobber");
+    let (mut owner_a, _) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir.path).expect("dir"), "owner-A", 1_000, 1_000).expect("open A");
+    owner_a.record_command(serde_json::json!({ "from": "A" })).expect("record A");
+
+    // TTL expires and owner B legitimately takes over the recovery directory.
+    let (mut owner_b, _) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir.path).expect("dir"), "owner-B", 5_000, 5_000).expect("open B");
+    owner_b.checkpoint(b"LIVE-SNAPSHOT-B").expect("checkpoint B");
+    owner_b.record_command(serde_json::json!({ "from": "B" })).expect("record B");
+
+    // Stale owner A wakes up and attempts both checkpoint() and close_cleanly(); neither may touch B's files.
+    let ck_err = owner_a.checkpoint(b"STALE-A-CLOBBER").expect_err("stale owner checkpoint must fail");
+    assert!(ck_err.to_string().contains("owned by `owner-B`"));
+    assert_eq!(fs::read(dir.path.join(SNAPSHOT_FILE_NAME)).expect("read B snap"), b"LIVE-SNAPSHOT-B");
+
+    let close_err = owner_a.close_cleanly(b"STALE-A-CLOSE").expect_err("stale owner close_cleanly must fail");
+    assert!(close_err.to_string().contains("owned by `owner-B`"));
+    assert_eq!(fs::read(dir.path.join(SNAPSHOT_FILE_NAME)).expect("B snap intact after stale close"), b"LIVE-SNAPSHOT-B");
+    let live_lease = DirectoryJournalBackend::open_dir(&dir.path).expect("dir").read_lease().expect("read lease").expect("B lease present");
+    assert_eq!(live_lease.owner_id, "owner-B");
+    let (_, post_b_check) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir.path).expect("dir"), "owner-C", 5_000, 20_000).expect("open C");
+    assert_eq!(post_b_check.snapshot.as_deref(), Some(b"LIVE-SNAPSHOT-B".as_slice()));
+    assert_eq!(post_b_check.recovered_commands, vec![serde_json::json!({ "from": "B" })]);
+}

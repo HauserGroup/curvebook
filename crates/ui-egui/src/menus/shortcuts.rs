@@ -187,9 +187,12 @@ impl ShortcutRegistry {
     /// Atomically import customized shortcut overrides from JSON (`{"cmd": "Combo"}` or
     /// `{"overrides": {"cmd": "Combo"}}`).
     ///
+    /// Unknown commands are ignored with a warning on stderr so user files across versions stay
+    /// loadable, while multi-command shortcut swaps apply cleanly without false conflicts.
+    ///
     /// # Errors
-    /// Returns an error without mutating `self` if the JSON is invalid, references unknown
-    /// commands, contains malformed shortcuts, or introduces conflicts.
+    /// Returns an error without mutating `self` if the JSON is invalid, contains non-string or
+    /// malformed shortcut values, or introduces duplicate conflicts among bindings.
     pub fn import_overrides_json(&mut self, raw_json: &str) -> Result<usize, String> {
         let parsed: Value = serde_json::from_str(raw_json).map_err(|err| format!("invalid shortcut overrides JSON: {err}"))?;
         let Some(root_obj) = parsed.as_object() else {
@@ -203,14 +206,29 @@ impl ShortcutRegistry {
             _ => root_obj,
         };
 
-        let mut staged = self.clone();
-        staged.reset_all();
-        let mut applied = 0usize;
-
+        let mut parsed_entries = Vec::with_capacity(overrides_map.len());
         for (command_id, combo_val) in overrides_map {
             let Some(combo) = combo_val.as_str() else {
                 return Err(format!("shortcut override for `{command_id}` must be a string"));
             };
+            if self.bindings.contains_key(command_id) {
+                parsed_entries.push((command_id.as_str(), combo));
+            } else {
+                eprintln!("warning: ignoring shortcut override for unknown command `{command_id}`");
+            }
+        }
+
+        let mut staged = self.clone();
+        staged.reset_all();
+        // Clear existing bindings for overridden commands first so shortcut swaps succeed cleanly.
+        for &(command_id, _) in &parsed_entries {
+            if let Some(binding) = staged.bindings.get_mut(command_id) {
+                binding.active_combo.clear();
+            }
+        }
+
+        let mut applied = 0usize;
+        for &(command_id, combo) in &parsed_entries {
             staged.set_shortcut(command_id, combo)?;
             applied += 1;
         }
@@ -410,6 +428,34 @@ mod tests {
         reg.reset_all();
         assert_eq!(reg.active_combo("ui.gallery.toggle"), Some(""));
         assert_eq!(normalize_shortcut_combo("shift+cmd+z")?, "Cmd+Shift+Z");
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s11_05_import_overrides_json_handles_swaps_and_unknown_commands() -> Result<(), Box<dyn std::error::Error>> {
+        let mut reg = ShortcutRegistry::new();
+
+        // Direct two-way swap between built-in bindings must succeed atomically without conflict.
+        let swapped = reg.import_overrides_json(r#"{"ui.palette.open":"F6","ui.pane.cycle":"Cmd+K"}"#)?;
+        assert_eq!(swapped, 2);
+        assert_eq!(reg.active_combo("ui.palette.open"), Some("F6"));
+        assert_eq!(reg.active_combo("ui.pane.cycle"), Some("Cmd+K"));
+        assert_eq!(reg.handle_key_combo("f6").map(|m| m.command_id), Some(String::from("ui.palette.open")));
+        assert_eq!(reg.handle_key_combo("cmd+k").map(|m| (m.command_id, m.params)), Some((String::from("ui.pane.cycle"), json!({"reverse": false}))));
+        assert_eq!(
+            reg.handle_key_combo("shift+cmd+k").map(|m| (m.command_id, m.params)),
+            Some((String::from("ui.pane.cycle"), json!({"reverse": true})))
+        );
+
+        // Unknown command entries must warn and skip instead of failing load, while valid entries apply.
+        let with_unknown = reg.import_overrides_json(r#"{"future.unknown.action":"Ctrl+Alt+9","ui.gallery.toggle":"Ctrl+Shift+G"}"#)?;
+        assert_eq!(with_unknown, 1);
+        assert_eq!(reg.active_combo("ui.gallery.toggle"), Some("Ctrl+Shift+G"));
+        assert_eq!(reg.active_combo("ui.palette.open"), Some("Cmd+K"));
+
+        // Real duplicate bindings within the same overrides payload must fail atomically.
+        assert!(reg.import_overrides_json(r#"{"ui.palette.open":"F6","ui.gallery.toggle":"F6"}"#).is_err());
+        assert_eq!(reg.active_combo("ui.gallery.toggle"), Some("Ctrl+Shift+G"));
         Ok(())
     }
 }
