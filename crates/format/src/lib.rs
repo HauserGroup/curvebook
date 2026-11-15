@@ -38,7 +38,7 @@ pub use pzfx::{import_pzfx_bytes, import_pzfx_str};
 pub use recovery::DirectoryJournalBackend;
 pub use recovery::{
     CURRENT_JOURNAL_VERSION, CURRENT_LOCK_VERSION, CrashRecoveryJournal, JOURNAL_FILE_NAME, JournalBackend, JournalLockLease, JournalOpRecord,
-    LOCKFILE_NAME, MemoryJournalBackend, RecoveryReport, SNAPSHOT_FILE_NAME, compute_record_crc32,
+    JournalRecoveryWarning, LOCKFILE_NAME, MemoryJournalBackend, RecoveryReport, SNAPSHOT_FILE_NAME, compute_record_crc32,
 };
 pub use registry::{ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatKind, FormatRegistry, ImportOptions, ImportPayload, Importer};
 pub use schemas::{all_persisted_schemas, archive_manifest_schema, batch_v1_schema, document_schema, journal_record_schema, preferences_schema};

@@ -215,6 +215,25 @@ pub struct ControlRequest {
     pub params: Value,
 }
 
+/// Recorded execution summary for a single engine command invoked by a control request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ControlRecordedStep {
+    pub command_id: String,
+    pub params: Value,
+    pub mutated: bool,
+}
+
+/// Snapshot of recorded command steps and pre-request session state passed to post-request
+/// persistence hooks (e.g. WAL journaling and snapshot checkpoints).
+#[derive(Debug, Clone)]
+pub struct ControlPostRequestContext<'a> {
+    pub method: &'a str,
+    pub steps: &'a [ControlRecordedStep],
+    pub prev_undo_depth: usize,
+    pub prev_redo_depth: usize,
+    pub prev_dirty: bool,
+}
+
 /// JSON-lines control response emitted by [`handle_control_line`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlResponse {
@@ -421,6 +440,19 @@ pub fn serve_control_listener(app: &mut UiApp, listener: &TcpListener, auth: &Co
     serve_control_listener_with_handler(app, listener, auth, dispatch_request)
 }
 
+/// Serve authenticated loopback JSON-lines requests from `listener` while invoking `on_post_request`
+/// before each response is flushed (for example to flush WAL entries or checkpoints).
+///
+/// # Errors
+/// Propagates listener accept errors.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn serve_control_listener_with_hook<F>(app: &mut UiApp, listener: &TcpListener, auth: &ControlAuth, mut on_post_request: F) -> io::Result<()>
+where
+    F: FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>,
+{
+    serve_control_listener_with_handler(app, listener, auth, |app_ref, req| dispatch_request_with_hook(app_ref, req, &mut on_post_request))
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn serve_control_listener_with_handler<F>(app: &mut UiApp, listener: &TcpListener, auth: &ControlAuth, mut handler: F) -> io::Result<()>
 where
@@ -479,6 +511,24 @@ pub fn serve_control_stream<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut 
 /// Returns an I/O error on underlying stream failure or oversized lines exceeding [`MAX_CONTROL_LINE_BYTES`].
 pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth) -> io::Result<bool> {
     serve_control_stream_with_handler(app, reader, writer, auth, dispatch_request)
+}
+
+/// Serve authenticated JSON-lines requests over `reader`/`writer` while invoking `on_post_request`
+/// before emitting each response, returning `Ok(true)` when `app.quit` stopped the stream.
+///
+/// # Errors
+/// Returns an I/O error on underlying stream failure or oversized lines exceeding [`MAX_CONTROL_LINE_BYTES`].
+pub fn serve_control_stream_with_quit_and_hook<R: BufRead, W: Write, F>(
+    app: &mut UiApp,
+    reader: &mut R,
+    writer: &mut W,
+    auth: &ControlAuth,
+    mut on_post_request: F,
+) -> io::Result<bool>
+where
+    F: FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>,
+{
+    serve_control_stream_with_handler(app, reader, writer, auth, |app_ref, req| dispatch_request_with_hook(app_ref, req, &mut on_post_request))
 }
 
 /// Convenience wrapper around [`serve_control_stream_with_quit`] that validates a raw token string.
@@ -817,6 +867,34 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
 }
 
 fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, ControlLoopAction) {
+    dispatch_request_inner(app, req, None)
+}
+
+fn dispatch_request_with_hook<F>(app: &mut UiApp, req: ControlRequest, on_post_request: &mut F) -> (ControlResponse, ControlLoopAction)
+where
+    F: FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>,
+{
+    let prev_undo_depth = app.session().undo_depth();
+    let prev_redo_depth = app.session().redo_depth();
+    let prev_dirty = app.session().is_dirty();
+    let method = req.method.clone();
+    let id = req.id.clone();
+    let mut steps = Vec::new();
+    let (mut response, action) = dispatch_request_inner(app, req, Some(&mut steps));
+    if action != ControlLoopAction::Quit {
+        let hook_ctx = ControlPostRequestContext { method: &method, steps: &steps, prev_undo_depth, prev_redo_depth, prev_dirty };
+        if let Err(err) = on_post_request(app, &hook_ctx) {
+            response = ControlResponse::err(id, err);
+        }
+    }
+    (response, action)
+}
+
+fn dispatch_request_inner(
+    app: &mut UiApp,
+    req: ControlRequest,
+    mut recorded: Option<&mut Vec<ControlRecordedStep>>,
+) -> (ControlResponse, ControlLoopAction) {
     let ControlRequest { id, method, params } = req;
     if method == "app.quit" {
         return (ControlResponse::ok(id, json!({ "quit": true })), ControlLoopAction::Quit);
@@ -833,14 +911,14 @@ fn dispatch_request(app: &mut UiApp, req: ControlRequest) -> (ControlResponse, C
                 "gui_only": app.is_gui_only(),
             })),
             "command.list" => Ok(handle_command_list(app)),
-            "command.run" => handle_command_run(app, &params),
-            "command.batch" => handle_command_batch(app, &params),
+            "command.run" => handle_command_run(app, &params, recorded.as_deref_mut()),
+            "command.batch" => handle_command_batch(app, &params, recorded),
             "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), &params).map_err(ControlCallError::from),
             "render.svg" => handle_render_svg(app, &params),
             "render.pdf" => handle_render_pdf(app, &params),
             "ui.state" | "state.snapshot" => Ok(handle_ui_state(app)),
-            "engine.execute" => handle_engine_execute(app, &params),
-            _ => dispatch_command_by_id(app, &method, params),
+            "engine.execute" => handle_engine_execute(app, &params, recorded),
+            _ => dispatch_command_by_id(app, &method, params, recorded),
         }
     };
 
@@ -855,7 +933,12 @@ fn is_control_readonly_ui_command(command_id: &str) -> bool {
     matches!(command_id, "ui.canvas.preflight" | "ui.result.inspectDiagnostics" | "result.inspect_diagnostics")
 }
 
-fn dispatch_command_by_id(app: &mut UiApp, command_id: &str, params: Value) -> Result<Value, ControlCallError> {
+fn dispatch_command_by_id(
+    app: &mut UiApp,
+    command_id: &str,
+    params: Value,
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
+) -> Result<Value, ControlCallError> {
     if is_gui_action_method(command_id) {
         return dispatch_gui_action(app, command_id, params).map_err(ControlCallError::from);
     }
@@ -873,7 +956,10 @@ fn dispatch_command_by_id(app: &mut UiApp, command_id: &str, params: Value) -> R
     if let Some(ui_value) = dispatch_ui_command_detailed(app, command_id, &params)? {
         return Ok(ui_value);
     }
-    let outcome = app.execute_control_command(command_id, params)?;
+    let outcome = app.execute_control_command(command_id, params.clone())?;
+    if let Some(steps) = recorded {
+        steps.push(ControlRecordedStep { command_id: command_id.to_owned(), params, mutated: outcome.mutated });
+    }
     serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize command outcome: {err}")))
 }
 
@@ -976,21 +1062,22 @@ fn handle_command_list(app: &UiApp) -> Value {
     })
 }
 
-fn handle_command_run(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+fn handle_command_run(app: &mut UiApp, params: &Value, recorded: Option<&mut Vec<ControlRecordedStep>>) -> Result<Value, ControlCallError> {
     let command_id = extract_command_id(params)?;
     let cmd_params = extract_nested_params(params);
     if command_id == "app.quit" {
         return Err(ControlCallError::from("use top-level method 'app.quit' to shut down the control server"));
     }
-    dispatch_command_by_id(app, &command_id, cmd_params)
+    dispatch_command_by_id(app, &command_id, cmd_params, recorded)
 }
 
-fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+fn handle_command_batch(app: &mut UiApp, params: &Value, mut recorded: Option<&mut Vec<ControlRecordedStep>>) -> Result<Value, ControlCallError> {
     let Some(items) = params.get("commands").and_then(Value::as_array) else {
         return Err(ControlCallError::from("command.batch requires a 'commands' array"));
     };
     let atomic = params.get("atomic").and_then(Value::as_bool).unwrap_or(false);
     let rollback_snapshot = atomic.then(|| app.clone());
+    let mut batch_steps: Vec<ControlRecordedStep> = Vec::new();
 
     let mut results = Vec::with_capacity(items.len());
     for (idx, item) in items.iter().enumerate() {
@@ -999,16 +1086,21 @@ fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, Contro
             Err(err) => {
                 if let Some(snapshot) = rollback_snapshot {
                     *app = snapshot;
+                } else if let Some(out_steps) = recorded.as_deref_mut() {
+                    out_steps.extend(batch_steps);
                 }
                 return Err(ControlCallError::from(format!("batch step {idx}: {err}")));
             }
         };
         let cmd_params = extract_nested_params(item);
-        match dispatch_command_by_id(app, &cmd_id, cmd_params) {
+        let step_sink = recorded.as_ref().map(|_| &mut batch_steps);
+        match dispatch_command_by_id(app, &cmd_id, cmd_params, step_sink) {
             Ok(val) => results.push(json!({ "index": idx, "command": cmd_id, "result": val })),
             Err(err) => {
                 if let Some(snapshot) = rollback_snapshot {
                     *app = snapshot;
+                } else if let Some(out_steps) = recorded.as_deref_mut() {
+                    out_steps.extend(batch_steps);
                 }
                 return Err(ControlCallError {
                     message: format!("batch step {idx} ({cmd_id}) failed (rolled_back={atomic}): {}", err.message),
@@ -1018,6 +1110,10 @@ fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, Contro
         }
     }
 
+    if let Some(out_steps) = recorded {
+        out_steps.extend(batch_steps);
+    }
+
     Ok(json!({
         "atomic": atomic,
         "count": results.len(),
@@ -1025,7 +1121,7 @@ fn handle_command_batch(app: &mut UiApp, params: &Value) -> Result<Value, Contro
     }))
 }
 
-fn handle_engine_execute(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
+fn handle_engine_execute(app: &mut UiApp, params: &Value, recorded: Option<&mut Vec<ControlRecordedStep>>) -> Result<Value, ControlCallError> {
     let cmd_id = params
         .get("command_id")
         .or_else(|| params.get("command"))
@@ -1034,7 +1130,10 @@ fn handle_engine_execute(app: &mut UiApp, params: &Value) -> Result<Value, Contr
         .filter(|s| !s.is_empty())
         .ok_or_else(|| ControlCallError::from("engine.execute requires non-empty 'command_id'"))?;
     let cmd_params = params.get("params").cloned().unwrap_or(Value::Null);
-    let outcome = app.execute_control_command(cmd_id, cmd_params)?;
+    let outcome = app.execute_control_command(cmd_id, cmd_params.clone())?;
+    if let Some(steps) = recorded {
+        steps.push(ControlRecordedStep { command_id: cmd_id.to_owned(), params: cmd_params, mutated: outcome.mutated });
+    }
     serde_json::to_value(outcome).map_err(|err| ControlCallError::from(format!("failed to serialize engine outcome: {err}")))
 }
 

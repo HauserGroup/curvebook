@@ -574,3 +574,208 @@ fn verify_prism_zip_roundtrip(doc: &ProjectDocument, pzfx: &str) {
     assert_eq!(pzfx_prism_report.document.data_sheets.len(), 5);
     assert_eq!(pzfx_prism_report.document.info_sheets.len(), 1);
 }
+
+#[test]
+fn r1_s06_02_snapshot_covered_seq_prevents_double_apply_across_mid_checkpoint_crash_and_legacy_fail_clear() {
+    struct FailClearBackend {
+        inner: MemoryJournalBackend,
+    }
+
+    impl JournalBackend for FailClearBackend {
+        fn acquire_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<Option<JournalLockLease>, FormatError> {
+            self.inner.acquire_lease(lease, now_epoch_ms)
+        }
+
+        fn renew_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<(), FormatError> {
+            self.inner.renew_lease(lease, now_epoch_ms)
+        }
+
+        fn release_lease(&mut self, owner_id: &str) -> Result<(), FormatError> {
+            self.inner.release_lease(owner_id)
+        }
+
+        fn read_lease(&self) -> Result<Option<JournalLockLease>, FormatError> {
+            self.inner.read_lease()
+        }
+
+        fn write_snapshot_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+            self.inner.write_snapshot_atomic(bytes)
+        }
+
+        fn read_snapshot(&self) -> Result<Option<Vec<u8>>, FormatError> {
+            self.inner.read_snapshot()
+        }
+
+        fn append_journal_line(&mut self, ndjson_line: &str) -> Result<(), FormatError> {
+            self.inner.append_journal_line(ndjson_line)
+        }
+
+        fn read_journal_bytes(&self) -> Result<Vec<u8>, FormatError> {
+            self.inner.read_journal_bytes()
+        }
+
+        fn replace_journal_bytes_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+            self.inner.replace_journal_bytes_atomic(bytes)
+        }
+
+        fn clear_journal(&mut self) -> Result<(), FormatError> {
+            Err(FormatError::Io(String::from("simulated clear_journal failure")))
+        }
+    }
+
+    // 1. Legacy JournalBackend override (only original 10 methods) where clear_journal fails mid-checkpoint.
+    let (mut legacy_journal, _) =
+        CrashRecoveryJournal::open_or_recover(FailClearBackend { inner: MemoryJournalBackend::new() }, "legacy-1", 2_000, 1_000)
+            .expect("open legacy backend");
+    let seq1 = legacy_journal.record_command(serde_json::json!({ "op": "inc", "delta": 1 })).expect("seq1");
+    let seq2 = legacy_journal.record_command(serde_json::json!({ "op": "inc", "delta": 2 })).expect("seq2");
+    assert_eq!((seq1, seq2), (1, 2));
+    assert!(legacy_journal.checkpoint(b"SNAPSHOT-SEQ-2").is_err(), "FailClear must error on clear_journal");
+    let crashed_legacy = legacy_journal.abandon();
+    let (reopened_legacy, legacy_report) =
+        CrashRecoveryJournal::open_or_recover(crashed_legacy, "legacy-2", 2_000, 4_000).expect("recover after FailClear");
+    assert_eq!(legacy_report.snapshot.as_deref(), Some(b"SNAPSHOT-SEQ-2".as_slice()));
+    assert_eq!(legacy_report.snapshot_covered_seq, Some(2));
+    assert!(legacy_report.recovered_commands.is_empty(), "seq <= covered_seq must not double-apply");
+    assert!(reopened_legacy.next_seq() >= 3);
+
+    // 2. Native DirectoryJournalBackend: atomic snapshot + covered_seq survives crash before clear_journal
+    //    and mid-promotion (when pending sidecar matches new snapshot while old meta sidecar still exists).
+    let dir = TempRecoveryDir::new("s06-02-covered-seq");
+    let (mut dir_journal, _) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir.path).expect("dir"), "dir-1", 2_000, 1_000)
+            .expect("open dir journal");
+    dir_journal.record_command(serde_json::json!({ "op": "c1" })).expect("dir c1");
+    dir_journal.record_command(serde_json::json!({ "op": "c2" })).expect("dir c2");
+    // Simulate crash right after snapshot promotion before ops.journal clear by writing snapshot+meta with covered_seq=2.
+    dir_journal.backend_mut().write_snapshot_with_seq(b"DIR-SNAP-2", 2).expect("write snapshot with seq");
+    let seq3 = dir_journal.record_command(serde_json::json!({ "op": "c3" })).expect("dir c3");
+    assert_eq!(seq3, 3);
+    drop(dir_journal.abandon());
+
+    let (dir_reopened, dir_report) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir.path).expect("reopen dir"), "dir-2", 2_000, 4_000)
+            .expect("recover dir journal");
+    assert_eq!(dir_report.snapshot.as_deref(), Some(b"DIR-SNAP-2".as_slice()));
+    assert_eq!(dir_report.snapshot_covered_seq, Some(2));
+    assert_eq!(dir_report.recovered_seqs, vec![3]);
+    assert_eq!(dir_report.recovered_commands, vec![serde_json::json!({ "op": "c3" })]);
+
+    // Also simulate interrupted pending meta promotion cleanly resolved against snapshot checksum.
+    let crashed_after_meta = dir_reopened.abandon();
+    fs::write(dir.path.join(SNAPSHOT_FILE_NAME), b"DIR-SNAP-3").expect("write snap3");
+    fs::write(
+        dir.path.join("snapshot.meta.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "format_version": 1,
+            "covered_seq": 1,
+            "snapshot_crc32": 0,
+            "snapshot_len": 1
+        }))
+        .expect("old meta"),
+    )
+    .expect("write stale meta");
+    fs::write(
+        dir.path.join("snapshot.pending.meta.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "format_version": 1,
+            "covered_seq": 3,
+            "snapshot_crc32": crc32fast::hash(b"DIR-SNAP-3"),
+            "snapshot_len": b"DIR-SNAP-3".len()
+        }))
+        .expect("pending meta"),
+    )
+    .expect("write pending meta");
+    let (dir_pending_reopened, pending_report) =
+        CrashRecoveryJournal::open_or_recover(crashed_after_meta, "dir-3", 2_000, 7_000).expect("recover pending meta");
+    assert_eq!(pending_report.snapshot_covered_seq, Some(3));
+    assert!(pending_report.recovered_commands.is_empty());
+
+    // After clean close, fresh session resets next_seq=1 and covered_seq is cleared so new seq=1 is not skipped.
+    let clean_backend = dir_pending_reopened.close_cleanly(b"DIR-FINAL").expect("clean close");
+    let (mut fresh_journal, fresh_report) = CrashRecoveryJournal::open_or_recover(clean_backend, "dir-4", 2_000, 8_000).expect("fresh open");
+    assert_eq!(fresh_journal.next_seq(), 1);
+    assert_eq!(fresh_report.snapshot_covered_seq, None);
+    let fresh_seq = fresh_journal.record_command(serde_json::json!({ "op": "fresh-after-clean-close" })).expect("fresh seq1");
+    assert_eq!(fresh_seq, 1);
+    drop(fresh_journal.abandon());
+
+    let (_, after_fresh_crash) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir.path).expect("open"), "dir-5", 2_000, 12_000)
+            .expect("recover fresh seq1");
+    assert_eq!(after_fresh_crash.recovered_seqs, vec![1]);
+}
+
+#[test]
+fn r1_s06_03_interior_corrupt_and_short_write_lines_are_quarantined_with_warnings() {
+    // 1. MemoryJournalBackend: torn interior write without trailing '\n' + later records + bad tail.
+    let (mut mem_journal, _) = CrashRecoveryJournal::open_or_recover(MemoryJournalBackend::new(), "mem-1", 3_000, 1_000).expect("open mem");
+    let cmd1 = serde_json::json!({ "step": 1 });
+    let cmd2 = serde_json::json!({ "step": 2 });
+    let cmd3 = serde_json::json!({ "step": 3 });
+    mem_journal.record_command(cmd1.clone()).expect("cmd1");
+    // Simulate torn short write lacking '\n' right in the middle of ops.journal.
+    mem_journal.backend_mut().append_raw_journal_bytes(b"{\"format_version\":1,\"seq\":99");
+    // Subsequent record_command must NOT glue onto the torn prefix line.
+    mem_journal.record_command(cmd2.clone()).expect("cmd2");
+    mem_journal.record_command(cmd3.clone()).expect("cmd3");
+    // Also inject an invalid-UTF-8 corrupt tail.
+    mem_journal.backend_mut().append_raw_journal_bytes(b"\xff\xfe{\"truncated\":");
+
+    let crashed_mem = mem_journal.abandon();
+    let (mem_recovered, mem_report) =
+        CrashRecoveryJournal::open_or_recover(crashed_mem, "mem-2", 3_000, 5_000).expect("interior corruption must recover intact commands");
+    assert_eq!(mem_report.recovered_commands, vec![cmd1.clone(), cmd2.clone(), cmd3.clone()]);
+    assert_eq!(mem_report.recovered_seqs, vec![1, 2, 3]);
+    assert_eq!(mem_report.discarded_corrupt_interior_lines, 1);
+    assert_eq!(mem_report.discarded_corrupt_tail_lines, 1);
+    assert_eq!(mem_report.total_discarded_corrupt_lines(), 2);
+    assert_eq!(mem_report.warnings.len(), 2);
+    assert_eq!(mem_report.warnings[0].kind, "corrupt_interior_line");
+    assert_eq!(mem_report.warnings[1].kind, "corrupt_tail_line");
+    drop(mem_recovered.abandon());
+
+    // Subsequent open on rewritten journal observes 0 warnings.
+    let (_, clean_mem_report) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&TempRecoveryDir::new("unused").path).expect("dir"), "x", 1, 1)
+            .expect("empty");
+    assert!(clean_mem_report.warnings.is_empty());
+
+    // 2. DirectoryJournalBackend: interior partial JSON + valid later writes on real disk.
+    let dir = TempRecoveryDir::new("s06-03-dir-interior");
+    let (mut dir_journal, _) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir.path).expect("dir"), "d1", 2_000, 1_000).expect("open dir");
+    dir_journal.record_command(cmd1.clone()).expect("d cmd1");
+    {
+        use std::io::Write;
+        let mut f = fs::OpenOptions::new().append(true).open(dir.path.join(JOURNAL_FILE_NAME)).expect("open raw ops.journal");
+        f.write_all(b"{\"format_version\":1,\"seq\":2,\"partial").expect("write short partial");
+        f.sync_data().expect("sync partial");
+    }
+    dir_journal.record_command(cmd2.clone()).expect("d cmd2 after partial");
+    dir_journal.record_command(cmd3.clone()).expect("d cmd3");
+    drop(dir_journal.abandon());
+
+    let (reopened_dir, dir_report) =
+        CrashRecoveryJournal::open_or_recover(DirectoryJournalBackend::open_dir(&dir.path).expect("dir"), "d2", 2_000, 4_000)
+            .expect("recover dir interior");
+    assert_eq!(dir_report.recovered_commands, vec![cmd1, cmd2, cmd3]);
+    assert_eq!(dir_report.recovered_seqs, vec![1, 2, 3]);
+    assert_eq!(dir_report.discarded_corrupt_interior_lines, 1);
+    assert_eq!(dir_report.warnings.len(), 1);
+    assert_eq!(dir_report.warnings[0].kind, "corrupt_interior_line");
+    let rewritten_backend = reopened_dir.close_cleanly(b"DONE").expect("close cleanly");
+    assert!(rewritten_backend.journal_bytes_or_empty().is_empty());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+trait DirBackendBytesExt {
+    fn journal_bytes_or_empty(&self) -> Vec<u8>;
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl DirBackendBytesExt for DirectoryJournalBackend {
+    fn journal_bytes_or_empty(&self) -> Vec<u8> {
+        self.read_journal_bytes().unwrap_or_default()
+    }
+}

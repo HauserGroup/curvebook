@@ -6,6 +6,8 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::{BufRead, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -13,13 +15,16 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use lumencraft_doc::{CellCoord, ProjectDocument, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableKind};
 use lumencraft_engine::{CommandOutcome, Session};
 use lumencraft_format::{
-    CrashRecoveryJournal, DirectoryJournalBackend, FormatKind, FormatRegistry, ImportOptions, JournalBackend, RecoveryReport,
+    CrashRecoveryJournal, DirectoryJournalBackend, FormatKind, FormatRegistry, ImportOptions, JournalBackend, JournalRecoveryWarning, RecoveryReport,
     instantiate_template_bytes, is_unpacked_project_dir,
 };
 use lumencraft_ui_egui::interaction::{KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics};
 use lumencraft_ui_egui::menus::{MenuSectionTooltips, menu_bar_tooltips};
 use lumencraft_ui_egui::theme::UiThemeMode;
-use lumencraft_ui_egui::{ClipboardBundle, UiApp, dispatch_ui_command, read_os_pasteboard, write_os_clipboard_bundle, write_os_pasteboard};
+use lumencraft_ui_egui::{
+    ClipboardBundle, ControlAuth, ControlPostRequestContext, UiApp, dispatch_ui_command, read_os_pasteboard, serve_control_listener_with_hook,
+    serve_control_stream_with_quit_and_hook, write_os_clipboard_bundle, write_os_pasteboard,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -503,6 +508,51 @@ fn claim_isolated_journal_dir(root: &Path, new_instance: bool, window_id: Deskto
     Ok(chosen)
 }
 
+fn is_readonly_control_method(method: &str) -> bool {
+    matches!(method, "ping" | "command.list" | "doc.inspect" | "render.svg" | "render.pdf" | "ui.state" | "state.snapshot" | "app.quit")
+}
+
+fn apply_control_journal_steps(
+    app: &UiApp,
+    recovery_journal: &mut Option<CrashRecoveryJournal<DirectoryJournalBackend>>,
+    dirty_commands: &mut Vec<String>,
+    ctx: &ControlPostRequestContext<'_>,
+) -> Result<(), String> {
+    let mut recorded_any_step = false;
+    for step in ctx.steps {
+        if step.mutated {
+            recorded_any_step = true;
+            dirty_commands.push(step.command_id.clone());
+            if let Some(journal) = recovery_journal.as_mut() {
+                app.session()
+                    .record_outcome_to_journal(journal, &step.command_id, &step.params, true)
+                    .map_err(|err| format!("failed to record control WAL entry `{}`: {err}", step.command_id))?;
+            }
+        } else if step.command_id == "project.save" && !app.session().is_dirty() {
+            recorded_any_step = true;
+            dirty_commands.clear();
+            if let Some(journal) = recovery_journal.as_mut() {
+                app.session().checkpoint_journal(journal).map_err(|err| format!("failed to checkpoint control WAL after save: {err}"))?;
+            }
+        }
+    }
+
+    if !recorded_any_step && !is_readonly_control_method(ctx.method) {
+        let now_dirty = app.session().is_dirty();
+        let stack_changed = app.session().undo_depth() != ctx.prev_undo_depth || app.session().redo_depth() != ctx.prev_redo_depth;
+        let became_dirty = !ctx.prev_dirty && now_dirty;
+        if stack_changed || became_dirty {
+            dirty_commands.push(ctx.method.to_owned());
+            if let Some(journal) = recovery_journal.as_mut() {
+                app.session()
+                    .checkpoint_journal(journal)
+                    .map_err(|err| format!("failed to checkpoint control UI mutation `{}`: {err}", ctx.method))?;
+            }
+        }
+    }
+    Ok(())
+}
+
 fn configure_app_overrides(app: &mut UiApp, cfg: &DesktopHostConfig) -> Result<(), String> {
     if let Some(locale) = cfg.locale_override.as_deref() {
         let _ = app.set_locale(locale);
@@ -530,6 +580,7 @@ pub struct DesktopWindowSession {
     recovery_dir: Option<PathBuf>,
     recovery_journal: Option<CrashRecoveryJournal<DirectoryJournalBackend>>,
     recovered_from_crash: bool,
+    recovery_warnings: Vec<JournalRecoveryWarning>,
     hovered_files: Vec<PathBuf>,
     ime_preedit: Option<ImePreeditState>,
     coasting_active: bool,
@@ -585,10 +636,22 @@ impl DesktopWindowSession {
         self.recovery_dir.as_deref()
     }
 
-    /// Whether opening this window recovered a stale lock or WAL commands from a previous crash.
+    /// Whether opening this window recovered a stale lock, WAL commands, or damaged entries from a previous crash.
     #[must_use]
     pub const fn recovered_from_crash(&self) -> bool {
         self.recovered_from_crash
+    }
+
+    /// Whether an active crash-recovery journal is attached to this window.
+    #[must_use]
+    pub const fn has_recovery_journal(&self) -> bool {
+        self.recovery_journal.is_some()
+    }
+
+    /// Structured WAL recovery warnings recorded when opening this window, if any.
+    #[must_use]
+    pub fn recovery_warnings(&self) -> &[JournalRecoveryWarning] {
+        &self.recovery_warnings
     }
 
     /// Paths currently hovering over this window between `FileHovered` and `FileDropped`/`FileHoverCancelled`.
@@ -646,8 +709,9 @@ impl DesktopWindowSession {
         }
     }
 
-    /// Execute an engine command against this window, tracking `dirty_commands` and appending to the
-    /// isolated crash-recovery WAL journal when mutated.
+    /// Execute an engine command against this window, tracking `dirty_commands` and persisting to
+    /// the crash-recovery WAL journal when mutated (atomically checkpointing undo/redo and
+    /// external-file readers).
     ///
     /// # Errors
     /// Returns an error if command execution or WAL journaling fails.
@@ -656,10 +720,9 @@ impl DesktopWindowSession {
         if outcome.mutated {
             self.dirty_commands.push(command_id.to_owned());
             if let Some(journal) = &mut self.recovery_journal {
-                let _seq = self
-                    .app
+                self.app
                     .session()
-                    .record_to_journal(journal, command_id, &params)
+                    .record_outcome_to_journal(journal, command_id, &params, outcome.mutated)
                     .map_err(|err| format!("failed to record WAL entry `{command_id}`: {err}"))?;
             }
         } else if command_id == "project.save" && !self.app.session().is_dirty() {
@@ -668,6 +731,39 @@ impl DesktopWindowSession {
         }
         self.app.sync_views();
         Ok(outcome)
+    }
+
+    /// Serve authenticated TCP `--control` requests while recording every mutating engine/UI step
+    /// into this window's crash-recovery journal before responding.
+    ///
+    /// # Errors
+    /// Propagates listener accept or I/O errors.
+    pub fn serve_control_listener(&mut self, listener: &TcpListener, auth: &ControlAuth) -> std::io::Result<()> {
+        let app = &mut self.app;
+        let recovery_journal = &mut self.recovery_journal;
+        let dirty_commands = &mut self.dirty_commands;
+        serve_control_listener_with_hook(app, listener, auth, |app_ref, hook_ctx| {
+            apply_control_journal_steps(app_ref, recovery_journal, dirty_commands, hook_ctx)
+        })
+    }
+
+    /// Serve authenticated stream control requests (`BufRead`/`Write`) while recording every
+    /// mutating engine/UI step into this window's crash-recovery journal before responding.
+    ///
+    /// # Errors
+    /// Propagates underlying stream I/O errors or oversized control-line rejections.
+    pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(
+        &mut self,
+        reader: &mut R,
+        writer: &mut W,
+        auth: &ControlAuth,
+    ) -> std::io::Result<bool> {
+        let app = &mut self.app;
+        let recovery_journal = &mut self.recovery_journal;
+        let dirty_commands = &mut self.dirty_commands;
+        serve_control_stream_with_quit_and_hook(app, reader, writer, auth, |app_ref, hook_ctx| {
+            apply_control_journal_steps(app_ref, recovery_journal, dirty_commands, hook_ctx)
+        })
     }
 
     /// Persist a full `.lumencraft` recovery snapshot and truncate replayed WAL entries.
@@ -865,6 +961,23 @@ impl DesktopHostRuntime {
         self.open_window_internal(session, None, viewport, attach_recovery, current_epoch_ms())
     }
 
+    /// Open a new desktop window wrapping a pre-constructed [`Session`] and an already-opened
+    /// [`CrashRecoveryJournal`] (for example single-instance startup recovery).
+    ///
+    /// # Errors
+    /// Returns an error if theme/locale configuration fails.
+    pub fn open_window_with_recovery(
+        &mut self,
+        session: Session,
+        viewport: ViewportMetrics,
+        recovery_dir: PathBuf,
+        journal: CrashRecoveryJournal<DirectoryJournalBackend>,
+        report: Option<RecoveryReport>,
+    ) -> Result<DesktopWindowId, String> {
+        let id = DesktopWindowId(self.next_window_id);
+        self.install_window_session(id, session, viewport, Some((recovery_dir, journal, report)))
+    }
+
     /// Re-open and crash-recover a window directly from an abandoned journal directory `recovery_dir`.
     ///
     /// # Errors
@@ -932,16 +1045,22 @@ impl DesktopHostRuntime {
         let mut app = UiApp::from_session(session);
         configure_app_overrides(&mut app, &self.config)?;
 
-        let (recovery_dir, recovery_journal, recovered_from_crash, recovered_cmds) = match recovery {
+        let (recovery_dir, recovery_journal, recovered_from_crash, recovery_warnings, recovered_cmds) = match recovery {
             Some((dir, journal, report_opt)) => {
-                let recovered = report_opt.as_ref().is_some_and(|r| r.recovered_from_stale_lock.is_some() || !r.recovered_commands.is_empty());
+                let recovered = report_opt.as_ref().is_some_and(|r| {
+                    r.recovered_from_stale_lock.is_some()
+                        || !r.recovered_commands.is_empty()
+                        || r.total_discarded_corrupt_lines() > 0
+                        || !r.warnings.is_empty()
+                });
+                let warnings = report_opt.as_ref().map(|r| r.warnings.clone()).unwrap_or_default();
                 let cmds: Vec<String> = report_opt
                     .as_ref()
                     .map(|r| r.recovered_commands.iter().filter_map(|v| v.get("command_id").and_then(Value::as_str).map(ToOwned::to_owned)).collect())
                     .unwrap_or_default();
-                (Some(dir), Some(journal), recovered, cmds)
+                (Some(dir), Some(journal), recovered, warnings, cmds)
             }
-            None => (None, None, false, Vec::new()),
+            None => (None, None, false, Vec::new(), Vec::new()),
         };
 
         for win in self.windows.values_mut() {
@@ -961,6 +1080,7 @@ impl DesktopHostRuntime {
             recovery_dir,
             recovery_journal,
             recovered_from_crash,
+            recovery_warnings,
             hovered_files: Vec::new(),
             ime_preedit: None,
             coasting_active: false,

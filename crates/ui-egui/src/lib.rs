@@ -35,13 +35,15 @@ pub use compositor::{
     render_workspace_rgba,
 };
 pub use control_io::{
-    CONTROL_AUTH_TOKEN_BYTES, CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, ControlLoopAction, ControlRequest, ControlResponse,
-    MAX_CONTROL_LINE_BYTES, MAX_CONTROL_TOKEN_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_gui_action, dispatch_ui_command, handle_control_line,
-    handle_control_line_with_action, is_http_request_line, parse_control_port, serve_control_stream, serve_control_stream_with_quit,
-    serve_control_stream_with_quit_and_token,
+    CONTROL_AUTH_TOKEN_BYTES, CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, ControlLoopAction, ControlPostRequestContext, ControlRecordedStep,
+    ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, MAX_CONTROL_TOKEN_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_gui_action,
+    dispatch_ui_command, handle_control_line, handle_control_line_with_action, is_http_request_line, parse_control_port, serve_control_stream,
+    serve_control_stream_with_quit, serve_control_stream_with_quit_and_hook, serve_control_stream_with_quit_and_token,
 };
 #[cfg(not(target_arch = "wasm32"))]
-pub use control_io::{bind_control_tcp_listener, run_control_tcp_server, serve_control_listener, validate_loopback_addr};
+pub use control_io::{
+    bind_control_tcp_listener, run_control_tcp_server, serve_control_listener, serve_control_listener_with_hook, validate_loopback_addr,
+};
 pub use dialogs_canvas::{
     ActiveDialog, AssumptionDiagnosticBanner, CanvasDialogState, ConvertArchetypeDialogState, ExcludeWithReasonDialogState, PrintDialogState,
     RemediationKind, SplitWorkspaceState,
