@@ -179,15 +179,19 @@ fn parse_table_element(
     let title = clamp_title(&raw_title, &id, warnings);
 
     let kind = resolve_table_kind(table_el.attr("TableType"), &id, warnings);
-    let replicates = table_el.attr("Replicates").and_then(|s| s.trim().parse::<usize>().ok()).unwrap_or(1);
+    let explicit_replicates = table_el.attr("Replicates").and_then(|s| s.trim().parse::<usize>().ok());
+    let replicates = explicit_replicates.unwrap_or(1);
     if replicates > 0 {
         validate_subcolumns(replicates)?;
     }
     let y_format = table_el.attr("YFormat").or_else(|| table_el.attr("EVFormat"));
-    let subcolumn_mode = resolve_subcolumn_mode(kind, y_format, replicates, &id, warnings)?;
+    let initial_subcolumn_mode = resolve_subcolumn_mode(kind, y_format, replicates, &id, warnings)?;
 
-    let row_titles_raw =
-        table_el.first_child("RowTitlesColumn").map(|el| extract_column_subcolumns(el).into_iter().next().unwrap_or_default()).unwrap_or_default();
+    let row_titles_el = table_el.first_child("RowTitlesColumn");
+    let row_titles_declared_subs = row_titles_el.map(parse_subcolumns_attr).transpose()?.flatten();
+    let row_titles_cols = row_titles_el.map(extract_column_subcolumns).unwrap_or_default();
+    warn_discarded_subcolumns(warnings, (&id, &title), "RowTitlesColumn", row_titles_cols.len(), row_titles_declared_subs, 1, "row-title column");
+    let row_titles_raw = row_titles_cols.into_iter().next().unwrap_or_default();
     let row_titles: Vec<String> = row_titles_raw
         .into_iter()
         .map(|c| match c.value {
@@ -198,37 +202,56 @@ fn parse_table_element(
         .collect();
 
     let x_el = table_el.first_child("XColumn");
+    let x_declared_subs = x_el.map(parse_subcolumns_attr).transpose()?.flatten();
     let x_title = x_el
         .and_then(|el| el.first_child("Title"))
         .map(|el| clamp_title(el.plain_text().trim(), &id, warnings))
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| String::from("X"));
     let x_cols = x_el.map(extract_column_subcolumns).unwrap_or_default();
+    let x_mode = resolve_x_mode(table_el, &x_cols, x_declared_subs)?;
 
     let y_elements: Vec<&XmlElement> =
         table_el.children_named("YColumn").chain(table_el.children_named("Column")).chain(table_el.children_named("VariableColumn")).collect();
     validate_data_sets(y_elements.len())?;
 
-    let mut parsed_y: Vec<(String, Vec<Vec<Cell>>)> = Vec::with_capacity(y_elements.len());
-    let mut nested_sub_titles: Vec<Vec<Option<String>>> = Vec::with_capacity(y_elements.len());
+    let mut parsed_y: Vec<ParsedYColumn> = Vec::with_capacity(y_elements.len());
     for (c_idx, y_el) in y_elements.iter().enumerate() {
         let col_title = y_el
             .first_child("Title")
             .map(|el| clamp_title(el.plain_text().trim(), &id, warnings))
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| default_column_label(c_idx));
-        let (sub_titles, subs) = extract_labeled_subcolumns(y_el, &id, warnings);
-        parsed_y.push((col_title, subs));
-        nested_sub_titles.push(sub_titles);
+        let declared_subcolumns = parse_subcolumns_attr(y_el)?;
+        let (sub_titles, subcolumns) = extract_labeled_subcolumns(y_el, &id, warnings);
+        parsed_y.push(ParsedYColumn { title: col_title, declared_subcolumns, sub_titles, subcolumns });
     }
 
-    let max_y_rows = parsed_y.iter().flat_map(|(_, subs)| subs.iter().map(Vec::len)).max().unwrap_or(0);
+    let subcolumn_mode = widen_y_subcolumn_mode(kind, initial_subcolumn_mode, &parsed_y)?;
+
+    let max_y_rows = parsed_y.iter().flat_map(|col| col.subcolumns.iter().map(Vec::len)).max().unwrap_or(0);
     let max_x_rows = x_cols.iter().map(Vec::len).max().unwrap_or(0);
     let row_count = row_titles.len().max(max_x_rows).max(max_y_rows);
     validate_rows(row_count)?;
 
+    let mut padded_row_titles = row_titles;
+    padded_row_titles.resize(row_count, String::new());
+    let has_row_titles = padded_row_titles.iter().any(|s| !s.is_empty());
+
+    warn_discarded_x_subcolumns(warnings, (&id, &title), kind, &x_mode, &x_title, &x_cols, x_declared_subs, has_row_titles);
+    if kind != TableKind::Nested {
+        let allowed_y_subs = match kind {
+            TableKind::Contingency | TableKind::Survival | TableKind::PartsOfWhole | TableKind::MultipleVariables => 1,
+            _ => subcolumn_mode.subcolumn_count(),
+        };
+        let mode_desc = format!("{kind:?} mode {subcolumn_mode:?}");
+        for col in &parsed_y {
+            warn_discarded_subcolumns(warnings, (&id, &title), &col.title, col.subcolumns.len(), col.declared_subcolumns, allowed_y_subs, &mode_desc);
+        }
+    }
+
     let remaining_cells = MAX_IMPORT_CELLS.saturating_sub(used_cells);
-    let table_cells = estimate_table_cells(kind, subcolumn_mode, table_el, &x_cols, &parsed_y, row_count)?;
+    let table_cells = estimate_table_cells(kind, subcolumn_mode, &x_mode, &parsed_y, row_count)?;
     if table_cells > remaining_cells {
         return Err(FormatError::XmlParse {
             offset: 0,
@@ -238,31 +261,133 @@ fn parse_table_element(
         });
     }
 
-    let mut padded_row_titles = row_titles;
-    padded_row_titles.resize(row_count, String::new());
-    let has_row_titles = padded_row_titles.iter().any(|s| !s.is_empty());
-
-    let mut arch = build_table_archetype(kind, subcolumn_mode, table_el, &x_title, &x_cols, &parsed_y, padded_row_titles, has_row_titles, row_count)?;
+    let mut arch = build_table_archetype(kind, subcolumn_mode, x_mode, &x_title, &x_cols, &parsed_y, padded_row_titles, has_row_titles, row_count)?;
     if let TableArchetype::Nested(ref mut nested) = arch {
+        let nested_sub_titles: Vec<Vec<Option<String>>> = parsed_y.iter().map(|col| col.sub_titles.clone()).collect();
         apply_nested_subcolumn_titles(nested, &nested_sub_titles);
     }
 
     Ok(DataSheet::new(SheetId::new(id), title, arch)?)
 }
 
+struct ParsedYColumn {
+    title: String,
+    declared_subcolumns: Option<usize>,
+    sub_titles: Vec<Option<String>>,
+    subcolumns: Vec<Vec<Cell>>,
+}
+
+fn parse_subcolumns_attr(el: &XmlElement) -> Result<Option<usize>, FormatError> {
+    let Some(raw) = el.attr("Subcolumns").map(str::trim).filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    let Ok(count) = raw.parse::<usize>() else {
+        return Ok(None);
+    };
+    if count == 0 {
+        return Ok(None);
+    }
+    validate_subcolumns(count)?;
+    Ok(Some(count))
+}
+
+fn widen_y_subcolumn_mode(kind: TableKind, resolved: SubcolumnMode, parsed_y: &[ParsedYColumn]) -> Result<SubcolumnMode, FormatError> {
+    let max_requested = parsed_y.iter().map(|col| col.subcolumns.len().max(col.declared_subcolumns.unwrap_or(0))).max().unwrap_or(0);
+    if matches!(kind, TableKind::Xy | TableKind::Grouped) && !resolved.is_pre_summarized() {
+        let widened = resolved.subcolumn_count().max(max_requested).max(usize::from(kind == TableKind::Grouped));
+        if widened > 1 || matches!(resolved, SubcolumnMode::RawReplicates(_)) {
+            validate_subcolumns(widened)?;
+            return Ok(SubcolumnMode::RawReplicates(widened));
+        }
+    }
+    Ok(resolved)
+}
+
+fn warn_discarded_subcolumns(
+    warnings: &mut Vec<ImportWarning>,
+    table: (&str, &str),
+    col_label: &str,
+    actual_subs: usize,
+    declared_subs: Option<usize>,
+    allowed_subs: usize,
+    mode_desc: &str,
+) {
+    let (table_id, table_title) = table;
+    let requested = actual_subs.max(declared_subs.unwrap_or(0));
+    if requested <= allowed_subs {
+        return;
+    }
+    let discarded = actual_subs.saturating_sub(allowed_subs);
+    let declared_note = declared_subs.map_or_else(String::new, |k| format!(", Subcolumns=\"{k}\""));
+    let action = if discarded > 0 {
+        format!("discarded {discarded} subcolumn(s) (kept {allowed_subs} of {actual_subs})")
+    } else {
+        let excess = requested.saturating_sub(allowed_subs);
+        format!("ignored {excess} declared subcolumn slot(s) beyond capacity ({allowed_subs})")
+    };
+    warnings.push(ImportWarning::new(
+        ImportWarningKind::CoercedValue,
+        table_id,
+        format!(
+            "table `{table_id}` (`{table_title}`) column `{col_label}` has {actual_subs} subcolumn(s){declared_note} exceeding {mode_desc} capacity ({allowed_subs}); {action}"
+        ),
+    ));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn warn_discarded_x_subcolumns(
+    warnings: &mut Vec<ImportWarning>,
+    table: (&str, &str),
+    kind: TableKind,
+    x_mode: &XColumnMode,
+    x_title: &str,
+    x_cols: &[Vec<Cell>],
+    x_declared_subs: Option<usize>,
+    has_row_titles: bool,
+) {
+    let col_label = format!("XColumn ({x_title})");
+    match kind {
+        TableKind::Xy => {
+            warn_discarded_subcolumns(
+                warnings,
+                table,
+                &col_label,
+                x_cols.len(),
+                x_declared_subs,
+                x_mode.subcolumn_count(),
+                &format!("XY X-column mode {x_mode:?}"),
+            );
+        }
+        TableKind::Survival => {
+            warn_discarded_subcolumns(warnings, table, &col_label, x_cols.len(), x_declared_subs, 1, "Survival time column");
+        }
+        TableKind::PartsOfWhole => {
+            if !has_row_titles {
+                warn_discarded_subcolumns(warnings, table, &col_label, x_cols.len(), x_declared_subs, 1, "PartsOfWhole slice-label column");
+            } else if x_cols.iter().any(|s| !s.is_empty()) || x_declared_subs.is_some() {
+                warn_discarded_subcolumns(warnings, table, &col_label, x_cols.len(), x_declared_subs, 0, "PartsOfWhole table with RowTitlesColumn");
+            }
+        }
+        TableKind::Column | TableKind::Grouped | TableKind::Contingency | TableKind::MultipleVariables | TableKind::Nested => {
+            if x_cols.iter().any(|s| !s.is_empty()) || x_declared_subs.is_some() {
+                warn_discarded_subcolumns(warnings, table, &col_label, x_cols.len(), x_declared_subs, 0, &format!("{kind:?} table (no X column)"));
+            }
+        }
+    }
+}
+
 fn estimate_table_cells(
     kind: TableKind,
     subcolumn_mode: SubcolumnMode,
-    table_el: &XmlElement,
-    x_cols: &[Vec<Cell>],
-    parsed_y: &[(String, Vec<Vec<Cell>>)],
+    x_mode: &XColumnMode,
+    parsed_y: &[ParsedYColumn],
     row_count: usize,
 ) -> Result<usize, FormatError> {
     let overflow = || FormatError::XmlParse { offset: 0, reason: format!("table cell count overflows budget cap of {MAX_IMPORT_CELLS}") };
     match kind {
         TableKind::Xy => {
             validate_subcolumns(subcolumn_mode.subcolumn_count())?;
-            let x_subs = resolve_x_mode(table_el, x_cols).subcolumn_count();
+            let x_subs = x_mode.subcolumn_count();
             let y_cols = parsed_y.len().checked_mul(subcolumn_mode.subcolumn_count()).ok_or_else(overflow)?;
             let total_cols = x_subs.checked_add(y_cols).ok_or_else(overflow)?;
             total_cols.checked_mul(row_count).ok_or_else(overflow)
@@ -278,11 +403,11 @@ fn estimate_table_cells(
             total_cols.checked_mul(row_count).ok_or_else(overflow)
         }
         TableKind::Nested => {
-            let max_units = parsed_y.iter().map(|(_, subs)| subs.len()).max().unwrap_or(1).max(1);
+            let max_units = parsed_y.iter().map(|col| col.subcolumns.len().max(col.declared_subcolumns.unwrap_or(0))).max().unwrap_or(1).max(1);
             validate_subcolumns(max_units)?;
             let mut total: usize = 0;
-            for (_, subs) in parsed_y {
-                let units = subs.len().max(1);
+            for col in parsed_y {
+                let units = col.subcolumns.len().max(col.declared_subcolumns.unwrap_or(0)).max(1);
                 let group_cells = units.checked_mul(row_count).ok_or_else(overflow)?;
                 total = total.checked_add(group_cells).ok_or_else(overflow)?;
             }
@@ -295,17 +420,16 @@ fn estimate_table_cells(
 fn build_table_archetype(
     kind: TableKind,
     subcolumn_mode: SubcolumnMode,
-    table_el: &XmlElement,
+    x_mode: XColumnMode,
     x_title: &str,
     x_cols: &[Vec<Cell>],
-    parsed_y: &[(String, Vec<Vec<Cell>>)],
+    parsed_y: &[ParsedYColumn],
     row_titles: Vec<String>,
     has_row_titles: bool,
     row_count: usize,
 ) -> Result<TableArchetype, FormatError> {
     match kind {
         TableKind::Xy => {
-            let x_mode = resolve_x_mode(table_el, x_cols);
             let mut xy = XyTable::new_with_x_mode(x_mode, subcolumn_mode, parsed_y.len(), row_count)?;
             xy.x_title = x_title.to_owned();
             xy.row_titles = row_titles;
@@ -347,7 +471,9 @@ fn build_table_archetype(
             surv.row_titles_expanded = has_row_titles;
             if let Some(first_x) = x_cols.first() {
                 for (r, cell) in first_x.iter().enumerate() {
-                    surv.times[r] = cell.clone();
+                    if let Some(slot) = surv.times.get_mut(r) {
+                        *slot = cell.clone();
+                    }
                 }
             }
             fill_datasets(&mut surv.cohorts, parsed_y);
@@ -378,12 +504,16 @@ fn build_table_archetype(
             let mut mv = MultipleVariablesTable::new(parsed_y.len(), row_count)?;
             mv.row_titles = row_titles;
             mv.row_titles_expanded = has_row_titles;
-            for (c_idx, (col_title, subs)) in parsed_y.iter().enumerate() {
-                let var = &mut mv.variables[c_idx];
-                var.title = col_title.clone();
-                if let Some(first_sub) = subs.first() {
+            for (c_idx, col) in parsed_y.iter().enumerate() {
+                let Some(var) = mv.variables.get_mut(c_idx) else {
+                    continue;
+                };
+                var.title = col.title.clone();
+                if let Some(first_sub) = col.subcolumns.first() {
                     for (r, cell) in first_sub.iter().enumerate() {
-                        var.cells[r] = cell.clone();
+                        if let Some(slot) = var.cells.get_mut(r) {
+                            *slot = cell.clone();
+                        }
                     }
                 }
                 var.refresh_inferred_role();
@@ -391,27 +521,31 @@ fn build_table_archetype(
             Ok(TableArchetype::MultipleVariables(mv))
         }
         TableKind::Nested => {
-            let max_units = parsed_y.iter().map(|(_, subs)| subs.len()).max().unwrap_or(1).max(1);
+            let max_units = parsed_y.iter().map(|col| col.subcolumns.len().max(col.declared_subcolumns.unwrap_or(0))).max().unwrap_or(1).max(1);
             validate_subcolumns(max_units)?;
             let mut nested = NestedTable::new(parsed_y.len(), 1, 0)?;
             nested.row_titles = row_titles;
             nested.row_titles_expanded = has_row_titles;
-            for (g_idx, (col_title, subs)) in parsed_y.iter().enumerate() {
-                let units = subs.len().max(1);
-                let mut grp = NestedGroupColumn::new(col_title.clone(), units, row_count)?;
-                for (s, sub_cells) in subs.iter().enumerate() {
+            for (g_idx, col) in parsed_y.iter().enumerate() {
+                let units = col.subcolumns.len().max(col.declared_subcolumns.unwrap_or(0)).max(1);
+                let mut grp = NestedGroupColumn::new(col.title.clone(), units, row_count)?;
+                for (s, sub_cells) in col.subcolumns.iter().enumerate() {
                     for (r, cell) in sub_cells.iter().enumerate() {
-                        grp.cells[r][s] = cell.clone();
+                        if let Some(slot) = grp.cells.get_mut(r).and_then(|row| row.get_mut(s)) {
+                            *slot = cell.clone();
+                        }
                     }
                 }
-                nested.groups[g_idx] = grp;
+                if let Some(slot) = nested.groups.get_mut(g_idx) {
+                    *slot = grp;
+                }
             }
             Ok(TableArchetype::Nested(nested))
         }
     }
 }
 
-fn resolve_x_mode(table_el: &XmlElement, x_cols: &[Vec<Cell>]) -> XColumnMode {
+fn resolve_x_mode(table_el: &XmlElement, x_cols: &[Vec<Cell>], x_declared_subs: Option<usize>) -> Result<XColumnMode, FormatError> {
     let x_fmt = table_el.attr("XFormat").unwrap_or("").trim();
     if x_fmt.eq_ignore_ascii_case("date") || x_fmt.eq_ignore_ascii_case("time") || x_fmt.eq_ignore_ascii_case("elapsed-time") {
         let unit_label = table_el
@@ -420,32 +554,37 @@ fn resolve_x_mode(table_el: &XmlElement, x_cols: &[Vec<Cell>]) -> XColumnMode {
             .map(|el| el.plain_text().trim().to_owned())
             .filter(|s| !s.is_empty())
             .unwrap_or_else(|| String::from("Time"));
-        return XColumnMode::DateOrElapsedTime { unit_label };
+        return Ok(XColumnMode::DateOrElapsedTime { unit_label });
     }
     if x_fmt.eq_ignore_ascii_case("start-step") || x_fmt.eq_ignore_ascii_case("sequence") {
         let start = table_el.attr("X0").and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(0.0);
         let step = table_el.attr("DeltaX").and_then(|s| s.parse::<f64>().ok()).filter(|v| v.is_finite()).unwrap_or(1.0);
-        return XColumnMode::GeneratedSequence { start, step, progression: SequenceProgression::Arithmetic };
+        return Ok(XColumnMode::GeneratedSequence { start, step, progression: SequenceProgression::Arithmetic });
     }
-    if x_cols.len() == 3 {
+    if x_fmt.eq_ignore_ascii_case("replicates") {
+        let count = x_cols.len().max(x_declared_subs.unwrap_or(0)).max(1);
+        validate_subcolumns(count)?;
+        return Ok(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::RawReplicates(count) });
+    }
+    if x_cols.len() == 3 || (x_fmt.eq_ignore_ascii_case("err") && x_cols.len() >= 3) {
         let sub_mode = match table_el.attr("XEVFormat").unwrap_or("").trim() {
             "SEM" => SubcolumnMode::MeanSemN,
             "CV" => SubcolumnMode::MeanCvN,
             _ => SubcolumnMode::MeanSdN,
         };
-        return XColumnMode::Numbers { subcolumn_mode: sub_mode };
+        return Ok(XColumnMode::Numbers { subcolumn_mode: sub_mode });
     }
-    XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }
+    Ok(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single })
 }
 
-fn fill_datasets(target: &mut [DataSetColumn], parsed_y: &[(String, Vec<Vec<Cell>>)]) {
-    for (c_idx, (col_title, subs)) in parsed_y.iter().enumerate() {
+fn fill_datasets(target: &mut [DataSetColumn], parsed_y: &[ParsedYColumn]) {
+    for (c_idx, col) in parsed_y.iter().enumerate() {
         let Some(ds) = target.get_mut(c_idx) else {
             continue;
         };
-        ds.title = col_title.clone();
+        ds.title = col.title.clone();
         let allowed_subs = ds.subcolumn_count();
-        for (s, sub_cells) in subs.iter().enumerate() {
+        for (s, sub_cells) in col.subcolumns.iter().enumerate() {
             if s >= allowed_subs {
                 break;
             }
@@ -551,6 +690,13 @@ fn resolve_subcolumn_mode(
             } else if kind == TableKind::Xy && replicates > 1 {
                 SubcolumnMode::RawReplicates(replicates)
             } else {
+                if replicates > 1 {
+                    warnings.push(ImportWarning::new(
+                        ImportWarningKind::CoercedValue,
+                        id,
+                        format!("Replicates=\"{replicates}\" is not valid for {kind:?} without a summary YFormat, using Single"),
+                    ));
+                }
                 SubcolumnMode::Single
             }
         }
@@ -572,6 +718,11 @@ fn resolve_subcolumn_mode(
         candidate.validate()?;
         Ok(candidate)
     } else if matches!(kind, TableKind::Grouped | TableKind::Nested) {
+        warnings.push(ImportWarning::new(
+            ImportWarningKind::CoercedValue,
+            id,
+            format!("subcolumn mode {candidate:?} is not valid for {kind:?}, using RawReplicates"),
+        ));
         Ok(SubcolumnMode::RawReplicates(replicates.max(1)))
     } else {
         warnings.push(ImportWarning::new(
@@ -679,13 +830,22 @@ mod tests {
                 .map(|el| extract_column_subcolumns(el).into_iter().next().unwrap_or_default())
                 .unwrap_or_default();
             let x_cols = table_el.first_child("XColumn").map(extract_column_subcolumns).unwrap_or_default();
-            let parsed_y: Vec<(String, Vec<Vec<Cell>>)> =
-                table_el.children_named("YColumn").enumerate().map(|(i, y_el)| (default_column_label(i), extract_column_subcolumns(y_el))).collect();
-            let max_y = parsed_y.iter().flat_map(|(_, s)| s.iter().map(Vec::len)).max().unwrap_or(0);
+            let x_mode = resolve_x_mode(table_el, &x_cols, None).unwrap();
+            let parsed_y: Vec<ParsedYColumn> = table_el
+                .children_named("YColumn")
+                .enumerate()
+                .map(|(i, y_el)| ParsedYColumn {
+                    title: default_column_label(i),
+                    declared_subcolumns: None,
+                    sub_titles: Vec::new(),
+                    subcolumns: extract_column_subcolumns(y_el),
+                })
+                .collect();
+            let max_y = parsed_y.iter().flat_map(|c| c.subcolumns.iter().map(Vec::len)).max().unwrap_or(0);
             let max_x = x_cols.iter().map(Vec::len).max().unwrap_or(0);
             let rows = row_titles.len().max(max_x).max(max_y);
-            let est = estimate_table_cells(kind, mode, table_el, &x_cols, &parsed_y, rows).unwrap();
-            let arch = build_table_archetype(kind, mode, table_el, "X", &x_cols, &parsed_y, vec![String::new(); rows], false, rows).unwrap();
+            let est = estimate_table_cells(kind, mode, &x_mode, &parsed_y, rows).unwrap();
+            let arch = build_table_archetype(kind, mode, x_mode, "X", &x_cols, &parsed_y, vec![String::new(); rows], false, rows).unwrap();
             assert_eq!(est, arch.allocated_cell_slots(), "estimate mismatch for {kind:?}");
             total_slots += arch.allocated_cell_slots();
         }
@@ -695,14 +855,111 @@ mod tests {
 
     #[test]
     fn estimate_table_cells_rejects_usize_overflow_cleanly() {
-        let root = parse_xml("<Table TableType=\"XY\" Replicates=\"512\"/>").unwrap();
-        let parsed_y = vec![(String::from("A"), vec![vec![]]); 1_024];
+        let parsed_y: Vec<ParsedYColumn> = (0..1_024)
+            .map(|_| ParsedYColumn { title: String::from("A"), declared_subcolumns: None, sub_titles: Vec::new(), subcolumns: vec![vec![]] })
+            .collect();
+        let x_mode = XColumnMode::default();
         // On 64-bit, `usize::MAX` rows overflows checked_mul cleanly without panic.
-        let err = estimate_table_cells(TableKind::Xy, SubcolumnMode::RawReplicates(512), &root, &[], &parsed_y, usize::MAX).unwrap_err();
+        let err = estimate_table_cells(TableKind::Xy, SubcolumnMode::RawReplicates(512), &x_mode, &parsed_y, usize::MAX).unwrap_err();
         assert!(matches!(err, FormatError::XmlParse { offset: 0, .. }));
 
-        let surv_root = parse_xml("<Table TableType=\"Survival\"/>").unwrap();
-        let surv_err = estimate_table_cells(TableKind::Survival, SubcolumnMode::Single, &surv_root, &[], &parsed_y, usize::MAX).unwrap_err();
+        let surv_err = estimate_table_cells(TableKind::Survival, SubcolumnMode::Single, &x_mode, &parsed_y, usize::MAX).unwrap_err();
         assert!(matches!(surv_err, FormatError::XmlParse { offset: 0, .. }));
+    }
+
+    #[test]
+    fn r1_s06_04_widens_compatible_tables_and_warns_when_subcolumns_discarded() {
+        // 1. OneWay (Column) cannot hold RawReplicates(2): keeps subcolumn 0 and emits CoercedValue naming table, column, and dropped count.
+        let oneway_xml = r#"<?xml version="1.0"?><PrismFile><TableSequence><Table ID="t-col" TableType="OneWay"><Title>Treatment</Title>
+<YColumn Subcolumns="2"><Title>DoseA</Title><Subcolumn><d>1</d><d>2</d></Subcolumn><Subcolumn><d>30</d><d>40</d></Subcolumn></YColumn></Table></TableSequence></PrismFile>"#;
+        let rep = import_pzfx_str(oneway_xml).unwrap();
+        assert!(
+            rep.warnings.iter().any(|w| {
+                w.kind == ImportWarningKind::CoercedValue
+                    && w.source == "t-col"
+                    && w.message.contains("Treatment")
+                    && w.message.contains("DoseA")
+                    && w.message.contains("discarded 1 subcolumn")
+            }),
+            "unexpected warnings: {:?}",
+            rep.warnings
+        );
+
+        // 2. XY without YFormat / Replicates widens cleanly to RawReplicates(k) from Subcolumns="3" / 3 <Subcolumn>s.
+        let xy_xml = r#"<?xml version="1.0"?><PrismFile><TableSequence><Table ID="t-xy" TableType="XY"><Title>Curve</Title>
+<XColumn><Subcolumn><d>1</d><d>2</d></Subcolumn></XColumn>
+<YColumn Subcolumns="3"><Title>Resp</Title><Subcolumn><d>10</d><d>20</d></Subcolumn><Subcolumn><d>11</d><d>21</d></Subcolumn><Subcolumn><d>12</d><d>22</d></Subcolumn></YColumn></Table></TableSequence></PrismFile>"#;
+        let xy_rep = import_pzfx_str(xy_xml).unwrap();
+        assert!(xy_rep.warnings.is_empty(), "expected lossless widening without warning, got {:?}", xy_rep.warnings);
+        let TableArchetype::Xy(xy) = &xy_rep.document.data_sheets[0].archetype else { panic!("expected XY") };
+        assert_eq!(xy.y_subcolumn_mode, SubcolumnMode::RawReplicates(3));
+        assert_eq!(xy.data_sets[0].cell(1, 2).unwrap().active_number(), Some(22.0));
+
+        // 3. Grouped (TwoWay) without Replicates widens cleanly to RawReplicates(k).
+        let grp_xml = r#"<?xml version="1.0"?><PrismFile><TableSequence><Table ID="t-grp" TableType="TwoWay"><Title>Grouped</Title>
+<YColumn Subcolumns="2"><Title>Drug</Title><Subcolumn><d>5</d></Subcolumn><Subcolumn><d>6</d></Subcolumn></YColumn></Table></TableSequence></PrismFile>"#;
+        let grp_rep = import_pzfx_str(grp_xml).unwrap();
+        assert!(grp_rep.warnings.is_empty(), "expected lossless widening without warning, got {:?}", grp_rep.warnings);
+        let TableArchetype::Grouped(grp) = &grp_rep.document.data_sheets[0].archetype else { panic!("expected Grouped") };
+        assert_eq!(grp.subcolumn_mode, SubcolumnMode::RawReplicates(2));
+        assert_eq!(grp.data_sets[0].cell(0, 1).unwrap().active_number(), Some(6.0));
+
+        // 4. XY with two X subcolumns (no XFormat) emits CoercedValue naming XColumn and discarded subcolumn;
+        //    MultipleVariables with >1 subcolumn emits CoercedValue naming the variable column.
+        let multi_xml = r#"<?xml version="1.0"?><PrismFile><TableSequence>
+<Table ID="t-xy2" TableType="XY"><Title>XY-X2</Title>
+<XColumn><Title>Conc</Title><Subcolumn><d>1</d></Subcolumn><Subcolumn><d>0.2</d></Subcolumn></XColumn>
+<YColumn><Title>Y</Title><Subcolumn><d>5</d></Subcolumn></YColumn></Table>
+<Table ID="t-mv2" TableType="MultipleVariables"><Title>MV2</Title>
+<YColumn><Title>Age</Title><Subcolumn><d>42</d></Subcolumn><Subcolumn><d>43</d></Subcolumn></YColumn></Table>
+<Table ID="t-surv2" TableType="Survival"><Title>Surv2</Title>
+<XColumn><Title>Days</Title><Subcolumn><d>10</d></Subcolumn><Subcolumn><d>11</d></Subcolumn></XColumn>
+<YColumn><Title>Arm</Title><Subcolumn><d>1</d></Subcolumn></YColumn></Table>
+</TableSequence></PrismFile>"#;
+        let m_rep = import_pzfx_str(multi_xml).unwrap();
+        assert!(m_rep.warnings.iter().any(|w| w.kind == ImportWarningKind::CoercedValue && w.source == "t-xy2" && w.message.contains("Conc")));
+        assert!(m_rep.warnings.iter().any(|w| w.kind == ImportWarningKind::CoercedValue && w.source == "t-mv2" && w.message.contains("Age")));
+        assert!(m_rep.warnings.iter().any(|w| w.kind == ImportWarningKind::CoercedValue && w.source == "t-surv2" && w.message.contains("Days")));
+
+        // 5. OneWay without Subcolumns attr still warns when >1 <Subcolumn> exists; XY without Subcolumns attr still widens;
+        //    pre-summarized YFormat="SD" with 4 subcolumns warns on the 4th; RowTitlesColumn with 2 subcolumns warns.
+        let implicit_xml = r#"<?xml version="1.0"?><PrismFile><TableSequence>
+<Table ID="t" TableType="OneWay"><Title>T</Title>
+<RowTitlesColumn><Subcolumn><d>r1</d><d>r2</d></Subcolumn><Subcolumn><d>extra</d></Subcolumn></RowTitlesColumn>
+<YColumn><Title>A</Title><Subcolumn><d>1</d><d>2</d></Subcolumn><Subcolumn><d>30</d><d>40</d></Subcolumn></YColumn></Table>
+<Table ID="xy-imp" TableType="XY"><Title>XYImp</Title>
+<XColumn><Subcolumn><d>1</d></Subcolumn></XColumn>
+<YColumn><Title>B</Title><Subcolumn><d>5</d></Subcolumn><Subcolumn><d>6</d></Subcolumn></YColumn></Table>
+<Table ID="xy-sd-over" TableType="XY" YFormat="SD"><Title>XYSD</Title>
+<YColumn><Title>C</Title><Subcolumn><d>1</d></Subcolumn><Subcolumn><d>0.1</d></Subcolumn><Subcolumn><d>3</d></Subcolumn><Subcolumn><d>99</d></Subcolumn></YColumn></Table>
+</TableSequence></PrismFile>"#;
+        let imp_rep = import_pzfx_str(implicit_xml).unwrap();
+        assert!(
+            imp_rep.warnings.iter().any(|w| w.kind == ImportWarningKind::CoercedValue && w.source == "t" && w.message.contains("RowTitlesColumn"))
+        );
+        assert!(imp_rep.warnings.iter().any(|w| w.kind == ImportWarningKind::CoercedValue && w.source == "t" && w.message.contains("A")));
+        assert!(!imp_rep.warnings.iter().any(|w| w.source == "xy-imp"), "xy-imp warnings: {:?}", imp_rep.warnings);
+        let TableArchetype::Xy(xy_imp) = &imp_rep.document.data_sheets[1].archetype else { panic!("expected XY") };
+        assert_eq!(xy_imp.y_subcolumn_mode, SubcolumnMode::RawReplicates(2));
+        assert_eq!(xy_imp.data_sets[0].cell(0, 1).unwrap().active_number(), Some(6.0));
+        assert!(imp_rep.warnings.iter().any(|w| w.kind == ImportWarningKind::CoercedValue && w.source == "xy-sd-over" && w.message.contains("C")));
+
+        // 6. Subcolumns exceeding MAX_SUBCOLUMNS rejected cleanly, and widened grid exceeding MAX_IMPORT_CELLS rejected before allocation.
+        let too_many_subs = format!(
+            "<PrismFile><Table ID=\"big\" TableType=\"XY\"><YColumn Subcolumns=\"{}\"/></Table></PrismFile>",
+            lumencraft_doc::MAX_SUBCOLUMNS + 1
+        );
+        assert!(matches!(import_pzfx_str(&too_many_subs), Err(FormatError::Doc(lumencraft_doc::DocError::TooManySubcolumns { .. }))));
+
+        let mut rows_xml = String::from("<XColumn><Subcolumn>");
+        for r in 0..250 {
+            rows_xml.push_str(&format!("<d>{r}</d>"));
+        }
+        rows_xml.push_str("</Subcolumn></XColumn>");
+        for c in 0..100 {
+            rows_xml.push_str(&format!("<YColumn Subcolumns=\"500\"><Title>Y{c}</Title></YColumn>"));
+        }
+        let budget_xml = format!("<PrismFile><Table ID=\"budget-widen\" TableType=\"XY\">{rows_xml}</Table></PrismFile>");
+        assert!(matches!(import_pzfx_str(&budget_xml), Err(FormatError::XmlParse { offset: 0, .. })));
     }
 }
