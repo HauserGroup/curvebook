@@ -374,18 +374,22 @@ fn parameter_display_label(fit: &NonlinearFitResult, name: &str, dataset_index: 
     }
 }
 
-fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
-    // Parameter & CI table.
+fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
     let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
     let mut param_labels = Vec::with_capacity(param_rows.capacity());
 
     for p in &fit.parameters {
         param_labels.push(parameter_display_label(fit, &p.name, p.dataset_index));
         let prefix = if p.notes.contains(&ParameterNote::Ambiguous) { Some("~".to_owned()) } else { None };
+        let ci_display = if nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy {
+            ResultCell::Text("Not applicable".to_owned())
+        } else {
+            ci_cell(p.ci_lower, p.ci_upper)
+        };
         param_rows.push(vec![
             ResultCell::Number { value: p.estimate, prefix, units: None },
             num_cell(p.se),
-            ResultCell::ConfidenceInterval { lower: p.ci_lower, upper: p.ci_upper },
+            ci_display,
             num_cell(p.dependency),
             num_cell(p.hougaard_g1),
         ]);
@@ -416,6 +420,10 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
             fit.status, fit.iterations, fit.df, fit.r_squared, fit.rsd, fit.rss
         )],
     });
+}
+
+fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
+    append_nonlinear_parameter_tab(result, fit, nl_spec);
 
     // Goodness-of-fit summary tab.
     let mut gof_labels = vec![

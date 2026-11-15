@@ -6,7 +6,9 @@ use std::collections::BTreeMap;
 
 use lumencraft_doc::CiBound;
 use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, f_sf, norm_cdf, norm_ppf, norm_sf, student_t_two_sided_isf, student_t_two_sided_p};
+use lumencraft_math::dist::{
+    chi2_isf, chi2_sf, f_sf, norm_cdf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p,
+};
 use lumencraft_math::linalg::{DenseMatrix, parameter_dependencies, qr_col_pivoted, svd};
 use lumencraft_math::roots::{RootOptions, brent_root};
 use lumencraft_math::special::ln_choose;
@@ -149,6 +151,27 @@ pub fn compute_covariance_diagnostics(
     theta: &[f64],
     confidence: ConfidenceLevel,
 ) -> Result<CovarianceDiagnostics, FitError> {
+    let sigma2 = if df > 0 { (rss / (df as f64)).max(0.0) } else { 0.0 };
+    let t_crit = if df > 0 { student_t_two_sided_isf(confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN };
+    compute_covariance_from_scale(j_mat, sigma2, t_crit, theta)
+}
+
+/// Compute asymptotic covariance, standard errors, and symmetric normal Wald CIs for Poisson deviance
+/// regression with fixed dispersion $\phi = 1$ using Fisher information $J^\top J$.
+///
+/// # Errors
+/// Returns [`FitError::Math`] if matrix allocation or linear algebra fails.
+pub(crate) fn compute_poisson_covariance_diagnostics(
+    j_mat: &DenseMatrix,
+    df: usize,
+    theta: &[f64],
+    confidence: ConfidenceLevel,
+) -> Result<CovarianceDiagnostics, FitError> {
+    let z_crit = if df > 0 { norm_two_sided_isf(confidence.alpha()).unwrap_or(1.96) } else { f64::NAN };
+    compute_covariance_from_scale(j_mat, 1.0, z_crit, theta)
+}
+
+fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, theta: &[f64]) -> Result<CovarianceDiagnostics, FitError> {
     let p = theta.len();
     if p == 0 {
         return Ok(CovarianceDiagnostics {
@@ -165,7 +188,6 @@ pub fn compute_covariance_diagnostics(
 
     let pqr = qr_col_pivoted(j_mat)?;
     let rank = pqr.rank();
-    let sigma2 = if df > 0 { (rss / (df as f64)).max(0.0) } else { 0.0 };
 
     let (xtx_inv, deps, mut ambiguous) = if rank == p && j_mat.nrows() >= p {
         let inv = pqr.xtx_inverse()?;
@@ -178,7 +200,6 @@ pub fn compute_covariance_diagnostics(
         (inv, vec![1.0; p], true)
     };
 
-    let t_crit = if df > 0 { student_t_two_sided_isf(confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN };
     let mut se = Vec::with_capacity(p);
     let mut ci_lo = Vec::with_capacity(p);
     let mut ci_hi = Vec::with_capacity(p);
@@ -192,7 +213,7 @@ pub fn compute_covariance_diagnostics(
             ambiguous = true;
         }
         se.push(se_i);
-        let half = if t_crit.is_finite() && se_i.is_finite() { t_crit * se_i } else { f64::NAN };
+        let half = if crit.is_finite() && se_i.is_finite() { crit * se_i } else { f64::NAN };
         ci_lo.push(theta[i] - half);
         ci_hi.push(theta[i] + half);
         for (j, cell) in cov_vec[i].iter_mut().enumerate().take(p) {
@@ -428,7 +449,7 @@ pub fn compute_profile_likelihood_cis<F>(
     cov_diag: &CovarianceDiagnostics,
     bounds: &[(Option<f64>, Option<f64>)],
     confidence: ConfidenceLevel,
-    mut profile_solve: F,
+    profile_solve: F,
 ) -> Vec<(CiBound, CiBound)>
 where
     F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
@@ -445,11 +466,53 @@ where
     };
     let f_crit = t_crit * t_crit;
     let ss_crit = ss_min * (1.0 + f_crit / (df as f64));
+    trace_all_profile_bounds(theta_hat, ss_min, ss_crit, t_crit, cov_diag, bounds, profile_solve)
+}
+
+/// Trace Venzon–Moolgavkar asymmetrical profile-deviance confidence intervals for Poisson
+/// deviance regression (fixed dispersion $\phi = 1$) against
+/// `D_crit = D_min + chi2_{1}(alpha)`.
+pub fn compute_deviance_profile_likelihood_cis<F>(
+    theta_hat: &[f64],
+    dev_min: f64,
+    cov_diag: &CovarianceDiagnostics,
+    bounds: &[(Option<f64>, Option<f64>)],
+    confidence: ConfidenceLevel,
+    profile_solve: F,
+) -> Vec<(CiBound, CiBound)>
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+{
+    let p = theta_hat.len();
+    if p == 0 || !dev_min.is_finite() || dev_min < 0.0 {
+        return vec![(CiBound::Open, CiBound::Open); p];
+    }
+    let Ok(chi2_crit) = chi2_isf(confidence.alpha(), 1.0) else {
+        return vec![(CiBound::Open, CiBound::Open); p];
+    };
+    let z_crit = chi2_crit.sqrt();
+    let dev_crit = dev_min + chi2_crit;
+    trace_all_profile_bounds(theta_hat, dev_min, dev_crit, z_crit, cov_diag, bounds, profile_solve)
+}
+
+fn trace_all_profile_bounds<F>(
+    theta_hat: &[f64],
+    ss_min: f64,
+    ss_crit: f64,
+    step_crit: f64,
+    cov_diag: &CovarianceDiagnostics,
+    bounds: &[(Option<f64>, Option<f64>)],
+    mut profile_solve: F,
+) -> Vec<(CiBound, CiBound)>
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+{
+    let p = theta_hat.len();
     let mut out = Vec::with_capacity(p);
 
     for k in 0..p {
         let se_k = cov_diag.standard_errors.get(k).copied().unwrap_or(f64::NAN);
-        let base_step = if se_k.is_finite() && se_k > 0.0 { t_crit * se_k } else { 0.1 * theta_hat[k].abs().max(1.0) };
+        let base_step = if se_k.is_finite() && se_k > 0.0 { step_crit * se_k } else { 0.1 * theta_hat[k].abs().max(1.0) };
         let (lb, ub) = bounds.get(k).copied().unwrap_or((None, None));
         let lo = trace_profile_endpoint(k, -1.0, theta_hat, ss_min, ss_crit, base_step, lb, &cov_diag.covariance_matrix, &mut profile_solve);
         let hi = trace_profile_endpoint(k, 1.0, theta_hat, ss_min, ss_crit, base_step, ub, &cov_diag.covariance_matrix, &mut profile_solve);
@@ -553,7 +616,7 @@ where
     );
     match root {
         Ok(r) if r.is_finite() => CiBound::Finite(r),
-        _ => CiBound::Finite(0.5 * (a + b)),
+        _ => CiBound::Open,
     }
 }
 
