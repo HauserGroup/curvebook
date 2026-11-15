@@ -747,6 +747,7 @@ fn hit_test_annotation(annotation: &GraphAnnotation, pt: PointPt, tol: f64) -> b
     match annotation {
         GraphAnnotation::TextBox { bounds_pt, .. }
         | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. }
+        | GraphAnnotation::ModelEquation { bounds_pt, .. }
         | GraphAnnotation::Shape { bounds_pt, .. } => rect_contains_with_margin((*bounds_pt).into(), pt, tol),
         GraphAnnotation::LineOrArrow { start_pt, end_pt, .. } => {
             point_to_segment_distance(pt, PointPt::new(start_pt.0, start_pt.1), PointPt::new(end_pt.0, end_pt.1)) <= tol
@@ -1594,5 +1595,22 @@ mod tests {
         assert_eq!(state.mode, CanvasToolMode::Bracket);
         assert_eq!(state.cursor(), Cursor::Crosshair);
         assert_eq!(state.snap_grid_pt, DEFAULT_SNAP_GRID_PT);
+    }
+
+    #[test]
+    fn model_equation_annotation_hit_tests_bounds() {
+        let scene = sample_scene();
+        let mut spec = broken_y_graph_spec();
+        spec.annotations.push(GraphAnnotation::ModelEquation {
+            result_sheet_id: SheetId::new("res-fit"),
+            data_set_index: 0,
+            mode: lumencraft_doc::EquationDisplayMode::Substituted,
+            bounds_pt: DocRectPt::new(80.0, 90.0, 140.0, 36.0),
+            font_size_pt: 10.0,
+            bordered: true,
+        });
+        let idx = spec.annotations.len() - 1;
+        assert_eq!(hit_test_graph(&scene, &spec, PointPt::new(120.0, 108.0), 4.0), Some(CanvasHitTarget::Annotation { index: idx }));
+        assert_ne!(hit_test_graph(&scene, &spec, PointPt::new(100.0, 200.0), 1.0), Some(CanvasHitTarget::Annotation { index: idx }));
     }
 }

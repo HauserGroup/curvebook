@@ -3,10 +3,11 @@
 use lumencraft_chart::preflight_check_scene;
 use lumencraft_doc::{
     AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CanvasResizeMode,
-    CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, ErrorCode,
-    FigureCanvasPreset, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, LineConnectionKind,
-    MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PairwiseComparisonRecord, PartsOfWholeLayout, PointStyleOverride,
-    ProjectDocument, RectPt, RegressionOverlaySpec, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure, TickLabelFormat,
+    CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric,
+    ErrorBarSpec, ErrorCode, FigureCanvasPreset, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject,
+    GroupedArrangement, LineConnectionKind, MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PairwiseComparisonRecord,
+    PartsOfWholeLayout, PointStyleOverride, ProjectDocument, RectPt, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping,
+    SizePt, SummaryMeasure, TickLabelFormat, WhiskerMethod,
 };
 use lumencraft_math::LogitDomain;
 use lumencraft_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -157,8 +158,8 @@ static SPECS: &[CommandSpec] = &[
         label: "Add Graph Annotation",
         menu_path: "Draw/Annotation...",
         shortcut: "",
-        summary: "Add a text box, line/arrow, shape, or live embedded result table annotation to a graph.",
-        beginner: "Places labels, arrows, geometric callouts, or embedded result summaries onto a graph.",
+        summary: "Add a text box, line/arrow, shape, live embedded result table, or live fitted model equation annotation to a graph.",
+        beginner: "Places labels, arrows, geometric callouts, embedded result summaries, or model equations onto a graph.",
         group: CommandGroup::Graph,
         effects: Effects::MUTATES_DOCUMENT,
         input_schema: schema_graph_add_annotation,
@@ -671,10 +672,31 @@ fn schema_graph_add_annotation() -> Value {
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID")),
             ("annotation", nullable_schema(json!({ "type": "object", "description": "Full serialized GraphAnnotation object" }))),
-            ("kind", nullable_schema(non_empty_str_schema("Annotation shorthand kind (`text`, `line`, `arrow`, `shape`, `table`)"))),
+            (
+                "kind",
+                nullable_schema(non_empty_str_schema(
+                    "Annotation shorthand kind (`text`, `line`, `arrow`, `shape`, `table`, `equation` / `model_equation`)",
+                )),
+            ),
             ("text", nullable_schema(str_schema("Text or markdown body for text annotations"))),
             ("bounds_pt", nullable_schema(any_json_schema("Bounding rectangle [x, y, w, h] or RectPt object"))),
-            ("result_sheet_id", nullable_schema(non_empty_str_schema("Result sheet ID for embedded table annotations"))),
+            ("result_sheet_id", nullable_schema(non_empty_str_schema("Result sheet ID for embedded table or model equation annotations"))),
+            (
+                "data_set_index",
+                nullable_schema(int_schema("Zero-based fitted dataset curve index for model equation annotations (default 0)", Some(0), None)),
+            ),
+            (
+                "mode",
+                nullable_schema(enum_str_schema(
+                    "Equation rendering mode for model equation annotations (`substituted` or `symbolic`, default `substituted`)",
+                    &["substituted", "symbolic"],
+                )),
+            ),
+            (
+                "font_size_pt",
+                nullable_schema(num_schema("Font size in points for model equation annotations (default 10.0)", Some(1.0), Some(144.0))),
+            ),
+            ("bordered", nullable_schema(bool_schema("Whether to draw a border around text box or model equation annotations"))),
         ],
         &["sheet_id"],
         vec![("sheet_id", &["id"])],
@@ -1088,17 +1110,26 @@ fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
 fn run_graph_set_kind(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_graph_set_kind();
     let params: GraphSetKindParams = parse_params(&schema, raw)?;
-    let _ = params.option_id;
+    let option_id = params.option_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let requested_kind = parse_graph_kind(&params.kind).ok();
+    let resolved_opt = option_id.and_then(|opt| resolve_graph_option(opt, requested_kind));
+    let (kind, opt_arrangement, gdo_preset) = match resolved_opt {
+        Some(spec) => spec,
+        None => (parse_graph_kind(&params.kind)?, None, None),
+    };
     let id = parse_sheet_id(&params.sheet_id)?;
-    let kind = parse_graph_kind(&params.kind)?;
     let reset_series = params.reset_series_style.unwrap_or(true);
 
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
     graph.initialized = true;
-    apply_graph_kind(&mut graph.spec, kind, reset_series);
+    apply_graph_kind_with_option(&mut graph.spec, kind, opt_arrangement, gdo_preset, reset_series);
     graph.spec.validate()?;
 
-    Ok(CommandOutcome::mutated("graph.setKind", format!("set graph `{id}` kind"), json!({ "sheet_id": id.as_str(), "kind": kind })))
+    let payload = match option_id {
+        Some(opt) => json!({ "sheet_id": id.as_str(), "kind": kind, "option_id": opt }),
+        None => json!({ "sheet_id": id.as_str(), "kind": kind }),
+    };
+    Ok(CommandOutcome::mutated("graph.setKind", format!("set graph `{id}` kind"), payload))
 }
 
 fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -1415,8 +1446,11 @@ fn run_graph_add_annotation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
     let annotation = if let Some(ref ann_val) = params.annotation {
         let ann: GraphAnnotation = serde_json::from_value(ann_val.clone())
             .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `annotation`: {err}")))?;
-        if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } = &ann {
-            let _ = require_result_sheet(doc, result_sheet_id)?;
+        match &ann {
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                let _ = require_result_sheet(doc, result_sheet_id)?;
+            }
+            _ => {}
         }
         ann
     } else {
@@ -1593,6 +1627,12 @@ fn resize_graph_annotation(ann: &mut GraphAnnotation, mode: CanvasResizeMode, sx
         GraphAnnotation::TextBox { bounds_pt, .. } | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => {
             *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy);
         }
+        GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, .. } => {
+            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy);
+            if mode == CanvasResizeMode::ProportionalScale {
+                *font_size_pt *= scale_1d;
+            }
+        }
         GraphAnnotation::LineOrArrow { start_pt, end_pt, .. } => {
             start_pt.0 *= sx;
             start_pt.1 *= sy;
@@ -1669,16 +1709,113 @@ fn okabe_swatch(idx: usize) -> Rgba8 {
     swatches[idx % swatches.len()]
 }
 
-fn apply_graph_kind(spec: &mut GraphSpec, kind: GraphKind, reset_series: bool) {
+fn resolve_graph_option(option_id: &str, requested_kind: Option<GraphKind>) -> Option<(GraphKind, Option<GroupedArrangement>, Option<&'static str>)> {
+    match option_id.to_ascii_lowercase().as_str() {
+        "diag.residual" | "diag.residuals" | "diag.residual_plot" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::ResidualPlot), None, None)),
+        "diag.normal_qq" | "diag.qq" | "diag.qq_plot" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::NormalQqPlot), None, None)),
+        "diag.heatmap" | "heatmap" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap), None, None)),
+        "diag.volcano" | "volcano" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::Volcano), None, None)),
+        "diag.bland_altman" | "bland_altman" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::BlandAltman), None, None)),
+        "diag.roc" | "roc" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::RocCurve), None, None)),
+        "diag.forest" | "forest" => Some((GraphKind::Diagnostic(DiagnosticPlotKind::ForestPlot), None, None)),
+        "xy.scatter" => Some((GraphKind::Xy, None, Some("xy.scatter"))),
+        "xy.scatter_line" | "xy_points_connecting" => Some((GraphKind::Xy, None, Some("xy.scatter_line"))),
+        "col.bar_replicates" | "col.scatter_bar" => Some((GraphKind::Column, None, Some("col.bar_replicates"))),
+        "col.before_after" => Some((GraphKind::Column, None, Some("col.before_after"))),
+        "col.box_whisker" | "col.box_tukey" => Some((GraphKind::Column, None, Some("col.box_whisker"))),
+        "col.violin" => Some((GraphKind::Column, None, Some("col.violin"))),
+        "col.raincloud" => Some((GraphKind::Column, None, Some("col.raincloud"))),
+        "col.aligned_dot" => Some((GraphKind::Column, None, Some("col.aligned_dot"))),
+        "grouped.interleaved" => {
+            let kind = if requested_kind == Some(GraphKind::Contingency) { GraphKind::Contingency } else { GraphKind::Grouped };
+            Some((kind, Some(GroupedArrangement::Interleaved), Some("grouped.interleaved")))
+        }
+        "grouped.stacked" => {
+            let kind = if requested_kind == Some(GraphKind::Contingency) { GraphKind::Contingency } else { GraphKind::Grouped };
+            Some((kind, Some(GroupedArrangement::Stacked), Some("grouped.stacked")))
+        }
+        "survival.km" => Some((GraphKind::Survival, None, Some("survival.km"))),
+        "parts.donut" => Some((GraphKind::PartsOfWhole, None, Some("parts.donut"))),
+        "parts.pie" => Some((GraphKind::PartsOfWhole, None, Some("parts.pie"))),
+        "parts.waffle" => Some((GraphKind::PartsOfWhole, None, Some("parts.waffle"))),
+        "mv.bubble" => Some((GraphKind::MultipleVariables, None, Some("mv.bubble"))),
+        _ => None,
+    }
+}
+
+fn default_gdo_for_option(preset: &str, color: Rgba8) -> GraphicalDataObject {
+    let marker = MarkerStyle { fill_color: color, stroke_color: color, ..MarkerStyle::default() };
+    match preset {
+        "xy.scatter" | "mv.bubble" => GraphicalDataObject::ScatterAndLine { marker: Some(marker), line: None, area_fill: None },
+        "xy.scatter_line" => GraphicalDataObject::ScatterAndLine {
+            marker: Some(marker),
+            line: Some(ConnectingLineStyle { kind: LineConnectionKind::PointToPoint, dash_style: LineDashStyle::Solid, stroke_width_pt: 1.5, color }),
+            area_fill: None,
+        },
+        "col.before_after" => GraphicalDataObject::BeforeAfterLines { marker: Some(marker), line_color: color, stroke_width_pt: 1.2 },
+        "col.box_whisker" => GraphicalDataObject::BoxAndWhisker {
+            whiskers: WhiskerMethod::Tukey1_5Iqr,
+            fill_color: color.with_alpha(190),
+            stroke_color: color,
+            show_outliers: true,
+            show_all_points: false,
+        },
+        "col.violin" => GraphicalDataObject::Violin {
+            fill_color: color.with_alpha(190),
+            stroke_color: color,
+            clip_to_observed_range: true,
+            show_median_and_quartiles: true,
+            half_violin_with_points: false,
+        },
+        "col.raincloud" => GraphicalDataObject::Violin {
+            fill_color: color.with_alpha(190),
+            stroke_color: color,
+            clip_to_observed_range: true,
+            show_median_and_quartiles: true,
+            half_violin_with_points: true,
+        },
+        "col.aligned_dot" => GraphicalDataObject::AlignedDotPlot { summary: SummaryMeasure::Mean, marker, show_crossbar: true },
+        "col.bar_replicates" | "grouped.interleaved" | "grouped.stacked" => GraphicalDataObject::BarWithReplicates {
+            summary: SummaryMeasure::Mean,
+            fill_color: color.with_alpha(210),
+            border_color: Rgba8::BLACK,
+            border_width_pt: 0.75,
+            replicate_overlay: Some(ReplicateOverlayStyle::DeterministicBeeswarm),
+        },
+        "survival.km" => default_gdo_for_kind(GraphKind::Survival, color),
+        "parts.donut" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Donut, show_center_total: true },
+        "parts.pie" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Pie, show_center_total: false },
+        "parts.waffle" => GraphicalDataObject::PartsOfWhole { layout: PartsOfWholeLayout::Waffle10x10, show_center_total: true },
+        _ => default_gdo_for_kind(GraphKind::Xy, color),
+    }
+}
+
+fn apply_graph_kind_with_option(
+    spec: &mut GraphSpec,
+    kind: GraphKind,
+    opt_arrangement: Option<GroupedArrangement>,
+    gdo_preset: Option<&'static str>,
+    reset_series: bool,
+) {
     spec.kind = kind;
+    if let Some(arr) = opt_arrangement {
+        spec.grouped_arrangement = arr;
+    }
     if !reset_series {
         return;
     }
     let swatch = okabe_swatch(0);
     for (idx, s) in spec.series.iter_mut().enumerate() {
-        let color = okabe_swatch(idx);
-        s.gdo = default_gdo_for_kind(kind, if idx == 0 { swatch } else { color });
+        let color = if idx == 0 { swatch } else { okabe_swatch(idx) };
+        s.gdo = match gdo_preset {
+            Some(preset) => default_gdo_for_option(preset, color),
+            None => default_gdo_for_kind(kind, color),
+        };
     }
+}
+
+fn apply_graph_kind(spec: &mut GraphSpec, kind: GraphKind, reset_series: bool) {
+    apply_graph_kind_with_option(spec, kind, None, None, reset_series);
 }
 
 fn default_gdo_for_kind(kind: GraphKind, color: Rgba8) -> GraphicalDataObject {
@@ -2141,6 +2278,42 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
             let bounds_pt = parse_rect_pt(params.get("bounds_pt"), RectPt::new(180.0, 40.0, 180.0, 90.0))?;
             let tab_id = opt_str(params, &["tab_id"]).map(str::to_owned);
             Ok(GraphAnnotation::EmbeddedResultTable { result_sheet_id: res_id, tab_id, bounds_pt })
+        }
+        "equation" | "model_equation" => {
+            let raw_res = opt_str(params, &["result_sheet_id", "result_sheet"])
+                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `result_sheet_id`"))?;
+            let res_id = parse_sheet_id(raw_res)?;
+            let _ = require_result_sheet(doc, &res_id)?;
+            let data_set_index = match params.get("data_set_index") {
+                Some(v) if !v.is_null() => {
+                    let raw =
+                        v.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`data_set_index` must be a non-negative integer"))?;
+                    usize::try_from(raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`data_set_index` out of range"))?
+                }
+                _ => 0,
+            };
+            let mode = match opt_str(params, &["mode"]).map(str::to_ascii_lowercase).as_deref() {
+                None | Some("substituted") => EquationDisplayMode::Substituted,
+                Some("symbolic") => EquationDisplayMode::Symbolic,
+                Some(other) => {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("unknown model equation mode `{other}`; use `substituted` or `symbolic`"),
+                    ));
+                }
+            };
+            let bounds_pt = parse_rect_pt(params.get("bounds_pt"), RectPt::new(60.0, 48.0, 220.0, 44.0))?;
+            let font_size_pt = match params.get("font_size_pt") {
+                Some(v) if !v.is_null() => {
+                    v.as_f64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`font_size_pt` must be a finite number"))?
+                }
+                _ => 10.0,
+            };
+            if !font_size_pt.is_finite() || font_size_pt <= 0.0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`font_size_pt` must be positive and finite"));
+            }
+            let bordered = params.get("bordered").or_else(|| params.get("boxed")).and_then(Value::as_bool).unwrap_or(true);
+            Ok(GraphAnnotation::ModelEquation { result_sheet_id: res_id, data_set_index, mode, bounds_pt, font_size_pt, bordered })
         }
         other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown annotation kind `{other}`"))),
     }

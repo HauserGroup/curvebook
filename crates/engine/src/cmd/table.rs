@@ -4,26 +4,29 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use lumencraft_doc::{
-    BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, GraphSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec,
-    InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MultipleVariablesTable, NestedTable, PlacementMode, ProjectDocument,
-    ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise, SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole,
-    validate_rows, validate_title,
+    BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, GraphSheet, ImportFilterSpec, ImportLinkSpec,
+    ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MultipleVariablesTable, NestedTable, PlacementMode,
+    ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise, SubcolumnMode, TableArchetype, TableKind, VariableColumn,
+    VariableRole, VariableSource, validate_rows, validate_title,
 };
 use lumencraft_format::{
     CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes,
     import_pzfx_str, parse_delimited_records,
 };
 use lumencraft_transform::{
-    ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload, PlateGeometry, PlateMapTemplate, PlateWellRole, TargetArchetypeKind,
-    TidyColumnMapping, apply_import_link_pipeline, convert_datasheet_archetype, evaluate_data_sheet_calculated_variables, map_plate_to_datasheet,
-    pivot_tidy_long_to_datasheet, preview_datasheet_conversion, simulate_xy_sheet,
+    AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload,
+    PlateGeometry, PlateMapTemplate, PlateWellRole, RowSampleConfig, SimulatedColumnSpec, SimulatedDistribution, SubjectRandomizationConfig,
+    TargetArchetypeKind, TidyColumnMapping, apply_import_link_pipeline, convert_datasheet_archetype, evaluate_data_sheet_calculated_variables,
+    map_plate_to_datasheet, pivot_tidy_long_to_datasheet, preview_datasheet_conversion, random_sample_rows, randomize_subjects_to_groups,
+    simulate_distribution_columns, simulate_xy_sheet, validate_no_formula_cycle,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::helpers::{
     column_subcolumn_count, decode_base64, ensure_sheet_not_frozen, locate_target_and_info_indices, next_unique_sheet_id,
-    next_unique_sheet_id_excluding, parse_sheet_id, require_data_sheet, require_unfrozen_data_sheet_mut, select_result_tab, x_subcolumn_count,
+    next_unique_sheet_id_excluding, parse_sheet_id, require_analyzable_data_sheet, require_data_sheet, require_info_sheet_mut,
+    require_unfrozen_data_sheet_mut, select_result_tab, sheet_id_exists, x_subcolumn_count,
 };
 use super::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
@@ -32,13 +35,13 @@ use super::params::{
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, ErrorCode, Session, dag};
 
-/// Registered command specifications for the `table` group (25 commands).
+/// Registered command specifications for the `table` group (28 commands).
 #[must_use]
 pub fn specs() -> &'static [CommandSpec] {
     &SPECS
 }
 
-const SPECS: [CommandSpec; 25] = [
+const SPECS: [CommandSpec; 28] = [
     CommandSpec {
         id: "table.setCell",
         label: "Set Cell Value",
@@ -363,6 +366,45 @@ const SPECS: [CommandSpec; 25] = [
         input_schema: schema_import_tidy_long,
         enabled: always_enabled,
         run: run_import_tidy_long,
+    },
+    CommandSpec {
+        id: "table.randomizeGroups",
+        label: "Randomize Subjects to Groups",
+        menu_path: "Data/Randomize Groups...",
+        shortcut: "",
+        summary: "Deterministically allocate subjects across treatment groups (complete-balanced or permuted-block) and upsert ARRIVE constants on an InfoSheet.",
+        beginner: "Randomizes subjects into balanced or blocked treatment arms and stores reproducibility metadata on an Info sheet.",
+        group: CommandGroup::Table,
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: schema_randomize_groups,
+        enabled: always_enabled,
+        run: run_randomize_groups,
+    },
+    CommandSpec {
+        id: "table.randomSampleRows",
+        label: "Random Sample Rows",
+        menu_path: "Data/Random Sample Rows...",
+        shortcut: "",
+        summary: "Draw a reproducible Fisher-Yates random sample of rows (optional stratification) into a new data sheet.",
+        beginner: "Creates a new table containing a seeded simple or stratified random subset of rows from a source sheet.",
+        group: CommandGroup::Table,
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: schema_random_sample_rows,
+        enabled: has_data_or_result_sheet,
+        run: run_random_sample_rows,
+    },
+    CommandSpec {
+        id: "table.simulateDistributions",
+        label: "Simulate Distributions",
+        menu_path: "Insert/Simulate Distributions...",
+        shortcut: "",
+        summary: "Generate a Column or MultipleVariables table with columns sampled from Uniform, Gaussian, LogNormal, Binomial, Poisson, or Exponential distributions.",
+        beginner: "Creates a new table of seeded random variates drawn from parametric statistical distributions.",
+        group: CommandGroup::Table,
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: schema_simulate_distributions,
+        enabled: always_enabled,
+        run: run_simulate_distributions,
     },
 ];
 
@@ -904,12 +946,13 @@ fn parse_target_archetype_kind(raw: &str) -> Result<TargetArchetypeKind, EngineE
         "column" | "columnar" => Ok(TargetArchetypeKind::Column),
         "grouped" => Ok(TargetArchetypeKind::Grouped),
         "xy" => Ok(TargetArchetypeKind::Xy),
+        "contingency" => Ok(TargetArchetypeKind::Contingency),
         "multiplevariables" | "multiple_variables" | "multiple-variables" | "multivariate" => Ok(TargetArchetypeKind::MultipleVariables),
         _ => Err(EngineError::with_code(
             ErrorCode::BadInput,
-            format!("unsupported target_kind `{raw}` (expected Column, Grouped, XY, or MultipleVariables)"),
+            format!("unsupported target_kind `{raw}` (expected Column, Grouped, XY, Contingency, or MultipleVariables)"),
         )
-        .with_remediation("Choose one of Column, Grouped, XY, or MultipleVariables.")),
+        .with_remediation("Choose one of Column, Grouped, XY, Contingency, or MultipleVariables.")),
     }
 }
 
@@ -1302,6 +1345,33 @@ fn schema_set_cell() -> Value {
     )
 }
 
+fn ensure_mv_columns_editable<I>(ds: &DataSheet, cols: I) -> Result<(), EngineError>
+where
+    I: IntoIterator<Item = usize>,
+{
+    let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+        return Ok(());
+    };
+    for col in cols {
+        if let Some(var) = mv.variables.get(col)
+            && let VariableSource::Calculated { formula } = &var.source
+        {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("column {} (`{}`) is a formula-driven calculated variable and cannot be edited manually", col, var.title),
+            )
+            .with_details(json!({
+                "sheet_id": ds.id.as_str(),
+                "column": col,
+                "title": var.title,
+                "formula": formula,
+            }))
+            .with_remediation("Edit the formula via `table.setCalculatedVariable` or target an entered column."));
+        }
+    }
+    Ok(())
+}
+
 fn run_set_cell(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetCellParams = parse_params(&schema_set_cell(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
@@ -1309,6 +1379,7 @@ fn run_set_cell(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineE
     let cell = p.cell.into_cell()?;
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
+    ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
     ds.set_cell(coord, cell)?;
     let recalc = recalculate_with_links(doc, false)?;
     Ok(CommandOutcome::mutated(
@@ -1423,6 +1494,7 @@ fn run_set_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engine
     let edits = collect_set_cells_edits(p)?;
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
+    ensure_mv_columns_editable(ds, edits.iter().map(|(c, _)| c.col))?;
     for (coord, cell) in &edits {
         ds.set_cell(*coord, cell.clone())?;
     }
@@ -2271,6 +2343,14 @@ fn clear_all_cells_in_sheet(ds: &mut DataSheet, clear_x: bool) -> Result<usize, 
             }
         }
         for c in 0..cols {
+            let is_calc_mv = matches!(
+                &ds.archetype,
+                TableArchetype::MultipleVariables(mv)
+                    if mv.variables.get(c).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. }))
+            );
+            if is_calc_mv {
+                continue;
+            }
             let subcols = column_subcolumn_count(&ds.archetype, c);
             for s in 0..subcols {
                 ds.set_cell(CellCoord::new(r, c, s), Cell::empty())?;
@@ -2294,6 +2374,7 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
         cleared = clear_all_cells_in_sheet(ds, p.clear_x.unwrap_or(false))?;
     } else if let Some(range) = range_opt {
         validate_cell_range_bounds(ds, range, false)?;
+        ensure_mv_columns_editable(ds, range.start.col..=range.end.col)?;
         for r in range.start.row..=range.end.row {
             for c in range.start.col..=range.end.col {
                 for s in range.start.subcol..=range.end.subcol {
@@ -2303,12 +2384,15 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
             }
         }
     } else if let Some(coords) = p.cells {
-        for item in coords {
-            ds.set_cell(item.resolve()?, Cell::empty())?;
+        let resolved: Vec<CellCoord> = coords.iter().map(CoordInput::resolve).collect::<Result<_, _>>()?;
+        ensure_mv_columns_editable(ds, resolved.iter().map(|c| c.col))?;
+        for coord in resolved {
+            ds.set_cell(coord, Cell::empty())?;
             cleared = cleared.saturating_add(1);
         }
     } else {
         let coord = CoordInput { coord: p.coord, row: p.bounds.row, col: p.bounds.col, subcol: p.bounds.subcol }.resolve()?;
+        ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
         ds.set_cell(coord, Cell::empty())?;
         cleared = 1;
     }
@@ -2445,6 +2529,28 @@ fn format_cell_as_tsv_token(cell: &Cell) -> String {
     if cell.excluded && !base.is_empty() { format!("{base}*") } else { base }
 }
 
+fn apply_paste_payload(
+    ds: &mut DataSheet,
+    spec: &ImportLinkSpec,
+    payload: ImportSourcePayload<'_>,
+    opts: &ImportPipelineOptions,
+) -> Result<ImportPipelineReport, EngineError> {
+    let has_calc_mv = matches!(
+        &ds.archetype,
+        TableArchetype::MultipleVariables(mv) if mv.variables.iter().any(|v| matches!(v.source, VariableSource::Calculated { .. }))
+    );
+    if !has_calc_mv {
+        return Ok(apply_import_link_pipeline(ds, spec, payload, opts, None)?);
+    }
+    let mut staged = ds.clone();
+    let report = apply_import_link_pipeline(&mut staged, spec, payload, opts, None)?;
+    if report.rows_placed > 0 && report.cols_placed > 0 {
+        ensure_mv_columns_editable(ds, report.target_range.start.col..=report.target_range.end.col)?;
+    }
+    *ds = staged;
+    Ok(report)
+}
+
 fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: PasteParams = parse_params(&schema_paste(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
@@ -2461,12 +2567,12 @@ fn run_paste(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineErro
         let delimiter = resolve_delimiter(p.delimiter.as_deref(), text)?;
         let decimal_separator = resolve_decimal_char(p.decimal_separator.as_deref(), p.normalize_decimal.unwrap_or(false), text, delimiter)?;
         let payload = ImportSourcePayload::DelimitedText { text, delimiter, decimal_separator };
-        apply_import_link_pipeline(ds, &spec, payload, &opts, None)?
+        apply_paste_payload(ds, &spec, payload, &opts)?
     } else if let Some(rows_arr) = p.rows.as_ref() {
         let dec = parse_decimal_opt(p.decimal_separator.as_deref()).unwrap_or('.');
         let tsv = serialize_2d_rows_as_tsv(rows_arr, dec)?;
         let payload = ImportSourcePayload::DelimitedText { text: &tsv, delimiter: '\t', decimal_separator: '.' };
-        apply_import_link_pipeline(ds, &spec, payload, &opts, None)?
+        apply_paste_payload(ds, &spec, payload, &opts)?
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.paste requires `text`/`tsv`/`csv` or `rows`/`grid`")
             .with_remediation("Supply delimited `text` or a 2D `rows` array."));
@@ -3465,30 +3571,39 @@ fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
             .with_remediation("Select a MultipleVariables data sheet."));
     };
 
-    let col_idx = if let Some(ref col_ref) = p.col {
-        resolve_mv_variable_index(mv, Some(col_ref), None)?
+    let (col_idx, created_new) = if let Some(ref col_ref) = p.col {
+        (resolve_mv_variable_index(mv, Some(col_ref), None)?, false)
     } else if let Some(ref title) = p.title {
         if let Some(existing) = mv.find_variable(title) {
-            existing
+            (existing, false)
         } else {
             let row_count = mv.row_count();
             let col = VariableColumn::new(title.as_str(), row_count)?;
             mv.variables.push(col);
-            mv.variables.len().saturating_sub(1)
+            (mv.variables.len().saturating_sub(1), true)
         }
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "table.setCalculatedVariable requires `column`/`col` or `title`")
             .with_remediation("Specify a target column index or a `title` for the calculated variable."));
     };
 
-    let var = mv
-        .variables
-        .get_mut(col_idx)
-        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
-    if let Some(ref title) = p.title {
-        var.title = title.clone();
+    if col_idx >= mv.variables.len() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")));
     }
-    var.set_calculated_formula(&p.formula);
+    let prev_title = p.title.as_ref().map(|title| {
+        let old = mv.variables[col_idx].title.clone();
+        mv.variables[col_idx].title = title.clone();
+        old
+    });
+    if let Err(err) = validate_no_formula_cycle(mv, col_idx, &p.formula) {
+        if created_new {
+            mv.variables.pop();
+        } else if let Some(old) = prev_title {
+            mv.variables[col_idx].title = old;
+        }
+        return Err(err.into());
+    }
+    mv.variables[col_idx].set_calculated_formula(&p.formula);
 
     evaluate_data_sheet_calculated_variables(ds, info_snapshot.as_ref())?;
     let recalc = recalculate_with_links(doc, false)?;
@@ -3719,6 +3834,8 @@ fn schema_convert_archetype() -> Value {
                         "Xy",
                         "XY",
                         "xy",
+                        "Contingency",
+                        "contingency",
                         "MultipleVariables",
                         "multiple_variables",
                         "multiple-variables",
@@ -4298,6 +4415,520 @@ fn run_import_tidy_long(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     ))
 }
 
+// ---------------------------------------------------------------------------
+// 26–28. table.randomizeGroups, table.randomSampleRows, table.simulateDistributions
+// ---------------------------------------------------------------------------
+
+fn resolve_new_data_sheet_id(doc: &ProjectDocument, raw_id: Option<&str>, prefix: &str) -> Result<SheetId, EngineError> {
+    if let Some(raw) = raw_id {
+        let id = parse_sheet_id(raw)?;
+        if sheet_id_exists(doc, &id) {
+            return Err(EngineError::with_code(ErrorCode::Conflict, format!("sheet `{id}` already exists")));
+        }
+        Ok(id)
+    } else {
+        next_unique_sheet_id(doc, prefix)
+    }
+}
+
+fn upsert_info_constants(
+    doc: &mut ProjectDocument,
+    explicit_info_id: Option<&str>,
+    fallback_info_id: Option<&SheetId>,
+    create_if_missing: bool,
+    default_title: &str,
+    constants: &[(String, String)],
+) -> Result<Option<SheetId>, EngineError> {
+    let target_id = if let Some(raw) = explicit_info_id {
+        let iid = parse_sheet_id(raw)?;
+        if doc.info_sheet(&iid).is_some() {
+            iid
+        } else if sheet_id_exists(doc, &iid) {
+            return Err(EngineError::with_code(ErrorCode::Conflict, format!("sheet `{iid}` already exists and is not an InfoSheet")));
+        } else {
+            doc.add_info_sheet(InfoSheet::new_preseeded(iid.clone(), default_title)?)?;
+            iid
+        }
+    } else if let Some(fid) = fallback_info_id.filter(|id| doc.info_sheet(id).is_some()) {
+        fid.clone()
+    } else if let Some(first) = doc.info_sheets.first() {
+        first.id.clone()
+    } else if create_if_missing {
+        let iid = next_unique_sheet_id(doc, "info")?;
+        doc.add_info_sheet(InfoSheet::new_preseeded(iid.clone(), default_title)?)?;
+        iid
+    } else {
+        return Ok(None);
+    };
+
+    let info = require_info_sheet_mut(doc, &target_id)?;
+    for (name, val) in constants {
+        info.set_constant(name.clone(), ConstantValue::Text(val.clone()), None)?;
+    }
+    Ok(Some(target_id))
+}
+
+const fn default_weight_one() -> usize {
+    1
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum GroupSpecInput {
+    Name(String),
+    Weighted {
+        #[serde(alias = "name")]
+        label: String,
+        #[serde(default = "default_weight_one")]
+        weight: usize,
+    },
+}
+
+#[derive(Debug, Deserialize)]
+struct RandomizeGroupsParams {
+    groups: Vec<GroupSpecInput>,
+    #[serde(default)]
+    subject_ids: Option<Vec<String>>,
+    #[serde(default, alias = "n_subjects", alias = "count")]
+    subject_count: Option<usize>,
+    #[serde(default)]
+    scheme: Option<String>,
+    #[serde(default)]
+    block_sizes: Option<Vec<usize>>,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default, alias = "sheetId", alias = "id")]
+    sheet_id: Option<String>,
+    #[serde(default, alias = "name")]
+    title: Option<String>,
+    #[serde(default, alias = "info_sheet")]
+    info_sheet_id: Option<String>,
+}
+
+fn schema_randomize_groups() -> Value {
+    let group_item = json!({
+        "anyOf": [
+            { "type": "string", "minLength": 1 },
+            {
+                "type": "object",
+                "properties": {
+                    "label": { "type": "string", "minLength": 1 },
+                    "weight": { "type": "integer", "minimum": 1 }
+                },
+                "required": ["label"],
+                "additionalProperties": true
+            }
+        ]
+    });
+    obj_schema_with_aliases(
+        vec![
+            ("groups", array_schema("Treatment arm names or `{label, weight}` allocation objects", group_item, Some(1), None)),
+            ("subject_ids", nullable_schema(array_schema("Explicit subject ID list", non_empty_str_schema("Subject ID"), Some(1), None))),
+            ("subject_count", nullable_schema(int_schema("Number of subjects (auto-numbered 1..=N when `subject_ids` is omitted)", Some(1), None))),
+            (
+                "scheme",
+                nullable_schema(enum_str_schema(
+                    "Allocation scheme (`complete_balanced` or `permuted_block`, default `complete_balanced`)",
+                    &["complete_balanced", "permuted_block"],
+                )),
+            ),
+            (
+                "block_sizes",
+                nullable_schema(array_schema(
+                    "Block sizes (each a positive multiple of sum of weights) for `permuted_block`",
+                    int_schema("Block size", Some(1), None),
+                    Some(1),
+                    None,
+                )),
+            ),
+            ("seed", nullable_schema(int_schema("Deterministic 64-bit PRNG seed (default 1)", Some(0), None))),
+            ("sheet_id", nullable_schema(non_empty_str_schema("Optional destination DataSheet ID"))),
+            ("title", nullable_schema(str_schema("Optional destination sheet title (default `Randomization Schedule`)"))),
+            ("info_sheet_id", nullable_schema(non_empty_str_schema("Optional target InfoSheet ID for ARRIVE randomization constants"))),
+        ],
+        &["groups"],
+        vec![("sheet_id", &["sheetId", "id"]), ("title", &["name"]), ("subject_count", &["n_subjects", "count"]), ("info_sheet_id", &["info_sheet"])],
+        true,
+    )
+}
+
+fn run_randomize_groups(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let p: RandomizeGroupsParams = parse_params(&schema_randomize_groups(), raw)?;
+    let groups: Vec<GroupAllocationWeight> = p
+        .groups
+        .into_iter()
+        .map(|g| match g {
+            GroupSpecInput::Name(label) => GroupAllocationWeight::new(label),
+            GroupSpecInput::Weighted { label, weight } => GroupAllocationWeight::with_weight(label, weight),
+        })
+        .collect();
+    let sum_weights: usize = groups.iter().fold(0usize, |acc, g| acc.saturating_add(g.weight));
+
+    let norm_scheme =
+        p.scheme.as_deref().unwrap_or(if p.block_sizes.as_ref().is_some_and(|v| !v.is_empty()) { "permuted_block" } else { "complete_balanced" });
+    let scheme_key: String = norm_scheme.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    let scheme = match scheme_key.as_str() {
+        "completebalanced" | "complete" | "balanced" => AllocationScheme::CompleteBalanced,
+        "permutedblock" | "block" => {
+            let block_sizes = match p.block_sizes {
+                Some(bs) => bs,
+                None => vec![sum_weights.saturating_mul(2).max(2)],
+            };
+            AllocationScheme::PermutedBlock { block_sizes }
+        }
+        other => {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unknown randomization scheme `{other}`; use `complete_balanced` or `permuted_block`"),
+            ));
+        }
+    };
+
+    let doc = &mut ctx.session.doc;
+    let id = resolve_new_data_sheet_id(doc, p.sheet_id.as_deref(), "data")?;
+    let title = p.title.unwrap_or_else(|| String::from("Randomization Schedule"));
+    let seed = p.seed.unwrap_or(1);
+
+    let config = match (p.subject_ids, p.subject_count) {
+        (Some(ids), Some(count)) => {
+            if ids.len() != count {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("`subject_ids` length ({}) does not match `subject_count` ({count})", ids.len()),
+                ));
+            }
+            SubjectRandomizationConfig { sheet_id: id.to_string(), title: title.clone(), subject_ids: ids, groups, scheme, seed }
+        }
+        (Some(ids), None) => SubjectRandomizationConfig { sheet_id: id.to_string(), title: title.clone(), subject_ids: ids, groups, scheme, seed },
+        (None, Some(count)) => SubjectRandomizationConfig::from_subject_count(id.to_string(), title.clone(), count, groups, scheme, seed),
+        (None, None) => {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "table.randomizeGroups requires `subject_ids` or `subject_count`"));
+        }
+    };
+
+    let subject_count = config.subject_ids.len();
+    let mut rand_out = randomize_subjects_to_groups(&config)?;
+    let info_id = upsert_info_constants(doc, p.info_sheet_id.as_deref(), None, true, &format!("{title} Info"), &rand_out.arrive_constants)?
+        .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "failed resolving InfoSheet for ARRIVE constants"))?;
+    rand_out.data_sheet.info_sheet_id = Some(info_id.clone());
+    doc.add_data_sheet(rand_out.data_sheet)?;
+    let recalc = recalculate_with_links(doc, false)?;
+
+    let constants_map: serde_json::Map<String, Value> = rand_out.arrive_constants.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
+    Ok(CommandOutcome::mutated(
+        "table.randomizeGroups",
+        format!("randomized {subject_count} subjects into `{}`", id.as_str()),
+        json!({
+            "sheet_id": id.as_str(),
+            "info_sheet_id": info_id.as_str(),
+            "title": title,
+            "subject_count": subject_count,
+            "seed": seed,
+            "arrive_constants": constants_map,
+            "recalculated_sheets": recalc.recalculated_sheets,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct RandomSampleRowsParams {
+    #[serde(alias = "source_sheet", alias = "data_sheet_id")]
+    source_sheet_id: String,
+    #[serde(alias = "n_samples", alias = "count")]
+    sample_size: usize,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default, alias = "stratify_col")]
+    stratify_column: Option<usize>,
+    #[serde(default)]
+    proportional_allocation: Option<bool>,
+    #[serde(default, alias = "sheetId", alias = "id")]
+    sheet_id: Option<String>,
+    #[serde(default, alias = "name")]
+    title: Option<String>,
+    #[serde(default, alias = "info_sheet")]
+    info_sheet_id: Option<String>,
+}
+
+fn schema_random_sample_rows() -> Value {
+    obj_schema_with_aliases(
+        vec![
+            ("source_sheet_id", non_empty_str_schema("Source DataSheet or analyzable ResultSheet ID")),
+            ("sample_size", int_schema("Number of rows to draw without replacement", Some(1), None)),
+            ("seed", nullable_schema(int_schema("Deterministic 64-bit PRNG seed (default 42)", Some(0), None))),
+            ("stratify_column", nullable_schema(int_schema("Optional zero-based stratification column index", Some(0), None))),
+            ("proportional_allocation", nullable_schema(bool_schema("Use proportional stratum allocation when stratified (default true)"))),
+            ("sheet_id", nullable_schema(non_empty_str_schema("Optional destination DataSheet ID"))),
+            ("title", nullable_schema(str_schema("Optional destination sheet title"))),
+            ("info_sheet_id", nullable_schema(non_empty_str_schema("Optional InfoSheet ID for recording sampling provenance constants"))),
+        ],
+        &["source_sheet_id", "sample_size"],
+        vec![
+            ("source_sheet_id", &["source_sheet", "data_sheet_id"]),
+            ("sample_size", &["n_samples", "count"]),
+            ("stratify_column", &["stratify_col"]),
+            ("sheet_id", &["sheetId", "id"]),
+            ("title", &["name"]),
+            ("info_sheet_id", &["info_sheet"]),
+        ],
+        true,
+    )
+}
+
+fn run_random_sample_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let p: RandomSampleRowsParams = parse_params(&schema_random_sample_rows(), raw)?;
+    let src_id = parse_sheet_id(&p.source_sheet_id)?;
+    let seed = p.seed.unwrap_or(42);
+    let proportional = p.proportional_allocation.unwrap_or(true);
+
+    let doc = &mut ctx.session.doc;
+    let src = require_analyzable_data_sheet(doc, &src_id)?.clone();
+    let src_info_id = src.info_sheet_id.clone();
+    let population_size = src.archetype.row_count();
+    let id = resolve_new_data_sheet_id(doc, p.sheet_id.as_deref(), "data")?;
+    let title = p.title.unwrap_or_else(|| format!("{} (Sample n={})", src.title, p.sample_size));
+
+    let mut sampled = random_sample_rows(
+        &src,
+        &RowSampleConfig {
+            seed,
+            sample_size: p.sample_size,
+            stratify_column: p.stratify_column,
+            proportional_allocation: proportional,
+            output_id: Some(id.to_string()),
+            output_title: Some(title.clone()),
+        },
+    )?;
+
+    let out_rows = sampled.archetype.row_count();
+    let out_cols = sampled.archetype.column_count();
+    let mut provenance = vec![
+        (String::from("sample.source_sheet_id"), src_id.to_string()),
+        (String::from("sample.seed"), seed.to_string()),
+        (String::from("sample.sample_size"), out_rows.to_string()),
+        (String::from("sample.population_size"), population_size.to_string()),
+    ];
+    if let Some(col) = p.stratify_column {
+        provenance.push((String::from("sample.stratify_column"), col.to_string()));
+        provenance.push((String::from("sample.allocation"), String::from(if proportional { "proportional" } else { "equal" })));
+    }
+
+    let info_id = upsert_info_constants(doc, p.info_sheet_id.as_deref(), src_info_id.as_ref(), false, &format!("{title} Info"), &provenance)?;
+    if let Some(ref iid) = info_id {
+        sampled.info_sheet_id = Some(iid.clone());
+    }
+    doc.add_data_sheet(sampled)?;
+    let recalc = recalculate_with_links(doc, false)?;
+
+    Ok(CommandOutcome::mutated(
+        "table.randomSampleRows",
+        format!("sampled {out_rows} row(s) from `{}` into `{}`", src_id.as_str(), id.as_str()),
+        json!({
+            "sheet_id": id.as_str(),
+            "source_sheet_id": src_id.as_str(),
+            "info_sheet_id": info_id.as_ref().map(SheetId::as_str),
+            "title": title,
+            "row_count": out_rows,
+            "col_count": out_cols,
+            "seed": seed,
+            "sample_size": p.sample_size,
+            "recalculated_sheets": recalc.recalculated_sheets,
+        }),
+    ))
+}
+
+#[derive(Debug, Deserialize)]
+struct SimulateDistributionsParams {
+    columns: Vec<Value>,
+    #[serde(alias = "row_count", alias = "rows")]
+    n_rows: usize,
+    #[serde(default)]
+    seed: Option<u64>,
+    #[serde(default, alias = "multiple_variables")]
+    use_multiple_variables: Option<bool>,
+    #[serde(default, alias = "sheetId", alias = "id")]
+    sheet_id: Option<String>,
+    #[serde(default, alias = "name")]
+    title: Option<String>,
+}
+
+fn find_dist_f64(sources: &[&serde_json::Map<String, Value>], keys: &[&str], field_name: &str, idx: usize) -> Result<f64, EngineError> {
+    for src in sources {
+        for key in keys {
+            if let Some(val) = src.get(*key) {
+                return val
+                    .as_f64()
+                    .filter(|v| v.is_finite())
+                    .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].{field_name} must be a finite number")));
+            }
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] missing numeric parameter `{field_name}`")))
+}
+
+fn find_dist_u64(sources: &[&serde_json::Map<String, Value>], keys: &[&str], field_name: &str, idx: usize) -> Result<u64, EngineError> {
+    for src in sources {
+        for key in keys {
+            if let Some(val) = src.get(*key) {
+                return val.as_u64().ok_or_else(|| {
+                    EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].{field_name} must be a non-negative integer"))
+                });
+            }
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] missing integer parameter `{field_name}`")))
+}
+
+fn parse_simulated_column_spec(item: &Value, idx: usize) -> Result<SimulatedColumnSpec, EngineError> {
+    if let Ok(direct) = serde_json::from_value::<SimulatedColumnSpec>(item.clone()) {
+        return Ok(direct);
+    }
+    let obj = item.as_object().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] must be an object")))?;
+    let name = obj
+        .get("name")
+        .or_else(|| obj.get("title"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] missing non-empty `name`")))?
+        .to_owned();
+
+    let dist_val =
+        obj.get("distribution").ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] missing `distribution`")))?;
+
+    if let Ok(dist) = serde_json::from_value::<SimulatedDistribution>(dist_val.clone()) {
+        return Ok(SimulatedColumnSpec { name, distribution: dist });
+    }
+
+    let mut sources: Vec<&serde_json::Map<String, Value>> = Vec::new();
+    if let Some(params_obj) = obj.get("params").and_then(Value::as_object) {
+        sources.push(params_obj);
+    }
+    let kind_raw = if let Some(s) = dist_val.as_str() {
+        s
+    } else if let Some(dist_obj) = dist_val.as_object() {
+        sources.push(dist_obj);
+        if let Some(inner_params) = dist_obj.get("params").and_then(Value::as_object) {
+            sources.push(inner_params);
+        }
+        dist_obj
+            .get("kind")
+            .or_else(|| dist_obj.get("type"))
+            .or_else(|| dist_obj.get("distribution"))
+            .and_then(Value::as_str)
+            .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].distribution object must specify `kind`")))?
+    } else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].distribution must be a distribution name or object")));
+    };
+    sources.push(obj);
+
+    let kind_key: String = kind_raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    let distribution = match kind_key.as_str() {
+        "uniform" => SimulatedDistribution::Uniform {
+            min: find_dist_f64(&sources, &["min"], "min", idx)?,
+            max: find_dist_f64(&sources, &["max"], "max", idx)?,
+        },
+        "gaussian" | "normal" => SimulatedDistribution::Gaussian {
+            mean: find_dist_f64(&sources, &["mean", "mu"], "mean", idx)?,
+            sd: find_dist_f64(&sources, &["sd", "std", "sigma"], "sd", idx)?,
+        },
+        "lognormal" => SimulatedDistribution::LogNormal {
+            mean_log: find_dist_f64(&sources, &["mean_log", "meanlog", "mu"], "mean_log", idx)?,
+            sd_log: find_dist_f64(&sources, &["sd_log", "sdlog", "sigma"], "sd_log", idx)?,
+        },
+        "binomial" => SimulatedDistribution::Binomial {
+            trials: find_dist_u64(&sources, &["trials", "n"], "trials", idx)?,
+            p: find_dist_f64(&sources, &["p", "prob", "probability"], "p", idx)?,
+        },
+        "poisson" => SimulatedDistribution::Poisson { lambda: find_dist_f64(&sources, &["lambda", "rate", "mean"], "lambda", idx)? },
+        "exponential" | "exp" => SimulatedDistribution::Exponential { rate: find_dist_f64(&sources, &["rate", "lambda"], "rate", idx)? },
+        other => {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("columns[{idx}] unknown distribution `{other}`; use uniform, gaussian, log_normal, binomial, poisson, or exponential"),
+            ));
+        }
+    };
+
+    Ok(SimulatedColumnSpec { name, distribution })
+}
+
+fn schema_simulate_distributions() -> Value {
+    let col_schema = json!({
+        "type": "object",
+        "description": "Column distribution specification `{ name, distribution, ... }` supporting uniform (`min`, `max`), gaussian (`mean`, `sd`), log_normal (`mean_log`, `sd_log`), binomial (`trials`, `p`), poisson (`lambda`), exponential (`rate`)",
+        "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "distribution": {
+                "anyOf": [
+                    { "type": "string", "enum": ["uniform", "gaussian", "log_normal", "binomial", "poisson", "exponential"] },
+                    { "type": "object" }
+                ]
+            }
+        },
+        "required": ["name", "distribution"],
+        "additionalProperties": true
+    });
+    obj_schema_with_aliases(
+        vec![
+            ("columns", array_schema("Simulated column distribution specifications", col_schema, Some(1), None)),
+            ("n_rows", int_schema("Number of rows to simulate per column", Some(1), None)),
+            ("seed", nullable_schema(int_schema("Deterministic 64-bit PRNG seed (default 1)", Some(0), None))),
+            ("use_multiple_variables", nullable_schema(bool_schema("Create MultipleVariables table instead of Column table (default false)"))),
+            ("sheet_id", nullable_schema(non_empty_str_schema("Optional destination DataSheet ID"))),
+            ("title", nullable_schema(str_schema("Optional destination sheet title (default `Simulated Distributions`)"))),
+        ],
+        &["columns", "n_rows"],
+        vec![
+            ("n_rows", &["row_count", "rows"]),
+            ("use_multiple_variables", &["multiple_variables"]),
+            ("sheet_id", &["sheetId", "id"]),
+            ("title", &["name"]),
+        ],
+        true,
+    )
+}
+
+fn run_simulate_distributions(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let p: SimulateDistributionsParams = parse_params(&schema_simulate_distributions(), raw)?;
+    let columns: Vec<SimulatedColumnSpec> =
+        p.columns.iter().enumerate().map(|(i, item)| parse_simulated_column_spec(item, i)).collect::<Result<_, _>>()?;
+    let seed = p.seed.unwrap_or(1);
+    let use_mv = p.use_multiple_variables.unwrap_or(false);
+    let title = p.title.unwrap_or_else(|| String::from("Simulated Distributions"));
+
+    let doc = &mut ctx.session.doc;
+    let id = resolve_new_data_sheet_id(doc, p.sheet_id.as_deref(), "data")?;
+    let col_count = columns.len();
+    let cfg = DistributionSimulationConfig {
+        sheet_id: id.to_string(),
+        title: title.clone(),
+        n_rows: p.n_rows,
+        seed,
+        columns,
+        use_multiple_variables: use_mv,
+    };
+    let sheet = simulate_distribution_columns(&cfg)?;
+    let kind = sheet.archetype.kind();
+    doc.add_data_sheet(sheet)?;
+    let recalc = recalculate_with_links(doc, false)?;
+
+    Ok(CommandOutcome::mutated(
+        "table.simulateDistributions",
+        format!("simulated {col_count} column(s) x {} rows into `{}`", p.n_rows, id.as_str()),
+        json!({
+            "sheet_id": id.as_str(),
+            "title": title,
+            "kind": kind,
+            "n_rows": p.n_rows,
+            "n_cols": col_count,
+            "seed": seed,
+            "use_multiple_variables": use_mv,
+            "recalculated_sheets": recalc.recalculated_sheets,
+        }),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
@@ -4329,11 +4960,11 @@ mod tests {
     }
 
     #[test]
-    fn specs_cover_all_25_table_commands_uniquely_and_register() {
+    fn specs_cover_all_28_table_commands_uniquely_and_register() {
         let listed = specs();
-        assert_eq!(listed.len(), 25);
+        assert_eq!(listed.len(), 28);
         let ids: BTreeSet<&'static str> = listed.iter().map(|s| s.id).collect();
-        assert_eq!(ids.len(), 25);
+        assert_eq!(ids.len(), 28);
         for spec in listed {
             assert_eq!(spec.group, CommandGroup::Table);
             assert!(!spec.label.is_empty());

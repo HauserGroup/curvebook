@@ -1294,7 +1294,7 @@ fn clone_downstream_graphs(
             }
         }
         for ann in &mut cloned.spec.annotations {
-            if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } = ann
+            if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
                 && let Some(mapped) = id_map.get(result_sheet_id)
             {
                 *result_sheet_id = mapped.clone();

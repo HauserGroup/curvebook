@@ -459,6 +459,44 @@ fn sweep_valid_table_commands(s: &mut Session, covered: &mut BTreeSet<&'static s
             "mapping": { "group_col": "Group", "value_col": "Value" }
         }),
     )?;
+    run_valid(
+        s,
+        covered,
+        "table.randomizeGroups",
+        json!({
+            "sheet_id": "rand-1",
+            "groups": [{ "label": "Vehicle", "weight": 1 }, { "label": "Drug", "weight": 1 }],
+            "subject_count": 8,
+            "scheme": "permuted_block",
+            "block_sizes": [4],
+            "seed": 17
+        }),
+    )?;
+    run_valid(
+        s,
+        covered,
+        "table.randomSampleRows",
+        json!({
+            "sheet_id": "sample-1",
+            "source_sheet_id": "tidy-1",
+            "sample_size": 2,
+            "seed": 19
+        }),
+    )?;
+    run_valid(
+        s,
+        covered,
+        "table.simulateDistributions",
+        json!({
+            "sheet_id": "dist-1",
+            "n_rows": 8,
+            "seed": 23,
+            "columns": [
+                { "name": "Unif", "distribution": "uniform", "min": 0.0, "max": 1.0 },
+                { "name": "Norm", "distribution": "gaussian", "mean": 5.0, "sd": 1.5 }
+            ]
+        }),
+    )?;
     Ok(())
 }
 

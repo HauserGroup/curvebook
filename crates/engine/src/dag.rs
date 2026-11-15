@@ -118,6 +118,14 @@ fn check_explicit_self_cycles(doc: &ProjectDocument) -> Result<(), EngineError> 
         if graph.spec.primary_source_sheet_id == graph.id {
             return Err(EngineError::new(format!("self-referential primary source detected on graph sheet `{}`", graph.id)));
         }
+        for ann in &graph.spec.annotations {
+            if let lumencraft_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }
+            | lumencraft_doc::GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
+                && result_sheet_id == &graph.id
+            {
+                return Err(EngineError::new(format!("self-referential annotation detected on graph sheet `{}`", graph.id)));
+            }
+        }
     }
 
     for layout in &doc.layout_sheets {
