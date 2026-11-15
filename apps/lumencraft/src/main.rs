@@ -3,7 +3,7 @@
 #![cfg_attr(all(windows, not(debug_assertions)), windows_subsystem = "windows")]
 
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -77,7 +77,7 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let env_port = std::env::var("LUMENCRAFT_CONTROL_PORT").ok();
     let env_token = std::env::var("LUMENCRAFT_CONTROL_TOKEN").ok();
-    match run_with_env(&args, env_port.as_deref(), env_token.as_deref()) {
+    match run_with_process_env(&args, env_port.as_deref(), env_token.as_deref(), |key| std::env::var_os(key)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("error: {err}");
@@ -88,10 +88,15 @@ fn main() -> ExitCode {
 
 #[cfg(test)]
 fn run(args: &[String]) -> Result<(), String> {
-    run_with_env(args, None, None)
+    run_with_process_env(args, None, None, |_| None)
 }
 
-fn run_with_env(args: &[String], env_port: Option<&str>, env_token: Option<&str>) -> Result<(), String> {
+fn run_with_process_env(
+    args: &[String],
+    env_port: Option<&str>,
+    env_token: Option<&str>,
+    env_get: impl Fn(&str) -> Option<OsString>,
+) -> Result<(), String> {
     let action = parse_args_with_env(args, env_port, env_token)?;
     match action {
         CliAction::PrintVersion => {
@@ -102,7 +107,7 @@ fn run_with_env(args: &[String], env_port: Option<&str>, env_token: Option<&str>
             print!("{USAGE}");
             Ok(())
         }
-        CliAction::Launch(cfg) => launch_application(&cfg),
+        CliAction::Launch(cfg) => launch_application_with_env(&cfg, env_get),
     }
 }
 
@@ -209,27 +214,85 @@ fn can_create_recovery_root(path: &Path) -> Result<bool, String> {
     }
 }
 
-fn configure_window_preferences(app: &mut UiApp, app_paths: &AppPaths, cfg: &LaunchConfig) -> Result<(), String> {
-    load_shortcut_preferences(app, app_paths)?;
+struct RuntimeShutdownGuard {
+    runtime: Option<DesktopHostRuntime>,
+}
+
+impl RuntimeShutdownGuard {
+    fn new(runtime: DesktopHostRuntime) -> Self {
+        Self { runtime: Some(runtime) }
+    }
+
+    fn get_mut(&mut self) -> Result<&mut DesktopHostRuntime, String> {
+        self.runtime.as_mut().ok_or_else(|| String::from("desktop runtime already consumed"))
+    }
+
+    fn take(&mut self) -> Result<DesktopHostRuntime, String> {
+        self.runtime.take().ok_or_else(|| String::from("desktop runtime already consumed"))
+    }
+
+    fn close_cleanly(&mut self) -> Result<(), String> {
+        match self.runtime.take() {
+            Some(mut rt) => rt.close_all_force(),
+            None => Ok(()),
+        }
+    }
+}
+
+impl Drop for RuntimeShutdownGuard {
+    fn drop(&mut self) {
+        if let Some(mut rt) = self.runtime.take() {
+            let _ = rt.close_all_force();
+        }
+    }
+}
+
+fn configure_window_preferences(app: &mut UiApp, app_paths: &AppPaths, cfg: &LaunchConfig, no_prefs: bool) {
+    if !no_prefs && let Err(err) = load_shortcut_preferences(app, app_paths) {
+        eprintln!("lumencraft preferences warning: {err}; using default shortcuts");
+        app.shortcuts.reset_all();
+    }
     if cfg.rulers {
         app.canvas_dialogs.rulers_visible = true;
     }
     lumencraft::configure_gui_only(app, cfg.gui_only);
     app.sync_views();
-    Ok(())
 }
 
+fn persist_window_preferences_best_effort(app: &UiApp, app_paths: &AppPaths, no_prefs: bool) {
+    if no_prefs {
+        return;
+    }
+    match should_persist_preferences(app, app_paths) {
+        Ok(true) => {
+            if let Err(err) = save_shortcut_preferences(app, app_paths) {
+                eprintln!("lumencraft preferences warning: {err}; leaving preferences untouched");
+            }
+        }
+        Ok(false) => {}
+        Err(err) => {
+            eprintln!("lumencraft preferences warning: {err}; leaving preferences untouched");
+        }
+    }
+}
+
+#[cfg(test)]
 fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
+    launch_application_with_env(cfg, |_| None)
+}
+
+fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Option<OsString>) -> Result<(), String> {
     let _loaded_fonts = install_fonts();
     let _ = lumencraft_ui_egui::bundled_fonts_enabled();
     let _ = lumencraft_format::EXTENSION;
 
     let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
-    let app_paths = resolve_app_paths(exe_dir.as_deref(), cfg.portable_dir.as_deref());
+    let no_prefs = is_no_prefs_enabled(&env_get);
+    let app_paths = resolve_app_paths_with_env(exe_dir.as_deref(), cfg.portable_dir.as_deref(), &env_get);
     let _validated_font = cfg.ttf_font.as_deref().map(load_validated_ttf_font).transpose()?;
 
     let interactive_gui = !cfg.headless_once && cfg.event_script.is_none() && cfg.control_port.is_none();
-    let enable_recovery = app_paths.portable || !cfg.headless_once;
+    let enable_recovery = !no_prefs && (app_paths.portable || !cfg.headless_once);
     let initial_viewport = if interactive_gui { ViewportMetrics::new(1280.0, 800.0, 2.0) } else { ViewportMetrics::new(400.0, 260.0, 2.0) };
     let recovery_root =
         if enable_recovery && can_create_recovery_root(&app_paths.recovery_dir)? { Some(app_paths.recovery_dir.clone()) } else { None };
@@ -240,31 +303,34 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
         gui_only: cfg.gui_only,
         locale_override: None,
         theme_override: None,
-        recovery_root,
+        recovery_root: recovery_root.clone(),
         initial_viewport,
     };
-    let mut runtime = DesktopHostRuntime::new(host_cfg);
+    let mut runtime_guard = RuntimeShutdownGuard::new(DesktopHostRuntime::new(host_cfg));
 
     if cfg.new_instance {
-        if cfg.files.is_empty() {
-            let _ = runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: None, viewport: initial_viewport })?;
-        } else {
-            for path in &cfg.files {
-                let _ = runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: Some(path.clone()), viewport: initial_viewport })?;
-            }
-        }
+        let session = load_startup_session(&cfg.files)?;
+        let attach_recovery = recovery_root.is_some();
+        let _ = runtime_guard.get_mut()?.open_window_with_session(session, initial_viewport, attach_recovery)?;
     } else {
         let startup = open_startup_session_with_recovery(&cfg.files, &app_paths, enable_recovery, now_epoch_ms())?;
         if let Some(journal) = startup.journal {
-            let _ = runtime.open_window_with_recovery(startup.session, initial_viewport, app_paths.recovery_dir.clone(), journal, startup.report)?;
+            let _ = runtime_guard.get_mut()?.open_window_with_recovery(
+                startup.session,
+                initial_viewport,
+                app_paths.recovery_dir.clone(),
+                journal,
+                startup.report,
+            )?;
         } else {
-            let _ = runtime.open_window_with_session(startup.session, initial_viewport, false)?;
+            let _ = runtime_guard.get_mut()?.open_window_with_session(startup.session, initial_viewport, false)?;
         }
     }
 
-    for win_id in runtime.window_ids() {
-        let win = runtime.window_mut(win_id)?;
-        configure_window_preferences(win.app_mut(), &app_paths, cfg)?;
+    let window_ids = runtime_guard.get_mut()?.window_ids();
+    for win_id in window_ids {
+        let win = runtime_guard.get_mut()?.window_mut(win_id)?;
+        configure_window_preferences(win.app_mut(), &app_paths, cfg, no_prefs);
     }
 
     if interactive_gui {
@@ -273,32 +339,34 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
             .as_deref()
             .map(|path| std::fs::read(path).map_err(|err| format!("failed to read `--ttf-font` `{}`: {err}", path.display())))
             .transpose()?;
+        let cleanup_paths = app_paths.clone();
         let cleanup = Box::new(move |rt: &mut DesktopHostRuntime| -> Result<(), String> {
             if let Some(focused_id) = rt.focused_window_id() {
                 let win = rt.window_mut(focused_id)?;
-                if should_persist_preferences(win.app(), &app_paths)? {
-                    save_shortcut_preferences(win.app(), &app_paths)?;
-                }
+                persist_window_preferences_best_effort(win.app(), &cleanup_paths, no_prefs);
             }
             Ok(())
         });
+        let runtime = runtime_guard.take()?;
         return lumencraft::gui_window::run_native_desktop(runtime, extra_ttf_bytes, cleanup);
     }
 
     if let Some(script_path) = cfg.event_script.as_deref() {
         let script =
             std::fs::read_to_string(script_path).map_err(|err| format!("failed to read --event-script `{}`: {err}", script_path.display()))?;
-        let _ = runtime.run_event_script_jsonl(&script)?;
+        let _ = runtime_guard.get_mut()?.run_event_script_jsonl(&script)?;
     }
 
     if cfg.headless_once {
-        for win_id in runtime.window_ids() {
-            let redraw = runtime.dispatch(DesktopHostEvent::RedrawRequested { window_id: win_id })?;
+        let headless_ids = runtime_guard.get_mut()?.window_ids();
+        for win_id in headless_ids {
+            let redraw = runtime_guard.get_mut()?.dispatch(DesktopHostEvent::RedrawRequested { window_id: win_id })?;
             let frame = redraw.frame.ok_or_else(|| format!("missing headless frame for window `{win_id}`"))?;
             if frame.rgba_bytes.is_empty() || frame.width_px == 0 || frame.height_px == 0 {
                 return Err(String::from("headless desktop host produced empty RGBA framebuffer"));
             }
-            let win = runtime.window(win_id)?;
+            let rt = runtime_guard.get_mut()?;
+            let win = rt.window(win_id)?;
             let png = render_workspace_frame_png(win.app(), RenderTargetSpec { width_px: 800, height_px: 520, dpi: 144 })
                 .map_err(|err| format!("headless frame render failed: {err}"))?;
             if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
@@ -308,19 +376,21 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     }
 
     if let Some(port) = cfg.control_port {
-        let focused_id = runtime.focused_window_id().ok_or_else(|| String::from("no open window available for --control server"))?;
-        let win = runtime.window_mut(focused_id)?;
+        let rt = runtime_guard.get_mut()?;
+        let focused_id = rt.focused_window_id().ok_or_else(|| String::from("no open window available for --control server"))?;
+        let win = rt.window_mut(focused_id)?;
         run_authenticated_control_server(win, port, cfg, &app_paths)?;
     }
 
-    if let Some(focused_id) = runtime.focused_window_id() {
-        let win = runtime.window_mut(focused_id)?;
-        if should_persist_preferences(win.app(), &app_paths)? {
-            save_shortcut_preferences(win.app(), &app_paths)?;
+    {
+        let rt = runtime_guard.get_mut()?;
+        if let Some(focused_id) = rt.focused_window_id() {
+            let win = rt.window_mut(focused_id)?;
+            persist_window_preferences_best_effort(win.app(), &app_paths, no_prefs);
         }
     }
 
-    runtime.close_all_force()?;
+    runtime_guard.close_cleanly()?;
     Ok(())
 }
 
@@ -445,13 +515,35 @@ fn close_startup_recovery_cleanly(app: &mut UiApp, recovery_journal: Option<Cras
     Ok(())
 }
 
+fn parse_env_truthy(val: Option<&OsStr>) -> bool {
+    val.and_then(|s| s.to_str()).map(str::trim).is_some_and(|s| {
+        s.eq_ignore_ascii_case("1") || s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("yes") || s.eq_ignore_ascii_case("on")
+    })
+}
+
+fn is_no_prefs_enabled(env_get: &impl Fn(&str) -> Option<OsString>) -> bool {
+    parse_env_truthy(env_get("LUMENCRAFT_NO_PREFS").as_deref())
+}
+
+#[cfg(test)]
 fn resolve_app_paths(exe_dir: Option<&Path>, explicit_portable: Option<&Path>) -> AppPaths {
-    resolve_app_paths_with_env(exe_dir, explicit_portable, |key| std::env::var_os(key))
+    resolve_app_paths_with_env(exe_dir, explicit_portable, |_| None)
 }
 
 fn resolve_app_paths_with_env(exe_dir: Option<&Path>, explicit_portable: Option<&Path>, env_get: impl Fn(&str) -> Option<OsString>) -> AppPaths {
     if let Some(dir) = explicit_portable {
         return portable_app_paths(dir);
+    }
+    if let Some(raw_cfg) = env_get("LUMENCRAFT_CONFIG_DIR").filter(|v| !v.to_string_lossy().trim().is_empty()) {
+        let base = PathBuf::from(raw_cfg);
+        return AppPaths {
+            portable: false,
+            preferences_file: base.join("preferences.json"),
+            shortcuts_file: base.join("shortcuts.json"),
+            recovery_dir: base.join("recovery"),
+            config_dir: base.clone(),
+            data_dir: base,
+        };
     }
     if let Some(dir) = exe_dir
         && dir.join("portable.txt").is_file()
@@ -913,6 +1005,165 @@ mod tests {
             }
         }
         assert!(!token_path.exists(), "ControlTokenFileGuard must remove token file on drop");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s11_02_launch_failure_releases_acquired_recovery_lock() -> Result<(), Box<dyn std::error::Error>> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-lock-cleanup-{}-{nanos}", std::process::id()));
+        let recovery_dir = dir.join("lumencraft-data").join("recovery");
+
+        // Trigger failure AFTER opening window + acquiring recovery lock (`--event-script` missing file).
+        let failing_cfg = LaunchConfig {
+            portable_dir: Some(dir.clone()),
+            event_script: Some(dir.join("definitely-missing-script.jsonl")),
+            ..LaunchConfig::default()
+        };
+        let err = super::launch_application_with_env(&failing_cfg, |_| None).expect_err("missing --event-script should fail launch");
+        assert!(err.contains("--event-script"));
+        assert!(!recovery_dir.join(lumencraft_format::LOCKFILE_NAME).exists(), "failed launch must still release lumencraft.lock");
+
+        // Immediate relaunch without waiting for TTL must succeed cleanly.
+        let ok_cfg = LaunchConfig { headless_once: true, portable_dir: Some(dir.clone()), ..LaunchConfig::default() };
+        super::launch_application_with_env(&ok_cfg, |_| None)?;
+        assert!(!recovery_dir.join(lumencraft_format::LOCKFILE_NAME).exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s11_04_multi_file_args_and_csv_dirty_flag() -> Result<(), Box<dyn std::error::Error>> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-s11-04-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+
+        let proj_a = dir.join("a.lumencraft");
+        let mut doc_a = ProjectDocument::new("Project Alpha")?;
+        doc_a.add_data_sheet(DataSheet::new("data-a", "Alpha Table", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 2)?))?)?;
+        save_project_file(&proj_a, &doc_a)?;
+
+        let proj_b = dir.join("b.lumencraft");
+        let doc_b = ProjectDocument::new("Project Beta")?;
+        save_project_file(&proj_b, &doc_b)?;
+
+        let csv_path = dir.join("extra.csv");
+        std::fs::write(&csv_path, "X,Y\n1,2\n3,4\n")?;
+
+        // 1. Multiple project archives must return an explicit error rather than silently dropping the first.
+        let multi_err = load_startup_session(&[proj_a.clone(), proj_b]).expect_err("multiple project archives must fail");
+        assert!(multi_err.contains("cannot open multiple project files"));
+
+        // 2. CSV before project archive loads archive AND merges CSV, marking session dirty.
+        let before = load_startup_session(&[csv_path.clone(), proj_a.clone()])?;
+        assert_eq!(before.document().title, "Project Alpha");
+        assert_eq!(before.document().data_sheets.len(), 2);
+        assert_eq!(before.file_path(), Some(proj_a.as_path()));
+        assert!(before.is_dirty(), "merging CSV before project archive must mark session dirty");
+
+        // 3. CSV after project archive loads archive AND merges CSV, marking session dirty.
+        let after = load_startup_session(&[proj_a.clone(), csv_path])?;
+        assert_eq!(after.document().title, "Project Alpha");
+        assert_eq!(after.document().data_sheets.len(), 2);
+        assert_eq!(after.file_path(), Some(proj_a.as_path()));
+        assert!(after.is_dirty(), "merging CSV after project archive must mark session dirty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s11_05_corrupt_prefs_and_shortcuts_warn_instead_of_aborting_launch() -> Result<(), Box<dyn std::error::Error>> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-s11-05-{}-{nanos}", std::process::id()));
+        let data_dir = dir.join("lumencraft-data");
+        std::fs::create_dir_all(&data_dir)?;
+
+        // Corrupt shortcuts.json must warn and fall back to defaults instead of aborting launch.
+        std::fs::write(data_dir.join("shortcuts.json"), "{definitely invalid json")?;
+        let headless_cfg = LaunchConfig { headless_once: true, portable_dir: Some(dir.clone()), ..LaunchConfig::default() };
+        super::launch_application_with_env(&headless_cfg, |_| None)?;
+
+        // Corrupt preferences.json must warn at launch and on exit without aborting cleanup.
+        std::fs::write(data_dir.join("preferences.json"), "{broken preferences json")?;
+        super::launch_application_with_env(&headless_cfg, |_| None)?;
+
+        // Swapped shortcuts.json loads cleanly through configure_window_preferences.
+        std::fs::remove_file(data_dir.join("preferences.json"))?;
+        std::fs::write(data_dir.join("shortcuts.json"), r#"{"ui.palette.open":"F6","ui.pane.cycle":"Cmd+K"}"#)?;
+        let app_paths = super::resolve_app_paths(None, Some(&dir));
+        let mut app = lumencraft_ui_egui::UiApp::new();
+        super::configure_window_preferences(&mut app, &app_paths, &LaunchConfig::default(), false);
+        assert_eq!(app.shortcuts.active_combo("ui.palette.open"), Some("F6"));
+        assert_eq!(app.shortcuts.active_combo("ui.pane.cycle"), Some("Cmd+K"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s11_06_config_dir_and_no_prefs_env_vars() -> Result<(), Box<dyn std::error::Error>> {
+        use std::ffi::OsString;
+
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-s11-06-{}-{nanos}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let env_cfg_dir = dir.join("custom-cfg");
+        std::fs::create_dir_all(&env_cfg_dir)?;
+
+        let paths =
+            super::resolve_app_paths_with_env(
+                None,
+                None,
+                |key| {
+                    if key == "LUMENCRAFT_CONFIG_DIR" { Some(OsString::from(&env_cfg_dir)) } else { None }
+                },
+            );
+        assert_eq!(paths.config_dir, env_cfg_dir);
+        assert_eq!(paths.preferences_file, env_cfg_dir.join("preferences.json"));
+        assert_eq!(paths.shortcuts_file, env_cfg_dir.join("shortcuts.json"));
+        assert_eq!(paths.recovery_dir, env_cfg_dir.join("recovery"));
+
+        // With LUMENCRAFT_NO_PREFS=1 (and true/yes), corrupt prefs are skipped, no prefs are saved,
+        // and no shared recovery lock/journal is touched even on non-headless event script execution.
+        let mut prefs = lumencraft_format::versioned::PreferencesFile::default();
+        prefs.shortcuts.insert(String::from("ui.gallery.toggle"), String::from("Ctrl+Alt+G"));
+        lumencraft_format::versioned::save_preferences_file(&paths.preferences_file, &prefs)?;
+
+        let script_path = dir.join("noop.jsonl");
+        std::fs::write(&script_path, "{\"WindowFocused\":{\"window_id\":1}}\n")?;
+        let cfg = LaunchConfig { event_script: Some(script_path), ..LaunchConfig::default() };
+
+        for val in ["1", "true", "YES"] {
+            let env_dir = env_cfg_dir.clone();
+            let flag = OsString::from(val);
+            super::launch_application_with_env(&cfg, move |key| match key {
+                "LUMENCRAFT_CONFIG_DIR" => Some(OsString::from(&env_dir)),
+                "LUMENCRAFT_NO_PREFS" => Some(flag.clone()),
+                _ => None,
+            })?;
+            assert!(!paths.recovery_dir.exists(), "LUMENCRAFT_NO_PREFS={val} must not touch recovery_dir");
+        }
+
+        // Verify a customized app does NOT write preferences when LUMENCRAFT_NO_PREFS is true.
+        let mut custom_app = lumencraft_ui_egui::UiApp::new();
+        custom_app.shortcuts.set_shortcut("ui.gallery.toggle", "Ctrl+Shift+Y")?;
+        let fresh_paths = super::resolve_app_paths(None, Some(&dir.join("unused-portable")));
+        super::persist_window_preferences_best_effort(&custom_app, &fresh_paths, true);
+        assert!(!fresh_paths.preferences_file.exists());
+
+        // Contrast: without LUMENCRAFT_NO_PREFS, LUMENCRAFT_CONFIG_DIR is used for recovery_dir.
+        let env_dir_enabled = env_cfg_dir.clone();
+        super::launch_application_with_env(
+            &cfg,
+            move |key| {
+                if key == "LUMENCRAFT_CONFIG_DIR" { Some(OsString::from(&env_dir_enabled)) } else { None }
+            },
+        )?;
+        assert!(paths.recovery_dir.is_dir(), "expected LUMENCRAFT_CONFIG_DIR/recovery when LUMENCRAFT_NO_PREFS is unset");
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

@@ -1371,6 +1371,7 @@ fn build_cox_design_subjects(
     for r in 0..mv.row_count() {
         let Some(t) = time_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
         let Some(st) = status_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
+        let status = parse_survival_status(st)?;
         let mut x_vals = Vec::with_capacity(pred_names.len());
         let mut ok = true;
         for (pos, &pc) in predictor_columns.iter().enumerate() {
@@ -1402,7 +1403,7 @@ fn build_cox_design_subjects(
             }
         }
         if ok {
-            subjects.push(CoxSubject { time: t, event: st != 0.0, x: x_vals });
+            subjects.push(CoxSubject { time: t, event: matches!(status, SurvivalStatus::Event), x: x_vals });
         }
     }
 
@@ -1490,6 +1491,16 @@ fn is_binary_status_column(mv: &MultipleVariablesTable, col_idx: usize) -> bool 
 fn title_has_any(title: &str, hints: &[&str]) -> bool {
     let lower = title.to_ascii_lowercase();
     hints.iter().any(|h| lower.contains(h))
+}
+
+fn parse_survival_status(st: f64) -> Result<SurvivalStatus, StatsError> {
+    if st == 1.0 {
+        Ok(SurvivalStatus::Event)
+    } else if st == 0.0 {
+        Ok(SurvivalStatus::Censored)
+    } else {
+        Err(StatsError::InvalidParameter { name: "survival_status", value: st })
+    }
 }
 
 fn extract_mv_km_cohorts(
@@ -1589,13 +1600,7 @@ fn extract_mv_km_cohorts(
             if !t.is_finite() || t < 0.0 {
                 return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
             }
-            let status = if st == 1.0 {
-                SurvivalStatus::Event
-            } else if st == 0.0 {
-                SurvivalStatus::Censored
-            } else {
-                return Err(StatsError::InvalidParameter { name: "survival_status", value: st });
-            };
+            let status = parse_survival_status(st)?;
             let Some(tok) = g_var.cells.get(r).and_then(mv_survival_token) else { continue };
             if let Some(pos) = levels.iter().position(|lvl| lvl == &tok) {
                 buckets[pos].push(SurvivalObservation { row: r, time: t, status });
@@ -1615,13 +1620,7 @@ fn extract_mv_km_cohorts(
             if !t.is_finite() || t < 0.0 {
                 return Err(StatsError::InvalidParameter { name: "survival_time", value: t });
             }
-            let status = if st == 1.0 {
-                SurvivalStatus::Event
-            } else if st == 0.0 {
-                SurvivalStatus::Censored
-            } else {
-                return Err(StatsError::InvalidParameter { name: "survival_status", value: st });
-            };
+            let status = parse_survival_status(st)?;
             obs.push(SurvivalObservation { row: r, time: t, status });
         }
         if obs.is_empty() {

@@ -454,12 +454,16 @@ fn provision_paired_info_sheet(
         if sheet_id_exists(doc, &iid) {
             return Err(EngineError::with_code(ErrorCode::AlreadyExists, format!("sheet id `{}` already exists in another section", iid.as_str())));
         }
-        let info = InfoSheet::new_preseeded(iid.clone(), format!("{data_title} Info"))?;
+        let info_title = format!("{data_title} Info");
+        validate_title(&info_title)?;
+        let info = InfoSheet::new_preseeded(iid.clone(), info_title)?;
         reserved.insert(iid.as_str().to_owned());
         return Ok((iid, Some(info)));
     }
     let iid = next_unique_id_with_reserved(doc, &format!("info-{}", data_id.as_str()), reserved)?;
-    let info = InfoSheet::new_preseeded(iid.clone(), format!("{data_title} Info"))?;
+    let info_title = format!("{data_title} Info");
+    validate_title(&info_title)?;
+    let info = InfoSheet::new_preseeded(iid.clone(), info_title)?;
     reserved.insert(iid.as_str().to_owned());
     Ok((iid, Some(info)))
 }
@@ -574,6 +578,7 @@ fn run_sheet_rename(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
         .sheet_section(&id)
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("sheet `{}` not found", id.as_str())))?;
 
+    validate_title(&title)?;
     match section {
         SheetSection::Data => {
             {
@@ -923,7 +928,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
             validate_project_cells(existing_cells, needed)?;
             let mut copy = src.clone();
             copy.id = new_id.clone();
-            copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            validate_title(&title)?;
+            copy.title = title;
             copy.frozen = parsed.frozen.unwrap_or(false);
             ctx.session.doc.add_data_sheet(copy)?;
             let _ = recalculate_with_links(&mut ctx.session.doc, false)?;
@@ -936,7 +943,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("info sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
-            copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            validate_title(&title)?;
+            copy.title = title;
             ctx.session.doc.add_info_sheet(copy)?;
         }
         SheetSection::Analyses => {
@@ -948,7 +957,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
             copy.analysis.id = new_id.clone();
-            copy.analysis.custom_title = Some(parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.analysis.effective_title())));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.analysis.effective_title()));
+            validate_title(&title)?;
+            copy.analysis.custom_title = Some(title);
             if let Some(ref mut ad) = copy.analyzable_data {
                 ad.id = new_id.clone();
             }
@@ -962,7 +973,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("graph sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
-            copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            validate_title(&title)?;
+            copy.title = title;
             ctx.session.doc.add_graph_sheet(copy)?;
         }
         SheetSection::Layouts => {
@@ -973,7 +986,9 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("layout sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
-            copy.title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
+            validate_title(&title)?;
+            copy.title = title;
             ctx.session.doc.add_layout_sheet(copy)?;
         }
     }
@@ -1306,7 +1321,9 @@ fn clone_paired_info(
     let new_info_id = next_unique_id_with_reserved(doc, &candidate, reserved)?;
     reserved.insert(new_info_id.as_str().to_owned());
     cloned_info.id = new_info_id.clone();
-    cloned_info.title = format!("{} Info", cloned_ds.title);
+    let info_title = format!("{} Info", cloned_ds.title);
+    validate_title(&info_title)?;
+    cloned_info.title = info_title;
     doc.add_info_sheet(cloned_info)?;
     cloned_ds.info_sheet_id = Some(new_info_id.clone());
     Ok(Some(new_info_id))
@@ -1330,7 +1347,7 @@ fn clone_downstream_results(
             }
             let new_res_id = next_unique_id_with_reserved(doc, &format!("{id_prefix}-res"), reserved)?;
             reserved.insert(new_res_id.as_str().to_owned());
-            let new_rs = remap_result_sheet(rs.clone(), new_res_id.clone(), id_map, clear_results, suffix_label);
+            let new_rs = remap_result_sheet(rs.clone(), new_res_id.clone(), id_map, clear_results, suffix_label)?;
             id_map.insert(rs.id.clone(), new_res_id.clone());
             created.push(new_res_id.as_str().to_owned());
             doc.add_result_sheet(new_rs)?;
@@ -1349,18 +1366,20 @@ fn remap_result_sheet(
     id_map: &HashMap<SheetId, SheetId>,
     clear_results: bool,
     suffix_label: &str,
-) -> ResultSheet {
+) -> Result<ResultSheet, EngineError> {
     let orig_title = res.title().to_owned();
     res.id = new_id.clone();
     res.analysis.id = new_id;
     if let Some(mapped) = id_map.get(&res.analysis.source_sheet_id) {
         res.analysis.source_sheet_id = mapped.clone();
     }
-    if let Some(custom) = res.analysis.custom_title.take() {
-        res.analysis.custom_title = Some(format!("{custom} ({suffix_label})"));
+    let next_title = if let Some(custom) = res.analysis.custom_title.take() {
+        format!("{custom} ({suffix_label})")
     } else {
-        res.analysis.custom_title = Some(format!("{orig_title} ({suffix_label})"));
-    }
+        format!("{orig_title} ({suffix_label})")
+    };
+    validate_title(&next_title)?;
+    res.analysis.custom_title = Some(next_title);
     remap_analysis_hooks(&mut res.analysis, id_map);
     if clear_results {
         res.status = ResultStatus::Dirty;
@@ -1373,7 +1392,7 @@ fn remap_result_sheet(
     } else if let Some(analyzable) = &mut res.analyzable_data {
         analyzable.id = res.id.clone();
     }
-    res
+    Ok(res)
 }
 
 fn remap_analysis_hooks(spec: &mut AnalysisSpec, id_map: &HashMap<SheetId, SheetId>) {
@@ -1426,7 +1445,9 @@ fn clone_downstream_graphs(
         reserved.insert(new_graph_id.as_str().to_owned());
         let mut cloned = gs.clone();
         cloned.id = new_graph_id.clone();
-        cloned.title = format!("{} ({suffix_label})", gs.title);
+        let next_title = format!("{} ({suffix_label})", gs.title);
+        validate_title(&next_title)?;
+        cloned.title = next_title;
         if let Some(mapped) = id_map.get(&gs.spec.primary_source_sheet_id) {
             cloned.spec.primary_source_sheet_id = mapped.clone();
         }
@@ -1475,7 +1496,9 @@ fn clone_downstream_layouts(
         reserved.insert(new_layout_id.as_str().to_owned());
         let mut cloned = ls.clone();
         cloned.id = new_layout_id.clone();
-        cloned.title = format!("{} ({suffix_label})", ls.title);
+        let next_title = format!("{} ({suffix_label})", ls.title);
+        validate_title(&next_title)?;
+        cloned.title = next_title;
         for item in &mut cloned.spec.items {
             match item {
                 LayoutItem::LiveGraph { graph_sheet_id, .. } => {

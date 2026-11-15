@@ -51,6 +51,29 @@ pub struct VarianceHomogeneityResult {
     pub brown_forsythe_df1: f64,
     pub brown_forsythe_df2: f64,
     pub brown_forsythe_p: f64,
+    #[serde(default)]
+    pub available: bool,
+}
+
+fn clamp_ss_roundoff(ss: f64, data_max_abs: f64, obs_count: usize) -> f64 {
+    let ss_clean = ss.max(0.0);
+    if data_max_abs == 0.0 || !data_max_abs.is_finite() {
+        return ss_clean;
+    }
+    let roundoff_amp = 64.0 * f64::EPSILON * data_max_abs;
+    let tol = roundoff_amp * roundoff_amp * (obs_count.max(1) as f64);
+    if ss_clean <= tol { 0.0 } else { ss_clean }
+}
+
+fn f_ratio_p(ms_num: f64, ms_den: f64, df1: f64, df2: f64) -> Result<(f64, f64), StatsError> {
+    if ms_den > 0.0 {
+        let f = ms_num / ms_den;
+        Ok((f, f_sf(f, df1, df2)?))
+    } else if ms_num > 0.0 {
+        Ok((f64::INFINITY, 0.0))
+    } else {
+        Ok((0.0, 1.0))
+    }
 }
 
 /// Ordinary one-way ANOVA table metrics.
@@ -326,6 +349,7 @@ pub fn variance_homogeneity_tests(groups: &[&[f64]]) -> Result<VarianceHomogenei
         brown_forsythe_df1: bf.df_between,
         brown_forsythe_df2: bf.df_within,
         brown_forsythe_p: bf.p_value,
+        available: true,
     })
 }
 
@@ -424,13 +448,14 @@ fn ordinary_one_way_anova_slices(groups: &[&[f64]], confidence: ConfidenceLevel)
         p_value: p_val,
         r_squared,
         variance_tests: VarianceHomogeneityResult {
-            bartlett_chi2: 0.0,
+            bartlett_chi2: f64::NAN,
             bartlett_df: df_between,
-            bartlett_p: 1.0,
-            brown_forsythe_f: 0.0,
+            bartlett_p: f64::NAN,
+            brown_forsythe_f: f64::NAN,
             brown_forsythe_df1: df_between,
             brown_forsythe_df2: df_within,
-            brown_forsythe_p: 1.0,
+            brown_forsythe_p: f64::NAN,
+            available: false,
         },
         effect_sizes,
     })
@@ -502,13 +527,14 @@ pub fn ordinary_one_way_from_summary(groups: &[GroupComparisonInput], confidence
         p_value: p_val,
         r_squared: if sst > 0.0 { ssb / sst } else { 0.0 },
         variance_tests: VarianceHomogeneityResult {
-            bartlett_chi2: 0.0,
+            bartlett_chi2: f64::NAN,
             bartlett_df: dfb,
-            bartlett_p: 1.0,
-            brown_forsythe_f: 0.0,
+            bartlett_p: f64::NAN,
+            brown_forsythe_f: f64::NAN,
             brown_forsythe_df1: dfb,
             brown_forsythe_df2: dfw,
-            brown_forsythe_p: 1.0,
+            brown_forsythe_p: f64::NAN,
+            available: false,
         },
         effect_sizes,
     })
@@ -604,10 +630,12 @@ pub fn rm_one_way_anova(blocks: &[Vec<f64>]) -> Result<RmOneWayAnovaResult, Stat
     let mut grand_sum = NeumaierSum::new();
     let mut row_means = Vec::with_capacity(n);
     let mut col_sums = vec![NeumaierSum::new(); k];
+    let mut data_max_abs = 0.0_f64;
 
     for row in blocks {
         let mut rsum = NeumaierSum::new();
         for (c, &v) in row.iter().enumerate() {
+            data_max_abs = data_max_abs.max(v.abs());
             rsum.add(v);
             col_sums[c].add(v);
             grand_sum.add(v);
@@ -635,9 +663,10 @@ pub fn rm_one_way_anova(blocks: &[Vec<f64>]) -> Result<RmOneWayAnovaResult, Stat
         }
     }
 
-    let sst = ss_treat.total().max(0.0);
-    let sss = ss_subj.total().max(0.0);
-    let ssr = ss_resid.total().max(0.0);
+    let obs_count = n * k;
+    let sst = clamp_ss_roundoff(ss_treat.total(), data_max_abs, obs_count);
+    let sss = clamp_ss_roundoff(ss_subj.total(), data_max_abs, obs_count);
+    let ssr = clamp_ss_roundoff(ss_resid.total(), data_max_abs, obs_count);
     let ss_total = sst + sss + ssr;
 
     let dft = kf - 1.0;
@@ -647,10 +676,8 @@ pub fn rm_one_way_anova(blocks: &[Vec<f64>]) -> Result<RmOneWayAnovaResult, Stat
     let mss = sss / dfs;
     let msr = ssr / dfr;
 
-    let f_treat = if msr > 0.0 { mst / msr } else { 0.0 };
-    let f_subj = if msr > 0.0 { mss / msr } else { 0.0 };
-    let p_uncorr = f_sf(f_treat, dft, dfr)?;
-    let p_subj = f_sf(f_subj, dfs, dfr)?;
+    let (f_treat, p_uncorr) = f_ratio_p(mst, msr, dft, dfr)?;
+    let (f_subj, p_subj) = f_ratio_p(mss, msr, dfs, dfr)?;
 
     let sphericity = compute_sphericity(blocks, &col_means)?;
     let gg_df1 = (dft * sphericity.greenhouse_geisser_eps).max(1.0);
@@ -967,7 +994,13 @@ pub fn fit_factorial_anova(
 
 fn build_factorial_term(name: &str, ss: f64, df: f64, ms_resid: f64, ss_resid: f64, ss_total: f64) -> Result<FactorialAnovaTerm, StatsError> {
     let ms = ss / df.max(1.0);
-    let f_val = if ms_resid > 0.0 { ms / ms_resid } else { 0.0 };
+    let f_val = if ms_resid > 0.0 {
+        ms / ms_resid
+    } else if ms > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
     Ok(FactorialAnovaTerm {
         name: name.to_owned(),
         ss,
@@ -1091,6 +1124,7 @@ pub fn fit_rm_two_way_anova(
     let mut subj_means = vec![0.0_f64; s_count];
     let mut subj_row_means = vec![vec![0.0_f64; a]; s_count];
     let mut subj_col_means = vec![vec![0.0_f64; b]; s_count];
+    let mut data_max_abs = 0.0_f64;
 
     for (s, mat) in subject_data.iter().enumerate() {
         let mut s_acc = NeumaierSum::new();
@@ -1099,6 +1133,7 @@ pub fn fit_rm_two_way_anova(
                 if !v.is_finite() {
                     return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "y", value: v }));
                 }
+                data_max_abs = data_max_abs.max(v.abs());
                 grand_sum.add(v);
                 s_acc.add(v);
                 cell_means[i][j] += v / sf;
@@ -1112,8 +1147,8 @@ pub fn fit_rm_two_way_anova(
     }
     let gm = grand_sum.total() / (total_n as f64);
 
-    let ss_a: f64 = row_means.iter().map(|&m| sf * bf * (m - gm).powi(2)).sum();
-    let ss_b: f64 = col_means.iter().map(|&m| sf * af * (m - gm).powi(2)).sum();
+    let ss_a = clamp_ss_roundoff(row_means.iter().map(|&m| sf * bf * (m - gm).powi(2)).sum(), data_max_abs, total_n);
+    let ss_b = clamp_ss_roundoff(col_means.iter().map(|&m| sf * af * (m - gm).powi(2)).sum(), data_max_abs, total_n);
     let mut ss_ab = 0.0_f64;
     for i in 0..a {
         for j in 0..b {
@@ -1121,7 +1156,8 @@ pub fn fit_rm_two_way_anova(
             ss_ab += sf * eff * eff;
         }
     }
-    let ss_s: f64 = subj_means.iter().map(|&m| af * bf * (m - gm).powi(2)).sum();
+    let ss_ab = clamp_ss_roundoff(ss_ab, data_max_abs, total_n);
+    let ss_s = clamp_ss_roundoff(subj_means.iter().map(|&m| af * bf * (m - gm).powi(2)).sum(), data_max_abs, total_n);
     let mut ss_sa = 0.0_f64;
     let mut ss_sb = 0.0_f64;
     let mut ss_sab = 0.0_f64;
@@ -1145,6 +1181,9 @@ pub fn fit_rm_two_way_anova(
             }
         }
     }
+    let ss_sa = clamp_ss_roundoff(ss_sa, data_max_abs, total_n);
+    let ss_sb = clamp_ss_roundoff(ss_sb, data_max_abs, total_n);
+    let ss_sab = clamp_ss_roundoff(ss_sab, data_max_abs, total_n);
 
     let dfa = af - 1.0;
     let dfb = bf - 1.0;
@@ -1185,8 +1224,7 @@ pub fn fit_rm_two_way_anova(
     let make_term = |name: String, ss: f64, df: f64, e_ss: f64, e_df: f64| -> Result<FactorialAnovaTerm, StatsError> {
         let ms = ss / df.max(1.0);
         let ms_e = e_ss / e_df.max(1.0);
-        let f = if ms_e > 0.0 { ms / ms_e } else { 0.0 };
-        let p = f_sf(f, df.max(1.0), e_df.max(1.0))?;
+        let (f, p) = f_ratio_p(ms, ms_e, df.max(1.0), e_df.max(1.0))?;
         Ok(FactorialAnovaTerm {
             name,
             ss,
@@ -1460,7 +1498,16 @@ where
 /// Replicates), computing exact Satterthwaite/Kenward-Roger df for unequal cluster sizes and
 /// variance components `(sigma_subcluster^2, sigma_error^2)`.
 pub fn nested_one_way_anova(table: &lumencraft_doc::NestedTable, two_group_t_test: bool) -> Result<NestedAnovaResult, StatsError> {
-    let g_count = table.groups.len();
+    let selected: Vec<usize> = (0..table.groups.len()).collect();
+    nested_one_way_anova_selected(table, &selected, two_group_t_test)
+}
+
+fn nested_one_way_anova_selected(
+    table: &lumencraft_doc::NestedTable,
+    selected_groups: &[usize],
+    two_group_t_test: bool,
+) -> Result<NestedAnovaResult, StatsError> {
+    let g_count = selected_groups.len();
     if two_group_t_test && g_count != 2 {
         return Err(StatsError::InsufficientSampleSize { context: "nested ANOVA groups", required: 2, actual: g_count });
     }
@@ -1475,19 +1522,20 @@ pub fn nested_one_way_anova(table: &lumencraft_doc::NestedTable, two_group_t_tes
     let mut total_obs = 0_usize;
     let mut grand_sum = NeumaierSum::new();
 
-    for (g_idx, group) in table.groups.iter().enumerate() {
+    for (local_g_idx, &orig_g_idx) in selected_groups.iter().enumerate() {
+        let group = table.groups.get(orig_g_idx).ok_or(StatsError::MissingColumn { index: orig_g_idx })?;
         group_labels.push(group.title.clone());
         let mut g_acc = NeumaierSum::new();
         let mut g_n = 0_usize;
         for b_idx in 0..group.biological_unit_count() {
-            let reps = table.active_technical_replicates(g_idx, b_idx);
+            let reps = table.active_technical_replicates(orig_g_idx, b_idx);
             if !reps.is_empty() {
                 let s: f64 = reps.iter().sum();
                 g_acc.add(s);
                 grand_sum.add(s);
                 g_n += reps.len();
                 total_obs += reps.len();
-                subcluster_data.push((g_idx, reps));
+                subcluster_data.push((local_g_idx, reps));
             }
         }
         if g_n == 0 {
@@ -1558,13 +1606,18 @@ pub fn nested_one_way_anova(table: &lumencraft_doc::NestedTable, two_group_t_tes
     let mss = sss / df1_sub;
     let mse = sse / df2_err;
 
-    let f_sub = if mse > 0.0 { mss / mse } else { 0.0 };
-    let p_sub = f_sf(f_sub, df1_sub, df2_err)?;
+    let (f_sub, p_sub) = f_ratio_p(mss, mse, df1_sub, df2_err)?;
 
     let x_mat = DenseMatrix::from_row_major(total_obs, g_count, x_data)?;
     let reml = fit_random_intercept_reml(&x_mat, &y_vec, &cluster_ids, &[("Group", 1, g_count - 1)])?;
 
-    let f_g = reml.fixed_terms.first().and_then(|t| t.f_statistic).unwrap_or(if mss > 0.0 { msg / mss } else { 0.0 });
+    let f_g = reml.fixed_terms.first().and_then(|t| t.f_statistic).unwrap_or(if mss > 0.0 {
+        msg / mss
+    } else if msg > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    });
     let df2_satt = reml.satterthwaite_df.first().copied().unwrap_or(df1_sub);
     let df2_kr = reml.kenward_roger_df.first().copied().unwrap_or(df1_sub);
     let p_g = reml.fixed_terms.first().and_then(|t| t.p_value).unwrap_or(f_sf(f_g, df1_g, df2_satt)?);
@@ -1634,7 +1687,14 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             push_scalar(&mut out, "Eta squared", None, res.effect_sizes.eta_squared);
             push_scalar(&mut out, "Omega squared", None, res.effect_sizes.omega_squared);
 
-            out.tabs.push(build_one_way_tab(&res, anova_spec.compute_effect_sizes, confidence, p_fmt));
+            let mut main_tab = build_one_way_tab(&res, anova_spec.compute_effect_sizes, confidence, p_fmt);
+            if !res.variance_tests.available {
+                main_tab.footnotes.push(String::from(
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data.",
+                ));
+            }
+            out.tabs.push(main_tab);
+            out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, p_fmt));
             append_one_way_multiplicity(&mut out, &group_inputs, res.ms_within, res.df_within, &anova_spec.multiplicity, p_fmt, confidence)?;
             append_one_way_checklist(&mut out, &res, &group_inputs, &raw_slices_owned, false, confidence.alpha());
         }
@@ -1657,7 +1717,14 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                 ],
                 vec![num_cell(uv.welch_w), num_cell(uv.welch_df1), num_cell(uv.welch_df2), p_cell(uv.welch_p, p_fmt)],
             ];
-            out.tabs.push(build_tab("unequal-var-anova", "Brown-Forsythe and Welch ANOVA", ResultTabKind::AnovaTable, headers, labels, rows));
+            let mut uv_tab = build_tab("unequal-var-anova", "Brown-Forsythe and Welch ANOVA", ResultTabKind::AnovaTable, headers, labels, rows);
+            if !base.variance_tests.available {
+                uv_tab.footnotes.push(String::from(
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data.",
+                ));
+            }
+            out.tabs.push(uv_tab);
+            out.tabs.push(build_variance_homogeneity_tab(&base.variance_tests, p_fmt));
 
             let proc_eff = match MultiplicityProcedure::from(anova_spec.multiplicity.method) {
                 MultiplicityProcedure::GamesHowell | MultiplicityProcedure::TamhaneT2 | MultiplicityProcedure::DunnettT3 => {
@@ -1972,6 +2039,58 @@ fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<Extra
     Ok((inputs, Some(res), raw_slices))
 }
 
+fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityResult, p_fmt: PValueFormat) -> ResultTab {
+    let headers = vec![String::from("Statistic"), String::from("DFn / df"), String::from("DFd"), String::from("P value"), String::from("Status")];
+    let labels = vec![String::from("Brown-Forsythe"), String::from("Bartlett")];
+    let mut tab = if vt.available && vt.brown_forsythe_p.is_finite() {
+        let rows = vec![
+            vec![
+                num_cell(vt.brown_forsythe_f),
+                num_cell(vt.brown_forsythe_df1),
+                num_cell(vt.brown_forsythe_df2),
+                p_cell(vt.brown_forsythe_p, p_fmt),
+                ResultCell::Text(if vt.brown_forsythe_p >= 0.05 {
+                    String::from("Equal variances not rejected")
+                } else {
+                    String::from("Variances differ")
+                }),
+            ],
+            vec![
+                num_cell(vt.bartlett_chi2),
+                num_cell(vt.bartlett_df),
+                ResultCell::Empty,
+                p_cell(vt.bartlett_p, p_fmt),
+                ResultCell::Text(if vt.bartlett_p >= 0.05 { String::from("Equal variances not rejected") } else { String::from("Variances differ") }),
+            ],
+        ];
+        build_tab("variance-homogeneity", "Test for homogeneity of variances", ResultTabKind::Diagnostics, headers, labels, rows)
+    } else {
+        let rows = vec![
+            vec![
+                ResultCell::Empty,
+                num_cell(vt.brown_forsythe_df1),
+                num_cell(vt.brown_forsythe_df2),
+                ResultCell::Empty,
+                ResultCell::Text(String::from("Not computable from summary statistics")),
+            ],
+            vec![
+                ResultCell::Empty,
+                num_cell(vt.bartlett_df),
+                ResultCell::Empty,
+                ResultCell::Empty,
+                ResultCell::Text(String::from("Not computable from summary statistics")),
+            ],
+        ];
+        build_tab("variance-homogeneity", "Test for homogeneity of variances", ResultTabKind::Diagnostics, headers, labels, rows)
+    };
+    if !vt.available {
+        tab.footnotes.push(String::from(
+            "Brown-Forsythe and Bartlett variance homogeneity tests cannot be computed from pre-summarized Mean/SD/N data; raw replicate observations are required.",
+        ));
+    }
+    tab
+}
+
 fn build_one_way_tab(res: &OneWayAnovaResult, include_effect: bool, confidence: ConfidenceLevel, p_fmt: PValueFormat) -> ResultTab {
     let mut headers = vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")];
     if include_effect {
@@ -2085,20 +2204,29 @@ fn append_one_way_checklist(
     is_welch: bool,
     alpha: f64,
 ) {
-    let equal_var_ok = res.variance_tests.brown_forsythe_p >= 0.05;
-    let (var_status, var_explanation) = if equal_var_ok {
-        (ChecklistStatus::Pass, "Group variances do not differ significantly; ordinary pooled-variance ANOVA is appropriate.")
-    } else if is_welch {
-        (ChecklistStatus::Info, "Variances appear unequal (P < 0.05); Brown-Forsythe & Welch ANOVA does not assume equal variances.")
+    if res.variance_tests.available && res.variance_tests.brown_forsythe_p.is_finite() {
+        let equal_var_ok = res.variance_tests.brown_forsythe_p >= 0.05;
+        let (var_status, var_explanation) = if equal_var_ok {
+            (ChecklistStatus::Pass, "Group variances do not differ significantly; ordinary pooled-variance ANOVA is appropriate.")
+        } else if is_welch {
+            (ChecklistStatus::Info, "Variances appear unequal (P < 0.05); Brown-Forsythe & Welch ANOVA does not assume equal variances.")
+        } else {
+            (ChecklistStatus::Warn, "Variances appear unequal (Brown-Forsythe P < 0.05), violating the pooled equal-variance assumption.")
+        };
+        out.checklist.push(checklist_item(
+            "Homogeneity of variances (Brown-Forsythe)",
+            var_status,
+            Some(format!("F = {:.3}, P = {:.4}", res.variance_tests.brown_forsythe_f, res.variance_tests.brown_forsythe_p)),
+            var_explanation,
+        ));
     } else {
-        (ChecklistStatus::Warn, "Variances appear unequal (Brown-Forsythe P < 0.05), violating the pooled equal-variance assumption.")
-    };
-    out.checklist.push(checklist_item(
-        "Homogeneity of variances (Brown-Forsythe)",
-        var_status,
-        Some(format!("F = {:.3}, P = {:.4}", res.variance_tests.brown_forsythe_f, res.variance_tests.brown_forsythe_p)),
-        var_explanation,
-    ));
+        out.checklist.push(checklist_item(
+            "Homogeneity of variances (Brown-Forsythe / Bartlett)",
+            ChecklistStatus::Info,
+            Some(String::from("Not computable from summary statistics")),
+            "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data; raw replicate observations are required.",
+        ));
+    }
     append_group_normality_checklist(&mut out.checklist, raw_slices, alpha, "Group normality (Shapiro-Wilk)");
     let min_n = inputs.iter().map(|g| g.n as usize).min().unwrap_or(0);
     out.checklist.push(checklist_item(
@@ -2117,7 +2245,7 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     let confidence = spec.confidence_level;
 
     let (mut result, obs) = match &sheet.archetype {
-        TableArchetype::Grouped(grouped) => run_grouped_factorial(grouped, &mut out, fac_spec, p_fmt)?,
+        TableArchetype::Grouped(grouped) => run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt)?,
         TableArchetype::MultipleVariables(mv) => run_multifactor_mv(mv, fac_spec)?,
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
     };
@@ -2276,7 +2404,7 @@ fn run_factorial_multiplicity(
     if mult_spec.method == MultiplicityMethod::None {
         return Ok(());
     }
-    if !result.df_residual.is_finite() || result.df_residual < 1.0 || !result.ms_residual.is_finite() || result.ms_residual <= 0.0 {
+    if !result.df_residual.is_finite() || result.df_residual < 1.0 || !result.ms_residual.is_finite() || result.ms_residual < 0.0 {
         return Ok(());
     }
 
@@ -2353,6 +2481,7 @@ fn grouped_row_levels(grouped: &lumencraft_doc::GroupedTable, n_rows: usize) -> 
 fn run_grouped_factorial(
     grouped: &lumencraft_doc::GroupedTable,
     out: &mut ResultSheet,
+    selected: &[usize],
     fac_spec: &FactorialAnovaSpec,
     p_fmt: PValueFormat,
 ) -> Result<(FactorialAnovaResult, FactorialObservations), StatsError> {
@@ -2360,26 +2489,33 @@ fn run_grouped_factorial(
         return Err(StatsError::RequiresRawReplicates);
     }
     let n_rows = grouped.row_count();
-    let n_cols = grouped.data_sets.len();
+    let selected_cols = resolve_selected_indices(selected, grouped.data_sets.len());
+    let n_cols = selected_cols.len();
+    if n_cols < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: n_cols });
+    }
     let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
         return Err(StatsError::RequiresRawReplicates);
     };
 
     // Repeated-measures 2-way path (with automatic REML mixed-effects fallback on missing replicates).
     if !fac_spec.three_way && fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
-        if grouped.has_missing_replicates() && fac_spec.fit_reml_on_missing {
-            return run_rm_two_way_reml_fallback(grouped, out, fac_spec, p_fmt);
+        let has_missing_selected = (0..n_rows).any(|r| {
+            selected_cols.iter().any(|&c| (0..n_subs).any(|s| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_none()))
+        });
+        if has_missing_selected && fac_spec.fit_reml_on_missing {
+            return run_rm_two_way_reml_fallback(grouped, out, &selected_cols, fac_spec, p_fmt);
         }
         let mut subject_data = vec![vec![vec![0.0_f64; n_cols]; n_rows]; n_subs];
         let mut obs = Vec::with_capacity(n_subs * n_rows * n_cols);
         for (s, subj) in subject_data.iter_mut().enumerate() {
             for (r, row_vec) in subj.iter_mut().enumerate() {
-                for (c, slot) in row_vec.iter_mut().enumerate() {
-                    let Some(v) = grouped.observation(r, c, s).and_then(|cell| cell.active_number()) else {
-                        return run_rm_two_way_reml_fallback(grouped, out, fac_spec, p_fmt);
+                for (c_pos, (&orig_c, slot)) in selected_cols.iter().zip(row_vec.iter_mut()).enumerate() {
+                    let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) else {
+                        return run_rm_two_way_reml_fallback(grouped, out, &selected_cols, fac_spec, p_fmt);
                     };
                     *slot = v;
-                    obs.push((vec![r, c], v));
+                    obs.push((vec![r, c_pos], v));
                 }
             }
         }
@@ -2395,7 +2531,7 @@ fn run_grouped_factorial(
         }
         let data = FactorialObservations {
             factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
-            factor_levels: vec![grouped_row_levels(grouped, n_rows), grouped.data_sets.iter().map(|ds| ds.title.clone()).collect()],
+            factor_levels: vec![grouped_row_levels(grouped, n_rows), selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect()],
             rows: obs,
         };
         return Ok((res, data));
@@ -2413,10 +2549,10 @@ fn run_grouped_factorial(
 
         let mut obs = Vec::new();
         for r in 0..n_rows {
-            for c in 0..4 {
-                let l1 = c / 2;
-                let l2 = c % 2;
-                for y in grouped.active_replicates(r, c) {
+            for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
+                let l1 = c_pos / 2;
+                let l2 = c_pos % 2;
+                for y in grouped.active_replicates(r, orig_c) {
                     obs.push((vec![l1, l2, r], y));
                 }
             }
@@ -2429,12 +2565,12 @@ fn run_grouped_factorial(
 
     // Standard Two-Way ANOVA (Row Factor x Column Factor).
     let row_levels = grouped_row_levels(grouped, n_rows);
-    let col_levels: Vec<String> = grouped.data_sets.iter().map(|ds| ds.title.clone()).collect();
+    let col_levels: Vec<String> = selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
     let mut obs = Vec::new();
     for r in 0..n_rows {
-        for c in 0..n_cols {
-            for y in grouped.active_replicates(r, c) {
-                obs.push((vec![r, c], y));
+        for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
+            for y in grouped.active_replicates(r, orig_c) {
+                obs.push((vec![r, c_pos], y));
             }
         }
     }
@@ -2450,11 +2586,12 @@ fn run_grouped_factorial(
 fn run_rm_two_way_reml_fallback(
     grouped: &lumencraft_doc::GroupedTable,
     out: &mut ResultSheet,
+    selected_cols: &[usize],
     fac_spec: &FactorialAnovaSpec,
     p_fmt: PValueFormat,
 ) -> Result<(FactorialAnovaResult, FactorialObservations), StatsError> {
     let n_rows = grouped.row_count();
-    let n_cols = grouped.data_sets.len();
+    let n_cols = selected_cols.len();
     let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
         return Err(StatsError::RequiresRawReplicates);
     };
@@ -2471,8 +2608,8 @@ fn run_rm_two_way_reml_fallback(
     let mut ss_tot_acc = NeumaierSum::new();
     for s in 0..n_subs {
         for (r, r_basis) in row_basis.iter().enumerate() {
-            for (c, c_basis) in col_basis.iter().enumerate() {
-                if let Some(v) = grouped.observation(r, c, s).and_then(|cell| cell.active_number()) {
+            for (c_pos, (&orig_c, c_basis)) in selected_cols.iter().zip(col_basis.iter()).enumerate() {
+                if let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) {
                     let mut row_x = Vec::with_capacity(p_total);
                     row_x.push(1.0);
                     row_x.extend_from_slice(r_basis);
@@ -2484,12 +2621,12 @@ fn run_rm_two_way_reml_fallback(
                     }
                     x_rows.extend_from_slice(&row_x);
                     y_vec.push(v);
-                    obs.push((vec![r, c], v));
+                    obs.push((vec![r, c_pos], v));
                     ss_tot_acc.add(v);
                     // Cluster ID represents repeated subject identity across matched dimensions.
                     let cid = match fac_spec.repeated_measures {
                         RepeatedMeasuresDesign::ColumnFactorMatched => r * n_subs + s,
-                        RepeatedMeasuresDesign::RowFactorMatched => c * n_subs + s,
+                        RepeatedMeasuresDesign::RowFactorMatched => c_pos * n_subs + s,
                         _ => s,
                     };
                     cluster_ids.push(cid);
@@ -2555,7 +2692,7 @@ fn run_rm_two_way_reml_fallback(
     };
     let data = FactorialObservations {
         factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
-        factor_levels: vec![grouped_row_levels(grouped, n_rows), grouped.data_sets.iter().map(|ds| ds.title.clone()).collect()],
+        factor_levels: vec![grouped_row_levels(grouped, n_rows), selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect()],
         rows: obs,
     };
     Ok((res, data))
@@ -2588,7 +2725,8 @@ fn run_multifactor_mv(
         let mut lvls = Vec::with_capacity(fac_spec.multifactor_columns.len());
         let mut valid = true;
         for (f_pos, &c_idx) in fac_spec.multifactor_columns.iter().enumerate() {
-            let cell = &mv.variables[c_idx].cells[r];
+            let factor_var = mv.variables.get(c_idx).ok_or(StatsError::MissingColumn { index: c_idx })?;
+            let cell = factor_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: n_rows, actual: factor_var.cells.len() })?;
             if cell.excluded {
                 valid = false;
                 break;
@@ -2625,7 +2763,8 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     let p_fmt = spec.p_value_format;
     let confidence = spec.confidence_level;
 
-    let res = nested_one_way_anova(nested, nested_spec.two_group_t_test)?;
+    let selected_groups = resolve_selected_indices(&spec.selected_data_sets, nested.groups.len());
+    let res = nested_one_way_anova_selected(nested, &selected_groups, nested_spec.two_group_t_test)?;
     push_scalar(&mut out, "F (among groups)", None, res.f_among_groups);
     push_scalar(&mut out, "P value (groups)", None, res.p_among_groups);
     push_scalar(&mut out, "Subcluster variance", None, res.variance_subclusters);
@@ -2693,10 +2832,11 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     ));
 
     // Optional group-level pairwise comparisons if >= 3 groups.
-    if !nested_spec.two_group_t_test && nested.groups.len() >= 3 {
-        let mut g_inputs = Vec::with_capacity(nested.groups.len());
+    if !nested_spec.two_group_t_test && selected_groups.len() >= 3 {
+        let mut g_inputs = Vec::with_capacity(selected_groups.len());
         let eff_var = res.variance_error + res.variance_subclusters;
-        for (g_idx, g) in nested.groups.iter().enumerate() {
+        for &g_idx in &selected_groups {
+            let g = &nested.groups[g_idx];
             let mut vals = Vec::new();
             for b in 0..g.biological_unit_count() {
                 vals.extend(nested.active_technical_replicates(g_idx, b));

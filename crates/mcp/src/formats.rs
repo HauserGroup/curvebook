@@ -99,7 +99,7 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
         Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
     };
 
-    apply_imported_payload(state, &resolved_path, format_id, payload, title_override.as_deref(), append)
+    apply_imported_payload(state, &resolved_path, format_id, payload, title_override.as_deref(), &import_opts, append)
 }
 
 fn resolve_importer<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &Path) -> Result<&'a dyn Importer, ToolCallError> {
@@ -154,6 +154,7 @@ fn apply_imported_payload(
     format_id: &str,
     payload: ImportPayload,
     title_override: Option<&str>,
+    import_opts: &ImportOptions,
     append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
     match (format_id, payload) {
@@ -194,67 +195,130 @@ fn apply_imported_payload(
             }))
         }
         ("prism" | "pzfx", ImportPayload::Report(report)) => {
-            let sheets = report.document.total_sheet_count();
-            let title = report.document.title.clone();
-            state.install_session(Session::from_document(report.document));
-            state.session.set_file_path(None, false);
-            ToolCallResult::ok_json(&json!({
-                "opened": true,
-                "format": format_id,
-                "path": resolved_path.display().to_string(),
-                "title": title,
-                "total_sheet_count": sheets,
-                "warnings": report.warnings,
-            }))
+            let warnings = match serde_json::to_value(&report.warnings) {
+                Ok(v) => v,
+                Err(err) => {
+                    return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize import warnings: {err}")));
+                }
+            };
+            apply_report_import(state, resolved_path, format_id, warnings)
         }
-        ("csv" | "tsv", ImportPayload::DataSheet(ds)) => apply_imported_datasheet(state, resolved_path, format_id, ds, append),
+        ("csv" | "tsv", ImportPayload::DataSheet(_)) => apply_csv_import(state, resolved_path, format_id, import_opts, append),
         _ => Ok(errors::result_from_code(ErrorCode::UnsupportedFormat, format!("unexpected payload returned by importer '{format_id}'"))),
     }
 }
 
-fn apply_imported_datasheet(
-    state: &mut McpServerState,
-    resolved_path: &Path,
-    format_id: &str,
-    ds: DataSheet,
-    append: bool,
-) -> Result<ToolCallResult, ToolCallError> {
-    let rows = ds.archetype.row_count();
-    let cols = ds.archetype.column_count();
-    let sheet_id_str = ds.id.as_str().to_owned();
-    let sheet_title = ds.title.clone();
-    let table_kind_label = ds.kind().label();
+fn apply_report_import(state: &mut McpServerState, resolved_path: &Path, format_id: &str, warnings: Value) -> Result<ToolCallResult, ToolCallError> {
+    let bytes = match std::fs::read(resolved_path) {
+        Ok(b) => b,
+        Err(err) => {
+            return Ok(errors::result_from_code(ErrorCode::IoError, format!("failed to read '{}': {err}", resolved_path.display())));
+        }
+    };
+    let command_id = if format_id == "prism" { "table.importPrism" } else { "table.importPzfx" };
+    let params = json!({
+        "bytes_base64": encode_base64(&bytes),
+        "merge": false,
+    });
 
-    if append {
-        let mut doc = state.session.document().clone();
-        if let Err(err) = doc.add_data_sheet(ds) {
-            return Ok(errors::result_from_engine_error(&EngineError::from(err)));
-        }
-        let is_dirty = state.session.is_dirty();
-        let existing_path = state.session.file_path().map(Path::to_path_buf);
-        state.install_session(Session::from_document(doc));
-        state.session.set_file_path(existing_path, !is_dirty);
-    } else {
-        let mut doc = match ProjectDocument::new(sheet_title.clone()) {
-            Ok(d) => d,
-            Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
-        };
-        if let Err(err) = doc.add_data_sheet(ds) {
-            return Ok(errors::result_from_engine_error(&EngineError::from(err)));
-        }
-        state.install_session(Session::from_document(doc));
-        state.session.set_file_path(None, false);
+    let mut next_session = Session::new();
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    if let Err(err) = next_session.execute_with_caller(command_id, params, lumencraft_engine::Caller::Mcp, &cancel) {
+        return Ok(errors::result_from_engine_error(&err));
     }
 
+    let sheets = next_session.document().total_sheet_count();
+    let title = next_session.document().title.clone();
+    state.install_session(next_session);
     ToolCallResult::ok_json(&json!({
         "opened": true,
         "format": format_id,
         "path": resolved_path.display().to_string(),
-        "sheet_id": sheet_id_str,
-        "title": sheet_title,
-        "table_kind": table_kind_label,
-        "rows": rows,
-        "columns": cols,
+        "title": title,
+        "total_sheet_count": sheets,
+        "warnings": warnings,
+    }))
+}
+
+fn apply_csv_import(
+    state: &mut McpServerState,
+    resolved_path: &Path,
+    format_id: &str,
+    import_opts: &ImportOptions,
+    append: bool,
+) -> Result<ToolCallResult, ToolCallError> {
+    if append && state.session.document().sheet_section(&import_opts.sheet_id).is_some() {
+        return Ok(errors::result_from_engine_error(&EngineError::from(lumencraft_doc::DocError::DuplicateSheetId {
+            sheet_id: import_opts.sheet_id.clone(),
+        })));
+    }
+
+    let csv_text = match std::fs::read_to_string(resolved_path) {
+        Ok(text) => text,
+        Err(err) => {
+            return Ok(errors::result_from_code(ErrorCode::IoError, format!("failed to read '{}': {err}", resolved_path.display())));
+        }
+    };
+    let csv_opts = import_opts.csv.clone().unwrap_or_else(|| if format_id == "tsv" { CsvOptions::tsv() } else { CsvOptions::detect(&csv_text) });
+    let subcolumn_mode = match serde_json::to_value(import_opts.subcolumn_mode) {
+        Ok(v) => v,
+        Err(err) => {
+            return Ok(errors::result_from_code(ErrorCode::InternalError, format!("failed to serialize subcolumn mode: {err}")));
+        }
+    };
+    let params = json!({
+        "sheet_id": import_opts.sheet_id.as_str(),
+        "csv": csv_text,
+        "title": import_opts.title,
+        "archetype": import_opts.table_kind.label(),
+        "subcolumn_mode": subcolumn_mode,
+        "delimiter": csv_opts.delimiter.to_string(),
+        "decimal_separator": csv_opts.decimal_separator.to_string(),
+    });
+
+    if append {
+        return execute_csv_import_on_session(&mut state.session, format_id, resolved_path, &import_opts.sheet_id, params);
+    }
+
+    let doc = match ProjectDocument::new(import_opts.title.clone()) {
+        Ok(d) => d,
+        Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
+    };
+    let mut next_session = Session::from_document(doc);
+    let result = execute_csv_import_on_session(&mut next_session, format_id, resolved_path, &import_opts.sheet_id, params)?;
+    if !result.is_error {
+        state.install_session(next_session);
+    }
+    Ok(result)
+}
+
+fn execute_csv_import_on_session(
+    session: &mut Session,
+    format_id: &str,
+    resolved_path: &Path,
+    sheet_id: &SheetId,
+    params: Value,
+) -> Result<ToolCallResult, ToolCallError> {
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    if let Err(err) = session.execute_with_caller("table.importCsv", params, lumencraft_engine::Caller::Mcp, &cancel) {
+        return Ok(errors::result_from_engine_error(&err));
+    }
+    let Some(ds) = session.document().data_sheet(sheet_id) else {
+        return Ok(errors::result_from_code(ErrorCode::InternalError, format!("imported sheet '{}' missing after import", sheet_id.as_str())));
+    };
+    sheet_summary_json(format_id, resolved_path, ds)
+}
+
+fn sheet_summary_json(format_id: &str, resolved_path: &Path, ds: &DataSheet) -> Result<ToolCallResult, ToolCallError> {
+    ToolCallResult::ok_json(&json!({
+        "opened": true,
+        "format": format_id,
+        "path": resolved_path.display().to_string(),
+        "sheet_id": ds.id.as_str(),
+        "title": ds.title,
+        "table_kind": ds.kind().label(),
+        "rows": ds.archetype.row_count(),
+        "columns": ds.archetype.column_count(),
     }))
 }
 

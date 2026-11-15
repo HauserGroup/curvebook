@@ -62,6 +62,32 @@ pub enum Expr {
     Call { name: String, args: Vec<Expr> },
 }
 
+impl Drop for Expr {
+    fn drop(&mut self) {
+        fn drain_children(node: &mut Expr, stack: &mut Vec<Expr>) {
+            match node {
+                Expr::Number(_) | Expr::Text(_) | Expr::Var(_) => {}
+                Expr::Unary { expr, .. } => {
+                    stack.push(std::mem::replace(expr.as_mut(), Expr::Number(0.0)));
+                }
+                Expr::Binary { left, right, .. } => {
+                    stack.push(std::mem::replace(left.as_mut(), Expr::Number(0.0)));
+                    stack.push(std::mem::replace(right.as_mut(), Expr::Number(0.0)));
+                }
+                Expr::Call { args, .. } => {
+                    stack.append(args);
+                }
+            }
+        }
+
+        let mut stack = Vec::new();
+        drain_children(self, &mut stack);
+        while let Some(mut node) = stack.pop() {
+            drain_children(&mut node, &mut stack);
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum TokenKind {
     Number(f64),

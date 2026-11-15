@@ -1434,7 +1434,7 @@ fn fit_plot_function_only(
 
     let raw_rss = raw_rss_acc.total();
     let df = total_obs.saturating_sub(k_free);
-    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
+    let rsd = if df > 0 && config.method != FitMethod::RobustCauchy { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
     let r_squared = if y_vals_all.len() > 1 {
         let ym = y_vals_all.iter().sum::<f64>() / (y_vals_all.len() as f64);
         let tss: f64 = y_vals_all.iter().map(|v| (v - ym) * (v - ym)).sum();
@@ -1536,6 +1536,25 @@ fn finalize_fit_uncertainty(
     config: &SolverConfig,
 ) -> Result<FinalizedUncertainty, FitError> {
     let k_free = layout.k_free();
+    if config.method == FitMethod::RobustCauchy {
+        return Ok(FinalizedUncertainty {
+            cov: CovarianceDiagnostics {
+                standard_errors: vec![f64::NAN; k_free],
+                symmetric_ci_lower: vec![f64::NAN; k_free],
+                symmetric_ci_upper: vec![f64::NAN; k_free],
+                covariance_matrix: Vec::new(),
+                correlation_matrix: Vec::new(),
+                dependencies: vec![f64::NAN; k_free],
+                numerical_rank: 0,
+                ambiguous: false,
+            },
+            cov_unscaled: None,
+            hougaard: vec![f64::NAN; k_free],
+            profile_cis: vec![(CiBound::Open, CiBound::Open); k_free],
+            t_crit: f64::NAN,
+            sigma_w: f64::NAN,
+        });
+    }
     let is_poisson = config.method == FitMethod::PoissonDeviance;
     let cov = if is_poisson {
         compute_poisson_covariance_diagnostics(&lm_out.j_mat, df, &lm_out.theta, config.confidence)?
@@ -1549,13 +1568,13 @@ fn finalize_fit_uncertainty(
     let (cov_unscaled, sigma_w, t_crit) = if is_poisson {
         (
             unscaled_cov_from_diag_or_j(&cov, 1, 1.0, &lm_out.j_mat),
-            if df > 0 { 1.0 } else { 0.0 },
+            if df > 0 { 1.0 } else { f64::NAN },
             if df > 0 { norm_two_sided_isf(config.confidence.alpha()).unwrap_or(1.96) } else { f64::NAN },
         )
     } else {
         (
             unscaled_cov_from_diag_or_j(&cov, df, lm_out.weighted_ss, &lm_out.j_mat),
-            if df > 0 { (lm_out.weighted_ss / (df as f64)).sqrt() } else { 0.0 },
+            if df > 0 { (lm_out.weighted_ss / (df as f64)).sqrt() } else { f64::NAN },
             if df > 0 { student_t_two_sided_isf(config.confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN },
         )
     };
@@ -1654,10 +1673,11 @@ fn fit_single_or_shared(
         tss_acc.add(rec.ss_within);
     }
     let tss = tss_acc.total();
+    let is_robust = config.method == FitMethod::RobustCauchy;
     let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
-    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
+    let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
 
-    let ic = compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok();
+    let ic = if is_robust { None } else { compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok() };
     let cov = unc.cov;
 
     let all_stud = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous);
@@ -1744,6 +1764,10 @@ fn solve_single_dataset_unit(
     let use_rep_moments = uses_replicate_summary_moments(config);
     let ds_obs = build_observations(ds_slice, config.weighting, use_rep_moments)?;
     let n_d = obs_replicate_count(&ds_obs);
+    let min_d = if matches!(config.method, FitMethod::RoutOutlierElimination { .. }) { p_d + 1 } else { p_d };
+    if n_d < min_d {
+        return Err(FitError::InsufficientData { required: min_d, actual: n_d });
+    }
     let ss_within_d = if use_rep_moments { obs_ss_within(&ds_obs) } else { 0.0 };
     let init_theta: Vec<f64> = seed_override.map_or_else(|| ds_layout.free_slots.iter().map(|s| s.init).collect(), |s| s.to_vec());
 
@@ -1764,7 +1788,7 @@ fn solve_single_dataset_unit(
         raw_rss_d.add((rec.rep_n as f64) * diff * diff);
         raw_rss_d.add(rec.ss_within);
     }
-    let rsd_d = if df_d > 0 { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { 0.0 };
+    let rsd_d = if df_d > 0 && config.method != FitMethod::RobustCauchy { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { f64::NAN };
     let stud_d = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous);
 
     let assembled = assemble_dataset_results(
@@ -1887,15 +1911,16 @@ fn fit_independent_datasets(
         sub_fits.push(solve_single_dataset_unit(model, ds, hooks, &ds_rules, config, seed)?);
     }
 
+    let is_robust = config.method == FitMethod::RobustCauchy;
     let mut global_theta = vec![0.0_f64; k_free];
-    let mut global_se = vec![0.0_f64; k_free];
+    let mut global_se = vec![f64::NAN; k_free];
     let mut global_sym_lo = vec![f64::NAN; k_free];
     let mut global_sym_hi = vec![f64::NAN; k_free];
-    let mut global_deps = vec![0.0_f64; k_free];
-    let mut global_hougaard = vec![0.0_f64; k_free];
+    let mut global_deps = vec![f64::NAN; k_free];
+    let mut global_hougaard = vec![f64::NAN; k_free];
     let mut global_profile_cis = vec![(CiBound::Open, CiBound::Open); k_free];
-    let mut global_cov_mat = vec![vec![0.0_f64; k_free]; k_free];
-    let mut global_corr_mat = vec![vec![0.0_f64; k_free]; k_free];
+    let mut global_cov_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
+    let mut global_corr_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
 
     let mut total_rank = 0_usize;
     let mut any_ambiguous = false;
@@ -1931,10 +1956,12 @@ fn fit_independent_datasets(
                 global_profile_cis[*g_slot] = sub.profile_cis[*l_slot];
             }
         }
-        for (a, &g_a) in l2g.iter().enumerate() {
-            for (b, &g_b) in l2g.iter().enumerate() {
-                global_cov_mat[g_a][g_b] = sub.cov.covariance_matrix[a][b];
-                global_corr_mat[g_a][g_b] = sub.cov.correlation_matrix[a][b];
+        if !is_robust && !sub.cov.covariance_matrix.is_empty() {
+            for (a, &g_a) in l2g.iter().enumerate() {
+                for (b, &g_b) in l2g.iter().enumerate() {
+                    global_cov_mat[g_a][g_b] = sub.cov.covariance_matrix[a][b];
+                    global_corr_mat[g_a][g_b] = sub.cov.correlation_matrix[a][b];
+                }
             }
         }
 
@@ -2000,8 +2027,8 @@ fn fit_independent_datasets(
     }
     let tss = tss_acc.total();
     let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
-    let rsd = if df > 0 { (raw_rss / (df as f64)).sqrt() } else { 0.0 };
-    let ic = compute_information_criteria(weighted_ss, n_obs, k_free).ok();
+    let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
+    let ic = if is_robust { None } else { compute_information_criteria(weighted_ss, n_obs, k_free).ok() };
 
     let res_diag = compute_residual_diagnostics(&all_points, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
 
@@ -2075,8 +2102,8 @@ fn build_fitted_parameter_summaries(
             ci_upper: profile_cis[idx].1,
             symmetric_ci_lower: cov.symmetric_ci_lower.get(idx).copied().unwrap_or(f64::NAN),
             symmetric_ci_upper: cov.symmetric_ci_upper.get(idx).copied().unwrap_or(f64::NAN),
-            dependency: cov.dependencies.get(idx).copied().unwrap_or(0.0),
-            hougaard_g1: hougaard.get(idx).copied().unwrap_or(0.0),
+            dependency: cov.dependencies.get(idx).copied().unwrap_or(f64::NAN),
+            hougaard_g1: hougaard.get(idx).copied().unwrap_or(f64::NAN),
             notes,
         });
     }
@@ -2156,7 +2183,13 @@ fn assemble_dataset_results(
         } else {
             1.0
         };
-        let ds_sy_x = if ds_n > k_free { (ds_ss / ((ds_n - k_free) as f64)).sqrt() } else { cfg.rsd };
+        let ds_sy_x = if cfg.solver.method == FitMethod::RobustCauchy {
+            f64::NAN
+        } else if ds_n > k_free {
+            (ds_ss / ((ds_n - k_free) as f64)).sqrt()
+        } else {
+            cfg.rsd
+        };
 
         let converged_or_ambig = lm_out.status == FitStatus::Converged || lm_out.status == FitStatus::Ambiguous;
         let curve_overlay = (cfg.solver.curve_overlay_segments > 0).then(|| {
@@ -2238,6 +2271,12 @@ pub fn compare_models(
     config: &SolverConfig,
     spec: &ModelComparisonSpec,
 ) -> Result<(NonlinearFitResult, ModelComparisonOutcome), FitError> {
+    if config.method == FitMethod::RobustCauchy {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: "NotApplicableInRobustMode: F, AICc, and LRT model comparisons are not applicable under Robust (Cauchy) regression".to_owned(),
+        });
+    }
     let alt = fit_nonlinear(alt_model, datasets, hooks, config)?;
     let outcome = match spec {
         ModelComparisonSpec::ExtraSumOfSquaresF { .. } => {

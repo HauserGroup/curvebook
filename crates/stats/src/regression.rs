@@ -888,7 +888,9 @@ fn build_glm_design(sheet: &DataSheet, glm_spec: &GlmSpec) -> Result<(DenseMatri
                 row_x.push(1.0);
                 let mut ok = true;
                 for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-                    let cell = &mv.variables[pc].cells[r];
+                    let pred_var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
+                    let cell =
+                        pred_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: mv.row_count(), actual: pred_var.cells.len() })?;
                     if cell.excluded {
                         ok = false;
                         break;

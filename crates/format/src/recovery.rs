@@ -24,6 +24,72 @@ pub const CURRENT_JOURNAL_VERSION: u32 = 1;
 /// Current persisted format version of [`JournalLockLease`] files (`lumencraft.lock`).
 pub const CURRENT_LOCK_VERSION: u32 = 1;
 
+/// Check whether `lease` may be reclaimed because its TTL expired or its local PID died.
+#[must_use]
+pub fn is_lease_reclaimable(lease: &JournalLockLease, now_epoch_ms: u64) -> bool {
+    lease.is_stale(now_epoch_ms) || is_dead_local_owner(&lease.owner_id)
+}
+
+/// Return `true` only when `owner_id` encodes a local `lumencraft-pid-<N>` owner whose OS
+/// process is verified absent (`ESRCH` / missing `/proc/<pid>`), falling back to `false` (TTL)
+/// whenever uncertain or on unsupported platforms.
+#[must_use]
+pub fn is_dead_local_owner(owner_id: &str) -> bool {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Some(pid) = parse_local_lumencraft_pid(owner_id) else {
+            return false;
+        };
+        if pid == std::process::id() {
+            return false;
+        }
+        #[cfg(target_os = "linux")]
+        {
+            if Path::new("/proc/self").exists() {
+                return !Path::new(&format!("/proc/{pid}")).exists();
+            }
+        }
+        #[cfg(unix)]
+        {
+            is_unix_pid_absent(pid)
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = pid;
+            false
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = owner_id;
+        false
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_local_lumencraft_pid(owner_id: &str) -> Option<u32> {
+    let rest = owner_id.strip_prefix("lumencraft-pid-")?;
+    let pid_part = rest.split('-').next()?;
+    let pid: u32 = pid_part.parse().ok()?;
+    if pid == 0 || i32::try_from(pid).is_err() {
+        return None;
+    }
+    Some(pid)
+}
+
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+fn is_unix_pid_absent(pid: u32) -> bool {
+    let pid_arg = pid.to_string();
+    let Ok(output) = std::process::Command::new("/bin/kill").args(["-0", &pid_arg]).output() else {
+        return false;
+    };
+    if output.status.success() {
+        return false;
+    }
+    let stderr = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    stderr.contains("no such process") || stderr.contains("esrch")
+}
+
 /// Filename of the exclusive writer lease file on native backends.
 pub const LOCKFILE_NAME: &str = "lumencraft.lock";
 /// Filename of the baseline atomic project snapshot on native backends.
@@ -354,7 +420,7 @@ impl JournalBackend for MemoryJournalBackend {
         let evicted = match &self.lease {
             Some(existing) => {
                 existing.validate_version()?;
-                if !existing.is_stale(now_epoch_ms) {
+                if !is_lease_reclaimable(existing, now_epoch_ms) {
                     return Err(FormatError::Io(format!(
                         "journal lock `{LOCKFILE_NAME}` is actively held by `{}` until {}ms",
                         existing.owner_id,
@@ -558,7 +624,7 @@ impl JournalBackend for DirectoryJournalBackend {
             Err(err) => return Err(err),
         };
 
-        if !existing.is_stale(now_epoch_ms) {
+        if !is_lease_reclaimable(&existing, now_epoch_ms) {
             return Err(FormatError::Io(format!(
                 "journal lock `{LOCKFILE_NAME}` is actively held by `{}` until {}ms",
                 existing.owner_id,
@@ -770,8 +836,22 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
         Ok((Self { backend, lease, next_seq }, report))
     }
 
+    fn ensure_lease_ownership(&self, action: &str) -> Result<(), FormatError> {
+        let Some(existing) = self.backend.read_lease()? else {
+            return Err(FormatError::Io(format!("cannot {action}: journal lock `{LOCKFILE_NAME}` is missing")));
+        };
+        if existing.owner_id != self.lease.owner_id {
+            return Err(FormatError::Io(format!(
+                "cannot {action}: journal lock `{LOCKFILE_NAME}` is owned by `{}` instead of `{}`",
+                existing.owner_id, self.lease.owner_id
+            )));
+        }
+        Ok(())
+    }
+
     /// Append a new command JSON payload to `ops.journal` with monotonic sequence and CRC32.
     pub fn record_command(&mut self, command_json: serde_json::Value) -> Result<u64, FormatError> {
+        self.ensure_lease_ownership("record journal command")?;
         let seq = self.next_seq;
         let record = JournalOpRecord::new(seq, command_json)?;
         let line = record.to_ndjson_line()?;
@@ -783,6 +863,7 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
     /// Persist an atomic snapshot checkpoint binding the covered journal sequence BEFORE
     /// truncating `ops.journal`.
     pub fn checkpoint(&mut self, snapshot_bytes: &[u8]) -> Result<(), FormatError> {
+        self.ensure_lease_ownership("checkpoint journal")?;
         let covered_seq = self.next_seq.saturating_sub(1);
         self.backend.write_snapshot_with_seq(snapshot_bytes, covered_seq)?;
         let backend_stored_seq = self.backend.read_snapshot_covered_seq()? == Some(covered_seq);
@@ -811,6 +892,7 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
     /// Write the final atomic snapshot, clear `ops.journal`, release `lumencraft.lock`, and return
     /// the underlying backend.
     pub fn close_cleanly(mut self, final_snapshot_bytes: &[u8]) -> Result<B, FormatError> {
+        self.ensure_lease_ownership("close journal cleanly")?;
         let covered_seq = self.next_seq.saturating_sub(1);
         self.backend.write_snapshot_with_seq(final_snapshot_bytes, covered_seq)?;
         let backend_stored_seq = self.backend.read_snapshot_covered_seq()? == Some(covered_seq);

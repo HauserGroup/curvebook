@@ -14,14 +14,151 @@
 //!   distributions: noncentral chisquare, noncentral `t` and the distribution of the square of the
 //!   sample multiple correlation coefficient. *CSDA*, 43(2), 249-267.
 
+use std::sync::OnceLock;
+
 use crate::dist::core::{chi2_cdf, chi2_sf, f_cdf, f_sf, norm_cdf, norm_isf, norm_sf, student_t_cdf, student_t_sf};
 use crate::error::MathError;
 use crate::roots::{RootOptions, brent_root};
-use crate::special::gamma::{ln_factorial, ln_gamma};
+use crate::special::erf::{erfc, exp_neg_sq};
+use crate::special::gamma::{deviance_bd0, ln_factorial, ln_gamma, stirling_err};
 use crate::special::inc_beta::{ln_beta_kernel, reg_beta_xy};
 use crate::special::inc_gamma::{reg_gamma_p, reg_gamma_q};
 
 const MAX_POISSON_TERMS: usize = 4096;
+const POISSON_SUM_MAX_LAM_HALF: f64 = 1_000_000.0;
+const HALF_LN_2PI: f64 = 0.918_938_533_204_672_7;
+const GL_ORDER: usize = 24;
+
+static GL_24: OnceLock<([f64; GL_ORDER], [f64; GL_ORDER])> = OnceLock::new();
+
+fn gauss_legendre_24() -> &'static ([f64; GL_ORDER], [f64; GL_ORDER]) {
+    GL_24.get_or_init(|| {
+        let mut nodes = [0.0_f64; GL_ORDER];
+        let mut weights = [0.0_f64; GL_ORDER];
+        let n_f = GL_ORDER as f64;
+        for i in 0..(GL_ORDER / 2) {
+            let mut x = (std::f64::consts::PI * ((i as f64) + 0.75) / (n_f + 0.5)).cos();
+            let mut dp = 0.0_f64;
+            for _ in 0..16 {
+                let mut p0 = 1.0_f64;
+                let mut p1 = x;
+                for k in 2..=GL_ORDER {
+                    let kf = k as f64;
+                    let pk = ((2.0 * kf - 1.0) * x * p1 - (kf - 1.0) * p0) / kf;
+                    p0 = p1;
+                    p1 = pk;
+                }
+                dp = n_f * (x * p1 - p0) / (x * x - 1.0);
+                let dx = p1 / dp;
+                x -= dx;
+                if dx.abs() <= 4.0 * f64::EPSILON {
+                    break;
+                }
+            }
+            let w = 2.0 / ((1.0 - x * x) * dp * dp);
+            nodes[i] = -x;
+            nodes[GL_ORDER - 1 - i] = x;
+            weights[i] = w;
+            weights[GL_ORDER - 1 - i] = w;
+        }
+        (nodes, weights)
+    })
+}
+
+fn poisson_pmf_at(k: usize, lam_half: f64) -> f64 {
+    if k == 0 {
+        return (-lam_half).exp();
+    }
+    let kf = k as f64;
+    if k < 12 {
+        (-lam_half + kf * lam_half.ln() - ln_factorial(k as u64)).exp()
+    } else {
+        (-deviance_bd0(kf, lam_half) - HALF_LN_2PI - 0.5 * kf.ln() - stirling_err(kf)).exp()
+    }
+}
+
+fn poisson_pdf_cont(k: f64, lam_half: f64) -> f64 {
+    (-deviance_bd0(k, lam_half) - HALF_LN_2PI - 0.5 * k.ln() - stirling_err(k)).exp()
+}
+
+fn temme_pq_large_a(a: f64, x: f64) -> (f64, f64) {
+    let lambda = x / a;
+    let mu = lambda - 1.0;
+    let half_eta2 = deviance_bd0(1.0, lambda);
+    let eta = (2.0 * half_eta2).sqrt().copysign(mu);
+    let (c0, c1, c2) = if eta.abs() < 0.02 {
+        let e = eta;
+        let c0 = -1.0 / 3.0 + e * (1.0 / 12.0 + e * (-2.0 / 135.0 + e * (1.0 / 864.0 + e / 2835.0)));
+        let c1 = -1.0 / 540.0 + e * (-1.0 / 288.0 + e * (25.0 / 12_096.0));
+        let c2 = 25.0 / 6048.0;
+        (c0, c1, c2)
+    } else {
+        let inv_mu = 1.0 / mu;
+        let inv_mu3 = inv_mu * inv_mu * inv_mu;
+        let inv_mu5 = inv_mu3 * inv_mu * inv_mu;
+        let inv_eta = 1.0 / eta;
+        let inv_eta3 = inv_eta * inv_eta * inv_eta;
+        let inv_eta5 = inv_eta3 * inv_eta * inv_eta;
+        let c0 = inv_mu - inv_eta;
+        let c1 = inv_eta3 - lambda * inv_mu3 - inv_mu / 12.0;
+        let c2 = -3.0 * inv_eta5 + lambda * (2.0 * lambda + 1.0) * inv_mu5 + lambda * inv_mu3 / 12.0 + inv_mu / 288.0;
+        (c0, c1, c2)
+    };
+    let inv_a = 1.0 / a;
+    let series = c0 + inv_a * (c1 + inv_a * c2);
+    let z = eta * (0.5 * a).sqrt();
+    let r_a = exp_neg_sq(z) * series / (std::f64::consts::TAU * a).sqrt();
+    let q = (0.5 * erfc(z) + r_a).clamp(0.0, 1.0);
+    let p = (0.5 * erfc(-z) - r_a).clamp(0.0, 1.0);
+    (p, q)
+}
+
+fn reg_gamma_eval_safe(a: f64, z: f64, upper: bool) -> Result<f64, MathError> {
+    let res = if upper { reg_gamma_q(a, z) } else { reg_gamma_p(a, z) };
+    match res {
+        Ok(v) => Ok(v),
+        Err(MathError::NotConverged { .. }) if a >= 4096.0 => {
+            let (p, q) = temme_pq_large_a(a, z);
+            Ok(if upper { q } else { p })
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn reg_beta_eval_safe(x: f64, y: f64, a: f64, b: f64) -> Result<f64, MathError> {
+    match reg_beta_xy(x, y, a, b) {
+        Ok(v) => Ok(v),
+        Err(MathError::NotConverged { .. }) if a >= 1e6 && b >= 1e6 => {
+            let s = a + b;
+            let pm = a / s;
+            let qm = b / s;
+            let sd = (pm * qm / (s + 1.0)).sqrt();
+            let diff = (b * x - a * y) / (s * (x + y));
+            Ok(norm_cdf(diff / sd))
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn poisson_gl_expectation<F: FnMut(f64) -> Result<f64, MathError>>(lam_half: f64, mut f: F) -> Result<f64, MathError> {
+    const SUBINTERVALS: [(f64, f64); 4] = [(-11.0, -5.5), (-5.5, 0.0), (0.0, 5.5), (5.5, 11.0)];
+    let (nodes, weights) = gauss_legendre_24();
+    let sigma = lam_half.sqrt();
+    let mut total = 0.0_f64;
+    for &(lo, hi) in &SUBINTERVALS {
+        let mid = 0.5 * (lo + hi);
+        let half = 0.5 * (hi - lo);
+        for (&t, &w) in nodes.iter().zip(weights.iter()) {
+            let u = mid + half * t;
+            let k = lam_half + sigma * u;
+            let weight = half * w * sigma * poisson_pdf_cont(k, lam_half);
+            if weight > 0.0 {
+                total += weight * f(k)?;
+            }
+        }
+    }
+    Ok(total.clamp(0.0, 1.0))
+}
 
 fn alpha_from_confidence(confidence_percent: f64) -> Result<f64, MathError> {
     if !confidence_percent.is_finite() || !(0.01..=99.99).contains(&confidence_percent) {
@@ -450,20 +587,29 @@ fn ncf_eval(f: f64, df1: f64, df2: f64, lambda: f64, upper: bool) -> Result<f64,
     };
 
     let lam_half = 0.5 * lambda;
-    let k0 = (lam_half.floor() as usize).min(500_000);
+    let b = 0.5 * df2;
+    if lam_half > POISSON_SUM_MAX_LAM_HALF {
+        let a_base = 0.5 * df1;
+        return poisson_gl_expectation(lam_half, |k| {
+            let a = a_base + k;
+            if upper { reg_beta_eval_safe(y, x, b, a) } else { reg_beta_eval_safe(x, y, a, b) }
+        });
+    }
+
+    let k0 = lam_half.floor() as usize;
     let k0_f = k0 as f64;
-    let p_k0 = (-lam_half + k0_f * lam_half.ln() - ln_factorial(k0 as u64)).exp();
+    let p_k0 = poisson_pmf_at(k0, lam_half);
 
     let a0 = 0.5 * df1 + k0_f;
-    let b = 0.5 * df2;
-    let i0 = if upper { reg_beta_xy(y, x, b, a0)? } else { reg_beta_xy(x, y, a0, b)? };
+    let i0 = if upper { reg_beta_eval_safe(y, x, b, a0)? } else { reg_beta_eval_safe(x, y, a0, b)? };
     let g0 = (ln_beta_kernel(x, y, a0, b)? - a0.ln()).exp();
 
+    let max_steps = MAX_POISSON_TERMS.max((12.0 * lam_half.sqrt()).ceil() as usize + 128);
     let mut total = p_k0 * i0;
     let mut pk = p_k0;
     let mut ik = i0;
     let mut gk = g0;
-    for step in 1..=MAX_POISSON_TERMS {
+    for step in 1..=max_steps {
         let j = (k0 + step) as f64;
         let a_prev = 0.5 * df1 + j - 1.0;
         pk *= lam_half / j;
@@ -478,7 +624,7 @@ fn ncf_eval(f: f64, df1: f64, df2: f64, lambda: f64, upper: bool) -> Result<f64,
     let mut pk_b = p_k0;
     let mut ik_b = i0;
     let mut gk_b = g0;
-    for k_curr in (1..=k0).rev() {
+    for k_curr in (1..=k0.min(max_steps)).map(|d| k0 - d + 1) {
         let jf = k_curr as f64;
         let a_prev = 0.5 * df1 + jf - 1.0;
         pk_b *= jf / lam_half;
@@ -565,19 +711,27 @@ fn ncchi2_eval(x: f64, df: f64, lambda: f64, upper: bool) -> Result<f64, MathErr
 
     let z = 0.5 * x;
     let lam_half = 0.5 * lambda;
-    let k0 = (lam_half.floor() as usize).min(500_000);
+    if lam_half > POISSON_SUM_MAX_LAM_HALF {
+        let a_base = 0.5 * df;
+        return poisson_gl_expectation(lam_half, |k| reg_gamma_eval_safe(a_base + k, z, upper));
+    }
+
+    let k0 = lam_half.floor() as usize;
     let k0_f = k0 as f64;
-    let p_k0 = (-lam_half + k0_f * lam_half.ln() - ln_factorial(k0 as u64)).exp();
+    let p_k0 = poisson_pmf_at(k0, lam_half);
 
     let a0 = 0.5 * df + k0_f;
-    let g_fn0 = if upper { reg_gamma_q(a0, z)? } else { reg_gamma_p(a0, z)? };
-    let step0 = (a0 * z.ln() - z - ln_gamma(a0 + 1.0)?).exp();
+    let g_fn0 = reg_gamma_eval_safe(a0, z, upper)?;
+    let ln_step0 =
+        if a0 >= 12.0 { -deviance_bd0(a0, z) - HALF_LN_2PI - 0.5 * a0.ln() - stirling_err(a0) } else { a0 * z.ln() - z - ln_gamma(a0 + 1.0)? };
+    let step0 = ln_step0.exp();
 
+    let max_steps = MAX_POISSON_TERMS.max((12.0 * lam_half.sqrt()).ceil() as usize + 128);
     let mut total = p_k0 * g_fn0;
     let mut pk = p_k0;
     let mut gk = g_fn0;
     let mut tk = step0;
-    for step in 1..=MAX_POISSON_TERMS {
+    for step in 1..=max_steps {
         let j = (k0 + step) as f64;
         let a_curr = 0.5 * df + j;
         pk *= lam_half / j;
@@ -592,7 +746,7 @@ fn ncchi2_eval(x: f64, df: f64, lambda: f64, upper: bool) -> Result<f64, MathErr
     let mut pk_b = p_k0;
     let mut gk_b = g_fn0;
     let mut tk_b = step0;
-    for k_curr in (1..=k0).rev() {
+    for k_curr in (1..=k0.min(max_steps)).map(|d| k0 - d + 1) {
         let jf = k_curr as f64;
         let a_curr = 0.5 * df + jf;
         pk_b *= jf / lam_half;
@@ -640,15 +794,21 @@ pub fn noncentral_chi2_ci(chi2_obs: f64, df: f64, confidence_percent: f64) -> Re
 fn solve_positive_noncentrality<F: FnMut(f64) -> f64>(mut f: F, scale_hint: f64) -> Result<f64, MathError> {
     let mut lo = 0.0_f64;
     let mut hi = scale_hint.max(1.0);
-    for _ in 0..48 {
+    for _ in 0..64 {
         let f_hi = f(hi);
+        if f_hi.is_nan() {
+            return Err(MathError::DomainError { name: "noncentrality", value: f_hi });
+        }
         if f_hi >= 0.0 {
             return brent_root(&mut f, lo, hi, RootOptions { rel_tol: 1e-12, abs_tol: 1e-13, max_iters: 128 });
         }
         lo = hi;
         hi *= 2.5;
+        if !hi.is_finite() {
+            break;
+        }
     }
-    Err(MathError::NotConverged { algorithm: "solve_positive_noncentrality", iterations: 48 })
+    Err(MathError::NotConverged { algorithm: "solve_positive_noncentrality", iterations: 64 })
 }
 
 #[cfg(test)]

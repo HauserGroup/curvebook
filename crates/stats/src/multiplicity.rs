@@ -356,6 +356,15 @@ pub fn compare_groups_with_procedure(
     }
 }
 
+fn zero_se_stat_p(diff: f64, signed: bool) -> (f64, f64) {
+    if diff != 0.0 {
+        let stat = if signed { diff.signum() * f64::INFINITY } else { f64::INFINITY };
+        (stat, 0.0)
+    } else {
+        (0.0, 1.0)
+    }
+}
+
 fn compare_pooled_or_fdr(
     groups: &[GroupComparisonInput],
     mse: f64,
@@ -390,7 +399,7 @@ fn compare_pooled_or_fdr(
                 let t = diff / se;
                 (t, student_t_two_sided_p(t, df_error)?)
             } else {
-                (0.0, 1.0)
+                zero_se_stat_p(diff, true)
             };
             raw_p.push(p_val);
             let ci = t_crit_opt.map(|tc| (diff - tc * se, diff + tc * se));
@@ -441,7 +450,7 @@ fn compare_tukey_kramer(
                 let q = diff.abs() / se_tukey;
                 (q, studentized_range_sf(q, k, df_error)?)
             } else {
-                (0.0, 1.0)
+                zero_se_stat_p(diff, false)
             };
             let ci = q_crit.map(|qc| (diff - qc * se_tukey, diff + qc * se_tukey));
             out.push(PairwiseComparisonDetail {
@@ -482,12 +491,13 @@ fn compare_newman_keuls(
             let hi = lo + span - 1;
             let ga = &groups[sorted_idx[lo]];
             let gb = &groups[sorted_idx[hi]];
+            let diff_span = gb.mean - ga.mean;
             let se_q = (0.5 * mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
             let raw_p = if se_q > 0.0 {
-                let q = (gb.mean - ga.mean).abs() / se_q;
+                let q = diff_span.abs() / se_q;
                 studentized_range_sf(q, span, df_error)?
             } else {
-                1.0
+                zero_se_stat_p(diff_span, false).1
             };
             let mut adj = raw_p;
             if lo > 0 {
@@ -516,7 +526,7 @@ fn compare_newman_keuls(
                 let q = diff.abs() / se_q;
                 (q, studentized_range_sf(q, 2, df_error)?)
             } else {
-                (0.0, 1.0)
+                zero_se_stat_p(diff, false)
             };
             let (p_lo, p_hi) = if pos_of[i] < pos_of[j] { (pos_of[i], pos_of[j]) } else { (pos_of[j], pos_of[i]) };
             let adj_p = p_mat[p_lo][p_hi];
@@ -569,7 +579,7 @@ fn compare_dunnett(
                 if loadings.len() == 1 { student_t_two_sided_p(t, df_error)? } else { dunnett_two_sided_p(t.abs(), df_error, ctrl.n, &treat_sizes)? };
             (t, p)
         } else {
-            (0.0, 1.0)
+            zero_se_stat_p(diff, true)
         };
         let _ = idx;
         let ci = d_crit.map(|dc| (diff - dc * se, diff + dc * se));
@@ -618,7 +628,7 @@ fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_
                 let q = diff.abs() / se_q;
                 (q, studentized_range_sf(q, k, df)?)
             } else {
-                (0.0, 1.0)
+                zero_se_stat_p(diff, false)
             };
             let ci = if report_ci {
                 let qc = studentized_range_isf(threshold, k, df)?;
@@ -661,7 +671,7 @@ fn compare_tamhane_t2(groups: &[GroupComparisonInput], threshold: f64, report_ci
                 let t = diff / se;
                 (t, student_t_two_sided_p(t, df)?)
             } else {
-                (0.0, 1.0)
+                zero_se_stat_p(diff, true)
             };
             let adj_p = sidak_single(raw_p, m);
             let ci = if report_ci {
@@ -720,7 +730,7 @@ fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci
                 let t = diff / se;
                 (t, studentized_max_modulus_sf(t.abs(), m, df)?)
             } else {
-                (0.0, 1.0)
+                zero_se_stat_p(diff, true)
             };
             let ci = if report_ci {
                 let crit = studentized_max_modulus_crit(threshold, m, df)?;
@@ -794,7 +804,7 @@ pub fn compare_dunn_ranks(
             let z = diff / se;
             (z, norm_two_sided_p(z.abs()))
         } else {
-            (0.0, 1.0)
+            zero_se_stat_p(diff, true)
         };
         raw_p.push(p_val);
         entries.push((&group_labels[i], &group_labels[j], diff, se, z_stat, p_val));

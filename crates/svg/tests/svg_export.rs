@@ -328,6 +328,13 @@ fn validator_rejects_malformed_and_non_finite_svgs_and_invalid_scenes() {
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><path d=\"M0 inf L10 10\"/></svg>",
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text transform=\"rotate(NaN, 0, 0)\"></text></svg>",
         "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text><tspan>A & B</tspan></text></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text><tspan>A\u{0000}B</tspan></text></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text><tspan>A\u{000B}B</tspan></text></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text><tspan>A\u{0001}B</tspan></text></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text><tspan>A\u{FFFE}B</tspan></text></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text><tspan>A\u{FFFF}B</tspan></text></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text><tspan>&#0;</tspan></text></svg>",
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><text><tspan>&#x0B;</tspan></text></svg>",
     ];
     for bad in invalid_svgs {
         assert!(validate_svg_structure(bad).is_err(), "expected validation failure for: {bad}");
@@ -369,4 +376,27 @@ fn compiled_chart_and_layout_scenes_export_valid_svg() {
             validate_svg_structure(&svg).expect("validate compiled scene SVG");
         }
     }
+}
+
+#[test]
+fn render_svg_strips_xml_forbidden_control_and_noncharacter_codepoints() {
+    let mut scene = ChartScene::new("xml-ctrl", "Dose\u{0000}\u{000B}\u{FFFE}Curve\u{FFFF}", 240.0, 120.0, Some(Rgba8::WHITE));
+    let mut span = RichSpan::plain("Group\u{000B}A\u{0001}B\u{000C}C\u{001F}D\u{FFFE}\u{FFFF}\t\n");
+    span.font_family = Some(String::from("Helv\u{0007}etica"));
+    scene.primitives.push(ScenePrimitive::Text(PositionedText {
+        rich: RichText::new(vec![span]),
+        anchor_pt: PointPt::new(20.0, 40.0),
+        font_size_pt: 12.0,
+        anchor: TextAnchor::Start,
+        color: Rgba8::BLACK,
+        rotation_deg: 0.0,
+    }));
+
+    let svg = render_svg(&scene, &SvgExportOptions::default()).expect("render SVG");
+    let invalid: Vec<char> =
+        svg.chars().filter(|&c| !matches!(c as u32, 0x09 | 0x0A | 0x0D | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10_FFFF)).collect();
+    assert!(invalid.is_empty(), "SVG output contains forbidden XML 1.0 chars: {invalid:?}");
+    assert!(svg.contains("<title>DoseCurve</title>"));
+    assert!(svg.contains("font-family=\"Helvetica\""));
+    validate_svg_structure(&svg).expect("sanitized SVG must validate");
 }

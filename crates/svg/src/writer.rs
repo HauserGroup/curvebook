@@ -598,9 +598,16 @@ fn is_formatted_zero(s: &str) -> bool {
     !rest.is_empty() && rest.bytes().all(|b| b == b'0' || b == b'.')
 }
 
+const fn is_valid_xml_char(ch: char) -> bool {
+    matches!(ch as u32, 0x09 | 0x0A | 0x0D | 0x20..=0xD7FF | 0xE000..=0xFFFD | 0x10000..=0x10_FFFF)
+}
+
 fn escape_xml(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
+        if !is_valid_xml_char(ch) {
+            continue;
+        }
         match ch {
             '&' => out.push_str("&amp;"),
             '<' => out.push_str("&lt;"),
@@ -616,6 +623,9 @@ fn escape_xml(raw: &str) -> String {
 fn escape_css_string(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len());
     for ch in raw.chars() {
+        if !is_valid_xml_char(ch) {
+            continue;
+        }
         match ch {
             '"' => out.push_str("\\\""),
             '\\' => out.push_str("\\\\"),
@@ -671,6 +681,9 @@ struct TagValidationState {
 pub fn validate_svg_structure(svg: &str) -> Result<(), SvgError> {
     if svg.trim().is_empty() {
         return Err(SvgError::ValidationFailed { message: String::from("SVG content is empty") });
+    }
+    if let Some(bad_ch) = svg.chars().find(|&c| !is_valid_xml_char(c)) {
+        return Err(SvgError::ValidationFailed { message: format!("forbidden XML 1.0 character U+{:04X} in SVG content", bad_ch as u32) });
     }
 
     let bytes = svg.as_bytes();
@@ -1028,6 +1041,12 @@ fn validate_xml_entities(s: &str) -> Result<(), SvgError> {
         let entity = after.get(..semi).unwrap_or_default();
         if entity.is_empty() || entity.chars().any(|c| c.is_ascii_whitespace() || c == '&' || c == '<') {
             return Err(SvgError::ValidationFailed { message: String::from("malformed XML entity reference") });
+        }
+        if let Some(num) = entity.strip_prefix('#') {
+            let cp = if let Some(hex) = num.strip_prefix('x') { u32::from_str_radix(hex, 16).ok() } else { num.parse::<u32>().ok() };
+            if !cp.and_then(char::from_u32).is_some_and(is_valid_xml_char) {
+                return Err(SvgError::ValidationFailed { message: format!("invalid XML numeric character reference `&{entity};`") });
+            }
         }
         rest = after.get(semi + 1..).unwrap_or_default();
     }

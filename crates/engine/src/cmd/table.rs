@@ -988,6 +988,7 @@ fn validate_row_title_batch(arch: &TableArchetype, start_row: usize, titles: &[O
 }
 
 fn set_group_title(arch: &mut TableArchetype, col: usize, title: &str) -> Result<(), EngineError> {
+    validate_title(title)?;
     match arch {
         TableArchetype::Xy(t) => set_ds_title(&mut t.data_sets, col, title),
         TableArchetype::Column(t) => set_ds_title(&mut t.data_sets, col, title),
@@ -1009,6 +1010,7 @@ fn set_group_title(arch: &mut TableArchetype, col: usize, title: &str) -> Result
 }
 
 fn set_ds_title(sets: &mut [DataSetColumn], col: usize, title: &str) -> Result<(), EngineError> {
+    validate_title(title)?;
     let ds = sets.get_mut(col).ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("column {col} out of range")))?;
     ds.title = title.to_owned();
     Ok(())
@@ -1052,6 +1054,15 @@ fn set_x_or_factor_title(
     row_factor: Option<&str>,
     col_factor: Option<&str>,
 ) -> Result<(), EngineError> {
+    if let Some(xt) = x_title {
+        validate_title(xt)?;
+    }
+    if let Some(rf) = row_factor {
+        validate_title(rf)?;
+    }
+    if let Some(cf) = col_factor {
+        validate_title(cf)?;
+    }
     if let Some(xt) = x_title {
         match arch {
             TableArchetype::Xy(t) => t.x_title = xt.to_owned(),
@@ -1191,6 +1202,7 @@ fn run_set_cell(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineE
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
+    ensure_coord_outside_linked_regions(ds, coord, "edit")?;
     ds.set_cell(coord, cell)?;
     let recalc = recalculate_with_links(doc, false)?;
     Ok(CommandOutcome::mutated(
@@ -1306,6 +1318,7 @@ fn run_set_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engine
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     ensure_mv_columns_editable(ds, edits.iter().map(|(c, _)| c.col))?;
+    ensure_coords_outside_linked_regions(ds, edits.iter().map(|(c, _)| *c), "edit")?;
     for (coord, cell) in &edits {
         ds.set_cell(*coord, cell.clone())?;
     }
@@ -1470,6 +1483,9 @@ fn schema_set_row_titles() -> Value {
 fn run_set_row_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetRowTitlesParams = parse_params(&schema_set_row_titles(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
@@ -1559,8 +1575,30 @@ fn run_set_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
 fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetTitlesParams = parse_params(&schema_set_titles(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
+    if let Some(xt) = p.x_title.as_deref() {
+        validate_title(xt)?;
+    }
+    if let Some(rf) = p.row_factor_title.as_deref() {
+        validate_title(rf)?;
+    }
+    if let Some(cf) = p.column_factor_title.as_deref() {
+        validate_title(cf)?;
+    }
+    if let Some(titles) = p.titles.as_deref() {
+        for title in titles {
+            validate_title(title)?;
+        }
+    } else if let Some(title) = p.title.as_deref() {
+        validate_title(title)?;
+    }
+    if let Some(row_titles) = p.row_titles.as_deref() {
+        validate_row_title_batch(&ds.archetype, 0, row_titles)?;
+    }
 
     let mut updated = 0usize;
     if let Some(xt) = p.x_title.as_deref() {
@@ -1646,6 +1684,14 @@ fn schema_set_subcolumn_titles() -> Value {
 fn run_set_subcolumn_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetSubcolumnTitlesParams = parse_params(&schema_set_subcolumn_titles(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
+    if let Some(ref titles) = p.titles {
+        for title in titles {
+            validate_title(title)?;
+        }
+    }
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
@@ -1787,8 +1833,18 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
     let mut updated = 0usize;
+    let action = if excluded { "exclude" } else { "unexclude" };
     if let Some(range) = range_opt {
         validate_cell_range_bounds(ds, range, target_x)?;
+        if !target_x {
+            for r in range.start.row..=range.end.row {
+                for c in range.start.col..=range.end.col {
+                    for s in range.start.subcol..=range.end.subcol {
+                        ensure_coord_outside_linked_regions(ds, CellCoord::new(r, c, s), action)?;
+                    }
+                }
+            }
+        }
         for r in range.start.row..=range.end.row {
             for c in range.start.col..=range.end.col {
                 for s in range.start.subcol..=range.end.subcol {
@@ -1802,14 +1858,23 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
             }
         }
     } else if let Some(coords) = p.cells {
-        for item in coords {
-            if target_x {
+        if target_x {
+            let mut x_coords = Vec::with_capacity(coords.len());
+            for item in coords {
                 let row = item.coord.row.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing required X cell `row`"))?;
-                ds.set_x_or_time_excluded(row, item.coord.subcol.unwrap_or(0), excluded)?;
-            } else {
-                ds.set_excluded(item.coord.resolve()?, excluded)?;
+                x_coords.push((row, item.coord.subcol.unwrap_or(0)));
             }
-            updated = updated.saturating_add(1);
+            for (row, subcol) in x_coords {
+                ds.set_x_or_time_excluded(row, subcol, excluded)?;
+                updated = updated.saturating_add(1);
+            }
+        } else {
+            let resolved: Vec<CellCoord> = coords.iter().map(|item| item.coord.resolve()).collect::<Result<_, _>>()?;
+            ensure_coords_outside_linked_regions(ds, resolved.iter().copied(), action)?;
+            for coord in resolved {
+                ds.set_excluded(coord, excluded)?;
+                updated = updated.saturating_add(1);
+            }
         }
     } else if target_x {
         let row = p.bounds.row.ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing required X cell `row`"))?;
@@ -1817,6 +1882,7 @@ fn run_exclude_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         updated = 1;
     } else {
         let coord = CoordInput { coord: p.coord, row: p.bounds.row, col: p.bounds.col, subcol: p.bounds.subcol }.resolve()?;
+        ensure_coord_outside_linked_regions(ds, coord, action)?;
         ds.set_excluded(coord, excluded)?;
         updated = 1;
     }
@@ -1985,6 +2051,7 @@ fn run_exclude_cells_with_reason(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comman
             ));
         }
     }
+    ensure_coords_outside_linked_regions(ds, coords.iter().copied(), "exclude")?;
     for &coord in &coords {
         ds.set_excluded_with_reason(coord, &p.reason_tag, &note, &timestamp_utc)?;
     }
@@ -2180,12 +2247,25 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
+    let unlink = p.unlink.unwrap_or(false);
     let mut cleared = 0usize;
     if p.all.unwrap_or(false) {
+        if !unlink && let Some(region) = ds.linked_regions.first() {
+            return Err(linked_region_conflict_error(&ds.id, region, "clear", None));
+        }
         cleared = clear_all_cells_in_sheet(ds, p.clear_x.unwrap_or(false))?;
     } else if let Some(range) = range_opt {
         validate_cell_range_bounds(ds, range, false)?;
         ensure_mv_columns_editable(ds, range.start.col..=range.end.col)?;
+        if !unlink {
+            for r in range.start.row..=range.end.row {
+                for c in range.start.col..=range.end.col {
+                    for s in range.start.subcol..=range.end.subcol {
+                        ensure_coord_outside_linked_regions(ds, CellCoord::new(r, c, s), "clear")?;
+                    }
+                }
+            }
+        }
         for r in range.start.row..=range.end.row {
             for c in range.start.col..=range.end.col {
                 for s in range.start.subcol..=range.end.subcol {
@@ -2197,6 +2277,9 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     } else if let Some(coords) = p.cells {
         let resolved: Vec<CellCoord> = coords.iter().map(CoordInput::resolve).collect::<Result<_, _>>()?;
         ensure_mv_columns_editable(ds, resolved.iter().map(|c| c.col))?;
+        if !unlink {
+            ensure_coords_outside_linked_regions(ds, resolved.iter().copied(), "clear")?;
+        }
         for coord in resolved {
             ds.set_cell(coord, Cell::empty())?;
             cleared = cleared.saturating_add(1);
@@ -2204,11 +2287,14 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     } else {
         let coord = CoordInput { coord: p.coord, row: p.bounds.row, col: p.bounds.col, subcol: p.bounds.subcol }.resolve()?;
         ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
+        if !unlink {
+            ensure_coord_outside_linked_regions(ds, coord, "clear")?;
+        }
         ds.set_cell(coord, Cell::empty())?;
         cleared = 1;
     }
 
-    if p.unlink.unwrap_or(false) {
+    if unlink {
         ds.linked_regions.clear();
     }
     let recalc = recalculate_with_links(doc, false)?;
@@ -2350,13 +2436,23 @@ fn apply_paste_payload(
         &ds.archetype,
         TableArchetype::MultipleVariables(mv) if mv.variables.iter().any(|v| matches!(v.source, VariableSource::Calculated { .. }))
     );
-    if !has_calc_mv {
+    if !has_calc_mv && ds.linked_regions.is_empty() {
         return Ok(apply_import_link_pipeline(ds, spec, payload, opts, None)?);
     }
     let mut staged = ds.clone();
     let report = apply_import_link_pipeline(&mut staged, spec, payload, opts, None)?;
     if report.rows_placed > 0 && report.cols_placed > 0 {
-        ensure_mv_columns_editable(ds, report.target_range.start.col..=report.target_range.end.col)?;
+        if has_calc_mv {
+            ensure_mv_columns_editable(ds, report.target_range.start.col..=report.target_range.end.col)?;
+        }
+        ensure_range_outside_linked_regions(ds, report.target_range, "paste")?;
+        if matches!(spec.placement.mode, lumencraft_doc::PlacementMode::InsertRows) {
+            let shift_span = lumencraft_doc::SheetCellRange::new(
+                CellCoord::new(spec.placement.anchor.row, report.target_range.start.col, report.target_range.start.subcol),
+                CellCoord::new(usize::MAX, report.target_range.end.col, report.target_range.end.subcol),
+            );
+            ensure_range_outside_linked_regions(ds, shift_span, "insert rows into")?;
+        }
     }
     *ds = staged;
     Ok(report)
@@ -2804,8 +2900,19 @@ fn import_into_existing_sheet(
         ..ImportPipelineOptions::default()
     };
     let link_before = doc.data_sheets.get(target_idx).map_or(0, |d| d.linked_regions.len());
+    let pre_linked_snapshot = if !keep_link && link_before > 0 { doc.data_sheets.get(target_idx).cloned() } else { None };
     let payload = OwnedSourcePayload::Delimited { text, delimiter, decimal_separator };
-    apply_pipeline_with_split_info(doc, target_idx, info_idx, &link_spec, &payload, &opts)?;
+    let report = apply_pipeline_with_split_info(doc, target_idx, info_idx, &link_spec, &payload, &opts)?;
+    if let Some(prev_ds) = pre_linked_snapshot
+        && report.rows_placed > 0
+        && report.cols_placed > 0
+        && let Err(err) = ensure_range_outside_linked_regions(&prev_ds, report.target_range, "import into")
+    {
+        if let Some(slot) = doc.data_sheets.get_mut(target_idx) {
+            *slot = prev_ds;
+        }
+        return Err(err);
+    }
     if !keep_link && let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
         target_ds.linked_regions.truncate(link_before);
     }
@@ -2814,6 +2921,9 @@ fn import_into_existing_sheet(
 
 fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: ImportCsvParams = parse_params(&schema_import_csv(), raw)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
     let policy = ctx.session.path_policy.clone();
     let doc = &mut ctx.session.doc;
     let id = match p.sheet_id.as_deref() {
@@ -3208,11 +3318,104 @@ fn schema_recode_levels() -> Value {
     )
 }
 
+struct NormalizedRangeBounds {
+    min_row: usize,
+    max_row: usize,
+    min_cs: (usize, usize),
+    max_cs: (usize, usize),
+}
+
+fn normalize_range_bounds(range: lumencraft_doc::SheetCellRange) -> NormalizedRangeBounds {
+    let min_row = range.start.row.min(range.end.row);
+    let max_row = range.start.row.max(range.end.row);
+    let a = (range.start.col, range.start.subcol);
+    let b = (range.end.col, range.end.subcol);
+    NormalizedRangeBounds { min_row, max_row, min_cs: a.min(b), max_cs: a.max(b) }
+}
+
+fn coord_in_sheet_range(range: lumencraft_doc::SheetCellRange, coord: CellCoord) -> bool {
+    let bounds = normalize_range_bounds(range);
+    let cs = (coord.col, coord.subcol);
+    coord.row >= bounds.min_row && coord.row <= bounds.max_row && cs >= bounds.min_cs && cs <= bounds.max_cs
+}
+
+fn ranges_overlap(a: lumencraft_doc::SheetCellRange, b: lumencraft_doc::SheetCellRange) -> bool {
+    let ab = normalize_range_bounds(a);
+    let bb = normalize_range_bounds(b);
+    ab.min_row <= bb.max_row && bb.min_row <= ab.max_row && ab.min_cs <= bb.max_cs && bb.min_cs <= ab.max_cs
+}
+
+fn linked_region_conflict_error(
+    sheet_id: &SheetId,
+    region: &lumencraft_doc::LinkedDataRegion,
+    action: &str,
+    coord: Option<CellCoord>,
+) -> EngineError {
+    let detail = match coord {
+        Some(c) => json!({
+            "sheet_id": sheet_id.as_str(),
+            "region_id": region.id,
+            "row": c.row,
+            "col": c.col,
+            "subcol": c.subcol,
+        }),
+        None => json!({
+            "sheet_id": sheet_id.as_str(),
+            "region_id": region.id,
+        }),
+    };
+    EngineError::with_code(
+        ErrorCode::Conflict,
+        format!("cannot {action} cells inside live linked region `{}` on `{sheet_id}`", region.id),
+    )
+    .with_remediation("Detach the link first (`table.clearCells` with `unlink: true` or re-import with `link: false`) before editing cells inside the linked region.")
+    .with_details(detail)
+}
+
+fn ensure_coord_outside_linked_regions(ds: &DataSheet, coord: CellCoord, action: &str) -> Result<(), EngineError> {
+    for region in &ds.linked_regions {
+        if coord_in_sheet_range(region.target_range, coord) {
+            return Err(linked_region_conflict_error(&ds.id, region, action, Some(coord)));
+        }
+    }
+    Ok(())
+}
+
+fn ensure_coords_outside_linked_regions(ds: &DataSheet, coords: impl IntoIterator<Item = CellCoord>, action: &str) -> Result<(), EngineError> {
+    if ds.linked_regions.is_empty() {
+        return Ok(());
+    }
+    for coord in coords {
+        ensure_coord_outside_linked_regions(ds, coord, action)?;
+    }
+    Ok(())
+}
+
+fn ensure_range_outside_linked_regions(ds: &DataSheet, range: lumencraft_doc::SheetCellRange, action: &str) -> Result<(), EngineError> {
+    for region in &ds.linked_regions {
+        if ranges_overlap(region.target_range, range) {
+            return Err(linked_region_conflict_error(&ds.id, region, action, None));
+        }
+    }
+    Ok(())
+}
+
 fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: RecodeLevelsParams = parse_params(&schema_recode_levels(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
     let pairs = p.mappings.into_pairs();
     let doc = &mut ctx.session.doc;
+    if let Some(ds) = doc.data_sheet(&id)
+        && let TableArchetype::MultipleVariables(ref mv) = ds.archetype
+        && let Ok(col_idx) = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())
+    {
+        ensure_sheet_not_frozen(ds)?;
+        let rows = ds.archetype.row_count();
+        if rows > 0 {
+            let col_range = lumencraft_doc::SheetCellRange::new(CellCoord::new(0, col_idx, 0), CellCoord::new(rows - 1, col_idx, 0));
+            ensure_range_outside_linked_regions(ds, col_range, "recode")?;
+        }
+    }
     let mv = require_mv_table_mut(doc, &id)?;
     let col_idx = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())?;
     let var = mv
@@ -3384,6 +3587,9 @@ fn schema_set_calculated_variable() -> Value {
 fn run_set_calculated_variable(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetCalculatedVariableParams = parse_params(&schema_set_calculated_variable(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
+    if let Some(ref title) = p.title {
+        validate_title(title)?;
+    }
     let doc = &mut ctx.session.doc;
 
     let info_snapshot = doc.data_sheet(&id).and_then(|ds| ds.info_sheet_id.as_ref()).and_then(|iid| doc.info_sheet(iid)).cloned();

@@ -151,7 +151,7 @@ pub fn compute_covariance_diagnostics(
     theta: &[f64],
     confidence: ConfidenceLevel,
 ) -> Result<CovarianceDiagnostics, FitError> {
-    let sigma2 = if df > 0 { (rss / (df as f64)).max(0.0) } else { 0.0 };
+    let sigma2 = if df > 0 { (rss / (df as f64)).max(0.0) } else { f64::NAN };
     let t_crit = if df > 0 { student_t_two_sided_isf(confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN };
     compute_covariance_from_scale(j_mat, sigma2, t_crit, theta)
 }
@@ -167,8 +167,9 @@ pub(crate) fn compute_poisson_covariance_diagnostics(
     theta: &[f64],
     confidence: ConfidenceLevel,
 ) -> Result<CovarianceDiagnostics, FitError> {
+    let sigma2 = if df > 0 { 1.0 } else { f64::NAN };
     let z_crit = if df > 0 { norm_two_sided_isf(confidence.alpha()).unwrap_or(1.96) } else { f64::NAN };
-    compute_covariance_from_scale(j_mat, 1.0, z_crit, theta)
+    compute_covariance_from_scale(j_mat, sigma2, z_crit, theta)
 }
 
 fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, theta: &[f64]) -> Result<CovarianceDiagnostics, FitError> {
@@ -207,24 +208,31 @@ fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, th
     let mut corr_vec = vec![vec![0.0; p]; p];
 
     for i in 0..p {
-        let var_i = (sigma2 * xtx_inv.get(i, i).unwrap_or(0.0)).max(0.0);
-        let se_i = var_i.sqrt();
-        if !se_i.is_finite() {
-            ambiguous = true;
-        }
+        let se_i = if sigma2.is_finite() {
+            let var_i = (sigma2 * xtx_inv.get(i, i).unwrap_or(0.0)).max(0.0);
+            let s = var_i.sqrt();
+            if !s.is_finite() {
+                ambiguous = true;
+            }
+            s
+        } else {
+            f64::NAN
+        };
         se.push(se_i);
         let half = if crit.is_finite() && se_i.is_finite() { crit * se_i } else { f64::NAN };
         ci_lo.push(theta[i] - half);
         ci_hi.push(theta[i] + half);
         for (j, cell) in cov_vec[i].iter_mut().enumerate().take(p) {
-            *cell = sigma2 * xtx_inv.get(i, j).unwrap_or(0.0);
+            *cell = if sigma2.is_finite() { sigma2 * xtx_inv.get(i, j).unwrap_or(0.0) } else { f64::NAN };
         }
     }
 
     for i in 0..p {
         for j in 0..p {
             let denom = se[i] * se[j];
-            corr_vec[i][j] = if i == j {
+            corr_vec[i][j] = if !sigma2.is_finite() {
+                f64::NAN
+            } else if i == j {
                 1.0
             } else if denom > 0.0 && denom.is_finite() {
                 (cov_vec[i][j] / denom).clamp(-1.0, 1.0)

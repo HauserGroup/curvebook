@@ -9,6 +9,7 @@ use lumencraft_math::DeterministicRng;
 
 use crate::error::TransformError;
 use crate::formula::{ScalarEnv, eval_scalar_expr, parse_formula};
+use crate::import::MAX_IMPORT_CELLS;
 
 /// Evaluate a named built-in simulation equation or custom formula expression at `x`.
 pub fn evaluate_equation(equation_id: &str, x: f64, parameters: &[(String, f64)]) -> Result<f64, TransformError> {
@@ -108,6 +109,7 @@ pub fn simulate_xy_sheet(
         return Err(TransformError::InvalidSpec { message: String::from("simulation x_min and x_max must be finite") });
     }
     validate_noise(noise)?;
+    check_simulation_cell_budget(row_count, 1, replicates, 1)?;
 
     let mode = if replicates == 1 { SubcolumnMode::Single } else { SubcolumnMode::RawReplicates(replicates) };
     let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, mode, 1, row_count)?;
@@ -131,6 +133,29 @@ pub fn simulate_xy_sheet(
 
     let sheet = DataSheet::new(sheet_id, title, TableArchetype::Xy(xy))?;
     Ok(sheet)
+}
+
+/// Enforce [`MAX_IMPORT_CELLS`] using overflow-checked arithmetic before allocating simulation grids or drawing RNG samples.
+fn check_simulation_cell_budget(row_count: usize, data_sets: usize, replicates: usize, x_subcolumns: usize) -> Result<usize, TransformError> {
+    let overflow = || TransformError::InvalidSpec { message: format!("simulation cell allocation overflows budget limit {MAX_IMPORT_CELLS}") };
+    let y_cells = row_count.checked_mul(replicates).and_then(|v| v.checked_mul(data_sets)).ok_or_else(overflow)?;
+    if y_cells > MAX_IMPORT_CELLS {
+        return Err(TransformError::InvalidSpec {
+            message: format!(
+                "simulation cell allocation ({row_count} rows x {replicates} replicates x {data_sets} dataset(s) = {y_cells} Y cells) exceeds budget limit {MAX_IMPORT_CELLS}"
+            ),
+        });
+    }
+    let x_cells = row_count.checked_mul(x_subcolumns).ok_or_else(overflow)?;
+    let total_cells = y_cells.checked_add(x_cells).ok_or_else(overflow)?;
+    if total_cells > MAX_IMPORT_CELLS {
+        return Err(TransformError::InvalidSpec {
+            message: format!(
+                "simulation cell allocation {total_cells} ({row_count} rows x ({x_subcolumns} X + {data_sets} x {replicates} Y)) exceeds budget limit {MAX_IMPORT_CELLS}"
+            ),
+        });
+    }
+    Ok(total_cells)
 }
 
 fn validate_noise(noise: SimulationNoise) -> Result<(), TransformError> {
@@ -256,4 +281,58 @@ fn eval_custom_formula(formula: &str, x: f64, parameters: &[(String, f64)]) -> R
     let val = eval_scalar_expr(&expr, &env)?;
     val.as_finite_f64()
         .ok_or_else(|| TransformError::EvalError { message: format!("custom equation `{formula}` evaluated to missing/non-finite at x={x}") })
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_doc::{MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, TransformAnalysisSpec};
+
+    use super::*;
+    use crate::ops::{TransformContext, execute_transform};
+
+    #[test]
+    fn r1_s04_08_simulate_enforces_cell_budget_before_allocation() {
+        // 1,000,000 rows x 512 replicates passes per-axis limits but requests 513M total cells.
+        let err = simulate_xy_sheet(
+            "sim-oom",
+            "Too Big",
+            1,
+            MAX_ROWS,
+            MAX_SUBCOLUMNS,
+            0.0,
+            1.0,
+            "linear",
+            &[(String::from("m"), 1.0), (String::from("b"), 0.0)],
+            SimulationNoise::Gaussian { sd: 1.0 },
+        )
+        .unwrap_err();
+        assert!(matches!(err, TransformError::InvalidSpec { ref message } if message.contains("budget")), "unexpected error: {err:?}");
+
+        // Exact Y boundary (1,000,000 * 10 = 10M Y cells) still exceeds MAX_IMPORT_CELLS once X column is included (11M > 10M).
+        let err_with_x = simulate_xy_sheet("sim-x-over", "With X", 1, 1_000_000, 10, 0.0, 1.0, "linear", &[], SimulationNoise::None).unwrap_err();
+        assert!(matches!(err_with_x, TransformError::InvalidSpec { .. }), "expected InvalidSpec when X+Y exceeds cap, got {err_with_x:?}");
+
+        // Execute transform path must also enforce the same budget.
+        let seed_sheet = DataSheet::new("seed", "Seed", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 1).unwrap())).unwrap();
+        let spec = TransformAnalysisSpec::Simulate {
+            seed: 42,
+            row_count: 50_000,
+            replicates: 250,
+            x_min: 0.0,
+            x_max: 10.0,
+            equation_id: String::from("linear"),
+            parameters: vec![],
+            noise: SimulationNoise::None,
+        };
+        let exec_err = execute_transform(&seed_sheet, &spec, &TransformContext::default()).unwrap_err();
+        assert!(matches!(exec_err, TransformError::InvalidSpec { .. }), "expected InvalidSpec, got {exec_err:?}");
+
+        // Overflow-checked budget helper accepts exact cap and rejects usize overflow cleanly.
+        assert_eq!(check_simulation_cell_budget(1_000_000, 1, 9, 1).unwrap(), MAX_IMPORT_CELLS);
+        assert!(matches!(check_simulation_cell_budget(usize::MAX, 1, 2, 1), Err(TransformError::InvalidSpec { .. })));
+
+        // Small trace within per-axis max subcolumns remains accepted.
+        let ok = simulate_xy_sheet("sim-ok", "Small", 1, 2, MAX_SUBCOLUMNS, 0.0, 1.0, "linear", &[], SimulationNoise::None).unwrap();
+        assert_eq!(ok.archetype.allocated_cell_slots(), 2 * (1 + MAX_SUBCOLUMNS));
+    }
 }

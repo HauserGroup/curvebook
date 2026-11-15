@@ -14,8 +14,9 @@ use lumencraft_chart::{
 };
 use lumencraft_palette::Rgba8;
 use lumencraft_text::{
-    BUNDLED_FONTS, GlyphOutlineCmd, PositionedGlyphOutline, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, TrueTypeFontInfo,
-    contains_rtl_script, outline_rich_text, parse_truetype_font_info, reorder_visual_bidi, shape_bidi_runs,
+    BUNDLED_FONTS, GlyphOutlineCmd, PositionedGlyphOutline, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, TrueTypeFont,
+    TrueTypeFontInfo, contains_rtl_script, glyph_paths::outline_ttf_glyph, outline_rich_text, parse_truetype_font_info, reorder_visual_bidi,
+    shape_bidi_runs,
 };
 use serde::{Deserialize, Serialize};
 
@@ -135,6 +136,7 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
 
     let embedded_ttf = resolve_embedded_truetype(options)?;
     let embedded_info = embedded_ttf.as_ref().map(|ttf| &ttf.info);
+    let parsed_ttf = embedded_ttf.as_ref().and_then(|ttf| TrueTypeFont::parse(&ttf.raw_bytes));
     let mut cumulative_stream_bytes = embedded_ttf.as_ref().map_or(0_usize, |t| t.compressed_bytes.len());
     if cumulative_stream_bytes > MAX_PDF_OUTPUT_BYTES {
         return Err(PdfError::ResourceLimit { message: format!("embedded PDF font exceeds output byte limit {MAX_PDF_OUTPUT_BYTES}") });
@@ -146,7 +148,7 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
 
     for scene in pages {
         validate_scene_bounds(scene)?;
-        let (raw_stream, used) = encode_page_stream(scene, options, embedded_info)?;
+        let (raw_stream, used) = encode_page_stream(scene, options, embedded_info, parsed_ttf.as_ref())?;
         all_gs_both.extend(used.gs_both.iter().copied());
         all_gs_stroke.extend(used.gs_stroke.iter().copied());
         let stream_bytes = compress_if_requested(raw_stream.into_bytes(), options.compress_streams)?;
@@ -163,7 +165,7 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
 }
 
 struct EmbeddedTrueTypeFont {
-    raw_len: usize,
+    raw_bytes: Vec<u8>,
     compressed_bytes: Vec<u8>,
     info: TrueTypeFontInfo,
     ps_name: String,
@@ -204,7 +206,7 @@ fn resolve_embedded_truetype(options: &PdfExportOptions) -> Result<Option<Embedd
     };
     let ps_name = sanitize_pdf_font_name(&info.postscript_name, &info.family_name);
     let compressed_bytes = compress_if_requested(raw_bytes.to_vec(), true)?;
-    Ok(Some(EmbeddedTrueTypeFont { raw_len: raw_bytes.len(), compressed_bytes, info, ps_name }))
+    Ok(Some(EmbeddedTrueTypeFont { raw_bytes: raw_bytes.to_vec(), compressed_bytes, info, ps_name }))
 }
 
 #[derive(Default)]
@@ -395,7 +397,7 @@ fn write_truetype_font_objects(
     write_pdf_obj(pdf, offsets, desc_id, desc_dict.as_bytes());
 
     let mut stream_obj = Vec::with_capacity(ttf.compressed_bytes.len() + 128);
-    let header = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", ttf.compressed_bytes.len(), ttf.raw_len);
+    let header = format!("<< /Length {} /Length1 {} /Filter /FlateDecode >>\nstream\n", ttf.compressed_bytes.len(), ttf.raw_bytes.len());
     stream_obj.extend_from_slice(header.as_bytes());
     stream_obj.extend_from_slice(&ttf.compressed_bytes);
     stream_obj.extend_from_slice(b"\nendstream\n");
@@ -483,10 +485,11 @@ fn write_pdf_obj(pdf: &mut Vec<u8>, offsets: &mut [usize], obj_id: usize, body: 
     pdf.extend_from_slice(b"endobj\n");
 }
 
-fn encode_page_stream(
+fn encode_page_stream<'a>(
     scene: &ChartScene,
     options: &PdfExportOptions,
-    embedded_info: Option<&TrueTypeFontInfo>,
+    embedded_info: Option<&'a TrueTypeFontInfo>,
+    embedded_ttf: Option<&'a TrueTypeFont<'a>>,
 ) -> Result<(String, PageResourcesUsed), PdfError> {
     let mut ctx = StreamCtx {
         buf: String::with_capacity(1024),
@@ -495,6 +498,7 @@ fn encode_page_stream(
         color_space: options.color_space,
         outline_text: options.outline_text,
         embedded_info,
+        embedded_ttf,
     };
     let mut clip_depth = 0usize;
 
@@ -534,6 +538,7 @@ struct StreamCtx<'a> {
     color_space: PdfColorSpace,
     outline_text: bool,
     embedded_info: Option<&'a TrueTypeFontInfo>,
+    embedded_ttf: Option<&'a TrueTypeFont<'a>>,
 }
 
 impl StreamCtx<'_> {
@@ -718,7 +723,7 @@ impl StreamCtx<'_> {
     fn emit_selectable_text(&mut self, text: &PositionedText) -> Result<(), PdfError> {
         let visual_rich: Cow<'_, RichText> =
             if rich_contains_rtl(&text.rich) { Cow::Owned(reorder_rich_text_bidi(&text.rich)) } else { Cow::Borrowed(&text.rich) };
-        let total_width = measure_selectable_text_width_pt(&visual_rich, text.font_size_pt, self.embedded_info);
+        let total_width = measure_selectable_text_width_pt(&visual_rich, text.font_size_pt, self.embedded_info, self.embedded_ttf);
         let u_start = anchor_offset_x(text.anchor, total_width);
         let rad = text.rotation_deg.to_radians();
         let mut state = SelectableTextState {
@@ -732,56 +737,57 @@ impl StreamCtx<'_> {
             active_font: None,
             active_rise: 0.0,
             pen_u: u_start,
+            in_text_block: false,
         };
 
+        for span in &visual_rich.spans {
+            self.emit_selectable_span(span, &mut state)?;
+        }
+
+        self.close_selectable_block(&mut state);
+        Ok(())
+    }
+
+    fn open_selectable_block(&mut self, state: &mut SelectableTextState, color: Rgba8) {
+        if state.in_text_block {
+            return;
+        }
         // Emit page-level graphics state alpha outside `BT ... ET` per PDF 1.4 operator rules.
         self.buf.push_str("q\n");
+        state.active_alpha = if color.a > 0 { color.a } else { 255 };
         if state.active_alpha < 255 {
             self.used.gs_both.insert(state.active_alpha);
             let _ = writeln!(self.buf, "/GSa{:03} gs", state.active_alpha);
         }
-        let _ = writeln!(self.buf, "{}", format_fill_color(text.color, self.color_space));
+        let _ = writeln!(self.buf, "{}", format_fill_color(color, self.color_space));
+        state.active_color = color;
+        state.active_font = None;
+        state.active_rise = 0.0;
         self.open_text_block(state.anchor_pt, state.pen_u, state.cos_a, state.sin_a);
-
-        for span in &visual_rich.spans {
-            self.emit_selectable_span(span, &mut state);
-        }
-
-        if state.active_rise.abs() > 1e-4 {
-            self.buf.push_str("0.000 Ts\n");
-        }
-        self.buf.push_str("ET\n");
-        self.buf.push_str("Q\n");
-        Ok(())
+        state.in_text_block = true;
     }
 
-    fn emit_selectable_span(&mut self, span: &RichSpan, state: &mut SelectableTextState) {
-        if span.text.is_empty() {
+    fn close_selectable_block(&mut self, state: &mut SelectableTextState) {
+        if !state.in_text_block {
             return;
+        }
+        if state.active_rise.abs() > 1e-4 {
+            self.buf.push_str("0.000 Ts\n");
+            state.active_rise = 0.0;
+        }
+        self.buf.push_str("ET\nQ\n");
+        state.in_text_block = false;
+        state.active_font = None;
+    }
+
+    fn emit_selectable_span(&mut self, span: &RichSpan, state: &mut SelectableTextState) -> Result<(), PdfError> {
+        if span.text.is_empty() {
+            return Ok(());
         }
         let span_color = span.color.unwrap_or(state.base_color);
         if span_color.a == 0 {
-            state.pen_u += measure_span_width_pt(span, state.font_size_pt, self.embedded_info);
-            return;
-        }
-        if span_color.a != state.active_alpha {
-            if state.active_rise.abs() > 1e-4 {
-                self.buf.push_str("0.000 Ts\n");
-                state.active_rise = 0.0;
-            }
-            self.buf.push_str("ET\nQ\nq\n");
-            state.active_alpha = span_color.a;
-            if state.active_alpha < 255 {
-                self.used.gs_both.insert(state.active_alpha);
-                let _ = writeln!(self.buf, "/GSa{:03} gs", state.active_alpha);
-            }
-            let _ = writeln!(self.buf, "{}", format_fill_color(span_color, self.color_space));
-            state.active_color = span_color;
-            state.active_font = None;
-            self.open_text_block(state.anchor_pt, state.pen_u, state.cos_a, state.sin_a);
-        } else if span_color != state.active_color {
-            let _ = writeln!(self.buf, "{}", format_fill_color(span_color, self.color_space));
-            state.active_color = span_color;
+            state.pen_u += measure_span_width_pt(span, state.font_size_pt, self.embedded_info, self.embedded_ttf);
+            return Ok(());
         }
 
         let span_size = effective_span_font_size(state.font_size_pt, span);
@@ -790,25 +796,66 @@ impl StreamCtx<'_> {
             SpanScript::Superscript => state.font_size_pt * 0.35,
             SpanScript::Subscript => -state.font_size_pt * 0.20,
         };
-        if (span_rise - state.active_rise).abs() > 1e-4 {
-            let _ = writeln!(self.buf, "{:.3} Ts", norm_zero(span_rise));
-            state.active_rise = span_rise;
-        }
+        let style = SpanPdfStyle { color: span_color, size_pt: span_size, rise_pt: span_rise };
 
-        for run in split_span_into_pdf_runs(&span.text, span.weight, span.slope, self.embedded_info.is_some()) {
-            if run.bytes.is_empty() {
-                continue;
+        for seg in split_span_into_pdf_segments(span, state.font_size_pt, self.embedded_info) {
+            match seg {
+                SpanPdfSegment::PdfText { font, bytes, width_pt } => {
+                    self.emit_pdf_text_segment(font, &bytes, style, state);
+                    state.pen_u += width_pt;
+                }
+                SpanPdfSegment::Outlined(slice) => {
+                    self.emit_outlined_segment(&slice, span, span_size, state)?;
+                }
             }
-            let size_key = (span_size * 100.0).round();
-            let need_tf = state.active_font.is_none_or(|(pf, ps)| pf != run.font || (ps - size_key).abs() > 0.5);
-            if need_tf {
-                let _ = writeln!(self.buf, "/{} {:.2} Tf", run.font.tag(), span_size);
-                state.active_font = Some((run.font, size_key));
-            }
-            write_pdf_bytes_literal(&mut self.buf, &run.bytes);
-            self.buf.push_str(" Tj\n");
         }
-        state.pen_u += measure_span_width_pt(span, state.font_size_pt, self.embedded_info);
+        Ok(())
+    }
+
+    fn emit_pdf_text_segment(&mut self, font: PdfFontId, bytes: &[u8], style: SpanPdfStyle, state: &mut SelectableTextState) {
+        if bytes.is_empty() {
+            return;
+        }
+        if state.in_text_block && style.color.a != state.active_alpha {
+            self.close_selectable_block(state);
+        }
+        if !state.in_text_block {
+            self.open_selectable_block(state, style.color);
+        } else if style.color != state.active_color {
+            let _ = writeln!(self.buf, "{}", format_fill_color(style.color, self.color_space));
+            state.active_color = style.color;
+        }
+        if (style.rise_pt - state.active_rise).abs() > 1e-4 {
+            let _ = writeln!(self.buf, "{:.3} Ts", norm_zero(style.rise_pt));
+            state.active_rise = style.rise_pt;
+        }
+        let size_key = (style.size_pt * 100.0).round();
+        let need_tf = state.active_font.is_none_or(|(pf, ps)| pf != font || (ps - size_key).abs() > 0.5);
+        if need_tf {
+            let _ = writeln!(self.buf, "/{} {:.2} Tf", font.tag(), style.size_pt);
+            state.active_font = Some((font, size_key));
+        }
+        write_pdf_bytes_literal(&mut self.buf, bytes);
+        self.buf.push_str(" Tj\n");
+    }
+
+    fn emit_outlined_segment(&mut self, slice: &str, span: &RichSpan, span_size: f64, state: &mut SelectableTextState) -> Result<(), PdfError> {
+        // Close any active `BT ... ET` and outer alpha `q ... Q` before emitting vector glyph outlines.
+        self.close_selectable_block(state);
+        let (glyphs, width_pt) = build_outlined_fallback_glyphs(slice, span, state.font_size_pt, self.embedded_ttf);
+        let xform = TextOutlineTransform {
+            ax: state.anchor_pt.x,
+            ay: state.anchor_pt.y,
+            u_start: state.pen_u,
+            cos_a: state.cos_a,
+            sin_a: state.sin_a,
+            page_h: self.page_h,
+        };
+        for glyph in &glyphs {
+            self.emit_single_outlined_glyph(glyph, state.base_color, span_size, &xform)?;
+        }
+        state.pen_u += width_pt;
+        Ok(())
     }
 
     fn open_text_block(&mut self, anchor_pt: PointPt, pen_u: f64, cos_a: f64, sin_a: f64) {
@@ -939,6 +986,14 @@ struct SelectableTextState {
     active_font: Option<(PdfFontId, f64)>,
     active_rise: f64,
     pen_u: f64,
+    in_text_block: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SpanPdfStyle {
+    color: Rgba8,
+    size_pt: f64,
+    rise_pt: f64,
 }
 
 struct TextOutlineTransform {
@@ -1002,9 +1057,9 @@ impl PdfFontId {
     }
 }
 
-struct TextRun {
-    font: PdfFontId,
-    bytes: Vec<u8>,
+enum SpanPdfSegment {
+    PdfText { font: PdfFontId, bytes: Vec<u8>, width_pt: f64 },
+    Outlined(String),
 }
 
 fn rich_contains_rtl(rich: &RichText) -> bool {
@@ -1081,20 +1136,108 @@ fn reorder_rich_text_bidi(rich: &RichText) -> RichText {
     RichText::new(visual_spans)
 }
 
-fn split_span_into_pdf_runs(text: &str, weight: SpanWeight, slope: SpanSlope, has_ttf: bool) -> Vec<TextRun> {
-    let base_font = PdfFontId::from_style_with_ttf(weight, slope, has_ttf);
-    let mut runs: Vec<TextRun> = Vec::new();
-    for ch in text.chars() {
-        let (font, byte) = if let Some(sym_byte) = symbol_font_byte(ch) { (PdfFontId::Symbol, sym_byte) } else { (base_font, winansi_font_byte(ch)) };
-        if let Some(last) = runs.last_mut()
-            && last.font == font
-        {
-            last.bytes.push(byte);
+fn split_span_into_pdf_segments(span: &RichSpan, base_font_size_pt: f64, embedded_info: Option<&TrueTypeFontInfo>) -> Vec<SpanPdfSegment> {
+    let size_pt = effective_span_font_size(base_font_size_pt, span);
+    let base_font = PdfFontId::from_style_with_ttf(span.weight, span.slope, embedded_info.is_some());
+    let mut segments: Vec<SpanPdfSegment> = Vec::new();
+    for ch in span.text.chars() {
+        if let Some(sym_byte) = symbol_font_byte(ch) {
+            let w = size_pt * (f64::from(symbol_advance_thousandths(sym_byte)) / 1000.0);
+            push_pdf_segment_byte(&mut segments, PdfFontId::Symbol, sym_byte, w);
+        } else if let Some(win_byte) = try_winansi_font_byte(ch) {
+            let w = winansi_char_width_pt(ch, win_byte, base_font, size_pt, embedded_info);
+            push_pdf_segment_byte(&mut segments, base_font, win_byte, w);
+        } else if let Some(SpanPdfSegment::Outlined(slice)) = segments.last_mut() {
+            slice.push(ch);
         } else {
-            runs.push(TextRun { font, bytes: vec![byte] });
+            let mut slice = String::new();
+            slice.push(ch);
+            segments.push(SpanPdfSegment::Outlined(slice));
         }
     }
-    runs
+    segments
+}
+
+fn push_pdf_segment_byte(segments: &mut Vec<SpanPdfSegment>, font: PdfFontId, byte: u8, char_width_pt: f64) {
+    if let Some(SpanPdfSegment::PdfText { font: prev_font, bytes, width_pt }) = segments.last_mut()
+        && *prev_font == font
+    {
+        bytes.push(byte);
+        *width_pt += char_width_pt;
+    } else {
+        segments.push(SpanPdfSegment::PdfText { font, bytes: vec![byte], width_pt: char_width_pt });
+    }
+}
+
+fn winansi_char_width_pt(ch: char, win_byte: u8, base_font: PdfFontId, size_pt: f64, embedded_info: Option<&TrueTypeFontInfo>) -> f64 {
+    if base_font == PdfFontId::EmbeddedTrueType
+        && let Some(info) = embedded_info
+    {
+        info.width_pt(ch, size_pt)
+    } else {
+        size_pt * (f64::from(helvetica_advance_thousandths(win_byte, base_font)) / 1000.0)
+    }
+}
+
+fn append_outlined_char(
+    ch: char,
+    pen_x: f64,
+    span: &RichSpan,
+    base_font_size_pt: f64,
+    embedded_ttf: Option<&TrueTypeFont<'_>>,
+    out: Option<&mut Vec<PositionedGlyphOutline>>,
+) -> f64 {
+    let span_size = effective_span_font_size(base_font_size_pt, span);
+    let y_offset = match span.script {
+        SpanScript::Baseline => 0.0,
+        SpanScript::Superscript => -0.35 * base_font_size_pt,
+        SpanScript::Subscript => 0.20 * base_font_size_pt,
+    };
+    if let Some(ttf) = embedded_ttf
+        && let Some(cmds) = outline_ttf_glyph(ttf, ch, pen_x, y_offset, span_size, span.slope == SpanSlope::Italic)
+    {
+        let adv = ttf.advance_em(ch).unwrap_or(0.60) * span_size;
+        if let Some(glyphs) = out {
+            glyphs.push(PositionedGlyphOutline {
+                codepoint: ch,
+                origin_x_pt: pen_x,
+                origin_y_pt: y_offset,
+                advance_x_pt: adv,
+                color: span.color,
+                commands: cmds,
+            });
+        }
+        return adv;
+    }
+    let single = RichText::new(vec![RichSpan { text: ch.to_string(), ..span.clone() }]);
+    let mut glyphs = outline_rich_text(&single, pen_x, 0.0, base_font_size_pt);
+    let adv = glyphs.iter().map(|g| g.advance_x_pt).sum();
+    if let Some(dst) = out {
+        dst.append(&mut glyphs);
+    }
+    adv
+}
+
+fn build_outlined_fallback_glyphs(
+    slice: &str,
+    span: &RichSpan,
+    base_font_size_pt: f64,
+    embedded_ttf: Option<&TrueTypeFont<'_>>,
+) -> (Vec<PositionedGlyphOutline>, f64) {
+    let mut glyphs = Vec::new();
+    let mut pen_x = 0.0;
+    for ch in slice.chars() {
+        pen_x += append_outlined_char(ch, pen_x, span, base_font_size_pt, embedded_ttf, Some(&mut glyphs));
+    }
+    (glyphs, pen_x)
+}
+
+fn outlined_slice_width_pt(slice: &str, span: &RichSpan, base_font_size_pt: f64, embedded_ttf: Option<&TrueTypeFont<'_>>) -> f64 {
+    let mut width = 0.0;
+    for ch in slice.chars() {
+        width += append_outlined_char(ch, width, span, base_font_size_pt, embedded_ttf, None);
+    }
+    width
 }
 
 /// Adobe Type 1 Symbol font encoding map (PDF Reference Appendix D.4).
@@ -1222,8 +1365,9 @@ fn symbol_font_byte(ch: char) -> Option<u8> {
 }
 
 /// WinAnsiEncoding (`Windows-1252`) single-byte character encoder (PDF Appendix D.2).
-fn winansi_font_byte(ch: char) -> u8 {
-    match ch {
+/// Returns `None` for characters outside Windows-1252 so non-WinAnsi glyphs render via vector outlines.
+fn try_winansi_font_byte(ch: char) -> Option<u8> {
+    let byte = match ch {
         '\t' | '\n' | '\r' => b' ',
         c if (' '..='~').contains(&c) => c as u8,
         '€' => 0x80,
@@ -1254,8 +1398,9 @@ fn winansi_font_byte(ch: char) -> u8 {
         'ž' => 0x9E,
         'Ÿ' => 0x9F,
         c if ('\u{00A0}'..='\u{00FF}').contains(&c) => c as u8,
-        _ => b'?',
-    }
+        _ => return None,
+    };
+    Some(byte)
 }
 
 fn write_pdf_bytes_literal(out: &mut String, bytes: &[u8]) {
@@ -1313,28 +1458,31 @@ fn anchor_offset_x(anchor: TextAnchor, total_width: f64) -> f64 {
     }
 }
 
-fn measure_span_width_pt(span: &RichSpan, base_font_size_pt: f64, embedded_info: Option<&TrueTypeFontInfo>) -> f64 {
-    let size_pt = effective_span_font_size(base_font_size_pt, span);
-    let base_font = PdfFontId::from_style_with_ttf(span.weight, span.slope, embedded_info.is_some());
+fn measure_span_width_pt(
+    span: &RichSpan,
+    base_font_size_pt: f64,
+    embedded_info: Option<&TrueTypeFontInfo>,
+    embedded_ttf: Option<&TrueTypeFont<'_>>,
+) -> f64 {
     let mut total = 0.0;
-    for ch in span.text.chars() {
-        if let Some(sym) = symbol_font_byte(ch) {
-            total += size_pt * (f64::from(symbol_advance_thousandths(sym)) / 1000.0);
-        } else if base_font == PdfFontId::EmbeddedTrueType
-            && let Some(info) = embedded_info
-        {
-            let effective_ch = if winansi_font_byte(ch) == b'?' && ch != '?' { '?' } else { ch };
-            total += info.width_pt(effective_ch, size_pt);
-        } else {
-            let width_em = helvetica_advance_thousandths(winansi_font_byte(ch), base_font);
-            total += size_pt * (f64::from(width_em) / 1000.0);
+    for seg in split_span_into_pdf_segments(span, base_font_size_pt, embedded_info) {
+        match seg {
+            SpanPdfSegment::PdfText { width_pt, .. } => total += width_pt,
+            SpanPdfSegment::Outlined(slice) => {
+                total += outlined_slice_width_pt(&slice, span, base_font_size_pt, embedded_ttf);
+            }
         }
     }
     total
 }
 
-fn measure_selectable_text_width_pt(rich: &RichText, base_font_size_pt: f64, embedded_info: Option<&TrueTypeFontInfo>) -> f64 {
-    rich.spans.iter().map(|span| measure_span_width_pt(span, base_font_size_pt, embedded_info)).sum()
+fn measure_selectable_text_width_pt(
+    rich: &RichText,
+    base_font_size_pt: f64,
+    embedded_info: Option<&TrueTypeFontInfo>,
+    embedded_ttf: Option<&TrueTypeFont<'_>>,
+) -> f64 {
+    rich.spans.iter().map(|span| measure_span_width_pt(span, base_font_size_pt, embedded_info, embedded_ttf)).sum()
 }
 
 /// Core-14 Helvetica advance widths in 1/1000 em units for accurate `Middle`/`End` alignment.

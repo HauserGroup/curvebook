@@ -116,14 +116,52 @@ fn check_explicit_self_cycles(doc: &ProjectDocument) -> Result<(), EngineError> 
 
     for graph in &doc.graph_sheets {
         if graph.spec.primary_source_sheet_id == graph.id {
-            return Err(EngineError::new(format!("self-referential primary source detected on graph sheet `{}`", graph.id)));
+            return Err(EngineError::with_code(
+                crate::ErrorCode::CycleDetected,
+                format!("self-referential primary source detected on graph sheet `{}`", graph.id),
+            ));
+        }
+        for series in &graph.spec.series {
+            if series.source_sheet_id == graph.id {
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("self-referential series source detected on graph sheet `{}`", graph.id),
+                ));
+            }
+            if let Some(ov) = &series.regression_overlay
+                && ov.result_sheet_id == graph.id
+            {
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("self-referential regression overlay detected on graph sheet `{}`", graph.id),
+                ));
+            }
+        }
+        for cmp in &graph.spec.comparisons {
+            if cmp.result_sheet_id == graph.id {
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("self-referential comparison bracket detected on graph sheet `{}`", graph.id),
+                ));
+            }
         }
         for ann in &graph.spec.annotations {
             if let lumencraft_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }
             | lumencraft_doc::GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
                 && result_sheet_id == &graph.id
             {
-                return Err(EngineError::new(format!("self-referential annotation detected on graph sheet `{}`", graph.id)));
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("self-referential annotation detected on graph sheet `{}`", graph.id),
+                ));
+            }
+        }
+        for hook in graph.spec.inline_hooks() {
+            if hook.upstream_sheet_id() == Some(&graph.id) {
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("self-referential inline hook detected on graph sheet `{}`", graph.id),
+                ));
             }
         }
     }
@@ -199,9 +237,126 @@ pub fn topological_order(doc: &ProjectDocument) -> Result<Vec<SheetId>, EngineEr
     }
 
     if order.len() != nodes.len() {
-        return Err(EngineError::new("cyclic dependency detected across project sheets"));
+        return Err(EngineError::with_code(crate::ErrorCode::CycleDetected, "cyclic dependency detected across project sheets"));
     }
+    lumencraft_format::detect_dependency_cycles(doc)?;
     Ok(order)
+}
+
+fn push_spec_hook_dep(deps: &mut Vec<SheetId>, hook: &lumencraft_doc::HookSource, fallback_info: Option<&SheetId>) {
+    match hook {
+        lumencraft_doc::HookSource::InfoConstant { info_sheet_id: Some(id), .. } => deps.push(id.clone()),
+        lumencraft_doc::HookSource::InfoConstant { info_sheet_id: None, .. } => {
+            if let Some(id) = fallback_info {
+                deps.push(id.clone());
+            }
+        }
+        lumencraft_doc::HookSource::ResultScalar { result_sheet_id, .. } => deps.push(result_sheet_id.clone()),
+        lumencraft_doc::HookSource::ColumnTitleValue { data_sheet_id, .. } => deps.push(data_sheet_id.clone()),
+    }
+}
+
+fn validate_spec_deps_acyclic(doc: &ProjectDocument, sheet_id: &SheetId, spec_deps: Vec<SheetId>, kind: &str) -> Result<(), EngineError> {
+    if spec_deps.iter().any(|dep| dep == sheet_id) {
+        return Err(EngineError::with_code(
+            crate::ErrorCode::CycleDetected,
+            format!("self-referential dependency detected on {kind} sheet `{sheet_id}`"),
+        ));
+    }
+    let mut visited = BTreeSet::new();
+    let mut queue: VecDeque<SheetId> = spec_deps.into_iter().collect();
+    while let Some(curr) = queue.pop_front() {
+        if &curr == sheet_id {
+            return Err(EngineError::with_code(
+                crate::ErrorCode::CycleDetected,
+                format!("cyclic dependency detected involving {kind} sheet `{sheet_id}`"),
+            ));
+        }
+        if !visited.insert(curr.clone()) {
+            continue;
+        }
+        for up in doc.upstream_dependencies(&curr) {
+            if &up == sheet_id {
+                return Err(EngineError::with_code(
+                    crate::ErrorCode::CycleDetected,
+                    format!("cyclic dependency detected involving {kind} sheet `{sheet_id}`"),
+                ));
+            }
+            if !visited.contains(&up) {
+                queue.push_back(up);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that inline template hooks do not self-reference `sheet_id` or point at wrong/missing sheets.
+pub(crate) fn validate_inline_hook_refs(doc: &ProjectDocument, sheet_id: &SheetId, hooks: &[lumencraft_doc::HookSource]) -> Result<(), EngineError> {
+    for hook in hooks {
+        if hook.upstream_sheet_id() == Some(sheet_id) {
+            return Err(EngineError::with_code(
+                crate::ErrorCode::CycleDetected,
+                format!("self-referential inline hook target `{sheet_id}` is not allowed on `{sheet_id}`"),
+            ));
+        }
+        match hook {
+            lumencraft_doc::HookSource::InfoConstant { info_sheet_id: Some(info_id), .. } => {
+                let _ = crate::cmd::helpers::require_info_sheet(doc, info_id)?;
+            }
+            lumencraft_doc::HookSource::InfoConstant { info_sheet_id: None, .. } => {}
+            lumencraft_doc::HookSource::ResultScalar { result_sheet_id, .. } => {
+                let _ = crate::cmd::helpers::require_result_sheet(doc, result_sheet_id)?;
+            }
+            lumencraft_doc::HookSource::ColumnTitleValue { data_sheet_id, .. } => {
+                let _ = crate::cmd::helpers::require_data_sheet(doc, data_sheet_id)?;
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate that candidate `spec` on `graph_id` introduces no self-reference or dependency cycle.
+pub(crate) fn validate_graph_spec_acyclic(doc: &ProjectDocument, graph_id: &SheetId, spec: &lumencraft_doc::GraphSpec) -> Result<(), EngineError> {
+    let default_info = doc.info_sheets.first().map(|s| s.id.clone());
+    let mut deps = Vec::new();
+    deps.push(spec.primary_source_sheet_id.clone());
+    for series in &spec.series {
+        deps.push(series.source_sheet_id.clone());
+        if let Some(ov) = &series.regression_overlay {
+            deps.push(ov.result_sheet_id.clone());
+        }
+    }
+    for cmp in &spec.comparisons {
+        deps.push(cmp.result_sheet_id.clone());
+    }
+    for ann in &spec.annotations {
+        if let lumencraft_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }
+        | lumencraft_doc::GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
+        {
+            deps.push(result_sheet_id.clone());
+        }
+    }
+    for hook in spec.inline_hooks() {
+        push_spec_hook_dep(&mut deps, &hook, default_info.as_ref());
+    }
+    validate_spec_deps_acyclic(doc, graph_id, deps, "graph")
+}
+
+/// Validate that candidate `spec` on `layout_id` introduces no self-reference or dependency cycle.
+pub(crate) fn validate_layout_spec_acyclic(doc: &ProjectDocument, layout_id: &SheetId, spec: &lumencraft_doc::LayoutSpec) -> Result<(), EngineError> {
+    let default_info = doc.info_sheets.first().map(|s| s.id.clone());
+    let mut deps = Vec::new();
+    for item in &spec.items {
+        match item {
+            lumencraft_doc::LayoutItem::LiveGraph { graph_sheet_id, .. } => deps.push(graph_sheet_id.clone()),
+            lumencraft_doc::LayoutItem::LiveTable { source_sheet_id, .. } => deps.push(source_sheet_id.clone()),
+            lumencraft_doc::LayoutItem::TextCallout { .. } => {}
+        }
+    }
+    for hook in spec.inline_hooks() {
+        push_spec_hook_dep(&mut deps, &hook, default_info.as_ref());
+    }
+    validate_spec_deps_acyclic(doc, layout_id, deps, "layout")
 }
 
 /// Recalculate linked data regions, calculated variables, and analytical result sheets in topological order.

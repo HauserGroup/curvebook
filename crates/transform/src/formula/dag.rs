@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, BinaryHeap};
 use lumencraft_doc::{DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, VariableSource, default_column_label};
 
 use crate::error::TransformError;
-use crate::formula::eval::{MultipleVariablesContext, eval_column_expr, resolve_mv_column};
+use crate::formula::eval::{MultipleVariablesContext, eval_column_expr, is_builtin_constant, resolve_mv_column};
 use crate::formula::parser::{Expr, VarRef, parse_formula};
 
 /// Referenced dependency target extracted statically from a formula AST.
@@ -27,28 +27,36 @@ pub fn extract_dependencies(expr: &Expr) -> Vec<DependencyTarget> {
 }
 
 fn collect_deps(expr: &Expr, out: &mut BTreeSet<DependencyTarget>) {
-    match expr {
-        Expr::Number(_) | Expr::Text(_) => {}
-        Expr::Var(vref) => match vref {
-            VarRef::Ident(name) | VarRef::Bracketed(name) | VarRef::ColumnByName(name) => {
-                out.insert(DependencyTarget::ColumnName(name.clone()));
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Number(_) | Expr::Text(_) => {}
+            Expr::Var(vref) => match vref {
+                VarRef::Ident(name) => {
+                    if !is_builtin_constant(name) {
+                        out.insert(DependencyTarget::ColumnName(name.clone()));
+                    }
+                }
+                VarRef::Bracketed(name) | VarRef::ColumnByName(name) => {
+                    out.insert(DependencyTarget::ColumnName(name.clone()));
+                }
+                VarRef::ColumnByIndex(idx) => {
+                    out.insert(DependencyTarget::ColumnIndex(*idx));
+                }
+                VarRef::InfoConstant(key) => {
+                    out.insert(DependencyTarget::InfoConstant(key.clone()));
+                }
+                VarRef::RowOneBased | VarRef::IndexZeroBased => {}
+            },
+            Expr::Unary { expr: inner, .. } => stack.push(inner),
+            Expr::Binary { left, right, .. } => {
+                stack.push(left);
+                stack.push(right);
             }
-            VarRef::ColumnByIndex(idx) => {
-                out.insert(DependencyTarget::ColumnIndex(*idx));
-            }
-            VarRef::InfoConstant(key) => {
-                out.insert(DependencyTarget::InfoConstant(key.clone()));
-            }
-            VarRef::RowOneBased | VarRef::IndexZeroBased => {}
-        },
-        Expr::Unary { expr: inner, .. } => collect_deps(inner, out),
-        Expr::Binary { left, right, .. } => {
-            collect_deps(left, out);
-            collect_deps(right, out);
-        }
-        Expr::Call { args, .. } => {
-            for arg in args {
-                collect_deps(arg, out);
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    stack.push(arg);
+                }
             }
         }
     }
