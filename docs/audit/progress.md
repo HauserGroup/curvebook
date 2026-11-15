@@ -6,21 +6,23 @@ Running overview of the Round 1 code audit run from one machine. It follows the 
 - **One base for every slice:** `ebcc622b32fc526c545aad8439e3e580d04b478c` (`origin/main`, 2026-11-14). Every `path:line` in `findings/` refers to this commit.
 - **Reviewers and verifiers are separate agent runs.** The verifier for a slice is a fresh run that forms its own view of the cited code before reading the reviewer's reasoning. Both are Claude models (reviewer and verifier use different model sizes), so the playbook's "different model family" condition is **not** met; a human or another model family should re-verify any finding before it is fixed.
 - **Failing tests** written by verifiers are committed only to local branches `audit/r1/<slice>` (one per slice rather than one per finding) and are never merged.
-- **No source changes** and no edits to [`docs/gaps.md`](../gaps.md). Moving confirmed findings into Known defects stays with the coordinator.
+- **No source changes in audit commits; Stage 1 re-check merged `main` (`fda1cc0`):** confirmed surviving findings (`156` unique) are recorded in [Known defects](../gaps.md#known-defects).
 
 Order follows the build order in the [`ROADMAP.md`](../../ROADMAP.md) progress log: numerical foundations, document model, statistics/fitting/transforms/formats, visual stack, tools and engine, shells (UI, CLI, MCP), build guards, then the cross-cutting slices.
 
 ## Summary
 
-Round 1 is complete: all 15 slices were reviewed and independently verified at `ebcc622` (2026-11-14 to 2026-11-15).
+Round 1 is complete at `ebcc622` (2026-11-14 to 2026-11-15) and Stage 1 re-verification against merged `main` (`fda1cc0106092834d97b53289ec2a99c1bf0439c`, `fda1cc0`) is complete (`#8`–`#13`):
 
-- **157 findings reported, none refuted.** 151 CONFIRMED, 5 PLAUSIBLE, 1 DUPLICATE.
-- **By agreed severity (confirmed + plausible):** S1 32, S2 60, S3 58, S4 6.
-- **Evidence:** 116 verdicts rest on a failing test committed to a local `audit/r1/<slice>` branch; 40 rest on a line-by-line trace. The coordinator spot-checked two trace-only S1 verdicts (R1-S02-02, R1-S11-01) and re-ran the S02 tests; both held.
-- **Themes.** (1) *Silent wrong statistics*: tests labelled exact or adjusted that report a different P (R1-S02-02, -04, -06), solver fallbacks reported as finite bounds (R1-S03-02, R1-S01-05), fits that ignore N on summarized data (R1-X2-02), and stale results kept after a failed recompute (R1-X2-01). (2) *No-panic and resource gaps on untrusted input*: missing total cell, pixel, page and item budgets (R1-S06-01, R1-S07-05, R1-S07-11, R1-X1-01), panics in release (R1-S08-02, R1-S10-01, R1-S12-02), hangs (R1-S07-10, R1-S08-01), and entry points outside the panic guard (R1-S12-04, R1-S10-03). (3) *Security boundaries*: an unauthenticated control socket reachable by a browser (R1-S10-02), and external-link paths escaping `--workdir` (R1-S12-01). (4) *Crash recovery that does not recover*: the desktop app never writes its journal (R1-S11-01), and checkpoint and replay are inconsistent (R1-S06-02, -03, R1-S07-06). (5) *Build guards that miss inputs* (S13).
-- **Not done:** no finding has been re-checked against current `main`, which has moved on (see the coordinator notes). No reviewer or verifier came from another model family, and no real browser, X11 clipboard, or `wasm32` build was exercised.
+- **157 findings reported, none refuted.** `151` CONFIRMED, `5` PLAUSIBLE, `1` DUPLICATE (`R1-S07-02` merged into `R1-S12-01`) -> **`156` unique survivors**.
+- **Stage 1 re-check on `main` (`fda1cc0`):** **`0` `FIXED_ON_MAIN`**, **`13` `PARTIAL_ON_MAIN`** (partial commits leave live defects/gaps open), **`144` `LIVE_ON_MAIN`** (`143` unique + duplicate `R1-S07-02`; includes partial mitigations on `R1-S11-01` and `R1-S06-01`).
+- **By agreed severity (156 unique survivors):** `S1` 32, `S2` 60, `S3` 58, `S4` 6.
+- **Evidence:** 116 verdicts rest on a failing test committed to a local `audit/r1/<slice>` branch; 40 rest on a line-by-line trace (1 duplicate). Re-run suites and targeted probes verified Stage 1 status on `fda1cc0` (`S13` inspected clean-room without touching `audit/r1/S13`).
+- **Themes.** (1) *Silent wrong statistics*: tests labelled exact or adjusted that report a different P (R1-S02-02 partial, -04, -06), solver fallbacks reported as finite bounds (R1-S03-02, R1-S01-05), fits that ignore N on summarized data (R1-X2-02), and stale results kept after a failed recompute (R1-X2-01). (2) *No-panic and resource gaps on untrusted input*: missing total cell, pixel, page and item budgets (R1-S06-01, R1-S07-05, R1-S07-11, R1-X1-01), panics in release (R1-S08-02, R1-S10-01, R1-S12-02), hangs (R1-S07-10, R1-S08-01), and CLI batch/control entry points outside the panic guard (R1-S12-04 partial, R1-S10-03 partial). (3) *Security boundaries*: an unauthenticated control socket reachable by a browser (R1-S10-02), and external-link paths escaping `--workdir` (R1-S12-01 / R1-S07-02). (4) *Crash recovery that does not recover*: default desktop and `--control` launches still do not record to the journal (R1-S11-01), and checkpoint and replay are inconsistent (R1-S06-02, -03, R1-S07-06). (5) *Build guards that miss inputs* (S13).
+- **Remaining gaps:** No reviewer or verifier came from another model family, and no real browser, X11 clipboard, or `wasm32` build was exercised live.
 
-**Next steps for the coordinator:** re-check each S1/S2 finding against current `main`, have a different model family or a person re-verify the S1 findings, then record the survivors in [Known defects](../gaps.md#known-defects), merging the cross-slice overlaps noted below.
+**Next steps:** Execute Stages 2–4 remediation of all `156` unique survivors tracked in [Known defects](../gaps.md#round-1-audit-survivors-on-main-fda1cc0), closing `R1-S07-02` alongside `R1-S12-01` and twin pairs together.
+
 
 ## Status
 
@@ -43,6 +45,64 @@ Round 1 is complete: all 15 slices were reviewed and independently verified at `
 | 15 | `X2` Data correctness, end to end | cells → analyses → save/reopen | done | 2/5/2/0 | 9/0/0/0 | 2026-11-15 |
 
 Status values: `pending` → `reviewing` → `verifying` → `done`. Verdicts: C = CONFIRMED, P = PLAUSIBLE, R = REFUTED, D = DUPLICATE.
+
+
+## Stage 1 re-check against `main` (`fda1cc0`)
+
+Every Round 1 finding (`157` total = `156` unique + `1` duplicate `R1-S07-02`) was re-verified against `main` (`fda1cc0106092834d97b53289ec2a99c1bf0439c`) in board reports `#8`–`#13`:
+
+- **Outcomes across all 157 findings:** `0` `FIXED_ON_MAIN`, `13` `PARTIAL_ON_MAIN` (all still leave open defects/gaps), `144` `LIVE_ON_MAIN` (`143` unique + duplicate `R1-S07-02`).
+- **Unique survivors (`156`):** **`32 S1`**, **`60 S2`**, **`58 S3`**, **`6 S4`** (`R1-S07-02` merged into `R1-S12-01`; one engine path-policy fix closes both).
+- **Duplicate twins kept cross-referenced:** `R1-S06-12` (`S3`, unused copy in `crates/format/src/csv.rs:1201-1204`) <-> `R1-S04-06` (`S2`, live path in `crates/transform/src/import.rs:443-447`); and `R1-S04-01` (`S2`, consumer twin in `crates/transform/src`) <-> `R1-S05-01` (`S1`, validation root cause in `crates/doc/src` & `crates/format/src`).
+- **Severity & latency adjustments at `fda1cc0`:** `R1-S04-01`, `R1-S04-02`, and `R1-S04-04` remain agreed `S2` (initial review `S1`); `R1-S10-03` remains agreed `S3` (`PLAUSIBLE`, initial `S2`); `R1-S09-10` agreed `S4` (initial `S3`, latent); `R1-S11-11` and `R1-S11-12` (`S3`) moved from latent to **non-latent** via `crates/ui-egui/src/interaction.rs:1335-1336, 1357-1360`; `R1-S01-05`, `R1-S01-06`, and `R1-S11-10` remain latent (`R1-S06-07` race, `R1-S07-06`, `R1-S11-08` X11 fork, `R1-S13-06`, and `R1-S13-10` are also conditional/latent today).
+
+### Per-slice Stage 1 summary (`fda1cc0`)
+
+| Order | Slice | Reviewed | Unique Survivors (S1/S2/S3/S4) | `FIXED_ON_MAIN` | `PARTIAL_ON_MAIN` | `LIVE_ON_MAIN` | Board Reports | Notes |
+|---:|---|---:|---|---:|---:|---:|---|---|
+| 1 | `S01` Numerical foundations | 8 | 8 (1/2/4/1) | 0 | 0 | 8 | `#11`, `#13` | `R1-S01-05`, `R1-S01-06` latent |
+| 2 | `S05` Document model | 7 | 7 (3/3/1/0) | 0 | 0 | 7 | `#9`, `#13` | `R1-S05-01` root cause of twin `R1-S04-01` |
+| 3 | `S02` Statistics | 13 | 13 (6/5/2/0) | 0 | 2 | 11 | `#11`, `#13` | 2 partial (`916897a`); 5 title-only items unchanged |
+| 4 | `S03` Curve fitting and equation language | 12 | 12 (3/6/3/0) | 0 | 0 | 12 | `#11`, `#13` | All 12 live |
+| 5 | `S04` Transforms | 13 | 13 (1/8/4/0) | 0 | 1 | 12 | `#9`, `#13` | 1 partial (`592e396`); `R1-S04-01/-02/-04` agreed S2; twins `-01`/`S05-01` & `-06`/`S06-12` |
+| 6 | `S06` File formats and import | 14 | 14 (1/4/9/0) | 0 | 0 | 14 | `#9`, `#13` | `R1-S06-01` partial `pzfx.rs` cap in `e7c4d6b` (`.prism` still live); `R1-S06-12` dead twin of `R1-S04-06` |
+| 7 | `S08` Chart compiler and scales | 11 | 11 (2/6/3/0) | 0 | 0 | 11 | `#8`, `#13` | All 11 live |
+| 8 | `S09` Text, raster, SVG and PDF output | 10 | 10 (1/3/5/1) | 0 | 0 | 10 | `#8`, `#13` | `R1-S09-10` agreed S4 (latent) |
+| 9 | `S11` Tools and app entry points | 13 | 13 (1/5/6/1) | 0 | 3 | 10 | `#12`, `#13` | 3 partial (`3cd144d`, `7b5bafa`, `461ad33`/`9db2f2b`); `R1-S11-01` partial `--new-instance` UI wiring; `-11`/`-12` now non-latent |
+| 10 | `S07` Engine | 14 | 13 (4/5/4/0) | 0 | 1 | 13 | `#10`, `#13` | 1 partial (`2a57609`); **`R1-S07-02` DUP of `R1-S12-01`** -> 13 unique |
+| 11 | `S10` UI shell | 9 | 9 (2/2/4/1) | 0 | 2 | 7 | `#12`, `#13` | 2 partial (`8c42638`); `R1-S10-03` agreed S3 (`PLAUSIBLE`) |
+| 12 | `S12` CLI and MCP | 10 | 10 (4/2/3/1) | 0 | 3 | 7 | `#12`, `#13` | 3 partial (`3cd144d`, `461ad33`); `R1-S12-01` merges `R1-S07-02` |
+| 13 | `S13` Build guards and test kit | 10 | 10 (0/2/7/1) | 0 | 0 | 10 | `#12`, `#13` | Clean-room inspected + `recheck_s13_08` panic reproduced |
+| 14 | `X1` Untrusted input, end to end | 4 | 4 (1/2/1/0) | 0 | 1 | 3 | `#10`, `#13` | 1 partial (`7b5bafa` + `3cd144d`) |
+| 15 | `X2` Data correctness, end to end | 9 | 9 (2/5/2/0) | 0 | 0 | 9 | `#10`, `#13` | All 9 live |
+| — | **Total** | **157** | **156 (32/60/58/6)** | **0** | **13** | **144** *(143 unique + 1 dup)* | `#8`–`#13` | `R1-S07-02` merged into `R1-S12-01` |
+
+### Pre-implemented `main` partial breakdown (`fda1cc0`)
+
+#### 13 `PARTIAL_ON_MAIN` findings (core defects/contract gaps still live)
+
+| ID | Agreed Sev | Commit(s) | What landed on `fda1cc0` | Remaining live gap on `fda1cc0` |
+|---|---|---|---|---|
+| [R1-S02-02](findings/S02.md) | S1 | `916897a` | `crates/stats/src/categorical.rs:1579-1581` (`run_contingency_analysis` rejects non-2x2 `McNemarPaired`) | `categorical.rs:1001-1021, 1629-1635` (`FisherExact` >6x6 / `>20_000`, `BarnardExact`, and `CochranArmitageTrend` when neither dim is 2 still fall back via `.unwrap_or(res.chi_square_p)` under the requested test label) |
+| [R1-S12-04](findings/S12.md) | S1 | `3cd144d` | `crates/mcp/src/tools.rs:655-667` wraps MCP `call_tool` in `run_guarded_tool` -> `lumencraft_engine::guard::run_guarded` (`r1_s12_04` MCP test passes) | `apps/lumencraft-cli/src/cmd_run_batch.rs:112` -> `cmd_convert.rs:367-430` (`export_from_document`) has no `run_guarded`/`catch_unwind` boundary (still panics exit 101) |
+| [R1-S04-05](findings/S04.md) | S2 | `592e396` | `crates/transform/src/import.rs:456-462, 600-626` (`ensure_sheet_columns`) grows columns when `mode == PlacementMode::AppendColumns` (`r1_s04_05` passes) | `import.rs:457, 471, 166` and `crates/engine/src/dag.rs:295-305` (`make_refresh_spec` turns `AppendColumns` into `Overwrite`): `Overwrite`/`InsertRows`/`AppendRows` wide pastes still drop out-of-range columns and misreport `cols_placed` |
+| [R1-S07-09](findings/S07.md) | S2 | `2a57609` | `crates/engine/src/cmd/sheet.rs:498-502` (`run_sheet_rename` calls `validate_title`; `r1_s07_09b` passes) | `crates/engine/src/cmd/table.rs:1186-1211, 1740-1777` (`set_group_title`/`set_ds_title`), `graph.rs:848-850, 880-882, 1158-1160`, `layout.rs:333-335` still store >4096 B titles rejected on save |
+| [R1-S02-13](findings/S02.md) | S3 | `916897a` | `crates/stats/src/survival.rs:1251-1336` (`build_cox_design_subjects`) dummy-encodes `VariableRole::Categorical` honoring `reference_levels` | `crates/stats/src/anova.rs:1746-1879` (`complete_paired_rows` in `crates/doc/src/archetypes.rs:357-377`), Friedman, and Cox (`survival.rs:1134, 1190-1201, 1297-1333`) still drop incomplete rows silently without dropped-count checklist/footnotes (and default `Continuous` text columns fail with `InsufficientSampleSize`) |
+| [R1-S10-03](findings/S10.md) | S3 | `8c42638` | `crates/ui-egui/src/compositor.rs:1351-1357, 1388-1391` (`clamp_to_u32` in `draw_layout_summary_badges` fixes layout badge overflow; `r1_s10_03` passes) | `crates/ui-egui/src/control_io.rs:310-350, 465-498` (`serve_control_stream_with_quit` / `dispatch_request`) still has no `catch_unwind`/`run_guarded` boundary (`r1_s10_01` still unwinds out of server) |
+| [R1-S10-07](findings/S10.md) | S3 | `8c42638` | `UiApp::set_locale` (`crates/ui-egui/src/lib.rs:151`) now syncs `self.grid.decimal_separator` (`grid_view.rs:1428`) | `compositor.rs:1423` formats via `app.grid.tool.format_visible_window(ds)` (`grid.tool.decimal_separator` stays `'.'`), and `ImportReshapeState::default` / `ImportPasteWizardState::default` (`grid_view.rs:673, 969`) stay `'.'` (`r1_s10_07` fails) |
+| [R1-S11-07](findings/S11.md) | S3 | `3cd144d` | `load_shortcut_preferences` / `save_shortcut_preferences` (`apps/lumencraft/src/main.rs:260-262, 306-308, 459-490`) persist and reload `PreferencesFile.shortcuts` | `PreferencesFile.locale` and `.theme` (`crates/format/src/versioned.rs:66-69`) are never written, checked in `should_persist_preferences` (`main.rs:319-326`), or restored on relaunch |
+| [R1-S11-08](findings/S11.md) | S3 | `7b5bafa` | `crates/ui-egui/src/os_integration.rs:987-1027` routes pasteboard/print subprocesses via `ProcessCommand` (`crates/platform/src/process.rs:187-248`: 30s wall / 10s idle timeout + child kill) | `ProcessCommand::spawn_child` (`crates/platform/src/process.rs:221`) still attaches `Stdio::piped()` stdout/stderr, so forked `wl-copy`/`xclip` (`os_integration.rs:497-522, 1045-1050, 1068-1073`; now live-reachable from `desktop_host.rs:1485`, `control_io.rs:1159`) still stall 10s idle timeout and error |
+| [R1-S12-09](findings/S12.md) | S3 | `461ad33` | `lumencraft-cli mcp [--control-port <port>] [--gui-only]` (`apps/lumencraft-cli/src/main.rs:38, 154-199`) + `handle_doc_inspect` (no `sheet_id`, `tools.rs:745-757`) enable live attach | Headless `command_list` (`crates/mcp/src/tools.rs:1040-1055`) still lists all `UI_COMMANDS`; in live-attach mode `doc_inspect {sheet_id}` (`:759-767`) and `open_file`/`save_file`/`render_preview`/`export` (`crates/mcp/src/formats.rs:245-402`) ignore `control_port()` and hit empty local `state.session` |
+| [R1-X1-04](findings/X1.md) | S3 | `7b5bafa` + `3cd144d` | `WorkdirGuard` (`crates/platform/src/path_guard.rs`) + `McpServerState::with_workdir`/`set_workdir` (`crates/mcp/src/tools.rs:145, 190, 1175`) + `formats.rs:47-100` + `docs/mcp.md:22` | `lumencraft-cli mcp` (`apps/lumencraft-cli/src/main.rs:38, 154-199`) exposes no `--workdir` flag so shipped MCP runs unsandboxed; engine `project.recalculate` still reads `ExternalDelimitedFile.path` without path policy (`cmd/project.rs:106-124`) |
+| [R1-S11-13](findings/S11.md) | S4 | `461ad33` / `9db2f2b` | `--new-instance` is now wired (`apps/lumencraft/src/main.rs:124-126, 212-238`) | Malformed `LUMENCRAFT_CONTROL_PORT` still aborts uncontrolled launches (`main.rs:170-174`; `r1_s11_13` fails), and `:160-162` still rejects unknown `-` flags and `-`-prefixed filenames without `--` |
+| [R1-S12-10](findings/S12.md) | S4 | `3cd144d` | `export` CLI subcommand added (`apps/lumencraft-cli/src/main.rs:32-33, 80`) | `docs/scripting-and-automation.md:20, 34-43, 49` still cites unimplemented `import`/`analyze`/`verify` subcommands, unread `inputs[].mode` (`cmd_run_batch.rs:270-281`), `exports[].kind` (`format` at `:322-326`), and `CliError::PathOutsideWorkdir` (`PathEscape` at `error.rs:36`) |
+
+#### 2 `LIVE_ON_MAIN` findings with partial pre-existing `main` mitigations
+
+| ID | Agreed Sev | Commit(s) | Partial mitigation on `fda1cc0` | Why still classified `LIVE_ON_MAIN` |
+|---|---|---|---|---|
+| [R1-S11-01](findings/S11.md) | S1 | `461ad33`, `9db2f2b` | Interactive `--new-instance` window sessions attach `recovery_journal` via `DesktopWindowSession::execute_and_journal` / `record_ui_mutation_checkpoint` (`apps/lumencraft/src/desktop_host.rs:654-708`, `apps/lumencraft/src/gui_window.rs:298, 321, 906`). | Default single-instance launch (`apps/lumencraft/src/main.rs:212-216, 239-243, 263, 309`) sets `recovery_root = None`, passes `attach_recovery = false`, and drops `single_instance_journal` unused until clean exit; `--control <port>` (`main.rs:301`) runs `run_control_tcp_server` directly bypassing `execute_and_journal` even under `--new-instance`. |
+| [R1-S06-01](findings/S06.md) | S1 | `e7c4d6b` | `crates/format/src/pzfx.rs:128-146` tracks cumulative `total_cells` against `MAX_IMPORT_CELLS` across multiple `<Table>` elements within one `.pzfx`. | `crates/format/src/prism.rs:127-156, 220-238` (`import_prism_bytes_with_limits`, `merge_embedded_pzfx`) and `csv.rs:871-881` still enforce cell limits per CSV/`.pzfx` entry with no project-wide cap (`11` CSV entries totaling `10,450,000` cells > `MAX_IMPORT_CELLS` succeeded). |
 
 ## Coverage log
 
@@ -76,7 +136,7 @@ What each review actually read, so a later session can see what was and was not 
 - **Rate-limit interruption (2026-11-14).** Reviewers for S07, S08, S09 and S11 were interrupted with no output and rerun from scratch; S03's reviewer was interrupted after writing a complete findings file, which was kept.
 - **Unrelated edits in the main checkout.** While this audit ran, another session left uncommitted feature edits (`QOL-5`, `QOL-8`, CLI, engine) in the main checkout's working tree on this branch. Audit commits stage only `docs/audit/`; reviewers read code only from the base worktree.
 
-- **`main` moved past the base during the audit.** After `a993740`, ten commits landed on `main` (`7b5bafa`..`47704e8`, 214 files, including "stats/fit remediation" and "Koopman/pharma parity"). The audit stays at `ebcc622`. Verdict lines reading "Still present on main: yes (main == base)" were true when written; re-check each finding against current `main` before fixing it, since some may already be fixed or moved. Audit bookkeeping moved to its own worktree on branch `audit/r1-local-2` so it no longer shares the main checkout.
+- **`main` moved past the base during the audit (Stage 1 re-check complete at `fda1cc0`).** Commits `7b5bafa`..`fda1cc0` landed after the `ebcc622` review baseline. Stage 1 re-checked all 157 findings against `fda1cc0` (`#8`–`#13`): `0 FIXED_ON_MAIN`, `13 PARTIAL_ON_MAIN`, and `144 LIVE_ON_MAIN`; every finding file and [Known defects](../gaps.md#round-1-audit-survivors-on-main-fda1cc0) now record exact `fda1cc0` status and line locations.
 
 - **R1-S10-02 severity (coordinator).** Kept at S1. The verifier left S2 open on the assumption that browsers block the vector, but they do not: a cross-origin `POST` with `Content-Type: text/plain` is a CORS "simple request", sent without a preflight. The page cannot read the response, but the command still runs. The verifier showed that the byte stream such a request produces executes its JSON body line over loopback TCP. Not demonstrated: driving a real browser.
 
@@ -86,161 +146,161 @@ What each review actually read, so a later session can see what was and was not 
 
 Candidates for [Known defects](../gaps.md#known-defects), most severe first, generated from the verdicts in `findings/`. "Basis" is `test` when the verifier cites a failing test and `trace` when it traced the code; trace-only S1 verdicts deserve a second look before fixing.
 
-| ID | Severity (agreed) | Title | Verdict | Basis | Slice |
-|---|---|---|---|---|---|
-| [R1-S01-01](findings/S01.md) | S1 | Noncentral *t* large-δ branch uses `E[U]·df/2` as the mean, so CDF/SF and Cohen's *d* CIs are wrong for \|δ\| > 447 | CONFIRMED | test | `S01` |
-| [R1-S02-01](findings/S02.md) | S1 | Contingency counts near `u64` range hang the 2×2 path and panic the R×C path | CONFIRMED | test | `S02` |
-| [R1-S02-02](findings/S02.md) | S1 | "Fisher's exact", "McNemar's" and "Cochran–Armitage" rows silently show the Pearson chi-square P | CONFIRMED | trace | `S02` |
-| [R1-S02-03](findings/S02.md) | S1 | ROC: perfectly separated groups report P = 1 and a zero-width CI for AUC = 1 | CONFIRMED | test | `S02` |
-| [R1-S02-04](findings/S02.md) | S1 | Dunn's test after Kruskal–Wallis, and "Dunn" after ordinary ANOVA, report unadjusted P as "Adjusted P" | CONFIRMED | test | `S02` |
-| [R1-S02-05](findings/S02.md) | S1 | Cox PH: a singular information matrix ships SE = 1000, or SE = 1 from an identity fallback, and non-convergence is never reported | CONFIRMED | test | `S02` |
-| [R1-S02-06](findings/S02.md) | S1 | One-tailed Mann–Whitney and Wilcoxon P-values ignore the direction of the effect and contradict the one-tailed *t* tests | CONFIRMED | test | `S02` |
-| [R1-S03-01](findings/S03.md) | S1 | Poisson and robust fits report profile CIs exactly half the Wald width (profile computed on the wrong objective) | CONFIRMED | test | `S03` |
-| [R1-S03-02](findings/S03.md) | S1 | Profile-likelihood bound falls back to the bracket midpoint when Brent fails | CONFIRMED | test | `S03` |
-| [R1-S03-03](findings/S03.md) | S1 | ROUT in the independent-curves (96-curve batch) path pools the residual scale across curves | CONFIRMED | test | `S03` |
-| [R1-S04-03](findings/S04.md) | S1 | Import placement grows tables without a row cap before validating | CONFIRMED | test | `S04` |
-| [R1-S05-01](findings/S05.md) | S1 | Ragged tables pass load validation; `row_count()` reads only the first column and consumers index the others → panic | CONFIRMED | test | `S05` |
-| [R1-S05-02](findings/S05.md) | S1 | `transpose_cell_grid` turns a ragged grid into a dense `max_cols × rows` grid with no cap, so a ~200 KB CSV can abort the app | CONFIRMED | test | `S05` |
-| [R1-S05-03](findings/S05.md) | S1 | `XColumnMode::Numbers { subcolumn_mode: RawReplicates(n) }` is not bounded after load, so saving loops `n` times | CONFIRMED | test | `S05` |
-| [R1-S06-01](findings/S06.md) | S1 | `.prism` import has no project-wide cell budget: a 6 KB file allocates 1.5 GiB and scales to hundreds of GiB | CONFIRMED | trace | `S06` |
-| [R1-S07-01](findings/S07.md) | S1 | Link refresh in `cmd_data` rewrites Append-mode links at the original anchor, overwriting the user's own rows | CONFIRMED | test | `S07` |
-| [R1-S07-05](findings/S07.md) | S1 | `sheet.createData` has no total cell budget: a 100-byte request can ask for 5×10¹¹ cells and abort the process | CONFIRMED | trace | `S07` |
-| [R1-S07-08](findings/S07.md) | S1 | Deleting a table's Info sheet silently rebinds its calculated variables to another table's Info constants | CONFIRMED | test | `S07` |
-| [R1-S07-10](findings/S07.md) | S1 | `sheet.duplicateFamily` / `sheet.clonePipeline` on a graph whose source chain loops never returns (release: 100 % CPU hang) | CONFIRMED | test | `S07` |
-| [R1-S08-01](findings/S08.md) | S1 | Log-axis tick generator overflows and allocates without bound when a data value is near `f64::MAX` or the smallest subnormal | CONFIRMED | test | `S08` |
-| [R1-S08-02](findings/S08.md) | S1 | Y-axis title placement panics in `f64::clamp` on canvases narrower than about 40 pt | CONFIRMED | test | `S08` |
-| [R1-S09-01](findings/S09.md) | S1 | Raster dashing has no length budget: one long dashed annotation line allocates without bound and aborts the app | CONFIRMED | test | `S09` |
-| [R1-S10-01](findings/S10.md) | S1 | `ui.screenshot` with a small viewport and any open dialog panics in `Ord::clamp` and kills the control server | CONFIRMED | test | `S10` |
-| [R1-S10-02](findings/S10.md) | S1 | The control socket accepts unauthenticated requests from any local process and from browser HTTP POSTs, and several of them write to arbitrary host paths | CONFIRMED | test | `S10` |
-| [R1-S11-01](findings/S11.md) | S1 | The desktop app opens a crash-recovery journal but never records a command, so a crash loses all work since launch | CONFIRMED | test | `S11` |
-| [R1-S12-01](findings/S12.md) | S1 | `--workdir` sandbox is bypassed by external-link paths stored inside a project or template | CONFIRMED | test | `S12` |
-| [R1-S12-02](findings/S12.md) | S1 | JSON project input skips `validate_project_document`; a 0.8 KB file panics `convert` | CONFIRMED | test | `S12` |
-| [R1-S12-03](findings/S12.md) | S1 | MCP `save_file` without `path` overwrites the previously opened file after a command replaced the document | CONFIRMED | test | `S12` |
-| [R1-S12-04](findings/S12.md) | S1 | MCP `render_preview` and `export` compile and render outside the engine panic guard; one bad graph ends the server and loses the session | CONFIRMED | test | `S12` |
-| [R1-X1-01](findings/X1.md) | S1 | Layout `LiveGraph` items have no count limit and each one compiles and keeps its own graph scene: a 44 KB project needs about 10 GB to show or export its layout | CONFIRMED | test | `X1` |
-| [R1-X2-01](findings/X2.md) | S1 | A result that fails to recompute keeps its old numbers, and hooks, chained analyses and graph overlays keep using them as current | CONFIRMED | test | `X2` |
-| [R1-X2-02](findings/X2.md) | S1 | Linear and nonlinear regression on Mean/SD/N (or Mean/SEM/N, Mean/%CV/N) data ignore N and the within-point scatter | CONFIRMED | test | `X2` |
-| [R1-S01-02](findings/S01.md) | S2 | Noncentral F and χ² cap the Poisson mode at 500 000, so λ > 1e6 gives CDF = SF = 0 and a truncated upper CI limit | CONFIRMED | test | `S01` |
-| [R1-S01-03](findings/S01.md) | S2 | `sym_eigen` declares convergence against an absolute threshold floored at 1.0, so small-scale matrices stop after one Jacobi sweep | CONFIRMED | test | `S01` |
-| [R1-S02-07](findings/S02.md) | S2 | Zero residual variance gives F = 0, P = 1 in RM ANOVA, and P = 1 for every post-hoc pair after an F test with P < 0.0001 | CONFIRMED | test | `S02` |
-| [R1-S02-08](findings/S02.md) | S2 | ANOVA on mean/SD/N data reports a made-up Brown–Forsythe "F = 0.000, P = 1.0000 — Pass" | CONFIRMED | trace | `S02` |
-| [R1-S02-09](findings/S02.md) | S2 | Cox regression treats any non-zero status as an event; Kaplan–Meier rejects the same column | CONFIRMED | trace | `S02` |
-| [R1-S02-10](findings/S02.md) | S2 | Outlier "Row Index" and per-column scalar indices count only non-blank cells, not table rows or data sets | CONFIRMED | trace | `S02` |
-| [R1-S02-11](findings/S02.md) | S2 | ROUT flags nothing when 68% or more of the values are tied | CONFIRMED | test | `S02` |
-| [R1-S03-04](findings/S03.md) | S2 | Implicit-equation solver uses absolute tolerances and a fixed search range | CONFIRMED | test | `S03` |
-| [R1-S03-05](findings/S03.md) | S2 | `hyp1f1` and `hyp2f1` return truncated partial sums as values | CONFIRMED | test | `S03` |
-| [R1-S03-06](findings/S03.md) | S2 | Robust (Cauchy) fits report SEs, CIs, bands and AICc/F comparisons that the guide says are not applicable | CONFIRMED | test | `S03` |
-| [R1-S03-07](findings/S03.md) | S2 | Batch (independent-curves) path accepts curves with fewer points than parameters and reports SE 0, R² 1, Sy.x 0 | CONFIRMED | test | `S03` |
-| [R1-S03-08](findings/S03.md) | S2 | `Y0 = expr` in a non-ODE equation is silently discarded and `Y0` becomes a fitted parameter | CONFIRMED | test | `S03` |
-| [R1-S03-09](findings/S03.md) | S2 | DSL compile cost grows quadratically with source size, with no total cap | CONFIRMED | test | `S03` |
-| [R1-S04-01](findings/S04.md) | S2 | Ragged tables panic the formula evaluator and Transpose | CONFIRMED | test | `S04` |
-| [R1-S04-02](findings/S04.md) | S2 | Long left-associative formula chains overflow the stack in the recursive evaluator | CONFIRMED | test | `S04` |
-| [R1-S04-04](findings/S04.md) | S2 | Bare built-in constants such as `e` silently resolve to default-labelled columns | CONFIRMED | test | `S04` |
-| [R1-S04-05](findings/S04.md) | S2 | Import placement never adds columns: AppendColumns and wide pastes silently drop data | CONFIRMED | test | `S04` |
-| [R1-S04-06](findings/S04.md) | S2 | `InsertRows` placement overwrites existing rows instead of inserting | CONFIRMED | test | `S04` |
-| [R1-S04-07](findings/S04.md) | S2 | Prune with averaging averages SD and N subcolumns and wipes text variables | CONFIRMED | test | `S04` |
-| [R1-S04-08](findings/S04.md) | S2 | Simulate allocates up to 512 M cells from user parameters with no total budget | CONFIRMED | test | `S04` |
-| [R1-S04-09](findings/S04.md) | S2 | XY Transpose and Select→XY projection silently keep only subcolumn 0 | CONFIRMED | test | `S04` |
-| [R1-S05-04](findings/S05.md) | S2 | `clone_structure` with `override_replicates` turns `Mean/SD/N` cells into raw replicates | CONFIRMED | test | `S05` |
-| [R1-S05-05](findings/S05.md) | S2 | A `Column` table's subcolumn mode is not checked against its kind after load; extra replicates are ignored without a message | CONFIRMED | test | `S05` |
-| [R1-S05-06](findings/S05.md) | S2 | `ordered_levels_with` is quadratic in the number of distinct levels | CONFIRMED | test | `S05` |
-| [R1-S06-02](findings/S06.md) | S2 | Checkpoint writes the snapshot before truncating the journal and records no covered sequence, so recovery replays commands already in the snapshot | CONFIRMED | test | `S06` |
-| [R1-S06-03](findings/S06.md) | S2 | One malformed interior journal line aborts all recovery, and the desktop app then refuses to start | CONFIRMED | test | `S06` |
-| [R1-S06-04](findings/S06.md) | S2 | PZFX import silently drops subcolumns beyond the resolved subcolumn mode | CONFIRMED | test | `S06` |
-| [R1-S06-05](findings/S06.md) | S2 | `.lumencraft` open parses `document.json` into a `serde_json::Value` tree first: a 61 KB archive drives 1.1 GiB of heap | CONFIRMED | trace | `S06` |
-| [R1-S07-03](findings/S07.md) | S2 | Refreshing an external file link never clears the previous block, so a shorter file leaves stale rows from the old file in the table | CONFIRMED | test | `S07` |
-| [R1-S07-04](findings/S07.md) | S2 | `graph.setSpec` accepts a spec that references the graph itself; afterwards every save fails (or every data edit fails) | CONFIRMED | test | `S07` |
-| [R1-S07-07](findings/S07.md) | S2 | Edits and exclusions inside a live-linked region report success but are reverted by the same command's link refresh | CONFIRMED | test | `S07` |
-| [R1-S07-09](findings/S07.md) | S2 | `sheet.rename` and `table.setGroupTitles` accept titles the save validator rejects, so every later save fails | CONFIRMED | test | `S07` |
-| [R1-S07-11](findings/S07.md) | S2 | `export.pdf { sheet_ids }` has no page or size cap: an 815-byte request built a 228 MB PDF in 66 s at 2.5 GB RSS | CONFIRMED | trace | `S07` |
-| [R1-S08-03](findings/S08.md) | S2 | Default replicate beeswarm is quadratic: a 16,000-value column takes 8 s per render, a 100,000-value column several minutes | CONFIRMED | test | `S08` |
-| [R1-S08-04](findings/S08.md) | S2 | XY/Column auto ranges on probit, logit and reciprocal axes exclude valid data, and the omitted points raise no warning | CONFIRMED | test | `S08` |
-| [R1-S08-05](findings/S08.md) | S2 | An explicit reversed axis range (`min > max`) is silently replaced, hiding data | CONFIRMED | test | `S08` |
-| [R1-S08-06](findings/S08.md) | S2 | Pre-summarized Mean/SD/N rows: a missing N draws ±SD for any requested metric, and a missing SD removes the mean even when no error bars are requested | CONFIRMED | test | `S08` |
-| [R1-S08-07](findings/S08.md) | S2 | A significance bracket whose group is not drawn falls back to the slot at the same position and labels the wrong pair | CONFIRMED | test | `S08` |
-| [R1-S08-08](findings/S08.md) | S2 | User major-tick intervals: ticks silently stop after 65 intervals, and tiny intervals overflow `i64` arithmetic | CONFIRMED | test | `S08` |
-| [R1-S09-02](findings/S09.md) | S2 | `parse_markup` is quadratic on unmatched `*`: a large text-box annotation hangs every render | CONFIRMED | test | `S09` |
-| [R1-S09-03](findings/S09.md) | S2 | Default (selectable-text) PDF export replaces every non-WinAnsi, non-Symbol character with `?`, even with an embedded TrueType font | CONFIRMED | test | `S09` |
-| [R1-S09-04](findings/S09.md) | S2 | SVG export writes XML-forbidden control characters from labels, producing a file no XML parser accepts, while `validate_svg_structure` passes it | CONFIRMED | test | `S09` |
-| [R1-S10-04](findings/S10.md) | S2 | One idle or slow client blocks the control server for every other client, with no timeout | CONFIRMED | test | `S10` |
-| [R1-S10-05](findings/S10.md) | S2 | `command.batch` has no step limit and responses are not bounded, so one request can run for hours and build a response of tens of GB | CONFIRMED | test | `S10` |
-| [R1-S11-02](findings/S11.md) | S2 | Any crash or startup error leaves `lumencraft.lock` behind, and the app then refuses to start for 5 minutes | CONFIRMED | test | `S11` |
-| [R1-S11-03](findings/S11.md) | S2 | The lease is never renewed: a second instance steals it after 5 minutes, and whichever instance quits last overwrites the other's recovery snapshot | CONFIRMED | trace | `S11` |
-| [R1-S11-04](findings/S11.md) | S2 | Several files on the command line: earlier projects are silently dropped, and a CSV merged into a project is reported as unmodified | CONFIRMED | trace | `S11` |
-| [R1-S11-05](findings/S11.md) | S2 | An unreadable or rejected `shortcuts.json` / `preferences.json` stops the app from starting, including a valid swapped-shortcut file | CONFIRMED | test | `S11` |
-| [R1-S11-06](findings/S11.md) | S2 | `LUMENCRAFT_NO_PREFS` and `LUMENCRAFT_CONFIG_DIR` are documented but never read, so "isolated" automation runs share the user's real recovery directory | CONFIRMED | trace | `S11` |
-| [R1-S12-05](findings/S12.md) | S2 | MCP `open_file {append: true}` reports the session clean and drops its undo history | CONFIRMED | test | `S12` |
-| [R1-S12-06](findings/S12.md) | S2 | An over-limit `Content-Length` frame ends the MCP server instead of being skipped, losing the session | CONFIRMED | test | `S12` |
-| [R1-S13-01](findings/S13.md) | S2 | `repo_files` silently drops every path that `git ls-files` quotes, so `assets`, `brands` and `cleanroom` never scan non-ASCII file names | CONFIRMED | trace | `S13` |
-| [R1-S13-02](findings/S13.md) | S2 | `cleanroom` misses the standard vendor copyright-notice forms and cannot see inside UTF-16 or compressed project files | CONFIRMED | trace | `S13` |
-| [R1-X1-02](findings/X1.md) | S2 | CSV import tokenizes the whole input into `Vec<Vec<String>>` before any column or cell limit, about 27 bytes of heap per input byte | CONFIRMED | test | `X1` |
-| [R1-X1-03](findings/X1.md) | S2 | No file read checks size or file type first: every limit applies after the whole file is in memory, a FIFO blocks forever, and a link to `/dev/zero` reads until the process aborts | CONFIRMED | test | `X1` |
-| [R1-X2-03](findings/X2.md) | S2 | Excluding an X value (or every Y in a row) turns that row into an "unknown" to interpolate | CONFIRMED | test | `X2` |
-| [R1-X2-04](findings/X2.md) | S2 | Paste and live CSV links split quoted fields and keep quoted numbers as text, while CSV import of the same text does not | CONFIRMED | test | `X2` |
-| [R1-X2-05](findings/X2.md) | S2 | Two-way/three-way ANOVA on Grouped tables, nested ANOVA and contingency analyses ignore "data sets to analyze" | CONFIRMED | test | `X2` |
-| [R1-X2-06](findings/X2.md) | S2 | A regression overlay on a data set the fit did not analyse draws another data set's curve | CONFIRMED | test | `X2` |
-| [R1-X2-07](findings/X2.md) | S2 | Heatmaps draw missing and excluded cells as the value 0, which also stretches the colour scale and drives the row clustering | CONFIRMED | test | `X2` |
-| [R1-S01-04](findings/S01.md) | S3 | `cholesky` detects singularity only by `pivot <= 0`, so exactly collinear Gram matrices factor and invert to ~1e14 | CONFIRMED | test | `S01` |
-| [R1-S01-05](findings/S01.md) | S3 | Inverse incomplete gamma/beta solvers return the bracket midpoint as `Ok` after the iteration budget | CONFIRMED | test | `S01` |
-| [R1-S01-06](findings/S01.md) | S3 | `reg_beta_inv_pair` derives the second component as `1 − x`, losing all precision when the quantile is near 1 | CONFIRMED | test | `S01` |
-| [R1-S01-07](findings/S01.md) | S3 | `ColorRamp::Custom` copies and sorts every stop on every sample, and the stop count is unbounded | CONFIRMED | test | `S01` |
-| [R1-S02-12](findings/S02.md) | S3 | Mann–Whitney does not match its documented exactness: ties always use the normal approximation, and large-sample "Hodges–Lehmann" is a difference of medians | CONFIRMED | trace | `S02` |
-| [R1-S02-13](findings/S02.md) | S3 | RM one-way ANOVA, Friedman and Cox drop incomplete rows without saying so, and Cox ignores `reference_levels` | CONFIRMED | trace | `S02` |
-| [R1-S03-10](findings/S03.md) | S3 | ODE models re-integrate from `t0` per point with a per-evaluation step ceiling and no overall budget | CONFIRMED | test | `S03` |
-| [R1-S03-11](findings/S03.md) | S3 | References to non-existent predictors (`X2`, `X3`, …) silently evaluate to 0 | CONFIRMED | test | `S03` |
-| [R1-S03-12](findings/S03.md) | S3 | Interpolated unknowns extrapolate up to 50 % of the X span without a flag; documented out-of-range flags do not exist | CONFIRMED | test | `S03` |
-| [R1-S04-10](findings/S04.md) | S3 | Curve calculus pairs each data set's compacted series with data set A's X values | CONFIRMED | test | `S04` |
-| [R1-S04-11](findings/S04.md) | S3 | Remove Baseline blanks cells for missing or zero baselines without a warning | CONFIRMED | test | `S04` |
-| [R1-S04-12](findings/S04.md) | S3 | The simulation seed in the summary tab loses precision above 2^53 | CONFIRMED | test | `S04` |
-| [R1-S04-13](findings/S04.md) | S3 | A non-ASCII, non-alphanumeric character produces a "token limit" parse error | CONFIRMED | test | `S04` |
-| [R1-S05-07](findings/S05.md) | S3 | `SummarizedPoint::reconstruct` returns `Ok` for impossible moments | CONFIRMED | test | `S05` |
-| [R1-S06-06](findings/S06.md) | S3 | Save validates finiteness only for cells, constants and results; a non-finite `f64` elsewhere writes a file that cannot be reopened | CONFIRMED | test | `S06` |
-| [R1-S06-08](findings/S06.md) | S3 | An unparsable `lumencraft.lock` is a permanent acquire error rather than a stale lease | CONFIRMED | trace | `S06` |
-| [R1-S06-09](findings/S06.md) | S3 | `MemoryJournalBackend` writes web-storage JSON it later refuses to read back | CONFIRMED | trace | `S06` |
-| [R1-S06-10](findings/S06.md) | S3 | One overlong PZFX row title rejects the whole import, while other titles are truncated with a warning | CONFIRMED | test | `S06` |
-| [R1-S06-11](findings/S06.md) | S3 | XML node cap counts elements only; text nodes and attributes give about 10× memory amplification | CONFIRMED | trace | `S06` |
-| [R1-S06-12](findings/S06.md) | S3 | `PlacementMode::InsertRows` overwrites the rows at the anchor instead of inserting | CONFIRMED | trace | `S06` |
-| [R1-S06-13](findings/S06.md) | S3 | `apply_csv_import_link` header promotion maps header index to data-set index, ignoring subcolumns | CONFIRMED | trace | `S06` |
-| [R1-S07-06](findings/S07.md) | S3 | WAL replay re-executes `edit.undo`/`edit.redo` and file-reading commands by parameters, so recovery diverges from the live session or fails outright (latent) | CONFIRMED | test | `S07` |
-| [R1-S07-12](findings/S07.md) | S3 | Every data edit recomputes every analysis in the project, contrary to the documented incremental dirty-node recalculation | CONFIRMED | test | `S07` |
-| [R1-S07-13](findings/S07.md) | S3 | `sheet.select` is recorded as an undoable edit: selecting a sheet wipes the redo history, consumes undo steps and marks a clean project dirty | CONFIRMED | test | `S07` |
-| [R1-S07-14](findings/S07.md) | S3 | `table.importPzfx` / `table.importPrism` with `merge: true` fail whenever an imported sheet ID already exists, which is the default case | CONFIRMED | test | `S07` |
-| [R1-S08-09](findings/S08.md) | S3 | The guarded axis engine in `scales.rs` that the tests and parity checklist verify is not the one `compile_graph` runs | CONFIRMED | trace | `S08` |
-| [R1-S08-10](findings/S08.md) | S3 | `scales.rs` reciprocal error-bar clamp uses +1e-12 as the floor on a negative axis, producing coordinates near 1e14 pt | CONFIRMED | test | `S08` |
-| [R1-S08-11](findings/S08.md) | S3 | Dendrogram node ids from a result tab are negated without overflow checks | CONFIRMED | test | `S08` |
-| [R1-S09-05](findings/S09.md) | S3 | PDF writer measures text with its own approximate Helvetica/Symbol width table, so centred and right-aligned PDF text is misplaced | CONFIRMED | test | `S09` |
-| [R1-S09-06](findings/S09.md) | S3 | Multi-line text is broken into lines only by the raster/outline paths; selectable PDF and editable SVG put all lines on one baseline | CONFIRMED | test | `S09` |
-| [R1-S09-07](findings/S09.md) | S3 | With `BUNDLED_FONTS` empty, raster and outlined text draw every accented Latin letter as an empty box | CONFIRMED | test | `S09` |
-| [R1-S09-08](findings/S09.md) | S3 | BiDi reordering is applied only by the PDF writer; PNG/TIFF and outlined SVG draw RTL text in logical order | CONFIRMED | trace | `S09` |
-| [R1-S09-09](findings/S09.md) | S3 | cmap format 4 collection iterates every code of every segment even when nothing is kept: a 262 KB font takes 3.2 s to validate | CONFIRMED | test | `S09` |
-| [R1-S10-06](findings/S10.md) | S3 | Every atomic `command.batch` deep-clones the whole `UiApp`, including the session undo history | CONFIRMED | test | `S10` |
-| [R1-S10-07](findings/S10.md) | S3 | `ui.locale.set` reports a comma decimal separator but the grid keeps displaying and parsing with `.` | CONFIRMED | test | `S10` |
-| [R1-S10-08](findings/S10.md) | S3 | Wrong-typed `ui.*` parameters are silently ignored and trigger a different action, including resetting every custom shortcut | CONFIRMED | test | `S10` |
-| [R1-S11-07](findings/S11.md) | S3 | Shortcut and preference changes are never saved by the shipped app | CONFIRMED | test | `S11` |
-| [R1-S11-09](findings/S11.md) | S3 | With `HOME` unset, config and recovery fall back to fixed, shared paths under `/tmp` | CONFIRMED | trace | `S11` |
-| [R1-S11-10](findings/S11.md) | S3 | `GridToolState::emit_exclude_selection_intent` sends reading-order bounds that the engine reads as a 3-D box (latent over- and under-exclusion) | CONFIRMED | trace | `S11` |
-| [R1-S11-11](findings/S11.md) | S3 | Navigator drag commits by the index captured at drag start and discards the dragged sheet ID (latent stale-index reorder) | CONFIRMED | trace | `S11` |
-| [R1-S11-12](findings/S11.md) | S3 | Drag-to-place comparison brackets guess the compared groups from `x / 48 pt` (latent wrong annotation) | CONFIRMED | trace | `S11` |
-| [R1-S12-07](findings/S12.md) | S3 | MCP `export {format: "csv", tab_id}` ignores `tab_id` unless `tidy: false` is also passed | CONFIRMED | trace | `S12` |
-| [R1-S12-08](findings/S12.md) | S3 | `lumencraft-cli info` prints sheet titles raw, so an archive can send terminal escape sequences | CONFIRMED | test | `S12` |
-| [R1-S12-09](findings/S12.md) | S3 | MCP live-attach mode is unreachable, yet `command_list` advertises 17 UI commands that therefore always fail; if wired up, file tools would act on an empty local session | CONFIRMED | trace | `S12` |
-| [R1-S13-03](findings/S13.md) | S3 | `brands` skips most of a Rust file after any `#[cfg(test)]`, misses multi-line string literals, and silently skips non-UTF-8 files | CONFIRMED | trace | `S13` |
-| [R1-S13-05](findings/S13.md) | S3 | `assets` accepts any backticked mention without checking the licence, and its extension list misses cursor, font-collection and palette files | CONFIRMED | trace | `S13` |
-| [R1-S13-06](findings/S13.md) | S3 | `layers` matches UI crates by exact name on direct dependencies only, and lets path dependencies and exempt apps bypass its checks | CONFIRMED | trace | `S13` |
-| [R1-S13-07](findings/S13.md) | S3 | `cursors` never fails and checks only one direction, contrary to `AGENTS.md` and `docs/development.md` | CONFIRMED | trace | `S13` |
-| [R1-S13-08](findings/S13.md) | S3 | NIST ANOVA parser allocates `df_between + 1` bools taken from the file header, so a 247-byte `.dat` aborts or panics `cargo xtask corpus` | CONFIRMED | test | `S13` |
-| [R1-S13-09](findings/S13.md) | S3 | `corpus --fetch` overwrites the cached files before checking the pinned hashes, and records a manifest built from whatever was downloaded | CONFIRMED | trace | `S13` |
-| [R1-S13-10](findings/S13.md) | S3 | `i18n-report` (in `ci`) is a substring test filter; if it matches no test, the gate passes with 0 tests run | CONFIRMED | test | `S13` |
-| [R1-X1-04](findings/X1.md) | S3 | The `--workdir` path guard exists only for CLI `run`/`batch`; MCP reads, writes and creates directories at any path through the same engine commands, and `docs/mcp.md` says nothing about it | CONFIRMED | trace | `X1` |
-| [R1-X2-08](findings/X2.md) | S3 | Text in a numeric data column is dropped from every analysis without being counted as missing or excluded | CONFIRMED | test | `X2` |
-| [R1-X2-09](findings/X2.md) | S3 | One non-finite number in any result sheet makes the whole project unsavable; Bland–Altman can produce one from finite data | CONFIRMED | test | `X2` |
-| [R1-S06-07](findings/S06.md) | S3 | Stale-lock eviction is unlink-then-create: two concurrent recoverers can both acquire the lease | PLAUSIBLE | trace | `S06` |
-| [R1-S06-14](findings/S06.md) | S3 | Journal replay is unbounded in size and record count | PLAUSIBLE | trace | `S06` |
-| [R1-S10-03](findings/S10.md) | S3 | Control requests outside `Session::execute` run with no panic boundary; one concrete overflow in the layout badge compositor | PLAUSIBLE | test | `S10` |
-| [R1-S11-08](findings/S11.md) | S3 | OS clipboard adapter waits for EOF on `xclip`/`wl-copy` stdout, which the backgrounded clipboard owner keeps open (latent hang) | PLAUSIBLE | trace | `S11` |
-| [R1-S01-08](findings/S01.md) | S4 | `gamma(-inf)` returns `Ok(NaN)` despite the documented error contract | CONFIRMED | test | `S01` |
-| [R1-S09-10](findings/S09.md) | S4 | Compound-glyph decoding has a depth cap but no total budget: 64 components per level × 8 levels is exponential (latent, bundled fonts only) | CONFIRMED | trace | `S09` |
-| [R1-S10-09](findings/S10.md) | S4 | Control-protocol docs and `UI_COMMANDS` parameter docs disagree with what the handlers accept and do | CONFIRMED | test | `S10` |
-| [R1-S11-13](findings/S11.md) | S4 | Startup environment and flags: a malformed `LUMENCRAFT_CONTROL_PORT` aborts a launch that never asked for control; `--new-instance` and paths beginning with `-` are not handled | CONFIRMED | test | `S11` |
-| [R1-S12-10](findings/S12.md) | S4 | Batch manifest schema in the scripting guide disagrees with the parser | CONFIRMED | trace | `S12` |
-| [R1-S13-04](findings/S13.md) | S4 | `brands` does not include the target product's own name, and does not cover user-facing files outside its narrow path list; such mentions ship today without `brand-ok` | PLAUSIBLE | trace | `S13` |
+| ID | Severity (agreed) | Title | Verdict | Basis | Slice | Stage 1 (`fda1cc0`) |
+|---|---|---|---|---|---|---|
+| [R1-S01-01](findings/S01.md) | S1 | Noncentral *t* large-δ branch uses `E[U]·df/2` as the mean, so CDF/SF and Cohen's *d* CIs are wrong for \|δ\| > 447 | CONFIRMED | test | `S01` | `LIVE_ON_MAIN` |
+| [R1-S02-01](findings/S02.md) | S1 | Contingency counts near `u64` range hang the 2×2 path and panic the R×C path | CONFIRMED | test | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-02](findings/S02.md) | S1 | "Fisher's exact", "McNemar's" and "Cochran–Armitage" rows silently show the Pearson chi-square P | CONFIRMED | trace | `S02` | `PARTIAL_ON_MAIN` (`916897a`) |
+| [R1-S02-03](findings/S02.md) | S1 | ROC: perfectly separated groups report P = 1 and a zero-width CI for AUC = 1 | CONFIRMED | test | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-04](findings/S02.md) | S1 | Dunn's test after Kruskal–Wallis, and "Dunn" after ordinary ANOVA, report unadjusted P as "Adjusted P" | CONFIRMED | test | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-05](findings/S02.md) | S1 | Cox PH: a singular information matrix ships SE = 1000, or SE = 1 from an identity fallback, and non-convergence is never reported | CONFIRMED | test | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-06](findings/S02.md) | S1 | One-tailed Mann–Whitney and Wilcoxon P-values ignore the direction of the effect and contradict the one-tailed *t* tests | CONFIRMED | test | `S02` | `LIVE_ON_MAIN` |
+| [R1-S03-01](findings/S03.md) | S1 | Poisson and robust fits report profile CIs exactly half the Wald width (profile computed on the wrong objective) | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-02](findings/S03.md) | S1 | Profile-likelihood bound falls back to the bracket midpoint when Brent fails | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-03](findings/S03.md) | S1 | ROUT in the independent-curves (96-curve batch) path pools the residual scale across curves | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S04-03](findings/S04.md) | S1 | Import placement grows tables without a row cap before validating | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S05-01](findings/S05.md) | S1 | Ragged tables pass load validation; `row_count()` reads only the first column and consumers index the others → panic | CONFIRMED | test | `S05` | `LIVE_ON_MAIN` (twin `R1-S04-01`) |
+| [R1-S05-02](findings/S05.md) | S1 | `transpose_cell_grid` turns a ragged grid into a dense `max_cols × rows` grid with no cap, so a ~200 KB CSV can abort the app | CONFIRMED | test | `S05` | `LIVE_ON_MAIN` |
+| [R1-S05-03](findings/S05.md) | S1 | `XColumnMode::Numbers { subcolumn_mode: RawReplicates(n) }` is not bounded after load, so saving loops `n` times | CONFIRMED | test | `S05` | `LIVE_ON_MAIN` |
+| [R1-S06-01](findings/S06.md) | S1 | `.prism` import has no project-wide cell budget: a 6 KB file allocates 1.5 GiB and scales to hundreds of GiB | CONFIRMED | trace | `S06` | `LIVE_ON_MAIN` (partial `pzfx.rs` cap in `e7c4d6b`) |
+| [R1-S07-01](findings/S07.md) | S1 | Link refresh in `cmd_data` rewrites Append-mode links at the original anchor, overwriting the user's own rows | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-05](findings/S07.md) | S1 | `sheet.createData` has no total cell budget: a 100-byte request can ask for 5×10¹¹ cells and abort the process | CONFIRMED | trace | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-08](findings/S07.md) | S1 | Deleting a table's Info sheet silently rebinds its calculated variables to another table's Info constants | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-10](findings/S07.md) | S1 | `sheet.duplicateFamily` / `sheet.clonePipeline` on a graph whose source chain loops never returns (release: 100 % CPU hang) | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S08-01](findings/S08.md) | S1 | Log-axis tick generator overflows and allocates without bound when a data value is near `f64::MAX` or the smallest subnormal | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S08-02](findings/S08.md) | S1 | Y-axis title placement panics in `f64::clamp` on canvases narrower than about 40 pt | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S09-01](findings/S09.md) | S1 | Raster dashing has no length budget: one long dashed annotation line allocates without bound and aborts the app | CONFIRMED | test | `S09` | `LIVE_ON_MAIN` |
+| [R1-S10-01](findings/S10.md) | S1 | `ui.screenshot` with a small viewport and any open dialog panics in `Ord::clamp` and kills the control server | CONFIRMED | test | `S10` | `LIVE_ON_MAIN` |
+| [R1-S10-02](findings/S10.md) | S1 | The control socket accepts unauthenticated requests from any local process and from browser HTTP POSTs, and several of them write to arbitrary host paths | CONFIRMED | test | `S10` | `LIVE_ON_MAIN` |
+| [R1-S11-01](findings/S11.md) | S1 | The desktop app opens a crash-recovery journal but never records a command, so a crash loses all work since launch | CONFIRMED | test | `S11` | `LIVE_ON_MAIN` (partial `--new-instance` UI in `461ad33`/`9db2f2b`) |
+| [R1-S12-01](findings/S12.md) | S1 | `--workdir` sandbox is bypassed by external-link paths stored inside a project or template | CONFIRMED | test | `S12` | `LIVE_ON_MAIN` (merges `R1-S07-02`) |
+| [R1-S12-02](findings/S12.md) | S1 | JSON project input skips `validate_project_document`; a 0.8 KB file panics `convert` | CONFIRMED | test | `S12` | `LIVE_ON_MAIN` |
+| [R1-S12-03](findings/S12.md) | S1 | MCP `save_file` without `path` overwrites the previously opened file after a command replaced the document | CONFIRMED | test | `S12` | `LIVE_ON_MAIN` |
+| [R1-S12-04](findings/S12.md) | S1 | MCP `render_preview` and `export` compile and render outside the engine panic guard; one bad graph ends the server and loses the session | CONFIRMED | test | `S12` | `PARTIAL_ON_MAIN` (`3cd144d`) |
+| [R1-X1-01](findings/X1.md) | S1 | Layout `LiveGraph` items have no count limit and each one compiles and keeps its own graph scene: a 44 KB project needs about 10 GB to show or export its layout | CONFIRMED | test | `X1` | `LIVE_ON_MAIN` |
+| [R1-X2-01](findings/X2.md) | S1 | A result that fails to recompute keeps its old numbers, and hooks, chained analyses and graph overlays keep using them as current | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-X2-02](findings/X2.md) | S1 | Linear and nonlinear regression on Mean/SD/N (or Mean/SEM/N, Mean/%CV/N) data ignore N and the within-point scatter | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-S01-02](findings/S01.md) | S2 | Noncentral F and χ² cap the Poisson mode at 500 000, so λ > 1e6 gives CDF = SF = 0 and a truncated upper CI limit | CONFIRMED | test | `S01` | `LIVE_ON_MAIN` |
+| [R1-S01-03](findings/S01.md) | S2 | `sym_eigen` declares convergence against an absolute threshold floored at 1.0, so small-scale matrices stop after one Jacobi sweep | CONFIRMED | test | `S01` | `LIVE_ON_MAIN` |
+| [R1-S02-07](findings/S02.md) | S2 | Zero residual variance gives F = 0, P = 1 in RM ANOVA, and P = 1 for every post-hoc pair after an F test with P < 0.0001 | CONFIRMED | test | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-08](findings/S02.md) | S2 | ANOVA on mean/SD/N data reports a made-up Brown–Forsythe "F = 0.000, P = 1.0000 — Pass" | CONFIRMED | trace | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-09](findings/S02.md) | S2 | Cox regression treats any non-zero status as an event; Kaplan–Meier rejects the same column | CONFIRMED | trace | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-10](findings/S02.md) | S2 | Outlier "Row Index" and per-column scalar indices count only non-blank cells, not table rows or data sets | CONFIRMED | trace | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-11](findings/S02.md) | S2 | ROUT flags nothing when 68% or more of the values are tied | CONFIRMED | test | `S02` | `LIVE_ON_MAIN` |
+| [R1-S03-04](findings/S03.md) | S2 | Implicit-equation solver uses absolute tolerances and a fixed search range | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-05](findings/S03.md) | S2 | `hyp1f1` and `hyp2f1` return truncated partial sums as values | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-06](findings/S03.md) | S2 | Robust (Cauchy) fits report SEs, CIs, bands and AICc/F comparisons that the guide says are not applicable | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-07](findings/S03.md) | S2 | Batch (independent-curves) path accepts curves with fewer points than parameters and reports SE 0, R² 1, Sy.x 0 | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-08](findings/S03.md) | S2 | `Y0 = expr` in a non-ODE equation is silently discarded and `Y0` becomes a fitted parameter | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-09](findings/S03.md) | S2 | DSL compile cost grows quadratically with source size, with no total cap | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S04-01](findings/S04.md) | S2 | Ragged tables panic the formula evaluator and Transpose | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` (twin `R1-S05-01`) |
+| [R1-S04-02](findings/S04.md) | S2 | Long left-associative formula chains overflow the stack in the recursive evaluator | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S04-04](findings/S04.md) | S2 | Bare built-in constants such as `e` silently resolve to default-labelled columns | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S04-05](findings/S04.md) | S2 | Import placement never adds columns: AppendColumns and wide pastes silently drop data | CONFIRMED | test | `S04` | `PARTIAL_ON_MAIN` (`592e396`) |
+| [R1-S04-06](findings/S04.md) | S2 | `InsertRows` placement overwrites existing rows instead of inserting | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` (twin `R1-S06-12`) |
+| [R1-S04-07](findings/S04.md) | S2 | Prune with averaging averages SD and N subcolumns and wipes text variables | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S04-08](findings/S04.md) | S2 | Simulate allocates up to 512 M cells from user parameters with no total budget | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S04-09](findings/S04.md) | S2 | XY Transpose and Select→XY projection silently keep only subcolumn 0 | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S05-04](findings/S05.md) | S2 | `clone_structure` with `override_replicates` turns `Mean/SD/N` cells into raw replicates | CONFIRMED | test | `S05` | `LIVE_ON_MAIN` |
+| [R1-S05-05](findings/S05.md) | S2 | A `Column` table's subcolumn mode is not checked against its kind after load; extra replicates are ignored without a message | CONFIRMED | test | `S05` | `LIVE_ON_MAIN` |
+| [R1-S05-06](findings/S05.md) | S2 | `ordered_levels_with` is quadratic in the number of distinct levels | CONFIRMED | test | `S05` | `LIVE_ON_MAIN` |
+| [R1-S06-02](findings/S06.md) | S2 | Checkpoint writes the snapshot before truncating the journal and records no covered sequence, so recovery replays commands already in the snapshot | CONFIRMED | test | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-03](findings/S06.md) | S2 | One malformed interior journal line aborts all recovery, and the desktop app then refuses to start | CONFIRMED | test | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-04](findings/S06.md) | S2 | PZFX import silently drops subcolumns beyond the resolved subcolumn mode | CONFIRMED | test | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-05](findings/S06.md) | S2 | `.lumencraft` open parses `document.json` into a `serde_json::Value` tree first: a 61 KB archive drives 1.1 GiB of heap | CONFIRMED | trace | `S06` | `LIVE_ON_MAIN` |
+| [R1-S07-03](findings/S07.md) | S2 | Refreshing an external file link never clears the previous block, so a shorter file leaves stale rows from the old file in the table | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-04](findings/S07.md) | S2 | `graph.setSpec` accepts a spec that references the graph itself; afterwards every save fails (or every data edit fails) | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-07](findings/S07.md) | S2 | Edits and exclusions inside a live-linked region report success but are reverted by the same command's link refresh | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-09](findings/S07.md) | S2 | `sheet.rename` and `table.setGroupTitles` accept titles the save validator rejects, so every later save fails | CONFIRMED | test | `S07` | `PARTIAL_ON_MAIN` (`2a57609`) |
+| [R1-S07-11](findings/S07.md) | S2 | `export.pdf { sheet_ids }` has no page or size cap: an 815-byte request built a 228 MB PDF in 66 s at 2.5 GB RSS | CONFIRMED | trace | `S07` | `LIVE_ON_MAIN` |
+| [R1-S08-03](findings/S08.md) | S2 | Default replicate beeswarm is quadratic: a 16,000-value column takes 8 s per render, a 100,000-value column several minutes | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S08-04](findings/S08.md) | S2 | XY/Column auto ranges on probit, logit and reciprocal axes exclude valid data, and the omitted points raise no warning | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S08-05](findings/S08.md) | S2 | An explicit reversed axis range (`min > max`) is silently replaced, hiding data | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S08-06](findings/S08.md) | S2 | Pre-summarized Mean/SD/N rows: a missing N draws ±SD for any requested metric, and a missing SD removes the mean even when no error bars are requested | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S08-07](findings/S08.md) | S2 | A significance bracket whose group is not drawn falls back to the slot at the same position and labels the wrong pair | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S08-08](findings/S08.md) | S2 | User major-tick intervals: ticks silently stop after 65 intervals, and tiny intervals overflow `i64` arithmetic | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S09-02](findings/S09.md) | S2 | `parse_markup` is quadratic on unmatched `*`: a large text-box annotation hangs every render | CONFIRMED | test | `S09` | `LIVE_ON_MAIN` |
+| [R1-S09-03](findings/S09.md) | S2 | Default (selectable-text) PDF export replaces every non-WinAnsi, non-Symbol character with `?`, even with an embedded TrueType font | CONFIRMED | test | `S09` | `LIVE_ON_MAIN` |
+| [R1-S09-04](findings/S09.md) | S2 | SVG export writes XML-forbidden control characters from labels, producing a file no XML parser accepts, while `validate_svg_structure` passes it | CONFIRMED | test | `S09` | `LIVE_ON_MAIN` |
+| [R1-S10-04](findings/S10.md) | S2 | One idle or slow client blocks the control server for every other client, with no timeout | CONFIRMED | test | `S10` | `LIVE_ON_MAIN` |
+| [R1-S10-05](findings/S10.md) | S2 | `command.batch` has no step limit and responses are not bounded, so one request can run for hours and build a response of tens of GB | CONFIRMED | test | `S10` | `LIVE_ON_MAIN` |
+| [R1-S11-02](findings/S11.md) | S2 | Any crash or startup error leaves `lumencraft.lock` behind, and the app then refuses to start for 5 minutes | CONFIRMED | test | `S11` | `LIVE_ON_MAIN` |
+| [R1-S11-03](findings/S11.md) | S2 | The lease is never renewed: a second instance steals it after 5 minutes, and whichever instance quits last overwrites the other's recovery snapshot | CONFIRMED | trace | `S11` | `LIVE_ON_MAIN` |
+| [R1-S11-04](findings/S11.md) | S2 | Several files on the command line: earlier projects are silently dropped, and a CSV merged into a project is reported as unmodified | CONFIRMED | trace | `S11` | `LIVE_ON_MAIN` |
+| [R1-S11-05](findings/S11.md) | S2 | An unreadable or rejected `shortcuts.json` / `preferences.json` stops the app from starting, including a valid swapped-shortcut file | CONFIRMED | test | `S11` | `LIVE_ON_MAIN` |
+| [R1-S11-06](findings/S11.md) | S2 | `LUMENCRAFT_NO_PREFS` and `LUMENCRAFT_CONFIG_DIR` are documented but never read, so "isolated" automation runs share the user's real recovery directory | CONFIRMED | trace | `S11` | `LIVE_ON_MAIN` |
+| [R1-S12-05](findings/S12.md) | S2 | MCP `open_file {append: true}` reports the session clean and drops its undo history | CONFIRMED | test | `S12` | `LIVE_ON_MAIN` |
+| [R1-S12-06](findings/S12.md) | S2 | An over-limit `Content-Length` frame ends the MCP server instead of being skipped, losing the session | CONFIRMED | test | `S12` | `LIVE_ON_MAIN` |
+| [R1-S13-01](findings/S13.md) | S2 | `repo_files` silently drops every path that `git ls-files` quotes, so `assets`, `brands` and `cleanroom` never scan non-ASCII file names | CONFIRMED | trace | `S13` | `LIVE_ON_MAIN` |
+| [R1-S13-02](findings/S13.md) | S2 | `cleanroom` misses the standard vendor copyright-notice forms and cannot see inside UTF-16 or compressed project files | CONFIRMED | trace | `S13` | `LIVE_ON_MAIN` |
+| [R1-X1-02](findings/X1.md) | S2 | CSV import tokenizes the whole input into `Vec<Vec<String>>` before any column or cell limit, about 27 bytes of heap per input byte | CONFIRMED | test | `X1` | `LIVE_ON_MAIN` |
+| [R1-X1-03](findings/X1.md) | S2 | No file read checks size or file type first: every limit applies after the whole file is in memory, a FIFO blocks forever, and a link to `/dev/zero` reads until the process aborts | CONFIRMED | test | `X1` | `LIVE_ON_MAIN` |
+| [R1-X2-03](findings/X2.md) | S2 | Excluding an X value (or every Y in a row) turns that row into an "unknown" to interpolate | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-X2-04](findings/X2.md) | S2 | Paste and live CSV links split quoted fields and keep quoted numbers as text, while CSV import of the same text does not | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-X2-05](findings/X2.md) | S2 | Two-way/three-way ANOVA on Grouped tables, nested ANOVA and contingency analyses ignore "data sets to analyze" | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-X2-06](findings/X2.md) | S2 | A regression overlay on a data set the fit did not analyse draws another data set's curve | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-X2-07](findings/X2.md) | S2 | Heatmaps draw missing and excluded cells as the value 0, which also stretches the colour scale and drives the row clustering | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-S01-04](findings/S01.md) | S3 | `cholesky` detects singularity only by `pivot <= 0`, so exactly collinear Gram matrices factor and invert to ~1e14 | CONFIRMED | test | `S01` | `LIVE_ON_MAIN` |
+| [R1-S01-05](findings/S01.md) | S3 | Inverse incomplete gamma/beta solvers return the bracket midpoint as `Ok` after the iteration budget | CONFIRMED | test | `S01` | `LIVE_ON_MAIN` (latent) |
+| [R1-S01-06](findings/S01.md) | S3 | `reg_beta_inv_pair` derives the second component as `1 − x`, losing all precision when the quantile is near 1 | CONFIRMED | test | `S01` | `LIVE_ON_MAIN` (latent) |
+| [R1-S01-07](findings/S01.md) | S3 | `ColorRamp::Custom` copies and sorts every stop on every sample, and the stop count is unbounded | CONFIRMED | test | `S01` | `LIVE_ON_MAIN` |
+| [R1-S02-12](findings/S02.md) | S3 | Mann–Whitney does not match its documented exactness: ties always use the normal approximation, and large-sample "Hodges–Lehmann" is a difference of medians | CONFIRMED | trace | `S02` | `LIVE_ON_MAIN` |
+| [R1-S02-13](findings/S02.md) | S3 | RM one-way ANOVA, Friedman and Cox drop incomplete rows without saying so, and Cox ignores `reference_levels` | CONFIRMED | trace | `S02` | `PARTIAL_ON_MAIN` (`916897a`) |
+| [R1-S03-10](findings/S03.md) | S3 | ODE models re-integrate from `t0` per point with a per-evaluation step ceiling and no overall budget | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-11](findings/S03.md) | S3 | References to non-existent predictors (`X2`, `X3`, …) silently evaluate to 0 | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S03-12](findings/S03.md) | S3 | Interpolated unknowns extrapolate up to 50 % of the X span without a flag; documented out-of-range flags do not exist | CONFIRMED | test | `S03` | `LIVE_ON_MAIN` |
+| [R1-S04-10](findings/S04.md) | S3 | Curve calculus pairs each data set's compacted series with data set A's X values | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S04-11](findings/S04.md) | S3 | Remove Baseline blanks cells for missing or zero baselines without a warning | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S04-12](findings/S04.md) | S3 | The simulation seed in the summary tab loses precision above 2^53 | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S04-13](findings/S04.md) | S3 | A non-ASCII, non-alphanumeric character produces a "token limit" parse error | CONFIRMED | test | `S04` | `LIVE_ON_MAIN` |
+| [R1-S05-07](findings/S05.md) | S3 | `SummarizedPoint::reconstruct` returns `Ok` for impossible moments | CONFIRMED | test | `S05` | `LIVE_ON_MAIN` |
+| [R1-S06-06](findings/S06.md) | S3 | Save validates finiteness only for cells, constants and results; a non-finite `f64` elsewhere writes a file that cannot be reopened | CONFIRMED | test | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-08](findings/S06.md) | S3 | An unparsable `lumencraft.lock` is a permanent acquire error rather than a stale lease | CONFIRMED | trace | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-09](findings/S06.md) | S3 | `MemoryJournalBackend` writes web-storage JSON it later refuses to read back | CONFIRMED | trace | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-10](findings/S06.md) | S3 | One overlong PZFX row title rejects the whole import, while other titles are truncated with a warning | CONFIRMED | test | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-11](findings/S06.md) | S3 | XML node cap counts elements only; text nodes and attributes give about 10× memory amplification | CONFIRMED | trace | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-12](findings/S06.md) | S3 | `PlacementMode::InsertRows` overwrites the rows at the anchor instead of inserting | CONFIRMED | trace | `S06` | `LIVE_ON_MAIN` (twin `R1-S04-06`) |
+| [R1-S06-13](findings/S06.md) | S3 | `apply_csv_import_link` header promotion maps header index to data-set index, ignoring subcolumns | CONFIRMED | trace | `S06` | `LIVE_ON_MAIN` |
+| [R1-S07-06](findings/S07.md) | S3 | WAL replay re-executes `edit.undo`/`edit.redo` and file-reading commands by parameters, so recovery diverges from the live session or fails outright (latent) | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-12](findings/S07.md) | S3 | Every data edit recomputes every analysis in the project, contrary to the documented incremental dirty-node recalculation | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-13](findings/S07.md) | S3 | `sheet.select` is recorded as an undoable edit: selecting a sheet wipes the redo history, consumes undo steps and marks a clean project dirty | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S07-14](findings/S07.md) | S3 | `table.importPzfx` / `table.importPrism` with `merge: true` fail whenever an imported sheet ID already exists, which is the default case | CONFIRMED | test | `S07` | `LIVE_ON_MAIN` |
+| [R1-S08-09](findings/S08.md) | S3 | The guarded axis engine in `scales.rs` that the tests and parity checklist verify is not the one `compile_graph` runs | CONFIRMED | trace | `S08` | `LIVE_ON_MAIN` |
+| [R1-S08-10](findings/S08.md) | S3 | `scales.rs` reciprocal error-bar clamp uses +1e-12 as the floor on a negative axis, producing coordinates near 1e14 pt | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S08-11](findings/S08.md) | S3 | Dendrogram node ids from a result tab are negated without overflow checks | CONFIRMED | test | `S08` | `LIVE_ON_MAIN` |
+| [R1-S09-05](findings/S09.md) | S3 | PDF writer measures text with its own approximate Helvetica/Symbol width table, so centred and right-aligned PDF text is misplaced | CONFIRMED | test | `S09` | `LIVE_ON_MAIN` |
+| [R1-S09-06](findings/S09.md) | S3 | Multi-line text is broken into lines only by the raster/outline paths; selectable PDF and editable SVG put all lines on one baseline | CONFIRMED | test | `S09` | `LIVE_ON_MAIN` |
+| [R1-S09-07](findings/S09.md) | S3 | With `BUNDLED_FONTS` empty, raster and outlined text draw every accented Latin letter as an empty box | CONFIRMED | test | `S09` | `LIVE_ON_MAIN` |
+| [R1-S09-08](findings/S09.md) | S3 | BiDi reordering is applied only by the PDF writer; PNG/TIFF and outlined SVG draw RTL text in logical order | CONFIRMED | trace | `S09` | `LIVE_ON_MAIN` |
+| [R1-S09-09](findings/S09.md) | S3 | cmap format 4 collection iterates every code of every segment even when nothing is kept: a 262 KB font takes 3.2 s to validate | CONFIRMED | test | `S09` | `LIVE_ON_MAIN` |
+| [R1-S10-06](findings/S10.md) | S3 | Every atomic `command.batch` deep-clones the whole `UiApp`, including the session undo history | CONFIRMED | test | `S10` | `LIVE_ON_MAIN` |
+| [R1-S10-07](findings/S10.md) | S3 | `ui.locale.set` reports a comma decimal separator but the grid keeps displaying and parsing with `.` | CONFIRMED | test | `S10` | `PARTIAL_ON_MAIN` (`8c42638`) |
+| [R1-S10-08](findings/S10.md) | S3 | Wrong-typed `ui.*` parameters are silently ignored and trigger a different action, including resetting every custom shortcut | CONFIRMED | test | `S10` | `LIVE_ON_MAIN` |
+| [R1-S11-07](findings/S11.md) | S3 | Shortcut and preference changes are never saved by the shipped app | CONFIRMED | test | `S11` | `PARTIAL_ON_MAIN` (`3cd144d`) |
+| [R1-S11-09](findings/S11.md) | S3 | With `HOME` unset, config and recovery fall back to fixed, shared paths under `/tmp` | CONFIRMED | trace | `S11` | `LIVE_ON_MAIN` |
+| [R1-S11-10](findings/S11.md) | S3 | `GridToolState::emit_exclude_selection_intent` sends reading-order bounds that the engine reads as a 3-D box (latent over- and under-exclusion) | CONFIRMED | trace | `S11` | `LIVE_ON_MAIN` (latent) |
+| [R1-S11-11](findings/S11.md) | S3 | Navigator drag commits by the index captured at drag start and discards the dragged sheet ID (latent stale-index reorder) | CONFIRMED | trace | `S11` | `LIVE_ON_MAIN` (**non-latent**) |
+| [R1-S11-12](findings/S11.md) | S3 | Drag-to-place comparison brackets guess the compared groups from `x / 48 pt` (latent wrong annotation) | CONFIRMED | trace | `S11` | `LIVE_ON_MAIN` (**non-latent**) |
+| [R1-S12-07](findings/S12.md) | S3 | MCP `export {format: "csv", tab_id}` ignores `tab_id` unless `tidy: false` is also passed | CONFIRMED | trace | `S12` | `LIVE_ON_MAIN` |
+| [R1-S12-08](findings/S12.md) | S3 | `lumencraft-cli info` prints sheet titles raw, so an archive can send terminal escape sequences | CONFIRMED | test | `S12` | `LIVE_ON_MAIN` |
+| [R1-S12-09](findings/S12.md) | S3 | MCP live-attach mode is unreachable, yet `command_list` advertises 17 UI commands that therefore always fail; if wired up, file tools would act on an empty local session | CONFIRMED | trace | `S12` | `PARTIAL_ON_MAIN` (`461ad33`) |
+| [R1-S13-03](findings/S13.md) | S3 | `brands` skips most of a Rust file after any `#[cfg(test)]`, misses multi-line string literals, and silently skips non-UTF-8 files | CONFIRMED | trace | `S13` | `LIVE_ON_MAIN` |
+| [R1-S13-05](findings/S13.md) | S3 | `assets` accepts any backticked mention without checking the licence, and its extension list misses cursor, font-collection and palette files | CONFIRMED | trace | `S13` | `LIVE_ON_MAIN` |
+| [R1-S13-06](findings/S13.md) | S3 | `layers` matches UI crates by exact name on direct dependencies only, and lets path dependencies and exempt apps bypass its checks | CONFIRMED | trace | `S13` | `LIVE_ON_MAIN` |
+| [R1-S13-07](findings/S13.md) | S3 | `cursors` never fails and checks only one direction, contrary to `AGENTS.md` and `docs/development.md` | CONFIRMED | trace | `S13` | `LIVE_ON_MAIN` |
+| [R1-S13-08](findings/S13.md) | S3 | NIST ANOVA parser allocates `df_between + 1` bools taken from the file header, so a 247-byte `.dat` aborts or panics `cargo xtask corpus` | CONFIRMED | test | `S13` | `LIVE_ON_MAIN` |
+| [R1-S13-09](findings/S13.md) | S3 | `corpus --fetch` overwrites the cached files before checking the pinned hashes, and records a manifest built from whatever was downloaded | CONFIRMED | trace | `S13` | `LIVE_ON_MAIN` |
+| [R1-S13-10](findings/S13.md) | S3 | `i18n-report` (in `ci`) is a substring test filter; if it matches no test, the gate passes with 0 tests run | CONFIRMED | test | `S13` | `LIVE_ON_MAIN` |
+| [R1-X1-04](findings/X1.md) | S3 | The `--workdir` path guard exists only for CLI `run`/`batch`; MCP reads, writes and creates directories at any path through the same engine commands, and `docs/mcp.md` says nothing about it | CONFIRMED | trace | `X1` | `PARTIAL_ON_MAIN` (`7b5bafa` + `3cd144d`) |
+| [R1-X2-08](findings/X2.md) | S3 | Text in a numeric data column is dropped from every analysis without being counted as missing or excluded | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-X2-09](findings/X2.md) | S3 | One non-finite number in any result sheet makes the whole project unsavable; Bland–Altman can produce one from finite data | CONFIRMED | test | `X2` | `LIVE_ON_MAIN` |
+| [R1-S06-07](findings/S06.md) | S3 | Stale-lock eviction is unlink-then-create: two concurrent recoverers can both acquire the lease | PLAUSIBLE | trace | `S06` | `LIVE_ON_MAIN` |
+| [R1-S06-14](findings/S06.md) | S3 | Journal replay is unbounded in size and record count | PLAUSIBLE | trace | `S06` | `LIVE_ON_MAIN` |
+| [R1-S10-03](findings/S10.md) | S3 | Control requests outside `Session::execute` run with no panic boundary; one concrete overflow in the layout badge compositor | PLAUSIBLE | test | `S10` | `PARTIAL_ON_MAIN` (`8c42638`) |
+| [R1-S11-08](findings/S11.md) | S3 | OS clipboard adapter waits for EOF on `xclip`/`wl-copy` stdout, which the backgrounded clipboard owner keeps open (latent hang) | PLAUSIBLE | trace | `S11` | `PARTIAL_ON_MAIN` (`7b5bafa`) |
+| [R1-S01-08](findings/S01.md) | S4 | `gamma(-inf)` returns `Ok(NaN)` despite the documented error contract | CONFIRMED | test | `S01` | `LIVE_ON_MAIN` |
+| [R1-S09-10](findings/S09.md) | S4 | Compound-glyph decoding has a depth cap but no total budget: 64 components per level × 8 levels is exponential (latent, bundled fonts only) | CONFIRMED | trace | `S09` | `LIVE_ON_MAIN` (latent) |
+| [R1-S10-09](findings/S10.md) | S4 | Control-protocol docs and `UI_COMMANDS` parameter docs disagree with what the handlers accept and do | CONFIRMED | test | `S10` | `LIVE_ON_MAIN` |
+| [R1-S11-13](findings/S11.md) | S4 | Startup environment and flags: a malformed `LUMENCRAFT_CONTROL_PORT` aborts a launch that never asked for control; `--new-instance` and paths beginning with `-` are not handled | CONFIRMED | test | `S11` | `PARTIAL_ON_MAIN` (`461ad33` / `9db2f2b`) |
+| [R1-S12-10](findings/S12.md) | S4 | Batch manifest schema in the scripting guide disagrees with the parser | CONFIRMED | trace | `S12` | `PARTIAL_ON_MAIN` (`3cd144d`) |
+| [R1-S13-04](findings/S13.md) | S4 | `brands` does not include the target product's own name, and does not cover user-facing files outside its narrow path list; such mentions ship today without `brand-ok` | PLAUSIBLE | trace | `S13` | `LIVE_ON_MAIN` |
