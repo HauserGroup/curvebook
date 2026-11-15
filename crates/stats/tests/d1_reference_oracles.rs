@@ -57,6 +57,22 @@ use lumencraft_testkit::nist_strd::{
 };
 use lumencraft_testkit::{assert_approx_eq, assert_lre_at_least, oracle_univariate_f64};
 
+/// The cached NIST StRD corpus (`corpus/nist-strd`, gitignored, `cargo xtask corpus --fetch`), or
+/// `None` when it is absent so offline runs and CI still exercise the generated benchmarks.
+/// `LUMENCRAFT_REQUIRE_CORPUS=1` turns a missing corpus into a failure.
+fn require_corpus_dir() -> Option<std::path::PathBuf> {
+    let dir = default_nist_strd_dir();
+    if corpus_available(&dir) {
+        return Some(dir);
+    }
+    assert!(
+        std::env::var_os("LUMENCRAFT_REQUIRE_CORPUS").is_none_or(|v| v != "1"),
+        "LUMENCRAFT_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}",
+        dir.display()
+    );
+    None
+}
+
 fn conf_95() -> ConfidenceLevel {
     ConfidenceLevel::DEFAULT_95
 }
@@ -85,8 +101,9 @@ fn oracle_nist_strd_univariate_all_and_offline_stiff() {
         assert_lre_at_least(summary.sd.unwrap(), o_sd, 14.0, &format!("dd {} sd", ds.name));
     }
 
-    let dir = default_nist_strd_dir();
-    assert!(corpus_available(&dir), "NIST StRD corpus expected at {}", dir.display());
+    let Some(dir) = require_corpus_dir() else {
+        return;
+    };
     let univ = load_corpus_univariate_all(&dir).unwrap();
     assert_eq!(univ.len(), 9);
     for ds in univ {
@@ -378,10 +395,10 @@ fn oracle_nonparametric_mann_whitney_wilcoxon_and_ks() {
 #[test]
 fn oracle_nist_strd_one_way_anova_and_summary_roundtrip() {
     let mut sets = all_offline_anova_benchmarks();
-    let dir = default_nist_strd_dir();
-    assert!(corpus_available(&dir));
-    sets.extend(load_corpus_anova_all(&dir).unwrap());
-    assert!(sets.len() >= 12);
+    if let Some(dir) = require_corpus_dir() {
+        sets.extend(load_corpus_anova_all(&dir).unwrap());
+        assert!(sets.len() >= 12);
+    }
 
     for ds in sets {
         let mut by_grp = std::collections::BTreeMap::<usize, Vec<f64>>::new();
@@ -1047,10 +1064,10 @@ fn oracle_survival_logrank_gehan_trend_and_hr() {
 #[test]
 fn oracle_nist_strd_linear_and_logistic_poisson_glms() {
     let mut lin_sets = all_offline_linear_regression_benchmarks();
-    let dir = default_nist_strd_dir();
-    assert!(corpus_available(&dir));
-    lin_sets.extend(load_corpus_linear_all(&dir).unwrap());
-    assert!(lin_sets.len() >= 15);
+    if let Some(dir) = require_corpus_dir() {
+        lin_sets.extend(load_corpus_linear_all(&dir).unwrap());
+        assert!(lin_sets.len() >= 15);
+    }
 
     for ds in lin_sets {
         let n = ds.y.len();
