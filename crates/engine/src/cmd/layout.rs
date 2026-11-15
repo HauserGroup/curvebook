@@ -2,8 +2,8 @@
 
 use lumencraft_chart::preflight_check_scene;
 use lumencraft_doc::{
-    CanvasResizeMode, ErrorCode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle,
-    PhysicalUnit, RectPt,
+    CanvasResizeMode, DocError, ErrorCode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MAX_LAYOUT_ITEMS,
+    PageOrientation, PanelBadgeStyle, PhysicalUnit, RectPt,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -316,6 +316,11 @@ fn run_layout_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, 
     let mut spec = current.spec.clone();
 
     if let Some(ref spec_val) = params.spec {
+        if let Some(items_arr) = spec_val.get("items").and_then(Value::as_array)
+            && items_arr.len() > MAX_LAYOUT_ITEMS
+        {
+            return Err(DocError::TooManyLayoutItems { count: items_arr.len(), max: MAX_LAYOUT_ITEMS }.into());
+        }
         let merged = merge_json_struct(&spec, spec_val)?;
         spec = serde_json::from_value(merged).map_err(|err| {
             EngineError::with_code(ErrorCode::BadInput, format!("invalid layout `spec`: {err}"))
@@ -325,6 +330,7 @@ fn run_layout_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, 
     } else {
         apply_layout_spec_fields(&mut spec, &params.fields)?;
     }
+    spec.validate_item_count().map_err(DocError::from)?;
 
     let page_pt = spec.page_size_pt();
     let items_len = spec.items.len();
@@ -351,6 +357,9 @@ fn run_layout_add_panel(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         let layout = require_layout_sheet(doc, &id)?;
         layout.spec.items.len()
     };
+    if next_idx >= MAX_LAYOUT_ITEMS {
+        return Err(DocError::TooManyLayoutItems { count: next_idx + 1, max: MAX_LAYOUT_ITEMS }.into());
+    }
     let bounds_pt = {
         let layout = require_layout_sheet(doc, &id)?;
         resolve_panel_bounds(&layout.spec, next_idx, &params)?
@@ -419,7 +428,7 @@ fn run_layout_add_panel(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     };
 
     let layout_mut = require_layout_sheet_mut(doc, &id)?;
-    layout_mut.spec.items.push(item);
+    layout_mut.spec.add_item(item).map_err(DocError::from)?;
     let panel_count = layout_mut.spec.items.len();
 
     Ok(CommandOutcome::mutated(

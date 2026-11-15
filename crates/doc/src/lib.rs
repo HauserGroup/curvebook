@@ -47,8 +47,9 @@ pub use archetypes::{
 };
 pub use cell::{Cell, CellValue, ExplicitErrorBounds, ReplicateStacking, SubcolumnMode, SummarizedPoint};
 pub use error::{
-    CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, MAX_TITLE_BYTES,
-    SummaryPointError, validate_confidence_level, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT,
+    MAX_SUBCOLUMNS, MAX_TITLE_BYTES, SummaryPointError, validate_cell_grid, validate_confidence_level, validate_data_sets, validate_project_cells,
+    validate_rows, validate_sheet_cells, validate_subcolumns, validate_title,
 };
 pub use graph::{
     AdditionalTick, AnnotationShapeKind, AreaFillSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle,
@@ -61,7 +62,8 @@ pub use graph::{
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, extract_template_hooks};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};
 pub use layout::{
-    CanvasResizeMode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, PageOrientation, PanelBadgeStyle, PhysicalUnit,
+    CanvasResizeMode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MAX_LAYOUT_ITEMS, PageOrientation,
+    PanelBadgeStyle, PhysicalUnit,
 };
 pub use links::{
     CellExclusionNote, CloneDataSheetOptions, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinkBorderColor,

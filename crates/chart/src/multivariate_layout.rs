@@ -1,10 +1,12 @@
 //! Multivariate bubble/categorical figures, all seven diagnostic plot subtypes, and
 //! multi-panel publication layout scene compilation.
 
+use std::collections::BTreeMap;
+
 use lumencraft_doc::{
     AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, GraphKind, GraphSheet, GraphSpec,
     GraphicalDataObject, LayoutItem, LayoutSheet, LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument,
-    ResultCell, ResultSheet, ResultTab, ResultTabKind, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn, VariableRole,
+    ResultCell, ResultSheet, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn, VariableRole,
     WhiskerMethod,
 };
 use lumencraft_math::dist::{chi2_isf, norm_ppf};
@@ -2756,21 +2758,41 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64
 // 3. Multi-Panel LayoutSheet Compilation (Gap G11)
 // ============================================================================
 
+/// Hard ceiling on total emitted scene primitives within a compiled multi-panel layout.
+pub const MAX_LAYOUT_PRIMITIVES: usize = 500_000;
+
+struct CompiledGraphEntry {
+    scene: Option<ChartScene>,
+    warning: Option<(&'static str, String)>,
+}
+
 struct PlacedPanel {
     panel_idx: usize,
     bounds: RectPt,
     badge: Option<String>,
-    sub_scene: Option<ChartScene>,
+    cache_idx: Option<usize>,
     scale: f64,
     tx: f64,
     ty: f64,
 }
 
+fn check_layout_primitive_budget(current: usize, added: usize, context: &str) -> Result<(), ChartError> {
+    let next = current.saturating_add(added);
+    if next > MAX_LAYOUT_PRIMITIVES {
+        return Err(ChartError::ResourceLimit { message: format!("{context} primitive count {next} exceeds layout budget {MAX_LAYOUT_PRIMITIVES}") });
+    }
+    Ok(())
+}
+
 /// Compile a multi-panel [`LayoutSheet`] into a unified physical-page [`ChartScene`].
 pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Result<ChartScene, ChartError> {
+    layout.spec.validate_item_count().map_err(|err| ChartError::ResourceLimit { message: err.to_string() })?;
+
     let page_pt = layout.spec.page_size_pt();
     let mut scene = ChartScene::new(layout.id.as_str(), layout.title.clone(), page_pt.width, page_pt.height, layout.spec.background_fill);
 
+    let mut compiled_graphs: Vec<CompiledGraphEntry> = Vec::new();
+    let mut graph_cache: BTreeMap<&SheetId, usize> = BTreeMap::new();
     let mut panels: Vec<PlacedPanel> = Vec::new();
     let mut other_items: Vec<&LayoutItem> = Vec::new();
     let mut panel_counter = 0_usize;
@@ -2780,27 +2802,35 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
             LayoutItem::LiveGraph { graph_sheet_id, bounds_pt, scale_percent, badge_override, .. } => {
                 let bounds = RectPt::from(*bounds_pt);
                 let badge = badge_override.clone().or_else(|| layout.spec.panel_badges.badge_for(panel_counter));
-                let sub_scene = match doc.graph_sheet(graph_sheet_id) {
-                    Some(gs) => match crate::compile_graph(gs, doc) {
-                        Ok(compiled) => Some(compiled),
-                        Err(e) => {
-                            scene.warnings.push(ChartWarning::new("panel_compile_error", e.to_string()));
-                            None
-                        }
-                    },
-                    None => {
-                        scene
-                            .warnings
-                            .push(ChartWarning::new("missing_layout_graph", format!("referenced graph sheet '{graph_sheet_id}' not found")));
-                        None
-                    }
+                let cache_idx = if let Some(&existing) = graph_cache.get(graph_sheet_id) {
+                    existing
+                } else {
+                    let entry = match doc.graph_sheet(graph_sheet_id) {
+                        Some(gs) => match crate::compile_graph(gs, doc) {
+                            Ok(compiled) => CompiledGraphEntry { scene: Some(compiled), warning: None },
+                            Err(e) => CompiledGraphEntry { scene: None, warning: Some(("panel_compile_error", e.to_string())) },
+                        },
+                        None => CompiledGraphEntry {
+                            scene: None,
+                            warning: Some(("missing_layout_graph", format!("referenced graph sheet '{graph_sheet_id}' not found"))),
+                        },
+                    };
+                    let idx = compiled_graphs.len();
+                    compiled_graphs.push(entry);
+                    graph_cache.insert(graph_sheet_id, idx);
+                    idx
                 };
-                let scale = sub_scene.as_ref().map_or(1.0, |sub| {
+                if let Some(entry) = compiled_graphs.get(cache_idx)
+                    && let Some((code, message)) = &entry.warning
+                {
+                    scene.warnings.push(ChartWarning::new(*code, message.clone()));
+                }
+                let scale = compiled_graphs.get(cache_idx).and_then(|entry| entry.scene.as_ref()).map_or(1.0, |sub| {
                     let pct = if scale_percent.is_finite() && *scale_percent > 0.0 { *scale_percent / 100.0 } else { 1.0 };
                     let fit = (bounds.width / sub.width_pt.max(1.0)).min(bounds.height / sub.height_pt.max(1.0));
                     (fit * pct).max(0.05)
                 });
-                panels.push(PlacedPanel { panel_idx: panel_counter, bounds, badge, sub_scene, scale, tx: bounds.x, ty: bounds.y });
+                panels.push(PlacedPanel { panel_idx: panel_counter, bounds, badge, cache_idx: Some(cache_idx), scale, tx: bounds.x, ty: bounds.y });
                 panel_counter += 1;
             }
             LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } => {
@@ -2810,11 +2840,12 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
     }
 
     if layout.spec.align_plot_origins {
-        align_placed_panel_origins(&mut panels);
+        align_placed_panel_origins(&mut panels, &compiled_graphs);
     }
 
     for panel in &panels {
-        emit_placed_panel(&mut scene, panel);
+        let sub = panel.cache_idx.and_then(|idx| compiled_graphs.get(idx)).and_then(|entry| entry.scene.as_ref());
+        emit_placed_panel(&mut scene, panel, sub)?;
     }
 
     for item in other_items {
@@ -2822,8 +2853,12 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
             LayoutItem::LiveTable { source_sheet_id, tab_id, bounds_pt, .. } => {
                 let bounds = RectPt::from(*bounds_pt);
                 if let Some(grid) = extract_sheet_grid(doc, source_sheet_id, tab_id.as_deref()) {
+                    let est_cells = grid.rows.len().saturating_mul(grid.headers.len().saturating_add(1));
+                    check_layout_primitive_budget(scene.primitives.len(), est_cells, "layout table")?;
                     render_data_grid_table(&mut scene, bounds, &grid.headers, &grid.row_labels, &grid.rows, Rgba8::rgb(130, 136, 145));
+                    check_layout_primitive_budget(scene.primitives.len(), 0, "layout table")?;
                 } else {
+                    check_layout_primitive_budget(scene.primitives.len(), 1, "layout missing table placeholder")?;
                     scene.warnings.push(ChartWarning::new("missing_layout_table", format!("referenced table sheet '{source_sheet_id}' not found")));
                     scene.primitives.push(ScenePrimitive::Path {
                         path: Path2D::rect(bounds),
@@ -2838,6 +2873,8 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
                 let bounds = RectPt::from(*bounds_pt);
                 let fs = if font_size_pt.is_finite() && *font_size_pt > 0.0 { *font_size_pt } else { 10.0 };
                 let line_h = fs * 1.3;
+                let line_count = expanded.lines().count();
+                check_layout_primitive_budget(scene.primitives.len(), line_count.saturating_add(2), "layout text callout")?;
                 scene.primitives.push(ScenePrimitive::PushClip { rect: bounds });
                 for (line_idx, line) in expanded.lines().enumerate() {
                     scene.primitives.push(ScenePrimitive::Text(PositionedText {
@@ -2859,18 +2896,20 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
 }
 
 /// Align inner `plot_rect_pt` origins across panels sharing a layout column (X) or layout row (Y).
-fn align_placed_panel_origins(panels: &mut [PlacedPanel]) {
+fn align_placed_panel_origins(panels: &mut [PlacedPanel], compiled_graphs: &[CompiledGraphEntry]) {
+    let sub_scene_of = |panel: &PlacedPanel| -> Option<&ChartScene> {
+        panel.cache_idx.and_then(|idx| compiled_graphs.get(idx)).and_then(|entry| entry.scene.as_ref())
+    };
     let mut col_targets: Vec<Option<f64>> = vec![None; panels.len()];
     for i in 0..panels.len() {
-        let Some(sub_i) = panels.get(i).and_then(|p| p.sub_scene.as_ref()) else { continue };
+        let Some(sub_i) = sub_scene_of(&panels[i]) else { continue };
         let bx_i = panels[i].bounds.x;
-        let peers: Vec<usize> = (0..panels.len())
-            .filter(|&j| panels.get(j).and_then(|p| p.sub_scene.as_ref()).is_some() && (panels[j].bounds.x - bx_i).abs() <= 16.0)
-            .collect();
+        let peers: Vec<usize> =
+            (0..panels.len()).filter(|&j| sub_scene_of(&panels[j]).is_some() && (panels[j].bounds.x - bx_i).abs() <= 16.0).collect();
         if peers.len() >= 2 {
             let max_origin_x = peers
                 .iter()
-                .filter_map(|&j| panels.get(j).and_then(|p| p.sub_scene.as_ref().map(|s| p.bounds.x + p.scale * s.plot_rect_pt.x)))
+                .filter_map(|&j| sub_scene_of(&panels[j]).map(|s| panels[j].bounds.x + panels[j].scale * s.plot_rect_pt.x))
                 .fold(bx_i + panels[i].scale * sub_i.plot_rect_pt.x, f64::max);
             col_targets[i] = Some(max_origin_x);
             let avail_right = (panels[i].bounds.right() - max_origin_x).max(8.0);
@@ -2881,15 +2920,14 @@ fn align_placed_panel_origins(panels: &mut [PlacedPanel]) {
 
     let mut row_targets: Vec<Option<f64>> = vec![None; panels.len()];
     for i in 0..panels.len() {
-        let Some(sub_i) = panels.get(i).and_then(|p| p.sub_scene.as_ref()) else { continue };
+        let Some(sub_i) = sub_scene_of(&panels[i]) else { continue };
         let by_i = panels[i].bounds.y;
-        let peers: Vec<usize> = (0..panels.len())
-            .filter(|&j| panels.get(j).and_then(|p| p.sub_scene.as_ref()).is_some() && (panels[j].bounds.y - by_i).abs() <= 16.0)
-            .collect();
+        let peers: Vec<usize> =
+            (0..panels.len()).filter(|&j| sub_scene_of(&panels[j]).is_some() && (panels[j].bounds.y - by_i).abs() <= 16.0).collect();
         if peers.len() >= 2 {
             let max_origin_y = peers
                 .iter()
-                .filter_map(|&j| panels.get(j).and_then(|p| p.sub_scene.as_ref().map(|s| p.bounds.y + p.scale * s.plot_rect_pt.y)))
+                .filter_map(|&j| sub_scene_of(&panels[j]).map(|s| panels[j].bounds.y + panels[j].scale * s.plot_rect_pt.y))
                 .fold(by_i + panels[i].scale * sub_i.plot_rect_pt.y, f64::max);
             row_targets[i] = Some(max_origin_y);
             let avail_bot = (panels[i].bounds.bottom() - max_origin_y).max(8.0);
@@ -2899,7 +2937,7 @@ fn align_placed_panel_origins(panels: &mut [PlacedPanel]) {
     }
 
     for (i, panel) in panels.iter_mut().enumerate() {
-        let Some(sub) = &panel.sub_scene else { continue };
+        let Some(sub) = sub_scene_of(panel) else { continue };
         if let Some(target_x) = col_targets.get(i).copied().flatten() {
             panel.tx = target_x - panel.scale * sub.plot_rect_pt.x;
         }
@@ -2909,11 +2947,25 @@ fn align_placed_panel_origins(panels: &mut [PlacedPanel]) {
     }
 }
 
-fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel) {
+fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel, sub_scene: Option<&ChartScene>) -> Result<(), ChartError> {
+    let badge_prims = usize::from(panel.badge.is_some());
+    let content_prims = sub_scene.map_or(1, |sub| usize::from(sub.background.is_some()).saturating_add(sub.primitives.len()));
+    let added_prims = 2_usize.saturating_add(content_prims).saturating_add(badge_prims);
+    check_layout_primitive_budget(scene.primitives.len(), added_prims, "layout panel")?;
+
+    if let Some(sub) = sub_scene {
+        let next_points = scene.plotted_points.len().saturating_add(sub.plotted_points.len());
+        if next_points > MAX_LAYOUT_PRIMITIVES {
+            return Err(ChartError::ResourceLimit {
+                message: format!("layout plotted point metadata count {next_points} exceeds layout budget {MAX_LAYOUT_PRIMITIVES}"),
+            });
+        }
+    }
+
     let bounds = panel.bounds;
     scene.primitives.push(ScenePrimitive::PushClip { rect: bounds });
 
-    if let Some(sub) = &panel.sub_scene {
+    if let Some(sub) = sub_scene {
         if let Some(bg) = sub.background {
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::rect(RectPt::new(panel.tx, panel.ty, sub.width_pt * panel.scale, sub.height_pt * panel.scale)),
@@ -2958,6 +3010,7 @@ fn emit_placed_panel(scene: &mut ChartScene, panel: &PlacedPanel) {
             color: Rgba8::BLACK,
         }));
     }
+    Ok(())
 }
 
 fn transform_point(p: PointPt, tx: f64, ty: f64, s: f64) -> PointPt {

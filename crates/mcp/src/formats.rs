@@ -601,12 +601,33 @@ impl Exporter for McpPdfExporter {
         let mut opts = PdfExportOptions { color_space: self.cfg.pdf_color_space, ..PdfExportOptions::default() };
 
         let (target_id, pdf_bytes) = if self.cfg.all_graphs && self.cfg.sheet_id.is_none() {
-            let mut scenes = Vec::with_capacity(doc.graph_sheets.len() + doc.layout_sheets.len());
+            let total_sheets = doc.graph_sheets.len().saturating_add(doc.layout_sheets.len());
+            if total_sheets > lumencraft_pdf::MAX_PDF_PAGES {
+                return Err(FormatError::Io(format!("PDF page count {total_sheets} exceeds maximum {}", lumencraft_pdf::MAX_PDF_PAGES)));
+            }
+            let mut scenes = Vec::with_capacity(total_sheets);
+            let mut total_primitives: usize = 0;
             for gs in &doc.graph_sheets {
-                scenes.push(compile_graph(gs, doc).map_err(|err| FormatError::Io(format!("chart compile failed for '{}': {err}", gs.id)))?);
+                let scene = compile_graph(gs, doc).map_err(|err| FormatError::Io(format!("chart compile failed for '{}': {err}", gs.id)))?;
+                total_primitives = total_primitives.saturating_add(scene.primitives.len());
+                if total_primitives > lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES {
+                    return Err(FormatError::Io(format!(
+                        "PDF primitive count {total_primitives} exceeds maximum {}",
+                        lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES
+                    )));
+                }
+                scenes.push(scene);
             }
             for ls in &doc.layout_sheets {
-                scenes.push(compile_layout(ls, doc).map_err(|err| FormatError::Io(format!("layout compile failed for '{}': {err}", ls.id)))?);
+                let scene = compile_layout(ls, doc).map_err(|err| FormatError::Io(format!("layout compile failed for '{}': {err}", ls.id)))?;
+                total_primitives = total_primitives.saturating_add(scene.primitives.len());
+                if total_primitives > lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES {
+                    return Err(FormatError::Io(format!(
+                        "PDF primitive count {total_primitives} exceeds maximum {}",
+                        lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES
+                    )));
+                }
+                scenes.push(scene);
             }
             if scenes.is_empty() {
                 return Err(FormatError::Io(String::from("no GraphSheet or LayoutSheet available to export")));

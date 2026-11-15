@@ -54,11 +54,21 @@ impl Default for PdfExportOptions {
     }
 }
 
+/// Hard ceiling on pages encoded into a single multi-page PDF document.
+pub const MAX_PDF_PAGES: usize = 64;
+
+/// Hard ceiling on total scene primitives encoded across all pages of a PDF document.
+pub const MAX_PDF_TOTAL_PRIMITIVES: usize = 500_000;
+
+/// Hard ceiling on emitted PDF byte length (32 MiB).
+pub const MAX_PDF_OUTPUT_BYTES: usize = 32 * 1024 * 1024;
+
 /// Errors produced while encoding a [`ChartScene`] into PDF bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PdfError {
     EmptyDocument,
     InvalidScene { message: String },
+    ResourceLimit { message: String },
     CompressionFailed { message: String },
 }
 
@@ -67,6 +77,7 @@ impl std::fmt::Display for PdfError {
         match self {
             Self::EmptyDocument => f.write_str("cannot write an empty PDF document without pages"),
             Self::InvalidScene { message } => write!(f, "invalid scene for PDF export: {message}"),
+            Self::ResourceLimit { message } => write!(f, "PDF export resource limit exceeded: {message}"),
             Self::CompressionFailed { message } => write!(f, "PDF stream compression failed: {message}"),
         }
     }
@@ -77,19 +88,46 @@ impl std::error::Error for PdfError {}
 /// Render a single [`ChartScene`] to a standalone single-page PDF byte stream.
 ///
 /// # Errors
-/// Returns [`PdfError`] if scene dimensions or geometry are invalid or stream compression fails.
+/// Returns [`PdfError`] if scene dimensions or geometry are invalid, limits are exceeded, or stream compression fails.
 pub fn render_pdf(scene: &ChartScene, options: &PdfExportOptions) -> Result<Vec<u8>, PdfError> {
-    render_pdf_pages(std::slice::from_ref(scene), options)
+    render_pdf_page_refs(&[scene], options)
 }
 
 /// Render one or more [`ChartScene`] pages into a multi-page PDF byte stream.
 ///
 /// # Errors
-/// Returns [`PdfError::EmptyDocument`] when `pages` is empty, [`PdfError::InvalidScene`] when
-/// any page or option box has invalid geometry, or [`PdfError::CompressionFailed`] if zlib fails.
+/// Returns [`PdfError::EmptyDocument`] when `pages` is empty, [`PdfError::ResourceLimit`] when page,
+/// primitive, or output byte budgets are exceeded, [`PdfError::InvalidScene`] when any page or option
+/// box has invalid geometry, or [`PdfError::CompressionFailed`] if zlib fails.
 pub fn render_pdf_pages(pages: &[ChartScene], options: &PdfExportOptions) -> Result<Vec<u8>, PdfError> {
+    let refs: Vec<&ChartScene> = pages.iter().collect();
+    render_pdf_page_refs(&refs, options)
+}
+
+/// Render one or more referenced [`ChartScene`] pages into a multi-page PDF byte stream without
+/// duplicating scene storage for repeated pages.
+///
+/// # Errors
+/// Returns [`PdfError`] if `pages` is empty, exceeds [`MAX_PDF_PAGES`], [`MAX_PDF_TOTAL_PRIMITIVES`],
+/// or [`MAX_PDF_OUTPUT_BYTES`], contains invalid geometry, or fails stream compression.
+pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -> Result<Vec<u8>, PdfError> {
     if pages.is_empty() {
         return Err(PdfError::EmptyDocument);
+    }
+    if pages.len() > MAX_PDF_PAGES {
+        return Err(PdfError::ResourceLimit { message: format!("PDF page count {} exceeds maximum {MAX_PDF_PAGES}", pages.len()) });
+    }
+
+    let mut total_primitives = 0_usize;
+    for scene in pages {
+        total_primitives = total_primitives
+            .checked_add(scene.primitives.len())
+            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF scene primitive count overflows budget {MAX_PDF_TOTAL_PRIMITIVES}") })?;
+        if total_primitives > MAX_PDF_TOTAL_PRIMITIVES {
+            return Err(PdfError::ResourceLimit {
+                message: format!("PDF scene primitive count {total_primitives} exceeds maximum {MAX_PDF_TOTAL_PRIMITIVES}"),
+            });
+        }
     }
 
     validate_box_opt(options.trim_pt, "trim_pt")?;
@@ -97,6 +135,10 @@ pub fn render_pdf_pages(pages: &[ChartScene], options: &PdfExportOptions) -> Res
 
     let embedded_ttf = resolve_embedded_truetype(options)?;
     let embedded_info = embedded_ttf.as_ref().map(|ttf| &ttf.info);
+    let mut cumulative_stream_bytes = embedded_ttf.as_ref().map_or(0_usize, |t| t.compressed_bytes.len());
+    if cumulative_stream_bytes > MAX_PDF_OUTPUT_BYTES {
+        return Err(PdfError::ResourceLimit { message: format!("embedded PDF font exceeds output byte limit {MAX_PDF_OUTPUT_BYTES}") });
+    }
 
     let mut encoded_pages = Vec::with_capacity(pages.len());
     let mut all_gs_both = BTreeSet::new();
@@ -108,6 +150,12 @@ pub fn render_pdf_pages(pages: &[ChartScene], options: &PdfExportOptions) -> Res
         all_gs_both.extend(used.gs_both.iter().copied());
         all_gs_stroke.extend(used.gs_stroke.iter().copied());
         let stream_bytes = compress_if_requested(raw_stream.into_bytes(), options.compress_streams)?;
+        cumulative_stream_bytes = cumulative_stream_bytes
+            .checked_add(stream_bytes.len())
+            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF stream byte count overflows limit {MAX_PDF_OUTPUT_BYTES}") })?;
+        if cumulative_stream_bytes > MAX_PDF_OUTPUT_BYTES {
+            return Err(PdfError::ResourceLimit { message: format!("PDF encoded content size exceeds maximum {MAX_PDF_OUTPUT_BYTES} bytes") });
+        }
         encoded_pages.push(EncodedPage { stream_bytes, used });
     }
 
@@ -196,7 +244,7 @@ fn compress_if_requested(raw: Vec<u8>, compress: bool) -> Result<Vec<u8>, PdfErr
 }
 
 fn assemble_pdf_document(
-    pages: &[ChartScene],
+    pages: &[&ChartScene],
     encoded_pages: &[EncodedPage],
     all_gs_both: &BTreeSet<u8>,
     all_gs_stroke: &BTreeSet<u8>,
@@ -275,7 +323,7 @@ fn assemble_pdf_document(
     }
 
     let ttf_font_id = ttf_ids.map(|(_, font_id, _, _)| font_id);
-    for (idx, (scene, encoded)) in pages.iter().zip(encoded_pages.iter()).enumerate() {
+    for (idx, (&scene, encoded)) in pages.iter().zip(encoded_pages.iter()).enumerate() {
         let content_obj_id = pages_base_id + idx * 2;
         let page_obj_id = content_obj_id + 1;
 
@@ -292,6 +340,11 @@ fn assemble_pdf_document(
     }
 
     write_xref_and_trailer(&mut pdf, &offsets, total_objs);
+    if pdf.len() > MAX_PDF_OUTPUT_BYTES {
+        return Err(PdfError::ResourceLimit {
+            message: format!("PDF output length {} bytes exceeds maximum {MAX_PDF_OUTPUT_BYTES} bytes", pdf.len()),
+        });
+    }
     Ok(pdf)
 }
 
@@ -349,7 +402,7 @@ fn write_truetype_font_objects(
     write_pdf_obj(pdf, offsets, stream_id, &stream_obj);
 }
 
-fn build_info_dict(pages: &[ChartScene], options: &PdfExportOptions) -> String {
+fn build_info_dict(pages: &[&ChartScene], options: &PdfExportOptions) -> String {
     let title = options
         .title
         .as_deref()

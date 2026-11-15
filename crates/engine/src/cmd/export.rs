@@ -1,11 +1,12 @@
 //! Vector and raster figure export commands (`export.*`, `graph.export*`, `layout.export*`).
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 
 use lumencraft_chart::{ChartScene, compile_graph, compile_layout};
 use lumencraft_doc::{ErrorCode, ProjectDocument, SheetId};
-use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
+use lumencraft_pdf::{MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_page_refs};
 use lumencraft_render::{MAX_RASTER_PIXELS, RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
 use lumencraft_svg::{SvgExportOptions, render_svg};
 use serde::Deserialize;
@@ -531,15 +532,47 @@ fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
 
     let doc = ctx.session.document();
     let (pdf, sheet_label, width_pt, height_pt, page_count) = if let Some(ids) = params.sheet_ids {
-        let mut scenes = Vec::with_capacity(ids.len());
-        for raw_id in ids {
-            let sid = parse_sheet_id(&raw_id)?;
-            scenes.push(compile_scene_for_sheet(doc, &sid)?);
+        if ids.len() > MAX_PDF_PAGES {
+            return Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("PDF page count {} exceeds maximum {MAX_PDF_PAGES}", ids.len()))
+                .with_remediation("Export fewer pages or split into multiple PDF files.")
+                .with_details(json!({ "page_count": ids.len(), "max_pages": MAX_PDF_PAGES })));
         }
-        let w = scenes.first().map_or(0.0, |s| s.width_pt);
-        let h = scenes.first().map_or(0.0, |s| s.height_pt);
-        let pages = scenes.len();
-        let bytes = render_pdf_pages(&scenes, &opts)?;
+        let mut parsed_ids = Vec::with_capacity(ids.len());
+        for raw_id in ids {
+            parsed_ids.push(parse_sheet_id(&raw_id)?);
+        }
+        let mut compiled_by_id: BTreeMap<SheetId, ChartScene> = BTreeMap::new();
+        for sid in &parsed_ids {
+            check_not_cancelled(ctx, command_id)?;
+            if !compiled_by_id.contains_key(sid) {
+                compiled_by_id.insert(sid.clone(), compile_scene_for_sheet(doc, sid)?);
+            }
+        }
+        let mut page_refs: Vec<&ChartScene> = Vec::with_capacity(parsed_ids.len());
+        let mut total_primitives: usize = 0;
+        for sid in &parsed_ids {
+            let scene = compiled_by_id
+                .get(sid)
+                .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, format!("compiled scene missing for `{sid}`")))?;
+            total_primitives = total_primitives.saturating_add(scene.primitives.len());
+            if total_primitives > MAX_PDF_TOTAL_PRIMITIVES {
+                return Err(EngineError::with_code(
+                    ErrorCode::ResourceLimit,
+                    format!("PDF primitive count {total_primitives} exceeds maximum {MAX_PDF_TOTAL_PRIMITIVES}"),
+                )
+                .with_remediation("Reduce chart complexity or split the PDF export into fewer pages.")
+                .with_details(json!({
+                    "primitive_count": total_primitives,
+                    "max_primitives": MAX_PDF_TOTAL_PRIMITIVES,
+                    "page_count": parsed_ids.len(),
+                })));
+            }
+            page_refs.push(scene);
+        }
+        let w = page_refs.first().map_or(0.0, |s| s.width_pt);
+        let h = page_refs.first().map_or(0.0, |s| s.height_pt);
+        let pages = page_refs.len();
+        let bytes = render_pdf_page_refs(&page_refs, &opts)?;
         (bytes, String::from("multi-page"), w, h, pages)
     } else {
         let raw_id = params.sheet_id.ok_or_else(|| {

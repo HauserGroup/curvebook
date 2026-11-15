@@ -37,6 +37,13 @@ const SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] = ["2024-11-05", "2025-03-26"];
 /// Maximum JSON-RPC payload size accepted by default (16 MiB).
 pub const MAX_REQUEST_BYTES: usize = 16 * 1024 * 1024;
 
+/// Maximum oversized frame bytes safely drained before closing the transport (64 MiB).
+pub const MAX_DRAIN_BYTES: usize = 64 * 1024 * 1024;
+
+/// Maximum leading payload bytes inspected for best-effort JSON-RPC `"id"` extraction
+/// when draining an oversized frame.
+const ID_SNIFF_BYTES: usize = 16 * 1024;
+
 /// Maximum bytes permitted in a single framing header line (8 KiB).
 pub const MAX_HEADER_LINE_BYTES: usize = 8 * 1024;
 
@@ -114,13 +121,14 @@ impl JsonRpcResponse {
 enum ReadLineOutcome {
     Line(Vec<u8>),
     Eof(Vec<u8>),
-    TooLong,
+    TooLong { id: Value },
+    DrainLimitExceeded,
 }
 
 enum NextFrame {
     Payload { bytes: Vec<u8>, mode: FramingMode },
-    RecoverableError { mode: FramingMode, code: i64, message: String },
-    FatalError { mode: FramingMode, code: i64, message: String },
+    RecoverableError { id: Value, mode: FramingMode, code: i64, message: String },
+    FatalError { id: Value, mode: FramingMode, code: i64, message: String },
     Eof,
 }
 
@@ -149,7 +157,17 @@ pub fn run_stdio_with_control_port(port: u16) -> Result<(), String> {
 /// with explicit `--gui-only` policy state.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn run_stdio_with_control_port_gui_only(port: u16, gui_only: bool) -> Result<(), String> {
+    run_stdio_with_control_port_options(port, gui_only, None)
+}
+
+/// Run the MCP server on process stdin/stdout attached to a live desktop `--control <port>` loop
+/// with explicit `--gui-only` policy state and optional `--control-token`.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn run_stdio_with_control_port_options(port: u16, gui_only: bool, control_token: Option<&str>) -> Result<(), String> {
     let mut state = McpServerState::with_control_port_and_gui_only(port, gui_only)?;
+    if let Some(token) = control_token {
+        state.set_control_token(Some(token))?;
+    }
     run_stdio_with_state(&mut state).map_err(|err| format!("stdio transport error: {err}"))
 }
 
@@ -174,13 +192,13 @@ pub fn serve_with_max_bytes<R: BufRead, W: Write>(reader: &mut R, writer: &mut W
                     write_json_value(writer, &notif, mode)?;
                 }
             }
-            NextFrame::RecoverableError { mode, code, message } => {
+            NextFrame::RecoverableError { id, mode, code, message } => {
                 last_mode = mode;
-                let resp = JsonRpcResponse::err(Value::Null, code, message, None);
+                let resp = JsonRpcResponse::err(id, code, message, None);
                 write_response(writer, &resp, mode)?;
             }
-            NextFrame::FatalError { mode, code, message } => {
-                let resp = JsonRpcResponse::err(Value::Null, code, message, None);
+            NextFrame::FatalError { id, mode, code, message } => {
+                let resp = JsonRpcResponse::err(id, code, message, None);
                 write_response(writer, &resp, mode)?;
                 return Ok(());
             }
@@ -483,11 +501,20 @@ fn read_next_non_empty_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> io:
                 }
                 return Ok(Some(Ok(bytes)));
             }
-            ReadLineOutcome::TooLong => {
+            ReadLineOutcome::TooLong { id } => {
                 return Ok(Some(Err(NextFrame::RecoverableError {
+                    id,
                     mode: FramingMode::Newline,
                     code: ERR_INVALID_REQUEST,
                     message: format!("line exceeds maximum request size of {max_bytes} bytes"),
+                })));
+            }
+            ReadLineOutcome::DrainLimitExceeded => {
+                return Ok(Some(Err(NextFrame::FatalError {
+                    id: Value::Null,
+                    mode: FramingMode::Newline,
+                    code: ERR_INVALID_REQUEST,
+                    message: format!("oversized newline frame exceeds maximum drain ceiling of {MAX_DRAIN_BYTES} bytes"),
                 })));
             }
             ReadLineOutcome::Line(bytes) => {
@@ -505,8 +532,9 @@ fn read_content_length_frame<R: BufRead>(reader: &mut R, first_line: Vec<u8>, ma
 
     while header_lines.len() <= MAX_HEADER_COUNT {
         match read_line_bytes(reader, MAX_HEADER_LINE_BYTES)? {
-            ReadLineOutcome::TooLong => {
+            ReadLineOutcome::TooLong { .. } | ReadLineOutcome::DrainLimitExceeded => {
                 return Ok(NextFrame::FatalError {
+                    id: Value::Null,
                     mode: FramingMode::ContentLength,
                     code: ERR_INVALID_REQUEST,
                     message: format!("header line exceeds maximum {MAX_HEADER_LINE_BYTES} bytes"),
@@ -517,6 +545,7 @@ fn read_content_length_frame<R: BufRead>(reader: &mut R, first_line: Vec<u8>, ma
                     break;
                 }
                 return Ok(NextFrame::FatalError {
+                    id: Value::Null,
                     mode: FramingMode::ContentLength,
                     code: ERR_PARSE_ERROR,
                     message: String::from("unexpected EOF while reading framing headers"),
@@ -534,6 +563,7 @@ fn read_content_length_frame<R: BufRead>(reader: &mut R, first_line: Vec<u8>, ma
 
     if !terminated_cleanly {
         return Ok(NextFrame::FatalError {
+            id: Value::Null,
             mode: FramingMode::ContentLength,
             code: ERR_INVALID_REQUEST,
             message: String::from("framing header block missing blank separator or exceeded header cap"),
@@ -543,9 +573,22 @@ fn read_content_length_frame<R: BufRead>(reader: &mut R, first_line: Vec<u8>, ma
     let content_length = match parse_headers_content_length(&header_lines, max_bytes) {
         Ok(len) => len,
         Err((code, message)) => {
-            return Ok(NextFrame::FatalError { mode: FramingMode::ContentLength, code, message });
+            return Ok(NextFrame::FatalError { id: Value::Null, mode: FramingMode::ContentLength, code, message });
         }
     };
+
+    if content_length > MAX_DRAIN_BYTES {
+        return Ok(NextFrame::FatalError {
+            id: Value::Null,
+            mode: FramingMode::ContentLength,
+            code: ERR_INVALID_REQUEST,
+            message: format!("Content-Length {content_length} exceeds maximum {max_bytes} bytes (and drain limit {MAX_DRAIN_BYTES} bytes)"),
+        });
+    }
+
+    if content_length > max_bytes {
+        return drain_oversized_content_length_frame(reader, content_length, max_bytes);
+    }
 
     read_exact_body(reader, content_length)
 }
@@ -579,11 +622,7 @@ fn parse_content_length_value(raw: &str, max_bytes: usize) -> Result<usize, (i64
     if trimmed.is_empty() || !trimmed.bytes().all(|b| b.is_ascii_digit()) {
         return Err((ERR_INVALID_REQUEST, String::from("Content-Length must be a non-negative integer")));
     }
-    let parsed = trimmed.parse::<usize>().map_err(|_| (ERR_INVALID_REQUEST, format!("Content-Length exceeds maximum {max_bytes} bytes")))?;
-    if parsed > max_bytes {
-        return Err((ERR_INVALID_REQUEST, format!("Content-Length {parsed} exceeds maximum {max_bytes} bytes")));
-    }
-    Ok(parsed)
+    trimmed.parse::<usize>().map_err(|_| (ERR_INVALID_REQUEST, format!("Content-Length exceeds maximum {max_bytes} bytes")))
 }
 
 fn read_exact_body<R: BufRead>(reader: &mut R, len: usize) -> io::Result<NextFrame> {
@@ -597,6 +636,7 @@ fn read_exact_body<R: BufRead>(reader: &mut R, len: usize) -> io::Result<NextFra
         let avail = reader.fill_buf()?;
         if avail.is_empty() {
             return Ok(NextFrame::FatalError {
+                id: Value::Null,
                 mode: FramingMode::ContentLength,
                 code: ERR_PARSE_ERROR,
                 message: format!("unexpected EOF after {} of {len} Content-Length bytes", body.len()),
@@ -610,8 +650,43 @@ fn read_exact_body<R: BufRead>(reader: &mut R, len: usize) -> io::Result<NextFra
     Ok(NextFrame::Payload { bytes: body, mode: FramingMode::ContentLength })
 }
 
+fn drain_oversized_content_length_frame<R: BufRead>(reader: &mut R, content_length: usize, max_bytes: usize) -> io::Result<NextFrame> {
+    let mut drained = 0usize;
+    let mut sniff_prefix = Vec::new();
+    let sniff_cap = ID_SNIFF_BYTES.min(content_length);
+
+    while drained < content_length {
+        let remaining = content_length - drained;
+        let avail = reader.fill_buf()?;
+        if avail.is_empty() {
+            return Ok(NextFrame::FatalError {
+                id: extract_jsonrpc_id_prefix(&sniff_prefix),
+                mode: FramingMode::ContentLength,
+                code: ERR_INVALID_REQUEST,
+                message: format!("Content-Length {content_length} exceeds maximum {max_bytes} bytes (unexpected EOF after {drained} bytes)"),
+            });
+        }
+        let take = avail.len().min(remaining).min(READ_CHUNK_BYTES);
+        if sniff_prefix.len() < sniff_cap {
+            let keep = take.min(sniff_cap - sniff_prefix.len());
+            sniff_prefix.extend_from_slice(&avail[..keep]);
+        }
+        reader.consume(take);
+        drained += take;
+    }
+
+    let id = extract_jsonrpc_id_prefix(&sniff_prefix);
+    Ok(NextFrame::RecoverableError {
+        id,
+        mode: FramingMode::ContentLength,
+        code: ERR_INVALID_REQUEST,
+        message: format!("Content-Length {content_length} exceeds maximum {max_bytes} bytes"),
+    })
+}
+
 fn read_line_bytes<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<ReadLineOutcome> {
     let mut buf = Vec::new();
+    let sniff_cap = ID_SNIFF_BYTES.min(max_bytes);
     loop {
         let avail = reader.fill_buf()?;
         if avail.is_empty() {
@@ -621,8 +696,12 @@ fn read_line_bytes<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<R
         if let Some(pos) = avail.iter().position(|&b| b == b'\n') {
             let take = pos + 1;
             if buf.len().saturating_add(take) > max_bytes {
+                if buf.len() < sniff_cap {
+                    let keep = take.min(sniff_cap - buf.len());
+                    buf.extend_from_slice(&avail[..keep]);
+                }
                 reader.consume(take);
-                return Ok(ReadLineOutcome::TooLong);
+                return Ok(ReadLineOutcome::TooLong { id: extract_jsonrpc_id_prefix(&buf) });
             }
             buf.extend_from_slice(&avail[..take]);
             reader.consume(take);
@@ -631,9 +710,15 @@ fn read_line_bytes<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<R
 
         if buf.len().saturating_add(avail.len()) > max_bytes {
             let avail_len = avail.len();
+            if buf.len() < sniff_cap {
+                let keep = avail_len.min(sniff_cap - buf.len());
+                buf.extend_from_slice(&avail[..keep]);
+            }
             reader.consume(avail_len);
-            drain_until_newline(reader)?;
-            return Ok(ReadLineOutcome::TooLong);
+            if !drain_until_newline_bounded(reader, MAX_DRAIN_BYTES)? {
+                return Ok(ReadLineOutcome::DrainLimitExceeded);
+            }
+            return Ok(ReadLineOutcome::TooLong { id: extract_jsonrpc_id_prefix(&buf) });
         }
 
         let take = avail.len();
@@ -642,18 +727,165 @@ fn read_line_bytes<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<R
     }
 }
 
-fn drain_until_newline<R: BufRead>(reader: &mut R) -> io::Result<()> {
+fn drain_until_newline_bounded<R: BufRead>(reader: &mut R, max_drain: usize) -> io::Result<bool> {
+    let mut drained = 0usize;
     loop {
         let avail = reader.fill_buf()?;
         if avail.is_empty() {
-            return Ok(());
+            return Ok(true);
         }
         if let Some(pos) = avail.iter().position(|&b| b == b'\n') {
-            reader.consume(pos + 1);
-            return Ok(());
+            let take = pos + 1;
+            if drained.saturating_add(take) > max_drain {
+                return Ok(false);
+            }
+            reader.consume(take);
+            return Ok(true);
         }
         let len = avail.len();
+        drained = drained.saturating_add(len);
+        if drained > max_drain {
+            return Ok(false);
+        }
         reader.consume(len);
+    }
+}
+
+fn extract_jsonrpc_id_prefix(prefix: &[u8]) -> Value {
+    let mut i = skip_ascii_ws(prefix, 0);
+    if prefix.get(i).copied() != Some(b'{') {
+        return Value::Null;
+    }
+    i += 1;
+
+    loop {
+        i = skip_ascii_ws(prefix, i);
+        let Some((key, next_pos)) = scan_json_string(prefix, i) else {
+            return Value::Null;
+        };
+        i = skip_ascii_ws(prefix, next_pos);
+        if prefix.get(i).copied() != Some(b':') {
+            return Value::Null;
+        }
+        i = skip_ascii_ws(prefix, i + 1);
+
+        if key == "id" {
+            return parse_jsonrpc_id_at(prefix, i);
+        }
+
+        let Some(after_val) = skip_json_value(prefix, i) else {
+            return Value::Null;
+        };
+        i = skip_ascii_ws(prefix, after_val);
+        if prefix.get(i).copied() != Some(b',') {
+            return Value::Null;
+        }
+        i += 1;
+    }
+}
+
+fn parse_jsonrpc_id_at(bytes: &[u8], start: usize) -> Value {
+    let Some(&first) = bytes.get(start) else {
+        return Value::Null;
+    };
+    match first {
+        b'"' => scan_json_string(bytes, start).map_or(Value::Null, |(s, _)| Value::String(s)),
+        b'n' => Value::Null,
+        b'-' | b'0'..=b'9' => {
+            let mut end = start;
+            while let Some(&b) = bytes.get(end) {
+                if b.is_ascii_digit() || matches!(b, b'-' | b'+' | b'.' | b'e' | b'E') {
+                    end += 1;
+                } else {
+                    break;
+                }
+            }
+            if end == bytes.len() {
+                return Value::Null;
+            }
+            match serde_json::from_slice::<Value>(&bytes[start..end]) {
+                Ok(v @ Value::Number(_)) => v,
+                _ => Value::Null,
+            }
+        }
+        _ => Value::Null,
+    }
+}
+
+fn skip_ascii_ws(bytes: &[u8], mut pos: usize) -> usize {
+    while bytes.get(pos).is_some_and(u8::is_ascii_whitespace) {
+        pos += 1;
+    }
+    pos
+}
+
+fn scan_json_string(bytes: &[u8], start: usize) -> Option<(String, usize)> {
+    if bytes.get(start).copied() != Some(b'"') {
+        return None;
+    }
+    let end = scan_json_string_end(bytes, start)?;
+    let s: String = serde_json::from_slice(&bytes[start..end]).ok()?;
+    Some((s, end))
+}
+
+fn scan_json_string_end(bytes: &[u8], start: usize) -> Option<usize> {
+    if bytes.get(start).copied() != Some(b'"') {
+        return None;
+    }
+    let mut pos = start + 1;
+    let mut escaped = false;
+    while let Some(&b) = bytes.get(pos) {
+        pos += 1;
+        if escaped {
+            escaped = false;
+        } else if b == b'\\' {
+            escaped = true;
+        } else if b == b'"' {
+            return Some(pos);
+        }
+    }
+    None
+}
+
+fn skip_json_value(bytes: &[u8], start: usize) -> Option<usize> {
+    let pos = skip_ascii_ws(bytes, start);
+    let &first = bytes.get(pos)?;
+    match first {
+        b'"' => scan_json_string_end(bytes, pos),
+        b'{' | b'[' => {
+            let mut depth = 0usize;
+            let mut i = pos;
+            while let Some(&b) = bytes.get(i) {
+                match b {
+                    b'"' => {
+                        i = scan_json_string_end(bytes, i)?;
+                    }
+                    b'{' | b'[' => {
+                        depth += 1;
+                        i += 1;
+                    }
+                    b'}' | b']' => {
+                        depth = depth.checked_sub(1)?;
+                        i += 1;
+                        if depth == 0 {
+                            return Some(i);
+                        }
+                    }
+                    _ => i += 1,
+                }
+            }
+            None
+        }
+        _ => {
+            let mut i = pos;
+            while let Some(&b) = bytes.get(i) {
+                if matches!(b, b',' | b'}' | b']') || b.is_ascii_whitespace() {
+                    return Some(i);
+                }
+                i += 1;
+            }
+            None
+        }
     }
 }
 
@@ -744,7 +976,10 @@ mod tests {
 
     use serde_json::{Value, json};
 
-    use super::{ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, ERR_PARSE_ERROR, FramingMode, serve, serve_with_max_bytes};
+    use super::{
+        ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, ERR_PARSE_ERROR, FramingMode, MAX_DRAIN_BYTES, MAX_REQUEST_BYTES, serve,
+        serve_with_max_bytes,
+    };
     use crate::tools::McpServerState;
 
     fn frame_content_length(body: &str) -> Vec<u8> {
@@ -833,5 +1068,81 @@ mod tests {
         assert_eq!(replies.len(), 1);
         assert_eq!(replies[0]["error"]["code"], json!(ERR_INVALID_REQUEST));
         assert_eq!(FramingMode::ContentLength, FramingMode::ContentLength);
+    }
+
+    #[test]
+    fn oversized_content_length_frame_drains_preserves_id_and_keeps_session_alive() {
+        let mut input = Vec::new();
+        input.extend(frame_content_length(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#));
+
+        let big_pad = "x".repeat(2048);
+        let oversized_str_id = format!(r#"{{"jsonrpc":"2.0","id":"big-1","method":"ping","params":{{"pad":"{big_pad}"}}}}"#);
+        input.extend(frame_content_length(&oversized_str_id));
+        input.extend(frame_content_length(r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#));
+
+        let oversized_num_id = format!(r#"{{"jsonrpc":"2.0","id":99,"method":"tools/call","params":{{"blob":"{big_pad}"}}}}"#);
+        input.extend(frame_content_length(&oversized_num_id));
+        input.extend(frame_content_length(r#"{"jsonrpc":"2.0","id":3,"method":"tools/list"}"#));
+
+        let mut reader = Cursor::new(input);
+        let mut output = Vec::new();
+        let mut state = McpServerState::new();
+        serve_with_max_bytes(&mut reader, &mut output, &mut state, 1024).expect("serve");
+
+        let replies = decode_content_length_frames(&output);
+        assert_eq!(replies.len(), 5, "all requests before and after oversized frames must be answered");
+        assert_eq!(replies[0]["id"], json!(0));
+        assert_eq!(replies[1]["id"], json!("big-1"));
+        assert_eq!(replies[1]["error"]["code"], json!(ERR_INVALID_REQUEST));
+        assert_eq!(replies[2]["id"], json!(2));
+        assert_eq!(replies[2]["result"], json!({}));
+        assert_eq!(replies[3]["id"], json!(99));
+        assert_eq!(replies[3]["error"]["code"], json!(ERR_INVALID_REQUEST));
+        assert_eq!(replies[4]["id"], json!(3));
+        assert!(replies[4]["result"]["tools"].is_array());
+    }
+
+    #[test]
+    fn default_serve_drains_17mib_content_length_and_answers_next_request() {
+        let mut input = Vec::new();
+        input.extend(frame_content_length(r#"{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}"#));
+        let pad = "a".repeat(17 * 1024 * 1024 - 128);
+        let oversized = format!(r#"{{"jsonrpc":"2.0","id":1,"method":"ping","params":{{"data":"{pad}"}}}}"#);
+        assert!(oversized.len() > MAX_REQUEST_BYTES);
+        assert!(oversized.len() < MAX_DRAIN_BYTES);
+        input.extend(frame_content_length(&oversized));
+        input.extend(frame_content_length(r#"{"jsonrpc":"2.0","id":2,"method":"ping"}"#));
+
+        let mut reader = Cursor::new(input);
+        let mut output = Vec::new();
+        let mut state = McpServerState::new();
+        serve(&mut reader, &mut output, &mut state).expect("serve");
+
+        let replies = decode_content_length_frames(&output);
+        assert_eq!(replies.len(), 3);
+        assert_eq!(replies[0]["id"], json!(0));
+        assert_eq!(replies[1]["id"], json!(1));
+        assert_eq!(replies[1]["error"]["code"], json!(ERR_INVALID_REQUEST));
+        assert_eq!(replies[2]["id"], json!(2));
+        assert_eq!(replies[2]["result"], json!({}));
+    }
+
+    #[test]
+    fn oversized_newline_frame_drains_preserves_id_and_recovers() {
+        let big = "z".repeat(2048);
+        let script = format!(
+            "{{\"jsonrpc\":\"2.0\",\"id\":\"nl-1\",\"method\":\"ping\",\"params\":{{\"x\":\"{big}\"}}}}\n{{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"ping\"}}\n"
+        );
+        let mut reader = Cursor::new(script.into_bytes());
+        let mut output = Vec::new();
+        let mut state = McpServerState::new();
+        serve_with_max_bytes(&mut reader, &mut output, &mut state, 1024).expect("serve");
+
+        let lines: Vec<Value> = String::from_utf8(output).expect("utf8").lines().map(|l| serde_json::from_str(l).expect("json line")).collect();
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0]["id"], json!("nl-1"));
+        assert_eq!(lines[0]["error"]["code"], json!(ERR_INVALID_REQUEST));
+        assert_eq!(lines[1]["id"], json!(7));
+        assert_eq!(lines[1]["result"], json!({}));
     }
 }
