@@ -29,7 +29,7 @@ const MAX_FONT_FILE_BYTES: usize = 64 * 1024 * 1024;
 const MAX_EVENT_SCRIPT_BYTES: usize = 64 * 1024 * 1024;
 
 const USAGE: &str = "\
-usage: lumencraft [options] [file...]
+usage: lumencraft [options] [--] [file...]
 
 options:
   --control <port>         listen on 127.0.0.1:<port> for authenticated JSON-lines automation
@@ -42,6 +42,7 @@ options:
   --ttf-font <path>     load and validate an external TrueType/SFNT (.ttf) font file
   --rulers              show physical canvas rulers on startup
   --event-script <path> replay newline-delimited DesktopHostEvent JSONL commands
+  --                    stop parsing options; treat remaining arguments as file paths
   -V, --version         print version and exit
   -h, --help            print this help message and exit
 ";
@@ -112,8 +113,37 @@ fn run_with_process_env(
             print!("{USAGE}");
             Ok(())
         }
-        CliAction::Launch(cfg) => launch_application_with_env(&cfg, env_get),
+        CliAction::Launch(cfg) => {
+            warn_or_reject_non_utf8_control_env(&cfg, env_port, env_token, &env_get)?;
+            launch_application_with_env(&cfg, env_get)
+        }
     }
+}
+
+fn warn_or_reject_non_utf8_control_env(
+    cfg: &LaunchConfig,
+    env_port: Option<&str>,
+    env_token: Option<&str>,
+    env_get: &impl Fn(&str) -> Option<OsString>,
+) -> Result<(), String> {
+    if cfg.control_port.is_none()
+        && env_port.is_none()
+        && let Some(raw_os) = env_get("LUMENCRAFT_CONTROL_PORT")
+        && raw_os.to_str().is_none()
+    {
+        eprintln!("lumencraft warning: ignoring non-UTF-8 LUMENCRAFT_CONTROL_PORT");
+    }
+    if cfg.control_token.is_none()
+        && env_token.is_none()
+        && let Some(raw_os) = env_get("LUMENCRAFT_CONTROL_TOKEN")
+        && raw_os.to_str().is_none()
+    {
+        if cfg.control_port.is_some() {
+            return Err(String::from("invalid LUMENCRAFT_CONTROL_TOKEN: must be valid UTF-8"));
+        }
+        eprintln!("lumencraft warning: ignoring non-UTF-8 LUMENCRAFT_CONTROL_TOKEN");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -183,8 +213,14 @@ fn parse_args_with_env(args: &[String], env_port: Option<&str>, env_token: Optio
                 cfg.event_script = Some(PathBuf::from(raw));
                 i += 2;
             }
+            "--" => {
+                if let Some(rest) = args.get(i + 1..) {
+                    cfg.files.extend(rest.iter().map(PathBuf::from));
+                }
+                break;
+            }
             flag if flag.starts_with('-') => {
-                return Err(format!("unknown option `{flag}`\n\n{USAGE}"));
+                return Err(format!("unknown option `{flag}` (use `--` before file paths starting with `-`)\n\n{USAGE}"));
             }
             path => {
                 cfg.files.push(PathBuf::from(path));
@@ -193,19 +229,36 @@ fn parse_args_with_env(args: &[String], env_port: Option<&str>, env_token: Optio
         }
     }
 
+    apply_env_control_overrides(&mut cfg, env_port, env_token)?;
+
+    Ok(CliAction::Launch(cfg))
+}
+
+fn apply_env_control_overrides(cfg: &mut LaunchConfig, env_port: Option<&str>, env_token: Option<&str>) -> Result<(), String> {
     if cfg.control_port.is_none()
         && let Some(raw_env) = env_port.map(str::trim).filter(|s| !s.is_empty())
     {
-        cfg.control_port = Some(parse_port(raw_env)?);
+        match parse_port(raw_env) {
+            Ok(port) => cfg.control_port = Some(port),
+            Err(err) => {
+                eprintln!("lumencraft warning: ignoring invalid LUMENCRAFT_CONTROL_PORT `{raw_env}`: {err}");
+            }
+        }
     }
     if cfg.control_token.is_none()
         && let Some(raw_tok) = env_token.map(str::trim).filter(|s| !s.is_empty())
     {
-        let validated = ControlAuth::from_token(raw_tok).map_err(|err| format!("invalid LUMENCRAFT_CONTROL_TOKEN: {err}"))?;
-        cfg.control_token = Some(validated.as_str().to_owned());
+        match ControlAuth::from_token(raw_tok) {
+            Ok(validated) => cfg.control_token = Some(validated.as_str().to_owned()),
+            Err(err) if cfg.control_port.is_some() => {
+                return Err(format!("invalid LUMENCRAFT_CONTROL_TOKEN: {err}"));
+            }
+            Err(err) => {
+                eprintln!("lumencraft warning: ignoring invalid LUMENCRAFT_CONTROL_TOKEN: {err}");
+            }
+        }
     }
-
-    Ok(CliAction::Launch(cfg))
+    Ok(())
 }
 
 fn can_create_recovery_root(path: &Path) -> Result<bool, String> {
@@ -1538,6 +1591,125 @@ mod tests {
         let xdg_sym_os = OsString::from(&xdg_sym);
         assert!(super::resolve_app_paths_with_env(None, None, |key| if key == "XDG_RUNTIME_DIR" { Some(xdg_sym_os.clone()) } else { None }).is_err());
 
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r1_s11_13_env_control_port_double_dash_and_new_instance() -> Result<(), Box<dyn std::error::Error>> {
+        use std::ffi::OsString;
+
+        assert!(super::USAGE.contains("[--]"));
+        assert!(super::USAGE.contains("--new-instance"));
+
+        // 1. Invalid LUMENCRAFT_CONTROL_PORT is ignored on uncontrolled launches instead of aborting.
+        for bad_port in ["abc", "0", "65536", "-1", "127.0.0.1:9125"] {
+            let parsed = super::parse_args_with_env(&[String::from("--headless-once")], Some(bad_port), None)?;
+            let CliAction::Launch(cfg) = parsed else {
+                return Err(String::from("expected Launch action").into());
+            };
+            assert!(cfg.headless_once);
+            assert_eq!(cfg.control_port, None, "bad env port `{bad_port}` should be ignored");
+        }
+
+        // Valid LUMENCRAFT_CONTROL_PORT still applies; CLI --control takes precedence and stays strict.
+        let env_valid = super::parse_args_with_env(&[], Some(" 9125 "), None)?;
+        let CliAction::Launch(env_cfg) = env_valid else {
+            return Err(String::from("expected Launch action").into());
+        };
+        assert_eq!(env_cfg.control_port, Some(9125));
+
+        let cli_override = super::parse_args_with_env(&[String::from("--control"), String::from("9126")], Some("abc"), None)?;
+        let CliAction::Launch(cli_cfg) = cli_override else {
+            return Err(String::from("expected Launch action").into());
+        };
+        assert_eq!(cli_cfg.control_port, Some(9126));
+        assert!(super::parse_args_with_env(&[String::from("--control"), String::from("0")], None, None).is_err());
+        assert!(super::parse_args_with_env(&[String::from("--control"), String::from("abc")], None, None).is_err());
+
+        // Invalid LUMENCRAFT_CONTROL_TOKEN only aborts when control mode is actually enabled.
+        let ignored_tok = super::parse_args_with_env(&[String::from("--headless-once")], Some("abc"), Some("bad token"))?;
+        let CliAction::Launch(ignored_cfg) = ignored_tok else {
+            return Err(String::from("expected Launch action").into());
+        };
+        assert_eq!(ignored_cfg.control_port, None);
+        assert_eq!(ignored_cfg.control_token, None);
+        assert!(super::parse_args_with_env(&[String::from("--control"), String::from("9126")], None, Some("bad token")).is_err());
+        assert!(super::parse_args_with_env(&[], Some("9125"), Some("bad token")).is_err());
+
+        // Non-UTF-8 LUMENCRAFT_CONTROL_PORT is ignored on uncontrolled launches; non-UTF-8 token fails when control is enabled.
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            let non_utf8 = OsString::from_vec(vec![0xff, 0xfe]);
+            super::run_with_process_env(&[String::from("--headless-once")], None, None, |key| {
+                if key == "LUMENCRAFT_CONTROL_PORT" { Some(non_utf8.clone()) } else { None }
+            })?;
+            let token_err = super::run_with_process_env(&[String::from("--control"), String::from("9126")], None, None, |key| {
+                if key == "LUMENCRAFT_CONTROL_TOKEN" { Some(non_utf8.clone()) } else { None }
+            })
+            .expect_err("non-UTF-8 token must fail when --control is enabled");
+            assert!(token_err.contains("LUMENCRAFT_CONTROL_TOKEN"));
+        }
+
+        // 2. `--` ends option parsing so `-`-prefixed file paths are accepted, while bare `-` flags are still rejected.
+        let dash_err = super::parse_args_with_env(&[String::from("-data.csv")], None, None).expect_err("bare -data.csv must be rejected");
+        assert!(dash_err.contains("unknown option"));
+        assert!(dash_err.contains("--"));
+
+        let terminated = super::parse_args_with_env(
+            &[
+                String::from("--headless-once"),
+                String::from("--"),
+                String::from("-data.csv"),
+                String::from("--help"),
+                String::from("-V"),
+                String::from("--control"),
+                String::from("--"),
+            ],
+            None,
+            None,
+        )?;
+        let CliAction::Launch(term_cfg) = terminated else {
+            return Err(String::from("expected Launch action for post-`--` args").into());
+        };
+        assert!(term_cfg.headless_once);
+        assert_eq!(
+            term_cfg.files,
+            vec![PathBuf::from("-data.csv"), PathBuf::from("--help"), PathBuf::from("-V"), PathBuf::from("--control"), PathBuf::from("--"),]
+        );
+
+        let empty_terminated = super::parse_args_with_env(&[String::from("--")], None, None)?;
+        let CliAction::Launch(empty_term_cfg) = empty_terminated else {
+            return Err(String::from("expected Launch action for bare `--`").into());
+        };
+        assert!(empty_term_cfg.files.is_empty());
+
+        // 3. `--new-instance` opens an isolated recovery dir without colliding on an active primary lock.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("lc-main-s11-13-{}-{nanos}", std::process::id()));
+        let paths = super::resolve_app_paths(None, Some(&dir))?;
+        std::fs::create_dir_all(&paths.recovery_dir)?;
+
+        let (_primary_session, primary_journal, _report) =
+            lumencraft_engine::Session::open_dir_with_recovery(&paths.recovery_dir, "active-primary", 300_000, super::now_epoch_ms())?;
+
+        let single_cfg = LaunchConfig { headless_once: true, portable_dir: Some(dir.clone()), new_instance: false, ..LaunchConfig::default() };
+        assert!(super::launch_application_with_env(&single_cfg, |_| None).is_err(), "single-instance launch must fail when primary lock is held");
+
+        let dash_csv = dir.join("-data.csv");
+        std::fs::write(&dash_csv, "X,Y\n1,2\n3,4\n")?;
+        let new_inst_cfg = LaunchConfig {
+            headless_once: true,
+            portable_dir: Some(dir.clone()),
+            new_instance: true,
+            files: vec![dash_csv],
+            ..LaunchConfig::default()
+        };
+        super::launch_application_with_env(&new_inst_cfg, |_| None)?;
+        assert!(paths.recovery_dir.join(lumencraft_format::LOCKFILE_NAME).is_file(), "primary lock must remain untouched");
+
+        drop(primary_journal.abandon());
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }
