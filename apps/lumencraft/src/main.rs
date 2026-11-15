@@ -17,7 +17,9 @@ use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use lumencraft_ui_egui::dialogs_canvas::render_workspace_frame_png;
 use lumencraft_ui_egui::interaction::ViewportMetrics;
 use lumencraft_ui_egui::theme::install_fonts;
-use lumencraft_ui_egui::{ControlAuth, UiApp, bind_control_tcp_listener, parse_control_port, validate_loopback_addr};
+use lumencraft_ui_egui::{
+    ControlAuth, UiApp, bind_control_tcp_listener, parse_control_port, serve_control_listener_with_hook, validate_loopback_addr,
+};
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
 
@@ -368,7 +370,8 @@ fn run_authenticated_control_server(win: &mut DesktopWindowSession, port: u16, c
     let token_path = control_token_file_path(&app_paths.config_dir, port);
     write_control_token_file(&token_path, &auth)?;
     let _token_guard = ControlTokenFileGuard { path: token_path };
-    win.serve_control_listener(&listener, &auth).map_err(|err| format!("control server I/O error: {err}"))
+    win.with_control_journal_hook(|app, on_post_request| serve_control_listener_with_hook(app, &listener, &auth, on_post_request))
+        .map_err(|err| format!("control server I/O error: {err}"))
 }
 
 fn should_persist_preferences(app: &UiApp, paths: &AppPaths) -> Result<bool, String> {

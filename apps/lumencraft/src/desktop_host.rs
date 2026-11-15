@@ -7,7 +7,6 @@
 use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{BufRead, Write};
-use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -22,8 +21,8 @@ use lumencraft_ui_egui::interaction::{KeyModifiers, PointerButton, UiEventOutcom
 use lumencraft_ui_egui::menus::{MenuSectionTooltips, menu_bar_tooltips};
 use lumencraft_ui_egui::theme::UiThemeMode;
 use lumencraft_ui_egui::{
-    ClipboardBundle, ControlAuth, ControlPostRequestContext, UiApp, dispatch_ui_command, read_os_pasteboard, serve_control_listener_with_hook,
-    serve_control_stream_with_quit_and_hook, write_os_clipboard_bundle, write_os_pasteboard,
+    ClipboardBundle, ControlAuth, ControlPostRequestContext, UiApp, dispatch_ui_command, read_os_pasteboard, serve_control_stream_with_quit_and_hook,
+    write_os_clipboard_bundle, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -733,18 +732,20 @@ impl DesktopWindowSession {
         Ok(outcome)
     }
 
-    /// Serve authenticated TCP `--control` requests while recording every mutating engine/UI step
-    /// into this window's crash-recovery journal before responding.
-    ///
-    /// # Errors
-    /// Propagates listener accept or I/O errors.
-    pub fn serve_control_listener(&mut self, listener: &TcpListener, auth: &ControlAuth) -> std::io::Result<()> {
+    /// Run a transport-supplied control server closure against this window's [`UiApp`] while
+    /// recording every mutating engine/UI step into this window's crash-recovery journal before
+    /// responding.
+    pub fn with_control_journal_hook<T>(
+        &mut self,
+        runner: impl FnOnce(&mut UiApp, &mut dyn FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>) -> T,
+    ) -> T {
         let app = &mut self.app;
         let recovery_journal = &mut self.recovery_journal;
         let dirty_commands = &mut self.dirty_commands;
-        serve_control_listener_with_hook(app, listener, auth, |app_ref, hook_ctx| {
+        let mut on_post_request = |app_ref: &UiApp, hook_ctx: &ControlPostRequestContext<'_>| {
             apply_control_journal_steps(app_ref, recovery_journal, dirty_commands, hook_ctx)
-        })
+        };
+        runner(app, &mut on_post_request)
     }
 
     /// Serve authenticated stream control requests (`BufRead`/`Write`) while recording every
@@ -758,12 +759,7 @@ impl DesktopWindowSession {
         writer: &mut W,
         auth: &ControlAuth,
     ) -> std::io::Result<bool> {
-        let app = &mut self.app;
-        let recovery_journal = &mut self.recovery_journal;
-        let dirty_commands = &mut self.dirty_commands;
-        serve_control_stream_with_quit_and_hook(app, reader, writer, auth, |app_ref, hook_ctx| {
-            apply_control_journal_steps(app_ref, recovery_journal, dirty_commands, hook_ctx)
-        })
+        self.with_control_journal_hook(|app, on_post_request| serve_control_stream_with_quit_and_hook(app, reader, writer, auth, on_post_request))
     }
 
     /// Persist a full `.lumencraft` recovery snapshot and truncate replayed WAL entries.
