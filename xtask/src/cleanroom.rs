@@ -1,25 +1,35 @@
 //! `cargo xtask cleanroom`: ensure no vendor copyright notices or vendor-authored project
 //! artifacts are committed to the repository (`AGENTS.md` › Non-negotiables).
 
+use std::collections::HashSet;
 use std::path::Path;
 
-/// Forbidden vendor copyright or creator signatures in source/test fixtures.
-const FORBIDDEN_SIGNATURES: &[&str] = &[
-    "copyright (c) graphpad",
-    "copyright graphpad software",
-    "all rights reserved. graphpad",
-    "dotmatics limited. all rights reserved",
-    "<GraphPadPrismFile",
-    "Created by GraphPad",
-];
+use lumencraft_format::{ZipArchive, ZipLimits};
 
 const SELF: &str = "xtask/src/cleanroom.rs";
+const AUDIT_DIR_PREFIX: &str = "docs/audit/";
+const MAX_SAME_LINE_GAP: usize = 120;
+const MAX_ADJACENT_LINE_GAP: usize = 80;
+const MAX_ARCHIVE_DEPTH: usize = 2;
+
+const CLEANROOM_ZIP_LIMITS: ZipLimits =
+    ZipLimits { max_entries: 1_024, max_total_uncompressed_bytes: 32 * 1024 * 1024, max_entry_uncompressed_bytes: 16 * 1024 * 1024 };
+
+const VENDOR_SIGNATURES: &[(&str, &str)] =
+    &[("graphpad", "vendor copyright notice (graphpad)"), ("dotmatics", "vendor copyright notice (dotmatics)")];
 
 #[derive(Debug, PartialEq, Eq)]
 pub struct CleanroomHit {
     pub path: String,
     pub line: usize,
     pub signature: &'static str,
+}
+
+#[derive(Clone, Copy)]
+enum Boundary {
+    None,
+    Alnum,
+    NotIdent,
 }
 
 pub fn run(root: &Path) -> Result<(), String> {
@@ -37,34 +47,287 @@ pub fn run(root: &Path) -> Result<(), String> {
 pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
     let mut hits = Vec::new();
     for path in files {
-        if path == SELF {
+        if should_skip(path) {
             continue;
         }
         let Ok(bytes) = std::fs::read(root.join(path)) else {
+            hits.push(CleanroomHit { path: path.clone(), line: 1, signature: "unreadable file" });
             continue;
         };
-        let text = String::from_utf8_lossy(&bytes);
-        for (idx, line) in text.lines().enumerate() {
-            let lower = line.to_ascii_lowercase();
-            for &sig in FORBIDDEN_SIGNATURES {
-                let sig_match = if sig.starts_with('<') || sig.starts_with("Created ") { line.contains(sig) } else { lower.contains(sig) };
-                if sig_match {
-                    hits.push(CleanroomHit { path: path.clone(), line: idx + 1, signature: sig });
-                }
-            }
-        }
+        scan_bytes_recursive(path, &bytes, 0, &mut hits);
     }
     hits
 }
 
+fn should_skip(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    trimmed == SELF || trimmed == "docs/audit" || trimmed.starts_with(AUDIT_DIR_PREFIX)
+}
+
+fn has_extension_ci(path: &str, exts: &[&str]) -> bool {
+    let Some(ext) = Path::new(path).extension().and_then(|e| e.to_str()) else {
+        return false;
+    };
+    exts.iter().any(|candidate| ext.eq_ignore_ascii_case(candidate))
+}
+
+fn scan_bytes_recursive(display_path: &str, bytes: &[u8], depth: usize, hits: &mut Vec<CleanroomHit>) {
+    let is_vendor_archive = has_extension_ci(display_path, &["prism", "pzf"]);
+    let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
+
+    if is_vendor_archive || is_zip {
+        if depth >= MAX_ARCHIVE_DEPTH {
+            if is_vendor_archive {
+                hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "nested archive depth exceeded" });
+            }
+            return;
+        }
+        if let Ok(archive) = ZipArchive::from_bytes_with_limits(bytes, CLEANROOM_ZIP_LIMITS) {
+            for (entry_name, entry_bytes) in archive.iter() {
+                let entry_path = format!("{display_path}!{entry_name}");
+                let mut name_seen = HashSet::new();
+                scan_text(&entry_path, entry_name, hits, &mut name_seen);
+                scan_bytes_recursive(&entry_path, entry_bytes, depth + 1, hits);
+            }
+            return;
+        }
+        let before = hits.len();
+        scan_text_bytes(display_path, bytes, hits);
+        if is_vendor_archive && hits.len() == before {
+            hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "uninspectable .prism/.pzf archive" });
+        }
+        return;
+    }
+
+    scan_text_bytes(display_path, bytes, hits);
+}
+
+fn scan_text_bytes(display_path: &str, bytes: &[u8], hits: &mut Vec<CleanroomHit>) {
+    let mut seen_lines = HashSet::new();
+    if bytes.starts_with(&[0xFF, 0xFE]) {
+        let decoded = decode_utf16(bytes.get(2..).unwrap_or_default(), true);
+        scan_text(display_path, &decoded, hits, &mut seen_lines);
+        return;
+    }
+    if bytes.starts_with(&[0xFE, 0xFF]) {
+        let decoded = decode_utf16(bytes.get(2..).unwrap_or_default(), false);
+        scan_text(display_path, &decoded, hits, &mut seen_lines);
+        return;
+    }
+    if let Some(stripped) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
+        let text = String::from_utf8_lossy(stripped);
+        scan_text(display_path, &text, hits, &mut seen_lines);
+        return;
+    }
+    if let Some(little_endian) = detect_bomless_utf16(bytes) {
+        let decoded = decode_utf16(bytes, little_endian);
+        scan_text(display_path, &decoded, hits, &mut seen_lines);
+    }
+    let text = String::from_utf8_lossy(bytes);
+    scan_text(display_path, &text, hits, &mut seen_lines);
+}
+
+fn detect_bomless_utf16(bytes: &[u8]) -> Option<bool> {
+    if bytes.len() < 8 || !bytes.contains(&0) {
+        return None;
+    }
+    let mut le_ascii = 0usize;
+    let mut be_ascii = 0usize;
+    let (pairs, _) = bytes.as_chunks::<2>();
+    let total_pairs = pairs.len();
+    for &[a, b] in pairs {
+        if a != 0 && (a.is_ascii_graphic() || a.is_ascii_whitespace()) && b == 0 {
+            le_ascii += 1;
+        } else if a == 0 && b != 0 && (b.is_ascii_graphic() || b.is_ascii_whitespace()) {
+            be_ascii += 1;
+        }
+    }
+    if le_ascii >= 4 && le_ascii * 4 >= total_pairs && le_ascii > be_ascii.saturating_mul(2) {
+        Some(true)
+    } else if be_ascii >= 4 && be_ascii * 4 >= total_pairs && be_ascii > le_ascii.saturating_mul(2) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
+    let (pairs, remainder) = bytes.as_chunks::<2>();
+    let units = pairs.iter().map(|&arr| if little_endian { u16::from_le_bytes(arr) } else { u16::from_be_bytes(arr) });
+    let mut out = String::with_capacity(pairs.len());
+    for ch in char::decode_utf16(units) {
+        out.push(ch.unwrap_or('\u{FFFD}'));
+    }
+    if !remainder.is_empty() {
+        out.push('\u{FFFD}');
+    }
+    out
+}
+
+fn scan_text(display_path: &str, text: &str, hits: &mut Vec<CleanroomHit>, seen_lines: &mut HashSet<usize>) {
+    let normalized: Vec<String> = text.lines().map(normalize_line).collect();
+    for (idx, norm) in normalized.iter().enumerate() {
+        let line_no = idx + 1;
+        if let Some(sig) = match_single_line(norm)
+            && seen_lines.insert(line_no)
+        {
+            hits.push(CleanroomHit { path: display_path.to_owned(), line: line_no, signature: sig });
+        }
+    }
+    for idx in 0..normalized.len().saturating_sub(1) {
+        let line_no = idx + 1;
+        if seen_lines.contains(&line_no) || seen_lines.contains(&(line_no + 1)) {
+            continue;
+        }
+        if let (Some(first), Some(second)) = (normalized.get(idx), normalized.get(idx + 1)) {
+            let joined = format!("{first} {second}");
+            if let Some(sig) = match_created_or_notice(&joined, MAX_ADJACENT_LINE_GAP)
+                && seen_lines.insert(line_no)
+            {
+                hits.push(CleanroomHit { path: display_path.to_owned(), line: line_no, signature: sig });
+            }
+        }
+    }
+}
+
+fn normalize_line(line: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut prev_space = false;
+    for ch in line.chars() {
+        if ch.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+        } else {
+            out.push(ch.to_ascii_lowercase());
+            prev_space = false;
+        }
+    }
+    out
+}
+
+fn match_single_line(norm: &str) -> Option<&'static str> {
+    if norm.contains("<graphpadprismfile") {
+        return Some("<GraphPadPrismFile");
+    }
+    match_created_or_notice(norm, MAX_SAME_LINE_GAP)
+}
+
+fn match_created_or_notice(norm: &str, max_gap: usize) -> Option<&'static str> {
+    let mut created = Vec::new();
+    collect_spans(norm, "created by graphpad", Boundary::Alnum, Boundary::Alnum, &mut created);
+    if !created.is_empty() {
+        return Some("Created by GraphPad");
+    }
+    has_nearby_vendor_notice(norm, max_gap)
+}
+
+fn has_nearby_vendor_notice(norm: &str, max_gap: usize) -> Option<&'static str> {
+    let indicators = find_indicator_spans(norm);
+    if indicators.is_empty() {
+        return None;
+    }
+    for &(vendor, sig) in VENDOR_SIGNATURES {
+        let mut vendor_spans = Vec::new();
+        collect_spans(norm, vendor, Boundary::Alnum, Boundary::None, &mut vendor_spans);
+        if has_nearby_pair(&vendor_spans, &indicators, max_gap) {
+            return Some(sig);
+        }
+    }
+    None
+}
+
+fn find_indicator_spans(norm: &str) -> Vec<(usize, usize)> {
+    let mut out = Vec::new();
+    collect_spans(norm, "copyright", Boundary::Alnum, Boundary::Alnum, &mut out);
+    collect_spans(norm, "all rights reserved", Boundary::Alnum, Boundary::Alnum, &mut out);
+    collect_spans(norm, "(c)", Boundary::NotIdent, Boundary::None, &mut out);
+    collect_spans(norm, "©", Boundary::None, Boundary::None, &mut out);
+    collect_spans(norm, "&copy;", Boundary::None, Boundary::None, &mut out);
+    collect_spans(norm, "&#169;", Boundary::None, Boundary::None, &mut out);
+    collect_spans(norm, "&#xa9;", Boundary::None, Boundary::None, &mut out);
+    collect_spans(norm, "&#x00a9;", Boundary::None, Boundary::None, &mut out);
+    out
+}
+
+fn has_nearby_pair(a: &[(usize, usize)], b: &[(usize, usize)], max_gap: usize) -> bool {
+    for &(a_start, a_end) in a {
+        for &(b_start, b_end) in b {
+            let gap = if a_end <= b_start { b_start - a_end } else { a_start.saturating_sub(b_end) };
+            if gap <= max_gap {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn boundary_ok(byte: Option<u8>, rule: Boundary) -> bool {
+    match (rule, byte) {
+        (Boundary::None, _) | (_, None) => true,
+        (Boundary::Alnum, Some(b)) => !b.is_ascii_alphanumeric(),
+        (Boundary::NotIdent, Some(b)) => !(b.is_ascii_alphanumeric() || b == b'_'),
+    }
+}
+
+fn collect_spans(haystack: &str, needle: &str, left: Boundary, right: Boundary, out: &mut Vec<(usize, usize)>) {
+    let bytes = haystack.as_bytes();
+    let nlen = needle.len();
+    let mut start = 0;
+    while let Some(slice) = haystack.get(start..)
+        && let Some(rel) = slice.find(needle)
+    {
+        let pos = start + rel;
+        let end = pos + nlen;
+        let prev = pos.checked_sub(1).and_then(|i| bytes.get(i).copied());
+        let next = bytes.get(end).copied();
+        if boundary_ok(prev, left) && boundary_ok(next, right) {
+            out.push((pos, end));
+        }
+        start = pos.saturating_add(1);
+        while start < bytes.len() && !haystack.is_char_boundary(start) {
+            start += 1;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::scan;
+    use lumencraft_format::ZipWriter;
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use super::{run, scan};
+
+    fn temp_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lc-cleanroom-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+    }
+
+    fn to_utf16_bytes(s: &str, little_endian: bool, include_bom: bool) -> Vec<u8> {
+        let mut out = Vec::new();
+        if include_bom {
+            out.extend_from_slice(if little_endian { &[0xFF, 0xFE] } else { &[0xFE, 0xFF] });
+        }
+        for unit in s.encode_utf16() {
+            let bytes = if little_endian { unit.to_le_bytes() } else { unit.to_be_bytes() };
+            out.extend_from_slice(&bytes);
+        }
+        out
+    }
 
     #[test]
     fn flags_vendor_xml_fixture_and_copyright() {
-        let dir = std::env::temp_dir().join(format!("lc-cleanroom-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = temp_dir("basic");
         std::fs::write(dir.join("bad.xml"), "<?xml version=\"1.0\"?>\n<GraphPadPrismFile PrismXMLVersion=\"5.00\"/>\n").unwrap();
         std::fs::write(dir.join("ok.rs"), "// Clean-room Rust implementation\n").unwrap();
         let files = vec![String::from("bad.xml"), String::from("ok.rs")];
@@ -73,5 +336,125 @@ mod tests {
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].path, "bad.xml");
         assert_eq!(hits[0].line, 2);
+    }
+
+    #[test]
+    fn flags_year_and_symbol_copyright_notices() {
+        let dir = temp_dir("notices");
+        std::fs::write(
+            dir.join("notices.xml"),
+            "<!-- Copyright (c) 2024 GraphPad Software, LLC. All rights reserved. -->\n\
+             <!-- © 2024 Dotmatics. All rights reserved. -->\n\
+             <!-- Copyright (c) 2020 GraphPad Example -->\n\
+             <!-- Copyright (c) 2024\n\
+                  GraphPad Software -->\n",
+        )
+        .unwrap();
+        let files = vec![String::from("notices.xml")];
+        let hits = scan(&dir, &files);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(hits.len(), 4, "{hits:?}");
+        assert_eq!(hits[0].line, 1);
+        assert_eq!(hits[1].line, 2);
+        assert_eq!(hits[2].line, 3);
+        assert_eq!(hits[3].line, 4);
+    }
+
+    #[test]
+    fn flags_utf16_le_and_be_with_or_without_bom() {
+        let dir = temp_dir("utf16");
+        let xml = "<?xml version=\"1.0\" encoding=\"UTF-16\"?>\n<GraphPadPrismFile PrismXMLVersion=\"5.00\"/>\n";
+        let notice = "© 2024 Dotmatics. All rights reserved.\n";
+
+        std::fs::write(dir.join("le_bom.pzfx"), to_utf16_bytes(xml, true, true)).unwrap();
+        std::fs::write(dir.join("be_bom.pzfx"), to_utf16_bytes(xml, false, true)).unwrap();
+        std::fs::write(dir.join("le_nobom.pzfx"), to_utf16_bytes(notice, true, false)).unwrap();
+        std::fs::write(dir.join("be_nobom.pzfx"), to_utf16_bytes(notice, false, false)).unwrap();
+
+        let files = vec![String::from("le_bom.pzfx"), String::from("be_bom.pzfx"), String::from("le_nobom.pzfx"), String::from("be_nobom.pzfx")];
+        let hits = scan(&dir, &files);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(hits.len(), 4, "{hits:?}");
+        assert_eq!(hits[0].path, "le_bom.pzfx");
+        assert_eq!(hits[0].line, 2);
+        assert_eq!(hits[1].path, "be_bom.pzfx");
+        assert_eq!(hits[1].line, 2);
+        assert_eq!(hits[2].path, "le_nobom.pzfx");
+        assert_eq!(hits[3].path, "be_nobom.pzfx");
+    }
+
+    #[test]
+    fn inspects_prism_and_pzf_archives_and_allows_clean_archives() {
+        let dir = temp_dir("archives");
+
+        let mut bad_zw = ZipWriter::new();
+        bad_zw.add_file("manifest.json", br#"{"title":"Sample"}"#.to_vec()).unwrap();
+        bad_zw.add_file("data/project.pzfx", to_utf16_bytes("<GraphPadPrismFile PrismXMLVersion=\"5.0\"/>", true, true)).unwrap();
+        std::fs::write(dir.join("vendor.prism"), bad_zw.finish().unwrap()).unwrap();
+
+        let mut notice_zw = ZipWriter::new();
+        notice_zw.add_file("meta/license.txt", b"Copyright (c) 2024 GraphPad Software, LLC. All rights reserved.\n".to_vec()).unwrap();
+        std::fs::write(dir.join("notice.pzf"), notice_zw.finish().unwrap()).unwrap();
+
+        std::fs::write(dir.join("opaque.pzf"), b"LEGACY_BINARY_PZF_HEADER\x00\x01\x02\x03").unwrap();
+
+        let mut clean_zw = ZipWriter::new();
+        clean_zw.add_file("manifest.json", br#"{"title":"Clean Experiment"}"#.to_vec()).unwrap();
+        clean_zw.add_file("data/dose.csv", b"X,Y\n1,2\n".to_vec()).unwrap();
+        std::fs::write(dir.join("clean.prism"), clean_zw.finish().unwrap()).unwrap();
+
+        let files = vec![String::from("vendor.prism"), String::from("notice.pzf"), String::from("opaque.pzf"), String::from("clean.prism")];
+        let hits = scan(&dir, &files);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(hits.len(), 3, "{hits:?}");
+        assert_eq!(hits[0].path, "vendor.prism!data/project.pzfx");
+        assert_eq!(hits[1].path, "notice.pzf!meta/license.txt");
+        assert_eq!(hits[2].path, "opaque.pzf");
+    }
+
+    #[test]
+    fn skips_audit_docs_and_ignores_benign_c_ident_or_plain_links() {
+        let dir = temp_dir("skip-and-benign");
+        std::fs::create_dir_all(dir.join("docs/audit/findings")).unwrap();
+        std::fs::write(
+            dir.join("docs/audit/findings/S13.md"),
+            "Copyright (c) 2024 GraphPad Software, LLC. All rights reserved.\n<GraphPadPrismFile/>\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("benign.rs"),
+            "const VENDOR: &str = \"graphpad\";\n// https://www.graphpad.com/guides/prism/latest/\nwhile let Some(c) = chars.next() {}\n",
+        )
+        .unwrap();
+        let files = vec![String::from("docs/audit/findings/S13.md"), String::from("benign.rs")];
+        let hits = scan(&dir, &files);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(hits.is_empty(), "{hits:?}");
+    }
+
+    #[test]
+    fn run_catches_non_ascii_utf16_and_zip_probes_while_allowing_audit_docs() {
+        let dir = temp_dir("git-e2e");
+        run_git(&dir, &["init"]);
+        std::fs::create_dir_all(dir.join("docs/audit/findings")).unwrap();
+        std::fs::write(
+            dir.join("docs/audit/findings/S13.md"),
+            "Copyright (c) 2024 GraphPad Software, LLC. All rights reserved.\n<GraphPadPrismFile/>\n",
+        )
+        .unwrap();
+        assert!(run(&dir).is_ok());
+
+        std::fs::create_dir_all(dir.join("fixtures")).unwrap();
+        std::fs::write(dir.join("fixtures/données.pzfx"), to_utf16_bytes("<GraphPadPrismFile PrismXMLVersion=\"5.0\"/>", true, true)).unwrap();
+
+        let mut zw = ZipWriter::new();
+        zw.add_file("inner.xml", b"<!-- \xC2\xA9 2024 Dotmatics. All rights reserved. -->\n".to_vec()).unwrap();
+        std::fs::write(dir.join("fixtures/résumé.prism"), zw.finish().unwrap()).unwrap();
+
+        run_git(&dir, &["add", "--", "docs", "fixtures"]);
+        let err = run(&dir).unwrap_err();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(err.contains("fixtures/données.pzfx"), "{err}");
+        assert!(err.contains("fixtures/résumé.prism!inner.xml"), "{err}");
     }
 }

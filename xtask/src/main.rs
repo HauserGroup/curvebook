@@ -120,19 +120,39 @@ pub(crate) fn workspace_root() -> Result<PathBuf, String> {
 }
 
 pub(crate) fn repo_files(root: &Path) -> Result<Vec<String>, String> {
-    let out = Command::new("git")
-        .current_dir(root)
-        .args(["ls-files", "--cached", "--others", "--exclude-standard"])
-        .output()
-        .map_err(|e| format!("git ls-files: {e}"))?;
-    if !out.status.success() {
-        return Err(format!("git ls-files failed: {}", String::from_utf8_lossy(&out.stderr)));
-    }
-    let text = String::from_utf8(out.stdout).map_err(|e| format!("git ls-files utf-8: {e}"))?;
-    let mut files: Vec<String> = text.lines().filter(|l| !l.is_empty()).filter(|l| root.join(l).is_file()).map(str::to_owned).collect();
+    let listed = git_ls_files_nul(root, &["-c", "core.quotePath=false", "ls-files", "-z", "--cached", "--others", "--exclude-standard"])?;
+    let deleted: std::collections::HashSet<String> =
+        git_ls_files_nul(root, &["-c", "core.quotePath=false", "ls-files", "-z", "--deleted"])?.into_iter().collect();
+
+    let mut files: Vec<String> = listed.into_iter().filter(|p| !deleted.contains(p)).collect();
     files.sort();
     files.dedup();
+
+    for path in &files {
+        let full = root.join(path);
+        let meta = std::fs::symlink_metadata(&full).map_err(|e| format!("repo file `{path}` is not accessible: {e}"))?;
+        if !meta.file_type().is_file() {
+            return Err(format!("repo path `{path}` is not a regular file"));
+        }
+        std::fs::File::open(&full).map_err(|e| format!("repo file `{path}` cannot be opened for reading: {e}"))?;
+    }
     Ok(files)
+}
+
+fn git_ls_files_nul(root: &Path, args: &[&str]) -> Result<Vec<String>, String> {
+    let out = Command::new("git").current_dir(root).args(args).output().map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if !out.status.success() {
+        return Err(format!("git {} failed: {}", args.join(" "), String::from_utf8_lossy(&out.stderr)));
+    }
+    let mut paths = Vec::new();
+    for raw in out.stdout.split(|&b| b == 0) {
+        if raw.is_empty() {
+            continue;
+        }
+        let path = std::str::from_utf8(raw).map_err(|e| format!("git ls-files utf-8: {e}"))?;
+        paths.push(path.to_owned());
+    }
+    Ok(paths)
 }
 
 pub(crate) fn cargo_metadata(root: &Path) -> Result<json::Json, String> {
@@ -247,4 +267,93 @@ fn wasm_target_installed() -> bool {
     }
     let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
     std::fs::read_dir(dir).ok().into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with("libcore"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+    use std::process::Command;
+
+    use super::repo_files;
+
+    fn temp_git_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lc-xtask-main-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        run_git(&dir, &["init"]);
+        run_git(&dir, &["config", "user.name", "Test"]);
+        run_git(&dir, &["config", "user.email", "test@example.com"]);
+        dir
+    }
+
+    fn run_git(dir: &Path, args: &[&str]) {
+        let out = Command::new("git").current_dir(dir).args(args).output().unwrap();
+        assert!(out.status.success(), "git {:?} failed: {}", args, String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn repo_files_preserves_non_ascii_and_quoted_paths() {
+        let dir = temp_git_dir("non-ascii");
+        let tracked = ["assets/logó.png", "assets/a\"b.png", "crates/format/tests/fixtures/données.pzfx"];
+        for rel in tracked {
+            let path = dir.join(rel);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, b"fixture").unwrap();
+        }
+        run_git(&dir, &["add", "--", "assets", "crates"]);
+
+        let untracked = "packaging/linux/résumé.desktop";
+        let untracked_path = dir.join(untracked);
+        std::fs::create_dir_all(untracked_path.parent().unwrap()).unwrap();
+        std::fs::write(&untracked_path, b"[Desktop Entry]\n").unwrap();
+
+        let files = repo_files(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            files,
+            vec![
+                String::from("assets/a\"b.png"),
+                String::from("assets/logó.png"),
+                String::from("crates/format/tests/fixtures/données.pzfx"),
+                String::from("packaging/linux/résumé.desktop"),
+            ]
+        );
+    }
+
+    #[test]
+    fn repo_files_skips_deleted_tracked_files_without_failing() {
+        let dir = temp_git_dir("deleted");
+        std::fs::write(dir.join("kept.txt"), b"ok").unwrap();
+        std::fs::write(dir.join("removed.txt"), b"gone").unwrap();
+        run_git(&dir, &["add", "--", "kept.txt", "removed.txt"]);
+        run_git(&dir, &["commit", "-m", "initial"]);
+
+        std::fs::remove_file(dir.join("removed.txt")).unwrap();
+        let files = repo_files(&dir).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(files, vec![String::from("kept.txt")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repo_files_rejects_broken_symlink_and_unreadable_file() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir_sym = temp_git_dir("symlink");
+        symlink("/nonexistent/target", dir_sym.join("broken.txt")).unwrap();
+        run_git(&dir_sym, &["add", "--", "broken.txt"]);
+        let sym_res = repo_files(&dir_sym);
+        let _ = std::fs::remove_dir_all(&dir_sym);
+        assert!(sym_res.is_err(), "expected broken symlink to fail repo_files: {sym_res:?}");
+
+        let dir_perm = temp_git_dir("unreadable");
+        let secret = dir_perm.join("unreadable.txt");
+        std::fs::write(&secret, b"data").unwrap();
+        run_git(&dir_perm, &["add", "--", "unreadable.txt"]);
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let perm_res = repo_files(&dir_perm);
+        let _ = std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644));
+        let _ = std::fs::remove_dir_all(&dir_perm);
+        assert!(perm_res.is_err(), "expected unreadable file to fail repo_files: {perm_res:?}");
+    }
 }
