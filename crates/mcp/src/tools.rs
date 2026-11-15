@@ -3,6 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
@@ -36,6 +37,9 @@ pub trait GuiSessionHost {
     fn is_gui_only(&self) -> bool;
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+type LiveControlHandler = Box<dyn FnMut(&str, Value) -> Result<Value, String> + Send>;
+
 /// Stateful execution context shared across requests on an MCP server connection.
 pub struct McpServerState {
     pub(crate) session: Session,
@@ -43,6 +47,8 @@ pub struct McpServerState {
     control_port: Option<u16>,
     #[cfg(not(target_arch = "wasm32"))]
     control_token: Option<String>,
+    #[cfg(not(target_arch = "wasm32"))]
+    control_handler: Option<LiveControlHandler>,
     #[cfg(not(target_arch = "wasm32"))]
     workdir_guard: Option<WorkdirGuard>,
     gui_host: Option<Box<dyn GuiSessionHost>>,
@@ -60,6 +66,7 @@ impl fmt::Debug for McpServerState {
         #[cfg(not(target_arch = "wasm32"))]
         s.field("control_port", &self.control_port)
             .field("has_control_token", &self.control_token.is_some())
+            .field("has_control_handler", &self.control_handler.is_some())
             .field("workdir_guard", &self.workdir_guard);
         s.field("has_gui_host", &self.gui_host.is_some())
             .field("gui_only", &self.gui_only)
@@ -88,6 +95,8 @@ impl McpServerState {
             #[cfg(not(target_arch = "wasm32"))]
             control_token: None,
             #[cfg(not(target_arch = "wasm32"))]
+            control_handler: None,
+            #[cfg(not(target_arch = "wasm32"))]
             workdir_guard: None,
             gui_host: None,
             gui_only: false,
@@ -111,6 +120,8 @@ impl McpServerState {
             #[cfg(not(target_arch = "wasm32"))]
             control_token: None,
             #[cfg(not(target_arch = "wasm32"))]
+            control_handler: None,
+            #[cfg(not(target_arch = "wasm32"))]
             workdir_guard,
             gui_host: None,
             gui_only,
@@ -132,6 +143,7 @@ impl McpServerState {
             session: Session::new(),
             control_port: Some(port),
             control_token: None,
+            control_handler: None,
             workdir_guard: None,
             gui_host: None,
             gui_only: false,
@@ -151,6 +163,17 @@ impl McpServerState {
         Ok(state)
     }
 
+    /// Attach an in-process JSON-lines control dispatcher for sandboxed integration tests.
+    #[doc(hidden)]
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn with_control_handler<F>(mut self, handler: F) -> Self
+    where
+        F: FnMut(&str, Value) -> Result<Value, String> + Send + 'static,
+    {
+        self.control_handler = Some(Box::new(handler));
+        self
+    }
+
     /// Construct a headless MCP server state whose file operations are confined strictly inside `workdir`.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_workdir(workdir: &Path) -> Result<Self, PlatformError> {
@@ -160,6 +183,7 @@ impl McpServerState {
             session,
             control_port: None,
             control_token: None,
+            control_handler: None,
             workdir_guard: Some(guard),
             gui_host: None,
             gui_only: false,
@@ -182,6 +206,8 @@ impl McpServerState {
             control_port: None,
             #[cfg(not(target_arch = "wasm32"))]
             control_token: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            control_handler: None,
             #[cfg(not(target_arch = "wasm32"))]
             workdir_guard: None,
             gui_host: Some(host),
@@ -300,11 +326,26 @@ impl McpServerState {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    fn resolved_control_token(&self, port: u16) -> Result<Option<String>, StructuredErrorPayload> {
+    pub(crate) fn resolved_control_token(&self, port: u16) -> Result<Option<String>, StructuredErrorPayload> {
         if let Some(ref explicit) = self.control_token {
             return Ok(Some(explicit.clone()));
         }
         live_control::resolve_default_control_token(port)
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_live_control(&mut self, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
+        let Some(port) = self.control_port() else {
+            return Err(StructuredErrorPayload::new(ErrorCode::Conflict, "live control request attempted without an attached --control-port"));
+        };
+        if let Some(ref mut handler) = self.control_handler {
+            return (handler)(method, params).map_err(|msg| {
+                let code = if msg.to_ascii_lowercase().contains("not found") { ErrorCode::NotFound } else { ErrorCode::BadInput };
+                StructuredErrorPayload::new(code, msg)
+            });
+        }
+        let token = self.resolved_control_token(port)?;
+        live_control::send_control_detailed_with_token(port, token.as_deref(), method, params)
     }
 
     /// Borrow the set of currently enabled per-command toolset groups.
@@ -662,8 +703,14 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                     "all_graphs": { "type": "boolean" },
                     "svg_precision": { "type": "integer", "minimum": 1, "maximum": 8 },
                     "pretty": { "type": "boolean" },
-                    "tidy": { "type": "boolean" },
-                    "tab_id": { "type": "string" },
+                    "tidy": {
+                        "type": "boolean",
+                        "description": "Export ResultSheet in tidy long format (defaults to true when tab_id is omitted, and false when tab_id is supplied; passing tidy: true with tab_id is rejected)."
+                    },
+                    "tab_id": {
+                        "type": "string",
+                        "description": "Specific ResultSheet tab ID to export via CSV (defaults tidy to false when omitted)."
+                    },
                     "csv_delimiter": { "type": "string" }
                 },
                 "additionalProperties": false
@@ -751,7 +798,7 @@ fn dispatch_tool_inner(state: &mut McpServerState, name: &str, arguments: Value)
         "doc_inspect" => handle_doc_inspect(state, args),
         "open_file" => formats::handle_open_file(state, args),
         "save_file" => formats::handle_save_file(state, args),
-        "command_list" => handle_command_list(args),
+        "command_list" => handle_command_list(state, args),
         "command_run" => handle_command_run(state, args),
         "command_batch" => handle_command_batch(state, args),
         "render_preview" => formats::handle_render_preview(state, args),
@@ -787,9 +834,8 @@ pub(crate) fn dispatch_gui_backend(state: &mut McpServerState, method: &str, par
         return host.call_gui(method, params).map_err(|err| StructuredErrorPayload::from_engine_error(&err));
     }
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(port) = state.control_port() {
-        let token = state.resolved_control_token(port)?;
-        return live_control::send_control_detailed_with_token(port, token.as_deref(), method, params);
+    if state.control_port().is_some() {
+        return state.send_live_control(method, params);
     }
     Err(StructuredErrorPayload::new(
         ErrorCode::Conflict,
@@ -809,24 +855,37 @@ fn handle_direct_command_tool(state: &mut McpServerState, command_id: &str, para
     }
 }
 
-fn handle_doc_inspect(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let include_cells = optional_bool(args, "include_cells")?.unwrap_or(false);
 
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(port) = state.control_port()
-        && sheet_id.is_none()
-    {
-        let token = match state.resolved_control_token(port) {
-            Ok(tok) => tok,
-            Err(payload) => return Ok(errors::result_from_payload(&payload)),
-        };
-        return match live_control::send_control_detailed_with_token(port, token.as_deref(), "state.snapshot", json!({})) {
-            Ok(snapshot) => ToolCallResult::ok_json(&json!({
-                "mode": "live_attach",
-                "control_port": port,
-                "snapshot": snapshot,
-            })),
+    if let Some(port) = state.control_port() {
+        if sheet_id.is_none() && !include_cells {
+            return match state.send_live_control("state.snapshot", json!({})) {
+                Ok(snapshot) => ToolCallResult::ok_json(&json!({
+                    "mode": "live_attach",
+                    "control_port": port,
+                    "snapshot": snapshot,
+                })),
+                Err(payload) => Ok(errors::result_from_payload(&payload)),
+            };
+        }
+        let params = json!({
+            "sheet_id": sheet_id,
+            "include_cells": include_cells,
+        });
+        return match state.send_live_control("doc.inspect", params) {
+            Ok(mut remote) => {
+                if let Some(obj) = remote.as_object_mut() {
+                    if let Some(sec) = obj.get("section").and_then(Value::as_str) {
+                        obj.insert(String::from("section"), Value::String(sec.to_ascii_lowercase()));
+                    }
+                    obj.insert(String::from("mode"), Value::String(String::from("live_attach")));
+                    obj.insert(String::from("control_port"), json!(port));
+                }
+                ToolCallResult::ok_json(&remote)
+            }
             Err(payload) => Ok(errors::result_from_payload(&payload)),
         };
     }
@@ -1078,7 +1137,7 @@ fn collect_variables_and_hooks(doc: &ProjectDocument) -> (Value, Vec<Value>) {
     (variables, hooks)
 }
 
-fn handle_command_list(args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+fn handle_command_list(state: &McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let filter = optional_non_empty_str(args, "filter")?.map(|s| s.to_ascii_lowercase());
     let group_filter = match optional_non_empty_str(args, "group")? {
         Some(raw) => Some(parse_command_group(&raw)?),
@@ -1086,6 +1145,7 @@ fn handle_command_list(args: &Map<String, Value>) -> Result<ToolCallResult, Tool
     };
     let include_ui = optional_bool(args, "include_ui")?.unwrap_or(true);
     let ui_only = optional_bool(args, "ui_only")?.unwrap_or(false);
+    let attached = is_attached(state);
 
     let mut commands = Vec::new();
     if !ui_only {
@@ -1107,6 +1167,7 @@ fn handle_command_list(args: &Map<String, Value>) -> Result<ToolCallResult, Tool
                     "input_schema": (spec.input_schema)(),
                     "mcp_tool": command_id_to_mcp_tool_name(spec.id),
                     "ui": false,
+                    "available": true,
                 }));
             }
         }
@@ -1124,6 +1185,8 @@ fn handle_command_list(args: &Map<String, Value>) -> Result<ToolCallResult, Tool
                     "summary": spec.summary,
                     "beginner": spec.beginner,
                     "ui": true,
+                    "requires_live_attach": true,
+                    "available": attached,
                 }));
             }
         }
@@ -1131,6 +1194,8 @@ fn handle_command_list(args: &Map<String, Value>) -> Result<ToolCallResult, Tool
 
     ToolCallResult::ok_json(&json!({
         "count": commands.len(),
+        "live_attached": attached,
+        "mode": if attached { "live_attach" } else { "headless" },
         "commands": commands,
     }))
 }
@@ -1186,7 +1251,7 @@ fn execute_batch_items(state: &mut McpServerState, items: Vec<(String, Value)>, 
     for (idx, (command_id, params)) in items.into_iter().enumerate() {
         match execute_single_command(state, &command_id, params) {
             Ok(outcome) => {
-                if outcome.get("mutated").and_then(Value::as_bool) == Some(true) {
+                if outcome.get("mutated").and_then(Value::as_bool) == Some(true) && !is_ui_catalog_command(&command_id) && command_id != "ping" {
                     remote_mutated_steps = remote_mutated_steps.saturating_add(1);
                 }
                 outcomes.push(json!({ "index": idx, "ok": true, "outcome": outcome }));
@@ -1232,20 +1297,10 @@ fn rollback_batch(state: &mut McpServerState, snapshot: Option<Session>, remote_
         return true;
     }
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(port) = state.control_port() {
-        let Ok(token) = state.resolved_control_token(port) else {
-            return false;
-        };
+    if state.control_port().is_some() {
         let mut all_undone = true;
         for _ in 0..remote_mutated_steps {
-            if live_control::send_control_detailed_with_token(
-                port,
-                token.as_deref(),
-                "engine.execute",
-                json!({ "command_id": "edit.undo", "params": {} }),
-            )
-            .is_err()
-            {
+            if state.send_live_control("engine.execute", json!({ "command_id": "edit.undo", "params": {} })).is_err() {
                 all_undone = false;
                 break;
             }
@@ -1260,9 +1315,8 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
     formats::sanitize_command_params(state, &mut params)?;
 
     #[cfg(not(target_arch = "wasm32"))]
-    if let Some(port) = state.control_port() {
-        let token = state.resolved_control_token(port).map_err(engine_error_from_payload)?;
-        return execute_remote_command(port, token.as_deref(), command_id, params).map_err(engine_error_from_payload);
+    if state.control_port().is_some() {
+        return execute_remote_command(state, command_id, params).map_err(engine_error_from_payload);
     }
 
     if is_ui_catalog_command(command_id) {
@@ -1285,7 +1339,7 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn engine_error_from_payload(payload: StructuredErrorPayload) -> EngineError {
+pub(crate) fn engine_error_from_payload(payload: StructuredErrorPayload) -> EngineError {
     let mut err = EngineError::with_code(payload.code, payload.message);
     err.retryable = payload.retryable;
     err.remediation = payload.remediation;
@@ -1294,17 +1348,26 @@ fn engine_error_from_payload(payload: StructuredErrorPayload) -> EngineError {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn execute_remote_command(port: u16, token: Option<&str>, command_id: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
+fn is_readonly_ui_catalog_command(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "ui.screenshot" | "ui.canvas.preflight" | "ui.result.copyMethodsReport" | "ui.result.applyRemediation" | "ui.result.inspectDiagnostics"
+    )
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn execute_remote_command(state: &mut McpServerState, command_id: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
     if command_id == "ping" || is_ui_catalog_command(command_id) {
-        let res = live_control::send_control_detailed_with_token(port, token, command_id, params)?;
+        let res = state.send_live_control(command_id, params)?;
+        let mutated = res.get("mutated").and_then(Value::as_bool).unwrap_or(command_id != "ping" && !is_readonly_ui_catalog_command(command_id));
         return Ok(json!({
             "command_id": command_id,
-            "mutated": false,
+            "mutated": mutated,
             "live_attach": true,
             "result": res,
         }));
     }
-    live_control::send_control_detailed_with_token(port, token, "engine.execute", json!({ "command_id": command_id, "params": params }))
+    state.send_live_control("engine.execute", json!({ "command_id": command_id, "params": params }))
 }
 
 fn is_ui_catalog_command(command_id: &str) -> bool {
@@ -1406,6 +1469,54 @@ pub(crate) fn encode_base64(input: &[u8]) -> String {
     out
 }
 
+/// Decode standard RFC 4648 base64 (`=` padded).
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn decode_base64(input: &str) -> Result<Vec<u8>, String> {
+    let clean: Vec<u8> = input.bytes().filter(|b| !b.is_ascii_whitespace()).collect();
+    if !clean.len().is_multiple_of(4) {
+        return Err(String::from("invalid base64 length"));
+    }
+    let decode_val = |b: u8| -> Option<u8> {
+        match b {
+            b'A'..=b'Z' => Some(b - b'A'),
+            b'a'..=b'z' => Some(b - b'a' + 26),
+            b'0'..=b'9' => Some(b - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    };
+    let mut out = Vec::with_capacity((clean.len() / 4) * 3);
+    let (chunks, _) = clean.as_chunks::<4>();
+    for (chunk_idx, chunk) in chunks.iter().enumerate() {
+        let is_last = (chunk_idx + 1) * 4 == clean.len();
+        let a = decode_val(chunk[0]).ok_or_else(|| String::from("invalid base64 character"))?;
+        let b = decode_val(chunk[1]).ok_or_else(|| String::from("invalid base64 character"))?;
+        let pad_c = chunk[2] == b'=';
+        let pad_d = chunk[3] == b'=';
+        if (pad_c || pad_d) && !is_last {
+            return Err(String::from("unexpected base64 padding before final quantum"));
+        }
+        if pad_c && !pad_d {
+            return Err(String::from("invalid base64 padding"));
+        }
+        let c = if pad_c { 0 } else { decode_val(chunk[2]).ok_or_else(|| String::from("invalid base64 character"))? };
+        let d = if pad_d { 0 } else { decode_val(chunk[3]).ok_or_else(|| String::from("invalid base64 character"))? };
+        let triple = (u32::from(a) << 18) | (u32::from(b) << 12) | (u32::from(c) << 6) | u32::from(d);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            out.push(((triple >> 16) & 0xFF) as u8);
+            if !pad_c {
+                out.push(((triple >> 8) & 0xFF) as u8);
+            }
+            if !pad_d {
+                out.push((triple & 0xFF) as u8);
+            }
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 mod live_control {
     use std::ffi::OsString;
@@ -1451,34 +1562,122 @@ mod live_control {
         Ok(raw.to_owned())
     }
 
-    pub(crate) fn resolve_config_dir_with_env(env_get: &impl Fn(&str) -> Option<OsString>) -> PathBuf {
+    #[cfg(unix)]
+    fn current_unix_uid() -> Result<u32, StructuredErrorPayload> {
+        use std::os::unix::fs::MetadataExt;
+        static CACHED_UID: std::sync::OnceLock<Result<u32, String>> = std::sync::OnceLock::new();
+        CACHED_UID
+            .get_or_init(|| {
+                if let Ok(meta) = std::fs::metadata("/proc/self") {
+                    return Ok(meta.uid());
+                }
+                for bin in ["/usr/bin/id", "/bin/id", "id"] {
+                    if let Ok(output) = lumencraft_platform::ProcessCommand::new(bin).arg("-u").run()
+                        && output.success
+                    {
+                        let text = String::from_utf8_lossy(&output.stdout);
+                        if let Ok(uid) = text.trim().parse::<u32>() {
+                            return Ok(uid);
+                        }
+                    }
+                }
+                Err(String::from("unable to resolve current OS UID for private user directory fallback"))
+            })
+            .clone()
+            .map_err(|msg| StructuredErrorPayload::new(ErrorCode::BadInput, msg))
+    }
+
+    #[cfg(unix)]
+    fn verify_private_dir(path: &std::path::Path, expected_uid: u32, label: &str, must_exist: bool) -> Result<(), StructuredErrorPayload> {
+        use std::os::unix::fs::MetadataExt;
+        let meta = match std::fs::symlink_metadata(path) {
+            Ok(meta) => meta,
+            Err(err) if !must_exist && err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => {
+                return Err(StructuredErrorPayload::new(ErrorCode::BadInput, format!("failed to inspect {label} `{}`: {err}", path.display())));
+            }
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("refusing unsafe non-directory or symlink {label} `{}`", path.display()),
+            ));
+        }
+        if meta.uid() != expected_uid {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("refusing {label} `{}` owned by uid {} (expected uid {expected_uid})", path.display(), meta.uid()),
+            ));
+        }
+        if (meta.mode() & 0o077) != 0 {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::BadInput,
+                format!("refusing {label} `{}` with group/world permissions {:04o} (must be private 0700)", path.display(), meta.mode() & 0o777),
+            ));
+        }
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    fn resolve_unix_private_fallback_root(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, StructuredErrorPayload> {
+        let uid = current_unix_uid()?;
+        if let Some(raw_xdg_rt) = env_get("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
+            let rt_dir = PathBuf::from(raw_xdg_rt);
+            verify_private_dir(&rt_dir, uid, "XDG_RUNTIME_DIR", true)?;
+            let app_root = rt_dir.join("lumencraft");
+            verify_private_dir(&app_root, uid, "runtime directory", false)?;
+            return Ok(app_root);
+        }
+        let tmp_base = env_get("TMPDIR").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
+        let uid_root = tmp_base.join(format!("lumencraft-uid-{uid}"));
+        verify_private_dir(&uid_root, uid, "per-user fallback directory", false)?;
+        Ok(uid_root)
+    }
+
+    pub(crate) fn resolve_config_dir_with_env(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, StructuredErrorPayload> {
         let nonempty_path = |key: &str| env_get(key).filter(|v| !v.is_empty()).map(PathBuf::from);
+        if let Some(raw_cfg) = env_get("LUMENCRAFT_CONFIG_DIR").filter(|v| !v.to_string_lossy().trim().is_empty()) {
+            return Ok(PathBuf::from(raw_cfg));
+        }
 
         #[cfg(target_os = "macos")]
         {
-            nonempty_path("HOME")
-                .map(|h| h.join("Library").join("Application Support").join("LumenCraft"))
-                .unwrap_or_else(|| std::env::temp_dir().join("lumencraft"))
+            if let Some(home) = nonempty_path("HOME") {
+                return Ok(home.join("Library").join("Application Support").join("LumenCraft"));
+            }
+            resolve_unix_private_fallback_root(env_get)
         }
         #[cfg(target_os = "windows")]
         {
-            let fallback_base = nonempty_path("USERPROFILE")
-                .map(|h| h.join("AppData").join("Roaming").join("LumenCraft"))
-                .unwrap_or_else(|| std::env::temp_dir().join("lumencraft"));
-            nonempty_path("APPDATA").map(|p| p.join("LumenCraft")).unwrap_or(fallback_base)
+            let fallback_base = nonempty_path("USERPROFILE").map(|h| h.join("AppData").join("Roaming").join("LumenCraft"));
+            nonempty_path("APPDATA").map(|p| p.join("LumenCraft")).or(fallback_base).ok_or_else(|| {
+                StructuredErrorPayload::new(
+                    ErrorCode::BadInput,
+                    "cannot determine LumenCraft config directory: APPDATA and USERPROFILE are unset (set LUMENCRAFT_CONFIG_DIR)",
+                )
+            })
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
-            let home = nonempty_path("HOME");
-            nonempty_path("XDG_CONFIG_HOME")
+            if let Some(dir) = nonempty_path("XDG_CONFIG_HOME")
                 .map(|p| p.join("lumencraft"))
-                .or_else(|| home.map(|h| h.join(".config").join("lumencraft")))
-                .unwrap_or_else(|| std::env::temp_dir().join("lumencraft-config"))
+                .or_else(|| nonempty_path("HOME").map(|h| h.join(".config").join("lumencraft")))
+            {
+                return Ok(dir);
+            }
+            let uid = current_unix_uid()?;
+            let root = resolve_unix_private_fallback_root(env_get)?;
+            let cfg_dir = root.join("config");
+            verify_private_dir(&cfg_dir, uid, "per-user config fallback directory", false)?;
+            Ok(cfg_dir)
         }
     }
 
-    pub(crate) fn control_token_file_path_with_env(port: u16, env_get: &impl Fn(&str) -> Option<OsString>) -> PathBuf {
-        resolve_config_dir_with_env(env_get).join(format!("control-{port}.token"))
+    pub(crate) fn control_token_file_path_with_env(
+        port: u16,
+        env_get: &impl Fn(&str) -> Option<OsString>,
+    ) -> Result<PathBuf, StructuredErrorPayload> {
+        Ok(resolve_config_dir_with_env(env_get)?.join(format!("control-{port}.token")))
     }
 
     pub(crate) fn resolve_default_control_token(port: u16) -> Result<Option<String>, StructuredErrorPayload> {
@@ -1500,7 +1699,7 @@ mod live_control {
             }
         }
 
-        let path = control_token_file_path_with_env(port, env_get);
+        let path = control_token_file_path_with_env(port, env_get)?;
         let buf = match lumencraft_platform::fs::read_regular_file_bytes_if_exists(&path, MAX_CONTROL_TOKEN_FILE_BYTES) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
@@ -1794,6 +1993,113 @@ mod tests {
     }
 
     #[test]
+    fn r1_s12_09_headless_command_list_marks_ui_unavailable() {
+        let mut state = McpServerState::new();
+        let res = call_tool(&mut state, "command_list", json!({})).expect("command_list");
+        let parsed = res.structured_content.expect("structured_content");
+        assert_eq!(parsed["live_attached"], json!(false));
+        assert_eq!(parsed["mode"], json!("headless"));
+
+        let list = parsed["commands"].as_array().expect("commands array");
+        let engine_entry = list.iter().find(|c| c["id"] == "sheet.createData").expect("engine command");
+        assert_eq!(engine_entry["ui"], json!(false));
+        assert_eq!(engine_entry["available"], json!(true));
+        assert!(engine_entry.get("requires_live_attach").is_none());
+
+        for spec in UI_COMMANDS {
+            let ui_entry = list.iter().find(|c| c["id"] == spec.id).expect("ui entry");
+            assert_eq!(ui_entry["ui"], json!(true));
+            assert_eq!(ui_entry["available"], json!(false));
+            assert_eq!(ui_entry["requires_live_attach"], json!(true));
+        }
+    }
+
+    #[test]
+    fn r1_s12_07_csv_export_with_tab_id_defaults_tidy_false_and_rejects_tidy_true() {
+        use lumencraft_doc::{
+            AnalysisKind, AnalysisSpec, DataSheet, DescriptiveSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+            SubcolumnMode, TableArchetype, XyTable,
+        };
+        use lumencraft_engine::Session;
+
+        let mut doc = ProjectDocument::new("Tab Export Doc").expect("doc");
+        let xy = XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy");
+        let ds = DataSheet::new("ds-1", "InputData", TableArchetype::Xy(xy)).expect("ds");
+        doc.data_sheets.push(ds);
+        doc.active_sheet_id = Some(lumencraft_doc::SheetId::new("ds-1"));
+
+        let spec = AnalysisSpec::new("res-1", "ds-1", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).expect("spec");
+        let mut rs = ResultSheet::new(spec).expect("rs");
+        rs.status = ResultStatus::UpToDate;
+        rs.tabs.push(ResultTab {
+            id: String::from("tab-alpha"),
+            title: String::from("Alpha Tab"),
+            kind: ResultTabKind::DescriptiveSummary,
+            column_headers: vec![String::from("AlphaHeader")],
+            row_labels: vec![String::from("AlphaMetric")],
+            rows: vec![vec![ResultCell::Number { value: 11.0, prefix: None, units: None }]],
+            footnotes: Vec::new(),
+        });
+        rs.tabs.push(ResultTab {
+            id: String::from("tab-beta"),
+            title: String::from("Beta Tab"),
+            kind: ResultTabKind::MainSummary,
+            column_headers: vec![String::from("BetaHeader")],
+            row_labels: vec![String::from("BetaMetric")],
+            rows: vec![vec![ResultCell::Number { value: 22.0, prefix: None, units: None }]],
+            footnotes: Vec::new(),
+        });
+        doc.result_sheets.push(rs);
+
+        let mut state = McpServerState::from_session(Session::from_document(doc));
+
+        // Passing `sheet_id` + `tab_id` with `tidy` omitted must default `tidy` to false and export only `tab-beta`.
+        let exp_beta_explicit = call_tool(&mut state, "export", json!({ "format": "csv", "sheet_id": "res-1", "tab_id": "tab-beta" }))
+            .expect("export explicit sheet_id + tab-beta");
+        assert!(!exp_beta_explicit.is_error, "unexpected error: {exp_beta_explicit:?}");
+        let super::ContentBlock::Text { text: beta_csv } = &exp_beta_explicit.content[0] else {
+            panic!("expected csv text block");
+        };
+        assert!(beta_csv.contains("BetaHeader") && beta_csv.contains("BetaMetric") && beta_csv.contains("22"), "got: {beta_csv}");
+        assert!(!beta_csv.contains("AlphaHeader"), "unexpected alpha header in tab-beta CSV: {beta_csv}");
+
+        // Omitting both `sheet_id` and `tidy` while active sheet is a DataSheet must resolve the ResultSheet owning `tab_id`.
+        let exp_beta_implicit =
+            call_tool(&mut state, "export", json!({ "format": "csv", "tab_id": "tab-beta" })).expect("export implicit sheet + tab-beta");
+        assert!(!exp_beta_implicit.is_error, "unexpected error: {exp_beta_implicit:?}");
+        let super::ContentBlock::Text { text: beta_implicit_csv } = &exp_beta_implicit.content[0] else {
+            panic!("expected csv text block");
+        };
+        assert_eq!(beta_implicit_csv, beta_csv);
+
+        let exp_alpha = call_tool(&mut state, "export", json!({ "format": "csv", "tab_id": "tab-alpha" })).expect("export tab-alpha");
+        assert!(!exp_alpha.is_error, "unexpected error: {exp_alpha:?}");
+        let super::ContentBlock::Text { text: alpha_csv } = &exp_alpha.content[0] else {
+            panic!("expected csv text block");
+        };
+        assert!(alpha_csv.contains("AlphaHeader") && alpha_csv.contains("AlphaMetric") && alpha_csv.contains("11"), "got: {alpha_csv}");
+        assert!(!alpha_csv.contains("BetaHeader"), "unexpected beta header in tab-alpha CSV: {alpha_csv}");
+
+        // Omitting both `tab_id` and `tidy` on a ResultSheet preserves default tidy export across all tabs.
+        let exp_tidy = call_tool(&mut state, "export", json!({ "format": "csv", "sheet_id": "res-1" })).expect("export tidy");
+        assert!(!exp_tidy.is_error);
+        let super::ContentBlock::Text { text: tidy_csv } = &exp_tidy.content[0] else {
+            panic!("expected csv text block");
+        };
+        assert!(tidy_csv.contains("tab-alpha") && tidy_csv.contains("tab-beta"), "expected tidy multi-tab CSV, got: {tidy_csv}");
+
+        // Explicit `tidy: true` + `tab_id` must be rejected with InvalidParams.
+        let err = call_tool(&mut state, "export", json!({ "format": "csv", "tab_id": "tab-beta", "tidy": true }))
+            .expect_err("explicit tidy: true with tab_id must fail");
+        assert!(matches!(err, ToolCallError::InvalidParams(_)), "unexpected error variant: {err:?}");
+
+        // Specifying `tab_id` while forcing `sheet_id` to a DataSheet must error clearly rather than ignoring `tab_id`.
+        let wrong_sheet =
+            call_tool(&mut state, "export", json!({ "format": "csv", "sheet_id": "ds-1", "tab_id": "tab-beta" })).expect("error tool call");
+        assert!(wrong_sheet.is_error, "expected error for tab_id against DataSheet");
+    }
+
+    #[test]
     fn unknown_tool_and_bad_params_return_protocol_errors() {
         let mut state = McpServerState::new();
         assert!(matches!(call_tool(&mut state, "nonexistent", json!({})), Err(ToolCallError::UnknownTool(_))));
@@ -1902,7 +2208,7 @@ mod tests {
         };
         assert_eq!(super::live_control::resolve_default_control_token_with_env(port, &fake_env).expect("missing file ok"), None);
 
-        let tok_path = super::live_control::control_token_file_path_with_env(port, &fake_env);
+        let tok_path = super::live_control::control_token_file_path_with_env(port, &fake_env).expect("token path");
         std::fs::create_dir_all(tok_path.parent().expect("parent")).expect("mkdir");
         std::fs::write(&tok_path, "file-token-99\n").expect("write token file");
         assert_eq!(
@@ -1920,6 +2226,37 @@ mod tests {
             super::live_control::resolve_default_control_token_with_env(port, &env_override).expect("env token"),
             Some(String::from("env-token-77"))
         );
+
+        // When HOME/XDG are unset on Unix, MCP resolves a UID-scoped path (never shared `/tmp/lumencraft`)
+        // and rejects symlinked fallback directories explicitly.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let unset_tmp = tmp_dir.join("unset-home-tmp");
+            std::fs::create_dir_all(&unset_tmp).expect("unset tmp");
+            let unset_os = OsString::from(&unset_tmp);
+            let uid_path = super::live_control::resolve_config_dir_with_env(&|key| {
+                if key == "TMPDIR" { Some(unset_os.clone()) } else { None }
+            })
+            .expect("uid fallback");
+            assert_ne!(uid_path, std::env::temp_dir().join("lumencraft"));
+            assert!(uid_path.to_string_lossy().contains("lumencraft-uid-"));
+
+            let decoy = tmp_dir.join("sym-decoy");
+            std::fs::create_dir_all(&decoy).expect("decoy");
+            let uid_root_name = uid_path.iter().find(|part| part.to_string_lossy().starts_with("lumencraft-uid-")).expect("uid dir component");
+            std::os::unix::fs::symlink(&decoy, unset_tmp.join(uid_root_name)).expect("symlink");
+            assert!(super::live_control::resolve_config_dir_with_env(&|key| if key == "TMPDIR" { Some(unset_os.clone()) } else { None }).is_err());
+
+            let rt_dir = tmp_dir.join("xdg-rt-bad");
+            std::fs::create_dir_all(&rt_dir).expect("rt dir");
+            std::fs::set_permissions(&rt_dir, std::fs::Permissions::from_mode(0o755)).expect("chmod 0755");
+            let rt_os = OsString::from(&rt_dir);
+            assert!(
+                super::live_control::resolve_config_dir_with_env(&|key| if key == "XDG_RUNTIME_DIR" { Some(rt_os.clone()) } else { None }).is_err()
+            );
+        }
+
         let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

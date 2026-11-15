@@ -21,7 +21,8 @@ use crate::UiApp;
 use crate::compositor::{ScreenshotRegionTarget, render_workspace_region_png};
 use crate::control_io::{
     DEFAULT_SCREENSHOT_DPI, DEFAULT_SCREENSHOT_HEIGHT_PX, DEFAULT_SCREENSHOT_WIDTH_PX, MAX_SCREENSHOT_DIM_PX, MIN_DPI, MIN_SCREENSHOT_DIM_PX,
-    dispatch_ui_command_as_ui, encode_base64, parse_bounded_u32, write_host_file,
+    dispatch_ui_command_as_ui, encode_base64, opt_bool_param, opt_finite_f64_param, opt_non_empty_str_param, opt_str_param, parse_bounded_u32,
+    require_params_object_or_null, write_host_file,
 };
 use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, equation_display_mode_str};
 use crate::inspect::inspect_ui_tree;
@@ -52,6 +53,7 @@ pub(crate) fn is_gui_action_method(method: &str) -> bool {
 
 /// Dispatch one of the 8 interactive GUI actions (`Caller::Ui`) against `app`.
 pub(crate) fn dispatch(app: &mut UiApp, method: &str, params: Value) -> Result<Value, EngineError> {
+    require_params_object_or_null(&params, method).map_err(bad_input)?;
     let res = match method {
         "ui.inspect" => handle_ui_inspect(app, &params),
         "ui.screenshot" => handle_ui_screenshot(app, &params),
@@ -80,14 +82,14 @@ fn disabled_err(reason: impl Into<String>) -> EngineError {
 
 fn handle_ui_inspect(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     app.sync_views();
-    let scope = params.get("scope").and_then(Value::as_str);
-    let include_bounds = params.get("include_bounds").and_then(Value::as_bool).unwrap_or(true);
+    let scope = opt_str_param(params, &["scope"]).map_err(bad_input)?;
+    let include_bounds = opt_bool_param(params, &["include_bounds"]).map_err(bad_input)?.unwrap_or(true);
     let snap = inspect_ui_tree(app, scope, include_bounds);
     serde_json::to_value(snap).map_err(|err| EngineError::with_code(ErrorCode::InternalError, format!("failed to serialize ui tree: {err}")))
 }
 
 fn handle_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, EngineError> {
-    let target_raw = params.get("target").and_then(Value::as_str).unwrap_or("full_window").trim().to_ascii_lowercase();
+    let target_raw = opt_str_param(params, &["target"]).map_err(bad_input)?.unwrap_or("full_window").trim().to_ascii_lowercase();
     let region = match target_raw.as_str() {
         "" | "full_window" | "full" | "window" | "workspace" | "viewport" => ScreenshotRegionTarget::FullWindow,
         "canvas" | "main" => ScreenshotRegionTarget::Canvas,
@@ -105,7 +107,7 @@ fn handle_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, EngineErro
     let dpi_u32 = parse_bounded_u32(params.get("dpi"), u32::from(DEFAULT_SCREENSHOT_DPI), u32::from(MIN_DPI), 600, "dpi").map_err(bad_input)?;
     let dpi = u16::try_from(dpi_u32).map_err(|_| bad_input("dpi out of range"))?;
 
-    let opt_path = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let opt_path = opt_str_param(params, &["path"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty());
     if opt_path.is_some() && app.is_gui_only() {
         return Err(EngineError::with_code(
             ErrorCode::GuiOnlyViolation,
@@ -143,28 +145,32 @@ fn handle_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, EngineErro
     }))
 }
 
-fn parse_modifiers(val: Option<&Value>) -> KeyModifiers {
+fn parse_modifiers(val: Option<&Value>) -> Result<KeyModifiers, EngineError> {
     let mut mods = KeyModifiers::default();
-    let Some(v) = val else {
-        return mods;
+    let Some(v) = val.filter(|v| !v.is_null()) else {
+        return Ok(mods);
     };
-    if let Some(obj) = v.as_object() {
-        mods.shift = obj.get("shift").and_then(Value::as_bool).unwrap_or(false);
-        mods.ctrl = obj.get("ctrl").or_else(|| obj.get("control")).and_then(Value::as_bool).unwrap_or(false);
-        mods.alt = obj.get("alt").or_else(|| obj.get("option")).and_then(Value::as_bool).unwrap_or(false);
-        mods.meta = obj.get("meta").or_else(|| obj.get("command")).or_else(|| obj.get("cmd")).and_then(Value::as_bool).unwrap_or(false);
-    } else if let Some(arr) = v.as_array() {
-        for item in arr.iter().filter_map(Value::as_str) {
-            match item.trim().to_ascii_lowercase().as_str() {
+    if v.is_object() {
+        mods.shift = opt_bool_param(v, &["shift"]).map_err(bad_input)?.unwrap_or(false);
+        mods.ctrl = opt_bool_param(v, &["ctrl", "control"]).map_err(bad_input)?.unwrap_or(false);
+        mods.alt = opt_bool_param(v, &["alt", "option"]).map_err(bad_input)?.unwrap_or(false);
+        mods.meta = opt_bool_param(v, &["meta", "command", "cmd"]).map_err(bad_input)?.unwrap_or(false);
+        return Ok(mods);
+    }
+    if let Some(arr) = v.as_array() {
+        for (idx, item) in arr.iter().enumerate() {
+            let s = item.as_str().ok_or_else(|| bad_input(format!("`modifiers[{idx}]` must be a string")))?;
+            match s.trim().to_ascii_lowercase().as_str() {
                 "shift" => mods.shift = true,
                 "ctrl" | "control" => mods.ctrl = true,
                 "alt" | "option" => mods.alt = true,
                 "cmd" | "command" | "meta" | "super" => mods.meta = true,
-                _ => {}
+                other => return Err(bad_input(format!("unsupported modifier `{other}`"))),
             }
         }
+        return Ok(mods);
     }
-    mods
+    Err(bad_input("`modifiers` must be a JSON object or array of strings"))
 }
 
 fn parse_metrics(params: &Value) -> Result<ViewportMetrics, EngineError> {
@@ -175,21 +181,14 @@ fn parse_metrics(params: &Value) -> Result<ViewportMetrics, EngineError> {
 }
 
 fn handle_pointer_gesture(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    let action = params
-        .get("action")
-        .or_else(|| params.get("kind"))
-        .or_else(|| params.get("gesture"))
-        .and_then(Value::as_str)
-        .unwrap_or("click")
-        .trim()
-        .to_ascii_lowercase();
+    let action = opt_str_param(params, &["action", "kind", "gesture"]).map_err(bad_input)?.unwrap_or("click").trim().to_ascii_lowercase();
     if !matches!(action.as_str(), "click" | "double_click" | "right_click" | "drag" | "hover" | "scroll" | "wheel") {
         return Err(bad_input(format!("unsupported pointer gesture action `{action}`")));
     }
 
     let metrics = parse_metrics(params)?;
-    let modifiers = parse_modifiers(params.get("modifiers"));
-    let widget_id = params.get("widget_id").or_else(|| params.get("target_id")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let modifiers = parse_modifiers(params.get("modifiers"))?;
+    let widget_id = opt_str_param(params, &["widget_id", "target_id"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty());
 
     let tree = inspect_ui_tree(app, None, true);
     let target_node = match widget_id {
@@ -244,10 +243,12 @@ fn handle_power_curve_hover(app: &mut UiApp, params: &Value, x: f64, y: f64, bou
     if app.canvas_dialogs.power_wizard.result.is_none() {
         let _ = app.canvas_dialogs.power_wizard.recalculate();
     }
-    let hovered = if let Some(hn) = params.get("hover_n").and_then(Value::as_f64) {
+    let hovered = if let Some(hn) = opt_finite_f64_param(params, &["hover_n"]).map_err(bad_input)? {
         app.canvas_dialogs.power_wizard.hover_at_n(hn)
     } else {
-        let frac = params.get("hover_fraction_x").and_then(Value::as_f64).unwrap_or_else(|| ((x - bounds[0]) / bounds[2].max(1.0)).clamp(0.0, 1.0));
+        let frac = opt_finite_f64_param(params, &["hover_fraction_x"])
+            .map_err(bad_input)?
+            .unwrap_or_else(|| ((x - bounds[0]) / bounds[2].max(1.0)).clamp(0.0, 1.0));
         app.canvas_dialogs.power_wizard.hover_at_fraction(frac)
     };
     app.interaction.last_logical_pos = Some([x, y]);
@@ -587,7 +588,7 @@ fn dispatch_physical_pointer(app: &mut UiApp, input: &PointerDispatchInput<'_>) 
             serde_json::to_value(out).unwrap_or(Value::Null)
         }
         "scroll" | "wheel" => {
-            let dy = params.get("delta_y").and_then(Value::as_f64).unwrap_or(-120.0);
+            let dy = opt_finite_f64_param(params, &["delta_y"]).map_err(bad_input)?.unwrap_or(-120.0);
             let out = dispatch_ui_event(app, UiInputEvent::WheelZoom { x, y, delta_y: dy, modifiers }, metrics).map_err(map_err)?;
             serde_json::to_value(out).unwrap_or(Value::Null)
         }
@@ -606,7 +607,8 @@ fn dispatch_physical_pointer(app: &mut UiApp, input: &PointerDispatchInput<'_>) 
             serde_json::to_value(out).unwrap_or(Value::Null)
         }
         "drag" => {
-            let to_node_bounds = params.get("to_widget_id").and_then(Value::as_str).and_then(|wid| tree.find_widget(wid).and_then(|n| n.bounds));
+            let to_wid = opt_non_empty_str_param(params, &["to_widget_id"]).map_err(bad_input)?;
+            let to_node_bounds = to_wid.and_then(|wid| tree.find_widget(wid).and_then(|n| n.bounds));
             let (tx, ty) = resolve_end_xy(params, to_node_bounds, x, y)?;
             dispatch_ui_event(app, UiInputEvent::PointerDown { x, y, button: PointerButton::Primary, modifiers }, metrics).map_err(map_err)?;
             dispatch_ui_event(app, UiInputEvent::PointerMove { x: tx, y: ty, modifiers }, metrics).map_err(map_err)?;
@@ -635,26 +637,32 @@ fn dispatch_physical_pointer(app: &mut UiApp, input: &PointerDispatchInput<'_>) 
 }
 
 fn resolve_pointer_xy(params: &Value, bounds: Option<[f64; 4]>) -> Result<(f64, f64), EngineError> {
-    if let (Some(x), Some(y)) = (params.get("x").and_then(Value::as_f64), params.get("y").and_then(Value::as_f64)) {
-        return Ok((x, y));
+    let x_opt = opt_finite_f64_param(params, &["x"]).map_err(bad_input)?;
+    let y_opt = opt_finite_f64_param(params, &["y"]).map_err(bad_input)?;
+    match (x_opt, y_opt) {
+        (Some(x), Some(y)) => Ok((x, y)),
+        (Some(_), None) | (None, Some(_)) => Err(bad_input("pointer gesture requires both numeric `x` and `y` coordinates")),
+        (None, None) => {
+            if let Some(b) = bounds {
+                return Ok((b[0] + b[2] * 0.5, b[1] + b[3] * 0.5));
+            }
+            Err(bad_input("pointer gesture requires either valid `widget_id` with bounds or numeric `x` and `y` coordinates"))
+        }
     }
-    if let Some(b) = bounds {
-        return Ok((b[0] + b[2] * 0.5, b[1] + b[3] * 0.5));
-    }
-    Err(bad_input("pointer gesture requires either valid `widget_id` with bounds or numeric `x` and `y` coordinates"))
 }
 
 fn resolve_end_xy(params: &Value, to_bounds: Option<[f64; 4]>, start_x: f64, start_y: f64) -> Result<(f64, f64), EngineError> {
-    if let (Some(x), Some(y)) = (
-        params.get("to_x").or_else(|| params.get("end_x")).and_then(Value::as_f64),
-        params.get("to_y").or_else(|| params.get("end_y")).and_then(Value::as_f64),
-    ) {
-        return Ok((x, y));
+    let x_opt = opt_finite_f64_param(params, &["to_x", "end_x"]).map_err(bad_input)?;
+    let y_opt = opt_finite_f64_param(params, &["to_y", "end_y"]).map_err(bad_input)?;
+    match (x_opt, y_opt) {
+        (Some(x), Some(y)) => return Ok((x, y)),
+        (Some(_), None) | (None, Some(_)) => return Err(bad_input("drag target requires both numeric `to_x` and `to_y` coordinates")),
+        (None, None) => {}
     }
     if let Some(b) = to_bounds {
         return Ok((b[0] + b[2] * 0.5, b[1] + b[3] * 0.5));
     }
-    if params.get("to_widget_id").is_some() {
+    if params.get("to_widget_id").is_some_and(|v| !v.is_null()) {
         return Err(EngineError::with_code(ErrorCode::NotFound, "drag `to_widget_id` not found"));
     }
     Ok((start_x, start_y))
@@ -665,11 +673,11 @@ fn point_in_rect(x: f64, y: f64, r: [f64; 4]) -> bool {
 }
 
 fn handle_type_text(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    let text = params.get("text").and_then(Value::as_str).ok_or_else(|| bad_input("ui.type_text requires `text` string"))?;
-    let clear_existing = params.get("clear_existing").and_then(Value::as_bool).unwrap_or(true);
-    let commit_enter = params.get("commit_enter").and_then(Value::as_bool).unwrap_or(true);
-    let explicit_formula_commit = params.get("commit_enter").and_then(Value::as_bool);
-    if let Some(wid) = params.get("widget_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
+    let text = opt_str_param(params, &["text"]).map_err(bad_input)?.ok_or_else(|| bad_input("ui.type_text requires `text` string"))?;
+    let clear_existing = opt_bool_param(params, &["clear_existing"]).map_err(bad_input)?.unwrap_or(true);
+    let explicit_formula_commit = opt_bool_param(params, &["commit_enter"]).map_err(bad_input)?;
+    let commit_enter = explicit_formula_commit.unwrap_or(true);
+    if let Some(wid) = opt_str_param(params, &["widget_id"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty()) {
         app.focus_widget_id = Some(wid.to_owned());
     }
     let wid = app.focus_widget_id.clone();
@@ -982,8 +990,8 @@ fn format_shortcut_combo(key: &str, mods: KeyModifiers) -> String {
 }
 
 fn handle_press_key(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    let key = params.get("key").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| bad_input("missing `key`"))?;
-    let modifiers = parse_modifiers(params.get("modifiers"));
+    let key = opt_non_empty_str_param(params, &["key"]).map_err(bad_input)?.ok_or_else(|| bad_input("missing `key`"))?;
+    let modifiers = parse_modifiers(params.get("modifiers"))?;
     let combo = format_shortcut_combo(key, modifiers);
 
     if (modifiers.meta || modifiers.ctrl) && !modifiers.shift && !modifiers.alt && key.eq_ignore_ascii_case("t") {
@@ -1071,7 +1079,7 @@ fn extract_menu_path(val: Option<&Value>) -> Result<Option<String>, EngineError>
 }
 
 fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    let explicit_cmd = params.get("command_id").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+    let explicit_cmd = opt_non_empty_str_param(params, &["command_id"]).map_err(bad_input)?;
     let path = extract_menu_path(params.get("path"))?;
     if explicit_cmd.is_none() && path.is_none() {
         return Err(bad_input("ui.invoke_menu requires `command_id` or `path`"));
@@ -1117,7 +1125,11 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
         return Err(EngineError::with_code(ErrorCode::NotFound, format!("menu item `{}` not found", path.as_deref().unwrap_or_default())));
     };
 
-    let extra_params = params.get("params").cloned().unwrap_or(Value::Null);
+    let extra_params = match params.get("params") {
+        None | Some(Value::Null) => Value::Null,
+        Some(other @ Value::Object(_)) => other.clone(),
+        Some(_) => return Err(bad_input("ui.invoke_menu `params` must be a JSON object or null")),
+    };
     if let Some(ui_val) = dispatch_ui_command_as_ui(app, &cmd_id, &extra_params)? {
         return Ok(json!({
             "invoked": true,
@@ -1139,25 +1151,24 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
 }
 
 fn handle_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    if let Some(sheet_raw) = params
-        .get("sheet_id")
-        .and_then(Value::as_str)
-        .or_else(|| params.get("widget_id").and_then(Value::as_str).and_then(|w| w.strip_prefix("nav.sheet.")))
-    {
+    let sheet_param = opt_non_empty_str_param(params, &["sheet_id"]).map_err(bad_input)?;
+    let widget_param = opt_non_empty_str_param(params, &["widget_id"]).map_err(bad_input)?;
+    if let Some(sheet_raw) = sheet_param.or_else(|| widget_param.and_then(|w| w.strip_prefix("nav.sheet."))) {
         let out = app.execute_command("sheet.select", json!({ "sheet_id": sheet_raw }))?;
         if let Ok(sid) = SheetId::try_new(sheet_raw) {
             let doc = app.document().clone();
             app.canvas_dialogs.on_sheet_selected(&doc, &sid);
         }
-        if params.get("tab").is_none() && params.get("tab_id").is_none() {
+        if params.get("tab").is_none_or(Value::is_null) && params.get("tab_id").is_none_or(Value::is_null) {
             return Ok(json!({ "sheet_id": sheet_raw, "switched": true, "payload": out.payload }));
         }
     }
 
     let tab_val = params
         .get("tab")
-        .or_else(|| params.get("tab_id"))
-        .or_else(|| params.get("widget_id"))
+        .filter(|v| !v.is_null())
+        .or_else(|| params.get("tab_id").filter(|v| !v.is_null()))
+        .or_else(|| params.get("widget_id").filter(|v| !v.is_null()))
         .ok_or_else(|| bad_input("ui.switch_tab requires `tab`, `tab_id`, `widget_id`, or `sheet_id`"))?;
 
     match &app.canvas_dialogs.active_dialog {
@@ -1186,8 +1197,9 @@ fn handle_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, EngineErr
 }
 
 fn parse_power_stage_value(val: &Value) -> Result<PowerWizardStage, EngineError> {
-    if let Some(idx) = val.as_u64() {
-        return PowerWizardStage::from_index(idx as usize).ok_or_else(|| bad_input(format!("invalid power wizard stage `{idx}`")));
+    if let Some(idx_u64) = val.as_u64() {
+        let idx = usize::try_from(idx_u64).map_err(|_| bad_input(format!("invalid power wizard stage `{idx_u64}`")))?;
+        return PowerWizardStage::from_index(idx).ok_or_else(|| bad_input(format!("invalid power wizard stage `{idx}`")));
     }
     let raw = val.as_str().ok_or_else(|| bad_input("power wizard stage must be string or index"))?;
     let trimmed = raw.strip_prefix("power.stage.").unwrap_or(raw).trim();
@@ -1210,7 +1222,7 @@ fn switch_result_sheet_tab(app: &mut UiApp, tab_val: &Value) -> Result<Value, En
         return Err(EngineError::with_code(ErrorCode::Conflict, "no active ResultSheet or multi-tab dialog"));
     };
     let idx = if let Some(n) = tab_val.as_u64() {
-        let i = n as usize;
+        let i = usize::try_from(n).map_err(|_| bad_input(format!("tab index `{n}` exceeds usize")))?;
         if i >= rs.tabs.len() {
             return Err(EngineError::with_code(ErrorCode::NotFound, format!("tab index `{i}` out of range")));
         }
@@ -1233,8 +1245,18 @@ fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, Engine
     if app.canvas_dialogs.active_dialog == ActiveDialog::None {
         return Err(EngineError::with_code(ErrorCode::Conflict, "no modal dialog is currently open"));
     }
-    let explicit_action = params.get("action").and_then(Value::as_str).map(|s| s.trim().to_ascii_lowercase());
-    let fields = params.get("fields").or_else(|| params.get("values")).or_else(|| params.get("patches")).and_then(Value::as_object);
+    let explicit_action = opt_non_empty_str_param(params, &["action"]).map_err(bad_input)?.map(|s| s.to_ascii_lowercase());
+    if let Some(ref act) = explicit_action
+        && !matches!(act.as_str(), "ok" | "cancel" | "apply" | "back" | "next" | "create" | "preview")
+    {
+        return Err(bad_input(format!("unsupported dialog action `{act}`; expected ok, cancel, apply, back, next, create, or preview")));
+    }
+
+    let fields = match params.get("fields").or_else(|| params.get("values")).or_else(|| params.get("patches")) {
+        None | Some(Value::Null) => None,
+        Some(Value::Object(map)) => Some(map),
+        Some(_) => return Err(bad_input("ui.answer_dialog `fields` must be a JSON object")),
+    };
     if let Some(f) = fields {
         patch_active_dialog(app, f)?;
         if explicit_action.is_none() {
@@ -1243,9 +1265,6 @@ fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, Engine
     }
 
     let action = explicit_action.unwrap_or_else(|| String::from("ok"));
-    if !matches!(action.as_str(), "ok" | "cancel" | "apply" | "back" | "next" | "create" | "preview") {
-        return Err(bad_input(format!("unsupported dialog action `{action}`; expected ok, cancel, apply, back, next, create, or preview")));
-    }
 
     if action == "cancel" {
         let prev = format!("{:?}", app.canvas_dialogs.active_dialog);
@@ -1261,10 +1280,34 @@ fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, Engine
     commit_active_dialog_action(app, &action, params)
 }
 
+fn map_opt_str<'a>(fields: &'a Map<String, Value>, keys: &[&str]) -> Result<Option<&'a str>, EngineError> {
+    for &key in keys {
+        if let Some(val) = fields.get(key) {
+            if val.is_null() {
+                return Ok(None);
+            }
+            return val.as_str().map(Some).ok_or_else(|| bad_input(format!("`{key}` must be a string")));
+        }
+    }
+    Ok(None)
+}
+
+fn map_opt_bool(fields: &Map<String, Value>, keys: &[&str]) -> Result<Option<bool>, EngineError> {
+    for &key in keys {
+        if let Some(val) = fields.get(key) {
+            if val.is_null() {
+                return Ok(None);
+            }
+            return val.as_bool().map(Some).ok_or_else(|| bad_input(format!("`{key}` must be a boolean")));
+        }
+    }
+    Ok(None)
+}
+
 fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(), EngineError> {
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::PowerAndSampleSize => app.canvas_dialogs.power_wizard.apply_field_patch(fields).map_err(disabled_err)?,
-        ActiveDialog::FormatSelectedPoints { .. } => app.canvas_dialogs.format_points.apply_field_patch(fields).map_err(disabled_err)?,
+        ActiveDialog::FormatSelectedPoints { .. } => app.canvas_dialogs.format_points.apply_field_patch(fields).map_err(bad_input)?,
         ActiveDialog::AnalyzeSheet { .. } => {
             let src = app.canvas_dialogs.analyze.source_sheet_id.as_ref();
             validate_pre_summarized_patch(app.document(), src, fields)?;
@@ -1276,33 +1319,27 @@ fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(
             app.canvas_dialogs.edit_params.apply_field_patch(fields).map_err(disabled_err)?;
         }
         ActiveDialog::ChangeDataAnalyzed { .. } => {
-            if let Some(sid) = fields.get("target_sheet_id").or_else(|| fields.get("source_sheet_id")).and_then(Value::as_str)
-                && let Ok(parsed) = SheetId::try_new(sid)
-            {
+            if let Some(sid) = map_opt_str(fields, &["target_sheet_id", "source_sheet_id"])? {
+                let parsed = SheetId::try_new(sid).map_err(|e| bad_input(e.to_string()))?;
                 app.canvas_dialogs.change_data.select_target(&parsed).map_err(disabled_err)?;
             }
         }
         ActiveDialog::ChangeGraphType { .. } => {
-            if let Some(opt) = fields
-                .get("option_id")
-                .or_else(|| fields.get("selected_option_id"))
-                .or_else(|| fields.get("graph_type.selected"))
-                .and_then(Value::as_str)
-            {
+            if let Some(opt) = map_opt_str(fields, &["option_id", "selected_option_id", "graph_type.selected"])? {
                 app.canvas_dialogs.change_graph_type.selected_option_id = opt.to_owned();
             }
-            if let Some(raw) = fields.get("summary_measure").or_else(|| fields.get("graph_type.summary_measure")).and_then(Value::as_str) {
+            if let Some(raw) = map_opt_str(fields, &["summary_measure", "graph_type.summary_measure"])? {
                 app.canvas_dialogs.change_graph_type.summary_measure = parse_summary_measure_str(raw).map_err(bad_input)?;
             }
-            if let Some(raw) = fields.get("error_bar_metric").or_else(|| fields.get("graph_type.error_bar_metric")).and_then(Value::as_str) {
+            if let Some(raw) = map_opt_str(fields, &["error_bar_metric", "graph_type.error_bar_metric"])? {
                 app.canvas_dialogs.change_graph_type.error_bar_metric = parse_error_bar_metric_str(raw).map_err(bad_input)?;
             }
         }
         ActiveDialog::ExcludeWithReason { .. } => {
-            if let Some(tag) = fields.get("reason_tag").and_then(Value::as_str) {
+            if let Some(tag) = map_opt_str(fields, &["reason_tag"])? {
                 app.canvas_dialogs.exclude_with_reason.reason_tag = tag.to_owned();
             }
-            if let Some(note) = fields.get("note").and_then(Value::as_str) {
+            if let Some(note) = map_opt_str(fields, &["note"])? {
                 app.canvas_dialogs.exclude_with_reason.note = note.to_owned();
             }
         }
@@ -1316,12 +1353,12 @@ fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(
             if (target_changed || !app.canvas_dialogs.convert_archetype.preview_ready)
                 && let Some(intent) = app.canvas_dialogs.convert_archetype.preview_intent()
             {
-                let out = app.session.execute_as_ui(&intent.command_id, intent.params)?;
+                let out = app.execute_session_ui_cmd(&intent.command_id, intent.params)?;
                 app.canvas_dialogs.convert_archetype.apply_preview_payload(&out.payload);
             }
         }
         ActiveDialog::CommandPalette => {
-            if let Some(q) = fields.get("query").or_else(|| fields.get("palette.query")).and_then(Value::as_str) {
+            if let Some(q) = map_opt_str(fields, &["query", "palette.query"])? {
                 app.canvas_dialogs.command_palette.query = q.to_owned();
             }
         }
@@ -1374,14 +1411,8 @@ fn validate_pre_summarized_patch(
     src: Option<&SheetId>,
     fields: &Map<String, Value>,
 ) -> Result<(), EngineError> {
-    let wants_paired =
-        fields.get("paired_or_matched").or_else(|| fields.get("edit.paired_or_matched")).or_else(|| fields.get("matched")).and_then(Value::as_bool)
-            == Some(true);
-    let two_method_norm = fields
-        .get("two_group_method")
-        .or_else(|| fields.get("edit.two_group.method"))
-        .or_else(|| fields.get("analyze.two_group.method"))
-        .and_then(Value::as_str)
+    let wants_paired = map_opt_bool(fields, &["paired_or_matched", "edit.paired_or_matched", "matched"])? == Some(true);
+    let two_method_norm = map_opt_str(fields, &["two_group_method", "edit.two_group.method", "analyze.two_group.method"])?
         .map(|s| s.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect::<String>());
     let wants_paired_method = two_method_norm
         .as_deref()
@@ -1392,7 +1423,7 @@ fn validate_pre_summarized_patch(
             return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Matched / Repeated Measures requires equal N >= 2"))));
         }
     }
-    let wants_nonparam = fields.get("assume_gaussian").or_else(|| fields.get("edit.assume_gaussian")).and_then(Value::as_bool) == Some(false)
+    let wants_nonparam = map_opt_bool(fields, &["assume_gaussian", "edit.assume_gaussian"])? == Some(false)
         || two_method_norm.as_deref().is_some_and(|m| {
             matches!(
                 m,
@@ -1490,7 +1521,7 @@ fn commit_power_wizard_action(app: &mut UiApp, action: &str) -> Result<Value, En
             Ok(json!({ "action": "back", "stage": prev.label(), "stage_index": prev.index() }))
         }
         "create" | "ok" => {
-            let created = app.canvas_dialogs.power_wizard.execute_create(&mut app.session)?;
+            let created = app.execute_power_wizard_create()?;
             let state_copy = app.canvas_dialogs.power_wizard.clone();
             app.power_wizards_by_sheet.insert(created.result_sheet_id.clone(), state_copy);
             app.canvas_dialogs.close_dialog();
@@ -1556,7 +1587,7 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
         app.canvas_dialogs.analyze.extracted_result_tab_id = None;
     }
 
-    let force_new = params.get("force_create_new").and_then(Value::as_bool).unwrap_or(false);
+    let force_new = opt_bool_param(params, &["force_create_new"]).map_err(bad_input)?.unwrap_or(false);
     if !force_new && let Some(intent) = app.canvas_dialogs.submit_analyze_or_prompt(app.session.document()) {
         let out = app.execute_command(&intent.command_id, intent.params)?;
         if let Some(new_id) = out.payload.get("sheet_id").and_then(Value::as_str) {
@@ -1577,14 +1608,24 @@ fn commit_analyze_sheet_action(app: &mut UiApp, params: &Value) -> Result<Value,
 }
 
 fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &Value) -> Result<Value, EngineError> {
-    let choice_str =
-        params.get("choice").or_else(|| params.get("fields").and_then(|f| f.get("choice"))).and_then(Value::as_str).unwrap_or("create_new");
+    let raw_choice = match params.get("choice") {
+        Some(v) => Some(v),
+        None => params.get("fields").and_then(Value::as_object).and_then(|f| f.get("choice")),
+    };
+    let choice_str = match raw_choice {
+        None | Some(Value::Null) => "create_new",
+        Some(other) => {
+            other.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| bad_input("duplicate prompt `choice` must be a string"))?
+        }
+    };
     let choice = if choice_str.eq_ignore_ascii_case("modify_existing")
         && let Some(first) = existing_ids.first()
     {
         AnalyzeDuplicateChoice::ModifyExisting(first.clone())
-    } else {
+    } else if choice_str.eq_ignore_ascii_case("create_new") || choice_str.eq_ignore_ascii_case("modify_existing") {
         AnalyzeDuplicateChoice::CreateNew
+    } else {
+        return Err(bad_input(format!("unsupported duplicate analysis choice `{choice_str}`; expected create_new or modify_existing")));
     };
     let intent =
         app.canvas_dialogs.analyze.resolve_duplicate_choice(&choice).ok_or_else(|| bad_input("failed to resolve duplicate analysis choice"))?;

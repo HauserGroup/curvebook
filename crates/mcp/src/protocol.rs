@@ -12,7 +12,11 @@ use serde_json::{Map, Value, json};
 use crate::SERVER_NAME;
 use crate::errors::{self, StructuredErrorPayload};
 use crate::prompts::{get_prompt, list_prompts};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::resources::{ResourceContent, ResourceDescriptor};
 use crate::resources::{ResourceError, list_resources, read_resource};
+#[cfg(not(target_arch = "wasm32"))]
+use crate::tools::decode_base64;
 use crate::tools::{McpServerState, ToolCallError, call_tool, list_tools_for_state};
 
 /// MCP protocol revision advertised by this server during `initialize`.
@@ -402,17 +406,24 @@ fn handle_tools_call(id: Value, params: Value, state: &mut McpServerState) -> Js
     }
 }
 
-fn handle_resources_list(id: Value, params: &Value, state: &McpServerState) -> JsonRpcResponse {
+fn handle_resources_list(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/list params must be an object", None);
     }
     if state.is_gui_only() {
         return JsonRpcResponse::ok(id, json!({ "resources": [] }));
     }
+    #[cfg(not(target_arch = "wasm32"))]
+    if state.control_port().is_some() {
+        return match list_live_resources(state) {
+            Ok(resources) => JsonRpcResponse::ok(id, json!({ "resources": resources })),
+            Err(payload) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, payload.message.clone(), Some(payload.to_value())),
+        };
+    }
     JsonRpcResponse::ok(id, json!({ "resources": list_resources(state.session().document()) }))
 }
 
-fn handle_resources_read(id: Value, params: &Value, state: &McpServerState) -> JsonRpcResponse {
+fn handle_resources_read(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
     let Some(map) = params.as_object() else {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/read params must be an object", None);
     };
@@ -426,11 +437,158 @@ fn handle_resources_read(id: Value, params: &Value, state: &McpServerState) -> J
         return JsonRpcResponse::err(id, ERR_INVALID_REQUEST, payload.message.clone(), Some(payload.to_value()));
     }
 
+    #[cfg(not(target_arch = "wasm32"))]
+    if state.control_port().is_some() {
+        return match read_live_resource(state, uri) {
+            Ok(contents) => JsonRpcResponse::ok(id, json!({ "contents": contents })),
+            Err(ResourceError::InvalidUri(msg)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, msg, None),
+            Err(ResourceError::NotFound(msg)) => JsonRpcResponse::err(id, ERR_RESOURCE_NOT_FOUND, msg, Some(json!({ "uri": uri }))),
+            Err(ResourceError::Internal(msg)) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, msg, None),
+        };
+    }
+
     match read_resource(state.session().document(), uri) {
         Ok(contents) => JsonRpcResponse::ok(id, json!({ "contents": contents })),
         Err(ResourceError::InvalidUri(msg)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, msg, None),
         Err(ResourceError::NotFound(msg)) => JsonRpcResponse::err(id, ERR_RESOURCE_NOT_FOUND, msg, Some(json!({ "uri": uri }))),
         Err(ResourceError::Internal(msg)) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, msg, None),
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn list_live_resources(state: &mut McpServerState) -> Result<Vec<ResourceDescriptor>, StructuredErrorPayload> {
+    fn json_array<'a>(v: &'a Value, key: &str) -> &'a [Value] {
+        v.get(key).and_then(Value::as_array).map(Vec::as_slice).unwrap_or(&[])
+    }
+    fn json_str<'a>(v: &'a Value, key: &str, fallback: &'a str) -> &'a str {
+        v.get(key).and_then(Value::as_str).unwrap_or(fallback)
+    }
+    fn json_u64(v: &Value, key: &str) -> u64 {
+        v.get(key).and_then(Value::as_u64).unwrap_or(0)
+    }
+
+    let snap = state.send_live_control("doc.inspect", json!({}))?;
+    let mut out = Vec::new();
+
+    for ds in json_array(&snap, "data_sheets") {
+        let id = json_str(ds, "id", "");
+        let title = json_str(ds, "title", id);
+        if !id.is_empty() {
+            out.push(ResourceDescriptor {
+                uri: format!("sheet://{id}"),
+                name: title.to_owned(),
+                description: format!("{title} (DataSheet: {}, {}x{})", json_str(ds, "kind", "data"), json_u64(ds, "rows"), json_u64(ds, "cols")),
+                mime_type: String::from("application/json"),
+            });
+        }
+    }
+    for info in json_array(&snap, "info_sheets") {
+        let id = json_str(info, "id", "");
+        let title = json_str(info, "title", id);
+        if !id.is_empty() {
+            out.push(ResourceDescriptor {
+                uri: format!("sheet://{id}"),
+                name: title.to_owned(),
+                description: format!("{title} (InfoSheet, {} constant(s))", json_u64(info, "constants")),
+                mime_type: String::from("application/json"),
+            });
+        }
+    }
+    for rs in json_array(&snap, "result_sheets") {
+        let id = json_str(rs, "id", "");
+        let title = json_str(rs, "title", id);
+        if !id.is_empty() {
+            out.push(ResourceDescriptor {
+                uri: format!("sheet://{id}"),
+                name: title.to_owned(),
+                description: format!("{title} (ResultSheet, {} tab(s))", json_u64(rs, "tabs")),
+                mime_type: String::from("application/json"),
+            });
+            out.push(ResourceDescriptor {
+                uri: format!("result://{id}"),
+                name: format!("{title} JSON Export"),
+                description: format!("{title} (ResultSheet JSON export)"),
+                mime_type: String::from("application/json"),
+            });
+        }
+    }
+    for gs in json_array(&snap, "graph_sheets") {
+        let id = json_str(gs, "id", "");
+        let title = json_str(gs, "title", id);
+        if !id.is_empty() {
+            out.push(ResourceDescriptor {
+                uri: format!("sheet://{id}"),
+                name: title.to_owned(),
+                description: format!("{title} (GraphSheet, {})", json_str(gs, "kind", "Graph")),
+                mime_type: String::from("application/json"),
+            });
+        }
+    }
+    for ls in json_array(&snap, "layout_sheets") {
+        let id = json_str(ls, "id", "");
+        let title = json_str(ls, "title", id);
+        if !id.is_empty() {
+            out.push(ResourceDescriptor {
+                uri: format!("sheet://{id}"),
+                name: title.to_owned(),
+                description: format!("{title} (LayoutSheet, {} item(s))", json_u64(ls, "items")),
+                mime_type: String::from("application/json"),
+            });
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_live_resource(state: &mut McpServerState, uri: &str) -> Result<Vec<ResourceContent>, ResourceError> {
+    let trimmed = uri.trim();
+    if let Some(sheet_id_raw) = trimmed.strip_prefix("sheet://") {
+        let id_str = sheet_id_raw.trim();
+        if id_str.is_empty() {
+            return Err(ResourceError::InvalidUri(String::from("sheet:// URI requires a non-empty sheet id")));
+        }
+        let mut val = state
+            .send_live_control("doc.inspect", json!({ "sheet_id": id_str, "include_cells": true }))
+            .map_err(|err| map_live_resource_error(uri, &err))?;
+        if let Some(obj) = val.as_object_mut() {
+            obj.insert(String::from("uri"), Value::String(trimmed.to_owned()));
+            if let Some(sec) = obj.get("section").and_then(Value::as_str) {
+                obj.insert(String::from("section"), Value::String(sec.to_ascii_lowercase()));
+            }
+        }
+        let text = serde_json::to_string_pretty(&val).map_err(|err| ResourceError::Internal(format!("resource JSON serialize failed: {err}")))?;
+        return Ok(vec![ResourceContent { uri: trimmed.to_owned(), mime_type: String::from("application/json"), text }]);
+    }
+    if let Some(result_id_raw) = trimmed.strip_prefix("result://") {
+        let id_str = result_id_raw.trim();
+        if id_str.is_empty() {
+            return Err(ResourceError::InvalidUri(String::from("result:// URI requires a non-empty result sheet id")));
+        }
+        let inspect = state.send_live_control("doc.inspect", json!({ "sheet_id": id_str })).map_err(|err| map_live_resource_error(uri, &err))?;
+        let is_result = inspect.get("section").and_then(Value::as_str).is_some_and(|s| s.eq_ignore_ascii_case("results"));
+        if !is_result {
+            return Err(ResourceError::NotFound(format!("resource not found: {trimmed}")));
+        }
+        let exported = state
+            .send_live_control("doc.export", json!({ "format": "json", "sheet_id": id_str, "pretty": true }))
+            .map_err(|err| map_live_resource_error(uri, &err))?;
+        let b64 = exported
+            .get("data_base64")
+            .and_then(Value::as_str)
+            .ok_or_else(|| ResourceError::Internal(String::from("live doc.export response missing data_base64")))?;
+        let bytes = decode_base64(b64).map_err(|err| ResourceError::Internal(format!("invalid base64 in live doc.export: {err}")))?;
+        let text = String::from_utf8(bytes).map_err(|err| ResourceError::Internal(format!("UTF-8 decode failed: {err}")))?;
+        return Ok(vec![ResourceContent { uri: trimmed.to_owned(), mime_type: String::from("application/json"), text }]);
+    }
+    Err(ResourceError::InvalidUri(format!("unsupported resource URI scheme '{trimmed}'; expected sheet://<id> or result://<id>")))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn map_live_resource_error(uri: &str, err: &StructuredErrorPayload) -> ResourceError {
+    if err.code == ErrorCode::NotFound || err.message.contains("not found") {
+        ResourceError::NotFound(format!("resource not found: {uri}"))
+    } else {
+        ResourceError::Internal(err.message.clone())
     }
 }
 

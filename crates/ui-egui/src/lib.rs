@@ -80,6 +80,90 @@ pub const fn bundled_fonts_enabled() -> bool {
 }
 
 /// Top-level application shell facade owning [`Session`] and panel/tool view state.
+/// Compact rollback snapshot of UI shell state excluding `Session` and its undo history.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct UiShellSnapshot {
+    pub theme: UiThemeSpec,
+    pub nav: WorkspaceNavState,
+    pub grid: GridViewState,
+    pub canvas_dialogs: CanvasDialogState,
+    pub shortcuts: ShortcutRegistry,
+    pub family_open: bool,
+    pub locale: String,
+    pub locale_preset: i18n::LocalePreset,
+    pub split: SplitWorkspaceState,
+    pub brushed_cell: Option<SourceCellId>,
+    pub brushed_points: Vec<SourceCellId>,
+    pub preview_filter: CanvasPreviewFilter,
+    pub presentation_mode: bool,
+    pub virtual_workspace: VirtualWorkspaceFolder,
+    pub inline_editor: InlineEditorState,
+    pub interaction: InteractionControllerState,
+    pub hover_command_id: Option<String>,
+    pub focus_widget_id: Option<String>,
+    pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
+}
+
+/// Incremental session rollback log captured for atomic `command.batch` execution.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct BatchUndoTracker {
+    pub net_batch_depth: isize,
+    pub baseline_dirty: bool,
+    pub baseline_file_path: Option<std::path::PathBuf>,
+    pub fallback_session: Option<Session>,
+}
+
+impl BatchUndoTracker {
+    pub(crate) fn for_session(session: &Session) -> Self {
+        Self {
+            net_batch_depth: 0,
+            baseline_dirty: session.is_dirty(),
+            baseline_file_path: session.file_path().map(std::path::Path::to_path_buf),
+            fallback_session: None,
+        }
+    }
+
+    pub(crate) fn capture_fallback_baseline_before(&mut self, session: &Session, force: bool) {
+        if self.fallback_session.is_some() || !force {
+            return;
+        }
+        let mut snap = session.clone();
+        if self.net_batch_depth < 0 {
+            for _ in 0..(-self.net_batch_depth) {
+                let _ = snap.redo();
+            }
+        } else if self.net_batch_depth > 0 {
+            for _ in 0..self.net_batch_depth {
+                let _ = snap.undo();
+            }
+        }
+        snap.set_file_path(self.baseline_file_path.clone(), !self.baseline_dirty);
+        self.fallback_session = Some(snap);
+    }
+
+    pub(crate) fn merge_committed_child(&mut self, child: Self) {
+        if self.fallback_session.is_none() {
+            if let Some(child_fallback) = child.fallback_session {
+                let mut snap = child_fallback;
+                if self.net_batch_depth < 0 {
+                    for _ in 0..(-self.net_batch_depth) {
+                        let _ = snap.redo();
+                    }
+                } else if self.net_batch_depth > 0 {
+                    for _ in 0..self.net_batch_depth {
+                        let _ = snap.undo();
+                    }
+                }
+                snap.set_file_path(self.baseline_file_path.clone(), !self.baseline_dirty);
+                self.fallback_session = Some(snap);
+            } else {
+                self.net_batch_depth += child.net_batch_depth;
+            }
+        }
+    }
+}
+
+/// Top-level application state driving the LumenCraft native desktop UI.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiApp {
     pub(crate) session: Session,
@@ -102,6 +186,7 @@ pub struct UiApp {
     pub hover_command_id: Option<String>,
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
+    pub(crate) batch_undo_log: Option<BatchUndoTracker>,
 }
 
 impl Default for UiApp {
@@ -141,10 +226,99 @@ impl UiApp {
             hover_command_id: None,
             focus_widget_id: None,
             power_wizards_by_sheet: std::collections::BTreeMap::new(),
+            batch_undo_log: None,
         };
         app.grid.apply_locale_preset(&app.locale_preset);
         app.sync_views();
         app
+    }
+
+    /// Capture only the UI shell fields (excluding `Session` and its undo history) for lightweight rollback.
+    pub(crate) fn snapshot_ui_shell(&self) -> UiShellSnapshot {
+        UiShellSnapshot {
+            theme: self.theme.clone(),
+            nav: self.nav.clone(),
+            grid: self.grid.clone(),
+            canvas_dialogs: self.canvas_dialogs.clone(),
+            shortcuts: self.shortcuts.clone(),
+            family_open: self.family_open,
+            locale: self.locale.clone(),
+            locale_preset: self.locale_preset.clone(),
+            split: self.split.clone(),
+            brushed_cell: self.brushed_cell.clone(),
+            brushed_points: self.brushed_points.clone(),
+            preview_filter: self.preview_filter,
+            presentation_mode: self.presentation_mode,
+            virtual_workspace: self.virtual_workspace.clone(),
+            inline_editor: self.inline_editor.clone(),
+            interaction: self.interaction.clone(),
+            hover_command_id: self.hover_command_id.clone(),
+            focus_widget_id: self.focus_widget_id.clone(),
+            power_wizards_by_sheet: self.power_wizards_by_sheet.clone(),
+        }
+    }
+
+    /// Restore UI shell fields captured by [`Self::snapshot_ui_shell`] without disturbing `Session`.
+    pub(crate) fn restore_ui_shell(&mut self, snap: UiShellSnapshot) {
+        self.theme = snap.theme;
+        self.nav = snap.nav;
+        self.grid = snap.grid;
+        self.canvas_dialogs = snap.canvas_dialogs;
+        self.shortcuts = snap.shortcuts;
+        self.family_open = snap.family_open;
+        self.locale = snap.locale;
+        self.locale_preset = snap.locale_preset;
+        self.split = snap.split;
+        self.brushed_cell = snap.brushed_cell;
+        self.brushed_points = snap.brushed_points;
+        self.preview_filter = snap.preview_filter;
+        self.presentation_mode = snap.presentation_mode;
+        self.virtual_workspace = snap.virtual_workspace;
+        self.inline_editor = snap.inline_editor;
+        self.interaction = snap.interaction;
+        self.hover_command_id = snap.hover_command_id;
+        self.focus_widget_id = snap.focus_widget_id;
+        self.power_wizards_by_sheet = snap.power_wizards_by_sheet;
+        self.sync_views();
+    }
+
+    fn record_session_cmd_on(
+        session: &mut Session,
+        mut tracker: Option<&mut BatchUndoTracker>,
+        command_id: &str,
+        op: impl FnOnce(&mut Session) -> Result<CommandOutcome, EngineError>,
+    ) -> Result<CommandOutcome, EngineError> {
+        if let Some(t) = tracker.as_deref_mut() {
+            let is_undo_or_redo = matches!(command_id, "edit.undo" | "edit.redo");
+            let force_fallback = (t.baseline_dirty && command_id == "project.save") || (t.net_batch_depth < 0 && !is_undo_or_redo);
+            t.capture_fallback_baseline_before(session, force_fallback);
+        }
+        let outcome = op(session)?;
+        if let Some(t) = tracker
+            && t.fallback_session.is_none()
+        {
+            if command_id == "edit.undo" {
+                if outcome.mutated {
+                    t.net_batch_depth -= 1;
+                }
+            } else if outcome.mutated {
+                t.net_batch_depth += 1;
+            }
+        }
+        Ok(outcome)
+    }
+
+    pub(crate) fn execute_session_ui_cmd(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
+        Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), command_id, |session| session.execute_as_ui(command_id, params))
+    }
+
+    pub(crate) fn execute_power_wizard_create(&mut self) -> Result<power_wizard::PowerWizardCreatedSheets, EngineError> {
+        let wizard = &mut self.canvas_dialogs.power_wizard;
+        let session = &mut self.session;
+        let tracker = &mut self.batch_undo_log;
+        wizard.execute_create_with(&mut |cmd_id, params| {
+            Self::record_session_cmd_on(session, tracker.as_mut(), cmd_id, |s| s.execute_as_ui(cmd_id, params))
+        })
     }
 
     /// Update active UI locale and synchronize its regional numeric/CSV [`LocalePreset`].
@@ -198,7 +372,9 @@ impl UiApp {
 
     /// Execute an internal UI command (`Caller::Ui`) and refresh UI navigator and selection state.
     pub fn execute_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
-        let outcome = self.session.execute_as_ui(command_id, params)?;
+        let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), command_id, |session| {
+            session.execute_as_ui(command_id, params)
+        })?;
         self.sync_views();
         Ok(outcome)
     }
@@ -206,7 +382,9 @@ impl UiApp {
     /// Execute an external control-protocol command (`Caller::Control`) respecting `--gui-only` locks.
     pub fn execute_control_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let outcome = self.session.execute_with_caller(command_id, params, lumencraft_engine::Caller::Control, &cancelled)?;
+        let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), command_id, |session| {
+            session.execute_with_caller(command_id, params, lumencraft_engine::Caller::Control, &cancelled)
+        })?;
         self.sync_views();
         Ok(outcome)
     }
@@ -393,7 +571,7 @@ impl UiApp {
             .convert_archetype
             .preview_intent()
             .ok_or_else(|| String::from("no data sheet bound for archetype conversion preview"))?;
-        let outcome = self.session.execute_as_ui(&intent.command_id, intent.params).map_err(|err| err.to_string())?;
+        let outcome = self.execute_session_ui_cmd(&intent.command_id, intent.params).map_err(|err| err.to_string())?;
         self.canvas_dialogs.convert_archetype.apply_preview_payload(&outcome.payload);
         self.canvas_dialogs.active_dialog = ActiveDialog::ConvertArchetype { sheet_id: sheet_id.clone() };
         Ok(())
@@ -424,6 +602,9 @@ impl UiApp {
     /// Returns an error string if the entry is missing or fails validation.
     pub fn load_from_virtual_workspace(&mut self, file_name: &str) -> Result<(), String> {
         let doc = self.virtual_workspace.open_project_archive(file_name)?;
+        if let Some(tracker) = self.batch_undo_log.as_mut() {
+            tracker.capture_fallback_baseline_before(&self.session, true);
+        }
         self.session = Session::from_document(doc);
         self.sync_views();
         Ok(())

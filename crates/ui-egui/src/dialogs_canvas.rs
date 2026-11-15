@@ -4057,7 +4057,13 @@ impl FormatAxesState {
                     self.set_y_thresholds(items);
                 }
                 "add_threshold" | "axes.add_threshold" => {
-                    let axis = val.get("axis").and_then(Value::as_str).map(parse_axis_target_str).transpose()?.unwrap_or(self.target_axis);
+                    let axis = match val.get("axis") {
+                        None | Some(Value::Null) => self.target_axis,
+                        Some(other) => {
+                            let s = other.as_str().ok_or_else(|| String::from("`axis` must be a string"))?;
+                            parse_axis_target_str(s)?
+                        }
+                    };
                     let items = parse_axis_thresholds_value(val, key)?;
                     self.append_thresholds_for_target(axis, items);
                 }
@@ -5521,35 +5527,46 @@ impl FormatSelectedPointsState {
 
     /// Apply field patches from UI widgets or `ui.answer_dialog`.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        let opt_patch_str = |val: &Value, key: &str| -> Result<Option<String>, String> {
+            match val {
+                Value::Null => Ok(None),
+                Value::String(s) => Ok(Some(s.clone())),
+                _ => Err(format!("`{key}` must be a string or null")),
+            }
+        };
+        let opt_patch_f64 = |val: &Value, key: &str| -> Result<Option<f64>, String> {
+            match val {
+                Value::Null => Ok(None),
+                _ => val.as_f64().filter(|n| n.is_finite()).map(Some).ok_or_else(|| format!("`{key}` must be a finite number or null")),
+            }
+        };
         for (key, val) in fields {
             match key.as_str() {
                 "points" | "selected_points" => {
-                    if let Some(arr) = val.as_array() {
-                        let mut pts = Vec::with_capacity(arr.len());
-                        for item in arr {
-                            let s = item.get("series_index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                            let p = item.get("point_index").and_then(Value::as_u64).unwrap_or(0) as usize;
-                            pts.push((s, p));
-                        }
-                        self.selected_points = pts;
+                    if !val.is_null() {
+                        self.selected_points = crate::control_io::parse_selected_points_array(val, key)?;
                     }
                 }
-                "color" | "symbol_color" | "format_points.color" => self.color = val.as_str().map(ToOwned::to_owned),
-                "fill_color" | "format_points.fill_color" => self.fill_color = val.as_str().map(ToOwned::to_owned),
-                "symbol" | "shape" | "symbol_shape" | "format_points.symbol" => self.symbol = val.as_str().map(ToOwned::to_owned),
-                "size_pt" | "format_points.size_pt" => self.size_pt = val.as_f64(),
-                "border_width_pt" | "stroke_width_pt" | "format_points.border_width_pt" => self.border_width_pt = val.as_f64(),
-                "fill_mode" | "format_points.fill_mode" => self.fill_mode = val.as_str().map(ToOwned::to_owned),
-                "hidden" | "format_points.hidden" => self.hidden = val.as_bool(),
+                "color" | "symbol_color" | "format_points.color" => self.color = opt_patch_str(val, key)?,
+                "fill_color" | "format_points.fill_color" => self.fill_color = opt_patch_str(val, key)?,
+                "symbol" | "shape" | "symbol_shape" | "format_points.symbol" => self.symbol = opt_patch_str(val, key)?,
+                "size_pt" | "format_points.size_pt" => self.size_pt = opt_patch_f64(val, key)?,
+                "border_width_pt" | "stroke_width_pt" | "format_points.border_width_pt" => {
+                    self.border_width_pt = opt_patch_f64(val, key)?;
+                }
+                "fill_mode" | "format_points.fill_mode" => self.fill_mode = opt_patch_str(val, key)?,
+                "hidden" | "format_points.hidden" => {
+                    self.hidden = match val {
+                        Value::Null => None,
+                        Value::Bool(b) => Some(*b),
+                        _ => return Err(format!("`{key}` must be a boolean or null")),
+                    };
+                }
                 "show_row_labels" | "format_points.show_row_labels" => {
-                    if let Some(b) = val.as_bool() {
-                        self.show_row_labels = b;
-                    }
+                    self.show_row_labels = val.as_bool().ok_or_else(|| format!("`{key}` must be a boolean"))?;
                 }
                 "clear" | "clear_overrides" | "format_points.clear" => {
-                    if let Some(b) = val.as_bool() {
-                        self.clear_overrides = b;
-                    }
+                    self.clear_overrides = val.as_bool().ok_or_else(|| format!("`{key}` must be a boolean"))?;
                 }
                 _ => {}
             }

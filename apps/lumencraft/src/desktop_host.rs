@@ -576,7 +576,19 @@ pub fn claim_isolated_journal_dir(root: &Path, new_instance: bool, window_id: De
 }
 
 fn is_readonly_control_method(method: &str) -> bool {
-    matches!(method, "ping" | "command.list" | "doc.inspect" | "render.svg" | "render.pdf" | "ui.state" | "state.snapshot" | "app.quit")
+    matches!(
+        method,
+        "ping"
+            | "command.list"
+            | "doc.inspect"
+            | "doc.export"
+            | "render.svg"
+            | "render.pdf"
+            | "render.preview"
+            | "ui.state"
+            | "state.snapshot"
+            | "app.quit"
+    )
 }
 
 fn apply_control_journal_steps(
@@ -608,7 +620,7 @@ fn apply_control_journal_steps(
         }
     }
 
-    if !recorded_any_step && !is_readonly_control_method(ctx.method) {
+    if !recorded_any_step && !ctx.rolled_back && !is_readonly_control_method(ctx.method) {
         let now_dirty = app.session().is_dirty();
         let stack_changed = app.session().undo_depth() != ctx.prev_undo_depth || app.session().redo_depth() != ctx.prev_redo_depth;
         let became_dirty = !ctx.prev_dirty && now_dirty;
@@ -932,6 +944,14 @@ impl DesktopWindowSession {
     }
 }
 
+struct PreferencesPersistHook(Box<dyn FnMut(&UiApp)>);
+
+impl std::fmt::Debug for PreferencesPersistHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreferencesPersistHook(..)")
+    }
+}
+
 /// Multi-window desktop host managing event loop dispatch, HiDPI scaling, IME composition,
 /// inertial trackpad coasting, file drops, clipboard pasteboard sync, and crash recovery.
 #[derive(Debug)]
@@ -942,13 +962,42 @@ pub struct DesktopHostRuntime {
     focused_window: Option<DesktopWindowId>,
     clipboard_text: Option<String>,
     clipboard_bundle: Option<ClipboardBundle>,
+    preferences_persist_hook: Option<PreferencesPersistHook>,
 }
 
 impl DesktopHostRuntime {
     /// Construct a new empty [`DesktopHostRuntime`] governed by `config`.
     #[must_use]
     pub fn new(config: DesktopHostConfig) -> Self {
-        Self { config, next_window_id: 1, windows: BTreeMap::new(), focused_window: None, clipboard_text: None, clipboard_bundle: None }
+        Self {
+            config,
+            next_window_id: 1,
+            windows: BTreeMap::new(),
+            focused_window: None,
+            clipboard_text: None,
+            clipboard_bundle: None,
+            preferences_persist_hook: None,
+        }
+    }
+
+    /// Install a callback invoked before closing windows or when UI preference/shortcut state changes.
+    pub fn set_preferences_persist_hook<F>(&mut self, hook: F)
+    where
+        F: FnMut(&UiApp) + 'static,
+    {
+        self.preferences_persist_hook = Some(PreferencesPersistHook(Box::new(hook)));
+    }
+
+    fn persist_window_preferences(&mut self, window_id: DesktopWindowId) {
+        if let Some(hook) = self.preferences_persist_hook.as_mut()
+            && let Some(win) = self.windows.get(&window_id)
+        {
+            (hook.0)(&win.app);
+        }
+    }
+
+    fn capture_pref_fingerprint(app: &UiApp) -> (String, lumencraft_ui_egui::UiThemeMode, String) {
+        (app.locale.clone(), app.theme.mode, app.shortcuts.export_overrides_json().unwrap_or_default())
     }
 
     /// Borrow the active [`DesktopHostConfig`].
@@ -1185,6 +1234,7 @@ impl DesktopHostRuntime {
         let ids: Vec<DesktopWindowId> = self.windows.keys().copied().collect();
         let mut errors = Vec::new();
         for id in ids {
+            self.persist_window_preferences(id);
             if let Err(err) = self.handle_window_close_requested(id, true) {
                 errors.push(format!("window {id}: {err}"));
             }
@@ -1199,7 +1249,10 @@ impl DesktopHostRuntime {
     pub fn dispatch(&mut self, event: DesktopHostEvent) -> Result<DesktopEventOutcome, String> {
         match event {
             DesktopHostEvent::WindowOpened { initial_file, viewport } => self.handle_window_opened(initial_file, viewport),
-            DesktopHostEvent::WindowCloseRequested { window_id, force } => self.handle_window_close_requested(window_id, force),
+            DesktopHostEvent::WindowCloseRequested { window_id, force } => {
+                self.persist_window_preferences(window_id);
+                self.handle_window_close_requested(window_id, force)
+            }
             DesktopHostEvent::WindowFocused { window_id } => self.handle_window_focused(window_id),
             DesktopHostEvent::Resized { window_id, width_px, height_px } => self.handle_resized(window_id, width_px, height_px),
             DesktopHostEvent::ScaleFactorChanged { window_id, scale_factor } => self.handle_scale_factor_changed(window_id, scale_factor),
@@ -1351,12 +1404,20 @@ impl DesktopHostRuntime {
     }
 
     fn dispatch_ui_event_on_window(&mut self, window_id: DesktopWindowId, ui_event: UiInputEvent) -> Result<DesktopEventOutcome, String> {
+        let check_shortcuts = !matches!(ui_event, UiInputEvent::PointerMove { .. }) && self.preferences_persist_hook.is_some();
         let win = self.window_mut(window_id)?;
         let prev_undo = win.app.session().undo_depth();
         let prev_redo = win.app.session().redo_depth();
         let prev_dirty = win.app.session().is_dirty();
+        let prev_basic = (win.app.locale.clone(), win.app.theme.mode);
+        let prev_shortcuts = if check_shortcuts { Some(win.app.shortcuts.export_overrides_json().unwrap_or_default()) } else { None };
         let ui_out: UiEventOutcome = win.app.dispatch_ui_event(ui_event, win.viewport)?;
         win.record_ui_mutation_checkpoint(ui_out.command_id.as_deref(), prev_undo, prev_redo, prev_dirty)?;
+        let prefs_changed = prev_basic != (win.app.locale.clone(), win.app.theme.mode)
+            || prev_shortcuts.as_deref().is_some_and(|before| before != win.app.shortcuts.export_overrides_json().unwrap_or_default());
+        if prefs_changed {
+            self.persist_window_preferences(window_id);
+        }
         Ok(DesktopEventOutcome {
             handled: ui_out.handled,
             action: ui_out.action,
@@ -1638,15 +1699,24 @@ impl DesktopHostRuntime {
                     ..Default::default()
                 });
             }
-            "window.close" | "file.close" => return self.handle_window_close_requested(window_id, false),
+            "window.close" | "file.close" => {
+                self.persist_window_preferences(window_id);
+                return self.handle_window_close_requested(window_id, false);
+            }
             "edit.copy" => return self.handle_clipboard_copy(window_id),
             "edit.paste" => return self.handle_clipboard_paste(window_id, None),
             _ => {}
         }
 
+        let has_hook = self.preferences_persist_hook.is_some();
         let win = self.window_mut(window_id)?;
+        let prev_prefs = has_hook.then(|| Self::capture_pref_fingerprint(&win.app));
         if let Some(ui_res) = dispatch_ui_command(&mut win.app, trimmed, &Value::Null)? {
             win.app.sync_views();
+            let changed = prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app));
+            if changed {
+                self.persist_window_preferences(window_id);
+            }
             return Ok(DesktopEventOutcome {
                 handled: true,
                 action: String::from("menu.ui_command"),
@@ -1665,6 +1735,9 @@ impl DesktopHostRuntime {
             Value::Null
         };
         let outcome = win.execute_and_journal(trimmed, params)?;
+        if prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app)) {
+            self.persist_window_preferences(window_id);
+        }
         Ok(DesktopEventOutcome {
             handled: true,
             action: String::from("menu.engine_command"),
