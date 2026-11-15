@@ -197,35 +197,38 @@ fn mcp_control_port_gui_only_drives_live_control_tcp_session() -> Result<(), Box
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);
 
+    // Like the desktop control server (`serve_control_listener` in `crates/ui-egui/src/control_io.rs`),
+    // serve every connection in turn against one `UiApp`: the MCP bridge opens a fresh TCP connection
+    // per control request, so a single-accept server refuses the second tool call.
     let server_thread = thread::spawn(move || -> Result<(), String> {
         let mut app = UiApp::new();
         app.set_gui_only(true);
-        let stream = loop {
+        loop {
             if stop_flag.load(Ordering::Relaxed) {
                 return Ok(());
             }
-            match listener.accept() {
-                Ok((stream, _)) => break stream,
+            let stream = match listener.accept() {
+                Ok((stream, _)) => stream,
                 Err(err) if err.kind() == ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(5));
+                    continue;
                 }
                 Err(err) => return Err(err.to_string()),
+            };
+            stream.set_nonblocking(false).map_err(|e| e.to_string())?;
+            let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
+            let reader = BufReader::new(stream);
+            for line_res in reader.lines() {
+                let line = line_res.map_err(|e| e.to_string())?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+                let reply = app.dispatch_control_line(&line);
+                writer.write_all(reply.as_bytes()).map_err(|e| e.to_string())?;
+                writer.write_all(b"\n").map_err(|e| e.to_string())?;
+                writer.flush().map_err(|e| e.to_string())?;
             }
-        };
-        stream.set_nonblocking(false).map_err(|e| e.to_string())?;
-        let mut writer = stream.try_clone().map_err(|e| e.to_string())?;
-        let reader = BufReader::new(stream);
-        for line_res in reader.lines() {
-            let line = line_res.map_err(|e| e.to_string())?;
-            if line.trim().is_empty() {
-                continue;
-            }
-            let reply = app.dispatch_control_line(&line);
-            writer.write_all(reply.as_bytes()).map_err(|e| e.to_string())?;
-            writer.write_all(b"\n").map_err(|e| e.to_string())?;
-            writer.flush().map_err(|e| e.to_string())?;
         }
-        Ok(())
     });
 
     let port_str = port.to_string();
