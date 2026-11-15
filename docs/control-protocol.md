@@ -16,7 +16,13 @@ Each client request is a single UTF-8 JSON object terminated by `\n` (bounded by
 {"id": 7, "op": "render.pdf", "sheet_id": "graph-1", "color_space": "srgb"}
 ```
 
-Supported built-in methods today are `"ping"` (includes `"gui_only"`), `"command.list"` (all registered engine commands in [`commands.md`](commands.md) plus the `32` synced `UI_COMMANDS` in `crates/mcp/src/ui_catalog.rs`), `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"render.svg"`, `"render.pdf"`, `"ui.state"` (alias `"state.snapshot"`, includes `"gui_only"`), `"app.quit"`, the 8 interactive GUI actions (`"ui.inspect"`, `"ui.screenshot"`, `"ui.pointer_gesture"`, `"ui.type_text"`, `"ui.press_key"`, `"ui.invoke_menu"`, `"ui.switch_tab"`, `"ui.answer_dialog"`), or any registered engine / `ui.*` command ID (`"ui.canvas.preflight"`, `"ui.event.dispatch"`, etc.) passed directly as `"method"`/`"op"` (`MAX_CONTROL_LINE_BYTES = 16 MiB` in `crates/ui-egui/src/control_io.rs`).
+Supported built-in methods today are `"auth"`, `"ping"` (includes `"gui_only"`), `"command.list"` (all registered engine commands in [`commands.md`](commands.md) plus all synced `UI_COMMANDS` in `crates/mcp/src/ui_catalog.rs`), `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"doc.export"`, `"render.svg"`, `"render.pdf"`, `"render.preview"`, `"ui.state"` (alias `"state.snapshot"`, includes `"gui_only"`), `"app.quit"`, the 8 interactive GUI actions (`"ui.inspect"`, `"ui.screenshot"`, `"ui.pointer_gesture"`, `"ui.type_text"`, `"ui.press_key"`, `"ui.invoke_menu"`, `"ui.switch_tab"`, `"ui.answer_dialog"`), or any registered engine / `ui.*` command ID (`"ui.canvas.preflight"`, `"ui.event.dispatch"`, etc.) passed directly as `"method"`/`"op"` (`MAX_CONTROL_LINE_BYTES = 16 MiB` in `crates/ui-egui/src/control_io.rs`).
+
+`render.pdf` accepts:
+- `sheet_id` / `sheetId`: optional `SheetId` (defaults to the active or first graph/layout sheet).
+- `all`: optional `bool` (default `false`); when `true`, renders all graph and layout sheets into a multi-page PDF.
+- `color_space`: optional `"srgb"` | `"rgb"` | `"cmyk"` | `"grayscale"` | `"gray"` (default `"srgb"`).
+- `path`: optional host filesystem destination path; when non-empty outside `--gui-only`, writes the rendered PDF bytes to `path` in addition to returning `data_base64`, `sheet_id`, `sheet_ids`, `page_count`, and `bytes_len`. Under `--gui-only`, non-empty `path` is rejected with `ErrorCode::GuiOnlyViolation`.
 
 Each response (`ControlResponse`) is a single UTF-8 JSON object terminated by `\n`:
 
@@ -24,11 +30,17 @@ Each response (`ControlResponse`) is a single UTF-8 JSON object terminated by `\
 {"id": 1, "ok": true, "result": {"commands": [...]}, "error": null}
 ```
 
-Errors return `ok: false` with `"result": null`, `"error"` set to a human-readable string, and optional structured `"error_detail"` (`ErrorCode`, `category`, `retryable`, `remediation`, `details`) without disconnecting the socket or crashing the session:
+Errors on well-framed requests—including unknown methods, invalid JSON, non-UTF-8 lines (`<= MAX_CONTROL_LINE_BYTES`), auth failures, validation/command errors, caught handler panics, and oversized responses (returned as a bounded overflow error)—return `ok: false` with `"result": null`, `"error"` set to a human-readable string, and optional structured `"error_detail"` (`ErrorCode`, `category`, `retryable`, `remediation`, `details`) without disconnecting the socket or crashing the session:
 
 ```json
 {"id": 99, "ok": false, "result": null, "error": "unknown command `foo.bar`"}
 ```
+
+Intentional socket termination occurs only on:
+- **Oversized frames (`> MAX_CONTROL_LINE_BYTES = 16 MiB`)**: sends a best-effort `ok: false` JSON error frame and closes the connection (`InvalidData`) rather than buffering unbounded input.
+- **HTTP request lines** (`GET `, `POST `, etc.): replies `403 Forbidden` with `Connection: close` and drops the connection.
+- **TCP idle timeout (`2s`)**: drops stalled TCP connections that do not send a complete `\n`-terminated frame within 2 seconds (no reply written).
+- **`"app.quit"`**: sends the `"ok": true` reply and shuts down the control loop cleanly.
 
 ## Interactive `ui.*` Actions & `--gui-only` Lock (`R8.6`)
 
@@ -57,4 +69,6 @@ Implemented in `crates/ui-egui/src/{control_io.rs, gui_actions.rs, inspect.rs}` 
 ## Security Invariants
 
 - Never binds to `0.0.0.0` or `::`; loopback (`127.0.0.1` / `::1` via `validate_loopback_addr`) only (`cargo xtask telemetry`).
-- Disabled by default unless `--control <port>` (`1..=65535`) is explicitly passed on the command line.
+- Disabled by default unless `--control <port>` (`1..=65535`) or `LUMENCRAFT_CONTROL_PORT` is explicitly set.
+- Requires bearer-token authentication (`ControlAuth`, via `--control-token` / `LUMENCRAFT_CONTROL_TOKEN` or an auto-generated session token) supplied via `"auth"` handshake or per-request `"token"`.
+- Rejects HTTP request lines (`403 Forbidden`) and bounds line framing (`MAX_CONTROL_LINE_BYTES = 16 MiB`, 2s TCP idle timeout).
