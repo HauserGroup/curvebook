@@ -75,6 +75,22 @@ pub enum GraphFamily {
     NestedSubcolumn,
 }
 
+/// Clamp `value` into `[min, max]` without panicking if `min > max` or any argument is `NaN`.
+#[must_use]
+pub(crate) fn clamp_f64_safe(value: f64, min: f64, max: f64) -> f64 {
+    if min.is_nan() && max.is_nan() {
+        return if value.is_nan() { 0.0 } else { value };
+    }
+    if min.is_nan() {
+        return if value.is_nan() { max } else { value.min(max) };
+    }
+    if max.is_nan() {
+        return if value.is_nan() { min } else { value.max(min) };
+    }
+    let (lo, hi) = if min <= max { (min, max) } else { (max, min) };
+    if value.is_nan() { lo } else { value.clamp(lo, hi) }
+}
+
 /// Compile a single [`GraphSheet`] within `doc` into a resolution-independent [`ChartScene`].
 ///
 /// # Errors

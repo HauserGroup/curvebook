@@ -19,6 +19,7 @@ pub type RgbaPixmap = RasterImage;
 const BEZIER_FLATNESS_TOL_PX: f64 = 0.15;
 const MAX_BEZIER_DEPTH: u8 = 12;
 const MITER_LIMIT: f64 = 4.0;
+const MAX_DASH_SEGMENTS: usize = 65_536;
 const SUBPIXEL_OFFSETS: [f64; 4] = [0.125, 0.375, 0.625, 0.875];
 
 /// Uncompressed RGBA pixel buffer paired with resolution and physical DPI metadata.
@@ -309,7 +310,17 @@ impl ClipRectPx {
     }
 
     fn is_empty(self) -> bool {
-        self.max_x <= self.min_x || self.max_y <= self.min_y
+        !self.min_x.is_finite()
+            || !self.max_x.is_finite()
+            || !self.min_y.is_finite()
+            || !self.max_y.is_finite()
+            || self.max_x <= self.min_x
+            || self.max_y <= self.min_y
+    }
+
+    fn expand(self, margin: f64) -> Self {
+        let m = if margin.is_finite() { margin.max(0.0) } else { 0.0 };
+        Self { min_x: self.min_x - m, min_y: self.min_y - m, max_x: self.max_x + m, max_y: self.max_y + m }
     }
 }
 
@@ -746,9 +757,15 @@ fn convex_poly_interval(verts: &[PointPx], y_sub: f64) -> Option<(f64, f64)> {
 }
 
 fn stroke_subpaths(img: &mut RasterImage, subpaths: &[Subpath], stroke: &StrokePaint, stroke_scale: f64, clip: ClipRectPx) {
+    if clip.is_empty() {
+        return;
+    }
     let width_px = (stroke.width_pt * stroke_scale).max(0.5);
     let radius = 0.5 * width_px;
+    let clip_margin = (MITER_LIMIT * radius).max(radius * 2.0) + 2.0;
+    let dash_clip = clip.expand(clip_margin);
     let mut pieces: Vec<StrokePiece> = Vec::new();
+    let mut dash_segments = 0usize;
 
     for sub in subpaths {
         let clean = normalize_subpath_points(&sub.points, sub.closed);
@@ -758,7 +775,7 @@ fn stroke_subpaths(img: &mut RasterImage, subpaths: &[Subpath], stroke: &StrokeP
         if stroke.dash == LineDashStyle::Solid {
             emit_solid_subpath_pieces(&clean, sub.closed, radius, stroke.cap, stroke.join, &mut pieces);
         } else {
-            emit_dashed_subpath_pieces(&clean, sub.closed, width_px, radius, stroke, &mut pieces);
+            emit_dashed_subpath_pieces(&clean, sub.closed, width_px, radius, stroke, dash_clip, &mut dash_segments, &mut pieces);
         }
     }
 
@@ -904,28 +921,264 @@ fn emit_solid_subpath_pieces(points: &[PointPx], closed: bool, r: f64, cap: Line
     }
 }
 
-fn emit_dashed_subpath_pieces(points: &[PointPx], closed: bool, width_px: f64, r: f64, stroke: &StrokePaint, out: &mut Vec<StrokePiece>) {
+#[derive(Debug, Clone, Copy)]
+enum ClipEdge {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ClippedSegment {
+    start: PointPx,
+    end: PointPx,
+    entered: bool,
+    exited: bool,
+    skip_start: f64,
+    skip_end: f64,
+}
+
+fn point_on_clip_edge(a: PointPx, b: PointPx, dx: f64, dy: f64, edge: ClipEdge, rect: ClipRectPx) -> PointPx {
+    match edge {
+        ClipEdge::Left | ClipEdge::Right => {
+            let x = match edge {
+                ClipEdge::Left => rect.min_x,
+                _ => rect.max_x,
+            };
+            let raw_y = if (x - a.x).abs() <= (x - b.x).abs() { a.y + (x - a.x) * (dy / dx) } else { b.y + (x - b.x) * (dy / dx) };
+            let y = if raw_y.is_finite() { raw_y.clamp(rect.min_y, rect.max_y) } else { a.y };
+            PointPx::new(x, y)
+        }
+        ClipEdge::Top | ClipEdge::Bottom => {
+            let y = match edge {
+                ClipEdge::Top => rect.min_y,
+                _ => rect.max_y,
+            };
+            let raw_x = if (y - a.y).abs() <= (y - b.y).abs() { a.x + (y - a.y) * (dx / dy) } else { b.x + (y - b.y) * (dx / dy) };
+            let x = if raw_x.is_finite() { raw_x.clamp(rect.min_x, rect.max_x) } else { a.x };
+            PointPx::new(x, y)
+        }
+    }
+}
+
+fn clip_axis_aligned_1d(a0: f64, b0: f64, lo: f64, hi: f64) -> Option<(f64, f64, bool, bool)> {
+    let d = b0 - a0;
+    if d > 0.0 {
+        let c0 = a0.max(lo);
+        let c1 = b0.min(hi);
+        if c1 - c0 <= 1e-9 {
+            return None;
+        }
+        Some((c0, c1, c0 > a0, c1 < b0))
+    } else if d < 0.0 {
+        let c0 = a0.min(hi);
+        let c1 = b0.max(lo);
+        if c0 - c1 <= 1e-9 {
+            return None;
+        }
+        Some((c0, c1, c0 < a0, c1 > b0))
+    } else {
+        None
+    }
+}
+
+/// Clip segment `(a, b)` against `rect` cleanly even at extreme coordinate magnitudes.
+fn clip_segment_to_rect(a: PointPx, b: PointPx, rect: ClipRectPx) -> Option<ClippedSegment> {
+    if rect.is_empty() || !a.is_finite() || !b.is_finite() {
+        return None;
+    }
+    let dx = b.x - a.x;
+    let dy = b.y - a.y;
+    if !dx.is_finite() || !dy.is_finite() {
+        return None;
+    }
+    if dy == 0.0 {
+        if a.y < rect.min_y || a.y > rect.max_y {
+            return None;
+        }
+        let (x0, x1, entered, exited) = clip_axis_aligned_1d(a.x, b.x, rect.min_x, rect.max_x)?;
+        return Some(ClippedSegment {
+            start: PointPx::new(x0, a.y),
+            end: PointPx::new(x1, a.y),
+            entered,
+            exited,
+            skip_start: (x0 - a.x).abs(),
+            skip_end: (b.x - x1).abs(),
+        });
+    }
+    if dx == 0.0 {
+        if a.x < rect.min_x || a.x > rect.max_x {
+            return None;
+        }
+        let (y0, y1, entered, exited) = clip_axis_aligned_1d(a.y, b.y, rect.min_y, rect.max_y)?;
+        return Some(ClippedSegment {
+            start: PointPx::new(a.x, y0),
+            end: PointPx::new(a.x, y1),
+            entered,
+            exited,
+            skip_start: (y0 - a.y).abs(),
+            skip_end: (b.y - y1).abs(),
+        });
+    }
+
+    let checks = [
+        (-dx, a.x - rect.min_x, ClipEdge::Left),
+        (dx, rect.max_x - a.x, ClipEdge::Right),
+        (-dy, a.y - rect.min_y, ClipEdge::Top),
+        (dy, rect.max_y - a.y, ClipEdge::Bottom),
+    ];
+    let mut t0 = 0.0f64;
+    let mut t1 = 1.0f64;
+    let mut enter_edge: Option<ClipEdge> = None;
+    let mut exit_edge: Option<ClipEdge> = None;
+
+    for (p, q, edge) in checks {
+        let r = q / p;
+        if !r.is_finite() {
+            return None;
+        }
+        if p < 0.0 {
+            if r > t0 {
+                t0 = r;
+                enter_edge = Some(edge);
+            }
+        } else if r < t1 {
+            t1 = r;
+            exit_edge = Some(edge);
+        }
+    }
+
+    if t0 - t1 > 1e-12 || t1 < 0.0 || t0 > 1.0 {
+        return None;
+    }
+
+    let start = match enter_edge {
+        Some(edge) => point_on_clip_edge(a, b, dx, dy, edge, rect),
+        None => a,
+    };
+    let end = match exit_edge {
+        Some(edge) => point_on_clip_edge(a, b, dx, dy, edge, rect),
+        None => b,
+    };
+    if (end.x - start.x).hypot(end.y - start.y) <= 1e-6 {
+        return None;
+    }
+
+    Some(ClippedSegment {
+        start,
+        end,
+        entered: enter_edge.is_some(),
+        exited: exit_edge.is_some(),
+        skip_start: (start.x - a.x).hypot(start.y - a.y),
+        skip_end: (b.x - end.x).hypot(b.y - end.y),
+    })
+}
+
+/// Advance dash phase analytically modulo `period` without stepping individual dashes.
+fn advance_dash_state(pattern: &[f64], period: f64, pat_idx: &mut usize, pat_rem: &mut f64, advance_len: f64) {
+    if period <= 0.0 || !period.is_finite() || !advance_len.is_finite() || advance_len <= 0.0 || pattern.is_empty() {
+        return;
+    }
+    let mut cur_phase = 0.0f64;
+    for (i, &seg) in pattern.iter().enumerate() {
+        match i.cmp(pat_idx) {
+            std::cmp::Ordering::Less => cur_phase += seg,
+            std::cmp::Ordering::Equal => {
+                cur_phase += (seg - *pat_rem).max(0.0);
+                break;
+            }
+            std::cmp::Ordering::Greater => break,
+        }
+    }
+    let mut phase = (cur_phase + (advance_len % period)) % period;
+    if !phase.is_finite() || phase < 0.0 || phase >= period {
+        phase = 0.0;
+    }
+    for (i, &seg) in pattern.iter().enumerate() {
+        if phase < seg - 1e-9 {
+            *pat_idx = i;
+            *pat_rem = (seg - phase).max(0.0);
+            return;
+        }
+        phase = (phase - seg).max(0.0);
+    }
+    *pat_idx = 0;
+    *pat_rem = pattern.first().copied().unwrap_or(0.25);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_dashed_subpath_pieces(
+    points: &[PointPx],
+    closed: bool,
+    width_px: f64,
+    r: f64,
+    stroke: &StrokePaint,
+    clip: ClipRectPx,
+    dash_segments: &mut usize,
+    out: &mut Vec<StrokePiece>,
+) {
     let mults = stroke.dash.dash_multipliers();
     if mults.is_empty() || points.len() < 2 {
         emit_solid_subpath_pieces(points, closed, r, stroke.cap, stroke.join, out);
         return;
     }
     let pattern: Vec<f64> = mults.iter().map(|&m| (m * width_px).max(0.25)).collect();
+    let dash_period: f64 = pattern.iter().copied().sum();
     let mut pat_idx = 0usize;
     let mut pat_rem = pattern.first().copied().unwrap_or(width_px);
     let mut dash_pts: Vec<PointPx> = Vec::new();
     let seg_count = if closed { points.len() } else { points.len() - 1 };
 
     for i in 0..seg_count {
+        if *dash_segments >= MAX_DASH_SEGMENTS {
+            break;
+        }
         let Some(&a) = points.get(i) else { continue };
         let Some(&b) = points.get((i + 1) % points.len()) else { continue };
-        let Some((dir, seg_len)) = unit_dir(a, b) else { continue };
-        let mut pos = 0.0f64;
-        while pos < seg_len - 1e-9 {
-            let take = (seg_len - pos).min(pat_rem);
-            let next_pos = pos + take;
-            let p_start = PointPx::new(a.x + dir.x * pos, a.y + dir.y * pos);
-            let p_end = PointPx::new(a.x + dir.x * next_pos, a.y + dir.y * next_pos);
+        let Some((_, seg_len)) = unit_dir(a, b) else { continue };
+        let Some(clipped) = clip_segment_to_rect(a, b, clip) else {
+            if !dash_pts.is_empty() {
+                emit_solid_subpath_pieces(&dash_pts, false, r, stroke.cap, stroke.join, out);
+                dash_pts.clear();
+            }
+            advance_dash_state(&pattern, dash_period, &mut pat_idx, &mut pat_rem, seg_len);
+            continue;
+        };
+        let Some((dir, vis_len)) = unit_dir(clipped.start, clipped.end) else {
+            if !dash_pts.is_empty() {
+                emit_solid_subpath_pieces(&dash_pts, false, r, stroke.cap, stroke.join, out);
+                dash_pts.clear();
+            }
+            advance_dash_state(&pattern, dash_period, &mut pat_idx, &mut pat_rem, seg_len);
+            continue;
+        };
+
+        if clipped.entered {
+            if !dash_pts.is_empty() {
+                emit_solid_subpath_pieces(&dash_pts, false, r, stroke.cap, stroke.join, out);
+                dash_pts.clear();
+            }
+            advance_dash_state(&pattern, dash_period, &mut pat_idx, &mut pat_rem, clipped.skip_start);
+        }
+
+        let mut u = 0.0f64;
+        while u < vis_len - 1e-9 {
+            if *dash_segments >= MAX_DASH_SEGMENTS {
+                if !dash_pts.is_empty() {
+                    emit_solid_subpath_pieces(&dash_pts, false, r, stroke.cap, stroke.join, out);
+                    dash_pts.clear();
+                }
+                return;
+            }
+            let take = (vis_len - u).min(pat_rem);
+            let next_u = u + take;
+            if next_u <= u {
+                break;
+            }
+            *dash_segments += 1;
+            let p_start = PointPx::new(clipped.start.x + dir.x * u, clipped.start.y + dir.y * u);
+            let p_end = PointPx::new(clipped.start.x + dir.x * next_u, clipped.start.y + dir.y * next_u);
             if pat_idx.is_multiple_of(2) {
                 if dash_pts.is_empty() {
                     dash_pts.push(p_start);
@@ -933,7 +1186,7 @@ fn emit_dashed_subpath_pieces(points: &[PointPx], closed: bool, width_px: f64, r
                 dash_pts.push(p_end);
             }
             pat_rem -= take;
-            pos = next_pos;
+            u = next_u;
             if pat_rem <= 1e-9 {
                 if pat_idx.is_multiple_of(2) && !dash_pts.is_empty() {
                     emit_solid_subpath_pieces(&dash_pts, false, r, stroke.cap, stroke.join, out);
@@ -942,6 +1195,14 @@ fn emit_dashed_subpath_pieces(points: &[PointPx], closed: bool, width_px: f64, r
                 pat_idx = (pat_idx + 1) % pattern.len();
                 pat_rem = pattern.get(pat_idx).copied().unwrap_or(width_px);
             }
+        }
+
+        if clipped.exited {
+            if !dash_pts.is_empty() {
+                emit_solid_subpath_pieces(&dash_pts, false, r, stroke.cap, stroke.join, out);
+                dash_pts.clear();
+            }
+            advance_dash_state(&pattern, dash_period, &mut pat_idx, &mut pat_rem, clipped.skip_end);
         }
     }
 
@@ -1153,4 +1414,109 @@ fn flatten_glyph_commands(cmds: &[GlyphOutlineCmd], xform: TextTransform) -> Vec
     }
 
     subpaths
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, ScenePrimitive, StrokePaint};
+    use lumencraft_palette::{LineDashStyle, Rgba8};
+
+    fn dashed_scene_for_line(x0: f64, y0: f64, x1: f64, y1: f64, dash: LineDashStyle) -> ChartScene {
+        let mut scene = ChartScene::new("dash", "Dash", 200.0, 100.0, Some(Rgba8::WHITE));
+        let path = Path2D::line(PointPt::new(x0, y0), PointPt::new(x1, y1));
+        scene.primitives.push(ScenePrimitive::Path {
+            path,
+            fill: None,
+            stroke: Some(StrokePaint { color: Rgba8::BLACK, width_pt: 2.0, dash, cap: LineCap::Butt, join: LineJoin::Miter }),
+            clip: None,
+        });
+        scene
+    }
+
+    #[test]
+    fn off_canvas_dashed_lines_render_fast_and_preserve_phase() {
+        let target = RenderTargetSpec { width_px: 200, height_px: 100, dpi: 72 };
+        let short_scene = dashed_scene_for_line(-26.0, 50.0, 226.0, 50.0, LineDashStyle::Dashed);
+        let img_short = render_scene(&short_scene, target).expect("short render");
+        assert!(img_short.rgba.as_chunks::<4>().0.iter().any(|px| px[0] < 128));
+
+        let t0 = std::time::Instant::now();
+        let huge_scene = dashed_scene_for_line(-1e16, 50.0, 1e16, 50.0, LineDashStyle::Dashed);
+        let img_huge = render_scene(&huge_scene, target).expect("huge horizontal render");
+        assert!(t0.elapsed().as_secs_f64() < 0.25);
+        assert!(img_huge.rgba.as_chunks::<4>().0.iter().any(|px| px[0] < 128));
+
+        let t1 = std::time::Instant::now();
+        let huge_diag = dashed_scene_for_line(-1e6, -1e6 + 50.0, 1e6, 1e6 + 50.0, LineDashStyle::Dashed);
+        let img_diag = render_scene(&huge_diag, target).expect("huge diagonal render");
+        assert!(t1.elapsed().as_secs_f64() < 0.25);
+        assert!(img_diag.rgba.as_chunks::<4>().0.iter().any(|px| px[0] < 128));
+
+        let mut s_1e5 = dashed_scene_for_line(10.0, 10.0, 10.0 + 1e5, 10.0, LineDashStyle::Dotted);
+        if let Some(ScenePrimitive::Path { stroke: Some(sp), .. }) = s_1e5.primitives.first_mut() {
+            sp.width_pt = 1.25;
+            sp.cap = LineCap::Round;
+            sp.join = LineJoin::Round;
+        }
+        let mut s_1e6 = dashed_scene_for_line(10.0, 10.0, 10.0 + 1e6, 10.0, LineDashStyle::Dotted);
+        if let Some(ScenePrimitive::Path { stroke: Some(sp), .. }) = s_1e6.primitives.first_mut() {
+            sp.width_pt = 1.25;
+            sp.cap = LineCap::Round;
+            sp.join = LineJoin::Round;
+        }
+        let t_a = std::time::Instant::now();
+        let _ = render_scene(&s_1e5, target).expect("1e5 dotted");
+        let dur_a = t_a.elapsed().as_secs_f64();
+        let t_b = std::time::Instant::now();
+        let _ = render_scene(&s_1e6, target).expect("1e6 dotted");
+        let dur_b = t_b.elapsed().as_secs_f64();
+        assert!(dur_b < 0.05 + 2.0 * dur_a);
+
+        let mut phase_pattern = vec![8.0, 5.0];
+        let period: f64 = phase_pattern.iter().copied().sum();
+        let mut idx_a = 0usize;
+        let mut rem_a = phase_pattern[0];
+        advance_dash_state(&phase_pattern, period, &mut idx_a, &mut rem_a, 10.0 * period + 3.0);
+        assert_eq!(idx_a, 0);
+        assert!((rem_a - 5.0).abs() < 1e-9);
+        phase_pattern.clear();
+        advance_dash_state(&phase_pattern, 0.0, &mut idx_a, &mut rem_a, 10.0);
+    }
+
+    #[test]
+    fn off_canvas_horizontal_dashed_line_matches_exact_phase_modulo() {
+        // Horizontal shift by an integer number of dash periods must produce identical visible pixels.
+        let target = RenderTargetSpec { width_px: 200, height_px: 100, dpi: 72 };
+        // width_pt = 2.0 at 72 dpi (scale 1.0): Dashed multipliers [4.0, 2.5] -> period = (4.0 + 2.5) * 2.0 = 13.0 px.
+        let period_px = 13.0;
+        let shift_periods = 100_000.0;
+        let s1 = dashed_scene_for_line(-130.0, 50.0, 260.0, 50.0, LineDashStyle::Dashed);
+        let s2 = dashed_scene_for_line(-130.0 - shift_periods * period_px, 50.0, 260.0 + 13_000.0, 50.0, LineDashStyle::Dashed);
+        let r1 = render_scene(&s1, target).expect("r1");
+        let r2 = render_scene(&s2, target).expect("r2");
+        assert_eq!(r1.rgba, r2.rgba);
+    }
+
+    #[test]
+    fn dense_in_canvas_dashed_polyline_hits_segment_cap_cleanly() {
+        let mut scene = ChartScene::new("dense", "Dense", 200.0, 100.0, Some(Rgba8::WHITE));
+        let mut commands = vec![PathCmd::MoveTo(PointPt::new(10.0, 10.0))];
+        for i in 1..=200 {
+            let x = if i % 2 == 0 { 10.0 } else { 190.0 };
+            let y = 10.0 + f64::from(i % 80);
+            commands.push(PathCmd::LineTo(PointPt::new(x, y)));
+        }
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D { commands },
+            fill: None,
+            stroke: Some(StrokePaint { color: Rgba8::BLACK, width_pt: 0.1, dash: LineDashStyle::Dotted, cap: LineCap::Butt, join: LineJoin::Miter }),
+            clip: None,
+        });
+        let target = RenderTargetSpec { width_px: 200, height_px: 100, dpi: 72 };
+        let t0 = std::time::Instant::now();
+        let img = render_scene(&scene, target).expect("dense render");
+        assert!(t0.elapsed().as_secs_f64() < 1.0);
+        assert!(img.rgba.as_chunks::<4>().0.iter().any(|px| px[0] < 128));
+    }
 }
