@@ -192,14 +192,7 @@ fn parse_table_element(
     let row_titles_cols = row_titles_el.map(extract_column_subcolumns).unwrap_or_default();
     warn_discarded_subcolumns(warnings, (&id, &title), "RowTitlesColumn", row_titles_cols.len(), row_titles_declared_subs, 1, "row-title column");
     let row_titles_raw = row_titles_cols.into_iter().next().unwrap_or_default();
-    let row_titles: Vec<String> = row_titles_raw
-        .into_iter()
-        .map(|c| match c.value {
-            CellValue::Empty => String::new(),
-            CellValue::Number(v) => format!("{v}"),
-            CellValue::Text(s) => s,
-        })
-        .collect();
+    let row_titles: Vec<String> = row_titles_raw.iter().map(|c| cell_to_clamped_title(c, &format!("table `{title}` row title"), warnings)).collect();
 
     let x_el = table_el.first_child("XColumn");
     let x_declared_subs = x_el.map(parse_subcolumns_attr).transpose()?.flatten();
@@ -261,7 +254,18 @@ fn parse_table_element(
         });
     }
 
-    let mut arch = build_table_archetype(kind, subcolumn_mode, x_mode, &x_title, &x_cols, &parsed_y, padded_row_titles, has_row_titles, row_count)?;
+    let (effective_row_titles, effective_has_row_titles) = if kind == TableKind::PartsOfWhole
+        && !has_row_titles
+        && let Some(first_x) = x_cols.first()
+    {
+        let mut labels: Vec<String> = first_x.iter().map(|c| cell_to_clamped_title(c, &format!("table `{title}` slice label"), warnings)).collect();
+        labels.resize(row_count, String::new());
+        (labels, true)
+    } else {
+        (padded_row_titles, has_row_titles)
+    };
+    let mut arch =
+        build_table_archetype(kind, subcolumn_mode, x_mode, &x_title, &x_cols, &parsed_y, effective_row_titles, effective_has_row_titles, row_count)?;
     if let TableArchetype::Nested(ref mut nested) = arch {
         let nested_sub_titles: Vec<Vec<Option<String>>> = parsed_y.iter().map(|col| col.sub_titles.clone()).collect();
         apply_nested_subcolumn_titles(nested, &nested_sub_titles);
@@ -484,14 +488,8 @@ fn build_table_archetype(
             pow.slice_labels = if has_row_titles {
                 row_titles
             } else if let Some(first_x) = x_cols.first() {
-                let mut labels: Vec<String> = first_x
-                    .iter()
-                    .map(|c| match &c.value {
-                        CellValue::Empty => String::new(),
-                        CellValue::Number(v) => format!("{v}"),
-                        CellValue::Text(s) => s.clone(),
-                    })
-                    .collect();
+                let mut discarded = Vec::new();
+                let mut labels: Vec<String> = first_x.iter().map(|c| cell_to_clamped_title(c, "PartsOfWhole slice label", &mut discarded)).collect();
                 labels.resize(row_count, String::new());
                 labels
             } else {
@@ -757,6 +755,14 @@ fn allocate_unique_id(raw: Option<&str>, prefix: &str, idx: usize, used: &mut Ha
         suffix += 1;
     }
     candidate
+}
+
+fn cell_to_clamped_title(cell: &Cell, source: &str, warnings: &mut Vec<ImportWarning>) -> String {
+    match &cell.value {
+        CellValue::Empty => String::new(),
+        CellValue::Number(v) => clamp_title(&format!("{v}"), source, warnings),
+        CellValue::Text(s) => clamp_title(s, source, warnings),
+    }
 }
 
 fn clamp_title(raw: &str, source: &str, warnings: &mut Vec<ImportWarning>) -> String {

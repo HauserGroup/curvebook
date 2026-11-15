@@ -15,8 +15,8 @@ use lumencraft_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
 use lumencraft_text::{LocaleNumberPolicy, RichText, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
 
 use crate::scales::{
-    AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, compute_additional_ticks_for_segments, emit_additional_tick_gridline_segments,
-    emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
+    AxisMapping, AxisRenderOptions, MAX_TICKS_PER_SEGMENT, ResolvedAdditionalTick, compute_additional_ticks_for_segments,
+    emit_additional_tick_gridline_segments, emit_additional_x_tick_primitives, emit_additional_y_tick_primitives,
 };
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt,
@@ -73,17 +73,21 @@ impl ResolvedSegment {
         };
         let lo = g_min.min(g_max);
         let hi = g_min.max(g_max);
+        let num_hi = self.min.max(self.max);
+        let (g_num_lo, g_num_hi) = if self.min <= self.max { (g_min, g_max) } else { (g_max, g_min) };
         let g_val = match self.scale.transform(value) {
             Some(v) if v.is_finite() => v,
             _ => {
-                // Non-positive on log or below lower boundary clamps toward lower bound unless clearly above max.
-                let fallback = if value.is_finite() && value >= self.max { hi } else { lo };
-                let s = ((fallback - g_min) / (g_max - g_min)).clamp(0.0, 1.0);
+                // Clamp out-of-domain values (e.g. non-positive on log) toward the closer numeric boundary.
+                let fallback = if value.is_finite() && value >= num_hi { g_num_hi } else { g_num_lo };
+                let denom = g_max - g_min;
+                let s = if denom.abs() > 0.0 { ((fallback - g_min) / denom).clamp(0.0, 1.0) } else { 0.0 };
                 return (self.span_start + s * (self.span_end - self.span_start), true);
             }
         };
         let clipped = g_val < lo || g_val > hi;
-        let s = ((g_val.clamp(lo, hi) - g_min) / (g_max - g_min)).clamp(0.0, 1.0);
+        let denom = g_max - g_min;
+        let s = if denom.abs() > 0.0 { ((g_val.clamp(lo, hi) - g_min) / denom).clamp(0.0, 1.0) } else { 0.0 };
         (self.span_start + s * (self.span_end - self.span_start), clipped)
     }
 }
@@ -96,6 +100,7 @@ pub(crate) struct SegmentedAxis {
     pub tick_format: TickLabelFormat,
     pub tick_angle_deg: f64,
     pub stroke_width_pt: f64,
+    pub warnings: Vec<ChartWarning>,
 }
 
 impl SegmentedAxis {
@@ -121,6 +126,7 @@ impl SegmentedAxis {
 
         let mut cursor = span_start;
         let mut resolved = Vec::with_capacity(count);
+        let mut warnings = Vec::new();
         for (idx, seg) in raw_segments[..count].iter().enumerate() {
             let share = if seg.length_share > 0.0 && seg.length_share.is_finite() { seg.length_share } else { 1.0 };
             let seg_len = usable * (share / safe_weights);
@@ -128,7 +134,7 @@ impl SegmentedAxis {
             let seg_end = cursor + dir * seg_len;
             cursor = seg_end + dir * gap;
 
-            let (dmin, dmax) = resolve_segment_domain(seg, data_values, include_zero_if_linear, top_headroom_frac);
+            let (dmin, dmax) = resolve_segment_domain(seg, data_values, include_zero_if_linear, top_headroom_frac, &mut warnings);
             resolved.push(ResolvedSegment {
                 index: idx,
                 min: dmin,
@@ -147,6 +153,7 @@ impl SegmentedAxis {
             tick_format: spec.tick_format,
             tick_angle_deg: spec.tick_angle_deg,
             stroke_width_pt: if spec.stroke_width_pt > 0.0 { spec.stroke_width_pt } else { 1.0 },
+            warnings,
         }
     }
 
@@ -166,10 +173,12 @@ impl SegmentedAxis {
         let mut best_idx = 0;
         let mut best_dist = f64::INFINITY;
         for seg in &self.segments {
-            let d = if value < seg.min {
-                (seg.min - value).abs()
-            } else if value > seg.max {
-                (value - seg.max).abs()
+            let seg_lo = seg.min.min(seg.max);
+            let seg_hi = seg.min.max(seg.max);
+            let d = if value < seg_lo {
+                (seg_lo - value).abs()
+            } else if value > seg_hi {
+                (value - seg_hi).abs()
             } else {
                 0.0
             };
@@ -187,32 +196,177 @@ impl SegmentedAxis {
     }
 }
 
-fn resolve_segment_domain(seg: &AxisSegment, data_values: &[f64], include_zero_if_linear: bool, top_headroom_frac: f64) -> (f64, f64) {
+const PERCENT_TAIL_DISTANCES: &[f64] = &[10.0, 5.0, 1.0, 0.5, 0.1, 0.05, 0.01, 0.005, 0.001, 0.0005, 0.0001, 1e-5, 1e-6, 1e-8, 1e-10, 1e-12];
+
+fn filter_reciprocal_segment_values(seg: &AxisSegment, valid: &[f64], warnings: &mut Vec<ChartWarning>) -> Vec<f64> {
+    if let Some(anchor) = seg.min.filter(|v| v.is_finite() && *v != 0.0).or_else(|| seg.max.filter(|v| v.is_finite() && *v != 0.0)) {
+        return valid.iter().copied().filter(|&v| v * anchor > 0.0).collect();
+    }
+    let has_pos = valid.iter().any(|&v| v > 0.0);
+    let has_neg = valid.iter().any(|&v| v < 0.0);
+    if has_pos && has_neg {
+        warnings.push(ChartWarning::new(
+            "reciprocal_domain_crosses_zero",
+            "reciprocal axis cannot span zero on a single segment; auto-domain restricted to positive values (use a broken axis to show both signs)",
+        ));
+        return valid.iter().copied().filter(|&v| v > 0.0).collect();
+    }
+    valid.to_vec()
+}
+
+fn resolve_segment_domain(
+    seg: &AxisSegment,
+    data_values: &[f64],
+    include_zero_if_linear: bool,
+    top_headroom_frac: f64,
+    warnings: &mut Vec<ChartWarning>,
+) -> (f64, f64) {
     let scale = seg.scale;
     let valid: Vec<f64> = data_values.iter().copied().filter(|&v| v.is_finite() && scale.transform(v).is_some()).collect();
+    let seg_valid = if scale == AxisScale::Reciprocal { filter_reciprocal_segment_values(seg, &valid, warnings) } else { valid };
 
-    let mut dmin = match seg.min {
-        Some(v) if v.is_finite() && scale.transform(v).is_some() => v,
-        _ => auto_domain_min(&valid, scale, include_zero_if_linear),
+    let explicit_min = match seg.min {
+        Some(v) if v.is_finite() && scale.transform(v).is_some() => Some(v),
+        Some(v) => {
+            warnings.push(ChartWarning::new("invalid_axis_domain", format!("ignored invalid minimum {v} for {scale:?} axis")));
+            None
+        }
+        None => None,
     };
-    let mut dmax = match seg.max {
-        Some(v) if v.is_finite() && scale.transform(v).is_some() => v,
-        _ => auto_domain_max(&valid, scale, top_headroom_frac),
+    let explicit_max = match seg.max {
+        Some(v) if v.is_finite() && scale.transform(v).is_some() => Some(v),
+        Some(v) => {
+            warnings.push(ChartWarning::new("invalid_axis_domain", format!("ignored invalid maximum {v} for {scale:?} axis")));
+            None
+        }
+        None => None,
     };
 
-    if seg.min.is_none() && seg.max.is_none() && (dmax - dmin).abs() < 1e-12 {
-        (dmin, dmax) = expand_degenerate_domain(dmin, scale);
-    }
-    if seg.min.is_none() && matches!(scale, AxisScale::Linear) && include_zero_if_linear && dmin > 0.0 {
+    let mut dmin = explicit_min.unwrap_or_else(|| auto_domain_min(&seg_valid, scale, include_zero_if_linear));
+    let mut dmax = explicit_max.unwrap_or_else(|| auto_domain_max(&seg_valid, scale, top_headroom_frac));
+
+    if explicit_min.is_none() && matches!(scale, AxisScale::Linear) && include_zero_if_linear && dmin > 0.0 && dmin <= dmax {
         dmin = 0.0;
     }
-    if seg.max.is_none() && matches!(scale, AxisScale::Linear) && include_zero_if_linear && dmax < 0.0 {
+    if explicit_max.is_none() && matches!(scale, AxisScale::Linear) && include_zero_if_linear && dmax < 0.0 && dmin <= dmax {
         dmax = 0.0;
     }
-    if dmin >= dmax {
+    if is_degenerate_domain(dmin, dmax, scale) {
+        if explicit_min.is_some() && explicit_max.is_some() {
+            warnings
+                .push(ChartWarning::new("invalid_axis_domain", format!("expanded degenerate explicit domain [{dmin}, {dmax}] for {scale:?} axis")));
+        }
         (dmin, dmax) = expand_degenerate_domain(dmin, scale);
     }
+    if scale == AxisScale::Reciprocal
+        && (!dmin.is_finite()
+            || !dmax.is_finite()
+            || dmin == 0.0
+            || dmax == 0.0
+            || dmin.signum() != dmax.signum()
+            || is_degenerate_domain(dmin, dmax, scale))
+    {
+        warnings
+            .push(ChartWarning::new("invalid_axis_domain", format!("repaired zero-crossing or invalid domain [{dmin}, {dmax}] for Reciprocal axis")));
+        let pos: Vec<f64> = seg_valid.iter().copied().filter(|&v| v > 0.0).collect();
+        let neg: Vec<f64> = seg_valid.iter().copied().filter(|&v| v < 0.0).collect();
+        let chosen = if !pos.is_empty() { &pos } else { &neg };
+        if !chosen.is_empty() {
+            let mut rmin = auto_domain_min(chosen, AxisScale::Reciprocal, false);
+            let mut rmax = auto_domain_max(chosen, AxisScale::Reciprocal, top_headroom_frac);
+            if is_degenerate_domain(rmin, rmax, AxisScale::Reciprocal) {
+                (rmin, rmax) = expand_degenerate_domain(rmin, AxisScale::Reciprocal);
+            }
+            if rmin.is_finite() && rmax.is_finite() && rmin != 0.0 && rmax != 0.0 && rmin.signum() == rmax.signum() {
+                return (rmin, rmax);
+            }
+        }
+        return default_domain(scale);
+    }
+    if is_log_like(scale)
+        && (!dmin.is_finite()
+            || !dmax.is_finite()
+            || dmin <= 0.0
+            || dmax <= 0.0
+            || is_degenerate_domain(dmin, dmax, scale)
+            || scale.transform(dmin).is_none()
+            || scale.transform(dmax).is_none())
+    {
+        warnings.push(ChartWarning::new(
+            "invalid_axis_domain",
+            format!("repaired non-finite or non-positive domain [{dmin}, {dmax}] for {scale:?} axis"),
+        ));
+        return default_domain(scale);
+    }
     (dmin, dmax)
+}
+
+fn is_degenerate_domain(dmin: f64, dmax: f64, scale: AxisScale) -> bool {
+    if !dmin.is_finite() || !dmax.is_finite() {
+        return true;
+    }
+    if matches!(scale, AxisScale::Linear) {
+        (dmax - dmin).abs() < 1e-12
+    } else {
+        match (scale.transform(dmin), scale.transform(dmax)) {
+            (Some(t_min), Some(t_max)) => (t_max - t_min).abs() < 1e-12,
+            _ => true,
+        }
+    }
+}
+
+fn log_auto_domain_min(raw_min: f64, scale: AxisScale) -> f64 {
+    let candidate = match scale {
+        AxisScale::Log10 => 10.0_f64.powf(raw_min.log10().floor()),
+        AxisScale::Log2 => 2.0_f64.powf(raw_min.log2().floor()),
+        AxisScale::Ln => (raw_min.ln() - 0.15).exp(),
+        _ => raw_min,
+    };
+    if candidate.is_finite() && candidate > 0.0 && scale.transform(candidate).is_some() { candidate.min(raw_min) } else { raw_min }
+}
+
+fn log_auto_domain_max(raw_max: f64, scale: AxisScale, top_headroom_frac: f64) -> f64 {
+    let headroom = if top_headroom_frac.is_finite() { top_headroom_frac.max(0.0) } else { 0.0 };
+    let padded = raw_max * (1.0 + headroom);
+    let candidate = match scale {
+        AxisScale::Log10 if padded.is_finite() => 10.0_f64.powf(padded.log10().ceil()),
+        AxisScale::Log2 if padded.is_finite() => 2.0_f64.powf(padded.log2().ceil()),
+        AxisScale::Ln => (raw_max.ln() + 0.15 + headroom).exp(),
+        _ => f64::INFINITY,
+    };
+    if candidate.is_finite() && candidate > 0.0 && scale.transform(candidate).is_some() {
+        candidate.max(raw_max)
+    } else if padded.is_finite() && padded > 0.0 && scale.transform(padded).is_some() {
+        padded.max(raw_max)
+    } else {
+        f64::MAX
+    }
+}
+
+pub(crate) fn prob_auto_domain_min(raw_min: f64, upper: f64, scale: AxisScale) -> f64 {
+    let mult = upper / 100.0;
+    let target = raw_min * 0.5;
+    for &tail_pct in PERCENT_TAIL_DISTANCES {
+        let cand = tail_pct * mult;
+        if cand <= target && cand <= raw_min && scale.transform(cand).is_some() {
+            return cand;
+        }
+    }
+    if target > 0.0 && target < upper && scale.transform(target).is_some() { target } else { raw_min }
+}
+
+pub(crate) fn prob_auto_domain_max(raw_max: f64, upper: f64, scale: AxisScale) -> f64 {
+    let mult = upper / 100.0;
+    let target_tail = (upper - raw_max) * 0.5;
+    for &tail_pct in PERCENT_TAIL_DISTANCES {
+        let tail = tail_pct * mult;
+        let cand = upper - tail;
+        if tail <= target_tail && cand >= raw_max && scale.transform(cand).is_some() {
+            return cand;
+        }
+    }
+    let padded = upper - target_tail;
+    if padded > 0.0 && padded < upper && scale.transform(padded).is_some() { padded.max(raw_max) } else { raw_max }
 }
 
 fn auto_domain_min(valid: &[f64], scale: AxisScale, include_zero_if_linear: bool) -> f64 {
@@ -230,11 +384,9 @@ fn auto_domain_min(valid: &[f64], scale: AxisScale, include_zero_if_linear: bool
             }
             nice_floor(base, span)
         }
-        AxisScale::Log10 => 10.0_f64.powf(raw_min.log10().floor()),
-        AxisScale::Log2 => 2.0_f64.powf(raw_min.log2().floor()),
-        AxisScale::Ln => (raw_min.ln() - 0.15).exp(),
-        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => (raw_min * 0.5).clamp(0.1, 10.0),
-        AxisScale::Logit(LogitDomain::Proportion) => (raw_min * 0.5).clamp(0.001, 0.1),
+        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => log_auto_domain_min(raw_min, scale),
+        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => prob_auto_domain_min(raw_min, 100.0, scale),
+        AxisScale::Logit(LogitDomain::Proportion) => prob_auto_domain_min(raw_min, 1.0, scale),
         AxisScale::Reciprocal => {
             if raw_min > 0.0 {
                 raw_min * 0.85
@@ -257,11 +409,9 @@ fn auto_domain_max(valid: &[f64], scale: AxisScale, top_headroom_frac: f64) -> f
             let padded = raw_max + span * (0.08 + top_headroom_frac.max(0.0));
             nice_ceil(padded, span)
         }
-        AxisScale::Log10 => 10.0_f64.powf((raw_max * (1.0 + top_headroom_frac.max(0.0))).log10().ceil()),
-        AxisScale::Log2 => 2.0_f64.powf((raw_max * (1.0 + top_headroom_frac.max(0.0))).log2().ceil()),
-        AxisScale::Ln => (raw_max.ln() + 0.15 + top_headroom_frac).exp(),
-        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => raw_max.clamp(90.0, 99.9),
-        AxisScale::Logit(LogitDomain::Proportion) => raw_max.clamp(0.9, 0.999),
+        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => log_auto_domain_max(raw_max, scale, top_headroom_frac),
+        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => prob_auto_domain_max(raw_max, 100.0, scale),
+        AxisScale::Logit(LogitDomain::Proportion) => prob_auto_domain_max(raw_max, 1.0, scale),
         AxisScale::Reciprocal => {
             if raw_max > 0.0 {
                 raw_max * 1.15
@@ -282,23 +432,66 @@ fn default_domain(scale: AxisScale) -> (f64, f64) {
     }
 }
 
+fn expand_log_degenerate(center: f64, lo_mult: f64, hi_mult: f64, scale: AxisScale) -> (f64, f64) {
+    if !center.is_finite() || center <= 0.0 || scale.transform(center).is_none() {
+        return default_domain(scale);
+    }
+    let raw_lo = center * lo_mult;
+    let lo = if raw_lo.is_finite() && raw_lo > 0.0 && scale.transform(raw_lo).is_some() { raw_lo } else { center };
+    let raw_hi = center * hi_mult;
+    let hi = if raw_hi.is_finite() && scale.transform(raw_hi).is_some() { raw_hi } else { f64::MAX };
+    if lo.is_finite() && hi.is_finite() && lo < hi && scale.transform(lo).is_some() && scale.transform(hi).is_some() {
+        (lo, hi)
+    } else {
+        default_domain(scale)
+    }
+}
+
 fn expand_degenerate_domain(center: f64, scale: AxisScale) -> (f64, f64) {
     match scale {
         AxisScale::Linear => {
-            let pad = center.abs().max(1.0) * 0.5;
-            (center - pad, center + pad)
+            let safe_center = if center.is_finite() { center } else { 0.0 };
+            let pad = safe_center.abs().max(1.0) * 0.5;
+            (safe_center - pad, safe_center + pad)
         }
-        AxisScale::Log10 => (center * 0.1, center * 10.0),
-        AxisScale::Log2 => (center * 0.5, center * 2.0),
-        AxisScale::Ln => (center * 0.5, center * 2.0),
-        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => (1.0, 99.0),
-        AxisScale::Logit(LogitDomain::Proportion) => (0.01, 0.99),
-        AxisScale::Reciprocal => (center * 0.5, center * 2.0),
+        AxisScale::Log10 => expand_log_degenerate(center, 0.1, 10.0, scale),
+        AxisScale::Log2 | AxisScale::Ln => expand_log_degenerate(center, 0.5, 2.0, scale),
+        AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => {
+            if center.is_finite() && center > 0.0 && center < 100.0 {
+                let lo = prob_auto_domain_min(center, 100.0, scale);
+                let hi = prob_auto_domain_max(center, 100.0, scale);
+                if lo < hi && scale.transform(lo).is_some() && scale.transform(hi).is_some() { (lo, hi) } else { (1.0, 99.0) }
+            } else {
+                (1.0, 99.0)
+            }
+        }
+        AxisScale::Logit(LogitDomain::Proportion) => {
+            if center.is_finite() && center > 0.0 && center < 1.0 {
+                let lo = prob_auto_domain_min(center, 1.0, scale);
+                let hi = prob_auto_domain_max(center, 1.0, scale);
+                if lo < hi && scale.transform(lo).is_some() && scale.transform(hi).is_some() { (lo, hi) } else { (0.01, 0.99) }
+            } else {
+                (0.01, 0.99)
+            }
+        }
+        AxisScale::Reciprocal => {
+            if !center.is_finite() || center == 0.0 {
+                default_domain(AxisScale::Reciprocal)
+            } else if center > 0.0 {
+                (center * 0.5, center * 2.0)
+            } else {
+                (center * 2.0, center * 0.5)
+            }
+        }
     }
 }
 
 fn nice_step(span: f64, target_ticks: usize) -> f64 {
-    let raw = (span.abs() / (target_ticks.max(2) as f64)).max(1e-12);
+    let abs_span = span.abs();
+    if !abs_span.is_finite() || abs_span <= 0.0 {
+        return 1.0;
+    }
+    let raw = (abs_span / (target_ticks.max(2) as f64)).max(1e-12);
     let exp = raw.log10().floor();
     let pow10 = 10.0_f64.powf(exp);
     let frac = raw / pow10;
@@ -454,13 +647,14 @@ fn summarize_pre_summarized(
     error_spec: Option<&ErrorBarSpec>,
     warnings: &mut Vec<ChartWarning>,
 ) -> Option<(f64, f64, f64)> {
+    let center_only = subcells.first().and_then(lumencraft_doc::Cell::active_number).filter(|v| v.is_finite());
+    let Some(eb) = error_spec else {
+        return center_only.map(|c| (c, c, c));
+    };
     let explicit = mode.explicit_bounds(subcells);
     if mode.supports_parametric_moments() {
         match SummarizedPoint::reconstruct(mode, subcells) {
             Ok(Some(pt)) => {
-                let Some(eb) = error_spec else {
-                    return Some((pt.mean, pt.mean, pt.mean));
-                };
                 let (lo, hi) = match eb.metric {
                     ErrorBarMetric::Sd => (pt.mean - pt.sd, pt.mean + pt.sd),
                     ErrorBarMetric::Sem => {
@@ -473,6 +667,10 @@ fn summarize_pre_summarized(
                             let t = student_t_two_sided_isf(0.05, pt.df_within).unwrap_or(1.959_963_984_540_054);
                             t * sem
                         } else {
+                            warnings.push(ChartWarning::new(
+                                "insufficient_sample_size_for_ci",
+                                format!("95% CI requires N >= 2 (got N = {}); error bar omitted", pt.n),
+                            ));
                             0.0
                         };
                         (pt.mean - half, pt.mean + half)
@@ -490,11 +688,34 @@ fn summarize_pre_summarized(
             Ok(None) => return None,
             Err(err) => {
                 warnings.push(ChartWarning::new("invalid_pre_summarized_point", err.to_string()));
-                return explicit.map(|b| (b.center, b.lower, b.upper));
+                let center = center_only?;
+                let can_use_direct_spread = !matches!(
+                    err,
+                    lumencraft_doc::SummaryPointError::NegativeSpread { .. }
+                        | lumencraft_doc::SummaryPointError::SampleSizeBelowOne { .. }
+                        | lumencraft_doc::SummaryPointError::MissingSpread
+                ) && matches!(
+                    (mode, eb.metric),
+                    (SubcolumnMode::MeanSdN | SubcolumnMode::MeanCvN, ErrorBarMetric::Sd | ErrorBarMetric::ExplicitSubcolumns)
+                        | (SubcolumnMode::MeanSemN, ErrorBarMetric::Sem | ErrorBarMetric::ExplicitSubcolumns)
+                );
+                if can_use_direct_spread && let Some(b) = explicit {
+                    return Some((b.center, b.lower, b.upper));
+                }
+                return Some((center, center, center));
             }
         }
     }
-    explicit.map(|b| (b.center, b.lower, b.upper))
+    if let Some(b) = explicit {
+        return Some((b.center, b.lower, b.upper));
+    }
+    center_only.map(|center| {
+        warnings.push(ChartWarning::new(
+            "incomplete_explicit_error_bounds",
+            format!("pre-summarized {mode:?} row is missing lower/upper spread cells; error bar omitted"),
+        ));
+        (center, center, center)
+    })
 }
 
 /// Compute `(lower_endpoint, upper_endpoint)` around `center` from raw replicate values.
@@ -801,6 +1022,12 @@ pub(crate) fn render_cartesian_chrome(
     let policy = LocaleNumberPolicy::default();
     let grid_color = AxisRenderOptions::default().grid_color;
 
+    scene.warnings.extend(x_axis.warnings.iter().cloned());
+    scene.warnings.extend(y_axis.warnings.iter().cloned());
+    if let Some(y2) = y2_axis {
+        scene.warnings.extend(y2.warnings.iter().cloned());
+    }
+
     let x_add = resolve_segmented_additional_ticks(x_axis, &graph.spec.x_axis, &policy, doc, primary_opt);
     let y_add = resolve_segmented_additional_ticks(y_axis, &graph.spec.y_axis, &policy, doc, primary_opt);
     let y2_add = match (y2_axis, graph.spec.y2_axis.as_ref()) {
@@ -821,18 +1048,18 @@ pub(crate) fn render_cartesian_chrome(
 
     emit_frame_spines(&mut scene.primitives, r, graph.spec.frame_preset, x_axis, y_axis, y2_axis);
 
-    emit_x_ticks(&mut scene.primitives, r, x_axis, categorical_x_ticks, &policy);
+    emit_x_ticks(&mut scene.primitives, &mut scene.warnings, r, x_axis, categorical_x_ticks, &policy);
     if !x_add.is_empty() {
         let tick_stroke = StrokePaint::solid(Rgba8::BLACK, x_axis.stroke_width_pt.max(0.75));
         emit_additional_x_tick_primitives(&x_add, r.bottom(), x_axis.tick_angle_deg, tick_stroke, &mut scene.primitives);
     }
-    emit_y_ticks(&mut scene.primitives, r.x, true, y_axis, &policy);
+    emit_y_ticks(&mut scene.primitives, &mut scene.warnings, r.x, true, y_axis, &policy);
     if !y_add.is_empty() {
         let tick_stroke = StrokePaint::solid(Rgba8::BLACK, y_axis.stroke_width_pt.max(0.75));
         emit_additional_y_tick_primitives(&y_add, r.x, true, y_axis.tick_angle_deg, 6.5, tick_stroke, &mut scene.primitives);
     }
     if let Some(y2) = y2_axis {
-        emit_y_ticks(&mut scene.primitives, r.right(), false, y2, &policy);
+        emit_y_ticks(&mut scene.primitives, &mut scene.warnings, r.right(), false, y2, &policy);
         if !y2_add.is_empty() {
             let tick_stroke = StrokePaint::solid(Rgba8::BLACK, y2.stroke_width_pt.max(0.75));
             emit_additional_y_tick_primitives(&y2_add, r.right(), false, y2.tick_angle_deg, 6.5, tick_stroke, &mut scene.primitives);
@@ -1037,6 +1264,7 @@ fn emit_break_ornament(
 
 fn emit_x_ticks(
     primitives: &mut Vec<ScenePrimitive>,
+    warnings: &mut Vec<ChartWarning>,
     r: RectPt,
     axis: &SegmentedAxis,
     categorical_ticks: Option<&[(f64, String)]>,
@@ -1067,7 +1295,7 @@ fn emit_x_ticks(
     }
 
     for seg in &axis.segments {
-        let (majors, minors) = generate_segment_ticks(*seg);
+        let (majors, minors) = generate_segment_ticks(*seg, warnings);
         for m in minors {
             if let Some(x_pt) = seg.map_strict(m) {
                 primitives.push(ScenePrimitive::Path {
@@ -1101,13 +1329,20 @@ fn emit_x_ticks(
     }
 }
 
-fn emit_y_ticks(primitives: &mut Vec<ScenePrimitive>, spine_x: f64, is_left: bool, axis: &SegmentedAxis, policy: &LocaleNumberPolicy) {
+fn emit_y_ticks(
+    primitives: &mut Vec<ScenePrimitive>,
+    warnings: &mut Vec<ChartWarning>,
+    spine_x: f64,
+    is_left: bool,
+    axis: &SegmentedAxis,
+    policy: &LocaleNumberPolicy,
+) {
     let tick_stroke = StrokePaint::solid(Rgba8::BLACK, axis.stroke_width_pt.max(0.75));
     let dir = if is_left { -1.0 } else { 1.0 };
     let anchor = if is_left { TextAnchor::End } else { TextAnchor::Start };
 
     for seg in &axis.segments {
-        let (majors, minors) = generate_segment_ticks(*seg);
+        let (majors, minors) = generate_segment_ticks(*seg, warnings);
         for m in minors {
             if let Some(y_pt) = seg.map_strict(m) {
                 primitives.push(ScenePrimitive::Path {
@@ -1140,55 +1375,151 @@ fn emit_y_ticks(primitives: &mut Vec<ScenePrimitive>, spine_x: f64, is_left: boo
     }
 }
 
-fn generate_segment_ticks(seg: ResolvedSegment) -> (Vec<f64>, Vec<f64>) {
+pub(crate) fn generate_prob_ticks_for_range(min_v: f64, max_v: f64, scale: AxisScale) -> Vec<f64> {
+    const PROBIT_CANDIDATES: &[f64] = &[0.001, 0.01, 0.05, 0.1, 1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 99.9, 99.95, 99.99, 99.999];
+    const LOGIT_PCT_CANDIDATES: &[f64] =
+        &[0.001, 0.01, 0.05, 0.1, 0.5, 1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 99.5, 99.9, 99.95, 99.99, 99.999];
+    const LOGIT_PROP_CANDIDATES: &[f64] =
+        &[0.00001, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99, 0.995, 0.999, 0.9995, 0.9999, 0.99999];
+    let candidates = match scale {
+        AxisScale::Probit => PROBIT_CANDIDATES,
+        AxisScale::Logit(LogitDomain::Percent) => LOGIT_PCT_CANDIDATES,
+        AxisScale::Logit(LogitDomain::Proportion) => LOGIT_PROP_CANDIDATES,
+        _ => &[],
+    };
+    let lo = min_v.min(max_v);
+    let hi = min_v.max(max_v);
+    let tol = 1e-12 * hi.abs().max(1.0);
+    let mut majors: Vec<f64> = candidates.iter().copied().filter(|&v| v >= lo - tol && v <= hi + tol).collect();
+    if majors.len() < 2
+        && let (Some(t0), Some(t1)) = (scale.transform(lo), scale.transform(hi))
+        && (t1 - t0).abs() > 1e-12
+    {
+        majors.clear();
+        for i in 0..=4 {
+            let t = t0 + ((i as f64) / 4.0) * (t1 - t0);
+            if let Some(v) = scale.inverse(t)
+                && v.is_finite()
+                && scale.transform(v).is_some()
+            {
+                majors.push(v);
+            }
+        }
+    }
+    majors
+}
+
+fn generate_segment_ticks(seg: ResolvedSegment, warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, Vec<f64>) {
     match seg.scale {
         AxisScale::Log10 => generate_log_ticks(seg, 10.0, 9),
         AxisScale::Log2 => generate_log_ticks(seg, 2.0, 1),
         AxisScale::Ln => generate_log_ticks(seg, std::f64::consts::E, 0),
-        AxisScale::Probit => {
-            let candidates = [0.1, 1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0, 99.9];
-            let majors = candidates.iter().copied().filter(|&v| v >= seg.min - 1e-12 && v <= seg.max + 1e-12).collect();
-            (majors, Vec::new())
-        }
-        AxisScale::Logit(LogitDomain::Percent) => {
-            let candidates = [1.0, 5.0, 10.0, 25.0, 50.0, 75.0, 90.0, 95.0, 99.0];
-            let majors = candidates.iter().copied().filter(|&v| v >= seg.min - 1e-12 && v <= seg.max + 1e-12).collect();
-            (majors, Vec::new())
-        }
-        AxisScale::Logit(LogitDomain::Proportion) => {
-            let candidates = [0.01, 0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 0.99];
-            let majors = candidates.iter().copied().filter(|&v| v >= seg.min - 1e-12 && v <= seg.max + 1e-12).collect();
-            (majors, Vec::new())
-        }
-        AxisScale::Linear | AxisScale::Reciprocal => generate_linear_ticks(seg),
+        AxisScale::Probit | AxisScale::Logit(_) => (generate_prob_ticks_for_range(seg.min, seg.max, seg.scale), Vec::new()),
+        AxisScale::Linear | AxisScale::Reciprocal => generate_linear_ticks(seg, warnings),
     }
 }
 
-fn generate_linear_ticks(seg: ResolvedSegment) -> (Vec<f64>, Vec<f64>) {
-    let span = (seg.max - seg.min).abs();
-    let step = match seg.major_tick_interval {
+pub(crate) fn compute_safe_linear_ticks(
+    min_v: f64,
+    max_v: f64,
+    requested_step: Option<f64>,
+    target_ticks: usize,
+    warnings: &mut Vec<ChartWarning>,
+) -> (Vec<f64>, f64, usize) {
+    let lo = min_v.min(max_v);
+    let hi = min_v.max(max_v);
+    let span = hi - lo;
+    if !lo.is_finite() || !hi.is_finite() || !span.is_finite() || span <= 0.0 {
+        let pt = if lo.is_finite() { vec![lo] } else { Vec::new() };
+        return (pt, 1.0, 0);
+    }
+
+    let max_intervals = (MAX_TICKS_PER_SEGMENT.saturating_sub(1)).max(1) as f64;
+    let mut step = match requested_step {
         Some(s) if s.is_finite() && s > 0.0 => s,
-        _ => nice_step(span, 5),
+        _ => nice_step(span, target_ticks),
     };
-    let start_k = (seg.min / step - 1e-9).ceil() as i64;
-    let end_k = (seg.max / step + 1e-9).floor() as i64;
-    let mut majors = Vec::new();
-    let count = (end_k - start_k).clamp(0, 64);
-    for dk in 0..=count {
-        let mut v = ((start_k + dk) as f64) * step;
+    let min_safe_step = (span / max_intervals).max(lo.abs().max(hi.abs()) * 1e-13);
+    let raw_intervals = span / step;
+    if !raw_intervals.is_finite() || raw_intervals > max_intervals || step < min_safe_step {
+        let stride = (raw_intervals / max_intervals).ceil();
+        let eff_step = if raw_intervals.is_finite() && stride.is_finite() && stride <= 1_000_000.0 {
+            let scaled = step * stride;
+            if scaled.is_finite() && scaled >= min_safe_step { scaled } else { nice_step(span, 8).max(min_safe_step) }
+        } else {
+            nice_step(span, 8).max(min_safe_step)
+        };
+        if let Some(req) = requested_step
+            && req.is_finite()
+            && req > 0.0
+        {
+            warnings.push(ChartWarning::new(
+                "major_tick_interval_capped",
+                format!("major_tick_interval ({req:e}) exceeds max {MAX_TICKS_PER_SEGMENT} ticks over span [{lo}, {hi}]; adjusted to {eff_step:e}"),
+            ));
+        }
+        step = eff_step;
+    }
+
+    let mut start_k_f = (lo / step - 1e-9).ceil();
+    let mut end_k_f = (hi / step + 1e-9).floor();
+    if !start_k_f.is_finite()
+        || !end_k_f.is_finite()
+        || start_k_f.abs() > 4.5e15
+        || end_k_f.abs() > 4.5e15
+        || (end_k_f - start_k_f) > max_intervals + 2.0
+    {
+        step = nice_step(span, 8).max(min_safe_step);
+        start_k_f = (lo / step - 1e-9).ceil();
+        end_k_f = (hi / step + 1e-9).floor();
+    }
+    if !start_k_f.is_finite() || !end_k_f.is_finite() || end_k_f < start_k_f {
+        return (vec![lo, hi], step, 0);
+    }
+
+    let count = ((end_k_f - start_k_f).round().max(0.0) as usize).saturating_add(1).min(MAX_TICKS_PER_SEGMENT);
+    let tol = 1e-9 * span.max(step);
+    let mut majors = Vec::with_capacity(count);
+    for dk in 0..count {
+        let mut v = (start_k_f + (dk as f64)) * step;
         if v.abs() < 1e-12 * step {
             v = 0.0;
         }
-        majors.push(v);
+        if v < lo && lo - v <= tol {
+            v = lo;
+        } else if v > hi && v - hi <= tol {
+            v = hi;
+        }
+        if v >= lo - tol && v <= hi + tol {
+            majors.push(v);
+        }
     }
+    if majors.is_empty() {
+        majors.push(lo);
+        majors.push(hi);
+    }
+    (majors, step, count)
+}
+
+fn generate_linear_ticks(seg: ResolvedSegment, warnings: &mut Vec<ChartWarning>) -> (Vec<f64>, Vec<f64>) {
+    let lo = seg.min.min(seg.max);
+    let hi = seg.min.max(seg.max);
+    let requested = seg.major_tick_interval.filter(|s| s.is_finite() && *s > 0.0);
+    let (majors, step, _) = compute_safe_linear_ticks(lo, hi, requested, 5, warnings);
+
     let mut minors = Vec::new();
-    if seg.minor_ticks_per_interval > 0 && majors.len() <= 32 {
+    let start_k_f = (lo / step - 1e-9).ceil();
+    if seg.minor_ticks_per_interval > 0 && majors.len() <= 64 && start_k_f.is_finite() && start_k_f.abs() < 4.5e15 {
         let sub = usize::from(seg.minor_ticks_per_interval) + 1;
-        for dk in -1..=count {
-            let base = ((start_k + dk) as f64) * step;
+        let intervals = majors.len().saturating_add(1);
+        for idx in 0..intervals {
+            let base = (start_k_f - 1.0 + (idx as f64)) * step;
             for j in 1..sub {
+                if minors.len() >= MAX_TICKS_PER_SEGMENT {
+                    return (majors, minors);
+                }
                 let v = base + step * (j as f64) / (sub as f64);
-                if v > seg.min && v < seg.max {
+                if v > lo && v < hi {
                     minors.push(v);
                 }
             }
@@ -1197,27 +1528,76 @@ fn generate_linear_ticks(seg: ResolvedSegment) -> (Vec<f64>, Vec<f64>) {
     (majors, minors)
 }
 
+fn log_in_base(value: f64, base: f64) -> f64 {
+    if (base - 10.0).abs() < f64::EPSILON {
+        value.log10()
+    } else if (base - 2.0).abs() < f64::EPSILON {
+        value.log2()
+    } else if (base - std::f64::consts::E).abs() < f64::EPSILON {
+        value.ln()
+    } else {
+        value.log(base)
+    }
+}
+
+fn log_exponent_range(lo: f64, hi: f64, base: f64) -> Option<(i32, i32, i32)> {
+    let lo_exp_f = log_in_base(lo, base).floor();
+    let hi_exp_f = log_in_base(hi, base).ceil();
+    if !lo_exp_f.is_finite() || !hi_exp_f.is_finite() || lo_exp_f > hi_exp_f {
+        return None;
+    }
+    let span_f = (hi_exp_f - lo_exp_f).max(1.0);
+    if !span_f.is_finite() {
+        return None;
+    }
+    let max_ticks_f = MAX_TICKS_PER_SEGMENT.saturating_sub(1).max(1) as f64;
+    let min_stride_f = (span_f / max_ticks_f).ceil().max(1.0);
+    let stride_f = (span_f / 7.0).ceil().max(min_stride_f).max(1.0);
+    if !stride_f.is_finite() || lo_exp_f < f64::from(i32::MIN) || hi_exp_f > f64::from(i32::MAX) || stride_f > f64::from(i32::MAX) {
+        return None;
+    }
+    Some((lo_exp_f as i32, hi_exp_f as i32, (stride_f as i32).max(1)))
+}
+
 fn generate_log_ticks(seg: ResolvedSegment, base: f64, default_subdivisions: u8) -> (Vec<f64>, Vec<f64>) {
-    let lo_exp = seg.min.log(base).floor() as i32;
-    let hi_exp = seg.max.log(base).ceil() as i32;
-    let stride = (((hi_exp - lo_exp).max(1) as f64) / 7.0).ceil().max(1.0) as i32;
+    if !seg.min.is_finite() || !seg.max.is_finite() || seg.min <= 0.0 || seg.max <= 0.0 || !base.is_finite() || base <= 1.0 {
+        return (Vec::new(), Vec::new());
+    }
+    let lo = seg.min.min(seg.max);
+    let hi = seg.min.max(seg.max);
+    let Some((lo_exp, hi_exp, stride)) = log_exponent_range(lo, hi, base) else {
+        return (Vec::new(), Vec::new());
+    };
+
+    let lo_tol = lo * (1.0 - 1e-9);
+    let hi_tol = if hi <= f64::MAX / (1.0 + 1e-9) { hi * (1.0 + 1e-9) } else { f64::MAX };
+    let emit_minors = (seg.minor_ticks_per_interval > 0 || default_subdivisions > 0) && (base - 10.0).abs() < f64::EPSILON && stride == 1;
+
     let mut majors = Vec::new();
     let mut minors = Vec::new();
     let mut k = lo_exp;
-    while k <= hi_exp {
+    while k <= hi_exp && majors.len() < MAX_TICKS_PER_SEGMENT {
         let major = base.powi(k);
-        if major >= seg.min * (1.0 - 1e-9) && major <= seg.max * (1.0 + 1e-9) {
-            majors.push(major);
-        }
-        if (seg.minor_ticks_per_interval > 0 || default_subdivisions > 0) && base == 10.0 && stride == 1 {
-            for mult in 2..=9 {
-                let mv = (mult as f64) * major;
-                if mv > seg.min && mv < seg.max {
-                    minors.push(mv);
+        if major.is_finite() && major > 0.0 {
+            if major >= lo_tol && major <= hi_tol {
+                majors.push(major);
+            }
+            if emit_minors {
+                for mult in 2..=9 {
+                    if minors.len() >= MAX_TICKS_PER_SEGMENT {
+                        break;
+                    }
+                    let mv = (mult as f64) * major;
+                    if mv.is_finite() && mv > lo && mv < hi {
+                        minors.push(mv);
+                    }
                 }
             }
         }
-        k += stride;
+        let Some(next_k) = k.checked_add(stride) else {
+            break;
+        };
+        k = next_k;
     }
     (majors, minors)
 }
@@ -1737,7 +2117,13 @@ fn resolve_fitted_overlay(doc: &ProjectDocument, series: &SeriesSpec, warnings: 
         warnings.push(ChartWarning::new("failed_regression_result", format!("regression result sheet '{}' failed: {message}", spec.result_sheet_id)));
         return None;
     }
-    let curve = res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index).or_else(|| res.fitted_curves.first())?;
+    let Some(curve) = res.fitted_curves.iter().find(|fc| fc.data_set_index == series.data_set_index) else {
+        warnings.push(ChartWarning::new(
+            "missing_fitted_curve",
+            format!("regression result sheet '{}' has no fitted curve for data set {}", spec.result_sheet_id, series.data_set_index),
+        ));
+        return None;
+    };
     if !curve.converged {
         warnings.push(ChartWarning::new("unconverged_fitted_curve", format!("fitted curve '{}' did not converge", curve.equation_id)));
     } else if curve.ambiguous {
@@ -1827,9 +2213,7 @@ fn render_xy_series(
         let Some((sx, px)) = x_axis.map_value(pt.x_center) else {
             if !warned_x_domain && is_out_of_axis_domain(x_axis, pt.x_center) {
                 warned_x_domain = true;
-                scene
-                    .warnings
-                    .push(ChartWarning::new("non_positive_on_log_axis", format!("omitted X coordinate {} outside axis domain", pt.x_center)));
+                push_domain_omission_warning(&mut scene.warnings, x_axis, "X", pt.x_center);
             }
             flush_run(&mut current_run, &mut mapped_runs);
             prev_seg_pair = None;
@@ -1838,9 +2222,7 @@ fn render_xy_series(
         let Some((sy, py)) = y_axis.map_value(pt.y_center) else {
             if !warned_y_domain && is_out_of_axis_domain(y_axis, pt.y_center) {
                 warned_y_domain = true;
-                scene
-                    .warnings
-                    .push(ChartWarning::new("non_positive_on_log_axis", format!("omitted Y coordinate {} outside axis domain", pt.y_center)));
+                push_domain_omission_warning(&mut scene.warnings, y_axis, "Y", pt.y_center);
             }
             flush_run(&mut current_run, &mut mapped_runs);
             prev_seg_pair = None;
@@ -1981,14 +2363,14 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
             let Some((_, px)) = ctx.x_axis.map_value(rx) else {
                 if !warned_x && is_out_of_axis_domain(ctx.x_axis, rx) {
                     warned_x = true;
-                    scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("omitted X replicate {rx} outside domain")));
+                    push_domain_omission_warning(&mut scene.warnings, ctx.x_axis, "X", rx);
                 }
                 continue;
             };
             let Some((_, py)) = ctx.y_axis.map_value(ry) else {
                 if !warned_y && is_out_of_axis_domain(ctx.y_axis, ry) {
                     warned_y = true;
-                    scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("omitted Y replicate {ry} outside domain")));
+                    push_domain_omission_warning(&mut scene.warnings, ctx.y_axis, "Y", ry);
                 }
                 continue;
             };
@@ -2009,6 +2391,18 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
 
 fn is_out_of_axis_domain(axis: &SegmentedAxis, val: f64) -> bool {
     axis.segments.iter().any(|s| s.scale.transform(val).is_none())
+}
+
+fn push_domain_omission_warning(warnings: &mut Vec<ChartWarning>, axis: &SegmentedAxis, axis_label: &str, val: f64) {
+    let scale = axis.segments.first().map_or(AxisScale::Linear, |s| s.scale);
+    let code = match scale {
+        AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => "non_positive_on_log_axis",
+        AxisScale::Probit => "out_of_domain_probit",
+        AxisScale::Logit(_) => "out_of_domain_logit",
+        AxisScale::Reciprocal => "zero_on_reciprocal_axis",
+        AxisScale::Linear => "invalid_axis_coordinate",
+    };
+    warnings.push(ChartWarning::new(code, format!("omitted {axis_label} coordinate {val} outside {scale:?} axis domain")));
 }
 
 fn flush_run(current: &mut Vec<PointPt>, runs: &mut Vec<Vec<PointPt>>) {
@@ -2189,8 +2583,14 @@ fn resample_curve_for_x_segment(src: &[CurveSamplePoint], seg_x: ResolvedSegment
         return Vec::new();
     };
 
-    let lo_t = if let Some(gx0) = seg_x.scale.transform(first_x) { gx0.max(g_seg_min.min(g_seg_max)) } else { g_seg_min.min(g_seg_max) };
-    let hi_t = if let Some(gx1) = seg_x.scale.transform(last_x) { gx1.min(g_seg_min.max(g_seg_max)) } else { g_seg_min.max(g_seg_max) };
+    let (lo_t, hi_t) = match (seg_x.scale.transform(first_x), seg_x.scale.transform(last_x)) {
+        (Some(gx0), Some(gx1)) => {
+            let g_curve_lo = gx0.min(gx1);
+            let g_curve_hi = gx0.max(gx1);
+            (g_curve_lo.max(g_seg_min.min(g_seg_max)), g_curve_hi.min(g_seg_min.max(g_seg_max)))
+        }
+        _ => (g_seg_min.min(g_seg_max), g_seg_min.max(g_seg_max)),
+    };
     if hi_t <= lo_t {
         return Vec::new();
     }
@@ -2438,5 +2838,53 @@ mod tests {
         let cols_in_draw_order: Vec<usize> = scene.plotted_points.iter().map(|p| p.source_cell.col).collect();
         assert_eq!(cols_in_draw_order, vec![1, 1, 1, 0, 0]);
         assert!(scene.primitives.iter().any(|p| matches!(p, ScenePrimitive::Path { fill: Some(f), .. } if f.color == highlight)));
+    }
+
+    #[test]
+    fn log_tick_generator_handles_invalid_and_extreme_bounds() {
+        use super::{ResolvedSegment, generate_log_ticks, resolve_segment_domain};
+        use crate::scales::MAX_TICKS_PER_SEGMENT;
+        use lumencraft_doc::AxisSegment;
+        use lumencraft_math::AxisScale;
+
+        let mk_seg = |min: f64, max: f64, scale: AxisScale| ResolvedSegment {
+            index: 0,
+            min,
+            max,
+            scale,
+            span_start: 0.0,
+            span_end: 200.0,
+            major_tick_interval: None,
+            minor_ticks_per_interval: 0,
+        };
+
+        for (min, max, base) in
+            [(0.0, 100.0, 10.0), (-5.0, 100.0, 10.0), (1.0, f64::INFINITY, 10.0), (f64::NAN, 100.0, 10.0), (1.0, 100.0, 1.0), (1.0, 100.0, f64::NAN)]
+        {
+            let (majors, minors) = generate_log_ticks(mk_seg(min, max, AxisScale::Log10), base, 9);
+            assert!(majors.is_empty() && minors.is_empty());
+        }
+
+        for (min, max, scale, base, sub) in [
+            (5e-324, f64::MAX, AxisScale::Log10, 10.0, 9),
+            (5e-324, f64::MAX, AxisScale::Log2, 2.0, 1),
+            (5e-324, f64::MAX, AxisScale::Ln, std::f64::consts::E, 0),
+            (1e307, f64::MAX, AxisScale::Log10, 10.0, 9),
+            (5e-324, 1e-320, AxisScale::Log10, 10.0, 9),
+        ] {
+            let (majors, minors) = generate_log_ticks(mk_seg(min, max, scale), base, sub);
+            assert!(majors.len() <= MAX_TICKS_PER_SEGMENT);
+            assert!(minors.len() <= MAX_TICKS_PER_SEGMENT);
+            assert!(majors.iter().all(|v| v.is_finite() && *v > 0.0));
+            assert!(minors.iter().all(|v| v.is_finite() && *v > 0.0));
+        }
+
+        for scale in [AxisScale::Log10, AxisScale::Log2, AxisScale::Ln] {
+            let seg_spec = AxisSegment { scale, ..AxisSegment::default() };
+            let mut warnings = Vec::new();
+            let (dmin, dmax) = resolve_segment_domain(&seg_spec, &[5e-324, f64::MAX], false, 0.05, &mut warnings);
+            assert!(dmin.is_finite() && dmax.is_finite() && dmin > 0.0 && dmin < dmax);
+            assert!(scale.transform(dmin).is_some() && scale.transform(dmax).is_some());
+        }
     }
 }
