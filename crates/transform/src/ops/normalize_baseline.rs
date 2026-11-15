@@ -505,77 +505,113 @@ fn apply_baseline_datasets(
     for (r, row_cells) in ds.cells.iter_mut().enumerate() {
         let b_opt = baselines.get(r).copied().flatten();
         match mode {
-            SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) => {
+            SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
                 for cell in row_cells {
                     apply_baseline_cell(cell, b_opt, operation, r, col, warnings);
                 }
             }
             SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN => {
-                if let Some(m) = row_cells.first().and_then(|c| c.value.finite_f64()) {
-                    let res = b_opt.and_then(|b| apply_baseline_op(m, b, operation));
-                    row_cells[0].value = res.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+                if let Some(mean_cell) = row_cells.first_mut() {
+                    apply_baseline_cell(mean_cell, b_opt, operation, r, col, warnings);
                 }
-                if let (Some(s), Some(b)) = (row_cells.get(1).and_then(|c| c.value.finite_f64()), b_opt) {
-                    let scale = baseline_spread_scale(b, operation);
-                    row_cells[1].value = scale.map_or(CellValue::Empty, |sc| CellValue::from_finite_or_empty(s * sc));
-                } else if row_cells.len() > 1 {
-                    row_cells[1].value = CellValue::Empty;
+                if let Some(spread_cell) = row_cells.get_mut(1) {
+                    apply_baseline_spread_cell(spread_cell, b_opt, operation, r, col, warnings);
                 }
             }
             SubcolumnMode::MeanCvN => {
-                if let (Some(m), Some(cv), Some(b)) =
-                    (row_cells.first().and_then(|c| c.value.finite_f64()), row_cells.get(1).and_then(|c| c.value.finite_f64()), b_opt)
-                {
-                    let sd_in = (cv / 100.0) * m.abs();
-                    let m_out = apply_baseline_op(m, b, operation);
-                    let sd_out = baseline_spread_scale(b, operation).map(|sc| sd_in * sc);
-                    row_cells[0].value = m_out.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
-                    row_cells[1].value = match (m_out, sd_out) {
-                        (Some(mo), Some(so)) if mo != 0.0 => CellValue::from_finite_or_empty(100.0 * so / mo.abs()),
-                        _ => CellValue::Empty,
-                    };
-                }
+                apply_baseline_mean_cv_row(row_cells, b_opt, operation, r, col, warnings);
             }
             SubcolumnMode::MeanLowHigh => {
-                if let Some(m) = row_cells.first().and_then(|c| c.value.finite_f64()) {
-                    row_cells[0].value =
-                        b_opt.and_then(|b| apply_baseline_op(m, b, operation)).map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+                if let Some(mean_cell) = row_cells.first_mut() {
+                    apply_baseline_cell(mean_cell, b_opt, operation, r, col, warnings);
                 }
-                let scale = b_opt.and_then(|b| baseline_spread_scale(b, operation));
                 for idx in 1..3 {
-                    if let Some(cell) = row_cells.get_mut(idx) {
-                        cell.value = match (cell.value.finite_f64(), scale) {
-                            (Some(v), Some(sc)) => CellValue::from_finite_or_empty(v * sc),
-                            _ => CellValue::Empty,
-                        };
+                    if let Some(spread_cell) = row_cells.get_mut(idx) {
+                        apply_baseline_spread_cell(spread_cell, b_opt, operation, r, col, warnings);
                     }
-                }
-            }
-            SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
-                for cell in row_cells {
-                    apply_baseline_cell(cell, b_opt, operation, r, col, warnings);
                 }
             }
         }
     }
 }
 
-fn apply_baseline_cell(cell: &mut Cell, b_opt: Option<f64>, operation: BaselineOperation, row: usize, col: usize, warnings: &mut Vec<String>) {
+fn apply_baseline_mean_cv_row(
+    row_cells: &mut [Cell],
+    b_opt: Option<f64>,
+    operation: BaselineOperation,
+    row: usize,
+    col: usize,
+    warnings: &mut Vec<String>,
+) {
+    let m_opt = row_cells.first().and_then(|c| c.value.finite_f64());
+    let Some(b) = b_opt else {
+        if let Some(mean_cell) = row_cells.first_mut() {
+            apply_baseline_cell(mean_cell, None, operation, row, col, warnings);
+        }
+        if let Some(cv_cell) = row_cells.get_mut(1) {
+            apply_baseline_spread_cell(cv_cell, None, operation, row, col, warnings);
+        }
+        return;
+    };
+
+    let m_out = if let Some(mean_cell) = row_cells.first_mut() {
+        apply_baseline_cell(mean_cell, Some(b), operation, row, col, warnings);
+        mean_cell.value.finite_f64()
+    } else {
+        None
+    };
+
+    if let Some(cv_cell) = row_cells.get_mut(1)
+        && let Some(cv) = cv_cell.value.finite_f64()
+    {
+        let cv_new = match (m_opt, m_out, baseline_spread_scale(b, operation)) {
+            (Some(m), Some(mo), Some(sc)) if mo != 0.0 => {
+                let sd_out = (cv / 100.0) * m.abs() * sc;
+                Some(100.0 * sd_out / mo.abs()).filter(|v| v.is_finite())
+            }
+            _ => None,
+        };
+        if let Some(v) = cv_new {
+            cv_cell.value = CellValue::Number(v);
+        } else {
+            cv_cell.value = CellValue::Empty;
+            if !cv_cell.excluded {
+                warnings.push(format!("row {row} col {col}: baseline %CV undefined for baseline={b}"));
+            }
+        }
+    }
+}
+
+fn apply_baseline_transform<F>(cell: &mut Cell, b_opt: Option<f64>, row: usize, col: usize, label: &str, warnings: &mut Vec<String>, op: F)
+where
+    F: FnOnce(f64, f64) -> Option<f64>,
+{
     let Some(v) = cell.value.finite_f64() else {
         return;
     };
     let Some(b) = b_opt else {
         cell.value = CellValue::Empty;
+        if !cell.excluded {
+            warnings.push(format!("row {row} col {col}: missing baseline; {label} blanked"));
+        }
         return;
     };
-    if let Some(out) = apply_baseline_op(v, b, operation) {
+    if let Some(out) = op(v, b).filter(|x| x.is_finite()) {
         cell.value = CellValue::Number(out);
     } else {
         cell.value = CellValue::Empty;
         if !cell.excluded {
-            warnings.push(format!("row {row} col {col}: baseline operation undefined for baseline={b}"));
+            warnings.push(format!("row {row} col {col}: baseline {label} undefined for baseline={b}"));
         }
     }
+}
+
+fn apply_baseline_cell(cell: &mut Cell, b_opt: Option<f64>, operation: BaselineOperation, row: usize, col: usize, warnings: &mut Vec<String>) {
+    apply_baseline_transform(cell, b_opt, row, col, "cell", warnings, |v, b| apply_baseline_op(v, b, operation));
+}
+
+fn apply_baseline_spread_cell(cell: &mut Cell, b_opt: Option<f64>, operation: BaselineOperation, row: usize, col: usize, warnings: &mut Vec<String>) {
+    apply_baseline_transform(cell, b_opt, row, col, "spread", warnings, |s, b| baseline_spread_scale(b, operation).map(|sc| s * sc));
 }
 
 fn apply_baseline_op(v: f64, b: f64, op: BaselineOperation) -> Option<f64> {

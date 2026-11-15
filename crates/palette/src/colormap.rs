@@ -150,6 +150,33 @@ impl ColormapId {
     }
 }
 
+/// Maximum number of custom colour stops permitted in a deserialized or validated ramp.
+pub const MAX_CUSTOM_STOPS: usize = 256;
+
+/// Validation errors returned when constructing or validating a [`ColorRamp::Custom`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorRampError {
+    /// More than [`MAX_CUSTOM_STOPS`] custom stops were provided.
+    TooManyStops { count: usize, max: usize },
+    /// A stop had a non-finite (`NaN` or `±inf`) position.
+    NonFinitePosition { index: usize },
+}
+
+impl std::fmt::Display for ColorRampError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::TooManyStops { count, max } => {
+                write!(f, "custom color ramp has {count} stops, exceeding maximum of {max}")
+            }
+            Self::NonFinitePosition { index } => {
+                write!(f, "custom color ramp stop at index {index} has a non-finite position")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ColorRampError {}
+
 /// Positioned colour stop in `[0.0, 1.0]` for user-defined gradients.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ColorStop {
@@ -158,10 +185,61 @@ pub struct ColorStop {
 }
 
 /// User-configurable continuous colour ramp (either a named colormap or custom stops).
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum ColorRamp {
     Named { id: ColormapId, reversed: bool },
     Custom { stops: Vec<ColorStop> },
+}
+
+impl<'de> serde::Deserialize<'de> for ColorRamp {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(serde::Deserialize)]
+        enum ColorRampDe {
+            Named {
+                id: ColormapId,
+                reversed: bool,
+            },
+            Custom {
+                #[serde(deserialize_with = "deserialize_bounded_stops")]
+                stops: Vec<ColorStop>,
+            },
+        }
+
+        match ColorRampDe::deserialize(deserializer)? {
+            ColorRampDe::Named { id, reversed } => Ok(Self::Named { id, reversed }),
+            ColorRampDe::Custom { stops } => Ok(Self::Custom { stops }),
+        }
+    }
+}
+
+fn deserialize_bounded_stops<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Vec<ColorStop>, D::Error> {
+    struct StopsVisitor;
+
+    impl<'de> serde::de::Visitor<'de> for StopsVisitor {
+        type Value = Vec<ColorStop>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "a sequence of at most {MAX_CUSTOM_STOPS} ColorStop entries")
+        }
+
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self::Value, A::Error> {
+            let hint = seq.size_hint().unwrap_or(0).min(MAX_CUSTOM_STOPS);
+            let mut stops = Vec::with_capacity(hint);
+            while let Some(stop) = seq.next_element::<ColorStop>()? {
+                if stops.len() >= MAX_CUSTOM_STOPS {
+                    return Err(serde::de::Error::custom(ColorRampError::TooManyStops { count: stops.len() + 1, max: MAX_CUSTOM_STOPS }));
+                }
+                if !stop.position.is_finite() {
+                    return Err(serde::de::Error::custom(ColorRampError::NonFinitePosition { index: stops.len() }));
+                }
+                stops.push(stop);
+            }
+            normalize_custom_stops(&mut stops);
+            Ok(stops)
+        }
+    }
+
+    deserializer.deserialize_seq(StopsVisitor)
 }
 
 impl Default for ColorRamp {
@@ -171,6 +249,25 @@ impl Default for ColorRamp {
 }
 
 impl ColorRamp {
+    /// Construct and normalize a validated custom colour ramp.
+    ///
+    /// Rejects ramps exceeding [`MAX_CUSTOM_STOPS`] or containing non-finite stop
+    /// positions; otherwise clamps positions to `[0.0, 1.0]`, stably sorts by
+    /// position, and collapses redundant stops at identical positions.
+    pub fn custom(mut stops: Vec<ColorStop>) -> Result<Self, ColorRampError> {
+        validate_custom_stops(&stops)?;
+        normalize_custom_stops(&mut stops);
+        Ok(Self::Custom { stops })
+    }
+
+    /// Validate that custom stops stay within [`MAX_CUSTOM_STOPS`] and have finite positions.
+    pub fn validate(&self) -> Result<(), ColorRampError> {
+        match self {
+            Self::Named { .. } => Ok(()),
+            Self::Custom { stops } => validate_custom_stops(stops),
+        }
+    }
+
     /// Sample at normalized position `t` in `[0.0, 1.0]`.
     #[must_use]
     pub fn sample(&self, t: f64) -> Rgba8 {
@@ -183,6 +280,54 @@ impl ColorRamp {
             Self::Custom { stops } => sample_custom_stops(stops, clamped),
         }
     }
+}
+
+fn validate_custom_stops(stops: &[ColorStop]) -> Result<(), ColorRampError> {
+    if stops.len() > MAX_CUSTOM_STOPS {
+        return Err(ColorRampError::TooManyStops { count: stops.len(), max: MAX_CUSTOM_STOPS });
+    }
+    for (index, stop) in stops.iter().enumerate() {
+        if !stop.position.is_finite() {
+            return Err(ColorRampError::NonFinitePosition { index });
+        }
+    }
+    Ok(())
+}
+
+fn normalize_custom_stops(stops: &mut Vec<ColorStop>) {
+    for stop in stops.iter_mut() {
+        let clamped = stop.position.clamp(0.0, 1.0);
+        stop.position = if clamped == 0.0 { 0.0 } else { clamped };
+    }
+    stops.sort_by(|a, b| a.position.total_cmp(&b.position));
+    if stops.len() <= 1 {
+        return;
+    }
+
+    let len = stops.len();
+    let mut write = 0usize;
+    let mut i = 0usize;
+    while i < len {
+        let Some(&first) = stops.get(i) else { break };
+        let mut end = i + 1;
+        while stops.get(end).is_some_and(|s| s.position == first.position) {
+            end += 1;
+        }
+        let last = stops.get(end - 1).copied().unwrap_or(first);
+        if let Some(slot) = stops.get_mut(write) {
+            *slot = first;
+            write += 1;
+        }
+        // Keep the trailing stop when the colour jumps at this position so hard step gradients are preserved.
+        if last.color != first.color
+            && let Some(slot) = stops.get_mut(write)
+        {
+            *slot = last;
+            write += 1;
+        }
+        i = end;
+    }
+    stops.truncate(write);
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss, clippy::cast_precision_loss)]
@@ -206,30 +351,159 @@ fn sample_uniform_stops(stops: &[Rgba8], t: f64) -> Rgba8 {
     lerp_oklab(c0, c1, frac)
 }
 
-fn sample_custom_stops(stops: &[ColorStop], t: f64) -> Rgba8 {
-    let mut valid: Vec<ColorStop> = stops
-        .iter()
-        .copied()
-        .filter(|s| s.position.is_finite())
-        .map(|s| ColorStop { position: s.position.clamp(0.0, 1.0), color: s.color })
-        .collect();
-    valid.sort_by(|a, b| a.position.total_cmp(&b.position));
-
-    let Some(&first) = valid.first() else {
-        return Rgba8::BLACK;
-    };
-    if t <= first.position {
-        return first.color;
+fn is_normalized_stops(stops: &[ColorStop]) -> bool {
+    let mut prev = -1.0_f64;
+    for s in stops {
+        let p = s.position;
+        if !p.is_finite() || !(0.0..=1.0).contains(&p) || p < prev || (p == 0.0 && p.is_sign_negative()) {
+            return false;
+        }
+        prev = p;
     }
-    for pair in valid.windows(2) {
-        let [left, right] = pair else { continue };
-        if t <= right.position {
-            let span = right.position - left.position;
-            if span <= 1e-12 {
-                return right.color;
+    true
+}
+
+fn interpolate_stops(left: ColorStop, right: ColorStop, t: f64) -> Rgba8 {
+    let span = right.position - left.position;
+    if span <= 1e-12 {
+        return right.color;
+    }
+    lerp_oklab(left.color, right.color, (t - left.position) / span)
+}
+
+fn sample_custom_stops(stops: &[ColorStop], t: f64) -> Rgba8 {
+    if stops.is_empty() {
+        return Rgba8::BLACK;
+    }
+    if stops.len() <= 64 {
+        if is_normalized_stops(stops) {
+            return sample_normalized_stops(stops, t);
+        }
+        return sample_custom_stops_unsorted(stops, t);
+    }
+    sample_large_custom_stops(stops, t)
+}
+
+fn sample_normalized_stops(stops: &[ColorStop], t: f64) -> Rgba8 {
+    let idx = stops.partition_point(|s| s.position < t);
+    if idx == 0 {
+        return stops.first().map_or(Rgba8::BLACK, |s| s.color);
+    }
+    let Some(&right) = stops.get(idx) else {
+        return stops.last().map_or(Rgba8::BLACK, |s| s.color);
+    };
+    let Some(&left) = stops.get(idx - 1) else {
+        return right.color;
+    };
+    interpolate_stops(left, right, t)
+}
+
+#[inline(always)]
+fn stop_word(s: &ColorStop) -> u64 {
+    let col = u64::from(s.color.r) ^ (u64::from(s.color.g) << 8) ^ (u64::from(s.color.b) << 16) ^ (u64::from(s.color.a) << 24);
+    s.position.to_bits() ^ (col << 17)
+}
+
+fn fingerprint_stops(stops: &[ColorStop]) -> (u64, u64) {
+    let mut a0 = (stops.len() as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let mut a1 = 0xBF58_476D_1CE4_E5B9_u64;
+    let mut a2 = 0x94D0_49BB_1331_11EB_u64;
+    let mut a3 = 0xD6E8_FEB8_6659_FD93_u64;
+    let mut b0 = 0xA076_1D64_78BD_642F_u64;
+    let mut b1 = 0xE703_7ED1_A0B4_28DB_u64;
+    let mut b2 = 0x8EBC_6AF0_9C88_C6E3_u64;
+    let mut b3 = 0x5899_65CC_7537_4CC3_u64;
+
+    let (chunks, rem) = stops.as_chunks::<8>();
+    for chunk in chunks {
+        let [s0, s1, s2, s3, s4, s5, s6, s7] = chunk;
+        a0 = a0.rotate_left(5).wrapping_add(stop_word(s0));
+        a1 = a1.rotate_left(7).wrapping_add(stop_word(s1));
+        a2 = a2.rotate_left(11).wrapping_add(stop_word(s2));
+        a3 = a3.rotate_left(13).wrapping_add(stop_word(s3));
+        b0 = b0.rotate_left(17) ^ stop_word(s4);
+        b1 = b1.rotate_left(19) ^ stop_word(s5);
+        b2 = b2.rotate_left(23) ^ stop_word(s6);
+        b3 = b3.rotate_left(29) ^ stop_word(s7);
+    }
+    for s in rem {
+        let w = stop_word(s);
+        a0 = a0.rotate_left(7).wrapping_add(w);
+        b0 = b0.rotate_left(13) ^ w;
+    }
+    let h0 = (a0 ^ a1.rotate_left(19) ^ a2.rotate_left(37) ^ a3.rotate_left(53)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    let h1 = (b0 ^ b1.rotate_left(23) ^ b2.rotate_left(41) ^ b3.rotate_left(59)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    (h0, h1)
+}
+
+struct CachedRamp {
+    len: usize,
+    fingerprint: (u64, u64),
+    normalized: Vec<ColorStop>,
+}
+
+std::thread_local! {
+    static CUSTOM_RAMP_CACHE: std::cell::RefCell<Option<CachedRamp>> = const { std::cell::RefCell::new(None) };
+}
+
+fn sample_large_custom_stops(stops: &[ColorStop], t: f64) -> Rgba8 {
+    let fp = fingerprint_stops(stops);
+    let len = stops.len();
+    let res = CUSTOM_RAMP_CACHE.try_with(|cell| {
+        let Ok(mut slot) = cell.try_borrow_mut() else {
+            return None;
+        };
+        let needs_rebuild = match slot.as_ref() {
+            Some(entry) => entry.len != len || entry.fingerprint != fp,
+            None => true,
+        };
+        if needs_rebuild {
+            let mut valid = Vec::with_capacity(stops.len());
+            for s in stops {
+                if s.position.is_finite() {
+                    let clamped = s.position.clamp(0.0, 1.0);
+                    let pos = if clamped == 0.0 { 0.0 } else { clamped };
+                    valid.push(ColorStop { position: pos, color: s.color });
+                }
             }
-            return lerp_oklab(left.color, right.color, (t - left.position) / span);
+            valid.sort_by(|a, b| a.position.total_cmp(&b.position));
+            *slot = Some(CachedRamp { len, fingerprint: fp, normalized: valid });
+        }
+        slot.as_ref().map(|entry| if entry.normalized.is_empty() { Rgba8::BLACK } else { sample_normalized_stops(&entry.normalized, t) })
+    });
+    match res {
+        Ok(Some(color)) => color,
+        _ => sample_custom_stops_unsorted(stops, t),
+    }
+}
+
+fn sample_custom_stops_unsorted(stops: &[ColorStop], t: f64) -> Rgba8 {
+    let mut best_left_pos = -1.0_f64;
+    let mut best_left_idx = usize::MAX;
+    let mut best_right_pos = 2.0_f64;
+    let mut best_right_idx = usize::MAX;
+    for (idx, s) in stops.iter().enumerate() {
+        let raw = s.position;
+        if !raw.is_finite() {
+            continue;
+        }
+        let p = raw.clamp(0.0, 1.0);
+        if p < t {
+            if p >= best_left_pos {
+                best_left_pos = p;
+                best_left_idx = idx;
+            }
+        } else if p < best_right_pos {
+            best_right_pos = p;
+            best_right_idx = idx;
         }
     }
-    valid.last().map_or(first.color, |last| last.color)
+    match (stops.get(best_left_idx), stops.get(best_right_idx)) {
+        (None, None) => Rgba8::BLACK,
+        (None, Some(right)) => right.color,
+        (Some(left), None) => left.color,
+        (Some(left), Some(right)) => {
+            interpolate_stops(ColorStop { position: best_left_pos, color: left.color }, ColorStop { position: best_right_pos, color: right.color }, t)
+        }
+    }
 }
