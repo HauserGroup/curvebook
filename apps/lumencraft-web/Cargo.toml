@@ -4,6 +4,8 @@ description = "LumenCraft in the browser (WebAssembly runner, WebGPU with WebGL2
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
 publish = false
 
 [lints]
@@ -18,3 +20,8 @@ lumencraft-engine = { workspace = true, features = ["bundled-fonts"] }
 lumencraft-ui-egui = { workspace = true }
 lumencraft-format = { workspace = true }
 lumencraft-text = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true }

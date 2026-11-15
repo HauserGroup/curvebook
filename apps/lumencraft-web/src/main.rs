@@ -39,7 +39,45 @@ pub fn bootstrap_web_session() -> Result<(WebBridgeSession, Vec<WebBridgeCommand
     Ok((session, commands))
 }
 
+#[cfg(target_arch = "wasm32")]
+fn connect_wasm_bridge() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    use js_sys::{Function, Reflect};
+    use wasm_bindgen::closure::Closure;
+    use wasm_bindgen::{JsCast, JsValue};
+
+    let Some(win) = web_sys::window() else {
+        return;
+    };
+    let Ok(host) = Reflect::get(&win, &JsValue::from_str("LumenCraftHost")) else {
+        return;
+    };
+    let Ok(connect_val) = Reflect::get(&host, &JsValue::from_str("connectBridge")) else {
+        return;
+    };
+    let Ok(connect_fn) = connect_val.dyn_into::<Function>() else {
+        return;
+    };
+
+    let session = Rc::new(RefCell::new(WebBridgeSession::new()));
+    let callback_session = Rc::clone(&session);
+    let handler = Closure::<dyn FnMut(String) -> String>::new(move |raw_json: String| {
+        let Ok(mut guard) = callback_session.try_borrow_mut() else {
+            return String::from("[]");
+        };
+        guard.handle_event_json(&raw_json).unwrap_or_else(|_| String::from("[]"))
+    });
+
+    let _ = connect_fn.call1(&host, handler.as_ref());
+    handler.forget();
+}
+
 fn main() {
+    #[cfg(target_arch = "wasm32")]
+    connect_wasm_bridge();
+    #[cfg(not(target_arch = "wasm32"))]
     let _bootstrap = bootstrap_web_session();
 }
 
