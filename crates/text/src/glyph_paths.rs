@@ -6,12 +6,15 @@
 //! oriented for the nonzero winding fill rule (positive area for outer contours, negative area
 //! for inner holes).
 
+use std::borrow::Cow;
+
 use lumencraft_palette::Rgba8;
 use serde::{Deserialize, Serialize};
 
 use crate::markup::{RichText, SpanSlope, SpanWeight};
 use crate::metrics::{
-    TrueTypeFont, char_advance_em_with_font, effective_span_scale, read_i16_be, read_u16_be, script_baseline_offset_pt, select_bundled_font,
+    TrueTypeFont, char_advance_em_with_font, effective_span_scale, is_combining_mark, read_i16_be, read_u16_be, reorder_rich_text_bidi,
+    rich_contains_rtl, script_baseline_offset_pt, select_bundled_font,
 };
 
 const MAX_TTF_CONTOURS: usize = 256;
@@ -50,9 +53,24 @@ pub fn outline_rich_text(rich: &RichText, origin_x_pt: f64, origin_y_pt: f64, fo
 }
 
 /// Position [`RichText`] runs starting at `(origin_x_pt, origin_y_pt)` rotated by `angle_deg`
-/// clockwise around `(origin_x_pt, origin_y_pt)` in Y-down PostScript points.
+/// clockwise around `(origin_x_pt, origin_y_pt)` in Y-down PostScript points, applying BiDi
+/// visual reordering automatically when RTL scripts are present.
 #[must_use]
 pub fn outline_rich_text_rotated(
+    rich: &RichText,
+    origin_x_pt: f64,
+    origin_y_pt: f64,
+    font_size_pt: f64,
+    angle_deg: f64,
+) -> Vec<PositionedGlyphOutline> {
+    let visual: Cow<'_, RichText> = if rich_contains_rtl(rich) { Cow::Owned(reorder_rich_text_bidi(rich)) } else { Cow::Borrowed(rich) };
+    outline_visual_rich_text_rotated(&visual, origin_x_pt, origin_y_pt, font_size_pt, angle_deg)
+}
+
+/// Position an already visually ordered [`RichText`] starting at `(origin_x_pt, origin_y_pt)`
+/// rotated by `angle_deg` clockwise around `(origin_x_pt, origin_y_pt)` without re-running BiDi.
+#[must_use]
+pub fn outline_visual_rich_text_rotated(
     rich: &RichText,
     origin_x_pt: f64,
     origin_y_pt: f64,
@@ -72,6 +90,7 @@ pub fn outline_rich_text_rotated(
     let mut pen_x = origin_x_pt;
     let mut line_y = origin_y_pt;
     let line_step = base_size * 1.20;
+    let mut last_base: Option<BaseGlyphPlacement> = None;
 
     for span in &rich.spans {
         let span_scale = effective_span_scale(span);
@@ -92,6 +111,7 @@ pub fn outline_rich_text_rotated(
                 });
                 pen_x = origin_x_pt;
                 line_y += line_step;
+                last_base = None;
                 continue;
             }
             if ch == '\r' {
@@ -107,13 +127,77 @@ pub fn outline_rich_text_rotated(
                 continue;
             }
 
+            let glyph_origin_y = line_y + y_offset;
+            if is_combining_mark(ch) {
+                let below = is_below_combining_mark(ch);
+                let (mut commands, anchor_x, anchor_y) = if let Some(base) = &mut last_base {
+                    let y_shift = if below {
+                        let k = base.below_stack;
+                        base.below_stack = base.below_stack.saturating_add(1);
+                        -f64::from(k) * 0.14
+                    } else {
+                        let k = base.above_stack;
+                        base.above_stack = base.above_stack.saturating_add(1);
+                        (if base.tall_top { 0.20 } else { 0.0 }) + f64::from(k) * 0.16
+                    };
+                    if let Some(ttf) = bundled
+                        && let Some(cmds) = outline_ttf_glyph(ttf, ch, pen_x, glyph_origin_y, glyph_size, span.slope == SpanSlope::Italic)
+                    {
+                        (cmds, pen_x, glyph_origin_y)
+                    } else {
+                        let cmds = cleanroom_vector_outline_with_y_shift(
+                            ch,
+                            base.pen_x,
+                            base.origin_y,
+                            base.glyph_size,
+                            base.adv_em,
+                            span.weight,
+                            span.slope,
+                            y_shift,
+                        );
+                        (cmds, base.pen_x, base.origin_y)
+                    }
+                } else {
+                    let cmds = if let Some(ttf) = bundled
+                        && let Some(cmds) = outline_ttf_glyph(ttf, ch, pen_x, glyph_origin_y, glyph_size, span.slope == SpanSlope::Italic)
+                    {
+                        cmds
+                    } else {
+                        cleanroom_vector_outline_with_y_shift(ch, pen_x, glyph_origin_y, glyph_size, 0.36, span.weight, span.slope, 0.0)
+                    };
+                    (cmds, pen_x, glyph_origin_y)
+                };
+                if rotate_active && !commands.is_empty() {
+                    rotate_commands(&mut commands, origin_x_pt, origin_y_pt, cos_a, sin_a);
+                }
+                let (rot_x, rot_y) = rotate_point(anchor_x, anchor_y, origin_x_pt, origin_y_pt, cos_a, sin_a, rotate_active);
+                out.push(PositionedGlyphOutline {
+                    codepoint: ch,
+                    origin_x_pt: rot_x,
+                    origin_y_pt: rot_y,
+                    advance_x_pt: 0.0,
+                    color: span.color,
+                    commands,
+                });
+                continue;
+            }
+
             let adv_em = char_advance_em_with_font(ch, span.weight, span.slope, bundled);
             let advance = glyph_size * adv_em;
-            let glyph_origin_y = line_y + y_offset;
 
             let mut commands = if ch.is_whitespace() {
+                last_base = None;
                 Vec::new()
             } else {
+                last_base = Some(BaseGlyphPlacement {
+                    pen_x,
+                    origin_y: glyph_origin_y,
+                    glyph_size,
+                    adv_em: adv_em.max(0.22),
+                    tall_top: is_tall_base(ch),
+                    above_stack: 0,
+                    below_stack: 0,
+                });
                 build_glyph_commands(ch, pen_x, glyph_origin_y, glyph_size, adv_em, span.weight, span.slope, bundled)
             };
 
@@ -134,6 +218,30 @@ pub fn outline_rich_text_rotated(
         }
     }
     out
+}
+
+#[derive(Clone, Copy)]
+struct BaseGlyphPlacement {
+    pen_x: f64,
+    origin_y: f64,
+    glyph_size: f64,
+    adv_em: f64,
+    tall_top: bool,
+    above_stack: u8,
+    below_stack: u8,
+}
+
+const fn is_tall_base(ch: char) -> bool {
+    matches!(ch, 'A'..='Z' | '0'..='9' | 'b' | 'd' | 'f' | 'h' | 'i' | 'j' | 'k' | 'l' | 't')
+        || matches!(ch as u32, 0x00C0..=0x00D6 | 0x00D8..=0x00DF | 0x0130 | 0x0132 | 0x013F | 0x0141 | 0x0152 | 0x017F)
+        || (matches!(ch as u32, 0x0100..=0x017E) && (ch as u32).is_multiple_of(2))
+}
+
+const fn is_below_combining_mark(ch: char) -> bool {
+    matches!(
+        ch as u32,
+        0x0316..=0x0333 | 0x0339..=0x033C | 0x0345 | 0x0347..=0x0349 | 0x034D | 0x034E | 0x0353..=0x0356 | 0x0359 | 0x035A | 0x035C | 0x0362
+    )
 }
 
 /// Decode a single glyph's TrueType `glyf` contour from `ttf` into Y-down `GlyphOutlineCmd`s.
@@ -468,6 +576,20 @@ fn cleanroom_vector_outline(
     weight: SpanWeight,
     slope: SpanSlope,
 ) -> Vec<GlyphOutlineCmd> {
+    cleanroom_vector_outline_with_y_shift(ch, pen_x, origin_y, glyph_size, adv_em, weight, slope, 0.0)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn cleanroom_vector_outline_with_y_shift(
+    ch: char,
+    pen_x: f64,
+    origin_y: f64,
+    glyph_size: f64,
+    adv_em: f64,
+    weight: SpanWeight,
+    slope: SpanSlope,
+    y_shift: f64,
+) -> Vec<GlyphOutlineCmd> {
     let half_stroke = match weight {
         SpanWeight::Regular => 0.043,
         SpanWeight::Bold => 0.062,
@@ -476,9 +598,10 @@ fn cleanroom_vector_outline(
     let items = build_glyph_strokes(ch);
 
     // Map normalized x in [0, 1] into padded glyph advance width [pad_l .. adv_em - pad_r].
-    let pad = (adv_em * 0.10).clamp(0.03, 0.09);
-    let draw_w = (adv_em - 2.0 * pad).max(0.08);
-    let map_pt = |(nx, ny): (f64, f64)| -> (f64, f64) { (pad + nx * draw_w, ny) };
+    let cell_adv = if adv_em > 0.0 { adv_em } else { 0.36 };
+    let pad = (cell_adv * 0.10).clamp(0.03, 0.09);
+    let draw_w = (cell_adv - 2.0 * pad).max(0.08);
+    let map_pt = |(nx, ny): (f64, f64)| -> (f64, f64) { (pad + nx * draw_w, ny + y_shift) };
 
     let mut contours: Vec<Vec<(f64, f64)>> = Vec::new();
     for item in items {
@@ -726,8 +849,442 @@ fn build_glyph_strokes(ch: char) -> Vec<StrokeItem> {
     if let Some(items) = math_symbol_strokes(ch) {
         return items;
     }
+    if let Some(items) = latin_extended_strokes(ch) {
+        return items;
+    }
+    if let Some(items) = combining_diacritic_strokes(ch) {
+        return items;
+    }
     // Fallback box for arbitrary unmapped glyphs
     vec![StrokeItem::Ring(vec![(0.12, 0.04), (0.12, 0.68), (0.88, 0.68), (0.88, 0.04)])]
+}
+
+#[derive(Clone, Copy)]
+enum DiacriticKind {
+    Grave,
+    Acute,
+    Circumflex,
+    Tilde,
+    Macron,
+    Breve,
+    DotAbove,
+    Diaeresis,
+    RingAbove,
+    DoubleAcute,
+    Caron,
+    Cedilla,
+    Ogonek,
+    DotBelow,
+    RingBelow,
+    MacronBelow,
+}
+
+fn diacritic_strokes(kind: DiacriticKind, y_shift: f64) -> Vec<StrokeItem> {
+    use StrokeItem::{Dot, Open, Ring};
+    let shift = |pts: Vec<(f64, f64)>| -> Vec<(f64, f64)> { pts.into_iter().map(|(x, y)| (x, y + y_shift)).collect() };
+    match kind {
+        DiacriticKind::Grave => vec![Open(shift(vec![(0.36, 0.78), (0.58, 0.62)]))],
+        DiacriticKind::Acute => vec![Open(shift(vec![(0.64, 0.78), (0.42, 0.62)]))],
+        DiacriticKind::Circumflex => vec![Open(shift(vec![(0.28, 0.62), (0.50, 0.78), (0.72, 0.62)]))],
+        DiacriticKind::Tilde => vec![Open(shift(vec![(0.24, 0.66), (0.38, 0.74), (0.62, 0.62), (0.76, 0.70)]))],
+        DiacriticKind::Macron => vec![Open(shift(vec![(0.24, 0.68), (0.76, 0.68)]))],
+        DiacriticKind::Breve => vec![Open(shift(arc(0.50, 0.76, 0.24, 0.14, 195.0, 345.0, 6)))],
+        DiacriticKind::DotAbove => vec![Dot(0.50, 0.68 + y_shift, 1.15)],
+        DiacriticKind::Diaeresis => vec![Dot(0.32, 0.68 + y_shift, 1.05), Dot(0.68, 0.68 + y_shift, 1.05)],
+        DiacriticKind::RingAbove => vec![Ring(shift(arc(0.50, 0.68, 0.14, 0.09, 0.0, 360.0, 8)))],
+        DiacriticKind::DoubleAcute => {
+            vec![Open(shift(vec![(0.46, 0.78), (0.30, 0.62)])), Open(shift(vec![(0.72, 0.78), (0.56, 0.62)]))]
+        }
+        DiacriticKind::Caron => vec![Open(shift(vec![(0.28, 0.78), (0.50, 0.62), (0.72, 0.78)]))],
+        DiacriticKind::Cedilla => vec![Open(vec![(0.52, 0.0), (0.50, -0.10), (0.62, -0.14), (0.56, -0.22), (0.42, -0.22)])],
+        DiacriticKind::Ogonek => vec![Open(vec![(0.70, 0.0), (0.60, -0.14), (0.74, -0.22), (0.86, -0.18)])],
+        DiacriticKind::DotBelow => vec![Dot(0.50, -0.14, 1.10)],
+        DiacriticKind::RingBelow => vec![Ring(arc(0.50, -0.14, 0.13, 0.08, 0.0, 360.0, 8))],
+        DiacriticKind::MacronBelow => vec![Open(vec![(0.24, -0.14), (0.76, -0.14)])],
+    }
+}
+
+fn combining_diacritic_strokes(ch: char) -> Option<Vec<StrokeItem>> {
+    use DiacriticKind as D;
+    use StrokeItem::{Open, Ring};
+    let kind = match ch {
+        '\u{0300}' => D::Grave,
+        '\u{0301}' => D::Acute,
+        '\u{0302}' => D::Circumflex,
+        '\u{0303}' => D::Tilde,
+        '\u{0304}' | '\u{0305}' => D::Macron,
+        '\u{0306}' => D::Breve,
+        '\u{0307}' => D::DotAbove,
+        '\u{0308}' => D::Diaeresis,
+        '\u{030A}' => D::RingAbove,
+        '\u{030B}' => D::DoubleAcute,
+        '\u{030C}' => D::Caron,
+        '\u{0323}' => D::DotBelow,
+        '\u{0325}' => D::RingBelow,
+        '\u{0327}' => D::Cedilla,
+        '\u{0328}' => D::Ogonek,
+        '\u{0331}' | '\u{0332}' => D::MacronBelow,
+        '\u{0309}' | '\u{0313}'..='\u{0315}' => return Some(vec![Open(arc(0.50, 0.70, 0.16, 0.10, 0.0, 220.0, 6))]),
+        '\u{030D}' | '\u{030E}' => return Some(vec![Open(vec![(0.50, 0.62), (0.50, 0.78)])]),
+        '\u{030F}' => return Some(vec![Open(vec![(0.30, 0.78), (0.48, 0.62)]), Open(vec![(0.54, 0.78), (0.72, 0.62)])]),
+        '\u{0311}' => return Some(vec![Open(arc(0.50, 0.64, 0.24, 0.14, 15.0, 165.0, 6))]),
+        '\u{0334}'..='\u{0338}' => return Some(vec![Open(vec![(0.20, 0.26), (0.80, 0.44)])]),
+        '\u{0300}'..='\u{036F}' => {
+            return Some(if is_below_combining_mark(ch) {
+                vec![Open(vec![(0.28, -0.14), (0.72, -0.14)])]
+            } else {
+                vec![Ring(arc(0.50, 0.68, 0.14, 0.08, 0.0, 360.0, 6))]
+            });
+        }
+        _ => return None,
+    };
+    Some(diacritic_strokes(kind, 0.0))
+}
+
+fn latin_decomposed(ch: char) -> Option<(char, DiacriticKind, bool)> {
+    use DiacriticKind as D;
+    let spec = match ch {
+        'À' => ('A', D::Grave, true),
+        'Á' => ('A', D::Acute, true),
+        'Â' => ('A', D::Circumflex, true),
+        'Ã' => ('A', D::Tilde, true),
+        'Ä' => ('A', D::Diaeresis, true),
+        'Ç' => ('C', D::Cedilla, false),
+        'È' => ('E', D::Grave, true),
+        'É' => ('E', D::Acute, true),
+        'Ê' => ('E', D::Circumflex, true),
+        'Ë' => ('E', D::Diaeresis, true),
+        'Ì' => ('I', D::Grave, true),
+        'Í' => ('I', D::Acute, true),
+        'Î' => ('I', D::Circumflex, true),
+        'Ï' => ('I', D::Diaeresis, true),
+        'Ñ' => ('N', D::Tilde, true),
+        'Ò' => ('O', D::Grave, true),
+        'Ó' => ('O', D::Acute, true),
+        'Ô' => ('O', D::Circumflex, true),
+        'Õ' => ('O', D::Tilde, true),
+        'Ö' => ('O', D::Diaeresis, true),
+        'Ù' => ('U', D::Grave, true),
+        'Ú' => ('U', D::Acute, true),
+        'Û' => ('U', D::Circumflex, true),
+        'Ü' => ('U', D::Diaeresis, true),
+        'Ý' => ('Y', D::Acute, true),
+        'à' => ('a', D::Grave, false),
+        'á' => ('a', D::Acute, false),
+        'â' => ('a', D::Circumflex, false),
+        'ã' => ('a', D::Tilde, false),
+        'ä' => ('a', D::Diaeresis, false),
+        'å' => ('a', D::RingAbove, false),
+        'ç' => ('c', D::Cedilla, false),
+        'è' => ('e', D::Grave, false),
+        'é' => ('e', D::Acute, false),
+        'ê' => ('e', D::Circumflex, false),
+        'ë' => ('e', D::Diaeresis, false),
+        'ì' => ('\u{0131}', D::Grave, false),
+        'í' => ('\u{0131}', D::Acute, false),
+        'î' => ('\u{0131}', D::Circumflex, false),
+        'ï' => ('\u{0131}', D::Diaeresis, false),
+        'ñ' => ('n', D::Tilde, false),
+        'ò' => ('o', D::Grave, false),
+        'ó' => ('o', D::Acute, false),
+        'ô' => ('o', D::Circumflex, false),
+        'õ' => ('o', D::Tilde, false),
+        'ö' => ('o', D::Diaeresis, false),
+        'ù' => ('u', D::Grave, false),
+        'ú' => ('u', D::Acute, false),
+        'û' => ('u', D::Circumflex, false),
+        'ü' => ('u', D::Diaeresis, false),
+        'ý' => ('y', D::Acute, false),
+        'ÿ' => ('y', D::Diaeresis, false),
+        // Latin Extended-A (`0x0100..=0x017F`)
+        'Ā' => ('A', D::Macron, true),
+        'ā' => ('a', D::Macron, false),
+        'Ă' => ('A', D::Breve, true),
+        'ă' => ('a', D::Breve, false),
+        'Ą' => ('A', D::Ogonek, false),
+        'ą' => ('a', D::Ogonek, false),
+        'Ć' => ('C', D::Acute, true),
+        'ć' => ('c', D::Acute, false),
+        'Ĉ' => ('C', D::Circumflex, true),
+        'ĉ' => ('c', D::Circumflex, false),
+        'Ċ' => ('C', D::DotAbove, true),
+        'ċ' => ('c', D::DotAbove, false),
+        'Č' => ('C', D::Caron, true),
+        'č' => ('c', D::Caron, false),
+        'Ď' => ('D', D::Caron, true),
+        'ď' => ('d', D::Caron, true),
+        'Ē' => ('E', D::Macron, true),
+        'ē' => ('e', D::Macron, false),
+        'Ĕ' => ('E', D::Breve, true),
+        'ĕ' => ('e', D::Breve, false),
+        'Ė' => ('E', D::DotAbove, true),
+        'ė' => ('e', D::DotAbove, false),
+        'Ę' => ('E', D::Ogonek, false),
+        'ę' => ('e', D::Ogonek, false),
+        'Ě' => ('E', D::Caron, true),
+        'ě' => ('e', D::Caron, false),
+        'Ĝ' => ('G', D::Circumflex, true),
+        'ĝ' => ('g', D::Circumflex, false),
+        'Ğ' => ('G', D::Breve, true),
+        'ğ' => ('g', D::Breve, false),
+        'Ġ' => ('G', D::DotAbove, true),
+        'ġ' => ('g', D::DotAbove, false),
+        'Ģ' => ('G', D::Cedilla, false),
+        'ģ' => ('g', D::Cedilla, false),
+        'Ĥ' => ('H', D::Circumflex, true),
+        'ĥ' => ('h', D::Circumflex, true),
+        'Ĩ' => ('I', D::Tilde, true),
+        'ĩ' => ('\u{0131}', D::Tilde, false),
+        'Ī' => ('I', D::Macron, true),
+        'ī' => ('\u{0131}', D::Macron, false),
+        'Ĭ' => ('I', D::Breve, true),
+        'ĭ' => ('\u{0131}', D::Breve, false),
+        'Į' => ('I', D::Ogonek, false),
+        'į' => ('\u{0131}', D::Ogonek, false),
+        'İ' => ('I', D::DotAbove, true),
+        'Ĵ' => ('J', D::Circumflex, true),
+        'ĵ' => ('\u{0237}', D::Circumflex, false),
+        'Ķ' => ('K', D::Cedilla, false),
+        'ķ' => ('k', D::Cedilla, false),
+        'Ĺ' => ('L', D::Acute, true),
+        'ĺ' => ('l', D::Acute, true),
+        'Ļ' => ('L', D::Cedilla, false),
+        'ļ' => ('l', D::Cedilla, false),
+        'Ľ' => ('L', D::Caron, true),
+        'ľ' => ('l', D::Caron, true),
+        'Ń' => ('N', D::Acute, true),
+        'ń' => ('n', D::Acute, false),
+        'Ņ' => ('N', D::Cedilla, false),
+        'ņ' => ('n', D::Cedilla, false),
+        'Ň' => ('N', D::Caron, true),
+        'ň' => ('n', D::Caron, false),
+        'Ō' => ('O', D::Macron, true),
+        'ō' => ('o', D::Macron, false),
+        'Ŏ' => ('O', D::Breve, true),
+        'ŏ' => ('o', D::Breve, false),
+        'Ő' => ('O', D::DoubleAcute, true),
+        'ő' => ('o', D::DoubleAcute, false),
+        'Ŕ' => ('R', D::Acute, true),
+        'ŕ' => ('r', D::Acute, false),
+        'Ŗ' => ('R', D::Cedilla, false),
+        'ŗ' => ('r', D::Cedilla, false),
+        'Ř' => ('R', D::Caron, true),
+        'ř' => ('r', D::Caron, false),
+        'Ś' => ('S', D::Acute, true),
+        'ś' => ('s', D::Acute, false),
+        'Ŝ' => ('S', D::Circumflex, true),
+        'ŝ' => ('s', D::Circumflex, false),
+        'Ş' => ('S', D::Cedilla, false),
+        'ş' => ('s', D::Cedilla, false),
+        'Š' => ('S', D::Caron, true),
+        'š' => ('s', D::Caron, false),
+        'Ţ' => ('T', D::Cedilla, false),
+        'ţ' => ('t', D::Cedilla, false),
+        'Ť' => ('T', D::Caron, true),
+        'ť' => ('t', D::Caron, true),
+        'Ũ' => ('U', D::Tilde, true),
+        'ũ' => ('u', D::Tilde, false),
+        'Ū' => ('U', D::Macron, true),
+        'ū' => ('u', D::Macron, false),
+        'Ŭ' => ('U', D::Breve, true),
+        'ŭ' => ('u', D::Breve, false),
+        'Ů' => ('U', D::RingAbove, true),
+        'ů' => ('u', D::RingAbove, false),
+        'Ű' => ('U', D::DoubleAcute, true),
+        'ű' => ('u', D::DoubleAcute, false),
+        'Ų' => ('U', D::Ogonek, false),
+        'ų' => ('u', D::Ogonek, false),
+        'Ŵ' => ('W', D::Circumflex, true),
+        'ŵ' => ('w', D::Circumflex, false),
+        'Ŷ' => ('Y', D::Circumflex, true),
+        'ŷ' => ('y', D::Circumflex, false),
+        'Ÿ' => ('Y', D::Diaeresis, true),
+        'Ź' => ('Z', D::Acute, true),
+        'ź' => ('z', D::Acute, false),
+        'Ż' => ('Z', D::DotAbove, true),
+        'ż' => ('z', D::DotAbove, false),
+        'Ž' => ('Z', D::Caron, true),
+        'ž' => ('z', D::Caron, false),
+        _ => return None,
+    };
+    Some(spec)
+}
+
+fn latin_extended_strokes(ch: char) -> Option<Vec<StrokeItem>> {
+    use StrokeItem::{Dot, Open, Ring};
+    if let Some((base, kind, tall)) = latin_decomposed(ch) {
+        let mut strokes = build_glyph_strokes(base);
+        strokes.extend(diacritic_strokes(kind, if tall { 0.20 } else { 0.0 }));
+        return Some(strokes);
+    }
+    let items = match ch {
+        '\u{0131}' => vec![Open(vec![(0.50, 0.0), (0.50, 0.50)])],
+        '\u{0237}' => vec![Open(chain(vec![(0.60, 0.50), (0.60, -0.04)], arc(0.32, -0.04, 0.28, 0.16, 0.0, -145.0, 6), vec![]))],
+        '¡' => vec![Dot(0.50, 0.56, 1.2), Open(vec![(0.50, 0.40), (0.50, -0.10)])],
+        '¢' => vec![Open(arc(0.54, 0.26, 0.40, 0.26, 40.0, 320.0, 12)), Open(vec![(0.54, -0.08), (0.54, 0.60)])],
+        '£' => vec![
+            Open(chain(arc(0.56, 0.56, 0.28, 0.16, 20.0, 200.0, 8), vec![(0.28, 0.0), (0.86, 0.0)], vec![])),
+            Open(vec![(0.14, 0.34), (0.64, 0.34)]),
+        ],
+        '¤' => vec![
+            Ring(arc(0.50, 0.36, 0.26, 0.24, 0.0, 360.0, 12)),
+            Open(vec![(0.20, 0.10), (0.32, 0.20)]),
+            Open(vec![(0.80, 0.10), (0.68, 0.20)]),
+            Open(vec![(0.20, 0.62), (0.32, 0.52)]),
+            Open(vec![(0.80, 0.62), (0.68, 0.52)]),
+        ],
+        '¥' => vec![
+            Open(vec![(0.10, 0.72), (0.50, 0.36), (0.90, 0.72)]),
+            Open(vec![(0.50, 0.36), (0.50, 0.0)]),
+            Open(vec![(0.16, 0.32), (0.84, 0.32)]),
+            Open(vec![(0.16, 0.18), (0.84, 0.18)]),
+        ],
+        '¦' => vec![Open(vec![(0.50, 0.72), (0.50, 0.42)]), Open(vec![(0.50, 0.30), (0.50, 0.0)])],
+        '¨' => diacritic_strokes(DiacriticKind::Diaeresis, 0.0),
+        'ª' => {
+            vec![Ring(arc(0.50, 0.56, 0.20, 0.14, 0.0, 360.0, 10)), Open(vec![(0.70, 0.68), (0.70, 0.42)]), Open(vec![(0.22, 0.32), (0.78, 0.32)])]
+        }
+        '«' => vec![Open(vec![(0.48, 0.46), (0.14, 0.26), (0.48, 0.06)]), Open(vec![(0.86, 0.46), (0.52, 0.26), (0.86, 0.06)])],
+        '¬' => vec![Open(vec![(0.12, 0.44), (0.88, 0.44), (0.88, 0.18)])],
+        '\u{00AD}' => vec![Open(vec![(0.20, 0.30), (0.80, 0.30)])],
+        '¯' => diacritic_strokes(DiacriticKind::Macron, 0.06),
+        '´' => diacritic_strokes(DiacriticKind::Acute, 0.0),
+        '¶' => vec![
+            Open(vec![(0.60, 0.0), (0.60, 0.72), (0.88, 0.72)]),
+            Open(vec![(0.80, 0.0), (0.80, 0.72)]),
+            Open(arc(0.54, 0.54, 0.32, 0.18, 90.0, 270.0, 8)),
+        ],
+        '¸' => vec![Open(vec![(0.52, 0.08), (0.50, -0.02), (0.62, -0.06), (0.56, -0.14), (0.42, -0.14)])],
+        'º' => vec![Ring(arc(0.50, 0.56, 0.22, 0.14, 0.0, 360.0, 10)), Open(vec![(0.22, 0.32), (0.78, 0.32)])],
+        '»' => vec![Open(vec![(0.14, 0.46), (0.48, 0.26), (0.14, 0.06)]), Open(vec![(0.52, 0.46), (0.86, 0.26), (0.52, 0.06)])],
+        '¼' | '½' | '¾' => vec![Open(vec![(0.16, 0.04), (0.84, 0.68)]), Dot(0.26, 0.56, 1.25), Dot(0.74, 0.16, 1.25)],
+        '¿' => vec![Dot(0.50, 0.56, 1.2), Open(chain(vec![(0.50, 0.38)], arc(0.52, 0.08, 0.36, 0.18, 135.0, -45.0, 8), vec![]))],
+        'Æ' => vec![
+            Open(vec![(0.06, 0.0), (0.44, 0.72), (0.44, 0.0)]),
+            Open(vec![(0.18, 0.26), (0.44, 0.26)]),
+            Open(vec![(0.92, 0.72), (0.44, 0.72)]),
+            Open(vec![(0.44, 0.38), (0.84, 0.38)]),
+            Open(vec![(0.44, 0.0), (0.92, 0.0)]),
+        ],
+        'æ' => vec![
+            Ring(arc(0.28, 0.22, 0.22, 0.18, 0.0, 360.0, 10)),
+            Open(vec![(0.50, 0.0), (0.50, 0.50)]),
+            Open(vec![(0.50, 0.26), (0.94, 0.26)]),
+            Open(arc(0.72, 0.26, 0.22, 0.24, 0.0, 320.0, 10)),
+        ],
+        'Ð' | 'Đ' => {
+            let mut d = build_glyph_strokes('D');
+            d.push(Open(vec![(0.02, 0.36), (0.38, 0.36)]));
+            d
+        }
+        'ð' => vec![
+            Ring(arc(0.50, 0.24, 0.36, 0.24, 0.0, 360.0, 12)),
+            Open(arc(0.50, 0.44, 0.36, 0.28, -10.0, 135.0, 8)),
+            Open(vec![(0.32, 0.56), (0.84, 0.72)]),
+        ],
+        'đ' => {
+            let mut d = build_glyph_strokes('d');
+            d.push(Open(vec![(0.60, 0.58), (0.96, 0.58)]));
+            d
+        }
+        'Ø' => {
+            let mut o = build_glyph_strokes('O');
+            o.push(Open(vec![(0.12, -0.04), (0.88, 0.76)]));
+            o
+        }
+        'ø' => {
+            let mut o = build_glyph_strokes('o');
+            o.push(Open(vec![(0.12, -0.04), (0.88, 0.56)]));
+            o
+        }
+        'Þ' => vec![
+            Open(vec![(0.16, 0.0), (0.16, 0.72)]),
+            Open(chain(vec![(0.16, 0.56)], arc(0.56, 0.38, 0.36, 0.18, 90.0, -90.0, 8), vec![(0.16, 0.20)])),
+        ],
+        'þ' => vec![Open(vec![(0.16, -0.20), (0.16, 0.72)]), Ring(arc(0.54, 0.26, 0.36, 0.26, 0.0, 360.0, 12))],
+        'ß' => vec![
+            Open(chain(vec![(0.20, 0.0), (0.20, 0.56)], arc(0.48, 0.56, 0.28, 0.16, 180.0, 0.0, 6), arc(0.56, 0.22, 0.34, 0.22, 90.0, -110.0, 8))),
+            Open(arc(0.54, 0.52, 0.24, 0.16, 0.0, -110.0, 6)),
+        ],
+        'Ħ' => {
+            let mut h = build_glyph_strokes('H');
+            h.push(Open(vec![(0.02, 0.54), (0.98, 0.54)]));
+            h
+        }
+        'ħ' => {
+            let mut h = build_glyph_strokes('h');
+            h.push(Open(vec![(0.02, 0.60), (0.58, 0.60)]));
+            h
+        }
+        'Ĳ' => vec![Open(vec![(0.24, 0.0), (0.24, 0.72)]), Open(chain(vec![(0.82, 0.72)], arc(0.62, 0.22, 0.20, 0.22, 0.0, -170.0, 6), vec![]))],
+        'ĳ' => vec![
+            Dot(0.24, 0.68, 1.1),
+            Open(vec![(0.24, 0.0), (0.24, 0.50)]),
+            Dot(0.74, 0.68, 1.1),
+            Open(chain(vec![(0.74, 0.50), (0.74, -0.04)], arc(0.54, -0.04, 0.20, 0.16, 0.0, -145.0, 5), vec![])),
+        ],
+        'ĸ' => vec![Open(vec![(0.14, 0.52), (0.14, 0.0)]), Open(vec![(0.86, 0.52), (0.18, 0.24), (0.88, 0.0)])],
+        'Ŀ' => {
+            let mut l = build_glyph_strokes('L');
+            l.push(Dot(0.68, 0.36, 1.15));
+            l
+        }
+        'ŀ' => {
+            let mut l = build_glyph_strokes('l');
+            l.push(Dot(0.78, 0.36, 1.15));
+            l
+        }
+        'Ł' => {
+            let mut l = build_glyph_strokes('L');
+            l.push(Open(vec![(0.02, 0.26), (0.46, 0.48)]));
+            l
+        }
+        'ł' => {
+            let mut l = build_glyph_strokes('l');
+            l.push(Open(vec![(0.22, 0.28), (0.78, 0.48)]));
+            l
+        }
+        'ŉ' => {
+            let mut n = build_glyph_strokes('n');
+            n.push(Open(vec![(0.18, 0.74), (0.18, 0.56)]));
+            n
+        }
+        'Ŋ' => vec![Open(vec![(0.12, 0.0), (0.12, 0.72), (0.86, 0.0), (0.86, 0.72)]), Open(arc(0.68, 0.0, 0.18, 0.20, 0.0, -150.0, 6))],
+        'ŋ' => vec![
+            Open(vec![(0.12, 0.0), (0.12, 0.52)]),
+            Open(chain(arc(0.48, 0.36, 0.36, 0.16, 175.0, 0.0, 8), vec![(0.84, -0.06)], arc(0.66, -0.06, 0.18, 0.14, 0.0, -150.0, 6))),
+        ],
+        'Œ' => vec![
+            Ring(arc(0.32, 0.36, 0.26, 0.36, 0.0, 360.0, 12)),
+            Open(vec![(0.94, 0.72), (0.58, 0.72), (0.58, 0.0), (0.94, 0.0)]),
+            Open(vec![(0.58, 0.36), (0.88, 0.36)]),
+        ],
+        'œ' => vec![
+            Ring(arc(0.30, 0.26, 0.22, 0.24, 0.0, 360.0, 10)),
+            Open(vec![(0.52, 0.26), (0.94, 0.26)]),
+            Open(arc(0.72, 0.26, 0.22, 0.24, 0.0, 320.0, 10)),
+        ],
+        'Ŧ' => {
+            let mut t = build_glyph_strokes('T');
+            t.push(Open(vec![(0.22, 0.38), (0.78, 0.38)]));
+            t
+        }
+        'ŧ' => {
+            let mut t = build_glyph_strokes('t');
+            t.push(Open(vec![(0.20, 0.30), (0.74, 0.30)]));
+            t
+        }
+        'ſ' => vec![Open(chain(arc(0.76, 0.60, 0.26, 0.12, 30.0, 180.0, 6), vec![(0.50, 0.0)], vec![]))],
+        'ƒ' => vec![
+            Open(chain(arc(0.74, 0.60, 0.22, 0.12, 20.0, 180.0, 6), vec![(0.46, -0.10)], arc(0.24, -0.10, 0.22, 0.10, 0.0, -160.0, 5))),
+            Open(vec![(0.18, 0.44), (0.80, 0.44)]),
+        ],
+        '€' => {
+            vec![Open(arc(0.58, 0.36, 0.38, 0.36, 40.0, 320.0, 14)), Open(vec![(0.08, 0.42), (0.72, 0.42)]), Open(vec![(0.08, 0.28), (0.68, 0.28)])]
+        }
+        _ => return None,
+    };
+    Some(items)
 }
 
 fn ascii_upper_strokes(ch: char) -> Option<Vec<StrokeItem>> {

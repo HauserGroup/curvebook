@@ -10,7 +10,7 @@ use std::sync::OnceLock;
 use serde::{Deserialize, Serialize};
 
 use crate::BUNDLED_FONTS;
-use crate::markup::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight};
+use crate::markup::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, shape_bidi_runs};
 
 /// Bounding box and vertical font metrics measured in PostScript points (`pt`).
 #[derive(Debug, Clone, Copy, PartialEq, Default, Serialize, Deserialize)]
@@ -130,10 +130,142 @@ pub fn char_advance_pt(ch: char, font_size_pt: f64, weight: SpanWeight, slope: S
     font_size_pt * char_advance_em_with_font(ch, weight, slope, bundled)
 }
 
+/// Returns `true` if `ch` is a Unicode combining diacritical mark with zero horizontal advance.
+#[must_use]
+pub const fn is_combining_mark(ch: char) -> bool {
+    matches!(ch as u32, 0x0300..=0x036F | 0x1AB0..=0x1AFF | 0x1DC0..=0x1DFF | 0x20D0..=0x20FF | 0xFE20..=0xFE2F)
+}
+
+/// Split `rich` into individual lines separated by `\n` (ignoring `\r`), preserving per-span styling.
+#[must_use]
+pub fn split_rich_text_lines(rich: &RichText) -> Vec<RichText> {
+    if rich.spans.is_empty() {
+        return Vec::new();
+    }
+    let mut lines: Vec<Vec<RichSpan>> = vec![Vec::new()];
+    for span in &rich.spans {
+        for (idx, part) in span.text.split('\n').enumerate() {
+            if idx > 0 {
+                lines.push(Vec::new());
+            }
+            let cleaned = if part.contains('\r') { part.replace('\r', "") } else { part.to_owned() };
+            if !cleaned.is_empty()
+                && let Some(cur) = lines.last_mut()
+            {
+                cur.push(RichSpan { text: cleaned, ..span.clone() });
+            }
+        }
+    }
+    lines.into_iter().map(RichText::new).collect()
+}
+
+/// Returns `true` if any span in `rich` contains an RTL script character.
+#[must_use]
+pub fn rich_contains_rtl(rich: &RichText) -> bool {
+    rich.spans.iter().any(|span| contains_rtl_script(&span.text))
+}
+
+fn infer_base_direction(rich: &RichText) -> TextDirection {
+    let mut buf = [0u8; 4];
+    for span in &rich.spans {
+        for ch in span.text.chars() {
+            if contains_rtl_script(ch.encode_utf8(&mut buf)) {
+                return TextDirection::Rtl;
+            }
+            if ch.is_alphabetic() {
+                return TextDirection::Ltr;
+            }
+        }
+    }
+    TextDirection::Ltr
+}
+
+fn consume_chars_prefix(text: &str, cursor: &mut usize, char_count: usize) -> String {
+    let start = *cursor;
+    let mut end = start;
+    for _ in 0..char_count {
+        let Some(ch) = text.get(end..).and_then(|s| s.chars().next()) else {
+            break;
+        };
+        end += ch.len_utf8();
+    }
+    *cursor = end;
+    text.get(start..end).unwrap_or_default().to_owned()
+}
+
+/// Reorder `rich` into visual left-to-right span order while preserving span styles and character count.
+#[must_use]
+pub fn reorder_rich_text_bidi(rich: &RichText) -> RichText {
+    let base_dir = infer_base_direction(rich);
+    if rich.spans.len() == 1
+        && let Some(span) = rich.spans.first()
+    {
+        let visual_spans = shape_bidi_runs(&span.text, base_dir).into_iter().map(|run| RichSpan { text: run.text, ..span.clone() }).collect();
+        return RichText::new(visual_spans);
+    }
+
+    let mut plain = String::new();
+    let mut span_ranges = Vec::with_capacity(rich.spans.len());
+    for span in &rich.spans {
+        if span.text.is_empty() {
+            continue;
+        }
+        let start = plain.len();
+        plain.push_str(&span.text);
+        span_ranges.push((start, plain.len(), span));
+    }
+    if plain.is_empty() {
+        return rich.clone();
+    }
+
+    let mut visual_spans = Vec::new();
+    for run in shape_bidi_runs(&plain, base_dir) {
+        if let Some(&(_, _, single_span)) = span_ranges.iter().find(|&&(s, e, _)| s <= run.start_byte && run.end_byte <= e) {
+            visual_spans.push(RichSpan { text: run.text, ..single_span.clone() });
+            continue;
+        }
+        let mut cursor = 0usize;
+        let push_slice = |s_start: usize, s_end: usize, span: &RichSpan, cursor: &mut usize, dst: &mut Vec<RichSpan>| {
+            let o_start = run.start_byte.max(s_start);
+            let o_end = run.end_byte.min(s_end);
+            if o_start < o_end
+                && let Some(slice) = plain.get(o_start..o_end)
+            {
+                let piece = consume_chars_prefix(&run.text, cursor, slice.chars().count());
+                if !piece.is_empty() {
+                    dst.push(RichSpan { text: piece, ..span.clone() });
+                }
+            }
+        };
+        match run.direction {
+            TextDirection::Ltr => {
+                for &(s_start, s_end, span) in &span_ranges {
+                    push_slice(s_start, s_end, span, &mut cursor, &mut visual_spans);
+                }
+            }
+            TextDirection::Rtl => {
+                for &(s_start, s_end, span) in span_ranges.iter().rev() {
+                    push_slice(s_start, s_end, span, &mut cursor, &mut visual_spans);
+                }
+            }
+        }
+        if cursor < run.text.len()
+            && let Some(tail) = run.text.get(cursor..)
+            && let Some(last) = visual_spans.last_mut()
+        {
+            last.text.push_str(tail);
+        }
+    }
+    RichText::new(visual_spans)
+}
+
 /// Clean-room Adobe Core-14 Helvetica (Regular/Bold/Oblique/BoldOblique) and Symbol advance
 /// width for Unicode codepoint `ch`, normalized in `em` units (`width_1000 / 1000.0`).
 #[must_use]
 pub fn core14_advance_em(ch: char, weight: SpanWeight, _slope: SpanSlope) -> f64 {
+    if is_combining_mark(ch) {
+        return 0.0;
+    }
     if let Some(w) = core14_ascii_width_1000(ch, weight) {
         return f64::from(w) / 1000.0;
     }
@@ -1205,6 +1337,8 @@ fn parse_cmap_mappings(cmap: &[u8], num_glyphs: u16) -> Result<Vec<(u32, u16)>, 
     Ok(merged)
 }
 
+const MAX_CMAP4_INDIRECT_STEPS: usize = MAX_CMAP_COLLECT * 4;
+
 fn collect_cmap_format4(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) -> Result<(), crate::TextError> {
     if sub.len() < 16 {
         return Err(invalid_sfnt("cmap format 4 subtable shorter than 16 bytes"));
@@ -1223,6 +1357,7 @@ fn collect_cmap_format4(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) 
         return Err(invalid_sfnt("cmap format 4 segments truncated"));
     }
 
+    let mut indirect_steps = 0usize;
     for i in 0..seg_count {
         let end_code = read_u16_be(sub, end_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 endCode"))?;
         let start_code = read_u16_be(sub, start_off + i * 2).ok_or_else(|| invalid_sfnt("cmap4 startCode"))?;
@@ -1235,26 +1370,63 @@ fn collect_cmap_format4(sub: &[u8], num_glyphs: u16, out: &mut Vec<(u32, u16)>) 
         if start_code == 0xFFFF && end_code == 0xFFFF {
             continue;
         }
-        for code in start_code..=end_code {
-            if out.len() >= MAX_CMAP_COLLECT {
-                return Ok(());
-            }
-            if code == 0xFFFF {
+        if out.len() >= MAX_CMAP_COLLECT {
+            return Ok(());
+        }
+        let seg_lo = start_code;
+        let seg_hi = end_code.min(0xFFFE);
+        if seg_lo > seg_hi {
+            continue;
+        }
+
+        if id_range_offset == 0 {
+            if num_glyphs <= 1 {
                 continue;
             }
-            let gid = if id_range_offset == 0 {
-                code.wrapping_add_signed(id_delta)
-            } else {
-                let slot_off = range_off + i * 2;
-                let glyph_addr = slot_off
-                    .checked_add(usize::from(id_range_offset))
-                    .and_then(|n| n.checked_add(usize::from(code - start_code) * 2))
-                    .ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray offset overflow"))?;
+            let max_gid = num_glyphs - 1;
+            let delta_u = u16::from_be_bytes(id_delta.to_be_bytes());
+            let c_lo = 1u16.wrapping_sub(delta_u);
+            let c_hi = max_gid.wrapping_sub(delta_u);
+            let ranges = if c_lo <= c_hi { [(c_lo, c_hi), (1, 0)] } else { [(0, c_hi), (c_lo, 0xFFFE)] };
+            for (r_lo, r_hi) in ranges {
+                if r_lo > r_hi {
+                    continue;
+                }
+                let lo = seg_lo.max(r_lo);
+                let hi = seg_hi.min(r_hi);
+                if lo > hi {
+                    continue;
+                }
+                for code in lo..=hi {
+                    if out.len() >= MAX_CMAP_COLLECT {
+                        return Ok(());
+                    }
+                    let gid = code.wrapping_add_signed(id_delta);
+                    out.push((u32::from(code), gid));
+                }
+            }
+        } else {
+            let slot_off = range_off + i * 2;
+            let first_addr = slot_off.checked_add(usize::from(id_range_offset)).ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray offset overflow"))?;
+            let last_addr =
+                first_addr.checked_add(usize::from(seg_hi - seg_lo) * 2).ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray offset overflow"))?;
+            if read_u16_be(sub, last_addr).is_none() {
+                return Err(invalid_sfnt("cmap4 glyphIdArray out of bounds"));
+            }
+            if num_glyphs <= 1 {
+                continue;
+            }
+            for code in seg_lo..=seg_hi {
+                if out.len() >= MAX_CMAP_COLLECT || indirect_steps >= MAX_CMAP4_INDIRECT_STEPS {
+                    return Ok(());
+                }
+                indirect_steps += 1;
+                let glyph_addr = first_addr + usize::from(code - seg_lo) * 2;
                 let raw = read_u16_be(sub, glyph_addr).ok_or_else(|| invalid_sfnt("cmap4 glyphIdArray out of bounds"))?;
-                if raw == 0 { 0 } else { raw.wrapping_add_signed(id_delta) }
-            };
-            if gid != 0 && gid < num_glyphs {
-                out.push((u32::from(code), gid));
+                let gid = if raw == 0 { 0 } else { raw.wrapping_add_signed(id_delta) };
+                if gid != 0 && gid < num_glyphs {
+                    out.push((u32::from(code), gid));
+                }
             }
         }
     }

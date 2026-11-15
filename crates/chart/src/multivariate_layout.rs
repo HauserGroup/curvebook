@@ -231,7 +231,7 @@ fn compile_bubble_scatter(
         let fill = match (&continuous_ramp, pt.color_scalar) {
             (Some(ramp), Some(v)) => {
                 let denom = (col_hi - col_lo).abs().max(1e-12);
-                ramp.sample(((v - col_lo) / denom).clamp(0.0, 1.0))
+                ramp.sample(crate::clamp_f64_safe((v - col_lo) / denom, 0.0, 1.0))
             }
             _ => match enc.color {
                 ColorChannelMapping::Constant(c) => c,
@@ -367,7 +367,7 @@ fn bubble_radius_pt(size: SizeChannelMapping, scalar: f64, max_abs_s: f64) -> f6
         SizeChannelMapping::Variable { min_radius_pt, max_radius_pt, .. } => {
             let lo = min_radius_pt.min(max_radius_pt).max(1.2);
             let hi = max_radius_pt.max(min_radius_pt).max(lo);
-            if max_abs_s <= 1e-12 { 0.5 * (lo + hi) } else { (hi * (scalar.abs() / max_abs_s).sqrt()).clamp(lo, hi) }
+            if max_abs_s <= 1e-12 { 0.5 * (lo + hi) } else { crate::clamp_f64_safe(hi * (scalar.abs() / max_abs_s).sqrt(), lo, hi) }
         }
     }
 }
@@ -545,7 +545,7 @@ fn compile_categorical_summary(
     draw_cartesian_frame(scene, &frame);
     draw_categorical_x_ticks(scene, &graph.spec, &cats, doc);
 
-    let y_zero = y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()).clamp(r.y, r.bottom());
+    let y_zero = crate::clamp_f64_safe(y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
     let mut line_centers = Vec::new();
     for (idx, values) in groups.iter().enumerate() {
         if values.is_empty() {
@@ -702,7 +702,7 @@ fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
     if n == 1 {
         return sorted.first().copied().unwrap_or(0.0);
     }
-    let idx_f = q.clamp(0.0, 1.0) * ((n - 1) as f64);
+    let idx_f = crate::clamp_f64_safe(q, 0.0, 1.0) * ((n - 1) as f64);
     let lo = idx_f.floor() as usize;
     let hi = idx_f.ceil() as usize;
     let frac = idx_f - (lo as f64);
@@ -1154,7 +1154,7 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         &[],
         PlotMarginConfig {
             extra_bottom_pt: if has_dendro && hm.clustering_cue.is_some() { 26.0 } else { 18.0 },
-            extra_left_pt: (max_row_lbl_w + if has_dendro { 34.0 } else { 8.0 }).clamp(12.0, 90.0),
+            extra_left_pt: crate::clamp_f64_safe(max_row_lbl_w + if has_dendro { 34.0 } else { 8.0 }, 12.0, 90.0),
             has_colorbar: true,
             suppress_y_axis_labels: true,
             ..PlotMarginConfig::default()
@@ -1162,7 +1162,7 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     );
 
     let r = scene.plot_rect_pt;
-    let dendro_w = if has_dendro { (r.width * 0.16).clamp(20.0, 48.0) } else { 0.0 };
+    let dendro_w = if has_dendro { crate::clamp_f64_safe(r.width * 0.16, 20.0, 48.0) } else { 0.0 };
     let grid = RectPt::new(r.x + dendro_w, r.y, (r.width - dendro_w).max(20.0), r.height);
     let cell_w = grid.width / (n_cols as f64);
     let cell_h = grid.height / (n_rows as f64);
@@ -1174,7 +1174,7 @@ fn compile_heatmap(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
         let y = grid.y + (vis_row as f64) * cell_h;
         for c in 0..n_cols {
             let val = row_vals.get(c).copied().unwrap_or(dom_lo);
-            let t = ((val - dom_lo) / denom).clamp(0.0, 1.0);
+            let t = crate::clamp_f64_safe((val - dom_lo) / denom, 0.0, 1.0);
             let x = grid.x + (c as f64) * cell_w;
             scene.primitives.push(ScenePrimitive::Path {
                 path: Path2D::rect(RectPt::new(x, y, cell_w, cell_h)),
@@ -1648,7 +1648,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64
                 if !diff.is_finite() || !rec.raw_p_or_q.is_finite() || rec.raw_p_or_q < 0.0 {
                     return None;
                 }
-                let neg_log_p = -(rec.raw_p_or_q.clamp(1e-300, 1.0)).log10();
+                let neg_log_p = -crate::clamp_f64_safe(rec.raw_p_or_q, 1e-300, 1.0).log10();
                 let lbl = (!rec.label_a.trim().is_empty()).then(|| rec.label_a.clone());
                 Some((diff, neg_log_p, lbl))
             })
@@ -1682,7 +1682,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64
                         let neg_log_p = if already_neg_log {
                             p_raw
                         } else if p_raw >= 0.0 {
-                            -(p_raw.clamp(1e-300, 1.0)).log10()
+                            -crate::clamp_f64_safe(p_raw, 1e-300, 1.0).log10()
                         } else {
                             return None;
                         };
@@ -2003,8 +2003,10 @@ fn compile_roc_curve(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Char
     let mut area_p = Path2D::new();
     let mut started = false;
     for &(fpr, tpr) in &points {
-        let (Some(px), Some(py)) = (x_map.map_value(fpr.clamp(0.0, 1.0), r.x, r.right()), y_map.map_value(tpr.clamp(0.0, 1.0), r.bottom(), r.y))
-        else {
+        let (Some(px), Some(py)) = (
+            x_map.map_value(crate::clamp_f64_safe(fpr, 0.0, 1.0), r.x, r.right()),
+            y_map.map_value(crate::clamp_f64_safe(tpr, 0.0, 1.0), r.bottom(), r.y),
+        ) else {
             continue;
         };
         if !started {
@@ -2107,7 +2109,7 @@ fn trapezoidal_auc(pts: &[(f64, f64)]) -> f64 {
             auc += (x1 - x0) * 0.5 * (y0 + y1);
         }
     }
-    auc.clamp(0.0, 1.0)
+    crate::clamp_f64_safe(auc, 0.0, 1.0)
 }
 
 // 2e. Forest Plot (OR/HR CIs + Diamond Pooled Estimate)
@@ -2163,7 +2165,7 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
         &graph.spec,
         &[],
         PlotMarginConfig {
-            extra_left_pt: (max_lbl_w + 10.0).clamp(32.0, 96.0),
+            extra_left_pt: crate::clamp_f64_safe(max_lbl_w + 10.0, 32.0, 96.0),
             has_legend: true,
             suppress_y_axis_labels: true,
             ..PlotMarginConfig::default()
@@ -2212,7 +2214,7 @@ fn compile_forest_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Ch
         };
 
         if entry.is_pooled {
-            let dh = (row_h * 0.28).clamp(3.5, 7.0);
+            let dh = crate::clamp_f64_safe(row_h * 0.28, 3.5, 7.0);
             scene.primitives.push(ScenePrimitive::Path {
                 path: polygon_path(&[(x_lo_pt, cy), (x_est_pt, cy - dh), (x_hi_pt, cy), (x_est_pt, cy + dh)]),
                 fill: Some(FillPaint::solid(pooled_col)),
