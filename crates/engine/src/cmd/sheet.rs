@@ -1,6 +1,6 @@
 //! Sheet creation, renaming, deletion, duplication, pipeline cloning, freezing, reordering, and selection commands.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode,
@@ -1076,6 +1076,36 @@ struct FamilyCloneOptions<'a> {
 }
 
 fn resolve_family_root_data_id(doc: &ProjectDocument, raw_id: &SheetId) -> Result<SheetId, EngineError> {
+    let mut active = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    resolve_family_root_data_id_with_visited(doc, raw_id, &mut active, &mut visited)
+}
+
+fn resolve_family_root_data_id_with_visited(
+    doc: &ProjectDocument,
+    raw_id: &SheetId,
+    active: &mut BTreeSet<SheetId>,
+    visited: &mut BTreeSet<SheetId>,
+) -> Result<SheetId, EngineError> {
+    if !active.insert(raw_id.clone()) {
+        return Err(EngineError::with_code(ErrorCode::CycleDetected, format!("circular sheet reference detected at `{}`", raw_id.as_str())));
+    }
+    if !visited.insert(raw_id.clone()) {
+        active.remove(raw_id);
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("sheet `{}` cannot trace back to a data sheet", raw_id.as_str())));
+    }
+
+    let outcome = resolve_family_root_data_id_inner(doc, raw_id, active, visited);
+    active.remove(raw_id);
+    outcome
+}
+
+fn resolve_family_root_data_id_inner(
+    doc: &ProjectDocument,
+    raw_id: &SheetId,
+    active: &mut BTreeSet<SheetId>,
+    visited: &mut BTreeSet<SheetId>,
+) -> Result<SheetId, EngineError> {
     let section =
         doc.sheet_section(raw_id).ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("sheet `{}` not found", raw_id.as_str())))?;
 
@@ -1088,19 +1118,20 @@ fn resolve_family_root_data_id(doc: &ProjectDocument, raw_id: &SheetId) -> Resul
             .map(|ds| ds.id.clone())
             .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("info sheet `{}` has no owning data sheet", raw_id.as_str()))),
         SheetSection::Analyses => {
-            let mut cur = raw_id.clone();
-            for _ in 0..=doc.result_sheets.len() {
-                if let Some(rs) = doc.result_sheet(&cur) {
-                    let up = &rs.analysis.source_sheet_id;
-                    if doc.data_sheet(up).is_some() {
-                        return Ok(up.clone());
-                    }
-                    cur = up.clone();
-                } else {
-                    break;
-                }
+            let Some(rs) = doc.result_sheet(raw_id) else {
+                return Err(EngineError::with_code(ErrorCode::NotFound, format!("result sheet `{}` not found", raw_id.as_str())));
+            };
+            let up = &rs.analysis.source_sheet_id;
+            if doc.data_sheet(up).is_some() {
+                return Ok(up.clone());
             }
-            Err(EngineError::with_code(ErrorCode::BadInput, format!("result sheet `{}` cannot trace back to a data sheet", raw_id.as_str())))
+            if doc.sheet_section(up).is_none() {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("result sheet `{}` cannot trace back to a data sheet", raw_id.as_str()),
+                ));
+            }
+            resolve_family_root_data_id_with_visited(doc, up, active, visited)
         }
         SheetSection::Graphs => {
             let gs = doc
@@ -1110,31 +1141,36 @@ fn resolve_family_root_data_id(doc: &ProjectDocument, raw_id: &SheetId) -> Resul
             if doc.data_sheet(primary).is_some() {
                 return Ok(primary.clone());
             }
-            resolve_family_root_data_id(doc, primary)
+            resolve_family_root_data_id_with_visited(doc, primary, active, visited)
         }
         SheetSection::Layouts => {
             let ls = doc
                 .layout_sheet(raw_id)
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("layout sheet `{}` not found", raw_id.as_str())))?;
+            let mut cycle_err: Option<EngineError> = None;
             for item in &ls.spec.items {
-                match item {
+                let target_id = match item {
                     LayoutItem::LiveTable { source_sheet_id, .. } => {
                         if doc.data_sheet(source_sheet_id).is_some() {
                             return Ok(source_sheet_id.clone());
                         }
-                        if let Ok(found) = resolve_family_root_data_id(doc, source_sheet_id) {
-                            return Ok(found);
+                        source_sheet_id
+                    }
+                    LayoutItem::LiveGraph { graph_sheet_id, .. } => graph_sheet_id,
+                    LayoutItem::TextCallout { .. } => continue,
+                };
+                match resolve_family_root_data_id_with_visited(doc, target_id, active, visited) {
+                    Ok(found) => return Ok(found),
+                    Err(err) if err.code == ErrorCode::CycleDetected => {
+                        if cycle_err.is_none() {
+                            cycle_err = Some(err);
                         }
                     }
-                    LayoutItem::LiveGraph { graph_sheet_id, .. } => {
-                        if let Ok(found) = resolve_family_root_data_id(doc, graph_sheet_id) {
-                            return Ok(found);
-                        }
-                    }
-                    LayoutItem::TextCallout { .. } => {}
+                    Err(_) => {}
                 }
             }
-            Err(EngineError::with_code(ErrorCode::BadInput, format!("layout `{}` has no data sheet family", raw_id.as_str())))
+            Err(cycle_err
+                .unwrap_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("layout `{}` has no data sheet family", raw_id.as_str()))))
         }
     }
 }

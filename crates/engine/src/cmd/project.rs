@@ -278,6 +278,7 @@ fn run_new_project_with_id(ctx: &mut Ctx<'_>, command_id: &str, params: Value) -
     let doc = ProjectDocument::new(title)?;
     let result_title = doc.title.clone();
     ctx.session.doc = doc;
+    ctx.session.set_file_path(None, false);
     Ok(CommandOutcome::mutated(command_id, "created new project", json!({ "title": result_title })))
 }
 
@@ -311,25 +312,26 @@ fn open_project_schema() -> Value {
 fn run_project_open(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let parsed: OpenProjectParams = parse_params(&open_project_schema(), params)?;
     let explicit_unpacked = parsed.unpacked.unwrap_or(false);
-    let (loaded, used_unpacked) = if let Some(ref path) = parsed.path {
+    let (loaded, used_unpacked, opened_path) = if let Some(ref path) = parsed.path {
         if path.trim().is_empty() {
             return Err(EngineError::with_code(ErrorCode::BadInput, "project.open `path` must not be empty"));
         }
         let (resolved, use_unpacked) = ctx.session.path_policy.resolve_project_open_target(path, explicit_unpacked)?;
         let opened = if use_unpacked { open_project_unpacked_dir(&resolved)? } else { open_project_file(&resolved)? };
-        (opened, use_unpacked)
+        (opened, use_unpacked, Some(resolved))
     } else if explicit_unpacked {
         return Err(EngineError::with_code(ErrorCode::BadInput, "project.open with `unpacked: true` requires `path`")
             .with_remediation("Provide a directory path in `path` when opening an unpacked project."));
     } else if let Some(ref b64) = parsed.bytes_base64 {
         let bytes = decode_base64(b64)?;
-        (open_project_bytes(&bytes)?, false)
+        (open_project_bytes(&bytes)?, false, None)
     } else {
         return Err(EngineError::with_code(ErrorCode::BadInput, "project.open requires `path` or `bytes_base64`")
             .with_remediation("Pass either `path` or `bytes_base64`."));
     };
 
     ctx.session.doc = loaded;
+    ctx.session.set_file_path(opened_path, false);
     Ok(CommandOutcome::mutated(
         "project.open",
         "opened project",
@@ -499,6 +501,7 @@ fn run_project_instantiate_template(ctx: &mut Ctx<'_>, params: Value) -> Result<
 
     let instantiated = instantiate_template_bytes(&bytes, parsed.title.as_deref())?;
     ctx.session.doc = instantiated;
+    ctx.session.set_file_path(None, false);
     Ok(CommandOutcome::mutated(
         "project.instantiateTemplate",
         "instantiated project from template",
