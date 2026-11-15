@@ -2,13 +2,13 @@
 
 Every command executed by `lumencraft-engine` (`Session::execute`), bound to UI shortcuts/menus (`UI_COMMANDS`), exposed through `lumencraft-mcp`, recorded in crash-recovery journals (`ops.journal`), or scripted in `lumencraft.batch.v1` manifests uses a canonical **command ID**.
 
-The authoritative generated list of all current engine and UI commands is maintained at `docs/commands.md` (generated via `cargo xtask commands` and verified in CI via `cargo xtask commands --check`). Never duplicate full command tables manually in prose.
+The authoritative generated list of all current engine commands is maintained at [`docs/commands.md`](commands.md) (generated via `cargo xtask commands` and verified in CI via `cargo xtask commands --check`); UI-only commands are listed in the generated `crates/mcp/src/ui_catalog.rs` (`cargo xtask ui-commands --check`). Never duplicate full command tables manually in prose.
 
 ---
 
 ## 1. Canonical Format: `<area>.<camelCaseAction>`
 
-- **Syntax:** `<area>.<camelCaseAction>` matching `^[a-z]+\.[a-z][a-zA-Z0-9]*$` (single dot separator, no underscores, no hyphens, no spaces).
+- **Syntax:** `<area>.<camelCaseAction>` matching `^[a-z]+\.[a-z][a-zA-Z0-9]*$` (single dot separator, no underscores, no hyphens, no spaces). This applies to engine commands and is enforced by `is_valid_command_id_format` in `crates/engine/tests/registry_and_errors.rs`; UI-only IDs follow the dotted form described in the `ui` / `app` row below.
 - **`<area>`:** Lowercase domain prefix identifying the subsystem owning the command.
 - **`<camelCaseAction>`:** Verb-first (or established action noun/verb) in strict lowerCamelCase starting with a lowercase ASCII letter.
 
@@ -16,20 +16,20 @@ The authoritative generated list of all current engine and UI commands is mainta
 
 | Area | Scope | Examples (representative pattern) |
 | :--- | :--- | :--- |
-| `project` *(and legacy `file`)* | Project creation, open, metadata, info pages | `project.new`, `project.setAuthor` *(keep `file.new` alias for replay compat)* |
+| `project` *(and legacy `file`)* | Project creation, open, save, templates, checkpoints | `project.new`, `project.save`, `project.createCheckpoint` *(keep `file.new` alias for replay compat)* |
 | `edit` | Session history traversal | `edit.undo`, `edit.redo` |
-| `sheet` | Workbook sheet management & table format creation | `sheet.addDataTable`, `sheet.duplicate`, `sheet.rename` |
-| `table` | Data grid cells, rows, columns, subcolumns, sorting | `table.setCell`, `table.insertRow`, `table.setColumnTitle` |
-| `info` | Info sheet constants and notes | `info.setConstant`, `info.deleteConstant`, `info.setNotes` |
+| `sheet` | Workbook sheet management & table format creation | `sheet.createData`, `sheet.duplicate`, `sheet.rename` |
+| `table` | Data grid cells, titles, subcolumns, imports, exclusions | `table.setCell`, `table.setCells`, `table.setSubcolumnTitles` |
+| `info` | Info sheet constants and notes | `info.setConstant`, `info.removeConstant`, `info.setNote` |
 | `analyze` / `transform` / `stats` / `fit` | Running quantitative pipelines | `analyze.run`, `transform.run`, `stats.run`, `fit.run` |
-| `analysis` | Existing analysis sheet lifecycle & parameters | `analysis.editParameters`, `analysis.recalculate`, `analysis.freeze` |
+| `analysis` | Existing analysis sheet lifecycle & parameters | `analysis.add`, `analysis.updateParams`, `analysis.run` |
 | `result` | Structured report / summary generation | `result.generateReport` |
-| `graph` | Plot/chart sheets, axes, legends, per-graph exports | `graph.new`, `graph.addPlot`, `graph.exportSvg` |
-| `layout` | Multi-panel page layouts & layout exports | `layout.new`, `layout.addPanel`, `layout.exportEmf` |
+| `graph` | Plot/chart sheets, axes, legends, per-graph exports | `graph.create`, `graph.setAxes`, `graph.exportSvg` |
+| `layout` | Multi-panel page layouts & layout exports | `layout.create`, `layout.addPanel`, `layout.exportEmf` |
 | `export` | Whole-figure / batch vector & raster export | `export.svg`, `export.pdf`, `export.png`, `export.tiff` |
-| `ui` / `app` | UI-only commands (`UI_COMMANDS` / `UiCommandSpec`) | `ui.openSettings`, `ui.zoomFit`, `ui.commandPalette`, `app.about` |
+| `ui` / `app` | UI-only commands (`UI_COMMANDS` / `UiCommandSpec`); may use a dotted `ui.<object>.<action>` form | `ui.palette.open`, `ui.zoom.fitSheet`, `ui.navigator.toggle`, `app.about` |
 
-Introducing a brand-new `<area>` prefix requires maintainer review and adding it to both the command registry validation test and this table.
+Introducing a brand-new `<area>` prefix requires maintainer review and adding it to both the command registry validation test (`valid_areas` in `crates/engine/tests/registry_and_errors.rs`) and this table.
 
 ---
 

@@ -1,6 +1,17 @@
 //! Canonical built-in equation library organized by [`EquationCategory`]: Dose–Response,
 //! Receptor Binding, Enzyme Kinetics, Exponential, Growth, Peaks, Waves, Standard Curves /
 //! Polynomials, Radiobiology, and all 27 NIST StRD nonlinear regression models.
+//!
+//! Per D1 (AGENTS.md), every built-in equation cites the published source of its functional form:
+//! full references sit in the `//!` header of each submodule ([`pharma`], [`curves`], [`nist`]) and
+//! short `Author (Year)` citations on each model. General references for the nonlinear least-squares
+//! models in this library:
+//! - Motulsky, H. J., & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear
+//!   and Nonlinear Regression: A Practical Guide to Curve Fitting*. New York: Oxford University Press.
+//! - Seber, G. A. F., & Wild, C. J. (1989). *Nonlinear Regression*. New York: Wiley.
+//! - Ratkowsky, D. A. (1990). *Handbook of Nonlinear Regression Models*. New York: Marcel Dekker.
+//! - NIST Statistical Reference Datasets, Nonlinear Regression:
+//!   <https://www.itl.nist.gov/div898/strd/nls/nls_main.shtml>.
 
 pub mod curves;
 pub mod nist;

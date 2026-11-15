@@ -13,6 +13,24 @@
 //! 6. `Correlation`: Pearson `r` vs `H0: r_0 = 0` (Fisher *z*, R `pwr.r.test` hybrid, or conditional *t*-transform).
 //! 7. `ChiSquare`: goodness-of-fit / contingency test parameterized by Cohen's `w` and `df`.
 //! 8. `SimpleLinearRegression`: slope *t*-test / `u = 1` *F*-test parameterized by Cohen's `f^2 = R^2 / (1 - R^2)`, `R^2`, or `(beta1, sigma_x, sigma_eps)` (`lambda = n * f^2`, `df = n - 2`).
+//!
+//! Effect-size conventions (`d`, `d_z`, `f`, `h`, `r`, `w`, `f^2`) and the noncentrality parameters
+//! follow Cohen (1988); *t*-test power via the noncentral *t* follows Owen (1965). Per-family sources
+//! are cited on the evaluators below in short `Author (Year)` form.
+//!
+//! References:
+//! - Chow, S.-C., Shao, J., & Wang, H. (2008). *Sample Size Calculations in Clinical Research*
+//!   (2nd ed.). Chapman & Hall/CRC.
+//! - Cohen, J. (1988). *Statistical Power Analysis for the Behavioral Sciences* (2nd ed.).
+//!   Lawrence Erlbaum Associates.
+//! - Fisher, R. A. (1921). On the "probable error" of a coefficient of correlation deduced from a
+//!   small sample. *Metron*, 1, 3-32.
+//! - Fleiss, J. L., Levin, B., & Paik, M. C. (2003). *Statistical Methods for Rates and Proportions*
+//!   (3rd ed.). Wiley.
+//! - Fleiss, J. L., Tytun, A., & Ury, H. K. (1980). A simple approximation for calculating sample
+//!   sizes for comparing independent proportions. *Biometrics*, 36(2), 343-346. doi:10.2307/2529990.
+//! - Owen, D. B. (1965). The power of Student's t-test. *Journal of the American Statistical
+//!   Association*, 60(309), 320-333. doi:10.2307/2283156.
 
 use lumencraft_math::dist::{
     chi2_isf, f_isf, ncchi2_sf, ncf_sf, nct_cdf, nct_sf, norm_cdf, norm_isf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_isf,
@@ -142,26 +160,32 @@ pub enum PowerSolveTarget {
 /// Variance / standard-error approximation used by [`PowerTestFamily::TwoProportions`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum TwoProportionsMethod {
-    /// Pooled proportion `p_bar` under `H0` and unpooled SE under `H1` (Fleiss / G*Power standard).
+    /// Pooled proportion `p_bar` under `H0` and unpooled SE under `H1` (Fleiss / G*Power standard):
+    /// the normal-approximation power formula of Fleiss, Levin & Paik (2003).
     #[default]
     PooledNullUnpooledAlt,
-    /// Unpooled Wald SE under both `H0` and `H1`.
+    /// Unpooled Wald SE under both `H0` and `H1` (Chow, Shao & Wang 2008).
     Unpooled,
-    /// Arcsine-transformed Cohen's `h = 2 asin(sqrt(p1)) - 2 asin(sqrt(p2))` (`pwr::pwr.2p.test`).
+    /// Arcsine-transformed Cohen's `h = 2 asin(sqrt(p1)) - 2 asin(sqrt(p2))` (`pwr::pwr.2p.test`);
+    /// Cohen (1988, ch. 6), with `z = h * sqrt(n1 n2 / (n1 + n2))` for unequal `n`.
     CohensH,
 }
 
 /// Power-curve convention used by [`PowerTestFamily::Correlation`] (`H0: rho = 0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum CorrelationPowerMethod {
-    /// Standard Fisher *z*-transformation (`z = atanh(r)`, `SE = 1 / sqrt(n - 3)`):
+    /// Standard Fisher *z*-transformation (`z = atanh(r)`, `SE = 1 / sqrt(n - 3)`; Fisher 1921):
     /// yields exact size `alpha` at `r = 0` and is strictly monotonic for all `n > 3`.
     #[default]
     FisherZ,
     /// R `pwr::pwr.r.test` convention: exact *t*-transform critical threshold `r_c` under `H0`
     /// paired with bias-corrected Fisher *z* (`atanh(r) + r / (2*(n-1))`, `SE = 1/sqrt(n-3)`).
+    /// The bias term `rho / (2(n - 1))` is Fisher's (1921) approximation to the mean of `atanh(r)`.
     FisherZWithTCrit,
     /// Conditional noncentral-*t* transform (`df = n - 2`, `delta = (r / sqrt(1 - r^2)) * sqrt(n - 2)`).
+    /// This is the power of the slope *t*-test conditional on the predictor (fixed-`x` regression),
+    /// not the exact unconditional distribution of the sample correlation under `rho != 0`; despite
+    /// the variant name it is an approximation for bivariate-normal data.
     ExactTTransform,
 }
 
@@ -215,7 +239,8 @@ pub struct PowerAnalysisRequest {
     pub chi_square_df: f64,
     /// Variance / SE convention for `TwoProportions` (default `PooledNullUnpooledAlt`).
     pub two_proportions_mode: TwoProportionsMethod,
-    /// Yates / Fleiss continuity correction for `TwoProportions` normal approximations.
+    /// Yates / Fleiss continuity correction for `TwoProportions` normal approximations: shrinks
+    /// `|p1 - p2|` by `(1/n1 + 1/n2) / 2` as in Fleiss, Tytun & Ury (1980).
     pub continuity_correction: bool,
     /// Power-curve convention for `Correlation` (default `FisherZ`).
     pub correlation_method: CorrelationPowerMethod,
@@ -509,7 +534,7 @@ pub struct PowerAnalysisResult {
 // Standalone Effect-Size Conversion Helpers
 // ============================================================================
 
-/// Compute Cohen's `d = (mean_1 - mean_2) / pooled_sd`.
+/// Compute Cohen's `d = (mean_1 - mean_2) / pooled_sd` (Cohen 1988, ch. 2).
 pub fn cohens_d_from_means(mean_1: f64, mean_2: f64, pooled_sd: f64) -> Result<f64, StatsError> {
     if !mean_1.is_finite() || !mean_2.is_finite() {
         return Err(StatsError::InvalidParameter { name: "mean", value: mean_1 + mean_2 });
@@ -531,7 +556,7 @@ pub fn paired_sd_from_correlation(sd: f64, correlation_r: f64) -> Result<f64, St
     Ok(sd * (2.0 * (1.0 - correlation_r)).sqrt())
 }
 
-/// Compute paired Cohen's `d_z = mean_diff / (sd * sqrt(2 * (1 - r)))`.
+/// Compute paired Cohen's `d_z = mean_diff / (sd * sqrt(2 * (1 - r)))` (Cohen 1988, ch. 2).
 pub fn cohens_dz_from_correlation(mean_diff: f64, sd: f64, correlation_r: f64) -> Result<f64, StatsError> {
     if !mean_diff.is_finite() {
         return Err(StatsError::InvalidParameter { name: "mean_diff", value: mean_diff });
@@ -540,7 +565,8 @@ pub fn cohens_dz_from_correlation(mean_diff: f64, sd: f64, correlation_r: f64) -
     Ok(mean_diff / sd_d)
 }
 
-/// Compute balanced one-way ANOVA Cohen's `f = sqrt(sum((mu_i - mu_bar)^2) / k) / within_sd`.
+/// Compute balanced one-way ANOVA Cohen's `f = sqrt(sum((mu_i - mu_bar)^2) / k) / within_sd`
+/// (Cohen 1988, ch. 8: `sigma_m` uses divisor `k`).
 pub fn cohens_f_from_means(group_means: &[f64], within_sd: f64) -> Result<f64, StatsError> {
     if group_means.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "one-way ANOVA means", required: 2, actual: group_means.len() });
@@ -553,7 +579,7 @@ pub fn cohens_f_from_means(group_means: &[f64], within_sd: f64) -> Result<f64, S
     Ok(sigma_m / within_sd)
 }
 
-/// Compute Cohen's `h = 2 * asin(sqrt(p1)) - 2 * asin(sqrt(p2))`.
+/// Compute Cohen's `h = 2 * asin(sqrt(p1)) - 2 * asin(sqrt(p2))` (Cohen 1988, ch. 6).
 pub fn cohens_h(p1: f64, p2: f64) -> Result<f64, StatsError> {
     if !p1.is_finite() || !(0.0..=1.0).contains(&p1) {
         return Err(StatsError::InvalidParameter { name: "p1", value: p1 });
@@ -564,7 +590,8 @@ pub fn cohens_h(p1: f64, p2: f64) -> Result<f64, StatsError> {
     Ok(2.0 * p1.sqrt().asin() - 2.0 * p2.sqrt().asin())
 }
 
-/// Compute Cohen's `f^2 = R^2 / (1 - R^2)` from coefficient of determination `R^2` in `[0, 1)`.
+/// Compute Cohen's `f^2 = R^2 / (1 - R^2)` from coefficient of determination `R^2` in `[0, 1)`
+/// (Cohen 1988, ch. 9).
 pub fn cohens_f2_from_r_squared(r_squared: f64) -> Result<f64, StatsError> {
     if !r_squared.is_finite() || !(0.0..1.0).contains(&r_squared) {
         return Err(StatsError::InvalidParameter { name: "r_squared", value: r_squared });
@@ -572,7 +599,8 @@ pub fn cohens_f2_from_r_squared(r_squared: f64) -> Result<f64, StatsError> {
     Ok(r_squared / (1.0 - r_squared))
 }
 
-/// Compute Cohen's `f^2 = (beta1 * sigma_x / sigma_eps)^2` for simple linear regression.
+/// Compute Cohen's `f^2 = (beta1 * sigma_x / sigma_eps)^2` for simple linear regression
+/// (Cohen 1988, ch. 9, with `R^2 / (1 - R^2) = beta1^2 sigma_x^2 / sigma_eps^2`).
 pub fn cohens_f2_from_slope(beta1: f64, sigma_x: f64, sigma_eps: f64) -> Result<f64, StatsError> {
     if !beta1.is_finite() {
         return Err(StatsError::InvalidParameter { name: "beta1", value: beta1 });
@@ -646,6 +674,12 @@ fn validate_tail_mode(family: PowerTestFamily, tail_mode: TailMode) -> Result<()
     Ok(())
 }
 
+/// Resolve the unpaired-*t* effect to Cohen's `d`.
+///
+/// With `sd_group2`, `d` uses the effective SD `sqrt((k sd1^2 + sd2^2) / (k + 1))` (`k = n2 / n1`),
+/// chosen so `sigma^2 (1/n1 + 1/n2)` equals `sd1^2/n1 + sd2^2/n2`. This is not the `n`-weighted
+/// pooled SD, and power is still evaluated for Student's pooled *t* with `n1 + n2 - 2` df, not for
+/// Welch's test.
 fn resolve_unpaired_t_effect(req: &PowerAnalysisRequest, k: f64) -> Result<ResolvedEffect, StatsError> {
     let allow_unspecified = req.solve_target == PowerSolveTarget::DetectableEffect;
     match &req.effect {
@@ -940,6 +974,10 @@ fn build_context(req: &PowerAnalysisRequest) -> Result<ResolvedContext, StatsErr
 // Core Distribution & Power Evaluators
 // ============================================================================
 
+/// Power of a Student *t* test from the noncentral *t* distribution (Owen 1965): two-sided
+/// `P(T' > t_c) + P(T' < -t_c)`, one-sided the corresponding single tail, with `T' ~ t'(df, delta)`.
+/// Callers supply `delta = d * sqrt(n1 n2 / (n1 + n2))` (unpaired), `d * sqrt(n)` (paired /
+/// one-sample) or `sqrt(n f^2)` (regression slope); see Cohen (1988, chs. 2 and 9).
 fn t_power(df: f64, delta: f64, alpha: f64, tail_mode: TailMode, numerator_df: Option<f64>) -> Result<PowerEval, StatsError> {
     if !df.is_finite() || df <= 0.0 {
         return Err(StatsError::InvalidParameter { name: "df", value: df });
@@ -971,6 +1009,7 @@ fn z_critical_value(alpha: f64, tail_mode: TailMode) -> Result<f64, StatsError> 
     })
 }
 
+/// Normal-approximation power for Cohen's `h` (Cohen 1988, ch. 6): `delta = h * sqrt(n1 n2 / (n1 + n2))`.
 fn two_proportions_h_power(n1: f64, n2: f64, h: f64, alpha: f64, tail_mode: TailMode) -> Result<PowerEval, StatsError> {
     let n_eff = ((n1 * n2) / (n1 + n2)).sqrt();
     let delta = h * n_eff;
@@ -983,6 +1022,10 @@ fn two_proportions_h_power(n1: f64, n2: f64, h: f64, alpha: f64, tail_mode: Tail
     Ok(PowerEval { power, actual_df: None, numerator_df: None, noncentrality_param: delta, critical_value: crit_out })
 }
 
+/// Normal-approximation power for `D = p1 - p2`: upper tail `P(Z > (z_a * SE0 + c - D) / SE1)`, lower
+/// tail the same with `+D` (two-sided sums both). `SE0` is pooled (Fleiss, Levin & Paik 2003) or
+/// unpooled `SE0 = SE1` (Chow, Shao & Wang 2008); the optional continuity correction is
+/// `c = (1/n1 + 1/n2) / 2` (Fleiss, Tytun & Ury 1980).
 fn two_proportions_p_power(ctx: &ResolvedContext, n1: f64, n2: f64, p1: f64, p2: f64) -> Result<PowerEval, StatsError> {
     if ctx.two_proportions_mode == TwoProportionsMethod::CohensH {
         let h = cohens_h(p1, p2)?;
@@ -1016,6 +1059,8 @@ fn two_proportions_p_power(ctx: &ResolvedContext, n1: f64, n2: f64, p1: f64, p2:
     Ok(PowerEval { power, actual_df: None, numerator_df: None, noncentrality_param: delta / se0, critical_value: crit_out })
 }
 
+/// Power for `H0: rho = 0` via Fisher's (1921) *z* (plain or with the `pwr.r.test` *t*-critical
+/// hybrid) or the conditional noncentral-*t* transform; see [`CorrelationPowerMethod`].
 fn correlation_power(method: CorrelationPowerMethod, n: f64, r: f64, alpha: f64, tail_mode: TailMode) -> Result<PowerEval, StatsError> {
     let df = n - 2.0;
     match method {
@@ -1065,6 +1110,9 @@ fn correlation_power(method: CorrelationPowerMethod, n: f64, r: f64, alpha: f64,
     }
 }
 
+/// Evaluate power at a given design. Besides [`t_power`] and the proportion / correlation helpers,
+/// one-way ANOVA uses noncentral *F* with `lambda = k n f^2` on `(k - 1, k (n - 1))` df and the
+/// chi-square family uses noncentral chi-square with `lambda = N w^2` (Cohen 1988, chs. 7 and 8).
 fn eval_power_at(ctx: &ResolvedContext, n1: f64, n2_explicit: Option<f64>) -> Result<PowerEval, StatsError> {
     match &ctx.effect {
         ResolvedEffect::UnpairedT { d, .. } => {

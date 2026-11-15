@@ -1,5 +1,67 @@
 //! Two-group parametric and nonparametric hypothesis tests, standardized effect sizes with
 //! exact noncentral-*t* confidence intervals, variance homogeneity tests, and Bland–Altman agreement.
+//!
+//! # References
+//!
+//! Full bibliographic details for the methods implemented in this module; individual items cite
+//! them in short `Author (Year)` form.
+//!
+//! - Student (1908). The probable error of a mean. *Biometrika* 6(1):1–25. doi:10.1093/biomet/6.1.1
+//! - Welch, B. L. (1947). The generalization of 'Student's' problem when several different population
+//!   variances are involved. *Biometrika* 34(1–2):28–35. doi:10.1093/biomet/34.1-2.28
+//! - Satterthwaite, F. E. (1946). An approximate distribution of estimates of variance components.
+//!   *Biometrics Bulletin* 2(6):110–114. doi:10.2307/3002019
+//! - Zar, J. H. (2010). *Biostatistical Analysis* (5th ed.). Pearson Prentice Hall. Ch. 7 (one-sample),
+//!   ch. 8 (two-sample, including the variance-ratio *F* test), ch. 9 (paired-sample hypotheses).
+//! - Levene, H. (1960). Robust tests for equality of variances. In I. Olkin et al. (Eds.),
+//!   *Contributions to Probability and Statistics: Essays in Honor of Harold Hotelling*, pp. 278–292.
+//!   Stanford University Press.
+//! - Brown, M. B., & Forsythe, A. B. (1974). Robust tests for the equality of variances.
+//!   *Journal of the American Statistical Association* 69(346):364–367. doi:10.1080/01621459.1974.10482955
+//! - Cohen, J. (1988). *Statistical Power Analysis for the Behavioral Sciences* (2nd ed.). Lawrence Erlbaum.
+//! - Hedges, L. V. (1981). Distribution theory for Glass's estimator of effect size and related
+//!   estimators. *Journal of Educational Statistics* 6(2):107–128. doi:10.3102/10769986006002107
+//! - Glass, G. V. (1976). Primary, secondary, and meta-analysis of research. *Educational Researcher*
+//!   5(10):3–8. doi:10.3102/0013189X005010003
+//! - Steiger, J. H., & Fouladi, R. T. (1997). Noncentrality interval estimation and the evaluation of
+//!   statistical models. In L. L. Harlow, S. A. Mulaik, & J. H. Steiger (Eds.), *What If There Were No
+//!   Significance Tests?*, pp. 221–257. Lawrence Erlbaum.
+//! - Cumming, G., & Finch, S. (2001). A primer on the understanding, use, and calculation of confidence
+//!   intervals that are based on central and noncentral distributions. *Educational and Psychological
+//!   Measurement* 61(4):532–574.
+//! - Rosenthal, R. (1991). *Meta-Analytic Procedures for Social Research* (rev. ed.). Sage.
+//! - Bland, J. M., & Altman, D. G. (1996). Statistics notes: The use of transformation when comparing
+//!   two means. *BMJ* 312(7039):1153. doi:10.1136/bmj.312.7039.1153
+//! - Wilcoxon, F. (1945). Individual comparisons by ranking methods. *Biometrics Bulletin* 1(6):80–83.
+//!   doi:10.2307/3001968
+//! - Mann, H. B., & Whitney, D. R. (1947). On a test of whether one of two random variables is
+//!   stochastically larger than the other. *Annals of Mathematical Statistics* 18(1):50–60.
+//!   doi:10.1214/aoms/1177730491
+//! - Pratt, J. W. (1959). Remarks on zeros and ties in the Wilcoxon signed rank procedures.
+//!   *Journal of the American Statistical Association* 54(287):655–667. doi:10.1080/01621459.1959.10501526
+//! - Hodges, J. L., & Lehmann, E. L. (1963). Estimates of location based on rank tests.
+//!   *Annals of Mathematical Statistics* 34(2):598–611. doi:10.1214/aoms/1177704172
+//! - Hollander, M., Wolfe, D. A., & Chicken, E. (2014). *Nonparametric Statistical Methods* (3rd ed.).
+//!   Wiley. Ch. 3 (paired/one-sample location: signed-rank test, Walsh-average estimator), ch. 4
+//!   (two-sample location: rank-sum test, Hodges–Lehmann shift estimator, Moses interval).
+//! - Conover, W. J. (1999). *Practical Nonparametric Statistics* (3rd ed.). Wiley.
+//! - Dixon, W. J., & Mood, A. M. (1946). The statistical sign test. *Journal of the American
+//!   Statistical Association* 41:557–566.
+//! - Cliff, N. (1993). Dominance statistics: Ordinal analyses to answer ordinal questions.
+//!   *Psychological Bulletin* 114(3):494–509. doi:10.1037/0033-2909.114.3.494
+//! - Wendt, H. W. (1972). Dealing with a common problem in social science: A simplified rank-biserial
+//!   coefficient of correlation based on the U statistic. *European Journal of Social Psychology* 2.
+//!   doi:10.1002/ejsp.2420020412
+//! - Kerby, D. S. (2014). The simple difference formula: An approach to teaching nonparametric
+//!   correlation. *Comprehensive Psychology* 3. doi:10.2466/11.IT.3.1
+//! - Smirnov, N. (1948). Table for estimating the goodness of fit of empirical distributions.
+//!   *Annals of Mathematical Statistics* 19(2):279–281. doi:10.1214/aoms/1177730256
+//! - Hodges, J. L. (1958). The significance probability of the Smirnov two-sample test.
+//!   *Arkiv för Matematik* 3(5):469–486. doi:10.1007/BF02589501
+//! - Bland, J. M., & Altman, D. G. (1986). Statistical methods for assessing agreement between two
+//!   methods of clinical measurement. *Lancet* 327(8476):307–310. doi:10.1016/S0140-6736(86)90837-8
+//! - Bland, J. M., & Altman, D. G. (1999). Measuring agreement in method comparison studies.
+//!   *Statistical Methods in Medical Research* 8(2):135–160. doi:10.1177/096228029900800204
 
 use lumencraft_doc::{
     AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
@@ -39,6 +101,10 @@ pub struct VarianceFTestResult {
 }
 
 /// Two-sided *F*-test for equality of variances (`s_max^2 / s_min^2`).
+///
+/// Variance-ratio test with the larger sample variance in the numerator and the two-sided *p*-value
+/// taken as `min(1, 2 * P(F >= f))` (Zar 2010, ch. 8). Sensitive to non-normality; see
+/// [`levene_variance_test`] for robust alternatives.
 pub fn f_test_variances(a: &[f64], b: &[f64]) -> Result<VarianceFTestResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -75,6 +141,9 @@ pub struct LeveneTestResult {
 }
 
 /// Levene (`use_median = false`) or Brown–Forsythe (`use_median = true`) homogeneity-of-variance test.
+///
+/// One-way ANOVA *F* on absolute deviations `|x_ij - c_i|`, where `c_i` is the group mean
+/// (Levene 1960) or the group median (Brown & Forsythe 1974).
 pub fn levene_variance_test(groups: &[&[f64]], use_median: bool) -> Result<LeveneTestResult, StatsError> {
     if groups.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "Levene test", required: 2, actual: groups.len() });
@@ -173,6 +242,7 @@ fn t_tail_p(t_stat: f64, df: f64, two_tailed: bool) -> Result<f64, StatsError> {
     }
 }
 
+/// Variance-ratio *F* test (Zar 2010, ch. 8) from summary SDs; same convention as [`f_test_variances`].
 fn f_test_from_summary(sd_a: f64, n_a: f64, sd_b: f64, n_b: f64) -> Result<VarianceFTestResult, StatsError> {
     let va = sd_a * sd_a;
     let vb = sd_b * sd_b;
@@ -190,6 +260,19 @@ fn f_test_from_summary(sd_a: f64, n_a: f64, sd_b: f64, n_b: f64) -> Result<Varia
     Ok(VarianceFTestResult { f_statistic: f_stat, df_num: df_n, df_den: df_d, p_value })
 }
 
+/// Standardized two-group effect sizes.
+///
+/// - Cohen's `d = diff / s_pooled` (Cohen 1988).
+/// - Hedges' `g = J(df) * d` with `df = n_a + n_b - 2` and the exact gamma-function bias correction
+///   `J` of Hedges (1981) (large-`df` approximation `1 - 3 / (4 df - 1)`, also Hedges 1981).
+/// - Confidence interval for `d` by inverting the noncentral *t* distribution of
+///   `d * sqrt(n_a n_b / (n_a + n_b))` (Steiger & Fouladi 1997; Cumming & Finch 2001), using the
+///   caller-supplied `df` (the pooled `n_a + n_b - 2` for Student *t*; note that the Welch callers pass
+///   the Welch–Satterthwaite `df`, which is not the `df` of that pivot). The `g` interval multiplies
+///   the `d` limits by `J`, a reporting convention rather than part of the cited inversion.
+/// - Glass's `Delta = diff / s_a` (falling back to `s_b` when `s_a = 0`) (Glass 1976), with a
+///   noncentral-*t* interval on `n - 1` df of the standardizing group (Hedges 1981).
+/// - `r^2 = t^2 / (t^2 + df)` (Rosenthal 1991).
 fn compute_unpaired_effect_sizes_f(
     diff: f64,
     sds: (f64, f64, f64),
@@ -245,6 +328,8 @@ fn compute_unpaired_effect_sizes(
     compute_unpaired_effect_sizes_f(diff, sds, (n_pair.0 as f64, n_pair.1 as f64), t_df_conf)
 }
 
+/// Student pooled-variance *t* (Student 1908; Zar 2010, ch. 8) or Welch *t* with Welch–Satterthwaite
+/// `df` (Welch 1947; Satterthwaite 1946) from `(mean, sd, n)` summaries.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn build_unpaired_t_from_moments(
     welch: bool,
@@ -333,6 +418,9 @@ fn build_unpaired_t_from_moments(
 }
 
 /// Unpaired Student *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
+///
+/// Pooled-variance *t* (Student 1908; Zar 2010, ch. 8). Levene/Brown–Forsythe cannot be computed from
+/// summaries, so `levene_median` is a placeholder (`p = 1`), not a test result.
 pub fn unpaired_t_test_from_summary(
     group_a: (f64, f64, f64),
     group_b: (f64, f64, f64),
@@ -345,6 +433,9 @@ pub fn unpaired_t_test_from_summary(
 }
 
 /// Unpaired Welch *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
+///
+/// Welch (1947) statistic with Welch–Satterthwaite `df` (Satterthwaite 1946). `levene_median` is a
+/// placeholder (`p = 1`), not a test result.
 pub fn welch_t_test_from_summary(
     group_a: (f64, f64, f64),
     group_b: (f64, f64, f64),
@@ -357,6 +448,10 @@ pub fn welch_t_test_from_summary(
 }
 
 /// One-sample Student *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
+///
+/// One-sample *t* on `n - 1` df (Student 1908; Zar 2010, ch. 7). Cohen's `d = (mean - mu0) / sd`
+/// (Cohen 1988), Hedges' `g = J(n - 1) * d` (Hedges 1981), and a noncentral-*t* interval for the
+/// standardized effect (Steiger & Fouladi 1997; Cumming & Finch 2001) whose limits are scaled by `J`.
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 pub fn one_sample_t_test_from_summary(
     mean: f64,
@@ -410,6 +505,11 @@ pub fn one_sample_t_test_from_summary(
 }
 
 /// Unpaired two-sample Student *t*-test (`a - b` or `b - a`; here `mean_a - mean_b`).
+///
+/// Pooled-variance *t* on `n_a + n_b - 2` df (Student 1908; Zar 2010, ch. 8), reported together with
+/// the variance-ratio *F* test, the Brown & Forsythe (1974) test, Cohen's `d` (Cohen 1988), Hedges'
+/// `g` (Hedges 1981), Glass's `Delta` (Glass 1976), noncentral-*t* intervals for them (Steiger &
+/// Fouladi 1997; Cumming & Finch 2001), and `r^2 = t^2 / (t^2 + df)` (Rosenthal 1991).
 pub fn unpaired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<UnpairedTResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -463,6 +563,11 @@ pub fn unpaired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confi
 }
 
 /// Unpaired Welch *t*-test (unequal variances, Welch–Satterthwaite fractional df).
+///
+/// `t = diff / sqrt(s_a^2/n_a + s_b^2/n_b)` (Welch 1947) with
+/// `df = (s_a^2/n_a + s_b^2/n_b)^2 / [(s_a^2/n_a)^2/(n_a-1) + (s_b^2/n_b)^2/(n_b-1)]` (Satterthwaite 1946).
+/// Effect sizes still standardize by the pooled SD (Cohen 1988; Hedges 1981), but their
+/// noncentral-*t* intervals and `r^2` are evaluated at the Welch `df`.
 pub fn welch_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<UnpairedTResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -523,6 +628,9 @@ pub fn welch_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confiden
 }
 
 /// Unpaired lognormal *t*-test (Student *t*-test performed on `ln(x)` for strictly positive observations).
+///
+/// The back-transformed difference and CI are the ratio of geometric means and its interval
+/// (Bland & Altman 1996).
 pub fn lognormal_unpaired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<UnpairedTResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -561,6 +669,11 @@ pub struct PairedTResult {
 }
 
 /// Paired *t*-test on matched pairs `(a_i, b_i)` analyzing `a_i - b_i`.
+///
+/// One-sample *t* on the differences with `n - 1` df (Student 1908; Zar 2010, ch. 9). Effect size
+/// `d_z = mean(d) / sd(d)` (Cohen 1988), `g_z = J(n - 1) * d_z` (Hedges 1981), with a noncentral-*t*
+/// interval (Steiger & Fouladi 1997) whose limits are scaled by `J`. The pairing check reports
+/// Pearson `r` with a **one-sided** *p*-value for `r > 0` from `t = r sqrt((n-2)/(1-r^2))` on `n - 2` df.
 pub fn paired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<PairedTResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -628,6 +741,9 @@ pub fn paired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confide
 }
 
 /// Ratio paired *t*-test on strictly positive pairs `(a_i, b_i)` analyzing `ln(a_i / b_i)`.
+///
+/// Paired *t* on log-transformed values; the back-transformed mean difference and CI are the
+/// geometric mean ratio and its interval (Bland & Altman 1996).
 pub fn ratio_paired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<PairedTResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -670,6 +786,9 @@ pub struct MannWhitneyResult {
 }
 
 /// Exact DP distribution of Mann–Whitney `U` for `n1 + n2 <= 40` without ties.
+///
+/// Counts arrangements by the Mann & Whitney (1947) recurrence on `U`; the two-sided *p*-value doubles
+/// the smaller tail, the one-sided *p*-value is `P(U >= u_obs)` (alternative: `a` stochastically larger).
 fn mann_whitney_exact_p(n1: usize, n2: usize, u_obs: usize, two_tailed: bool) -> f64 {
     let max_u = n1 * n2;
     // dp[i][u] = number of subsets of size i from i+j elements with U = u, iteratively over N = n1+n2.
@@ -704,6 +823,12 @@ fn mann_whitney_exact_p(n1: usize, n2: usize, u_obs: usize, two_tailed: bool) ->
 /// Mann–Whitney *U* test comparing `a` and `b`, with exact DP *p*-values for `n_a + n_b <= 40`
 /// without ties, Hodges–Lehmann median difference `a - b` + Moses CI, Cliff's `delta`, and
 /// rank-biserial `r`.
+///
+/// Wilcoxon (1945) rank-sum / Mann & Whitney (1947) `U_a = R_a - n_a (n_a + 1) / 2`. With ties or
+/// `n_a + n_b > 40` the *p*-value uses the normal approximation with the tie-corrected variance
+/// `(n_a n_b / 12) [N + 1 - sum(t^3 - t) / (N (N - 1))]` and a 0.5 continuity correction
+/// (Hollander, Wolfe & Chicken 2014, ch. 4). Cliff's `delta = (U_a - U_b) / (n_a n_b)` (Cliff 1993),
+/// equal to the rank-biserial correlation of Wendt (1972) / Kerby (2014).
 pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<MannWhitneyResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -765,6 +890,13 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
     })
 }
 
+/// Hodges & Lehmann (1963) two-sample shift estimator (median of all `a_i - b_j`) with the Moses
+/// distribution-free interval `[D_(k), D_(mn + 1 - k)]` (Hollander, Wolfe & Chicken 2014, ch. 4).
+///
+/// Deviations from the textbook procedure: `k` always comes from the large-sample approximation
+/// `floor(mn/2 - z sqrt(mn (m + n + 1) / 12))` (no exact small-sample critical values, no tie
+/// correction); and when `m * n > 40_000` the returned point estimate is the **difference of sample
+/// medians**, not the Hodges–Lehmann estimator, with no interval.
 fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) -> Result<(f64, Option<(f64, f64)>), StatsError> {
     let na = a.len();
     let nb = b.len();
@@ -819,6 +951,16 @@ pub struct WilcoxonMatchedResult {
 
 /// Wilcoxon matched-pairs signed-rank test (`use_pratt_zeros = false` uses classic zero exclusion;
 /// `true` uses Pratt's zero-inclusion tie adjustment).
+///
+/// Signed-rank statistic `W+` (Wilcoxon 1945). Classic mode drops zero differences and uses the exact
+/// null distribution for `n <= 25` without ties, otherwise the normal approximation with tie
+/// correction and 0.5 continuity correction (Hollander, Wolfe & Chicken 2014, ch. 3). Pratt mode
+/// (Pratt 1959) ranks zeros with the nonzero `|d|`, discards their ranks, and always uses the normal
+/// approximation with mean `[n(n+1) - z(z+1)] / 4` and variance
+/// `[n(n+1)(2n+1) - z(z+1)(2z+1) - sum(t^3 - t)/2] / 24`; here the tie sum also includes the
+/// group of tied zeros. The pseudomedian is the Hodges & Lehmann (1963) Walsh-average estimator
+/// computed on **all** differences (zeros included, in both modes); the matched-pairs rank-biserial
+/// `r = (W+ - W-) / (W+ + W-)` follows Kerby (2014).
 pub fn wilcoxon_matched_pairs(
     a: &[f64],
     b: &[f64],
@@ -919,6 +1061,12 @@ pub struct PairedSignTestResult {
 
 /// Exact paired sign test on matched pairs `(a_i, b_i)` evaluating `d_i = a_i - b_i` after
 /// dropping exact zero ties (`d_i == 0`), with exact order-statistic binomial CI for median `d`.
+///
+/// Exact `Binomial(n_nonzero, 1/2)` sign test (Dixon & Mood 1946; Conover 1999) and the
+/// distribution-free order-statistic interval for the median (Conover 1999). The two-sided *p*-value
+/// doubles the smaller tail; the one-sided *p*-value is the smaller tail, i.e. it is taken in the
+/// observed direction rather than a pre-specified one. The median CI is computed over all
+/// differences, zeros included.
 pub fn paired_sign_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<PairedSignTestResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -971,8 +1119,12 @@ pub struct TwoSampleKsResult {
     pub exact_p_used: bool,
 }
 
-/// Two-sample Kolmogorov–Smirnov test (exact Smirnov lattice path DP for `n_a * n_b <= 625` without
-/// ties, Smirnov asymptotic series otherwise).
+/// Two-sample Kolmogorov–Smirnov test (exact Smirnov lattice path DP when `n_a <= 25` and `n_b <= 25`
+/// with no ties between the samples, Smirnov asymptotic series otherwise).
+///
+/// `D = sup |F_a(x) - F_b(x)|`. The exact two-sided *p*-value `P(D >= d)` counts lattice paths
+/// (Hodges 1958); the asymptotic *p*-value evaluates the limiting Kolmogorov–Smirnov series at
+/// `lambda = D sqrt(n_a n_b / (n_a + n_b))` (Smirnov 1948) without a finite-sample correction.
 pub fn ks_two_sample(a: &[f64], b: &[f64]) -> Result<TwoSampleKsResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -1030,6 +1182,8 @@ fn has_cross_ties(sa: &[f64], sb: &[f64]) -> bool {
     false
 }
 
+/// Exact two-sided Smirnov `P(D >= d_obs)` by counting monotone lattice paths from `(0, 0)` to
+/// `(n_a, n_b)` that stay strictly inside `|i/n_a - j/n_b| < d_obs` (Hodges 1958).
 fn ks_exact_smirnov_p(na: usize, nb: usize, d_obs: f64) -> f64 {
     let naf = na as f64;
     let nbf = nb as f64;
@@ -1078,6 +1232,13 @@ pub struct BlandAltmanResult {
 }
 
 /// Compute Bland–Altman agreement (`method_a - method_b` vs `(method_a + method_b) / 2`).
+///
+/// Bias `mean(d)` with a *t* interval and limits of agreement `mean(d) ± z * sd(d)` (Bland & Altman
+/// 1986), where `z` is the normal quantile for the requested confidence (1.96 at 95%). The limits'
+/// intervals use the approximate standard error `sd(d) * sqrt(1/n + z^2 / (2(n - 1)))` with a
+/// *t*(`n - 1`) multiplier (Bland & Altman 1999; the 1986 paper's `sqrt(3 sd^2 / n)` is the
+/// `z ≈ 2` simplification). The optional percent difference `100 (a - b) / mean(a, b)` is discussed in
+/// Bland & Altman (1999).
 pub fn bland_altman(
     method_a: &[f64],
     method_b: &[f64],
@@ -1156,6 +1317,10 @@ pub struct MultipleRowTestEntry {
 }
 
 /// Run one unpaired or Welch *t*-test per row across two replicate groups and apply multiplicity.
+///
+/// Each row uses [`unpaired_t_test`] (Student 1908) or [`welch_t_test`] (Welch 1947); the adjustment
+/// is delegated to `crate::multiplicity`, which carries its own references. Rows whose test fails
+/// (e.g. fewer than two values or zero variance) are omitted from the output and from the adjustment.
 pub fn multiple_row_t_tests(
     row_labels: &[String],
     group_a_rows: &[Vec<f64>],

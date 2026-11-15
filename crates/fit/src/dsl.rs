@@ -9,6 +9,20 @@
 //!   adaptive Dormand–Prince RK45 (`rtol`, `atol`, step rejection, bounded steps)
 //! - Rich scalar math + statistical/special functions (Bessel J/Y/I/K, Kummer 1F1, Gauss 2F1,
 //!   `erf`, `gamma`, `normcdf`, etc.) executed in a bounded, WASM-safe stack VM.
+//!
+//! # References
+//!
+//! Short `Author (Year)` citations on individual items refer to the list below.
+//!
+//! Reference: Dormand, J. R. & Prince, P. J. (1980). A family of embedded Runge–Kutta formulae. *Journal of Computational and Applied Mathematics* 6(1), 19–26. doi:10.1016/0771-050X(80)90013-3
+//!
+//! Reference: Hairer, E., Nørsett, S. P. & Wanner, G. (1993). *Solving Ordinary Differential Equations I: Nonstiff Problems*, 2nd rev. ed. Springer Series in Computational Mathematics 8. Springer.
+//!
+//! Reference: Brent, R. P. (1973). *Algorithms for Minimization without Derivatives*. Prentice-Hall.
+//!
+//! Reference: Abramowitz, M. & Stegun, I. A. (eds.) (1964). *Handbook of Mathematical Functions with Formulas, Graphs, and Mathematical Tables*. National Bureau of Standards Applied Mathematics Series 55. U.S. Government Printing Office.
+//!
+//! Reference: Press, W. H., Teukolsky, S. A., Vetterling, W. T. & Flannery, B. P. (1992). *Numerical Recipes in C: The Art of Scientific Computing*, 2nd ed. Cambridge University Press.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
@@ -561,6 +575,11 @@ impl CompiledDslModel {
         self.programs.iter().rfind(|(f, _)| f.matches(ds_idx)).map(|(_, p)| p)
     }
 
+    /// Solve the implicit equation `F(x, y; theta) = 0` for `y`: bracket a sign change over a
+    /// fixed list of trial `y` values and refine with Brent (1973); if no bracket is found, fall
+    /// back to a step-clamped Newton iteration with central-difference derivative and accept
+    /// only `|F| < 1e-7`. Only one root is returned (the first bracket found), so equations with
+    /// several real roots in `y` may select a branch that depends on the trial order.
     fn eval_implicit(&self, x: &[f64], params: &[f64], ds_idx: usize) -> Option<f64> {
         let prog = self.select_program(ds_idx)?;
         let f = |y: f64| -> f64 { eval_bytecode(prog, x, y, params, ds_idx).unwrap_or(f64::NAN) };
@@ -716,6 +735,18 @@ impl ParametricModel for CompiledDslModel {
 }
 
 /// Adaptive Dormand–Prince 5(4) Runge–Kutta integrator from `t0` to `t_end` for scalar `y`.
+///
+/// Butcher tableau, 5th-order propagating weights, and embedded error weights `b - b*` of
+/// Dormand & Prince (1980) (local extrapolation: the 5th-order solution is advanced). Error
+/// control follows Hairer, Nørsett & Wanner (1993), Sec. II.4: `err <= atol + rtol * max(|y|,
+/// |y_new|)` with `rtol = 1e-8`, `atol = 1e-10`; accepted steps grow by
+/// `0.9 * ratio^(-1/5)` clamped to `[0.2, 5]`.
+///
+/// Deviations: rejected steps shrink by `0.9 * ratio^(-1/4)` clamped to `[0.1, 0.5]` (the
+/// reference controller uses exponent `-1/5` throughout); the first-same-as-last stage is
+/// recomputed rather than reused (cost only); there is no automatic initial step selection
+/// (the first step is 5% of the span). Non-finite stages shrink the step by 4; integration
+/// fails (`None`) below `1e-13 * max(span, 1)` or after `MAX_ODE_STEPS` steps.
 pub fn integrate_rk45<F>(t0: f64, t_end: f64, y0: f64, mut rhs: F) -> Option<f64>
 where
     F: FnMut(f64, f64) -> Option<f64>,
@@ -2255,7 +2286,9 @@ fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
 }
 
 // ============================================================================
-// Pure-Rust Bessel & Hypergeometric Special Functions (Abramowitz & Stegun)
+// Pure-Rust Bessel & Hypergeometric Special Functions
+// (J/Y: rational approximations as given in Press et al. 1992, Sec. 6.5;
+//  I/K: Abramowitz & Stegun 1964, 9.8.1-9.8.8; hypergeometric: A&S 13.1 and 15.1)
 // ============================================================================
 
 fn parse_bessel_order(v: f64) -> Option<i32> {
@@ -2269,6 +2302,9 @@ fn parse_bessel_order(v: f64) -> Option<i32> {
     Some(rounded as i32)
 }
 
+/// Bessel `J0(x)`: rational approximation for `|x| < 8` and the asymptotic phase/amplitude form
+/// for `|x| >= 8`, with the coefficients given in Press et al. (1992), Sec. 6.5. Accuracy is
+/// single-precision level (roughly `1e-8`), far below `f64` resolution.
 fn bessel_j0(x: f64) -> f64 {
     if !x.is_finite() {
         return f64::NAN;
@@ -2290,6 +2326,7 @@ fn bessel_j0(x: f64) -> f64 {
     }
 }
 
+/// Bessel `J1(x)`; same scheme and accuracy as `bessel_j0` (Press et al. 1992, Sec. 6.5).
 fn bessel_j1(x: f64) -> f64 {
     if !x.is_finite() {
         return f64::NAN;
@@ -2312,6 +2349,9 @@ fn bessel_j1(x: f64) -> f64 {
     }
 }
 
+/// Integer-order `J_n(x)`: upward recurrence from `J0`, `J1` when `|x| > n`, otherwise Miller's
+/// downward recurrence normalised by `J0 + 2 sum J_{2k} = 1` (Press et al. 1992, Sec. 6.5;
+/// recurrence A&S 9.1.27). Inherits the single-precision accuracy of `bessel_j0`/`bessel_j1`.
 fn bessel_jn(n: i32, x: f64) -> f64 {
     if n.unsigned_abs() > MAX_BESSEL_ORDER as u32 || !x.is_finite() {
         return f64::NAN;
@@ -2371,6 +2411,8 @@ fn bessel_jn(n: i32, x: f64) -> f64 {
     if x < 0.0 && n % 2 != 0 { -ans } else { ans }
 }
 
+/// Bessel `Y0(x)` for `x > 0`; rational + `(2/pi) J0(x) ln x` for `x < 8`, asymptotic form above
+/// (Press et al. 1992, Sec. 6.5). Single-precision level accuracy.
 fn bessel_y0(x: f64) -> Option<f64> {
     if !x.is_finite() || x <= 0.0 {
         return None;
@@ -2391,6 +2433,7 @@ fn bessel_y0(x: f64) -> Option<f64> {
     Some(ans)
 }
 
+/// Bessel `Y1(x)` for `x > 0`; same scheme as `bessel_y0` (Press et al. 1992, Sec. 6.5).
 fn bessel_y1(x: f64) -> Option<f64> {
     if !x.is_finite() || x <= 0.0 {
         return None;
@@ -2414,6 +2457,7 @@ fn bessel_y1(x: f64) -> Option<f64> {
     Some(ans)
 }
 
+/// Integer-order `Y_n(x)` by (stable) upward recurrence from `Y0`, `Y1` (A&S 9.1.27).
 fn bessel_yn(n: i32, x: f64) -> Option<f64> {
     if n.unsigned_abs() > MAX_BESSEL_ORDER as u32 || !x.is_finite() || x <= 0.0 {
         return None;
@@ -2439,6 +2483,8 @@ fn bessel_yn(n: i32, x: f64) -> Option<f64> {
     if by.is_finite() { Some(by) } else { None }
 }
 
+/// Modified Bessel `I0(x)`: polynomial approximations A&S 9.8.1 (`|x| < 3.75`) and 9.8.2
+/// (`|x| >= 3.75`), whose tabulated error bounds are of order `1e-7` (A&S 1964).
 fn bessel_i0(x: f64) -> Option<f64> {
     let ax = x.abs();
     if ax > 700.0 {
@@ -2459,6 +2505,7 @@ fn bessel_i0(x: f64) -> Option<f64> {
     if ans.is_finite() { Some(ans) } else { None }
 }
 
+/// Modified Bessel `I1(x)`: A&S 9.8.3 / 9.8.4 polynomial approximations (error order `1e-7`).
 fn bessel_i1(x: f64) -> Option<f64> {
     let ax = x.abs();
     if ax > 700.0 {
@@ -2480,6 +2527,7 @@ fn bessel_i1(x: f64) -> Option<f64> {
     if signed.is_finite() { Some(signed) } else { None }
 }
 
+/// Modified Bessel `K0(x)`, `x > 0`: A&S 9.8.5 (`x <= 2`) / 9.8.6 (`x > 2`) (error order `1e-7`).
 fn bessel_k0(x: f64) -> Option<f64> {
     if x <= 0.0 {
         return None;
@@ -2498,6 +2546,7 @@ fn bessel_k0(x: f64) -> Option<f64> {
     if ans.is_finite() { Some(ans) } else { None }
 }
 
+/// Modified Bessel `K1(x)`, `x > 0`: A&S 9.8.7 (`x <= 2`) / 9.8.8 (`x > 2`) (error order `1e-7`).
 fn bessel_k1(x: f64) -> Option<f64> {
     if x <= 0.0 {
         return None;
@@ -2518,6 +2567,10 @@ fn bessel_k1(x: f64) -> Option<f64> {
 }
 
 /// Confluent hypergeometric function `1F1(a; b; z)` via series for moderate `|z|`.
+///
+/// Kummer's power series (A&S 13.1.2), truncated when a term falls below `1e-14` of the sum or
+/// after 300 terms. No asymptotic expansion is used, so for large negative `z` the alternating
+/// series loses accuracy to cancellation; no error bound is enforced.
 fn hyp1f1(a: f64, b: f64, z: f64) -> Option<f64> {
     if b <= 0.0 && (b - b.round()).abs() < 1e-12 {
         return None;
@@ -2539,6 +2592,9 @@ fn hyp1f1(a: f64, b: f64, z: f64) -> Option<f64> {
 }
 
 /// Gauss hypergeometric function `2F1(a, b; c; z)` for `|z| < 1`.
+///
+/// Gauss series (A&S 15.1.1), truncated at `1e-14` relative or 400 terms; convergence is slow as
+/// `|z| -> 1` and no analytic continuation is applied.
 fn hyp2f1(a: f64, b: f64, c: f64, z: f64) -> Option<f64> {
     if z.abs() >= 1.0 || (c <= 0.0 && (c - c.round()).abs() < 1e-12) {
         return None;
@@ -2560,6 +2616,10 @@ fn hyp2f1(a: f64, b: f64, c: f64, z: f64) -> Option<f64> {
 }
 
 /// Tricomi confluent hypergeometric `U(a, b, z)` via non-integer connection formula (`b` perturbed slightly at integers).
+///
+/// Connection formula A&S 13.1.3 in terms of `1F1`. The `1e-7` shift of integer `b` is a
+/// heuristic without a documented error bound (the formula is singular at integer `b`, where
+/// A&S 13.1.6 limit forms apply), and accuracy degrades for large `z` through `hyp1f1`.
 fn confluent_u(a: f64, b_in: f64, z: f64) -> Option<f64> {
     if z <= 0.0 {
         return None;

@@ -1,13 +1,14 @@
 # Development
 
-> **Last updated:** 2026-11-15 · **Change:** added `cargo xtask coverage` (`R0.16`) and the coverage-report policy.
+> **Last updated:** 2026-11-15 · **Change:** corrected web build status (`R8.4` landed), environment variables, font feature flags, `cargo xtask cursors` behaviour, and the panic-guard entry point; added `cargo xtask coverage` (`R0.16`).
 
 ## Prerequisites
 
 - **Rust 1.95+** (`edition = "2024"`, `resolver = "3"`).
 - Optional tools:
   - [`cargo-nextest`](https://nexte.st/) — used automatically by `cargo xtask test` when installed; falls back to `cargo test`.
-  - `wasm32-unknown-unknown` target + [`trunk`](https://trunkrs.dev/) — for `cargo xtask wasm` and browser builds in `apps/lumencraft-web`.
+  - `wasm32-unknown-unknown` target — for `cargo xtask wasm`; plus [`trunk`](https://trunkrs.dev/) for browser builds in `apps/lumencraft-web`.
+  - [`actionlint`](https://github.com/rhysd/actionlint) + [`shellcheck`](https://www.shellcheck.net/) — for `cargo xtask workflows`.
   - [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install --locked cargo-llvm-cov`) + the `llvm-tools-preview` rustup component — for `cargo xtask coverage` ([Coverage reports](#coverage-reports)).
   - `resvg` (or `rsvg-convert`) + `iconutil` (macOS) — only when regenerating `assets/app-icon/` via `packaging/icons.sh`.
 
@@ -28,6 +29,7 @@
 | Print per-crate LOC and test statistics | `cargo xtask stats` |
 | Write a local source-coverage report (lcov + HTML) | `cargo xtask coverage [-p <crate>]` |
 | Build macOS `dist/LumenCraft.app` bundle | `cargo xtask bundle` |
+| List every `xtask` subcommand (secrets, licences, telemetry, generated docs, …) | `cargo xtask --help` (see also [AGENTS.md](../AGENTS.md) §4) |
 
 ## Subsystem implementation guides
 
@@ -44,12 +46,12 @@ Before adding or modifying behaviour in any domain crate, read its governing spe
 
 Font binaries never live inside this repository ([`AGENTS.md`](../AGENTS.md) › Assets).
 
-- Set `LUMENCRAFT_FONTS_DIR` to an absolute directory of SIL OFL font faces when building if you want embedded fonts staged via `crates/text/build.rs` into `lumencraft_text::BUNDLED_FONTS` and copied into `dist/web/fonts/` via `cargo xtask web-fonts`. At runtime, pass `--ttf-font <path>` or set `LUMENCRAFT_FONTS_DIR` when you want external `.ttf` files embedded as TrueType `/FontFile2` font streams in `%PDF-1.7` exports.
-- **Leaving out the bundled fonts:** `lumencraft-text` and `lumencraft-ui-egui` gate embedded font bytes behind the `bundled-fonts` Cargo feature. Embedders that supply their own `egui` font definitions can depend on `lumencraft-ui-egui` with `default-features = false` and call `lumencraft_ui_egui::theme::install_fonts`. `cargo xtask ci` explicitly tests both `--all-features` and `--no-default-features`.
+- Set `LUMENCRAFT_FONTS_DIR` to an absolute directory of SIL OFL font faces when building if you want embedded fonts staged via `crates/text/build.rs` into `lumencraft_text::BUNDLED_FONTS` and copied into `dist/web/fonts/` via `cargo xtask web-fonts`. At runtime, pass `--ttf-font <path>` (to `lumencraft` or to `lumencraft-cli convert` / `export`) when you want an external `.ttf` file embedded as a TrueType `/FontFile2` font stream in `%PDF-1.7` exports; `LUMENCRAFT_FONTS_DIR` itself is read only at build time (`crates/text/build.rs`, `cargo xtask web-fonts`). Set `LUMENCRAFT_FONTS_REQUIRED=1` to make the build fail when `LUMENCRAFT_FONTS_DIR` is unset.
+- **Leaving out the bundled fonts:** `lumencraft-text`, `lumencraft-engine`, and `lumencraft-ui-egui` gate embedded font bytes behind the default-on `bundled-fonts` Cargo feature. Embedders can depend on them with `default-features = false`; `lumencraft_ui_egui::theme::install_fonts()` then reports `0` bundled faces. `cargo xtask ci` tests `lumencraft-text` and `lumencraft-ui-egui` and checks `lumencraft-mcp` with `--no-default-features`.
 
 ## Web build
 
-`apps/lumencraft-web` shares the same pure-Rust `UiApp` + `lumencraft-engine` codebase (`init_web_app()` tests run cleanly on the host offline; full `wasm32-unknown-unknown` Trunk WebGPU/WebGL2 bundling is skipped cleanly when the offline `rustup` sysroot omits `wasm32` `libcore`, and is completed as part of `G6`):
+`apps/lumencraft-web` shares the same pure-Rust `UiApp` + `lumencraft-engine` codebase and presents the compositor's RGBA frame on a WebGL2 `<canvas>` (`R8.4`; `init_web_app()` tests also run on the host). `cargo xtask wasm` type-checks `lumencraft-web` and `lumencraft-engine` for `wasm32-unknown-unknown`; `./packaging/web/package.sh` produces the release zip. Web menus and toolbar are not built yet (`R10.7`):
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -63,15 +65,17 @@ trunk serve --release   # serves on http://127.0.0.1:8767
 | Variable | Effect |
 |---|---|
 | `LUMENCRAFT_CONTROL_PORT` | Equivalent to `--control <port>` (`1..=65535`, binds strictly to `127.0.0.1`) |
-| `LUMENCRAFT_NO_PREFS` | Disables reading/writing user preferences and disk logs (for isolated CLI/agent test runs) |
-| `LUMENCRAFT_CONFIG_DIR` | Overrides the configuration and recovery directory for `lumencraft` and `lumencraft-cli` |
 | `LUMENCRAFT_FONTS_DIR` | Optional path to external SIL OFL fonts directory at build time |
-| `WGPU_POWER_PREF` / `WGPU_BACKEND` / `WGPU_ADAPTER_NAME` | Graphics adapter selection overrides (`low`, `high`, `metal`, `vulkan`, `dx12`, `gl`) |
-| `RUST_LOG` | Standard `env_logger`-style log filter (`info` default for `lumencraft*`, `warn` for dependencies) |
+| `LUMENCRAFT_FONTS_REQUIRED` | Build-time: fail the `lumencraft-text` build when `LUMENCRAFT_FONTS_DIR` is unset |
+| `LUMENCRAFT_ALLOW_OS_GUI_DIALOG` | Allow print preview to launch the host OS dialog (otherwise the PDF spool is only staged) |
+| `LUMENCRAFT_REQUIRE_CORPUS` / `LUMENCRAFT_CORPUS_DIR` | Tests: require the cached NIST StRD corpus / override its location (see below) |
+| `WGPU_POWER_PREF` / `WGPU_BACKEND` | Graphics adapter overrides honoured by the third-party `wgpu` renderer used by `eframe` (not read by LumenCraft code) |
+
+To isolate configuration for test or agent runs, pass `--portable-dir <dir>` (or place a `portable.txt` next to the executable) so preferences, shortcuts, and the recovery journal live under `<dir>/lumencraft-data`. LumenCraft has no logging framework and reads no `RUST_LOG` filter.
 
 ## Cursors
 
-`crates/tools/src/cursors.toml` documents every `Cursor` enum variant in plain behavioural language with its hotspot coordinates (`[x, y]`). `cargo xtask cursors` (run by `cargo xtask ci`) verifies bidirectional 1-to-1 correspondence between `crates/tools/src/lib.rs` and `cursors.toml`.
+`crates/tools/src/cursors.toml` documents every `Cursor` enum variant in plain behavioural language with its hotspot coordinates (`[x, y]`). `cargo xtask cursors` (run by `cargo xtask ci`) warns about any `Cursor` variant in `crates/tools/src/lib.rs` with no `[[cursor]]` entry in `cursors.toml`; it is warning-only and never fails CI.
 
 ## Vendor names & clean-room gates
 
@@ -127,12 +131,12 @@ A crash destroys a researcher's unsaved experimental data tables, exclusions, an
 
 - **Indexing and slicing:** `v[i]` and `&s[a..b]` panic out of range or off UTF-8 char boundaries. Whenever row, column, subcolumn, or byte indices originate from files, selections, or parameters, use `.get(i)` / `.get_mut(i)`.
 - **Floating-point & integer edge cases:** Check `f64::is_finite()` before sorting (`total_cmp` or filtered finite slices — never `partial_cmp().unwrap()`) or casting with `as`; guard integer division/modulo against zero and unsigned subtraction with `saturating_sub` or `checked_sub`.
-- **Singular & non-convergent math:** Rank-deficient design matrices, zero degrees of freedom, negative log arguments, and non-convergent Levenberg–Marquardt runs are normal scientific outcomes (`FitStatus::Ambiguous`, `FitStatus::NotConverged`, `CiBound::Open`), never panics.
+- **Singular & non-convergent math:** Rank-deficient design matrices, zero degrees of freedom, negative log arguments, and non-convergent Levenberg–Marquardt runs are normal scientific outcomes (`FitStatus::Ambiguous`, `FitStatus::HitMaxIters`, `CiBound::Open`), never panics.
 - **Bounded allocations & iterations:** Enforce explicit caps on archive decompression bytes, XML/AST nesting depth (`<= 64`), table row/column counts, and optimizer/ODE step counts.
 
 ### The safety net
 
-`lumencraft_engine::guard::catch_panic` wraps top-level native entry points (`Session::execute`, tool input handlers, `--control` requests, and MCP requests) to roll back partial mutations and return `EngineError::Internal` if an unexpected bug ever unwinds. On `wasm32`, panics abort unconditionally, so `Result` discipline remains mandatory everywhere.
+`lumencraft_engine::guard::run_guarded` wraps command handlers inside `Session::execute` (and therefore GUI, CLI, and `--control` commands) and MCP `tools/call` dispatch (`crates/mcp/src/tools.rs`) to roll back partial mutations and return an `EngineError` with `ErrorCode::InternalPanic` if an unexpected bug ever unwinds. On `wasm32`, panics abort unconditionally, so `Result` discipline remains mandatory everywhere.
 
 ### Fuzzing
 

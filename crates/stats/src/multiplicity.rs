@@ -4,6 +4,49 @@
 //! Holm–Bonferroni, Dunnett, Dunnett's T3, Games–Howell, Tamhane's T2, Dunn's rank-sum,
 //! Fisher's LSD, Student–Newman–Keuls, Benjamini–Hochberg, Benjamini–Yekutieli, and
 //! two-stage Benjamini–Krieger–Yekutieli, plus post-hoc linear trend testing.
+//!
+//! Each routine below cites its source in short `Author (Year)` form; full details are listed
+//! here once. Hsu (1996) is the general reference for the familywise procedures.
+//!
+//! References:
+//! - Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and
+//!   powerful approach to multiple testing. *Journal of the Royal Statistical Society, Series B*,
+//!   57(1), 289-300.
+//! - Benjamini, Y., Krieger, A. M., & Yekutieli, D. (2006). Adaptive linear step-up procedures that
+//!   control the false discovery rate. *Biometrika*, 93(3), 491-507.
+//! - Benjamini, Y., & Yekutieli, D. (2001). The control of the false discovery rate in multiple
+//!   testing under dependency. *Annals of Statistics*, 29(4), 1165-1188.
+//! - Dunn, O. J. (1961). Multiple comparisons among means. *Journal of the American Statistical
+//!   Association*, 56(293), 52-64.
+//! - Dunn, O. J. (1964). Multiple comparisons using rank sums. *Technometrics*, 6(3), 241-252.
+//! - Dunnett, C. W. (1955). A multiple comparison procedure for comparing several treatments with a
+//!   control. *Journal of the American Statistical Association*, 50(272), 1096-1121.
+//! - Dunnett, C. W. (1980). Pairwise multiple comparisons in the unequal variance case. *Journal of
+//!   the American Statistical Association*, 75(372), 796-800. doi:10.1080/01621459.1980.10477552.
+//! - Fisher, R. A. (1935). *The Design of Experiments*. Oliver & Boyd.
+//! - Games, P. A., & Howell, J. F. (1976). Pairwise multiple comparison procedures with unequal n's
+//!   and/or variances: a Monte Carlo study. *Journal of Educational Statistics*, 1(2), 113-125.
+//! - Holland, B. S., & Copenhaver, M. D. (1987). An improved sequentially rejective Bonferroni test
+//!   procedure. *Biometrics*, 43(2), 417-423. doi:10.2307/2531823.
+//! - Holm, S. (1979). A simple sequentially rejective multiple test procedure. *Scandinavian Journal
+//!   of Statistics*, 6(2), 65-70.
+//! - Hsu, J. C. (1996). *Multiple Comparisons: Theory and Methods*. Chapman & Hall.
+//! - Keuls, M. (1952). The use of the "studentized range" in connection with an analysis of
+//!   variance. *Euphytica*, 1(2), 112-122. doi:10.1007/BF01908269.
+//! - Kramer, C. Y. (1956). Extension of multiple range tests to group means with unequal numbers of
+//!   replications. *Biometrics*, 12(3), 307-310. doi:10.2307/3001469.
+//! - Maxwell, S. E., & Delaney, H. D. (2004). *Designing Experiments and Analyzing Data: A Model
+//!   Comparison Perspective* (2nd ed.). Lawrence Erlbaum Associates.
+//! - Newman, D. (1939). The distribution of range in samples from a normal population, expressed in
+//!   terms of an independent estimate of standard deviation. *Biometrika*, 31(1/2), 20-30.
+//! - Šidák, Z. (1967). Rectangular confidence regions for the means of multivariate normal
+//!   distributions. *Journal of the American Statistical Association*, 62(318), 626-633.
+//! - Tamhane, A. C. (1979). A comparison of procedures for multiple comparisons of means with
+//!   unequal variances. *Journal of the American Statistical Association*, 74(366), 471-480.
+//!   doi:10.1080/01621459.1979.10482541.
+//! - Tukey, J. W. (1953). *The Problem of Multiple Comparisons*. Unpublished manuscript, Princeton
+//!   University (reprinted in *The Collected Works of John W. Tukey*, Vol. VIII, 1994).
+//! - Zar, J. H. (2010). *Biostatistical Analysis* (5th ed.). Pearson Prentice Hall.
 
 use lumencraft_doc::{MultiplicityMethod, MultiplicitySpec, PairwiseComparisonRecord, ResultCell, ResultTab};
 use lumencraft_math::dist::{
@@ -125,6 +168,12 @@ pub struct LinearTrendResult {
 }
 
 /// Compute post-hoc linear trend test across ordered groups using pooled `mse` and `df_error`.
+///
+/// Single-degree-of-freedom linear contrast with equally spaced, centred coefficients
+/// `c_i = i - (k - 1) / 2` (unweighted means approach): `L = sum(c_i * mean_i)`,
+/// `SS_trend = L^2 / sum(c_i^2 / n_i)`, `F = SS_trend / MSE` on `(1, df_error)` df, as in the trend
+/// analysis of Maxwell & Delaney (2004). `slope_estimate = L / sum(c_i^2)` is the least-squares slope
+/// of the group means on group index. When `mse == 0` the routine reports `F = 0`, `p = 1`.
 pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f64) -> Result<LinearTrendResult, StatsError> {
     let k = groups.len();
     if k < 2 {
@@ -159,14 +208,15 @@ pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f6
 // Standalone P-Value & FDR Adjustment Functions
 // ============================================================================
 
-/// Adjust a slice of raw *p*-values using Bonferroni (`min(1, m * p)`).
+/// Adjust a slice of raw *p*-values using Bonferroni (`min(1, m * p)`), the Bonferroni-inequality
+/// procedure of Dunn (1961).
 #[must_use]
 pub fn adjust_bonferroni(raw_p: &[f64]) -> Vec<f64> {
     let m = raw_p.len() as f64;
     raw_p.iter().map(|&p| (p.clamp(0.0, 1.0) * m).min(1.0)).collect()
 }
 
-/// Adjust a slice of raw *p*-values using Šídák (`1 - (1 - p)^m`, cancellation-free).
+/// Adjust a slice of raw *p*-values using Šídák (`1 - (1 - p)^m`, cancellation-free); Šidák (1967).
 #[must_use]
 pub fn adjust_sidak(raw_p: &[f64]) -> Vec<f64> {
     let m = raw_p.len() as f64;
@@ -185,13 +235,19 @@ fn sidak_single(p: f64, m: f64) -> f64 {
     (-(m * (-pc).ln_1p()).exp_m1()).clamp(pc, 1.0)
 }
 
-/// Step-down Holm–Bonferroni adjusted *p*-values (monotone and `>= raw_p`).
+/// Step-down Holm–Bonferroni adjusted *p*-values (monotone and `>= raw_p`); Holm (1979).
+///
+/// Sorted ascending, `p_(i)` is multiplied by `m - i + 1` and a running maximum enforces
+/// step-down monotonicity.
 #[must_use]
 pub fn adjust_holm_bonferroni(raw_p: &[f64]) -> Vec<f64> {
     step_down_adjust(raw_p, false)
 }
 
 /// Step-down Holm–Šídák adjusted *p*-values (monotone and `>= raw_p`).
+///
+/// Holm's (1979) step-down scheme with the Šidák (1967) multiplier `1 - (1 - p_(i))^(m - i + 1)`
+/// in place of the Bonferroni one (Holland & Copenhaver 1987), with a running maximum.
 #[must_use]
 pub fn adjust_holm_sidak(raw_p: &[f64]) -> Vec<f64> {
     step_down_adjust(raw_p, true)
@@ -216,13 +272,16 @@ fn step_down_adjust(raw_p: &[f64], sidak: bool) -> Vec<f64> {
     out
 }
 
-/// Benjamini–Hochberg (BH) step-up FDR *q*-values (monotone and `>= raw_p`).
+/// Benjamini–Hochberg (BH) step-up FDR *q*-values (monotone and `>= raw_p`); Benjamini & Hochberg (1995).
+///
+/// `q_(i) = min_{j >= i} min(1, m * p_(j) / j)` (running minimum from the largest *p*-value down).
 #[must_use]
 pub fn adjust_benjamini_hochberg(raw_p: &[f64]) -> Vec<f64> {
     step_up_fdr(raw_p, 1.0)
 }
 
-/// Benjamini–Yekutieli (BY) step-up FDR *q*-values under arbitrary dependency (`c(m) = H_m`).
+/// Benjamini–Yekutieli (BY) step-up FDR *q*-values under arbitrary dependency (`c(m) = H_m`);
+/// Benjamini & Yekutieli (2001): the BH step-up run with `m` replaced by `m * sum_{i<=m} 1/i`.
 #[must_use]
 pub fn adjust_benjamini_yekutieli(raw_p: &[f64]) -> Vec<f64> {
     let m = raw_p.len();
@@ -251,6 +310,12 @@ fn step_up_fdr(raw_p: &[f64], multiplier: f64) -> Vec<f64> {
 
 /// Two-stage linear step-up Benjamini–Krieger–Yekutieli (2006) FDR *q*-values evaluated at target `fdr_q`.
 /// Discoveries satisfy `q_i <= fdr_q` iff rejected by the two-stage BKY procedure at `fdr_q`.
+///
+/// Follows the two-stage linear step-up procedure of Benjamini, Krieger & Yekutieli (2006): stage 1
+/// runs BH at `q' = q / (1 + q)` giving `r1` rejections; if `r1 = 0` nothing is rejected and if
+/// `r1 = m` everything is; otherwise `m0_hat = m - r1` and stage 2 runs the linear step-up with
+/// thresholds `i * q' / m0_hat`. The returned values depend on `fdr_q` (via `q'` and `m0_hat`), so
+/// they are threshold-specific decision values rather than `q`-independent *q*-values.
 #[must_use]
 pub fn adjust_two_stage_bky(raw_p: &[f64], fdr_q: f64) -> Vec<f64> {
     let m = raw_p.len();
@@ -313,6 +378,13 @@ pub fn compare_groups_pairwise(
 }
 
 /// Compute pairwise comparisons with explicit [`MultiplicityProcedure`].
+///
+/// Pooled-variance procedures (`None`, `FisherLsd`, `Bonferroni`, `Sidak`, Holm variants, and the
+/// FDR procedures) start from Student *t* statistics `(mean_a - mean_b) / sqrt(MSE (1/n_a + 1/n_b))`
+/// on `df_error` and then adjust the *p*-values. `FisherLsd` is the unadjusted least significant
+/// difference of Fisher (1935); this routine does not itself gate it on a significant omnibus *F*.
+/// Procedure-specific sources are cited on each comparison engine. Procedures with no pooled-*t*
+/// meaning here (`DunnRankSum`) fall through to unadjusted *t* tests; use [`compare_dunn_ranks`].
 pub fn compare_groups_with_procedure(
     groups: &[GroupComparisonInput],
     mse: f64,
@@ -404,6 +476,9 @@ fn compare_pooled_or_fdr(
     Ok(out)
 }
 
+/// Tukey (1953) honestly-significant-difference comparisons with the Kramer (1956) unequal-`n`
+/// standard error: `q = |mean_a - mean_b| / sqrt((MSE / 2) (1/n_a + 1/n_b))` referred to the
+/// studentized range distribution with `k` means and `df_error` df.
 fn compare_tukey_kramer(
     groups: &[GroupComparisonInput],
     mse: f64,
@@ -447,6 +522,14 @@ fn compare_tukey_kramer(
     Ok(out)
 }
 
+/// Student–Newman–Keuls multiple-range comparisons (Newman 1939; Keuls 1952), with Kramer (1956)
+/// unequal-`n` standard errors.
+///
+/// Each pair of means spanning `p` ordered means is referred to the studentized range with `p`
+/// means and `df_error` df. Adjusted *p*-values are made coherent with the step-down rule (a range is
+/// declared different only if every range containing it is) by taking the maximum with the
+/// enclosing ranges. Newman–Keuls does not control the familywise error rate when `k > 3`
+/// (Hsu 1996).
 fn compare_newman_keuls(
     groups: &[GroupComparisonInput],
     mse: f64,
@@ -523,6 +606,10 @@ fn compare_newman_keuls(
     Ok(out)
 }
 
+/// Dunnett (1955) many-to-one comparisons of each treatment against a control: pooled-variance
+/// *t* statistics referred to the exact multivariate *t* distribution with correlations
+/// `rho_ij = lambda_i lambda_j`, `lambda_i = sqrt(n_i / (n_i + n_0))` (unequal `n` supported).
+/// If `control_column` matches no group, the first group is used as the control.
 fn compare_dunnett(
     groups: &[GroupComparisonInput],
     mse: f64,
@@ -575,6 +662,8 @@ fn compare_dunnett(
     Ok(out)
 }
 
+/// Welch standard error `sqrt(s_a^2/n_a + s_b^2/n_b)` and Welch–Satterthwaite df for one pair,
+/// as used by the Games & Howell (1976), Tamhane (1979) T2 and Dunnett (1980) T3 procedures.
 fn welch_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f64, f64) {
     let va = (ga.sd * ga.sd) / ga.n;
     let vb = (gb.sd * gb.sd) / gb.n;
@@ -587,6 +676,8 @@ fn welch_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f6
     (v_sum.sqrt(), df.max(1.0))
 }
 
+/// Games & Howell (1976) unequal-variance pairwise comparisons: per-pair Welch standard error and
+/// df, with `q = |diff| / (SE / sqrt(2))` referred to the studentized range with `k` means.
 fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
     let mut out = Vec::with_capacity(k * (k - 1) / 2);
@@ -629,6 +720,8 @@ fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_
     Ok(out)
 }
 
+/// Tamhane (1979) T2 unequal-variance pairwise comparisons: per-pair Welch *t* tests with a Šidák
+/// adjustment over the `m = k(k-1)/2` comparisons (Šidák-adjusted Welch critical values for CIs).
 fn compare_tamhane_t2(groups: &[GroupComparisonInput], threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
     let m = (k * (k - 1) / 2) as f64;
@@ -689,6 +782,9 @@ fn studentized_max_modulus_crit(alpha: f64, m: usize, df: f64) -> Result<f64, St
     Ok(max_studentized_range_isf(alpha, m.max(1), 2, df)? * std::f64::consts::FRAC_1_SQRT_2)
 }
 
+/// Dunnett (1980) T3 unequal-variance pairwise comparisons: per-pair Welch *t* statistics referred
+/// to the studentized maximum modulus with `m = k(k-1)/2` and the pair's Welch df. The reported
+/// `raw_p` equals the adjusted *p*-value (no separate unadjusted Welch *p* is computed).
 fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
     let m = k * (k - 1) / 2;
@@ -734,6 +830,10 @@ fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci
 /// Dunn's nonparametric rank-sum pairwise comparison with tie correction and configurable
 /// post-adjustment (Bonferroni, Šídák, Holm, or BH/BY/BKY FDR; defaults to Bonferroni when
 /// `DunnRankSum` or `None` is specified on nonparametric ANOVA).
+///
+/// Dunn (1964): `z = (Rbar_i - Rbar_j) / sqrt([N(N+1)/12 - sum(t^3 - t) / (12(N - 1))] (1/n_i + 1/n_j))`
+/// on mean ranks from the pooled ranking, with the Kruskal–Wallis tie correction as presented in Zar (2010); Dunn's
+/// original proposal uses the Bonferroni adjustment, which is the default here.
 pub fn compare_dunn_ranks(
     group_labels: &[(usize, String)],
     group_n: &[usize],

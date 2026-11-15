@@ -40,7 +40,7 @@ Every non-code asset (icons, SVGs, cursor bitmaps, sample `.csv`/`.lumencraft`/r
 | :--- | :--- |
 | `deny.toml` | Configuration for `cargo deny check licenses`, restricting allowed crate SPDX expressions and flagging unapproved or banned licences (`R0.5`). |
 | `about.toml` | `cargo-about` template configuration (paired with `about.hbs`) used to assemble bundled third-party crate licence disclosures (`R0.5`). |
-| `cargo xtask licenses` | Runs licence verification (`cargo deny check licenses`) and generates `THIRD-PARTY-LICENSES.html` from resolved dependencies (`R0.5`). |
+| `cargo xtask licenses [--html [out]]` | Runs offline `deny.toml` / `Cargo.toml` / `Cargo.lock` licence checks, plus `cargo deny check licenses` when `cargo-deny` is installed (required when `CI=true`); `--html` writes `THIRD-PARTY-LICENSES.html` via `cargo about generate about.hbs` when `cargo-about` is installed, else a built-in pure-Rust renderer (`R0.5`). |
 | `THIRD-PARTY-LICENSES.html` | Generated third-party Rust dependency licence compendium included in release packages and installers ([docs/releasing.md](releasing.md)). |
 | [ATTRIBUTION.md](../ATTRIBUTION.md) | Third-party icon, palette, data, and scientific reference credits shipped alongside releases and checked against [ASSETS.md](../ASSETS.md). |
 | [NOTICE](../NOTICE) | Apache-2.0 / ecosystem attribution notice included in source archives and release artefacts. |

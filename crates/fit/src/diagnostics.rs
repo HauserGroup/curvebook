@@ -1,6 +1,64 @@
 //! Uncertainty quantification, multicollinearity & Hougaard nonlinearity diagnostics,
 //! Venzon–Moolgavkar profile-likelihood confidence intervals, model comparison (`Extra-SS F`,
 //! `AICc`, `BIC`), ROUT outlier detection, and residual assumption checks.
+//!
+//! # References
+//!
+//! Short `Author (Year)` citations on individual items refer to the list below.
+//!
+//! Reference: Bates, D. M. & Watts, D. G. (1988). *Nonlinear Regression Analysis and Its Applications*. Wiley.
+//!
+//! Reference: Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
+//!
+//! Reference: Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
+//!
+//! Reference: Draper, N. R. & Smith, H. (1998). *Applied Regression Analysis*, 3rd ed. Wiley.
+//!
+//! Reference: Hougaard, P. (1985). The appropriateness of the asymptotic distribution in a nonlinear regression model in relation to curvature. *Journal of the Royal Statistical Society, Series B* 47, 103–114.
+//!
+//! Reference: Ratkowsky, D. A. (1990). *Handbook of Nonlinear Regression Models*. Marcel Dekker.
+//!
+//! Reference: Venzon, D. J. & Moolgavkar, S. H. (1988). A method for computing profile-likelihood-based confidence intervals. *Journal of the Royal Statistical Society, Series C (Applied Statistics)* 37(1), 87–94. doi:10.2307/2347496
+//!
+//! Reference: Brent, R. P. (1973). *Algorithms for Minimization without Derivatives*. Prentice-Hall.
+//!
+//! Reference: Wilks, S. S. (1938). The large-sample distribution of the likelihood ratio for testing composite hypotheses. *Annals of Mathematical Statistics* 9(1), 60–62. doi:10.1214/aoms/1177732360
+//!
+//! Reference: McCullagh, P. & Nelder, J. A. (1989). *Generalized Linear Models*, 2nd ed. Chapman & Hall.
+//!
+//! Reference: Akaike, H. (1974). A new look at the statistical model identification. *IEEE Transactions on Automatic Control* 19(6), 716–723. doi:10.1109/TAC.1974.1100705
+//!
+//! Reference: Hurvich, C. M. & Tsai, C.-L. (1989). Regression and time series model selection in small samples. *Biometrika* 76(2), 297–307. doi:10.1093/biomet/76.2.297
+//!
+//! Reference: Schwarz, G. (1978). Estimating the dimension of a model. *Annals of Statistics* 6(2), 461–464. doi:10.1214/aos/1176344136
+//!
+//! Reference: Burnham, K. P. & Anderson, D. R. (2002). *Model Selection and Multimodel Inference: A Practical Information-Theoretic Approach*, 2nd ed. Springer.
+//!
+//! Reference: Wald, A. & Wolfowitz, J. (1940). On a test whether two samples are from the same population. *Annals of Mathematical Statistics* 11(2), 147–162.
+//!
+//! Reference: Swed, F. S. & Eisenhart, C. (1943). Tables for testing randomness of grouping in a sequence of alternatives. *Annals of Mathematical Statistics* 14.
+//!
+//! Reference: Shapiro, S. S. & Wilk, M. B. (1965). An analysis of variance test for normality (complete samples). *Biometrika* 52(3/4), 591–611.
+//!
+//! Reference: Royston, P. (1995). Remark AS R94: A remark on algorithm AS 181: The W-test for normality. *Journal of the Royal Statistical Society, Series C (Applied Statistics)* 44(4), 547–551.
+//!
+//! Reference: D'Agostino, R. B., Belanger, A. & D'Agostino, R. B., Jr. (1990). A suggestion for using powerful and informative tests of normality. *The American Statistician* 44(4), 316–321.
+//!
+//! Reference: Anscombe, F. J. & Glynn, W. J. (1983). Distribution of the kurtosis statistic b2 for normal samples. *Biometrika* 70(1), 227–234.
+//!
+//! Reference: Anderson, T. W. & Darling, D. A. (1954). A test of goodness of fit. *Journal of the American Statistical Association* 49(268), 765–769.
+//!
+//! Reference: D'Agostino, R. B. & Stephens, M. A. (eds.) (1986). *Goodness-of-Fit Techniques*. Marcel Dekker.
+//!
+//! Reference: Lilliefors, H. W. (1967). On the Kolmogorov–Smirnov test for normality with mean and variance unknown. *Journal of the American Statistical Association* 62(318), 399–402.
+//!
+//! Reference: Dallal, G. E. & Wilkinson, L. (1986). An analytic approximation to the distribution of Lilliefors's test statistic for normality. *The American Statistician* 40(4), 294–296. doi:10.2307/2684607
+//!
+//! Reference: Zar, J. H. (2010). *Biostatistical Analysis*, 5th ed. Pearson Prentice Hall.
+//!
+//! Reference: Motulsky, H. J. & Brown, R. E. (2006). Detecting outliers when fitting data with nonlinear regression – a new method based on robust nonlinear regression and the false discovery rate. *BMC Bioinformatics* 7, 123. doi:10.1186/1471-2105-7-123
+//!
+//! Reference: Benjamini, Y. & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. *Journal of the Royal Statistical Society, Series B* 57(1), 289–300.
 
 use std::collections::BTreeMap;
 
@@ -140,6 +198,14 @@ pub struct RoutDetectionResult {
 /// Compute asymptotic covariance, standard errors, symmetric `t`-CIs, correlation matrix, and
 /// parameter dependencies from the weighted Jacobian `j_mat` (`N x p_free`) at convergence.
 ///
+/// Linearised (asymptotic) covariance `Cov = s^2 (J^T J)^{-1}`, `s^2 = SS / df`, with symmetric
+/// Wald intervals `theta_j +/- t_{df, alpha/2} SE_j` (Bates & Watts 1988; Seber & Wild 1989).
+/// `(J^T J)^{-1}` comes from a column-pivoted QR of `J` (no explicit normal equations); when `J`
+/// is rank-deficient an SVD pseudo-inverse is used and the fit is flagged ambiguous.
+/// Dependency is `1 - 1 / ((J^T J)_{jj} [(J^T J)^{-1}]_{jj})`, i.e. the uncentred `R^2` of
+/// column `j` on the others, as described by Motulsky & Christopoulos (2004); a dependency
+/// above `0.9999` marks the fit ambiguous.
+///
 /// # Errors
 /// Returns [`FitError::Math`] if matrix allocation or linear algebra fails.
 pub fn compute_covariance_diagnostics(
@@ -227,6 +293,11 @@ pub fn compute_covariance_diagnostics(
 
 /// Compute Hougaard's skewness measure `g_{1,i}` for each free parameter using second-order
 /// finite differences of the model prediction vector `eval_fn(theta) -> Option<Vec<f64>>`.
+///
+/// Hougaard (1985) skewness in the form given by Ratkowsky (1990):
+/// `g_{1,i} = -s * sum_{jkl} L_ij L_ik L_il (W_jkl + W_kjl + W_ljk) / L_ii^{3/2}`, with
+/// `L = (J^T J)^{-1}` and `W_jkl = sum_m (d f_m / d theta_j)(d^2 f_m / d theta_k d theta_l)`
+/// (weighted). Second derivatives use central differences with step `1e-4 * max(|theta|, 1)`.
 pub fn compute_hougaard_skewness<F>(
     theta: &[f64],
     sqrt_weights: &[f64],
@@ -421,6 +492,16 @@ where
 /// Trace Venzon–Moolgavkar asymmetrical profile-likelihood confidence intervals for every free
 /// parameter, returning [`CiBound::Open`] if the profile sum of squares asymptotes below
 /// `SS_crit = SS_min * (1 + F_{1, df}(alpha) / df)`.
+///
+/// The endpoint criterion is the profile-`t` interval of Bates & Watts (1988):
+/// `|tau(theta_k)| <= t_{df, alpha/2}` with `tau^2 = (S~(theta_k) - SS_min) / s^2`, which is
+/// exactly `S~(theta_k) <= SS_crit` above (`F_{1,df} = t_{df}^2`). These are the same
+/// profile-likelihood endpoints targeted by Venzon & Moolgavkar (1988).
+///
+/// Deviation: endpoints are not found with Venzon & Moolgavkar's modified Newton–Raphson
+/// system. Each side is bracketed by geometric step expansion from the Wald half-width and then
+/// refined with Brent (1973) root-finding on `S~(theta_k) - SS_crit`. Nuisance parameters are
+/// warm-started by the linear covariance regression `theta_j + (C_jk / C_kk) * delta`.
 pub fn compute_profile_likelihood_cis<F>(
     theta_hat: &[f64],
     ss_min: f64,
@@ -498,7 +579,7 @@ where
         if (cand - prev_val).abs() <= 1e-15 * prev_val.abs().max(1.0) && hit_box {
             return CiBound::Open;
         }
-        // Venzon-Moolgavkar tangent warm-start along covariance ratio.
+        // Linear (covariance-regression) warm start for the nuisance parameters.
         let delta = cand - theta_hat[k];
         if cov_kk > 0.0 {
             for (j, slot) in warm_theta.iter_mut().enumerate() {
@@ -560,6 +641,10 @@ where
 /// Compare two nested regression models using the Extra-Sum-of-Squares *F*-test (`model_1` simpler
 /// with `df_1 > df_2`, `model_2` more complex).
 ///
+/// `F = ((SS_1 - SS_2) / (df_1 - df_2)) / (SS_2 / df_2)` on `(df_1 - df_2, df_2)` degrees of
+/// freedom (Seber & Wild 1989; Motulsky & Christopoulos 2004). Exact for nested linear models;
+/// approximate for nonlinear ones.
+///
 /// # Errors
 /// Returns [`FitError::InvalidParameter`] if degrees of freedom or sums of squares are invalid.
 pub fn compare_models_f_test(
@@ -593,6 +678,9 @@ pub fn compare_models_f_test(
 /// Compare two nested regression models using the Gaussian Likelihood Ratio Test
 /// ($D = 2(\ln L_{\text{alt}} - \ln L_{\text{null}}) = N \ln(\text{SS}_{\text{null}} / \text{SS}_{\text{alt}}) \sim \chi^2_{\Delta k}$).
 ///
+/// The `N ln(SS_null / SS_alt)` form uses the Gaussian log-likelihood maximised over `sigma^2`;
+/// the asymptotic chi-square reference distribution is Wilks (1938).
+///
 /// # Errors
 /// Returns [`FitError::InvalidParameter`] if degrees of freedom or sums of squares are invalid.
 pub fn compare_models_lrt(
@@ -621,6 +709,8 @@ pub fn compare_models_lrt(
     Ok(LikelihoodRatioResult { lr_statistic, df_diff, df_null, df_alt, p_value, preferred_complex_model: p_value < alpha })
 }
 
+/// Likelihood ratio test from deviances: `D_null - D_alt ~ chi^2_{df_null - df_alt}`
+/// (McCullagh & Nelder 1989; Wilks 1938).
 pub(crate) fn compare_models_lrt_deviance(
     dev_null: f64,
     df_null: usize,
@@ -642,6 +732,11 @@ pub(crate) fn compare_models_lrt_deviance(
 
 /// Compute $\text{AIC}_c$ and $\text{BIC}$ for least-squares residuals (`K = p_free + 1` including $\sigma^2$).
 ///
+/// Least-squares forms (additive constants dropped): `AIC = N ln(SS / N) + 2K` (Akaike 1974;
+/// Burnham & Anderson 2002), `AICc = AIC + 2K(K + 1) / (N - K - 1)` (Hurvich & Tsai 1989), and
+/// `BIC = N ln(SS / N) + K ln N` (Schwarz 1978). Only valid when `ss` is a (weighted) Gaussian
+/// residual sum of squares.
+///
 /// # Errors
 /// Returns [`FitError::InsufficientData`] if `n_obs <= k_free + 2` (so $N - K - 1 \le 0$).
 pub fn compute_information_criteria(ss: f64, n_obs: usize, p_free: usize) -> Result<InformationCriteria, FitError> {
@@ -659,6 +754,9 @@ pub fn compute_information_criteria(ss: f64, n_obs: usize, p_free: usize) -> Res
 }
 
 /// Compare two models on identical observations via $\text{AIC}_c$, Akaike weights, and evidence ratio.
+///
+/// Akaike weights `w_i = exp(-Delta_i / 2) / sum exp(-Delta_j / 2)` and evidence ratio
+/// `exp(|Delta AICc| / 2)` per Burnham & Anderson (2002).
 ///
 /// # Errors
 /// Propagates [`compute_information_criteria`] errors if sample size is too small.
@@ -686,6 +784,13 @@ pub fn compare_models_aicc(ss_a: f64, p_free_a: usize, ss_b: f64, p_free_b: usiz
 }
 
 /// Wald–Wolfowitz runs test on ordered residuals (`runs` of positive vs negative residuals).
+///
+/// Wald & Wolfowitz (1940). For `n <= 200` the p-value uses the exact null distribution of the
+/// number of runs (as tabulated by Swed & Eisenhart 1943); otherwise the normal approximation
+/// with mean `1 + 2 n1 n2 / n`, variance `2 n1 n2 (2 n1 n2 - n) / (n^2 (n - 1))`, and a 0.5
+/// continuity correction. Zero residuals are dropped. Use in curve fitting follows
+/// Motulsky & Christopoulos (2004); `deviates_significantly` uses the one-sided "too few runs"
+/// p-value at a fixed `0.05`.
 #[must_use]
 pub fn runs_test(residuals: &[f64]) -> RunsTestResult {
     let signs: Vec<bool> = residuals.iter().filter(|&&r| r.is_finite() && r != 0.0).map(|&r| r > 0.0).collect();
@@ -809,6 +914,11 @@ fn exact_runs_two_sided(r_obs: usize, n1: usize, n2: usize) -> f64 {
 
 /// Replicates test for lack of fit (partitions residual sum of squares into pure error at
 /// replicate `X` values and lack-of-fit).
+///
+/// Pure-error / lack-of-fit partition and `F = MS_LOF / MS_PE` per Draper & Smith (1998) and
+/// Motulsky & Christopoulos (2004). Pure error is computed from unweighted replicate `Y`
+/// values (or `(n - 1) SD^2` for pre-summarised points), so `ss_res` should be on the same
+/// unweighted scale for the partition to be exact.
 #[must_use]
 pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) -> Option<LackOfFitResult> {
     if points.is_empty() || df_res == 0 || !ss_res.is_finite() || ss_res < 0.0 {
@@ -878,6 +988,13 @@ pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) 
 }
 
 /// Shapiro–Wilk normality test (Royston 1995 AS R94) on residuals (`3 <= n <= 5000`).
+///
+/// Shapiro & Wilk (1965) `W` with Royston's (1995) polynomial approximations for the
+/// coefficients `a_n`, `a_{n-1}` and the normalising transformations for the p-value
+/// (exact arcsine form at `n = 3`).
+///
+/// Deviation: for `4 <= n <= 5` the coefficients are the normalised Blom scores `m / ||m||`
+/// rather than AS R94's polynomial-corrected `a_n`; `n = 3` coincides with AS R94.
 #[must_use]
 pub fn shapiro_wilk_test(values: &[f64]) -> Option<NormalityTestResult> {
     let n = values.len();
@@ -989,6 +1106,12 @@ fn royston_sw_p_value(w: f64, nf: f64) -> f64 {
 }
 
 /// D'Agostino–Pearson $K^2$ omnibus normality test (`n >= 8`).
+///
+/// `K^2 = Z_1^2 + Z_2^2 ~ chi^2_2`, with the skewness transformation `Z_1` (D'Agostino 1970) and
+/// the kurtosis transformation `Z_2` of Anscombe & Glynn (1983), as assembled by
+/// D'Agostino, Belanger & D'Agostino (1990).
+///
+/// Reference: D'Agostino, R. B. (1970). Transformation to normality of the null distribution of g1. *Biometrika* 57(3), 679–681.
 #[must_use]
 pub fn dagostino_pearson_test(values: &[f64]) -> Option<NormalityTestResult> {
     let n = values.len();
@@ -1038,6 +1161,10 @@ pub fn dagostino_pearson_test(values: &[f64]) -> Option<NormalityTestResult> {
 }
 
 /// Anderson–Darling normality test on residuals (`n >= 8`) with Stephens small-sample adjustment $A^{*2}$.
+///
+/// `A^2` of Anderson & Darling (1954) with mean and SD estimated, the case-3 modification
+/// `A*^2 = A^2 (1 + 0.75/n + 2.25/n^2)`, and the piecewise exponential p-value approximation
+/// tabulated in D'Agostino & Stephens (1986).
 #[must_use]
 pub fn anderson_darling_test(values: &[f64]) -> Option<NormalityTestResult> {
     let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
@@ -1078,6 +1205,15 @@ pub fn anderson_darling_test(values: &[f64]) -> Option<NormalityTestResult> {
 }
 
 /// Lilliefors-adjusted Kolmogorov–Smirnov normality test on residuals (`n >= 5`).
+///
+/// Statistic `D` per Lilliefors (1967). P-values below `0.10` use the analytic approximation of
+/// Dallal & Wilkinson (1986), which those authors only claim for upper-tail probabilities below
+/// `0.10`.
+///
+/// Uncited: the `n > 100` rescaling `D (n / 100)^0.49` and the quartic polynomials in the
+/// modified statistic `D (sqrt(n) - 0.01 + 0.85 / sqrt(n))` used when the Dallal–Wilkinson value
+/// exceeds `0.10` have no published source recorded here; they need a verified reference or
+/// an independent oracle before this branch satisfies rule D1.
 #[must_use]
 pub fn lilliefors_ks_test(values: &[f64]) -> Option<NormalityTestResult> {
     let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
@@ -1144,6 +1280,10 @@ fn average_ranks(vals: &[f64]) -> Vec<f64> {
 }
 
 /// Homoscedasticity check via Spearman rank correlation between `|residual|` and predicted `Y`.
+///
+/// Spearman rank correlation (average ranks for ties) tested with the `t = r sqrt((n - 2) /
+/// (1 - r^2))` approximation on `n - 2` df (Zar 2010). Applying it to `|residual|` versus fitted
+/// `Y` is a heuristic screen for a monotone variance trend, not a named published test.
 #[must_use]
 pub fn homoscedasticity_spearman_test(y_hat: &[f64], residuals: &[f64], alpha: f64) -> Option<HomoscedasticityResult> {
     let mut yh_vals = Vec::with_capacity(y_hat.len().min(residuals.len()));
@@ -1175,6 +1315,9 @@ pub fn homoscedasticity_spearman_test(y_hat: &[f64], residuals: &[f64], alpha: f
 
 /// Compute the 68.27th percentile of absolute residuals multiplied by `N / (N - K)`
 /// (`RSDR` scale per Motulsky & Brown 2006).
+///
+/// `RSDR = P68 * N / (N - K)`, where `P68` is the 68.27th percentile of `|r_i|` by linear
+/// interpolation, matching the definition in Motulsky & Brown (2006).
 #[must_use]
 pub fn compute_rsdr(abs_residuals: &[f64], k_free: usize) -> f64 {
     let n = abs_residuals.len();
@@ -1197,6 +1340,14 @@ pub fn compute_rsdr(abs_residuals: &[f64], k_free: usize) -> f64 {
 /// 1. Compute `RSDR` with `K = k_free` adjusted degrees of freedom from the Cauchy robust fit residuals,
 /// 2. Compute two-sided Student-*t* *p*-values `t_i = |r_i| / RSDR` with `df = N - K`,
 /// 3. Apply Benjamini–Hochberg FDR at caller threshold `Q%` (`q_percent / 100`).
+///
+/// Motulsky & Brown's rule `alpha_i = Q (N - (i - 1)) / N` over residuals ranked by size is the
+/// Benjamini & Hochberg (1995) step-up threshold `Q j / N` on the `j`-th smallest p-value, which
+/// is what this function applies.
+///
+/// Deviation: Motulsky & Brown only test the 30% of points furthest from the curve (`i` from
+/// `int(0.70 N)` to `N`); this implementation applies the step-up rule across all `N` points,
+/// so with a large `Q` it can flag points the paper's procedure would never test.
 ///
 /// # Errors
 /// Returns [`FitError::InsufficientData`] if `points.len() <= k_free`.

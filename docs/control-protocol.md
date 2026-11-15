@@ -1,6 +1,6 @@
 # Live TCP Control Protocol (`--control`)
 
-When launched with `lumencraft --control <port>`, the desktop application binds strictly to loopback (`127.0.0.1:<port>`) and serves a line-delimited JSON (`JSONL`) automation channel (`crates/ui-egui/src/control_io.rs`) backed by the same typed command registries as `lumencraft-cli` and `lumencraft-mcp` ([`commands.md`](commands.md), [`mcp.md`](mcp.md), [`STATUS.md`](STATUS.md)).
+When launched with `lumencraft --control <port>`, the desktop application binds strictly to loopback (`127.0.0.1:<port>`) and serves a line-delimited JSON (`JSONL`) automation channel (`crates/ui-egui/src/control_io.rs`) backed by the same typed command registries as `lumencraft-cli` and `lumencraft-mcp` ([`commands.md`](commands.md), [`mcp.md`](mcp.md), [`STATUS.md`](STATUS.md)). In `--control` mode the application currently runs headless and does not open a window (`apps/lumencraft/src/main.rs`; shared live window tracked in [`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window)).
 
 ## Framing
 
@@ -16,7 +16,7 @@ Each client request is a single UTF-8 JSON object terminated by `\n` (bounded by
 {"id": 7, "op": "render.pdf", "sheet_id": "graph-1", "color_space": "srgb"}
 ```
 
-Supported built-in methods today are `"ping"` (includes `"gui_only"`), `"command.list"` (all registered engine commands in [`commands.md`](commands.md) plus the `32` synced `UI_COMMANDS` in `crates/mcp/src/ui_catalog.rs`), `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"render.svg"`, `"render.pdf"`, `"ui.state"` (alias `"state.snapshot"`, includes `"gui_only"`), `"app.quit"`, the 8 interactive GUI actions (`"ui.inspect"`, `"ui.screenshot"`, `"ui.pointer_gesture"`, `"ui.type_text"`, `"ui.press_key"`, `"ui.invoke_menu"`, `"ui.switch_tab"`, `"ui.answer_dialog"`), or any registered engine / `ui.*` command ID (`"ui.canvas.preflight"`, `"ui.event.dispatch"`, etc.) passed directly as `"method"`/`"op"` (`MAX_CONTROL_LINE_BYTES = 16 MiB` in `crates/ui-egui/src/control_io.rs`).
+Supported built-in methods today are `"ping"` (includes `"gui_only"`), `"command.list"` (all registered engine commands in [`commands.md`](commands.md) plus the synced `UI_COMMANDS` in the generated `crates/mcp/src/ui_catalog.rs`), `"command.run"`, `"command.batch"`, `"engine.execute"`, `"doc.inspect"`, `"render.svg"`, `"render.pdf"`, `"ui.state"` (alias `"state.snapshot"`, includes `"gui_only"`), `"app.quit"`, the 8 interactive GUI actions (`"ui.inspect"`, `"ui.screenshot"`, `"ui.pointer_gesture"`, `"ui.type_text"`, `"ui.press_key"`, `"ui.invoke_menu"`, `"ui.switch_tab"`, `"ui.answer_dialog"`), or any registered engine / `ui.*` command ID (`"ui.canvas.preflight"`, `"ui.event.dispatch"`, etc.) passed directly as `"method"`/`"op"` (`MAX_CONTROL_LINE_BYTES = 16 MiB` in `crates/ui-egui/src/control_io.rs`).
 
 Each response (`ControlResponse`) is a single UTF-8 JSON object terminated by `\n`:
 
@@ -43,6 +43,9 @@ Implemented in `crates/ui-egui/src/{control_io.rs, gui_actions.rs, inspect.rs}` 
 - **Disk-write restriction (`ui.screenshot` & `render.pdf`):** Under `--gui-only`, `ui.screenshot` returns `data_base64` PNG bytes in memory (`path` is `null`); supplying a non-empty `path` to `"ui.screenshot"` or `"render.pdf"` fails with `ErrorCode::GuiOnlyViolation`.
 
 ### 2. The 8 `ui.*` Interactive GUI JSON-Lines Actions
+
+These actions form the **semantic agent harness** used by the `gui_only` suites (`R8.6`–`R8.8`, `R9.17`): widget IDs come from `ui.inspect` nodes synthesized from state, and `ui.answer_dialog` patches fields directly. Passing them does not show that a person can operate the drawn GUI; human-operable chrome is milestone [`R10`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion).
+
 | Method | Purpose & Behavior (`crates/ui-egui/src/gui_actions.rs`) |
 |---|---|
 | `"ui.inspect"` | Returns a scoped [`UiTreeSnapshot`](../crates/ui-egui/src/inspect.rs) (`scope`: `all`/`workspace`, `menus`, `toolbar`, `navigator`, `tabs`, `canvas`, `grid`, `dialog`; `include_bounds`, `sheet_id`), including widget `bounds`, `enabled` / `disabled_reason` predicates, `grid_selection`, `brushed_points`, visible `grid_cells` (`grid.cell.*` and XY/Survival `grid.xcell.*`), and canvas hit targets. |
@@ -57,4 +60,4 @@ Implemented in `crates/ui-egui/src/{control_io.rs, gui_actions.rs, inspect.rs}` 
 ## Security Invariants
 
 - Never binds to `0.0.0.0` or `::`; loopback (`127.0.0.1` / `::1` via `validate_loopback_addr`) only (`cargo xtask telemetry`).
-- Disabled by default unless `--control <port>` (`1..=65535`) is explicitly passed on the command line.
+- Disabled by default unless `--control <port>` (`1..=65535`) is explicitly passed on the command line or `LUMENCRAFT_CONTROL_PORT` is set.

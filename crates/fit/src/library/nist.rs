@@ -1,5 +1,42 @@
 //! All 27 canonical NIST StRD nonlinear least-squares benchmark models with exact analytical
 //! Jacobians and domain-safe evaluations.
+//!
+//! Reference: National Institute of Standards and Technology, Statistical Reference Datasets
+//! (StRD), Nonlinear Regression collection, <https://www.itl.nist.gov/div898/strd/nls/nls_main.shtml>.
+//! Each model function below is transcribed from the certified-model header of the corresponding
+//! NIST `.dat` file (parameters `b1..bk` map to indices `0..k-1`). Original data sources, as listed
+//! by NIST in each dataset file:
+//! - Misra1a, Misra1b, Misra1c, Misra1d: Misra, D., NIST (1978). Dental Research Monomolecular
+//!   Adsorption Study.
+//! - Chwirut1, Chwirut2: Chwirut, D., NIST (197?). Ultrasonic Reference Block Study.
+//! - Lanczos1, Lanczos2, Lanczos3: Lanczos, C. (1956). *Applied Analysis*. Englewood Cliffs, NJ:
+//!   Prentice Hall, pp. 272–280.
+//! - Gauss1, Gauss2, Gauss3: Rust, B., NIST (1996) (generated data).
+//! - DanWood: Daniel, C., & Wood, F. S. (1980). *Fitting Equations to Data*, 2nd ed. New York:
+//!   Wiley, pp. 428–431.
+//! - Kirby2: Kirby, R., NIST (197?). Scanning electron microscope line width standards.
+//! - Hahn1: Hahn, T., NIST (197?). Copper Thermal Expansion Study.
+//! - Nelson: Nelson, W. (1981). Analysis of Performance-Degradation Data. *IEEE Transactions on
+//!   Reliability* R-30(2):149–155. (The certified response is `log[y]`.)
+//! - MGH09: Kowalik, J. S., & Osborne, M. R. (1978). *Methods for Unconstrained Optimization
+//!   Problems*. New York: Elsevier North-Holland.
+//! - MGH10: Meyer, R. R. (1970). Theoretical and computational aspects of nonlinear regression.
+//!   In Rosen, Mangasarian & Ritter (Eds.), *Nonlinear Programming*. New York: Academic Press,
+//!   pp. 465–486.
+//! - MGH17: Osborne, M. R. (1972). Some aspects of nonlinear least squares calculations. In
+//!   Lootsma (Ed.), *Numerical Methods for Nonlinear Optimization*. New York: Academic Press,
+//!   pp. 171–189.
+//! - Roszman1: Roszman, L., NIST (19??). Quantum Defects for Sulfur I Atom.
+//! - ENSO: Kahaner, D., Moler, C., & Nash, S. (1989). *Numerical Methods and Software*.
+//!   Englewood Cliffs, NJ: Prentice Hall, pp. 441–445.
+//! - Thurber: Thurber, R., NIST (197?). Semiconductor electron mobility modeling.
+//! - BoxBOD: Box, G. E. P., Hunter, W. G., & Hunter, J. S. (1978). *Statistics for
+//!   Experimenters*. New York: Wiley, pp. 483–487.
+//! - Rat42, Rat43: Ratkowsky, D. A. (1983). *Nonlinear Regression Modeling*. New York: Marcel
+//!   Dekker (Rat42 pp. 61 and 88; Rat43 pp. 62 and 88).
+//! - Eckerle4: Eckerle, K., NIST (197?). Circular Interference Transmittance Study.
+//! - Bennett5: Bennett, L., Swartzendruber, L., & Brown, H., NIST (1994). Superconductivity
+//!   Magnetization Modeling.
 
 use std::f64::consts::PI;
 
@@ -38,27 +75,49 @@ pub const NIST_EQUATION_IDS: &[&str] = &[
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NistKind {
+    /// Misra1a `y = b1 * (1 - exp(-b2 * x))` (NIST StRD; Misra 1978); shares its evaluation with `BoxBod`.
     Misra1a,
+    /// Chwirut1/2 `y = exp(-b1 * x) / (b2 + b3 * x)` (NIST StRD; Chwirut, NIST).
     Chwirut,
+    /// Lanczos1/2/3 `y = b1 e^(-b2 x) + b3 e^(-b4 x) + b5 e^(-b6 x)` (NIST StRD; Lanczos 1956).
     Lanczos,
+    /// Gauss1/2/3 exponential baseline plus two Gaussian peaks (NIST StRD; Rust 1996).
     Gauss,
+    /// DanWood `y = b1 * x^b2` (NIST StRD; Daniel & Wood 1980).
     DanWood,
+    /// Misra1b `y = b1 * (1 - (1 + b2 x / 2)^(-2))` (NIST StRD; Misra 1978).
     Misra1b,
+    /// Kirby2 quadratic/quadratic rational (NIST StRD; Kirby, NIST).
     Kirby2,
+    /// Hahn1 cubic/cubic rational (NIST StRD; Hahn, NIST).
     Hahn1,
+    /// Nelson `log[y] = b1 - b2 * x1 * exp(-b3 * x2)`; predicts `log[y]` (NIST StRD; Nelson 1981).
     Nelson,
+    /// MGH17 `y = b1 + b2 e^(-x b4) + b3 e^(-x b5)` (NIST StRD; Osborne 1972).
     Mgh17,
+    /// Misra1c `y = b1 * (1 - (1 + 2 b2 x)^(-1/2))` (NIST StRD; Misra 1978).
     Misra1c,
+    /// Misra1d `y = b1 b2 x / (1 + b2 x)` (NIST StRD; Misra 1978).
     Misra1d,
+    /// Roszman1 `y = b1 - b2 x - arctan(b3 / (x - b4)) / pi` (NIST StRD; Roszman, NIST).
     Roszman1,
+    /// ENSO annual plus two free-period harmonics (NIST StRD; Kahaner, Moler & Nash 1989).
     Enso,
+    /// MGH09 `y = b1 (x^2 + x b2) / (x^2 + x b3 + b4)` (NIST StRD; Kowalik & Osborne 1978).
     Mgh09,
+    /// Thurber cubic/cubic rational (NIST StRD; Thurber, NIST); shares its evaluation with `Hahn1`.
     Thurber,
+    /// BoxBOD `y = b1 * (1 - exp(-b2 * x))` (NIST StRD; Box, Hunter & Hunter 1978).
     BoxBod,
+    /// Rat42 logistic `y = b1 / (1 + exp(b2 - b3 x))` (NIST StRD; Ratkowsky 1983).
     Rat42,
+    /// MGH10 `y = b1 * exp(b2 / (x + b3))` (NIST StRD; Meyer 1970).
     Mgh10,
+    /// Eckerle4 `y = (b1 / b2) * exp(-0.5 ((x - b3) / b2)^2)` (NIST StRD; Eckerle, NIST).
     Eckerle4,
+    /// Rat43 Richards-type `y = b1 / (1 + exp(b2 - b3 x))^(1/b4)` (NIST StRD; Ratkowsky 1983).
     Rat43,
+    /// Bennett5 `y = b1 * (b2 + x)^(-1/b3)` (NIST StRD; Bennett, Swartzendruber & Brown 1994).
     Bennett5,
 }
 

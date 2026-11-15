@@ -1,6 +1,55 @@
 //! Trust-region Levenberg–Marquardt nonlinear regression engine, global sharing, constraints,
 //! Nelder–Mead simplex warm-start, weighting, Poisson deviance IRLS, Cauchy robust IRLS,
 //! ROUT outlier elimination, curve bands, and Brent inverse unknown interpolation.
+//!
+//! # Methods and references
+//!
+//! - Damped least squares: Levenberg (1944) and Marquardt (1963); the trust-region form with
+//!   adaptive column scaling, step-bound update, and `ftol`/`xtol`/`gtol` tests follows
+//!   Moré (1978) and the MINPACK-1 implementation (Moré, Garbow & Hillstrom 1980). See
+//!   `run_trust_region_lm` for the documented deviations.
+//! - Simplex rescue: Nelder & Mead (1965) with the outside/inside contraction rules of
+//!   Lagarias et al. (1998).
+//! - Finite-difference Jacobian step sizes (`~eps^(1/3)` central, `~eps^(1/2)` forward):
+//!   Nocedal & Wright (2006), Ch. 8.
+//! - Weighting, asymptotic standard errors, Wald and profile intervals, confidence/prediction
+//!   bands, and model comparison: Bates & Watts (1988), Seber & Wild (1989), and
+//!   Motulsky & Christopoulos (2004).
+//! - Poisson regression by iteratively reweighted least squares: Green (1984);
+//!   McCullagh & Nelder (1989).
+//! - Robust (Cauchy / Lorentzian) fitting and ROUT outlier removal: Motulsky & Brown (2006),
+//!   solved here by IRLS (Holland & Welsch 1977).
+//! - Root finding for interpolation: Brent (1973), Ch. 4.
+//!
+//! Reference: Levenberg, K. (1944). A method for the solution of certain non-linear problems in least squares. *Quarterly of Applied Mathematics* 2(2), 164–168. doi:10.1090/qam/10666
+//!
+//! Reference: Marquardt, D. W. (1963). An algorithm for least-squares estimation of nonlinear parameters. *Journal of the Society for Industrial and Applied Mathematics* 11(2), 431–441. doi:10.1137/0111030
+//!
+//! Reference: Moré, J. J. (1978). The Levenberg–Marquardt algorithm: implementation and theory. In G. A. Watson (ed.), *Numerical Analysis*, Lecture Notes in Mathematics 630, 105–116. Springer. doi:10.1007/BFb0067700
+//!
+//! Reference: Moré, J. J., Garbow, B. S. & Hillstrom, K. E. (1980). *User Guide for MINPACK-1*. Report ANL-80-74, Argonne National Laboratory.
+//!
+//! Reference: Nelder, J. A. & Mead, R. (1965). A simplex method for function minimization. *The Computer Journal* 7(4), 308–313. doi:10.1093/comjnl/7.4.308
+//!
+//! Reference: Lagarias, J. C., Reeds, J. A., Wright, M. H. & Wright, P. E. (1998). Convergence properties of the Nelder–Mead simplex method in low dimensions. *SIAM Journal on Optimization* 9(1), 112–147. doi:10.1137/S1052623496303470
+//!
+//! Reference: Nocedal, J. & Wright, S. J. (2006). *Numerical Optimization*, 2nd ed. Springer.
+//!
+//! Reference: Bates, D. M. & Watts, D. G. (1988). *Nonlinear Regression Analysis and Its Applications*. Wiley.
+//!
+//! Reference: Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
+//!
+//! Reference: Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
+//!
+//! Reference: Green, P. J. (1984). Iteratively reweighted least squares for maximum likelihood estimation, and some robust and resistant alternatives. *Journal of the Royal Statistical Society, Series B* 46(2), 149–192.
+//!
+//! Reference: McCullagh, P. & Nelder, J. A. (1989). *Generalized Linear Models*, 2nd ed. Chapman & Hall.
+//!
+//! Reference: Motulsky, H. J. & Brown, R. E. (2006). Detecting outliers when fitting data with nonlinear regression – a new method based on robust nonlinear regression and the false discovery rate. *BMC Bioinformatics* 7, 123. doi:10.1186/1471-2105-7-123
+//!
+//! Reference: Holland, P. W. & Welsch, R. E. (1977). Robust regression using iteratively reweighted least-squares. *Communications in Statistics – Theory and Methods* 6(9), 813–827. doi:10.1080/03610927708827533
+//!
+//! Reference: Brent, R. P. (1973). *Algorithms for Minimization without Derivatives*. Prentice-Hall.
 
 use lumencraft_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
 use lumencraft_math::ConfidenceLevel;
@@ -411,6 +460,13 @@ fn project_theta(theta: &mut [f64], bounds: &[(Option<f64>, Option<f64>)]) {
     }
 }
 
+/// Observation weight `w_i` for weighted least squares (minimise `sum w_i (y_i - f_i)^2`).
+///
+/// Relative (`1/Y^2`, `1/|Y|`, `1/|Y|^k`), `1/X`, `1/X^2`, and inverse-variance (`1/SD^2`)
+/// weighting follow the schemes described by Motulsky & Christopoulos (2004) and the weighted
+/// least-squares framework of Seber & Wild (1989). Weights are computed from the observed
+/// `Y` (not the fitted curve), and zero / non-finite denominators are rejected as
+/// [`FitError::ImpossibleWeights`] rather than clamped.
 fn compute_point_weight(pt: &DataPoint, scheme: WeightingScheme) -> Result<f64, FitError> {
     if let Some(w_exp) = pt.explicit_weight {
         if !w_exp.is_finite() || w_exp <= 0.0 {
@@ -548,6 +604,10 @@ fn mat_set(m: &mut DenseMatrix, r: usize, c: usize, val: f64) {
 
 /// Compute weighted Jacobian `J_{i, j} = sqrt_w_i * df_i / dtheta_j` (`N x K`) using analytical
 /// `model.grad` when supported, or central/forward finite differences otherwise.
+///
+/// Step sizes `h = 1e-6 * max(|theta_j|, 1)` (central, near `eps^(1/3)`) and
+/// `h = 1.5e-8 * max(|theta_j|, 1)` (one-sided, near `eps^(1/2)`) follow the truncation /
+/// round-off balance in Nocedal & Wright (2006), Ch. 8.
 fn compute_jacobian(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -683,6 +743,18 @@ struct LmRunOutput {
 
 /// Core Moré (1978) trust-region Levenberg–Marquardt solver using QR decomposition on the
 /// augmented Jacobian `[J; sqrt(lambda) * D]` (`lumencraft_math::linalg::qr`).
+///
+/// Follows Moré (1978) / MINPACK-1 `lmder` (Moré, Garbow & Hillstrom 1980) for: column scaling
+/// `D_j = max(D_j, ||J_{:,j}||)`, initial radius `factor * ||D theta||`, the gain ratio
+/// `rho = actual / predicted reduction`, the radius update (shrink by a clamped quadratic
+/// `temp` in `[0.1, 0.5]` when `rho < 0.25`, expand to `2 ||D p||` when `rho > 0.75` or
+/// `lambda == 0`), step acceptance at `rho >= 1e-4`, and the `ftol`/`xtol`/`gtol` tests.
+///
+/// Deviations from Moré (1978): the Levenberg–Marquardt parameter is located by the simplified
+/// safeguarded iteration in [`solve_trust_region_subproblem`] rather than Moré's Newton
+/// iteration; the expansion step uses `max(delta, 2 ||D p||)` (MINPACK sets `2 ||D p||`);
+/// and box constraints are handled by projecting each trial point onto the bounds (not part of
+/// Moré's unconstrained algorithm), with the predicted reduction evaluated on the projected step.
 fn run_trust_region_lm(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -918,6 +990,14 @@ impl LmDampWorkspace {
 
 /// Solve the Moré trust-region subproblem `(J^T J + lambda D^2) p = J^T r` with `||D p|| <= delta`
 /// via QR decomposition of the augmented matrix `[J; sqrt(lambda) D]`.
+///
+/// As in Moré (1978), the Gauss–Newton step (`lambda = 0`) is accepted when
+/// `||D p|| <= 1.1 delta`, `lambda` is bracketed by `[parl, paru]` with
+/// `paru = ||D^{-1} J^T r|| / delta`, and iteration stops when `| ||D p|| - delta | <= 0.1 delta`
+/// or after 10 trials. Deviation: the `lambda` correction is the heuristic
+/// `lambda * (||D p|| - delta) / delta` with bisection toward `parl`, not Moré's Newton
+/// correction derived from the R factor, so convergence to the boundary is slower but each
+/// trial is still a valid damped least-squares step.
 fn solve_trust_region_subproblem(
     j_mat: &DenseMatrix,
     r: &[f64],
@@ -1022,6 +1102,12 @@ fn matvec(a: &DenseMatrix, v: &[f64]) -> Vec<f64> {
 }
 
 /// Nelder–Mead simplex warm-start / local rescue for difficult starts or non-finite initial points.
+///
+/// Nelder & Mead (1965) with standard coefficients (reflection 1, expansion 2, contraction 0.5,
+/// shrink 0.5) and the ordering, greedy-expansion, and outside/inside contraction rules of
+/// Lagarias et al. (1998). Box constraints are enforced by projecting vertices before
+/// evaluation (a pragmatic extension, not part of either reference). Termination is on the
+/// relative spread of objective values or the evaluation budget only.
 fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[ObsRecord], seed: &[f64], max_evals: usize) -> Option<Vec<f64>> {
     let k = layout.k_free();
     if k == 0 {
@@ -1167,6 +1253,8 @@ fn obs_y_ss(obs: &[ObsRecord]) -> f64 {
     acc.total().max(1.0)
 }
 
+/// Symmetric Wald intervals `theta_j +/- t_{df, alpha/2} * SE_j` from the linearised covariance
+/// (Bates & Watts 1988; Seber & Wild 1989), reported as open when the fit is ambiguous.
 fn wald_ci_bounds(cov: &CovarianceDiagnostics, df: usize) -> Vec<(CiBound, CiBound)> {
     cov.standard_errors
         .iter()
@@ -1200,6 +1288,12 @@ fn unscaled_cov_from_diag_or_j(cov: &CovarianceDiagnostics, df: usize, weighted_
     compute_unscaled_cov(j_mat)
 }
 
+/// Internally studentised residuals `e_i / (s * sqrt(1 - h_ii))` with tangent-plane leverage
+/// `h_ii = J_i (J^T J)^{-1} J_i^T` from the weighted Jacobian (Cook & Weisberg 1982, applied to
+/// the linearised model). Leverage is set to zero (plain standardised residuals) when the fit
+/// is ambiguous or `K > 64`.
+///
+/// Reference: Cook, R. D. & Weisberg, S. (1982). *Residuals and Influence in Regression*. Chapman & Hall.
 fn compute_studentized_residuals(j_mat: &DenseMatrix, w_res: &[f64], cov_unscaled: Option<&DenseMatrix>, sigma_w: f64, ambiguous: bool) -> Vec<f64> {
     let n = w_res.len();
     if !sigma_w.is_finite() || sigma_w <= 0.0 {
@@ -1278,6 +1372,13 @@ fn compute_residual_diagnostics(
 }
 
 /// Execute nonlinear regression for one or more datasets using any built-in or DSL [`ParametricModel`].
+///
+/// Least squares is minimised by trust-region Levenberg–Marquardt (Levenberg 1944;
+/// Marquardt 1963; Moré 1978). Inference follows the linearisation theory of Bates & Watts (1988)
+/// and Seber & Wild (1989): `s^2 = SS_w / (N - K)`, `Cov = s^2 (J^T J)^{-1}`, symmetric `t`
+/// intervals, profile-likelihood intervals, Hougaard (1985) skewness, and delta-method curve
+/// bands. Goodness-of-fit, AICc/BIC, runs, replicates, and normality diagnostics are documented
+/// in [`crate::diagnostics`].
 pub fn fit_nonlinear(
     model: &dyn ParametricModel,
     datasets: &[DatasetSeries],
@@ -1456,6 +1557,9 @@ fn fit_plot_function_only(
     })
 }
 
+/// Dispatch on [`FitMethod`]. ROUT follows the three stages of Motulsky & Brown (2006): robust
+/// Cauchy fit, outlier detection on its residuals ([`rout_detect_outliers`]), then an ordinary
+/// (optionally weighted) least-squares refit of the remaining points, seeded from the robust fit.
 fn solve_lm_by_method(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -2114,6 +2218,15 @@ fn assemble_dataset_results(
 
 /// Compare primary fitted model against an alternative nested/non-nested model via Extra-SS *F*,
 /// $\text{AIC}_c$, or Likelihood Ratio Test (`ModelComparisonSpec`).
+///
+/// Extra-sum-of-squares *F* (Seber & Wild 1989; Motulsky & Christopoulos 2004), AICc
+/// (Hurvich & Tsai 1989; Burnham & Anderson 2002), and the Gaussian or deviance likelihood
+/// ratio test (Wilks 1938). Full references are in [`crate::diagnostics`]. The *F* and LRT
+/// paths order the two fits by residual degrees of freedom and assume they are nested.
+///
+/// Note: all three statistics are computed from `weighted_ss`. Under
+/// `FitMethod::PoissonDeviance` that value is the Poisson deviance, which is the correct input
+/// for the deviance LRT but not for the Gaussian-likelihood *F* test or AICc formula.
 pub fn compare_models(
     primary: &NonlinearFitResult,
     alt_model: &dyn ParametricModel,
@@ -2158,6 +2271,11 @@ pub fn compare_models(
     Ok((alt, outcome))
 }
 
+/// Poisson maximum-likelihood regression by iteratively reweighted least squares
+/// (Green 1984; McCullagh & Nelder 1989): weights `w_i = 1 / mu_i` are frozen at the current
+/// fitted means and the weighted least-squares problem is re-solved by Levenberg–Marquardt
+/// until the deviance stabilises. A fixed point satisfies the Poisson score equations
+/// `sum (y_i - mu_i) / mu_i * d mu_i / d theta = 0`. The reported `weighted_ss` is the deviance.
 fn fit_poisson_irls(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -2194,6 +2312,8 @@ fn fit_poisson_irls(
     Ok(last_out)
 }
 
+/// Poisson deviance `D = 2 sum [ y ln(y / mu) - (y - mu) ]` (McCullagh & Nelder 1989), evaluated
+/// stably via `deviance_bd0`.
 fn poisson_deviance(obs: &[ObsRecord], y_hat: &[f64]) -> f64 {
     let mut acc = NeumaierSum::new();
     for (rec, &mu) in obs.iter().zip(y_hat.iter()) {
@@ -2202,6 +2322,15 @@ fn poisson_deviance(obs: &[ObsRecord], y_hat: &[f64]) -> f64 {
     acc.total()
 }
 
+/// Robust Cauchy (Lorentzian) fit minimising `sum ln(1 + (r_i / RSDR)^2)`, the merit function of
+/// Motulsky & Brown (2006), with `RSDR` re-estimated from the current residuals at every
+/// iteration as in that paper.
+///
+/// Deviation: Motulsky & Brown minimise the Lorentzian merit with a modified Marquardt
+/// algorithm; this routine instead uses IRLS with Cauchy weights `w_i = 1 / (1 + z_i^2)`,
+/// `z_i = |r_i| / RSDR` (Holland & Welsch 1977), each weighted subproblem solved by
+/// Levenberg–Marquardt. For a fixed scale both reach the same stationary point. Standard
+/// errors from this fit are not robust-theory SEs and are not used by ROUT.
 fn fit_cauchy_irls(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -2245,6 +2374,10 @@ fn compute_unscaled_cov(j_mat: &DenseMatrix) -> Option<DenseMatrix> {
 }
 
 /// Optimize the remaining `K - 1` nuisance parameters with `theta[fixed_idx] = fixed_val` held constant.
+///
+/// Returns the profile sum of squares `S~(theta_k)` of Bates & Watts (1988). Uses a simplified
+/// trust-region LM (Moré 1978 subproblem solver, but accepts any non-increasing step and
+/// shrinks the radius by 4 otherwise, with no gain-ratio test).
 fn solve_profile_subproblem(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -2373,6 +2506,11 @@ struct CurveOverlayContext<'a> {
     solver: &'a SolverConfig,
 }
 
+/// Sample the fitted curve with pointwise delta-method bands (Bates & Watts 1988;
+/// Seber & Wild 1989): with `g = d f(x) / d theta` and `C = (J^T J)^{-1}`,
+/// confidence band `y +/- t_{df} s sqrt(g^T C g)` and prediction band
+/// `y +/- t_{df} s sqrt(1 + g^T C g)`. These are pointwise bands, not simultaneous
+/// (Scheffé-type) bands over the whole curve.
 fn build_curve_overlay(ctx: &CurveOverlayContext<'_>) -> FittedCurveOverlay {
     let mut data_x_min = f64::INFINITY;
     let mut data_x_max = f64::NEG_INFINITY;
@@ -2541,6 +2679,12 @@ fn quadratic_form(m: &DenseMatrix, v: &[f64]) -> f64 {
 
 /// Interpolate unknown `X` from target `Y` along the fitted curve using scan + `brent_root`,
 /// returning inverse confidence bounds (`CiBound::Open` when plateauing beyond band limits).
+///
+/// Roots are bracketed by a 200-point scan and refined with Brent (1973). The interval is where
+/// the pointwise mean-response confidence band (see `build_curve_overlay`) crosses `y_target`,
+/// i.e. it treats `y_target` as an exactly known mean response. It does not include the
+/// measurement error of a new observation; a calibration interval for a measured unknown would
+/// invert the prediction band instead (Seber & Wild 1989).
 #[allow(clippy::too_many_arguments)]
 fn interpolate_x_from_y(
     model: &dyn ParametricModel,
@@ -2628,6 +2772,8 @@ fn interpolate_x_from_y(
     InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: y_target, output_estimate: x_hat, ci_lower, ci_upper, note: None }
 }
 
+/// Predict `Y` at `x_val` with the pointwise delta-method confidence interval for the mean
+/// response (Bates & Watts 1988).
 #[allow(clippy::too_many_arguments)]
 fn interpolate_y_from_x(
     model: &dyn ParametricModel,

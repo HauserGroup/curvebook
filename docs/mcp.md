@@ -1,6 +1,6 @@
 # Model Context Protocol Server (`lumencraft-mcp`)
 
-`lumencraft-cli mcp` runs a stdio [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server (`crates/mcp`) over an in-memory `lumencraft-engine` session, or attached to a live desktop window via `lumencraft-cli mcp --control-port <port>` ([`control-protocol.md`](control-protocol.md)).
+`lumencraft-cli mcp` runs a stdio [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server (`crates/mcp`) over an in-memory `lumencraft-engine` session, or attached to a running `lumencraft --control <port>` instance via `lumencraft-cli mcp --control-port <port>` ([`control-protocol.md`](control-protocol.md)). That instance currently runs headless, without a visible window ([`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window)).
 
 > Related specifications: [`commands.md`](commands.md), [`gui-workflows.md`](gui-workflows.md), [`control-protocol.md`](control-protocol.md) · Live test & command counts: [`STATUS.md`](STATUS.md)
 
@@ -17,6 +17,20 @@
 }
 ```
 
+## What MCP Can and Cannot Do Today
+
+MCP is currently the most complete way to drive LumenCraft; the rendered GUI is not yet operable by a person ([`R10`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion)).
+
+| Mode | Reach |
+|---|---|
+| `lumencraft-cli mcp` (in-process, headless) | Every engine command in `cmd::registry()` through `command_run`, `command_batch`, and per-command toolset tools, plus open/save/export and previews. All document work is reachable. `ui.*` UI commands are listed by `command_list` but not executable in this mode. |
+| `--control-port <port>` | Same, forwarded to a running `lumencraft --control`; adds the UI-only `ui.*` commands. |
+| `--gui-only` | Only the 8 `gui` tools, driving `UiApp` through the semantic agent harness used by the `WF-01`–`WF-49` tests. |
+
+Limits: "Analyze a stack of *P* values" ([`R10.10`](ROADMAP.md#r1010-standalone-analyze-a-stack-of-p-values-analysis)) and Compact Letter Display ([`R10.11`](ROADMAP.md#r1011-compact-letter-display-cld)) are not implemented by any route; `WF-01`–`WF-49` are verified in-process, not yet over MCP stdio; and an agent cannot share a visible window with a person. The last two are tracked in [`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window).
+
+**Roadmap priority:** [`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window) is the next feature priority after the Rust 1.99.1 upgrade (`R0.18`) and before new human-operable GUI work (`R10`). Completion requires real MCP transport coverage of existing engine capabilities and an opt-in shared visible session. Tests for later engine features are added when those features land and do not postpone this gate. This is a sequencing decision, not a claim that the remaining MCP gaps are fixed. After implementation is verified, [`R7.4`](ROADMAP.md#r74-accessible-mcp-guide-and-minimal-readme) adds a short beginner guide to a simplified README; this document remains the detailed reference.
+
 ## Shipped Surface (`R7.1`, `R0.13`)
 
 Every handler executes inside `run_guarded` with structured error payloads (`ErrorCode`, `category`, `retryable`, `remediation`, `details`), `Effects`-derived MCP annotations (`readOnlyHint`, `destructiveHint`, `idempotentHint`), and optional `WorkdirGuard` path containment:
@@ -24,7 +38,7 @@ Every handler executes inside `run_guarded` with structured error payloads (`Err
 | Surface | Purpose |
 |---|---|
 | `doc_inspect` / `open_file` / `save_file` | Inspect project sheets (`Data`, `Info`, `Results`, `Graphs`, `Layouts`) or live `--control` state snapshots, open `.lumencraft` / `.lumencraft.d` / `.lctemplate` / `.prism` / `.pzfx` / `.csv` / `.tsv`, and atomically save `.lumencraft`, `.lumencraft.d`, or `.lctemplate` projects. |
-| `command_list` / `command_run` / `command_batch` | Discover and execute typed engine commands ([`commands.md`](commands.md)) plus the `32` synced UI commands (`crates/mcp/src/ui_catalog.rs`), optionally with `atomic: true` batch rollback. |
+| `command_list` / `command_run` / `command_batch` | Discover and execute typed engine commands ([`commands.md`](commands.md)) plus the synced UI commands (generated `crates/mcp/src/ui_catalog.rs`), optionally with `atomic: true` batch rollback. |
 | `list_toolsets` / `enable_toolset` | Progressively enable or disable per-command MCP tools grouped by `CommandGroup` — plus the `"gui"` toolset (`gui_toolset` in `list_toolsets`: 8 `GUI Automation` tools) — emitting `notifications/tools/list_changed`. |
 | `render_preview` / `export` | Compile and rasterize any `GraphSheet` or `LayoutSheet` to PNG preview bytes, or export `SVG` / `%PDF-1.7` / `PNG` / `TIFF` / `CSV` / `JSON`. |
 | MCP Resources & Prompts | Read `sheet://<id>` and `result://<id>` resources and guided statistical/curve-fitting workflow prompts. |
@@ -41,7 +55,7 @@ Verified in `crates/mcp/src/{gui_tools.rs, tools.rs, protocol.rs}` and `apps/lum
   - `lumencraft-cli mcp --control-port <N> --gui-only` — attaches over loopback `127.0.0.1:<N>` to a running desktop window (typically launched with `lumencraft --control <N> --gui-only`).
 
 ### 2. The 8-Tool `gui` Surface (`GUI_TOOL_NAMES`)
-In normal mode, `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiSessionHost`) appends the 8 `gui` tools alongside the 10 core tools (and any enabled `CommandGroup` tools). Under `--gui-only`, `list_tools_for_state` shrinks `tools/list` strictly to these 8 tools:
+In normal mode, `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiSessionHost`) appends the 8 `gui` tools alongside the core tools in the table above (and any enabled `CommandGroup` tools). Under `--gui-only`, `list_tools_for_state` shrinks `tools/list` strictly to these 8 tools:
 
 | MCP Tool | Key Inputs | Key Annotations / Return |
 |---|---|---|
@@ -61,4 +75,4 @@ In normal mode, `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiS
 
 ## UI Command Sync
 
-Desktop UI commands declared in `crates/ui-egui/src/menus/ui_commands.rs` (`32` entries in `UI_COMMANDS`, including `ui.powerWizard.open` and `ui.formatPoints.open`) are mirrored into `crates/mcp/src/ui_catalog.rs` via `cargo xtask ui-commands` (enforced in CI with `cargo xtask ui-commands --check`) so `lumencraft-mcp` never depends directly on `lumencraft-ui-egui`.
+Desktop UI commands declared in `crates/ui-egui/src/menus/ui_commands.rs` (`UI_COMMANDS`, including `ui.powerWizard.open` and `ui.formatPoints.open`; live count in [`STATUS.md`](STATUS.md)) are mirrored into `crates/mcp/src/ui_catalog.rs` via `cargo xtask ui-commands` (enforced in CI with `cargo xtask ui-commands --check`) so `lumencraft-mcp` never depends directly on `lumencraft-ui-egui`.

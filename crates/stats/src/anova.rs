@@ -2,6 +2,61 @@
 //! (Mauchly, Greenhouse–Geisser, Huynh–Feldt), mixed-effects REML (Satterthwaite & Kenward–Roger
 //! degrees of freedom), nested hierarchical ANOVA / nested *t*-test, and effect sizes with exact
 //! noncentral-*F* confidence intervals.
+//!
+//! Classical fixed-effects ANOVA partitions (one-way, factorial, repeated-measures, nested) follow
+//! the textbook treatments in Zar (2010), Maxwell & Delaney (2004), and Searle (1987); ordinary
+//! one-way results are checked against the NIST StRD ANOVA datasets.
+//!
+//! References:
+//! - Zar, J. H. (2010). *Biostatistical Analysis* (5th ed.). Pearson Prentice Hall.
+//! - Maxwell, S. E., & Delaney, H. D. (2004). *Designing Experiments and Analyzing Data: A Model
+//!   Comparison Perspective* (2nd ed.). Lawrence Erlbaum.
+//! - Searle, S. R. (1987). *Linear Models for Unbalanced Data*. Wiley.
+//! - NIST Statistical Reference Datasets (StRD), Analysis of Variance:
+//!   <https://www.itl.nist.gov/div898/strd/anova/anova.html>
+//! - Bartlett, M. S. (1937). Properties of sufficiency and statistical tests. *Proceedings of the
+//!   Royal Society of London A* 160(901):268–282. doi:10.1098/rspa.1937.0109
+//! - Brown, M. B., & Forsythe, A. B. (1974a). Robust tests for the equality of variances. *Journal
+//!   of the American Statistical Association* 69(346):364–367. doi:10.1080/01621459.1974.10482955
+//! - Brown, M. B., & Forsythe, A. B. (1974b). The small sample behavior of some statistics which
+//!   test the equality of several means. *Technometrics* 16(1):129–132.
+//! - Welch, B. L. (1951). On the comparison of several mean values: an alternative approach.
+//!   *Biometrika* 38(3/4):330–336.
+//! - Mauchly, J. W. (1940). Significance test for sphericity of a normal *n*-variate distribution.
+//!   *Annals of Mathematical Statistics* 11(2):204–209. doi:10.1214/aoms/1177731915
+//! - Greenhouse, S. W., & Geisser, S. (1959). On methods in the analysis of profile data.
+//!   *Psychometrika* 24(2):95–112. doi:10.1007/BF02289823
+//! - Huynh, H., & Feldt, L. S. (1976). Estimation of the Box correction for degrees of freedom from
+//!   sample data in randomized block and split-plot designs. *Journal of Educational Statistics*
+//!   1(1):69–82. doi:10.3102/10769986001001069
+//! - Kruskal, W. H., & Wallis, W. A. (1952). Use of ranks in one-criterion variance analysis.
+//!   *Journal of the American Statistical Association* 47(260):583–621.
+//!   doi:10.1080/01621459.1952.10483441
+//! - Friedman, M. (1937). The use of ranks to avoid the assumption of normality implicit in the
+//!   analysis of variance. *Journal of the American Statistical Association* 32(200):675–701.
+//!   doi:10.1080/01621459.1937.10503522
+//! - Kendall, M. G., & Babington Smith, B. (1939). The problem of *m* rankings. *Annals of
+//!   Mathematical Statistics* 10(3):275–287.
+//! - Steiger, J. H. (2004). Beyond the F test: effect size confidence intervals and tests of close
+//!   fit in the analysis of variance and contrast analysis. *Psychological Methods* 9(2):164–182.
+//!   doi:10.1037/1082-989X.9.2.164
+//! - Olejnik, S., & Algina, J. (2003). Generalized eta and omega squared statistics: measures of
+//!   effect size for some common research designs. *Psychological Methods* 8(4):434–447.
+//!   doi:10.1037/1082-989X.8.4.434
+//! - Cohen, J. (1988). *Statistical Power Analysis for the Behavioral Sciences* (2nd ed.).
+//!   Lawrence Erlbaum.
+//! - Patterson, H. D., & Thompson, R. (1971). Recovery of inter-block information when block sizes
+//!   are unequal. *Biometrika* 58(3):545–554. doi:10.1093/biomet/58.3.545
+//! - Self, S. G., & Liang, K.-Y. (1987). Asymptotic properties of maximum likelihood estimators and
+//!   likelihood ratio tests under nonstandard conditions. *Journal of the American Statistical
+//!   Association* 82(398):605–610. doi:10.1080/01621459.1987.10478472
+//! - Satterthwaite, F. E. (1946). An approximate distribution of estimates of variance components.
+//!   *Biometrics Bulletin* 2(6):110–114. doi:10.2307/3002019
+//! - Giesbrecht, F. G., & Burns, J. C. (1985). Two-stage analysis based on a mixed model:
+//!   large-sample asymptotic theory and small-sample simulation results. *Biometrics*
+//!   41(2):477–486. doi:10.2307/2530872
+//! - Kenward, M. G., & Roger, J. H. (1997). Small sample inference for fixed effects from
+//!   restricted maximum likelihood. *Biometrics* 53(3):983–997. doi:10.2307/2533558
 
 use lumencraft_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, FactorialAnovaSpec, MultiplicityMethod, MultiplicitySpec, NestedAnalysisSpec,
@@ -223,6 +278,18 @@ pub struct NestedAnovaResult {
 
 /// Compute ANOVA effect sizes (`eta^2`, `partial eta^2`, `omega^2`, Cohen's `f`) and exact
 /// noncentral-*F* confidence intervals.
+///
+/// - `omega^2 = (SS_effect - df_effect * MS_error) / (SS_total + MS_error)` is the Hays estimator
+///   as tabulated by Olejnik & Algina (2003).
+/// - Cohen's `f = sqrt(eta_p^2 / (1 - eta_p^2))` (Cohen, 1988, ch. 8). Cohen defines `f` from
+///   `eta^2`; this uses partial `eta^2`, which coincides with `eta^2` only for one-way designs.
+/// - The confidence interval inverts the noncentral-*F* distribution for the noncentrality
+///   `lambda` and maps it via `lambda / (lambda + N)` (Steiger, 2004), with
+///   `N = df_effect + df_error + 1`. That `N` equals the total sample size only for one-way
+///   designs.
+/// - Note: `eta_squared_ci` is set to the partial-`eta^2` interval. The two agree only when
+///   `SS_total = SS_effect + SS_error` (one-way); for multi-term designs it is not an interval for
+///   `eta^2`.
 pub fn compute_anova_effect_sizes(
     ss_effect: f64,
     ss_error: f64,
@@ -269,6 +336,11 @@ pub fn compute_anova_effect_sizes(
 }
 
 /// Bartlett's and Brown–Forsythe homogeneity-of-variance tests across `k >= 2` groups.
+///
+/// Bartlett (1937) statistic with the usual correction
+/// `C = 1 + (sum 1/nu_i - 1/sum nu_i) / (3 (k - 1))`, referred to `chi^2(k - 1)`. The
+/// Brown & Forsythe (1974a) test is the median-centred Levene variant: ordinary one-way ANOVA on
+/// `|x_ij - median_i|`.
 pub fn variance_homogeneity_tests(groups: &[&[f64]]) -> Result<VarianceHomogeneityResult, StatsError> {
     if groups.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "ANOVA groups", required: 2, actual: groups.len() });
@@ -335,6 +407,10 @@ pub fn variance_homogeneity_tests(groups: &[&[f64]]) -> Result<VarianceHomogenei
 
 /// Ordinary one-way ANOVA using two-pass `SummaryMoments` and `NeumaierSum` shifted by the grand
 /// mean so stiff NIST StRD series (`SmLs01..09`, `SiRstv`, `AtmWtAg`) retain full precision.
+///
+/// Fixed-effects one-way ANOVA partition `SS_total = SS_between + SS_within` with
+/// `F = MS_between / MS_within` on `(k - 1, N - k)` df (Zar, 2010, ch. 10), verified against the
+/// NIST StRD ANOVA certified values.
 pub fn ordinary_one_way_anova(groups: &[(&str, &[f64])], confidence: ConfidenceLevel) -> Result<OneWayAnovaResult, StatsError> {
     let slices: Vec<&[f64]> = groups.iter().map(|(_, s)| *s).collect();
     let labels: Vec<String> = groups.iter().map(|(l, _)| (*l).to_owned()).collect();
@@ -437,6 +513,9 @@ fn ordinary_one_way_anova_slices(groups: &[&[f64]], confidence: ConfidenceLevel)
 }
 
 /// One-way ANOVA from pre-summarized `(label, n, mean, sd)` records.
+///
+/// Same partition as [`ordinary_one_way_anova`] with `SS_within = sum (n_i - 1) s_i^2` and
+/// `SS_between = sum n_i (mean_i - grand_mean)^2` (Zar, 2010, ch. 10).
 pub fn ordinary_one_way_from_summary(groups: &[GroupComparisonInput], confidence: ConfidenceLevel) -> Result<OneWayAnovaResult, StatsError> {
     if groups.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "ANOVA groups", required: 2, actual: groups.len() });
@@ -515,6 +594,12 @@ pub fn ordinary_one_way_from_summary(groups: &[GroupComparisonInput], confidence
 }
 
 /// Welch's and Brown–Forsythe's unequal-variance one-way ANOVA from group summaries.
+///
+/// Welch (1951) `W` with weights `w_i = n_i / s_i^2`, denominator
+/// `1 + 2 (k - 2) / (k^2 - 1) * sum (1 - w_i / sum w)^2 / (n_i - 1)`, and
+/// `df2 = (k^2 - 1) / (3 sum (1 - w_i / sum w)^2 / (n_i - 1))`. Brown & Forsythe (1974b)
+/// `F* = sum n_i (mean_i - grand_mean)^2 / sum (1 - n_i / N) s_i^2` on `(k - 1, f)` df, with `f`
+/// from the Satterthwaite (1946) approximation.
 pub fn unequal_variance_one_way_anova(groups: &[GroupComparisonInput]) -> Result<UnequalVarianceAnovaResult, StatsError> {
     let k = groups.len();
     if k < 2 {
@@ -583,6 +668,10 @@ pub fn unequal_variance_one_way_anova(groups: &[GroupComparisonInput]) -> Result
 
 /// Repeated-measures one-way ANOVA on complete subject blocks (`n` rows × `k` conditions), with
 /// Mauchly's sphericity test, Greenhouse–Geisser `epsilon_hat`, and Huynh–Feldt `epsilon_tilde`.
+///
+/// Subjects × treatments (randomized-block) partition with `F = MS_treatment / MS_residual` on
+/// `(k - 1, (n - 1)(k - 1))` df (Zar, 2010, ch. 12; Maxwell & Delaney, 2004, ch. 11). Corrected
+/// p-values multiply both df by Greenhouse & Geisser (1959) or Huynh & Feldt (1976) epsilon.
 pub fn rm_one_way_anova(blocks: &[Vec<f64>]) -> Result<RmOneWayAnovaResult, StatsError> {
     let n = blocks.len();
     if n < 2 {
@@ -688,6 +777,16 @@ pub fn rm_one_way_anova(blocks: &[Vec<f64>]) -> Result<RmOneWayAnovaResult, Stat
 
 /// Compute Mauchly's `W` and Greenhouse–Geisser / Huynh–Feldt sphericity epsilons from an `n x k`
 /// repeated-measures matrix via orthonormal Helmert contrast projection `C^T S C`.
+///
+/// - Mauchly (1940) `W = det(C S C^T) / (tr(C S C^T) / p)^p` with `p = k - 1`, using the
+///   chi-square approximation `-(n - 1 - (2p^2 + p + 2) / (6p)) ln W` on `p(p + 1)/2 - 1` df.
+/// - Greenhouse & Geisser (1959) `epsilon_hat = (sum lambda)^2 / (p sum lambda^2)`, bounded
+///   below by `1/p`.
+/// - Huynh & Feldt (1976) single-group `epsilon_tilde = (n p epsilon_hat - 2) /
+///   (p (n - 1 - p epsilon_hat))`, truncated to `[epsilon_hat, 1]`.
+///
+/// Note: this treats the `n` rows as one group. Huynh & Feldt's split-plot form uses the pooled
+/// within-group covariance and `N - g` in place of `n - 1`; it is not implemented here.
 fn compute_sphericity(blocks: &[Vec<f64>], col_means: &[f64]) -> Result<SphericityResult, StatsError> {
     let n = blocks.len();
     let k = col_means.len();
@@ -759,6 +858,14 @@ fn compute_sphericity(blocks: &[Vec<f64>], col_means: &[f64]) -> Result<Spherici
 }
 
 /// Kruskal–Wallis one-way ANOVA on ranks with tie correction and epsilon-squared effect size.
+///
+/// `H = 12 / (N (N + 1)) sum R_i^2 / n_i - 3 (N + 1)`, divided by the tie correction
+/// `1 - sum (t^3 - t) / (N^3 - N)` and referred to `chi^2(k - 1)` (Kruskal & Wallis, 1952;
+/// Zar, 2010, ch. 10).
+///
+/// Note: the effect size is computed as `(H - (k - 1)) / (N - 1)`. This is neither the usual rank
+/// epsilon-squared `H / (N - 1)` nor eta-squared-H `(H - k + 1) / (N - k)`; no published source
+/// for this exact form has been identified.
 pub fn kruskal_wallis_test(groups: &[&[f64]]) -> Result<KruskalWallisResult, StatsError> {
     if groups.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "ANOVA groups", required: 2, actual: groups.len() });
@@ -799,6 +906,11 @@ pub fn kruskal_wallis_test(groups: &[&[f64]]) -> Result<KruskalWallisResult, Sta
 }
 
 /// Friedman nonparametric repeated-measures rank test on complete blocks (`n` rows × `k` conditions).
+///
+/// Friedman (1937) statistic with within-block tie correction,
+/// `Q = 12 sum (R_j - n (k + 1)/2)^2 / (n k (k + 1) - sum (t^3 - t) / (k - 1))`, referred to
+/// `chi^2(k - 1)` (Zar, 2010, ch. 12). Kendall's `W = Q / (n (k - 1))` (Kendall & Babington
+/// Smith, 1939).
 pub fn friedman_test(blocks: &[Vec<f64>]) -> Result<FriedmanResult, StatsError> {
     let n = blocks.len();
     if n < 2 {
@@ -867,6 +979,12 @@ struct TermSpec {
 
 /// Fit Type I (sequential) or Type III (partial, sum/effect-coded) general `N`-way factorial ANOVA
 /// via `lumencraft_math::linalg::solve_linear_least_squares`.
+///
+/// Sums of squares come from full-vs-reduced model comparisons (Maxwell & Delaney, 2004, ch. 7;
+/// Searle, 1987). Type I: sequential RSS reductions in term order. Type III: RSS increase from
+/// dropping each term's sum-to-zero-coded columns from the full model. With no empty cells this
+/// matches the usual Type III hypotheses on unweighted marginal means. With empty cells it tests
+/// whatever estimable function remains, which is not the Type IV construction.
 pub fn fit_factorial_anova(
     data: &FactorialObservations,
     max_interaction_order: usize,
@@ -1064,6 +1182,17 @@ fn is_design_unbalanced(rows: &[(Vec<usize>, f64)], levels: &[Vec<String>]) -> b
 
 /// Repeated-measures two-way ANOVA (`RowFactorMatched`, `ColumnFactorMatched`, or `BothFactorsMatched`)
 /// on complete balanced subject blocks `subject_data[subject][row][col]`.
+///
+/// Expected-mean-square error strata follow Maxwell & Delaney (2004, ch. 12).
+/// - Both factors within subjects: `A`, `B`, `A × B` are tested against `S × A`, `S × B`, and
+///   `S × A × B`.
+/// - Split-plot designs: the between-subject factor is tested against `S(between)`; the
+///   within-subject factor and the interaction are tested against `S(between) × within`.
+///
+/// The returned F-tests are uncorrected. The optional [`SphericityResult`] is computed only for
+/// the single within factor (the column factor when both are matched). For split-plot designs
+/// it is computed from subject means averaged across the between-factor levels, not from the
+/// pooled within-group covariance used by Huynh & Feldt (1976).
 pub fn fit_rm_two_way_anova(
     subject_data: &[Vec<Vec<f64>>],
     row_name: &str,
@@ -1228,6 +1357,13 @@ pub fn fit_rm_two_way_anova(
 ///
 /// Profiles exact log-REML over variance ratio `tau = sigma_u^2 / sigma_e^2` using `cholesky`,
 /// and computes Satterthwaite & Kenward–Roger Wald *F*-tests for every fixed-effect term.
+///
+/// The restricted likelihood is that of Patterson & Thompson (1971), with `sigma_e^2` profiled
+/// out. The random-intercept LRT uses the boundary `0.5 chi^2(0) + 0.5 chi^2(1)` mixture of
+/// Self & Liang (1987).
+///
+/// Note: the "Satterthwaite" and "Kenward–Roger" df are heuristic approximations, not the
+/// published methods; see `compute_reml_wald_terms`.
 pub fn fit_random_intercept_reml(
     x: &DenseMatrix,
     y: &[f64],
@@ -1372,6 +1508,16 @@ struct RemlWaldArgs<'a> {
     term_slices: &'a [(&'a str, usize, usize)],
 }
 
+/// Wald *F* = `beta' Cov(beta)^-1 beta / q` for each fixed-effect term, with
+/// `Cov(beta) = sigma_e^2 (X' V^-1 X)^-1`, plus approximate denominator df.
+///
+/// Note: this deviates from the published methods its outputs are named after.
+/// - The "Satterthwaite" df is a delta-method heuristic in the spirit of Satterthwaite (1946)
+///   and Giesbrecht & Burns (1985): `2 / Var(log v)`, combining a finite-difference sensitivity
+///   to `tau` with an independent `2 / (n - p)` term for `sigma_e^2`. It does not use the full
+///   REML information matrix or the `sigma_e^2`–`tau` covariance, and it is capped at `n - p`.
+/// - The "Kenward–Roger" df is that value times `1 / (1 + 1 / (clusters - 1))`. It does not apply
+///   the Kenward & Roger (1997) covariance bias adjustment or the F-statistic scaling.
 fn compute_reml_wald_terms<F>(args: RemlWaldArgs<'_>, eval_profile: &F) -> Result<RemlWaldOutput, StatsError>
 where
     F: Fn(f64) -> Result<(f64, f64, f64, DenseMatrix, Vec<f64>), StatsError>,
@@ -1459,6 +1605,15 @@ where
 /// Fit nested hierarchical one-way ANOVA (Groups -> Biological-Unit Subclusters -> Technical
 /// Replicates), computing exact Satterthwaite/Kenward-Roger df for unequal cluster sizes and
 /// variance components `(sigma_subcluster^2, sigma_error^2)`.
+///
+/// The two-level nested partition (groups, subclusters within groups, error) and the
+/// subcluster *F*-test follow Zar (2010, ch. 15). The among-groups test is a REML Wald test from
+/// [`fit_random_intercept_reml`] (Patterson & Thompson, 1971). For two groups, the nested `t` is
+/// the signed square root of that Wald *F*.
+///
+/// Note: despite the description above, the reported "Satterthwaite" and "Kenward–Roger"
+/// denominator df are not exact; they are the heuristic approximations documented on
+/// `compute_reml_wald_terms`.
 pub fn nested_one_way_anova(table: &lumencraft_doc::NestedTable, two_group_t_test: bool) -> Result<NestedAnovaResult, StatsError> {
     let g_count = table.groups.len();
     if two_group_t_test && g_count != 2 {
@@ -2587,7 +2742,7 @@ fn run_multifactor_mv(
     Ok((res, data))
 }
 
-/// Execute a [`NestedAnalysisSpec`] against a [`NestedTable`] [`DataSheet`].
+/// Execute a [`NestedAnalysisSpec`] against a `Nested` [`DataSheet`].
 pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: &NestedAnalysisSpec) -> Result<ResultSheet, StatsError> {
     let TableArchetype::Nested(nested) = &sheet.archetype else {
         return Err(StatsError::IncompatibleTable { analysis: "nested ANOVA / nested t-test", actual: sheet.archetype.kind() });

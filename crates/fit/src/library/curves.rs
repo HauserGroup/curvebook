@@ -1,4 +1,42 @@
 //! Exponential, Growth, Radiobiology, Peak, Wave, and Standard-Curve / Polynomial equations.
+//!
+//! Every equation below cites the published source of its functional form in short
+//! `Author (Year)` form on its model struct; the full references are collected here. Where the
+//! library's parameterisation differs from the original paper (e.g. `Y0` / `Plateau` / `K` instead
+//! of the original constants) the struct comment says so and names the textbook that uses the
+//! library's parameterisation.
+//!
+//! References:
+//! - Motulsky, H. J., & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear
+//!   and Nonlinear Regression: A Practical Guide to Curve Fitting*. New York: Oxford University Press.
+//! - Seber, G. A. F., & Wild, C. J. (1989). *Nonlinear Regression*. New York: Wiley.
+//!   (Ch. 7 growth models; ch. 8 compartmental / sum-of-exponentials models; ch. 9 multiphase and
+//!   spline regressions.)
+//! - Malthus, T. R. (1798). *An Essay on the Principle of Population*. London: J. Johnson.
+//! - Verhulst, P.-F. (1838). Notice sur la loi que la population suit dans son accroissement.
+//!   *Correspondance mathématique et physique* 10:113–121.
+//! - Gompertz, B. (1825). On the nature of the function expressive of the law of human mortality,
+//!   and on a new mode of determining the value of life contingencies. *Philosophical Transactions
+//!   of the Royal Society of London* 115:513–583.
+//! - Yin, X., Goudriaan, J., Lantinga, E. A., Vos, J., & Spiertz, H. J. (2003). A flexible sigmoid
+//!   function of determinate growth. *Annals of Botany* 91:361–371. doi:10.1093/aob/mcg029.
+//! - Fowler, J. F. (1989). The linear-quadratic formula and progress in fractionated radiotherapy.
+//!   *British Journal of Radiology* 62:679–694.
+//! - Bevington, P. R., & Robinson, D. K. (2003). *Data Reduction and Error Analysis for the
+//!   Physical Sciences*, 3rd ed. New York: McGraw-Hill. (Ch. 2: Gaussian and Lorentzian distributions.)
+//! - Limpert, E., Stahel, W. A., & Abbt, M. (2001). Log-normal distributions across the sciences:
+//!   keys and clues. *BioScience* 51:341–352.
+//! - Weibull, W. (1951). A statistical distribution function of wide applicability. *Journal of
+//!   Applied Mechanics* 18:293–297.
+//! - Finney, D. J. (1971). *Probit Analysis*, 3rd ed. Cambridge: Cambridge University Press.
+//! - Bloomfield, P. (2000). *Fourier Analysis of Time Series: An Introduction*, 2nd ed. New York: Wiley.
+//! - Bracewell, R. N. (2000). *The Fourier Transform and Its Applications*, 3rd ed. Boston: McGraw-Hill.
+//! - Draper, N. R., & Smith, H. (1998). *Applied Regression Analysis*, 3rd ed. New York: Wiley.
+//! - Hudson, D. J. (1966). Fitting segmented curves whose join points have to be estimated.
+//!   *Journal of the American Statistical Association* 61:1097–1129.
+//! - Watts, D. G., & Bacon, D. W. (1974). Using an hyperbola as a transition model to fit
+//!   two-regime straight-line data. *Technometrics* 16.
+//! - Huxley, J. S. (1932). *Problems of Relative Growth*. London: Methuen.
 
 use crate::library::{ParametricModel, data_x_min_max, data_y_min_max};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
@@ -126,6 +164,10 @@ pub fn resolve_curve_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
     }
 }
 
+/// One-phase exponential decay `Y = (Y0 - Plateau) * exp(-K * X) + Plateau`.
+/// `HalfLife = ln 2 / K`, `Tau = 1 / K`.
+/// Reference: first-order (single-compartment) kinetics, Seber & Wild (1989) ch. 8; this
+/// `Y0` / `Plateau` / `K` parameterisation follows Motulsky & Christopoulos (2004).
 struct OnePhaseDecay {
     params: Vec<String>,
 }
@@ -180,6 +222,9 @@ impl ParametricModel for OnePhaseDecay {
     }
 }
 
+/// Two-phase (bi-exponential) decay with `PercentFast` of the span decaying at `KFast`.
+/// Reference: sum-of-exponentials (two-compartment) model, Seber & Wild (1989) ch. 8; the
+/// `Plateau` / `PercentFast` parameterisation follows Motulsky & Christopoulos (2004).
 struct TwoPhaseDecay {
     params: Vec<String>,
 }
@@ -217,6 +262,8 @@ impl ParametricModel for TwoPhaseDecay {
     }
 }
 
+/// Three-phase (tri-exponential) decay; the very-slow fraction is `1 - PercentFast - PercentSlow`.
+/// Reference: sum-of-exponentials (compartmental) model, Seber & Wild (1989) ch. 8.
 struct ThreePhaseDecay {
     params: Vec<String>,
 }
@@ -254,6 +301,9 @@ impl ParametricModel for ThreePhaseDecay {
     }
 }
 
+/// Constant `Y0` until `X0`, then one-phase decay toward `Plateau` (piecewise composite).
+/// Reference: the decay segment is the first-order form of Seber & Wild (1989) ch. 8; the hold
+/// segment is a piecewise join (Seber & Wild 1989, ch. 9). No single primary source for the composite.
 struct PlateauThenDecay {
     params: Vec<String>,
 }
@@ -289,6 +339,9 @@ impl ParametricModel for PlateauThenDecay {
     }
 }
 
+/// One-phase exponential association `Y = Y0 + (Plateau - Y0) * (1 - exp(-K * X))`.
+/// Reference: monomolecular (first-order approach to an asymptote) form, Seber & Wild (1989)
+/// ch. 7; parameterisation follows Motulsky & Christopoulos (2004).
 struct OnePhaseAssociation {
     params: Vec<String>,
 }
@@ -332,6 +385,9 @@ impl ParametricModel for OnePhaseAssociation {
     }
 }
 
+/// Constant `Y0` until `X0`, then one-phase association toward `Plateau` (piecewise composite).
+/// Reference: monomolecular segment per Seber & Wild (1989) ch. 7, joined piecewise (ch. 9).
+/// No single primary source for the composite.
 struct PlateauThenAssoc {
     params: Vec<String>,
 }
@@ -367,6 +423,8 @@ impl ParametricModel for PlateauThenAssoc {
     }
 }
 
+/// Unbounded exponential (Malthusian) growth `Y = Y0 * exp(k * X)`.
+/// Reference: Malthus (1798); see also Seber & Wild (1989) ch. 7.
 struct ExponentialGrowth {
     id: &'static str,
     name: &'static str,
@@ -412,6 +470,9 @@ impl ParametricModel for ExponentialGrowth {
     }
 }
 
+/// Exponential approach to a maximum `Y = YM - (YM - Y0) * exp(-k * X)`.
+/// Reference: monomolecular / Mitscherlich growth form, Seber & Wild (1989) ch. 7.
+/// Mathematically identical to `one_phase_association` with `Plateau = YM`.
 struct ExponentialPlateau {
     params: Vec<String>,
 }
@@ -441,6 +502,9 @@ impl ParametricModel for ExponentialPlateau {
     }
 }
 
+/// Logistic growth `Y = YM * Y0 / (Y0 + (YM - Y0) * exp(-k * X))` (so `Y(0) = Y0`).
+/// Reference: Verhulst (1838); the `YM` / `Y0` / `k` parameterisation is the logistic of
+/// Seber & Wild (1989) ch. 7 written in terms of the initial value.
 struct LogisticGrowth {
     params: Vec<String>,
 }
@@ -480,6 +544,9 @@ impl ParametricModel for LogisticGrowth {
     }
 }
 
+/// Gompertz growth `Y = YM * exp(-ln(YM / Y0) * exp(-k * X))` (so `Y(0) = Y0`).
+/// Reference: Gompertz (1825); the initial-value parameterisation is one of the equivalent
+/// Gompertz forms in Seber & Wild (1989) ch. 7.
 struct GompertzGrowth {
     params: Vec<String>,
 }
@@ -515,6 +582,12 @@ impl ParametricModel for GompertzGrowth {
     }
 }
 
+/// Beta growth function `Y = Ym * (1 + (te - X) / (te - tm)) * (X / te)^(te / (te - tm))`
+/// for `0 <= X <= te`, where `te` is the end of growth (where `Y = Ym`) and `tm` the time of the
+/// maximum growth rate.
+/// Reference: Yin, Goudriaan, Lantinga, Vos & Spiertz (2003), beta growth function.
+/// Note: Yin et al. define `Y = Ym` for `X > te` (determinate growth); this implementation returns
+/// `0` beyond `te`, which is not part of the published form.
 struct BetaGrowthDecay {
     params: Vec<String>,
 }
@@ -551,6 +624,8 @@ impl ParametricModel for BetaGrowthDecay {
     }
 }
 
+/// Linear-quadratic cell survival `S = exp(-(alpha * D + beta * D^2))` (surviving fraction).
+/// Reference: Fowler (1989).
 struct LinearQuadraticSurvival {
     params: Vec<String>,
 }
@@ -578,6 +653,9 @@ impl ParametricModel for LinearQuadraticSurvival {
     }
 }
 
+/// Gaussian peak `Y = Baseline + Amplitude * exp(-0.5 * ((X - Mean) / SD)^2)` (unnormalised:
+/// `Amplitude` is the peak height, not an area).
+/// Reference: Gaussian line shape, Bevington & Robinson (2003) ch. 2.
 struct GaussianCurve {
     with_baseline: bool,
     params: Vec<String>,
@@ -615,6 +693,8 @@ impl ParametricModel for GaussianCurve {
     }
 }
 
+/// Sum of two unnormalised Gaussian peaks (no baseline).
+/// Reference: Gaussian line shape, Bevington & Robinson (2003) ch. 2.
 struct TwoGaussians {
     params: Vec<String>,
 }
@@ -650,6 +730,9 @@ impl ParametricModel for TwoGaussians {
     }
 }
 
+/// Log-normal-shaped peak `Y = Amplitude * exp(-0.5 * (ln(X / GeoMean) / ln(GeoSD))^2)`,
+/// parameterised by the geometric mean and the multiplicative (geometric) standard deviation.
+/// Reference: Limpert, Stahel & Abbt (2001) (median `mu*` and multiplicative SD `sigma*` form).
 struct LogGaussian {
     params: Vec<String>,
 }
@@ -683,6 +766,8 @@ impl ParametricModel for LogGaussian {
     }
 }
 
+/// Cumulative Gaussian `Y = Bottom + (Top - Bottom) * Phi((X - Mean) / SD)`.
+/// Reference: normal-sigmoid (probit) response curve, Finney (1971).
 struct CumulativeGaussian {
     params: Vec<String>,
 }
@@ -717,6 +802,9 @@ impl ParametricModel for CumulativeGaussian {
     }
 }
 
+/// Lorentzian (Cauchy) peak `Y = Amplitude / (1 + ((X - Center) / (Width / 2))^2)`, where
+/// `Width` is the full width at half maximum.
+/// Reference: Lorentzian distribution, Bevington & Robinson (2003) ch. 2.
 struct LorentzianPeak {
     params: Vec<String>,
 }
@@ -750,6 +838,9 @@ impl ParametricModel for LorentzianPeak {
     }
 }
 
+/// Scaled Weibull density `Y = Amplitude * (k / lambda) * (X / lambda)^(k - 1) * exp(-(X / lambda)^k)`
+/// with `Scale = lambda`, `Shape = k` (`Amplitude` is the area under the curve).
+/// Reference: Weibull (1951).
 struct WeibullPeak {
     params: Vec<String>,
 }
@@ -787,6 +878,10 @@ impl ParametricModel for WeibullPeak {
     }
 }
 
+/// Sine wave `Y = Baseline + Amplitude * sin(2 * pi * Frequency * X + PhaseShift)` (phase in
+/// radians); the damped variant multiplies the amplitude by `exp(-K * X)`.
+/// Reference: sinusoid fitting, Bloomfield (2000). The damped variant is the under-damped
+/// linear-oscillator form; no single statistical primary source is cited for it.
 struct SineWave {
     damped: bool,
     params: Vec<String>,
@@ -826,6 +921,9 @@ impl ParametricModel for SineWave {
     }
 }
 
+/// Sinc peak `Y = Baseline + Amplitude * sin(u) / u` with `u = (X - Center) / Width`.
+/// Reference: Bracewell (2000), who defines the normalised `sinc x = sin(pi x) / (pi x)`; here the
+/// factor `pi` is absorbed into `Width` (unnormalised sinc).
 struct SincWave {
     params: Vec<String>,
 }
@@ -860,6 +958,8 @@ impl ParametricModel for SincWave {
     }
 }
 
+/// Straight line `Y = Slope * X + YIntercept` (or through the origin).
+/// Reference: Draper & Smith (1998).
 struct StraightLine {
     through_origin: bool,
     params: Vec<String>,
@@ -900,6 +1000,8 @@ impl ParametricModel for StraightLine {
     }
 }
 
+/// Two-segment continuous linear regression with join point `X0`.
+/// Reference: Hudson (1966); Seber & Wild (1989) ch. 9.
 struct SegmentalLinear {
     params: Vec<String>,
 }
@@ -929,6 +1031,11 @@ impl ParametricModel for SegmentalLinear {
     }
 }
 
+/// Two-regime straight lines joined by a hyperbolic transition:
+/// `Y = Y0 + Slope1 * dx + (Slope2 - Slope1) / 2 * (dx + sqrt(dx^2 + Delta^2) - |Delta|)`,
+/// `dx = X - X0`, so `Y(X0) = Y0` and `Delta -> 0` recovers the sharp hinge.
+/// Reference: Watts & Bacon (1974) hyperbola transition model, reparameterised so that `Y0` is the
+/// value at the join; see also Seber & Wild (1989) ch. 9.
 struct SmoothHinge {
     params: Vec<String>,
 }
@@ -960,6 +1067,8 @@ impl ParametricModel for SmoothHinge {
     }
 }
 
+/// Polynomial `Y = B0 + B1 * X + ... + Bd * X^d` (degree 2–6), linear in its parameters.
+/// Reference: polynomial regression, Draper & Smith (1998).
 struct Polynomial {
     degree: usize,
 }
@@ -1027,6 +1136,9 @@ impl ParametricModel for Polynomial {
     }
 }
 
+/// Power law `Y = a * X^b` (allometric form; the ID `power_series` is historical — this is not a
+/// power series).
+/// Reference: Huxley (1932).
 struct PowerCurve {
     params: Vec<String>,
 }
@@ -1058,6 +1170,8 @@ impl ParametricModel for PowerCurve {
     }
 }
 
+/// Logarithmic curve `Y = a * ln(X) + b` (linear regression on transformed `X`).
+/// Reference: Draper & Smith (1998).
 struct LogarithmicCurve {
     params: Vec<String>,
 }
@@ -1120,6 +1234,9 @@ fn estimate_centered_linear_seed(points: &[DataPoint]) -> (f64, f64, f64) {
 }
 
 /// Centered polynomial model: `Y = sum_{k=0..degree} B_k * (X - XCenter)^k`.
+/// Reference: centred polynomial regression, Draper & Smith (1998). `XCenter` is meant to be held
+/// fixed: with `XCenter` free the model is over-parameterised (same function space as the
+/// uncentred polynomial of the same degree).
 struct CenteredPolynomial {
     degree: usize,
     id: &'static str,
@@ -1211,6 +1328,7 @@ impl ParametricModel for CenteredPolynomial {
 }
 
 /// Semi-logarithmic standard curve: `Y = Slope * log10(X) + YIntercept`.
+/// Reference: linear regression on transformed `X`, Draper & Smith (1998).
 struct SemiLogLine {
     params: Vec<String>,
 }
@@ -1263,6 +1381,7 @@ impl ParametricModel for SemiLogLine {
 }
 
 /// Power-law standard curve in log10-log10 form: `Y = 10^(Slope * log10(X) + LogYIntercept)`.
+/// Reference: the allometric power law of Huxley (1932) written in log-log form.
 struct LogLogLine {
     params: Vec<String>,
 }
@@ -1321,6 +1440,8 @@ impl ParametricModel for LogLogLine {
 }
 
 /// Probit percentage curve: `Y = NormalCdf(Slope * X + Intercept) * 100`.
+/// Reference: Finney (1971). Uses the modern normal-equivalent-deviate scale (no classical `+5`
+/// probit offset).
 struct ProbitLine {
     params: Vec<String>,
 }

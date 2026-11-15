@@ -2,6 +2,60 @@
 //!
 //! Includes analytical gradients, smart data-driven initial parameter estimates, default
 //! domain bounds, and derived scalar transformations (`EC50`, `IC50`, `Span`, `Ki`, `Km`).
+//!
+//! Every equation family cites the published source of its functional form in short
+//! `Author (Year)` form on its model struct; the full references are collected here. Where the
+//! library's parameterisation differs from the original paper (e.g. `log10` concentration on X,
+//! `Bottom` / `Top` / `LogEC50` / `HillSlope`), the struct comment names the textbook that uses the
+//! library's parameterisation (usually Motulsky & Christopoulos 2004).
+//!
+//! References:
+//! - Hill, A. V. (1910). The possible effects of the aggregation of the molecules of hæmoglobin on
+//!   its dissociation curves. *Journal of Physiology* 40:iv–vii.
+//! - Motulsky, H. J., & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear
+//!   and Nonlinear Regression: A Practical Guide to Curve Fitting*. New York: Oxford University Press.
+//! - Richards, F. J. (1959). A flexible growth function for empirical use. *Journal of
+//!   Experimental Botany* 10. doi:10.1093/jxb/10.2.290.
+//! - Gottschalk, P. G., & Dunn, J. R. (2005). The five-parameter logistic: a characterization and
+//!   comparison with the four-parameter logistic. *Analytical Biochemistry* 343:54–65.
+//!   doi:10.1016/j.ab.2005.04.035.
+//! - Sebaugh, J. L. (2011). Guidelines for accurate EC50/IC50 estimation. *Pharmaceutical
+//!   Statistics* 10:128–134. doi:10.1002/pst.426.
+//! - Arunlakshana, O., & Schild, H. O. (1959). Some quantitative uses of drug antagonists.
+//!   *British Journal of Pharmacology and Chemotherapy* 14:48–58.
+//! - Lew, M. J., & Angus, J. A. (1995). Analysis of competitive agonist–antagonist interactions by
+//!   nonlinear regression. *Trends in Pharmacological Sciences* 16:328–337.
+//! - Ehlert, F. J. (1988). Estimation of the affinities of allosteric ligands using radioligand
+//!   binding and pharmacological null methods. *Molecular Pharmacology* 33:187–194.
+//! - Black, J. W., & Leff, P. (1983). Operational models of pharmacological agonism. *Proceedings
+//!   of the Royal Society of London, Series B* 220:141–162.
+//! - Black, J. W., Leff, P., Shankley, N. P., & Wood, J. (1985). An operational model of
+//!   pharmacological agonism: the effect of E/\[A\] curve shape on agonist dissociation constant
+//!   estimation. *British Journal of Pharmacology* 84:561–571. doi:10.1111/j.1476-5381.1985.tb12941.x.
+//! - Langmuir, I. (1918). The adsorption of gases on plane surfaces of glass, mica and platinum.
+//!   *Journal of the American Chemical Society* 40:1361–1403.
+//! - Hulme, E. C., & Trevethick, M. A. (2010). Ligand binding assays at equilibrium: validation and
+//!   interpretation. *British Journal of Pharmacology* 161:1219–1237.
+//!   doi:10.1111/j.1476-5381.2009.00604.x.
+//! - Cheng, Y., & Prusoff, W. H. (1973). Relationship between the inhibition constant (KI) and the
+//!   concentration of inhibitor which causes 50 per cent inhibition (I50) of an enzymatic reaction.
+//!   *Biochemical Pharmacology* 22:3099–3108. doi:10.1016/0006-2952(73)90196-2.
+//! - DeBlasi, A., O'Reilly, K., & Motulsky, H. J. (1989). Calculating receptor number from binding
+//!   experiments using same compound as radioligand and competitor. *Trends in Pharmacological
+//!   Sciences* 10:227–229.
+//! - Swillens, S. (1995). Interpretation of binding curves obtained with high receptor
+//!   concentrations: practical aid for computer analysis. *Molecular Pharmacology* 47:1197–1203.
+//! - Wang, Z.-X. (1995). An exact mathematical expression for describing competitive binding of two
+//!   different ligands to a protein molecule. *FEBS Letters* 360:111–114.
+//! - Motulsky, H. J., & Mahan, L. C. (1984). The kinetics of competitive radioligand binding
+//!   predicted by the law of mass action. *Molecular Pharmacology* 25:1–9.
+//! - Michaelis, L., & Menten, M. L. (1913). Die Kinetik der Invertinwirkung. *Biochemische
+//!   Zeitschrift* 49:333–369.
+//! - Haldane, J. B. S. (1930). *Enzymes*. London: Longmans, Green.
+//! - Segel, I. H. (1975). *Enzyme Kinetics: Behavior and Analysis of Rapid Equilibrium and
+//!   Steady-State Enzyme Systems*. New York: Wiley.
+//! - Morrison, J. F. (1969). Kinetics of the reversible inhibition of enzyme-catalysed reactions by
+//!   tight-binding inhibitors. *Biochimica et Biophysica Acta* 185:269–286.
 
 use crate::library::{ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
@@ -301,6 +355,11 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
     }
 }
 
+/// Three/four-parameter logistic on log10 concentration:
+/// `Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))` (agonist; the inhibitor
+/// form uses `(X - LogIC50) * HillSlope`). The normalized variants fix `Bottom = 0`, `Top = 100`.
+/// Reference: Hill (1910) equation; this log-X `Bottom` / `Top` / `LogEC50` / `HillSlope`
+/// parameterisation follows Motulsky & Christopoulos (2004).
 struct LogDoseResponse {
     id: &'static str,
     name: &'static str,
@@ -411,6 +470,9 @@ impl ParametricModel for LogDoseResponse {
     }
 }
 
+/// Hill equation on linear concentration:
+/// `Y = Bottom + (Top - Bottom) * X^h / (EC50^h + X^h)` (inhibitor form uses `EC50^h / (EC50^h + X^h)`).
+/// Reference: Hill (1910); parameterisation per Motulsky & Christopoulos (2004).
 struct LinearDoseResponse {
     id: &'static str,
     name: &'static str,
@@ -520,6 +582,11 @@ impl ParametricModel for LinearDoseResponse {
     }
 }
 
+/// Five-parameter (asymmetric) logistic:
+/// `Y = Bottom + (Top - Bottom) / (1 + 10^((LogXb - X) * HillSlope))^S`; `S = 1` gives the 4PL.
+/// Derived `LogEC50 = LogXb - log10(2^(1/S) - 1) / HillSlope` (the X giving half the span).
+/// Reference: Richards (1959) generalised logistic; the asymmetry-exponent form used for
+/// dose-response is that of Gottschalk & Dunn (2005), here with log10 X.
 struct RichardsFivePl {
     params: Vec<String>,
 }
@@ -568,6 +635,10 @@ impl ParametricModel for RichardsFivePl {
     }
 }
 
+/// Bell-shaped dose-response: a rising and a falling Hill term sharing a `Dip` level,
+/// `Y = Dip + (Plateau1 - Dip) * s1 + (Plateau2 - Dip) * (1 - s2)`, `si = 1 / (1 + 10^((X - LogEC50_i) * nHi))`.
+/// Reference: built from two Hill (1910) log-logistic terms; no single primary source for this
+/// composite.
 struct BellShapedDoseResponse {
     params: Vec<String>,
 }
@@ -600,6 +671,10 @@ impl ParametricModel for BellShapedDoseResponse {
     }
 }
 
+/// Biphasic dose-response: weighted sum (`Frac`, `1 - Frac`) of two log-logistic Hill terms with
+/// separate `LogEC50` and Hill slopes, each term `1 / (1 + 10^((X - LogEC50_i) * nHi))`.
+/// Reference: built from two Hill (1910) log-logistic terms (two-site analogue); no single
+/// primary source for this composite.
 struct BiphasicDoseResponse {
     params: Vec<String>,
 }
@@ -635,6 +710,10 @@ impl ParametricModel for BiphasicDoseResponse {
     }
 }
 
+/// 4PL reparameterised to fit `LogECF` (the concentration giving `F` % of the span) directly:
+/// `LogEC50 = LogECF + log10((100 - F) / F) / HillSlope`.
+/// Reference: algebraic reparameterisation of the Hill (1910) log-logistic in the
+/// Motulsky & Christopoulos (2004) parameterisation.
 struct DoseResponseEcF {
     params: Vec<String>,
 }
@@ -668,6 +747,10 @@ impl ParametricModel for DoseResponseEcF {
     }
 }
 
+/// 4PL inhibitor curve fitted for the absolute IC50 (concentration at which `Y` equals
+/// `Baseline / 2`, i.e. 50 % of the control response, assuming the 0 % control response is zero):
+/// `LogIC50 = LogAbsIC50 - log10((Top - Baseline/2) / (Baseline/2 - Bottom)) / HillSlope`.
+/// Reference: absolute vs relative IC50, Sebaugh (2011); curve form per Hill (1910).
 struct AbsoluteIc50 {
     params: Vec<String>,
 }
@@ -702,6 +785,11 @@ impl ParametricModel for AbsoluteIc50 {
     }
 }
 
+/// Agonist 4PL whose EC50 is shifted by a competitive antagonist at `AntagConc`:
+/// `LogEC50' = LogEC50 + log10(1 + (AntagConc * 10^pA2)^SchildSlope)`.
+/// Reference: Schild equation, Arunlakshana & Schild (1959); global nonlinear-regression form
+/// per Lew & Angus (1995). `pA2` is `-log10` of the antagonist concentration giving a dose ratio
+/// of 2; it equals `pKB` only when `SchildSlope = 1`.
 struct GaddumSchild {
     params: Vec<String>,
 }
@@ -733,6 +821,9 @@ impl ParametricModel for GaddumSchild {
     }
 }
 
+/// Agonist 4PL whose EC50 is shifted by an allosteric modulator (affinity cooperativity `alpha`,
+/// modulator dissociation constant `Kb`): `EC50' = EC50 * (1 + B/Kb) / (1 + alpha * B/Kb)`.
+/// Reference: allosteric ternary complex model, Ehlert (1988).
 struct AllostericEc50Shift {
     params: Vec<String>,
 }
@@ -767,6 +858,10 @@ impl ParametricModel for AllostericEc50Shift {
     }
 }
 
+/// Operational model of agonism with transducer slope `n`, `X = log10[A]`:
+/// `E = Basal + (Emax - Basal) * tau^n [A]^n / (([A] + KA)^n + tau^n [A]^n)`.
+/// Reference: Black & Leff (1983); the slope-`n` form is Black, Leff, Shankley & Wood (1985).
+/// `Emax` is the system maximum (`Em`), not the agonist's observed maximum.
 struct OperationalAgonism {
     params: Vec<String>,
 }
@@ -811,6 +906,11 @@ impl ParametricModel for OperationalAgonism {
     }
 }
 
+/// One-site saturation binding `B = Bmax * X / (Kd + X)` (rectangular hyperbola), optionally with
+/// a Hill exponent (`Bmax * X^h / (Kd^h + X^h)`) or with linear nonspecific binding plus background
+/// (`+ NS * X + Background`).
+/// Reference: Langmuir (1918) isotherm / mass-action binding; Hill (1910) for the Hill variant;
+/// see Hulme & Trevethick (2010) and Motulsky & Christopoulos (2004).
 struct OneSiteBinding {
     id: &'static str,
     name: &'static str,
@@ -896,6 +996,8 @@ impl ParametricModel for OneSiteBinding {
     }
 }
 
+/// Two independent classes of sites: sum of two `Bmax * X / (Kd + X)` hyperbolas.
+/// Reference: Langmuir (1918) isotherm summed over two site classes; Hulme & Trevethick (2010).
 struct TwoSiteBinding {
     params: Vec<String>,
 }
@@ -928,6 +1030,8 @@ impl ParametricModel for TwoSiteBinding {
     }
 }
 
+/// One-site competition (Hill slope 1) with `LogIC50 = LogKi + log10(1 + [hot] / Kd_hot)`.
+/// Reference: Cheng & Prusoff (1973); log-X form per Motulsky & Christopoulos (2004).
 struct CompetitionOneSiteKi {
     params: Vec<String>,
 }
@@ -961,6 +1065,9 @@ impl ParametricModel for CompetitionOneSiteKi {
     }
 }
 
+/// Two-site competition: `FractionHi`-weighted sum of two one-site curves, each IC50 converted to
+/// Ki with the Cheng & Prusoff (1973) correction (assumes the radioligand has the same `Kd` at
+/// both sites). Reference: Motulsky & Christopoulos (2004).
 struct CompetitionTwoSiteKi {
     params: Vec<String>,
 }
@@ -996,6 +1103,8 @@ impl ParametricModel for CompetitionTwoSiteKi {
     }
 }
 
+/// Single-exponential dissociation `Y = (Y0 - NS) * exp(-Koff * t) + NS`.
+/// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004).
 struct DissociationOnePhase {
     params: Vec<String>,
 }
@@ -1030,6 +1139,8 @@ impl ParametricModel for DissociationOnePhase {
     }
 }
 
+/// Single-exponential association `Y = Ymax * (1 - exp(-Kobs * t))`.
+/// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004).
 struct AssociationOneConc {
     params: Vec<String>,
 }
@@ -1063,6 +1174,10 @@ impl ParametricModel for AssociationOneConc {
     }
 }
 
+/// Association at radioligand concentration `L` with `Kobs = Kon * L + Koff` and plateau
+/// `Bmax * L / (L + Koff / Kon)`.
+/// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004); this is the
+/// competitor-free special case of Motulsky & Mahan (1984).
 struct AssociationTwoConc {
     params: Vec<String>,
 }
@@ -1096,6 +1211,9 @@ impl ParametricModel for AssociationTwoConc {
     }
 }
 
+/// Association (as `association_kinetics_two_conc`) until `Time0`, then dissociation at `Koff`
+/// from the level reached at `Time0`.
+/// Reference: mass-action binding kinetics, Motulsky & Christopoulos (2004).
 struct AssocThenDissoc {
     params: Vec<String>,
 }
@@ -1143,6 +1261,8 @@ impl ParametricModel for AssocThenDissoc {
     }
 }
 
+/// Michaelis–Menten `v = Vmax * S / (Km + S)`; the `kcat` variant uses `Vmax = kcat * Et`.
+/// Reference: Michaelis & Menten (1913); Segel (1975).
 struct MichaelisMenten {
     kcat_mode: bool,
     params: Vec<String>,
@@ -1217,6 +1337,8 @@ impl ParametricModel for MichaelisMenten {
     }
 }
 
+/// Sigmoidal (Hill-type) kinetics `v = Vmax * S^h / (Khalf^h + S^h)`.
+/// Reference: Hill (1910); Segel (1975).
 struct AllostericSigmoidal {
     params: Vec<String>,
 }
@@ -1256,6 +1378,8 @@ impl ParametricModel for AllostericSigmoidal {
     }
 }
 
+/// Uncompetitive substrate inhibition `v = Vmax * S / (Km + S * (1 + S / Ki))`.
+/// Reference: Haldane (1930); Segel (1975).
 struct SubstrateInhibition {
     params: Vec<String>,
 }
@@ -1296,6 +1420,11 @@ enum EnzymeInhibMode {
     Mixed,
 }
 
+/// Rapid-equilibrium reversible inhibition at inhibitor concentration `I`:
+/// competitive (`Km_app = Km (1 + I/Ki)`), pure noncompetitive (`Vmax_app = Vmax / (1 + I/Ki)`),
+/// uncompetitive (`Vmax` and `Km` both divided by `1 + I/(alpha Ki)`), and mixed
+/// (`Vmax_app = Vmax / (1 + I/(alpha Ki))`, `Km_app = Km (1 + I/Ki) / (1 + I/(alpha Ki))`).
+/// Reference: Segel (1975).
 struct EnzymeInhibition {
     id: &'static str,
     name: &'static str,
@@ -1367,6 +1496,10 @@ impl ParametricModel for EnzymeInhibition {
     }
 }
 
+/// Morrison tight-binding inhibition (X = total inhibitor concentration):
+/// `v = Vo * (1 - ((Et + I + Ki_app) - sqrt((Et + I + Ki_app)^2 - 4 Et I)) / (2 Et))`, with
+/// `Ki_app = Ki * (1 + S / Km)` (competitive inhibitor).
+/// Reference: Morrison (1969).
 struct MorrisonKi {
     params: Vec<String>,
 }
@@ -1429,6 +1562,8 @@ fn estimate_global_ns_and_bg(primary: &[DataPoint], ds1: &[DataPoint]) -> (f64, 
 }
 
 /// Global one-site total and nonspecific binding (`dataset 0` = Total, `dataset >= 1` = Nonspecific).
+/// Reference: Langmuir (1918) specific term plus linear nonspecific binding; shared-parameter
+/// global fit per Motulsky & Christopoulos (2004).
 struct OneSiteTotalAndNsGlobal {
     params: Vec<String>,
 }
@@ -1511,6 +1646,8 @@ impl ParametricModel for OneSiteTotalAndNsGlobal {
 }
 
 /// Global two-site total and nonspecific binding (`dataset 0` = Total, `dataset >= 1` = Nonspecific).
+/// Reference: two-site Langmuir (1918) specific term plus linear nonspecific binding; global fit
+/// per Motulsky & Christopoulos (2004).
 struct TwoSiteTotalAndNsGlobal {
     params: Vec<String>,
 }
@@ -1610,6 +1747,8 @@ impl ParametricModel for TwoSiteTotalAndNsGlobal {
 }
 
 /// Specific saturation binding with ligand depletion (Swillens 1995 / Morrison quadratic root).
+/// Free ligand solves `Total = Free * (1 + NS) + Rt * Free / (Kd + Free)`.
+/// Reference: Swillens (1995); quadratic-root treatment as in Morrison (1969).
 struct OneSiteSpecificLigandDepletion {
     params: Vec<String>,
 }
@@ -1755,6 +1894,10 @@ fn tighten_competition_bracket(rt: f64, hot_nm: f64, kd: f64, i_tot: f64, ki: f6
 }
 
 /// One-site competitive binding with depletion of both radioligand and unlabeled competitor (`X = log10[Competitor M]`).
+/// Solves the exact mass balance `Rt = R + Hot * R / (Kd * (1 + NS) + R) + I * R / (Ki + R)` numerically
+/// for free receptor `R`; `Y` is the specifically bound radioligand `Hot * R / (Kd * (1 + NS) + R)`.
+/// Reference: exact two-ligand competition with depletion, Wang (1995) (closed-form cubic; solved
+/// here by safeguarded Newton iteration); see also Swillens (1995).
 struct OneSiteCompetitionLigandDepletion {
     params: Vec<String>,
 }
@@ -1891,7 +2034,9 @@ impl ParametricModel for OneSiteCompetitionLigandDepletion {
     }
 }
 
-/// Allosteric ternary-complex saturation binding with modulator concentration `ModConc`.
+/// Allosteric ternary-complex saturation binding with modulator concentration `ModConc`:
+/// `B = Bmax * X / (X + Kd * (1 + ModConc/Kb) / (1 + alpha * ModConc/Kb))`.
+/// Reference: Ehlert (1988).
 struct AllostericModulatorSaturation {
     params: Vec<String>,
 }
@@ -1971,7 +2116,9 @@ impl ParametricModel for AllostericModulatorSaturation {
     }
 }
 
-/// Homologous one-site competitive binding (`Kd_cold == Kd_hot`, `X = log10[Cold]`).
+/// Homologous one-site competitive binding (`Kd_cold == Kd_hot`, `X = log10[Cold]`):
+/// `B = Bmax * Hot / (Hot + Cold + Kd) + NS`.
+/// Reference: DeBlasi, O'Reilly & Motulsky (1989).
 struct HomologousOneSiteCompetition {
     params: Vec<String>,
 }
@@ -2047,6 +2194,8 @@ impl ParametricModel for HomologousOneSiteCompetition {
 }
 
 /// Motulsky-Mahan (1984) closed-form competitive binding kinetics vs time `t = X`.
+/// Reference: Motulsky & Mahan (1984), eq. for radioligand binding in the presence of an unlabeled
+/// competitor (`kon1`/`koff1` radioligand, `kon2`/`koff2` competitor).
 struct MotulskyMahanKinetics {
     params: Vec<String>,
 }

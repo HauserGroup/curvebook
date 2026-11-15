@@ -26,11 +26,12 @@ Before tagging or publishing a release, verify both source invariants and packag
       ```sh
       cargo xtask licenses
       ```
-      This verifies crates offline against [docs/licences.md](licences.md) (`deny.toml`) and builds `THIRD-PARTY-LICENSES.html` (`about.toml`); CI adds `cargo deny check licenses` and `cargo about` with `cargo xtask licenses --html` fallback.
+      This verifies crates offline against [docs/licences.md](licences.md) (`deny.toml`), and runs `cargo deny check licenses` when installed (mandatory when `CI=true`); add `--html` to write `THIRD-PARTY-LICENSES.html` (`cargo about generate about.hbs` when `cargo-about` is installed, otherwise a built-in renderer). The release workflow's `licenses` job uses `cargo about` with the `cargo xtask licenses --html` fallback.
     - Run the full CI gate suite:
       ```sh
       cargo xtask ci
       ```
+      Hosted CI currently fails on `main` at the `actionlint` install step of `.github/workflows/ci.yml` before any Rust gate runs (`R0.6`, open in [ROADMAP.md](ROADMAP.md)), so a local `cargo xtask ci` pass is the only gate evidence until that is fixed.
 2. **Cross-platform packaging integrity scripts:**
    - Shared packaging metadata / brand hygiene check (verifies `packaging/env.sh` values and rejects stale template placeholders):
      ```sh
@@ -74,7 +75,7 @@ Every tagged release distributes binaries and archives alongside licence disclos
 
 - **Canonical identity (`packaging/env.sh`):** All installers share App ID `org.lumencraft.LumenCraft`, binary/CLI slug `lumencraft` / `lumencraft-cli`, and project/template/interchange file associations (`.lumencraft`, `.lctemplate`, `.pzfx`, `.prism`). `packaging/check-app-specific.sh` must pass cleanly without template leftover strings.
 - **Zero Telemetry & Web Privacy Headers:** LumenCraft ships zero telemetry, analytics, crash uploaders, update-check pings, or external third-party cloud scanners (`cargo xtask telemetry`). Web deployments bundle `packaging/web/_headers` and `packaging/web/.htaccess` enforcing `default-src 'self'`, `connect-src 'none'`, `Referrer-Policy: no-referrer`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, and `Cross-Origin-Embedder-Policy: require-corp`.
-- **Zero bundled fonts:** Packages do **not** embed binary fonts by default (`cargo xtask assets` rejects tracked `.ttf`/`.otf`/`.woff`/`.woff2`). Desktop releases resolve OS fonts at runtime (`LUMENCRAFT_FONTS_DIR` override); web tests using `bundled-fonts` require explicit local font staging (`cargo xtask web-fonts`) with matching licence notice rules ([docs/licences.md](licences.md)).
+- **Zero bundled fonts:** Packages do **not** embed binary fonts by default (`cargo xtask assets` rejects tracked `.ttf`/`.otf`/`.woff`/`.woff2`). Desktop releases probe OS font paths at runtime (`--ttf-font <path>` adds a face); `LUMENCRAFT_FONTS_DIR` is read only at build time, and web tests using `bundled-fonts` require explicit local font staging (`cargo xtask web-fonts`) with matching licence notice rules ([docs/licences.md](licences.md)).
 - **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.lumencraft`, `.lctemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`.
 - **Linux specifics:** `packaging/linux/` installs desktop, AppStream, icon sizes, and MIME definitions consistently for `.AppImage`, `.deb`, `.rpm`, and Flatpak (`org.lumencraft.LumenCraft`).
 - **Windows specifics:** WiX v5 dual-scope MSI supports unprivileged per-user installation by default and elevated per-machine deployment ([packaging/windows/INSTALLATION.md](../packaging/windows/INSTALLATION.md)). Both `.msi` and `-portable.zip` link the static CRT to avoid external redistributable prompts.
@@ -86,10 +87,11 @@ Every tagged release distributes binaries and archives alongside licence disclos
 
 Once the release build passes verification and is published:
 
-1. Mark all shipped `R<m>.<n>` items **Done** in [docs/ROADMAP.md](ROADMAP.md) (moving milestone archival notes to `docs/roadmap-history.md` if retiring a milestone phase).
-2. Refresh and verify [docs/STATUS.md](STATUS.md) and open-item summaries:
+1. Confirm the release-gate table in [docs/ROADMAP.md](ROADMAP.md) (`Legacy Milestone & Gate Mapping`): the **Agent-harness workflows** gate (formerly "Core workflows") covers the semantic `gui_only` agent suite only, and a `1.0` release additionally requires the **Human GUI workflows** gate (`R10`).
+2. Mark all shipped `R<m>.<n>` items **Done** in [docs/ROADMAP.md](ROADMAP.md) (moving milestone archival notes to `docs/roadmap-history.md` if retiring a milestone phase).
+3. Refresh and verify [docs/STATUS.md](STATUS.md) and open-item summaries:
    ```sh
    cargo xtask status
    cargo xtask pending
    ```
-3. Confirm release notes link only verified changes, `THIRD-PARTY-LICENSES.html` and `SHA256SUMS.txt` are published cleanly alongside installers, and open issues closed by `(R<m>.<n>)` PRs are updated.
+4. Confirm release notes link only verified changes, `THIRD-PARTY-LICENSES.html` and `SHA256SUMS.txt` are published cleanly alongside installers, and open issues closed by `(R<m>.<n>)` PRs are updated.

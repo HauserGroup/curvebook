@@ -2,6 +2,55 @@
 //! Brookmeyer–Crowley median survival CI, Log-rank (Mantel–Cox), Gehan–Breslow–Wilcoxon,
 //! log-rank trend, Hazard Ratios, and Cox Proportional Hazards regression (Efron & Breslow ties)
 //! with Schoenfeld residual proportional-hazards diagnostics.
+//!
+//! Methods follow Kaplan & Meier (1958), Greenwood (1926), Kalbfleisch & Prentice (2002),
+//! Brookmeyer & Crowley (1982), Mantel (1966), Peto & Peto (1972), Gehan (1965), Breslow (1970),
+//! Tarone (1975), Berry, Kitchin & Mock (1991), Cox (1972), Breslow (1974), Efron (1977),
+//! Schoenfeld (1982), Therneau, Grambsch & Fleming (1990), Grambsch & Therneau (1994),
+//! Harrell et al. (1982), with textbook treatments in Klein & Moeschberger (2003) and
+//! Therneau & Grambsch (2000).
+//!
+//! References:
+//! - Kaplan, E. L., & Meier, P. (1958). Nonparametric estimation from incomplete observations.
+//!   *Journal of the American Statistical Association*, 53(282), 457-481.
+//!   `doi:10.1080/01621459.1958.10501452`.
+//! - Greenwood, M. (1926). The natural duration of cancer. *Reports on Public Health and Medical
+//!   Subjects*, No. 33. London: HMSO.
+//! - Kalbfleisch, J. D., & Prentice, R. L. (2002). *The Statistical Analysis of Failure Time Data*
+//!   (2nd ed.). New York: Wiley.
+//! - Brookmeyer, R., & Crowley, J. (1982). A confidence interval for the median survival time.
+//!   *Biometrics*, 38(1), 29-41. `doi:10.2307/2530286`.
+//! - Mantel, N. (1966). Evaluation of survival data and two new rank order statistics arising in
+//!   its consideration. *Cancer Chemotherapy Reports*, 50(3), 163-170.
+//! - Peto, R., & Peto, J. (1972). Asymptotically efficient rank invariant test procedures.
+//!   *Journal of the Royal Statistical Society, Series A*, 135(2), 185-207. `doi:10.2307/2344317`.
+//! - Gehan, E. A. (1965). A generalized Wilcoxon test for comparing arbitrarily singly-censored
+//!   samples. *Biometrika*, 52(1/2). `doi:10.1093/biomet/52.1-2.203`.
+//! - Breslow, N. (1970). A generalized Kruskal-Wallis test for comparing K samples subject to
+//!   unequal patterns of censorship. *Biometrika*, 57(3), 579-594. `doi:10.1093/biomet/57.3.579`.
+//! - Tarone, R. E. (1975). Tests for trend in life table analysis. *Biometrika*, 62(3), 679-682.
+//!   `doi:10.1093/biomet/62.3.679`.
+//! - Berry, G., Kitchin, R. M., & Mock, P. A. (1991). A comparison of two simple hazard ratio
+//!   estimators based on the logrank test. *Statistics in Medicine*, 10(5), 749-755.
+//!   `doi:10.1002/sim.4780100510`.
+//! - Cox, D. R. (1972). Regression models and life-tables. *Journal of the Royal Statistical
+//!   Society, Series B*, 34(2), 187-220. `doi:10.1111/j.2517-6161.1972.tb00899.x`.
+//! - Breslow, N. (1974). Covariance analysis of censored survival data. *Biometrics*, 30(1).
+//!   `doi:10.2307/2529620`.
+//! - Efron, B. (1977). The efficiency of Cox's likelihood function for censored data. *Journal of
+//!   the American Statistical Association*, 72(359), 557-565. `doi:10.1080/01621459.1977.10480613`.
+//! - Schoenfeld, D. (1982). Partial residuals for the proportional hazards regression model.
+//!   *Biometrika*, 69(1), 239-241. `doi:10.1093/biomet/69.1.239`.
+//! - Therneau, T. M., Grambsch, P. M., & Fleming, T. R. (1990). Martingale-based residuals for
+//!   survival models. *Biometrika*, 77(1), 147-160. `doi:10.1093/biomet/77.1.147`.
+//! - Grambsch, P. M., & Therneau, T. M. (1994). Proportional hazards tests and diagnostics based on
+//!   weighted residuals. *Biometrika*, 81(3), 515-526. `doi:10.1093/biomet/81.3.515`.
+//! - Harrell, F. E., Califf, R. M., Pryor, D. B., Lee, K. L., & Rosati, R. A. (1982). Evaluating
+//!   the yield of medical tests. *JAMA*, 247(18), 2543-2546. `doi:10.1001/jama.247.18.2543`.
+//! - Klein, J. P., & Moeschberger, M. L. (2003). *Survival Analysis: Techniques for Censored and
+//!   Truncated Data* (2nd ed.). New York: Springer.
+//! - Therneau, T. M., & Grambsch, P. M. (2000). *Modeling Survival Data: Extending the Cox Model*.
+//!   New York: Springer. `doi:10.1007/978-1-4757-3294-8`.
 
 use lumencraft_doc::{
     AnalysisSpec, Cell, CellValue, ChecklistStatus, CoxTieMethod, CurveSamplePoint, DataSheet, FittedCurveOverlay, MultipleVariablesTable,
@@ -81,7 +130,8 @@ pub struct CoxCovariateResult {
 }
 
 /// Single time-indexed baseline cumulative hazard and survival point from a Cox PH fit
-/// (evaluated at the sample mean covariates).
+/// (evaluated at the sample mean covariates). `cum_hazard` is the Breslow (1974) estimator
+/// (Efron-adjusted under Efron ties) and `survival = exp(-cum_hazard)`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CoxBaselinePoint {
     pub time: f64,
@@ -127,6 +177,21 @@ pub struct CoxPhResult {
 
 /// Compute Kaplan–Meier survival curve, Greenwood SE, pointwise CIs (asymmetrical log-log or linear),
 /// and Brookmeyer–Crowley median survival CI.
+///
+/// - Survival: Kaplan & Meier (1958) product-limit estimator `S(t) = prod_{t_i <= t} (1 - d_i / n_i)`
+///   over distinct event times. At a tied time, events are counted before censorings (censored
+///   subjects remain in the risk set `n_i`), the usual product-limit convention.
+/// - Standard error: Greenwood (1926) variance `Var[S(t)] = S(t)^2 * sum d_i / (n_i (n_i - d_i))`.
+///   Terms with `n_i = d_i` (where `S` drops to 0) are omitted from the sum.
+/// - Pointwise CI: either the linear ("plain") interval `S +/- z * SE`, clamped to `[0, 1]`, or the
+///   log-log interval `S^exp(+/- z * se_ll)` with `se_ll = sqrt(greenwood_sum) / |ln S|`
+///   (Kalbfleisch & Prentice 2002; Klein & Moeschberger 2003). No arcsine-square-root or plain
+///   `log` transform is implemented.
+/// - Median: the first time `S(t) < 0.5`. If `S(t)` equals 0.5 exactly over an interval, the
+///   midpoint of that interval and the next event time is used.
+/// - Median CI: Brookmeyer & Crowley (1982) test inversion; see `brookmeyer_crowley_median_ci`.
+///
+/// Full references are listed in the module header.
 pub fn kaplan_meier_curve(
     label: &str,
     observations: &[SurvivalObservation],
@@ -239,8 +304,15 @@ fn km_quantile_time(steps: &[KaplanMeierStep], target_s: f64) -> Option<f64> {
     prev_t
 }
 
-/// Brookmeyer–Crowley (1982) confidence interval for median survival using the log-log transformed
-/// Greenwood interval crossing `S(t) = 0.5` (matching standard `survfit` default `"log"`/`"log-log"`).
+/// Brookmeyer & Crowley (1982) confidence interval for median survival, obtained by inverting the
+/// pointwise Greenwood interval at `S(t) = 0.5`: the lower limit is the first time the lower
+/// pointwise bound reaches `<= 0.5`, the upper limit is the first time the upper pointwise bound
+/// falls below 0.5 (open-ended if it never does).
+///
+/// The pointwise bounds are whichever transform `kaplan_meier_curve` was asked for. With the linear
+/// ("plain") band this is the original Brookmeyer & Crowley (1982) interval; with the log-log band
+/// it is the transformed variant of the same test inversion described in Klein & Moeschberger
+/// (2003). Full references are listed in the module header.
 fn brookmeyer_crowley_median_ci(steps: &[KaplanMeierStep], z_crit: f64) -> (Option<f64>, Option<f64>) {
     let lo_time = steps.iter().find(|s| s.ci_lower <= 0.5 + 1e-12).map(|s| s.time);
     let hi_time = steps.iter().find(|s| s.ci_upper < 0.5 - 1e-12).map(|s| s.time);
@@ -256,6 +328,18 @@ enum SurvivalWeight {
 
 /// Multi-cohort log-rank (Mantel–Cox) or Gehan–Breslow–Wilcoxon chi-square test using exact
 /// hypergeometric variance covariance matrix over distinct event times.
+///
+/// Both tests are members of the weighted log-rank class: `U_g = sum_j w_j (d_gj - n_gj d_j / n_j)`
+/// with hypergeometric covariance `V_gh = sum_j w_j^2 d_j (n_j - d_j) / (n_j (n_j - 1)) * n_gj
+/// (delta_gh - n_hj / n_j)`, and `chi^2 = U' V^- U` on `K - 1` degrees of freedom computed from the
+/// first `K - 1` groups (Klein & Moeschberger 2003).
+/// - `w_j = 1`: log-rank test (Mantel 1966; Peto & Peto 1972).
+/// - `w_j = n_j` (number at risk): Gehan (1965) generalized Wilcoxon test, extended to `K` samples by
+///   Breslow (1970). The variance is the conditional hypergeometric weighted log-rank variance,
+///   not Gehan's original two-sample permutation variance, so results can differ slightly from
+///   Gehan (1965) in small samples.
+///
+/// Full references are listed in the module header.
 pub fn compare_survival_curves(cohorts: &[&[SurvivalObservation]], gehan_wilcoxon: bool) -> Result<SurvivalComparisonResult, StatsError> {
     let k = cohorts.len();
     if k < 2 {
@@ -288,6 +372,11 @@ pub fn compare_survival_curves(cohorts: &[&[SurvivalObservation]], gehan_wilcoxo
 }
 
 /// Log-rank test for linear trend across `K >= 2` ordered cohorts (Tarone 1975).
+///
+/// Uses the log-rank score vector `U` and hypergeometric covariance `V` from
+/// `compare_survival_curves` with equally spaced scores `s = (1, ..., K)` in cohort order:
+/// `chi^2 = (s' U)^2 / (s' V s)` on 1 degree of freedom (Tarone 1975; Klein & Moeschberger 2003).
+/// Full references are listed in the module header.
 pub fn log_rank_trend_test(cohorts: &[&[SurvivalObservation]]) -> Result<SurvivalComparisonResult, StatsError> {
     let k = cohorts.len();
     if k < 2 {
@@ -308,6 +397,18 @@ pub fn log_rank_trend_test(cohorts: &[&[SurvivalObservation]]) -> Result<Surviva
 }
 
 /// Mantel–Haenszel and Log-rank Hazard Ratio estimates with `confidence` intervals for two cohorts.
+///
+/// Both estimates (cohort A relative to cohort B) come from the log-rank quantities `O_g`, `E_g`,
+/// and the hypergeometric variance `V`, and correspond to the two log-rank estimators compared by
+/// Berry, Kitchin & Mock (1991):
+/// - `log_rank_hr`: the ratio of observed-to-expected rates `(O_A / E_A) / (O_B / E_B)` (called the
+///   Pike estimator by Berry, Kitchin & Mock 1991). It falls back to `exp((O_A - E_A) / V)` when
+///   `E_A`, `E_B`, or `O_B` is zero. Its CI uses `exp(ln HR +/- z / sqrt(V))`.
+/// - `mantel_haenszel_hr`: `exp((O_A - E_A) / V)` with CI `exp((O_A - E_A) / V +/- z / sqrt(V))`.
+///   Berry, Kitchin & Mock (1991) call this the Peto (one-step) estimator. It is not the
+///   Mantel–Haenszel common-ratio estimator `sum(d_Aj n_Bj / n_j) / sum(d_Bj n_Aj / n_j)`.
+///
+/// Full references are listed in the module header.
 pub fn two_cohort_hazard_ratio(
     cohort_a: &[SurvivalObservation],
     cohort_b: &[SurvivalObservation],
@@ -419,6 +520,23 @@ pub struct CoxSubject {
 /// Fit Cox Proportional Hazards model via Newton–Raphson with backtracking step-halving,
 /// supporting Breslow and Efron tie handling, omnibus LR/Wald/Score tests, Harrell's C-index,
 /// and Schoenfeld residual proportional-hazards checks.
+///
+/// - Model and estimation: maximizes the Cox (1972) partial likelihood (covariates are centred at
+///   their sample means first; `beta` is invariant to the shift). Linear predictors are clamped to
+///   `[-50, 50]` before exponentiation as an overflow guard.
+/// - Ties: Breslow (1974) approximation (every tied event sees the full risk set) or Efron (1977)
+///   approximation (the `m`-th of `d` tied events sees the risk set minus `m / d` of the tied
+///   events' weight), with the matching score and observed information (Therneau & Grambsch 2000).
+/// - Inference: `Cov(beta)` is the inverse observed information at convergence; Wald `z` and HR CIs
+///   `exp(beta +/- z * SE)`; omnibus likelihood-ratio, Wald, and score (at `beta = 0`) chi-square
+///   tests on `p` degrees of freedom.
+/// - Residuals and baseline hazard: martingale and deviance residuals (Therneau, Grambsch & Fleming
+///   1990) and the Breslow-type cumulative baseline hazard (Breslow 1974), Efron-adjusted when
+///   Efron ties are selected (Therneau & Grambsch 2000).
+/// - Discrimination: Harrell et al. (1982) concordance index.
+/// - Proportional hazards: Schoenfeld (1982) residuals and the Grambsch & Therneau (1994) test.
+///
+/// Full references are listed in the module header.
 pub fn cox_ph_regression(
     subjects: &[CoxSubject],
     covariate_names: &[String],
@@ -614,6 +732,8 @@ fn cox_cov_and_corr_matrices(cov_beta: &DenseMatrix, p: usize) -> (Vec<Vec<f64>>
     (cov_rows, corr_rows)
 }
 
+/// Log partial likelihood, score vector, and observed information of the Cox (1972) model at
+/// `beta`, with Breslow (1974) or Efron (1977) tie handling (Therneau & Grambsch 2000).
 fn cox_eval(
     ordered: &[(f64, bool, Vec<f64>, usize)],
     beta: &[f64],
@@ -731,6 +851,17 @@ fn solve_quad_form(mat_data: &[f64], vec: &[f64], p: usize) -> Result<f64, Stats
     Ok(vec.iter().zip(sol.iter()).map(|(a, b)| a * b).sum::<f64>().max(0.0))
 }
 
+/// Schoenfeld (1982) residuals `r_k = x_k - xbar(beta, t_k)` at each event (with the Efron-weighted
+/// risk-set mean when Efron ties are used) and the Grambsch & Therneau (1994) proportional-hazards
+/// tests based on scaled residuals `r*_k = d * Cov(beta) * r_k`.
+///
+/// The time transform is the event rank divided by `d + 1` (tied event times share their average
+/// rank). Per covariate, `rho` is the Pearson correlation of `r*_kj` with the transformed time, and
+/// the test statistic is the approximate form
+/// `(sum_k (g_k - gbar) r*_kj)^2 / (d * Cov(beta)_jj * sum_k (g_k - gbar)^2)` on 1 df. The global
+/// statistic is the matching approximate form using the full `Cov(beta)` on `p` df. The `+ beta`
+/// offset of the scaled residuals is omitted because it does not affect either statistic.
+/// Full references are listed in the module header.
 fn schoenfeld_diagnostics(
     ordered: &[(f64, bool, Vec<f64>, usize)],
     beta: &[f64],
@@ -855,6 +986,14 @@ fn schoenfeld_diagnostics(
     Ok((rhos, ps, global_chi2.max(0.0)))
 }
 
+/// Martingale residuals `M_i = delta_i - exp(x_i' beta) H0(t_i)` and deviance residuals
+/// `sign(M_i) sqrt(-2 (M_i + delta_i ln(delta_i - M_i)))` (Therneau, Grambsch & Fleming 1990), and
+/// the cumulative baseline hazard at the mean covariates.
+///
+/// The baseline hazard increment at each event time is the Breslow (1974) estimator
+/// `d_j / sum_{risk set} exp(x' beta)`, or with Efron ties the Efron-adjusted increment
+/// `sum_m 1 / (S0 - (m / d) S0_events)`; a subject dying at a tied time is charged the
+/// `(1 - m / d)`-weighted share of that increment (Therneau & Grambsch 2000).
 fn cox_residuals_and_baseline(
     ordered: &[(f64, bool, Vec<f64>, usize)],
     beta: &[f64],
@@ -914,6 +1053,9 @@ fn cox_residuals_and_baseline(
     (mart, dev, baseline)
 }
 
+/// Harrell et al. (1982) concordance index for the fitted linear predictor. A pair is usable when
+/// the subject with the shorter time had an event (an event tied in time with a censored subject
+/// counts as shorter); tied linear predictors score 1/2. Pairs of tied event times are excluded.
 fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> f64 {
     let lp: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum()).collect();
     let mut conc = 0.0_f64;

@@ -15,7 +15,7 @@ Public behavioural references:
 1. **Typed experimental semantics, never untyped A1 spreadsheets.** Every `DataSheet` in `lumencraft-doc` carries an explicit `TableArchetype` variant that governs valid subcolumn layouts, compatible analyses, and default graph types.
 2. **Non-destructive exclusions and missingness.** Every cell is an explicit enum (`CellValue::Number(f64)`, `CellValue::Text(String)`, `CellValue::Empty`) paired with an `excluded: bool` mask. Excluded cells remain visible in the grid (styled in blue italics with an `*` badge) and remain stored in `.lumencraft` files, while downstream transforms, statistical tests, curve fits, and graphs treat them as masked observations without mutating raw values.
 3. **Bounded untrusted dimensions.** Project loaders, CSV importers, clipboard paste handlers, and command parameters enforce explicit caps (`MAX_ROWS = 1_000_000`, `MAX_DATA_SETS = 1_024`, `MAX_SUBCOLUMNS = 512`, `MAX_TITLE_BYTES = 4_096`) and return `DocError` / `EngineError` rather than panicking or exhausting memory.
-4. **Freeze state.** A `DataSheet` exposes `frozen: bool` (matching the Prism 11.0 Freeze/Unfreeze table workflow). When `frozen` is `true`, cell-edit, paste, row/column insertion, and formula-edit commands return `EngineError::SheetFrozen` while read-only inspection, downstream analyses, and graph styling remain active.
+4. **Freeze state.** A `DataSheet` exposes `frozen: bool` (matching the Prism 11.0 Freeze/Unfreeze table workflow). When `frozen` is `true`, cell-edit, paste, row/column insertion, and formula-edit commands return `DocError::SheetFrozen` (surfaced as `ErrorCode::FrozenSheet`, `"frozen_sheet"`) while read-only inspection, downstream analyses, and graph styling remain active.
 
 ---
 
@@ -53,12 +53,12 @@ When a user enters pre-averaged data (`MeanSdN`, `MeanSemN`, `MeanCvN`) instead 
 
 Each column in a `MultipleVariables` sheet stores a `VariableRole` (`Continuous`, `Categorical`, `Label`, or `Calculated`) paired with `role_inferred: bool` (displaying a muted badge when auto-inferred on paste/import vs. an accented badge once explicitly confirmed by the user):
 - **Bulk categorical level recoding (`table.recodeLevels`):** Renaming a category token in the Variables inspector (for instance correcting `"Hzel"` to `"Hazel"`) rewrites matching non-excluded and excluded cells across the column atomically and merges the two levels' frequency counts in a single undoable transaction.
-- **Categorical ordering (`LevelOrderSpec`, Prism 11.1 parity):** Each `Categorical` column stores:
+- **Categorical ordering (`LevelOrderSpec`, Prism 11.1 parity):** Each `Categorical` column stores a `LevelOrderSpec { order: LevelOrderKind, reversed }` (`crates/doc/src/archetypes.rs`) where `LevelOrderKind` is one of:
   - `EntryOrder` (order of first appearance in the column),
   - `Alphabetical` (natural case-insensitive UTF-8 sort),
   - `FrequencyDescending` / `FrequencyAscending` (count of non-excluded rows),
   - `Explicit(Vec<String>)` (manual drag-ordered sequence; unseen levels append deterministically in entry order),
-  - `reversed: bool` modifier.
+  - plus the `reversed: bool` modifier.
 
 Graphs referencing a `MultipleVariables` sheet may either inherit the table's `LevelOrderSpec` or override display order per axis/legend without mutating the source table's contrast reference level.
 
@@ -77,7 +77,7 @@ Info constants and upstream `ResultSheet` scalars (such as a fitted $K_d$ from a
 - Standard-curve dilution factors and baseline offsets,
 - Dynamic axis titles, callout text boxes, and layout headers (`{{info:Ligand}}`, `{{result:fit-1:EC50}}`).
 
-`lumencraft-engine` validates all constant hooks through its topological DAG before execution; circular parameter/constant references return `EngineError::DependencyCycle` and never recurse infinitely (preventing the cyclic-hook corruption class).
+`lumencraft-engine` validates all constant hooks through its topological DAG before execution; circular parameter/constant references are rejected with `ErrorCode::CycleDetected` (`"cycle_detected"`, from `FormatError::DependencyCycle` / link-cycle detection in `crates/engine/src/dag.rs`) and never recurse infinitely (preventing the cyclic-hook corruption class).
 
 ---
 
@@ -90,7 +90,7 @@ In `MultipleVariables` sheets, a column may declare `VariableSource::Calculated 
 - Formulas begin with `=` in UI entry (stored normalized without leading `=`).
 - Variable references resolve column names (`[Body Mass] / ([Height_m]^2)` or bare identifiers when unambiguous). Self-references and multi-column cycles are rejected during DAG compilation.
 - Missing (`Empty`), excluded, or non-numeric cells propagate `Empty` (`NaN` internally mapped back to `CellValue::Empty` with a diagnostic badge, never panicking on `0.0 / 0.0` or `ln(-1.0)`).
-- Arithmetic & scalar functions share the unified AST evaluator with `lumencraft-transform` and `lumencraft-fit` (`abs`, `sqrt`, `sqr`, `ln`, `log`/`log10`, `log2`, `exp`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `arctan2(x, y)`, `logit`, `probit` [$5 + \Phi^{-1}(p)$], `round`, `floor`, `ceil`, `int`, `sgn`, `min`, `max`, `if`, `and`, `or`, `not`, `is_defined`).
+- Arithmetic & scalar functions are evaluated by the `lumencraft-transform` formula engine (`crates/transform/src/formula/`; the curve-fit equation DSL in `crates/fit/src/dsl.rs` is a separate compiler with an overlapping function set) (`abs`, `sqrt`, `sqr`, `ln`, `log`/`log10`, `log2`, `exp`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `arctan2(x, y)`, `logit`, `probit` [$5 + \Phi^{-1}(p)$], `round`, `floor`, `ceil`, `int`, `sgn`, `min`, `max`, `if`, `and`, `or`, `not`, `is_defined`).
 - **Aggregate & conditional column functions** (available in Calculated Variables and Select-and-Transform, disallowed inside nonlinear regression models):
   - `count(var)`, `sum(var)`, `mean(var)`, `sd(var)`, `sem(var)`, `median(var)`, `iqr(var)`, `min_col(var)`, `max_col(var)`, `percentile(var, p)`
   - `countif`, `sumif`, `meanif`
@@ -102,19 +102,19 @@ In `MultipleVariables` sheets, a column may declare `VariableSource::Calculated 
 
 ## 5. Derived Transforms (`crates/transform`)
 
-Transforms never overwrite a `DataSheet` in place; they execute as pure functions `(DataSheet, TransformSpec) -> Result<ResultSheet, TransformError>` inside the reactive DAG so downstream analyses and graphs can bind to transformed outputs while raw data stay untouched:
+Transforms never overwrite a `DataSheet` in place; they execute as pure functions (`execute_transform(&DataSheet, &TransformAnalysisSpec, &TransformContext) -> Result<TransformOutput, TransformError>` and `execute_analysis_transform(…) -> Result<ResultSheet, TransformError>` in `crates/transform/src/ops/mod.rs`) inside the reactive DAG so downstream analyses and graphs can bind to transformed outputs while raw data stay untouched:
 
-1. **Mathematical transforms (`TransformMath`):**
+1. **Mathematical transforms (`TransformAnalysisSpec::Math`, `MathTransformPreset`):**
    - Standard presets on $X$ and/or $Y$: $\ln(v)$, $\log_{10}(v)$, $\log_2(v)$, $10^v$, $e^v$, $1/v$, $\sqrt{v}$, $v^2$, $\text{logit}(v) = \ln(v/(1-v))$, $\text{probit}(v) = 5 + \Phi^{-1}(v)$, $\arcsin(\sqrt{v})$, linear scale $a v + b$, pharmacology concentration conversions ($\text{M} \leftrightarrow \text{mM}, \mu\text{M}, \text{nM}, \text{pM}$ and $-\log_{10}[\text{M}] = \text{pEC}_{50}$).
    - Error propagation when input is `Mean + SD/SEM`: exact transformation of replicate endpoints or first-order delta-method $|f'(M)| \cdot \text{SD}$ depending on user setting.
-2. **Normalize (`TransformNormalize`):**
+2. **Normalize (`TransformAnalysisSpec::Normalize`):**
    - Per-dataset or global `0%` anchor (minimum, `0.0`, first/last row, mean of control column, or hooked constant) and `100%` anchor (maximum, sum, last/first row, or hooked constant), outputting percentages or fractions `[0, 1]` with optional clamping/stretching.
-3. **Remove Baseline and Column Math (`TransformBaseline`):**
+3. **Remove Baseline and Column Math (`TransformAnalysisSpec::RemoveBaseline`):**
    - Subtract or divide by baseline column(s), linear baseline interpolated between first/last $k$ rows, or mean of replicate subcolumns (`A - B`, `A / B`, `% change from baseline`).
-4. **Transpose, Prune Rows & Binning:**
+4. **Transpose, Prune Rows & Binning (`Transpose`, `PruneRows`, `SelectAndTransform`):**
    - Swap rows $\leftrightarrow$ data sets while preserving titles; decimate every $k$-th row or average $k$-row windows for high-frequency time-series traces; Select & Transform subsetting (`MultipleVariables` $\to$ `XY` / `Column` / `Grouped` / `Survival`).
 5. **Simulate XY / Column / Contingency Data (`TransformAnalysisSpec::Simulate`):**
-   - Deterministic seeded PRNG (`lumencraft-math::rng`) parameterized by `seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise` (`SimulationNoise`: `None`, `Gaussian`, `RelativePercent`, or `Poisson`) to generate synthetic curves or distributions for Monte Carlo validation, power exploration, and teaching workflows.
+   - Deterministic seeded PRNG (`lumencraft_math::rng::DeterministicRng`) parameterized by `seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise` (`SimulationNoise`: `None`, `Gaussian`, `RelativePercent`, or `Poisson`) to generate synthetic curves or distributions for Monte Carlo validation, power exploration, and teaching workflows.
 
 ---
 
@@ -138,22 +138,22 @@ Beyond derived `ResultSheet` transforms, a `DataSheet` may embed live, provenanc
 
 ---
 
-## 7. Engine Command Contracts (`crates/engine/src/cmd/table.rs`)
+## 7. Engine Command Contracts (`crates/engine/src/cmd/{sheet,table,info,analysis}.rs`)
 
-Planned canonical command IDs (all JSON-serializable, undoable in one step, reachable from GUI, CLI, `--control`, and MCP):
+Landed command IDs (all JSON-serializable, undoable in one step, reachable from GUI, CLI, `--control`, and MCP). Key parameters are listed below; the generated [`docs/commands.md`](commands.md) is the authoritative parameter schema:
 
-- `sheet.createData` — `{ archetype, title, designHint, subcolumnMode, replicates }`
-- `sheet.freeze` / `sheet.unfreeze` — `{ sheetId }`
-- `sheet.clonePipeline` — `{ sheetId, keepXValues, clearYValues, clearColumnTitles, clearRowTitles, overrideReplicates, title }` ("Clone family / New data for existing graph & analysis")
-- `table.setCells` — `{ sheetId, edits: [{ row, dataSet, subcolumn, value }] }`
-- `table.pasteLink` — `{ targetSheetId, anchor, linkSpec }` (live `LinkedDataRegion` including reactive transpose)
-- `table.excludeCells` — `{ sheetId, selection, excluded: bool }`
-- `table.setTitles` — `{ sheetId, xTitle, dataSetTitles, rowTitles }`
-- `table.setVariableRole` — `{ sheetId, column, role }` (locks `role_inferred = false`)
-- `table.recodeLevels` — `{ sheetId, column, mappings: [{ from, to }] }`
-- `table.setCategoricalOrder` — `{ sheetId, column, orderSpec }`
-- `table.setCalculatedVariable` — `{ sheetId, column, title, formula }`
-- `info.setConstant` / `analysis.hookConstant` — `{ sheetId, name, value, units }`
-- `analysis.updateParams` — `{ analysisId, spec }` (in-place parameter reconfiguration + auto-title refresh)
-- `analysis.retargetData` — `{ analysisId, newSourceSheetId, columnMapping }` (`Change Data Analyzed` across families)
-- `transform.run` — `{ sourceSheetId, spec }`
+- `sheet.createData` — `{ kind, title, design_hint, replicates, rows, cols, auto_info, auto_graph, auto_family, … }`
+- `sheet.freeze` / `sheet.unfreeze` — `{ sheet_id }`
+- `sheet.clonePipeline` — `{ sheet_id, keep_x_values, clear_y_values, clear_column_titles, clear_row_titles, clone_analyses, clone_graphs, clone_layouts, … }` ("Clone family / New data for existing graph & analysis")
+- `table.setCells` — `{ sheet_id, edits | rows, start_row, start_col, start_subcol }`
+- `table.pasteLink` — `{ sheet_id, anchor, link_spec, mode, filter, propagate_title_header, … }` (live `LinkedDataRegion` including reactive transpose)
+- `table.excludeCells` — `{ sheet_id, cells | coord | range, excluded }`
+- `table.setTitles` — `{ sheet_id, x_title, titles, row_titles, row_factor_title, column_factor_title, … }`
+- `table.setVariableRole` — `{ sheet_id, col | title, role }` (locks `role_inferred = false`)
+- `table.recodeLevels` — `{ sheet_id, col | title, mappings }`
+- `table.setCategoricalOrder` — `{ sheet_id, col | title, order | order_spec, levels, reversed, reference_level }`
+- `table.setCalculatedVariable` — `{ sheet_id, col | title, formula }`
+- `info.setConstant` — `{ sheet_id, name, value, units, kind }`; constants are hooked into fits through `parameter_rules` entries with scope `hooked_constant` (`HookSource`) on `analysis.updateParams` / `fit.run` (there is no separate `analysis.hookConstant` command)
+- `analysis.updateParams` — `{ sheet_id, params, kind, confidence_percent, p_value_format, selected_data_sets, title }` (in-place parameter reconfiguration + auto-title refresh)
+- `analysis.retargetData` — `{ sheet_id, source_sheet_id, selected_data_sets, clear_selected_data_sets }` (`Change Data Analyzed` across families)
+- `transform.run` — `{ source_sheet_id, spec | kind, sheet_id, title, overwrite, … }`

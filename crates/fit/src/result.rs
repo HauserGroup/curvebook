@@ -1,6 +1,16 @@
 //! End-to-end execution of [`AnalysisSpec`] (`LinearRegression` & `NonlinearRegression`) against
 //! upstream [`DataSheet`]s, assembling complete multi-tab [`ResultSheet`] artifacts with
 //! `FittedCurveOverlay`s, hookable scalars, and plain-language [`ChecklistItem`] diagnostics.
+//!
+//! The statistical routines and their references live in [`crate::solver`],
+//! [`crate::diagnostics`], and [`crate::linear`]; this module only formats their output, apart
+//! from the normal Q-Q plotting positions and the trapezoidal AUC documented below.
+//!
+//! Reference: Blom, G. (1958). *Statistical Estimates and Transformed Beta-Variables*. Wiley.
+//!
+//! Reference: Ratkowsky, D. A. (1990). *Handbook of Nonlinear Regression Models*. Marcel Dekker.
+//!
+//! Reference: Press, W. H., Teukolsky, S. A., Vetterling, W. T. & Flannery, B. P. (2007). *Numerical Recipes: The Art of Scientific Computing*, 3rd ed. Cambridge University Press.
 
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, LinearRegressionSpec,
@@ -374,6 +384,10 @@ fn parameter_display_label(fit: &NonlinearFitResult, name: &str, dataset_index: 
     }
 }
 
+/// Fill the nonlinear result tabs and checklist. Checklist thresholds are heuristics, not
+/// published cut-offs: `Dependency > 0.99` warns of near-redundant parameters (the dependency
+/// measure is described by Motulsky & Christopoulos 2004), and `|g1| > 1` flags strong
+/// nonlinearity on the interpretation scale for Hougaard's skewness given by Ratkowsky (1990).
 fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
     // Parameter & CI table.
     let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
@@ -677,6 +691,8 @@ fn append_comparison_tab(
     }
 }
 
+/// Residual tab including normal Q-Q theoretical quantiles at Blom (1958) plotting positions
+/// `(i - 3/8) / (n + 1/4)`.
 fn append_nonlinear_residuals_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
     let total_pts: usize = fit.datasets.iter().map(|d| d.y_hat.len()).sum();
     if total_pts == 0 {
@@ -867,6 +883,9 @@ fn collect_sorted_mean_xy_into(points: &[DataPoint], scratch: &mut Vec<(f64, f64
     collapse_duplicate_x(scratch, collapsed_out);
 }
 
+/// Composite trapezoidal rule on (possibly unequally spaced) sorted points, with linear
+/// interpolation at the interval ends (Press et al. 2007, Sec. 4.1). Exact for piecewise-linear
+/// data; no error estimate is attempted for curved data.
 fn trapezoidal_auc_over_interval(sorted_unique_pts: &[(f64, f64)], x_min: f64, x_max: f64) -> Option<f64> {
     if !x_min.is_finite() || !x_max.is_finite() || x_max < x_min || sorted_unique_pts.is_empty() {
         return None;

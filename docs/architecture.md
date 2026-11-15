@@ -1,6 +1,6 @@
 # Architecture
 
-LumenCraft is organized as a strictly layered Rust workspace (`L0` through `L7`). `cargo xtask layers` parses `cargo metadata` on every CI run and rejects upward dependencies, undeclared sideways dependencies, `lumencraft-testkit` outside `[dev-dependencies]`, external suite crates (`craft-*`), and any UI/windowing crate (`egui`, `eframe`, `winit`, `rfd`) below `L6`.
+LumenCraft is organized as a strictly layered Rust workspace (`L0` through `L7`). `cargo xtask layers` parses `cargo metadata` on every CI run and rejects upward dependencies, undeclared sideways dependencies, `lumencraft-testkit` outside `[dev-dependencies]`, external suite crates (`craft-*`), and any UI/windowing crate (`egui`, `eframe`, `winit`, `rfd`, `bevy*`) below `L6`; it also rejects raw process spawning outside `crates/platform/src/`.
 
 ```mermaid
 flowchart TD
@@ -11,7 +11,7 @@ flowchart TD
     L3["L3 Rendering & File I/O: render, format, svg, pdf"]
     L2["L2 Scientific Engines: transform, stats, fit, text, chart"]
     L1["L1 Pure Project Model: doc"]
-    L0["L0 Foundations: math, palette"]
+    L0["L0 Foundations: math, palette, platform"]
 
     L7 --> L6
     L6 --> L5
@@ -27,6 +27,7 @@ flowchart TD
 ### L0 — Numerical & Color Foundations
 - **`lumencraft-math`**: Pure IEEE-754 numerical primitives, compensated summation (Kahan/Neumaier), special functions (`ln_gamma`, regularized incomplete beta $I_x(a,b)$ and gamma $P(a,x)$, `erf`/`erfc`, Student *t*, Snedecor *F*, $\chi^2$, normal CDF/quantile), QR/SVD/Cholesky dense linear algebra for design matrices and Jacobians, and deterministic PRNG helpers for Monte Carlo / permutation tests.
 - **`lumencraft-palette`** *(may depend on `math`)*: Perceptual color spaces (sRGB, linear RGB, OkLab/OkLCH), print CMYK conversion, colorblind-safe scientific palettes (Okabe–Ito, Viridis, Cividis, Paul Tol), and color-vision-deficiency simulation matrices.
+- **`lumencraft-platform`**: OS shims kept out of the headless core: atomic temp-file + sync + rename writes (`fs.rs`), bounded subprocesses with cleaned environments (`process.rs`), and `WorkdirGuard` / `PathResolver` path confinement (`path_guard.rs`).
 
 ### L1 — Pure Document & Sheet Model
 - **`lumencraft-doc`**: Immutable/serializable value types representing a LumenCraft project:
@@ -43,8 +44,8 @@ flowchart TD
 - **`lumencraft-chart`** *(may depend on `transform`, `stats`, `fit`, `text`)*: Compiles a `GraphSpec` + resolved upstream `DataSheet`/`ResultSheet` data into a resolution-independent 2D vector scene graph (axes, ticks, discontinuous axis breaks, data series, error bars, box/violin density kernels, fitted curve polylines/Béziers, confidence ribbons, legends, and significance brackets).
 
 ### L3 — Rendering & Persistence
-- **`lumencraft-render`**: Deterministic CPU rasterizer and compositor for compiled chart scenes and multi-panel page layouts (PNG/TIFF exports and golden snapshots; native GPU `wgpu` backend queued in `G6`).
-- **`lumencraft-format`**: Reads and writes the native `.lumencraft` and `.lctemplate` ZIP-based project containers (versioned manifest + structured JSON/columnar tables) and provides clean-room importers/exporters for CSV, TSV, and third-party `.pzfx` / `.prism` scientific files.
+- **`lumencraft-render`**: Deterministic CPU rasterizer and compositor for compiled chart scenes and multi-panel page layouts (PNG/TIFF exports and golden snapshots). The desktop and web hosts upload this CPU RGBA output as a texture; there is no GPU rendering backend.
+- **`lumencraft-format`**: Reads and writes the native `.lumencraft` and `.lctemplate` ZIP-based project containers and the unpacked `.lumencraft.d/` directory form (versioned manifest + structured JSON/columnar tables, `MIGRATION_STEPS` upgrades), the `ops.journal` crash-recovery journal (`recovery.rs`), and clean-room importers/exporters for CSV, TSV, and third-party `.pzfx` / `.prism` scientific files, all registered in `FormatRegistry` (`registry.rs`).
 - **`lumencraft-svg`**: Lossless vector SVG serializer for single graphs and multi-panel layouts (preserving editable `<text>` or optional outlined glyphs).
 - **`lumencraft-pdf`**: Direct PDF 1.7 vector writer for journal submission figures and print layouts.
 
@@ -55,11 +56,12 @@ flowchart TD
 - **`lumencraft-engine`**: Owns the live `Session`, undo/redo transaction log, topological dependency graph (`DataSheet -> LinkedDataRegion / Transform / Analysis -> ResultSheet -> Graph -> Layout`), incremental dirty-node invalidation and recalculation, in-place analysis parameter updates and cross-family dataset retargeting (`Change Data Analyzed`), and the JSON-serializable command dispatcher shared identically by the GUI, CLI, `--control` TCP server, and MCP server.
 
 ### L6 — Thin Front-Ends
-- **`lumencraft-ui-egui`**: Pure-Rust `UiApp` state shell, `17` `UI_COMMANDS`, `16`-locale/RTL i18n, and deterministic software RGBA/PNG compositor (`render_workspace_rgba` / `render_workspace_frame_png`: Navigator sidebar, Family pane, virtualized subcolumn grid, Analysis/Result/Graph/Format inspectors, Page Layout composer, and `--control` JSONL server). Contains zero statistical math; every mutation dispatches an engine command. Live native OS `eframe`/`egui`/`wgpu` desktop & `wasm32` UI hosting is queued in `G6`.
-- **`lumencraft-mcp`**: Headless Model Context Protocol server over stdio exposing project inspection, data entry, statistical analysis execution, curve fitting, and SVG/PDF/PNG figure rendering to AI coding and research agents.
+- **`lumencraft-ui-egui`**: Pure-Rust `UiApp` state shell, `UI_COMMANDS` registry (`menus/ui_commands.rs`), multi-locale/RTL i18n (`i18n.rs`), `ui.inspect` semantic tree (`inspect.rs`), `--control` JSONL server (`control_io.rs`), and deterministic software RGBA/PNG compositor (`compositor.rs`: `render_workspace_rgba` / `render_workspace_frame_png` drawing the Navigator sidebar, Family pane, subcolumn grid, inspectors, and Page Layout composer). Contains zero statistical math; every mutation dispatches an engine command. Despite the crate name it does not link `egui`. The drawn chrome is not yet human-operable: modal dialogs, toolbar, inspectors, and result tabs are painted but not interactive (see `R10` in [ROADMAP.md](ROADMAP.md)).
+  - **Interactive chrome decision (`R10.1`, decided 2026-11-15; implementation todo):** a single retained layout & widget tree is built in-house in `lumencraft-ui-egui` and painted by `compositor.rs`; pixel rendering, physical hit-testing, and `ui.inspect` all read that one tree, and `egui` widgets are not used for chrome. Desktop and headless runs shape text with `lumencraft-text` and system fonts; the web host measures and draws text with the browser's canvas text API and fonts through a text-measurement interface it implements.
+- **`lumencraft-mcp`**: Headless Model Context Protocol server over stdio exposing project inspection, data entry, statistical analysis execution, curve fitting, and SVG/PDF/PNG figure rendering to AI coding and research agents, plus the `gui` toolset (`gui_tools.rs`) that drives `UiApp` in process or over a `--control` TCP session (see [mcp.md](mcp.md)).
 
 ### L7 — Executables & Workspace Tooling
-- **`apps/lumencraft`**: Native desktop binary (`macOS`, `Linux`, `Windows`, `FreeBSD`).
+- **`apps/lumencraft`**: Native desktop binary (`macOS`, `Linux`, `Windows`, `FreeBSD`): `DesktopHostRuntime` (`desktop_host.rs`) owns the `UiApp` session and event routing, and `gui_window.rs` (`run_native_desktop`) opens an `eframe` window with a native `egui` menu bar and `rfd` file dialogs, presenting the compositor's RGBA frame as a single texture (`R8.3`).
 - **`apps/lumencraft-cli`**: Headless batch CLI, format converter, analysis runner, and `mcp` subcommand host.
-- **`apps/lumencraft-web`**: Browser WebAssembly SPA crate (`init_web_app` tested on host; live `wasm32-unknown-unknown` Trunk + WebGPU/WebGL2 compilation queued in `G6`, external `wasm32` sysroot required).
-- **`xtask`**: Pure-`std` workspace task runner enforcing formatting, clippy, tests, layer rules, asset attribution, clean-room checks, brand hygiene, UI command catalog sync, and macOS `.app` bundling.
+- **`apps/lumencraft-web`**: Browser WebAssembly crate (`init_web_app`, `connect_wasm_bridge`, `host_adapters.rs`) built with Trunk for `wasm32-unknown-unknown`; it blits the compositor's RGBA frame to a WebGL2 `<canvas>` (2D-context fallback) and has no HTML menu bar or toolbar yet (`R8.4`; web chrome is `R10.7`).
+- **`xtask`**: Workspace task runner (depends on `lumencraft-engine`, `lumencraft-format`, `lumencraft-testkit`, and `serde_json` for codegen) enforcing formatting, clippy, tests, layer rules, asset attribution, clean-room checks, brand hygiene, telemetry/secrets/licence gates, generated-doc sync (`commands`, `schemas`, `ui-commands`), and macOS `.app` bundling. Run `cargo xtask --help` for the full list.

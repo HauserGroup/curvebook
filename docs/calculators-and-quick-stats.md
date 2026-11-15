@@ -2,11 +2,11 @@
 
 > Related specifications: [`statistics-implementation.md`](statistics-implementation.md), [`curve-fitting-implementation.md`](curve-fitting-implementation.md), [`data-tables-and-transforms.md`](data-tables-and-transforms.md), [`graphing-and-layouts.md`](graphing-and-layouts.md), [`qol-beyond-parity.md`](qol-beyond-parity.md), [`gui-workflows.md`](gui-workflows.md) · Roadmap: [`ROADMAP.md`](ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) (`R9.12`–`R9.16` / `QOL-12`–`QOL-16`) · Live metrics: [`STATUS.md`](STATUS.md)
 
-Active scope covers categorical/continuous table-analysis completions (`R9.12`), seeded randomization and sampling (`R9.14`), and symbolic/live best-fit equation annotations only (`R9.16`) — all implemented across Waves 21–22b. Statistical/distribution/Bayesian calculators (`R9.13`) and bench-chemistry/radiochemical calculators (`R9.15`) remain deferred without scheduled milestones; their detailed designs remain as inactive reference material. Compact Letter Display (`CLD`) remains excluded from product scope, including optional calculator outputs.
+Active scope covers categorical/continuous table-analysis completions (`R9.12`), seeded randomization and sampling (`R9.14`), and symbolic/live best-fit equation annotations only (`R9.16`) — all implemented across Waves 21–22b. Statistical/distribution/Bayesian calculators (`R9.13`) and bench-chemistry/radiochemical calculators (`R9.15`) remain deferred without scheduled milestones; their detailed designs remain as inactive reference material. Compact Letter Display (`CLD`) is not part of any calculator or `R9` item; it is back in product scope and tracked separately as [`R10.11`](ROADMAP.md#r1011-compact-letter-display-cld) (scope confirmed 2026-11-15).
 
 > **Status Note (Implemented scope vs. deferred calculators):**
 > - **Shipped end-to-end (`R1`–`R7` & Waves 21–22b `R9.12`/`R9.14`/`R9.16`):** $2 \times 2$ & $R \times C$ contingency ($\chi^2$, Yates, $G^2$, Fisher's exact, Barnard's exact, Baptista–Pike OR, Koopman RR, Newcombe RD, inverted Altman `NNTB`/`NNTH` CIs via `altman_nnt_from_rd`, McNemar's test + discordant-pair OR CIs via `mcnemar_detailed`, weighted Cohen's `cohens_kappa` & Fleiss' `fleiss_kappa`, exact binomial `ContingencyMethod::ExactBinomial`), uniform & custom expected proportion goodness-of-fit $\chi^2$, descriptive statistics + arbitrary $0.01\%\text{–}99.99\%$ mean CIs & exact $\chi^2$ `sd_ci` (`RawReplicates` and pre-summarized `Mean + SD/SEM + N`), Grubbs/ROUT outliers, unpaired/Welch/paired/ratio/one-sample *t*-tests (with direct `Mean + SD/SEM + N` in `run_two_group_analysis`) + paired exact Sign test (`TwoGroupMethod::PairedSignTest`), simple/Deming linear regression, factorial ANOVA main/simple-effect multiplicity post-hoc tabs (`run_factorial_anova`), extra-sum-of-squares *F* & $\text{AIC}_c$ fit comparisons, `log_agonist_vs_response_ecf` ($\log\text{EC}_F$ curve fitting), live pairwise significance brackets (`GraphSpec::comparisons`), seeded XY Monte Carlo simulation (`table.simulateXy`), seeded group randomization/row sampling/distribution simulation (`crates/transform/src/randomize.rs`: `table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions`), and linked symbolic/live-substituted $\TeX$ model equation annotations (`crates/fit/src/tex_format.rs`, `crates/chart/src/equation_box.rs`, `GraphAnnotation::ModelEquation`, `ui.graph.insertModelEquation`).
-> - **Deferred (outside active backlog):** `R9.13` (`QOL-13` instant statistical/distribution/Bayesian calculators) and `R9.15` (`QOL-15` bench molarity/dilution/radiochemical calculators) remain deferred without milestones; their reference sections below are not active implementation assignments. Existing core probability distribution modules (`norm`/`student_t`/`f`/`chi2`/Beta/Gamma in `crates/math/src/dist/`) and statistical routines remain supported.
+> - **Deferred (outside active backlog):** `R9.13` (`QOL-13` instant statistical/distribution/Bayesian calculators) and `R9.15` (`QOL-15` bench molarity/dilution/radiochemical calculators) remain deferred without milestones; their reference sections below are not active implementation assignments. Existing core probability distributions (`norm`/`student_t`/`f`/`chi2`, noncentral, Dunnett, studentized range in `crates/math/src/dist/`), regularized incomplete beta/gamma special functions (`crates/math/src/special/`), and statistical routines remain supported. None of the `calc.*` command IDs below are registered in `cmd::registry()` (see the generated [`commands.md`](commands.md)).
 
 ---
 
@@ -15,8 +15,8 @@ Active scope covers categorical/continuous table-analysis completions (`R9.12`),
 Calculator-specific design rules below apply only if deferred work is explicitly resumed; the described calculator modules and commands are proposed seams, not implementation claims.
 
 1. **Zero Archive-Schema Churn for Instant Calculators:**
-   - Summary-input statistical calculators, probability tail/quantile evaluators, clinical Bayes calculators, two-mean error propagation, and wet-lab chemistry/radiochemistry tools execute as **stateless, read-only engine queries** (`CommandGroup::Calculator`, `Effects::read_only()` in `crates/engine/src/cmd/calc.rs`).
-   - Opening or running an instant calculator mutates zero sheets, consumes zero undo slots, and leaves `.lumencraft` / `.lumencraft.d/` archive schemas (`versioned.rs`) untouched unless the user explicitly invokes *Insert Result into Info Sheet* or *Create Dilution / Randomization Data Sheet*.
+   - Summary-input statistical calculators, probability tail/quantile evaluators, clinical Bayes calculators, two-mean error propagation, and wet-lab chemistry/radiochemistry tools execute as **stateless, read-only engine queries** (proposed: a new `CommandGroup::Calculator` with `READ_ONLY` effects in a new `crates/engine/src/cmd/calc.rs`; neither exists today).
+   - Opening or running an instant calculator mutates zero sheets, consumes zero undo slots, and leaves `.lumencraft` / `.lumencraft.d/` archive schemas (`crates/format/src/versioned.rs`) untouched unless the user explicitly invokes *Insert Result into Info Sheet* or *Create Dilution / Randomization Data Sheet*.
 2. **Additive `#[serde(default)]` Table & Graph Extensions:**
    - New variants and optional fields on `ContingencyMethod`, `ContingencySpec`, `DescriptiveSummary`, `TransformAnalysisSpec`, and `GraphSpec` serialize with `#[serde(default, skip_serializing_if = "...")]`, preserving 100% forward/backward compatibility with existing `.lumencraft` projects and batch scripts.
 3. **100% Offline & WASM-Safe (`#![forbid(unsafe_code)]`):**
@@ -24,9 +24,11 @@ Calculator-specific design rules below apply only if deferred work is explicitly
 
 ---
 
+<a id="qol12-table-completions"></a>
+
 ## 2. Categorical & Continuous Table-Analysis Completions (`R9.12` / `QOL-12` — Implemented, Wave 21)
 
-Implemented across `crates/doc/src/analysis.rs`, `crates/stats/src/{categorical,column,two_group,anova}.rs`, `crates/engine/src/{cmd/analysis.rs,methods_report.rs}`, and `crates/ui-egui` (verified by `crates/stats/tests/wave21_r97_r912_clustering.rs` [`9 passed`] and `crates/ui-egui/tests/gui_w22b_qol_and_r9.rs`):
+Implemented across `crates/doc/src/analysis.rs`, `crates/stats/src/{categorical,column,two_group,anova}.rs`, `crates/engine/src/{cmd/analysis.rs,methods_report.rs}`, and `crates/ui-egui` (verified by `crates/stats/tests/wave21_r97_r912_clustering.rs` and `crates/ui-egui/tests/gui_w22b_qol_and_r9.rs`; live test counts in [`STATUS.md`](STATUS.md)):
 
 ### 2.1 Factorial & Multifactor ANOVA Post-Hoc Multiplicity Tabs (`crates/stats/src/anova.rs`)
 - Wired `FactorialAnovaSpec::multiplicity` (`crates/doc/src/analysis.rs`) inside `run_factorial_anova` to emit `ResultTabKind::MultipleComparisons` tabs (Tukey, Šídák, Bonferroni, Dunnett, Holm–Šídák, Newman–Keuls, Fisher LSD, and BH/BY/BKY FDR) across main-effect marginal means and simple-effect cell means using `compare_groups_with_procedure(&groups, ms_residual, df_residual, ...)` (or Satterthwaite/Kenward–Roger cell $df$ under REML mixed models), completing the backend tab seam used by `WF-09`, `WF-10`, and `WF-33` ([`gui-workflows.md`](gui-workflows.md)).
@@ -50,13 +52,15 @@ Implemented across `crates/doc/src/analysis.rs`, `crates/stats/src/{categorical,
 
 ---
 
+<a id="qol13-calculators"></a>
+
 ## 3. Instant Statistical, Distribution & Bayesian Calculators (`R9.13` / `QOL-13`)
 
 **Deferred reference only:** No scheduled milestone, active implementation task, formula extension, or Calculators drawer is authorized by this section.
 
 If resumed, the proposed design would use pure domain functions in `crates/stats/src/calculators.rs`, exposed via read-only `calc.*` commands (`crates/engine/src/cmd/calc.rs`), MCP tools, scalar table-formula builtins (`crates/transform/src/formula/eval.rs`), and the non-modal **Calculators** drawer (`ui.calculator.open` in `crates/ui-egui`).
 
-| Command ID | Inputs | Exact Mathematical Output |
+| Proposed command ID (not registered) | Inputs | Exact Mathematical Output |
 |---|---|---|
 | `calc.proportionAndCountCi` | $(k, n, 1-\alpha)$ or Poisson count $(c, 1-\alpha)$ | Binomial Wilson score, Clopper–Pearson exact, and Agresti–Coull modified-Wald CIs; Garwood (1936, <https://doi.org/10.1093/biomet/28.3-4.437>) exact Poisson count CI $\left[\tfrac{1}{2}\chi^2_{\alpha/2,\,2c},\; \tfrac{1}{2}\chi^2_{1-\alpha/2,\,2(c+1)}\right]$ (with lower bound $0$ when $c = 0$). |
 | `calc.clinicalPredictiveValues` | Sensitivity $Se$, Specificity $Sp$, prior prevalence $\pi \in (0, 1)$ | Positive/negative likelihood ratios $\text{LR}^+ = Se/(1-Sp)$, $\text{LR}^- = (1-Se)/Sp$, and Bayes posterior $\text{PPV} = \frac{Se \cdot \pi}{Se \cdot \pi + (1-Sp)(1-\pi)}$, $\text{NPV} = \frac{Sp(1-\pi)}{Sp(1-\pi) + (1-Se)\pi}$. |
@@ -69,14 +73,16 @@ If resumed, the proposed design would use pure domain functions in `crates/stats
 
 ---
 
+<a id="qol14-randomization"></a>
+
 ## 4. Experimental Randomization & Subset Sampling (`R9.14` / `QOL-14` — Implemented, Wave 22)
 
 Implemented in `crates/transform/src/randomize.rs` over `lumencraft_math::DeterministicRng`, wired into `crates/engine/src/cmd/table.rs` (`table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions`), `crates/ui-egui/src/dialogs_r9.rs` (`RandomizeGroupsDialogState`, `RandomSampleRowsDialogState`, `SimulateDistributionsDialogState`), and `crates/ui-egui/src/menus/ui_commands.rs` (`ui.table.{randomizeGroups,randomSampleRows,simulateDistributions}`) so every experimental allocation or subsample is 100% reproducible from its recorded 64-bit seed:
 
 1. **Subject-to-Group Randomization (`table.randomizeGroups`):**
    - Assigns $N$ subjects (numeric `1..=N` or custom identifier labels) across $k \ge 2$ treatment arms with equal or weighted allocation ratios $(w_1 : \dots : w_k)$.
-   - Supports **Complete Balanced Randomization** and **Permuted-Block Randomization** (fixed block size $B$ or randomly permuted block-size multiples to prevent allocation prediction in unblinded sequential studies).
-   - Emits a structured `MultipleVariables` or `Column` schedule sheet and writes `Randomization Seed`, `Block Design`, and `Allocation Ratio` constants into a linked `InfoSheet` for ARRIVE guideline reporting.
+   - Supports **Complete Balanced Randomization** and **Permuted-Block Randomization** (`AllocationScheme::PermutedBlock { block_sizes }`: one fixed block size, or sizes drawn uniformly per block from a list; every size must be a positive multiple of the summed allocation weights, which limits allocation prediction in unblinded sequential studies).
+   - Emits a structured `MultipleVariables` schedule sheet (`Subject_ID`, `Allocation_Order`, `Block_Index`, `Block_Size`, `Assigned_Group`) and writes `randomization.seed`, `randomization.method`, `randomization.allocation_ratio`, `randomization.block_sizes`, and `randomization.total_subjects` constants into a linked `InfoSheet` for ARRIVE guideline reporting (`build_arrive_constants` in `crates/transform/src/randomize.rs`).
 2. **Uniform & Stratified Random Subset Selection (`table.randomSampleRows` / `TransformAnalysisSpec::RandomSample`):**
    - Selects $k$ of $N$ active rows uniformly **without replacement** via partial Fisher–Yates shuffle (optionally stratified proportionally or equally across a categorical `MultipleVariables` column), producing a non-destructive derived sheet while leaving source observations intact.
 3. **Standalone Multi-Distribution Table Generator (`table.simulateDistributions`):**
@@ -84,11 +90,13 @@ Implemented in `crates/transform/src/randomize.rs` over `lumencraft_math::Determ
 
 ---
 
+<a id="qol15-bench-calculators"></a>
+
 ## 5. Bench Molarity, Dilution & Radiochemical Calculators (`R9.15` / `QOL-15`)
 
 **Deferred reference only:** No scheduled milestone or active implementation task. The full calculator scope, including dilution-series conveniences, remains deferred.
 
-Stateless wet-lab preparation calculators in `crates/stats/src/calculators.rs` (`calc.*`) with optional one-click export of computed concentrations/masses into `InfoSheet` constants or `XY` dilution series:
+If resumed, the proposed stateless wet-lab preparation calculators would live in `crates/stats/src/calculators.rs` (proposed, not present) behind proposed `calc.*` commands (none registered), with optional one-click export of computed concentrations/masses into `InfoSheet` constants or `XY` dilution series:
 
 1. **Molarity & Solution Preparation (`calc.molarity`):**
    - Solves for mass $m$, molar concentration $C$, volume $V$, or formula weight $\text{FW}$ in $m = C \cdot V \cdot \text{FW}$ across SI unit prefixes ($\text{fg}$–$\text{kg}$, $\text{fM}$–$\text{M}$, $\text{nL}$–$\text{L}$, $\text{g/mol}$–$\text{kDa}$).
@@ -120,8 +128,9 @@ Stateless wet-lab preparation calculators in `crates/stats/src/calculators.rs` (
 
 ## 6. Live Best-Fit Equation Annotations (`R9.16` / `QOL-16`, Equations Only — Implemented, Wave 22b)
 
-- Implemented across `crates/doc/src/graph.rs` (`GraphAnnotation::ModelEquation`), `crates/fit/src/tex_format.rs` (`format_model_equation_tex`, `format_polynomial_equation_tex`, `format_number_sig_figs`), `crates/chart/src/equation_box.rs` (`ModelEquationParams`, `render_model_equation_annotation`, `EquationDisplayMode::{Symbolic, Substituted}`), `crates/engine/src/cmd/graph.rs`, `crates/ui-egui/src/dialogs_r9.rs` (`InsertModelEquationDialogState`), and `crates/ui-egui/src/menus/ui_commands.rs` (`ui.graph.insertModelEquation`): provides one-click placement of a linked model equation on a fitted `XY` graph in symbolic or live-substituted form.
+- Implemented across `crates/doc/src/graph.rs` (`GraphAnnotation::ModelEquation`), `crates/fit/src/tex_format.rs` (`format_model_equation_tex`, `format_polynomial_equation_tex`, `format_number_sig_figs`), `crates/chart/src/equation_box.rs` (`ModelEquationParams`, `render_model_equation_annotation`), `EquationDisplayMode::{Symbolic, Substituted}` (`crates/doc/src/graph.rs`), `crates/engine/src/cmd/graph.rs` (`graph.addAnnotation` with kind `model_equation`), `crates/ui-egui/src/dialogs_r9.rs` (`InsertModelEquationDialogState`), and `crates/ui-egui/src/menus/ui_commands.rs` (`ui.graph.insertModelEquation`): provides one-click placement of a linked model equation on a fitted `XY` graph in symbolic or live-substituted form.
 - Renders canonical $\TeX$-subset templates for built-in models (`NonlinearRegression`, `LinearRegression`, `PassingBablok`) and supported custom `fitted_curves` DSL expressions (`\frac{...}{...}`, superscripts, subscripts, Greek letters, and `\log_{10}`), with deterministic rendering across RGBA, SVG, and `%PDF-1.7`.
 - Stays linked to the selected fit and updates substituted coefficients automatically after upstream edits and fit recalculation, using versioned graph metadata and existing command seams.
-- **Excluded:** Compact Letter Display, group letters, significance-matrix algorithms, pairwise-display modes, and additional $R^2$ / $\text{AIC}_c$ callouts. Existing significance brackets remain unchanged.
-- **Verification:** Symbolic and live-substituted equations stay synced after recalculation and match across screen and export rendering (`gui_w22b_qol_and_r9` [`9 passed`], `WF-49`).
+- **Excluded from this item:** Compact Letter Display (tracked separately in [`R10.11`](ROADMAP.md#r1011-compact-letter-display-cld)), group letters, significance-matrix algorithms, pairwise-display modes, and additional $R^2$ / $\text{AIC}_c$ callouts. Existing significance brackets remain unchanged.
+- **Verification:** Symbolic and live-substituted equations stay synced after recalculation and match across screen and export rendering (`gui_w22b_qol_and_r9`, `WF-49`; live test counts in [`STATUS.md`](STATUS.md)).
+- **Planned follow-up:** Rendering is single-line text today; the two-dimensional typeset layout (stacked fractions, sub/superscripts, Greek parameters) is planned in [`R10.19`](ROADMAP.md#r1019-typeset-mathematical-equation-annotations) (todo).

@@ -1,5 +1,21 @@
 //! Simple linear regression (OLS, origin-forced, bands, unknown interpolation, ANCOVA line
 //! comparison) and Model II Deming / Orthogonal regression with jackknife confidence intervals.
+//!
+//! # References
+//!
+//! Short `Author (Year)` citations on individual items refer to the list below.
+//!
+//! Reference: Draper, N. R. & Smith, H. (1998). *Applied Regression Analysis*, 3rd ed. Wiley.
+//!
+//! Reference: Zar, J. H. (2010). *Biostatistical Analysis*, 5th ed. Pearson Prentice Hall.
+//!
+//! Reference: Fieller, E. C. (1954). Some problems in interval estimation. *Journal of the Royal Statistical Society, Series B* 16(2), 175–185.
+//!
+//! Reference: Deming, W. E. (1943). *Statistical Adjustment of Data*. Wiley.
+//!
+//! Reference: Linnet, K. (1993). Evaluation of regression procedures for methods comparison studies. *Clinical Chemistry* 39(3), 424–432. doi:10.1093/clinchem/39.3.424
+//!
+//! Reference: Efron, B. & Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall.
 
 use lumencraft_doc::{CiBound, CurveSamplePoint};
 use lumencraft_math::ConfidenceLevel;
@@ -130,6 +146,12 @@ pub struct DemingResult {
 }
 
 /// Perform simple OLS linear regression (or origin-forced linear regression) on `(x, y)` pairs.
+///
+/// Textbook least squares (Draper & Smith 1998; Zar 2010): `b = S_xy / S_xx`, `a = ybar - b xbar`,
+/// `s = sqrt(RSS / df)`, `SE(b) = s / sqrt(S_xx)`, `SE(a) = s sqrt(1/n + xbar^2 / S_xx)`, and the
+/// regression *F* test on `(1, df)`. Through the origin, raw (uncentred) sums are used with
+/// `df = n - 1`; `R^2` there is reported against the uncentred `sum y^2`.
+/// Also runs the runs test and replicates lack-of-fit test from [`crate::diagnostics`].
 ///
 /// # Errors
 /// Returns [`FitError::InsufficientData`] if too few observations are given, or
@@ -279,6 +301,9 @@ fn fit_through_origin(xs: &[f64], ys: &[f64]) -> Result<(f64, f64, f64, f64, f64
     Ok((slope, 0.0, se_slope_factor, 0.0, s_xx, s_yy, s_xy, 0.0))
 }
 
+/// Pointwise confidence band `yhat +/- t s sqrt(h)` and prediction band
+/// `yhat +/- t s sqrt(1 + h)`, with `h = 1/n + (x - xbar)^2 / S_xx` (or `x^2 / S_xx` through the
+/// origin) (Draper & Smith 1998). Not simultaneous (Working–Hotelling) bands.
 #[allow(clippy::too_many_arguments)]
 fn build_linear_bands(
     xs: &[f64],
@@ -317,6 +342,14 @@ fn build_linear_bands(
     out
 }
 
+/// Inverse estimation of `X` from `Y` with Fieller (1954) limits, as in Draper & Smith (1998):
+/// with `g = t^2 s^2 / (b^2 S_xx)`, limits are
+/// `xbar + (xhat - xbar) / (1 - g) +/- t s / (|b| (1 - g)) sqrt((1 - g)/n + (xhat - xbar)^2 / S_xx)`,
+/// and are open (unbounded) when `g >= 1` (slope not significantly non-zero).
+///
+/// Note: this is the interval for the `X` at which the *mean* response equals `y0`. It omits the
+/// `+1` term for the error of a new single observation, so it is narrower than the classical
+/// calibration (inverse prediction) interval.
 #[allow(clippy::too_many_arguments)]
 fn interpolate_x_list(
     unknown_ys: &[f64],
@@ -360,6 +393,8 @@ fn interpolate_x_list(
     out
 }
 
+/// Predicted `Y` at each `X` with mean-response confidence and single-observation prediction
+/// intervals (Draper & Smith 1998).
 #[allow(clippy::too_many_arguments)]
 fn interpolate_y_list(
     unknown_xs: &[f64],
@@ -393,6 +428,13 @@ fn interpolate_y_list(
 }
 
 /// Compare slopes and intercepts (elevations) across `k >= 2` linear regression datasets via ANCOVA.
+///
+/// Follows the comparison of simple regression lines in Zar (2010): slopes are tested with
+/// `F = ((SS_common - SS_separate) / (k - 1)) / (SS_separate / (N - 2k))`, where `SS_common` uses
+/// the pooled within-group slope; if slopes are treated as equal, elevations are tested with
+/// `F = ((SS_total - SS_common) / (k - 1)) / (SS_common / (N - k - 1))`, where `SS_total` is
+/// the residual SS of one line fitted to all points. Through the origin only the slope test is
+/// reported (`df = (k - 1, N - k)`). Significance flags use a fixed `0.05`.
 ///
 /// # Errors
 /// Returns [`FitError::InsufficientData`] if fewer than 2 datasets or too few points exist.
@@ -493,6 +535,11 @@ pub fn compare_linear_lines(datasets: &[&[DataPoint]], force_through_origin: boo
 /// Model II Deming regression for errors in both `X` and `Y` (`lambda = sigma_x^2 / sigma_y^2`,
 /// where `lambda = 1.0` is Orthogonal / Major Axis regression), with Leave-One-Out jackknife SEs and CIs.
 ///
+/// Unweighted Deming (1943) regression with jackknife standard errors and `t_{n-2}` intervals
+/// as evaluated for method-comparison studies by Linnet (1993). Intervals are centred on the
+/// full-sample estimates, not on the jackknife bias-corrected estimates. Weighted (constant-CV)
+/// Deming regression is not implemented here.
+///
 /// # Errors
 /// Returns [`FitError::InsufficientData`] if `points.len() < 3` or [`FitError::InvalidParameter`]
 /// if `lambda <= 0` or `X`/`Y` covariance is degenerate.
@@ -563,6 +610,15 @@ pub fn deming_regression(points: &[DataPoint], opts: &DemingOptions) -> Result<D
     })
 }
 
+/// Closed-form Deming slope
+/// `b = (S_yy - l S_xx + sqrt((S_yy - l S_xx)^2 + 4 l S_xy^2)) / (2 S_xy)` (Deming 1943;
+/// Linnet 1993), evaluated in a cancellation-free form when `S_yy - l S_xx < 0`.
+///
+/// Note: in this formula `l` is the ratio of the Y-error variance to the X-error variance
+/// (`sigma_y^2 / sigma_x^2`): `l -> inf` recovers OLS of Y on X and `l -> 0` recovers OLS of
+/// X on Y. The residual scaling `1 + b^2 / l` uses the same convention. This is the reciprocal
+/// of the `DemingOptions::variance_ratio_lambda` field documentation (`sigma_x^2 / sigma_y^2`);
+/// the two agree only at `lambda = 1`.
 fn fit_deming_core(xs: &[f64], ys: &[f64], lambda: f64) -> Result<(f64, f64, f64), FitError> {
     let mx = SummaryMoments::from_slice(xs)?;
     let my = SummaryMoments::from_slice(ys)?;
@@ -605,6 +661,8 @@ fn fit_deming_core(xs: &[f64], ys: &[f64], lambda: f64) -> Result<(f64, f64, f64
     Ok((slope, intercept, sy_x))
 }
 
+/// Leave-one-out jackknife standard error `sqrt((n - 1)/n * sum (theta_(i) - theta_bar)^2)`
+/// (Efron & Tibshirani 1993), equal to the SE of the mean of jackknife pseudo-values.
 fn jackknife_se(vals: &[f64]) -> f64 {
     let n = vals.len();
     if n < 2 {
