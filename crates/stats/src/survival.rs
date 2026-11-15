@@ -113,6 +113,12 @@ pub struct CoxPhResult {
     pub martingale_residuals: Vec<f64>,
     pub deviance_residuals: Vec<f64>,
     pub baseline_survival: Vec<CoxBaselinePoint>,
+    /// Inverse Fisher information covariance matrix `Cov(beta_hat)` (`p x p`).
+    #[serde(default)]
+    pub cov_beta: Vec<Vec<f64>>,
+    /// Parameter correlation matrix `Corr(beta_hat)` derived from `cov_beta` (`p x p`).
+    #[serde(default)]
+    pub correlation_matrix: Vec<Vec<f64>>,
 }
 
 // ============================================================================
@@ -560,6 +566,7 @@ pub fn cox_ph_regression(
 
     let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &beta, tie_method, n);
     let concordance = harrell_c_index(&ordered, &beta);
+    let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(&cov_beta, p);
 
     Ok(CoxPhResult {
         n_subjects: n,
@@ -583,7 +590,28 @@ pub fn cox_ph_regression(
         martingale_residuals,
         deviance_residuals,
         baseline_survival,
+        cov_beta: cov_beta_rows,
+        correlation_matrix,
     })
+}
+
+fn cox_cov_and_corr_matrices(cov_beta: &DenseMatrix, p: usize) -> (Vec<Vec<f64>>, Vec<Vec<f64>>) {
+    let mut cov_rows = vec![vec![0.0_f64; p]; p];
+    let mut corr_rows = vec![vec![0.0_f64; p]; p];
+    let inv_sds: Vec<f64> = (0..p)
+        .map(|j| {
+            let var = cov_beta.get(j, j).unwrap_or(0.0).max(0.0);
+            if var > 0.0 { 1.0 / var.sqrt() } else { 0.0 }
+        })
+        .collect();
+    for j in 0..p {
+        for k in 0..p {
+            let c = cov_beta.get(j, k).unwrap_or(0.0);
+            cov_rows[j][k] = c;
+            corr_rows[j][k] = if j == k { if inv_sds[j] > 0.0 { 1.0 } else { 0.0 } } else { (c * inv_sds[j] * inv_sds[k]).clamp(-1.0, 1.0) };
+        }
+    }
+    (cov_rows, corr_rows)
 }
 
 fn cox_eval(
@@ -1103,39 +1131,15 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
                 return Err(StatsError::IncompatibleTable { analysis: "Cox proportional hazards", actual: sheet.archetype.kind() });
             };
-            let _ = reference_levels;
-            let time_var = mv.variables.get(*time_column).ok_or(StatsError::MissingColumn { index: *time_column })?;
-            let status_var = mv.variables.get(*status_column).ok_or(StatsError::MissingColumn { index: *status_column })?;
-            let mut pred_names = Vec::with_capacity(predictor_columns.len());
-            for &pc in predictor_columns {
-                let pv = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
-                pred_names.push(pv.title.clone());
-            }
-
-            let mut subjects = Vec::new();
-            for r in 0..mv.row_count() {
-                let Some(t) = time_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-                let Some(st) = status_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-                let mut x_vals = Vec::with_capacity(predictor_columns.len());
-                let mut ok = true;
-                for &pc in predictor_columns {
-                    if let Some(xv) = mv.variables[pc].cells.get(r).and_then(|c| c.active_number()) {
-                        x_vals.push(xv);
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-                if ok {
-                    subjects.push(CoxSubject { time: t, event: st != 0.0, x: x_vals });
-                }
-            }
+            let (pred_names, subjects) = build_cox_design_subjects(mv, *time_column, *status_column, predictor_columns, reference_levels)?;
 
             let cox = cox_ph_regression(&subjects, &pred_names, *tie_method, confidence)?;
+            let aic = -2.0 * cox.log_lik_model + 2.0 * (cox.covariates.len() as f64);
             push_scalar(&mut out, "Concordance (C-index)", None, cox.concordance);
             push_scalar(&mut out, "Likelihood ratio chi2", None, cox.likelihood_ratio_chi2);
             push_scalar(&mut out, "Likelihood ratio P", None, cox.likelihood_ratio_p);
             push_scalar(&mut out, "Global Schoenfeld P", None, cox.global_schoenfeld_p);
+            push_scalar(&mut out, "AIC", None, aic);
 
             let headers = vec![
                 String::from("beta"),
@@ -1165,11 +1169,23 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 "Cox proportional hazards estimates",
                 ResultTabKind::ParametersAndConfidenceIntervals,
                 headers,
-                labels,
+                labels.clone(),
                 rows,
             ));
 
             append_cox_baseline_tabs(&mut out, &cox.baseline_survival);
+
+            let corr_rows: Vec<Vec<ResultCell>> = cox.correlation_matrix.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+            out.tabs.push(build_tab(
+                "cox-covariance",
+                "Cox parameter correlation matrix",
+                ResultTabKind::CovarianceMatrix,
+                labels.clone(),
+                labels,
+                corr_rows,
+            ));
+
+            append_cox_curve_overlays(&mut out, &cox);
 
             let ph_ok = cox.global_schoenfeld_p >= 0.05;
             out.checklist.push(checklist_item(
@@ -1179,7 +1195,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 if ph_ok {
                     "Scaled Schoenfeld residuals show no significant time-varying slope (PH assumption satisfied)."
                 } else {
-                    "Schoenfeld residual test suggests time-varying hazard ratios (P < 0.05); inspect stratified or time-dependent models."
+                    "Schoenfeld residual test indicates time-varying hazard ratios (P < 0.05), violating the proportional hazards assumption."
                 },
             ));
         }
@@ -1228,6 +1244,139 @@ fn append_cox_baseline_tabs(out: &mut ResultSheet, baseline: &[CoxBaselinePoint]
         lml_labels,
         lml_rows,
     ));
+}
+
+/// Build Cox PH predictor names and complete-case subjects, expanding categorical predictors
+/// into `"{title}[{level} vs {ref_level}]"` reference-coded dummy indicators.
+fn build_cox_design_subjects(
+    mv: &MultipleVariablesTable,
+    time_column: usize,
+    status_column: usize,
+    predictor_columns: &[usize],
+    reference_levels: &[(usize, String)],
+) -> Result<(Vec<String>, Vec<CoxSubject>), StatsError> {
+    let time_var = mv.variables.get(time_column).ok_or(StatsError::MissingColumn { index: time_column })?;
+    let status_var = mv.variables.get(status_column).ok_or(StatsError::MissingColumn { index: status_column })?;
+
+    let mut cat_levels: Vec<Option<(String, Vec<String>)>> = Vec::with_capacity(predictor_columns.len());
+    for &pc in predictor_columns {
+        let pv = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
+        if pv.role == VariableRole::Categorical {
+            let mut lvls: Vec<String> =
+                pv.ordered_levels_with(&pv.level_order).into_iter().filter(|s| s.included_count > 0).map(|s| s.level).collect();
+            let ref_lvl = reference_levels
+                .iter()
+                .find(|(idx, _)| *idx == pc)
+                .map(|(_, l)| l.clone())
+                .filter(|l| lvls.iter().any(|existing| existing == l))
+                .or_else(|| lvls.first().cloned());
+            if let Some(rl) = ref_lvl {
+                lvls.retain(|l| l != &rl);
+                cat_levels.push(Some((rl, lvls)));
+            } else {
+                cat_levels.push(None);
+            }
+        } else {
+            cat_levels.push(None);
+        }
+    }
+
+    let mut pred_names = Vec::new();
+    for (pos, &pc) in predictor_columns.iter().enumerate() {
+        let title = &mv.variables[pc].title;
+        if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
+            for lv in non_refs {
+                pred_names.push(format!("{title}[{lv} vs {ref_lvl}]"));
+            }
+        } else {
+            pred_names.push(title.clone());
+        }
+    }
+
+    let mut subjects = Vec::new();
+    for r in 0..mv.row_count() {
+        let Some(t) = time_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
+        let Some(st) = status_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
+        let mut x_vals = Vec::with_capacity(pred_names.len());
+        let mut ok = true;
+        for (pos, &pc) in predictor_columns.iter().enumerate() {
+            let Some(cell) = mv.variables[pc].cells.get(r) else {
+                ok = false;
+                break;
+            };
+            if cell.excluded {
+                ok = false;
+                break;
+            }
+            if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
+                let Some(tok) = mv_survival_token(cell) else {
+                    ok = false;
+                    break;
+                };
+                if tok != *ref_lvl && !non_refs.contains(&tok) {
+                    ok = false;
+                    break;
+                }
+                for lv in non_refs {
+                    x_vals.push(if &tok == lv { 1.0 } else { 0.0 });
+                }
+            } else if let Some(xv) = cell.active_number() {
+                x_vals.push(xv);
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            subjects.push(CoxSubject { time: t, event: st != 0.0, x: x_vals });
+        }
+    }
+
+    Ok((pred_names, subjects))
+}
+
+/// Push Breslow/Efron baseline survival `S0(t) = exp(-H0(t))` and per-covariate unit-shift
+/// overlays `S0(t)^exp(beta_j)` into `out.fitted_curves`.
+fn append_cox_curve_overlays(out: &mut ResultSheet, cox: &CoxPhResult) {
+    if cox.baseline_survival.is_empty() {
+        return;
+    }
+    let prepend_zero = cox.baseline_survival.first().is_some_and(|p| p.time > 0.0);
+    let mut base_pts = Vec::with_capacity(cox.baseline_survival.len() + usize::from(prepend_zero));
+    if prepend_zero {
+        base_pts.push(CurveSamplePoint { x: 0.0, y: 1.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+    }
+    for pt in &cox.baseline_survival {
+        let s0 = (-pt.cum_hazard).exp().clamp(0.0, 1.0);
+        base_pts.push(CurveSamplePoint { x: pt.time, y: s0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+    }
+    out.fitted_curves.push(FittedCurveOverlay {
+        data_set_index: 0,
+        equation_id: String::from("cox_baseline"),
+        converged: cox.converged,
+        ambiguous: false,
+        points: base_pts,
+    });
+
+    for (j, cov) in cox.covariates.iter().enumerate() {
+        let hr_shift = cov.beta.clamp(-50.0, 50.0).exp();
+        let mut cov_pts = Vec::with_capacity(cox.baseline_survival.len() + usize::from(prepend_zero));
+        if prepend_zero {
+            cov_pts.push(CurveSamplePoint { x: 0.0, y: 1.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+        }
+        for pt in &cox.baseline_survival {
+            let s0 = (-pt.cum_hazard).exp().clamp(0.0, 1.0);
+            let s_shifted = s0.powf(hr_shift).clamp(0.0, 1.0);
+            cov_pts.push(CurveSamplePoint { x: pt.time, y: s_shifted, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
+        }
+        out.fitted_curves.push(FittedCurveOverlay {
+            data_set_index: j + 1,
+            equation_id: String::from("cox_covariate"),
+            converged: cox.converged,
+            ambiguous: false,
+            points: cov_pts,
+        });
+    }
 }
 
 fn mv_survival_token(cell: &Cell) -> Option<String> {

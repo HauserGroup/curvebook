@@ -5,8 +5,8 @@
 
 use lumencraft_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, FactorialAnovaSpec, MultiplicityMethod, MultiplicitySpec, NestedAnalysisSpec,
-    OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, RemediationKind, RepeatedMeasuresDesign, ResultCell, ResultSheet,
-    ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
+    OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, RepeatedMeasuresDesign, ResultCell, ResultSheet, ResultTab, ResultTabKind,
+    SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{chi2_sf, f_sf, noncentral_f_ci, student_t_two_sided_p};
@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::column::shapiro_wilk;
 use crate::common::{
-    build_tab, checklist_item, checklist_item_with_remediation, extract_numeric_columns, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell,
-    p_cell, push_scalar, quantile_type6_sorted, rank_with_ties, resolve_selected_indices, sorted_finite, validate_finite_slice,
+    build_tab, checklist_item, extract_numeric_columns, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar,
+    quantile_type6_sorted, rank_with_ties, resolve_selected_indices, sorted_finite, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{
@@ -1829,8 +1829,7 @@ fn run_rm_one_way_anova_sheet(
             append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, &anova_spec.multiplicity, p_fmt, confidence)?;
 
             let sph_status = if rm.sphericity.greenhouse_geisser_eps < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
-            let sph_remediation = if sph_status == ChecklistStatus::Warn && !geisser_greenhouse { Some(RemediationKind::Friedman) } else { None };
-            out.checklist.push(checklist_item_with_remediation(
+            out.checklist.push(checklist_item(
                 "Sphericity (Mauchly / Greenhouse-Geisser)",
                 sph_status,
                 Some(format!(
@@ -1840,18 +1839,15 @@ fn run_rm_one_way_anova_sheet(
                 if geisser_greenhouse {
                     "Geisser-Greenhouse correction is applied to treatment degrees of freedom."
                 } else {
-                    "Consider enabling Geisser-Greenhouse correction if epsilon_GG < 0.75."
+                    "Greenhouse-Geisser epsilon < 0.75 indicates departure from covariance sphericity for unadjusted repeated-measures F degrees of freedom."
                 },
-                sph_remediation,
             ));
             let condition_slices: Vec<Vec<f64>> = (0..indices.len()).map(|pos| blocks.iter().map(|b| b[pos]).collect()).collect();
             append_group_normality_checklist(
                 &mut out.checklist,
                 &condition_slices,
                 confidence.alpha(),
-                RemediationKind::Friedman,
                 "Repeated-measures condition normality (Shapiro-Wilk)",
-                "Friedman test",
             );
         }
         OneWayMethod::Friedman => {
@@ -2004,10 +2000,23 @@ fn append_one_way_multiplicity(
 }
 
 fn push_pairwise_outputs(out: &mut ResultSheet, details: &[PairwiseComparisonDetail], title: &str, p_fmt: PValueFormat, confidence: ConfidenceLevel) {
+    push_pairwise_outputs_with_id(out, details, "multiple-comparisons", title, p_fmt, confidence);
+}
+
+fn push_pairwise_outputs_with_id(
+    out: &mut ResultSheet,
+    details: &[PairwiseComparisonDetail],
+    tab_id: &str,
+    title: &str,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) {
     if details.is_empty() {
         return;
     }
-    out.tabs.push(build_multiplicity_tab(details, title, p_fmt, confidence));
+    let mut tab = build_multiplicity_tab(details, title, p_fmt, confidence);
+    tab.id = tab_id.to_owned();
+    out.tabs.push(tab);
     for d in details {
         out.pairwise_comparisons.push(PairwiseComparisonRecord {
             group_a: d.group_a,
@@ -2022,27 +2031,19 @@ fn push_pairwise_outputs(out: &mut ResultSheet, details: &[PairwiseComparisonDet
     }
 }
 
-fn append_group_normality_checklist(
-    checklist: &mut Vec<ChecklistItem>,
-    raw_slices: &[Vec<f64>],
-    alpha: f64,
-    remediation_on_fail: RemediationKind,
-    assumption: &str,
-    alt_label: &str,
-) {
+fn append_group_normality_checklist(checklist: &mut Vec<ChecklistItem>, raw_slices: &[Vec<f64>], alpha: f64, assumption: &str) {
     let worst = raw_slices.iter().filter_map(|s| shapiro_wilk(s, alpha).ok()).min_by(|a, b| a.p_value.total_cmp(&b.p_value));
     if let Some(sw) = worst {
         let violated = !sw.passed;
-        checklist.push(checklist_item_with_remediation(
+        checklist.push(checklist_item(
             assumption,
             if violated { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
             Some(format!("min Shapiro-Wilk W = {:.4}, p = {:.4}", sw.statistic, sw.p_value)),
             if violated {
-                format!("At least one group departs significantly from Gaussian normality; {alt_label} is recommended.")
+                "At least one group departs significantly from Gaussian normality; inspect group distributions and Normal Q-Q diagnostics."
             } else {
-                String::from("Group distributions do not depart significantly from Gaussian normality.")
+                "Group distributions do not depart significantly from Gaussian normality."
             },
-            violated.then_some(remediation_on_fail),
         ));
     }
 }
@@ -2056,32 +2057,20 @@ fn append_one_way_checklist(
     alpha: f64,
 ) {
     let equal_var_ok = res.variance_tests.brown_forsythe_p >= 0.05;
-    let (var_status, var_explanation, var_remediation) = if equal_var_ok {
-        (ChecklistStatus::Pass, "Group variances do not differ significantly; ordinary pooled-variance ANOVA is appropriate.", None)
+    let (var_status, var_explanation) = if equal_var_ok {
+        (ChecklistStatus::Pass, "Group variances do not differ significantly; ordinary pooled-variance ANOVA is appropriate.")
     } else if is_welch {
-        (ChecklistStatus::Info, "Variances appear unequal (P < 0.05); Brown-Forsythe & Welch ANOVA does not assume equal variances.", None)
+        (ChecklistStatus::Info, "Variances appear unequal (P < 0.05); Brown-Forsythe & Welch ANOVA does not assume equal variances.")
     } else {
-        (
-            ChecklistStatus::Warn,
-            "Variances appear unequal (P < 0.05); consider Brown-Forsythe & Welch ANOVA with Games-Howell or Dunnett T3 post-hoc tests.",
-            Some(RemediationKind::WelchAnova),
-        )
+        (ChecklistStatus::Warn, "Variances appear unequal (Brown-Forsythe P < 0.05), violating the pooled equal-variance assumption.")
     };
-    out.checklist.push(checklist_item_with_remediation(
+    out.checklist.push(checklist_item(
         "Homogeneity of variances (Brown-Forsythe)",
         var_status,
         Some(format!("F = {:.3}, P = {:.4}", res.variance_tests.brown_forsythe_f, res.variance_tests.brown_forsythe_p)),
         var_explanation,
-        var_remediation,
     ));
-    append_group_normality_checklist(
-        &mut out.checklist,
-        raw_slices,
-        alpha,
-        RemediationKind::KruskalWallis,
-        "Group normality (Shapiro-Wilk)",
-        "Kruskal-Wallis test",
-    );
+    append_group_normality_checklist(&mut out.checklist, raw_slices, alpha, "Group normality (Shapiro-Wilk)");
     let min_n = inputs.iter().map(|g| g.n as usize).min().unwrap_or(0);
     out.checklist.push(checklist_item(
         "Group sample size",
@@ -2096,8 +2085,9 @@ fn append_one_way_checklist(
 pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &FactorialAnovaSpec) -> Result<ResultSheet, StatsError> {
     let mut out = init_result_sheet(spec)?;
     let p_fmt = spec.p_value_format;
+    let confidence = spec.confidence_level;
 
-    let mut result = match &sheet.archetype {
+    let (mut result, obs) = match &sheet.archetype {
         TableArchetype::Grouped(grouped) => run_grouped_factorial(grouped, &mut out, fac_spec, p_fmt)?,
         TableArchetype::MultipleVariables(mv) => run_multifactor_mv(mv, fac_spec)?,
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
@@ -2154,6 +2144,8 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     let tab_title = if fac_spec.three_way { "Three-way ANOVA" } else { "Factorial ANOVA" };
     out.tabs.push(build_tab("factorial-anova", tab_title, ResultTabKind::AnovaTable, headers, row_labels, rows));
 
+    run_factorial_multiplicity(&mut out, &obs, &result, &fac_spec.multiplicity, p_fmt, confidence)?;
+
     out.checklist.push(checklist_item(
         "Cell balance & sums of squares",
         if result.unbalanced { ChecklistStatus::Info } else { ChecklistStatus::Pass },
@@ -2171,12 +2163,170 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     Ok(out)
 }
 
+fn build_factorial_group_inputs(labels: &[String], bins: Vec<Vec<f64>>, ms_residual: f64) -> Result<Vec<GroupComparisonInput>, StatsError> {
+    let fallback_sd = ms_residual.max(0.0).sqrt();
+    let mut inputs = Vec::with_capacity(labels.len());
+    for (idx, (label, vals)) in labels.iter().zip(bins).enumerate() {
+        if vals.is_empty() {
+            continue;
+        }
+        let m = SummaryMoments::from_slice(&vals)?;
+        let sd = if vals.len() >= 2 && m.css.is_finite() { (m.css / ((vals.len() - 1) as f64)).max(0.0).sqrt() } else { fallback_sd };
+        inputs.push(GroupComparisonInput { index: idx, label: label.clone(), n: vals.len() as f64, mean: m.mean, sd });
+    }
+    Ok(inputs)
+}
+
+fn effective_factorial_mult_spec(spec: &MultiplicitySpec, inputs: &[GroupComparisonInput]) -> MultiplicitySpec {
+    let mut adjusted = *spec;
+    if let MultiplicityMethod::Dunnett { control_column } = adjusted.method
+        && !inputs.iter().any(|g| g.index == control_column)
+        && let Some(first) = inputs.first()
+    {
+        adjusted.method = MultiplicityMethod::Dunnett { control_column: first.index };
+    }
+    adjusted
+}
+
+struct SimpleEffectsSpec<'a> {
+    cond_factor: usize,
+    target_factor: usize,
+    mult_spec: &'a MultiplicitySpec,
+    tab_id: &'a str,
+    title: &'a str,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+}
+
+fn run_simple_effects_for_pair(
+    out: &mut ResultSheet,
+    obs: &FactorialObservations,
+    result: &FactorialAnovaResult,
+    cfg: &SimpleEffectsSpec<'_>,
+) -> Result<(), StatsError> {
+    let cond_levels = &obs.factor_levels[cfg.cond_factor];
+    let target_levels = &obs.factor_levels[cfg.target_factor];
+    if target_levels.len() < 2 {
+        return Ok(());
+    }
+    let mut combined = Vec::new();
+    for (c_idx, cond_label) in cond_levels.iter().enumerate() {
+        let mut bins = vec![Vec::new(); target_levels.len()];
+        for (lvls, y) in &obs.rows {
+            if lvls.get(cfg.cond_factor) == Some(&c_idx)
+                && let Some(&t_idx) = lvls.get(cfg.target_factor)
+                && t_idx < bins.len()
+            {
+                bins[t_idx].push(*y);
+            }
+        }
+        let inputs = build_factorial_group_inputs(target_levels, bins, result.ms_residual)?;
+        if inputs.len() < 2 {
+            continue;
+        }
+        let eff_spec = effective_factorial_mult_spec(cfg.mult_spec, &inputs);
+        let mut details = compare_groups_pairwise(&inputs, result.ms_residual, result.df_residual, &eff_spec)?;
+        for d in &mut details {
+            d.label_a = format!("{cond_label} | {}", d.label_a);
+            d.label_b = format!("{cond_label} | {}", d.label_b);
+        }
+        combined.extend(details);
+    }
+    push_pairwise_outputs_with_id(out, &combined, cfg.tab_id, cfg.title, cfg.p_fmt, cfg.confidence);
+    Ok(())
+}
+
+fn run_factorial_multiplicity(
+    out: &mut ResultSheet,
+    obs: &FactorialObservations,
+    result: &FactorialAnovaResult,
+    mult_spec: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    if mult_spec.method == MultiplicityMethod::None {
+        return Ok(());
+    }
+    if !result.df_residual.is_finite() || result.df_residual < 1.0 || !result.ms_residual.is_finite() || result.ms_residual <= 0.0 {
+        return Ok(());
+    }
+
+    for (f_idx, levels) in obs.factor_levels.iter().enumerate() {
+        if levels.len() < 2 {
+            continue;
+        }
+        let mut bins = vec![Vec::new(); levels.len()];
+        for (lvls, y) in &obs.rows {
+            if let Some(&lvl) = lvls.get(f_idx)
+                && lvl < bins.len()
+            {
+                bins[lvl].push(*y);
+            }
+        }
+        let inputs = build_factorial_group_inputs(levels, bins, result.ms_residual)?;
+        if inputs.len() < 2 {
+            continue;
+        }
+        let eff_spec = effective_factorial_mult_spec(mult_spec, &inputs);
+        let details = compare_groups_pairwise(&inputs, result.ms_residual, result.df_residual, &eff_spec)?;
+        let tab_id = match f_idx {
+            0 => String::from("multiple-comparisons-factor-a"),
+            1 => String::from("multiple-comparisons-factor-b"),
+            k => format!("multiple-comparisons-factor-{}", k + 1),
+        };
+        let f_name = obs.factor_names.get(f_idx).map_or("Factor", String::as_str);
+        let title = format!("Multiple comparisons: {f_name} (marginal means)");
+        push_pairwise_outputs_with_id(out, &details, &tab_id, &title, p_fmt, confidence);
+    }
+
+    if obs.factor_levels.len() >= 2 {
+        let name_a = obs.factor_names.first().map_or("Factor A", String::as_str);
+        let name_b = obs.factor_names.get(1).map_or("Factor B", String::as_str);
+        let title_a_within_b = format!("Simple effects: {name_a} within {name_b}");
+        run_simple_effects_for_pair(
+            out,
+            obs,
+            result,
+            &SimpleEffectsSpec {
+                cond_factor: 1,
+                target_factor: 0,
+                mult_spec,
+                tab_id: "multiple-comparisons-simple-a-within-b",
+                title: &title_a_within_b,
+                p_fmt,
+                confidence,
+            },
+        )?;
+        let title_b_within_a = format!("Simple effects: {name_b} within {name_a}");
+        run_simple_effects_for_pair(
+            out,
+            obs,
+            result,
+            &SimpleEffectsSpec {
+                cond_factor: 0,
+                target_factor: 1,
+                mult_spec,
+                tab_id: "multiple-comparisons-simple-b-within-a",
+                title: &title_b_within_a,
+                p_fmt,
+                confidence,
+            },
+        )?;
+    }
+
+    Ok(())
+}
+
+fn grouped_row_levels(grouped: &lumencraft_doc::GroupedTable, n_rows: usize) -> Vec<String> {
+    (0..n_rows).map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect()
+}
+
 fn run_grouped_factorial(
     grouped: &lumencraft_doc::GroupedTable,
     out: &mut ResultSheet,
     fac_spec: &FactorialAnovaSpec,
     p_fmt: PValueFormat,
-) -> Result<FactorialAnovaResult, StatsError> {
+) -> Result<(FactorialAnovaResult, FactorialObservations), StatsError> {
     if grouped.subcolumn_mode.is_pre_summarized() {
         return Err(StatsError::RequiresRawReplicates);
     }
@@ -2192,6 +2342,7 @@ fn run_grouped_factorial(
             return run_rm_two_way_reml_fallback(grouped, out, fac_spec, p_fmt);
         }
         let mut subject_data = vec![vec![vec![0.0_f64; n_cols]; n_rows]; n_subs];
+        let mut obs = Vec::with_capacity(n_subs * n_rows * n_cols);
         for (s, subj) in subject_data.iter_mut().enumerate() {
             for (r, row_vec) in subj.iter_mut().enumerate() {
                 for (c, slot) in row_vec.iter_mut().enumerate() {
@@ -2199,6 +2350,7 @@ fn run_grouped_factorial(
                         return run_rm_two_way_reml_fallback(grouped, out, fac_spec, p_fmt);
                     };
                     *slot = v;
+                    obs.push((vec![r, c], v));
                 }
             }
         }
@@ -2212,7 +2364,12 @@ fn run_grouped_factorial(
                 "Greenhouse-Geisser epsilon summarizes covariance sphericity across repeated levels.",
             ));
         }
-        return Ok(res);
+        let data = FactorialObservations {
+            factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
+            factor_levels: vec![grouped_row_levels(grouped, n_rows), grouped.data_sets.iter().map(|ds| ds.title.clone()).collect()],
+            rows: obs,
+        };
+        return Ok((res, data));
     }
 
     // Three-way 2 x 2 x K path.
@@ -2223,8 +2380,7 @@ fn run_grouped_factorial(
         let f3_name = grouped.row_factor_title.clone();
         let f1_levels = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
         let f2_levels = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
-        let f3_levels: Vec<String> =
-            (0..n_rows).map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect();
+        let f3_levels = grouped_row_levels(grouped, n_rows);
 
         let mut obs = Vec::new();
         for r in 0..n_rows {
@@ -2238,12 +2394,12 @@ fn run_grouped_factorial(
         }
         let data =
             FactorialObservations { factor_names: vec![f1_name, f2_name, f3_name], factor_levels: vec![f1_levels, f2_levels, f3_levels], rows: obs };
-        return fit_factorial_anova(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type);
+        let res = fit_factorial_anova(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
+        return Ok((res, data));
     }
 
     // Standard Two-Way ANOVA (Row Factor x Column Factor).
-    let row_levels: Vec<String> =
-        (0..n_rows).map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect();
+    let row_levels = grouped_row_levels(grouped, n_rows);
     let col_levels: Vec<String> = grouped.data_sets.iter().map(|ds| ds.title.clone()).collect();
     let mut obs = Vec::new();
     for r in 0..n_rows {
@@ -2258,7 +2414,8 @@ fn run_grouped_factorial(
         factor_levels: vec![row_levels, col_levels],
         rows: obs,
     };
-    fit_factorial_anova(&data, fac_spec.max_interaction_order.clamp(1, 2), fac_spec.ss_type)
+    let res = fit_factorial_anova(&data, fac_spec.max_interaction_order.clamp(1, 2), fac_spec.ss_type)?;
+    Ok((res, data))
 }
 
 fn run_rm_two_way_reml_fallback(
@@ -2266,7 +2423,7 @@ fn run_rm_two_way_reml_fallback(
     out: &mut ResultSheet,
     fac_spec: &FactorialAnovaSpec,
     p_fmt: PValueFormat,
-) -> Result<FactorialAnovaResult, StatsError> {
+) -> Result<(FactorialAnovaResult, FactorialObservations), StatsError> {
     let n_rows = grouped.row_count();
     let n_cols = grouped.data_sets.len();
     let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
@@ -2280,6 +2437,7 @@ fn run_rm_two_way_reml_fallback(
 
     let mut x_rows: Vec<f64> = Vec::new();
     let mut y_vec: Vec<f64> = Vec::new();
+    let mut obs = Vec::new();
     let mut cluster_ids: Vec<usize> = Vec::new();
     let mut ss_tot_acc = NeumaierSum::new();
     for s in 0..n_subs {
@@ -2297,6 +2455,7 @@ fn run_rm_two_way_reml_fallback(
                     }
                     x_rows.extend_from_slice(&row_x);
                     y_vec.push(v);
+                    obs.push((vec![r, c], v));
                     ss_tot_acc.add(v);
                     // Cluster ID represents repeated subject identity across matched dimensions.
                     let cid = match fac_spec.repeated_measures {
@@ -2354,7 +2513,7 @@ fn run_rm_two_way_reml_fallback(
     ));
 
     let ym = SummaryMoments::from_slice(&y_vec)?;
-    Ok(FactorialAnovaResult {
+    let res = FactorialAnovaResult {
         terms: reml.fixed_terms,
         ss_residual: reml.sigma2_error * ((n_obs - p_total) as f64),
         df_residual: (n_obs - p_total) as f64,
@@ -2364,10 +2523,19 @@ fn run_rm_two_way_reml_fallback(
         total_n: n_obs,
         unbalanced: true,
         ss_type: SumOfSquaresType::TypeIII,
-    })
+    };
+    let data = FactorialObservations {
+        factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
+        factor_levels: vec![grouped_row_levels(grouped, n_rows), grouped.data_sets.iter().map(|ds| ds.title.clone()).collect()],
+        rows: obs,
+    };
+    Ok((res, data))
 }
 
-fn run_multifactor_mv(mv: &lumencraft_doc::MultipleVariablesTable, fac_spec: &FactorialAnovaSpec) -> Result<FactorialAnovaResult, StatsError> {
+fn run_multifactor_mv(
+    mv: &lumencraft_doc::MultipleVariablesTable,
+    fac_spec: &FactorialAnovaSpec,
+) -> Result<(FactorialAnovaResult, FactorialObservations), StatsError> {
     let resp_idx = fac_spec.response_column.ok_or(StatsError::MissingColumn { index: 0 })?;
     let resp_var = mv.variables.get(resp_idx).ok_or(StatsError::MissingColumn { index: resp_idx })?;
     if fac_spec.multifactor_columns.is_empty() {
@@ -2415,7 +2583,8 @@ fn run_multifactor_mv(mv: &lumencraft_doc::MultipleVariablesTable, fac_spec: &Fa
         }
     }
     let data = FactorialObservations { factor_names, factor_levels, rows: obs };
-    fit_factorial_anova(&data, fac_spec.max_interaction_order, fac_spec.ss_type)
+    let res = fit_factorial_anova(&data, fac_spec.max_interaction_order, fac_spec.ss_type)?;
+    Ok((res, data))
 }
 
 /// Execute a [`NestedAnalysisSpec`] against a [`NestedTable`] [`DataSheet`].

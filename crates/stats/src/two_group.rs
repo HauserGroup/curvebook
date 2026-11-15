@@ -3,19 +3,23 @@
 
 use lumencraft_doc::{
     AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
-    MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, RemediationKind, ResultCell, ResultSheet, ResultTabKind,
-    TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole,
+    MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, TableArchetype,
+    TwoGroupMethod, TwoGroupSpec, VariableRole,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{f_sf, norm_sf, norm_two_sided_isf, student_t_cdf, student_t_sf, student_t_two_sided_p};
 use lumencraft_math::noncentral_t_ci;
+use lumencraft_math::special::inc_beta::reg_beta;
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
-use crate::column::{hedges_j_factor, hodges_lehmann_one_sample, ks_asymptotic_p, shapiro_wilk, wilcoxon_exact_p};
+use crate::column::{
+    OneSampleTResult, exact_binomial_median_ci, hedges_j_factor, hodges_lehmann_one_sample, ks_asymptotic_p, shapiro_wilk,
+    summarize_pre_summarized_points, wilcoxon_exact_p,
+};
 use crate::common::{
-    build_tab, checklist_item, checklist_item_with_remediation, ci_cell, extract_numeric_columns, extract_paired_values, init_result_sheet, num_cell,
-    opt_ci_cell, opt_num_cell, p_cell, push_scalar, quantile_type6_sorted, rank_with_ties, resolve_selected_indices, sorted_finite, t_crit_two_sided,
+    build_tab, checklist_item, ci_cell, extract_numeric_columns, extract_paired_values, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell,
+    p_cell, push_scalar, quantile_type6_sorted, quartiles_hinge, rank_with_ties, resolve_selected_indices, sorted_finite, t_crit_two_sided,
     validate_finite_slice,
 };
 use crate::error::StatsError;
@@ -169,20 +173,35 @@ fn t_tail_p(t_stat: f64, df: f64, two_tailed: bool) -> Result<f64, StatsError> {
     }
 }
 
-fn compute_unpaired_effect_sizes(
+fn f_test_from_summary(sd_a: f64, n_a: f64, sd_b: f64, n_b: f64) -> Result<VarianceFTestResult, StatsError> {
+    let va = sd_a * sd_a;
+    let vb = sd_b * sd_b;
+    let df_a = (n_a - 1.0).max(1.0);
+    let df_b = (n_b - 1.0).max(1.0);
+    if va == 0.0 && vb == 0.0 {
+        return Ok(VarianceFTestResult { f_statistic: 1.0, df_num: df_a, df_den: df_b, p_value: 1.0 });
+    }
+    let (f_stat, df_n, df_d) = if va >= vb {
+        (if vb > 0.0 { va / vb } else { f64::INFINITY }, df_a, df_b)
+    } else {
+        (if va > 0.0 { vb / va } else { f64::INFINITY }, df_b, df_a)
+    };
+    let p_value = if f_stat.is_finite() { (2.0 * f_sf(f_stat, df_n, df_d)?).min(1.0) } else { 0.0 };
+    Ok(VarianceFTestResult { f_statistic: f_stat, df_num: df_n, df_den: df_d, p_value })
+}
+
+fn compute_unpaired_effect_sizes_f(
     diff: f64,
     sds: (f64, f64, f64),
-    n_pair: (usize, usize),
+    n_pair: (f64, f64),
     t_df_conf: (f64, f64, ConfidenceLevel),
 ) -> Result<TwoGroupEffectSizes, StatsError> {
     let (sd_a, sd_b, sd_pooled) = sds;
-    let (n_a, n_b) = n_pair;
+    let (na, nb) = n_pair;
     let (t_stat, df_ci, confidence) = t_df_conf;
-    let na = n_a as f64;
-    let nb = n_b as f64;
     let n_eff = ((na * nb) / (na + nb)).sqrt();
     let d = if sd_pooled > 0.0 { diff / sd_pooled } else { 0.0 };
-    let df_pool = (n_a + n_b - 2) as f64;
+    let df_pool = (na + nb - 2.0).max(1.0);
     let j = if df_pool > 1.0 { hedges_j_factor(df_pool)? } else { 1.0 };
     let g = j * d;
 
@@ -202,12 +221,12 @@ fn compute_unpaired_effect_sizes(
     let (glass_delta, glass_delta_ci) = if sd_a > 0.0 {
         let gd = diff / sd_a;
         let t_glass = gd * n_eff;
-        let g_ci = noncentral_t_ci(t_glass, (n_a - 1) as f64, confidence.percent()).ok().map(|(lo, hi)| (lo / n_eff, hi / n_eff));
+        let g_ci = noncentral_t_ci(t_glass, (na - 1.0).max(1.0), confidence.percent()).ok().map(|(lo, hi)| (lo / n_eff, hi / n_eff));
         (Some(gd), g_ci)
     } else if sd_b > 0.0 {
         let gd = diff / sd_b;
         let t_glass = gd * n_eff;
-        let g_ci = noncentral_t_ci(t_glass, (n_b - 1) as f64, confidence.percent()).ok().map(|(lo, hi)| (lo / n_eff, hi / n_eff));
+        let g_ci = noncentral_t_ci(t_glass, (nb - 1.0).max(1.0), confidence.percent()).ok().map(|(lo, hi)| (lo / n_eff, hi / n_eff));
         (Some(gd), g_ci)
     } else {
         (None, None)
@@ -215,6 +234,179 @@ fn compute_unpaired_effect_sizes(
 
     let r_sq = if df_ci > 0.0 { (t_stat * t_stat) / (t_stat * t_stat + df_ci) } else { 0.0 };
     Ok(TwoGroupEffectSizes { cohens_d: d, cohens_d_ci: d_ci, hedges_g: g, hedges_g_ci: g_ci, glass_delta, glass_delta_ci, r_squared: r_sq })
+}
+
+fn compute_unpaired_effect_sizes(
+    diff: f64,
+    sds: (f64, f64, f64),
+    n_pair: (usize, usize),
+    t_df_conf: (f64, f64, ConfidenceLevel),
+) -> Result<TwoGroupEffectSizes, StatsError> {
+    compute_unpaired_effect_sizes_f(diff, sds, (n_pair.0 as f64, n_pair.1 as f64), t_df_conf)
+}
+
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn build_unpaired_t_from_moments(
+    welch: bool,
+    a: (f64, f64, f64),
+    b: (f64, f64, f64),
+    two_tailed: bool,
+    confidence: ConfidenceLevel,
+    levene_median: LeveneTestResult,
+) -> Result<UnpairedTResult, StatsError> {
+    let (mean_a, sd_a, na) = a;
+    let (mean_b, sd_b, nb) = b;
+    if na < 2.0 {
+        return Err(StatsError::InsufficientSampleSize {
+            context: if welch { "Welch t-test group A" } else { "unpaired t-test group A" },
+            required: 2,
+            actual: na.max(0.0) as usize,
+        });
+    }
+    if nb < 2.0 {
+        return Err(StatsError::InsufficientSampleSize {
+            context: if welch { "Welch t-test group B" } else { "unpaired t-test group B" },
+            required: 2,
+            actual: nb.max(0.0) as usize,
+        });
+    }
+    if !mean_a.is_finite() || !sd_a.is_finite() || sd_a < 0.0 || !na.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "group_a_summary", value: sd_a });
+    }
+    if !mean_b.is_finite() || !sd_b.is_finite() || sd_b < 0.0 || !nb.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "group_b_summary", value: sd_b });
+    }
+
+    let va = sd_a * sd_a;
+    let vb = sd_b * sd_b;
+    let css_a = (na - 1.0) * va;
+    let css_b = (nb - 1.0) * vb;
+    let df_pool = na + nb - 2.0;
+    let sp2 = (css_a + css_b) / df_pool;
+    let sp = sp2.sqrt();
+
+    let (se, df) = if welch {
+        let sem2_a = va / na;
+        let sem2_b = vb / nb;
+        let se2 = sem2_a + sem2_b;
+        if se2 == 0.0 {
+            return Err(StatsError::ZeroVariance { context: "Welch t-test" });
+        }
+        let denom = (sem2_a * sem2_a) / (na - 1.0) + (sem2_b * sem2_b) / (nb - 1.0);
+        (se2.sqrt(), (se2 * se2) / denom)
+    } else {
+        if sp2 == 0.0 {
+            return Err(StatsError::ZeroVariance { context: "unpaired t-test" });
+        }
+        (sp * (1.0 / na + 1.0 / nb).sqrt(), df_pool)
+    };
+
+    let diff = mean_a - mean_b;
+    let t_stat = diff / se;
+    let p_value = t_tail_p(t_stat, df, two_tailed)?;
+    let t_crit = t_crit_two_sided(confidence, df)?;
+    let ci = (diff - t_crit * se, diff + t_crit * se);
+    let f_test = f_test_from_summary(sd_a, na, sd_b, nb)?;
+    let effect_sizes = compute_unpaired_effect_sizes_f(diff, (sd_a, sd_b, sp), (na, nb), (t_stat, df, confidence))?;
+
+    Ok(UnpairedTResult {
+        method_label: if welch { "Welch's t test" } else { "Unpaired Student t test" },
+        n_a: na.round() as usize,
+        n_b: nb.round() as usize,
+        mean_a,
+        mean_b,
+        sd_a,
+        sd_b,
+        difference: diff,
+        se_difference: se,
+        ci,
+        t_statistic: t_stat,
+        df,
+        p_value,
+        two_tailed,
+        f_test,
+        levene_median,
+        effect_sizes,
+        geometric_mean_ratio: None,
+        geometric_mean_ratio_ci: None,
+    })
+}
+
+/// Unpaired Student *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
+pub fn unpaired_t_test_from_summary(
+    group_a: (f64, f64, f64),
+    group_b: (f64, f64, f64),
+    two_tailed: bool,
+    confidence: ConfidenceLevel,
+) -> Result<UnpairedTResult, StatsError> {
+    let placeholder_levene =
+        LeveneTestResult { use_median: true, f_statistic: 0.0, df_between: 1.0, df_within: (group_a.2 + group_b.2 - 2.0).max(1.0), p_value: 1.0 };
+    build_unpaired_t_from_moments(false, group_a, group_b, two_tailed, confidence, placeholder_levene)
+}
+
+/// Unpaired Welch *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
+pub fn welch_t_test_from_summary(
+    group_a: (f64, f64, f64),
+    group_b: (f64, f64, f64),
+    two_tailed: bool,
+    confidence: ConfidenceLevel,
+) -> Result<UnpairedTResult, StatsError> {
+    let placeholder_levene =
+        LeveneTestResult { use_median: true, f_statistic: 0.0, df_between: 1.0, df_within: (group_a.2 + group_b.2 - 2.0).max(1.0), p_value: 1.0 };
+    build_unpaired_t_from_moments(true, group_a, group_b, two_tailed, confidence, placeholder_levene)
+}
+
+/// One-sample Student *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+pub fn one_sample_t_test_from_summary(
+    mean: f64,
+    sd: f64,
+    n: f64,
+    hypothetical_mean: f64,
+    two_tailed: bool,
+    confidence: ConfidenceLevel,
+) -> Result<OneSampleTResult, StatsError> {
+    if !hypothetical_mean.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "hypothetical_mean", value: hypothetical_mean });
+    }
+    if !mean.is_finite() || !sd.is_finite() || sd < 0.0 || !n.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "one_sample_summary", value: sd });
+    }
+    if n < 2.0 {
+        return Err(StatsError::InsufficientSampleSize { context: "one-sample t test", required: 2, actual: n.max(0.0) as usize });
+    }
+    if sd == 0.0 {
+        return Err(StatsError::ZeroVariance { context: "one-sample t test" });
+    }
+    let sem = sd / n.sqrt();
+    let discrepancy = mean - hypothetical_mean;
+    let t_stat = discrepancy / sem;
+    let df = n - 1.0;
+    let p_value = t_tail_p(t_stat, df, two_tailed)?;
+    let t_crit = t_crit_two_sided(confidence, df)?;
+    let ci = (discrepancy - t_crit * sem, discrepancy + t_crit * sem);
+    let d = discrepancy / sd;
+    let j = hedges_j_factor(df)?;
+    let g = j * d;
+    let inv_sqrt_n = 1.0 / n.sqrt();
+    let g_ci = noncentral_t_ci(t_stat, df, confidence.percent()).ok().map(|(lo, hi)| (lo * inv_sqrt_n * j, hi * inv_sqrt_n * j));
+
+    Ok(OneSampleTResult {
+        n: n.round() as usize,
+        hypothetical_mean,
+        sample_mean: mean,
+        discrepancy,
+        sd,
+        sem,
+        t_statistic: t_stat,
+        df,
+        p_value,
+        two_tailed,
+        ci,
+        cohens_d: d,
+        hedges_g: g,
+        hedges_g_ci: g_ci,
+    })
 }
 
 /// Unpaired two-sample Student *t*-test (`a - b` or `b - a`; here `mean_a - mean_b`).
@@ -710,6 +902,65 @@ pub fn wilcoxon_matched_pairs(
     })
 }
 
+/// Output of an exact binomial paired sign test on matched differences `a_i - b_i`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PairedSignTestResult {
+    pub n_total: usize,
+    pub n_positive: usize,
+    pub n_negative: usize,
+    pub n_ties: usize,
+    pub n_nonzero: usize,
+    pub median_difference: f64,
+    pub ci: Option<(f64, f64)>,
+    pub ci_actual_confidence_percent: Option<f64>,
+    pub p_value: f64,
+    pub two_tailed: bool,
+}
+
+/// Exact paired sign test on matched pairs `(a_i, b_i)` evaluating `d_i = a_i - b_i` after
+/// dropping exact zero ties (`d_i == 0`), with exact order-statistic binomial CI for median `d`.
+pub fn paired_sign_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<PairedSignTestResult, StatsError> {
+    validate_finite_slice(a)?;
+    validate_finite_slice(b)?;
+    if a.len() != b.len() {
+        return Err(StatsError::DimensionMismatch { expected: a.len(), actual: b.len() });
+    }
+    let diffs: Vec<f64> = a.iter().zip(b.iter()).map(|(&x, &y)| x - y).collect();
+    let n_total = diffs.len();
+    let n_positive = diffs.iter().filter(|&&d| d > 0.0).count();
+    let n_negative = diffs.iter().filter(|&&d| d < 0.0).count();
+    let n_ties = n_total - n_positive - n_negative;
+    let n_nonzero = n_positive + n_negative;
+
+    let p_value = if n_nonzero == 0 {
+        1.0
+    } else {
+        let k_min = n_positive.min(n_negative);
+        let tail = reg_beta(0.5, (n_nonzero - k_min) as f64, (k_min + 1) as f64)?.clamp(0.0, 1.0);
+        if two_tailed { if k_min * 2 == n_nonzero { 1.0 } else { (2.0 * tail).clamp(0.0, 1.0) } } else { tail }
+    };
+
+    let sorted = sorted_finite(&diffs);
+    let median_difference = quartiles_hinge(&sorted).map_or(sorted[0], |(_, med, _)| med);
+    let (ci, ci_actual_confidence_percent) = match exact_binomial_median_ci(&diffs, confidence) {
+        Ok(mci) => (Some((mci.lower, mci.upper)), Some(mci.actual_confidence_percent)),
+        Err(_) => (None, None),
+    };
+
+    Ok(PairedSignTestResult {
+        n_total,
+        n_positive,
+        n_negative,
+        n_ties,
+        n_nonzero,
+        median_difference,
+        ci,
+        ci_actual_confidence_percent,
+        p_value,
+        two_tailed,
+    })
+}
+
 /// Output of a two-sample Kolmogorov–Smirnov test.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TwoSampleKsResult {
@@ -950,11 +1201,74 @@ pub fn multiple_row_t_tests(
 // ResultSheet Builder
 // ============================================================================
 
+fn extract_pre_summarized_group(
+    col_tab: &lumencraft_doc::ColumnTable,
+    col_idx: usize,
+    conf: ConfidenceLevel,
+) -> Result<(String, f64, f64, f64), StatsError> {
+    let ds = col_tab.data_sets.get(col_idx).ok_or(StatsError::MissingColumn { index: col_idx })?;
+    let mut pts = Vec::new();
+    for r in 0..ds.row_count() {
+        if let Some(pt) = col_tab.summarized_point(r, col_idx)? {
+            pts.push(pt);
+        }
+    }
+    if pts.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    let pooled = summarize_pre_summarized_points(&ds.title, &pts, conf)?;
+    if pooled.total_n < 2.0 {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        return Err(StatsError::InsufficientSampleSize {
+            context: "pre-summarized t-test group",
+            required: 2,
+            actual: pooled.total_n.max(0.0) as usize,
+        });
+    }
+    let sd = pooled.sd.ok_or(StatsError::InsufficientSampleSize { context: "pre-summarized t-test SD", required: 2, actual: 1 })?;
+    Ok((pooled.label, pooled.mean, sd, pooled.total_n))
+}
+
 /// Execute [`TwoGroupSpec`] on a [`DataSheet`] and emit a complete [`ResultSheet`].
 pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGroupSpec) -> Result<ResultSheet, StatsError> {
     let mut res = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;
+
+    if let TableArchetype::Column(col_tab) = &sheet.archetype
+        && col_tab.subcolumn_mode.is_pre_summarized()
+    {
+        if !col_tab.subcolumn_mode.supports_parametric_moments() {
+            return Err(StatsError::RequiresRawReplicates);
+        }
+        match tg.method {
+            TwoGroupMethod::OneSampleT { hypothetical } => {
+                let indices = resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len());
+                let &first_idx = indices.first().ok_or(StatsError::EmptyInput)?;
+                let (label, mean, sd, n) = extract_pre_summarized_group(col_tab, first_idx, conf)?;
+                let out = one_sample_t_test_from_summary(mean, sd, n, hypothetical, tg.two_tailed, conf)?;
+                populate_one_sample_t_sheet_impl(&mut res, &label, None, &out, conf, p_fmt);
+                return Ok(res);
+            }
+            TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT => {
+                let indices = resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len());
+                if indices.len() < 2 {
+                    return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: indices.len() });
+                }
+                let (idx_a, idx_b) = (indices[0], indices[1]);
+                let (lbl_a, mean_a, sd_a, n_a) = extract_pre_summarized_group(col_tab, idx_a, conf)?;
+                let (lbl_b, mean_b, sd_b, n_b) = extract_pre_summarized_group(col_tab, idx_b, conf)?;
+                let out = if matches!(tg.method, TwoGroupMethod::WelchT) {
+                    welch_t_test_from_summary((mean_a, sd_a, n_a), (mean_b, sd_b, n_b), tg.two_tailed, conf)?
+                } else {
+                    unpaired_t_test_from_summary((mean_a, sd_a, n_a), (mean_b, sd_b, n_b), tg.two_tailed, conf)?
+                };
+                populate_unpaired_t_sheet_impl(&mut res, idx_a, idx_b, &lbl_a, &lbl_b, &out, tg.compute_effect_sizes, conf, p_fmt, false);
+                return Ok(res);
+            }
+            _ => return Err(StatsError::RequiresRawReplicates),
+        }
+    }
 
     match tg.method {
         TwoGroupMethod::OneSampleT { hypothetical } => {
@@ -962,7 +1276,7 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
             let cols = extract_numeric_columns(sheet, &sel)?;
             let first = cols.first().ok_or(StatsError::EmptyInput)?;
             let out = crate::column::one_sample_t_test(&first.values, hypothetical, tg.two_tailed, conf)?;
-            populate_one_sample_t_sheet(&mut res, &first.label, &first.values, &out, conf, p_fmt);
+            populate_one_sample_t_sheet_impl(&mut res, &first.label, Some(&first.values), &out, conf, p_fmt);
             return Ok(res);
         }
         TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
@@ -977,7 +1291,10 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
     }
 
     if let Some((lvl_a, lvl_b, skipped_missing)) = resolve_mv_two_group_inputs(sheet, spec, tg)? {
-        if matches!(tg.method, TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank) {
+        if matches!(
+            tg.method,
+            TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest
+        ) {
             return Err(StatsError::InvalidParameter { name: "paired_method_on_mv_categorical_grouping", value: 0.0 });
         }
         match tg.method {
@@ -1007,6 +1324,7 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
             TwoGroupMethod::PairedT
             | TwoGroupMethod::RatioPairedT
             | TwoGroupMethod::WilcoxonSignedRank
+            | TwoGroupMethod::PairedSignTest
             | TwoGroupMethod::OneSampleT { .. }
             | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
         }
@@ -1064,6 +1382,11 @@ pub fn run_two_group_analysis(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGr
             let (xa, xb) = extract_paired_values(sheet, ca.index, cb.index)?;
             let out = wilcoxon_matched_pairs(&xa, &xb, tg.two_tailed, conf, false)?;
             populate_wilcoxon_paired_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, conf, p_fmt);
+        }
+        TwoGroupMethod::PairedSignTest => {
+            let (xa, xb) = extract_paired_values(sheet, ca.index, cb.index)?;
+            let out = paired_sign_test(&xa, &xb, tg.two_tailed, conf)?;
+            populate_paired_sign_sheet(&mut res, ca.index, cb.index, &ca.label, &cb.label, &out, conf, p_fmt);
         }
         TwoGroupMethod::KolmogorovSmirnov => {
             let out = ks_two_sample(&ca.values, &cb.values)?;
@@ -1711,6 +2034,22 @@ fn populate_unpaired_t_sheet(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
+    populate_unpaired_t_sheet_impl(res, idx_a, idx_b, lbl_a, lbl_b, out, include_es, conf, p_fmt, true);
+}
+
+#[allow(clippy::too_many_arguments)]
+fn populate_unpaired_t_sheet_impl(
+    res: &mut ResultSheet,
+    idx_a: usize,
+    idx_b: usize,
+    lbl_a: &str,
+    lbl_b: &str,
+    out: &UnpairedTResult,
+    include_es: bool,
+    conf: ConfidenceLevel,
+    p_fmt: PValueFormat,
+    has_raw_replicates: bool,
+) {
     let mut row_labels = vec![
         String::from("P value"),
         String::from("t statistic"),
@@ -1774,17 +2113,16 @@ fn populate_unpaired_t_sheet(
         is_fdr_q: false,
         significant: out.p_value <= conf.alpha(),
     });
-    append_unpaired_checklist(&mut res.checklist, out, conf.alpha());
+    append_unpaired_checklist(&mut res.checklist, out, conf.alpha(), has_raw_replicates);
 }
 
-fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedTResult, alpha: f64) {
+fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedTResult, alpha: f64, has_raw_replicates: bool) {
     if out.n_a < 5 || out.n_b < 5 {
-        checklist.push(checklist_item_with_remediation(
+        checklist.push(checklist_item(
             "Sample size adequacy",
             ChecklistStatus::Warn,
             Some(format!("n_A = {}, n_B = {}", out.n_a, out.n_b)),
-            "Small group sample sizes limit statistical power and make normality checks unreliable.",
-            Some(RemediationKind::MannWhitneyU),
+            "Small group sample sizes (n < 5) limit statistical power and make normality and variance homogeneity tests inconclusive.",
         ));
     } else {
         checklist.push(checklist_item(
@@ -1795,19 +2133,39 @@ fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedT
         ));
     }
     if out.method_label == "Unpaired Student t test" && out.f_test.p_value <= alpha {
-        checklist.push(checklist_item_with_remediation(
+        checklist.push(checklist_item(
             "Homogeneity of variances",
             ChecklistStatus::Violated,
             Some(format!("F = {:.3}, p = {:.4}", out.f_test.f_statistic, out.f_test.p_value)),
-            "Group variances differ significantly; Welch's t-test is recommended.",
-            Some(RemediationKind::WelchT),
+            "F-test indicates unequal group variances (p <= alpha), violating the equal-variance assumption of pooled-variance Student t tests.",
+        ));
+    } else if has_raw_replicates {
+        checklist.push(checklist_item(
+            "Variance homogeneity check",
+            if out.method_label == "Welch's t test" && out.levene_median.p_value <= alpha { ChecklistStatus::Info } else { ChecklistStatus::Pass },
+            Some(format!("Levene(median) F = {:.3}, p = {:.4}", out.levene_median.f_statistic, out.levene_median.p_value)),
+            if out.method_label == "Welch's t test" && out.levene_median.p_value <= alpha {
+                "Levene test indicates heterogeneous variances; Welch's t-test does not assume equal variances."
+            } else {
+                "No severe departure from equal group variances was detected."
+            },
         ));
     } else {
         checklist.push(checklist_item(
             "Variance homogeneity check",
-            ChecklistStatus::Pass,
-            Some(format!("Levene(median) F = {:.3}, p = {:.4}", out.levene_median.f_statistic, out.levene_median.p_value)),
-            "No severe departure from equal group variances was flagged.",
+            if out.f_test.p_value <= alpha { ChecklistStatus::Info } else { ChecklistStatus::Pass },
+            Some(format!("F = {:.3}, p = {:.4}", out.f_test.f_statistic, out.f_test.p_value)),
+            if out.f_test.p_value <= alpha {
+                "Variance F-test indicates unequal group variances (p <= alpha); Welch's t-test does not assume equal variances."
+            } else {
+                "Variance F-test shows no significant departure from equal group variances."
+            },
+        ));
+        checklist.push(checklist_item(
+            "Pre-summarized input mode",
+            ChecklistStatus::Info,
+            None,
+            "Moments were reconstructed from entered Mean, Spread, and N; normality and Levene median tests require raw replicates.",
         ));
     }
 }
@@ -1825,16 +2183,15 @@ fn append_unpaired_normality_checklist(checklist: &mut Vec<ChecklistItem>, vals_
     let min_sw = [sw_a.as_ref(), sw_b.as_ref()].into_iter().flatten().min_by(|x, y| x.p_value.total_cmp(&y.p_value));
     if let Some(worst) = min_sw {
         let violated = !worst.passed;
-        checklist.push(checklist_item_with_remediation(
+        checklist.push(checklist_item(
             if is_lognormal { "Lognormality of group values" } else { "Normality of group values" },
             if violated { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
             Some(format!("min Shapiro-Wilk W = {:.4}, p = {:.4}", worst.statistic, worst.p_value)),
             if violated {
-                "At least one group departs significantly from Gaussian normality; Mann-Whitney U test is recommended."
+                "Shapiro-Wilk test indicates at least one group departs significantly from Gaussian normality."
             } else {
                 "Neither group shows a significant departure from Gaussian normality."
             },
-            violated.then_some(RemediationKind::MannWhitneyU),
         ));
     }
 }
@@ -1846,25 +2203,26 @@ fn append_paired_normality_checklist(checklist: &mut Vec<ChecklistItem>, vals_a:
         .filter_map(|(&a, &b)| if is_ratio { (a > 0.0 && b > 0.0).then(|| (a / b).ln()) } else { Some(a - b) })
         .collect();
     if diffs.len() < 5 {
-        checklist.push(checklist_item_with_remediation(
+        checklist.push(checklist_item(
             "Normality of paired differences",
             ChecklistStatus::Warn,
             Some(format!("n = {} pairs", diffs.len())),
-            "Small paired sample size limits normality checking; Wilcoxon matched-pairs test is recommended.",
-            Some(RemediationKind::WilcoxonSignedRank),
+            format!(
+                "Sample size (n = {} pairs) is too small to assess normality of paired differences reliably; assumption test is inconclusive.",
+                diffs.len()
+            ),
         ));
     } else if let Ok(sw) = shapiro_wilk(&diffs, alpha) {
         let violated = !sw.passed;
-        checklist.push(checklist_item_with_remediation(
+        checklist.push(checklist_item(
             "Normality of paired differences",
             if violated { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
             Some(format!("Shapiro-Wilk W = {:.4}, p = {:.4}", sw.statistic, sw.p_value)),
             if violated {
-                "Paired differences depart significantly from Gaussian normality; Wilcoxon matched-pairs test is recommended."
+                "Shapiro-Wilk test indicates paired differences depart significantly from Gaussian normality."
             } else {
                 "Paired differences do not depart significantly from Gaussian normality."
             },
-            violated.then_some(RemediationKind::WilcoxonSignedRank),
         ));
     }
 }
@@ -2085,11 +2443,11 @@ fn populate_ks_sheet(
     ));
 }
 
-fn populate_one_sample_t_sheet(
+fn populate_one_sample_t_sheet_impl(
     res: &mut ResultSheet,
     label: &str,
-    values: &[f64],
-    out: &crate::column::OneSampleTResult,
+    values: Option<&[f64]>,
+    out: &OneSampleTResult,
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
@@ -2116,31 +2474,128 @@ fn populate_one_sample_t_sheet(
     res.tabs.push(build_tab("one-sample-t", "One-sample t test", ResultTabKind::MainSummary, vec![label.to_owned()], row_labels, rows));
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "t", None, out.t_statistic);
-    let (status, metric, explanation, remediation) = if out.n < 5 {
-        (
-            ChecklistStatus::Warn,
-            Some(format!("n = {}", out.n)),
-            "Small sample size limits normality checking; One-sample Wilcoxon test is recommended.",
-            Some(RemediationKind::OneSampleWilcoxon),
-        )
-    } else if let Ok(sw) = shapiro_wilk(values, conf.alpha())
-        && !sw.passed
-    {
-        (
-            ChecklistStatus::Warn,
-            Some(format!("n = {}, Shapiro-Wilk W = {:.4}, p = {:.4}", out.n, sw.statistic, sw.p_value)),
-            "Sample departs significantly from Gaussian normality; One-sample Wilcoxon test is recommended.",
-            Some(RemediationKind::OneSampleWilcoxon),
-        )
+
+    if let Some(raw_vals) = values {
+        let (status, metric, explanation) = if out.n < 5 {
+            (
+                ChecklistStatus::Warn,
+                Some(format!("n = {}", out.n)),
+                format!("Sample size (n = {}) is too small to assess Gaussian normality reliably; assumption test is inconclusive.", out.n),
+            )
+        } else if let Ok(sw) = shapiro_wilk(raw_vals, conf.alpha())
+            && !sw.passed
+        {
+            (
+                ChecklistStatus::Warn,
+                Some(format!("n = {}, Shapiro-Wilk W = {:.4}, p = {:.4}", out.n, sw.statistic, sw.p_value)),
+                String::from("Shapiro-Wilk test indicates significant departure from Gaussian normality."),
+            )
+        } else {
+            (
+                ChecklistStatus::Pass,
+                Some(format!("n = {}", out.n)),
+                String::from("One-sample t test assumes independent observations from an approximately Gaussian population."),
+            )
+        };
+        res.checklist.push(checklist_item("One-sample Gaussian assumption", status, metric, explanation));
     } else {
-        (
-            ChecklistStatus::Pass,
+        res.checklist.push(checklist_item(
+            "Pre-summarized input mode",
+            ChecklistStatus::Info,
             Some(format!("n = {}", out.n)),
-            "One-sample t test assumes independent observations from an approximately Gaussian population.",
-            None,
-        )
-    };
-    res.checklist.push(checklist_item_with_remediation("One-sample Gaussian assumption", status, metric, explanation, remediation));
+            "Moments were reconstructed from entered Mean, Spread, and N; Gaussian normality tests require raw replicates.",
+        ));
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn populate_paired_sign_sheet(
+    res: &mut ResultSheet,
+    idx_a: usize,
+    idx_b: usize,
+    lbl_a: &str,
+    lbl_b: &str,
+    out: &PairedSignTestResult,
+    conf: ConfidenceLevel,
+    p_fmt: PValueFormat,
+) {
+    let row_labels = vec![
+        String::from("P value"),
+        String::from("Median difference (A - B)"),
+        format!("{}% CI of median difference", conf.percent()),
+        String::from("Median CI actual confidence (%)"),
+        String::from("Positive differences (n+)"),
+        String::from("Negative differences (n-)"),
+        String::from("Zero ties (n0)"),
+        String::from("Effective pairs (n+ + n-)"),
+    ];
+    let rows = vec![
+        vec![p_cell(out.p_value, p_fmt)],
+        vec![num_cell(out.median_difference)],
+        vec![opt_ci_cell(out.ci)],
+        vec![opt_num_cell(out.ci_actual_confidence_percent)],
+        vec![num_cell(out.n_positive as f64)],
+        vec![num_cell(out.n_negative as f64)],
+        vec![num_cell(out.n_ties as f64)],
+        vec![num_cell(out.n_nonzero as f64)],
+    ];
+    res.tabs.push(build_tab(
+        "paired-sign-test",
+        "Paired sign test",
+        ResultTabKind::MainSummary,
+        vec![format!("{lbl_a} vs. {lbl_b}")],
+        row_labels,
+        rows,
+    ));
+
+    let pos_prop = if out.n_nonzero > 0 { Some((out.n_positive as f64) / (out.n_nonzero as f64)) } else { None };
+    let diag_labels = vec![
+        String::from("Total matched pairs"),
+        String::from("Effective non-tie pairs"),
+        String::from("Dropped exact zero ties"),
+        String::from("Positive sign proportion"),
+        String::from("Null binomial probability (p0)"),
+    ];
+    let diag_rows = vec![
+        vec![num_cell(out.n_total as f64)],
+        vec![num_cell(out.n_nonzero as f64)],
+        vec![num_cell(out.n_ties as f64)],
+        vec![opt_num_cell(pos_prop)],
+        vec![num_cell(0.5)],
+    ];
+    res.tabs.push(build_tab(
+        "paired-sign-diagnostics",
+        "Paired sign test diagnostics",
+        ResultTabKind::Diagnostics,
+        vec![format!("{lbl_a} vs. {lbl_b}")],
+        diag_labels,
+        diag_rows,
+    ));
+
+    push_scalar(res, "median_difference", None, out.median_difference);
+    push_scalar(res, "p_value", None, out.p_value);
+    push_scalar(res, "n_positive", None, out.n_positive as f64);
+    push_scalar(res, "n_negative", None, out.n_negative as f64);
+    push_scalar(res, "n_ties", None, out.n_ties as f64);
+
+    res.pairwise_comparisons.push(PairwiseComparisonRecord {
+        group_a: idx_a,
+        group_b: idx_b,
+        label_a: lbl_a.to_owned(),
+        label_b: lbl_b.to_owned(),
+        estimate_diff: Some(out.median_difference),
+        raw_p_or_q: out.p_value,
+        is_fdr_q: false,
+        significant: out.p_value <= conf.alpha(),
+    });
+
+    let status = if out.n_nonzero < 6 || out.n_ties > 0 { ChecklistStatus::Info } else { ChecklistStatus::Pass };
+    res.checklist.push(checklist_item(
+        "Paired sign test assumptions",
+        status,
+        Some(format!("n+ = {}, n- = {}, ties = {}", out.n_positive, out.n_negative, out.n_ties)),
+        "Exact binomial sign test evaluates sign concordance without assuming normality or symmetry; exact zero ties are excluded from the binomial denominator.",
+    ));
 }
 
 fn populate_one_sample_w_sheet(

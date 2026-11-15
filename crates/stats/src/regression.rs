@@ -63,6 +63,9 @@ pub struct MultipleLinearResult {
     pub residuals: Vec<f64>,
     pub leverage: Vec<f64>,
     pub cooks_distance: Vec<f64>,
+    /// Parameter covariance matrix `sigma^2 * (X'X)^-1` (`p x p`).
+    #[serde(default)]
+    pub cov_beta: Vec<Vec<f64>>,
 }
 
 /// Parameter row for Logistic or Poisson GLM.
@@ -291,6 +294,8 @@ pub fn multiple_linear_regression(
         }
     }
 
+    let cov_beta: Vec<Vec<f64>> = (0..p).map(|j| (0..p).map(|k| mse * cov_unscaled.get(j, k).unwrap_or(0.0)).collect()).collect();
+
     Ok(MultipleLinearResult {
         n,
         p,
@@ -316,6 +321,7 @@ pub fn multiple_linear_regression(
         residuals,
         leverage,
         cooks_distance,
+        cov_beta,
     })
 }
 
@@ -1380,6 +1386,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
             push_scalar(&mut out, "Residual SD (Sy.x)", None, res.residual_sd);
             push_scalar(&mut out, "F statistic", None, res.f_statistic);
             push_scalar(&mut out, "P value", None, res.f_p_value);
+            push_scalar(&mut out, "AIC", None, res.aic);
             push_scalar(&mut out, "AICc", None, res.aicc);
             push_scalar(&mut out, "Durbin-Watson", None, res.durbin_watson);
 
@@ -1408,7 +1415,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 "Multiple linear regression parameters",
                 ResultTabKind::ParametersAndConfidenceIntervals,
                 headers,
-                labels,
+                labels.clone(),
                 rows,
             ));
 
@@ -1433,7 +1440,65 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 anova_rows,
             ));
 
-            // Checklists: VIF, Durbin-Watson, Cook's distance.
+            // Type III partial sum of squares table.
+            let mut type_iii_labels = Vec::new();
+            let mut type_iii_rows = Vec::new();
+            for t in &res.terms {
+                if let (Some(ss), Some(f_val), Some(p_val)) = (t.type_iii_ss, t.type_iii_f, t.type_iii_p) {
+                    type_iii_labels.push(t.name.clone());
+                    type_iii_rows.push(vec![num_cell(ss), num_cell(1.0), num_cell(ss), num_cell(f_val), p_cell(p_val, p_fmt)]);
+                }
+            }
+            if !type_iii_rows.is_empty() {
+                out.tabs.push(build_tab(
+                    "glm-linear-type-iii",
+                    "Type III partial sums of squares",
+                    ResultTabKind::AnovaTable,
+                    vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")],
+                    type_iii_labels,
+                    type_iii_rows,
+                ));
+            }
+
+            // Parameter covariance matrix sigma^2 * (X'X)^-1.
+            let cov_rows: Vec<Vec<ResultCell>> = res.cov_beta.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+            out.tabs.push(build_tab(
+                "glm-linear-covariance",
+                "Parameter covariance matrix",
+                ResultTabKind::CovarianceMatrix,
+                labels.clone(),
+                labels,
+                cov_rows,
+            ));
+
+            // Residuals and influence diagnostics.
+            let resid_labels: Vec<String> = (1..=res.n).map(|i| format!("Row {i}")).collect();
+            let mut resid_rows = Vec::with_capacity(res.n);
+            for (i, &yi) in y_vec.iter().enumerate().take(res.n) {
+                resid_rows.push(vec![
+                    num_cell(yi),
+                    num_cell(res.fitted[i]),
+                    num_cell(res.residuals[i]),
+                    num_cell(res.leverage[i]),
+                    num_cell(res.cooks_distance[i]),
+                ]);
+            }
+            out.tabs.push(build_tab(
+                "glm-linear-residuals",
+                "Linear regression residuals and influence",
+                ResultTabKind::Residuals,
+                vec![
+                    String::from("Observed Y"),
+                    String::from("Predicted Y"),
+                    String::from("Residual"),
+                    String::from("Leverage"),
+                    String::from("Cook's D"),
+                ],
+                resid_labels,
+                resid_rows,
+            ));
+
+            // Checklists: VIF, Cook's distance, and residual normality (QOL-7 diagnostics-only).
             let max_vif = res.terms.iter().filter_map(|t| t.vif).fold(0.0_f64, f64::max);
             if glm_spec.compute_vif && max_vif > 0.0 {
                 let status = if max_vif >= 10.0 {
@@ -1467,6 +1532,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                     "No extreme high-leverage influential points (all Cook's D <= 1.0)."
                 },
             ));
+            out.checklist.push(residual_normality_checklist_item(&res.residuals, confidence.alpha()));
         }
         GlmFamily::Logistic => {
             let res = multiple_logistic_regression(&x_mat, &y_vec, &term_names, glm_spec.compute_vif, confidence)?;
@@ -1476,12 +1542,15 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
             push_scalar(&mut out, "McFadden R squared", None, res.mcfadden_r2);
             push_scalar(&mut out, "Nagelkerke R squared", None, res.nagelkerke_r2);
             push_scalar(&mut out, "Tjur R squared", None, res.tjur_r2);
+            push_scalar(&mut out, "AIC", None, res.aic);
             push_scalar(&mut out, "AICc", None, res.aicc);
+            push_scalar(&mut out, "Hosmer-Lemeshow chi2", None, res.hosmer_lemeshow_chi2);
+            push_scalar(&mut out, "Hosmer-Lemeshow P", None, res.hosmer_lemeshow_p);
             if let Some(auc) = res.roc_auc {
                 push_scalar(&mut out, "ROC AUC", None, auc);
             }
 
-            let headers = vec![
+            let mut headers = vec![
                 String::from("beta"),
                 String::from("SE"),
                 String::from("Wald z"),
@@ -1489,18 +1558,25 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 String::from("Odds Ratio"),
                 format!("{}% CI (OR)", confidence.percent()),
             ];
+            if glm_spec.compute_vif {
+                headers.push(String::from("VIF"));
+            }
             let mut labels = Vec::with_capacity(res.terms.len());
             let mut rows = Vec::with_capacity(res.terms.len());
             for t in &res.terms {
                 labels.push(t.name.clone());
-                rows.push(vec![
+                let mut r = vec![
                     num_cell(t.beta),
                     num_cell(t.se),
                     num_cell(t.z_statistic),
                     p_cell(t.p_value, p_fmt),
                     num_cell(t.exp_beta),
                     ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
-                ]);
+                ];
+                if glm_spec.compute_vif {
+                    r.push(opt_num_cell(t.vif));
+                }
+                rows.push(r);
             }
             out.tabs.push(build_tab(
                 "glm-logistic-params",
@@ -1511,6 +1587,23 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 rows,
             ));
 
+            out.tabs.push(build_logistic_classification_tab(&y_vec, &res.predicted_probs));
+
+            let pred_labels: Vec<String> = (1..=res.n).map(|i| format!("Row {i}")).collect();
+            let pred_rows: Vec<Vec<ResultCell>> = y_vec
+                .iter()
+                .zip(res.predicted_probs.iter())
+                .map(|(&yi, &pi)| vec![num_cell(yi), num_cell(pi), num_cell(if pi >= 0.5 { 1.0 } else { 0.0 })])
+                .collect();
+            out.tabs.push(build_tab(
+                "glm-logistic-predictions",
+                "Logistic regression predicted probabilities",
+                ResultTabKind::Residuals,
+                vec![String::from("Observed Y"), String::from("Predicted probability"), String::from("Predicted class")],
+                pred_labels,
+                pred_rows,
+            ));
+
             out.checklist.push(checklist_item(
                 "Logistic separation & calibration",
                 if res.separation_detected { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
@@ -1518,19 +1611,26 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 if res.separation_detected {
                     "Complete or quasi-complete separation detected; penalized safeguard applied to stabilize odds ratios."
                 } else {
-                    "IRLS converged cleanly without separation; inspect Hosmer-Lemeshow P and ROC AUC for calibration/discrimination."
+                    "IRLS converged without separation; Hosmer-Lemeshow P and ROC AUC summarize calibration and discrimination."
                 },
             ));
         }
         GlmFamily::Poisson => {
             let res = multiple_poisson_regression(&x_mat, &y_vec, &term_names, glm_spec.compute_vif, confidence)?;
+            let mcfadden_r2 = if res.log_lik_null.abs() > 1e-12 && res.log_lik_null.is_finite() && res.log_lik_model.is_finite() {
+                (1.0 - res.log_lik_model / res.log_lik_null).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
             push_scalar(&mut out, "Residual deviance", None, res.deviance_residual);
             push_scalar(&mut out, "Pearson dispersion", None, res.dispersion_pearson);
             push_scalar(&mut out, "LR chi-square", None, res.lr_chi2);
             push_scalar(&mut out, "LR P value", None, res.lr_p);
+            push_scalar(&mut out, "AIC", None, res.aic);
             push_scalar(&mut out, "AICc", None, res.aicc);
+            push_scalar(&mut out, "McFadden R squared", None, mcfadden_r2);
 
-            let headers = vec![
+            let mut headers = vec![
                 String::from("beta"),
                 String::from("SE"),
                 String::from("Wald z"),
@@ -1538,18 +1638,25 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 String::from("Rate Ratio"),
                 format!("{}% CI (RR)", confidence.percent()),
             ];
+            if glm_spec.compute_vif {
+                headers.push(String::from("VIF"));
+            }
             let mut labels = Vec::with_capacity(res.terms.len());
             let mut rows = Vec::with_capacity(res.terms.len());
             for t in &res.terms {
                 labels.push(t.name.clone());
-                rows.push(vec![
+                let mut r = vec![
                     num_cell(t.beta),
                     num_cell(t.se),
                     num_cell(t.z_statistic),
                     p_cell(t.p_value, p_fmt),
                     num_cell(t.exp_beta),
                     ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
-                ]);
+                ];
+                if glm_spec.compute_vif {
+                    r.push(opt_num_cell(t.vif));
+                }
+                rows.push(r);
             }
             out.tabs.push(build_tab(
                 "glm-poisson-params",
@@ -1560,13 +1667,39 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 rows,
             ));
 
+            let resid_labels: Vec<String> = (1..=res.n).map(|i| format!("Row {i}")).collect();
+            let resid_rows: Vec<Vec<ResultCell>> = y_vec
+                .iter()
+                .zip(res.predicted_means.iter())
+                .map(|(&yi, &mui)| {
+                    let mu = mui.max(1e-12);
+                    let pearson = (yi - mui) / mu.sqrt();
+                    let dev_sq = if yi > 0.0 { 2.0 * (yi * (yi / mu).ln() - (yi - mu)) } else { 2.0 * mu };
+                    let dev_res = if yi >= mui { dev_sq.max(0.0).sqrt() } else { -dev_sq.max(0.0).sqrt() };
+                    vec![num_cell(yi), num_cell(mui), num_cell(pearson), num_cell(dev_res)]
+                })
+                .collect();
+            out.tabs.push(build_tab(
+                "glm-poisson-residuals",
+                "Poisson regression Pearson and deviance residuals",
+                ResultTabKind::Residuals,
+                vec![
+                    String::from("Observed Y"),
+                    String::from("Predicted count"),
+                    String::from("Pearson residual"),
+                    String::from("Deviance residual"),
+                ],
+                resid_labels,
+                resid_rows,
+            ));
+
             let overdispersed = res.dispersion_pearson > 1.5;
             out.checklist.push(checklist_item(
                 "Equidispersion assumption (Poisson)",
                 if overdispersed { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
                 Some(format!("Pearson chi2 / df = {:.3}", res.dispersion_pearson)),
                 if overdispersed {
-                    "Overdispersion detected (dispersion > 1.5); standard errors may be underestimated relative to negative binomial or quasi-Poisson models."
+                    "Overdispersion detected (Pearson chi2 / df > 1.5); Poisson variance assumptions understate dispersion and standard errors."
                 } else {
                     "Count variance is consistent with Poisson equidispersion (dispersion <= 1.5)."
                 },
@@ -1575,4 +1708,99 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
     }
 
     Ok(out)
+}
+
+/// Evaluate residual Gaussian normality for linear GLM without remediation suggestions (`QOL-7`).
+fn residual_normality_checklist_item(residuals: &[f64], alpha: f64) -> lumencraft_doc::ChecklistItem {
+    let outcome = if residuals.len() < 3 {
+        return checklist_item(
+            "Residual normality",
+            ChecklistStatus::Info,
+            Some(format!("n = {}", residuals.len())),
+            "Fewer than 3 residuals are available; normality testing requires at least 3 residuals.",
+        );
+    } else if residuals.len() <= 5000 {
+        crate::column::shapiro_wilk(residuals, alpha)
+    } else {
+        crate::column::dagostino_pearson_k2(residuals, alpha)
+    };
+    match outcome {
+        Ok(res) => checklist_item(
+            "Residual normality",
+            if res.passed { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+            Some(format!("{} = {:.4}, P = {:.4}", res.test_name, res.statistic, res.p_value)),
+            if res.passed {
+                "Residual distribution shows no significant departure from Gaussian normality; small-sample t and F approximations hold under normal errors."
+            } else {
+                "Residual distribution departs from Gaussian normality (P < alpha); small-sample t-intervals and F-tests rely on asymptotic normality."
+            },
+        ),
+        Err(StatsError::ZeroVariance { .. }) => checklist_item(
+            "Residual normality",
+            ChecklistStatus::Info,
+            Some(String::from("exact fit (zero residual variance)")),
+            "Regression residuals have zero variance (exact model fit); normality test statistics are degenerate.",
+        ),
+        Err(err) => checklist_item("Residual normality", ChecklistStatus::Info, None, format!("Residual normality diagnostic unavailable: {err}.")),
+    }
+}
+
+/// Build logistic classification summary (cutoff 0.50) and cutoff-accuracy sweep (`0.1..=0.9`).
+fn build_logistic_classification_tab(y: &[f64], probs: &[f64]) -> lumencraft_doc::ResultTab {
+    fn metrics_row(y: &[f64], probs: &[f64], cutoff: f64) -> Vec<ResultCell> {
+        let mut tp = 0_usize;
+        let mut fp = 0_usize;
+        let mut fn_cnt = 0_usize;
+        let mut tn = 0_usize;
+        for (&yi, &pi) in y.iter().zip(probs.iter()) {
+            let obs_pos = yi > 0.5;
+            let pred_pos = pi >= cutoff;
+            match (obs_pos, pred_pos) {
+                (true, true) => tp += 1,
+                (false, true) => fp += 1,
+                (true, false) => fn_cnt += 1,
+                (false, false) => tn += 1,
+            }
+        }
+        let sens = (tp + fn_cnt > 0).then(|| (tp as f64) / ((tp + fn_cnt) as f64));
+        let spec = (tn + fp > 0).then(|| (tn as f64) / ((tn + fp) as f64));
+        let ppv = (tp + fp > 0).then(|| (tp as f64) / ((tp + fp) as f64));
+        let npv = (tn + fn_cnt > 0).then(|| (tn as f64) / ((tn + fn_cnt) as f64));
+        let acc = ((tp + tn) as f64) / (y.len().max(1) as f64);
+        vec![
+            num_cell(cutoff),
+            num_cell(tp as f64),
+            num_cell(fp as f64),
+            num_cell(fn_cnt as f64),
+            num_cell(tn as f64),
+            opt_num_cell(sens),
+            opt_num_cell(spec),
+            opt_num_cell(ppv),
+            opt_num_cell(npv),
+            num_cell(acc),
+        ]
+    }
+
+    let headers = vec![
+        String::from("Cutoff"),
+        String::from("TP"),
+        String::from("FP"),
+        String::from("FN"),
+        String::from("TN"),
+        String::from("Sensitivity"),
+        String::from("Specificity"),
+        String::from("PPV"),
+        String::from("NPV"),
+        String::from("Accuracy"),
+    ];
+    let mut row_labels = Vec::with_capacity(10);
+    let mut rows = Vec::with_capacity(10);
+    row_labels.push(String::from("Cutoff 0.50 (2x2)"));
+    rows.push(metrics_row(y, probs, 0.5));
+    for k in 1..=9 {
+        let cutoff = (k as f64) * 0.1;
+        row_labels.push(format!("Sweep cutoff {cutoff:.1}"));
+        rows.push(metrics_row(y, probs, cutoff));
+    }
+    build_tab("glm-logistic-classification", "Logistic classification table & cutoff sweep", ResultTabKind::Diagnostics, headers, row_labels, rows)
 }
