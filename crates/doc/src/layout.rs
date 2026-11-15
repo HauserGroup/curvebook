@@ -261,6 +261,52 @@ impl LayoutSpec {
         Ok(())
     }
 
+    /// Return the first non-finite float field path in this layout specification, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<&'static str> {
+        if !self.width.is_finite() {
+            return Some("spec.width");
+        }
+        if !self.height.is_finite() {
+            return Some("spec.height");
+        }
+        for item in &self.items {
+            match item {
+                LayoutItem::LiveGraph { bounds_pt, scale_percent, .. } => {
+                    if !rect_is_finite(*bounds_pt) {
+                        return Some("spec.items.live_graph.bounds_pt");
+                    }
+                    if !scale_percent.is_finite() {
+                        return Some("spec.items.live_graph.scale_percent");
+                    }
+                }
+                LayoutItem::LiveTable { bounds_pt, .. } => {
+                    if !rect_is_finite(*bounds_pt) {
+                        return Some("spec.items.live_table.bounds_pt");
+                    }
+                }
+                LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
+                    if !rect_is_finite(*bounds_pt) {
+                        return Some("spec.items.text_callout.bounds_pt");
+                    }
+                    if !font_size_pt.is_finite() {
+                        return Some("spec.items.text_callout.font_size_pt");
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Validate item budget and float finiteness for this layout specification.
+    pub fn validate(&self) -> Result<(), DocError> {
+        self.validate_item_count()?;
+        if let Some(reason) = self.first_non_finite_float() {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason });
+        }
+        Ok(())
+    }
+
     /// Append a [`LayoutItem`] while enforcing [`MAX_LAYOUT_ITEMS`].
     pub fn add_item(&mut self, item: LayoutItem) -> Result<(), LayoutItemLimitError> {
         let next = self.items.len().saturating_add(1);
@@ -335,6 +381,10 @@ pub struct LayoutSheet {
     pub color_tag: Option<Rgba8>,
 }
 
+fn rect_is_finite(rect: RectPt) -> bool {
+    rect.x.is_finite() && rect.y.is_finite() && rect.width.is_finite() && rect.height.is_finite()
+}
+
 impl LayoutSheet {
     pub fn new(id: impl Into<SheetId>, title: impl Into<String>, spec: LayoutSpec) -> Result<Self, DocError> {
         let id = id.into();
@@ -343,7 +393,32 @@ impl LayoutSheet {
         }
         let title = title.into();
         validate_title(&title)?;
-        spec.validate_item_count()?;
+        spec.validate()?;
         Ok(Self { id, title, spec, floating_notes: Vec::new(), color_tag: None })
+    }
+
+    /// Return the first non-finite float field path in this layout sheet, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<&'static str> {
+        if let Some(field) = self.spec.first_non_finite_float() {
+            return Some(field);
+        }
+        if self.floating_notes.iter().any(|note| !rect_is_finite(note.bounds_pt)) {
+            return Some("floating_notes.bounds_pt");
+        }
+        None
+    }
+
+    /// Validate sheet identity, title, layout specification, and floating-note geometry.
+    pub fn validate(&self) -> Result<(), DocError> {
+        if self.id.as_str().trim().is_empty() {
+            return Err(DocError::EmptyIdentifier);
+        }
+        validate_title(&self.title)?;
+        self.spec.validate()?;
+        if self.floating_notes.iter().any(|note| !rect_is_finite(note.bounds_pt)) {
+            return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason: "floating_notes.bounds_pt" });
+        }
+        Ok(())
     }
 }
