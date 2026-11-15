@@ -180,6 +180,9 @@ pub fn clopper_pearson_ci(k: u64, n: u64, confidence: ConfidenceLevel) -> Result
     if n == 0 {
         return Ok((0.0, 1.0));
     }
+    if k > n {
+        return Err(StatsError::InvalidParameter { name: "binomial_successes", value: k as f64 });
+    }
     let alpha = confidence.alpha();
     let half = 0.5 * alpha;
     let lo = if k == 0 { 0.0 } else { reg_beta_inv(k as f64, (n - k + 1) as f64, half)? };
@@ -210,6 +213,9 @@ pub fn exact_binomial_test(k: u64, n: u64, null_proportion: f64, confidence: Con
     }
     if k > n {
         return Err(StatsError::InvalidParameter { name: "binomial_successes", value: k as f64 });
+    }
+    if n > EXACT_BINOMIAL_MAX_TOTAL {
+        return Err(StatsError::InvalidParameter { name: "binomial_max_total", value: n as f64 });
     }
     if !null_proportion.is_finite() || null_proportion <= 0.0 || null_proportion >= 1.0 {
         return Err(StatsError::InvalidParameter { name: "null_proportion", value: null_proportion });
@@ -267,6 +273,38 @@ pub fn exact_binomial_test(k: u64, n: u64, null_proportion: f64, confidence: Con
 // Contingency Tests (Chi-Square, G^2, Fisher, Cochran–Armitage, McNemar)
 // ============================================================================
 
+const FISHER_2X2_MAX_TOTAL: u64 = 5_000_000;
+const FISHER_RXC_MAX_TOTAL: u64 = 50_000;
+const FISHER_RXC_ANALYZE_MAX_TOTAL: u64 = 20_000;
+const MCNEMAR_MAX_TOTAL: u64 = 5_000_000;
+const EXACT_BINOMIAL_MAX_TOTAL: u64 = 5_000_000;
+const NONCENTRAL_HYPERGEOM_MAX_TOTAL: u64 = 5_000_000;
+const NONCENTRAL_HYPERGEOM_MAX_SPAN: u64 = 100_000;
+
+fn checked_sum_u64(vals: &[u64], name: &'static str) -> Result<u64, StatsError> {
+    vals.iter().try_fold(0_u64, |acc, &v| acc.checked_add(v)).ok_or(StatsError::InvalidParameter { name, value: f64::INFINITY })
+}
+
+fn checked_table_margins(counts: &[Vec<u64>]) -> Result<(Vec<u64>, Vec<u64>, u64), StatsError> {
+    let n_rows = counts.len();
+    let n_cols = counts.first().map_or(0, Vec::len);
+    let mut r_sums = Vec::with_capacity(n_rows);
+    let mut c_sums = vec![0_u64; n_cols];
+    let mut total = 0_u64;
+    for row in counts {
+        if row.len() != n_cols {
+            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n_cols, actual: row.len() }));
+        }
+        let r_sum = checked_sum_u64(row, "contingency_row_total")?;
+        r_sums.push(r_sum);
+        total = total.checked_add(r_sum).ok_or(StatsError::InvalidParameter { name: "contingency_table_total", value: f64::INFINITY })?;
+        for (c, &v) in row.iter().enumerate() {
+            c_sums[c] = c_sums[c].checked_add(v).ok_or(StatsError::InvalidParameter { name: "contingency_col_total", value: f64::INFINITY })?;
+        }
+    }
+    Ok((r_sums, c_sums, total))
+}
+
 /// Log-probability of observing integer matrix `counts` given its row sums `r_sums` and column sums
 /// `c_sums` under the multiple hypergeometric null distribution.
 fn log_hypergeom_table(counts: &[Vec<u64>], r_sums: &[u64], c_sums: &[u64], total: u64) -> Result<f64, StatsError> {
@@ -288,12 +326,15 @@ fn log_hypergeom_table(counts: &[Vec<u64>], r_sums: &[u64], c_sums: &[u64], tota
 
 /// Exact two-sided Fisher's test for a `2 x 2` count matrix `[[a, b], [c, d]]`.
 pub fn fisher_exact_2x2(a: u64, b: u64, c: u64, d: u64) -> Result<f64, StatsError> {
-    let r1 = a + b;
-    let r2 = c + d;
-    let c1 = a + c;
-    let total = r1 + r2;
+    let r1 = a.checked_add(b).ok_or(StatsError::InvalidParameter { name: "fisher_exact_row1_total", value: f64::INFINITY })?;
+    let r2 = c.checked_add(d).ok_or(StatsError::InvalidParameter { name: "fisher_exact_row2_total", value: f64::INFINITY })?;
+    let c1 = a.checked_add(c).ok_or(StatsError::InvalidParameter { name: "fisher_exact_col1_total", value: f64::INFINITY })?;
+    let total = r1.checked_add(r2).ok_or(StatsError::InvalidParameter { name: "fisher_exact_table_total", value: f64::INFINITY })?;
     if total == 0 {
         return Ok(1.0);
+    }
+    if total > FISHER_2X2_MAX_TOTAL {
+        return Err(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 });
     }
     let lo = c1.saturating_sub(r2);
     let hi = r1.min(c1);
@@ -729,6 +770,21 @@ pub fn barnard_exact_2x2_with_ordering(a: u64, b: u64, c: u64, d: u64, ordering:
     Ok(BarnardExactResult { statistic: z_stat, p_value, nuisance_pi, ordering, used_asymptotic_fallback: false })
 }
 
+fn build_fisher_rxc_pool(c_sums: &[u64], total: u64) -> Result<Vec<usize>, StatsError> {
+    let total_usize = usize::try_from(total).map_err(|_| StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 })?;
+    let mut col_pool = Vec::with_capacity(total_usize);
+    for (c_idx, &cnt) in c_sums.iter().enumerate() {
+        let cnt_usize = usize::try_from(cnt).map_err(|_| StatsError::InvalidParameter { name: "fisher_exact_max_total", value: cnt as f64 })?;
+        let new_len = col_pool
+            .len()
+            .checked_add(cnt_usize)
+            .filter(|&len| len <= total_usize)
+            .ok_or(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 })?;
+        col_pool.resize(new_len, c_idx);
+    }
+    Ok(col_pool)
+}
+
 /// Freeman–Halton exact / deterministic Monte Carlo *p*-value for general `R x C` contingency tables.
 ///
 /// Uses deterministic Patefield-style permutation sampling (`DeterministicRng::from_seed`) for
@@ -740,32 +796,22 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
     if n_rows < 2 || n_cols < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "Fisher R x C contingency", required: 2, actual: n_rows.min(n_cols) });
     }
+    let (r_sums, c_sums, total) = checked_table_margins(counts)?;
     if n_rows == 2 && n_cols == 2 {
         return fisher_exact_2x2(counts[0][0], counts[0][1], counts[1][0], counts[1][1]);
     }
-    let r_sums: Vec<u64> = counts.iter().map(|r| r.iter().sum()).collect();
-    let mut c_sums = vec![0_u64; n_cols];
-    for row in counts {
-        for (c, &v) in row.iter().enumerate() {
-            c_sums[c] += v;
-        }
-    }
-    let total: u64 = r_sums.iter().sum();
     if total == 0 {
         return Ok(1.0);
     }
-    let obs_log = log_hypergeom_table(counts, &r_sums, &c_sums, total)?;
 
     // Build flat vector of column assignments and permute deterministically across 10,000 draws.
-    if total > 50_000 {
+    if total > FISHER_RXC_MAX_TOTAL {
         // Reject tables exceeding the deterministic Monte Carlo permutation cap rather than silently
         // substituting asymptotic chi-square under a Fisher exact label.
         return Err(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 });
     }
-    let mut col_pool = Vec::with_capacity(total as usize);
-    for (c_idx, &cnt) in c_sums.iter().enumerate() {
-        col_pool.resize(col_pool.len() + (cnt as usize), c_idx);
-    }
+    let obs_log = log_hypergeom_table(counts, &r_sums, &c_sums, total)?;
+    let mut col_pool = build_fisher_rxc_pool(&c_sums, total)?;
     let n_sims = 10_000_usize;
     let mut rng = DeterministicRng::from_seed(0xC07_4F15_8E2B_1001);
     let mut sim_table = vec![vec![0_u64; n_cols]; n_rows];
@@ -779,7 +825,9 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
         let mut cursor = 0_usize;
         for (r_idx, &r_cnt) in r_sums.iter().enumerate() {
             for _ in 0..r_cnt {
-                let c_idx = col_pool[cursor];
+                let Some(&c_idx) = col_pool.get(cursor) else {
+                    return Err(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 });
+                };
                 sim_table[r_idx][c_idx] += 1;
                 cursor += 1;
             }
@@ -792,41 +840,33 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
     Ok(((extreme + 1) as f64) / ((n_sims + 1) as f64))
 }
 
-fn chi_square_stats(counts: &[Vec<u64>], yates: bool) -> Result<(f64, f64, f64), StatsError> {
+fn chi_square_stats_with_margins(
+    counts: &[Vec<u64>],
+    r_sums: &[u64],
+    c_sums: &[u64],
+    total: u64,
+    yates: bool,
+) -> Result<(f64, f64, f64), StatsError> {
     let n_rows = counts.len();
     let n_cols = counts.first().map_or(0, Vec::len);
     if n_rows < 2 || n_cols < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "chi-square contingency", required: 2, actual: n_rows.min(n_cols) });
     }
-    let r_sums: Vec<f64> = counts.iter().map(|r| r.iter().sum::<u64>() as f64).collect();
-    let mut c_sums = vec![0.0_f64; n_cols];
-    for row in counts {
-        if row.len() != n_cols {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n_cols, actual: row.len() }));
-        }
-        for (c, &v) in row.iter().enumerate() {
-            c_sums[c] += v as f64;
-        }
-    }
-    let total: f64 = r_sums.iter().sum();
-    if total <= 0.0 {
+    if total == 0 {
         return Err(StatsError::EmptyInput);
     }
-
+    let total_f = total as f64;
     let use_yates = yates && n_rows == 2 && n_cols == 2;
     let mut chi2 = 0.0_f64;
     let mut g2 = 0.0_f64;
     let mut min_exp = f64::INFINITY;
-    let mut lt5_count = 0_usize;
 
     for (r, row) in counts.iter().enumerate() {
+        let rs_f = r_sums[r] as f64;
         for (c, &o_u) in row.iter().enumerate() {
             let obs = o_u as f64;
-            let exp = (r_sums[r] * c_sums[c]) / total;
+            let exp = (rs_f * (c_sums[c] as f64)) / total_f;
             min_exp = min_exp.min(exp);
-            if exp < 5.0 {
-                lt5_count += 1;
-            }
             if exp > 0.0 {
                 let diff = (obs - exp).abs();
                 let adj_diff = if use_yates { (diff - 0.5).max(0.0) } else { diff };
@@ -837,11 +877,7 @@ fn chi_square_stats(counts: &[Vec<u64>], yates: bool) -> Result<(f64, f64, f64),
             }
         }
     }
-    let frac_lt5 = (lt5_count as f64) / ((n_rows * n_cols) as f64);
-    Ok((chi2, g2.max(0.0), min_exp)).map(|(x, g, me)| {
-        let _ = frac_lt5;
-        (x, g, me)
-    })
+    Ok((chi2, g2.max(0.0), min_exp))
 }
 
 /// Cochran–Armitage chi-square test for linear trend across ordered levels (`R x 2` or `2 x C`).
@@ -851,6 +887,11 @@ pub fn cochran_armitage_trend(counts: &[Vec<u64>]) -> Result<(f64, f64), StatsEr
     if !((n_cols == 2 && n_rows >= 3) || (n_rows == 2 && n_cols >= 3)) {
         let bad = if n_rows == 2 || n_cols == 2 { n_rows.max(n_cols) } else { n_rows.min(n_cols) };
         return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 });
+    }
+    for row in counts {
+        if row.len() != n_cols {
+            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n_cols, actual: row.len() }));
+        }
     }
     // Orient as k ordered levels x 2 outcomes.
     let oriented: Vec<[f64; 2]> = if n_cols == 2 {
@@ -897,12 +938,18 @@ pub fn cochran_armitage_trend(counts: &[Vec<u64>]) -> Result<(f64, f64), StatsEr
 /// McNemar's paired `2 x 2` test on discordant counts `(b = cell[0][1], c = cell[1][0])`,
 /// returning `(chi2_with_continuity, exact_binomial_two_sided_p)`.
 pub fn mcnemar_test(b: u64, c: u64) -> Result<(f64, f64), StatsError> {
-    let n = b + c;
+    let n = b.checked_add(c).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
     if n == 0 {
         return Ok((0.0, 1.0));
     }
+    if n > MCNEMAR_MAX_TOTAL {
+        return Err(StatsError::InvalidParameter { name: "mcnemar_max_total", value: n as f64 });
+    }
     let diff = (b as f64 - c as f64).abs();
     let chi2 = ((diff - 1.0).max(0.0)).powi(2) / (n as f64);
+    if b == c {
+        return Ok((chi2, 1.0));
+    }
     let min_bc = b.min(c);
     let ln_two_n = -(n as f64) * std::f64::consts::LN_2;
     let ln_nf = ln_factorial(n);
@@ -911,15 +958,14 @@ pub fn mcnemar_test(b: u64, c: u64) -> Result<(f64, f64), StatsError> {
         let lp = ln_nf - ln_factorial(k) - ln_factorial(n - k) + ln_two_n;
         tail += lp.exp();
     }
-    let exact_p = if min_bc * 2 == n { 1.0 } else { (2.0 * tail).clamp(0.0, 1.0) };
-    Ok((chi2, exact_p))
+    Ok((chi2, (2.0 * tail).clamp(0.0, 1.0)))
 }
 
 /// Detailed McNemar paired analysis including discordant-pair odds ratio `b / c` and its
 /// exact Clopper–Pearson confidence interval transformed via `[p_L / (1 - p_L), p_U / (1 - p_U)]`.
 pub fn mcnemar_detailed(b: u64, c: u64, confidence: ConfidenceLevel) -> Result<McNemarResult, StatsError> {
     let (chi_square_yates, exact_p_value) = mcnemar_test(b, c)?;
-    let n = b + c;
+    let n = b.checked_add(c).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
     if n == 0 {
         return Ok(McNemarResult {
             b,
@@ -969,29 +1015,25 @@ pub fn mcnemar_detailed(b: u64, c: u64, confidence: ConfidenceLevel) -> Result<M
 pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confidence: ConfidenceLevel) -> Result<ContingencyResult, StatsError> {
     let n_rows = counts.len();
     let n_cols = counts.first().map_or(0, Vec::len);
-    let total_count: u64 = counts.iter().flat_map(|r| r.iter()).sum();
+    if n_rows == 0 || n_cols == 0 {
+        return Err(StatsError::EmptyInput);
+    }
+    let (r_sums, c_sums, total_count) = checked_table_margins(counts)?;
     if total_count == 0 {
         return Err(StatsError::EmptyInput);
     }
 
-    let (chi2, g2, min_exp) = chi_square_stats(counts, yates_continuity)?;
+    let (chi2, g2, min_exp) = chi_square_stats_with_margins(counts, &r_sums, &c_sums, total_count, yates_continuity)?;
     let df = ((n_rows - 1) * (n_cols - 1)) as f64;
     let chi2_p = chi2_sf(chi2, df)?;
     let g2_p = chi2_sf(g2, df)?;
 
     // Count fraction of cells with expected count < 5.
     let total_f = total_count as f64;
-    let r_sums: Vec<f64> = counts.iter().map(|r| r.iter().sum::<u64>() as f64).collect();
-    let mut c_sums = vec![0.0_f64; n_cols];
-    for row in counts {
-        for (c, &v) in row.iter().enumerate() {
-            c_sums[c] += v as f64;
-        }
-    }
     let mut lt5 = 0_usize;
     for &rs in &r_sums {
         for &cs in &c_sums {
-            if (rs * cs) / total_f < 5.0 {
+            if ((rs as f64) * (cs as f64)) / total_f < 5.0 {
                 lt5 += 1;
             }
         }
@@ -999,16 +1041,22 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
     let cells_lt5_fraction = (lt5 as f64) / ((n_rows * n_cols) as f64);
 
     let fisher_exact_p = if n_rows == 2 && n_cols == 2 {
-        if total_count <= 5_000_000 { Some(fisher_exact_2x2(counts[0][0], counts[0][1], counts[1][0], counts[1][1])?) } else { None }
-    } else if n_rows <= 6 && n_cols <= 6 && total_count <= 20_000 {
+        if total_count <= FISHER_2X2_MAX_TOTAL { Some(fisher_exact_2x2(counts[0][0], counts[0][1], counts[1][0], counts[1][1])?) } else { None }
+    } else if n_rows <= 6 && n_cols <= 6 && total_count <= FISHER_RXC_ANALYZE_MAX_TOTAL {
         Some(fisher_exact_rxc(counts)?)
     } else {
         None
     };
 
     let (mcnemar_chi2, mcnemar_exact_p) = if n_rows == 2 && n_cols == 2 {
-        let (mc, mp) = mcnemar_test(counts[0][1], counts[1][0])?;
-        (Some(mc), Some(mp))
+        let discordant_total =
+            counts[0][1].checked_add(counts[1][0]).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
+        if discordant_total <= MCNEMAR_MAX_TOTAL {
+            let (mc, mp) = mcnemar_test(counts[0][1], counts[1][0])?;
+            (Some(mc), Some(mp))
+        } else {
+            (None, None)
+        }
     } else {
         (None, None)
     };
@@ -1021,7 +1069,8 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
     };
 
     // Uncorrected Pearson chi-square for phi and Cramer's V.
-    let (chi2_uncorr, _, _) = if yates_continuity { chi_square_stats(counts, false)? } else { (chi2, g2, min_exp) };
+    let (chi2_uncorr, _, _) =
+        if yates_continuity { chi_square_stats_with_margins(counts, &r_sums, &c_sums, total_count, false)? } else { (chi2, g2, min_exp) };
     let phi = if n_rows == 2 && n_cols == 2 { Some((chi2_uncorr / total_f).sqrt()) } else { None };
     let k_min = (n_rows.min(n_cols) - 1) as f64;
     let cramers_v = (chi2_uncorr / (total_f * k_min)).sqrt().clamp(0.0, 1.0);
@@ -1058,11 +1107,30 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
 // ============================================================================
 
 /// Noncentral hypergeometric exact two-sided *p*-value as a function of log-odds ratio `theta`.
-fn noncentral_hypergeom_p(a_obs: u64, r1: u64, r2: u64, c1: u64, or_val: f64) -> f64 {
+fn noncentral_hypergeom_p(a_obs: u64, r1: u64, r2: u64, c1: u64, or_val: f64) -> Result<f64, StatsError> {
+    let total = r1.checked_add(r2).ok_or(StatsError::InvalidParameter { name: "noncentral_hypergeom_total", value: f64::INFINITY })?;
+    if total > NONCENTRAL_HYPERGEOM_MAX_TOTAL {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_max_total", value: total as f64 });
+    }
+    if c1 > total {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_col1", value: c1 as f64 });
+    }
     let lo = c1.saturating_sub(r2);
     let hi = r1.min(c1);
+    if lo > hi || a_obs < lo || a_obs > hi {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_cell", value: a_obs as f64 });
+    }
+    if !or_val.is_finite() || or_val < 0.0 {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_or", value: or_val });
+    }
+    let span = hi - lo + 1;
+    if span > NONCENTRAL_HYPERGEOM_MAX_SPAN {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_max_span", value: span as f64 });
+    }
+    let span_usize = usize::try_from(span).map_err(|_| StatsError::InvalidParameter { name: "noncentral_hypergeom_max_span", value: span as f64 })?;
+
     let log_or = or_val.max(1e-18).ln();
-    let mut log_weights = Vec::with_capacity((hi - lo + 1) as usize);
+    let mut log_weights = Vec::with_capacity(span_usize);
     let mut max_lw = f64::NEG_INFINITY;
     for x in lo..=hi {
         let bx = r1 - x;
@@ -1079,6 +1147,9 @@ fn noncentral_hypergeom_p(a_obs: u64, r1: u64, r2: u64, c1: u64, or_val: f64) ->
         norm += w;
         probs.push((x, w));
     }
+    if !norm.is_finite() || norm <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_norm", value: norm });
+    }
     let mut obs_p = 0.0_f64;
     for &(x, w) in &probs {
         if x == a_obs {
@@ -1087,17 +1158,19 @@ fn noncentral_hypergeom_p(a_obs: u64, r1: u64, r2: u64, c1: u64, or_val: f64) ->
         }
     }
     let p_sum: f64 = probs.iter().map(|(_, w)| w / norm).filter(|&p| p <= obs_p + 1e-12).sum();
-    p_sum.clamp(0.0, 1.0)
+    Ok(p_sum.clamp(0.0, 1.0))
 }
 
 /// Baptista–Pike (1977) exact conditional odds-ratio confidence interval for `2 x 2` table `[[a, b], [c, d]]`.
 pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: ConfidenceLevel) -> Option<(f64, f64)> {
-    let r1 = a + b;
-    let r2 = c + d;
-    let c1 = a + c;
+    let r1 = a.checked_add(b)?;
+    let r2 = c.checked_add(d)?;
+    let c1 = a.checked_add(c)?;
+    let total = r1.checked_add(r2)?;
     let lo_x = c1.saturating_sub(r2);
     let hi_x = r1.min(c1);
-    if r1 == 0 || r2 == 0 || lo_x >= hi_x {
+    let span = hi_x.checked_sub(lo_x).and_then(|v| v.checked_add(1))?;
+    if r1 == 0 || r2 == 0 || lo_x >= hi_x || total > NONCENTRAL_HYPERGEOM_MAX_TOTAL || span > NONCENTRAL_HYPERGEOM_MAX_SPAN {
         return None;
     }
     let alpha = confidence.alpha();
@@ -1115,13 +1188,13 @@ pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: Confidenc
     } else {
         let mut l = or_pt.max(1e-6);
         for _ in 0..40 {
-            if noncentral_hypergeom_p(a, r1, r2, c1, l) < alpha {
+            if noncentral_hypergeom_p(a, r1, r2, c1, l).ok()? < alpha {
                 break;
             }
             l *= 0.5;
         }
         brent_root(
-            |theta| noncentral_hypergeom_p(a, r1, r2, c1, theta) - alpha,
+            |theta| noncentral_hypergeom_p(a, r1, r2, c1, theta).unwrap_or(0.0) - alpha,
             l,
             or_pt.max(l * 1.1),
             RootOptions { rel_tol: 1e-7, abs_tol: 1e-8, max_iters: 64 },
@@ -1134,13 +1207,13 @@ pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: Confidenc
     } else {
         let mut h = or_pt.max(1.0);
         for _ in 0..40 {
-            if noncentral_hypergeom_p(a, r1, r2, c1, h) < alpha {
+            if noncentral_hypergeom_p(a, r1, r2, c1, h).ok()? < alpha {
                 break;
             }
             h *= 2.0;
         }
         brent_root(
-            |theta| noncentral_hypergeom_p(a, r1, r2, c1, theta) - alpha,
+            |theta| noncentral_hypergeom_p(a, r1, r2, c1, theta).unwrap_or(0.0) - alpha,
             or_pt.min(h * 0.9),
             h,
             RootOptions { rel_tol: 1e-7, abs_tol: 1e-8, max_iters: 64 },
@@ -1338,10 +1411,11 @@ fn rd_lo_abs(v: f64) -> f64 {
 
 /// RR CI, Newcombe risk-difference CI, NNT, and Wilson CIs for sensitivity/specificity/PPV/NPV.
 pub fn analyze_2x2_ratios(a: u64, b: u64, c: u64, d: u64, confidence: ConfidenceLevel) -> Result<TwoByTwoRatiosResult, StatsError> {
-    let r1 = a + b;
-    let r2 = c + d;
-    let c1 = a + c;
-    let c2 = b + d;
+    let r1 = a.checked_add(b).ok_or(StatsError::InvalidParameter { name: "contingency_row_sum", value: f64::INFINITY })?;
+    let r2 = c.checked_add(d).ok_or(StatsError::InvalidParameter { name: "contingency_row_sum", value: f64::INFINITY })?;
+    let c1 = a.checked_add(c).ok_or(StatsError::InvalidParameter { name: "contingency_col_sum", value: f64::INFINITY })?;
+    let c2 = b.checked_add(d).ok_or(StatsError::InvalidParameter { name: "contingency_col_sum", value: f64::INFINITY })?;
+    let _total = r1.checked_add(r2).ok_or(StatsError::InvalidParameter { name: "contingency_total", value: f64::INFINITY })?;
     if r1 == 0 || r2 == 0 {
         return Err(StatsError::EmptyInput);
     }
@@ -1406,12 +1480,12 @@ pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: 
     if k < 2 || counts.iter().any(|r| r.len() != k) {
         return Err(StatsError::InvalidParameter { name: "square_matrix_k", value: k as f64 });
     }
-    let total: u64 = counts.iter().flat_map(|r| r.iter()).sum();
+    let (row_sums, _col_sums, total) = checked_table_margins(counts)?;
     if total == 0 {
         return Err(StatsError::EmptyInput);
     }
     let nf = total as f64;
-    let row_p: Vec<f64> = counts.iter().map(|r| (r.iter().sum::<u64>() as f64) / nf).collect();
+    let row_p: Vec<f64> = row_sums.into_iter().map(|s| (s as f64) / nf).collect();
     let mut col_p = vec![0.0_f64; k];
     for row in counts {
         for (j, &v) in row.iter().enumerate() {
@@ -1492,12 +1566,12 @@ pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> R
     if n < 2 || k < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "Fleiss kappa", required: 2, actual: n.min(k) });
     }
-    let m: u64 = rater_counts[0].iter().sum();
+    let m = checked_sum_u64(&rater_counts[0], "fleiss_raters_per_subject")?;
     if m < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "Fleiss raters per subject", required: 2, actual: m as usize });
     }
     for row in rater_counts {
-        if row.len() != k || row.iter().sum::<u64>() != m {
+        if row.len() != k || checked_sum_u64(row, "fleiss_raters_per_subject")? != m {
             return Err(StatsError::InvalidParameter { name: "raters_per_subject", value: m as f64 });
         }
     }
@@ -1551,12 +1625,16 @@ fn validate_and_run_barnard_if_requested(counts: &[Vec<u64>], method: Contingenc
             Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 })
         }
         ContingencyMethod::BarnardExact => {
-            if n_rows != 2 || n_cols != 2 {
+            if n_rows != 2 || n_cols != 2 || counts.iter().any(|r| r.len() != 2) {
                 return Err(StatsError::InvalidParameter { name: "barnard_exact_dimensions", value: n_rows.max(n_cols) as f64 });
             }
-            let n1 = counts[0][0].saturating_add(counts[0][1]);
-            let n2 = counts[1][0].saturating_add(counts[1][1]);
-            let total = n1.saturating_add(n2);
+            let n1 = counts[0][0]
+                .checked_add(counts[0][1])
+                .ok_or(StatsError::InvalidParameter { name: "barnard_exact_max_total", value: f64::INFINITY })?;
+            let n2 = counts[1][0]
+                .checked_add(counts[1][1])
+                .ok_or(StatsError::InvalidParameter { name: "barnard_exact_max_total", value: f64::INFINITY })?;
+            let total = n1.checked_add(n2).ok_or(StatsError::InvalidParameter { name: "barnard_exact_max_total", value: f64::INFINITY })?;
             let grid_cells = n1.saturating_add(1).saturating_mul(n2.saturating_add(1));
             if total > BARNARD_MAX_TOTAL || grid_cells > BARNARD_MAX_GRID_CELLS {
                 return Err(StatsError::InvalidParameter { name: "barnard_exact_max_total", value: total as f64 });
@@ -1629,7 +1707,12 @@ fn resolve_contingency_primary(
             Ok(ContingencyPrimaryOutcome::plain("Cochran-Armitage trend", res.cochran_armitage_z, ca_p))
         }
         ContingencyMethod::McNemarPaired => {
-            let mc_p = res.mcnemar_exact_p.ok_or(StatsError::InvalidParameter { name: "mcnemar_dimensions", value: n_rows.max(n_cols) as f64 })?;
+            let err = if n_rows == 2 && n_cols == 2 {
+                StatsError::InvalidParameter { name: "mcnemar_max_total", value: res.total_count as f64 }
+            } else {
+                StatsError::InvalidParameter { name: "mcnemar_dimensions", value: n_rows.max(n_cols) as f64 }
+            };
+            let mc_p = res.mcnemar_exact_p.ok_or(err)?;
             Ok(ContingencyPrimaryOutcome::plain("McNemar's test", res.mcnemar_chi2, mc_p))
         }
         ContingencyMethod::CohenKappa { .. } | ContingencyMethod::FleissKappa | ContingencyMethod::ExactBinomial => {
@@ -1740,7 +1823,7 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
             Some(_) => ResultCell::Text(String::from("∞")),
             None => ResultCell::Empty,
         };
-        let disc_total = mc.b + mc.c;
+        let disc_total = mc.b.checked_add(mc.c).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
         let disc_prop_cell = if disc_total > 0 { num_cell((mc.b as f64) / (disc_total as f64)) } else { ResultCell::Empty };
         out.tabs.push(build_tab(
             "contingency-mcnemar",
@@ -1887,7 +1970,7 @@ fn run_cohen_kappa_sheet(
 ) -> Result<ResultSheet, StatsError> {
     let res = cohens_kappa(counts, weighting, confidence)?;
     let k = counts.len();
-    let total: u64 = counts.iter().flat_map(|r| r.iter()).sum();
+    let (_, _, total) = checked_table_margins(counts)?;
     let label = match weighting {
         KappaWeighting::Unweighted => "Cohen's kappa (unweighted)",
         KappaWeighting::Linear => "Cohen's kappa (linear weighted)",
@@ -1937,7 +2020,7 @@ fn run_fleiss_kappa_sheet(
     let res = fleiss_kappa(counts, confidence)?;
     let n = counts.len();
     let k = counts.first().map_or(0, Vec::len);
-    let m: u64 = counts.first().map_or(0, |r| r.iter().sum());
+    let m = counts.first().map_or(Ok(0), |r| checked_sum_u64(r, "fleiss_raters_per_subject"))?;
     push_kappa_outputs(
         &mut out,
         &res,
@@ -1991,7 +2074,7 @@ fn extract_exact_binomial_counts(sheet: &DataSheet, spec: &AnalysisSpec) -> Resu
             };
             let k = as_count(slices[0].value)?;
             let f = as_count(slices[1].value)?;
-            let n = k + f;
+            let n = k.checked_add(f).ok_or(StatsError::InvalidParameter { name: "exact_binomial_total", value: f64::INFINITY })?;
             if n == 0 {
                 return Err(StatsError::EmptyInput);
             }
@@ -2006,7 +2089,7 @@ fn extract_exact_binomial_counts(sheet: &DataSheet, spec: &AnalysisSpec) -> Resu
                 (2, 1) => (table.count_at(0, 0)?.unwrap_or(0), table.count_at(1, 0)?.unwrap_or(0)),
                 _ => return Err(StatsError::DimensionMismatch { expected: 2, actual: n_rows * n_cols }),
             };
-            let n = k + f;
+            let n = k.checked_add(f).ok_or(StatsError::InvalidParameter { name: "exact_binomial_total", value: f64::INFINITY })?;
             if n == 0 {
                 return Err(StatsError::EmptyInput);
             }
@@ -2266,7 +2349,8 @@ mod tests {
     use lumencraft_math::dist::norm_two_sided_isf;
 
     use super::{
-        koopman_chi2_score, koopman_rr_ci, koopman_solve_lower, koopman_solve_lower_c_zero, koopman_solve_upper, koopman_solve_upper_a_zero,
+        StatsError, checked_table_margins, fisher_exact_2x2, koopman_chi2_score, koopman_rr_ci, koopman_solve_lower, koopman_solve_lower_c_zero,
+        koopman_solve_upper, koopman_solve_upper_a_zero, noncentral_hypergeom_p,
     };
 
     #[test]
@@ -2465,5 +2549,48 @@ mod tests {
         assert!(koopman_solve_upper(&nan_inside_hi_bracket, 1.0).is_none());
         assert!(koopman_solve_lower_c_zero(&nan_inside_lo_bracket).is_none());
         assert!(koopman_solve_upper_a_zero(&nan_inside_hi_bracket).is_none());
+    }
+
+    #[test]
+    fn noncentral_hypergeom_and_table_margin_overflow_guards() {
+        // Total overflow, total cap, span cap, invalid col sum, out-of-range cell, and bad OR.
+        assert!(matches!(
+            noncentral_hypergeom_p(1, u64::MAX, 1, 1, 1.0),
+            Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_total", .. })
+        ));
+        assert!(matches!(
+            noncentral_hypergeom_p(1, 3_000_000, 3_000_000, 2, 1.0),
+            Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_max_total", .. })
+        ));
+        assert!(matches!(
+            noncentral_hypergeom_p(50_000, 200_000, 200_000, 200_000, 1.0),
+            Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_max_span", .. })
+        ));
+        assert!(matches!(noncentral_hypergeom_p(1, 5, 5, 11, 1.0), Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_col1", .. })));
+        assert!(matches!(noncentral_hypergeom_p(6, 5, 5, 6, 1.0), Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_cell", .. })));
+        assert!(matches!(noncentral_hypergeom_p(2, 5, 5, 5, f64::NAN), Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_or", .. })));
+        assert!(matches!(noncentral_hypergeom_p(2, 5, 5, 5, -1.0), Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_or", .. })));
+        // Valid small case stays close to central hypergeometric p at OR = 1.0.
+        let p_unit = noncentral_hypergeom_p(8, 10, 10, 10, 1.0).unwrap();
+        let p_fisher = fisher_exact_2x2(8, 2, 2, 8).unwrap();
+        assert!((p_unit - p_fisher).abs() < 1e-12);
+
+        // Checked table margins reject row overflow, col overflow, table total overflow, and ragged rows.
+        assert!(matches!(
+            checked_table_margins(&[vec![u64::MAX, 1], vec![0, 0]]),
+            Err(StatsError::InvalidParameter { name: "contingency_row_total", .. })
+        ));
+        assert!(matches!(
+            checked_table_margins(&[vec![1_u64 << 63, 0], vec![1_u64 << 63, 0]]),
+            Err(StatsError::InvalidParameter { name: "contingency_table_total", .. })
+        ));
+        assert!(matches!(
+            checked_table_margins(&[vec![1_u64 << 63, 0], vec![0, 1_u64 << 63]]),
+            Err(StatsError::InvalidParameter { name: "contingency_table_total", .. })
+        ));
+        assert!(matches!(
+            checked_table_margins(&[vec![1, 2], vec![3]]),
+            Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: 2, actual: 1 }))
+        ));
     }
 }
