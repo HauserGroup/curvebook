@@ -31,7 +31,7 @@ Claimable engineering roadmap for **LumenCraft**. For current verified capabilit
 
 | Milestone | Scope & target gate | Was | Status | Notes |
 |---|---|---|---|---|
-| **R0** | Align with house principles & typed engine scaffold | Phases A–E | in progress | `R0.1`–`R0.5`, `R0.7`–`R0.13` done (Waves 8A–14); `R0.6` (Zero-Telemetry policy, local `xtask telemetry`, and local `xtask workflows` `actionlint` + `shellcheck` done; live GH Actions runner execution open), `R0.14` (clean-room PNG screenshots, `.github/workflows/release.yml` `tags: ["v*"]`, `cargo-about` `THIRD-PARTY-LICENSES.html` + `cargo-deny`, web `.zip`, and local universal macOS `.dmg`/`.zip` `package.sh` + `verify.sh` done; hosted `v0.1.0-rc1` CI tag/matrix open) in progress |
+| **R0** | Align with house principles & typed engine scaffold | Phases A–E | in progress | `R0.1`–`R0.5`, `R0.7`–`R0.13` done (Waves 8A–14); `R0.16` (local `cargo-llvm-cov` coverage reports) in progress; `R0.6` (Zero-Telemetry policy, local `xtask telemetry`, and local `xtask workflows` `actionlint` + `shellcheck` done; live GH Actions runner execution open), `R0.14` (clean-room PNG screenshots, `.github/workflows/release.yml` `tags: ["v*"]`, `cargo-about` `THIRD-PARTY-LICENSES.html` + `cargo-deny`, web `.zip`, and local universal macOS `.dmg`/`.zip` `package.sh` + `verify.sh` done; hosted `v0.1.0-rc1` CI tag/matrix open) in progress |
 | **R1** | Workspace scaffold, numerical foundations & NIST StRD oracle | `M0`, `M1` (partial), `G1` | done | `58` NIST StRD datasets + `D1` R `4.5.2` oracle matrices verified (`0 h`) |
 | **R2** | Typed data tables, reactive DAG, persistence & `.prism`/`.pzfx` import | `M1`, `M2`, `G2`, `G10` | done | Waves 1–6 incl. `.lumencraft.d/`, `G2` & `G10` fixes verified (`0 h`) |
 | **R3** | Core biostatistics, ANOVA/REML, survival, contingency, ROC & multivariate | `M2`, `M6`, `G3`, `G8` | done | Waves 2–5 incl. `BarnardExact`, `PassingBablok`, MICE, `G8` Koopman fix (`0 h`) |
@@ -133,6 +133,16 @@ Owner: open · Status: in progress · Was: Phase E
 - [x] Expand `docs/releasing.md`, add `packaging/macos/verify.sh`, `packaging/linux/apprun-test.sh`, `packaging/windows/check-icons.ps1`, pass `--cargo-profile web-release` in `packaging/web/package.sh`, update `.github/workflows/release.yml` with `tags: ["v*"]` and safe `env:` version resolution, generate `THIRD-PARTY-LICENSES.html` (`cargo about generate` + `cargo deny check licenses`), and modernize `README.md` with badges, section nav, Downloads, `platform/`, Zero-Telemetry callout, and one-line Status.
 - [x] Generate clean-room `1440x900` Light Split Workspace and Dark Multi-Panel Layout PNG screenshots (`crates/ui-egui/examples/doc_screenshots.rs`, `cargo xtask screenshots [--check]`, `docs/images/workspace-split-fit.png`, `docs/images/workspace-layout-dark.png`, `ASSETS.md`, `README.md`) and complete local universal macOS (`lumencraft-0.1.0-macos-universal.dmg`, `36,340,795` B; `lumencraft-cli-0.1.0-macos-universal.zip`, `13,504,838` B) & web (`lumencraft-web-0.1.0.zip`, `4,162,394` B) release packaging + `verify.sh --arch universal` + `check-app-specific.sh`.
 - [ ] Tag `v0.1.0-rc1` across the 5-OS hosted GitHub Actions release matrix (`release.yml`) and verify hosted CI `cargo deny`/`cargo about` execution across all runners.
+
+### R0.16 Local source-coverage reports (`cargo-llvm-cov`)
+Owner: open · Status: in progress — claimed: jsture, branch `chore/R0.16-llvm-cov` · Was: coverage tooling review 2026-11-15 · Est. note: 2–4 h
+
+Coverage is a diagnostic for finding untested edge-case and error paths (`NaN`/`±Inf`, empty input, malformed files). It is never a substitute for `D1` oracle checks and has no percentage gate.
+
+- [x] Add `cargo xtask coverage [-p <crate>]... [-- <test args>]` wrapping `cargo llvm-cov` (nextest when installed), excluding `xtask` and `lumencraft-testkit`, writing `lcov.info` and an HTML report under the coverage target directory, and printing an install hint when `cargo-llvm-cov` or `llvm-tools-preview` is missing (`xtask/src/coverage.rs`, `5` unit tests; local runs on `lumencraft-math` and `lumencraft-format`).
+- [x] Add `.github/workflows/coverage.yml` (manual and weekly, not a PR gate) that runs `cargo xtask coverage` and keeps the report as a workflow artifact only; no third-party coverage upload service (local `cargo xtask workflows` + `cargo xtask telemetry` pass).
+- [ ] Confirm a green hosted run of `coverage.yml` (`workflow_dispatch`) once it is on `main`.
+- [x] Document the command and its policy (no thresholds, no hand-written coverage percentages) in [`development.md`](development.md) and [`AGENTS.md`](../AGENTS.md) §4.
 
 ---
 
