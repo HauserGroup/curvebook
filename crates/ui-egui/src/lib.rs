@@ -142,6 +142,7 @@ impl UiApp {
             focus_widget_id: None,
             power_wizards_by_sheet: std::collections::BTreeMap::new(),
         };
+        app.grid.apply_locale_preset(&app.locale_preset);
         app.sync_views();
         app
     }
@@ -151,7 +152,7 @@ impl UiApp {
         let normalized = i18n::normalize_locale(locale);
         self.locale = normalized.to_owned();
         self.locale_preset = i18n::LocalePreset::for_locale(normalized);
-        self.grid.decimal_separator = self.locale_preset.decimal_separator;
+        self.grid.apply_locale_preset(&self.locale_preset);
         &self.locale
     }
 

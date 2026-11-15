@@ -230,10 +230,24 @@ fn summarize_layout_sheet_json(l: &lumencraft_doc::LayoutSheet) -> Value {
     })
 }
 
+fn sanitize_terminal_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for ch in text.chars() {
+        if ch.is_control() {
+            for esc in ch.escape_default() {
+                out.push(esc);
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn print_info_human(file_label: &str, loaded: &LoadedProject) {
     let doc = &loaded.doc;
-    println!("File: {file_label} ({}, schema v{})", loaded.format_tag, doc.schema_version);
-    println!("Title: {}", doc.title);
+    println!("File: {} ({}, schema v{})", sanitize_terminal_text(file_label), loaded.format_tag, doc.schema_version);
+    println!("Title: {}", sanitize_terminal_text(&doc.title));
     println!(
         "Sheets ({} total): {} tables, {} info sheets, {} analyses, {} graphs, {} layouts",
         doc.total_sheet_count(),
@@ -247,7 +261,7 @@ fn print_info_human(file_label: &str, loaded: &LoadedProject) {
     if !loaded.warnings.is_empty() {
         println!("Warnings ({}):", loaded.warnings.len());
         for w in &loaded.warnings {
-            println!("  - {w}");
+            println!("  - {}", sanitize_terminal_text(w));
         }
     }
 }
@@ -256,13 +270,25 @@ fn print_human_sections(doc: &ProjectDocument) {
     if !doc.data_sheets.is_empty() {
         println!("Tables:");
         for ds in &doc.data_sheets {
-            println!("  - {} [{}] `{}` ({}x{})", ds.id, ds.kind().label(), ds.title, ds.archetype.row_count(), ds.archetype.column_count());
+            println!(
+                "  - {} [{}] `{}` ({}x{})",
+                sanitize_terminal_text(ds.id.as_str()),
+                ds.kind().label(),
+                sanitize_terminal_text(&ds.title),
+                ds.archetype.row_count(),
+                ds.archetype.column_count()
+            );
         }
     }
     if !doc.info_sheets.is_empty() {
         println!("Info Sheets:");
         for info in &doc.info_sheets {
-            println!("  - {} `{}` ({} constants)", info.id, info.title, info.constants.len());
+            println!(
+                "  - {} `{}` ({} constants)",
+                sanitize_terminal_text(info.id.as_str()),
+                sanitize_terminal_text(&info.title),
+                info.constants.len()
+            );
         }
     }
     if !doc.result_sheets.is_empty() {
@@ -270,9 +296,9 @@ fn print_human_sections(doc: &ProjectDocument) {
         for res in &doc.result_sheets {
             println!(
                 "  - {} `{}` (source: {}, tabs: {}, scalars: {}, curves: {})",
-                res.id,
-                res.title(),
-                res.analysis.source_sheet_id,
+                sanitize_terminal_text(res.id.as_str()),
+                sanitize_terminal_text(res.title()),
+                sanitize_terminal_text(res.analysis.source_sheet_id.as_str()),
                 res.tabs.len(),
                 res.scalars.len(),
                 res.fitted_curves.len()
@@ -282,13 +308,20 @@ fn print_human_sections(doc: &ProjectDocument) {
     if !doc.graph_sheets.is_empty() {
         println!("Graphs:");
         for g in &doc.graph_sheets {
-            println!("  - {} [{:?}] `{}` (initialized: {}, series: {})", g.id, g.spec.kind, g.title, g.initialized, g.spec.series.len());
+            println!(
+                "  - {} [{:?}] `{}` (initialized: {}, series: {})",
+                sanitize_terminal_text(g.id.as_str()),
+                g.spec.kind,
+                sanitize_terminal_text(&g.title),
+                g.initialized,
+                g.spec.series.len()
+            );
         }
     }
     if !doc.layout_sheets.is_empty() {
         println!("Layouts:");
         for l in &doc.layout_sheets {
-            println!("  - {} `{}` ({} items)", l.id, l.title, l.spec.items.len());
+            println!("  - {} `{}` ({} items)", sanitize_terminal_text(l.id.as_str()), sanitize_terminal_text(&l.title), l.spec.items.len());
         }
     }
 }

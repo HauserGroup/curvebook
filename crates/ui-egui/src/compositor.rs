@@ -1547,8 +1547,9 @@ fn draw_visible_grid_cells(
             let (raw_text, fg) = if is_inline_edited {
                 (app.inline_editor.buffer.clone(), pal.text)
             } else if is_generated_x {
+                let dec = app.locale_preset.decimal_separator;
                 let text = match &ds.archetype {
-                    TableArchetype::Xy(xy) => xy.x_value_at(row).map_or_else(String::new, format_compact_f64),
+                    TableArchetype::Xy(xy) => xy.x_value_at(row).map_or_else(String::new, |v| format_localized_compact_f64(v, dec)),
                     _ => String::new(),
                 };
                 (text, pal.muted)
@@ -1969,7 +1970,7 @@ fn draw_status_bar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp,
         .grid
         .quick_stats
         .filter(|s| s.numeric_count > 0)
-        .and_then(|s| s.mean.map(|m| format!("n={} Mean={}", s.numeric_count, format_compact_f64(m))))
+        .and_then(|s| s.mean.map(|m| format!("n={} Mean={}", s.numeric_count, format_localized_compact_f64(m, app.locale_preset.decimal_separator))))
         .unwrap_or_default();
     let banner = app.canvas_dialogs.status_banner.as_deref().unwrap_or("");
     let left_text = [cursor_str, stats_str, String::from(banner)].into_iter().filter(|s| !s.is_empty()).collect::<Vec<String>>().join(" | ");
@@ -1984,6 +1985,16 @@ fn draw_status_bar(img: &mut RasterImage, rect: WorkspacePixelRect, app: &UiApp,
             rtl: is_rtl,
         },
     );
+}
+
+fn format_localized_compact_f64(value: f64, decimal_separator: char) -> String {
+    let text = format_compact_f64(value);
+    if decimal_separator != '.' {
+        let mut buf = [0u8; 4];
+        text.replace('.', decimal_separator.encode_utf8(&mut buf))
+    } else {
+        text
+    }
 }
 
 fn draw_modal_overlay(img: &mut RasterImage, backdrop: WorkspacePixelRect, modal: WorkspacePixelRect, app: &UiApp, pal: &FramePalette) {

@@ -696,6 +696,28 @@ impl Default for WorkspaceNavState {
     }
 }
 
+/// Resolve the live zero-based index of `sheet_id` inside `folder` of `doc`, if still present.
+#[must_use]
+pub fn live_sheet_index_in_folder(doc: &ProjectDocument, folder: SheetFolderKind, sheet_id: &str) -> Option<usize> {
+    match folder {
+        SheetFolderKind::Data => doc.data_sheets.iter().position(|s| s.id.as_str() == sheet_id),
+        SheetFolderKind::Info => doc.info_sheets.iter().position(|s| s.id.as_str() == sheet_id),
+        SheetFolderKind::Results => doc.result_sheets.iter().position(|s| s.id.as_str() == sheet_id),
+        SheetFolderKind::Graphs => doc.graph_sheets.iter().position(|s| s.id.as_str() == sheet_id),
+        SheetFolderKind::Layouts => doc.layout_sheets.iter().position(|s| s.id.as_str() == sheet_id),
+    }
+}
+
+fn folder_len(doc: &ProjectDocument, folder: SheetFolderKind) -> usize {
+    match folder {
+        SheetFolderKind::Data => doc.data_sheets.len(),
+        SheetFolderKind::Info => doc.info_sheets.len(),
+        SheetFolderKind::Results => doc.result_sheets.len(),
+        SheetFolderKind::Graphs => doc.graph_sheets.len(),
+        SheetFolderKind::Layouts => doc.layout_sheets.len(),
+    }
+}
+
 impl WorkspaceNavState {
     /// Cycle active workspace pane focus forward (`reverse = false`, `F6`) or backward (`reverse = true`, `Shift+F6`).
     pub fn cycle_focus_pane(&mut self, reverse: bool) -> ActiveWorkspacePane {
@@ -713,6 +735,11 @@ impl WorkspaceNavState {
         self.navigator_drag.update_hover(to_index);
     }
 
+    /// Update the live drop slot index only when `folder` matches the dragged sheet's folder.
+    pub fn update_sheet_hover_in_folder(&mut self, folder: SheetFolderKind, to_index: usize) {
+        self.navigator_drag.update_hover_in_folder(folder, to_index);
+    }
+
     /// Cancel an in-progress navigator sheet drag without emitting a reorder command.
     pub fn cancel_sheet_drag(&mut self) {
         self.navigator_drag.cancel();
@@ -725,6 +752,20 @@ impl WorkspaceNavState {
             return None;
         }
         Some(("sheet.reorder", json!({ "folder": folder, "from_index": from_index, "to_index": to_index })))
+    }
+
+    /// Commit an active navigator drag-reorder by resolving the dragged `sheet_id` against the
+    /// live `ProjectDocument` (`R1-S11-11`) rather than relying on the start index captured before
+    /// mid-drag edits.
+    pub fn commit_sheet_drop_command_for_doc(&mut self, doc: &ProjectDocument) -> Option<(&'static str, Value)> {
+        let (folder, sheet_id, _captured_from_index, raw_to_index) = self.navigator_drag.commit_drop_with_sheet()?;
+        let live_from_index = live_sheet_index_in_folder(doc, folder, &sheet_id)?;
+        let count = folder_len(doc, folder);
+        let to_index = raw_to_index.min(count.saturating_sub(1));
+        if live_from_index == to_index {
+            return None;
+        }
+        Some(("sheet.reorder", json!({ "sheet_id": sheet_id, "folder": folder, "index": to_index, "to_index": to_index })))
     }
 
     /// Toggle visibility of the Project Portfolio Gallery overview.
