@@ -18,7 +18,9 @@ use lumencraft_math::roots::{RootOptions, brent_root};
 use lumencraft_math::special::{ln_choose, ln_factorial, reg_beta_inv};
 use serde::{Deserialize, Serialize};
 
-use crate::common::{build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar};
+use crate::common::{
+    build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices,
+};
 use crate::error::StatsError;
 
 // ============================================================================
@@ -1739,12 +1741,16 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
         return Err(StatsError::IncompatibleTable { analysis: "contingency analysis", actual: sheet.archetype.kind() });
     };
     table.validate_counts()?;
+    let selected_cols = resolve_selected_indices(&spec.selected_data_sets, table.data_sets.len());
+    if selected_cols.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
     let n_rows = table.row_count();
-    let n_cols = table.data_sets.len();
+    let n_cols = selected_cols.len();
     let mut counts = vec![vec![0_u64; n_cols]; n_rows];
     for (r, row_vec) in counts.iter_mut().enumerate() {
-        for (c, slot) in row_vec.iter_mut().enumerate() {
-            *slot = table.count_at(r, c)?.unwrap_or(0);
+        for (c_out, &c_src) in selected_cols.iter().enumerate() {
+            row_vec[c_out] = table.count_at(r, c_src)?.unwrap_or(0);
         }
     }
 
@@ -2082,11 +2088,12 @@ fn extract_exact_binomial_counts(sheet: &DataSheet, spec: &AnalysisSpec) -> Resu
         }
         TableArchetype::Contingency(table) => {
             table.validate_counts()?;
+            let selected_cols = resolve_selected_indices(&spec.selected_data_sets, table.data_sets.len());
             let n_rows = table.row_count();
-            let n_cols = table.data_sets.len();
+            let n_cols = selected_cols.len();
             let (k, f) = match (n_rows, n_cols) {
-                (1, 2) => (table.count_at(0, 0)?.unwrap_or(0), table.count_at(0, 1)?.unwrap_or(0)),
-                (2, 1) => (table.count_at(0, 0)?.unwrap_or(0), table.count_at(1, 0)?.unwrap_or(0)),
+                (1, 2) => (table.count_at(0, selected_cols[0])?.unwrap_or(0), table.count_at(0, selected_cols[1])?.unwrap_or(0)),
+                (2, 1) => (table.count_at(0, selected_cols[0])?.unwrap_or(0), table.count_at(1, selected_cols[0])?.unwrap_or(0)),
                 _ => return Err(StatsError::DimensionMismatch { expected: 2, actual: n_rows * n_cols }),
             };
             let n = k.checked_add(f).ok_or(StatsError::InvalidParameter { name: "exact_binomial_total", value: f64::INFINITY })?;

@@ -148,7 +148,18 @@ pub fn sym_eigen(a: &DenseMatrix) -> Result<SymEigen, MathError> {
         return Err(MathError::DomainError { name: "matrix", value: f64::NAN });
     }
     let n = a.nrows();
-    let scale = a.frobenius_norm().max(1.0);
+    let frob = a.frobenius_norm();
+    let scale = if frob > 0.0 {
+        frob
+    } else {
+        let mut max_abs = 0.0_f64;
+        for i in 0..n {
+            for j in 0..n {
+                max_abs = max_abs.max(a.entry(i, j).abs());
+            }
+        }
+        max_abs
+    };
     for i in 0..n {
         for j in (i + 1)..n {
             if (a.entry(i, j) - a.entry(j, i)).abs() > 1e-11 * scale {

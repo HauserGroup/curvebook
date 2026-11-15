@@ -193,6 +193,23 @@ type OptionalCiPair = (Option<(f64, f64)>, Option<(f64, f64)>);
 type OptionalMeanCi = (Option<f64>, Option<(f64, f64)>);
 type ExtractedSeriesPair = (Vec<(String, Vec<f64>, usize)>, Vec<(String, Vec<SummarizedPoint>)>);
 
+struct IndexedRawSeries {
+    data_set_index: usize,
+    label: String,
+    values: Vec<f64>,
+    excluded_count: usize,
+    /// Original 0-based table row index for each active observation in `values`.
+    row_indices: Vec<usize>,
+}
+
+struct IndexedPooledSeries {
+    data_set_index: usize,
+    label: String,
+    points: Vec<SummarizedPoint>,
+}
+
+type IndexedSeriesPair = (Vec<IndexedRawSeries>, Vec<IndexedPooledSeries>);
+
 fn compute_custom_percentiles(sorted: &[f64], custom_upper: Option<f64>) -> Result<OptionalCiPair, StatsError> {
     let Some(p_hi) = custom_upper else {
         return Ok((None, None));
@@ -373,6 +390,17 @@ pub fn extract_series_for_descriptive(
     selected: &[usize],
     aggregation: SubcolumnAggregation,
 ) -> Result<ExtractedSeriesPair, StatsError> {
+    let (raw, pooled) = extract_indexed_series_for_descriptive(sheet, selected, aggregation)?;
+    let raw_out = raw.into_iter().map(|s| (s.label, s.values, s.excluded_count)).collect();
+    let pooled_out = pooled.into_iter().map(|p| (p.label, p.points)).collect();
+    Ok((raw_out, pooled_out))
+}
+
+fn extract_indexed_series_for_descriptive(
+    sheet: &DataSheet,
+    selected: &[usize],
+    aggregation: SubcolumnAggregation,
+) -> Result<IndexedSeriesPair, StatsError> {
     match &sheet.archetype {
         TableArchetype::Column(t) => extract_column_table_for_desc(t, selected),
         TableArchetype::Xy(t) => extract_xy_table_for_desc(t, selected, aggregation),
@@ -383,16 +411,18 @@ pub fn extract_series_for_descriptive(
             for idx in indices {
                 let var = &t.variables[idx];
                 let mut vals = Vec::new();
+                let mut row_indices = Vec::new();
                 let mut ex = 0_usize;
-                for c in &var.cells {
+                for (r_idx, c) in var.cells.iter().enumerate() {
                     if c.excluded {
                         ex += 1;
                     } else if let Some(v) = c.active_number() {
                         vals.push(v);
+                        row_indices.push(r_idx);
                     }
                 }
                 if !vals.is_empty() {
-                    raw.push((var.title.clone(), vals, ex));
+                    raw.push(IndexedRawSeries { data_set_index: idx, label: var.title.clone(), values: vals, excluded_count: ex, row_indices });
                 }
             }
             Ok((raw, Vec::new()))
@@ -401,7 +431,7 @@ pub fn extract_series_for_descriptive(
     }
 }
 
-fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[usize]) -> Result<ExtractedSeriesPair, StatsError> {
+fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[usize]) -> Result<IndexedSeriesPair, StatsError> {
     let indices = resolve_selected_indices(selected, t.data_sets.len());
     if t.subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
@@ -414,7 +444,7 @@ fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[us
                 }
             }
             if !pts.is_empty() {
-                pooled.push((ds.title.clone(), pts));
+                pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
         return Ok((Vec::new(), pooled));
@@ -426,18 +456,20 @@ fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[us
     for idx in indices {
         let ds = &t.data_sets[idx];
         let mut vals = Vec::new();
+        let mut row_indices = Vec::new();
         let mut ex = 0_usize;
-        for row in &ds.cells {
+        for (r_idx, row) in ds.cells.iter().enumerate() {
             if let Some(c) = row.first() {
                 if c.excluded {
                     ex += 1;
                 } else if let Some(v) = c.active_number() {
                     vals.push(v);
+                    row_indices.push(r_idx);
                 }
             }
         }
         if !vals.is_empty() {
-            raw.push((ds.title.clone(), vals, ex));
+            raw.push(IndexedRawSeries { data_set_index: idx, label: ds.title.clone(), values: vals, excluded_count: ex, row_indices });
         }
     }
     Ok((raw, Vec::new()))
@@ -447,7 +479,7 @@ fn extract_xy_table_for_desc(
     t: &lumencraft_doc::XyTable,
     selected: &[usize],
     aggregation: SubcolumnAggregation,
-) -> Result<ExtractedSeriesPair, StatsError> {
+) -> Result<IndexedSeriesPair, StatsError> {
     let indices = resolve_selected_indices(selected, t.data_sets.len());
     if t.y_subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
@@ -460,7 +492,7 @@ fn extract_xy_table_for_desc(
                 }
             }
             if !pts.is_empty() {
-                pooled.push((ds.title.clone(), pts));
+                pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
         return Ok((Vec::new(), pooled));
@@ -476,7 +508,7 @@ fn extract_grouped_table_for_desc(
     t: &lumencraft_doc::GroupedTable,
     selected: &[usize],
     aggregation: SubcolumnAggregation,
-) -> Result<ExtractedSeriesPair, StatsError> {
+) -> Result<IndexedSeriesPair, StatsError> {
     let indices = resolve_selected_indices(selected, t.data_sets.len());
     if t.subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
@@ -489,7 +521,7 @@ fn extract_grouped_table_for_desc(
                 }
             }
             if !pts.is_empty() {
-                pooled.push((ds.title.clone(), pts));
+                pooled.push(IndexedPooledSeries { data_set_index: idx, label: ds.title.clone(), points: pts });
             }
         }
         return Ok((Vec::new(), pooled));
@@ -505,7 +537,7 @@ fn aggregate_replicate_datasets(
     data_sets: &[lumencraft_doc::DataSetColumn],
     indices: &[usize],
     aggregation: SubcolumnAggregation,
-) -> Vec<(String, Vec<f64>, usize)> {
+) -> Vec<IndexedRawSeries> {
     let mut out = Vec::new();
     for &idx in indices {
         let ds = &data_sets[idx];
@@ -513,8 +545,9 @@ fn aggregate_replicate_datasets(
         match aggregation {
             SubcolumnAggregation::RowMeans => {
                 let mut vals = Vec::new();
+                let mut row_indices = Vec::new();
                 let mut ex = 0_usize;
-                for row in &ds.cells {
+                for (r_idx, row) in ds.cells.iter().enumerate() {
                     let mut row_vals = Vec::new();
                     for c in row {
                         if c.excluded {
@@ -525,45 +558,50 @@ fn aggregate_replicate_datasets(
                     }
                     if let Ok(m) = SummaryMoments::from_slice(&row_vals) {
                         vals.push(m.mean);
+                        row_indices.push(r_idx);
                     }
                 }
                 if !vals.is_empty() {
-                    out.push((ds.title.clone(), vals, ex));
+                    out.push(IndexedRawSeries { data_set_index: idx, label: ds.title.clone(), values: vals, excluded_count: ex, row_indices });
                 }
             }
             SubcolumnAggregation::PerSubcolumn => {
                 for s in 0..subs {
                     let mut vals = Vec::new();
+                    let mut row_indices = Vec::new();
                     let mut ex = 0_usize;
-                    for row in &ds.cells {
+                    for (r_idx, row) in ds.cells.iter().enumerate() {
                         if let Some(c) = row.get(s) {
                             if c.excluded {
                                 ex += 1;
                             } else if let Some(v) = c.active_number() {
                                 vals.push(v);
+                                row_indices.push(r_idx);
                             }
                         }
                     }
                     if !vals.is_empty() {
                         let lbl = if subs > 1 { format!("{}:{}", ds.title, s + 1) } else { ds.title.clone() };
-                        out.push((lbl, vals, ex));
+                        out.push(IndexedRawSeries { data_set_index: idx, label: lbl, values: vals, excluded_count: ex, row_indices });
                     }
                 }
             }
             SubcolumnAggregation::PooledGrandSample => {
                 let mut vals = Vec::new();
+                let mut row_indices = Vec::new();
                 let mut ex = 0_usize;
-                for row in &ds.cells {
+                for (r_idx, row) in ds.cells.iter().enumerate() {
                     for c in row {
                         if c.excluded {
                             ex += 1;
                         } else if let Some(v) = c.active_number() {
                             vals.push(v);
+                            row_indices.push(r_idx);
                         }
                     }
                 }
                 if !vals.is_empty() {
-                    out.push((ds.title.clone(), vals, ex));
+                    out.push(IndexedRawSeries { data_set_index: idx, label: ds.title.clone(), values: vals, excluded_count: ex, row_indices });
                 }
             }
         }
@@ -1052,27 +1090,40 @@ pub fn rout_outliers(values: &[f64], fdr_q_percent: f64) -> Result<RoutResult, S
 
     let mut outlier_mask = vec![false; n];
     let mut outliers = Vec::new();
-    if rsdr > 0.0 {
-        let q = fdr_q_percent / 100.0;
-        let df = (n - 1) as f64;
-        let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
-        let mut first_outlier_pos = None;
-        for (pos, &(_, r)) in abs_res.iter().enumerate().skip(start) {
+    let q = fdr_q_percent / 100.0;
+    let df = (n - 1) as f64;
+    let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
+    let rout_stat_p = |r: f64| -> Result<(f64, f64), StatsError> {
+        if rsdr > 0.0 {
             let t_stat = r / rsdr;
-            let p_val = student_t_two_sided_p(t_stat, df)?;
-            let bh_thresh = q * ((n - pos) as f64) / (n as f64);
-            if p_val <= bh_thresh {
-                first_outlier_pos = Some(pos);
-                break;
+            Ok((t_stat, student_t_two_sided_p(t_stat, df)?))
+        } else if r > 0.0 {
+            // Bulk (>=68.27%) residuals are zero so RSDR == 0: any non-zero residual
+            // is infinitely many robust SDs from the bulk center with P = 0.
+            Ok((f64::INFINITY, 0.0))
+        } else {
+            Ok((0.0, 1.0))
+        }
+    };
+    let mut first_outlier_pos = None;
+    for (pos, &(_, r)) in abs_res.iter().enumerate().skip(start) {
+        let (_, p_val) = rout_stat_p(r)?;
+        let bh_thresh = q * ((n - pos) as f64) / (n as f64);
+        if p_val <= bh_thresh {
+            first_outlier_pos = Some(pos);
+            break;
+        }
+    }
+    if let Some(mut cut) = first_outlier_pos {
+        if rsdr == 0.0 && abs_res[cut].1 > 0.0 {
+            while cut > 0 && abs_res[cut - 1].1 == abs_res[cut].1 {
+                cut -= 1;
             }
         }
-        if let Some(cut) = first_outlier_pos {
-            for &(orig_idx, r) in &abs_res[cut..] {
-                outlier_mask[orig_idx] = true;
-                let t_stat = r / rsdr;
-                let p_val = student_t_two_sided_p(t_stat, df)?;
-                outliers.push(OutlierFlag { index: orig_idx, value: values[orig_idx], score: t_stat, threshold_or_p: p_val });
-            }
+        for &(orig_idx, r) in &abs_res[cut..] {
+            outlier_mask[orig_idx] = true;
+            let (t_stat, p_val) = rout_stat_p(r)?;
+            outliers.push(OutlierFlag { index: orig_idx, value: values[orig_idx], score: t_stat, threshold_or_p: p_val });
         }
     }
 
@@ -1371,7 +1422,7 @@ pub(crate) fn ks_asymptotic_p(lambda: f64) -> f64 {
 /// Execute [`DescriptiveSpec`] on a [`DataSheet`] and emit a complete [`ResultSheet`].
 pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &DescriptiveSpec) -> Result<ResultSheet, StatsError> {
     let mut res = init_result_sheet(spec)?;
-    let (raw_series, pooled_series) = extract_series_for_descriptive(sheet, &spec.selected_data_sets, desc.aggregation)?;
+    let (raw_series, pooled_series) = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, desc.aggregation)?;
     if raw_series.is_empty() && pooled_series.is_empty() {
         return Err(StatsError::EmptyInput);
     }
@@ -1386,27 +1437,28 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     }
 
     let mut summaries = Vec::with_capacity(raw_series.len());
-    for (label, vals, ex) in &raw_series {
-        summaries.push(summarize_column(label, vals, *ex, conf, desc.custom_upper_percentile)?);
+    for series in &raw_series {
+        summaries.push(summarize_column(&series.label, &series.values, series.excluded_count, conf, desc.custom_upper_percentile)?);
     }
     res.tabs.push(build_descriptive_tab(&summaries, conf));
 
-    for (idx, s) in summaries.iter().enumerate() {
-        push_scalar(&mut res, "N", Some(idx), s.n as f64);
-        push_scalar(&mut res, "Mean", Some(idx), s.mean);
-        push_scalar(&mut res, "Median", Some(idx), s.median);
+    for (series, s) in raw_series.iter().zip(&summaries) {
+        let ds_idx = Some(series.data_set_index);
+        push_scalar(&mut res, "N", ds_idx, s.n as f64);
+        push_scalar(&mut res, "Mean", ds_idx, s.mean);
+        push_scalar(&mut res, "Median", ds_idx, s.median);
         if let Some(sd) = s.sd {
-            push_scalar(&mut res, "SD", Some(idx), sd);
+            push_scalar(&mut res, "SD", ds_idx, sd);
         }
         if let Some(sem) = s.sem {
-            push_scalar(&mut res, "SEM", Some(idx), sem);
+            push_scalar(&mut res, "SEM", ds_idx, sem);
         }
     }
 
     if desc.run_normality_battery {
         let mut batteries = Vec::with_capacity(raw_series.len());
-        for (_, vals, _) in &raw_series {
-            batteries.push(normality_battery(vals, conf.alpha())?);
+        for series in &raw_series {
+            batteries.push(normality_battery(&series.values, conf.alpha())?);
         }
         res.tabs.push(build_normality_tab(&summaries, &batteries, p_fmt));
         append_normality_checklist(&mut res.checklist, &summaries, &batteries, conf.alpha());
@@ -1592,7 +1644,7 @@ fn collect_dataset_rows_for_desc(
     Ok(out)
 }
 
-fn build_normal_qq_tab(raw_series: &[(String, Vec<f64>, usize)]) -> Result<Option<ResultTab>, StatsError> {
+fn build_normal_qq_tab(raw_series: &[IndexedRawSeries]) -> Result<Option<ResultTab>, StatsError> {
     if raw_series.is_empty() {
         return Ok(None);
     }
@@ -1608,7 +1660,9 @@ fn build_normal_qq_tab(raw_series: &[(String, Vec<f64>, usize)]) -> Result<Optio
     let mut rows = Vec::new();
     let mut footnotes = Vec::new();
 
-    for (label, vals, _) in raw_series {
+    for series in raw_series {
+        let label = &series.label;
+        let vals = &series.values;
         if vals.is_empty() {
             continue;
         }
@@ -1642,14 +1696,10 @@ fn build_normal_qq_tab(raw_series: &[(String, Vec<f64>, usize)]) -> Result<Optio
     Ok(Some(tab))
 }
 
-fn populate_pooled_descriptive_sheet(
-    res: &mut ResultSheet,
-    pooled_series: &[(String, Vec<SummarizedPoint>)],
-    conf: ConfidenceLevel,
-) -> Result<(), StatsError> {
+fn populate_pooled_descriptive_sheet(res: &mut ResultSheet, pooled_series: &[IndexedPooledSeries], conf: ConfidenceLevel) -> Result<(), StatsError> {
     let mut pooled = Vec::with_capacity(pooled_series.len());
-    for (lbl, pts) in pooled_series {
-        pooled.push(summarize_pre_summarized_points(lbl, pts, conf)?);
+    for ps in pooled_series {
+        pooled.push(summarize_pre_summarized_points(&ps.label, &ps.points, conf)?);
     }
     let headers: Vec<String> = pooled.iter().map(|p| p.label.clone()).collect();
     let row_labels = vec![
@@ -1661,16 +1711,17 @@ fn populate_pooled_descriptive_sheet(
         format!("{}% CI of Mean", conf.percent()),
     ];
     let mut rows = vec![Vec::with_capacity(pooled.len()); row_labels.len()];
-    for (idx, p) in pooled.iter().enumerate() {
+    for (ps, p) in pooled_series.iter().zip(&pooled) {
         rows[0].push(num_cell(p.point_count as f64));
         rows[1].push(num_cell(p.total_n));
         rows[2].push(num_cell(p.mean));
         rows[3].push(opt_num_cell(p.sd));
         rows[4].push(opt_num_cell(p.sem));
         rows[5].push(opt_ci_cell(p.mean_ci));
-        push_scalar(res, "Mean", Some(idx), p.mean);
+        let ds_idx = Some(ps.data_set_index);
+        push_scalar(res, "Mean", ds_idx, p.mean);
         if let Some(sd) = p.sd {
-            push_scalar(res, "SD", Some(idx), sd);
+            push_scalar(res, "SD", ds_idx, sd);
         }
     }
     res.tabs.push(build_tab("desc-pooled", "Descriptive Statistics (Pooled)", ResultTabKind::DescriptiveSummary, headers, row_labels, rows));
@@ -1817,12 +1868,12 @@ fn append_normality_checklist(
 
 fn append_one_sample_tab(
     res: &mut ResultSheet,
-    raw_series: &[(String, Vec<f64>, usize)],
+    raw_series: &[IndexedRawSeries],
     mu0: f64,
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) -> Result<(), StatsError> {
-    let headers: Vec<String> = raw_series.iter().map(|(l, _, _)| l.clone()).collect();
+    let headers: Vec<String> = raw_series.iter().map(|s| s.label.clone()).collect();
     let row_labels = vec![
         String::from("Hypothetical value"),
         String::from("t statistic"),
@@ -1832,7 +1883,8 @@ fn append_one_sample_tab(
         String::from("Wilcoxon P"),
     ];
     let mut rows = vec![Vec::with_capacity(raw_series.len()); row_labels.len()];
-    for (_, vals, _) in raw_series {
+    for series in raw_series {
+        let vals = &series.values;
         rows[0].push(num_cell(mu0));
         if let Ok(t_res) = one_sample_t_test(vals, mu0, true, conf) {
             rows[1].push(num_cell(t_res.t_statistic));
@@ -1858,7 +1910,7 @@ fn append_one_sample_tab(
 /// Execute [`OutlierSpec`] on a [`DataSheet`] and emit a [`ResultSheet`].
 pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec: OutlierSpec) -> Result<ResultSheet, StatsError> {
     let mut res = init_result_sheet(spec)?;
-    let (raw_series, _) = extract_series_for_descriptive(sheet, &spec.selected_data_sets, SubcolumnAggregation::PooledGrandSample)?;
+    let (raw_series, _) = extract_indexed_series_for_descriptive(sheet, &spec.selected_data_sets, SubcolumnAggregation::PooledGrandSample)?;
     if raw_series.is_empty() {
         return Err(StatsError::EmptyInput);
     }
@@ -1873,25 +1925,29 @@ pub fn run_outlier_analysis(sheet: &DataSheet, spec: &AnalysisSpec, outlier_spec
     let mut rows = Vec::new();
     let mut total_flagged = 0_usize;
 
-    for (col_idx, (label, vals, _)) in raw_series.iter().enumerate() {
+    for series in &raw_series {
+        let ds_idx = Some(series.data_set_index);
+        let vals = &series.values;
         let flags = match outlier_spec {
             OutlierSpec::Grubbs { alpha, iterative } => grubbs_outliers(vals, alpha, iterative)?.outliers,
             OutlierSpec::Rout { fdr_q_percent } => {
                 let r = rout_outliers(vals, fdr_q_percent)?;
-                push_scalar(&mut res, "RobustCenter", Some(col_idx), r.robust_center);
-                push_scalar(&mut res, "RSDR", Some(col_idx), r.rsdr);
+                push_scalar(&mut res, "RobustCenter", ds_idx, r.robust_center);
+                push_scalar(&mut res, "RSDR", ds_idx, r.rsdr);
                 r.outliers
             }
         };
-        push_scalar(&mut res, "OutlierCount", Some(col_idx), flags.len() as f64);
+        push_scalar(&mut res, "OutlierCount", ds_idx, flags.len() as f64);
         total_flagged += flags.len();
         for f in flags {
+            let table_row_1based = series.row_indices.get(f.index).copied().unwrap_or(f.index) + 1;
+            let stat_cell = if f.score.is_infinite() { ResultCell::Text(String::from("∞")) } else { num_cell(f.score) };
             row_labels.push(format!("Outlier {}", rows.len() + 1));
             rows.push(vec![
-                ResultCell::Text(label.clone()),
-                num_cell((f.index + 1) as f64),
+                ResultCell::Text(series.label.clone()),
+                num_cell(table_row_1based as f64),
                 num_cell(f.value),
-                num_cell(f.score),
+                stat_cell,
                 num_cell(f.threshold_or_p),
             ]);
         }
