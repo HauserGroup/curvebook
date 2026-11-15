@@ -358,7 +358,7 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             let top = ctx.val("Top", "\\text{Top}");
             let frac = ctx.val("Frac", "\\text{Frac}");
             format!(
-                "Y = {bot} + ({top} - {bot}) \\cdot (\\frac{{{frac}}}{{1 + 10^{{(X - {}) \\cdot {}}}}} + \\frac{{1 - {frac}}}{{1 + 10^{{(X - {}) \\cdot {}}}}})",
+                "Y = {bot} + ({top} - {bot}) \\cdot (\\frac{{{frac}}}{{1 + 10^{{({} - X) \\cdot {}}}}} + \\frac{{1 - {frac}}}{{1 + 10^{{({} - X) \\cdot {}}}}})",
                 ctx.val("LogEC50_1", "\\log\\text{EC}_{50,1}"),
                 ctx.factor("nH1", "n_{H1}"),
                 ctx.val("LogEC50_2", "\\log\\text{EC}_{50,2}"),
@@ -452,9 +452,11 @@ fn format_dose_response_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "absolute_ic50_4pl" => {
             let bot = ctx.val("Bottom", "\\text{Bottom}");
             let top = ctx.val("Top", "\\text{Top}");
-            let base = ctx.factor("Baseline", "\\text{Baseline}");
+            let c0 = ctx.val("Control0", "\\text{Control}_0");
+            let c100 = ctx.val("Control100", "\\text{Control}_{100}");
+            let midpoint = format!("0.5 \\cdot ({c0} + {c100})");
             format!(
-                "Y = {bot} + \\frac{{{top} - {bot}}}{{1 + \\frac{{{top} - 0.5 \\cdot {base}}}{{0.5 \\cdot {base} - {bot}}} \\cdot 10^{{(X - {}) \\cdot {}}}}}",
+                "Y = {bot} + \\frac{{{top} - {bot}}}{{1 + \\frac{{{top} - {midpoint}}}{{{midpoint} - {bot}}} \\cdot 10^{{(X - {}) \\cdot {}}}}}",
                 ctx.val("LogIC50", "\\log\\text{IC}_{50}"),
                 ctx.factor("HillSlope", "\\text{HillSlope}"),
             )
@@ -759,11 +761,11 @@ fn format_exponential_growth_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
             format!("Y = {ym} \\cdot (\\frac{{{y0}}}{{{ym}}})^{{\\exp(-{} \\cdot X)}}", ctx.val("K", "K"))
         }
         "beta_growth_then_decay" => {
+            let ym = ctx.val("Ym", "Y_m");
             let te = ctx.val("te", "t_e");
             let tm = ctx.val("tm", "t_m");
             format!(
-                "Y = {} \\cdot (1 + \\frac{{{te} - X}}{{{te} - {tm}}}) \\cdot (\\frac{{X}}{{{te}}})^{{\\frac{{{te}}}{{{te} - {tm}}}}}",
-                ctx.val("Ym", "Y_m"),
+                "Y = {ym} \\cdot (1 + \\frac{{{te} - X}}{{{te} - {tm}}}) \\cdot (\\frac{{X}}{{{te}}})^{{\\frac{{{te}}}{{{te} - {tm}}}}} \\quad (0 \\le X \\le {te}); \\quad {ym} \\quad (X > {te})"
             )
         }
         "linear_quadratic_survival" => {
@@ -900,7 +902,7 @@ fn format_line_poly_curve_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "centered_poly_4" | "centered_quartic" => format_centered_poly_tex(4, ctx),
         "centered_poly_5" => format_centered_poly_tex(5, ctx),
         "centered_poly_6" => format_centered_poly_tex(6, ctx),
-        "power_series" => format!("Y = {} \\cdot X^{{{}}} + {}", ctx.val("a", "a"), ctx.val("b", "b"), ctx.val("c", "c"),),
+        "power_law" | "power_series" => format!("Y = {} \\cdot X^{{{}}}", ctx.val("a", "a"), ctx.val("b", "b")),
         "logarithmic_curve" => format!("Y = {} + {} \\cdot \\ln(X)", ctx.val("a", "a"), ctx.val("b", "b")),
         "semi_log_line" => format!("Y = {} \\cdot \\log(X) + {}", ctx.val("Slope", "\\text{Slope}"), ctx.val("YIntercept", "\\text{YIntercept}")),
         "log_log_line" => {

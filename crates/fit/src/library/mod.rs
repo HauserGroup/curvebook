@@ -18,6 +18,7 @@ pub mod nist;
 pub mod pharma;
 
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
+use lumencraft_doc::ParameterRule;
 
 /// Trait implemented by every built-in or user-defined parametric curve model.
 pub trait ParametricModel: Send + Sync {
@@ -46,6 +47,12 @@ pub trait ParametricModel: Send + Sync {
     /// Optional default `(lower_bound, upper_bound)` per parameter.
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(None, None); self.param_count()]
+    }
+    /// Optional default parameter rules (such as fixing `XCenter` to the sample mean in centered
+    /// polynomials so the Jacobian stays full rank) when the caller provides no explicit rule for
+    /// that parameter name.
+    fn default_parameter_rules(&self, _points: &[DataPoint]) -> Vec<ParameterRule> {
+        Vec::new()
     }
     /// Derived scalar transforms (e.g., `EC50`, `t_half`, `Span`, inflection point).
     fn derived_transforms(&self, _params: &[f64]) -> Vec<DerivedScalar> {

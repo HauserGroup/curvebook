@@ -40,6 +40,7 @@
 
 use crate::library::{ParametricModel, data_x_min_max, data_y_min_max};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
+use lumencraft_doc::{ParameterRule, ParameterScope};
 
 /// Canonical IDs exposed by the general curve equation catalog.
 pub const CURVE_EQUATION_IDS: &[&str] = &[
@@ -51,8 +52,8 @@ pub const CURVE_EQUATION_IDS: &[&str] = &[
     "one_phase_association",
     "plateau_followed_by_one_phase_association",
     "exponential_growth",
-    "exponential_plateau",
     // Growth
+    "exponential_plateau",
     "logistic_growth",
     "gompertz_growth",
     "beta_growth_then_decay",
@@ -81,7 +82,7 @@ pub const CURVE_EQUATION_IDS: &[&str] = &[
     "polynomial_4",
     "polynomial_5",
     "polynomial_6",
-    "power_series",
+    "power_law",
     "logarithmic_curve",
     "centered_poly_1",
     "centered_poly_2",
@@ -149,7 +150,7 @@ pub fn resolve_curve_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
         "polynomial_4" | "quartic" => Some(Box::new(Polynomial { degree: 4 })),
         "polynomial_5" => Some(Box::new(Polynomial { degree: 5 })),
         "polynomial_6" => Some(Box::new(Polynomial { degree: 6 })),
-        "power_series" => Some(Box::new(PowerCurve { params: names(&["a", "b"]) })),
+        "power_law" | "power_series" => Some(Box::new(PowerCurve { params: names(&["a", "b"]) })),
         "logarithmic_curve" => Some(Box::new(LogarithmicCurve { params: names(&["a", "b"]) })),
         "centered_poly_1" | "centered_linear" | "centered_polynomial_1" => Some(Box::new(CenteredPolynomial::new(1))),
         "centered_poly_2" | "centered_quadratic" | "centered_polynomial_2" => Some(Box::new(CenteredPolynomial::new(2))),
@@ -341,7 +342,8 @@ impl ParametricModel for PlateauThenDecay {
 
 /// One-phase exponential association `Y = Y0 + (Plateau - Y0) * (1 - exp(-K * X))`.
 /// Reference: monomolecular (first-order approach to an asymptote) form, Seber & Wild (1989)
-/// ch. 7; parameterisation follows Motulsky & Christopoulos (2004).
+/// ch. 7; this kinetics parameterisation `(Y0, Plateau, K)` follows Motulsky & Christopoulos
+/// (2004). See [`ExponentialPlateau`] for the `Growth`-category `(YM, Y0, k)` parameterisation.
 struct OnePhaseAssociation {
     params: Vec<String>,
 }
@@ -382,6 +384,17 @@ impl ParametricModel for OnePhaseAssociation {
         let (ymin, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
         vec![ymin, ymax, 2.0 / (xmax - xmin).max(1.0)]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (Some(0.0), None)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = vec![DerivedScalar { name: "Span".to_owned(), value: params[1] - params[0], units: None }];
+        if params[2] > 0.0 {
+            out.push(DerivedScalar { name: "HalfTime".to_owned(), value: core::f64::consts::LN_2 / params[2], units: None });
+            out.push(DerivedScalar { name: "Tau".to_owned(), value: 1.0 / params[2], units: None });
+        }
+        out
     }
 }
 
@@ -470,9 +483,11 @@ impl ParametricModel for ExponentialGrowth {
     }
 }
 
-/// Exponential approach to a maximum `Y = YM - (YM - Y0) * exp(-k * X)`.
-/// Reference: monomolecular / Mitscherlich growth form, Seber & Wild (1989) ch. 7.
-/// Mathematically identical to `one_phase_association` with `Plateau = YM`.
+/// Exponential plateau (monomolecular / Mitscherlich) growth `Y = YM - (YM - Y0) * exp(-k * X)`.
+/// Categorised under `Growth` with the ceiling parameterisation `(YM, Y0, k)` matching
+/// `logistic_growth` and `gompertz_growth` (Seber & Wild 1989 ch. 7), distinct from
+/// `one_phase_association` (`Exponential` kinetics parameterisation `(Y0, Plateau, K)`).
+/// Reference: Seber & Wild (1989) ch. 7.
 struct ExponentialPlateau {
     params: Vec<String>,
 }
@@ -485,7 +500,7 @@ impl ParametricModel for ExponentialPlateau {
         "Exponential plateau"
     }
     fn category(&self) -> EquationCategory {
-        EquationCategory::Exponential
+        EquationCategory::Growth
     }
     fn param_names(&self) -> &[String] {
         &self.params
@@ -495,10 +510,34 @@ impl ParametricModel for ExponentialPlateau {
         let (ym, y0, k) = (params[0], params[1], params[2]);
         Some(ym - (ym - y0) * safe_exp(-k * t)?)
     }
+    fn grad(&self, x: &[f64], params: &[f64], _dataset_index: usize, out: &mut [f64]) -> bool {
+        let Some(&t) = x.first() else {
+            return false;
+        };
+        let (ym, y0, k) = (params[0], params[1], params[2]);
+        let Some(e) = safe_exp(-k * t) else {
+            return false;
+        };
+        out[0] = 1.0 - e;
+        out[1] = e;
+        out[2] = (ym - y0) * t * e;
+        out.iter().all(|v| v.is_finite())
+    }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
         vec![ymax, ymin, 2.0 / (xmax - xmin).max(1.0)]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (Some(0.0), None)]
+    }
+    fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
+        let mut out = vec![DerivedScalar { name: "Span".to_owned(), value: params[0] - params[1], units: None }];
+        if params[2] > 0.0 {
+            out.push(DerivedScalar { name: "HalfTime".to_owned(), value: core::f64::consts::LN_2 / params[2], units: None });
+            out.push(DerivedScalar { name: "Tau".to_owned(), value: 1.0 / params[2], units: None });
+        }
+        out
     }
 }
 
@@ -528,13 +567,11 @@ impl ParametricModel for LogisticGrowth {
         if y0 == 0.0 {
             return None;
         }
-        let ratio = (ym - y0) / y0;
         let e = safe_exp(-k * t)?;
         let denom = y0 + (ym - y0) * e;
         if denom == 0.0 {
             return None;
         }
-        let _ = ratio;
         Some(ym * y0 / denom)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
@@ -583,11 +620,9 @@ impl ParametricModel for GompertzGrowth {
 }
 
 /// Beta growth function `Y = Ym * (1 + (te - X) / (te - tm)) * (X / te)^(te / (te - tm))`
-/// for `0 <= X <= te`, where `te` is the end of growth (where `Y = Ym`) and `tm` the time of the
-/// maximum growth rate.
-/// Reference: Yin, Goudriaan, Lantinga, Vos & Spiertz (2003), beta growth function.
-/// Note: Yin et al. define `Y = Ym` for `X > te` (determinate growth); this implementation returns
-/// `0` beyond `te`, which is not part of the published form.
+/// for `0 <= X <= te` (with `0 <= tm < te`), holding `Y = Ym` for `X > te` (determinate
+/// growth ceiling) and `Y = 0` for `X <= 0`.
+/// Reference: Yin, Goudriaan, Lantinga, Vos & Spiertz (2003), Eqs. (5)-(6) (`tb = 0`, `wb = 0`).
 struct BetaGrowthDecay {
     params: Vec<String>,
 }
@@ -608,19 +643,32 @@ impl ParametricModel for BetaGrowthDecay {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let t = x.first().copied()?;
         let (ym, te, tm) = (params[0], params[1], params[2]);
-        if te <= tm || t > te {
+        if !t.is_finite() || !ym.is_finite() || !te.is_finite() || !tm.is_finite() || te <= 0.0 || tm < 0.0 || te <= tm {
+            return None;
+        }
+        if t <= 0.0 {
             return Some(0.0);
         }
+        if t >= te {
+            return Some(ym);
+        }
         let denom = te - tm;
-        let base = (t / te).max(0.0);
+        let base = t / te;
         let exp = te / denom;
         let factor = 1.0 + (te - t) / denom;
-        Some(ym * factor * base.powf(exp))
+        let val = ym * factor * base.powf(exp);
+        val.is_finite().then_some(val)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
-        vec![ymax, xmax, 0.5 * (xmin + xmax)]
+        let te = if xmax.is_finite() && xmax > 1e-6 { xmax } else { 1.0 };
+        let x0 = if xmin.is_finite() { xmin.clamp(0.0, 0.8 * te) } else { 0.0 };
+        let tm = (0.5 * (x0 + te)).clamp(0.0, 0.9 * te);
+        vec![ymax, te, tm]
+    }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (Some(1e-12), None), (Some(0.0), None)]
     }
 }
 
@@ -1136,8 +1184,8 @@ impl ParametricModel for Polynomial {
     }
 }
 
-/// Power law `Y = a * X^b` (allometric form; the ID `power_series` is historical — this is not a
-/// power series).
+/// Power law `Y = a * X^b` (allometric form; `"power_series"` is retained as a backwards-compatible
+/// lookup alias for persisted workspaces).
 /// Reference: Huxley (1932).
 struct PowerCurve {
     params: Vec<String>,
@@ -1145,10 +1193,10 @@ struct PowerCurve {
 
 impl ParametricModel for PowerCurve {
     fn id(&self) -> &str {
-        "power_series"
+        "power_law"
     }
     fn name(&self) -> &str {
-        "Power curve (Y = a * X^b)"
+        "Power law (Y = a * X^b)"
     }
     fn category(&self) -> EquationCategory {
         EquationCategory::StandardCurve
@@ -1324,6 +1372,17 @@ impl ParametricModel for CenteredPolynomial {
         guess[1] = slope;
         guess[self.degree + 1] = mean_x;
         guess
+    }
+
+    fn default_parameter_rules(&self, points: &[DataPoint]) -> Vec<ParameterRule> {
+        let (mean_x, _, _) = estimate_centered_linear_seed(points);
+        vec![ParameterRule {
+            name: "XCenter".to_owned(),
+            scope: ParameterScope::Constant(mean_x),
+            initial_override: None,
+            lower_bound: None,
+            upper_bound: None,
+        }]
     }
 }
 

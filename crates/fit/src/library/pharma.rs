@@ -59,6 +59,7 @@
 
 use crate::library::{ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
+use lumencraft_doc::{ParameterRule, ParameterScope};
 
 /// Canonical IDs exposed by the pharmacology / biochemistry equation catalog.
 pub const PHARMA_EQUATION_IDS: &[&str] = &[
@@ -262,7 +263,7 @@ pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
             Some(Box::new(BiphasicDoseResponse { params: names(&["Bottom", "Top", "Frac", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]) }))
         }
         "log_agonist_vs_response_ecf" | "ecf" => Some(Box::new(DoseResponseEcF { params: names(&["Bottom", "Top", "LogECF", "HillSlope", "F"]) })),
-        "absolute_ic50_4pl" => Some(Box::new(AbsoluteIc50 { params: names(&["Bottom", "Top", "LogIC50", "HillSlope", "Baseline"]) })),
+        "absolute_ic50_4pl" => Some(Box::new(AbsoluteIc50 { params: names(&["Bottom", "Top", "LogIC50", "HillSlope", "Control0", "Control100"]) })),
         "ec50_shift_gaddum_schild" | "gaddum_schild" => {
             Some(Box::new(GaddumSchild { params: names(&["Bottom", "Top", "LogEC50", "HillSlope", "pA2", "SchildSlope", "AntagConc"]) }))
         }
@@ -671,8 +672,42 @@ impl ParametricModel for BellShapedDoseResponse {
     }
 }
 
+/// Determine whether `(x, y)` exhibits a downward trend via OLS covariance sign.
+fn estimate_curve_is_falling(points: &[DataPoint]) -> bool {
+    let mut count = 0_usize;
+    let mut sum_x = 0.0_f64;
+    let mut sum_y = 0.0_f64;
+    for p in points {
+        let x = p.x0();
+        if x.is_finite() && p.y.is_finite() {
+            sum_x += x;
+            sum_y += p.y;
+            count += 1;
+        }
+    }
+    if count < 2 {
+        return false;
+    }
+    let n = count as f64;
+    let mean_x = sum_x / n;
+    let mean_y = sum_y / n;
+    let mut cov = 0.0_f64;
+    let mut var_x = 0.0_f64;
+    for p in points {
+        let x = p.x0();
+        if x.is_finite() && p.y.is_finite() {
+            let dx = x - mean_x;
+            cov += dx * (p.y - mean_y);
+            var_x += dx * dx;
+        }
+    }
+    var_x > 0.0 && cov < 0.0
+}
+
 /// Biphasic dose-response: weighted sum (`Frac`, `1 - Frac`) of two log-logistic Hill terms with
-/// separate `LogEC50` and Hill slopes, each term `1 / (1 + 10^((X - LogEC50_i) * nHi))`.
+/// separate `LogEC50` and Hill slopes, each term `1 / (1 + 10^((LogEC50_i - X) * nHi))`,
+/// matching the library agonist slope convention (Motulsky & Christopoulos 2004; Hill 1910):
+/// positive `nHi` gives a rising curve with `X`, negative `nHi` a falling curve.
 /// Reference: built from two Hill (1910) log-logistic terms (two-site analogue); no single
 /// primary source for this composite.
 struct BiphasicDoseResponse {
@@ -695,15 +730,16 @@ impl ParametricModel for BiphasicDoseResponse {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let (bottom, top, frac, l1, l2, n1, n2) = (params[0], params[1], params[2], params[3], params[4], params[5], params[6]);
-        let (s1, _) = sigmoid_from_log_x(x0, l1, -n1)?;
-        let (s2, _) = sigmoid_from_log_x(x0, l2, -n2)?;
+        let (s1, _) = sigmoid_from_log_x(x0, l1, n1)?;
+        let (s2, _) = sigmoid_from_log_x(x0, l2, n2)?;
         Some(bottom + (top - bottom) * (frac * s1 + (1.0 - frac) * s2))
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
         let (xmin, xmax) = data_x_min_max(points);
         let span = (xmax - xmin).max(1.0);
-        vec![ymin, ymax, 0.5, xmin + 0.3 * span, xmin + 0.7 * span, 1.0, 1.0]
+        let slope = if estimate_curve_is_falling(points) { -1.0 } else { 1.0 };
+        vec![ymin, ymax, 0.5, xmin + 0.3 * span, xmin + 0.7 * span, slope, slope]
     }
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         vec![(None, None), (None, None), (Some(0.0), Some(1.0)), (None, None), (None, None), (None, None), (None, None)]
@@ -748,8 +784,10 @@ impl ParametricModel for DoseResponseEcF {
 }
 
 /// 4PL inhibitor curve fitted for the absolute IC50 (concentration at which `Y` equals
-/// `Baseline / 2`, i.e. 50 % of the control response, assuming the 0 % control response is zero):
-/// `LogIC50 = LogAbsIC50 - log10((Top - Baseline/2) / (Baseline/2 - Bottom)) / HillSlope`.
+/// `(Control0 + Control100) / 2`, i.e. 50 % of the response window defined by the 0 % and 100 %
+/// assay controls):
+/// `LogIC50 = LogAbsIC50 - log10((Top - Y50) / (Y50 - Bottom)) / HillSlope`,
+/// where `Y50 = (Control0 + Control100) / 2`.
 /// Reference: absolute vs relative IC50, Sebaugh (2011); curve form per Hill (1910).
 struct AbsoluteIc50 {
     params: Vec<String>,
@@ -770,9 +808,9 @@ impl ParametricModel for AbsoluteIc50 {
     }
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
-        let (bottom, top, log_abs_ic50, hill, baseline) = (params[0], params[1], params[2], params[3], params[4]);
-        let fifty = 0.5 * baseline;
-        if top <= fifty || bottom >= fifty || (top - bottom).abs() < 1e-15 {
+        let (bottom, top, log_abs_ic50, hill, control0, control100) = (params[0], params[1], params[2], params[3], params[4], params[5]);
+        let fifty = 0.5 * (control0 + control100);
+        if !fifty.is_finite() || top <= fifty || bottom >= fifty || (top - bottom).abs() < 1e-15 || hill.abs() < 1e-12 {
             return None;
         }
         let log_ic50 = log_abs_ic50 - ((top - fifty) / (fifty - bottom)).log10() / hill;
@@ -781,7 +819,26 @@ impl ParametricModel for AbsoluteIc50 {
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (ymin, ymax) = data_y_min_max(points);
-        vec![ymin, ymax, estimate_x_at_ymid(points), 1.0, ymax]
+        vec![ymin, ymax, estimate_x_at_ymid(points), 1.0, ymin, ymax]
+    }
+    fn default_parameter_rules(&self, points: &[DataPoint]) -> Vec<ParameterRule> {
+        let (ymin, ymax) = data_y_min_max(points);
+        vec![
+            ParameterRule {
+                name: "Control0".to_owned(),
+                scope: ParameterScope::Constant(ymin),
+                initial_override: None,
+                lower_bound: None,
+                upper_bound: None,
+            },
+            ParameterRule {
+                name: "Control100".to_owned(),
+                scope: ParameterScope::Constant(ymax),
+                initial_override: None,
+                lower_bound: None,
+                upper_bound: None,
+            },
+        ]
     }
 }
 
@@ -891,13 +948,10 @@ impl ParametricModel for OperationalAgonism {
             return None;
         }
         let operate = (num / den).powf(n);
-        let denom = operate + ((a + ka) / den).powf(n);
-        let term = if operate.is_finite() && denom.is_finite() {
-            operate / (1.0 + operate)
-        } else {
+        if !operate.is_finite() {
             return None;
-        };
-        let _ = denom;
+        }
+        let term = operate / (1.0 + operate);
         Some(basal + (emax - basal) * term)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
