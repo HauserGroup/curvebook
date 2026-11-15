@@ -1,9 +1,10 @@
 //! Graph and layout canvas interaction state machines emitting declarative engine command intents.
 
-use lumencraft_chart::{ChartScene, PointPt, RectPt};
+use lumencraft_chart::scales::{AxisOrientation, ResolvedAxis};
+use lumencraft_chart::{ChartScene, ChartWarning, PointPt, RectPt};
 use lumencraft_doc::{
-    AxisSpec, BracketLabelMode, BracketStyle, GraphAnnotation, GraphSheet, GraphSpec, LayoutItem, LayoutSpec, PairwiseBracketSpec,
-    RectPt as DocRectPt, SheetFolderKind, SheetId,
+    AxisSpec, BracketLabelMode, BracketStyle, DataSheet, GraphAnnotation, GraphKind, GraphSheet, GraphSpec, GroupedArrangement, GroupedTable,
+    LayoutItem, LayoutSpec, PairwiseBracketSpec, ProjectDocument, RectPt as DocRectPt, SheetFolderKind, SheetId, TableArchetype,
 };
 use lumencraft_palette::{LineDashStyle, Rgba8};
 use serde::{Deserialize, Serialize};
@@ -329,11 +330,12 @@ impl CanvasToolState {
 
     /// Advance two-click comparison bracket placement; click 1 arms, click 2 emits `graph.addComparisonBrackets`.
     pub fn click_bracket(&mut self, sheet_id: &SheetId, anchor: BracketAnchor, default_label: BracketLabelMode) -> Option<ToolCommandIntent> {
+        let _group = anchor.group_index?;
         let Some(first) = self.pending_bracket_start.take() else {
             self.pending_bracket_start = Some(anchor);
             return None;
         };
-        let (group_a, group_b) = resolve_bracket_group_pair(&first, &anchor);
+        let (group_a, group_b) = resolve_bracket_group_pair(&first, &anchor)?;
         let result_sheet_id = anchor.result_sheet_id.or(first.result_sheet_id).unwrap_or_else(|| sheet_id.clone());
         let step_pt = (first.pt.y - anchor.pt.y).abs().clamp(10.0, 48.0);
         let spec = PairwiseBracketSpec {
@@ -350,6 +352,63 @@ impl CanvasToolState {
         Some(build_add_comparison_brackets_intent(sheet_id, &[spec]))
     }
 
+    /// Resolve a pairwise comparison `(group_a, group_b)` by mapping drag start and end
+    /// scene coordinates onto compiled category slots of `graph`. Returns `None` if either
+    /// endpoint falls outside real category slots or both hit the same group.
+    #[must_use]
+    pub fn resolve_bracket_drag_pair(
+        &mut self,
+        scene: &ChartScene,
+        graph: &GraphSheet,
+        doc: &ProjectDocument,
+        end_pt: PointPt,
+    ) -> Option<(usize, usize)> {
+        let start_pt = self.drag_start_pt.take()?;
+        let slots = resolve_category_slots(scene, graph, doc);
+        let first =
+            BracketAnchor { pt: start_pt, group_index: hit_test_category_slot(&slots, scene, start_pt), data_value: None, result_sheet_id: None };
+        let second =
+            BracketAnchor { pt: end_pt, group_index: hit_test_category_slot(&slots, scene, end_pt), data_value: None, result_sheet_id: None };
+        resolve_bracket_group_pair(&first, &second)
+    }
+
+    /// Finalize a pointer drag gesture against a compiled `GraphSheet`, yielding an engine intent
+    /// when applicable without guessing category slots from fixed pixel strides.
+    pub fn end_drag_on_graph(&mut self, scene: &ChartScene, graph: &GraphSheet, doc: &ProjectDocument, end_pt: PointPt) -> Option<ToolCommandIntent> {
+        if self.mode == CanvasToolMode::Bracket {
+            let (group_a, group_b) = self.resolve_bracket_drag_pair(scene, graph, doc, end_pt)?;
+            let result_sheet_id = doc
+                .result_sheets
+                .iter()
+                .find(|res| {
+                    res.analysis.source_sheet_id == graph.spec.primary_source_sheet_id
+                        && res
+                            .pairwise_comparisons
+                            .iter()
+                            .any(|c| (c.group_a == group_a && c.group_b == group_b) || (c.group_a == group_b && c.group_b == group_a))
+                })
+                .or_else(|| {
+                    doc.result_sheets
+                        .iter()
+                        .find(|res| res.analysis.source_sheet_id == graph.spec.primary_source_sheet_id && !res.pairwise_comparisons.is_empty())
+                })
+                .map_or_else(|| graph.id.clone(), |res| res.id.clone());
+            let spec = PairwiseBracketSpec {
+                result_sheet_id,
+                group_a,
+                group_b,
+                style: BracketStyle::Square,
+                label_mode: BracketLabelMode::SummaryStars,
+                hide_if_non_significant: false,
+                stroke_width_pt: 1.0,
+                font_size_pt: 9.0,
+                bracket_step_pt: 12.0,
+            };
+            return Some(build_add_comparison_brackets_intent(&graph.id, &[spec]));
+        }
+        self.end_drag(&graph.id, end_pt)
+    }
+
     /// Finalize a pointer drag gesture on `sheet_id`, yielding an engine intent when applicable.
     pub fn end_drag(&mut self, sheet_id: &SheetId, end_pt: PointPt) -> Option<ToolCommandIntent> {
         let start = self.drag_start_pt.take()?;
@@ -358,23 +417,7 @@ impl CanvasToolState {
                 self.pan_by(end_pt.x - start.x, end_pt.y - start.y);
                 None
             }
-            CanvasToolMode::Bracket => {
-                let left_anchor = BracketAnchor { pt: start, group_index: None, data_value: Some(start.y.min(end_pt.y)), result_sheet_id: None };
-                let right_anchor = BracketAnchor { pt: end_pt, group_index: None, data_value: Some(start.y.min(end_pt.y)), result_sheet_id: None };
-                let (group_a, group_b) = resolve_bracket_group_pair(&left_anchor, &right_anchor);
-                let spec = PairwiseBracketSpec {
-                    result_sheet_id: sheet_id.clone(),
-                    group_a,
-                    group_b,
-                    style: BracketStyle::Square,
-                    label_mode: BracketLabelMode::SummaryStars,
-                    hide_if_non_significant: false,
-                    stroke_width_pt: 1.0,
-                    font_size_pt: 9.0,
-                    bracket_step_pt: 12.0,
-                };
-                Some(build_add_comparison_brackets_intent(sheet_id, &[spec]))
-            }
+            CanvasToolMode::Bracket => None,
             CanvasToolMode::TextCallout | CanvasToolMode::Callout => {
                 let bounds = normalized_rect_from_drag(start, end_pt, DEFAULT_CALLOUT_WIDTH_PT, DEFAULT_CALLOUT_HEIGHT_PT);
                 Some(build_add_text_callout_intent(sheet_id, bounds, "Callout", true))
@@ -622,21 +665,168 @@ fn sanitized_zoom(zoom: f64) -> f64 {
     if zoom.is_finite() && zoom > 0.0 { zoom.clamp(MIN_ZOOM, MAX_ZOOM) } else { 1.0 }
 }
 
-fn resolve_bracket_group_pair(first: &BracketAnchor, second: &BracketAnchor) -> (usize, usize) {
-    match (first.group_index, second.group_index) {
-        (Some(a), Some(b)) if a != b => (a.min(b), a.max(b)),
-        (Some(a), Some(_)) => (a, a.saturating_add(1)),
-        _ => {
-            if first.pt.x <= second.pt.x {
-                let left = ((first.pt.x.max(0.0) / 48.0).floor() as usize).min(1022);
-                let right = ((second.pt.x.max(0.0) / 48.0).floor() as usize).max(left.saturating_add(1)).min(1023);
-                (left, right)
-            } else {
-                let left = ((second.pt.x.max(0.0) / 48.0).floor() as usize).min(1022);
-                let right = ((first.pt.x.max(0.0) / 48.0).floor() as usize).max(left.saturating_add(1)).min(1023);
-                (left, right)
+/// Resolved horizontal category slot bounds in scene coordinates (`pt`) for bracket placement.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CategorySlotBound {
+    pub group_index: usize,
+    pub x_min_pt: f64,
+    pub x_max_pt: f64,
+    pub center_pt: f64,
+}
+
+/// Resolve compiled horizontal category slot bounds for `graph` within `scene`.
+#[must_use]
+pub fn resolve_category_slots(scene: &ChartScene, graph: &GraphSheet, doc: &ProjectDocument) -> Vec<CategorySlotBound> {
+    if scene.plot_rect_pt.width <= 0.0 || scene.plot_rect_pt.height <= 0.0 {
+        return Vec::new();
+    }
+    let Some(data_sheet) = doc.data_sheet(&graph.spec.primary_source_sheet_id) else {
+        return Vec::new();
+    };
+    let Some(CategoryDataSlots { domain_bounds, slots: data_slots }) = category_data_slots(&graph.spec, data_sheet) else {
+        return Vec::new();
+    };
+    let mut warnings: Vec<ChartWarning> = Vec::new();
+    let x_axis = ResolvedAxis::resolve(&graph.spec.x_axis, AxisOrientation::Horizontal, scene.plot_rect_pt, Some(domain_bounds), &mut warnings);
+    let mut out = Vec::with_capacity(data_slots.len());
+    for (group_index, left_val, right_val) in data_slots {
+        let Some(left_m) = x_axis.map_value(left_val) else {
+            continue;
+        };
+        let Some(right_m) = x_axis.map_value(right_val) else {
+            continue;
+        };
+        if left_m.segment_index != right_m.segment_index {
+            let mid_val = 0.5 * (left_val + right_val);
+            if let Some(mid_m) = x_axis.map_value(mid_val) {
+                out.push(CategorySlotBound { group_index, x_min_pt: mid_m.coord_pt, x_max_pt: mid_m.coord_pt, center_pt: mid_m.coord_pt });
+            }
+            continue;
+        }
+        let x_min_pt = left_m.coord_pt.min(right_m.coord_pt);
+        let x_max_pt = left_m.coord_pt.max(right_m.coord_pt);
+        out.push(CategorySlotBound { group_index, x_min_pt, x_max_pt, center_pt: 0.5 * (x_min_pt + x_max_pt) });
+    }
+    out
+}
+
+/// Hit-test a scene point `pt` against resolved category slots (`resolve_category_slots`).
+#[must_use]
+pub fn hit_test_category_slot(slots: &[CategorySlotBound], scene: &ChartScene, pt: PointPt) -> Option<usize> {
+    if slots.is_empty() || !pt.x.is_finite() || !pt.y.is_finite() {
+        return None;
+    }
+    if pt.y < scene.plot_rect_pt.y || pt.y > scene.plot_rect_pt.bottom() + 24.0 {
+        return None;
+    }
+    if pt.x < scene.plot_rect_pt.x || pt.x > scene.plot_rect_pt.right() {
+        return None;
+    }
+    slots
+        .iter()
+        .filter(|slot| pt.x >= slot.x_min_pt - 1e-6 && pt.x <= slot.x_max_pt + 1e-6)
+        .min_by(|a, b| (pt.x - a.center_pt).abs().total_cmp(&(pt.x - b.center_pt).abs()))
+        .map(|slot| slot.group_index)
+}
+
+struct CategoryDataSlots {
+    domain_bounds: (f64, f64),
+    slots: Vec<(usize, f64, f64)>,
+}
+
+fn category_data_slots(spec: &GraphSpec, sheet: &DataSheet) -> Option<CategoryDataSlots> {
+    match (spec.kind, &sheet.archetype) {
+        (GraphKind::Column, TableArchetype::Column(col)) => {
+            let slots = linear_column_slots(spec, col.data_sets.len());
+            let count = slots.len().max(1) as f64;
+            Some(CategoryDataSlots { domain_bounds: (0.0, count), slots })
+        }
+        (GraphKind::Column, TableArchetype::Nested(nested)) => {
+            let slots = linear_column_slots(spec, nested.groups.len());
+            let count = slots.len().max(1) as f64;
+            Some(CategoryDataSlots { domain_bounds: (0.0, count), slots })
+        }
+        (GraphKind::Grouped, TableArchetype::Grouped(grouped)) => grouped_category_slots(spec.grouped_arrangement, grouped),
+        _ => None,
+    }
+}
+
+fn linear_column_slots(spec: &GraphSpec, fallback_count: usize) -> Vec<(usize, f64, f64)> {
+    if spec.series.is_empty() {
+        (0..fallback_count).map(|idx| (idx, idx as f64, idx as f64 + 1.0)).collect()
+    } else {
+        spec.series.iter().enumerate().map(|(pos, s)| (s.data_set_index, pos as f64, pos as f64 + 1.0)).collect()
+    }
+}
+
+fn grouped_category_slots(arrangement: GroupedArrangement, grouped: &GroupedTable) -> Option<CategoryDataSlots> {
+    let nrows = grouped.row_count();
+    let ncols = grouped.data_sets.len();
+    if nrows == 0 || ncols == 0 {
+        return None;
+    }
+    if arrangement == GroupedArrangement::Separated {
+        let total_span = (ncols as f64) * (nrows as f64) + (ncols.saturating_sub(1) as f64) * 0.9;
+        let mut slots = Vec::with_capacity(nrows * ncols);
+        for c in 0..ncols {
+            for r in 0..nrows {
+                let cx = (c as f64) * (nrows as f64 + 0.9) + (r as f64) + 0.5;
+                slots.push((c * nrows + r, cx - 0.5, cx + 0.5));
             }
         }
+        return Some(CategoryDataSlots { domain_bounds: (0.0, total_span.max(1.0)), slots });
+    }
+
+    let (centers, step, dmin, dmax) = grouped_row_centers(grouped, nrows);
+    let mut slots = Vec::new();
+    match arrangement {
+        GroupedArrangement::Interleaved => {
+            let cluster_w = step * 0.76;
+            let slot_w = cluster_w / ncols as f64;
+            slots.reserve(nrows * ncols);
+            for (r, &cx) in centers.iter().enumerate() {
+                for c in 0..ncols {
+                    let slot_cx = cx - 0.5 * cluster_w + (c as f64 + 0.5) * slot_w;
+                    slots.push((r * ncols + c, slot_cx - 0.5 * slot_w, slot_cx + 0.5 * slot_w));
+                }
+            }
+        }
+        GroupedArrangement::Stacked | GroupedArrangement::Superimposed => {
+            slots.reserve(nrows);
+            for (r, &cx) in centers.iter().enumerate() {
+                slots.push((r, cx - 0.5 * step, cx + 0.5 * step));
+            }
+        }
+        GroupedArrangement::Separated => {}
+    }
+    Some(CategoryDataSlots { domain_bounds: (dmin, dmax), slots })
+}
+
+fn grouped_row_centers(grouped: &GroupedTable, nrows: usize) -> (Vec<f64>, f64, f64, f64) {
+    if let Some(spacing) = &grouped.row_numeric_spacing
+        && spacing.len() >= nrows
+        && let Some(vals) = spacing[..nrows].iter().map(|opt| opt.filter(|v| v.is_finite())).collect::<Option<Vec<f64>>>()
+    {
+        let mut min_step = f64::INFINITY;
+        for pair in vals.windows(2) {
+            let diff = (pair[1] - pair[0]).abs();
+            if diff > 1e-9 && diff < min_step {
+                min_step = diff;
+            }
+        }
+        let step = if min_step.is_finite() { min_step } else { 1.0 };
+        let min_v = vals.iter().copied().fold(f64::INFINITY, f64::min);
+        let max_v = vals.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        return (vals, step, min_v - 0.5 * step, max_v + 0.5 * step);
+    }
+    let centers: Vec<f64> = (0..nrows).map(|r| r as f64 + 0.5).collect();
+    (centers, 1.0, 0.0, nrows as f64)
+}
+
+fn resolve_bracket_group_pair(first: &BracketAnchor, second: &BracketAnchor) -> Option<(usize, usize)> {
+    match (first.group_index, second.group_index) {
+        (Some(a), Some(b)) if a != b => Some((a.min(b), a.max(b))),
+        _ => None,
     }
 }
 
@@ -1347,11 +1537,41 @@ impl NavigatorDragState {
         self.hover_target_index = None;
     }
 
+    /// Folder currently being reordered, if any.
+    #[must_use]
+    pub fn active_folder(&self) -> Option<SheetFolderKind> {
+        self.active_drag.as_ref().map(|(folder, _, _)| *folder)
+    }
+
+    /// Sheet identifier currently being dragged, if any.
+    #[must_use]
+    pub fn active_sheet_id(&self) -> Option<&str> {
+        self.active_drag.as_ref().map(|(_, sheet_id, _)| sheet_id.as_str())
+    }
+
     /// Update the hovered insertion index while a drag is active.
     pub fn update_hover(&mut self, to_index: usize) {
         if self.active_drag.is_some() {
             self.hover_target_index = Some(to_index);
         }
+    }
+
+    /// Update the hovered insertion index only when `folder` matches the dragged sheet's folder.
+    pub fn update_hover_in_folder(&mut self, folder: SheetFolderKind, to_index: usize) {
+        if let Some((active_folder, _, _)) = &self.active_drag
+            && *active_folder == folder
+        {
+            self.hover_target_index = Some(to_index);
+        }
+    }
+
+    /// Commit an active drag-reorder drop, returning `(folder, sheet_id, from_index, to_index)`
+    /// regardless of whether the captured start index equals `to_index` (so callers can reconcile
+    /// `sheet_id` against the live document).
+    pub fn commit_drop_with_sheet(&mut self) -> Option<(SheetFolderKind, String, usize, usize)> {
+        let (folder, sheet_id, from_index) = self.active_drag.take()?;
+        let to_index = self.hover_target_index.take()?;
+        Some((folder, sheet_id, from_index, to_index))
     }
 
     /// Commit an active drag-reorder drop, returning `(folder, from_index, to_index)` when moved.
