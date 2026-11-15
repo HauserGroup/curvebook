@@ -305,6 +305,19 @@ fn extract_from_xy(xy: &lumencraft_doc::XyTable, selected_data_sets: &[usize]) -
     Ok(series_list)
 }
 
+fn x_row_is_blank_unknown(xy: &lumencraft_doc::XyTable, row: usize) -> bool {
+    match &xy.x_mode {
+        lumencraft_doc::XColumnMode::Numbers { .. } | lumencraft_doc::XColumnMode::DateOrElapsedTime { .. } => {
+            xy.x_cells.get(row).and_then(|subs| subs.first()).is_some_and(|cell| !cell.excluded && cell.is_empty())
+        }
+        lumencraft_doc::XColumnMode::GeneratedSequence { .. } => false,
+    }
+}
+
+fn y_cells_are_blank_unknown(subcells: &[Cell]) -> bool {
+    !subcells.is_empty() && subcells.iter().all(|cell| !cell.excluded && cell.is_empty())
+}
+
 fn populate_xy_column(xy: &lumencraft_doc::XyTable, ds: &DataSetColumn, ds_idx: usize, series: &mut DatasetSeries) -> Result<(), FitError> {
     let x_sd = |row: usize| -> Option<f64> {
         let lumencraft_doc::XColumnMode::Numbers { subcolumn_mode } = xy.x_mode else {
@@ -319,6 +332,13 @@ fn populate_xy_column(xy: &lumencraft_doc::XyTable, ds: &DataSetColumn, ds_idx: 
 
     for (row, subcells) in ds.cells.iter().enumerate() {
         let x_opt = xy.x_value_at(row);
+        let x_blank = x_opt.is_none() && x_row_is_blank_unknown(xy, row);
+        // Excluded (or non-blank non-numeric) X rows must be dropped outright rather than
+        // masquerading as blank X cells queued for inverse interpolation.
+        if x_opt.is_none() && !x_blank {
+            continue;
+        }
+
         if xy.y_subcolumn_mode.supports_parametric_moments() {
             let pt_opt =
                 xy.summarized_y_point(row, ds_idx).map_err(|e| FitError::InvalidParameter { name: "pre_summarized_y", reason: e.to_string() })?;
@@ -334,9 +354,9 @@ fn populate_xy_column(xy: &lumencraft_doc::XyTable, ds: &DataSetColumn, ds_idx: 
                         row,
                     });
                 }
-                (None, Some(pt)) => series.unknowns_y.push((row, pt.mean)),
-                (Some(x), None) => series.unknowns_x.push((row, x)),
-                (None, None) => {}
+                (None, Some(pt)) if x_blank => series.unknowns_y.push((row, pt.mean)),
+                (Some(x), None) if y_cells_are_blank_unknown(subcells) => series.unknowns_x.push((row, x)),
+                _ => {}
             }
         } else if xy.y_subcolumn_mode.is_pre_summarized() {
             if let (Some(x), Some(y)) = (x_opt, subcells.first().and_then(Cell::active_number)) {
@@ -349,12 +369,15 @@ fn populate_xy_column(xy: &lumencraft_doc::XyTable, ds: &DataSetColumn, ds_idx: 
                     had_y = true;
                     if let Some(x) = x_opt {
                         series.points.push(DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: ds_idx, row });
-                    } else {
+                    } else if x_blank {
                         series.unknowns_y.push((row, y));
                     }
                 }
             }
-            if !had_y && let Some(x) = x_opt {
+            if !had_y
+                && let Some(x) = x_opt
+                && y_cells_are_blank_unknown(subcells)
+            {
                 series.unknowns_x.push((row, x));
             }
         }

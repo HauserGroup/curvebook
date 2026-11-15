@@ -10,7 +10,7 @@
 //! - Rich scalar math + statistical/special functions (Bessel J/Y/I/K, Kummer 1F1, Gauss 2F1,
 //!   `erf`, `gamma`, `normcdf`, etc.) executed in a bounded, WASM-safe stack VM.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt;
 
 use lumencraft_math::dist::{norm_cdf, norm_ppf};
@@ -26,10 +26,15 @@ const MAX_ODE_STEPS: usize = 50_000;
 const MAX_PARSE_DEPTH: usize = 128;
 const MAX_AST_NODES: usize = 4_096;
 const MAX_DATASET_EXPANSION: usize = 10_000;
+const MAX_DSL_SOURCE_BYTES: usize = 1_048_576;
+const MAX_DSL_LINES: usize = 16_384;
+const MAX_TOTAL_DATASET_INDICES: usize = 50_000;
+const MAX_DATASET_CLASSES: usize = 4_096;
+const MAX_TOTAL_OPCODES: usize = 500_000;
 const MAX_BESSEL_ORDER: i32 = 100_000;
 
 /// Dataset-filter predicate parsed from `<A>`, `<~A>`, `<B:D>`, or `<0>` line prefixes.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DatasetFilter {
     Any,
     Include(Vec<usize>),
@@ -408,6 +413,14 @@ struct CompiledProgram {
     local_count: usize,
 }
 
+#[derive(Debug, Clone)]
+struct CompiledInitRule {
+    filter: DatasetFilter,
+    slot: usize,
+    param_idx: Option<usize>,
+    prog: CompiledProgram,
+}
+
 /// Compiled custom equation implementing [`ParametricModel`] safely inside a bounded VM.
 #[derive(Debug, Clone)]
 pub struct CompiledDslModel {
@@ -416,17 +429,28 @@ pub struct CompiledDslModel {
     kind: DslEquationKind,
     param_names: Vec<String>,
     programs: Vec<(DatasetFilter, CompiledProgram)>,
+    program_by_ds: HashMap<usize, usize>,
+    default_program_idx: Option<usize>,
     ode_init_program: Option<CompiledProgram>,
     ode_t0: f64,
     initial_hints: HashMap<String, f64>,
-    initial_rules: Vec<(DatasetFilter, String, CompiledProgram)>,
-    transforms: Vec<(String, CompiledProgram)>,
+    initial_rules: Vec<CompiledInitRule>,
+    init_local_count: usize,
+    transforms: Vec<(String, usize, CompiledProgram)>,
+    transform_local_count: usize,
 }
 
 impl CompiledDslModel {
     /// Compile a user equation string (explicit `Y=...`, conditional `IF`, `<A>` dataset lines,
     /// implicit `LHS=RHS`, or 1st-order ODE `dY/dX=...` / `D(Y, X)=...`).
     pub fn compile(id: impl Into<String>, source: &str) -> Result<Self, FitError> {
+        if source.len() > MAX_DSL_SOURCE_BYTES {
+            return Err(FitError::DslCompileError {
+                message: format!("Custom equation exceeds maximum source length ({MAX_DSL_SOURCE_BYTES} bytes)"),
+                line: 1,
+                column: 1,
+            });
+        }
         let id = id.into();
         let mut section = DslSection::Equation;
         let mut parsed_lines: Vec<(usize, DatasetFilter, ParsedStatement)> = Vec::new();
@@ -434,9 +458,17 @@ impl CompiledDslModel {
         let mut raw_transform_lines: Vec<(usize, String, Expr)> = Vec::new();
         let mut initial_hints = HashMap::new();
         let mut ode_t0 = 0.0_f64;
+        let mut total_dataset_indices = 0_usize;
 
         for (idx, raw_line) in source.lines().enumerate() {
             let line_no = idx + 1;
+            if line_no > MAX_DSL_LINES {
+                return Err(FitError::DslCompileError {
+                    message: format!("Custom equation exceeds maximum line limit ({MAX_DSL_LINES})"),
+                    line: line_no,
+                    column: 1,
+                });
+            }
             let trimmed = strip_comment(raw_line, &mut initial_hints, &mut ode_t0);
             if trimmed.is_empty() {
                 continue;
@@ -446,6 +478,18 @@ impl CompiledDslModel {
                 continue;
             }
             let (filter, rest) = parse_dataset_prefix(trimmed, line_no)?;
+            let filter_len = match &filter {
+                DatasetFilter::Any => 0,
+                DatasetFilter::Include(v) | DatasetFilter::Exclude(v) => v.len(),
+            };
+            total_dataset_indices = total_dataset_indices.saturating_add(filter_len);
+            if total_dataset_indices > MAX_TOTAL_DATASET_INDICES {
+                return Err(FitError::DslCompileError {
+                    message: format!("Total dataset selector indices exceed global limit ({MAX_TOTAL_DATASET_INDICES})"),
+                    line: line_no,
+                    column: 1,
+                });
+            }
             if rest.is_empty() {
                 continue;
             }
@@ -455,7 +499,9 @@ impl CompiledDslModel {
                     parsed_lines.push((line_no, filter, stmt));
                 }
                 DslSection::InitialValues => match parse_statement(rest, line_no)? {
-                    ParsedStatement::Assign { name, rhs } => raw_init_lines.push((line_no, filter, name, rhs)),
+                    ParsedStatement::Assign { name, rhs } | ParsedStatement::OdeInitial { lhs_name: Some(name), rhs, .. } => {
+                        raw_init_lines.push((line_no, filter, name, rhs));
+                    }
                     _ => {
                         return Err(FitError::DslCompileError {
                             message: "Expected `PARAM = expr` assignment in [InitialValues]".to_owned(),
@@ -473,7 +519,9 @@ impl CompiledDslModel {
                         });
                     }
                     match parse_statement(rest, line_no)? {
-                        ParsedStatement::Assign { name, rhs } => raw_transform_lines.push((line_no, name, rhs)),
+                        ParsedStatement::Assign { name, rhs } | ParsedStatement::OdeInitial { lhs_name: Some(name), rhs, .. } => {
+                            raw_transform_lines.push((line_no, name, rhs));
+                        }
                         _ => {
                             return Err(FitError::DslCompileError {
                                 message: "Expected `SCALAR = expr` assignment in [Transforms]".to_owned(),
@@ -517,26 +565,59 @@ impl CompiledDslModel {
         }
 
         let param_map: HashMap<String, usize> = param_order.iter().enumerate().map(|(i, p)| (p.clone(), i)).collect();
+        let mut total_opcodes = 0_usize;
 
         let mut programs = Vec::with_capacity(body_stmts.len());
+        let mut program_by_ds = HashMap::new();
+        let mut default_program_idx = None;
         for (filter, locals, target) in body_stmts {
-            let prog = compile_program(&locals, &target, &param_map)?;
+            let remaining = MAX_TOTAL_OPCODES.saturating_sub(total_opcodes);
+            let prog = compile_program_refs(&locals, &target, &param_map, remaining)?;
+            total_opcodes = total_opcodes.saturating_add(prog.code.len());
+            if total_opcodes > MAX_TOTAL_OPCODES {
+                return Err(FitError::DslCompileError {
+                    message: format!("Compiled equation exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
+                    line: 1,
+                    column: 1,
+                });
+            }
+            let prog_idx = programs.len();
+            match &filter {
+                DatasetFilter::Include(v) => {
+                    for &ds in v {
+                        program_by_ds.insert(ds, prog_idx);
+                    }
+                }
+                DatasetFilter::Exclude(_) | DatasetFilter::Any => {
+                    default_program_idx = Some(prog_idx);
+                }
+            }
             programs.push((filter, prog));
         }
 
         let ode_init_program = if kind == DslEquationKind::OdeFirstOrder {
-            if let Some((_, init_expr)) = init_stmts.last() {
-                Some(compile_program(&[], init_expr, &param_map)?)
+            let remaining = MAX_TOTAL_OPCODES.saturating_sub(total_opcodes);
+            let prog = if let Some((_, init_expr)) = init_stmts.last() {
+                compile_program_refs(&[], init_expr, &param_map, remaining)?
             } else {
                 let y0_idx = *param_map.get("Y0").unwrap_or(&0);
-                Some(CompiledProgram { code: vec![OpCode::LoadParam(y0_idx), OpCode::Halt], local_count: 0 })
+                CompiledProgram { code: vec![OpCode::LoadParam(y0_idx), OpCode::Halt], local_count: 0 }
+            };
+            total_opcodes = total_opcodes.saturating_add(prog.code.len());
+            if total_opcodes > MAX_TOTAL_OPCODES {
+                return Err(FitError::DslCompileError {
+                    message: format!("Compiled equation exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
+                    line: 1,
+                    column: 1,
+                });
             }
+            Some(prog)
         } else {
             None
         };
 
-        let initial_rules = compile_initial_rules(raw_init_lines)?;
-        let transforms = compile_transforms(raw_transform_lines, &param_map)?;
+        let (initial_rules, init_local_count) = compile_initial_rules(raw_init_lines, &param_order, &param_map, &mut total_opcodes)?;
+        let (transforms, transform_local_count) = compile_transforms(raw_transform_lines, &param_map, &mut total_opcodes)?;
 
         Ok(Self {
             name: id.clone(),
@@ -544,11 +625,15 @@ impl CompiledDslModel {
             kind,
             param_names: param_order,
             programs,
+            program_by_ds,
+            default_program_idx,
             ode_init_program,
             ode_t0,
             initial_hints,
             initial_rules,
+            init_local_count,
             transforms,
+            transform_local_count,
         })
     }
 
@@ -558,49 +643,83 @@ impl CompiledDslModel {
     }
 
     fn select_program(&self, ds_idx: usize) -> Option<&CompiledProgram> {
-        self.programs.iter().rfind(|(f, _)| f.matches(ds_idx)).map(|(_, p)| p)
+        let idx = self.program_by_ds.get(&ds_idx).copied().or(self.default_program_idx)?;
+        self.programs.get(idx).map(|(_, p)| p)
     }
 
     fn eval_implicit(&self, x: &[f64], params: &[f64], ds_idx: usize) -> Option<f64> {
         let prog = self.select_program(ds_idx)?;
         let f = |y: f64| -> f64 { eval_bytecode(prog, x, y, params, ds_idx).unwrap_or(f64::NAN) };
-        let guesses = [0.0, 1.0, -1.0, 10.0, -10.0, 100.0, 0.1, -0.1, 1e-4, 1000.0];
-        let mut last_y: Option<f64> = None;
-        let mut last_val = f64::NAN;
-        for &g in &guesses {
-            let val = f(g);
-            if val.is_finite() {
-                if val.abs() < 1e-13 {
-                    return Some(g);
-                }
-                if let Some(prev_y) = last_y
-                    && last_val * val < 0.0
-                    && let Ok(root) = brent_root(f, prev_y.min(g), prev_y.max(g), RootOptions { abs_tol: 1e-12, rel_tol: 1e-12, max_iters: 100 })
-                {
-                    return Some(root);
-                }
-                last_y = Some(g);
-                last_val = val;
-            }
-        }
-        // Try safeguarded secant/Newton around initial finite point.
-        let mut y = last_y?;
-        for _ in 0..40 {
-            let fy = f(y);
-            if !fy.is_finite() {
+        let brent_scaled = |lo: f64, hi: f64| -> Option<f64> {
+            let bracket_scale = lo.abs().max(hi.abs());
+            let abs_tol = if bracket_scale > 0.0 { (bracket_scale * 1e-14).max(f64::MIN_POSITIVE * 1e6) } else { 1e-300 };
+            let root = brent_root(&f, lo, hi, RootOptions { abs_tol, rel_tol: 1e-13, max_iters: 120 }).ok()?;
+            if !root.is_finite() {
                 return None;
             }
-            if fy.abs() < 1e-12 {
-                return Some(y);
+            if root != 0.0 && lo <= 0.0 && hi >= 0.0 && root.abs() < 1e-3 * bracket_scale {
+                let (tight_lo, tight_hi) = if root > 0.0 { (0.0, (2.0 * root).min(hi)) } else { ((2.0 * root).max(lo), 0.0) };
+                let f_tlo = f(tight_lo);
+                let f_thi = f(tight_hi);
+                if f_tlo.is_finite() && f_thi.is_finite() && (f_tlo == 0.0 || f_thi == 0.0 || (f_tlo > 0.0) != (f_thi > 0.0)) {
+                    let tight_tol = (root.abs() * 1e-14).max(f64::MIN_POSITIVE * 1e6);
+                    if let Ok(refined) = brent_root(&f, tight_lo, tight_hi, RootOptions { abs_tol: tight_tol, rel_tol: 1e-13, max_iters: 120 })
+                        && refined.is_finite()
+                    {
+                        return Some(refined);
+                    }
+                }
             }
-            let h = 1e-6 * (1.0 + y.abs());
-            let df = (f(y + h) - f(y - h)) / (2.0 * h);
-            if !df.is_finite() || df.abs() < 1e-15 {
-                break;
-            }
-            y -= (fy / df).clamp(-100.0, 100.0);
+            Some(root)
+        };
+
+        let f0 = f(0.0);
+        if f0 == 0.0 {
+            return Some(0.0);
         }
-        if f(y).abs() < 1e-7 { Some(y) } else { None }
+
+        let (pos_probes, anchor_scale) = implicit_probes_and_scale(x, params);
+        let mut best_starts: Vec<(f64, f64)> = Vec::new();
+        let mut push_finite = |g: f64, val: f64| {
+            if best_starts.len() < 3 {
+                best_starts.push((g, val));
+            } else if let Some((worst_idx, &(_, worst_val))) = best_starts.iter().enumerate().max_by(|a, b| a.1.1.abs().total_cmp(&b.1.1.abs()))
+                && val.abs() < worst_val.abs()
+            {
+                best_starts[worst_idx] = (g, val);
+            }
+        };
+        if f0.is_finite() {
+            push_finite(0.0, f0);
+        }
+
+        // Scan positive then negative half-lines outward from 0 so tight scale-matched brackets
+        // are tested before large magnitudes and positive physical roots are found first.
+        for sign in [1.0_f64, -1.0_f64] {
+            let mut prev_y: Option<f64> = if f0.is_finite() { Some(0.0) } else { None };
+            let mut prev_val = f0;
+            for &m in &pos_probes {
+                let g = sign * m;
+                let val = f(g);
+                if val.is_finite() {
+                    if val == 0.0 {
+                        return Some(g);
+                    }
+                    push_finite(g, val);
+                    if let Some(py) = prev_y
+                        && (prev_val > 0.0) != (val > 0.0)
+                        && let Some(root) = brent_scaled(py.min(g), py.max(g))
+                    {
+                        return Some(root);
+                    }
+                    prev_y = Some(g);
+                    prev_val = val;
+                }
+            }
+        }
+
+        best_starts.sort_by(|a, b| a.1.abs().total_cmp(&b.1.abs()));
+        implicit_newton_fallback(&f, &brent_scaled, &best_starts, anchor_scale)
     }
 
     /// Integrate ODE `dy/dt = f(t, y; theta)` from `t0` to target `t_end` using adaptive Dormand–Prince RK45.
@@ -624,6 +743,115 @@ impl CompiledDslModel {
             eval_bytecode(prog, &xv, y, params, ds_idx)
         })
     }
+}
+
+fn implicit_probes_and_scale(x: &[f64], params: &[f64]) -> (Vec<f64>, f64) {
+    const MAGS: [f64; 34] = [
+        1e-30, 1e-24, 1e-18, 1e-15, 1e-14, 1e-13, 1e-12, 1e-11, 1e-10, 1e-9, 1e-8, 1e-7, 1e-6, 1e-5, 1e-4, 1e-3, 1e-2, 0.05, 0.1, 0.25, 0.5, 1.0,
+        2.0, 5.0, 10.0, 100.0, 1e3, 1e4, 1e6, 1e9, 1e15, 1e18, 1e24, 1e30,
+    ];
+    let mut pos_probes = Vec::with_capacity(64);
+    pos_probes.extend_from_slice(&MAGS);
+    let mut max_data_scale = 0.0_f64;
+    for &v in x.iter().chain(params.iter()) {
+        let av = v.abs();
+        if v.is_finite() && av > 0.0 {
+            max_data_scale = max_data_scale.max(av);
+            for factor in [0.1, 0.5, 1.0, 2.0, 10.0] {
+                let scaled = av * factor;
+                if scaled.is_finite() && scaled > 0.0 {
+                    pos_probes.push(scaled);
+                }
+            }
+        }
+    }
+    pos_probes.sort_by(f64::total_cmp);
+    pos_probes.dedup_by(|a, b| (*a - *b).abs() <= 1e-12 * a.abs().max(b.abs()));
+    (pos_probes, max_data_scale.max(1e-12))
+}
+
+fn implicit_newton_fallback<F, B>(f: &F, brent_scaled: &B, best_starts: &[(f64, f64)], anchor_scale: f64) -> Option<f64>
+where
+    F: Fn(f64) -> f64,
+    B: Fn(f64, f64) -> Option<f64>,
+{
+    for &(start_y, start_fy) in best_starts {
+        let mut y = start_y;
+        let mut fy = start_fy;
+        let init_f_abs = fy.abs();
+        for _ in 0..48 {
+            if !fy.is_finite() {
+                break;
+            }
+            if fy == 0.0 {
+                return Some(y);
+            }
+            let h = 1e-6 * if y != 0.0 { y.abs() } else { anchor_scale };
+            let fp = f(y + h);
+            let fm = f(y - h);
+            let df = if fp.is_finite() && fm.is_finite() {
+                (fp - fm) / (2.0 * h)
+            } else if fp.is_finite() {
+                (fp - fy) / h
+            } else if fm.is_finite() {
+                (fy - fm) / h
+            } else {
+                break;
+            };
+            if !df.is_finite() || df == 0.0 {
+                break;
+            }
+            let delta = fy / df;
+            if !delta.is_finite() {
+                break;
+            }
+            let y_tol = 1e-11 * y.abs().max(anchor_scale * 1e-6);
+            let ref_f = init_f_abs.max(df.abs() * y.abs().max(anchor_scale * 1e-6)).max(f64::MIN_POSITIVE);
+            if fy.abs() <= 1e-12 * ref_f && delta.abs() <= y_tol {
+                return Some(y);
+            }
+            let mut alpha = 1.0_f64;
+            let mut accepted = false;
+            for _ in 0..16 {
+                let cand = y - alpha * delta;
+                if cand.is_finite() {
+                    let f_cand = f(cand);
+                    if f_cand.is_finite() {
+                        if f_cand == 0.0 {
+                            return Some(cand);
+                        }
+                        if (f_cand > 0.0) != (fy > 0.0)
+                            && let Some(root) = brent_scaled(y.min(cand), y.max(cand))
+                        {
+                            return Some(root);
+                        }
+                        if f_cand.abs() < fy.abs() {
+                            y = cand;
+                            fy = f_cand;
+                            accepted = true;
+                            break;
+                        }
+                    }
+                }
+                alpha *= 0.5;
+            }
+            if !accepted {
+                break;
+            }
+        }
+        let h_end = 1e-6 * if y != 0.0 { y.abs() } else { anchor_scale };
+        let df_end = ((f(y + h_end) - f(y - h_end)) / (2.0 * h_end)).abs();
+        let ref_f = init_f_abs.max(if df_end.is_finite() { df_end * y.abs().max(anchor_scale * 1e-6) } else { 0.0 }).max(f64::MIN_POSITIVE);
+        if fy.is_finite()
+            && df_end.is_finite()
+            && df_end > 0.0
+            && fy.abs() <= 1e-11 * ref_f
+            && (fy / df_end).abs() <= 1e-10 * y.abs().max(anchor_scale * 1e-6)
+        {
+            return Some(y);
+        }
+    }
+    None
 }
 
 impl ParametricModel for CompiledDslModel {
@@ -672,30 +900,33 @@ impl ParametricModel for CompiledDslModel {
         let same_ds = points.first().map(|p0| p0.data_set_index).filter(|&first| points.iter().all(|p| p.data_set_index == first));
         let eval_ds = same_ds.unwrap_or(0);
         let mut applied = vec![false; guesses.len()];
+        let mut locals = vec![None; self.init_local_count];
         for pass in 0..2 {
-            for (filter, name, prog) in &self.initial_rules {
+            if pass == 1 && same_ds.is_some() {
+                break;
+            }
+            for rule in &self.initial_rules {
                 let matches = match (same_ds, pass) {
-                    (Some(ds), 0) => filter.matches(ds),
+                    (Some(ds), 0) => rule.filter.matches(ds),
                     (Some(_), _) => false,
-                    (None, 0) => *filter == DatasetFilter::Any,
-                    (None, _) => filter.matches(0),
+                    (None, 0) => rule.filter == DatasetFilter::Any,
+                    (None, _) => rule.filter != DatasetFilter::Any && rule.filter.matches(0),
                 };
                 if !matches {
                     continue;
                 }
-                let Some(p_idx) =
-                    self.param_names.iter().position(|p| p == name).or_else(|| self.param_names.iter().position(|p| p.eq_ignore_ascii_case(name)))
-                else {
-                    continue;
-                };
-                if pass == 1 && applied[p_idx] {
-                    continue;
-                }
-                if let Some(val) = eval_bytecode(prog, &[0.0], f64::NAN, &stats, eval_ds)
+                if let Some(val) = eval_bytecode_with_locals(&rule.prog, &[0.0], f64::NAN, &stats, eval_ds, &mut locals)
                     && val.is_finite()
                 {
-                    guesses[p_idx] = val;
-                    applied[p_idx] = true;
+                    if rule.slot < locals.len() {
+                        locals[rule.slot] = Some(val);
+                    }
+                    if let Some(p_idx) = rule.param_idx
+                        && !(pass == 1 && applied[p_idx])
+                    {
+                        guesses[p_idx] = val;
+                        applied[p_idx] = true;
+                    }
                 }
             }
         }
@@ -704,11 +935,17 @@ impl ParametricModel for CompiledDslModel {
 
     fn derived_transforms(&self, params: &[f64]) -> Vec<DerivedScalar> {
         let mut out = Vec::with_capacity(self.transforms.len());
-        for (name, prog) in &self.transforms {
-            if let Some(val) = eval_bytecode(prog, &[0.0], f64::NAN, params, 0)
+        let mut locals = vec![None; self.transform_local_count];
+        for (name, slot, prog) in &self.transforms {
+            if let Some(val) = eval_bytecode_with_locals(prog, &[0.0], f64::NAN, params, 0, &mut locals)
                 && val.is_finite()
             {
+                if *slot < locals.len() {
+                    locals[*slot] = Some(val);
+                }
                 out.push(DerivedScalar { name: name.clone(), value: val, units: None });
+            } else if *slot < locals.len() {
+                locals[*slot] = None;
             }
         }
         out
@@ -835,7 +1072,7 @@ where
 
 enum ParsedStatement {
     OdeDerivative(Expr),
-    OdeInitial { t0: Option<f64>, rhs: Expr },
+    OdeInitial { lhs_name: Option<String>, t0: Option<f64>, rhs: Expr },
     Assign { name: String, rhs: Expr },
     ImplicitEquation { lhs: Expr, rhs: Expr },
     BareExpr(Expr),
@@ -900,6 +1137,8 @@ fn parse_dataset_prefix(line: &str, line_no: usize) -> Result<(DatasetFilter, &s
             indices.push(parse_ds_token(p, line_no)?);
         }
     }
+    indices.sort_unstable();
+    indices.dedup();
     let filter = if negated { DatasetFilter::Exclude(indices) } else { DatasetFilter::Include(indices) };
     Ok((filter, rest))
 }
@@ -928,15 +1167,19 @@ fn parse_statement(rest: &str, line_no: usize) -> Result<ParsedStatement, FitErr
             let rhs = parse_expr(rhs_s, line_no)?;
             return Ok(ParsedStatement::OdeDerivative(rhs));
         }
-        if lhs_upper == "Y0" || lhs_upper == "Y(0)" {
+        if lhs_upper == "Y0" {
             let rhs = parse_expr(rhs_s, line_no)?;
-            return Ok(ParsedStatement::OdeInitial { t0: Some(0.0), rhs });
+            return Ok(ParsedStatement::OdeInitial { lhs_name: Some(lhs_trim.to_owned()), t0: Some(0.0), rhs });
+        }
+        if lhs_upper == "Y(0)" {
+            let rhs = parse_expr(rhs_s, line_no)?;
+            return Ok(ParsedStatement::OdeInitial { lhs_name: None, t0: Some(0.0), rhs });
         }
         if let Some(inner) = lhs_upper.strip_prefix("Y(").and_then(|s| s.strip_suffix(')'))
             && let Ok(t0_val) = inner.parse::<f64>()
         {
             let rhs = parse_expr(rhs_s, line_no)?;
-            return Ok(ParsedStatement::OdeInitial { t0: Some(t0_val), rhs });
+            return Ok(ParsedStatement::OdeInitial { lhs_name: None, t0: Some(t0_val), rhs });
         }
         if is_valid_ident(lhs_trim) {
             let rhs = parse_expr(rhs_s, line_no)?;
@@ -1022,10 +1265,15 @@ fn parse_section_header(trimmed: &str, line_no: usize) -> Result<Option<DslSecti
     }
 }
 
-fn build_eq_items(
-    parsed_lines: Vec<(usize, DatasetFilter, ParsedStatement)>,
-    mut ode_t0: f64,
-) -> (DslEquationKind, Vec<EqItem>, Vec<(usize, Expr)>, f64) {
+struct BuiltEqItems {
+    kind: DslEquationKind,
+    items: Vec<EqItem>,
+    init_stmts: Vec<(usize, Expr)>,
+    ode_t0: f64,
+}
+
+fn build_eq_items(parsed_lines: Vec<(usize, DatasetFilter, ParsedStatement)>, mut ode_t0: f64) -> Result<BuiltEqItems, FitError> {
+    let has_ode = parsed_lines.iter().any(|(_, _, s)| matches!(s, ParsedStatement::OdeDerivative(_)));
     let mut kind = DslEquationKind::Explicit;
     let mut items = Vec::with_capacity(parsed_lines.len());
     let mut init_stmts = Vec::new();
@@ -1035,11 +1283,22 @@ fn build_eq_items(
                 kind = DslEquationKind::OdeFirstOrder;
                 items.push(EqItem::Ode { filter, rhs });
             }
-            ParsedStatement::OdeInitial { t0, rhs } => {
-                if let Some(t) = t0 {
-                    ode_t0 = t;
+            ParsedStatement::OdeInitial { lhs_name, t0, rhs } => {
+                if has_ode {
+                    if let Some(t) = t0 {
+                        ode_t0 = t;
+                    }
+                    init_stmts.push((line_no, rhs));
+                } else if let Some(name) = lhs_name {
+                    // Non-ODE `Y0 = expr` is an ordinary local assignment rather than a hidden/discarded ODE IC.
+                    items.push(EqItem::Local { filter, name, rhs });
+                } else {
+                    return Err(FitError::DslCompileError {
+                        message: "ODE initial condition `Y(t0) = ...` requires an ODE derivative equation (`dY/dX = ...`)".to_owned(),
+                        line: line_no,
+                        column: 1,
+                    });
                 }
-                init_stmts.push((line_no, rhs));
             }
             ParsedStatement::Assign { name, rhs } => {
                 if name.eq_ignore_ascii_case("Y") {
@@ -1069,70 +1328,119 @@ fn build_eq_items(
             }
         }
     }
-    (kind, items, init_stmts, ode_t0)
+    Ok(BuiltEqItems { kind, items, init_stmts, ode_t0 })
 }
 
-fn collect_filter_classes(eq_items: &[EqItem]) -> (Vec<(DatasetFilter, usize)>, DatasetFilter, usize) {
-    let mut non_any_filters: Vec<&DatasetFilter> = Vec::new();
-    let mut mentioned_set: BTreeSet<usize> = BTreeSet::new();
+struct FilterClassPartition<'a> {
+    explicit_classes: Vec<DatasetFilter>,
+    outside_filter: DatasetFilter,
+    filter_ids: HashMap<&'a DatasetFilter, usize>,
+    matching_classes: Vec<Vec<usize>>,
+}
+
+fn collect_filter_classes(eq_items: &[EqItem]) -> Result<FilterClassPartition<'_>, FitError> {
+    let mut unique_filters: Vec<&DatasetFilter> = Vec::new();
+    let mut filter_ids: HashMap<&DatasetFilter, usize> = HashMap::new();
     for item in eq_items {
         let f = item.filter();
+        if *f != DatasetFilter::Any && !filter_ids.contains_key(f) {
+            let fi = unique_filters.len();
+            unique_filters.push(f);
+            filter_ids.insert(f, fi);
+        }
+    }
+
+    let mut events_by_ds: HashMap<usize, Vec<i32>> = HashMap::new();
+    for (fi, &f) in unique_filters.iter().enumerate() {
+        let tag = i32::try_from(fi + 1).map_err(|_| FitError::DslCompileError {
+            message: "Too many distinct dataset filters".to_owned(),
+            line: 1,
+            column: 1,
+        })?;
         match f {
             DatasetFilter::Any => {}
-            DatasetFilter::Include(v) | DatasetFilter::Exclude(v) => {
-                mentioned_set.extend(v.iter().copied());
-                if !non_any_filters.contains(&f) {
-                    non_any_filters.push(f);
+            DatasetFilter::Include(v) => {
+                for &ds in v {
+                    events_by_ds.entry(ds).or_default().push(tag);
+                }
+            }
+            DatasetFilter::Exclude(v) => {
+                for &ds in v {
+                    events_by_ds.entry(ds).or_default().push(-tag);
                 }
             }
         }
     }
-    let mentioned: Vec<usize> = mentioned_set.into_iter().collect();
-    let pos_by_ds: HashMap<usize, usize> = mentioned.iter().enumerate().map(|(pos, &ds)| (ds, pos)).collect();
-    let outside_rep = (0..=mentioned.len()).find(|ds| !pos_by_ds.contains_key(ds)).unwrap_or(0);
-    let outside_filter = if mentioned.is_empty() { DatasetFilter::Any } else { DatasetFilter::Exclude(mentioned.clone()) };
-    if mentioned.is_empty() {
-        return (Vec::new(), outside_filter, outside_rep);
+
+    let mut mentioned: Vec<usize> = events_by_ds.keys().copied().collect();
+    mentioned.sort_unstable();
+    let outside_filter = if mentioned.is_empty() { DatasetFilter::Any } else { DatasetFilter::Exclude(mentioned) };
+
+    let mut groups: HashMap<Vec<i32>, Vec<usize>> = HashMap::new();
+    for (ds, ev) in events_by_ds {
+        groups.entry(ev).or_default().push(ds);
+    }
+    let mut explicit_classes: Vec<(usize, DatasetFilter)> = groups
+        .into_values()
+        .map(|mut indices| {
+            indices.sort_unstable();
+            let rep = indices[0];
+            (rep, DatasetFilter::Include(indices))
+        })
+        .collect();
+    explicit_classes.sort_by_key(|(rep, _)| *rep);
+    if explicit_classes.len() > MAX_DATASET_CLASSES {
+        return Err(FitError::DslCompileError {
+            message: format!("Distinct dataset equivalence classes exceed limit ({MAX_DATASET_CLASSES})"),
+            line: 1,
+            column: 1,
+        });
     }
 
-    let words = non_any_filters.len().div_ceil(64);
-    let mut exclude_default = vec![0_u64; words];
-    for (fi, f) in non_any_filters.iter().enumerate() {
-        if matches!(f, DatasetFilter::Exclude(_)) {
-            exclude_default[fi / 64] |= 1_u64 << (fi % 64);
+    let explicit_filters: Vec<DatasetFilter> = explicit_classes.into_iter().map(|(_, f)| f).collect();
+    let num_explicit = explicit_filters.len();
+    let total_classes = num_explicit + 1;
+
+    let mut ds_to_class = HashMap::new();
+    for (c_idx, f) in explicit_filters.iter().enumerate() {
+        if let DatasetFilter::Include(v) = f {
+            for &ds in v {
+                ds_to_class.insert(ds, c_idx);
+            }
         }
     }
-    let mut sigs = vec![exclude_default; mentioned.len()];
-    for (fi, f) in non_any_filters.iter().enumerate() {
-        let word = fi / 64;
-        let mask = 1_u64 << (fi % 64);
+
+    let mut matching_classes = vec![Vec::new(); unique_filters.len()];
+    let mut stamp = vec![usize::MAX; total_classes];
+    for (fi, &f) in unique_filters.iter().enumerate() {
         match f {
+            DatasetFilter::Any => {}
             DatasetFilter::Include(v) => {
                 for &ds in v {
-                    if let Some(&pos) = pos_by_ds.get(&ds) {
-                        sigs[pos][word] |= mask;
+                    if let Some(&c_idx) = ds_to_class.get(&ds)
+                        && stamp[c_idx] != fi
+                    {
+                        stamp[c_idx] = fi;
+                        matching_classes[fi].push(c_idx);
                     }
                 }
             }
             DatasetFilter::Exclude(v) => {
                 for &ds in v {
-                    if let Some(&pos) = pos_by_ds.get(&ds) {
-                        sigs[pos][word] &= !mask;
+                    if let Some(&c_idx) = ds_to_class.get(&ds) {
+                        stamp[c_idx] = fi;
+                    }
+                }
+                for (c_idx, st) in stamp.iter().enumerate().take(total_classes) {
+                    if *st != fi {
+                        matching_classes[fi].push(c_idx);
                     }
                 }
             }
-            DatasetFilter::Any => {}
         }
     }
 
-    let mut groups: BTreeMap<Vec<u64>, Vec<usize>> = BTreeMap::new();
-    for (pos, &ds) in mentioned.iter().enumerate() {
-        groups.entry(sigs[pos].clone()).or_default().push(ds);
-    }
-    let mut classes: Vec<(DatasetFilter, usize)> =
-        groups.into_values().map(|indices| (DatasetFilter::Include(indices.clone()), indices[0])).collect();
-    classes.sort_by_key(|(_, rep)| *rep);
-    (classes, outside_filter, outside_rep)
+    Ok(FilterClassPartition { explicit_classes: explicit_filters, outside_filter, filter_ids, matching_classes })
 }
 
 fn target_for_kind(item: &EqItem, kind: DslEquationKind) -> Option<(Expr, bool)> {
@@ -1148,34 +1456,36 @@ fn target_for_kind(item: &EqItem, kind: DslEquationKind) -> Option<(Expr, bool)>
     }
 }
 
-fn branch_uses_unbound_scoped(locals: &[(String, Expr)], target: &Expr, scoped_names: &BTreeSet<String>) -> bool {
+fn target_expr_for_unbound_check(item: &EqItem, kind: DslEquationKind) -> Option<&Expr> {
+    match (kind, item) {
+        (DslEquationKind::OdeFirstOrder, EqItem::Ode { rhs, .. }) => Some(rhs),
+        (DslEquationKind::Implicit, EqItem::Implicit { diff, .. }) => Some(diff),
+        (DslEquationKind::Implicit | DslEquationKind::Explicit, EqItem::Explicit { expr, .. }) => Some(expr),
+        _ => None,
+    }
+}
+
+fn branch_uses_unbound_scoped_indices(
+    eq_items: &[EqItem],
+    local_indices: &[usize],
+    target_idx: usize,
+    kind: DslEquationKind,
+    scoped_names: &HashSet<String>,
+) -> bool {
+    let Some(target) = target_expr_for_unbound_check(&eq_items[target_idx], kind) else {
+        return false;
+    };
     let mut free = Vec::new();
     let mut seen = BTreeSet::new();
     let mut bound = BTreeSet::new();
-    for (lname, rhs) in locals {
-        collect_free_idents(rhs, &bound, &mut seen, &mut free);
-        bound.insert(lname.clone());
+    for &idx in local_indices {
+        if let EqItem::Local { name, rhs, .. } = &eq_items[idx] {
+            collect_free_idents(rhs, &bound, &mut seen, &mut free);
+            bound.insert(name.clone());
+        }
     }
     collect_free_idents(target, &bound, &mut seen, &mut free);
     free.iter().any(|ident| scoped_names.contains(ident))
-}
-
-fn collect_branches_for_rep(eq_items: &[EqItem], kind: DslEquationKind, class_filter: &DatasetFilter, rep_ds: usize) -> Vec<(OutputBranch, bool)> {
-    let mut active_locals: Vec<(String, Expr)> = Vec::new();
-    let mut out = Vec::new();
-    for item in eq_items {
-        if !item.filter().matches(rep_ds) {
-            continue;
-        }
-        if let EqItem::Local { name, rhs, .. } = item {
-            active_locals.push((name.clone(), rhs.clone()));
-            continue;
-        }
-        if let Some((target, was_any)) = target_for_kind(item, kind) {
-            out.push(((class_filter.clone(), active_locals.clone(), target), was_any));
-        }
-    }
-    out
 }
 
 struct ResolvedEquationBody {
@@ -1186,12 +1496,12 @@ struct ResolvedEquationBody {
 }
 
 fn resolve_equation_branches(parsed_lines: Vec<(usize, DatasetFilter, ParsedStatement)>, ode_t0: f64) -> Result<ResolvedEquationBody, FitError> {
-    let (kind, eq_items, init_stmts, ode_t0) = build_eq_items(parsed_lines, ode_t0);
+    let BuiltEqItems { kind, items: eq_items, init_stmts, ode_t0 } = build_eq_items(parsed_lines, ode_t0)?;
     let has_ode_output = eq_items.iter().any(|it| matches!(it, EqItem::Ode { .. }));
     if kind == DslEquationKind::OdeFirstOrder && !has_ode_output {
         return Err(FitError::DslCompileError { message: "Missing ODE derivative expression".to_owned(), line: 1, column: 1 });
     }
-    let scoped_local_names: BTreeSet<String> = eq_items
+    let scoped_local_names: HashSet<String> = eq_items
         .iter()
         .filter_map(|it| match it {
             EqItem::Local { filter, name, .. } if *filter != DatasetFilter::Any => Some(name.clone()),
@@ -1199,20 +1509,99 @@ fn resolve_equation_branches(parsed_lines: Vec<(usize, DatasetFilter, ParsedStat
         })
         .collect();
 
-    let (explicit_classes, outside_filter, outside_rep) = collect_filter_classes(&eq_items);
+    let partition = collect_filter_classes(&eq_items)?;
+    let num_explicit = partition.explicit_classes.len();
+    let outside_class = num_explicit;
+    let total_classes = num_explicit + 1;
+
+    let mut class_locals: Vec<Vec<usize>> = vec![Vec::new(); total_classes];
+    let mut explicit_outputs: Vec<Option<(usize, usize)>> = vec![None; num_explicit];
+    let mut outside_outputs: Vec<(usize, usize, bool)> = Vec::new();
+    let mut total_branch_refs = 0_usize;
+
+    for (item_idx, item) in eq_items.iter().enumerate() {
+        let f = item.filter();
+        let is_local = matches!(item, EqItem::Local { .. });
+        let is_target = target_expr_for_unbound_check(item, kind).is_some();
+        if !is_local && !is_target {
+            continue;
+        }
+        let was_any = *f == DatasetFilter::Any;
+        let classes_slice: &[usize] = if was_any {
+            &[]
+        } else if let Some(&fi) = partition.filter_ids.get(f) {
+            &partition.matching_classes[fi]
+        } else {
+            &[]
+        };
+
+        let count_matched = if was_any { total_classes } else { classes_slice.len() };
+        if is_local {
+            total_branch_refs = total_branch_refs.saturating_add(count_matched);
+            if total_branch_refs > MAX_TOTAL_OPCODES {
+                return Err(FitError::DslCompileError {
+                    message: format!("Compiled equation exceeds branch-expansion budget ({MAX_TOTAL_OPCODES})"),
+                    line: 1,
+                    column: 1,
+                });
+            }
+        }
+
+        if was_any {
+            for c_idx in 0..total_classes {
+                if is_local {
+                    class_locals[c_idx].push(item_idx);
+                } else if c_idx == outside_class {
+                    outside_outputs.push((class_locals[outside_class].len(), item_idx, true));
+                } else {
+                    explicit_outputs[c_idx] = Some((class_locals[c_idx].len(), item_idx));
+                }
+            }
+        } else {
+            for &c_idx in classes_slice {
+                if is_local {
+                    class_locals[c_idx].push(item_idx);
+                } else if c_idx == outside_class {
+                    outside_outputs.push((class_locals[outside_class].len(), item_idx, false));
+                } else {
+                    explicit_outputs[c_idx] = Some((class_locals[c_idx].len(), item_idx));
+                }
+            }
+        }
+    }
+
+    let materialize_locals = |indices: &[usize]| -> Vec<(String, Expr)> {
+        indices
+            .iter()
+            .filter_map(|&idx| match &eq_items[idx] {
+                EqItem::Local { name, rhs, .. } => Some((name.clone(), rhs.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+
     let mut body_stmts = Vec::new();
-    for (class_filter, rep_ds) in &explicit_classes {
-        for (branch, _) in collect_branches_for_rep(&eq_items, kind, class_filter, *rep_ds) {
-            body_stmts.push(branch);
+    for (c_idx, class_filter) in partition.explicit_classes.into_iter().enumerate() {
+        if let Some((loc_len, item_idx)) = explicit_outputs[c_idx]
+            && let Some((target, _)) = target_for_kind(&eq_items[item_idx], kind)
+        {
+            let locals = materialize_locals(&class_locals[c_idx][..loc_len]);
+            body_stmts.push((class_filter, locals, target));
         }
     }
     let any_explicit_branch = !body_stmts.is_empty();
-    for (branch, was_any) in collect_branches_for_rep(&eq_items, kind, &outside_filter, outside_rep) {
-        if any_explicit_branch && was_any && branch_uses_unbound_scoped(&branch.1, &branch.2, &scoped_local_names) {
+    for (loc_len, item_idx, was_any) in outside_outputs.into_iter().rev() {
+        let local_slice = &class_locals[outside_class][..loc_len];
+        if any_explicit_branch && was_any && branch_uses_unbound_scoped_indices(&eq_items, local_slice, item_idx, kind, &scoped_local_names) {
             continue;
         }
-        body_stmts.push(branch);
+        if let Some((target, _)) = target_for_kind(&eq_items[item_idx], kind) {
+            let locals = materialize_locals(local_slice);
+            body_stmts.push((partition.outside_filter, locals, target));
+            break;
+        }
     }
+
     Ok(ResolvedEquationBody { kind, body_stmts, init_stmts, ode_t0 })
 }
 
@@ -1252,15 +1641,14 @@ fn compute_dataset_stats(points: &[DataPoint]) -> [f64; 11] {
     [ymin, ymax, xmin, xmax, xmid, ymid, x_at_ymin, x_at_ymax, x_at_y50, span, sign]
 }
 
-fn canonicalize_init_expr(expr: &mut Expr, shadowed: &BTreeSet<String>) {
+fn canonicalize_init_expr(expr: &mut Expr, any_slots: &HashMap<String, (usize, usize)>, specific_slots: Option<&HashMap<String, (usize, usize)>>) {
     let mut stack = vec![expr];
     while let Some(node) = stack.pop() {
         match node {
             Expr::Num(_) => {}
             Expr::Ident(name) => {
-                if !shadowed.contains(name.as_str())
-                    && let Some(&canon) = INIT_STAT_NAMES.iter().find(|&&s| s.eq_ignore_ascii_case(name))
-                {
+                let is_shadowed = any_slots.contains_key(name.as_str()) || specific_slots.is_some_and(|m| m.contains_key(name.as_str()));
+                if !is_shadowed && let Some(&canon) = INIT_STAT_NAMES.iter().find(|&&s| s.eq_ignore_ascii_case(name)) {
                     *name = canon.to_owned();
                 }
             }
@@ -1301,47 +1689,81 @@ fn ensure_no_data_vars(prog: &CompiledProgram, section_name: &str, line_no: usiz
 
 fn compile_initial_rules(
     raw_init_lines: Vec<(usize, DatasetFilter, String, Expr)>,
-) -> Result<Vec<(DatasetFilter, String, CompiledProgram)>, FitError> {
+    param_names: &[String],
+    param_map: &HashMap<String, usize>,
+    total_opcodes: &mut usize,
+) -> Result<(Vec<CompiledInitRule>, usize), FitError> {
     if raw_init_lines.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
     let stat_map: HashMap<String, usize> = INIT_STAT_NAMES.iter().enumerate().map(|(i, &n)| (n.to_owned(), i)).collect();
-    let mut history: Vec<(DatasetFilter, String, Expr)> = Vec::new();
-    let mut compiled = Vec::with_capacity(raw_init_lines.len());
-    for (line_no, filter, name, mut rhs) in raw_init_lines {
-        let mut prior_locals = Vec::new();
-        let mut shadowed = BTreeSet::new();
-        for (prev_filter, prev_name, prev_rhs) in &history {
-            if *prev_filter == DatasetFilter::Any || *prev_filter == filter {
-                prior_locals.push((prev_name.clone(), prev_rhs.clone()));
-                shadowed.insert(prev_name.clone());
-            }
+    let mut any_slots: HashMap<String, (usize, usize)> = HashMap::new();
+    let mut scoped_slots: HashMap<DatasetFilter, HashMap<String, (usize, usize)>> = HashMap::new();
+    let total_slots = raw_init_lines.len();
+    let mut compiled = Vec::with_capacity(total_slots);
+
+    for (rule_idx, (line_no, filter, name, mut rhs)) in raw_init_lines.into_iter().enumerate() {
+        let specific = if filter == DatasetFilter::Any { None } else { scoped_slots.get(&filter) };
+        canonicalize_init_expr(&mut rhs, &any_slots, specific);
+        let resolver = LocalResolver::Scoped { any: &any_slots, specific };
+        let remaining = MAX_TOTAL_OPCODES.saturating_sub(*total_opcodes);
+        let prog = compile_target_resolved(&rhs, &resolver, &stat_map, remaining).map_err(|e| with_line(e, line_no))?;
+        *total_opcodes = total_opcodes.saturating_add(prog.code.len());
+        if *total_opcodes > MAX_TOTAL_OPCODES {
+            return Err(FitError::DslCompileError {
+                message: format!("[InitialValues] exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
+                line: line_no,
+                column: 1,
+            });
         }
-        canonicalize_init_expr(&mut rhs, &shadowed);
-        let prog = compile_program(&prior_locals, &rhs, &stat_map).map_err(|e| with_line(e, line_no))?;
         ensure_no_data_vars(&prog, "[InitialValues]", line_no)?;
-        compiled.push((filter.clone(), name.clone(), prog));
-        history.push((filter, name, rhs));
+        let param_idx = param_map.get(&name).copied().or_else(|| param_names.iter().position(|p| p.eq_ignore_ascii_case(&name)));
+        let slot = rule_idx;
+        if filter == DatasetFilter::Any {
+            any_slots.insert(name, (slot, rule_idx));
+        } else {
+            scoped_slots.entry(filter.clone()).or_default().insert(name, (slot, rule_idx));
+        }
+        compiled.push(CompiledInitRule { filter, slot, param_idx, prog });
     }
-    Ok(compiled)
+    Ok((compiled, total_slots))
 }
+
+type CompiledTransforms = Vec<(String, usize, CompiledProgram)>;
 
 fn compile_transforms(
     raw_transform_lines: Vec<(usize, String, Expr)>,
     param_map: &HashMap<String, usize>,
-) -> Result<Vec<(String, CompiledProgram)>, FitError> {
+    total_opcodes: &mut usize,
+) -> Result<(CompiledTransforms, usize), FitError> {
     if raw_transform_lines.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), 0));
     }
-    let mut prior_locals: Vec<(String, Expr)> = Vec::new();
+    let mut local_map: HashMap<String, usize> = HashMap::new();
     let mut compiled = Vec::with_capacity(raw_transform_lines.len());
     for (line_no, name, rhs) in raw_transform_lines {
-        let prog = compile_program(&prior_locals, &rhs, param_map).map_err(|e| with_line(e, line_no))?;
+        let resolver = LocalResolver::Flat(&local_map);
+        let remaining = MAX_TOTAL_OPCODES.saturating_sub(*total_opcodes);
+        let prog = compile_target_resolved(&rhs, &resolver, param_map, remaining).map_err(|e| with_line(e, line_no))?;
+        *total_opcodes = total_opcodes.saturating_add(prog.code.len());
+        if *total_opcodes > MAX_TOTAL_OPCODES {
+            return Err(FitError::DslCompileError {
+                message: format!("[Transforms] exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
+                line: line_no,
+                column: 1,
+            });
+        }
         ensure_no_data_vars(&prog, "[Transforms]", line_no)?;
-        prior_locals.push((name.clone(), rhs));
-        compiled.push((name, prog));
+        let slot = if let Some(&s) = local_map.get(&name) {
+            s
+        } else {
+            let s = local_map.len();
+            local_map.insert(name.clone(), s);
+            s
+        };
+        compiled.push((name, slot, prog));
     }
-    Ok(compiled)
+    Ok((compiled, local_map.len()))
 }
 
 fn expr_references_y(expr: &Expr) -> bool {
@@ -1778,11 +2200,46 @@ fn parse_expr(input: &str, line: usize) -> Result<Expr, FitError> {
     Ok(expr)
 }
 
-fn compile_program(locals: &[(String, Expr)], target: &Expr, params: &HashMap<String, usize>) -> Result<CompiledProgram, FitError> {
+enum LocalResolver<'a> {
+    Flat(&'a HashMap<String, usize>),
+    Scoped { any: &'a HashMap<String, (usize, usize)>, specific: Option<&'a HashMap<String, (usize, usize)>> },
+}
+
+impl LocalResolver<'_> {
+    fn slot(&self, name: &str) -> Option<usize> {
+        match self {
+            Self::Flat(map) => map.get(name).copied(),
+            Self::Scoped { any, specific } => match (any.get(name), specific.and_then(|s| s.get(name))) {
+                (Some(&(s1, o1)), Some(&(s2, o2))) => Some(if o2 >= o1 { s2 } else { s1 }),
+                (Some(&(s, _)), None) | (None, Some(&(s, _))) => Some(s),
+                (None, None) => None,
+            },
+        }
+    }
+}
+
+fn check_opcode_budget(code: &[OpCode], max_opcodes: usize) -> Result<(), FitError> {
+    if code.len() > max_opcodes {
+        return Err(FitError::DslCompileError {
+            message: format!("Compiled equation exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
+            line: 1,
+            column: 1,
+        });
+    }
+    Ok(())
+}
+
+fn compile_program_refs(
+    locals: &[(String, Expr)],
+    target: &Expr,
+    params: &HashMap<String, usize>,
+    max_opcodes: usize,
+) -> Result<CompiledProgram, FitError> {
     let mut local_map: HashMap<String, usize> = HashMap::new();
     let mut code = Vec::new();
     for (lname, rhs) in locals {
-        compile_expr(rhs, &local_map, params, &mut code)?;
+        let resolver = LocalResolver::Flat(&local_map);
+        compile_expr_resolved(rhs, &resolver, params, &mut code, max_opcodes)?;
         let slot = if let Some(&s) = local_map.get(lname) {
             s
         } else {
@@ -1791,10 +2248,26 @@ fn compile_program(locals: &[(String, Expr)], target: &Expr, params: &HashMap<St
             s
         };
         code.push(OpCode::StoreLocal(slot));
+        check_opcode_budget(&code, max_opcodes)?;
     }
-    compile_expr(target, &local_map, params, &mut code)?;
+    let resolver = LocalResolver::Flat(&local_map);
+    compile_expr_resolved(target, &resolver, params, &mut code, max_opcodes)?;
     code.push(OpCode::Halt);
+    check_opcode_budget(&code, max_opcodes)?;
     Ok(CompiledProgram { code, local_count: local_map.len() })
+}
+
+fn compile_target_resolved(
+    target: &Expr,
+    locals: &LocalResolver<'_>,
+    params: &HashMap<String, usize>,
+    max_opcodes: usize,
+) -> Result<CompiledProgram, FitError> {
+    let mut code = Vec::new();
+    compile_expr_resolved(target, locals, params, &mut code, max_opcodes)?;
+    code.push(OpCode::Halt);
+    check_opcode_budget(&code, max_opcodes)?;
+    Ok(CompiledProgram { code, local_count: 0 })
 }
 
 enum CompileTask<'a> {
@@ -1831,7 +2304,7 @@ fn binary_op_to_kind(op: BinaryOp) -> BinaryKind {
 
 fn schedule_expr_compile<'a>(
     node: &'a Expr,
-    locals: &HashMap<String, usize>,
+    locals: &LocalResolver<'_>,
     params: &HashMap<String, usize>,
     code: &mut Vec<OpCode>,
     tasks: &mut Vec<CompileTask<'a>>,
@@ -1884,9 +2357,21 @@ fn schedule_expr_compile<'a>(
     Ok(())
 }
 
+#[cfg(test)]
 fn compile_expr(expr: &Expr, locals: &HashMap<String, usize>, params: &HashMap<String, usize>, code: &mut Vec<OpCode>) -> Result<(), FitError> {
+    compile_expr_resolved(expr, &LocalResolver::Flat(locals), params, code, MAX_TOTAL_OPCODES)
+}
+
+fn compile_expr_resolved(
+    expr: &Expr,
+    locals: &LocalResolver<'_>,
+    params: &HashMap<String, usize>,
+    code: &mut Vec<OpCode>,
+    max_opcodes: usize,
+) -> Result<(), FitError> {
     let mut tasks = vec![CompileTask::Eval(expr)];
     while let Some(task) = tasks.pop() {
+        check_opcode_budget(code, max_opcodes)?;
         match task {
             CompileTask::Eval(node) => schedule_expr_compile(node, locals, params, code, &mut tasks)?,
             CompileTask::EmitUnary(kind) => code.push(OpCode::Unary(kind)),
@@ -1946,11 +2431,11 @@ fn compile_expr(expr: &Expr, locals: &HashMap<String, usize>, params: &HashMap<S
             }
         }
     }
-    Ok(())
+    check_opcode_budget(code, max_opcodes)
 }
 
-fn compile_ident(name: &str, locals: &HashMap<String, usize>, params: &HashMap<String, usize>, code: &mut Vec<OpCode>) -> Result<(), FitError> {
-    if let Some(&slot) = locals.get(name) {
+fn compile_ident(name: &str, locals: &LocalResolver<'_>, params: &HashMap<String, usize>, code: &mut Vec<OpCode>) -> Result<(), FitError> {
+    if let Some(slot) = locals.slot(name) {
         code.push(OpCode::LoadLocal(slot));
         return Ok(());
     }
@@ -2053,8 +2538,12 @@ fn resolve_builtin_fn(name: &str) -> Result<(BuiltinFn, usize), FitError> {
 // ============================================================================
 
 fn eval_bytecode(prog: &CompiledProgram, x: &[f64], y: f64, params: &[f64], ds_idx: usize) -> Option<f64> {
+    let mut locals = vec![None; prog.local_count];
+    eval_bytecode_with_locals(prog, x, y, params, ds_idx, &mut locals)
+}
+
+fn eval_bytecode_with_locals(prog: &CompiledProgram, x: &[f64], y: f64, params: &[f64], ds_idx: usize, locals: &mut [Option<f64>]) -> Option<f64> {
     let mut stack: Vec<f64> = Vec::with_capacity(32);
-    let mut locals = vec![0.0_f64; prog.local_count];
     let mut ip = 0_usize;
     let mut steps = 0_usize;
 
@@ -2071,10 +2560,10 @@ fn eval_bytecode(prog: &CompiledProgram, x: &[f64], y: f64, params: &[f64], ds_i
             OpCode::LoadY => stack.push(y),
             OpCode::LoadDatasetIndex => stack.push(ds_idx as f64),
             OpCode::LoadParam(idx) => stack.push(*params.get(idx)?),
-            OpCode::LoadLocal(slot) => stack.push(*locals.get(slot)?),
+            OpCode::LoadLocal(slot) => stack.push(locals.get(slot).copied().flatten()?),
             OpCode::StoreLocal(slot) => {
                 let v = stack.pop()?;
-                *locals.get_mut(slot)? = v;
+                *locals.get_mut(slot)? = Some(v);
             }
             OpCode::Unary(kind) => {
                 let v = stack.pop()?;
@@ -2517,46 +3006,127 @@ fn bessel_k1(x: f64) -> Option<f64> {
     if ans.is_finite() { Some(ans) } else { None }
 }
 
-/// Confluent hypergeometric function `1F1(a; b; z)` via series for moderate `|z|`.
+/// Confluent hypergeometric function `1F1(a; b; z)` via Kummer's transform (`z < -1`) and convergent series.
 fn hyp1f1(a: f64, b: f64, z: f64) -> Option<f64> {
-    if b <= 0.0 && (b - b.round()).abs() < 1e-12 {
+    if !a.is_finite() || !b.is_finite() || !z.is_finite() || (b <= 0.0 && (b - b.round()).abs() < 1e-12) {
         return None;
     }
-    let mut term = 1.0_f64;
-    let mut sum = 1.0_f64;
-    for k in 0..300 {
-        let kf = k as f64;
-        term *= ((a + kf) / (b + kf)) * (z / (kf + 1.0));
-        if !term.is_finite() {
-            return None;
-        }
-        sum += term;
-        if term.abs() <= 1e-14 * sum.abs().max(1.0) {
-            return Some(sum);
+    if z == 0.0 || a == 0.0 {
+        return Some(1.0);
+    }
+    if z < -1.0
+        && let Some(transformed) = hyp1f1_series(b - a, b, -z)
+    {
+        let scaled = z.exp() * transformed;
+        if scaled.is_finite() {
+            return Some(scaled);
         }
     }
-    if sum.is_finite() { Some(sum) } else { None }
+    hyp1f1_series(a, b, z)
 }
 
-/// Gauss hypergeometric function `2F1(a, b; c; z)` for `|z| < 1`.
-fn hyp2f1(a: f64, b: f64, c: f64, z: f64) -> Option<f64> {
-    if z.abs() >= 1.0 || (c <= 0.0 && (c - c.round()).abs() < 1e-12) {
-        return None;
-    }
+fn hyp1f1_series(a: f64, b: f64, z: f64) -> Option<f64> {
+    const MAX_ITERS: usize = 2_000;
     let mut term = 1.0_f64;
     let mut sum = 1.0_f64;
-    for k in 0..400 {
+    let mut max_abs = 1.0_f64;
+    let mut prev_small = false;
+    for k in 0..MAX_ITERS {
         let kf = k as f64;
-        term *= ((a + kf) * (b + kf) / (c + kf)) * (z / (kf + 1.0));
+        let denom = b + kf;
+        if denom == 0.0 {
+            return None;
+        }
+        let factor = ((a + kf) / denom) * (z / (kf + 1.0));
+        term *= factor;
         if !term.is_finite() {
             return None;
         }
+        if term == 0.0 {
+            return if max_abs > 1e12 * sum.abs().max(1.0) { None } else { Some(sum) };
+        }
+        max_abs = max_abs.max(term.abs());
         sum += term;
-        if term.abs() <= 1e-14 * sum.abs().max(1.0) {
-            return Some(sum);
+        if !sum.is_finite() {
+            return None;
+        }
+        max_abs = max_abs.max(sum.abs());
+        let is_small = term.abs() <= 1e-14 * sum.abs().max(f64::MIN_POSITIVE);
+        let past_growth = (a + kf > 0.0 || kf + 1.0 > z.abs()) && b + kf > 0.0 && factor.abs() < 0.9;
+        if k >= 1 && is_small && prev_small && past_growth {
+            return if max_abs > 1e12 * sum.abs().max(f64::MIN_POSITIVE) { None } else { Some(sum) };
+        }
+        prev_small = is_small;
+    }
+    None
+}
+
+/// Gauss hypergeometric function `2F1(a, b; c; z)` for `z < 1` (with Pfaff continuation for `z < -0.5`).
+fn hyp2f1(a: f64, b: f64, c: f64, z: f64) -> Option<f64> {
+    if !a.is_finite() || !b.is_finite() || !c.is_finite() || !z.is_finite() || z >= 1.0 || (c <= 0.0 && (c - c.round()).abs() < 1e-12) {
+        return None;
+    }
+    if z == 0.0 || a == 0.0 || b == 0.0 {
+        return Some(1.0);
+    }
+    if z < -0.5 {
+        let w = z / (z - 1.0);
+        if w.is_finite() && w < 1.0 {
+            let one_minus_z = 1.0 - z;
+            if let Some(series_val) = hyp2f1_series(a, c - b, c, w) {
+                let res = one_minus_z.powf(-a) * series_val;
+                if res.is_finite() {
+                    return Some(res);
+                }
+            }
+            if let Some(series_val) = hyp2f1_series(c - a, b, c, w) {
+                let res = one_minus_z.powf(-b) * series_val;
+                if res.is_finite() {
+                    return Some(res);
+                }
+            }
+        }
+        if z <= -1.0 {
+            return None;
         }
     }
-    if sum.is_finite() { Some(sum) } else { None }
+    hyp2f1_series(a, b, c, z)
+}
+
+fn hyp2f1_series(a: f64, b: f64, c: f64, z: f64) -> Option<f64> {
+    const MAX_ITERS: usize = 50_000;
+    let mut term = 1.0_f64;
+    let mut sum = 1.0_f64;
+    let mut max_abs = 1.0_f64;
+    let mut prev_small = false;
+    for k in 0..MAX_ITERS {
+        let kf = k as f64;
+        let denom = c + kf;
+        if denom == 0.0 {
+            return None;
+        }
+        let factor = ((a + kf) * (b + kf) / denom) * (z / (kf + 1.0));
+        term *= factor;
+        if !term.is_finite() {
+            return None;
+        }
+        if term == 0.0 {
+            return if max_abs > 1e12 * sum.abs().max(1.0) { None } else { Some(sum) };
+        }
+        max_abs = max_abs.max(term.abs());
+        sum += term;
+        if !sum.is_finite() {
+            return None;
+        }
+        max_abs = max_abs.max(sum.abs());
+        let is_small = term.abs() <= 1e-14 * sum.abs().max(f64::MIN_POSITIVE);
+        let past_pole = c + kf > 0.0 && (a + kf > 0.0 || b + kf > 0.0 || kf + 1.0 > a.abs().max(b.abs()));
+        if k >= 1 && is_small && prev_small && past_pole && factor.abs() < 0.9999 {
+            return if max_abs > 1e12 * sum.abs().max(f64::MIN_POSITIVE) { None } else { Some(sum) };
+        }
+        prev_small = is_small;
+    }
+    None
 }
 
 /// Tricomi confluent hypergeometric `U(a, b, z)` via non-integer connection formula (`b` perturbed slightly at integers).

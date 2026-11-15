@@ -377,22 +377,24 @@ fn parameter_display_label(fit: &NonlinearFitResult, name: &str, dataset_index: 
 fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
     let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
     let mut param_labels = Vec::with_capacity(param_rows.capacity());
+    let is_robust = nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
 
     for p in &fit.parameters {
         param_labels.push(parameter_display_label(fit, &p.name, p.dataset_index));
         let prefix = if p.notes.contains(&ParameterNote::Ambiguous) { Some("~".to_owned()) } else { None };
-        let ci_display = if nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy {
-            ResultCell::Text("Not applicable".to_owned())
+        let row = if is_robust {
+            let na = ResultCell::Text("Not applicable".to_owned());
+            vec![ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]
         } else {
-            ci_cell(p.ci_lower, p.ci_upper)
+            vec![
+                ResultCell::Number { value: p.estimate, prefix, units: None },
+                num_cell(p.se),
+                ci_cell(p.ci_lower, p.ci_upper),
+                num_cell(p.dependency),
+                num_cell(p.hougaard_g1),
+            ]
         };
-        param_rows.push(vec![
-            ResultCell::Number { value: p.estimate, prefix, units: None },
-            num_cell(p.se),
-            ci_display,
-            num_cell(p.dependency),
-            num_cell(p.hougaard_g1),
-        ]);
+        param_rows.push(row);
         result.scalars.push(ResultScalarEntry { key: p.name.clone(), data_set_index: p.dataset_index, value: p.estimate, units: None });
     }
 
@@ -401,6 +403,14 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         param_rows.push(vec![num_cell(*val), ResultCell::Empty, ResultCell::Text("Fixed".to_owned()), ResultCell::Empty, ResultCell::Empty]);
         result.scalars.push(ResultScalarEntry { key: name.clone(), data_set_index: None, value: *val, units: None });
     }
+
+    let sy_x_str = if is_robust {
+        "Not applicable (NotApplicableInRobustMode)".to_owned()
+    } else if fit.rsd.is_finite() {
+        format!("{:.6}", fit.rsd)
+    } else {
+        "N/A (DF = 0)".to_owned()
+    };
 
     result.tabs.push(ResultTab {
         id: "nonlinear_parameters".to_owned(),
@@ -416,14 +426,15 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         row_labels: param_labels,
         rows: param_rows,
         footnotes: vec![format!(
-            "Status: {:?}, Iterations: {}, DF: {}, R2 = {:.6}, Sy.x = {:.6}, RSS = {:.6}",
-            fit.status, fit.iterations, fit.df, fit.r_squared, fit.rsd, fit.rss
+            "Status: {:?}, Iterations: {}, DF: {}, R2 = {:.6}, Sy.x = {}, RSS = {:.6}",
+            fit.status, fit.iterations, fit.df, fit.r_squared, sy_x_str, fit.rss
         )],
     });
 }
 
 fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
     append_nonlinear_parameter_tab(result, fit, nl_spec);
+    let is_robust = nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
 
     // Goodness-of-fit summary tab.
     let mut gof_labels = vec![
@@ -435,13 +446,14 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
         "BIC".to_owned(),
         "Number of points analyzed".to_owned(),
     ];
+    let na_cell = || ResultCell::Text("Not applicable".to_owned());
     let mut gof_vals = vec![
         vec![num_cell(fit.df as f64)],
         vec![num_cell(fit.r_squared)],
         vec![num_cell(fit.rss)],
-        vec![num_cell(fit.rsd)],
-        vec![fit.aic_c.map_or(ResultCell::Empty, num_cell)],
-        vec![fit.bic.map_or(ResultCell::Empty, num_cell)],
+        vec![if is_robust { na_cell() } else { num_cell(fit.rsd) }],
+        vec![if is_robust { na_cell() } else { fit.aic_c.map_or(ResultCell::Empty, num_cell) }],
+        vec![if is_robust { na_cell() } else { fit.bic.map_or(ResultCell::Empty, num_cell) }],
         vec![num_cell(fit.n_obs as f64)],
     ];
     if let Some(r) = &fit.runs_test {
@@ -475,7 +487,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     if nl_spec.emit_residuals_tab {
         append_nonlinear_residuals_tab(result, fit);
     }
-    if nl_spec.emit_covariance_tab {
+    if nl_spec.emit_covariance_tab && !is_robust {
         append_nonlinear_covariance_tab(result, fit);
     }
     append_nonlinear_interpolated_tab(result, fit);
@@ -499,8 +511,20 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     result.scalars.push(ResultScalarEntry { key: "R2".to_owned(), data_set_index: None, value: fit.r_squared, units: None });
     result.scalars.push(ResultScalarEntry { key: "RSS".to_owned(), data_set_index: None, value: fit.rss, units: None });
 
+    append_nonlinear_checklist(result, fit, is_robust);
+}
+
+fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult, is_robust: bool) {
     // Diagnostics checklist items.
-    if fit.status == FitStatus::Ambiguous || fit.covariance.ambiguous {
+    if is_robust {
+        result.checklist.push(ChecklistItem {
+            assumption: "Parameter identifiability & asymptotic SEs".to_owned(),
+            status: ChecklistStatus::Info,
+            diagnostic_metric: Some("NotApplicableInRobustMode".to_owned()),
+            explanation: "Asymptotic standard errors, confidence intervals, covariance matrices, confidence bands, and F/AICc comparisons are omitted in Robust (Cauchy) regression.".to_owned(),
+            remediation: None,
+        });
+    } else if fit.status == FitStatus::Ambiguous || fit.covariance.ambiguous {
         result.checklist.push(ChecklistItem {
             assumption: "Parameter identifiability".to_owned(),
             status: ChecklistStatus::Violated,
