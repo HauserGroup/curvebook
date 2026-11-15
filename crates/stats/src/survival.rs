@@ -20,8 +20,12 @@
 //!   (2nd ed.). New York: Wiley.
 //! - Brookmeyer, R., & Crowley, J. (1982). A confidence interval for the median survival time.
 //!   *Biometrics*, 38(1), 29-41. `doi:10.2307/2530286`.
+//! - Mantel, N., & Haenszel, W. (1959). Statistical aspects of the analysis of data from
+//!   retrospective studies of disease. *Journal of the National Cancer Institute*, 22(4), 719-748.
 //! - Mantel, N. (1966). Evaluation of survival data and two new rank order statistics arising in
 //!   its consideration. *Cancer Chemotherapy Reports*, 50(3), 163-170.
+//! - Greenland, S., & Robins, J. M. (1985). Estimation of a common effect parameter from sparse
+//!   follow-up data. *Biometrics*, 41(1), 55-68. `doi:10.2307/2530643`.
 //! - Peto, R., & Peto, J. (1972). Asymptotically efficient rank invariant test procedures.
 //!   *Journal of the Royal Statistical Society, Series A*, 135(2), 185-207. `doi:10.2307/2344317`.
 //! - Gehan, E. A. (1965). A generalized Wilcoxon test for comparing arbitrarily singly-censored
@@ -33,6 +37,8 @@
 //! - Berry, G., Kitchin, R. M., & Mock, P. A. (1991). A comparison of two simple hazard ratio
 //!   estimators based on the logrank test. *Statistics in Medicine*, 10(5), 749-755.
 //!   `doi:10.1002/sim.4780100510`.
+//! - Machin, D., Cheung, Y. B., & Parmar, M. K. B. (2006). *Survival Analysis: A Practical
+//!   Approach* (2nd ed.). Chichester: Wiley.
 //! - Cox, D. R. (1972). Regression models and life-tables. *Journal of the Royal Statistical
 //!   Society, Series B*, 34(2), 187-220. `doi:10.1111/j.2517-6161.1972.tb00899.x`.
 //! - Breslow, N. (1974). Covariance analysis of censored survival data. *Biometrics*, 30(1).
@@ -99,13 +105,44 @@ pub struct KaplanMeierCohortResult {
     pub steps: Vec<KaplanMeierStep>,
 }
 
-/// Two-group hazard ratio summary from Mantel–Haenszel and log-rank estimators.
+/// Two-group hazard ratio summary from observed/expected (log-rank/Pike), Mantel–Haenszel
+/// common hazard ratio (Berry, Kitchin & Mock 1991; Greenland & Robins 1985), and Peto's
+/// one-step estimator (Berry, Kitchin & Mock 1991).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HazardRatioResult {
+    /// Ratio of observed-to-expected rates `(O_A / E_A) / (O_B / E_B)` (`f64::NAN` if `E_A <= 0`,
+    /// `E_B <= 0`, or `O_B <= 0`).
     pub log_rank_hr: f64,
-    pub log_rank_ci: (f64, f64),
+    /// Confidence interval for `log_rank_hr` via `SE(ln HR_OE) = sqrt(1 / E_A + 1 / E_B)`; `None`
+    /// when `log_rank_hr` is non-estimable or `O_A <= 0`.
+    pub log_rank_ci: Option<(f64, f64)>,
+    /// Genuine Mantel–Haenszel common hazard/rate ratio `sum(d_Aj * n_Bj / n_j) /
+    /// sum(d_Bj * n_Aj / n_j)` (`f64::NAN` if the denominator sum `S <= 0`).
     pub mantel_haenszel_hr: f64,
-    pub mantel_haenszel_ci: (f64, f64),
+    /// Confidence interval for `mantel_haenszel_hr` via Greenland & Robins (1985) variance
+    /// `sum(d_j * n_Aj * n_Bj / n_j^2) / (R * S)`; `None` when non-estimable (`R <= 0` or `S <= 0`).
+    pub mantel_haenszel_ci: Option<(f64, f64)>,
+    /// Peto one-step log-rank hazard ratio `exp((O_A - E_A) / V)` (`f64::NAN` when `V <= 0`).
+    pub peto_one_step_hr: f64,
+    /// Confidence interval for `peto_one_step_hr` with `SE(ln HR) = 1 / sqrt(V)`; `None` when `V <= 0`.
+    pub peto_one_step_ci: Option<(f64, f64)>,
+}
+
+impl HazardRatioResult {
+    /// Returns `Some(hr)` when `log_rank_hr` is finite and estimable, else `None`.
+    pub fn log_rank_hr_opt(&self) -> Option<f64> {
+        self.log_rank_hr.is_finite().then_some(self.log_rank_hr)
+    }
+
+    /// Returns `Some(hr)` when `mantel_haenszel_hr` is finite and estimable, else `None`.
+    pub fn mantel_haenszel_hr_opt(&self) -> Option<f64> {
+        self.mantel_haenszel_hr.is_finite().then_some(self.mantel_haenszel_hr)
+    }
+
+    /// Returns `Some(hr)` when `peto_one_step_hr` is finite and estimable, else `None`.
+    pub fn peto_one_step_hr_opt(&self) -> Option<f64> {
+        self.peto_one_step_hr.is_finite().then_some(self.peto_one_step_hr)
+    }
 }
 
 /// Omnibus multi-cohort survival curve comparison test result.
@@ -254,7 +291,7 @@ pub fn kaplan_meier_curve(
     }
 
     let median_survival = km_quantile_time(&steps, 0.5);
-    let median_ci = brookmeyer_crowley_median_ci(&steps, z_crit);
+    let median_ci = brookmeyer_crowley_median_ci(&steps, z_crit, asymmetrical_log_log_ci);
 
     Ok(KaplanMeierCohortResult {
         label: label.to_owned(),
@@ -307,18 +344,37 @@ fn km_quantile_time(steps: &[KaplanMeierStep], target_s: f64) -> Option<f64> {
 }
 
 /// Brookmeyer & Crowley (1982) confidence interval for median survival, obtained by inverting the
-/// pointwise Greenwood interval at `S(t) = 0.5`: the lower limit is the first time the lower
-/// pointwise bound reaches `<= 0.5`, the upper limit is the first time the upper pointwise bound
-/// falls below 0.5 (open-ended if it never does).
+/// pointwise Greenwood test around `S(t) = 0.5` at critical value `z_crit`: the lower limit is the
+/// first finite-variance step whose lower bound reaches `<= 0.5`, and the upper limit is the first
+/// finite-variance step whose upper bound falls below `0.5` (open-ended `None` if it never does).
 ///
-/// The pointwise bounds are whichever transform `kaplan_meier_curve` was asked for. With the linear
-/// ("plain") band this is the original Brookmeyer & Crowley (1982) interval; with the log-log band
-/// it is the transformed variant of the same test inversion described in Klein & Moeschberger
-/// (2003). Full references are listed in the module header.
-fn brookmeyer_crowley_median_ci(steps: &[KaplanMeierStep], z_crit: f64) -> (Option<f64>, Option<f64>) {
-    let lo_time = steps.iter().find(|s| s.ci_lower <= 0.5 + 1e-12).map(|s| s.time);
-    let hi_time = steps.iter().find(|s| s.ci_upper < 0.5 - 1e-12).map(|s| s.time);
-    let _ = z_crit;
+/// Steps where `S(t) <= 0.0` have indeterminate Greenwood variance (`0 * inf` due to `n_j = d_j`)
+/// and are excluded from finite interval inversion, matching standard Greenwood quantile behavior.
+/// With `asymmetrical_log_log_ci == false` this is the linear ("plain") Brookmeyer & Crowley (1982)
+/// test inversion; with `asymmetrical_log_log_ci == true` it is the log-log transformed inversion of
+/// Klein & Moeschberger (2003). Full references are listed in the module header.
+fn brookmeyer_crowley_median_ci(steps: &[KaplanMeierStep], z_crit: f64, asymmetrical_log_log_ci: bool) -> (Option<f64>, Option<f64>) {
+    if !z_crit.is_finite() || z_crit <= 0.0 {
+        return (None, None);
+    }
+    let mut lo_time = None;
+    let mut hi_time = None;
+    for s in steps {
+        if s.survival <= 0.0 || s.survival >= 1.0 || !s.greenwood_se.is_finite() {
+            continue;
+        }
+        let greenwood_sum = (s.greenwood_se / s.survival).powi(2);
+        let (ci_lo, ci_hi) = km_pointwise_ci(s.survival, s.greenwood_se, greenwood_sum, z_crit, asymmetrical_log_log_ci);
+        if lo_time.is_none() && ci_lo <= 0.5 + 1e-12 {
+            lo_time = Some(s.time);
+        }
+        if hi_time.is_none() && ci_hi < 0.5 - 1e-12 {
+            hi_time = Some(s.time);
+        }
+        if lo_time.is_some() && hi_time.is_some() {
+            break;
+        }
+    }
     (lo_time, hi_time)
 }
 
@@ -398,17 +454,22 @@ pub fn log_rank_trend_test(cohorts: &[&[SurvivalObservation]]) -> Result<Surviva
     Ok(SurvivalComparisonResult { test_name: String::from("Log-rank test for trend"), chi_square: chi2, df: 1.0, p_value })
 }
 
-/// Mantel–Haenszel and Log-rank Hazard Ratio estimates with `confidence` intervals for two cohorts.
+/// Observed/expected, genuine Mantel–Haenszel, and Peto one-step Hazard Ratio estimates with
+/// `confidence` intervals for two cohorts (cohort A relative to cohort B).
 ///
-/// Both estimates (cohort A relative to cohort B) come from the log-rank quantities `O_g`, `E_g`,
-/// and the hypergeometric variance `V`, and correspond to the two log-rank estimators compared by
-/// Berry, Kitchin & Mock (1991):
-/// - `log_rank_hr`: the ratio of observed-to-expected rates `(O_A / E_A) / (O_B / E_B)` (called the
-///   Pike estimator by Berry, Kitchin & Mock 1991). It falls back to `exp((O_A - E_A) / V)` when
-///   `E_A`, `E_B`, or `O_B` is zero. Its CI uses `exp(ln HR +/- z / sqrt(V))`.
-/// - `mantel_haenszel_hr`: `exp((O_A - E_A) / V)` with CI `exp((O_A - E_A) / V +/- z / sqrt(V))`.
-///   Berry, Kitchin & Mock (1991) call this the Peto (one-step) estimator. It is not the
-///   Mantel–Haenszel common-ratio estimator `sum(d_Aj n_Bj / n_j) / sum(d_Bj n_Aj / n_j)`.
+/// Over distinct event times `t_j` with risk-set sizes `n_Aj, n_Bj` (`n_j = n_Aj + n_Bj`) and event
+/// counts `d_Aj, d_Bj` (`d_j = d_Aj + d_Bj`), log-rank statistics are `O_g = sum d_gj`,
+/// `E_g = sum d_j * n_gj / n_j`, and hypergeometric variance `V = sum d_j (n_j - d_j) / (n_j (n_j - 1)) * n_Aj n_Bj / n_j`:
+/// - `log_rank_hr`: Pike / observed-to-expected rate ratio `(O_A / E_A) / (O_B / E_B)` with Wald
+///   CI `exp(ln HR +/- z * sqrt(1 / E_A + 1 / E_B))` (Machin, Cheung & Parmar 2006; Berry, Kitchin
+///   & Mock 1991). Non-estimable (`f64::NAN`, `log_rank_ci: None`) when `E_A <= 0`, `E_B <= 0`, or
+///   `O_B <= 0`; `log_rank_ci` is also `None` when `O_A <= 0`.
+/// - `mantel_haenszel_hr`: genuine Mantel–Haenszel common hazard/rate ratio `R / S` where
+///   `R = sum d_Aj n_Bj / n_j` and `S = sum d_Bj n_Aj / n_j` (Mantel & Haenszel 1959; Berry,
+///   Kitchin & Mock 1991, eq. 3), with Greenland & Robins (1985, eq. 5) sparse-data variance
+///   `Var(ln HR_MH) = (sum d_j n_Aj n_Bj / n_j^2) / (R * S)` and CI `None` when `R <= 0` or `S <= 0`.
+/// - `peto_one_step_hr`: Peto's one-step estimator `exp((O_A - E_A) / V)` with `SE = 1 / sqrt(V)`
+///   (Berry, Kitchin & Mock 1991; Machin, Cheung & Parmar 2006); non-estimable when `V <= 0`.
 ///
 /// Full references are listed in the module header.
 pub fn two_cohort_hazard_ratio(
@@ -417,24 +478,101 @@ pub fn two_cohort_hazard_ratio(
     confidence: ConfidenceLevel,
 ) -> Result<HazardRatioResult, StatsError> {
     let (_, cov, obs, exp) = weighted_log_rank_stats(&[cohort_a, cohort_b], SurvivalWeight::LogRank)?;
+    let (r_mh, s_mh, gr_num) = mh_strata_sums(cohort_a, cohort_b);
     let o1 = obs[0];
     let o2 = obs[1];
     let e1 = exp[0];
     let e2 = exp[1];
-    let v = cov[0].max(1e-18);
+    let v = cov[0];
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
 
-    // Log-rank HR = exp((O1 - E1) / V) (or ratio of relative event rates (O1/E1)/(O2/E2)).
-    let lr_hr = if e1 > 0.0 && e2 > 0.0 && o2 > 0.0 { (o1 / e1) / (o2 / e2) } else { ((o1 - e1) / v).exp() };
-    let se_log = (1.0 / v).sqrt();
-    let lr_lo = (lr_hr.max(1e-15).ln() - z_crit * se_log).exp();
-    let lr_hi = (lr_hr.max(1e-15).ln() + z_crit * se_log).exp();
+    let (lr_hr, lr_ci) = if e1 > 0.0 && e2 > 0.0 && o2 > 0.0 {
+        let hr = (o1 / e1) / (o2 / e2);
+        let se_oe = (1.0 / e1 + 1.0 / e2).sqrt();
+        (hr, log_scale_hr_ci(hr, se_oe, z_crit))
+    } else {
+        (f64::NAN, None)
+    };
 
-    let mh_hr = ((o1 - e1) / v).exp();
-    let mh_lo = ((o1 - e1) / v - z_crit * se_log).exp();
-    let mh_hi = ((o1 - e1) / v + z_crit * se_log).exp();
+    let (mh_hr, mh_ci) = if s_mh > 0.0 {
+        let hr = r_mh / s_mh;
+        let se_mh = if r_mh > 0.0 && gr_num > 0.0 { (gr_num / (r_mh * s_mh)).sqrt() } else { f64::NAN };
+        (hr, log_scale_hr_ci(hr, se_mh, z_crit))
+    } else {
+        (f64::NAN, None)
+    };
 
-    Ok(HazardRatioResult { log_rank_hr: lr_hr, log_rank_ci: (lr_lo, lr_hi), mantel_haenszel_hr: mh_hr, mantel_haenszel_ci: (mh_lo, mh_hi) })
+    let (peto_hr, peto_ci) = if v > 0.0 {
+        let log_peto = (o1 - e1) / v;
+        let se_peto = (1.0 / v).sqrt();
+        let hr = log_peto.exp();
+        let ci = ((log_peto - z_crit * se_peto).exp(), (log_peto + z_crit * se_peto).exp());
+        (hr, (ci.0.is_finite() && ci.1.is_finite()).then_some(ci))
+    } else {
+        (f64::NAN, None)
+    };
+
+    Ok(HazardRatioResult {
+        log_rank_hr: lr_hr,
+        log_rank_ci: lr_ci,
+        mantel_haenszel_hr: mh_hr,
+        mantel_haenszel_ci: mh_ci,
+        peto_one_step_hr: peto_hr,
+        peto_one_step_ci: peto_ci,
+    })
+}
+
+fn log_scale_hr_ci(hr: f64, se_log: f64, z_crit: f64) -> Option<(f64, f64)> {
+    if !hr.is_finite() || hr <= 0.0 || !se_log.is_finite() || se_log <= 0.0 {
+        return None;
+    }
+    let ln_hr = hr.ln();
+    let lo = (ln_hr - z_crit * se_log).exp();
+    let hi = (ln_hr + z_crit * se_log).exp();
+    (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
+fn mh_strata_sums(cohort_a: &[SurvivalObservation], cohort_b: &[SurvivalObservation]) -> (f64, f64, f64) {
+    let mut recs: Vec<(f64, usize, SurvivalStatus)> = Vec::with_capacity(cohort_a.len() + cohort_b.len());
+    for o in cohort_a {
+        recs.push((o.time, 0, o.status));
+    }
+    for o in cohort_b {
+        recs.push((o.time, 1, o.status));
+    }
+    recs.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut at_risk = [cohort_a.len(), cohort_b.len()];
+    let mut r_sum = 0.0_f64;
+    let mut s_sum = 0.0_f64;
+    let mut gr_num = 0.0_f64;
+    let mut idx = 0_usize;
+    while idx < recs.len() {
+        let t = recs[idx].0;
+        let mut d = [0_usize; 2];
+        let mut c = [0_usize; 2];
+        while idx < recs.len() && recs[idx].0 == t {
+            let (_, g, st) = recs[idx];
+            match st {
+                SurvivalStatus::Event => d[g] += 1,
+                SurvivalStatus::Censored => c[g] += 1,
+            }
+            idx += 1;
+        }
+        let d_tot = d[0] + d[1];
+        let n_tot = at_risk[0] + at_risk[1];
+        if d_tot > 0 && n_tot > 0 {
+            let nf = n_tot as f64;
+            let na = at_risk[0] as f64;
+            let nb = at_risk[1] as f64;
+            r_sum += (d[0] as f64) * nb / nf;
+            s_sum += (d[1] as f64) * na / nf;
+            gr_num += (d_tot as f64) * na * nb / (nf * nf);
+        }
+        at_risk[0] = at_risk[0].saturating_sub(d[0] + c[0]);
+        at_risk[1] = at_risk[1].saturating_sub(d[1] + c[1]);
+    }
+    (r_sum, s_sum, gr_num)
 }
 
 type WeightedLogRankStats = (Vec<f64>, Vec<f64>, Vec<f64>, Vec<f64>);
@@ -478,14 +616,14 @@ fn weighted_log_rank_stats(cohorts: &[&[SurvivalObservation]], weight_kind: Surv
         let d_total: usize = d_g.iter().sum();
         let n_total: usize = at_risk.iter().sum();
 
-        if d_total > 0 && n_total > 1 {
+        if d_total > 0 && n_total > 0 {
             let nf = n_total as f64;
             let df = d_total as f64;
             let w = match weight_kind {
                 SurvivalWeight::LogRank => 1.0,
                 SurvivalWeight::GehanWilcoxon => nf,
             };
-            let var_mult = w * w * df * (nf - df) / (nf * (nf - 1.0));
+            let var_mult = if n_total > 1 { w * w * df * (nf - df) / (nf * (nf - 1.0)) } else { 0.0 };
             for g in 0..k {
                 let ng = at_risk[g] as f64;
                 let dg = d_g[g] as f64;
@@ -493,10 +631,12 @@ fn weighted_log_rank_stats(cohorts: &[&[SurvivalObservation]], weight_kind: Surv
                 obs_tot[g] += dg;
                 exp_tot[g] += eg;
                 u[g] += w * (dg - eg);
-                for h in 0..k {
-                    let nh = at_risk[h] as f64;
-                    let delta = if g == h { 1.0 } else { 0.0 };
-                    cov[g * k + h] += var_mult * ng * (delta - nh / nf);
+                if var_mult > 0.0 {
+                    for h in 0..k {
+                        let nh = at_risk[h] as f64;
+                        let delta = if g == h { 1.0 } else { 0.0 };
+                        cov[g * k + h] += var_mult * ng * (delta - nh / nf);
+                    }
                 }
             }
         }
@@ -1303,8 +1443,15 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
 
                 if refs.len() == 2 {
                     let hr = two_cohort_hazard_ratio(refs[0], refs[1], confidence)?;
-                    push_scalar(&mut out, "Hazard ratio (log-rank)", None, hr.log_rank_hr);
-                    push_scalar(&mut out, "Hazard ratio (Mantel-Haenszel)", None, hr.mantel_haenszel_hr);
+                    if let Some(v) = hr.log_rank_hr_opt() {
+                        push_scalar(&mut out, "Hazard ratio (log-rank)", None, v);
+                    }
+                    if let Some(v) = hr.mantel_haenszel_hr_opt() {
+                        push_scalar(&mut out, "Hazard ratio (Mantel-Haenszel)", None, v);
+                    }
+                    if let Some(v) = hr.peto_one_step_hr_opt() {
+                        push_scalar(&mut out, "Hazard ratio (Peto one-step)", None, v);
+                    }
                 } else if refs.len() >= 3 {
                     append_survival_pairwise(&mut out, &indices, &km_results, &cohort_obs, multiplicity, p_fmt, confidence)?;
                 }
@@ -1968,8 +2115,8 @@ fn append_survival_pairwise(
             num_cell(chi2),
             p_cell(rp, p_fmt),
             p_cell(ap, p_fmt),
-            num_cell(hr.log_rank_hr),
-            opt_ci_cell(Some(hr.log_rank_ci)),
+            opt_num_cell(hr.log_rank_hr_opt()),
+            opt_ci_cell(hr.log_rank_ci),
             ResultCell::Boolean(sig),
         ]);
         out.pairwise_comparisons.push(PairwiseComparisonRecord {
@@ -1977,7 +2124,7 @@ fn append_survival_pairwise(
             group_b: indices[j],
             label_a: lbl_a,
             label_b: lbl_b,
-            estimate_diff: Some(hr.log_rank_hr),
+            estimate_diff: hr.log_rank_hr_opt(),
             raw_p_or_q: ap,
             is_fdr_q: is_fdr,
             significant: sig,

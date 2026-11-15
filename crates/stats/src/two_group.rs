@@ -26,6 +26,9 @@
 //! - Steiger, J. H., & Fouladi, R. T. (1997). Noncentrality interval estimation and the evaluation of
 //!   statistical models. In L. L. Harlow, S. A. Mulaik, & J. H. Steiger (Eds.), *What If There Were No
 //!   Significance Tests?*, pp. 221–257. Lawrence Erlbaum.
+//! - Steiger, J. H. (2004). Beyond the F test: Effect size confidence intervals and tests of close
+//!   fit in the analysis of variance and contrast analysis. *Psychological Methods* 9(2):164–182.
+//!   doi:10.1037/1082-989X.9.2.164
 //! - Cumming, G., & Finch, S. (2001). A primer on the understanding, use, and calculation of confidence
 //!   intervals that are based on central and noncentral distributions. *Educational and Psychological
 //!   Measurement* 61(4):532–574.
@@ -41,6 +44,8 @@
 //!   *Journal of the American Statistical Association* 54(287):655–667. doi:10.1080/01621459.1959.10501526
 //! - Hodges, J. L., & Lehmann, E. L. (1963). Estimates of location based on rank tests.
 //!   *Annals of Mathematical Statistics* 34(2):598–611. doi:10.1214/aoms/1177704172
+//! - Monahan, J. F. (1984). Algorithm 616: Fast computation of the Hodges–Lehmann location estimator.
+//!   *ACM Transactions on Mathematical Software* 10(3):265–270. doi:10.1145/1271.319414
 //! - Hollander, M., Wolfe, D. A., & Chicken, E. (2014). *Nonparametric Statistical Methods* (3rd ed.).
 //!   Wiley. Ch. 3 (paired/one-sample location: signed-rank test, Walsh-average estimator), ch. 4
 //!   (two-sample location: rank-sum test, Hodges–Lehmann shift estimator, Moses interval).
@@ -226,7 +231,8 @@ pub struct UnpairedTResult {
     pub p_value: f64,
     pub two_tailed: bool,
     pub f_test: VarianceFTestResult,
-    pub levene_median: LeveneTestResult,
+    /// Brown–Forsythe (median-based Levene) test when raw replicates are available; `None` for summary inputs.
+    pub levene_median: Option<LeveneTestResult>,
     pub effect_sizes: TwoGroupEffectSizes,
     /// Present for `LognormalUnpairedT`: geometric mean ratio `exp(mean_ln_a - mean_ln_b)` and CI.
     pub geometric_mean_ratio: Option<f64>,
@@ -267,13 +273,13 @@ fn f_test_from_summary(sd_a: f64, n_a: f64, sd_b: f64, n_b: f64) -> Result<Varia
 /// - Hedges' `g = J(df) * d` with `df = n_a + n_b - 2` and the exact gamma-function bias correction
 ///   `J` of Hedges (1981) (large-`df` approximation `1 - 3 / (4 df - 1)`, also Hedges 1981).
 /// - Confidence interval for `d` by inverting the noncentral *t* distribution of
-///   `d * sqrt(n_a n_b / (n_a + n_b))` (Steiger & Fouladi 1997; Cumming & Finch 2001), using the
-///   caller-supplied `df` (the pooled `n_a + n_b - 2` for Student *t*; note that the Welch callers pass
-///   the Welch–Satterthwaite `df`, which is not the `df` of that pivot). The `g` interval multiplies
-///   the `d` limits by `J`, a reporting convention rather than part of the cited inversion.
+///   `d * sqrt(n_a n_b / (n_a + n_b))` on pooled `df = n_a + n_b - 2` (Steiger & Fouladi 1997;
+///   Cumming & Finch 2001; Steiger 2004). Because `d` standardizes by `s_pooled`, the pivot
+///   follows noncentral `t(df = n_a + n_b - 2)` even when paired with Welch's `t` test. The `g`
+///   interval scales the `d` limits by `J(n_a + n_b - 2)`.
 /// - Glass's `Delta = diff / s_a` (falling back to `s_b` when `s_a = 0`) (Glass 1976), with a
 ///   noncentral-*t* interval on `n - 1` df of the standardizing group (Hedges 1981).
-/// - `r^2 = t^2 / (t^2 + df)` (Rosenthal 1991).
+/// - `r^2 = t^2 / (t^2 + df)` using the test's own `t` statistic and `df` (Rosenthal 1991).
 fn compute_unpaired_effect_sizes_f(
     diff: f64,
     sds: (f64, f64, f64),
@@ -282,7 +288,7 @@ fn compute_unpaired_effect_sizes_f(
 ) -> Result<TwoGroupEffectSizes, StatsError> {
     let (sd_a, sd_b, sd_pooled) = sds;
     let (na, nb) = n_pair;
-    let (t_stat, df_ci, confidence) = t_df_conf;
+    let (t_stat, df_test, confidence) = t_df_conf;
     let n_eff = ((na * nb) / (na + nb)).sqrt();
     let d = if sd_pooled > 0.0 { diff / sd_pooled } else { 0.0 };
     let df_pool = (na + nb - 2.0).max(1.0);
@@ -291,7 +297,7 @@ fn compute_unpaired_effect_sizes_f(
 
     let (d_ci, g_ci) = if sd_pooled > 0.0 && n_eff > 0.0 {
         let t_for_d = d * n_eff;
-        if let Ok((lo, hi)) = noncentral_t_ci(t_for_d, df_ci, confidence.percent()) {
+        if let Ok((lo, hi)) = noncentral_t_ci(t_for_d, df_pool, confidence.percent()) {
             let dl = lo / n_eff;
             let dh = hi / n_eff;
             (Some((dl, dh)), Some((j * dl, j * dh)))
@@ -316,7 +322,7 @@ fn compute_unpaired_effect_sizes_f(
         (None, None)
     };
 
-    let r_sq = if df_ci > 0.0 { (t_stat * t_stat) / (t_stat * t_stat + df_ci) } else { 0.0 };
+    let r_sq = if df_test > 0.0 { (t_stat * t_stat) / (t_stat * t_stat + df_test) } else { 0.0 };
     Ok(TwoGroupEffectSizes { cohens_d: d, cohens_d_ci: d_ci, hedges_g: g, hedges_g_ci: g_ci, glass_delta, glass_delta_ci, r_squared: r_sq })
 }
 
@@ -338,7 +344,7 @@ fn build_unpaired_t_from_moments(
     b: (f64, f64, f64),
     two_tailed: bool,
     confidence: ConfidenceLevel,
-    levene_median: LeveneTestResult,
+    levene_median: Option<LeveneTestResult>,
 ) -> Result<UnpairedTResult, StatsError> {
     let (mean_a, sd_a, na) = a;
     let (mean_b, sd_b, nb) = b;
@@ -420,32 +426,30 @@ fn build_unpaired_t_from_moments(
 
 /// Unpaired Student *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
 ///
-/// Pooled-variance *t* (Student 1908; Zar 2010, ch. 8). Levene/Brown–Forsythe cannot be computed from
-/// summaries, so `levene_median` is a placeholder (`p = 1`), not a test result.
+/// Pooled-variance *t* (Student 1908; Zar 2010, ch. 8) with the exact two-sample variance-ratio
+/// *F* test from summary SDs and sample sizes. Levene/Brown–Forsythe requires raw replicates, so
+/// `levene_median` is `None`.
 pub fn unpaired_t_test_from_summary(
     group_a: (f64, f64, f64),
     group_b: (f64, f64, f64),
     two_tailed: bool,
     confidence: ConfidenceLevel,
 ) -> Result<UnpairedTResult, StatsError> {
-    let placeholder_levene =
-        LeveneTestResult { use_median: true, f_statistic: 0.0, df_between: 1.0, df_within: (group_a.2 + group_b.2 - 2.0).max(1.0), p_value: 1.0 };
-    build_unpaired_t_from_moments(false, group_a, group_b, two_tailed, confidence, placeholder_levene)
+    build_unpaired_t_from_moments(false, group_a, group_b, two_tailed, confidence, None)
 }
 
 /// Unpaired Welch *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
 ///
-/// Welch (1947) statistic with Welch–Satterthwaite `df` (Satterthwaite 1946). `levene_median` is a
-/// placeholder (`p = 1`), not a test result.
+/// Welch (1947) statistic with Welch–Satterthwaite `df` (Satterthwaite 1946) and the exact
+/// two-sample variance-ratio *F* test from summary SDs and sample sizes. Levene/Brown–Forsythe
+/// requires raw replicates, so `levene_median` is `None`.
 pub fn welch_t_test_from_summary(
     group_a: (f64, f64, f64),
     group_b: (f64, f64, f64),
     two_tailed: bool,
     confidence: ConfidenceLevel,
 ) -> Result<UnpairedTResult, StatsError> {
-    let placeholder_levene =
-        LeveneTestResult { use_median: true, f_statistic: 0.0, df_between: 1.0, df_within: (group_a.2 + group_b.2 - 2.0).max(1.0), p_value: 1.0 };
-    build_unpaired_t_from_moments(true, group_a, group_b, two_tailed, confidence, placeholder_levene)
+    build_unpaired_t_from_moments(true, group_a, group_b, two_tailed, confidence, None)
 }
 
 /// One-sample Student *t*-test reconstructed directly from pre-summarized `(mean, sd, n)` moments.
@@ -537,7 +541,7 @@ pub fn unpaired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confi
     let t_crit = t_crit_two_sided(confidence, df)?;
     let ci = (diff - t_crit * se, diff + t_crit * se);
     let f_test = f_test_variances(a, b)?;
-    let levene_median = levene_variance_test(&[a, b], true)?;
+    let levene_median = Some(levene_variance_test(&[a, b], true)?);
     let effect_sizes = compute_unpaired_effect_sizes(diff, (sd_a, sd_b, sp), (a.len(), b.len()), (t_stat, df, confidence))?;
 
     Ok(UnpairedTResult {
@@ -567,8 +571,9 @@ pub fn unpaired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confi
 ///
 /// `t = diff / sqrt(s_a^2/n_a + s_b^2/n_b)` (Welch 1947) with
 /// `df = (s_a^2/n_a + s_b^2/n_b)^2 / [(s_a^2/n_a)^2/(n_a-1) + (s_b^2/n_b)^2/(n_b-1)]` (Satterthwaite 1946).
-/// Effect sizes still standardize by the pooled SD (Cohen 1988; Hedges 1981), but their
-/// noncentral-*t* intervals and `r^2` are evaluated at the Welch `df`.
+/// Standardized effect sizes `d` and `g` (Cohen 1988; Hedges 1981) standardize by the pooled SD, so
+/// their noncentral-*t* confidence intervals use pooled `df = n_a + n_b - 2` (Steiger 2004), while
+/// `r^2 = t^2 / (t^2 + df)` uses the Welch `t` and Welch–Satterthwaite `df`.
 pub fn welch_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<UnpairedTResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -601,7 +606,7 @@ pub fn welch_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confiden
     let t_crit = t_crit_two_sided(confidence, df)?;
     let ci = (diff - t_crit * se, diff + t_crit * se);
     let f_test = f_test_variances(a, b)?;
-    let levene_median = levene_variance_test(&[a, b], true)?;
+    let levene_median = Some(levene_variance_test(&[a, b], true)?);
     let sd_pooled = ((ma.css + mb.css) / (na + nb - 2.0)).sqrt();
     let effect_sizes = compute_unpaired_effect_sizes(diff, (sd_a, sd_b, sd_pooled), (a.len(), b.len()), (t_stat, df, confidence))?;
 
@@ -674,7 +679,8 @@ pub struct PairedTResult {
 /// One-sample *t* on the differences with `n - 1` df (Student 1908; Zar 2010, ch. 9). Effect size
 /// `d_z = mean(d) / sd(d)` (Cohen 1988), `g_z = J(n - 1) * d_z` (Hedges 1981), with a noncentral-*t*
 /// interval (Steiger & Fouladi 1997) whose limits are scaled by `J`. The pairing check reports
-/// Pearson `r` with a **one-sided** *p*-value for `r > 0` from `t = r sqrt((n-2)/(1-r^2))` on `n - 2` df.
+/// Pearson `r` with a **two-sided** *p*-value for `H0: rho = 0` from `t = r sqrt((n-2)/(1-r^2))` on
+/// `n - 2` df (returning `0` continuously at both `r = -1` and `r = +1` when `n >= 3`).
 pub fn paired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: ConfidenceLevel) -> Result<PairedTResult, StatsError> {
     validate_finite_slice(a)?;
     validate_finite_slice(b)?;
@@ -700,13 +706,15 @@ pub fn paired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confide
 
     let (pairing_r, pairing_p) = if n >= 3 {
         if let Ok(r) = pearson_r(a, b) {
-            let p_r = if (1.0 - r * r) > 0.0 {
-                let tr = r * (((n - 2) as f64) / (1.0 - r * r)).sqrt();
-                student_t_sf(tr, (n - 2) as f64).ok()
+            let r_clamped = r.clamp(-1.0, 1.0);
+            let one_minus_r2 = 1.0 - r_clamped * r_clamped;
+            let p_r = if one_minus_r2 > 0.0 {
+                let tr = r_clamped * (((n - 2) as f64) / one_minus_r2).sqrt();
+                student_t_two_sided_p(tr, (n - 2) as f64).ok()
             } else {
                 Some(0.0)
             };
-            (Some(r), p_r)
+            (Some(r_clamped), p_r)
         } else {
             (None, None)
         }
@@ -789,7 +797,8 @@ pub struct MannWhitneyResult {
 /// Exact DP distribution of Mann–Whitney `U` for `n1 + n2 <= 40` without ties.
 ///
 /// Counts arrangements by the Mann & Whitney (1947) recurrence on `U`; the two-sided *p*-value doubles
-/// the smaller tail, the one-sided *p*-value is `P(U >= u_obs)` (alternative: `a` stochastically larger).
+/// the smaller tail, and the one-sided *p*-value returns the smaller (observed-direction) tail
+/// `min(P(U <= u_obs), P(U >= u_obs))`, matching the sign, Wilcoxon, and *t*-test convention.
 fn mann_whitney_exact_p(n1: usize, n2: usize, u_obs: usize, two_tailed: bool) -> f64 {
     let max_u = n1 * n2;
     // dp[i][u] = number of subsets of size i from i+j elements with U = u, iteratively over N = n1+n2.
@@ -930,10 +939,10 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
 /// Hodges & Lehmann (1963) two-sample shift estimator (median of all `a_i - b_j`) with the Moses
 /// distribution-free interval `[D_(k), D_(mn + 1 - k)]` (Hollander, Wolfe & Chicken 2014, ch. 4).
 ///
-/// Deviations from the textbook procedure: `k` always comes from the large-sample approximation
-/// `floor(mn/2 - z sqrt(mn (m + n + 1) / 12))` (no exact small-sample critical values, no tie
-/// correction); and when `m * n > 40_000` the returned point estimate is the **difference of sample
-/// medians**, not the Hodges–Lehmann estimator, with no interval.
+/// Uses exact sorted differences when `m * n <= 40_000` and exact `O((m + n) log(m + n))`
+/// monotone-matrix selection (`select_kth_pairwise_sum`, cf. Monahan 1984) for both the shift
+/// median and the large-sample normal-approximated Moses CI (`floor(mn/2 - z sqrt(mn(m+n+1)/12))`)
+/// when `m * n > 40_000`.
 fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) -> Result<(f64, Option<(f64, f64)>), StatsError> {
     let na = a.len();
     let nb = b.len();
@@ -953,6 +962,9 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
             let mid_hi = select_kth_pairwise_sum(&sa, &neg_b, m_u64 / 2)?;
             0.5 * mid_lo + 0.5 * mid_hi
         };
+        if !hl.is_finite() {
+            return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
+        }
         if na + nb < 4 {
             return Ok((hl, None));
         }
@@ -1020,10 +1032,11 @@ pub struct WilcoxonMatchedResult {
 /// correction and 0.5 continuity correction (Hollander, Wolfe & Chicken 2014, ch. 3). Pratt mode
 /// (Pratt 1959) ranks zeros with the nonzero `|d|`, discards their ranks, and always uses the normal
 /// approximation with mean `[n(n+1) - z(z+1)] / 4` and variance
-/// `[n(n+1)(2n+1) - z(z+1)(2z+1) - sum(t^3 - t)/2] / 24`; here the tie sum also includes the
-/// group of tied zeros. The pseudomedian is the Hodges & Lehmann (1963) Walsh-average estimator
-/// computed on **all** differences (zeros included, in both modes); the matched-pairs rank-biserial
-/// `r = (W+ - W-) / (W+ + W-)` follows Kerby (2014).
+/// `[n(n+1)(2n+1) - z(z+1)(2z+1) - sum_{nonzero}(t^3 - t)/2] / 24`, where the tie correction
+/// sum includes only **nonzero** tied groups so zeros are not double-counted. The pseudomedian is
+/// the Hodges & Lehmann (1963) Walsh-average estimator computed on **all** differences (zeros
+/// included, in both modes); the matched-pairs rank-biserial `r = (W+ - W-) / (W+ + W-)` follows
+/// Kerby (2014).
 pub fn wilcoxon_matched_pairs(
     a: &[f64],
     b: &[f64],
@@ -2481,12 +2494,12 @@ fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedT
             Some(format!("F = {:.3}, p = {:.4}", out.f_test.f_statistic, out.f_test.p_value)),
             "F-test indicates unequal group variances (p <= alpha), violating the equal-variance assumption of pooled-variance Student t tests.",
         ));
-    } else if has_raw_replicates {
+    } else if has_raw_replicates && let Some(ref levene) = out.levene_median {
         checklist.push(checklist_item(
             "Variance homogeneity check",
-            if out.method_label == "Welch's t test" && out.levene_median.p_value <= alpha { ChecklistStatus::Info } else { ChecklistStatus::Pass },
-            Some(format!("Levene(median) F = {:.3}, p = {:.4}", out.levene_median.f_statistic, out.levene_median.p_value)),
-            if out.method_label == "Welch's t test" && out.levene_median.p_value <= alpha {
+            if out.method_label == "Welch's t test" && levene.p_value <= alpha { ChecklistStatus::Info } else { ChecklistStatus::Pass },
+            Some(format!("Levene(median) F = {:.3}, p = {:.4}", levene.f_statistic, levene.p_value)),
+            if out.method_label == "Welch's t test" && levene.p_value <= alpha {
                 "Levene test indicates heterogeneous variances; Welch's t-test does not assume equal variances."
             } else {
                 "No severe departure from equal group variances was detected."
@@ -2503,6 +2516,8 @@ fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedT
                 "Variance F-test shows no significant departure from equal group variances."
             },
         ));
+    }
+    if !has_raw_replicates {
         checklist.push(checklist_item(
             "Pre-summarized input mode",
             ChecklistStatus::Info,
@@ -2626,16 +2641,16 @@ fn populate_paired_t_sheet(
         is_fdr_q: false,
         significant: out.p_value <= conf.alpha(),
     });
-    let pairing_status = match out.pairing_p {
-        Some(p) if p <= conf.alpha() => ChecklistStatus::Pass,
-        Some(_) => ChecklistStatus::Warn,
-        None => ChecklistStatus::Info,
+    let pairing_status = match (out.pairing_r, out.pairing_p) {
+        (Some(r), Some(p)) if r > 0.0 && p <= conf.alpha() => ChecklistStatus::Pass,
+        (Some(_), Some(_)) => ChecklistStatus::Warn,
+        _ => ChecklistStatus::Info,
     };
     res.checklist.push(checklist_item(
         "Pairing effectiveness",
         pairing_status,
         out.pairing_r.map(|r| format!("r = {r:.4}")),
-        "Evaluates whether matched pairs covary positively across subjects.",
+        "Evaluates two-sided Pearson correlation r; positive significant covariance reduces paired-difference variance.",
     ));
 }
 
