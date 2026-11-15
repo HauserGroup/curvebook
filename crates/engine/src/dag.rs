@@ -7,6 +7,7 @@ use lumencraft_doc::{
     LayoutItem, LinkSource, PlacementMode, ProjectDocument, ResultSheet, ResultStatus, SheetCellRange, SheetId, TableArchetype,
 };
 use lumencraft_fit::HookContext;
+use lumencraft_format::MAX_CSV_FILE_BYTES;
 use lumencraft_transform::{
     ImportPipelineOptions, ImportSourcePayload, TransformContext, apply_import_link_pipeline, detect_link_cycles,
     evaluate_data_sheet_calculated_variables, execute_analysis_transform,
@@ -597,7 +598,7 @@ fn resolve_refresh_source<'a>(
             let Some(policy) = external_policy else {
                 return Ok(None);
             };
-            let text = policy.read_utf8_file(path, "linked file")?;
+            let text = policy.read_utf8_file(path, "linked file", MAX_CSV_FILE_BYTES)?;
             Ok(Some(ResolvedRefreshSource::Delimited { text, delimiter: *delimiter, decimal_separator: *decimal_separator }))
         }
     }

@@ -115,16 +115,17 @@ impl ExternalPathPolicy {
         Ok(())
     }
 
-    /// Read a UTF-8 text file subject to this policy and non-regular-file checks.
+    /// Read a UTF-8 text file subject to this policy, regular-file validation, and `max_bytes` cap.
     ///
     /// # Errors
     /// Returns [`EngineError`] with [`ErrorCode::PathEscape`] on policy/escape violation,
     /// [`ErrorCode::BadInput`] for empty paths or non-regular files (directories, FIFOs, device
-    /// nodes), [`ErrorCode::IoError`] if reading fails, or [`ErrorCode::UnsupportedFormat`] on
-    /// `wasm32`.
-    pub(crate) fn read_utf8_file(&self, raw_path: &str, label: &str) -> Result<String, EngineError> {
+    /// nodes), [`ErrorCode::ResourceLimit`] if size exceeds `max_bytes`, [`ErrorCode::IoError`] if
+    /// reading fails, or [`ErrorCode::UnsupportedFormat`] on `wasm32`.
+    pub(crate) fn read_utf8_file(&self, raw_path: &str, label: &str, max_bytes: usize) -> Result<String, EngineError> {
         #[cfg(target_arch = "wasm32")]
         {
+            let _ = max_bytes;
             if matches!(self, Self::RejectExternal) {
                 return Err(reject_external_err(raw_path));
             }
@@ -137,20 +138,22 @@ impl ExternalPathPolicy {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let resolved = self.resolve_existing_read_file(raw_path, label)?;
-            fs::read_to_string(&resolved).map_err(|err| read_io_err(raw_path, label, &err.to_string()))
+            let resolved = self.resolve_target_path(raw_path, label)?;
+            lumencraft_platform::fs::read_regular_file_utf8(&resolved, max_bytes).map_err(|err| map_read_platform_err(err, raw_path, label))
         }
     }
 
-    /// Read raw bytes from a regular file subject to this policy and non-regular-file checks.
+    /// Read raw bytes from a regular file subject to this policy, regular-file validation, and `max_bytes` cap.
     ///
     /// # Errors
     /// Returns [`EngineError`] with [`ErrorCode::PathEscape`] on policy/escape violation,
-    /// [`ErrorCode::BadInput`] for empty paths or non-regular files, [`ErrorCode::IoError`] if
-    /// reading fails, or [`ErrorCode::UnsupportedFormat`] on `wasm32`.
-    pub(crate) fn read_binary_file(&self, raw_path: &str, label: &str) -> Result<Vec<u8>, EngineError> {
+    /// [`ErrorCode::BadInput`] for empty paths or non-regular files, [`ErrorCode::ResourceLimit`]
+    /// if size exceeds `max_bytes`, [`ErrorCode::IoError`] if reading fails, or
+    /// [`ErrorCode::UnsupportedFormat`] on `wasm32`.
+    pub(crate) fn read_binary_file(&self, raw_path: &str, label: &str, max_bytes: usize) -> Result<Vec<u8>, EngineError> {
         #[cfg(target_arch = "wasm32")]
         {
+            let _ = max_bytes;
             if matches!(self, Self::RejectExternal) {
                 return Err(reject_external_err(raw_path));
             }
@@ -163,8 +166,8 @@ impl ExternalPathPolicy {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let resolved = self.resolve_existing_read_file(raw_path, label)?;
-            fs::read(&resolved).map_err(|err| read_io_err(raw_path, label, &err.to_string()))
+            let resolved = self.resolve_target_path(raw_path, label)?;
+            lumencraft_platform::fs::read_regular_file_bytes(&resolved, max_bytes).map_err(|err| map_read_platform_err(err, raw_path, label))
         }
     }
 
@@ -243,18 +246,6 @@ impl ExternalPathPolicy {
             Self::Workdir(guard) => guard.resolve(raw_path).map_err(EngineError::from),
             Self::RejectExternal => Err(reject_external_err(raw_path)),
         }
-    }
-
-    #[cfg(not(target_arch = "wasm32"))]
-    fn resolve_existing_read_file(&self, raw_path: &str, label: &str) -> Result<PathBuf, EngineError> {
-        validate_raw_path(raw_path, label)?;
-        let resolved = match self {
-            Self::Unconstrained => PathBuf::from(raw_path),
-            Self::Workdir(guard) => guard.resolve(raw_path).map_err(|err| map_read_platform_err(err, raw_path, label))?,
-            Self::RejectExternal => return Err(reject_external_err(raw_path)),
-        };
-        ensure_regular_file(&resolved).map_err(|err| map_read_platform_err(err, raw_path, label))?;
-        Ok(resolved)
     }
 }
 

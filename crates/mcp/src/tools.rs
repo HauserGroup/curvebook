@@ -1409,8 +1409,7 @@ pub(crate) fn encode_base64(input: &[u8]) -> String {
 #[cfg(not(target_arch = "wasm32"))]
 mod live_control {
     use std::ffi::OsString;
-    use std::fs::File;
-    use std::io::{self, BufRead, BufReader, Read, Write};
+    use std::io::{BufRead, BufReader, Read, Write};
     use std::net::{SocketAddr, TcpStream};
     use std::path::PathBuf;
     use std::time::Duration;
@@ -1502,9 +1501,18 @@ mod live_control {
         }
 
         let path = control_token_file_path_with_env(port, env_get);
-        let file = match File::open(&path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(None),
+        let buf = match lumencraft_platform::fs::read_regular_file_bytes_if_exists(&path, MAX_CONTROL_TOKEN_FILE_BYTES) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return Ok(None),
+            Err(lumencraft_platform::PlatformError::FileTooLarge { .. }) => {
+                return Err(StructuredErrorPayload::new(
+                    ErrorCode::BadInput,
+                    format!("control token file `{}` exceeds maximum {MAX_CONTROL_TOKEN_FILE_BYTES} bytes", path.display()),
+                ));
+            }
+            Err(lumencraft_platform::PlatformError::InvalidPath { reason }) => {
+                return Err(StructuredErrorPayload::new(ErrorCode::BadInput, format!("invalid control token file `{}`: {reason}", path.display())));
+            }
             Err(err) => {
                 return Err(StructuredErrorPayload::new(
                     ErrorCode::IoError,
@@ -1512,16 +1520,6 @@ mod live_control {
                 ));
             }
         };
-        let mut buf = Vec::new();
-        file.take(MAX_CONTROL_TOKEN_FILE_BYTES as u64 + 1).read_to_end(&mut buf).map_err(|err| {
-            StructuredErrorPayload::new(ErrorCode::IoError, format!("failed to read control token file `{}`: {err}", path.display()))
-        })?;
-        if buf.len() > MAX_CONTROL_TOKEN_FILE_BYTES {
-            return Err(StructuredErrorPayload::new(
-                ErrorCode::BadInput,
-                format!("control token file `{}` exceeds maximum {MAX_CONTROL_TOKEN_FILE_BYTES} bytes", path.display()),
-            ));
-        }
         let text = std::str::from_utf8(&buf)
             .map_err(|_| StructuredErrorPayload::new(ErrorCode::BadInput, format!("control token file `{}` is not valid UTF-8", path.display())))?;
         let trimmed = text.trim();

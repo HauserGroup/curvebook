@@ -327,9 +327,10 @@ impl FontBook {
     /// Read and register valid SFNT/TrueType fonts from explicit `paths`, prepending them ahead of fallbacks.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_host_font_paths(&mut self, paths: &[&str]) -> usize {
+        const MAX_HOST_FONT_BYTES: usize = 64 * 1024 * 1024;
         let mut loaded = 0usize;
         for &path in paths.iter().rev() {
-            let Ok(bytes) = std::fs::read(path) else {
+            let Ok(bytes) = lumencraft_platform::fs::read_regular_file_bytes(std::path::Path::new(path), MAX_HOST_FONT_BYTES) else {
                 continue;
             };
             if lumencraft_text::TrueTypeFont::parse(&bytes).is_some() {

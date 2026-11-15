@@ -2,7 +2,6 @@
 //! schema migration, dimension/float validation, and circular dependency guards.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use lumencraft_doc::{
@@ -21,6 +20,9 @@ const MANIFEST_PATH: &str = "manifest.json";
 const DOCUMENT_PATH: &str = "document.json";
 const SHEETS_DIR: &str = "sheets";
 const FORMAT_MAGIC: &str = "lumencraft-archive";
+
+/// Maximum byte length permitted when reading a `.lumencraft`, `.lctemplate`, or `.prism` archive file.
+pub const MAX_ARCHIVE_FILE_BYTES: usize = 128 * 1024 * 1024;
 
 /// Kind of native LumenCraft ZIP archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -146,6 +148,16 @@ fn platform_write_atomic(_path: &Path, _bytes: &[u8]) -> Result<(), FormatError>
     Err(FormatError::Io(String::from("atomic file writes are not supported on wasm32")))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn platform_read_regular_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, FormatError> {
+    Ok(lumencraft_platform::fs::read_regular_file_bytes(path, max_bytes)?)
+}
+
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn platform_read_regular_file(_path: &Path, _max_bytes: usize) -> Result<Vec<u8>, FormatError> {
+    Err(FormatError::Io(String::from("filesystem reads are not supported on wasm32")))
+}
+
 /// Write a `.lumencraft` archive to disk.
 pub fn save_project_file(path: &Path, doc: &ProjectDocument) -> Result<(), FormatError> {
     let bytes = save_project_bytes(doc)?;
@@ -155,7 +167,7 @@ pub fn save_project_file(path: &Path, doc: &ProjectDocument) -> Result<(), Forma
 
 /// Read a `.lumencraft` archive from disk.
 pub fn open_project_file(path: &Path) -> Result<ProjectDocument, FormatError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = platform_read_regular_file(path, MAX_ARCHIVE_FILE_BYTES)?;
     open_project_bytes(&bytes)
 }
 
@@ -168,7 +180,7 @@ pub fn save_template_file(path: &Path, doc: &ProjectDocument) -> Result<(), Form
 
 /// Read a `.lctemplate` archive from disk.
 pub fn open_template_file(path: &Path) -> Result<ProjectDocument, FormatError> {
-    let bytes = std::fs::read(path)?;
+    let bytes = platform_read_regular_file(path, MAX_ARCHIVE_FILE_BYTES)?;
     open_template_bytes(&bytes)
 }
 
@@ -538,21 +550,18 @@ fn resolve_contained_path(canon_root: &Path, rel: &str, must_exist: bool) -> Res
 
 fn read_contained_file(canon_root: &Path, rel: &str, max_entry_bytes: u64, remaining_budget: &mut u64) -> Result<Vec<u8>, FormatError> {
     let resolved = resolve_contained_path(canon_root, rel, true)?;
-    let meta = std::fs::metadata(&resolved)?;
-    if !meta.is_file() {
-        return Err(FormatError::Io(format!("entry `{rel}` is not a regular file")));
-    }
     let entry_cap = max_entry_bytes.min(*remaining_budget);
-    if meta.len() > entry_cap {
-        return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` size {} exceeds security limit {entry_cap}", meta.len()) });
-    }
-    let file = std::fs::File::open(&resolved)?;
-    let mut reader = file.take(entry_cap.saturating_add(1));
-    let mut buf = Vec::with_capacity(usize::try_from(meta.len()).unwrap_or(0));
-    reader.read_to_end(&mut buf)?;
-    if (buf.len() as u64) > entry_cap {
-        return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` payload exceeds security limit") });
-    }
+    let cap_usize = usize::try_from(entry_cap).unwrap_or(usize::MAX);
+    let buf = match platform_read_regular_file(&resolved, cap_usize) {
+        Ok(bytes) => bytes,
+        Err(FormatError::FileTooLarge { actual_bytes: Some(actual), .. }) => {
+            return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` size {actual} exceeds security limit {entry_cap}") });
+        }
+        Err(FormatError::FileTooLarge { actual_bytes: None, .. }) => {
+            return Err(FormatError::ZipBomb { reason: format!("entry `{rel}` payload exceeds security limit") });
+        }
+        Err(err) => return Err(err),
+    };
     *remaining_budget = remaining_budget.saturating_sub(buf.len() as u64);
     Ok(buf)
 }
@@ -612,13 +621,8 @@ fn collect_prior_manifest_csv_paths(canon_root: &Path) -> Result<Vec<String>, Fo
     let Ok(manifest_path) = resolve_contained_path(canon_root, MANIFEST_PATH, true) else {
         return Ok(Vec::new());
     };
-    let Ok(meta) = std::fs::metadata(&manifest_path) else {
-        return Ok(Vec::new());
-    };
-    if !meta.is_file() || meta.len() > crate::zip::MAX_ZIP_ENTRY_BYTES {
-        return Ok(Vec::new());
-    }
-    let Ok(bytes) = std::fs::read(&manifest_path) else {
+    let cap = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
+    let Ok(bytes) = platform_read_regular_file(&manifest_path, cap) else {
         return Ok(Vec::new());
     };
     let Ok(manifest) = serde_json::from_slice::<ArchiveManifest>(&bytes) else {
@@ -639,7 +643,7 @@ fn write_file_atomically(canon_root: &Path, rel: &str, bytes: &[u8]) -> Result<(
         && !meta.file_type().is_symlink()
         && meta.is_file()
         && meta.len() == bytes.len() as u64
-        && let Ok(existing) = std::fs::read(&target)
+        && let Ok(existing) = platform_read_regular_file(&target, bytes.len())
         && existing == bytes
     {
         return Ok(());

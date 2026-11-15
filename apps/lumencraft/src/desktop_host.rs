@@ -15,8 +15,8 @@ use lumencraft_doc::{CellCoord, ProjectDocument, SheetCellRange, SheetId, SheetS
 use lumencraft_engine::{CommandOutcome, Session};
 use lumencraft_format::recovery::is_lease_reclaimable;
 use lumencraft_format::{
-    CrashRecoveryJournal, DirectoryJournalBackend, FormatKind, FormatRegistry, ImportOptions, JournalBackend, JournalRecoveryWarning, RecoveryReport,
-    instantiate_template_bytes, is_unpacked_project_dir,
+    CrashRecoveryJournal, DirectoryJournalBackend, FormatKind, FormatRegistry, ImportOptions, JournalBackend, JournalRecoveryWarning,
+    MAX_ARCHIVE_FILE_BYTES, RecoveryReport, instantiate_template_bytes, is_unpacked_project_dir,
 };
 use lumencraft_ui_egui::interaction::{KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics};
 use lumencraft_ui_egui::menus::{MenuSectionTooltips, menu_bar_tooltips};
@@ -373,7 +373,8 @@ fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
             Ok(LoadedPathPayload::Project { doc: Box::new(doc), archive_path: Some(path.to_path_buf()), clean_archive: true })
         }
         FormatKind::Template => {
-            let bytes = std::fs::read(path).map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
+            let bytes = lumencraft_platform::fs::read_regular_file_bytes(path, MAX_ARCHIVE_FILE_BYTES)
+                .map_err(|err| format!("failed to read `{}`: {err}", path.display()))?;
             let doc =
                 instantiate_template_bytes(&bytes, None).map_err(|err| format!("failed to instantiate template `{}`: {err}", path.display()))?;
             Ok(LoadedPathPayload::Project { doc: Box::new(doc), archive_path: None, clean_archive: false })

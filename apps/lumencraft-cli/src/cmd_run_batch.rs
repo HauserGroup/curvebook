@@ -8,8 +8,9 @@ use std::sync::atomic::AtomicBool;
 use lumencraft_doc::ProjectDocument;
 use lumencraft_engine::cmd::Caller;
 use lumencraft_engine::{ExternalPathPolicy, Session};
-use lumencraft_format::instantiate_template_bytes;
+use lumencraft_format::{MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, instantiate_template_bytes};
 use lumencraft_pdf::PdfVersion;
+use lumencraft_platform::PlatformError;
 use serde_json::{Map, Value, json};
 
 use crate::cmd_convert::{
@@ -20,6 +21,7 @@ use crate::error::CliError;
 use crate::sandbox::{PathResolver, WorkdirGuard};
 
 const BATCH_SCHEMA_V1: &str = "lumencraft.batch.v1";
+const MAX_SCRIPT_FILE_BYTES: usize = 64 * 1024 * 1024;
 
 struct RunnerArgs {
     source_path: String,
@@ -166,11 +168,22 @@ fn build_resolver(workdir: Option<&str>, fallback_base: &Path) -> Result<PathRes
 
 fn read_text_source(source: &str) -> Result<String, CliError> {
     if source == "-" {
-        let mut buf = String::new();
-        std::io::stdin().read_to_string(&mut buf).map_err(|err| CliError::Runtime(format!("failed to read stdin: {err}")))?;
-        return Ok(buf);
+        let mut bytes = Vec::new();
+        let cap = (MAX_SCRIPT_FILE_BYTES as u64).saturating_add(1);
+        std::io::stdin().take(cap).read_to_end(&mut bytes).map_err(|err| CliError::Runtime(format!("failed to read stdin: {err}")))?;
+        if bytes.len() > MAX_SCRIPT_FILE_BYTES {
+            return Err(CliError::from(PlatformError::FileTooLarge {
+                path: String::from("<stdin>"),
+                actual_bytes: None,
+                limit_bytes: MAX_SCRIPT_FILE_BYTES,
+            }));
+        }
+        return String::from_utf8(bytes).map_err(|err| CliError::Runtime(format!("failed to read stdin as UTF-8: {err}")));
     }
-    fs::read_to_string(source).map_err(|err| CliError::Runtime(format!("failed to read `{source}`: {err}")))
+    lumencraft_platform::fs::read_regular_file_utf8(Path::new(source), MAX_SCRIPT_FILE_BYTES).map_err(|err| match err {
+        PlatformError::FileTooLarge { .. } => CliError::from(err),
+        other => CliError::Runtime(format!("failed to read `{source}`: {other}")),
+    })
 }
 
 fn parse_script_commands(raw_text: &str, resolver: &PathResolver) -> Result<Vec<ParsedCommand>, CliError> {
@@ -397,7 +410,10 @@ fn parse_export_ttf_font(idx: usize, val: Option<&Value>, resolver: &PathResolve
 
 fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<Session, CliError> {
     if let Some(tpl_path) = &manifest.template_path {
-        let bytes = fs::read(tpl_path).map_err(|err| CliError::Runtime(format!("failed to read template `{}`: {err}", tpl_path.display())))?;
+        let bytes = lumencraft_platform::fs::read_regular_file_bytes(tpl_path, MAX_ARCHIVE_FILE_BYTES).map_err(|err| match err {
+            PlatformError::FileTooLarge { .. } => CliError::from(err),
+            other => CliError::Runtime(format!("failed to read template `{}`: {other}", tpl_path.display())),
+        })?;
         let doc = instantiate_template_bytes(&bytes, None)?;
         return Ok(Session::from_document(doc));
     }
@@ -410,8 +426,10 @@ fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<Session, CliE
 
 fn load_manifest_inputs(session: &mut Session, inputs: &[BatchInputSpec]) -> Result<(), CliError> {
     for (idx, input) in inputs.iter().enumerate() {
-        let csv_text = fs::read_to_string(&input.csv_path)
-            .map_err(|err| CliError::Runtime(format!("failed to read input `{}`: {err}", input.csv_path.display())))?;
+        let csv_text = lumencraft_platform::fs::read_regular_file_utf8(&input.csv_path, MAX_CSV_FILE_BYTES).map_err(|err| match err {
+            PlatformError::FileTooLarge { .. } => CliError::from(err),
+            other => CliError::Runtime(format!("failed to read input `{}`: {other}", input.csv_path.display())),
+        })?;
 
         let matched_sheet_id = resolve_existing_data_sheet_id(session.document(), input.sheet.as_deref());
         let target_sheet_id = matched_sheet_id.clone().or_else(|| input.sheet.clone()).unwrap_or_else(|| format!("data_{}", idx + 1));

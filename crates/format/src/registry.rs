@@ -5,15 +5,18 @@ use std::sync::Arc;
 
 use lumencraft_doc::{DataSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
 
+#[cfg(not(target_arch = "wasm32"))]
+use crate::archive::platform_read_regular_file;
 use crate::archive::{
-    is_unpacked_project_dir, open_project_bytes, open_project_unpacked_dir, open_template_bytes, save_project_bytes, save_project_unpacked_dir,
-    save_template_bytes,
+    MAX_ARCHIVE_FILE_BYTES, is_unpacked_project_dir, open_project_bytes, open_project_unpacked_dir, open_template_bytes, save_project_bytes,
+    save_project_unpacked_dir, save_template_bytes,
 };
-use crate::csv::{CsvOptions, export_datasheet_to_csv, import_csv_to_datasheet};
+use crate::csv::{CsvOptions, MAX_CSV_FILE_BYTES, export_datasheet_to_csv, import_csv_to_datasheet};
 use crate::error::{FormatError, ImportReport};
 use crate::export::{export_result_sheet_json, export_result_sheet_tidy_csv};
 use crate::prism::import_prism_bytes;
 use crate::pzfx::import_pzfx_bytes;
+use crate::xml::MAX_XML_BYTES;
 
 /// Coarse category of a supported file format or container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -119,6 +122,11 @@ pub trait Importer: Send + Sync {
     /// Metadata descriptor for this importer.
     fn descriptor(&self) -> FormatDescriptor;
 
+    /// Maximum regular-file byte length permitted when importing from disk via [`Self::import_path`].
+    fn max_input_bytes(&self) -> usize {
+        MAX_ARCHIVE_FILE_BYTES
+    }
+
     /// Decode an in-memory byte slice into a typed [`ImportPayload`].
     fn import_bytes(&self, bytes: &[u8], opts: &ImportOptions) -> Result<ImportPayload, FormatError>;
 
@@ -126,7 +134,7 @@ pub trait Importer: Send + Sync {
     fn import_path(&self, path: &Path, opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let bytes = std::fs::read(path)?;
+            let bytes = platform_read_regular_file(path, self.max_input_bytes())?;
             self.import_bytes(&bytes, opts)
         }
         #[cfg(target_arch = "wasm32")]
@@ -442,6 +450,10 @@ impl Importer for PzfxAdapter {
         DESC_PZFX
     }
 
+    fn max_input_bytes(&self) -> usize {
+        MAX_XML_BYTES
+    }
+
     fn import_bytes(&self, bytes: &[u8], _opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
         Ok(ImportPayload::Report(import_pzfx_bytes(bytes)?))
     }
@@ -451,6 +463,10 @@ struct CsvAdapter;
 impl Importer for CsvAdapter {
     fn descriptor(&self) -> FormatDescriptor {
         DESC_CSV
+    }
+
+    fn max_input_bytes(&self) -> usize {
+        MAX_CSV_FILE_BYTES
     }
 
     fn import_bytes(&self, bytes: &[u8], opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
@@ -475,6 +491,10 @@ struct TsvAdapter;
 impl Importer for TsvAdapter {
     fn descriptor(&self) -> FormatDescriptor {
         DESC_TSV
+    }
+
+    fn max_input_bytes(&self) -> usize {
+        MAX_CSV_FILE_BYTES
     }
 
     fn import_bytes(&self, bytes: &[u8], opts: &ImportOptions) -> Result<ImportPayload, FormatError> {

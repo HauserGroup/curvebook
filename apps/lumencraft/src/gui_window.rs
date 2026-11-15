@@ -19,6 +19,7 @@ const DEFAULT_WINDOW_WIDTH_PT: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT_PT: f32 = 800.0;
 const DOUBLE_CLICK_WINDOW_SEC: f64 = 0.40;
 const DOUBLE_CLICK_RADIUS_PT: f32 = 5.0;
+const MAX_HOST_FONT_BYTES: usize = 64 * 1024 * 1024;
 
 const HOST_PROPORTIONAL_TTF_CANDIDATES: &[&str] = &[
     "/System/Library/Fonts/Supplemental/Arial.ttf",
@@ -103,7 +104,7 @@ fn insert_valid_sfnt(defs: &mut egui::FontDefinitions, name: &str, bytes: &[u8])
 
 fn load_host_sfnt_candidates(defs: &mut egui::FontDefinitions, candidates: &[&str], family_list: &mut Vec<String>) {
     for (idx, path) in candidates.iter().enumerate() {
-        let Ok(bytes) = std::fs::read(path) else {
+        let Ok(bytes) = lumencraft_platform::fs::read_regular_file_bytes(Path::new(path), MAX_HOST_FONT_BYTES) else {
             continue;
         };
         let label = format!("host-font-{idx}-{}", path_stem_hint(path));

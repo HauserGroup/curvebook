@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use lumencraft_doc::{AnalysisKind, AnalysisSpec, ErrorCode, NamedCheckpoint, ParameterScope, ProjectDocument, SheetId};
 use lumencraft_format::{
-    instantiate_template_bytes, open_project_bytes, open_project_file, open_project_unpacked_dir, save_project_bytes, save_project_unpacked_dir,
-    save_template_bytes,
+    MAX_ARCHIVE_FILE_BYTES, instantiate_template_bytes, open_project_bytes, open_project_file, open_project_unpacked_dir, save_project_bytes,
+    save_project_unpacked_dir, save_template_bytes,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -302,7 +302,7 @@ fn instantiate_template_schema() -> Value {
 fn run_project_instantiate_template(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let parsed: InstantiateTemplateParams = parse_params(&instantiate_template_schema(), params)?;
     let bytes = if let Some(ref path) = parsed.path {
-        ctx.session.path_policy.read_binary_file(path, "template file")?
+        ctx.session.path_policy.read_binary_file(path, "template file", MAX_ARCHIVE_FILE_BYTES)?
     } else if let Some(ref b64) = parsed.bytes_base64 {
         decode_base64(b64)?
     } else {
