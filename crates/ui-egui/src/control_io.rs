@@ -1,9 +1,11 @@
 //! Local JSON-lines control channel and publication clipboard/print payload builders
 //! (`docs/control-protocol.md`, `docs/hardware-parity.md`).
 
+use std::fmt;
 use std::io::{self, BufRead, Write};
 #[cfg(not(target_arch = "wasm32"))]
 use std::net::{SocketAddr, TcpListener};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
 use lumencraft_doc::{
@@ -31,6 +33,158 @@ use crate::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 
 /// Hard bound per JSON-lines control request/response frame (16 MiB).
 pub const MAX_CONTROL_LINE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Number of random bytes encoded into an auto-generated control authentication token (256 bits).
+pub const CONTROL_AUTH_TOKEN_BYTES: usize = 32;
+
+/// Hard upper bound on accepted control token length in bytes.
+pub const MAX_CONTROL_TOKEN_BYTES: usize = 512;
+
+/// HTTP 403 response emitted immediately when an HTTP client hits the raw control socket.
+pub const CONTROL_HTTP_FORBIDDEN_RESPONSE: &str = "HTTP/1.1 403 Forbidden\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nForbidden\n";
+
+const HTTP_REQUEST_METHODS: &[&str] = &["POST", "GET", "PUT", "DELETE", "HEAD", "OPTIONS", "PATCH", "TRACE", "CONNECT", "PRI"];
+
+/// Per-instance bearer secret enforcing authentication on local control sockets and streams.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ControlAuth {
+    token: String,
+}
+
+impl fmt::Debug for ControlAuth {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("ControlAuth([REDACTED])")
+    }
+}
+
+impl ControlAuth {
+    /// Generate a fresh 256-bit cryptographically random control authentication token.
+    ///
+    /// # Errors
+    /// Returns an I/O error if OS entropy cannot be read, or `Unsupported` on `wasm32`.
+    pub fn generate() -> io::Result<Self> {
+        let bytes = generate_entropy_bytes()?;
+        Ok(Self { token: encode_lower_hex(&bytes) })
+    }
+
+    /// Validate and wrap a caller-supplied control authentication token.
+    ///
+    /// # Errors
+    /// Returns a descriptive error when `token` is empty, contains whitespace or control
+    /// characters, or exceeds [`MAX_CONTROL_TOKEN_BYTES`].
+    pub fn from_token(token: impl Into<String>) -> Result<Self, String> {
+        let candidate = token.into();
+        if candidate.is_empty() {
+            return Err(String::from("control token must not be empty"));
+        }
+        if candidate.len() > MAX_CONTROL_TOKEN_BYTES {
+            return Err(format!("control token exceeds {MAX_CONTROL_TOKEN_BYTES} bytes"));
+        }
+        if candidate.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+            return Err(String::from("control token must not contain whitespace or control characters"));
+        }
+        Ok(Self { token: candidate })
+    }
+
+    /// Borrow the raw secret token string for writing to a restricted local token file or client.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.token
+    }
+
+    /// Verify `candidate` against the secret token using constant-time byte comparison.
+    #[must_use]
+    pub fn verify(&self, candidate: &str) -> bool {
+        constant_time_eq(self.token.as_bytes(), candidate.as_bytes())
+    }
+}
+
+fn constant_time_eq(expected: &[u8], actual: &[u8]) -> bool {
+    let max_len = expected.len().max(actual.len());
+    let mut diff: u8 = u8::from(expected.len() != actual.len());
+    for idx in 0..max_len {
+        let a = expected.get(idx).copied().unwrap_or(0);
+        let b = actual.get(idx).copied().unwrap_or(0);
+        diff |= core::hint::black_box(a ^ b);
+    }
+    core::hint::black_box(diff) == 0
+}
+
+fn encode_lower_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(bytes.len() * 2);
+    for &byte in bytes {
+        out.push(char::from(HEX[usize::from(byte >> 4)]));
+        out.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    out
+}
+
+#[cfg(unix)]
+fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
+    use std::io::Read;
+
+    let mut file = std::fs::File::open("/dev/urandom")?;
+    let mut buf = [0u8; CONTROL_AUTH_TOKEN_BYTES];
+    file.read_exact(&mut buf)?;
+    Ok(buf)
+}
+
+#[cfg(all(not(unix), not(target_arch = "wasm32")))]
+fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
+    use std::collections::hash_map::RandomState;
+    use std::hash::BuildHasher;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(1);
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |dur| dur.as_nanos());
+    let pid = u64::from(std::process::id());
+    let mut buf = [0u8; CONTROL_AUTH_TOKEN_BYTES];
+    for (chunk_idx, chunk) in buf.chunks_exact_mut(8).enumerate() {
+        let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let state = RandomState::new();
+        let mixed = state.hash_one((nanos, pid, seq, chunk_idx as u64, b"lumencraft-control-auth"));
+        chunk.copy_from_slice(&mixed.to_le_bytes());
+    }
+    Ok(buf)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
+    Err(io::Error::new(io::ErrorKind::Unsupported, "OS entropy generation for TCP control auth tokens is unavailable on wasm32"))
+}
+
+fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    let n = needle.as_bytes();
+    !n.is_empty() && haystack.as_bytes().windows(n.len()).any(|win| win.eq_ignore_ascii_case(n))
+}
+
+fn has_http_method_prefix(trimmed: &str) -> bool {
+    let bytes = trimmed.as_bytes();
+    HTTP_REQUEST_METHODS.iter().any(|method| {
+        let len = method.len();
+        bytes.get(..len).is_some_and(|head| head.eq_ignore_ascii_case(method.as_bytes()))
+            && bytes.get(len).is_some_and(|next| *next == b' ' || *next == b'\t')
+    })
+}
+
+/// Detect whether `line` looks like an HTTP request line (e.g. `POST / HTTP/1.1` from browser `fetch`/form).
+#[must_use]
+pub fn is_http_request_line(line: &str) -> bool {
+    let trimmed = line.trim();
+    if has_http_method_prefix(trimmed) {
+        return true;
+    }
+    if trimmed.starts_with('{') {
+        return false;
+    }
+    contains_ascii_case_insensitive(trimmed, "HTTP/1.")
+        || contains_ascii_case_insensitive(trimmed, "HTTP/2.")
+        || contains_ascii_case_insensitive(trimmed, "HTTP/0.")
+        || contains_ascii_case_insensitive(trimmed, "HTTP/2 ")
+        || trimmed.eq_ignore_ascii_case("HTTP/2")
+}
 
 pub(crate) const DEFAULT_SCREENSHOT_WIDTH_PX: u32 = 1024;
 pub(crate) const DEFAULT_SCREENSHOT_HEIGHT_PX: u32 = 640;
@@ -263,51 +417,91 @@ pub fn bind_control_tcp_listener(addr: SocketAddr) -> io::Result<TcpListener> {
 /// # Errors
 /// Propagates listener accept errors.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn serve_control_listener(app: &mut UiApp, listener: &TcpListener) -> io::Result<()> {
+pub fn serve_control_listener(app: &mut UiApp, listener: &TcpListener, auth: &ControlAuth) -> io::Result<()> {
+    serve_control_listener_with_handler(app, listener, auth, dispatch_request)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn serve_control_listener_with_handler<F>(app: &mut UiApp, listener: &TcpListener, auth: &ControlAuth, mut handler: F) -> io::Result<()>
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
     for incoming in listener.incoming() {
         let stream = incoming?;
-        match serve_control_connection(app, stream) {
-            Ok(true) => break,
-            Ok(false) => {}
-            Err(err) => eprintln!("control connection closed after error: {err}"),
+        let guarded = catch_unwind(AssertUnwindSafe(|| serve_control_connection_with_handler(app, stream, auth, &mut handler)));
+        match guarded {
+            Ok(Ok(true)) => break,
+            Ok(Ok(false)) => {}
+            Ok(Err(err)) => eprintln!("control connection closed after error: {err}"),
+            Err(payload) => {
+                let panic_msg = extract_panic_message(&*payload);
+                eprintln!("control connection closed after internal panic: {panic_msg}");
+            }
         }
     }
     Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn serve_control_connection(app: &mut UiApp, mut stream: std::net::TcpStream) -> io::Result<bool> {
+fn serve_control_connection_with_handler<F>(app: &mut UiApp, mut stream: std::net::TcpStream, auth: &ControlAuth, handler: &mut F) -> io::Result<bool>
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
     let reader_stream = stream.try_clone()?;
     let mut reader = io::BufReader::new(reader_stream);
-    serve_control_stream_with_quit(app, &mut reader, &mut stream)
+    serve_control_stream_with_handler(app, &mut reader, &mut stream, auth, handler)
 }
 
-/// Bind `addr` (loopback-only) and run the JSON-lines TCP control server until `app.quit`.
+/// Bind `addr` (loopback-only) and run the authenticated JSON-lines TCP control server until `app.quit`.
 ///
 /// # Errors
 /// Returns an error if `addr` is non-loopback or socket bind/accept fails.
 #[cfg(not(target_arch = "wasm32"))]
-pub fn run_control_tcp_server(app: &mut UiApp, addr: SocketAddr) -> Result<(), String> {
+pub fn run_control_tcp_server(app: &mut UiApp, addr: SocketAddr, auth: &ControlAuth) -> Result<(), String> {
     let checked = validate_loopback_addr(addr)?;
     let listener = bind_control_tcp_listener(checked).map_err(|err| format!("failed to bind control socket {checked}: {err}"))?;
-    serve_control_listener(app, &listener).map_err(|err| format!("control server I/O error: {err}"))
+    serve_control_listener(app, &listener, auth).map_err(|err| format!("control server I/O error: {err}"))
 }
 
-/// Serve JSON-lines control requests from `reader` and emit serialized responses to `writer`,
-/// stopping cleanly on EOF or `app.quit`.
+/// Serve authenticated JSON-lines control requests from `reader` and emit serialized responses to `writer`,
+/// stopping cleanly on EOF, HTTP `403` rejection, or `app.quit`.
 ///
 /// # Errors
 /// Returns an I/O error if reading, exceeding [`MAX_CONTROL_LINE_BYTES`], or writing fails.
-pub fn serve_control_stream<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W) -> io::Result<()> {
-    let _ = serve_control_stream_with_quit(app, reader, writer)?;
+pub fn serve_control_stream<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth) -> io::Result<()> {
+    let _ = serve_control_stream_with_quit(app, reader, writer, auth)?;
     Ok(())
 }
 
-/// Serve JSON-lines requests over `reader`/`writer` and return `Ok(true)` when `app.quit` stopped the stream.
+/// Serve authenticated JSON-lines requests over `reader`/`writer` and return `Ok(true)` when `app.quit` stopped the stream.
 ///
 /// # Errors
 /// Returns an I/O error on underlying stream failure or oversized lines exceeding [`MAX_CONTROL_LINE_BYTES`].
-pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W) -> io::Result<bool> {
+pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth) -> io::Result<bool> {
+    serve_control_stream_with_handler(app, reader, writer, auth, dispatch_request)
+}
+
+/// Convenience wrapper around [`serve_control_stream_with_quit`] that validates a raw token string.
+///
+/// # Errors
+/// Returns `InvalidInput` if `token` is invalid, or any underlying stream I/O error.
+pub fn serve_control_stream_with_quit_and_token<R: BufRead, W: Write>(
+    app: &mut UiApp,
+    reader: &mut R,
+    writer: &mut W,
+    token: &str,
+) -> io::Result<bool> {
+    let auth = ControlAuth::from_token(token).map_err(|err| io::Error::new(io::ErrorKind::InvalidInput, err))?;
+    serve_control_stream_with_quit(app, reader, writer, &auth)
+}
+
+fn serve_control_stream_with_handler<R, W, F>(app: &mut UiApp, reader: &mut R, writer: &mut W, auth: &ControlAuth, mut handler: F) -> io::Result<bool>
+where
+    R: BufRead,
+    W: Write,
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    let mut connection_authenticated = false;
     loop {
         let Some(raw_bytes) = read_bounded_control_line(reader, MAX_CONTROL_LINE_BYTES)? else {
             return Ok(false);
@@ -318,7 +512,12 @@ pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(app: &mut UiApp, rea
         if trimmed.is_empty() {
             continue;
         }
-        let (response_json, action) = handle_control_line_with_action(app, trimmed);
+        if is_http_request_line(trimmed) {
+            writer.write_all(CONTROL_HTTP_FORBIDDEN_RESPONSE.as_bytes())?;
+            writer.flush()?;
+            return Ok(false);
+        }
+        let (response_json, action) = handle_authenticated_control_line(app, trimmed, auth, &mut connection_authenticated, &mut handler);
         writer.write_all(response_json.as_bytes())?;
         writer.write_all(b"\n")?;
         writer.flush()?;
@@ -328,25 +527,180 @@ pub fn serve_control_stream_with_quit<R: BufRead, W: Write>(app: &mut UiApp, rea
     }
 }
 
-/// Handle a single JSON-lines request against `app` and return serialized JSON response text.
+fn handle_authenticated_control_line<F>(
+    app: &mut UiApp,
+    line: &str,
+    auth: &ControlAuth,
+    connection_authenticated: &mut bool,
+    handler: &mut F,
+) -> (String, ControlLoopAction)
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    let best_effort_id = extract_best_effort_request_id(line);
+    let guarded = catch_unwind(AssertUnwindSafe(|| process_authenticated_line(app, line, auth, connection_authenticated, handler)));
+    match guarded {
+        Ok(output) => output,
+        Err(payload) => (serialize_response(&panic_control_response(best_effort_id, &*payload)), ControlLoopAction::Continue),
+    }
+}
+
+fn process_authenticated_line<F>(
+    app: &mut UiApp,
+    line: &str,
+    auth: &ControlAuth,
+    connection_authenticated: &mut bool,
+    handler: &mut F,
+) -> (String, ControlLoopAction)
+where
+    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
+{
+    let raw: Value = match serde_json::from_str(line) {
+        Ok(value) => value,
+        Err(err) => {
+            let resp = if *connection_authenticated {
+                ControlResponse::err(Value::String(String::new()), format!("invalid control JSON: {err}"))
+            } else {
+                unauthorized_control_response(Value::String(String::new()), "authentication required")
+            };
+            return (serialize_response(&resp), ControlLoopAction::Continue);
+        }
+    };
+    let Some(obj) = raw.as_object() else {
+        let resp = if *connection_authenticated {
+            ControlResponse::err(Value::String(String::new()), "control request must be a JSON object")
+        } else {
+            unauthorized_control_response(Value::String(String::new()), "authentication required")
+        };
+        return (serialize_response(&resp), ControlLoopAction::Continue);
+    };
+
+    let id = obj.get("id").cloned().unwrap_or_else(|| Value::String(String::new()));
+    let raw_method = obj.get("method").or_else(|| obj.get("op")).and_then(Value::as_str).map(str::trim);
+
+    if raw_method == Some("auth") {
+        let valid = extract_auth_handshake_token(obj).is_some_and(|tok| auth.verify(tok));
+        *connection_authenticated = valid;
+        let resp = if valid {
+            ControlResponse::ok(id, json!({ "authenticated": true }))
+        } else {
+            unauthorized_control_response(id, "invalid or missing control authentication token")
+        };
+        return (serialize_response(&resp), ControlLoopAction::Continue);
+    }
+
+    if let Err(reason) = authorize_request_envelope(obj, auth, *connection_authenticated) {
+        return (serialize_response(&unauthorized_control_response(id, reason)), ControlLoopAction::Continue);
+    }
+
+    let Some(method) = raw_method.filter(|s| !s.is_empty()) else {
+        let resp = ControlResponse::err(id, "missing non-empty 'method' or 'op' field");
+        return (serialize_response(&resp), ControlLoopAction::Continue);
+    };
+
+    let params = normalize_request_params(method, obj);
+    let req = ControlRequest { id, method: method.to_owned(), params };
+    let (response, action) = handler(app, req);
+    (serialize_response(&response), action)
+}
+
+fn extract_auth_handshake_token(obj: &Map<String, Value>) -> Option<&str> {
+    let top = obj.get("token");
+    let nested = obj.get("params").and_then(Value::as_object).and_then(|params| params.get("token"));
+    match (top, nested) {
+        (Some(a), Some(b)) => {
+            let sa = a.as_str()?;
+            let sb = b.as_str()?;
+            if sa == sb { Some(sa) } else { None }
+        }
+        (Some(val), None) | (None, Some(val)) => val.as_str(),
+        (None, None) => None,
+    }
+}
+
+fn authorize_request_envelope(obj: &Map<String, Value>, auth: &ControlAuth, connection_authenticated: bool) -> Result<(), &'static str> {
+    if let Some(token_val) = obj.get("token") {
+        let matched = token_val.as_str().is_some_and(|candidate| auth.verify(candidate));
+        if matched {
+            return Ok(());
+        }
+        return Err("invalid control authentication token");
+    }
+    if connection_authenticated {
+        return Ok(());
+    }
+    Err("authentication required")
+}
+
+fn unauthorized_control_response(id: Value, detail: &str) -> ControlResponse {
+    let message = format!("unauthorized: {detail}");
+    ControlResponse {
+        id,
+        ok: false,
+        result: Value::Null,
+        error: Some(message.clone()),
+        error_detail: Some(json!({
+            "code": "unauthorized",
+            "category": "policy",
+            "message": message,
+            "retryable": false,
+            "remediation": "Authenticate with `{\"method\":\"auth\",\"params\":{\"token\":\"<token>\"}}` or include top-level `\"token\"`.",
+        })),
+    }
+}
+
+fn extract_panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    if let Some(msg) = payload.downcast_ref::<&str>() {
+        if msg.trim().is_empty() { String::from("empty panic payload") } else { (*msg).to_owned() }
+    } else if let Some(msg) = payload.downcast_ref::<String>() {
+        if msg.trim().is_empty() { String::from("empty panic payload") } else { msg.clone() }
+    } else {
+        String::from("unknown panic payload")
+    }
+}
+
+fn panic_control_response(id: Value, payload: &(dyn std::any::Any + Send)) -> ControlResponse {
+    let panic_msg = extract_panic_message(payload);
+    let err = EngineError::with_code(ErrorCode::InternalPanic, format!("internal control panic: {panic_msg}"))
+        .with_remediation("Inspect application state before retrying the control command.");
+    ControlResponse::err_with_detail(id, err.into())
+}
+
+fn extract_best_effort_request_id(line: &str) -> Value {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|val| val.as_object().and_then(|obj| obj.get("id")).cloned())
+        .unwrap_or_else(|| Value::String(String::new()))
+}
+
+/// Handle a single in-process JSON-lines request against `app` and return serialized JSON response text.
+///
+/// Always emits a structured JSON [`ControlResponse`] even on parse, validation, or handler-panic failures.
 #[must_use]
 pub fn handle_control_line(app: &mut UiApp, line: &str) -> String {
     handle_control_line_with_action(app, line).0
 }
 
-/// Handle a single JSON-lines request against `app` and return `(response_json, loop_action)`.
+/// Handle a single in-process JSON-lines request against `app` and return `(response_json, loop_action)`.
 #[must_use]
 pub fn handle_control_line_with_action(app: &mut UiApp, line: &str) -> (String, ControlLoopAction) {
-    let req = match parse_control_request(line) {
-        Ok(parsed) => parsed,
-        Err((id, message)) => {
-            let resp = ControlResponse::err(id, message);
-            return (serialize_response(&resp), ControlLoopAction::Continue);
-        }
-    };
+    let best_effort_id = extract_best_effort_request_id(line);
+    let guarded = catch_unwind(AssertUnwindSafe(|| {
+        let req = match parse_control_request(line) {
+            Ok(parsed) => parsed,
+            Err((id, message)) => {
+                let resp = ControlResponse::err(id, message);
+                return (serialize_response(&resp), ControlLoopAction::Continue);
+            }
+        };
 
-    let (response, action) = dispatch_request(app, req);
-    (serialize_response(&response), action)
+        let (response, action) = dispatch_request(app, req);
+        (serialize_response(&response), action)
+    }));
+    match guarded {
+        Ok(output) => output,
+        Err(payload) => (serialize_response(&panic_control_response(best_effort_id, &*payload)), ControlLoopAction::Continue),
+    }
 }
 
 /// Dispatch one front-end UI command from [`UI_COMMANDS`].
@@ -551,7 +905,7 @@ fn normalize_request_params(method: &str, obj: &Map<String, Value>) -> Value {
         } else {
             let mut inner = Map::new();
             for (key, value) in obj {
-                if !matches!(key.as_str(), "id" | "method" | "op" | "command" | "command_id" | "params") {
+                if !matches!(key.as_str(), "id" | "method" | "op" | "command" | "command_id" | "params" | "token" | "auth_token") {
                     inner.insert(key.clone(), value.clone());
                 }
             }
@@ -568,7 +922,7 @@ fn normalize_request_params(method: &str, obj: &Map<String, Value>) -> Value {
         _ => Map::new(),
     };
     for (key, value) in obj {
-        if matches!(key.as_str(), "id" | "method" | "op" | "params") {
+        if matches!(key.as_str(), "id" | "method" | "op" | "params" | "token" | "auth_token") {
             continue;
         }
         base.entry(key.clone()).or_insert_with(|| value.clone());
@@ -2498,6 +2852,210 @@ mod tests {
         assert_eq!(legacy.error.as_deref(), Some("legacy"));
         assert_eq!(legacy.error_detail, None);
 
+        Ok(())
+    }
+
+    #[test]
+    fn control_auth_token_generation_validation_and_constant_time_verify() -> Result<(), Box<dyn std::error::Error>> {
+        use super::{CONTROL_AUTH_TOKEN_BYTES, ControlAuth};
+
+        let a = ControlAuth::generate()?;
+        let b = ControlAuth::generate()?;
+        assert_eq!(a.as_str().len(), CONTROL_AUTH_TOKEN_BYTES * 2);
+        assert!(a.as_str().bytes().all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f')));
+        assert_ne!(a.as_str(), b.as_str());
+        assert!(a.verify(a.as_str()));
+        assert!(!a.verify(b.as_str()));
+        assert!(!a.verify(""));
+        assert!(!a.verify(&format!("{}x", a.as_str())));
+        assert_eq!(format!("{a:?}"), "ControlAuth([REDACTED])");
+
+        assert!(ControlAuth::from_token("").is_err());
+        assert!(ControlAuth::from_token("has space").is_err());
+        assert!(ControlAuth::from_token("has\nnewline").is_err());
+        assert!(ControlAuth::from_token("a".repeat(600)).is_err());
+        let explicit = ControlAuth::from_token("sample-explicit-secret")?;
+        assert!(explicit.verify("sample-explicit-secret"));
+        assert!(!explicit.verify("sample-explicit-secre"));
+        Ok(())
+    }
+
+    #[test]
+    fn control_stream_rejects_http_and_unauthenticated_before_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{BufReader, Cursor};
+
+        use super::{CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, serve_control_stream_with_quit};
+        use crate::UiApp;
+
+        let auth = ControlAuth::from_token("sample-stream-secret")?;
+        let mut app = UiApp::new();
+
+        let http_attack = concat!(
+            "POST / HTTP/1.1\r\n",
+            "Host: 127.0.0.1:9001\r\n",
+            "Origin: https://attacker.example\r\n",
+            "Content-Type: text/plain\r\n",
+            "Content-Length: 74\r\n",
+            "\r\n",
+            "{\"id\":\"pwn\",\"method\":\"sheet.createData\",\"params\":{\"sheet_id\":\"s1\"}}\n"
+        );
+        let mut http_reader = BufReader::new(Cursor::new(http_attack.as_bytes()));
+        let mut http_out = Vec::new();
+        let quit = serve_control_stream_with_quit(&mut app, &mut http_reader, &mut http_out, &auth)?;
+        assert!(!quit);
+        assert_eq!(String::from_utf8(http_out)?, CONTROL_HTTP_FORBIDDEN_RESPONSE);
+        assert!(app.document().data_sheets.is_empty(), "HTTP body command must never run");
+
+        let script = concat!(
+            "{\"id\":1,\"method\":\"ping\"}\n",
+            "{\"id\":2,\"method\":\"sheet.createData\",\"token\":\"wrong\",\"params\":{\"sheet_id\":\"s1\"}}\n",
+            "{\"id\":3,\"method\":\"app.quit\"}\n",
+            "{\"id\":4,\"method\":\"ping\",\"token\":\"sample-stream-secret\"}\n",
+            "{\"id\":5,\"method\":\"ping\"}\n",
+            "{\"id\":6,\"method\":\"auth\",\"params\":{\"token\":\"wrong\"}}\n",
+            "{\"id\":7,\"method\":\"auth\",\"params\":{\"token\":\"sample-stream-secret\"}}\n",
+            "{\"id\":8,\"method\":\"ping\",\"token\":\"wrong\"}\n",
+            "{\"id\":9,\"method\":\"sheet.createData\",\"params\":{\"sheet_id\":\"s-ok\",\"title\":\"OK\"}}\n",
+            "{\"id\":10,\"method\":\"app.quit\"}\n"
+        );
+        let mut reader = BufReader::new(Cursor::new(script.as_bytes()));
+        let mut out = Vec::new();
+        let quit = serve_control_stream_with_quit(&mut app, &mut reader, &mut out, &auth)?;
+        assert!(quit);
+
+        let lines: Vec<serde_json::Value> = String::from_utf8(out)?.lines().map(serde_json::from_str).collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(lines.len(), 10);
+        for unauth_idx in [0usize, 1, 2, 4, 5, 7] {
+            assert_eq!(lines[unauth_idx]["ok"], serde_json::json!(false), "expected failure at idx {unauth_idx}");
+            assert!(
+                lines[unauth_idx]["error"].as_str().is_some_and(|e| e.contains("unauthorized")),
+                "expected unauthorized error at idx {unauth_idx}: {}",
+                lines[unauth_idx]
+            );
+            assert_eq!(lines[unauth_idx]["error_detail"]["code"], serde_json::json!("unauthorized"));
+        }
+        assert_eq!(lines[3]["ok"], serde_json::json!(true));
+        assert_eq!(lines[6]["ok"], serde_json::json!(true));
+        assert_eq!(lines[6]["result"]["authenticated"], serde_json::json!(true));
+        assert_eq!(lines[8]["ok"], serde_json::json!(true));
+        assert_eq!(lines[9]["result"]["quit"], serde_json::json!(true));
+        assert_eq!(app.document().data_sheets.len(), 1);
+        assert_eq!(app.document().data_sheets[0].id.as_str(), "s-ok");
+        Ok(())
+    }
+
+    #[test]
+    #[allow(clippy::panic)]
+    fn control_server_panic_guard_keeps_stream_and_tcp_listener_alive() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{BufReader, BufWriter, Cursor, ErrorKind, Write};
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::Duration;
+
+        use super::{
+            ControlAuth, ControlLoopAction, ControlRequest, ControlResponse, bind_control_tcp_listener, dispatch_request,
+            serve_control_listener_with_handler, serve_control_stream_with_handler,
+        };
+        use crate::UiApp;
+
+        let auth = ControlAuth::from_token("sample-panic-guard-token")?;
+        let mut app = UiApp::new();
+        let stream_input = concat!(
+            "{\"id\":\"a\",\"method\":\"auth\",\"params\":{\"token\":\"sample-panic-guard-token\"}}\n",
+            "{\"id\":\"boom-1\",\"method\":\"test.panic\"}\n",
+            "{\"id\":\"ok-after\",\"method\":\"ping\"}\n",
+            "{\"id\":\"q\",\"method\":\"app.quit\"}\n"
+        );
+        let mut reader = BufReader::new(Cursor::new(stream_input.as_bytes()));
+        let mut out = Vec::new();
+        let quit = serve_control_stream_with_handler(&mut app, &mut reader, &mut out, &auth, |ui, req: ControlRequest| {
+            if req.method == "test.panic" {
+                panic!("simulated handler panic for R1-S10-03");
+            }
+            dispatch_request(ui, req)
+        })?;
+        assert!(quit);
+
+        let stream_lines: Vec<serde_json::Value> = String::from_utf8(out)?.lines().map(serde_json::from_str).collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(stream_lines.len(), 4);
+        assert_eq!(stream_lines[0]["ok"], serde_json::json!(true));
+        assert_eq!(stream_lines[1]["id"], serde_json::json!("boom-1"));
+        assert_eq!(stream_lines[1]["ok"], serde_json::json!(false));
+        assert_eq!(stream_lines[1]["error_detail"]["code"], serde_json::json!("internal_panic"));
+        assert!(stream_lines[1]["error"].as_str().is_some_and(|e| e.contains("simulated handler panic for R1-S10-03")));
+        assert_eq!(stream_lines[2]["id"], serde_json::json!("ok-after"));
+        assert_eq!(stream_lines[2]["ok"], serde_json::json!(true));
+        assert_eq!(stream_lines[3]["result"]["quit"], serde_json::json!(true));
+
+        let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+            other => other?,
+        };
+        let addr = listener.local_addr()?;
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+            Ok(probe) => {
+                drop(probe);
+                let _ = listener.accept();
+            }
+            Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => return Ok(()),
+            Err(err) => return Err(Box::new(err)),
+        }
+
+        let token_owned = auth.as_str().to_owned();
+        let client = std::thread::spawn(move || -> Result<Vec<serde_json::Value>, String> {
+            let mut results = Vec::new();
+            {
+                let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
+                let mut r = BufReader::new(reader_stream);
+                let mut w = BufWriter::new(stream);
+                for req in [
+                    format!("{{\"id\":1,\"method\":\"auth\",\"params\":{{\"token\":\"{token_owned}\"}}}}\n"),
+                    String::from("{\"id\":2,\"method\":\"test.panic\"}\n"),
+                    String::from("{\"id\":3,\"method\":\"ping\"}\n"),
+                ] {
+                    w.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+                    w.flush().map_err(|e| e.to_string())?;
+                    let mut line = String::new();
+                    std::io::BufRead::read_line(&mut r, &mut line).map_err(|e| e.to_string())?;
+                    results.push(serde_json::from_str(&line).map_err(|e| e.to_string())?);
+                }
+            }
+            {
+                let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
+                let reader_stream = stream.try_clone().map_err(|e| e.to_string())?;
+                let mut r = BufReader::new(reader_stream);
+                let mut w = BufWriter::new(stream);
+                for req in [
+                    format!("{{\"id\":4,\"method\":\"ping\",\"token\":\"{token_owned}\"}}\n"),
+                    format!("{{\"id\":5,\"method\":\"app.quit\",\"token\":\"{token_owned}\"}}\n"),
+                ] {
+                    w.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+                    w.flush().map_err(|e| e.to_string())?;
+                    let mut line = String::new();
+                    std::io::BufRead::read_line(&mut r, &mut line).map_err(|e| e.to_string())?;
+                    results.push(serde_json::from_str(&line).map_err(|e| e.to_string())?);
+                }
+            }
+            Ok(results)
+        });
+
+        let mut tcp_app = UiApp::new();
+        serve_control_listener_with_handler(&mut tcp_app, &listener, &auth, |ui, req| -> (ControlResponse, ControlLoopAction) {
+            if req.method == "test.panic" {
+                panic!("tcp handler boom");
+            }
+            dispatch_request(ui, req)
+        })?;
+        let responses = client.join().map_err(|_| "client thread panicked")??;
+        assert_eq!(responses.len(), 5);
+        assert_eq!(responses[0]["ok"], serde_json::json!(true));
+        assert_eq!(responses[1]["ok"], serde_json::json!(false));
+        assert_eq!(responses[1]["error_detail"]["code"], serde_json::json!("internal_panic"));
+        assert_eq!(responses[2]["ok"], serde_json::json!(true));
+        assert_eq!(responses[3]["ok"], serde_json::json!(true));
+        assert_eq!(responses[4]["result"]["quit"], serde_json::json!(true));
         Ok(())
     }
 }
