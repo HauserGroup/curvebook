@@ -300,6 +300,9 @@ impl ParametricModel for ThreePhaseDecay {
         let span_x = (xmax - xmin).max(1.0);
         vec![ymax, ymin, 33.0, 33.0, 5.0 / span_x, 1.0 / span_x, 0.2 / span_x]
     }
+    fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
+        vec![(None, None), (None, None), (Some(0.0), Some(100.0)), (Some(0.0), Some(100.0)), (Some(0.0), None), (Some(0.0), None), (Some(0.0), None)]
+    }
 }
 
 /// Constant `Y0` until `X0`, then one-phase decay toward `Plateau` (piecewise composite).

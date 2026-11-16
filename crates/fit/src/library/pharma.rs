@@ -1383,8 +1383,9 @@ impl ParametricModel for MichaelisMenten {
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
         let (_, ymax) = data_y_min_max(points);
+        let v_init = if ymax > 0.0 && ymax.is_finite() { ymax } else { 1.0 };
         let km = estimate_x_at_ymid(points).abs().max(1e-3);
-        if self.kcat_mode { vec![ymax.max(1.0), km, 1.0] } else { vec![ymax.max(1.0), km] }
+        if self.kcat_mode { vec![v_init, km, 1.0] } else { vec![v_init, km] }
     }
     fn default_bounds(&self) -> Vec<(Option<f64>, Option<f64>)> {
         if self.kcat_mode { vec![(Some(0.0), None), (Some(1e-30), None), (Some(0.0), None)] } else { vec![(Some(0.0), None), (Some(1e-30), None)] }

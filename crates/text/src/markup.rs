@@ -380,8 +380,10 @@ fn handle_backslash(rest: &str, state: &StyleState, spans: &mut Vec<RichSpan>, d
         }
 
         if let Some(sym) = lookup_latex_escape(name) {
+            let empty_group =
+                if matches!(name, "textbackslash" | "textless" | "textgreater" | "textdegree" | "percent") && tail.starts_with("{}") { 2 } else { 0 };
             push_styled(spans, sym, state);
-            return Some((1 + name_len, sym.chars().last()));
+            return Some((1 + name_len + empty_group, sym.chars().last()));
         }
 
         return None;
@@ -1010,6 +1012,9 @@ fn lookup_math_escape(name: &str) -> Option<&'static str> {
         "ndash" => Some("\u{2013}"),
         "mdash" => Some("\u{2014}"),
         "percent" => Some("%"),
+        "textbackslash" => Some("\\"),
+        "textless" => Some("<"),
+        "textgreater" => Some(">"),
         "space" => Some(" "),
         "quad" => Some("  "),
         "qquad" => Some("    "),
@@ -2159,5 +2164,15 @@ mod tests {
         let escaped = parse_markup(r"\*plain *yes* **unmatched");
         assert_eq!(escaped.plain_text(), "*plain yes **unmatched");
         assert!(escaped.spans.iter().any(|s| s.text == "yes" && s.slope == SpanSlope::Italic));
+    }
+
+    #[test]
+    fn parse_markup_renders_tex_text_escapes_cleanly() {
+        let math_callout = parse_markup(r"$Y = \text{a\textless{}b\textbackslash{}c\textgreater{}d\*e}$");
+        assert_eq!(math_callout.plain_text(), r"Y = a<b\c>d*e");
+
+        let plain_callout = parse_markup(r"Y = \text{a\textless{}b\textbackslash{}c\textgreater{}d\*e}");
+        assert_eq!(plain_callout.plain_text(), r"Y = a<b\c>d*e");
+        assert!(plain_callout.spans.iter().all(|s| !s.text.contains("\\text")));
     }
 }
