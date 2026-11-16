@@ -57,6 +57,14 @@
 //!   41(2):477–486. doi:10.2307/2530872
 //! - Kenward, M. G., & Roger, J. H. (1997). Small sample inference for fixed effects from
 //!   restricted maximum likelihood. *Biometrics* 53(3):983–997. doi:10.2307/2533558
+//! - Fai, A. H.-T., & Cornelius, P. L. (1996). Approximate F-tests of multiple degree of freedom
+//!   hypotheses in generalized least squares analyses of unbalanced split-plot experiments.
+//!   *Journal of Statistical Computation and Simulation* 54(4):363–378. doi:10.1080/00949659608811740
+//! - Gilmour, A. R., Thompson, R., & Cullis, B. R. (1995). Average Information REML: an efficient
+//!   algorithm for variance parameter estimation in linear mixed models. *Biometrics*
+//!   51(4):1440–1450. doi:10.2307/2533274
+//! - Tomczak, M., & Tomczak, E. (2014). The need to report effect size estimates revisited. An
+//!   overview of some recommended measures of effect size. *Trends in Sport Sciences* 1(21):19–25.
 
 use lumencraft_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, FactorialAnovaSpec, MultiplicityMethod, MultiplicitySpec, NestedAnalysisSpec,
@@ -64,7 +72,7 @@ use lumencraft_doc::{
     SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
 use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, f_sf, noncentral_f_ci, student_t_two_sided_p};
+use lumencraft_math::dist::{chi2_sf, f_sf, noncentral_f_ci};
 use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, sym_eigen};
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
@@ -179,6 +187,34 @@ pub struct SphericityResult {
     pub huynh_feldt_eps: f64,
 }
 
+/// Sphericity epsilon adjustment applied to repeated-measures two-way *F*-test *p*-values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RmSphericityCorrection {
+    #[default]
+    None,
+    GreenhouseGeisser,
+    HuynhFeldt,
+}
+
+/// Per-factor sphericity diagnostics for two-way repeated-measures and split-plot ANOVA.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct RmTwoWaySphericities {
+    pub row: Option<SphericityResult>,
+    pub column: Option<SphericityResult>,
+    pub interaction: Option<SphericityResult>,
+}
+
+/// Two-way repeated-measures / split-plot ANOVA output with factor-specific sphericity diagnostics
+/// and sphericity-adjusted *p*-values.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RmTwoWayAnovaResult {
+    pub anova: FactorialAnovaResult,
+    pub design: RepeatedMeasuresDesign,
+    pub sphericities: RmTwoWaySphericities,
+    pub correction: RmSphericityCorrection,
+    pub term_error_dfs: [f64; 3],
+}
+
 /// Repeated-measures one-way ANOVA output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RmOneWayAnovaResult {
@@ -270,6 +306,17 @@ pub struct MixedRemlResult {
     pub kenward_roger_df: Vec<f64>,
 }
 
+/// Multi-variance-component linear mixed-effects REML fit (`V = sigma_e^2 I + sum_k sigma_k^2 G_k`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct MultiVcRemlResult {
+    pub variance_components: Vec<(String, f64)>,
+    pub sigma2_error: f64,
+    pub reml_log_lik: f64,
+    pub fixed_terms: Vec<FactorialAnovaTerm>,
+    pub satterthwaite_df: Vec<f64>,
+    pub kenward_roger_df: Vec<f64>,
+}
+
 /// Nested one-way ANOVA and optional two-group nested *t*-test output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NestedAnovaResult {
@@ -301,19 +348,18 @@ pub struct NestedAnovaResult {
 // ============================================================================
 
 /// Compute ANOVA effect sizes (`eta^2`, `partial eta^2`, `omega^2`, Cohen's `f`) and exact
-/// noncentral-*F* confidence intervals.
+/// noncentral-*F* confidence intervals for one-way designs.
 ///
-/// - `omega^2 = (SS_effect - df_effect * MS_error) / (SS_total + MS_error)` is the Hays estimator
-///   as tabulated by Olejnik & Algina (2003).
-/// - Cohen's `f = sqrt(eta_p^2 / (1 - eta_p^2))` (Cohen, 1988, ch. 8). Cohen defines `f` from
-///   `eta^2`; this uses partial `eta^2`, which coincides with `eta^2` only for one-way designs.
-/// - The confidence interval inverts the noncentral-*F* distribution for the noncentrality
-///   `lambda` and maps it via `lambda / (lambda + N)` (Steiger, 2004), with
-///   `N = df_effect + df_error + 1`. That `N` equals the total sample size only for one-way
-///   designs.
-/// - Note: `eta_squared_ci` is set to the partial-`eta^2` interval. The two agree only when
-///   `SS_total = SS_effect + SS_error` (one-way); for multi-term designs it is not an interval for
-///   `eta^2`.
+/// - `omega^2 = (SS_effect - df_effect * MS_error) / (SS_total + MS_error)` (Hays estimator per
+///   Olejnik & Algina, 2003).
+/// - Cohen's `f = sqrt(eta_p^2 / (1 - eta_p^2))` (Cohen, 1988, ch. 8; returns `+inf` when
+///   `eta_p^2 = 1.0`).
+/// - For one-way designs (`SS_effect + SS_error == SS_total`), `N = df_effect + df_error + 1` is
+///   exact and `eta_squared == partial_eta_squared`, so Steiger (2004) noncentral-*F* intervals are
+///   computed automatically. For multi-way designs where `SS_effect + SS_error != SS_total`, the
+///   omitted factor degrees of freedom are unknown from `(df_effect, df_error)` alone and
+///   `eta_squared != partial_eta_squared`; call [`compute_anova_effect_sizes_for_n`] with the true
+///   `total_n` instead (this 6-argument helper returns `None` for the confidence intervals).
 pub fn compute_anova_effect_sizes(
     ss_effect: f64,
     ss_error: f64,
@@ -322,35 +368,90 @@ pub fn compute_anova_effect_sizes(
     df_error: f64,
     confidence: ConfidenceLevel,
 ) -> AnovaEffectSizes {
+    let is_one_way = ((ss_effect + ss_error) - ss_total).abs() <= 1e-9 * ss_total.max(1e-30);
+    if is_one_way {
+        let total_n = (df_effect + df_error + 1.0).round().max(1.0) as usize;
+        return compute_anova_effect_sizes_for_n(ss_effect, ss_error, ss_total, df_effect, df_error, total_n, confidence);
+    }
+
     let ms_error = if df_error > 0.0 { ss_error / df_error } else { 0.0 };
     let eta2 = if ss_total > 0.0 { (ss_effect / ss_total).clamp(0.0, 1.0) } else { 0.0 };
     let partial_eta2 = if ss_effect + ss_error > 0.0 { (ss_effect / (ss_effect + ss_error)).clamp(0.0, 1.0) } else { 0.0 };
     let omega2_denom = ss_total + ms_error;
     let omega2 = if omega2_denom > 0.0 { ((ss_effect - df_effect * ms_error) / omega2_denom).clamp(0.0, 1.0) } else { 0.0 };
-    let cohens_f = if partial_eta2 < 1.0 { (partial_eta2 / (1.0 - partial_eta2)).sqrt() } else { 0.0 };
+    let cohens_f = if partial_eta2 < 1.0 {
+        (partial_eta2 / (1.0 - partial_eta2)).sqrt()
+    } else if partial_eta2 > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+
+    AnovaEffectSizes {
+        eta_squared: eta2,
+        eta_squared_ci: None,
+        partial_eta_squared: partial_eta2,
+        partial_eta_squared_ci: None,
+        omega_squared: omega2,
+        cohens_f,
+        cohens_f_ci: None,
+    }
+}
+
+/// Compute ANOVA effect sizes (`eta^2`, `partial eta^2`, `omega^2`, Cohen's `f`) and exact
+/// Steiger (2004) noncentral-*F* confidence intervals for `partial_eta_squared` and `cohens_f`
+/// using an explicit total sample size `total_n`.
+///
+/// For one-way designs (`SS_effect + SS_error == SS_total`), `eta_squared_ci` coincides with
+/// `partial_eta_squared_ci`. For multi-way designs (`SS_effect + SS_error != SS_total`),
+/// `partial_eta_squared_ci` uses `lambda / (lambda + total_n)` per Steiger (2004, eq. 16) while
+/// `eta_squared_ci` is left `None` because the noncentral-*F* pivot parameterizes `partial eta^2`,
+/// not classical `eta^2 = SS_effect / SS_total`.
+pub fn compute_anova_effect_sizes_for_n(
+    ss_effect: f64,
+    ss_error: f64,
+    ss_total: f64,
+    df_effect: f64,
+    df_error: f64,
+    total_n: usize,
+    confidence: ConfidenceLevel,
+) -> AnovaEffectSizes {
+    let ms_error = if df_error > 0.0 { ss_error / df_error } else { 0.0 };
+    let eta2 = if ss_total > 0.0 { (ss_effect / ss_total).clamp(0.0, 1.0) } else { 0.0 };
+    let partial_eta2 = if ss_effect + ss_error > 0.0 { (ss_effect / (ss_effect + ss_error)).clamp(0.0, 1.0) } else { 0.0 };
+    let omega2_denom = ss_total + ms_error;
+    let omega2 = if omega2_denom > 0.0 { ((ss_effect - df_effect * ms_error) / omega2_denom).clamp(0.0, 1.0) } else { 0.0 };
+    let cohens_f = if partial_eta2 < 1.0 {
+        (partial_eta2 / (1.0 - partial_eta2)).sqrt()
+    } else if partial_eta2 > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
 
     let f_obs = if ms_error > 0.0 && df_effect > 0.0 { (ss_effect / df_effect) / ms_error } else { 0.0 };
-    let total_df_n = df_effect + df_error + 1.0;
-    let ncf_ci = if f_obs.is_finite() && df_effect >= 1.0 && df_error >= 1.0 {
+    let total_n_f = total_n as f64;
+    let ncf_ci = if total_n > 0 && f_obs.is_finite() && df_effect >= 1.0 && df_error >= 1.0 {
         noncentral_f_ci(f_obs.max(0.0), df_effect, df_error, confidence.percent()).ok()
     } else {
         None
     };
 
     let partial_eta_ci = ncf_ci.map(|(lo, hi)| {
-        let p_lo = (lo / (lo + total_df_n)).clamp(0.0, 1.0);
-        let p_hi = (hi / (hi + total_df_n)).clamp(0.0, 1.0);
+        let p_lo = (lo / (lo + total_n_f)).clamp(0.0, 1.0);
+        let p_hi = (hi / (hi + total_n_f)).clamp(0.0, 1.0);
         (p_lo, p_hi)
     });
     let cohens_f_ci = partial_eta_ci.map(|(p_lo, p_hi)| {
-        let f_lo = if p_lo < 1.0 { (p_lo / (1.0 - p_lo)).sqrt() } else { 0.0 };
+        let f_lo = if p_lo < 1.0 { (p_lo / (1.0 - p_lo)).sqrt() } else { f64::INFINITY };
         let f_hi = if p_hi < 1.0 { (p_hi / (1.0 - p_hi)).sqrt() } else { f64::INFINITY };
         (f_lo, f_hi)
     });
+    let is_one_way = ((ss_effect + ss_error) - ss_total).abs() <= 1e-9 * ss_total.max(1e-30);
 
     AnovaEffectSizes {
         eta_squared: eta2,
-        eta_squared_ci: partial_eta_ci,
+        eta_squared_ci: if is_one_way { partial_eta_ci } else { None },
         partial_eta_squared: partial_eta2,
         partial_eta_squared_ci: partial_eta_ci,
         omega_squared: omega2,
@@ -407,6 +508,8 @@ pub fn variance_homogeneity_tests(groups: &[&[f64]]) -> Result<VarianceHomogenei
         let c = 1.0 + (sum_inv_df.total() - 1.0 / total_df) / (3.0 * (k - 1.0));
         let stat = (num / c).max(0.0);
         (stat, chi2_sf(stat, k - 1.0)?)
+    } else if pooled_var > 0.0 {
+        (f64::INFINITY, 0.0)
     } else {
         (0.0, 1.0)
     };
@@ -769,7 +872,7 @@ pub fn rm_one_way_anova(blocks: &[Vec<f64>]) -> Result<RmOneWayAnovaResult, Stat
     let (f_treat, p_uncorr) = f_ratio_p(mst, msr, dft, dfr)?;
     let (f_subj, p_subj) = f_ratio_p(mss, msr, dfs, dfr)?;
 
-    let sphericity = compute_sphericity(blocks, &col_means)?;
+    let sphericity = compute_sphericity(blocks)?;
     let gg_df1 = (dft * sphericity.greenhouse_geisser_eps).max(1.0);
     let gg_df2 = (dfr * sphericity.greenhouse_geisser_eps).max(1.0);
     let hf_df1 = (dft * sphericity.huynh_feldt_eps).max(1.0);
@@ -803,50 +906,10 @@ pub fn rm_one_way_anova(blocks: &[Vec<f64>]) -> Result<RmOneWayAnovaResult, Stat
     })
 }
 
-/// Compute Mauchly's `W` and Greenhouse–Geisser / Huynh–Feldt sphericity epsilons from an `n x k`
-/// repeated-measures matrix via orthonormal Helmert contrast projection `C^T S C`.
-///
-/// - Mauchly (1940) `W = det(C S C^T) / (tr(C S C^T) / p)^p` with `p = k - 1`, using the
-///   chi-square approximation `-(n - 1 - (2p^2 + p + 2) / (6p)) ln W` on `p(p + 1)/2 - 1` df.
-/// - Greenhouse & Geisser (1959) `epsilon_hat = (sum lambda)^2 / (p sum lambda^2)`, bounded
-///   below by `1/p`.
-/// - Huynh & Feldt (1976) single-group `epsilon_tilde = (n p epsilon_hat - 2) /
-///   (p (n - 1 - p epsilon_hat))`, truncated to `[epsilon_hat, 1]`.
-///
-/// Note: this treats the `n` rows as one group. Huynh & Feldt's split-plot form uses the pooled
-/// within-group covariance and `N - g` in place of `n - 1`; it is not implemented here.
-fn compute_sphericity(blocks: &[Vec<f64>], col_means: &[f64]) -> Result<SphericityResult, StatsError> {
-    let n = blocks.len();
-    let k = col_means.len();
-    if k <= 2 || n <= 2 {
-        return Ok(SphericityResult {
-            mauchly_w: 1.0,
-            mauchly_chi2: 0.0,
-            mauchly_df: 0.0,
-            mauchly_p: 1.0,
-            greenhouse_geisser_eps: 1.0,
-            huynh_feldt_eps: 1.0,
-        });
+fn helmert_contrast_matrix(k: usize) -> Result<DenseMatrix, StatsError> {
+    if k <= 1 {
+        return Ok(DenseMatrix::zeros(0, k)?);
     }
-    let nf = n as f64;
-    let _kf = k as f64;
-    let df_s = nf - 1.0;
-
-    // Sample covariance matrix S (k x k).
-    let mut s_cov = vec![0.0_f64; k * k];
-    for r in 0..k {
-        for c in r..k {
-            let mut acc = NeumaierSum::new();
-            for row in blocks {
-                acc.add((row[r] - col_means[r]) * (row[c] - col_means[c]));
-            }
-            let val = acc.total() / df_s;
-            s_cov[r * k + c] = val;
-            s_cov[c * k + r] = val;
-        }
-    }
-
-    // Orthonormal Helmert contrast matrix H ((k - 1) x k).
     let p = k - 1;
     let mut h_mat = DenseMatrix::zeros(p, k)?;
     for i in 0..p {
@@ -857,43 +920,160 @@ fn compute_sphericity(blocks: &[Vec<f64>], col_means: &[f64]) -> Result<Spherici
         }
         h_mat.set(i, i + 1, -m / norm)?;
     }
+    Ok(h_mat)
+}
 
-    let s_mat = DenseMatrix::from_row_major(k, k, s_cov)?;
-    let hs = h_mat.matmul(&s_mat)?;
-    let c_cov = hs.matmul(&h_mat.transpose())?;
-    let eig = sym_eigen(&c_cov)?;
-    let mut eigvals: Vec<f64> = eig.eigenvalues.iter().map(|&x| x.max(0.0)).collect();
+fn unit_row_vector(k: usize) -> Result<DenseMatrix, StatsError> {
+    let val = if k > 0 { 1.0 / (k as f64).sqrt() } else { 0.0 };
+    Ok(DenseMatrix::from_row_major(1, k, vec![val; k])?)
+}
 
-    let tr = eigvals.iter().sum::<f64>();
-    let tr_sq = eigvals.iter().map(|&l| l * l).sum::<f64>();
-    let pf = p as f64;
-    let eps_gg = if tr_sq > 0.0 { ((tr * tr) / (pf * tr_sq)).clamp(1.0 / pf, 1.0) } else { 1.0 };
-    let eps_hf = ((nf * pf * eps_gg - 2.0) / (pf * (nf - 1.0 - pf * eps_gg))).clamp(eps_gg, 1.0);
-
-    // Mauchly's W = det(C) / (tr(C)/p)^p.
-    for v in &mut eigvals {
-        *v = v.max(1e-18);
+fn kronecker_dense(a: &DenseMatrix, b: &DenseMatrix) -> Result<DenseMatrix, StatsError> {
+    let ra = a.nrows();
+    let ca = a.ncols();
+    let rb = b.nrows();
+    let cb = b.ncols();
+    let rows = ra * rb;
+    let cols = ca * cb;
+    let mut data = vec![0.0_f64; rows * cols];
+    for ia in 0..ra {
+        for ja in 0..ca {
+            let av = a.get(ia, ja).unwrap_or(0.0);
+            for ib in 0..rb {
+                let r = ia * rb + ib;
+                for jb in 0..cb {
+                    let c = ja * cb + jb;
+                    data[r * cols + c] = av * b.get(ib, jb).unwrap_or(0.0);
+                }
+            }
+        }
     }
-    let prod: f64 = eigvals.iter().product();
-    let mean_eig = (tr / pf).max(1e-18);
-    let w = (prod / mean_eig.powf(pf)).clamp(1e-15, 1.0);
+    Ok(DenseMatrix::from_row_major(rows, cols, data)?)
+}
+
+fn pooled_within_group_cov(groups: &[Vec<Vec<f64>>]) -> Result<DenseMatrix, StatsError> {
+    let k = groups.first().and_then(|g| g.first()).map_or(0, Vec::len);
+    if k == 0 {
+        return Err(StatsError::EmptyInput);
+    }
+    let mut total_df = 0.0_f64;
+    let mut s_sum = vec![0.0_f64; k * k];
+    for grp in groups {
+        let n_g = grp.len();
+        if n_g < 2 {
+            continue;
+        }
+        let ng_f = n_g as f64;
+        let mut means = vec![0.0_f64; k];
+        for row in grp {
+            if row.len() != k {
+                return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: k, actual: row.len() }));
+            }
+            for (c, &v) in row.iter().enumerate() {
+                means[c] += v / ng_f;
+            }
+        }
+        total_df += ng_f - 1.0;
+        for r in 0..k {
+            for c in r..k {
+                let mut acc = NeumaierSum::new();
+                for row in grp {
+                    acc.add((row[r] - means[r]) * (row[c] - means[c]));
+                }
+                s_sum[r * k + c] += acc.total();
+            }
+        }
+    }
+    if total_df <= 0.0 {
+        return Err(StatsError::InsufficientSampleSize { context: "within-group covariance df", required: 2, actual: 0 });
+    }
+    for r in 0..k {
+        for c in r..k {
+            let val = s_sum[r * k + c] / total_df;
+            s_sum[r * k + c] = val;
+            s_sum[c * k + r] = val;
+        }
+    }
+    Ok(DenseMatrix::from_row_major(k, k, s_sum)?)
+}
+
+/// Compute Mauchly's `W` and Greenhouse–Geisser / Huynh–Feldt sphericity epsilons from a covariance
+/// matrix `S` (`df_e` error df, `n_subj` total subjects) via an orthonormal contrast projection `M S M^T`.
+///
+/// - Mauchly (1940) `W = det(C) / (tr(C)/p)^p` using chi-square approximation on `p(p + 1)/2 - 1` df.
+/// - Greenhouse & Geisser (1959) `epsilon_hat = (sum lambda)^2 / (p sum lambda^2)` bounded in `[1/p, 1]`.
+/// - Huynh & Feldt (1976, p. 74) `epsilon_tilde = (N p epsilon_hat - 2) / (p (df_e - p epsilon_hat))`,
+///   clamped to `[epsilon_hat, 1]` (returning `1` when `df_e <= p * epsilon_hat`).
+fn compute_sphericity_from_cov_contrast(s_cov: &DenseMatrix, contrast: &DenseMatrix, df_e: f64, n_subj: f64) -> Result<SphericityResult, StatsError> {
+    let p = contrast.nrows();
+    if p <= 1 || df_e <= 1.0 {
+        return Ok(SphericityResult {
+            mauchly_w: 1.0,
+            mauchly_chi2: 0.0,
+            mauchly_df: 0.0,
+            mauchly_p: 1.0,
+            greenhouse_geisser_eps: 1.0,
+            huynh_feldt_eps: 1.0,
+        });
+    }
+    let c_cov = symmetrize_dense(&contrast.matmul(s_cov)?.matmul(&contrast.transpose())?)?;
+    let eig = sym_eigen(&c_cov)?;
+    let eigvals: Vec<f64> = eig.eigenvalues.iter().map(|&x| x.max(0.0)).collect();
+    let tr: f64 = eigvals.iter().sum();
+    let tr_sq: f64 = eigvals.iter().map(|&l| l * l).sum();
+    if tr <= 0.0 || tr_sq <= 0.0 {
+        return Ok(SphericityResult {
+            mauchly_w: 1.0,
+            mauchly_chi2: 0.0,
+            mauchly_df: 0.0,
+            mauchly_p: 1.0,
+            greenhouse_geisser_eps: 1.0,
+            huynh_feldt_eps: 1.0,
+        });
+    }
+    let pf = p as f64;
+    let eps_gg = ((tr * tr) / (pf * tr_sq)).clamp(1.0 / pf, 1.0);
+    let hf_denom = pf * (df_e - pf * eps_gg);
+    let eps_hf = if hf_denom > 0.0 { ((n_subj * pf * eps_gg - 2.0) / hf_denom).clamp(eps_gg, 1.0) } else { 1.0 };
+
+    // Normalize eigenvalues by mean_eig = tr / p before taking logs so Mauchly W is scale-invariant.
+    let mean_eig = tr / pf;
+    let ln_w: f64 = eigvals.iter().map(|&v| (v / mean_eig).max(1e-15).ln()).sum::<f64>().min(0.0);
+    let w = ln_w.exp().clamp(1e-15, 1.0);
     let m_df = 0.5 * pf * (pf + 1.0) - 1.0;
-    let f_scale = 1.0 - (2.0 * pf * pf + pf + 2.0) / (6.0 * pf * df_s);
-    let chi2 = (-df_s * f_scale * w.ln()).max(0.0);
+    let f_scale = (1.0 - (2.0 * pf * pf + pf + 2.0) / (6.0 * pf * df_e)).max(0.0);
+    let chi2 = (-df_e * f_scale * ln_w).max(0.0);
     let mauchly_p = if m_df > 0.0 { chi2_sf(chi2, m_df)? } else { 1.0 };
 
     Ok(SphericityResult { mauchly_w: w, mauchly_chi2: chi2, mauchly_df: m_df, mauchly_p, greenhouse_geisser_eps: eps_gg, huynh_feldt_eps: eps_hf })
 }
 
-/// Kruskal–Wallis one-way ANOVA on ranks with tie correction and epsilon-squared effect size.
+fn compute_sphericity(blocks: &[Vec<f64>]) -> Result<SphericityResult, StatsError> {
+    let n = blocks.len();
+    let k = blocks.first().map_or(0, Vec::len);
+    if k <= 2 || n <= 2 {
+        return Ok(SphericityResult {
+            mauchly_w: 1.0,
+            mauchly_chi2: 0.0,
+            mauchly_df: 0.0,
+            mauchly_p: 1.0,
+            greenhouse_geisser_eps: 1.0,
+            huynh_feldt_eps: 1.0,
+        });
+    }
+    let s_cov = pooled_within_group_cov(&[blocks.to_vec()])?;
+    let h_mat = helmert_contrast_matrix(k)?;
+    let nf = n as f64;
+    compute_sphericity_from_cov_contrast(&s_cov, &h_mat, nf - 1.0, nf)
+}
+
+/// Kruskal–Wallis one-way ANOVA on ranks with tie correction and rank epsilon-squared effect size.
 ///
 /// `H = 12 / (N (N + 1)) sum R_i^2 / n_i - 3 (N + 1)`, divided by the tie correction
 /// `1 - sum (t^3 - t) / (N^3 - N)` and referred to `chi^2(k - 1)` (Kruskal & Wallis, 1952;
-/// Zar, 2010, ch. 10).
+/// Zar, 2010, ch. 10). When all values are tied (`tie_correction = 0`), reports `H = 0` and `p = 1`.
 ///
-/// Note: the effect size is computed as `(H - (k - 1)) / (N - 1)`. This is neither the usual rank
-/// epsilon-squared `H / (N - 1)` nor eta-squared-H `(H - k + 1) / (N - k)`; no published source
-/// for this exact form has been identified.
+/// Effect size is rank epsilon-squared `epsilon^2_R = H / (N - 1)` (Tomczak & Tomczak, 2014, eq. 5).
 pub fn kruskal_wallis_test(groups: &[&[f64]]) -> Result<KruskalWallisResult, StatsError> {
     if groups.len() < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "ANOVA groups", required: 2, actual: groups.len() });
@@ -925,10 +1105,10 @@ pub fn kruskal_wallis_test(groups: &[&[f64]]) -> Result<KruskalWallisResult, Sta
 
     let h_raw = (12.0 / (nf * (nf + 1.0))) * h_sum - 3.0 * (nf + 1.0);
     let tie_denom = 1.0 - ranked.tie_sum_t3_minus_t / (nf * nf * nf - nf);
-    let (h_corr, tie_factor) = if tie_denom > 0.0 { (h_raw.max(0.0) / tie_denom, tie_denom) } else { (0.0, 1.0) };
+    let (h_corr, tie_factor) = if tie_denom > 1e-15 { (h_raw.max(0.0) / tie_denom, tie_denom) } else { (0.0, 0.0) };
     let df = (groups.len() - 1) as f64;
     let p_value = chi2_sf(h_corr, df)?;
-    let eps2 = ((h_corr - df) / (nf - 1.0)).clamp(0.0, 1.0);
+    let eps2 = (h_corr / (nf - 1.0)).clamp(0.0, 1.0);
 
     Ok(KruskalWallisResult { h_statistic: h_corr, df, p_value, tie_correction: tie_factor, epsilon_squared: eps2, group_mean_ranks, total_n })
 }
@@ -1075,7 +1255,7 @@ pub fn fit_factorial_anova(
                 let red_x = columns_to_matrix(&dropped_cols, n_obs)?;
                 let (red_sol, _) = solve_linear_least_squares(&red_x, &y)?;
                 let ss_t = (red_sol.rss - ss_resid).max(0.0);
-                let df_t = (full_sol.rank.saturating_sub(red_sol.rank)).max(1) as f64;
+                let df_t = full_sol.rank.saturating_sub(red_sol.rank) as f64;
                 out_terms.push(build_factorial_term(&t.name, ss_t, df_t, ms_resid, ss_resid, ss_total)?);
             }
         }
@@ -1088,7 +1268,7 @@ pub fn fit_factorial_anova(
                 let seq_x = columns_to_matrix(&prev_cols, n_obs)?;
                 let (seq_sol, _) = solve_linear_least_squares(&seq_x, &y)?;
                 let ss_t = (prev_rss - seq_sol.rss).max(0.0);
-                let df_t = (seq_sol.rank.saturating_sub(prev_rank)).max(1) as f64;
+                let df_t = seq_sol.rank.saturating_sub(prev_rank) as f64;
                 prev_rss = seq_sol.rss;
                 prev_rank = seq_sol.rank;
                 out_terms.push(build_factorial_term(&t.name, ss_t, df_t, ms_resid, ss_resid, ss_total)?);
@@ -1112,7 +1292,19 @@ pub fn fit_factorial_anova(
 }
 
 fn build_factorial_term(name: &str, ss: f64, df: f64, ms_resid: f64, ss_resid: f64, ss_total: f64) -> Result<FactorialAnovaTerm, StatsError> {
-    let ms = ss / df.max(1.0);
+    if df <= 0.0 {
+        return Ok(FactorialAnovaTerm {
+            name: name.to_owned(),
+            ss: 0.0,
+            df: 0.0,
+            ms: 0.0,
+            f_statistic: None,
+            p_value: None,
+            partial_eta_squared: None,
+            eta_squared: None,
+        });
+    }
+    let ms = ss / df;
     let f_val = if ms_resid > 0.0 {
         ms / ms_resid
     } else if ms > 0.0 {
@@ -1134,8 +1326,10 @@ fn build_factorial_term(name: &str, ss: f64, df: f64, ms_resid: f64, ss_resid: f
 
 fn finalize_term_p_values(res: &mut FactorialAnovaResult) -> Result<(), StatsError> {
     for t in &mut res.terms {
-        if let Some(f_val) = t.f_statistic {
-            t.p_value = Some(f_sf(f_val, t.df.max(1.0), res.df_residual.max(1.0))?);
+        if t.df > 0.0
+            && let Some(f_val) = t.f_statistic
+        {
+            t.p_value = Some(f_sf(f_val, t.df, res.df_residual.max(1.0))?);
         }
     }
     Ok(())
@@ -1214,25 +1408,112 @@ fn is_design_unbalanced(rows: &[(Vec<usize>, f64)], levels: &[Vec<String>]) -> b
 // Repeated-Measures Two-Way ANOVA & Mixed-Effects REML
 // ============================================================================
 
-/// Repeated-measures two-way ANOVA (`RowFactorMatched`, `ColumnFactorMatched`, or `BothFactorsMatched`)
-/// on complete balanced subject blocks `subject_data[subject][row][col]`.
+fn apply_rm_sphericity_p(
+    f_val: f64,
+    df_num: f64,
+    df_den: f64,
+    sph: Option<&SphericityResult>,
+    correction: RmSphericityCorrection,
+) -> Result<f64, StatsError> {
+    let eps = match (correction, sph) {
+        (RmSphericityCorrection::None, _) | (_, None) => 1.0,
+        (RmSphericityCorrection::GreenhouseGeisser, Some(s)) => s.greenhouse_geisser_eps,
+        (RmSphericityCorrection::HuynhFeldt, Some(s)) => s.huynh_feldt_eps,
+    };
+    let adj_df1 = (df_num * eps).max(1e-12);
+    let adj_df2 = (df_den * eps).max(1e-12);
+    Ok(f_sf(f_val, adj_df1, adj_df2)?)
+}
+
+fn compute_rm_two_way_sphericities(
+    subject_data: &[Vec<Vec<f64>>],
+    a: usize,
+    b: usize,
+    rm_design: RepeatedMeasuresDesign,
+) -> Result<RmTwoWaySphericities, StatsError> {
+    let s_count = subject_data.len();
+    let sf = s_count as f64;
+    let af = a as f64;
+    let bf = b as f64;
+    match rm_design {
+        RepeatedMeasuresDesign::BothFactorsMatched => {
+            let mut y_flat = Vec::with_capacity(s_count);
+            for mat in subject_data {
+                let mut row = Vec::with_capacity(a * b);
+                for r_vec in mat {
+                    row.extend_from_slice(r_vec);
+                }
+                y_flat.push(row);
+            }
+            let s_cov = pooled_within_group_cov(&[y_flat])?;
+            let ha = helmert_contrast_matrix(a)?;
+            let hb = helmert_contrast_matrix(b)?;
+            let ua = unit_row_vector(a)?;
+            let ub = unit_row_vector(b)?;
+            let m_row = kronecker_dense(&ha, &ub)?;
+            let m_col = kronecker_dense(&ua, &hb)?;
+            let m_int = kronecker_dense(&ha, &hb)?;
+            let df_e = sf - 1.0;
+            Ok(RmTwoWaySphericities {
+                row: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_row, df_e, sf)?),
+                column: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_col, df_e, sf)?),
+                interaction: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_int, df_e, sf)?),
+            })
+        }
+        RepeatedMeasuresDesign::ColumnFactorMatched => {
+            let mut groups = vec![Vec::with_capacity(s_count); a];
+            for mat in subject_data {
+                for i in 0..a {
+                    groups[i].push(mat[i].clone());
+                }
+            }
+            let s_pool = pooled_within_group_cov(&groups)?;
+            let m_col = helmert_contrast_matrix(b)?;
+            let n_subj = af * sf;
+            let df_e = n_subj - af;
+            let sph_col = compute_sphericity_from_cov_contrast(&s_pool, &m_col, df_e, n_subj)?;
+            Ok(RmTwoWaySphericities { row: None, column: Some(sph_col), interaction: None })
+        }
+        RepeatedMeasuresDesign::RowFactorMatched => {
+            let mut groups = vec![Vec::with_capacity(s_count); b];
+            for mat in subject_data {
+                for j in 0..b {
+                    let mut vec_subj = Vec::with_capacity(a);
+                    for r_vec in mat.iter().take(a) {
+                        vec_subj.push(r_vec[j]);
+                    }
+                    groups[j].push(vec_subj);
+                }
+            }
+            let s_pool = pooled_within_group_cov(&groups)?;
+            let m_row = helmert_contrast_matrix(a)?;
+            let n_subj = bf * sf;
+            let df_e = n_subj - bf;
+            let sph_row = compute_sphericity_from_cov_contrast(&s_pool, &m_row, df_e, n_subj)?;
+            Ok(RmTwoWaySphericities { row: Some(sph_row), column: None, interaction: None })
+        }
+        RepeatedMeasuresDesign::None => Ok(RmTwoWaySphericities::default()),
+    }
+}
+
+/// Repeated-measures two-way ANOVA (`RowFactorMatched`, `ColumnFactorMatched`, or
+/// `BothFactorsMatched`) on complete balanced subject blocks `subject_data[subject][row][col]`,
+/// returning separate sphericity diagnostics for all within-subject factors and applying the
+/// requested [`RmSphericityCorrection`] (`None`, `GreenhouseGeisser`, or `HuynhFeldt`) directly
+/// to the *F*-test *p*-values.
 ///
-/// Expected-mean-square error strata follow Maxwell & Delaney (2004, ch. 12).
-/// - Both factors within subjects: `A`, `B`, `A × B` are tested against `S × A`, `S × B`, and
-///   `S × A × B`.
-/// - Split-plot designs: the between-subject factor is tested against `S(between)`; the
-///   within-subject factor and the interaction are tested against `S(between) × within`.
-///
-/// The returned F-tests are uncorrected. The optional [`SphericityResult`] is computed only for
-/// the single within factor (the column factor when both are matched). For split-plot designs
-/// it is computed from subject means averaged across the between-factor levels, not from the
-/// pooled within-group covariance used by Huynh & Feldt (1976).
-pub fn fit_rm_two_way_anova(
+/// - When `BothFactorsMatched`, sphericity matrices come from the Kronecker orthonormal Helmert
+///   contrasts `H_A x u_B`, `u_A x H_B`, and `H_A x H_B` on the subject covariance matrix (`df_e = S - 1`).
+/// - For split-plot designs (`ColumnFactorMatched` / `RowFactorMatched`), sphericity is computed from
+///   the pooled within-group covariance matrix on `df_error = N - g` (Huynh & Feldt, 1976, p. 71)
+///   and applied to both the within-subject main effect and the interaction term.
+pub fn fit_rm_two_way_anova_with_sphericity(
     subject_data: &[Vec<Vec<f64>>],
     row_name: &str,
     col_name: &str,
     rm_design: RepeatedMeasuresDesign,
-) -> Result<(FactorialAnovaResult, Option<SphericityResult>), StatsError> {
+    correction: RmSphericityCorrection,
+) -> Result<RmTwoWayAnovaResult, StatsError> {
     let s_count = subject_data.len();
     if s_count < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "RM two-way subjects", required: 2, actual: s_count });
@@ -1257,8 +1538,14 @@ pub fn fit_rm_two_way_anova(
     let mut data_max_abs = 0.0_f64;
 
     for (s, mat) in subject_data.iter().enumerate() {
+        if mat.len() != a {
+            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: a, actual: mat.len() }));
+        }
         let mut s_acc = NeumaierSum::new();
         for (i, r_vec) in mat.iter().enumerate() {
+            if r_vec.len() != b {
+                return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: b, actual: r_vec.len() }));
+            }
             for (j, &v) in r_vec.iter().enumerate() {
                 if !v.is_finite() {
                     return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "y", value: v }));
@@ -1320,321 +1607,977 @@ pub fn fit_rm_two_way_anova(
     let dfab = dfa * dfb;
     let ss_total = ss_a + ss_b + ss_ab + ss_s + ss_sa + ss_sb + ss_sab;
 
-    // Select appropriate error terms per RepeatedMeasuresDesign.
-    let (err_a_ss, err_a_df, err_b_ss, err_b_df, err_ab_ss, err_ab_df, sph) = match rm_design {
-        RepeatedMeasuresDesign::BothFactorsMatched => {
-            let sph = compute_sphericity(&subj_col_means, &col_means).ok();
-            (ss_sa, (sf - 1.0) * dfa, ss_sb, (sf - 1.0) * dfb, ss_sab, (sf - 1.0) * dfab, sph)
-        }
+    let sphericities = compute_rm_two_way_sphericities(subject_data, a, b, rm_design)?;
+    let (err_a_ss, err_a_df, err_b_ss, err_b_df, err_ab_ss, err_ab_df, term_sphs) = match rm_design {
+        RepeatedMeasuresDesign::BothFactorsMatched => (
+            ss_sa,
+            (sf - 1.0) * dfa,
+            ss_sb,
+            (sf - 1.0) * dfb,
+            ss_sab,
+            (sf - 1.0) * dfab,
+            [sphericities.row.as_ref(), sphericities.column.as_ref(), sphericities.interaction.as_ref()],
+        ),
         RepeatedMeasuresDesign::ColumnFactorMatched => {
-            // Subjects nested in Row (Factor A); Factor B and AxB tested against Subject(A)xB.
             let ss_subj_within_a = ss_s + ss_sa;
             let df_subj_within_a = af * (sf - 1.0);
             let ss_err_within = ss_sb + ss_sab;
             let df_err_within = af * (sf - 1.0) * dfb;
-            let sph = compute_sphericity(&subj_col_means, &col_means).ok();
-            (ss_subj_within_a, df_subj_within_a, ss_err_within, df_err_within, ss_err_within, df_err_within, sph)
+            (
+                ss_subj_within_a,
+                df_subj_within_a,
+                ss_err_within,
+                df_err_within,
+                ss_err_within,
+                df_err_within,
+                [None, sphericities.column.as_ref(), sphericities.column.as_ref()],
+            )
         }
         RepeatedMeasuresDesign::RowFactorMatched => {
-            // Subjects nested in Column (Factor B); Factor A and AxB tested against Subject(B)xA.
             let ss_subj_within_b = ss_s + ss_sb;
             let df_subj_within_b = bf * (sf - 1.0);
             let ss_err_within = ss_sa + ss_sab;
             let df_err_within = bf * (sf - 1.0) * dfa;
-            let sph = compute_sphericity(&subj_row_means, &row_means).ok();
-            (ss_err_within, df_err_within, ss_subj_within_b, df_subj_within_b, ss_err_within, df_err_within, sph)
+            (
+                ss_err_within,
+                df_err_within,
+                ss_subj_within_b,
+                df_subj_within_b,
+                ss_err_within,
+                df_err_within,
+                [sphericities.row.as_ref(), None, sphericities.row.as_ref()],
+            )
         }
         RepeatedMeasuresDesign::None => {
             let df_res = (total_n as f64) - af * bf;
             let ss_res = ss_s + ss_sa + ss_sb + ss_sab;
-            (ss_res, df_res, ss_res, df_res, ss_res, df_res, None)
+            (ss_res, df_res, ss_res, df_res, ss_res, df_res, [None, None, None])
         }
     };
 
-    let make_term = |name: String, ss: f64, df: f64, e_ss: f64, e_df: f64| -> Result<FactorialAnovaTerm, StatsError> {
-        let ms = ss / df.max(1.0);
-        let ms_e = e_ss / e_df.max(1.0);
-        let (f, p) = f_ratio_p(ms, ms_e, df.max(1.0), e_df.max(1.0))?;
-        Ok(FactorialAnovaTerm {
-            name,
-            ss,
-            df,
-            ms,
-            f_statistic: Some(f),
-            p_value: Some(p),
-            partial_eta_squared: Some(if ss + e_ss > 0.0 { ss / (ss + e_ss) } else { 0.0 }),
-            eta_squared: Some(if ss_total > 0.0 { ss / ss_total } else { 0.0 }),
-        })
-    };
+    let make_term =
+        |name: String, ss: f64, df: f64, e_ss: f64, e_df: f64, sph_opt: Option<&SphericityResult>| -> Result<FactorialAnovaTerm, StatsError> {
+            let ms = ss / df.max(1.0);
+            let ms_e = e_ss / e_df.max(1.0);
+            let (f, _) = f_ratio_p(ms, ms_e, df.max(1.0), e_df.max(1.0))?;
+            let p = apply_rm_sphericity_p(f, df.max(1.0), e_df.max(1.0), sph_opt, correction)?;
+            Ok(FactorialAnovaTerm {
+                name,
+                ss,
+                df,
+                ms,
+                f_statistic: Some(f),
+                p_value: Some(p),
+                partial_eta_squared: Some(if ss + e_ss > 0.0 { ss / (ss + e_ss) } else { 0.0 }),
+                eta_squared: Some(if ss_total > 0.0 { ss / ss_total } else { 0.0 }),
+            })
+        };
 
     let terms = vec![
-        make_term(row_name.to_owned(), ss_a, dfa, err_a_ss, err_a_df)?,
-        make_term(col_name.to_owned(), ss_b, dfb, err_b_ss, err_b_df)?,
-        make_term(format!("{row_name} × {col_name}"), ss_ab, dfab, err_ab_ss, err_ab_df)?,
+        make_term(row_name.to_owned(), ss_a, dfa, err_a_ss, err_a_df, term_sphs[0])?,
+        make_term(col_name.to_owned(), ss_b, dfb, err_b_ss, err_b_df, term_sphs[1])?,
+        make_term(format!("{row_name} × {col_name}"), ss_ab, dfab, err_ab_ss, err_ab_df, term_sphs[2])?,
     ];
 
     let df_resid = err_ab_df;
     let ms_resid = err_ab_ss / df_resid.max(1.0);
-    Ok((
-        FactorialAnovaResult {
-            terms,
-            ss_residual: err_ab_ss,
-            df_residual: df_resid,
-            ms_residual: ms_resid,
-            ss_total,
-            df_total: (total_n - 1) as f64,
-            total_n,
-            unbalanced: false,
-            ss_type: SumOfSquaresType::TypeIII,
-        },
-        sph,
-    ))
+    let anova = FactorialAnovaResult {
+        terms,
+        ss_residual: err_ab_ss,
+        df_residual: df_resid,
+        ms_residual: ms_resid,
+        ss_total,
+        df_total: (total_n - 1) as f64,
+        total_n,
+        unbalanced: false,
+        ss_type: SumOfSquaresType::TypeIII,
+    };
+    Ok(RmTwoWayAnovaResult { anova, design: rm_design, sphericities, correction, term_error_dfs: [err_a_df, err_b_df, err_ab_df] })
 }
 
-/// General random-intercept Mixed-Effects REML model for unbalanced repeated-measures or
-/// multi-factor hierarchical designs (`y = X beta + Z u + eps`, `u ~ N(0, sigma_u^2 I)`).
+/// Repeated-measures two-way ANOVA (`RowFactorMatched`, `ColumnFactorMatched`, or `BothFactorsMatched`)
+/// on complete balanced subject blocks `subject_data[subject][row][col]`, returning uncorrected *p*-values
+/// alongside the primary within-subject [`SphericityResult`].
 ///
-/// Profiles exact log-REML over variance ratio `tau = sigma_u^2 / sigma_e^2` using `cholesky`,
-/// and computes Satterthwaite & Kenward–Roger Wald *F*-tests for every fixed-effect term.
-///
-/// The restricted likelihood is that of Patterson & Thompson (1971), with `sigma_e^2` profiled
-/// out. The random-intercept LRT uses the boundary `0.5 chi^2(0) + 0.5 chi^2(1)` mixture of
-/// Self & Liang (1987).
-///
-/// Note: the "Satterthwaite" and "Kenward–Roger" df are heuristic approximations, not the
-/// published methods; see `compute_reml_wald_terms`.
-pub fn fit_random_intercept_reml(
-    x: &DenseMatrix,
-    y: &[f64],
-    cluster_ids: &[usize],
-    term_slices: &[(&str, usize, usize)],
-) -> Result<MixedRemlResult, StatsError> {
-    let n = x.nrows();
-    let p = x.ncols();
-    if y.len() != n || cluster_ids.len() != n {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
+/// See [`fit_rm_two_way_anova_with_sphericity`] for full per-factor (`row`, `column`, `interaction`)
+/// sphericity results and applied Greenhouse–Geisser / Huynh–Feldt *p*-values.
+pub fn fit_rm_two_way_anova(
+    subject_data: &[Vec<Vec<f64>>],
+    row_name: &str,
+    col_name: &str,
+    rm_design: RepeatedMeasuresDesign,
+) -> Result<(FactorialAnovaResult, Option<SphericityResult>), StatsError> {
+    let res = fit_rm_two_way_anova_with_sphericity(subject_data, row_name, col_name, rm_design, RmSphericityCorrection::None)?;
+    let primary_sph = match rm_design {
+        RepeatedMeasuresDesign::BothFactorsMatched | RepeatedMeasuresDesign::ColumnFactorMatched => res.sphericities.column,
+        RepeatedMeasuresDesign::RowFactorMatched => res.sphericities.row,
+        RepeatedMeasuresDesign::None => None,
+    };
+    Ok((res.anova, primary_sph))
+}
+
+struct RiClusterStats {
+    m_c: f64,
+    sum_y: f64,
+    yy: f64,
+    sum_x: Vec<f64>,
+    xy: Vec<f64>,
+    xx: Vec<f64>,
+}
+
+struct OwnedRemlFisherMats {
+    info_e: DenseMatrix,
+    m_mats: Vec<DenseMatrix>,
+    q_mats: Vec<Vec<DenseMatrix>>,
+}
+
+struct KrTermContext<'a> {
+    phi: &'a DenseMatrix,
+    phi_a: &'a DenseMatrix,
+    beta: &'a [f64],
+    sigma2_e: f64,
+    w_info_inv: &'a DenseMatrix,
+    phi_m_phi: &'a [DenseMatrix],
+    n_minus_p: f64,
+}
+
+struct MultiVcEvalState {
+    ll: f64,
+    score: Vec<f64>,
+    ai: DenseMatrix,
+    beta: Vec<f64>,
+    phi: DenseMatrix,
+    vi: DenseMatrix,
+    p_mat: DenseMatrix,
+    vir: Vec<f64>,
+    quad: f64,
+}
+
+fn symmetrize_dense(m: &DenseMatrix) -> Result<DenseMatrix, StatsError> {
+    let nr = m.nrows();
+    let nc = m.ncols();
+    if nr != nc {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: nr, actual: nc }));
     }
-    if n <= p {
-        return Err(StatsError::InsufficientSampleSize { context: "mixed-effects REML", required: p + 1, actual: n });
+    let mut data = vec![0.0_f64; nr * nr];
+    for i in 0..nr {
+        data[i * nr + i] = m.get(i, i).unwrap_or(0.0);
+        for j in (i + 1)..nr {
+            let v = 0.5 * (m.get(i, j).unwrap_or(0.0) + m.get(j, i).unwrap_or(0.0));
+            data[i * nr + j] = v;
+            data[j * nr + i] = v;
+        }
     }
-    validate_finite_slice(y)?;
+    Ok(DenseMatrix::from_row_major(nr, nr, data)?)
+}
 
-    let mut unique_clusters = std::collections::BTreeMap::<usize, Vec<usize>>::new();
-    for (row_idx, &cid) in cluster_ids.iter().enumerate() {
-        unique_clusters.entry(cid).or_default().push(row_idx);
+fn scale_dense(m: &DenseMatrix, factor: f64) -> Result<DenseMatrix, StatsError> {
+    let data: Vec<f64> = m.as_slice().iter().map(|&v| v * factor).collect();
+    Ok(DenseMatrix::from_row_major(m.nrows(), m.ncols(), data)?)
+}
+
+fn dense_sub(a: &DenseMatrix, b: &DenseMatrix) -> Result<DenseMatrix, StatsError> {
+    if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: a.nrows(), actual: b.nrows() }));
     }
-    let cluster_groups: Vec<Vec<usize>> = unique_clusters.into_values().collect();
-    let n_minus_p = (n - p) as f64;
+    let data: Vec<f64> = a.as_slice().iter().zip(b.as_slice().iter()).map(|(&x, &y)| x - y).collect();
+    Ok(DenseMatrix::from_row_major(a.nrows(), a.ncols(), data)?)
+}
 
-    // Profile log-REML evaluation as a function of `tau = sigma_u^2 / sigma_e^2 >= 0` using
-    // O(N) Sherman-Morrison per cluster block: V_c^{-1} = I - (tau / (1 + m_c tau)) 1 1^T.
-    let eval_profile = |tau_raw: f64| -> Result<(f64, f64, f64, DenseMatrix, Vec<f64>), StatsError> {
-        let tau = tau_raw.max(0.0);
-        let mut xtvx = vec![0.0_f64; p * p];
-        let mut xtvy = vec![0.0_f64; p];
-        let mut ytvy = 0.0_f64;
-        let mut ln_det_v = 0.0_f64;
+fn trace_product(a: &DenseMatrix, b: &DenseMatrix) -> f64 {
+    let n = a.nrows().min(b.ncols());
+    let k = a.ncols().min(b.nrows());
+    let mut acc = NeumaierSum::new();
+    for i in 0..n {
+        for j in 0..k {
+            acc.add(a.get(i, j).unwrap_or(0.0) * b.get(j, i).unwrap_or(0.0));
+        }
+    }
+    acc.total()
+}
 
-        for rows in &cluster_groups {
-            let m_c = rows.len() as f64;
-            let gamma = tau / (1.0 + m_c * tau);
-            ln_det_v += (1.0 + m_c * tau).ln();
+fn subblock_dense(m: &DenseMatrix, start: usize, len: usize) -> Result<DenseMatrix, StatsError> {
+    let mut data = Vec::with_capacity(len * len);
+    for r in 0..len {
+        for c in 0..len {
+            data.push(m.get(start + r, start + c).unwrap_or(0.0));
+        }
+    }
+    Ok(DenseMatrix::from_row_major(len, len, data)?)
+}
 
-            let mut sum_x = vec![0.0_f64; p];
-            let mut sum_y = 0.0_f64;
-            for &r in rows {
-                let yr = y[r];
-                sum_y += yr;
-                ytvy += yr * yr;
-                for j in 0..p {
-                    let xrj = x.get(r, j).unwrap_or(0.0);
-                    sum_x[j] += xrj;
-                    xtvy[j] += xrj * yr;
-                    for k in j..p {
-                        xtvx[j * p + k] += xrj * x.get(r, k).unwrap_or(0.0);
-                    }
+fn invert_reml_info(info: &DenseMatrix) -> Result<DenseMatrix, StatsError> {
+    let sym = symmetrize_dense(info)?;
+    if let Ok(chol) = cholesky(&sym)
+        && let Ok(inv) = chol.inverse()
+    {
+        return Ok(inv);
+    }
+    // Near-singular or collinear strata: Moore-Penrose pseudoinverse on positive eigenmodes.
+    let eig = sym_eigen(&sym)?;
+    let r = sym.nrows();
+    let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+    let tol = 1e-12 * max_ev.max(1e-30);
+    let mut inv_data = vec![0.0_f64; r * r];
+    for (k, &ev) in eig.eigenvalues.iter().enumerate() {
+        if ev <= tol {
+            continue;
+        }
+        let inv_ev = 1.0 / ev;
+        for i in 0..r {
+            let qi = eig.eigenvectors.get(i, k).unwrap_or(0.0);
+            for j in i..r {
+                let qj = eig.eigenvectors.get(j, k).unwrap_or(0.0);
+                let delta = qi * qj * inv_ev;
+                inv_data[i * r + j] += delta;
+                if i != j {
+                    inv_data[j * r + i] += delta;
                 }
             }
-            ytvy -= gamma * sum_y * sum_y;
+        }
+    }
+    Ok(DenseMatrix::from_row_major(r, r, inv_data)?)
+}
+
+fn ri_precompute_clusters(x: &DenseMatrix, y: &[f64], cluster_ids: &[usize]) -> Vec<RiClusterStats> {
+    let p = x.ncols();
+    let mut grouped = std::collections::BTreeMap::<usize, Vec<usize>>::new();
+    for (row_idx, &cid) in cluster_ids.iter().enumerate() {
+        grouped.entry(cid).or_default().push(row_idx);
+    }
+    let mut clusters = Vec::with_capacity(grouped.len());
+    for rows in grouped.into_values() {
+        let m_c = rows.len() as f64;
+        let mut sum_y = 0.0_f64;
+        let mut yy = 0.0_f64;
+        let mut sum_x = vec![0.0_f64; p];
+        let mut xy = vec![0.0_f64; p];
+        let mut xx = vec![0.0_f64; p * p];
+        for r in rows {
+            let yr = y[r];
+            sum_y += yr;
+            yy += yr * yr;
             for j in 0..p {
-                xtvy[j] -= gamma * sum_x[j] * sum_y;
+                let xrj = x.get(r, j).unwrap_or(0.0);
+                sum_x[j] += xrj;
+                xy[j] += xrj * yr;
                 for k in j..p {
-                    xtvx[j * p + k] -= gamma * sum_x[j] * sum_x[k];
+                    xx[j * p + k] += xrj * x.get(r, k).unwrap_or(0.0);
                 }
             }
         }
         for j in 0..p {
             for k in 0..j {
-                xtvx[j * p + k] = xtvx[k * p + j];
+                xx[j * p + k] = xx[k * p + j];
             }
         }
-        let m_xtvx = DenseMatrix::from_row_major(p, p, xtvx)?;
-        let chol = cholesky(&m_xtvx)?;
-        let beta = chol.solve(&xtvy)?;
-        let rss_gls = (ytvy - beta.iter().zip(xtvy.iter()).map(|(b, t)| b * t).sum::<f64>()).max(1e-18);
-        let sigma2_e = (rss_gls / n_minus_p).max(1e-18);
-        let ln_det_xtvx = chol.ln_det();
-        let ll_reml = -0.5 * (ln_det_v + ln_det_xtvx + n_minus_p * sigma2_e.ln() + n_minus_p);
-        let xtvx_inv = chol.inverse()?;
-        Ok((ll_reml, sigma2_e, tau * sigma2_e, xtvx_inv, beta))
+        clusters.push(RiClusterStats { m_c, sum_y, yy, sum_x, xy, xx });
+    }
+    clusters
+}
+
+type RiProfileEval = (f64, f64, DenseMatrix, Vec<f64>);
+
+fn ri_eval_profile(clusters: &[RiClusterStats], p: usize, n_minus_p: f64, tau_raw: f64) -> Result<RiProfileEval, StatsError> {
+    let tau = tau_raw.max(0.0);
+    let mut xtvx = vec![0.0_f64; p * p];
+    let mut xtvy = vec![0.0_f64; p];
+    let mut ytvy = 0.0_f64;
+    let mut ln_det_v = 0.0_f64;
+
+    for cl in clusters {
+        let gamma = tau / (1.0 + cl.m_c * tau);
+        ln_det_v += (1.0 + cl.m_c * tau).ln();
+        ytvy += cl.yy - gamma * cl.sum_y * cl.sum_y;
+        for r_row in 0..p {
+            xtvy[r_row] += cl.xy[r_row] - gamma * cl.sum_x[r_row] * cl.sum_y;
+            for c_col in r_row..p {
+                xtvx[r_row * p + c_col] += cl.xx[r_row * p + c_col] - gamma * cl.sum_x[r_row] * cl.sum_x[c_col];
+            }
+        }
+    }
+    for r_row in 0..p {
+        for c_col in 0..r_row {
+            xtvx[r_row * p + c_col] = xtvx[c_col * p + r_row];
+        }
+    }
+    let xtvx_mat = DenseMatrix::from_row_major(p, p, xtvx)?;
+    let chol_x = cholesky(&xtvx_mat)?;
+    let ln_det_xtvx = chol_x.ln_det();
+    let xtvx_inv = chol_x.inverse()?;
+    let beta = chol_x.solve(&xtvy)?;
+    let quad_b: f64 = beta.iter().zip(xtvy.iter()).map(|(&b, &rhs)| b * rhs).sum();
+    let rss = (ytvy - quad_b).max(1e-30);
+    let sigma2_e = rss / n_minus_p;
+    let ll = -0.5 * (n_minus_p * sigma2_e.ln() + ln_det_v + ln_det_xtvx + n_minus_p);
+    Ok((ll, sigma2_e, xtvx_inv, beta))
+}
+
+fn ri_build_fisher_mats(
+    clusters: &[RiClusterStats],
+    p: usize,
+    n_obs: usize,
+    tau: f64,
+    sigma2_e: f64,
+    phi_rel: &DenseMatrix,
+) -> Result<OwnedRemlFisherMats, StatsError> {
+    let mut m0 = vec![0.0_f64; p * p];
+    let mut m1 = vec![0.0_f64; p * p];
+    let mut q00 = vec![0.0_f64; p * p];
+    let mut q01 = vec![0.0_f64; p * p];
+    let mut q11 = vec![0.0_f64; p * p];
+    let mut sum_a2 = 0.0_f64;
+    let mut sum_ma2 = 0.0_f64;
+    let mut sum_m2a2 = 0.0_f64;
+
+    for cl in clusters {
+        let a_c = 1.0 / (1.0 + cl.m_c * tau);
+        let a2 = a_c * a_c;
+        let a3 = a2 * a_c;
+        let c_m0 = (1.0 - a2) / cl.m_c;
+        let c_q00 = (1.0 - a3) / cl.m_c;
+        sum_a2 += a2;
+        sum_ma2 += cl.m_c * a2;
+        sum_m2a2 += cl.m_c * cl.m_c * a2;
+        for r in 0..p {
+            for c in r..p {
+                let idx = r * p + c;
+                let xx_rc = cl.xx[idx];
+                let xplus_rc = cl.sum_x[r] * cl.sum_x[c];
+                m0[idx] += xx_rc - c_m0 * xplus_rc;
+                m1[idx] += a2 * xplus_rc;
+                q00[idx] += xx_rc - c_q00 * xplus_rc;
+                q01[idx] += a3 * xplus_rc;
+                q11[idx] += cl.m_c * a3 * xplus_rc;
+            }
+        }
+    }
+    for mat in [&mut m0, &mut m1, &mut q00, &mut q01, &mut q11] {
+        for r in 0..p {
+            for c in 0..r {
+                mat[r * p + c] = mat[c * p + r];
+            }
+        }
+    }
+    let m0_mat = DenseMatrix::from_row_major(p, p, m0)?;
+    let m1_mat = DenseMatrix::from_row_major(p, p, m1)?;
+    let q00_mat = DenseMatrix::from_row_major(p, p, q00)?;
+    let q01_mat = DenseMatrix::from_row_major(p, p, q01)?;
+    let q11_mat = DenseMatrix::from_row_major(p, p, q11)?;
+
+    let tr_v2 = ((n_obs - clusters.len()) as f64) + sum_a2;
+    let m_rel = [&m0_mat, &m1_mat];
+    let q_rel = [[&q00_mat, &q01_mat], [&q01_mat, &q11_mat]];
+    let tr_vg_vg = [[tr_v2, sum_ma2], [sum_ma2, sum_m2a2]];
+    let mut ie_data = [0.0_f64; 4];
+    for r in 0..2 {
+        let pm_r = phi_rel.matmul(m_rel[r])?;
+        for s in r..2 {
+            let pm_s = phi_rel.matmul(m_rel[s])?;
+            let ie_rs = 0.5 * (tr_vg_vg[r][s] - 2.0 * trace_product(phi_rel, q_rel[r][s]) + trace_product(&pm_r, &pm_s));
+            ie_data[r * 2 + s] = ie_rs;
+            ie_data[s * 2 + r] = ie_rs;
+        }
+    }
+    let inv_s2 = 1.0 / sigma2_e;
+    let inv_s4 = inv_s2 * inv_s2;
+    let inv_s6 = inv_s4 * inv_s2;
+    let info_e = scale_dense(&DenseMatrix::from_row_major(2, 2, ie_data.to_vec())?, inv_s4)?;
+    let m_mats = vec![scale_dense(&m0_mat, inv_s4)?, scale_dense(&m1_mat, inv_s4)?];
+    let q01_s = scale_dense(&q01_mat, inv_s6)?;
+    let q_mats = vec![vec![scale_dense(&q00_mat, inv_s6)?, q01_s.clone()], vec![q01_s, scale_dense(&q11_mat, inv_s6)?]];
+    Ok(OwnedRemlFisherMats { info_e, m_mats, q_mats })
+}
+
+fn kr_scale_and_df(qf: f64, a1: f64, a2: f64, nu_sat: f64, n_minus_p: f64) -> (f64, f64) {
+    if a2 <= 1e-14 || 1.0 - a2 / qf <= 1e-6 {
+        return (1.0, nu_sat);
+    }
+    let b_kr = (a1 + 6.0 * a2) / (2.0 * qf);
+    let g_kr = ((qf + 1.0) * a1 - (qf + 4.0) * a2) / ((qf + 2.0) * a2);
+    let den_c = 3.0 * qf + 2.0 * (1.0 - g_kr);
+    if den_c.abs() <= 1e-14 {
+        return (1.0, nu_sat);
+    }
+    let c1 = g_kr / den_c;
+    let c2 = (qf - g_kr) / den_c;
+    let c3 = (qf + 2.0 - g_kr) / den_c;
+    let e_star = 1.0 / (1.0 - a2 / qf);
+    let v_num = 1.0 + c1 * b_kr;
+    let v_den = (1.0 - c2 * b_kr).powi(2) * (1.0 - c3 * b_kr);
+    if v_num <= 0.0 || v_den <= 1e-6 {
+        return (1.0, nu_sat);
+    }
+    let v_star = (2.0 / qf) * (v_num / v_den);
+    let rho = v_star / (2.0 * e_star * e_star);
+    if qf * rho - 1.0 <= 1e-12 {
+        return (1.0 / e_star, n_minus_p);
+    }
+    let nu_kr = (4.0 + (qf + 2.0) / (qf * rho - 1.0)).clamp(1.0, n_minus_p);
+    let lambda = if nu_kr > 2.0 { nu_kr / (e_star * (nu_kr - 2.0)) } else { 1.0 / e_star };
+    (lambda.max(0.0), nu_kr)
+}
+
+fn kr_single_term_df1(ctx: &KrTermContext<'_>, term_name: &str, col: usize) -> Result<(FactorialAnovaTerm, f64, f64), StatsError> {
+    let v = ctx.phi.get(col, col).unwrap_or(0.0).max(0.0);
+    let v_a_raw = ctx.phi_a.get(col, col).unwrap_or(v);
+    let v_a = if v_a_raw > 1e-12 * v { v_a_raw } else { v };
+    let b = ctx.beta[col];
+    let f_kr = if v_a > 0.0 {
+        (b * b) / v_a
+    } else if b != 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    let mut grad = Vec::with_capacity(ctx.phi_m_phi.len());
+    for pmp in ctx.phi_m_phi {
+        grad.push(pmp.get(col, col).unwrap_or(0.0));
+    }
+    let wg = ctx.w_info_inv.matvec(&grad)?;
+    let denom: f64 = grad.iter().zip(wg.iter()).map(|(&a, &c)| a * c).sum();
+    let nu = if denom > 1e-30 * v * v { (2.0 * v * v / denom).clamp(1.0, ctx.n_minus_p) } else { ctx.n_minus_p };
+    let p_val = f_sf(f_kr, 1.0, nu)?;
+    let ms = f_kr * ctx.sigma2_e;
+    let part_eta = if f_kr + nu > 0.0 { Some(f_kr / (f_kr + nu)) } else { Some(0.0) };
+    let term = FactorialAnovaTerm {
+        name: term_name.to_owned(),
+        ss: ms,
+        df: 1.0,
+        ms,
+        f_statistic: Some(f_kr),
+        p_value: Some(p_val),
+        partial_eta_squared: part_eta,
+        eta_squared: None,
+    };
+    Ok((term, nu, nu))
+}
+
+fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &str, start: usize, q: usize) -> Result<(FactorialAnovaTerm, f64, f64), StatsError> {
+    let qf = q as f64;
+    let sigma = symmetrize_dense(&subblock_dense(ctx.phi, start, q)?)?;
+    let sigma_a = symmetrize_dense(&subblock_dense(ctx.phi_a, start, q)?)?;
+    let beta_sub = &ctx.beta[start..(start + q)];
+    let inv_a = match cholesky(&sigma_a).and_then(|c| c.inverse()) {
+        Ok(inv) => inv,
+        Err(_) => invert_reml_info(&sigma_a)?,
+    };
+    let inv_b = inv_a.matvec(beta_sub)?;
+    let quad: f64 = beta_sub.iter().zip(inv_b.iter()).map(|(&b, &ib)| b * ib).sum();
+    let f_raw = (quad / qf).max(0.0);
+
+    // Fai & Cornelius (1996) Satterthwaite df via spectral decomposition of L Phi L^T.
+    let eig = sym_eigen(&sigma)?;
+    let n_vc = ctx.w_info_inv.nrows();
+    let mut nu_modes = Vec::with_capacity(q);
+    for m in 0..q {
+        let v_m = eig.eigenvalues[m];
+        if v_m <= 1e-30 {
+            nu_modes.push(ctx.n_minus_p);
+            continue;
+        }
+        let mut u_m = Vec::with_capacity(q);
+        for r in 0..q {
+            u_m.push(eig.eigenvectors.get(r, m).unwrap_or(0.0));
+        }
+        let mut grad_m = Vec::with_capacity(n_vc);
+        for pmp in ctx.phi_m_phi {
+            let sub = subblock_dense(pmp, start, q)?;
+            let sv = sub.matvec(&u_m)?;
+            grad_m.push(u_m.iter().zip(sv.iter()).map(|(&a, &b)| a * b).sum());
+        }
+        let wg = ctx.w_info_inv.matvec(&grad_m)?;
+        let denom_m: f64 = grad_m.iter().zip(wg.iter()).map(|(&a, &b)| a * b).sum();
+        let nu_m = if denom_m > 1e-30 * v_m * v_m { 2.0 * v_m * v_m / denom_m } else { ctx.n_minus_p };
+        nu_modes.push(nu_m);
+    }
+    let nu_sat = if nu_modes.iter().all(|&nm| nm > 2.0) {
+        let e_fc: f64 = nu_modes.iter().map(|&nm| nm / (nm - 2.0)).sum();
+        if e_fc > qf + 1e-12 { (2.0 * e_fc / (e_fc - qf)).clamp(1.0, ctx.n_minus_p) } else { ctx.n_minus_p }
+    } else {
+        nu_modes.iter().copied().fold(ctx.n_minus_p, f64::min).clamp(1.0, ctx.n_minus_p)
     };
 
-    // Grid + golden-section search over log1p(tau) in [0, 12] to avoid flat-boundary misses.
+    // Kenward & Roger (1997, Biometrics 53:985 Eq. (6)) scaled F* and denominator df.
+    let sigma_inv = invert_reml_info(&sigma)?;
+    let mut t_mats = Vec::with_capacity(n_vc);
+    let mut tr_t = Vec::with_capacity(n_vc);
+    for pmp in ctx.phi_m_phi {
+        let d_sub = subblock_dense(pmp, start, q)?;
+        let ti = sigma_inv.matmul(&d_sub)?;
+        let mut tr = 0.0_f64;
+        for k in 0..q {
+            tr += ti.get(k, k).unwrap_or(0.0);
+        }
+        tr_t.push(tr);
+        t_mats.push(ti);
+    }
+    let mut a1 = 0.0_f64;
+    let mut a2 = 0.0_f64;
+    for i in 0..n_vc {
+        for j in 0..n_vc {
+            let wij = ctx.w_info_inv.get(i, j).unwrap_or(0.0);
+            a1 += wij * tr_t[i] * tr_t[j];
+            a2 += wij * trace_product(&t_mats[i], &t_mats[j]);
+        }
+    }
+    let (lambda_kr, nu_kr) = kr_scale_and_df(qf, a1, a2, nu_sat, ctx.n_minus_p);
+    let f_kr = (lambda_kr * f_raw).max(0.0);
+    let p_val = f_sf(f_kr, qf, nu_kr)?;
+    let ms = f_kr * ctx.sigma2_e;
+    let part_eta = if qf * f_kr + nu_kr > 0.0 { Some((qf * f_kr) / (qf * f_kr + nu_kr)) } else { Some(0.0) };
+    let term = FactorialAnovaTerm {
+        name: term_name.to_owned(),
+        ss: ms * qf,
+        df: qf,
+        ms,
+        f_statistic: Some(f_kr),
+        p_value: Some(p_val),
+        partial_eta_squared: part_eta,
+        eta_squared: None,
+    };
+    Ok((term, nu_sat, nu_kr))
+}
+
+type RemlWaldTermsOut = (Vec<FactorialAnovaTerm>, Vec<f64>, Vec<f64>);
+
+fn eval_reml_wald_terms_from_mats(
+    phi: &DenseMatrix,
+    beta: &[f64],
+    sigma2_e: f64,
+    fisher: &OwnedRemlFisherMats,
+    terms: &[(&str, usize, usize)],
+    n_minus_p: f64,
+) -> Result<RemlWaldTermsOut, StatsError> {
+    let w_info_inv = invert_reml_info(&fisher.info_e)?;
+    let n_vc = fisher.m_mats.len();
+    let p = phi.nrows();
+    let mut phi_m_phi = Vec::with_capacity(n_vc);
+    for m_mat in &fisher.m_mats {
+        phi_m_phi.push(symmetrize_dense(&phi.matmul(m_mat)?.matmul(phi)?)?);
+    }
+    let mut lambda_data = vec![0.0_f64; p * p];
+    for r in 0..n_vc {
+        for s in 0..n_vc {
+            let wrs = w_info_inv.get(r, s).unwrap_or(0.0);
+            if wrs == 0.0 {
+                continue;
+            }
+            let m_phi_m = fisher.m_mats[r].matmul(phi)?.matmul(&fisher.m_mats[s])?;
+            let diff = dense_sub(&fisher.q_mats[r][s], &m_phi_m)?;
+            let contrib = phi.matmul(&diff)?.matmul(phi)?;
+            for (dst, &val) in lambda_data.iter_mut().zip(contrib.as_slice().iter()) {
+                *dst += wrs * val;
+            }
+        }
+    }
+    let phi_a_raw: Vec<f64> = phi.as_slice().iter().zip(lambda_data.iter()).map(|(&a, &l)| a + 2.0 * l).collect();
+    let phi_a_sym = symmetrize_dense(&DenseMatrix::from_row_major(p, p, phi_a_raw)?)?;
+    let phi_a = if cholesky(&phi_a_sym).is_ok() { phi_a_sym } else { phi.clone() };
+    let ctx = KrTermContext { phi, phi_a: &phi_a, beta, sigma2_e, w_info_inv: &w_info_inv, phi_m_phi: &phi_m_phi, n_minus_p };
+
+    let mut fixed_terms = Vec::with_capacity(terms.len());
+    let mut satt_dfs = Vec::with_capacity(terms.len());
+    let mut kr_dfs = Vec::with_capacity(terms.len());
+    for &(name, start, len) in terms {
+        if len == 0 || start + len > p {
+            continue;
+        }
+        let (term, nu_sat, nu_kr) = if len == 1 { kr_single_term_df1(&ctx, name, start)? } else { kr_multi_term_df(&ctx, name, start, len)? };
+        fixed_terms.push(term);
+        satt_dfs.push(nu_sat);
+        kr_dfs.push(nu_kr);
+    }
+    Ok((fixed_terms, satt_dfs, kr_dfs))
+}
+
+/// Fit a linear mixed-effects random-intercept model via Restricted Maximum Likelihood (REML)
+/// (Patterson & Thompson, 1971) with genuine Fai & Cornelius (1996) / Satterthwaite (1946)
+/// and Kenward & Roger (1997) denominator degrees of freedom, adjusted covariance, and scaled *F*.
+pub fn fit_random_intercept_reml(
+    x: &DenseMatrix,
+    y: &[f64],
+    cluster_ids: &[usize],
+    terms: &[(&str, usize, usize)],
+) -> Result<MixedRemlResult, StatsError> {
+    let n = x.nrows();
+    let p = x.ncols();
+    if y.len() != n {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
+    }
+    if cluster_ids.len() != n {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: cluster_ids.len() }));
+    }
+    if n <= p {
+        return Err(StatsError::InsufficientSampleSize { context: "REML mixed model", required: p + 1, actual: n });
+    }
+    validate_finite_slice(y)?;
+    let n_minus_p = (n - p) as f64;
+    let y_moments = SummaryMoments::from_slice(y)?;
+    let y_scale_raw = (y_moments.css / (n as f64)).sqrt();
+    let y_scale = if y_scale_raw.is_finite() && y_scale_raw > 0.0 { y_scale_raw } else { 1.0 };
+    let y_scaled: Vec<f64> = y.iter().map(|&v| v / y_scale).collect();
+
+    let clusters = ri_precompute_clusters(x, &y_scaled, cluster_ids);
+    let eval_u = |u: f64| -> Result<(f64, RiProfileEval), StatsError> {
+        let tau = u.exp_m1().max(0.0);
+        let ev = ri_eval_profile(&clusters, p, n_minus_p, tau)?;
+        Ok((tau, ev))
+    };
+
+    let (_, zero_eval) = eval_u(0.0)?;
+    let ll_zero = zero_eval.0;
+
+    // Coarse search on u = ln(1 + tau) in [0, 12] + fine search in [0, 0.25].
     let mut best_u = 0.0_f64;
-    let mut best_ll = eval_profile(0.0)?.0;
-    let ll_zero = best_ll;
-    for i in 1..=60 {
-        let u = 12.0 * (i as f64) / 60.0;
-        let tau = u.exp_m1();
-        if let Ok((ll, _, _, _, _)) = eval_profile(tau)
+    let mut best_ll = ll_zero;
+    let mut best_step = 12.0 / 80.0;
+    for i in 1..=80 {
+        let u = (i as f64) * (12.0 / 80.0);
+        if let Ok((_, (ll, _, _, _))) = eval_u(u)
             && ll > best_ll
         {
             best_ll = ll;
             best_u = u;
         }
     }
-    let mut lo = (best_u - 0.3).max(0.0);
-    let mut hi = (best_u + 0.3).min(12.0);
-    let phi = 0.5 * (5.0_f64.sqrt() - 1.0);
-    for _ in 0..40 {
-        let x1 = hi - phi * (hi - lo);
-        let x2 = lo + phi * (hi - lo);
-        let f1 = eval_profile(x1.exp_m1()).map(|r| r.0).unwrap_or(f64::NEG_INFINITY);
-        let f2 = eval_profile(x2.exp_m1()).map(|r| r.0).unwrap_or(f64::NEG_INFINITY);
-        if f1 < f2 {
-            lo = x1;
-        } else {
-            hi = x2;
+    for i in 1..=25 {
+        let u = (i as f64) * (0.25 / 25.0);
+        if let Ok((_, (ll, _, _, _))) = eval_u(u)
+            && ll > best_ll
+        {
+            best_ll = ll;
+            best_u = u;
+            best_step = 0.25 / 25.0;
         }
     }
-    let opt_u = 0.5 * (lo + hi);
-    let tau_opt = if opt_u < 1e-6 { 0.0 } else { opt_u.exp_m1() };
-    let (ll_opt, sigma2_e, sigma2_u, xtvx_inv, beta) = eval_profile(tau_opt)?;
-    let icc = if sigma2_u + sigma2_e > 0.0 { sigma2_u / (sigma2_u + sigma2_e) } else { 0.0 };
-    let lrt_chi2 = (2.0 * (ll_opt - ll_zero)).max(0.0);
-    let lrt_p = if lrt_chi2 > 0.0 { 0.5 * chi2_sf(lrt_chi2, 1.0)? } else { 1.0 };
 
-    // Estimate asymptotic REML covariance of (sigma2_e, sigma2_u) via numerical Hessian of ll_reml
-    // for Satterthwaite & Kenward-Roger degrees of freedom.
-    let (satt_dfs, kr_dfs, fixed_terms) = compute_reml_wald_terms(
-        RemlWaldArgs { cluster_groups: &cluster_groups, n, n_minus_p, sigma2_e, tau_opt, xtvx_inv: &xtvx_inv, beta: &beta, term_slices },
-        &eval_profile,
-    )?;
+    let mut a_u = (best_u - best_step).max(0.0);
+    let mut b_u = (best_u + best_step).min(12.0);
+    let phi_gold = 0.5 * (5.0_f64.sqrt() - 1.0);
+    let mut c_u = b_u - phi_gold * (b_u - a_u);
+    let mut d_u = a_u + phi_gold * (b_u - a_u);
+    let mut f_c = eval_u(c_u).map_or(f64::NEG_INFINITY, |(_, ev)| ev.0);
+    let mut f_d = eval_u(d_u).map_or(f64::NEG_INFINITY, |(_, ev)| ev.0);
+    for _ in 0..65 {
+        if f_c < f_d {
+            a_u = c_u;
+            c_u = d_u;
+            f_c = f_d;
+            d_u = a_u + phi_gold * (b_u - a_u);
+            f_d = eval_u(d_u).map_or(f64::NEG_INFINITY, |(_, ev)| ev.0);
+        } else {
+            b_u = d_u;
+            d_u = c_u;
+            f_d = f_c;
+            c_u = b_u - phi_gold * (b_u - a_u);
+            f_c = eval_u(c_u).map_or(f64::NEG_INFINITY, |(_, ev)| ev.0);
+        }
+    }
+    let cand_u = 0.5 * (a_u + b_u);
+    let (cand_tau, cand_eval) = eval_u(cand_u)?;
+    let (tau_hat, (opt_ll, sigma2_e_scaled, xtvx_rel_inv, beta_scaled)) = if cand_eval.0 > best_ll && cand_eval.0 > ll_zero + 1e-12 {
+        (cand_tau, cand_eval)
+    } else if best_ll > ll_zero + 1e-12 {
+        eval_u(best_u)?
+    } else {
+        (0.0, zero_eval)
+    };
+
+    let lrt_chi2 = (2.0 * (opt_ll - ll_zero)).max(0.0);
+    let lrt_p = if tau_hat > 0.0 && lrt_chi2 > 0.0 { 0.5 * chi2_sf(lrt_chi2, 1.0)? } else { 1.0 };
+
+    let sigma2_e = sigma2_e_scaled * y_scale * y_scale;
+    let sigma2_u = tau_hat * sigma2_e;
+    let icc = if sigma2_u + sigma2_e > 0.0 { sigma2_u / (sigma2_u + sigma2_e) } else { 0.0 };
+    let reml_log_lik = opt_ll - n_minus_p * y_scale.ln();
+    let beta: Vec<f64> = beta_scaled.into_iter().map(|b| b * y_scale).collect();
+    let phi = scale_dense(&xtvx_rel_inv, sigma2_e)?;
+
+    let fisher = ri_build_fisher_mats(&clusters, p, n, tau_hat, sigma2_e, &xtvx_rel_inv)?;
+    let (fixed_terms, satterthwaite_df, kenward_roger_df) = eval_reml_wald_terms_from_mats(&phi, &beta, sigma2_e, &fisher, terms, n_minus_p)?;
 
     Ok(MixedRemlResult {
         sigma2_random: sigma2_u,
         sigma2_error: sigma2_e,
         icc,
-        reml_log_lik: ll_opt,
+        reml_log_lik,
         lrt_random_chi2: lrt_chi2,
         lrt_random_p: lrt_p,
         fixed_terms,
-        satterthwaite_df: satt_dfs,
-        kenward_roger_df: kr_dfs,
+        satterthwaite_df,
+        kenward_roger_df,
     })
 }
 
-type RemlWaldOutput = (Vec<f64>, Vec<f64>, Vec<FactorialAnovaTerm>);
-
-struct RemlWaldArgs<'a> {
-    cluster_groups: &'a [Vec<usize>],
-    n: usize,
-    n_minus_p: f64,
-    sigma2_e: f64,
-    tau_opt: f64,
-    xtvx_inv: &'a DenseMatrix,
-    beta: &'a [f64],
-    term_slices: &'a [(&'a str, usize, usize)],
+fn cluster_ids_to_g_matrix(cluster_ids: &[usize]) -> Result<(DenseMatrix, usize), StatsError> {
+    let n = cluster_ids.len();
+    let mut remap = std::collections::BTreeMap::<usize, usize>::new();
+    let mut mapped = Vec::with_capacity(n);
+    for &cid in cluster_ids {
+        let next = remap.len();
+        let idx = *remap.entry(cid).or_insert(next);
+        mapped.push(idx);
+    }
+    let c_count = remap.len();
+    let mut g = vec![0.0_f64; n * n];
+    for i in 0..n {
+        g[i * n + i] = 1.0;
+        for j in (i + 1)..n {
+            if mapped[i] == mapped[j] {
+                g[i * n + j] = 1.0;
+                g[j * n + i] = 1.0;
+            }
+        }
+    }
+    Ok((DenseMatrix::from_row_major(n, n, g)?, c_count))
 }
 
-/// Wald *F* = `beta' Cov(beta)^-1 beta / q` for each fixed-effect term, with
-/// `Cov(beta) = sigma_e^2 (X' V^-1 X)^-1`, plus approximate denominator df.
-///
-/// Note: this deviates from the published methods its outputs are named after.
-/// - The "Satterthwaite" df is a delta-method heuristic in the spirit of Satterthwaite (1946)
-///   and Giesbrecht & Burns (1985): `2 / Var(log v)`, combining a finite-difference sensitivity
-///   to `tau` with an independent `2 / (n - p)` term for `sigma_e^2`. It does not use the full
-///   REML information matrix or the `sigma_e^2`–`tau` covariance, and it is capped at `n - p`.
-/// - The "Kenward–Roger" df is that value times `1 / (1 + 1 / (clusters - 1))`. It does not apply
-///   the Kenward & Roger (1997) covariance bias adjustment or the F-statistic scaling.
-fn compute_reml_wald_terms<F>(args: RemlWaldArgs<'_>, eval_profile: &F) -> Result<RemlWaldOutput, StatsError>
-where
-    F: Fn(f64) -> Result<(f64, f64, f64, DenseMatrix, Vec<f64>), StatsError>,
-{
-    let RemlWaldArgs { cluster_groups, n, n_minus_p, sigma2_e, tau_opt, xtvx_inv, beta, term_slices } = args;
-    let n_clusters = cluster_groups.len() as f64;
-    let avg_m = (n as f64) / n_clusters.max(1.0);
-    let max_between_df = (n_clusters - 1.0).max(1.0);
-    let eps = (0.01 * tau_opt.max(0.05)).min(0.1);
-    let tau_lo = (tau_opt - eps).max(0.0);
-    let tau_hi = tau_opt + eps;
-
-    let inv_lo = eval_profile(tau_lo)?.3;
-    let inv_hi = eval_profile(tau_hi)?.3;
-    let dtau = (tau_hi - tau_lo).max(1e-8);
-
-    // Finite-difference curvature of profile REML wrt sigma2_u -> approximate var(tau_hat).
-    let ll_0 = eval_profile(tau_opt)?.0;
-    let ll_l = eval_profile(tau_lo)?.0;
-    let ll_h = eval_profile(tau_hi)?.0;
-    let d2_ll = ((ll_h - 2.0 * ll_0 + ll_l) / (0.25 * dtau * dtau)).min(-1e-8);
-    let var_tau = (-1.0 / d2_ll).clamp(1e-6, 100.0);
-
-    let mut satt_dfs = Vec::with_capacity(term_slices.len());
-    let mut kr_dfs = Vec::with_capacity(term_slices.len());
-    let mut terms = Vec::with_capacity(term_slices.len());
-
-    let p = beta.len();
-    for &(name, c_start, c_len) in term_slices {
-        if c_len == 0 || c_start + c_len > p {
-            continue;
+fn multi_vc_eval_state(x: &DenseMatrix, y: &[f64], gs: &[DenseMatrix], theta: &[f64]) -> Result<MultiVcEvalState, StatsError> {
+    let n = x.nrows();
+    let n_vc = gs.len();
+    let mut v_data = vec![0.0_f64; n * n];
+    for (&th, g) in theta.iter().zip(gs.iter()) {
+        for (dst, &gv) in v_data.iter_mut().zip(g.as_slice().iter()) {
+            *dst += th * gv;
         }
-        let b_sub = &beta[c_start..(c_start + c_len)];
-        let mut cov_sub_data = vec![0.0_f64; c_len * c_len];
-        let mut dcov_dtau = vec![0.0_f64; c_len * c_len];
-        for r in 0..c_len {
-            for c in 0..c_len {
-                let v0 = xtvx_inv.get(c_start + r, c_start + c).unwrap_or(0.0);
-                let vl = inv_lo.get(c_start + r, c_start + c).unwrap_or(0.0);
-                let vh = inv_hi.get(c_start + r, c_start + c).unwrap_or(0.0);
-                cov_sub_data[r * c_len + c] = sigma2_e * v0;
-                dcov_dtau[r * c_len + c] = sigma2_e * (vh - vl) / dtau;
-            }
-        }
-        let cov_sub = DenseMatrix::from_row_major(c_len, c_len, cov_sub_data)?;
-        let chol_sub = cholesky(&cov_sub)?;
-        let v_inv_b = chol_sub.solve(b_sub)?;
-        let f_wald = (b_sub.iter().zip(v_inv_b.iter()).map(|(a, b)| a * b).sum::<f64>() / (c_len as f64)).max(0.0);
-
-        // Satterthwaite scalar trace sensitivity wrt tau and residual variance.
-        let cov_inv = chol_sub.inverse()?;
-        let mut grad_tau = 0.0_f64;
-        for i in 0..c_len {
-            for j in 0..c_len {
-                grad_tau += cov_inv.get(i, j).unwrap_or(0.0) * dcov_dtau[j * c_len + i];
-            }
-        }
-        let df_within = n_minus_p.max(1.0);
-        let var_log_v = (grad_tau * grad_tau * var_tau / ((c_len * c_len) as f64)) + 2.0 / df_within;
-        let df_satt = (2.0 / var_log_v.max(1e-6)).clamp(1.0, df_within);
-        let kr_shrink = if avg_m > 1.0 && tau_opt > 0.0 { 1.0 / (1.0 + 1.0 / max_between_df) } else { 1.0 };
-        let df_kr = (df_satt * kr_shrink).clamp(1.0, df_within);
-        let p_val = f_sf(f_wald, c_len as f64, df_kr)?;
-
-        satt_dfs.push(df_satt);
-        kr_dfs.push(df_kr);
-        terms.push(FactorialAnovaTerm {
-            name: name.to_owned(),
-            ss: f_wald * (c_len as f64) * sigma2_e,
-            df: c_len as f64,
-            ms: f_wald * sigma2_e,
-            f_statistic: Some(f_wald),
-            p_value: Some(p_val),
-            partial_eta_squared: None,
-            eta_squared: None,
-        });
     }
-    Ok((satt_dfs, kr_dfs, terms))
+    let v_mat = symmetrize_dense(&DenseMatrix::from_row_major(n, n, v_data)?)?;
+    let chol_v = cholesky(&v_mat)?;
+    let ld_v = chol_v.ln_det();
+    let vi = chol_v.inverse()?;
+
+    let xt_vi = x.transpose().matmul(&vi)?;
+    let xtvix = symmetrize_dense(&xt_vi.matmul(x)?)?;
+    let chol_m = cholesky(&xtvix)?;
+    let ld_m = chol_m.ln_det();
+    let phi = chol_m.inverse()?;
+    let xtvi_y = xt_vi.matvec(y)?;
+    let beta = chol_m.solve(&xtvi_y)?;
+    let x_beta = x.matvec(&beta)?;
+    let resid: Vec<f64> = y.iter().zip(x_beta.iter()).map(|(&yv, &xb)| yv - xb).collect();
+    let vir = vi.matvec(&resid)?;
+    let quad: f64 = resid.iter().zip(vir.iter()).map(|(&r, &vr)| r * vr).sum();
+    let ll = -0.5 * (ld_v + ld_m + quad);
+
+    let proj = xt_vi.transpose().matmul(&phi)?.matmul(&xt_vi)?;
+    let p_mat = symmetrize_dense(&dense_sub(&vi, &proj)?)?;
+
+    let mut g_vir = Vec::with_capacity(n_vc);
+    let mut score = Vec::with_capacity(n_vc);
+    for g in gs {
+        let gv = g.matvec(&vir)?;
+        let tr_pg = trace_product(&p_mat, g);
+        let q_g: f64 = vir.iter().zip(gv.iter()).map(|(&a, &b)| a * b).sum();
+        score.push(-0.5 * (tr_pg - q_g));
+        g_vir.push(gv);
+    }
+    let mut ai_data = vec![0.0_f64; n_vc * n_vc];
+    for i in 0..n_vc {
+        let p_g_vir_i = p_mat.matvec(&g_vir[i])?;
+        for j in i..n_vc {
+            let val: f64 = g_vir[j].iter().zip(p_g_vir_i.iter()).map(|(&a, &b)| a * b).sum();
+            let ai_ij = 0.5 * val;
+            ai_data[i * n_vc + j] = ai_ij;
+            ai_data[j * n_vc + i] = ai_ij;
+        }
+    }
+    let ai = DenseMatrix::from_row_major(n_vc, n_vc, ai_data)?;
+    Ok(MultiVcEvalState { ll, score, ai, beta, phi, vi, p_mat, vir, quad })
+}
+
+fn multi_vc_em_step(st: &MultiVcEvalState, gs: &[DenseMatrix], dofs: &[f64], theta: &[f64], floor_positive: bool) -> Vec<f64> {
+    let mut next = Vec::with_capacity(theta.len());
+    for k in 0..theta.len() {
+        let th = theta[k];
+        let g_vir = gs[k].matvec(&st.vir).unwrap_or_default();
+        let uhat_sq = th * th * st.vir.iter().zip(g_vir.iter()).map(|(&a, &b)| a * b).sum::<f64>();
+        let cov_trace = dofs[k] * th - th * th * trace_product(&st.p_mat, &gs[k]);
+        let floor = if k == 0 || floor_positive { 1e-12 } else { 0.0 };
+        next.push(((uhat_sq + cov_trace) / dofs[k]).max(floor));
+    }
+    next
+}
+
+fn multi_vc_ai_step(
+    x: &DenseMatrix,
+    y: &[f64],
+    gs: &[DenseMatrix],
+    dofs: &[f64],
+    theta: &mut [f64],
+    n_minus_p: f64,
+) -> Result<(bool, bool), StatsError> {
+    let st = multi_vc_eval_state(x, y, gs, theta)?;
+    let n_vc = theta.len();
+    let free: Vec<usize> = (0..n_vc).filter(|&k| theta[k] > 1e-11 || st.score[k] > 1e-9).collect();
+    if free.is_empty() {
+        return Ok((true, true));
+    }
+    let max_active_grad = free.iter().map(|&k| st.score[k].abs()).fold(0.0_f64, f64::max);
+    if max_active_grad < 1e-9 {
+        return Ok((true, true));
+    }
+
+    let nf = free.len();
+    let g_f: Vec<f64> = free.iter().map(|&k| st.score[k]).collect();
+    let mut ai_f_data = Vec::with_capacity(nf * nf);
+    for &i in &free {
+        for &j in &free {
+            ai_f_data.push(st.ai.get(i, j).unwrap_or(0.0));
+        }
+    }
+    let ai_f = symmetrize_dense(&DenseMatrix::from_row_major(nf, nf, ai_f_data)?)?;
+    let mut step_f = if let Ok(chol) = cholesky(&ai_f)
+        && let Ok(sol) = chol.solve(&g_f)
+    {
+        sol
+    } else {
+        let eig = sym_eigen(&ai_f)?;
+        let max_ev = eig.eigenvalues.iter().map(|&v| v.abs()).fold(0.0_f64, f64::max).max(1e-12);
+        let qtg = eig.eigenvectors.t_matvec(&g_f)?;
+        let scaled: Vec<f64> = qtg.iter().zip(eig.eigenvalues.iter()).map(|(&c, &ev)| c / ev.max(1e-8 * max_ev)).collect();
+        eig.eigenvectors.matvec(&scaled)?
+    };
+    let directional: f64 = step_f.iter().zip(g_f.iter()).map(|(&d, &g)| d * g).sum();
+    if directional <= 0.0 || !directional.is_finite() {
+        step_f = g_f;
+    }
+
+    let mut step = vec![0.0_f64; n_vc];
+    for (&k, &df) in free.iter().zip(step_f.iter()) {
+        step[k] = df;
+    }
+
+    let mut alpha = 1.0_f64;
+    for _ in 0..25 {
+        let mut cand: Vec<f64> = theta.iter().zip(step.iter()).map(|(&t, &d)| (t + alpha * d).max(0.0)).collect();
+        cand[0] = cand[0].max(1e-12);
+        if let Ok(st_c) = multi_vc_eval_state(x, y, gs, &cand)
+            && st_c.ll >= st.ll - 1e-13
+        {
+            let c_scale = st_c.quad / n_minus_p;
+            let mut chosen = cand.clone();
+            let mut chosen_ll = st_c.ll;
+            if c_scale.is_finite() && c_scale > 1e-12 {
+                let mut cand_r: Vec<f64> = cand.iter().map(|&v| v * c_scale).collect();
+                cand_r[0] = cand_r[0].max(1e-12);
+                if let Ok(st_r) = multi_vc_eval_state(x, y, gs, &cand_r)
+                    && st_r.ll > chosen_ll
+                {
+                    chosen = cand_r;
+                    chosen_ll = st_r.ll;
+                }
+            }
+            let max_delta = theta.iter().zip(chosen.iter()).map(|(&a, &b)| (a - b).abs()).fold(0.0_f64, f64::max);
+            let improved = chosen_ll > st.ll + 1e-13;
+            theta.copy_from_slice(&chosen);
+            return Ok((max_delta < 1e-11 && !improved, true));
+        }
+        alpha *= 0.5;
+    }
+
+    // Backtracking failed: take one guaranteed-monotone EM step.
+    let em_next = multi_vc_em_step(&st, gs, dofs, theta, false);
+    let max_delta = theta.iter().zip(em_next.iter()).map(|(&a, &b)| (a - b).abs()).fold(0.0_f64, f64::max);
+    theta.copy_from_slice(&em_next);
+    Ok((max_delta < 1e-11, false))
+}
+
+/// Fit a multi-variance-component linear mixed model `V = sigma_e^2 I + sum_k sigma_k^2 G_k`
+/// via EM warm-start followed by projected Average-Information REML (Gilmour, Thompson & Cullis,
+/// 1995), with genuine Fai & Cornelius (1996) Satterthwaite and Kenward & Roger (1997) fixed-effect
+/// inference across all `(r + 1)` variance components.
+pub fn fit_multi_vc_reml(
+    x: &DenseMatrix,
+    y: &[f64],
+    random_effects: &[(&str, DenseMatrix, usize)],
+    terms: &[(&str, usize, usize)],
+) -> Result<MultiVcRemlResult, StatsError> {
+    let n = x.nrows();
+    let p = x.ncols();
+    if y.len() != n {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
+    }
+    if n <= p {
+        return Err(StatsError::InsufficientSampleSize { context: "multi-VC REML model", required: p + 1, actual: n });
+    }
+    validate_finite_slice(y)?;
+    let n_minus_p = (n - p) as f64;
+    let y_moments = SummaryMoments::from_slice(y)?;
+    let y_scale_raw = (y_moments.css / (n as f64)).sqrt();
+    let y_scale = if y_scale_raw.is_finite() && y_scale_raw > 0.0 { y_scale_raw } else { 1.0 };
+    let y_scaled: Vec<f64> = y.iter().map(|&v| v / y_scale).collect();
+
+    let n_vc = 1 + random_effects.len();
+    let mut gs = Vec::with_capacity(n_vc);
+    let mut dofs = Vec::with_capacity(n_vc);
+    let mut names = Vec::with_capacity(random_effects.len());
+    gs.push(DenseMatrix::identity(n)?);
+    dofs.push(n as f64);
+    for (name, g_mat, rank_c) in random_effects {
+        if g_mat.nrows() != n || g_mat.ncols() != n {
+            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: g_mat.nrows().min(g_mat.ncols()) }));
+        }
+        gs.push(g_mat.clone());
+        dofs.push((*rank_c).max(1) as f64);
+        names.push((*name).to_owned());
+    }
+
+    let var0 = solve_linear_least_squares(x, &y_scaled).map_or(1.0, |(sol, _)| (sol.rss / n_minus_p).max(1e-6));
+    let mut theta = vec![(var0 / (n_vc as f64)).max(1e-8); n_vc];
+    for _ in 0..25 {
+        if let Ok(st) = multi_vc_eval_state(x, &y_scaled, &gs, &theta) {
+            theta = multi_vc_em_step(&st, &gs, &dofs, &theta, true);
+        } else {
+            break;
+        }
+    }
+    for _ in 0..80 {
+        let (converged, _) = multi_vc_ai_step(x, &y_scaled, &gs, &dofs, &mut theta, n_minus_p)?;
+        if converged {
+            break;
+        }
+    }
+
+    let st = multi_vc_eval_state(x, &y_scaled, &gs, &theta)?;
+    let mut ie_data = vec![0.0_f64; n_vc * n_vc];
+    let mut m_mats = Vec::with_capacity(n_vc);
+    let xt_vi = x.transpose().matmul(&st.vi)?;
+    let vi_x = st.vi.matmul(x)?;
+    for g in &gs {
+        m_mats.push(symmetrize_dense(&xt_vi.matmul(g)?.matmul(&vi_x)?)?);
+    }
+    let mut q_mats = vec![Vec::with_capacity(n_vc); n_vc];
+    let mut pg_mats = Vec::with_capacity(n_vc);
+    for (r, gr) in gs.iter().enumerate() {
+        pg_mats.push(st.p_mat.matmul(gr)?);
+        let xt_vi_gr = xt_vi.matmul(gr)?;
+        for gs_mat in &gs {
+            q_mats[r].push(xt_vi_gr.matmul(&st.vi)?.matmul(gs_mat)?.matmul(&vi_x)?);
+        }
+    }
+    for r in 0..n_vc {
+        for s in r..n_vc {
+            let ie_rs = 0.5 * trace_product(&pg_mats[r], &pg_mats[s]);
+            ie_data[r * n_vc + s] = ie_rs;
+            ie_data[s * n_vc + r] = ie_rs;
+        }
+    }
+    let fisher = OwnedRemlFisherMats { info_e: DenseMatrix::from_row_major(n_vc, n_vc, ie_data)?, m_mats, q_mats };
+    let sigma2_error = theta[0] * y_scale * y_scale;
+    let (mut fixed_terms, satterthwaite_df, kenward_roger_df) =
+        eval_reml_wald_terms_from_mats(&st.phi, &st.beta, theta[0], &fisher, terms, n_minus_p)?;
+    for term in &mut fixed_terms {
+        if let Some(f_val) = term.f_statistic {
+            let ms = f_val * sigma2_error;
+            term.ms = ms;
+            term.ss = ms * term.df;
+        }
+    }
+    let variance_components = names.into_iter().zip(theta.iter().skip(1).map(|&v| v * y_scale * y_scale)).collect();
+    let reml_log_lik = st.ll - n_minus_p * y_scale.ln();
+
+    Ok(MultiVcRemlResult { variance_components, sigma2_error, reml_log_lik, fixed_terms, satterthwaite_df, kenward_roger_df })
 }
 
 // ============================================================================
@@ -1642,17 +2585,15 @@ where
 // ============================================================================
 
 /// Fit nested hierarchical one-way ANOVA (Groups -> Biological-Unit Subclusters -> Technical
-/// Replicates), computing exact Satterthwaite/Kenward-Roger df for unequal cluster sizes and
-/// variance components `(sigma_subcluster^2, sigma_error^2)`.
+/// Replicates), computing exact Satterthwaite / Fai & Cornelius (1996) and Kenward & Roger (1997)
+/// denominator degrees of freedom for unequal cluster sizes and variance components
+/// `(sigma_subcluster^2, sigma_error^2)`.
 ///
-/// The two-level nested partition (groups, subclusters within groups, error) and the
-/// subcluster *F*-test follow Zar (2010, ch. 15). The among-groups test is a REML Wald test from
-/// [`fit_random_intercept_reml`] (Patterson & Thompson, 1971). For two groups, the nested `t` is
-/// the signed square root of that Wald *F*.
-///
-/// Note: despite the description above, the reported "Satterthwaite" and "Kenward–Roger"
-/// denominator df are not exact; they are the heuristic approximations documented on
-/// `compute_reml_wald_terms`.
+/// The two-level nested partition (groups, subclusters within groups, error) and the subcluster
+/// *F*-test follow Zar (2010, ch. 15). The among-groups test is the REML small-sample
+/// Kenward–Roger Wald *F*-test from [`fit_random_intercept_reml`] (Patterson & Thompson, 1971;
+/// Kenward & Roger, 1997). For two groups, the nested `t` is the signed square root of that
+/// adjusted Wald *F*.
 pub fn nested_one_way_anova(table: &lumencraft_doc::NestedTable, two_group_t_test: bool) -> Result<NestedAnovaResult, StatsError> {
     let selected: Vec<usize> = (0..table.groups.len()).collect();
     nested_one_way_anova_selected(table, &selected, two_group_t_test)
@@ -1725,8 +2666,6 @@ fn nested_one_way_anova_selected(
     let mut y_vec = Vec::with_capacity(total_obs);
     let mut cluster_ids = Vec::with_capacity(total_obs);
     let mut row_cursor = 0_usize;
-    let mut sum_n_ij_sq_over_ni = vec![0.0_f64; g_count];
-    let mut sum_n_ij_sq = 0.0_f64;
 
     for (cid, (g_idx, reps)) in subcluster_data.iter().enumerate() {
         let g_mean = group_sums[*g_idx] / (group_n[*g_idx] as f64);
@@ -1735,9 +2674,6 @@ fn nested_one_way_anova_selected(
         let d_sub = m.mean - g_mean;
         ss_sub.add(n_ij * d_sub * d_sub);
         ss_err.add(m.css);
-
-        sum_n_ij_sq += n_ij * n_ij;
-        sum_n_ij_sq_over_ni[*g_idx] += (n_ij * n_ij) / (group_n[*g_idx] as f64);
 
         for &v in reps {
             x_data[row_cursor * g_count] = 1.0;
@@ -1776,13 +2712,7 @@ fn nested_one_way_anova_selected(
     });
     let df2_satt = reml.satterthwaite_df.first().copied().unwrap_or(df1_sub);
     let df2_kr = reml.kenward_roger_df.first().copied().unwrap_or(df1_sub);
-    let p_g = reml.fixed_terms.first().and_then(|t| t.p_value).unwrap_or(f_sf(f_g, df1_g, df2_satt)?);
-
-    // Classic moment estimate check for balanced clarity alongside REML.
-    let n0_denom = df1_sub;
-    let sum_sq_over = sum_n_ij_sq_over_ni.iter().sum::<f64>();
-    let n0 = ((total_obs as f64) - sum_sq_over) / n0_denom.max(1.0);
-    let _ = (sum_n_ij_sq, n0);
+    let p_g = reml.fixed_terms.first().and_then(|t| t.p_value).unwrap_or(f_sf(f_g, df1_g, df2_kr)?);
 
     let t_nested = if two_group_t_test {
         let sign = if (group_sums[0] / (group_n[0] as f64)) >= (group_sums[1] / (group_n[1] as f64)) { 1.0 } else { -1.0 };
@@ -2416,13 +3346,19 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     let p_fmt = spec.p_value_format;
     let confidence = spec.confidence_level;
 
-    let (mut result, obs) = match &sheet.archetype {
-        TableArchetype::Grouped(grouped) => run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt)?,
-        TableArchetype::MultipleVariables(mv) => run_multifactor_mv(mv, fac_spec)?,
+    let (mut result, obs, aux_tabs) = match &sheet.archetype {
+        TableArchetype::Grouped(grouped) => {
+            let outcome = run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt)?;
+            (outcome.result, outcome.observations, outcome.aux_tabs)
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let (res, obs) = run_multifactor_mv(mv, fac_spec)?;
+            (res, obs, Vec::new())
+        }
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
     };
 
-    if result.terms.iter().any(|t| t.p_value.is_none()) {
+    if result.terms.iter().any(|t| t.df > 0.0 && t.p_value.is_none()) {
         finalize_term_p_values(&mut result)?;
     }
 
@@ -2472,6 +3408,7 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
 
     let tab_title = if fac_spec.three_way { "Three-way ANOVA" } else { "Factorial ANOVA" };
     out.tabs.push(build_tab("factorial-anova", tab_title, ResultTabKind::AnovaTable, headers, row_labels, rows));
+    out.tabs.extend(aux_tabs);
 
     run_factorial_multiplicity(&mut out, &obs, &result, &fac_spec.multiplicity, p_fmt, confidence)?;
 
@@ -2651,13 +3588,112 @@ fn grouped_row_levels(grouped: &lumencraft_doc::GroupedTable, n_rows: usize) -> 
     (0..n_rows).map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect()
 }
 
+struct GroupedFactorialOutcome {
+    result: FactorialAnovaResult,
+    observations: FactorialObservations,
+    aux_tabs: Vec<ResultTab>,
+}
+
+fn build_rm_sphericity_tab(
+    row_name: &str,
+    col_name: &str,
+    rm_res: &RmTwoWayAnovaResult,
+    p_fmt: PValueFormat,
+) -> Result<Option<ResultTab>, StatsError> {
+    let design = rm_res.design;
+    let res = &rm_res.anova;
+    let sph = &rm_res.sphericities;
+    let inter_name = format!("{row_name} × {col_name}");
+    let entries: [(&str, Option<&SphericityResult>, usize); 3] = match design {
+        RepeatedMeasuresDesign::BothFactorsMatched => {
+            [(row_name, sph.row.as_ref(), 0), (col_name, sph.column.as_ref(), 1), (inter_name.as_str(), sph.interaction.as_ref(), 2)]
+        }
+        RepeatedMeasuresDesign::ColumnFactorMatched => {
+            [(col_name, sph.column.as_ref(), 1), (inter_name.as_str(), sph.column.as_ref(), 2), ("", None, usize::MAX)]
+        }
+        RepeatedMeasuresDesign::RowFactorMatched => {
+            [(row_name, sph.row.as_ref(), 0), (inter_name.as_str(), sph.row.as_ref(), 2), ("", None, usize::MAX)]
+        }
+        RepeatedMeasuresDesign::None => return Ok(None),
+    };
+
+    let headers = vec![
+        String::from("Mauchly W"),
+        String::from("Mauchly chi2"),
+        String::from("df"),
+        String::from("Mauchly P"),
+        String::from("G-G epsilon"),
+        String::from("H-F epsilon"),
+        String::from("G-G P"),
+        String::from("H-F P"),
+    ];
+    let mut row_labels = Vec::new();
+    let mut rows = Vec::new();
+    for (label, s_opt, term_idx) in entries {
+        let (Some(s), Some(term), Some(&df_err)) = (s_opt, res.terms.get(term_idx), rm_res.term_error_dfs.get(term_idx)) else {
+            continue;
+        };
+        let f_val = term.f_statistic.unwrap_or(0.0);
+        let p_gg = apply_rm_sphericity_p(f_val, term.df, df_err, Some(s), RmSphericityCorrection::GreenhouseGeisser)?;
+        let p_hf = apply_rm_sphericity_p(f_val, term.df, df_err, Some(s), RmSphericityCorrection::HuynhFeldt)?;
+        row_labels.push(label.to_owned());
+        rows.push(vec![
+            num_cell(s.mauchly_w),
+            num_cell(s.mauchly_chi2),
+            num_cell(s.mauchly_df),
+            p_cell(s.mauchly_p, p_fmt),
+            num_cell(s.greenhouse_geisser_eps),
+            num_cell(s.huynh_feldt_eps),
+            p_cell(p_gg, p_fmt),
+            p_cell(p_hf, p_fmt),
+        ]);
+    }
+    if rows.is_empty() {
+        return Ok(None);
+    }
+    Ok(Some(build_tab("rm-sphericity", "Repeated-measures sphericity", ResultTabKind::Diagnostics, headers, row_labels, rows)))
+}
+
+fn push_rm_sphericity_outputs(
+    out: &mut ResultSheet,
+    row_name: &str,
+    col_name: &str,
+    rm_res: &RmTwoWayAnovaResult,
+    p_fmt: PValueFormat,
+) -> Result<Option<ResultTab>, StatsError> {
+    let sph = &rm_res.sphericities;
+    let inter_name = format!("{row_name} × {col_name}");
+    let items: [(&str, Option<&SphericityResult>); 3] =
+        [(row_name, sph.row.as_ref()), (col_name, sph.column.as_ref()), (&inter_name, sph.interaction.as_ref())];
+    let mut worst_gg = 1.0_f64;
+    let mut summary_parts = Vec::new();
+    for (name, s_opt) in items {
+        let Some(s) = s_opt else {
+            continue;
+        };
+        worst_gg = worst_gg.min(s.greenhouse_geisser_eps);
+        push_scalar(out, format!("{name}: G-G epsilon"), None, s.greenhouse_geisser_eps);
+        push_scalar(out, format!("{name}: H-F epsilon"), None, s.huynh_feldt_eps);
+        summary_parts.push(format!("{name}: eps_GG={:.4}, eps_HF={:.4}, P={:.4}", s.greenhouse_geisser_eps, s.huynh_feldt_eps, s.mauchly_p));
+    }
+    if !summary_parts.is_empty() {
+        out.checklist.push(checklist_item(
+            "Sphericity (RM two-way)",
+            if worst_gg < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
+            Some(summary_parts.join("; ")),
+            "Greenhouse-Geisser and Huynh-Feldt epsilons summarize covariance sphericity across within-subject factors.",
+        ));
+    }
+    build_rm_sphericity_tab(row_name, col_name, rm_res, p_fmt)
+}
+
 fn run_grouped_factorial(
     grouped: &lumencraft_doc::GroupedTable,
     out: &mut ResultSheet,
     selected: &[usize],
     fac_spec: &FactorialAnovaSpec,
     p_fmt: PValueFormat,
-) -> Result<(FactorialAnovaResult, FactorialObservations), StatsError> {
+) -> Result<GroupedFactorialOutcome, StatsError> {
     if grouped.subcolumn_mode.is_pre_summarized() {
         return Err(StatsError::RequiresRawReplicates);
     }
@@ -2692,22 +3728,20 @@ fn run_grouped_factorial(
                 }
             }
         }
-        let (res, sph_opt) =
-            fit_rm_two_way_anova(&subject_data, &grouped.row_factor_title, &grouped.column_factor_title, fac_spec.repeated_measures)?;
-        if let Some(sph) = sph_opt {
-            out.checklist.push(checklist_item(
-                "Sphericity (RM two-way)",
-                if sph.greenhouse_geisser_eps < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
-                Some(format!("eps_GG = {:.4}, eps_HF = {:.4}, Mauchly P = {:.4}", sph.greenhouse_geisser_eps, sph.huynh_feldt_eps, sph.mauchly_p)),
-                "Greenhouse-Geisser epsilon summarizes covariance sphericity across repeated levels.",
-            ));
-        }
+        let rm_res = fit_rm_two_way_anova_with_sphericity(
+            &subject_data,
+            &grouped.row_factor_title,
+            &grouped.column_factor_title,
+            fac_spec.repeated_measures,
+            RmSphericityCorrection::None,
+        )?;
+        let sph_tab = push_rm_sphericity_outputs(out, &grouped.row_factor_title, &grouped.column_factor_title, &rm_res, p_fmt)?;
         let data = FactorialObservations {
             factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
             factor_levels: vec![grouped_row_levels(grouped, n_rows), selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect()],
             rows: obs,
         };
-        return Ok((res, data));
+        return Ok(GroupedFactorialOutcome { result: rm_res.anova, observations: data, aux_tabs: sph_tab.into_iter().collect() });
     }
 
     // Three-way 2 x 2 x K path.
@@ -2733,7 +3767,7 @@ fn run_grouped_factorial(
         let data =
             FactorialObservations { factor_names: vec![f1_name, f2_name, f3_name], factor_levels: vec![f1_levels, f2_levels, f3_levels], rows: obs };
         let res = fit_factorial_anova(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
-        return Ok((res, data));
+        return Ok(GroupedFactorialOutcome { result: res, observations: data, aux_tabs: Vec::new() });
     }
 
     // Standard Two-Way ANOVA (Row Factor x Column Factor).
@@ -2753,7 +3787,18 @@ fn run_grouped_factorial(
         rows: obs,
     };
     let res = fit_factorial_anova(&data, fac_spec.max_interaction_order.clamp(1, 2), fac_spec.ss_type)?;
-    Ok((res, data))
+    Ok(GroupedFactorialOutcome { result: res, observations: data, aux_tabs: Vec::new() })
+}
+
+fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[FactorialAnovaTerm], satt: &[f64], kr: &[f64]) {
+    for (idx, term) in terms.iter().enumerate() {
+        if let Some(&df_s) = satt.get(idx) {
+            push_scalar(out, format!("{}: Satterthwaite df", term.name), None, df_s);
+        }
+        if let Some(&df_k) = kr.get(idx) {
+            push_scalar(out, format!("{}: Kenward-Roger df", term.name), None, df_k);
+        }
+    }
 }
 
 fn run_rm_two_way_reml_fallback(
@@ -2762,7 +3807,7 @@ fn run_rm_two_way_reml_fallback(
     selected_cols: &[usize],
     fac_spec: &FactorialAnovaSpec,
     p_fmt: PValueFormat,
-) -> Result<(FactorialAnovaResult, FactorialObservations), StatsError> {
+) -> Result<GroupedFactorialOutcome, StatsError> {
     let n_rows = grouped.row_count();
     let n_cols = selected_cols.len();
     let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
@@ -2777,8 +3822,9 @@ fn run_rm_two_way_reml_fallback(
     let mut x_rows: Vec<f64> = Vec::new();
     let mut y_vec: Vec<f64> = Vec::new();
     let mut obs = Vec::new();
-    let mut cluster_ids: Vec<usize> = Vec::new();
-    let mut ss_tot_acc = NeumaierSum::new();
+    let mut subj_ids: Vec<usize> = Vec::new();
+    let mut subj_row_ids: Vec<usize> = Vec::new();
+    let mut subj_col_ids: Vec<usize> = Vec::new();
     for s in 0..n_subs {
         for (r, r_basis) in row_basis.iter().enumerate() {
             for (c_pos, (&orig_c, c_basis)) in selected_cols.iter().zip(col_basis.iter()).enumerate() {
@@ -2795,14 +3841,9 @@ fn run_rm_two_way_reml_fallback(
                     x_rows.extend_from_slice(&row_x);
                     y_vec.push(v);
                     obs.push((vec![r, c_pos], v));
-                    ss_tot_acc.add(v);
-                    // Cluster ID represents repeated subject identity across matched dimensions.
-                    let cid = match fac_spec.repeated_measures {
-                        RepeatedMeasuresDesign::ColumnFactorMatched => r * n_subs + s,
-                        RepeatedMeasuresDesign::RowFactorMatched => c_pos * n_subs + s,
-                        _ => s,
-                    };
-                    cluster_ids.push(cid);
+                    subj_ids.push(s);
+                    subj_row_ids.push(s * n_rows + r);
+                    subj_col_ids.push(s * n_cols + c_pos);
                 }
             }
         }
@@ -2818,45 +3859,115 @@ fn run_rm_two_way_reml_fallback(
         (grouped.column_factor_title.as_str(), 1 + n_r, n_c),
         (inter_name.as_str(), 1 + n_r + n_c, n_r * n_c),
     ];
-    let reml = fit_random_intercept_reml(&x_mat, &y_vec, &cluster_ids, &term_slices)?;
-    push_scalar(out, "REML sigma^2 (subject)", None, reml.sigma2_random);
-    push_scalar(out, "REML sigma^2 (residual)", None, reml.sigma2_error);
-    push_scalar(out, "REML ICC", None, reml.icc);
-    push_scalar(out, "REML log-likelihood", None, reml.reml_log_lik);
 
-    let reml_headers =
-        vec![String::from("Component"), String::from("Variance"), String::from("ICC"), String::from("LRT chi2"), String::from("LRT P")];
-    let reml_rows = vec![
-        vec![
-            ResultCell::Text(String::from("Subject (random)")),
-            num_cell(reml.sigma2_random),
-            num_cell(reml.icc),
-            num_cell(reml.lrt_random_chi2),
-            p_cell(reml.lrt_random_p, p_fmt),
-        ],
-        vec![ResultCell::Text(String::from("Residual")), num_cell(reml.sigma2_error), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
-    ];
-    out.tabs.push(build_tab(
-        "mixed-reml",
-        "Mixed-effects REML variance components",
-        ResultTabKind::ParametersAndConfidenceIntervals,
-        reml_headers,
-        vec![String::from("Subject"), String::from("Residual")],
-        reml_rows,
-    ));
+    let (fixed_terms, sigma2_e, reml_ll, icc_subj, vc_tab) = match fac_spec.repeated_measures {
+        RepeatedMeasuresDesign::BothFactorsMatched => {
+            let (g_s, c_s) = cluster_ids_to_g_matrix(&subj_ids)?;
+            let (g_sr, c_sr) = cluster_ids_to_g_matrix(&subj_row_ids)?;
+            let (g_sc, c_sc) = cluster_ids_to_g_matrix(&subj_col_ids)?;
+            let sr_name = format!("subject × {}", grouped.row_factor_title);
+            let sc_name = format!("subject × {}", grouped.column_factor_title);
+            let mres = fit_multi_vc_reml(
+                &x_mat,
+                &y_vec,
+                &[("subject", g_s, c_s), (sr_name.as_str(), g_sr, c_sr), (sc_name.as_str(), g_sc, c_sc)],
+                &term_slices,
+            )?;
+            let s2_s = mres.variance_components.first().map_or(0.0, |(_, v)| *v);
+            let s2_sr = mres.variance_components.get(1).map_or(0.0, |(_, v)| *v);
+            let s2_sc = mres.variance_components.get(2).map_or(0.0, |(_, v)| *v);
+            let tot = (s2_s + s2_sr + s2_sc + mres.sigma2_error).max(1e-18);
+            let icc = s2_s / tot;
+
+            push_scalar(out, "REML sigma^2 (subject)", None, s2_s);
+            push_scalar(out, format!("REML sigma^2 ({sr_name})"), None, s2_sr);
+            push_scalar(out, format!("REML sigma^2 ({sc_name})"), None, s2_sc);
+            push_scalar(out, "REML sigma^2 (residual)", None, mres.sigma2_error);
+            push_scalar(out, "REML ICC", None, icc);
+            push_scalar(out, "REML log-likelihood", None, mres.reml_log_lik);
+            push_reml_df_scalars(out, &mres.fixed_terms, &mres.satterthwaite_df, &mres.kenward_roger_df);
+
+            let sr_title = format!("Subject × {}", grouped.row_factor_title);
+            let sc_title = format!("Subject × {}", grouped.column_factor_title);
+            let vc_headers = vec![String::from("Component"), String::from("Variance"), String::from("SD"), String::from("% of total")];
+            let vc_rows = vec![
+                vec![ResultCell::Text(String::from("Subject (random)")), num_cell(s2_s), num_cell(s2_s.sqrt()), num_cell(100.0 * s2_s / tot)],
+                vec![ResultCell::Text(sr_title.clone()), num_cell(s2_sr), num_cell(s2_sr.sqrt()), num_cell(100.0 * s2_sr / tot)],
+                vec![ResultCell::Text(sc_title.clone()), num_cell(s2_sc), num_cell(s2_sc.sqrt()), num_cell(100.0 * s2_sc / tot)],
+                vec![
+                    ResultCell::Text(String::from("Residual")),
+                    num_cell(mres.sigma2_error),
+                    num_cell(mres.sigma2_error.sqrt()),
+                    num_cell(100.0 * mres.sigma2_error / tot),
+                ],
+            ];
+            let tab = build_tab(
+                "mixed-reml",
+                "Mixed-effects REML variance components",
+                ResultTabKind::ParametersAndConfidenceIntervals,
+                vc_headers,
+                vec![String::from("Subject"), sr_title, sc_title, String::from("Residual")],
+                vc_rows,
+            );
+            (mres.fixed_terms, mres.sigma2_error, mres.reml_log_lik, icc, tab)
+        }
+        design => {
+            let cluster_ids: Vec<usize> = match design {
+                RepeatedMeasuresDesign::ColumnFactorMatched => subj_row_ids.clone(),
+                RepeatedMeasuresDesign::RowFactorMatched => subj_col_ids.clone(),
+                _ => subj_ids,
+            };
+            let reml = fit_random_intercept_reml(&x_mat, &y_vec, &cluster_ids, &term_slices)?;
+            push_scalar(out, "REML sigma^2 (subject)", None, reml.sigma2_random);
+            push_scalar(out, "REML sigma^2 (residual)", None, reml.sigma2_error);
+            push_scalar(out, "REML ICC", None, reml.icc);
+            push_scalar(out, "REML log-likelihood", None, reml.reml_log_lik);
+            push_reml_df_scalars(out, &reml.fixed_terms, &reml.satterthwaite_df, &reml.kenward_roger_df);
+
+            let reml_headers =
+                vec![String::from("Component"), String::from("Variance"), String::from("ICC"), String::from("LRT chi2"), String::from("LRT P")];
+            let reml_rows = vec![
+                vec![
+                    ResultCell::Text(String::from("Subject (random)")),
+                    num_cell(reml.sigma2_random),
+                    num_cell(reml.icc),
+                    num_cell(reml.lrt_random_chi2),
+                    p_cell(reml.lrt_random_p, p_fmt),
+                ],
+                vec![
+                    ResultCell::Text(String::from("Residual")),
+                    num_cell(reml.sigma2_error),
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                ],
+            ];
+            let tab = build_tab(
+                "mixed-reml",
+                "Mixed-effects REML variance components",
+                ResultTabKind::ParametersAndConfidenceIntervals,
+                reml_headers,
+                vec![String::from("Subject"), String::from("Residual")],
+                reml_rows,
+            );
+            (reml.fixed_terms, reml.sigma2_error, reml.reml_log_lik, reml.icc, tab)
+        }
+    };
+
+    out.tabs.push(vc_tab);
     out.checklist.push(checklist_item(
         "Missing-value mixed-effects REML",
         ChecklistStatus::Info,
-        Some(format!("ICC = {:.3}, REML logL = {:.2}", reml.icc, reml.reml_log_lik)),
+        Some(format!("ICC = {icc_subj:.3}, REML logL = {reml_ll:.2}")),
         "Missing replicates detected in repeated-measures cells; fitted linear mixed-effects REML with Kenward-Roger degrees of freedom instead of listwise deletion.",
     ));
 
     let ym = SummaryMoments::from_slice(&y_vec)?;
     let res = FactorialAnovaResult {
-        terms: reml.fixed_terms,
-        ss_residual: reml.sigma2_error * ((n_obs - p_total) as f64),
+        terms: fixed_terms,
+        ss_residual: sigma2_e * ((n_obs - p_total) as f64),
         df_residual: (n_obs - p_total) as f64,
-        ms_residual: reml.sigma2_error,
+        ms_residual: sigma2_e,
         ss_total: ym.css,
         df_total: (n_obs - 1) as f64,
         total_n: n_obs,
@@ -2868,7 +3979,7 @@ fn run_rm_two_way_reml_fallback(
         factor_levels: vec![grouped_row_levels(grouped, n_rows), selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect()],
         rows: obs,
     };
-    Ok((res, data))
+    Ok(GroupedFactorialOutcome { result: res, observations: data, aux_tabs: Vec::new() })
 }
 
 fn run_multifactor_mv(
@@ -2934,7 +4045,6 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     };
     let mut out = init_result_sheet(spec)?;
     let p_fmt = spec.p_value_format;
-    let confidence = spec.confidence_level;
 
     let selected_groups = resolve_selected_indices(&spec.selected_data_sets, nested.groups.len());
     let res = nested_one_way_anova_selected(nested, &selected_groups, nested_spec.two_group_t_test)?;
@@ -2945,7 +4055,6 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     push_scalar(&mut out, "ICC (subcluster)", None, res.icc_subclusters);
     if let Some(t_val) = res.t_nested {
         push_scalar(&mut out, "Nested t", None, t_val);
-        let _ = student_t_two_sided_p(t_val, res.df2_groups_kenward_roger);
     }
 
     let headers = vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")];
@@ -3004,21 +4113,10 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
         vc_rows,
     ));
 
-    // Optional group-level pairwise comparisons if >= 3 groups.
+    // Optional group-level pairwise comparisons using hierarchical group-mean variances:
+    // Var(mean_g) = sigma_u^2 * sum_j(n_{gj}^2) / N_g^2 + sigma_e^2 / N_g (Sokal & Rohlf / Montgomery).
     if !nested_spec.two_group_t_test && selected_groups.len() >= 3 {
-        let mut g_inputs = Vec::with_capacity(selected_groups.len());
-        let eff_var = res.variance_error + res.variance_subclusters;
-        for &g_idx in &selected_groups {
-            let g = &nested.groups[g_idx];
-            let mut vals = Vec::new();
-            for b in 0..g.biological_unit_count() {
-                vals.extend(nested.active_technical_replicates(g_idx, b));
-            }
-            let m = SummaryMoments::from_slice(&vals)?;
-            g_inputs.push(GroupComparisonInput { index: g_idx, label: g.title.clone(), n: vals.len() as f64, mean: m.mean, sd: eff_var.sqrt() });
-        }
-        let details = compare_groups_pairwise(&g_inputs, eff_var, res.df2_groups_kenward_roger, &nested_spec.multiplicity)?;
-        push_pairwise_outputs(&mut out, &details, "Nested multiple comparisons", p_fmt, confidence);
+        append_nested_multiplicity(&mut out, nested, &selected_groups, &res, spec, nested_spec)?;
     }
 
     out.checklist.push(checklist_item(
@@ -3029,4 +4127,67 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     ));
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
+}
+
+fn append_nested_multiplicity(
+    out: &mut ResultSheet,
+    nested: &lumencraft_doc::NestedTable,
+    selected_groups: &[usize],
+    res: &NestedAnovaResult,
+    spec: &AnalysisSpec,
+    nested_spec: &NestedAnalysisSpec,
+) -> Result<(), StatsError> {
+    let p_fmt = spec.p_value_format;
+    let confidence = spec.confidence_level;
+    let is_welch = matches!(
+        MultiplicityProcedure::from(nested_spec.multiplicity.method),
+        MultiplicityProcedure::GamesHowell | MultiplicityProcedure::TamhaneT2 | MultiplicityProcedure::DunnettT3
+    );
+    let mut group_stats = Vec::with_capacity(selected_groups.len());
+    for &g_idx in selected_groups {
+        let g = nested.groups.get(g_idx).ok_or(StatsError::MissingColumn { index: g_idx })?;
+        let mut vals = Vec::new();
+        let mut m_g = 0_usize;
+        let mut sum_n_sq = 0.0_f64;
+        for b in 0..g.biological_unit_count() {
+            let reps = nested.active_technical_replicates(g_idx, b);
+            if !reps.is_empty() {
+                m_g += 1;
+                let n_b = reps.len() as f64;
+                sum_n_sq += n_b * n_b;
+                vals.extend(reps);
+            }
+        }
+        let m = SummaryMoments::from_slice(&vals)?;
+        let total_n_g = vals.len() as f64;
+        let var_mean_g = res.variance_subclusters * (sum_n_sq / (total_n_g * total_n_g)) + res.variance_error / total_n_g;
+        group_stats.push((g_idx, g.title.clone(), m.mean, m_g as f64, var_mean_g.max(0.0)));
+    }
+    let all_pos = group_stats.iter().all(|(_, _, _, _, v)| *v > 0.0);
+    let mse_eff = if is_welch || !all_pos { 0.0 } else { 1.0 };
+    let mut g_inputs = Vec::with_capacity(group_stats.len());
+    for (g_idx, label, mean, m_g, var_mean_g) in group_stats {
+        let n_eff = if !is_welch && all_pos { 1.0 / var_mean_g } else { m_g.max(1.0) };
+        let sd_eff = (m_g.max(1.0) * var_mean_g).sqrt();
+        g_inputs.push(GroupComparisonInput { index: g_idx, label, n: n_eff, mean, sd: sd_eff });
+    }
+    if nested_spec.multiplicity.method == MultiplicityMethod::LinearTrend {
+        let trend = linear_trend_test(&g_inputs, mse_eff, res.df2_groups_kenward_roger)?;
+        push_scalar(out, "Linear trend F", None, trend.f_statistic);
+        push_scalar(out, "Linear trend P", None, trend.p_value);
+        let headers = vec![String::from("Slope"), String::from("R squared"), String::from("F"), String::from("P value")];
+        let rows = vec![vec![num_cell(trend.slope_estimate), num_cell(trend.ss_trend), num_cell(trend.f_statistic), p_cell(trend.p_value, p_fmt)]];
+        out.tabs.push(build_tab(
+            "linear-trend",
+            "Test for linear trend",
+            ResultTabKind::MultipleComparisons,
+            headers,
+            vec![String::from("Linear trend")],
+            rows,
+        ));
+    } else {
+        let details = compare_groups_pairwise(&g_inputs, mse_eff, res.df2_groups_kenward_roger, &nested_spec.multiplicity)?;
+        push_pairwise_outputs(out, &details, "Nested multiple comparisons", p_fmt, confidence);
+    }
+    Ok(())
 }

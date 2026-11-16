@@ -318,16 +318,21 @@ fn edge_02a_missing_replicate_rm_reml_satterthwaite_kr_vs_nlme() {
     assert_approx_eq(reml.reml_log_lik, exp_profile_reml, 1e-4, 1e-4, "REML logLik");
     assert!(reml.lrt_random_chi2 > 50.0 && reml.lrt_random_p < 1e-10);
 
-    let exp_f = [("A", 2_988.069_729_587_45), ("B", 1_343.763_711_046_137_6), ("A × B", 67.127_302_874_484_6)];
-    for ((idx, (name, f_expected)), term) in exp_f.iter().enumerate().zip(&reml.fixed_terms) {
+    // Exact Kenward & Roger (1997) F* and Fai & Cornelius (1996) / KR denominator df from R 4.5.2.
+    let exp_kr = [
+        ("A", 2_987.986_991_201_63, 31.002_456_915_365_0, 31.002_456_915_365_0),
+        ("B", 1_343.646_367_183_48, 31.005_806_685_873_7, 31.005_806_951_511_0),
+        ("A × B", 67.123_207_651_699_1, 31.010_799_392_432_4, 31.010_800_376_831_4),
+    ];
+    for ((idx, (name, f_expected, sat_exp, kr_exp)), term) in exp_kr.iter().enumerate().zip(&reml.fixed_terms) {
         assert_eq!(term.name, *name);
-        assert_approx_eq(term.f_statistic.unwrap(), *f_expected, 1e-2, 5e-4, &format!("REML F {name}"));
+        assert_approx_eq(term.f_statistic.unwrap(), *f_expected, 1e-4, 1e-6, &format!("REML F_KR {name}"));
         assert!(term.p_value.unwrap() < 1e-10);
         let sat = reml.satterthwaite_df[idx];
         let kr = reml.kenward_roger_df[idx];
         assert!(sat.is_finite() && kr.is_finite());
-        assert!(kr >= 1.0 && kr <= sat + 1e-12 && sat <= 38.0);
-        assert!(kr < sat, "KR adjustment should shrink finite-cluster df vs Satterthwaite");
+        assert_approx_eq(sat, *sat_exp, 1e-4, 1e-5, &format!("REML nu_Sat {name}"));
+        assert_approx_eq(kr, *kr_exp, 1e-4, 1e-5, &format!("REML nu_KR {name}"));
     }
 }
 
@@ -362,13 +367,18 @@ fn edge_02b_grouped_rm_missing_cell_fallback_and_sparse_cluster_reml() {
     let res_sheet = run_factorial_anova(&sheet, &spec, &fac_spec).unwrap();
 
     let scalar_map: HashMap<&str, f64> = res_sheet.scalars.iter().map(|s| (s.key.as_str(), s.value)).collect();
-    let exp_s2_u = 4.558_845_077_276_424;
-    let exp_s2_e = 0.121_430_006_359_814;
-    assert_approx_eq(scalar_map["REML sigma^2 (subject)"], exp_s2_u, 1e-4, 1e-4, "Sheet REML s2_u");
-    assert_approx_eq(scalar_map["REML sigma^2 (residual)"], exp_s2_e, 1e-4, 1e-4, "Sheet REML s2_e");
-    assert_approx_eq(scalar_map["REML ICC"], exp_s2_u / (exp_s2_u + exp_s2_e), 1e-4, 1e-4, "Sheet REML ICC");
-    let exp_profile_reml = -42.698_093_229_508_97 + 0.5 * 38.0 * std::f64::consts::TAU.ln();
-    assert_approx_eq(scalar_map["REML log-likelihood"], exp_profile_reml, 1e-4, 1e-4, "Sheet REML logLik");
+    // 4-stratum REML oracle for BothFactorsMatched: S, S×Timepoint, S×Treatment, residual (R 4.5.2 AI-REML).
+    let exp_s2_s = 4.464_884_941_512_92;
+    let exp_s2_sr = 0.088_333_824_264_694;
+    let exp_s2_sc = 0.008_785_904_276_616;
+    let exp_s2_e = 0.047_890_562_833_143;
+    let exp_tot = exp_s2_s + exp_s2_sr + exp_s2_sc + exp_s2_e;
+    assert_approx_eq(scalar_map["REML sigma^2 (subject)"], exp_s2_s, 1e-3, 1e-3, "Sheet REML s2_S");
+    assert_approx_eq(scalar_map["REML sigma^2 (subject × Timepoint)"], exp_s2_sr, 1e-3, 1e-2, "Sheet REML s2_SR");
+    assert_approx_eq(scalar_map["REML sigma^2 (subject × Treatment)"], exp_s2_sc, 1e-3, 1e-1, "Sheet REML s2_SC");
+    assert_approx_eq(scalar_map["REML sigma^2 (residual)"], exp_s2_e, 1e-3, 2e-2, "Sheet REML s2_e");
+    assert_approx_eq(scalar_map["REML ICC"], exp_s2_s / exp_tot, 1e-3, 1e-3, "Sheet REML ICC");
+    assert_approx_eq(scalar_map["REML log-likelihood"], -4.692_444_027_256_86, 1e-3, 1e-3, "Sheet REML logLik");
     assert!(
         res_sheet
             .tabs
@@ -387,8 +397,11 @@ fn edge_02b_grouped_rm_missing_cell_fallback_and_sparse_cluster_reml() {
         .collect();
     let sparse_x = DenseMatrix::from_row_major(sparse_clusters.len(), 2, sparse_x_vals).unwrap();
     let sparse_reml = fit_random_intercept_reml(&sparse_x, &sparse_y, &sparse_clusters, &[("Cond", 1, 1)]).unwrap();
-    assert!(sparse_reml.sigma2_random > 1.0 && sparse_reml.sigma2_error > 0.0 && sparse_reml.icc > 0.8);
-    assert!(sparse_reml.kenward_roger_df[0] < sparse_reml.satterthwaite_df[0]);
+    assert_approx_eq(sparse_reml.sigma2_random, 6.744_219_433_408_78, 1e-4, 1e-4, "Sparse REML s2_u");
+    assert_approx_eq(sparse_reml.sigma2_error, 0.009_375_238_795_555, 1e-5, 1e-4, "Sparse REML s2_e");
+    assert_approx_eq(sparse_reml.fixed_terms[0].f_statistic.unwrap(), 11_555.340_836_419_9, 1e-1, 1e-5, "Sparse REML F_KR");
+    assert_approx_eq(sparse_reml.satterthwaite_df[0], 12.000_427_585_730_3, 1e-4, 1e-5, "Sparse REML nu_Sat");
+    assert_approx_eq(sparse_reml.kenward_roger_df[0], 12.000_427_585_730_3, 1e-4, 1e-5, "Sparse REML nu_KR");
 }
 
 #[test]
