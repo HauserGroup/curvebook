@@ -74,7 +74,7 @@ use crate::common::{
     sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
-use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
+use crate::multiplicity::{MultiplicityProcedure, adjust_p_values, adjust_sidak};
 
 // ============================================================================
 // Typed Outputs
@@ -240,6 +240,11 @@ pub fn kaplan_meier_curve(
     if observations.is_empty() {
         return Err(StatsError::EmptyInput);
     }
+    for obs in observations {
+        if !obs.time.is_finite() || obs.time < 0.0 {
+            return Err(StatsError::InvalidParameter { name: "survival_time", value: obs.time });
+        }
+    }
     let mut sorted = observations.to_vec();
     sorted.sort_by(|a, b| a.time.total_cmp(&b.time));
 
@@ -257,7 +262,7 @@ pub fn kaplan_meier_curve(
         let t = sorted[i].time;
         let mut d_i = 0_usize;
         let mut c_i = 0_usize;
-        while i < sorted.len() && sorted[i].time == t {
+        while i < sorted.len() && sorted[i].time.total_cmp(&t).is_eq() {
             match sorted[i].status {
                 SurvivalStatus::Event => d_i += 1,
                 SurvivalStatus::Censored => c_i += 1,
@@ -1109,7 +1114,7 @@ fn schoenfeld_diagnostics(
 
     let n_evt = resid_rows.len();
     if n_evt < 3 {
-        return Ok((vec![0.0; p], vec![1.0; p], 0.0));
+        return Ok((vec![f64::NAN; p], vec![f64::NAN; p], f64::NAN));
     }
 
     // Grambsch-Therneau (1994) scaled Schoenfeld correlation test against tied average event-rank time.
@@ -1129,6 +1134,9 @@ fn schoenfeld_diagnostics(
     }
     let g_mean: f64 = g_times.iter().sum::<f64>() / (n_evt as f64);
     let g_ss: f64 = g_times.iter().map(|&g| (g - g_mean).powi(2)).sum();
+    if !g_ss.is_finite() || g_ss <= 0.0 {
+        return Ok((vec![f64::NAN; p], vec![f64::NAN; p], f64::NAN));
+    }
     let n_ef = n_evt as f64;
 
     let mut scaled_cols = vec![vec![0.0_f64; n_evt]; p];
@@ -1522,6 +1530,10 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 cox_tab.footnotes.push(String::from(
                     "Model did not converge or exhibited separation/collinearity; non-estimable SE, Wald Z/P, and HR CI bounds are omitted. Refer to Likelihood ratio P for the omnibus test.",
                 ));
+            } else if !cox.global_schoenfeld_p.is_finite() {
+                cox_tab.footnotes.push(String::from(
+                    "Schoenfeld proportional-hazards residual test is non-estimable when fewer than 3 events (or fewer than 2 distinct event times) are observed.",
+                ));
             }
             out.tabs.push(cox_tab);
 
@@ -1565,7 +1577,11 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 (
                     ChecklistStatus::Warn,
                     Some(String::from("Global Schoenfeld test unavailable")),
-                    "Global Schoenfeld proportional-hazards test cannot be computed when the covariate covariance matrix is non-estimable.",
+                    if cox.n_events < 3 {
+                        "Global Schoenfeld proportional-hazards test is non-estimable with fewer than 3 events."
+                    } else {
+                        "Global Schoenfeld proportional-hazards test cannot be computed when the covariate covariance matrix or distinct event-time variance is non-estimable."
+                    },
                 )
             };
             out.checklist.push(checklist_item("Proportional hazards assumption (Schoenfeld)", ph_status, ph_metric, ph_expl));
@@ -2112,6 +2128,69 @@ fn extract_mv_km_cohorts(
     Ok(MvKmExtraction { cohorts, skipped_rows, ignored_non_numeric })
 }
 
+struct SurvivalPairwisePlan {
+    pair_indices: Vec<(usize, usize)>,
+    procedure: MultiplicityProcedure,
+    note: Option<String>,
+}
+
+fn resolve_survival_pairwise_plan(
+    indices: &[usize],
+    km_results: &[KaplanMeierCohortResult],
+    method: curvebook_doc::MultiplicityMethod,
+) -> Result<SurvivalPairwisePlan, StatsError> {
+    let k = indices.len();
+    let all_pairs = || -> Vec<(usize, usize)> { (0..k).flat_map(|i| ((i + 1)..k).map(move |j| (i, j))).collect() };
+
+    let requested = MultiplicityProcedure::from(method);
+    match requested {
+        MultiplicityProcedure::Dunnett { control_column } => {
+            let ctrl_pos = indices
+                .iter()
+                .position(|&idx| idx == control_column)
+                .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+            let pair_indices: Vec<(usize, usize)> = (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect();
+            let ctrl_lbl = km_results.get(ctrl_pos).map_or("control", |r| r.label.as_str());
+            let note = format!(
+                "Dunnett control-comparison mode compared each non-control cohort against '{ctrl_lbl}' ({} log-rank comparisons) with Bonferroni FWER adjustment; exact Dunnett multivariate-t quantiles apply only to Gaussian ANOVA contrasts.",
+                pair_indices.len()
+            );
+            Ok(SurvivalPairwisePlan { pair_indices, procedure: MultiplicityProcedure::Bonferroni, note: Some(note) })
+        }
+        MultiplicityProcedure::None => Ok(SurvivalPairwisePlan { pair_indices: all_pairs(), procedure: MultiplicityProcedure::None, note: None }),
+        MultiplicityProcedure::FisherLsd => Ok(SurvivalPairwisePlan {
+            pair_indices: all_pairs(),
+            procedure: MultiplicityProcedure::None,
+            note: Some(String::from("Fisher's LSD reports unadjusted pairwise log-rank P values without familywise error control.")),
+        }),
+        MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::Sidak
+        | MultiplicityProcedure::HolmBonferroni
+        | MultiplicityProcedure::HolmSidak
+        | MultiplicityProcedure::BenjaminiHochbergFdr
+        | MultiplicityProcedure::BenjaminiYekutieliFdr
+        | MultiplicityProcedure::TwoStageBkyFdr => Ok(SurvivalPairwisePlan { pair_indices: all_pairs(), procedure: requested, note: None }),
+        other => {
+            let name = match other {
+                MultiplicityProcedure::TukeyKramer => "Tukey-Kramer",
+                MultiplicityProcedure::NewmanKeuls => "Student-Newman-Keuls",
+                MultiplicityProcedure::GamesHowell => "Games-Howell",
+                MultiplicityProcedure::TamhaneT2 => "Tamhane's T2",
+                MultiplicityProcedure::DunnettT3 => "Dunnett's T3",
+                MultiplicityProcedure::DunnRankSum => "Dunn's rank-sum",
+                MultiplicityProcedure::LinearTrend => "Linear trend",
+                _ => "Requested ANOVA post-hoc procedure",
+            };
+            let pairs = all_pairs();
+            let note = format!(
+                "{name} is defined for parametric ANOVA or rank contrasts rather than censored survival curves; pairwise log-rank P values across all {} cohort pairs were adjusted via Bonferroni.",
+                pairs.len()
+            );
+            Ok(SurvivalPairwisePlan { pair_indices: pairs, procedure: MultiplicityProcedure::Bonferroni, note: Some(note) })
+        }
+    }
+}
+
 fn append_survival_pairwise(
     out: &mut ResultSheet,
     indices: &[usize],
@@ -2121,27 +2200,23 @@ fn append_survival_pairwise(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
-    let k = cohort_obs.len();
-    let mut pairs = Vec::new();
-    let mut raw_p = Vec::new();
-    for i in 0..k {
-        for j in (i + 1)..k {
-            let cmp = compare_survival_curves(&[&cohort_obs[i], &cohort_obs[j]], false)?;
-            let hr = two_cohort_hazard_ratio(&cohort_obs[i], &cohort_obs[j], confidence)?;
-            raw_p.push(cmp.p_value);
-            pairs.push((i, j, cmp.chi_square, cmp.p_value, hr));
+    let plan = resolve_survival_pairwise_plan(indices, km_results, mult.method)?;
+    let mut pairs = Vec::with_capacity(plan.pair_indices.len());
+    let mut raw_p = Vec::with_capacity(plan.pair_indices.len());
+    for (i, j) in plan.pair_indices {
+        let cmp = compare_survival_curves(&[&cohort_obs[i], &cohort_obs[j]], false)?;
+        if !cmp.p_value.is_finite() {
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "survival_pairwise_p", value: cmp.p_value }));
         }
+        let hr = two_cohort_hazard_ratio(&cohort_obs[i], &cohort_obs[j], confidence)?;
+        raw_p.push(cmp.p_value);
+        pairs.push((i, j, cmp.chi_square, cmp.p_value, hr));
     }
-    let proc_eff = match MultiplicityProcedure::from(mult.method) {
-        MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => MultiplicityProcedure::None,
-        MultiplicityProcedure::BenjaminiHochbergFdr | MultiplicityProcedure::BenjaminiYekutieliFdr | MultiplicityProcedure::TwoStageBkyFdr => {
-            MultiplicityProcedure::from(mult.method)
-        }
-        MultiplicityProcedure::HolmBonferroni => MultiplicityProcedure::HolmBonferroni,
-        MultiplicityProcedure::Sidak | MultiplicityProcedure::HolmSidak => MultiplicityProcedure::HolmSidak,
-        _ => MultiplicityProcedure::Bonferroni,
+    let (adj, is_fdr) = if plan.procedure == MultiplicityProcedure::Sidak {
+        (adjust_sidak(&raw_p), false)
+    } else {
+        adjust_p_values(&raw_p, plan.procedure, mult.threshold)
     };
-    let (adj, is_fdr) = adjust_p_values(&raw_p, proc_eff, mult.threshold);
 
     let headers = vec![
         String::from("Chi-square"),
@@ -2154,6 +2229,9 @@ fn append_survival_pairwise(
     let mut row_labels = Vec::with_capacity(pairs.len());
     let mut rows = Vec::with_capacity(pairs.len());
     for ((i, j, chi2, rp, hr), ap) in pairs.into_iter().zip(adj) {
+        if !ap.is_finite() {
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "survival_pairwise_adjusted_p", value: ap }));
+        }
         let lbl_a = km_results[i].label.clone();
         let lbl_b = km_results[j].label.clone();
         row_labels.push(format!("{lbl_a} vs. {lbl_b}"));
@@ -2177,7 +2255,12 @@ fn append_survival_pairwise(
             significant: sig,
         });
     }
-    out.tabs.push(build_tab("survival-pairwise", "Pairwise survival comparisons", ResultTabKind::MultipleComparisons, headers, row_labels, rows));
+    let mut pw_tab = build_tab("survival-pairwise", "Pairwise survival comparisons", ResultTabKind::MultipleComparisons, headers, row_labels, rows);
+    if let Some(note) = plan.note {
+        pw_tab.footnotes.push(note.clone());
+        out.checklist.push(checklist_item("Pairwise survival multiplicity adjustment", ChecklistStatus::Info, None, note));
+    }
+    out.tabs.push(pw_tab);
     Ok(())
 }
 

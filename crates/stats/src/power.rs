@@ -681,6 +681,7 @@ struct ResolvedContext {
     alpha: f64,
     target_power: Option<f64>,
     allocation_ratio: f64,
+    fixed_n2: Option<f64>,
     two_proportions_mode: TwoProportionsMethod,
     continuity_correction: bool,
     correlation_method: CorrelationPowerMethod,
@@ -1007,19 +1008,31 @@ fn build_context(req: &PowerAnalysisRequest) -> Result<ResolvedContext, StatsErr
     let alpha = validate_prob_open("alpha", req.alpha)?;
     validate_tail_mode(req.family, req.tail_mode)?;
     let mut allocation_ratio = validate_allocation_ratio(req.allocation_ratio)?;
+    let mut fixed_n2 = None;
     if req.sample_size_group2.is_some() && !matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions) {
         return Err(StatsError::IncompatibleAnalysisSpec { expected: "sample_size_group2 is only valid for two-sample designs" });
     }
-    if matches!(req.solve_target, PowerSolveTarget::Power | PowerSolveTarget::DetectableEffect)
-        && let (Some(n1_raw), Some(n2_raw)) = (req.sample_size, req.sample_size_group2)
-    {
-        if !n1_raw.is_finite() || n1_raw < 1.0 || n1_raw > MAX_CONTINUOUS_N {
-            return Err(StatsError::InvalidParameter { name: "sample_size", value: n1_raw });
+    if matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions) {
+        let is_welch = matches!(&req.effect, PowerEffectSpec::MeanDiffAndSd { sd_group2: Some(_), .. });
+        let min_n2 = if is_welch { 1.0 + 1e-6 } else { 1.0 };
+        match (req.sample_size, req.sample_size_group2) {
+            (Some(n1_raw), Some(n2_raw)) => {
+                if !n1_raw.is_finite() || n1_raw < 1.0 || n1_raw > MAX_CONTINUOUS_N {
+                    return Err(StatsError::InvalidParameter { name: "sample_size", value: n1_raw });
+                }
+                if !n2_raw.is_finite() || n2_raw < min_n2 || n2_raw > MAX_CONTINUOUS_N {
+                    return Err(StatsError::InvalidParameter { name: "sample_size_group2", value: n2_raw });
+                }
+                allocation_ratio = validate_allocation_ratio(n2_raw / n1_raw)?;
+            }
+            (None, Some(n2_raw)) => {
+                if !n2_raw.is_finite() || n2_raw < min_n2 || n2_raw > MAX_CONTINUOUS_N {
+                    return Err(StatsError::InvalidParameter { name: "sample_size_group2", value: n2_raw });
+                }
+                fixed_n2 = Some(n2_raw);
+            }
+            _ => {}
         }
-        if !n2_raw.is_finite() || n2_raw < 1.0 || n2_raw > MAX_CONTINUOUS_N {
-            return Err(StatsError::InvalidParameter { name: "sample_size_group2", value: n2_raw });
-        }
-        allocation_ratio = validate_allocation_ratio(n2_raw / n1_raw)?;
     }
 
     let target_power = match req.solve_target {
@@ -1048,6 +1061,7 @@ fn build_context(req: &PowerAnalysisRequest) -> Result<ResolvedContext, StatsErr
         alpha,
         target_power,
         allocation_ratio,
+        fixed_n2,
         two_proportions_mode: req.two_proportions_mode,
         continuity_correction: req.continuity_correction,
         correlation_method: req.correlation_method,
@@ -1378,9 +1392,10 @@ fn correlation_power(method: CorrelationPowerMethod, n: f64, r: f64, alpha: f64,
 /// one-way ANOVA uses noncentral *F* with `lambda = k n f^2` on `(k - 1, k (n - 1))` df and the
 /// chi-square family uses noncentral chi-square with `lambda = N w^2` (Cohen 1988, chs. 7 and 8).
 fn eval_power_at(ctx: &ResolvedContext, n1: f64, n2_explicit: Option<f64>) -> Result<PowerEval, StatsError> {
+    let eff_n2 = n2_explicit.or(ctx.fixed_n2);
     match &ctx.effect {
         ResolvedEffect::UnpairedT { d, welch_sds, .. } => {
-            let n2 = n2_explicit.unwrap_or(ctx.allocation_ratio * n1);
+            let n2 = eff_n2.unwrap_or(ctx.allocation_ratio * n1);
             if let Some((mean_diff, sd1, sd2)) = welch_sds {
                 let df = welch_satterthwaite_df(n1, n2, *sd1, *sd2)?;
                 let se = ((sd1 * sd1) / n1 + (sd2 * sd2) / n2).sqrt();
@@ -1415,14 +1430,14 @@ fn eval_power_at(ctx: &ResolvedContext, n1: f64, n2_explicit: Option<f64>) -> Re
             Ok(PowerEval { power, actual_df: Some(df2), numerator_df: Some(df1), noncentrality_param: lambda, critical_value: f_crit })
         }
         ResolvedEffect::TwoProportions { p1: Some(p1), p2: Some(p2), .. } => {
-            let n2 = n2_explicit.unwrap_or(ctx.allocation_ratio * n1);
+            let n2 = eff_n2.unwrap_or(ctx.allocation_ratio * n1);
             if n1 < 1.0 || n2 < 1.0 {
                 return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
             }
             two_proportions_p_power(ctx, n1, n2, *p1, *p2)
         }
         ResolvedEffect::TwoProportions { h, .. } => {
-            let n2 = n2_explicit.unwrap_or(ctx.allocation_ratio * n1);
+            let n2 = eff_n2.unwrap_or(ctx.allocation_ratio * n1);
             if n1 < 1.0 || n2 < 1.0 {
                 return Err(StatsError::InvalidParameter { name: "sample_size", value: n1 });
             }
@@ -1456,6 +1471,12 @@ fn eval_power_at(ctx: &ResolvedContext, n1: f64, n2_explicit: Option<f64>) -> Re
 fn min_continuous_n(ctx: &ResolvedContext) -> f64 {
     match ctx.family {
         PowerTestFamily::TwoSampleUnpairedT => {
+            if let Some(n2_fix) = ctx.fixed_n2 {
+                return match &ctx.effect {
+                    ResolvedEffect::UnpairedT { welch_sds: Some(_), .. } => 1.0 + 1e-6,
+                    _ => (2.25 - n2_fix).max(1.0),
+                };
+            }
             let k = ctx.allocation_ratio;
             match &ctx.effect {
                 ResolvedEffect::UnpairedT { welch_sds: Some(_), .. } => (1.0_f64 + 1e-6).max((1.0 + 1e-6) / k),
@@ -1470,7 +1491,13 @@ fn min_continuous_n(ctx: &ResolvedContext) -> f64 {
             };
             1.0 + 0.5 / k
         }
-        PowerTestFamily::TwoProportions => 1.0_f64.max((1.0 + 1e-12) / ctx.allocation_ratio),
+        PowerTestFamily::TwoProportions => {
+            if ctx.fixed_n2.is_some() {
+                1.0
+            } else {
+                1.0_f64.max((1.0 + 1e-12) / ctx.allocation_ratio)
+            }
+        }
         PowerTestFamily::ChiSquare => 1.0,
         PowerTestFamily::Correlation => match ctx.correlation_method {
             CorrelationPowerMethod::ExactTTransform | CorrelationPowerMethod::ConditionalSlopeT => 2.25,
@@ -1484,6 +1511,16 @@ fn min_curve_integer_n(ctx: &ResolvedContext) -> Result<usize, StatsError> {
     let base = ctx.family.min_integer_n();
     match ctx.family {
         PowerTestFamily::TwoSampleUnpairedT => {
+            if let Some(n2_fix) = ctx.fixed_n2 {
+                let need = match &ctx.effect {
+                    ResolvedEffect::UnpairedT { welch_sds: Some(_), .. } => 2,
+                    _ => {
+                        let n2_int = f64_to_checked_usize("sample_size_group2", n2_fix.ceil())?.max(1);
+                        3usize.saturating_sub(n2_int).max(1)
+                    }
+                };
+                return Ok(base.max(need));
+            }
             let need = match &ctx.effect {
                 ResolvedEffect::UnpairedT { welch_sds: Some(_), .. } => {
                     let mut n = f64_to_checked_usize("sample_size", (2.0 / ctx.allocation_ratio).ceil().max(2.0))?;
@@ -1504,6 +1541,9 @@ fn min_curve_integer_n(ctx: &ResolvedContext) -> Result<usize, StatsError> {
             Ok(base.max(need))
         }
         PowerTestFamily::TwoProportions => {
+            if ctx.fixed_n2.is_some() {
+                return Ok(base.max(1));
+            }
             let mut n = f64_to_checked_usize("sample_size", (1.0 / ctx.allocation_ratio).ceil())?;
             while (n as f64) * ctx.allocation_ratio < 1.0 {
                 n = n.checked_add(1).ok_or(StatsError::InvalidParameter { name: "sample_size", value: f64::INFINITY })?;
@@ -1922,7 +1962,7 @@ fn checked_two_sample_or_total_counts(ctx: &ResolvedContext, n1: usize, n2_expli
     match ctx.family {
         PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions => {
             let n2_min = min_group2_integer_n(ctx);
-            let mut n2 = match n2_explicit {
+            let mut n2 = match n2_explicit.or(ctx.fixed_n2) {
                 Some(n2v) => f64_to_checked_usize("sample_size_group2", n2v.ceil())?,
                 None => f64_to_checked_usize("sample_size", ((n1 as f64) * ctx.allocation_ratio).ceil())?,
             };
@@ -1998,13 +2038,14 @@ fn build_convention_notes(ctx: &ResolvedContext) -> Vec<String> {
     let mut notes = Vec::new();
     match ctx.family {
         PowerTestFamily::TwoSampleUnpairedT => {
+            let alloc_desc = match ctx.fixed_n2 {
+                Some(n2_fix) => format!("fixed n2 = {n2_fix:.1}"),
+                None => format!("n2/n1 = {:.3}", ctx.allocation_ratio),
+            };
             if matches!(&ctx.effect, ResolvedEffect::UnpairedT { welch_sds: Some(_), .. }) {
-                notes.push(format!(
-                    "Unpaired Welch t-test using Welch-Satterthwaite df and exact noncentral-t distribution (n2/n1 = {:.3}).",
-                    ctx.allocation_ratio
-                ));
+                notes.push(format!("Unpaired Welch t-test using Welch-Satterthwaite df and exact noncentral-t distribution ({alloc_desc})."));
             } else {
-                notes.push(format!("Unpaired Student t-test using exact noncentral-t distribution (n2/n1 = {:.3}).", ctx.allocation_ratio));
+                notes.push(format!("Unpaired Student t-test using exact noncentral-t distribution ({alloc_desc})."));
             }
         }
         PowerTestFamily::TwoSamplePairedT => {
@@ -2153,9 +2194,12 @@ pub fn solve_power(req: &PowerAnalysisRequest) -> Result<PowerAnalysisResult, St
     if let ResolvedEffect::Anova { k, .. } = &ctx.effect {
         curve_req.num_groups = Some(*k);
     }
-    if matches!(req.solve_target, PowerSolveTarget::Power | PowerSolveTarget::DetectableEffect) && req.sample_size_group2.is_some() {
+    if req.sample_size.is_some() && req.sample_size_group2.is_some() {
         curve_req.allocation_ratio = ctx.allocation_ratio;
         curve_req.sample_size_group2 = None;
+        if req.solve_target == PowerSolveTarget::SampleSize {
+            curve_req.sample_size = None;
+        }
     }
 
     let min_curve_n = min_curve_integer_n(&ctx)?;
@@ -2226,12 +2270,24 @@ pub fn compute_power_curve(req: &PowerAnalysisRequest, n_min: usize, n_max: usiz
         return Ok(Vec::new());
     }
 
+    let design_pair = if matches!(ctx.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions)
+        && let (Some(n1_raw), Some(n2_raw)) = (req.sample_size, req.sample_size_group2)
+    {
+        Some((f64_to_checked_usize("sample_size", n1_raw.ceil())?, n2_raw))
+    } else {
+        None
+    };
+
     let n_values = sample_integer_grid(lo, n_max, num_points);
     let mut points = Vec::with_capacity(n_values.len());
     for n in n_values {
         let nf = n as f64;
-        let ev = eval_power_at(&ctx, nf, None)?;
-        let (_, total_int) = checked_two_sample_or_total_counts(&ctx, n, None)?;
+        let explicit_n2 = match design_pair {
+            Some((n1_ceil, n2_raw)) if n == n1_ceil => Some(n2_raw),
+            _ => ctx.fixed_n2,
+        };
+        let (n2_int, total_int) = checked_two_sample_or_total_counts(&ctx, n, explicit_n2)?;
+        let ev = eval_power_at(&ctx, nf, n2_int.map(|v| v as f64))?;
         points.push(PowerCurvePoint { n: nf, power: ev.power, effect_size: eff.canonical, total_n: total_int as f64 });
     }
     Ok(points)
