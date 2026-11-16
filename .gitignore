@@ -1,5 +1,7 @@
 *~
-plan/
+# Track the scheduled rename plan; keep other planning material local.
+/plan/*
+!/plan/curvebook-rename.md
 /target
 /dist
 /corpus

@@ -79,6 +79,7 @@ Every tagged release distributes binaries and archives alongside licence disclos
 - **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.lumencraft`, `.lctemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`.
 - **Linux specifics:** `packaging/linux/` installs desktop, AppStream, icon sizes, and MIME definitions consistently for `.AppImage`, `.deb`, `.rpm`, and Flatpak (`org.lumencraft.LumenCraft`).
 - **Windows specifics:** WiX v5 dual-scope MSI supports unprivileged per-user installation by default and elevated per-machine deployment ([packaging/windows/INSTALLATION.md](../packaging/windows/INSTALLATION.md)). Both `.msi` and `-portable.zip` link the static CRT to avoid external redistributable prompts.
+- **Windows signing and planned Store distribution:** [`windows-signing.md`](windows-signing.md) explains self-signing for trusted test machines without Azure, plus the Microsoft-signed MSIX Store route. MSIX packaging is planned in [`R8.9`](ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution); the current builder produces MSI and portable ZIP only. A self-signed MSI/EXE does not meet Store MSI/EXE signing requirements.
 - **Web specifics:** Built via Trunk under `web-release` with relative root paths (`./`) and strict no-egress security headers (`packaging/web/{_headers,.htaccess}`) so bundles deploy cleanly on subpath hosts without rebuilding.
 
 ---

@@ -4,6 +4,12 @@ How independent reviewers audit LumenCraft in parallel. Reviewers may be people 
 
 Read [`AGENTS.md`](../../AGENTS.md) first. Its rules apply to every role below. This file adds the audit protocol on top of them.
 
+> **Scope — manual human-launched audit agents only:** This playbook (`docs/audit/README.md`), [`workflow.md`](workflow.md), and [`work-log.md`](work-log.md) apply **only** to manual, human-launched slice-audit runs (where a person starts an individual reviewer or verifier agent to inspect a slice, claim a GitHub tracking issue, and open a document-only findings PR without editing implementation code). They **do not** apply to automated multi-agent roadmap orchestration or defect-remediation swarms (such as `R0.19` Round 2 remediation, `R0.20`, or `R10` implementation), which follow [`AGENTS.md`](../../AGENTS.md) and [`docs/ROADMAP.md`](../ROADMAP.md) directly rather than claiming audit slice issues, opening single-file audit PRs, or logging runs in [`work-log.md`](work-log.md).
+
+For a new round using issue claims and document-only audit PRs, use [Human instructions and agent prompts for slice audits](workflow.md). Start with its Audit 101: claim an issue, audit autonomously, and open a PR containing one findings document. Detailed instructions and optional independent finding review follow below. The historical round records below keep their recorded procedures and baselines.
+
+The [audit work log](work-log.md) records scope, people, timestamps, code commits, agents/models, slash commands, and evidence for individual audit runs.
+
 ## Directory index & audit rounds
 
 | Round / Document | Baseline & Range | Status on `main` (`1e9dc59`) | Files |
