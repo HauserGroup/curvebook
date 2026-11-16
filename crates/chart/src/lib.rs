@@ -2,7 +2,7 @@
 //! (SD, SEM, 95% CI, range, IQR), fitted regression curves, survival step functions, segmented axes
 //! and pairwise significance brackets into device-independent figure geometry.
 //!
-//! Layer L2 domain crate. Governing spec: `docs/graphing-and-layouts.md` and `docs/graphing-parity.md`.
+//! Layer L2 domain crate. Governing spec: `docs/implementation/graphing-and-layouts.md` and `docs/graphing-parity.md`.
 #![forbid(unsafe_code)]
 
 pub mod column_grouped;

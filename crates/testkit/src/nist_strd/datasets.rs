@@ -1,5 +1,5 @@
 //! Offline certified NIST StRD reference benchmarks and 106-bit `DoubleDouble`-certified stiff
-//! generators (`docs/development.md` §Verified NIST StRD corpus; `docs/statistics-implementation.md` §1.3).
+//! generators (`docs/development.md` §Verified NIST StRD corpus; `docs/implementation/statistics-implementation.md` §1.3).
 //!
 //! All datasets here run offline with zero network I/O:
 //! - Exact NIST StRD `NumAcc1`-`NumAcc4` + binary-exact high-stiffness `BinaryStiff1e8` (`mean / sd = 8e8`),

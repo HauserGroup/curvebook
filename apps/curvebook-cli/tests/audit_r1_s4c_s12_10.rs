@@ -1,5 +1,5 @@
 //! Regression tests for `R1-S12-10` (Stage 4C S4):
-//! - `docs/scripting-and-automation.md` matches the shipped `curvebook-cli` subcommands,
+//! - `docs/implementation/scripting-and-automation.md` matches the shipped `curvebook-cli` subcommands,
 //!   `curvebook.batch.v1` manifest schema (`docs/schemas/batch-v1.schema.json`), and `CliError::PathEscape`.
 //! - `curvebook-cli batch` executes the documented manifest format end-to-end (replacing matching
 //!   data sheets by title and exporting `json`, `csv`, `pdf`, and `curvebook`) and rejects stale
@@ -92,9 +92,9 @@ fn assert_json_cli_error(
 
 fn extract_first_json_code_block(markdown: &str) -> Result<&str, Box<dyn std::error::Error>> {
     let marker = "```json\n";
-    let start = markdown.find(marker).ok_or("missing ```json fenced block in docs/scripting-and-automation.md")? + marker.len();
+    let start = markdown.find(marker).ok_or("missing ```json fenced block in docs/implementation/scripting-and-automation.md")? + marker.len();
     let rest = &markdown[start..];
-    let end = rest.find("```").ok_or("unclosed ```json fenced block in docs/scripting-and-automation.md")?;
+    let end = rest.find("```").ok_or("unclosed ```json fenced block in docs/implementation/scripting-and-automation.md")?;
     Ok(&rest[..end])
 }
 
@@ -106,7 +106,7 @@ fn object_property_keys(schema_node: &Value) -> Result<BTreeSet<String>, Box<dyn
 #[test]
 fn r1_s12_10_scripting_guide_matches_cli_manifest_and_error_contract() -> Result<(), Box<dyn std::error::Error>> {
     let root = repo_root()?;
-    let guide = fs::read_to_string(root.join("docs/scripting-and-automation.md"))?;
+    let guide = fs::read_to_string(root.join("docs/implementation/scripting-and-automation.md"))?;
     let main_src = fs::read_to_string(root.join("apps/curvebook-cli/src/main.rs"))?;
     let error_src = fs::read_to_string(root.join("apps/curvebook-cli/src/error.rs"))?;
     let schema_disk: Value = serde_json::from_str(&fs::read_to_string(root.join("docs/schemas/batch-v1.schema.json"))?)?;
@@ -116,10 +116,13 @@ fn r1_s12_10_scripting_guide_matches_cli_manifest_and_error_contract() -> Result
     // 1. Stale legacy guide drift must be gone.
     for forbidden in ["PathOutsideWorkdir", "results_json", "results_csv", "\"mode\": \"replace_data\"", "\"kind\": \"pdf\"", "\"kind\": \"project\""]
     {
-        assert!(!guide.contains(forbidden), "docs/scripting-and-automation.md still contains stale `{forbidden}`");
+        assert!(!guide.contains(forbidden), "docs/implementation/scripting-and-automation.md still contains stale `{forbidden}`");
     }
     for removed_subcmd in ["`import`", "`analyze`", "`verify`"] {
-        assert!(!guide.contains(removed_subcmd), "docs/scripting-and-automation.md still documents removed subcommand {removed_subcmd}");
+        assert!(
+            !guide.contains(removed_subcmd),
+            "docs/implementation/scripting-and-automation.md still documents removed subcommand {removed_subcmd}"
+        );
     }
 
     // 2. Documented subcommands and error variant match main.rs & error.rs.
@@ -132,7 +135,7 @@ fn r1_s12_10_scripting_guide_matches_cli_manifest_and_error_contract() -> Result
     assert!(guide.contains("CliError::PathEscape"), "guide must reference CliError::PathEscape");
     assert!(guide.contains("CliError::Schema"), "guide must reference CliError::Schema");
 
-    // 3. Example manifest in docs/scripting-and-automation.md conforms strictly to batch-v1.schema.json.
+    // 3. Example manifest in docs/implementation/scripting-and-automation.md conforms strictly to batch-v1.schema.json.
     let example_raw = extract_first_json_code_block(&guide)?;
     let example: Value = serde_json::from_str(example_raw)?;
     let root_obj = example.as_object().ok_or("guide example manifest must be a JSON object")?;

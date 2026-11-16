@@ -2611,12 +2611,12 @@ Keywords=biostatistics;regression;GraphPad;
     #[test]
     fn flags_artcraft_suite_references_in_docs_and_workflows() {
         let mut hits = Vec::new();
-        scan_file("docs/releasing.md", "Installs under Programs\\ArtCraft\\CurveBook or https://getartcraft.com\n", &mut hits);
+        scan_file("docs/release/releasing.md", "Installs under Programs\\ArtCraft\\CurveBook or https://getartcraft.com\n", &mut hits);
         assert_eq!(
             hits,
             vec![
-                BrandHit { path: String::from("docs/releasing.md"), line: 1, brand: "artcraft" },
-                BrandHit { path: String::from("docs/releasing.md"), line: 1, brand: "getartcraft" },
+                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "artcraft" },
+                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "getartcraft" },
             ]
         );
     }
@@ -2634,14 +2634,14 @@ Keywords=biostatistics;regression;GraphPad;
         // No marker: still flagged in the README.
         scan_file("README.md", "Part of ArtCraft.\n", &mut hits);
         // Marker in any other file: still flagged.
-        scan_file("docs/releasing.md", "Not affiliated with ArtCraft. <!-- brand-ok -->\n", &mut hits);
+        scan_file("docs/release/releasing.md", "Not affiliated with ArtCraft. <!-- brand-ok -->\n", &mut hits);
         // Marked README line: suite infrastructure is still flagged.
         scan_file("README.md", "See https://getartcraft.com and craft-ui. <!-- brand-ok -->\n", &mut hits);
         assert_eq!(
             hits,
             vec![
                 BrandHit { path: String::from("README.md"), line: 1, brand: "artcraft" },
-                BrandHit { path: String::from("docs/releasing.md"), line: 1, brand: "artcraft" },
+                BrandHit { path: String::from("docs/release/releasing.md"), line: 1, brand: "artcraft" },
                 BrandHit { path: String::from("README.md"), line: 1, brand: "getartcraft" },
                 BrandHit { path: String::from("README.md"), line: 1, brand: "craft-ui" },
             ]

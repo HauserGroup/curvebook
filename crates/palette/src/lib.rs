@@ -3,7 +3,7 @@
 //! CurveBook.
 //!
 //! Layer L0 foundation crate (after `curvebook-math`).
-//! Governing spec: `docs/graphing-and-layouts.md` (§5) and `docs/architecture.md`.
+//! Governing spec: `docs/implementation/graphing-and-layouts.md` (§5) and `docs/architecture.md`.
 //!
 //! ```
 //! use curvebook_palette::{ColormapId, CvdKind, PaletteId, Rgba8};

@@ -1,5 +1,5 @@
 //! Vectorized and scalar formula evaluation over `DataSheet`, `MultipleVariablesTable`, and
-//! `InfoSheet` constants (`docs/data-tables-and-transforms.md` §4.1).
+//! `InfoSheet` constants (`docs/implementation/data-tables-and-transforms.md` §4.1).
 
 use std::cmp::Ordering;
 

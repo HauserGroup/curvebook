@@ -1,5 +1,5 @@
 //! Seeded experimental subject randomization, uniform/stratified row sampling, and probability
-//! distribution column simulation (`R9.14` / `QOL-14`, `docs/calculators-and-quick-stats.md` §4).
+//! distribution column simulation (`R9.14` / `QOL-14`, `docs/planning/calculators-and-quick-stats.md` §4).
 
 use std::collections::{BTreeSet, HashMap};
 

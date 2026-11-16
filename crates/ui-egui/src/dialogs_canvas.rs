@@ -3652,7 +3652,7 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
     },
 ];
 
-/// First-visit `Change Graph Type` chooser state (`docs/graphing-and-layouts.md` §2).
+/// First-visit `Change Graph Type` chooser state (`docs/implementation/graphing-and-layouts.md` §2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeGraphTypeState {
     pub graph_sheet_id: Option<SheetId>,

@@ -1,6 +1,6 @@
 # Data Tables, Calculated Variables & Transforms — Implementation Guidelines
 
-Governing specification for `crates/doc` (`L1`), `crates/transform` (`L2`), and data-sheet commands in `crates/engine` (`L5`). Parity checklist: [`file-format-parity.md`](file-format-parity.md) and [`ui-parity.md`](ui-parity.md).
+Governing specification for `crates/doc` (`L1`), `crates/transform` (`L2`), and data-sheet commands in `crates/engine` (`L5`). Parity checklist: [`file-format-parity.md`](../file-format-parity.md) and [`ui-parity.md`](../ui-parity.md).
 
 Public behavioural references:
 - [Data tables overview](https://www.graphpad.com/guides/prism/latest/user-guide/using_prism_tables.htm)
@@ -140,7 +140,7 @@ Beyond derived `ResultSheet` transforms, a `DataSheet` may embed live, provenanc
 
 ## 7. Engine Command Contracts (`crates/engine/src/cmd/{sheet,table,info,analysis}.rs`)
 
-Landed command IDs (all JSON-serializable, undoable in one step, reachable from GUI, CLI, `--control`, and MCP). Key parameters are listed below; the generated [`docs/commands.md`](commands.md) is the authoritative parameter schema:
+Landed command IDs (all JSON-serializable, undoable in one step, reachable from GUI, CLI, `--control`, and MCP). Key parameters are listed below; the generated [`docs/commands.md`](../commands.md) is the authoritative parameter schema:
 
 - `sheet.createData` — `{ kind, title, design_hint, replicates, rows, cols, auto_info, auto_graph, auto_family, … }`
 - `sheet.freeze` / `sheet.unfreeze` — `{ sheet_id }`

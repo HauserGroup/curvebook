@@ -132,7 +132,7 @@ fn r2_s13_05_and_r2_s11_11_web_headers_coop_coep_csp_and_subpath_rules() {
     let headers = fs::read_to_string(root.join("packaging/web/_headers")).unwrap();
     let htaccess = fs::read_to_string(root.join("packaging/web/.htaccess")).unwrap();
     let agents = fs::read_to_string(root.join("AGENTS.md")).unwrap();
-    let releasing = fs::read_to_string(root.join("docs/releasing.md")).unwrap();
+    let releasing = fs::read_to_string(root.join("docs/release/releasing.md")).unwrap();
 
     for expected in [
         "Cross-Origin-Opener-Policy: same-origin",

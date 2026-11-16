@@ -2,7 +2,7 @@
 //! `A P = Q R`), parameter covariance `(R^T R)^{-1}`, multicollinearity dependency metrics, and
 //! equilibrated rank-safe linear least-squares solvers.
 //!
-//! Per `docs/statistics-implementation.md` §1.3, design matrices `X in R^{n x p}` use
+//! Per `docs/implementation/statistics-implementation.md` §1.3, design matrices `X in R^{n x p}` use
 //! column-pivoted Householder QR (`qr_col_pivoted`) with explicit rank-deficiency detection
 //! `|R_{kk}| <= eps * max(n, p) * |R_{00}|`, falling back cleanly to SVD pseudoinverse or reporting
 //! aliased columns rather than dividing by zero.
@@ -500,7 +500,7 @@ impl PivotedQr {
 
 /// Compute nonlinear/linear regression parameter dependencies
 /// `Dependency_k = 1 - 1 / ((A^T A)_{kk} * [(A^T A)^{-1}]_{kk})` in `[0, 1)`
-/// per `docs/curve-fitting-implementation.md` §2.1.
+/// per `docs/implementation/curve-fitting-implementation.md` §2.1.
 ///
 /// # Errors
 /// Returns [`MathError::SingularMatrix`] if `a` does not have full column rank.

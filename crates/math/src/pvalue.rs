@@ -1,5 +1,5 @@
 //! Arbitrary confidence-level validation (`[0.01%, 99.99%]`) and *p*-value display formatting &
-//! significance-star summaries per `docs/statistics-implementation.md` §1.2.
+//! significance-star summaries per `docs/implementation/statistics-implementation.md` §1.2.
 //!
 //! Shared as the single canonical definition across `curvebook-math` (`L0`), `curvebook-doc`
 //! (`L1`), and downstream statistical/fitting/chart crates (`L2`).
@@ -85,7 +85,7 @@ impl TryFrom<f64> for ConfidenceLevel {
     }
 }
 
-/// *P*-value and *q*-value formatting and asterisk-threshold presets (`docs/statistics-implementation.md` §1.2).
+/// *P*-value and *q*-value formatting and asterisk-threshold presets (`docs/implementation/statistics-implementation.md` §1.2).
 ///
 /// Raw `f64` probabilities are always stored unrounded in result sheets so downstream multiplicity
 /// adjustments and live graph brackets never suffer rounding quantization.

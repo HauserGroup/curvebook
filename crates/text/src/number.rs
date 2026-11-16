@@ -3,7 +3,7 @@
 use curvebook_math::{AxisScale, PValueFormat};
 use serde::{Deserialize, Serialize};
 
-/// Axis numeric tick formatting style (`docs/graphing-and-layouts.md` §3.3).
+/// Axis numeric tick formatting style (`docs/implementation/graphing-and-layouts.md` §3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum AxisTickFormat {
     #[default]

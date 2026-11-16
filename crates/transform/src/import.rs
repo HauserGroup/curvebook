@@ -1,5 +1,5 @@
 //! Four-stage [`ImportLinkSpec`] data import, filtering, reshaping, placement, and
-//! circular-link detection pipeline (`docs/data-tables-and-transforms.md` §6).
+//! circular-link detection pipeline (`docs/implementation/data-tables-and-transforms.md` §6).
 
 use std::collections::{BTreeMap, BTreeSet};
 

@@ -1,7 +1,7 @@
 //! Parameterized `AnalysisSpec` schemas across transforms (`crates/transform`), biostatistics
 //! (`crates/stats`), and linear/nonlinear regression (`crates/fit`), plus `PValueFormat` display
-//! rules and `Change Data Analyzed` compatibility checks (`docs/data-tables-and-transforms.md` §5,
-//! `docs/statistics-implementation.md` §1–§5, `docs/curve-fitting-implementation.md` §1–§4).
+//! rules and `Change Data Analyzed` compatibility checks (`docs/implementation/data-tables-and-transforms.md` §5,
+//! `docs/implementation/statistics-implementation.md` §1–§5, `docs/implementation/curve-fitting-implementation.md` §1–§4).
 
 pub use curvebook_math::PValueFormat;
 
@@ -18,7 +18,7 @@ const fn default_true() -> bool {
 }
 
 // ============================================================================
-// Multiplicity & FDR Specifications (`docs/statistics-implementation.md` §4)
+// Multiplicity & FDR Specifications (`docs/implementation/statistics-implementation.md` §4)
 // ============================================================================
 
 /// Familywise error-rate (FWER) or false-discovery-rate (FDR) procedure.
@@ -61,7 +61,7 @@ impl Default for MultiplicitySpec {
 }
 
 // ============================================================================
-// Transform Specifications (`docs/data-tables-and-transforms.md` §5)
+// Transform Specifications (`docs/implementation/data-tables-and-transforms.md` §5)
 // ============================================================================
 
 /// Scalar mathematical transform preset.
@@ -177,10 +177,10 @@ pub enum TransformAnalysisSpec {
 }
 
 // ============================================================================
-// Biostatistics Specifications (`docs/statistics-implementation.md` §2–§5)
+// Biostatistics Specifications (`docs/implementation/statistics-implementation.md` §2–§5)
 // ============================================================================
 
-/// Replicate-subcolumn aggregation rule for Descriptive Statistics (`docs/statistics-implementation.md` §2.1).
+/// Replicate-subcolumn aggregation rule for Descriptive Statistics (`docs/implementation/statistics-implementation.md` §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SubcolumnAggregation {
     #[default]
@@ -598,7 +598,7 @@ pub enum MultivariateSpec {
 }
 
 // ============================================================================
-// Linear & Nonlinear Regression Specifications (`docs/curve-fitting-implementation.md`)
+// Linear & Nonlinear Regression Specifications (`docs/implementation/curve-fitting-implementation.md`)
 // ============================================================================
 
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -616,7 +616,7 @@ impl Default for LinearRegressionSpec {
     }
 }
 
-/// Differential weighting scheme for nonlinear regression (`docs/curve-fitting-implementation.md` §1.1).
+/// Differential weighting scheme for nonlinear regression (`docs/implementation/curve-fitting-implementation.md` §1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum WeightingScheme {
     #[default]
@@ -635,7 +635,7 @@ pub enum WeightingScheme {
     ObservedSd,
 }
 
-/// Regression objective function (`docs/curve-fitting-implementation.md` §1.1).
+/// Regression objective function (`docs/implementation/curve-fitting-implementation.md` §1.1).
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum FitMethod {
     #[default]
@@ -647,7 +647,7 @@ pub enum FitMethod {
     },
 }
 
-/// Dataset parameter sharing or constant constraint (`docs/curve-fitting-implementation.md` §1.3).
+/// Dataset parameter sharing or constant constraint (`docs/implementation/curve-fitting-implementation.md` §1.3).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ParameterScope {
     Local,

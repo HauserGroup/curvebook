@@ -1,6 +1,6 @@
 //! The eight typed scientific data-table archetypes (`XyTable`, `ColumnTable`, `GroupedTable`,
 //! `ContingencyTable`, `SurvivalTable`, `PartsOfWholeTable`, `MultipleVariablesTable`,
-//! `NestedTable`) and their unified [`TableArchetype`] sum type (`docs/data-tables-and-transforms.md` §2).
+//! `NestedTable`) and their unified [`TableArchetype`] sum type (`docs/implementation/data-tables-and-transforms.md` §2).
 
 use std::cmp::Ordering;
 
@@ -158,7 +158,7 @@ fn validate_table_subcolumn_mode(kind: TableKind, mode: SubcolumnMode) -> Result
     Ok(())
 }
 
-/// Independent X-column configuration for an [`XyTable`] (`docs/data-tables-and-transforms.md` §2).
+/// Independent X-column configuration for an [`XyTable`] (`docs/implementation/data-tables-and-transforms.md` §2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum XColumnMode {
     /// Explicit numeric X coordinates with optional error subcolumns (`Single`, `MeanSdN`, etc.).
@@ -447,7 +447,7 @@ impl XyTable {
 // 2. Column Table
 // ============================================================================
 
-/// Experimental row-index semantics for a [`ColumnTable`] (`docs/data-tables-and-transforms.md` §2.2).
+/// Experimental row-index semantics for a [`ColumnTable`] (`docs/implementation/data-tables-and-transforms.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ColumnDesignHint {
     /// Unmatched replicates stacked down each group column; row permutations within a single column
@@ -639,7 +639,7 @@ pub struct PairedRowsReport {
 // ============================================================================
 
 /// Optional `2 × 2 × K` Three-Way ANOVA column factor metadata mapping 4 data-set columns
-/// `((F1_0, F2_0), (F1_0, F2_1), (F1_1, F2_0), (F1_1, F2_1))` (`docs/data-tables-and-transforms.md` §2.2).
+/// `((F1_0, F2_0), (F1_0, F2_1), (F1_1, F2_0), (F1_1, F2_1))` (`docs/implementation/data-tables-and-transforms.md` §2.2).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreeWayColumnGrouping {
     pub factor_1_name: String,
@@ -1152,7 +1152,7 @@ impl PartsOfWholeTable {
 // 7. Multiple Variables Table
 // ============================================================================
 
-/// Typed semantic role of a column in a [`MultipleVariablesTable`] (`docs/data-tables-and-transforms.md` §2.3).
+/// Typed semantic role of a column in a [`MultipleVariablesTable`] (`docs/implementation/data-tables-and-transforms.md` §2.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum VariableRole {
     #[default]
@@ -1162,7 +1162,7 @@ pub enum VariableRole {
     Calculated,
 }
 
-/// Origin of values in a [`VariableColumn`] (`docs/data-tables-and-transforms.md` §4).
+/// Origin of values in a [`VariableColumn`] (`docs/implementation/data-tables-and-transforms.md` §4).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum VariableSource {
     #[default]
@@ -1171,7 +1171,7 @@ pub enum VariableSource {
     Calculated { formula: String },
 }
 
-/// Ordering rule for distinct levels of a `Categorical` variable (`docs/data-tables-and-transforms.md` §2.3).
+/// Ordering rule for distinct levels of a `Categorical` variable (`docs/implementation/data-tables-and-transforms.md` §2.3).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum LevelOrderKind {
     /// Order of first appearance in the column.
@@ -1268,7 +1268,7 @@ impl VariableColumn {
     }
 
     /// Atomically recode categorical tokens across both included and excluded cells
-    /// (`table.recodeLevels`; `docs/data-tables-and-transforms.md` §2.3), returning the number of
+    /// (`table.recodeLevels`; `docs/implementation/data-tables-and-transforms.md` §2.3), returning the number of
     /// rewritten cells.
     pub fn recode_levels(&mut self, mappings: &[(String, String)]) -> usize {
         if mappings.is_empty() {
@@ -1495,7 +1495,7 @@ impl MultipleVariablesTable {
 // ============================================================================
 
 /// Experimental group (`A`, `B`, ...) containing biological-unit subcolumns (`A:1`, `A:2`, ...)
-/// with technical replicates stacked down rows (`docs/data-tables-and-transforms.md` §2).
+/// with technical replicates stacked down rows (`docs/implementation/data-tables-and-transforms.md` §2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NestedGroupColumn {
     pub title: String,
@@ -1625,7 +1625,7 @@ impl NestedTable {
 // Unified TableArchetype Sum Type
 // ============================================================================
 
-/// Strongly typed table payload carried by every [`crate::DataSheet`] (`docs/data-tables-and-transforms.md` §1.1 & §2).
+/// Strongly typed table payload carried by every [`crate::DataSheet`] (`docs/implementation/data-tables-and-transforms.md` §1.1 & §2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TableArchetype {
     Xy(XyTable),

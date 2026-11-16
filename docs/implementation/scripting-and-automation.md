@@ -1,6 +1,6 @@
 # Scripting, Batch Pipelines, CLI & MCP Automation — Implementation Guidelines
 
-Governing specification for headless batch workflows across `crates/engine` (`L5`), `crates/format` (`L3`), `crates/mcp` (`L6`), and `apps/curvebook-cli` (`L7`). Related protocol specs: [`control-protocol.md`](control-protocol.md) and [`mcp.md`](mcp.md).
+Governing specification for headless batch workflows across `crates/engine` (`L5`), `crates/format` (`L3`), `crates/mcp` (`L6`), and `apps/curvebook-cli` (`L7`). Related protocol specs: [`control-protocol.md`](../control-protocol.md) and [`mcp.md`](../mcp.md).
 
 Public behavioural references:
 - [Model Context Protocol (MCP) specification](https://modelcontextprotocol.io/)
@@ -14,7 +14,7 @@ Traditional desktop biostatistics tools accumulated proprietary, imperative text
 CurveBook replaces ad-hoc macro scripting with a **single unified, headless-capable command architecture**:
 1. **Every operation is a registered `CommandSpec`** in `curvebook-engine` (`crates/engine/src/cmd/*`, `cmd::registry()`) taking schema-validated JSON parameters and returning a structured `Result<CommandOutcome, EngineError>`.
 2. **Four identical execution transports** share the exact same command registry and deterministic L0–L5 execution engine:
-   - **Interactive GUI (`curvebook` / `curvebook-web`):** Menu items, dialogs, spreadsheet edits, and canvas tools dispatch commands onto `Session` (the drawn chrome is not yet fully human-operable; see `R10` in [ROADMAP.md](ROADMAP.md)).
+   - **Interactive GUI (`curvebook` / `curvebook-web`):** Menu items, dialogs, spreadsheet edits, and canvas tools dispatch commands onto `Session` (the drawn chrome is not yet fully human-operable; see `R10` in [ROADMAP.md](../ROADMAP.md)).
    - **Reusable Method & Project Templates (`.cbtemplate`):** Zero-code Assay / Plate repetition — open a template pre-wired with transforms, statistical tests, nonlinear fits, significance brackets, and page layouts, drop in new CSV/plate data, and every downstream result and figure updates deterministically.
    - **Headless Batch CLI (`curvebook-cli`):** Run batch pipelines and inspect, convert, or export projects headlessly via `run`, `batch`, `convert`, `export`, `info`, `commands`, direct `<command-id>` dispatch (for example `table.importCsv`, `stats.run`, `fit.run`), `bench`, `perf`, and `mcp` in CI, Snakemake, Nextflow, R, or Python without a display server (`xvfb` or GUI never required).
    - **Live Socket (`--control <port>`) & AI Agent Server (`curvebook-cli mcp`):** Drive an in-memory headless project, a headless `curvebook --control` session, or a live desktop window over JSONL / stdio MCP.
@@ -23,7 +23,7 @@ CurveBook replaces ad-hoc macro scripting with a **single unified, headless-capa
 
 ## 2. Batch Pipeline Recipes (`curvebook.batch.v1` / `.jsonl`)
 
-For reproducible laboratory pipelines (e.g. processing 96-well / 384-well dose–response plates nightly), `curvebook-cli batch <manifest.json> [--workdir <dir>] [--json]` executes a deterministic `curvebook.batch.v1` manifest ([`schemas/batch-v1.schema.json`](schemas/batch-v1.schema.json)) and `curvebook-cli run <script.jsonl> [--workdir <dir>] [--json]` executes a JSON-lines or JSON-array command stream, both with bounded file access rooted at an explicit `--workdir`:
+For reproducible laboratory pipelines (e.g. processing 96-well / 384-well dose–response plates nightly), `curvebook-cli batch <manifest.json> [--workdir <dir>] [--json]` executes a deterministic `curvebook.batch.v1` manifest ([`schemas/batch-v1.schema.json`](../schemas/batch-v1.schema.json)) and `curvebook-cli run <script.jsonl> [--workdir <dir>] [--json]` executes a JSON-lines or JSON-array command stream, both with bounded file access rooted at an explicit `--workdir`:
 
 ```json
 {
@@ -65,4 +65,4 @@ For reproducible laboratory pipelines (e.g. processing 96-well / 384-well dose�
 | Restyle 12 graphs in a manuscript to match Figure 1A | `graph.applyStyleFrom` ("Apply Graph Style / Wand") across selected graph IDs |
 | Fit 200 compound plates and export $\text{IC}_{50}$ + $95\%$ profile CIs to CSV | `curvebook-cli batch` applying a `.cbtemplate` over plate CSVs $\to$ tidy `csv` result tables + multi-page `pdf` |
 | Inspect, fit, diagnose & plot interactively from an AI research assistant | `curvebook-cli mcp` (`doc_inspect`, `command_batch`, `render_preview`, `export`) |
-| Drive a running CurveBook session from external lab instrumentation | `curvebook --control 7979` over `127.0.0.1` loopback JSONL ([`control-protocol.md`](control-protocol.md)) |
+| Drive a running CurveBook session from external lab instrumentation | `curvebook --control 7979` over `127.0.0.1` loopback JSONL ([`control-protocol.md`](../control-protocol.md)) |
