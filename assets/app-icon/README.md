@@ -12,6 +12,8 @@
 
 ## Files
 
+The additional detailed pixel-art variant is `lumencraft-win95-2508.png` (2508 × 2508 RGBA). It uses crisp, exact 2× nearest-neighbour scaling of the native imagegen output, `source/seven-pane-win95-1254.png` (1254 × 1254 RGBA), preserving its pixel clusters and transparent background. The prompt and export notes are in `source/seven-pane-win95.prompt.txt`. The existing approved artwork and packaged platform exports remain available.
+
 | File | What | Used by |
 |---|---|---|
 | `lumencraft.svg` | Self-contained SVG with a transparent 512 × 512 viewBox | Source for platform raster exports |

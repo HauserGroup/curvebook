@@ -10,3 +10,7 @@ and every derived icon asset in this directory
   - MIT license (../../LICENSE-MIT or http://opensource.org/licenses/MIT)
 
 at your option.
+
+The additional generated pixel-art source (`source/seven-pane-win95-1254.png`), its
+prompt (`source/seven-pane-win95.prompt.txt`), and large transparent export
+(`lumencraft-win95-2508.png`) are covered by the same dual licence.
