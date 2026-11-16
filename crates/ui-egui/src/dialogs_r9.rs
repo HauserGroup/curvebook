@@ -6,8 +6,9 @@
 
 use lumencraft_doc::{
     AnalysisKind, BracketLabelMode, BracketStyle, BreakOrnament, ChecklistItem, ChecklistStatus, ClusterDistance, ClusterLinkage, CoxTieMethod,
-    EquationDisplayMode, FitMethod, GlmFamily, GraphAnnotation, GraphAxisScale, GraphSheet, JournalWidthPreset, KappaWeighting, PageOrientation,
-    PanelBadgeStyle, ParameterRule, ProjectDocument, RectPt, RepeatedMeasuresDesign, SheetId, SumOfSquaresType, TwoGroupMethod, WeightingScheme,
+    EquationDisplayMode, FitMethod, GlmFamily, GraphAnnotation, GraphAxisScale, GraphSheet, JournalWidthPreset, KappaWeighting, PValueStackMethod,
+    PageOrientation, PanelBadgeStyle, ParameterRule, ProjectDocument, RectPt, RepeatedMeasuresDesign, SheetId, SumOfSquaresType, TwoGroupMethod,
+    WeightingScheme,
 };
 use lumencraft_palette::{ColormapId, PaletteId};
 use lumencraft_render::TiffCompression;
@@ -306,6 +307,42 @@ pub(crate) fn parse_axis_scale_str(raw: &str) -> Result<GraphAxisScale, String> 
         "reciprocal" | "1x" => Ok(GraphAxisScale::Reciprocal),
         _ => Err(format!("unknown axis scale `{raw}`")),
     }
+}
+
+pub(crate) fn parse_pvalue_stack_method_val(val: &Value) -> Result<PValueStackMethod, String> {
+    if let Ok(parsed) = serde_json::from_value::<PValueStackMethod>(val.clone()) {
+        return Ok(parsed);
+    }
+    let raw = val.as_str().ok_or_else(|| String::from("`pvalue_stack.method` must be a valid P-value stack multiplicity method string"))?;
+    let folded: String = raw
+        .chars()
+        .map(|c| match c {
+            'š' | 'Š' => 's',
+            'í' | 'Í' | 'ì' | 'î' | 'ï' => 'i',
+            'á' | 'Á' => 'a',
+            _ => c,
+        })
+        .collect();
+    match norm_key(&folded).as_str() {
+        "bonferroni" => Ok(PValueStackMethod::Bonferroni),
+        "holm" | "holmbonferroni" | "holm1979" => Ok(PValueStackMethod::HolmBonferroni),
+        "sidak" | "sidak1967" => Ok(PValueStackMethod::Sidak),
+        "holmsidak" => Ok(PValueStackMethod::HolmSidak),
+        "bh" | "benjaminihochberg" | "benjaminihochberg1995" | "benjaminihochbergfdr" | "fdrbh" | "fdr" => Ok(PValueStackMethod::BenjaminiHochberg),
+        "bky" | "twostagebky" | "twostagebkyfdr" | "benjaminikriegeryekutieli" | "benjaminikriegeryekutielitwostage2006" | "bky2006" => {
+            Ok(PValueStackMethod::TwoStageBky)
+        }
+        "by" | "benjaminiyekutieli" | "benjaminiyekutieli2001" | "benjaminiyekutielifdr" | "fdrby" => Ok(PValueStackMethod::BenjaminiYekutieli),
+        _ => Err(format!("unknown P-value stack multiplicity method `{raw}`")),
+    }
+}
+
+pub(crate) fn parse_pvalue_stack_threshold_val(val: &Value, field: &str) -> Result<f64, String> {
+    let t = parse_finite_f64(val, field)?;
+    if !(0.0 < t && t < 1.0) {
+        return Err(format!("`{field}` ({t}) must lie strictly in (0, 1)"));
+    }
+    Ok(t)
 }
 
 pub(crate) fn parse_break_ornament_str(raw: &str) -> Result<BreakOrnament, String> {

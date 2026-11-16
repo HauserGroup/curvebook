@@ -8,15 +8,14 @@ use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, Cell, CellCoord, ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint,
     ColumnTable, ConstantValue, ContingencyTable, DataSheet, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GroupedTable, HookSource,
     InfoConstant, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
-    MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, PanelBadgeStyle, ParameterScope,
-    ProjectDocument, RectPt, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SizeChannelMapping,
-    SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TableKind, VariableRole, XyTable, extract_template_hooks,
+    MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, PValueFormat, PValueStackMethod, PValueStackSpec, PairwiseComparisonRecord,
+    PanelBadgeStyle, ParameterScope, ProjectDocument, RectPt, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab,
+    ResultTabKind, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TableKind, VariableRole, XyTable, extract_template_hooks,
 };
 use lumencraft_engine::Session;
 use lumencraft_palette::{ColormapId, CvdKind, LineDashStyle, MarkerFillMode, PaletteId};
 use lumencraft_render::RenderTargetSpec;
 use lumencraft_tools::{GridCellCoord, JournalWidthPreset as ToolJournalWidthPreset, PhysicalUnit, SelectionQuickStats};
-use lumencraft_ui_egui::UiApp;
 use lumencraft_ui_egui::dialogs_canvas::{
     ANALYSIS_CATALOG, ActiveDialog, ActiveInspector, AnalyzeDialogState, AnalyzeDuplicateChoice, AxisTarget, CommandOrigin, CommandPaletteState,
     VariableRoleFilter, compute_workspace_layout, default_analysis_kind_for_id, render_workspace_frame_png, render_workspace_rgba,
@@ -24,6 +23,7 @@ use lumencraft_ui_egui::dialogs_canvas::{
 };
 use lumencraft_ui_egui::theme::{UiThemeSpec, font_diagnostics};
 use lumencraft_ui_egui::workspace_nav::ActiveWorkspacePane;
+use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::json;
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -971,4 +971,102 @@ fn portfolio_gallery_and_active_pane_focus_indicator_render_distinctly() {
             );
         }
     }
+}
+
+#[test]
+fn r10_10_pvalue_stack_catalog_analyze_and_edit_params_roundtrip() {
+    // 1. Static catalog registration & compatibility matrix.
+    let entry = ANALYSIS_CATALOG.iter().find(|item| item.id == "stats.pvalue_stack").expect("pvalue_stack catalog entry");
+    assert_eq!(entry.label, "Analyze a Stack of P Values");
+    let default_kind = default_analysis_kind_for_id("stats.pvalue_stack").expect("default pvalue_stack kind");
+    assert!(matches!(default_kind, AnalysisKind::PValueStack(PValueStackSpec { method: PValueStackMethod::BenjaminiHochberg, .. })));
+    for compat in [TableKind::Column, TableKind::Xy, TableKind::Grouped, TableKind::MultipleVariables] {
+        assert!(default_kind.is_compatible_with(compat), "expected {compat:?} compatibility");
+    }
+    for incompat in [TableKind::Contingency, TableKind::Survival, TableKind::PartsOfWhole, TableKind::Nested] {
+        assert!(!default_kind.is_compatible_with(incompat), "expected {incompat:?} incompatibility");
+    }
+
+    // 2. End-to-end GUI flow: Analyze... -> inspect controls -> run -> EditAnalysisParameters (Cmd+T) -> update.
+    let mut app = UiApp::new();
+    app.execute_command("sheet.createData", json!({ "sheet_id": "col-pvals", "title": "P Stack", "kind": "Column", "rows": 5, "cols": 2 }))
+        .expect("create Column sheet");
+    app.execute_command(
+        "table.setCells",
+        json!({
+            "sheet_id": "col-pvals",
+            "edits": [
+                { "row": 0, "col": 0, "value": 0.001 },
+                { "row": 1, "col": 0, "value": 0.014 },
+                { "row": 2, "col": 0, "value": 0.040 },
+                { "row": 3, "col": 0, "value": 0.200 },
+                { "row": 4, "col": 0, "value": 0.900 },
+                { "row": 0, "col": 1, "value": 0.0005 },
+                { "row": 1, "col": 1, "value": 0.009 }
+            ]
+        }),
+    )
+    .expect("seed P values");
+
+    app.execute_command("sheet.select", json!({ "sheet_id": "col-pvals" })).expect("select Column sheet");
+    dispatch_gui_action(&mut app, "ui.invoke_menu", json!({ "command_id": "ui.analyze.open" })).expect("open Analyze dialog");
+    dispatch_gui_action(
+        &mut app,
+        "ui.answer_dialog",
+        json!({
+            "fields": {
+                "entry_id": "stats.pvalue_stack",
+                "method": "Šídák (1967)",
+                "threshold": 0.05,
+                "column": 0
+            }
+        }),
+    )
+    .expect("patch Analyze dialog fields");
+
+    let analyze_tree = dispatch_gui_action(&mut app, "ui.inspect", json!({ "include_widgets": true })).expect("inspect Analyze dialog");
+    let analyze_txt = serde_json::to_string(&analyze_tree).expect("serialize inspect tree");
+    assert!(analyze_txt.contains("analyze.pvalue_stack.method"));
+    assert!(analyze_txt.contains("analyze.pvalue_stack.threshold"));
+    assert!(analyze_txt.contains("analyze.pvalue_stack.column"));
+
+    dispatch_gui_action(&mut app, "ui.answer_dialog", json!({ "action": "ok" })).expect("commit Analyze dialog");
+    let res_id = app.document().result_sheets.last().expect("created ResultSheet").id.clone();
+    let created = app.document().result_sheet(&res_id).expect("result sheet present");
+    assert_eq!(
+        created.analysis.kind,
+        AnalysisKind::PValueStack(PValueStackSpec { method: PValueStackMethod::Sidak, threshold: 0.05, column: Some(0) })
+    );
+    assert_eq!(created.scalars.iter().find(|s| s.key == "TotalDiscoveries").map(|s| s.value), Some(1.0));
+
+    // Open EditAnalysisParameters for the active PValueStack result sheet and update via `multiplicity_method`.
+    let snap = app.document().clone();
+    assert!(app.canvas_dialogs.open_edit_parameters(&snap, &res_id));
+    let edit_tree = dispatch_gui_action(&mut app, "ui.inspect", json!({ "include_widgets": true })).expect("inspect Edit Params dialog");
+    let edit_txt = serde_json::to_string(&edit_tree).expect("serialize edit inspect tree");
+    assert!(edit_txt.contains("edit.pvalue_stack.method"));
+    assert!(edit_txt.contains("edit.pvalue_stack.threshold"));
+    assert!(edit_txt.contains("edit.pvalue_stack.column"));
+
+    dispatch_gui_action(
+        &mut app,
+        "ui.answer_dialog",
+        json!({
+            "action": "ok",
+            "fields": {
+                "multiplicity_method": "Benjamini-Krieger-Yekutieli",
+                "threshold": 0.10,
+                "column": 1
+            }
+        }),
+    )
+    .expect("commit EditAnalysisParameters");
+
+    let updated = app.document().result_sheet(&res_id).expect("updated result sheet");
+    assert_eq!(
+        updated.analysis.kind,
+        AnalysisKind::PValueStack(PValueStackSpec { method: PValueStackMethod::TwoStageBky, threshold: 0.10, column: Some(1) })
+    );
+    assert_eq!(updated.scalars.iter().find(|s| s.key == "TotalInputCount").map(|s| s.value), Some(2.0));
+    assert_eq!(updated.scalars.iter().find(|s| s.key == "TotalDiscoveries").map(|s| s.value), Some(2.0));
 }

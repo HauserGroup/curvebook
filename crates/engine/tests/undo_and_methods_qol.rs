@@ -7,9 +7,9 @@ use std::time::Instant;
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, CellCoord, ColumnDesignHint, ColumnTable, ContingencyMethod, ContingencySpec,
     ContingencyTable, CoxTieMethod, DataSheet, FactorialAnovaSpec, FitMethod, GroupedTable, LinearRegressionSpec, ModelComparisonSpec,
-    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod, ParameterRule,
-    ParameterScope, PassingBablokSpec, ProjectDocument, ResultStatus, SheetId, SubcolumnMode, SurvivalAnalysisSpec, SurvivalTable, TableArchetype,
-    TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, XyTable,
+    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod,
+    PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, ResultStatus, SheetId, SubcolumnMode,
+    SurvivalAnalysisSpec, SurvivalTable, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, XyTable,
 };
 use lumencraft_engine::methods_report::{ReportFormat, generate_methods_report};
 use lumencraft_engine::{CommandOutcome, MAX_UNDO_CELL_BUDGET, MAX_UNDO_ENTRIES, Session};
@@ -663,4 +663,76 @@ fn qol6_contingency_regression_and_multivariate_methods_reports() {
             .contains("Multiple Imputation by Chained Equations")
     );
     assert!(generate_methods_report(doc_snap, &SheetId::new("res-2way"), ReportFormat::PlainText).unwrap().contains("two-way factorial ANOVA"));
+}
+
+#[test]
+fn r10_10_pvalue_stack_executes_updates_undoes_and_generates_methods_report() {
+    let mut doc = ProjectDocument::new("Differential Screen P Values").unwrap();
+    let pvals = [0.001_f64, 0.015, 0.032, 0.045, 0.21, 0.80];
+    let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, pvals.len()).unwrap();
+    col.data_sets[0].title = String::from("Screen_P");
+    col.data_sets[1].title = String::from("Secondary_P");
+    for (r, &p) in pvals.iter().enumerate() {
+        col.data_sets[0].cells[r][0] = Cell::number(p);
+        col.data_sets[1].cells[r][0] = Cell::number((p * 1.5).min(1.0));
+    }
+    doc.add_data_sheet(DataSheet::new(SheetId::new("p-col"), "Raw P Stack", TableArchetype::Column(col)).unwrap()).unwrap();
+    let mut session = Session::from_document(doc);
+
+    // 1. Run via dedicated `stats.pvalueStack` command selecting column 0 with Benjamini-Hochberg at Q = 0.05.
+    let run_out = ok_cmd(
+        &mut session,
+        "stats.pvalueStack",
+        json!({
+            "sheet_id": "res-pstack",
+            "source_sheet_id": "p-col",
+            "method": "benjamini_hochberg",
+            "threshold": 0.05,
+            "column": 0
+        }),
+    );
+    assert_eq!(run_out.payload["sheet_id"], json!("res-pstack"));
+
+    let rs_bh = session.document().result_sheet(&SheetId::new("res-pstack")).unwrap();
+    assert_eq!(rs_bh.status, ResultStatus::UpToDate);
+    assert_eq!(rs_bh.scalars.iter().find(|s| s.key == "TotalInputCount").map(|s| s.value), Some(6.0));
+    assert_eq!(rs_bh.scalars.iter().find(|s| s.key == "TotalDiscoveries").map(|s| s.value), Some(2.0));
+    assert!(rs_bh.tabs.iter().any(|t| t.id == "pvalue-stack-summary"));
+    assert!(rs_bh.tabs.iter().any(|t| t.id == "pvalue-stack-adjusted"));
+
+    // 2. Verify domain error refusal on out-of-range P values (> 1.0) without silent clamping.
+    ok_cmd(&mut session, "table.setCell", json!({ "sheet_id": "p-col", "row": 5, "col": 1, "value": 1.25 }));
+    let err = session.execute("stats.pvalueStack", json!({ "sheet_id": "res-bad", "source_sheet_id": "p-col", "column": 1 })).unwrap_err();
+    assert!(err.to_string().contains("Domain") || err.to_string().contains("[0, 1]") || err.to_string().contains("failed"), "got: {err}");
+
+    // 3. Update parameters to Holm-Bonferroni (`analysis.updateParams`), verify fewer discoveries, then undo/redo.
+    ok_cmd(
+        &mut session,
+        "analysis.updateParams",
+        json!({
+            "sheet_id": "res-pstack",
+            "kind": AnalysisKind::PValueStack(PValueStackSpec {
+                method: PValueStackMethod::HolmBonferroni,
+                threshold: 0.05,
+                column: Some(0),
+            })
+        }),
+    );
+    let rs_holm = session.document().result_sheet(&SheetId::new("res-pstack")).unwrap();
+    assert_eq!(rs_holm.scalars.iter().find(|s| s.key == "TotalDiscoveries").map(|s| s.value), Some(1.0));
+
+    assert!(session.undo().unwrap());
+    let rs_undone = session.document().result_sheet(&SheetId::new("res-pstack")).unwrap();
+    assert_eq!(rs_undone.scalars.iter().find(|s| s.key == "TotalDiscoveries").map(|s| s.value), Some(2.0));
+    assert!(session.redo().unwrap());
+    let rs_redone = session.document().result_sheet(&SheetId::new("res-pstack")).unwrap();
+    assert_eq!(rs_redone.scalars.iter().find(|s| s.key == "TotalDiscoveries").map(|s| s.value), Some(1.0));
+
+    // 4. Verify methods report generation across all 3 formats.
+    for fmt in ["plain", "markdown", "latex"] {
+        let rep = ok_cmd(&mut session, "result.generateReport", json!({ "result_sheet_id": "res-pstack", "format": fmt }));
+        let text = rep.payload["report"].as_str().unwrap();
+        assert_clean_room_prose(text);
+        assert!(text.contains("Holm") || text.contains("FWER"), "expected Holm methods text in {fmt}:\n{text}");
+    }
 }

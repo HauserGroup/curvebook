@@ -1156,6 +1156,23 @@ fn push_r9_analyze_controls(
             ControlEnablement::enabled(),
         );
     }
+    if st.selected_entry_id.as_deref() == Some("stats.pvalue_stack") {
+        push(
+            "analyze.pvalue_stack.method",
+            "combobox",
+            "Multiplicity procedure",
+            json!(format!("{:?}", st.pvalue_stack_method)),
+            ControlEnablement::enabled(),
+        );
+        push(
+            "analyze.pvalue_stack.threshold",
+            "spinbutton",
+            "Alpha / FDR Q threshold",
+            json!(st.pvalue_stack_threshold),
+            ControlEnablement::enabled(),
+        );
+        push("analyze.pvalue_stack.column", "combobox", "P-value column", json!(st.pvalue_stack_column), ControlEnablement::enabled());
+    }
 }
 
 fn build_edit_params_dialog_nodes(
@@ -1585,6 +1602,11 @@ fn push_r9_edit_params_controls(
             push("edit.sample.seed", "spinbutton", "RNG seed", json!(seed));
             push("edit.sample.stratify_column", "combobox", "Stratify column", json!(stratify_column));
             push("edit.sample.proportional_allocation", "checkbox", "Proportional allocation", json!(proportional_allocation));
+        }
+        AnalysisKind::PValueStack(ps) => {
+            push("edit.pvalue_stack.method", "combobox", "Multiplicity procedure", json!(format!("{:?}", ps.method)));
+            push("edit.pvalue_stack.threshold", "spinbutton", "Alpha / FDR Q threshold", json!(ps.threshold));
+            push("edit.pvalue_stack.column", "combobox", "P-value column", json!(ps.column));
         }
         _ => {}
     }

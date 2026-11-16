@@ -292,6 +292,70 @@ impl Default for PassingBablokSpec {
     }
 }
 
+/// Multiplicity correction procedure for a standalone stack of *P* values (`R10.10`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum PValueStackMethod {
+    Bonferroni,
+    HolmBonferroni,
+    Sidak,
+    HolmSidak,
+    #[default]
+    BenjaminiHochberg,
+    TwoStageBky,
+    BenjaminiYekutieli,
+}
+
+impl PValueStackMethod {
+    /// All seven multiplicity procedures in canonical order.
+    pub const ALL: [Self; 7] =
+        [Self::Bonferroni, Self::HolmBonferroni, Self::Sidak, Self::HolmSidak, Self::BenjaminiHochberg, Self::TwoStageBky, Self::BenjaminiYekutieli];
+
+    /// Whether this procedure controls the false discovery rate (FDR, emitting *q*-values)
+    /// rather than the family-wise error rate (FWER, emitting adjusted *P* values).
+    #[must_use]
+    pub const fn is_fdr(self) -> bool {
+        matches!(self, Self::BenjaminiHochberg | Self::TwoStageBky | Self::BenjaminiYekutieli)
+    }
+
+    /// Canonical short display label for result tables and methods reports.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Bonferroni => "Bonferroni",
+            Self::HolmBonferroni => "Holm (1979)",
+            Self::Sidak => "Šídák (1967)",
+            Self::HolmSidak => "Holm–Šídák",
+            Self::BenjaminiHochberg => "Benjamini–Hochberg (1995)",
+            Self::TwoStageBky => "Benjamini–Krieger–Yekutieli two-stage (2006)",
+            Self::BenjaminiYekutieli => "Benjamini–Yekutieli (2001)",
+        }
+    }
+}
+
+fn default_pvalue_stack_threshold() -> f64 {
+    0.05
+}
+
+/// Specification for standalone multiplicity adjustment of a stack of raw *P* values (`R10.10`).
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PValueStackSpec {
+    /// Multiplicity correction / FDR procedure.
+    #[serde(default)]
+    pub method: PValueStackMethod,
+    /// Family-wise significance level (`alpha` for FWER) or desired FDR (`Q` for FDR), in `(0.0, 1.0)`.
+    #[serde(default = "default_pvalue_stack_threshold")]
+    pub threshold: f64,
+    /// Optional 0-based column override; `None` resolves `AnalysisSpec::selected_data_sets`.
+    #[serde(default)]
+    pub column: Option<usize>,
+}
+
+impl Default for PValueStackSpec {
+    fn default() -> Self {
+        Self { method: PValueStackMethod::default(), threshold: default_pvalue_stack_threshold(), column: None }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum OneWayMethod {
     #[default]
@@ -709,6 +773,7 @@ pub enum AnalysisKind {
     Multivariate(MultivariateSpec),
     LinearRegression(LinearRegressionSpec),
     NonlinearRegression(NonlinearFitSpec),
+    PValueStack(PValueStackSpec),
 }
 
 impl AnalysisKind {
@@ -801,6 +866,7 @@ impl AnalysisKind {
             Self::Multivariate(MultivariateSpec::MultipleImputation { .. }) => String::from("Multiple imputation"),
             Self::LinearRegression(_) => String::from("Simple linear regression"),
             Self::NonlinearRegression(fit) => format!("Nonlinear regression ({})", fit.equation_id),
+            Self::PValueStack(s) => format!("Analyze stack of P values ({})", s.method.label()),
         }
     }
 
@@ -834,6 +900,9 @@ impl AnalysisKind {
             }
             Self::LinearRegression(_) | Self::NonlinearRegression(_) => {
                 matches!(table_kind, TableKind::Xy | TableKind::Grouped | TableKind::MultipleVariables)
+            }
+            Self::PValueStack(_) => {
+                matches!(table_kind, TableKind::Column | TableKind::Xy | TableKind::Grouped | TableKind::MultipleVariables)
             }
         }
     }

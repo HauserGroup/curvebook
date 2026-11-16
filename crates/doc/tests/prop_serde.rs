@@ -1028,3 +1028,31 @@ proptest! {
         assert_json_roundtrip(&spec);
     }
 }
+
+#[test]
+fn pvalue_stack_spec_defaults_compatibility_and_serde_roundtrip() {
+    use lumencraft_doc::{PValueStackMethod, PValueStackSpec};
+
+    let minimal_json = r#"{}"#;
+    let decoded_default: PValueStackSpec = serde_json::from_str(minimal_json).unwrap();
+    assert_eq!(decoded_default, PValueStackSpec::default());
+    assert_eq!(decoded_default.method, PValueStackMethod::BenjaminiHochberg);
+    assert!((decoded_default.threshold - 0.05).abs() < 1e-12);
+    assert_eq!(decoded_default.column, None);
+
+    for method in PValueStackMethod::ALL {
+        let spec = PValueStackSpec { method, threshold: 0.1, column: Some(2) };
+        let kind = AnalysisKind::PValueStack(spec);
+        assert!(kind.is_compatible_with(TableKind::Column));
+        assert!(kind.is_compatible_with(TableKind::MultipleVariables));
+        assert!(kind.is_compatible_with(TableKind::Xy));
+        assert!(kind.is_compatible_with(TableKind::Grouped));
+        assert!(!kind.is_compatible_with(TableKind::Contingency));
+        assert!(!kind.is_compatible_with(TableKind::Survival));
+        assert!(!kind.is_compatible_with(TableKind::Nested));
+        assert!(kind.derive_auto_title().contains(method.label()));
+
+        let full = AnalysisSpec::new("res-p", "col-p", kind).unwrap();
+        assert_json_roundtrip(&full);
+    }
+}

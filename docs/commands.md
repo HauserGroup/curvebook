@@ -1,6 +1,6 @@
 # LumenCraft Command Reference
 
-Registered commands: 95
+Registered commands: 96
 
 ## Project & Files (`project`)
 
@@ -542,6 +542,14 @@ Registered commands: 95
 - **Summary:** Generate a publication-ready statistical methods prose report in `plain`, `markdown`, or `latex`, optionally saving to disk.
 - **Beginner note:** Creates a narrative methods paragraph describing the statistical test, sample sizes, and options used.
 - **Parameters:** `format` (any), `path` (any), `result_sheet_id*` (string)
+
+### `stats.pvalueStack` — Analyze a Stack of P Values
+
+- **Effects:** `MUTATES_DOCUMENT`
+- **Menu:** `Analyze/Column Analyses/Analyze a Stack of P Values...`
+- **Summary:** Adjust a column stack of raw P values across 7 FWER/FDR multiplicity procedures and report discoveries.
+- **Beginner note:** Adjusts a column of P values using Bonferroni, Holm, Šídák, Holm-Šídák, Benjamini-Hochberg, BKY two-stage, or Benjamini-Yekutieli.
+- **Parameters:** `column` (any), `method` (any), `overwrite` (any), `p_value_format` (any), `selected_data_sets` (any), `sheet_id` (any), `source_sheet_id*` (string), `threshold` (any), `title` (any)
 
 ### `stats.run` — Run Statistical Test
 

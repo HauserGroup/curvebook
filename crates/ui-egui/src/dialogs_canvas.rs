@@ -11,10 +11,11 @@ use lumencraft_doc::{
     GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource, JournalWidthPreset,
     LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec,
     MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PageOrientation, PairwiseBracketSpec, PanelBadgeStyle, ParameterRule,
-    ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResultCell,
-    ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec,
-    TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
+    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, PageOrientation,
+    PairwiseBracketSpec, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt,
+    RepeatedMeasuresDesign, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping,
+    SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    VariableRole, WeightingScheme, WhiskerMethod,
 };
 use lumencraft_engine::{EngineError, Session, cmd};
 use lumencraft_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -381,6 +382,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         keywords: "multiple imputation pmm mice missing data rubin rules",
         summary: "Chained predictive mean matching imputations pooled via Rubin's rules.",
     },
+    AnalysisCatalogItem {
+        id: "stats.pvalue_stack",
+        label: "Analyze a Stack of P Values",
+        category: AnalysisCategory::Column,
+        keywords: "p value p-value stack multiplicity fdr bonferroni holm sidak benjamini hochberg bky yekutieli q value discovery",
+        summary: "Adjust a column stack of raw P values across 7 FWER/FDR procedures and flag discoveries.",
+    },
 ];
 
 /// Map a static catalog identifier into its default [`AnalysisKind`].
@@ -482,6 +490,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             response_column: None,
             predictor_columns: Vec::new(),
         })),
+        "stats.pvalue_stack" => Some(AnalysisKind::PValueStack(PValueStackSpec::default())),
         _ => None,
     }
 }
@@ -686,6 +695,16 @@ pub struct AnalyzeDialogState {
     pub sample_stratify_column: Option<usize>,
     #[serde(default = "default_true_flag")]
     pub sample_proportional: bool,
+    #[serde(default)]
+    pub pvalue_stack_method: PValueStackMethod,
+    #[serde(default = "default_pvalue_stack_threshold")]
+    pub pvalue_stack_threshold: f64,
+    #[serde(default)]
+    pub pvalue_stack_column: Option<usize>,
+}
+
+const fn default_pvalue_stack_threshold() -> f64 {
+    0.05
 }
 
 const fn default_transform_y() -> Option<MathTransformPreset> {
@@ -783,6 +802,9 @@ impl Default for AnalyzeDialogState {
             sample_size: 10,
             sample_stratify_column: None,
             sample_proportional: true,
+            pvalue_stack_method: PValueStackMethod::default(),
+            pvalue_stack_threshold: default_pvalue_stack_threshold(),
+            pvalue_stack_column: None,
         }
     }
 }
@@ -835,6 +857,9 @@ impl AnalyzeDialogState {
         self.sample_size = 10;
         self.sample_stratify_column = None;
         self.sample_proportional = true;
+        self.pvalue_stack_method = PValueStackMethod::default();
+        self.pvalue_stack_threshold = default_pvalue_stack_threshold();
+        self.pvalue_stack_column = None;
     }
 
     /// Populate defaults and variable candidates for `sheet`.
@@ -896,13 +921,14 @@ impl AnalyzeDialogState {
 
     /// Apply modal field updates from `ui.answer_dialog` / interactive controls.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for key in ["entry_id", "selected_entry_id", "analysis", "analyze.entry"] {
+            if let Some(s) = fields.get(key).and_then(Value::as_str) {
+                self.selected_entry_id = Some(s.to_owned());
+            }
+        }
         for (key, val) in fields {
             match key.as_str() {
-                "entry_id" | "selected_entry_id" | "analysis" | "analyze.entry" => {
-                    if let Some(s) = val.as_str() {
-                        self.selected_entry_id = Some(s.to_owned());
-                    }
-                }
+                "entry_id" | "selected_entry_id" | "analysis" | "analyze.entry" => {}
                 "search" | "search_query" | "analyze.search" => {
                     if let Some(s) = val.as_str() {
                         self.search_query = s.to_owned();
@@ -1047,10 +1073,14 @@ impl AnalyzeDialogState {
                 self.factorial_ss_type = parse_ss_type_str(raw)?;
             }
             "multiplicity_method" | "analyze.multiplicity_method" => {
-                let raw = val.as_str().ok_or_else(|| String::from("`multiplicity_method` must be a string"))?;
-                let parsed = parse_multiplicity_method_name(raw, 0)?;
-                self.factorial_multiplicity = parsed;
-                self.km_multiplicity_method = parsed;
+                if self.selected_entry_id.as_deref() == Some("stats.pvalue_stack") {
+                    self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
+                } else {
+                    let raw = val.as_str().ok_or_else(|| String::from("`multiplicity_method` must be a string"))?;
+                    let parsed = parse_multiplicity_method_name(raw, 0)?;
+                    self.factorial_multiplicity = parsed;
+                    self.km_multiplicity_method = parsed;
+                }
             }
             "distance" | "cluster_distance" | "analyze.cluster.distance" => {
                 let raw = val.as_str().ok_or_else(|| String::from("`distance` must be a string"))?;
@@ -1148,6 +1178,32 @@ impl AnalyzeDialogState {
             }
             "proportional_allocation" | "analyze.sample.proportional_allocation" => {
                 self.sample_proportional = val.as_bool().ok_or_else(|| String::from("`proportional_allocation` must be boolean"))?;
+            }
+            _ => self.apply_pvalue_stack_analyze_field(key, val)?,
+        }
+        Ok(())
+    }
+
+    fn apply_pvalue_stack_analyze_field(&mut self, key: &str, val: &Value) -> Result<(), String> {
+        let is_pstack = self.selected_entry_id.as_deref() == Some("stats.pvalue_stack");
+        match key {
+            "pvalue_stack_method" | "analyze.pvalue_stack.method" | "analyze.pvalue_stack.multiplicity_method" => {
+                self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
+            }
+            "pvalue_stack_threshold" | "analyze.pvalue_stack.threshold" => {
+                self.pvalue_stack_threshold = parse_pvalue_stack_threshold_val(val, key)?;
+            }
+            "pvalue_stack_column" | "analyze.pvalue_stack.column" => {
+                self.pvalue_stack_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+            }
+            "method" if is_pstack => {
+                self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
+            }
+            "threshold" | "alpha" | "q" | "fdr_q" if is_pstack => {
+                self.pvalue_stack_threshold = parse_pvalue_stack_threshold_val(val, key)?;
+            }
+            "column" if is_pstack => {
+                self.pvalue_stack_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
             }
             _ => {}
         }
@@ -1381,6 +1437,11 @@ impl AnalyzeDialogState {
                 *sample_size = self.sample_size.max(1);
                 *stratify_column = self.sample_stratify_column;
                 *proportional_allocation = self.sample_proportional;
+            }
+            AnalysisKind::PValueStack(ps) => {
+                ps.method = self.pvalue_stack_method;
+                ps.threshold = self.pvalue_stack_threshold;
+                ps.column = self.pvalue_stack_column;
             }
             _ => {}
         }
@@ -1689,7 +1750,11 @@ impl EditAnalysisParametersState {
     }
 
     fn apply_single_param_patch(&mut self, key: &str, val: &Value) -> Result<(), String> {
-        if self.apply_contingency_param_patch(key, val)? || self.apply_transform_param_patch(key, val)? || self.apply_r9_param_patch(key, val)? {
+        if self.apply_contingency_param_patch(key, val)?
+            || self.apply_transform_param_patch(key, val)?
+            || self.apply_pvalue_stack_param_patch(key, val)?
+            || self.apply_r9_param_patch(key, val)?
+        {
             return Ok(());
         }
         match key {
@@ -1922,6 +1987,40 @@ impl EditAnalysisParametersState {
             mutate(&mut c);
             spec.update_kind(AnalysisKind::Contingency(c));
         }
+    }
+
+    /// Applies `PValueStack`-specific field patches on `EditAnalysisParametersState`.
+    fn apply_pvalue_stack_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+        let Some(spec) = &mut self.draft else {
+            return Ok(false);
+        };
+        let AnalysisKind::PValueStack(mut ps) = spec.kind.clone() else {
+            return Ok(false);
+        };
+        let handled = match key {
+            "method"
+            | "pvalue_stack_method"
+            | "multiplicity_method"
+            | "multiplicity"
+            | "edit.pvalue_stack.method"
+            | "edit.pvalue_stack.multiplicity_method" => {
+                ps.method = parse_pvalue_stack_method_val(val)?;
+                true
+            }
+            "threshold" | "pvalue_stack_threshold" | "alpha" | "q" | "fdr_q" | "edit.pvalue_stack.threshold" => {
+                ps.threshold = parse_pvalue_stack_threshold_val(val, key)?;
+                true
+            }
+            "column" | "pvalue_stack_column" | "edit.pvalue_stack.column" => {
+                ps.column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            spec.update_kind(AnalysisKind::PValueStack(ps));
+        }
+        Ok(handled)
     }
 
     /// Applies Transform-specific field patches on `EditAnalysisParametersState`.

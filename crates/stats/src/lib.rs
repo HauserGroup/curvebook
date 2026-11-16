@@ -17,6 +17,7 @@ pub mod error;
 pub mod multiplicity;
 pub mod multivariate;
 pub mod power;
+pub mod pvalue_stack;
 pub mod regression;
 pub mod roc;
 pub mod survival;
@@ -71,5 +72,6 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
             Err(StatsError::IncompatibleTable { analysis: "curve fitting (handled by lumencraft-fit)", actual: sheet.archetype.kind() })
         }
+        AnalysisKind::PValueStack(ps) => pvalue_stack::run_pvalue_stack_analysis(sheet, spec, ps),
     }
 }

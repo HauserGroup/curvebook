@@ -4,10 +4,10 @@ use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
     CoxTieMethod, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting,
     LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
-    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, ParameterRule, ParameterScope,
-    PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise,
-    SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole,
-    WeightingScheme,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec,
+    ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec,
+    SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    VariableRole, WeightingScheme,
 };
 use lumencraft_fit::get_builtin_model;
 use lumencraft_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
@@ -188,6 +188,19 @@ static SPECS: &[CommandSpec] = &[
         input_schema: schema_result_generate_report,
         enabled: has_result_sheet,
         run: run_result_generate_report,
+    },
+    CommandSpec {
+        id: "stats.pvalueStack",
+        label: "Analyze a Stack of P Values",
+        menu_path: "Analyze/Column Analyses/Analyze a Stack of P Values...",
+        shortcut: "",
+        summary: "Adjust a column stack of raw P values across 7 FWER/FDR multiplicity procedures and report discoveries.",
+        beginner: "Adjusts a column of P values using Bonferroni, Holm, Šídák, Holm-Šídák, Benjamini-Hochberg, BKY two-stage, or Benjamini-Yekutieli.",
+        group: CommandGroup::Analysis,
+        effects: Effects::MUTATES_DOCUMENT,
+        input_schema: schema_stats_pvalue_stack,
+        enabled: has_data_sheet,
+        run: run_stats_pvalue_stack,
     },
 ];
 
@@ -404,6 +417,43 @@ fn schema_stats_run() -> Value {
     schema_analysis_base("Statistical test kind shorthand or typed AnalysisKind object", false, true)
 }
 
+fn schema_stats_pvalue_stack() -> Value {
+    obj_schema_with_aliases(
+        vec![
+            ("sheet_id", nullable_schema(non_empty_str_schema("Optional target result sheet ID"))),
+            ("source_sheet_id", non_empty_str_schema("Source data sheet ID containing raw P-value column(s)")),
+            (
+                "method",
+                nullable_schema(str_schema(
+                    "Multiplicity procedure (`bonferroni`, `holm`, `sidak`, `holm_sidak`, `benjamini_hochberg`, `two_stage_bky`, `benjamini_yekutieli`)",
+                )),
+            ),
+            ("threshold", nullable_schema(num_schema("Significance alpha (FWER) or desired FDR Q strictly in (0, 1)", Some(0.0), Some(1.0)))),
+            ("column", nullable_schema(int_schema("Optional zero-based column index override", Some(0), None))),
+            (
+                "selected_data_sets",
+                nullable_schema(array_schema(
+                    "Subset of zero-based column indices to analyze",
+                    int_schema("Dataset column index", Some(0), None),
+                    None,
+                    None,
+                )),
+            ),
+            ("overwrite", nullable_schema(bool_schema("Overwrite an existing result sheet with the same ID"))),
+            ("title", nullable_schema(str_schema("Optional custom title override"))),
+            ("p_value_format", nullable_schema(any_json_schema("P-value formatting rule (`four_decimal`, `apa`, `nejm`, `scientific`, or object)"))),
+        ],
+        &["source_sheet_id"],
+        vec![
+            ("sheet_id", &["id"]),
+            ("source_sheet_id", &["source_sheet", "source", "data_sheet_id"]),
+            ("selected_data_sets", &["selected_columns", "columns"]),
+            ("threshold", &["alpha", "q", "fdr_q"]),
+        ],
+        true,
+    )
+}
+
 fn schema_fit_run() -> Value {
     schema_analysis_base("Regression kind or equation shorthand (e.g. `four_parameter_logistic`, `linear`, `deming`) or typed object", true, true)
 }
@@ -576,6 +626,16 @@ fn run_transform_run(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
 fn run_stats_run(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_stats_run();
     run_analysis_with_domain(ctx, "stats.run", raw, &schema, AnalysisDomain::StatsOnly)
+}
+
+fn run_stats_pvalue_stack(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_stats_pvalue_stack();
+    let mut validated: Value = parse_params(&schema, raw)?;
+    if let Value::Object(ref mut map) = validated {
+        map.entry(String::from("kind")).or_insert_with(|| json!("pvalue_stack"));
+    }
+    let exec_schema = schema_stats_run();
+    run_analysis_with_domain(ctx, "stats.pvalueStack", validated, &exec_schema, AnalysisDomain::StatsOnly)
 }
 
 fn run_fit_run(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -1259,6 +1319,9 @@ fn resolve_other_stats_shorthand(name: &str, params: &Value) -> Result<Option<An
         }
         "bland_altman" | "stats.bland_altman" => AnalysisKind::BlandAltman(BlandAltmanSpec::default()),
         "passing_bablok" | "stats.passing_bablok" => AnalysisKind::PassingBablok(PassingBablokSpec::default()),
+        "pvalue_stack" | "stats.pvalue_stack" | "p_value_stack" | "pvalues" | "pvaluestack" | "stats.pvaluestack" => {
+            AnalysisKind::PValueStack(PValueStackSpec::default())
+        }
         "contingency"
         | "chi_square"
         | "fisher_exact"
@@ -1371,6 +1434,7 @@ fn apply_shorthand_kind_overrides(kind: &mut AnalysisKind, params: &Value) -> Re
         AnalysisKind::MultipleRowTTests(spec) => apply_multiple_row_overrides(spec, params)?,
         AnalysisKind::BlandAltman(spec) => apply_bland_altman_overrides(spec, params)?,
         AnalysisKind::PassingBablok(spec) => apply_passing_bablok_overrides(spec, params)?,
+        AnalysisKind::PValueStack(spec) => apply_pvalue_stack_overrides(spec, params)?,
         AnalysisKind::TwoGroupComparison(spec) => apply_two_group_overrides(spec, params)?,
         AnalysisKind::Contingency(spec) => apply_contingency_overrides(spec, params)?,
         AnalysisKind::Survival(spec) => apply_survival_overrides(spec, params)?,
@@ -1422,6 +1486,54 @@ fn apply_bland_altman_overrides(spec: &mut BlandAltmanSpec, params: &Value) -> R
 fn apply_passing_bablok_overrides(spec: &mut PassingBablokSpec, params: &Value) -> Result<(), EngineError> {
     apply_usize_field(params, &["x_column"], &mut spec.x_column)?;
     apply_usize_field(params, &["y_column"], &mut spec.y_column)?;
+    Ok(())
+}
+
+fn parse_pvalue_stack_method(raw: &str) -> Result<PValueStackMethod, EngineError> {
+    let norm = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
+    match norm.as_str() {
+        "bonferroni" => Ok(PValueStackMethod::Bonferroni),
+        "holm" | "holm_bonferroni" | "holm_1979" => Ok(PValueStackMethod::HolmBonferroni),
+        "sidak" | "šidák" | "šídák" | "sidak_1967" => Ok(PValueStackMethod::Sidak),
+        "holm_sidak" | "holm_šidák" | "holm_šídák" => Ok(PValueStackMethod::HolmSidak),
+        "bh" | "benjamini_hochberg" | "benjamini_hochberg_fdr" | "fdr_bh" => Ok(PValueStackMethod::BenjaminiHochberg),
+        "bky" | "two_stage_bky" | "two_stage_bky_fdr" | "benjamini_krieger_yekutieli" | "bky_2006" => Ok(PValueStackMethod::TwoStageBky),
+        "by" | "benjamini_yekutieli" | "benjamini_yekutieli_fdr" | "fdr_by" => Ok(PValueStackMethod::BenjaminiYekutieli),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown P-value stack multiplicity method `{raw}`"))),
+    }
+}
+
+fn apply_pvalue_stack_overrides(spec: &mut PValueStackSpec, params: &Value) -> Result<(), EngineError> {
+    if let Some(m_val) = params
+        .get("method")
+        .or_else(|| params.get("pvalue_stack_method"))
+        .or_else(|| params.get("multiplicity_method"))
+        .or_else(|| params.get("multiplicity"))
+        && !m_val.is_null()
+    {
+        if let Ok(parsed) = serde_json::from_value::<PValueStackMethod>(m_val.clone()) {
+            spec.method = parsed;
+        } else if let Some(raw) = m_val.as_str() {
+            spec.method = parse_pvalue_stack_method(raw)?;
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`method` must be a valid P-value stack multiplicity method string"));
+        }
+    }
+    if let Some(t_val) = params
+        .get("threshold")
+        .or_else(|| params.get("pvalue_stack_threshold"))
+        .or_else(|| params.get("alpha"))
+        .or_else(|| params.get("q"))
+        .or_else(|| params.get("fdr_q"))
+        && !t_val.is_null()
+    {
+        let t = t_val
+            .as_f64()
+            .filter(|v| v.is_finite() && *v > 0.0 && *v < 1.0)
+            .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`threshold` (`alpha` / `Q`) must be a finite number strictly in (0, 1)"))?;
+        spec.threshold = t;
+    }
+    apply_opt_usize_field(params, &["column", "pvalue_stack_column"], &mut spec.column)?;
     Ok(())
 }
 
@@ -2200,8 +2312,9 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_all_eleven_analysis_commands() {
-        assert_eq!(specs().len(), 11);
+    fn registry_contains_all_twelve_analysis_commands() {
+        assert_eq!(specs().len(), 12);
+        assert!(specs().iter().any(|s| s.id == "stats.pvalueStack"));
         for spec in specs() {
             assert_eq!(spec.group, CommandGroup::Analysis);
             assert!(!spec.summary.is_empty());

@@ -509,6 +509,28 @@ fn sweep_valid_info_and_analysis_commands(s: &mut Session, covered: &mut BTreeSe
     run_valid(s, covered, "analyze.run", json!({ "sheet_id": "res-desc", "source_sheet": "col-1", "kind": "descriptive_stats" }))?;
     run_valid(s, covered, "transform.run", json!({ "sheet_id": "res-xform", "source_sheet": "xy-1", "kind": "normalize" }))?;
     run_valid(s, covered, "stats.run", json!({ "sheet_id": "res-anova", "source_sheet": "col-1", "kind": "one_way_anova" }))?;
+    execute_checked(s, "sheet.createData", json!({ "sheet_id": "pval-1", "title": "P Stack", "archetype": "column", "cols": 1, "rows": 4 }))
+        .map_err(|e| e.to_string())?;
+    execute_checked(
+        s,
+        "table.setCells",
+        json!({
+            "sheet_id": "pval-1",
+            "cells": [
+                { "row": 0, "col": 0, "value": 0.001 },
+                { "row": 1, "col": 0, "value": 0.02 },
+                { "row": 2, "col": 0, "value": 0.04 },
+                { "row": 3, "col": 0, "value": 0.50 }
+            ]
+        }),
+    )
+    .map_err(|e| e.to_string())?;
+    run_valid(
+        s,
+        covered,
+        "stats.pvalueStack",
+        json!({ "sheet_id": "res-pstack", "source_sheet": "pval-1", "method": "benjamini_hochberg", "threshold": 0.05 }),
+    )?;
     run_valid(s, covered, "fit.run", json!({ "sheet_id": "res-fit", "source_sheet": "xy-1", "kind": "linear_regression" }))?;
     run_valid(s, covered, "analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-1", "kind": "stats.bland_altman" }))?;
     run_valid(s, covered, "analysis.run", json!({ "sheet_id": "res-col", "source_sheet": "col-1", "kind": "descriptive_stats" }))?;
@@ -774,6 +796,14 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
             json!({ "source_sheet": "missing", "kind": "normalize" }),
             json!({ "source_sheet": "xy-1", "kind": "unknown_analysis_kind" }),
             json!({ "source_sheet": "col-1", "kind": "one_way_anova", "confidence_percent": 150.0 }),
+        ],
+        "stats.pvalueStack" => vec![
+            json!({}),
+            json!({ "source_sheet": "missing" }),
+            json!({ "source_sheet": "col-1", "threshold": 0.05 }),
+            json!({ "source_sheet": "col-1", "method": "not_a_method", "threshold": 0.05 }),
+            json!({ "source_sheet": "col-1", "method": "bonferroni", "threshold": 1.5 }),
+            json!({ "source_sheet": "col-1", "method": "bonferroni", "threshold": 0.0 }),
         ],
         "graph.setAxes" => vec![
             json!({ "sheet_id": "gr-seed", "x_axis": { "min": 100.0, "max": 10.0 } }),

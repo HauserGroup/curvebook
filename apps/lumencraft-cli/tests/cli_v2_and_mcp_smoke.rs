@@ -269,6 +269,73 @@ fn direct_command_execution_supports_schema_typed_flags_and_atomic_save() -> Tes
     // Invalid typed flag value returns usage exit 2
     let _ = assert_structured_json_error(&["sheet.createData", "--rows", "abc", "--json"], 2, "bad_input", "input")?;
     let _ = assert_structured_json_error(&["sheet.createData", "--no-such-flag", "--json"], 2, "bad_input", "input")?;
+
+    // Discover and execute `stats.pvalueStack` via schema-typed CLI flags.
+    let analysis_cmds = run_cli_ok_json(&["commands", "--group", "analysis", "--json"])?;
+    let has_pstack = analysis_cmds["commands"].as_array().is_some_and(|arr| arr.iter().any(|c| c["id"] == json!("stats.pvalueStack")));
+    assert!(has_pstack, "expected `stats.pvalueStack` in `commands --group analysis --json`");
+
+    let col_created = run_cli_ok_json(&[
+        "sheet.createData",
+        "--sheet-id",
+        "pvals_1",
+        "--title",
+        "CLI P Stack",
+        "--archetype",
+        "Column",
+        "--rows",
+        "3",
+        "--cols",
+        "1",
+        "--workdir",
+        wd_str,
+        "--out",
+        "nested/pstack.lumencraft",
+        "--json",
+    ])?;
+    assert_eq!(col_created["ok"], json!(true));
+    for (row, p) in ["0.001", "0.02", "0.40"].iter().enumerate() {
+        let row_s = row.to_string();
+        let _ = run_cli_ok_json(&[
+            "table.setCell",
+            "--workdir",
+            wd_str,
+            "--in",
+            "nested/pstack.lumencraft",
+            "--out",
+            "nested/pstack.lumencraft",
+            "--sheet_id",
+            "pvals_1",
+            "--row",
+            &row_s,
+            "--col",
+            "0",
+            "--value",
+            p,
+            "--json",
+        ])?;
+    }
+    let pstack_res = run_cli_ok_json(&[
+        "stats.pvalueStack",
+        "--workdir",
+        wd_str,
+        "--in",
+        "nested/pstack.lumencraft",
+        "--out",
+        "nested/pstack.lumencraft",
+        "--sheet-id",
+        "res_pstack",
+        "--source-sheet-id",
+        "pvals_1",
+        "--method",
+        "bonferroni",
+        "--threshold",
+        "0.05",
+        "--json",
+    ])?;
+    assert_eq!(pstack_res["ok"], json!(true));
+    assert_eq!(pstack_res["result"]["scalars"]["TotalInputCount"]["value"], json!(3.0));
+    assert_eq!(pstack_res["result"]["scalars"]["TotalDiscoveries"]["value"], json!(1.0));
     Ok(())
 }
 

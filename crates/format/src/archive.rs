@@ -1178,6 +1178,7 @@ fn validate_analysis_kind_floats(spec: &lumencraft_doc::AnalysisSpec, sheet_id: 
         | lumencraft_doc::AnalysisKind::GeneralizedLinearModel(_)
         | lumencraft_doc::AnalysisKind::Multivariate(_)
         | lumencraft_doc::AnalysisKind::LinearRegression(_) => Ok(()),
+        lumencraft_doc::AnalysisKind::PValueStack(ps) => check_finite(ps.threshold, || format!("{sheet_id}.analysis.pvalue_stack.threshold")),
     }
 }
 

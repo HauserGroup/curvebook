@@ -4936,6 +4936,24 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "تشغيل اختبار إحصائي",
         he: "הרץ מבחן סטטיסטי",
     ]),
+    entry!("cmd.stats.pvalueStack" => [
+        en: "Analyze a Stack of P Values",
+        de: "Stapel von P-Werten analysieren",
+        es: "Analizar pila de valores P",
+        fr: "Analyser une pile de valeurs P",
+        ja: "P値のスタックを解析",
+        ko: "P 값 스택 분석",
+        pt_br: "Analisar pilha de valores P",
+        zh_cn: "分析 P 值堆叠",
+        zh_tw: "分析 P 值堆疊",
+        it: "Analizza pila di valori P",
+        nl: "Stapel P-waarden analyseren",
+        pl: "Analizuj stos wartości P",
+        ru: "Анализ набора значений P",
+        tr: "P Değerleri Yığınını Analiz Et",
+        ar: "تحليل مكدس قيم P",
+        he: "נתח מחסנית ערכי P",
+    ]),
     entry!("cmd.fit.run" => [
         en: "Run Curve Fit / Regression",
         de: "Kurvenanpassung / Regression ausführen",
@@ -5946,8 +5964,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 307);
-        assert_eq!(LOCALES.len() * catalog_len(), 4_912);
+        assert_eq!(catalog_len(), 308);
+        assert_eq!(LOCALES.len() * catalog_len(), 4_928);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -5984,7 +6002,7 @@ mod tests {
 
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = lumencraft_engine::cmd::registry().specs().collect();
-        assert_eq!(engine_specs.len(), 95, "expected 95 engine CommandSpec entries");
+        assert_eq!(engine_specs.len(), 96, "expected 96 engine CommandSpec entries");
         assert_eq!(crate::menus::UI_COMMANDS.len(), 45, "expected 45 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();

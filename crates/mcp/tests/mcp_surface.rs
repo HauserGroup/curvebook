@@ -543,3 +543,62 @@ fn mcp_workdir_persists_across_open_file_and_blocks_stored_external_link_recalcu
         state.session().document().data_sheet(&SheetId::new("col-1")).expect("col-1").archetype.data_cell(CellCoord::new(0, 0, 0)).map(|c| &c.value);
     assert_eq!(cell_after_ok, Some(&CellValue::Number(77.5)));
 }
+
+#[test]
+fn r10_10_analysis_toolset_exposes_and_executes_stats_pvalue_stack() {
+    let mut state = McpServerState::new();
+    call_tool(&mut state, "enable_toolset", json!({ "group": "analysis" })).expect("enable analysis");
+    call_tool(&mut state, "enable_toolset", json!({ "group": "sheet" })).expect("enable sheet");
+    call_tool(&mut state, "enable_toolset", json!({ "group": "table" })).expect("enable table");
+
+    assert_eq!(command_id_to_mcp_tool_name("stats.pvalueStack"), "stats_pvalue_stack");
+
+    let listed = rpc_roundtrip(&mut state, 100, "tools/list", json!({})).expect("tools/list");
+    let tools = listed["result"]["tools"].as_array().expect("tools array");
+    let pstack_tool = tools
+        .iter()
+        .find(|t| t["name"] == command_id_to_mcp_tool_name("stats.pvalueStack"))
+        .expect("stats_pvalue_stack registered in analysis toolset");
+    assert_eq!(pstack_tool["annotations"]["readOnlyHint"], json!(false));
+
+    let created = call_tool(
+        &mut state,
+        "sheet_create_data",
+        json!({ "sheet_id": "mcp-pvals", "title": "MCP P Stack", "archetype": "column", "rows": 4, "cols": 1 }),
+    )
+    .expect("sheet_create_data");
+    assert!(!created.is_error, "sheet_create_data failed: {created:?}");
+
+    let edits = call_tool(
+        &mut state,
+        "table_set_cells",
+        json!({
+            "sheet_id": "mcp-pvals",
+            "edits": [
+                { "row": 0, "col": 0, "value": 0.002 },
+                { "row": 1, "col": 0, "value": 0.015 },
+                { "row": 2, "col": 0, "value": 0.045 },
+                { "row": 3, "col": 0, "value": 0.600 }
+            ]
+        }),
+    )
+    .expect("table_set_cells");
+    assert!(!edits.is_error, "table_set_cells failed: {edits:?}");
+
+    let res = call_tool(
+        &mut state,
+        "stats_pvalue_stack",
+        json!({
+            "sheet_id": "mcp-res-pstack",
+            "source_sheet_id": "mcp-pvals",
+            "method": "holm",
+            "threshold": 0.05
+        }),
+    )
+    .expect("stats_pvalue_stack call");
+    assert!(!res.is_error, "stats_pvalue_stack failed: {res:?}");
+    let payload = &res.structured_content.expect("structured_content")["payload"];
+    assert_eq!(payload["sheet_id"], json!("mcp-res-pstack"));
+    assert_eq!(payload["scalars"]["TotalInputCount"]["value"], json!(4.0));
+    assert_eq!(payload["scalars"]["TotalDiscoveries"]["value"], json!(2.0));
+}

@@ -11,9 +11,9 @@ use lumencraft_doc::{
     ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
     GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod,
     MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
-    ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResultCell, ResultSheet, ResultStatus, ResultTab,
-    ResultTabKind, RocCiMethod, RocSpec, SheetId, SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype,
-    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
+    PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResultCell,
+    ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId, SimulationNoise, SubcolumnAggregation, SumOfSquaresType,
+    SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
 };
 use lumencraft_fit::get_builtin_model;
 
@@ -232,6 +232,7 @@ fn describe_analysis_kind(spec: &AnalysisSpec, res: &ResultSheet, source_ds: Opt
         AnalysisKind::NestedComparison(s) => describe_nested(s),
         AnalysisKind::BlandAltman(s) => describe_bland_altman(s, source_ds),
         AnalysisKind::PassingBablok(s) => describe_passing_bablok(s, source_ds),
+        AnalysisKind::PValueStack(s) => describe_pvalue_stack(s, source_ds),
         AnalysisKind::Contingency(s) => describe_contingency(s),
         AnalysisKind::Survival(s) => describe_survival(s, source_ds),
         AnalysisKind::RocCurve(s) => describe_roc(s),
@@ -400,6 +401,27 @@ fn describe_bland_altman(s: &BlandAltmanSpec, source_ds: Option<&DataSheet>) -> 
     let scale = if s.percent_difference { "percentage differences relative to the pair mean" } else { "raw paired differences (A - B)" };
     vec![ReportBlock::Paragraph(vec![plain(format!(
         "Method agreement between `{col_a}` and `{col_b}` was evaluated via Bland-Altman analysis of {scale} against pair averages, reporting mean bias, standard deviation of differences, and 95% limits of agreement with confidence intervals."
+    ))])]
+}
+
+fn describe_pvalue_stack(s: &PValueStackSpec, source_ds: Option<&DataSheet>) -> Vec<ReportBlock> {
+    let (threshold_sym, control, citation) = match s.method {
+        PValueStackMethod::Bonferroni => ("alpha", "family-wise error rate (FWER)", "Dunn (1961)"),
+        PValueStackMethod::HolmBonferroni => ("alpha", "family-wise error rate (FWER) step-down", "Holm (1979)"),
+        PValueStackMethod::Sidak => ("alpha", "family-wise error rate (FWER)", "Šídák (1967)"),
+        PValueStackMethod::HolmSidak => ("alpha", "family-wise error rate (FWER) step-down", "Holm (1979) and Holland & Copenhaver (1987)"),
+        PValueStackMethod::BenjaminiHochberg => ("Q", "false discovery rate (FDR)", "Benjamini & Hochberg (1995)"),
+        PValueStackMethod::TwoStageBky => ("Q", "two-stage adaptive false discovery rate (FDR)", "Benjamini, Krieger, & Yekutieli (2006)"),
+        PValueStackMethod::BenjaminiYekutieli => ("Q", "false discovery rate (FDR) under arbitrary dependence", "Benjamini & Yekutieli (2001)"),
+    };
+    let col_clause = match s.column {
+        Some(col) => format!("on `{}`", column_title_at(source_ds, col)),
+        None => String::from("across the selected P-value column(s)"),
+    };
+    vec![ReportBlock::Paragraph(vec![plain(format!(
+        "Raw P values {col_clause} were evaluated for statistical discovery using the {} procedure ({citation}) to control the {control} at {threshold_sym} = {}. Adjusted P values (or FDR q-values) and boolean discovery indicators preserve the original input row order and rank mapping.",
+        s.method.label(),
+        s.threshold
     ))])]
 }
 

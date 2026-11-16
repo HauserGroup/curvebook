@@ -35,9 +35,9 @@ pub use analysis::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
     CoxTieMethod, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, KappaWeighting, LinearRegressionSpec,
     MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
-    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, ParameterRule, ParameterScope, PassingBablokSpec,
-    RepeatedMeasuresDesign, RocCiMethod, RocSpec, SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec,
-    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
+    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule,
+    ParameterScope, PassingBablokSpec, RepeatedMeasuresDesign, RocCiMethod, RocSpec, SimulationNoise, SubcolumnAggregation, SumOfSquaresType,
+    SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
 };
 pub use archetypes::{
     CategoricalLevelSummary, CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, GroupedTable, LevelOrderKind, LevelOrderSpec,
