@@ -538,7 +538,7 @@ fn write_os_clipboard_bundle_platform(bundle: &ClipboardBundle, primary_text: &s
     write_os_clipboard_bundle_with(&fallback_candidates, bundle, primary_text, flavors)
 }
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(all(not(target_arch = "wasm32"), any(target_os = "macos", target_os = "windows")))]
 fn stage_optional_file(dir: &std::path::Path, filename: &str, bytes: &[u8]) -> Result<String, String> {
     if bytes.is_empty() {
         return Ok(String::new());
@@ -680,6 +680,7 @@ pub fn discover_os_printers() -> Vec<String> {
     }
 }
 
+#[cfg(any(all(not(target_arch = "wasm32"), unix), test))]
 fn parse_lpstat_printers(stdout: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in stdout.lines() {
@@ -701,7 +702,7 @@ fn parse_lpstat_printers(stdout: &str) -> Vec<String> {
     out
 }
 
-#[cfg(any(target_os = "windows", test))]
+#[cfg(any(all(not(target_arch = "wasm32"), target_os = "windows"), test))]
 fn parse_windows_printers(stdout: &str) -> Vec<String> {
     let mut out = Vec::new();
     for line in stdout.lines() {
@@ -713,6 +714,7 @@ fn parse_windows_printers(stdout: &str) -> Vec<String> {
     out
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn validate_printer_name_value(name: &str) -> Result<&str, String> {
     let trimmed = name.trim();
     if trimmed.is_empty() {
@@ -727,6 +729,7 @@ fn validate_printer_name_value(name: &str) -> Result<&str, String> {
     Ok(trimmed)
 }
 
+#[cfg(any(not(target_arch = "wasm32"), test))]
 fn sanitize_print_title(raw: &str) -> String {
     let mut out = String::with_capacity(raw.len().min(64));
     for ch in raw.chars() {
