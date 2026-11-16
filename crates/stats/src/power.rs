@@ -36,7 +36,9 @@ use lumencraft_math::dist::{
     chi2_isf, f_isf, ncchi2_sf, ncf_sf, nct_cdf, nct_sf, norm_cdf, norm_isf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_isf,
     student_t_two_sided_isf,
 };
+use lumencraft_math::quad::gauss_legendre_32;
 use lumencraft_math::roots::{RootOptions, brent_root};
+use lumencraft_math::special::ln_gamma;
 use lumencraft_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 
@@ -182,11 +184,17 @@ pub enum CorrelationPowerMethod {
     /// paired with bias-corrected Fisher *z* (`atanh(r) + r / (2*(n-1))`, `SE = 1/sqrt(n-3)`).
     /// The bias term `rho / (2(n - 1))` is Fisher's (1921) approximation to the mean of `atanh(r)`.
     FisherZWithTCrit,
-    /// Conditional noncentral-*t* transform (`df = n - 2`, `delta = (r / sqrt(1 - r^2)) * sqrt(n - 2)`).
-    /// This is the power of the slope *t*-test conditional on the predictor (fixed-`x` regression),
-    /// not the exact unconditional distribution of the sample correlation under `rho != 0`; despite
-    /// the variant name it is an approximation for bivariate-normal data.
+    /// Exact unconditional distribution of sample Pearson correlation *r* under bivariate normality
+    /// (`rho != 0`, `n > 2`; Fisher 1915, *Biometrika* 10:507–521; Hotelling 1953, *JRSS-B*
+    /// 15:193–232; Anderson 2003, Ch. 4). Integrates the exact hypergeometric density of *r* over
+    /// the exact `t_{n - 2}` rejection region in Fisher `z = atanh(r)` space.
     ExactTTransform,
+    /// Conditional fixed-*x* regression slope *t*-test (`df = n - 2`,
+    /// `delta = (r / sqrt(1 - r^2)) * sqrt(n)`): uses the same `lambda = n * f^2` noncentrality
+    /// convention (`f^2 = r^2 / (1 - r^2)`) as [`PowerTestFamily::SimpleLinearRegression`]
+    /// (Cohen 1988, Ch. 9; Chow, Shao & Wang 2008, §10.2), so fixed-*x* correlation and simple
+    /// linear regression with `R^2 = r^2` agree identically.
+    ConditionalSlopeT,
 }
 
 /// Effect-size input parameterization for [`PowerAnalysisRequest`].
@@ -1059,8 +1067,186 @@ fn two_proportions_p_power(ctx: &ResolvedContext, n1: f64, n2: f64, p1: f64, p2:
     Ok(PowerEval { power, actual_df: None, numerator_df: None, noncentrality_param: delta / se0, critical_value: crit_out })
 }
 
+fn hyp2f1_half_half(c: f64, w: f64) -> Result<f64, StatsError> {
+    if w <= 0.85 || c >= 16.0 {
+        let mut sum = 1.0;
+        let mut term = 1.0;
+        for k in 0..2500 {
+            let kf = k as f64;
+            term *= ((0.5 + kf) * (0.5 + kf)) / ((c + kf) * (kf + 1.0)) * w;
+            sum += term;
+            if term.abs() <= 1e-16 * sum.abs() {
+                return Ok(sum);
+            }
+        }
+        return Ok(sum);
+    }
+    // Euler integral representation with t = u^2 and u = 1 - s^2 handles c < 16 as w -> 1 cleanly.
+    let log_norm = 4.0_f64.ln() - (ln_gamma(0.5)? + ln_gamma(c - 0.5)? - ln_gamma(c)?);
+    let norm = log_norm.exp();
+    let one_minus_w = (1.0 - w).max(1e-15);
+    let s_split = one_minus_w.powf(0.25).clamp(1e-5, 0.5);
+    let integrand = |s: f64| -> f64 {
+        if s <= 0.0 {
+            return 0.0;
+        }
+        let s2 = s * s;
+        let one_minus_u2 = s2 * (2.0 - s2);
+        let denom = ((1.0 - w) + w * one_minus_u2).max(1e-300).sqrt();
+        s * ((c - 1.5) * one_minus_u2.ln()).exp() / denom
+    };
+    let i1 = gauss_legendre_32(integrand, 0.0, s_split);
+    let i2 = gauss_legendre_32(integrand, s_split, 1.0);
+    Ok(norm * (i1 + i2))
+}
+
+fn hotelling_ln_prefactor(n: f64) -> Result<f64, StatsError> {
+    let x = n - 1.0;
+    let half_ln_2pi = 0.5 * (2.0 * std::f64::consts::PI).ln();
+    if x < 100.0 {
+        return Ok((n - 2.0).ln() + ln_gamma(x)? - ln_gamma(x + 0.5)? - half_ln_2pi);
+    }
+    // Tricomi & Erdelyi (1951) asymptotic difference for ln(Gamma(x) / Gamma(x + 1/2)).
+    let inv = 1.0 / x;
+    let inv2 = inv * inv;
+    Ok(0.5 * x.ln() + (-inv).ln_1p() + 0.125 * inv - (1.0 / 192.0) * (inv * inv2) + (1.0 / 640.0) * (inv * inv2 * inv2) - half_ln_2pi)
+}
+
+fn hotelling_ln_sech(delta: f64) -> f64 {
+    let ad = delta.abs();
+    if ad <= 1.0 {
+        let s = (0.5 * ad).sinh();
+        -(2.0 * s * s).ln_1p()
+    } else {
+        -ad - (-2.0 * ad).exp().ln_1p() + std::f64::consts::LN_2
+    }
+}
+
+fn hotelling_pdf_z(z: f64, n: f64, rho: f64, ln_c: f64, zeta: f64) -> Result<f64, StatsError> {
+    let delta = z - zeta;
+    let ln_s = hotelling_ln_sech(delta);
+    let prod = rho * delta.tanh();
+    let one_plus_rt = if prod < -0.5 {
+        let e2 = (-2.0 * delta.abs()).exp();
+        ((1.0 - rho.abs()) + (1.0 + rho.abs()) * e2) / (1.0 + e2)
+    } else {
+        1.0 + prod
+    };
+    let exponent = ln_c + (n - 2.0) * ln_s + 0.5 * one_plus_rt.max(1e-300).ln();
+    if exponent < -745.0 {
+        return Ok(0.0);
+    }
+    let r = z.tanh();
+    let w = if rho * r > 0.5 {
+        let e2z = (-2.0 * z.abs()).exp();
+        let one_m_rr = ((1.0 - rho.abs()) + (1.0 + rho.abs()) * e2z) / (1.0 + e2z);
+        1.0 - 0.5 * one_m_rr
+    } else {
+        0.5 * (1.0 + rho * r)
+    };
+    Ok(exponent.exp() * hyp2f1_half_half(n - 0.5, w.min(1.0 - 1e-16))?)
+}
+
+fn integrate_hotelling_z(n: f64, rho: f64, a: f64, b: f64, mu: f64, sig: f64) -> Result<f64, StatsError> {
+    if !(a.is_finite() && b.is_finite()) || b <= a {
+        return Ok(0.0);
+    }
+    let ln_c = hotelling_ln_prefactor(n)?;
+    let zeta = rho.atanh();
+    let mut pts = Vec::with_capacity(28);
+    pts.push(a);
+    for &k in &[-160.0, -96.0, -48.0, -24.0, -14.0, -7.0, -3.5, -1.5, -0.5, 0.5, 1.5, 3.5, 7.0, 14.0, 24.0, 48.0, 96.0, 160.0] {
+        let p = mu + k * sig;
+        if p > a && p < b {
+            pts.push(p);
+        }
+    }
+    pts.push(b);
+    let mut err: Option<StatsError> = None;
+    let mut total = 0.0;
+    for win in pts.windows(2) {
+        let (u, v) = (win[0], win[1]);
+        if v - u <= 1e-15 {
+            continue;
+        }
+        total += gauss_legendre_32(
+            |z| {
+                if err.is_some() {
+                    return 0.0;
+                }
+                match hotelling_pdf_z(z, n, rho, ln_c, zeta) {
+                    Ok(val) => val,
+                    Err(e) => {
+                        err = Some(e);
+                        0.0
+                    }
+                }
+            },
+            u,
+            v,
+        );
+        if let Some(e) = err {
+            return Err(e);
+        }
+    }
+    Ok(total)
+}
+
+fn hotelling_correlation_power(n: f64, r: f64, alpha: f64, tail_mode: TailMode) -> Result<PowerEval, StatsError> {
+    if !n.is_finite() || n <= 2.0 {
+        return Err(StatsError::InvalidParameter { name: "sample_size", value: n });
+    }
+    let df = n - 2.0;
+    if r == 0.0 {
+        return t_power(df, 0.0, alpha, tail_mode, None);
+    }
+    let t_crit = match tail_mode {
+        TailMode::TwoSided => student_t_two_sided_isf(alpha, df)?,
+        TailMode::OneSided(_) => student_t_isf(alpha, df)?,
+    };
+    let r_crit = t_crit / t_crit.hypot(df.sqrt());
+    let z_crit = r_crit.atanh();
+    let sig = 1.0 / df.sqrt();
+    let span = (14.0 * sig).max(52.0 / df);
+
+    let (crit_out, power) = match tail_mode {
+        TailMode::TwoSided => {
+            let rho = r.abs();
+            let mu = rho.atanh() + rho / (2.0 * (n - 1.0));
+            let (z_lo, z_hi) = (mu - span, mu + span);
+            let p_mid = integrate_hotelling_z(n, rho, (-z_crit).max(z_lo), z_crit.min(z_hi), mu, sig)?;
+            let p = if p_mid <= 0.5 {
+                1.0 - p_mid
+            } else {
+                let p_left = integrate_hotelling_z(n, rho, z_lo, (-z_crit).min(z_hi), mu, sig)?;
+                let p_right = integrate_hotelling_z(n, rho, z_crit.max(z_lo), z_hi, mu, sig)?;
+                p_left + p_right
+            };
+            (t_crit, p.clamp(0.0, 1.0))
+        }
+        TailMode::OneSided(dir) => {
+            let (rho, crit) = match dir {
+                OneSidedDirection::Greater => (r, t_crit),
+                OneSidedDirection::Less => (-r, -t_crit),
+            };
+            let mu = rho.atanh() + rho / (2.0 * (n - 1.0));
+            let (z_lo, z_hi) = (mu - span, mu + span);
+            let p = if z_crit >= mu {
+                integrate_hotelling_z(n, rho, z_crit.max(z_lo), z_hi, mu, sig)?
+            } else {
+                1.0 - integrate_hotelling_z(n, rho, z_lo, z_crit.min(z_hi), mu, sig)?
+            };
+            (crit, p.clamp(0.0, 1.0))
+        }
+    };
+    let ncp_eff = (r / (1.0 - r * r).sqrt()) * (n - 1.0).sqrt();
+    Ok(PowerEval { power, actual_df: Some(df), numerator_df: None, noncentrality_param: ncp_eff, critical_value: crit_out })
+}
+
 /// Power for `H0: rho = 0` via Fisher's (1921) *z* (plain or with the `pwr.r.test` *t*-critical
-/// hybrid) or the conditional noncentral-*t* transform; see [`CorrelationPowerMethod`].
+/// hybrid), the exact bivariate-normal distribution of *r* (`ExactTTransform`; Fisher 1915;
+/// Hotelling 1953), or the fixed-*x* conditional slope *t*-test (`ConditionalSlopeT`); see
+/// [`CorrelationPowerMethod`].
 fn correlation_power(method: CorrelationPowerMethod, n: f64, r: f64, alpha: f64, tail_mode: TailMode) -> Result<PowerEval, StatsError> {
     let df = n - 2.0;
     match method {
@@ -1100,11 +1286,12 @@ fn correlation_power(method: CorrelationPowerMethod, n: f64, r: f64, alpha: f64,
             };
             Ok(PowerEval { power, actual_df: Some(df), numerator_df: None, noncentrality_param: zr * sqrt_n3, critical_value: crit_out })
         }
-        CorrelationPowerMethod::ExactTTransform => {
+        CorrelationPowerMethod::ExactTTransform => hotelling_correlation_power(n, r, alpha, tail_mode),
+        CorrelationPowerMethod::ConditionalSlopeT => {
             if !n.is_finite() || n <= 2.0 {
                 return Err(StatsError::InvalidParameter { name: "sample_size", value: n });
             }
-            let delta = (r / (1.0 - r * r).sqrt()) * df.sqrt();
+            let delta = (r / (1.0 - r * r).sqrt()) * n.sqrt();
             t_power(df, delta, alpha, tail_mode, None)
         }
     }
@@ -1198,7 +1385,7 @@ fn min_continuous_n(ctx: &ResolvedContext) -> f64 {
         }
         PowerTestFamily::TwoProportions | PowerTestFamily::ChiSquare => 1.0,
         PowerTestFamily::Correlation => match ctx.correlation_method {
-            CorrelationPowerMethod::ExactTTransform => 2.25,
+            CorrelationPowerMethod::ExactTTransform | CorrelationPowerMethod::ConditionalSlopeT => 2.25,
             CorrelationPowerMethod::FisherZ | CorrelationPowerMethod::FisherZWithTCrit => 3.005,
         },
         PowerTestFamily::SimpleLinearRegression => 2.25,
@@ -1696,7 +1883,12 @@ fn build_convention_notes(ctx: &ResolvedContext) -> Vec<String> {
             let conv = match ctx.correlation_method {
                 CorrelationPowerMethod::FisherZ => "Fisher z-transformation (z = atanh(r), SE = 1/sqrt(n - 3)) vs H0: r0 = 0",
                 CorrelationPowerMethod::FisherZWithTCrit => "R pwr.r.test convention (exact t-transform r_c + bias-corrected Fisher z)",
-                CorrelationPowerMethod::ExactTTransform => "Conditional noncentral-t transform (df = n - 2)",
+                CorrelationPowerMethod::ExactTTransform => {
+                    "Exact unconditional bivariate-normal r distribution (Fisher 1915 / Hotelling 1953 / Anderson Ch. 4, df = n - 2)"
+                }
+                CorrelationPowerMethod::ConditionalSlopeT => {
+                    "Conditional fixed-x slope t-test (df = n - 2, lambda = n * f^2, aligned with SimpleLinearRegression)"
+                }
             };
             notes.push(format!("Pearson correlation power via {conv}."));
         }

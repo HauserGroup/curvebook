@@ -193,6 +193,7 @@ fn oracle_correlation() {
     assert_eq!(corr_t.n_per_group, 84);
     assert!(corr_t.continuous_n > 83.0 && corr_t.continuous_n <= 84.0);
     assert!(corr_t.achieved_power >= 0.80);
+    assert!((corr_t.achieved_power - 0.800_338_953_408_2).abs() < 1e-9);
     let corr_t_83 = solve_power(
         &PowerAnalysisRequest::correlation(0.3, 0.05, 0.80)
             .with_correlation_method(CorrelationPowerMethod::ExactTTransform)
@@ -202,8 +203,14 @@ fn oracle_correlation() {
     .unwrap();
     assert!(corr_t_83.achieved_power < 0.80);
 
-    // Null correlation r = 0 yields exact alpha under FisherZ and ExactTTransform.
-    for method in [CorrelationPowerMethod::FisherZ, CorrelationPowerMethod::ExactTTransform] {
+    // ConditionalSlopeT aligns with SimpleLinearRegression's Cohen (1988) lambda = n * f^2 convention (n = 82 at r = 0.3).
+    let corr_cond =
+        solve_power(&PowerAnalysisRequest::correlation(0.3, 0.05, 0.80).with_correlation_method(CorrelationPowerMethod::ConditionalSlopeT)).unwrap();
+    assert_eq!(corr_cond.n_per_group, 82);
+    assert!(corr_cond.achieved_power >= 0.80);
+
+    // Null correlation r = 0 yields exact alpha under FisherZ, ExactTTransform, and ConditionalSlopeT.
+    for method in [CorrelationPowerMethod::FisherZ, CorrelationPowerMethod::ExactTTransform, CorrelationPowerMethod::ConditionalSlopeT] {
         let null_c = solve_power(
             &PowerAnalysisRequest::correlation(0.0, 0.05, 0.80)
                 .with_target(PowerSolveTarget::Power)

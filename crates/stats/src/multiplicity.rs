@@ -73,6 +73,7 @@ pub enum MultiplicityProcedure {
     GamesHowell,
     TamhaneT2,
     DunnRankSum,
+    LinearTrend,
     FisherLsd,
     NewmanKeuls,
     BenjaminiHochbergFdr,
@@ -103,7 +104,7 @@ impl From<MultiplicityMethod> for MultiplicityProcedure {
             MultiplicityMethod::GamesHowell => Self::GamesHowell,
             MultiplicityMethod::TamhaneT2 => Self::TamhaneT2,
             MultiplicityMethod::DunnRankSum => Self::DunnRankSum,
-            MultiplicityMethod::LinearTrend => Self::None,
+            MultiplicityMethod::LinearTrend => Self::LinearTrend,
             MultiplicityMethod::BenjaminiHochbergFdr => Self::BenjaminiHochbergFdr,
             MultiplicityMethod::BenjaminiYekutieliFdr => Self::BenjaminiYekutieliFdr,
             MultiplicityMethod::TwoStageBkyFdr => Self::TwoStageBkyFdr,
@@ -173,7 +174,8 @@ pub struct LinearTrendResult {
 /// `c_i = i - (k - 1) / 2` (unweighted means approach): `L = sum(c_i * mean_i)`,
 /// `SS_trend = L^2 / sum(c_i^2 / n_i)`, `F = SS_trend / MSE` on `(1, df_error)` df, as in the trend
 /// analysis of Maxwell & Delaney (2004). `slope_estimate = L / sum(c_i^2)` is the least-squares slope
-/// of the group means on group index. When `mse == 0` the routine reports `F = 0`, `p = 1`.
+/// of the group means on group index. When `mse == 0`, returns `F = +inf, p = 0` for any nonzero linear
+/// contrast (`ss_trend > 0`) and `F = 0, p = 1` when `ss_trend == 0`.
 pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f64) -> Result<LinearTrendResult, StatsError> {
     let k = groups.len();
     if k < 2 {
@@ -198,8 +200,14 @@ pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f6
     let l_val = num.total();
     let d_val = denom_ss.total();
     let ss_trend = if d_val > 0.0 { (l_val * l_val) / d_val } else { 0.0 };
-    let f_stat = if mse > 0.0 { ss_trend / mse } else { 0.0 };
-    let p_value = if mse > 0.0 { f_sf(f_stat, 1.0, df_error)? } else { 1.0 };
+    let (f_stat, p_value) = if mse > 0.0 {
+        let f = ss_trend / mse;
+        (f, f_sf(f, 1.0, df_error)?)
+    } else if ss_trend > 0.0 {
+        (f64::INFINITY, 0.0)
+    } else {
+        (0.0, 1.0)
+    };
     let slope_estimate = if denom_slope.total() > 0.0 { l_val / denom_slope.total() } else { 0.0 };
     Ok(LinearTrendResult { ss_trend, df_trend: 1.0, df_error, f_statistic: f_stat, p_value, slope_estimate })
 }
@@ -358,7 +366,8 @@ pub fn adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshol
         | MultiplicityProcedure::Dunnett { .. }
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::GamesHowell
-        | MultiplicityProcedure::DunnRankSum => (adjust_bonferroni(raw_p), false),
+        | MultiplicityProcedure::DunnRankSum
+        | MultiplicityProcedure::LinearTrend => (adjust_bonferroni(raw_p), false),
         MultiplicityProcedure::Sidak | MultiplicityProcedure::TamhaneT2 => (adjust_sidak(raw_p), false),
         MultiplicityProcedure::HolmBonferroni => (adjust_holm_bonferroni(raw_p), false),
         MultiplicityProcedure::HolmSidak => (adjust_holm_sidak(raw_p), false),
@@ -389,8 +398,9 @@ pub fn compare_groups_pairwise(
 /// FDR procedures) start from Student *t* statistics `(mean_a - mean_b) / sqrt(MSE (1/n_a + 1/n_b))`
 /// on `df_error` and then adjust the *p*-values. `FisherLsd` is the unadjusted least significant
 /// difference of Fisher (1935); this routine does not itself gate it on a significant omnibus *F*.
-/// Procedure-specific sources are cited on each comparison engine. Procedures with no pooled-*t*
-/// meaning here (`DunnRankSum`) fall through to unadjusted *t* tests; use [`compare_dunn_ranks`].
+/// Procedure-specific sources are cited on each comparison engine. Non-pairwise procedures
+/// (`DunnRankSum`, `LinearTrend`) return `StatsError::InvalidParameter`; use [`compare_dunn_ranks`]
+/// or [`linear_trend_test`] instead.
 pub fn compare_groups_with_procedure(
     groups: &[GroupComparisonInput],
     mse: f64,
@@ -415,6 +425,9 @@ pub fn compare_groups_with_procedure(
         MultiplicityProcedure::DunnettT3 => compare_dunnett_t3(groups, threshold, report_ci),
         MultiplicityProcedure::DunnRankSum => {
             Err(StatsError::InvalidParameter { name: "multiplicity_procedure_dunn_requires_kruskal_wallis", value: 0.0 })
+        }
+        MultiplicityProcedure::LinearTrend => {
+            Err(StatsError::InvalidParameter { name: "multiplicity_procedure_linear_trend_requires_trend_test", value: 0.0 })
         }
         MultiplicityProcedure::None
         | MultiplicityProcedure::Sidak
@@ -521,11 +534,14 @@ fn compare_tukey_kramer(
             let gb = &groups[j];
             let diff = ga.mean - gb.mean;
             let se_tukey = (0.5 * mse * (1.0 / ga.n + 1.0 / gb.n)).max(0.0).sqrt();
-            let (q_stat, p_val) = if se_tukey > 0.0 {
+            let se_diff = se_tukey * std::f64::consts::SQRT_2;
+            let (q_stat, raw_p, adj_p) = if se_tukey > 0.0 {
                 let q = diff.abs() / se_tukey;
-                (q, studentized_range_sf(q, k, df_error)?)
+                let rp = student_t_two_sided_p(diff / se_diff, df_error)?;
+                (q, rp, studentized_range_sf(q, k, df_error)?)
             } else {
-                zero_se_stat_p(diff, false)
+                let (stat, p) = zero_se_stat_p(diff, false);
+                (stat, p, p)
             };
             let ci = q_crit.map(|qc| (diff - qc * se_tukey, diff + qc * se_tukey));
             out.push(PairwiseComparisonDetail {
@@ -534,14 +550,14 @@ fn compare_tukey_kramer(
                 label_a: ga.label.clone(),
                 label_b: gb.label.clone(),
                 mean_diff: diff,
-                se_diff: se_tukey * std::f64::consts::SQRT_2,
+                se_diff,
                 statistic: q_stat,
                 df: df_error,
-                raw_p: p_val,
-                adjusted_p_or_q: p_val,
+                raw_p,
+                adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci,
-                significant: p_val <= threshold,
+                significant: adj_p <= threshold,
             });
         }
     }
@@ -636,7 +652,7 @@ fn compare_newman_keuls(
 /// Dunnett (1955) many-to-one comparisons of each treatment against a control: pooled-variance
 /// *t* statistics referred to the exact multivariate *t* distribution with correlations
 /// `rho_ij = lambda_i lambda_j`, `lambda_i = sqrt(n_i / (n_i + n_0))` (unequal `n` supported).
-/// If `control_column` matches no group, the first group is used as the control.
+/// Returns `StatsError::InvalidParameter` when `control_column` matches no group.
 fn compare_dunnett(
     groups: &[GroupComparisonInput],
     mse: f64,
@@ -662,14 +678,15 @@ fn compare_dunnett(
     for (idx, tr) in treatments.iter().enumerate() {
         let diff = tr.mean - ctrl.mean;
         let se = (mse * (1.0 / tr.n + 1.0 / ctrl.n)).max(0.0).sqrt();
-        let (t_stat, p_val) = if se > 0.0 {
+        let (t_stat, raw_p, adj_p) = if se > 0.0 {
             let t = diff / se;
+            let rp = student_t_two_sided_p(t, df_error)?;
             // Exact Dunnett multivariate-t p-value for this comparison against all m loadings.
-            let p =
-                if loadings.len() == 1 { student_t_two_sided_p(t, df_error)? } else { dunnett_two_sided_p(t.abs(), df_error, ctrl.n, &treat_sizes)? };
-            (t, p)
+            let ap = if loadings.len() == 1 { rp } else { dunnett_two_sided_p(t.abs(), df_error, ctrl.n, &treat_sizes)? };
+            (t, rp, ap)
         } else {
-            zero_se_stat_p(diff, true)
+            let (stat, p) = zero_se_stat_p(diff, true);
+            (stat, p, p)
         };
         let _ = idx;
         let ci = d_crit.map(|dc| (diff - dc * se, diff + dc * se));
@@ -682,11 +699,11 @@ fn compare_dunnett(
             se_diff: se,
             statistic: t_stat,
             df: df_error,
-            raw_p: p_val,
-            adjusted_p_or_q: p_val,
+            raw_p,
+            adjusted_p_or_q: adj_p,
             is_fdr_q: false,
             ci,
-            significant: p_val <= threshold,
+            significant: adj_p <= threshold,
         });
     }
     Ok(out)
@@ -718,11 +735,13 @@ fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_
             let diff = ga.mean - gb.mean;
             let (se, df) = welch_pair_se_df(ga, gb);
             let se_q = se * std::f64::consts::FRAC_1_SQRT_2;
-            let (q_stat, p_val) = if se_q > 0.0 {
+            let (q_stat, raw_p, adj_p) = if se_q > 0.0 {
                 let q = diff.abs() / se_q;
-                (q, studentized_range_sf(q, k, df)?)
+                let rp = student_t_two_sided_p(diff / se, df)?;
+                (q, rp, studentized_range_sf(q, k, df)?)
             } else {
-                zero_se_stat_p(diff, false)
+                let (stat, p) = zero_se_stat_p(diff, false);
+                (stat, p, p)
             };
             let ci = if report_ci {
                 let qc = studentized_range_isf(threshold, k, df)?;
@@ -739,11 +758,11 @@ fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_
                 se_diff: se,
                 statistic: q_stat,
                 df,
-                raw_p: p_val,
-                adjusted_p_or_q: p_val,
+                raw_p,
+                adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci,
-                significant: p_val <= threshold,
+                significant: adj_p <= threshold,
             });
         }
     }
@@ -813,8 +832,9 @@ fn studentized_max_modulus_crit(alpha: f64, m: usize, df: f64) -> Result<f64, St
 }
 
 /// Dunnett (1980) T3 unequal-variance pairwise comparisons: per-pair Welch *t* statistics referred
-/// to the studentized maximum modulus with `m = k(k-1)/2` and the pair's Welch df. The reported
-/// `raw_p` equals the adjusted *p*-value (no separate unadjusted Welch *p* is computed).
+/// to the studentized maximum modulus with `m = k(k-1)/2` and the pair's Welch df. `raw_p` reports
+/// the unadjusted two-sided Welch *t* *p*-value on Welch df, and `adjusted_p_or_q` reports the Dunnett
+/// T3 adjusted *p*-value.
 fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
     let m = k * (k - 1) / 2;
@@ -825,11 +845,13 @@ fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci
             let gb = &groups[j];
             let diff = ga.mean - gb.mean;
             let (se, df) = welch_pair_se_df(ga, gb);
-            let (t_stat, adj_p) = if se > 0.0 {
+            let (t_stat, raw_p, adj_p) = if se > 0.0 {
                 let t = diff / se;
-                (t, studentized_max_modulus_sf(t.abs(), m, df)?)
+                let rp = student_t_two_sided_p(t, df)?;
+                (t, rp, studentized_max_modulus_sf(t.abs(), m, df)?)
             } else {
-                zero_se_stat_p(diff, true)
+                let (stat, p) = zero_se_stat_p(diff, true);
+                (stat, p, p)
             };
             let ci = if report_ci {
                 let crit = studentized_max_modulus_crit(threshold, m, df)?;
@@ -846,7 +868,7 @@ fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci
                 se_diff: se,
                 statistic: t_stat,
                 df,
-                raw_p: adj_p,
+                raw_p,
                 adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci,
@@ -878,10 +900,11 @@ pub fn compare_dunn_ranks(
     }
     let proc_req = MultiplicityProcedure::from(spec.method);
     let pair_indices: Vec<(usize, usize)> = if let MultiplicityProcedure::Dunnett { control_column } = proc_req {
-        if control_column >= k {
-            return Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 });
-        }
-        (0..k).filter(|&i| i != control_column).map(|i| (i, control_column)).collect()
+        let ctrl_pos = group_labels
+            .iter()
+            .position(|(idx, _)| *idx == control_column)
+            .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+        (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
     } else {
         let mut pairs = Vec::with_capacity(k * (k - 1) / 2);
         for i in 0..k {
@@ -916,6 +939,7 @@ pub fn compare_dunn_ranks(
     let proc_eff = match proc_req {
         MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => MultiplicityProcedure::None,
         MultiplicityProcedure::DunnRankSum
+        | MultiplicityProcedure::LinearTrend
         | MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
         | MultiplicityProcedure::GamesHowell
