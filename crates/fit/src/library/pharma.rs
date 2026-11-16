@@ -1949,9 +1949,10 @@ fn tighten_competition_bracket(rt: f64, hot_nm: f64, kd: f64, i_tot: f64, ki: f6
 
 /// One-site competitive binding with depletion of both radioligand and unlabeled competitor (`X = log10[Competitor M]`).
 /// Solves the exact mass balance `Rt = R + Hot * R / (Kd * (1 + NS) + R) + I * R / (Ki + R)` numerically
-/// for free receptor `R`; `Y` is the specifically bound radioligand `Hot * R / (Kd * (1 + NS) + R)`.
-/// Reference: exact two-ligand competition with depletion, Wang (1995) (closed-form cubic; solved
-/// here by safeguarded Newton iteration); see also Swillens (1995).
+/// for free receptor `R`; `Y` is the total bound radioligand (specific + nonspecific `NS * FreeHot`),
+/// `Hot * (R + NS * Kd) / (Kd * (1 + NS) + R)`, where `FreeHot = Hot * Kd / (Kd * (1 + NS) + R)`.
+/// Reference: exact two-ligand competition with depletion and nonspecific binding, Swillens (1995);
+/// see also Wang (1995).
 struct OneSiteCompetitionLigandDepletion {
     params: Vec<String>,
 }
@@ -2041,7 +2042,7 @@ impl ParametricModel for OneSiteCompetitionLigandDepletion {
     fn eval(&self, x: &[f64], params: &[f64], _dataset_index: usize) -> Option<f64> {
         let x0 = x.first().copied()?;
         let st = Self::solve_free_receptor(x0, params)?;
-        let y = (st.r / (st.kd + st.r)) * st.hot_nm;
+        let y = ((st.r + st.ns * st.kd_nm) / (st.kd + st.r)) * st.hot_nm;
         y.is_finite().then_some(y)
     }
 
@@ -2060,19 +2061,21 @@ impl ParametricModel for OneSiteCompetitionLigandDepletion {
         let p_d = st.r / d_d;
         let q_d = st.kd / d_d;
         let q_i = st.ki / d_i;
+        let one_plus_ns = 1.0 + st.ns;
         let alpha = (st.hot_nm / d_d) * q_d;
+        let alpha_sp = (st.hot_nm / d_d) * (st.kd_nm / d_d);
         let beta = (st.i_tot / d_i) * q_i;
         let rest_g = 1.0 + beta;
         let g_prime = alpha + rest_g;
         if !g_prime.is_finite() || g_prime < 1.0 {
             return false;
         }
-        let y = st.hot_nm * p_d;
-        out[0] = alpha / g_prime;
-        out[1] = p_d * (rest_g / g_prime);
-        out[2] = -((y * (1.0 + st.ns)) / d_d) * (rest_g / g_prime);
-        out[3] = alpha * (core::f64::consts::LN_10 * st.r * beta) / g_prime;
-        out[4] = -((y * st.kd_nm) / d_d) * (rest_g / g_prime);
+        // Y = (B*_sp + NS * HotNM) / (1 + NS) where B*_sp = HotNM * p_d, so all partials remain cancellation-free.
+        out[0] = alpha_sp / g_prime;
+        out[1] = (st.ns + p_d * (rest_g / g_prime)) / one_plus_ns;
+        out[2] = -((st.hot_nm * p_d) / d_d) * (rest_g / g_prime);
+        out[3] = alpha_sp * (core::f64::consts::LN_10 * st.r * beta) / g_prime;
+        out[4] = ((st.hot_nm * st.kd_nm) / (d_d * one_plus_ns)) * ((alpha + q_d * rest_g) / g_prime);
         out[..5].iter().all(|v| v.is_finite())
     }
 

@@ -31,7 +31,7 @@ pub use solver::{
     FittedDatasetResult, FittedParameterSummary, InferenceAvailability, InterpolatedUnknown, ModelComparisonOutcome, ModelComparisonResult,
     NonlinearFitResult, SolverConfig, compare_models, compare_models_checked, fit_nonlinear,
 };
-pub use tex_format::{format_model_equation_tex, format_number_sig_figs, format_polynomial_equation_tex};
+pub use tex_format::{format_model_equation_tex, format_model_equation_tex_for_dataset, format_number_sig_figs, format_polynomial_equation_tex};
 pub use types::{
     DataPoint, DatasetSeries, DerivedScalar, EquationCategory, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet,
     extract_datasets_from_sheet_with_options, filter_datasets_by_range,

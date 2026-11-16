@@ -235,19 +235,20 @@ fn one_site_competition_ligand_depletion_mass_balance_grad_and_fit() {
         let kd = kd_nm * (1.0 + ns);
         let ki = 10.0_f64.powf(log_ki + 9.0);
         for &x in &[-12.0, -10.5, -9.0, -8.0, -6.5, -4.0] {
-            let rl = model.eval(&[x], params, 0).expect("eval succeeds");
-            // Invert Y = R * HotNM / (kd + R) for R = Y * kd / (HotNM - Y) when HotNM > Y.
-            let r = rl * kd / (hot_nm - rl);
+            let y_tot = model.eval(&[x], params, 0).expect("eval succeeds");
+            // Invert Swillens total bound Y = HotNM * (R + NS * KdNM) / (KdNM * (1 + NS) + R).
+            let r = kd_nm * (y_tot * (1.0 + ns) - ns * hot_nm) / (hot_nm - y_tot);
             let i_tot = 10.0_f64.powf(x + 9.0);
             let residual = r + r * hot_nm / (kd + r) + r * i_tot / (ki + r) - rt;
             assert!(residual.abs() <= 1e-10 * rt.max(1.0), "mass-balance residual={residual:.3e} for x={x}, params={params:?}");
             assert_grad_matches_fd(model.as_ref(), &[x], params, 0, 1e-9, 1e-6, &format!("comp_depl x={x} rt={rt}"));
         }
 
-        // Zero competitor limit matches Swillens saturation with ligand depletion.
+        // Zero competitor limit matches Swillens saturation specific bound + NS * FreeHot.
         let y_no_cold = model.eval(&[-18.0], params, 0).unwrap();
-        let y_sat = sat_depletion.eval(&[hot_nm], &[rt, kd_nm, ns], 0).unwrap();
-        assert_approx_eq(y_no_cold, y_sat, 1e-10, 1e-6, "zero-competitor limit matches one_site_specific_ligand_depletion");
+        let y_sat_spec = sat_depletion.eval(&[hot_nm], &[rt, kd_nm, ns], 0).unwrap();
+        let y_sat_tot = y_sat_spec + ns * (hot_nm - y_sat_spec) / (1.0 + ns);
+        assert_approx_eq(y_no_cold, y_sat_tot, 1e-10, 1e-6, "zero-competitor limit matches Swillens total bound");
     }
 
     // NS == 0.0 boundary gradient (forward FD on NS) and zero-competitor limit.
@@ -268,8 +269,9 @@ fn one_site_competition_ligand_depletion_mass_balance_grad_and_fit() {
         assert_approx_eq(y_comp, y_cp, 1e-12, 1e-4, &format!("non-depletion Cheng-Prusoff equivalence x={x}"));
     }
 
-    // Domain and boundary checks.
-    assert_eq!(model.eval(&[-8.0], &[0.0, 2.0, 1.0, -8.0, 0.1], 0), Some(0.0));
+    // Domain and boundary checks (Rt = 0 leaves nonspecific plateau HotNM * NS / (1 + NS)).
+    let y_rt0 = model.eval(&[-8.0], &[0.0, 2.0, 1.0, -8.0, 0.1], 0).expect("Rt=0 succeeds");
+    assert_approx_eq(y_rt0, 2.0 * 0.1 / 1.1, 1e-14, 1e-14, "Rt=0 nonspecific bound plateau");
     assert_eq!(model.eval(&[-8.0], &[10.0, 0.0, 1.0, -8.0, 0.1], 0), Some(0.0));
     assert!(model.eval(&[-8.0], &[-0.1, 2.0, 1.0, -8.0, 0.0], 0).is_none());
     assert!(model.eval(&[-8.0], &[10.0, -0.1, 1.0, -8.0, 0.0], 0).is_none());

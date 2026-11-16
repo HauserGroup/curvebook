@@ -12,6 +12,8 @@
 //!
 //! Reference: Press, W. H., Teukolsky, S. A., Vetterling, W. T. & Flannery, B. P. (2007). *Numerical Recipes: The Art of Scientific Computing*, 3rd ed. Cambridge University Press.
 
+use std::collections::HashSet;
+
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, LinearRegressionSpec,
     NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
@@ -246,7 +248,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
         }
     }
 
-    append_auc_scalars_and_tab(&mut result, &datasets);
+    append_auc_scalars_and_tab(&mut result, &datasets, None);
     result.status = ResultStatus::UpToDate;
     Ok(result)
 }
@@ -302,7 +304,7 @@ fn build_deming_result_sheet(
             "Orthogonal Deming regression uses fixed variance ratio lambda = 1.0 (equal X and Y error variances).".to_owned(),
         ],
     });
-    append_auc_scalars_and_tab(&mut result, datasets);
+    append_auc_scalars_and_tab(&mut result, datasets, None);
     result.status = ResultStatus::UpToDate;
     Ok(result)
 }
@@ -387,7 +389,8 @@ pub fn execute_nonlinear_analysis(
         filtered_datasets = Some(copy);
     }
     let auc_datasets = filtered_datasets.as_deref().unwrap_or(&datasets);
-    append_auc_scalars_and_tab(&mut result, auc_datasets);
+    let has_custom_plot_bounds = nl_spec.plot_x_min.is_some() || nl_spec.plot_x_max.is_some();
+    append_auc_scalars_and_tab(&mut result, auc_datasets, Some((model.as_ref(), &fit, has_custom_plot_bounds)));
 
     result.status = ResultStatus::UpToDate;
     Ok(result)
@@ -404,6 +407,7 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
     let mut param_labels = Vec::with_capacity(param_rows.capacity());
     let is_robust = fit.is_robust_cauchy() || nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
+    let mut emitted_scalars: HashSet<(String, Option<usize>)> = HashSet::new();
 
     for p in &fit.parameters {
         param_labels.push(parameter_display_label(fit, &p.name, p.dataset_index));
@@ -421,13 +425,31 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
             ]
         };
         param_rows.push(row);
+        emitted_scalars.insert((p.name.to_ascii_lowercase(), p.dataset_index));
         result.scalars.push(ResultScalarEntry { key: p.name.clone(), data_set_index: p.dataset_index, value: p.estimate, units: None });
     }
 
     for (name, val, _) in &fit.fixed_constants {
         param_labels.push(format!("{name} (Constant)"));
         param_rows.push(vec![num_cell(*val), ResultCell::Empty, ResultCell::Text("Fixed".to_owned()), ResultCell::Empty, ResultCell::Empty]);
+        emitted_scalars.insert((name.to_ascii_lowercase(), None));
         result.scalars.push(ResultScalarEntry { key: name.clone(), data_set_index: None, value: *val, units: None });
+    }
+
+    // Emit raw per-dataset parameter names for per-dataset fixed constants (`HotNM [DS1]`,
+    // `AntagConc [DS1]`) with `data_set_index: Some(ds_res.data_set_index)` so TeX substitution
+    // and scalar lookups resolve each dataset's constant cleanly.
+    for ds_res in &fit.datasets {
+        for (pname, &pval) in ds_res.param_names.iter().zip(ds_res.params.iter()) {
+            if !pval.is_finite() {
+                continue;
+            }
+            let lower = pname.to_ascii_lowercase();
+            if !emitted_scalars.contains(&(lower.clone(), None)) && !emitted_scalars.contains(&(lower.clone(), Some(ds_res.data_set_index))) {
+                emitted_scalars.insert((lower, Some(ds_res.data_set_index)));
+                result.scalars.push(ResultScalarEntry { key: pname.clone(), data_set_index: Some(ds_res.data_set_index), value: pval, units: None });
+            }
+        }
     }
 
     let sy_x_str = if is_robust {
@@ -979,6 +1001,9 @@ fn collapse_duplicate_x(sorted_pts: &[(f64, f64)], out: &mut Vec<(f64, f64)>) {
 fn collect_sorted_mean_xy_into(points: &[DataPoint], scratch: &mut Vec<(f64, f64)>, collapsed_out: &mut Vec<(f64, f64)>) {
     scratch.clear();
     collapsed_out.clear();
+    if points.iter().any(|pt| pt.x.len() != 1) {
+        return;
+    }
     for pt in points {
         if let Some(&x) = pt.x.first()
             && x.is_finite()
@@ -1032,7 +1057,19 @@ fn trapezoidal_auc_over_interval(sorted_unique_pts: &[(f64, f64)], x_min: f64, x
     total.is_finite().then_some(total)
 }
 
-fn compute_curve_overlay_auc(
+fn overlay_covers_interval(sorted_pts: &[(f64, f64)], x_min: f64, x_max: f64) -> bool {
+    if !x_min.is_finite() || !x_max.is_finite() || x_max < x_min {
+        return false;
+    }
+    let (Some(first), Some(last)) = (sorted_pts.first(), sorted_pts.last()) else {
+        return false;
+    };
+    let scale = (x_max - x_min).abs().max(x_min.abs()).max(x_max.abs()).max(1.0);
+    let tol = 1e-12 * scale;
+    first.0 <= x_min + tol && last.0 >= x_max - tol
+}
+
+pub(crate) fn compute_curve_overlay_auc(
     overlay: &FittedCurveOverlay,
     x_min: f64,
     x_max: f64,
@@ -1050,18 +1087,65 @@ fn compute_curve_overlay_auc(
         return None;
     }
     if scratch.windows(2).all(|w| w[0].0 < w[1].0) {
+        if !overlay_covers_interval(scratch, x_min, x_max) {
+            return None;
+        }
         return trapezoidal_auc_over_interval(scratch, x_min, x_max);
     }
     scratch.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
     collapse_duplicate_x(scratch, collapsed);
-    if x_max == x_min {
-        let covers = collapsed.first().is_some_and(|p| p.0 <= x_min) && collapsed.last().is_some_and(|p| p.0 >= x_max);
-        return covers.then_some(0.0);
+    if !overlay_covers_interval(collapsed, x_min, x_max) {
+        return None;
     }
     trapezoidal_auc_over_interval(collapsed, x_min, x_max)
 }
 
-fn append_auc_scalars_and_tab(result: &mut ResultSheet, datasets: &[DatasetSeries]) {
+fn compute_model_grid_auc(
+    model: &dyn ParametricModel,
+    params: &[f64],
+    data_set_index: usize,
+    x_min: f64,
+    x_max: f64,
+    scratch: &mut Vec<(f64, f64)>,
+) -> Option<f64> {
+    if !x_min.is_finite() || !x_max.is_finite() || x_max < x_min {
+        return None;
+    }
+    if x_max == x_min {
+        let y = model.eval(&[x_min], params, data_set_index)?;
+        return y.is_finite().then_some(0.0);
+    }
+    scratch.clear();
+    let use_log = x_min > 0.0 && (x_max / x_min) >= 100.0;
+    let log_min = if use_log { x_min.ln() } else { 0.0 };
+    let log_span = if use_log { x_max.ln() - log_min } else { 0.0 };
+    let n_grid = 256_usize;
+    for i in 0..n_grid {
+        let frac = (i as f64) / ((n_grid - 1) as f64);
+        let x = if use_log {
+            (log_min + frac * log_span).exp().clamp(x_min, x_max)
+        } else if i + 1 == n_grid {
+            x_max
+        } else {
+            x_min + frac * (x_max - x_min)
+        };
+        if let Some(y) = model.eval(&[x], params, data_set_index)
+            && y.is_finite()
+        {
+            scratch.push((canonical_zero(x), y));
+        }
+    }
+    if scratch.len() < 2 || !overlay_covers_interval(scratch, x_min, x_max) {
+        return None;
+    }
+    trapezoidal_auc_over_interval(scratch, x_min, x_max)
+}
+
+fn append_auc_scalars_and_tab(
+    result: &mut ResultSheet,
+    datasets: &[DatasetSeries],
+    nl_auc: Option<(&dyn ParametricModel, &NonlinearFitResult, bool)>,
+) {
     let mut col_headers = Vec::new();
     let mut row_emp = Vec::new();
     let mut row_fit = Vec::new();
@@ -1074,6 +1158,9 @@ fn append_auc_scalars_and_tab(result: &mut ResultSheet, datasets: &[DatasetSerie
     let mut curve_collapsed_scratch = Vec::new();
 
     for (ds_pos, ds) in datasets.iter().enumerate() {
+        if ds.points.iter().any(|pt| pt.x.len() != 1) {
+            continue;
+        }
         collect_sorted_mean_xy_into(&ds.points, &mut raw_scratch, &mut collapsed_scratch);
         if raw_scratch.len() < 2 || collapsed_scratch.is_empty() {
             continue;
@@ -1097,7 +1184,16 @@ fn append_auc_scalars_and_tab(result: &mut ResultSheet, datasets: &[DatasetSerie
             .filter(|fc| fc.data_set_index == ds.data_set_index)
             .or_else(|| result.fitted_curves.iter().find(|fc| fc.data_set_index == ds.data_set_index));
 
-        let fitted_auc = overlay.and_then(|ov| compute_curve_overlay_auc(ov, x_min, x_max, &mut curve_raw_scratch, &mut curve_collapsed_scratch));
+        let fitted_auc = overlay.and_then(|ov| {
+            if let Some((model, fit, custom_bounds)) = nl_auc
+                && custom_bounds
+                && let Some(ds_res) = fit.datasets.iter().find(|fd| fd.data_set_index == ds.data_set_index)
+            {
+                compute_model_grid_auc(model, &ds_res.params, ds.data_set_index, x_min, x_max, &mut curve_raw_scratch)
+            } else {
+                compute_curve_overlay_auc(ov, x_min, x_max, &mut curve_raw_scratch, &mut curve_collapsed_scratch)
+            }
+        });
         if let Some(fit_auc) = fitted_auc {
             result.scalars.push(ResultScalarEntry {
                 key: "AUC (fitted curve)".to_owned(),
@@ -1126,7 +1222,7 @@ fn append_auc_scalars_and_tab(result: &mut ResultSheet, datasets: &[DatasetSerie
         row_labels: vec!["Trapezoidal AUC".to_owned(), "Fitted curve AUC".to_owned(), "X min".to_owned(), "X max".to_owned()],
         rows: vec![row_emp, row_fit, row_xmin, row_xmax],
         footnotes: vec![
-            "Trapezoidal AUC integrates replicate-averaged (X, Mean Y) across [X min, X max]; fitted curve AUC integrates the evaluated curve overlay across [X min, X max]."
+            "Trapezoidal AUC integrates replicate-averaged (X, Mean Y) across [X min, X max]; fitted curve AUC integrates the fitted curve across [X min, X max]."
                 .to_owned(),
         ],
     });
@@ -1515,5 +1611,38 @@ mod tests {
         assert_eq!(auc_tab.column_headers, vec!["Valid"]);
         assert_num_cell_approx(&auc_tab.rows[2][0], 0.0, 1e-12, "X min");
         assert_num_cell_approx(&auc_tab.rows[3][0], 4.0, 1e-12, "X max");
+    }
+
+    #[test]
+    fn compute_curve_overlay_auc_rejects_narrowed_or_disjoint_overlays() {
+        use lumencraft_doc::{CurveSamplePoint, FittedCurveOverlay};
+
+        let pt = |x: f64, y: f64| CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None };
+        let narrowed = FittedCurveOverlay {
+            data_set_index: 0,
+            equation_id: "constant".to_owned(),
+            converged: true,
+            ambiguous: false,
+            points: vec![pt(5.0, 2.0), pt(7.5, 2.0), pt(10.0, 2.0)],
+        };
+        let mut scratch = Vec::new();
+        let mut collapsed = Vec::new();
+
+        // Full [0, 10] requested while overlay only covers [5, 10] -> must return None (not truncated 10.0).
+        assert_eq!(super::compute_curve_overlay_auc(&narrowed, 0.0, 10.0, &mut scratch, &mut collapsed), None);
+        // Right-truncated overlay on [0, 5] while [0, 10] requested -> None.
+        let left_only = FittedCurveOverlay { points: vec![pt(0.0, 2.0), pt(2.5, 2.0), pt(5.0, 2.0)], ..narrowed.clone() };
+        assert_eq!(super::compute_curve_overlay_auc(&left_only, 0.0, 10.0, &mut scratch, &mut collapsed), None);
+        // Disjoint [20, 30] requested when overlay spans [5, 10] -> None (not 0.0).
+        assert_eq!(super::compute_curve_overlay_auc(&narrowed, 20.0, 30.0, &mut scratch, &mut collapsed), None);
+        // Degenerate single-point interval outside overlay -> None.
+        assert_eq!(super::compute_curve_overlay_auc(&narrowed, 0.0, 0.0, &mut scratch, &mut collapsed), None);
+        // Matching sub-interval [5, 10] covered by overlay -> exact trapezoidal area 10.0.
+        let covered = super::compute_curve_overlay_auc(&narrowed, 5.0, 10.0, &mut scratch, &mut collapsed).expect("covered [5, 10]");
+        assert!((covered - 10.0).abs() < 1e-12);
+
+        // Unsorted / duplicate-X overlay must also enforce coverage after collapse.
+        let unsorted_partial = FittedCurveOverlay { points: vec![pt(8.0, 2.0), pt(5.0, 2.0), pt(8.0, 2.0)], ..narrowed };
+        assert_eq!(super::compute_curve_overlay_auc(&unsorted_partial, 0.0, 10.0, &mut scratch, &mut collapsed), None);
     }
 }
