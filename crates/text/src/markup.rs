@@ -165,8 +165,15 @@ impl StyleState {
 ///   `\cdot`, `\le`, `\ge`, `\times`, `\approx`, `\infty`, `\neq`, `\Delta`, `\chi`, `&alpha;`, etc.).
 #[must_use]
 pub fn parse_markup(input: &str) -> RichText {
+    parse_markup_mode(input, false)
+}
+
+fn parse_markup_mode(input: &str, in_math: bool) -> RichText {
     let mut spans = Vec::new();
     let mut state = StyleState::from_script(SpanScript::Baseline);
+    if in_math {
+        state = state.with_math();
+    }
     parse_segment(input, &mut state, &mut spans, 0);
     RichText::new(spans)
 }
@@ -1160,8 +1167,11 @@ pub enum EquationSegment {
 pub fn parse_equation_segments(input: &str) -> Vec<EquationSegment> {
     let mut out = Vec::new();
     let trimmed = input.trim();
-    let source = unwrap_outer_math_delimiters(trimmed).unwrap_or(input);
-    parse_equation_segments_inner(source, &mut out, 0);
+    let (source, outer_in_math) = match unwrap_outer_math_delimiters(trimmed) {
+        Some(inner) => (inner, true),
+        None => (input, false),
+    };
+    parse_equation_segments_inner(source, &mut out, 0, outer_in_math);
     out
 }
 
@@ -1182,9 +1192,16 @@ fn match_math_for_segments(rest: &str) -> Option<(&str, usize)> {
     match_balanced_math_delimiters(rest, delim_len)
 }
 
-fn parse_equation_segments_inner(input: &str, out: &mut Vec<EquationSegment>, depth: usize) {
+fn ends_with_unescaped_script_marker(prefix: &str) -> bool {
+    let Some(before) = prefix.strip_suffix(['^', '_']) else {
+        return false;
+    };
+    before.bytes().rev().take_while(|&b| b == b'\\').count().is_multiple_of(2)
+}
+
+fn parse_equation_segments_inner(input: &str, out: &mut Vec<EquationSegment>, depth: usize, in_math: bool) {
     if depth >= MAX_MARKUP_DEPTH {
-        push_inline_segment(out, parse_markup(input));
+        push_inline_segment(out, parse_markup_mode(input, in_math));
         return;
     }
     let mut idx = 0usize;
@@ -1193,22 +1210,25 @@ fn parse_equation_segments_inner(input: &str, out: &mut Vec<EquationSegment>, de
 
     while idx < input.len() {
         let rest = &input[idx..];
-        if brace_depth == 0
+        if !in_math
+            && brace_depth == 0
             && rest.starts_with('$')
             && let Some((inner, consumed)) = match_math_for_segments(rest)
         {
-            push_inline_segment(out, parse_markup(&input[inline_start..idx]));
-            parse_equation_segments_inner(inner, out, depth + 1);
+            push_inline_segment(out, parse_markup_mode(&input[inline_start..idx], in_math));
+            parse_equation_segments_inner(inner, out, depth + 1, true);
             idx += consumed;
             inline_start = idx;
             continue;
         }
 
         if rest.starts_with('\\') {
+            let preceded_by_script = ends_with_unescaped_script_marker(&input[inline_start..idx]);
             if brace_depth == 0
+                && !preceded_by_script
                 && let Some((frac_seg, consumed)) = try_parse_frac_segment(rest, depth)
             {
-                push_inline_segment(out, parse_markup(&input[inline_start..idx]));
+                push_inline_segment(out, parse_markup_mode(&input[inline_start..idx], in_math));
                 out.push(frac_seg);
                 idx += consumed;
                 inline_start = idx;
@@ -1230,7 +1250,7 @@ fn parse_equation_segments_inner(input: &str, out: &mut Vec<EquationSegment>, de
     }
 
     if inline_start < input.len() {
-        push_inline_segment(out, parse_markup(&input[inline_start..]));
+        push_inline_segment(out, parse_markup_mode(&input[inline_start..], in_math));
     }
 }
 
@@ -1244,9 +1264,9 @@ fn try_parse_frac_segment(rest: &str, depth: usize) -> Option<(EquationSegment, 
     let tail = &after[name_len..];
     let (num, den, args_consumed) = extract_frac_args(tail)?;
     let mut numerator = Vec::new();
-    parse_equation_segments_inner(trim_horiz_ws_nonempty(num), &mut numerator, depth + 1);
+    parse_equation_segments_inner(trim_horiz_ws_nonempty(num), &mut numerator, depth + 1, true);
     let mut denominator = Vec::new();
-    parse_equation_segments_inner(trim_horiz_ws_nonempty(den), &mut denominator, depth + 1);
+    parse_equation_segments_inner(trim_horiz_ws_nonempty(den), &mut denominator, depth + 1, true);
     Some((EquationSegment::Fraction { numerator, denominator }, 1 + name_len + args_consumed))
 }
 

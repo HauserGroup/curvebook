@@ -23,14 +23,33 @@ pub use scene::{
 
 use serde::{Deserialize, Serialize};
 
-/// Apply any [`lumencraft_doc::PointStyleOverride`] for `(series_index, point_index)` onto `base`.
+/// Select the effective [`lumencraft_doc::PointStyleOverride`] from `overrides`,
+/// matching `(series_index, point_index)` and optional replicate subcolumn `subcol`.
+///
+/// Prefers exact `subcol` matches over wildcard (`None`) overrides so editing or hiding
+/// one replicate never leaks onto sibling replicates in the same row.
+#[must_use]
+pub fn select_point_override(
+    overrides: &[lumencraft_doc::PointStyleOverride],
+    series_index: usize,
+    point_index: usize,
+    subcol: Option<usize>,
+    override_subcol: impl Fn(&lumencraft_doc::PointStyleOverride) -> Option<usize>,
+) -> Option<&lumencraft_doc::PointStyleOverride> {
+    if let Some(target_sub) = subcol
+        && let Some(exact) =
+            overrides.iter().rfind(|ov| ov.series_index == series_index && ov.point_index == point_index && override_subcol(ov) == Some(target_sub))
+    {
+        return Some(exact);
+    }
+    overrides.iter().rfind(|ov| ov.series_index == series_index && ov.point_index == point_index && override_subcol(ov).is_none())
+}
+
+/// Apply a [`lumencraft_doc::PointStyleOverride`] onto `base`.
 ///
 /// Returns `None` when the point override hides the point (`hidden == true`).
 #[must_use]
-pub(crate) fn resolve_overridden_marker(spec: &GraphSpec, series_index: usize, point_index: usize, mut base: MarkerStyle) -> Option<MarkerStyle> {
-    let Some(ov) = spec.point_override(series_index, point_index) else {
-        return Some(base);
-    };
+pub fn apply_point_override(ov: &lumencraft_doc::PointStyleOverride, mut base: MarkerStyle) -> Option<MarkerStyle> {
     if ov.hidden {
         return None;
     }
@@ -60,6 +79,23 @@ pub(crate) fn resolve_overridden_marker(spec: &GraphSpec, series_index: usize, p
         base.fill_mode = fill_mode;
     }
     Some(base)
+}
+
+/// Apply any [`lumencraft_doc::PointStyleOverride`] for `(series_index, point_index, subcol)` onto `base`.
+///
+/// Returns `None` when the point override hides the point (`hidden == true`).
+#[must_use]
+pub(crate) fn resolve_overridden_marker_for_cell(
+    spec: &GraphSpec,
+    series_index: usize,
+    point_index: usize,
+    subcol: Option<usize>,
+    base: MarkerStyle,
+) -> Option<MarkerStyle> {
+    let Some(ov) = select_point_override(&spec.point_overrides, series_index, point_index, subcol, |_| None) else {
+        return Some(base);
+    };
+    apply_point_override(ov, base)
 }
 
 /// High-level graph families corresponding to typed scientific data tables.

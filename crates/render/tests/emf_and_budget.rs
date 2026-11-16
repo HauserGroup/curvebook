@@ -12,6 +12,7 @@ use lumencraft_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight};
 
 const EMR_HEADER: u32 = 1;
 const EMR_POLYBEZIER: u32 = 2;
+const EMR_POLYBEZIERTO: u32 = 5;
 const EMR_SETWINDOWEXTEX: u32 = 9;
 const EMR_SETVIEWPORTEXTEX: u32 = 11;
 const EMR_EOF: u32 = 14;
@@ -159,8 +160,16 @@ impl EmfParserState {
                 assert!(self.in_path, "EMR_CLOSEFIGURE outside path");
             }
             EMR_POLYBEZIER => {
+                assert!(!self.in_path, "EMR_POLYBEZIER should not appear inside BeginPath/EndPath; use EMR_POLYBEZIERTO");
                 let cptl = read_u32_le(rec, 24);
                 assert!(cptl >= 4 && (cptl - 1).is_multiple_of(3), "invalid EMR_POLYBEZIER cptl={cptl}");
+                assert_eq!(n_size as usize, 28 + (cptl as usize) * 8);
+                self.polybezier_point_counts.push(cptl);
+            }
+            EMR_POLYBEZIERTO => {
+                assert!(self.in_path, "EMR_POLYBEZIERTO emitted outside path");
+                let cptl = read_u32_le(rec, 24);
+                assert!(cptl >= 3 && cptl.is_multiple_of(3), "invalid EMR_POLYBEZIERTO cptl={cptl}");
                 assert_eq!(n_size as usize, 28 + (cptl as usize) * 8);
                 self.polybezier_point_counts.push(cptl);
             }
@@ -213,6 +222,7 @@ impl EmfParserState {
             | EMR_ENDPATH
             | EMR_CLOSEFIGURE
             | EMR_POLYBEZIER
+            | EMR_POLYBEZIERTO
             | EMR_FILLPATH
             | EMR_STROKEANDFILLPATH
             | EMR_STROKEPATH => self.validate_path_or_clip_record(i_type, n_size, rec),
@@ -456,7 +466,8 @@ fn encode_emf_emits_valid_ecma234_records_paths_clips_and_unicode_text() {
     assert!(parsed.record_counts.contains_key(&EMR_STROKEANDFILLPATH));
     assert!(parsed.record_counts.contains_key(&EMR_FILLPATH));
     assert!(parsed.record_counts.contains_key(&EMR_STROKEPATH));
-    assert_eq!(parsed.polybezier_point_counts, vec![4, 4]);
+    assert!(parsed.record_counts.contains_key(&EMR_POLYBEZIERTO));
+    assert_eq!(parsed.polybezier_point_counts, vec![3, 3]);
     assert_eq!(parsed.record_counts.get(&EMR_SAVEDC).copied(), Some(2));
     assert_eq!(parsed.record_counts.get(&EMR_INTERSECTCLIPRECT).copied(), Some(2));
     assert_eq!(parsed.record_counts.get(&EMR_RESTOREDC).copied(), Some(2));

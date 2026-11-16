@@ -1,5 +1,6 @@
 //! Graph and layout canvas interaction state machines emitting declarative engine command intents.
 
+use lumencraft_chart::equation_box::resolve_model_equation_hit_bounds;
 use lumencraft_chart::scales::{AxisOrientation, ResolvedAxis};
 use lumencraft_chart::{ChartScene, ChartWarning, PointPt, RectPt};
 use lumencraft_doc::{
@@ -586,7 +587,7 @@ pub fn hit_test_scene(scene: &ChartScene, pt: PointPt, tolerance_pt: f64) -> Opt
 pub fn hit_test_graph(scene: &ChartScene, spec: &GraphSpec, pt: PointPt, tolerance_pt: f64) -> Option<CanvasHitTarget> {
     let tol = tolerance_pt.max(1.0);
     for (idx, ann) in spec.annotations.iter().enumerate().rev() {
-        if hit_test_annotation(ann, pt, tol) {
+        if hit_test_annotation(scene, ann, pt, tol) {
             return Some(match ann {
                 GraphAnnotation::EmbeddedResultTable { .. } => CanvasHitTarget::EmbeddedTable { index: idx },
                 _ => CanvasHitTarget::Annotation { index: idx },
@@ -933,12 +934,15 @@ fn hit_test_plot_axes(plot_rect: RectPt, has_y2: bool, pt: PointPt, tol: f64) ->
     None
 }
 
-fn hit_test_annotation(annotation: &GraphAnnotation, pt: PointPt, tol: f64) -> bool {
+fn hit_test_annotation(scene: &ChartScene, annotation: &GraphAnnotation, pt: PointPt, tol: f64) -> bool {
     match annotation {
         GraphAnnotation::TextBox { bounds_pt, .. }
         | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. }
-        | GraphAnnotation::ModelEquation { bounds_pt, .. }
         | GraphAnnotation::Shape { bounds_pt, .. } => rect_contains_with_margin((*bounds_pt).into(), pt, tol),
+        GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, bordered, .. } => {
+            resolve_model_equation_hit_bounds(scene, *bounds_pt, *font_size_pt, *bordered)
+                .is_some_and(|rect| rect_contains_with_margin(rect, pt, tol))
+        }
         GraphAnnotation::LineOrArrow { start_pt, end_pt, .. } => {
             point_to_segment_distance(pt, PointPt::new(start_pt.0, start_pt.1), PointPt::new(end_pt.0, end_pt.1)) <= tol
         }

@@ -739,7 +739,7 @@ fn render_before_after_connectors(
     axes: ConnectorAxes<'_>,
     bounds: &mut Vec<RenderedSlotBound>,
 ) {
-    let ba_cols: Vec<(usize, &CategorySlotItem)> =
+    let mut ba_cols: Vec<(usize, &CategorySlotItem)> =
         items.iter().enumerate().filter(|(_, it)| matches!(it.gdo, GraphicalDataObject::BeforeAfterLines { .. })).collect();
     if ba_cols.len() < 2 {
         return;
@@ -747,7 +747,8 @@ fn render_before_after_connectors(
     let TableArchetype::Column(col_table) = &sheet.archetype else {
         return;
     };
-    let (line_color, width_pt, marker_opt) = match &ba_cols[0].1.gdo {
+    ba_cols.sort_by(|(_, a), (_, b)| a.x_pos.total_cmp(&b.x_pos).then_with(|| a.group_key.cmp(&b.group_key)));
+    let (line_color, width_pt, default_marker) = match &ba_cols[0].1.gdo {
         GraphicalDataObject::BeforeAfterLines { line_color, stroke_width_pt, marker } => (*line_color, *stroke_width_pt, *marker),
         _ => return,
     };
@@ -757,52 +758,58 @@ fn render_before_after_connectors(
     let mut top_per_col: Vec<f64> = vec![clip.bottom(); items.len()];
 
     for row in 0..col_table.row_count() {
-        let mut pts: Vec<(usize, PointPt, f64)> = Vec::new();
-        for &(col_idx, item) in &ba_cols {
-            let Some(val) = col_table.data_sets.get(col_idx).and_then(|d| d.cell(row, 0)).and_then(lumencraft_doc::Cell::active_number) else {
+        let mut pts: Vec<(usize, &CategorySlotItem, PointPt, f64)> = Vec::new();
+        for &(slot_idx, item) in &ba_cols {
+            let data_col = item.group_key;
+            let Some(val) = col_table.data_sets.get(data_col).and_then(|d| d.cell(row, 0)).and_then(lumencraft_doc::Cell::active_number) else {
                 continue;
             };
             let target_y = if item.bind_to_right_y2 { axes.y2.unwrap_or(axes.y) } else { axes.y };
             if let (Some((_, px)), Some((_, py))) = (axes.x.map_value(item.x_pos), target_y.map_value(val)) {
-                pts.push((col_idx, PointPt::new(px, py), val));
-                if let Some(slot_top) = top_per_col.get_mut(col_idx) {
+                pts.push((data_col, item, PointPt::new(px, py), val));
+                if let Some(slot_top) = top_per_col.get_mut(slot_idx) {
                     *slot_top = slot_top.min(py);
                 }
             }
         }
         if pts.len() >= 2 {
             let mut cmds = Vec::with_capacity(pts.len());
-            cmds.push(PathCmd::MoveTo(pts[0].1));
-            for &(_, p, _) in &pts[1..] {
+            cmds.push(PathCmd::MoveTo(pts[0].2));
+            for &(_, _, p, _) in &pts[1..] {
                 cmds.push(PathCmd::LineTo(p));
             }
             scene.primitives.push(ScenePrimitive::Path { path: Path2D { commands: cmds }, fill: None, stroke: Some(stroke), clip: Some(clip) });
         }
-        if let Some(m) = marker_opt {
-            for &(col_idx, p, val) in &pts {
-                let Some(resolved) = crate::resolve_overridden_marker(graph_spec, col_idx, row, m) else {
-                    continue;
-                };
-                emit_marker(&mut scene.primitives, p, &resolved, Some(clip));
-                scene.plotted_points.push(PlottedPointMeta {
-                    center_pt: p,
-                    radius_pt: (resolved.size_pt * 0.5).max(3.0),
-                    source_cell: SourceCellId { sheet_id: sheet.id.clone(), row, col: col_idx, subcol: 0 },
-                    series_label: items[col_idx].match_label.clone(),
-                    value_summary: format_point_value(val),
-                });
-            }
+        for &(data_col, item, p, val) in &pts {
+            let item_marker = match &item.gdo {
+                GraphicalDataObject::BeforeAfterLines { marker, .. } => *marker,
+                _ => default_marker,
+            };
+            let Some(m) = item_marker else {
+                continue;
+            };
+            let Some(resolved) = crate::resolve_overridden_marker_for_cell(graph_spec, data_col, row, Some(0), m) else {
+                continue;
+            };
+            emit_marker(&mut scene.primitives, p, &resolved, Some(clip));
+            scene.plotted_points.push(PlottedPointMeta {
+                center_pt: p,
+                radius_pt: (resolved.size_pt * 0.5).max(3.0),
+                source_cell: SourceCellId { sheet_id: sheet.id.clone(), row, col: data_col, subcol: 0 },
+                series_label: item.match_label.clone(),
+                value_summary: format_point_value(val),
+            });
         }
     }
 
-    for &(col_idx, item) in &ba_cols {
+    for &(slot_idx, item) in &ba_cols {
         if let Some((_, x_pt)) = axes.x.map_value(item.x_pos) {
             bounds.push(RenderedSlotBound {
                 group_key: item.group_key,
                 label: item.match_label.clone(),
                 alt_label: item.alt_label.clone(),
                 x_pt,
-                top_y_pt: top_per_col.get(col_idx).copied().unwrap_or(clip.bottom()),
+                top_y_pt: top_per_col.get(slot_idx).copied().unwrap_or(clip.bottom()),
             });
         }
     }
@@ -1133,7 +1140,9 @@ fn render_box_whisker_item(
     } else if show_outliers {
         for idx in outlier_indices {
             let obs = &sorted_obs[idx];
-            let Some(resolved) = crate::resolve_overridden_marker(graph_spec, obs.source.col, obs.source.row, dot_style) else {
+            let Some(resolved) =
+                crate::resolve_overridden_marker_for_cell(graph_spec, obs.source.col, obs.source.row, Some(obs.source.subcol), dot_style)
+            else {
                 continue;
             };
             if let Some((_, py)) = y_axis.map_value(obs.value) {
@@ -1436,7 +1445,8 @@ fn emit_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &ReplicateDo
     let mut pts_y: Vec<f64> = Vec::with_capacity(obs.len());
     let mut max_dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
     for o in obs {
-        let Some(resolved) = crate::resolve_overridden_marker(ctx.spec, o.source.col, o.source.row, *ctx.marker) else {
+        let Some(resolved) = crate::resolve_overridden_marker_for_cell(ctx.spec, o.source.col, o.source.row, Some(o.source.subcol), *ctx.marker)
+        else {
             continue;
         };
         if let Some((_, py)) = ctx.y_axis.map_value(o.value) {

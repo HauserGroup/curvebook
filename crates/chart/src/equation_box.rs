@@ -66,17 +66,85 @@ enum ResolvedEquation {
     Empty,
 }
 
+fn is_summary_or_gof_scalar(key: &str) -> bool {
+    let lower = key.trim().to_ascii_lowercase();
+    matches!(
+        lower.as_str(),
+        "r2" | "r^2"
+            | "adjusted r2"
+            | "adjusted r^2"
+            | "pseudo r2"
+            | "rss"
+            | "rsdr"
+            | "sy.x"
+            | "residual sd (sy.x)"
+            | "rmse"
+            | "aic"
+            | "aicc"
+            | "bic"
+            | "auc"
+            | "roc auc"
+            | "dof"
+    ) || lower.starts_with("auc (")
+        || lower.starts_with("residual sd")
+}
+
+fn normalize_scalar_key(key: &str) -> String {
+    key.trim().to_ascii_lowercase().replace([' ', '-'], "_")
+}
+
+fn polynomial_order_for_equation_id(equation_id: &str) -> Option<(usize, bool)> {
+    match normalize_scalar_key(equation_id).as_str() {
+        "straight_line" => Some((1, false)),
+        "line_through_origin" => Some((1, true)),
+        "polynomial_2" | "quadratic" => Some((2, false)),
+        "polynomial_3" | "cubic" => Some((3, false)),
+        "polynomial_4" | "quartic" => Some((4, false)),
+        "polynomial_5" => Some((5, false)),
+        "polynomial_6" => Some((6, false)),
+        _ => None,
+    }
+}
+
+fn has_all_polynomial_coeffs(params: &[(String, f64)], order: usize, through_origin: bool) -> bool {
+    if order <= 1 {
+        let lin = collect_linear_params(params, through_origin);
+        return lin.len() == if through_origin { 1 } else { 2 };
+    }
+    let start = usize::from(through_origin);
+    (start..=order).all(|power| {
+        let b0 = format!("b{power}");
+        let b1 = format!("b_{power}");
+        let a0 = format!("a{power}");
+        let a1 = format!("a_{power}");
+        let beta = format!("beta{power}");
+        let c = format!("c{power}");
+        params.iter().any(|(name, _)| {
+            let key = normalize_scalar_key(name);
+            key == b0
+                || key == b1
+                || key == a0
+                || key == a1
+                || key == beta
+                || key == c
+                || (power == 0 && matches!(key.as_str(), "intercept" | "yintercept" | "y_intercept"))
+                || (power == 1 && key == "slope")
+        })
+    })
+}
+
 /// Collect scalar parameters for `data_set_index` from `res`, preferring
 /// dataset-specific entries and falling back to shared (`data_set_index: None`)
-/// parameters for keys not already bound to the dataset.
+/// parameters for keys not already bound to the dataset when another dataset
+/// hasn't already claimed dataset-scoped parameters alone.
 #[must_use]
 pub(crate) fn collect_dataset_scalars(res: &ResultSheet, data_set_index: usize) -> Vec<(String, f64)> {
     let mut out: Vec<(String, f64)> = Vec::new();
     let mut seen_keys: Vec<String> = Vec::new();
 
     for scalar in &res.scalars {
-        if scalar.data_set_index == Some(data_set_index) && scalar.value.is_finite() {
-            let lower = scalar.key.to_ascii_lowercase();
+        if scalar.data_set_index == Some(data_set_index) && scalar.value.is_finite() && !is_summary_or_gof_scalar(&scalar.key) {
+            let lower = scalar.key.trim().to_ascii_lowercase();
             if !seen_keys.iter().any(|k| k == &lower) {
                 seen_keys.push(lower);
                 out.push((scalar.key.clone(), scalar.value));
@@ -84,12 +152,18 @@ pub(crate) fn collect_dataset_scalars(res: &ResultSheet, data_set_index: usize) 
         }
     }
 
-    for scalar in &res.scalars {
-        if scalar.data_set_index.is_none() && scalar.value.is_finite() {
-            let lower = scalar.key.to_ascii_lowercase();
-            if !seen_keys.iter().any(|k| k == &lower) {
-                seen_keys.push(lower);
-                out.push((scalar.key.clone(), scalar.value));
+    let has_other_dataset_scoped = res
+        .scalars
+        .iter()
+        .any(|s| s.data_set_index.is_some_and(|idx| idx != data_set_index) && s.value.is_finite() && !is_summary_or_gof_scalar(&s.key));
+    if !out.is_empty() || !has_other_dataset_scoped {
+        for scalar in &res.scalars {
+            if scalar.data_set_index.is_none() && scalar.value.is_finite() && !is_summary_or_gof_scalar(&scalar.key) {
+                let lower = scalar.key.trim().to_ascii_lowercase();
+                if !seen_keys.iter().any(|k| k == &lower) {
+                    seen_keys.push(lower);
+                    out.push((scalar.key.clone(), scalar.value));
+                }
             }
         }
     }
@@ -107,46 +181,75 @@ fn resolve_model_equation(doc: &ProjectDocument, result_sheet_id: &SheetId, data
         let label = if message.trim().is_empty() { "(Fit failed)".to_owned() } else { "(Fit failed — check analysis)".to_owned() };
         return ResolvedEquation::Placeholder(label);
     }
+    if matches!(res.status, ResultStatus::Dirty) {
+        return ResolvedEquation::Placeholder("(Fit pending)".to_owned());
+    }
 
     let substituted = matches!(mode, EquationDisplayMode::Substituted);
     let params = collect_dataset_scalars(res, data_set_index);
+    let overlay_for_dataset = if res.fitted_curves.is_empty() {
+        None
+    } else {
+        let Some(ov) = res.fitted_curves.iter().find(|c| c.data_set_index == data_set_index) else {
+            return ResolvedEquation::Placeholder("(Fit unavailable)".to_owned());
+        };
+        if !ov.converged {
+            return ResolvedEquation::Placeholder("(Fit did not converge)".to_owned());
+        }
+        Some(ov)
+    };
 
     match &res.analysis.kind {
         AnalysisKind::NonlinearRegression(nl) => {
-            let overlay = res
-                .fitted_curves
-                .iter()
-                .find(|c| c.data_set_index == data_set_index && !c.equation_id.trim().is_empty())
-                .or_else(|| res.fitted_curves.iter().find(|c| !c.equation_id.trim().is_empty()));
-            let equation_id = overlay.map(|c| c.equation_id.as_str()).unwrap_or(nl.equation_id.as_str());
+            let equation_id =
+                overlay_for_dataset.map(|c| c.equation_id.as_str()).filter(|id| !id.trim().is_empty()).unwrap_or(nl.equation_id.as_str());
             if equation_id.trim().is_empty() {
                 return ResolvedEquation::Placeholder("(No nonlinear model selected)".to_owned());
             }
-            let custom_dsl = if overlay.is_none() || equation_id == nl.equation_id { nl.custom_dsl.as_deref() } else { None };
+            let custom_dsl = if overlay_for_dataset.is_none() || equation_id == nl.equation_id { nl.custom_dsl.as_deref() } else { None };
+            if substituted {
+                if params.is_empty() {
+                    return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
+                }
+                if custom_dsl.is_none()
+                    && let Some((order, through_origin)) = polynomial_order_for_equation_id(equation_id)
+                    && !has_all_polynomial_coeffs(&params, order, through_origin)
+                {
+                    return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
+                }
+            }
             let tex = format_model_equation_tex(equation_id, custom_dsl, &params, substituted, EQUATION_SIG_FIGS);
             ResolvedEquation::Tex(tex)
         }
         AnalysisKind::LinearRegression(lin) => {
             let through_origin = lin.force_through_origin && !lin.deming_model_ii;
             let lin_params = collect_linear_params(&params, through_origin);
+            if substituted && !has_all_polynomial_coeffs(&lin_params, 1, through_origin) {
+                return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
+            }
             let tex = format_polynomial_equation_tex(1, through_origin, &lin_params, substituted, EQUATION_SIG_FIGS);
             ResolvedEquation::Tex(tex)
         }
         AnalysisKind::PassingBablok(_) => {
             let pb_params = collect_linear_params(&params, false);
-            if pb_params.is_empty() && substituted {
-                return ResolvedEquation::Empty;
+            if substituted && !has_all_polynomial_coeffs(&pb_params, 1, false) {
+                return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
             }
             let tex = format_polynomial_equation_tex(1, false, &pb_params, substituted, EQUATION_SIG_FIGS);
             ResolvedEquation::Tex(tex)
         }
         _ => {
-            if let Some(curve) = res
-                .fitted_curves
-                .iter()
-                .find(|c| c.data_set_index == data_set_index && !c.equation_id.trim().is_empty())
-                .or_else(|| res.fitted_curves.iter().find(|c| !c.equation_id.trim().is_empty()))
-            {
+            if let Some(curve) = overlay_for_dataset.filter(|c| !c.equation_id.trim().is_empty()) {
+                if substituted {
+                    if params.is_empty() {
+                        return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
+                    }
+                    if let Some((order, through_origin)) = polynomial_order_for_equation_id(&curve.equation_id)
+                        && !has_all_polynomial_coeffs(&params, order, through_origin)
+                    {
+                        return ResolvedEquation::Placeholder("(Fit parameters unavailable)".to_owned());
+                    }
+                }
                 let tex = format_model_equation_tex(&curve.equation_id, None, &params, substituted, EQUATION_SIG_FIGS);
                 ResolvedEquation::Tex(tex)
             } else {
@@ -160,11 +263,12 @@ fn resolve_model_equation(doc: &ProjectDocument, result_sheet_id: &SheetId, data
 /// unrelated scalars like `"R2"` are never consumed positionally.
 fn collect_linear_params(params: &[(String, f64)], force_through_origin: bool) -> Vec<(String, f64)> {
     let mut out = Vec::with_capacity(2);
-    if let Some((_, slope)) = params.iter().find(|(k, _)| k.eq_ignore_ascii_case("Slope")) {
+    if let Some((_, slope)) = params.iter().find(|(k, _)| matches!(normalize_scalar_key(k).as_str(), "slope" | "b1" | "b_1")) {
         out.push(("Slope".to_owned(), *slope));
     }
     if !force_through_origin
-        && let Some((_, intercept)) = params.iter().find(|(k, _)| k.eq_ignore_ascii_case("YIntercept") || k.eq_ignore_ascii_case("Intercept"))
+        && let Some((_, intercept)) =
+            params.iter().find(|(k, _)| matches!(normalize_scalar_key(k).as_str(), "yintercept" | "y_intercept" | "intercept" | "b0" | "b_0"))
     {
         out.push(("YIntercept".to_owned(), *intercept));
     }
@@ -179,13 +283,13 @@ pub fn render_model_equation_annotation(scene: &mut ChartScene, doc: &ProjectDoc
     match resolve_model_equation(doc, params.result_sheet_id, params.data_set_index, params.mode) {
         ResolvedEquation::Empty => {}
         ResolvedEquation::Placeholder(label) => {
-            render_placeholder_box(scene, bounds, &label, safe_font, params.bordered);
+            let _ = render_placeholder_box(scene, bounds, &label, safe_font, params.bordered);
         }
         ResolvedEquation::Tex(tex) => {
             if tex.trim().is_empty() {
                 return;
             }
-            render_tex_box(scene, bounds, &tex, safe_font, params.bordered);
+            let _ = render_tex_box(scene, bounds, &tex, safe_font, params.bordered);
         }
     }
 }
@@ -198,7 +302,137 @@ pub fn render_tex_equation_box(scene: &mut ChartScene, bounds_pt: lumencraft_doc
     if tex.trim().is_empty() {
         return;
     }
-    render_tex_box(scene, RectPt::from(bounds_pt), tex, sanitize_font_size(font_size_pt), bordered);
+    let _ = render_tex_box(scene, RectPt::from(bounds_pt), tex, sanitize_font_size(font_size_pt), bordered);
+}
+
+fn path_bbox_pt(path: &Path2D) -> Option<RectPt> {
+    let mut min_x = f64::INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    let mut include = |p: PointPt| {
+        if p.x.is_finite() && p.y.is_finite() {
+            min_x = min_x.min(p.x);
+            min_y = min_y.min(p.y);
+            max_x = max_x.max(p.x);
+            max_y = max_y.max(p.y);
+        }
+    };
+    for cmd in &path.commands {
+        match *cmd {
+            PathCmd::MoveTo(p) | PathCmd::LineTo(p) => include(p),
+            PathCmd::QuadTo { control, to } => {
+                include(control);
+                include(to);
+            }
+            PathCmd::CubicTo { c1, c2, to } => {
+                include(c1);
+                include(c2);
+                include(to);
+            }
+            PathCmd::Close => {}
+        }
+    }
+    if min_x.is_finite() && min_y.is_finite() && max_x.is_finite() && max_y.is_finite() {
+        Some(RectPt::new(min_x, min_y, (max_x - min_x).max(0.0), (max_y - min_y).max(0.0)))
+    } else {
+        None
+    }
+}
+
+/// Resolve the effective hit-test bounding box for a [`lumencraft_doc::GraphAnnotation::ModelEquation`].
+///
+/// When either `bounds_pt.width` or `bounds_pt.height` is non-positive (auto-sized equation box),
+/// recovers the compiled box dimensions from `scene.primitives` (background box, overflow clip rect,
+/// or laid-out equation runs anchored at `(bounds_pt.x, bounds_pt.y)`).
+#[must_use]
+pub fn resolve_model_equation_hit_bounds(scene: &ChartScene, bounds_pt: lumencraft_doc::RectPt, font_size_pt: f64, bordered: bool) -> Option<RectPt> {
+    let b = RectPt::from(bounds_pt);
+    if b.width > 0.0 && b.height > 0.0 {
+        return Some(b);
+    }
+    let safe_font = sanitize_font_size(font_size_pt);
+    let (pad_x, pad_y) = sanitize_padding(safe_font);
+    let matches_fixed = |r: RectPt| -> bool {
+        (r.x - b.x).abs() <= 0.5
+            && (r.y - b.y).abs() <= 0.5
+            && r.width > 0.0
+            && r.height > 0.0
+            && (b.width <= 0.0 || (r.width - b.width).abs() <= 0.5)
+            && (b.height <= 0.0 || (r.height - b.height).abs() <= 0.5)
+    };
+
+    for prim in scene.primitives.iter().rev() {
+        match prim {
+            ScenePrimitive::PushClip { rect } if matches_fixed(*rect) => return Some(*rect),
+            ScenePrimitive::Path { path, fill: Some(fill), stroke: Some(stroke), clip: None }
+                if bordered && fill.color == Rgba8::WHITE && stroke.color == Rgba8::BLACK && (stroke.width_pt - 0.8).abs() <= 1e-2 =>
+            {
+                if path.commands.len() == 5
+                    && let Some(r) = path_bbox_pt(path)
+                    && matches_fixed(r)
+                {
+                    return Some(r);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let min_font = 0.45 * safe_font;
+    let max_font = safe_font + 0.05;
+    let max_start_y = if b.height > 0.0 { b.y + b.height + pad_y } else { b.y + pad_y + 3.0 * safe_font };
+    let is_eq_text = |t: &PositionedText| -> bool {
+        t.anchor == TextAnchor::Start
+            && t.rotation_deg.abs() <= 1e-6
+            && (min_font..=max_font).contains(&t.font_size_pt)
+            && t.anchor_pt.x >= b.x + pad_x - 0.5
+            && t.anchor_pt.y >= b.y + pad_y * 0.4
+    };
+    let start_i = scene.primitives.iter().position(|prim| match prim {
+        ScenePrimitive::Text(t) => is_eq_text(t) && t.anchor_pt.x <= b.x + pad_x + 4.0 * safe_font && t.anchor_pt.y <= max_start_y,
+        _ => false,
+    })?;
+
+    let mut max_x = b.x + pad_x;
+    let mut max_y = b.y + pad_y;
+    let scan_from = if start_i > 0
+        && matches!(
+            &scene.primitives[start_i - 1],
+            ScenePrimitive::Path { path, fill: None, stroke: Some(_), clip: None }
+                if path_bbox_pt(path).is_some_and(|r| r.x >= b.x + pad_x - 0.5 && r.y >= b.y)
+        ) {
+        start_i - 1
+    } else {
+        start_i
+    };
+
+    for prim in &scene.primitives[scan_from..] {
+        match prim {
+            ScenePrimitive::Text(t) if is_eq_text(t) => {
+                if let Some(tb) = crate::scene::text_primitive_bounds_pt(t) {
+                    max_x = max_x.max(tb.right());
+                    max_y = max_y.max(tb.bottom());
+                } else {
+                    max_x = max_x.max(t.anchor_pt.x);
+                    max_y = max_y.max(t.anchor_pt.y);
+                }
+            }
+            ScenePrimitive::Path { path, fill: None, stroke: Some(_), clip: None } => {
+                let Some(pb) = path_bbox_pt(path) else { break };
+                if pb.x < b.x + pad_x - 0.5 || pb.y < b.y {
+                    break;
+                }
+                max_x = max_x.max(pb.right());
+                max_y = max_y.max(pb.bottom());
+            }
+            _ => break,
+        }
+    }
+
+    let box_w = if b.width > 0.0 { b.width } else { (max_x + pad_x - b.x).max(2.0 * pad_x) };
+    let box_h = if b.height > 0.0 { b.height } else { (max_y + pad_y - b.y).max(2.0 * pad_y) };
+    Some(RectPt::new(b.x, b.y, box_w, box_h))
 }
 
 fn sanitize_font_size(font_size_pt: f64) -> f64 {
@@ -220,7 +454,7 @@ fn emit_box_background(scene: &mut ChartScene, box_rect: RectPt) {
     });
 }
 
-fn render_placeholder_box(scene: &mut ChartScene, bounds: RectPt, label: &str, font_size: f64, bordered: bool) {
+fn render_placeholder_box(scene: &mut ChartScene, bounds: RectPt, label: &str, font_size: f64, bordered: bool) -> RectPt {
     let (pad_x, pad_y) = sanitize_padding(font_size);
     let rich = parse_markup(label);
     let m = measure_text_pt(&rich, font_size);
@@ -233,7 +467,7 @@ fn render_placeholder_box(scene: &mut ChartScene, bounds: RectPt, label: &str, f
     }
 
     let overflow =
-        bounds.width > 0.0 && bounds.height > 0.0 && (m.width_pt + 2.0 * pad_x > box_w + 0.5 || m.line_height_pt + 2.0 * pad_y > box_h + 0.5);
+        (bounds.width > 0.0 && m.width_pt + 2.0 * pad_x > box_w + 0.5) || (bounds.height > 0.0 && m.line_height_pt + 2.0 * pad_y > box_h + 0.5);
     if overflow {
         scene.primitives.push(ScenePrimitive::PushClip { rect: box_rect });
     }
@@ -253,12 +487,13 @@ fn render_placeholder_box(scene: &mut ChartScene, bounds: RectPt, label: &str, f
     if overflow {
         scene.primitives.push(ScenePrimitive::PopClip);
     }
+    box_rect
 }
 
-fn render_tex_box(scene: &mut ChartScene, bounds: RectPt, tex: &str, font_size: f64, bordered: bool) {
+fn render_tex_box(scene: &mut ChartScene, bounds: RectPt, tex: &str, font_size: f64, bordered: bool) -> Option<RectPt> {
     let nodes = parse_math_nodes(tex);
     if nodes.is_empty() {
-        return;
+        return None;
     }
 
     let root_ctx = LayoutCtx { style: MathStyle::Display, base_font: font_size, color: Rgba8::BLACK, depth: 0 };
@@ -283,7 +518,7 @@ fn render_tex_box(scene: &mut ChartScene, bounds: RectPt, tex: &str, font_size: 
         emit_box_background(scene, box_rect);
     }
 
-    let overflow = bounds.width > 0.0 && bounds.height > 0.0 && (max_row_w + 2.0 * pad_x > box_w + 0.5 || total_h + 2.0 * pad_y > box_h + 0.5);
+    let overflow = (bounds.width > 0.0 && max_row_w + 2.0 * pad_x > box_w + 0.5) || (bounds.height > 0.0 && total_h + 2.0 * pad_y > box_h + 0.5);
     if overflow {
         scene.primitives.push(ScenePrimitive::PushClip { rect: box_rect });
     }
@@ -299,6 +534,7 @@ fn render_tex_box(scene: &mut ChartScene, bounds: RectPt, tex: &str, font_size: 
     if overflow {
         scene.primitives.push(ScenePrimitive::PopClip);
     }
+    Some(box_rect)
 }
 
 // ---------------------------------------------------------------------------

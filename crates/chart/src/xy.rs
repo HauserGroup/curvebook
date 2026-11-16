@@ -1690,7 +1690,7 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
     let mut warned_y = ctx.warned_y_domain;
     if ctx.use_replicates {
         for &(rx, ry, row, subcol) in &data.replicates {
-            let Some(marker) = crate::resolve_overridden_marker(ctx.spec, data.col_index, row, ctx.marker) else {
+            let Some(marker) = crate::resolve_overridden_marker_for_cell(ctx.spec, data.col_index, row, Some(subcol), ctx.marker) else {
                 continue;
             };
             let Some((_, px)) = ctx.x_axis.map_value(rx) else {
@@ -1713,7 +1713,7 @@ fn emit_xy_markers(scene: &mut ChartScene, data: &ExtractedXySeries, summary_mar
         }
     } else {
         for &(pt, row, vx, vy) in summary_markers {
-            let Some(marker) = crate::resolve_overridden_marker(ctx.spec, data.col_index, row, ctx.marker) else {
+            let Some(marker) = crate::resolve_overridden_marker_for_cell(ctx.spec, data.col_index, row, Some(0), ctx.marker) else {
                 continue;
             };
             emit_marker(&mut scene.primitives, pt, &marker, Some(ctx.clip));

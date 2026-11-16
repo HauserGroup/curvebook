@@ -2,7 +2,7 @@
 //!
 //! Emits little-endian 4-byte-aligned Enhanced Metafile records with exact header byte counts,
 //! record counts, 0.01 mm `rclFrame` bounds, `MM_ANISOTROPIC` coordinate mapping, styled vector
-//! paths (lines and `EMR_POLYBEZIER` cubic segments), clip stacks, Unicode `EMR_EXTTEXTOUTW`
+//! paths (lines and `EMR_POLYBEZIERTO` cubic segments), clip stacks, Unicode `EMR_EXTTEXTOUTW`
 //! labels, optional bottom-up BGRA `EMR_STRETCHDIBITS` bitmaps, and clean `EMR_DELETEOBJECT`
 //! handle lifecycle management.
 
@@ -10,7 +10,10 @@ use lumencraft_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
 use lumencraft_palette::{LineDashStyle, Rgba8};
-use lumencraft_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, measure_text_pt, metrics::char_advance_pt};
+use lumencraft_text::{
+    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, measure_text_pt,
+    metrics::{char_advance_pt, split_rich_text_lines},
+};
 
 use crate::rasterizer::{MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS, RasterImage, RenderError};
 
@@ -28,7 +31,7 @@ const REF_DEVICE_MM: i32 = 2_540;
 
 // ECMA-234 / Enhanced Metafile record identifiers (`iType`).
 const EMR_HEADER: u32 = 1;
-const EMR_POLYBEZIER: u32 = 2;
+const EMR_POLYBEZIERTO: u32 = 5;
 const EMR_SETWINDOWEXTEX: u32 = 9;
 const EMR_SETWINDOWORGEX: u32 = 10;
 const EMR_SETVIEWPORTEXTEX: u32 = 11;
@@ -395,45 +398,50 @@ impl EmfWriter {
         let mut dev_bounds = BoundsRect::empty();
         let mut cur_pt: Option<PointPt> = None;
         let mut subpath_start: Option<PointPt> = None;
+        let mut pending_moveto: Option<PointPt> = None;
+        let mut bezier_start: Option<PointPt> = None;
         let mut pending_beziers: Vec<PointPt> = Vec::new();
         let mut has_segments = false;
         let mut began = false;
 
-        let ensure_begun = |writer: &mut Self, flag: &mut bool| -> Result<(), RenderError> {
-            if !*flag {
-                writer.emit_empty_record(EMR_BEGINPATH)?;
-                *flag = true;
-            }
-            Ok(())
-        };
+        let commit_moveto_if_pending =
+            |writer: &mut Self, began: &mut bool, pending: &mut Option<PointPt>, bounds: &mut BoundsRect| -> Result<(), RenderError> {
+                if let Some(mpt) = pending.take() {
+                    if !*began {
+                        writer.emit_empty_record(EMR_BEGINPATH)?;
+                        *began = true;
+                    }
+                    let (lx, ly) = point_to_logical(mpt);
+                    writer.emit_i32_pair_record(EMR_MOVETOEX, lx, ly)?;
+                    bounds.include_pt(pt_to_dev_px(mpt.x), pt_to_dev_px(mpt.y));
+                } else if !*began {
+                    writer.emit_empty_record(EMR_BEGINPATH)?;
+                    *began = true;
+                }
+                Ok(())
+            };
 
         for cmd in &path.commands {
             match *cmd {
                 PathCmd::MoveTo(pt) if point_is_finite(pt) => {
                     if !pending_beziers.is_empty() {
-                        ensure_begun(self, &mut began)?;
-                        self.flush_polybezier(&mut pending_beziers, &mut dev_bounds)?;
+                        commit_moveto_if_pending(self, &mut began, &mut pending_moveto, &mut dev_bounds)?;
+                        self.flush_polybezier_to(bezier_start.take(), &mut pending_beziers, &mut dev_bounds)?;
                         has_segments = true;
                     }
-                    ensure_begun(self, &mut began)?;
-                    let (lx, ly) = point_to_logical(pt);
-                    self.emit_i32_pair_record(EMR_MOVETOEX, lx, ly)?;
-                    dev_bounds.include_pt(pt_to_dev_px(pt.x), pt_to_dev_px(pt.y));
+                    pending_moveto = Some(pt);
                     cur_pt = Some(pt);
                     subpath_start = Some(pt);
                 }
                 PathCmd::LineTo(to) if point_is_finite(to) => {
-                    let prev = match cur_pt {
-                        Some(p) => p,
-                        None => continue,
-                    };
-                    if !pending_beziers.is_empty() {
-                        ensure_begun(self, &mut began)?;
-                        self.flush_polybezier(&mut pending_beziers, &mut dev_bounds)?;
-                        let (px, py) = point_to_logical(prev);
-                        self.emit_i32_pair_record(EMR_MOVETOEX, px, py)?;
+                    if cur_pt.is_none() {
+                        continue;
                     }
-                    ensure_begun(self, &mut began)?;
+                    if !pending_beziers.is_empty() {
+                        commit_moveto_if_pending(self, &mut began, &mut pending_moveto, &mut dev_bounds)?;
+                        self.flush_polybezier_to(bezier_start.take(), &mut pending_beziers, &mut dev_bounds)?;
+                    }
+                    commit_moveto_if_pending(self, &mut began, &mut pending_moveto, &mut dev_bounds)?;
                     let (lx, ly) = point_to_logical(to);
                     self.emit_i32_pair_record(EMR_LINETO, lx, ly)?;
                     dev_bounds.include_pt(pt_to_dev_px(to.x), pt_to_dev_px(to.y));
@@ -441,38 +449,35 @@ impl EmfWriter {
                     has_segments = true;
                 }
                 PathCmd::QuadTo { control, to } if point_is_finite(control) && point_is_finite(to) => {
-                    let p0 = match cur_pt {
-                        Some(p) => p,
-                        None => continue,
+                    let Some(p0) = cur_pt else {
+                        continue;
                     };
                     // Exact quadratic-to-cubic Bezier degree elevation.
                     let c1 = PointPt::new(p0.x + (2.0 / 3.0) * (control.x - p0.x), p0.y + (2.0 / 3.0) * (control.y - p0.y));
                     let c2 = PointPt::new(to.x + (2.0 / 3.0) * (control.x - to.x), to.y + (2.0 / 3.0) * (control.y - to.y));
                     if pending_beziers.is_empty() {
-                        pending_beziers.push(p0);
+                        bezier_start = Some(p0);
                     }
                     pending_beziers.extend_from_slice(&[c1, c2, to]);
                     cur_pt = Some(to);
-                    has_segments = true;
                 }
                 PathCmd::CubicTo { c1, c2, to } if point_is_finite(c1) && point_is_finite(c2) && point_is_finite(to) => {
-                    let p0 = match cur_pt {
-                        Some(p) => p,
-                        None => continue,
+                    let Some(p0) = cur_pt else {
+                        continue;
                     };
                     if pending_beziers.is_empty() {
-                        pending_beziers.push(p0);
+                        bezier_start = Some(p0);
                     }
                     pending_beziers.extend_from_slice(&[c1, c2, to]);
                     cur_pt = Some(to);
-                    has_segments = true;
                 }
                 PathCmd::Close => {
                     if !pending_beziers.is_empty() {
-                        ensure_begun(self, &mut began)?;
-                        self.flush_polybezier(&mut pending_beziers, &mut dev_bounds)?;
+                        commit_moveto_if_pending(self, &mut began, &mut pending_moveto, &mut dev_bounds)?;
+                        self.flush_polybezier_to(bezier_start.take(), &mut pending_beziers, &mut dev_bounds)?;
+                        has_segments = true;
                     }
-                    if began && subpath_start.is_some() {
+                    if began && pending_moveto.is_none() && subpath_start.is_some() {
                         self.emit_empty_record(EMR_CLOSEFIGURE)?;
                         cur_pt = subpath_start;
                         has_segments = true;
@@ -483,8 +488,8 @@ impl EmfWriter {
         }
 
         if !pending_beziers.is_empty() {
-            ensure_begun(self, &mut began)?;
-            self.flush_polybezier(&mut pending_beziers, &mut dev_bounds)?;
+            commit_moveto_if_pending(self, &mut began, &mut pending_moveto, &mut dev_bounds)?;
+            self.flush_polybezier_to(bezier_start.take(), &mut pending_beziers, &mut dev_bounds)?;
             has_segments = true;
         }
         if !began || !has_segments {
@@ -504,12 +509,18 @@ impl EmfWriter {
         Ok(Some(dev_bounds))
     }
 
-    fn flush_polybezier(&mut self, pts: &mut Vec<PointPt>, dev_bounds: &mut BoundsRect) -> Result<(), RenderError> {
-        if pts.len() < 4 || !(pts.len() - 1).is_multiple_of(3) {
+    fn flush_polybezier_to(&mut self, start_pt: Option<PointPt>, pts: &mut Vec<PointPt>, dev_bounds: &mut BoundsRect) -> Result<(), RenderError> {
+        if pts.len() < 3 || !pts.len().is_multiple_of(3) {
             pts.clear();
             return Ok(());
         }
         let mut poly_bounds = BoundsRect::empty();
+        if let Some(s) = start_pt {
+            let dx = pt_to_dev_px(s.x);
+            let dy = pt_to_dev_px(s.y);
+            poly_bounds.include_pt(dx, dy);
+            dev_bounds.include_pt(dx, dy);
+        }
         for pt in pts.iter() {
             let dx = pt_to_dev_px(pt.x);
             let dy = pt_to_dev_px(pt.y);
@@ -518,7 +529,7 @@ impl EmfWriter {
         }
         let rcl = poly_bounds.as_ltrb(self.metrics.vp_w, self.metrics.vp_h);
         let cptl =
-            u32::try_from(pts.len()).map_err(|_| RenderError::EncodingFailed { message: String::from("EMR_POLYBEZIER point count overflow") })?;
+            u32::try_from(pts.len()).map_err(|_| RenderError::EncodingFailed { message: String::from("EMR_POLYBEZIERTO point count overflow") })?;
         let mut payload = Vec::with_capacity(20 + pts.len() * 8);
         push_rect_bytes(&mut payload, rcl);
         payload.extend_from_slice(&cptl.to_le_bytes());
@@ -528,49 +539,71 @@ impl EmfWriter {
             payload.extend_from_slice(&ly.to_le_bytes());
         }
         pts.clear();
-        self.emit_record(EMR_POLYBEZIER, &payload)
+        self.emit_record(EMR_POLYBEZIERTO, &payload)
     }
 
     fn emit_text(&mut self, text: &PositionedText) -> Result<(), RenderError> {
         if !point_is_finite(text.anchor_pt) || !text.font_size_pt.is_finite() || text.font_size_pt <= 0.0 || text.rich.spans.is_empty() {
             return Ok(());
         }
-        let total_w = measure_text_pt(&text.rich, text.font_size_pt).width_pt;
-        let anchor_dx = match text.anchor {
-            TextAnchor::Start => 0.0,
-            TextAnchor::Middle => -0.5 * total_w,
-            TextAnchor::End => -total_w,
-        };
+        let lines = split_rich_text_lines(&text.rich);
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let line_step = text.font_size_pt * 1.20;
         let rad = if text.rotation_deg.is_finite() { text.rotation_deg.to_radians() } else { 0.0 };
         let (sin_a, cos_a) = rad.sin_cos();
         let escapement_tenths = if text.rotation_deg.is_finite() { (-text.rotation_deg * 10.0).round() as i32 } else { 0 };
 
-        let mut cursor_x = anchor_dx;
-        for span in &text.rich.spans {
-            if span.text.is_empty() {
+        for (line_idx, line) in lines.iter().enumerate() {
+            if line.spans.is_empty() {
                 continue;
             }
-            let span_size_pt = text.font_size_pt * effective_span_scale(span);
-            let baseline_dy = script_baseline_dy(span.script, text.font_size_pt);
-            let span_w = measure_text_pt(&RichText::new(vec![span.clone()]), text.font_size_pt).width_pt;
-            let raw_color = span.color.unwrap_or(text.color);
-            if raw_color.a > 0 && span_size_pt > 0.0 {
-                let x_pt = text.anchor_pt.x + cursor_x * cos_a - baseline_dy * sin_a;
-                let y_pt = text.anchor_pt.y + cursor_x * sin_a + baseline_dy * cos_a;
-                let color = blend_over_bg(raw_color, self.bg_color);
-                self.emit_text_span(span, PointPt::new(x_pt, y_pt), span_size_pt, escapement_tenths, color)?;
+            let total_w = measure_text_pt(line, text.font_size_pt).width_pt;
+            let anchor_dx = match text.anchor {
+                TextAnchor::Start => 0.0,
+                TextAnchor::Middle => -0.5 * total_w,
+                TextAnchor::End => -total_w,
+            };
+            let line_y = (line_idx as f64) * line_step;
+            let mut cursor_x = anchor_dx;
+            for span in &line.spans {
+                if span.text.is_empty() {
+                    continue;
+                }
+                let span_size_pt = text.font_size_pt * effective_span_scale(span);
+                let baseline_dy = line_y + script_baseline_dy(span.script, text.font_size_pt);
+                let span_w = measure_text_pt(&RichText::new(vec![span.clone()]), text.font_size_pt).width_pt;
+                let raw_color = span.color.unwrap_or(text.color);
+                if raw_color.a > 0 && span_size_pt > 0.0 {
+                    let x_pt = text.anchor_pt.x + cursor_x * cos_a - baseline_dy * sin_a;
+                    let y_pt = text.anchor_pt.y + cursor_x * sin_a + baseline_dy * cos_a;
+                    let color = blend_over_bg(raw_color, self.bg_color);
+                    self.emit_text_span(span, PointPt::new(x_pt, y_pt), span_size_pt, rad, escapement_tenths, color)?;
+                }
+                cursor_x += span_w;
             }
-            cursor_x += span_w;
         }
         Ok(())
     }
 
-    fn emit_text_span(&mut self, span: &RichSpan, origin_pt: PointPt, size_pt: f64, escapement_tenths: i32, color: Rgba8) -> Result<(), RenderError> {
+    fn emit_text_span(
+        &mut self,
+        span: &RichSpan,
+        origin_pt: PointPt,
+        size_pt: f64,
+        rad: f64,
+        escapement_tenths: i32,
+        color: Rgba8,
+    ) -> Result<(), RenderError> {
         let mut utf16_units: Vec<u16> = Vec::new();
         let mut dx_logical: Vec<u32> = Vec::new();
         let mut total_adv_pt = 0.0_f64;
 
         for ch in span.text.chars() {
+            if ch == '\n' || ch == '\r' {
+                continue;
+            }
             let adv_pt = char_advance_pt(ch, size_pt, span.weight, span.slope);
             let adv_log = scale_logical(adv_pt.max(0.0)).max(0) as u32;
             let mut u16_buf = [0u16; 2];
@@ -595,15 +628,14 @@ impl EmfWriter {
         self.emit_u32_record(EMR_SETTEXTCOLOR, &[colorref(color)])?;
 
         let (lx, ly) = point_to_logical(origin_pt);
-        let rad = (-f64::from(escapement_tenths) / 10.0).to_radians();
+        let (sin_a, cos_a) = rad.sin_cos();
         let mut span_bounds = BoundsRect::empty();
-        for (px, py) in [
-            (origin_pt.x, origin_pt.y - size_pt),
-            (origin_pt.x + total_adv_pt * rad.cos(), origin_pt.y + total_adv_pt * rad.sin() - size_pt),
-            (origin_pt.x, origin_pt.y + 0.25 * size_pt),
-            (origin_pt.x + total_adv_pt * rad.cos(), origin_pt.y + total_adv_pt * rad.sin() + 0.25 * size_pt),
-        ] {
-            span_bounds.include_pt(pt_to_dev_px(px), pt_to_dev_px(py));
+        for u in [0.0_f64, total_adv_pt] {
+            for v in [-size_pt, 0.25 * size_pt] {
+                let px = origin_pt.x + u * cos_a - v * sin_a;
+                let py = origin_pt.y + u * sin_a + v * cos_a;
+                span_bounds.include_pt(pt_to_dev_px(px), pt_to_dev_px(py));
+            }
         }
         self.bounds.include_rect(span_bounds);
 

@@ -248,7 +248,7 @@ fn compile_bubble_scatter(
             stroke_color: Rgba8::rgba(25, 25, 25, 210),
             stroke_width_pt: 0.75,
         };
-        let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, pt.row, base_marker) else {
+        let Some(marker) = crate::resolve_overridden_marker_for_cell(&graph.spec, enc.y_column, pt.row, Some(0), base_marker) else {
             continue;
         };
         let center_pt = PointPt::new(px, py);
@@ -1059,8 +1059,151 @@ fn matching_results<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Vec<&'a
 }
 
 fn find_matching_result_where<'a>(graph: &GraphSheet, doc: &'a ProjectDocument, pred: impl Fn(&ResultSheet) -> bool) -> Option<&'a ResultSheet> {
-    let candidates = matching_results(graph, doc);
-    candidates.iter().copied().find(|r| pred(r)).or_else(|| candidates.into_iter().next())
+    matching_results(graph, doc).into_iter().find(|r| pred(r))
+}
+
+#[derive(Debug, Clone)]
+struct DiagPoint {
+    x: f64,
+    y: f64,
+    label: Option<String>,
+    source: SourceCellId,
+    series_label: String,
+}
+
+fn active_xy_pairs_with_sources(sheet_id: &SheetId, xy: &lumencraft_doc::XyTable, data_set: usize) -> Vec<(f64, f64, SourceCellId, String)> {
+    let Some(ds) = xy.data_sets.get(data_set) else {
+        return Vec::new();
+    };
+    let label = ds.title.clone();
+    let mut out = Vec::new();
+    for (row, subcells) in ds.cells.iter().enumerate() {
+        let Some(x) = xy.x_value_at(row).filter(|v| v.is_finite()) else {
+            continue;
+        };
+        if xy.y_subcolumn_mode.is_pre_summarized() {
+            if let Some(mean) = subcells.first().and_then(|c| c.active_number()).filter(|v| v.is_finite()) {
+                out.push((x, mean, SourceCellId { sheet_id: sheet_id.clone(), row, col: data_set, subcol: 0 }, label.clone()));
+            }
+        } else {
+            for (subcol, cell) in subcells.iter().enumerate() {
+                if let Some(y) = cell.active_number().filter(|v| v.is_finite()) {
+                    out.push((x, y, SourceCellId { sheet_id: sheet_id.clone(), row, col: data_set, subcol }, label.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+fn collect_ds_active_point_sources(ds: &DataSheet, col_idx: usize, include_replicates: bool) -> (Vec<SourceCellId>, String) {
+    let mut out = Vec::new();
+    match &ds.archetype {
+        TableArchetype::Xy(xy) => {
+            let c = col_idx.min(xy.data_sets.len().saturating_sub(1));
+            let label = xy.data_sets.get(c).map_or_else(|| String::from("Y"), |d| d.title.clone());
+            if let Some(d) = xy.data_sets.get(c) {
+                for r in 0..xy.row_count() {
+                    if !xy.x_value_at(r).is_some_and(f64::is_finite) {
+                        continue;
+                    }
+                    let Some(row_cells) = d.cells.get(r) else {
+                        continue;
+                    };
+                    if include_replicates && !xy.y_subcolumn_mode.is_pre_summarized() {
+                        for (subcol, cell) in row_cells.iter().enumerate() {
+                            if cell.active_number().is_some_and(f64::is_finite) {
+                                out.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol });
+                            }
+                        }
+                    } else if xy.y_subcolumn_mode.is_pre_summarized() {
+                        if row_cells.first().and_then(|cell| cell.active_number()).is_some_and(f64::is_finite) {
+                            out.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol: 0 });
+                        }
+                    } else if row_cells.iter().any(|cell| cell.active_number().is_some_and(f64::is_finite)) {
+                        out.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol: 0 });
+                    }
+                }
+            }
+            (out, label)
+        }
+        TableArchetype::Column(col) => {
+            let c = col_idx.min(col.data_sets.len().saturating_sub(1));
+            let label = col.data_sets.get(c).map_or_else(|| format!("Group {}", c + 1), |d| d.title.clone());
+            if let Some(d) = col.data_sets.get(c) {
+                for r in 0..col.row_count() {
+                    let Some(row_cells) = d.cells.get(r) else {
+                        continue;
+                    };
+                    if include_replicates {
+                        for (subcol, cell) in row_cells.iter().enumerate() {
+                            if cell.active_number().is_some_and(f64::is_finite) {
+                                out.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol });
+                            }
+                        }
+                    } else if row_cells.first().and_then(|cell| cell.active_number()).is_some_and(f64::is_finite) {
+                        out.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol: 0 });
+                    }
+                }
+            }
+            (out, label)
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let c = col_idx.min(mv.variables.len().saturating_sub(1));
+            let label = mv.variables.get(c).map_or_else(|| format!("Var {}", c + 1), |v| v.title.clone());
+            if let Some(v) = mv.variables.get(c) {
+                for r in 0..mv.row_count() {
+                    if v.cells.get(r).and_then(|cell| cell.active_number()).is_some_and(f64::is_finite) {
+                        out.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol: 0 });
+                    }
+                }
+            }
+            (out, label)
+        }
+        _ => (out, String::new()),
+    }
+}
+
+fn collect_ds_active_values_with_sources(ds: &DataSheet, col_idx: usize) -> (Vec<(f64, SourceCellId)>, String) {
+    let mut out = Vec::new();
+    match &ds.archetype {
+        TableArchetype::Column(col) => {
+            let c = col_idx.min(col.data_sets.len().saturating_sub(1));
+            let label = col.data_sets.get(c).map_or_else(|| format!("Group {}", c + 1), |d| d.title.clone());
+            if let Some(d) = col.data_sets.get(c) {
+                for r in 0..col.row_count() {
+                    if let Some(row_cells) = d.cells.get(r) {
+                        for (subcol, cell) in row_cells.iter().enumerate() {
+                            if let Some(v) = cell.active_number().filter(|x| x.is_finite()) {
+                                out.push((v, SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol }));
+                            }
+                        }
+                    }
+                }
+            }
+            (out, label)
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let c = col_idx.min(mv.variables.len().saturating_sub(1));
+            let label = mv.variables.get(c).map_or_else(|| format!("Var {}", c + 1), |v| v.title.clone());
+            if let Some(v) = mv.variables.get(c) {
+                for r in 0..mv.row_count() {
+                    if let Some(val) = v.cells.get(r).and_then(|cell| cell.active_number()).filter(|x| x.is_finite()) {
+                        out.push((val, SourceCellId { sheet_id: ds.id.clone(), row: r, col: c, subcol: 0 }));
+                    }
+                }
+            }
+            (out, label)
+        }
+        TableArchetype::Xy(xy) => {
+            let c = col_idx.min(xy.data_sets.len().saturating_sub(1));
+            let pairs = active_xy_pairs_with_sources(&ds.id, xy, c);
+            let label = xy.data_sets.get(c).map_or_else(|| String::from("Y"), |d| d.title.clone());
+            out.extend(pairs.into_iter().map(|(_, y, src, _)| (y, src)));
+            (out, label)
+        }
+        _ => (out, String::new()),
+    }
 }
 
 fn resolve_source_data_sheet<'a>(graph: &GraphSheet, doc: &'a ProjectDocument) -> Option<&'a DataSheet> {
@@ -1120,10 +1263,15 @@ fn extract_residuals_cols(headers: &[String]) -> (Option<usize>, Option<usize>, 
     (ds_col, x_col, y_col, obs_col)
 }
 
-fn extract_residuals_tab_pairs(tab: &ResultTab, graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64)> {
+fn extract_residuals_tab_points(res: &ResultSheet, tab: &ResultTab, graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint> {
     let (ds_col, x_col, y_col, obs_col) = extract_residuals_cols(&tab.column_headers);
     let target_label = selected_dataset_label_in_tab(tab, ds_col, graph, doc);
-    tab.rows
+    let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
+    let fallback_sheet_id =
+        doc.data_sheet(&res.analysis.source_sheet_id).map(|d| d.id.clone()).unwrap_or_else(|| graph.spec.primary_source_sheet_id.clone());
+
+    let pairs: Vec<(usize, f64, f64)> = tab
+        .rows
         .iter()
         .enumerate()
         .filter_map(|(i, row)| {
@@ -1132,24 +1280,61 @@ fn extract_residuals_tab_pairs(tab: &ResultTab, graph: &GraphSheet, doc: &Projec
             {
                 return None;
             }
-            match (x_col, y_col, obs_col) {
-                (Some(xc), Some(yc), _) => Some((result_cell_num(row.get(xc)?)?, result_cell_num(row.get(yc)?)?)),
+            let (xv, yv) = match (x_col, y_col, obs_col) {
+                (Some(xc), Some(yc), _) => (result_cell_num(row.get(xc)?)?, result_cell_num(row.get(yc)?)?),
                 (Some(xc), None, Some(oc)) if xc != oc => {
                     let fitted = result_cell_num(row.get(xc)?)?;
                     let observed = result_cell_num(row.get(oc)?)?;
-                    Some((fitted, observed - fitted))
+                    (fitted, observed - fitted)
                 }
                 (None, Some(yc), _) => {
                     let yv = result_cell_num(row.get(yc)?)?;
                     let xv = row.iter().enumerate().find_map(|(ci, c)| if ci != yc { result_cell_num(c) } else { None }).unwrap_or((i + 1) as f64);
-                    Some((xv, yv))
+                    (xv, yv)
                 }
                 _ => match (row.first().and_then(result_cell_num), row.get(1).and_then(result_cell_num)) {
-                    (Some(a), Some(b)) => Some((a, b)),
-                    (Some(r), None) => Some(((i + 1) as f64, r)),
-                    _ => None,
+                    (Some(a), Some(b)) => (a, b),
+                    (Some(r), None) => ((i + 1) as f64, r),
+                    _ => return None,
                 },
-            }
+            };
+            Some((i, xv, yv))
+        })
+        .collect();
+
+    if pairs.is_empty() {
+        return Vec::new();
+    }
+
+    let source_col = match &res.analysis.kind {
+        AnalysisKind::GeneralizedLinearModel(glm) => glm.response_column,
+        _ => ds_idx,
+    };
+    let ds_opt = doc.data_sheet(&res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+    let (resolved_sources, series_label) = if let Some(ds) = ds_opt {
+        let (all_rep_sources, lbl) = collect_ds_active_point_sources(ds, source_col, true);
+        if all_rep_sources.len() == pairs.len() {
+            (Some(all_rep_sources), lbl)
+        } else {
+            let (row_sources, lbl_row) = collect_ds_active_point_sources(ds, source_col, false);
+            if row_sources.len() == pairs.len() { (Some(row_sources), lbl_row) } else { (None, lbl) }
+        }
+    } else {
+        (None, target_label.clone().unwrap_or_else(|| graph.spec.title.clone()))
+    };
+    let resolved_label = if series_label.is_empty() { graph.spec.title.clone() } else { series_label };
+
+    pairs
+        .into_iter()
+        .enumerate()
+        .map(|(k, (tab_row_idx, x, y))| {
+            let source = resolved_sources.as_ref().and_then(|v| v.get(k)).cloned().unwrap_or(SourceCellId {
+                sheet_id: fallback_sheet_id.clone(),
+                row: tab_row_idx,
+                col: source_col,
+                subcol: 0,
+            });
+            DiagPoint { x, y, label: tab.row_labels.get(tab_row_idx).cloned(), source, series_label: resolved_label.clone() }
         })
         .collect()
 }
@@ -1353,6 +1538,16 @@ fn correlation_heatmap_data(res: &ResultSheet, tab: &ResultTab) -> HeatmapData {
     }
 }
 
+fn resolve_selected_heatmap_cols(selected: &[usize], len: usize) -> Vec<usize> {
+    let mut out = Vec::new();
+    for &idx in selected {
+        if idx < len && !out.contains(&idx) {
+            out.push(idx);
+        }
+    }
+    out
+}
+
 fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<HeatmapData> {
     let direct_res = doc.result_sheet(&graph.spec.primary_source_sheet_id);
     if let Some(res) = direct_res
@@ -1368,9 +1563,6 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
 
     let clustering_res = find_matching_result_where(graph, doc, |r| {
         !matches!(r.status, ResultStatus::Failed { .. }) && matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }))
-    })
-    .filter(|r| {
-        !matches!(r.status, ResultStatus::Failed { .. }) && matches!(r.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. }))
     });
 
     if clustering_res.is_none()
@@ -1383,16 +1575,26 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
         return Some(correlation_heatmap_data(res, tab));
     }
 
+    let selected_cols = clustering_res.map(|r| r.analysis.selected_data_sets.as_slice()).unwrap_or(&[]);
     let ds = resolve_source_data_sheet(graph, doc)?;
     let (mut hm, expect_rows) = match &ds.archetype {
         TableArchetype::MultipleVariables(mv) => {
-            let num_cols: Vec<(usize, String)> = mv
-                .variables
-                .iter()
-                .enumerate()
-                .filter(|(_, v)| v.role == VariableRole::Continuous || v.role == VariableRole::Calculated)
-                .map(|(i, v)| (i, v.title.clone()))
-                .collect();
+            let num_cols: Vec<(usize, String)> = if selected_cols.is_empty() {
+                mv.variables
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, v)| v.role == VariableRole::Continuous || v.role == VariableRole::Calculated)
+                    .map(|(i, v)| (i, v.title.clone()))
+                    .collect()
+            } else {
+                resolve_selected_heatmap_cols(selected_cols, mv.variables.len())
+                    .into_iter()
+                    .filter_map(|i| {
+                        let v = mv.variables.get(i)?;
+                        (v.role == VariableRole::Continuous || v.role == VariableRole::Calculated).then(|| (i, v.title.clone()))
+                    })
+                    .collect()
+            };
             if num_cols.is_empty() {
                 return None;
             }
@@ -1433,15 +1635,30 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
             )
         }
         TableArchetype::Column(col) => {
-            let col_labels: Vec<String> = col.data_sets.iter().map(|d| d.title.clone()).collect();
+            let col_indices: Vec<usize> = if selected_cols.is_empty() {
+                (0..col.data_sets.len()).collect()
+            } else {
+                resolve_selected_heatmap_cols(selected_cols, col.data_sets.len())
+            };
+            if col_indices.is_empty() {
+                return None;
+            }
+            let col_labels: Vec<String> = col_indices.iter().filter_map(|&c| col.data_sets.get(c).map(|d| d.title.clone())).collect();
             let nrows = col.row_count();
             let row_labels =
                 (0..nrows).map(|r| col.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("R{}", r + 1))).collect();
             let values = (0..nrows)
                 .map(|r| {
-                    col.data_sets
+                    col_indices
                         .iter()
-                        .map(|d| d.cells.get(r).and_then(|s| s.first()).and_then(|c| c.active_number()).filter(|x| x.is_finite()))
+                        .map(|&c| {
+                            col.data_sets
+                                .get(c)
+                                .and_then(|d| d.cells.get(r))
+                                .and_then(|s| s.first())
+                                .and_then(|c| c.active_number())
+                                .filter(|x| x.is_finite())
+                        })
                         .collect()
                 })
                 .collect();
@@ -1459,14 +1676,23 @@ fn extract_heatmap_data(graph: &GraphSheet, doc: &ProjectDocument) -> Option<Hea
             )
         }
         TableArchetype::Grouped(g) => {
-            let col_labels: Vec<String> = g.data_sets.iter().map(|d| d.title.clone()).collect();
+            let col_indices: Vec<usize> = if selected_cols.is_empty() {
+                (0..g.data_sets.len()).collect()
+            } else {
+                resolve_selected_heatmap_cols(selected_cols, g.data_sets.len())
+            };
+            if col_indices.is_empty() {
+                return None;
+            }
+            let col_labels: Vec<String> = col_indices.iter().filter_map(|&c| g.data_sets.get(c).map(|d| d.title.clone())).collect();
             let nrows = g.row_count();
             let row_labels =
                 (0..nrows).map(|r| g.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("R{}", r + 1))).collect();
             let values = (0..nrows)
                 .map(|r| {
-                    (0..g.data_sets.len())
-                        .map(|c| {
+                    col_indices
+                        .iter()
+                        .map(|&c| {
                             let reps: Vec<f64> = g.active_replicates(r, c).into_iter().filter(|x| x.is_finite()).collect();
                             if reps.is_empty() {
                                 None
@@ -1887,8 +2113,8 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     });
     let (fc_neg, fc_pos, default_p_thresh) = volcano_thresholds(&graph.spec);
     let p_thresh = if graph.spec.y_axis.thresholds.is_empty() { mr_threshold.unwrap_or(default_p_thresh) } else { default_p_thresh };
-    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.0), b.max(p.0)));
-    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.1), b.max(p.1)));
+    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.x), b.max(p.x)));
+    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y), b.max(p.y)));
     let x_abs = x_min.abs().max(x_max.abs()).max(fc_pos).max(1.0) * 1.1;
     let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, -x_abs, x_abs);
     let (y_lo, y_hi) = resolve_axis_domain(&graph.spec.y_axis, 0.0_f64.min(y_min), (y_max.max(p_thresh + 0.5)) * 1.1);
@@ -1939,14 +2165,15 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
     let up_col = Rgba8::rgb(213, 94, 0);
     let down_col = Rgba8::rgb(0, 114, 178);
     let ns_col = Rgba8::rgb(145, 153, 163);
-    for (idx, (fc, neg_log_p, opt_lbl)) in pts.iter().enumerate() {
-        let (Some(px), Some(py)) = (x_map.map_value(*fc, r.x, r.right()), y_map.map_value(*neg_log_p, r.bottom(), r.y)) else {
+    for pt in &pts {
+        let (fc, neg_log_p) = (pt.x, pt.y);
+        let (Some(px), Some(py)) = (x_map.map_value(fc, r.x, r.right()), y_map.map_value(neg_log_p, r.bottom(), r.y)) else {
             continue;
         };
-        let is_sig = *neg_log_p >= p_thresh;
-        let col = if is_sig && *fc >= fc_pos {
+        let is_sig = neg_log_p >= p_thresh;
+        let col = if is_sig && fc >= fc_pos {
             up_col
-        } else if is_sig && *fc <= fc_neg {
+        } else if is_sig && fc <= fc_neg {
             down_col
         } else {
             ns_col
@@ -1959,13 +2186,22 @@ fn compile_volcano(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartS
             stroke_color: Rgba8::WHITE,
             stroke_width_pt: 0.4,
         };
-        let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) else {
+        let Some(marker) = crate::resolve_overridden_marker_for_cell(&graph.spec, pt.source.col, pt.source.row, Some(pt.source.subcol), base_marker)
+        else {
             continue;
         };
-        emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+        let center_pt = PointPt::new(px, py);
+        emit_marker(scene, center_pt, marker, Some(r));
+        scene.plotted_points.push(PlottedPointMeta {
+            center_pt,
+            radius_pt: (marker.size_pt * 0.5).max(3.0),
+            source_cell: pt.source.clone(),
+            series_label: pt.series_label.clone(),
+            value_summary: format!("log2FC={}, -log10P={}", format_point_value(fc), format_point_value(neg_log_p)),
+        });
         if is_sig
-            && (*fc >= fc_pos || *fc <= fc_neg)
-            && let Some(lbl) = opt_lbl
+            && (fc >= fc_pos || fc <= fc_neg)
+            && let Some(lbl) = &pt.label
         {
             scene.primitives.push(ScenePrimitive::Text(PositionedText {
                 rich: parse_markup(lbl),
@@ -2017,11 +2253,40 @@ fn volcano_thresholds(spec: &GraphSpec) -> (f64, f64, f64) {
     (neg_fc, pos_fc, p_cut)
 }
 
-fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64, Option<String>)> {
+fn parse_source_row_hint(tab: &ResultTab, tab_idx: usize, ds_opt: Option<&DataSheet>) -> usize {
+    if let Some(lbl) = tab.row_labels.get(tab_idx).map(|s| s.trim())
+        && !lbl.is_empty()
+    {
+        if let Some(ds) = ds_opt {
+            let titles: &[String] = match &ds.archetype {
+                TableArchetype::Xy(xy) => &xy.row_titles,
+                TableArchetype::Column(col) => &col.row_titles,
+                TableArchetype::Grouped(g) => &g.row_titles,
+                TableArchetype::MultipleVariables(mv) => &mv.row_titles,
+                _ => &[],
+            };
+            if let Some(pos) = titles.iter().position(|t| t.trim() == lbl) {
+                return pos;
+            }
+        }
+        if let Some(num) = lbl.strip_prefix("Row ").and_then(|rest| rest.trim().parse::<usize>().ok())
+            && num >= 1
+        {
+            return num - 1;
+        }
+    }
+    tab_idx
+}
+
+fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint> {
     if let Some(res) = find_matching_result_where(graph, doc, |r| matches!(r.analysis.kind, AnalysisKind::MultipleRowTTests(_)))
+        .or_else(|| doc.result_sheet(&graph.spec.primary_source_sheet_id))
         && (matches!(res.analysis.kind, AnalysisKind::MultipleRowTTests(_)) || doc.result_sheet(&graph.spec.primary_source_sheet_id).is_some())
     {
-        let from_pairs: Vec<(f64, f64, Option<String>)> = res
+        let ds_id = res.analysis.source_sheet_id.clone();
+        let ds_opt = doc.data_sheet(&ds_id);
+        let default_col = graph.spec.series.first().map_or(0, |s| s.data_set_index);
+        let from_pairs: Vec<DiagPoint> = res
             .pairwise_comparisons
             .iter()
             .filter_map(|rec| {
@@ -2031,7 +2296,14 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64
                 }
                 let neg_log_p = -crate::clamp_f64_safe(rec.raw_p_or_q, 1e-300, 1.0).log10();
                 let lbl = (!rec.label_a.trim().is_empty()).then(|| rec.label_a.clone());
-                Some((diff, neg_log_p, lbl))
+                let series_label = lbl.clone().unwrap_or_else(|| graph.spec.title.clone());
+                Some(DiagPoint {
+                    x: diff,
+                    y: neg_log_p,
+                    label: lbl,
+                    source: SourceCellId { sheet_id: ds_id.clone(), row: rec.group_a, col: default_col, subcol: 0 },
+                    series_label,
+                })
             })
             .collect();
         if !from_pairs.is_empty() {
@@ -2053,7 +2325,7 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64
                     .or_else(|| tab.rows.first().and_then(|r| r.iter().position(|c| matches!(c, ResultCell::PValue { .. }))));
             if let (Some(dc), Some(pc)) = (diff_col, p_col) {
                 let already_neg_log = tab.column_headers.get(pc).is_some_and(|h| h.to_ascii_lowercase().contains("-log10"));
-                let from_tab: Vec<(f64, f64, Option<String>)> = tab
+                let from_tab: Vec<DiagPoint> = tab
                     .rows
                     .iter()
                     .enumerate()
@@ -2068,7 +2340,15 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64
                             return None;
                         };
                         let lbl = tab.row_labels.get(i).filter(|s| !s.trim().is_empty()).cloned();
-                        Some((diff, neg_log_p, lbl))
+                        let row_idx = parse_source_row_hint(tab, i, ds_opt);
+                        let series_label = lbl.clone().unwrap_or_else(|| graph.spec.title.clone());
+                        Some(DiagPoint {
+                            x: diff,
+                            y: neg_log_p,
+                            label: lbl,
+                            source: SourceCellId { sheet_id: ds_id.clone(), row: row_idx, col: default_col, subcol: 0 },
+                            series_label,
+                        })
                     })
                     .collect();
                 if !from_tab.is_empty() {
@@ -2090,21 +2370,30 @@ fn extract_volcano_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64
                         if let (Some(x), Some(y)) = (xc.cells.get(r).and_then(|c| c.active_number()), yc.cells.get(r).and_then(|c| c.active_number()))
                         {
                             let lbl = lbl_idx.and_then(|li| mv.variables.get(li)).and_then(|c| cell_token(c, r));
-                            raw.push((x, y, lbl));
+                            raw.push(DiagPoint {
+                                x,
+                                y,
+                                label: lbl,
+                                source: SourceCellId { sheet_id: ds.id.clone(), row: r, col: y_idx, subcol: 0 },
+                                series_label: yc.title.clone(),
+                            });
                         }
                     }
                     let y_title_low = yc.title.to_ascii_lowercase();
-                    let looks_raw_p = !y_title_low.contains("log") && !raw.is_empty() && raw.iter().all(|(_, y, _)| *y > 0.0 && *y <= 1.0);
+                    let looks_raw_p = !y_title_low.contains("log") && !raw.is_empty() && raw.iter().all(|pt| pt.y > 0.0 && pt.y <= 1.0);
                     if looks_raw_p {
-                        for (_, y, _) in &mut raw {
-                            *y = -y.max(1e-300).log10();
+                        for pt in &mut raw {
+                            pt.y = -pt.y.max(1e-300).log10();
                         }
                     }
                     return raw;
                 }
             }
             TableArchetype::Xy(xy) => {
-                return xy.active_xy_pairs(0).into_iter().map(|(x, y)| (x, y, None)).collect();
+                return active_xy_pairs_with_sources(&ds.id, xy, 0)
+                    .into_iter()
+                    .map(|(x, y, source, series_label)| DiagPoint { x, y, label: None, source, series_label })
+                    .collect();
             }
             _ => {}
         }
@@ -2121,8 +2410,8 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
         return Ok(());
     };
 
-    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &(x, _)| (a.min(x), b.max(x)));
-    let (mut y_min, mut y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &(_, y)| (a.min(y), b.max(y)));
+    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.x), b.max(p.x)));
+    let (mut y_min, mut y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y), b.max(p.y)));
     y_min = y_min.min(loa_lo);
     y_max = y_max.max(loa_hi);
 
@@ -2150,7 +2439,8 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
     draw_cartesian_frame(scene, &frame);
 
     let color = graph.spec.palette.color_at(0);
-    for (idx, &(avg, diff)) in pts.iter().enumerate() {
+    for pt in &pts {
+        let (avg, diff) = (pt.x, pt.y);
         if let (Some(px), Some(py)) = (x_map.map_value(avg, r.x, r.right()), y_map.map_value(diff, r.bottom(), r.y)) {
             let base_marker = MarkerStyle {
                 shape: MarkerShape::Circle,
@@ -2160,8 +2450,18 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
                 stroke_color: Rgba8::WHITE,
                 stroke_width_pt: 0.6,
             };
-            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
-                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            if let Some(marker) =
+                crate::resolve_overridden_marker_for_cell(&graph.spec, pt.source.col, pt.source.row, Some(pt.source.subcol), base_marker)
+            {
+                let center_pt = PointPt::new(px, py);
+                emit_marker(scene, center_pt, marker, Some(r));
+                scene.plotted_points.push(PlottedPointMeta {
+                    center_pt,
+                    radius_pt: (marker.size_pt * 0.5).max(3.0),
+                    source_cell: pt.source.clone(),
+                    series_label: pt.series_label.clone(),
+                    value_summary: format!("Average={}, Difference={}", format_point_value(avg), format_point_value(diff)),
+                });
             }
         }
     }
@@ -2196,7 +2496,7 @@ fn compile_bland_altman(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut C
 }
 
 struct BlandAltmanData {
-    points: Vec<(f64, f64)>,
+    points: Vec<DiagPoint>,
     bias: f64,
     loa_lo: f64,
     loa_hi: f64,
@@ -2220,25 +2520,37 @@ fn find_tab_row_value(res: &ResultSheet, label_pred: impl Fn(&str) -> bool) -> O
     None
 }
 
-fn extract_bland_altman_pairs_from_ds(ds: &DataSheet, col_a: usize, col_b: usize, graph: &GraphSheet) -> Option<(Vec<f64>, Vec<f64>)> {
+struct BlandAltmanExtractedPairs {
+    sources: Vec<SourceCellId>,
+    a: Vec<f64>,
+    b: Vec<f64>,
+    series_label: String,
+}
+
+fn extract_bland_altman_pairs_from_ds(ds: &DataSheet, col_a: usize, col_b: usize, graph: &GraphSheet) -> Option<BlandAltmanExtractedPairs> {
     match &ds.archetype {
         TableArchetype::Column(col) if col.data_sets.len() >= 2 => {
+            let mut sources = Vec::new();
             let mut va = Vec::new();
             let mut vb = Vec::new();
+            let label = col.data_sets.get(col_a).map_or_else(|| String::from("Method A"), |d| d.title.clone());
             for r in 0..col.row_count() {
                 if let (Some(x), Some(y)) = (
                     col.data_sets.get(col_a).and_then(|d| d.cells.get(r)).and_then(|s| s.first()).and_then(|c| c.active_number()),
                     col.data_sets.get(col_b).and_then(|d| d.cells.get(r)).and_then(|s| s.first()).and_then(|c| c.active_number()),
                 ) {
+                    sources.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: col_a, subcol: 0 });
                     va.push(x);
                     vb.push(y);
                 }
             }
-            Some((va, vb))
+            Some(BlandAltmanExtractedPairs { sources, a: va, b: vb, series_label: label })
         }
         TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 2 => {
             let xi = graph.spec.multivariate.as_ref().map_or(col_a, |m| m.x_column);
             let yi = graph.spec.multivariate.as_ref().map_or(col_b, |m| m.y_column);
+            let label = mv.variables.get(xi).map_or_else(|| String::from("Method A"), |v| v.title.clone());
+            let mut sources = Vec::new();
             let mut va = Vec::new();
             let mut vb = Vec::new();
             for r in 0..mv.row_count() {
@@ -2246,13 +2558,26 @@ fn extract_bland_altman_pairs_from_ds(ds: &DataSheet, col_a: usize, col_b: usize
                     mv.variables.get(xi).and_then(|v| v.cells.get(r)).and_then(|c| c.active_number()),
                     mv.variables.get(yi).and_then(|v| v.cells.get(r)).and_then(|c| c.active_number()),
                 ) {
+                    sources.push(SourceCellId { sheet_id: ds.id.clone(), row: r, col: xi, subcol: 0 });
                     va.push(x);
                     vb.push(y);
                 }
             }
-            Some((va, vb))
+            Some(BlandAltmanExtractedPairs { sources, a: va, b: vb, series_label: label })
         }
-        TableArchetype::Xy(xy) => Some(xy.active_xy_pairs(col_a).into_iter().unzip()),
+        TableArchetype::Xy(xy) => {
+            let pairs = active_xy_pairs_with_sources(&ds.id, xy, col_a);
+            let label = xy.data_sets.get(col_a).map_or_else(|| String::from("Method A"), |d| d.title.clone());
+            let mut sources = Vec::with_capacity(pairs.len());
+            let mut va = Vec::with_capacity(pairs.len());
+            let mut vb = Vec::with_capacity(pairs.len());
+            for (x, y, src, _) in pairs {
+                sources.push(src);
+                va.push(x);
+                vb.push(y);
+            }
+            Some(BlandAltmanExtractedPairs { sources, a: va, b: vb, series_label: label })
+        }
         _ => None,
     }
 }
@@ -2267,14 +2592,14 @@ fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument) -> Optio
             AnalysisKind::BlandAltman(ba) => (ba.column_a, ba.column_b, ba.percent_difference),
             _ => (0, 1, title_pct_diff),
         };
-        let mut pts: Vec<(f64, f64)> = res
+        let mut raw_pts: Vec<(f64, f64)> = res
             .fitted_curves
             .iter()
             .find(|c| c.equation_id == "BlandAltman")
             .map(|c| c.points.iter().filter(|p| p.x.is_finite() && p.y.is_finite()).map(|p| (p.x, p.y)).collect())
             .unwrap_or_default();
 
-        if pts.is_empty()
+        if raw_pts.is_empty()
             && let Some(tab) = res
                 .tabs
                 .iter()
@@ -2283,7 +2608,7 @@ fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument) -> Optio
         {
             let x_col = find_header_col(&tab.column_headers, |h| h.contains("average") || h.contains("mean")).unwrap_or(0);
             let y_col = find_header_col(&tab.column_headers, |h| h.contains("difference") || h.contains("diff")).unwrap_or(1);
-            pts = tab.rows.iter().filter_map(|row| Some((result_cell_num(row.get(x_col)?)?, result_cell_num(row.get(y_col)?)?))).collect();
+            raw_pts = tab.rows.iter().filter_map(|row| Some((result_cell_num(row.get(x_col)?)?, result_cell_num(row.get(y_col)?)?))).collect();
         }
 
         let mut bias_opt = find_scalar_ci(res, |k| k == "bias").or_else(|| find_tab_row_value(res, |l| l == "bias"));
@@ -2292,21 +2617,22 @@ fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument) -> Optio
         let mut loa_hi_opt = find_scalar_ci(res, |k| k == "loaupper" || k == "loa_upper")
             .or_else(|| find_tab_row_value(res, |l| l.contains("upper") && l.contains("loa")));
 
-        if (pts.is_empty() || bias_opt.is_none() || loa_lo_opt.is_none() || loa_hi_opt.is_none())
-            && let Some(ds) = doc.data_sheet(&res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc))
-            && let Some((a, b)) = extract_bland_altman_pairs_from_ds(ds, col_a, col_b, graph)
-            && let Ok(ba) = bland_altman(&a, &b, spec_pct, res.analysis.confidence_level)
+        let ds_opt = doc.data_sheet(&res.analysis.source_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+        let ds_pairs = ds_opt.and_then(|ds| extract_bland_altman_pairs_from_ds(ds, col_a, col_b, graph));
+        if (raw_pts.is_empty() || bias_opt.is_none() || loa_lo_opt.is_none() || loa_hi_opt.is_none())
+            && let Some(ref extracted) = ds_pairs
+            && let Ok(ba) = bland_altman(&extracted.a, &extracted.b, spec_pct, res.analysis.confidence_level)
         {
-            if pts.is_empty() {
-                pts = ba.points;
+            if raw_pts.is_empty() {
+                raw_pts = ba.points;
             }
             bias_opt = bias_opt.or(Some(ba.bias));
             loa_lo_opt = loa_lo_opt.or(Some(ba.loa_lower));
             loa_hi_opt = loa_hi_opt.or(Some(ba.loa_upper));
         }
 
-        if pts.len() >= 2 {
-            let diffs: Vec<f64> = pts.iter().map(|p| p.1).collect();
+        if raw_pts.len() >= 2 {
+            let diffs: Vec<f64> = raw_pts.iter().map(|p| p.1).collect();
             let bias = bias_opt.unwrap_or_else(|| diffs.iter().sum::<f64>() / (diffs.len() as f64));
             let sd_fallback = sample_sd(&diffs).unwrap_or(0.0);
             let sd_bias = find_scalar_ci(res, |k| k == "sdbias" || k == "sd_bias")
@@ -2314,29 +2640,60 @@ fn extract_bland_altman_data(graph: &GraphSheet, doc: &ProjectDocument) -> Optio
                 .unwrap_or(sd_fallback);
             let loa_lo = loa_lo_opt.unwrap_or(bias - 1.96 * sd_bias);
             let loa_hi = loa_hi_opt.unwrap_or(bias + 1.96 * sd_bias);
-            return Some(BlandAltmanData { points: pts, bias, loa_lo, loa_hi, percent_difference: spec_pct });
+            let fallback_id = res.analysis.source_sheet_id.clone();
+            let points: Vec<DiagPoint> = match ds_pairs {
+                Some(extracted) if extracted.sources.len() == raw_pts.len() => raw_pts
+                    .into_iter()
+                    .zip(extracted.sources)
+                    .map(|((x, y), source)| DiagPoint { x, y, label: None, source, series_label: extracted.series_label.clone() })
+                    .collect(),
+                Some(extracted) => raw_pts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, (x, y))| DiagPoint {
+                        x,
+                        y,
+                        label: None,
+                        source: SourceCellId { sheet_id: fallback_id.clone(), row: idx, col: col_a, subcol: 0 },
+                        series_label: extracted.series_label.clone(),
+                    })
+                    .collect(),
+                None => raw_pts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(idx, (x, y))| DiagPoint {
+                        x,
+                        y,
+                        label: None,
+                        source: SourceCellId { sheet_id: fallback_id.clone(), row: idx, col: col_a, subcol: 0 },
+                        series_label: graph.spec.title.clone(),
+                    })
+                    .collect(),
+            };
+            return Some(BlandAltmanData { points, bias, loa_lo, loa_hi, percent_difference: spec_pct });
         }
     }
 
     let ds = resolve_source_data_sheet(graph, doc)?;
     if let TableArchetype::Xy(xy) = &ds.archetype {
-        let pairs = xy.active_xy_pairs(0);
+        let pairs = active_xy_pairs_with_sources(&ds.id, xy, 0);
         if graph.spec.y_axis.title.to_ascii_lowercase().contains("diff") && pairs.len() >= 2 {
             let diffs: Vec<f64> = pairs.iter().map(|p| p.1).collect();
             let bias = diffs.iter().sum::<f64>() / (diffs.len() as f64);
             let sd = sample_sd(&diffs).unwrap_or(0.0);
-            return Some(BlandAltmanData {
-                points: pairs,
-                bias,
-                loa_lo: bias - 1.96 * sd,
-                loa_hi: bias + 1.96 * sd,
-                percent_difference: title_pct_diff,
-            });
+            let points = pairs.into_iter().map(|(x, y, source, series_label)| DiagPoint { x, y, label: None, source, series_label }).collect();
+            return Some(BlandAltmanData { points, bias, loa_lo: bias - 1.96 * sd, loa_hi: bias + 1.96 * sd, percent_difference: title_pct_diff });
         }
     }
-    let (a, b) = extract_bland_altman_pairs_from_ds(ds, 0, 1, graph)?;
-    let ba = bland_altman(&a, &b, title_pct_diff, ConfidenceLevel::DEFAULT_95).ok()?;
-    Some(BlandAltmanData { points: ba.points, bias: ba.bias, loa_lo: ba.loa_lower, loa_hi: ba.loa_upper, percent_difference: title_pct_diff })
+    let extracted = extract_bland_altman_pairs_from_ds(ds, 0, 1, graph)?;
+    let ba = bland_altman(&extracted.a, &extracted.b, title_pct_diff, ConfidenceLevel::DEFAULT_95).ok()?;
+    let points = ba
+        .points
+        .into_iter()
+        .zip(extracted.sources)
+        .map(|((x, y), source)| DiagPoint { x, y, label: None, source, series_label: extracted.series_label.clone() })
+        .collect();
+    Some(BlandAltmanData { points, bias: ba.bias, loa_lo: ba.loa_lower, loa_hi: ba.loa_upper, percent_difference: title_pct_diff })
 }
 
 // 2d. ROC Curve (Sensitivity vs 1-Specificity + Diagonal + AUC)
@@ -2780,8 +3137,8 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
         return Ok(());
     }
 
-    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &(x, _)| (a.min(x), b.max(x)));
-    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &(_, y)| (a.min(y).min(0.0), b.max(y).max(0.0)));
+    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.x), b.max(p.x)));
+    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y).min(0.0), b.max(p.y).max(0.0)));
     let x_pad = (x_max - x_min).max(1.0) * 0.08;
     let y_pad = (y_max - y_min).max(1.0) * 0.12;
     let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, x_min - x_pad, x_max + x_pad);
@@ -2817,7 +3174,8 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
     }
 
     let color = graph.spec.palette.color_at(0);
-    for (idx, &(xv, yv)) in pts.iter().enumerate() {
+    for pt in &pts {
+        let (xv, yv) = (pt.x, pt.y);
         if let (Some(px), Some(py)) = (x_map.map_value(xv, r.x, r.right()), y_map.map_value(yv, r.bottom(), r.y)) {
             let base_marker = MarkerStyle {
                 shape: MarkerShape::Circle,
@@ -2827,49 +3185,75 @@ fn compile_residual_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut 
                 stroke_color: Rgba8::WHITE,
                 stroke_width_pt: 0.5,
             };
-            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
-                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            if let Some(marker) =
+                crate::resolve_overridden_marker_for_cell(&graph.spec, pt.source.col, pt.source.row, Some(pt.source.subcol), base_marker)
+            {
+                let center_pt = PointPt::new(px, py);
+                emit_marker(scene, center_pt, marker, Some(r));
+                scene.plotted_points.push(PlottedPointMeta {
+                    center_pt,
+                    radius_pt: (marker.size_pt * 0.5).max(3.0),
+                    source_cell: pt.source.clone(),
+                    series_label: pt.series_label.clone(),
+                    value_summary: format!("Fitted={}, Residual={}", format_point_value(xv), format_point_value(yv)),
+                });
             }
         }
     }
     Ok(())
 }
 
-fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64)> {
+fn extract_residual_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint> {
     if let Some(res) = find_matching_result_where(graph, doc, |r| {
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
     {
-        let pts = extract_residuals_tab_pairs(tab, graph, doc);
+        let pts = extract_residuals_tab_points(res, tab, graph, doc);
         if !pts.is_empty() {
             return pts;
         }
     }
 
     let Some(ds) = resolve_source_data_sheet(graph, doc) else { return Vec::new() };
-    let pairs: Vec<(f64, f64)> = match &ds.archetype {
-        TableArchetype::Xy(xy) => xy.active_xy_pairs(0),
+    let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
+    let pairs_with_sources: Vec<(f64, f64, SourceCellId, String)> = match &ds.archetype {
+        TableArchetype::Xy(xy) => active_xy_pairs_with_sources(&ds.id, xy, ds_idx),
         TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 2 => {
             let xi = graph.spec.multivariate.as_ref().map_or(0, |m| m.x_column);
             let yi = graph.spec.multivariate.as_ref().map_or(1, |m| m.y_column);
-            let raw: Vec<(f64, f64)> = (0..mv.row_count())
-                .filter_map(|r| Some((mv.variables.get(xi)?.cells.get(r)?.active_number()?, mv.variables.get(yi)?.cells.get(r)?.active_number()?)))
+            let y_lbl = mv.variables.get(yi).map_or_else(|| String::from("Residual"), |v| v.title.clone());
+            let raw: Vec<(f64, f64, SourceCellId, String)> = (0..mv.row_count())
+                .filter_map(|r| {
+                    let x = mv.variables.get(xi)?.cells.get(r)?.active_number().filter(|v| v.is_finite())?;
+                    let y = mv.variables.get(yi)?.cells.get(r)?.active_number().filter(|v| v.is_finite())?;
+                    Some((x, y, SourceCellId { sheet_id: ds.id.clone(), row: r, col: yi, subcol: 0 }, y_lbl.clone()))
+                })
                 .collect();
-            let y_title_low = mv.variables.get(yi).map_or("", |v| v.title.as_str()).to_ascii_lowercase();
+            let y_title_low = y_lbl.to_ascii_lowercase();
             if y_title_low.contains("resid") {
-                return raw;
+                return raw.into_iter().map(|(x, y, source, series_label)| DiagPoint { x, y, label: None, source, series_label }).collect();
             }
             raw
         }
         TableArchetype::Column(col) => {
-            let vals: Vec<f64> =
-                col.data_sets.first().map_or_else(Vec::new, |d| d.cells.iter().filter_map(|s| s.first().and_then(|c| c.active_number())).collect());
+            let (val_sources, lbl) = collect_ds_active_values_with_sources(ds, ds_idx);
+            let vals: Vec<f64> = val_sources.iter().map(|(v, _)| *v).collect();
             let mean = if vals.is_empty() { 0.0 } else { vals.iter().sum::<f64>() / (vals.len() as f64) };
-            return vals.into_iter().enumerate().map(|(i, v)| ((i + 1) as f64, v - mean)).collect();
+            let _ = col;
+            return val_sources
+                .into_iter()
+                .enumerate()
+                .map(|(i, (v, source))| DiagPoint { x: (i + 1) as f64, y: v - mean, label: None, source, series_label: lbl.clone() })
+                .collect();
         }
         _ => Vec::new(),
     };
-    ols_residuals(&pairs)
+    let raw_pairs: Vec<(f64, f64)> = pairs_with_sources.iter().map(|(x, y, _, _)| (*x, *y)).collect();
+    ols_residuals(&raw_pairs)
+        .into_iter()
+        .zip(pairs_with_sources)
+        .map(|((fitted, resid), (_, _, source, series_label))| DiagPoint { x: fitted, y: resid, label: None, source, series_label })
+        .collect()
 }
 
 fn ols_residuals(pairs: &[(f64, f64)]) -> Vec<(f64, f64)> {
@@ -2897,16 +3281,16 @@ fn ols_residuals(pairs: &[(f64, f64)]) -> Vec<(f64, f64)> {
 
 fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut ChartScene) -> Result<(), ChartError> {
     let mut pts = extract_qq_points(graph, doc);
-    pts.retain(|(x, y)| x.is_finite() && y.is_finite());
+    pts.retain(|pt| pt.x.is_finite() && pt.y.is_finite());
     if pts.len() < 3 {
         scene.warnings.push(ChartWarning::new("insufficient_qq_sample", "at least 3 finite observations required for Normal Q-Q plot"));
         draw_empty_open_frame(scene);
         return Ok(());
     }
 
-    pts.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.total_cmp(&b.1)));
-    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &(x, _)| (a.min(x), b.max(x)));
-    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &(_, y)| (a.min(y), b.max(y)));
+    pts.sort_by(|a, b| a.x.total_cmp(&b.x).then_with(|| a.y.total_cmp(&b.y)));
+    let (x_min, x_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.x), b.max(p.x)));
+    let (y_min, y_max) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), p| (a.min(p.y), b.max(p.y)));
     let x_pad = (x_max - x_min).max(1.0) * 0.1;
     let y_pad = (y_max - y_min).max(1.0) * 0.1;
     let (x_lo, x_hi) = resolve_axis_domain(&graph.spec.x_axis, x_min - x_pad, x_max + x_pad);
@@ -2929,8 +3313,8 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
     let frame = CartesianFrame { spec: &frame_spec, x_ticks: &x_ticks, y_ticks: &y_ticks, x_map, y_map, max_y_label_w: max_y_w, doc };
     draw_cartesian_frame(scene, &frame);
 
-    let mut xs: Vec<f64> = pts.iter().map(|p| p.0).collect();
-    let mut ys: Vec<f64> = pts.iter().map(|p| p.1).collect();
+    let mut xs: Vec<f64> = pts.iter().map(|p| p.x).collect();
+    let mut ys: Vec<f64> = pts.iter().map(|p| p.y).collect();
     xs.sort_by(f64::total_cmp);
     ys.sort_by(f64::total_cmp);
     if let (Some((qx1, _, qx3)), Some((qy1, _, qy3))) = (quartiles_hinge(&xs), quartiles_hinge(&ys))
@@ -2954,7 +3338,8 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
     }
 
     let color = graph.spec.palette.color_at(0);
-    for (idx, &(z, y)) in pts.iter().enumerate() {
+    for pt in &pts {
+        let (z, y) = (pt.x, pt.y);
         if let (Some(px), Some(py)) = (x_map.map_value(z, r.x, r.right()), y_map.map_value(y, r.bottom(), r.y)) {
             let base_marker = MarkerStyle {
                 shape: MarkerShape::Circle,
@@ -2964,8 +3349,18 @@ fn compile_normal_qq_plot(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut
                 stroke_color: Rgba8::WHITE,
                 stroke_width_pt: 0.5,
             };
-            if let Some(marker) = crate::resolve_overridden_marker(&graph.spec, 0, idx, base_marker) {
-                emit_marker(scene, PointPt::new(px, py), marker, Some(r));
+            if let Some(marker) =
+                crate::resolve_overridden_marker_for_cell(&graph.spec, pt.source.col, pt.source.row, Some(pt.source.subcol), base_marker)
+            {
+                let center_pt = PointPt::new(px, py);
+                emit_marker(scene, center_pt, marker, Some(r));
+                scene.plotted_points.push(PlottedPointMeta {
+                    center_pt,
+                    radius_pt: (marker.size_pt * 0.5).max(3.0),
+                    source_cell: pt.source.clone(),
+                    series_label: pt.series_label.clone(),
+                    value_summary: format!("Theoretical={}, Sample={}", format_point_value(z), format_point_value(y)),
+                });
             }
         }
     }
@@ -3003,27 +3398,30 @@ fn selected_dataset_label_in_tab(tab: &ResultTab, ds_col: Option<usize>, graph: 
     seen.get(ds_idx).or_else(|| seen.first()).cloned()
 }
 
-fn values_to_qq_pairs(mut vals: Vec<f64>) -> Vec<(f64, f64)> {
-    vals.retain(|v| v.is_finite());
-    vals.sort_by(f64::total_cmp);
+fn values_to_qq_diag_points(mut vals: Vec<(f64, SourceCellId, String)>) -> Vec<DiagPoint> {
+    vals.retain(|(v, _, _)| v.is_finite());
+    vals.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.row.cmp(&b.1.row)).then_with(|| a.1.subcol.cmp(&b.1.subcol)));
     let n = vals.len();
     if n < 3 {
         return Vec::new();
     }
     vals.into_iter()
         .enumerate()
-        .filter_map(|(i, y)| {
+        .filter_map(|(i, (y, source, series_label))| {
             let p = ((i as f64) + 0.5) / (n as f64);
             let z = norm_ppf(p).ok()?;
-            Some((z, y))
+            Some(DiagPoint { x: z, y, label: None, source, series_label })
         })
         .collect()
 }
 
-fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64)> {
-    // 1. Prefer explicit ResultTabKind::NormalQq (either DescriptiveStats or Fit Q-Q tab).
-    if let Some(res) = find_matching_result_where(graph, doc, |r| r.tabs.iter().any(|t| t.kind == ResultTabKind::NormalQq))
-        && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::NormalQq)
+fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<DiagPoint> {
+    let ds_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
+
+    // 1. Prefer explicit ResultTabKind::NormalQq (excluding BlandAltman).
+    if let Some(res) = find_matching_result_where(graph, doc, |r| {
+        !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::NormalQq)
+    }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::NormalQq)
     {
         let ds_col = find_header_col(&tab.column_headers, |h| h == "data set" || h == "dataset" || h == "group");
         let target_label = selected_dataset_label_in_tab(tab, ds_col, graph, doc);
@@ -3066,38 +3464,80 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64
             }
         };
 
+        let fallback_sheet_id = res.analysis.source_sheet_id.clone();
+        let ds_opt = doc.data_sheet(&fallback_sheet_id).or_else(|| resolve_source_data_sheet(graph, doc));
+        let ds_col_idx = match ds_opt.map(|d| &d.archetype) {
+            Some(TableArchetype::MultipleVariables(_)) => graph.spec.multivariate.as_ref().map_or(ds_idx, |m| m.x_column),
+            _ => ds_idx,
+        };
+        let mut sorted_ds_vals = ds_opt.map_or_else(|| (Vec::new(), String::new()), |ds| collect_ds_active_values_with_sources(ds, ds_col_idx));
+        sorted_ds_vals.0.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| a.1.row.cmp(&b.1.row)).then_with(|| a.1.subcol.cmp(&b.1.subcol)));
+        let series_label =
+            if sorted_ds_vals.1.is_empty() { target_label.clone().unwrap_or_else(|| graph.spec.title.clone()) } else { sorted_ds_vals.1.clone() };
+
         if let (Some(ec), Some(oc)) = (xc, yc) {
-            let pairs: Vec<(f64, f64)> = tab
+            let pairs: Vec<(usize, f64, f64)> = tab
                 .rows
                 .iter()
-                .filter_map(|row| {
+                .enumerate()
+                .filter_map(|(i, row)| {
                     if let (Some(dc), Some(lbl)) = (ds_col, target_label.as_deref())
                         && matches!(row.get(dc), Some(ResultCell::Text(t)) if t != lbl)
                     {
                         return None;
                     }
-                    Some((result_cell_num(row.get(ec)?)?, result_cell_num(row.get(oc)?)?))
+                    Some((i, result_cell_num(row.get(ec)?)?, result_cell_num(row.get(oc)?)?))
                 })
                 .collect();
             if pairs.len() >= 3 {
-                return pairs;
+                let can_zip_sorted = sorted_ds_vals.0.len() == pairs.len()
+                    && sorted_ds_vals.0.iter().zip(pairs.iter()).all(|((dv, _), (_, _, obs))| (dv - obs).abs() <= 1e-6 * dv.abs().max(1.0));
+                return pairs
+                    .into_iter()
+                    .enumerate()
+                    .map(|(k, (tab_i, exp, obs))| {
+                        let source = if can_zip_sorted {
+                            sorted_ds_vals.0[k].1.clone()
+                        } else {
+                            SourceCellId { sheet_id: fallback_sheet_id.clone(), row: tab_i, col: ds_col_idx, subcol: 0 }
+                        };
+                        DiagPoint { x: exp, y: obs, label: None, source, series_label: series_label.clone() }
+                    })
+                    .collect();
             }
         } else if let Some(oc) = yc {
-            let vals: Vec<f64> = tab
+            let vals: Vec<(usize, f64)> = tab
                 .rows
                 .iter()
-                .filter_map(|row| {
+                .enumerate()
+                .filter_map(|(i, row)| {
                     if let (Some(dc), Some(lbl)) = (ds_col, target_label.as_deref())
                         && matches!(row.get(dc), Some(ResultCell::Text(t)) if t != lbl)
                     {
                         return None;
                     }
-                    result_cell_num(row.get(oc)?)
+                    Some((i, result_cell_num(row.get(oc)?)?))
                 })
                 .collect();
-            let pairs = values_to_qq_pairs(vals);
-            if pairs.len() >= 3 {
-                return pairs;
+            if vals.len() >= 3 {
+                let mut sorted_raw = sorted_ds_vals.0.clone();
+                let mut tab_sorted: Vec<(usize, f64)> = vals.clone();
+                tab_sorted.sort_by(|a, b| a.1.total_cmp(&b.1));
+                let can_zip = sorted_raw.len() == tab_sorted.len()
+                    && sorted_raw.iter().zip(tab_sorted.iter()).all(|((dv, _), (_, ov))| (dv - ov).abs() <= 1e-6 * dv.abs().max(1.0));
+                let inputs: Vec<(f64, SourceCellId, String)> = if can_zip {
+                    sorted_raw.drain(..).map(|(v, src)| (v, src, series_label.clone())).collect()
+                } else {
+                    vals.into_iter()
+                        .map(|(tab_i, v)| {
+                            (v, SourceCellId { sheet_id: fallback_sheet_id.clone(), row: tab_i, col: ds_col_idx, subcol: 0 }, series_label.clone())
+                        })
+                        .collect()
+                };
+                let pts = values_to_qq_diag_points(inputs);
+                if pts.len() >= 3 {
+                    return pts;
+                }
             }
         }
     }
@@ -3107,8 +3547,9 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64
         !matches!(r.analysis.kind, AnalysisKind::BlandAltman(_)) && r.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals)
     }) && let Some(tab) = res.tabs.iter().find(|t| t.kind == ResultTabKind::Residuals)
     {
-        let vals: Vec<f64> = extract_residuals_tab_pairs(tab, graph, doc).into_iter().map(|(_, resid)| resid).collect();
-        let pairs = values_to_qq_pairs(vals);
+        let vals: Vec<(f64, SourceCellId, String)> =
+            extract_residuals_tab_points(res, tab, graph, doc).into_iter().map(|pt| (pt.y, pt.source, pt.series_label)).collect();
+        let pairs = values_to_qq_diag_points(vals);
         if pairs.len() >= 3 {
             return pairs;
         }
@@ -3116,25 +3557,14 @@ fn extract_qq_points(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<(f64, f64
 
     // 3. Fallback to raw DataSheet observations.
     let Some(ds) = resolve_source_data_sheet(graph, doc) else { return Vec::new() };
-    let vals = match &ds.archetype {
-        TableArchetype::Column(col) => {
-            let idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
-            col.data_sets
-                .get(idx)
-                .or_else(|| col.data_sets.first())
-                .map_or_else(Vec::new, |d| d.cells.iter().filter_map(|s| s.first().and_then(|c| c.active_number())).collect())
-        }
-        TableArchetype::MultipleVariables(mv) => {
-            let idx = graph.spec.multivariate.as_ref().map_or(0, |m| m.x_column);
-            mv.variables
-                .get(idx)
-                .or_else(|| mv.variables.first())
-                .map_or_else(Vec::new, |v| v.cells.iter().filter_map(|c| c.active_number()).collect())
-        }
-        TableArchetype::Xy(xy) => xy.active_xy_pairs(0).into_iter().map(|p| p.1).collect(),
-        _ => Vec::new(),
+    let target_col = match &ds.archetype {
+        TableArchetype::MultipleVariables(_) => graph.spec.multivariate.as_ref().map_or(ds_idx, |m| m.x_column),
+        _ => ds_idx,
     };
-    values_to_qq_pairs(vals)
+    let (val_sources, label) = collect_ds_active_values_with_sources(ds, target_col);
+    let series_label = if label.is_empty() { graph.spec.title.clone() } else { label };
+    let tagged = val_sources.into_iter().map(|(v, src)| (v, src, series_label.clone())).collect();
+    values_to_qq_diag_points(tagged)
 }
 
 // ============================================================================
