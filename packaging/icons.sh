@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Regenerate rasterized/platform icons in assets/app-icon/ from lumencraft.svg and lumencraft-small.svg.
-# Requires: resvg (or rsvg-convert), cargo (for xtask ico), and iconutil on macOS (for .icns).
+# Requires: resvg, rsvg-convert, or magick; cargo (for xtask ico); and iconutil on macOS (for .icns).
 set -euo pipefail
 # shellcheck source=env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/env.sh"
@@ -9,24 +9,28 @@ ICON_DIR="$ROOT/assets/app-icon"
 SVG="$ICON_DIR/lumencraft.svg"
 SMALL_SVG="$ICON_DIR/lumencraft-small.svg"
 APP_ID="org.lumencraft.LumenCraft"
-TMP="$(mktemp -d)"
+mkdir -p "$ROOT/target"
+TMP="$(mktemp -d "$ROOT/target/app-icons.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
-# The SVG is a full-bleed 512 tile, used as-is on Windows and Linux. macOS icons follow Apple's grid:
-# the tile is 824/1024 of the canvas with a transparent margin, so widen the viewBox around it.
+# The SVG has a transparent 512-square canvas, used as-is on Windows and Linux.
+# macOS adds the existing 824/1024 icon-grid inset by widening the viewBox.
 MAC_SVG="$TMP/mac.svg"
 sed 's/viewBox="0 0 512 512"/viewBox="-62.136 -62.136 636.272 636.272"/' "$SVG" >"$MAC_SVG"
 grep -q 'viewBox="-62.136' "$MAC_SVG" || { echo "error: $SVG has no 512 viewBox" >&2; exit 1; }
 
 render_svg() {
-  local svg="$1" size="$2" out="$3"
+  local svg="$1" size="$2" out="$3" density
   mkdir -p "$(dirname "$out")"
   if command -v resvg >/dev/null; then
     resvg -w "$size" -h "$size" "$svg" "$out" </dev/null
   elif command -v rsvg-convert >/dev/null; then
     rsvg-convert -w "$size" -h "$size" "$svg" -o "$out" </dev/null
+  elif command -v magick >/dev/null; then
+    density="$(awk -v size="$size" 'BEGIN { print size * 96 / 512 }')"
+    magick -background none -density "$density" "MSVG:$svg" -resize "${size}x${size}" "PNG32:$out" </dev/null
   else
-    echo "error: need resvg or rsvg-convert to render $svg" >&2
+    echo "error: need resvg, rsvg-convert, or magick to render $svg" >&2
     exit 1
   fi
 }

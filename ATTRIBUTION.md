@@ -4,5 +4,6 @@ The complete asset manifest is [ASSETS.md](ASSETS.md). Every non-code asset in t
 
 | Asset | Author | Source | SPDX license | Notes |
 |---|---|---|---|---|
-| `assets/app-icon/source/approved-mole.png` | LumenCraft contributors | Original approved raster artwork created for LumenCraft (1254 × 1254 px) | MIT OR Apache-2.0 | Untouched approved engraved mole holding a refractive prism reference |
-| `assets/app-icon/lumencraft.svg` | LumenCraft contributors | Vectorised from `assets/app-icon/source/approved-mole.png` for LumenCraft | MIT OR Apache-2.0 | Canonical 512x512 viewBox master app icon source |
+| `assets/app-icon/source/approved-mole.png` | LumenCraft contributors | Original approved raster artwork created for LumenCraft (1254 × 1254 px) | MIT OR Apache-2.0 | Archived former engraved mole artwork; contributor credit retained |
+| `assets/app-icon/lumencraft.svg` | LumenCraft contributors | Embeds `assets/app-icon/source/approved-seven-pane.png` for LumenCraft | MIT OR Apache-2.0 | Canonical 512x512 viewBox master app icon source |
+| `assets/app-icon/source/approved-seven-pane.png` | LumenCraft contributors | User-supplied approved seven-pane artwork for LumenCraft (1536 × 1024 px) | MIT OR Apache-2.0 | Untouched source with original transparency |

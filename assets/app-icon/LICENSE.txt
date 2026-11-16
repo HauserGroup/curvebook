@@ -1,7 +1,8 @@
 Copyright (c) 2026 LumenCraft contributors
 
-The original LumenCraft application icon artwork (`source/approved-mole.png`), traced vector
-masters (`lumencraft.svg`, `lumencraft-small.svg`), and every derived icon asset in this directory
+The original LumenCraft application icon artwork (`source/approved-seven-pane.png` and the
+archived `source/approved-mole.png`), SVG masters (`lumencraft.svg`, `lumencraft-small.svg`),
+and every derived icon asset in this directory
 (`lumencraft-1024.png`, `lumencraft-macos-512.png`, `lumencraft.icns`, `lumencraft.ico`, and
 `hicolor/`) are dual-licensed under either:
 

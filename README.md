@@ -7,7 +7,7 @@
 [Capabilities](#capabilities) · [Workspace](#workspace-layout) · [Downloads](#downloads) · [Quick Start](#quick-start) · [Docs](#documentation--implementation-guides) · [Clean-Room](#clean-room--licensing)
 
 <p align="center">
-  <img src="assets/app-icon/hicolor/256x256/apps/org.lumencraft.LumenCraft.png" alt="LumenCraft logo: an engraved mole holding a prism that splits a beam of light into a spectrum" width="160">
+  <img src="assets/app-icon/hicolor/256x256/apps/org.lumencraft.LumenCraft.png" alt="LumenCraft logo: seven coloured curved panes meeting at a central point" width="160">
 </p>
 
 **LumenCraft** is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written in pure Rust — designed for experimental scientists who work with structured replicate tables, linked statistical analyses, curve fitting, and publication-ready figures on desktop and the web.

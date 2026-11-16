@@ -1,43 +1,29 @@
 # LumenCraft Application Icons
 
-**Creature:** a dark engraved mole holding a triangular refractive prism. A white beam enters the prism and emerges as a rainbow spectrum.
+**Artwork:** seven coloured curved panes meet at a central point: cyan, green, yellow, and coral above/right; light blue, blue, and green below/left. The lower-right region is transparent.
 
-**Style:** black-and-ivory engraving with directional fur strokes, hatching, and stippling. Tight head-and-shoulders portrait on a full-bleed purple field, with the body running off the tile.
+**Source:** `source/approved-seven-pane.png` is the untouched user-approved `1536 × 1024 px` RGBA image. Preserve its original colours, proportions, and alpha channel. No opaque background is added.
 
-**Palette:** multicolour, preserving the purple background and rainbow spectrum. Representative solid colours in the master export:
+**Canvas:** `viewBox="0 0 512 512"`. The full image is fitted within the square canvas, centred vertically with transparent padding; it is neither cropped nor stretched. macOS adds the existing `824/1024` canvas inset (approximately `50 px` extra margin per side at `512 px`).
 
-| Colour | Hex | Used for |
-|---|---|---|
-| Ink | `#1a1716` | Dark fur, contours, and engraving |
-| Paper | `#f0e8d6` | Highlights, claws, snout, and prism |
-| Purple | `#512073` | Full-bleed field |
-| Red | `#f31d21` | Spectrum |
-| Orange | `#fb8802` | Spectrum |
-| Yellow | `#f8d603` | Spectrum |
-| Green | `#23b638` | Spectrum |
-| Cyan | `#03b0f5` | Spectrum |
-| Blue | `#233bd0` | Spectrum |
-| Violet | `#9b37f5` | Spectrum |
+**SVGs:** `lumencraft.svg` embeds the approved PNG as a data URI, making the export source self-contained. `lumencraft-small.svg` is an identical copy retained for existing scalable-icon consumers. These SVGs contain raster artwork, not traced vector paths, and retain the source image's resolution limit.
 
-Additional tonal colours occur in the tracing and antialiasing.
-
-**Tile:** `viewBox="0 0 512 512"`, clipped to a rounded square with `rx="112"`. Windows and Linux use the tile edge to edge. macOS uses a centred tile measuring `824/1024` of the canvas width (`412 px` tile with `50 px` transparent margins on the `512 px` canvas).
-
-**Provenance & Licence:** `source/approved-mole.png` is the untouched `1254 × 1254 px` approved raster source. `lumencraft.svg` (traced at `2048 px`) is the canonical vector for platform exports, and `lumencraft-small.svg` (traced at `1024 px`) is the lighter scalable SVG. Dual-licensed under `MIT OR Apache-2.0` (see `LICENSE.txt`).
+**Provenance & Licence:** contributed as LumenCraft app artwork under `MIT OR Apache-2.0` (see `LICENSE.txt`). The former `source/approved-mole.png` remains archived with its contributor attribution; no current export uses it.
 
 ## Files
 
 | File | What | Used by |
 |---|---|---|
-| `lumencraft.svg` | Master path-based vector, traced at 2048 px | Source for platform raster exports |
-| `lumencraft-small.svg` | Lighter path-based vector, traced at 1024 px | Linux scalable icon |
-| `lumencraft-1024.png` | Full tile, 1024 × 1024 px | Documentation and store listings |
-| `lumencraft-macos-512.png` | 512 px canvas; 412 px tile with 50 px transparent margins | Runtime macOS Dock/window icon |
+| `lumencraft.svg` | Self-contained SVG with a transparent 512 × 512 viewBox | Source for platform raster exports |
+| `lumencraft-small.svg` | Identical self-contained SVG | Linux scalable icon |
+| `lumencraft-1024.png` | 1024 × 1024 px transparent square canvas | Documentation and store listings |
+| `lumencraft-macos-512.png` | 512 px canvas with additional macOS icon-grid inset | Runtime macOS Dock/window icon asset |
 | `lumencraft.icns` | macOS icon set, 16–1024 px, including Retina representations | `cargo xtask bundle` / `packaging/macos/package.sh` (`CFBundleIconFile`) |
-| `lumencraft.ico` | Windows icon with 16, 24, 32, 48, 64, 128, and 256 px PNG entries | Embedded executable/installer icon (`apps/lumencraft/build.rs`, `packaging/windows/`) |
-| `hicolor/<size>x<size>/apps/org.lumencraft.LumenCraft.png` | PNGs at 16, 22, 24, 32, 48, 64, 96, 128, 256, and 512 px | Linux/FreeBSD theme icons, web favicons, installer art, runtime and in-app branding |
+| `lumencraft.ico` | Windows icon with 16, 24, 32, 48, 64, 128, and 256 px PNG entries | Executable/installer icon asset (`apps/lumencraft/build.rs`, `packaging/windows/`) |
+| `hicolor/<size>x<size>/apps/org.lumencraft.LumenCraft.png` | PNGs at 16, 22, 24, 32, 48, 64, 96, 128, 256, and 512 px | Linux/FreeBSD theme icons, web favicons, installer art, runtime and in-app branding assets |
 | `hicolor/scalable/apps/org.lumencraft.LumenCraft.svg` | Exact copy of `lumencraft-small.svg` | Linux/FreeBSD scalable theme icon and web favicon |
-| `source/approved-mole.png` | Untouched approved final image (1254 × 1254 px) | Original artwork reference |
+| `source/approved-seven-pane.png` | Untouched approved image (1536 × 1024 px) | Original artwork reference |
+| `source/approved-mole.png` | Archived former artwork (1254 × 1254 px) | Historical provenance only |
 
 ## How it reaches each OS
 
@@ -49,7 +35,7 @@ Additional tonal colours occur in the tracing and antialiasing.
 
 ## Regenerating
 
-From the workspace root (with `resvg` or `rsvg-convert` installed, `cargo` for `xtask ico`, plus `iconutil` on macOS):
+From the workspace root (with `resvg`, `rsvg-convert`, or ImageMagick (`magick`) installed, `cargo` for `xtask ico`, plus `iconutil` on macOS):
 
 ```sh
 packaging/icons.sh

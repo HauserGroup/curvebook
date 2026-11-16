@@ -10,7 +10,7 @@
   - `wasm32-unknown-unknown` target — for `cargo xtask wasm`; plus [`trunk`](https://trunkrs.dev/) for browser builds in `apps/lumencraft-web`.
   - [`actionlint`](https://github.com/rhysd/actionlint) + [`shellcheck`](https://www.shellcheck.net/) — for `cargo xtask workflows`.
   - [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install --locked cargo-llvm-cov`) + the `llvm-tools-preview` rustup component — for `cargo xtask coverage` ([Coverage reports](#coverage-reports)).
-  - `resvg` (or `rsvg-convert`) + `iconutil` (macOS) — only when regenerating `assets/app-icon/` via `packaging/icons.sh`.
+  - `resvg`, `rsvg-convert`, or ImageMagick (`magick`), plus `iconutil` (macOS) — only when regenerating `assets/app-icon/` via `packaging/icons.sh`.
 
 ## Everyday commands
 
