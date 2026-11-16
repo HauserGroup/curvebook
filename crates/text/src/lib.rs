@@ -8,10 +8,11 @@ pub mod glyph_paths;
 pub mod markup;
 pub mod metrics;
 pub mod number;
+pub mod shaping;
 
 use std::fmt;
 
-pub use glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, outline_rich_text};
+pub use glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, has_cleanroom_vector_outline, outline_rich_text};
 pub use markup::{
     BidiRun, EquationSegment, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, expand_template_hooks,
     is_rtl_locale, parse_equation_segments, parse_markup, reorder_visual_bidi, shape_bidi_runs,
@@ -21,6 +22,7 @@ pub use metrics::{
     system_cjk_font_candidates,
 };
 pub use number::{LocaleNumberPolicy, format_axis_tick, format_pvalue_label};
+pub use shaping::{FontFamilyKind, MeasuredTextMetrics, ShapedGlyphRun, ShapedTextLine, SystemFontSet, TextMeasurer, UiTextStyle};
 
 /// Errors produced when inspecting or validating SFNT / TrueType font binaries.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

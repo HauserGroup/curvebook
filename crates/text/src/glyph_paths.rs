@@ -866,33 +866,50 @@ fn arc(cx: f64, cy: f64, rx: f64, ry: f64, start_deg: f64, end_deg: f64, steps: 
     pts
 }
 
+/// Return `true` when the cleanroom vector outline generator has an explicit glyph recipe for
+/// `ch` (rather than falling back to a generic missing-glyph rectangle).
+#[must_use]
+pub fn has_cleanroom_vector_outline(ch: char) -> bool {
+    try_build_glyph_strokes(ch).is_some()
+}
+
 fn build_glyph_strokes(ch: char) -> Vec<StrokeItem> {
-    if let Some(items) = ascii_upper_strokes(ch) {
-        return items;
-    }
-    if let Some(items) = ascii_lower_strokes(ch) {
-        return items;
-    }
-    if let Some(items) = ascii_digit_punct_strokes(ch) {
-        return items;
-    }
-    if let Some(items) = greek_upper_strokes(ch) {
-        return items;
-    }
-    if let Some(items) = greek_lower_strokes(ch) {
-        return items;
-    }
-    if let Some(items) = math_symbol_strokes(ch) {
-        return items;
-    }
-    if let Some(items) = latin_extended_strokes(ch) {
-        return items;
-    }
-    if let Some(items) = combining_diacritic_strokes(ch) {
+    if let Some(items) = try_build_glyph_strokes(ch) {
         return items;
     }
     // Fallback box for arbitrary unmapped glyphs
     vec![StrokeItem::Ring(vec![(0.12, 0.04), (0.12, 0.68), (0.88, 0.68), (0.88, 0.04)])]
+}
+
+fn try_build_glyph_strokes(ch: char) -> Option<Vec<StrokeItem>> {
+    if let Some(items) = ascii_upper_strokes(ch) {
+        return Some(items);
+    }
+    if let Some(items) = ascii_lower_strokes(ch) {
+        return Some(items);
+    }
+    if let Some(items) = ascii_digit_punct_strokes(ch) {
+        return Some(items);
+    }
+    if let Some(items) = greek_upper_strokes(ch) {
+        return Some(items);
+    }
+    if let Some(items) = greek_lower_strokes(ch) {
+        return Some(items);
+    }
+    if let Some(items) = math_symbol_strokes(ch) {
+        return Some(items);
+    }
+    if let Some(items) = sub_super_strokes(ch) {
+        return Some(items);
+    }
+    if let Some(items) = latin_extended_strokes(ch) {
+        return Some(items);
+    }
+    if let Some(items) = cyrillic_strokes(ch) {
+        return Some(items);
+    }
+    combining_diacritic_strokes(ch)
 }
 
 #[derive(Clone, Copy)]
@@ -1656,9 +1673,219 @@ fn math_symbol_strokes(ch: char) -> Option<Vec<StrokeItem>> {
         '\u{00B3}' => vec![Open(chain(arc(0.48, 0.60, 0.26, 0.11, 150.0, -90.0, 6), arc(0.50, 0.42, 0.28, 0.11, 90.0, -150.0, 6), vec![]))],
         '\u{2070}' => vec![Ring(arc(0.50, 0.52, 0.28, 0.20, 0.0, 360.0, 10))],
         '\u{25CF}' => vec![Solid(make_circle_cw_yup(0.50, 0.36, 0.38, 14))],
+        '\u{2018}' => vec![Open(vec![(0.56, 0.72), (0.42, 0.56)]), Dot(0.54, 0.54, 0.9)],
+        '\u{2019}' => vec![Open(vec![(0.54, 0.72), (0.40, 0.54)]), Dot(0.52, 0.68, 0.9)],
+        '\u{201C}' => vec![Open(vec![(0.34, 0.72), (0.24, 0.54)]), Open(vec![(0.66, 0.72), (0.56, 0.54)])],
+        '\u{201D}' => vec![Open(vec![(0.38, 0.72), (0.28, 0.54)]), Open(vec![(0.70, 0.72), (0.60, 0.54)])],
+        '\u{2039}' => vec![Open(vec![(0.68, 0.46), (0.30, 0.26), (0.68, 0.06)])],
+        '\u{203A}' => vec![Open(vec![(0.32, 0.46), (0.70, 0.26), (0.32, 0.06)])],
+        '\u{2500}' => vec![Open(vec![(0.0, 0.36), (1.0, 0.36)])],
+        '\u{FF08}' => ascii_digit_punct_strokes('(')?,
+        '\u{FF09}' => ascii_digit_punct_strokes(')')?,
+        '\u{FF0B}' => ascii_digit_punct_strokes('+')?,
+        '\u{FF0C}' => ascii_digit_punct_strokes(',')?,
+        '\u{FF0E}' => ascii_digit_punct_strokes('.')?,
+        '\u{FF0F}' => ascii_digit_punct_strokes('/')?,
+        '\u{FF1A}' => ascii_digit_punct_strokes(':')?,
         _ => return None,
     };
     Some(items)
+}
+
+fn transform_stroke_items(items: Vec<StrokeItem>, y_scale: f64, y_shift: f64) -> Vec<StrokeItem> {
+    let tx = |pts: Vec<(f64, f64)>| -> Vec<(f64, f64)> { pts.into_iter().map(|(x, y)| (x, y * y_scale + y_shift)).collect() };
+    items
+        .into_iter()
+        .map(|item| match item {
+            StrokeItem::Open(pts) => StrokeItem::Open(tx(pts)),
+            StrokeItem::Ring(pts) => StrokeItem::Ring(tx(pts)),
+            StrokeItem::Dot(x, y, r) => StrokeItem::Dot(x, y * y_scale + y_shift, r * 0.75),
+            StrokeItem::Solid(pts) => StrokeItem::Solid(tx(pts)),
+        })
+        .collect()
+}
+
+fn sub_super_strokes(ch: char) -> Option<Vec<StrokeItem>> {
+    let (base, is_sup) = match ch {
+        '\u{2071}' => ('i', true),
+        '\u{2074}' => ('4', true),
+        '\u{2075}' => ('5', true),
+        '\u{2076}' => ('6', true),
+        '\u{2077}' => ('7', true),
+        '\u{2078}' => ('8', true),
+        '\u{2079}' => ('9', true),
+        '\u{207A}' => ('+', true),
+        '\u{207B}' => ('-', true),
+        '\u{207C}' => ('=', true),
+        '\u{207D}' => ('(', true),
+        '\u{207E}' => (')', true),
+        '\u{207F}' => ('n', true),
+        '\u{2080}' => ('0', false),
+        '\u{2081}' => ('1', false),
+        '\u{2082}' => ('2', false),
+        '\u{2083}' => ('3', false),
+        '\u{2084}' => ('4', false),
+        '\u{2085}' => ('5', false),
+        '\u{2086}' => ('6', false),
+        '\u{2087}' => ('7', false),
+        '\u{2088}' => ('8', false),
+        '\u{2089}' => ('9', false),
+        '\u{208A}' => ('+', false),
+        '\u{208B}' => ('-', false),
+        '\u{208C}' => ('=', false),
+        '\u{208D}' => ('(', false),
+        '\u{208E}' => (')', false),
+        _ => return None,
+    };
+    let raw = ascii_digit_punct_strokes(base).or_else(|| ascii_lower_strokes(base))?;
+    let (y_scale, y_shift) = if is_sup { (0.56, 0.34) } else { (0.56, -0.18) };
+    Some(transform_stroke_items(raw, y_scale, y_shift))
+}
+
+fn cyrillic_strokes(ch: char) -> Option<Vec<StrokeItem>> {
+    if let Some(upper) = cyrillic_upper_strokes(ch) {
+        return Some(upper);
+    }
+    cyrillic_lower_strokes(ch)
+}
+
+fn cyrillic_upper_strokes(ch: char) -> Option<Vec<StrokeItem>> {
+    use StrokeItem::{Dot, Open, Ring};
+    let items = match ch {
+        'А' => ascii_upper_strokes('A')?,
+        'Б' => vec![
+            Open(vec![(0.86, 0.72), (0.14, 0.72), (0.14, 0.0)]),
+            Open(chain(vec![(0.14, 0.38)], arc(0.52, 0.19, 0.38, 0.19, 90.0, -90.0, 8), vec![(0.14, 0.0)])),
+        ],
+        'В' => ascii_upper_strokes('B')?,
+        'Г' => greek_upper_strokes('\u{0393}')?,
+        'Д' => vec![
+            Open(vec![(0.14, 0.06), (0.28, 0.72), (0.82, 0.72), (0.82, 0.06)]),
+            Open(vec![(0.06, 0.06), (0.94, 0.06)]),
+            Open(vec![(0.08, 0.06), (0.08, -0.10)]),
+            Open(vec![(0.92, 0.06), (0.92, -0.10)]),
+        ],
+        'Е' => ascii_upper_strokes('E')?,
+        'Ё' => {
+            let mut e = ascii_upper_strokes('E')?;
+            e.push(Dot(0.32, 0.86, 1.0));
+            e.push(Dot(0.68, 0.86, 1.0));
+            e
+        }
+        'Ж' => vec![
+            Open(vec![(0.50, 0.0), (0.50, 0.72)]),
+            Open(vec![(0.08, 0.72), (0.50, 0.36), (0.92, 0.72)]),
+            Open(vec![(0.08, 0.0), (0.50, 0.36), (0.92, 0.0)]),
+        ],
+        'З' => vec![Open(chain(arc(0.48, 0.54, 0.38, 0.18, 155.0, -90.0, 8), arc(0.50, 0.18, 0.40, 0.18, 90.0, -155.0, 8), vec![]))],
+        'И' => vec![Open(vec![(0.12, 0.72), (0.12, 0.0), (0.88, 0.72), (0.88, 0.0)])],
+        'Й' => {
+            let mut i = vec![Open(vec![(0.12, 0.72), (0.12, 0.0), (0.88, 0.72), (0.88, 0.0)])];
+            i.extend(diacritic_strokes(DiacriticKind::Breve, 0.12));
+            i
+        }
+        'К' => ascii_upper_strokes('K')?,
+        'Л' => vec![Open(vec![(0.08, 0.0), (0.28, 0.72), (0.86, 0.72), (0.86, 0.0)])],
+        'М' => ascii_upper_strokes('M')?,
+        'Н' => ascii_upper_strokes('H')?,
+        'О' => ascii_upper_strokes('O')?,
+        'П' => greek_upper_strokes('\u{03A0}')?,
+        'Р' => ascii_upper_strokes('P')?,
+        'С' => ascii_upper_strokes('C')?,
+        'Т' => ascii_upper_strokes('T')?,
+        'У' => vec![Open(vec![(0.12, 0.72), (0.50, 0.24)]), Open(vec![(0.88, 0.72), (0.36, 0.0), (0.16, 0.0)])],
+        'Ф' => greek_upper_strokes('\u{03A6}')?,
+        'Х' => ascii_upper_strokes('X')?,
+        'Ц' => vec![Open(vec![(0.12, 0.72), (0.12, 0.04), (0.82, 0.04), (0.82, 0.72)]), Open(vec![(0.82, 0.04), (0.94, 0.04), (0.94, -0.10)])],
+        'Ч' => vec![Open(chain(vec![(0.14, 0.72)], arc(0.50, 0.42, 0.36, 0.14, 180.0, 360.0, 6), vec![(0.86, 0.72), (0.86, 0.0)]))],
+        'Ш' => vec![Open(vec![(0.08, 0.72), (0.08, 0.0), (0.92, 0.0), (0.92, 0.72)]), Open(vec![(0.50, 0.72), (0.50, 0.0)])],
+        'Щ' => vec![
+            Open(vec![(0.08, 0.72), (0.08, 0.04), (0.84, 0.04), (0.84, 0.72)]),
+            Open(vec![(0.46, 0.72), (0.46, 0.04)]),
+            Open(vec![(0.84, 0.04), (0.96, 0.04), (0.96, -0.10)]),
+        ],
+        'Ъ' => vec![
+            Open(vec![(0.08, 0.72), (0.34, 0.72), (0.34, 0.0)]),
+            Open(chain(vec![(0.34, 0.38)], arc(0.64, 0.19, 0.28, 0.19, 90.0, -90.0, 8), vec![(0.34, 0.0)])),
+        ],
+        'Ы' => vec![
+            Open(vec![(0.10, 0.72), (0.10, 0.0)]),
+            Open(chain(vec![(0.10, 0.36)], arc(0.38, 0.18, 0.24, 0.18, 90.0, -90.0, 8), vec![(0.10, 0.0)])),
+            Open(vec![(0.86, 0.72), (0.86, 0.0)]),
+        ],
+        'Ь' => vec![
+            Open(vec![(0.16, 0.72), (0.16, 0.0)]),
+            Open(chain(vec![(0.16, 0.38)], arc(0.54, 0.19, 0.36, 0.19, 90.0, -90.0, 8), vec![(0.16, 0.0)])),
+        ],
+        'Э' => vec![Open(arc(0.44, 0.36, 0.44, 0.36, 140.0, -140.0, 14)), Open(vec![(0.42, 0.36), (0.88, 0.36)])],
+        'Ю' => {
+            vec![Open(vec![(0.10, 0.72), (0.10, 0.0)]), Open(vec![(0.10, 0.36), (0.36, 0.36)]), Ring(arc(0.64, 0.36, 0.28, 0.36, 0.0, 360.0, 14))]
+        }
+        'Я' => vec![
+            Open(vec![(0.88, 0.0), (0.88, 0.72)]),
+            Open(chain(vec![(0.88, 0.72)], arc(0.44, 0.54, 0.36, 0.18, 90.0, 270.0, 8), vec![(0.88, 0.36)])),
+            Open(vec![(0.48, 0.36), (0.10, 0.0)]),
+        ],
+        _ => return None,
+    };
+    Some(items)
+}
+
+fn cyrillic_lower_strokes(ch: char) -> Option<Vec<StrokeItem>> {
+    use StrokeItem::Dot;
+    let items = match ch {
+        'а' => ascii_lower_strokes('a')?,
+        'б' => vec![StrokeItem::Ring(arc(0.50, 0.24, 0.36, 0.24, 0.0, 360.0, 12)), StrokeItem::Open(vec![(0.52, 0.48), (0.24, 0.66), (0.78, 0.72)])],
+        'е' => ascii_lower_strokes('e')?,
+        'ё' => {
+            let mut e = ascii_lower_strokes('e')?;
+            e.push(Dot(0.32, 0.68, 1.0));
+            e.push(Dot(0.68, 0.68, 1.0));
+            e
+        }
+        'о' => ascii_lower_strokes('o')?,
+        'р' => ascii_lower_strokes('p')?,
+        'с' => ascii_lower_strokes('c')?,
+        'у' => ascii_lower_strokes('y')?,
+        'х' => ascii_lower_strokes('x')?,
+        'в' | 'г' | 'д' | 'ж' | 'з' | 'и' | 'й' | 'к' | 'л' | 'м' | 'н' | 'п' | 'т' | 'ф' | 'ц' | 'ч' | 'ш' | 'щ' | 'ъ' | 'ы' | 'ь' | 'э' | 'ю'
+        | 'я' => {
+            let upper = cyrillic_upper_for_lower(ch)?;
+            transform_stroke_items(cyrillic_upper_strokes(upper)?, 0.72, 0.0)
+        }
+        _ => return None,
+    };
+    Some(items)
+}
+
+const fn cyrillic_upper_for_lower(ch: char) -> Option<char> {
+    match ch {
+        'в' => Some('В'),
+        'г' => Some('Г'),
+        'д' => Some('Д'),
+        'ж' => Some('Ж'),
+        'з' => Some('З'),
+        'и' => Some('И'),
+        'й' => Some('Й'),
+        'к' => Some('К'),
+        'л' => Some('Л'),
+        'м' => Some('М'),
+        'н' => Some('Н'),
+        'п' => Some('П'),
+        'т' => Some('Т'),
+        'ф' => Some('Ф'),
+        'ц' => Some('Ц'),
+        'ч' => Some('Ч'),
+        'ш' => Some('Ш'),
+        'щ' => Some('Щ'),
+        'ъ' => Some('Ъ'),
+        'ы' => Some('Ы'),
+        'ь' => Some('Ь'),
+        'э' => Some('Э'),
+        'ю' => Some('Ю'),
+        'я' => Some('Я'),
+        _ => None,
+    }
 }
 
 fn chain(mut a: Vec<(f64, f64)>, b: Vec<(f64, f64)>, c: Vec<(f64, f64)>) -> Vec<(f64, f64)> {

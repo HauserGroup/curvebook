@@ -269,6 +269,12 @@ pub fn core14_advance_em(ch: char, weight: SpanWeight, _slope: SpanSlope) -> f64
     if let Some(w) = core14_ascii_width_1000(ch, weight) {
         return f64::from(w) / 1000.0;
     }
+    if let Some(w) = core14_accented_latin_width_1000(ch, weight) {
+        return f64::from(w) / 1000.0;
+    }
+    if let Some(w) = core14_cyrillic_width_1000(ch, weight) {
+        return f64::from(w) / 1000.0;
+    }
     if let Some(w) = core14_symbol_width_1000(ch) {
         return f64::from(w) / 1000.0;
     }
@@ -403,14 +409,19 @@ fn core14_symbol_width_1000(ch: char) -> Option<u16> {
         '\u{03C9}' => Some(686),              // omega
 
         // Scientific, typographic & mathematical operators
-        '\u{00B0}' | '\u{2218}' => Some(400),                            // degree / ring
-        '\u{00B1}' | '\u{2213}' => Some(549),                            // plus-minus / minus-plus
-        '\u{00B2}' | '\u{00B3}' | '\u{00B9}' => Some(333),               // superscript digits
+        '\u{00B0}' | '\u{2218}' => Some(400), // degree / ring
+        '\u{00B1}' | '\u{2213}' => Some(549), // plus-minus / minus-plus
+        '\u{00B2}' | '\u{00B3}' | '\u{00B9}' | '\u{2070}' | '\u{2074}'..='\u{2079}' | '\u{207F}' | '\u{2080}'..='\u{2089}' => Some(333),
+        '\u{207A}' | '\u{207B}' | '\u{207C}' | '\u{208A}' | '\u{208B}' | '\u{208C}' => Some(350),
+        '\u{2071}' | '\u{207D}' | '\u{207E}' | '\u{208D}' | '\u{208E}' => Some(240),
         '\u{00B7}' => Some(250),                                         // middle dot
         '\u{00C5}' => Some(667),                                         // Angstrom A-ring
         '\u{00D7}' | '\u{00F7}' => Some(549),                            // times / divide
-        '\u{2013}' => Some(556),                                         // en-dash
+        '\u{2013}' | '\u{2500}' => Some(556),                            // en-dash / box horizontal
         '\u{2014}' | '\u{2026}' | '\u{2030}' | '\u{2122}' => Some(1000), // em-dash / ellipsis / permil / TM
+        '\u{2018}' | '\u{2019}' => Some(222),                            // single quotes
+        '\u{201C}' | '\u{201D}' | '\u{2039}' | '\u{203A}' => Some(333),  // double quotes / single guillemets
+        '\u{00AB}' | '\u{00BB}' => Some(556),                            // double guillemets
         '\u{2020}' | '\u{2021}' | '\u{00A7}' => Some(556),               // dagger / double dagger / section
         '\u{2022}' => Some(350),                                         // bullet
         '\u{2032}' => Some(247),                                         // prime
@@ -429,6 +440,68 @@ fn core14_symbol_width_1000(ch: char) -> Option<u16> {
         '\u{2234}' => Some(863),              // therefore
         _ => None,
     }
+}
+
+fn core14_accented_latin_width_1000(ch: char, weight: SpanWeight) -> Option<u16> {
+    let base = match ch {
+        'À'..='Å' | 'Ā' | 'Ă' | 'Ą' => 'A',
+        'Ç' | 'Ć' | 'Ĉ' | 'Ċ' | 'Č' => 'C',
+        'Ď' | 'Đ' | 'Ð' => 'D',
+        'È'..='Ë' | 'Ē' | 'Ĕ' | 'Ė' | 'Ę' | 'Ě' => 'E',
+        'Ĝ' | 'Ğ' | 'Ġ' | 'Ģ' => 'G',
+        'Ĥ' | 'Ħ' => 'H',
+        'Ì'..='Ï' | 'Ĩ' | 'Ī' | 'Ĭ' | 'Į' | 'İ' => 'I',
+        'Ĵ' => 'J',
+        'Ķ' => 'K',
+        'Ĺ' | 'Ļ' | 'Ľ' | 'Ŀ' | 'Ł' => 'L',
+        'Ñ' | 'Ń' | 'Ņ' | 'Ň' | 'Ŋ' => 'N',
+        'Ò'..='Ö' | 'Ø' | 'Ō' | 'Ŏ' | 'Ő' => 'O',
+        'Ŕ' | 'Ŗ' | 'Ř' => 'R',
+        'Ś' | 'Ŝ' | 'Ş' | 'Š' => 'S',
+        'Ţ' | 'Ť' | 'Ŧ' => 'T',
+        'Ù'..='Ü' | 'Ũ' | 'Ū' | 'Ŭ' | 'Ů' | 'Ű' | 'Ų' => 'U',
+        'Ŵ' => 'W',
+        'Ý' | 'Ŷ' | 'Ÿ' => 'Y',
+        'Ź' | 'Ż' | 'Ž' => 'Z',
+        'à'..='å' | 'ā' | 'ă' | 'ą' => 'a',
+        'ç' | 'ć' | 'ĉ' | 'ċ' | 'č' => 'c',
+        'ď' | 'đ' | 'ð' => 'd',
+        'è'..='ë' | 'ē' | 'ĕ' | 'ė' | 'ę' | 'ě' => 'e',
+        'ĝ' | 'ğ' | 'ġ' | 'ģ' => 'g',
+        'ĥ' | 'ħ' => 'h',
+        'ì'..='ï' | 'ĩ' | 'ī' | 'ĭ' | 'į' | 'ı' => 'i',
+        'ĵ' | '\u{0237}' => 'j',
+        'ķ' | 'ĸ' => 'k',
+        'ĺ' | 'ļ' | 'ľ' | 'ŀ' | 'ł' | 'ſ' => 'l',
+        'ñ' | 'ń' | 'ņ' | 'ň' | 'ŋ' => 'n',
+        'ò'..='ö' | 'ø' | 'ō' | 'ŏ' | 'ő' => 'o',
+        'ŕ' | 'ŗ' | 'ř' => 'r',
+        'ś' | 'ŝ' | 'ş' | 'š' => 's',
+        'ţ' | 'ť' | 'ŧ' => 't',
+        'ù'..='ü' | 'ũ' | 'ū' | 'ŭ' | 'ů' | 'ű' | 'ų' => 'u',
+        'ŵ' => 'w',
+        'ý' | 'ÿ' | 'ŷ' => 'y',
+        'ź' | 'ż' | 'ž' => 'z',
+        'Æ' | 'Œ' | 'Ĳ' => return Some(if ch == 'Ĳ' { 722 } else { 1000 }),
+        'æ' | 'œ' | 'ß' => return Some(if ch == 'ß' { 611 } else { 889 }),
+        _ => return None,
+    };
+    core14_ascii_width_1000(base, weight)
+}
+
+fn core14_cyrillic_width_1000(ch: char, weight: SpanWeight) -> Option<u16> {
+    let base = match ch {
+        'А' => 'A',
+        'Б' | 'В' | 'Г' | 'Е' | 'Ё' | 'З' | 'Р' | 'С' | 'Т' | 'У' | 'Ь' | 'Э' => 'E',
+        'Д' | 'Ж' | 'М' | 'Ф' | 'Ы' | 'Ю' => return Some(if matches!(ch, 'Ж' | 'М' | 'Ю') { 889 } else { 778 }),
+        'Ш' | 'Щ' => return Some(944),
+        'И' | 'Й' | 'К' | 'Л' | 'Н' | 'О' | 'П' | 'Х' | 'Ц' | 'Ч' | 'Ъ' | 'Я' => 'H',
+        'а' | 'б' | 'в' | 'г' | 'д' | 'е' | 'ё' | 'з' | 'и' | 'й' | 'к' | 'л' | 'н' | 'о' | 'п' | 'р' | 'с' | 'т' | 'у' | 'х' | 'ц' | 'ч' | 'ъ'
+        | 'ь' | 'э' | 'я' => 'a',
+        'ж' | 'м' | 'ф' | 'ш' | 'щ' | 'ы' | 'ю' => return Some(if matches!(ch, 'ш' | 'щ') { 833 } else { 778 }),
+        _ => return None,
+    };
+    core14_ascii_width_1000(base, weight)
 }
 
 const fn is_wide_cjk(ch: char) -> bool {
@@ -463,25 +536,30 @@ impl<'a> TrueTypeFont<'a> {
     /// `loca`/`glyf`), returning `None` if malformed or missing required tables.
     #[must_use]
     pub fn parse(bytes: &'a [u8]) -> Option<Self> {
-        if bytes.len() < 12 {
-            return None;
-        }
-        let version = bytes.get(0..4)?;
+        Self::parse_at(bytes, 0)
+    }
+
+    /// Parse an SFNT/TrueType font face starting at `sfnt_offset` inside `bytes` (used both for
+    /// standalone SFNT files at `0` and individual faces inside a `.ttc` TrueType collection).
+    #[must_use]
+    pub fn parse_at(bytes: &'a [u8], sfnt_offset: usize) -> Option<Self> {
+        let header = bytes.get(sfnt_offset..sfnt_offset.checked_add(12)?)?;
+        let version = header.get(0..4)?;
         if version != [0x00, 0x01, 0x00, 0x00] && version != b"true" && version != b"OTTO" {
             return None;
         }
-        let num_tables = read_u16_be(bytes, 4)?;
+        let num_tables = read_u16_be(bytes, sfnt_offset.checked_add(4)?)?;
         if num_tables == 0 || num_tables > 128 {
             return None;
         }
 
-        let head = find_sfnt_table(bytes, num_tables, *b"head")?;
-        let hhea = find_sfnt_table(bytes, num_tables, *b"hhea")?;
-        let maxp = find_sfnt_table(bytes, num_tables, *b"maxp")?;
-        let cmap = find_sfnt_table(bytes, num_tables, *b"cmap")?;
-        let hmtx = find_sfnt_table(bytes, num_tables, *b"hmtx")?;
-        let loca = find_sfnt_table(bytes, num_tables, *b"loca");
-        let glyf = find_sfnt_table(bytes, num_tables, *b"glyf");
+        let head = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"head")?;
+        let hhea = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"hhea")?;
+        let maxp = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"maxp")?;
+        let cmap = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"cmap")?;
+        let hmtx = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"hmtx")?;
+        let loca = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"loca");
+        let glyf = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"glyf");
 
         if head.len() < 54 || hhea.len() < 36 || maxp.len() < 6 || cmap.len() < 4 {
             return None;
@@ -521,6 +599,28 @@ impl<'a> TrueTypeFont<'a> {
             cmap_subtable_offset,
             cmap_format,
         })
+    }
+
+    /// Parse a single SFNT or TrueType Collection (`.ttc`) byte slice into `(sfnt_offset, font)` pairs.
+    #[must_use]
+    pub fn parse_collection(bytes: &'a [u8]) -> Vec<(usize, Self)> {
+        if bytes.get(0..4) == Some(b"ttcf") {
+            let Some(num_fonts_raw) = read_u32_be(bytes, 8) else {
+                return Vec::new();
+            };
+            let count = usize::try_from(num_fonts_raw).unwrap_or(0).min(64);
+            let mut out = Vec::with_capacity(count);
+            for i in 0..count {
+                let Some(off) = read_u32_be(bytes, 12 + i * 4).and_then(|v| usize::try_from(v).ok()) else {
+                    break;
+                };
+                if let Some(font) = Self::parse_at(bytes, off) {
+                    out.push((off, font));
+                }
+            }
+            return out;
+        }
+        Self::parse_at(bytes, 0).map_or_else(Vec::new, |font| vec![(0, font)])
     }
 
     #[must_use]
@@ -664,15 +764,179 @@ pub(crate) fn select_bundled_font(weight: SpanWeight, slope: SpanSlope) -> Optio
     best.map(|(_, font)| font)
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub(crate) struct SfntFaceMeta {
+    pub(crate) family_name: String,
+    pub(crate) is_bold: bool,
+    pub(crate) is_italic: bool,
+    pub(crate) is_fixed_pitch: bool,
+    pub(crate) is_serif: bool,
+    pub(crate) is_variable: bool,
+}
+
+pub(crate) fn inspect_sfnt_face_meta_at(bytes: &[u8], sfnt_offset: usize, fallback_name: &str) -> SfntFaceMeta {
+    let Some(num_tables) = read_u16_be(bytes, sfnt_offset.saturating_add(4)).filter(|&n| n > 0 && n <= 128) else {
+        return SfntFaceMeta::default();
+    };
+    let head = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"head");
+    let os2 = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"OS/2").and_then(|t| parse_os2_table(t).ok());
+    let post = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"post").and_then(|t| parse_post_table(t).ok());
+    let parsed_names = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"name").and_then(|t| parse_name_table(t).ok());
+    let is_variable = find_sfnt_table_at(bytes, sfnt_offset, num_tables, *b"fvar").is_some();
+
+    let mac_style = head.and_then(|h| read_u16_be(h, 44)).unwrap_or(0);
+    let family_name = parsed_names.map(|(fam, ps)| if !fam.is_empty() { fam } else { ps }).unwrap_or_default();
+    let combined_label = format!("{} {}", family_name.to_ascii_lowercase(), fallback_name.to_ascii_lowercase());
+
+    let is_bold =
+        os2.is_some_and(|m| m.weight_class >= 600 || (m.fs_selection & 0x0020) != 0) || (mac_style & 0x0001) != 0 || combined_label.contains("bold");
+    let is_italic = os2.is_some_and(|m| (m.fs_selection & 0x0001) != 0)
+        || (mac_style & 0x0002) != 0
+        || post.is_some_and(|p| p.italic_angle.abs() > 1e-6)
+        || combined_label.contains("italic")
+        || combined_label.contains("oblique");
+    let is_fixed_pitch = post.is_some_and(|p| p.is_fixed_pitch)
+        || combined_label.contains("mono")
+        || combined_label.contains("courier")
+        || combined_label.contains("consola")
+        || combined_label.contains("menlo")
+        || combined_label.contains("monaco");
+    let is_serif = !is_fixed_pitch
+        && (os2.is_some_and(|m| {
+            let class_id = (m.family_class >> 8) & 0xFF;
+            (1..=7).contains(&class_id)
+        }) || combined_label.contains("serif")
+            || combined_label.contains("times")
+            || combined_label.contains("new york")
+            || combined_label.contains("newyork")
+            || combined_label.contains("georgia")
+            || combined_label.contains("cambria"));
+
+    SfntFaceMeta { family_name, is_bold, is_italic, is_fixed_pitch, is_serif, is_variable }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CachedSfntLayout {
+    head: (usize, usize),
+    hhea: (usize, usize),
+    cmap: (usize, usize),
+    hmtx: (usize, usize),
+    loca: Option<(usize, usize)>,
+    glyf: Option<(usize, usize)>,
+    units_per_em: u16,
+    ascent: i16,
+    descent: i16,
+    line_gap: i16,
+    num_glyphs: u16,
+    num_h_metrics: u16,
+    index_to_loc_format: i16,
+    cmap_subtable_offset: usize,
+    cmap_format: u16,
+}
+
+impl CachedSfntLayout {
+    pub(crate) fn extract(bytes: &[u8], sfnt_offset: usize) -> Option<Self> {
+        let header = bytes.get(sfnt_offset..sfnt_offset.checked_add(12)?)?;
+        let version = header.get(0..4)?;
+        if version != [0x00, 0x01, 0x00, 0x00] && version != b"true" && version != b"OTTO" {
+            return None;
+        }
+        let num_tables = read_u16_be(bytes, sfnt_offset.checked_add(4)?)?;
+        if num_tables == 0 || num_tables > 128 {
+            return None;
+        }
+        let head_r = find_sfnt_table_range_at(bytes, sfnt_offset, num_tables, *b"head")?;
+        let hhea_r = find_sfnt_table_range_at(bytes, sfnt_offset, num_tables, *b"hhea")?;
+        let maxp_r = find_sfnt_table_range_at(bytes, sfnt_offset, num_tables, *b"maxp")?;
+        let cmap_r = find_sfnt_table_range_at(bytes, sfnt_offset, num_tables, *b"cmap")?;
+        let hmtx_r = find_sfnt_table_range_at(bytes, sfnt_offset, num_tables, *b"hmtx")?;
+        let loca_r = find_sfnt_table_range_at(bytes, sfnt_offset, num_tables, *b"loca");
+        let glyf_r = find_sfnt_table_range_at(bytes, sfnt_offset, num_tables, *b"glyf");
+
+        let head = bytes.get(head_r.0..head_r.1)?;
+        let hhea = bytes.get(hhea_r.0..hhea_r.1)?;
+        let maxp = bytes.get(maxp_r.0..maxp_r.1)?;
+        let cmap = bytes.get(cmap_r.0..cmap_r.1)?;
+        let hmtx = bytes.get(hmtx_r.0..hmtx_r.1)?;
+        if head.len() < 54 || hhea.len() < 36 || maxp.len() < 6 || cmap.len() < 4 {
+            return None;
+        }
+        let units_per_em = read_u16_be(head, 18)?;
+        if !(16..=16384).contains(&units_per_em) {
+            return None;
+        }
+        let index_to_loc_format = read_i16_be(head, 50)?;
+        let ascent = read_i16_be(hhea, 4)?;
+        let descent = read_i16_be(hhea, 6)?;
+        let line_gap = read_i16_be(hhea, 8)?;
+        let num_h_metrics = read_u16_be(hhea, 34)?;
+        let num_glyphs = read_u16_be(maxp, 4)?;
+        if num_glyphs == 0 || num_h_metrics == 0 || num_h_metrics > num_glyphs || hmtx.len() < usize::from(num_h_metrics) * 4 {
+            return None;
+        }
+        let (cmap_subtable_offset, cmap_format) = select_cmap_subtable(cmap)?;
+        Some(Self {
+            head: head_r,
+            hhea: hhea_r,
+            cmap: cmap_r,
+            hmtx: hmtx_r,
+            loca: loca_r,
+            glyf: glyf_r,
+            units_per_em,
+            ascent,
+            descent,
+            line_gap,
+            num_glyphs,
+            num_h_metrics,
+            index_to_loc_format,
+            cmap_subtable_offset,
+            cmap_format,
+        })
+    }
+
+    pub(crate) fn font<'a>(&self, bytes: &'a [u8]) -> Option<TrueTypeFont<'a>> {
+        Some(TrueTypeFont {
+            head: bytes.get(self.head.0..self.head.1)?,
+            hhea: bytes.get(self.hhea.0..self.hhea.1)?,
+            cmap: bytes.get(self.cmap.0..self.cmap.1)?,
+            hmtx: bytes.get(self.hmtx.0..self.hmtx.1)?,
+            loca: self.loca.and_then(|(s, e)| bytes.get(s..e)),
+            glyf: self.glyf.and_then(|(s, e)| bytes.get(s..e)),
+            units_per_em: self.units_per_em,
+            ascent: self.ascent,
+            descent: self.descent,
+            line_gap: self.line_gap,
+            num_glyphs: self.num_glyphs,
+            num_h_metrics: self.num_h_metrics,
+            index_to_loc_format: self.index_to_loc_format,
+            cmap_subtable_offset: self.cmap_subtable_offset,
+            cmap_format: self.cmap_format,
+        })
+    }
+}
+
 fn find_sfnt_table(bytes: &[u8], num_tables: u16, target: [u8; 4]) -> Option<&[u8]> {
+    find_sfnt_table_at(bytes, 0, num_tables, target)
+}
+
+fn find_sfnt_table_at(bytes: &[u8], sfnt_offset: usize, num_tables: u16, target: [u8; 4]) -> Option<&[u8]> {
+    let (start, end) = find_sfnt_table_range_at(bytes, sfnt_offset, num_tables, target)?;
+    bytes.get(start..end)
+}
+
+fn find_sfnt_table_range_at(bytes: &[u8], sfnt_offset: usize, num_tables: u16, target: [u8; 4]) -> Option<(usize, usize)> {
+    let dir_base = sfnt_offset.checked_add(12)?;
     for i in 0..usize::from(num_tables) {
-        let rec_off = 12usize.checked_add(i.checked_mul(16)?)?;
+        let rec_off = dir_base.checked_add(i.checked_mul(16)?)?;
         let tag = bytes.get(rec_off..rec_off + 4)?;
         if tag == target {
             let offset = usize::try_from(read_u32_be(bytes, rec_off + 8)?).ok()?;
             let length = usize::try_from(read_u32_be(bytes, rec_off + 12)?).ok()?;
             let end = offset.checked_add(length)?;
-            return bytes.get(offset..end);
+            if end <= bytes.len() {
+                return Some((offset, end));
+            }
+            return None;
         }
     }
     None
