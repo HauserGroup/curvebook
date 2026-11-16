@@ -27,6 +27,13 @@ The additional detailed pixel-art variant is `lumencraft-win95-2508.png` (2508 �
 | `source/approved-seven-pane.png` | Untouched approved image (1536 × 1024 px) | Original artwork reference |
 | `source/approved-mole.png` | Archived former artwork (1254 × 1254 px) | Historical provenance only |
 
+## Slack emoji
+
+- `slack/lumencraft.png`: transparent 128 × 128 PNG; suggested name `:lumencraft:`.
+- `slack/lumencraft-subtle.gif`: transparent 128 × 128 GIF; suggested name `:lumencraft_breathe:`. A gentle 2.16-second breathing loop varies the fitted artwork width from 120 to 124 pixels, using a shared colour palette to avoid palette flicker.
+
+Both exports derive from `source/seven-pane-win95-1254.png` and stay below 128 KB. Transparent margins are trimmed before fitting the artwork inside the square emoji canvas. The GIF's disposal settings clear earlier artwork as it changes size, and it loops continuously. Upload each file separately through Slack's custom emoji picker.
+
 ## How it reaches each OS
 
 - **macOS:** use `lumencraft-macos-512.png` for the runtime Dock/window icon; `lumencraft.icns` is bundled into `LumenCraft.app` (`CFBundleIconFile`).
