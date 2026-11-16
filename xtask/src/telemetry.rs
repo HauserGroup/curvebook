@@ -979,18 +979,25 @@ fn validate_permission_entry(
     state: &mut WorkflowParseState,
     violations: &mut Vec<TelemetryViolation>,
 ) {
+    let clean_scope = unquote_yaml_scalar(scope);
     let clean_level = unquote_yaml_scalar(level);
-    if is_top && scope == "contents" && clean_level == "read" {
+    if is_top && clean_scope == "contents" && clean_level == "read" {
         state.top_has_contents_read = true;
     }
     if clean_level == "write" {
-        let publish_ok = !is_top && rel == ".github/workflows/release.yml" && state.current_job.as_deref() == Some("publish") && scope == "contents";
+        let publish_ok = !is_top
+            && rel == ".github/workflows/release.yml"
+            && state.current_job.as_deref() == Some("publish")
+            && matches!(clean_scope, "contents" | "id-token" | "attestations");
         if !publish_ok {
             violations.push(TelemetryViolation {
                 check: 4,
                 path: rel.to_owned(),
                 line: line_no,
-                detail: format!("unexpected write permission `{scope}: write` (only release.yml `publish` job may declare `contents: write`)"),
+                detail: format!(
+                    "unexpected write permission `{clean_scope}: write` \
+                     (only release.yml `publish` job may declare `contents: write`, `id-token: write`, or `attestations: write`)"
+                ),
             });
         }
     }
@@ -2012,6 +2019,71 @@ mod tests {
         );
         let (_, hits3) = run_checks(&dir3.path).unwrap();
         assert!(hits3.iter().any(|v| v.check == 4 && v.detail.contains("github.event.")), "{hits3:?}");
+    }
+
+    #[test]
+    fn check4_allows_release_publish_attestation_writes_and_rejects_elsewhere() {
+        let has_bad_write = |hits: &[super::TelemetryViolation], path: &str, scope: &str| {
+            let prefix = format!("unexpected write permission `{scope}: write`");
+            hits.iter().any(|v| v.check == 4 && v.path == path && v.detail.starts_with(&prefix))
+        };
+
+        let dir_ok = create_clean_fixture("check4-attest-ok");
+        dir_ok.write(
+            ".github/workflows/release.yml",
+            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  git-sources:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo --version\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n    steps:\n      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8\n",
+        );
+        let (_, ok_hits) = run_checks(&dir_ok.path).unwrap();
+        assert!(ok_hits.is_empty(), "expected release.yml publish attestation scopes to pass: {ok_hits:?}");
+
+        let dir_top = create_clean_fixture("check4-attest-top");
+        dir_top.write(
+            ".github/workflows/release.yml",
+            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\n  id-token: write\n  attestations: write\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo ok\n",
+        );
+        let (_, top_hits) = run_checks(&dir_top.path).unwrap();
+        assert_eq!(top_hits.len(), 2, "{top_hits:?}");
+        assert!(has_bad_write(&top_hits, ".github/workflows/release.yml", "id-token"), "{top_hits:?}");
+        assert!(has_bad_write(&top_hits, ".github/workflows/release.yml", "attestations"), "{top_hits:?}");
+
+        let dir_other_job = create_clean_fixture("check4-attest-other-job");
+        dir_other_job.write(
+            ".github/workflows/release.yml",
+            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  git-sources:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n    steps:\n      - run: echo bad\n  linux:\n    runs-on: ubuntu-latest\n    permissions:\n      attestations: write\n    steps:\n      - run: echo bad\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n    steps:\n      - run: echo ok\n",
+        );
+        let (_, job_hits) = run_checks(&dir_other_job.path).unwrap();
+        assert_eq!(job_hits.len(), 2, "{job_hits:?}");
+        assert!(has_bad_write(&job_hits, ".github/workflows/release.yml", "id-token"), "{job_hits:?}");
+        assert!(has_bad_write(&job_hits, ".github/workflows/release.yml", "attestations"), "{job_hits:?}");
+
+        let dir_ci = create_clean_fixture("check4-attest-ci");
+        dir_ci.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      id-token: write\n      attestations: write\n    steps:\n      - run: cargo test\n",
+        );
+        let (_, ci_hits) = run_checks(&dir_ci.path).unwrap();
+        assert_eq!(ci_hits.len(), 2, "{ci_hits:?}");
+        assert!(has_bad_write(&ci_hits, ".github/workflows/ci.yml", "id-token"), "{ci_hits:?}");
+        assert!(has_bad_write(&ci_hits, ".github/workflows/ci.yml", "attestations"), "{ci_hits:?}");
+
+        let dir_ci_top = create_clean_fixture("check4-attest-ci-top");
+        dir_ci_top.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [push]\npermissions:\n  contents: read\n  id-token: write\n  attestations: write\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
+        );
+        let (_, ci_top_hits) = run_checks(&dir_ci_top.path).unwrap();
+        assert_eq!(ci_top_hits.len(), 2, "{ci_top_hits:?}");
+        assert!(has_bad_write(&ci_top_hits, ".github/workflows/ci.yml", "id-token"), "{ci_top_hits:?}");
+        assert!(has_bad_write(&ci_top_hits, ".github/workflows/ci.yml", "attestations"), "{ci_top_hits:?}");
+
+        let dir_bad_scope = create_clean_fixture("check4-attest-bad-scope");
+        dir_bad_scope.write(
+            ".github/workflows/release.yml",
+            "name: Release\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  publish:\n    runs-on: ubuntu-latest\n    permissions:\n      contents: write\n      id-token: write\n      attestations: write\n      packages: write\n    steps:\n      - run: echo ok\n",
+        );
+        let (_, scope_hits) = run_checks(&dir_bad_scope.path).unwrap();
+        assert_eq!(scope_hits.len(), 1, "{scope_hits:?}");
+        assert!(has_bad_write(&scope_hits, ".github/workflows/release.yml", "packages"), "{scope_hits:?}");
     }
 
     #[test]
