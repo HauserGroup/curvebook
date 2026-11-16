@@ -29,6 +29,12 @@
 //! - Huynh, H., & Feldt, L. S. (1976). Estimation of the Box correction for degrees of freedom from
 //!   sample data in randomized block and split-plot designs. *Journal of Educational Statistics*
 //!   1(1):69–82. doi:10.3102/10769986001001069
+//! - Lecoutre, B. (1991). A correction for the epsilon-tilde approximate test in repeated measures
+//!   designs with two or more independent groups. *Journal of Educational Statistics*
+//!   16(4):371–372. doi:10.3102/10769986016004371
+//! - Copenhaver, M. D., & Holland, B. S. (1988). Computation of the distribution of the maximum
+//!   studentized range statistic with application to multiple significance testing of simple
+//!   effects. *Journal of Statistical Computation and Simulation* 30(1):1–15.
 //! - Kruskal, W. H., & Wallis, W. A. (1952). Use of ranks in one-criterion variance analysis.
 //!   *Journal of the American Statistical Association* 47(260):583–621.
 //!   doi:10.1080/01621459.1952.10483441
@@ -80,7 +86,7 @@ use curvebook_doc::{
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
     chi2_sf, dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, f_sf, max_studentized_range_isf, max_studentized_range_sf,
-    noncentral_f_ci, student_t_two_sided_isf, student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
+    noncentral_f_ci, student_t_two_sided_isf, student_t_two_sided_p,
 };
 use curvebook_math::linalg::{DenseMatrix, cholesky, qr_col_pivoted, solve_linear_least_squares, sym_eigen};
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
@@ -95,7 +101,7 @@ use crate::common::{
 use crate::error::StatsError;
 use crate::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, PairwiseComparisonDetail, adjust_p_values, build_multiplicity_tab, compare_dunn_ranks,
-    compare_groups_pairwise, compare_groups_with_procedure, linear_trend_test,
+    compare_groups_pairwise_with_confidence, compare_groups_with_confidence, linear_trend_test,
 };
 
 // ============================================================================
@@ -1047,30 +1053,25 @@ fn pooled_within_group_cov(groups: &[Vec<Vec<f64>>]) -> Result<DenseMatrix, Stat
 }
 
 /// Compute Mauchly's `W` and Greenhouse–Geisser / Huynh–Feldt sphericity epsilons from a covariance
-/// matrix `S` (`df_e` error df, `n_subj` total subjects) via an orthonormal contrast projection `M S M^T`.
+/// matrix `S` (`df_e` error df, `n_subj` total subjects across `n_groups` independent groups) via
+/// an orthonormal contrast projection `M S M^T`.
 ///
-/// - Mauchly (1940) `W = det(C) / (tr(C)/p)^p` using chi-square approximation on `p(p + 1)/2 - 1` df.
-/// - Greenhouse & Geisser (1959) `epsilon_hat = (sum lambda)^2 / (p sum lambda^2)` bounded in `[1/p, 1]`.
-/// - Huynh & Feldt (1976, p. 74) `epsilon_tilde = (N p epsilon_hat - 2) / (p (df_e - p epsilon_hat))`,
-///   clamped to `[epsilon_hat, 1]` (returning `1` when `df_e <= p * epsilon_hat`).
-fn compute_sphericity_from_cov_contrast(s_cov: &DenseMatrix, contrast: &DenseMatrix, df_e: f64, n_subj: f64) -> Result<SphericityResult, StatsError> {
+/// - Mauchly (1940) `W = det(C) / (tr(C)/p)^p` using chi-square approximation on `p(p + 1)/2 - 1` df
+///   when `df_e >= p`; when `df_e < p` (singular Wishart), Mauchly's `p` is reported as `NaN` (inestimable).
+/// - Greenhouse & Geisser (1959) `epsilon_hat = (sum lambda)^2 / (p sum lambda^2)` bounded in `[1/p, 1]`
+///   (falling back to the conservative lower bound `1/p` when `df_e < 1` or contrast variance is zero).
+/// - Huynh & Feldt (1976, p. 74) with the split-plot `(N - g + 1)` correction of Lecoutre (1991,
+///   *J. Educ. Stat.* 16:371–372): `epsilon_tilde = ((N - g + 1) p epsilon_hat - 2) / (p (df_e - p epsilon_hat))`,
+///   clamped to `[epsilon_hat, 1]`.
+fn compute_sphericity_from_cov_contrast(
+    s_cov: &DenseMatrix,
+    contrast: &DenseMatrix,
+    df_e: f64,
+    n_subj: f64,
+    n_groups: f64,
+) -> Result<SphericityResult, StatsError> {
     let p = contrast.nrows();
-    if p <= 1 || df_e <= 1.0 {
-        return Ok(SphericityResult {
-            mauchly_w: 1.0,
-            mauchly_chi2: 0.0,
-            mauchly_df: 0.0,
-            mauchly_p: 1.0,
-            greenhouse_geisser_eps: 1.0,
-            huynh_feldt_eps: 1.0,
-        });
-    }
-    let c_cov = symmetrize_dense(&contrast.matmul(s_cov)?.matmul(&contrast.transpose())?)?;
-    let eig = sym_eigen(&c_cov)?;
-    let eigvals: Vec<f64> = eig.eigenvalues.iter().map(|&x| x.max(0.0)).collect();
-    let tr: f64 = eigvals.iter().sum();
-    let tr_sq: f64 = eigvals.iter().map(|&l| l * l).sum();
-    if tr <= 0.0 || tr_sq <= 0.0 {
+    if p <= 1 {
         return Ok(SphericityResult {
             mauchly_w: 1.0,
             mauchly_chi2: 0.0,
@@ -1081,15 +1082,62 @@ fn compute_sphericity_from_cov_contrast(s_cov: &DenseMatrix, contrast: &DenseMat
         });
     }
     let pf = p as f64;
-    let eps_gg = ((tr * tr) / (pf * tr_sq)).clamp(1.0 / pf, 1.0);
+    let lower_bound = 1.0 / pf;
+    let m_df = 0.5 * pf * (pf + 1.0) - 1.0;
+    if !df_e.is_finite() || df_e < 1.0 {
+        return Ok(SphericityResult {
+            mauchly_w: f64::NAN,
+            mauchly_chi2: f64::NAN,
+            mauchly_df: m_df,
+            mauchly_p: f64::NAN,
+            greenhouse_geisser_eps: lower_bound,
+            huynh_feldt_eps: lower_bound,
+        });
+    }
+    let c_cov = symmetrize_dense(&contrast.matmul(s_cov)?.matmul(&contrast.transpose())?)?;
+    let eig = sym_eigen(&c_cov)?;
+    let eigvals: Vec<f64> = eig.eigenvalues.iter().map(|&x| x.max(0.0)).collect();
+    let tr: f64 = eigvals.iter().sum();
+    let tr_sq: f64 = eigvals.iter().map(|&l| l * l).sum();
+    if tr <= 0.0 || tr_sq <= 0.0 {
+        return Ok(SphericityResult {
+            mauchly_w: f64::NAN,
+            mauchly_chi2: f64::NAN,
+            mauchly_df: m_df,
+            mauchly_p: f64::NAN,
+            greenhouse_geisser_eps: lower_bound,
+            huynh_feldt_eps: lower_bound,
+        });
+    }
+    let eps_gg = ((tr * tr) / (pf * tr_sq)).clamp(lower_bound, 1.0);
+    let n_eff = n_subj - n_groups + 1.0;
+    let hf_num = n_eff * pf * eps_gg - 2.0;
     let hf_denom = pf * (df_e - pf * eps_gg);
-    let eps_hf = if hf_denom > 0.0 { ((n_subj * pf * eps_gg - 2.0) / hf_denom).clamp(eps_gg, 1.0) } else { 1.0 };
+    let eps_hf = if df_e <= 1.0 {
+        eps_gg
+    } else if hf_denom > 0.0 {
+        (hf_num / hf_denom).clamp(eps_gg, 1.0)
+    } else if hf_num > 0.0 {
+        1.0
+    } else {
+        eps_gg
+    };
+
+    if df_e < pf {
+        return Ok(SphericityResult {
+            mauchly_w: 0.0,
+            mauchly_chi2: f64::NAN,
+            mauchly_df: m_df,
+            mauchly_p: f64::NAN,
+            greenhouse_geisser_eps: eps_gg,
+            huynh_feldt_eps: eps_hf,
+        });
+    }
 
     // Normalize eigenvalues by mean_eig = tr / p before taking logs so Mauchly W is scale-invariant.
     let mean_eig = tr / pf;
     let ln_w: f64 = eigvals.iter().map(|&v| (v / mean_eig).max(1e-15).ln()).sum::<f64>().min(0.0);
     let w = ln_w.exp().clamp(1e-15, 1.0);
-    let m_df = 0.5 * pf * (pf + 1.0) - 1.0;
     let f_scale = (1.0 - (2.0 * pf * pf + pf + 2.0) / (6.0 * pf * df_e)).max(0.0);
     let chi2 = (-df_e * f_scale * ln_w).max(0.0);
     let mauchly_p = if m_df > 0.0 { chi2_sf(chi2, m_df)? } else { 1.0 };
@@ -1100,7 +1148,7 @@ fn compute_sphericity_from_cov_contrast(s_cov: &DenseMatrix, contrast: &DenseMat
 fn compute_sphericity(blocks: &[Vec<f64>]) -> Result<SphericityResult, StatsError> {
     let n = blocks.len();
     let k = blocks.first().map_or(0, Vec::len);
-    if k <= 2 || n <= 2 {
+    if k <= 2 {
         return Ok(SphericityResult {
             mauchly_w: 1.0,
             mauchly_chi2: 0.0,
@@ -1110,10 +1158,22 @@ fn compute_sphericity(blocks: &[Vec<f64>]) -> Result<SphericityResult, StatsErro
             huynh_feldt_eps: 1.0,
         });
     }
+    if n < 2 {
+        let pf = (k - 1) as f64;
+        let lb = 1.0 / pf;
+        return Ok(SphericityResult {
+            mauchly_w: f64::NAN,
+            mauchly_chi2: f64::NAN,
+            mauchly_df: 0.5 * pf * (pf + 1.0) - 1.0,
+            mauchly_p: f64::NAN,
+            greenhouse_geisser_eps: lb,
+            huynh_feldt_eps: lb,
+        });
+    }
     let s_cov = pooled_within_group_cov(&[blocks.to_vec()])?;
     let h_mat = helmert_contrast_matrix(k)?;
     let nf = n as f64;
-    compute_sphericity_from_cov_contrast(&s_cov, &h_mat, nf - 1.0, nf)
+    compute_sphericity_from_cov_contrast(&s_cov, &h_mat, nf - 1.0, nf, 1.0)
 }
 
 /// Kruskal–Wallis one-way ANOVA on ranks with tie correction and rank epsilon-squared effect size.
@@ -1593,9 +1653,9 @@ fn compute_rm_two_way_sphericities(
             let m_int = kronecker_dense(&ha, &hb)?;
             let df_e = sf - 1.0;
             Ok(RmTwoWaySphericities {
-                row: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_row, df_e, sf)?),
-                column: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_col, df_e, sf)?),
-                interaction: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_int, df_e, sf)?),
+                row: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_row, df_e, sf, 1.0)?),
+                column: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_col, df_e, sf, 1.0)?),
+                interaction: Some(compute_sphericity_from_cov_contrast(&s_cov, &m_int, df_e, sf, 1.0)?),
             })
         }
         RepeatedMeasuresDesign::ColumnFactorMatched => {
@@ -1609,7 +1669,7 @@ fn compute_rm_two_way_sphericities(
             let m_col = helmert_contrast_matrix(b)?;
             let n_subj = af * sf;
             let df_e = n_subj - af;
-            let sph_col = compute_sphericity_from_cov_contrast(&s_pool, &m_col, df_e, n_subj)?;
+            let sph_col = compute_sphericity_from_cov_contrast(&s_pool, &m_col, df_e, n_subj, af)?;
             Ok(RmTwoWaySphericities { row: None, column: Some(sph_col), interaction: None })
         }
         RepeatedMeasuresDesign::RowFactorMatched => {
@@ -1627,7 +1687,7 @@ fn compute_rm_two_way_sphericities(
             let m_row = helmert_contrast_matrix(a)?;
             let n_subj = bf * sf;
             let df_e = n_subj - bf;
-            let sph_row = compute_sphericity_from_cov_contrast(&s_pool, &m_row, df_e, n_subj)?;
+            let sph_row = compute_sphericity_from_cov_contrast(&s_pool, &m_row, df_e, n_subj, bf)?;
             Ok(RmTwoWaySphericities { row: Some(sph_row), column: None, interaction: None })
         }
         RepeatedMeasuresDesign::None => Ok(RmTwoWaySphericities::default()),
@@ -3945,13 +4005,14 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
                 }
                 _ => MultiplicityProcedure::GamesHowell,
             };
-            let details = compare_groups_with_procedure(
+            let details = compare_groups_with_confidence(
                 &group_inputs,
                 base.ms_within,
                 base.df_within,
                 proc_eff,
                 anova_spec.multiplicity.threshold,
                 anova_spec.multiplicity.report_confidence_intervals,
+                confidence,
             )?;
             push_pairwise_outputs(&mut out, &details, "Multiple comparisons (Games-Howell / T2 / T3)", p_fmt, confidence);
             append_one_way_checklist(&mut out, &base, &group_inputs, &raw_slices_owned, true, confidence.alpha());
@@ -4147,12 +4208,13 @@ fn run_rm_one_way_anova_sheet(
             append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, &anova_spec.multiplicity, p_fmt, confidence)?;
 
             let sph_status = if rm.sphericity.greenhouse_geisser_eps < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
+            let mauchly_p_lbl = if rm.sphericity.mauchly_p.is_finite() { format!("{:.4}", rm.sphericity.mauchly_p) } else { String::from("n/a") };
             out.checklist.push(checklist_item(
                 "Sphericity (Mauchly / Greenhouse-Geisser)",
                 sph_status,
                 Some(format!(
-                    "eps_GG = {:.4}, eps_HF = {:.4}, Mauchly P = {:.4}",
-                    rm.sphericity.greenhouse_geisser_eps, rm.sphericity.huynh_feldt_eps, rm.sphericity.mauchly_p
+                    "eps_GG = {:.4}, eps_HF = {:.4}, Mauchly P = {mauchly_p_lbl}",
+                    rm.sphericity.greenhouse_geisser_eps, rm.sphericity.huynh_feldt_eps
                 )),
                 if geisser_greenhouse {
                     "Geisser-Greenhouse correction is applied to treatment degrees of freedom."
@@ -4371,7 +4433,7 @@ fn append_one_way_multiplicity(
         ));
         return Ok(());
     }
-    let details = compare_groups_pairwise(inputs, ms_within, df_within, mult)?;
+    let details = compare_groups_pairwise_with_confidence(inputs, ms_within, df_within, mult, confidence)?;
     push_pairwise_outputs(out, &details, "Multiple comparisons", p_fmt, confidence);
     Ok(())
 }
@@ -4571,6 +4633,7 @@ struct ContrastEstimate {
     se: f64,
     df: f64,
     ctrl_var_pair: Option<(f64, f64)>,
+    cov_vectors: Option<(Vec<f64>, Vec<f64>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -4801,16 +4864,18 @@ impl OlsPostHocModel {
                 }
             }
             let (se, df) = welch_stats_from_weighted_terms(&terms);
-            return Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair: None }));
+            return Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair: None, cov_vectors: None }));
         }
 
-        let se = (self.ms_resid * quad_form(&l, &self.cov_unscaled)).max(0.0).sqrt();
+        let cov_l_raw = self.cov_unscaled.matvec(&l)?;
+        let cov_l: Vec<f64> = cov_l_raw.into_iter().map(|v| v * self.ms_resid).collect();
+        let se = dot_slice(&l, &cov_l).max(0.0).sqrt();
         let ctrl_var_pair = if is_vec_estimable(&self.row_proj, &w_a)? && is_vec_estimable(&self.row_proj, &w_b)? {
             Some(((self.ms_resid * quad_form(&w_a, &self.cov_unscaled)).max(0.0), (self.ms_resid * quad_form(&w_b, &self.cov_unscaled)).max(0.0)))
         } else {
             None
         };
-        Ok(Some(ContrastEstimate { diff, se, df: self.df_resid, ctrl_var_pair }))
+        Ok(Some(ContrastEstimate { diff, se, df: self.df_resid, ctrl_var_pair, cov_vectors: Some((l, cov_l)) }))
     }
 
     fn eval_marginal_pair(&self, f_idx: usize, lvl_a: usize, lvl_b: usize, unequal_var: bool) -> Result<Option<ContrastEstimate>, StatsError> {
@@ -4871,7 +4936,7 @@ impl RmBalancedPostHocModel {
                 (self.err_b_ms, self.err_b_df, sf * (self.a_count as f64))
             };
             let v_lvl = (ms / n_eff).max(0.0);
-            return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df, ctrl_var_pair: Some((v_lvl, v_lvl)) }));
+            return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df, ctrl_var_pair: Some((v_lvl, v_lvl)), cov_vectors: None }));
         }
 
         let is_between =
@@ -4880,7 +4945,7 @@ impl RmBalancedPostHocModel {
             let va = self.subject_marginal_values(f_idx, lvl_a);
             let vb = self.subject_marginal_values(f_idx, lvl_b);
             let (d, se, df) = welch_two_slice_stats(&va, &vb)?;
-            return Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None }));
+            return Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }));
         }
 
         if self.design == RepeatedMeasuresDesign::BothFactorsMatched {
@@ -4888,7 +4953,7 @@ impl RmBalancedPostHocModel {
             let vb = self.subject_marginal_values(f_idx, lvl_b);
             let diffs: Vec<f64> = va.into_iter().zip(vb).map(|(x, y)| x - y).collect();
             let (d, se, df) = paired_diff_stats(&diffs)?;
-            return Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None }));
+            return Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }));
         }
 
         // Mixed design within-subject factor: paired diffs stratified by the between-subject factor.
@@ -4910,7 +4975,7 @@ impl RmBalancedPostHocModel {
             terms.push((w2 * g_se * g_se, g_df));
         }
         let (se, df) = welch_stats_from_weighted_terms(&terms);
-        Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair: None }))
+        Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair: None, cov_vectors: None }))
     }
 
     fn eval_simple_pair(
@@ -4945,7 +5010,13 @@ impl RmBalancedPostHocModel {
                 (ms_num / n_other, df)
             };
             let v_lvl = (ms_pool / sf).max(0.0);
-            return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df: df_pool, ctrl_var_pair: Some((v_lvl, v_lvl)) }));
+            return Ok(Some(ContrastEstimate {
+                diff,
+                se: (2.0 * v_lvl).sqrt(),
+                df: df_pool,
+                ctrl_var_pair: Some((v_lvl, v_lvl)),
+                cov_vectors: None,
+            }));
         }
 
         let is_between =
@@ -4954,11 +5025,11 @@ impl RmBalancedPostHocModel {
         let vb: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][rb][cb]).collect();
         if is_between {
             let (d, se, df) = welch_two_slice_stats(&va, &vb)?;
-            Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None }))
+            Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
         } else {
             let diffs: Vec<f64> = va.into_iter().zip(vb).map(|(x, y)| x - y).collect();
             let (d, se, df) = paired_diff_stats(&diffs)?;
-            Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None }))
+            Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None, cov_vectors: None }))
         }
     }
 }
@@ -5007,15 +5078,17 @@ impl RemlContrastModel {
         let denom = dot_slice(&grad, &wg);
         let df = if v > 0.0 && denom > 1e-30 * v * v { (2.0 * v * v / denom).clamp(1.0, self.n_minus_p) } else { self.n_minus_p };
 
+        let y2 = self.y_scale * self.y_scale;
+        let phi_a_l = self.phi_a.matvec(&l)?;
+        let cov_l: Vec<f64> = phi_a_l.into_iter().map(|val| val * y2).collect();
         let ctrl_var_pair = if is_vec_estimable(&self.row_proj, wa_orig)? && is_vec_estimable(&self.row_proj, wb_orig)? {
             let wa = self.map_to_eff(wa_orig);
             let wb = self.map_to_eff(wb_orig);
-            let y2 = self.y_scale * self.y_scale;
             Some(((quad_form(&wa, &self.phi_a) * y2).max(0.0), (quad_form(&wb, &self.phi_a) * y2).max(0.0)))
         } else {
             None
         };
-        Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair }))
+        Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair, cov_vectors: Some((l, cov_l)) }))
     }
 
     fn avg_cell_vec(&self, f_idx: usize, lvl: usize, other_indices: &[usize]) -> Vec<f64> {
@@ -5129,9 +5202,7 @@ fn push_pairwise_outputs_with_footnote(
     }
     let mut tab = build_multiplicity_tab(details, title, p_fmt, confidence);
     tab.id = tab_id.to_owned();
-    if let Some(note) = extra_footnote
-        && details.len() > 1
-    {
+    if let Some(note) = extra_footnote {
         tab.footnotes.push(note);
     }
     out.tabs.push(tab);
@@ -5178,7 +5249,7 @@ fn build_pair_detail(
         adjusted_p_or_q,
         is_fdr_q,
         ci,
-        significant: adjusted_p_or_q <= threshold,
+        significant: threshold.is_finite() && adjusted_p_or_q.is_finite() && adjusted_p_or_q <= threshold,
     }
 }
 
@@ -5186,10 +5257,57 @@ fn zero_se_pair(diff: f64, unsigned: bool) -> (f64, f64) {
     if diff != 0.0 { (if unsigned { f64::INFINITY } else { diff.signum() * f64::INFINITY }, 0.0) } else { (0.0, 1.0) }
 }
 
+fn compare_independent_newman_keuls(
+    entries: &[NamedSliceContrast<'_>],
+    stats: &[f64],
+    raw_p: &[f64],
+    threshold: f64,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    let m = entries.len();
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by(|&a, &b| raw_p[a].total_cmp(&raw_p[b]).then_with(|| stats[b].abs().total_cmp(&stats[a].abs())));
+
+    let mut adj_vec = vec![1.0_f64; m];
+    let mut running_max = 0.0_f64;
+    for (rank, &orig_idx) in order.iter().enumerate() {
+        let e = &entries[orig_idx];
+        let m_rem = m - rank;
+        let cand = if e.se > 0.0 {
+            let t_abs = (e.diff / e.se).abs();
+            max_studentized_range_sf(std::f64::consts::SQRT_2 * t_abs, m_rem, 2, e.df)?
+        } else {
+            raw_p[orig_idx]
+        };
+        running_max = running_max.max(cand).max(raw_p[orig_idx]).clamp(0.0, 1.0);
+        adj_vec[orig_idx] = running_max;
+    }
+
+    let mut out = Vec::with_capacity(m);
+    for (idx, e) in entries.iter().enumerate() {
+        out.push(build_pair_detail(
+            e.id_a,
+            e.id_b,
+            e.label_a.to_owned(),
+            e.label_b.to_owned(),
+            e.diff,
+            e.se,
+            e.df,
+            stats[idx],
+            raw_p[idx],
+            adj_vec[idx],
+            false,
+            None,
+            threshold,
+        ));
+    }
+    Ok(out)
+}
+
 fn compare_independent_contrast_family(
     entries: &[NamedSliceContrast<'_>],
     proc_req: MultiplicityProcedure,
     threshold: f64,
+    ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let m = entries.len();
@@ -5199,14 +5317,23 @@ fn compare_independent_contrast_family(
     if !threshold.is_finite() || threshold <= 0.0 || threshold >= 1.0 {
         return Err(StatsError::InvalidParameter { name: "threshold", value: threshold });
     }
+    if report_ci && (!ci_alpha.is_finite() || ci_alpha <= 0.0 || ci_alpha >= 1.0) {
+        return Err(StatsError::InvalidParameter { name: "ci_alpha", value: ci_alpha });
+    }
     let uses_q_stat =
         matches!(proc_req, MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::NewmanKeuls | MultiplicityProcedure::GamesHowell);
     let mut raw_p = Vec::with_capacity(m);
     let mut stats = Vec::with_capacity(m);
     for e in entries {
+        if !e.diff.is_finite() || !e.se.is_finite() || e.se < 0.0 || !e.df.is_finite() || e.df <= 0.0 {
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "contrast_estimate", value: f64::NAN }));
+        }
         if e.se > 0.0 {
             let t = e.diff / e.se;
             let rp = student_t_two_sided_p(t, e.df)?;
+            if !rp.is_finite() {
+                return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "contrast_p_value", value: rp }));
+            }
             raw_p.push(rp);
             stats.push(if uses_q_stat { t.abs() * std::f64::consts::SQRT_2 } else { t });
         } else {
@@ -5220,7 +5347,7 @@ fn compare_independent_contrast_family(
         let mut out = Vec::with_capacity(m);
         for (idx, e) in entries.iter().enumerate() {
             let ci = if report_ci && !matches!(proc_req, MultiplicityProcedure::NewmanKeuls) {
-                let tc = student_t_two_sided_isf(threshold.clamp(1e-12, 0.9999), e.df)?;
+                let tc = student_t_two_sided_isf(ci_alpha.clamp(1e-12, 0.9999), e.df)?;
                 Some((e.diff - tc * e.se, e.diff + tc * e.se))
             } else {
                 None
@@ -5245,12 +5372,11 @@ fn compare_independent_contrast_family(
     }
 
     match proc_req {
+        MultiplicityProcedure::NewmanKeuls => compare_independent_newman_keuls(entries, &stats, &raw_p, threshold),
         MultiplicityProcedure::TukeyKramer
-        | MultiplicityProcedure::NewmanKeuls
         | MultiplicityProcedure::GamesHowell
         | MultiplicityProcedure::DunnettT3
         | MultiplicityProcedure::Dunnett { .. } => {
-            let allow_ci = report_ci && !matches!(proc_req, MultiplicityProcedure::NewmanKeuls);
             let mut out = Vec::with_capacity(m);
             for (idx, e) in entries.iter().enumerate() {
                 let adj_p = if e.se > 0.0 {
@@ -5259,8 +5385,8 @@ fn compare_independent_contrast_family(
                 } else {
                     raw_p[idx]
                 };
-                let ci = if allow_ci {
-                    let crit = max_studentized_range_isf(threshold, m, 2, e.df)? * std::f64::consts::FRAC_1_SQRT_2;
+                let ci = if report_ci {
+                    let crit = max_studentized_range_isf(ci_alpha, m, 2, e.df)? * std::f64::consts::FRAC_1_SQRT_2;
                     Some((e.diff - crit * e.se, e.diff + crit * e.se))
                 } else {
                     None
@@ -5287,8 +5413,8 @@ fn compare_independent_contrast_family(
             let eff_proc = if matches!(proc_req, MultiplicityProcedure::TamhaneT2) { MultiplicityProcedure::Sidak } else { proc_req };
             let (adj_p, is_fdr) = adjust_p_values(&raw_p, eff_proc, threshold);
             let per_alpha = match eff_proc {
-                MultiplicityProcedure::Bonferroni => Some(threshold / (m as f64)),
-                MultiplicityProcedure::Sidak => Some(1.0 - (1.0 - threshold).powf(1.0 / (m as f64))),
+                MultiplicityProcedure::Bonferroni => Some(ci_alpha / (m as f64)),
+                MultiplicityProcedure::Sidak => Some(1.0 - (1.0 - ci_alpha).powf(1.0 / (m as f64))),
                 _ => None,
             };
             let mut out = Vec::with_capacity(m);
@@ -5325,19 +5451,25 @@ struct ContrastFamilyEval<'a> {
     levels: &'a [(usize, String)],
     level_means: &'a [Option<f64>],
     mult_spec: &'a MultiplicitySpec,
+    confidence: ConfidenceLevel,
+    n_slices: usize,
     pairs: Vec<(usize, usize, ContrastEstimate)>,
 }
 
-fn compare_contrast_family(eval: ContrastFamilyEval<'_>) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+type ContrastFamilyOutcome = (Vec<PairwiseComparisonDetail>, Option<String>);
+
+fn compare_contrast_family(eval: ContrastFamilyEval<'_>) -> Result<ContrastFamilyOutcome, StatsError> {
     let k = eval.levels.len();
     let proc_req = MultiplicityProcedure::from(eval.mult_spec.method);
     let threshold = eval.mult_spec.threshold;
+    let ci_alpha = eval.confidence.alpha();
     let report_ci = eval.mult_spec.report_confidence_intervals;
+    let n_slices = eval.n_slices.max(1);
     if !threshold.is_finite() || threshold <= 0.0 || threshold >= 1.0 {
         return Err(StatsError::InvalidParameter { name: "threshold", value: threshold });
     }
     if eval.pairs.is_empty() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
 
     let mut used = vec![false; k];
@@ -5348,7 +5480,7 @@ fn compare_contrast_family(eval: ContrastFamilyEval<'_>) -> Result<Vec<PairwiseC
     let k_eff = used.iter().filter(|&&u| u).count().max(2);
 
     match proc_req {
-        MultiplicityProcedure::Dunnett { .. } => compare_contrast_dunnett(&eval, threshold, report_ci),
+        MultiplicityProcedure::Dunnett { .. } => compare_contrast_dunnett(&eval, threshold, ci_alpha, report_ci),
         MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::GamesHowell => {
             let mut out = Vec::with_capacity(eval.pairs.len());
             for &(i, j, ref est) in &eval.pairs {
@@ -5356,13 +5488,13 @@ fn compare_contrast_family(eval: ContrastFamilyEval<'_>) -> Result<Vec<PairwiseC
                 let (q_stat, raw_p, adj_p) = if se_q > 0.0 {
                     let q = est.diff.abs() / se_q;
                     let rp = student_t_two_sided_p(est.diff / est.se, est.df)?;
-                    (q, rp, studentized_range_sf(q, k_eff, est.df)?)
+                    (q, rp, max_studentized_range_sf(q, n_slices, k_eff, est.df)?)
                 } else {
                     let (st, rp) = zero_se_pair(est.diff, true);
                     (st, rp, rp)
                 };
                 let ci = if report_ci {
-                    let qc = studentized_range_isf(threshold, k_eff, est.df)?;
+                    let qc = max_studentized_range_isf(ci_alpha, n_slices, k_eff, est.df)?;
                     Some((est.diff - qc * se_q, est.diff + qc * se_q))
                 } else {
                     None
@@ -5383,45 +5515,9 @@ fn compare_contrast_family(eval: ContrastFamilyEval<'_>) -> Result<Vec<PairwiseC
                     threshold,
                 ));
             }
-            Ok(out)
+            Ok((out, None))
         }
-        MultiplicityProcedure::NewmanKeuls => compare_contrast_newman_keuls(&eval, threshold),
-        MultiplicityProcedure::DunnettT3 => {
-            let m = eval.pairs.len();
-            let mut out = Vec::with_capacity(m);
-            for &(i, j, ref est) in &eval.pairs {
-                let (t_stat, raw_p, adj_p) = if est.se > 0.0 {
-                    let t = est.diff / est.se;
-                    let rp = student_t_two_sided_p(t, est.df)?;
-                    (t, rp, max_studentized_range_sf(std::f64::consts::SQRT_2 * t.abs(), m.max(1), 2, est.df)?)
-                } else {
-                    let (st, rp) = zero_se_pair(est.diff, false);
-                    (st, rp, rp)
-                };
-                let ci = if report_ci {
-                    let crit = max_studentized_range_isf(threshold, m.max(1), 2, est.df)? * std::f64::consts::FRAC_1_SQRT_2;
-                    Some((est.diff - crit * est.se, est.diff + crit * est.se))
-                } else {
-                    None
-                };
-                out.push(build_pair_detail(
-                    eval.levels[i].0,
-                    eval.levels[j].0,
-                    eval.levels[i].1.clone(),
-                    eval.levels[j].1.clone(),
-                    est.diff,
-                    est.se,
-                    est.df,
-                    t_stat,
-                    raw_p,
-                    adj_p,
-                    false,
-                    ci,
-                    threshold,
-                ));
-            }
-            Ok(out)
-        }
+        MultiplicityProcedure::NewmanKeuls => Ok((compare_contrast_newman_keuls(&eval, threshold)?, None)),
         _ => {
             let entries: Vec<NamedSliceContrast<'_>> = eval
                 .pairs
@@ -5436,74 +5532,157 @@ fn compare_contrast_family(eval: ContrastFamilyEval<'_>) -> Result<Vec<PairwiseC
                     df: est.df,
                 })
                 .collect();
-            let m = entries.len();
-            let mut raw_p = Vec::with_capacity(m);
-            let mut t_stats = Vec::with_capacity(m);
-            for e in &entries {
-                if e.se > 0.0 {
-                    let t = e.diff / e.se;
-                    t_stats.push(t);
-                    raw_p.push(student_t_two_sided_p(t, e.df)?);
-                } else {
-                    let (st, rp) = zero_se_pair(e.diff, false);
-                    t_stats.push(st);
-                    raw_p.push(rp);
-                }
-            }
-            let eff_proc = if matches!(proc_req, MultiplicityProcedure::TamhaneT2) { MultiplicityProcedure::Sidak } else { proc_req };
-            let (adj_p, is_fdr) = adjust_p_values(&raw_p, eff_proc, threshold);
-            let per_alpha = match eff_proc {
-                MultiplicityProcedure::Bonferroni => Some(threshold / (m as f64)),
-                MultiplicityProcedure::Sidak => Some(1.0 - (1.0 - threshold).powf(1.0 / (m as f64))),
-                MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => Some(threshold),
-                _ => None,
-            };
-            let mut out = Vec::with_capacity(m);
-            for (idx, e) in entries.iter().enumerate() {
-                let ci = match (report_ci, per_alpha) {
-                    (true, Some(a)) => {
-                        let tc = student_t_two_sided_isf(a.clamp(1e-12, 0.9999), e.df)?;
-                        Some((e.diff - tc * e.se, e.diff + tc * e.se))
-                    }
-                    _ => None,
-                };
-                out.push(build_pair_detail(
-                    e.id_a,
-                    e.id_b,
-                    e.label_a.to_owned(),
-                    e.label_b.to_owned(),
-                    e.diff,
-                    e.se,
-                    e.df,
-                    t_stats[idx],
-                    raw_p[idx],
-                    adj_p[idx],
-                    is_fdr,
-                    ci,
-                    threshold,
-                ));
-            }
-            Ok(out)
+            let details = compare_independent_contrast_family(&entries, proc_req, threshold, ci_alpha, report_ci)?;
+            Ok((details, None))
         }
     }
 }
 
-fn compare_contrast_dunnett(eval: &ContrastFamilyEval<'_>, threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+fn factor_loadings_from_cov_vectors(pairs: &[(usize, usize, ContrastEstimate)]) -> Option<Vec<f64>> {
+    let m = pairs.len();
+    if m <= 1 {
+        return Some(vec![std::f64::consts::FRAC_1_SQRT_2; m]);
+    }
+    if pairs.iter().all(|(_, _, e)| e.se <= 0.0) {
+        return Some(vec![std::f64::consts::FRAC_1_SQRT_2; m]);
+    }
+    if !pairs.iter().all(|(_, _, e)| e.se > 0.0 && e.cov_vectors.is_some()) {
+        return None;
+    }
+    let mut rhos = vec![vec![0.0_f64; m]; m];
+    let mut max_abs_rho = 0.0_f64;
+    for a in 0..m {
+        let (la, _) = pairs[a].2.cov_vectors.as_ref()?;
+        for b in (a + 1)..m {
+            let (_, cov_lb) = pairs[b].2.cov_vectors.as_ref()?;
+            let denom = pairs[a].2.se * pairs[b].2.se;
+            if denom <= 0.0 {
+                return None;
+            }
+            let r = dot_slice(la, cov_lb) / denom;
+            if !r.is_finite() {
+                return None;
+            }
+            max_abs_rho = max_abs_rho.max(r.abs());
+            rhos[a][b] = r;
+            rhos[b][a] = r;
+        }
+    }
+    if max_abs_rho <= 1e-12 {
+        return Some(vec![0.0; m]);
+    }
+    if m == 2 {
+        let r01 = rhos[0][1];
+        if (0.0..0.999_999).contains(&r01) {
+            let lam = r01.sqrt();
+            return Some(vec![lam, lam]);
+        }
+        return None;
+    }
+    let mut log_row_sums = vec![0.0_f64; m];
+    for a in 0..m {
+        for (b, &r) in rhos[a].iter().enumerate() {
+            if a == b {
+                continue;
+            }
+            if !(1e-12..0.999_999).contains(&r) {
+                return None;
+            }
+            log_row_sums[a] += r.ln();
+        }
+    }
+    let sum_s: f64 = log_row_sums.iter().sum();
+    let offset = sum_s / (2.0 * ((m - 1) as f64));
+    let denom_m = (m - 2) as f64;
+    let loadings: Vec<f64> = log_row_sums.iter().map(|&sa| ((sa - offset) / denom_m).exp().clamp(0.0, 0.999_999)).collect();
+    for a in 0..m {
+        for b in (a + 1)..m {
+            if (rhos[a][b] - loadings[a] * loadings[b]).abs() > 1e-4 {
+                return None;
+            }
+        }
+    }
+    Some(loadings)
+}
+
+fn resolve_dunnett_loadings(pairs: &[(usize, usize, ContrastEstimate)]) -> Option<Vec<f64>> {
+    if pairs.len() > 1 && pairs.iter().all(|(_, _, e)| e.se > 0.0 && e.cov_vectors.is_some()) {
+        return factor_loadings_from_cov_vectors(pairs);
+    }
+    if let Some(loadings) = factor_loadings_from_cov_vectors(pairs) {
+        return Some(loadings);
+    }
+    let first_vc = pairs.first().and_then(|(_, _, e)| e.ctrl_var_pair.map(|(_, vc)| vc))?;
+    if pairs.iter().all(|(_, _, e)| matches!(e.ctrl_var_pair, Some((vt, vc)) if vt + vc > 0.0 && (vc - first_vc).abs() <= 1e-9 * first_vc.max(1.0))) {
+        return Some(
+            pairs
+                .iter()
+                .map(|(_, _, e)| match e.ctrl_var_pair {
+                    Some((v_tr, v_ctrl)) if v_tr + v_ctrl > 0.0 => (v_ctrl / (v_tr + v_ctrl)).sqrt().clamp(0.0, 0.999_999),
+                    _ => 0.0,
+                })
+                .collect(),
+        );
+    }
+    None
+}
+
+fn compare_contrast_dunnett(
+    eval: &ContrastFamilyEval<'_>,
+    threshold: f64,
+    ci_alpha: f64,
+    report_ci: bool,
+) -> Result<ContrastFamilyOutcome, StatsError> {
     let m = eval.pairs.len();
+    let n_slices = eval.n_slices.max(1);
+    let Some(loadings) = resolve_dunnett_loadings(&eval.pairs) else {
+        let m_tot = (m * n_slices).max(1);
+        let mut out = Vec::with_capacity(m);
+        for &(i, j, ref est) in &eval.pairs {
+            let (t_stat, raw_p, adj_p) = if est.se > 0.0 {
+                let t = est.diff / est.se;
+                let rp = student_t_two_sided_p(t, est.df)?;
+                let ap = max_studentized_range_sf(std::f64::consts::SQRT_2 * t.abs(), m_tot, 2, est.df)?;
+                (t, rp, ap)
+            } else {
+                let (st, rp) = zero_se_pair(est.diff, false);
+                (st, rp, rp)
+            };
+            let ci = if report_ci {
+                let crit = max_studentized_range_isf(ci_alpha, m_tot, 2, est.df)? * std::f64::consts::FRAC_1_SQRT_2;
+                Some((est.diff - crit * est.se, est.diff + crit * est.se))
+            } else {
+                None
+            };
+            out.push(build_pair_detail(
+                eval.levels[i].0,
+                eval.levels[j].0,
+                eval.levels[i].1.clone(),
+                eval.levels[j].1.clone(),
+                est.diff,
+                est.se,
+                est.df,
+                t_stat,
+                raw_p,
+                adj_p,
+                false,
+                ci,
+                threshold,
+            ));
+        }
+        let note = String::from(
+            "Contrast correlation structure is non-estimable in single-factor Dunnett form; conservative Studentized Maximum Modulus adjustment applied.",
+        );
+        return Ok((out, Some(note)));
+    };
+
     let df_joint = eval.pairs.iter().map(|(_, _, e)| e.df).fold(f64::INFINITY, f64::min).max(1.0);
-    let loadings: Vec<f64> = eval
-        .pairs
-        .iter()
-        .map(|(_, _, e)| match e.ctrl_var_pair {
-            Some((v_tr, v_ctrl)) if v_tr + v_ctrl > 0.0 => (v_ctrl / (v_tr + v_ctrl)).sqrt().clamp(0.0, 0.999999),
-            _ => std::f64::consts::FRAC_1_SQRT_2,
-        })
-        .collect();
+    let slice_ci_alpha = if n_slices > 1 { -((-ci_alpha.clamp(1e-12, 0.9999)).ln_1p() / (n_slices as f64)).exp_m1() } else { ci_alpha };
     let d_crit = if report_ci {
         Some(if m == 1 {
-            student_t_two_sided_isf(threshold.clamp(1e-12, 0.9999), df_joint)?
+            student_t_two_sided_isf(slice_ci_alpha.clamp(1e-12, 0.9999), df_joint)?
         } else {
-            dunnett_two_sided_crit_loadings(threshold, df_joint, &loadings)?
+            dunnett_two_sided_crit_loadings(slice_ci_alpha.clamp(1e-12, 0.9999), df_joint, &loadings)?
         })
     } else {
         None
@@ -5514,7 +5693,13 @@ fn compare_contrast_dunnett(eval: &ContrastFamilyEval<'_>, threshold: f64, repor
         let (t_stat, raw_p, adj_p) = if est.se > 0.0 {
             let t = est.diff / est.se;
             let rp = student_t_two_sided_p(t, est.df)?;
-            let ap = if m == 1 { rp } else { dunnett_two_sided_p_loadings(t.abs(), df_joint, &loadings)? };
+            let ap_slice = if m == 1 { rp } else { dunnett_two_sided_p_loadings(t.abs(), df_joint, &loadings)? };
+            let ap = if n_slices > 1 {
+                let pc = ap_slice.clamp(0.0, 1.0);
+                if pc >= 1.0 { 1.0 } else { (-((n_slices as f64) * (-pc).ln_1p()).exp_m1()).clamp(pc, 1.0) }
+            } else {
+                ap_slice
+            };
             (t, rp, ap)
         } else {
             let (st, rp) = zero_se_pair(est.diff, false);
@@ -5537,7 +5722,7 @@ fn compare_contrast_dunnett(eval: &ContrastFamilyEval<'_>, threshold: f64, repor
             threshold,
         ));
     }
-    Ok(out)
+    Ok((out, None))
 }
 
 fn resolve_level_order_for_nk(k: usize, eval: &ContrastFamilyEval<'_>) -> Vec<usize> {
@@ -5569,6 +5754,7 @@ fn resolve_level_order_for_nk(k: usize, eval: &ContrastFamilyEval<'_>) -> Vec<us
 
 fn compare_contrast_newman_keuls(eval: &ContrastFamilyEval<'_>, threshold: f64) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k_total = eval.levels.len();
+    let n_slices = eval.n_slices.max(1);
     let sorted_idx = resolve_level_order_for_nk(k_total, eval);
     let k = sorted_idx.len();
     if k < 2 {
@@ -5587,7 +5773,7 @@ fn compare_contrast_newman_keuls(eval: &ContrastFamilyEval<'_>, threshold: f64) 
             let v = sorted_idx[hi];
             let raw_p = if let Some(&est) = pair_map.get(&(u.min(v), u.max(v))) {
                 let se_q = est.se * std::f64::consts::FRAC_1_SQRT_2;
-                if se_q > 0.0 { studentized_range_sf(est.diff.abs() / se_q, span, est.df)? } else { zero_se_pair(est.diff, true).1 }
+                if se_q > 0.0 { max_studentized_range_sf(est.diff.abs() / se_q, n_slices, span, est.df)? } else { zero_se_pair(est.diff, true).1 }
             } else {
                 0.0
             };
@@ -5652,8 +5838,38 @@ fn validate_dunnett_ctrl(mult_spec: &MultiplicitySpec, n_levels: usize) -> Resul
     Ok(())
 }
 
+/// Resolve the single factorial factor targeted by `MultiplicityMethod::Dunnett { control_column }`.
+///
+/// Prefers primary factor `0` when `control_column` is in bounds there, otherwise falls back to the
+/// first factor with at least 2 levels where `control_column < levels.len()`, returning
+/// `StatsError::InvalidParameter` when `control_column` is out of bounds for every factor.
+fn resolve_factorial_dunnett_target(obs: &FactorialObservations, control_column: usize) -> Result<usize, StatsError> {
+    for (f_idx, levels) in obs.factor_levels.iter().enumerate() {
+        if levels.len() >= 2 && control_column < levels.len() {
+            return Ok(f_idx);
+        }
+    }
+    Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })
+}
+
 fn is_unequal_variance_method(method: MultiplicityMethod) -> bool {
     matches!(method, MultiplicityMethod::GamesHowell | MultiplicityMethod::TamhaneT2 | MultiplicityMethod::DunnettT3)
+}
+
+fn is_contrast_count_multiplicity_method(method: MultiplicityMethod) -> bool {
+    matches!(
+        method,
+        MultiplicityMethod::None
+            | MultiplicityMethod::FisherLsd
+            | MultiplicityMethod::Bonferroni
+            | MultiplicityMethod::Sidak
+            | MultiplicityMethod::HolmSidak
+            | MultiplicityMethod::TamhaneT2
+            | MultiplicityMethod::DunnettT3
+            | MultiplicityMethod::BenjaminiHochbergFdr
+            | MultiplicityMethod::BenjaminiYekutieliFdr
+            | MultiplicityMethod::TwoStageBkyFdr
+    )
 }
 
 fn collect_factor_pairs<F>(n_levels: usize, method: MultiplicityMethod, mut eval_pair: F) -> Result<Vec<(usize, usize, ContrastEstimate)>, StatsError>
@@ -5697,6 +5913,7 @@ fn run_simple_effects_for_pair(
     }
     validate_dunnett_ctrl(cfg.mult_spec, k_t)?;
     let unequal = is_unequal_variance_method(cfg.mult_spec.method);
+    let ci_alpha = cfg.confidence.alpha();
 
     if k_t == 2 {
         let (idx_a, idx_b) = match cfg.mult_spec.method {
@@ -5741,6 +5958,7 @@ fn run_simple_effects_for_pair(
             &slice_refs,
             cfg.mult_spec.method.into(),
             cfg.mult_spec.threshold,
+            ci_alpha,
             cfg.mult_spec.report_confidence_intervals,
         )?;
         let note = if combined.len() >= 2 && !matches!(cfg.mult_spec.method, MultiplicityMethod::None | MultiplicityMethod::FisherLsd) {
@@ -5752,7 +5970,7 @@ fn run_simple_effects_for_pair(
         return Ok(());
     }
 
-    let mut combined = Vec::new();
+    let mut slice_groups = Vec::with_capacity(cond_levels.len());
     for (c_idx, cond_label) in cond_levels.iter().enumerate() {
         let base_id = *next_group_id;
         *next_group_id += k_t;
@@ -5761,15 +5979,67 @@ fn run_simple_effects_for_pair(
         let pairs = collect_factor_pairs(k_t, cfg.mult_spec.method, |i, j| {
             post_hoc.eval_simple_pair(cfg.cond_factor, c_idx, cfg.target_factor, i, j, unequal)
         })?;
-        if pairs.is_empty() {
-            continue;
+        if !pairs.is_empty() {
+            slice_groups.push((slice_levels, pairs));
         }
-        let level_means: Vec<Option<f64>> = vec![None; k_t];
-        let details =
-            compare_contrast_family(ContrastFamilyEval { levels: &slice_levels, level_means: &level_means, mult_spec: cfg.mult_spec, pairs })?;
-        combined.extend(details);
     }
-    push_pairwise_outputs_with_footnote(out, &combined, cfg.tab_id, cfg.title, cfg.p_fmt, cfg.confidence, None);
+    if slice_groups.is_empty() {
+        return Ok(());
+    }
+
+    let n_slices = slice_groups.len();
+    let mut dunnett_fallback_note: Option<String> = None;
+    let combined = if is_contrast_count_multiplicity_method(cfg.mult_spec.method) {
+        let mut flat_refs = Vec::new();
+        for (slice_levels, pairs) in &slice_groups {
+            for &(i, j, ref est) in pairs {
+                flat_refs.push(NamedSliceContrast {
+                    id_a: slice_levels[i].0,
+                    id_b: slice_levels[j].0,
+                    label_a: slice_levels[i].1.as_str(),
+                    label_b: slice_levels[j].1.as_str(),
+                    diff: est.diff,
+                    se: est.se,
+                    df: est.df,
+                });
+            }
+        }
+        compare_independent_contrast_family(
+            &flat_refs,
+            cfg.mult_spec.method.into(),
+            cfg.mult_spec.threshold,
+            ci_alpha,
+            cfg.mult_spec.report_confidence_intervals,
+        )?
+    } else {
+        let level_means: Vec<Option<f64>> = vec![None; k_t];
+        let mut all_details = Vec::new();
+        for (slice_levels, pairs) in slice_groups {
+            let (details, note_opt) = compare_contrast_family(ContrastFamilyEval {
+                levels: &slice_levels,
+                level_means: &level_means,
+                mult_spec: cfg.mult_spec,
+                confidence: cfg.confidence,
+                n_slices,
+                pairs,
+            })?;
+            if dunnett_fallback_note.is_none() {
+                dunnett_fallback_note = note_opt;
+            }
+            all_details.extend(details);
+        }
+        all_details
+    };
+
+    let mut notes = Vec::new();
+    if combined.len() >= 2 && !matches!(cfg.mult_spec.method, MultiplicityMethod::None | MultiplicityMethod::FisherLsd) {
+        notes.push(format!("Multiplicity adjusted across all {} simple-effect comparisons.", combined.len()));
+    }
+    if let Some(dn) = dunnett_fallback_note {
+        notes.push(dn);
+    }
+    let merged_note = if notes.is_empty() { None } else { Some(notes.join(" ")) };
+    push_pairwise_outputs_with_footnote(out, &combined, cfg.tab_id, cfg.title, cfg.p_fmt, cfg.confidence, merged_note);
     Ok(())
 }
 
@@ -5788,12 +6058,21 @@ fn run_factorial_multiplicity(
     if !result.df_residual.is_finite() || result.df_residual < 1.0 || !result.ms_residual.is_finite() || result.ms_residual < 0.0 {
         return Ok(());
     }
+    let dunnett_target = match mult_spec.method {
+        MultiplicityMethod::Dunnett { control_column } => Some((resolve_factorial_dunnett_target(obs, control_column)?, control_column)),
+        _ => None,
+    };
     let unequal = is_unequal_variance_method(mult_spec.method);
     let mut next_group_id = 0_usize;
 
     for (f_idx, levels) in obs.factor_levels.iter().enumerate() {
         let k = levels.len();
         if k < 2 {
+            continue;
+        }
+        if let Some((target_f, _)) = dunnett_target
+            && f_idx != target_f
+        {
             continue;
         }
         validate_dunnett_ctrl(mult_spec, k)?;
@@ -5808,7 +6087,14 @@ fn run_factorial_multiplicity(
         for lvl in 0..k {
             level_means.push(post_hoc.level_mean_estimate(f_idx, lvl)?);
         }
-        let details = compare_contrast_family(ContrastFamilyEval { levels: &numbered_levels, level_means: &level_means, mult_spec, pairs })?;
+        let (details, fam_note) = compare_contrast_family(ContrastFamilyEval {
+            levels: &numbered_levels,
+            level_means: &level_means,
+            mult_spec,
+            confidence,
+            n_slices: 1,
+            pairs,
+        })?;
         let tab_id = match f_idx {
             0 => String::from("multiple-comparisons-factor-a"),
             1 => String::from("multiple-comparisons-factor-b"),
@@ -5816,44 +6102,59 @@ fn run_factorial_multiplicity(
         };
         let f_name = obs.factor_names.get(f_idx).map_or("Factor", String::as_str);
         let title = format!("Multiple comparisons: {f_name} (marginal means)");
-        push_pairwise_outputs_with_footnote(out, &details, &tab_id, &title, p_fmt, confidence, None);
+        let mut notes = Vec::new();
+        if let Some((_, ctrl_idx)) = dunnett_target
+            && obs.factor_levels.len() >= 2
+        {
+            let ctrl_lbl = levels.get(ctrl_idx).map_or("control", String::as_str);
+            notes.push(format!("Dunnett many-to-one comparisons target {f_name} against control level `{ctrl_lbl}` (index {ctrl_idx})."));
+        }
+        if let Some(fn_str) = fam_note {
+            notes.push(fn_str);
+        }
+        let extra_note = if notes.is_empty() { None } else { Some(notes.join(" ")) };
+        push_pairwise_outputs_with_footnote(out, &details, &tab_id, &title, p_fmt, confidence, extra_note);
     }
 
     if obs.factor_levels.len() >= 2 {
         let name_a = obs.factor_names.first().map_or("Factor A", String::as_str);
         let name_b = obs.factor_names.get(1).map_or("Factor B", String::as_str);
-        let title_a_within_b = format!("Simple effects: {name_a} within {name_b}");
-        run_simple_effects_for_pair(
-            out,
-            obs,
-            post_hoc,
-            &SimpleEffectsSpec {
-                cond_factor: 1,
-                target_factor: 0,
-                mult_spec,
-                tab_id: "multiple-comparisons-simple-a-within-b",
-                title: &title_a_within_b,
-                p_fmt,
-                confidence,
-            },
-            &mut next_group_id,
-        )?;
-        let title_b_within_a = format!("Simple effects: {name_b} within {name_a}");
-        run_simple_effects_for_pair(
-            out,
-            obs,
-            post_hoc,
-            &SimpleEffectsSpec {
-                cond_factor: 0,
-                target_factor: 1,
-                mult_spec,
-                tab_id: "multiple-comparisons-simple-b-within-a",
-                title: &title_b_within_a,
-                p_fmt,
-                confidence,
-            },
-            &mut next_group_id,
-        )?;
+        if dunnett_target.is_none_or(|(target_f, _)| target_f == 0) {
+            let title_a_within_b = format!("Simple effects: {name_a} within {name_b}");
+            run_simple_effects_for_pair(
+                out,
+                obs,
+                post_hoc,
+                &SimpleEffectsSpec {
+                    cond_factor: 1,
+                    target_factor: 0,
+                    mult_spec,
+                    tab_id: "multiple-comparisons-simple-a-within-b",
+                    title: &title_a_within_b,
+                    p_fmt,
+                    confidence,
+                },
+                &mut next_group_id,
+            )?;
+        }
+        if dunnett_target.is_none_or(|(target_f, _)| target_f == 1) {
+            let title_b_within_a = format!("Simple effects: {name_b} within {name_a}");
+            run_simple_effects_for_pair(
+                out,
+                obs,
+                post_hoc,
+                &SimpleEffectsSpec {
+                    cond_factor: 0,
+                    target_factor: 1,
+                    mult_spec,
+                    tab_id: "multiple-comparisons-simple-b-within-a",
+                    title: &title_b_within_a,
+                    p_fmt,
+                    confidence,
+                },
+                &mut next_group_id,
+            )?;
+        }
     }
 
     Ok(())
@@ -5950,7 +6251,8 @@ fn push_rm_sphericity_outputs(
         worst_gg = worst_gg.min(s.greenhouse_geisser_eps);
         push_scalar(out, format!("{name}: G-G epsilon"), None, s.greenhouse_geisser_eps);
         push_scalar(out, format!("{name}: H-F epsilon"), None, s.huynh_feldt_eps);
-        summary_parts.push(format!("{name}: eps_GG={:.4}, eps_HF={:.4}, P={:.4}", s.greenhouse_geisser_eps, s.huynh_feldt_eps, s.mauchly_p));
+        let mauchly_lbl = if s.mauchly_p.is_finite() { format!("{:.4}", s.mauchly_p) } else { String::from("n/a") };
+        summary_parts.push(format!("{name}: eps_GG={:.4}, eps_HF={:.4}, P={mauchly_lbl}", s.greenhouse_geisser_eps, s.huynh_feldt_eps));
     }
     if !summary_parts.is_empty() {
         out.checklist.push(checklist_item(
@@ -6632,7 +6934,8 @@ fn append_nested_multiplicity(
             rows,
         ));
     } else {
-        let details = compare_groups_pairwise(&g_inputs, mse_eff, res.df2_groups_kenward_roger, &nested_spec.multiplicity)?;
+        let details =
+            compare_groups_pairwise_with_confidence(&g_inputs, mse_eff, res.df2_groups_kenward_roger, &nested_spec.multiplicity, confidence)?;
         push_pairwise_outputs(out, &details, "Nested multiple comparisons", p_fmt, confidence);
     }
     Ok(())

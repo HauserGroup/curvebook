@@ -16,6 +16,7 @@ use curvebook_math::dist::{chi2_sf, noncentral_chi2_ci, norm_sf, norm_two_sided_
 use curvebook_math::rng::DeterministicRng;
 use curvebook_math::roots::{RootOptions, brent_root};
 use curvebook_math::special::{ln_choose, ln_factorial, reg_beta_inv};
+use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
@@ -328,6 +329,11 @@ fn log_hypergeom_table(counts: &[Vec<u64>], r_sums: &[u64], c_sums: &[u64], tota
 }
 
 /// Exact two-sided Fisher's test for a `2 x 2` count matrix `[[a, b], [c, d]]`.
+///
+/// Sums hypergeometric point probabilities satisfying `P(X = x) <= P(X = a) * (1 + 10^-7)`
+/// (Agresti, 2013, *Categorical Data Analysis*, 3rd ed., §3.5.1), using a relative probability
+/// tolerance in log space so symmetric mirror tables at large `N` are not excluded by floating-point
+/// rounding of `ln(n!)`.
 pub fn fisher_exact_2x2(a: u64, b: u64, c: u64, d: u64) -> Result<f64, StatsError> {
     let r1 = a.checked_add(b).ok_or(StatsError::InvalidParameter { name: "fisher_exact_row1_total", value: f64::INFINITY })?;
     let r2 = c.checked_add(d).ok_or(StatsError::InvalidParameter { name: "fisher_exact_row2_total", value: f64::INFINITY })?;
@@ -343,18 +349,30 @@ pub fn fisher_exact_2x2(a: u64, b: u64, c: u64, d: u64) -> Result<f64, StatsErro
     let hi = r1.min(c1);
     let log_const = ln_factorial(r1) + ln_factorial(r2) + ln_factorial(c1) + ln_factorial(total - c1) - ln_factorial(total);
     let obs_log = log_const - (ln_factorial(a) + ln_factorial(b) + ln_factorial(c) + ln_factorial(d));
+    let log_rel_tol = (1.0_f64 + 1e-7).ln();
 
-    let mut p_sum = 0.0_f64;
+    let mut tail_sum = NeumaierSum::new();
+    let mut total_sum = NeumaierSum::new();
+    let mut all_included = true;
     for x in lo..=hi {
         let bx = r1 - x;
         let cx = c1 - x;
         let dx = r2 - cx;
         let lp = log_const - (ln_factorial(x) + ln_factorial(bx) + ln_factorial(cx) + ln_factorial(dx));
-        if lp <= obs_log + 1e-12 {
-            p_sum += lp.exp();
+        let px = lp.exp();
+        total_sum.add(px);
+        if lp <= obs_log + log_rel_tol {
+            tail_sum.add(px);
+        } else {
+            all_included = false;
         }
     }
-    Ok(p_sum.clamp(0.0, 1.0))
+    if all_included {
+        return Ok(1.0);
+    }
+    let denom = total_sum.total();
+    let p_val = if denom > 0.0 { tail_sum.total() / denom } else { tail_sum.total() };
+    Ok(p_val.clamp(0.0, 1.0))
 }
 
 const BARNARD_MAX_TOTAL: u64 = 2_000;
@@ -814,6 +832,7 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
         return Err(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: total as f64 });
     }
     let obs_log = log_hypergeom_table(counts, &r_sums, &c_sums, total)?;
+    let log_rel_tol = (1.0_f64 + 1e-7).ln();
     let mut col_pool = build_fisher_rxc_pool(&c_sums, total)?;
     let n_sims = 10_000_usize;
     let mut rng = DeterministicRng::from_seed(0xC07_4F15_8E2B_1001);
@@ -836,7 +855,7 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
             }
         }
         let sim_log = log_hypergeom_table(&sim_table, &r_sums, &c_sums, total)?;
-        if sim_log <= obs_log + 1e-12 {
+        if sim_log <= obs_log + log_rel_tol {
             extreme += 1;
         }
     }

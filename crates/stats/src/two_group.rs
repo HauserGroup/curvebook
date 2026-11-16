@@ -163,7 +163,7 @@ pub fn levene_variance_test(groups: &[&[f64]], use_median: bool) -> Result<Leven
         }
         let center = if use_median {
             let s = sorted_finite(grp);
-            quantile_type6_sorted(&s, 0.5).unwrap_or(s[0])
+            quantile_type6_sorted(&s, 0.5).or_else(|| s.first().copied()).ok_or(StatsError::EmptyInput)?
         } else {
             SummaryMoments::from_slice(grp)?.mean
         };
@@ -879,8 +879,8 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
     let nb = b.len();
     let sa = sorted_finite(a);
     let sb = sorted_finite(b);
-    let median_a = quantile_type6_sorted(&sa, 0.5).unwrap_or(sa[0]);
-    let median_b = quantile_type6_sorted(&sb, 0.5).unwrap_or(sb[0]);
+    let median_a = quantile_type6_sorted(&sa, 0.5).or_else(|| sa.first().copied()).ok_or(StatsError::EmptyInput)?;
+    let median_b = quantile_type6_sorted(&sb, 0.5).or_else(|| sb.first().copied()).ok_or(StatsError::EmptyInput)?;
 
     let mut combined = Vec::with_capacity(na + nb);
     combined.extend_from_slice(a);
@@ -987,7 +987,7 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
             }
         }
         diffs.sort_by(f64::total_cmp);
-        let hl = quantile_type6_sorted(&diffs, 0.5).unwrap_or(diffs[0]);
+        let hl = quantile_type6_sorted(&diffs, 0.5).or_else(|| diffs.first().copied()).ok_or(StatsError::EmptyInput)?;
         if !hl.is_finite() {
             return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
         }
@@ -1435,7 +1435,9 @@ pub fn multiple_row_t_tests(
     for (idx, (ra, rb)) in group_a_rows.iter().zip(group_b_rows.iter()).enumerate() {
         let res =
             if welch { welch_t_test(ra, rb, true, ConfidenceLevel::DEFAULT_95) } else { unpaired_t_test(ra, rb, true, ConfidenceLevel::DEFAULT_95) };
-        if let Ok(r) = res {
+        if let Ok(r) = res
+            && r.p_value.is_finite()
+        {
             let lbl = row_labels.get(idx).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", idx + 1));
             raw_p.push(r.p_value);
             staged.push((idx, lbl, r.mean_a, r.mean_b, r.difference, r.t_statistic, r.df, r.p_value));
@@ -1455,7 +1457,7 @@ pub fn multiple_row_t_tests(
             df,
             raw_p,
             adjusted_p_or_q: adj_p,
-            significant: adj_p <= threshold,
+            significant: threshold.is_finite() && adj_p.is_finite() && adj_p <= threshold,
         })
         .collect())
 }
@@ -1807,11 +1809,11 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
         let row_lbl = row_labels.get(idx).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", idx + 1));
         let row_out = run_single_row_comparison(ra, rb, mr, conf);
         match row_out {
-            Ok((mean_a, mean_b, diff, stat, df, p_val)) => {
+            Ok((mean_a, mean_b, diff, stat, df, p_val)) if p_val.is_finite() => {
                 raw_p.push(p_val);
                 staged.push((idx, row_lbl, mean_a, mean_b, diff, stat, df, p_val));
             }
-            Err(_) => {
+            Ok(_) | Err(_) => {
                 skipped_rows += 1;
             }
         }
@@ -1834,7 +1836,7 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
             df,
             raw_p: rp,
             adjusted_p_or_q: adj,
-            significant: adj <= threshold,
+            significant: adj.is_finite() && adj <= threshold,
         });
     }
 

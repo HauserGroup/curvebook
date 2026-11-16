@@ -216,23 +216,58 @@ pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f6
 // Standalone P-Value & FDR Adjustment Functions
 // ============================================================================
 
+/// Partition `raw_p` so non-finite entries (`NaN`, `±Inf`) remain `NaN` in the output without
+/// corrupting the family size `m`, rank order, or step-down/step-up running extrema of valid
+/// finite *p*-values.
+fn with_finite_pvalues(raw_p: &[f64], f: impl FnOnce(&[f64]) -> Vec<f64>) -> Vec<f64> {
+    if raw_p.iter().all(|p| p.is_finite()) {
+        return f(raw_p);
+    }
+    let mut valid_indices = Vec::with_capacity(raw_p.len());
+    let mut valid_p = Vec::with_capacity(raw_p.len());
+    for (idx, &p) in raw_p.iter().enumerate() {
+        if p.is_finite() {
+            valid_indices.push(idx);
+            valid_p.push(p);
+        }
+    }
+    let mut out = vec![f64::NAN; raw_p.len()];
+    if !valid_p.is_empty() {
+        let adj = f(&valid_p);
+        for (&orig_idx, val) in valid_indices.iter().zip(adj) {
+            if let Some(slot) = out.get_mut(orig_idx) {
+                *slot = val;
+            }
+        }
+    }
+    out
+}
+
 /// Adjust a slice of raw *p*-values using Bonferroni (`min(1, m * p)`), the Bonferroni-inequality
-/// procedure of Dunn (1961).
+/// procedure of Dunn (1961). Non-finite entries (`NaN`, `±Inf`) remain `NaN` and are excluded from `m`.
 #[must_use]
 pub fn adjust_bonferroni(raw_p: &[f64]) -> Vec<f64> {
-    let m = raw_p.len() as f64;
-    raw_p.iter().map(|&p| (p.clamp(0.0, 1.0) * m).min(1.0)).collect()
+    with_finite_pvalues(raw_p, |vals| {
+        let m = vals.len() as f64;
+        vals.iter().map(|&p| (p.clamp(0.0, 1.0) * m).min(1.0)).collect()
+    })
 }
 
 /// Adjust a slice of raw *p*-values using Šídák (`1 - (1 - p)^m`, cancellation-free); Šidák (1967).
+/// Non-finite entries (`NaN`, `±Inf`) remain `NaN` and are excluded from `m`.
 #[must_use]
 pub fn adjust_sidak(raw_p: &[f64]) -> Vec<f64> {
-    let m = raw_p.len() as f64;
-    raw_p.iter().map(|&p| sidak_single(p, m)).collect()
+    with_finite_pvalues(raw_p, |vals| {
+        let m = vals.len() as f64;
+        vals.iter().map(|&p| sidak_single(p, m)).collect()
+    })
 }
 
 #[inline]
 fn sidak_single(p: f64, m: f64) -> f64 {
+    if !p.is_finite() || !m.is_finite() || m <= 0.0 {
+        return f64::NAN;
+    }
     let pc = p.clamp(0.0, 1.0);
     if pc >= 1.0 {
         return 1.0;
@@ -246,22 +281,23 @@ fn sidak_single(p: f64, m: f64) -> f64 {
 /// Step-down Holm–Bonferroni adjusted *p*-values (monotone and `>= raw_p`); Holm (1979).
 ///
 /// Sorted ascending, `p_(i)` is multiplied by `m - i + 1` and a running maximum enforces
-/// step-down monotonicity.
+/// step-down monotonicity. Non-finite entries (`NaN`, `±Inf`) remain `NaN` and are excluded from `m`.
 #[must_use]
 pub fn adjust_holm_bonferroni(raw_p: &[f64]) -> Vec<f64> {
-    step_down_adjust(raw_p, false)
+    with_finite_pvalues(raw_p, |vals| step_down_adjust_finite(vals, false))
 }
 
 /// Step-down Holm–Šídák adjusted *p*-values (monotone and `>= raw_p`).
 ///
 /// Holm's (1979) step-down scheme with the Šidák (1967) multiplier `1 - (1 - p_(i))^(m - i + 1)`
 /// in place of the Bonferroni one (Holland & Copenhaver 1987), with a running maximum.
+/// Non-finite entries (`NaN`, `±Inf`) remain `NaN` and are excluded from `m`.
 #[must_use]
 pub fn adjust_holm_sidak(raw_p: &[f64]) -> Vec<f64> {
-    step_down_adjust(raw_p, true)
+    with_finite_pvalues(raw_p, |vals| step_down_adjust_finite(vals, true))
 }
 
-fn step_down_adjust(raw_p: &[f64], sidak: bool) -> Vec<f64> {
+fn step_down_adjust_finite(raw_p: &[f64], sidak: bool) -> Vec<f64> {
     let m = raw_p.len();
     if m == 0 {
         return Vec::new();
@@ -283,21 +319,25 @@ fn step_down_adjust(raw_p: &[f64], sidak: bool) -> Vec<f64> {
 /// Benjamini–Hochberg (BH) step-up FDR *q*-values (monotone and `>= raw_p`); Benjamini & Hochberg (1995).
 ///
 /// `q_(i) = min_{j >= i} min(1, m * p_(j) / j)` (running minimum from the largest *p*-value down).
+/// Non-finite entries (`NaN`, `±Inf`) remain `NaN` and are excluded from `m`.
 #[must_use]
 pub fn adjust_benjamini_hochberg(raw_p: &[f64]) -> Vec<f64> {
-    step_up_fdr(raw_p, 1.0)
+    with_finite_pvalues(raw_p, |vals| step_up_fdr_finite(vals, 1.0))
 }
 
 /// Benjamini–Yekutieli (BY) step-up FDR *q*-values under arbitrary dependency (`c(m) = H_m`);
 /// Benjamini & Yekutieli (2001): the BH step-up run with `m` replaced by `m * sum_{i<=m} 1/i`.
+/// Non-finite entries (`NaN`, `±Inf`) remain `NaN` and are excluded from `m`.
 #[must_use]
 pub fn adjust_benjamini_yekutieli(raw_p: &[f64]) -> Vec<f64> {
-    let m = raw_p.len();
-    let harmonic: f64 = (1..=m).map(|i| 1.0 / (i as f64)).sum();
-    step_up_fdr(raw_p, harmonic.max(1.0))
+    with_finite_pvalues(raw_p, |vals| {
+        let m = vals.len();
+        let harmonic: f64 = (1..=m).map(|i| 1.0 / (i as f64)).sum();
+        step_up_fdr_finite(vals, harmonic.max(1.0))
+    })
 }
 
-fn step_up_fdr(raw_p: &[f64], multiplier: f64) -> Vec<f64> {
+fn step_up_fdr_finite(raw_p: &[f64], multiplier: f64) -> Vec<f64> {
     let m = raw_p.len();
     if m == 0 {
         return Vec::new();
@@ -324,34 +364,37 @@ fn step_up_fdr(raw_p: &[f64], multiplier: f64) -> Vec<f64> {
 /// `r1 = m` everything is; otherwise `m0_hat = m - r1` and stage 2 runs the linear step-up with
 /// thresholds `i * q' / m0_hat`. The returned values depend on `fdr_q` (via `q'` and `m0_hat`), so
 /// they are threshold-specific decision values rather than `q`-independent *q*-values.
+/// Non-finite entries (`NaN`, `±Inf`) remain `NaN` and are excluded from `m`.
 #[must_use]
 pub fn adjust_two_stage_bky(raw_p: &[f64], fdr_q: f64) -> Vec<f64> {
-    let m = raw_p.len();
-    if m == 0 {
+    if raw_p.is_empty() {
         return Vec::new();
     }
+    if !fdr_q.is_finite() {
+        return vec![f64::NAN; raw_p.len()];
+    }
     let q = fdr_q.clamp(1e-6, 0.9999);
-    let q_stage1 = q / (1.0 + q);
-    let bh1 = adjust_benjamini_hochberg(raw_p);
-    let r1 = bh1.iter().filter(|&&qv| qv <= q_stage1).count();
-    if r1 == 0 {
-        return bh1.into_iter().zip(raw_p.iter()).map(|(qv, &p)| (qv * (1.0 + q)).max(p.clamp(0.0, 1.0)).min(1.0)).collect();
-    }
-    if r1 == m {
-        return bh1.into_iter().zip(raw_p.iter()).map(|(qv, &p)| (qv * (1.0 + q)).max(p.clamp(0.0, 1.0)).min(1.0)).collect();
-    }
-    let m0_hat = (m - r1) as f64;
-    let mut order: Vec<(usize, f64)> = raw_p.iter().copied().enumerate().map(|(i, p)| (i, p.clamp(0.0, 1.0))).collect();
-    order.sort_by(|a, b| a.1.total_cmp(&b.1));
+    with_finite_pvalues(raw_p, |vals| {
+        let m = vals.len();
+        let q_stage1 = q / (1.0 + q);
+        let bh1 = step_up_fdr_finite(vals, 1.0);
+        let r1 = bh1.iter().filter(|&&qv| qv <= q_stage1).count();
+        if r1 == 0 || r1 == m {
+            return bh1.into_iter().zip(vals.iter()).map(|(qv, &p)| (qv * (1.0 + q)).max(p.clamp(0.0, 1.0)).min(1.0)).collect();
+        }
+        let m0_hat = (m - r1) as f64;
+        let mut order: Vec<(usize, f64)> = vals.iter().copied().enumerate().map(|(i, p)| (i, p.clamp(0.0, 1.0))).collect();
+        order.sort_by(|a, b| a.1.total_cmp(&b.1));
 
-    let mut out = vec![1.0_f64; m];
-    let mut running_min = 1.0_f64;
-    for (rank, &(orig_idx, p)) in order.iter().enumerate().rev() {
-        let cand = (p * m0_hat * (1.0 + q) / ((rank + 1) as f64)).min(1.0);
-        running_min = running_min.min(cand);
-        out[orig_idx] = running_min.max(p).min(1.0);
-    }
-    out
+        let mut out = vec![1.0_f64; m];
+        let mut running_min = 1.0_f64;
+        for (rank, &(orig_idx, p)) in order.iter().enumerate().rev() {
+            let cand = (p * m0_hat * (1.0 + q) / ((rank + 1) as f64)).min(1.0);
+            running_min = running_min.min(cand);
+            out[orig_idx] = running_min.max(p).min(1.0);
+        }
+        out
+    })
 }
 
 /// Apply any p-value-only multiplicity procedure (`None`, `Bonferroni`, `Sidak`, `HolmBonferroni`,
@@ -359,7 +402,9 @@ pub fn adjust_two_stage_bky(raw_p: &[f64], fdr_q: f64) -> Vec<f64> {
 #[must_use]
 pub fn adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshold: f64) -> (Vec<f64>, bool) {
     match procedure {
-        MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => (raw_p.iter().map(|p| p.clamp(0.0, 1.0)).collect(), false),
+        MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => {
+            (with_finite_pvalues(raw_p, |vals| vals.iter().map(|p| p.clamp(0.0, 1.0)).collect()), false)
+        }
         MultiplicityProcedure::Bonferroni
         | MultiplicityProcedure::TukeyKramer
         | MultiplicityProcedure::NewmanKeuls
@@ -392,6 +437,18 @@ pub fn compare_groups_pairwise(
     compare_groups_with_procedure(groups, mse, df_error, spec.method.into(), spec.threshold, spec.report_confidence_intervals)
 }
 
+/// Compute pairwise comparisons across `groups` using `confidence` (`ci_alpha = 1 - confidence`)
+/// to construct confidence intervals while `spec.threshold` governs discovery/significance flags.
+pub fn compare_groups_pairwise_with_confidence(
+    groups: &[GroupComparisonInput],
+    mse: f64,
+    df_error: f64,
+    spec: &MultiplicitySpec,
+    confidence: curvebook_math::ConfidenceLevel,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    compare_groups_with_confidence(groups, mse, df_error, spec.method.into(), spec.threshold, spec.report_confidence_intervals, confidence)
+}
+
 /// Compute pairwise comparisons with explicit [`MultiplicityProcedure`].
 ///
 /// Pooled-variance procedures (`None`, `FisherLsd`, `Bonferroni`, `Sidak`, Holm variants, and the
@@ -409,6 +466,33 @@ pub fn compare_groups_with_procedure(
     threshold: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    compare_groups_impl(groups, mse, df_error, procedure, threshold, threshold, report_ci)
+}
+
+/// Compute pairwise comparisons with explicit [`MultiplicityProcedure`], constructing confidence
+/// intervals at `confidence` (`ci_alpha = confidence.alpha()`) while testing significance against
+/// `threshold`.
+pub fn compare_groups_with_confidence(
+    groups: &[GroupComparisonInput],
+    mse: f64,
+    df_error: f64,
+    procedure: MultiplicityProcedure,
+    threshold: f64,
+    report_ci: bool,
+    confidence: curvebook_math::ConfidenceLevel,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    compare_groups_impl(groups, mse, df_error, procedure, threshold, confidence.alpha(), report_ci)
+}
+
+fn compare_groups_impl(
+    groups: &[GroupComparisonInput],
+    mse: f64,
+    df_error: f64,
+    procedure: MultiplicityProcedure,
+    threshold: f64,
+    ci_alpha: f64,
+    report_ci: bool,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
     if k < 2 {
         return Ok(Vec::new());
@@ -416,13 +500,16 @@ pub fn compare_groups_with_procedure(
     if !threshold.is_finite() || threshold <= 0.0 || threshold >= 1.0 {
         return Err(StatsError::InvalidParameter { name: "threshold", value: threshold });
     }
+    if report_ci && (!ci_alpha.is_finite() || ci_alpha <= 0.0 || ci_alpha >= 1.0) {
+        return Err(StatsError::InvalidParameter { name: "ci_alpha", value: ci_alpha });
+    }
     match procedure {
-        MultiplicityProcedure::Dunnett { control_column } => compare_dunnett(groups, mse, df_error, control_column, threshold, report_ci),
-        MultiplicityProcedure::TukeyKramer => compare_tukey_kramer(groups, mse, df_error, threshold, report_ci),
+        MultiplicityProcedure::Dunnett { control_column } => compare_dunnett(groups, mse, df_error, control_column, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::TukeyKramer => compare_tukey_kramer(groups, mse, df_error, threshold, ci_alpha, report_ci),
         MultiplicityProcedure::NewmanKeuls => compare_newman_keuls(groups, mse, df_error, threshold),
-        MultiplicityProcedure::GamesHowell => compare_games_howell(groups, threshold, report_ci),
-        MultiplicityProcedure::TamhaneT2 => compare_tamhane_t2(groups, threshold, report_ci),
-        MultiplicityProcedure::DunnettT3 => compare_dunnett_t3(groups, threshold, report_ci),
+        MultiplicityProcedure::GamesHowell => compare_games_howell(groups, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::TamhaneT2 => compare_tamhane_t2(groups, threshold, ci_alpha, report_ci),
+        MultiplicityProcedure::DunnettT3 => compare_dunnett_t3(groups, threshold, ci_alpha, report_ci),
         MultiplicityProcedure::DunnRankSum => {
             Err(StatsError::InvalidParameter { name: "multiplicity_procedure_dunn_requires_kruskal_wallis", value: 0.0 })
         }
@@ -437,7 +524,7 @@ pub fn compare_groups_with_procedure(
         | MultiplicityProcedure::FisherLsd
         | MultiplicityProcedure::BenjaminiHochbergFdr
         | MultiplicityProcedure::BenjaminiYekutieliFdr
-        | MultiplicityProcedure::TwoStageBkyFdr => compare_pooled_or_fdr(groups, mse, df_error, procedure, threshold, report_ci),
+        | MultiplicityProcedure::TwoStageBkyFdr => compare_pooled_or_fdr(groups, mse, df_error, procedure, threshold, ci_alpha, report_ci),
     }
 }
 
@@ -456,6 +543,7 @@ fn compare_pooled_or_fdr(
     df_error: f64,
     procedure: MultiplicityProcedure,
     threshold: f64,
+    ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
@@ -464,9 +552,9 @@ fn compare_pooled_or_fdr(
     let mut entries = Vec::with_capacity(m);
 
     let per_comp_alpha = match procedure {
-        MultiplicityProcedure::Bonferroni => Some(threshold / (m as f64)),
-        MultiplicityProcedure::Sidak => Some(1.0 - (1.0 - threshold).powf(1.0 / (m as f64))),
-        MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => Some(threshold),
+        MultiplicityProcedure::Bonferroni => Some(ci_alpha / (m as f64)),
+        MultiplicityProcedure::Sidak => Some(1.0 - (1.0 - ci_alpha).powf(1.0 / (m as f64))),
+        MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => Some(ci_alpha),
         _ => None,
     };
     let t_crit_opt = match (report_ci, per_comp_alpha) {
@@ -509,7 +597,7 @@ fn compare_pooled_or_fdr(
             adjusted_p_or_q: adj_p,
             is_fdr_q: is_fdr,
             ci,
-            significant: adj_p <= threshold,
+            significant: adj_p.is_finite() && adj_p <= threshold,
         })
         .collect();
     Ok(out)
@@ -523,10 +611,11 @@ fn compare_tukey_kramer(
     mse: f64,
     df_error: f64,
     threshold: f64,
+    ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
-    let q_crit = if report_ci { Some(studentized_range_isf(threshold, k, df_error)?) } else { None };
+    let q_crit = if report_ci { Some(studentized_range_isf(ci_alpha, k, df_error)?) } else { None };
     let mut out = Vec::with_capacity(k * (k - 1) / 2);
     for i in 0..k {
         for j in (i + 1)..k {
@@ -557,7 +646,7 @@ fn compare_tukey_kramer(
                 adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci,
-                significant: adj_p <= threshold,
+                significant: adj_p.is_finite() && adj_p <= threshold,
             });
         }
     }
@@ -642,7 +731,7 @@ fn compare_newman_keuls(
                 adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci: None,
-                significant: adj_p <= threshold,
+                significant: adj_p.is_finite() && adj_p <= threshold,
             });
         }
     }
@@ -659,6 +748,7 @@ fn compare_dunnett(
     df_error: f64,
     control_column: usize,
     threshold: f64,
+    ci_alpha: f64,
     report_ci: bool,
 ) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let ctrl_pos = groups
@@ -672,7 +762,7 @@ fn compare_dunnett(
     }
     let treat_sizes: Vec<f64> = treatments.iter().map(|g| g.n).collect();
     let loadings = dunnett_loadings_from_sizes(ctrl.n, &treat_sizes)?;
-    let d_crit = if report_ci { Some(dunnett_two_sided_crit(threshold, df_error, ctrl.n, &treat_sizes)?) } else { None };
+    let d_crit = if report_ci { Some(dunnett_two_sided_crit(ci_alpha, df_error, ctrl.n, &treat_sizes)?) } else { None };
 
     let mut out = Vec::with_capacity(treatments.len());
     for (idx, tr) in treatments.iter().enumerate() {
@@ -703,7 +793,7 @@ fn compare_dunnett(
             adjusted_p_or_q: adj_p,
             is_fdr_q: false,
             ci,
-            significant: adj_p <= threshold,
+            significant: adj_p.is_finite() && adj_p <= threshold,
         });
     }
     Ok(out)
@@ -725,7 +815,12 @@ fn welch_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f6
 
 /// Games & Howell (1976) unequal-variance pairwise comparisons: per-pair Welch standard error and
 /// df, with `q = |diff| / (SE / sqrt(2))` referred to the studentized range with `k` means.
-fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+fn compare_games_howell(
+    groups: &[GroupComparisonInput],
+    threshold: f64,
+    ci_alpha: f64,
+    report_ci: bool,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
     let mut out = Vec::with_capacity(k * (k - 1) / 2);
     for i in 0..k {
@@ -744,7 +839,7 @@ fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_
                 (stat, p, p)
             };
             let ci = if report_ci {
-                let qc = studentized_range_isf(threshold, k, df)?;
+                let qc = studentized_range_isf(ci_alpha, k, df)?;
                 Some((diff - qc * se_q, diff + qc * se_q))
             } else {
                 None
@@ -762,7 +857,7 @@ fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_
                 adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci,
-                significant: adj_p <= threshold,
+                significant: adj_p.is_finite() && adj_p <= threshold,
             });
         }
     }
@@ -771,10 +866,15 @@ fn compare_games_howell(groups: &[GroupComparisonInput], threshold: f64, report_
 
 /// Tamhane (1979) T2 unequal-variance pairwise comparisons: per-pair Welch *t* tests with a Šidák
 /// adjustment over the `m = k(k-1)/2` comparisons (Šidák-adjusted Welch critical values for CIs).
-fn compare_tamhane_t2(groups: &[GroupComparisonInput], threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+fn compare_tamhane_t2(
+    groups: &[GroupComparisonInput],
+    threshold: f64,
+    ci_alpha: f64,
+    report_ci: bool,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
     let m = (k * (k - 1) / 2) as f64;
-    let alpha_sidak = 1.0 - (1.0 - threshold).powf(1.0 / m);
+    let alpha_sidak = 1.0 - (1.0 - ci_alpha).powf(1.0 / m);
     let mut out = Vec::with_capacity(k * (k - 1) / 2);
     for i in 0..k {
         for j in (i + 1)..k {
@@ -808,7 +908,7 @@ fn compare_tamhane_t2(groups: &[GroupComparisonInput], threshold: f64, report_ci
                 adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci,
-                significant: adj_p <= threshold,
+                significant: adj_p.is_finite() && adj_p <= threshold,
             });
         }
     }
@@ -835,7 +935,12 @@ fn studentized_max_modulus_crit(alpha: f64, m: usize, df: f64) -> Result<f64, St
 /// to the studentized maximum modulus with `m = k(k-1)/2` and the pair's Welch df. `raw_p` reports
 /// the unadjusted two-sided Welch *t* *p*-value on Welch df, and `adjusted_p_or_q` reports the Dunnett
 /// T3 adjusted *p*-value.
-fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+fn compare_dunnett_t3(
+    groups: &[GroupComparisonInput],
+    threshold: f64,
+    ci_alpha: f64,
+    report_ci: bool,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
     let k = groups.len();
     let m = k * (k - 1) / 2;
     let mut out = Vec::with_capacity(m);
@@ -854,7 +959,7 @@ fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci
                 (stat, p, p)
             };
             let ci = if report_ci {
-                let crit = studentized_max_modulus_crit(threshold, m, df)?;
+                let crit = studentized_max_modulus_crit(ci_alpha, m, df)?;
                 Some((diff - crit * se, diff + crit * se))
             } else {
                 None
@@ -872,7 +977,7 @@ fn compare_dunnett_t3(groups: &[GroupComparisonInput], threshold: f64, report_ci
                 adjusted_p_or_q: adj_p,
                 is_fdr_q: false,
                 ci,
-                significant: adj_p <= threshold,
+                significant: adj_p.is_finite() && adj_p <= threshold,
             });
         }
     }
@@ -971,7 +1076,7 @@ pub fn compare_dunn_ranks(
             adjusted_p_or_q: adj_p,
             is_fdr_q: is_fdr,
             ci: None,
-            significant: adj_p <= spec.threshold,
+            significant: spec.threshold.is_finite() && adj_p.is_finite() && adj_p <= spec.threshold,
         })
         .collect();
     Ok(out)
