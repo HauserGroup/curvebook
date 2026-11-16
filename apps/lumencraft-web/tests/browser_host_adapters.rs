@@ -417,3 +417,66 @@ fn multi_flavor_clipboard_print_and_json_bridge_roundtrip() {
         assert_eq!(decoded, ev);
     }
 }
+
+#[test]
+fn r2_s11_web_edge_gaps_paste_storage_locks_print_and_schema() {
+    // 1. R2-S11-03: non-integer `schema_version` must be rejected rather than falling back to 0.
+    let mut json_host = lumencraft_web::WebWorkspaceHost::new();
+    let bad_ver = br#"{"schema_version":"future","title":"Bad"}"#;
+    let err = json_host.open_project_json_bytes(bad_ver).expect_err("non-integer schema_version must error");
+    assert!(err.contains("schema_version"), "unexpected error: {err}");
+
+    // 2. R2-S11-06: PasteClipboard must route into active inline editor BEFORE DataSheet,
+    // and when not inline editing, pass locale `decimal_separator` to `table.paste`.
+    let (mut session, data_id, _graph_id) = build_populated_xy_session("web-r2-doc", "tab-r2").expect("populated session");
+    session.host.app_mut().inline_editor.active = true;
+    session.host.app_mut().inline_editor.buffer = String::from("abc");
+    session.host.app_mut().inline_editor.caret_byte = 3;
+    let inline_cmds = session.handle_event(WebBridgeEvent::PasteClipboard { text: String::from("XYZ") }).expect("inline paste");
+    assert!(matches!(inline_cmds.first(), Some(WebBridgeCommand::RenderRgbaFrame { .. })));
+    assert_eq!(session.host.app().inline_editor.buffer, "abcXYZ");
+
+    session.host.app_mut().inline_editor.active = false;
+    let _ = session.host.execute_command("sheet.select", json!({ "sheet_id": data_id })).expect("select data sheet");
+    let _ = lumencraft_ui_egui::dispatch_ui_command(session.host.app_mut(), "ui.locale.set", &json!({ "locale": "de-DE" }))
+        .expect("set German comma decimal locale");
+    let paste_cmds = session.handle_event(WebBridgeEvent::PasteClipboard { text: String::from("3,5") }).expect("comma decimal paste");
+    assert!(matches!(paste_cmds.first(), Some(WebBridgeCommand::RenderRgbaFrame { .. })));
+    let ds = session.host.app().document().data_sheets.iter().find(|s| s.id.as_str() == data_id).expect("data sheet present");
+    let pasted_csv = lumencraft_format::export_datasheet_to_csv(ds, &lumencraft_format::CsvOptions::csv()).expect("export pasted csv");
+    assert!(pasted_csv.contains("3.5"), "comma-decimal paste under de-DE must parse 3.5; csv:\n{pasted_csv}");
+
+    // 3. R2-S11-05: UI theme/locale/shortcut changes emit PersistLocalStorage automatically, and
+    // HydrateLocalStorage restores theme, locale, shortcuts, AND blank-session autosave snapshots.
+    let theme_cmds = session
+        .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("ui.theme.set"), params: json!({ "theme": "dark" }) })
+        .expect("set dark theme");
+    let persisted = theme_cmds.iter().find(|cmd| matches!(cmd, WebBridgeCommand::PersistLocalStorage { .. }));
+    assert!(persisted.is_some(), "changing theme must emit PersistLocalStorage automatically");
+    let Some(WebBridgeCommand::PersistLocalStorage { writes, .. }) = persisted else {
+        panic!("missing PersistLocalStorage");
+    };
+    let autosave_cmds = session.handle_event(WebBridgeEvent::SaveAutosave { now_ms: 9_999 }).expect("save autosave");
+    let Some(WebBridgeCommand::PersistLocalStorage { writes: doc_writes, .. }) = autosave_cmds.into_iter().next() else {
+        panic!("expected autosave PersistLocalStorage");
+    };
+    let mut hydrated_entries = writes.clone();
+    hydrated_entries.extend(doc_writes);
+
+    let mut fresh = WebBridgeSession::with_ids("web-r2-doc", "tab-r2-fresh");
+    let hyd_cmds = fresh.handle_event(WebBridgeEvent::HydrateLocalStorage { entries: hydrated_entries }).expect("hydrate theme + autosave");
+    assert!(matches!(hyd_cmds.first(), Some(WebBridgeCommand::RenderRgbaFrame { .. })));
+    assert_eq!(fresh.host.app().theme.mode, lumencraft_ui_egui::theme::UiThemeMode::Dark);
+    assert_eq!(fresh.host.app().locale, "de");
+    let restored_ds = fresh.host.app().document().data_sheets.iter().find(|s| s.id.as_str() == data_id).expect("restored autosave data sheet");
+    let restored_csv = lumencraft_format::export_datasheet_to_csv(restored_ds, &lumencraft_format::CsvOptions::csv()).expect("export restored csv");
+    assert!(restored_csv.contains("3.5"), "restored autosave must preserve pasted value 3.5; csv:\n{restored_csv}");
+
+    // 4. R2-S11-04 & R2-S11-13 in index.html: verify release gate (!holdsCurrentWebLock), localStorage
+    // lock fallback when navigator.locks is absent, debounced autosave trigger, and DOM print zoom scaling.
+    let html = include_str!("../index.html");
+    assert!(html.contains("data.type === \"release\" && !holdsCurrentWebLock"));
+    assert!(html.contains("tryAcquireFallbackStorageLock"));
+    assert!(html.contains("scheduleAutosave"));
+    assert!(html.contains("section.style.zoom = scaleFactor.toFixed(4)"));
+}

@@ -10,11 +10,14 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
-use lumencraft::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowSession, open_document_from_files};
+use lumencraft::desktop_host::{
+    DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, DesktopWindowSession, allocate_fresh_isolated_journal_dir,
+    dir_has_active_lease, dir_has_unrecovered_crash, open_document_from_files,
+};
 use lumencraft::gui_window::{LiveControlChannel, LiveControlPostHook, run_native_desktop_with_control};
 use lumencraft::live_control::{LiveControlBridge, LiveControlServerGuard, serve_live_control_io, spawn_live_control_accept_loop};
 use lumencraft_engine::Session;
-use lumencraft_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, RecoveryReport};
+use lumencraft_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, JournalBackend, RecoveryReport};
 use lumencraft_format::versioned::{
     CURRENT_PREFERENCES_VERSION, MAX_PREFERENCES_FILE_BYTES, PreferencesFile, load_preferences_file, save_preferences_file,
 };
@@ -37,9 +40,9 @@ const USAGE: &str = "\
 usage: lumencraft [options] [--] [file...]
 
 options:
-  --control <port>         listen on 127.0.0.1:<port> for authenticated JSON-lines automation
+  --control <port>         listen on 127.0.0.1:<port> for authenticated JSON-lines automation (or LUMENCRAFT_CONTROL_PORT; headless unless --window)
   --control-token <token>  bearer token for --control authentication (or LUMENCRAFT_CONTROL_TOKEN)
-  --window                 attach a visible desktop window to --control <port> (instead of headless)
+  --window                 attach a visible desktop window to --control <port> or LUMENCRAFT_CONTROL_PORT
   --gui-only               restrict automation (--control) to interactive GUI actions only
   --in-window-menus     render the menu bar inside the window on macOS
   --new-instance        open files in a separate application window
@@ -358,6 +361,10 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
     launch_application_with_env(cfg, |_| None)
 }
 
+fn should_launch_window(cfg: &LaunchConfig) -> bool {
+    !cfg.headless_once && (cfg.window || (cfg.event_script.is_none() && cfg.control_port.is_none()))
+}
+
 fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Option<OsString>) -> Result<(), String> {
     validate_launch_config(cfg)?;
     let _loaded_fonts = install_fonts();
@@ -369,7 +376,7 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
     let app_paths = resolve_app_paths_with_env(exe_dir.as_deref(), cfg.portable_dir.as_deref(), &env_get)?;
     let _validated_font = cfg.ttf_font.as_deref().map(load_validated_ttf_font).transpose()?;
 
-    let launch_window = !cfg.headless_once && (cfg.window || (cfg.event_script.is_none() && cfg.control_port.is_none()));
+    let launch_window = should_launch_window(cfg);
     let enable_recovery = !no_prefs && (app_paths.portable || !cfg.headless_once);
     let initial_viewport = if launch_window { ViewportMetrics::new(1280.0, 800.0, 2.0) } else { ViewportMetrics::new(400.0, 260.0, 2.0) };
     let recovery_root =
@@ -392,17 +399,15 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         let _ = runtime_guard.get_mut()?.open_window_with_session(session, initial_viewport, attach_recovery)?;
     } else {
         let startup = open_startup_session_with_recovery(&cfg.files, &app_paths, enable_recovery, now_epoch_ms())?;
+        let recovery_dir = startup.recovery_dir.unwrap_or_else(|| app_paths.recovery_dir.clone());
         if let Some(journal) = startup.journal {
-            let _ = runtime_guard.get_mut()?.open_window_with_recovery(
-                startup.session,
-                initial_viewport,
-                app_paths.recovery_dir.clone(),
-                journal,
-                startup.report,
-            )?;
+            let _ = runtime_guard.get_mut()?.open_window_with_recovery(startup.session, initial_viewport, recovery_dir, journal, startup.report)?;
         } else {
             let _ = runtime_guard.get_mut()?.open_window_with_session(startup.session, initial_viewport, false)?;
         }
+    }
+    if enable_recovery && !cfg.headless_once {
+        let _ = runtime_guard.get_mut()?.recover_stale_journals(initial_viewport, now_epoch_ms())?;
     }
 
     let window_ids = runtime_guard.get_mut()?.window_ids();
@@ -688,6 +693,7 @@ struct StartupRecoveryState {
     session: Session,
     journal: Option<CrashRecoveryJournal<DirectoryJournalBackend>>,
     report: Option<RecoveryReport>,
+    recovery_dir: Option<PathBuf>,
 }
 
 fn now_epoch_ms() -> u64 {
@@ -698,37 +704,66 @@ fn recovery_owner_id() -> String {
     format!("lumencraft-pid-{}", std::process::id())
 }
 
+fn ensure_primary_recovery_dir(app_paths: &AppPaths) -> Result<bool, String> {
+    if app_paths.portable || app_paths.recovery_dir.exists() {
+        return Ok(true);
+    }
+    match std::fs::create_dir_all(&app_paths.recovery_dir) {
+        Ok(()) => Ok(true),
+        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => Ok(false),
+        Err(err) => Err(format!("failed to create recovery directory `{}`: {err}", app_paths.recovery_dir.display())),
+    }
+}
+
 fn open_startup_session_with_recovery(
     files: &[PathBuf],
     app_paths: &AppPaths,
     enable_recovery: bool,
     now_ms: u64,
 ) -> Result<StartupRecoveryState, String> {
-    if !files.is_empty() || !enable_recovery {
+    if !enable_recovery {
         let session = load_startup_session(files)?;
-        return Ok(StartupRecoveryState { session, journal: None, report: None });
+        return Ok(StartupRecoveryState { session, journal: None, report: None, recovery_dir: None });
     }
 
-    if app_paths.portable || app_paths.recovery_dir.exists() {
-        let (session, journal, report) = Session::open_dir_with_recovery(&app_paths.recovery_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
-            .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", app_paths.recovery_dir.display()))?;
+    let session = load_startup_session(files)?;
+    if !ensure_primary_recovery_dir(app_paths)? {
+        return Ok(StartupRecoveryState { session, journal: None, report: None, recovery_dir: None });
+    }
+
+    if files.is_empty() {
+        let (recovered_session, journal, report) =
+            Session::open_dir_with_recovery(&app_paths.recovery_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
+                .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", app_paths.recovery_dir.display()))?;
         log_recovery_warnings(&app_paths.recovery_dir, &report);
-        return Ok(StartupRecoveryState { session, journal: Some(journal), report: Some(report) });
+        return Ok(StartupRecoveryState {
+            session: recovered_session,
+            journal: Some(journal),
+            report: Some(report),
+            recovery_dir: Some(app_paths.recovery_dir.clone()),
+        });
     }
 
-    match std::fs::create_dir_all(&app_paths.recovery_dir) {
-        Ok(()) => {
-            let (session, journal, report) =
-                Session::open_dir_with_recovery(&app_paths.recovery_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
-                    .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", app_paths.recovery_dir.display()))?;
-            log_recovery_warnings(&app_paths.recovery_dir, &report);
-            Ok(StartupRecoveryState { session, journal: Some(journal), report: Some(report) })
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::PermissionDenied => {
-            Ok(StartupRecoveryState { session: Session::new(), journal: None, report: None })
-        }
-        Err(err) => Err(format!("failed to create recovery directory `{}`: {err}", app_paths.recovery_dir.display())),
+    if dir_has_active_lease(&app_paths.recovery_dir, now_ms) {
+        let _ = Session::open_dir_with_recovery(&app_paths.recovery_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
+            .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", app_paths.recovery_dir.display()))?;
     }
+
+    let target_dir = if dir_has_unrecovered_crash(&app_paths.recovery_dir, now_ms) {
+        allocate_fresh_isolated_journal_dir(&app_paths.recovery_dir, DesktopWindowId(1), now_ms)?
+    } else {
+        app_paths.recovery_dir.clone()
+    };
+
+    let (_, mut journal, _) = Session::open_dir_with_recovery(&target_dir, recovery_owner_id(), RECOVERY_LOCK_TTL_MS, now_ms)
+        .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", target_dir.display()))?;
+    if let Err(err) = session.checkpoint_journal(&mut journal) {
+        let owner_id = journal.lease().owner_id.clone();
+        let mut backend = journal.abandon();
+        let _ = backend.release_lease(&owner_id);
+        return Err(format!("failed to seed startup recovery snapshot in `{}`: {err}", target_dir.display()));
+    }
+    Ok(StartupRecoveryState { session, journal: Some(journal), report: None, recovery_dir: Some(target_dir) })
 }
 
 fn log_recovery_warnings(dir: &Path, report: &RecoveryReport) {
@@ -1241,6 +1276,89 @@ mod tests {
             ..super::LaunchConfig::default()
         };
         super::launch_application(&headless_cfg)?;
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn cli_file_startup_attaches_recovery_and_control_port_window_routing() -> Result<(), Box<dyn std::error::Error>> {
+        let dir = std::env::temp_dir().join(format!("lc-main-new12-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir)?;
+
+        // NEW-1 + NEW-2: CLI file startup attaches recovery journal AND protects existing primary crash.
+        let cli_rec_root = dir.join("cli-file-portable");
+        let cli_rec_paths = super::resolve_app_paths(None, Some(&cli_rec_root))?;
+        let cli_project = dir.join("startup-file.lumencraft");
+        let mut cli_doc = lumencraft_doc::ProjectDocument::new("Startup File")?;
+        cli_doc.add_data_sheet(lumencraft_doc::DataSheet::new(
+            "cli-s1",
+            "CLI Data",
+            lumencraft_doc::TableArchetype::Column(lumencraft_doc::ColumnTable::new(lumencraft_doc::ColumnDesignHint::default(), 1, 2)?),
+        )?)?;
+        lumencraft_format::save_project_file(&cli_project, &cli_doc)?;
+
+        let mut cli_start = super::open_startup_session_with_recovery(std::slice::from_ref(&cli_project), &cli_rec_paths, true, 5_000)?;
+        let mut cli_journal = cli_start.journal.ok_or("NEW-1: CLI file startup must attach live recovery journal")?;
+        assert_eq!(cli_start.recovery_dir.as_deref(), Some(cli_rec_paths.recovery_dir.as_path()));
+        cli_start.session.execute_and_record(
+            &mut cli_journal,
+            "table.setCell",
+            serde_json::json!({ "sheet_id": "cli-s1", "row": 0, "col": 0, "value": 98.75 }),
+        )?;
+        drop(cli_journal.abandon());
+
+        let cli_recovered = super::open_startup_session_with_recovery(&[], &cli_rec_paths, true, 5_000 + super::RECOVERY_LOCK_TTL_MS + 10)?;
+        let crashed_sheet =
+            cli_recovered.session.document().data_sheet(&lumencraft_doc::SheetId::new("cli-s1")).ok_or("missing recovered CLI sheet")?;
+        assert_eq!(crashed_sheet.cell(lumencraft_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(98.75));
+        let mut rec_app = lumencraft_ui_egui::UiApp::from_session(cli_recovered.session);
+        super::close_startup_recovery_cleanly(&mut rec_app, cli_recovered.journal)?;
+
+        // NEW-2: If primary recovery_dir holds an unrecovered crash, launching with another CLI file
+        // preserves the crashed primary journal intact and runs in an isolated journal directory.
+        {
+            let (mut s_crash, mut j_crash, _) =
+                lumencraft_engine::Session::open_dir_with_recovery(&cli_rec_paths.recovery_dir, "crashed-proc", super::RECOVERY_LOCK_TTL_MS, 10_000)?;
+            s_crash.execute_and_record(&mut j_crash, "sheet.createData", serde_json::json!({ "sheet_id": "keep-crash", "title": "Preserved" }))?;
+            drop(j_crash.abandon());
+        }
+        let isolated_cli = super::open_startup_session_with_recovery(
+            std::slice::from_ref(&cli_project),
+            &cli_rec_paths,
+            true,
+            10_000 + super::RECOVERY_LOCK_TTL_MS + 10,
+        )?;
+        let iso_journal = isolated_cli.journal.ok_or("NEW-2: isolated CLI file launch must still attach a journal")?;
+        assert_ne!(isolated_cli.recovery_dir.as_deref(), Some(cli_rec_paths.recovery_dir.as_path()));
+        let mut iso_app = lumencraft_ui_egui::UiApp::from_session(isolated_cli.session);
+        super::close_startup_recovery_cleanly(&mut iso_app, Some(iso_journal))?;
+
+        let primary_still_has_crash =
+            super::open_startup_session_with_recovery(&[], &cli_rec_paths, true, 10_000 + super::RECOVERY_LOCK_TTL_MS + 20)?;
+        assert!(
+            primary_still_has_crash.session.document().data_sheet(&lumencraft_doc::SheetId::new("keep-crash")).is_some(),
+            "crashed primary journal must not be overwritten when launching with a CLI file"
+        );
+        let mut clean_primary_app = lumencraft_ui_egui::UiApp::from_session(primary_still_has_crash.session);
+        super::close_startup_recovery_cleanly(&mut clean_primary_app, primary_still_has_crash.journal)?;
+
+        // R2-S11-09 (#362): LUMENCRAFT_CONTROL_PORT matches --control behavior (headless unless --window).
+        let env_headless = super::parse_args(&[], Some("9125"))?;
+        let super::CliAction::Launch(cfg_headless) = env_headless else {
+            return Err("expected Launch for LUMENCRAFT_CONTROL_PORT".into());
+        };
+        assert_eq!(cfg_headless.control_port, Some(9125));
+        assert!(!cfg_headless.window);
+        assert!(!super::should_launch_window(&cfg_headless));
+
+        let env_windowed = super::parse_args(&[String::from("--window")], Some("9125"))?;
+        let super::CliAction::Launch(cfg_windowed) = env_windowed else {
+            return Err("expected Launch for LUMENCRAFT_CONTROL_PORT + --window".into());
+        };
+        assert_eq!(cfg_windowed.control_port, Some(9125));
+        assert!(cfg_windowed.window);
+        assert!(super::should_launch_window(&cfg_windowed));
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())

@@ -8,6 +8,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -29,8 +30,8 @@ use lumencraft_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, menu_bar_t
 use lumencraft_ui_egui::theme::UiThemeMode;
 use lumencraft_ui_egui::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 use lumencraft_ui_egui::{
-    CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, LOCALES, UiApp, dispatch_ui_command, is_http_request_line,
-    read_os_pasteboard, serve_control_stream_with_quit_and_hook, write_os_clipboard_bundle, write_os_pasteboard,
+    CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, LOCALES, OsAdapterStatus, UiApp, dispatch_ui_command,
+    is_http_request_line, read_os_pasteboard, serve_control_stream_with_quit_and_hook, write_os_clipboard_bundle, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -157,6 +158,20 @@ pub enum CloseDisposition {
     PromptUnsaved { window_id: DesktopWindowId, dirty_commands: Vec<String> },
 }
 
+mod arc_bytes_serde {
+    use std::sync::Arc;
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub fn serialize<S: Serializer>(bytes: &Arc<[u8]>, serializer: S) -> Result<S::Ok, S::Error> {
+        bytes.as_ref().serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Arc<[u8]>, D::Error> {
+        Vec::<u8>::deserialize(deserializer).map(Arc::from)
+    }
+}
+
 /// Rendered software compositor framebuffer output returned by [`DesktopHostEvent::RedrawRequested`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopFrameOutput {
@@ -164,7 +179,8 @@ pub struct DesktopFrameOutput {
     pub width_px: u32,
     pub height_px: u32,
     pub scale_factor: f32,
-    pub rgba_bytes: Vec<u8>,
+    #[serde(with = "arc_bytes_serde")]
+    pub rgba_bytes: Arc<[u8]>,
     pub frame_ms: f64,
     pub window_title: String,
 }
@@ -323,7 +339,7 @@ fn has_unpacked_dir_suffix(path: &Path) -> bool {
 }
 
 fn is_unpacked_project_target(path: &Path) -> bool {
-    has_unpacked_dir_suffix(path) || is_unpacked_project_dir(path) || path.is_dir()
+    (has_unpacked_dir_suffix(path) && !path.is_file()) || is_unpacked_project_dir(path)
 }
 
 fn next_csv_sheet_id(doc: &ProjectDocument, hint_idx: usize) -> SheetId {
@@ -364,6 +380,12 @@ fn classify_and_load_path(path: &Path) -> Result<LoadedPathPayload, String> {
     let registry = FormatRegistry::default_registry();
     let importer = if is_unpacked_project_target(path) { registry.importer_by_format("lumencraft.d") } else { registry.importer_for_path(path) };
     let Some(importer) = importer else {
+        if path.is_dir() {
+            return Err(format!(
+                "unsupported directory `{}`: expected a `.lumencraft.d` unpacked project bundle containing `manifest.json`",
+                path.display()
+            ));
+        }
         let ext = path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
         return Err(format!(
             "unsupported file extension `.{ext}` for `{}`; expected .lumencraft, .lumencraft.d, .lctemplate, .prism, .pzfx, .csv, or .tsv",
@@ -542,7 +564,33 @@ fn abort_journal_lease_best_effort(journal: CrashRecoveryJournal<DirectoryJourna
     let _ = backend.release_lease(&owner_id);
 }
 
-fn dir_has_active_lease(candidate: &Path, now_epoch_ms: u64) -> bool {
+fn paths_equal(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(ca), Ok(cb)) => ca == cb,
+        _ => false,
+    }
+}
+
+fn paths_contain_equivalent(paths: &[PathBuf], target: &Path) -> bool {
+    paths.iter().any(|candidate| paths_equal(candidate, target))
+}
+
+fn session_has_document(session: &Session) -> bool {
+    let doc = session.document();
+    !doc.data_sheets.is_empty()
+        || !doc.graph_sheets.is_empty()
+        || !doc.layout_sheets.is_empty()
+        || !doc.result_sheets.is_empty()
+        || !doc.info_sheets.is_empty()
+        || session.file_path().is_some()
+}
+
+/// Check whether `candidate` currently holds a live, non-reclaimable recovery lock lease.
+#[must_use]
+pub fn dir_has_active_lease(candidate: &Path, now_epoch_ms: u64) -> bool {
     if !candidate.exists() {
         return false;
     }
@@ -550,6 +598,64 @@ fn dir_has_active_lease(candidate: &Path, now_epoch_ms: u64) -> bool {
         return false;
     };
     matches!(backend.read_lease(), Ok(Some(lease)) if !is_lease_reclaimable(&lease, now_epoch_ms))
+}
+
+/// Check whether `candidate` contains an unrecovered crash journal (a stale reclaimable lock
+/// lease or non-empty pending WAL entries in `ops.journal`).
+#[must_use]
+pub fn dir_has_unrecovered_crash(candidate: &Path, now_epoch_ms: u64) -> bool {
+    if !candidate.is_dir() {
+        return false;
+    }
+    let Ok(backend) = DirectoryJournalBackend::open_dir(candidate) else {
+        return false;
+    };
+    match backend.read_lease() {
+        Ok(Some(lease)) => is_lease_reclaimable(&lease, now_epoch_ms),
+        Ok(None) => backend.read_journal_bytes().is_ok_and(|bytes| bytes.iter().any(|byte| !byte.is_ascii_whitespace())),
+        Err(_) => false,
+    }
+}
+
+/// Scan `recovery_root` for stale crashed child journal directories (`instance-*` or `win-*`)
+/// whose recovery lock leases are reclaimable or which contain uncheckpointed WAL entries.
+#[must_use]
+pub fn find_stale_recovery_dirs(recovery_root: &Path, now_epoch_ms: u64) -> Vec<PathBuf> {
+    let Ok(entries) = std::fs::read_dir(recovery_root) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.is_dir()
+                && path.file_name().and_then(|n| n.to_str()).is_some_and(|name| name.starts_with("instance-") || name.starts_with("win-"))
+                && dir_has_unrecovered_crash(path, now_epoch_ms)
+        })
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// Allocate a fresh, collision-free isolated recovery directory under `root` without
+/// touching any active lease or unrecovered crash journal.
+///
+/// # Errors
+/// Returns an error if creating the chosen directory fails.
+pub fn allocate_fresh_isolated_journal_dir(root: &Path, window_id: DesktopWindowId, now_epoch_ms: u64) -> Result<PathBuf, String> {
+    let chosen = loop {
+        let seq = allocate_instance_seq();
+        let candidate = root.join(format!("instance-{}-s{}-win-{}", std::process::id(), seq, window_id.0));
+        if !dir_has_active_lease(&candidate, now_epoch_ms) && !dir_has_unrecovered_crash(&candidate, now_epoch_ms) {
+            break candidate;
+        }
+    };
+    std::fs::create_dir_all(&chosen).map_err(|err| format!("failed to create recovery dir `{}`: {err}", chosen.display()))?;
+    Ok(chosen)
+}
+
+fn dir_occupies_journal(candidate: &Path, now_epoch_ms: u64) -> bool {
+    dir_has_active_lease(candidate, now_epoch_ms) || dir_has_unrecovered_crash(candidate, now_epoch_ms)
 }
 
 /// Claim a crash-recovery directory under `root`, isolating `--new-instance` processes and
@@ -566,20 +672,11 @@ pub fn claim_isolated_journal_dir(root: &Path, new_instance: bool, window_id: De
         root.join(format!("win-{}", window_id.0))
     };
 
-    let chosen = if !new_instance || !dir_has_active_lease(&base_candidate, now_epoch_ms) {
-        base_candidate
-    } else {
-        loop {
-            let seq = allocate_instance_seq();
-            let candidate = root.join(format!("instance-{}-s{}-win-{}", std::process::id(), seq, window_id.0));
-            if !dir_has_active_lease(&candidate, now_epoch_ms) {
-                break candidate;
-            }
-        }
-    };
-
-    std::fs::create_dir_all(&chosen).map_err(|err| format!("failed to create recovery dir `{}`: {err}", chosen.display()))?;
-    Ok(chosen)
+    if !new_instance || !dir_occupies_journal(&base_candidate, now_epoch_ms) {
+        std::fs::create_dir_all(&base_candidate).map_err(|err| format!("failed to create recovery dir `{}`: {err}", base_candidate.display()))?;
+        return Ok(base_candidate);
+    }
+    allocate_fresh_isolated_journal_dir(root, window_id, now_epoch_ms)
 }
 
 fn is_readonly_control_method(method: &str) -> bool {
@@ -1098,7 +1195,7 @@ impl DesktopWindowSession {
             width_px: raster.width_px,
             height_px: raster.height_px,
             scale_factor,
-            rgba_bytes: raster.rgba,
+            rgba_bytes: Arc::from(raster.rgba),
             frame_ms: elapsed_ms,
             window_title: self.window_title(),
         };
@@ -1123,6 +1220,44 @@ impl std::fmt::Debug for PreferencesPersistHook {
     }
 }
 
+/// Injectable OS clipboard adapter used by [`DesktopHostRuntime`].
+pub trait OsClipboardAdapter: fmt::Debug + Send + Sync {
+    /// Write plain UTF-8 / TSV text to the OS pasteboard.
+    ///
+    /// # Errors
+    /// Returns an error if the OS clipboard backend fails unexpectedly.
+    fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String>;
+
+    /// Write a multi-flavor [`ClipboardBundle`] (SVG, PDF, PNG, HTML) to the OS pasteboard.
+    ///
+    /// # Errors
+    /// Returns an error if the OS clipboard backend fails unexpectedly.
+    fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String>;
+
+    /// Read plain UTF-8 text from the OS pasteboard.
+    ///
+    /// # Errors
+    /// Returns an error if the OS clipboard backend fails unexpectedly.
+    fn read_text(&self) -> Result<OsAdapterStatus, String>;
+}
+
+#[derive(Debug, Default)]
+struct SystemOsClipboardAdapter;
+
+impl OsClipboardAdapter for SystemOsClipboardAdapter {
+    fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
+        write_os_pasteboard(text)
+    }
+
+    fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        write_os_clipboard_bundle(bundle)
+    }
+
+    fn read_text(&self) -> Result<OsAdapterStatus, String> {
+        read_os_pasteboard()
+    }
+}
+
 /// Multi-window desktop host managing event loop dispatch, HiDPI scaling, IME composition,
 /// inertial trackpad coasting, file drops, clipboard pasteboard sync, and crash recovery.
 #[derive(Debug)]
@@ -1133,6 +1268,7 @@ pub struct DesktopHostRuntime {
     focused_window: Option<DesktopWindowId>,
     clipboard_text: Option<String>,
     clipboard_bundle: Option<ClipboardBundle>,
+    clipboard_adapter: Box<dyn OsClipboardAdapter>,
     preferences_persist_hook: Option<PreferencesPersistHook>,
 }
 
@@ -1147,8 +1283,15 @@ impl DesktopHostRuntime {
             focused_window: None,
             clipboard_text: None,
             clipboard_bundle: None,
+            clipboard_adapter: Box::new(SystemOsClipboardAdapter),
             preferences_persist_hook: None,
         }
+    }
+
+    /// Replace the OS clipboard backend (used in deterministic tests to simulate
+    /// external OS pasteboard changes or OS pasteboard failures).
+    pub fn set_clipboard_adapter(&mut self, adapter: Box<dyn OsClipboardAdapter>) {
+        self.clipboard_adapter = adapter;
     }
 
     /// Install a callback invoked before closing windows or when UI preference/shortcut state changes.
@@ -1242,7 +1385,7 @@ impl DesktopHostRuntime {
     pub fn open_window(&mut self, initial_file: Option<PathBuf>, viewport: ViewportMetrics) -> Result<DesktopWindowId, String> {
         let files: Vec<PathBuf> = initial_file.into_iter().collect();
         let session = open_document_from_files(&files)?;
-        let attach_recovery = self.config.recovery_root.is_some() && (self.config.new_instance || files.is_empty() || !self.windows.is_empty());
+        let attach_recovery = self.config.recovery_root.is_some();
         self.open_window_with_session(session, viewport, attach_recovery)
     }
 
@@ -1294,6 +1437,34 @@ impl DesktopHostRuntime {
         self.install_window_session(id, session, viewport, Some((recovery_dir, journal, Some(report))))
     }
 
+    /// Scan `config.recovery_root` for stale crashed journals (`win-*`, `instance-*`, or an
+    /// unopened root) and reopen each one into its own recovered desktop window.
+    ///
+    /// # Errors
+    /// Returns an error if recovering any discovered stale journal fails.
+    pub fn recover_stale_journals(&mut self, viewport: ViewportMetrics, now_epoch_ms: u64) -> Result<Vec<DesktopWindowId>, String> {
+        let Some(root) = self.config.recovery_root.clone() else {
+            return Ok(Vec::new());
+        };
+        let mut open_dirs: Vec<PathBuf> = self.windows.values().filter_map(|win| win.recovery_dir.clone()).collect();
+        let mut candidates = Vec::new();
+        if dir_has_unrecovered_crash(&root, now_epoch_ms) {
+            candidates.push(root.clone());
+        }
+        candidates.extend(find_stale_recovery_dirs(&root, now_epoch_ms));
+
+        let mut recovered_ids = Vec::new();
+        for dir in candidates {
+            if paths_contain_equivalent(&open_dirs, &dir) {
+                continue;
+            }
+            let win_id = self.recover_window_from_dir(dir.clone(), viewport, now_epoch_ms)?;
+            open_dirs.push(dir);
+            recovered_ids.push(win_id);
+        }
+        Ok(recovered_ids)
+    }
+
     fn open_window_internal(
         &mut self,
         session: Session,
@@ -1305,32 +1476,47 @@ impl DesktopHostRuntime {
         let id = DesktopWindowId(self.next_window_id);
         let recovery = if attach_recovery {
             if let Some(dir) = explicit_recovery_dir.or_else(|| self.config.recovery_root.clone()) {
-                let journal_dir = claim_isolated_journal_dir(&dir, self.config.new_instance, id, now_epoch_ms)?;
+                let has_doc = session_has_document(&session);
+                let journal_dir = self.choose_window_journal_dir(&dir, id, has_doc, now_epoch_ms)?;
                 let owner_id = recovery_owner_for_window(id);
-                let opened = Session::open_dir_with_recovery(&journal_dir, owner_id, DEFAULT_RECOVERY_LOCK_TTL_MS, now_epoch_ms)
-                    .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", journal_dir.display()))?;
-                // Preserve passed-in file session if initial_file was supplied alongside recovery.
-                let (recovered_session, mut journal, report) = opened;
-                let final_session = if session.document().data_sheets.is_empty()
-                    && session.document().graph_sheets.is_empty()
-                    && session.document().info_sheets.is_empty()
-                    && session.file_path().is_none()
-                {
-                    recovered_session
+                let (recovered_session, journal, report) =
+                    Session::open_dir_with_recovery(&journal_dir, &owner_id, DEFAULT_RECOVERY_LOCK_TTL_MS, now_epoch_ms)
+                        .map_err(|err| format!("failed to open recovery journal in `{}`: {err}", journal_dir.display()))?;
+                if !has_doc {
+                    return self.install_window_session(id, recovered_session, viewport, Some((journal_dir, journal, Some(report))));
+                }
+                let had_prior_crash = report.recovered_from_stale_lock.is_some() || !report.recovered_commands.is_empty();
+                let (final_dir, mut final_journal) = if had_prior_crash {
+                    drop(journal.abandon());
+                    let fresh_dir = allocate_fresh_isolated_journal_dir(&dir, id, now_epoch_ms)?;
+                    let (_, fresh_journal, _) = Session::open_dir_with_recovery(&fresh_dir, &owner_id, DEFAULT_RECOVERY_LOCK_TTL_MS, now_epoch_ms)
+                        .map_err(|err| format!("failed to open fresh recovery journal in `{}`: {err}", fresh_dir.display()))?;
+                    (fresh_dir, fresh_journal)
                 } else {
-                    if let Err(err) = session.checkpoint_journal(&mut journal) {
-                        abort_journal_lease_best_effort(journal);
-                        return Err(format!("failed to seed initial recovery snapshot: {err}"));
-                    }
-                    session
+                    (journal_dir, journal)
                 };
-                return self.install_window_session(id, final_session, viewport, Some((journal_dir, journal, Some(report))));
+                if let Err(err) = session.checkpoint_journal(&mut final_journal) {
+                    abort_journal_lease_best_effort(final_journal);
+                    return Err(format!("failed to seed initial recovery snapshot: {err}"));
+                }
+                return self.install_window_session(id, session, viewport, Some((final_dir, final_journal, None)));
             }
             None
         } else {
             None
         };
         self.install_window_session(id, session, viewport, recovery)
+    }
+
+    fn choose_window_journal_dir(&self, root: &Path, id: DesktopWindowId, has_doc: bool, now_epoch_ms: u64) -> Result<PathBuf, String> {
+        let candidate = claim_isolated_journal_dir(root, self.config.new_instance, id, now_epoch_ms)?;
+        let already_open = self.windows.values().any(|win| win.recovery_dir.as_deref().is_some_and(|p| paths_equal(p, &candidate)));
+        let preserve_existing_crash = has_doc && dir_has_unrecovered_crash(&candidate, now_epoch_ms);
+        let non_primary_active = (self.config.new_instance || id.0 > 1) && dir_has_active_lease(&candidate, now_epoch_ms);
+        if already_open || preserve_existing_crash || non_primary_active {
+            return allocate_fresh_isolated_journal_dir(root, id, now_epoch_ms);
+        }
+        Ok(candidate)
     }
 
     fn install_window_session(
@@ -1644,22 +1830,47 @@ impl DesktopHostRuntime {
         delta_y: f64,
         modifiers: KeyModifiers,
     ) -> Result<DesktopEventOutcome, String> {
-        let (grid_sheet_id, over_scene_paper) = {
+        let (modal_open, grid_sheet_id, over_scene_paper) = {
             let win = self.window(window_id)?;
-            let layout = win.app.layout_map(win.viewport);
-            let hit = layout.hit_test_logical(x_pt, y_pt);
-            let doc = win.app.document();
-            let over_scene = matches!(hit, WorkspaceHitTarget::ScenePaper { .. })
-                || (matches!(hit, WorkspaceHitTarget::Pane(ActiveWorkspacePane::MainCanvasOrGrid)) && layout.scene_paper.is_some());
-            let grid_target = match hit {
-                WorkspaceHitTarget::GridCell { sheet_id, .. } | WorkspaceHitTarget::GridXCell { sheet_id, .. } => Some(sheet_id),
-                WorkspaceHitTarget::Pane(ActiveWorkspacePane::MainCanvasOrGrid) if layout.scene_paper.is_none() => {
-                    doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned()
-                }
-                _ => None,
-            };
-            (grid_target, over_scene)
+            if win.app.canvas_dialogs.active_dialog != ActiveDialog::None || win.app.nav.welcome.open {
+                (true, None, false)
+            } else {
+                let layout = win.app.layout_map(win.viewport);
+                let hit = layout.hit_test_logical(x_pt, y_pt);
+                let doc = win.app.document();
+                let grid_hit_rect = if x_pt >= 0.0 && y_pt >= 0.0 {
+                    let phys = win.viewport.logical_to_physical_px([x_pt, y_pt]);
+                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                    let (px, py) = (phys[0].clamp(0.0, f64::from(u32::MAX)).round() as u32, phys[1].clamp(0.0, f64::from(u32::MAX)).round() as u32);
+                    layout.grid_geometry.as_ref().filter(|g| g.sheet_rect.contains(px, py)).map(|g| g.sheet_id.clone())
+                } else {
+                    None
+                };
+                let grid_target = match hit {
+                    WorkspaceHitTarget::GridCell { ref sheet_id, .. } | WorkspaceHitTarget::GridXCell { ref sheet_id, .. } => Some(sheet_id.clone()),
+                    _ if grid_hit_rect.is_some() => grid_hit_rect,
+                    WorkspaceHitTarget::Pane(ActiveWorkspacePane::MainCanvasOrGrid) if layout.scene_paper.is_none() => {
+                        doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned()
+                    }
+                    _ => None,
+                };
+                let over_scene = grid_target.is_none()
+                    && (matches!(
+                        hit,
+                        WorkspaceHitTarget::ScenePaper { .. } | WorkspaceHitTarget::CanvasTitle { .. } | WorkspaceHitTarget::AxisTitle { .. }
+                    ) || (matches!(hit, WorkspaceHitTarget::Pane(ActiveWorkspacePane::MainCanvasOrGrid)) && layout.scene_paper.is_some()));
+                (false, grid_target, over_scene)
+            }
         };
+
+        if modal_open {
+            return Ok(DesktopEventOutcome {
+                handled: false,
+                action: String::from("wheel.dialog_open_ignored"),
+                window_id: Some(window_id),
+                ..Default::default()
+            });
+        }
 
         if let Some(sheet_id) = grid_sheet_id {
             let win = self.window_mut(window_id)?;
@@ -1688,10 +1899,10 @@ impl DesktopHostRuntime {
             });
         }
 
-        let ui_event = if !modifiers.ctrl && !modifiers.meta && delta_x.abs() > f64::EPSILON {
-            UiInputEvent::InertialPan { delta_x, delta_y, dt_sec: 0.016, step_coast: false }
-        } else {
+        let ui_event = if modifiers.ctrl || modifiers.meta {
             UiInputEvent::WheelZoom { x: x_pt, y: y_pt, delta_y, modifiers }
+        } else {
+            UiInputEvent::InertialPan { delta_x, delta_y, dt_sec: 0.016, step_coast: false }
         };
         self.dispatch_ui_event_on_window(window_id, ui_event)
     }
@@ -1754,7 +1965,10 @@ impl DesktopHostRuntime {
         let (inline_active, dialog_active, shortcut_route) = {
             let win = self.window(window_id)?;
             let inline = win.app.inline_editor.active;
-            let dialog = win.app.canvas_dialogs.active_dialog != ActiveDialog::None;
+            let dialog = win.app.canvas_dialogs.active_dialog != ActiveDialog::None
+                || win.app.nav.welcome.open
+                || win.app.grid.import_wizard.open
+                || win.app.grid.variables_dialog.open;
             let routed = if !inline && !dialog { match_routed_desktop_shortcut(&win.app, trimmed, modifiers) } else { None };
             (inline, dialog, routed)
         };
@@ -1972,9 +2186,13 @@ impl DesktopHostRuntime {
                 let has_hook = self.preferences_persist_hook.is_some();
                 let win = self.window_mut(window_id)?;
                 let prev_prefs = has_hook.then(|| Self::capture_pref_fingerprint(&win.app));
+                let prev_undo = win.app.session().undo_depth();
+                let prev_redo = win.app.session().redo_depth();
+                let prev_dirty = win.app.session().is_dirty();
                 let ui_res = dispatch_ui_command(&mut win.app, &ui_command_id, &params)?
                     .ok_or_else(|| format!("UI command `{ui_command_id}` is not registered in dispatcher"))?;
                 win.app.sync_views();
+                win.record_ui_mutation_checkpoint(Some(trimmed), prev_undo, prev_redo, prev_dirty)?;
                 let changed = prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app));
                 if changed {
                     self.persist_window_preferences(window_id);
@@ -2021,32 +2239,174 @@ impl DesktopHostRuntime {
         }
     }
 
-    fn handle_clipboard_copy(&mut self, window_id: DesktopWindowId) -> Result<DesktopEventOutcome, String> {
-        let (copied_text, copied_bundle, action) = {
-            let win = self.window(window_id)?;
-            let doc = win.app.document();
-            let active_id = doc.active_sheet_id.as_ref();
-            if let Some(sheet_id) = active_id
-                && let Some(ds) = doc.data_sheet(sheet_id)
-            {
-                let dec = win.app.locale_preset.decimal_separator;
-                let tsv = if let Some((min, max)) = win.app.grid.tool.selection_bounds() {
-                    let range = SheetCellRange::new(CellCoord::new(min.row, min.col, min.subcol), CellCoord::new(max.row, max.col, max.subcol));
-                    ClipboardBundle::tsv_from_datasheet_range(ds, range, dec)
-                } else {
-                    ClipboardBundle::tsv_from_datasheet(ds, dec)?
+    /// Copy from the active inline editor, selected table cells, or active graph/layout into both
+    /// the OS pasteboard and the host's fallback clipboard state.
+    ///
+    /// # Errors
+    /// Returns an error if `window_id` is unknown or clipboard serialization fails.
+    pub fn cut_selection(&mut self, window_id: DesktopWindowId) -> Result<DesktopEventOutcome, String> {
+        let copy_out = self.handle_clipboard_copy(window_id)?;
+        if !copy_out.handled {
+            return Ok(copy_out);
+        }
+        let win = self.window_mut(window_id)?;
+        if win.app.inline_editor.active {
+            win.app.inline_editor.buffer.clear();
+            win.app.inline_editor.caret_byte = 0;
+        } else if let Some(sheet_id) = win.app.document().active_sheet_id.clone()
+            && win.app.document().data_sheet(&sheet_id).is_some()
+        {
+            let range = win.app.grid.tool.selection_bounds().or_else(|| win.app.grid.tool.active.map(|c| (c, c)));
+            if let Some((min, max)) = range {
+                let _ = win.execute_and_journal(
+                    "table.clearCells",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "row_start": min.row,
+                        "row_end": max.row,
+                        "col_start": min.col,
+                        "col_end": max.col,
+                        "subcol_start": min.subcol,
+                        "subcol_end": max.subcol,
+                    }),
+                )?;
+            }
+        }
+        Ok(DesktopEventOutcome { action: copy_out.action.replacen("copied", "cut", 1), ..copy_out })
+    }
+
+    fn format_os_clipboard_write(base_action: &str, write_res: Result<OsAdapterStatus, String>) -> Result<(String, Value), String> {
+        match write_res {
+            Ok(status) => {
+                let action = if status.available { base_action.to_owned() } else { format!("{base_action}_os_unavailable") };
+                let payload = serde_json::to_value(&status).map_err(|err| format!("failed to serialize clipboard status: {err}"))?;
+                Ok((action, json!({ "os_clipboard": payload })))
+            }
+            Err(err) => Ok((format!("{base_action}_os_failed"), json!({ "os_clipboard": { "available": false, "synced": false, "error": err } }))),
+        }
+    }
+
+    fn read_paste_text_from_os_or_cache(
+        &mut self,
+        window_id: DesktopWindowId,
+        inline_active: bool,
+    ) -> Result<Result<(String, Option<Value>), DesktopEventOutcome>, String> {
+        match self.clipboard_adapter.read_text() {
+            Ok(status) if status.available => {
+                let Some(os_text) = status.text.clone() else {
+                    return Ok(Err(DesktopEventOutcome {
+                        handled: false,
+                        action: String::from("clipboard.paste_empty"),
+                        window_id: Some(window_id),
+                        command_result: Some(json!({ "os_clipboard": status })),
+                        ..Default::default()
+                    }));
                 };
-                let _ = write_os_pasteboard(&tsv);
-                (tsv, None, "clipboard.copied_tsv")
-            } else if let Some(sheet_id) = active_id
-                && matches!(doc.sheet_section(sheet_id), Some(SheetSection::Graphs | SheetSection::Layouts))
-            {
-                let dpi = win.viewport.dpi_for_base(BASE_LOGICAL_DPI);
-                let bundle = ClipboardBundle::from_sheet(win.app.session(), sheet_id, dpi)?;
-                let _ = write_os_clipboard_bundle(&bundle);
-                let primary = if !bundle.svg.is_empty() { bundle.svg.clone() } else { bundle.html.clone() };
-                (primary, Some(bundle), "clipboard.copied_bundle")
+                let is_own_bundle_markup = !inline_active
+                    && self
+                        .clipboard_bundle
+                        .as_ref()
+                        .is_some_and(|b| (!b.svg.is_empty() && os_text == b.svg) || (!b.html.is_empty() && os_text == b.html));
+                if is_own_bundle_markup {
+                    return Ok(Err(DesktopEventOutcome {
+                        handled: false,
+                        action: String::from("clipboard.paste_bundle_not_tabular"),
+                        window_id: Some(window_id),
+                        ..Default::default()
+                    }));
+                }
+                Ok(Ok((os_text, None)))
+            }
+            Ok(status) => {
+                let status_val = serde_json::to_value(&status).ok();
+                if let Some(cached) = self.clipboard_text.clone() {
+                    return Ok(Ok((cached, status_val)));
+                }
+                let action = if self.clipboard_bundle.is_some() {
+                    String::from("clipboard.paste_bundle_not_tabular")
+                } else {
+                    String::from("clipboard.paste_os_unavailable")
+                };
+                Ok(Err(DesktopEventOutcome {
+                    handled: false,
+                    action,
+                    window_id: Some(window_id),
+                    command_result: Some(json!({ "os_clipboard": status })),
+                    ..Default::default()
+                }))
+            }
+            Err(err) => {
+                let err_val = json!({ "available": false, "synced": false, "error": err });
+                if let Some(cached) = self.clipboard_text.clone() {
+                    return Ok(Ok((cached, Some(err_val))));
+                }
+                let action = if self.clipboard_bundle.is_some() {
+                    String::from("clipboard.paste_bundle_not_tabular")
+                } else {
+                    String::from("clipboard.paste_os_failed")
+                };
+                Ok(Err(DesktopEventOutcome {
+                    handled: false,
+                    action,
+                    window_id: Some(window_id),
+                    command_result: Some(json!({ "os_clipboard": err_val })),
+                    ..Default::default()
+                }))
+            }
+        }
+    }
+
+    fn handle_clipboard_copy(&mut self, window_id: DesktopWindowId) -> Result<DesktopEventOutcome, String> {
+        enum CopyTarget {
+            InlineText(String),
+            TableTsv(String),
+            Bundle(Box<ClipboardBundle>),
+            NothingSelected,
+        }
+
+        let target = {
+            let win = self.window(window_id)?;
+            if win.app.inline_editor.active {
+                CopyTarget::InlineText(win.app.inline_editor.buffer.clone())
             } else {
+                let doc = win.app.document();
+                let active_id = doc.active_sheet_id.as_ref();
+                if let Some(sheet_id) = active_id
+                    && let Some(ds) = doc.data_sheet(sheet_id)
+                {
+                    let dec = win.app.locale_preset.decimal_separator;
+                    let tsv = if let Some((min, max)) = win.app.grid.tool.selection_bounds() {
+                        let range = SheetCellRange::new(CellCoord::new(min.row, min.col, min.subcol), CellCoord::new(max.row, max.col, max.subcol));
+                        ClipboardBundle::tsv_from_datasheet_range(ds, range, dec)
+                    } else {
+                        ClipboardBundle::tsv_from_datasheet(ds, dec)?
+                    };
+                    CopyTarget::TableTsv(tsv)
+                } else if let Some(sheet_id) = active_id
+                    && matches!(doc.sheet_section(sheet_id), Some(SheetSection::Graphs | SheetSection::Layouts))
+                {
+                    let dpi = win.viewport.dpi_for_base(BASE_LOGICAL_DPI);
+                    CopyTarget::Bundle(Box::new(ClipboardBundle::from_sheet(win.app.session(), sheet_id, dpi)?))
+                } else {
+                    CopyTarget::NothingSelected
+                }
+            }
+        };
+
+        let (copied_text, copied_bundle, base_action, write_res) = match target {
+            CopyTarget::InlineText(text) => {
+                let res = self.clipboard_adapter.write_text(&text);
+                (Some(text), None, "clipboard.copied_inline_text", res)
+            }
+            CopyTarget::TableTsv(tsv) => {
+                let res = self.clipboard_adapter.write_text(&tsv);
+                (Some(tsv), None, "clipboard.copied_tsv", res)
+            }
+            CopyTarget::Bundle(bundle) => {
+                let res = self.clipboard_adapter.write_bundle(&bundle);
+                (None, Some(*bundle), "clipboard.copied_bundle", res)
+            }
+            CopyTarget::NothingSelected => {
                 return Ok(DesktopEventOutcome {
                     handled: false,
                     action: String::from("clipboard.copy_nothing_selected"),
@@ -2056,42 +2416,39 @@ impl DesktopHostRuntime {
             }
         };
 
-        self.clipboard_text = Some(copied_text);
+        self.clipboard_text = copied_text;
         self.clipboard_bundle = copied_bundle;
-        Ok(DesktopEventOutcome { handled: true, action: String::from(action), window_id: Some(window_id), ..Default::default() })
+        let (action, result_json) = Self::format_os_clipboard_write(base_action, write_res)?;
+        Ok(DesktopEventOutcome { handled: true, action, window_id: Some(window_id), command_result: Some(result_json), ..Default::default() })
+    }
+
+    fn attach_os_clipboard_note(command_result: &mut Option<Value>, note: Value) {
+        match command_result {
+            Some(Value::Object(map)) => {
+                map.insert(String::from("os_clipboard"), note);
+            }
+            _ => {
+                *command_result = Some(json!({ "os_clipboard": note }));
+            }
+        }
     }
 
     fn handle_clipboard_paste(&mut self, window_id: DesktopWindowId, text_override: Option<String>) -> Result<DesktopEventOutcome, String> {
-        let paste_text = match text_override {
-            Some(explicit) => explicit,
-            None => match self.clipboard_text.clone() {
-                Some(cached) => cached,
-                None => match read_os_pasteboard() {
-                    Ok(status) if status.available => match status.text {
-                        Some(os_text) => os_text,
-                        None => {
-                            return Ok(DesktopEventOutcome {
-                                handled: false,
-                                action: String::from("clipboard.paste_empty"),
-                                window_id: Some(window_id),
-                                ..Default::default()
-                            });
-                        }
-                    },
-                    _ => {
-                        return Ok(DesktopEventOutcome {
-                            handled: false,
-                            action: String::from("clipboard.paste_empty"),
-                            window_id: Some(window_id),
-                            ..Default::default()
-                        });
-                    }
-                },
+        let inline_active = self.window(window_id)?.app.inline_editor.active;
+        let (paste_text, os_note) = match text_override {
+            Some(explicit) => (explicit, None),
+            None => match self.read_paste_text_from_os_or_cache(window_id, inline_active)? {
+                Ok(pair) => pair,
+                Err(outcome) => return Ok(outcome),
             },
         };
 
-        if self.window(window_id)?.app.inline_editor.active {
-            return self.dispatch_ui_event_on_window(window_id, UiInputEvent::TextInput { text: paste_text });
+        if inline_active {
+            let mut out = self.dispatch_ui_event_on_window(window_id, UiInputEvent::TextInput { text: paste_text })?;
+            if let Some(note) = os_note {
+                Self::attach_os_clipboard_note(&mut out.command_result, note);
+            }
+            return Ok(out);
         }
 
         let win = self.window_mut(window_id)?;
@@ -2120,19 +2477,30 @@ impl DesktopHostRuntime {
             .active
             .map_or_else(|| json!({ "row": 0, "col": 0, "subcol": 0 }), |c| json!({ "row": c.row, "col": c.col, "subcol": c.subcol }));
         let dec = win.app.locale_preset.decimal_separator.to_string();
-        let params = json!({
+        let mut params = json!({
             "sheet_id": sheet_id.as_str(),
             "text": paste_text,
             "decimal_separator": dec,
             "anchor": anchor,
         });
+        if dec == ","
+            && !paste_text.contains(';')
+            && (paste_text.contains('\t') || paste_text.lines().all(|line| line.matches(',').count() <= 1))
+            && let Some(obj) = params.as_object_mut()
+        {
+            obj.insert(String::from("delimiter"), json!("\t"));
+        }
         let outcome = win.execute_and_journal("table.paste", params)?;
+        let mut command_result = Some(outcome.payload);
+        if let Some(note) = os_note {
+            Self::attach_os_clipboard_note(&mut command_result, note);
+        }
         Ok(DesktopEventOutcome {
             handled: true,
             action: String::from("clipboard.pasted_table"),
             window_id: Some(window_id),
             command_id: Some(String::from("table.paste")),
-            command_result: Some(outcome.payload),
+            command_result,
             ..Default::default()
         })
     }
@@ -3054,7 +3422,9 @@ fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
         .is_some_and(|spec| (spec.input_schema)().get("required").and_then(Value::as_array).is_some_and(|arr| !arr.is_empty()))
 }
 
-fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModifiers) -> Option<String> {
+/// Match a customized key combination in `app.shortcuts` to a desktop-routed command ID.
+#[must_use]
+pub fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModifiers) -> Option<String> {
     if (modifiers.meta || modifiers.ctrl) && !modifiers.alt && !modifiers.shift && key.eq_ignore_ascii_case("v") {
         // Let clipboard paste shortcut use host pasteboard instead of opening Paste Special wizard.
         return None;

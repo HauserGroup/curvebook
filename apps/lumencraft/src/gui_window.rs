@@ -16,8 +16,8 @@ use lumencraft_ui_egui::{ControlAuth, ControlPostRequestContext, LOCALES, UiApp,
 use serde_json::json;
 
 use crate::desktop_host::{
-    CloseDisposition, DesktopFrameOutput, DesktopHostEvent, DesktopHostRuntime, DesktopMenuChromeState, DesktopMenuItem, DesktopWindowId,
-    DesktopWindowSession, LiveControlFrameOutput,
+    CloseDisposition, DesktopEventOutcome, DesktopFrameOutput, DesktopHostEvent, DesktopHostRuntime, DesktopMenuChromeState, DesktopMenuItem,
+    DesktopWindowId, DesktopWindowSession, LiveControlFrameOutput, match_routed_desktop_shortcut,
 };
 
 /// Canonical file extensions accepted by native project/data `Open...` dialogs (`classify_and_load_path`).
@@ -234,6 +234,18 @@ impl LumenCraftNativeApp {
         self.close_confirmed
     }
 
+    /// Whether the unsaved-changes confirmation modal is currently open.
+    #[must_use]
+    pub const fn close_dialog_open(&self) -> bool {
+        self.close_dialog_open
+    }
+
+    /// Current top-bar error or warning banner text, if any.
+    #[must_use]
+    pub fn status_banner(&self) -> Option<&str> {
+        self.status_banner.as_deref()
+    }
+
     /// Drain and process all currently queued live-control requests without blocking rendering.
     pub fn poll_live_control(&mut self, ctx: &egui::Context) -> usize {
         let mut pending = Vec::new();
@@ -302,24 +314,28 @@ impl LumenCraftNativeApp {
     pub fn step_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         let _ = self.poll_live_control(&ctx);
-        let window_id = self.active_window_id();
+        let initial_window_id = self.active_window_id();
 
-        self.handle_close_request(&ctx, window_id);
-        self.render_top_menu_bar(ui, window_id);
+        self.handle_close_request(&ctx, initial_window_id);
+        let bar_window_id = self.active_window_id();
+        self.render_top_menu_bar(ui, bar_window_id);
 
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let canvas_rect = ui.available_rect_before_wrap();
             let ppp = ctx.pixels_per_point().max(1.0);
-            self.sync_canvas_viewport(window_id, canvas_rect, ppp);
-            self.process_canvas_input(ui, window_id, canvas_rect);
+            let input_window_id = self.active_window_id();
+            self.sync_canvas_viewport(input_window_id, canvas_rect, ppp);
+            self.process_canvas_input(ui, input_window_id, canvas_rect);
 
-            if let Some(frame) = self.tick_animations_and_redraw(&ctx, window_id) {
+            let paint_window_id = self.active_window_id();
+            if let Some(frame) = self.tick_animations_and_redraw(&ctx, paint_window_id) {
                 self.upload_and_paint_frame(ui, canvas_rect, &frame);
             }
         });
 
-        self.render_unsaved_close_modal(&ctx, window_id);
-        self.sync_window_title(&ctx, window_id);
+        let post_window_id = self.active_window_id();
+        self.render_unsaved_close_modal(&ctx, post_window_id);
+        self.sync_window_title(&ctx, post_window_id);
     }
 
     /// Run shutdown cleanup, signal any attached live-control server to stop, and close all windows.
@@ -356,18 +372,47 @@ impl LumenCraftNativeApp {
         }
     }
 
+    fn on_active_window_switched(&mut self) {
+        self.last_frame_size = [0, 0];
+        self.last_scale_factor = 0.0;
+        self.last_title.clear();
+        self.hovered_paths_active = false;
+        self.pointer_captured = false;
+        self.close_dialog_open = false;
+    }
+
+    fn apply_close_outcome(&mut self, ctx: Option<&egui::Context>, outcome: &DesktopEventOutcome) {
+        if matches!(outcome.close_disposition, Some(CloseDisposition::PromptUnsaved { .. })) {
+            if let Some(ctx) = ctx {
+                ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            }
+            self.close_dialog_open = true;
+            return;
+        }
+        if matches!(outcome.close_disposition, Some(CloseDisposition::Closed)) {
+            self.close_dialog_open = false;
+            if self.runtime.window_count() > 0 {
+                if let Some(ctx) = ctx {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+                }
+                self.close_confirmed = false;
+                self.on_active_window_switched();
+            } else {
+                self.close_confirmed = true;
+                if let Some(ctx) = ctx {
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+            }
+        }
+    }
+
     fn handle_close_request(&mut self, ctx: &egui::Context, window_id: DesktopWindowId) {
         if !ctx.input(|i| i.viewport().close_requested()) || self.close_confirmed {
             return;
         }
         match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: false }) {
             Ok(outcome) => {
-                if matches!(outcome.close_disposition, Some(CloseDisposition::PromptUnsaved { .. })) {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-                    self.close_dialog_open = true;
-                } else {
-                    self.close_confirmed = true;
-                }
+                self.apply_close_outcome(Some(ctx), &outcome);
             }
             Err(err) => {
                 ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -385,11 +430,23 @@ impl LumenCraftNativeApp {
             return;
         }
         let chrome: DesktopMenuChromeState = win.chrome_state();
-        if chrome.sections.is_empty() {
+        if !chrome.menu_bar_visible || chrome.sections.is_empty() {
+            if let Some(err) = self.status_banner.clone() {
+                egui::Panel::top("lumencraft_status_banner").show(ui, |ui| {
+                    ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
+                });
+            }
             return;
         }
 
+        let window_entries: Vec<(DesktopWindowId, String)> = if self.runtime.window_count() > 1 {
+            self.runtime.window_ids().into_iter().filter_map(|id| self.runtime.window(id).ok().map(|w| (id, w.window_title()))).collect()
+        } else {
+            Vec::new()
+        };
+
         let mut pending_command: Option<String> = None;
+        let mut pending_focus_window: Option<DesktopWindowId> = None;
         egui::Panel::top("lumencraft_menu_bar").show(ui, |ui| {
             egui::MenuBar::new().ui(ui, |ui| {
                 for section in &chrome.sections {
@@ -402,6 +459,17 @@ impl LumenCraftNativeApp {
                         }
                     });
                 }
+                if !window_entries.is_empty() {
+                    ui.menu_button("Window", |ui| {
+                        for (id, title) in &window_entries {
+                            let label = if *id == window_id { format!("✓ Window {}: {title}", id.0) } else { format!("Window {}: {title}", id.0) };
+                            if ui.button(label).clicked() {
+                                pending_focus_window = Some(*id);
+                                ui.close();
+                            }
+                        }
+                    });
+                }
                 if let Some(err) = self.status_banner.as_deref() {
                     ui.separator();
                     ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
@@ -409,26 +477,45 @@ impl LumenCraftNativeApp {
             });
         });
 
+        if let Some(target_id) = pending_focus_window {
+            let _ = self.runtime.dispatch(DesktopHostEvent::WindowFocused { window_id: target_id });
+            self.on_active_window_switched();
+        }
         if let Some(command_id) = pending_command {
-            self.execute_menu_command(window_id, &command_id);
+            let ctx = ui.ctx().clone();
+            self.execute_menu_command(Some(&ctx), window_id, &command_id);
         }
     }
 
-    fn execute_menu_command(&mut self, window_id: DesktopWindowId, command_id: &str) {
+    fn execute_menu_command(&mut self, ctx: Option<&egui::Context>, window_id: DesktopWindowId, command_id: &str) {
         self.status_banner = None;
-        let result = if let Some(native_result) = self.try_handle_native_file_command(window_id, command_id) {
-            native_result
-        } else {
-            self.runtime.dispatch(DesktopHostEvent::MenuAction { window_id, command_id: command_id.to_string() }).map(|_| ())
-        };
-        if let Err(err) = result {
-            self.status_banner = Some(err);
+        if let Some(native_result) = self.try_handle_native_file_command(window_id, command_id) {
+            if let Err(err) = native_result {
+                self.status_banner = Some(err);
+            }
+            return;
+        }
+        match self.runtime.dispatch(DesktopHostEvent::MenuAction { window_id, command_id: command_id.to_string() }) {
+            Ok(outcome) => {
+                if outcome.close_disposition.is_some() {
+                    self.apply_close_outcome(ctx, &outcome);
+                } else if outcome.opened_window_id.is_some() {
+                    self.on_active_window_switched();
+                }
+                if outcome.command_id.as_deref().is_some_and(|c| c == "edit.copy") {
+                    self.apply_clipboard_outcome_status(&outcome);
+                }
+            }
+            Err(err) => {
+                self.status_banner = Some(err);
+            }
         }
     }
 
     fn try_handle_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Option<Result<(), String>> {
         let res = match command_id {
             "project.open" | "file.open" => self.handle_native_open(window_id),
+            "file.open_unpacked_dir" => self.handle_native_open_folder(window_id),
             "project.save" | "file.save" => self.handle_native_save(window_id, false),
             "project.saveAs" | "file.save_as" => self.handle_native_save(window_id, true),
             "project.saveTemplate" => self.handle_native_save_template(window_id),
@@ -448,7 +535,22 @@ impl LumenCraftNativeApp {
         let Some(path) = rfd::FileDialog::new().add_filter("LumenCraft / Data", NATIVE_OPEN_FILE_EXTENSIONS).pick_file() else {
             return Ok(());
         };
-        self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path }).map(|_| ())
+        let outcome = self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path })?;
+        if outcome.opened_window_id.is_some() {
+            self.on_active_window_switched();
+        }
+        Ok(())
+    }
+
+    fn handle_native_open_folder(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
+        let Some(path) = rfd::FileDialog::new().pick_folder() else {
+            return Ok(());
+        };
+        let outcome = self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path })?;
+        if outcome.opened_window_id.is_some() {
+            self.on_active_window_switched();
+        }
+        Ok(())
     }
 
     fn handle_native_save(&mut self, window_id: DesktopWindowId, force_dialog: bool) -> Result<(), String> {
@@ -467,9 +569,11 @@ impl LumenCraftNativeApp {
                 None => return Ok(()),
             }
         };
+        let is_unpacked = lumencraft_format::is_unpacked_project_dir(&target_path)
+            || target_path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_ascii_lowercase().ends_with(".lumencraft.d"));
         let win = self.runtime.window_mut(window_id)?;
         let path_str = target_path.to_string_lossy().into_owned();
-        win.execute_and_journal("project.save", json!({ "path": path_str, "unpacked": false }))?;
+        win.execute_and_journal("project.save", json!({ "path": path_str, "unpacked": is_unpacked }))?;
         win.app_mut().session_mut().set_file_path(Some(target_path), true);
         Ok(())
     }
@@ -549,9 +653,10 @@ impl LumenCraftNativeApp {
                         Ok(()) => {
                             let still_dirty = self.runtime.window(window_id).map(|w| w.has_unsaved_changes()).unwrap_or(false);
                             if !still_dirty {
-                                self.close_dialog_open = false;
-                                self.close_confirmed = true;
-                                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                                match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: false }) {
+                                    Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
+                                    Err(err) => self.status_banner = Some(err),
+                                }
                             }
                         }
                         Err(err) => {
@@ -560,10 +665,10 @@ impl LumenCraftNativeApp {
                     }
                 }
                 if ui.button("Don't Save").clicked() {
-                    let _ = self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: true });
-                    self.close_dialog_open = false;
-                    self.close_confirmed = true;
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                    match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: true }) {
+                        Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
+                        Err(err) => self.status_banner = Some(err),
+                    }
                 }
                 if ui.button("Cancel").clicked() {
                     self.close_dialog_open = false;
@@ -622,7 +727,16 @@ impl LumenCraftNativeApp {
 
         for file in dropped {
             self.hovered_paths_active = false;
-            let _ = self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path: file.path().to_path_buf() });
+            match self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path: file.path().to_path_buf() }) {
+                Ok(outcome) => {
+                    if outcome.opened_window_id.is_some() {
+                        self.on_active_window_switched();
+                    }
+                }
+                Err(err) => {
+                    self.status_banner = Some(err);
+                }
+            }
         }
     }
 
@@ -676,7 +790,7 @@ impl LumenCraftNativeApp {
                     }
                 }
                 egui::Event::Key { key, pressed, modifiers, .. } => {
-                    if let Some(inserted) = self.dispatch_key_event(window_id, *key, *pressed, *modifiers) {
+                    if let Some(inserted) = self.dispatch_key_event(ctx, window_id, *key, *pressed, *modifiers) {
                         suppressed_text_char = Some(inserted);
                     }
                 }
@@ -697,28 +811,64 @@ impl LumenCraftNativeApp {
                     self.dispatch_clipboard_copy(ctx, window_id);
                 }
                 egui::Event::Cut => {
-                    self.dispatch_clipboard_copy(ctx, window_id);
-                    let _ = self.runtime.dispatch(DesktopHostEvent::KeyboardInput {
-                        window_id,
-                        key: String::from("Backspace"),
-                        pressed: true,
-                        modifiers: KeyModifiers::default(),
-                        text: None,
-                    });
+                    self.dispatch_clipboard_cut(ctx, window_id);
                 }
                 egui::Event::Paste(text) => {
-                    let _ = self.runtime.dispatch(DesktopHostEvent::ClipboardPaste { window_id, text_override: Some(text.clone()) });
+                    if let Err(err) = self.runtime.dispatch(DesktopHostEvent::ClipboardPaste { window_id, text_override: Some(text.clone()) }) {
+                        self.status_banner = Some(err);
+                    }
                 }
                 _ => {}
             }
         }
     }
 
-    fn dispatch_clipboard_copy(&mut self, ctx: &egui::Context, window_id: DesktopWindowId) {
-        if self.runtime.dispatch(DesktopHostEvent::ClipboardCopy { window_id }).is_ok()
+    fn apply_clipboard_outcome_status(&mut self, outcome: &DesktopEventOutcome) {
+        let os_status = outcome.command_result.as_ref().and_then(|v| v.get("os_clipboard"));
+        if let Some(err) = os_status.and_then(|s| s.get("error")).and_then(serde_json::Value::as_str) {
+            self.status_banner = Some(format!("OS clipboard error: {err}"));
+        } else if os_status.and_then(|s| s.get("available")).and_then(serde_json::Value::as_bool) == Some(false)
+            && let Some(detail) = os_status.and_then(|s| s.get("detail")).and_then(serde_json::Value::as_str)
+        {
+            self.status_banner = Some(format!("OS clipboard unavailable: {detail}"));
+        }
+    }
+
+    fn maybe_sync_plain_text_fallback(&self, ctx: &egui::Context, outcome: &DesktopEventOutcome) {
+        let os_available =
+            outcome.command_result.as_ref().and_then(|v| v.get("os_clipboard")).and_then(|s| s.get("available")).and_then(serde_json::Value::as_bool)
+                == Some(true);
+        // Never overwrite multi-flavor ClipboardBundle flavors on the OS pasteboard with `ctx.copy_text`,
+        // and avoid redundant `ctx.copy_text` clobbering whenever OS write succeeded cleanly.
+        if !os_available
+            && self.runtime.clipboard_bundle().is_none()
             && let Some(copied) = self.runtime.clipboard_text()
         {
             ctx.copy_text(copied.to_owned());
+        }
+    }
+
+    fn dispatch_clipboard_copy(&mut self, ctx: &egui::Context, window_id: DesktopWindowId) {
+        match self.runtime.dispatch(DesktopHostEvent::ClipboardCopy { window_id }) {
+            Ok(outcome) => {
+                self.apply_clipboard_outcome_status(&outcome);
+                self.maybe_sync_plain_text_fallback(ctx, &outcome);
+            }
+            Err(err) => {
+                self.status_banner = Some(err);
+            }
+        }
+    }
+
+    fn dispatch_clipboard_cut(&mut self, ctx: &egui::Context, window_id: DesktopWindowId) {
+        match self.runtime.cut_selection(window_id) {
+            Ok(outcome) => {
+                self.apply_clipboard_outcome_status(&outcome);
+                self.maybe_sync_plain_text_fallback(ctx, &outcome);
+            }
+            Err(err) => {
+                self.status_banner = Some(err);
+            }
         }
     }
 
@@ -764,24 +914,51 @@ impl LumenCraftNativeApp {
         self.click_count
     }
 
-    fn dispatch_key_event(&mut self, window_id: DesktopWindowId, key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> Option<String> {
+    fn dispatch_key_event(
+        &mut self,
+        ctx: &egui::Context,
+        window_id: DesktopWindowId,
+        key: egui::Key,
+        pressed: bool,
+        modifiers: egui::Modifiers,
+    ) -> Option<String> {
         let key_name = egui_key_to_name(key)?;
         let (inline_active_before, inline_text_before) = self.inline_editor_snapshot(window_id);
-        let dialog_inactive =
-            self.runtime.window(window_id).is_ok_and(|w| w.app().canvas_dialogs.active_dialog == ActiveDialog::None && !w.app().nav.welcome.open);
+        let dialog_inactive = !self.close_dialog_open
+            && self.runtime.window(window_id).is_ok_and(|w| {
+                let app = w.app();
+                app.canvas_dialogs.active_dialog == ActiveDialog::None
+                    && !app.nav.welcome.open
+                    && !app.grid.import_wizard.open
+                    && !app.grid.variables_dialog.open
+            });
         let primary_cmd = modifiers.command || modifiers.mac_cmd || modifiers.ctrl;
-        if pressed && !inline_active_before && dialog_inactive && primary_cmd && !modifiers.alt {
-            if key == egui::Key::O && !modifiers.shift {
-                self.execute_menu_command(window_id, "project.open");
-                return None;
+        if pressed && !inline_active_before && dialog_inactive {
+            if primary_cmd && !modifiers.alt {
+                if key == egui::Key::O && !modifiers.shift {
+                    self.execute_menu_command(Some(ctx), window_id, "project.open");
+                    return None;
+                }
+                if key == egui::Key::S {
+                    let cmd = if modifiers.shift { "project.saveAs" } else { "project.save" };
+                    self.execute_menu_command(Some(ctx), window_id, cmd);
+                    return None;
+                }
             }
-            if key == egui::Key::S {
-                let cmd = if modifiers.shift { "project.saveAs" } else { "project.save" };
-                self.execute_menu_command(window_id, cmd);
+            let routed_cmd =
+                self.runtime.window(window_id).ok().and_then(|w| match_routed_desktop_shortcut(w.app(), &key_name, to_key_modifiers(modifiers)));
+            if let Some(cmd) = routed_cmd
+                && (menu_action_triggers_native_file_dialog(&cmd)
+                    || matches!(cmd.as_str(), "window.close" | "file.close" | "window.new" | "file.newWindow"))
+            {
+                self.execute_menu_command(Some(ctx), window_id, &cmd);
                 return None;
             }
         }
         let has_cmd_or_ctrl = modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd;
+        if pressed && !dialog_inactive && has_cmd_or_ctrl {
+            return None;
+        }
         let is_single_char_key = key_name.chars().count() == 1;
 
         if inline_active_before && pressed && is_single_char_key && !has_cmd_or_ctrl {
@@ -997,6 +1174,7 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
         command_id,
         "project.open"
             | "file.open"
+            | "file.open_unpacked_dir"
             | "project.save"
             | "file.save"
             | "project.saveAs"
@@ -1131,6 +1309,7 @@ fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'static 
 
 fn render_extra_file_actions(ui: &mut egui::Ui, existing_items: &[DesktopMenuItem], pending_command: &mut Option<String>) {
     let extras = [
+        ("Open Unpacked Folder…", "file.open_unpacked_dir", &["file.open_unpacked_dir"][..]),
         ("Save As…", "file.save_as", &["project.saveAs", "file.save_as"][..]),
         ("Export PDF…", "export.pdf", &["export.pdf", "file.export_pdf"][..]),
         ("Export PNG…", "export.png", &["export.png", "file.export_png"][..]),
@@ -1406,6 +1585,198 @@ mod tests {
         let cancel_sent =
             output.viewport_output.get(&egui::ViewportId::ROOT).is_some_and(|v| v.commands.contains(&egui::ViewportCommand::CancelClose));
         assert!(cancel_sent);
+        Ok(())
+    }
+
+    #[derive(Debug)]
+    struct TestGuiClipboard {
+        fail_writes: bool,
+        available: bool,
+        writes_text: std::sync::RwLock<Vec<String>>,
+        writes_bundle_count: std::sync::atomic::AtomicUsize,
+    }
+
+    impl TestGuiClipboard {
+        fn new(available: bool, fail_writes: bool) -> Self {
+            Self {
+                fail_writes,
+                available,
+                writes_text: std::sync::RwLock::new(Vec::new()),
+                writes_bundle_count: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+    }
+
+    impl crate::desktop_host::OsClipboardAdapter for TestGuiClipboard {
+        fn write_text(&self, text: &str) -> Result<lumencraft_ui_egui::OsAdapterStatus, String> {
+            if self.fail_writes {
+                return Err(String::from("pasteboard write denied"));
+            }
+            if let Ok(mut guard) = self.writes_text.write() {
+                guard.push(text.to_owned());
+            }
+            Ok(lumencraft_ui_egui::OsAdapterStatus {
+                available: self.available,
+                availability: if self.available {
+                    lumencraft_ui_egui::OsAdapterAvailability::Submitted
+                } else {
+                    lumencraft_ui_egui::OsAdapterAvailability::Unavailable
+                },
+                backend: String::from("mock"),
+                detail: String::from(if self.available { "ok" } else { "headless" }),
+                text: None,
+                job_id: None,
+            })
+        }
+
+        fn write_bundle(&self, _bundle: &lumencraft_ui_egui::ClipboardBundle) -> Result<lumencraft_ui_egui::OsAdapterStatus, String> {
+            if self.fail_writes {
+                return Err(String::from("bundle write denied"));
+            }
+            self.writes_bundle_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            Ok(lumencraft_ui_egui::OsAdapterStatus {
+                available: self.available,
+                availability: if self.available {
+                    lumencraft_ui_egui::OsAdapterAvailability::Submitted
+                } else {
+                    lumencraft_ui_egui::OsAdapterAvailability::Unavailable
+                },
+                backend: String::from("mock"),
+                detail: String::from(if self.available { "ok" } else { "headless" }),
+                text: None,
+                job_id: None,
+            })
+        }
+
+        fn read_text(&self) -> Result<lumencraft_ui_egui::OsAdapterStatus, String> {
+            Ok(lumencraft_ui_egui::OsAdapterStatus::unavailable("mock", "empty"))
+        }
+    }
+
+    #[test]
+    fn r2_s11_07_graph_copy_skips_ctx_copy_text_surfaces_errors_and_cut_clears_selection() -> Result<(), String> {
+        let (mut runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
+        runtime.set_clipboard_adapter(Box::new(TestGuiClipboard::new(true, false)));
+        {
+            let win = runtime.window_mut(id)?;
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-1", "kind": "column", "cols": 1, "rows": 3, "auto_graph": true }))?;
+            win.execute_and_journal("table.setCell", json!({ "sheet_id": "ds-1", "row": 0, "col": 0, "value": 11.0 }))?;
+            win.execute_and_journal("table.setCell", json!({ "sheet_id": "ds-1", "row": 1, "col": 0, "value": 22.0 }))?;
+            let graph_id = win.app().document().graph_sheets.first().ok_or("missing graph")?.id.clone();
+            win.execute_and_journal("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
+        }
+        let mut app = LumenCraftNativeApp::new(runtime, id, None);
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 24.0), egui::vec2(960.0, 616.0));
+
+        // 1. Copy on GraphSheet must NOT emit OutputCommand::CopyText (preserves PDF/PNG/HTML bundle).
+        let raw_input =
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(960.0, 640.0))), ..Default::default() };
+        let mut out_graph = ctx.run_ui(raw_input.clone(), |ui| {
+            app.dispatch_egui_events(ui.ctx(), id, rect, None, egui::Modifiers::NONE, &[egui::Event::Copy]);
+        });
+        out_graph.textures_delta.clear();
+        assert!(app.runtime.clipboard_bundle().is_some());
+        assert!(app.runtime.clipboard_text().is_none());
+        let emitted_copy_text = out_graph.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(_)));
+        assert!(!emitted_copy_text, "graph bundle copy must NOT overwrite OS multi-flavor clipboard with ctx.copy_text");
+
+        // 2. Cut on DataSheet clears ONLY the selected cell, leaving unselected rows intact.
+        {
+            let win = app.runtime.window_mut(id)?;
+            win.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-1" }))?;
+            win.app_mut().grid.select_single_sync(lumencraft_doc::CellCoord::new(0, 0, 0).into());
+        }
+        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[egui::Event::Cut]);
+        let ds = app.runtime.window(id)?.app().document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?;
+        assert_eq!(ds.cell(lumencraft_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), None);
+        assert_eq!(ds.cell(lumencraft_doc::CellCoord::new(1, 0, 0)).and_then(|c| c.active_number()), Some(22.0));
+
+        // 3. Cut during inline editor clears inline_editor.buffer cleanly.
+        {
+            let win = app.runtime.window_mut(id)?;
+            win.app_mut().inline_editor.active = true;
+            win.app_mut().inline_editor.buffer = String::from("edited-inline");
+            win.app_mut().inline_editor.caret_byte = 13;
+        }
+        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[egui::Event::Cut]);
+        assert_eq!(app.runtime.window(id)?.app().inline_editor.buffer, "");
+        assert_eq!(app.runtime.clipboard_text(), Some("edited-inline"));
+
+        // 4. Failing OS clipboard surfaced in status_banner.
+        app.runtime.set_clipboard_adapter(Box::new(TestGuiClipboard::new(true, true)));
+        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[egui::Event::Copy]);
+        assert!(app.status_banner().is_some_and(|s| s.contains("pasteboard write denied")), "banner: {:?}", app.status_banner());
+        Ok(())
+    }
+
+    #[test]
+    fn r2_s11_02_cmd_s_writes_archive_and_unpacked_dir_and_respects_all_modals() -> Result<(), String> {
+        let base_dir = std::env::temp_dir().join(format!("lc-gui-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base_dir);
+        std::fs::create_dir_all(&base_dir).map_err(|e| e.to_string())?;
+        let archive_path = base_dir.join("project.lumencraft");
+        let unpacked_path = base_dir.join("project.lumencraft.d");
+
+        let (mut runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
+        {
+            let win = runtime.window_mut(id)?;
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "sv-1", "kind": "column", "cols": 1, "rows": 2 }))?;
+            win.execute_and_journal("project.save", json!({ "path": archive_path.to_string_lossy(), "unpacked": false }))?;
+            win.app_mut().session_mut().set_file_path(Some(archive_path.clone()), true);
+            win.execute_and_journal("table.setCell", json!({ "sheet_id": "sv-1", "row": 0, "col": 0, "value": 77.25 }))?;
+        }
+
+        let mut app = LumenCraftNativeApp::new(runtime, id, None);
+        let ctx = egui::Context::default();
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 24.0), egui::vec2(960.0, 616.0));
+        let cmd_s = egui::Event::Key {
+            key: egui::Key::S,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers { command: true, ..egui::Modifiers::NONE },
+        };
+
+        // Blocked while import_wizard / variables_dialog / close_dialog_open are open.
+        app.runtime.window_mut(id)?.app_mut().grid.import_wizard.open = true;
+        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, std::slice::from_ref(&cmd_s));
+        assert!(app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must be blocked while ImportWizard is open");
+        app.runtime.window_mut(id)?.app_mut().grid.import_wizard.open = false;
+
+        app.runtime.window_mut(id)?.app_mut().grid.variables_dialog.open = true;
+        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, std::slice::from_ref(&cmd_s));
+        assert!(app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must be blocked while VariablesDialog is open");
+        app.runtime.window_mut(id)?.app_mut().grid.variables_dialog.open = false;
+
+        // With all modals closed, Cmd+S saves archive to disk cleanly.
+        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, std::slice::from_ref(&cmd_s));
+        assert!(!app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must persist dirty archive");
+        let reopened = lumencraft_format::open_project_file(&archive_path).map_err(|e| e.to_string())?;
+        assert_eq!(
+            reopened.data_sheet(&SheetId::new("sv-1")).and_then(|s| s.cell(lumencraft_doc::CellCoord::new(0, 0, 0))).and_then(|c| c.active_number()),
+            Some(77.25)
+        );
+
+        // Save as unpacked `.lumencraft.d`, dirty again, and confirm Cmd+S saves back as unpacked dir (`unpacked: true`).
+        {
+            let win = app.runtime.window_mut(id)?;
+            win.execute_and_journal("project.save", json!({ "path": unpacked_path.to_string_lossy(), "unpacked": true }))?;
+            win.app_mut().session_mut().set_file_path(Some(unpacked_path.clone()), true);
+            win.execute_and_journal("table.setCell", json!({ "sheet_id": "sv-1", "row": 1, "col": 0, "value": 88.5 }))?;
+        }
+        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[cmd_s]);
+        assert!(!app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must persist dirty unpacked dir");
+        let reopened_dir = lumencraft_format::open_project_unpacked_dir(&unpacked_path).map_err(|e| e.to_string())?;
+        assert_eq!(
+            reopened_dir
+                .data_sheet(&SheetId::new("sv-1"))
+                .and_then(|s| s.cell(lumencraft_doc::CellCoord::new(1, 0, 0)))
+                .and_then(|c| c.active_number()),
+            Some(88.5)
+        );
+
+        let _ = std::fs::remove_dir_all(&base_dir);
         Ok(())
     }
 }

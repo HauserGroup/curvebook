@@ -210,12 +210,13 @@ impl WebWorkspaceHost {
     pub fn open_project_json_bytes(&mut self, bytes: &[u8]) -> Result<WorkspaceSummary, String> {
         let raw_val: Value = serde_json::from_slice(bytes).map_err(|err| format!("invalid project JSON: {err}"))?;
         let obj = raw_val.as_object().ok_or_else(|| String::from("invalid project JSON: root must be a JSON object"))?;
-        let from_version = obj
-            .get("schema_version")
-            .and_then(Value::as_u64)
-            .map(|v| u32::try_from(v).map_err(|_| String::from("invalid `schema_version`")))
-            .transpose()?
-            .unwrap_or(0);
+        let from_version = match obj.get("schema_version") {
+            Some(raw_ver) => {
+                let ver = raw_ver.as_u64().ok_or_else(|| String::from("invalid `schema_version`"))?;
+                u32::try_from(ver).map_err(|_| String::from("invalid `schema_version`"))?
+            }
+            None => 0,
+        };
         let migrated = migrate_document_json(raw_val, from_version).map_err(|err| format!("invalid project JSON: {err}"))?;
         let doc = serde_json::from_value(migrated).map_err(|err| format!("invalid project JSON: {err}"))?;
         validate_project_document(&doc).map_err(|err| format!("invalid project document: {err}"))?;

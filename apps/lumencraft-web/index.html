@@ -222,6 +222,8 @@
 
       const PREFERENCES_KEY = "lumencraft.v1.preferences";
       const AUTOSAVE_PREFIX = "lumencraft.v1.autosave.";
+      const LOCK_KEY_PREFIX = "lumencraft.v1.lock.";
+      const LOCK_LEASE_TTL_MS = 15000;
       const TAB_CHANNEL_NAME = "lumencraft.v1.tab_locks";
       const Z_BAND_ORDER = ["workspace", "popup_dropdown", "modal_overlay", "top_overlay"];
 
@@ -255,6 +257,8 @@
       let activeLockDocId = "default";
       let lockChannel = null;
       let releaseCurrentWebLock = null;
+      let fallbackLockTimerId = null;
+      let autosaveTimerId = null;
       let holdsCurrentWebLock = false;
       let lastRenderedFrameCmd = null;
       let toastTimerId = null;
@@ -696,10 +700,18 @@
           return;
         }
         printStageEl.replaceChildren();
+        const scalePercent = typeof cmd.scale_percent === "number" && Number.isFinite(cmd.scale_percent)
+          ? Math.min(400, Math.max(10, cmd.scale_percent))
+          : 100;
+        const scaleFactor = scalePercent / 100;
         const parser = new DOMParser();
         for (const svgText of cmd.svg_pages) {
           const section = document.createElement("section");
           section.className = "lumencraft-print-page";
+          section.dataset.scalePercent = String(scalePercent);
+          if (Math.abs(scaleFactor - 1) > 0.001) {
+            section.style.zoom = scaleFactor.toFixed(4);
+          }
           const doc = parser.parseFromString(svgText, "image/svg+xml");
           const svgEl = doc.documentElement;
           if (svgEl && svgEl.nodeName.toLowerCase() === "svg") {
@@ -811,6 +823,29 @@
         }
       }
 
+      function scheduleAutosave(action) {
+        if (!holdsCurrentWebLock || !dispatchFn || !action) {
+          return;
+        }
+        if (
+          action === "storage.hydrated" ||
+          action.startsWith("viewport.") ||
+          action.startsWith("view.") ||
+          action.startsWith("clipboard.")
+        ) {
+          return;
+        }
+        if (autosaveTimerId !== null) {
+          clearTimeout(autosaveTimerId);
+        }
+        autosaveTimerId = setTimeout(() => {
+          autosaveTimerId = null;
+          if (holdsCurrentWebLock && dispatchFn) {
+            emitEvent({ kind: "save_autosave", now_ms: Date.now() });
+          }
+        }, 400);
+      }
+
       async function applyBridgeCommand(cmd) {
         if (!cmd || !cmd.kind) {
           return;
@@ -818,6 +853,7 @@
         switch (cmd.kind) {
           case "render_rgba_frame":
             renderRgbaCommand(cmd);
+            scheduleAutosave(cmd.action);
             break;
           case "persist_local_storage":
             applyLocalStorageCommand(cmd);
@@ -1283,8 +1319,76 @@
         }
       });
 
+      function releaseFallbackLockEntry(docId) {
+        if (fallbackLockTimerId !== null) {
+          clearInterval(fallbackLockTimerId);
+          fallbackLockTimerId = null;
+        }
+        if (!window.localStorage) {
+          return;
+        }
+        try {
+          const key = LOCK_KEY_PREFIX + (docId || activeLockDocId || "default");
+          const raw = window.localStorage.getItem(key);
+          if (!raw) {
+            return;
+          }
+          const parsed = JSON.parse(raw);
+          if (parsed && parsed.tabId === tabId) {
+            window.localStorage.removeItem(key);
+          }
+        } catch (_err) {
+          // Ignore storage read/remove errors.
+        }
+      }
+
+      function tryAcquireFallbackStorageLock(docId) {
+        const key = LOCK_KEY_PREFIX + docId;
+        const now = Date.now();
+        try {
+          if (window.localStorage) {
+            const raw = window.localStorage.getItem(key);
+            if (raw) {
+              const existing = JSON.parse(raw);
+              if (existing && existing.tabId && existing.tabId !== tabId && Number(existing.expiresAt) > now) {
+                holdsCurrentWebLock = false;
+                emitEvent({
+                  kind: "observe_external_lock",
+                  doc_id: docId,
+                  holder_tab_id: String(existing.tabId),
+                  now_ms: now
+                });
+                return;
+              }
+            }
+            window.localStorage.setItem(key, JSON.stringify({ tabId, expiresAt: now + LOCK_LEASE_TTL_MS }));
+            fallbackLockTimerId = setInterval(() => {
+              if (!holdsCurrentWebLock || !window.localStorage) {
+                return;
+              }
+              try {
+                window.localStorage.setItem(key, JSON.stringify({ tabId, expiresAt: Date.now() + LOCK_LEASE_TTL_MS }));
+              } catch (_err) {
+                // Ignore heartbeat write errors.
+              }
+            }, 5000);
+          }
+        } catch (_err) {
+          // Fall back to exclusive local session when localStorage is restricted.
+        }
+        holdsCurrentWebLock = true;
+        emitEvent({ kind: "acquire_lock", doc_id: docId, tab_id: tabId, now_ms: now });
+        if (lockChannel) {
+          lockChannel.postMessage({ type: "holder", docId, tabId });
+        }
+      }
+
       function coordinateDocumentLock(docId) {
-        activeLockDocId = docId || "default";
+        const nextDocId = docId || "default";
+        if (holdsCurrentWebLock) {
+          releaseFallbackLockEntry(activeLockDocId);
+        }
+        activeLockDocId = nextDocId;
         holdsCurrentWebLock = false;
         if (typeof releaseCurrentWebLock === "function") {
           releaseCurrentWebLock();
@@ -1305,7 +1409,7 @@
                   holder_tab_id: data.tabId,
                   now_ms: Date.now()
                 });
-              } else if (data.type === "release") {
+              } else if (data.type === "release" && !holdsCurrentWebLock) {
                 coordinateDocumentLock(activeLockDocId);
               }
             });
@@ -1338,8 +1442,7 @@
             });
           });
         } else {
-          holdsCurrentWebLock = true;
-          emitEvent({ kind: "acquire_lock", doc_id: activeLockDocId, tab_id: tabId, now_ms: Date.now() });
+          tryAcquireFallbackStorageLock(activeLockDocId);
         }
       }
 
@@ -1350,8 +1453,11 @@
       });
 
       window.addEventListener("beforeunload", () => {
-        if (holdsCurrentWebLock && lockChannel) {
-          lockChannel.postMessage({ type: "release", docId: activeLockDocId, tabId });
+        if (holdsCurrentWebLock) {
+          releaseFallbackLockEntry(activeLockDocId);
+          if (lockChannel) {
+            lockChannel.postMessage({ type: "release", docId: activeLockDocId, tabId });
+          }
         }
         holdsCurrentWebLock = false;
         if (typeof releaseCurrentWebLock === "function") {

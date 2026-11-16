@@ -167,6 +167,7 @@ fn window_flag_help_and_conflicting_headless_flags() -> Result<(), Box<dyn std::
     let help_text = String::from_utf8(help.stdout)?;
     assert!(help_text.contains("--window"), "missing --window in --help output:\n{help_text}");
     assert!(help_text.contains("--control <port>"), "missing --control <port> in --help output:\n{help_text}");
+    assert!(help_text.contains("LUMENCRAFT_CONTROL_PORT"), "missing LUMENCRAFT_CONTROL_PORT in --help output:\n{help_text}");
 
     let conflict = Command::new(bin).args(["--control", "9125", "--window", "--headless-once"]).output()?;
     assert!(!conflict.status.success(), "--control + --window + --headless-once must fail");

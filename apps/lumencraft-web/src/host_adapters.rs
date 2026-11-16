@@ -2617,11 +2617,15 @@ impl WebBridgeSession {
                 WebBridgeCommand::NotifyStatus { level, code, message },
             ]),
             WebCommandRoute::UiCommand { command_id: ui_cmd, params: default_params } => {
+                let before = self.capture_pref_fingerprint();
                 let effective = if has_explicit_params { params } else { default_params };
                 let Some(command_result) = dispatch_ui_command(self.host.app_mut(), &ui_cmd, &effective).map_err(WebAdapterError::Workspace)? else {
                     return Err(WebAdapterError::Validation(format!("unhandled web UI command `{ui_cmd}`")));
                 };
-                Ok(vec![self.render_frame_command(self.render_dpi, Some(ui_cmd), Some(command_result))?])
+                self.host.app_mut().sync_views();
+                let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(ui_cmd), Some(command_result))?];
+                self.maybe_append_preferences_persist(&before, &mut cmds);
+                Ok(cmds)
             }
             WebCommandRoute::EngineCommand { command_id: eng_cmd, params: default_params } => {
                 let effective = if has_explicit_params {
@@ -2641,27 +2645,88 @@ impl WebBridgeSession {
         if text.is_empty() {
             return Ok(Vec::new());
         }
+        if self.host.app().inline_editor.active {
+            return self.dispatch_single_ui_input(UiInputEvent::TextInput { text });
+        }
         let target = {
             let app = self.host.app();
             let coord = app.grid.tool.active.unwrap_or_default();
+            let decimal_separator = app.locale_preset.decimal_separator.to_string();
             app.document()
                 .active_sheet_id
                 .as_ref()
                 .filter(|id| app.document().data_sheet(id).is_some())
-                .map(|id| (id.as_str().to_owned(), coord.row, coord.col, coord.subcol))
+                .map(|id| (id.as_str().to_owned(), coord.row, coord.col, coord.subcol, decimal_separator))
         };
-        if let Some((sheet_id, start_row, start_col, start_subcol)) = target {
-            let params = json!({
+        if let Some((sheet_id, start_row, start_col, start_subcol, decimal_separator)) = target {
+            let mut params = json!({
                 "sheet_id": sheet_id,
                 "text": text,
                 "start_row": start_row,
                 "start_col": start_col,
                 "start_subcol": start_subcol,
+                "decimal_separator": decimal_separator,
                 "mode": "overwrite",
             });
+            if decimal_separator == ","
+                && !text.contains(';')
+                && (text.contains('\t') || text.lines().all(|line| line.matches(',').count() <= 1))
+                && let Some(obj) = params.as_object_mut()
+            {
+                obj.insert(String::from("delimiter"), json!("\t"));
+            }
             return self.handle_execute_command("table.paste", params);
         }
         self.dispatch_single_ui_input(UiInputEvent::TextInput { text })
+    }
+
+    fn capture_pref_fingerprint(&self) -> (String, lumencraft_ui_egui::theme::UiThemeMode, String) {
+        let app = self.host.app();
+        (app.locale.clone(), app.theme.mode, app.shortcuts.export_overrides_json().unwrap_or_default())
+    }
+
+    fn build_preferences_file(&self) -> PreferencesFile {
+        let app = self.host.app();
+        let theme = match app.theme.mode {
+            lumencraft_ui_egui::theme::UiThemeMode::Light => "light",
+            lumencraft_ui_egui::theme::UiThemeMode::Dark => "dark",
+            lumencraft_ui_egui::theme::UiThemeMode::HighContrast => "high_contrast",
+        };
+        let shortcuts: BTreeMap<String, String> =
+            app.shortcuts.export_overrides_json().ok().and_then(|raw| serde_json::from_str(&raw).ok()).unwrap_or_default();
+        PreferencesFile {
+            version: CURRENT_PREFERENCES_VERSION,
+            locale: Some(app.locale.clone()),
+            theme: Some(String::from(theme)),
+            shortcuts,
+            extra: Map::new(),
+        }
+    }
+
+    fn maybe_append_preferences_persist(
+        &mut self,
+        before: &(String, lumencraft_ui_egui::theme::UiThemeMode, String),
+        cmds: &mut Vec<WebBridgeCommand>,
+    ) {
+        if self.capture_pref_fingerprint() == *before {
+            return;
+        }
+        let prefs = self.build_preferences_file();
+        match self.storage.save_preferences(&prefs) {
+            Ok(encoded) => {
+                cmds.push(WebBridgeCommand::PersistLocalStorage {
+                    writes: vec![(String::from(PREFERENCES_STORAGE_KEY), encoded)],
+                    removals: Vec::new(),
+                });
+            }
+            Err(err) => {
+                cmds.push(WebBridgeCommand::NotifyStatus {
+                    level: WebNoticeLevel::Warning,
+                    code: String::from(err.code()),
+                    message: err.to_string(),
+                });
+            }
+        }
     }
 
     fn handle_hydrate_local_storage(&mut self, entries: Vec<(String, String)>) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
@@ -2675,6 +2740,7 @@ impl WebBridgeSession {
                 });
             }
         }
+        let mut restored_any = false;
         match self.storage.load_preferences() {
             Ok(Some(prefs)) => {
                 if let Some(locale) = prefs.locale {
@@ -2683,7 +2749,11 @@ impl WebBridgeSession {
                 if let Some(theme) = prefs.theme {
                     let _ = dispatch_ui_command(self.host.app_mut(), "ui.theme.set", &json!({ "theme": theme }));
                 }
-                cmds.push(self.render_frame_command(self.render_dpi, Some(String::from("storage.hydrated")), None)?);
+                for (cmd_id, combo) in &prefs.shortcuts {
+                    let _ = self.host.app_mut().shortcuts.set_shortcut(cmd_id, combo);
+                }
+                self.host.app_mut().sync_views();
+                restored_any = true;
             }
             Ok(None) => {}
             Err(err) => {
@@ -2693,6 +2763,28 @@ impl WebBridgeSession {
                     message: err.to_string(),
                 });
             }
+        }
+        let blank_clean_doc = self.host.app().document().total_sheet_count() == 0 && !self.host.app().session().is_dirty();
+        if blank_clean_doc {
+            match self.storage.load_autosave_snapshot(&self.doc_id, 0) {
+                Ok(Some(snapshot)) => match self.host.open_project_json_bytes(snapshot.as_bytes()) {
+                    Ok(_) => restored_any = true,
+                    Err(err) => cmds.push(WebBridgeCommand::NotifyStatus {
+                        level: WebNoticeLevel::Warning,
+                        code: String::from("autosave_corrupt"),
+                        message: format!("failed to restore browser autosave: {err}"),
+                    }),
+                },
+                Ok(None) => {}
+                Err(err) => cmds.push(WebBridgeCommand::NotifyStatus {
+                    level: WebNoticeLevel::Warning,
+                    code: String::from(err.code()),
+                    message: err.to_string(),
+                }),
+            }
+        }
+        if restored_any {
+            cmds.insert(0, self.render_frame_command(self.render_dpi, Some(String::from("storage.hydrated")), None)?);
         }
         Ok(cmds)
     }
@@ -2716,9 +2808,12 @@ impl WebBridgeSession {
     }
 
     fn dispatch_single_ui_input(&mut self, input: UiInputEvent) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        let before = self.capture_pref_fingerprint();
         let outcome = self.host.dispatch_event(input).map_err(WebAdapterError::Workspace)?;
         if outcome.handled {
-            Ok(vec![self.render_frame_command(self.render_dpi, Some(outcome.action), outcome.command_result)?])
+            let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(outcome.action), outcome.command_result)?];
+            self.maybe_append_preferences_persist(&before, &mut cmds);
+            Ok(cmds)
         } else {
             Ok(Vec::new())
         }
@@ -2729,9 +2824,12 @@ impl WebBridgeSession {
             return Err(self.read_only_err(command_id));
         }
 
+        let before = self.capture_pref_fingerprint();
         if cmd::registry().get(command_id).is_some() {
             let result = self.host.execute_command(command_id, params).map_err(WebAdapterError::Workspace)?;
-            return Ok(vec![self.render_frame_command(self.render_dpi, Some(command_id.to_owned()), Some(result))?]);
+            let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(command_id.to_owned()), Some(result))?];
+            self.maybe_append_preferences_persist(&before, &mut cmds);
+            return Ok(cmds);
         }
 
         let line = json!({ "id": "bridge", "method": command_id, "params": params }).to_string();
@@ -2741,7 +2839,9 @@ impl WebBridgeSession {
             let err_msg = reply.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("control command failed");
             return Err(WebAdapterError::Workspace(err_msg.to_owned()));
         }
-        Ok(vec![self.render_frame_command(self.render_dpi, Some(command_id.to_owned()), reply.get("result").cloned())?])
+        let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(command_id.to_owned()), reply.get("result").cloned())?];
+        self.maybe_append_preferences_persist(&before, &mut cmds);
+        Ok(cmds)
     }
 
     fn handle_control_line(&mut self, line: &str) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
@@ -2757,13 +2857,16 @@ impl WebBridgeSession {
             return Err(self.read_only_err(method));
         }
 
+        let before = self.capture_pref_fingerprint();
         let reply_raw = self.host.dispatch_control_line(line);
         let reply: Value = serde_json::from_str(&reply_raw).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
         if reply.get("ok").and_then(Value::as_bool) != Some(true) {
             let err_msg = reply.get("error").and_then(|e| e.get("message")).and_then(Value::as_str).unwrap_or("control line failed");
             return Err(WebAdapterError::Workspace(err_msg.to_owned()));
         }
-        Ok(vec![self.render_frame_command(self.render_dpi, Some(method.to_owned()), Some(reply))?])
+        let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(method.to_owned()), Some(reply))?];
+        self.maybe_append_preferences_persist(&before, &mut cmds);
+        Ok(cmds)
     }
 
     fn handle_save_autosave(&mut self, now_ms: u64) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {

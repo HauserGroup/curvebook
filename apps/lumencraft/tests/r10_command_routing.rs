@@ -553,14 +553,15 @@ fn mouse_wheel_scrolls_data_grid_and_ignores_non_canvas_without_zooming() -> Res
     assert_eq!(nav_wheel.action, "wheel.non_canvas_ignored");
     assert!((rt.window(wid)?.app().canvas_dialogs.pan_zoom.zoom - zoom_before).abs() < 1e-9);
 
-    // 3. Wheel over GraphSheet ScenePaper still zooms canvas cleanly.
+    // 3. Unmodified vertical wheel over GraphSheet ScenePaper pans cleanly without zooming (`B4`).
     let graph_id = rt.window(wid)?.app().document().graph_sheets.first().ok_or("missing graph")?.id.clone();
     let _ = rt.window_mut(wid)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
     let gmap = rt.window(wid)?.app().layout_map(metrics);
     let paper = gmap.scene_paper.as_ref().ok_or("missing scene_paper")?.paper;
     let paper_pt =
         metrics.physical_to_logical_px([f64::from(paper.x) + f64::from(paper.width) * 0.5, f64::from(paper.y) + f64::from(paper.height) * 0.5]);
-    let graph_wheel = rt.dispatch(DesktopHostEvent::MouseWheel {
+    let pan_before = rt.window(wid)?.app().canvas_dialogs.pan_zoom.pan_pt;
+    let pan_wheel = rt.dispatch(DesktopHostEvent::MouseWheel {
         window_id: wid,
         x_pt: paper_pt[0],
         y_pt: paper_pt[1],
@@ -568,7 +569,20 @@ fn mouse_wheel_scrolls_data_grid_and_ignores_non_canvas_without_zooming() -> Res
         delta_y: 48.0,
         modifiers: KeyModifiers::default(),
     })?;
-    assert!(graph_wheel.handled);
+    assert!(pan_wheel.handled);
+    assert!((rt.window(wid)?.app().canvas_dialogs.pan_zoom.zoom - zoom_before).abs() < 1e-9);
+    assert_ne!(rt.window(wid)?.app().canvas_dialogs.pan_zoom.pan_pt, pan_before);
+
+    // 4. Ctrl+Wheel over GraphSheet ScenePaper zooms canvas cleanly (`B4`).
+    let zoom_wheel = rt.dispatch(DesktopHostEvent::MouseWheel {
+        window_id: wid,
+        x_pt: paper_pt[0],
+        y_pt: paper_pt[1],
+        delta_x: 0.0,
+        delta_y: 48.0,
+        modifiers: KeyModifiers { ctrl: true, ..KeyModifiers::default() },
+    })?;
+    assert!(zoom_wheel.handled);
     assert!((rt.window(wid)?.app().canvas_dialogs.pan_zoom.zoom - zoom_before).abs() > 1e-3);
 
     Ok(())
