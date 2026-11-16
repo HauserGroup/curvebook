@@ -473,6 +473,8 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      id-token: write
+      attestations: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -486,10 +488,9 @@ jobs:
         with:
           name: third-party-licenses
           path: dist/release
-      - name: Create or update draft GitHub Release
+      - name: Verify version parity and generate SHA256SUMS.txt
+        id: release_meta
         env:
-          GH_TOKEN: ${{ github.token }}
-          ALPHA_RELEASE: ${{ inputs.alpha }}
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -505,16 +506,6 @@ jobs:
             echo "error: resolved release version '$ver' disagrees with packaging/env.sh version '$VERSION'" >&2
             exit 1
           fi
-          tag="v$ver"
-          title="CurveBook $tag"
-          prerelease=false
-          release_flags=(--draft)
-          if [ "${ALPHA_RELEASE:-}" = "true" ]; then
-            title="CurveBook Alpha $tag"
-            prerelease=true
-            release_flags+=(--latest=false)
-          fi
-          release_flags+=("--prerelease=$prerelease" --title "$title")
           (
             cd dist/release
             files=()
@@ -528,6 +519,28 @@ jobs:
             mv ../SHA256SUMS.txt.tmp SHA256SUMS.txt
             sha256sum --check SHA256SUMS.txt
           )
+          echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+      - name: Attest release artifacts and SHA256SUMS.txt
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: 'dist/release/*'
+      - name: Create or update draft GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALPHA_RELEASE: ${{ inputs.alpha }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          title="CurveBook $tag"
+          prerelease=false
+          release_flags=(--draft)
+          if [ "${ALPHA_RELEASE:-}" = "true" ]; then
+            title="CurveBook Alpha $tag"
+            prerelease=true
+            release_flags+=(--latest=false)
+          fi
+          release_flags+=("--prerelease=$prerelease" --title "$title")
           if gh release view "$tag" >/dev/null 2>&1; then
             is_draft="$(gh release view "$tag" --json isDraft --jq .isDraft)"
             if [ "$is_draft" != "true" ]; then

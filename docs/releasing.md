@@ -87,7 +87,24 @@ Every tagged release distributes binaries and archives alongside licence disclos
 | **Windows** | WiX v5 `.msi` installer and `-portable.zip` standalone archive | `packaging/windows/package.ps1`, `packaging/windows/INSTALLATION.md` | Dual-scope MSI (`PerUser` default, optional `PerMachine`); static MSVC CRT; checked via `check-icons.ps1` & `check-install-policy.ps1`. Fresh CurveBook upgrade/component identity leaves any existing LumenCraft install separate. |
 | **FreeBSD** | `.tar.gz` binary archive | `packaging/freebsd/package.sh` | Desktop & headless CLI archive for FreeBSD builds. |
 | **Web (WASM)** | Trunk `web-release` static `.zip` bundle | `packaging/web/package.sh`, `packaging/web/{_headers,.htaccess}` | Built targeting `wasm32-unknown-unknown` with relative (`./`) asset URLs and strict Zero-Telemetry CSP (`connect-src 'self'` for same-origin `.wasm` streaming only, zero external origins), COOP, and COEP headers; verified via `cargo xtask wasm` + `telemetry`. |
-| **Compliance & Checksums** | **`THIRD-PARTY-LICENSES.html`**, `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`, `ATTRIBUTION.md`, `SHA256SUMS.txt` | `cargo xtask licenses` (`about.toml`) & release workflow | Bundled inside packages / release assets so every binary download includes complete third-party dependency & asset notices. |
+| **Compliance & Checksums** | **`THIRD-PARTY-LICENSES.html`**, `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`, `ATTRIBUTION.md`, `SHA256SUMS.txt` | `cargo xtask licenses` (`about.toml`), `sha256sum`, & `actions/attest-build-provenance` | Bundled inside packages / release assets so every binary download includes complete third-party dependency & asset notices; `SHA256SUMS.txt` and all uploaded artefacts receive keyless GitHub Sigstore build provenance attestations in CI. |
+
+### Verifying Downloaded Release Artefacts
+
+Every file uploaded by the `publish` job in [`.github/workflows/release.yml`](../.github/workflows/release.yml) — Linux (`.AppImage`, `.AppImage.zsync`, `.deb`, `.rpm`, `.tar.gz`, `.flatpak`), Windows (`.msi`, `-portable.zip`), macOS (`.dmg`, CLI `.zip`), FreeBSD (`.tar.gz`), web (`.zip`), `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` itself — receives a keyless GitHub Sigstore build provenance attestation (`actions/attest-build-provenance`).
+
+1. **Verify Sigstore build provenance** with the GitHub CLI (`gh`):
+   ```sh
+   gh attestation verify <file> --repo HauserGroup/curvebook
+   ```
+   This confirms that `<file>` (including `SHA256SUMS.txt` or any individual installer/archive) matches a build produced by `.github/workflows/release.yml` in `HauserGroup/curvebook`.
+2. **Verify SHA-256 checksums** after downloading `SHA256SUMS.txt` alongside your release files:
+   ```sh
+   sha256sum -c SHA256SUMS.txt
+   ```
+   *(If you downloaded only one platform's files into the current directory, pass `sha256sum -c --ignore-missing SHA256SUMS.txt`; on macOS without GNU coreutils, use `shasum -a 256 -c SHA256SUMS.txt`.)*
+
+**CI-only provenance & zero binary egress:** Keyless OIDC/Sigstore attestation calls (`id-token: write` and `attestations: write`, scoped strictly to the `publish` job in `.github/workflows/release.yml`) run exclusively in GitHub Actions during release publishing. Shipped CurveBook binaries (`curvebook`, `curvebook-cli`) and the WASM web bundle gain **zero** network access, update checks, or telemetry (`cargo xtask telemetry`).
 
 ---
 
