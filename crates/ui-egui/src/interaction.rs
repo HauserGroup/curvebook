@@ -18,8 +18,14 @@ use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::compositor::{WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout_map};
-use crate::dialogs_canvas::ActiveDialog;
+use crate::dialogs_canvas::{ActiveDialog, AnalysisCategory};
 use crate::grid_view::{GridViewState, format_cell_display, parse_localized_number_input, resolve_flat_coord};
+use crate::layout::a11y::{WidgetRole, cycle_focus_in_scope};
+use crate::layout::hit_test::{find_scroll_container_at, hit_test_logical};
+use crate::layout::scroll::ScrollStateStore;
+use crate::layout::widgets::{DropdownOption, OpenDropdownState, TextFieldBufferMap, TextFieldEditState};
+use crate::layout::{WidgetAction, ZLayer};
+use crate::modal_predicates::evaluate_dialog_widget;
 use crate::workspace_nav::{ActiveWorkspacePane, build_set_info_constant_command, build_set_info_notes_command, live_sheet_index_in_folder};
 use lumencraft_doc::GraphSheet;
 
@@ -904,7 +910,7 @@ pub enum CanvasDragTarget {
     },
 }
 
-/// Ephemeral pointer drag tracking across frames (`G6`).
+/// Ephemeral pointer drag, hover, scroll, and overlay tracking across frames (`G6`, `R10.16`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct InteractionControllerState {
     pub pointer_down: bool,
@@ -915,6 +921,20 @@ pub struct InteractionControllerState {
     pub canvas_drag: Option<CanvasDragTarget>,
     #[serde(default)]
     pub context_menu_target: Option<String>,
+    #[serde(default)]
+    pub hovered_widget_id: Option<String>,
+    #[serde(default)]
+    pub pressed_widget_id: Option<String>,
+    #[serde(default)]
+    pub open_menu: Option<String>,
+    #[serde(default)]
+    pub open_dropdown: Option<OpenDropdownState>,
+    #[serde(default)]
+    pub scroll_offsets: ScrollStateStore,
+    #[serde(default)]
+    pub text_field_buffers: TextFieldBufferMap,
+    #[serde(default)]
+    pub last_clipboard_text: Option<String>,
 }
 
 /// Structured outcome emitted by [`dispatch_ui_event`].
@@ -926,28 +946,99 @@ pub struct UiEventOutcome {
     pub command_result: Option<Value>,
 }
 
-/// Dispatch an interactive [`UiInputEvent`] against `app` under `metrics` (`G6`, `M7`).
-///
-/// # Errors
-/// Returns a descriptive error string if a triggered engine or UI command fails.
-pub fn dispatch_ui_event(app: &mut UiApp, event: UiInputEvent, metrics: ViewportMetrics) -> Result<UiEventOutcome, String> {
+/// Dispatch [`UiInputEvent`] against `app` without rebuilding the retained [`crate::layout::LayoutTree`].
+pub(crate) fn dispatch_ui_event_without_layout_rebuild(
+    app: &mut UiApp,
+    event: UiInputEvent,
+    metrics: ViewportMetrics,
+) -> Result<UiEventOutcome, String> {
     let outcome = match event {
         UiInputEvent::PointerDown { x, y, button, modifiers } => handle_pointer_down(app, metrics, [x, y], button, modifiers)?,
         UiInputEvent::PointerMove { x, y, .. } => handle_pointer_move(app, metrics, [x, y]),
         UiInputEvent::PointerUp { x, y, button, .. } => handle_pointer_up(app, metrics, [x, y], button)?,
         UiInputEvent::DoubleClick { x, y, button, .. } => handle_double_click(app, metrics, [x, y], button),
-        UiInputEvent::WheelZoom { x, y, delta_y, .. } => handle_wheel_zoom(app, metrics, [x, y], delta_y),
+        UiInputEvent::WheelZoom { x, y, delta_y, modifiers } => dispatch_mouse_wheel(app, metrics, x, y, 0.0, delta_y, modifiers)?,
         UiInputEvent::PinchZoom { x, y, scale_delta } => handle_pinch_zoom(app, metrics, [x, y], scale_delta),
         UiInputEvent::InertialPan { delta_x, delta_y, dt_sec, step_coast } => {
             handle_inertial_pan(app, metrics, [delta_x, delta_y], dt_sec, step_coast)
         }
-        UiInputEvent::KeyDown { key, modifiers } => handle_key_down(app, &key, modifiers)?,
+        UiInputEvent::KeyDown { key, modifiers } => handle_key_down(app, metrics, &key, modifiers)?,
         UiInputEvent::TextInput { text } => handle_text_input(app, &text),
         UiInputEvent::CommitInlineEdit => commit_inline_edit(app)?,
         UiInputEvent::CancelInlineEdit => cancel_inline_edit(app),
     };
     app.sync_views();
     Ok(outcome)
+}
+
+/// Dispatch an interactive [`UiInputEvent`] against `app` under `metrics` (`G6`, `M7`).
+///
+/// # Errors
+/// Returns a descriptive error string if a triggered engine or UI command fails.
+pub fn dispatch_ui_event(app: &mut UiApp, event: UiInputEvent, metrics: ViewportMetrics) -> Result<UiEventOutcome, String> {
+    let outcome = dispatch_ui_event_without_layout_rebuild(app, event, metrics)?;
+    let _ = app.build_and_cache_layout_tree(metrics);
+    Ok(outcome)
+}
+
+/// Dismiss any stale sheet-bound modal (such as `ChangeGraphType` for a different graph) and synchronize dialog/inspector state for `sheet_id`.
+pub(crate) fn sync_dialogs_on_sheet_switch(app: &mut UiApp, sheet_id: &SheetId) {
+    if matches!(&app.canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { graph_sheet_id } if graph_sheet_id != sheet_id) {
+        app.canvas_dialogs.close_dialog();
+    }
+    let doc = app.document().clone();
+    app.canvas_dialogs.on_sheet_selected(&doc, sheet_id);
+}
+
+/// Unified mouse-wheel handler scrolling hovered [`crate::layout::scroll::ScrollMeta`] containers
+/// unless zoom-modified (`ctrl || meta`) or over [`ScenePaperMapping`] (`R10.16`, `R10.2`).
+///
+/// # Errors
+/// Returns an error string only if a triggered state refresh fails.
+pub fn dispatch_mouse_wheel(
+    app: &mut UiApp,
+    metrics: ViewportMetrics,
+    x: f64,
+    y: f64,
+    delta_x: f64,
+    delta_y: f64,
+    modifiers: KeyModifiers,
+) -> Result<UiEventOutcome, String> {
+    if !delta_x.is_finite() || !delta_y.is_finite() {
+        return Ok(UiEventOutcome { handled: false, action: String::from("mouse_wheel_invalid"), ..Default::default() });
+    }
+    let tree = app.build_and_cache_layout_tree(metrics);
+    let [phys_x, phys_y] = metrics.logical_to_physical_px([x, y]);
+    #[allow(clippy::cast_possible_truncation)]
+    let (px, py) = (phys_x.round() as i32, phys_y.round() as i32);
+
+    if !(modifiers.ctrl || modifiers.meta)
+        && let Some(scroll) = find_scroll_container_at(&tree, px, py).cloned()
+        && (scroll.has_vertical_overflow() || scroll.has_horizontal_overflow())
+    {
+        let next = app.interaction.scroll_offsets.apply_wheel(&scroll, delta_x, delta_y);
+        app.sync_views();
+        let _ = app.build_and_cache_layout_tree(metrics);
+        return Ok(UiEventOutcome {
+            handled: true,
+            action: String::from("scroll_container.wheel"),
+            command_id: None,
+            command_result: Some(json!({
+                "container_id": scroll.container_id.as_str(),
+                "scroll_offset_px": next,
+                "max_scroll_px": scroll.max_scroll_px,
+            })),
+        });
+    }
+
+    let over_scene_paper = px >= 0 && py >= 0 && tree.scene_papers.iter().any(|p| p.paper.contains(px as u32, py as u32));
+    if app.canvas_dialogs.active_dialog == ActiveDialog::None && (modifiers.ctrl || modifiers.meta || over_scene_paper) {
+        let out = handle_wheel_zoom(app, metrics, [x, y], delta_y);
+        let _ = app.build_and_cache_layout_tree(metrics);
+        return Ok(out);
+    }
+
+    Ok(UiEventOutcome { handled: false, action: String::from("mouse_wheel_ignored"), ..Default::default() })
 }
 
 fn handle_pointer_down(
@@ -967,6 +1058,52 @@ fn handle_pointer_down(
     app.interaction.context_menu_target = None;
     app.interaction.pointer_down = true;
     app.interaction.last_logical_pos = Some(logical_pos);
+    app.interaction.pressed_widget_id = None;
+
+    let tree = app.build_and_cache_layout_tree(metrics);
+    if let Some(node) = hit_test_logical(&tree, logical_pos[0], logical_pos[1]).cloned() {
+        if node.id.as_str() == "modal.backdrop" {
+            app.interaction.open_dropdown = None;
+            app.interaction.open_menu = None;
+            return Ok(UiEventOutcome { handled: true, action: String::from("modal.backdrop_blocked"), ..Default::default() });
+        }
+        if app.interaction.open_menu.is_some() && node.z_layer < ZLayer::DropdownMenu && !node.id.as_str().starts_with("menu.") {
+            app.interaction.open_menu = None;
+        }
+        if app.interaction.open_dropdown.is_some()
+            && !matches!(node.z_layer, ZLayer::DropdownMenu | ZLayer::ModalDropdown)
+            && !matches!(node.action, WidgetAction::OpenDropdown(_))
+        {
+            app.interaction.open_dropdown = None;
+        }
+        if should_handle_chrome_widget_click(&node) {
+            if node.id.as_str() == "formula_bar.input" {
+                app.grid.formula_bar.active = true;
+            }
+            if node.state.enablement.enabled && (node.a11y.tab_order.is_some() || node.a11y.role == WidgetRole::TextBox) {
+                app.focus_widget_id = Some(node.id.0.clone());
+                if node.a11y.role == WidgetRole::TextBox {
+                    ensure_text_field_buffer(app, node.id.as_str(), node.a11y.value_text.as_deref().unwrap_or(""));
+                }
+            }
+            if node.state.enablement.enabled && node.action != WidgetAction::NoOp {
+                app.interaction.pressed_widget_id = Some(node.id.0.clone());
+            }
+            return Ok(UiEventOutcome {
+                handled: true,
+                action: if node.state.enablement.enabled {
+                    format!("widget.pressed:{}", node.id.as_str())
+                } else {
+                    format!("widget.disabled:{}", node.id.as_str())
+                },
+                ..Default::default()
+            });
+        }
+        if node.z_layer >= ZLayer::ModalBackdrop {
+            return Ok(UiEventOutcome { handled: true, action: format!("modal.surface:{}", node.id.as_str()), ..Default::default() });
+        }
+    }
+
     let target = layout.hit_test_logical(logical_pos[0], logical_pos[1]);
 
     match target {
@@ -977,9 +1114,10 @@ fn handle_pointer_down(
         }
         WorkspaceHitTarget::NavigatorEntry { sheet_id, folder, index_in_folder } => {
             app.nav.active_pane = ActiveWorkspacePane::Navigator;
+            app.inline_editor.cancel();
             let _ = app.execute_command("sheet.select", json!({ "sheet_id": sheet_id.as_str() }));
             app.nav.sync_from_document(app.session.document());
-            app.canvas_dialogs.on_sheet_selected(app.session.document(), &sheet_id);
+            sync_dialogs_on_sheet_switch(app, &sheet_id);
             let live_index = live_sheet_index_in_folder(app.session.document(), folder, sheet_id.as_str()).unwrap_or(index_in_folder);
             app.nav.begin_sheet_drag(folder, sheet_id.as_str(), live_index);
             app.interaction.dragging_navigator_sheet = Some(sheet_id.clone());
@@ -1249,14 +1387,27 @@ fn handle_pointer_move(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
         return UiEventOutcome { handled: true, action: String::from("canvas.object_drag_snap"), ..Default::default() };
     }
 
-    if let WorkspaceHitTarget::GridCell { sheet_id, coord, .. } = layout.hit_test_physical(phys_x, phys_y)
+    let tree = app.build_and_cache_layout_tree(metrics);
+    if let Some(node) = hit_test_logical(&tree, logical_pos[0], logical_pos[1]) {
+        app.interaction.hovered_widget_id = Some(node.id.0.clone());
+        app.hover_command_id = match &node.action {
+            WidgetAction::InvokeCommand { command_id, .. } => Some(command_id.clone()),
+            _ => None,
+        };
+    } else {
+        app.interaction.hovered_widget_id = None;
+        app.hover_command_id = None;
+    }
+
+    if app.canvas_dialogs.active_dialog == ActiveDialog::None
+        && let WorkspaceHitTarget::GridCell { sheet_id, coord, .. } = layout.hit_test_physical(phys_x, phys_y)
         && let Some(ds) = app.session.document().data_sheet(&sheet_id)
     {
         app.grid.update_hover_exclusion_tooltip(ds, Some(coord));
         return UiEventOutcome { handled: true, action: String::from("grid.hover"), ..Default::default() };
     }
 
-    UiEventOutcome { handled: false, action: String::from("pointer_move"), ..Default::default() }
+    UiEventOutcome { handled: app.interaction.hovered_widget_id.is_some(), action: String::from("pointer_move"), ..Default::default() }
 }
 
 fn execute_engine_value(app: &mut UiApp, command_id: &str, params: Value) -> Result<Value, String> {
@@ -1359,6 +1510,27 @@ fn handle_pointer_up(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [f6
 
     if let Some(drag_target) = app.interaction.canvas_drag.take() {
         return commit_canvas_object_drag(app, &layout, logical_pos, drag_target);
+    }
+
+    if let Some(pressed_id) = app.interaction.pressed_widget_id.take() {
+        let tree = app.build_and_cache_layout_tree(metrics);
+        if let Some(node) = hit_test_logical(&tree, logical_pos[0], logical_pos[1]).cloned()
+            && node.id.as_str() == pressed_id
+            && node.state.enablement.enabled
+        {
+            return execute_widget_action(app, &node.action, metrics);
+        }
+        return Ok(UiEventOutcome { handled: true, action: String::from("widget.release_outside"), ..Default::default() });
+    }
+
+    if app.canvas_dialogs.active_dialog != ActiveDialog::None {
+        let tree = app.build_and_cache_layout_tree(metrics);
+        let action = if hit_test_logical(&tree, logical_pos[0], logical_pos[1]).is_some_and(|n| n.id.as_str() == "modal.backdrop") {
+            "modal.backdrop_blocked"
+        } else {
+            "modal.pointer_up"
+        };
+        return Ok(UiEventOutcome { handled: true, action: String::from(action), ..Default::default() });
     }
 
     if let WorkspaceHitTarget::ScenePaper { sheet_id, scene_pt } = layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
@@ -1611,52 +1783,535 @@ impl UiApp {
     }
 }
 
-fn handle_text_input(app: &mut UiApp, text: &str) -> UiEventOutcome {
-    if !app.inline_editor.active || text.is_empty() {
-        return UiEventOutcome { handled: false, action: String::from("text_input_ignored"), ..Default::default() };
+fn should_handle_chrome_widget_click(node: &crate::layout::WidgetNode) -> bool {
+    if node.z_layer >= ZLayer::DropdownMenu {
+        return node.action != WidgetAction::NoOp;
     }
-    app.inline_editor.insert_text(text);
-    if matches!(app.inline_editor.target, Some(InlineEditorTarget::GridCell { .. } | InlineEditorTarget::GridXCell { .. })) {
-        app.grid.tool.editing_buffer = Some(app.inline_editor.buffer.clone());
+    let id = node.id.as_str();
+    if id == "result.diagnostic_banner" || id.starts_with("canvas.surface.") || id.starts_with("info.") {
+        return false;
     }
-    UiEventOutcome { handled: true, action: String::from("inline_edit.text_input"), ..Default::default() }
+    !matches!(node.action, WidgetAction::NoOp | WidgetAction::SelectGridCell { .. } | WidgetAction::SwitchSheet { .. } | WidgetAction::SwapSplitPanes)
 }
 
-fn handle_key_down(app: &mut UiApp, key: &str, modifiers: KeyModifiers) -> Result<UiEventOutcome, String> {
-    let trimmed = key.trim();
-    if app.inline_editor.active {
-        match trimmed {
-            "Enter" | "Return" => return commit_inline_edit(app),
-            "Escape" | "Esc" => return Ok(cancel_inline_edit(app)),
-            "Backspace" => {
-                app.inline_editor.backspace();
-                return Ok(UiEventOutcome { handled: true, action: String::from("inline_edit.backspace"), ..Default::default() });
+fn ensure_text_field_buffer(app: &mut UiApp, wid: &str, initial: &str) {
+    let multiline = wid == "info.notes";
+    app.interaction.text_field_buffers.entry(wid.to_owned()).or_insert_with(|| TextFieldEditState::new(initial, multiline));
+}
+
+fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
+    let text = app.interaction.text_field_buffers.get(fid).map(|b| b.text.clone()).unwrap_or_default();
+    if fid == "palette.query" {
+        app.canvas_dialogs.command_palette.query = text;
+    } else if fid == "formula_bar.input" {
+        let doc = app.document().clone();
+        app.grid.formula_bar.set_input(&text, None, &doc);
+    }
+}
+
+/// Execute any retained [`WidgetAction`] cleanly through the unified desktop/web/driver handler.
+///
+/// # Errors
+/// Returns an error string if the triggered command or dialog action fails.
+pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: ViewportMetrics) -> Result<UiEventOutcome, String> {
+    match action {
+        WidgetAction::NoOp => Ok(UiEventOutcome { handled: false, action: String::from("widget.noop"), ..Default::default() }),
+        WidgetAction::MenuOpen(key) => {
+            app.interaction.open_dropdown = None;
+            app.interaction.open_menu = if app.interaction.open_menu.as_deref() == Some(key.as_str()) { None } else { Some(key.clone()) };
+            Ok(UiEventOutcome { handled: true, action: format!("menu.toggle:{key}"), ..Default::default() })
+        }
+        WidgetAction::InvokeCommand { command_id, params } => {
+            app.interaction.open_menu = None;
+            app.interaction.open_dropdown = None;
+            if let Some(ui_val) = crate::control_io::dispatch_ui_command(app, command_id, params).map_err(|e| e.to_string())? {
+                return Ok(UiEventOutcome {
+                    handled: true,
+                    action: format!("command.ui:{command_id}"),
+                    command_id: Some(command_id.clone()),
+                    command_result: Some(ui_val),
+                });
             }
-            _ => {
-                if !modifiers.ctrl && !modifiers.meta && !modifiers.alt && trimmed.chars().count() == 1 {
-                    return Ok(handle_text_input(app, trimmed));
+            let res = execute_engine_value(app, command_id, params.clone())?;
+            Ok(UiEventOutcome {
+                handled: true,
+                action: format!("command.engine:{command_id}"),
+                command_id: Some(command_id.clone()),
+                command_result: Some(res),
+            })
+        }
+        WidgetAction::SwitchSheet { sheet_id, .. } => {
+            app.inline_editor.cancel();
+            let res = execute_engine_value(app, "sheet.select", json!({ "sheet_id": sheet_id.as_str() }))?;
+            app.nav.sync_from_document(app.session.document());
+            sync_dialogs_on_sheet_switch(app, sheet_id);
+            Ok(UiEventOutcome {
+                handled: true,
+                action: String::from("sheet.select"),
+                command_id: Some(String::from("sheet.select")),
+                command_result: Some(res),
+            })
+        }
+        WidgetAction::ToggleFolder(section) => {
+            if let Some(pos) = app.nav.collapsed_sections.iter().position(|s| s == section) {
+                app.nav.collapsed_sections.remove(pos);
+            } else {
+                app.nav.collapsed_sections.push(*section);
+            }
+            for folder in &mut app.nav.folders {
+                if folder.section == *section {
+                    folder.collapsed = app.nav.collapsed_sections.contains(section);
                 }
             }
+            Ok(UiEventOutcome { handled: true, action: format!("nav.toggle_folder:{section:?}"), ..Default::default() })
+        }
+        WidgetAction::ToggleFamilyPane => {
+            app.family_open = !app.family_open;
+            Ok(UiEventOutcome { handled: true, action: String::from("nav.toggle_family"), ..Default::default() })
+        }
+        WidgetAction::SetSplitRatio(ratio) => {
+            app.split.enabled = true;
+            app.split.ratio = ratio.clamp(0.2, 0.8);
+            Ok(UiEventOutcome { handled: true, action: String::from("split.ratio"), ..Default::default() })
+        }
+        WidgetAction::SwapSplitPanes => {
+            std::mem::swap(&mut app.split.primary_sheet_id, &mut app.split.secondary_sheet_id);
+            Ok(UiEventOutcome { handled: true, action: String::from("split.swap"), ..Default::default() })
+        }
+        WidgetAction::SelectGridCell { row, col, subcol } => {
+            let coord = GridCellCoord::new(*row as usize, *col as usize, *subcol as usize);
+            app.grid.select_single_sync(coord);
+            app.grid.refresh_selection_stats(app.session.document());
+            Ok(UiEventOutcome { handled: true, action: String::from("grid.select_cell"), ..Default::default() })
+        }
+        WidgetAction::StartInlineGridEdit { row, col, subcol } => {
+            let coord = GridCellCoord::new(*row as usize, *col as usize, *subcol as usize);
+            app.grid.select_single_sync(coord);
+            Ok(UiEventOutcome { handled: true, action: String::from("grid.edit_begin"), ..Default::default() })
+        }
+        WidgetAction::FocusWidget(wid) => {
+            app.focus_widget_id = Some(wid.clone());
+            if wid == "formula_bar.input" {
+                app.grid.formula_bar.active = true;
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("widget.focus:{wid}"), ..Default::default() })
+        }
+        WidgetAction::ScrollBy { container_id, delta_x, delta_y } => {
+            let tree = app.build_and_cache_layout_tree(metrics);
+            if let Some(meta) = tree.nodes.iter().filter_map(|n| n.scroll.as_ref()).find(|s| s.container_id.as_str() == container_id) {
+                app.interaction.scroll_offsets.apply_wheel(meta, *delta_x, *delta_y);
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("scroll.by:{container_id}"), ..Default::default() })
+        }
+        WidgetAction::ScrollbarTrackJump { container_id, vertical, ratio } => {
+            let tree = app.build_and_cache_layout_tree(metrics);
+            if let Some(meta) = tree.nodes.iter().filter_map(|n| n.scroll.as_ref()).find(|s| s.container_id.as_str() == container_id) {
+                app.interaction.scroll_offsets.apply_track_ratio(meta, *vertical, *ratio);
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("scroll.jump:{container_id}"), ..Default::default() })
+        }
+        WidgetAction::SelectResultTab(tab_id) => {
+            if let Some(rs_id) = app.document().active_sheet_id.clone()
+                && let Some(rs) = app.document().result_sheet(&rs_id)
+                && let Some(idx) = rs.tabs.iter().position(|t| &t.id == tab_id)
+            {
+                app.canvas_dialogs.result_view.active_tab_index = idx;
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("result.select_tab:{tab_id}"), ..Default::default() })
+        }
+        WidgetAction::ToggleInspectorTab(mode) => {
+            app.canvas_dialogs.active_inspector = *mode;
+            Ok(UiEventOutcome { handled: true, action: format!("inspector.mode:{mode:?}"), ..Default::default() })
+        }
+        WidgetAction::SetCanvasZoomFit => {
+            app.canvas_dialogs.canvas.zoom = 1.0;
+            app.canvas_dialogs.canvas.pan_pt = PointPt::new(0.0, 0.0);
+            app.canvas_dialogs.pan_zoom.zoom = 1.0;
+            app.canvas_dialogs.pan_zoom.pan_pt = [0.0, 0.0];
+            Ok(UiEventOutcome { handled: true, action: String::from("canvas.zoom_fit"), ..Default::default() })
+        }
+        WidgetAction::CycleCanvasZoomPreset => {
+            let next = crate::layout::canvas_viewport::next_zoom_preset(app.canvas_dialogs.canvas.zoom);
+            app.canvas_dialogs.canvas.zoom = next;
+            app.canvas_dialogs.pan_zoom.zoom = next;
+            Ok(UiEventOutcome { handled: true, action: format!("canvas.zoom_preset:{next}"), ..Default::default() })
+        }
+        WidgetAction::SelectCanvasTool(_) | WidgetAction::SelectLayoutPanel(_) => {
+            Ok(UiEventOutcome { handled: true, action: String::from("canvas.tool_action"), ..Default::default() })
+        }
+        WidgetAction::ClosePopupOrModal => {
+            if app.interaction.open_dropdown.take().is_none() && app.interaction.open_menu.take().is_none() {
+                app.canvas_dialogs.close_dialog();
+            }
+            Ok(UiEventOutcome { handled: true, action: String::from("popup_or_modal.closed"), ..Default::default() })
+        }
+        other => execute_dialog_widget_action(app, other, metrics),
+    }
+}
+
+fn execute_dialog_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: ViewportMetrics) -> Result<UiEventOutcome, String> {
+    match action {
+        WidgetAction::SelectAnalyzeCategory(cat) => {
+            app.canvas_dialogs.analyze.category_filter = match cat.as_str() {
+                "transform" => Some(AnalysisCategory::Transform),
+                "column" => Some(AnalysisCategory::Column),
+                "grouped" => Some(AnalysisCategory::Grouped),
+                "xy" => Some(AnalysisCategory::XyAndRegression),
+                "survival" => Some(AnalysisCategory::Survival),
+                "contingency" => Some(AnalysisCategory::Contingency),
+                "multivariate" => Some(AnalysisCategory::Multivariate),
+                _ => None,
+            };
+            let first = app.canvas_dialogs.analyze.compatible_entries().first().map(|e| e.id.to_owned());
+            if let Some(id) = first {
+                app.canvas_dialogs.analyze.selected_entry_id = Some(id);
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("analyze.category:{cat}"), ..Default::default() })
+        }
+        WidgetAction::SelectAnalyzeEntry(entry_id) => {
+            app.canvas_dialogs.analyze.selected_entry_id = Some(entry_id.clone());
+            Ok(UiEventOutcome { handled: true, action: format!("analyze.entry:{entry_id}"), ..Default::default() })
+        }
+        WidgetAction::SelectEditParamsTab(tab_id) => {
+            let mut map = serde_json::Map::new();
+            map.insert(String::from("active_tab"), json!(tab_id));
+            app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+            Ok(UiEventOutcome { handled: true, action: format!("edit.tab:{tab_id}"), ..Default::default() })
+        }
+        WidgetAction::ToggleDialogCheckbox(field) => {
+            let next_val = match field.as_str() {
+                "assume_gaussian" => !app.canvas_dialogs.edit_params.assume_gaussian,
+                "paired_or_matched" => !app.canvas_dialogs.edit_params.paired_or_matched,
+                "welch_correction" => !app.canvas_dialogs.edit_params.welch_correction,
+                "compare_against_control" => !app.canvas_dialogs.edit_params.compare_against_control,
+                _ => true,
+            };
+            let mut map = serde_json::Map::new();
+            map.insert(field.clone(), Value::Bool(next_val));
+            app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+            Ok(UiEventOutcome { handled: true, action: format!("dialog.toggle:{field}"), ..Default::default() })
+        }
+        WidgetAction::SelectDialogRadio { group, value } => {
+            let mut map = serde_json::Map::new();
+            map.insert(group.clone(), Value::String(value.clone()));
+            app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+            Ok(UiEventOutcome { handled: true, action: format!("dialog.radio:{group}={value}"), ..Default::default() })
+        }
+        WidgetAction::OpenDropdown(dropdown_id) => open_dropdown_for_id(app, dropdown_id, metrics),
+        WidgetAction::SelectDropdownOption { dropdown_id, value } => {
+            app.interaction.open_dropdown = None;
+            let mut map = serde_json::Map::new();
+            if dropdown_id == "edit.multiplicity_method" {
+                map.insert(String::from("multiplicity_method"), Value::String(value.clone()));
+                app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+            } else if dropdown_id == "inspector.pairwise_mode" {
+                map.insert(String::from("display_mode"), Value::String(value.clone()));
+                app.canvas_dialogs.pairwise.apply_field_patch(&map, None)?;
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("dropdown.select:{dropdown_id}={value}"), ..Default::default() })
+        }
+        WidgetAction::StepSpinner { field_id, delta } => {
+            if field_id == "edit.alpha"
+                && let Some(cur_pct) = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| d.confidence_level.percent())
+            {
+                let next_pct = (cur_pct - delta * 100.0).clamp(50.0, 99.9);
+                let _ = app.canvas_dialogs.edit_params.set_confidence_percent(next_pct);
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("spinner.step:{field_id}"), ..Default::default() })
+        }
+        WidgetAction::SetSlider { field_id, normalized } => {
+            if field_id == "inspector.zoom_slider" {
+                let z = (0.5 + normalized * 1.5).clamp(0.5, 2.0);
+                app.canvas_dialogs.canvas.zoom = z;
+                app.canvas_dialogs.pan_zoom.zoom = z;
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("slider.set:{field_id}"), ..Default::default() })
+        }
+        WidgetAction::DialogCancel => {
+            app.canvas_dialogs.close_dialog();
+            app.interaction.open_dropdown = None;
+            Ok(UiEventOutcome { handled: true, action: String::from("dialog.cancelled"), ..Default::default() })
+        }
+        WidgetAction::DialogConfirm => {
+            let res = crate::gui_actions::submit_active_dialog_ok(app).map_err(|e| e.to_string())?;
+            Ok(UiEventOutcome { handled: true, action: String::from("dialog.confirmed"), command_result: Some(res), ..Default::default() })
+        }
+        WidgetAction::InvokeDialogButton(btn) => {
+            let res = crate::gui_actions::execute_dialog_button_action(app, btn).map_err(|e| e.to_string())?;
+            app.interaction.open_dropdown = None;
+            Ok(UiEventOutcome { handled: true, action: format!("dialog.button:{btn}"), command_result: Some(res), ..Default::default() })
+        }
+        WidgetAction::ClickDialogControl(wid) => {
+            if let Some(res) = crate::gui_actions::apply_dialog_widget_click(app, wid).map_err(|e| e.to_string())? {
+                return Ok(UiEventOutcome {
+                    handled: true,
+                    action: format!("dialog.control:{wid}"),
+                    command_result: Some(res),
+                    ..Default::default()
+                });
+            }
+            Ok(UiEventOutcome { handled: true, action: format!("dialog.control_focus:{wid}"), ..Default::default() })
+        }
+        _ => Ok(UiEventOutcome { handled: false, action: String::from("widget.noop"), ..Default::default() }),
+    }
+}
+
+fn open_dropdown_for_id(app: &mut UiApp, dropdown_id: &str, metrics: ViewportMetrics) -> Result<UiEventOutcome, String> {
+    if app.interaction.open_dropdown.as_ref().is_some_and(|d| d.dropdown_id == dropdown_id) {
+        app.interaction.open_dropdown = None;
+        return Ok(UiEventOutcome { handled: true, action: format!("dropdown.closed:{dropdown_id}"), ..Default::default() });
+    }
+    let tree = app.build_and_cache_layout_tree(metrics);
+    let anchor = tree.node(dropdown_id).map(|n| n.bounds.rect_px).unwrap_or_default();
+    if dropdown_id == "edit.multiplicity_method" {
+        let param_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.posthoc.tukey").enabled;
+        let nonparam_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.posthoc.dunn").enabled;
+        let opts = vec![
+            DropdownOption { value: String::from("none"), label: String::from("None (uncorrected)"), enabled: true },
+            DropdownOption { value: String::from("tukey"), label: String::from("Tukey HSD"), enabled: param_ok },
+            DropdownOption { value: String::from("bonferroni"), label: String::from("Bonferroni"), enabled: param_ok },
+            DropdownOption { value: String::from("sidak"), label: String::from("Sidak"), enabled: param_ok },
+            DropdownOption { value: String::from("holm_sidak"), label: String::from("Holm-Sidak"), enabled: param_ok },
+            DropdownOption { value: String::from("dunnett"), label: String::from("Dunnett"), enabled: param_ok },
+            DropdownOption { value: String::from("dunn"), label: String::from("Dunn (Rank Sum)"), enabled: nonparam_ok },
+        ];
+        app.interaction.open_dropdown = Some(OpenDropdownState {
+            dropdown_id: dropdown_id.to_owned(),
+            label: String::from("Multiple Comparisons"),
+            z_layer: ZLayer::ModalDropdown,
+            anchor_rect_px: anchor,
+            selected_value: String::from("tukey"),
+            options: opts,
+        });
+    } else if dropdown_id == "inspector.pairwise_mode" {
+        let opts = vec![
+            DropdownOption { value: String::from("stars"), label: String::from("Significance Stars"), enabled: true },
+            DropdownOption { value: String::from("exact"), label: String::from("Numeric P Values"), enabled: true },
+            DropdownOption { value: String::from("cld"), label: String::from("Compact Letter Display"), enabled: true },
+        ];
+        app.interaction.open_dropdown = Some(OpenDropdownState {
+            dropdown_id: dropdown_id.to_owned(),
+            label: String::from("Pairwise Display Mode"),
+            z_layer: ZLayer::DropdownMenu,
+            anchor_rect_px: anchor,
+            selected_value: String::from("stars"),
+            options: opts,
+        });
+    }
+    Ok(UiEventOutcome { handled: true, action: format!("dropdown.opened:{dropdown_id}"), ..Default::default() })
+}
+
+fn handle_text_input(app: &mut UiApp, text: &str) -> UiEventOutcome {
+    if text.is_empty() {
+        return UiEventOutcome { handled: false, action: String::from("text_input_ignored"), ..Default::default() };
+    }
+    if app.inline_editor.active {
+        app.inline_editor.insert_text(text);
+        if matches!(app.inline_editor.target, Some(InlineEditorTarget::GridCell { .. } | InlineEditorTarget::GridXCell { .. })) {
+            app.grid.tool.editing_buffer = Some(app.inline_editor.buffer.clone());
+        }
+        return UiEventOutcome { handled: true, action: String::from("inline_edit.text_input"), ..Default::default() };
+    }
+    if let Some(fid) = app.focus_widget_id.clone()
+        && is_text_widget_id(&fid)
+    {
+        ensure_text_field_buffer(app, &fid, "");
+        if let Some(buf) = app.interaction.text_field_buffers.get_mut(&fid) {
+            buf.insert_text(text);
+        }
+        sync_focused_text_field(app, &fid);
+        return UiEventOutcome { handled: true, action: format!("textbox.text_input:{fid}"), ..Default::default() };
+    }
+    UiEventOutcome { handled: false, action: String::from("text_input_ignored"), ..Default::default() }
+}
+
+fn is_text_widget_id(wid: &str) -> bool {
+    matches!(wid, "palette.query" | "formula_bar.input" | "info.notes") || wid.contains("search") || wid.contains("input")
+}
+
+fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifiers: KeyModifiers) -> Result<UiEventOutcome, String> {
+    let trimmed = key.trim();
+    if app.inline_editor.active && !modifiers.meta && !modifiers.ctrl {
+        return handle_inline_editor_key(app, trimmed, modifiers);
+    }
+
+    if trimmed.eq_ignore_ascii_case("tab") && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
+        if app.canvas_dialogs.active_dialog == ActiveDialog::None && app.grid.formula_bar.active {
+            let doc = app.document().clone();
+            let accepted = app.grid.formula_bar.accept_completion(&doc);
+            return Ok(UiEventOutcome {
+                handled: true,
+                action: String::from("formula_bar.tab_complete"),
+                command_result: Some(json!({ "completion_accepted": accepted, "input": app.grid.formula_bar.input })),
+                ..Default::default()
+            });
+        }
+        let tree = app.build_and_cache_layout_tree(metrics);
+        if let Some(next_id) = cycle_focus_in_scope(&tree.nodes, tree.active_focus_scope, app.focus_widget_id.as_deref(), modifiers.shift) {
+            app.focus_widget_id = Some(next_id.clone());
+            if let Some(node) = tree.node(&next_id)
+                && node.a11y.role == WidgetRole::TextBox
+            {
+                ensure_text_field_buffer(app, &next_id, node.a11y.value_text.as_deref().unwrap_or(""));
+            }
+            return Ok(UiEventOutcome { handled: true, action: format!("focus.cycle:{next_id}"), ..Default::default() });
         }
     }
 
-    if app.canvas_dialogs.active_dialog != ActiveDialog::None && matches!(trimmed, "Escape" | "Esc") {
-        app.canvas_dialogs.close_dialog();
-        return Ok(UiEventOutcome { handled: true, action: String::from("dialog.cancelled"), ..Default::default() });
-    }
-
-    for candidate in build_shortcut_candidates(trimmed, modifiers) {
-        if let Ok(Some(exec)) = app.handle_key_combo(&candidate) {
+    if app.canvas_dialogs.active_dialog == ActiveDialog::None
+        && (modifiers.meta || modifiers.ctrl)
+        && !modifiers.shift
+        && !modifiers.alt
+        && trimmed.eq_ignore_ascii_case("t")
+    {
+        let doc = app.document().clone();
+        if let Some(rs_id) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
+            app.canvas_dialogs.open_edit_parameters(&doc, rs_id);
             return Ok(UiEventOutcome {
                 handled: true,
-                action: format!("shortcut:{}", exec.command_id),
-                command_id: Some(exec.command_id),
-                command_result: Some(exec.result),
+                action: String::from("shortcut:ui.editParams.open"),
+                command_id: Some(String::from("ui.editParams.open")),
+                command_result: Some(json!({ "dialog": "EditAnalysisParameters", "result_sheet_id": rs_id.as_str() })),
             });
         }
     }
 
+    if let Some(fid) = app.focus_widget_id.clone()
+        && is_text_widget_id(&fid)
+        && let Some(out) = handle_textbox_key(app, &fid, trimmed, modifiers)?
+    {
+        return Ok(out);
+    }
+
+    if matches!(trimmed, "Escape" | "Esc") {
+        if app.interaction.open_dropdown.take().is_some() || app.interaction.open_menu.take().is_some() {
+            return Ok(UiEventOutcome { handled: true, action: String::from("popup.dismissed"), ..Default::default() });
+        }
+        if app.canvas_dialogs.active_dialog != ActiveDialog::None {
+            app.canvas_dialogs.close_dialog();
+            return Ok(UiEventOutcome { handled: true, action: String::from("dialog.cancelled"), ..Default::default() });
+        }
+    }
+
+    if app.canvas_dialogs.active_dialog != ActiveDialog::None
+        && !modifiers.ctrl
+        && !modifiers.meta
+        && !modifiers.alt
+        && matches!(trimmed, "Enter" | "Return")
+    {
+        let res = crate::gui_actions::submit_active_dialog_ok(app).map_err(|e| e.to_string())?;
+        return Ok(UiEventOutcome { handled: true, action: String::from("dialog.confirmed"), command_result: Some(res), ..Default::default() });
+    }
+
+    if (trimmed == " " || trimmed.eq_ignore_ascii_case("space"))
+        && let Some(fid) = app.focus_widget_id.clone()
+        && let Some(node) = app.build_and_cache_layout_tree(metrics).node(&fid).cloned()
+        && node.state.enablement.enabled
+        && node.action != WidgetAction::NoOp
+    {
+        return execute_widget_action(app, &node.action, metrics);
+    }
+
+    if app.canvas_dialogs.active_dialog == ActiveDialog::None {
+        for candidate in build_shortcut_candidates(trimmed, modifiers) {
+            if let Ok(Some(exec)) = app.handle_key_combo(&candidate) {
+                return Ok(UiEventOutcome {
+                    handled: true,
+                    action: format!("shortcut:{}", exec.command_id),
+                    command_id: Some(exec.command_id),
+                    command_result: Some(exec.result),
+                });
+            }
+        }
+    }
+
     Ok(UiEventOutcome { handled: false, action: String::from("key_down_unhandled"), ..Default::default() })
+}
+
+fn handle_inline_editor_key(app: &mut UiApp, key: &str, modifiers: KeyModifiers) -> Result<UiEventOutcome, String> {
+    match key {
+        "Enter" | "Return" => commit_inline_edit(app),
+        "Escape" | "Esc" => Ok(cancel_inline_edit(app)),
+        "Backspace" => {
+            app.inline_editor.backspace();
+            Ok(UiEventOutcome { handled: true, action: String::from("inline_edit.backspace"), ..Default::default() })
+        }
+        _ if !modifiers.ctrl && !modifiers.meta && !modifiers.alt && key.chars().count() == 1 => Ok(handle_text_input(app, key)),
+        _ => Ok(UiEventOutcome { handled: false, action: String::from("key_down_unhandled"), ..Default::default() }),
+    }
+}
+
+fn handle_textbox_key(app: &mut UiApp, fid: &str, key: &str, modifiers: KeyModifiers) -> Result<Option<UiEventOutcome>, String> {
+    if fid == "formula_bar.input" && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
+        if matches!(key, "Enter" | "Return") {
+            let res = crate::gui_actions::commit_formula_bar(app).map_err(|e| e.to_string())?;
+            return Ok(Some(UiEventOutcome {
+                handled: true,
+                action: String::from("formula_bar.committed"),
+                command_result: Some(res),
+                ..Default::default()
+            }));
+        }
+        if matches!(key, "Escape" | "Esc") {
+            crate::gui_actions::cancel_formula_bar(app);
+            return Ok(Some(UiEventOutcome { handled: true, action: String::from("formula_bar.cancelled"), ..Default::default() }));
+        }
+    }
+    ensure_text_field_buffer(app, fid, "");
+    if (modifiers.ctrl || modifiers.meta) && key.eq_ignore_ascii_case("a") {
+        if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
+            b.select_all();
+        }
+        return Ok(Some(UiEventOutcome { handled: true, action: String::from("textbox.select_all"), ..Default::default() }));
+    }
+    if (modifiers.ctrl || modifiers.meta) && key.eq_ignore_ascii_case("c") {
+        if let Some(sel) = app.interaction.text_field_buffers.get(fid).and_then(TextFieldEditState::copy_selection) {
+            app.interaction.last_clipboard_text = Some(sel);
+        }
+        return Ok(Some(UiEventOutcome { handled: true, action: String::from("textbox.copy"), ..Default::default() }));
+    }
+    if (modifiers.ctrl || modifiers.meta) && key.eq_ignore_ascii_case("v") {
+        if let Some(clip) = app.interaction.last_clipboard_text.clone() {
+            if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
+                b.insert_text(&clip);
+            }
+            sync_focused_text_field(app, fid);
+        }
+        return Ok(Some(UiEventOutcome { handled: true, action: String::from("textbox.paste"), ..Default::default() }));
+    }
+    let handled = match key {
+        "Backspace" => {
+            if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
+                b.backspace();
+            }
+            sync_focused_text_field(app, fid);
+            true
+        }
+        "Delete" => {
+            if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
+                b.delete_forward();
+            }
+            sync_focused_text_field(app, fid);
+            true
+        }
+        "ArrowLeft" | "Left" => {
+            if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
+                b.move_left(modifiers.shift);
+            }
+            true
+        }
+        "ArrowRight" | "Right" => {
+            if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
+                b.move_right(modifiers.shift);
+            }
+            true
+        }
+        _ if !modifiers.ctrl && !modifiers.meta && !modifiers.alt && key.chars().count() == 1 => {
+            return Ok(Some(handle_text_input(app, key)));
+        }
+        _ => false,
+    };
+    Ok(handled.then(|| UiEventOutcome { handled: true, action: format!("textbox.key:{key}"), ..Default::default() }))
 }
 
 fn build_shortcut_candidates(key: &str, modifiers: KeyModifiers) -> Vec<String> {

@@ -5,7 +5,7 @@
 This reference documents LumenCraft's **strict `gui_only` execution contract**, the semantic UI inspection tree and 8-tool agent GUI surface (`R8.6`; `UI_COMMANDS` synced to `crates/mcp/src/ui_catalog.rs`, typed engine commands behind UI actions, and i18n strings — current totals in [`STATUS.md`](STATUS.md)), the 4-stage Power & Sample Size wizard, declarative modal graying predicates, grid-to-graph formatting and `ResultSheet` chaining (`R8.7`), the **28 agent-harness end-to-end workflows** (formerly "Core workflows"; `R8.8`, `WF-01`–`WF-28` across Shards 1–4), the **21 extended multivariable, clustering, GLM, survival & statistical-graphing `gui_only` workflows** (`R9.17` / `QOL-17`, `WF-29`–`WF-49` across Shards 5–7), and **Compact Letter Display** (`R10.11`, `WF-50`) — **50 total strict `gui_only` agent-harness workflows**.
 
 > [!IMPORTANT]
-> **Agent harness ≠ human GUI (audit 2026-11-15).** Every test listed in this document drives `UiApp` through `dispatch_gui_action`: widget nodes come from `inspect.rs` and are not drawn in the window, menu actions carry structured JSON params through `ui.invoke_menu`, and dialog fields are patched through `ui.answer_dialog`. These tests prove engine and dialog state machines and the agent automation surface. They do **not** show that a person can complete the workflow: today **`0` of `50`** reference workflows are completable in the rendered desktop or web GUI. See [§6](#6-human-path-status--blockers-r10) and [`R10`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion).
+> **Agent-Harness (`gui_only`) Suite vs. `R10.2` Human-Path Acceptance:** Every `gui_wf_*` (`WF-01`–`WF-50`) shard listed in this document is an **agent-harness (`gui_only`)** test running through `dispatch_gui_action` (`HumanPathOnly` disabled) so structured agent invocations (`ui.invoke_menu` with JSON `params`, `ui.answer_dialog`, and direct `widget_id` dispatch) remain covered against the engine and dialog state machines. **Real human-path acceptance** (`App::set_human_path_only(true)` via `HumanPathDriver`) rejects those synthetic shortcuts with `ErrorCode::GuiOnlyViolation` and requires raw pointer coordinates, scroll wheel deltas, keyboard focus cycling (`Tab`/`Shift+Tab`), keystrokes, and IME preedit against rendered [`LayoutTree`](../crates/ui-egui/src/layout/mod.rs) widgets checked by `verify_pixel_to_hit_box_parity` (wired into `cargo xtask ci`). Phase 2 Core Infrastructure (`R10.1` One-Way ANOVA `AnalyzeSheet` + `EditAnalysisParameters` human-path spike, `R10.9` L6 glyph atlas, `R10.15` aspect-ratio viewport, `R10.16` reusable widgets/modals/scrollbars, `R10.2` parity gate, `R10.22` budgets) is verified in `crates/ui-egui/tests/r10_core_and_spike.rs`; full 50-workflow human-path completion remains tracked in [§6](#6-human-path-status--blockers-r10).
 
 > **Verification Status (`R8.6`–`R8.8`, `R9.7`, `R9.16`, `R9.17`, `R10.11` Implemented — agent harness):**
 > - **Workspace shell & inspection (`R8.6`):** `UiApp` (`crates/ui-egui`), software RGBA/PNG compositing (`render_workspace_rgba` / `render_workspace_frame_png`), `UiTreeSnapshot` (`crates/ui-egui/src/inspect.rs`, synced `UI_COMMANDS`), the 8 `ui.*` interactive GUI action handlers (`crates/ui-egui/src/gui_actions.rs`), `--control` JSONL loopback (`crates/ui-egui/src/control_io.rs`), `GuiOnlyPolicy` (`crates/engine/src/lib.rs`), `ErrorCode::GuiOnlyViolation` (`crates/doc/src/result.rs`), `GuiSessionHost` + the 8 `gui` MCP tools (`crates/mcp/src/{tools.rs, gui_tools.rs, protocol.rs}`), `InProcessUiGuiHost` (`apps/lumencraft-cli/src/main.rs`), and `lumencraft --gui-only` (`apps/lumencraft/src/main.rs`).
@@ -121,7 +121,11 @@ Every workflow test runs under `UiApp` with `app.set_gui_only(true)` (`GuiOnlyPo
 - `apps/lumencraft-cli/tests/mcp_gui_only_parity.rs` — spawned `lumencraft-cli mcp --gui-only` (`InProcessUiGuiHost`) and `lumencraft-cli mcp --control-port <N> --gui-only` end-to-end tests.
 - `apps/lumencraft/tests/gui_only_wiring.rs` — `lumencraft --headless-once --gui-only` binary and multi-window `DesktopHostRuntime` enforcement.
 
-### Shard 1 — `crates/ui-egui/tests/gui_wf_foundations_and_data.rs` (`WF-01`–`WF-06`)
+### `gui_wf_*` Agent-Harness Shard Inventory (`WF-01`–`WF-50`, `HumanPathOnly = false`)
+
+Each shard below runs with `app.set_gui_only(true)` and `app.is_human_path_only() == false` (agent-harness mode):
+
+### Shard 1 — `crates/ui-egui/tests/gui_wf_foundations_and_data.rs` (`WF-01`–`WF-06`, agent harness)
 
 | ID | Test Function | Key GUI Surfaces & Verified Pipeline |
 |---|---|---|
@@ -226,7 +230,13 @@ Every workflow test runs under `UiApp` with `app.set_gui_only(true)` (`GuiOnlyPo
 
 A workflow is **human-complete** only when all five protocol stages (create table → enter data → configure analysis → verify results and graph → live upstream edit) pass using raw pointer, wheel, keyboard, and IME events against widgets drawn in the frame a person sees, on desktop and web. The binding definition and harness are in [`R10.2`](ROADMAP.md#r102-human-path-acceptance-harness--phantom-widget-gate).
 
-### 6.1 Systemic blockers (audit 2026-11-15)
+### 6.1 Phase 2 Core Infrastructure (`R10.1`, `R10.2`, `R10.9`, `R10.15`, `R10.16`, `R10.22` Implemented) vs. Remaining Wave 5 Human-Path Work
+
+- **Implemented core infrastructure (`crates/ui-egui/src/{layout/*,views/mod.rs,text_bridge.rs,human_driver.rs}`, verified by `crates/ui-egui/tests/r10_core_and_spike.rs`):**
+  - Single retained `LayoutTree` uniting rendering (`paint.rs`), physical/logical hit-testing (`hit_test.rs`), universal `ScrollMeta` vertical/horizontal scrolling & scrollbars (`scroll.rs`), `ModalBackdrop` no-click-through pointer capture & `Tab`/`Shift+Tab` modal focus trapping (`a11y.rs`), `R10.16` reusable widgets, aspect-ratio centered paper viewport (`R10.15` `canvas_viewport.rs`), L6 `TextMeasurer` + 4x4 coverage-mask glyph atlas retiring `FONT_5X7` (`R10.9`), strict `LayoutTree`-projected `ui.inspect` bounds, `HumanPathDriver` + `HumanPathOnly` bypass guards (`R10.2`), `verify_pixel_to_hit_box_parity` + `verify_click_action_parity` wired into `cargo xtask ci`, the interactive `R10.1` One-Way ANOVA spike (`AnalyzeSheet` + `EditAnalysisParameters`), and verified `R10.22` budgets (`<= 16.67 ms` on `1M`-cell virtualized grid, `<= 50 ms` input-to-paint latency).
+- **Remaining workflow & surface expansion (`R10.3`–`R10.13`, `R10.17`–`R10.18`):** Full 50-workflow interactive coverage across the Welcome/New Table wizard (`B2`), expanded multi-column result viewer & chaining controls (`B3`), desktop/web menu & toolbar routing (`B4`), and live right-hand inspectors/navigator/formula editor (`B5`).
+
+### 6.2 Systemic blockers (historical audit 2026-11-15 — core foundation resolved in Phase 2; full workflows in Wave 5)
 
 | Blocker | Human-visible behaviour | Fix |
 |---|---|---|

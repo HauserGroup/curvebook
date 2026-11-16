@@ -35,6 +35,7 @@ usage: cargo xtask <command> [args...]
 
 commands:
   ci                    run full local/CI gate (fmt, clippy, tests, doctests, feature checks, policy gates, wasm)
+  r10-gate              run R10.2 anti-phantom parity gate & R10.22 frame/latency budgets
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
   layers                verify L0..L7 dependency rules, UI-crate isolation, and source hygiene
   secrets [--history]   scan repo (or git history additions) for API tokens, private keys, and local paths
@@ -86,6 +87,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "ci" => cmd_ci(&root),
+        "r10-gate" => cmd_r10_gate(&root),
         "test" => cmd_test(&root, rest),
         "layers" => cmd_layers(&root),
         "secrets" => secrets::run_cli(&root, rest),
@@ -256,10 +258,15 @@ fn cmd_wasm(root: &Path) -> Result<(), String> {
     run_cargo_strs(root, &["check", "--target", "wasm32-unknown-unknown", "-p", "lumencraft-web", "-p", "lumencraft-engine", "--keep-going"])
 }
 
+fn cmd_r10_gate(root: &Path) -> Result<(), String> {
+    run_cargo_strs(root, &["test", "-p", "lumencraft-ui-egui", "--test", "r10_core_and_spike"])
+}
+
 fn cmd_ci(root: &Path) -> Result<(), String> {
     run_cargo_strs(root, &["fmt", "--all", "--", "--check"])?;
     run_cargo_strs(root, &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])?;
     cmd_test(root, &[])?;
+    cmd_r10_gate(root)?;
     run_cargo_strs(root, &["test", "--workspace", "--doc"])?;
 
     // Verify embedders can build and test text/ui/mcp without bundled fonts.

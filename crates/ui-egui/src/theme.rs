@@ -298,22 +298,30 @@ impl FontBook {
         Self { faces }
     }
 
-    /// Construct a [`FontBook`] probing standard host OS system TrueType/OpenType font files when
-    /// available on native targets, always retaining the embedded fallback faces.
+    /// Construct a [`FontBook`] probing optional `LUMENCRAFT_FONTS_DIR` and standard host OS system
+    /// TrueType/OpenType font files when available on native targets, always retaining the embedded
+    /// fallback faces.
     #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
     pub fn with_system_and_fallback() -> Self {
         const HOST_CANDIDATE_PATHS: &[&str] = &[
             "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            "/System/Library/Fonts/Supplemental/Arial.ttf",
+            "/System/Library/Fonts/Supplemental/Courier New.ttf",
+            "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
             "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
             "/System/Library/Fonts/Monaco.ttf",
             "/System/Library/Fonts/Geneva.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
             "C:\\Windows\\Fonts\\arial.ttf",
+            "C:\\Windows\\Fonts\\consola.ttf",
         ];
         let mut book = Self::with_embedded_fallback();
         let _ = book.load_host_font_paths(HOST_CANDIDATE_PATHS);
+        let _ = book.load_env_fonts_dir();
         book
     }
 
@@ -322,6 +330,29 @@ impl FontBook {
     #[must_use]
     pub fn with_system_and_fallback() -> Self {
         Self::with_embedded_fallback()
+    }
+
+    /// Probe `.ttf` / `.otf` files from `LUMENCRAFT_FONTS_DIR` when set on native targets.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_env_fonts_dir(&mut self) -> usize {
+        let Some(dir_os) = std::env::var_os("LUMENCRAFT_FONTS_DIR") else {
+            return 0;
+        };
+        let Ok(entries) = std::fs::read_dir(std::path::Path::new(&dir_os)) else {
+            return 0;
+        };
+        let mut paths = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let is_font =
+                path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("ttf") || ext.eq_ignore_ascii_case("otf"));
+            if is_font && let Some(s) = path.to_str() {
+                paths.push(s.to_owned());
+            }
+        }
+        paths.sort();
+        let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
+        self.load_host_font_paths(&refs)
     }
 
     /// Read and register valid SFNT/TrueType fonts from explicit `paths`, prepending them ahead of fallbacks.
@@ -351,6 +382,29 @@ impl FontBook {
     #[must_use]
     pub fn parsed_faces(&self) -> Vec<(&str, lumencraft_text::TrueTypeFont<'_>)> {
         self.faces.iter().filter_map(|(name, bytes)| lumencraft_text::TrueTypeFont::parse(bytes).map(|ttf| (name.as_str(), ttf))).collect()
+    }
+
+    /// Raw `(face_name, sfnt_bytes)` slices in priority order.
+    #[must_use]
+    pub fn raw_faces(&self) -> &[(String, Vec<u8>)] {
+        &self.faces
+    }
+
+    /// Stable FNV-1a fingerprint over loaded face names and byte lengths.
+    #[must_use]
+    pub fn fingerprint(&self) -> u64 {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        for (name, bytes) in &self.faces {
+            for b in name.as_bytes() {
+                h ^= u64::from(*b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+            for b in (bytes.len() as u64).to_le_bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        h
     }
 
     /// Shape `text` cleanly (applying BiDi visual reordering for RTL locales) and rasterize via

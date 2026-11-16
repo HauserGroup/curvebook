@@ -26,7 +26,7 @@ use crate::control_io::{
 };
 use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, equation_display_mode_str};
 use crate::inspect::inspect_ui_tree;
-use crate::interaction::{KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, dispatch_ui_event};
+use crate::interaction::{KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, dispatch_ui_event, sync_dialogs_on_sheet_switch};
 use crate::menus::tooltips::menu_bar_tooltips;
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::modal_predicates::{
@@ -263,6 +263,12 @@ fn handle_power_curve_hover(app: &mut UiApp, params: &Value, x: f64, y: f64, bou
 }
 
 fn try_activate_semantic_widget(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
+    if app.is_human_path_only() {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            format!("semantic widget activation `{wid}` (`try_activate_semantic_widget`) is blocked under human_path_only"),
+        ));
+    }
     if let Some(btn) = wid.strip_prefix("dialog.button.") {
         return handle_answer_dialog(app, &json!({ "action": btn })).map(Some);
     }
@@ -306,6 +312,13 @@ fn try_activate_semantic_widget(app: &mut UiApp, wid: &str) -> Result<Option<Val
     {
         return handle_invoke_menu(app, &json!({ "command_id": cmd_id })).map(Some);
     }
+    if let Some(res) = try_toggle_dialog_widget_click(app, wid)? {
+        return Ok(Some(res));
+    }
+    Ok(None)
+}
+
+pub(crate) fn apply_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
     if let Some(res) = try_toggle_dialog_widget_click(app, wid)? {
         return Ok(Some(res));
     }
@@ -477,6 +490,10 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
         }
         "edit.two_group.welch" => {
             patch.insert(String::from("welch_correction"), json!(!ep.welch_correction));
+        }
+        "edit.two_group.graph_differences" => {
+            app.canvas_dialogs.edit_params.graph_differences = !app.canvas_dialogs.edit_params.graph_differences;
+            return Ok(Some(json!({ "clicked": wid, "updated": true })));
         }
         "edit.contingency.odds_ratio" => {
             patch.insert(String::from("compute_odds_and_risk_ratios"), json!(!ep.contingency_odds_ratio_checked));
@@ -716,6 +733,12 @@ fn handle_type_text(app: &mut UiApp, params: &Value) -> Result<Value, EngineErro
     let explicit_formula_commit = opt_bool_param(params, &["commit_enter"]).map_err(bad_input)?;
     let commit_enter = explicit_formula_commit.unwrap_or(true);
     if let Some(wid) = opt_str_param(params, &["widget_id"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty()) {
+        if app.is_human_path_only() && app.focus_widget_id.as_deref() != Some(wid) {
+            return Err(EngineError::with_code(
+                ErrorCode::GuiOnlyViolation,
+                format!("focus-jumping ui.type_text to `{wid}` is blocked under human_path_only; click or Tab to focus first"),
+            ));
+        }
         app.focus_widget_id = Some(wid.to_owned());
     }
     let wid = app.focus_widget_id.clone();
@@ -832,6 +855,9 @@ fn apply_type_text_to_grid(
             "value": scalar,
         }),
     )?;
+    if commit_enter {
+        app.inline_editor.cancel();
+    }
     let next_coord = if commit_enter { GridCellCoord::new(coord.row + 1, coord.col, coord.subcol) } else { coord };
     app.grid.select_single_sync(next_coord);
     app.sync_brush_from_grid_selection(sheet_id);
@@ -1032,62 +1058,33 @@ fn handle_press_key(app: &mut UiApp, params: &Value) -> Result<Value, EngineErro
     let modifiers = parse_modifiers(params.get("modifiers"))?;
     let combo = format_shortcut_combo(key, modifiers);
 
-    if (modifiers.meta || modifiers.ctrl) && !modifiers.shift && !modifiers.alt && key.eq_ignore_ascii_case("t") {
-        let doc = app.document().clone();
-        if let Some(rs_id) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
-            app.canvas_dialogs.open_edit_parameters(&doc, rs_id);
-            return Ok(json!({ "combo": combo, "dialog": "EditAnalysisParameters", "result_sheet_id": rs_id.as_str() }));
-        }
-    }
-
-    if app.canvas_dialogs.active_dialog != ActiveDialog::None
-        && !modifiers.meta
-        && !modifiers.ctrl
-        && !modifiers.alt
-        && matches!(key.to_ascii_lowercase().as_str(), "enter" | "return")
-    {
-        let action = match app.canvas_dialogs.active_dialog {
-            ActiveDialog::PowerAndSampleSize => {
-                if app.canvas_dialogs.power_wizard.stage == PowerWizardStage::Results {
-                    "create"
-                } else {
-                    "next"
-                }
-            }
-            _ => "ok",
-        };
-        return handle_answer_dialog(app, &json!({ "action": action }));
-    }
-
-    if app.canvas_dialogs.active_dialog == ActiveDialog::None
-        && !modifiers.meta
-        && !modifiers.ctrl
-        && !modifiers.alt
-        && (app.grid.formula_bar.active || app.focus_widget_id.as_deref() == Some("formula_bar.input"))
-    {
-        match key.to_ascii_lowercase().as_str() {
-            "enter" | "return" => return commit_formula_bar(app),
-            "escape" | "esc" => {
-                cancel_formula_bar(app);
-                return Ok(json!({ "combo": combo, "formula_bar_active": false, "cancelled": true }));
-            }
-            "tab" if app.grid.formula_bar.active => {
-                let doc = app.document().clone();
-                let accepted = app.grid.formula_bar.accept_completion(&doc);
-                return Ok(json!({ "combo": combo, "completion_accepted": accepted, "input": app.grid.formula_bar.input }));
-            }
-            _ => {}
-        }
-    }
-
-    if app.canvas_dialogs.active_dialog == ActiveDialog::None
-        && let Some(exec) = app.handle_key_combo(&combo).map_err(|e| EngineError::with_code(ErrorCode::Conflict, e))?
-    {
-        return Ok(json!({ "combo": combo, "shortcut_executed": exec.command_id, "ui": exec.ui, "result": exec.result }));
-    }
-
     let out = dispatch_ui_event(app, UiInputEvent::KeyDown { key: key.to_owned(), modifiers }, ViewportMetrics::default())
         .map_err(|e| EngineError::with_code(ErrorCode::Conflict, e))?;
+
+    if out.action == "shortcut:ui.editParams.open" {
+        return Ok(out.command_result.unwrap_or_else(|| json!({ "combo": combo, "dialog": "EditAnalysisParameters" })));
+    }
+    if matches!(out.action.as_str(), "dialog.confirmed" | "formula_bar.committed") {
+        let fallback = json!({ "combo": combo });
+        return Ok(out.command_result.unwrap_or(fallback));
+    }
+    if out.action == "formula_bar.cancelled" {
+        return Ok(json!({ "combo": combo, "formula_bar_active": false, "cancelled": true }));
+    }
+    if out.action == "formula_bar.tab_complete" {
+        let mut obj = out.command_result.unwrap_or_else(|| json!({}));
+        if let Some(m) = obj.as_object_mut() {
+            m.insert(String::from("combo"), json!(combo));
+        }
+        return Ok(obj);
+    }
+    if let Some(cid) = out.command_id.as_deref()
+        && out.action.starts_with("shortcut:")
+    {
+        let is_ui = UI_COMMANDS.iter().any(|u| u.id == cid);
+        return Ok(json!({ "combo": combo, "shortcut_executed": cid, "ui": is_ui, "result": out.command_result.unwrap_or(Value::Null) }));
+    }
+
     Ok(json!({ "combo": combo, "key": key, "outcome": out }))
 }
 
@@ -1117,6 +1114,12 @@ fn extract_menu_path(val: Option<&Value>) -> Result<Option<String>, EngineError>
 }
 
 fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    if app.is_human_path_only() && params.get("params").is_some_and(|v| !v.is_null()) {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            "ui.invoke_menu with semantic `params` bypass is blocked under human_path_only",
+        ));
+    }
     let explicit_cmd = opt_non_empty_str_param(params, &["command_id"]).map_err(bad_input)?;
     let path = extract_menu_path(params.get("path"))?;
     if explicit_cmd.is_none() && path.is_none() {
@@ -1192,10 +1195,10 @@ fn handle_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, EngineErr
     let sheet_param = opt_non_empty_str_param(params, &["sheet_id"]).map_err(bad_input)?;
     let widget_param = opt_non_empty_str_param(params, &["widget_id"]).map_err(bad_input)?;
     if let Some(sheet_raw) = sheet_param.or_else(|| widget_param.and_then(|w| w.strip_prefix("nav.sheet."))) {
+        app.inline_editor.cancel();
         let out = app.execute_command("sheet.select", json!({ "sheet_id": sheet_raw }))?;
         if let Ok(sid) = SheetId::try_new(sheet_raw) {
-            let doc = app.document().clone();
-            app.canvas_dialogs.on_sheet_selected(&doc, &sid);
+            sync_dialogs_on_sheet_switch(app, &sid);
         }
         if params.get("tab").is_none_or(Value::is_null) && params.get("tab_id").is_none_or(Value::is_null) {
             return Ok(json!({ "sheet_id": sheet_raw, "switched": true, "payload": out.payload }));
@@ -1279,7 +1282,47 @@ fn switch_result_sheet_tab(app: &mut UiApp, tab_val: &Value) -> Result<Value, En
     Ok(json!({ "sheet_id": rs.id.as_str(), "tab_index": idx, "tab_id": chosen.id, "tab_title": chosen.title }))
 }
 
+/// Shared modal confirm helper invoked by keyboard `Enter`, modal `OK`/`Create` pointer clicks,
+/// and `ui.answer_dialog` when `human_path_only` is disabled.
+pub(crate) fn submit_active_dialog_ok(app: &mut UiApp) -> Result<Value, EngineError> {
+    let action = match app.canvas_dialogs.active_dialog {
+        ActiveDialog::PowerAndSampleSize => {
+            if app.canvas_dialogs.power_wizard.stage == PowerWizardStage::Results {
+                "create"
+            } else {
+                "next"
+            }
+        }
+        _ => "ok",
+    };
+    execute_dialog_button_action(app, action)
+}
+
+/// Shared modal footer button executor invoked by physical modal button clicks (`ok`, `create`,
+/// `cancel`, `apply`, `next`, `back`, `preview`).
+pub(crate) fn execute_dialog_button_action(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {
+    if app.canvas_dialogs.active_dialog == ActiveDialog::None {
+        return Err(EngineError::with_code(ErrorCode::Conflict, "no modal dialog is currently open"));
+    }
+    if action == "cancel" {
+        let prev = format!("{:?}", app.canvas_dialogs.active_dialog);
+        app.canvas_dialogs.close_dialog();
+        return Ok(json!({ "action": "cancel", "closed": true, "previous_dialog": prev }));
+    }
+    let check = evaluate_dialog_button(&app.canvas_dialogs, app.document(), action).unwrap_or_else(ControlEnablement::enabled);
+    if !check.enabled {
+        return Err(disabled_err(check.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is currently disabled"))));
+    }
+    commit_active_dialog_action(app, action, &Value::Null)
+}
+
 fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
+    if app.is_human_path_only() {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            "ui.answer_dialog is blocked under human_path_only; use physical clicks or keyboard navigation",
+        ));
+    }
     if app.canvas_dialogs.active_dialog == ActiveDialog::None {
         return Err(EngineError::with_code(ErrorCode::Conflict, "no modal dialog is currently open"));
     }
@@ -1779,7 +1822,7 @@ fn apply_type_text_to_formula_bar(app: &mut UiApp, text: &str, clear_existing: b
     }))
 }
 
-fn commit_formula_bar(app: &mut UiApp) -> Result<Value, EngineError> {
+pub(crate) fn commit_formula_bar(app: &mut UiApp) -> Result<Value, EngineError> {
     if !app.grid.formula_bar.active {
         return Err(disabled_err("formula bar is not active"));
     }
@@ -1809,7 +1852,7 @@ fn commit_formula_bar(app: &mut UiApp) -> Result<Value, EngineError> {
     }))
 }
 
-fn cancel_formula_bar(app: &mut UiApp) {
+pub(crate) fn cancel_formula_bar(app: &mut UiApp) {
     app.grid.formula_bar.cancel();
     if app.focus_widget_id.as_deref() == Some("formula_bar.input") {
         app.focus_widget_id = None;

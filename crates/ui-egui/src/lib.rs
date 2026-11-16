@@ -12,14 +12,18 @@ pub mod dialogs_canvas;
 pub mod dialogs_r9;
 pub mod grid_view;
 mod gui_actions;
+pub mod human_driver;
 pub mod i18n;
 pub mod inspect;
 pub mod interaction;
+pub mod layout;
 pub mod menus;
 pub mod modal_predicates;
 pub mod os_integration;
 pub mod power_wizard;
+pub mod text_bridge;
 pub mod theme;
+pub mod views;
 pub mod workspace_nav;
 
 pub use lumencraft_chart::{ChartScene, PointPt, PreflightIssue, SourceCellId};
@@ -50,12 +54,18 @@ pub use dialogs_canvas::{
 };
 pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
+pub use human_driver::HumanPathDriver;
 pub use i18n::{LOCALES, LocalePreset, locale_display_name, normalize_locale, tr};
 pub use inspect::{UiTreeSnapshot, inspect_ui_tree};
 pub use interaction::{
     CanvasDragTarget, GridHitGeometry, InfoRowHitRect, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers,
     LayoutResizeHandle, NavigatorEntryHitRect, PointerButton, ScenePaperMapping, UiEventOutcome, UiInputEvent, ViewportMetrics,
-    VirtualWorkspaceFolder, WorkspaceHitTarget, WorkspaceLayoutMap, dispatch_ui_event,
+    VirtualWorkspaceFolder, WorkspaceHitTarget, WorkspaceLayoutMap, dispatch_mouse_wheel, dispatch_ui_event, execute_widget_action,
+};
+pub use layout::{
+    AccessibilityMeta, ClipId, FocusScope, LayoutRectPx, LayoutTextRun, LayoutTree, NodeBounds, PaintOp, ParityReport, ParityViolation,
+    RetainedLayoutFrame, ScrollAxes, ScrollMeta, WidgetAction, WidgetId, WidgetNode, WidgetRole, WidgetVisualState, ZLayer,
+    verify_click_action_parity, verify_pixel_to_hit_box_parity,
 };
 pub use menus::{
     CommandTooltip, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, TOOLBAR_BUTTONS, ToolbarButtonSpec,
@@ -70,6 +80,9 @@ pub use os_integration::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
 pub use power_wizard::{PowerWizardStage, PowerWizardState};
+pub use text_bridge::{
+    DesktopTextMeasurer, FontFamilyKind, MeasuredTextMetrics, ShapedGlyphRun, ShapedTextLine, SoftwareTextPainter, TextMeasurer, UiTextStyle,
+};
 pub use theme::{FontBook, UiThemeMode, UiThemeSpec};
 pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 
@@ -102,6 +115,17 @@ pub(crate) struct UiShellSnapshot {
     pub hover_command_id: Option<String>,
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
+    pub human_path_only: bool,
+}
+
+/// Equality-transparent cache slot storing the latest finalized [`layout::RetainedLayoutFrame`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CachedLayoutSlot(pub Option<layout::RetainedLayoutFrame>);
+
+impl PartialEq for CachedLayoutSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 /// Incremental session rollback log captured for atomic `command.batch` execution.
@@ -186,6 +210,8 @@ pub struct UiApp {
     pub hover_command_id: Option<String>,
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
+    pub human_path_only: bool,
+    pub(crate) retained_layout: CachedLayoutSlot,
     pub(crate) batch_undo_log: Option<BatchUndoTracker>,
 }
 
@@ -226,6 +252,8 @@ impl UiApp {
             hover_command_id: None,
             focus_widget_id: None,
             power_wizards_by_sheet: std::collections::BTreeMap::new(),
+            human_path_only: false,
+            retained_layout: CachedLayoutSlot::default(),
             batch_undo_log: None,
         };
         app.grid.apply_locale_preset(&app.locale_preset);
@@ -255,6 +283,7 @@ impl UiApp {
             hover_command_id: self.hover_command_id.clone(),
             focus_widget_id: self.focus_widget_id.clone(),
             power_wizards_by_sheet: self.power_wizards_by_sheet.clone(),
+            human_path_only: self.human_path_only,
         }
     }
 
@@ -279,6 +308,8 @@ impl UiApp {
         self.hover_command_id = snap.hover_command_id;
         self.focus_widget_id = snap.focus_widget_id;
         self.power_wizards_by_sheet = snap.power_wizards_by_sheet;
+        self.human_path_only = snap.human_path_only;
+        self.retained_layout.0 = None;
         self.sync_views();
     }
 
@@ -368,6 +399,44 @@ impl UiApp {
     pub fn set_gui_only(&mut self, gui_only: bool) {
         let policy = if gui_only { lumencraft_engine::GuiOnlyPolicy::Strict } else { lumencraft_engine::GuiOnlyPolicy::Disabled };
         self.session.set_gui_only(policy);
+    }
+
+    /// Return whether `R10.2` human-path-only enforcement is active (`HumanPathDriver` / parity tests).
+    #[must_use]
+    pub const fn is_human_path_only(&self) -> bool {
+        self.human_path_only
+    }
+
+    /// Enable or disable `R10.2` human-path-only enforcement rejecting synthetic semantic bypasses.
+    pub fn set_human_path_only(&mut self, enabled: bool) {
+        self.human_path_only = enabled;
+    }
+
+    /// Build or return the cached retained [`layout::LayoutTree`] for `metrics`.
+    pub fn build_and_cache_layout_tree(&mut self, metrics: ViewportMetrics) -> layout::LayoutTree {
+        let hash = layout::compute_ui_state_fingerprint(self, metrics);
+        if let Some(cached) = &self.retained_layout.0
+            && cached.metrics == metrics
+            && cached.state_hash == hash
+        {
+            return cached.tree.clone();
+        }
+        let tree = layout::LayoutTree::build(self, metrics);
+        self.retained_layout.0 = Some(layout::RetainedLayoutFrame { metrics, state_hash: hash, tree: tree.clone() });
+        tree
+    }
+
+    /// Borrow the cached [`layout::LayoutTree`] if clean, or build a fresh one for immutable callers.
+    #[must_use]
+    pub fn layout_tree_cow(&self, metrics: ViewportMetrics) -> std::borrow::Cow<'_, layout::LayoutTree> {
+        let hash = layout::compute_ui_state_fingerprint(self, metrics);
+        if let Some(cached) = &self.retained_layout.0
+            && cached.metrics == metrics
+            && cached.state_hash == hash
+        {
+            return std::borrow::Cow::Borrowed(&cached.tree);
+        }
+        std::borrow::Cow::Owned(layout::LayoutTree::build(self, metrics))
     }
 
     /// Execute an internal UI command (`Caller::Ui`) and refresh UI navigator and selection state.

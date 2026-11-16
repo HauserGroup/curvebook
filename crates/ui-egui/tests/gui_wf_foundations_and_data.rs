@@ -472,8 +472,11 @@ fn wf03_column_brushing_format_and_undo_redo_shortcuts() -> TestRes {
         return Err(format!("expected multi-row selection + synced brushed_points, got rows={rows:?}, snap={grid_snap}"));
     }
 
-    // Switch to linked graph and brush points from canvas -> grid via ui.pointer_gesture.
+    // Switch to linked graph, confirm first-visit graph chooser (`B1`/`ModalBackdrop`), and brush points from canvas -> grid.
     click_widget(&mut app, &format!("nav.sheet.{graph_id_str}"))?;
+    if inspect(&mut app, "dialog", false)?.get("active_dialog").and_then(Value::as_str) == Some("change_graph_type") {
+        gui(&mut app, "ui.answer_dialog", json!({ "action": "ok" }))?;
+    }
     let canvas_snap = inspect(&mut app, "canvas", true)?;
     let canvas_pts = find_first_widgets(&canvas_snap, "canvas.point.");
     if canvas_pts.len() < 2 {
