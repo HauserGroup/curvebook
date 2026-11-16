@@ -999,6 +999,7 @@ dependencies = [
  "curvebook-chart",
  "curvebook-doc",
  "curvebook-engine",
+ "curvebook-fit",
  "curvebook-format",
  "curvebook-math",
  "curvebook-palette",
