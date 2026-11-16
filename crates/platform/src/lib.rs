@@ -12,10 +12,11 @@ pub mod process;
 use std::fmt;
 
 #[cfg(not(target_arch = "wasm32"))]
-pub use fs::{read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, write_atomic, write_atomic_with_hook};
+pub use fs::{read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, sync_dir, write_atomic, write_atomic_with_hook};
 pub use path_guard::PATH_PARAM_KEYS;
 #[cfg(not(target_arch = "wasm32"))]
 pub use path_guard::{PathResolver, WorkdirGuard, ensure_regular_file};
+pub use process::local_host_fingerprint;
 #[cfg(not(target_arch = "wasm32"))]
 pub use process::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_WALL_TIMEOUT, ProcessCommand, ProcessOutput};
 

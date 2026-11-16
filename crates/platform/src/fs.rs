@@ -91,7 +91,7 @@ where
         .map_err(|err| io_err(&format!("rename `{}` to `{}`", tmp_path.display(), resolved_target.display()), &err))?;
     guard.disarm();
 
-    sync_parent_dir_best_effort(parent);
+    sync_dir(parent)?;
     Ok(())
 }
 
@@ -284,11 +284,49 @@ fn validate_regular_file_meta(path: &Path, meta: &Metadata, max_bytes: usize) ->
     Ok(())
 }
 
+/// Synchronize directory metadata (`fsync`) on `dir` so preceding file renames, creations, or
+/// unlinks in `dir` are durable across power loss.
+///
+/// Platforms or filesystems that reject opening or `fsync`-ing directories (`EINVAL`, `ENOTSUP`,
+/// `EACCES`, `EISDIR`, or read-only directory descriptors returning `EBADF` /
+/// `ERROR_INVALID_HANDLE`) are treated as non-fatal no-ops, whereas genuine storage failures
+/// (`EIO`, `ENOSPC`, etc.) propagate as [`PlatformError::Io`].
+///
+/// # Errors
+/// Returns [`PlatformError::Io`] if opening or syncing `dir` fails with a non-ignorable OS error.
 #[cfg(not(target_arch = "wasm32"))]
-fn sync_parent_dir_best_effort(parent: &Path) {
-    if let Ok(dir) = File::open(parent) {
-        let _ = dir.sync_all();
+pub fn sync_dir(dir: &Path) -> Result<(), PlatformError> {
+    let handle = match File::open(dir) {
+        Ok(file) => file,
+        Err(err) if is_ignorable_dir_sync_error(&err) => return Ok(()),
+        Err(err) => return Err(io_err(&format!("open directory `{}` for sync", dir.display()), &err)),
+    };
+    check_dir_sync_result(dir, handle.sync_all())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn check_dir_sync_result(dir: &Path, result: std::io::Result<()>) -> Result<(), PlatformError> {
+    match result {
+        Ok(()) => Ok(()),
+        Err(err) if is_ignorable_dir_sync_error(&err) => Ok(()),
+        Err(err) => Err(io_err(&format!("sync directory `{}`", dir.display()), &err)),
     }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_ignorable_dir_sync_error(err: &std::io::Error) -> bool {
+    if matches!(err.kind(), ErrorKind::InvalidInput | ErrorKind::Unsupported | ErrorKind::PermissionDenied | ErrorKind::IsADirectory) {
+        return true;
+    }
+    #[cfg(unix)]
+    if err.raw_os_error() == Some(9) {
+        return true;
+    }
+    #[cfg(windows)]
+    if matches!(err.raw_os_error(), Some(1 | 5 | 6 | 50 | 87)) {
+        return true;
+    }
+    false
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -304,7 +342,8 @@ mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
     use super::{
-        read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, resolve_parent_dir, write_atomic, write_atomic_with_hook,
+        check_dir_sync_result, read_regular_file_bytes, read_regular_file_bytes_if_exists, read_regular_file_utf8, resolve_parent_dir, sync_dir,
+        write_atomic, write_atomic_with_hook,
     };
     use crate::PlatformError;
 
@@ -466,6 +505,34 @@ mod tests {
 
         // Writing over an existing directory is rejected explicitly.
         assert!(matches!(write_atomic(&target_dir, b"nope"), Err(PlatformError::InvalidPath { .. })));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_dir_ignores_unsupported_dir_fsync_but_propagates_storage_failures() {
+        use std::io::ErrorKind;
+
+        let dir = temp_dir("sync-dir");
+        sync_dir(&dir).expect("sync_dir on valid directory");
+
+        for kind in [ErrorKind::InvalidInput, ErrorKind::Unsupported, ErrorKind::PermissionDenied, ErrorKind::IsADirectory] {
+            check_dir_sync_result(&dir, Err(Error::new(kind, "dir sync rejected by filesystem"))).expect("non-fatal dir sync rejection");
+        }
+        #[cfg(unix)]
+        check_dir_sync_result(&dir, Err(Error::from_raw_os_error(9))).expect("EBADF on read-only dir fd is ignored");
+
+        let storage_full = check_dir_sync_result(&dir, Err(Error::new(ErrorKind::StorageFull, "no space left"))).unwrap_err();
+        assert!(matches!(storage_full, PlatformError::Io { .. }));
+
+        #[cfg(unix)]
+        {
+            let eio = check_dir_sync_result(&dir, Err(Error::from_raw_os_error(5))).unwrap_err();
+            assert!(matches!(eio, PlatformError::Io { .. }));
+        }
+
+        let missing = sync_dir(&dir.join("does-not-exist")).unwrap_err();
+        assert!(matches!(missing, PlatformError::Io { .. }));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

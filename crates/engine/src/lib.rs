@@ -26,7 +26,7 @@ use curvebook_fit::FitError;
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_format::DirectoryJournalBackend;
 use curvebook_format::FormatError;
-use curvebook_format::recovery::{CrashRecoveryJournal, JournalBackend, RecoveryReport};
+use curvebook_format::recovery::{CrashRecoveryJournal, JournalBackend, JournalRecoveryWarning, RecoveryReport};
 use curvebook_math::MathError;
 use curvebook_pdf::PdfError;
 use curvebook_platform::PlatformError;
@@ -773,7 +773,7 @@ fn is_strict_gui_only_allowed(spec: &cmd::CommandSpec, caller: Caller, params: &
     if spec.id == "table.convertArchetype" && is_preview_only_convert(params) {
         return true;
     }
-    spec.effects.read_only_hint() && !spec.effects.contains(cmd::Effects::READS_FILESYSTEM)
+    spec.effects.strict_gui_only_allowed()
 }
 
 /// Stateful project session owning undo/redo history, dirty tracking, and guarded command execution.
@@ -791,28 +791,64 @@ pub struct Session {
 /// Optional crash-recovery WAL journal hooks backed by `curvebook_format::recovery`.
 impl Session {
     /// Open or crash-recover a [`Session`] from `backend`, sanitizing any circular hooks and
-    /// replaying committed journal commands on top of the latest snapshot.
+    /// replaying committed journal commands strictly on top of the latest snapshot.
+    ///
+    /// If opening the baseline snapshot or replaying any recovered command fails, the acquired
+    /// journal lock lease is released before returning [`EngineError`].
     pub fn open_with_recovery<B: JournalBackend>(
         backend: B,
         owner_id: impl Into<String>,
         ttl_ms: u64,
         now_epoch_ms: u64,
     ) -> Result<(Self, CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
-        let (journal, report) = CrashRecoveryJournal::open_or_recover(backend, owner_id, ttl_ms, now_epoch_ms)?;
+        Self::open_with_recovery_mode(backend, owner_id, ttl_ms, now_epoch_ms, false)
+    }
+
+    /// Open or crash-recover a [`Session`] from `backend` in opt-in salvage mode, skipping
+    /// individual journal records that cannot be replayed while recording structured
+    /// [`JournalRecoveryWarning`] entries in [`RecoveryReport::warnings`] and checkpointing the
+    /// salvaged document state.
+    pub fn open_with_best_effort_recovery<B: JournalBackend>(
+        backend: B,
+        owner_id: impl Into<String>,
+        ttl_ms: u64,
+        now_epoch_ms: u64,
+    ) -> Result<(Self, CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
+        Self::open_with_recovery_mode(backend, owner_id, ttl_ms, now_epoch_ms, true)
+    }
+
+    fn open_with_recovery_mode<B: JournalBackend>(
+        backend: B,
+        owner_id: impl Into<String>,
+        ttl_ms: u64,
+        now_epoch_ms: u64,
+        skip_unreplayable: bool,
+    ) -> Result<(Self, CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
+        let (mut journal, mut report) = CrashRecoveryJournal::open_or_recover(backend, owner_id, ttl_ms, now_epoch_ms)?;
         let doc = match &report.snapshot {
-            Some(bytes) => curvebook_format::open_project_bytes(bytes)?,
+            Some(bytes) => match curvebook_format::open_project_bytes(bytes) {
+                Ok(doc) => doc,
+                Err(err) => {
+                    let _ = journal.release_lease();
+                    return Err(err.into());
+                }
+            },
             None => ProjectDocument::default(),
         };
         let mut session = Self::from_document(doc);
-        for cmd in &report.recovered_commands {
-            let command_id = cmd
-                .get("command_id")
-                .or_else(|| cmd.get("id"))
-                .or_else(|| cmd.get("command"))
-                .and_then(serde_json::Value::as_str)
-                .ok_or_else(|| EngineError::new("recovered journal entry missing `command_id` string"))?;
-            let params = cmd.get("params").cloned().unwrap_or_else(|| json!({}));
-            let _ = session.execute(command_id, params)?;
+        let skipped = match replay_recovered_commands(&mut session, &report, skip_unreplayable) {
+            Ok(warnings) => warnings,
+            Err(err) => {
+                let _ = journal.release_lease();
+                return Err(err);
+            }
+        };
+        if !skipped.is_empty() {
+            report.warnings.extend(skipped);
+            if let Err(err) = session.checkpoint_journal(&mut journal) {
+                let _ = journal.release_lease();
+                return Err(err);
+            }
         }
         Ok((session, journal, report))
     }
@@ -827,6 +863,19 @@ impl Session {
     ) -> Result<(Self, CrashRecoveryJournal<DirectoryJournalBackend>, RecoveryReport), EngineError> {
         let backend = DirectoryJournalBackend::open_dir(dir)?;
         Self::open_with_recovery(backend, owner_id, ttl_ms, now_epoch_ms)
+    }
+
+    /// Native-only opt-in helper opening a [`Session`] backed by [`DirectoryJournalBackend`] in
+    /// `dir`, skipping unreplayable WAL records with [`RecoveryReport::warnings`] diagnostics.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn open_dir_with_best_effort_recovery(
+        dir: impl AsRef<Path>,
+        owner_id: impl Into<String>,
+        ttl_ms: u64,
+        now_epoch_ms: u64,
+    ) -> Result<(Self, CrashRecoveryJournal<DirectoryJournalBackend>, RecoveryReport), EngineError> {
+        let backend = DirectoryJournalBackend::open_dir(dir)?;
+        Self::open_with_best_effort_recovery(backend, owner_id, ttl_ms, now_epoch_ms)
     }
 
     /// Record a command invocation `{ command_id, params }` into the WAL `journal`, returning its sequence number.
@@ -878,19 +927,21 @@ impl Session {
     /// Execute `command_id` transactionally and persist its effect to `journal` only when the
     /// command succeeds and mutates state (atomically checkpointing undo/redo and external-file
     /// readers, or appending deterministic commands to `ops.journal`).
+    ///
+    /// If persisting to `journal` fails, the in-memory document, undo/redo history, `file_path`,
+    /// and `dirty` state are rolled back atomically.
     pub fn execute_and_record<B: JournalBackend>(
         &mut self,
         journal: &mut CrashRecoveryJournal<B>,
         command_id: &str,
         params: serde_json::Value,
     ) -> Result<CommandOutcome, EngineError> {
-        let outcome = self.execute(command_id, params.clone())?;
-        self.record_outcome_to_journal(journal, command_id, &params, outcome.mutated)?;
-        Ok(outcome)
+        let cancelled = AtomicBool::new(false);
+        self.execute_with_caller_and_record(journal, command_id, params, Caller::Ui, &cancelled)
     }
 
     /// Execute `command_id` on behalf of `caller` and persist its effect to `journal` when it
-    /// mutates state.
+    /// mutates state, rolling back all session mutations atomically if journaling fails.
     pub fn execute_with_caller_and_record<B: JournalBackend>(
         &mut self,
         journal: &mut CrashRecoveryJournal<B>,
@@ -899,9 +950,10 @@ impl Session {
         caller: Caller,
         cancelled: &AtomicBool,
     ) -> Result<CommandOutcome, EngineError> {
-        let outcome = self.execute_with_caller(command_id, params.clone(), caller, cancelled)?;
-        self.record_outcome_to_journal(journal, command_id, &params, outcome.mutated)?;
-        Ok(outcome)
+        let journal_params = params.clone();
+        self.execute_with_caller_and_hook(command_id, params, caller, cancelled, |session, outcome| {
+            session.record_outcome_to_journal(journal, command_id, &journal_params, outcome.mutated)
+        })
     }
 
     /// Persist a full `.curvebook` snapshot of the current document into `journal` and prune replayed WAL entries.
@@ -918,6 +970,66 @@ impl Session {
         self.dirty = false;
         Ok(backend)
     }
+}
+
+fn attach_replay_failure_context(mut err: EngineError, seq: u64, replay_index: usize, command_id: &str) -> EngineError {
+    if err.remediation.is_none() {
+        err = err.with_remediation("Use Session::open_with_best_effort_recovery to skip unreplayable journal entries while preserving intact edits.");
+    }
+    let mut details_map = match err.details.take() {
+        Some(Value::Object(map)) => map,
+        Some(other) => {
+            let mut map = serde_json::Map::new();
+            map.insert(String::from("cause"), other);
+            map
+        }
+        None => serde_json::Map::new(),
+    };
+    details_map.entry(String::from("seq")).or_insert_with(|| json!(seq));
+    details_map.entry(String::from("replay_index")).or_insert_with(|| json!(replay_index));
+    details_map.entry(String::from("command_id")).or_insert_with(|| json!(command_id));
+    err.details = Some(Value::Object(details_map));
+    err
+}
+
+fn replay_recovered_commands(
+    session: &mut Session,
+    report: &RecoveryReport,
+    skip_unreplayable: bool,
+) -> Result<Vec<JournalRecoveryWarning>, EngineError> {
+    let mut skipped = Vec::new();
+    for (idx, cmd) in report.recovered_commands.iter().enumerate() {
+        let seq = report.recovered_seqs.get(idx).copied().unwrap_or(0);
+        let Some(command_id) = cmd.get("command_id").or_else(|| cmd.get("id")).or_else(|| cmd.get("command")).and_then(serde_json::Value::as_str)
+        else {
+            if skip_unreplayable {
+                skipped.push(JournalRecoveryWarning {
+                    line: 0,
+                    kind: String::from("skipped_unreplayable_command"),
+                    message: format!("skipped recovered journal entry at seq {seq} (index {idx}): missing `command_id` string"),
+                });
+                continue;
+            }
+            return Err(EngineError::new("recovered journal entry missing `command_id` string")
+                .with_details(json!({ "seq": seq, "replay_index": idx }))
+                .with_remediation(
+                    "Use Session::open_with_best_effort_recovery to skip unreplayable journal entries while preserving intact edits.",
+                ));
+        };
+        let params = cmd.get("params").cloned().unwrap_or_else(|| json!({}));
+        if let Err(err) = session.execute(command_id, params) {
+            if skip_unreplayable {
+                skipped.push(JournalRecoveryWarning {
+                    line: 0,
+                    kind: String::from("skipped_unreplayable_command"),
+                    message: format!("skipped recovered journal command `{command_id}` at seq {seq} (index {idx}): {err}"),
+                });
+                continue;
+            }
+            return Err(attach_replay_failure_context(err, seq, idx, command_id));
+        }
+    }
+    Ok(skipped)
 }
 
 impl Default for Session {
@@ -1080,6 +1192,20 @@ impl Session {
         caller: Caller,
         cancelled: &AtomicBool,
     ) -> Result<CommandOutcome, EngineError> {
+        self.execute_with_caller_and_hook(command_id, params, caller, cancelled, |_, _| Ok(()))
+    }
+
+    fn execute_with_caller_and_hook<F>(
+        &mut self,
+        command_id: &str,
+        params: Value,
+        caller: Caller,
+        cancelled: &AtomicBool,
+        after_commit: F,
+    ) -> Result<CommandOutcome, EngineError>
+    where
+        F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
+    {
         if cancelled.load(Ordering::Relaxed) {
             return Err(EngineError::with_code(ErrorCode::Cancelled, format!("command `{command_id}` cancelled"))
                 .with_retryable(true)
@@ -1091,16 +1217,31 @@ impl Session {
                 .with_remediation("Inspect the command registry to discover valid command IDs.")
                 .with_details(json!({ "command_id": command_id }))
         })?;
-        self.execute_registered_spec(spec, params, caller, cancelled)
+        self.execute_registered_spec_with_hook(spec, params, caller, cancelled, after_commit)
     }
 
+    #[cfg(test)]
     fn execute_registered_spec(
+        &mut self,
+        spec: &cmd::CommandSpec,
+        params: Value,
+        caller: Caller,
+        cancelled: &AtomicBool,
+    ) -> Result<CommandOutcome, EngineError> {
+        self.execute_registered_spec_with_hook(spec, params, caller, cancelled, |_, _| Ok(()))
+    }
+
+    fn execute_registered_spec_with_hook<F>(
         &mut self,
         spec: &cmd::CommandSpec,
         mut params: Value,
         caller: Caller,
         cancelled: &AtomicBool,
-    ) -> Result<CommandOutcome, EngineError> {
+        after_commit: F,
+    ) -> Result<CommandOutcome, EngineError>
+    where
+        F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
+    {
         if self.gui_only == GuiOnlyPolicy::Strict && !is_strict_gui_only_allowed(spec, caller, &params) {
             return Err(EngineError::with_code(
                 ErrorCode::GuiOnlyViolation,
@@ -1124,21 +1265,84 @@ impl Session {
             .with_details(json!({ "command_id": spec.id })));
         }
         if spec.id == "edit.undo" || spec.id == "edit.redo" {
-            return guard::run_guarded(spec.id, || {
-                let mut ctx = cmd::Ctx { session: self, caller, cancelled };
-                (spec.run)(&mut ctx, params)
-            });
+            return self.execute_undo_redo_with_hook(spec, params, caller, cancelled, after_commit);
         }
 
         let read_only =
             !spec.effects.contains(cmd::Effects::MUTATES_DOCUMENT) || (spec.id == "table.convertArchetype" && is_preview_only_convert(&params));
         if read_only {
-            return guard::run_guarded(spec.id, || {
+            let before_active = self.doc.active_sheet_id.clone();
+            let before_anchor = self.doc.family_anchor_sheet_id.clone();
+            let res = guard::run_guarded(spec.id, || {
                 let mut ctx = cmd::Ctx { session: self, caller, cancelled };
                 (spec.run)(&mut ctx, params)
-            });
+            })?;
+            if let Err(hook_err) = after_commit(self, &res) {
+                self.doc.active_sheet_id = before_active;
+                self.doc.family_anchor_sheet_id = before_anchor;
+                return Err(hook_err);
+            }
+            return Ok(res);
         }
 
+        self.execute_mutating_spec_with_hook(spec, params, caller, cancelled, after_commit)
+    }
+
+    fn execute_undo_redo_with_hook<F>(
+        &mut self,
+        spec: &cmd::CommandSpec,
+        params: Value,
+        caller: Caller,
+        cancelled: &AtomicBool,
+        after_commit: F,
+    ) -> Result<CommandOutcome, EngineError>
+    where
+        F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
+    {
+        let before_dirty = self.dirty;
+        let redo_may_evict = spec.id == "edit.redo"
+            && !self.redo_stack.is_empty()
+            && (self.undo_stack.len() >= MAX_UNDO_ENTRIES
+                || self.undo_cell_slots().saturating_add(document_allocated_cell_slots(&self.doc)) > MAX_UNDO_CELL_BUDGET
+                || self.undo_checkpoint_bytes().saturating_add(document_checkpoint_bytes(&self.doc)) > MAX_UNDO_CHECKPOINT_BYTES_BUDGET);
+        let undo_backup = redo_may_evict.then(|| self.undo_stack.clone());
+
+        let res = guard::run_guarded(spec.id, || {
+            let mut ctx = cmd::Ctx { session: self, caller, cancelled };
+            (spec.run)(&mut ctx, params)
+        })?;
+        if let Err(hook_err) = after_commit(self, &res) {
+            if res.mutated {
+                if spec.id == "edit.undo" {
+                    if let Some(before_doc) = self.redo_stack.pop() {
+                        let undone_doc = std::mem::replace(&mut self.doc, before_doc);
+                        self.undo_stack.push_back(UndoEntry::from_document(undone_doc));
+                    }
+                } else if let Some(prev_entry) = self.undo_stack.pop_back() {
+                    let redone_doc = std::mem::replace(&mut self.doc, prev_entry.doc);
+                    self.redo_stack.push(redone_doc);
+                    if let Some(full_undo) = undo_backup {
+                        self.undo_stack = full_undo;
+                    }
+                }
+                self.dirty = before_dirty;
+            }
+            return Err(hook_err);
+        }
+        Ok(res)
+    }
+
+    fn execute_mutating_spec_with_hook<F>(
+        &mut self,
+        spec: &cmd::CommandSpec,
+        params: Value,
+        caller: Caller,
+        cancelled: &AtomicBool,
+        after_commit: F,
+    ) -> Result<CommandOutcome, EngineError>
+    where
+        F: FnOnce(&Self, &CommandOutcome) -> Result<(), EngineError>,
+    {
         let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
             || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
             || (spec.id == "project.open" && !params.get("path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()));
@@ -1162,9 +1366,17 @@ impl Session {
                     if clears_file_path_on_mutate {
                         self.file_path = None;
                     }
+                    self.dirty = true;
+                    if let Err(hook_err) = after_commit(self, &res) {
+                        self.doc = before;
+                        self.file_path = before_path;
+                        self.dirty = before_dirty;
+                        return Err(hook_err);
+                    }
                     self.push_undo_snapshot(before);
                     self.redo_stack.clear();
-                    self.dirty = true;
+                } else {
+                    after_commit(self, &res)?;
                 }
                 Ok(res)
             }
@@ -1273,6 +1485,17 @@ mod tests {
             .execute_as_ui("sheet.createData", json!({ "sheet_id": "d1", "title": "UI Created", "graph_sheet_id": "g1" }))
             .expect("UI caller always allowed");
         assert!(created.mutated);
+
+        // UI-state-changing commands like `sheet.select` must also be rejected for non-UI callers in Strict mode,
+        // while remaining allowed for `Caller::Ui`.
+        for blocked_caller in [Caller::Mcp, Caller::Control, Caller::Cli] {
+            let select_err = session
+                .execute_with_caller("sheet.select", json!({ "sheet_id": "g1" }), blocked_caller, &cancelled)
+                .expect_err("sheet.select must fail for non-UI callers in Strict mode");
+            assert_eq!(select_err.code, ErrorCode::GuiOnlyViolation);
+        }
+        let ui_selected = session.execute_as_ui("sheet.select", json!({ "sheet_id": "g1" })).expect("UI caller may select sheet");
+        assert!(!ui_selected.mutated);
 
         // Compute and export commands are also blocked for non-UI callers under Strict policy.
         let compute_err = session
