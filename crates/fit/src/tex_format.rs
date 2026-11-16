@@ -1,9 +1,11 @@
 //! Canonical TeX-subset equation formatting for fitted linear, polynomial,
-//! built-in nonlinear, and custom DSL models (`R9.16`).
+//! built-in nonlinear, and custom DSL models (`R9.16` / `R10.19`).
 //!
-//! Emits clean strings compatible with `lumencraft-text`'s TeX subset (`\frac{}{}`,
-//! `\sqrt{}`, `\exp`, `\ln`, `\log`, `\sin`, `\cos`, `\tan`, `\min`, `\max`,
-//! `\cdot`, `\times`, `\text{}`, Greek escapes, braced `^{}`/`_{}`).
+//! Emits clean strings compatible with two-dimensional mathematical typography
+//! (`\frac{}{}`, `\sqrt{}`, `\exp`, `\ln`, `\log`, `\sin`, `\cos`, `\tan`,
+//! `\sinh`, `\cosh`, `\tanh`, `\arcsin`, `\arccos`, `\arctan`, `\erf`, `\erfc`,
+//! `\min`, `\max`, `\cdot`, `\times`, `\text{}`, uppercase and lowercase Greek
+//! escapes, fractional powers, and braced `^{}`/`_{}`).
 
 use crate::library::normalize_id;
 
@@ -809,7 +811,7 @@ fn format_peak_wave_tex(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "cumulative_gaussian" => {
             let bot = ctx.val("Bottom", "\\text{Bottom}");
             format!(
-                "Y = {bot} + ({} - {bot}) \\cdot \\frac{{1}}{{2}} \\cdot (1 + \\text{{erf}}(\\frac{{X - {}}}{{{} \\cdot \\sqrt{{2}}}}))",
+                "Y = {bot} + ({} - {bot}) \\cdot \\frac{{1}}{{2}} \\cdot (1 + \\erf(\\frac{{X - {}}}{{{} \\cdot \\sqrt{{2}}}}))",
                 ctx.val("Top", "\\text{Top}"),
                 ctx.val("Mean", "\\text{Mean}"),
                 ctx.val("SD", "\\text{SD}"),
@@ -981,9 +983,9 @@ fn format_nist_part2(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
     let s = match id {
         "nelson" => format!("Y = {b1} - {b2} \\cdot X_1 \\cdot \\exp(-{b3} \\cdot X_2)"),
         "mgh17" => format!("Y = {b1} + {b2} \\cdot \\exp(-{b4} \\cdot X) + {b3} \\cdot \\exp(-{b5} \\cdot X)"),
-        "misra1c" => format!("Y = {b1} \\cdot (1 - (1 + 2 \\cdot {} \\cdot X)^{{-1/2}})", ctx.factor("b2", "b_2")),
+        "misra1c" => format!("Y = {b1} \\cdot (1 - (1 + 2 \\cdot {} \\cdot X)^{{-\\frac{{1}}{{2}}}})", ctx.factor("b2", "b_2")),
         "misra1d" => format!("Y = \\frac{{{b1} \\cdot {} \\cdot X}}{{1 + {b2} \\cdot X}}", ctx.factor("b2", "b_2")),
-        "roszman1" => format!("Y = {b1} - {b2} \\cdot X - \\frac{{\\text{{arctan}}(\\frac{{{b3}}}{{X - {b4}}})}}{{\\pi}}"),
+        "roszman1" => format!("Y = {b1} - {b2} \\cdot X - \\frac{{\\arctan(\\frac{{{b3}}}{{X - {b4}}})}}{{\\pi}}"),
         "enso" => format!(
             "Y = {b1} + {b2} \\cdot \\cos(\\frac{{2\\pi \\cdot X}}{{12}}) + {b3} \\cdot \\sin(\\frac{{2\\pi \\cdot X}}{{12}}) + {b5} \\cdot \\cos(\\frac{{2\\pi \\cdot X}}{{{b4}}}) + {b6} \\cdot \\sin(\\frac{{2\\pi \\cdot X}}{{{b4}}}) + {b8} \\cdot \\cos(\\frac{{2\\pi \\cdot X}}{{{b7}}}) + {b9} \\cdot \\sin(\\frac{{2\\pi \\cdot X}}{{{b7}}})"
         ),
@@ -993,8 +995,8 @@ fn format_nist_part2(id: &str, ctx: &EqCtx<'_>) -> Option<String> {
         "eckerle4" => {
             format!("Y = \\frac{{{b1}}}{{{b2}}} \\cdot \\exp(-\\frac{{(X - {b3})^{{2}}}}{{2 \\cdot {}^{{2}}}})", ctx.pow_base("b2", "b_2"))
         }
-        "rat43" => format!("Y = \\frac{{{b1}}}{{(1 + \\exp({b2} - {b3} \\cdot X))^{{1 / {}}}}}", ctx.denom("b4", "b_4")),
-        "bennett5" => format!("Y = {b1} \\cdot ({b2} + X)^{{-1 / {}}}", ctx.denom("b3", "b_3")),
+        "rat43" => format!("Y = \\frac{{{b1}}}{{(1 + \\exp({b2} - {b3} \\cdot X))^{{\\frac{{1}}{{{}}}}}}}", ctx.denom("b4", "b_4")),
+        "bennett5" => format!("Y = {b1} \\cdot ({b2} + X)^{{-\\frac{{1}}{{{}}}}}", ctx.denom("b3", "b_3")),
         _ => return None,
     };
     Some(s)
@@ -1011,7 +1013,7 @@ fn format_custom_dsl_tex(src: &str, params: &[(String, f64)], substituted: bool,
     let tex = if let Some(expr) = parse_dsl_expr(&tokens, &mut pos) {
         if pos == tokens.len() {
             let ctx = EqCtx { params, substituted, sig_figs };
-            let rhs_tex = render_dsl_tex(&expr, &ctx, 0, false);
+            let rhs_tex = render_dsl_tex(&expr, &ctx, 0);
             format!("{lhs} = {rhs_tex}")
         } else {
             fallback_custom_dsl_tex(&lhs, &rhs_src, params, substituted, sig_figs)
@@ -1307,7 +1309,7 @@ fn parse_primary(tokens: &[DslTok], pos: &mut usize) -> Option<DslExpr> {
     }
 }
 
-fn render_dsl_tex(expr: &DslExpr, ctx: &EqCtx<'_>, parent_prec: u8, in_script: bool) -> String {
+fn render_dsl_tex(expr: &DslExpr, ctx: &EqCtx<'_>, parent_prec: u8) -> String {
     match expr {
         DslExpr::Num(s) => format_dsl_literal(s, ctx.sig_figs),
         DslExpr::Ident(name) => {
@@ -1325,65 +1327,79 @@ fn render_dsl_tex(expr: &DslExpr, ctx: &EqCtx<'_>, parent_prec: u8, in_script: b
         }
         DslExpr::Neg(inner) => {
             let need_paren = matches!(inner.as_ref(), DslExpr::Bin(DslBinOp::Add | DslBinOp::Sub, _, _));
-            let body = render_dsl_tex(inner, ctx, 2, in_script);
+            let body = render_dsl_tex(inner, ctx, 2);
             if !need_paren && let Some(pos_body) = body.strip_prefix('-') {
                 return if parent_prec >= 3 && pos_body.contains("\\times") { format!("({pos_body})") } else { pos_body.to_string() };
             }
             let neg = if need_paren { format!("-({body})") } else { format!("-{body}") };
             if parent_prec >= 3 { format!("({neg})") } else { neg }
         }
-        DslExpr::Bin(op, lhs, rhs) => render_dsl_bin(*op, lhs, rhs, ctx, parent_prec, in_script),
+        DslExpr::Bin(op, lhs, rhs) => render_dsl_bin(*op, lhs, rhs, ctx, parent_prec),
         DslExpr::Call(name, args) => render_dsl_call(name, args, ctx),
     }
 }
 
-fn render_dsl_bin(op: DslBinOp, lhs: &DslExpr, rhs: &DslExpr, ctx: &EqCtx<'_>, parent_prec: u8, in_script: bool) -> String {
+fn render_dsl_bin(op: DslBinOp, lhs: &DslExpr, rhs: &DslExpr, ctx: &EqCtx<'_>, parent_prec: u8) -> String {
     match op {
         DslBinOp::Add => {
-            let s = format!("{} + {}", render_dsl_tex(lhs, ctx, 1, in_script), render_dsl_tex(rhs, ctx, 1, in_script));
+            let s = format!("{} + {}", render_dsl_tex(lhs, ctx, 1), render_dsl_tex(rhs, ctx, 1));
             if parent_prec > 1 { format!("({s})") } else { s }
         }
         DslBinOp::Sub => {
             let r_paren = matches!(rhs, DslExpr::Bin(DslBinOp::Add | DslBinOp::Sub, _, _));
-            let r = render_dsl_tex(rhs, ctx, 2, in_script);
+            let r = render_dsl_tex(rhs, ctx, 2);
             let rhs_str = if r_paren { format!("({r})") } else { r };
-            let s = format!("{} - {rhs_str}", render_dsl_tex(lhs, ctx, 1, in_script));
+            let s = format!("{} - {rhs_str}", render_dsl_tex(lhs, ctx, 1));
             if parent_prec > 1 { format!("({s})") } else { s }
         }
         DslBinOp::Mul => {
-            let l_str = render_dsl_tex(lhs, ctx, 2, in_script);
-            let r_str = render_dsl_tex(rhs, ctx, 3, in_script);
+            let l_str = render_dsl_tex(lhs, ctx, 2);
+            let r_str = render_dsl_tex(rhs, ctx, 3);
             let s = format!("{l_str} \\cdot {r_str}");
             if parent_prec > 2 { format!("({s})") } else { s }
         }
         DslBinOp::Div => {
-            if in_script {
-                let l_str = render_dsl_tex(lhs, ctx, 3, true);
-                let r_str = render_dsl_tex(rhs, ctx, 3, true);
-                let s = format!("{l_str} / {r_str}");
-                if parent_prec > 2 { format!("({s})") } else { s }
-            } else {
-                let n = render_dsl_tex(lhs, ctx, 0, false);
-                let d = render_dsl_tex(rhs, ctx, 0, false);
-                format!("\\frac{{{n}}}{{{d}}}")
+            if let Some(pos_lhs) = strip_leading_dsl_neg(lhs) {
+                let inner_tex = render_dsl_tex(&pos_lhs, ctx, 0);
+                let d = render_dsl_tex(rhs, ctx, 0);
+                if let Some(pos) = inner_tex.strip_prefix('-') {
+                    let frac = format!("\\frac{{{pos}}}{{{d}}}");
+                    return if parent_prec >= 3 && pos.contains("\\times") { format!("({frac})") } else { frac };
+                }
+                let frac = format!("-\\frac{{{inner_tex}}}{{{d}}}");
+                return if parent_prec >= 3 { format!("({frac})") } else { frac };
             }
+            let n = render_dsl_tex(lhs, ctx, 0);
+            let d = render_dsl_tex(rhs, ctx, 0);
+            format!("\\frac{{{n}}}{{{d}}}")
         }
         DslBinOp::Pow => {
-            let mut b = render_dsl_tex(lhs, ctx, 4, in_script);
+            let mut b = render_dsl_tex(lhs, ctx, 4);
             let base_needs_paren = matches!(lhs, DslExpr::Bin(_, _, _) | DslExpr::Neg(_))
                 || ((b.starts_with('-') || b.contains("\\times") || b.starts_with("\\frac")) && !b.starts_with('('));
             if base_needs_paren && !b.starts_with('(') {
                 b = format!("({b})");
             }
-            let e = render_dsl_tex(rhs, ctx, 0, true);
+            let e = render_dsl_tex(rhs, ctx, 0);
             format!("{b}^{{{e}}}")
         }
     }
 }
 
+fn strip_leading_dsl_neg(expr: &DslExpr) -> Option<DslExpr> {
+    match expr {
+        DslExpr::Neg(inner) => Some(inner.as_ref().clone()),
+        DslExpr::Bin(DslBinOp::Mul, l, r) => {
+            let l_pos = strip_leading_dsl_neg(l)?;
+            Some(DslExpr::Bin(DslBinOp::Mul, Box::new(l_pos), r.clone()))
+        }
+        _ => None,
+    }
+}
+
 fn render_dsl_call(name: &str, args: &[DslExpr], ctx: &EqCtx<'_>) -> String {
     let lower = name.to_ascii_lowercase();
-    let rendered_args: Vec<String> = args.iter().map(|a| render_dsl_tex(a, ctx, 0, false)).collect();
+    let rendered_args: Vec<String> = args.iter().map(|a| render_dsl_tex(a, ctx, 0)).collect();
     match (lower.as_str(), rendered_args.as_slice()) {
         ("exp", [a]) => format!("\\exp({a})"),
         ("exp10", [a]) => format!("10^{{{a}}}"),
@@ -1395,9 +1411,26 @@ fn render_dsl_call(name: &str, args: &[DslExpr], ctx: &EqCtx<'_>) -> String {
         ("sin", [a]) => format!("\\sin({a})"),
         ("cos", [a]) => format!("\\cos({a})"),
         ("tan", [a]) => format!("\\tan({a})"),
+        ("sinh", [a]) => format!("\\sinh({a})"),
+        ("cosh", [a]) => format!("\\cosh({a})"),
+        ("tanh", [a]) => format!("\\tanh({a})"),
+        ("arcsin" | "asin", [a]) => format!("\\arcsin({a})"),
+        ("arccos" | "acos", [a]) => format!("\\arccos({a})"),
+        ("arctan" | "atan", [a]) => format!("\\arctan({a})"),
+        ("sec", [a]) => format!("\\sec({a})"),
+        ("csc", [a]) => format!("\\csc({a})"),
+        ("cot", [a]) => format!("\\cot({a})"),
+        ("erf", [a]) => format!("\\erf({a})"),
+        ("erfc", [a]) => format!("\\erfc({a})"),
         ("min", _) => format!("\\min({})", rendered_args.join(", ")),
         ("max", _) => format!("\\max({})", rendered_args.join(", ")),
-        ("pow", [b, e]) => format!("({b})^{{{e}}}"),
+        ("pow", [b, e]) => {
+            if matches!(args.first(), Some(DslExpr::Ident(_) | DslExpr::Num(_))) && !b.starts_with('-') && !b.contains("\\times") {
+                format!("{b}^{{{e}}}")
+            } else {
+                format!("({b})^{{{e}}}")
+            }
+        }
         _ => format!("\\text{{{name}}}({})", rendered_args.join(", ")),
     }
 }
@@ -1492,13 +1525,90 @@ fn replace_ident_word_prefix(input: &str, pat: &str, rep: &str) -> String {
     out
 }
 
-fn tex_ident(ident: &str) -> String {
-    match ident {
-        "alpha" | "beta" | "gamma" | "delta" | "epsilon" | "zeta" | "eta" | "theta" | "iota" | "kappa" | "lambda" | "mu" | "nu" | "xi" | "rho"
-        | "sigma" | "tau" | "phi" | "chi" | "psi" | "omega" => format!("\\{ident}"),
-        _ if ident.len() == 1 => ident.to_string(),
-        _ => format!("\\text{{{ident}}}"),
+fn greek_tex_escape(ident: &str) -> Option<&'static str> {
+    let esc = match ident {
+        "alpha" => "\\alpha",
+        "beta" => "\\beta",
+        "gamma" => "\\gamma",
+        "delta" => "\\delta",
+        "epsilon" => "\\epsilon",
+        "varepsilon" => "\\varepsilon",
+        "zeta" => "\\zeta",
+        "eta" => "\\eta",
+        "theta" => "\\theta",
+        "vartheta" => "\\vartheta",
+        "iota" => "\\iota",
+        "kappa" => "\\kappa",
+        "varkappa" => "\\varkappa",
+        "lambda" => "\\lambda",
+        "mu" => "\\mu",
+        "nu" => "\\nu",
+        "xi" => "\\xi",
+        "omicron" => "\\omicron",
+        "pi" => "\\pi",
+        "varpi" => "\\varpi",
+        "rho" => "\\rho",
+        "varrho" => "\\varrho",
+        "sigma" => "\\sigma",
+        "varsigma" => "\\varsigma",
+        "tau" => "\\tau",
+        "upsilon" => "\\upsilon",
+        "phi" => "\\phi",
+        "varphi" => "\\varphi",
+        "chi" => "\\chi",
+        "psi" => "\\psi",
+        "omega" => "\\omega",
+        "Alpha" => "\\Alpha",
+        "Beta" => "\\Beta",
+        "Gamma" => "\\Gamma",
+        "Delta" => "\\Delta",
+        "Epsilon" => "\\Epsilon",
+        "Zeta" => "\\Zeta",
+        "Eta" => "\\Eta",
+        "Theta" => "\\Theta",
+        "Iota" => "\\Iota",
+        "Kappa" => "\\Kappa",
+        "Lambda" => "\\Lambda",
+        "Mu" => "\\Mu",
+        "Nu" => "\\Nu",
+        "Xi" => "\\Xi",
+        "Omicron" => "\\Omicron",
+        "Pi" => "\\Pi",
+        "Rho" => "\\Rho",
+        "Sigma" => "\\Sigma",
+        "Tau" => "\\Tau",
+        "Upsilon" => "\\Upsilon",
+        "Phi" => "\\Phi",
+        "Chi" => "\\Chi",
+        "Psi" => "\\Psi",
+        "Omega" => "\\Omega",
+        _ => return None,
+    };
+    Some(esc)
+}
+
+fn tex_ident_sub(sub: &str) -> String {
+    if let Some(greek) = greek_tex_escape(sub) {
+        return greek.to_string();
     }
+    if sub.len() == 1 || sub.chars().all(|c| c.is_ascii_digit()) {
+        return sub.to_string();
+    }
+    let clean = sub.replace('_', ",");
+    format!("\\text{{{clean}}}")
+}
+
+fn tex_ident(ident: &str) -> String {
+    if let Some(greek) = greek_tex_escape(ident) {
+        return greek.to_string();
+    }
+    if let Some((head, tail)) = ident.split_once('_')
+        && !head.is_empty()
+        && !tail.is_empty()
+    {
+        return format!("{}_{{{}}}", tex_ident(head), tex_ident_sub(tail));
+    }
+    if ident.len() == 1 { ident.to_string() } else { format!("\\text{{{ident}}}") }
 }
 
 // ---------------------------------------------------------------------------
@@ -1764,5 +1874,35 @@ mod tests {
 
         let fb_empty = format_model_equation_tex("totally_unknown_id", None, &[], false, 4);
         assert_eq!(fb_empty, "Y = f_{totally_unknown_id}(X)");
+    }
+
+    #[test]
+    fn greek_parameters_fractional_exponents_and_operators_format_for_2d_math() {
+        let greek_dsl = "Y = Delta * exp(-theta * X / tau_fast) + alpha_1 * sin(kappa * X + phi) + Omega";
+        let sym = format_model_equation_tex("custom_dsl", Some(greek_dsl), &[], false, 4);
+        assert_eq!(
+            sym,
+            "Y = \\Delta \\cdot \\exp(-\\frac{\\theta \\cdot X}{\\tau_{\\text{fast}}}) + \\alpha_{1} \\cdot \\sin(\\kappa \\cdot X + \\phi) + \\Omega"
+        );
+
+        let sub = format_model_equation_tex(
+            "custom_dsl",
+            Some(greek_dsl),
+            &[("Delta".into(), 12.5), ("theta".into(), 2.0), ("tau_fast".into(), 4.0), ("Omega".into(), -1.5)],
+            true,
+            4,
+        );
+        assert!(sub.contains("12.5 \\cdot \\exp(-\\frac{2 \\cdot X}{4})"), "sub={sub}");
+        assert!(sub.contains("- 1.5"), "sub={sub}");
+
+        let frac_pow = format_model_equation_tex("custom_dsl", Some("Y = A * (X / t_e)^(-1 / beta) + erf(gamma * X)"), &[], false, 4);
+        assert_eq!(frac_pow, "Y = A \\cdot (\\frac{X}{t_{e}})^{-\\frac{1}{\\beta}} + \\erf(\\gamma \\cdot X)");
+
+        let misra1c = format_model_equation_tex("nist_misra1c", None, &[], false, 4);
+        assert_eq!(misra1c, "Y = b_1 \\cdot (1 - (1 + 2 \\cdot b_2 \\cdot X)^{-\\frac{1}{2}})");
+        let rat43 = format_model_equation_tex("nist_rat43", None, &[], false, 4);
+        assert_eq!(rat43, "Y = \\frac{b_1}{(1 + \\exp(b_2 - b_3 \\cdot X))^{\\frac{1}{b_4}}}");
+        let roszman = format_model_equation_tex("nist_roszman1", None, &[], false, 4);
+        assert_eq!(roszman, "Y = b_1 - b_2 \\cdot X - \\frac{\\arctan(\\frac{b_3}{X - b_4})}{\\pi}");
     }
 }
