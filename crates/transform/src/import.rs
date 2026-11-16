@@ -221,16 +221,29 @@ fn extract_stage1(
             let Some(tab) = tab else {
                 return Err(TransformError::InvalidInput { message: String::from("referenced ResultTab not found") });
             };
-            let mut grid = Vec::new();
-            let end_r = range.end.row.min(tab.rows.len().saturating_sub(1));
-            if range.start.row <= end_r && !tab.rows.is_empty() {
-                for r in range.start.row..=end_r {
-                    let row = &tab.rows[r];
-                    let end_c = range.end.col.min(row.len().saturating_sub(1));
-                    if range.start.col <= end_c && !row.is_empty() {
-                        grid.push(row[range.start.col..=end_c].iter().map(result_cell_to_cell).collect());
-                    }
+            let col_count = tab.rows.iter().map(Vec::len).max().unwrap_or(0).max(tab.column_headers.len());
+            if tab.rows.is_empty()
+                || col_count == 0
+                || range.end.row < range.start.row
+                || range.end.col < range.start.col
+                || range.start.row >= tab.rows.len()
+                || range.start.col >= col_count
+            {
+                return Ok((Vec::new(), Vec::new()));
+            }
+            let end_r = range.end.row.min(tab.rows.len() - 1);
+            let end_c = range.end.col.min(col_count - 1);
+            let row_span = end_r - range.start.row + 1;
+            let width = end_c - range.start.col + 1;
+            check_transform_cell_budget(row_span.checked_mul(width), "internal result import")?;
+            let mut grid = Vec::with_capacity(row_span);
+            for r in range.start.row..=end_r {
+                let row = &tab.rows[r];
+                let mut row_cells = Vec::with_capacity(width);
+                for c in range.start.col..=end_c {
+                    row_cells.push(row.get(c).map_or_else(Cell::empty, result_cell_to_cell));
                 }
+                grid.push(row_cells);
             }
             Ok((grid, Vec::new()))
         }
@@ -454,7 +467,7 @@ fn apply_stage2_filter(
     }
 
     if let Some(ref pred) = opts.exclude_row_predicate {
-        apply_row_exclusion_predicate(&mut grid, pred)?;
+        apply_row_exclusion_predicate(&mut grid, header_row, pred)?;
     }
 
     for &(r, c) in &opts.exclude_coords {
@@ -545,23 +558,65 @@ fn apply_grid_baseline(grid: &mut [Vec<Cell>], base_col: usize, op: BaselineOper
     Ok(())
 }
 
-fn apply_row_exclusion_predicate(grid: &mut [Vec<Cell>], pred: &str) -> Result<(), TransformError> {
+struct ImportRowEnv<'a> {
+    row: &'a [Cell],
+    header_row: &'a [Cell],
+    col_labels: &'a [String],
+    scalars: ScalarEnv<'a>,
+}
+
+impl crate::formula::FormulaContext for ImportRowEnv<'_> {
+    fn row_count(&self) -> usize {
+        1
+    }
+
+    fn resolve_column_index(&self, name: &str) -> Option<usize> {
+        let needle = name.trim();
+        if let Some(pos) = self.header_row.iter().position(|c| c.active_text().is_some_and(|t| t.trim() == needle)) {
+            return Some(pos);
+        }
+        if let Some(pos) = self.header_row.iter().position(|c| c.active_text().is_some_and(|t| t.trim().eq_ignore_ascii_case(needle))) {
+            return Some(pos);
+        }
+        self.col_labels.iter().position(|lbl| lbl.eq_ignore_ascii_case(needle))
+    }
+
+    fn column_count(&self) -> usize {
+        self.col_labels.len()
+    }
+
+    fn column_values(&self, col_idx: usize) -> Option<Vec<crate::formula::FormulaValue>> {
+        if col_idx >= self.col_labels.len() {
+            return None;
+        }
+        let val = self.row.get(col_idx).map_or(crate::formula::FormulaValue::Missing, crate::formula::FormulaValue::from_cell);
+        Some(vec![val])
+    }
+
+    fn resolve_info_constant(&self, _name: &str) -> Option<crate::formula::FormulaValue> {
+        None
+    }
+
+    fn resolve_scalar(&self, name: &str) -> Option<crate::formula::FormulaValue> {
+        crate::formula::FormulaContext::resolve_scalar(&self.scalars, name)
+    }
+}
+
+fn apply_row_exclusion_predicate(grid: &mut [Vec<Cell>], header_row: &[Cell], pred: &str) -> Result<(), TransformError> {
     let expr = parse_formula(pred)?;
+    if grid.is_empty() {
+        return Ok(());
+    }
+    let col_count = grid.iter().map(Vec::len).max().unwrap_or(0).max(header_row.len());
+    let col_labels: Vec<String> = (0..col_count).map(default_column_label).collect();
     for (r, row) in grid.iter_mut().enumerate() {
-        let mut bindings = Vec::with_capacity(row.len() + 2);
         #[allow(clippy::cast_precision_loss)]
-        {
-            bindings.push(("$row", (r + 1) as f64));
-            bindings.push(("$index", r as f64));
-        }
-        let col_names: Vec<String> = (0..row.len()).map(curvebook_doc::default_column_label).collect();
-        for (c, cell) in row.iter().enumerate() {
-            if let Some(v) = cell.active_number() {
-                bindings.push((col_names[c].as_str(), v));
-            }
-        }
-        let env = ScalarEnv::new(bindings, None);
-        if eval_scalar_expr(&expr, &env)?.as_bool() == Some(true) {
+        let scalars = ScalarEnv::new(vec![("$row", (r + 1) as f64), ("$index", r as f64)], None);
+        let excluded = {
+            let env = ImportRowEnv { row, header_row, col_labels: &col_labels, scalars };
+            eval_scalar_expr(&expr, &env)?.as_bool() == Some(true)
+        };
+        if excluded {
             for cell in row.iter_mut() {
                 cell.excluded = true;
             }

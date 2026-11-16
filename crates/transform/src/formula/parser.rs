@@ -444,7 +444,9 @@ impl Parser {
             }
             TokenKind::Ident(ref name) if name.eq_ignore_ascii_case("not") && !matches!(self.peek_next_kind(), Some(TokenKind::LParen)) => {
                 self.advance();
-                let rhs = self.parse_expr(13)?;
+                // Word-form `not` binds looser than comparisons (`==`, `!=`, `<`, `<=`, `>`, `>=` at bp 5..8)
+                // and tighter than logical `and` (bp 3..4) and `or` (bp 1..2).
+                let rhs = self.parse_expr(5)?;
                 Ok(Expr::Unary { op: UnaryOp::Not, expr: Box::new(rhs) })
             }
             _ => self.parse_primary(),

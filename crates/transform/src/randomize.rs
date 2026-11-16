@@ -33,7 +33,8 @@ pub enum AllocationScheme {
     CompleteBalanced,
     /// Sequential permuted blocks whose sizes are fixed (`block_sizes.len() == 1`) or drawn
     /// uniformly per block from `block_sizes` (`block_sizes.len() > 1`). Every block size must be
-    /// a positive multiple of `sum(weights)`.
+    /// a positive multiple of `sum(weights)` within the bounded per-block capacity limit
+    /// (Matts & Lachin, *Controlled Clinical Trials*, 1988, 9(4), 327–344).
     PermutedBlock { block_sizes: Vec<usize> },
 }
 
@@ -342,8 +343,20 @@ fn validate_randomization_config(config: &SubjectRandomizationConfig) -> Result<
         if block_sizes.is_empty() {
             return Err(TransformError::InvalidSpec { message: String::from("PermutedBlock block_sizes must not be empty") });
         }
+        let n_subjects = config.subject_ids.len();
+        let max_block_size = n_subjects.saturating_mul(16).clamp(65_536, curvebook_doc::MAX_ROWS);
         for &b in block_sizes {
-            if b == 0 || b % sum_weights != 0 {
+            if b == 0 {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("PermutedBlock size {b} must be a positive multiple of sum(weights) = {sum_weights}"),
+                });
+            }
+            if b > max_block_size {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("PermutedBlock size {b} exceeds maximum permitted block size {max_block_size} for {n_subjects} subject(s)"),
+                });
+            }
+            if b % sum_weights != 0 {
                 return Err(TransformError::InvalidSpec {
                     message: format!("PermutedBlock size {b} must be a positive multiple of sum(weights) = {sum_weights}"),
                 });
@@ -380,7 +393,10 @@ fn assign_subject_groups(config: &SubjectRandomizationConfig, sum_weights: usize
                     block_sizes.get(picked).copied().unwrap_or(block_sizes[0])
                 };
                 let mult = block_size / sum_weights;
-                let mut block = Vec::with_capacity(block_size);
+                let mut block = Vec::new();
+                block.try_reserve_exact(block_size).map_err(|_| TransformError::InvalidSpec {
+                    message: format!("PermutedBlock size {block_size} exceeds available memory capacity"),
+                })?;
                 for (g_idx, g) in config.groups.iter().enumerate() {
                     let count = g
                         .weight

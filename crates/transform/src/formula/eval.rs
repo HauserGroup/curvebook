@@ -89,6 +89,9 @@ pub trait FormulaContext {
     }
     fn row_count(&self) -> usize;
     fn resolve_column_index(&self, name: &str) -> Option<usize>;
+    fn resolve_column_index_exact(&self, name: &str) -> Option<usize> {
+        self.resolve_column_index(name)
+    }
     fn column_count(&self) -> usize;
     fn column_values(&self, col_idx: usize) -> Option<Vec<FormulaValue>>;
     fn resolve_x_column(&self) -> Option<Vec<FormulaValue>> {
@@ -169,6 +172,10 @@ impl FormulaContext for TableEvalContext<'_> {
         resolve_archetype_column(&self.sheet.archetype, name)
     }
 
+    fn resolve_column_index_exact(&self, name: &str) -> Option<usize> {
+        resolve_archetype_column_exact(&self.sheet.archetype, name)
+    }
+
     fn column_count(&self) -> usize {
         self.sheet.archetype.column_count()
     }
@@ -209,6 +216,10 @@ impl FormulaContext for MultipleVariablesContext<'_> {
 
     fn resolve_column_index(&self, name: &str) -> Option<usize> {
         resolve_mv_column(self.table, name)
+    }
+
+    fn resolve_column_index_exact(&self, name: &str) -> Option<usize> {
+        resolve_ident_mv_column(self.table, name)
     }
 
     fn column_count(&self) -> usize {
@@ -256,6 +267,22 @@ pub(crate) fn resolve_mv_column(mv: &MultipleVariablesTable, name: &str) -> Opti
     (0..mv.variables.len()).find(|&i| default_column_label(i).eq_ignore_ascii_case(needle))
 }
 
+pub(crate) fn resolve_ident_mv_column(mv: &MultipleVariablesTable, name: &str) -> Option<usize> {
+    let needle = name.trim();
+    if !is_math_constant(needle) {
+        return resolve_mv_column(mv, needle);
+    }
+    if let Some(pos) = mv.variables.iter().position(|v| v.title.trim() == needle) {
+        return Some(pos);
+    }
+    if !needle.eq_ignore_ascii_case("e")
+        && let Some(pos) = mv.variables.iter().position(|v| v.title.trim().eq_ignore_ascii_case(needle))
+    {
+        return Some(pos);
+    }
+    (0..mv.variables.len()).find(|&i| default_column_label(i) == needle)
+}
+
 fn resolve_dataset_titles(titles: &[String], name: &str) -> Option<usize> {
     let needle = name.trim();
     if let Some(pos) = titles.iter().position(|t| t.trim() == needle) {
@@ -265,6 +292,57 @@ fn resolve_dataset_titles(titles: &[String], name: &str) -> Option<usize> {
         return Some(pos);
     }
     (0..titles.len()).find(|&i| default_column_label(i).eq_ignore_ascii_case(needle))
+}
+
+fn resolve_ident_dataset_titles(titles: &[String], name: &str) -> Option<usize> {
+    let needle = name.trim();
+    if !is_math_constant(needle) {
+        return resolve_dataset_titles(titles, needle);
+    }
+    if let Some(pos) = titles.iter().position(|t| t.trim() == needle) {
+        return Some(pos);
+    }
+    if !needle.eq_ignore_ascii_case("e")
+        && let Some(pos) = titles.iter().position(|t| t.trim().eq_ignore_ascii_case(needle))
+    {
+        return Some(pos);
+    }
+    (0..titles.len()).find(|&i| default_column_label(i) == needle)
+}
+
+fn resolve_archetype_column_exact(arch: &TableArchetype, name: &str) -> Option<usize> {
+    match arch {
+        TableArchetype::MultipleVariables(mv) => resolve_ident_mv_column(mv, name),
+        TableArchetype::Xy(t) => {
+            let titles: Vec<String> = t.data_sets.iter().map(|d| d.title.clone()).collect();
+            resolve_ident_dataset_titles(&titles, name)
+                .or_else(|| name.trim().eq_ignore_ascii_case("y").then_some(0).filter(|_| !t.data_sets.is_empty()))
+        }
+        TableArchetype::Column(t) => {
+            let titles: Vec<String> = t.data_sets.iter().map(|d| d.title.clone()).collect();
+            resolve_ident_dataset_titles(&titles, name)
+        }
+        TableArchetype::Grouped(t) => {
+            let titles: Vec<String> = t.data_sets.iter().map(|d| d.title.clone()).collect();
+            resolve_ident_dataset_titles(&titles, name)
+        }
+        TableArchetype::Contingency(t) => {
+            let titles: Vec<String> = t.data_sets.iter().map(|d| d.title.clone()).collect();
+            resolve_ident_dataset_titles(&titles, name)
+        }
+        TableArchetype::Survival(t) => {
+            let titles: Vec<String> = t.cohorts.iter().map(|d| d.title.clone()).collect();
+            resolve_ident_dataset_titles(&titles, name)
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            let titles: Vec<String> = t.data_sets.iter().map(|d| d.title.clone()).collect();
+            resolve_ident_dataset_titles(&titles, name)
+        }
+        TableArchetype::Nested(t) => {
+            let titles: Vec<String> = t.groups.iter().map(|g| g.title.clone()).collect();
+            resolve_ident_dataset_titles(&titles, name)
+        }
+    }
 }
 
 fn resolve_archetype_column(arch: &TableArchetype, name: &str) -> Option<usize> {
@@ -444,13 +522,21 @@ fn eval_column_expr_inner(expr: &Expr, ctx: &dyn FormulaContext) -> Result<Vec<F
 fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
     let n = ctx.row_count();
     match vref {
-        VarRef::RowOneBased =>
-        {
+        VarRef::RowOneBased => {
+            if n == 1
+                && let Some(v) = ctx.resolve_scalar("$row")
+            {
+                return Ok(vec![v]);
+            }
             #[allow(clippy::cast_precision_loss)]
             Ok((1..=n).map(|r| FormulaValue::Number(r as f64)).collect())
         }
-        VarRef::IndexZeroBased =>
-        {
+        VarRef::IndexZeroBased => {
+            if n == 1
+                && let Some(v) = ctx.resolve_scalar("$index")
+            {
+                return Ok(vec![v]);
+            }
             #[allow(clippy::cast_precision_loss)]
             Ok((0..n).map(|r| FormulaValue::Number(r as f64)).collect())
         }
@@ -498,45 +584,72 @@ fn eval_var_ref(vref: &VarRef, ctx: &dyn FormulaContext) -> Result<Vec<FormulaVa
 
 fn resolve_ident_var(name: &str, ctx: &dyn FormulaContext) -> Result<Vec<FormulaValue>, TransformError> {
     let n = ctx.row_count();
-    if let Some(v) = ctx.resolve_scalar(name) {
+    let trimmed = name.trim();
+    if let Some(v) = ctx.resolve_scalar(trimmed) {
         return Ok(vec![v; n]);
     }
-    if let Some(c) = builtin_constant(name) {
+    if let Some(c) = reserved_literal(trimmed) {
         return Ok(vec![c; n]);
     }
-    if name.eq_ignore_ascii_case("x")
+    if is_math_constant(trimmed) {
+        if let Some(idx) = ctx.resolve_column_index_exact(trimmed)
+            && let Some(vals) = ctx.column_values(idx)
+        {
+            return Ok(normalize_col_len(vals, n));
+        }
+        if let Some(c) = math_constant(trimmed) {
+            return Ok(vec![c; n]);
+        }
+        if let Some(v) = ctx.resolve_info_constant(trimmed) {
+            return Ok(vec![v; n]);
+        }
+        return Err(TransformError::UnknownVariable { name: name.to_owned() });
+    }
+    if trimmed.eq_ignore_ascii_case("x")
         && let Some(xs) = ctx.resolve_x_column()
     {
         return Ok(normalize_col_len(xs, n));
     }
-    if let Some(idx) = ctx.resolve_column_index(name)
+    if let Some(idx) = ctx.resolve_column_index(trimmed)
         && let Some(vals) = ctx.column_values(idx)
     {
         return Ok(normalize_col_len(vals, n));
     }
-    if let Some(v) = ctx.resolve_info_constant(name) {
+    if let Some(v) = ctx.resolve_info_constant(trimmed) {
         return Ok(vec![v; n]);
     }
     Err(TransformError::UnknownVariable { name: name.to_owned() })
 }
 
+/// Returns `true` only for reserved non-column keyword literals (`true`, `false`, `nan`) so static
+/// dependency extraction never skips column names such as `E`, `e`, `pi`, or `tau`.
 pub(crate) fn is_builtin_constant(name: &str) -> bool {
-    builtin_constant(name).is_some()
+    reserved_literal(name.trim()).is_some()
 }
 
-fn builtin_constant(name: &str) -> Option<FormulaValue> {
+pub(crate) fn is_math_constant(name: &str) -> bool {
+    math_constant(name).is_some()
+}
+
+fn reserved_literal(name: &str) -> Option<FormulaValue> {
+    if name.eq_ignore_ascii_case("true") {
+        Some(FormulaValue::Number(1.0))
+    } else if name.eq_ignore_ascii_case("false") {
+        Some(FormulaValue::Number(0.0))
+    } else if name.eq_ignore_ascii_case("nan") {
+        Some(FormulaValue::Missing)
+    } else {
+        None
+    }
+}
+
+fn math_constant(name: &str) -> Option<FormulaValue> {
     if name.eq_ignore_ascii_case("pi") {
         Some(FormulaValue::Number(std::f64::consts::PI))
     } else if name.eq_ignore_ascii_case("e") {
         Some(FormulaValue::Number(std::f64::consts::E))
     } else if name.eq_ignore_ascii_case("tau") {
         Some(FormulaValue::Number(std::f64::consts::TAU))
-    } else if name.eq_ignore_ascii_case("true") {
-        Some(FormulaValue::Number(1.0))
-    } else if name.eq_ignore_ascii_case("false") {
-        Some(FormulaValue::Number(0.0))
-    } else if name.eq_ignore_ascii_case("nan") {
-        Some(FormulaValue::Missing)
     } else {
         None
     }
@@ -552,12 +665,16 @@ fn apply_unary(op: UnaryOp, val: &FormulaValue) -> FormulaValue {
 
 fn apply_binary(op: BinaryOp, lhs: &FormulaValue, rhs: &FormulaValue) -> FormulaValue {
     match op {
+        // Strong Kleene three-valued logic (Kleene, *Introduction to Metamathematics*, 1952, §64):
+        // `false and Missing -> false`, `true or Missing -> true`, otherwise `Missing`.
         BinaryOp::And => match (lhs.as_bool(), rhs.as_bool()) {
-            (Some(a), Some(b)) => FormulaValue::Number(if a && b { 1.0 } else { 0.0 }),
+            (Some(false), _) | (_, Some(false)) => FormulaValue::Number(0.0),
+            (Some(true), Some(true)) => FormulaValue::Number(1.0),
             _ => FormulaValue::Missing,
         },
         BinaryOp::Or => match (lhs.as_bool(), rhs.as_bool()) {
-            (Some(a), Some(b)) => FormulaValue::Number(if a || b { 1.0 } else { 0.0 }),
+            (Some(true), _) | (_, Some(true)) => FormulaValue::Number(1.0),
+            (Some(false), Some(false)) => FormulaValue::Number(0.0),
             _ => FormulaValue::Missing,
         },
         BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => apply_comparison(op, lhs, rhs),
@@ -1196,7 +1313,7 @@ fn eval_variadic_minmax(cols: &[Vec<FormulaValue>], row: usize, is_min: bool) ->
     let mut acc: Option<f64> = None;
     for col in cols {
         let Some(v) = col.get(row).and_then(FormulaValue::as_finite_f64) else {
-            return FormulaValue::Missing;
+            continue;
         };
         acc = Some(match acc {
             None => v,
@@ -1213,14 +1330,16 @@ fn eval_variadic_minmax(cols: &[Vec<FormulaValue>], row: usize, is_min: bool) ->
 }
 
 fn eval_variadic_logic(cols: &[Vec<FormulaValue>], row: usize, is_and: bool) -> FormulaValue {
-    let mut acc = is_and;
+    let mut saw_missing = false;
     for col in cols {
-        let Some(b) = col.get(row).and_then(FormulaValue::as_bool) else {
-            return FormulaValue::Missing;
-        };
-        acc = if is_and { acc && b } else { acc || b };
+        match col.get(row).and_then(FormulaValue::as_bool) {
+            Some(false) if is_and => return FormulaValue::Number(0.0),
+            Some(true) if !is_and => return FormulaValue::Number(1.0),
+            Some(_) => {}
+            None => saw_missing = true,
+        }
     }
-    FormulaValue::Number(if acc { 1.0 } else { 0.0 })
+    if saw_missing { FormulaValue::Missing } else { FormulaValue::Number(if is_and { 1.0 } else { 0.0 }) }
 }
 
 fn eval_unary_math(lower: &str, x: f64) -> f64 {
