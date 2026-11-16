@@ -3,6 +3,7 @@ name = "lumencraft-engine"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 publish.workspace = true
 description = "LumenCraft session state, undo history, reactive analysis pipeline and command registry"
 

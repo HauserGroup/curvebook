@@ -9,6 +9,9 @@ on:
       - .github/workflows/freebsd.yml
       - packaging/freebsd/**
       - packaging/env.sh
+      - Cargo.toml
+      - Cargo.lock
+      - rust-toolchain.toml
   schedule:
     - cron: "29 4 * * *"
   workflow_dispatch:
@@ -33,7 +36,10 @@ jobs:
         uses: vmactions/freebsd-vm@v1
         with:
           usesh: true
-          prepare: pkg install -y bash curl git pkgconf rust
+          prepare: pkg install -y bash curl git pkgconf rustup-init
           run: |
             set -eu
+            rustup-init -y --profile minimal --default-toolchain 1.99.1 --no-modify-path
+            . "$HOME/.cargo/env"
+            rustc --version
             bash ./packaging/freebsd/package.sh

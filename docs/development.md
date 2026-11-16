@@ -4,7 +4,9 @@
 
 ## Prerequisites
 
-- **Rust 1.95+** (`edition = "2024"`, `resolver = "3"`).
+- **Rust 1.99.1+** (`edition = "2024"`, `resolver = "3"`), pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) (`profile = "minimal"`, components `rustfmt`, `clippy`).
+  - Run `rustc --version` and `cargo --version` (and `rustup show active-toolchain`) inside the repository to confirm rustup's proxy selects `1.99.1` (or newer) for both the compiler and Cargo.
+  - **macOS Homebrew note:** If both Homebrew `rust` and `rustup` are installed, `/opt/homebrew/bin/{cargo,rustc}` link directly to Homebrew's formula and bypass `rust-toolchain.toml` and `+<toolchain>` selection. Prepend `rustup`'s proxy bin directory (`export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`) ahead of `/opt/homebrew/bin` so `rust-toolchain.toml` takes effect.
 - Optional tools:
   - [`cargo-nextest`](https://nexte.st/) — used automatically by `cargo xtask test` when installed; falls back to `cargo test`.
   - `wasm32-unknown-unknown` target — for `cargo xtask wasm`; plus [`trunk`](https://trunkrs.dev/) for browser builds in `apps/lumencraft-web`.

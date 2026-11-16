@@ -37,7 +37,7 @@ For concrete extension checklists, common past mistakes, and subsystem details, 
 3. **Last-resort UI/MCP guard.** Keep `crates/engine/src/guard.rs` in place at UI/MCP boundaries only as defence-in-depth—never rely on `catch_unwind` to excuse panics in libraries.
 
 ### Pure Rust, `wasm32` Clean Core, and No `chrono`
-1. **Rust only.** All production crates, applications, CLI, MCP server, and `xtask` build/verify automation are written in Rust (`edition = "2024"`, `rust-version = "1.95"`).
+1. **Rust only.** All production crates, applications, CLI, MCP server, and `xtask` build/verify automation are written in Rust (`edition = "2024"`, `rust-version = "1.99.1"`).
 2. **`wasm32-unknown-unknown` compatibility for headless layers.** Keep `L0`–`L5` headless logic (`math`, `palette`, `doc`, `transform`, `stats`, `fit`, `text`, `chart`, `svg`, `pdf`, `render`, `tools`, `engine`) free of unguarded OS/blocking assumptions so `cargo xtask wasm` continues to pass. Place OS/filesystem/process shims behind `lumencraft-platform` (`crates/platform`) or `apps/*`.
 3. **No `chrono` crate and no hand-rolled calendar math.** `chrono` is intentionally excluded from `Cargo.toml` to keep dependencies minimal and deterministic. Never add `chrono` to workspace manifests and never hand-roll Gregorian leap-year/calendar arithmetic. For native fallback timestamps use `std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)` (recording epoch milliseconds/seconds or `unix:<secs>`), and keep `wasm32`/deterministic library paths dependent on caller-supplied timestamps or `lumencraft-platform`.
 

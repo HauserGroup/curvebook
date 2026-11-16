@@ -3,6 +3,7 @@ name = "lumencraft-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+rust-version.workspace = true
 publish = false
 description = "LumenCraft command line: MCP server (stdio), headless statistical runs and figure export"
 

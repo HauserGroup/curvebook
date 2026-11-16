@@ -1,6 +1,6 @@
 # Contributing to LumenCraft
 
-Thank you for contributing to **LumenCraft**! This repository is built in Rust (`edition = "2024"`, `rust-version = "1.95"`) under `MIT OR Apache-2.0`.
+Thank you for contributing to **LumenCraft**! This repository is built in Rust (`edition = "2024"`, `rust-version = "1.99.1"`, pinned via `rust-toolchain.toml`) under `MIT OR Apache-2.0`.
 
 Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [docs/pitfalls.md](docs/pitfalls.md)—all engineering, clean-room, statistical, and verification rules apply equally to human contributors and AI coding agents.
 

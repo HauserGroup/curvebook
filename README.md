@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/lumencraft/lumencraft/actions/workflows/ci.yml/badge.svg)](https://github.com/lumencraft/lumencraft/actions/workflows/ci.yml)
 [![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#clean-room--licensing)
-[![Rust 1.95+](https://img.shields.io/badge/rust-1.95%2B-orange.svg)](#quick-start)
+[![Rust 1.99.1+](https://img.shields.io/badge/rust-1.99.1%2B-orange.svg)](#quick-start)
 
 [Capabilities](#capabilities) · [Workspace](#workspace-layout) · [Downloads](#downloads) · [Quick Start](#quick-start) · [Docs](#documentation--implementation-guides) · [Clean-Room](#clean-room--licensing)
 
@@ -91,7 +91,7 @@ Prebuilt release packages and checksums are published on [GitHub Releases](https
 
 ## Quick Start
 
-Requires **Rust 1.95+** (`edition = "2024"`).
+Requires **Rust 1.99.1+** (`edition = "2024"`, pinned in [`rust-toolchain.toml`](rust-toolchain.toml); verify both compiler and Cargo with `rustc --version` and `cargo --version`, see [`docs/development.md`](docs/development.md#prerequisites) if Homebrew Rust precedes rustup on `PATH`).
 
 ```sh
 # Run the full local verification suite (fmt, clippy, unit/doc tests, telemetry, screenshot, asset/brand/cleanroom/layer gates)

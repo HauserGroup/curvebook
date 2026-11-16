@@ -34,7 +34,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: "1.99.1"
       - name: Verify Cargo.lock sources
         run: |
           set -euo pipefail
@@ -73,7 +73,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: "1.99.1"
       - name: Run cargo xtask contributors
         run: cargo xtask contributors
       - uses: actions/upload-artifact@v7
@@ -92,7 +92,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - name: Generate THIRD-PARTY-LICENSES.html
         run: |
@@ -156,7 +156,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@v2
       - name: Build Linux packages
         env:
@@ -196,7 +196,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: "1.99.1"
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@v2
       - name: Import macOS signing certificate (when configured)
@@ -275,7 +275,7 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: "1.99.1"
           targets: x86_64-pc-windows-msvc, i686-pc-windows-msvc, aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@v2
       - name: Install WiX v5
@@ -328,7 +328,7 @@ jobs:
       - name: Install Rust toolchain & Trunk
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: "1.95"
+          toolchain: "1.99.1"
           targets: wasm32-unknown-unknown
       - uses: Swatinem/rust-cache@v2
       - name: Install Trunk
@@ -369,12 +369,25 @@ jobs:
           path: licenses
       - name: Build FreeBSD package
         uses: vmactions/freebsd-vm@v1
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+          GITHUB_REF_TYPE: ${{ github.ref_type }}
+          GITHUB_REF_NAME: ${{ github.ref_name }}
         with:
           usesh: true
-          prepare: pkg install -y bash curl git pkgconf rust
+          envs: 'INPUT_VERSION GITHUB_REF_TYPE GITHUB_REF_NAME'
+          prepare: pkg install -y bash curl git pkgconf rustup-init
           run: |
             set -eu
-            LUMENCRAFT_VERSION="${{ inputs.version }}" bash ./packaging/freebsd/package.sh
+            rustup-init -y --profile minimal --default-toolchain 1.99.1 --no-modify-path
+            . "$HOME/.cargo/env"
+            rustc --version
+            if [ -n "${INPUT_VERSION:-}" ]; then
+              export LUMENCRAFT_VERSION="$INPUT_VERSION"
+            elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
+              export LUMENCRAFT_VERSION="${GITHUB_REF_NAME#v}"
+            fi
+            bash ./packaging/freebsd/package.sh
       - uses: actions/upload-artifact@v7
         with:
           name: release-freebsd-x86_64
