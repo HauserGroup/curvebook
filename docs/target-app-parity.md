@@ -8,6 +8,8 @@ Authoritative clean-room parity assessment for CurveBook. Active task queue in [
 
 Every score in this document is graded strictly from shipped, tested code in `crates/*` and `apps/*` against public documentation (`https://www.graphpad.com/guides/prism/latest/{user-guide,statistics,curve-fitting}/` and public release notes at `https://www.graphpad.com/updates`), peer-reviewed statistical methods, and certified reference benchmarks (NIST StRD). In accordance with [`AGENTS.md`](../AGENTS.md), no proprietary binary, installation directory, or vendor-created sample file is ever inspected or run.
 
+The [limited local JPG reference policy](../AGENTS.md#limited-local-jpg-reference-policy) allows the designated existing frames to inform high-level workflows, information hierarchy, and generic functional organization while requiring independent implementation and original visual design. Frames provide no numerical reference answers, visual matching targets, acceptance baselines, or evidence of workflow completion. Scores and completion claims still require the shipped-code and test evidence described here.
+
 ### Scoring rubric (per feature area)
 
 | Score | Meaning |
