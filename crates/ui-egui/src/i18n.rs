@@ -44,9 +44,22 @@ macro_rules! entry {
             he: $he:expr $(,)?
         ]
     ) => {
-        CatalogEntry { key: $key, translations: [$en, $de, $es, $fr, $ja, $ko, $pt_br, $zh_cn, $zh_tw, $it, $nl, $pl, $ru, $tr, $ar, $he] }
+        $crate::i18n::CatalogEntry {
+            key: $key,
+            translations: [$en, $de, $es, $fr, $ja, $ko, $pt_br, $zh_cn, $zh_tw, $it, $nl, $pl, $ru, $tr, $ar, $he],
+        }
     };
 }
+
+#[allow(unused_imports)]
+pub(crate) use entry;
+
+pub mod cjk_rtl;
+pub mod eu;
+pub mod shard_extra;
+
+/// Additional translation catalog shard slices merged with [`CATALOG`] during lookup and reporting.
+pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[shard_extra::ENTRIES, eu::ENTRIES, cjk_rtl::ENTRIES];
 
 /// Complete interface translation catalog covering menus, navigator folders, the 8 data-table
 /// archetypes, analysis/fit families, dialog actions, inspector controls, and themes.
@@ -5775,15 +5788,28 @@ pub fn locale_display_name(locale: &str) -> &'static str {
     }
 }
 
+/// Iterate over every registered [`CatalogEntry`] across [`CATALOG`] and [`EXTRA_SHARD_CATALOGS`].
+pub fn all_entries() -> impl Iterator<Item = &'static CatalogEntry> {
+    CATALOG.iter().chain(EXTRA_SHARD_CATALOGS.iter().flat_map(|shard| shard.iter()))
+}
+
+fn try_tr_in_entries<'a>(entries: impl Iterator<Item = &'a CatalogEntry>, locale: &str, key: &str) -> Option<&'static str> {
+    let idx = exact_locale_index(locale)?;
+    entries.filter(|entry| entry.key == key).filter_map(|entry| entry.translations.get(idx).copied()).find(|text| !text.trim().is_empty())
+}
+
+/// Look up a translation strictly for `locale` across custom [`CatalogEntry`] shard slices.
+#[must_use]
+pub fn try_tr_in_slices(slices: &[&[CatalogEntry]], locale: &str, key: &str) -> Option<&'static str> {
+    try_tr_in_entries(slices.iter().flat_map(|slice| slice.iter()), locale, key)
+}
+
 /// Look up a translation strictly for `locale` without falling back to English.
 ///
 /// Returns `None` if `locale` is not a registered code or if `key` is missing/empty in that locale.
 #[must_use]
 pub fn try_tr(locale: &str, key: &str) -> Option<&'static str> {
-    let idx = exact_locale_index(locale)?;
-    let entry = CATALOG.iter().find(|entry| entry.key == key)?;
-    let text = entry.translations.get(idx).copied()?;
-    if text.trim().is_empty() { None } else { Some(text) }
+    try_tr_in_entries(all_entries(), locale, key)
 }
 
 /// Look up a localized string for `(locale, key)`, normalizing BCP-47 tags and falling back to
@@ -5794,7 +5820,7 @@ pub fn tr(locale: &str, key: &str) -> &'static str {
     try_tr(canonical, key).or_else(|| try_tr("en", key)).unwrap_or("")
 }
 
-/// Look up a localized string, returning `key` unchanged if it is not registered in [`CATALOG`].
+/// Look up a localized string, returning `key` unchanged if it is not registered in [`CATALOG`] or [`EXTRA_SHARD_CATALOGS`].
 #[must_use]
 pub fn tr_or<'a>(locale: &str, key: &'a str) -> Cow<'a, str> {
     let resolved = tr(locale, key);
@@ -5805,9 +5831,10 @@ pub fn tr_or<'a>(locale: &str, key: &'a str) -> Cow<'a, str> {
 #[must_use]
 pub fn try_tr_command(locale: &str, command_id: &str) -> Option<&'static str> {
     let idx = exact_locale_index(locale)?;
-    let entry = CATALOG.iter().find(|entry| entry.key.strip_prefix("cmd.") == Some(command_id))?;
-    let text = entry.translations.get(idx).copied()?;
-    if text.trim().is_empty() { None } else { Some(text) }
+    all_entries()
+        .filter(|entry| entry.key.strip_prefix("cmd.") == Some(command_id))
+        .filter_map(|entry| entry.translations.get(idx).copied())
+        .find(|text| !text.trim().is_empty())
 }
 
 /// Resolve the localized label for `command_id` in `locale`, falling back to `"en"` or `fallback`.
@@ -5824,32 +5851,45 @@ pub fn translate_command_label(locale: &str, english_label: &'static str) -> &'s
     let Some(idx) = exact_locale_index(canonical) else {
         return english_label;
     };
-    let Some(entry) = CATALOG.iter().find(|entry| entry.key.starts_with("cmd.") && entry.translations[0] == english_label) else {
-        return english_label;
-    };
-    let text = entry.translations.get(idx).copied().unwrap_or(english_label);
-    if text.trim().is_empty() { english_label } else { text }
+    all_entries()
+        .filter(|entry| entry.key.starts_with("cmd.") && entry.translations[0] == english_label)
+        .filter_map(|entry| entry.translations.get(idx).copied())
+        .find(|text| !text.trim().is_empty())
+        .unwrap_or(english_label)
 }
 
-/// Iterate over every registered localization key in [`CATALOG`].
+/// Iterate over every unique registered localization key across [`CATALOG`] and [`EXTRA_SHARD_CATALOGS`].
 pub fn all_keys() -> impl Iterator<Item = &'static str> {
-    CATALOG.iter().map(|entry| entry.key)
+    let mut seen = std::collections::BTreeSet::new();
+    let mut keys = Vec::new();
+    for entry in all_entries() {
+        if seen.insert(entry.key) {
+            keys.push(entry.key);
+        }
+    }
+    keys.into_iter()
 }
 
-/// Total number of message keys registered in [`CATALOG`].
+/// Total number of message entries registered across [`CATALOG`] and [`EXTRA_SHARD_CATALOGS`].
 #[must_use]
 pub const fn catalog_len() -> usize {
-    CATALOG.len()
+    let mut total = CATALOG.len();
+    let mut i = 0;
+    while i < EXTRA_SHARD_CATALOGS.len() {
+        total += EXTRA_SHARD_CATALOGS[i].len();
+        i += 1;
+    }
+    total
 }
 
-/// Collect all `(locale, key)` pairs that are missing or empty across [`LOCALES`] x [`CATALOG`].
+/// Collect all `(locale, key)` pairs that are missing or empty across [`LOCALES`] x all registered shards.
 #[must_use]
 pub fn missing_translations() -> Vec<(&'static str, &'static str)> {
     let mut missing = Vec::new();
     for &locale in LOCALES {
-        for entry in CATALOG {
-            if try_tr(locale, entry.key).is_none() {
-                missing.push((locale, entry.key));
+        for key in all_keys() {
+            if try_tr(locale, key).is_none() {
+                missing.push((locale, key));
             }
         }
     }
@@ -5993,8 +6033,8 @@ mod tests {
     use curvebook_math::{AxisScale, PValueFormat};
 
     use super::{
-        CATALOG, LOCALES, LocalePreset, catalog_len, command_label, is_rtl_locale, locale_display_name, mirror_x_for_rtl, missing_translations,
-        normalize_locale, tr, translate_command_label, try_tr, try_tr_command,
+        CATALOG, EXTRA_SHARD_CATALOGS, LOCALES, LocalePreset, all_keys, catalog_len, command_label, is_rtl_locale, locale_display_name,
+        mirror_x_for_rtl, missing_translations, normalize_locale, tr, translate_command_label, try_tr, try_tr_command, try_tr_in_slices,
     };
 
     fn assert_rtl_and_non_latin_scripts() {
@@ -6021,13 +6061,13 @@ mod tests {
         assert!(has_arabic(locale_display_name("ar")));
         assert!(has_hebrew(locale_display_name("he")));
 
-        for entry in CATALOG {
-            if entry.key == "table.xy" {
+        for key in all_keys() {
+            if key == "table.xy" {
                 continue;
             }
-            assert!(has_cyrillic(try_tr("ru", entry.key).unwrap()), "expected Cyrillic in ru:{}", entry.key);
-            assert!(has_arabic(try_tr("ar", entry.key).unwrap()), "expected Arabic script in ar:{}", entry.key);
-            assert!(has_hebrew(try_tr("he", entry.key).unwrap()), "expected Hebrew script in he:{}", entry.key);
+            assert!(has_cyrillic(try_tr("ru", key).unwrap()), "expected Cyrillic in ru:{key}");
+            assert!(has_arabic(try_tr("ar", key).unwrap()), "expected Arabic script in ar:{key}");
+            assert!(has_hebrew(try_tr("he", key).unwrap()), "expected Hebrew script in he:{key}");
         }
     }
 
@@ -6053,9 +6093,9 @@ mod tests {
             assert_eq!(preset.locale, locale);
             assert_eq!(preset.is_rtl(), matches!(locale, "ar" | "he"));
             assert!(!locale_display_name(locale).is_empty());
-            for entry in CATALOG {
-                let direct = try_tr(locale, entry.key).unwrap();
-                assert_eq!(tr(locale, entry.key), direct);
+            for key in all_keys() {
+                let direct = try_tr(locale, key).unwrap();
+                assert_eq!(tr(locale, key), direct);
             }
         }
 
@@ -6378,7 +6418,7 @@ mod tests {
     }
 
     fn verify_tr_keys_exist(calls: &[(String, String)]) -> Result<(), String> {
-        let known: HashSet<&'static str> = CATALOG.iter().map(|entry| entry.key).collect();
+        let known: HashSet<&'static str> = all_keys().collect();
         let mut missing = Vec::new();
         for (location, key) in calls {
             if !known.contains(key.as_str()) {
@@ -6386,6 +6426,52 @@ mod tests {
             }
         }
         if missing.is_empty() { Ok(()) } else { Err(missing.join("; ")) }
+    }
+
+    #[test]
+    fn shard_catalog_aggregation_searches_extra_slices_cleanly() {
+        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 3);
+        let eu_slice = &[entry!("shard.test.key" => [
+            en: "Test Key",
+            de: "Testschlüssel",
+            es: "",
+            fr: "",
+            ja: "",
+            ko: "",
+            pt_br: "",
+            zh_cn: "",
+            zh_tw: "",
+            it: "",
+            nl: "",
+            pl: "",
+            ru: "",
+            tr: "",
+            ar: "",
+            he: "",
+        ])];
+        let cjk_slice = &[entry!("shard.test.key" => [
+            en: "",
+            de: "",
+            es: "",
+            fr: "",
+            ja: "テストキー",
+            ko: "",
+            pt_br: "",
+            zh_cn: "",
+            zh_tw: "",
+            it: "",
+            nl: "",
+            pl: "",
+            ru: "",
+            tr: "",
+            ar: "مفتاح اختبار",
+            he: "",
+        ])];
+        let slices: &[&[super::CatalogEntry]] = &[eu_slice, cjk_slice];
+        assert_eq!(try_tr_in_slices(slices, "de", "shard.test.key"), Some("Testschlüssel"));
+        assert_eq!(try_tr_in_slices(slices, "ja", "shard.test.key"), Some("テストキー"));
+        assert_eq!(try_tr_in_slices(slices, "ar", "shard.test.key"), Some("مفتاح اختبار"));
+        assert_eq!(try_tr_in_slices(slices, "fr", "shard.test.key"), None);
     }
 
     #[test]
