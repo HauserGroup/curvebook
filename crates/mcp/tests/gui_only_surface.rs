@@ -483,7 +483,9 @@ fn gui_tools_parameter_validation_rejects_malformed_inputs() {
         ("ui_type_text", json!({ "text": 42 })),
         ("ui_press_key", json!({ "key": "   " })),
         ("ui_invoke_menu", json!({})),
-        ("ui_switch_tab", json!({ "sheet_id": "result-1" })),
+        ("ui_switch_tab", json!({})),
+        ("ui_switch_tab", json!({ "tab": -1 })),
+        ("ui_switch_tab", json!({ "tab": "   " })),
         ("ui_answer_dialog", json!({})),
     ];
 
@@ -491,4 +493,75 @@ fn gui_tools_parameter_validation_rejects_malformed_inputs() {
         let res = call_tool(&mut state, tool, args);
         assert!(matches!(res, Err(ToolCallError::InvalidParams(_))), "expected InvalidParams for {tool}, got {res:?}");
     }
+}
+
+#[test]
+fn gui_tools_forward_extended_parameters_and_reject_screenshot_path_in_gui_only() {
+    let (host, shared) = SharedMockHost::new(true);
+    let mut state = McpServerState::with_gui_host(Box::new(host));
+
+    for scope in ["workspace", "toolbar", "tabs"] {
+        let res = call_tool(&mut state, "ui_inspect", json!({ "scope": scope })).expect("ui_inspect extended scope");
+        assert!(!res.is_error);
+    }
+
+    let shot = call_tool(&mut state, "ui_screenshot", json!({ "target": "full_window", "width_px": 640, "height_px": 400 }))
+        .expect("full_window screenshot");
+    assert!(!shot.is_error);
+
+    let rejected = call_tool(&mut state, "ui_screenshot", json!({ "target": "workspace", "path": "blocked.png" }))
+        .expect("gui-only screenshot path error result");
+    assert!(rejected.is_error);
+    assert_eq!(rejected.structured_content.as_ref().and_then(|v| v.get("code")), Some(&json!("gui_only_violation")));
+
+    call_tool(
+        &mut state,
+        "ui_pointer_gesture",
+        json!({
+            "action": "hover",
+            "widget_id": "power.curve_hover",
+            "hover_fraction_x": 0.45,
+            "hover_n": 18.0,
+            "metrics": { "width_px": 1280.0, "height_px": 800.0, "scale_factor": 1.0 }
+        }),
+    )
+    .expect("power hover");
+
+    call_tool(
+        &mut state,
+        "ui_invoke_menu",
+        json!({
+            "command_id": "sheet.createData",
+            "params": { "archetype": "Column", "rows": 5, "cols": 3 }
+        }),
+    )
+    .expect("invoke menu with params");
+
+    call_tool(&mut state, "ui_switch_tab", json!({ "sheet_id": "result-1" })).expect("sheet_id only");
+    call_tool(&mut state, "ui_switch_tab", json!({ "tab": 2 })).expect("integer tab index");
+
+    call_tool(
+        &mut state,
+        "ui_answer_dialog",
+        json!({
+            "action": "ok",
+            "patches": { "alpha": 0.01 },
+            "force_create_new": true,
+            "choice": "create_new"
+        }),
+    )
+    .expect("answer dialog extended");
+
+    let host_guard = shared.borrow();
+    let calls = &host_guard.calls;
+    assert_eq!(calls[3].1["target"], json!("full_window"));
+    assert_eq!(calls[4].1["hover_fraction_x"], json!(0.45));
+    assert_eq!(calls[4].1["hover_n"], json!(18.0));
+    assert_eq!(calls[4].1["metrics"]["width_px"], json!(1280.0));
+    assert_eq!(calls[5].1["params"]["archetype"], json!("Column"));
+    assert_eq!(calls[6].1["sheet_id"], json!("result-1"));
+    assert_eq!(calls[7].1["tab"], json!(2));
+    assert_eq!(calls[8].1["patches"]["alpha"], json!(0.01));
+    assert_eq!(calls[8].1["force_create_new"], json!(true));
+    assert_eq!(calls[8].1["choice"], json!("create_new"));
 }

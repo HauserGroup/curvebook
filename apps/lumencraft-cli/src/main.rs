@@ -157,6 +157,9 @@ impl lumencraft_mcp::GuiSessionHost for InProcessUiGuiHost {
 fn run_mcp(args: &[String]) -> Result<(), CliError> {
     let cfg = parse_mcp_args_with_env(args, &|key| std::env::var_os(key))?;
     let _ = lumencraft_mcp::SERVER_NAME;
+    if let Some(ref workdir) = cfg.workdir {
+        let _ = sandbox::WorkdirGuard::new(workdir)?;
+    }
     let mut state = match (cfg.control_port, cfg.gui_only) {
         (Some(port), true) => lumencraft_mcp::McpServerState::with_control_port_and_gui_only(port, true)
             .map_err(|err| CliError::Runtime(format!("MCP stdio server failed: {err}")))?,
@@ -164,7 +167,12 @@ fn run_mcp(args: &[String]) -> Result<(), CliError> {
             lumencraft_mcp::McpServerState::with_control_port(port).map_err(|err| CliError::Runtime(format!("MCP stdio server failed: {err}")))?
         }
         (None, true) => {
-            let host = InProcessUiGuiHost::new(true);
+            let mut host = InProcessUiGuiHost::new(true);
+            if let Some(ref workdir) = cfg.workdir {
+                let policy = lumencraft_engine::ExternalPathPolicy::workdir(workdir)
+                    .map_err(|err| CliError::Runtime(format!("MCP workdir setup failed: {err}")))?;
+                host.app.session_mut().set_path_policy(policy);
+            }
             lumencraft_mcp::McpServerState::with_gui_host(Box::new(host)).with_gui_only(true)
         }
         (None, false) => lumencraft_mcp::McpServerState::new(),
@@ -173,7 +181,6 @@ fn run_mcp(args: &[String]) -> Result<(), CliError> {
         state.set_control_token(Some(token)).map_err(|err| CliError::Usage(format!("invalid --control-token: {err}")))?;
     }
     if let Some(ref workdir) = cfg.workdir {
-        let _ = sandbox::WorkdirGuard::new(workdir)?;
         state.set_workdir(Some(workdir)).map_err(|err| CliError::Runtime(format!("MCP workdir setup failed: {err}")))?;
     }
     lumencraft_mcp::run_stdio_with_state(&mut state).map_err(|err| CliError::Runtime(format!("MCP stdio server failed: {err}")))

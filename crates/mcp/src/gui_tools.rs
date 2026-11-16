@@ -10,6 +10,7 @@ use lumencraft_engine::cmd::Effects;
 use serde_json::{Map, Value, json};
 
 use crate::errors::{self, StructuredErrorPayload};
+use crate::formats;
 use crate::tools::{
     ContentBlock, McpServerState, ToolCallError, ToolCallResult, ToolDefinition, dispatch_gui_backend, optional_bool, optional_non_empty_str,
     optional_u32_bounded, required_non_empty_str,
@@ -20,8 +21,8 @@ use crate::toolsets::ToolAnnotations;
 pub const GUI_TOOL_NAMES: [&str; 8] =
     ["ui_inspect", "ui_screenshot", "ui_pointer_gesture", "ui_type_text", "ui_press_key", "ui_invoke_menu", "ui_switch_tab", "ui_answer_dialog"];
 
-const VALID_INSPECT_SCOPES: [&str; 6] = ["all", "dialog", "grid", "navigator", "canvas", "menus"];
-const VALID_SCREENSHOT_TARGETS: [&str; 4] = ["workspace", "viewport", "canvas", "dialog"];
+const VALID_INSPECT_SCOPES: [&str; 9] = ["all", "workspace", "dialog", "grid", "navigator", "canvas", "menus", "toolbar", "tabs"];
+const VALID_SCREENSHOT_TARGETS: [&str; 5] = ["full_window", "workspace", "viewport", "canvas", "dialog"];
 
 /// Return `true` when `name` identifies one of the 8 `gui` MCP tools.
 #[must_use]
@@ -114,6 +115,10 @@ fn def_ui_screenshot() -> ToolDefinition {
                     "minimum": 72,
                     "maximum": 600,
                     "description": "Optional render DPI (72..=600)."
+                },
+                "path": {
+                    "type": "string",
+                    "description": "Optional host output path (rejected with gui_only_violation when --gui-only is active)."
                 }
             },
             "additionalProperties": false
@@ -165,7 +170,10 @@ fn def_ui_pointer_gesture() -> ToolDefinition {
                 "to_x": { "type": "number", "description": "Destination logical X coordinate for 'drag' gestures." },
                 "to_y": { "type": "number", "description": "Destination logical Y coordinate for 'drag' gestures." },
                 "modifiers": modifiers_schema(),
-                "delta_y": { "type": "number", "description": "Vertical scroll delta for 'wheel' gestures." }
+                "delta_y": { "type": "number", "description": "Vertical scroll delta for 'wheel' gestures." },
+                "hover_fraction_x": { "type": "number", "description": "Optional fractional X coordinate [0.0, 1.0] for power curve hover." },
+                "hover_n": { "type": "number", "description": "Optional sample-size N coordinate for power curve hover." },
+                "metrics": { "type": "object", "description": "Optional ViewportMetrics ({width_px, height_px, scale_factor}) for pointer dispatch." }
             },
             "required": ["action"],
             "additionalProperties": false
@@ -226,7 +234,8 @@ fn def_ui_invoke_menu() -> ToolDefinition {
                     ],
                     "description": "Visible menu path (e.g. 'Analyze > Column Analyses > One-way ANOVA') or array of segments."
                 },
-                "command_id": { "type": "string", "description": "Command identifier associated with the menu/toolbar item." }
+                "command_id": { "type": "string", "description": "Command identifier associated with the menu/toolbar item." },
+                "params": { "type": "object", "description": "Optional parameter payload for the invoked command or dialog initializer." }
             },
             "additionalProperties": false
         }),
@@ -237,13 +246,25 @@ fn def_ui_invoke_menu() -> ToolDefinition {
 fn def_ui_switch_tab() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_switch_tab"),
-        description: String::from("Switch an active modal/wizard tab or ResultSheet sub-tab (fails with disabled_reason if grayed out)."),
+        description: String::from("Switch the active sheet, modal/wizard stage, or ResultSheet sub-tab (fails with disabled_reason if grayed out)."),
         input_schema: json!({
             "type": "object",
             "properties": {
-                "tab": { "type": "string", "description": "Tab identifier or visible tab label." },
-                "tab_id": { "type": "string", "description": "Alias for tab." },
-                "sheet_id": { "type": "string", "description": "Optional ResultSheet ID when selecting a sub-tab." },
+                "tab": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "integer", "minimum": 0 }
+                    ],
+                    "description": "Tab identifier, visible tab label, or zero-based tab index."
+                },
+                "tab_id": {
+                    "oneOf": [
+                        { "type": "string" },
+                        { "type": "integer", "minimum": 0 }
+                    ],
+                    "description": "Alias for tab."
+                },
+                "sheet_id": { "type": "string", "description": "Optional sheet identifier to activate before/when selecting a sub-tab." },
                 "widget_id": { "type": "string", "description": "Optional tab strip or widget identifier." }
             },
             "additionalProperties": false
@@ -256,15 +277,18 @@ fn def_ui_answer_dialog() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_answer_dialog"),
         description: String::from(
-            "Update enabled modal/wizard controls by widget_id (`fields`/`values`) and/or click a modal action button (e.g. 'ok', 'cancel', 'next', 'back', 'create').",
+            "Update enabled modal/wizard controls by widget_id (`fields`/`values`/`patches`) and/or click a modal action button (e.g. 'ok', 'cancel', 'next', 'back', 'create', 'apply', 'preview').",
         ),
         input_schema: json!({
             "type": "object",
             "properties": {
-                "action": { "type": "string", "description": "Modal button action to activate (e.g. 'ok', 'cancel', 'back', 'next', 'create', 'apply')." },
+                "action": { "type": "string", "description": "Modal button action to activate (e.g. 'ok', 'cancel', 'back', 'next', 'create', 'apply', 'preview')." },
                 "fields": { "type": "object", "description": "Map of modal widget_id -> value to set before clicking action." },
                 "values": { "type": "object", "description": "Alias for fields mapping widget_id -> value." },
-                "dialog_id": { "type": "string", "description": "Optional active dialog/wizard identifier." }
+                "patches": { "type": "object", "description": "Alias for fields mapping widget_id -> value." },
+                "dialog_id": { "type": "string", "description": "Optional active dialog/wizard identifier." },
+                "force_create_new": { "type": "boolean", "description": "Optional flag creating a new ResultSheet directly when committing AnalyzeSheet." },
+                "choice": { "type": "string", "description": "Optional selection for prompt dialogs (e.g. 'create_new' or 'modify_existing')." }
             },
             "additionalProperties": false
         }),
@@ -300,7 +324,7 @@ fn handle_ui_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> R
         let scope = raw_scope.to_ascii_lowercase();
         if !VALID_INSPECT_SCOPES.contains(&scope.as_str()) {
             return Err(ToolCallError::InvalidParams(format!(
-                "unsupported ui_inspect scope '{raw_scope}'; expected one of: all, dialog, grid, navigator, canvas, menus"
+                "unsupported ui_inspect scope '{raw_scope}'; expected one of: all, workspace, dialog, grid, navigator, canvas, menus, toolbar, tabs"
             )));
         }
         params.insert(String::from("scope"), Value::String(scope));
@@ -320,7 +344,7 @@ fn handle_ui_screenshot(state: &mut McpServerState, args: &Map<String, Value>) -
         let target = raw_target.to_ascii_lowercase();
         if !VALID_SCREENSHOT_TARGETS.contains(&target.as_str()) {
             return Err(ToolCallError::InvalidParams(format!(
-                "unsupported ui_screenshot target '{raw_target}'; expected workspace, viewport, canvas, or dialog"
+                "unsupported ui_screenshot target '{raw_target}'; expected full_window, workspace, viewport, canvas, or dialog"
             )));
         }
         params.insert(String::from("target"), Value::String(target));
@@ -333,6 +357,22 @@ fn handle_ui_screenshot(state: &mut McpServerState, args: &Map<String, Value>) -
     }
     if let Some(dpi) = optional_u32_bounded(args, "dpi", 72, 600)? {
         params.insert(String::from("dpi"), json!(dpi));
+    }
+    if let Some(raw_path) = optional_non_empty_str(args, "path")? {
+        if state.is_gui_only() {
+            return Ok(errors::result_from_payload(
+                &StructuredErrorPayload::new(
+                    ErrorCode::GuiOnlyViolation,
+                    "direct filesystem writes via `ui_screenshot` `path` are blocked under --gui-only",
+                )
+                .with_remediation("Omit `path` and inspect the returned in-memory `data_base64` PNG instead."),
+            ));
+        }
+        let resolved = match formats::resolve_mcp_path(state, &raw_path) {
+            Ok(p) => p,
+            Err(err) => return Ok(errors::result_from_engine_error(&err)),
+        };
+        params.insert(String::from("path"), Value::String(resolved.to_string_lossy().into_owned()));
     }
 
     match dispatch_gui_backend(state, "ui.screenshot", Value::Object(params)) {
@@ -404,6 +444,9 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
     }
 
     let delta_y = optional_finite_f64(args, "delta_y")?;
+    let hover_fraction_x = optional_finite_f64(args, "hover_fraction_x")?;
+    let hover_n = optional_finite_f64(args, "hover_n")?;
+    let metrics = optional_object(args, "metrics")?;
     let modifiers = optional_modifiers(args, "modifiers")?;
 
     let mut params = Map::new();
@@ -415,6 +458,11 @@ fn handle_ui_pointer_gesture(state: &mut McpServerState, args: &Map<String, Valu
     insert_opt_f64(&mut params, "to_x", to_x);
     insert_opt_f64(&mut params, "to_y", to_y);
     insert_opt_f64(&mut params, "delta_y", delta_y);
+    insert_opt_f64(&mut params, "hover_fraction_x", hover_fraction_x);
+    insert_opt_f64(&mut params, "hover_n", hover_n);
+    if let Some(m) = metrics {
+        params.insert(String::from("metrics"), m);
+    }
     if let Some(mods) = modifiers {
         params.insert(String::from("modifiers"), mods);
     }
@@ -451,6 +499,7 @@ fn handle_ui_press_key(state: &mut McpServerState, args: &Map<String, Value>) ->
 fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let path = optional_menu_path(args, "path")?;
     let command_id = optional_non_empty_str(args, "command_id")?;
+    let extra_params = optional_object(args, "params")?;
     if path.is_none() && command_id.is_none() {
         return Err(ToolCallError::InvalidParams(String::from("ui_invoke_menu requires \"path\" or \"command_id\"")));
     }
@@ -460,19 +509,27 @@ fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) 
         params.insert(String::from("path"), p);
     }
     insert_opt_str(&mut params, "command_id", command_id);
+    if let Some(mut extra) = extra_params {
+        if let Err(err) = formats::sanitize_command_params(state, &mut extra) {
+            return Ok(errors::result_from_engine_error(&err));
+        }
+        params.insert(String::from("params"), extra);
+    }
     dispatch_json_result(state, "ui.invoke_menu", Value::Object(params))
 }
 
 fn handle_ui_switch_tab(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
-    let tab = optional_non_empty_str(args, "tab")?.or(optional_non_empty_str(args, "tab_id")?);
+    let tab = optional_tab_target(args, "tab")?.or(optional_tab_target(args, "tab_id")?);
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let widget_id = optional_non_empty_str(args, "widget_id")?;
-    if tab.is_none() && widget_id.is_none() {
-        return Err(ToolCallError::InvalidParams(String::from("ui_switch_tab requires \"tab\" (or \"tab_id\") or \"widget_id\"")));
+    if tab.is_none() && sheet_id.is_none() && widget_id.is_none() {
+        return Err(ToolCallError::InvalidParams(String::from("ui_switch_tab requires \"tab\" (or \"tab_id\"), \"sheet_id\", or \"widget_id\"")));
     }
 
     let mut params = Map::new();
-    insert_opt_str(&mut params, "tab", tab);
+    if let Some(t) = tab {
+        params.insert(String::from("tab"), t);
+    }
     insert_opt_str(&mut params, "sheet_id", sheet_id);
     insert_opt_str(&mut params, "widget_id", widget_id);
     dispatch_json_result(state, "ui.switch_tab", Value::Object(params))
@@ -483,18 +540,30 @@ fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>
     let dialog_id = optional_non_empty_str(args, "dialog_id")?;
     let fields = optional_object(args, "fields")?;
     let values = optional_object(args, "values")?;
-    if action.is_none() && fields.is_none() && values.is_none() {
-        return Err(ToolCallError::InvalidParams(String::from("ui_answer_dialog requires \"action\", \"fields\", or \"values\"")));
+    let patches = optional_object(args, "patches")?;
+    let force_create_new = optional_bool(args, "force_create_new")?;
+    let choice = optional_non_empty_str(args, "choice")?;
+    if action.is_none() && fields.is_none() && values.is_none() && patches.is_none() && choice.is_none() {
+        return Err(ToolCallError::InvalidParams(String::from(
+            "ui_answer_dialog requires \"action\", \"fields\", \"values\", \"patches\", or \"choice\"",
+        )));
     }
 
     let mut params = Map::new();
     insert_opt_str(&mut params, "action", action);
     insert_opt_str(&mut params, "dialog_id", dialog_id);
+    insert_opt_str(&mut params, "choice", choice);
+    if let Some(force) = force_create_new {
+        params.insert(String::from("force_create_new"), Value::Bool(force));
+    }
     if let Some(f) = fields {
         params.insert(String::from("fields"), f);
     }
     if let Some(v) = values {
         params.insert(String::from("values"), v);
+    }
+    if let Some(p) = patches {
+        params.insert(String::from("patches"), p);
     }
     dispatch_json_result(state, "ui.answer_dialog", Value::Object(params))
 }
@@ -527,6 +596,26 @@ fn optional_finite_f64(args: &Map<String, Value>, key: &str) -> Result<Option<f6
         return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a finite number")));
     }
     Ok(Some(num))
+}
+
+fn optional_tab_target(args: &Map<String, Value>, key: &str) -> Result<Option<Value>, ToolCallError> {
+    let Some(val) = args.get(key) else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    if let Some(idx) = val.as_u64() {
+        return Ok(Some(json!(idx)));
+    }
+    if let Some(s) = val.as_str() {
+        let trimmed = s.trim();
+        if trimmed.is_empty() {
+            return Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must not be blank")));
+        }
+        return Ok(Some(Value::String(trimmed.to_owned())));
+    }
+    Err(ToolCallError::InvalidParams(format!("parameter \"{key}\" must be a non-empty string or non-negative integer")))
 }
 
 fn optional_object(args: &Map<String, Value>, key: &str) -> Result<Option<Value>, ToolCallError> {
