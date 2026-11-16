@@ -584,11 +584,11 @@ A 2026-11-15 audit of the rendered desktop window (`apps/lumencraft`) and web ca
 | — | Missing analyses (engine work, can start any time) | `R10.10`, `R10.11` |
 
 ### R10.1 Interactive chrome architecture decision & spike
-Owner: maintainers · Status: todo · Was: Human-GUI audit 2026-11-15 · Est. note: 16–24 h
+Owner: maintainers · Status: in progress · Was: Human-GUI audit 2026-11-15 · Est. note: 16–24 h
 
 - [x] **Decision resolved (2026-11-15):** implement the single retained layout & widget tree in-house in `lumencraft-ui-egui`, painted by `compositor.rs` with shaped text from `lumencraft-text` on desktop and headless runs; `egui` widgets are not used for chrome. Record the decision and the `UiApp` ↔ layout-tree boundary (including a text-measurement interface the web host implements) in [`architecture.md`](architecture.md) as part of the spike below.
 - [x] **Decision resolved (2026-11-15):** fonts under the zero-bundled-fonts rule — desktop discovers system fonts (`LUMENCRAFT_FONTS_DIR` override); the web host measures and draws text with the browser's canvas text API and the browser's fonts; desktop/headless determinism is measured against a pinned, untracked test font set (`cargo xtask web-fonts`).
-- [ ] Spike `AnalyzeSheet` + `EditAnalysisParameters` (one-way ANOVA) end to end on desktop and web; report web bundle size, `1M`-cell grid frame time, and `cargo xtask wasm`, `telemetry`, `licenses`, and `layers` results.
+- [ ] Spike `AnalyzeSheet` + `EditAnalysisParameters` (one-way ANOVA) end to end on desktop and web; report web bundle size, `1M`-cell grid frame time, and `cargo xtask wasm`, `telemetry`, `licenses`, and `layers` results. *(Web-host `BrowserCanvasTextMeasurer` + `ZLayerBand` `WebTextDrawOp` + `WebChromeBridge` `Analyze`/edit-params bridge verified on `main` via `lumencraft-web` **`25 passed`**, `xtask wasm`, `xtask telemetry` `0` violations, `xtask layers` `22` packages, and `./packaging/web/package.sh` `lumencraft-web-0.1.0.zip` `4.0M`; desktop shared `LayoutTree` `AnalyzeSheet` + `EditAnalysisParameters` spike & `1M`-cell frame timing remain pending `R10.1`/`R10.2`.)*
 - [ ] Select the human-path test driver for `R10.2` and confirm any new dependency's licence with `cargo xtask licenses`.
 
 ### R10.2 Human-path acceptance harness & phantom-widget gate
@@ -633,11 +633,11 @@ Owner: open · Status: in progress · Was: Human-GUI audit 2026-11-15 · Est. no
 - [ ] Render the `Cmd/Ctrl+K` command palette with typing and keyboard selection.
 
 ### R10.7 Web menu bar, toolbar & chrome parity (`B4` web)
-Owner: open · Status: todo · Was: Human-GUI audit 2026-11-15 · Est. note: 20–32 h · Depends on: `R10.1`, `R10.6`
+Owner: open · Status: in progress · Was: Human-GUI audit 2026-11-15 · Est. note: 20–32 h · Depends on: `R10.1`, `R10.6`
 
-- [ ] Present the shared menu bar, toolbar, dialogs, and context menus in `lumencraft-web` from the same layout tree as desktop (binding rule 3).
-- [ ] Map keyboard shortcuts with browser-reserved key handling, plus open/save via the existing `FileSystemAccessBridge` with download fallback.
-- [ ] Re-verify the strict CSP, `cargo xtask telemetry` (`0` violations), and bundle size after the change.
+- [ ] Present the shared menu bar, toolbar, dialogs, and context menus in `lumencraft-web` from the same layout tree as desktop (binding rule 3). *(Web `WebTextBridge` / `ZLayerBand`, `WebChromeBridge` / `WebChromeLayout`, and `<canvas>` `Z_BAND_ORDER` clip/fillText pipeline landed in `apps/lumencraft-web/{index.html,src/{text_bridge,chrome_bridge,host_adapters}.rs}`; consuming desktop's shared `LayoutTree` awaits `R10.1` `crates/ui-egui`.)*
+- [x] Mapped web keyboard shortcuts with browser-reserved key handling (`WebShortcutRouter`, `WEB_SHORTCUT_MAPPINGS`, zero-`Value::Null` `WebCommandRoute` / `:variant` dropdowns, QOL-7 disabled remediation, `toolbar.edit_params` & `toolbar.axes` routing) and open/save/export via `FileSystemAccessBridge::export_bytes` with Blob `<a download>` + `<input type="file">` fallbacks (`lumencraft-web` **`25 passed`** incl. `web_chrome_parity_menu_toolbar_modal_and_alt_t_edit_params_flow`, `file_system_access_and_download_fallback_export_all_supported_formats`, `toolbar_undo_redo_new_axes_edit_params_and_shortcuts_route_without_null`, `dropdown_menus_omit_event_dispatch_disable_remediation_and_route_palette_and_variants`, `browser_host_adapters::*` `7`).
+- [x] Re-verified strict CSP, `cargo xtask telemetry` (`0` violations across `23` manifests / `417` locked packages / `196` Rust sources / `51` web/workflow/packaging files / `6` workflows / `2` header configs), `cargo clippy --target wasm32-unknown-unknown -p lumencraft-web --no-deps -- -D warnings`, `cargo xtask wasm`, `xtask {layers,cleanroom,brands,secrets}` (`0/604`), `index_html_enforces_strict_csp_zero_egress_z_compositing_and_blob_fallback`, and `./packaging/web/package.sh` (`lumencraft-web-0.1.0.zip` `4.0M`, `<= 6,243,591` B).
 
 ### R10.8 Multi-tier data grid, navigation & calculated-variable editor (`B5`)
 Owner: open · Status: todo · Was: Human-GUI audit 2026-11-15 · Est. note: 50–80 h · Depends on: `R10.16`, `R10.9`

@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; object-src 'none'; base-uri 'self'; form-action 'none'">
   <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="mobile-web-app-capable" content="yes">
@@ -113,6 +114,43 @@
       display: flex;
     }
 
+    #lumencraft_toast {
+      position: fixed;
+      right: 16px;
+      bottom: 32px;
+      z-index: 30;
+      display: none;
+      max-width: min(440px, calc(100vw - 32px));
+      padding: 8px 12px;
+      border-radius: 7px;
+      border: 1px solid #3c4a66;
+      background: rgba(20, 24, 34, 0.95);
+      color: #e6eefc;
+      font-size: 12.5px;
+      line-height: 1.35;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.4);
+      pointer-events: none;
+    }
+
+    #lumencraft_toast[data-visible="true"] {
+      display: block;
+    }
+
+    #lumencraft_toast[data-level="error"] {
+      border-color: #e05d5d;
+      color: #ffd9d9;
+    }
+
+    #lumencraft_toast[data-level="warning"] {
+      border-color: #d99b26;
+      color: #fde6b4;
+    }
+
+    #lumencraft_toast[data-level="success"] {
+      border-color: #3da86d;
+      color: #ccf4dc;
+    }
+
     #lumencraft_print_stage {
       display: none;
     }
@@ -132,7 +170,11 @@
       #lumencraft_canvas,
       #lumencraft_loading,
       #lumencraft_readonly_banner,
-      #lumencraft_drop_overlay {
+      #lumencraft_drop_overlay,
+      #lumencraft_toast,
+      #lumencraft_a11y_chrome,
+      #lumencraft_file_input,
+      #lumencraft_dir_input {
         display: none !important;
       }
 
@@ -159,7 +201,7 @@
   </style>
 </head>
 <body>
-  <canvas id="lumencraft_canvas" aria-label="LumenCraft workspace canvas"></canvas>
+  <canvas id="lumencraft_canvas" tabindex="0" aria-label="LumenCraft workspace canvas"></canvas>
   <div id="lumencraft_loading">Loading LumenCraft&hellip;</div>
   <div id="lumencraft_readonly_banner" role="status" aria-live="polite" data-visible="false">
     <span id="lumencraft_readonly_badge">Read-Only</span>
@@ -168,6 +210,10 @@
   <div id="lumencraft_drop_overlay" data-active="false">
     Drop .lumencraft, .lumencraft.d, .pzfx, .prism, .csv, or .tsv files to open locally
   </div>
+  <div id="lumencraft_toast" role="status" aria-live="polite" data-visible="false" data-level="info"></div>
+  <div id="lumencraft_a11y_chrome" aria-live="polite" style="position:fixed;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;"></div>
+  <input id="lumencraft_file_input" type="file" accept=".lumencraft,.lctemplate,.pzfx,.prism,.csv,.tsv,.txt" multiple hidden />
+  <input id="lumencraft_dir_input" type="file" webkitdirectory multiple hidden />
   <div id="lumencraft_print_stage" aria-hidden="true"></div>
 
   <script>
@@ -177,15 +223,26 @@
       const PREFERENCES_KEY = "lumencraft.v1.preferences";
       const AUTOSAVE_PREFIX = "lumencraft.v1.autosave.";
       const TAB_CHANNEL_NAME = "lumencraft.v1.tab_locks";
+      const Z_BAND_ORDER = ["workspace", "popup_dropdown", "modal_overlay", "top_overlay"];
 
       const canvas = document.getElementById("lumencraft_canvas");
       const loadingEl = document.getElementById("lumencraft_loading");
       const bannerEl = document.getElementById("lumencraft_readonly_banner");
       const bannerTextEl = document.getElementById("lumencraft_readonly_text");
       const dropOverlayEl = document.getElementById("lumencraft_drop_overlay");
+      const toastEl = document.getElementById("lumencraft_toast");
+      const a11yChromeEl = document.getElementById("lumencraft_a11y_chrome");
+      const fileInputEl = document.getElementById("lumencraft_file_input");
+      const dirInputEl = document.getElementById("lumencraft_dir_input");
       const printStageEl = document.getElementById("lumencraft_print_stage");
+
+      const compositeCanvas = document.createElement("canvas");
+      const compositeCtx = compositeCanvas.getContext("2d");
+      const layerCanvas = document.createElement("canvas");
+      const layerCtx = layerCanvas.getContext("2d");
+
       let ctx2d = null;
-      const glState = initWebGl2Presenter(canvas);
+      let glState = initWebGl2Presenter(canvas);
       if (!glState && canvas) {
         ctx2d = canvas.getContext("2d");
       }
@@ -198,8 +255,27 @@
       let activeLockDocId = "default";
       let lockChannel = null;
       let releaseCurrentWebLock = null;
+      let holdsCurrentWebLock = false;
+      let lastRenderedFrameCmd = null;
+      let toastTimerId = null;
       let dispatchFn = null;
       const pendingEvents = [];
+
+      function showNotice(level, message) {
+        if (!toastEl || !message) {
+          return;
+        }
+        toastEl.setAttribute("data-level", level || "info");
+        toastEl.setAttribute("data-visible", "true");
+        toastEl.textContent = message;
+        if (toastTimerId !== null) {
+          clearTimeout(toastTimerId);
+        }
+        const duration = (level === "error" || level === "warning") ? 7000 : 4500;
+        toastTimerId = setTimeout(() => {
+          toastEl.setAttribute("data-visible", "false");
+        }, duration);
+      }
 
       function initWebGl2Presenter(targetCanvas) {
         if (!targetCanvas) {
@@ -310,13 +386,43 @@
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
         gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
 
+        const maxTextureSize = Number(gl.getParameter(gl.MAX_TEXTURE_SIZE)) || 4096;
+
         return {
           gl,
           program,
           vao,
           tex,
-          texLoc: gl.getUniformLocation(program, "u_tex")
+          texLoc: gl.getUniformLocation(program, "u_tex"),
+          maxTextureSize,
+          contextLost: false
         };
+      }
+
+      if (canvas) {
+        canvas.addEventListener("webglcontextlost", (ev) => {
+          ev.preventDefault();
+          if (glState) {
+            glState.contextLost = true;
+          }
+          if (!ctx2d) {
+            ctx2d = canvas.getContext("2d");
+          }
+          showNotice("warning", "WebGL context paused; switched to software 2D canvas.");
+          if (lastRenderedFrameCmd) {
+            renderRgbaCommand(lastRenderedFrameCmd);
+          }
+        });
+        canvas.addEventListener("webglcontextrestored", () => {
+          glState = initWebGl2Presenter(canvas);
+          if (glState) {
+            glState.contextLost = false;
+            showNotice("info", "WebGL2 context restored.");
+            if (lastRenderedFrameCmd) {
+              renderRgbaCommand(lastRenderedFrameCmd);
+            }
+          }
+        });
       }
 
       function bytesToBase64(uint8) {
@@ -361,44 +467,139 @@
         }
       }
 
+      function drawClippedTextOp(ctx, op) {
+        ctx.save();
+        if (op.clip_px && op.clip_px.width > 0 && op.clip_px.height > 0) {
+          ctx.beginPath();
+          ctx.rect(op.clip_px.x, op.clip_px.y, op.clip_px.width, op.clip_px.height);
+          ctx.clip();
+        }
+        ctx.font = op.font_css || "13px system-ui, sans-serif";
+        const c = Array.isArray(op.color_rgba) ? op.color_rgba : [24, 28, 36, 255];
+        ctx.fillStyle = "rgba(" + c[0] + "," + c[1] + "," + c[2] + "," + (c[3] / 255).toFixed(4) + ")";
+        ctx.textAlign = op.align || "left";
+        ctx.textBaseline = "alphabetic";
+        if ("direction" in ctx && op.direction) {
+          ctx.direction = op.direction;
+        }
+        if (typeof op.max_width_px === "number" && op.max_width_px > 0) {
+          ctx.fillText(op.text || "", op.x_px, op.baseline_y_px, op.max_width_px);
+        } else {
+          ctx.fillText(op.text || "", op.x_px, op.baseline_y_px);
+        }
+        ctx.restore();
+      }
+
+      function compositeFrameSurface(cmd, baseRgba) {
+        const w = cmd.width_px;
+        const h = cmd.height_px;
+        const hasOverlays = (Array.isArray(cmd.rgba_layers) && cmd.rgba_layers.some((l) => l && !l.uses_base_frame))
+          || (Array.isArray(cmd.text_ops) && cmd.text_ops.length > 0);
+        if (!hasOverlays || !compositeCtx) {
+          return null;
+        }
+
+        if (compositeCanvas.width !== w) compositeCanvas.width = w;
+        if (compositeCanvas.height !== h) compositeCanvas.height = h;
+        const baseData = new ImageData(new Uint8ClampedArray(baseRgba.buffer, baseRgba.byteOffset, baseRgba.byteLength), w, h);
+        compositeCtx.putImageData(baseData, 0, 0);
+
+        const layers = Array.isArray(cmd.rgba_layers) ? cmd.rgba_layers : [];
+        const textOps = Array.isArray(cmd.text_ops) ? cmd.text_ops : [];
+        for (const band of Z_BAND_ORDER) {
+          for (const layer of layers) {
+            if (!layer || layer.z_band !== band || layer.uses_base_frame || !layer.rgba_base64) {
+              continue;
+            }
+            const rect = layer.rect_px;
+            if (!rect || !rect.width || !rect.height || !layerCtx) {
+              continue;
+            }
+            const layerBytes = base64ToBytes(layer.rgba_base64);
+            if (layerBytes.length !== rect.width * rect.height * 4) {
+              continue;
+            }
+            if (layerCanvas.width !== rect.width) layerCanvas.width = rect.width;
+            if (layerCanvas.height !== rect.height) layerCanvas.height = rect.height;
+            const img = new ImageData(new Uint8ClampedArray(layerBytes.buffer, layerBytes.byteOffset, layerBytes.byteLength), rect.width, rect.height);
+            layerCtx.putImageData(img, 0, 0);
+            compositeCtx.drawImage(layerCanvas, rect.x, rect.y);
+          }
+          for (const op of textOps) {
+            if (op && op.z_band === band) {
+              drawClippedTextOp(compositeCtx, op);
+            }
+          }
+        }
+        return compositeCanvas;
+      }
+
+      function mirrorChromeAccessibility(chrome) {
+        if (!chrome) {
+          return;
+        }
+        if (a11yChromeEl && chrome.status_summary) {
+          a11yChromeEl.textContent = chrome.status_summary;
+        }
+        if (canvas && chrome.active_dialog && chrome.active_dialog !== "None") {
+          canvas.setAttribute("aria-label", "LumenCraft workspace dialog " + chrome.active_dialog);
+        } else if (canvas) {
+          canvas.setAttribute("aria-label", "LumenCraft workspace canvas");
+        }
+      }
+
       function renderRgbaCommand(cmd) {
         if (!canvas || !cmd.width_px || !cmd.height_px || !cmd.rgba_base64) {
           return;
         }
-        if (canvas.width !== cmd.width_px) {
-          canvas.width = cmd.width_px;
+        lastRenderedFrameCmd = cmd;
+        mirrorChromeAccessibility(cmd.chrome);
+        const maxDim = (glState && glState.maxTextureSize) ? glState.maxTextureSize : 8192;
+        const targetW = Math.min(cmd.width_px, maxDim);
+        const targetH = Math.min(cmd.height_px, maxDim);
+        if (canvas.width !== targetW) {
+          canvas.width = targetW;
         }
-        if (canvas.height !== cmd.height_px) {
-          canvas.height = cmd.height_px;
+        if (canvas.height !== targetH) {
+          canvas.height = targetH;
         }
         const rgba = base64ToBytes(cmd.rgba_base64);
         if (rgba.length === cmd.width_px * cmd.height_px * 4) {
-          if (glState) {
+          const composited = compositeFrameSurface(cmd, rgba);
+          if (glState && !glState.contextLost) {
             const { gl, program, vao, tex, texLoc } = glState;
-            gl.viewport(0, 0, cmd.width_px, cmd.height_px);
+            gl.viewport(0, 0, canvas.width, canvas.height);
             gl.useProgram(program);
             gl.activeTexture(gl.TEXTURE0);
             gl.bindTexture(gl.TEXTURE_2D, tex);
             gl.pixelStorei(gl.UNPACK_ALIGNMENT, 1);
-            gl.texImage2D(
-              gl.TEXTURE_2D,
-              0,
-              gl.RGBA,
-              cmd.width_px,
-              cmd.height_px,
-              0,
-              gl.RGBA,
-              gl.UNSIGNED_BYTE,
-              rgba
-            );
+            if (composited) {
+              gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, composited);
+            } else {
+              gl.texImage2D(
+                gl.TEXTURE_2D,
+                0,
+                gl.RGBA,
+                cmd.width_px,
+                cmd.height_px,
+                0,
+                gl.RGBA,
+                gl.UNSIGNED_BYTE,
+                rgba
+              );
+            }
             if (texLoc !== null) {
               gl.uniform1i(texLoc, 0);
             }
             gl.bindVertexArray(vao);
             gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
           } else if (ctx2d) {
-            const imgData = new ImageData(new Uint8ClampedArray(rgba.buffer), cmd.width_px, cmd.height_px);
-            ctx2d.putImageData(imgData, 0, 0);
+            if (composited) {
+              ctx2d.drawImage(composited, 0, 0);
+            } else {
+              const imgData = new ImageData(new Uint8ClampedArray(rgba.buffer), cmd.width_px, cmd.height_px);
+              ctx2d.putImageData(imgData, 0, 0);
+            }
           }
         }
         if (loadingEl) {
@@ -410,21 +611,25 @@
         if (!window.localStorage) {
           return;
         }
-        if (Array.isArray(cmd.removals)) {
-          for (const key of cmd.removals) {
-            if (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX)) {
-              window.localStorage.removeItem(key);
-            }
-          }
-        }
-        if (Array.isArray(cmd.writes)) {
-          for (const entry of cmd.writes) {
-            if (entry && typeof entry.key === "string" && typeof entry.value === "string") {
-              if (entry.key === PREFERENCES_KEY || entry.key.startsWith(AUTOSAVE_PREFIX)) {
-                window.localStorage.setItem(entry.key, entry.value);
+        try {
+          if (Array.isArray(cmd.removals)) {
+            for (const key of cmd.removals) {
+              if (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX)) {
+                window.localStorage.removeItem(key);
               }
             }
           }
+          if (Array.isArray(cmd.writes)) {
+            for (const entry of cmd.writes) {
+              if (entry && typeof entry.key === "string" && typeof entry.value === "string") {
+                if (entry.key === PREFERENCES_KEY || entry.key.startsWith(AUTOSAVE_PREFIX)) {
+                  window.localStorage.setItem(entry.key, entry.value);
+                }
+              }
+            }
+          }
+        } catch (_err) {
+          showNotice("warning", "Local browser storage quota exceeded or restricted; state stays in memory.");
         }
       }
 
@@ -550,6 +755,62 @@
         }
       }
 
+      async function applySaveOrDownloadCommand(cmd) {
+        const bytes = base64ToBytes(cmd.bytes_base64 || "");
+        const fileName = cmd.file_name || "lumencraft-export";
+        const mimeType = cmd.mime_type || "application/octet-stream";
+        if (typeof window.showSaveFilePicker === "function") {
+          try {
+            const dotIdx = fileName.lastIndexOf(".");
+            const ext = dotIdx >= 0 ? fileName.slice(dotIdx) : "";
+            const baseMime = mimeType.split(";")[0];
+            const pickerOpts = ext
+              ? { suggestedName: fileName, types: [{ description: "LumenCraft Export", accept: { [baseMime]: [ext] } }] }
+              : { suggestedName: fileName };
+            const handle = await window.showSaveFilePicker(pickerOpts);
+            const writable = await handle.createWritable();
+            await writable.write(bytes);
+            await writable.close();
+            showNotice("success", "Saved " + fileName);
+            return true;
+          } catch (err) {
+            if (err && err.name === "AbortError") {
+              return false;
+            }
+          }
+        }
+        const blob = new Blob([bytes], { type: mimeType });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = fileName;
+        a.rel = "noopener";
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+        showNotice("success", "Downloaded " + fileName);
+        return true;
+      }
+
+      async function applyTriggerFilePickerCommand(cmd) {
+        if (cmd && cmd.directory) {
+          const usedFs = await openDirectoryPickerTree();
+          if (!usedFs && dirInputEl) {
+            dirInputEl.click();
+          }
+          return;
+        }
+        if (fileInputEl && cmd && typeof cmd.accept === "string" && cmd.accept.length > 0) {
+          fileInputEl.accept = cmd.accept;
+        }
+        const usedFs = await openWithFilePicker();
+        if (!usedFs && fileInputEl) {
+          fileInputEl.click();
+        }
+      }
+
       async function applyBridgeCommand(cmd) {
         if (!cmd || !cmd.kind) {
           return;
@@ -573,6 +834,15 @@
           case "apply_directory_sync":
             await applyDirectorySyncCommand(cmd);
             break;
+          case "save_or_download_file":
+            await applySaveOrDownloadCommand(cmd);
+            break;
+          case "trigger_file_picker":
+            await applyTriggerFilePickerCommand(cmd);
+            break;
+          case "notify_status":
+            showNotice(cmd.level || "info", cmd.message || cmd.code || "");
+            break;
           default:
             break;
         }
@@ -583,11 +853,15 @@
           return;
         }
         const rect = canvas.getBoundingClientRect();
-        const dpr = Math.max(1, window.devicePixelRatio || 1);
+        const rawDpr = Math.max(1, window.devicePixelRatio || 1);
         const width = Math.max(1, rect.width || window.innerWidth || 1280);
         const height = Math.max(1, rect.height || window.innerHeight || 800);
-        const physW = Math.max(1, Math.round(width * dpr));
-        const physH = Math.max(1, Math.round(height * dpr));
+        const maxTex = (glState && glState.maxTextureSize) ? glState.maxTextureSize : 8192;
+        const maxDprW = maxTex / width;
+        const maxDprH = maxTex / height;
+        const dpr = Math.max(0.5, Math.min(rawDpr, maxDprW, maxDprH));
+        const physW = Math.max(1, Math.min(maxTex, Math.round(width * dpr)));
+        const physH = Math.max(1, Math.min(maxTex, Math.round(height * dpr)));
         if (canvas.width !== physW) canvas.width = physW;
         if (canvas.height !== physH) canvas.height = physH;
         emitEvent({
@@ -740,52 +1014,35 @@
         canvas.addEventListener("wheel", (ev) => {
           ev.preventDefault();
           const pt = toEventPoint(ev);
-          if (ev.ctrlKey || ev.metaKey) {
-            emitEvent({
-              kind: "ui_input",
-              event: {
-                WheelZoom: {
-                  x: pt.x,
-                  y: pt.y,
-                  delta_y: -ev.deltaY,
-                  modifiers: toModifiers(ev)
-                }
-              }
-            });
-          } else {
-            emitEvent({
-              kind: "ui_input",
-              event: {
-                InertialPan: {
-                  delta_x: -ev.deltaX,
-                  delta_y: -ev.deltaY,
-                  dt_sec: 1 / 60,
-                  step_coast: false
-                }
-              }
-            });
-          }
+          emitEvent({
+            kind: "wheel",
+            x: pt.x,
+            y: pt.y,
+            delta_x: ev.deltaX,
+            delta_y: ev.deltaY,
+            modifiers: toModifiers(ev)
+          });
         }, { passive: false });
+
+        function shouldPreventBrowserShortcut(ev) {
+          const lower = (ev.key || "").toLowerCase();
+          if (ev.key === "Tab") {
+            return true;
+          }
+          if (ev.altKey && !ev.metaKey && !ev.ctrlKey) {
+            return ["w", "t", "n", "b", "i", "p", "l", "k", "0", "e"].includes(lower);
+          }
+          if ((ev.metaKey || ev.ctrlKey) && !ev.altKey) {
+            return ["c", "p", "o", "s", "k", "t", "z", "y", "e", "0", "\\"].includes(lower);
+          }
+          return false;
+        }
 
         window.addEventListener("keydown", (ev) => {
           if (ev.isComposing) {
             return;
           }
-          const lower = (ev.key || "").toLowerCase();
-          if ((ev.metaKey || ev.ctrlKey) && !ev.altKey) {
-            if (lower === "c") {
-              ev.preventDefault();
-              const dpr = Math.max(1, window.devicePixelRatio || 1);
-              emitEvent({ kind: "copy_clipboard", sheet_id: null, dpi: Math.round(144 * dpr) });
-              return;
-            }
-            if (lower === "p") {
-              ev.preventDefault();
-              emitEvent({ kind: "print_current_sheet", sheet_id: null, scale_percent: 100.0 });
-              return;
-            }
-          }
-          if (ev.key === "Tab") {
+          if (shouldPreventBrowserShortcut(ev)) {
             ev.preventDefault();
           }
           emitEvent({
@@ -799,32 +1056,68 @@
           });
         });
 
+        window.addEventListener("compositionstart", () => {
+          emitEvent({ kind: "ime_preedit", text: "" });
+        });
+
+        window.addEventListener("compositionupdate", (ev) => {
+          emitEvent({ kind: "ime_preedit", text: ev.data || "" });
+        });
+
         window.addEventListener("compositionend", (ev) => {
-          if (ev.data) {
-            emitEvent({
-              kind: "ui_input",
-              event: {
-                TextInput: {
-                  text: ev.data
-                }
-              }
-            });
-          }
+          emitEvent({ kind: "ime_commit", text: ev.data || "" });
         });
 
         window.addEventListener("paste", (ev) => {
           const text = ev.clipboardData ? ev.clipboardData.getData("text/plain") : "";
           if (text) {
             ev.preventDefault();
-            emitEvent({
-              kind: "ui_input",
-              event: {
-                TextInput: {
-                  text
-                }
-              }
-            });
+            emitEvent({ kind: "paste_clipboard", text });
           }
+        });
+      }
+
+      if (fileInputEl) {
+        fileInputEl.addEventListener("change", async () => {
+          const files = fileInputEl.files;
+          if (!files || files.length === 0) {
+            return;
+          }
+          if (files.length === 1) {
+            const file = files[0];
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
+          } else {
+            const batch = [];
+            for (let i = 0; i < files.length; i += 1) {
+              const file = files[i];
+              const bytes = new Uint8Array(await file.arrayBuffer());
+              batch.push({ path: file.name, bytes_base64: bytesToBase64(bytes) });
+            }
+            emitEvent({ kind: "import_dropped_files", files: batch });
+          }
+          fileInputEl.value = "";
+        });
+      }
+
+      if (dirInputEl) {
+        dirInputEl.addEventListener("change", async () => {
+          const files = dirInputEl.files;
+          if (!files || files.length === 0) {
+            return;
+          }
+          const firstRel = files[0].webkitRelativePath || "workspace.lumencraft.d/document.json";
+          const rootName = firstRel.includes("/") ? firstRel.split("/")[0] : "workspace.lumencraft.d";
+          const entries = [];
+          for (let i = 0; i < files.length; i += 1) {
+            const file = files[i];
+            const rawRel = file.webkitRelativePath || file.name;
+            const rel = rawRel.startsWith(rootName + "/") ? rawRel.slice(rootName.length + 1) : rawRel;
+            const bytes = new Uint8Array(await file.arrayBuffer());
+            entries.push({ path: rel, bytes_base64: bytesToBase64(bytes) });
+          }
+          emitEvent({ kind: "import_directory_entries", root_name: rootName, entries });
+          dirInputEl.value = "";
         });
       }
 
@@ -843,48 +1136,68 @@
 
       async function openWithFilePicker() {
         if (typeof window.showOpenFilePicker !== "function") {
+          if (fileInputEl) {
+            fileInputEl.click();
+          }
           return false;
         }
-        const [handle] = await window.showOpenFilePicker({
-          multiple: false,
-          types: [{
-            description: "LumenCraft Projects and Scientific Data",
-            accept: {
-              "application/octet-stream": [".lumencraft", ".lctemplate", ".pzfx", ".prism"],
-              "text/csv": [".csv", ".tsv"]
-            }
-          }]
-        });
-        const file = await handle.getFile();
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
-        return true;
+        try {
+          const [handle] = await window.showOpenFilePicker({
+            multiple: false,
+            types: [{
+              description: "LumenCraft Projects and Scientific Data",
+              accept: {
+                "application/octet-stream": [".lumencraft", ".lctemplate", ".pzfx", ".prism"],
+                "text/csv": [".csv", ".tsv"]
+              }
+            }]
+          });
+          const file = await handle.getFile();
+          const bytes = new Uint8Array(await file.arrayBuffer());
+          emitEvent({ kind: "open_file_bytes", file_name: file.name, bytes_base64: bytesToBase64(bytes) });
+          return true;
+        } catch (err) {
+          if (err && err.name === "AbortError") {
+            return true;
+          }
+          if (fileInputEl) {
+            fileInputEl.click();
+          }
+          return false;
+        }
       }
 
-      async function saveWithFilePicker(bytes) {
-        if (typeof window.showSaveFilePicker !== "function") {
-          return false;
-        }
-        const handle = await window.showSaveFilePicker({
-          suggestedName: "project.lumencraft",
-          types: [{ description: "LumenCraft Archive", accept: { "application/octet-stream": [".lumencraft"] } }]
+      async function saveWithFilePicker(bytes, suggestedName, mimeType) {
+        return applySaveOrDownloadCommand({
+          file_name: suggestedName || "project.lumencraft",
+          mime_type: mimeType || "application/octet-stream",
+          bytes_base64: bytesToBase64(bytes instanceof Uint8Array ? bytes : new Uint8Array(bytes || []))
         });
-        const writable = await handle.createWritable();
-        await writable.write(bytes);
-        await writable.close();
-        return true;
       }
 
       async function openDirectoryPickerTree() {
         if (typeof window.showDirectoryPicker !== "function") {
+          if (dirInputEl) {
+            dirInputEl.click();
+          }
           return false;
         }
-        const dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
-        activeDirectoryHandle = dirHandle;
-        const entries = [];
-        await readDirectoryHandleEntries(dirHandle, "", entries);
-        emitEvent({ kind: "import_directory_entries", root_name: dirHandle.name, entries });
-        return true;
+        try {
+          const dirHandle = await window.showDirectoryPicker({ mode: "readwrite" });
+          activeDirectoryHandle = dirHandle;
+          const entries = [];
+          await readDirectoryHandleEntries(dirHandle, "", entries);
+          emitEvent({ kind: "import_directory_entries", root_name: dirHandle.name, entries });
+          return true;
+        } catch (err) {
+          if (err && err.name === "AbortError") {
+            return true;
+          }
+          if (dirInputEl) {
+            dirInputEl.click();
+          }
+          return false;
+        }
       }
 
       async function collectDroppedEntry(entry, prefix, out) {
@@ -911,24 +1224,32 @@
         }
       }
 
+      let dragOverlayVisible = false;
+      function setDragState(active) {
+        if (dragOverlayVisible === active) {
+          return;
+        }
+        dragOverlayVisible = active;
+        if (dropOverlayEl) {
+          dropOverlayEl.setAttribute("data-active", active ? "true" : "false");
+        }
+        emitEvent({ kind: "drag_state_changed", active });
+      }
+
       window.addEventListener("dragover", (ev) => {
         ev.preventDefault();
-        if (dropOverlayEl) {
-          dropOverlayEl.setAttribute("data-active", "true");
-        }
+        setDragState(true);
       });
 
       window.addEventListener("dragleave", (ev) => {
-        if (ev.relatedTarget === null && dropOverlayEl) {
-          dropOverlayEl.setAttribute("data-active", "false");
+        if (ev.relatedTarget === null) {
+          setDragState(false);
         }
       });
 
       window.addEventListener("drop", async (ev) => {
         ev.preventDefault();
-        if (dropOverlayEl) {
-          dropOverlayEl.setAttribute("data-active", "false");
-        }
+        setDragState(false);
         const dt = ev.dataTransfer;
         if (!dt) {
           return;
@@ -964,6 +1285,7 @@
 
       function coordinateDocumentLock(docId) {
         activeLockDocId = docId || "default";
+        holdsCurrentWebLock = false;
         if (typeof releaseCurrentWebLock === "function") {
           releaseCurrentWebLock();
           releaseCurrentWebLock = null;
@@ -994,6 +1316,7 @@
           const lockName = "lumencraft.doc." + activeLockDocId;
           void navigator.locks.request(lockName, { ifAvailable: true }, (lock) => {
             if (!lock) {
+              holdsCurrentWebLock = false;
               emitEvent({
                 kind: "observe_external_lock",
                 doc_id: activeLockDocId,
@@ -1002,15 +1325,20 @@
               });
               return Promise.resolve();
             }
+            holdsCurrentWebLock = true;
             emitEvent({ kind: "acquire_lock", doc_id: activeLockDocId, tab_id: tabId, now_ms: Date.now() });
             if (lockChannel) {
               lockChannel.postMessage({ type: "holder", docId: activeLockDocId, tabId });
             }
             return new Promise((resolve) => {
-              releaseCurrentWebLock = resolve;
+              releaseCurrentWebLock = () => {
+                holdsCurrentWebLock = false;
+                resolve();
+              };
             });
           });
         } else {
+          holdsCurrentWebLock = true;
           emitEvent({ kind: "acquire_lock", doc_id: activeLockDocId, tab_id: tabId, now_ms: Date.now() });
         }
       }
@@ -1022,19 +1350,45 @@
       });
 
       window.addEventListener("beforeunload", () => {
-        if (lockChannel) {
+        if (holdsCurrentWebLock && lockChannel) {
           lockChannel.postMessage({ type: "release", docId: activeLockDocId, tabId });
         }
+        holdsCurrentWebLock = false;
         if (typeof releaseCurrentWebLock === "function") {
           releaseCurrentWebLock();
           releaseCurrentWebLock = null;
         }
       });
 
+      function collectLocalStorageSnapshot() {
+        const entries = [];
+        if (!window.localStorage) {
+          return entries;
+        }
+        try {
+          for (let i = 0; i < window.localStorage.length; i += 1) {
+            const key = window.localStorage.key(i);
+            if (key && (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX))) {
+              const val = window.localStorage.getItem(key);
+              if (typeof val === "string") {
+                entries.push({ key, value: val });
+              }
+            }
+          }
+        } catch (_err) {
+          // Ignore storage read restrictions.
+        }
+        return entries;
+      }
+
       window.LumenCraftHost = {
         tabId,
         connectBridge(fn) {
           dispatchFn = fn;
+          const stored = collectLocalStorageSnapshot();
+          if (stored.length > 0) {
+            emitEvent({ kind: "hydrate_local_storage", entries: stored });
+          }
           syncCanvasViewport();
           coordinateDocumentLock(activeLockDocId);
           while (pendingEvents.length > 0) {
@@ -1047,7 +1401,11 @@
         openDirectoryPickerTree,
         coordinateDocumentLock,
         readLocalPreferences() {
-          return window.localStorage ? window.localStorage.getItem(PREFERENCES_KEY) : null;
+          try {
+            return window.localStorage ? window.localStorage.getItem(PREFERENCES_KEY) : null;
+          } catch (_err) {
+            return null;
+          }
         }
       };
 

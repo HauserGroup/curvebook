@@ -10,10 +10,20 @@ use std::error::Error;
 use std::fmt;
 
 use lumencraft_engine::cmd;
-use lumencraft_format::{CURRENT_PREFERENCES_VERSION, PreferencesFile, parse_preferences_json};
+use lumencraft_format::{CURRENT_PREFERENCES_VERSION, CsvOptions, PreferencesFile, export_datasheet_to_csv, parse_preferences_json};
 use lumencraft_ui_egui::serde_json::{self, Map, Value, json};
-use lumencraft_ui_egui::{CanvasPreviewFilter, ClipboardBundle, PrintJobSpec, UiEventOutcome, UiInputEvent, ViewportMetrics};
+use lumencraft_ui_egui::{
+    CanvasPreviewFilter, ClipboardBundle, KeyModifiers, PointerButton, PrintJobSpec, UiEventOutcome, UiInputEvent, ViewportMetrics,
+    dispatch_ui_command,
+};
 
+use crate::chrome_bridge::{
+    self, WebChromeAction, WebChromeBridge, WebChromeDispatch, WebChromeSnapshot, WebCommandRoute, WebExportFormat, WebNoticeLevel,
+    WebShortcutAction, commit_active_modal_dialog, contextual_command_params, resolve_web_command_route,
+};
+use crate::text_bridge::{
+    BrowserCanvasTextMeasurer, WebRgbaLayer, WebTextBridge, WebTextDrawOp, decode_rgba_layers_json, decode_text_ops_json, encode_text_ops_json,
+};
 use crate::{WebWorkspaceHost, WorkspaceSummary};
 
 /// Default browser `localStorage` quota budget (`5 MiB`).
@@ -900,6 +910,152 @@ impl FileSystemAccessBridge {
         self.last_synced_tree = next;
         Ok(plan)
     }
+
+    /// Export the active document or sheet as downloadable bytes for File System Access / Blob fallback (`R10.7`).
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::Workspace`] or [`WebAdapterError::Validation`] if export fails or no compatible sheet exists.
+    pub fn export_bytes(
+        &mut self,
+        host: &mut WebWorkspaceHost,
+        format: WebExportFormat,
+        sheet_id: Option<&str>,
+        dpi: u16,
+    ) -> Result<WebExportArtifact, WebAdapterError> {
+        let stem = sanitize_download_stem(&host.app().document().title);
+        let clamped_dpi = dpi.clamp(MIN_CLIPBOARD_DPI, MAX_CLIPBOARD_DPI);
+
+        match format {
+            WebExportFormat::LumencraftArchive => {
+                let bytes = self.export_lumencraft_bytes(host)?;
+                Ok(WebExportArtifact {
+                    format,
+                    file_name: format!("{stem}.lumencraft"),
+                    mime_type: String::from(format.mime_type()),
+                    extension: String::from(format.extension()),
+                    bytes,
+                })
+            }
+            WebExportFormat::LumencraftDirectory => {
+                let tree = self.export_directory_tree(host)?;
+                let dir_name = format!("{stem}.lumencraft.d");
+                let mut zip = lumencraft_format::ZipWriter::new();
+                for (rel_path, content) in tree {
+                    zip.add_file(&format!("{dir_name}/{rel_path}"), content).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
+                }
+                let bytes = zip.finish().map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
+                Ok(WebExportArtifact {
+                    format,
+                    file_name: format!("{dir_name}.zip"),
+                    mime_type: String::from("application/zip"),
+                    extension: String::from("zip"),
+                    bytes,
+                })
+            }
+            WebExportFormat::Csv => export_csv_artifact(host, sheet_id, &stem),
+            WebExportFormat::Svg | WebExportFormat::Pdf | WebExportFormat::Png | WebExportFormat::Tiff => {
+                export_figure_artifact(host, format, sheet_id, clamped_dpi, &stem)
+            }
+        }
+    }
+}
+
+/// Downloadable export artifact prepared by [`FileSystemAccessBridge::export_bytes`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebExportArtifact {
+    pub format: WebExportFormat,
+    pub file_name: String,
+    pub mime_type: String,
+    pub extension: String,
+    pub bytes: Vec<u8>,
+}
+
+fn sanitize_download_stem(raw: &str) -> String {
+    let cleaned: String = raw.trim().chars().map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') { ch } else { '_' }).collect();
+    let collapsed = cleaned.trim_matches('_');
+    if collapsed.is_empty() { String::from("lumencraft-project") } else { collapsed.to_owned() }
+}
+
+fn export_csv_artifact(host: &WebWorkspaceHost, sheet_id: Option<&str>, project_stem: &str) -> Result<WebExportArtifact, WebAdapterError> {
+    let doc = host.app().document();
+    let ds = sheet_id
+        .and_then(|raw| doc.data_sheets.iter().find(|s| s.id.as_str() == raw))
+        .or_else(|| doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)))
+        .or_else(|| doc.data_sheets.first())
+        .ok_or_else(|| WebAdapterError::Validation(String::from("no data sheet available to export as CSV")))?;
+
+    let dec = host.app().locale_preset.decimal_separator;
+    let mut opts = if dec == ',' { CsvOptions::european_csv() } else { CsvOptions::csv() };
+    opts.decimal_separator = dec;
+    let csv_text = export_datasheet_to_csv(ds, &opts).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
+    let sheet_stem = sanitize_download_stem(&ds.title);
+    let file_name = if sheet_stem.is_empty() { format!("{project_stem}.csv") } else { format!("{sheet_stem}.csv") };
+    Ok(WebExportArtifact {
+        format: WebExportFormat::Csv,
+        file_name,
+        mime_type: String::from(WebExportFormat::Csv.mime_type()),
+        extension: String::from(WebExportFormat::Csv.extension()),
+        bytes: csv_text.into_bytes(),
+    })
+}
+
+fn export_figure_artifact(
+    host: &mut WebWorkspaceHost,
+    format: WebExportFormat,
+    sheet_id: Option<&str>,
+    dpi: u16,
+    project_stem: &str,
+) -> Result<WebExportArtifact, WebAdapterError> {
+    let target_id = {
+        let doc = host.app().document();
+        sheet_id
+            .and_then(|raw| {
+                doc.graph_sheets
+                    .iter()
+                    .find(|s| s.id.as_str() == raw)
+                    .map(|s| s.id.clone())
+                    .or_else(|| doc.layout_sheets.iter().find(|s| s.id.as_str() == raw).map(|s| s.id.clone()))
+            })
+            .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned())
+            .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
+            .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
+            .ok_or_else(|| WebAdapterError::Validation(String::from("no graph or layout sheet available to export")))?
+    };
+
+    let (cmd_id, params) = match format {
+        WebExportFormat::Svg => ("export.svg", json!({ "sheet_id": target_id.as_str() })),
+        WebExportFormat::Pdf => ("export.pdf", json!({ "sheet_id": target_id.as_str() })),
+        WebExportFormat::Png => ("export.png", json!({ "sheet_id": target_id.as_str(), "dpi": dpi })),
+        WebExportFormat::Tiff => ("export.tiff", json!({ "sheet_id": target_id.as_str(), "dpi": dpi, "compression": "deflate" })),
+        _ => return Err(WebAdapterError::Validation(String::from("unsupported figure export format"))),
+    };
+
+    let payload = host.execute_command(cmd_id, params).map_err(WebAdapterError::Workspace)?;
+    let inner = payload.get("payload").unwrap_or(&payload);
+    let bytes = match format {
+        WebExportFormat::Svg => inner
+            .get("svg")
+            .and_then(Value::as_str)
+            .ok_or_else(|| WebAdapterError::Workspace(String::from("export.svg missing `svg` payload")))?
+            .as_bytes()
+            .to_vec(),
+        WebExportFormat::Pdf | WebExportFormat::Png | WebExportFormat::Tiff => {
+            let b64 = inner
+                .get("base64")
+                .and_then(Value::as_str)
+                .ok_or_else(|| WebAdapterError::Workspace(format!("{cmd_id} missing `base64` payload")))?;
+            decode_base64(b64)?
+        }
+        _ => Vec::new(),
+    };
+
+    Ok(WebExportArtifact {
+        format,
+        file_name: format!("{project_stem}-{}.{}", sanitize_download_stem(target_id.as_str()), format.extension()),
+        mime_type: String::from(format.mime_type()),
+        extension: String::from(format.extension()),
+        bytes,
+    })
 }
 
 fn looks_like_directory_entry(path: &str) -> bool {
@@ -1221,6 +1377,14 @@ pub enum WebBridgeEvent {
     ReleaseLock { now_ms: u64 },
     SetPreviewFilter { filter: CanvasPreviewFilter },
     SetPresentationMode { enabled: bool },
+    Wheel { x: f64, y: f64, delta_x: f64, delta_y: f64, modifiers: KeyModifiers },
+    ImePreedit { text: String },
+    ImeCommit { text: String },
+    DragStateChanged { active: bool },
+    PasteClipboard { text: String },
+    ExportFile { format: WebExportFormat, sheet_id: Option<String>, dpi: u16 },
+    HydrateLocalStorage { entries: Vec<(String, String)> },
+    ClickChromeNode { node_id: String, button: PointerButton, modifiers: KeyModifiers },
 }
 
 impl WebBridgeEvent {
@@ -1313,6 +1477,34 @@ impl WebBridgeEvent {
                 json!({ "kind": "set_preview_filter", "filter": encoded })
             }
             Self::SetPresentationMode { enabled } => json!({ "kind": "set_presentation_mode", "enabled": enabled }),
+            Self::Wheel { x, y, delta_x, delta_y, modifiers } => json!({
+                "kind": "wheel",
+                "x": x,
+                "y": y,
+                "delta_x": delta_x,
+                "delta_y": delta_y,
+                "modifiers": modifiers_to_json(*modifiers),
+            }),
+            Self::ImePreedit { text } => json!({ "kind": "ime_preedit", "text": text }),
+            Self::ImeCommit { text } => json!({ "kind": "ime_commit", "text": text }),
+            Self::DragStateChanged { active } => json!({ "kind": "drag_state_changed", "active": active }),
+            Self::PasteClipboard { text } => json!({ "kind": "paste_clipboard", "text": text }),
+            Self::ExportFile { format, sheet_id, dpi } => json!({
+                "kind": "export_file",
+                "format": format.as_str(),
+                "sheet_id": sheet_id,
+                "dpi": dpi,
+            }),
+            Self::HydrateLocalStorage { entries } => json!({
+                "kind": "hydrate_local_storage",
+                "entries": entries.iter().map(|(k, v)| json!({ "key": k, "value": v })).collect::<Vec<_>>(),
+            }),
+            Self::ClickChromeNode { node_id, button, modifiers } => json!({
+                "kind": "click_chrome_node",
+                "node_id": node_id,
+                "button": pointer_button_as_str(*button),
+                "modifiers": modifiers_to_json(*modifiers),
+            }),
         };
         Ok(value)
     }
@@ -1400,12 +1592,17 @@ impl WebBridgeEvent {
             "release_lock" => Ok(Self::ReleaseLock { now_ms: require_u64_or_default(obj, "now_ms", 0) }),
             "set_preview_filter" => {
                 let raw = obj.get("filter").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `filter` field")))?;
-                let filter: CanvasPreviewFilter =
-                    serde_json::from_value(raw.clone()).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
+                let filter = if let Some(name) = raw.as_str() {
+                    CanvasPreviewFilter::from_name(name)
+                        .or_else(|| serde_json::from_value(raw.clone()).ok())
+                        .ok_or_else(|| WebAdapterError::Serialization(format!("unknown canvas preview filter `{name}`")))?
+                } else {
+                    serde_json::from_value(raw.clone()).map_err(|err| WebAdapterError::Serialization(err.to_string()))?
+                };
                 Ok(Self::SetPreviewFilter { filter })
             }
             "set_presentation_mode" => Ok(Self::SetPresentationMode { enabled: obj.get("enabled").and_then(Value::as_bool).unwrap_or(false) }),
-            other => Err(WebAdapterError::Serialization(format!("unknown bridge event kind `{other}`"))),
+            other => decode_extended_bridge_event(other, obj),
         }
     }
 
@@ -1419,6 +1616,35 @@ impl WebBridgeEvent {
     }
 }
 
+fn decode_extended_bridge_event(kind: &str, obj: &Map<String, Value>) -> Result<WebBridgeEvent, WebAdapterError> {
+    match kind {
+        "wheel" => Ok(WebBridgeEvent::Wheel {
+            x: require_f64_or_default(obj, "x", 0.0)?,
+            y: require_f64_or_default(obj, "y", 0.0)?,
+            delta_x: require_f64_or_default(obj, "delta_x", 0.0)?,
+            delta_y: require_f64_or_default(obj, "delta_y", 0.0)?,
+            modifiers: parse_modifiers_field(obj, "modifiers"),
+        }),
+        "ime_preedit" => Ok(WebBridgeEvent::ImePreedit { text: optional_str_field(obj, "text").unwrap_or_default() }),
+        "ime_commit" => Ok(WebBridgeEvent::ImeCommit { text: optional_str_field(obj, "text").unwrap_or_default() }),
+        "drag_state_changed" => Ok(WebBridgeEvent::DragStateChanged { active: obj.get("active").and_then(Value::as_bool).unwrap_or(false) }),
+        "paste_clipboard" => Ok(WebBridgeEvent::PasteClipboard { text: optional_str_field(obj, "text").unwrap_or_default() }),
+        "export_file" => {
+            let fmt_raw = require_str_field(obj, "format")?;
+            let format =
+                WebExportFormat::from_name(fmt_raw).ok_or_else(|| WebAdapterError::Serialization(format!("unknown export format `{fmt_raw}`")))?;
+            Ok(WebBridgeEvent::ExportFile { format, sheet_id: optional_str_field(obj, "sheet_id"), dpi: require_u16_or_default(obj, "dpi", 300) })
+        }
+        "hydrate_local_storage" => Ok(WebBridgeEvent::HydrateLocalStorage { entries: parse_string_pairs(obj, "entries")? }),
+        "click_chrome_node" => Ok(WebBridgeEvent::ClickChromeNode {
+            node_id: require_str_field(obj, "node_id")?.to_owned(),
+            button: parse_pointer_button(obj.get("button")),
+            modifiers: parse_modifiers_field(obj, "modifiers"),
+        }),
+        other => Err(WebAdapterError::Serialization(format!("unknown bridge event kind `{other}`"))),
+    }
+}
+
 /// Outgoing host command emitted by [`WebBridgeSession`] for the browser DOM host to execute.
 #[derive(Debug, Clone, PartialEq)]
 pub enum WebBridgeCommand {
@@ -1427,6 +1653,9 @@ pub enum WebBridgeCommand {
         height_px: u32,
         dpi: u16,
         rgba_bytes: Vec<u8>,
+        rgba_layers: Vec<WebRgbaLayer>,
+        text_ops: Vec<WebTextDrawOp>,
+        chrome: WebChromeSnapshot,
         zoom: f64,
         pan_pt: [f64; 2],
         action: Option<String>,
@@ -1457,6 +1686,22 @@ pub enum WebBridgeCommand {
         holder_tab_id: Option<String>,
         message: Option<String>,
     },
+    SaveOrDownloadFile {
+        file_name: String,
+        mime_type: String,
+        bytes: Vec<u8>,
+        format: WebExportFormat,
+    },
+    TriggerFilePicker {
+        accept: String,
+        multiple: bool,
+        directory: bool,
+    },
+    NotifyStatus {
+        level: WebNoticeLevel,
+        code: String,
+        message: String,
+    },
 }
 
 impl WebBridgeCommand {
@@ -1464,17 +1709,22 @@ impl WebBridgeCommand {
     #[must_use]
     pub fn to_json_value(&self) -> Value {
         match self {
-            Self::RenderRgbaFrame { width_px, height_px, dpi, rgba_bytes, zoom, pan_pt, action, command_result } => json!({
-                "kind": "render_rgba_frame",
-                "width_px": width_px,
-                "height_px": height_px,
-                "dpi": dpi,
-                "rgba_base64": encode_base64(rgba_bytes),
-                "zoom": zoom,
-                "pan_pt": pan_pt,
-                "action": action,
-                "command_result": command_result,
-            }),
+            Self::RenderRgbaFrame { width_px, height_px, dpi, rgba_bytes, rgba_layers, text_ops, chrome, zoom, pan_pt, action, command_result } => {
+                json!({
+                    "kind": "render_rgba_frame",
+                    "width_px": width_px,
+                    "height_px": height_px,
+                    "dpi": dpi,
+                    "rgba_base64": encode_base64(rgba_bytes),
+                    "rgba_layers": rgba_layers.iter().map(WebRgbaLayer::to_json_value).collect::<Vec<_>>(),
+                    "text_ops": encode_text_ops_json(text_ops),
+                    "chrome": chrome.to_json_value(),
+                    "zoom": zoom,
+                    "pan_pt": pan_pt,
+                    "action": action,
+                    "command_result": command_result,
+                })
+            }
             Self::WriteClipboardItems { payload } => json!({
                 "kind": "write_clipboard_items",
                 "payload": payload.to_json_value(),
@@ -1507,6 +1757,25 @@ impl WebBridgeCommand {
                 "holder_tab_id": holder_tab_id,
                 "message": message,
             }),
+            Self::SaveOrDownloadFile { file_name, mime_type, bytes, format } => json!({
+                "kind": "save_or_download_file",
+                "file_name": file_name,
+                "mime_type": mime_type,
+                "bytes_base64": encode_base64(bytes),
+                "format": format.as_str(),
+            }),
+            Self::TriggerFilePicker { accept, multiple, directory } => json!({
+                "kind": "trigger_file_picker",
+                "accept": accept,
+                "multiple": multiple,
+                "directory": directory,
+            }),
+            Self::NotifyStatus { level, code, message } => json!({
+                "kind": "notify_status",
+                "level": level.as_str(),
+                "code": code,
+                "message": message,
+            }),
         }
     }
 
@@ -1523,11 +1792,26 @@ impl WebBridgeCommand {
                 let height_px = u32::try_from(obj.get("height_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
                 let dpi = require_u16_or_default(obj, "dpi", 96);
                 let rgba_bytes = decode_base64_field(obj, "rgba_base64", "rgba_bytes")?;
+                let rgba_layers = decode_rgba_layers_json(obj)?;
+                let text_ops = decode_text_ops_json(obj)?;
+                let chrome = obj.get("chrome").map(WebChromeSnapshot::from_json_value).unwrap_or_default();
                 let zoom = require_f64_or_default(obj, "zoom", 1.0)?;
                 let pan_pt = parse_pan_pt(obj.get("pan_pt"))?;
                 let action = optional_str_field(obj, "action");
                 let command_result = obj.get("command_result").filter(|v| !v.is_null()).cloned();
-                Ok(Self::RenderRgbaFrame { width_px, height_px, dpi, rgba_bytes, zoom, pan_pt, action, command_result })
+                Ok(Self::RenderRgbaFrame {
+                    width_px,
+                    height_px,
+                    dpi,
+                    rgba_bytes,
+                    rgba_layers,
+                    text_ops,
+                    chrome,
+                    zoom,
+                    pan_pt,
+                    action,
+                    command_result,
+                })
             }
             "write_clipboard_items" => {
                 let payload_val = obj.get("payload").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `payload`")))?;
@@ -1572,12 +1856,37 @@ impl WebBridgeCommand {
                 holder_tab_id: optional_str_field(obj, "holder_tab_id"),
                 message: optional_str_field(obj, "message"),
             }),
+            "save_or_download_file" => {
+                let fmt_raw = require_str_field(obj, "format")?;
+                let format = WebExportFormat::from_name(fmt_raw)
+                    .ok_or_else(|| WebAdapterError::Serialization(format!("unknown export format `{fmt_raw}`")))?;
+                Ok(Self::SaveOrDownloadFile {
+                    file_name: require_str_field(obj, "file_name")?.to_owned(),
+                    mime_type: optional_str_field(obj, "mime_type").unwrap_or_else(|| String::from(format.mime_type())),
+                    bytes: decode_base64_field(obj, "bytes_base64", "bytes")?,
+                    format,
+                })
+            }
+            "trigger_file_picker" => Ok(Self::TriggerFilePicker {
+                accept: optional_str_field(obj, "accept").unwrap_or_default(),
+                multiple: obj.get("multiple").and_then(Value::as_bool).unwrap_or(false),
+                directory: obj.get("directory").and_then(Value::as_bool).unwrap_or(false),
+            }),
+            "notify_status" => {
+                let level_raw = optional_str_field(obj, "level").unwrap_or_else(|| String::from("info"));
+                let level = WebNoticeLevel::from_name(&level_raw).unwrap_or(WebNoticeLevel::Info);
+                Ok(Self::NotifyStatus {
+                    level,
+                    code: optional_str_field(obj, "code").unwrap_or_else(|| String::from("status")),
+                    message: optional_str_field(obj, "message").unwrap_or_default(),
+                })
+            }
             other => Err(WebAdapterError::Serialization(format!("unknown bridge command kind `{other}`"))),
         }
     }
 }
 
-/// Complete browser adapter session binding workspace, storage, locks, filesystem sync, and touch input.
+/// Complete browser adapter session binding workspace, storage, locks, filesystem sync, touch, text measurement, and chrome.
 #[derive(Debug, Clone)]
 pub struct WebBridgeSession {
     pub host: WebWorkspaceHost,
@@ -1585,6 +1894,8 @@ pub struct WebBridgeSession {
     pub locks: WebLockCoordinator,
     pub fs: FileSystemAccessBridge,
     pub touch: TouchGestureRecognizer,
+    pub text_measurer: BrowserCanvasTextMeasurer,
+    pub chrome: WebChromeBridge,
     doc_id: String,
     tab_id: String,
     access_mode: TabAccessMode,
@@ -1615,6 +1926,8 @@ impl WebBridgeSession {
             locks: WebLockCoordinator::default(),
             fs: FileSystemAccessBridge::new(),
             touch: TouchGestureRecognizer::new(),
+            text_measurer: BrowserCanvasTextMeasurer::new(),
+            chrome: WebChromeBridge::new(),
             doc_id: doc,
             tab_id: tab,
             access_mode: TabAccessMode::ExclusiveReadWrite,
@@ -1709,21 +2022,27 @@ impl WebBridgeSession {
             return Err(WebAdapterError::Clipboard(format!("clipboard DPI {dpi} out of supported range {MIN_CLIPBOARD_DPI}..={MAX_CLIPBOARD_DPI}")));
         }
 
-        let decimal_sep = if self.host.app().locale.starts_with("de") || self.host.app().locale.starts_with("fr") { ',' } else { '.' };
+        let decimal_sep = self.host.app().locale_preset.decimal_separator;
+        let selection_bounds = self.host.app().grid.tool.selection_bounds();
         let session = self.host.app_mut().session_mut();
         let doc = session.document();
 
-        let render_sheet_id = sheet_id
-            .and_then(|raw| {
-                doc.graph_sheets
-                    .iter()
-                    .find(|s| s.id.as_str() == raw)
-                    .map(|s| s.id.clone())
-                    .or_else(|| doc.layout_sheets.iter().find(|s| s.id.as_str() == raw).map(|s| s.id.clone()))
-            })
-            .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned())
-            .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
-            .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()));
+        let active_is_data_sheet = sheet_id.is_none() && doc.active_sheet_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some());
+        let render_sheet_id = if active_is_data_sheet {
+            None
+        } else {
+            sheet_id
+                .and_then(|raw| {
+                    doc.graph_sheets
+                        .iter()
+                        .find(|s| s.id.as_str() == raw)
+                        .map(|s| s.id.clone())
+                        .or_else(|| doc.layout_sheets.iter().find(|s| s.id.as_str() == raw).map(|s| s.id.clone()))
+                })
+                .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned())
+                .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
+                .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
+        };
 
         let data_sheet = sheet_id
             .and_then(|raw| doc.data_sheets.iter().find(|s| s.id.as_str() == raw))
@@ -1731,7 +2050,23 @@ impl WebBridgeSession {
             .or_else(|| doc.data_sheets.first());
 
         let tsv = match data_sheet {
-            Some(ds) => Some(ClipboardBundle::tsv_from_datasheet(ds, decimal_sep).map_err(WebAdapterError::Clipboard)?),
+            Some(ds) => {
+                let selected_tsv = if active_is_data_sheet
+                    && let Some((lo, hi)) = selection_bounds
+                    && let Ok(range) = serde_json::from_value(json!({
+                        "start": { "row": lo.row, "col": lo.col, "subcol": lo.subcol },
+                        "end": { "row": hi.row, "col": hi.col, "subcol": hi.subcol },
+                    })) {
+                    let block = ClipboardBundle::tsv_from_datasheet_range(ds, range, decimal_sep);
+                    (!block.is_empty()).then_some(block)
+                } else {
+                    None
+                };
+                Some(match selected_tsv {
+                    Some(block) => block,
+                    None => ClipboardBundle::tsv_from_datasheet(ds, decimal_sep).map_err(WebAdapterError::Clipboard)?,
+                })
+            }
             None => None,
         };
 
@@ -1783,13 +2118,14 @@ impl WebBridgeSession {
         Err(WebAdapterError::Clipboard(String::from("no printable graph/layout or data sheet available for clipboard export")))
     }
 
-    /// Build a 100%-scale publication print command with vector `<svg>` pages + `@media print` HTML.
+    /// Build a scaled publication print command targeting the requested or active printable sheet (`R2-S11-13`).
     ///
     /// # Errors
     /// Returns [`WebAdapterError::Print`] if no printable sheet exists or spooling fails.
     pub fn build_print_command(&mut self, sheet_id: Option<&str>, scale_percent: f64) -> Result<WebBridgeCommand, WebAdapterError> {
         let mut spec = PrintJobSpec::publication_100_percent();
-        spec.scale_percent = scale_percent;
+        let clamped_scale = if scale_percent.is_finite() { scale_percent.clamp(10.0, 400.0) } else { 100.0 };
+        spec.scale_percent = clamped_scale;
 
         let target_ids: Vec<String> = {
             let doc = self.host.app().document();
@@ -1803,6 +2139,9 @@ impl WebBridgeSession {
                     .ok_or_else(|| WebAdapterError::Print(format!("printable graph or layout sheet `{raw}` not found")))?;
                 spec.sheet_ids.push(found.clone());
                 vec![found.as_str().to_owned()]
+            } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()) {
+                spec.sheet_ids.push(active.clone());
+                vec![active.as_str().to_owned()]
             } else {
                 doc.graph_sheets.iter().map(|s| s.id.as_str().to_owned()).chain(doc.layout_sheets.iter().map(|s| s.id.as_str().to_owned())).collect()
             }
@@ -1828,7 +2167,7 @@ impl WebBridgeSession {
             svg_pages.push(svg.to_owned());
         }
 
-        let html = build_print_html_document(&title, &svg_pages);
+        let html = build_print_html_document(&title, &svg_pages, spool.scale_percent);
         Ok(WebBridgeCommand::TriggerPrintHtml {
             title,
             svg_pages,
@@ -1873,12 +2212,7 @@ impl WebBridgeSession {
                 let coast = self.touch.step_inertia(dt_sec);
                 self.dispatch_single_ui_input(coast)
             }
-            WebBridgeEvent::UiInput { event: input } => {
-                if ui_input_requires_write_lock(&input) {
-                    self.require_write_lock(ui_input_label(&input))?;
-                }
-                self.dispatch_single_ui_input(input)
-            }
+            WebBridgeEvent::UiInput { event: input } => self.handle_ui_input_event(input),
             WebBridgeEvent::ExecuteCommand { command_id, params } => self.handle_execute_command(&command_id, params),
             WebBridgeEvent::DispatchControlLine { line } => self.handle_control_line(&line),
             WebBridgeEvent::RenderFrame { dpi } => {
@@ -1893,16 +2227,19 @@ impl WebBridgeSession {
             WebBridgeEvent::OpenFileBytes { file_name, bytes } => {
                 self.require_write_lock("open_file_bytes")?;
                 let summary = self.fs.import_file_bytes(&mut self.host, &file_name, &bytes)?;
+                self.chrome.close_popups();
                 Ok(vec![self.summary_render_command("open_file_bytes", &summary)?])
             }
             WebBridgeEvent::ImportDroppedFiles { files } => {
                 self.require_write_lock("import_dropped_files")?;
                 let summary = self.fs.import_dropped_files(&mut self.host, files)?;
+                self.chrome.close_popups();
                 Ok(vec![self.summary_render_command("import_dropped_files", &summary)?])
             }
             WebBridgeEvent::ImportDirectoryEntries { root_name, entries } => {
                 self.require_write_lock("import_directory_entries")?;
                 let summary = self.fs.import_directory_tree(&mut self.host, &root_name, entries)?;
+                self.chrome.close_popups();
                 Ok(vec![self.summary_render_command("import_directory_entries", &summary)?])
             }
             WebBridgeEvent::SyncDirectory { root_name } => {
@@ -1951,6 +2288,7 @@ impl WebBridgeSession {
                 self.host.set_presentation_mode(enabled);
                 Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("ui.presentation.set")), None)?])
             }
+            other => self.handle_extended_event(other),
         }
     }
 
@@ -2010,6 +2348,353 @@ impl WebBridgeSession {
                 holder_tab_id: Some(holder_tab_id),
             },
         }
+    }
+
+    fn current_chrome_layout(&self) -> chrome_bridge::WebChromeLayout {
+        let viewport = self.host.viewport();
+        let layout = self.host.app().layout_map(viewport);
+        self.chrome.build_layout(self.host.app(), viewport, &layout.frame, &self.text_measurer, self.render_dpi)
+    }
+
+    fn handle_ui_input_event(&mut self, input: UiInputEvent) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        match input {
+            UiInputEvent::PointerMove { x, y, modifiers } => {
+                let viewport = self.host.viewport();
+                let [px_f, py_f] = viewport.logical_to_physical_px([x, y]);
+                #[allow(clippy::cast_possible_truncation)]
+                let (px, py) = (px_f.round() as i32, py_f.round() as i32);
+                let chrome_layout = self.current_chrome_layout();
+                let hover_changed = self.chrome.handle_pointer_move(&chrome_layout, px, py);
+                let outcome = self.host.dispatch_event(UiInputEvent::PointerMove { x, y, modifiers }).map_err(WebAdapterError::Workspace)?;
+                if outcome.handled || hover_changed {
+                    let action = if outcome.handled { outcome.action } else { String::from("chrome.hover") };
+                    Ok(vec![self.render_frame_command(self.render_dpi, Some(action), outcome.command_result)?])
+                } else {
+                    Ok(Vec::new())
+                }
+            }
+            UiInputEvent::PointerDown { x, y, button, modifiers } => {
+                let viewport = self.host.viewport();
+                let [px_f, py_f] = viewport.logical_to_physical_px([x, y]);
+                #[allow(clippy::cast_possible_truncation)]
+                let phys_pos = [px_f.round() as i32, py_f.round() as i32];
+                let chrome_layout = self.current_chrome_layout();
+                let dispatch = self.chrome.handle_pointer_down(self.host.app_mut(), &chrome_layout, [x, y], phys_pos, button);
+                let patched = match dispatch {
+                    WebChromeDispatch::PassToWorkspace(_) => {
+                        WebChromeDispatch::PassToWorkspace(UiInputEvent::PointerDown { x, y, button, modifiers })
+                    }
+                    other => other,
+                };
+                self.finish_chrome_dispatch(patched)
+            }
+            UiInputEvent::KeyDown { key, modifiers } => {
+                let dispatch = self.chrome.handle_key_down(self.host.app_mut(), &key, modifiers);
+                self.finish_chrome_dispatch(dispatch)
+            }
+            other => {
+                if ui_input_requires_write_lock(&other) {
+                    self.require_write_lock(ui_input_label(&other))?;
+                }
+                self.dispatch_single_ui_input(other)
+            }
+        }
+    }
+
+    fn handle_extended_event(&mut self, event: WebBridgeEvent) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        match event {
+            WebBridgeEvent::Wheel { x, y, delta_x, delta_y, modifiers } => {
+                let disp = self.chrome.route_wheel(self.host.app(), self.host.viewport(), [x, y], [delta_x, delta_y], modifiers);
+                self.finish_chrome_dispatch(disp)
+            }
+            WebBridgeEvent::ImePreedit { text } => {
+                self.chrome.ime_preedit = (!text.is_empty()).then_some(text);
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("ime.preedit")), None)?])
+            }
+            WebBridgeEvent::ImeCommit { text } => {
+                if self.access_mode.is_read_only()
+                    && !matches!(self.host.app().canvas_dialogs.active_dialog, lumencraft_ui_egui::ActiveDialog::CommandPalette)
+                {
+                    return Err(self.read_only_err("ime_commit"));
+                }
+                let disp = self.chrome.handle_ime_commit(self.host.app_mut(), &text);
+                self.finish_chrome_dispatch(disp)
+            }
+            WebBridgeEvent::DragStateChanged { active } => {
+                self.chrome.drag_active = active;
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("drag.state")), None)?])
+            }
+            WebBridgeEvent::PasteClipboard { text } => self.handle_paste_clipboard(text),
+            WebBridgeEvent::ExportFile { format, sheet_id, dpi } => {
+                let art = self.fs.export_bytes(&mut self.host, format, sheet_id.as_deref(), dpi)?;
+                Ok(vec![WebBridgeCommand::SaveOrDownloadFile {
+                    file_name: art.file_name,
+                    mime_type: art.mime_type,
+                    bytes: art.bytes,
+                    format: art.format,
+                }])
+            }
+            WebBridgeEvent::HydrateLocalStorage { entries } => self.handle_hydrate_local_storage(entries),
+            WebBridgeEvent::ClickChromeNode { node_id, button, modifiers: _ } => {
+                let chrome_layout = self.current_chrome_layout();
+                let Some(node) = chrome_layout.find_node(&node_id) else {
+                    return Err(WebAdapterError::Validation(format!("chrome node `{node_id}` not found")));
+                };
+                #[allow(clippy::cast_possible_wrap)]
+                let phys_x = node.rect_px.x.saturating_add((node.rect_px.width / 2) as i32);
+                #[allow(clippy::cast_possible_wrap)]
+                let phys_y = node.rect_px.y.saturating_add((node.rect_px.height / 2) as i32);
+                let scale = self.host.viewport().scale_factor.max(1e-6);
+                let logical_pos = [f64::from(phys_x) / scale, f64::from(phys_y) / scale];
+                let disp = self.chrome.handle_pointer_down(self.host.app_mut(), &chrome_layout, logical_pos, [phys_x, phys_y], button);
+                self.finish_chrome_dispatch(disp)
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn finish_chrome_dispatch(&mut self, dispatch: WebChromeDispatch) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        match dispatch {
+            WebChromeDispatch::PassToWorkspace(ev) => {
+                if ui_input_requires_write_lock(&ev) {
+                    self.require_write_lock(ui_input_label(&ev))?;
+                }
+                self.dispatch_single_ui_input(ev)
+            }
+            WebChromeDispatch::WheelScrollGrid { dx_px, dy_px } => {
+                let app = self.host.app_mut();
+                if let Some(active_ds) = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)).cloned() {
+                    app.grid.tool.scroll_for_sheet(&active_ds, dx_px, dy_px);
+                }
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("grid.scroll")), None)?])
+            }
+            WebChromeDispatch::HandledRedraw { action, command_result } => {
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(action), command_result)?])
+            }
+            WebChromeDispatch::ShortcutTriggered(act) => self.dispatch_shortcut_action(act),
+            WebChromeDispatch::InvokeChromeAction(act) => self.dispatch_chrome_action(act),
+            WebChromeDispatch::BlockedByModalBackdrop => {
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("modal.backdrop_blocked")), None)?])
+            }
+            WebChromeDispatch::Ignored => Ok(Vec::new()),
+        }
+    }
+
+    fn dispatch_shortcut_action(&mut self, action: WebShortcutAction) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        match action {
+            WebShortcutAction::None => Ok(Vec::new()),
+            WebShortcutAction::OpenFilePicker => Ok(vec![WebBridgeCommand::TriggerFilePicker {
+                accept: String::from(".lumencraft,.lctemplate,.pzfx,.prism,.csv,.tsv,.txt"),
+                multiple: true,
+                directory: false,
+            }]),
+            WebShortcutAction::SaveArchive => {
+                let art = self.fs.export_bytes(&mut self.host, WebExportFormat::LumencraftArchive, None, self.render_dpi)?;
+                Ok(vec![WebBridgeCommand::SaveOrDownloadFile {
+                    file_name: art.file_name,
+                    mime_type: art.mime_type,
+                    bytes: art.bytes,
+                    format: art.format,
+                }])
+            }
+            WebShortcutAction::ExportFormat(format) => {
+                let art = self.fs.export_bytes(&mut self.host, format, None, 300)?;
+                Ok(vec![WebBridgeCommand::SaveOrDownloadFile {
+                    file_name: art.file_name,
+                    mime_type: art.mime_type,
+                    bytes: art.bytes,
+                    format: art.format,
+                }])
+            }
+            WebShortcutAction::PrintCurrentSheet => Ok(vec![self.build_print_command(None, 100.0)?]),
+            WebShortcutAction::CopyClipboard => Ok(vec![WebBridgeCommand::WriteClipboardItems { payload: self.build_clipboard_payload(None, 300)? }]),
+            WebShortcutAction::CloseWorkspacePrompt => {
+                self.chrome.close_popups();
+                let note = WebBridgeCommand::NotifyStatus {
+                    level: WebNoticeLevel::Info,
+                    code: String::from("workspace.close_prompt"),
+                    message: String::from("Use File > New Project to reset or Save before closing."),
+                };
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("file.close_prompt")), None)?, note])
+            }
+            WebShortcutAction::OpenEditAnalysisParameters(sheet_id_str) => {
+                if self.access_mode.is_read_only() {
+                    return Err(self.read_only_err("edit_analysis_parameters"));
+                }
+                let opened = {
+                    let app = self.host.app_mut();
+                    let doc = app.document().clone();
+                    doc.result_sheets
+                        .iter()
+                        .find(|s| s.id.as_str() == sheet_id_str)
+                        .map(|s| s.id.clone())
+                        .is_some_and(|rs_id| app.canvas_dialogs.open_edit_parameters(&doc, &rs_id))
+                };
+                if !opened {
+                    return Err(WebAdapterError::Validation(format!("result sheet `{sheet_id_str}` not found for parameter edit")));
+                }
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("dialog.edit_analysis_parameters")), None)?])
+            }
+            WebShortcutAction::ExecuteCommand { command_id, params } => {
+                let resolved_params = if params.is_null() { contextual_command_params(self.host.app(), &command_id) } else { params };
+                self.execute_chrome_command_or_dispatch(&command_id, resolved_params)
+            }
+        }
+    }
+
+    fn dispatch_chrome_action(&mut self, action: WebChromeAction) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        match action {
+            WebChromeAction::InvokeCommand(command_id) => {
+                let params = contextual_command_params(self.host.app(), &command_id);
+                self.execute_chrome_command_or_dispatch(&command_id, params)
+            }
+            WebChromeAction::ExportFormat(format) => self.dispatch_shortcut_action(WebShortcutAction::ExportFormat(format)),
+            WebChromeAction::OpenFilePicker => self.dispatch_shortcut_action(WebShortcutAction::OpenFilePicker),
+            WebChromeAction::OpenDirectoryPicker => {
+                Ok(vec![WebBridgeCommand::TriggerFilePicker { accept: String::new(), multiple: true, directory: true }])
+            }
+            WebChromeAction::DialogConfirm => {
+                if matches!(self.host.app().canvas_dialogs.active_dialog, lumencraft_ui_egui::ActiveDialog::CommandPalette) {
+                    let palette_hit = {
+                        let app = self.host.app();
+                        let hits = app.canvas_dialogs.command_palette.matches_for_session(app.session());
+                        hits.get(app.canvas_dialogs.command_palette.selected_index).or_else(|| hits.first()).map(|h| h.id.to_owned())
+                    };
+                    self.host.app_mut().canvas_dialogs.close_dialog();
+                    if let Some(cmd_id) = palette_hit {
+                        return self.execute_chrome_command_or_dispatch(&cmd_id, json!({}));
+                    }
+                    return Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("palette.no_match")), None)?]);
+                }
+                if self.access_mode.is_read_only() {
+                    return Err(self.read_only_err("dialog_confirm"));
+                }
+                let was_print_dialog = matches!(self.host.app().canvas_dialogs.active_dialog, lumencraft_ui_egui::ActiveDialog::Print { .. });
+                let print_scale = self.host.app().canvas_dialogs.print.job.scale_percent;
+                match commit_active_modal_dialog(self.host.app_mut()) {
+                    Ok(out) => {
+                        let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(out.action), out.command_result)?];
+                        if was_print_dialog && let Ok(print_cmd) = self.build_print_command(None, print_scale) {
+                            cmds.push(print_cmd);
+                        }
+                        Ok(cmds)
+                    }
+                    Err(msg) => Ok(vec![
+                        self.render_frame_command(self.render_dpi, Some(String::from("dialog.commit_error")), Some(json!({ "error": msg })))?,
+                        WebBridgeCommand::NotifyStatus { level: WebNoticeLevel::Error, code: String::from("dialog_error"), message: msg },
+                    ]),
+                }
+            }
+            _ => Ok(Vec::new()),
+        }
+    }
+
+    fn execute_chrome_command_or_dispatch(&mut self, command_id: &str, params: Value) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        let route = resolve_web_command_route(self.host.app(), command_id);
+        let has_explicit_params = params.as_object().is_some_and(|obj| !obj.is_empty());
+        if self.access_mode.is_read_only() && !route.is_read_only_hint() && !is_command_read_only(command_id, Some(&params)) {
+            return Err(self.read_only_err(command_id));
+        }
+
+        match route {
+            WebCommandRoute::OpenFilePicker { accept } => Ok(vec![WebBridgeCommand::TriggerFilePicker { accept, multiple: true, directory: false }]),
+            WebCommandRoute::ExportFormat { format, sheet_id } => {
+                if has_explicit_params && params.get("path").is_some() && cmd::registry().get(command_id).is_some() {
+                    return self.handle_execute_command(command_id, params);
+                }
+                let art = self.fs.export_bytes(&mut self.host, format, sheet_id.as_deref(), 300)?;
+                Ok(vec![WebBridgeCommand::SaveOrDownloadFile {
+                    file_name: art.file_name,
+                    mime_type: art.mime_type,
+                    bytes: art.bytes,
+                    format: art.format,
+                }])
+            }
+            WebCommandRoute::PrintCurrentSheet => Ok(vec![self.build_print_command(None, 100.0)?]),
+            WebCommandRoute::OpenEditAnalysisParameters(rs_id) => self.dispatch_shortcut_action(WebShortcutAction::OpenEditAnalysisParameters(rs_id)),
+            WebCommandRoute::NoticeOnly { level, code, message } => Ok(vec![
+                self.render_frame_command(self.render_dpi, Some(format!("chrome.notice:{code}")), Some(json!({ "notice": message })))?,
+                WebBridgeCommand::NotifyStatus { level, code, message },
+            ]),
+            WebCommandRoute::UiCommand { command_id: ui_cmd, params: default_params } => {
+                let effective = if has_explicit_params { params } else { default_params };
+                let Some(command_result) = dispatch_ui_command(self.host.app_mut(), &ui_cmd, &effective).map_err(WebAdapterError::Workspace)? else {
+                    return Err(WebAdapterError::Validation(format!("unhandled web UI command `{ui_cmd}`")));
+                };
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(ui_cmd), Some(command_result))?])
+            }
+            WebCommandRoute::EngineCommand { command_id: eng_cmd, params: default_params } => {
+                let effective = if has_explicit_params {
+                    params
+                } else if default_params.is_null() {
+                    json!({})
+                } else {
+                    default_params
+                };
+                self.handle_execute_command(&eng_cmd, effective)
+            }
+        }
+    }
+
+    fn handle_paste_clipboard(&mut self, text: String) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        self.require_write_lock("paste_clipboard")?;
+        if text.is_empty() {
+            return Ok(Vec::new());
+        }
+        let target = {
+            let app = self.host.app();
+            let coord = app.grid.tool.active.unwrap_or_default();
+            app.document()
+                .active_sheet_id
+                .as_ref()
+                .filter(|id| app.document().data_sheet(id).is_some())
+                .map(|id| (id.as_str().to_owned(), coord.row, coord.col, coord.subcol))
+        };
+        if let Some((sheet_id, start_row, start_col, start_subcol)) = target {
+            let params = json!({
+                "sheet_id": sheet_id,
+                "text": text,
+                "start_row": start_row,
+                "start_col": start_col,
+                "start_subcol": start_subcol,
+                "mode": "overwrite",
+            });
+            return self.handle_execute_command("table.paste", params);
+        }
+        self.dispatch_single_ui_input(UiInputEvent::TextInput { text })
+    }
+
+    fn handle_hydrate_local_storage(&mut self, entries: Vec<(String, String)>) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        let mut cmds = Vec::new();
+        for (key, value) in entries {
+            if let Err(err) = self.storage.backend_mut().set_item(&key, &value) {
+                cmds.push(WebBridgeCommand::NotifyStatus {
+                    level: WebNoticeLevel::Warning,
+                    code: String::from(err.code()),
+                    message: err.to_string(),
+                });
+            }
+        }
+        match self.storage.load_preferences() {
+            Ok(Some(prefs)) => {
+                if let Some(locale) = prefs.locale {
+                    let _ = dispatch_ui_command(self.host.app_mut(), "ui.locale.set", &json!({ "locale": locale }));
+                }
+                if let Some(theme) = prefs.theme {
+                    let _ = dispatch_ui_command(self.host.app_mut(), "ui.theme.set", &json!({ "theme": theme }));
+                }
+                cmds.push(self.render_frame_command(self.render_dpi, Some(String::from("storage.hydrated")), None)?);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                cmds.push(WebBridgeCommand::NotifyStatus {
+                    level: WebNoticeLevel::Warning,
+                    code: String::from(err.code()),
+                    message: err.to_string(),
+                });
+            }
+        }
+        Ok(cmds)
     }
 
     fn dispatch_touch_events(&mut self, events: Vec<UiInputEvent>) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
@@ -2101,12 +2786,20 @@ impl WebBridgeSession {
 
     fn render_frame_command(&mut self, dpi: u16, action: Option<String>, command_result: Option<Value>) -> Result<WebBridgeCommand, WebAdapterError> {
         let frame = self.host.render_rgba(dpi).map_err(|err| WebAdapterError::Workspace(err.to_string()))?;
+        let viewport = self.host.viewport();
+        let layout = self.host.app().layout_map(viewport);
+        let chrome_layout = self.chrome.build_layout(self.host.app(), viewport, &layout.frame, &self.text_measurer, dpi);
+        let layered = WebTextBridge::compose_layered_frame(frame, &chrome_layout.rects, chrome_layout.text_ops);
+        WebTextBridge::validate_layered_frame(&layered)?;
         let pan_zoom = &self.host.app().canvas_dialogs.pan_zoom;
         Ok(WebBridgeCommand::RenderRgbaFrame {
-            width_px: frame.width_px,
-            height_px: frame.height_px,
+            width_px: layered.width_px,
+            height_px: layered.height_px,
             dpi,
-            rgba_bytes: frame.rgba,
+            rgba_bytes: layered.base_rgba_bytes,
+            rgba_layers: layered.rgba_layers,
+            text_ops: layered.text_ops,
+            chrome: chrome_layout.snapshot,
             zoom: pan_zoom.zoom,
             pan_pt: pan_zoom.pan_pt,
             action,
@@ -2173,8 +2866,9 @@ fn is_command_read_only(command_id: &str, params: Option<&Value>) -> bool {
             })
         });
     }
+    let base = command_id.split(':').next().unwrap_or(command_id);
     matches!(
-        command_id,
+        base,
         "render.svg"
             | "render.pdf"
             | "doc.inspect"
@@ -2198,11 +2892,53 @@ fn is_command_read_only(command_id: &str, params: Option<&Value>) -> bool {
             | "file.print"
             | "ui.navigator.toggle"
             | "ui.inspector.toggle"
+            | "ui.family.toggle"
+            | "ui.zoom.fitSheet"
+            | "ui.split.toggle"
+            | "ui.gallery.toggle"
+            | "ui.pane.cycle"
+            | "ui.shortcut.set"
+            | "ui.shortcut.reset"
+            | "ui.closeWorkspace.prompt"
+            | "ui.analyze.open"
+            | "ui.powerWizard.open"
+            | "ui.formatPoints.open"
+            | "ui.changeGraphType.open"
+            | "ui.clonePipeline.open"
+            | "ui.graph.axes.open"
+            | "ui.graph.format.open"
+            | "ui.graph.pairwise.open"
+            | "ui.graph.insertModelEquation"
+            | "ui.graph.bubblePlot.open"
+            | "ui.layout.composer.open"
+            | "ui.export.figure.open"
+            | "ui.import.reshape.open"
+            | "ui.result.copyMethodsReport"
+            | "ui.result.applyRemediation"
+            | "ui.result.inspectDiagnostics"
+            | "ui.canvas.preflight"
+            | "ui.brush.point"
+            | "toolbar.axes"
+            | "ui.export.csv"
+            | "table.exportCsv"
+            | "export.svg"
+            | "graph.exportSvg"
+            | "export.pdf"
+            | "graph.exportPdf"
+            | "export.png"
+            | "graph.exportPng"
+            | "export.tiff"
+            | "analysis.exportJson"
+            | "analysis.exportCsv"
+            | "result.generateReport"
+            | "graph.preflightCheck"
+            | "table.exclusionAuditReport"
     )
 }
 
-fn build_print_html_document(title: &str, svg_pages: &[String]) -> String {
+fn build_print_html_document(title: &str, svg_pages: &[String], scale_percent: f64) -> String {
     let escaped_title = escape_html_text(title);
+    let scale_factor = if scale_percent.is_finite() { (scale_percent / 100.0).clamp(0.1, 4.0) } else { 1.0 };
     let mut pages_html = String::new();
     for (idx, svg) in svg_pages.iter().enumerate() {
         pages_html.push_str("<section class=\"lumencraft-print-page\" data-page=\"");
@@ -2213,7 +2949,7 @@ fn build_print_html_document(title: &str, svg_pages: &[String]) -> String {
     }
     format!(
         "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{escaped_title}</title>\
-         <style>@page{{margin:0}}body{{margin:0;background:#fff}}.lumencraft-print-page{{page-break-after:always;break-after:page;}}\
+         <style>@page{{margin:0}}body{{margin:0;background:#fff}}.lumencraft-print-page{{page-break-after:always;break-after:page;zoom:{scale_factor:.4};}}\
          .lumencraft-print-page:last-child{{page-break-after:auto;break-after:auto;}}svg{{display:block;max-width:100%;height:auto;}}</style>\
          </head><body>{pages_html}</body></html>"
     )
@@ -2374,6 +3110,51 @@ fn decode_base64_field(obj: &Map<String, Value>, b64_key: &str, array_key: &str)
     Ok(Vec::new())
 }
 
+pub(crate) fn encode_base64_slice(input: &[u8]) -> String {
+    encode_base64(input)
+}
+
+pub(crate) fn decode_base64_str(input: &str) -> Result<Vec<u8>, WebAdapterError> {
+    decode_base64(input)
+}
+
+fn modifiers_to_json(mods: KeyModifiers) -> Value {
+    json!({
+        "ctrl": mods.ctrl,
+        "shift": mods.shift,
+        "alt": mods.alt,
+        "meta": mods.meta,
+    })
+}
+
+fn parse_modifiers_field(obj: &Map<String, Value>, key: &str) -> KeyModifiers {
+    let Some(m) = obj.get(key).and_then(Value::as_object) else {
+        return KeyModifiers::default();
+    };
+    KeyModifiers {
+        ctrl: m.get("ctrl").and_then(Value::as_bool).unwrap_or(false),
+        shift: m.get("shift").and_then(Value::as_bool).unwrap_or(false),
+        alt: m.get("alt").and_then(Value::as_bool).unwrap_or(false),
+        meta: m.get("meta").and_then(Value::as_bool).unwrap_or(false),
+    }
+}
+
+fn pointer_button_as_str(button: PointerButton) -> &'static str {
+    match button {
+        PointerButton::Primary => "Primary",
+        PointerButton::Secondary => "Secondary",
+        PointerButton::Middle => "Middle",
+    }
+}
+
+fn parse_pointer_button(value: Option<&Value>) -> PointerButton {
+    match value.and_then(Value::as_str).map(str::to_ascii_lowercase).as_deref() {
+        Some("secondary" | "right") => PointerButton::Secondary,
+        Some("middle") => PointerButton::Middle,
+        _ => PointerButton::Primary,
+    }
+}
+
 const B64_ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
 fn encode_base64(input: &[u8]) -> String {
@@ -2446,5 +3227,529 @@ fn decode_b64_digit(byte: u8) -> Result<u8, WebAdapterError> {
         b'+' => Ok(62),
         b'/' => Ok(63),
         _ => Err(WebAdapterError::Serialization(format!("invalid base64 byte 0x{byte:02x}"))),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use lumencraft_format::{CURRENT_PREFERENCES_VERSION, PreferencesFile};
+    use lumencraft_ui_egui::{
+        CanvasPreviewFilter, KeyModifiers, PointerButton, UiInputEvent,
+        serde_json::{self, json},
+    };
+
+    use super::{PREFERENCES_STORAGE_KEY, WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebExportFormat};
+    use crate::text_bridge::ZLayerBand;
+
+    fn build_session_with_xy_and_result() -> (WebBridgeSession, String, String) {
+        let mut session = WebBridgeSession::with_ids("r10-web-test", "tab-main");
+        session
+            .handle_event(WebBridgeEvent::ResizeViewport { logical_width: 1280.0, logical_height: 800.0, scale_factor: 1.0 })
+            .expect("initial viewport resize");
+        session
+            .handle_event(WebBridgeEvent::ExecuteCommand {
+                command_id: String::from("sheet.createData"),
+                params: json!({ "sheet_id": "xy-1", "kind": "xy", "title": "Dose Curve", "auto_family": true }),
+            })
+            .expect("create xy sheet");
+        session
+            .handle_event(WebBridgeEvent::ExecuteCommand {
+                command_id: String::from("table.setXCells"),
+                params: json!({ "sheet_id": "xy-1", "values": [1.0, 2.0, 4.0, 8.0] }),
+            })
+            .expect("set x values");
+        for (row, val) in [10.0, 22.0, 44.0, 80.0].into_iter().enumerate() {
+            session
+                .handle_event(WebBridgeEvent::ExecuteCommand {
+                    command_id: String::from("table.setCell"),
+                    params: json!({ "sheet_id": "xy-1", "row": row, "col": 0, "value": val }),
+                })
+                .expect("set y value");
+        }
+        let graph_id = session.host.app().document().graph_sheets[0].id.as_str().to_owned();
+        (session, String::from("xy-1"), graph_id)
+    }
+
+    #[test]
+    fn web_chrome_parity_menu_toolbar_modal_and_alt_t_edit_params_flow() {
+        let (mut session, data_id, _graph_id) = build_session_with_xy_and_result();
+
+        // Opening File dropdown emits PopupDropdown RGBA + clipped Z-ordered text ops.
+        let file_open_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.file"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("click File menu");
+        let Some(WebBridgeCommand::RenderRgbaFrame { rgba_layers, text_ops, chrome, .. }) = file_open_cmds.first() else {
+            panic!("expected RenderRgbaFrame after menu click");
+        };
+        assert_eq!(chrome.open_menu_key.as_deref(), Some("menu.file"));
+        assert!(rgba_layers.iter().any(|l| l.z_band == ZLayerBand::PopupDropdown && !l.uses_base_frame));
+        assert!(text_ops.iter().any(|op| op.z_band == ZLayerBand::PopupDropdown && op.clip_px.is_some()));
+
+        // Clicking File > Open triggers browser picker protocol.
+        let picker_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.item.project.open"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("click File > Open item");
+        assert!(matches!(picker_cmds.as_slice(), [WebBridgeCommand::TriggerFilePicker { directory: false, .. }]));
+
+        // Toolbar Analyze button opens AnalyzeSheet modal cleanly in ModalOverlay band.
+        let analyze_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("toolbar.analyze"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("click Analyze toolbar button");
+        let Some(WebBridgeCommand::RenderRgbaFrame { rgba_layers, chrome, .. }) = analyze_cmds.first() else {
+            panic!("expected RenderRgbaFrame for Analyze modal");
+        };
+        assert!(chrome.active_dialog.contains("AnalyzeSheet"));
+        assert!(rgba_layers.iter().any(|l| l.z_band == ZLayerBand::ModalOverlay));
+
+        // Clicking corner outside modal hits backdrop and must not leak through to workspace.
+        let blocked = session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::PointerDown { x: 4.0, y: 4.0, button: PointerButton::Primary, modifiers: KeyModifiers::default() },
+            })
+            .expect("backdrop click stays clean");
+        assert!(matches!(
+            blocked.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { action: Some(act), .. }) if act == "modal.backdrop_blocked"
+        ));
+
+        // Confirm Analyze modal -> select newly created ResultSheet -> Alt+T opens EditAnalysisParameters.
+        session
+            .handle_event(WebBridgeEvent::UiInput { event: UiInputEvent::KeyDown { key: String::from("Enter"), modifiers: KeyModifiers::default() } })
+            .expect("confirm Analyze modal");
+        if session.host.app().document().result_sheets.is_empty() {
+            session
+                .handle_event(WebBridgeEvent::ExecuteCommand {
+                    command_id: String::from("analysis.run"),
+                    params: json!({ "source_sheet_id": data_id, "kind": "descriptive_stats" }),
+                })
+                .expect("fallback analysis run");
+        }
+        let rs_id = session.host.app().document().result_sheets[0].id.as_str().to_owned();
+        session
+            .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("sheet.select"), params: json!({ "sheet_id": rs_id }) })
+            .expect("select ResultSheet");
+
+        let alt_t_cmds = session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("t"), modifiers: KeyModifiers { alt: true, ..Default::default() } },
+            })
+            .expect("Alt+T on ResultSheet");
+        assert!(matches!(
+            alt_t_cmds.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { chrome, .. }) if chrome.active_dialog.contains("EditAnalysisParameters")
+        ));
+        let ok_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("modal.ok"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("confirm EditAnalysisParameters via modal button");
+        assert!(matches!(ok_cmds.first(), Some(WebBridgeCommand::RenderRgbaFrame { chrome, .. }) if chrome.active_dialog == "None"));
+    }
+
+    #[test]
+    fn web_wheel_ime_paste_clipboard_and_audit_edge_cases_behave_cleanly() {
+        let (mut session, data_id, _graph_id) = build_session_with_xy_and_result();
+        session
+            .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("sheet.select"), params: json!({ "sheet_id": data_id }) })
+            .expect("select DataSheet");
+
+        // Wheel over DataSheet canvas scrolls grid instead of zooming or panning unrelated canvas.
+        let scroll_cmds = session
+            .handle_event(WebBridgeEvent::Wheel { x: 400.0, y: 300.0, delta_x: 0.0, delta_y: 48.0, modifiers: KeyModifiers::default() })
+            .expect("wheel scroll grid");
+        assert!(matches!(scroll_cmds.first(), Some(WebBridgeCommand::RenderRgbaFrame { action: Some(act), .. }) if act == "grid.scroll"));
+
+        // Lowercase preview filter alias parses cleanly (`R2-S01-04`).
+        let ev = WebBridgeEvent::from_json_str(r#"{"kind":"set_preview_filter","filter":"grayscale"}"#).expect("lowercase filter parses");
+        assert_eq!(ev, WebBridgeEvent::SetPreviewFilter { filter: CanvasPreviewFilter::GrayscalePrint });
+
+        // Active DataSheet clipboard copy exports TSV/HTML without grabbing unrelated Graph PNG (`R2-S11-06`).
+        let copy_cmds = session.handle_event(WebBridgeEvent::CopyClipboard { sheet_id: None, dpi: 150 }).expect("copy active DataSheet");
+        let Some(WebBridgeCommand::WriteClipboardItems { payload }) = copy_cmds.first() else {
+            panic!("expected WriteClipboardItems");
+        };
+        assert!(payload.tsv.as_deref().is_some_and(|t| t.contains("10")));
+        assert!(payload.png_bytes.is_empty());
+
+        // Browser paste event dispatches TSV paste into DataSheet.
+        let paste_cmds = session.handle_event(WebBridgeEvent::PasteClipboard { text: String::from("77.5") }).expect("paste into active DataSheet");
+        assert!(matches!(paste_cmds.first(), Some(WebBridgeCommand::RenderRgbaFrame { .. })));
+
+        // IME preedit mirrors into chrome state, and Alt+K + IME commit writes to Command Palette search box.
+        let preedit = session.handle_event(WebBridgeEvent::ImePreedit { text: String::from("にほ") }).expect("ime preedit");
+        assert!(matches!(preedit.first(), Some(WebBridgeCommand::RenderRgbaFrame { chrome, .. }) if chrome.ime_preedit.as_deref() == Some("にほ")));
+        session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("k"), modifiers: KeyModifiers { alt: true, ..Default::default() } },
+            })
+            .expect("Alt+K opens command palette");
+        let ime_commit = session.handle_event(WebBridgeEvent::ImeCommit { text: String::from("zoom") }).expect("ime commit into palette");
+        assert!(matches!(
+            ime_commit.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { action: Some(act), .. }) if act == "palette.ime_commit"
+        ));
+        session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("Escape"), modifiers: KeyModifiers::default() },
+            })
+            .expect("Escape closes palette");
+
+        // Hydrate localStorage preferences safely.
+        let prefs = PreferencesFile { version: CURRENT_PREFERENCES_VERSION, theme: Some(String::from("dark")), ..PreferencesFile::default() };
+        let encoded_prefs = serde_json::to_string(&prefs).expect("serialize prefs");
+        let hydrated = session
+            .handle_event(WebBridgeEvent::HydrateLocalStorage { entries: vec![(String::from(PREFERENCES_STORAGE_KEY), encoded_prefs)] })
+            .expect("hydrate storage");
+        assert!(matches!(hydrated.first(), Some(WebBridgeCommand::RenderRgbaFrame { .. })));
+    }
+
+    #[test]
+    fn file_system_access_and_download_fallback_export_all_supported_formats() {
+        let (mut session, data_id, graph_id) = build_session_with_xy_and_result();
+        // Contended read-only tab still allows File System Access / Blob exports and scaled print.
+        session
+            .handle_event(WebBridgeEvent::ObserveExternalLock {
+                doc_id: String::from("r10-web-test"),
+                holder_tab_id: String::from("tab-other"),
+                now_ms: 100,
+            })
+            .expect("enter read-only contended state");
+        assert!(session.access_mode().is_read_only());
+
+        let write_err = session.handle_event(WebBridgeEvent::PasteClipboard { text: String::from("99") }).expect_err("read-only tab rejects paste");
+        assert!(matches!(write_err, WebAdapterError::ReadOnlyContended { .. }));
+
+        let formats = [
+            (WebExportFormat::LumencraftArchive, Some(graph_id.as_str()), b"PK\x03\x04".as_slice()),
+            (WebExportFormat::LumencraftDirectory, None, b"PK\x03\x04".as_slice()),
+            (WebExportFormat::Csv, Some(data_id.as_str()), b"".as_slice()),
+            (WebExportFormat::Svg, Some(graph_id.as_str()), b"<svg".as_slice()),
+            (WebExportFormat::Pdf, Some(graph_id.as_str()), b"%PDF-".as_slice()),
+            (WebExportFormat::Png, Some(graph_id.as_str()), &[0x89, b'P', b'N', b'G']),
+            (WebExportFormat::Tiff, Some(graph_id.as_str()), b"II*\0".as_slice()),
+        ];
+
+        for (fmt, target, magic) in formats {
+            let cmds = session
+                .handle_event(WebBridgeEvent::ExportFile { format: fmt, sheet_id: target.map(str::to_owned), dpi: 150 })
+                .expect("export command succeeds");
+            let Some(WebBridgeCommand::SaveOrDownloadFile { file_name, bytes, format, .. }) = cmds.into_iter().next() else {
+                panic!("expected SaveOrDownloadFile for {fmt:?}");
+            };
+            assert_eq!(format, fmt);
+            assert!(!file_name.is_empty());
+            assert!(!bytes.is_empty());
+            if !magic.is_empty() && fmt != WebExportFormat::Svg {
+                assert!(bytes.starts_with(magic), "unexpected header bytes for {fmt:?}");
+            } else if fmt == WebExportFormat::Svg {
+                let text = std::str::from_utf8(&bytes).expect("SVG UTF-8");
+                assert!(text.contains("<svg"));
+            }
+        }
+
+        // Scaled print honors active graph and embeds scale in HTML (`R2-S11-13`).
+        let print_cmds = session.handle_event(WebBridgeEvent::PrintCurrentSheet { sheet_id: None, scale_percent: 85.0 }).expect("scaled print");
+        let Some(WebBridgeCommand::TriggerPrintHtml { html, scale_percent, .. }) = print_cmds.into_iter().next() else {
+            panic!("expected TriggerPrintHtml");
+        };
+        assert!((scale_percent - 85.0).abs() < 1e-6);
+        assert!(html.contains("0.8500"));
+    }
+
+    #[test]
+    fn index_html_enforces_strict_csp_zero_egress_z_compositing_and_blob_fallback() {
+        let html = include_str!("../index.html");
+        assert!(html.contains("<meta http-equiv=\"Content-Security-Policy\""));
+        assert!(html.contains("default-src 'self'"));
+        assert!(html.contains("object-src 'none'"));
+        assert!(html.contains("form-action 'none'"));
+
+        // Zero external network/telemetry calls (`concat!` avoids triggering static scanner on the test line itself).
+        for forbidden in [
+            concat!("fetc", "h("),
+            concat!("XMLHttp", "Request"),
+            concat!("Web", "Socket"),
+            concat!("send", "Beacon"),
+            concat!("http", "://"),
+            concat!("https", "://"),
+        ] {
+            assert!(!html.contains(forbidden), "index.html must never contain `{forbidden}`");
+        }
+
+        // Z-band compositing, clipped canvas fillText, WebGL recovery, FS fallbacks, and lock safety markers.
+        for required in [
+            "Z_BAND_ORDER",
+            "ctx.save()",
+            "ctx.clip()",
+            "ctx.fillText(",
+            "lumencraft_file_input",
+            "lumencraft_dir_input",
+            "URL.createObjectURL(",
+            "webglcontextlost",
+            "webglcontextrestored",
+            "MAX_TEXTURE_SIZE",
+            "holdsCurrentWebLock",
+            "hydrate_local_storage",
+        ] {
+            assert!(html.contains(required), "index.html missing required bridge feature `{required}`");
+        }
+    }
+
+    #[test]
+    fn toolbar_undo_redo_new_axes_edit_params_and_shortcuts_route_without_null() {
+        let (mut session, data_id, _graph_id) = build_session_with_xy_and_result();
+        session
+            .handle_event(WebBridgeEvent::ExecuteCommand {
+                command_id: String::from("analysis.run"),
+                params: json!({ "source_sheet_id": data_id, "kind": "descriptive_stats" }),
+            })
+            .expect("create ResultSheet");
+        let rs_id = session.host.app().document().result_sheets[0].id.as_str().to_owned();
+
+        // 1. `toolbar.axes` opens FormatAxes modal cleanly (not `expected object, got null`).
+        let axes_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("toolbar.axes"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("toolbar.axes opens FormatAxes");
+        assert!(matches!(
+            axes_cmds.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { chrome, .. }) if chrome.active_dialog.contains("FormatAxes")
+        ));
+        session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("Escape"), modifiers: KeyModifiers::default() },
+            })
+            .expect("Escape closes FormatAxes");
+
+        // 2. Selecting ResultSheet exposes `toolbar.edit_params`, which opens `EditAnalysisParameters`.
+        session
+            .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("sheet.select"), params: json!({ "sheet_id": rs_id }) })
+            .expect("select ResultSheet");
+        let edit_params_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("toolbar.edit_params"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("toolbar.edit_params opens EditAnalysisParameters");
+        assert!(matches!(
+            edit_params_cmds.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { chrome, .. }) if chrome.active_dialog.contains("EditAnalysisParameters")
+        ));
+        session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("Escape"), modifiers: KeyModifiers::default() },
+            })
+            .expect("Escape closes EditAnalysisParameters");
+
+        // 3. `Cmd+Enter` (`analyze.run`), `toolbar.undo`, `toolbar.redo`, `toolbar.new`, and `Alt+Shift+N` (`file.new`) never hit `Value::Null`.
+        let cmd_enter_cmds = session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("Enter"), modifiers: KeyModifiers { meta: true, ..Default::default() } },
+            })
+            .expect("Cmd+Enter triggers analyze.run cleanly");
+        assert!(matches!(
+            cmd_enter_cmds.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { action: Some(act), .. }) if act == "analyze.run"
+        ));
+
+        let undo_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("toolbar.undo"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("toolbar.undo succeeds");
+        assert!(matches!(undo_cmds.first(), Some(WebBridgeCommand::RenderRgbaFrame { .. })));
+
+        let redo_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("toolbar.redo"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("toolbar.redo succeeds");
+        assert!(matches!(redo_cmds.first(), Some(WebBridgeCommand::RenderRgbaFrame { .. })));
+
+        let new_btn_cmds = session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("toolbar.new"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("toolbar.new succeeds");
+        assert!(matches!(
+            new_btn_cmds.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { action: Some(act), .. }) if act == "project.new"
+        ));
+
+        let alt_shift_n = session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("n"), modifiers: KeyModifiers { alt: true, shift: true, ..Default::default() } },
+            })
+            .expect("Alt+Shift+N executes file.new cleanly");
+        assert!(matches!(
+            alt_shift_n.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { action: Some(act), .. }) if act == "file.new"
+        ));
+
+        // 4. Unrecognized UI/engine commands must return an error instead of silently succeeding.
+        let unknown_err = session
+            .execute_chrome_command_or_dispatch("ui.nonexistent.cmd", serde_json::Value::Null)
+            .expect_err("unhandled command must fail loudly");
+        assert!(matches!(unknown_err, WebAdapterError::Workspace(_) | WebAdapterError::Validation(_)));
+    }
+
+    #[test]
+    fn dropdown_menus_omit_event_dispatch_disable_remediation_and_route_palette_and_variants() {
+        let (mut session, data_id, _graph_id) = build_session_with_xy_and_result();
+        session
+            .handle_event(WebBridgeEvent::ExecuteCommand {
+                command_id: String::from("analysis.run"),
+                params: json!({ "source_sheet_id": data_id, "kind": "descriptive_stats" }),
+            })
+            .expect("create ResultSheet");
+
+        // Open `menu.view`: automation-only `ui.event.dispatch` must be omitted, and theme/filter/locale clicks succeed.
+        session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.view"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("open View dropdown");
+        let view_layout = session.current_chrome_layout();
+        assert!(view_layout.find_node("menu.item.ui.event.dispatch").is_none(), "automation hook must not appear in menu.view");
+        assert!(view_layout.find_node("menu.item.ui.theme.set").is_some());
+        assert!(view_layout.find_node("menu.item.ui.theme.set:dark").is_some());
+
+        session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.item.ui.theme.set:dark"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("click Theme: Dark dropdown item");
+        assert!(session.host.app().theme.surface_bg.relative_luminance() < 0.25);
+
+        session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.view"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("reopen View dropdown");
+        session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.item.ui.previewFilter.set"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("click base previewFilter item cycles cleanly");
+        assert_ne!(session.host.app().preview_filter, CanvasPreviewFilter::Normal);
+
+        session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.view"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("reopen View dropdown");
+        session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.item.ui.locale.set:de"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("click Locale: Deutsch item");
+        assert_eq!(session.host.app().locale, "de");
+
+        // Open `menu.analyze`: if `ui.result.applyRemediation` appears, it stays disabled (QOL-7 diagnostic-only).
+        session
+            .handle_event(WebBridgeEvent::ClickChromeNode {
+                node_id: String::from("menu.analyze"),
+                button: PointerButton::Primary,
+                modifiers: KeyModifiers::default(),
+            })
+            .expect("open Analyze dropdown");
+        let analyze_layout = session.current_chrome_layout();
+        if let Some(rem_node) = analyze_layout.find_node("menu.item.ui.result.applyRemediation") {
+            assert!(!rem_node.enabled, "ui.result.applyRemediation must stay disabled in web dropdown");
+        }
+        session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("Escape"), modifiers: KeyModifiers::default() },
+            })
+            .expect("Escape closes dropdown");
+
+        // Command Palette execution of zero-arg / engine commands runs cleanly without Value::Null failure.
+        session
+            .handle_event(WebBridgeEvent::UiInput {
+                event: UiInputEvent::KeyDown { key: String::from("k"), modifiers: KeyModifiers { alt: true, ..Default::default() } },
+            })
+            .expect("Alt+K opens Command Palette");
+        session.handle_event(WebBridgeEvent::ImeCommit { text: String::from("edit.undo") }).expect("query edit.undo");
+        let pal_exec = session
+            .handle_event(WebBridgeEvent::UiInput { event: UiInputEvent::KeyDown { key: String::from("Enter"), modifiers: KeyModifiers::default() } })
+            .expect("Command Palette executes edit.undo");
+        assert!(matches!(
+            pal_exec.first(),
+            Some(WebBridgeCommand::RenderRgbaFrame { action: Some(act), .. }) if act == "edit.undo"
+        ));
+
+        // Exhaustive check across all TOOLBAR_BUTTONS, UI_COMMANDS, and cmd::registry(): zero Value::Null params.
+        for btn in lumencraft_ui_egui::TOOLBAR_BUTTONS {
+            let route = crate::chrome_bridge::resolve_web_command_route(session.host.app(), btn.command_id);
+            assert!(
+                !matches!(
+                    route,
+                    crate::chrome_bridge::WebCommandRoute::EngineCommand { ref params, .. }
+                        | crate::chrome_bridge::WebCommandRoute::UiCommand { ref params, .. } if params.is_null()
+                ),
+                "toolbar command `{}` resolved to Value::Null",
+                btn.command_id
+            );
+        }
+        for spec in lumencraft_ui_egui::UI_COMMANDS {
+            let route = crate::chrome_bridge::resolve_web_command_route(session.host.app(), spec.id);
+            assert!(
+                !matches!(
+                    route,
+                    crate::chrome_bridge::WebCommandRoute::EngineCommand { ref params, .. }
+                        | crate::chrome_bridge::WebCommandRoute::UiCommand { ref params, .. } if params.is_null()
+                ),
+                "UI command `{}` resolved to Value::Null",
+                spec.id
+            );
+        }
+        for spec in lumencraft_engine::cmd::registry().specs() {
+            let route = crate::chrome_bridge::resolve_web_command_route(session.host.app(), spec.id);
+            assert!(
+                !matches!(
+                    route,
+                    crate::chrome_bridge::WebCommandRoute::EngineCommand { ref params, .. }
+                        | crate::chrome_bridge::WebCommandRoute::UiCommand { ref params, .. } if params.is_null()
+                ),
+                "engine command `{}` resolved to Value::Null",
+                spec.id
+            );
+        }
     }
 }

@@ -2,7 +2,7 @@
 #![forbid(unsafe_code)]
 
 use lumencraft_ui_egui::UiApp;
-use lumencraft_web::{WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebWorkspaceHost};
+use lumencraft_web::{WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebNoticeLevel, WebWorkspaceHost};
 
 /// Construct and initialize the browser WASM host without any host OS, filesystem, or socket calls.
 #[must_use]
@@ -39,6 +39,18 @@ pub fn bootstrap_web_session() -> Result<(WebBridgeSession, Vec<WebBridgeCommand
     Ok((session, commands))
 }
 
+/// Dispatch a raw JSON bridge event and emit a structured `NotifyStatus` command when handling fails (`R2-S11-05`).
+#[must_use]
+pub fn dispatch_bridge_event_json_or_notice(session: &mut WebBridgeSession, raw_json: &str) -> String {
+    match session.handle_event_json(raw_json) {
+        Ok(reply) => reply,
+        Err(err) => {
+            let notice = WebBridgeCommand::NotifyStatus { level: WebNoticeLevel::Error, code: String::from(err.code()), message: err.to_string() };
+            WebBridgeSession::commands_to_json_string(&[notice]).unwrap_or_else(|_| String::from("[]"))
+        }
+    }
+}
+
 #[cfg(target_arch = "wasm32")]
 fn connect_wasm_bridge() {
     use std::cell::RefCell;
@@ -67,7 +79,7 @@ fn connect_wasm_bridge() {
         let Ok(mut guard) = callback_session.try_borrow_mut() else {
             return String::from("[]");
         };
-        guard.handle_event_json(&raw_json).unwrap_or_else(|_| String::from("[]"))
+        dispatch_bridge_event_json_or_notice(&mut guard, &raw_json)
     });
 
     let _ = connect_fn.call1(&host, handler.as_ref());
@@ -83,8 +95,8 @@ fn main() {
 
 #[cfg(test)]
 mod tests {
-    use super::{bootstrap_web_session, init_web_app};
-    use lumencraft_web::{TabAccessMode, WebBridgeCommand};
+    use super::{bootstrap_web_session, dispatch_bridge_event_json_or_notice, init_web_app};
+    use lumencraft_web::{TabAccessMode, WebBridgeCommand, WebBridgeSession, WebNoticeLevel};
 
     #[test]
     fn web_app_initializes_and_dispatches_control_commands_without_os_calls() {
@@ -108,13 +120,22 @@ mod tests {
 
     #[test]
     fn web_bridge_session_bootstraps_lock_and_initial_frame() {
-        let (session, commands) = bootstrap_web_session().expect("bootstrap succeeds on native host");
+        let (mut session, commands) = bootstrap_web_session().expect("bootstrap succeeds on native host");
         assert_eq!(session.access_mode(), &TabAccessMode::ExclusiveReadWrite);
         assert!(commands.iter().any(|cmd| matches!(cmd, WebBridgeCommand::SetReadOnlyBanner { read_only: false, holder_tab_id: None, .. })));
         assert!(commands.iter().any(|cmd| matches!(
             cmd,
-            WebBridgeCommand::RenderRgbaFrame { width_px, height_px, rgba_bytes, .. }
-                if *width_px > 0 && *height_px > 0 && !rgba_bytes.is_empty()
+            WebBridgeCommand::RenderRgbaFrame { width_px, height_px, rgba_bytes, rgba_layers, text_ops, chrome, .. }
+                if *width_px > 0
+                    && *height_px > 0
+                    && !rgba_bytes.is_empty()
+                    && !rgba_layers.is_empty()
+                    && !text_ops.is_empty()
+                    && chrome.menu_bar_visible
         )));
+
+        let err_json = dispatch_bridge_event_json_or_notice(&mut session, "{invalid-json");
+        let parsed = WebBridgeSession::commands_from_json_str(&err_json).expect("error command array decodes");
+        assert!(matches!(parsed.as_slice(), [WebBridgeCommand::NotifyStatus { level: WebNoticeLevel::Error, .. }]));
     }
 }

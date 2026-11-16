@@ -8,22 +8,35 @@
 
 use lumencraft_engine::Session;
 use lumencraft_format::{
-    ArchiveKind, ImportReport, import_prism_bytes, import_pzfx_bytes, instantiate_template_bytes, open_archive_bytes, save_project_bytes,
+    ArchiveKind, ImportReport, import_prism_bytes, import_pzfx_bytes, instantiate_template_bytes, migrate_document_json, open_archive_bytes,
+    save_project_bytes, validate_project_document,
 };
 use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use lumencraft_ui_egui::serde_json::{self, Value, json};
 use lumencraft_ui_egui::theme::install_fonts;
+pub mod chrome_bridge;
 pub mod host_adapters;
+pub mod text_bridge;
 
+pub use chrome_bridge::{
+    WEB_SHORTCUT_MAPPINGS, WebChromeAction, WebChromeBridge, WebChromeDispatch, WebChromeLayout, WebChromeNode, WebChromeRole, WebChromeSnapshot,
+    WebCommandRoute, WebContextMenuState, WebExportFormat, WebKeyRouteResult, WebNoticeLevel, WebShortcutAction, WebShortcutMapping,
+    WebShortcutRouter, all_shortcuts_have_web_policy, resolve_web_command_route,
+};
 pub use host_adapters::{
     AUTOSAVE_KEY_PREFIX, AutosaveSaveOutcome, DEFAULT_LOCK_LEASE_TTL_MS, DirectorySyncPlan, FileSystemAccessBridge, LockAcquisition,
     LockReleaseOutcome, MemoryWebStorage, PREFERENCES_STORAGE_KEY, QUOTA_BUDGET_BYTES, TabAccessMode, TouchGestureRecognizer, TouchPoint,
-    WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebClipboardPayload, WebLockCoordinator, WebStorageBackend,
-    WebStorageManager,
+    WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebClipboardPayload, WebExportArtifact, WebLockCoordinator,
+    WebStorageBackend, WebStorageManager,
 };
 pub use lumencraft_ui_egui::{
     CanvasPreviewFilter, KeyModifiers, PointerButton, RasterImage, RenderError, RenderTargetSpec, UiApp, UiEventOutcome, UiInputEvent,
     ViewportMetrics, VirtualWorkspaceFolder, WorkspaceHitTarget, WorkspaceLayoutMap,
+};
+pub use text_bridge::{
+    BrowserCanvasTextMeasurer, DEFAULT_TEXT_CACHE_CAPACITY, DeterministicTextMeasureBackend, FontFamilyKind, LayoutRectPx, MeasuredTextMetrics,
+    PlatformCanvasMeasureBackend, ShapedGlyphRun, ShapedTextLine, TextCacheStats, UiTextStyle, WebLayeredFrame, WebRectPrimitive, WebRgbaLayer,
+    WebTextAlign, WebTextBridge, WebTextDirection, WebTextDrawOp, WebTextMeasurer, ZLayer, ZLayerBand, canvas_font_css,
 };
 
 /// Default logical viewport width used when [`WebWorkspaceHost::new`] starts.
@@ -195,7 +208,17 @@ impl WebWorkspaceHost {
     /// # Errors
     /// Returns an error description if JSON deserialization fails.
     pub fn open_project_json_bytes(&mut self, bytes: &[u8]) -> Result<WorkspaceSummary, String> {
-        let doc = serde_json::from_slice(bytes).map_err(|err| format!("invalid project JSON: {err}"))?;
+        let raw_val: Value = serde_json::from_slice(bytes).map_err(|err| format!("invalid project JSON: {err}"))?;
+        let obj = raw_val.as_object().ok_or_else(|| String::from("invalid project JSON: root must be a JSON object"))?;
+        let from_version = obj
+            .get("schema_version")
+            .and_then(Value::as_u64)
+            .map(|v| u32::try_from(v).map_err(|_| String::from("invalid `schema_version`")))
+            .transpose()?
+            .unwrap_or(0);
+        let migrated = migrate_document_json(raw_val, from_version).map_err(|err| format!("invalid project JSON: {err}"))?;
+        let doc = serde_json::from_value(migrated).map_err(|err| format!("invalid project JSON: {err}"))?;
+        validate_project_document(&doc).map_err(|err| format!("invalid project document: {err}"))?;
         self.install_session(Session::from_document(doc), "json", Vec::new(), false);
         Ok(self.inspect_summary())
     }
@@ -741,5 +764,34 @@ mod tests {
             .dispatch_event(UiInputEvent::InertialPan { delta_x: 24.0, delta_y: -12.0, dt_sec: 0.016, step_coast: true })
             .expect("InertialPan succeeds");
         assert!(pan_out.handled);
+    }
+
+    #[test]
+    fn open_project_json_bytes_migrates_and_validates_documents() {
+        use lumencraft_ui_egui::serde_json;
+        let mut host = build_populated_host();
+        let raw_json = serde_json::to_vec(host.app().document()).expect("serialize doc");
+        let summary = host.open_project_json_bytes(&raw_json).expect("valid JSON document loads cleanly");
+        assert!(summary.sheet_count >= 2);
+
+        // Legacy v0 JSON missing schema_version and optional vectors migrates cleanly.
+        let mut legacy_val: serde_json::Value = serde_json::from_slice(&raw_json).expect("parse doc JSON");
+        if let Some(obj) = legacy_val.as_object_mut() {
+            obj.remove("schema_version");
+            obj.remove("checkpoints");
+        }
+        let legacy_bytes = serde_json::to_vec(&legacy_val).expect("serialize legacy JSON");
+        host.open_project_json_bytes(&legacy_bytes).expect("legacy v0 document migrates forward");
+
+        // Unsupported future schema version fails validation cleanly.
+        let mut future_val: serde_json::Value = serde_json::from_slice(&raw_json).expect("parse doc JSON");
+        if let Some(obj) = future_val.as_object_mut() {
+            obj.insert(String::from("schema_version"), json!(999));
+        }
+        let future_bytes = serde_json::to_vec(&future_val).expect("serialize future JSON");
+        assert!(host.open_project_json_bytes(&future_bytes).is_err(), "future schema must fail validation");
+
+        // Non-finite float or malformed root fails cleanly.
+        assert!(host.open_project_json_bytes(b"[]").is_err(), "non-object root must fail");
     }
 }
