@@ -63,7 +63,7 @@ use crate::diagnostics::{
     AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, HomoscedasticityResult, InformationCriteria, LackOfFitResult,
     LikelihoodRatioResult, NormalityTestResult, RoutDetectionResult, RoutPointAudit, RunsTestResult, anderson_darling_test, compare_models_aicc,
     compare_models_f_test, compare_models_lrt, compare_models_lrt_deviance, compute_covariance_diagnostics, compute_deviance_profile_likelihood_cis,
-    compute_hougaard_skewness_into, compute_information_criteria, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis,
+    compute_hougaard_skewness_into, compute_information_criteria, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis_scaled,
     compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test, lilliefors_ks_test, runs_test, shapiro_wilk_test,
 };
 use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget, ode_fit_budget_exceeded};
@@ -412,8 +412,14 @@ pub struct NonlinearFitResult {
     pub n_outliers_excluded: usize,
     pub k_free: usize,
     pub df: usize,
+    /// Unweighted residual sum of squares $\sum (y_i - \hat{y}_i)^2$ in original $Y$ units.
     pub rss: f64,
+    /// Objective value minimised by the fit: weighted residual sum of squares $\sum w_i (y_i - \hat{y}_i)^2$
+    /// for least-squares fits (equal to `rss` when unweighted) or Poisson deviance for `PoissonDeviance`.
     pub weighted_ss: f64,
+    /// Unweighted residual standard deviation (`Sy.x = sqrt(rss / df)`) in original $Y$ units;
+    /// weighted least-squares parameter covariance, studentized residuals, and bands use
+    /// $\sigma_w = \sqrt{\text{weighted\_ss} / \text{df}}$ per Motulsky & Christopoulos (2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub rsd: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1113,10 +1119,13 @@ fn run_trust_region_lm(
     let ftol = 1e-15_f64;
     let xtol = 1e-14_f64;
     let gtol = 1e-13_f64;
+    let stall_gtol = 1e-4_f64;
+    let y_norm = obs_y_ss(obs).sqrt();
 
     let mut diag = vec![0.0_f64; k];
     let mut delta = 0.0_f64;
     let mut iter = 0_usize;
+    let mut last_max_g_cos = f64::INFINITY;
     let mut j_mat = DenseMatrix::zeros(n, k)?;
     let mut damp_ws = LmDampWorkspace::new(n, k)?;
 
@@ -1131,46 +1140,7 @@ fn run_trust_region_lm(
             }
         };
 
-        // Update column scaling D_j = max(D_j, ||J_{:, j}||_2).
-        for (j, d_j) in diag.iter_mut().enumerate() {
-            let mut col_ss = NeumaierSum::new();
-            for i in 0..n {
-                let v = mat_get(&j_mat, i, j);
-                col_ss.add(v * v);
-            }
-            let cnorm = col_ss.total().sqrt();
-            let eff = if cnorm > 1e-12 { cnorm } else { 1.0 };
-            *d_j = if *d_j == 0.0 { eff } else { d_j.max(eff) };
-        }
-
-        if iter == 0 {
-            let xnorm = scaled_l2_norm(&diag, &theta);
-            delta = init_factor * if xnorm > 0.0 { xnorm } else { 1.0 };
-        }
-
-        // Check projected/scaled gradient norm (gtol).
-        let mut max_g_cos = 0.0_f64;
-        if ss_curr > 0.0 {
-            let fnorm = ss_curr.sqrt();
-            for j in 0..k {
-                let mut col_dot = NeumaierSum::new();
-                let mut col_ss = NeumaierSum::new();
-                for (i, &w_r) in w_res.iter().enumerate().take(n) {
-                    let jv = mat_get(&j_mat, i, j);
-                    col_dot.add(jv * w_r);
-                    col_ss.add(jv * jv);
-                }
-                let cnorm = col_ss.total().sqrt();
-                if cnorm > 0.0 {
-                    let grad_j = col_dot.total();
-                    let at_lo = bounds[j].0.is_some_and(|l| (theta[j] - l).abs() <= 1e-12 && grad_j < 0.0);
-                    let at_hi = bounds[j].1.is_some_and(|u| (u - theta[j]).abs() <= 1e-12 && grad_j > 0.0);
-                    if !at_lo && !at_hi {
-                        max_g_cos = max_g_cos.max((grad_j / (cnorm * fnorm)).abs());
-                    }
-                }
-            }
-        } else {
+        if ss_curr == 0.0 {
             return Ok(LmRunOutput {
                 theta,
                 weighted_res: w_res,
@@ -1181,6 +1151,12 @@ fn run_trust_region_lm(
                 iterations: iter,
             });
         }
+        let max_g_cos = update_lm_diag_and_projected_grad(&j_mat, &w_res, &theta, &bounds, ss_curr, &mut diag);
+        if iter == 0 {
+            let xnorm = scaled_l2_norm(&diag, &theta);
+            delta = init_factor * if xnorm > 0.0 { xnorm } else { 1.0 };
+        }
+        last_max_g_cos = max_g_cos;
         if max_g_cos <= gtol {
             return Ok(LmRunOutput {
                 theta,
@@ -1196,7 +1172,7 @@ fn run_trust_region_lm(
         let mut accepted = false;
         let mut lambda = 0.0_f64;
         for _ in 0..40 {
-            let (step, lam_used) = solve_trust_region_subproblem(&j_mat, &w_res, &diag, delta, lambda, &mut damp_ws)?;
+            let (step, lam_used) = solve_trust_region_subproblem(&j_mat, &w_res, &diag, &theta, delta, lambda, &mut damp_ws)?;
             lambda = lam_used;
 
             let mut theta_trial: Vec<f64> = theta.iter().zip(step.iter()).map(|(a, b)| a + b).collect();
@@ -1219,8 +1195,8 @@ fn run_trust_region_lm(
                     lambda = face_lam;
                 }
             }
-            if iter == 0 {
-                delta = delta.min(p_norm.max(1e-12));
+            if iter == 0 && p_norm > 0.0 {
+                delta = delta.min(p_norm);
             }
 
             // Predicted reduction: 2 r^T (J p) - ||J p||^2 (valid under active-bound projection too).
@@ -1266,7 +1242,9 @@ fn run_trust_region_lm(
                 if lambda == 0.0 {
                     // Rejecting an undamped Gauss–Newton step means the trust region must contract
                     // strictly below ||D p_gn|| / 1.1 so the next trial applies nonzero damping.
-                    delta = delta.min(0.8 * p_norm).max(1e-15 * scaled_l2_norm(&diag, &theta).max(1.0));
+                    let raw_xnorm = scaled_l2_norm(&diag, &theta);
+                    let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
+                    delta = delta.min(0.8 * p_norm).max(1e-15 * x_norm);
                 }
             } else if lambda == 0.0 || rho > 0.75 {
                 delta = delta.max(2.0 * p_norm);
@@ -1283,7 +1261,8 @@ fn run_trust_region_lm(
                 iter += 1;
                 accepted = true;
 
-                let x_norm = scaled_l2_norm(&diag, &theta).max(1.0);
+                let raw_xnorm = scaled_l2_norm(&diag, &theta);
+                let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
                 if (act_red.abs() <= ftol && pred_red <= ftol && rho <= 2.0) || p_norm <= xtol * x_norm {
                     let j_final = compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds).unwrap_or(j_mat);
                     return Ok(LmRunOutput {
@@ -1299,17 +1278,11 @@ fn run_trust_region_lm(
                 break;
             }
 
-            let x_norm = scaled_l2_norm(&diag, &theta).max(1.0);
+            let raw_xnorm = scaled_l2_norm(&diag, &theta);
+            let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
             if p_norm <= xtol * x_norm || delta <= 1e-15 * x_norm {
-                return Ok(LmRunOutput {
-                    theta,
-                    weighted_res: w_res,
-                    y_hat,
-                    weighted_ss: ss_curr,
-                    j_mat,
-                    status: FitStatus::Converged,
-                    iterations: iter,
-                });
+                let status = stalled_lm_status(max_g_cos, ss_curr, y_norm, stall_gtol);
+                return Ok(LmRunOutput { theta, weighted_res: w_res, y_hat, weighted_ss: ss_curr, j_mat, status, iterations: iter });
             }
         }
 
@@ -1319,15 +1292,51 @@ fn run_trust_region_lm(
     }
 
     let j_final = compute_jacobian(model, layout, obs, &theta, &y_hat, &bounds).unwrap_or(j_mat);
-    Ok(LmRunOutput {
-        theta,
-        weighted_res: w_res,
-        y_hat,
-        weighted_ss: ss_curr,
-        j_mat: j_final,
-        status: if iter >= max_iters { FitStatus::HitMaxIters } else { FitStatus::Converged },
-        iterations: iter,
-    })
+    let status = if iter >= max_iters { FitStatus::HitMaxIters } else { stalled_lm_status(last_max_g_cos, ss_curr, y_norm, stall_gtol) };
+    Ok(LmRunOutput { theta, weighted_res: w_res, y_hat, weighted_ss: ss_curr, j_mat: j_final, status, iterations: iter })
+}
+
+fn update_lm_diag_and_projected_grad(
+    j_mat: &DenseMatrix,
+    w_res: &[f64],
+    theta: &[f64],
+    bounds: &[(Option<f64>, Option<f64>)],
+    ss_curr: f64,
+    diag: &mut [f64],
+) -> f64 {
+    let n = j_mat.nrows();
+    let fnorm = ss_curr.sqrt();
+    let mut max_g_cos = 0.0_f64;
+    for (j, d_j) in diag.iter_mut().enumerate() {
+        let mut col_ss = NeumaierSum::new();
+        let mut col_dot = NeumaierSum::new();
+        for (i, &w_r) in w_res.iter().enumerate().take(n) {
+            let jv = mat_get(j_mat, i, j);
+            col_ss.add(jv * jv);
+            col_dot.add(jv * w_r);
+        }
+        let cnorm = col_ss.total().sqrt();
+        let eff = if cnorm > f64::MIN_POSITIVE.sqrt() { cnorm } else { 1.0 };
+        *d_j = if *d_j == 0.0 { eff } else { d_j.max(eff) };
+        if cnorm > 0.0 && fnorm > 0.0 {
+            let grad_j = col_dot.total();
+            let at_lo = bounds[j].0.is_some_and(|l| (theta[j] - l).abs() <= 1e-12 * l.abs().max(f64::MIN_POSITIVE) && grad_j < 0.0);
+            let at_hi = bounds[j].1.is_some_and(|u| (u - theta[j]).abs() <= 1e-12 * u.abs().max(f64::MIN_POSITIVE) && grad_j > 0.0);
+            if !at_lo && !at_hi {
+                max_g_cos = max_g_cos.max((grad_j / (cnorm * fnorm)).abs());
+            }
+        }
+    }
+    max_g_cos
+}
+
+fn stalled_lm_status(max_g_cos: f64, ss_curr: f64, y_norm: f64, stall_gtol: f64) -> FitStatus {
+    if ss_curr == 0.0 {
+        return FitStatus::Converged;
+    }
+    let fnorm = ss_curr.sqrt();
+    let eff_g = if max_g_cos.is_finite() { max_g_cos * (fnorm / fnorm.max(1e-8 * y_norm)) } else { f64::INFINITY };
+    if eff_g <= stall_gtol { FitStatus::Converged } else { FitStatus::Diverged }
 }
 
 struct LmDampWorkspace {
@@ -1357,6 +1366,7 @@ fn solve_trust_region_subproblem(
     j_mat: &DenseMatrix,
     r: &[f64],
     diag: &[f64],
+    theta: &[f64],
     delta: f64,
     lambda_hint: f64,
     ws: &mut LmDampWorkspace,
@@ -1377,7 +1387,7 @@ fn solve_trust_region_subproblem(
         if let Ok(r_gn) = pqr.r()
             && let Some(s_norm_sq) = more_r_inv_t_norm_sq(&r_gn, diag, &p_gn, p_norm, Some(pqr.permutation()))
         {
-            parl = ((p_norm - delta) / (delta.max(1e-30) * s_norm_sq)).max(0.0);
+            parl = ((p_norm - delta) / (delta.max(f64::MIN_POSITIVE) * s_norm_sq)).max(0.0);
         }
     }
 
@@ -1395,7 +1405,7 @@ fn solve_trust_region_subproblem(
     if gnorm == 0.0 || !gnorm.is_finite() {
         return Ok((vec![0.0_f64; k], 0.0));
     }
-    let mut paru = (gnorm / delta.max(1e-30)).max(1e-12);
+    let mut paru = (gnorm / delta.max(f64::MIN_POSITIVE)).max(1e-12);
     // When rank-deficient (parl == 0), keep sqrt(lambda) safely above QR rounding noise in nullspace.
     let lam_floor = if pqr.rank() < k { (1e-10 * paru).max(1e-12).min(paru) } else { (1e-14 * paru).max(1e-24).min(paru) };
     let mut lam = lambda_hint.max(parl).min(paru);
@@ -1410,7 +1420,7 @@ fn solve_trust_region_subproblem(
         if lam < lam_floor {
             lam = (0.001 * paru).max(parl).max(lam_floor).min(paru);
         }
-        let (p, r_mat) = solve_damped_qr_with_r(j_mat, r, diag, lam, ws)?;
+        let (p, r_mat) = solve_damped_qr_with_r(j_mat, r, diag, theta, lam, ws)?;
         let p_norm = scaled_l2_norm(diag, &p);
         let fp = p_norm - delta;
         best_p = p;
@@ -1418,7 +1428,7 @@ fn solve_trust_region_subproblem(
             return Ok((best_p, lam));
         }
         let parc = match more_r_inv_t_norm_sq(&r_mat, diag, &best_p, p_norm, None) {
-            Some(s_norm_sq) => fp / (delta.max(1e-30) * s_norm_sq),
+            Some(s_norm_sq) => fp / (delta.max(f64::MIN_POSITIVE) * s_norm_sq),
             None => 0.0,
         };
         if fp > 0.0 {
@@ -1436,30 +1446,47 @@ fn solve_trust_region_subproblem(
     Ok((best_p, lam))
 }
 
+fn damped_param_unit_scale(theta_j: f64) -> f64 {
+    let a = theta_j.abs();
+    if a > 0.0 && a.is_finite() { a.clamp(1e-100, 1.0) } else { 1.0 }
+}
+
 fn solve_damped_qr_with_r(
     j_mat: &DenseMatrix,
     r: &[f64],
     diag: &[f64],
+    theta: &[f64],
     lambda: f64,
     ws: &mut LmDampWorkspace,
 ) -> Result<(Vec<f64>, DenseMatrix), FitError> {
     let n = j_mat.nrows();
     let k = j_mat.ncols();
     let sqrt_lam = lambda.sqrt();
-    for i in 0..n {
-        for j in 0..k {
-            mat_set(&mut ws.aug, i, j, mat_get(j_mat, i, j));
+    for j in 0..k {
+        let sj = damped_param_unit_scale(theta.get(j).copied().unwrap_or(1.0));
+        let dj = diag.get(j).copied().unwrap_or(1.0);
+        for i in 0..n {
+            mat_set(&mut ws.aug, i, j, mat_get(j_mat, i, j) * sj);
         }
-    }
-    for (j, &dj) in diag.iter().enumerate().take(k) {
-        mat_set(&mut ws.aug, n + j, j, sqrt_lam * dj);
+        for i in 0..k {
+            mat_set(&mut ws.aug, n + i, j, if i == j { sqrt_lam * dj * sj } else { 0.0 });
+        }
     }
     ws.rhs[..n].copy_from_slice(r);
     ws.rhs[n..(n + k)].fill(0.0);
 
     let qr_res = qr(&ws.aug)?;
-    let p = qr_res.solve_basic(&ws.rhs)?;
-    let r_mat = qr_res.r()?;
+    let mut p = qr_res.solve_basic(&ws.rhs)?;
+    let mut r_mat = qr_res.r()?;
+    for j in 0..k {
+        let sj = damped_param_unit_scale(theta.get(j).copied().unwrap_or(1.0));
+        p[j] *= sj;
+        let inv_sj = 1.0 / sj;
+        for i in 0..=j {
+            let rij = mat_get(&r_mat, i, j);
+            mat_set(&mut r_mat, i, j, rij * inv_sj);
+        }
+    }
     Ok((p, r_mat))
 }
 
@@ -1493,9 +1520,14 @@ fn quadratic_pred_num(j_mat: &DenseMatrix, w_res: &[f64], step: &[f64]) -> f64 {
 }
 
 fn is_bound_actively_blocked(theta_j: f64, step_j: f64, bound: (Option<f64>, Option<f64>)) -> bool {
-    let tol = 1e-12 * theta_j.abs().max(1.0);
-    let at_lo = bound.0.is_some_and(|lo| theta_j <= lo + tol && step_j < 0.0);
-    let at_hi = bound.1.is_some_and(|hi| theta_j >= hi - tol && step_j > 0.0);
+    let at_lo = bound.0.is_some_and(|lo| {
+        let tol = 1e-12 * lo.abs().max(f64::MIN_POSITIVE);
+        theta_j <= lo + tol && step_j < 0.0
+    });
+    let at_hi = bound.1.is_some_and(|hi| {
+        let tol = 1e-12 * hi.abs().max(f64::MIN_POSITIVE);
+        theta_j >= hi - tol && step_j > 0.0
+    });
     at_lo || at_hi
 }
 
@@ -1523,14 +1555,16 @@ fn solve_active_face_subproblem(
     let kf = free_cols.len();
     let mut j_free = DenseMatrix::zeros(n, kf)?;
     let mut diag_free = Vec::with_capacity(kf);
+    let mut theta_free = Vec::with_capacity(kf);
     for (col_idx, &orig_j) in free_cols.iter().enumerate() {
         diag_free.push(diag[orig_j]);
+        theta_free.push(theta[orig_j]);
         for i in 0..n {
             mat_set(&mut j_free, i, col_idx, mat_get(j_mat, i, orig_j));
         }
     }
     let mut ws_free = LmDampWorkspace::new(n, kf)?;
-    let (sub_step, sub_lam) = solve_trust_region_subproblem(&j_free, r, &diag_free, delta, lambda_hint, &mut ws_free)?;
+    let (sub_step, sub_lam) = solve_trust_region_subproblem(&j_free, r, &diag_free, &theta_free, delta, lambda_hint, &mut ws_free)?;
     let mut full_step = vec![0.0_f64; k];
     for (col_idx, &orig_j) in free_cols.iter().enumerate() {
         full_step[orig_j] = sub_step[col_idx];
@@ -1699,23 +1733,40 @@ fn solve_with_warm_start(
     // trust-region factor `1.0` and optional Nelder-Mead restart purely from `start` or `best.theta`.
     if config.use_simplex_warm_start && (best.status != FitStatus::Converged || best.weighted_ss > 1e-3 * obs_y_ss(obs)) {
         match run_trust_region_lm(model, layout, obs, &start, config.max_iters, 1.0) {
-            Ok(alt1) if alt1.weighted_ss < best.weighted_ss => best = alt1,
+            Ok(alt1)
+                if alt1.weighted_ss < best.weighted_ss
+                    || (best.status != FitStatus::Converged && alt1.status == FitStatus::Converged && alt1.weighted_ss <= best.weighted_ss) =>
+            {
+                best = alt1;
+            }
             Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
             _ => {}
         }
         if let Some(nm) = nelder_mead_rescue(model, layout, obs, &best.theta, 400) {
             match run_trust_region_lm(model, layout, obs, &nm, config.max_iters, 1.0) {
-                Ok(alt2) if alt2.weighted_ss < best.weighted_ss => best = alt2,
+                Ok(alt2)
+                    if alt2.weighted_ss < best.weighted_ss
+                        || (best.status != FitStatus::Converged && alt2.status == FitStatus::Converged && alt2.weighted_ss <= best.weighted_ss) =>
+                {
+                    best = alt2;
+                }
                 Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
                 _ => {}
             }
         } else if let Some(err) = ode_budget_error() {
             return Err(err);
         }
-        if best.weighted_ss > 1e-2 * obs_y_ss(obs) {
+        if best.weighted_ss > 1e-2 * obs_y_ss(obs) || best.status != FitStatus::Converged {
             if let Some(nm_start) = nelder_mead_rescue(model, layout, obs, &start, 600) {
                 match run_trust_region_lm(model, layout, obs, &nm_start, config.max_iters, 0.5) {
-                    Ok(alt3) if alt3.weighted_ss < best.weighted_ss => best = alt3,
+                    Ok(alt3)
+                        if alt3.weighted_ss < best.weighted_ss
+                            || (best.status != FitStatus::Converged
+                                && alt3.status == FitStatus::Converged
+                                && alt3.weighted_ss <= best.weighted_ss) =>
+                    {
+                        best = alt3;
+                    }
                     Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
                     _ => {}
                 }
@@ -1732,7 +1783,7 @@ fn obs_y_ss(obs: &[ObsRecord]) -> f64 {
     for o in obs {
         acc.add(o.sqrt_weight * o.sqrt_weight * o.point.y * o.point.y);
     }
-    acc.total().max(1.0)
+    acc.total().max(f64::MIN_POSITIVE)
 }
 
 /// Symmetric Wald intervals `theta_j +/- t_{df, alpha/2} * SE_j` from the linearised covariance
@@ -1959,19 +2010,25 @@ fn replicates_lack_of_fit_obs(obs: &[ObsRecord], weighted_ss: f64, df: usize, me
     Some(LackOfFitResult { ss_pure_error, df_pure_error, ss_lack_of_fit, df_lack_of_fit, f_stat, p_value, significant_lack_of_fit: p_value < 0.05 })
 }
 
-/// ROUT outlier detection per Motulsky & Brown (2006, BMC Bioinformatics 7:123): computes RSDR,
-/// two-sided *t*-test *p*-values vs. RSDR, and applies Benjamini–Hochberg step-up FDR **only**
-/// across the top 30% of points furthest from the fitted curve (`start = floor(0.70 * N)`).
-/// Bottom ~70% residuals are left untested (`q_value = 1.0`, `is_outlier = false`).
+/// ROUT outlier detection per Motulsky & Brown (2006, *BMC Bioinformatics* 7:123): computes RSDR
+/// on the base-weighted residuals `r_{w,i} = (y_i - \hat{y}_i) * sqrt(w_i)` so heteroscedastic
+/// schemes (such as `1/Y^2`) are standardized to uniform error scale, evaluates two-sided *t*-test
+/// *p*-values vs. RSDR, and applies Benjamini–Hochberg step-up FDR **only** across the top 30% of
+/// points furthest from the fitted curve (`start = floor(0.70 * N)`). Bottom ~70% residuals are
+/// left untested (`q_value = 1.0`, `is_outlier = false`).
 fn rout_detect_outliers_mb2006(
     points: &[DataPoint],
-    raw_residuals: &[f64],
+    weighted_residuals: &[f64],
+    sqrt_weights: &[f64],
     k_free: usize,
     fdr_q_percent: f64,
 ) -> Result<RoutDetectionResult, FitError> {
     let n = points.len();
-    if raw_residuals.len() != n {
-        return Err(FitError::InvalidParameter { name: "raw_residuals", reason: format!("expected {n} residuals, got {}", raw_residuals.len()) });
+    if weighted_residuals.len() != n || sqrt_weights.len() != n {
+        return Err(FitError::InvalidParameter {
+            name: "weighted_residuals",
+            reason: format!("expected {n} weighted residuals and weights, got {} / {}", weighted_residuals.len(), sqrt_weights.len()),
+        });
     }
     if n <= k_free {
         return Err(FitError::InsufficientData { required: k_free + 1, actual: n });
@@ -1981,21 +2038,22 @@ fn rout_detect_outliers_mb2006(
     }
 
     let df = n - k_free;
-    let abs_res: Vec<f64> = raw_residuals.iter().map(|r| r.abs()).collect();
-    let y_scale = points.iter().map(|p| p.y.abs()).fold(0.0_f64, f64::max).max(1e-12);
-    let rsdr = compute_rsdr(&abs_res, k_free).max(1e-10 * y_scale);
+    let abs_res: Vec<f64> = weighted_residuals.iter().map(|r| r.abs()).collect();
+    let w_y_scale = points.iter().zip(sqrt_weights.iter()).map(|(p, &sw)| (p.y * sw).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
+    let rsdr = compute_rsdr(&abs_res, k_free).max(1e-10 * w_y_scale);
+    let zero_floor = (1e-30 * w_y_scale).max(f64::MIN_POSITIVE);
     let mut p_values = Vec::with_capacity(n);
-    for &r in raw_residuals {
+    for &r in weighted_residuals {
         if !r.is_finite() {
-            return Err(FitError::InvalidParameter { name: "raw_residuals", reason: "ROUT residuals must all be finite".to_owned() });
+            return Err(FitError::InvalidParameter { name: "weighted_residuals", reason: "ROUT residuals must all be finite".to_owned() });
         }
-        let p = if rsdr <= 1e-30 { if r.abs() <= 1e-30 { 1.0 } else { 0.0 } } else { student_t_two_sided_p((r / rsdr).abs(), df as f64)? };
+        let p = if rsdr <= zero_floor { if r.abs() <= zero_floor { 1.0 } else { 0.0 } } else { student_t_two_sided_p((r / rsdr).abs(), df as f64)? };
         p_values.push(p);
     }
 
     let mut order: Vec<usize> = (0..n).collect();
     order.sort_by(|&a, &b| {
-        p_values[a].total_cmp(&p_values[b]).then_with(|| raw_residuals[b].abs().total_cmp(&raw_residuals[a].abs())).then_with(|| a.cmp(&b))
+        p_values[a].total_cmp(&p_values[b]).then_with(|| weighted_residuals[b].abs().total_cmp(&weighted_residuals[a].abs())).then_with(|| a.cmp(&b))
     });
 
     // Motulsky & Brown (2006): test only top ~30% furthest points (ranks 1..=m_test out of N).
@@ -2040,7 +2098,7 @@ fn rout_detect_outliers_mb2006(
             row: pt.row,
             x0: pt.x0(),
             y: pt.y,
-            residual: raw_residuals[idx],
+            residual: weighted_residuals[idx],
             p_value: p_values[idx],
             q_value: q_values[idx],
             is_outlier: is_outlier[idx],
@@ -2143,6 +2201,20 @@ pub fn fit_nonlinear(
         && active_datasets.iter().any(|d| d.is_pre_summarized)
     {
         return Err(FitError::RequiresRawReplicates);
+    }
+    if config.method == FitMethod::PoissonDeviance {
+        if config.weighting != WeightingScheme::None {
+            return Err(FitError::InvalidParameter {
+                name: "weighting",
+                reason: "Poisson deviance regression defines variance Var(Y) = mu internally and cannot be combined with least-squares weighting schemes; use WeightingScheme::None".to_owned(),
+            });
+        }
+        if active_datasets.iter().flat_map(|d| d.points.iter()).any(|pt| pt.explicit_weight.is_some()) {
+            return Err(FitError::InvalidParameter {
+                name: "weighting",
+                reason: "Poisson deviance regression cannot be combined with explicit observation weights".to_owned(),
+            });
+        }
     }
 
     let layout = ParameterLayout::build(model, active_datasets, hooks, &config.parameter_rules)?;
@@ -2325,8 +2397,9 @@ fn solve_lm_by_method(
         FitMethod::RoutOutlierElimination { fdr_q_percent } => {
             let cauchy_out = fit_cauchy_irls(model, layout, obs, init_theta, config)?;
             let pts: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
-            let raw_res: Vec<f64> = obs.iter().zip(cauchy_out.y_hat.iter()).map(|(o, yh)| o.point.y - yh).collect();
-            let rout = rout_detect_outliers_mb2006(&pts, &raw_res, k_free, fdr_q_percent)?;
+            let sqrt_w: Vec<f64> = obs.iter().map(|o| o.sqrt_weight).collect();
+            let w_res: Vec<f64> = obs.iter().zip(cauchy_out.y_hat.iter()).map(|(o, yh)| (o.point.y - yh) * o.sqrt_weight).collect();
+            let rout = rout_detect_outliers_mb2006(&pts, &w_res, &sqrt_w, k_free, fdr_q_percent)?;
             let mut is_out = vec![false; obs.len()];
             for &idx in &rout.outlier_indices {
                 is_out[idx] = true;
@@ -2395,13 +2468,13 @@ fn finalize_fit_uncertainty(
         (
             unscaled_cov_from_diag_or_j(&cov, 1, 1.0, &lm_out.j_mat),
             if df > 0 { 1.0 } else { f64::NAN },
-            if df > 0 { norm_two_sided_isf(config.confidence.alpha()).unwrap_or(1.96) } else { f64::NAN },
+            if df > 0 { norm_two_sided_isf(config.confidence.alpha()).unwrap_or(f64::NAN) } else { f64::NAN },
         )
     } else {
         (
             unscaled_cov_from_diag_or_j(&cov, df, lm_out.weighted_ss, &lm_out.j_mat),
             if df > 0 { (lm_out.weighted_ss / (df as f64)).sqrt() } else { f64::NAN },
-            if df > 0 { student_t_two_sided_isf(config.confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN },
+            if df > 0 { student_t_two_sided_isf(config.confidence.alpha(), df as f64).unwrap_or(f64::NAN) } else { f64::NAN },
         )
     };
 
@@ -2442,9 +2515,16 @@ fn finalize_fit_uncertainty(
         }
         FitMethod::LeastSquares | FitMethod::RoutOutlierElimination { .. } => {
             if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
-                compute_profile_likelihood_cis(
+                let mut wy2_acc = NeumaierSum::new();
+                for o in obs {
+                    let wy = o.sqrt_weight * o.point.y;
+                    wy2_acc.add(wy * wy);
+                }
+                wy2_acc.add(ss_within_total);
+                compute_profile_likelihood_cis_scaled(
                     &lm_out.theta,
                     lm_out.weighted_ss,
+                    Some(wy2_acc.total()),
                     df,
                     &cov,
                     &bounds,
@@ -2537,7 +2617,7 @@ fn fit_single_or_shared(
 
     let raw_residuals_all: Vec<f64> = obs.iter().zip(lm_out.y_hat.iter()).map(|(o, yh)| o.point.y - yh).collect();
     let rsdr = if is_robust {
-        let abs_res: Vec<f64> = raw_residuals_all.iter().map(|r| r.abs()).collect();
+        let abs_res: Vec<f64> = obs.iter().zip(raw_residuals_all.iter()).map(|(o, r)| (r * o.sqrt_weight).abs()).collect();
         Some(compute_rsdr(&abs_res, k_free))
     } else {
         None
@@ -2713,7 +2793,9 @@ fn fit_independent_datasets(
             let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
             let sub = solve_single_dataset_unit(model, ds, hooks, &ds_rules, &cauchy_cfg, None)?;
             let p_d = sub.layout.k_free();
-            let rout_d = rout_detect_outliers_mb2006(&ds.points, &sub.ds_result.residuals, p_d, fdr_q_percent)?;
+            let sqrt_w_d: Vec<f64> = sub.obs_moments.iter().map(|&(sw, _, _)| sw).collect();
+            let w_res_d: Vec<f64> = sub.ds_result.residuals.iter().zip(sqrt_w_d.iter()).map(|(&r, &sw)| r * sw).collect();
+            let rout_d = rout_detect_outliers_mb2006(&ds.points, &w_res_d, &sqrt_w_d, p_d, fdr_q_percent)?;
 
             let mut is_out = vec![false; ds.points.len()];
             for &local_idx in &rout_d.outlier_indices {
@@ -2776,6 +2858,7 @@ fn fit_independent_datasets(
     let mut global_corr_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
 
     let mut total_rank = 0_usize;
+    let mut any_diverged = false;
     let mut any_ambiguous = false;
     let mut any_max_iters = false;
     let mut max_iterations = 0_usize;
@@ -2821,6 +2904,7 @@ fn fit_independent_datasets(
         }
 
         total_rank += sub.cov.numerical_rank;
+        any_diverged |= sub.status == FitStatus::Diverged;
         any_ambiguous |= sub.cov.ambiguous || sub.status == FitStatus::Ambiguous;
         any_max_iters |= sub.status == FitStatus::HitMaxIters;
         max_iterations = max_iterations.max(sub.iterations);
@@ -2846,7 +2930,9 @@ fn fit_independent_datasets(
         interpolated_y.extend(sub.interpolated_y);
     }
 
-    let status = if any_ambiguous {
+    let status = if any_diverged {
+        FitStatus::Diverged
+    } else if any_ambiguous {
         FitStatus::Ambiguous
     } else if any_max_iters {
         FitStatus::HitMaxIters
@@ -2885,7 +2971,7 @@ fn fit_independent_datasets(
         if ds_results.len() == 1 {
             ds_results[0].rsdr
         } else {
-            let abs_res: Vec<f64> = all_raw_residuals.iter().map(|r| r.abs()).collect();
+            let abs_res: Vec<f64> = all_obs.iter().zip(all_raw_residuals.iter()).map(|(o, r)| (r * o.sqrt_weight).abs()).collect();
             Some(compute_rsdr(&abs_res, k_free))
         }
     } else {
@@ -3021,6 +3107,7 @@ fn assemble_dataset_results(
 
         let mut ds_y_hat = Vec::new();
         let mut ds_res = Vec::new();
+        let mut ds_base_w_abs_res = Vec::new();
         let mut ds_w_res = Vec::new();
         let mut ds_stud_res = Vec::new();
         let mut ds_rss = NeumaierSum::new();
@@ -3034,6 +3121,7 @@ fn assemble_dataset_results(
                 let w_rep = rec.rep_n as f64;
                 ds_y_hat.push(yh);
                 ds_res.push(r);
+                ds_base_w_abs_res.push((r * rec.sqrt_weight).abs());
                 ds_w_res.push(lm_out.weighted_res[i]);
                 if cfg.solver.method != FitMethod::RobustCauchy {
                     ds_stud_res.push(studentized_all.get(i).copied().unwrap_or(0.0));
@@ -3069,9 +3157,8 @@ fn assemble_dataset_results(
             cfg.rsd
         };
         let ds_rsdr = if is_robust {
-            let abs_res: Vec<f64> = ds_res.iter().map(|r| r.abs()).collect();
             let k_ds = layout.bindings[ds_local_idx].iter().filter(|b| matches!(b, ParamBinding::Free(_))).count();
-            Some(compute_rsdr(&abs_res, k_ds))
+            Some(compute_rsdr(&ds_base_w_abs_res, k_ds))
         } else {
             None
         };
@@ -3292,6 +3379,12 @@ fn fit_poisson_irls(
     init_theta: &[f64],
     config: &SolverConfig,
 ) -> Result<LmRunOutput, FitError> {
+    if config.weighting != WeightingScheme::None || obs.iter().any(|rec| rec.point.explicit_weight.is_some()) {
+        return Err(FitError::InvalidParameter {
+            name: "weighting",
+            reason: "Poisson deviance regression defines variance Var(Y) = mu internally and cannot be combined with least-squares weighting schemes or explicit observation weights".to_owned(),
+        });
+    }
     for rec in obs {
         if rec.point.y < 0.0 || !rec.point.y.is_finite() {
             return Err(FitError::ImpossibleWeights { reason: "Poisson deviance regression requires non-negative counts (Y >= 0)".to_owned() });
@@ -3342,13 +3435,14 @@ fn poisson_deviance(obs: &[ObsRecord], y_hat: &[f64]) -> f64 {
     acc.total()
 }
 
-/// Robust Cauchy (Lorentzian) fit minimising `sum ln(1 + (r_i / RSDR)^2)`, the merit function of
-/// Motulsky & Brown (2006), with `RSDR` re-estimated from the current residuals at every
-/// iteration as in that paper.
+/// Robust Cauchy (Lorentzian) fit minimising `sum ln(1 + (r_{w,i} / RSDR)^2)`, the merit function
+/// of Motulsky & Brown (2006, *BMC Bioinformatics* 7:123), with `RSDR` re-estimated from the
+/// base-weighted residuals `r_{w,i} = (y_i - \hat{y}_i) * sqrt(w_i)` at every iteration so
+/// heteroscedastic weighting schemes (`1/Y^2`, `1/|Y|`, etc.) are standardized consistently.
 ///
 /// Deviation: Motulsky & Brown minimise the Lorentzian merit with a modified Marquardt
 /// algorithm; this routine instead uses IRLS with Cauchy weights `w_i = 1 / (1 + z_i^2)`,
-/// `z_i = |r_i| / RSDR` (Holland & Welsch 1977), each weighted subproblem solved by
+/// `z_i = |r_{w,i}| / RSDR` (Holland & Welsch 1977), each weighted subproblem solved by
 /// Levenberg–Marquardt. For a fixed scale both reach the same stationary point. Standard
 /// errors from this fit are not robust-theory SEs and are not used by ROUT.
 fn fit_cauchy_irls(
@@ -3362,11 +3456,12 @@ fn fit_cauchy_irls(
     let mut work_obs = obs.to_vec();
     let mut last_out = solve_with_warm_start(model, layout, &work_obs, &theta, config)?;
     let k_free = layout.k_free();
+    let w_y_scale = obs.iter().map(|o| (o.point.y * o.sqrt_weight).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
 
     for _ in 0..15 {
         let prev_theta = last_out.theta.clone();
-        let abs_res: Vec<f64> = obs.iter().zip(last_out.y_hat.iter()).map(|(o, yh)| (o.point.y - yh).abs()).collect();
-        let rsdr = compute_rsdr(&abs_res, k_free).max(1e-12);
+        let abs_res: Vec<f64> = obs.iter().zip(last_out.y_hat.iter()).map(|(o, yh)| ((o.point.y - yh) * o.sqrt_weight).abs()).collect();
+        let rsdr = compute_rsdr(&abs_res, k_free).max(1e-12 * w_y_scale);
         for (i, rec) in work_obs.iter_mut().enumerate() {
             let z = abs_res[i] / rsdr;
             let cauchy_w = 1.0 / (1.0 + z * z);
@@ -3374,7 +3469,11 @@ fn fit_cauchy_irls(
         }
         theta = prev_theta.clone();
         last_out = run_trust_region_lm(model, layout, &work_obs, &theta, config.max_iters, 10.0)?;
-        let max_step = prev_theta.iter().zip(last_out.theta.iter()).map(|(a, b)| (a - b).abs() / b.abs().max(1.0)).fold(0.0_f64, f64::max);
+        let max_step = prev_theta
+            .iter()
+            .zip(last_out.theta.iter())
+            .map(|(a, b)| (a - b).abs() / b.abs().max(a.abs()).max(f64::MIN_POSITIVE))
+            .fold(0.0_f64, f64::max);
         if max_step < 1e-8 {
             break;
         }
@@ -3383,14 +3482,42 @@ fn fit_cauchy_irls(
 }
 
 fn compute_unscaled_cov(j_mat: &DenseMatrix) -> Option<DenseMatrix> {
-    if j_mat.ncols() == 0 || j_mat.nrows() < j_mat.ncols() {
+    let p = j_mat.ncols();
+    let nrows = j_mat.nrows();
+    if p == 0 || nrows < p {
         return None;
     }
-    let pqr = qr_col_pivoted(j_mat).ok()?;
-    if pqr.rank() < j_mat.ncols() {
+    let mut col_norms = vec![0.0_f64; p];
+    let mut j_scaled = DenseMatrix::zeros(nrows, p).ok()?;
+    for (c, cn_slot) in col_norms.iter_mut().enumerate().take(p) {
+        let cn = j_mat.col_norm2(c);
+        if !cn.is_finite() || cn <= 0.0 {
+            return None;
+        }
+        *cn_slot = cn;
+        let inv_cn = 1.0 / cn;
+        for r in 0..nrows {
+            if let Some(slot) = j_scaled.get_mut(r, c) {
+                *slot = j_mat.get(r, c).unwrap_or(0.0) * inv_cn;
+            }
+        }
+    }
+    let pqr = qr_col_pivoted(&j_scaled).ok()?;
+    if pqr.rank() < p {
         return None;
     }
-    pqr.xtx_inverse().ok()
+    let inv_scaled = pqr.xtx_inverse().ok()?;
+    let mut inv = DenseMatrix::zeros(p, p).ok()?;
+    for i in 0..p {
+        let di = col_norms[i];
+        for j in 0..p {
+            let dj = col_norms[j];
+            if let Some(slot) = inv.get_mut(i, j) {
+                *slot = (inv_scaled.get(i, j).unwrap_or(0.0) / di) / dj;
+            }
+        }
+    }
+    Some(inv)
 }
 
 struct ReducedLmState {
@@ -3426,24 +3553,42 @@ fn run_reduced_lm(
         }
         let j_full = compute_jacobian(model, layout, obs, work, &y_hat, full_bounds)?;
         let mut j_sub = DenseMatrix::zeros(obs.len(), sub_k).ok()?;
+        let mut max_g_cos = 0.0_f64;
+        let fnorm = ss_curr.sqrt();
         for (sub_j, &orig_j) in map_indices.iter().enumerate() {
-            let mut col_ss = 0.0_f64;
-            for i in 0..obs.len() {
+            let mut col_ss = NeumaierSum::new();
+            let mut col_dot = NeumaierSum::new();
+            for (i, &wr) in w_res.iter().enumerate().take(obs.len()) {
                 let val = mat_get(&j_full, i, orig_j);
                 mat_set(&mut j_sub, i, sub_j, val);
-                col_ss += val * val;
+                col_ss.add(val * val);
+                col_dot.add(val * wr);
             }
-            let cn = col_ss.sqrt().max(1e-12);
+            let raw_cn = col_ss.total().sqrt();
+            if raw_cn > 0.0 && fnorm > 0.0 {
+                let grad_j = col_dot.total();
+                let xj = sub_theta[sub_j];
+                let at_lo = sub_bounds[sub_j].0.is_some_and(|l| (xj - l).abs() <= 1e-12 * l.abs().max(f64::MIN_POSITIVE) && grad_j < 0.0);
+                let at_hi = sub_bounds[sub_j].1.is_some_and(|u| (u - xj).abs() <= 1e-12 * u.abs().max(f64::MIN_POSITIVE) && grad_j > 0.0);
+                if !at_lo && !at_hi {
+                    max_g_cos = max_g_cos.max((grad_j / (raw_cn * fnorm)).abs());
+                }
+            }
+            let cn = if raw_cn > f64::MIN_POSITIVE.sqrt() { raw_cn } else { 1.0 };
             diag[sub_j] = if iter == 0 { cn } else { diag[sub_j].max(cn) };
         }
+        if ss_curr == 0.0 || max_g_cos <= 1e-12 {
+            break;
+        }
         if iter == 0 {
-            delta = 10.0 * scaled_l2_norm(&diag, &sub_theta).max(1.0);
+            let theta_scale = scaled_l2_norm(&diag, &sub_theta);
+            delta = 10.0 * if theta_scale > 0.0 { theta_scale } else { 1.0 };
         }
 
         let mut accepted = false;
         let mut lam = 0.0_f64;
         for _ in 0..15 {
-            let Ok((step, lam_u)) = solve_trust_region_subproblem(&j_sub, &w_res, &diag, delta, lam, &mut lm_ws) else {
+            let Ok((step, lam_u)) = solve_trust_region_subproblem(&j_sub, &w_res, &diag, &sub_theta, delta, lam, &mut lm_ws) else {
                 break;
             };
             lam = lam_u;
@@ -3464,7 +3609,9 @@ fn run_reduced_lm(
                     ss_curr = ss_t;
                     accepted = true;
                     delta = delta.max(2.0 * p_norm);
-                    if act <= 1e-11 * ss_curr.max(1.0) || p_norm <= 1e-10 {
+                    let theta_norm = scaled_l2_norm(&diag, &sub_theta);
+                    let step_tol = 1e-10 * theta_norm.max(f64::MIN_POSITIVE);
+                    if act <= 1e-11 * ss_curr.max(f64::MIN_POSITIVE) || p_norm <= step_tol {
                         for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
                             work[orig] = v;
                         }

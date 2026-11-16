@@ -72,7 +72,7 @@ use curvebook_math::dist::{
     chi2_isf, chi2_sf, f_sf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_two_sided_isf,
     student_t_two_sided_p,
 };
-use curvebook_math::linalg::{DenseMatrix, parameter_dependencies, qr_col_pivoted, svd};
+use curvebook_math::linalg::{DenseMatrix, qr_col_pivoted, svd};
 use curvebook_math::roots::{RootOptions, brent_root};
 use curvebook_math::special::ln_choose;
 use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
@@ -223,7 +223,7 @@ pub fn compute_covariance_diagnostics(
     confidence: ConfidenceLevel,
 ) -> Result<CovarianceDiagnostics, FitError> {
     let sigma2 = if df > 0 { (rss / (df as f64)).max(0.0) } else { f64::NAN };
-    let t_crit = if df > 0 { student_t_two_sided_isf(confidence.alpha(), df as f64).unwrap_or(1.96) } else { f64::NAN };
+    let t_crit = if df > 0 { student_t_two_sided_isf(confidence.alpha(), df as f64).unwrap_or(f64::NAN) } else { f64::NAN };
     compute_covariance_from_scale(j_mat, sigma2, t_crit, theta)
 }
 
@@ -239,7 +239,7 @@ pub(crate) fn compute_poisson_covariance_diagnostics(
     confidence: ConfidenceLevel,
 ) -> Result<CovarianceDiagnostics, FitError> {
     let sigma2 = if df > 0 { 1.0 } else { f64::NAN };
-    let z_crit = if df > 0 { norm_two_sided_isf(confidence.alpha()).unwrap_or(1.96) } else { f64::NAN };
+    let z_crit = if df > 0 { norm_two_sided_isf(confidence.alpha()).unwrap_or(f64::NAN) } else { f64::NAN };
     compute_covariance_from_scale(j_mat, sigma2, z_crit, theta)
 }
 
@@ -258,12 +258,47 @@ fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, th
         });
     }
 
-    let pqr = qr_col_pivoted(j_mat)?;
+    let nrows = j_mat.nrows();
+    let mut col_norms = vec![0.0_f64; p];
+    let mut j_scaled = DenseMatrix::zeros(nrows, p)?;
+    for (c, cn_slot) in col_norms.iter_mut().enumerate().take(p) {
+        let cn = j_mat.col_norm2(c);
+        *cn_slot = cn;
+        if cn > 0.0 && cn.is_finite() {
+            let inv_cn = 1.0 / cn;
+            for r in 0..nrows {
+                if let Some(slot) = j_scaled.get_mut(r, c) {
+                    *slot = j_mat.get(r, c).unwrap_or(0.0) * inv_cn;
+                }
+            }
+        }
+    }
+
+    let pqr = qr_col_pivoted(&j_scaled)?;
     let rank = pqr.rank();
 
-    let (xtx_inv, deps, mut ambiguous) = if rank == p && j_mat.nrows() >= p {
-        let inv = pqr.xtx_inverse()?;
-        let deps = parameter_dependencies(j_mat).unwrap_or_else(|_| vec![1.0; p]);
+    let (xtx_inv, deps, mut ambiguous) = if rank == p && nrows >= p {
+        let inv_scaled = pqr.xtx_inverse()?;
+        let mut inv = DenseMatrix::zeros(p, p)?;
+        let mut deps = Vec::with_capacity(p);
+        for i in 0..p {
+            let di = col_norms[i];
+            let diag_prod = inv_scaled.get(i, i).unwrap_or(1.0);
+            let dep = if !diag_prod.is_finite() {
+                1.0
+            } else if diag_prod <= 1.0 {
+                0.0
+            } else {
+                (1.0 - 1.0 / diag_prod).clamp(0.0, 1.0)
+            };
+            deps.push(dep);
+            for j in 0..p {
+                let dj = col_norms[j];
+                if let Some(slot) = inv.get_mut(i, j) {
+                    *slot = if di > 0.0 && dj > 0.0 { (inv_scaled.get(i, j).unwrap_or(0.0) / di) / dj } else { f64::NAN };
+                }
+            }
+        }
         let amb = deps.iter().any(|&d| !d.is_finite() || d > 0.9999);
         (inv, deps, amb)
     } else {
@@ -548,11 +583,38 @@ pub fn compute_profile_likelihood_cis<F>(
 where
     F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
 {
+    compute_profile_likelihood_cis_scaled(theta_hat, ss_min, None, df, cov_diag, bounds, confidence, profile_solve)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compute_profile_likelihood_cis_scaled<F>(
+    theta_hat: &[f64],
+    ss_min: f64,
+    ss_scale: Option<f64>,
+    df: usize,
+    cov_diag: &CovarianceDiagnostics,
+    bounds: &[(Option<f64>, Option<f64>)],
+    confidence: ConfidenceLevel,
+    profile_solve: F,
+) -> Vec<(CiBound, CiBound)>
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+{
     let p = theta_hat.len();
     if p == 0 || df == 0 || !ss_min.is_finite() {
         return vec![(CiBound::Open, CiBound::Open); p];
     }
-    if ss_min <= 1e-30 {
+    let is_exact_fit = if ss_min <= f64::MIN_POSITIVE * 1e6 {
+        true
+    } else if let Some(scale) = ss_scale.filter(|s| s.is_finite() && *s > 0.0) {
+        ss_min <= (1e-28 * scale).max(f64::MIN_POSITIVE * 1e6)
+    } else {
+        let has_nontrivial_rel_se =
+            theta_hat.iter().zip(cov_diag.standard_errors.iter()).any(|(&th, &se)| se.is_finite() && se > 1e-14 * th.abs().max(f64::MIN_POSITIVE));
+        let param_sq_scale = theta_hat.iter().map(|&t| t * t).fold(0.0_f64, f64::max).max(1.0);
+        !has_nontrivial_rel_se && ss_min <= 1e-28 * param_sq_scale
+    };
+    if is_exact_fit {
         return theta_hat.iter().map(|&t| (CiBound::Finite(t), CiBound::Finite(t))).collect();
     }
     let Ok(t_crit) = student_t_two_sided_isf(confidence.alpha(), df as f64) else {
@@ -606,7 +668,7 @@ where
 
     for k in 0..p {
         let se_k = cov_diag.standard_errors.get(k).copied().unwrap_or(f64::NAN);
-        let base_step = if se_k.is_finite() && se_k > 0.0 { step_crit * se_k } else { 0.1 * theta_hat[k].abs().max(1.0) };
+        let base_step = if se_k.is_finite() && se_k > 0.0 { step_crit * se_k } else { 0.1 * theta_hat[k].abs().max(1e-12) };
         let (lb, ub) = bounds.get(k).copied().unwrap_or((None, None));
         let lo = trace_profile_endpoint(k, -1.0, theta_hat, ss_min, ss_crit, base_step, lb, &cov_diag.covariance_matrix, &mut profile_solve);
         let hi = trace_profile_endpoint(k, 1.0, theta_hat, ss_min, ss_crit, base_step, ub, &cov_diag.covariance_matrix, &mut profile_solve);
@@ -630,7 +692,7 @@ where
 {
     let (a, b) = if br.x_neg <= br.x_pos { (br.x_neg, br.x_pos) } else { (br.x_pos, br.x_neg) };
     let span = br.x_pos - br.x_neg;
-    let tol = 1e-7 * base_step.max(1e-12);
+    let tol = (1e-7 * base_step).max(f64::MIN_POSITIVE);
     let opts = RootOptions { rel_tol: 1e-7, abs_tol: tol, max_iters: 48 };
     let mut interp_w = Vec::with_capacity(br.w_pos.len());
     let root = brent_root(
@@ -680,7 +742,8 @@ where
     let mut warm_theta = theta_hat.to_vec();
     let cov_kk = cov.get(k).and_then(|r| r.get(k)).copied().unwrap_or(0.0);
 
-    let mut step = base_step.max(1e-8 * theta_hat[k].abs().max(1.0));
+    let min_step = if theta_hat[k] != 0.0 { 1e-12 * theta_hat[k].abs() } else { f64::MIN_POSITIVE };
+    let mut step = base_step.max(min_step);
     let mut bracket: Option<ProfileBracket> = None;
     let mut last_ss = ss_min;
 
@@ -697,7 +760,7 @@ where
             }
             _ => false,
         };
-        if (cand - prev_val).abs() <= 1e-15 * prev_val.abs().max(1.0) && hit_box {
+        if (cand - prev_val).abs() <= 1e-15 * prev_val.abs().max(base_step).max(f64::MIN_POSITIVE) && hit_box {
             return CiBound::Open;
         }
         // Linear (covariance-regression) warm start for the nuisance parameters.
