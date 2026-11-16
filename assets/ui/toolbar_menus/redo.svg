@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <title>Redo</title>
+  <desc>Minimal geometric right-pointing arc arrow representing redo.</desc>
+  <path d="M10.5 4l3 3-3 3"/>
+  <path d="M13 7H6.5a4 4 0 0 0 0 8H8.5"/>
+</svg>

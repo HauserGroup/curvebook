@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <title>Analyze Sheet</title>
+  <desc>Scatter coordinates joined by a smooth curve representing scientific analysis.</desc>
+  <path d="M2.5 12.5C5 12 6.5 5.5 13.5 3.5"/>
+  <circle cx="4" cy="11" r="1.1"/>
+  <circle cx="8" cy="7.5" r="1.1"/>
+  <circle cx="12" cy="4.5" r="1.1"/>
+</svg>

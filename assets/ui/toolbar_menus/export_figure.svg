@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+  <title>Export Figure</title>
+  <desc>Output tray with upward vector arrow for exporting SVG, PDF, PNG, or TIFF figures.</desc>
+  <path d="M8 2.5v7.5M5.5 5L8 2.5 10.5 5"/>
+  <path d="M2.5 10.5v3h11v-3"/>
+</svg>
