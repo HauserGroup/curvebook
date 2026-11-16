@@ -221,8 +221,7 @@ fn gui_tools_route_through_gui_session_host_including_png_screenshot_and_tsv() {
     let (host, shared) = SharedMockHost::new(true);
     let mut state = McpServerState::with_gui_host(Box::new(host));
 
-    let inspect_res =
-        call_tool(&mut state, "ui_inspect", json!({ "scope": "dialog", "include_bounds": true, "sheet_id": "data-1" })).expect("ui_inspect");
+    let inspect_res = call_tool(&mut state, "ui_inspect", json!({ "scope": "dialog", "include_bounds": true })).expect("ui_inspect");
     assert!(!inspect_res.is_error);
 
     let shot_reply = rpc_roundtrip(
@@ -362,9 +361,9 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
         Err(err) => panic!("unexpected loopback connect probe error: {err}"),
     }
 
-    // Spin up a loopback --control server handling three sequential requests.
+    // Spin up a loopback --control server handling initial `ping` handshake + three sequential requests.
     let server = thread::spawn(move || -> Result<(), String> {
-        for expected in 0..3 {
+        for expected in 0..4 {
             let (mut stream, _) = listener.accept().map_err(|e| format!("accept: {e}"))?;
             let mut line = String::new();
             let cloned = stream.try_clone().map_err(|e| format!("clone: {e}"))?;
@@ -374,11 +373,15 @@ fn gui_tools_return_conflict_when_unattached_and_route_over_control_port() {
             let id = req["id"].as_str().ok_or_else(|| String::from("missing id"))?;
             let resp = match expected {
                 0 => {
+                    assert_eq!(req["method"], json!("ping"));
+                    json!({ "id": id, "ok": true, "result": { "pong": true, "gui_only": true } })
+                }
+                1 => {
                     assert_eq!(req["method"], json!("ui.inspect"));
                     assert_eq!(req["params"]["scope"], json!("grid"));
                     json!({ "id": id, "ok": true, "result": { "scope": "grid", "active_sheet": "data-1" } })
                 }
-                1 => {
+                2 => {
                     assert_eq!(req["method"], json!("ui.screenshot"));
                     json!({
                         "id": id,

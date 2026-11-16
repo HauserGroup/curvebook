@@ -72,10 +72,6 @@ fn def_ui_inspect() -> ToolDefinition {
                 "include_bounds": {
                     "type": "boolean",
                     "description": "Include widget/hit-target bounding boxes in the snapshot."
-                },
-                "sheet_id": {
-                    "type": "string",
-                    "description": "Optional sheet identifier filter."
                 }
             },
             "additionalProperties": false
@@ -286,7 +282,6 @@ fn def_ui_answer_dialog() -> ToolDefinition {
                 "fields": { "type": "object", "description": "Map of modal widget_id -> value to set before clicking action." },
                 "values": { "type": "object", "description": "Alias for fields mapping widget_id -> value." },
                 "patches": { "type": "object", "description": "Alias for fields mapping widget_id -> value." },
-                "dialog_id": { "type": "string", "description": "Optional active dialog/wizard identifier." },
                 "force_create_new": { "type": "boolean", "description": "Optional flag creating a new ResultSheet directly when committing AnalyzeSheet." },
                 "choice": { "type": "string", "description": "Optional selection for prompt dialogs (e.g. 'create_new' or 'modify_existing')." }
             },
@@ -319,6 +314,7 @@ fn dispatch_json_result(state: &mut McpServerState, method: &str, params: Value)
 }
 
 fn handle_ui_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("ui_inspect", args, &["scope", "include_bounds"])?;
     let mut params = Map::new();
     if let Some(raw_scope) = optional_non_empty_str(args, "scope")? {
         let scope = raw_scope.to_ascii_lowercase();
@@ -331,9 +327,6 @@ fn handle_ui_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> R
     }
     if let Some(include_bounds) = optional_bool(args, "include_bounds")? {
         params.insert(String::from("include_bounds"), Value::Bool(include_bounds));
-    }
-    if let Some(sheet_id) = optional_non_empty_str(args, "sheet_id")? {
-        params.insert(String::from("sheet_id"), Value::String(sheet_id));
     }
     dispatch_json_result(state, "ui.inspect", Value::Object(params))
 }
@@ -504,17 +497,24 @@ fn handle_ui_invoke_menu(state: &mut McpServerState, args: &Map<String, Value>) 
         return Err(ToolCallError::InvalidParams(String::from("ui_invoke_menu requires \"path\" or \"command_id\"")));
     }
 
+    let mut extra = extra_params.unwrap_or_else(|| json!({}));
+    if let Err(err) = formats::sanitize_command_params(state, &mut extra) {
+        return Ok(errors::result_from_engine_error(&err));
+    }
+    if state.is_gui_only()
+        && let Some(blocked) = check_gui_only_menu_restriction(command_id.as_deref(), path.as_ref(), &extra)
+    {
+        return Ok(blocked);
+    }
+
     let mut params = Map::new();
     if let Some(p) = path {
         params.insert(String::from("path"), p);
     }
     insert_opt_str(&mut params, "command_id", command_id);
-    if let Some(mut extra) = extra_params {
-        if let Err(err) = formats::sanitize_command_params(state, &mut extra) {
-            return Ok(errors::result_from_engine_error(&err));
-        }
-        params.insert(String::from("params"), extra);
-    }
+    // Always supply an object for `params` (never `null`/omitted) so standard non-`ui.*` engine
+    // menu items pass strict root-object schema validation (`R2-S12-03`).
+    params.insert(String::from("params"), extra);
     dispatch_json_result(state, "ui.invoke_menu", Value::Object(params))
 }
 
@@ -536,8 +536,8 @@ fn handle_ui_switch_tab(state: &mut McpServerState, args: &Map<String, Value>) -
 }
 
 fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
+    reject_unknown_args("ui_answer_dialog", args, &["action", "fields", "values", "patches", "force_create_new", "choice"])?;
     let action = optional_non_empty_str(args, "action")?;
-    let dialog_id = optional_non_empty_str(args, "dialog_id")?;
     let fields = optional_object(args, "fields")?;
     let values = optional_object(args, "values")?;
     let patches = optional_object(args, "patches")?;
@@ -549,9 +549,16 @@ fn handle_ui_answer_dialog(state: &mut McpServerState, args: &Map<String, Value>
         )));
     }
 
+    if state.is_gui_only() {
+        for map_val in [&fields, &values, &patches].into_iter().flatten() {
+            if map_requests_os_print_submission(map_val) {
+                return Ok(gui_only_subprocess_blocked("ui_answer_dialog.submit_to_os", "OS print spooler subprocess submission (`submit_to_os`)"));
+            }
+        }
+    }
+
     let mut params = Map::new();
     insert_opt_str(&mut params, "action", action);
-    insert_opt_str(&mut params, "dialog_id", dialog_id);
     insert_opt_str(&mut params, "choice", choice);
     if let Some(force) = force_create_new {
         params.insert(String::from("force_create_new"), Value::Bool(force));
@@ -698,6 +705,68 @@ fn insert_opt_str(map: &mut Map<String, Value>, key: &str, value: Option<String>
     if let Some(v) = value {
         map.insert(key.to_owned(), Value::String(v));
     }
+}
+
+fn reject_unknown_args(tool_name: &str, args: &Map<String, Value>, allowed: &[&str]) -> Result<(), ToolCallError> {
+    for key in args.keys() {
+        if !allowed.contains(&key.as_str()) {
+            return Err(ToolCallError::InvalidParams(format!("unsupported parameter \"{key}\" for {tool_name}")));
+        }
+    }
+    Ok(())
+}
+
+fn normalize_menu_token(raw: &str) -> String {
+    raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
+}
+
+fn menu_path_matches_tokens(path: Option<&Value>, candidates: &[&str]) -> bool {
+    let Some(val) = path else {
+        return false;
+    };
+    let joined = match val {
+        Value::String(s) => s.to_owned(),
+        Value::Array(items) => items.iter().filter_map(Value::as_str).collect::<Vec<_>>().join("/"),
+        _ => return false,
+    };
+    let normalized = normalize_menu_token(&joined);
+    candidates.iter().any(|c| normalized == *c)
+}
+
+fn map_requests_os_print_submission(val: &Value) -> bool {
+    val.as_object().is_some_and(|obj| {
+        obj.get("submit_to_os").and_then(Value::as_bool) == Some(true) || obj.get("print.submit_to_os").and_then(Value::as_bool) == Some(true)
+    })
+}
+
+fn gui_only_subprocess_blocked(target: &str, helper_desc: &str) -> ToolCallResult {
+    let payload = StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, format!("{helper_desc} is forbidden under --gui-only policy"))
+        .with_remediation("Inspect content inside the window via `ui_inspect` or `ui_screenshot` without invoking host OS helpers.")
+        .with_details(json!({ "target": target, "policy": "gui_only" }));
+    errors::result_from_payload(&payload)
+}
+
+fn check_gui_only_menu_restriction(command_id: Option<&str>, path: Option<&Value>, extra: &Value) -> Option<ToolCallResult> {
+    let is_copy_methods = command_id == Some("ui.result.copyMethodsReport")
+        || menu_path_matches_tokens(path, &["analyzecopymethodsreport", "analyzecopymethodsstatisticalreporting", "copymethodsreport"]);
+    if is_copy_methods {
+        return Some(gui_only_subprocess_blocked("ui.result.copyMethodsReport", "OS clipboard helper `ui.result.copyMethodsReport`"));
+    }
+
+    if command_id == Some("file.print") {
+        return Some(gui_only_subprocess_blocked("file.print", "OS print helper `file.print`"));
+    }
+
+    let is_print_open = command_id == Some("ui.print.open") || menu_path_matches_tokens(path, &["fileprint", "print"]);
+    if is_print_open && map_requests_os_print_submission(extra) {
+        return Some(gui_only_subprocess_blocked("ui.print.open", "OS print spooler subprocess submission (`submit_to_os`)"));
+    }
+
+    if command_id == Some("ui.screenshot") && extra.get("path").is_some_and(|v| !v.is_null()) {
+        return Some(gui_only_subprocess_blocked("ui.screenshot.path", "ui.screenshot disk `path` output via ui_invoke_menu"));
+    }
+
+    None
 }
 
 fn insert_opt_f64(map: &mut Map<String, Value>, key: &str, value: Option<f64>) {

@@ -9,7 +9,7 @@ use lumencraft_doc::{DataSheet, ErrorCode, ProjectDocument, ResultSheet, SheetId
 use lumencraft_engine::{EngineError, Session};
 use lumencraft_format::{
     CsvOptions, ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatError, FormatKind, FormatRegistry, ImportOptions, ImportPayload,
-    Importer, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv,
+    Importer, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv, is_unpacked_project_dir,
     strip_project_data_for_template,
 };
 use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
@@ -87,15 +87,14 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
     let title_override = optional_non_empty_str(args, "title")?;
     let append = optional_bool(args, "append")?.unwrap_or(false);
 
-    let raw_candidate = Path::new(&raw_path);
-    let reg = FormatRegistry::default_registry();
-    let importer = resolve_importer(&reg, explicit_format.as_deref(), raw_candidate)?;
-    let import_opts = build_import_options(raw_candidate, args)?;
-
     let resolved_path = match resolve_mcp_path(state, &raw_path) {
         Ok(p) => p,
         Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
+
+    let reg = FormatRegistry::default_registry();
+    let importer = resolve_importer(&reg, explicit_format.as_deref(), &resolved_path)?;
+    let import_opts = build_import_options(&resolved_path, args)?;
 
     let format_id = importer.descriptor().id;
     if format_id == "lumencraft.d" {
@@ -227,7 +226,7 @@ fn apply_imported_payload(
             let sheets = doc.total_sheet_count();
             let title = doc.title.clone();
             state.install_session(Session::from_document(doc));
-            state.session.set_file_path(Some(resolved_path.to_path_buf()), true);
+            state.session_mut().set_file_path(Some(resolved_path.to_path_buf()), true);
             ToolCallResult::ok_json(&json!({
                 "opened": true,
                 "format": format_id,
@@ -250,7 +249,7 @@ fn apply_imported_payload(
             let sheets = doc.total_sheet_count();
             let title = doc.title.clone();
             state.install_session(Session::from_document(doc));
-            state.session.set_file_path(None, true);
+            state.session_mut().set_file_path(None, true);
             ToolCallResult::ok_json(&json!({
                 "opened": true,
                 "format": "lctemplate",
@@ -469,7 +468,7 @@ fn apply_csv_import(
     import_opts: &ImportOptions,
     append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
-    if append && state.session.document().sheet_section(&import_opts.sheet_id).is_some() {
+    if append && state.session().document().sheet_section(&import_opts.sheet_id).is_some() {
         return Ok(errors::result_from_engine_error(&EngineError::from(lumencraft_doc::DocError::DuplicateSheetId {
             sheet_id: import_opts.sheet_id.clone(),
         })));
@@ -481,7 +480,8 @@ fn apply_csv_import(
     };
 
     if append {
-        return execute_csv_import_on_session(&mut state.session, format_id, resolved_path, &import_opts.sheet_id, params);
+        return state
+            .mutate_active_session(|session| execute_csv_import_on_session(session, format_id, resolved_path, &import_opts.sheet_id, params));
     }
 
     let doc = match ProjectDocument::new(import_opts.title.clone()) {
@@ -547,14 +547,14 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
                 }
             }
         };
-        let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
-        let reg = FormatRegistry::default_registry();
-        let exporter = resolve_save_exporter(&reg, explicit_format.as_deref(), Path::new(&raw_path))?;
-        let format_id = exporter.descriptor().id;
         let resolved_path = match resolve_mcp_path(state, &raw_path) {
             Ok(p) => p,
             Err(err) => return Ok(errors::result_from_engine_error(&err)),
         };
+        let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
+        let reg = FormatRegistry::default_registry();
+        let exporter = resolve_save_exporter(&reg, explicit_format.as_deref(), &resolved_path)?;
+        let format_id = exporter.descriptor().id;
         let cmd_id = if format_id == "lctemplate" { "project.saveTemplate" } else { "project.save" };
         let mut cmd_params = json!({
             "path": resolved_path.display().to_string(),
@@ -584,31 +584,30 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
 
     let raw_path = match optional_non_empty_str(args, "path")? {
         Some(p) => p,
-        None => match state.session.file_path() {
+        None => match state.session().file_path() {
             Some(existing) => existing.display().to_string(),
             None => {
                 return Err(ToolCallError::InvalidParams(String::from("save_file requires \"path\" when session has no associated file_path")));
             }
         },
     };
-    let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
-    let reg = FormatRegistry::default_registry();
-    let exporter = resolve_save_exporter(&reg, explicit_format.as_deref(), Path::new(&raw_path))?;
-    let format_id = exporter.descriptor().id;
-
     let resolved_path = match resolve_mcp_path(state, &raw_path) {
         Ok(p) => p,
         Err(err) => return Ok(errors::result_from_engine_error(&err)),
     };
+    let explicit_format = optional_non_empty_str(args, "format")?.map(|s| s.to_ascii_lowercase());
+    let reg = FormatRegistry::default_registry();
+    let exporter = resolve_save_exporter(&reg, explicit_format.as_deref(), &resolved_path)?;
+    let format_id = exporter.descriptor().id;
 
-    let doc = state.session.document().clone();
+    let doc = state.session().document().clone();
     if let Err(err) = exporter.export_path(ExportSource::Document(&doc), &resolved_path, &ExportOptions::default()) {
         let engine_err = EngineError::from(err);
         return Ok(errors::result_from_engine_error(&engine_err));
     }
 
     if matches!(format_id, "lumencraft" | "lumencraft.d") {
-        state.session.set_file_path(Some(resolved_path.clone()), true);
+        state.mutate_active_session(|session| session.set_file_path(Some(resolved_path.clone()), true));
     }
 
     ToolCallResult::ok_json(&json!({
@@ -620,6 +619,10 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
     }))
 }
 
+fn has_lumencraft_unpacked_suffix(path: &Path) -> bool {
+    path.file_name().and_then(std::ffi::OsStr::to_str).is_some_and(|name| name.to_ascii_lowercase().ends_with(".lumencraft.d"))
+}
+
 fn resolve_save_exporter<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &Path) -> Result<&'a dyn Exporter, ToolCallError> {
     if let Some(fmt) = explicit {
         if !matches!(fmt, "lumencraft" | "lumencraft.d" | "lctemplate") {
@@ -627,8 +630,12 @@ fn resolve_save_exporter<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, pa
         }
         return reg.exporter_by_format(fmt).ok_or_else(|| ToolCallError::InvalidParams(format!("unsupported save format '{fmt}'")));
     }
+    if !has_lumencraft_unpacked_suffix(path) && !is_unpacked_project_dir(path) && path.is_dir() {
+        return Err(ToolCallError::InvalidParams(format!("save_file target `{}` is a directory without a `.lumencraft.d` suffix", path.display())));
+    }
     if let Some(found) = reg.exporter_for_path(path)
         && matches!(found.descriptor().id, "lumencraft" | "lumencraft.d" | "lctemplate")
+        && (found.descriptor().id != "lumencraft.d" || has_lumencraft_unpacked_suffix(path) || is_unpacked_project_dir(path))
     {
         return Ok(found);
     }
@@ -673,7 +680,7 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
         });
     }
 
-    let (target_id, sheet_kind, scene) = match compile_visual_sheet(state.session.document(), sheet_id.as_deref()) {
+    let (target_id, sheet_kind, scene) = match compile_visual_sheet(state.session().document(), sheet_id.as_deref()) {
         Ok(compiled) => compiled,
         Err(msg) => return Ok(errors::result_from_code(ErrorCode::NotFound, msg)),
     };
@@ -794,7 +801,7 @@ pub(crate) fn handle_export(state: &mut McpServerState, args: &Map<String, Value
     };
 
     let export_opts = ExportOptions { csv: cfg.csv_opts.clone(), pretty: cfg.pretty, sheet_id };
-    let doc = state.session.document();
+    let doc = state.session().document();
     let bytes = match exporter.export_bytes(ExportSource::Document(doc), &export_opts) {
         Ok(b) => b,
         Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),

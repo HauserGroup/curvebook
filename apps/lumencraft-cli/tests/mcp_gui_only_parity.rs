@@ -3,7 +3,7 @@
 
 use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, ErrorKind, Read, Write};
-use std::net::TcpListener;
+use std::net::{TcpListener, TcpStream};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -190,7 +190,15 @@ fn mcp_control_port_gui_only_drives_live_control_tcp_session() -> Result<(), Box
         Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
         Err(err) => return Err(err.into()),
     };
-    let port = listener.local_addr()?.port();
+    let addr = listener.local_addr()?;
+    let port = addr.port();
+    if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+        if err.kind() == ErrorKind::PermissionDenied {
+            return Ok(());
+        }
+        return Err(err.into());
+    }
+    let _ = listener.accept();
     assert!(McpServerState::with_control_port_and_gui_only(port, true)?.is_gui_only());
 
     listener.set_nonblocking(true)?;

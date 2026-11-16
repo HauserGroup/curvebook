@@ -120,11 +120,6 @@ fn normalize_in_process_gui_params(method: &str, mut params: serde_json::Value) 
                     obj.insert(String::from("target"), serde_json::Value::String(String::from("full_window")));
                 }
             }
-            "ui.pointer_gesture" => {
-                if matches!(obj.get("action").and_then(serde_json::Value::as_str), Some("wheel")) {
-                    obj.insert(String::from("action"), serde_json::Value::String(String::from("scroll")));
-                }
-            }
             "ui.invoke_menu" => {
                 if let Some(arr) = obj.get("path").and_then(serde_json::Value::as_array) {
                     let segments: Vec<&str> = arr.iter().filter_map(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty()).collect();
@@ -151,6 +146,18 @@ impl lumencraft_mcp::GuiSessionHost for InProcessUiGuiHost {
 
     fn is_gui_only(&self) -> bool {
         self.app.is_gui_only()
+    }
+
+    fn hosted_session(&self) -> Option<&lumencraft_engine::Session> {
+        Some(self.app.session())
+    }
+
+    fn hosted_session_mut(&mut self) -> Option<&mut lumencraft_engine::Session> {
+        Some(self.app.session_mut())
+    }
+
+    fn sync_after_session_mutation(&mut self) {
+        self.app.sync_views();
     }
 }
 
@@ -416,6 +423,52 @@ mod tests {
         assert!(!host.is_gui_only());
         let inspect_relaxed = host.call_gui("ui.inspect", serde_json::json!({})).unwrap();
         assert_eq!(inspect_relaxed["gui_only"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn r2_s12_07_09_in_process_ui_gui_host_shares_session_and_preserves_wheel() -> Result<(), String> {
+        use lumencraft_mcp::{McpServerState, call_tool, dispatch_json_value};
+        use serde_json::json;
+
+        let mut state = McpServerState::with_gui_host(Box::new(super::InProcessUiGuiHost::new(false)));
+        assert!(!state.is_gui_only());
+
+        // Core `command_run` mutates the hosted UiApp session and syncs views.
+        let created = call_tool(
+            &mut state,
+            "command_run",
+            json!({ "command_id": "sheet.createData", "params": { "sheet_id": "shared-s1", "kind": "Column" } }),
+        )
+        .map_err(|e| format!("command_run failed: {e}"))?;
+        assert!(!created.is_error);
+
+        let inspect = call_tool(&mut state, "ui_inspect", json!({ "scope": "navigator" })).map_err(|e| format!("ui_inspect failed: {e}"))?;
+        assert!(!inspect.is_error);
+        let nav_json = inspect.structured_content.ok_or_else(|| String::from("missing ui_inspect structured content"))?;
+        let sheets = nav_json["navigator_sheets"].as_array().ok_or_else(|| format!("missing navigator_sheets: {nav_json}"))?;
+        assert!(sheets.iter().any(|s| s["sheet_id"] == json!("shared-s1")), "shared-s1 missing from navigator: {nav_json}");
+
+        // `resources/list` and `resources/read` read the same hosted UiApp session.
+        let res_list = dispatch_json_value(json!({ "jsonrpc": "2.0", "id": 1, "method": "resources/list", "params": {} }), &mut state)
+            .ok_or_else(|| String::from("missing resources/list reply"))?;
+        let res_arr = res_list["result"]["resources"].as_array().ok_or_else(|| format!("missing resources array: {res_list}"))?;
+        assert!(res_arr.iter().any(|r| r["uri"] == json!("sheet://shared-s1")), "resources/list missed hosted sheet: {res_list}");
+
+        let res_read = dispatch_json_value(
+            json!({ "jsonrpc": "2.0", "id": 2, "method": "resources/read", "params": { "uri": "sheet://shared-s1" } }),
+            &mut state,
+        )
+        .ok_or_else(|| String::from("missing resources/read reply"))?;
+        assert!(res_read.get("error").is_none(), "resources/read error: {res_read}");
+        assert!(!res_read["result"]["contents"].as_array().is_none_or(Vec::is_empty));
+
+        // `wheel` action is preserved verbatim (`"wheel"`, not rewritten to `"scroll"`).
+        let wheel = call_tool(&mut state, "ui_pointer_gesture", json!({ "action": "wheel", "x": 200.0, "y": 200.0, "delta_y": -120.0 }))
+            .map_err(|e| format!("wheel gesture failed: {e}"))?;
+        assert!(!wheel.is_error, "wheel gesture errored: {:?}", wheel.structured_content);
+        let wheel_sc = wheel.structured_content.ok_or_else(|| String::from("missing wheel structured content"))?;
+        assert_eq!(wheel_sc["action"], json!("wheel"));
+        Ok(())
     }
 
     #[test]

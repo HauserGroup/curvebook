@@ -11,7 +11,7 @@ use serde_json::{Map, Value, json};
 
 use crate::SERVER_NAME;
 use crate::errors::{self, StructuredErrorPayload};
-use crate::prompts::{get_prompt, list_prompts};
+use crate::prompts::{get_prompt_for_mode, list_prompts_for_mode};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::resources::{ResourceContent, ResourceDescriptor};
 use crate::resources::{ResourceError, list_resources, read_resource};
@@ -313,8 +313,8 @@ fn dispatch_method(req_id: Option<Value>, method: &str, params: Value, state: &m
         "tools/call" => Some(handle_tools_call(id, params, state)),
         "resources/list" => Some(handle_resources_list(id, &params, state)),
         "resources/read" => Some(handle_resources_read(id, &params, state)),
-        "prompts/list" => Some(handle_prompts_list(id, &params)),
-        "prompts/get" => Some(handle_prompts_get(id, &params)),
+        "prompts/list" => Some(handle_prompts_list(id, &params, state)),
+        "prompts/get" => Some(handle_prompts_get(id, &params, state)),
         _ => Some(JsonRpcResponse::err(id, ERR_METHOD_NOT_FOUND, format!("method not found: {method}"), None)),
     }
 }
@@ -323,9 +323,27 @@ fn is_notification_method(method: &str, is_notification: bool) -> bool {
     is_notification || matches!(method, "notifications/initialized" | "initialized" | "notifications/cancelled")
 }
 
+fn rpc_error_from_payload(id: Value, payload: StructuredErrorPayload) -> JsonRpcResponse {
+    let code = if payload.code == ErrorCode::GuiOnlyViolation { ERR_INVALID_REQUEST } else { ERR_INTERNAL_ERROR };
+    JsonRpcResponse::err(id, code, payload.message.clone(), Some(payload.to_value()))
+}
+
+fn run_guarded_rpc<F>(id: Value, op: &str, f: F) -> JsonRpcResponse
+where
+    F: FnOnce(&Value) -> Result<JsonRpcResponse, lumencraft_engine::EngineError>,
+{
+    match lumencraft_engine::guard::run_guarded(op, || f(&id)) {
+        Ok(resp) => resp,
+        Err(err) => rpc_error_from_payload(id, StructuredErrorPayload::from_engine_error(&err)),
+    }
+}
+
 fn handle_initialize(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "initialize params must be an object", None);
+    }
+    if let Err(payload) = state.sync_remote_control_policy() {
+        return rpc_error_from_payload(id, payload);
     }
     let requested = params.get("protocolVersion").and_then(Value::as_str);
     let negotiated = negotiate_protocol_version(requested);
@@ -367,9 +385,12 @@ fn negotiate_protocol_version(requested: Option<&str>) -> &'static str {
     MCP_PROTOCOL_VERSION
 }
 
-fn handle_tools_list(id: Value, params: &Value, state: &McpServerState) -> JsonRpcResponse {
+fn handle_tools_list(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "tools/list params must be an object", None);
+    }
+    if let Err(payload) = state.sync_remote_control_policy() {
+        return rpc_error_from_payload(id, payload);
     }
     JsonRpcResponse::ok(id, json!({ "tools": list_tools_for_state(state) }))
 }
@@ -410,17 +431,22 @@ fn handle_resources_list(id: Value, params: &Value, state: &mut McpServerState) 
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/list params must be an object", None);
     }
-    if state.is_gui_only() {
-        return JsonRpcResponse::ok(id, json!({ "resources": [] }));
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    if state.control_port().is_some() {
-        return match list_live_resources(state) {
-            Ok(resources) => JsonRpcResponse::ok(id, json!({ "resources": resources })),
-            Err(payload) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, payload.message.clone(), Some(payload.to_value())),
-        };
-    }
-    JsonRpcResponse::ok(id, json!({ "resources": list_resources(state.session().document()) }))
+    run_guarded_rpc(id, "mcp.resources_list", |req_id| {
+        if let Err(payload) = state.sync_remote_control_policy() {
+            return Ok(rpc_error_from_payload(req_id.clone(), payload));
+        }
+        if state.is_gui_only() {
+            return Ok(JsonRpcResponse::ok(req_id.clone(), json!({ "resources": [] })));
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        if state.control_port().is_some() {
+            return Ok(match list_live_resources(state) {
+                Ok(resources) => JsonRpcResponse::ok(req_id.clone(), json!({ "resources": resources })),
+                Err(payload) => rpc_error_from_payload(req_id.clone(), payload),
+            });
+        }
+        Ok(JsonRpcResponse::ok(req_id.clone(), json!({ "resources": list_resources(state.session().document()) })))
+    })
 }
 
 fn handle_resources_read(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
@@ -430,29 +456,34 @@ fn handle_resources_read(id: Value, params: &Value, state: &mut McpServerState) 
     let Some(uri) = map.get("uri").and_then(Value::as_str).filter(|s| !s.trim().is_empty()) else {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "resources/read requires a non-empty string \"uri\"", None);
     };
-    if state.is_gui_only() {
-        let payload = StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, "resources/read is forbidden under --gui-only policy")
-            .with_remediation("Inspect visible sheets via `ui_inspect` or `ui_screenshot` instead.")
-            .with_details(json!({ "uri": uri, "policy": "gui_only" }));
-        return JsonRpcResponse::err(id, ERR_INVALID_REQUEST, payload.message.clone(), Some(payload.to_value()));
-    }
+    run_guarded_rpc(id, "mcp.resources_read", |req_id| {
+        if let Err(payload) = state.sync_remote_control_policy() {
+            return Ok(rpc_error_from_payload(req_id.clone(), payload));
+        }
+        if state.is_gui_only() {
+            let payload = StructuredErrorPayload::new(ErrorCode::GuiOnlyViolation, "resources/read is forbidden under --gui-only policy")
+                .with_remediation("Inspect visible sheets via `ui_inspect` or `ui_screenshot` instead.")
+                .with_details(json!({ "uri": uri, "policy": "gui_only" }));
+            return Ok(JsonRpcResponse::err(req_id.clone(), ERR_INVALID_REQUEST, payload.message.clone(), Some(payload.to_value())));
+        }
 
-    #[cfg(not(target_arch = "wasm32"))]
-    if state.control_port().is_some() {
-        return match read_live_resource(state, uri) {
-            Ok(contents) => JsonRpcResponse::ok(id, json!({ "contents": contents })),
-            Err(ResourceError::InvalidUri(msg)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, msg, None),
-            Err(ResourceError::NotFound(msg)) => JsonRpcResponse::err(id, ERR_RESOURCE_NOT_FOUND, msg, Some(json!({ "uri": uri }))),
-            Err(ResourceError::Internal(msg)) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, msg, None),
-        };
-    }
+        #[cfg(not(target_arch = "wasm32"))]
+        if state.control_port().is_some() {
+            return Ok(match read_live_resource(state, uri) {
+                Ok(contents) => JsonRpcResponse::ok(req_id.clone(), json!({ "contents": contents })),
+                Err(ResourceError::InvalidUri(msg)) => JsonRpcResponse::err(req_id.clone(), ERR_INVALID_PARAMS, msg, None),
+                Err(ResourceError::NotFound(msg)) => JsonRpcResponse::err(req_id.clone(), ERR_RESOURCE_NOT_FOUND, msg, Some(json!({ "uri": uri }))),
+                Err(ResourceError::Internal(msg)) => JsonRpcResponse::err(req_id.clone(), ERR_INTERNAL_ERROR, msg, None),
+            });
+        }
 
-    match read_resource(state.session().document(), uri) {
-        Ok(contents) => JsonRpcResponse::ok(id, json!({ "contents": contents })),
-        Err(ResourceError::InvalidUri(msg)) => JsonRpcResponse::err(id, ERR_INVALID_PARAMS, msg, None),
-        Err(ResourceError::NotFound(msg)) => JsonRpcResponse::err(id, ERR_RESOURCE_NOT_FOUND, msg, Some(json!({ "uri": uri }))),
-        Err(ResourceError::Internal(msg)) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, msg, None),
-    }
+        Ok(match read_resource(state.session().document(), uri) {
+            Ok(contents) => JsonRpcResponse::ok(req_id.clone(), json!({ "contents": contents })),
+            Err(ResourceError::InvalidUri(msg)) => JsonRpcResponse::err(req_id.clone(), ERR_INVALID_PARAMS, msg, None),
+            Err(ResourceError::NotFound(msg)) => JsonRpcResponse::err(req_id.clone(), ERR_RESOURCE_NOT_FOUND, msg, Some(json!({ "uri": uri }))),
+            Err(ResourceError::Internal(msg)) => JsonRpcResponse::err(req_id.clone(), ERR_INTERNAL_ERROR, msg, None),
+        })
+    })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -592,14 +623,17 @@ fn map_live_resource_error(uri: &str, err: &StructuredErrorPayload) -> ResourceE
     }
 }
 
-fn handle_prompts_list(id: Value, params: &Value) -> JsonRpcResponse {
+fn handle_prompts_list(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
     if !params.is_object() {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/list params must be an object", None);
     }
-    JsonRpcResponse::ok(id, json!({ "prompts": list_prompts() }))
+    if let Err(payload) = state.sync_remote_control_policy() {
+        return rpc_error_from_payload(id, payload);
+    }
+    JsonRpcResponse::ok(id, json!({ "prompts": list_prompts_for_mode(state.is_gui_only()) }))
 }
 
-fn handle_prompts_get(id: Value, params: &Value) -> JsonRpcResponse {
+fn handle_prompts_get(id: Value, params: &Value, state: &mut McpServerState) -> JsonRpcResponse {
     let Some(map) = params.as_object() else {
         return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/get params must be an object", None);
     };
@@ -613,8 +647,11 @@ fn handle_prompts_get(id: Value, params: &Value) -> JsonRpcResponse {
             return JsonRpcResponse::err(id, ERR_INVALID_PARAMS, "prompts/get \"arguments\" must be an object", None);
         }
     };
+    if let Err(payload) = state.sync_remote_control_policy() {
+        return rpc_error_from_payload(id, payload);
+    }
 
-    match get_prompt(name, &arguments) {
+    match get_prompt_for_mode(name, &arguments, state.is_gui_only()) {
         Ok(result) => match serde_json::to_value(result) {
             Ok(val) => JsonRpcResponse::ok(id, val),
             Err(err) => JsonRpcResponse::err(id, ERR_INTERNAL_ERROR, format!("failed to encode prompt result: {err}"), None),

@@ -241,10 +241,12 @@ pub fn has_unpacked_dir_suffix(path: &Path) -> bool {
     path.file_name().and_then(std::ffi::OsStr::to_str).is_some_and(|name| name.to_ascii_lowercase().ends_with(".lumencraft.d"))
 }
 
-/// Return `true` when `path` refers to an unpacked `.lumencraft.d` directory or an existing directory.
+/// Return `true` when `path` refers to an unpacked `.lumencraft.d` directory (either by
+/// `.lumencraft.d` suffix or an existing unpacked `manifest.json` marker), without classifying
+/// arbitrary directories such as `.` (`R2-S12-02`).
 #[must_use]
 pub fn is_unpacked_project_path(path: &Path) -> bool {
-    has_unpacked_dir_suffix(path) || is_unpacked_project_dir(path) || path.is_dir()
+    has_unpacked_dir_suffix(path) || is_unpacked_project_dir(path)
 }
 
 /// Compute total file byte size inside an unpacked directory tree.
@@ -303,8 +305,12 @@ pub fn detect_export_format_from_path(path: &Path) -> Result<ExportFormat, CliEr
     if is_unpacked_project_path(path) {
         return Ok(ExportFormat::LumencraftDir);
     }
+    if path.is_dir() {
+        return Err(CliError::Usage(format!("output path `{}` is a directory without a `.lumencraft.d` suffix", path.display())));
+    }
     let registry = FormatRegistry::default_registry();
     if let Some(exporter) = registry.exporter_for_path(path)
+        && exporter.descriptor().id != "lumencraft.d"
         && let Some(fmt) = export_format_from_descriptor_id(exporter.descriptor().id)
     {
         return Ok(fmt);
@@ -360,7 +366,12 @@ fn import_with_registered_adapter(
     allow_delimited: bool,
 ) -> Result<LoadedProject, CliError> {
     match kind {
-        FormatKind::Archive | FormatKind::Template => {
+        FormatKind::Template => {
+            let payload = importer.import_bytes(bytes, &ImportOptions::default())?;
+            let doc = payload.into_document().ok_or_else(|| CliError::Runtime(format!("importer `{format_tag}` returned non-document payload")))?;
+            Ok(LoadedProject { doc, format_tag, warnings: Vec::new() })
+        }
+        FormatKind::Archive => {
             let doc = match importer.import_bytes(bytes, &ImportOptions::default()) {
                 Ok(payload) => {
                     payload.into_document().ok_or_else(|| CliError::Runtime(format!("importer `{format_tag}` returned non-document payload")))?
@@ -996,5 +1007,23 @@ mod tests {
         let usage = super::run_guarded_cli::<(), _>("cli.test_usage", || Err(crate::error::CliError::Usage(String::from("bad flag"))))
             .expect_err("non-panic CliError must pass through unchanged");
         assert_eq!(usage.exit_code(), 2);
+    }
+
+    #[test]
+    fn r2_s12_02_unpacked_path_rejects_dot_and_arbitrary_dirs() {
+        let base = std::env::temp_dir().join(format!("lc_r2_s12_02_unit_{}", std::process::id()));
+        let plain = base.join("workspace");
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&plain).unwrap();
+
+        assert!(!super::is_unpacked_project_path(std::path::Path::new(".")));
+        assert!(!super::is_unpacked_project_path(&plain));
+        assert!(super::detect_export_format_from_path(&plain).is_err());
+
+        let suffixed = base.join("study.lumencraft.d");
+        assert!(super::is_unpacked_project_path(&suffixed));
+        assert_eq!(super::detect_export_format_from_path(&suffixed).unwrap(), super::ExportFormat::LumencraftDir);
+
+        let _ = std::fs::remove_dir_all(&base);
     }
 }

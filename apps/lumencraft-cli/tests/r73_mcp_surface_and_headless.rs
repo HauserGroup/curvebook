@@ -598,7 +598,15 @@ fn r73_stdio_strict_gui_only_rejections_and_control_port_parity() -> Result<(), 
         Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
         Err(err) => return Err(format!("bind control TcpListener: {err}")),
     };
-    let port = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?.port();
+    let addr = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
+    let port = addr.port();
+    if let Err(err) = TcpStream::connect_timeout(&addr, Duration::from_millis(200)) {
+        if err.kind() == ErrorKind::PermissionDenied {
+            return Ok(());
+        }
+        return Err(format!("probe control connect: {err}"));
+    }
+    let _ = listener.accept();
     listener.set_nonblocking(true).map_err(|e| format!("set_nonblocking: {e}"))?;
     let stop = Arc::new(AtomicBool::new(false));
     let stop_flag = Arc::clone(&stop);

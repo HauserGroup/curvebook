@@ -5,16 +5,32 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use lumencraft_engine::cmd::{Caller, CommandGroup, CommandSpec, registry};
+use lumencraft_engine::cmd::{Caller, CommandGroup, CommandSpec, Effects, registry};
 use lumencraft_engine::{ExternalPathPolicy, Session};
 use lumencraft_format::registry::{ExportOptions, ExportSource, FormatKind, FormatRegistry};
 use serde_json::{Map, Value, json};
 
 use crate::cmd_convert::{
     ExportFormat, ExportRequest, detect_export_format_from_path, export_from_document, is_unpacked_project_path, load_project_from_path,
+    run_guarded_cli,
 };
 use crate::error::CliError;
-use crate::sandbox::{PATH_PARAM_KEYS, PathResolver, WorkdirGuard};
+use crate::sandbox::{PathResolver, WorkdirGuard};
+
+const OUTPUT_PATH_PARAM_KEYS: &[&str] = &[
+    "path",
+    "file",
+    "file_path",
+    "filePath",
+    "out",
+    "output",
+    "output_path",
+    "outputPath",
+    "target_path",
+    "targetPath",
+    "project_path",
+    "projectPath",
+];
 
 /// Parsed flags for `lumencraft-cli commands [--group <g>] [--json]`.
 struct ListCommandsArgs {
@@ -131,7 +147,7 @@ pub fn run_direct_command_with_cancel(spec: &CommandSpec, args: &[String], cance
     let out_target = parsed.out_path.as_deref().map(|raw| resolve_and_validate_out_target(&resolver, raw)).transpose()?;
 
     resolver.sanitize_params(&mut parsed.params)?;
-    if parsed.workdir.is_some() {
+    if parsed.workdir.is_some() && spec.effects.contains(Effects::WRITES_FILESYSTEM) {
         ensure_param_output_parents(&parsed.params)?;
     }
 
@@ -150,7 +166,7 @@ pub fn run_direct_command_with_cancel(spec: &CommandSpec, args: &[String], cance
     let outcome = session.execute_with_caller(spec.id, parsed.params, Caller::Cli, cancelled)?;
 
     let saved_out = if let Some((ref out_path, format)) = out_target {
-        persist_session_output(&session, out_path, format)?;
+        run_guarded_cli("cli.direct.export_out", || persist_session_output(&session, out_path, format))?;
         Some(out_path.to_string_lossy().into_owned())
     } else {
         None
@@ -536,8 +552,14 @@ fn parse_typed_scalar_or_composite(kind: &PropKind, nullable: bool, raw: &str, f
     match kind {
         PropKind::Bool => Ok(Value::Bool(parse_bool_literal(raw, flag_name)?)),
         PropKind::Integer => {
-            let n = raw.trim().parse::<i64>().map_err(|_| CliError::Usage(format!("invalid integer `{raw}` for `--{flag_name}`")))?;
-            Ok(Value::Number(serde_json::Number::from(n)))
+            let trimmed = raw.trim();
+            if let Ok(n) = trimmed.parse::<i64>() {
+                Ok(Value::Number(serde_json::Number::from(n)))
+            } else if let Ok(n) = trimmed.parse::<u64>() {
+                Ok(Value::Number(serde_json::Number::from(n)))
+            } else {
+                Err(CliError::Usage(format!("invalid integer `{raw}` for `--{flag_name}`")))
+            }
         }
         PropKind::Number => {
             let f = raw.trim().parse::<f64>().map_err(|_| CliError::Usage(format!("invalid number `{raw}` for `--{flag_name}`")))?;
@@ -644,6 +666,9 @@ fn merge_param_value(params: &mut Map<String, Value>, prop: &PropertySchema, inc
 
 fn resolve_and_validate_out_target(resolver: &PathResolver, raw_out: &str) -> Result<(PathBuf, Option<ExportFormat>), CliError> {
     let out_path = resolver.resolve(raw_out)?;
+    if out_path.is_dir() && !is_unpacked_project_path(&out_path) {
+        return Err(CliError::Usage(format!("output path `{}` is a directory without a `.lumencraft.d` suffix", out_path.display())));
+    }
     if let Some(exporter) = FormatRegistry::default_registry().exporter_for_path(&out_path)
         && exporter.descriptor().kind == FormatKind::Template
     {
@@ -665,6 +690,7 @@ fn persist_session_output(session: &Session, out_path: &Path, format: Option<Exp
 
     let reg = FormatRegistry::default_registry();
     if let Some(exporter) = reg.exporter_for_path(out_path)
+        && exporter.descriptor().id != "lumencraft.d"
         && matches!(exporter.descriptor().kind, FormatKind::Archive | FormatKind::Template | FormatKind::DelimitedText | FormatKind::ResultTable)
     {
         exporter.export_path(ExportSource::Document(session.document()), out_path, &ExportOptions { pretty: true, ..ExportOptions::default() })?;
@@ -691,7 +717,7 @@ fn ensure_param_output_parents(params: &Value) -> Result<(), CliError> {
         return Ok(());
     };
     for (k, v) in obj {
-        if PATH_PARAM_KEYS.contains(&k.as_str())
+        if OUTPUT_PATH_PARAM_KEYS.contains(&k.as_str())
             && let Some(raw) = v.as_str()
             && let Some(parent) = Path::new(raw).parent()
             && !parent.as_os_str().is_empty()

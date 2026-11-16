@@ -6,7 +6,6 @@
 use std::path::{Path, PathBuf};
 
 use lumencraft_platform::PlatformError;
-pub use lumencraft_platform::path_guard::PATH_PARAM_KEYS;
 use lumencraft_platform::path_guard::{PathResolver as PlatformPathResolver, WorkdirGuard as PlatformWorkdirGuard};
 use serde_json::Value;
 
@@ -83,9 +82,10 @@ fn map_guard_error(err: PlatformError, sandboxed: bool) -> CliError {
 
 #[cfg(test)]
 mod tests {
+    use lumencraft_platform::path_guard::PATH_PARAM_KEYS;
     use serde_json::json;
 
-    use super::{PATH_PARAM_KEYS, PathResolver, WorkdirGuard};
+    use super::{PathResolver, WorkdirGuard};
     use crate::error::CliError;
 
     #[test]

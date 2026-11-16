@@ -35,6 +35,20 @@ pub trait GuiSessionHost {
 
     /// Return `true` when the hosted UI session enforces `--gui-only` mode.
     fn is_gui_only(&self) -> bool;
+
+    /// Optional shared backing [`Session`] when running alongside an in-process GUI app so core
+    /// tools and MCP `resources/*` read and mutate the same document (`R2-S12-07`).
+    fn hosted_session(&self) -> Option<&Session> {
+        None
+    }
+
+    /// Mutably borrow the shared backing [`Session`] for core engine/file operations (`R2-S12-07`).
+    fn hosted_session_mut(&mut self) -> Option<&mut Session> {
+        None
+    }
+
+    /// Synchronize UI view state after direct mutations through [`Self::hosted_session_mut`].
+    fn sync_after_session_mutation(&mut self) {}
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -49,6 +63,10 @@ pub struct McpServerState {
     control_token: Option<String>,
     #[cfg(not(target_arch = "wasm32"))]
     control_handler: Option<LiveControlHandler>,
+    #[cfg(not(target_arch = "wasm32"))]
+    control_requested_gui_only: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    control_policy_synced: bool,
     #[cfg(not(target_arch = "wasm32"))]
     workdir_guard: Option<WorkdirGuard>,
     gui_host: Option<Box<dyn GuiSessionHost>>,
@@ -67,6 +85,8 @@ impl fmt::Debug for McpServerState {
         s.field("control_port", &self.control_port)
             .field("has_control_token", &self.control_token.is_some())
             .field("has_control_handler", &self.control_handler.is_some())
+            .field("control_requested_gui_only", &self.control_requested_gui_only)
+            .field("control_policy_synced", &self.control_policy_synced)
             .field("workdir_guard", &self.workdir_guard);
         s.field("has_gui_host", &self.gui_host.is_some())
             .field("gui_only", &self.gui_only)
@@ -97,6 +117,10 @@ impl McpServerState {
             #[cfg(not(target_arch = "wasm32"))]
             control_handler: None,
             #[cfg(not(target_arch = "wasm32"))]
+            control_requested_gui_only: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            control_policy_synced: false,
+            #[cfg(not(target_arch = "wasm32"))]
             workdir_guard: None,
             gui_host: None,
             gui_only: false,
@@ -122,6 +146,10 @@ impl McpServerState {
             #[cfg(not(target_arch = "wasm32"))]
             control_handler: None,
             #[cfg(not(target_arch = "wasm32"))]
+            control_requested_gui_only: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            control_policy_synced: false,
+            #[cfg(not(target_arch = "wasm32"))]
             workdir_guard,
             gui_host: None,
             gui_only,
@@ -144,6 +172,8 @@ impl McpServerState {
             control_port: Some(port),
             control_token: None,
             control_handler: None,
+            control_requested_gui_only: false,
+            control_policy_synced: false,
             workdir_guard: None,
             gui_host: None,
             gui_only: false,
@@ -159,7 +189,8 @@ impl McpServerState {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_control_port_and_gui_only(port: u16, gui_only: bool) -> Result<Self, String> {
         let mut state = Self::with_control_port(port)?;
-        state.set_gui_only(gui_only);
+        state.control_requested_gui_only = gui_only;
+        state.apply_local_gui_only(gui_only);
         Ok(state)
     }
 
@@ -171,6 +202,7 @@ impl McpServerState {
         F: FnMut(&str, Value) -> Result<Value, String> + Send + 'static,
     {
         self.control_handler = Some(Box::new(handler));
+        self.control_policy_synced = false;
         self
     }
 
@@ -184,6 +216,8 @@ impl McpServerState {
             control_port: None,
             control_token: None,
             control_handler: None,
+            control_requested_gui_only: false,
+            control_policy_synced: false,
             workdir_guard: Some(guard),
             gui_host: None,
             gui_only: false,
@@ -200,7 +234,7 @@ impl McpServerState {
         let gui_only = host.is_gui_only();
         let mut session = Session::new();
         session.set_gui_only(if gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled });
-        Self {
+        let mut state = Self {
             session,
             #[cfg(not(target_arch = "wasm32"))]
             control_port: None,
@@ -209,6 +243,10 @@ impl McpServerState {
             #[cfg(not(target_arch = "wasm32"))]
             control_handler: None,
             #[cfg(not(target_arch = "wasm32"))]
+            control_requested_gui_only: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            control_policy_synced: false,
+            #[cfg(not(target_arch = "wasm32"))]
             workdir_guard: None,
             gui_host: Some(host),
             gui_only,
@@ -216,7 +254,9 @@ impl McpServerState {
             enabled_toolsets: BTreeSet::new(),
             pending_notifications: Vec::new(),
             initialized: false,
-        }
+        };
+        state.sync_policies_to_hosted_session();
+        state
     }
 
     /// Fluent builder to enable or disable strict `--gui-only` mode on this server state.
@@ -240,24 +280,68 @@ impl McpServerState {
                 ExternalPathPolicy::Unconstrained
             }
         };
-        self.session.set_path_policy(policy);
+        self.session.set_path_policy(policy.clone());
+        if let Some(host) = self.gui_host.as_mut()
+            && let Some(hosted) = host.hosted_session_mut()
+        {
+            hosted.set_path_policy(policy);
+        }
         Ok(())
     }
 
-    /// Replace the active headless [`Session`] while preserving configured `--gui-only` and
-    /// `--workdir` policies across `open_file` reloads.
+    fn effective_path_policy(&self) -> ExternalPathPolicy {
+        #[cfg(not(target_arch = "wasm32"))]
+        if let Some(guard) = self.workdir_guard.as_ref() {
+            return ExternalPathPolicy::from_guard(guard.clone());
+        }
+        if *self.session.path_policy() == ExternalPathPolicy::RejectExternal {
+            return ExternalPathPolicy::RejectExternal;
+        }
+        ExternalPathPolicy::Unconstrained
+    }
+
+    fn sync_policies_to_hosted_session(&mut self) {
+        let gui_policy = if self.gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled };
+        let path_policy = self.effective_path_policy();
+        if let Some(host) = self.gui_host.as_mut()
+            && let Some(hosted) = host.hosted_session_mut()
+        {
+            hosted.set_gui_only(gui_policy);
+            if *hosted.path_policy() != path_policy && path_policy != ExternalPathPolicy::Unconstrained {
+                hosted.set_path_policy(path_policy);
+            }
+        }
+    }
+
+    /// Execute `f` against the active [`Session`] (the attached `GuiSessionHost` session when
+    /// available, otherwise `self.session`), and notify the GUI host after mutation.
+    pub(crate) fn mutate_active_session<R>(&mut self, f: impl FnOnce(&mut Session) -> R) -> R {
+        if let Some(host) = self.gui_host.as_mut()
+            && host.hosted_session().is_some()
+            && let Some(hosted) = host.hosted_session_mut()
+        {
+            let res = f(hosted);
+            host.sync_after_session_mutation();
+            return res;
+        }
+        f(&mut self.session)
+    }
+
+    /// Replace the active [`Session`] (or hosted `GuiSessionHost` session) while preserving
+    /// configured `--gui-only` and `--workdir` policies across `open_file` reloads and rollbacks.
     pub(crate) fn install_session(&mut self, mut session: Session) {
         let gui_policy = if self.gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled };
         session.set_gui_only(gui_policy);
-        #[cfg(not(target_arch = "wasm32"))]
-        if let Some(guard) = self.workdir_guard.as_ref() {
-            session.set_path_policy(ExternalPathPolicy::from_guard(guard.clone()));
-        } else if *self.session.path_policy() == ExternalPathPolicy::RejectExternal {
-            session.set_path_policy(ExternalPathPolicy::RejectExternal);
+        let current_policy = self.effective_path_policy();
+        if current_policy != ExternalPathPolicy::Unconstrained {
+            session.set_path_policy(current_policy);
         }
-        #[cfg(target_arch = "wasm32")]
-        if *self.session.path_policy() == ExternalPathPolicy::RejectExternal {
-            session.set_path_policy(ExternalPathPolicy::RejectExternal);
+        if let Some(host) = self.gui_host.as_mut()
+            && let Some(hosted) = host.hosted_session_mut()
+        {
+            *hosted = session;
+            host.sync_after_session_mutation();
+            return;
         }
         self.session = session;
     }
@@ -269,14 +353,25 @@ impl McpServerState {
         self.workdir_guard.as_ref()
     }
 
-    /// Borrow the underlying headless [`Session`].
+    /// Borrow the active backing [`Session`] (the attached `GuiSessionHost` session when hosted,
+    /// otherwise this state's standalone session).
     #[must_use]
     pub fn session(&self) -> &Session {
+        if let Some(hosted) = self.gui_host.as_deref().and_then(GuiSessionHost::hosted_session) {
+            return hosted;
+        }
         &self.session
     }
 
-    /// Mutably borrow the underlying headless [`Session`].
+    /// Mutably borrow the active backing [`Session`].
     pub fn session_mut(&mut self) -> &mut Session {
+        let has_hosted = self.gui_host.as_deref().and_then(GuiSessionHost::hosted_session).is_some();
+        if has_hosted
+            && let Some(host) = self.gui_host.as_mut()
+            && let Some(hosted) = host.hosted_session_mut()
+        {
+            return hosted;
+        }
         &mut self.session
     }
 
@@ -301,6 +396,7 @@ impl McpServerState {
             return Err(String::from("control port must be in 1..=65535"));
         }
         self.control_port = port;
+        self.control_policy_synced = false;
         Ok(())
     }
 
@@ -322,6 +418,7 @@ impl McpServerState {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_control_token(&mut self, token: Option<&str>) -> Result<(), String> {
         self.control_token = token.map(live_control::validate_control_token).transpose()?;
+        self.control_policy_synced = false;
         Ok(())
     }
 
@@ -334,7 +431,7 @@ impl McpServerState {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub(crate) fn send_live_control(&mut self, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
+    fn send_live_control_raw(&mut self, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
         let Some(port) = self.control_port() else {
             return Err(StructuredErrorPayload::new(ErrorCode::Conflict, "live control request attempted without an attached --control-port"));
         };
@@ -346,6 +443,45 @@ impl McpServerState {
         }
         let token = self.resolved_control_token(port)?;
         live_control::send_control_detailed_with_token(port, token.as_deref(), method, params)
+    }
+
+    /// Synchronize `--gui-only` policy with an attached `--control-port` host via `ping`,
+    /// failing closed when the handshake fails or when local `--gui-only` cannot be enforced on an
+    /// unlocked remote host (`R2-S12-01`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn sync_remote_control_policy(&mut self) -> Result<(), StructuredErrorPayload> {
+        if self.control_port.is_none() || self.control_policy_synced {
+            return Ok(());
+        }
+        let ping = self.send_live_control_raw("ping", json!({}))?;
+        let Some(remote_gui_only) = ping.get("gui_only").and_then(Value::as_bool) else {
+            return Err(StructuredErrorPayload::new(ErrorCode::Conflict, "remote control host `ping` response omitted boolean `gui_only` policy")
+                .with_remediation("Attach only to a LumenCraft control server returning `gui_only` from `ping`."));
+        };
+        if self.control_requested_gui_only && !remote_gui_only {
+            return Err(StructuredErrorPayload::new(
+                ErrorCode::GuiOnlyViolation,
+                "cannot enforce `--gui-only` over `--control-port`: remote desktop host does not have `--gui-only` enabled",
+            )
+            .with_remediation(
+                "Restart the remote desktop host with `--gui-only` before attaching `lumencraft-cli mcp --control-port ... --gui-only`.",
+            )
+            .with_details(json!({ "local_gui_only": true, "remote_gui_only": false })));
+        }
+        self.apply_local_gui_only(remote_gui_only);
+        self.control_policy_synced = true;
+        Ok(())
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn sync_remote_control_policy(&mut self) -> Result<(), StructuredErrorPayload> {
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn send_live_control(&mut self, method: &str, params: Value) -> Result<Value, StructuredErrorPayload> {
+        self.sync_remote_control_policy()?;
+        self.send_live_control_raw(method, params)
     }
 
     /// Borrow the set of currently enabled per-command toolset groups.
@@ -409,6 +545,7 @@ impl McpServerState {
             }
             h
         });
+        self.sync_policies_to_hosted_session();
     }
 
     /// Return `true` when an in-process [`GuiSessionHost`] is attached.
@@ -428,15 +565,27 @@ impl McpServerState {
         self.gui_host.as_deref_mut()
     }
 
-    /// Enable or disable strict `--gui-only` enforcement, propagating to both `self.session` and
-    /// any attached [`GuiSessionHost`].
-    pub fn set_gui_only(&mut self, gui_only: bool) {
+    fn apply_local_gui_only(&mut self, gui_only: bool) {
         self.gui_only = gui_only;
         let policy = if gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled };
         self.session.set_gui_only(policy);
         if let Some(host) = self.gui_host.as_mut() {
             host.set_gui_only(gui_only);
+            if let Some(hosted) = host.hosted_session_mut() {
+                hosted.set_gui_only(policy);
+            }
         }
+    }
+
+    /// Enable or disable strict `--gui-only` enforcement, propagating to both `self.session` and
+    /// any attached [`GuiSessionHost`].
+    pub fn set_gui_only(&mut self, gui_only: bool) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.control_port.is_some() {
+            self.control_requested_gui_only = gui_only;
+            self.control_policy_synced = false;
+        }
+        self.apply_local_gui_only(gui_only);
     }
 
     /// Return `true` when `--gui-only` policy is active on this state, session, or GUI host.
@@ -786,6 +935,10 @@ where
 fn dispatch_tool_inner(state: &mut McpServerState, name: &str, arguments: Value) -> Result<ToolCallResult, ToolCallError> {
     let args = arguments.as_object().ok_or_else(|| ToolCallError::InvalidParams(String::from("tool arguments must be an object")))?;
 
+    if let Err(payload) = state.sync_remote_control_policy() {
+        return Ok(errors::result_from_payload(&payload));
+    }
+
     if gui_tools::is_gui_tool_name(name) {
         return gui_tools::dispatch_gui_tool(state, name, args);
     }
@@ -890,13 +1043,13 @@ fn handle_doc_inspect(state: &mut McpServerState, args: &Map<String, Value>) -> 
         };
     }
 
-    let doc = state.session.document();
+    let doc = state.session().document();
     if let Some(target_id) = sheet_id {
         let target = SheetId::new(target_id);
         return inspect_single_sheet(doc, &target, include_cells);
     }
 
-    let summary = build_document_summary(&state.session);
+    let summary = build_document_summary(state.session());
     ToolCallResult::ok_json(&summary)
 }
 
@@ -1250,7 +1403,7 @@ fn handle_command_batch(state: &mut McpServerState, args: &Map<String, Value>) -
 }
 
 fn execute_batch_items(state: &mut McpServerState, items: Vec<(String, Value)>, atomic: bool) -> Result<ToolCallResult, ToolCallError> {
-    let snapshot = if atomic && !is_attached(state) { Some(state.session.clone()) } else { None };
+    let snapshot = if atomic && !is_attached(state) { Some(state.session().clone()) } else { None };
     let mut outcomes = Vec::with_capacity(items.len());
     let mut remote_mutated_steps: usize = 0;
 
@@ -1299,7 +1452,7 @@ fn execute_batch_items(state: &mut McpServerState, items: Vec<(String, Value)>, 
 
 fn rollback_batch(state: &mut McpServerState, snapshot: Option<Session>, remote_mutated_steps: usize) -> bool {
     if let Some(prev) = snapshot {
-        state.session = prev;
+        state.install_session(prev);
         return true;
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -1334,13 +1487,16 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
     }
 
     let cancel = AtomicBool::new(false);
-    let outcome = state.session.execute_with_caller(command_id, params, Caller::Mcp, &cancel)?;
+    let (outcome, dirty) = state.mutate_active_session(|session| {
+        let out = session.execute_with_caller(command_id, params, Caller::Mcp, &cancel)?;
+        Ok::<_, EngineError>((out, session.is_dirty()))
+    })?;
     Ok(json!({
         "command_id": outcome.command_id,
         "mutated": outcome.mutated,
         "message": outcome.message,
         "payload": outcome.payload,
-        "dirty": state.session.is_dirty(),
+        "dirty": dirty,
     }))
 }
 

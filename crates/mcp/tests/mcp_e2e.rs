@@ -634,7 +634,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     let (methods_tx, methods_rx) = mpsc::channel::<String>();
 
     let handle = thread::spawn(move || {
-        for stream_res in listener.incoming().take(5) {
+        for stream_res in listener.incoming().take(6) {
             let mut stream = stream_res.expect("accept");
             let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
             let mut line = String::new();
@@ -645,6 +645,7 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
             methods_tx.send(method.clone()).expect("record method");
 
             let resp = match method.as_str() {
+                "ping" => json!({ "id": id, "ok": true, "result": { "pong": true, "gui_only": false } }),
                 "state.snapshot" => json!({ "id": id, "ok": true, "result": { "title": "Live Desktop Window", "active_sheet_id": "xy-live" } }),
                 "ui.navigator.toggle" => json!({ "id": id, "ok": true, "result": { "navigator_open": false } }),
                 "engine.execute" => {
@@ -698,5 +699,5 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
 
     handle.join().expect("server thread finished");
     let methods: Vec<String> = methods_rx.iter().collect();
-    assert_eq!(methods, vec!["state.snapshot", "ui.navigator.toggle", "engine.execute", "engine.execute", "engine.execute"]);
+    assert_eq!(methods, vec!["ping", "state.snapshot", "ui.navigator.toggle", "engine.execute", "engine.execute", "engine.execute"]);
 }
