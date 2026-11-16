@@ -192,13 +192,21 @@ fn eval_pchip(x: &[f64; NUM_P_NODES], y: &[f64; NUM_P_NODES], d: &[f64; NUM_P_NO
 /// # Errors
 /// Returns:
 /// - [`MathError::InvalidParameter`] if `sorted_values.len() < 5`,
-/// - [`MathError::DomainError`] if any value is non-finite or sample variance is zero.
+/// - [`MathError::DomainError`] if any value is non-finite, `sorted_values` is not sorted in
+///   non-decreasing order, or sample variance is zero.
 pub fn lilliefors_d_from_sorted(sorted_values: &[f64]) -> Result<f64, MathError> {
     let n = sorted_values.len();
     if n < 5 {
         return Err(MathError::InvalidParameter { name: "n", value: n as f64 });
     }
     let moments = SummaryMoments::from_slice(sorted_values)?;
+    for pair in sorted_values.windows(2) {
+        if let [prev, curr] = *pair
+            && curr < prev
+        {
+            return Err(MathError::DomainError { name: "sorted_values", value: curr });
+        }
+    }
     let sd = moments.sample_sd()?;
     if !sd.is_finite() || sd <= 0.0 {
         return Err(MathError::DomainError { name: "sd", value: sd });
@@ -284,6 +292,11 @@ mod tests {
         assert_eq!(lilliefors_p_value(1.0, 10).unwrap(), 0.0);
         assert!(lilliefors_d_from_sorted(&[1.0, 2.0, 3.0, 4.0]).is_err());
         assert!(lilliefors_d_from_sorted(&[5.0; 6]).is_err());
+        assert!(lilliefors_d_from_sorted(&[1.0, 3.0, 2.0, 4.0, 5.0]).is_err());
+        assert!(lilliefors_d_from_sorted(&[1.0, 2.0, f64::NAN, 4.0, 5.0]).is_err());
+        assert!(lilliefors_d_from_sorted(&[1.0, 2.0, 3.0, 4.0, f64::INFINITY]).is_err());
+        // Non-decreasing sorted data with ties is valid:
+        assert!(lilliefors_d_from_sorted(&[1.0, 2.0, 2.0, 3.0, 5.0]).is_ok());
     }
 
     #[test]

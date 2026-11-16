@@ -15,7 +15,7 @@
 //!   `doi:10.1080/00949658808811082`.
 //! - Hartley, H. O. (1942). The range in random samples. *Biometrika*, 32(3/4), 334-348.
 
-use crate::dist::core::{norm_cdf, norm_isf, norm_pdf, norm_sf, student_t_two_sided_isf, student_t_two_sided_p};
+use crate::dist::core::{norm_cdf, norm_isf, norm_ln_pdf, norm_ln_sf, norm_pdf, norm_sf, student_t_two_sided_isf, student_t_two_sided_p};
 use crate::error::MathError;
 use crate::quad::gauss_legendre_32;
 use crate::roots::{RootOptions, brent_root};
@@ -314,22 +314,176 @@ pub fn studentized_range_sf(q: f64, k: usize, df: f64) -> Result<f64, MathError>
     Ok(integrate_over_chi_scale_tail(df, 0.5 * q * q, |u| gaussian_range_sf(q * u, k))?.clamp(0.0, 1.0))
 }
 
+fn ln_one_minus_exp_neg(ln_val: f64) -> f64 {
+    if ln_val >= 0.0 {
+        f64::NEG_INFINITY
+    } else if ln_val > -std::f64::consts::LN_2 {
+        (-ln_val.exp_m1()).ln()
+    } else {
+        (-ln_val.exp()).ln_1p()
+    }
+}
+
+fn gaussian_range_ln_integrand(z: f64, w: f64, ln_k: f64, km1_f: f64) -> f64 {
+    let la = norm_ln_sf(z);
+    let lb = norm_ln_sf(z + w);
+    let delta = lb - la;
+    let ln_gap = if delta < -40.0 {
+        km1_f.ln() + delta
+    } else if delta <= -std::f64::consts::LN_2 {
+        ln_one_minus_exp_neg(km1_f * (-delta.exp()).ln_1p())
+    } else {
+        let l1 = norm_ln_sf(-(z + w));
+        let l2 = norm_ln_sf(-z);
+        let ldiff = l1 + ln_one_minus_exp_neg(l2 - l1);
+        ln_one_minus_exp_neg(km1_f * (ldiff - la))
+    };
+    ln_k + norm_ln_pdf(z) + km1_f * la + ln_gap
+}
+
+/// Log-space inner Gaussian range survival `ln(1 - H_k(w)) = ln P(Z_{(k)} - Z_{(1)} > w)` for
+/// arbitrary `w > 0`, remaining finite and accurate past `f64` probability underflow (`0.25 * w^2 > 760`).
+fn gaussian_range_ln_sf(w: f64, k: usize) -> f64 {
+    if w <= 0.0 {
+        return 0.0;
+    }
+    if k == 2 {
+        return -0.25 * w * w + crate::special::erfcx(0.5 * w).ln();
+    }
+    if 0.25 * w * w <= 560.0 {
+        let sf = gaussian_range_sf(w, k);
+        if sf > 1e-250 {
+            return sf.ln();
+        }
+    }
+    let kf = k as f64;
+    let km1_f = (k - 1) as f64;
+    let ln_k = kf.ln();
+    let z_star = -0.5 * w;
+    let z_mode = -norm_isf(1.0 / kf).unwrap_or(0.0).min(5.0);
+    let z_lo = (z_star - 10.0).min(z_mode - 8.0).min(NORMAL_Z_MIN);
+    let z_hi = (z_star + 10.0).max(active_z_upper_bound(km1_f).min(NORMAL_Z_MAX));
+    let probes = [z_star - 1.5, z_star, z_star + 1.5, z_mode.clamp(z_lo, z_hi)];
+    let mut ln_ref = f64::NEG_INFINITY;
+    for &zp in &probes {
+        ln_ref = ln_ref.max(gaussian_range_ln_integrand(zp, w, ln_k, km1_f));
+    }
+    if !ln_ref.is_finite() {
+        return f64::NEG_INFINITY;
+    }
+    let knots = [z_star - 3.0, z_star, z_star + 3.0, z_star + 10.0, z_mode];
+    let scaled = sum_gl32_panels(|z| (gaussian_range_ln_integrand(z, w, ln_k, km1_f) - ln_ref).exp(), z_lo, z_hi, &knots, 0.25);
+    if scaled > 0.0 { (ln_ref + scaled.ln()).min(0.0) } else { f64::NEG_INFINITY }
+}
+
+fn ln_chi_w_density(w: f64, ln_q: f64, df: f64, lg_a: f64) -> f64 {
+    if w <= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let a = 0.5 * df;
+    let ln_w = w.ln();
+    let ln_u = ln_w - ln_q;
+    let ln_x = a.ln() + 2.0 * ln_u;
+    let ln_kern = if ln_x < -40.0 {
+        if a >= 12.0 { df * ln_u + a + 0.5 * (a / std::f64::consts::TAU).ln() - stirling_err(a) } else { a * ln_x - lg_a }
+    } else {
+        let x = ln_x.exp();
+        if a >= 12.0 { -deviance_bd0(a, x) + 0.5 * (a / std::f64::consts::TAU).ln() - stirling_err(a) } else { a * ln_x - x - lg_a }
+    };
+    std::f64::consts::LN_2 - ln_w + ln_kern
+}
+
+/// Evaluate `ln P(Q_{k, df} > q)` via log-sum-exp quadrature in `w = q * u` when `studentized_range_sf`
+/// underflows `f64`, capturing both the finite-`df` polynomial `O(q^{-df})` exact integral and the
+/// large-`df` saddle-point regime without resorting to a loose Bonferroni bound.
+fn integrate_over_chi_scale_ln_sf(q: f64, k: usize, df: f64) -> Result<f64, MathError> {
+    let a = 0.5 * df;
+    let lg_a = if a < 12.0 { ln_gamma(a)? } else { 0.0 };
+    let ln_q = q.ln();
+    let inv_q = 1.0 / q;
+    let rate_w = df * inv_q * inv_q + 0.5;
+    let w_range = 2.0 * (2.0 * (k as f64).ln().max(1.0)).sqrt();
+
+    if df < 2.0 {
+        // Substitute w = t^{1/a} so w^{df - 1} dw = (1/a) t dt removes the w -> 0 singularity.
+        let inv_a = 1.0 / a;
+        let w_scale = (1.0 / rate_w).sqrt();
+        let w_max = (w_range + 14.0 * w_scale).max(36.0);
+        let t_max = w_max.powf(a);
+        let const_ln = std::f64::consts::LN_2 + (a - 1.0) * a.ln() - lg_a - df * ln_q;
+        let ln_t_integrand = |t: f64| -> f64 {
+            if t <= 0.0 {
+                return f64::NEG_INFINITY;
+            }
+            let ln_w = t.ln() * inv_a;
+            let w = ln_w.exp();
+            let ln_x = a.ln() + 2.0 * (ln_w - ln_q);
+            let x = if ln_x < -50.0 { 0.0 } else { ln_x.exp() };
+            const_ln + t.ln() - x + gaussian_range_ln_sf(w, k)
+        };
+        let probes_w = [0.25 * w_scale, w_scale, 0.5 * w_range, w_range, 0.4 * w_max];
+        let mut ln_ref = f64::NEG_INFINITY;
+        for &wp in &probes_w {
+            let tp = wp.clamp(1e-4, 0.95 * w_max).powf(a);
+            ln_ref = ln_ref.max(ln_t_integrand(tp));
+        }
+        let knots = [(0.25 * w_scale).powf(a), w_scale.powf(a), w_range.powf(a), (0.5 * w_max).powf(a)];
+        let scaled = sum_gl32_panels(|t| (ln_t_integrand(t) - ln_ref).exp(), 0.0, t_max, &knots, 1e-4 * t_max);
+        if scaled > 0.0 {
+            return Ok((ln_ref + scaled.ln()).min(0.0));
+        }
+    } else {
+        let w_star = ((df - 1.0) / rate_w).sqrt();
+        let sigma_star = (0.5 / rate_w).sqrt();
+        let w_chi_mode = if q < 1e100 { q * ((df - 1.0) / df).sqrt() } else { f64::INFINITY };
+        let w_peak = (w_range + (df - 1.0).sqrt()).min(w_chi_mode).max(w_star);
+        let w_min = (w_star - 11.0 * sigma_star).max(0.0);
+        let w_max = (w_peak + 13.0 * sigma_star).max(w_star + 11.0 * sigma_star);
+        let min_gap = (0.25 * sigma_star).max(1e-6);
+
+        let ln_w_integrand = |w: f64| -> f64 { ln_chi_w_density(w, ln_q, df, lg_a) + gaussian_range_ln_sf(w, k) };
+        let probes = [(0.5 * w_star).max(w_min + min_gap), w_star, 0.5 * (w_star + w_peak), w_peak, (w_peak + 2.0 * sigma_star).min(w_max - min_gap)];
+        let mut ln_ref = f64::NEG_INFINITY;
+        for &wp in &probes {
+            if wp > w_min && wp < w_max {
+                ln_ref = ln_ref.max(ln_w_integrand(wp));
+            }
+        }
+        let knots = [w_star - 3.5 * sigma_star, w_star, w_star + 3.5 * sigma_star, w_peak - 3.5 * sigma_star, w_peak, w_peak + 3.5 * sigma_star];
+        let scaled = sum_gl32_panels(|w| (ln_w_integrand(w) - ln_ref).exp(), w_min, w_max, &knots, min_gap);
+        if scaled > 0.0 {
+            return Ok((ln_ref + scaled.ln()).min(0.0));
+        }
+    }
+
+    let pairs = (k * (k - 1)) / 2;
+    Ok(((pairs as f64).ln() + crate::dist::core::student_t_ln_two_sided_p(q * std::f64::consts::FRAC_1_SQRT_2, df)?).min(0.0))
+}
+
 /// Natural logarithm of the Studentized range upper-tail probability `ln P(Q_{k, df} > q)`.
+///
+/// Evaluates log-sum-exp quadrature directly in `(w = q u, z)` space whenever `studentized_range_sf`
+/// approaches or crosses `f64` underflow (`<= 1e-250`), avoiding the `O(ln(k^2))` overstatement of a
+/// naive Bonferroni bound on finite degrees of freedom.
 ///
 /// # Errors
 /// Returns an error if `k < 2`, `df <= 0`, or `q` is `NaN`.
 pub fn studentized_range_ln_sf(q: f64, k: usize, df: f64) -> Result<f64, MathError> {
-    if k == 2 && q > 0.0 {
+    validate_q_args(q, k, df)?;
+    if q <= 0.0 {
+        return Ok(0.0);
+    }
+    if q.is_infinite() {
+        return Ok(f64::NEG_INFINITY);
+    }
+    if k == 2 {
         return crate::dist::core::student_t_ln_two_sided_p(q * std::f64::consts::FRAC_1_SQRT_2, df);
     }
-    let sf = studentized_range_sf(q, k, df)?;
-    if sf > 0.0 {
-        Ok(sf.ln())
-    } else {
-        // Bonferroni asymptotic bound when below f64 subnormal floor:
-        let pairs = (k * (k - 1)) / 2;
-        Ok((pairs as f64).ln() + crate::dist::core::student_t_ln_two_sided_p(q * std::f64::consts::FRAC_1_SQRT_2, df)?)
+    if df.is_infinite() || df >= HUGE_DF_CUTOFF {
+        return Ok(gaussian_range_ln_sf(q, k));
     }
+    let sf = studentized_range_sf(q, k, df)?;
+    if sf > 1e-250 { Ok(sf.ln()) } else { integrate_over_chi_scale_ln_sf(q, k, df) }
 }
 
 /// Upper-tail critical value `q_{alpha, k, df}` solving `P(Q_{k, df} > q) = alpha` for `alpha in [0, 1]`.
@@ -467,8 +621,9 @@ pub fn max_studentized_range_isf(alpha: f64, r: usize, c: usize, df: f64) -> Res
 #[cfg(test)]
 mod tests {
     use super::{
-        gaussian_range_sf, integrate_over_chi_scale_tail, max_studentized_range_cdf, max_studentized_range_isf, max_studentized_range_sf,
-        studentized_range_cdf, studentized_range_isf, studentized_range_sf,
+        gaussian_range_ln_sf, gaussian_range_sf, integrate_over_chi_scale_ln_sf, integrate_over_chi_scale_tail, max_studentized_range_cdf,
+        max_studentized_range_isf, max_studentized_range_sf, studentized_range_cdf, studentized_range_isf, studentized_range_ln_sf,
+        studentized_range_sf,
     };
     use crate::dist::core::student_t_two_sided_p;
     use crate::dist::dunnett::dunnett_two_sided_p_loadings;
@@ -585,5 +740,31 @@ mod tests {
         let rhs_10 = se * max_studentized_range_isf(0.10, 3, 3, 24.0).unwrap();
         assert!((rhs_05 - 13.93).abs() < 0.005, "sugar cane alpha=0.05 RHS = {rhs_05:.4}");
         assert!((rhs_10 - 12.43).abs() < 0.005, "sugar cane alpha=0.10 RHS = {rhs_10:.4}");
+    }
+
+    #[test]
+    fn ln_sf_quadrature_matches_linear_sf_and_resolves_deep_underflow_without_bonferroni_bias() {
+        // Direct cross-check on (q = 60, k = 50, df = 5): log-space quadrature agrees with linear sf.ln()
+        // and lies ~2.98 log-units (~19.7x) below the loose Bonferroni upper bound.
+        let lsf_60 = studentized_range_ln_sf(60.0, 50, 5.0).unwrap();
+        let quad_ln_60 = integrate_over_chi_scale_ln_sf(60.0, 50, 5.0).unwrap();
+        assert!((lsf_60 - (-11.668_195)).abs() < 1e-4, "lsf_60 = {lsf_60}");
+        assert!((quad_ln_60 - lsf_60).abs() < 1e-10, "quad_ln_60={quad_ln_60} vs lsf_60={lsf_60}");
+
+        // Deep underflow on finite df = 5 (q = 1e80 -> sf = 0.0 in f64):
+        // True finite-df tail scales as q^{-df} * (2 (df/2)^{df/2} / Gamma(df/2)) * int w^{df-1} (1 - H_k(w)) dw,
+        // which stays ~2.97 log-units below the Bonferroni upper bound ln(1225) + ln P(|t_5| > q / sqrt(2)).
+        assert_eq!(studentized_range_sf(1e80, 50, 5.0).unwrap(), 0.0);
+        let lsf_1e80 = studentized_range_ln_sf(1e80, 50, 5.0).unwrap();
+        let bonf_1e80 = (1225.0_f64).ln() + crate::dist::core::student_t_ln_two_sided_p(1e80 * std::f64::consts::FRAC_1_SQRT_2, 5.0).unwrap();
+        assert!((lsf_1e80 - (-912.217_9)).abs() < 1e-3, "lsf_1e80 = {lsf_1e80}");
+        assert!(bonf_1e80 - lsf_1e80 > 2.95 && bonf_1e80 - lsf_1e80 < 3.00, "gap = {}", bonf_1e80 - lsf_1e80);
+
+        // Deep Gaussian range tail (q = 60, k = 50, df = inf, where sf ~ e^{-896.86} underflows f64):
+        assert_eq!(studentized_range_sf(60.0, 50, f64::INFINITY).unwrap(), 0.0);
+        let lsf_inf = studentized_range_ln_sf(60.0, 50, f64::INFINITY).unwrap();
+        let g_ln = gaussian_range_ln_sf(60.0, 50);
+        assert_eq!(lsf_inf, g_ln);
+        assert!((lsf_inf - (-896.863_421)).abs() < 1e-4, "lsf_inf = {lsf_inf}");
     }
 }
