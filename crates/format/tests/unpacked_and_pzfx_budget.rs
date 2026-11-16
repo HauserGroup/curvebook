@@ -2,15 +2,15 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, GraphSheet, InfoSheet, JournalWidthPreset,
     LayoutItem, LayoutSheet, LayoutSpec, NamedCheckpoint, NonlinearFitSpec, ParameterRule, ParameterScope, ProjectDocument, RectPt,
     ResultScalarEntry, ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_format::prism::MAX_PROJECT_CELLS;
-use lumencraft_format::pzfx::MAX_IMPORT_CELLS;
-use lumencraft_format::zip::ZipWriter;
-use lumencraft_format::{
+use curvebook_format::prism::MAX_PROJECT_CELLS;
+use curvebook_format::pzfx::MAX_IMPORT_CELLS;
+use curvebook_format::zip::ZipWriter;
+use curvebook_format::{
     ArchiveKind, ArchiveManifest, FormatError, import_prism_bytes, import_pzfx_str, is_unpacked_project_dir, open_project_bytes,
     open_project_unpacked_dir, save_project_bytes, save_project_unpacked_dir, save_template_bytes,
 };
@@ -24,7 +24,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(label: &str) -> Result<Self, FormatError> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lc-w5-format-{label}-{}-{seq}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cb-w5-format-{label}-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
@@ -80,7 +80,7 @@ fn build_rich_project_with_notes_and_checkpoints() -> Result<ProjectDocument, Fo
     let mut fit = NonlinearFitSpec::new("four_pl");
     fit.parameter_rules.push(ParameterRule {
         name: String::from("HotNM"),
-        scope: ParameterScope::HookedConstant(lumencraft_doc::HookSource::InfoConstant {
+        scope: ParameterScope::HookedConstant(curvebook_doc::HookSource::InfoConstant {
             info_sheet_id: Some(SheetId::new("info-1")),
             constant_name: String::from("HotNM"),
         }),
@@ -124,7 +124,7 @@ fn build_rich_project_with_notes_and_checkpoints() -> Result<ProjectDocument, Fo
 fn zip_and_unpacked_dir_preserve_exclusion_notes_and_checkpoints() {
     let doc = build_rich_project_with_notes_and_checkpoints().unwrap();
 
-    // `.lumencraft` ZIP round-trip
+    // `.curvebook` ZIP round-trip
     let zip_bytes = save_project_bytes(&doc).unwrap();
     let decoded_zip = open_project_bytes(&zip_bytes).unwrap();
     assert_eq!(decoded_zip, doc);
@@ -133,9 +133,9 @@ fn zip_and_unpacked_dir_preserve_exclusion_notes_and_checkpoints() {
     assert_eq!(decoded_zip.checkpoints.len(), 1);
     assert_eq!(decoded_zip.checkpoints[0].id, "cp-baseline");
 
-    // `.lumencraft.d/` directory round-trip
+    // `.curvebook.d/` directory round-trip
     let root = TempDirGuard::new("roundtrip").unwrap();
-    let proj_dir = root.path().join("assay.lumencraft.d");
+    let proj_dir = root.path().join("assay.curvebook.d");
     assert!(!is_unpacked_project_dir(&proj_dir));
 
     save_project_unpacked_dir(&doc, &proj_dir).unwrap();
@@ -147,16 +147,16 @@ fn zip_and_unpacked_dir_preserve_exclusion_notes_and_checkpoints() {
     assert_eq!(decoded_dir.checkpoints, doc.checkpoints);
 
     // Non-project paths must return false for `is_unpacked_project_dir`
-    let zip_file = root.path().join("assay.lumencraft");
+    let zip_file = root.path().join("assay.curvebook");
     std::fs::write(&zip_file, &zip_bytes).unwrap();
     assert!(!is_unpacked_project_dir(&zip_file));
 
-    let empty_dir = root.path().join("empty.lumencraft.d");
+    let empty_dir = root.path().join("empty.curvebook.d");
     std::fs::create_dir_all(&empty_dir).unwrap();
     assert!(!is_unpacked_project_dir(&empty_dir));
 
     // Template manifest unpacked on disk is rejected by both `is_unpacked_project_dir` and `open_project_unpacked_dir`
-    let tpl_dir = root.path().join("assay.lctemplate.d");
+    let tpl_dir = root.path().join("assay.cbtemplate.d");
     save_project_unpacked_dir(&doc, &tpl_dir).unwrap();
     let tpl_zip = save_template_bytes(&doc).unwrap();
     let mut tpl_manifest: ArchiveManifest = serde_json::from_slice(&std::fs::read(tpl_dir.join("manifest.json")).unwrap()).unwrap();
@@ -171,7 +171,7 @@ fn zip_and_unpacked_dir_preserve_exclusion_notes_and_checkpoints() {
 fn unpacked_dir_is_deterministic_git_friendly_and_preserves_repo_files() {
     let mut doc = build_rich_project_with_notes_and_checkpoints().unwrap();
     let root = TempDirGuard::new("git-diff").unwrap();
-    let proj_dir = root.path().join("study.lumencraft.d");
+    let proj_dir = root.path().join("study.curvebook.d");
 
     save_project_unpacked_dir(&doc, &proj_dir).unwrap();
     std::fs::create_dir_all(proj_dir.join(".git")).unwrap();
@@ -185,7 +185,7 @@ fn unpacked_dir_is_deterministic_git_friendly_and_preserves_repo_files() {
     let sheet2_v1 = std::fs::read_to_string(proj_dir.join("sheets/data-col.csv")).unwrap();
 
     // Canonical 2-space pretty JSON (no tabs) + valid RFC-4180 CSV headers
-    assert!(manifest_v1.contains("\n  \"format\": \"lumencraft-archive\""));
+    assert!(manifest_v1.contains("\n  \"format\": \"curvebook-archive\""));
     assert!(document_v1.contains("\n  \"schema_version\":"));
     assert!(!document_v1.contains('\t'));
     assert!(sheet2_v1.contains("Vehicle"));
@@ -223,7 +223,7 @@ fn unpacked_dir_is_deterministic_git_friendly_and_preserves_repo_files() {
 fn unpacked_dir_prunes_stale_sheet_files_on_resave() {
     let mut doc = build_rich_project_with_notes_and_checkpoints().unwrap();
     let root = TempDirGuard::new("prune").unwrap();
-    let proj_dir = root.path().join("prune.lumencraft.d");
+    let proj_dir = root.path().join("prune.curvebook.d");
 
     save_project_unpacked_dir(&doc, &proj_dir).unwrap();
     std::fs::write(proj_dir.join("README.md"), b"keep me").unwrap();
@@ -255,7 +255,7 @@ fn unpacked_dir_prunes_stale_sheet_files_on_resave() {
 fn unpacked_dir_rejects_traversal_tampering_and_corrupt_entries() {
     let doc = build_rich_project_with_notes_and_checkpoints().unwrap();
     let root = TempDirGuard::new("security").unwrap();
-    let proj_dir = root.path().join("sec.lumencraft.d");
+    let proj_dir = root.path().join("sec.curvebook.d");
     save_project_unpacked_dir(&doc, &proj_dir).unwrap();
 
     let orig_manifest_bytes = std::fs::read(proj_dir.join("manifest.json")).unwrap();
@@ -301,7 +301,7 @@ fn unpacked_dir_rejects_symlinks_escaping_root_and_dangling_symlinks() {
     std::fs::write(&outside_file, b"top,secret\n").unwrap();
 
     // Case A: sheet file symlinked outside directory
-    let proj_a = root.path().join("proj_a.lumencraft.d");
+    let proj_a = root.path().join("proj_a.curvebook.d");
     save_project_unpacked_dir(&doc, &proj_a).unwrap();
     std::fs::remove_file(proj_a.join("sheets/data-xy.csv")).unwrap();
     symlink(&outside_file, proj_a.join("sheets/data-xy.csv")).unwrap();
@@ -310,7 +310,7 @@ fn unpacked_dir_rejects_symlinks_escaping_root_and_dangling_symlinks() {
     assert_eq!(std::fs::read(&outside_file).unwrap(), b"top,secret\n");
 
     // Case B: `sheets` directory symlinked outside directory
-    let proj_b = root.path().join("proj_b.lumencraft.d");
+    let proj_b = root.path().join("proj_b.curvebook.d");
     save_project_unpacked_dir(&doc, &proj_b).unwrap();
     std::fs::remove_dir_all(proj_b.join("sheets")).unwrap();
     symlink(&outside_dir, proj_b.join("sheets")).unwrap();
@@ -321,7 +321,7 @@ fn unpacked_dir_rejects_symlinks_escaping_root_and_dangling_symlinks() {
     assert_eq!(remaining_outside, BTreeSet::from([String::from("secret.csv")]));
 
     // Case C: `document.json` symlinked outside directory
-    let proj_c = root.path().join("proj_c.lumencraft.d");
+    let proj_c = root.path().join("proj_c.curvebook.d");
     save_project_unpacked_dir(&doc, &proj_c).unwrap();
     std::fs::remove_file(proj_c.join("document.json")).unwrap();
     symlink(&outside_file, proj_c.join("document.json")).unwrap();
@@ -331,7 +331,7 @@ fn unpacked_dir_rejects_symlinks_escaping_root_and_dangling_symlinks() {
     assert_eq!(std::fs::read(&outside_file).unwrap(), b"top,secret\n");
 
     // Case D: dangling symlink inside `sheets/`
-    let proj_d = root.path().join("proj_d.lumencraft.d");
+    let proj_d = root.path().join("proj_d.curvebook.d");
     save_project_unpacked_dir(&doc, &proj_d).unwrap();
     std::fs::remove_file(proj_d.join("sheets/data-xy.csv")).unwrap();
     symlink(outside_dir.join("does_not_exist.csv"), proj_d.join("sheets/data-xy.csv")).unwrap();

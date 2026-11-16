@@ -1,5 +1,5 @@
-use lumencraft_format::FormatError;
-use lumencraft_format::recovery::{
+use curvebook_format::FormatError;
+use curvebook_format::recovery::{
     CURRENT_JOURNAL_VERSION, CrashRecoveryJournal, DirectoryJournalBackend, JOURNAL_FILE_NAME, JournalBackend, JournalLimits, JournalLockLease,
     JournalOpRecord, LOCKFILE_NAME, MAX_JOURNAL_BYTES, MAX_WEB_STORAGE_JSON_BYTES, MemoryJournalBackend,
 };
@@ -20,7 +20,7 @@ impl TempDirGuard {
     fn new(prefix: &str) -> Result<Self, std::io::Error> {
         let seq = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
         let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("lc_audit_s4b_rec_{prefix}_{pid}_{seq}"));
+        let path = std::env::temp_dir().join(format!("cb_audit_s4b_rec_{prefix}_{pid}_{seq}"));
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
     }

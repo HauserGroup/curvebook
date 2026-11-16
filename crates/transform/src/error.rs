@@ -1,9 +1,9 @@
-//! Structured error types for `lumencraft-transform`.
+//! Structured error types for `curvebook-transform`.
 
 use std::fmt;
 
-use lumencraft_doc::{DocError, SummaryPointError, TableKind};
-use lumencraft_math::MathError;
+use curvebook_doc::{DocError, SummaryPointError, TableKind};
+use curvebook_math::MathError;
 
 /// Error produced by formula parsing/evaluation, table transformations, curve calculus, or imports.
 #[derive(Debug, Clone, PartialEq)]

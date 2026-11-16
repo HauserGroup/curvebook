@@ -1,21 +1,21 @@
 //! Integration tests wiring Waves 20-21 (`doc`, `transform`, `stats`, `fit`, `chart`)
-//! through `lumencraft-format` and `lumencraft-engine`.
+//! through `curvebook-format` and `curvebook-engine`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_chart::{ChartScene, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ClusterDistance, ClusterLinkage, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyMethod,
     ContingencySpec, ContingencyTable, DataSheet, EquationDisplayMode, FigureCanvasPreset, GraphAnnotation, GroupedTable, InfoSheet, KappaWeighting,
     MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, PartsOfWholeTable, ProjectDocument, RectPt, ResultStatus,
     ResultTabKind, SheetId, SubcolumnMode, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, XyTable,
 };
-use lumencraft_engine::dag::{recalculate_project, recalculate_project_with_report};
-use lumencraft_engine::methods_report::{ReportFormat, generate_methods_report};
-use lumencraft_engine::{ErrorCode, Session};
-use lumencraft_format::{FormatError, detect_dependency_cycles};
+use curvebook_engine::dag::{recalculate_project, recalculate_project_with_report};
+use curvebook_engine::methods_report::{ReportFormat, generate_methods_report};
+use curvebook_engine::{ErrorCode, Session};
+use curvebook_format::{FormatError, detect_dependency_cycles};
 use serde_json::json;
 
-fn exec_ok(session: &mut Session, id: &str, params: serde_json::Value) -> lumencraft_engine::CommandOutcome {
+fn exec_ok(session: &mut Session, id: &str, params: serde_json::Value) -> curvebook_engine::CommandOutcome {
     session.execute(id, params).unwrap_or_else(|e| panic!("command `{id}` failed unexpectedly: {e}"))
 }
 

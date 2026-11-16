@@ -5,17 +5,17 @@
 //! - Stephens, M. A. (1974). *JASA* 69(347), 730–737 (asymptotic `sqrt(n)` scaling).
 //! - Dallal, G. E. & Wilkinson, L. (1986). *The American Statistician* 40(4), 294–296 (Table 1 and
 //!   analytic upper-tail approximation eq. (1) for `5 <= n <= 100, p <= 0.10`).
-//! - Independent deterministic Monte Carlo validation via `lumencraft_math::DeterministicRng`
+//! - Independent deterministic Monte Carlo validation via `curvebook_math::DeterministicRng`
 //!   (`seed = 0xA117_0107_CEAD_BEEF`, distinct from table training seed `0x4C49_4C4C_4945_464F`),
 //!   explicitly covering `n > 100` (`n = 150, 500`) as well as `n <= 100`.
 
-use lumencraft_math::DeterministicRng;
-use lumencraft_math::dist::{lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf};
-use lumencraft_math::sum::SummaryMoments;
-use lumencraft_stats::StatsError;
-use lumencraft_stats::column::{lilliefors_ks, normality_battery};
+use curvebook_math::DeterministicRng;
+use curvebook_math::dist::{lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf};
+use curvebook_math::sum::SummaryMoments;
+use curvebook_stats::StatsError;
+use curvebook_stats::column::{lilliefors_ks, normality_battery};
 
-fn lilliefors_d_stat_direct(sample: &mut [f64]) -> Result<f64, lumencraft_math::MathError> {
+fn lilliefors_d_stat_direct(sample: &mut [f64]) -> Result<f64, curvebook_math::MathError> {
     sample.sort_by(f64::total_cmp);
     let n = sample.len() as f64;
     let m = SummaryMoments::from_slice(sample)?;
@@ -37,7 +37,7 @@ fn r017_lilliefors_edge_cases_invariance_and_math_primitive_parity() {
     assert!(lilliefors_ks(&[1.0, 2.0, f64::NAN, 4.0, 5.0], 0.05).is_err());
     assert!(lilliefors_ks(&[1.0, 2.0, f64::INFINITY, 4.0, 5.0], 0.05).is_err());
 
-    // Exact agreement with lumencraft_math::dist::lilliefors_* + affine invariance
+    // Exact agreement with curvebook_math::dist::lilliefors_* + affine invariance
     let mut rng = DeterministicRng::from_seed(0x0170_C0DE_0000_0001);
     for &n in &[5_usize, 12, 50, 150, 500] {
         let raw: Vec<f64> = (0..n).map(|_| rng.standard_normal()).collect();

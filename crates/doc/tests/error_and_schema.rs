@@ -1,7 +1,7 @@
 //! Verification tests for structured L1 error codes, `RemediationKind`, and Draft 2020-12 JSON Schema helpers (`C2`).
 
-use lumencraft_doc::layout::{LayoutItemLimitError, MAX_LAYOUT_ITEMS};
-use lumencraft_doc::{
+use curvebook_doc::layout::{LayoutItemLimitError, MAX_LAYOUT_ITEMS};
+use curvebook_doc::{
     Cell, ChecklistItem, ChecklistStatus, ColumnDesignHint, ColumnTable, ContingencyTable, DRAFT_2020_12_SCHEMA_URI, DataSetColumn, DataSheet,
     DocError, ErrorCategory, ErrorCode, GroupedTable, JournalWidthPreset, JsonSchema, LayoutItem, LayoutSpec, MAX_SUBCOLUMNS, MultipleVariablesTable,
     NestedTable, PROJECT_DOCUMENT_SCHEMA_ID, PartsOfWholeTable, ProjectDocument, RectPt, RemediationKind, ResultStatus, SequenceProgression, SheetId,

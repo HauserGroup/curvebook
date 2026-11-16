@@ -8,13 +8,13 @@
 //! allowing automation workflows under `--gui-only` to drive menus, spreadsheets, canvases,
 //! wizards, and modal dialogs identically to an interactive desktop user.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, Cell, CellValue, CldOrdering, ContingencyMethod, EquationDisplayMode, ErrorBarMetric, ErrorCode, MultivariateSpec, OneWayMethod,
     ResidualCovariance, SheetId, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableSource, XColumnMode,
 };
-use lumencraft_engine::{EngineError, cmd};
-use lumencraft_render::RenderTargetSpec;
-use lumencraft_tools::GridCellCoord;
+use curvebook_engine::{EngineError, cmd};
+use curvebook_render::RenderTargetSpec;
+use curvebook_tools::GridCellCoord;
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
@@ -429,7 +429,7 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
     let ep = &app.canvas_dialogs.edit_params;
     let cont_spec = match ep.draft.as_ref().map(|d| &d.kind) {
         Some(AnalysisKind::Contingency(c)) => c.clone(),
-        _ => lumencraft_doc::ContingencySpec::default(),
+        _ => curvebook_doc::ContingencySpec::default(),
     };
     let gg_checked = ep.draft.as_ref().is_none_or(|d| {
         !matches!(
@@ -841,7 +841,7 @@ fn apply_type_text_to_grid(
         text.to_owned()
     } else {
         let existing =
-            cell_existing_text(app.document().data_sheet(sheet_id).and_then(|ds| ds.archetype.data_cell(lumencraft_doc::CellCoord::from(coord))));
+            cell_existing_text(app.document().data_sheet(sheet_id).and_then(|ds| ds.archetype.data_cell(curvebook_doc::CellCoord::from(coord))));
         format!("{existing}{text}")
     };
     let scalar = parse_grid_scalar_value(&final_text);
@@ -1488,7 +1488,7 @@ fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(
 }
 
 fn validate_pre_summarized_patch(
-    doc: &lumencraft_doc::ProjectDocument,
+    doc: &curvebook_doc::ProjectDocument,
     src: Option<&SheetId>,
     fields: &Map<String, Value>,
 ) -> Result<(), EngineError> {
@@ -1740,7 +1740,7 @@ fn commit_command_palette_action(app: &mut UiApp) -> Result<Value, EngineError> 
     Ok(json!({ "action": "ok", "command_id": selected.id, "mutated": out.mutated, "payload": out.payload }))
 }
 
-fn commit_single_intent(app: &mut UiApp, intent: Option<lumencraft_tools::ToolCommandIntent>, close: bool) -> Result<Value, EngineError> {
+fn commit_single_intent(app: &mut UiApp, intent: Option<curvebook_tools::ToolCommandIntent>, close: bool) -> Result<Value, EngineError> {
     let Some(i) = intent else {
         return Err(bad_input("active dialog has no valid commit parameters"));
     };
@@ -1751,7 +1751,7 @@ fn commit_single_intent(app: &mut UiApp, intent: Option<lumencraft_tools::ToolCo
     Ok(json!({ "action": "ok", "command_id": i.command_id, "mutated": out.mutated, "payload": out.payload }))
 }
 
-fn commit_many_intents_opt_close(app: &mut UiApp, intents: Vec<lumencraft_tools::ToolCommandIntent>, close: bool) -> Result<Value, EngineError> {
+fn commit_many_intents_opt_close(app: &mut UiApp, intents: Vec<curvebook_tools::ToolCommandIntent>, close: bool) -> Result<Value, EngineError> {
     let mut payloads = Vec::with_capacity(intents.len());
     for i in intents {
         let out = app.execute_command(&i.command_id, i.params)?;

@@ -66,16 +66,16 @@
 
 use std::collections::BTreeMap;
 
-use lumencraft_doc::CiBound;
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{
+use curvebook_doc::CiBound;
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{
     chi2_isf, chi2_sf, f_sf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_two_sided_isf,
     student_t_two_sided_p,
 };
-use lumencraft_math::linalg::{DenseMatrix, parameter_dependencies, qr_col_pivoted, svd};
-use lumencraft_math::roots::{RootOptions, brent_root};
-use lumencraft_math::special::ln_choose;
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
+use curvebook_math::linalg::{DenseMatrix, parameter_dependencies, qr_col_pivoted, svd};
+use curvebook_math::roots::{RootOptions, brent_root};
+use curvebook_math::special::ln_choose;
+use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 
 use crate::error::FitError;
 use crate::types::{DataPoint, validated_replicate_moments};
@@ -1344,7 +1344,7 @@ pub fn anderson_darling_test(values: &[f64]) -> Option<NormalityTestResult> {
 
 /// Lilliefors-adjusted Kolmogorov–Smirnov normality test on residuals (`n >= 5`).
 ///
-/// Statistic `D` per Lilliefors (1967) and *p*-value via [`lumencraft_math::dist::lilliefors_p_value`]
+/// Statistic `D` per Lilliefors (1967) and *p*-value via [`curvebook_math::dist::lilliefors_p_value`]
 /// (Stephens 1974 `sqrt(n)` scaling + monotone PCHIP over an original seeded Monte Carlo table with
 /// `1 / sqrt(n) -> 0` asymptotic extrapolation; max absolute error `0.0015` across `n >= 5`,
 /// verified against Dallal & Wilkinson 1986 Table 1 and hold-out simulations including `n > 100`).

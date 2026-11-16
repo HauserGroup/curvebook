@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode,
     GraphAnnotation, GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
     LayoutItem, LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, ParameterScope, PartsOfWholeTable, PlacementMode, ProjectDocument,
@@ -10,7 +10,7 @@ use lumencraft_doc::{
     TableArchetype, TableKind, VariableRole, XColumnMode, XyTable, validate_cell_grid, validate_data_sets, validate_project_cells, validate_rows,
     validate_sheet_cells, validate_subcolumns, validate_title,
 };
-use lumencraft_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
+use curvebook_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -250,7 +250,7 @@ fn parse_x_mode(raw: Option<&Value>) -> Result<XColumnMode, EngineError> {
                 Ok(XColumnMode::DateOrElapsedTime { unit_label: String::from("Time") })
             }
             "sequence" | "generated" | "generated_sequence" => {
-                Ok(XColumnMode::GeneratedSequence { start: 0.0, step: 1.0, progression: lumencraft_doc::SequenceProgression::Arithmetic })
+                Ok(XColumnMode::GeneratedSequence { start: 0.0, step: 1.0, progression: curvebook_doc::SequenceProgression::Arithmetic })
             }
             other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unsupported x_mode `{other}`"))),
         };
@@ -1949,8 +1949,8 @@ fn apply_row_labels(row_titles: &mut [String], tab: &ResultTab) {
 
 fn apply_tab_metadata_to_sheet(sheet: &mut DataSheet, tab: &ResultTab) {
     match &mut sheet.archetype {
-        TableArchetype::Column(lumencraft_doc::ColumnTable { data_sets, row_titles, .. })
-        | TableArchetype::Grouped(lumencraft_doc::GroupedTable { data_sets, row_titles, .. }) => {
+        TableArchetype::Column(curvebook_doc::ColumnTable { data_sets, row_titles, .. })
+        | TableArchetype::Grouped(curvebook_doc::GroupedTable { data_sets, row_titles, .. }) => {
             for (idx, ds) in data_sets.iter_mut().enumerate() {
                 if let Some(hdr) = tab.column_headers.get(idx).map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     ds.title = clip_safe_title(hdr);

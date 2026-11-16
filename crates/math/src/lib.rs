@@ -1,5 +1,5 @@
 //! Numerical primitives, special functions, tail-safe probability distributions, dense linear
-//! algebra, quadrature, root-finding, deterministic PRNG, and axis scale transforms for LumenCraft.
+//! algebra, quadrature, root-finding, deterministic PRNG, and axis scale transforms for CurveBook.
 //!
 //! Layer L0 foundation crate: depends on no higher workspace crates; uses `serde` for schema
 //! serialization alongside pure-std numerical kernels.
@@ -9,9 +9,9 @@
 //! # Example
 //!
 //! ```
-//! use lumencraft_math::{AxisScale, ConfidenceLevel, LogitDomain, PValueFormat};
-//! use lumencraft_math::dist::student_t_two_sided_p;
-//! use lumencraft_math::sum::SummaryMoments;
+//! use curvebook_math::{AxisScale, ConfidenceLevel, LogitDomain, PValueFormat};
+//! use curvebook_math::dist::student_t_two_sided_p;
+//! use curvebook_math::sum::SummaryMoments;
 //!
 //! let moments = SummaryMoments::from_slice(&[10.0, 12.0, 14.0, 16.0]).expect("finite sample");
 //! assert_eq!(moments.mean, 13.0);

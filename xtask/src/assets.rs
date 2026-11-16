@@ -89,8 +89,8 @@ const ASSET_EXT: &[&str] = &[
     "woff2",
     "eot",
     "pfb",
-    "lumencraft",
-    "lctemplate",
+    "curvebook",
+    "cbtemplate",
     "prism",
     "pzfx",
     "pzf",
@@ -266,7 +266,7 @@ fn parse_attribution_table(md: &str, table_name: &str) -> Result<BTreeMap<String
 }
 
 fn row_requires_attribution_entry(row: &AssetRow) -> bool {
-    let third_party_author = !row.author.to_ascii_lowercase().contains("lumencraft");
+    let third_party_author = !row.author.to_ascii_lowercase().contains("curvebook");
     let attr_licence = row.licence_tokens.iter().any(|tok| ATTRIBUTION_REQUIRED_LICENCES.contains(&tok.as_str()));
     third_party_author || attr_licence
 }
@@ -336,7 +336,7 @@ fn is_direct_original_source(source: &str) -> bool {
     {
         return true;
     }
-    lower.contains("lumencraft")
+    lower.contains("curvebook")
         && (lower.contains("approved")
             || lower.contains("artwork")
             || lower.contains("generated")
@@ -352,9 +352,9 @@ fn verify_original_provenance_chain(row: &AssetRow, all_rows: &BTreeMap<String, 
         return Err(format!("{}: circular asset provenance chain in ASSETS.md", row.path));
     }
     check_row_safety(row)?;
-    if !row.author.to_ascii_lowercase().contains("lumencraft") {
+    if !row.author.to_ascii_lowercase().contains("curvebook") {
         return Err(format!(
-            "{}: UI icon, schematic, thumbnail, or screenshot baseline must declare LumenCraft authorship (got `{}`)",
+            "{}: UI icon, schematic, thumbnail, or screenshot baseline must declare CurveBook authorship (got `{}`)",
             row.path, row.author
         ));
     }
@@ -378,7 +378,7 @@ fn verify_original_provenance_chain(row: &AssetRow, all_rows: &BTreeMap<String, 
 
     if !is_direct_original_source(&row.source) {
         return Err(format!(
-            "{}: UI icon, schematic, thumbnail, or screenshot baseline must declare original LumenCraft provenance in ASSETS.md (source: `{}`)",
+            "{}: UI icon, schematic, thumbnail, or screenshot baseline must declare original CurveBook provenance in ASSETS.md (source: `{}`)",
             row.path, row.source
         ));
     }
@@ -490,11 +490,12 @@ mod tests {
     #[test]
     fn detects_unattributed_assets() {
         let files =
-            vec![String::from("assets/app-icon/lumencraft.svg"), String::from("crates/stats/src/lib.rs"), String::from("docs/images/plot.png")];
-        let md = "| `assets/app-icon/lumencraft.svg` | LumenCraft contributors | original | MIT OR Apache-2.0 |";
+            vec![String::from("assets/app-icon/curvebook.svg"), String::from("crates/stats/src/lib.rs"), String::from("docs/images/plot.png")];
+        let md = "| `assets/app-icon/curvebook.svg` | CurveBook contributors | original | MIT OR Apache-2.0 |";
         assert_eq!(missing(&files, md), vec![String::from("docs/images/plot.png")]);
         assert!(!is_asset("crates/stats/src/lib.rs"));
-        assert!(is_asset("examples/dose.lumencraft"));
+        assert!(is_asset("examples/dose.curvebook"));
+        assert!(is_asset("examples/dose.cbtemplate"));
     }
 
     #[test]
@@ -540,12 +541,12 @@ See also `assets/prose.png` in prose.
     }
 
     #[test]
-    fn enforces_attribution_md_for_third_party_and_cc_by_assets_while_allowing_lumen_assets() {
+    fn enforces_attribution_md_for_third_party_and_cc_by_assets_while_allowing_curvebook_assets() {
         let files = vec![String::from("assets/mole.png"), String::from("assets/third.svg")];
         let assets_ok = "\
 | Asset | Author | Source | Licence | Notes |
 |---|---|---|---|---|
-| `assets/mole.png` | LumenCraft contributors | Original artwork | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) | ok |
+| `assets/mole.png` | CurveBook contributors | Original artwork | MIT OR Apache-2.0 (`assets/app-icon/LICENSE.txt`) | ok |
 | `assets/third.svg` | Upstream Icon Set | https://example.org/icon | CC-BY-4.0 | third-party |
 ";
         let err = verify_assets(&files, assets_ok, "").unwrap_err();
@@ -568,7 +569,8 @@ See also `assets/prose.png` in prose.
             "assets/thumbnails/bar-thumb.png",
             "docs/images/workspace-split-fit.png",
             "assets/app-icon/source/approved-seven-pane.png",
-            "assets/app-icon/lumencraft-win95-2508.png",
+            "assets/app-icon/source/approved-mole.png",
+            "assets/app-icon/curvebook-win95-2508.png",
         ] {
             assert!(is_original_only_visual_asset(path), "expected original provenance check on {path}");
         }
@@ -582,10 +584,10 @@ See also `assets/prose.png` in prose.
         let good_md = "\
 | Asset | Author | Source | Licence | Notes |
 |---|---|---|---|---|
-| `assets/ui/archetypes/xy.svg` | LumenCraft contributors | Original SVG schematic drawn for LumenCraft | MIT OR Apache-2.0 | Archetype icon |
-| `assets/diagrams/anova-schematic.svg` | LumenCraft contributors | Original diagram created for LumenCraft | MIT OR Apache-2.0 | Schematic |
-| `assets/thumbnails/bar-thumb.png` | LumenCraft contributors | Rendered from `assets/ui/archetypes/xy.svg` | MIT OR Apache-2.0 | Thumbnail |
-| `docs/images/welcome.png` | LumenCraft contributors | Deterministic workspace screenshot generated by cargo xtask screenshots | MIT OR Apache-2.0 | Baseline |
+| `assets/ui/archetypes/xy.svg` | CurveBook contributors | Original SVG schematic drawn for CurveBook | MIT OR Apache-2.0 | Archetype icon |
+| `assets/diagrams/anova-schematic.svg` | CurveBook contributors | Original diagram created for CurveBook | MIT OR Apache-2.0 | Schematic |
+| `assets/thumbnails/bar-thumb.png` | CurveBook contributors | Rendered from `assets/ui/archetypes/xy.svg` | MIT OR Apache-2.0 | Thumbnail |
+| `docs/images/welcome.png` | CurveBook contributors | Deterministic workspace screenshot generated by cargo xtask screenshots | MIT OR Apache-2.0 | Baseline |
 ";
         assert_eq!(verify_assets(&good_files, good_md, "").unwrap(), 4);
 
@@ -594,31 +596,31 @@ See also `assets/prose.png` in prose.
         let third_party_md = "| `assets/ui/icons/save.svg` | Upstream Icon Set | https://example.org/save.svg | CC-BY-4.0 | imported |\n";
         let third_party_attr = "| `assets/ui/icons/save.svg` | Upstream Icon Set | https://example.org/save.svg | CC-BY-4.0 | imported |\n";
         let err_third = verify_assets(&third_party_files, third_party_md, third_party_attr).unwrap_err();
-        assert!(err_third.contains("LumenCraft authorship"), "{err_third}");
+        assert!(err_third.contains("CurveBook authorship"), "{err_third}");
 
         // Reject reference frame / derived vendor wording.
         let ref_files = vec![String::from("docs/images/frame.png")];
-        let ref_md = "| `docs/images/frame.png` | LumenCraft contributors | Derived from reference frame 12 | MIT OR Apache-2.0 | screenshot |\n";
+        let ref_md = "| `docs/images/frame.png` | CurveBook contributors | Derived from reference frame 12 | MIT OR Apache-2.0 | screenshot |\n";
         let err_ref = verify_assets(&ref_files, ref_md, "").unwrap_err();
         assert!(err_ref.contains("non-original provenance phrase"), "{err_ref}");
 
         // Reject non-original ambiguous source on a UI thumbnail.
         let vague_files = vec![String::from("assets/thumbnails/card.png")];
-        let vague_md = "| `assets/thumbnails/card.png` | LumenCraft contributors | Exported raster image | MIT OR Apache-2.0 | card |\n";
+        let vague_md = "| `assets/thumbnails/card.png` | CurveBook contributors | Exported raster image | MIT OR Apache-2.0 | card |\n";
         let err_vague = verify_assets(&vague_files, vague_md, "").unwrap_err();
-        assert!(err_vague.contains("original LumenCraft provenance"), "{err_vague}");
+        assert!(err_vague.contains("original CurveBook provenance"), "{err_vague}");
 
         // Reject dangling and circular provenance chains.
         let bad_chain_files = vec![String::from("assets/ui/a.png"), String::from("assets/ui/b.png")];
         let cycle_md = "\
-| `assets/ui/a.png` | LumenCraft contributors | Rendered from `assets/ui/b.png` | MIT OR Apache-2.0 | a |
-| `assets/ui/b.png` | LumenCraft contributors | Rendered from `assets/ui/a.png` | MIT OR Apache-2.0 | b |
+| `assets/ui/a.png` | CurveBook contributors | Rendered from `assets/ui/b.png` | MIT OR Apache-2.0 | a |
+| `assets/ui/b.png` | CurveBook contributors | Rendered from `assets/ui/a.png` | MIT OR Apache-2.0 | b |
 ";
         let err_cycle = verify_assets(&bad_chain_files, cycle_md, "").unwrap_err();
         assert!(err_cycle.contains("circular asset provenance chain"), "{err_cycle}");
 
         let dangling_files = vec![String::from("assets/ui/orphan.png")];
-        let dangling_md = "| `assets/ui/orphan.png` | LumenCraft contributors | Rendered from `assets/ui/missing.svg` | MIT OR Apache-2.0 | x |\n";
+        let dangling_md = "| `assets/ui/orphan.png` | CurveBook contributors | Rendered from `assets/ui/missing.svg` | MIT OR Apache-2.0 | x |\n";
         let err_dangling = verify_assets(&dangling_files, dangling_md, "").unwrap_err();
         assert!(err_dangling.contains("missing from ASSETS.md"), "{err_dangling}");
     }
@@ -629,12 +631,14 @@ See also `assets/prose.png` in prose.
         let assets_md = std::fs::read_to_string(root.join("ASSETS.md")).unwrap();
         let attr_md = std::fs::read_to_string(root.join("ATTRIBUTION.md")).unwrap();
         let files = vec![
+            String::from("assets/app-icon/source/approved-mole.png"),
             String::from("assets/app-icon/source/approved-seven-pane.png"),
-            String::from("assets/app-icon/lumencraft-win95-2508.png"),
-            String::from("assets/app-icon/lumencraft.svg"),
+            String::from("assets/app-icon/source/seven-pane-win95-1254.png"),
+            String::from("assets/app-icon/curvebook-win95-2508.png"),
+            String::from("assets/app-icon/curvebook.svg"),
             String::from("docs/images/workspace-split-fit.png"),
             String::from("docs/images/workspace-layout-dark.png"),
         ];
-        assert_eq!(verify_assets(&files, &assets_md, &attr_md).unwrap(), 5);
+        assert_eq!(verify_assets(&files, &assets_md, &attr_md).unwrap(), 7);
     }
 }

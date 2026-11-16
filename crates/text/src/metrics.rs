@@ -1225,7 +1225,7 @@ pub fn parse_truetype_font_info(sfnt_bytes: &[u8]) -> Result<TrueTypeFontInfo, c
     } else if !parsed_ps.is_empty() {
         parsed_ps.clone()
     } else {
-        String::from("LumenCraft Sans")
+        String::from("CurveBook Sans")
     };
     let postscript_name = if !parsed_ps.is_empty() { sanitize_postscript_name(&parsed_ps) } else { sanitize_postscript_name(&family_name) };
 
@@ -1787,7 +1787,7 @@ fn scale_font_units_1000(value: i32, units_per_em: u16) -> i32 {
 fn sanitize_postscript_name(raw: &str) -> String {
     let cleaned: String =
         raw.chars().filter(|&c| c.is_ascii_graphic() && !matches!(c, '(' | ')' | '<' | '>' | '[' | ']' | '{' | '}' | '/' | '%')).collect();
-    if cleaned.is_empty() { String::from("LumenCraftSans-Regular") } else { cleaned }
+    if cleaned.is_empty() { String::from("CurveBookSans-Regular") } else { cleaned }
 }
 
 const WIN1252_80_9F: [Option<char>; 32] = [
@@ -2105,7 +2105,7 @@ fn build_minimal_cmap_table() -> Vec<u8> {
 
 fn build_minimal_name_table() -> Vec<u8> {
     const ENTRIES: [(u16, &str); 5] =
-        [(1, "LumenCraft Sans"), (2, "Regular"), (3, "LumenCraft-Sans-Regular"), (4, "LumenCraft Sans Regular"), (6, "LumenCraftSans-Regular")];
+        [(1, "CurveBook Sans"), (2, "Regular"), (3, "CurveBook-Sans-Regular"), (4, "CurveBook Sans Regular"), (6, "CurveBookSans-Regular")];
     let mut str_buf = Vec::new();
     let mut records = Vec::new();
     for (name_id, text) in ENTRIES {

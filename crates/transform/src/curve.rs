@@ -1,8 +1,8 @@
 //! Curve calculus: Area Under the Curve (AUC) with peak detection and SE propagation,
 //! Savitzky-Golay / moving-average / LOWESS smoothing, differentiation, and integration.
 
-use lumencraft_doc::{Cell, DataSheet, SubcolumnMode, TableArchetype, XColumnMode, XyTable};
-use lumencraft_math::{DenseMatrix, solve_linear_least_squares, sum};
+use curvebook_doc::{Cell, DataSheet, SubcolumnMode, TableArchetype, XColumnMode, XyTable};
+use curvebook_math::{DenseMatrix, solve_linear_least_squares, sum};
 
 use crate::error::TransformError;
 

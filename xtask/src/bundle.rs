@@ -1,10 +1,10 @@
-//! `cargo xtask bundle`: build release binaries and assemble `dist/LumenCraft.app` on macOS.
+//! `cargo xtask bundle`: build release binaries and assemble `dist/CurveBook.app` on macOS.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const PLIST_IN: &str = "packaging/macos/Info.plist.in";
-const ICON_ICNS: &str = "assets/app-icon/lumencraft.icns";
+const ICON_ICNS: &str = "assets/app-icon/curvebook.icns";
 const PLUTIL_BIN: &str = "/usr/bin/plutil";
 const CODESIGN_BIN: &str = "/usr/bin/codesign";
 
@@ -16,7 +16,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     build_release_binaries(root, &sha)?;
 
     let dist_dir = root.join("dist");
-    let app_dir = dist_dir.join("LumenCraft.app");
+    let app_dir = dist_dir.join("CurveBook.app");
     if app_dir.exists() {
         std::fs::remove_dir_all(&app_dir).map_err(|e| format!("clean {}: {e}", app_dir.display()))?;
     }
@@ -33,11 +33,11 @@ pub fn run(root: &Path) -> Result<(), String> {
 
 fn build_release_binaries(root: &Path, sha: &str) -> Result<(), String> {
     let mut cmd = Command::new("cargo");
-    cmd.current_dir(root).env("LUMENCRAFT_BUILD_SHA", sha).args(["build", "--release"]);
+    cmd.current_dir(root).env("CURVEBOOK_BUILD_SHA", sha).args(["build", "--release"]);
     if std::env::var("CARGO_NET_OFFLINE").is_ok_and(|val| val == "true" || val == "1") {
         cmd.arg("--offline");
     }
-    cmd.args(["-p", "lumencraft", "-p", "lumencraft-cli"]);
+    cmd.args(["-p", "curvebook", "-p", "curvebook-cli"]);
     let status = cmd.status().map_err(|e| format!("cargo build --release: {e}"))?;
     if !status.success() {
         return Err(String::from("release build failed"));
@@ -59,7 +59,7 @@ fn assemble_validate_and_sign(root: &Path, app_dir: &Path, version: &str, sha: &
     validate_info_plist(&plist_path)?;
 
     let release_dir = resolve_target_dir(root).join("release");
-    for bin in ["lumencraft", "lumencraft-cli"] {
+    for bin in ["curvebook", "curvebook-cli"] {
         let src = release_dir.join(bin);
         let dst = macos_dir.join(bin);
         std::fs::copy(&src, &dst).map_err(|e| format!("copy {}: {e}", src.display()))?;
@@ -67,7 +67,7 @@ fn assemble_validate_and_sign(root: &Path, app_dir: &Path, version: &str, sha: &
     }
 
     let icns = root.join(ICON_ICNS);
-    std::fs::copy(&icns, res_dir.join("lumencraft.icns")).map_err(|e| format!("copy {ICON_ICNS}: {e}"))?;
+    std::fs::copy(&icns, res_dir.join("curvebook.icns")).map_err(|e| format!("copy {ICON_ICNS}: {e}"))?;
 
     adhoc_codesign_and_verify(app_dir)?;
     Ok(())
@@ -160,7 +160,7 @@ mod tests {
 
     fn unique_temp_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("lumencraft-xtask-bundle-{label}-{}-{nanos}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("curvebook-xtask-bundle-{label}-{}-{nanos}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -204,26 +204,26 @@ mod tests {
     fn packaging_metadata_is_consistent_and_free_of_sibling_leftovers() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
         let plist = std::fs::read_to_string(root.join("packaging/macos/Info.plist.in")).unwrap();
-        assert!(plist.contains("org.lumencraft.LumenCraft"));
-        assert!(plist.contains("lumencraft"));
-        assert!(plist.contains("lctemplate"));
+        assert!(plist.contains("org.curvebook.CurveBook"));
+        assert!(plist.contains("curvebook"));
+        assert!(plist.contains("cbtemplate"));
 
-        let desktop = std::fs::read_to_string(root.join("packaging/linux/org.lumencraft.LumenCraft.desktop")).unwrap();
+        let desktop = std::fs::read_to_string(root.join("packaging/linux/org.curvebook.CurveBook.desktop")).unwrap();
         assert!(desktop.contains("Categories=Science;Math;"));
-        assert!(desktop.contains("application/vnd.lumencraft.project"));
+        assert!(desktop.contains("application/vnd.curvebook.project"));
 
-        let mime = std::fs::read_to_string(root.join("packaging/linux/org.lumencraft.LumenCraft.mime.xml")).unwrap();
-        assert!(mime.contains("*.lumencraft"));
-        assert!(mime.contains("*.lctemplate"));
+        let mime = std::fs::read_to_string(root.join("packaging/linux/org.curvebook.CurveBook.mime.xml")).unwrap();
+        assert!(mime.contains("*.curvebook"));
+        assert!(mime.contains("*.cbtemplate"));
 
         for rel in [
             "packaging/macos/Info.plist.in",
-            "packaging/linux/org.lumencraft.LumenCraft.desktop",
-            "packaging/linux/org.lumencraft.LumenCraft.metainfo.xml.in",
-            "packaging/linux/org.lumencraft.LumenCraft.mime.xml",
-            "packaging/linux/flatpak/org.lumencraft.LumenCraft.yml",
-            "packaging/linux/flatpak/org.lumencraft.LumenCraft.bundle.yml",
-            "packaging/windows/lumencraft.wxs",
+            "packaging/linux/org.curvebook.CurveBook.desktop",
+            "packaging/linux/org.curvebook.CurveBook.metainfo.xml.in",
+            "packaging/linux/org.curvebook.CurveBook.mime.xml",
+            "packaging/linux/flatpak/org.curvebook.CurveBook.yml",
+            "packaging/linux/flatpak/org.curvebook.CurveBook.bundle.yml",
+            "packaging/windows/curvebook.wxs",
             "packaging/windows/install-policy.wxi",
             "packaging/windows/check-install-policy.ps1",
         ] {

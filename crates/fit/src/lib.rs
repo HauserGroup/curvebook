@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 //! Linear, Deming (Model II), and Nonlinear Regression + Custom Bytecode/ODE Equation DSL
-//! engine for LumenCraft (`Layer L2`).
+//! engine for CurveBook (`Layer L2`).
 
 pub mod diagnostics;
 pub mod dsl;
@@ -39,11 +39,11 @@ pub use types::{
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSheet, FitMethod, LinearRegressionSpec, NonlinearFitSpec, ParameterRule, ParameterScope,
         SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
     };
-    use lumencraft_math::ConfidenceLevel;
+    use curvebook_math::ConfidenceLevel;
 
     use super::*;
 

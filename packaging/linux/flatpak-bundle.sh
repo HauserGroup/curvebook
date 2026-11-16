@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Repackage a LumenCraft Linux tarball as a single-file Flatpak bundle:
+# Repackage a CurveBook Linux tarball as a single-file Flatpak bundle:
 #
-#   $DIST/lumencraft-<version>-linux-<arch>.flatpak
+#   $DIST/curvebook-<version>-linux-<arch>.flatpak
 #
 # Usage: packaging/linux/flatpak-bundle.sh [--no-test] [--oci] [TARBALL]
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/linux"
-APP_ID=org.lumencraft.LumenCraft
+APP_ID=org.curvebook.CurveBook
 FLATHUB=https://dl.flathub.org/repo/flathub.flatpakrepo
 
 TEST=1
@@ -30,20 +30,20 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-BASENAME="lumencraft-$VERSION-linux-$ARCH"
+BASENAME="curvebook-$VERSION-linux-$ARCH"
 TARBALL="${TARBALL:-$DIST/$BASENAME.tar.gz}"
 [[ -f "$TARBALL" ]] || { echo "error: $TARBALL not found (run packaging/linux/package.sh --formats tar first)" >&2; exit 1; }
 for tool in flatpak flatpak-builder; do
   command -v "$tool" >/dev/null || { echo "error: $tool not found" >&2; exit 1; }
 done
 
-echo "==> LumenCraft $VERSION Flatpak bundle for $ARCH from $(basename "$TARBALL")"
+echo "==> CurveBook $VERSION Flatpak bundle for $ARCH from $(basename "$TARBALL")"
 
 WORK="$CARGO_TARGET_DIR/flatpak-bundle"
 rm -rf "$WORK"
 mkdir -p "$WORK/stage"
 tar -xzf "$TARBALL" -C "$WORK/stage" --strip-components=1
-[[ -x "$WORK/stage/bin/lumencraft" ]] || { echo "error: $TARBALL has no bin/lumencraft" >&2; exit 1; }
+[[ -x "$WORK/stage/bin/curvebook" ]] || { echo "error: $TARBALL has no bin/curvebook" >&2; exit 1; }
 cp "$HERE/flatpak/$APP_ID.bundle.yml" "$WORK/$APP_ID.yml"
 
 flatpak remote-add --user --if-not-exists flathub "$FLATHUB"
@@ -63,7 +63,7 @@ fi
 if [[ "$TEST" = 1 ]]; then
   flatpak install --user -y --noninteractive --reinstall "$OUT"
   flatpak info --user "$APP_ID"
-  flatpak run --command=lumencraft-cli "$APP_ID" --version
+  flatpak run --command=curvebook-cli "$APP_ID" --version
   flatpak run --command=sh "$APP_ID" -c 'ls /app/share/applications /app/share/metainfo /app/share/mime/packages /app/share/icons/hicolor/scalable/apps'
 fi
 echo "==> done"

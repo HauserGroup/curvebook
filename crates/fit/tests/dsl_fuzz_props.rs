@@ -2,8 +2,8 @@
 //! stack VM evaluator, implicit root solver, RK45 ODE integrator, and nonlinear fitter.
 #![forbid(unsafe_code)]
 
-use lumencraft_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme};
-use lumencraft_fit::{
+use curvebook_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, DslEquationKind, HookContext, ParametricModel, SolverConfig, fit_nonlinear, integrate_rk45,
     replicates_lack_of_fit,
 };

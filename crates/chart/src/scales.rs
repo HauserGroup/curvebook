@@ -3,14 +3,14 @@
 
 use std::fmt::Write as FmtWrite;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CiBound, FramePreset, GraphAnnotation, GraphSpec,
     LegendSpec, ProjectDocument, ResultCell, ResultTab, SheetId, SizePt, TableArchetype, TickLabelFormat,
 };
-use lumencraft_math::dist::{norm_cdf, norm_ppf};
-use lumencraft_math::{AxisScale, LogitDomain};
-use lumencraft_palette::{LineDashStyle, MarkerFillMode, MarkerShape, Rgba8};
-use lumencraft_text::{LocaleNumberPolicy, RichText, expand_template_hooks, measure_text_pt, parse_markup};
+use curvebook_math::dist::{norm_cdf, norm_ppf};
+use curvebook_math::{AxisScale, LogitDomain};
+use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, Rgba8};
+use curvebook_text::{LocaleNumberPolicy, RichText, expand_template_hooks, measure_text_pt, parse_markup};
 
 use crate::scene::{
     ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
@@ -137,7 +137,7 @@ pub struct ErrorBarMappedPt {
 }
 
 /// Guarded forward transform `g(u)` across all 7 [`AxisScale`] variants, explicitly invoking
-/// `lumencraft_math` inverse normal CDF (`norm_ppf`) for [`AxisScale::Probit`].
+/// `curvebook_math` inverse normal CDF (`norm_ppf`) for [`AxisScale::Probit`].
 #[must_use]
 pub fn scale_transform(scale: AxisScale, value: f64) -> Option<f64> {
     if !value.is_finite() {
@@ -155,7 +155,7 @@ pub fn scale_transform(scale: AxisScale, value: f64) -> Option<f64> {
 }
 
 /// Guarded inverse transform `g^{-1}(t)` across all 7 [`AxisScale`] variants, using
-/// `lumencraft_math::dist::norm_cdf` for [`AxisScale::Probit`].
+/// `curvebook_math::dist::norm_cdf` for [`AxisScale::Probit`].
 #[must_use]
 pub fn scale_inverse(scale: AxisScale, transformed: f64) -> Option<f64> {
     if !transformed.is_finite() {
@@ -2251,7 +2251,7 @@ pub(crate) fn format_tick_markup(value: f64, scale: AxisScale, format: TickLabel
     }
     let clean = clean_zero(value);
     match format {
-        TickLabelFormat::Decimal | TickLabelFormat::Categorical(_) => lumencraft_text::format_axis_tick(clean, scale, policy),
+        TickLabelFormat::Decimal | TickLabelFormat::Categorical(_) => curvebook_text::format_axis_tick(clean, scale, policy),
         TickLabelFormat::PowerOfTenSuperscript => format_power_of_ten_markup(clean, policy),
         TickLabelFormat::ScientificE => format_scientific_e(clean, policy),
         TickLabelFormat::Antilog => {
@@ -2259,7 +2259,7 @@ pub(crate) fn format_tick_markup(value: f64, scale: AxisScale, format: TickLabel
                 AxisScale::Linear if clean.abs() <= 300.0 => 10.0_f64.powf(clean),
                 _ => clean,
             };
-            lumencraft_text::format_axis_tick(antilog_val, AxisScale::Log10, policy)
+            curvebook_text::format_axis_tick(antilog_val, AxisScale::Log10, policy)
         }
         TickLabelFormat::EngineeringSi => format_engineering_si(clean, policy),
     }
@@ -2380,7 +2380,7 @@ pub fn resolve_template_hooks(template: &str, doc: &ProjectDocument, primary_dat
     expand_template_hooks(template, |token| resolve_single_hook(token, doc, paired_info))
 }
 
-fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&lumencraft_doc::InfoSheet>) -> Option<String> {
+fn resolve_single_hook(token: &str, doc: &ProjectDocument, paired_info: Option<&curvebook_doc::InfoSheet>) -> Option<String> {
     let parts: Vec<&str> = token.split(':').map(str::trim).collect();
     match parts.as_slice() {
         ["info", name] if !name.is_empty() => paired_info.and_then(|i| i.get_constant(name)).map(|c| c.value.display_text()),
@@ -3261,8 +3261,8 @@ fn data_set_title(archetype: &TableArchetype, idx: usize) -> Option<&str> {
     }
 }
 
-fn entry_from_gdo(label: String, gdo: &lumencraft_doc::GraphicalDataObject, fallback: Rgba8) -> LegendEntry {
-    use lumencraft_doc::GraphicalDataObject as Gdo;
+fn entry_from_gdo(label: String, gdo: &curvebook_doc::GraphicalDataObject, fallback: Rgba8) -> LegendEntry {
+    use curvebook_doc::GraphicalDataObject as Gdo;
     match gdo {
         Gdo::ScatterAndLine { marker, line, .. } => LegendEntry {
             label,

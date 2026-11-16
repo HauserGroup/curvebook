@@ -1,7 +1,7 @@
 //! Interface color palette, polarity presets (`Light`, `Dark`, `HighContrast`), WCAG 2.1 AA
 //! contrast validation, and font registration hooks for the desktop and browser UI shell.
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 use serde::{Deserialize, Serialize};
 
 /// Minimum WCAG 2.1 AA contrast ratio for normal-sized UI and grid text (`4.5:1`).
@@ -13,7 +13,7 @@ pub const WCAG_AA_UI_MIN_RATIO: f64 = 3.0;
 /// Minimum WCAG 2.1 AAA contrast ratio for primary text (`7.0:1`).
 pub const WCAG_AAA_TEXT_MIN_RATIO: f64 = 7.0;
 
-/// Surface polarity preset for the LumenCraft application shell.
+/// Surface polarity preset for the CurveBook application shell.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum UiThemeMode {
     #[default]
@@ -216,32 +216,32 @@ pub fn wcag_contrast_ratio(foreground: Rgba8, background: Rgba8) -> f64 {
     foreground.contrast_ratio(background)
 }
 
-/// Descriptor for an active font face compiled into `lumencraft-text`.
+/// Descriptor for an active font face compiled into `curvebook-text`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct BundledFontEntry {
     pub name: &'static str,
     pub byte_len: usize,
 }
 
-/// Register bundled interface and scientific fonts from `lumencraft-text`.
+/// Register bundled interface and scientific fonts from `curvebook-text`.
 ///
 /// Returns the number of non-empty bundled font faces available (`0` cleanly when compiled with
-/// `--no-default-features` or when `LUMENCRAFT_FONTS_DIR` was unset at build time).
+/// `--no-default-features` or when `CURVEBOOK_FONTS_DIR` was unset at build time).
 #[must_use]
 pub fn install_fonts() -> usize {
-    if !crate::bundled_fonts_enabled() || !lumencraft_text::has_bundled_fonts_feature() {
+    if !crate::bundled_fonts_enabled() || !curvebook_text::has_bundled_fonts_feature() {
         return 0;
     }
-    lumencraft_text::BUNDLED_FONTS.iter().filter(|(name, bytes)| !name.is_empty() && !bytes.is_empty()).count()
+    curvebook_text::BUNDLED_FONTS.iter().filter(|(name, bytes)| !name.is_empty() && !bytes.is_empty()).count()
 }
 
 /// Inspect active bundled font face descriptors (empty when `bundled-fonts` is disabled).
 #[must_use]
 pub fn bundled_font_entries() -> Vec<BundledFontEntry> {
-    if !crate::bundled_fonts_enabled() || !lumencraft_text::has_bundled_fonts_feature() {
+    if !crate::bundled_fonts_enabled() || !curvebook_text::has_bundled_fonts_feature() {
         return Vec::new();
     }
-    lumencraft_text::BUNDLED_FONTS
+    curvebook_text::BUNDLED_FONTS
         .iter()
         .filter(|(name, bytes)| !name.is_empty() && !bytes.is_empty())
         .map(|(name, bytes)| BundledFontEntry { name, byte_len: bytes.len() })
@@ -261,8 +261,8 @@ pub struct FontDiagnostics {
 pub fn font_diagnostics(locale: &str) -> FontDiagnostics {
     FontDiagnostics {
         bundled_count: install_fonts(),
-        system_cjk_candidates: lumencraft_text::system_cjk_font_candidates(locale),
-        rtl_supported: lumencraft_text::is_rtl_locale(locale),
+        system_cjk_candidates: curvebook_text::system_cjk_font_candidates(locale),
+        rtl_supported: curvebook_text::is_rtl_locale(locale),
     }
 }
 
@@ -284,21 +284,21 @@ impl FontBook {
     #[must_use]
     pub fn with_embedded_fallback() -> Self {
         let mut faces = Vec::new();
-        if crate::bundled_fonts_enabled() && lumencraft_text::has_bundled_fonts_feature() {
-            for &(name, bytes) in lumencraft_text::BUNDLED_FONTS {
-                if !name.is_empty() && lumencraft_text::TrueTypeFont::parse(bytes).is_some() {
+        if crate::bundled_fonts_enabled() && curvebook_text::has_bundled_fonts_feature() {
+            for &(name, bytes) in curvebook_text::BUNDLED_FONTS {
+                if !name.is_empty() && curvebook_text::TrueTypeFont::parse(bytes).is_some() {
                     faces.push((name.to_owned(), bytes.to_vec()));
                 }
             }
         }
-        let minimal = lumencraft_text::build_minimal_truetype_font();
-        if lumencraft_text::TrueTypeFont::parse(&minimal).is_some() {
-            faces.push((String::from("LumenCraft Minimal Fallback"), minimal));
+        let minimal = curvebook_text::build_minimal_truetype_font();
+        if curvebook_text::TrueTypeFont::parse(&minimal).is_some() {
+            faces.push((String::from("CurveBook Minimal Fallback"), minimal));
         }
         Self { faces }
     }
 
-    /// Construct a [`FontBook`] probing optional `LUMENCRAFT_FONTS_DIR` and standard host OS system
+    /// Construct a [`FontBook`] probing optional `CURVEBOOK_FONTS_DIR` and standard host OS system
     /// TrueType/OpenType font files when available on native targets, always retaining the embedded
     /// fallback faces.
     #[cfg(not(target_arch = "wasm32"))]
@@ -332,10 +332,10 @@ impl FontBook {
         Self::with_embedded_fallback()
     }
 
-    /// Probe `.ttf` / `.otf` files from `LUMENCRAFT_FONTS_DIR` when set on native targets.
+    /// Probe `.ttf` / `.otf` files from `CURVEBOOK_FONTS_DIR` when set on native targets.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_env_fonts_dir(&mut self) -> usize {
-        let Some(dir_os) = std::env::var_os("LUMENCRAFT_FONTS_DIR") else {
+        let Some(dir_os) = std::env::var_os("CURVEBOOK_FONTS_DIR") else {
             return 0;
         };
         let Ok(entries) = std::fs::read_dir(std::path::Path::new(&dir_os)) else {
@@ -361,10 +361,10 @@ impl FontBook {
         const MAX_HOST_FONT_BYTES: usize = 64 * 1024 * 1024;
         let mut loaded = 0usize;
         for &path in paths.iter().rev() {
-            let Ok(bytes) = lumencraft_platform::fs::read_regular_file_bytes(std::path::Path::new(path), MAX_HOST_FONT_BYTES) else {
+            let Ok(bytes) = curvebook_platform::fs::read_regular_file_bytes(std::path::Path::new(path), MAX_HOST_FONT_BYTES) else {
                 continue;
             };
-            if lumencraft_text::TrueTypeFont::parse(&bytes).is_some() {
+            if curvebook_text::TrueTypeFont::parse(&bytes).is_some() {
                 self.faces.insert(0, (path.to_owned(), bytes));
                 loaded += 1;
             }
@@ -378,10 +378,10 @@ impl FontBook {
         self.faces.iter().map(|(name, _)| name.as_str()).collect()
     }
 
-    /// Parse all loaded faces as zero-copy [`lumencraft_text::TrueTypeFont`] readers.
+    /// Parse all loaded faces as zero-copy [`curvebook_text::TrueTypeFont`] readers.
     #[must_use]
-    pub fn parsed_faces(&self) -> Vec<(&str, lumencraft_text::TrueTypeFont<'_>)> {
-        self.faces.iter().filter_map(|(name, bytes)| lumencraft_text::TrueTypeFont::parse(bytes).map(|ttf| (name.as_str(), ttf))).collect()
+    pub fn parsed_faces(&self) -> Vec<(&str, curvebook_text::TrueTypeFont<'_>)> {
+        self.faces.iter().filter_map(|(name, bytes)| curvebook_text::TrueTypeFont::parse(bytes).map(|ttf| (name.as_str(), ttf))).collect()
     }
 
     /// Raw `(face_name, sfnt_bytes)` slices in priority order.
@@ -408,29 +408,29 @@ impl FontBook {
     }
 
     /// Shape `text` cleanly (applying BiDi visual reordering for RTL locales) and rasterize via
-    /// loaded [`lumencraft_text::TrueTypeFont`] glyph outlines + vector fallback into an RGBA pixmap.
+    /// loaded [`curvebook_text::TrueTypeFont`] glyph outlines + vector fallback into an RGBA pixmap.
     ///
     /// Returns `(ttf_mapped_glyph_count, image)`.
     ///
     /// # Errors
-    /// Returns a [`lumencraft_render::RenderError`] if scene rasterization fails for invalid `spec`.
+    /// Returns a [`curvebook_render::RenderError`] if scene rasterization fails for invalid `spec`.
     pub fn rasterize_shaped_text(
         &self,
         text: &str,
         locale: &str,
         font_size_pt: f64,
-        spec: lumencraft_render::RenderTargetSpec,
+        spec: curvebook_render::RenderTargetSpec,
         foreground: Rgba8,
         background: Rgba8,
-    ) -> Result<(usize, lumencraft_render::RasterImage), lumencraft_render::RenderError> {
-        let is_rtl = lumencraft_text::is_rtl_locale(locale);
-        let direction = if is_rtl { lumencraft_text::TextDirection::Rtl } else { lumencraft_text::TextDirection::Ltr };
-        let visual = lumencraft_text::reorder_visual_bidi(text, direction);
+    ) -> Result<(usize, curvebook_render::RasterImage), curvebook_render::RenderError> {
+        let is_rtl = curvebook_text::is_rtl_locale(locale);
+        let direction = if is_rtl { curvebook_text::TextDirection::Rtl } else { curvebook_text::TextDirection::Ltr };
+        let visual = curvebook_text::reorder_visual_bidi(text, direction);
         let parsed = self.parsed_faces();
 
         let page_w = f64::from(spec.width_px.max(1)) * 72.0 / f64::from(spec.dpi.max(1));
         let page_h = f64::from(spec.height_px.max(1)) * 72.0 / f64::from(spec.dpi.max(1));
-        let mut scene = lumencraft_chart::ChartScene::new(String::from("fontbook-qa"), String::from(locale), page_w, page_h, Some(background));
+        let mut scene = curvebook_chart::ChartScene::new(String::from("fontbook-qa"), String::from(locale), page_w, page_h, Some(background));
 
         let mut pen_x = 12.0;
         let baseline_y = (font_size_pt * 1.4).max(16.0);
@@ -442,9 +442,9 @@ impl FontBook {
             }
             if let Some((adv, path)) = first_ttf_glyph_path(&parsed, ch, pen_x, baseline_y, font_size_pt) {
                 if !path.commands.is_empty() {
-                    scene.primitives.push(lumencraft_chart::ScenePrimitive::Path {
+                    scene.primitives.push(curvebook_chart::ScenePrimitive::Path {
                         path,
-                        fill: Some(lumencraft_chart::FillPaint::solid(foreground)),
+                        fill: Some(curvebook_chart::FillPaint::solid(foreground)),
                         stroke: None,
                         clip: None,
                     });
@@ -452,12 +452,12 @@ impl FontBook {
                 }
                 pen_x += adv.max(font_size_pt * 0.25);
             } else {
-                let rich = lumencraft_text::RichText::plain(ch.to_string());
-                let metrics = lumencraft_text::measure_text_pt(&rich, font_size_pt);
-                scene.primitives.push(lumencraft_chart::ScenePrimitive::Text(lumencraft_chart::PositionedText {
+                let rich = curvebook_text::RichText::plain(ch.to_string());
+                let metrics = curvebook_text::measure_text_pt(&rich, font_size_pt);
+                scene.primitives.push(curvebook_chart::ScenePrimitive::Text(curvebook_chart::PositionedText {
                     rich,
-                    anchor_pt: lumencraft_chart::PointPt::new(pen_x, baseline_y),
-                    anchor: lumencraft_chart::TextAnchor::Start,
+                    anchor_pt: curvebook_chart::PointPt::new(pen_x, baseline_y),
+                    anchor: curvebook_chart::TextAnchor::Start,
                     font_size_pt,
                     rotation_deg: 0.0,
                     color: foreground,
@@ -466,48 +466,48 @@ impl FontBook {
             }
         }
 
-        let img = lumencraft_render::render_scene(&scene, spec)?;
+        let img = curvebook_render::render_scene(&scene, spec)?;
         Ok((ttf_mapped, img))
     }
 }
 
 fn first_ttf_glyph_path(
-    faces: &[(&str, lumencraft_text::TrueTypeFont<'_>)],
+    faces: &[(&str, curvebook_text::TrueTypeFont<'_>)],
     ch: char,
     pen_x: f64,
     baseline_y: f64,
     font_size_pt: f64,
-) -> Option<(f64, lumencraft_chart::Path2D)> {
+) -> Option<(f64, curvebook_chart::Path2D)> {
     let (_, ttf) = faces.iter().find(|(_, f)| f.glyph_id(ch).is_some())?;
-    let cmds = lumencraft_text::glyph_paths::outline_ttf_glyph(ttf, ch, pen_x, baseline_y, font_size_pt, false)?;
+    let cmds = curvebook_text::glyph_paths::outline_ttf_glyph(ttf, ch, pen_x, baseline_y, font_size_pt, false)?;
     let adv = ttf.advance_em(ch).unwrap_or(0.55) * font_size_pt;
     Some((adv, glyph_cmds_to_path(&cmds)))
 }
 
-fn glyph_cmds_to_path(cmds: &[lumencraft_text::GlyphOutlineCmd]) -> lumencraft_chart::Path2D {
-    let mut path = lumencraft_chart::Path2D::new();
+fn glyph_cmds_to_path(cmds: &[curvebook_text::GlyphOutlineCmd]) -> curvebook_chart::Path2D {
+    let mut path = curvebook_chart::Path2D::new();
     for cmd in cmds {
         match *cmd {
-            lumencraft_text::GlyphOutlineCmd::MoveTo { x_pt, y_pt } => {
-                path.commands.push(lumencraft_chart::PathCmd::MoveTo(lumencraft_chart::PointPt::new(x_pt, y_pt)));
+            curvebook_text::GlyphOutlineCmd::MoveTo { x_pt, y_pt } => {
+                path.commands.push(curvebook_chart::PathCmd::MoveTo(curvebook_chart::PointPt::new(x_pt, y_pt)));
             }
-            lumencraft_text::GlyphOutlineCmd::LineTo { x_pt, y_pt } => {
-                path.commands.push(lumencraft_chart::PathCmd::LineTo(lumencraft_chart::PointPt::new(x_pt, y_pt)));
+            curvebook_text::GlyphOutlineCmd::LineTo { x_pt, y_pt } => {
+                path.commands.push(curvebook_chart::PathCmd::LineTo(curvebook_chart::PointPt::new(x_pt, y_pt)));
             }
-            lumencraft_text::GlyphOutlineCmd::QuadTo { cx_pt, cy_pt, x_pt, y_pt } => {
-                path.commands.push(lumencraft_chart::PathCmd::QuadTo {
-                    control: lumencraft_chart::PointPt::new(cx_pt, cy_pt),
-                    to: lumencraft_chart::PointPt::new(x_pt, y_pt),
+            curvebook_text::GlyphOutlineCmd::QuadTo { cx_pt, cy_pt, x_pt, y_pt } => {
+                path.commands.push(curvebook_chart::PathCmd::QuadTo {
+                    control: curvebook_chart::PointPt::new(cx_pt, cy_pt),
+                    to: curvebook_chart::PointPt::new(x_pt, y_pt),
                 });
             }
-            lumencraft_text::GlyphOutlineCmd::CubicTo { c1x_pt, c1y_pt, c2x_pt, c2y_pt, x_pt, y_pt } => {
-                path.commands.push(lumencraft_chart::PathCmd::CubicTo {
-                    c1: lumencraft_chart::PointPt::new(c1x_pt, c1y_pt),
-                    c2: lumencraft_chart::PointPt::new(c2x_pt, c2y_pt),
-                    to: lumencraft_chart::PointPt::new(x_pt, y_pt),
+            curvebook_text::GlyphOutlineCmd::CubicTo { c1x_pt, c1y_pt, c2x_pt, c2y_pt, x_pt, y_pt } => {
+                path.commands.push(curvebook_chart::PathCmd::CubicTo {
+                    c1: curvebook_chart::PointPt::new(c1x_pt, c1y_pt),
+                    c2: curvebook_chart::PointPt::new(c2x_pt, c2y_pt),
+                    to: curvebook_chart::PointPt::new(x_pt, y_pt),
                 });
             }
-            lumencraft_text::GlyphOutlineCmd::Close => path.commands.push(lumencraft_chart::PathCmd::Close),
+            curvebook_text::GlyphOutlineCmd::Close => path.commands.push(curvebook_chart::PathCmd::Close),
         }
     }
     path
@@ -515,7 +515,7 @@ fn glyph_cmds_to_path(cmds: &[lumencraft_text::GlyphOutlineCmd]) -> lumencraft_c
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_palette::Rgba8;
+    use curvebook_palette::Rgba8;
 
     use super::{UiThemeMode, UiThemeSpec, WCAG_AA_TEXT_MIN_RATIO, WCAG_AAA_TEXT_MIN_RATIO, font_diagnostics, install_fonts, wcag_contrast_ratio};
 

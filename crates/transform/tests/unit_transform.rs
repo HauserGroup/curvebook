@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable,
     DataSheet, DocError, ErrorPropagationMode, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet,
     InternalLinkKind, LinkSource, MAX_ROWS, MAX_SUBCOLUMNS, MathTransformPreset, MultipleVariablesTable, NestedTable, NormalizeAnchor,
     PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SimulationNoise, SubcolumnMode, SurvivalTable, TableArchetype, TableKind,
     TransformAnalysisSpec, VariableRole, XColumnMode, XyTable,
 };
-use lumencraft_transform::import::MAX_IMPORT_CELLS;
-use lumencraft_transform::{
+use curvebook_transform::import::MAX_IMPORT_CELLS;
+use curvebook_transform::{
     AucOptions, BaselineKind, CurveSheetOp, DependencyTarget, DerivativeOrder, FormulaContext, FormulaValue, ImportPipelineOptions,
     ImportSourcePayload, MathTransformOp, PruneMethod, ScalarEnv, SelectRule, SmoothMethod, TransformContext, TransformError,
     apply_curve_calculus_to_sheet, apply_import_link_pipeline, compute_auc, compute_auc_with_se, compute_sheet_auc, detect_link_cycles,
@@ -657,13 +657,13 @@ fn import_link_pipeline_four_stages_and_cycle_detection() {
     if let LinkSource::InternalSheet { ref mut sheet_id, .. } = link_from_2.source {
         *sheet_id = SheetId::new("s2");
     }
-    s2.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+    s2.linked_regions.push(curvebook_doc::LinkedDataRegion {
         id: String::from("l1"),
         spec: link_from_1.clone(),
         target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
         provenance_summary: String::from("s1->s2"),
     });
-    s3.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+    s3.linked_regions.push(curvebook_doc::LinkedDataRegion {
         id: String::from("l2"),
         spec: link_from_2,
         target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
@@ -679,7 +679,7 @@ fn import_link_pipeline_four_stages_and_cycle_detection() {
     if let LinkSource::InternalSheet { ref mut sheet_id, .. } = link_from_3.source {
         *sheet_id = SheetId::new("s3");
     }
-    s1_cyclic.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+    s1_cyclic.linked_regions.push(curvebook_doc::LinkedDataRegion {
         id: String::from("l3"),
         spec: link_from_3,
         target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(0, 0, 0)),
@@ -828,7 +828,7 @@ fn validate_no_formula_cycle_guards_and_errors() {
     mv.variables[2].set_calculated_formula("=ColB * 2");
 
     validate_no_formula_cycle(&mv, 0, "=Raw / 2").unwrap();
-    assert!(matches!(mv.variables[0].source, lumencraft_doc::VariableSource::Entered));
+    assert!(matches!(mv.variables[0].source, curvebook_doc::VariableSource::Entered));
 
     assert!(matches!(validate_no_formula_cycle(&mv, 0, "=ColA + 1"), Err(TransformError::CircularDependency { .. })));
     assert!(matches!(validate_no_formula_cycle(&mv, 0, "=A * 2"), Err(TransformError::CircularDependency { .. })));
@@ -903,7 +903,7 @@ fn rowwise_round_sum_mean_if_log10_and_qpcr_ddct_chain() {
     qpcr.variables[13].set_calculated_formula("=IF(FoldChange > 2, ROUND(LOG10(SUM(Ct_T1, Ct_T2) / RefMean), 3), 0)");
 
     for col_idx in 7..=13 {
-        if let lumencraft_doc::VariableSource::Calculated { formula } = &qpcr.variables[col_idx].source {
+        if let curvebook_doc::VariableSource::Calculated { formula } = &qpcr.variables[col_idx].source {
             validate_no_formula_cycle(&qpcr, col_idx, formula).unwrap();
         }
     }

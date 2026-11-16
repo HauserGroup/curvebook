@@ -1,9 +1,9 @@
-//! Regression tests for Stage 4B S09 typography & layout fixes in `lumencraft-svg`.
+//! Regression tests for Stage 4B S09 typography & layout fixes in `curvebook-svg`.
 
-use lumencraft_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
-use lumencraft_palette::Rgba8;
-use lumencraft_svg::{SvgExportOptions, render_svg, validate_svg_structure};
-use lumencraft_text::{RichText, parse_markup};
+use curvebook_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
+use curvebook_palette::Rgba8;
+use curvebook_svg::{SvgExportOptions, render_svg, validate_svg_structure};
+use curvebook_text::{RichText, parse_markup};
 
 fn path_x_bounds(svg: &str) -> Option<(f64, f64)> {
     let mut min_x = f64::INFINITY;

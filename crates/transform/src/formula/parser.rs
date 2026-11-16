@@ -1,4 +1,4 @@
-//! Lexer and Pratt recursive-descent parser for LumenCraft formulas (`docs/data-tables-and-transforms.md` §4.1).
+//! Lexer and Pratt recursive-descent parser for CurveBook formulas (`docs/data-tables-and-transforms.md` §4.1).
 
 use crate::error::TransformError;
 

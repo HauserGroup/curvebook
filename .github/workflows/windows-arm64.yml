@@ -40,7 +40,7 @@ jobs:
       - name: Install WiX v5
         shell: pwsh
         run: |
-          $tools = Join-Path $env:RUNNER_TEMP 'lumencraft-wix-arm64'
+          $tools = Join-Path $env:RUNNER_TEMP 'curvebook-wix-arm64'
           dotnet tool install --tool-path $tools wix --version 5.0.2
           $tools >> $env:GITHUB_PATH
           & (Join-Path $tools 'wix.exe') extension add -g WixToolset.UI.wixext/5.0.2

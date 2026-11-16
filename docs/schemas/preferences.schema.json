@@ -1,5 +1,5 @@
 {
-  "$id": "https://lumencraft.dev/schemas/preferences.schema.json",
+  "$id": "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/preferences.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": true,
   "description": "Draft 2020-12 schema for versioned user preferences files with forward-compatible extension fields.",

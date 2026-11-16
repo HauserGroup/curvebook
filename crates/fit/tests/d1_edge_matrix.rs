@@ -11,14 +11,14 @@
 //!   R 4.5.2 (2025-10-31) `stats` (`lm`, `optim`, `qf`, `pf`) on purely synthetic fixtures.
 //! - Zero proprietary software references and zero vendor-derived fixtures.
 
-use lumencraft_doc::{CiBound, ConfidenceLevel, FitMethod, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
-use lumencraft_fit::diagnostics::{compare_models_aicc, compare_models_f_test};
-use lumencraft_fit::dsl::CompiledDslModel;
-use lumencraft_fit::error::{FitError, FitStatus, ParameterNote};
-use lumencraft_fit::library::get_builtin_model;
-use lumencraft_fit::solver::{FittedParameterSummary, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models, fit_nonlinear};
-use lumencraft_fit::types::{DataPoint, DatasetSeries, HookContext};
-use lumencraft_testkit::metrics::{assert_approx_eq, assert_lre_at_least};
+use curvebook_doc::{CiBound, ConfidenceLevel, FitMethod, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_fit::diagnostics::{compare_models_aicc, compare_models_f_test};
+use curvebook_fit::dsl::CompiledDslModel;
+use curvebook_fit::error::{FitError, FitStatus, ParameterNote};
+use curvebook_fit::library::get_builtin_model;
+use curvebook_fit::solver::{FittedParameterSummary, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models, fit_nonlinear};
+use curvebook_fit::types::{DataPoint, DatasetSeries, HookContext};
+use curvebook_testkit::metrics::{assert_approx_eq, assert_lre_at_least};
 
 fn series_from_xy(idx: usize, label: &str, xs: &[f64], ys: &[f64]) -> DatasetSeries {
     let points = xs

@@ -1,9 +1,9 @@
-//! Regression tests for Stage 4B S09 typography & layout fixes in `lumencraft-render`.
+//! Regression tests for Stage 4B S09 typography & layout fixes in `curvebook-render`.
 
-use lumencraft_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
-use lumencraft_palette::Rgba8;
-use lumencraft_render::{RasterImage, RenderTargetSpec, render_scene};
-use lumencraft_text::RichText;
+use curvebook_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
+use curvebook_palette::Rgba8;
+use curvebook_render::{RasterImage, RenderTargetSpec, render_scene};
+use curvebook_text::RichText;
 
 fn dark_pixel_row_bounds(img: &RasterImage, y_min: u32, y_max: u32) -> Option<(u32, u32)> {
     let mut min_x = u32::MAX;

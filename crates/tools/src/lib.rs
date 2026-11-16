@@ -1,4 +1,4 @@
-//! Interactive tool state machines for LumenCraft: spreadsheet cell selection, graph object
+//! Interactive tool state machines for CurveBook: spreadsheet cell selection, graph object
 //! manipulation, axis range/break dragging, pairwise significance bracket placement, text/arrow
 //! callouts and publication layout alignment.
 //!
@@ -35,7 +35,7 @@ pub enum Cursor {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{Cell, CellCoord, DataSheet, SheetId, SubcolumnMode, TableArchetype, XyTable};
+    use curvebook_doc::{Cell, CellCoord, DataSheet, SheetId, SubcolumnMode, TableArchetype, XyTable};
 
     use super::{CanvasToolMode, CanvasToolState, Cursor, GridCellCoord, GridToolState, SelectionQuickStats};
 

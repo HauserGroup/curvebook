@@ -4,17 +4,17 @@
 use std::io::Read;
 
 use crc32fast::Hasher;
-use flate2::read::ZlibDecoder;
-use lumencraft_chart::{
+use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
     compile_graph, compile_layout,
 };
-use lumencraft_doc::{
+use curvebook_doc::{
     DataSheet, GraphSheet, LayoutItem, LayoutSheet, LayoutSpec, ProjectDocument, RectPt as DocRectPt, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_VERMILION, Rgba8};
-use lumencraft_render::{RasterImage, RenderError, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
-use lumencraft_text::parse_markup;
+use curvebook_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_VERMILION, Rgba8};
+use curvebook_render::{RasterImage, RenderError, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
+use curvebook_text::parse_markup;
+use flate2::read::ZlibDecoder;
 
 struct DecodedPng {
     width: u32,
@@ -651,7 +651,7 @@ fn rasterizes_rich_and_rotated_text_and_compiled_chart_scenes() {
     assert!(vert_ys.1 > vert_ys.0 && vert_xs.1 > vert_xs.0, "rotated -90° label produced no pixels");
     assert!((vert_ys.1 - vert_ys.0) > (vert_xs.1 - vert_xs.0), "rotated -90° label should be taller than wide");
 
-    // Compile real ChartScenes via `lumencraft_chart` and verify non-blank deterministic exports.
+    // Compile real ChartScenes via `curvebook_chart` and verify non-blank deterministic exports.
     let mut doc = ProjectDocument::default();
     let archetype = TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 2, 8).expect("xy table"));
     let data = DataSheet::new(SheetId::new("data-1"), "Dose Response", archetype).expect("datasheet");
@@ -690,7 +690,7 @@ fn rasterizes_rich_and_rotated_text_and_compiled_chart_scenes() {
 
 #[test]
 fn cld_compiled_graph_rasterizes_deterministically_into_rgba_annotation_band() {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, CompactLetterDisplaySpec, OneWayAnovaSpec, PairwiseComparisonRecord,
         PairwiseDisplayMode, ResultSheet, ResultStatus,
     };

@@ -7,13 +7,13 @@
 
 #![forbid(unsafe_code)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, BaselineOperation, CellCoord, CellValue, ChecklistStatus, ContingencyMethod, DiagnosticPlotKind, EquationDisplayMode, GlmFamily,
     GraphAnnotation, GraphKind, MultiplicityMethod, MultivariatePlotMode, MultivariateSpec, SheetId, SurvivalAnalysisSpec, TableArchetype, TableKind,
     TransformAnalysisSpec, TwoGroupMethod, VariableRole,
 };
-use lumencraft_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
+use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;
@@ -208,7 +208,7 @@ fn r9_12_presummarized_guards_and_extended_statistical_options() -> TestRes {
     let cont_res_id = app.document().result_sheets.last().unwrap().id.as_str().to_owned();
     assert!(matches!(
         app.document().result_sheets.last().unwrap().analysis.kind,
-        AnalysisKind::Contingency(ref c) if c.method == ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Linear }
+        AnalysisKind::Contingency(ref c) if c.method == ContingencyMethod::CohenKappa { weighting: curvebook_doc::KappaWeighting::Linear }
     ));
     select_sheet(&mut app, &cont_res_id)?;
     act(&mut app, "ui.press_key", json!({ "key": "T", "modifiers": { "meta": true } }))?;
@@ -317,7 +317,7 @@ fn r9_12_presummarized_guards_and_extended_statistical_options() -> TestRes {
     )?;
     assert!(matches!(
         app.document().result_sheets.last().unwrap().analysis.kind,
-        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { tie_method: lumencraft_doc::CoxTieMethod::Efron, .. })
+        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { tie_method: curvebook_doc::CoxTieMethod::Efron, .. })
     ));
 
     // 5. RandomSample transform through AnalyzeDialog.

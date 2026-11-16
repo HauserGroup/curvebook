@@ -1,9 +1,9 @@
-Copyright (c) 2026 LumenCraft contributors
+Copyright (c) 2026 CurveBook contributors
 
-The original LumenCraft application icon artwork (`source/approved-seven-pane.png` and the
-archived `source/approved-mole.png`), SVG masters (`lumencraft.svg`, `lumencraft-small.svg`),
+The original CurveBook application icon artwork (`source/approved-seven-pane.png` and the
+archived `source/approved-mole.png`), SVG masters (`curvebook.svg`, `curvebook-small.svg`),
 and every derived icon asset in this directory
-(`lumencraft-1024.png`, `lumencraft-macos-512.png`, `lumencraft.icns`, `lumencraft.ico`, and
+(`curvebook-1024.png`, `curvebook-macos-512.png`, `curvebook.icns`, `curvebook.ico`, and
 `hicolor/`) are dual-licensed under either:
 
   - Apache License, Version 2.0 (../../LICENSE-APACHE or http://www.apache.org/licenses/LICENSE-2.0)
@@ -13,7 +13,7 @@ at your option.
 
 The additional generated pixel-art source (`source/seven-pane-win95-1254.png`), its
 prompt (`source/seven-pane-win95.prompt.txt`), and large transparent export
-(`lumencraft-win95-2508.png`) are covered by the same dual licence.
+(`curvebook-win95-2508.png`) are covered by the same dual licence.
 
 The static and animated emoji exports in `slack/` are derived from that original
 pixel-art source and are covered by the same dual licence.

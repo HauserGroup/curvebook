@@ -1,9 +1,9 @@
-# LumenCraft Agent & Contributor Rules
+# CurveBook Agent & Contributor Rules
 
-This file is the binding engineering and governance specification for **LumenCraft** (crate prefix `lumencraft-*`, repository root `lumencraft/`). Every contributor and AI coding agent must follow these rules.
+This file is the binding engineering and governance specification for **CurveBook** (crate prefix `curvebook-*`, repository root `curvebook/`). Every contributor and AI coding agent must follow these rules.
 
 For concrete extension checklists, common past mistakes, and subsystem details, also read:
-- [docs/pitfalls.md](docs/pitfalls.md) — five documented LumenCraft mistakes and the rules that prevent them
+- [docs/pitfalls.md](docs/pitfalls.md) — five documented CurveBook mistakes and the rules that prevent them
 - [docs/extending.md](docs/extending.md) — where and how to add commands, analyses, fit models, formats, cursors, locales, schema migrations, and assets
 - [docs/command-ids.md](docs/command-ids.md) — canonical command ID scheme, area prefixes, and replay stability rules
 - [docs/file-formats.md](docs/file-formats.md) — persisted formats, ownership, versioning policy, and migrations
@@ -17,7 +17,7 @@ For concrete extension checklists, common past mistakes, and subsystem details, 
 ### Clean-Room Development (`xtask cleanroom`, `xtask brands`)
 1. **Strict clean-room implementation only.** Never copy, translate, decompile, disassemble, or inspect the binaries, memory, or bundled assets of proprietary commercial statistical, graphing, or curve-fitting applications. Only publicly observable file format behaviour (such as `.pzfx` and `.prism` files read/written by `crates/format`), public scientific specifications, and peer-reviewed statistical literature may inform our design.
 2. **No copyleft dependencies or translations.** Never depend on or translate code from `GPL`, `AGPL`, or `LGPL` projects—even permissive-looking ports of GPL codebases (e.g., R, GNU Scientific Library, JASP, PSPP, Veusz, LabPlot, SciDAVis).
-3. **Neutral terminology and original brand identity.** Write all code, UI labels, comments, examples, and documentation in LumenCraft's own words. Never reference other suite brands, placeholder template package names, or proprietary competitor product names anywhere in the repository (`cargo xtask brands` and `cargo xtask cleanroom` enforce this). Keep `.prism` and `.pzfx` naming strictly limited to file format parser/exporter boundaries.
+3. **Neutral terminology and original brand identity.** Write all code, UI labels, comments, examples, and documentation in CurveBook's own words. Never reference other suite brands, placeholder template package names, or proprietary competitor product names anywhere in the repository (`cargo xtask brands` and `cargo xtask cleanroom` enforce this). Keep `.prism` and `.pzfx` naming strictly limited to file format parser/exporter boundaries.
 
 ### Statistical Rigor & Verified Oracles (`D1` Rule)
 1. **Cite a published reference.** Every statistical test, probability distribution, numerical solver, transform, and curve-fitting routine in `crates/math`, `crates/stats`, `crates/fit`, and `crates/transform` must cite a peer-reviewed paper, standard textbook (e.g., Zar, Motulsky & Christopoulos, Press et al.), or NIST StRD specification in its doc comments.
@@ -26,20 +26,20 @@ For concrete extension checklists, common past mistakes, and subsystem details, 
 
 ### Assets & Zero Bundled Fonts (`xtask assets`)
 1. **Every asset needs attribution.** Every image, icon, SVG, cursor, sample file, or third-party data file in the repository must have a row in [ASSETS.md](ASSETS.md) (and an entry in [ATTRIBUTION.md](ATTRIBUTION.md) when third-party), verified by `cargo xtask assets`.
-2. **Zero bundled font files.** Do not commit `.ttf`, `.otf`, `.woff`, or `.woff2` files into the repository (`cargo xtask assets` fails if any font binaries are tracked). Native builds discover system fonts dynamically (overridable with `LUMENCRAFT_FONTS_DIR`), and optional `bundled-fonts` builds for local web/dev testing use untracked local fetches (`cargo xtask web-fonts`).
+2. **Zero bundled font files.** Do not commit `.ttf`, `.otf`, `.woff`, or `.woff2` files into the repository (`cargo xtask assets` fails if any font binaries are tracked). Native builds discover system fonts dynamically (overridable with `CURVEBOOK_FONTS_DIR`), and optional `bundled-fonts` builds for local web/dev testing use untracked local fetches (`cargo xtask web-fonts`).
 
-### LumenCraft Never Crashes
+### CurveBook Never Crashes
 1. **No panicking paths in shipped code.** Workspace `[lints.clippy]` in [Cargo.toml](Cargo.toml) denies:
    - `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`
    - `unsafe_code` (and every crate must include `#![forbid(unsafe_code)]` and `[lints] workspace = true`)
    - `wildcard_imports`, `cognitive_complexity`, `too_many_arguments`
-2. **Validate every external boundary.** File I/O, `.lumencraft`/`.pzfx`/`.prism`/CSV parsing, RPC/MCP requests, user expressions, and slice indexing must use checked access (`.get(...)`, checked arithmetic, typed `Result` / `Option` returns) and surface actionable errors to the caller/user rather than crashing.
+2. **Validate every external boundary.** File I/O, `.curvebook`/`.pzfx`/`.prism`/CSV parsing, RPC/MCP requests, user expressions, and slice indexing must use checked access (`.get(...)`, checked arithmetic, typed `Result` / `Option` returns) and surface actionable errors to the caller/user rather than crashing.
 3. **Last-resort UI/MCP guard.** Keep `crates/engine/src/guard.rs` in place at UI/MCP boundaries only as defence-in-depth—never rely on `catch_unwind` to excuse panics in libraries.
 
 ### Pure Rust, `wasm32` Clean Core, and No `chrono`
 1. **Rust only.** All production crates, applications, CLI, MCP server, and `xtask` build/verify automation are written in Rust (`edition = "2024"`, `rust-version = "1.99.1"`).
-2. **`wasm32-unknown-unknown` compatibility for headless layers.** Keep `L0`–`L5` headless logic (`math`, `palette`, `doc`, `transform`, `stats`, `fit`, `text`, `chart`, `svg`, `pdf`, `render`, `tools`, `engine`) free of unguarded OS/blocking assumptions so `cargo xtask wasm` continues to pass. Place OS/filesystem/process shims behind `lumencraft-platform` (`crates/platform`) or `apps/*`.
-3. **No `chrono` crate and no hand-rolled calendar math.** `chrono` is intentionally excluded from `Cargo.toml` to keep dependencies minimal and deterministic. Never add `chrono` to workspace manifests and never hand-roll Gregorian leap-year/calendar arithmetic. For native fallback timestamps use `std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)` (recording epoch milliseconds/seconds or `unix:<secs>`), and keep `wasm32`/deterministic library paths dependent on caller-supplied timestamps or `lumencraft-platform`.
+2. **`wasm32-unknown-unknown` compatibility for headless layers.** Keep `L0`–`L5` headless logic (`math`, `palette`, `doc`, `transform`, `stats`, `fit`, `text`, `chart`, `svg`, `pdf`, `render`, `tools`, `engine`) free of unguarded OS/blocking assumptions so `cargo xtask wasm` continues to pass. Place OS/filesystem/process shims behind `curvebook-platform` (`crates/platform`) or `apps/*`.
+3. **No `chrono` crate and no hand-rolled calendar math.** `chrono` is intentionally excluded from `Cargo.toml` to keep dependencies minimal and deterministic. Never add `chrono` to workspace manifests and never hand-roll Gregorian leap-year/calendar arithmetic. For native fallback timestamps use `std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)` (recording epoch milliseconds/seconds or `unix:<secs>`), and keep `wasm32`/deterministic library paths dependent on caller-supplied timestamps or `curvebook-platform`.
 
 ### Licence Allowlist (Short Policy)
 Only permissive, compatible crate licences are allowed in Cargo dependencies:
@@ -50,7 +50,7 @@ Copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) is strictly forbidden. See [docs/licences
 Never delete, truncate, or omit contributor attributions in [docs/contributors.md](docs/contributors.md), `ATTRIBUTION.md`, or `NOTICE` (`cargo xtask contributors` keeps contributor records synced). Report or handle vulnerability details strictly per [SECURITY.md](SECURITY.md).
 
 ### Zero Telemetry (`xtask telemetry`)
-1. **Strict zero-telemetry & zero-egress architecture.** Never add analytics, crash reporters, telemetry SDKs, auto-updaters, or HTTP client crates anywhere in Cargo manifests or `Cargo.lock`, and never introduce `fetch(`, `XMLHttpRequest`, `navigator.sendBeacon`, `WebSocket`, or external origins in `apps/lumencraft-web/` or `packaging/web/`.
+1. **Strict zero-telemetry & zero-egress architecture.** Never add analytics, crash reporters, telemetry SDKs, auto-updaters, or HTTP client crates anywhere in Cargo manifests or `Cargo.lock`, and never introduce `fetch(`, `XMLHttpRequest`, `navigator.sendBeacon`, `WebSocket`, or external origins in `apps/curvebook-web/` or `packaging/web/`.
 2. **Loopback-only local sockets.** Non-test production Rust code may bind TCP sockets only for explicit user-initiated local loopback IPC (`127.0.0.1` / `::1` via `validate_loopback_addr` in `--control` / MCP modes), and GitHub Actions workflows must pin `permissions: contents: read` without unvalidated `${{ github.event.* }}` script injection (`cargo xtask telemetry` enforces all 5 checks inside `cargo xtask ci`).
 3. **Web security headers.** Keep strict `Content-Security-Policy` (`default-src 'self'`, `connect-src 'self'` for same-origin `.wasm` streaming only and zero external origins), `Referrer-Policy: no-referrer`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, `Cross-Origin-Embedder-Policy: require-corp`, and `X-Content-Type-Options: nosniff` in `packaging/web/_headers` and `packaging/web/.htaccess`.
 
@@ -62,7 +62,7 @@ One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came 
 
 - **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`97` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `MUTATES_DOCUMENT` / `READ_ONLY` / `IDEMPOTENT`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
 - **UI command registry:** UI-only actions use the typed `UiCommandSpec` struct slice `UI_COMMANDS` (`45` entries) in `crates/ui-egui/src/menus/ui_commands.rs`. `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and always check sync with `cargo xtask ui-commands --check`.
-- **Strict `--gui-only` channel lock:** Under `lumencraft --control <port> --gui-only` or `lumencraft-cli mcp [--control-port <p>] --gui-only` (`GuiOnlyPolicy::Strict` in `crates/engine/src/lib.rs`), direct `Caller::Control` / `Caller::Mcp` engine mutations, `doc_inspect`, `resources/read`, and disk-path `ui.screenshot` writes are rejected with `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`), while the 8 `gui` tools (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`) drive `UiApp` widgets that commit internally via `Caller::Ui`.
+- **Strict `--gui-only` channel lock:** Under `curvebook --control <port> --gui-only` or `curvebook-cli mcp [--control-port <p>] --gui-only` (`GuiOnlyPolicy::Strict` in `crates/engine/src/lib.rs`), direct `Caller::Control` / `Caller::Mcp` engine mutations, `doc_inspect`, `resources/read`, and disk-path `ui.screenshot` writes are rejected with `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`), while the 8 `gui` tools (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`) drive `UiApp` widgets that commit internally via `Caller::Ui`.
 
 ---
 
@@ -88,17 +88,17 @@ Read these before editing code:
   `feature/`, `bugfix/`, `hotfix/`, `refactor/`, `docs/`, `test/`, `chore/`, `audit/`
   Example: `feature/R0.10-platform-atomic-write`, `bugfix/R2.3-anova-unequal-n`.
 - **Pull requests & merge style:** PRs are **squash-merged** into `main`. Write a clear, plain-English PR title **ending with `(R<m>.<n>)`**, e.g.:
-  `Move atomic saves into lumencraft-platform (R0.10)`
+  `Move atomic saves into curvebook-platform (R0.10)`
   *(This replaces the legacy `M1.1: ...` title-prefix convention.)*
 - Keep each PR focused on **one** roadmap item (`R<m>.<n>`) unless splitting/grouping is explicitly planned in `docs/ROADMAP.md`.
 
 ### Architecture Rules
-1. **Headless first:** All document/data/analysis/graph mutations execute through `lumencraft-engine` (`Session::execute`), ensuring parity across GUI (`ui-egui` via `Caller::Ui`), CLI (`lumencraft-cli`), MCP (`lumencraft-mcp`), crash-recovery replay (`ops.journal`), and batch runs (`lumencraft.batch.v1`). UI layers must never mutate `Project` directly. Under strict `--gui-only`, interactive MCP/control callers must drive `UiApp` widgets rather than calling direct `L5` engine mutation commands.
+1. **Headless first:** All document/data/analysis/graph mutations execute through `curvebook-engine` (`Session::execute`), ensuring parity across GUI (`ui-egui` via `Caller::Ui`), CLI (`curvebook-cli`), MCP (`curvebook-mcp`), crash-recovery replay (`ops.journal`), and batch runs (`curvebook.batch.v1`). UI layers must never mutate `Project` directly. Under strict `--gui-only`, interactive MCP/control callers must drive `UiApp` widgets rather than calling direct `L5` engine mutation commands.
 2. **Extend through seams:** Register new commands, analyses, fit equations, file formats, cursors, locales, and schema steps through the canonical seams documented in [docs/extending.md](docs/extending.md).
 3. **Data over code:** Prefer declarative descriptor tables, schema definitions, and TOML/struct registries (`CommandSpec`, `UiCommandSpec`, `cursors.toml`, parametric model metadata, format descriptors) over copy-pasted match arms.
 4. **Structured results:** Commands, fits, statistical analyses, and imports return typed result structures and typed errors (`EngineError`, `DocError`, `FormatError`) rather than opaque strings.
-5. **Versioned files:** Every persisted document, template, settings file, lock/journal envelope, and batch schema has an explicit format version and migration step, and **refuses to overwrite newer versions** saved by a newer LumenCraft release ([docs/file-formats.md](docs/file-formats.md)).
-6. **Bounded processes & atomic writes via `lumencraft-platform`:** All persistent writes (projects, unpacked directories, templates, preferences, exports) must write via temp file + sync + atomic rename—never bare `std::fs::write` over an existing target—and subprocesses must use bounded timeouts and cleaned environments through `crates/platform` (`lumencraft-platform`, introduced in `R0.10`).
+5. **Versioned files:** Every persisted document, template, settings file, lock/journal envelope, and batch schema has an explicit format version and migration step, and **refuses to overwrite newer versions** saved by a newer CurveBook release ([docs/file-formats.md](docs/file-formats.md)).
+6. **Bounded processes & atomic writes via `curvebook-platform`:** All persistent writes (projects, unpacked directories, templates, preferences, exports) must write via temp file + sync + atomic rename—never bare `std::fs::write` over an existing target—and subprocesses must use bounded timeouts and cleaned environments through `crates/platform` (`curvebook-platform`, introduced in `R0.10`).
 
 ### Done Means & "Before You Finish"
 A task is **Done** only when:
@@ -139,11 +139,11 @@ cargo xtask pending
 cargo xtask wasm
 ```
 
-(Running `cargo xtask ci` executes the full workspace CI bundle. For strict `--gui-only` MCP/control/UI workflow checks, run integration targets `gui_only_workflows`, `gui_w22b_qol_and_r9`, `gui_wf_foundations_and_data`, `gui_wf_group_comparisons_and_power`, `gui_wf_regression_contingency_multivariate`, `gui_wf_statistical_graphs`, `gui_wf_multivariable_and_transforms`, `gui_wf_clustering_glm_and_pharma`, and `gui_wf_advanced_statistical_graphs` in `lumencraft-ui-egui`, `gui_only_surface` in `lumencraft-mcp`, `mcp_gui_only_parity` in `lumencraft-cli`, and `gui_only_wiring` in `lumencraft`.)
+(Running `cargo xtask ci` executes the full workspace CI bundle. For strict `--gui-only` MCP/control/UI workflow checks, run integration targets `gui_only_workflows`, `gui_w22b_qol_and_r9`, `gui_wf_foundations_and_data`, `gui_wf_group_comparisons_and_power`, `gui_wf_regression_contingency_multivariate`, `gui_wf_statistical_graphs`, `gui_wf_multivariable_and_transforms`, `gui_wf_clustering_glm_and_pharma`, and `gui_wf_advanced_statistical_graphs` in `curvebook-ui-egui`, `gui_only_surface` in `curvebook-mcp`, `mcp_gui_only_parity` in `curvebook-cli`, and `gui_only_wiring` in `curvebook`.)
 
 ### Parallel Agents
 When multiple agents work concurrently on the repository:
-1. **Isolate `CARGO_TARGET_DIR`:** Give every agent its own build directory (for example `CARGO_TARGET_DIR=/tmp/lc-<agent-name>`) so Cargo package locks and build artefacts never collide.
+1. **Isolate `CARGO_TARGET_DIR`:** Give every agent its own build directory (for example `CARGO_TARGET_DIR=/tmp/cb-<agent-name>`) so Cargo package locks and build artefacts never collide.
 2. **Strictly non-overlapping crate/file ownership:** Assign disjoint crates or files before starting. Two agents must never edit the same file simultaneously.
 3. **No shared-tree git mutations:** Never run `git add`, `git commit`, `git reset`, `git checkout`, or `git config` inside a shared working copy unless you are working in your own isolated git worktree/share.
-4. **Never use `/private/tmp` (or `/tmp` worktrees/file-tool paths):** On macOS `/tmp` resolves to `/private/tmp` outside the workspace, causing permission prompts and sandbox-locked leftovers. Keep `git worktree` checkouts and scratch files inside the workspace (e.g. `../.lc-worktrees/<agent-name>`), never pass `/tmp` or `/private/tmp` to `read_file`/`edit_file`/`write_file`, and limit `/tmp` to `run_command` env vars (`CARGO_TARGET_DIR`, `CARGO_HOME`, `RUSTUP_HOME`).
+4. **Never use `/private/tmp` (or `/tmp` worktrees/file-tool paths):** On macOS `/tmp` resolves to `/private/tmp` outside the workspace, causing permission prompts and sandbox-locked leftovers. Keep `git worktree` checkouts and scratch files inside the workspace (e.g. `../.cb-worktrees/<agent-name>`), never pass `/tmp` or `/private/tmp` to `read_file`/`edit_file`/`write_file`, and limit `/tmp` to `run_command` env vars (`CARGO_TARGET_DIR`, `CARGO_HOME`, `RUSTUP_HOME`).

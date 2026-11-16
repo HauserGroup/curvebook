@@ -317,11 +317,11 @@ impl std::error::Error for StrdCorpusLoadError {
     }
 }
 
-/// Resolve the default NIST StRD corpus directory (`LUMENCRAFT_CORPUS_DIR` env override, or
+/// Resolve the default NIST StRD corpus directory (`CURVEBOOK_CORPUS_DIR` env override, or
 /// `<workspace_root>/corpus/nist-strd`).
 #[must_use]
 pub fn default_nist_strd_dir() -> PathBuf {
-    if let Some(dir) = std::env::var_os("LUMENCRAFT_CORPUS_DIR")
+    if let Some(dir) = std::env::var_os("CURVEBOOK_CORPUS_DIR")
         && !dir.is_empty()
     {
         return PathBuf::from(dir);
@@ -456,7 +456,7 @@ mod tests {
     };
 
     fn require_corpus_env() -> bool {
-        std::env::var_os("LUMENCRAFT_REQUIRE_CORPUS").is_some_and(|v| v == "1")
+        std::env::var_os("CURVEBOOK_REQUIRE_CORPUS").is_some_and(|v| v == "1")
     }
 
     #[test]
@@ -530,7 +530,7 @@ mod tests {
     fn on_disk_58_file_corpus_verifies_sha256_and_parses_all_suites() {
         let dir = default_nist_strd_dir();
         if !corpus_available(&dir) {
-            assert!(!require_corpus_env(), "LUMENCRAFT_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}", dir.display());
+            assert!(!require_corpus_env(), "CURVEBOOK_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}", dir.display());
             return;
         }
 

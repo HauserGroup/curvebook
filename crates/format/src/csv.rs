@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, ImportFilterSpec,
     ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn,
     NestedTable, PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn,
@@ -649,7 +649,7 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
 ) -> Result<DataSheet, FormatError> {
     subcolumn_mode.validate()?;
     if !target_kind.allows_subcolumn_mode(subcolumn_mode) {
-        return Err(FormatError::Doc(lumencraft_doc::DocError::IncompatibleSubcolumnMode { archetype: target_kind, mode: subcolumn_mode }));
+        return Err(FormatError::Doc(curvebook_doc::DocError::IncompatibleSubcolumnMode { archetype: target_kind, mode: subcolumn_mode }));
     }
     let prefix_cols = usize::from(opts.has_row_titles)
         + usize::from(
@@ -1230,7 +1230,7 @@ pub fn apply_csv_import_link(
 ) -> Result<SheetCellRange, FormatError> {
     target.ensure_mutable()?;
     let (delimiter, decimal_separator) = match &spec.source {
-        lumencraft_doc::LinkSource::ExternalDelimitedFile { delimiter, decimal_separator, .. } => (*delimiter, *decimal_separator),
+        curvebook_doc::LinkSource::ExternalDelimitedFile { delimiter, decimal_separator, .. } => (*delimiter, *decimal_separator),
         _ => (',', '.'),
     };
     let filtered = filter_delimited_text(csv_text, delimiter, decimal_separator, has_header, &spec.filter)?;

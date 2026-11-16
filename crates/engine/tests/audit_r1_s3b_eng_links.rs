@@ -4,12 +4,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, ErrorCode, FitMethod, GroupedTable,
     HookSource, InfoSheet, NonlinearFitSpec, NormalizeAnchor, ParameterRule, ParameterScope, ProjectDocument, ResultSheet, ResultStatus,
     SheetCellRange, SheetId, SubcolumnMode, TableArchetype, TransformAnalysisSpec, WeightingScheme, XColumnMode, XyTable,
 };
-use lumencraft_engine::{Session, dag};
+use curvebook_engine::{Session, dag};
 use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -23,7 +23,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let id = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lumencraft-s3b-eng-links-{label}-{}-{id}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("curvebook-s3b-eng-links-{label}-{}-{id}", std::process::id()));
         if path.exists() {
             let _ = fs::remove_dir_all(&path);
         }

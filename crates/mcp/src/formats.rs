@@ -4,17 +4,17 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
-use lumencraft_chart::{ChartScene, compile_graph, compile_layout};
-use lumencraft_doc::{DataSheet, ErrorCode, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
-use lumencraft_engine::{EngineError, Session};
-use lumencraft_format::{
+use curvebook_chart::{ChartScene, compile_graph, compile_layout};
+use curvebook_doc::{DataSheet, ErrorCode, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
+use curvebook_engine::{EngineError, Session};
+use curvebook_format::{
     CsvOptions, ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatError, FormatKind, FormatRegistry, ImportOptions, ImportPayload,
     Importer, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv, is_unpacked_project_dir,
     strip_project_data_for_template,
 };
-use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use lumencraft_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
-use lumencraft_svg::{SvgExportOptions, render_svg};
+use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
+use curvebook_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
+use curvebook_svg::{SvgExportOptions, render_svg};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
 
@@ -73,7 +73,7 @@ pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result
 pub(crate) fn sanitize_command_params(state: &McpServerState, params: &mut Value) -> Result<(), EngineError> {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(guard) = state.workdir_guard() {
-        lumencraft_platform::PathResolver::Sandboxed(guard.clone()).sanitize_params(params).map_err(EngineError::from)?;
+        curvebook_platform::PathResolver::Sandboxed(guard.clone()).sanitize_params(params).map_err(EngineError::from)?;
     }
     #[cfg(target_arch = "wasm32")]
     let _ = (state, params);
@@ -97,7 +97,7 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
     let import_opts = build_import_options(&resolved_path, args)?;
 
     let format_id = importer.descriptor().id;
-    if format_id == "lumencraft.d" {
+    if format_id == "curvebook.d" {
         let payload = match importer.import_path(&resolved_path, &import_opts) {
             Ok(p) => p,
             Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
@@ -106,9 +106,9 @@ pub(crate) fn handle_open_file(state: &mut McpServerState, args: &Map<String, Va
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    let raw_bytes = match lumencraft_platform::fs::read_regular_file_bytes(&resolved_path, importer.max_input_bytes()) {
+    let raw_bytes = match curvebook_platform::fs::read_regular_file_bytes(&resolved_path, importer.max_input_bytes()) {
         Ok(bytes) => bytes,
-        Err(lumencraft_platform::PlatformError::InvalidPath { reason }) => {
+        Err(curvebook_platform::PlatformError::InvalidPath { reason }) => {
             return Ok(errors::result_from_engine_error(&EngineError::with_code(
                 ErrorCode::BadInput,
                 format!("invalid file `{}`: {reason}", resolved_path.display()),
@@ -222,7 +222,7 @@ fn apply_imported_payload(
     }
 
     match (format_id, payload) {
-        ("lumencraft" | "lumencraft.d", ImportPayload::Document(doc)) => {
+        ("curvebook" | "curvebook.d", ImportPayload::Document(doc)) => {
             let sheets = doc.total_sheet_count();
             let title = doc.title.clone();
             state.install_session(Session::from_document(doc));
@@ -235,7 +235,7 @@ fn apply_imported_payload(
                 "total_sheet_count": sheets,
             }))
         }
-        ("lctemplate", ImportPayload::Document(raw_doc)) => {
+        ("cbtemplate", ImportPayload::Document(raw_doc)) => {
             let mut doc = match strip_project_data_for_template(&raw_doc) {
                 Ok(d) => d,
                 Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
@@ -252,7 +252,7 @@ fn apply_imported_payload(
             state.session_mut().set_file_path(None, true);
             ToolCallResult::ok_json(&json!({
                 "opened": true,
-                "format": "lctemplate",
+                "format": "cbtemplate",
                 "path": resolved_path.display().to_string(),
                 "title": title,
                 "total_sheet_count": sheets,
@@ -294,10 +294,10 @@ fn apply_imported_payload_live(
     append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
     match (format_id, payload) {
-        ("lumencraft" | "lumencraft.d", ImportPayload::Document(_)) => {
+        ("curvebook" | "curvebook.d", ImportPayload::Document(_)) => {
             let params = json!({
                 "path": resolved_path.display().to_string(),
-                "unpacked": format_id == "lumencraft.d",
+                "unpacked": format_id == "curvebook.d",
             });
             let res = match state.send_live_control("engine.execute", json!({ "command_id": "project.open", "params": params })) {
                 Ok(v) => v,
@@ -315,7 +315,7 @@ fn apply_imported_payload_live(
                 "total_sheet_count": sheet_count,
             }))
         }
-        ("lctemplate", ImportPayload::Document(_)) => {
+        ("cbtemplate", ImportPayload::Document(_)) => {
             let mut params = Map::new();
             params.insert(String::from("path"), json!(resolved_path.display().to_string()));
             if let Some(title) = title_override {
@@ -333,7 +333,7 @@ fn apply_imported_payload_live(
                 "opened": true,
                 "mode": "live_attach",
                 "control_port": port,
-                "format": "lctemplate",
+                "format": "cbtemplate",
                 "path": resolved_path.display().to_string(),
                 "title": title,
                 "total_sheet_count": sheet_count,
@@ -443,7 +443,7 @@ fn apply_report_import(
 
     let mut next_session = Session::new();
     let cancel = std::sync::atomic::AtomicBool::new(false);
-    if let Err(err) = next_session.execute_with_caller(command_id, params, lumencraft_engine::Caller::Mcp, &cancel) {
+    if let Err(err) = next_session.execute_with_caller(command_id, params, curvebook_engine::Caller::Mcp, &cancel) {
         return Ok(errors::result_from_engine_error(&err));
     }
 
@@ -469,7 +469,7 @@ fn apply_csv_import(
     append: bool,
 ) -> Result<ToolCallResult, ToolCallError> {
     if append && state.session().document().sheet_section(&import_opts.sheet_id).is_some() {
-        return Ok(errors::result_from_engine_error(&EngineError::from(lumencraft_doc::DocError::DuplicateSheetId {
+        return Ok(errors::result_from_engine_error(&EngineError::from(curvebook_doc::DocError::DuplicateSheetId {
             sheet_id: import_opts.sheet_id.clone(),
         })));
     }
@@ -504,7 +504,7 @@ fn execute_csv_import_on_session(
     params: Value,
 ) -> Result<ToolCallResult, ToolCallError> {
     let cancel = std::sync::atomic::AtomicBool::new(false);
-    if let Err(err) = session.execute_with_caller("table.importCsv", params, lumencraft_engine::Caller::Mcp, &cancel) {
+    if let Err(err) = session.execute_with_caller("table.importCsv", params, curvebook_engine::Caller::Mcp, &cancel) {
         return Ok(errors::result_from_engine_error(&err));
     }
     let Some(ds) = session.document().data_sheet(sheet_id) else {
@@ -555,12 +555,12 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
         let reg = FormatRegistry::default_registry();
         let exporter = resolve_save_exporter(&reg, explicit_format.as_deref(), &resolved_path)?;
         let format_id = exporter.descriptor().id;
-        let cmd_id = if format_id == "lctemplate" { "project.saveTemplate" } else { "project.save" };
+        let cmd_id = if format_id == "cbtemplate" { "project.saveTemplate" } else { "project.save" };
         let mut cmd_params = json!({
             "path": resolved_path.display().to_string(),
             "return_bytes": false,
         });
-        if format_id == "lumencraft.d"
+        if format_id == "curvebook.d"
             && let Some(obj) = cmd_params.as_object_mut()
         {
             obj.insert(String::from("unpacked"), json!(true));
@@ -606,7 +606,7 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
         return Ok(errors::result_from_engine_error(&engine_err));
     }
 
-    if matches!(format_id, "lumencraft" | "lumencraft.d") {
+    if matches!(format_id, "curvebook" | "curvebook.d") {
         state.mutate_active_session(|session| session.set_file_path(Some(resolved_path.clone()), true));
     }
 
@@ -619,27 +619,27 @@ pub(crate) fn handle_save_file(state: &mut McpServerState, args: &Map<String, Va
     }))
 }
 
-fn has_lumencraft_unpacked_suffix(path: &Path) -> bool {
-    path.file_name().and_then(std::ffi::OsStr::to_str).is_some_and(|name| name.to_ascii_lowercase().ends_with(".lumencraft.d"))
+fn has_curvebook_unpacked_suffix(path: &Path) -> bool {
+    path.file_name().and_then(std::ffi::OsStr::to_str).is_some_and(|name| name.to_ascii_lowercase().ends_with(".curvebook.d"))
 }
 
 fn resolve_save_exporter<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, path: &Path) -> Result<&'a dyn Exporter, ToolCallError> {
     if let Some(fmt) = explicit {
-        if !matches!(fmt, "lumencraft" | "lumencraft.d" | "lctemplate") {
+        if !matches!(fmt, "curvebook" | "curvebook.d" | "cbtemplate") {
             return Err(ToolCallError::InvalidParams(format!("unsupported save format '{fmt}'")));
         }
         return reg.exporter_by_format(fmt).ok_or_else(|| ToolCallError::InvalidParams(format!("unsupported save format '{fmt}'")));
     }
-    if !has_lumencraft_unpacked_suffix(path) && !is_unpacked_project_dir(path) && path.is_dir() {
-        return Err(ToolCallError::InvalidParams(format!("save_file target `{}` is a directory without a `.lumencraft.d` suffix", path.display())));
+    if !has_curvebook_unpacked_suffix(path) && !is_unpacked_project_dir(path) && path.is_dir() {
+        return Err(ToolCallError::InvalidParams(format!("save_file target `{}` is a directory without a `.curvebook.d` suffix", path.display())));
     }
     if let Some(found) = reg.exporter_for_path(path)
-        && matches!(found.descriptor().id, "lumencraft" | "lumencraft.d" | "lctemplate")
-        && (found.descriptor().id != "lumencraft.d" || has_lumencraft_unpacked_suffix(path) || is_unpacked_project_dir(path))
+        && matches!(found.descriptor().id, "curvebook" | "curvebook.d" | "cbtemplate")
+        && (found.descriptor().id != "curvebook.d" || has_curvebook_unpacked_suffix(path) || is_unpacked_project_dir(path))
     {
         return Ok(found);
     }
-    reg.exporter_by_format("lumencraft").ok_or_else(|| ToolCallError::InvalidParams(String::from("lumencraft exporter unavailable")))
+    reg.exporter_by_format("curvebook").ok_or_else(|| ToolCallError::InvalidParams(String::from("curvebook exporter unavailable")))
 }
 
 /// Handle `render_preview`: compile GraphSheet/LayoutSheet and rasterize PNG preview with metadata.
@@ -827,7 +827,7 @@ fn write_atomic_export(dest: &Path, format: &str, target_id: &str, bytes: &[u8])
                     .with_retryable(true),
             ));
         }
-        if let Err(err) = lumencraft_platform::fs::write_atomic(dest, bytes) {
+        if let Err(err) = curvebook_platform::fs::write_atomic(dest, bytes) {
             return Ok(errors::result_from_engine_error(&EngineError::from(err)));
         }
         ToolCallResult::ok_json(&json!({
@@ -1022,18 +1022,18 @@ impl Exporter for McpPdfExporter {
 
         let (target_id, pdf_bytes) = if self.cfg.all_graphs && self.cfg.sheet_id.is_none() {
             let total_sheets = doc.graph_sheets.len().saturating_add(doc.layout_sheets.len());
-            if total_sheets > lumencraft_pdf::MAX_PDF_PAGES {
-                return Err(FormatError::Io(format!("PDF page count {total_sheets} exceeds maximum {}", lumencraft_pdf::MAX_PDF_PAGES)));
+            if total_sheets > curvebook_pdf::MAX_PDF_PAGES {
+                return Err(FormatError::Io(format!("PDF page count {total_sheets} exceeds maximum {}", curvebook_pdf::MAX_PDF_PAGES)));
             }
             let mut scenes = Vec::with_capacity(total_sheets);
             let mut total_primitives: usize = 0;
             for gs in &doc.graph_sheets {
                 let scene = compile_graph(gs, doc).map_err(|err| FormatError::Io(format!("chart compile failed for '{}': {err}", gs.id)))?;
                 total_primitives = total_primitives.saturating_add(scene.primitives.len());
-                if total_primitives > lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES {
+                if total_primitives > curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES {
                     return Err(FormatError::Io(format!(
                         "PDF primitive count {total_primitives} exceeds maximum {}",
-                        lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES
+                        curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES
                     )));
                 }
                 scenes.push(scene);
@@ -1041,10 +1041,10 @@ impl Exporter for McpPdfExporter {
             for ls in &doc.layout_sheets {
                 let scene = compile_layout(ls, doc).map_err(|err| FormatError::Io(format!("layout compile failed for '{}': {err}", ls.id)))?;
                 total_primitives = total_primitives.saturating_add(scene.primitives.len());
-                if total_primitives > lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES {
+                if total_primitives > curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES {
                     return Err(FormatError::Io(format!(
                         "PDF primitive count {total_primitives} exceeds maximum {}",
-                        lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES
+                        curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES
                     )));
                 }
                 scenes.push(scene);

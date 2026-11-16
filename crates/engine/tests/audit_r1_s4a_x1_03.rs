@@ -1,4 +1,4 @@
-//! Permanent regression tests for `R1-X1-03` across `lumencraft-engine`:
+//! Permanent regression tests for `R1-X1-03` across `curvebook-engine`:
 //! - Non-regular files (FIFOs, symlinks to FIFOs, directories, `/dev/null`, `/dev/zero`) rejected
 //!   before `open()`/`read()` without blocking or OOM.
 //! - Oversized files (`> per-format cap`) rejected BEFORE reading or allocating via metadata +
@@ -12,12 +12,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     CellCoord, ErrorCode, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange,
     SheetId,
 };
-use lumencraft_engine::{ExternalPathPolicy, Session};
-use lumencraft_format::{MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES};
+use curvebook_engine::{ExternalPathPolicy, Session};
+use curvebook_format::{MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES};
 use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -31,7 +31,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn create(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let id = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lc-s4a-x103-eng-{label}-{}-{id}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cb-s4a-x103-eng-{label}-{}-{id}", std::process::id()));
         if path.exists() {
             let _ = fs::remove_dir_all(&path);
         }
@@ -197,7 +197,7 @@ fn r1_x1_03_oversized_files_rejected_before_allocation() -> TestResult {
     create_sparse_file(&big_pzfx, (MAX_XML_BYTES as u64).saturating_add(1))?;
     let big_pzfx_str = big_pzfx.display().to_string();
 
-    let big_archive = dir.child("oversized.lumencraft");
+    let big_archive = dir.child("oversized.curvebook");
     create_sparse_file(&big_archive, (MAX_ARCHIVE_FILE_BYTES as u64).saturating_add(1))?;
     let big_archive_str = big_archive.display().to_string();
 

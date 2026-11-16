@@ -13,15 +13,15 @@
 
 #![forbid(unsafe_code)]
 
-use lumencraft_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, CellCoord, CellValue, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage, CoxTieMethod, DataSheet, MultivariatePlotMode,
     MultivariateSpec, ParameterScope, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SurvivalAnalysisSpec, TableArchetype,
     VariableRole,
 };
-use lumencraft_palette::LineDashStyle;
-use lumencraft_testkit::metrics::approx_eq;
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
+use curvebook_palette::LineDashStyle;
+use curvebook_testkit::metrics::approx_eq;
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;

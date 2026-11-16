@@ -1,4 +1,4 @@
-//! Biostatistics & Multiplicity Engine for LumenCraft (Layer L2).
+//! Biostatistics & Multiplicity Engine for CurveBook (Layer L2).
 //!
 //! Provides column descriptive statistics, normality & lognormality tests, outlier detection
 //! (Grubbs & standalone ROUT), two-group comparisons & Bland–Altman agreement, one-/two-/three-/N-way
@@ -24,7 +24,7 @@ pub mod roc;
 pub mod survival;
 pub mod two_group;
 
-use lumencraft_doc::{AnalysisKind, AnalysisSpec, DataSheet, ResultSheet};
+use curvebook_doc::{AnalysisKind, AnalysisSpec, DataSheet, ResultSheet};
 
 pub use error::StatsError;
 pub use power::{
@@ -48,7 +48,7 @@ pub enum AnalysisFamily {
     PowerAndSampleSize,
 }
 
-/// Dispatch any statistical [`AnalysisSpec`] handled by `lumencraft-stats` against a [`DataSheet`]
+/// Dispatch any statistical [`AnalysisSpec`] handled by `curvebook-stats` against a [`DataSheet`]
 /// and produce a complete [`ResultSheet`] (scalars, tabs, pairwise comparison records, curves, and
 /// plain-language `ChecklistItem` diagnostics).
 pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultSheet, StatsError> {
@@ -68,10 +68,10 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
         AnalysisKind::GeneralizedLinearModel(g) => regression::run_glm_analysis(sheet, spec, g),
         AnalysisKind::Multivariate(m) => multivariate::run_multivariate_analysis(sheet, spec, m),
         AnalysisKind::Transform(_) => {
-            Err(StatsError::IncompatibleTable { analysis: "transform (handled by lumencraft-transform)", actual: sheet.archetype.kind() })
+            Err(StatsError::IncompatibleTable { analysis: "transform (handled by curvebook-transform)", actual: sheet.archetype.kind() })
         }
         AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
-            Err(StatsError::IncompatibleTable { analysis: "curve fitting (handled by lumencraft-fit)", actual: sheet.archetype.kind() })
+            Err(StatsError::IncompatibleTable { analysis: "curve fitting (handled by curvebook-fit)", actual: sheet.archetype.kind() })
         }
         AnalysisKind::PValueStack(ps) => pvalue_stack::run_pvalue_stack_analysis(sheet, spec, ps),
     }

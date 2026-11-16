@@ -1,4 +1,4 @@
-//! D1 literature oracles and regression reproducers for `R4.6` fixes in [`lumencraft_fit::linear`]:
+//! D1 literature oracles and regression reproducers for `R4.6` fixes in [`curvebook_fit::linear`]:
 //! - Deming Model II regression `variance_ratio_lambda = sigma_x^2 / sigma_y^2`
 //! - Linear inverse calibration (`interpolate_x_from_y`) prediction vs mean-response intervals
 //!
@@ -13,11 +13,11 @@
 //! - Seber, G. A. F. & Lee, A. J. (2003). *Linear Regression Analysis*, 2nd ed., §6.1.3. Wiley.
 //! - NIST/SEMATECH e-Handbook of Statistical Methods, §4.5.1.1 (Linear Calibration).
 
-use lumencraft_doc::CiBound;
-use lumencraft_fit::linear::{InverseIntervalSet, interpolate_x_from_y};
-use lumencraft_fit::{DataPoint, DemingOptions, FitError, SimpleLinearOptions, deming_regression, simple_linear_regression};
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::student_t_two_sided_isf;
+use curvebook_doc::CiBound;
+use curvebook_fit::linear::{InverseIntervalSet, interpolate_x_from_y};
+use curvebook_fit::{DataPoint, DemingOptions, FitError, SimpleLinearOptions, deming_regression, simple_linear_regression};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::student_t_two_sided_isf;
 
 fn assert_close(actual: f64, expected: f64, abs_tol: f64, rel_tol: f64, label: &str) {
     assert!(actual.is_finite(), "{label}: actual is non-finite ({actual})");

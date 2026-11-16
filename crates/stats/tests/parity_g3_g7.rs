@@ -14,31 +14,31 @@
 //! Passing & Bablok (*J Clin Chem Clin Biochem* 1983); Kaplan & Meier (1958); Breslow (1972) / Cox (1972) baseline hazard.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, ColumnDesignHint, ColumnTable, CoxTieMethod, DataSheet, DescriptiveSpec, GroupedTable,
     LevelOrderKind, LevelOrderSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec,
     OneWayMethod, PassingBablokSpec, ResultCell, ResultTabKind, SheetId, SubcolumnMode, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus,
     SurvivalTable, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole, XyTable,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{norm_two_sided_isf, student_t_two_sided_p, studentized_range_sf};
-use lumencraft_stats::column::qq_expected_quantiles;
-use lumencraft_stats::multiplicity::{MultiplicityProcedure, adjust_benjamini_hochberg};
-use lumencraft_stats::survival::{compare_survival_curves, kaplan_meier_curve};
-use lumencraft_stats::two_group::{bland_altman, mann_whitney_u, paired_t_test, unpaired_t_test, welch_t_test};
-use lumencraft_stats::{StatsError, run_analysis};
-use lumencraft_testkit::assert_approx_eq;
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{norm_two_sided_isf, student_t_two_sided_p, studentized_range_sf};
+use curvebook_stats::column::qq_expected_quantiles;
+use curvebook_stats::multiplicity::{MultiplicityProcedure, adjust_benjamini_hochberg};
+use curvebook_stats::survival::{compare_survival_curves, kaplan_meier_curve};
+use curvebook_stats::two_group::{bland_altman, mann_whitney_u, paired_t_test, unpaired_t_test, welch_t_test};
+use curvebook_stats::{StatsError, run_analysis};
+use curvebook_testkit::assert_approx_eq;
 
 fn spec_for(id: &str, src: &str, kind: AnalysisKind) -> AnalysisSpec {
     AnalysisSpec::new(SheetId::new(id), SheetId::new(src), kind).unwrap()
 }
 
-fn scalar_by_key(sheet: &lumencraft_doc::ResultSheet, key: &str) -> f64 {
+fn scalar_by_key(sheet: &curvebook_doc::ResultSheet, key: &str) -> f64 {
     assert!(sheet.scalars.iter().any(|s| s.key == key), "missing scalar {key}");
     sheet.scalars.iter().find(|s| s.key == key).map_or(f64::NAN, |s| s.value)
 }
 
-fn tab_by_kind(sheet: &lumencraft_doc::ResultSheet, kind: ResultTabKind) -> &lumencraft_doc::ResultTab {
+fn tab_by_kind(sheet: &curvebook_doc::ResultSheet, kind: ResultTabKind) -> &curvebook_doc::ResultTab {
     assert!(sheet.tabs.iter().any(|t| t.kind == kind), "missing expected tab kind {kind:?}");
     sheet.tabs.iter().find(|t| t.kind == kind).unwrap()
 }

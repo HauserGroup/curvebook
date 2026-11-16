@@ -11,7 +11,7 @@
 //!   eight styles (`D`, `D'`, `T`, `T'`, `S`, `S'`, `SS`, `SS'`) using `1.0 / 0.70 / 0.50`
 //!   font scaling (`cmr10` / `cmr7` / `cmr5` ratios).
 //! - **Appendix G fontdimens** (p. 447, normalized in current-style `em` and matched to
-//!   `lumencraft-text` metrics with math axis $\sigma_{22} = 0.34\,\text{em}$ and x-height
+//!   `curvebook-text` metrics with math axis $\sigma_{22} = 0.34\,\text{em}$ and x-height
 //!   $\sigma_5 = 0.52\,\text{em}$, rule thickness $\theta = \xi_8 = \max(0.050\,\text{em}, 0.30\,\text{pt})$).
 //! - **Rule 11** (`\sqrt`, p. 443): radicand in cramped style $C'$, clearance
 //!   $\varphi = \theta + \frac{1}{4}\psi$ ($\psi = \sigma_5$ in display style, $\theta$ otherwise),
@@ -28,10 +28,10 @@
 //!   p. 446): symmetric vertical span around the math axis $\sigma_{22}$ covering tall stacked
 //!   subexpressions via smooth vector [`Path2D`] outlines.
 
-use lumencraft_doc::{AnalysisKind, EquationDisplayMode, ProjectDocument, ResultSheet, ResultStatus, SheetId};
-use lumencraft_fit::tex_format::{format_model_equation_tex, format_polynomial_equation_tex};
-use lumencraft_palette::Rgba8;
-use lumencraft_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, measure_text_pt, parse_markup};
+use curvebook_doc::{AnalysisKind, EquationDisplayMode, ProjectDocument, ResultSheet, ResultStatus, SheetId};
+use curvebook_fit::tex_format::{format_model_equation_tex, format_polynomial_equation_tex};
+use curvebook_palette::Rgba8;
+use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, measure_text_pt, parse_markup};
 
 use crate::scene::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
@@ -42,7 +42,7 @@ const EQUATION_SIG_FIGS: usize = 4;
 const MAX_TEX_DEPTH: usize = 48;
 const MIN_RULE_THICKNESS_PT: f64 = 0.30;
 
-/// Inputs required to compile a [`lumencraft_doc::GraphAnnotation::ModelEquation`] annotation.
+/// Inputs required to compile a [`curvebook_doc::GraphAnnotation::ModelEquation`] annotation.
 #[derive(Debug, Clone, Copy)]
 pub struct ModelEquationParams<'a> {
     /// Target regression [`ResultSheet`] ID in the [`ProjectDocument`].
@@ -52,7 +52,7 @@ pub struct ModelEquationParams<'a> {
     /// Symbolic parameter names vs live substituted coefficient values.
     pub mode: EquationDisplayMode,
     /// Annotation bounding box in points (zero width/height triggers auto-sizing).
-    pub bounds_pt: lumencraft_doc::RectPt,
+    pub bounds_pt: curvebook_doc::RectPt,
     /// Base font size in points for top-level equation runs.
     pub font_size_pt: f64,
     /// Whether to draw a white filled background and 0.8 pt black border.
@@ -298,7 +298,7 @@ pub fn render_model_equation_annotation(scene: &mut ChartScene, doc: &ProjectDoc
 ///
 /// Uses the same Knuth Appendix G two-dimensional mathematical layout engine as
 /// [`render_model_equation_annotation`].
-pub fn render_tex_equation_box(scene: &mut ChartScene, bounds_pt: lumencraft_doc::RectPt, tex: &str, font_size_pt: f64, bordered: bool) {
+pub fn render_tex_equation_box(scene: &mut ChartScene, bounds_pt: curvebook_doc::RectPt, tex: &str, font_size_pt: f64, bordered: bool) {
     if tex.trim().is_empty() {
         return;
     }
@@ -340,13 +340,13 @@ fn path_bbox_pt(path: &Path2D) -> Option<RectPt> {
     }
 }
 
-/// Resolve the effective hit-test bounding box for a [`lumencraft_doc::GraphAnnotation::ModelEquation`].
+/// Resolve the effective hit-test bounding box for a [`curvebook_doc::GraphAnnotation::ModelEquation`].
 ///
 /// When either `bounds_pt.width` or `bounds_pt.height` is non-positive (auto-sized equation box),
 /// recovers the compiled box dimensions from `scene.primitives` (background box, overflow clip rect,
 /// or laid-out equation runs anchored at `(bounds_pt.x, bounds_pt.y)`).
 #[must_use]
-pub fn resolve_model_equation_hit_bounds(scene: &ChartScene, bounds_pt: lumencraft_doc::RectPt, font_size_pt: f64, bordered: bool) -> Option<RectPt> {
+pub fn resolve_model_equation_hit_bounds(scene: &ChartScene, bounds_pt: curvebook_doc::RectPt, font_size_pt: f64, bordered: bool) -> Option<RectPt> {
     let b = RectPt::from(bounds_pt);
     if b.width > 0.0 && b.height > 0.0 {
         return Some(b);
@@ -2369,7 +2369,7 @@ fn flush_pending_text(scene: &mut ChartScene, pending: &mut Option<PendingText>)
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, EquationDisplayMode, ErrorCode, FittedCurveOverlay, LinearRegressionSpec, NonlinearFitSpec, ProjectDocument,
         RectPt as DocRectPt, ResultScalarEntry, ResultSheet, ResultStatus, SheetId,
     };

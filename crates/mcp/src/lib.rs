@@ -1,8 +1,8 @@
-//! Model Context Protocol (MCP) server for LumenCraft (JSON-RPC 2.0 over stdio), supporting both
+//! Model Context Protocol (MCP) server for CurveBook (JSON-RPC 2.0 over stdio), supporting both
 //! headless batch/agent sessions and live attachment to a running desktop window over the control
 //! channel.
 //!
-//! Layer L6 crate: never depends on `lumencraft-ui-egui`; UI command discovery uses the generated
+//! Layer L6 crate: never depends on `curvebook-ui-egui`; UI command discovery uses the generated
 //! `ui_catalog` mirror checked by `cargo xtask ui-commands --check`.
 //! Governing spec: `docs/mcp.md` and `docs/scripting-and-automation.md`.
 #![forbid(unsafe_code)]
@@ -18,7 +18,7 @@ pub mod toolsets;
 pub mod ui_catalog;
 
 /// MCP server protocol name advertised during initialization.
-pub const SERVER_NAME: &str = "lumencraft";
+pub const SERVER_NAME: &str = "curvebook";
 
 pub use errors::StructuredErrorPayload;
 pub use gui_tools::{GUI_TOOL_NAMES, is_gui_tool_name, list_gui_tools};
@@ -45,7 +45,7 @@ mod tests {
 
     #[test]
     fn mcp_catalog_is_available() {
-        assert_eq!(SERVER_NAME, "lumencraft");
+        assert_eq!(SERVER_NAME, "curvebook");
         assert!(!UI_COMMANDS.is_empty());
     }
 }

@@ -40,7 +40,7 @@
 
 use crate::library::{ParametricModel, data_x_min_max, data_y_min_max};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
-use lumencraft_doc::{ParameterRule, ParameterScope};
+use curvebook_doc::{ParameterRule, ParameterScope};
 
 /// Canonical IDs exposed by the general curve equation catalog.
 pub const CURVE_EQUATION_IDS: &[&str] = &[
@@ -840,7 +840,7 @@ impl ParametricModel for CumulativeGaussian {
             return None;
         }
         let z = (x0 - mean) / sd;
-        let cdf = lumencraft_math::dist::norm_cdf(z);
+        let cdf = curvebook_math::dist::norm_cdf(z);
         Some(bottom + (top - bottom) * cdf)
     }
     fn initial_guess(&self, points: &[DataPoint]) -> Vec<f64> {
@@ -1531,7 +1531,7 @@ impl ParametricModel for ProbitLine {
         if !z.is_finite() {
             return None;
         }
-        let y = lumencraft_math::dist::norm_cdf(z) * 100.0;
+        let y = curvebook_math::dist::norm_cdf(z) * 100.0;
         y.is_finite().then_some(y)
     }
 
@@ -1546,7 +1546,7 @@ impl ParametricModel for ProbitLine {
         if !z.is_finite() {
             return false;
         }
-        let scale = 100.0 * lumencraft_math::dist::norm_pdf(z);
+        let scale = 100.0 * curvebook_math::dist::norm_pdf(z);
         out[0] = scale * x0;
         out[1] = scale;
         out[0].is_finite() && out[1].is_finite()
@@ -1558,7 +1558,7 @@ impl ParametricModel for ProbitLine {
             .filter(|p| p.x0().is_finite() && p.y.is_finite())
             .filter_map(|p| {
                 let prob = (p.y / 100.0).clamp(0.01, 0.99);
-                lumencraft_math::dist::norm_ppf(prob).ok().map(|z| (p.x0(), z))
+                curvebook_math::dist::norm_ppf(prob).ok().map(|z| (p.x0(), z))
             })
             .collect();
         let (slope, intercept) = estimate_ols_from_pairs(&pairs);

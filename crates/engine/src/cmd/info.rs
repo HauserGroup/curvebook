@@ -1,6 +1,6 @@
 //! Info-sheet note and shared constant commands (`info.setNote`, `info.setConstant`, `info.removeConstant`).
 
-use lumencraft_doc::{ConstantValue, ErrorCode};
+use curvebook_doc::{ConstantValue, ErrorCode};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -269,7 +269,7 @@ pub fn specs() -> &'static [CommandSpec] {
 mod tests {
     use std::sync::atomic::AtomicBool;
 
-    use lumencraft_doc::{DataSheet, InfoSheet, ProjectDocument, SheetId, TableArchetype, XyTable};
+    use curvebook_doc::{DataSheet, InfoSheet, ProjectDocument, SheetId, TableArchetype, XyTable};
     use serde_json::json;
 
     use crate::cmd::Caller;
@@ -294,7 +294,7 @@ mod tests {
         let mut session = new_session("Info Test");
         let info = InfoSheet::new_preseeded("info-1", "Assay Info").unwrap();
         session.doc.add_info_sheet(info).unwrap();
-        let xy = XyTable::new(lumencraft_doc::SubcolumnMode::Single, 1, 2).unwrap();
+        let xy = XyTable::new(curvebook_doc::SubcolumnMode::Single, 1, 2).unwrap();
         let mut ds = DataSheet::new("data-1", "Dose", TableArchetype::Xy(xy)).unwrap();
         ds.info_sheet_id = Some(SheetId::new("info-1"));
         session.doc.add_data_sheet(ds).unwrap();

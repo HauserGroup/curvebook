@@ -5,11 +5,11 @@
 use std::cmp::Ordering;
 use std::fmt;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellCoord, CellValue, DataSheet, ImportLinkSpec, LinkBorderColor, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS,
     SheetCellRange, SheetId, SubcolumnMode, TableArchetype, XColumnMode,
 };
-use lumencraft_math::sum::SummaryMoments;
+use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -1501,7 +1501,7 @@ const fn ensure_bounds_constants_used() -> usize {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec,
         InternalLinkKind, LinkBorderColor, LinkSource, LinkedDataRegion, MAX_ROWS, NestedTable, SheetCellRange, SheetId, SubcolumnMode,
         TableArchetype, XyTable,

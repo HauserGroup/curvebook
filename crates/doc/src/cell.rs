@@ -44,7 +44,7 @@ impl CellValue {
 /// Grid cell pairing a [`CellValue`] with a non-destructive exclusion mask (`excluded: bool`).
 ///
 /// Excluded cells remain visible in the spreadsheet (rendered in blue italics with an `*` badge)
-/// and persist in `.lumencraft` archives while downstream statistical tests, fits, transforms, and
+/// and persist in `.curvebook` archives while downstream statistical tests, fits, transforms, and
 /// graphs mask them out without mutating raw observations (`docs/data-tables-and-transforms.md` §1.2).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Cell {

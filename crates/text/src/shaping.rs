@@ -2,7 +2,7 @@
 //!
 //! Provides the `L2` [`TextMeasurer`] boundary shared by desktop, headless, and web text
 //! pipelines alongside [`SystemFontSet`], a zero-bundled-font runtime measurer supporting
-//! `LUMENCRAFT_FONTS_DIR` overrides, host SFNT/TTF/TTC discovery, and cleanroom Core-14 /
+//! `CURVEBOOK_FONTS_DIR` overrides, host SFNT/TTF/TTC discovery, and cleanroom Core-14 /
 //! vector-outline fallbacks (wasm-safe and `--no-default-features` safe).
 
 use std::borrow::Cow;
@@ -267,7 +267,7 @@ impl LoadedFontFace {
 /// System/environment SFNT font collection implementing [`TextMeasurer`] without bundled font binaries.
 ///
 /// Discovers fonts in priority order:
-/// 1. Runtime `LUMENCRAFT_FONTS_DIR` override (`fonts/manifest.txt`, `manifest.txt`, or font files)
+/// 1. Runtime `CURVEBOOK_FONTS_DIR` override (`fonts/manifest.txt`, `manifest.txt`, or font files)
 /// 2. Optional compile-time `BUNDLED_FONTS` when the `bundled-fonts` feature is enabled
 /// 3. Host OS SFNT/TTF/TTC fonts on native platforms (no-op on `wasm32`)
 /// 4. Deterministic cleanroom Core-14 metrics and `glyph_paths` vector outlines
@@ -284,20 +284,20 @@ impl Default for SystemFontSet {
 }
 
 impl SystemFontSet {
-    /// Construct a [`SystemFontSet`] using runtime `LUMENCRAFT_FONTS_DIR`, optional `BUNDLED_FONTS`,
+    /// Construct a [`SystemFontSet`] using runtime `CURVEBOOK_FONTS_DIR`, optional `BUNDLED_FONTS`,
     /// and host OS system fonts (or cleanroom fallback on `wasm32`).
     #[must_use]
     pub fn new() -> Self {
         Self::from_env_and_system()
     }
 
-    /// Construct a [`SystemFontSet`] from `LUMENCRAFT_FONTS_DIR` (if set), optional `BUNDLED_FONTS`,
+    /// Construct a [`SystemFontSet`] from `CURVEBOOK_FONTS_DIR` (if set), optional `BUNDLED_FONTS`,
     /// and cached host OS system fonts.
     #[must_use]
     pub fn from_env_and_system() -> Self {
         let mut faces = Vec::new();
         #[cfg(not(target_arch = "wasm32"))]
-        if let Some(env_dir) = std::env::var_os("LUMENCRAFT_FONTS_DIR").filter(|v| !v.is_empty()) {
+        if let Some(env_dir) = std::env::var_os("CURVEBOOK_FONTS_DIR").filter(|v| !v.is_empty()) {
             load_faces_from_dir(std::path::Path::new(&env_dir), FontSourceTier::EnvOverride, &mut faces);
         }
         append_bundled_faces(&mut faces);

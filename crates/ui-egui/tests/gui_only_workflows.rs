@@ -3,11 +3,11 @@
 //! the 4-stage Power & Sample Size wizard, multi-row grid selection + `Format Selected Points...`,
 //! and `ResultSheet` -> `Analyze...` downstream chaining (`R8.6` & `R8.7`).
 
-use lumencraft_doc::{AnalysisKind, CellCoord, CellValue, ErrorCode, GraphAnnotation, SheetId, SheetSection, TableArchetype, TableKind};
-use lumencraft_ui_egui::control_io::handle_control_line;
-use lumencraft_ui_egui::dialogs_canvas::ActiveDialog;
-use lumencraft_ui_egui::power_wizard::PowerWizardStage;
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
+use curvebook_doc::{AnalysisKind, CellCoord, CellValue, ErrorCode, GraphAnnotation, SheetId, SheetSection, TableArchetype, TableKind};
+use curvebook_ui_egui::control_io::handle_control_line;
+use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+use curvebook_ui_egui::power_wizard::PowerWizardStage;
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;

@@ -1,21 +1,21 @@
 //! NIST StRD numerical accuracy, rank-deficient linear algebra, tail-safe distribution, and
-//! degenerate-input robustness integration suite for `lumencraft-math` + `lumencraft-testkit`.
+//! degenerate-input robustness integration suite for `curvebook-math` + `curvebook-testkit`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_math::dist::{
+use curvebook_math::dist::{
     chi2_isf, chi2_sf, dunnett_one_sided_crit, dunnett_one_sided_p, dunnett_two_sided_crit, dunnett_two_sided_p, f_isf, f_sf, norm_cdf, norm_sf,
     student_t_isf, student_t_sf, student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
 };
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments, covariance, lag1_autocorrelation, pearson_r, sample_sd};
-use lumencraft_math::{
+use curvebook_math::sum::{NeumaierSum, SummaryMoments, covariance, lag1_autocorrelation, pearson_r, sample_sd};
+use curvebook_math::{
     AxisScale, ConfidenceLevel, DenseMatrix, DeterministicRng, LogitDomain, PValueFormat, cholesky, noncentral_chi2_ci, noncentral_f_ci,
     noncentral_t_ci, parameter_dependencies, qr_col_pivoted, solve_linear_least_squares, svd,
 };
-use lumencraft_testkit::nist_strd::{
+use curvebook_testkit::nist_strd::{
     all_offline_anova_benchmarks, all_offline_linear_regression_benchmarks, all_offline_univariate_benchmarks, binary_stiff_1e8, corpus_available,
     default_nist_strd_dir, load_corpus_anova_all, load_corpus_linear_all, load_corpus_univariate_all, numacc4,
 };
-use lumencraft_testkit::{DoubleDouble, assert_approx_eq, assert_lre_at_least, oracle_univariate_f64};
+use curvebook_testkit::{DoubleDouble, assert_approx_eq, assert_lre_at_least, oracle_univariate_f64};
 
 #[test]
 fn nist_strd_univariate_stiffness_and_permutation_invariance() {
@@ -303,8 +303,8 @@ fn require_corpus_dir() -> Option<std::path::PathBuf> {
         return Some(dir);
     }
     assert!(
-        std::env::var_os("LUMENCRAFT_REQUIRE_CORPUS").is_none_or(|v| v != "1"),
-        "LUMENCRAFT_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}",
+        std::env::var_os("CURVEBOOK_REQUIRE_CORPUS").is_none_or(|v| v != "1"),
+        "CURVEBOOK_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}",
         dir.display()
     );
     None

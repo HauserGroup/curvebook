@@ -3,8 +3,8 @@
 //! bubble/categorical encodings, live pairwise significance brackets, and style cloning
 //! (`docs/graphing-and-layouts.md` §1–§5).
 
-pub use lumencraft_math::{AxisScale, LogitDomain};
-use lumencraft_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
+pub use curvebook_math::{AxisScale, LogitDomain};
+use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 
 use crate::archetypes::{ColumnDesignHint, LevelOrderSpec, TableArchetype};
 use crate::error::{DocError, validate_title};
@@ -47,7 +47,7 @@ pub enum FramePreset {
     OriginCrossing,
 }
 
-/// Guarded axis scale bijection (`docs/graphing-and-layouts.md` §3.1), unified with [`lumencraft_math::AxisScale`].
+/// Guarded axis scale bijection (`docs/graphing-and-layouts.md` §3.1), unified with [`curvebook_math::AxisScale`].
 pub type GraphAxisScale = AxisScale;
 
 /// Break-mark ornament between discontinuous axis segments (`docs/graphing-and-layouts.md` §3.2).
@@ -659,7 +659,7 @@ impl CompactLetterDisplaySpec {
     }
 }
 
-/// Resolution-independent figure specification compiled by `lumencraft-chart`.
+/// Resolution-independent figure specification compiled by `curvebook-chart`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GraphSpec {
     pub kind: GraphKind,
@@ -1315,7 +1315,7 @@ impl GraphSheet {
 mod tests {
     use super::{GraphSpec, GroupedArrangement, PointStyleOverride};
     use crate::{ColumnDesignHint, ColumnTable, DataSheet, SheetId, TableArchetype};
-    use lumencraft_palette::{MarkerFillMode, MarkerShape, Rgba8};
+    use curvebook_palette::{MarkerFillMode, MarkerShape, Rgba8};
 
     #[test]
     fn graph_spec_point_overrides_round_trip_and_backward_compat() {

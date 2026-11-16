@@ -1,7 +1,7 @@
 //! Arbitrary confidence-level validation (`[0.01%, 99.99%]`) and *p*-value display formatting &
 //! significance-star summaries per `docs/statistics-implementation.md` §1.2.
 //!
-//! Shared as the single canonical definition across `lumencraft-math` (`L0`), `lumencraft-doc`
+//! Shared as the single canonical definition across `curvebook-math` (`L0`), `curvebook-doc`
 //! (`L1`), and downstream statistical/fitting/chart crates (`L2`).
 
 use crate::error::MathError;

@@ -3,7 +3,7 @@
 //! `crates/doc` is an L1 model crate without a direct `serde_json` runtime dependency, so schemas
 //! are constructed as strongly typed, deterministically ordered [`SchemaNode`] values that derive
 //! `serde::Serialize` / `serde::Deserialize` and convert trivially via `serde_json::to_value` in
-//! downstream crates (`lumencraft-format`, `lumencraft-engine`).
+//! downstream crates (`curvebook-format`, `curvebook-engine`).
 
 use std::collections::BTreeMap;
 
@@ -17,7 +17,7 @@ use crate::result::{ChecklistItem, ChecklistStatus, ErrorCategory, ErrorCode, Re
 pub const DRAFT_2020_12_SCHEMA_URI: &str = "https://json-schema.org/draft/2020-12/schema";
 
 /// Canonical `$id` URI for serialized [`ProjectDocument`] payloads.
-pub const PROJECT_DOCUMENT_SCHEMA_ID: &str = "https://lumencraft.dev/schemas/project-document.v1.schema.json";
+pub const PROJECT_DOCUMENT_SCHEMA_ID: &str = "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/document.schema.json";
 
 /// JSON Schema primitive type discriminator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -763,7 +763,7 @@ pub fn project_document_schema() -> SchemaNode {
     .with_schema_uri(DRAFT_2020_12_SCHEMA_URI)
     .with_id(PROJECT_DOCUMENT_SCHEMA_ID)
     .with_title("ProjectDocument")
-    .with_description("Canonical LumenCraft L1 ProjectDocument JSON schema (Draft 2020-12).")
+    .with_description("Canonical CurveBook L1 ProjectDocument JSON schema (Draft 2020-12).")
     .with_def(SheetId::schema_name(), SheetId::json_schema())
     .with_def(ErrorCategory::schema_name(), ErrorCategory::json_schema())
     .with_def(ErrorCode::schema_name(), ErrorCode::json_schema())

@@ -3,7 +3,7 @@
 
 use std::fmt;
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 
 use crate::error::DocError;
 

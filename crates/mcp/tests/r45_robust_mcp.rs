@@ -2,7 +2,7 @@
 
 use std::io::Cursor;
 
-use lumencraft_mcp::{McpServerState, serve};
+use curvebook_mcp::{McpServerState, serve};
 use serde_json::{Value, json};
 
 fn frame_cl(val: &Value) -> Vec<u8> {

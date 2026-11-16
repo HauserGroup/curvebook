@@ -23,10 +23,10 @@
 //!
 //! Reference: Efron, B. & Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall.
 
-use lumencraft_doc::{CiBound, CurveSamplePoint};
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{f_sf, student_t_two_sided_isf};
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments};
+use curvebook_doc::{CiBound, CurveSamplePoint};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{f_sf, student_t_two_sided_isf};
+use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 
 use crate::diagnostics::{LackOfFitResult, RunsTestResult, replicates_lack_of_fit, runs_test};
 use crate::error::FitError;
@@ -1092,7 +1092,7 @@ fn jackknife_se(vals: &[f64]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::CiBound;
+    use curvebook_doc::CiBound;
 
     use super::{InverseIntervalSet, InverseQuadraticContext, fit_deming_core, solve_inverse_quadratic};
 

@@ -238,7 +238,7 @@ pub fn render_commands_markdown() -> String {
 #[must_use]
 pub fn render_registry_markdown(reg: &Registry) -> String {
     let mut out = String::new();
-    let _ = writeln!(out, "# LumenCraft Command Reference\n");
+    let _ = writeln!(out, "# CurveBook Command Reference\n");
     let _ = writeln!(out, "Registered commands: {}\n", reg.len());
     for &group in CommandGroup::all() {
         let items = reg.specs_by_group(group);

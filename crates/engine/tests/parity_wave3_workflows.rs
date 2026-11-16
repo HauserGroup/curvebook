@@ -1,17 +1,17 @@
 //! Wave 3 (`L5` Engine Wiring & Parity) integration tests covering `sheet.reorder`,
 //! `graph.setAdditionalTicks` -> `ChartScene`, `#114` biostatistics/imputation/fitting parity,
-//! `lumencraft_format::sanitize_circular_hooks` integration, and `CrashRecoveryJournal` WAL replay.
+//! `curvebook_format::sanitize_circular_hooks` integration, and `CrashRecoveryJournal` WAL replay.
 
-use lumencraft_chart::{ChartScene, ScenePrimitive};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, ScenePrimitive};
+use curvebook_doc::{
     AdditionalTick, AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyMethod, ContingencyTable, DataSheet,
     GraphSheet, GroupedTable, HookSource, InfoSheet, LayoutSheet, LayoutSpec, ModelComparisonSpec, MultipleVariablesTable, MultiplicityMethod,
     NonlinearFitSpec, NormalizeAnchor, ParameterScope, ProjectDocument, ResultSheet, ResultStatus, ResultTabKind, SheetFolderKind, SheetId,
     SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableRole, XyTable,
 };
-use lumencraft_engine::{CommandOutcome, Session, cmd, cmd::helpers::compile_sheet_scene, dag};
-use lumencraft_format::{JOURNAL_FILE_NAME, MemoryJournalBackend};
-use lumencraft_palette::LineDashStyle;
+use curvebook_engine::{CommandOutcome, Session, cmd, cmd::helpers::compile_sheet_scene, dag};
+use curvebook_format::{JOURNAL_FILE_NAME, MemoryJournalBackend};
+use curvebook_palette::LineDashStyle;
 use serde_json::{Value, json};
 
 type TestRes<T = ()> = Result<T, String>;
@@ -326,7 +326,7 @@ fn analysis_add_new_biostatistics_and_multiple_imputation_kinds() -> TestRes {
     assert_eq!(mi.status, ResultStatus::UpToDate);
     assert!(matches!(
         &mi.analysis.kind,
-        AnalysisKind::Multivariate(lumencraft_doc::MultivariateSpec::MultipleImputation {
+        AnalysisKind::Multivariate(curvebook_doc::MultivariateSpec::MultipleImputation {
             imputations_m: 3,
             max_iters: 5,
             seed: 77,
@@ -513,7 +513,7 @@ fn circular_hook_sanitization_prevents_dag_stall() -> TestRes {
     // Mutual HookSource cycle (r1 <-> r2) + valid acyclic InfoConstant hook on Bottom.
     let mut fit1 = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
     fit1.parameter_rules = vec![
-        lumencraft_doc::ParameterRule {
+        curvebook_doc::ParameterRule {
             name: String::from("Top"),
             scope: ParameterScope::HookedConstant(HookSource::ResultScalar {
                 result_sheet_id: SheetId::new("r2"),
@@ -524,7 +524,7 @@ fn circular_hook_sanitization_prevents_dag_stall() -> TestRes {
             lower_bound: None,
             upper_bound: None,
         },
-        lumencraft_doc::ParameterRule {
+        curvebook_doc::ParameterRule {
             name: String::from("Bottom"),
             scope: ParameterScope::HookedConstant(HookSource::InfoConstant {
                 info_sheet_id: Some(SheetId::new("info-1")),
@@ -536,7 +536,7 @@ fn circular_hook_sanitization_prevents_dag_stall() -> TestRes {
         },
     ];
     let mut fit2 = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
-    fit2.parameter_rules = vec![lumencraft_doc::ParameterRule {
+    fit2.parameter_rules = vec![curvebook_doc::ParameterRule {
         name: String::from("Top"),
         scope: ParameterScope::HookedConstant(HookSource::ResultScalar {
             result_sheet_id: SheetId::new("r1"),
@@ -662,7 +662,7 @@ fn native_directory_journal_torn_tail_replay_into_session() -> TestRes {
     }
 
     let id = DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!("lc-engine-recovery-{}-{id}", std::process::id()));
+    let path = std::env::temp_dir().join(format!("cb-engine-recovery-{}-{id}", std::process::id()));
     let _guard = GuardDir(path.clone());
 
     let (mut s1, mut j1, _) = Session::open_dir_with_recovery(&path, "native-1", 2_000, 10_000).map_err(|e| e.to_string())?;

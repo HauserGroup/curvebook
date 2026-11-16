@@ -8,7 +8,7 @@ use std::process::Command;
 const PEOPLE_REL: &str = "contributors/people.toml";
 const OUT_REL: &str = "contributors/contributors.json";
 const ZERO_HEAD: &str = "0000000000000000000000000000000000000000";
-const DEFAULT_REPO: &str = "lumencraft/lumencraft";
+const DEFAULT_REPO: &str = "HauserGroup/curvebook";
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PersonOverride {
@@ -330,14 +330,14 @@ Local User\x1flocal@example.org
                 real_name: Some(String::from("Ada Lovelace")),
             }]
         );
-        let json = render_contributors_json("lumencraft/lumencraft", "main", "abc", "2026-11-13T00:00:00Z", total, unattributed, &entries);
+        let json = render_contributors_json("HauserGroup/curvebook", "main", "abc", "2026-11-13T00:00:00Z", total, unattributed, &entries);
         let parsed = crate::json::parse(&json).unwrap();
-        assert_eq!(parsed.get("repo").and_then(crate::json::Json::as_str), Some("lumencraft/lumencraft"));
+        assert_eq!(parsed.get("repo").and_then(crate::json::Json::as_str), Some("HauserGroup/curvebook"));
     }
 
     #[test]
     fn extracts_repo_slug_from_workspace_cargo_toml() {
-        let cargo = "[workspace.package]\nversion = \"0.1.0\"\nrepository = \"https://github.com/lumencraft/lumencraft\"\n";
-        assert_eq!(parse_cargo_repo_slug(cargo).as_deref(), Some("lumencraft/lumencraft"));
+        let cargo = "[workspace.package]\nversion = \"0.1.0\"\nrepository = \"https://github.com/HauserGroup/curvebook\"\n";
+        assert_eq!(parse_cargo_repo_slug(cargo).as_deref(), Some("HauserGroup/curvebook"));
     }
 }

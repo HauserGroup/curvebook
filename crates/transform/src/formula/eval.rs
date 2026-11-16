@@ -3,8 +3,8 @@
 
 use std::cmp::Ordering;
 
-use lumencraft_doc::{Cell, CellValue, DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, default_column_label};
-use lumencraft_math::{dist, special, sum};
+use curvebook_doc::{Cell, CellValue, DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, default_column_label};
+use curvebook_math::{dist, special, sum};
 
 use crate::error::TransformError;
 use crate::formula::parser::{BinaryOp, Expr, UnaryOp, VarRef, parse_formula};
@@ -229,9 +229,9 @@ fn lookup_info_value(info_sheet: Option<&InfoSheet>, name: &str) -> Option<Formu
     let info = info_sheet?;
     let c = info.get_constant(name)?;
     match &c.value {
-        lumencraft_doc::ConstantValue::Empty => Some(FormulaValue::Missing),
-        lumencraft_doc::ConstantValue::Number(v) => Some(FormulaValue::from_f64(*v)),
-        lumencraft_doc::ConstantValue::Text(s) | lumencraft_doc::ConstantValue::Date(s) => {
+        curvebook_doc::ConstantValue::Empty => Some(FormulaValue::Missing),
+        curvebook_doc::ConstantValue::Number(v) => Some(FormulaValue::from_f64(*v)),
+        curvebook_doc::ConstantValue::Text(s) | curvebook_doc::ConstantValue::Date(s) => {
             if let Ok(num) = s.trim().parse::<f64>()
                 && num.is_finite()
             {

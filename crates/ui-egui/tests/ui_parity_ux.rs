@@ -4,14 +4,14 @@
 //! `Nested`/`Xy` subcolumn header & biological-unit badge helpers.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ConstantValue, DataSheet, DescriptiveSpec, GraphSheet, InfoSheet, LayoutSheet, LayoutSpec, NestedTable,
     ProjectDocument, ResultSheet, SheetFolderKind, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_engine::Session;
-use lumencraft_ui_egui::grid_view::{biological_unit_label, format_cell_display, parse_localized_number_input, subcolumn_header_labels};
-use lumencraft_ui_egui::i18n::LocalePreset;
-use lumencraft_ui_egui::workspace_nav::{ActiveWorkspacePane, WorkspaceNavState, build_set_info_constant_command, build_set_info_notes_command};
+use curvebook_engine::Session;
+use curvebook_ui_egui::grid_view::{biological_unit_label, format_cell_display, parse_localized_number_input, subcolumn_header_labels};
+use curvebook_ui_egui::i18n::LocalePreset;
+use curvebook_ui_egui::workspace_nav::{ActiveWorkspacePane, WorkspaceNavState, build_set_info_constant_command, build_set_info_notes_command};
 use serde_json::json;
 
 fn make_xy_sheet(id: &str, title: &str) -> DataSheet {

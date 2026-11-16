@@ -1,5 +1,6 @@
 # Standalone release pipeline: every push to `release` builds installers for every platform and
-# creates or updates the draft GitHub Release "LumenCraft v<version>". See docs/releasing.md.
+# creates or updates a draft GitHub Release. Manual runs default to Alpha prereleases
+# with ad-hoc macOS signing and unsigned Windows packages. See docs/releasing.md.
 name: Release
 
 on:
@@ -12,9 +13,13 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version override for a test run, e.g. 0.2.0-rc.1 (empty: Cargo.toml)"
+        description: "Package version to verify (empty: Cargo.toml; must match the workspace version)"
         type: string
         default: ""
+      alpha:
+        description: "Create an Alpha draft prerelease with ad-hoc macOS signing and unsigned Windows packages"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -77,7 +82,7 @@ jobs:
           print(f"Verified release version parity: {cargo_ver}")
           PY
           . ./packaging/env.sh
-          cargo run --locked --offline -p xtask -- version check
+          cargo run --locked -p xtask -- version
       - name: Verify Cargo.lock sources
         run: |
           set -euo pipefail
@@ -217,13 +222,19 @@ jobs:
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
+          CURVEBOOK_MAINTAINER: ${{ vars.CURVEBOOK_MAINTAINER }}
         run: |
           if [ -n "${INPUT_VERSION:-}" ]; then
-            export LUMENCRAFT_VERSION="$INPUT_VERSION"
+            export CURVEBOOK_VERSION="$INPUT_VERSION"
           elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
-            export LUMENCRAFT_VERSION="${GITHUB_REF_NAME#v}"
+            export CURVEBOOK_VERSION="${GITHUB_REF_NAME#v}"
           fi
-          ./packaging/linux/package.sh
+          if [ -n "$(printf '%s' "${CURVEBOOK_MAINTAINER:-}" | tr -d '[:space:]')" ]; then
+            ./packaging/linux/package.sh
+          else
+            echo "::warning::CURVEBOOK_MAINTAINER is unset; building appimage and tar only (skipping deb/rpm)"
+            ./packaging/linux/package.sh --formats "appimage tar"
+          fi
           ./packaging/linux/flatpak-bundle.sh --no-test
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -254,6 +265,7 @@ jobs:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Import macOS signing certificate (when configured)
+        if: inputs.alpha != true
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -264,7 +276,7 @@ jobs:
             echo "No APPLE_CERTIFICATE configured; using ad-hoc signing."
             exit 0
           fi
-          kc="$RUNNER_TEMP/lumencraft-signing.keychain-db"
+          kc="$RUNNER_TEMP/curvebook-signing.keychain-db"
           cert="$RUNNER_TEMP/cert.p12"
           printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
@@ -288,19 +300,26 @@ jobs:
           rm -f "$cert"
       - name: Build macOS universal DMG & CLI zip
         env:
+          ALPHA_RELEASE: ${{ inputs.alpha }}
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_ID: ${{ !inputs.alpha && secrets.APPLE_ID || '' }}
+          APPLE_PASSWORD: ${{ !inputs.alpha && secrets.APPLE_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ !inputs.alpha && secrets.APPLE_TEAM_ID || '' }}
         run: |
           if [ -n "${INPUT_VERSION:-}" ]; then
-            export LUMENCRAFT_VERSION="$INPUT_VERSION"
+            export CURVEBOOK_VERSION="$INPUT_VERSION"
           elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
-            export LUMENCRAFT_VERSION="${GITHUB_REF_NAME#v}"
+            export CURVEBOOK_VERSION="${GITHUB_REF_NAME#v}"
+          fi
+          if [ "${ALPHA_RELEASE:-}" = "true" ]; then
+            export MACOS_SIGN_IDENTITY="-"
           fi
           ./packaging/macos/package.sh --arch universal
+          if [ "${ALPHA_RELEASE:-}" = "true" ]; then
+            ./packaging/macos/verify.sh --arch universal
+          fi
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-macos-universal
@@ -335,7 +354,7 @@ jobs:
       - name: Install WiX v5
         shell: pwsh
         run: |
-          $tools = Join-Path $env:RUNNER_TEMP 'lumencraft-wix'
+          $tools = Join-Path $env:RUNNER_TEMP 'curvebook-wix'
           dotnet tool install --tool-path $tools wix --version 5.0.2
           $tools >> $env:GITHUB_PATH
           & (Join-Path $tools 'wix.exe') extension add -g WixToolset.UI.wixext/5.0.2
@@ -347,19 +366,19 @@ jobs:
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           MATRIX_ARCH: ${{ matrix.arch }}
-          WINDOWS_CERTIFICATE: ${{ secrets.WINDOWS_CERTIFICATE }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
-          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
-          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
-          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
-          AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
-          AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
-          AZURE_CERT_PROFILE: ${{ secrets.AZURE_CERT_PROFILE }}
+          WINDOWS_CERTIFICATE: ${{ !inputs.alpha && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ !inputs.alpha && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          AZURE_TENANT_ID: ${{ !inputs.alpha && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ !inputs.alpha && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ !inputs.alpha && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_SIGNING_ENDPOINT: ${{ !inputs.alpha && secrets.AZURE_SIGNING_ENDPOINT || '' }}
+          AZURE_SIGNING_ACCOUNT: ${{ !inputs.alpha && secrets.AZURE_SIGNING_ACCOUNT || '' }}
+          AZURE_CERT_PROFILE: ${{ !inputs.alpha && secrets.AZURE_CERT_PROFILE || '' }}
         run: |
           if ($env:INPUT_VERSION) {
-            $env:LUMENCRAFT_VERSION = $env:INPUT_VERSION
+            $env:CURVEBOOK_VERSION = $env:INPUT_VERSION
           } elseif ($env:GITHUB_REF_TYPE -eq 'tag' -and $env:GITHUB_REF_NAME.StartsWith('v')) {
-            $env:LUMENCRAFT_VERSION = $env:GITHUB_REF_NAME.Substring(1)
+            $env:CURVEBOOK_VERSION = $env:GITHUB_REF_NAME.Substring(1)
           }
           ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -394,9 +413,9 @@ jobs:
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
           if [ -n "${INPUT_VERSION:-}" ]; then
-            export LUMENCRAFT_VERSION="$INPUT_VERSION"
+            export CURVEBOOK_VERSION="$INPUT_VERSION"
           elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
-            export LUMENCRAFT_VERSION="${GITHUB_REF_NAME#v}"
+            export CURVEBOOK_VERSION="${GITHUB_REF_NAME#v}"
           fi
           ./packaging/web/package.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -437,9 +456,9 @@ jobs:
             . "$HOME/.cargo/env"
             rustc --version
             if [ -n "${INPUT_VERSION:-}" ]; then
-              export LUMENCRAFT_VERSION="$INPUT_VERSION"
+              export CURVEBOOK_VERSION="$INPUT_VERSION"
             elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
-              export LUMENCRAFT_VERSION="${GITHUB_REF_NAME#v}"
+              export CURVEBOOK_VERSION="${GITHUB_REF_NAME#v}"
             fi
             bash ./packaging/freebsd/package.sh
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -470,6 +489,7 @@ jobs:
       - name: Create or update draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+          ALPHA_RELEASE: ${{ inputs.alpha }}
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
@@ -486,15 +506,38 @@ jobs:
             exit 1
           fi
           tag="v$ver"
-          title="LumenCraft $tag"
-          (cd dist/release && sha256sum -- * > SHA256SUMS.txt)
+          title="CurveBook $tag"
+          prerelease=false
+          release_flags=(--draft)
+          if [ "${ALPHA_RELEASE:-}" = "true" ]; then
+            title="CurveBook Alpha $tag"
+            prerelease=true
+            release_flags+=(--latest=false)
+          fi
+          release_flags+=("--prerelease=$prerelease" --title "$title")
+          (
+            cd dist/release
+            files=()
+            for file in *; do
+              [ "$file" = "SHA256SUMS.txt" ] && continue
+              test -f "$file" && test -s "$file"
+              files+=("$file")
+            done
+            test "${#files[@]}" -gt 0
+            sha256sum -- "${files[@]}" > ../SHA256SUMS.txt.tmp
+            mv ../SHA256SUMS.txt.tmp SHA256SUMS.txt
+            sha256sum --check SHA256SUMS.txt
+          )
           if gh release view "$tag" >/dev/null 2>&1; then
             is_draft="$(gh release view "$tag" --json isDraft --jq .isDraft)"
             if [ "$is_draft" != "true" ]; then
               echo "error: refusing to overwrite already-published release $tag (isDraft=$is_draft)" >&2
               exit 1
             fi
+            gh release edit "$tag" "${release_flags[@]}"
             gh release upload "$tag" dist/release/* --clobber
           else
-            gh release create "$tag" dist/release/* --draft --title "$title" --generate-notes
+            gh release create "$tag" dist/release/* "${release_flags[@]}" --target "$GITHUB_SHA" --generate-notes
           fi
+          url="$(gh release view "$tag" --json url --jq .url)"
+          printf '### Draft release\n\n[%s](%s)\n\nInstallers, Linux packages, the WASM ZIP, licence disclosures, and SHA256SUMS.txt are attached under **Assets**. This draft is not publicly published.\n' "$title" "$url" >> "$GITHUB_STEP_SUMMARY"

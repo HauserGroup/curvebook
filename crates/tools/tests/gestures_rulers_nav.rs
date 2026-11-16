@@ -1,11 +1,11 @@
 //! Integration tests for trackpad pinch-zoom & pan inertia, physical rulers & journal presets,
 //! and Project Navigator drag-reorder state (`L4`).
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ColumnDesignHint, ColumnTable, DataSheet, DescriptiveSpec, GraphSheet, InfoSheet, LayoutSheet, LayoutSpec,
     ProjectDocument, ResultSheet, ResultStatus, SheetFolderKind, TableArchetype,
 };
-use lumencraft_tools::{JournalWidthPreset, NavigatorDragState, PanZoomInertiaState, PhysicalUnit, RulerTick, build_ruler_ticks};
+use curvebook_tools::{JournalWidthPreset, NavigatorDragState, PanZoomInertiaState, PhysicalUnit, RulerTick, build_ruler_ticks};
 
 #[test]
 fn pinch_zoom_preserves_anchor_and_clamps_bounds() {

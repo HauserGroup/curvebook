@@ -1,12 +1,12 @@
 //! Scientific colour spaces, colorblind-safe categorical palettes, continuous heatmap colormaps,
 //! colour-vision-deficiency simulation, data-point symbol glyphs, and line dash styles for
-//! LumenCraft.
+//! CurveBook.
 //!
-//! Layer L0 foundation crate (after `lumencraft-math`).
+//! Layer L0 foundation crate (after `curvebook-math`).
 //! Governing spec: `docs/graphing-and-layouts.md` (§5) and `docs/architecture.md`.
 //!
 //! ```
-//! use lumencraft_palette::{ColormapId, CvdKind, PaletteId, Rgba8};
+//! use curvebook_palette::{ColormapId, CvdKind, PaletteId, Rgba8};
 //!
 //! let primary = PaletteId::OkabeIto.color_at(0);
 //! assert!(primary.meets_wcag_aa(Rgba8::WHITE));

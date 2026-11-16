@@ -1,9 +1,9 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, GraphSheet, InfoSheet,
     JournalWidthPreset, LayoutSheet, LayoutSpec, OneWayAnovaSpec, ProjectDocument, ResultStatus, SheetId, SubcolumnMode, TableArchetype, TableKind,
     XyTable,
 };
-use lumencraft_format::{
+use curvebook_format::{
     CsvOptions, export_datasheet_to_csv, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes, instantiate_template_bytes,
     open_project_bytes, open_template_bytes, parse_delimited_records, parse_xml, save_project_bytes, save_template_bytes,
 };
@@ -50,7 +50,7 @@ proptest! {
     #![proptest_config(ProptestConfig::with_cases(48))]
 
     #[test]
-    fn lumencraft_archive_round_trip(
+    fn curvebook_archive_round_trip(
         proj_title in "[A-Za-z0-9 _-]{1,24}",
         info_val in -1e4_f64..1e4_f64,
         col_cells in prop::collection::vec(prop::collection::vec(arb_cell(), 4), 2),
@@ -81,7 +81,7 @@ proptest! {
         doc.add_data_sheet(xy_sheet).unwrap();
 
         let spec = AnalysisSpec::new("anova-1", "data-col", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).unwrap();
-        doc.add_result_sheet(lumencraft_doc::ResultSheet::new(spec).unwrap()).unwrap();
+        doc.add_result_sheet(curvebook_doc::ResultSheet::new(spec).unwrap()).unwrap();
         doc.add_graph_sheet(GraphSheet::new_uninitialized_for_data("graph-1", &col_sheet).unwrap()).unwrap();
         doc.add_layout_sheet(LayoutSheet::new("layout-1", "Fig 1", LayoutSpec::from_preset(JournalWidthPreset::SingleColumn85Mm)).unwrap()).unwrap();
 

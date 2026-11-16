@@ -12,21 +12,21 @@
 
 use std::collections::HashMap;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ConfidenceLevel, CoxTieMethod, DataSheet, FactorialAnovaSpec, GlmFamily, GlmSpec, GroupedTable,
     MultipleVariablesTable, MultiplicityMethod, RepeatedMeasuresDesign, ResultCell, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
     VariableRole,
 };
-use lumencraft_math::DenseMatrix;
-use lumencraft_stats::anova::{
+use curvebook_math::DenseMatrix;
+use curvebook_stats::anova::{
     FactorialAnovaTerm, FactorialObservations, fit_factorial_anova, fit_random_intercept_reml, friedman_test, kruskal_wallis_test,
     run_factorial_anova, unequal_variance_one_way_anova,
 };
-use lumencraft_stats::multiplicity::{GroupComparisonInput, compare_groups_with_procedure};
-use lumencraft_stats::multivariate::{LinkageMethod, hierarchical_clustering, kmeans_pp, pca_analysis};
-use lumencraft_stats::regression::{multiple_linear_regression, multiple_logistic_regression, multiple_poisson_regression, run_glm_analysis};
-use lumencraft_stats::survival::{CoxPhResult, CoxSubject, cox_ph_regression};
-use lumencraft_testkit::metrics::{assert_approx_eq, assert_lre_at_least};
+use curvebook_stats::multiplicity::{GroupComparisonInput, compare_groups_with_procedure};
+use curvebook_stats::multivariate::{LinkageMethod, hierarchical_clustering, kmeans_pp, pca_analysis};
+use curvebook_stats::regression::{multiple_linear_regression, multiple_logistic_regression, multiple_poisson_regression, run_glm_analysis};
+use curvebook_stats::survival::{CoxPhResult, CoxSubject, cox_ph_regression};
+use curvebook_testkit::metrics::{assert_approx_eq, assert_lre_at_least};
 
 fn unbalanced_3way_fixture() -> FactorialObservations {
     let counts = [
@@ -348,7 +348,7 @@ fn edge_02b_grouped_rm_missing_cell_fallback_and_sparse_cluster_reml() {
         grouped.data_sets[col].cells[row][subj] = Cell::number(y);
     }
 
-    let ds_id = lumencraft_doc::SheetId::new("g-rm-miss");
+    let ds_id = curvebook_doc::SheetId::new("g-rm-miss");
     let mut sheet = DataSheet::new(ds_id.clone(), "RM Missing Cells", TableArchetype::Grouped(grouped)).unwrap();
     sheet.id = ds_id.clone();
 
@@ -594,7 +594,7 @@ fn edge_04b_poisson_exposure_scaling_overdispersion_and_sheet_dispatch() {
         mv.variables[2].cells[i] = Cell::text(if grp[i] > 0.5 { "B_Active" } else { "A_Ctrl" });
         mv.variables[3].cells[i] = Cell::number(exposure[i].ln());
     }
-    let sid = lumencraft_doc::SheetId::new("mv-glm-edge");
+    let sid = curvebook_doc::SheetId::new("mv-glm-edge");
     let mut ds = DataSheet::new(sid.clone(), "GLM Edge Table", TableArchetype::MultipleVariables(mv)).unwrap();
     ds.id = sid.clone();
     let glm_spec = GlmSpec {

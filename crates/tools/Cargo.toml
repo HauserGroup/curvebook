@@ -1,23 +1,23 @@
 [package]
-name = "lumencraft-tools"
+name = "curvebook-tools"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft interactive spreadsheet, graph annotation, axis-break and layout tools"
+description = "CurveBook interactive spreadsheet, graph annotation, axis-break and layout tools"
 
 [lints]
 workspace = true
 
 [dependencies]
-lumencraft-chart = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-math = { workspace = true }
-lumencraft-palette = { workspace = true }
+curvebook-chart = { workspace = true }
+curvebook-doc = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-palette = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }
 proptest = { workspace = true }

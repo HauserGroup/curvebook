@@ -9,17 +9,17 @@
 
 use std::collections::BTreeSet;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, DataSheet, MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec, OneWayMethod,
     PairwiseComparisonRecord, SheetId, TableArchetype,
 };
-use lumencraft_stats::StatsError;
-use lumencraft_stats::anova::run_one_way_anova;
-use lumencraft_stats::cld::{
+use curvebook_stats::StatsError;
+use curvebook_stats::anova::run_one_way_anova;
+use curvebook_stats::cld::{
     CldGroupInput, CldOptions, CldOrdering, CldPairwiseInput, CldResult, column_letter_token, compute_cld, compute_cld_from_details,
     compute_cld_from_matrix, compute_cld_from_records, compute_cld_from_result_sheet,
 };
-use lumencraft_stats::multiplicity::{GroupComparisonInput, compare_groups_pairwise};
+use curvebook_stats::multiplicity::{GroupComparisonInput, compare_groups_pairwise};
 
 fn assert_cld_invariants(res: &CldResult, groups: &[CldGroupInput], is_sig: impl Fn(usize, usize) -> bool, ordering: CldOrdering) {
     assert_eq!(res.sorted_assignments.len(), groups.len(), "group assignment count mismatch");

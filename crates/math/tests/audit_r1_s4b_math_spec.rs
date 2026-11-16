@@ -1,12 +1,12 @@
-//! Stage 4B audit regression tests for `R1-S01-05` and `R1-S01-06` in `lumencraft-math`.
+//! Stage 4B audit regression tests for `R1-S01-05` and `R1-S01-06` in `curvebook-math`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_math::MathError;
-use lumencraft_math::dist::{
+use curvebook_math::MathError;
+use curvebook_math::dist::{
     chi2_isf, chi2_ppf, chi2_sf, f_cdf, f_isf, f_ppf, f_sf, student_t_isf, student_t_ppf, student_t_sf, student_t_two_sided_isf,
     student_t_two_sided_p,
 };
-use lumencraft_math::special::{
+use curvebook_math::special::{
     ln_reg_gamma_q, reg_beta_inv, reg_beta_inv_pair, reg_beta_xy, reg_gamma_p, reg_gamma_p_inv, reg_gamma_q, reg_gamma_q_inv,
 };
 

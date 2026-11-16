@@ -1,37 +1,37 @@
 [package]
-name = "lumencraft-ui-egui"
+name = "curvebook-ui-egui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft desktop and web interface shell: project navigator, spreadsheet grid, dialogs and graph canvas"
+description = "CurveBook desktop and web interface shell: project navigator, spreadsheet grid, dialogs and graph canvas"
 
 [lints]
 workspace = true
 
 [features]
 default = ["bundled-fonts"]
-bundled-fonts = ["lumencraft-engine/bundled-fonts", "lumencraft-text/bundled-fonts"]
+bundled-fonts = ["curvebook-engine/bundled-fonts", "curvebook-text/bundled-fonts"]
 
 [dependencies]
-lumencraft-chart = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-engine = { workspace = true }
-lumencraft-format = { workspace = true }
-lumencraft-math = { workspace = true }
-lumencraft-palette = { workspace = true }
-lumencraft-pdf = { workspace = true }
-lumencraft-platform = { workspace = true }
-lumencraft-render = { workspace = true }
-lumencraft-stats = { workspace = true }
-lumencraft-svg = { workspace = true }
-lumencraft-text = { workspace = true }
-lumencraft-tools = { workspace = true }
-lumencraft-transform = { workspace = true }
+curvebook-chart = { workspace = true }
+curvebook-doc = { workspace = true }
+curvebook-engine = { workspace = true }
+curvebook-format = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-palette = { workspace = true }
+curvebook-pdf = { workspace = true }
+curvebook-platform = { workspace = true }
+curvebook-render = { workspace = true }
+curvebook-stats = { workspace = true }
+curvebook-svg = { workspace = true }
+curvebook-text = { workspace = true }
+curvebook-tools = { workspace = true }
+curvebook-transform = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }
 proptest = { workspace = true }

@@ -1,14 +1,14 @@
 //! `cargo xtask web-fonts`: stage font faces listed in `crates/text/web-fonts.txt` from
-//! `$LUMENCRAFT_FONTS_DIR/fonts/` into the Trunk staging directory (`$TRUNK_STAGING_DIR/fonts` or
-//! `dist/web/fonts`). No-op when `LUMENCRAFT_FONTS_DIR` is unset.
+//! `$CURVEBOOK_FONTS_DIR/fonts/` into the Trunk staging directory (`$TRUNK_STAGING_DIR/fonts` or
+//! `dist/web/fonts`). No-op when `CURVEBOOK_FONTS_DIR` is unset.
 
 use std::path::{Path, PathBuf};
 
 const MANIFEST_REL: &str = "crates/text/web-fonts.txt";
 
 pub fn run(root: &Path) -> Result<(), String> {
-    let Some(fonts_root) = std::env::var_os("LUMENCRAFT_FONTS_DIR").filter(|v| !v.is_empty()) else {
-        println!("web-fonts: LUMENCRAFT_FONTS_DIR not set; skipping optional font staging");
+    let Some(fonts_root) = std::env::var_os("CURVEBOOK_FONTS_DIR").filter(|v| !v.is_empty()) else {
+        println!("web-fonts: CURVEBOOK_FONTS_DIR not set; skipping optional font staging");
         return Ok(());
     };
     let manifest_path = root.join(MANIFEST_REL);

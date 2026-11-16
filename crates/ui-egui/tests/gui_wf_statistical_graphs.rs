@@ -3,19 +3,19 @@
 //!
 //! Every workflow runs strictly under `UiApp` with `app.set_gui_only(true)` (`GuiOnlyPolicy::Strict`)
 //! and drives all creation, data entry, analysis, formatting, layout dragging, inspection, export,
-//! print spooling, and screenshot capture exclusively through `lumencraft_ui_egui::dispatch_gui_action`.
+//! print spooling, and screenshot capture exclusively through `curvebook_ui_egui::dispatch_gui_action`.
 
 #![forbid(unsafe_code)]
 
-use lumencraft_chart::{ChartScene, PointPt, compile_graph, compile_layout};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PointPt, compile_graph, compile_layout};
+use curvebook_doc::{
     BracketLabelMode, BracketStyle, ErrorBarMetric, FigureCanvasPreset, FramePreset, GraphAnnotation, GraphicalDataObject, JournalWidthPreset,
     LayoutItem, MultivariatePlotMode, PanelBadgeStyle, ProjectDocument, ReplicateOverlayStyle, SheetId, SummaryMeasure, WhiskerMethod,
 };
-use lumencraft_palette::{CanvasPreviewFilter, MarkerStyle, PaletteId, Rgba8};
-use lumencraft_ui_egui::dialogs_canvas::{ActiveDialog, ActiveInspector};
-use lumencraft_ui_egui::theme::UiThemeMode;
-use lumencraft_ui_egui::{UiApp, ViewportMetrics, dispatch_gui_action};
+use curvebook_palette::{CanvasPreviewFilter, MarkerStyle, PaletteId, Rgba8};
+use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, ActiveInspector};
+use curvebook_ui_egui::theme::UiThemeMode;
+use curvebook_ui_egui::{UiApp, ViewportMetrics, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;

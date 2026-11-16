@@ -6,7 +6,7 @@
 
 use std::collections::HashSet;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, InfoConstant, InfoSheet,
     MAX_TITLE_BYTES, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, ProjectDocument, SequenceProgression, SheetId,
     SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable, default_column_label, validate_data_sets, validate_rows,
@@ -953,9 +953,9 @@ mod tests {
         // 6. Subcolumns exceeding MAX_SUBCOLUMNS rejected cleanly, and widened grid exceeding MAX_IMPORT_CELLS rejected before allocation.
         let too_many_subs = format!(
             "<PrismFile><Table ID=\"big\" TableType=\"XY\"><YColumn Subcolumns=\"{}\"/></Table></PrismFile>",
-            lumencraft_doc::MAX_SUBCOLUMNS + 1
+            curvebook_doc::MAX_SUBCOLUMNS + 1
         );
-        assert!(matches!(import_pzfx_str(&too_many_subs), Err(FormatError::Doc(lumencraft_doc::DocError::TooManySubcolumns { .. }))));
+        assert!(matches!(import_pzfx_str(&too_many_subs), Err(FormatError::Doc(curvebook_doc::DocError::TooManySubcolumns { .. }))));
 
         let mut rows_xml = String::from("<XColumn><Subcolumn>");
         for r in 0..250 {

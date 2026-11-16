@@ -4,15 +4,15 @@
 
 use std::time::Instant;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, CellCoord, ColumnDesignHint, ColumnTable, ContingencyMethod, ContingencySpec,
     ContingencyTable, CoxTieMethod, DataSheet, FactorialAnovaSpec, FitMethod, GroupedTable, LinearRegressionSpec, ModelComparisonSpec,
     MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NonlinearFitSpec, OneWayAnovaSpec, OneWayMethod,
     PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, ResultStatus, SheetId, SubcolumnMode,
     SurvivalAnalysisSpec, SurvivalTable, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, XyTable,
 };
-use lumencraft_engine::methods_report::{ReportFormat, generate_methods_report};
-use lumencraft_engine::{CommandOutcome, MAX_UNDO_CELL_BUDGET, MAX_UNDO_ENTRIES, Session};
+use curvebook_engine::methods_report::{ReportFormat, generate_methods_report};
+use curvebook_engine::{CommandOutcome, MAX_UNDO_CELL_BUDGET, MAX_UNDO_ENTRIES, Session};
 use serde_json::{Value, json};
 
 fn ok_cmd(session: &mut Session, id: &str, params: Value) -> CommandOutcome {
@@ -146,9 +146,9 @@ fn g12_read_only_commands_preserve_redo_stack_and_undo_depth() {
     assert_eq!(session.redo_depth(), 1);
     assert_eq!(session.document().data_sheet(&SheetId::new("xy-1")).unwrap().title, "Dose Assay v2");
 
-    let tmp_dir = std::env::temp_dir().join("lumencraft-g12-readonly-tests");
+    let tmp_dir = std::env::temp_dir().join("curvebook-g12-readonly-tests");
     let _ = std::fs::create_dir_all(&tmp_dir);
-    let archive_path = tmp_dir.join("ro_check.lumencraft");
+    let archive_path = tmp_dir.join("ro_check.curvebook");
     let csv_path = tmp_dir.join("ro_check.csv");
     let json_path = tmp_dir.join("ro_check.json");
     let g_emf_path = tmp_dir.join("g1.emf");

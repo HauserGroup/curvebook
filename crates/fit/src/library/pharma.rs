@@ -59,7 +59,7 @@
 
 use crate::library::{ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
-use lumencraft_doc::{ParameterRule, ParameterScope};
+use curvebook_doc::{ParameterRule, ParameterScope};
 
 /// Canonical IDs exposed by the pharmacology / biochemistry equation catalog.
 pub const PHARMA_EQUATION_IDS: &[&str] = &[
@@ -2318,7 +2318,7 @@ impl ParametricModel for MotulskyMahanKinetics {
 mod tests {
     use super::{PHARMA_EQUATION_IDS, resolve_pharma_model};
 
-    /// Display names are written in LumenCraft's own words (AGENTS.md › clean-room: no copied
+    /// Display names are written in CurveBook's own words (AGENTS.md › clean-room: no copied
     /// equation wording), so none uses the "Family -- Variant" separator style.
     #[test]
     fn display_names_use_own_wording() {

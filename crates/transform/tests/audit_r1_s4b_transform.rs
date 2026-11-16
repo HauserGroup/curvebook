@@ -1,10 +1,10 @@
 use std::error::Error;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     BaselineOperation, Cell, CellValue, ColumnDesignHint, ColumnTable, DataSheet, GroupedTable, SubcolumnMode, TableArchetype, TransformAnalysisSpec,
     XColumnMode, XyTable,
 };
-use lumencraft_transform::{CurveSheetOp, DerivativeOrder, SmoothMethod, TransformContext, apply_curve_calculus_to_sheet, execute_transform};
+use curvebook_transform::{CurveSheetOp, DerivativeOrder, SmoothMethod, TransformContext, apply_curve_calculus_to_sheet, execute_transform};
 
 fn build_xy(id: &str, xs: &[f64], ys: &[&[Option<f64>]]) -> Result<DataSheet, Box<dyn Error>> {
     let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::Single, ys.len(), xs.len())?;

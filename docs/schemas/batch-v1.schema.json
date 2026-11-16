@@ -104,9 +104,9 @@
         },
         "format": {
           "enum": [
-            "lumencraft",
-            "lumencraft.d",
-            "lumencraft-dir",
+            "curvebook",
+            "curvebook.d",
+            "curvebook-dir",
             "unpacked",
             "dir",
             "csv",
@@ -379,10 +379,10 @@
       "type": "object"
     }
   },
-  "$id": "https://lumencraft.dev/schemas/batch-v1.schema.json",
+  "$id": "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/batch-v1.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Draft 2020-12 schema for lumencraft.batch.v1 headless batch manifests.",
+  "description": "Draft 2020-12 schema for curvebook.batch.v1 headless batch manifests.",
   "not": {
     "properties": {
       "project": {
@@ -433,7 +433,7 @@
       ]
     },
     "schema": {
-      "const": "lumencraft.batch.v1",
+      "const": "curvebook.batch.v1",
       "type": "string"
     },
     "template": {

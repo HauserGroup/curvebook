@@ -1,13 +1,13 @@
 //! Stage 4B S3 audit regressions: `R1-S07-12`, `R1-S07-13`, `R1-S07-14`, `R1-X2-09`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BracketLabelMode, BracketStyle, Cell, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, GraphAnnotation,
     GraphSheet, HookSource, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec, LinearRegressionSpec, NonlinearFitSpec, NormalizeAnchor,
     PairwiseBracketSpec, ParameterRule, ParameterScope, ProjectDocument, RectPt, RegressionOverlaySpec, ResultScalarEntry, ResultSheet, ResultStatus,
     SheetId, SubcolumnMode, TableArchetype, TransformAnalysisSpec, XyTable,
 };
-use lumencraft_engine::{CommandOutcome, Session, cmd, cmd::Effects, dag};
+use curvebook_engine::{CommandOutcome, Session, cmd, cmd::Effects, dag};
 use serde_json::{Value, json};
 
 fn ok(session: &mut Session, cmd_id: &str, params: Value) -> CommandOutcome {
@@ -302,7 +302,7 @@ fn r1_s07_13_sheet_select_non_mutating_preserves_dirty_undo_and_redo() {
     assert_eq!(session.undo_depth(), 0);
     assert_eq!(session.redo_depth(), 1);
     assert_eq!(
-        session.document().data_sheet(&SheetId::new("data-1")).unwrap().cell(lumencraft_doc::CellCoord::new(0, 0, 0)).unwrap().active_number(),
+        session.document().data_sheet(&SheetId::new("data-1")).unwrap().cell(curvebook_doc::CellCoord::new(0, 0, 0)).unwrap().active_number(),
         Some(1.0)
     );
 
@@ -312,7 +312,7 @@ fn r1_s07_13_sheet_select_non_mutating_preserves_dirty_undo_and_redo() {
 
     assert!(session.redo().unwrap());
     assert_eq!(
-        session.document().data_sheet(&SheetId::new("data-1")).unwrap().cell(lumencraft_doc::CellCoord::new(0, 0, 0)).unwrap().active_number(),
+        session.document().data_sheet(&SheetId::new("data-1")).unwrap().cell(curvebook_doc::CellCoord::new(0, 0, 0)).unwrap().active_number(),
         Some(77.5)
     );
 }
@@ -333,7 +333,7 @@ fn r1_s07_14_pzfx_double_merge_allocates_unique_ids() {
     assert_eq!(pzfx_session.document().info_sheets.len(), 3);
     assert_eq!(pzfx_session.document().data_sheet(&SheetId::new("data-1")).unwrap().title, "Dest Table One");
     assert_eq!(pzfx_session.document().info_sheet(&SheetId::new("info-1")).unwrap().title, "Dest Info One");
-    assert!(lumencraft_format::save_project_bytes(pzfx_session.document()).is_ok());
+    assert!(curvebook_format::save_project_bytes(pzfx_session.document()).is_ok());
 }
 
 fn build_colliding_source_archive_b64() -> String {
@@ -472,7 +472,7 @@ fn r1_s07_14_prism_merge_remaps_colliding_ids_and_all_refs() {
     assert_remapped_archive_refs(merged);
 
     assert!(dag::topological_order(merged).is_ok());
-    assert!(lumencraft_format::save_project_bytes(merged).is_ok());
+    assert!(curvebook_format::save_project_bytes(merged).is_ok());
     let _ = ok(&mut dest_sess, "project.recalculate", json!({}));
     assert_eq!(dest_sess.document().result_sheet(&SheetId::new("res-1-2")).unwrap().status, ResultStatus::UpToDate);
 }
@@ -541,7 +541,7 @@ fn r1_x2_09_overflowing_bland_altman_fails_cleanly_and_never_blocks_save() {
     let scaled_res = scaled_session.execute("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-ba", "kind": "stats.bland_altman" }));
     assert!(scaled_res.is_ok(), "scaled 1e300 Bland-Altman should succeed finitely: {scaled_res:?}");
     assert_eq!(scaled_session.document().result_sheet(&SheetId::new("res-ba")).unwrap().status, ResultStatus::UpToDate);
-    assert!(lumencraft_format::save_project_bytes(scaled_session.document()).is_ok());
+    assert!(curvebook_format::save_project_bytes(scaled_session.document()).is_ok());
 
     // Case 1: Adding Bland-Altman directly onto difference-overflowing 1e308 data (`1e308 - (-1e308) = +inf`)
     // must fail cleanly rather than committing non-finite floats that poison `project.save`.
@@ -560,7 +560,7 @@ fn r1_x2_09_overflowing_bland_altman_fails_cleanly_and_never_blocks_save() {
     let add_res = add_session.execute("analysis.add", json!({ "sheet_id": "res-ba", "source_sheet": "col-ba", "kind": "stats.bland_altman" }));
     assert!(add_res.is_err(), "analysis.add must reject non-finite Bland-Altman result");
     assert!(add_session.document().result_sheet(&SheetId::new("res-ba")).is_none(), "rolled-back session must stay clean");
-    assert!(lumencraft_format::save_project_bytes(add_session.document()).is_ok());
+    assert!(curvebook_format::save_project_bytes(add_session.document()).is_ok());
     let _ = ok(&mut add_session, "project.save", json!({}));
 
     // Case 2: Initially healthy Bland-Altman becomes overflowing on downstream cell edits ->
@@ -591,6 +591,6 @@ fn r1_x2_09_overflowing_bland_altman_fails_cleanly_and_never_blocks_save() {
     assert!(res.pairwise_comparisons.is_empty());
     assert!(res.analyzable_data.is_none());
 
-    assert!(lumencraft_format::save_project_bytes(session.document()).is_ok());
+    assert!(curvebook_format::save_project_bytes(session.document()).is_ok());
     let _saved = ok(&mut session, "project.save", json!({}));
 }

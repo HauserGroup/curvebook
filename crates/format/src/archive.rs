@@ -1,4 +1,4 @@
-//! Native `.lumencraft` and `.lctemplate` ZIP archive serialization, deserialization,
+//! Native `.curvebook` and `.cbtemplate` ZIP archive serialization, deserialization,
 //! schema migration, dimension/float validation, and circular dependency guards.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -9,7 +9,7 @@ use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation,
     GraphSheet, HookSource, InfoSheet, LayoutItem, LayoutSheet, MAX_DATA_SETS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, NormalizeAnchor,
     ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultStatus, SheetId, SheetSection, TableArchetype, TransformAnalysisSpec,
@@ -24,17 +24,18 @@ use crate::zip::{ZipArchive, ZipLimits, ZipWriter, sanitize_zip_path};
 const MANIFEST_PATH: &str = "manifest.json";
 const DOCUMENT_PATH: &str = "document.json";
 const SHEETS_DIR: &str = "sheets";
-const FORMAT_MAGIC: &str = "lumencraft-archive";
+pub(crate) const FORMAT_MAGIC: &str = "curvebook-archive";
+pub(crate) const LEGACY_FORMAT_MAGIC: &str = "lumencraft-archive";
 const MAX_CHECKPOINTS_PER_PROJECT: usize = 64;
 const MAX_SHEET_CSV_STEM_LEN: usize = 64;
 const MAX_MANIFEST_CSV_STEM_LEN: usize = 128;
 
 static UNPACKED_STAGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
-/// Maximum byte length permitted when reading a `.lumencraft`, `.lctemplate`, or `.prism` archive file.
+/// Maximum byte length permitted when reading a `.curvebook`, `.cbtemplate`, or `.prism` archive file.
 pub const MAX_ARCHIVE_FILE_BYTES: usize = 128 * 1024 * 1024;
 
-/// Kind of native LumenCraft ZIP archive.
+/// Kind of native CurveBook ZIP archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ArchiveKind {
     Project,
@@ -61,7 +62,7 @@ pub struct SheetManifestEntry {
     pub crc32: Option<u32>,
 }
 
-/// Top-level `manifest.json` stored inside `.lumencraft` and `.lctemplate` archives.
+/// Top-level `manifest.json` stored inside `.curvebook` and `.cbtemplate` archives.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArchiveManifest {
     pub format: String,
@@ -72,12 +73,12 @@ pub struct ArchiveManifest {
     pub sheets: Vec<SheetManifestEntry>,
 }
 
-/// Serialize a [`ProjectDocument`] into deterministic `.lumencraft` archive bytes.
+/// Serialize a [`ProjectDocument`] into deterministic `.curvebook` archive bytes.
 pub fn save_project_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, FormatError> {
     save_archive_bytes(doc, ArchiveKind::Project)
 }
 
-/// Serialize a [`ProjectDocument`] into deterministic `.lctemplate` archive bytes, stripping
+/// Serialize a [`ProjectDocument`] into deterministic `.cbtemplate` archive bytes, stripping
 /// project-specific raw data cell values and cached results while preserving schemas, specs,
 /// graphs, layouts, and info constants.
 pub fn save_template_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, FormatError> {
@@ -85,7 +86,7 @@ pub fn save_template_bytes(doc: &ProjectDocument) -> Result<Vec<u8>, FormatError
     save_archive_bytes(&templated, ArchiveKind::Template)
 }
 
-/// Load and validate a `.lumencraft` project archive from raw bytes.
+/// Load and validate a `.curvebook` project archive from raw bytes.
 pub fn open_project_bytes(bytes: &[u8]) -> Result<ProjectDocument, FormatError> {
     let (kind, doc) = open_archive_bytes(bytes)?;
     if kind != ArchiveKind::Project {
@@ -94,7 +95,7 @@ pub fn open_project_bytes(bytes: &[u8]) -> Result<ProjectDocument, FormatError> 
     Ok(doc)
 }
 
-/// Load and validate a `.lctemplate` archive from raw bytes.
+/// Load and validate a `.cbtemplate` archive from raw bytes.
 pub fn open_template_bytes(bytes: &[u8]) -> Result<ProjectDocument, FormatError> {
     let (kind, doc) = open_archive_bytes(bytes)?;
     if kind != ArchiveKind::Template {
@@ -103,7 +104,7 @@ pub fn open_template_bytes(bytes: &[u8]) -> Result<ProjectDocument, FormatError>
     Ok(doc)
 }
 
-/// Load a `.lctemplate` (or `.lumencraft`) archive and instantiate a clean [`ProjectDocument`]
+/// Load a `.cbtemplate` (or `.curvebook`) archive and instantiate a clean [`ProjectDocument`]
 /// ready for new experimental data, optionally assigning a new project title.
 pub fn instantiate_template_bytes(bytes: &[u8], new_title: Option<&str>) -> Result<ProjectDocument, FormatError> {
     let (_, raw_doc) = open_archive_bytes(bytes)?;
@@ -115,7 +116,7 @@ pub fn instantiate_template_bytes(bytes: &[u8], new_title: Option<&str>) -> Resu
     Ok(doc)
 }
 
-/// Load any native LumenCraft archive (`.lumencraft` or `.lctemplate`), returning its [`ArchiveKind`]
+/// Load any native CurveBook archive (`.curvebook` or `.cbtemplate`), returning its [`ArchiveKind`]
 /// and validated, schema-migrated [`ProjectDocument`].
 pub fn open_archive_bytes(bytes: &[u8]) -> Result<(ArchiveKind, ProjectDocument), FormatError> {
     open_archive_bytes_with_limits(bytes, ZipLimits::default())
@@ -149,7 +150,7 @@ pub fn open_archive_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
 
 #[cfg(not(target_arch = "wasm32"))]
 fn platform_write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FormatError> {
-    lumencraft_platform::fs::write_atomic(path, bytes)?;
+    curvebook_platform::fs::write_atomic(path, bytes)?;
     Ok(())
 }
 
@@ -160,7 +161,7 @@ fn platform_write_atomic(_path: &Path, _bytes: &[u8]) -> Result<(), FormatError>
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn platform_read_regular_file(path: &Path, max_bytes: usize) -> Result<Vec<u8>, FormatError> {
-    Ok(lumencraft_platform::fs::read_regular_file_bytes(path, max_bytes)?)
+    Ok(curvebook_platform::fs::read_regular_file_bytes(path, max_bytes)?)
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -182,7 +183,7 @@ fn ensure_schema_version_supported(version: u32) -> Result<(), FormatError> {
 fn ensure_existing_archive_not_newer(path: &Path) -> Result<(), FormatError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(bytes) = lumencraft_platform::fs::read_regular_file_bytes_if_exists(path, MAX_ARCHIVE_FILE_BYTES)? else {
+        let Some(bytes) = curvebook_platform::fs::read_regular_file_bytes_if_exists(path, MAX_ARCHIVE_FILE_BYTES)? else {
             return Ok(());
         };
         let Ok(archive) = ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()) else {
@@ -204,7 +205,7 @@ fn ensure_existing_archive_not_newer(path: &Path) -> Result<(), FormatError> {
     }
 }
 
-/// Write a `.lumencraft` archive to disk.
+/// Write a `.curvebook` archive to disk.
 pub fn save_project_file(path: &Path, doc: &ProjectDocument) -> Result<(), FormatError> {
     let bytes = save_project_bytes(doc)?;
     ensure_existing_archive_not_newer(path)?;
@@ -212,13 +213,13 @@ pub fn save_project_file(path: &Path, doc: &ProjectDocument) -> Result<(), Forma
     Ok(())
 }
 
-/// Read a `.lumencraft` archive from disk.
+/// Read a `.curvebook` archive from disk.
 pub fn open_project_file(path: &Path) -> Result<ProjectDocument, FormatError> {
     let bytes = platform_read_regular_file(path, MAX_ARCHIVE_FILE_BYTES)?;
     open_project_bytes(&bytes)
 }
 
-/// Write a `.lctemplate` archive to disk.
+/// Write a `.cbtemplate` archive to disk.
 pub fn save_template_file(path: &Path, doc: &ProjectDocument) -> Result<(), FormatError> {
     let bytes = save_template_bytes(doc)?;
     ensure_existing_archive_not_newer(path)?;
@@ -226,21 +227,21 @@ pub fn save_template_file(path: &Path, doc: &ProjectDocument) -> Result<(), Form
     Ok(())
 }
 
-/// Read a `.lctemplate` archive from disk.
+/// Read a `.cbtemplate` archive from disk.
 pub fn open_template_file(path: &Path) -> Result<ProjectDocument, FormatError> {
     let bytes = platform_read_regular_file(path, MAX_ARCHIVE_FILE_BYTES)?;
     open_template_bytes(&bytes)
 }
 
-/// Return `true` when `path` is an existing directory containing a valid unpacked `.lumencraft.d/`
+/// Return `true` when `path` is an existing directory containing a valid unpacked `.curvebook.d/`
 /// project manifest and document payload (rejecting template archives and escaping symlinks).
 #[must_use]
 pub fn is_unpacked_project_dir(path: &Path) -> bool {
     check_unpacked_project_dir(path).unwrap_or(false)
 }
 
-/// Write `doc` to an unpacked, Git-friendly `.lumencraft.d/` project directory using the exact
-/// deterministic `.lumencraft` layout (`manifest.json`, canonical 2-space `document.json`, and
+/// Write `doc` to an unpacked, Git-friendly `.curvebook.d/` project directory using the exact
+/// deterministic `.curvebook` layout (`manifest.json`, canonical 2-space `document.json`, and
 /// RFC-4180 `sheets/<id>.csv` CSVs), pruning stale tracked sheet files without disturbing `.git`
 /// or user files, enforcing `ZipLimits::default()`, refusing future-schema overwrites, and
 /// committing transactionally across staged temp files.
@@ -281,7 +282,7 @@ where
     prune_stale_unpacked_files(&canon_root, &prior_paths, &expected_paths)
 }
 
-/// Read and validate an unpacked `.lumencraft.d/` project directory, enforcing strict relative-path
+/// Read and validate an unpacked `.curvebook.d/` project directory, enforcing strict relative-path
 /// containment, symlink boundaries, CRC-32 verification, size caps, and schema migration.
 pub fn open_project_unpacked_dir(dir: &Path) -> Result<ProjectDocument, FormatError> {
     if !std::fs::metadata(dir)?.is_dir() {
@@ -342,11 +343,34 @@ fn validate_sheet_csv_path(raw: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
+#[derive(serde::Deserialize)]
+struct ManifestHeaderPeek {
+    #[serde(default)]
+    format: Option<String>,
+    #[serde(default)]
+    schema_version: Option<u32>,
+}
+
+fn reject_legacy_archive_magic(format: &str) -> Result<(), FormatError> {
+    if format == LEGACY_FORMAT_MAGIC {
+        return Err(FormatError::UnsupportedFormat {
+            reason: format!("unsupported legacy archive format `{LEGACY_FORMAT_MAGIC}`; CurveBook does not open or convert LumenCraft files"),
+        });
+    }
+    Ok(())
+}
+
 fn parse_and_validate_manifest(manifest_text: &str) -> Result<ArchiveManifest, FormatError> {
-    if let Some(version) = peek_json_schema_version(manifest_text.as_bytes()) {
-        ensure_schema_version_supported(version)?;
+    if let Ok(peek) = serde_json::from_str::<ManifestHeaderPeek>(manifest_text) {
+        if let Some(format) = peek.format.as_deref() {
+            reject_legacy_archive_magic(format)?;
+        }
+        if let Some(version) = peek.schema_version {
+            ensure_schema_version_supported(version)?;
+        }
     }
     let manifest: ArchiveManifest = serde_json::from_str(manifest_text)?;
+    reject_legacy_archive_magic(&manifest.format)?;
     if manifest.format != FORMAT_MAGIC {
         return Err(FormatError::UnsupportedFormat { reason: format!("unexpected archive format `{}`", manifest.format) });
     }
@@ -892,19 +916,20 @@ fn create_and_write_stage_file(parent: &Path, target: &Path, bytes: &[u8], exist
         if existing_perms.is_some() {
             opts.mode(0o600);
         }
-        let mut file = match opts.open(&stage_path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(FormatError::Io(err.to_string())),
+        let write_res = {
+            let mut file = match opts.open(&stage_path) {
+                Ok(file) => file,
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(err) => return Err(FormatError::Io(err.to_string())),
+            };
+            (|| -> Result<(), std::io::Error> {
+                file.write_all(bytes)?;
+                if let Some(perms) = existing_perms {
+                    file.set_permissions(perms)?;
+                }
+                file.sync_all()
+            })()
         };
-        let write_res = (|| -> Result<(), std::io::Error> {
-            file.write_all(bytes)?;
-            if let Some(perms) = existing_perms {
-                file.set_permissions(perms)?;
-            }
-            file.sync_all()
-        })();
-        drop(file);
         if let Err(err) = write_res {
             let _ = std::fs::remove_file(&stage_path);
             return Err(FormatError::Io(err.to_string()));
@@ -1041,7 +1066,7 @@ fn unique_sheet_csv_path(idx: usize, id: &SheetId, used_lower: &mut HashSet<Stri
     candidate
 }
 
-/// Strip raw cell values and cached result tables to produce a clean reusable `.lctemplate`.
+/// Strip raw cell values and cached result tables to produce a clean reusable `.cbtemplate`.
 pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectDocument, FormatError> {
     ensure_schema_version_supported(doc.schema_version)?;
     validate_project_document(doc)?;
@@ -1255,7 +1280,7 @@ fn backfill_graph_sheet_defaults(gs: &mut serde_json::Value) {
     }
 }
 
-/// Enforce all `lumencraft-doc` structural bounds, finite-float invariants, and DAG cycle absence.
+/// Enforce all `curvebook-doc` structural bounds, finite-float invariants, and DAG cycle absence.
 pub fn validate_project_document(doc: &ProjectDocument) -> Result<(), FormatError> {
     validate_project_document_inner(doc, true)
 }
@@ -1264,7 +1289,7 @@ fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_en
     validate_title(&doc.title)?;
     let total = doc.total_sheet_count();
     if total > MAX_SHEETS_PER_PROJECT {
-        return Err(FormatError::Doc(lumencraft_doc::DocError::TooManySheets { count: total, max: MAX_SHEETS_PER_PROJECT }));
+        return Err(FormatError::Doc(curvebook_doc::DocError::TooManySheets { count: total, max: MAX_SHEETS_PER_PROJECT }));
     }
 
     let mut seen_ids = HashSet::with_capacity(total);
@@ -1323,7 +1348,7 @@ fn validate_checkpoints(doc: &ProjectDocument) -> Result<(), FormatError> {
     let mut seen_ids = HashSet::with_capacity(doc.checkpoints.len());
     for cp in &doc.checkpoints {
         if cp.id.trim().is_empty() {
-            return Err(FormatError::Doc(lumencraft_doc::DocError::EmptyIdentifier));
+            return Err(FormatError::Doc(curvebook_doc::DocError::EmptyIdentifier));
         }
         validate_title(&cp.id)?;
         validate_title(&cp.name)?;
@@ -1352,7 +1377,7 @@ fn check_opt_finite(value: Option<f64>, location: impl FnOnce() -> String) -> Re
     if let Some(v) = value { check_finite(v, location) } else { Ok(()) }
 }
 
-fn validate_floating_notes(notes: &[lumencraft_doc::FloatingNote], sheet_id: &str) -> Result<(), FormatError> {
+fn validate_floating_notes(notes: &[curvebook_doc::FloatingNote], sheet_id: &str) -> Result<(), FormatError> {
     for (idx, note) in notes.iter().enumerate() {
         let b = note.bounds_pt;
         if !b.x.is_finite() || !b.y.is_finite() || !b.width.is_finite() || !b.height.is_finite() {
@@ -1362,8 +1387,8 @@ fn validate_floating_notes(notes: &[lumencraft_doc::FloatingNote], sheet_id: &st
     Ok(())
 }
 
-fn validate_archetype_extra_floats(arch: &lumencraft_doc::TableArchetype, ctx: &str) -> Result<(), FormatError> {
-    if let lumencraft_doc::TableArchetype::Grouped(t) = arch
+fn validate_archetype_extra_floats(arch: &curvebook_doc::TableArchetype, ctx: &str) -> Result<(), FormatError> {
+    if let curvebook_doc::TableArchetype::Grouped(t) = arch
         && let Some(spacing) = &t.row_numeric_spacing
     {
         for (row, maybe_v) in spacing.iter().enumerate() {
@@ -1373,40 +1398,40 @@ fn validate_archetype_extra_floats(arch: &lumencraft_doc::TableArchetype, ctx: &
     Ok(())
 }
 
-fn validate_math_transform_preset(preset: &lumencraft_doc::MathTransformPreset, location_prefix: &str) -> Result<(), FormatError> {
+fn validate_math_transform_preset(preset: &curvebook_doc::MathTransformPreset, location_prefix: &str) -> Result<(), FormatError> {
     match preset {
-        lumencraft_doc::MathTransformPreset::LinearScale { slope, intercept } => {
+        curvebook_doc::MathTransformPreset::LinearScale { slope, intercept } => {
             check_finite(*slope, || format!("{location_prefix}.slope"))?;
             check_finite(*intercept, || format!("{location_prefix}.intercept"))?;
         }
-        lumencraft_doc::MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor } => {
+        curvebook_doc::MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor } => {
             check_finite(*molar_unit_factor, || format!("{location_prefix}.molar_unit_factor"))?;
         }
-        lumencraft_doc::MathTransformPreset::Ln
-        | lumencraft_doc::MathTransformPreset::Log10
-        | lumencraft_doc::MathTransformPreset::Log2
-        | lumencraft_doc::MathTransformPreset::Exp10
-        | lumencraft_doc::MathTransformPreset::Exp
-        | lumencraft_doc::MathTransformPreset::Reciprocal
-        | lumencraft_doc::MathTransformPreset::Sqrt
-        | lumencraft_doc::MathTransformPreset::Square
-        | lumencraft_doc::MathTransformPreset::Logit
-        | lumencraft_doc::MathTransformPreset::Probit
-        | lumencraft_doc::MathTransformPreset::ArcsinSqrt => {}
+        curvebook_doc::MathTransformPreset::Ln
+        | curvebook_doc::MathTransformPreset::Log10
+        | curvebook_doc::MathTransformPreset::Log2
+        | curvebook_doc::MathTransformPreset::Exp10
+        | curvebook_doc::MathTransformPreset::Exp
+        | curvebook_doc::MathTransformPreset::Reciprocal
+        | curvebook_doc::MathTransformPreset::Sqrt
+        | curvebook_doc::MathTransformPreset::Square
+        | curvebook_doc::MathTransformPreset::Logit
+        | curvebook_doc::MathTransformPreset::Probit
+        | curvebook_doc::MathTransformPreset::ArcsinSqrt => {}
     }
     Ok(())
 }
 
-fn validate_normalize_anchor(anchor: &lumencraft_doc::NormalizeAnchor, location: &str) -> Result<(), FormatError> {
-    if let lumencraft_doc::NormalizeAnchor::FixedValue(v) = anchor {
+fn validate_normalize_anchor(anchor: &curvebook_doc::NormalizeAnchor, location: &str) -> Result<(), FormatError> {
+    if let curvebook_doc::NormalizeAnchor::FixedValue(v) = anchor {
         check_finite(*v, || location.to_owned())?;
     }
     Ok(())
 }
 
-fn validate_transform_floats(transform: &lumencraft_doc::TransformAnalysisSpec, sheet_id: &str) -> Result<(), FormatError> {
+fn validate_transform_floats(transform: &curvebook_doc::TransformAnalysisSpec, sheet_id: &str) -> Result<(), FormatError> {
     match transform {
-        lumencraft_doc::TransformAnalysisSpec::Math { x_transform, y_transform, .. } => {
+        curvebook_doc::TransformAnalysisSpec::Math { x_transform, y_transform, .. } => {
             if let Some(p) = x_transform {
                 validate_math_transform_preset(p, &format!("{sheet_id}.analysis.x_transform"))?;
             }
@@ -1414,40 +1439,40 @@ fn validate_transform_floats(transform: &lumencraft_doc::TransformAnalysisSpec, 
                 validate_math_transform_preset(p, &format!("{sheet_id}.analysis.y_transform"))?;
             }
         }
-        lumencraft_doc::TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. } => {
+        curvebook_doc::TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. } => {
             validate_normalize_anchor(zero_anchor, &format!("{sheet_id}.analysis.zero_anchor"))?;
             validate_normalize_anchor(hundred_anchor, &format!("{sheet_id}.analysis.hundred_anchor"))?;
         }
-        lumencraft_doc::TransformAnalysisSpec::Simulate { x_min, x_max, parameters, noise, .. } => {
+        curvebook_doc::TransformAnalysisSpec::Simulate { x_min, x_max, parameters, noise, .. } => {
             check_finite(*x_min, || format!("{sheet_id}.analysis.simulate.x_min"))?;
             check_finite(*x_max, || format!("{sheet_id}.analysis.simulate.x_max"))?;
             for (idx, (_, val)) in parameters.iter().enumerate() {
                 check_finite(*val, || format!("{sheet_id}.analysis.simulate.parameters[{idx}]"))?;
             }
             match noise {
-                lumencraft_doc::SimulationNoise::Gaussian { sd } => {
+                curvebook_doc::SimulationNoise::Gaussian { sd } => {
                     check_finite(*sd, || format!("{sheet_id}.analysis.simulate.noise.sd"))?;
                 }
-                lumencraft_doc::SimulationNoise::RelativePercent { cv_percent } => {
+                curvebook_doc::SimulationNoise::RelativePercent { cv_percent } => {
                     check_finite(*cv_percent, || format!("{sheet_id}.analysis.simulate.noise.cv_percent"))?;
                 }
-                lumencraft_doc::SimulationNoise::None | lumencraft_doc::SimulationNoise::Poisson => {}
+                curvebook_doc::SimulationNoise::None | curvebook_doc::SimulationNoise::Poisson => {}
             }
         }
-        lumencraft_doc::TransformAnalysisSpec::RemoveBaseline { .. }
-        | lumencraft_doc::TransformAnalysisSpec::Transpose { .. }
-        | lumencraft_doc::TransformAnalysisSpec::PruneRows { .. }
-        | lumencraft_doc::TransformAnalysisSpec::SelectAndTransform { .. }
-        | lumencraft_doc::TransformAnalysisSpec::RandomSample { .. } => {}
+        curvebook_doc::TransformAnalysisSpec::RemoveBaseline { .. }
+        | curvebook_doc::TransformAnalysisSpec::Transpose { .. }
+        | curvebook_doc::TransformAnalysisSpec::PruneRows { .. }
+        | curvebook_doc::TransformAnalysisSpec::SelectAndTransform { .. }
+        | curvebook_doc::TransformAnalysisSpec::RandomSample { .. } => {}
     }
     Ok(())
 }
 
-fn validate_nonlinear_fit_floats(fit: &lumencraft_doc::NonlinearFitSpec, sheet_id: &str) -> Result<(), FormatError> {
-    if let lumencraft_doc::FitMethod::RoutOutlierElimination { fdr_q_percent } = fit.method {
+fn validate_nonlinear_fit_floats(fit: &curvebook_doc::NonlinearFitSpec, sheet_id: &str) -> Result<(), FormatError> {
+    if let curvebook_doc::FitMethod::RoutOutlierElimination { fdr_q_percent } = fit.method {
         check_finite(fdr_q_percent, || format!("{sheet_id}.analysis.fit_method.fdr_q_percent"))?;
     }
-    if let lumencraft_doc::WeightingScheme::GeneralPowerY(k) = fit.weighting {
+    if let curvebook_doc::WeightingScheme::GeneralPowerY(k) = fit.weighting {
         check_finite(k, || format!("{sheet_id}.analysis.weighting.power"))?;
     }
     for (idx, rule) in fit.parameter_rules.iter().enumerate() {
@@ -1455,18 +1480,18 @@ fn validate_nonlinear_fit_floats(fit: &lumencraft_doc::NonlinearFitSpec, sheet_i
         check_opt_finite(rule.lower_bound, || format!("{sheet_id}.parameter_rules[{idx}].lower_bound"))?;
         check_opt_finite(rule.upper_bound, || format!("{sheet_id}.parameter_rules[{idx}].upper_bound"))?;
         match &rule.scope {
-            lumencraft_doc::ParameterScope::Constant(v) => {
+            curvebook_doc::ParameterScope::Constant(v) => {
                 check_finite(*v, || format!("{sheet_id}.parameter_rules[{idx}].constant"))?;
             }
-            lumencraft_doc::ParameterScope::PerDatasetConstant(entries) => {
+            curvebook_doc::ParameterScope::PerDatasetConstant(entries) => {
                 for (entry_idx, (_, val)) in entries.iter().enumerate() {
                     check_finite(*val, || format!("{sheet_id}.parameter_rules[{idx}].per_dataset[{entry_idx}]"))?;
                 }
             }
-            lumencraft_doc::ParameterScope::Local
-            | lumencraft_doc::ParameterScope::SharedGlobal
-            | lumencraft_doc::ParameterScope::HookedConstant(_)
-            | lumencraft_doc::ParameterScope::ColumnTitleConstant => {}
+            curvebook_doc::ParameterScope::Local
+            | curvebook_doc::ParameterScope::SharedGlobal
+            | curvebook_doc::ParameterScope::HookedConstant(_)
+            | curvebook_doc::ParameterScope::ColumnTitleConstant => {}
         }
     }
     if let Some((lo, hi)) = fit.x_range_filter {
@@ -1481,47 +1506,47 @@ fn validate_nonlinear_fit_floats(fit: &lumencraft_doc::NonlinearFitSpec, sheet_i
     check_opt_finite(fit.plot_x_max, || format!("{sheet_id}.analysis.plot_x_max"))
 }
 
-fn validate_analysis_kind_floats(spec: &lumencraft_doc::AnalysisSpec, sheet_id: &str) -> Result<(), FormatError> {
+fn validate_analysis_kind_floats(spec: &curvebook_doc::AnalysisSpec, sheet_id: &str) -> Result<(), FormatError> {
     check_finite(spec.confidence_level.percent(), || format!("{sheet_id}.analysis.confidence_level"))?;
     match &spec.kind {
-        lumencraft_doc::AnalysisKind::Transform(transform) => validate_transform_floats(transform, sheet_id),
-        lumencraft_doc::AnalysisKind::DescriptiveStats(d) => {
+        curvebook_doc::AnalysisKind::Transform(transform) => validate_transform_floats(transform, sheet_id),
+        curvebook_doc::AnalysisKind::DescriptiveStats(d) => {
             check_opt_finite(d.custom_upper_percentile, || format!("{sheet_id}.analysis.custom_upper_percentile"))?;
             check_opt_finite(d.hypothetical_value, || format!("{sheet_id}.analysis.hypothetical_value"))
         }
-        lumencraft_doc::AnalysisKind::OutlierDetection(o) => match o {
-            lumencraft_doc::OutlierSpec::Grubbs { alpha, .. } => check_finite(*alpha, || format!("{sheet_id}.analysis.outlier.alpha")),
-            lumencraft_doc::OutlierSpec::Rout { fdr_q_percent } => {
+        curvebook_doc::AnalysisKind::OutlierDetection(o) => match o {
+            curvebook_doc::OutlierSpec::Grubbs { alpha, .. } => check_finite(*alpha, || format!("{sheet_id}.analysis.outlier.alpha")),
+            curvebook_doc::OutlierSpec::Rout { fdr_q_percent } => {
                 check_finite(*fdr_q_percent, || format!("{sheet_id}.analysis.outlier.fdr_q_percent"))
             }
         },
-        lumencraft_doc::AnalysisKind::TwoGroupComparison(t) => match t.method {
-            lumencraft_doc::TwoGroupMethod::OneSampleT { hypothetical } | lumencraft_doc::TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
+        curvebook_doc::AnalysisKind::TwoGroupComparison(t) => match t.method {
+            curvebook_doc::TwoGroupMethod::OneSampleT { hypothetical } | curvebook_doc::TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
                 check_finite(hypothetical, || format!("{sheet_id}.analysis.hypothetical"))
             }
-            lumencraft_doc::TwoGroupMethod::UnpairedT
-            | lumencraft_doc::TwoGroupMethod::WelchT
-            | lumencraft_doc::TwoGroupMethod::PairedT
-            | lumencraft_doc::TwoGroupMethod::RatioPairedT
-            | lumencraft_doc::TwoGroupMethod::LognormalUnpairedT
-            | lumencraft_doc::TwoGroupMethod::MannWhitneyU
-            | lumencraft_doc::TwoGroupMethod::WilcoxonSignedRank
-            | lumencraft_doc::TwoGroupMethod::KolmogorovSmirnov
-            | lumencraft_doc::TwoGroupMethod::PairedSignTest => Ok(()),
+            curvebook_doc::TwoGroupMethod::UnpairedT
+            | curvebook_doc::TwoGroupMethod::WelchT
+            | curvebook_doc::TwoGroupMethod::PairedT
+            | curvebook_doc::TwoGroupMethod::RatioPairedT
+            | curvebook_doc::TwoGroupMethod::LognormalUnpairedT
+            | curvebook_doc::TwoGroupMethod::MannWhitneyU
+            | curvebook_doc::TwoGroupMethod::WilcoxonSignedRank
+            | curvebook_doc::TwoGroupMethod::KolmogorovSmirnov
+            | curvebook_doc::TwoGroupMethod::PairedSignTest => Ok(()),
         },
-        lumencraft_doc::AnalysisKind::MultipleRowTTests(s) => {
+        curvebook_doc::AnalysisKind::MultipleRowTTests(s) => {
             check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
         }
-        lumencraft_doc::AnalysisKind::OneWayAnova(s) => {
+        curvebook_doc::AnalysisKind::OneWayAnova(s) => {
             check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
         }
-        lumencraft_doc::AnalysisKind::FactorialAnova(s) => {
+        curvebook_doc::AnalysisKind::FactorialAnova(s) => {
             check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
         }
-        lumencraft_doc::AnalysisKind::NestedComparison(s) => {
+        curvebook_doc::AnalysisKind::NestedComparison(s) => {
             check_finite(s.multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
         }
-        lumencraft_doc::AnalysisKind::Contingency(c) => {
+        curvebook_doc::AnalysisKind::Contingency(c) => {
             if let Some(props) = &c.expected_proportions {
                 for (idx, p) in props.iter().enumerate() {
                     check_finite(*p, || format!("{sheet_id}.analysis.expected_proportions[{idx}]"))?;
@@ -1529,29 +1554,29 @@ fn validate_analysis_kind_floats(spec: &lumencraft_doc::AnalysisSpec, sheet_id: 
             }
             check_opt_finite(c.null_proportion, || format!("{sheet_id}.analysis.null_proportion"))
         }
-        lumencraft_doc::AnalysisKind::Survival(s) => match s {
-            lumencraft_doc::SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. } => {
+        curvebook_doc::AnalysisKind::Survival(s) => match s {
+            curvebook_doc::SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. } => {
                 check_finite(multiplicity.threshold, || format!("{sheet_id}.analysis.multiplicity.threshold"))
             }
-            lumencraft_doc::SurvivalAnalysisSpec::CoxProportionalHazards { .. } => Ok(()),
+            curvebook_doc::SurvivalAnalysisSpec::CoxProportionalHazards { .. } => Ok(()),
         },
-        lumencraft_doc::AnalysisKind::NonlinearRegression(fit) => validate_nonlinear_fit_floats(fit, sheet_id),
-        lumencraft_doc::AnalysisKind::BlandAltman(_)
-        | lumencraft_doc::AnalysisKind::PassingBablok(_)
-        | lumencraft_doc::AnalysisKind::RocCurve(_)
-        | lumencraft_doc::AnalysisKind::GeneralizedLinearModel(_)
-        | lumencraft_doc::AnalysisKind::Multivariate(_)
-        | lumencraft_doc::AnalysisKind::LinearRegression(_) => Ok(()),
-        lumencraft_doc::AnalysisKind::PValueStack(ps) => check_finite(ps.threshold, || format!("{sheet_id}.analysis.pvalue_stack.threshold")),
+        curvebook_doc::AnalysisKind::NonlinearRegression(fit) => validate_nonlinear_fit_floats(fit, sheet_id),
+        curvebook_doc::AnalysisKind::BlandAltman(_)
+        | curvebook_doc::AnalysisKind::PassingBablok(_)
+        | curvebook_doc::AnalysisKind::RocCurve(_)
+        | curvebook_doc::AnalysisKind::GeneralizedLinearModel(_)
+        | curvebook_doc::AnalysisKind::Multivariate(_)
+        | curvebook_doc::AnalysisKind::LinearRegression(_) => Ok(()),
+        curvebook_doc::AnalysisKind::PValueStack(ps) => check_finite(ps.threshold, || format!("{sheet_id}.analysis.pvalue_stack.threshold")),
     }
 }
 
 fn register_unique_sheet_id(seen: &mut HashSet<SheetId>, id: &SheetId) -> Result<(), FormatError> {
     if id.as_str().trim().is_empty() {
-        return Err(FormatError::Doc(lumencraft_doc::DocError::EmptyIdentifier));
+        return Err(FormatError::Doc(curvebook_doc::DocError::EmptyIdentifier));
     }
     if !seen.insert(id.clone()) {
-        return Err(FormatError::Doc(lumencraft_doc::DocError::DuplicateSheetId { sheet_id: id.clone() }));
+        return Err(FormatError::Doc(curvebook_doc::DocError::DuplicateSheetId { sheet_id: id.clone() }));
     }
     Ok(())
 }
@@ -1561,7 +1586,7 @@ fn validate_data_sheet(ds: &DataSheet) -> Result<(), FormatError> {
     let ctx = ds.id.as_str();
     match &ds.archetype {
         TableArchetype::Xy(t) => {
-            if let lumencraft_doc::XColumnMode::GeneratedSequence { start, step, .. } = t.x_mode
+            if let curvebook_doc::XColumnMode::GeneratedSequence { start, step, .. } = t.x_mode
                 && (!start.is_finite() || !step.is_finite())
             {
                 return Err(FormatError::NonFiniteFloat { location: format!("{ctx}.x_mode") });
@@ -1659,7 +1684,7 @@ fn validate_exclusion_notes(ds: &DataSheet) -> Result<(), FormatError> {
             )));
         }
         let Some(cell) = ds.archetype.data_cell(entry.coord) else {
-            return Err(FormatError::Doc(lumencraft_doc::DocError::CellOutOfBounds {
+            return Err(FormatError::Doc(curvebook_doc::DocError::CellOutOfBounds {
                 row: entry.coord.row,
                 col: entry.coord.col,
                 subcol: entry.coord.subcol,
@@ -1677,7 +1702,7 @@ fn validate_exclusion_notes(ds: &DataSheet) -> Result<(), FormatError> {
 
 fn validate_titles(titles: &[String]) -> Result<(), FormatError> {
     if titles.len() > MAX_ROWS {
-        return Err(FormatError::Doc(lumencraft_doc::DocError::TooManyRows { count: titles.len(), max: MAX_ROWS }));
+        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyRows { count: titles.len(), max: MAX_ROWS }));
     }
     for title in titles {
         validate_title(title)?;
@@ -1687,7 +1712,7 @@ fn validate_titles(titles: &[String]) -> Result<(), FormatError> {
 
 fn validate_dataset_columns(cols: &[DataSetColumn], ctx: &str) -> Result<(), FormatError> {
     if cols.len() > MAX_DATA_SETS {
-        return Err(FormatError::Doc(lumencraft_doc::DocError::TooManyDataSets { count: cols.len(), max: MAX_DATA_SETS }));
+        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyDataSets { count: cols.len(), max: MAX_DATA_SETS }));
     }
     for (c, col) in cols.iter().enumerate() {
         validate_title(&col.title)?;
@@ -1700,7 +1725,7 @@ fn validate_cell_rows(rows: &[Vec<Cell>], max_subs: usize, ctx: &str) -> Result<
     validate_rows(rows.len())?;
     for (r, row) in rows.iter().enumerate() {
         if row.len() > max_subs {
-            return Err(FormatError::Doc(lumencraft_doc::DocError::TooManySubcolumns { count: row.len(), max: max_subs }));
+            return Err(FormatError::Doc(curvebook_doc::DocError::TooManySubcolumns { count: row.len(), max: max_subs }));
         }
         for (s, cell) in row.iter().enumerate() {
             validate_cell(cell, &format!("{ctx}[{r}][{s}]"))?;
@@ -2110,25 +2135,25 @@ fn strip_template_hooks_targeting(text: &mut String, target_id: &SheetId, defaul
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
-    use lumencraft_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
+    use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
 
     use super::{MANIFEST_PATH, open_project_unpacked_dir, save_project_unpacked_dir, save_project_unpacked_dir_with_hook};
 
     #[test]
     fn unpacked_save_rolls_back_committed_files_on_mid_commit_failure() {
-        let dir = std::env::temp_dir().join(format!("lc-unpacked-rollback-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-unpacked-rollback-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut doc_v1 = ProjectDocument::new("Version One").unwrap();
         let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
-        col.data_sets[0].cells[0] = vec![lumencraft_doc::Cell::number(10.0)];
+        col.data_sets[0].cells[0] = vec![curvebook_doc::Cell::number(10.0)];
         doc_v1.add_data_sheet(DataSheet::new("sheet-a", "A", TableArchetype::Column(col)).unwrap()).unwrap();
         save_project_unpacked_dir(&doc_v1, &dir).unwrap();
 
         let mut doc_v2 = doc_v1.clone();
         doc_v2.title = String::from("Version Two");
         let mut col2 = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
-        col2.data_sets[0].cells[0] = vec![lumencraft_doc::Cell::number(20.0)];
+        col2.data_sets[0].cells[0] = vec![curvebook_doc::Cell::number(20.0)];
         doc_v2.add_data_sheet(DataSheet::new("sheet-b", "B", TableArchetype::Column(col2)).unwrap()).unwrap();
 
         // Simulate failure right before committing `manifest.json` (after `document.json` and new CSV committed).

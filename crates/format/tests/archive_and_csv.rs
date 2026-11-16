@@ -1,4 +1,4 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, CURRENT_SCHEMA_VERSION, Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet,
     DocError, FloatingNote, GraphSheet, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
     JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LinkBorderColor, LinkSource, LinkedDataRegion, MAX_SUBCOLUMNS, MAX_TITLE_BYTES,
@@ -6,7 +6,7 @@ use lumencraft_doc::{
     ProjectDocument, RectPt, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetCellRange, SheetId, SubcolumnMode,
     SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
-use lumencraft_format::{
+use curvebook_format::{
     ArchiveKind, CsvOptions, FormatError, ImportBaselineAdjustment, ZipLimits, ZipWriter, apply_csv_import_link, export_datasheet_to_csv,
     filter_delimited_text, import_csv_to_datasheet, instantiate_template_bytes, open_archive_bytes, open_project_bytes, open_template_bytes,
     parse_cell_token, parse_delimited_records, rearrange_and_baseline_grid, save_project_bytes, save_template_bytes, validate_project_document,
@@ -38,7 +38,7 @@ fn build_sample_project() -> Result<ProjectDocument, FormatError> {
     let mut fit = NonlinearFitSpec::new("four_pl");
     fit.parameter_rules.push(ParameterRule {
         name: String::from("HotNM"),
-        scope: ParameterScope::HookedConstant(lumencraft_doc::HookSource::InfoConstant {
+        scope: ParameterScope::HookedConstant(curvebook_doc::HookSource::InfoConstant {
             info_sheet_id: Some(SheetId::new("info-1")),
             constant_name: String::from("HotNM"),
         }),
@@ -68,7 +68,7 @@ fn build_sample_project() -> Result<ProjectDocument, FormatError> {
 }
 
 #[test]
-fn lumencraft_archive_is_deterministic_and_round_trips() {
+fn curvebook_archive_is_deterministic_and_round_trips() {
     let doc = build_sample_project().unwrap();
     let bytes1 = save_project_bytes(&doc).unwrap();
     let bytes2 = save_project_bytes(&doc).unwrap();
@@ -83,7 +83,7 @@ fn lumencraft_archive_is_deterministic_and_round_trips() {
 }
 
 #[test]
-fn lctemplate_strips_raw_cells_and_cached_results_while_preserving_schemas() {
+fn cbtemplate_strips_raw_cells_and_cached_results_while_preserving_schemas() {
     let doc = build_sample_project().unwrap();
     let tmpl_bytes = save_template_bytes(&doc).unwrap();
     assert!(matches!(open_project_bytes(&tmpl_bytes), Err(FormatError::InvalidArchiveKind { expected: "project", found: "template" })));
@@ -114,7 +114,7 @@ fn archive_detects_crc_corruption_and_missing_entries() {
     let doc_bytes = serde_json::to_vec(&doc).unwrap();
     writer.add_file("document.json", doc_bytes.clone()).unwrap();
     let bad_manifest = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": CURRENT_SCHEMA_VERSION,
         "kind": "Project",
         "title": doc.title,
@@ -145,10 +145,10 @@ fn zip_rejects_path_traversal_duplicates_and_zip_bombs() {
     let doc = build_sample_project().unwrap();
     let bytes = save_project_bytes(&doc).unwrap();
     let tiny_limits = ZipLimits { max_entries: 1, max_total_uncompressed_bytes: 1024 * 1024, max_entry_uncompressed_bytes: 1024 * 1024 };
-    assert!(matches!(lumencraft_format::open_archive_bytes_with_limits(&bytes, tiny_limits), Err(FormatError::ZipBomb { .. })));
+    assert!(matches!(curvebook_format::open_archive_bytes_with_limits(&bytes, tiny_limits), Err(FormatError::ZipBomb { .. })));
 
     let tiny_bytes_limits = ZipLimits { max_entries: 100, max_total_uncompressed_bytes: 64, max_entry_uncompressed_bytes: 64 };
-    assert!(matches!(lumencraft_format::open_archive_bytes_with_limits(&bytes, tiny_bytes_limits), Err(FormatError::ZipBomb { .. })));
+    assert!(matches!(curvebook_format::open_archive_bytes_with_limits(&bytes, tiny_bytes_limits), Err(FormatError::ZipBomb { .. })));
 }
 
 #[test]
@@ -164,7 +164,7 @@ fn schema_migration_v0_to_v1_and_future_version_rejection() {
     });
     let doc_bytes = serde_json::to_vec(&v0_doc).unwrap();
     let manifest = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": 0,
         "kind": "Project",
         "title": "Legacy Study",
@@ -192,7 +192,7 @@ fn schema_migration_v0_to_v1_and_future_version_rejection() {
     });
     let f_bytes = serde_json::to_vec(&future_doc).unwrap();
     let f_manifest = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": CURRENT_SCHEMA_VERSION + 5,
         "kind": "Project",
         "title": "Future Study",
@@ -209,9 +209,9 @@ fn schema_migration_v0_to_v1_and_future_version_rejection() {
     let v1_grouped = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).unwrap();
     let v1_ds = DataSheet::new("data-1", "Grouped Data", TableArchetype::Grouped(v1_grouped)).unwrap();
     legacy_src.add_data_sheet(v1_ds).unwrap();
-    let v1_fac = lumencraft_doc::FactorialAnovaSpec {
-        repeated_measures: lumencraft_doc::RepeatedMeasuresDesign::ColumnFactorMatched,
-        ..lumencraft_doc::FactorialAnovaSpec::default()
+    let v1_fac = curvebook_doc::FactorialAnovaSpec {
+        repeated_measures: curvebook_doc::RepeatedMeasuresDesign::ColumnFactorMatched,
+        ..curvebook_doc::FactorialAnovaSpec::default()
     };
     let v1_analysis = AnalysisSpec::new("res-rm-1", "data-1", AnalysisKind::FactorialAnova(v1_fac)).unwrap();
     let v1_res = ResultSheet::new(v1_analysis).unwrap();
@@ -222,7 +222,7 @@ fn schema_migration_v0_to_v1_and_future_version_rejection() {
 
     let v1_bytes = serde_json::to_vec(&v1_doc).unwrap();
     let v1_manifest = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": 1,
         "kind": "Project",
         "title": "V1 RM Study",
@@ -238,7 +238,7 @@ fn schema_migration_v0_to_v1_and_future_version_rejection() {
     assert!(
         matches!(
             &migrated_v1.result_sheets[0].analysis.kind,
-            AnalysisKind::FactorialAnova(spec) if spec.residual_covariance == lumencraft_doc::ResidualCovariance::CompoundSymmetry
+            AnalysisKind::FactorialAnova(spec) if spec.residual_covariance == curvebook_doc::ResidualCovariance::CompoundSymmetry
         ),
         "expected CompoundSymmetry default after v1->v2 migration, got {:?}",
         migrated_v1.result_sheets[0].analysis.kind
@@ -463,7 +463,7 @@ fn forged_zip_header_inflating_past_budget_is_blocked_as_zip_bomb() {
     out.extend_from_slice(&0_u16.to_le_bytes());
 
     let limits = ZipLimits { max_entries: 16, max_total_uncompressed_bytes: 512, max_entry_uncompressed_bytes: 512 };
-    assert!(matches!(lumencraft_format::ZipArchive::from_bytes_with_limits(&out, limits), Err(FormatError::ZipBomb { .. })));
+    assert!(matches!(curvebook_format::ZipArchive::from_bytes_with_limits(&out, limits), Err(FormatError::ZipBomb { .. })));
 }
 
 #[test]
@@ -503,7 +503,7 @@ fn raw_datasheet(id: &str, archetype: TableArchetype) -> DataSheet {
 fn wrap_project_zip(doc_json: &serde_json::Value) -> Result<Vec<u8>, FormatError> {
     let doc_bytes = serde_json::to_vec(doc_json)?;
     let manifest = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": CURRENT_SCHEMA_VERSION,
         "kind": "Project",
         "title": "Forged",

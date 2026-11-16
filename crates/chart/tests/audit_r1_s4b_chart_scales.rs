@@ -4,19 +4,19 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lumencraft_chart::scales::{
+use curvebook_chart::scales::{
     AxisMapping, AxisOrientation, AxisRenderOptions, MAX_TICKS_PER_SEGMENT, ResolvedAxis, ScaleDiagnostics, TickComputeConfig, TickKind,
     compute_axis_ticks_with_warnings, render_graph_chrome, resolve_axes_and_ticks,
 };
-use lumencraft_chart::{ChartScene, PathCmd, RectPt, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PathCmd, RectPt, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, Cell, ClusterDistance, ClusterLinkage, ColumnDesignHint, ColumnTable, DataSheet,
     DiagnosticPlotKind, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, GraphKind, GraphSheet, LogitDomain, MultipleVariablesTable,
     MultivariateSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizePt, SubcolumnMode,
     SurvivalTable, TableArchetype, VariableRole, XyTable,
 };
-use lumencraft_math::AxisScale;
-use lumencraft_text::LocaleNumberPolicy;
+use curvebook_math::AxisScale;
+use curvebook_text::LocaleNumberPolicy;
 
 fn assert_all_primitives_finite(scene: &ChartScene) {
     for prim in &scene.primitives {

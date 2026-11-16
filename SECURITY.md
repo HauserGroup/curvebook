@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-LumenCraft is pre-alpha and has no released versions. Security fixes go to the `main` branch only.
+CurveBook is pre-alpha and has no released versions. Security fixes go to the `main` branch only.
 
 ## Reporting a vulnerability
 
@@ -25,9 +25,9 @@ A maintainer will confirm that the report arrived, assess it, and tell you what 
 
 ## What counts
 
-LumenCraft opens files and accepts requests that it must treat as hostile. These are in scope:
+CurveBook opens files and accepts requests that it must treat as hostile. These are in scope:
 
-- a project archive (`.lumencraft`, `.prism`, `.pzfx`), CSV, or pasted table that causes memory exhaustion, unbounded decompression, a hang, or writes outside the intended location,
+- a project archive (`.curvebook`, `.cbtemplate`, `.prism`, `.pzfx`), CSV, or pasted table that causes memory exhaustion, unbounded decompression, a hang, or writes outside the intended location,
 - a user-defined equation or formula that escapes its evaluator or exhausts resources,
 - a request over the MCP server, the CLI, or the `--control` channel that reads or writes files, or runs code, beyond what the request is meant to allow,
 - the `--control` channel being reachable from anywhere other than the local machine,
@@ -35,4 +35,4 @@ LumenCraft opens files and accepts requests that it must treat as hostile. These
 
 A crash on malformed input is a bug we want to hear about, because the project's rule is that shipped code never panics. Unless it can be turned into one of the problems above, report it as an ordinary bug with the bug report issue template.
 
-Vulnerabilities in a dependency should go to that dependency's maintainers first. Tell us as well if LumenCraft is affected in a way that needs a change here.
+Vulnerabilities in a dependency should go to that dependency's maintainers first. Tell us as well if CurveBook is affected in a way that needs a change here.

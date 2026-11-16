@@ -16,11 +16,11 @@ Calculator-specific design rules below apply only if deferred work is explicitly
 
 1. **Zero Archive-Schema Churn for Instant Calculators:**
    - Summary-input statistical calculators, probability tail/quantile evaluators, clinical Bayes calculators, two-mean error propagation, and wet-lab chemistry/radiochemistry tools execute as **stateless, read-only engine queries** (proposed: a new `CommandGroup::Calculator` with `READ_ONLY` effects in a new `crates/engine/src/cmd/calc.rs`; neither exists today).
-   - Opening or running an instant calculator mutates zero sheets, consumes zero undo slots, and leaves `.lumencraft` / `.lumencraft.d/` archive schemas (`crates/format/src/versioned.rs`) untouched unless the user explicitly invokes *Insert Result into Info Sheet* or *Create Dilution / Randomization Data Sheet*.
+   - Opening or running an instant calculator mutates zero sheets, consumes zero undo slots, and leaves `.curvebook` / `.curvebook.d/` archive schemas (`crates/format/src/versioned.rs`) untouched unless the user explicitly invokes *Insert Result into Info Sheet* or *Create Dilution / Randomization Data Sheet*.
 2. **Additive `#[serde(default)]` Table & Graph Extensions:**
-   - New variants and optional fields on `ContingencyMethod`, `ContingencySpec`, `DescriptiveSummary`, `TransformAnalysisSpec`, and `GraphSpec` serialize with `#[serde(default, skip_serializing_if = "...")]`, preserving 100% forward/backward compatibility with existing `.lumencraft` projects and batch scripts.
+   - New variants and optional fields on `ContingencyMethod`, `ContingencySpec`, `DescriptiveSummary`, `TransformAnalysisSpec`, and `GraphSpec` serialize with `#[serde(default, skip_serializing_if = "...")]`, preserving 100% forward/backward compatibility with existing `.curvebook` projects and batch scripts.
 3. **100% Offline & WASM-Safe (`#![forbid(unsafe_code)]`):**
-   - All active mathematical, randomization, and equation-rendering routines, and any deferred calculator routines if resumed, run deterministically in pure Rust (`L0`–`L3`) identically across desktop, headless CLI/MCP, and `wasm32-unknown-unknown` (`lumencraft-web`) with zero network calls.
+   - All active mathematical, randomization, and equation-rendering routines, and any deferred calculator routines if resumed, run deterministically in pure Rust (`L0`–`L3`) identically across desktop, headless CLI/MCP, and `wasm32-unknown-unknown` (`curvebook-web`) with zero network calls.
 
 ---
 
@@ -77,7 +77,7 @@ If resumed, the proposed design would use pure domain functions in `crates/stats
 
 ## 4. Experimental Randomization & Subset Sampling (`R9.14` / `QOL-14` — Implemented, Wave 22)
 
-Implemented in `crates/transform/src/randomize.rs` over `lumencraft_math::DeterministicRng`, wired into `crates/engine/src/cmd/table.rs` (`table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions`), `crates/ui-egui/src/dialogs_r9.rs` (`RandomizeGroupsDialogState`, `RandomSampleRowsDialogState`, `SimulateDistributionsDialogState`), and `crates/ui-egui/src/menus/ui_commands.rs` (`ui.table.{randomizeGroups,randomSampleRows,simulateDistributions}`) so every experimental allocation or subsample is 100% reproducible from its recorded 64-bit seed:
+Implemented in `crates/transform/src/randomize.rs` over `curvebook_math::DeterministicRng`, wired into `crates/engine/src/cmd/table.rs` (`table.randomizeGroups`, `table.randomSampleRows`, `table.simulateDistributions`), `crates/ui-egui/src/dialogs_r9.rs` (`RandomizeGroupsDialogState`, `RandomSampleRowsDialogState`, `SimulateDistributionsDialogState`), and `crates/ui-egui/src/menus/ui_commands.rs` (`ui.table.{randomizeGroups,randomSampleRows,simulateDistributions}`) so every experimental allocation or subsample is 100% reproducible from its recorded 64-bit seed:
 
 1. **Subject-to-Group Randomization (`table.randomizeGroups`):**
    - Assigns $N$ subjects (numeric `1..=N` or custom identifier labels) across $k \ge 2$ treatment arms with equal or weighted allocation ratios $(w_1 : \dots : w_k)$.

@@ -3,14 +3,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSheet, DocError, GroupedTable, LinkBorderColor,
     MultipleVariablesTable, NestedTable, PartsOfWholeTable, ProjectDocument, ResultStatus, SheetFolderKind, SheetId, SheetSection, SubcolumnMode,
     SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
-use lumencraft_engine::Session;
-use lumencraft_palette::Rgba8;
-use lumencraft_tools::{NavigatorDragState, ToolCommandIntent};
+use curvebook_engine::Session;
+use curvebook_palette::Rgba8;
+use curvebook_tools::{NavigatorDragState, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -606,7 +606,7 @@ pub struct PortfolioGalleryState {
     pub cards: Vec<PortfolioCard>,
 }
 
-/// Build an `"info.setConstant"` [`ToolCommandIntent`] for updating or creating an [`lumencraft_doc::InfoSheet`] constant.
+/// Build an `"info.setConstant"` [`ToolCommandIntent`] for updating or creating an [`curvebook_doc::InfoSheet`] constant.
 #[must_use]
 pub fn build_set_info_constant_command(sheet_id: &SheetId, name: &str, value: &ConstantValue, units: Option<&str>) -> ToolCommandIntent {
     let mut obj = serde_json::Map::new();
@@ -633,7 +633,7 @@ pub fn build_set_info_constant_command(sheet_id: &SheetId, name: &str, value: &C
     ToolCommandIntent::new("info.setConstant", Value::Object(obj))
 }
 
-/// Build an `"info.setNote"` [`ToolCommandIntent`] for updating or appending structured notes on an [`lumencraft_doc::InfoSheet`].
+/// Build an `"info.setNote"` [`ToolCommandIntent`] for updating or appending structured notes on an [`curvebook_doc::InfoSheet`].
 #[must_use]
 pub fn build_set_info_notes_command(sheet_id: &SheetId, markdown: &str, append: bool) -> ToolCommandIntent {
     ToolCommandIntent::new(
@@ -907,14 +907,14 @@ impl WorkspaceNavState {
         self.gallery.cards = cards;
     }
 
-    /// Toggle collapsed state for a [`lumencraft_doc::FloatingNote`] identifier and return the new collapsed flag.
+    /// Toggle collapsed state for a [`curvebook_doc::FloatingNote`] identifier and return the new collapsed flag.
     pub fn toggle_floating_note(&mut self, note_id: &str) -> bool {
         let collapsed = self.floating_notes_collapsed.entry(note_id.to_owned()).or_insert(false);
         *collapsed = !*collapsed;
         *collapsed
     }
 
-    /// Return whether a [`lumencraft_doc::FloatingNote`] is currently collapsed in the UI.
+    /// Return whether a [`curvebook_doc::FloatingNote`] is currently collapsed in the UI.
     #[must_use]
     pub fn is_floating_note_collapsed(&self, note_id: &str) -> bool {
         self.floating_notes_collapsed.get(note_id).copied().unwrap_or(false)
@@ -1272,7 +1272,7 @@ fn build_data_entry(s: &DataSheet, active: Option<&SheetId>, up_set: &BTreeSet<S
 }
 
 fn build_result_entry(
-    s: &lumencraft_doc::ResultSheet,
+    s: &curvebook_doc::ResultSheet,
     active: Option<&SheetId>,
     up_set: &BTreeSet<SheetId>,
     down_set: &BTreeSet<SheetId>,

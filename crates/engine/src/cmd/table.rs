@@ -2,17 +2,17 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, DocError, GraphSheet, ImportFilterSpec, ImportLinkSpec,
     ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_SHEETS_PER_PROJECT, MultipleVariablesTable,
     NestedGroupColumn, NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise,
     SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, validate_project_cells, validate_rows, validate_title,
 };
-use lumencraft_format::{
+use curvebook_format::{
     CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, export_datasheet_to_csv, export_result_sheet_tidy_csv,
     import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes, import_pzfx_str, parse_delimited_records,
 };
-use lumencraft_transform::{
+use curvebook_transform::{
     AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, ImportPipelineOptions, ImportPipelineReport, ImportSourcePayload,
     PlateGeometry, PlateMapTemplate, PlateWellRole, RowSampleConfig, SimulatedColumnSpec, SimulatedDistribution, SubjectRandomizationConfig,
     TargetArchetypeKind, TidyColumnMapping, apply_import_link_pipeline, convert_datasheet_archetype, evaluate_data_sheet_calculated_variables,
@@ -1172,7 +1172,7 @@ fn ensure_mv_edit_preserves_calculated(
     before: &DataSheet,
     after: &DataSheet,
     cols_placed: usize,
-    target_range: lumencraft_doc::SheetCellRange,
+    target_range: curvebook_doc::SheetCellRange,
 ) -> Result<(), EngineError> {
     let TableArchetype::MultipleVariables(before_mv) = &before.archetype else {
         return Ok(());
@@ -2517,8 +2517,8 @@ fn apply_paste_payload(
     }
     if report.rows_placed > 0 && report.cols_placed > 0 {
         ensure_range_outside_linked_regions(ds, report.target_range, "paste")?;
-        if matches!(spec.placement.mode, lumencraft_doc::PlacementMode::InsertRows) {
-            let shift_span = lumencraft_doc::SheetCellRange::new(
+        if matches!(spec.placement.mode, curvebook_doc::PlacementMode::InsertRows) {
+            let shift_span = curvebook_doc::SheetCellRange::new(
                 CellCoord::new(spec.placement.anchor.row, report.target_range.start.col, report.target_range.start.subcol),
                 CellCoord::new(usize::MAX, report.target_range.end.col, report.target_range.end.subcol),
             );
@@ -3563,7 +3563,7 @@ struct NormalizedRangeBounds {
     max_cs: (usize, usize),
 }
 
-fn normalize_range_bounds(range: lumencraft_doc::SheetCellRange) -> NormalizedRangeBounds {
+fn normalize_range_bounds(range: curvebook_doc::SheetCellRange) -> NormalizedRangeBounds {
     let min_row = range.start.row.min(range.end.row);
     let max_row = range.start.row.max(range.end.row);
     let a = (range.start.col, range.start.subcol);
@@ -3571,24 +3571,19 @@ fn normalize_range_bounds(range: lumencraft_doc::SheetCellRange) -> NormalizedRa
     NormalizedRangeBounds { min_row, max_row, min_cs: a.min(b), max_cs: a.max(b) }
 }
 
-fn coord_in_sheet_range(range: lumencraft_doc::SheetCellRange, coord: CellCoord) -> bool {
+fn coord_in_sheet_range(range: curvebook_doc::SheetCellRange, coord: CellCoord) -> bool {
     let bounds = normalize_range_bounds(range);
     let cs = (coord.col, coord.subcol);
     coord.row >= bounds.min_row && coord.row <= bounds.max_row && cs >= bounds.min_cs && cs <= bounds.max_cs
 }
 
-fn ranges_overlap(a: lumencraft_doc::SheetCellRange, b: lumencraft_doc::SheetCellRange) -> bool {
+fn ranges_overlap(a: curvebook_doc::SheetCellRange, b: curvebook_doc::SheetCellRange) -> bool {
     let ab = normalize_range_bounds(a);
     let bb = normalize_range_bounds(b);
     ab.min_row <= bb.max_row && bb.min_row <= ab.max_row && ab.min_cs <= bb.max_cs && bb.min_cs <= ab.max_cs
 }
 
-fn linked_region_conflict_error(
-    sheet_id: &SheetId,
-    region: &lumencraft_doc::LinkedDataRegion,
-    action: &str,
-    coord: Option<CellCoord>,
-) -> EngineError {
+fn linked_region_conflict_error(sheet_id: &SheetId, region: &curvebook_doc::LinkedDataRegion, action: &str, coord: Option<CellCoord>) -> EngineError {
     let detail = match coord {
         Some(c) => json!({
             "sheet_id": sheet_id.as_str(),
@@ -3629,7 +3624,7 @@ fn ensure_coords_outside_linked_regions(ds: &DataSheet, coords: impl IntoIterato
     Ok(())
 }
 
-fn ensure_range_outside_linked_regions(ds: &DataSheet, range: lumencraft_doc::SheetCellRange, action: &str) -> Result<(), EngineError> {
+fn ensure_range_outside_linked_regions(ds: &DataSheet, range: curvebook_doc::SheetCellRange, action: &str) -> Result<(), EngineError> {
     for region in &ds.linked_regions {
         if ranges_overlap(region.target_range, range) {
             return Err(linked_region_conflict_error(&ds.id, region, action, None));
@@ -3651,7 +3646,7 @@ fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         ensure_mv_columns_editable(ds, std::iter::once(col_idx))?;
         let rows = ds.archetype.row_count();
         if rows > 0 {
-            let col_range = lumencraft_doc::SheetCellRange::new(CellCoord::new(0, col_idx, 0), CellCoord::new(rows - 1, col_idx, 0));
+            let col_range = curvebook_doc::SheetCellRange::new(CellCoord::new(0, col_idx, 0), CellCoord::new(rows - 1, col_idx, 0));
             ensure_range_outside_linked_regions(ds, col_range, "recode")?;
         }
     }
@@ -4324,7 +4319,7 @@ fn schema_import_plate_map() -> Value {
             ("title", nullable_schema(str_schema("Imported sheet title (default `Plate Data`)"))),
             ("geometry", geom_schema),
             ("values", values_schema),
-            ("template", nullable_schema(any_json_schema("PlateMapTemplate object or `.lctemplate` JSON string"))),
+            ("template", nullable_schema(any_json_schema("PlateMapTemplate object or `.cbtemplate` JSON string"))),
             ("roles", nullable_schema(array_schema("Array of per-well role definitions", any_json_schema("PlateWellRole"), None, None))),
             ("template_name", nullable_schema(str_schema("Template name when building from `roles`"))),
             ("x_title", nullable_schema(str_schema("X/concentration axis title (default `Concentration`)"))),
@@ -4420,7 +4415,7 @@ fn resolve_plate_template(p: &ImportPlateMapParams, default_name: &str) -> Resul
     let geom_override = p.geometry.as_ref().map(PlateGeometryInput::resolve).transpose()?;
     if let Some(tpl_val) = &p.template {
         let tpl = if let Some(json_str) = tpl_val.as_str() {
-            PlateMapTemplate::from_lctemplate_json(json_str)?
+            PlateMapTemplate::from_cbtemplate_json(json_str)?
         } else {
             parse_plate_template_obj(tpl_val, default_name)?
         };
@@ -5403,7 +5398,7 @@ mod tests {
         s.execute("table.paste", json!({ "sheet_id": "col-1", "tsv": "5\t6\n7\t8" })).expect("paste");
         s.execute("table.pasteLink", json!({ "target_sheet_id": "xy-1", "source_sheet_id": "col-1" })).expect("pasteLink");
 
-        let tmp_dir = std::env::temp_dir().join(format!("lc-w9b-table-test-{}", std::process::id()));
+        let tmp_dir = std::env::temp_dir().join(format!("cb-w9b-table-test-{}", std::process::id()));
         let csv_path = tmp_dir.join("out.csv");
         let exp = s.execute("table.exportCsv", json!({ "sheet_id": "col-1", "path": csv_path.to_string_lossy() })).expect("exportCsv");
         assert!(!exp.mutated);
@@ -5453,7 +5448,7 @@ mod tests {
         assert!(oob.as_ref().is_err_and(|e| e.code == ErrorCode::BadInput), "expected BadInput for subcol >= width, got {oob:?}");
 
         // Oversized title must be rejected by validate_title.
-        let oversized = "T".repeat(lumencraft_doc::MAX_TITLE_BYTES + 1);
+        let oversized = "T".repeat(curvebook_doc::MAX_TITLE_BYTES + 1);
         let too_long = s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "subcol": 0, "title": oversized }));
         assert!(too_long.is_err(), "expected oversized subcolumn title to fail validation");
 

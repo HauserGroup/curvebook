@@ -1,9 +1,9 @@
 //! Integration tests for Wave 1 survival/categorical charts, 5-channel multivariate plots,
 //! all seven diagnostic plot subtypes, and multi-panel origin-aligned publication layouts.
 
-use lumencraft_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
-use lumencraft_chart::{compile_graph, compile_layout};
-use lumencraft_doc::{
+use curvebook_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
+use curvebook_chart::{compile_graph, compile_layout};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, AxisSpec, AxisThreshold, Cell, ColorChannelMapping, ColumnDesignHint, ColumnTable, ConstantValue,
     ContingencyTable, DataSheet, DiagnosticPlotKind, EquationDisplayMode, ErrorBarSpec, GraphAnnotation, GraphKind, GraphSheet, GraphicalDataObject,
     GroupedArrangement, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LevelOrderKind, LevelOrderSpec, LinearRegressionSpec,
@@ -12,9 +12,9 @@ use lumencraft_doc::{
     RocSpec, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, SurvivalAnalysisSpec, SurvivalTable, TableArchetype, VariableRole,
     WhiskerMethod, XyTable,
 };
-use lumencraft_palette::{ColorRamp, ColormapId, LineDashStyle, PaletteId, Rgba8};
-use lumencraft_stats::{multivariate::run_multivariate_analysis, roc::run_roc_analysis, survival::run_survival_analysis};
-use lumencraft_text::SpanWeight;
+use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, PaletteId, Rgba8};
+use curvebook_stats::{multivariate::run_multivariate_analysis, roc::run_roc_analysis, survival::run_survival_analysis};
+use curvebook_text::SpanWeight;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

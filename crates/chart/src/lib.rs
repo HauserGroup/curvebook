@@ -1,4 +1,4 @@
-//! Scientific graph scene compiler for LumenCraft: maps typed data tables, error-bar summaries
+//! Scientific graph scene compiler for CurveBook: maps typed data tables, error-bar summaries
 //! (SD, SEM, 95% CI, range, IQR), fitted regression curves, survival step functions, segmented axes
 //! and pairwise significance brackets into device-independent figure geometry.
 //!
@@ -13,9 +13,9 @@ pub mod scene;
 pub mod survival_cat;
 pub mod xy;
 
-use lumencraft_doc::{GraphKind, GraphSheet, GraphSpec, LayoutSheet, ProjectDocument};
-use lumencraft_palette::{MarkerStyle, Rgba8};
-use lumencraft_text::parse_markup;
+use curvebook_doc::{GraphKind, GraphSheet, GraphSpec, LayoutSheet, ProjectDocument};
+use curvebook_palette::{MarkerStyle, Rgba8};
+use curvebook_text::parse_markup;
 pub use scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, PreflightIssue,
     RectPt, ScenePrimitive, SourceCellId, StrokePaint, TextAnchor, preflight_check_scene,
@@ -23,19 +23,19 @@ pub use scene::{
 
 use serde::{Deserialize, Serialize};
 
-/// Select the effective [`lumencraft_doc::PointStyleOverride`] from `overrides`,
+/// Select the effective [`curvebook_doc::PointStyleOverride`] from `overrides`,
 /// matching `(series_index, point_index)` and optional replicate subcolumn `subcol`.
 ///
 /// Prefers exact `subcol` matches over wildcard (`None`) overrides so editing or hiding
 /// one replicate never leaks onto sibling replicates in the same row.
 #[must_use]
 pub fn select_point_override(
-    overrides: &[lumencraft_doc::PointStyleOverride],
+    overrides: &[curvebook_doc::PointStyleOverride],
     series_index: usize,
     point_index: usize,
     subcol: Option<usize>,
-    override_subcol: impl Fn(&lumencraft_doc::PointStyleOverride) -> Option<usize>,
-) -> Option<&lumencraft_doc::PointStyleOverride> {
+    override_subcol: impl Fn(&curvebook_doc::PointStyleOverride) -> Option<usize>,
+) -> Option<&curvebook_doc::PointStyleOverride> {
     if let Some(target_sub) = subcol
         && let Some(exact) =
             overrides.iter().rfind(|ov| ov.series_index == series_index && ov.point_index == point_index && override_subcol(ov) == Some(target_sub))
@@ -45,11 +45,11 @@ pub fn select_point_override(
     overrides.iter().rfind(|ov| ov.series_index == series_index && ov.point_index == point_index && override_subcol(ov).is_none())
 }
 
-/// Apply a [`lumencraft_doc::PointStyleOverride`] onto `base`.
+/// Apply a [`curvebook_doc::PointStyleOverride`] onto `base`.
 ///
 /// Returns `None` when the point override hides the point (`hidden == true`).
 #[must_use]
-pub fn apply_point_override(ov: &lumencraft_doc::PointStyleOverride, mut base: MarkerStyle) -> Option<MarkerStyle> {
+pub fn apply_point_override(ov: &curvebook_doc::PointStyleOverride, mut base: MarkerStyle) -> Option<MarkerStyle> {
     if ov.hidden {
         return None;
     }
@@ -81,7 +81,7 @@ pub fn apply_point_override(ov: &lumencraft_doc::PointStyleOverride, mut base: M
     Some(base)
 }
 
-/// Apply any [`lumencraft_doc::PointStyleOverride`] for `(series_index, point_index, subcol)` onto `base`.
+/// Apply any [`curvebook_doc::PointStyleOverride`] for `(series_index, point_index, subcol)` onto `base`.
 ///
 /// Returns `None` when the point override hides the point (`hidden == true`).
 #[must_use]
@@ -177,7 +177,7 @@ pub fn compile_layout(layout: &LayoutSheet, doc: &ProjectDocument) -> Result<Cha
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{DataSheet, GraphSheet, LayoutSheet, LayoutSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
+    use curvebook_doc::{DataSheet, GraphSheet, LayoutSheet, LayoutSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
 
     use super::{GraphFamily, compile_graph, compile_layout};
 

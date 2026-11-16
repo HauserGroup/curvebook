@@ -1,11 +1,11 @@
 //! Regression tests for Round 2 (`R0.19`) (`R2-S11-16`): hit-testing auto-sized `ModelEquation` boxes.
 
-use lumencraft_chart::{PointPt, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{PointPt, compile_graph};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, DataSheet, EquationDisplayMode, GraphAnnotation, GraphSheet, LinearRegressionSpec, ProjectDocument,
     RectPt as DocRectPt, ResultScalarEntry, ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_tools::canvas::{CanvasHitTarget, hit_test_graph};
+use curvebook_tools::canvas::{CanvasHitTarget, hit_test_graph};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

@@ -7,18 +7,18 @@ use std::io::{self, BufRead, Write};
 use std::net::{SocketAddr, TcpListener};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, RectPt, ScenePrimitive, StrokePaint};
+use curvebook_doc::{
     AnalysisKind, CanvasResizeMode, DataSheet, ErrorCode, FigureCanvasPreset, MultipleVariablesTable, MultivariateSpec, ProjectDocument, ResultCell,
     ResultSheet, SheetFolderKind, SheetId, SheetSection, TableArchetype,
 };
-use lumencraft_engine::{EngineError, Session, cmd};
-use lumencraft_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
-use lumencraft_palette::{CanvasPreviewFilter, Rgba8};
-use lumencraft_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use lumencraft_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
-use lumencraft_svg::{SvgExportOptions, render_svg};
-use lumencraft_tools::{GridCellCoord, PhysicalUnit};
+use curvebook_engine::{EngineError, Session, cmd};
+use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
+use curvebook_palette::{CanvasPreviewFilter, Rgba8};
+use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
+use curvebook_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
+use curvebook_svg::{SvgExportOptions, render_svg};
+use curvebook_tools::{GridCellCoord, PhysicalUnit};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -154,7 +154,7 @@ fn generate_entropy_bytes() -> io::Result<[u8; CONTROL_AUTH_TOKEN_BYTES]> {
     for (chunk_idx, chunk) in buf.chunks_exact_mut(8).enumerate() {
         let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let state = RandomState::new();
-        let mixed = state.hash_one((nanos, pid, seq, chunk_idx as u64, b"lumencraft-control-auth"));
+        let mixed = state.hash_one((nanos, pid, seq, chunk_idx as u64, b"curvebook-control-auth"));
         chunk.copy_from_slice(&mixed.to_le_bytes());
     }
     Ok(buf)
@@ -387,7 +387,7 @@ impl PrintJobSpec {
             color_space: self.color_space,
             compress_streams: true,
             title,
-            creator: String::from("LumenCraft Print Spooler"),
+            creator: String::from("CurveBook Print Spooler"),
             outline_text: false,
             trim_pt,
             bleed_pt,
@@ -820,7 +820,7 @@ pub fn handle_control_line_with_action(app: &mut UiApp, line: &str) -> (String, 
 ///
 /// Dispatch one of the 8 interactive GUI actions (`ui.inspect`, `ui.screenshot`,
 /// `ui.pointer_gesture`, `ui.type_text`, `ui.press_key`, `ui.invoke_menu`, `ui.switch_tab`,
-/// `ui.answer_dialog`) against `app` for in-process callers (`lumencraft-cli` MCP bridge, `R8.7`).
+/// `ui.answer_dialog`) against `app` for in-process callers (`curvebook-cli` MCP bridge, `R8.7`).
 ///
 /// All workspace mutations invoked via these GUI interactions run as `Caller::Ui`.
 ///
@@ -1981,11 +1981,11 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
             let mut opts = PdfExportOptions { color_space: pdf_color_space, ..PdfExportOptions::default() };
             if all_graphs && sheet_id_str.is_none() {
                 let sheet_ids = collect_all_renderable_ids(doc).map_err(ControlCallError::from)?;
-                if sheet_ids.len() > lumencraft_pdf::MAX_PDF_PAGES {
+                if sheet_ids.len() > curvebook_pdf::MAX_PDF_PAGES {
                     return Err(ControlCallError::from(format!(
                         "PDF page count {} exceeds maximum {}",
                         sheet_ids.len(),
-                        lumencraft_pdf::MAX_PDF_PAGES
+                        curvebook_pdf::MAX_PDF_PAGES
                     )));
                 }
                 let mut scenes = Vec::with_capacity(sheet_ids.len());
@@ -1993,10 +1993,10 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
                 for sid in &sheet_ids {
                     let scene = app.session().render_sheet_scene(sid)?;
                     total_primitives = total_primitives.saturating_add(scene.primitives.len());
-                    if total_primitives > lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES {
+                    if total_primitives > curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES {
                         return Err(ControlCallError::from(format!(
                             "PDF primitive count {total_primitives} exceeds maximum {}",
-                            lumencraft_pdf::MAX_PDF_TOTAL_PRIMITIVES
+                            curvebook_pdf::MAX_PDF_TOTAL_PRIMITIVES
                         )));
                     }
                     scenes.push(scene);
@@ -2359,11 +2359,11 @@ fn dispatch_ui_result_inspect_diagnostics(app: &mut UiApp, params: &Value) -> Re
             .filter(|t| {
                 matches!(
                     t.kind,
-                    lumencraft_doc::ResultTabKind::Diagnostics
-                        | lumencraft_doc::ResultTabKind::NormalQq
-                        | lumencraft_doc::ResultTabKind::Residuals
-                        | lumencraft_doc::ResultTabKind::CovarianceMatrix
-                        | lumencraft_doc::ResultTabKind::LogMinusLog
+                    curvebook_doc::ResultTabKind::Diagnostics
+                        | curvebook_doc::ResultTabKind::NormalQq
+                        | curvebook_doc::ResultTabKind::Residuals
+                        | curvebook_doc::ResultTabKind::CovarianceMatrix
+                        | curvebook_doc::ResultTabKind::LogMinusLog
                 )
             })
             .map(|t| t.id.clone())
@@ -3125,7 +3125,7 @@ fn dispatch_ui_theme_set(app: &mut UiApp, params: &Value) -> Result<Value, Strin
 
 #[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn write_host_file(path: &str, bytes: &[u8]) -> Result<(), String> {
-    lumencraft_platform::fs::write_atomic(std::path::Path::new(path), bytes).map_err(|err| format!("failed to write file `{path}`: {err}"))
+    curvebook_platform::fs::write_atomic(std::path::Path::new(path), bytes).map_err(|err| format!("failed to write file `{path}`: {err}"))
 }
 
 #[cfg(target_arch = "wasm32")]
@@ -4029,7 +4029,7 @@ mod tests {
             )?;
         }
         // Mark session saved/clean at undo_depth = 13 while retaining full prior undo stack.
-        app.session_mut().set_file_path(Some(std::path::PathBuf::from("project.lumen")), true);
+        app.session_mut().set_file_path(Some(std::path::PathBuf::from("project.curvebook")), true);
         let baseline_undo_depth = app.session().undo_depth();
         assert!(baseline_undo_depth >= 13);
         assert!(!app.session().is_dirty());
@@ -4087,7 +4087,7 @@ mod tests {
         assert_eq!(app.document(), &baseline_doc);
         assert_eq!(app.session().undo_depth(), baseline_undo_depth);
         assert!(!app.session().is_dirty());
-        assert_eq!(app.session().file_path(), Some(std::path::Path::new("project.lumen")));
+        assert_eq!(app.session().file_path(), Some(std::path::Path::new("project.curvebook")));
         assert_eq!(app.locale, baseline_locale);
         assert_eq!(app.canvas_dialogs.rulers_visible, baseline_rulers);
 

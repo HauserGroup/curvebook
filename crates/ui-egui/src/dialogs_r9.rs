@@ -2,17 +2,17 @@
 //! `QOL-16`, `WF-44..WF-48`).
 //!
 //! Kept isolated from `dialogs_canvas.rs` so parsers and workflow dialog states share one typed,
-//! declarative contract emitting pure [`ToolCommandIntent`] payloads into `lumencraft-engine`.
+//! declarative contract emitting pure [`ToolCommandIntent`] payloads into `curvebook-engine`.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, BracketLabelMode, BracketStyle, BreakOrnament, ChecklistItem, ChecklistStatus, CldOrdering, ClusterDistance, ClusterLinkage,
     CoxTieMethod, EquationDisplayMode, FitMethod, GlmFamily, GraphAnnotation, GraphAxisScale, GraphSheet, JournalWidthPreset, KappaWeighting,
     PValueStackMethod, PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ProjectDocument, RectPt, RepeatedMeasuresDesign,
     ResidualCovariance, SheetId, SumOfSquaresType, TwoGroupMethod, WeightingScheme,
 };
-use lumencraft_palette::{ColormapId, PaletteId};
-use lumencraft_render::TiffCompression;
-use lumencraft_tools::ToolCommandIntent;
+use curvebook_palette::{ColormapId, PaletteId};
+use curvebook_render::TiffCompression;
+use curvebook_tools::ToolCommandIntent;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -309,8 +309,8 @@ pub(crate) fn parse_axis_scale_str(raw: &str) -> Result<GraphAxisScale, String> 
         "log10" => Ok(GraphAxisScale::Log10),
         "log2" => Ok(GraphAxisScale::Log2),
         "ln" | "loge" => Ok(GraphAxisScale::Ln),
-        "logit" | "logitproportion" => Ok(GraphAxisScale::Logit(lumencraft_doc::LogitDomain::Proportion)),
-        "logitpercent" => Ok(GraphAxisScale::Logit(lumencraft_doc::LogitDomain::Percent)),
+        "logit" | "logitproportion" => Ok(GraphAxisScale::Logit(curvebook_doc::LogitDomain::Proportion)),
+        "logitpercent" => Ok(GraphAxisScale::Logit(curvebook_doc::LogitDomain::Percent)),
         "probit" => Ok(GraphAxisScale::Probit),
         "reciprocal" | "1x" => Ok(GraphAxisScale::Reciprocal),
         _ => Err(format!("unknown axis scale `{raw}`")),
@@ -791,7 +791,7 @@ impl RandomSampleRowsDialogState {
         self.target_info_sheet_id = ds.info_sheet_id.clone().or_else(|| doc.info_sheets.first().map(|s| s.id.clone()));
         let col_count = ds.archetype.column_count();
         self.available_columns = (0..col_count)
-            .map(|i| data_column_title(ds, i).map_or_else(|| format!("Col {}", lumencraft_doc::default_column_label(i)), ToOwned::to_owned))
+            .map(|i| data_column_title(ds, i).map_or_else(|| format!("Col {}", curvebook_doc::default_column_label(i)), ToOwned::to_owned))
             .collect();
         self.sample_size = self.sample_size.max(1).min(ds.archetype.row_count().max(1));
         true
@@ -1263,7 +1263,7 @@ impl InsertModelEquationDialogState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, ColumnTable, DataSheet, GraphKind, GraphSheet, LinearRegressionSpec,
         ProjectDocument, RemediationKind, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, TableArchetype,
     };
@@ -1289,7 +1289,7 @@ mod tests {
         assert_eq!(intent.params["subject_count"], 9);
 
         let mut sample_dlg = RandomSampleRowsDialogState::default();
-        let mut col = ColumnTable::new(lumencraft_doc::ColumnDesignHint::UnpairedReplicates, 2, 12).unwrap();
+        let mut col = ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 2, 12).unwrap();
         col.data_sets[0].title = String::from("Weight");
         col.data_sets[1].title = String::from("Group");
         let ds = DataSheet::new("data-src", "Cohort", TableArchetype::Column(col)).unwrap();
@@ -1332,7 +1332,7 @@ mod tests {
     #[test]
     fn r9_16_insert_model_equation_toggles_modes_and_excludes_cld() {
         let mut doc = ProjectDocument::new("Eq Project").unwrap();
-        let col = ColumnTable::new(lumencraft_doc::ColumnDesignHint::UnpairedReplicates, 2, 4).unwrap();
+        let col = ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 2, 4).unwrap();
         doc.add_data_sheet(DataSheet::new("data-1", "Raw", TableArchetype::Column(col)).unwrap()).unwrap();
         let res_spec = AnalysisSpec::new("res-lin", "data-1", AnalysisKind::LinearRegression(LinearRegressionSpec::default())).unwrap();
         let mut res = ResultSheet::new(res_spec).unwrap();

@@ -4,7 +4,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use lumencraft_format::{ZipArchive, ZipLimits};
+use curvebook_format::{ZipArchive, ZipLimits};
 
 const SELF: &str = "xtask/src/cleanroom.rs";
 const AUDIT_DIR_PREFIX: &str = "docs/audit/";
@@ -295,14 +295,14 @@ fn collect_spans(haystack: &str, needle: &str, left: Boundary, right: Boundary, 
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_format::ZipWriter;
+    use curvebook_format::ZipWriter;
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
     use super::{run, scan};
 
     fn temp_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lc-cleanroom-{}-{label}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-cleanroom-{}-{label}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir

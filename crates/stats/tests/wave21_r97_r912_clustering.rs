@@ -6,24 +6,24 @@
 //! - Pillar 3 (`WF-37` / `WF-38`): Clustering distances (4), linkages (7), cophenetic matrix + r,
 //!   hierarchical cut silhouettes, and k-means / candidate-k WCSS + silhouette sweep.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CiBound, ClusterDistance, ClusterLinkage, ColumnDesignHint, ColumnTable, ContingencyMethod, ContingencySpec,
     ContingencyTable, DataSheet, DescriptiveSpec, FactorialAnovaSpec, GroupedTable, KappaWeighting, MultipleVariablesTable, MultiplicityMethod,
     MultiplicitySpec, MultivariateSpec, PartsOfWholeTable, ResultCell, ResultSheet, ResultTab, ResultTabKind, SheetId, SubcolumnMode,
     SumOfSquaresType, TableArchetype, TwoGroupMethod, TwoGroupSpec,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_stats::categorical::{
+use curvebook_math::ConfidenceLevel;
+use curvebook_stats::categorical::{
     NntKind, agresti_coull_ci, altman_nnt_from_rd, analyze_2x2_ratios, clopper_pearson_ci, cohens_kappa, exact_binomial_test, fleiss_kappa,
     mcnemar_detailed, wilson_score_ci,
 };
-use lumencraft_stats::column::summarize_column;
-use lumencraft_stats::error::StatsError;
-use lumencraft_stats::multivariate::{
+use curvebook_stats::column::summarize_column;
+use curvebook_stats::error::StatsError;
+use curvebook_stats::multivariate::{
     cophenetic_correlation, cophenetic_distance_matrix, cut_dendrogram, hierarchical_clustering_with_metrics, kmeans_pp_with_distance,
     pairwise_distance_matrix, pairwise_distance_value,
 };
-use lumencraft_stats::run_analysis;
+use curvebook_stats::run_analysis;
 
 fn scalar(sheet: &ResultSheet, key: &str) -> f64 {
     sheet.scalars.iter().find(|s| s.key == key).unwrap_or_else(|| panic!("missing scalar `{key}`")).value

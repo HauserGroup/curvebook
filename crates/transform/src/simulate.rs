@@ -1,11 +1,11 @@
 //! Deterministic curve and distribution simulation (`TransformAnalysisSpec::Simulate`,
 //! `docs/data-tables-and-transforms.md` §5.5).
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, DataSheet, MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, SubcolumnMode, TableArchetype, XColumnMode, XyTable, validate_rows,
     validate_subcolumns,
 };
-use lumencraft_math::DeterministicRng;
+use curvebook_math::DeterministicRng;
 
 use crate::error::TransformError;
 use crate::formula::{ScalarEnv, eval_scalar_expr, parse_formula};
@@ -82,7 +82,7 @@ pub fn evaluate_equation(equation_id: &str, x: f64, parameters: &[(String, f64)]
     Ok(y)
 }
 
-/// Generate a synthetic [`DataSheet`] deterministically using `lumencraft_math::DeterministicRng`.
+/// Generate a synthetic [`DataSheet`] deterministically using `curvebook_math::DeterministicRng`.
 #[allow(clippy::too_many_arguments, clippy::cast_precision_loss)]
 pub fn simulate_xy_sheet(
     sheet_id: &str,
@@ -285,7 +285,7 @@ fn eval_custom_formula(formula: &str, x: f64, parameters: &[(String, f64)]) -> R
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, TransformAnalysisSpec};
+    use curvebook_doc::{MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, TransformAnalysisSpec};
 
     use super::*;
     use crate::ops::{TransformContext, execute_transform};

@@ -18,7 +18,7 @@ pub mod nist;
 pub mod pharma;
 
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
-use lumencraft_doc::ParameterRule;
+use curvebook_doc::ParameterRule;
 
 /// Trait implemented by every built-in or user-defined parametric curve model.
 pub trait ParametricModel: Send + Sync {

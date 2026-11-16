@@ -5,7 +5,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Check [`docs/gaps.md`](https://github.com/HauserGroup/lumencraft/blob/main/docs/gaps.md) first. Most missing features are already listed there with a gap id and a gate.
+        Check [`docs/gaps.md`](https://github.com/HauserGroup/curvebook/blob/main/docs/gaps.md) first. Most missing features are already listed there with a gap id and a gate.
         Work is done in the order set out in the roadmap, so a request outside the current gate may wait.
   - type: textarea
     id: need

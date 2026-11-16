@@ -51,13 +51,13 @@
 //!
 //! Reference: Brent, R. P. (1973). *Algorithms for Minimization without Derivatives*. Prentice-Hall.
 
-use lumencraft_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{f_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p};
-use lumencraft_math::linalg::{DenseMatrix, qr, qr_col_pivoted};
-use lumencraft_math::roots::{RootOptions, brent_root};
-use lumencraft_math::special::{deviance_bd0, ln_gamma};
-use lumencraft_math::sum::NeumaierSum;
+use curvebook_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{f_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p};
+use curvebook_math::linalg::{DenseMatrix, qr, qr_col_pivoted};
+use curvebook_math::roots::{RootOptions, brent_root};
+use curvebook_math::special::{deviance_bd0, ln_gamma};
+use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::{
     AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, HomoscedasticityResult, InformationCriteria, LackOfFitResult,
@@ -1064,7 +1064,7 @@ struct LmRunOutput {
 }
 
 /// Core Moré (1978) trust-region Levenberg–Marquardt solver using QR decomposition on the
-/// augmented Jacobian `[J; sqrt(lambda) * D]` (`lumencraft_math::linalg::qr`).
+/// augmented Jacobian `[J; sqrt(lambda) * D]` (`curvebook_math::linalg::qr`).
 ///
 /// Follows Moré (1978) / MINPACK-1 `lmder` (Moré, Garbow & Hillstrom 1980) for: column scaling
 /// `D_j = max(D_j, ||J_{:,j}||)`, initial radius `factor * ||D theta||`, the gain ratio

@@ -1,8 +1,8 @@
-//! Structured error types for `lumencraft-math`.
+//! Structured error types for `curvebook-math`.
 
 use std::fmt;
 
-/// Domain, parameter, dimension, or convergence error returned by `lumencraft-math` routines.
+/// Domain, parameter, dimension, or convergence error returned by `curvebook-math` routines.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MathError {
     /// Input slice or iterator contained zero usable observations.

@@ -1,6 +1,6 @@
 //! Menu and toolbar tooltips resolved from engine [`CommandSpec`] and front-end [`UiCommandSpec`].
 
-use lumencraft_engine::cmd;
+use curvebook_engine::cmd;
 
 use crate::UiApp;
 use crate::i18n;
@@ -172,8 +172,8 @@ fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
         "ui.result.appendClusterColumn" => doc
             .result_sheets
             .iter()
-            .any(|rs| matches!(rs.analysis.kind, lumencraft_doc::AnalysisKind::Multivariate(lumencraft_doc::MultivariateSpec::Clustering { .. }))),
-        "ui.table.openFormulaBar" => doc.data_sheets.iter().any(|ds| matches!(ds.archetype, lumencraft_doc::TableArchetype::MultipleVariables(_))),
+            .any(|rs| matches!(rs.analysis.kind, curvebook_doc::AnalysisKind::Multivariate(curvebook_doc::MultivariateSpec::Clustering { .. }))),
+        "ui.table.openFormulaBar" => doc.data_sheets.iter().any(|ds| matches!(ds.archetype, curvebook_doc::TableArchetype::MultipleVariables(_))),
         "ui.table.convertArchetype.open" | "ui.table.randomSampleRows" | "ui.grid.excludeWithReason" => !doc.data_sheets.is_empty(),
         "ui.layout.composer.open" => !doc.layout_sheets.is_empty(),
         "ui.canvas.applyPreset" | "ui.canvas.preflight" | "ui.export.figure.open" => !doc.graph_sheets.is_empty() || !doc.layout_sheets.is_empty(),

@@ -2,7 +2,7 @@
 //! presets (`mm`, `cm`, `in`, `pt`), live placed graphs and embedded data/result tables, plot-origin
 //! baseline alignment, and automatic panel lettering (`docs/graphing-and-layouts.md` §6).
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 
 use crate::error::{DocError, validate_title};
 use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_template_hooks};

@@ -1,9 +1,9 @@
-//! Structured error types for `lumencraft-stats`.
+//! Structured error types for `curvebook-stats`.
 
 use std::fmt;
 
-use lumencraft_doc::{DocError, SummaryPointError, TableKind};
-use lumencraft_math::MathError;
+use curvebook_doc::{DocError, SummaryPointError, TableKind};
+use curvebook_math::MathError;
 
 /// Errors returned by statistical computation engines and `ResultSheet` builders.
 #[derive(Debug, Clone, PartialEq)]

@@ -1,12 +1,12 @@
 //! Property-based tests (`proptest!`) for nonlinear parameter recovery, weighting scaling
 //! invariance, AICc ranking, profile-likelihood CI bracketing, and ODE vs closed-form decay.
 
-use lumencraft_doc::{CiBound, FitMethod, ParameterRule, ParameterScope, WeightingScheme};
-use lumencraft_fit::{
+use curvebook_doc::{CiBound, FitMethod, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, FitStatus, HookContext, ParametricModel, SolverConfig, compare_models_aicc, fit_nonlinear,
     get_builtin_model,
 };
-use lumencraft_math::ConfidenceLevel;
+use curvebook_math::ConfidenceLevel;
 use proptest::prelude::*;
 
 fn make_series(pts: Vec<DataPoint>) -> DatasetSeries {

@@ -1,9 +1,9 @@
 //! Core data structures, equation category namespaces, hook resolution, and table extraction
-//! helpers for `lumencraft-fit`.
+//! helpers for `curvebook-fit`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use lumencraft_doc::{Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, TableArchetype};
+use curvebook_doc::{Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, TableArchetype};
 
 use crate::error::FitError;
 
@@ -278,7 +278,7 @@ fn resolve_selected_indices(total: usize, selected: &[usize]) -> Vec<usize> {
     if selected.is_empty() { (0..total).collect() } else { selected.iter().copied().filter(|&i| i < total).collect() }
 }
 
-fn extract_from_xy(xy: &lumencraft_doc::XyTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
+fn extract_from_xy(xy: &curvebook_doc::XyTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
     let indices = resolve_selected_indices(xy.data_sets.len(), selected_data_sets);
     let mut series_list = Vec::with_capacity(indices.len());
     for ds_idx in indices {
@@ -305,12 +305,12 @@ fn extract_from_xy(xy: &lumencraft_doc::XyTable, selected_data_sets: &[usize]) -
     Ok(series_list)
 }
 
-fn x_row_is_blank_unknown(xy: &lumencraft_doc::XyTable, row: usize) -> bool {
+fn x_row_is_blank_unknown(xy: &curvebook_doc::XyTable, row: usize) -> bool {
     match &xy.x_mode {
-        lumencraft_doc::XColumnMode::Numbers { .. } | lumencraft_doc::XColumnMode::DateOrElapsedTime { .. } => {
+        curvebook_doc::XColumnMode::Numbers { .. } | curvebook_doc::XColumnMode::DateOrElapsedTime { .. } => {
             xy.x_cells.get(row).and_then(|subs| subs.first()).is_some_and(|cell| !cell.excluded && cell.is_empty())
         }
-        lumencraft_doc::XColumnMode::GeneratedSequence { .. } => false,
+        curvebook_doc::XColumnMode::GeneratedSequence { .. } => false,
     }
 }
 
@@ -318,9 +318,9 @@ fn y_cells_are_blank_unknown(subcells: &[Cell]) -> bool {
     !subcells.is_empty() && subcells.iter().all(|cell| !cell.excluded && cell.is_empty())
 }
 
-fn populate_xy_column(xy: &lumencraft_doc::XyTable, ds: &DataSetColumn, ds_idx: usize, series: &mut DatasetSeries) -> Result<(), FitError> {
+fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: usize, series: &mut DatasetSeries) -> Result<(), FitError> {
     let x_sd = |row: usize| -> Option<f64> {
-        let lumencraft_doc::XColumnMode::Numbers { subcolumn_mode } = xy.x_mode else {
+        let curvebook_doc::XColumnMode::Numbers { subcolumn_mode } = xy.x_mode else {
             return None;
         };
         if !subcolumn_mode.supports_parametric_moments() {
@@ -385,7 +385,7 @@ fn populate_xy_column(xy: &lumencraft_doc::XyTable, ds: &DataSetColumn, ds_idx: 
     Ok(())
 }
 
-fn extract_from_grouped(g: &lumencraft_doc::GroupedTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
+fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[usize]) -> Result<Vec<DatasetSeries>, FitError> {
     let indices = resolve_selected_indices(g.data_sets.len(), selected_data_sets);
     let mut series_list = Vec::with_capacity(indices.len());
     for ds_idx in indices {
@@ -401,7 +401,7 @@ fn extract_from_grouped(g: &lumencraft_doc::GroupedTable, selected_data_sets: &[
                 .or_else(|| g.row_titles.get(row).and_then(|t| parse_leading_number(t)))
                 .unwrap_or(row as f64);
             if g.subcolumn_mode.supports_parametric_moments() {
-                let pt_opt = lumencraft_doc::SummarizedPoint::reconstruct(g.subcolumn_mode, subcells)
+                let pt_opt = curvebook_doc::SummarizedPoint::reconstruct(g.subcolumn_mode, subcells)
                     .map_err(|e| FitError::InvalidParameter { name: "pre_summarized_y", reason: e.to_string() })?;
                 if let Some(pt) = pt_opt {
                     points.push(DataPoint {
@@ -456,7 +456,7 @@ fn mv_group_token(cell: &Cell) -> Option<String> {
 }
 
 fn resolve_mv_columns(
-    mv: &lumencraft_doc::MultipleVariablesTable,
+    mv: &curvebook_doc::MultipleVariablesTable,
     selected_data_sets: &[usize],
     mv_spec: &MultivarExtractionSpec<'_>,
 ) -> Result<(Vec<usize>, usize, Vec<usize>), FitError> {
@@ -512,7 +512,7 @@ fn resolve_mv_columns(
         mv.variables
             .iter()
             .enumerate()
-            .find(|(idx, v)| *idx != y_col && !x_used.contains(idx) && v.role == lumencraft_doc::VariableRole::Categorical)
+            .find(|(idx, v)| *idx != y_col && !x_used.contains(idx) && v.role == curvebook_doc::VariableRole::Categorical)
             .map(|(idx, _)| vec![idx])
             .unwrap_or_default()
     } else {
@@ -523,7 +523,7 @@ fn resolve_mv_columns(
 }
 
 fn extract_from_multivar(
-    mv: &lumencraft_doc::MultipleVariablesTable,
+    mv: &curvebook_doc::MultipleVariablesTable,
     selected_data_sets: &[usize],
     mv_spec: &MultivarExtractionSpec<'_>,
 ) -> Result<Vec<DatasetSeries>, FitError> {

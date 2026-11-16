@@ -8,9 +8,9 @@ use std::rc::Rc;
 use std::thread;
 use std::time::Duration;
 
-use lumencraft_doc::ErrorCode;
-use lumencraft_engine::{EngineError, GuiOnlyPolicy};
-use lumencraft_mcp::{
+use curvebook_doc::ErrorCode;
+use curvebook_engine::{EngineError, GuiOnlyPolicy};
+use curvebook_mcp::{
     ContentBlock, GUI_ONLY_SERVER_INSTRUCTIONS, GUI_TOOL_NAMES, GuiSessionHost, McpServerState, SERVER_INSTRUCTIONS, ToolCallError, call_tool,
     list_tools, list_tools_for_state, serve,
 };
@@ -182,7 +182,7 @@ fn gui_only_blocks_all_non_gui_tools_with_gui_only_violation() {
         ("command_run", json!({ "command_id": "sheet.createData" })),
         ("command_batch", json!({ "commands": [] })),
         ("open_file", json!({ "path": "data.csv" })),
-        ("save_file", json!({ "path": "out.lumencraft" })),
+        ("save_file", json!({ "path": "out.curvebook" })),
         ("export", json!({ "format": "csv" })),
         ("render_preview", json!({ "sheet_id": "graph-1" })),
         ("doc_inspect", json!({})),

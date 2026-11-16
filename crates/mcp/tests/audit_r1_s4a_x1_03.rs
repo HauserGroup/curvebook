@@ -1,4 +1,4 @@
-//! Permanent regression tests for `R1-X1-03` across `lumencraft-mcp`:
+//! Permanent regression tests for `R1-X1-03` across `curvebook-mcp`:
 //! - `open_file` rejects FIFOs, symlinks to FIFOs, directories, and `/dev/zero` without blocking.
 //! - `open_file` enforces per-format size limits before reading or allocating.
 #![forbid(unsafe_code)]
@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lumencraft_format::{MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES};
-use lumencraft_mcp::{McpServerState, call_tool};
+use curvebook_format::{MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES};
+use curvebook_mcp::{McpServerState, call_tool};
 use serde_json::json;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -25,7 +25,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn create(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let id = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lc-s4a-x103-mcp-{label}-{}-{id}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cb-s4a-x103-mcp-{label}-{}-{id}", std::process::id()));
         if path.exists() {
             let _ = fs::remove_dir_all(&path);
         }
@@ -110,8 +110,8 @@ fn r1_x1_03_mcp_open_file_rejects_oversized_inputs_before_allocation() -> TestRe
         ("huge.csv", MAX_CSV_FILE_BYTES),
         ("huge.tsv", MAX_CSV_FILE_BYTES),
         ("huge.pzfx", MAX_XML_BYTES),
-        ("huge.lumencraft", MAX_ARCHIVE_FILE_BYTES),
-        ("huge.lctemplate", MAX_ARCHIVE_FILE_BYTES),
+        ("huge.curvebook", MAX_ARCHIVE_FILE_BYTES),
+        ("huge.cbtemplate", MAX_ARCHIVE_FILE_BYTES),
         ("huge.prism", MAX_ARCHIVE_FILE_BYTES),
     ] {
         let p = dir.child(name);

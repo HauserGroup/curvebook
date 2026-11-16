@@ -3,9 +3,7 @@
 use std::io::Write;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use flate2::Compression;
-use flate2::write::DeflateEncoder;
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, CURRENT_SCHEMA_VERSION, Cell, CellCoord, CellValue, ChecklistItem, ChecklistStatus, CiBound,
     ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, CurveSamplePoint, DataSheet, DocError, FittedCurveOverlay, FloatingNote,
     GraphAnnotation, GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
@@ -14,13 +12,15 @@ use lumencraft_doc::{
     PlacementMode, ProjectDocument, RectPt, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SequenceProgression,
     SheetCellRange, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
-use lumencraft_format::{
+use curvebook_format::{
     ArchiveKind, CsvOptions, FormatError, ImportBaselineAdjustment, ImportWarningKind, MAX_XML_DEPTH, MAX_ZIP_ENTRIES, XmlLimits, ZipArchive,
     ZipLimits, ZipWriter, apply_csv_import_link, export_datasheet_to_csv, filter_delimited_text, import_csv_to_datasheet, import_prism_bytes,
     import_prism_bytes_with_limits, import_pzfx_bytes, import_pzfx_str, instantiate_template_bytes, open_archive_bytes,
     open_archive_bytes_with_limits, open_project_bytes, open_template_bytes, parse_cell_token, parse_delimited_records, parse_xml,
     parse_xml_with_limits, rearrange_and_baseline_grid, sanitize_zip_path, save_project_bytes, save_template_bytes, validate_project_document,
 };
+use flate2::Compression;
+use flate2::write::DeflateEncoder;
 use proptest::collection;
 use proptest::prelude::{Just, ProptestConfig, Strategy, TestCaseError, any, prop_assert, prop_assert_eq, prop_oneof, proptest};
 
@@ -251,9 +251,9 @@ fn build_rich_eight_archetype_project() -> ProjectDocument {
     doc.add_data_sheet(nest_sheet).unwrap();
 
     let mut fit = NonlinearFitSpec::new("four_pl");
-    fit.parameter_rules.push(lumencraft_doc::ParameterRule {
+    fit.parameter_rules.push(curvebook_doc::ParameterRule {
         name: String::from("HotNM"),
-        scope: lumencraft_doc::ParameterScope::HookedConstant(HookSource::InfoConstant {
+        scope: curvebook_doc::ParameterScope::HookedConstant(HookSource::InfoConstant {
             info_sheet_id: Some(SheetId::new("info-main")),
             constant_name: String::from("HotNM"),
         }),
@@ -313,8 +313,8 @@ fn build_rich_eight_archetype_project() -> ProjectDocument {
         result_sheet_id: SheetId::new("anova-1"),
         group_a: 0,
         group_b: 1,
-        style: lumencraft_doc::BracketStyle::Square,
-        label_mode: lumencraft_doc::BracketLabelMode::SummaryStars,
+        style: curvebook_doc::BracketStyle::Square,
+        label_mode: curvebook_doc::BracketLabelMode::SummaryStars,
         hide_if_non_significant: false,
         stroke_width_pt: 1.0,
         font_size_pt: 10.0,
@@ -361,7 +361,7 @@ fn full_eight_archetype_project_and_template_round_trip_determinism() {
 
     let proj_a = save_project_bytes(&doc).unwrap();
     let proj_b = save_project_bytes(&doc).unwrap();
-    assert_eq!(proj_a, proj_b, ".lumencraft save output must be byte-for-byte deterministic");
+    assert_eq!(proj_a, proj_b, ".curvebook save output must be byte-for-byte deterministic");
 
     let (kind, decoded) = open_archive_bytes(&proj_a).unwrap();
     assert_eq!(kind, ArchiveKind::Project);
@@ -371,7 +371,7 @@ fn full_eight_archetype_project_and_template_round_trip_determinism() {
 
     let tmpl_a = save_template_bytes(&doc).unwrap();
     let tmpl_b = save_template_bytes(&doc).unwrap();
-    assert_eq!(tmpl_a, tmpl_b, ".lctemplate save output must be byte-for-byte deterministic");
+    assert_eq!(tmpl_a, tmpl_b, ".cbtemplate save output must be byte-for-byte deterministic");
     assert!(matches!(open_project_bytes(&tmpl_a), Err(FormatError::InvalidArchiveKind { expected: "project", found: "template" })));
 
     let tmpl = open_template_bytes(&tmpl_a).unwrap();
@@ -407,7 +407,7 @@ fn full_eight_archetype_project_and_template_round_trip_determinism() {
 }
 
 // ============================================================================
-// 2. Truncated & Bit-Flipped .lumencraft / .lctemplate Streams
+// 2. Truncated & Bit-Flipped .curvebook / .cbtemplate Streams
 // ============================================================================
 
 #[test]
@@ -499,7 +499,7 @@ fn targeted_zip_header_and_manifest_corruptions_return_clean_err() {
     assert!(matches!(open_project_bytes(&bad_magic_zip), Err(FormatError::UnsupportedFormat { .. })));
 
     let missing_sheet_csv = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": CURRENT_SCHEMA_VERSION,
         "kind": "Project",
         "title": "X",
@@ -644,7 +644,7 @@ fn corrupt_crc32_and_invalid_utf8_entries_handled_cleanly() {
     let doc_bytes = serde_json::to_vec(&doc).unwrap();
     let csv_bytes = export_datasheet_to_csv(&doc.data_sheets[0], &CsvOptions::csv()).unwrap().into_bytes();
     let bad_sheet_manifest = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": CURRENT_SCHEMA_VERSION,
         "kind": "Project",
         "title": doc.title,
@@ -676,7 +676,7 @@ fn corrupt_crc32_and_invalid_utf8_entries_handled_cleanly() {
     assert!(matches!(open_archive_bytes(&bad_manifest_utf8), Err(FormatError::InvalidZip { .. })));
 
     let manifest_ok = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": CURRENT_SCHEMA_VERSION,
         "kind": "Project",
         "title": "Bad UTF8 Doc",

@@ -1,35 +1,35 @@
-//! Comprehensive integration & smoke tests covering every statistical family in `lumencraft-stats`,
+//! Comprehensive integration & smoke tests covering every statistical family in `curvebook-stats`,
 //! end-to-end `run_analysis` `ResultSheet` builders, multiplicity procedures, and `ChecklistItem` diagnostics.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellValue, ColumnDesignHint, ColumnTable, ContingencyMethod, ContingencySpec, ContingencyTable, CoxTieMethod,
     DataSheet, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec, GroupedTable, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
     MultivariateSpec, NestedAnalysisSpec, NestedTable, OneWayAnovaSpec, OneWayMethod, OutlierSpec, RepeatedMeasuresDesign, RocCiMethod, RocSpec,
     SheetId, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, SurvivalTable, TableArchetype,
     TwoGroupMethod, TwoGroupSpec,
 };
-use lumencraft_math::{ConfidenceLevel, DenseMatrix};
-use lumencraft_stats::anova::{
+use curvebook_math::{ConfidenceLevel, DenseMatrix};
+use curvebook_stats::anova::{
     FactorialObservations, fit_factorial_anova, fit_random_intercept_reml, fit_rm_two_way_anova, friedman_test, kruskal_wallis_test,
     nested_one_way_anova, rm_one_way_anova, unequal_variance_one_way_anova,
 };
-use lumencraft_stats::categorical::{
+use curvebook_stats::categorical::{
     KappaWeighting, baptista_pike_or_ci, cochran_armitage_trend, cohens_kappa, fleiss_kappa, mcnemar_test, wilson_score_ci,
 };
-use lumencraft_stats::column::{
+use curvebook_stats::column::{
     anderson_darling, dagostino_pearson_k2, exact_binomial_median_ci, grubbs_outliers, lilliefors_ks, rout_outliers, shapiro_wilk,
 };
-use lumencraft_stats::multiplicity::{
+use curvebook_stats::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, adjust_p_values, compare_dunn_ranks, compare_groups_with_procedure,
 };
-use lumencraft_stats::multivariate::{LinkageMethod, hierarchical_clustering, kmeans_pp};
-use lumencraft_stats::regression::{multiple_logistic_regression, multiple_poisson_regression};
-use lumencraft_stats::roc::{compare_roc_delong_paired, compare_roc_unpaired, roc_curve_analysis};
-use lumencraft_stats::run_analysis;
-use lumencraft_stats::survival::{CoxSubject, compare_survival_curves, cox_ph_regression, kaplan_meier_curve};
-use lumencraft_stats::two_group::{bland_altman, lognormal_unpaired_t_test, ratio_paired_t_test, welch_t_test, wilcoxon_matched_pairs};
-use lumencraft_testkit::assert_approx_eq;
+use curvebook_stats::multivariate::{LinkageMethod, hierarchical_clustering, kmeans_pp};
+use curvebook_stats::regression::{multiple_logistic_regression, multiple_poisson_regression};
+use curvebook_stats::roc::{compare_roc_delong_paired, compare_roc_unpaired, roc_curve_analysis};
+use curvebook_stats::run_analysis;
+use curvebook_stats::survival::{CoxSubject, compare_survival_curves, cox_ph_regression, kaplan_meier_curve};
+use curvebook_stats::two_group::{bland_altman, lognormal_unpaired_t_test, ratio_paired_t_test, welch_t_test, wilcoxon_matched_pairs};
+use curvebook_testkit::assert_approx_eq;
 
 fn col_sheet(id: &str, cols: &[(&str, &[f64])], hint: ColumnDesignHint) -> DataSheet {
     let max_rows = cols.iter().map(|(_, v)| v.len()).max().unwrap_or(1);

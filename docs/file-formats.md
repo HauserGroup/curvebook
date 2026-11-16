@@ -1,6 +1,6 @@
 # Persisted File Formats & Versioning
 
-LumenCraft versions every persisted artefact so older projects migrate forward deterministically and newer projects are never silently damaged by an older binary. Machine-readable schemas generated from source live under `docs/schemas/*.schema.json` (`archive-manifest.schema.json`, `document.schema.json`, `batch-v1.schema.json`, `preferences.schema.json`, `journal-record.schema.json` via `cargo xtask schemas`).
+CurveBook versions every persisted artefact so older projects migrate forward deterministically and newer projects are never silently damaged by an older binary. Machine-readable schemas generated from source live under `docs/schemas/*.schema.json` (`archive-manifest.schema.json`, `document.schema.json`, `batch-v1.schema.json`, `preferences.schema.json`, `journal-record.schema.json` via `cargo xtask schemas`, with schema `$id` URIs under `https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/<filename>`).
 
 ---
 
@@ -8,27 +8,27 @@ LumenCraft versions every persisted artefact so older projects migrate forward d
 
 | File / Directory | Contents | Owner Crate(s) | Current Version | Notes |
 | :--- | :--- | :--- | :--- | :--- |
-| **`.lumencraft`** | Compressed archive (`manifest.json`, `document.json`, `sheets/*.csv`) | `lumencraft-doc`, `lumencraft-format` (`crates/format/src/archive.rs`) | `CURRENT_SCHEMA_VERSION = 1` (`crates/doc/src/error.rs`; `FORMAT_MAGIC = "lumencraft-archive"`) | CRC32-checked entries; saved via atomic write (`lumencraft-platform` / temp + rename). |
-| **`.lumencraft.d/`** | Unpacked project directory (`manifest.json`, `document.json`, `sheets/*.csv`) | `lumencraft-doc`, `lumencraft-format` (`crates/format/src/archive.rs`) | `CURRENT_SCHEMA_VERSION = 1` | Version-control friendly workspace layout with the same manifest/document versioning. |
-| **`.lctemplate`** | Reusable project template ZIP (`ArchiveKind::Template`) | `lumencraft-doc`, `lumencraft-format` (`crates/format/src/archive.rs`) | `CURRENT_SCHEMA_VERSION = 1` | Data cell values and cached results stripped; formulas, analyses, graphs, layouts, and info constants preserved. |
-| **`preferences.json`** *(and `shortcuts.json`)* | Desktop UI settings (`PreferencesFile`: locale, theme, custom shortcut bindings, preserved unknown fields) | `lumencraft` (`apps/lumencraft/src/main.rs`), `lumencraft-platform` | `CURRENT_PREFERENCES_VERSION = 1` (`crates/format/src/versioned.rs`) | Atomic writes only; must never overwrite a newer version file written by a newer release (`docs/schemas/preferences.schema.json`). |
-| **`ops.journal` & `lumencraft.lock`** | Crash-recovery NDJSON command WAL (`{ format_version, seq, crc32, command_json }`) + `JournalLockLease` JSON (`{ format_version, owner_id, acquired_epoch_ms, ttl_ms }`) *(with optional `snapshot.lumencraft`)* | `lumencraft-format` (`crates/format/src/recovery.rs`) | `CURRENT_JOURNAL_VERSION = 1`, `CURRENT_LOCK_VERSION = 1` | `ops.journal` replays serialized engine commands through `Session::execute` (see [docs/command-ids.md](command-ids.md)); schemas in `docs/schemas/journal-record.schema.json`. |
-| **`lumencraft.batch.v1`** | Headless CLI batch execution manifest (`{ schema, template \| project, inputs, commands, exports }`) | `lumencraft-cli` (`apps/lumencraft-cli/src/cmd_run_batch.rs`) | `BATCH_SCHEMA_V1 = "lumencraft.batch.v1"` | Exact `"schema"` tag verified before execution (`docs/schemas/batch-v1.schema.json`); breaking contract changes increment schema suffix (`v2`). |
+| **`.curvebook`** | Compressed archive (`manifest.json`, `document.json`, `sheets/*.csv`) | `curvebook-doc`, `curvebook-format` (`crates/format/src/archive.rs`) | `CURRENT_SCHEMA_VERSION = 2` (`crates/doc/src/error.rs`; `FORMAT_MAGIC = "curvebook-archive"`) | Format ID `curvebook` (`application/vnd.curvebook.project`, UTI `org.curvebook.project`); CRC32-checked entries; saved via atomic write (`curvebook-platform` / temp + rename). |
+| **`.curvebook.d/`** | Unpacked project directory (`manifest.json`, `document.json`, `sheets/*.csv`) | `curvebook-doc`, `curvebook-format` (`crates/format/src/archive.rs`) | `CURRENT_SCHEMA_VERSION = 2` | Format ID `curvebook.d`; version-control friendly workspace layout with the same manifest/document versioning. |
+| **`.cbtemplate`** | Reusable project template ZIP (`ArchiveKind::Template`) | `curvebook-doc`, `curvebook-format` (`crates/format/src/archive.rs`) | `CURRENT_SCHEMA_VERSION = 2` | Format ID `cbtemplate` (`application/vnd.curvebook.template`, UTI `org.curvebook.template`); data cell values and cached results stripped; formulas, analyses, graphs, layouts, and info constants preserved. |
+| **`preferences.json`** *(and `shortcuts.json`)* | Desktop UI settings (`PreferencesFile`: locale, theme, custom shortcut bindings, preserved unknown fields) | `curvebook` (`apps/curvebook/src/main.rs`), `curvebook-platform` | `CURRENT_PREFERENCES_VERSION = 1` (`crates/format/src/versioned.rs`) | Atomic writes only; must never overwrite a newer version file written by a newer release (`docs/schemas/preferences.schema.json`). |
+| **`ops.journal` & `curvebook.lock`** | Crash-recovery NDJSON command WAL (`{ format_version, seq, crc32, command_json }`) + `JournalLockLease` JSON (`{ format_version, owner_id, acquired_epoch_ms, ttl_ms }`) *(with optional `snapshot.curvebook`)* | `curvebook-format` (`crates/format/src/recovery.rs`) | `CURRENT_JOURNAL_VERSION = 1`, `CURRENT_LOCK_VERSION = 1` | `ops.journal` replays serialized engine commands through `Session::execute` (see [docs/command-ids.md](command-ids.md)); schemas in `docs/schemas/journal-record.schema.json`. |
+| **`curvebook.batch.v1`** | Headless CLI batch execution manifest (`{ schema, template \| project, inputs, commands, exports }`) | `curvebook-cli` (`apps/curvebook-cli/src/cmd_run_batch.rs`) | `BATCH_SCHEMA_V1 = "curvebook.batch.v1"` | Exact `"schema"` tag verified before execution (`docs/schemas/batch-v1.schema.json`); unsupported `curvebook.batch.vN` versions are rejected cleanly. |
 
-*(External interchange importers/exporters such as `.pzfx`, `.prism`, `.csv`, `.tsv`, `.svg`, `.pdf`, `.png`, `.tiff`, and `.emf` are read/exported defensively with bounds checks and clean-room parsers, and do not own LumenCraft's native schema history.)*
+*(External interchange importers/exporters such as `.pzfx`, `.prism`, `.csv`, `.tsv`, `.svg`, `.pdf`, `.png`, `.tiff`, and `.emf` are read/exported defensively with bounds checks and clean-room parsers, and do not own CurveBook's native schema history.)*
 
 ---
 
 ## 2. Forward & Backward Compatibility Policy
 
-1. **Backward compatibility (older files in newer LumenCraft):**
+1. **Backward compatibility (older files in newer CurveBook):**
    - Files tagged with `0 <= version <= CURRENT` are upgraded sequentially in memory (`v0 -> v1 -> ... -> CURRENT`) through registered migration steps before deserializing typed Rust models.
    - Defaults for newly added optional fields are applied explicitly inside the migration step or versioned loader—never silently fabricated during error recovery.
-2. **Forward safety (newer files in older LumenCraft):**
-   - Reading a manifest or settings wrapper whose `version` exceeds what the running binary understands **must fail cleanly** with a typed error (`FormatError::UnsupportedSchemaVersion { version, max_supported }`) telling the user a newer version of LumenCraft created the file.
+2. **Forward safety (newer files in older CurveBook):**
+   - Reading a manifest or settings wrapper whose `version` exceeds what the running binary understands **must fail cleanly** with a typed error (`FormatError::UnsupportedSchemaVersion { version, max_supported }`) telling the user a newer version of CurveBook created the file.
    - **Never overwrite a newer version:** Neither project save paths nor desktop settings/preferences savers may overwrite an on-disk file whose persisted version is higher than `max_supported`, preventing silent loss of fields added in newer releases.
 3. **Atomic persistence:**
-   - All project, template, settings, and manifest saves write through a temporary sibling file -> flush/sync -> atomic rename (`lumencraft-platform`), so crashes never truncate existing files ([docs/pitfalls.md](pitfalls.md)).
+   - All project, template, settings, and manifest saves write through a temporary sibling file -> flush/sync -> atomic rename (`curvebook-platform`), so crashes never truncate existing files ([docs/pitfalls.md](pitfalls.md)).
 
 ---
 
@@ -47,3 +47,18 @@ cargo xtask schemas --check
 ```
 
 `cargo xtask schemas` updates `docs/schemas/*.schema.json`; `cargo xtask schemas --check` fails in CI if persisted structs/manifests changed without regenerating the schema snapshots.
+
+---
+
+## 4. Breaking Cutover, Legacy Rejection & Residual-Name Allowlist
+
+1. **Full breaking cutover (`R0.20`):**
+   - CurveBook is a **full breaking cutover** with **zero LumenCraft file readers, executable or environment-variable aliases, settings/recovery migrations, or browser-storage migrations**.
+   - **Renaming does not convert:** Renaming an older `.lumencraft`, `.lumencraft.d/`, or `.lctemplate` file or directory to `.curvebook`, `.curvebook.d/`, or `.cbtemplate` does **not** convert old archives. `lumencraft-archive` manifest magic, `.lumencraft` / `.lumencraft.d` / `.lctemplate` native format IDs, and `lumencraft.batch.v1` batch manifests are **explicitly rejected** (including against `.pzfx` / interchange importer fallbacks).
+   - Existing user `.lumencraft` files, old settings/recovery directories, old browser `localStorage` / Web Lock namespaces, and separate LumenCraft Windows installations are left untouched; any conversion utility or migration service is outside this cutover.
+2. **Narrow residual-name allowlist (`plan/curvebook-rename.md`):**
+   - Residual case-insensitive `lumencraft`, `lctemplate`, or `lc-` / `lc_` references in tracked text exist solely for:
+     - [`plan/curvebook-rename.md`](../plan/curvebook-rename.md) (the before/after cutover specification);
+     - Legacy-rejection negative tests (synthesized in test code without committed binary fixtures) and breaking-change / install-separation notes (`docs/file-formats.md`, `docs/releasing.md`, `docs/STATUS.md`, `packaging/windows/INSTALLATION.md`);
+     - Historical audit and provenance records (`docs/audit/findings/r1/**`, `docs/audit/findings/r2/**`, `docs/audit/progress.md`, `docs/audit/round2-post-ebcc622.md`, `docs/roadmap-history.md`, dated pre-cutover baseline records in `docs/ROADMAP.md` and `docs/STATUS.md`, `R0.20`'s heading/anchor `#r020-rename-lumencraft-to-curvebook`, `assets/app-icon/source/seven-pane-win95.prompt.txt`, archived mole attribution, and `xtask` guard negative tests).
+   - Residual old names never create runtime compatibility, fallbacks, or current product instructions.

@@ -3,16 +3,16 @@
 
 use std::collections::BTreeMap;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, BracketLabelMode, BracketStyle, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec, GraphSheet, GraphSpec,
     GraphicalDataObject, GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode,
     ProjectDocument, ReplicateOverlayStyle, ResultStatus, SheetId, SummaryMeasure, TableArchetype, TickLabelFormat, WhiskerMethod,
 };
-use lumencraft_math::sum::SummaryMoments;
-use lumencraft_palette::{LineDashStyle, MarkerShape, MarkerStyle, Rgba8};
-use lumencraft_stats::cld::{CldOptions, compute_cld_from_result_sheet};
-use lumencraft_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
-use lumencraft_text::{LocaleNumberPolicy, RichText, format_pvalue_label, measure_text_pt};
+use curvebook_math::sum::SummaryMoments;
+use curvebook_palette::{LineDashStyle, MarkerShape, MarkerStyle, Rgba8};
+use curvebook_stats::cld::{CldOptions, compute_cld_from_result_sheet};
+use curvebook_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
+use curvebook_text::{LocaleNumberPolicy, RichText, format_pvalue_label, measure_text_pt};
 
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
@@ -101,7 +101,7 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
 
     let has_y2 = graph.spec.y2_axis.is_some()
         || graph.spec.series.iter().any(|s| s.bind_to_right_y2)
-        || matches!(graph.spec.frame_preset, lumencraft_doc::FramePreset::DualYSecondaryRight);
+        || matches!(graph.spec.frame_preset, curvebook_doc::FramePreset::DualYSecondaryRight);
     let mut tick_positions: Vec<(f64, String)> = Vec::new();
     let mut items = primary_opt.map(|primary| extract_items(graph, primary, &mut tick_positions, &mut scene.warnings)).unwrap_or_default();
 
@@ -133,7 +133,7 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
     let x_axis = SegmentedAxis::build(&graph.spec.x_axis, r.x, r.right(), &x_vals, false, 0.0);
     let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &y_vals, include_zero_y, headroom);
     let y2_axis = if has_y2 {
-        let y2_spec = graph.spec.y2_axis.clone().unwrap_or_else(|| lumencraft_doc::AxisSpec::linear("Y2"));
+        let y2_spec = graph.spec.y2_axis.clone().unwrap_or_else(|| curvebook_doc::AxisSpec::linear("Y2"));
         let source = if y2_vals.is_empty() { &y_vals } else { &y2_vals };
         Some(SegmentedAxis::build(&y2_spec, r.bottom(), r.y, source, include_zero_y, headroom))
     } else {
@@ -183,7 +183,7 @@ fn render_empty_axes(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Char
     let x_axis = SegmentedAxis::build(&graph.spec.x_axis, r.x, r.right(), &[0.0, 1.0], false, 0.0);
     let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &[0.0, 1.0], false, 0.0);
     let y2_axis = if has_y2 {
-        let y2_spec = graph.spec.y2_axis.clone().unwrap_or_else(|| lumencraft_doc::AxisSpec::linear("Y2"));
+        let y2_spec = graph.spec.y2_axis.clone().unwrap_or_else(|| curvebook_doc::AxisSpec::linear("Y2"));
         Some(SegmentedAxis::build(&y2_spec, r.bottom(), r.y, &[0.0, 1.0], false, 0.0))
     } else {
         None
@@ -331,7 +331,7 @@ fn tint_gdo(gdo: &mut GraphicalDataObject, swatch: Rgba8) {
 
 fn extract_items(
     graph: &GraphSheet,
-    sheet: &lumencraft_doc::DataSheet,
+    sheet: &curvebook_doc::DataSheet,
     tick_positions: &mut Vec<(f64, String)>,
     warnings: &mut Vec<ChartWarning>,
 ) -> Vec<CategorySlotItem> {
@@ -397,8 +397,8 @@ fn extract_column_items(
 fn extract_column_presummarized(
     sheet_id: &SheetId,
     col: usize,
-    mode: lumencraft_doc::SubcolumnMode,
-    rows: &[Vec<lumencraft_doc::Cell>],
+    mode: curvebook_doc::SubcolumnMode,
+    rows: &[Vec<curvebook_doc::Cell>],
     err_spec: Option<&ErrorBarSpec>,
     warnings: &mut Vec<ChartWarning>,
 ) -> ExtractedKind {
@@ -428,7 +428,7 @@ fn extract_nested_items(
             let mut unit_vals = Vec::new();
             let mut first_row: Option<usize> = None;
             for (r, row_cells) in group.cells.iter().enumerate() {
-                if let Some(v) = row_cells.get(b).and_then(lumencraft_doc::Cell::active_number) {
+                if let Some(v) = row_cells.get(b).and_then(curvebook_doc::Cell::active_number) {
                     first_row.get_or_insert(r);
                     unit_vals.push(v);
                     all_tech.push(RawObs { value: v, source: SourceCellId { sheet_id: sheet_id.clone(), row: r, col: g_idx, subcol: b } });
@@ -734,7 +734,7 @@ struct ConnectorAxes<'a> {
 fn render_before_after_connectors(
     scene: &mut ChartScene,
     graph_spec: &GraphSpec,
-    sheet: &lumencraft_doc::DataSheet,
+    sheet: &curvebook_doc::DataSheet,
     items: &[CategorySlotItem],
     axes: ConnectorAxes<'_>,
     bounds: &mut Vec<RenderedSlotBound>,
@@ -761,7 +761,7 @@ fn render_before_after_connectors(
         let mut pts: Vec<(usize, &CategorySlotItem, PointPt, f64)> = Vec::new();
         for &(slot_idx, item) in &ba_cols {
             let data_col = item.group_key;
-            let Some(val) = col_table.data_sets.get(data_col).and_then(|d| d.cell(row, 0)).and_then(lumencraft_doc::Cell::active_number) else {
+            let Some(val) = col_table.data_sets.get(data_col).and_then(|d| d.cell(row, 0)).and_then(curvebook_doc::Cell::active_number) else {
                 continue;
             };
             let target_y = if item.bind_to_right_y2 { axes.y2.unwrap_or(axes.y) } else { axes.y };
@@ -944,7 +944,7 @@ fn render_bar_item(
     {
         let dot_style = MarkerStyle {
             shape: MarkerShape::Circle,
-            fill_mode: lumencraft_palette::MarkerFillMode::Filled,
+            fill_mode: curvebook_palette::MarkerFillMode::Filled,
             size_pt: 3.4,
             fill_color: border_color,
             stroke_color: Rgba8::WHITE,
@@ -1119,7 +1119,7 @@ fn render_box_whisker_item(
     let mut highest_pt = py_whi.min(top_box);
     let dot_style = MarkerStyle {
         shape: MarkerShape::Circle,
-        fill_mode: lumencraft_palette::MarkerFillMode::Filled,
+        fill_mode: curvebook_palette::MarkerFillMode::Filled,
         size_pt: 3.4,
         fill_color: stroke_color,
         stroke_color,
@@ -1272,7 +1272,7 @@ fn render_violin_item(
     if half_violin_with_points {
         let dot_style = MarkerStyle {
             shape: MarkerShape::Circle,
-            fill_mode: lumencraft_palette::MarkerFillMode::Filled,
+            fill_mode: curvebook_palette::MarkerFillMode::Filled,
             size_pt: 3.4,
             fill_color: stroke_color,
             stroke_color: Rgba8::WHITE,
@@ -1603,7 +1603,7 @@ pub(crate) fn cld_reserved_top_margin_pt(spec: &GraphSpec) -> f64 {
     (font + offset + 6.0).clamp(16.0, 34.0)
 }
 
-fn collect_cld_means_override(res: &lumencraft_doc::ResultSheet, slot_metas: &[(usize, &str, &str, Option<f64>, f64)]) -> Option<Vec<(usize, f64)>> {
+fn collect_cld_means_override(res: &curvebook_doc::ResultSheet, slot_metas: &[(usize, &str, &str, Option<f64>, f64)]) -> Option<Vec<(usize, f64)>> {
     let needs_override = res.pairwise_comparisons.iter().any(|r| r.estimate_diff.is_none()) || matches!(res.analysis.kind, AnalysisKind::Survival(_));
     if !needs_override {
         return None;
@@ -1626,7 +1626,7 @@ fn collect_cld_means_override(res: &lumencraft_doc::ResultSheet, slot_metas: &[(
 }
 
 fn match_cld_assignments_to_slots(
-    assignments: &[lumencraft_stats::cld::CldGroupAssignment],
+    assignments: &[curvebook_stats::cld::CldGroupAssignment],
     slot_metas: &[(usize, &str, &str, Option<f64>, f64)],
     grouped_arrangement: GroupedArrangement,
     warnings: &mut Vec<ChartWarning>,
@@ -1842,10 +1842,10 @@ fn resolve_brackets(
 
 fn build_bracket_label(
     spec: &PairwiseBracketSpec,
-    res_opt: Option<&lumencraft_doc::ResultSheet>,
+    res_opt: Option<&curvebook_doc::ResultSheet>,
     rec_opt: Option<&PairwiseComparisonRecord>,
     doc: &ProjectDocument,
-    info_id: Option<&lumencraft_doc::SheetId>,
+    info_id: Option<&curvebook_doc::SheetId>,
     warnings: &mut Vec<ChartWarning>,
 ) -> Option<RichText> {
     match &spec.label_mode {
@@ -1919,7 +1919,7 @@ fn curly_brace_path(x0: f64, x1: f64, y: f64, amp: f64) -> Path2D {
     }
 }
 
-fn build_legend_items(graph: &GraphSheet, sheet: &lumencraft_doc::DataSheet) -> Vec<LegendItem> {
+fn build_legend_items(graph: &GraphSheet, sheet: &curvebook_doc::DataSheet) -> Vec<LegendItem> {
     if !matches!(sheet.archetype, TableArchetype::Grouped(_)) && graph.spec.series.len() <= 1 {
         return Vec::new();
     }
@@ -1986,12 +1986,12 @@ fn legend_item_from_gdo(label: String, gdo: &GraphicalDataObject) -> LegendItem 
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         BracketLabelMode, BracketStyle, Cell, ColumnDesignHint, ColumnTable, DataSheet, GraphSheet, GraphicalDataObject, GroupedArrangement,
         GroupedTable, PairwiseBracketSpec, PointStyleOverride, ProjectDocument, ReplicateOverlayStyle, SheetId, SubcolumnMode, SummaryMeasure,
         TableArchetype,
     };
-    use lumencraft_palette::{MarkerShape, Rgba8};
+    use curvebook_palette::{MarkerShape, Rgba8};
 
     use crate::{ScenePrimitive, compile_graph};
 
@@ -2003,7 +2003,7 @@ mod tests {
         let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_1"), &ds).expect("graph sheet");
         gs.spec.series[0].gdo = GraphicalDataObject::AlignedDotPlot {
             summary: SummaryMeasure::Mean,
-            marker: lumencraft_palette::MarkerStyle::default(),
+            marker: curvebook_palette::MarkerStyle::default(),
             show_crossbar: false,
         };
         let custom_color = Rgba8::rgb(204, 121, 167);
@@ -2137,7 +2137,7 @@ mod tests {
 
     #[test]
     fn cld_display_modes_avoid_bracket_and_title_collisions_across_bar_and_box() {
-        use lumencraft_doc::{
+        use curvebook_doc::{
             AnalysisKind, AnalysisSpec, CompactLetterDisplaySpec, OneWayAnovaSpec, PairwiseComparisonRecord, PairwiseDisplayMode, ResultSheet,
             ResultStatus,
         };
@@ -2255,7 +2255,7 @@ mod tests {
         let mut gs_box = gs;
         for s in &mut gs_box.spec.series {
             s.gdo = GraphicalDataObject::BoxAndWhisker {
-                whiskers: lumencraft_doc::WhiskerMethod::MinToMax,
+                whiskers: curvebook_doc::WhiskerMethod::MinToMax,
                 fill_color: Rgba8::rgb(86, 180, 233),
                 stroke_color: Rgba8::BLACK,
                 show_outliers: false,
@@ -2268,7 +2268,7 @@ mod tests {
 
     #[test]
     fn cld_handles_missing_failed_incompatible_and_stacked_gracefully() {
-        use lumencraft_doc::{
+        use curvebook_doc::{
             AnalysisKind, AnalysisSpec, CompactLetterDisplaySpec, ErrorCode, OneWayAnovaSpec, PairwiseComparisonRecord, PairwiseDisplayMode,
             ResultSheet, ResultStatus,
         };

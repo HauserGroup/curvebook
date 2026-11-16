@@ -6,12 +6,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     CellCoord, CellValue, ErrorCode, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion, ProjectDocument,
     SheetCellRange, SheetId,
 };
-use lumencraft_engine::{ExternalPathPolicy, Session};
-use lumencraft_transform::{PlateGeometry, PlateMapTemplate, PlateWellRole};
+use curvebook_engine::{ExternalPathPolicy, Session};
+use curvebook_transform::{PlateGeometry, PlateMapTemplate, PlateWellRole};
 use serde_json::json;
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -25,7 +25,7 @@ struct TempWorkspace {
 impl TempWorkspace {
     fn new(label: &str) -> Self {
         let id = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("lc-engine-policy-{label}-{}-{id}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("cb-engine-policy-{label}-{}-{id}", std::process::id()));
         let workdir = root.join("workdir");
         let outside = root.join("outside");
         fs::create_dir_all(&workdir).expect("workdir");
@@ -168,9 +168,9 @@ fn workdir_policy_guards_command_path_params_paste_link_spec_and_preserves_plate
     assert!(ws.workdir.join("exports/out.csv").exists());
 
     // 4. Write escapes fail even on export commands outside table/project modules.
-    let save_err = session.execute("project.save", json!({ "path": "../outside/escape.lumencraft" })).expect_err("save escape");
+    let save_err = session.execute("project.save", json!({ "path": "../outside/escape.curvebook" })).expect_err("save escape");
     assert_eq!(save_err.code, ErrorCode::PathEscape);
-    assert!(!ws.outside.join("escape.lumencraft").exists());
+    assert!(!ws.outside.join("escape.curvebook").exists());
 
     let csv_err = session.execute("table.exportCsv", json!({ "sheet_id": "col-1", "path": "../outside/leak.csv" })).expect_err("exportCsv escape");
     assert_eq!(csv_err.code, ErrorCode::PathEscape);

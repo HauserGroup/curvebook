@@ -4,9 +4,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{CellCoord, CellValue, SheetId};
-use lumencraft_format::{ZipWriter, save_project_file, save_project_unpacked_dir, save_template_file};
-use lumencraft_mcp::{ContentBlock, McpServerState, ToolCallResult, call_tool};
+use curvebook_doc::{CellCoord, CellValue, SheetId};
+use curvebook_format::{ZipWriter, save_project_file, save_project_unpacked_dir, save_template_file};
+use curvebook_mcp::{ContentBlock, McpServerState, ToolCallResult, call_tool};
 use serde_json::{Value, json};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -71,7 +71,7 @@ fn read_y_cell_number(state: &McpServerState, sheet_id: &str, row: usize, col: u
 
 #[test]
 fn r1_s12_05_non_append_csv_and_tsv_mark_dirty_with_no_file_path() -> TestResult {
-    let dir = TempFixtureDir::new("lc_r1_s12_05_csv_tsv")?;
+    let dir = TempFixtureDir::new("cb_r1_s12_05_csv_tsv")?;
     let csv_path = dir.child("alpha.csv");
     let tsv_path = dir.child("beta.tsv");
     fs::write(&csv_path, "X,Y\n1,10\n2,20\n").map_err(|err| format!("write csv: {err}"))?;
@@ -118,7 +118,7 @@ fn r1_s12_05_non_append_csv_and_tsv_mark_dirty_with_no_file_path() -> TestResult
 
 #[test]
 fn r1_s12_05_tsv_with_commas_keeps_tab_delimiter_on_open_and_append() -> TestResult {
-    let dir = TempFixtureDir::new("lc_r1_s12_05_tsv_commas")?;
+    let dir = TempFixtureDir::new("cb_r1_s12_05_tsv_commas")?;
     let first_csv = dir.child("first.csv");
     let comma_tsv = dir.child("labels.tsv");
     fs::write(&first_csv, "X,Y\n1,2\n").map_err(|err| format!("write csv: {err}"))?;
@@ -146,7 +146,7 @@ fn r1_s12_05_tsv_with_commas_keeps_tab_delimiter_on_open_and_append() -> TestRes
 
 #[test]
 fn r1_s12_05_append_csv_preserves_prior_undo_and_marks_dirty() -> TestResult {
-    let dir = TempFixtureDir::new("lc_r1_s12_05_append_undo")?;
+    let dir = TempFixtureDir::new("cb_r1_s12_05_append_undo")?;
     let a_path = dir.child("a.csv");
     let b_path = dir.child("b.csv");
     fs::write(&a_path, "X,Y\n1,2\n3,4\n").map_err(|err| format!("write a.csv: {err}"))?;
@@ -212,9 +212,9 @@ fn r1_s12_05_append_csv_preserves_prior_undo_and_marks_dirty() -> TestResult {
 
 #[test]
 fn r1_s12_05_append_into_saved_project_preserves_path_marks_dirty_and_undoes() -> TestResult {
-    let dir = TempFixtureDir::new("lc_r1_s12_05_append_proj")?;
+    let dir = TempFixtureDir::new("cb_r1_s12_05_append_proj")?;
     let seed_csv = dir.child("base.csv");
-    let proj_path = dir.child("study.lumencraft");
+    let proj_path = dir.child("study.curvebook");
     let append_tsv = dir.child("extra.tsv");
     fs::write(&seed_csv, "X,Y\n1,5\n").map_err(|err| format!("write seed csv: {err}"))?;
     fs::write(&append_tsv, "X\tY\n7\t8\n").map_err(|err| format!("write extra tsv: {err}"))?;
@@ -255,7 +255,7 @@ fn r1_s12_05_append_into_saved_project_preserves_path_marks_dirty_and_undoes() -
 
 #[test]
 fn r1_s12_05_append_duplicate_sheet_id_errors_without_overwriting_or_losing_undo() -> TestResult {
-    let dir = TempFixtureDir::new("lc_r1_s12_05_dup_sheet")?;
+    let dir = TempFixtureDir::new("cb_r1_s12_05_dup_sheet")?;
     let a_path = dir.child("a.csv");
     let b_path = dir.child("b.csv");
     fs::write(&a_path, "X,Y\n1,2\n").map_err(|err| format!("write a.csv: {err}"))?;
@@ -298,7 +298,7 @@ fn r1_s12_05_append_duplicate_sheet_id_errors_without_overwriting_or_losing_undo
 
 #[test]
 fn r1_s12_05_pzfx_and_prism_imports_mark_dirty_with_null_file_path() -> TestResult {
-    let dir = TempFixtureDir::new("lc_r1_s12_05_pzfx_prism")?;
+    let dir = TempFixtureDir::new("cb_r1_s12_05_pzfx_prism")?;
     let pzfx_path = dir.child("curve.pzfx");
     let prism_path = dir.child("bundle.prism");
 
@@ -345,12 +345,12 @@ fn r1_s12_05_pzfx_and_prism_imports_mark_dirty_with_null_file_path() -> TestResu
 }
 
 #[test]
-fn r1_s12_05_lumencraft_unpacked_and_template_semantics_stay_accurate() -> TestResult {
-    let dir = TempFixtureDir::new("lc_r1_s12_05_proj_tpl")?;
+fn r1_s12_05_curvebook_unpacked_and_template_semantics_stay_accurate() -> TestResult {
+    let dir = TempFixtureDir::new("cb_r1_s12_05_proj_tpl")?;
     let seed_csv = dir.child("seed.csv");
-    let proj_path = dir.child("saved.lumencraft");
-    let unpacked_dir = dir.child("saved.lumencraft.d");
-    let tpl_path = dir.child("starter.lctemplate");
+    let proj_path = dir.child("saved.curvebook");
+    let unpacked_dir = dir.child("saved.curvebook.d");
+    let tpl_path = dir.child("starter.cbtemplate");
     fs::write(&seed_csv, "X,Y\n1,2\n").map_err(|err| format!("write seed csv: {err}"))?;
 
     let mut seed_state = McpServerState::new();
@@ -366,14 +366,14 @@ fn r1_s12_05_lumencraft_unpacked_and_template_semantics_stay_accurate() -> TestR
     assert_eq!(proj_inspect["file_path"], proj_path.display().to_string());
 
     let unpacked_res = call_json(&mut state, "open_file", json!({ "path": unpacked_dir.display().to_string() }))?;
-    assert_eq!(unpacked_res["format"], "lumencraft.d");
+    assert_eq!(unpacked_res["format"], "curvebook.d");
     let unpacked_inspect = call_json(&mut state, "doc_inspect", json!({}))?;
     assert_eq!(unpacked_inspect["dirty"], false);
     let unpacked_file_path = unpacked_inspect["file_path"].as_str().ok_or_else(|| String::from("missing file_path"))?;
     assert_eq!(Path::new(unpacked_file_path), unpacked_dir.as_path());
 
     let tpl_res = call_json(&mut state, "open_file", json!({ "path": tpl_path.display().to_string(), "title": "Instantiated Study" }))?;
-    assert_eq!(tpl_res["format"], "lctemplate");
+    assert_eq!(tpl_res["format"], "cbtemplate");
     assert_eq!(tpl_res["title"], "Instantiated Study");
     let tpl_inspect = call_json(&mut state, "doc_inspect", json!({}))?;
     assert_eq!(tpl_inspect["dirty"], false);
@@ -383,10 +383,10 @@ fn r1_s12_05_lumencraft_unpacked_and_template_semantics_stay_accurate() -> TestR
 
 #[test]
 fn r1_s12_05_workdir_guard_allows_open_and_append_while_keeping_dirty_and_undo() -> TestResult {
-    let dir = TempFixtureDir::new("lc_r1_s12_05_workdir")?;
+    let dir = TempFixtureDir::new("cb_r1_s12_05_workdir")?;
     let a_path = dir.child("a.csv");
     let b_path = dir.child("b.csv");
-    let outside_dir = TempFixtureDir::new("lc_r1_s12_05_outside")?;
+    let outside_dir = TempFixtureDir::new("cb_r1_s12_05_outside")?;
     let outside_csv = outside_dir.child("outside.csv");
     fs::write(&a_path, "X,Y\n1,2\n").map_err(|err| format!("write a.csv: {err}"))?;
     fs::write(&b_path, "X,Y\n3,4\n").map_err(|err| format!("write b.csv: {err}"))?;

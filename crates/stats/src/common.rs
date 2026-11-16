@@ -1,10 +1,10 @@
 //! Shared numerical, ranking, quantile, validation, and `ResultSheet` construction helpers.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PValueFormat, RemediationKind, ResultCell, ResultScalarEntry,
     ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype,
 };
-use lumencraft_math::ConfidenceLevel;
+use curvebook_math::ConfidenceLevel;
 
 use crate::error::StatsError;
 
@@ -15,7 +15,7 @@ pub fn validate_finite_slice(values: &[f64]) -> Result<(), StatsError> {
     }
     for &v in values {
         if !v.is_finite() {
-            return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "x", value: v }));
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "x", value: v }));
         }
     }
     Ok(())
@@ -370,7 +370,7 @@ pub fn build_tab(
 
 /// Two-sided Student's `t` critical value `t_{1 - alpha/2, df}`.
 pub fn t_crit_two_sided(confidence: ConfidenceLevel, df: f64) -> Result<f64, StatsError> {
-    Ok(lumencraft_math::dist::student_t_two_sided_isf(confidence.alpha(), df)?)
+    Ok(curvebook_math::dist::student_t_two_sided_isf(confidence.alpha(), df)?)
 }
 
 /// Check if a subcolumn mode is pre-summarized with parametric moments (`MeanSdN`, `MeanSemN`, `MeanCvN`).
@@ -453,14 +453,14 @@ pub fn sanitize_result_sheet_floats(sheet: &mut ResultSheet) -> Result<(), Stats
             rec.estimate_diff = None;
         }
         if !rec.raw_p_or_q.is_finite() {
-            return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "non_finite_pairwise_p", value: rec.raw_p_or_q }));
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "non_finite_pairwise_p", value: rec.raw_p_or_q }));
         }
     }
     for curve in &mut sheet.fitted_curves {
         for pt in &mut curve.points {
             if !pt.x.is_finite() || !pt.y.is_finite() {
                 let bad = if !pt.x.is_finite() { pt.x } else { pt.y };
-                return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "non_finite_curve_point", value: bad }));
+                return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "non_finite_curve_point", value: bad }));
             }
             if pt.ci_lower.is_some_and(|v| !v.is_finite()) {
                 pt.ci_lower = None;
@@ -609,7 +609,7 @@ pub fn select_kth_pairwise_sum(sorted_xs: &[f64], sorted_ys: &[f64], k: u64) -> 
     })?;
     let out = if scale_half { 2.0 * raw } else { raw };
     if !out.is_finite() {
-        return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "pairwise_sum_overflow", value: out }));
+        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "pairwise_sum_overflow", value: out }));
     }
     Ok(out)
 }

@@ -1,24 +1,24 @@
-//! Comprehensive integration, edge-case, and property tests for `lumencraft-text`.
+//! Comprehensive integration, edge-case, and property tests for `curvebook-text`.
 
 #![allow(clippy::cognitive_complexity, clippy::too_many_arguments)]
 
-use lumencraft_math::{AxisScale, LogitDomain, PValueFormat};
-use lumencraft_testkit::assert_approx_eq;
-use lumencraft_text::glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, outline_rich_text, outline_rich_text_rotated, outline_ttf_glyph};
+use curvebook_math::{AxisScale, LogitDomain, PValueFormat};
+use curvebook_testkit::assert_approx_eq;
+use curvebook_text::glyph_paths::{GlyphOutlineCmd, PositionedGlyphOutline, outline_rich_text, outline_rich_text_rotated, outline_ttf_glyph};
 
 fn assert_near(actual: f64, expected: f64, tol: f64, label: &str) {
     assert_approx_eq(actual, expected, tol, tol, label);
 }
-use lumencraft_text::markup::{
+use curvebook_text::markup::{
     BidiRun, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, expand_template_hooks, is_rtl_locale,
     parse_markup, reorder_visual_bidi, shape_bidi_runs,
 };
-use lumencraft_text::metrics::{
+use curvebook_text::metrics::{
     TextMetricsPt, TrueTypeFont, TrueTypeFontInfo, build_minimal_truetype_font, char_advance_pt, core14_advance_em, has_bundled_or_ttf_font,
     measure_text_pt, parse_truetype_font_info, system_cjk_font_candidates,
 };
-use lumencraft_text::number::{AxisTickFormat, LocaleNumberPolicy, format_axis_tick, format_axis_tick_with_format, format_pvalue_label};
-use lumencraft_text::{BUNDLED_FONTS, EquationSegment, TextError, has_bundled_fonts_feature, parse_equation_segments};
+use curvebook_text::number::{AxisTickFormat, LocaleNumberPolicy, format_axis_tick, format_axis_tick_with_format, format_pvalue_label};
+use curvebook_text::{BUNDLED_FONTS, EquationSegment, TextError, has_bundled_fonts_feature, parse_equation_segments};
 use proptest::{prelude::any, prop_assert, prop_assert_eq, proptest};
 
 // ---------------------------------------------------------------------------
@@ -943,8 +943,8 @@ fn minimal_truetype_font_builder_roundtrips_through_sfnt_parsers_and_outlines() 
     assert!(ttf.has_glyf_outlines());
 
     let info: TrueTypeFontInfo = parse_truetype_font_info(&ttf_bytes).expect("minimal TTF must inspect cleanly");
-    assert_eq!(info.postscript_name, "LumenCraftSans-Regular");
-    assert_eq!(info.family_name, "LumenCraft Sans");
+    assert_eq!(info.postscript_name, "CurveBookSans-Regular");
+    assert_eq!(info.family_name, "CurveBook Sans");
     assert_eq!(info.units_per_em, 1000);
     assert_eq!(info.ascender_1000, 800);
     assert_eq!(info.descender_1000, -200);

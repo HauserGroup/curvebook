@@ -1,10 +1,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CiBound, DataSheet, FitMethod, ModelComparisonSpec, NonlinearFitSpec, ParameterRule,
     ParameterScope, ResultCell, ResultSheet, ResultStatus, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
 };
-use lumencraft_fit::{
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, HookContext, InferenceAvailability, ModelComparisonOutcome, NonlinearFitResult, ParameterNote,
     SolverConfig, compare_models, compare_models_checked, compute_rsdr, execute_analysis, fit_nonlinear, get_builtin_model,
 };
@@ -128,7 +128,7 @@ fn assert_robust_diagnostics_and_comparison_suppressed(res: &ResultSheet) {
     }
     assert!(interp_tab.footnotes.iter().any(|f| f.contains("NotApplicableInRobustMode")));
 
-    let comp_tab = res.tabs.iter().find(|t| t.kind == lumencraft_doc::ResultTabKind::ModelComparison).unwrap();
+    let comp_tab = res.tabs.iter().find(|t| t.kind == curvebook_doc::ResultTabKind::ModelComparison).unwrap();
     let inf_row = comp_tab.row_labels.iter().position(|l| l == "Inference availability").unwrap();
     assert_eq!(comp_tab.rows[inf_row][0], ResultCell::Text("Not applicable (NotApplicableInRobustMode)".to_owned()));
     assert!(comp_tab.rows.iter().flatten().any(|c| c == &ResultCell::Text("Not applicable".to_owned())));

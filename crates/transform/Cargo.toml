@@ -1,20 +1,20 @@
 [package]
-name = "lumencraft-transform"
+name = "curvebook-transform"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft data transformations, normalization, baseline subtraction and simulation"
+description = "CurveBook data transformations, normalization, baseline subtraction and simulation"
 
 [lints]
 workspace = true
 
 [dependencies]
-lumencraft-math = { workspace = true }
-lumencraft-doc = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-doc = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }
 proptest = { workspace = true }

@@ -1,22 +1,22 @@
 //! Permanent regression tests for Round 2 (`R0.19`) Slices `S08` (`R2-S08-01..06`)
 //! and `S11-16` (`R2-S11-16` single-axis `ModelEquation` overflow clipping).
 
-use lumencraft_chart::equation_box::{ModelEquationParams, render_model_equation_annotation, render_tex_equation_box};
-use lumencraft_chart::{
+use curvebook_chart::equation_box::{ModelEquationParams, render_model_equation_annotation, render_tex_equation_box};
+use curvebook_chart::{
     ChartScene, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SourceCellId, TextAnchor, compile_graph, preflight_check_scene,
     select_point_override,
 };
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint, ColumnTable,
     DataSheet, DiagnosticPlotKind, EquationDisplayMode, FittedCurveOverlay, GraphKind, GraphSheet, GraphicalDataObject, GroupedArrangement,
     GroupedTable, LinearRegressionSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
     MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NonlinearFitSpec, PointStyleOverride, ProjectDocument, RectPt as DocRectPt,
     ResultScalarEntry, ResultSheet, ResultStatus, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_palette::{MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
-use lumencraft_stats::multivariate::run_multivariate_analysis;
-use lumencraft_stats::two_group::{run_bland_altman_analysis, run_multiple_row_t_tests_analysis};
-use lumencraft_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight};
+use curvebook_palette::{MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
+use curvebook_stats::multivariate::run_multivariate_analysis;
+use curvebook_stats::two_group::{run_bland_altman_analysis, run_multiple_row_t_tests_analysis};
+use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -247,8 +247,8 @@ fn r2_s08_02_superimposed_before_after_connectors_never_swap_columns() -> TestRe
     }
 
     // Verify plotted_points provenance maps lower-value points to col=0 (Before) and higher-value points to col=1 (After).
-    let before_pts: Vec<&lumencraft_chart::PlottedPointMeta> = scene.plotted_points.iter().filter(|m| m.source_cell.col == 0).collect();
-    let after_pts: Vec<&lumencraft_chart::PlottedPointMeta> = scene.plotted_points.iter().filter(|m| m.source_cell.col == 1).collect();
+    let before_pts: Vec<&curvebook_chart::PlottedPointMeta> = scene.plotted_points.iter().filter(|m| m.source_cell.col == 0).collect();
+    let after_pts: Vec<&curvebook_chart::PlottedPointMeta> = scene.plotted_points.iter().filter(|m| m.source_cell.col == 1).collect();
     assert_eq!(before_pts.len(), 2);
     assert_eq!(after_pts.len(), 2);
     assert!(before_pts.iter().all(|b| after_pts.iter().all(|a| b.center_pt.y > a.center_pt.y && b.center_pt.x < a.center_pt.x)));

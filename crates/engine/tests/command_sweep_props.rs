@@ -1,7 +1,7 @@
-//! Proptest command-sweep and corrupt-input fuzzing for `lumencraft_engine::Session` (Gap G12).
+//! Proptest command-sweep and corrupt-input fuzzing for `curvebook_engine::Session` (Gap G12).
 //!
 //! Covers:
-//! 1. Exhaustive valid execution of every `CommandSpec` in `lumencraft_engine::cmd::registry()`.
+//! 1. Exhaustive valid execution of every `CommandSpec` in `curvebook_engine::cmd::registry()`.
 //! 2. Exhaustive hostile/malformed-input sweep across every `CommandSpec` (wrong types,
 //!    non-finite/`NaN` strings, `u64::MAX` indices, nonexistent sheets, cyclic links/formulas,
 //!    frozen sheet protections, malformed archives/XML/CSV).
@@ -14,9 +14,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{InfoSheet, ProjectDocument, TableKind};
-use lumencraft_engine::cmd;
-use lumencraft_engine::{CommandOutcome, EngineError, Session};
+use curvebook_doc::{InfoSheet, ProjectDocument, TableKind};
+use curvebook_engine::cmd;
+use curvebook_engine::{CommandOutcome, EngineError, Session};
 use proptest::collection::vec;
 use proptest::prelude::TestCaseError;
 use proptest::prop_assert;
@@ -30,7 +30,7 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 fn next_temp_file(stem: &str, ext: &str) -> PathBuf {
     let n = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
     let pid = std::process::id();
-    std::env::temp_dir().join(format!("lc_sweep_{pid}_{n}_{stem}.{ext}"))
+    std::env::temp_dir().join(format!("cb_sweep_{pid}_{n}_{stem}.{ext}"))
 }
 
 fn check_no_panic(command_id: &str, res: &Result<CommandOutcome, EngineError>) {
@@ -674,7 +674,7 @@ fn sweep_valid_export_and_project_commands(s: &mut Session, covered: &mut BTreeS
     run_valid(s, covered, "edit.undo", json!({}))?;
     run_valid(s, covered, "edit.redo", json!({}))?;
 
-    let proj_path = next_temp_file("saved", "lcproj");
+    let proj_path = next_temp_file("saved", "cbproj");
     let saved = run_valid(s, covered, "project.save", json!({ "path": proj_path, "include_bytes": true }))?;
     let saved_b64 =
         saved.payload.get("bytes_base64").and_then(Value::as_str).ok_or_else(|| String::from("missing project bytes_base64"))?.to_string();
@@ -736,7 +736,7 @@ fn sweep_every_catalog_command_hostile_and_corrupt_inputs() -> Result<(), String
             "bytes_base64": "====invalid-b64====",
             "xml": "<unclosed><tag>",
             "csv": "",
-            "path": "/nonexistent_dir_lc_sweep/should_fail.out",
+            "path": "/nonexistent_dir_cb_sweep/should_fail.out",
             "width_px": 0,
             "height_px": 0,
             "dpi": 0
@@ -856,7 +856,7 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
         "project.open" | "project.instantiateTemplate" => vec![
             json!({ "bytes_base64": "====" }),
             json!({ "bytes_base64": "aGVsbG8=" }),
-            json!({ "path": next_temp_file("does_not_exist", "lcproj") }),
+            json!({ "path": next_temp_file("does_not_exist", "cbproj") }),
         ],
         _ => Vec::new(),
     };

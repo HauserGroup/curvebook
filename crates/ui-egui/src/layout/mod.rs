@@ -10,8 +10,8 @@ pub mod widgets;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lumencraft_doc::{SheetId, SheetSection};
-use lumencraft_palette::Rgba8;
+use curvebook_doc::{SheetId, SheetSection};
+use curvebook_palette::Rgba8;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 

@@ -9,9 +9,9 @@
 use std::cmp::Ordering;
 use std::collections::{BTreeMap, VecDeque};
 
-use lumencraft_doc::{AnalysisKind, PairwiseComparisonRecord, ResultSheet};
+use curvebook_doc::{AnalysisKind, PairwiseComparisonRecord, ResultSheet};
 
-pub use lumencraft_doc::CldOrdering;
+pub use curvebook_doc::CldOrdering;
 
 use crate::StatsError;
 use crate::multiplicity::{GroupComparisonInput, PairwiseComparisonDetail};

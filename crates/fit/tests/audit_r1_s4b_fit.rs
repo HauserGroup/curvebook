@@ -1,7 +1,7 @@
 use std::time::Instant;
 
-use lumencraft_doc::{ParameterRule, ParameterScope};
-use lumencraft_fit::{
+use curvebook_doc::{ParameterRule, ParameterScope};
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, FitError, HookContext, ParametricModel, SolverConfig, fit_nonlinear, get_builtin_model,
 };
 

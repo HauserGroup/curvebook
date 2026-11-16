@@ -1,4 +1,4 @@
-//! Permanent Round 2 (`R0.19`) Slice `S12` audit regression suite for `lumencraft-mcp`.
+//! Permanent Round 2 (`R0.19`) Slice `S12` audit regression suite for `curvebook-mcp`.
 //!
 //! Covers:
 //! - `R2-S12-01`: `--control-port` `ping` handshake & bidirectional `--gui-only` policy enforcement.
@@ -23,10 +23,10 @@ use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::Duration;
 
-use lumencraft_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
-use lumencraft_engine::{EngineError, Session};
-use lumencraft_format::{FormatRegistry, save_project_unpacked_dir};
-use lumencraft_mcp::{
+use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
+use curvebook_engine::{EngineError, Session};
+use curvebook_format::{FormatRegistry, save_project_unpacked_dir};
+use curvebook_mcp::{
     GUI_ONLY_SERVER_INSTRUCTIONS, GuiSessionHost, McpServerState, SERVER_INSTRUCTIONS, ToolCallError, call_tool, dispatch_json_value, list_gui_tools,
     list_tools_for_state,
 };
@@ -43,7 +43,7 @@ struct TempDir {
 impl TempDir {
     fn new(label: &str) -> Result<Self, String> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("lc-r2-s12-mcp-{label}-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-r2-s12-mcp-{label}-{}-{seq}", std::process::id()));
         if dir.exists() {
             let _ = fs::remove_dir_all(&dir);
         }
@@ -329,7 +329,7 @@ fn r2_s12_04_open_and_save_check_workdir_guard_before_host_fs_probe() -> TestRes
     fs::create_dir_all(&workdir).map_err(|e| e.to_string())?;
     fs::create_dir_all(&outside).map_err(|e| e.to_string())?;
 
-    // Create a valid unpacked project directory WITHOUT `.lumencraft.d` suffix inside BOTH
+    // Create a valid unpacked project directory WITHOUT `.curvebook.d` suffix inside BOTH
     // `outside/secret_study` and `workdir/rel_study`, plus a plain directory `outside/plain_dir`.
     let mut doc = ProjectDocument::new("Pre-Guard Study").map_err(|e| e.to_string())?;
     let ds = DataSheet::new(
@@ -375,12 +375,12 @@ fn r2_s12_04_open_and_save_check_workdir_guard_before_host_fs_probe() -> TestRes
         );
     }
 
-    // Relative unpacked project without `.lumencraft.d` suffix inside `--workdir` resolves via `&resolved_path`.
+    // Relative unpacked project without `.curvebook.d` suffix inside `--workdir` resolves via `&resolved_path`.
     let rel_open = call_tool(&mut state, "open_file", json!({ "path": "rel_study" })).map_err(|e| format!("relative open_file failed: {e}"))?;
     assert!(!rel_open.is_error, "expected relative unpacked workdir study to open cleanly: {:?}", rel_open.structured_content);
     let _ = FormatRegistry::default_registry();
 
-    // `save_file { "path": "." }` inside workdir must fail with InvalidParams rather than matching `lumencraft.d`.
+    // `save_file { "path": "." }` inside workdir must fail with InvalidParams rather than matching `curvebook.d`.
     let dot_err = call_tool(&mut state, "save_file", json!({ "path": "." }));
     assert!(matches!(dot_err, Err(ToolCallError::InvalidParams(_))), "expected InvalidParams for save_file `.`, got {dot_err:?}");
     Ok(())
@@ -421,7 +421,7 @@ fn r2_s12_07_hosted_session_shared_and_resources_guarded() -> TestResult {
             .map_err(|e| format!("command_run failed: {e}"))?;
     assert!(!created.is_error, "command_run errored: {:?}", created.structured_content);
     assert!(sync_count.load(Ordering::Relaxed) >= 1, "expected sync_after_session_mutation call");
-    assert!(state.session().document().data_sheet(&lumencraft_doc::SheetId::new("hosted-1")).is_some());
+    assert!(state.session().document().data_sheet(&curvebook_doc::SheetId::new("hosted-1")).is_some());
 
     let ui_insp = call_tool(&mut state, "ui_inspect", json!({ "scope": "navigator" })).map_err(|e| format!("ui_inspect failed: {e}"))?;
     let ui_sc = ui_insp.structured_content.ok_or_else(|| String::from("missing ui_inspect structured_content"))?;
@@ -437,9 +437,9 @@ fn r2_s12_07_hosted_session_shared_and_resources_guarded() -> TestResult {
     assert!(!rread["result"]["contents"].as_array().is_none_or(Vec::is_empty));
 
     // Save + export from the hosted session succeed inside `--workdir`.
-    let saved = call_tool(&mut state, "save_file", json!({ "path": "hosted.lumencraft" })).map_err(|e| format!("save_file failed: {e}"))?;
+    let saved = call_tool(&mut state, "save_file", json!({ "path": "hosted.curvebook" })).map_err(|e| format!("save_file failed: {e}"))?;
     assert!(!saved.is_error, "save_file failed: {:?}", saved.structured_content);
-    assert!(dir.path.join("hosted.lumencraft").is_file());
+    assert!(dir.path.join("hosted.curvebook").is_file());
     let exported = call_tool(&mut state, "export", json!({ "format": "csv", "sheet_id": "hosted-1", "path": "hosted.csv" }))
         .map_err(|e| format!("export failed: {e}"))?;
     assert!(!exported.is_error, "export failed: {:?}", exported.structured_content);
@@ -491,5 +491,40 @@ fn r2_s12_09_prompts_adapt_to_gui_only_mode() -> TestResult {
     let got_headless = rpc_ok(&mut headless, 3, "prompts/get", json!({ "name": "dose_response_curve_fit" }))?;
     let h_text = got_headless["result"]["messages"][0]["content"]["text"].as_str().unwrap_or("");
     assert!(h_text.contains("doc_inspect") && h_text.contains("render_preview"), "headless prompt missing expected guidance: {h_text}");
+    Ok(())
+}
+
+#[test]
+fn r020_legacy_lumencraft_formats_are_rejected_without_aliases() -> TestResult {
+    let dir = TempDir::new("legacy-reject")?;
+    let legacy_proj = dir.path.join("legacy.lumencraft");
+    let legacy_tpl = dir.path.join("legacy.lctemplate");
+    let legacy_dir = dir.path.join("legacy.lumencraft.d");
+    fs::write(&legacy_proj, b"not-a-curvebook-archive").map_err(|e| e.to_string())?;
+    fs::write(&legacy_tpl, b"not-a-curvebook-template").map_err(|e| e.to_string())?;
+    fs::create_dir_all(&legacy_dir).map_err(|e| e.to_string())?;
+
+    let mut state = McpServerState::new();
+    for fmt in ["lumencraft", "lumencraft.d", "lctemplate"] {
+        let save_err = call_tool(&mut state, "save_file", json!({ "path": dir.path.join("out.curvebook").display().to_string(), "format": fmt }));
+        assert!(
+            matches!(save_err, Err(ToolCallError::InvalidParams(_))),
+            "expected InvalidParams rejecting legacy save format `{fmt}`, got {save_err:?}"
+        );
+
+        let open_err = call_tool(&mut state, "open_file", json!({ "path": legacy_proj.display().to_string(), "format": fmt }));
+        assert!(
+            matches!(open_err, Err(ToolCallError::InvalidParams(_))),
+            "expected InvalidParams rejecting legacy open format `{fmt}`, got {open_err:?}"
+        );
+    }
+    for legacy_path in [&legacy_proj, &legacy_tpl, &legacy_dir] {
+        let err = call_tool(&mut state, "open_file", json!({ "path": legacy_path.display().to_string() }));
+        assert!(
+            matches!(err, Err(ToolCallError::InvalidParams(_))),
+            "expected InvalidParams rejecting legacy path {}, got {err:?}",
+            legacy_path.display()
+        );
+    }
     Ok(())
 }

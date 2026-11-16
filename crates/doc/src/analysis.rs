@@ -3,7 +3,7 @@
 //! rules and `Change Data Analyzed` compatibility checks (`docs/data-tables-and-transforms.md` §5,
 //! `docs/statistics-implementation.md` §1–§5, `docs/curve-fitting-implementation.md` §1–§4).
 
-pub use lumencraft_math::PValueFormat;
+pub use curvebook_math::PValueFormat;
 
 use crate::TableKind;
 use crate::error::{ConfidenceLevel, DocError, validate_confidence_level, validate_title};

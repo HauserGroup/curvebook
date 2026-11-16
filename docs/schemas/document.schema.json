@@ -469,10 +469,10 @@
       "type": "string"
     }
   },
-  "$id": "https://lumencraft.dev/schemas/project-document.v1.schema.json",
+  "$id": "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/document.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Canonical LumenCraft L1 ProjectDocument JSON schema (Draft 2020-12).",
+  "description": "Canonical CurveBook L1 ProjectDocument JSON schema (Draft 2020-12).",
   "properties": {
     "active_sheet_id": {
       "anyOf": [

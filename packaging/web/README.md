@@ -1,13 +1,13 @@
-# Hosting LumenCraft for the Web
+# Hosting CurveBook for the Web
 
-`lumencraft-web-<version>.zip` (built via `packaging/web/package.sh`) contains a self-contained
-static site in `lumencraft-web-<version>/`:
+`curvebook-web-<version>.zip` (built via `packaging/web/package.sh`) contains a self-contained
+static site in `curvebook-web-<version>/`:
 
 | File | Description |
 |---|---|
 | `index.html` | Entry page using relative URLs (`public_url = "./"`), deployable at any path prefix. |
-| `lumencraft-web-<hash>.js` | Generated `wasm-bindgen` ES module loader. |
-| `lumencraft-web-<hash>_bg.wasm` | Compiled LumenCraft WebAssembly binary (`+simd128`). |
+| `curvebook-web-<hash>.js` | Generated `wasm-bindgen` ES module loader. |
+| `curvebook-web-<hash>_bg.wasm` | Compiled CurveBook WebAssembly binary (`+simd128`). |
 | `_headers`, `.htaccess` | Sample header configurations for Cloudflare Pages / Netlify and Apache. |
 
 ## Server Configuration
@@ -19,7 +19,7 @@ static site in `lumencraft-web-<version>/`:
 
 ## Browser Floor
 
-LumenCraft compiles WASM with `+simd128` (`.cargo/config.toml`) and renders via WebGPU with automatic fallback to WebGL2:
+CurveBook compiles WASM with `+simd128` (`.cargo/config.toml`) and renders via WebGPU with automatic fallback to WebGL2:
 - Chrome / Edge 91+
 - Firefox 89+
 - Safari 16.4+

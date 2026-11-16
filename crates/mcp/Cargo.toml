@@ -1,31 +1,31 @@
 [package]
-name = "lumencraft-mcp"
+name = "curvebook-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft Model Context Protocol (MCP) server over stdio"
+description = "CurveBook Model Context Protocol (MCP) server over stdio"
 
 [lints]
 workspace = true
 
 [features]
 default = ["bundled-fonts"]
-bundled-fonts = ["lumencraft-engine/bundled-fonts"]
+bundled-fonts = ["curvebook-engine/bundled-fonts"]
 
 [dependencies]
-lumencraft-chart = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-engine = { workspace = true }
-lumencraft-format = { workspace = true }
-lumencraft-pdf = { workspace = true }
-lumencraft-platform = { workspace = true }
-lumencraft-render = { workspace = true }
-lumencraft-svg = { workspace = true }
+curvebook-chart = { workspace = true }
+curvebook-doc = { workspace = true }
+curvebook-engine = { workspace = true }
+curvebook-format = { workspace = true }
+curvebook-pdf = { workspace = true }
+curvebook-platform = { workspace = true }
+curvebook-render = { workspace = true }
+curvebook-svg = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }
 proptest = { workspace = true }

@@ -5,11 +5,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSheet, DescriptiveSpec, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableArchetype,
     XyTable,
 };
-use lumencraft_engine::{EngineError, ErrorCode, Session, dag};
+use curvebook_engine::{EngineError, ErrorCode, Session, dag};
 use serde_json::{Value, json};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
@@ -19,7 +19,7 @@ struct TempDir(PathBuf);
 impl TempDir {
     fn new() -> Result<Self, String> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("lc-s4a-eng-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-s4a-eng-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         Ok(Self(dir))
     }
@@ -59,7 +59,7 @@ fn r1_s07_03_external_csv_and_tsv_shrink_grow_and_empty_refresh() -> Result<(), 
     let dir = TempDir::new()?;
     let csv_path = dir.path().join("external.csv");
     let tsv_path = dir.path().join("external.tsv");
-    let save_path = dir.path().join("project.lumencraft");
+    let save_path = dir.path().join("project.curvebook");
 
     std::fs::write(&csv_path, "1,10,100\n2,20,200\n3,30,300\n4,40,400\n").map_err(|e| e.to_string())?;
     std::fs::write(&tsv_path, "10\t1.5\t2.5\t3.5\n20\t4.5\t5.5\t6.5\n30\t7.5\t8.5\t9.5\n").map_err(|e| e.to_string())?;
@@ -165,7 +165,7 @@ fn r1_s07_03_external_csv_and_tsv_shrink_grow_and_empty_refresh() -> Result<(), 
 #[test]
 fn r1_s07_04_graph_and_layout_reject_self_refs_wrong_sections_and_cycles() -> Result<(), String> {
     let dir = TempDir::new()?;
-    let save_path = dir.path().join("valid.lumencraft");
+    let save_path = dir.path().join("valid.curvebook");
 
     let mut session = Session::new();
     let _ = exec(&mut session, "sheet.createData", json!({ "sheet_id": "d", "kind": "column", "cols": 2, "rows": 3, "auto_info": true }))?;
@@ -319,7 +319,7 @@ fn r1_s07_04_graph_and_layout_reject_self_refs_wrong_sections_and_cycles() -> Re
     let ds = DataSheet::new("d", "D", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 2).map_err(|e| e.to_string())?))
         .map_err(|e| e.to_string())?;
     cycle_doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
-    let mut g = lumencraft_doc::GraphSheet::new_uninitialized_for_data("g", &cycle_doc.data_sheets[0]).map_err(|e| e.to_string())?;
+    let mut g = curvebook_doc::GraphSheet::new_uninitialized_for_data("g", &cycle_doc.data_sheets[0]).map_err(|e| e.to_string())?;
     g.spec.primary_source_sheet_id = SheetId::new("res-cycle");
     cycle_doc.add_graph_sheet(g).map_err(|e| e.to_string())?;
     let analysis_spec = AnalysisSpec::new("res-cycle", "g", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).map_err(|e| e.to_string())?;
@@ -338,7 +338,7 @@ fn r1_s07_04_graph_and_layout_reject_self_refs_wrong_sections_and_cycles() -> Re
 #[test]
 fn r1_s07_07_linked_region_rejects_edits_exclusions_clears_pastes_and_recodes() -> Result<(), String> {
     let dir = TempDir::new()?;
-    let save_path = dir.path().join("linked.lumencraft");
+    let save_path = dir.path().join("linked.curvebook");
     let csv_path = dir.path().join("mv.csv");
     std::fs::write(&csv_path, "A,10\nB,20\n").map_err(|e| e.to_string())?;
 
@@ -606,7 +606,7 @@ fn verify_duplicate_title_overflows(session: &mut Session, oversized_ascii: &str
 #[test]
 fn r1_s07_09_title_validation_enforced_across_all_sheets_tables_graphs_and_layouts() -> Result<(), String> {
     let dir = TempDir::new()?;
-    let save_path = dir.path().join("titles.lumencraft");
+    let save_path = dir.path().join("titles.curvebook");
 
     let oversized_ascii = "T".repeat(4097);
     let oversized_utf8 = "é".repeat(2049); // 2049 chars, 4098 UTF-8 bytes > MAX_TITLE_BYTES (4096)

@@ -1,38 +1,42 @@
 {
-  "id": "lumencraft",
-  "name": "LumenCraft",
-  "upgradeCode": "CC9EF573-33E0-4208-BE7A-690B34A5A4C9",
+  "id": "curvebook",
+  "name": "CurveBook",
+  "upgradeCode": "570875D8-A8A5-4335-8646-C8CE385B27BD",
+  "componentGuids": {
+    "CurveBookApp": "30074268-38AD-4435-82B7-E2E8948273F9",
+    "DesktopShortcut": "5BFAC2A4-683C-40C9-B561-298D76308811"
+  },
   "sources": [
-    "lumencraft.wxs"
+    "curvebook.wxs"
   ],
-  "icon": "assets/app-icon/lumencraft.ico",
+  "icon": "assets/app-icon/curvebook.ico",
   "localization": [
-    "lumencraft.en-us.wxl"
+    "curvebook.en-us.wxl"
   ],
   "extensions": [
     "UI",
     "Util"
   ],
   "payloads": [
-    "lumencraft-cli.exe",
-    "lumencraft.exe"
+    "curvebook-cli.exe",
+    "curvebook.exe"
   ],
   "registry": [
     [
       "-1",
-      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\lumencraft.exe",
+      "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\curvebook.exe",
       "",
-      "[#LumencraftExe]"
+      "[#CurveBookExe]"
     ],
     [
       "-1",
-      "Software\\LumenCraft",
+      "Software\\CurveBook",
       "InstallDir",
       "[INSTALLFOLDER]"
     ],
     [
       "-1",
-      "Software\\LumenCraft",
+      "Software\\CurveBook",
       "DesktopShortcut",
       "#1"
     ]

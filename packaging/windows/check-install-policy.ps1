@@ -53,6 +53,21 @@ try {
     throw 'Policy regression: new packages must default to the per-user dual-scope context.'
   }
   if ($properties['UpgradeCode'].Trim('{}') -ne $policy.upgradeCode) { throw 'The existing upgrade identity must not change.' }
+  if ($properties['UpgradeCode'].Trim('{}') -eq 'CC9EF573-33E0-4208-BE7A-690B34A5A4C9') {
+    throw 'CurveBook must use a fresh UpgradeCode separate from LumenCraft.'
+  }
+  $components = @{}
+  foreach ($row in (Read-Rows $database 'SELECT `Component`, `ComponentId` FROM `Component`' 2)) {
+    $components[$row[0]] = $row[1].Trim('{}')
+  }
+  foreach ($entry in $policy.componentGuids.PSObject.Properties) {
+    if (-not $components.ContainsKey($entry.Name) -or $components[$entry.Name] -ne $entry.Value) {
+      throw "Component '$($entry.Name)' GUID must match pinned policy value '$($entry.Value)'."
+    }
+    if ($components[$entry.Name] -in @('039825BB-45BE-41D1-BBAF-8D25A4125026', '512791E8-A25F-40EC-82B4-500A4EE18F8F')) {
+      throw "Component '$($entry.Name)' must use a fresh GUID separate from LumenCraft."
+    }
+  }
   $directories = @{}
   foreach ($row in (Read-Rows $database 'SELECT `Directory`, `Directory_Parent`, `DefaultDir` FROM `Directory`' 3)) {
     $directories[$row[0]] = @($row[1], $row[2])
@@ -67,7 +82,7 @@ try {
     throw 'Use Windows Installer native folder redirection directly under ProgramFiles, not a hard-coded profile path.'
   }
   $guards = @(Read-Rows $database 'SELECT `Condition`, `Description` FROM `LaunchCondition`' 2 |
-    Where-Object { $_[0] -match 'LUMENCRAFT_(USER|MACHINE)_DIR' })
+    Where-Object { $_[0] -match 'CURVEBOOK_(USER|MACHINE)_DIR' })
   if ($guards.Count -ne 2) { throw 'Expected both duplicate-installation guards.' }
   $cases = 0
   foreach ($scope in @('', '2', '1')) {
@@ -76,8 +91,8 @@ try {
         foreach ($installed in @('', '1')) {
           Set-SessionProperty $session 'ALLUSERS' $scope
           Set-SessionProperty $session 'Installed' $installed
-          Set-SessionProperty $session 'LUMENCRAFT_USER_DIR' $user
-          Set-SessionProperty $session 'LUMENCRAFT_MACHINE_DIR' $machine
+          Set-SessionProperty $session 'CURVEBOOK_USER_DIR' $user
+          Set-SessionProperty $session 'CURVEBOOK_MACHINE_DIR' $machine
           $allowed = $true
           foreach ($guard in $guards) {
             $value = $session.EvaluateCondition($guard[0])
@@ -96,9 +111,9 @@ try {
     foreach ($explicit in @('', 'F:\Chosen exact app')) {
       Set-SessionProperty $session 'ALLUSERS' $scope
       Set-SessionProperty $session 'INSTALLFOLDER' $explicit
-      Set-SessionProperty $session 'LUMENCRAFT_USER_DIR' 'D:\Existing user app'
-      Set-SessionProperty $session 'LUMENCRAFT_MACHINE_DIR' 'E:\Existing machine app'
-      $action = if ($scope -eq '1') { 'LumencraftRestoreMachineFolder' } else { 'LumencraftRestoreUserFolder' }
+      Set-SessionProperty $session 'CURVEBOOK_USER_DIR' 'D:\Existing user app'
+      Set-SessionProperty $session 'CURVEBOOK_MACHINE_DIR' 'E:\Existing machine app'
+      $action = if ($scope -eq '1') { 'CurveBookRestoreMachineFolder' } else { 'CurveBookRestoreUserFolder' }
       $restore = @(Read-Rows $database ('SELECT `Condition` FROM `InstallExecuteSequence` WHERE `Action` = ''{0}''' -f $action) 1)[0]
       $selected = $session.EvaluateCondition($restore[0]) -eq 1
       if ($selected -eq [bool]$explicit) { throw "$action must run only when no folder was supplied." }
@@ -109,20 +124,20 @@ try {
   }
   $ui = @{}
   foreach ($row in (Read-Rows $database 'SELECT `Action`, `Sequence` FROM `InstallUISequence`' 2)) { $ui[$row[0]] = [int]$row[1] }
-  if (-not ($ui['AppSearch'] -lt $ui['LumencraftPreferMachineScope'] -and
-      $ui['LumencraftPreferMachineScope'] -lt $ui['LumencraftScopeDlg'] -and
-      $ui['LumencraftScopeDlg'] -lt $ui['FindRelatedProducts'] -and
+  if (-not ($ui['AppSearch'] -lt $ui['CurveBookPreferMachineScope'] -and
+      $ui['CurveBookPreferMachineScope'] -lt $ui['CurveBookScopeDlg'] -and
+      $ui['CurveBookScopeDlg'] -lt $ui['FindRelatedProducts'] -and
       $ui['FindRelatedProducts'] -lt $ui['LaunchConditions'] -and
-      $ui['LumencraftScopeDlg'] -lt $ui['LumencraftRestoreUserFolder'] -and $ui['LumencraftRestoreUserFolder'] -lt $ui['CostInitialize'] -and
-      $ui['LumencraftScopeDlg'] -lt $ui['LumencraftRestoreMachineFolder'] -and $ui['LumencraftRestoreMachineFolder'] -lt $ui['CostInitialize'])) {
+      $ui['CurveBookScopeDlg'] -lt $ui['CurveBookRestoreUserFolder'] -and $ui['CurveBookRestoreUserFolder'] -lt $ui['CostInitialize'] -and
+      $ui['CurveBookScopeDlg'] -lt $ui['CurveBookRestoreMachineFolder'] -and $ui['CurveBookRestoreMachineFolder'] -lt $ui['CostInitialize'])) {
     throw 'Scope must be chosen after AppSearch and before FindRelatedProducts, launch checks and costing.'
   }
-  $defaults = @(Read-Rows $database 'SELECT `Action`, `Sequence`, `Condition` FROM `InstallUISequence`' 3 | Where-Object { $_[0] -like 'LumencraftDefault*' })
+  $defaults = @(Read-Rows $database 'SELECT `Action`, `Sequence`, `Condition` FROM `InstallUISequence`' 3 | Where-Object { $_[0] -like 'CurveBookDefault*' })
   if ($defaults.Count -lt 2) { throw 'The wizard must set the new-install folder after the scope page.' }
   foreach ($row in $defaults) {
-    if (-not ($ui['LumencraftScopeDlg'] -lt [int]$row[1] -and [int]$row[1] -lt $ui['CostInitialize'])) { throw "$($row[0]) must run after the scope page and before costing." }
+    if (-not ($ui['CurveBookScopeDlg'] -lt [int]$row[1] -and [int]$row[1] -lt $ui['CostInitialize'])) { throw "$($row[0]) must run after the scope page and before costing." }
   }
-  if (@(Read-Rows $database 'SELECT `Action` FROM `InstallExecuteSequence`' 1 | Where-Object { $_[0] -like 'LumencraftDefault*' }).Count) {
+  if (@(Read-Rows $database 'SELECT `Action` FROM `InstallExecuteSequence`' 1 | Where-Object { $_[0] -like 'CurveBookDefault*' }).Count) {
     throw 'Silent installs must not use the wizard-only default folder actions.'
   }
   $machineRoot = if ((Get-PackageTemplate $database) -match '^Intel') {
@@ -132,8 +147,8 @@ try {
   foreach ($scope in @('1', '')) {
     Set-SessionProperty $session 'ALLUSERS' $scope
     Set-SessionProperty $session 'INSTALLFOLDER' ''
-    Set-SessionProperty $session 'LUMENCRAFT_MACHINE_DIR' ''
-    Set-SessionProperty $session 'LUMENCRAFT_USER_DIR' ''
+    Set-SessionProperty $session 'CURVEBOOK_MACHINE_DIR' ''
+    Set-SessionProperty $session 'CURVEBOOK_USER_DIR' ''
     foreach ($row in @($defaults | Sort-Object { [int]$_[1] })) {
       if ($session.EvaluateCondition($row[2]) -eq 1 -and $session.DoAction($row[0]) -ne 1) { throw "$($row[0]) failed." }
     }

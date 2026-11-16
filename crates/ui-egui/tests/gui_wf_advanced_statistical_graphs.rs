@@ -1,20 +1,20 @@
 //! Strict `--gui-only` end-to-end GUI acceptance workflows `WF-44`..`WF-49` (Shard 7).
 //!
 //! Every workflow boots [`UiApp::new()`] with `app.set_gui_only(true)` (`GuiOnlyPolicy::Strict`)
-//! and drives all interactions exclusively through [`lumencraft_ui_egui::dispatch_gui_action`]:
+//! and drives all interactions exclusively through [`curvebook_ui_egui::dispatch_gui_action`]:
 //! `ui.invoke_menu`, `ui.switch_tab`, `ui.type_text`, `ui.press_key`, `ui.pointer_gesture`,
 //! `ui.answer_dialog`, `ui.inspect`, and `ui.screenshot`. Zero direct `app.execute_command` calls
 //! appear anywhere in this test crate.
 #![forbid(unsafe_code)]
 
-use lumencraft_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, ColorChannelMapping, DiagnosticPlotKind, EquationDisplayMode, GraphAnnotation, GraphKind, MultiplicityMethod, MultivariatePlotMode,
     ProjectDocument, SizeChannelMapping, SurvivalAnalysisSpec,
 };
-use lumencraft_palette::{ColormapId, LineDashStyle};
-use lumencraft_ui_egui::dialogs_canvas::ActiveDialog;
-use lumencraft_ui_egui::{UiApp, ViewportMetrics, dispatch_gui_action};
+use curvebook_palette::{ColormapId, LineDashStyle};
+use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+use curvebook_ui_egui::{UiApp, ViewportMetrics, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -291,7 +291,7 @@ fn assert_strict_gui_only_guards(app: &mut UiApp) -> TestResult {
 // ---------------------------------------------------------------------------
 // WF-44: Confidence Ellipses & Convex Hulls + Multivariable Guards
 // ---------------------------------------------------------------------------
-// Note: `lumencraft_doc::MultivariateGraphEncoding` models confidence ellipses as a boolean
+// Note: `curvebook_doc::MultivariateGraphEncoding` models confidence ellipses as a boolean
 // (`show_confidence_ellipses`) rendered at the 95% chi-square boundary in `multivariate_layout.rs`,
 // and enforces an N >= 3 per-group observation guard for both convex hulls and confidence ellipses.
 

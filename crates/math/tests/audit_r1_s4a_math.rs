@@ -1,8 +1,8 @@
-//! Stage 4A regression tests for S01 fixes in `lumencraft-math` (`R1-S01-02`, `R1-S01-03`).
+//! Stage 4A regression tests for S01 fixes in `curvebook-math` (`R1-S01-02`, `R1-S01-03`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_math::dist::{ncchi2_cdf, ncchi2_sf, ncf_cdf, ncf_sf, norm_cdf};
-use lumencraft_math::{DenseMatrix, noncentral_chi2_ci, noncentral_f_ci, sym_eigen};
+use curvebook_math::dist::{ncchi2_cdf, ncchi2_sf, ncf_cdf, ncf_sf, norm_cdf};
+use curvebook_math::{DenseMatrix, noncentral_chi2_ci, noncentral_f_ci, sym_eigen};
 
 fn assert_near(actual: f64, expected: f64, tol: f64, label: &str) {
     assert!(actual.is_finite() && (actual - expected).abs() <= tol, "{label}: expected {expected} +/- {tol}, got {actual}");

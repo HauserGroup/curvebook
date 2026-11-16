@@ -1,20 +1,20 @@
 [package]
-name = "lumencraft-fit"
+name = "curvebook-fit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft nonlinear regression, dose-response, enzyme kinetics and model-comparison engine"
+description = "CurveBook nonlinear regression, dose-response, enzyme kinetics and model-comparison engine"
 
 [lints]
 workspace = true
 
 [dependencies]
-lumencraft-math = { workspace = true }
-lumencraft-doc = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-doc = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }
 proptest = { workspace = true }

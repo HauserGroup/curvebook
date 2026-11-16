@@ -897,7 +897,7 @@ fn normalize_key(raw: &str) -> String {
 #[must_use]
 pub fn check_live_status_metrics(root: &Path, status_md: &str) -> Vec<EvidenceViolation> {
     let mut violations = Vec::new();
-    let live_engine = lumencraft_engine::cmd::registry().len();
+    let live_engine = curvebook_engine::cmd::registry().len();
     let live_ui = count_live_ui_commands(root);
     let live_pkgs = crate::layers::TABLE.len();
 

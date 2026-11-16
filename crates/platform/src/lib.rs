@@ -1,4 +1,4 @@
-//! Host platform safety primitives for LumenCraft: atomic filesystem writes, bounded
+//! Host platform safety primitives for CurveBook: atomic filesystem writes, bounded
 //! subprocess execution, and canonicalized `--workdir` path containment.
 //!
 //! Layer L0 crate: depends only on `std`, `serde`, and `serde_json`. Compiles cleanly on
@@ -37,7 +37,7 @@ impl fmt::Display for TimeoutKind {
     }
 }
 
-/// Structured error returned by `lumencraft-platform` filesystem, subprocess, and path-guard helpers.
+/// Structured error returned by `curvebook-platform` filesystem, subprocess, and path-guard helpers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlatformError {
     /// Target executable could not be found on `PATH` or at the specified location.

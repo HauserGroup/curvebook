@@ -2,7 +2,7 @@
 //!
 //! Decouples `LayoutTree` typography and software rasterization behind [`TextMeasurer`]:
 //! - Desktop/CLI/tests use [`DesktopTextMeasurer`], backed by [`crate::theme::FontBook`] (OS host
-//!   fonts + `LUMENCRAFT_FONTS_DIR` + `lumencraft-text` clean-room glyph outlines, zero bundled font
+//!   fonts + `CURVEBOOK_FONTS_DIR` + `curvebook-text` clean-room glyph outlines, zero bundled font
 //!   requirements) and [`SoftwareTextPainter`], a cached 4x4 supersampled nonzero-winding glyph
 //!   coverage atlas replacing `FONT_5X7`.
 //! - Browser (`wasm32`) and future L2 shaper upgrades implement [`TextMeasurer`] directly.
@@ -11,10 +11,10 @@ use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use lumencraft_palette::Rgba8;
-use lumencraft_render::RasterImage;
-use lumencraft_text::glyph_paths::outline_ttf_glyph;
-use lumencraft_text::{
+use curvebook_palette::Rgba8;
+use curvebook_render::RasterImage;
+use curvebook_text::glyph_paths::outline_ttf_glyph;
+use curvebook_text::{
     GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, is_rtl_locale, measure_text_pt, outline_rich_text,
     reorder_visual_bidi,
 };
@@ -156,7 +156,7 @@ struct CachedGlyphEntry {
 const PRECOMPUTED_NON_ASCII: &[char] =
     &['…', '–', '—', '±', '×', '÷', '≤', '≥', '≠', '≈', '°', 'µ', 'μ', 'α', 'β', 'γ', 'σ', 'Δ', '∑', '√', '•', '→', '←', '↑', '↓'];
 
-/// Desktop / headless CPU text measurer wrapping [`FontBook`] and `lumencraft-text` clean-room
+/// Desktop / headless CPU text measurer wrapping [`FontBook`] and `curvebook-text` clean-room
 /// outlines without any external font bundle requirement.
 #[derive(Debug, Clone)]
 pub struct DesktopTextMeasurer {
@@ -173,7 +173,7 @@ impl Default for DesktopTextMeasurer {
 }
 
 impl DesktopTextMeasurer {
-    /// Construct a measurer using host OS fonts (`LUMENCRAFT_FONTS_DIR`, OS system faces) and the
+    /// Construct a measurer using host OS fonts (`CURVEBOOK_FONTS_DIR`, OS system faces) and the
     /// built-in minimal SFNT + clean-room vector fallback.
     #[must_use]
     pub fn new() -> Self {
@@ -221,7 +221,7 @@ impl DesktopTextMeasurer {
 
     fn resolve_glyph_fast<'p>(
         &'p self,
-        parsed_cache: &mut Option<Vec<(&'p str, lumencraft_text::TrueTypeFont<'p>)>>,
+        parsed_cache: &mut Option<Vec<(&'p str, curvebook_text::TrueTypeFont<'p>)>>,
         ch: char,
         style: &UiTextStyle,
         eff_size: f64,
@@ -280,7 +280,7 @@ impl DesktopTextMeasurer {
     }
 }
 
-fn compute_cached_glyph_entry(parsed: &[(&str, lumencraft_text::TrueTypeFont<'_>)], face_tabular_em: &[f64], ch: char) -> CachedGlyphEntry {
+fn compute_cached_glyph_entry(parsed: &[(&str, curvebook_text::TrueTypeFont<'_>)], face_tabular_em: &[f64], ch: char) -> CachedGlyphEntry {
     if ch.is_control() || ch == ' ' {
         return CachedGlyphEntry {
             glyph_id: None,
@@ -348,7 +348,7 @@ struct GlyphResolution {
     missing_glyph: bool,
 }
 
-fn tabular_digit_advance_em(ttf: &lumencraft_text::TrueTypeFont<'_>) -> f64 {
+fn tabular_digit_advance_em(ttf: &curvebook_text::TrueTypeFont<'_>) -> f64 {
     let mut max_adv = 0.56_f64;
     for d in '0'..='9' {
         if let Some(a) = ttf.advance_em(d) {
@@ -733,7 +733,7 @@ fn rasterize_glyph_mask(measurer: &DesktopTextMeasurer, key: GlyphCacheKey, ch: 
     let mut cmds: Option<Vec<GlyphOutlineCmd>> = None;
     if let Some(face_idx) = key.face_index
         && let Some((_, bytes)) = measurer.font_book().raw_faces().get(face_idx)
-        && let Some(ttf) = lumencraft_text::TrueTypeFont::parse(bytes)
+        && let Some(ttf) = curvebook_text::TrueTypeFont::parse(bytes)
     {
         cmds = outline_ttf_glyph(&ttf, ch, 0.0, 0.0, size_px, false);
     }
@@ -962,8 +962,8 @@ fn apply_synthetic_bold_dilation(alpha: &mut [u8], width: u32, height: u32) {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_palette::Rgba8;
-    use lumencraft_render::RasterImage;
+    use curvebook_palette::Rgba8;
+    use curvebook_render::RasterImage;
 
     use super::{DesktopTextMeasurer, PaintClipPx, SoftwareTextPainter, TextMeasurer, TextPaintStyle, UiTextStyle};
 

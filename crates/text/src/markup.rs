@@ -1,6 +1,6 @@
 //! Scientific rich-text markup parsing and template-hook expansion for figure labels.
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 use serde::{Deserialize, Serialize};
 
 const MAX_MARKUP_DEPTH: usize = 64;

@@ -3,12 +3,12 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lumencraft_chart::{
+use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
-use lumencraft_palette::{CanvasPreviewFilter, LineDashStyle, Rgba8, simulate_preview_filter};
-use lumencraft_render::{MAX_RASTER_PIXELS, RasterImage, RenderError, RgbaPixmap, apply_canvas_preview_filter, encode_emf, encode_raster_emf};
-use lumencraft_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight};
+use curvebook_palette::{CanvasPreviewFilter, LineDashStyle, Rgba8, simulate_preview_filter};
+use curvebook_render::{MAX_RASTER_PIXELS, RasterImage, RenderError, RgbaPixmap, apply_canvas_preview_filter, encode_emf, encode_raster_emf};
+use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight};
 
 const EMR_HEADER: u32 = 1;
 const EMR_POLYBEZIER: u32 = 2;

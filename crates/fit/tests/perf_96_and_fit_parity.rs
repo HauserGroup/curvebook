@@ -2,11 +2,11 @@
 
 use std::time::Instant;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CiBound, DataSheet, LevelOrderKind, ModelComparisonSpec, MultipleVariablesTable, NonlinearFitSpec,
     ParameterRule, ParameterScope, ResultCell, ResultStatus, ResultTab, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, VariableRole, XyTable,
 };
-use lumencraft_fit::{
+use curvebook_fit::{
     DataPoint, DatasetSeries, FitError, FitStatus, HookContext, ModelComparisonOutcome, MultivarExtractionSpec, SolverConfig, anderson_darling_test,
     compare_models, compare_models_lrt, execute_analysis, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options, fit_nonlinear,
     get_builtin_model, homoscedasticity_spearman_test, lilliefors_ks_test,

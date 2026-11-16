@@ -1,0 +1,37 @@
+[package]
+name = "curvebook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+default-run = "curvebook"
+description = "CurveBook native desktop biostatistics, curve-fitting and scientific graphing application"
+
+[lints]
+workspace = true
+
+[features]
+default = ["wgpu", "accessibility"]
+wgpu = ["eframe/wgpu"]
+accessibility = ["eframe/accesskit"]
+
+[dependencies]
+egui = { workspace = true }
+curvebook-chart = { workspace = true }
+curvebook-doc = { workspace = true }
+curvebook-engine = { workspace = true, features = ["bundled-fonts"] }
+curvebook-format = { workspace = true }
+curvebook-pdf = { workspace = true }
+curvebook-platform = { workspace = true }
+curvebook-render = { workspace = true }
+curvebook-svg = { workspace = true }
+curvebook-text = { workspace = true }
+curvebook-ui-egui = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+eframe = { workspace = true, features = ["wayland", "x11"] }
+rfd = { workspace = true }

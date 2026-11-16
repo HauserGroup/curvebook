@@ -3,13 +3,13 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, MAX_SHEETS_PER_PROJECT, ProjectDocument, ResultCell, ResultStatus, SheetId,
     TableArchetype, TableKind,
 };
-use lumencraft_engine::{CommandOutcome, Session};
-use lumencraft_format::is_unpacked_project_dir;
-use lumencraft_transform::{PlateGeometry, PlateMapTemplate, PlateWellRole};
+use curvebook_engine::{CommandOutcome, Session};
+use curvebook_format::is_unpacked_project_dir;
+use curvebook_transform::{PlateGeometry, PlateMapTemplate, PlateWellRole};
 use serde_json::{Value, json};
 
 fn exec_ok(session: &mut Session, command_id: &str, params: Value) -> CommandOutcome {
@@ -28,7 +28,7 @@ fn unique_temp_path(label: &str, ext: &str) -> PathBuf {
     let seq = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
     let pid = std::process::id();
-    std::env::temp_dir().join(format!("lc-w6-data-{label}-{pid}-{nanos}-{seq}.{ext}"))
+    std::env::temp_dir().join(format!("cb-w6-data-{label}-{pid}-{nanos}-{seq}.{ext}"))
 }
 
 fn find_result_metric(session: &Session, res_id: &str, metric_label: &str) -> Option<f64> {
@@ -436,8 +436,8 @@ fn qol11_checkpoints_and_unpacked_dir_open_save() {
     assert!(listed.payload["checkpoints"][0].get("snapshot_json").is_none());
     assert_eq!(listed.payload["checkpoints"][0]["name"], json!("Baseline"));
 
-    // Save to `.lumencraft.d` auto-detected by suffix, and to explicit `unpacked: true` folder without suffix.
-    let unpacked_dir = unique_temp_path("project", "lumencraft.d");
+    // Save to `.curvebook.d` auto-detected by suffix, and to explicit `unpacked: true` folder without suffix.
+    let unpacked_dir = unique_temp_path("project", "curvebook.d");
     let save_out = exec_ok(&mut session, "project.save", json!({ "path": unpacked_dir.to_string_lossy() }));
     assert!(!save_out.mutated, "project.save must remain read-only");
     assert_eq!(save_out.payload["unpacked"], json!(true));

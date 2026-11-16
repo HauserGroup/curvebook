@@ -1,10 +1,10 @@
 #![forbid(unsafe_code)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellCoord, ChecklistItem, DataSheet, EquationDisplayMode, GraphAnnotation, GraphSheet, ResultCell, ResultSheet, ResultTab, ResultTabKind,
     SheetId, TableArchetype, TableKind, VariableSource,
 };
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;

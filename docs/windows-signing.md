@@ -1,6 +1,6 @@
 # Windows signing without Azure
 
-LumenCraft currently builds MSI installers and portable ZIP archives using [`packaging/windows/package.ps1`](../packaging/windows/package.ps1). MSIX packaging is **planned**, not implemented; see [`R8.9`](ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution). The MSIX instructions below apply once a package and its manifest are available.
+CurveBook currently builds MSI installers and portable ZIP archives using [`packaging/windows/package.ps1`](../packaging/windows/package.ps1). MSIX packaging is **planned**, not implemented; see [`R8.9`](ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution). The MSIX instructions below apply once a package and its manifest are available.
 
 | Distribution | Signing approach |
 |---|---|
@@ -37,9 +37,9 @@ Ensure `signtool.exe` is on `PATH`, or replace the lookup below with its install
 ```powershell
 $ErrorActionPreference = 'Stop'
 $signTool = (Get-Command signtool.exe -ErrorAction Stop).Source
-$signingDir = Join-Path $env:LOCALAPPDATA 'LumenCraft\signing'
+$signingDir = Join-Path $env:LOCALAPPDATA 'CurveBook\signing'
 New-Item -ItemType Directory -Force -Path $signingDir | Out-Null
-$cerPath = Join-Path $signingDir 'lumencraft-test.cer'
+$cerPath = Join-Path $signingDir 'curvebook-test.cer'
 ```
 
 ## 2. Create a test certificate
@@ -47,11 +47,11 @@ $cerPath = Join-Path $signingDir 'lumencraft-test.cer'
 For MSI/EXE tests, use the subject below. For MSIX, first set `$publisher` to the **exact** `Identity Publisher` value from that package's `AppxManifest.xml`, including punctuation and ordering. A friendly display name is not the publisher identity. Obtain the production identity from Partner Center before creating a Store manifest.
 
 ```powershell
-$publisher = 'CN=LumenCraft Test'
+$publisher = 'CN=CurveBook Test'
 $cert = New-SelfSignedCertificate `
     -Type Custom `
     -Subject $publisher `
-    -FriendlyName 'LumenCraft local signing test' `
+    -FriendlyName 'CurveBook local signing test' `
     -CertStoreLocation 'Cert:\CurrentUser\My' `
     -KeyAlgorithm RSA `
     -KeyLength 2048 `
@@ -84,7 +84,7 @@ Build with `packaging/windows/package.ps1` as described in [`releasing.md`](rele
 For example, set `$msiPath` to the MSI that was built, then sign it:
 
 ```powershell
-$msiPath = (Resolve-Path '.\dist\release\lumencraft-0.1.0-windows-x64.msi').Path
+$msiPath = (Resolve-Path '.\dist\release\curvebook-0.1.0-windows-x64.msi').Path
 & $signTool sign /fd SHA256 /s My /sha1 $thumbprint $msiPath
 if ($LASTEXITCODE -ne 0) { throw 'MSI signing failed' }
 ```
@@ -98,7 +98,7 @@ Adjust the version, architecture, and output directory to your build. The same c
 This step needs an actual MSIX produced by the future `R8.9` builder or a separately prepared test package. Today's `package.ps1` does not produce it. Confirm that its manifest publisher matches `$cert.Subject`; if it differs, create a matching certificate before signing.
 
 ```powershell
-$msixPath = (Resolve-Path '.\dist\release\lumencraft-test-x64.msix').Path
+$msixPath = (Resolve-Path '.\dist\release\curvebook-test-x64.msix').Path
 & $signTool sign /fd SHA256 /s My /sha1 $thumbprint $msixPath
 if ($LASTEXITCODE -ne 0) { throw 'MSIX signing failed' }
 ```
@@ -110,7 +110,7 @@ The example assumes the MSIX block map uses SHA256, the MakeAppx default. SignTo
 Copy the signed package and public `.cer` to each test PC. Compare the certificate thumbprint with the value obtained from the signing machine through a trusted channel. In an **Administrator PowerShell** on that PC, set the path to the received certificate and inspect it before importing:
 
 ```powershell
-$cerPath = (Resolve-Path '.\lumencraft-test.cer').Path
+$cerPath = (Resolve-Path '.\curvebook-test.cer').Path
 $publicCert = Get-PfxCertificate -FilePath $cerPath
 $publicCert | Format-List Subject, Thumbprint, NotAfter
 ```
@@ -128,7 +128,7 @@ Back in the intended user's PowerShell, resolve the local package path and verif
 
 ```powershell
 $signTool = (Get-Command signtool.exe -ErrorAction Stop).Source
-$msixPath = (Resolve-Path '.\lumencraft-test-x64.msix').Path
+$msixPath = (Resolve-Path '.\dist\release\curvebook-test-x64.msix').Path
 & $signTool verify /pa /v $msixPath
 if ($LASTEXITCODE -ne 0) { throw 'Signature verification failed; do not install' }
 Add-AppxPackage -Path $msixPath

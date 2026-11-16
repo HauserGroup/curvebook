@@ -12,8 +12,8 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_engine::cmd::{CommandGroup, Effects, registry};
-use lumencraft_mcp::{
+use curvebook_engine::cmd::{CommandGroup, Effects, registry};
+use curvebook_mcp::{
     ERR_INVALID_PARAMS, ERR_RESOURCE_NOT_FOUND, McpServerState, ToolAnnotations, call_tool, command_id_to_mcp_tool_name, list_tools,
     list_tools_for_group, list_tools_for_state, serve,
 };
@@ -28,7 +28,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(prefix: &str) -> Self {
         let id = TEMP_DIR_COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = env::temp_dir().join(format!("lumencraft-{prefix}-{}-{id}", std::process::id()));
+        let dir = env::temp_dir().join(format!("curvebook-{prefix}-{}-{id}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         Self { path: dir }
     }
@@ -78,7 +78,7 @@ fn rpc_roundtrip(state: &mut McpServerState, id: i64, method: &str, params: Valu
     frames.into_iter().next().ok_or_else(|| format!("expected response frame for {method}"))
 }
 
-fn snapshot_tool_names(tools: &[lumencraft_mcp::ToolDefinition]) -> Vec<String> {
+fn snapshot_tool_names(tools: &[curvebook_mcp::ToolDefinition]) -> Vec<String> {
     tools.iter().map(|t| t.name.clone()).collect()
 }
 
@@ -429,13 +429,13 @@ fn workdir_guard_blocks_parent_traversal_and_outside_paths_on_all_io_surfaces() 
     }
 
     // 2. Refuse ../ escape and outside path in save_file
-    for bad in ["../escape.lumencraft", &outside_dir.join("escape.lumencraft").display().to_string()] {
+    for bad in ["../escape.curvebook", &outside_dir.join("escape.curvebook").display().to_string()] {
         let res = call_tool(&mut state, "save_file", json!({ "path": bad })).expect("save_file refusal");
         assert!(res.is_error, "expected save_file refusal for '{bad}'");
         let sc = res.structured_content.expect("structured error");
         assert_eq!(sc["code"], json!("path_escape"));
     }
-    assert!(!outside_dir.join("escape.lumencraft").exists());
+    assert!(!outside_dir.join("escape.curvebook").exists());
 
     // 3. Legitimate inside path succeeds via open_file + export + save_file (atomic)
     let open_ok = call_tool(&mut state, "open_file", json!({ "path": "inside.csv" })).expect("inside open_file");
@@ -450,9 +450,9 @@ fn workdir_guard_blocks_parent_traversal_and_outside_paths_on_all_io_surfaces() 
     assert!(!export_ok.is_error);
     assert!(Path::new(&sandbox_root.join("nested/out.csv")).exists());
 
-    let save_ok = call_tool(&mut state, "save_file", json!({ "path": "saved.lumencraft" })).expect("inside save");
+    let save_ok = call_tool(&mut state, "save_file", json!({ "path": "saved.curvebook" })).expect("inside save");
     assert!(!save_ok.is_error);
-    assert!(sandbox_root.join("saved.lumencraft").exists());
+    assert!(sandbox_root.join("saved.curvebook").exists());
 
     // 4. Command path parameters inside command_run must also respect WorkdirGuard.
     let cmd_escape = call_tool(
@@ -460,24 +460,24 @@ fn workdir_guard_blocks_parent_traversal_and_outside_paths_on_all_io_surfaces() 
         "command_run",
         json!({
             "command_id": "project.save",
-            "params": { "path": "../outside/cmd_escape.lumencraft" }
+            "params": { "path": "../outside/cmd_escape.curvebook" }
         }),
     )
     .expect("command_run path escape");
     assert!(cmd_escape.is_error);
     assert_eq!(cmd_escape.structured_content.expect("sc")["code"], json!("path_escape"));
-    assert!(!outside_dir.join("cmd_escape.lumencraft").exists());
+    assert!(!outside_dir.join("cmd_escape.curvebook").exists());
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 #[test]
 fn mcp_workdir_persists_across_open_file_and_blocks_stored_external_link_recalculate() {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         CellCoord, CellValue, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange,
         SheetId,
     };
-    use lumencraft_engine::Session;
-    use lumencraft_format::save_project_file;
+    use curvebook_engine::Session;
+    use curvebook_format::save_project_file;
 
     let dir = TempDirGuard::new("mcp-stored-link");
     let sandbox_root = dir.path.join("sandbox");
@@ -511,15 +511,15 @@ fn mcp_workdir_persists_across_open_file_and_blocks_stored_external_link_recalcu
         save_project_file(archive_path, &doc).expect("save archive");
     };
 
-    let escaping_archive = sandbox_root.join("escape_link.lumencraft");
+    let escaping_archive = sandbox_root.join("escape_link.curvebook");
     build_archive(&escaping_archive, &outside_secret.display().to_string());
-    let allowed_archive = sandbox_root.join("inside_link.lumencraft");
+    let allowed_archive = sandbox_root.join("inside_link.curvebook");
     build_archive(&allowed_archive, "nested/allowed.csv");
 
     let mut state = McpServerState::with_workdir(&sandbox_root).expect("with_workdir");
 
     // Opening a valid archive inside workdir must preserve ExternalPathPolicy::Workdir on Session.
-    let open_esc = call_tool(&mut state, "open_file", json!({ "path": "escape_link.lumencraft" })).expect("open escape_link");
+    let open_esc = call_tool(&mut state, "open_file", json!({ "path": "escape_link.curvebook" })).expect("open escape_link");
     assert!(!open_esc.is_error, "open_file inside workdir failed: {open_esc:?}");
     assert!(state.session().path_policy().is_constrained(), "path_policy must survive open_file");
 
@@ -533,7 +533,7 @@ fn mcp_workdir_persists_across_open_file_and_blocks_stored_external_link_recalcu
     assert_eq!(cell_after_bad, Some(&CellValue::Number(10.0)));
 
     // Opening an archive whose stored external link stays inside workdir recalculates cleanly.
-    let open_ok = call_tool(&mut state, "open_file", json!({ "path": "inside_link.lumencraft" })).expect("open inside_link");
+    let open_ok = call_tool(&mut state, "open_file", json!({ "path": "inside_link.curvebook" })).expect("open inside_link");
     assert!(!open_ok.is_error);
     let recalc_ok =
         call_tool(&mut state, "command_run", json!({ "command_id": "project.recalculate", "params": { "include_external_links": true } }))

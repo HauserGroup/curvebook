@@ -1,8 +1,8 @@
 //! Exact statistical power, sample-size, and minimum-detectable-effect calculation engine (`R8.7`).
 //!
 //! Backed by tail-safe noncentral *t*, noncentral *F*, noncentral chi-square, and normal
-//! distributions from [`lumencraft_math::dist`], plus Brent-Dekker root finding from
-//! [`lumencraft_math::roots`].
+//! distributions from [`curvebook_math::dist`], plus Brent-Dekker root finding from
+//! [`curvebook_math::roots`].
 //!
 //! Supported test families ([`PowerTestFamily`]):
 //! 1. `TwoSampleUnpairedT`: equal or unequal allocation ratio `k = n2 / n1`, Cohen's `d` or raw group means & pooled SD.
@@ -32,14 +32,14 @@
 //! - Owen, D. B. (1965). The power of Student's t-test. *Journal of the American Statistical
 //!   Association*, 60(309), 320-333. doi:10.2307/2283156.
 
-use lumencraft_math::dist::{
+use curvebook_math::dist::{
     chi2_isf, f_isf, ncchi2_sf, ncf_sf, nct_cdf, nct_sf, norm_cdf, norm_isf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_isf,
     student_t_two_sided_isf,
 };
-use lumencraft_math::quad::gauss_legendre_32;
-use lumencraft_math::roots::{RootOptions, brent_root};
-use lumencraft_math::special::ln_gamma;
-use lumencraft_math::sum::SummaryMoments;
+use curvebook_math::quad::gauss_legendre_32;
+use curvebook_math::roots::{RootOptions, brent_root};
+use curvebook_math::special::ln_gamma;
+use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 
 use crate::error::StatsError;

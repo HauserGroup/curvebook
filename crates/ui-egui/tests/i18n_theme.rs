@@ -1,23 +1,23 @@
-//! Integration tests for `lumencraft-ui-egui` theming, WCAG 2.1 AA contrast, font feature
+//! Integration tests for `curvebook-ui-egui` theming, WCAG 2.1 AA contrast, font feature
 //! handling, and 16-locale scientific internationalization, RTL layout helpers, and number formatting.
 
 #![allow(clippy::unwrap_used)]
 
 use std::collections::HashSet;
 
-use lumencraft_doc::{CellCoord, SheetSection, SubcolumnMode, TableKind};
-use lumencraft_format::{export_datasheet_to_csv, import_csv_to_datasheet};
-use lumencraft_math::{AxisScale, PValueFormat};
-use lumencraft_palette::Rgba8;
-use lumencraft_ui_egui::i18n::{
+use curvebook_doc::{CellCoord, SheetSection, SubcolumnMode, TableKind};
+use curvebook_format::{export_datasheet_to_csv, import_csv_to_datasheet};
+use curvebook_math::{AxisScale, PValueFormat};
+use curvebook_palette::Rgba8;
+use curvebook_ui_egui::i18n::{
     LOCALES, LocalePreset, all_keys, catalog_len, is_rtl_locale, locale_display_name, mirror_x_for_rtl, missing_translations, normalize_locale,
     sheet_section_label, table_kind_label, tr, tr_or, try_tr,
 };
-use lumencraft_ui_egui::theme::{
+use curvebook_ui_egui::theme::{
     UiThemeMode, UiThemeSpec, WCAG_AA_TEXT_MIN_RATIO, WCAG_AA_UI_MIN_RATIO, WCAG_AAA_TEXT_MIN_RATIO, bundled_font_entries, install_fonts,
     wcag_contrast_ratio,
 };
-use lumencraft_ui_egui::{UiApp, bundled_fonts_enabled};
+use curvebook_ui_egui::{UiApp, bundled_fonts_enabled};
 
 #[test]
 fn wcag_contrast_meets_aa_for_light_dark_and_high_contrast() {
@@ -202,9 +202,9 @@ fn all_sixteen_locales_are_complete_and_genuinely_translated() {
     verify_locale_tag_normalization();
 
     // Command catalog localization parity across all 16 locales.
-    assert_eq!(lumencraft_ui_egui::i18n::command_label("de", "project.save", ""), "Projekt speichern");
-    assert_eq!(lumencraft_ui_egui::i18n::command_label("ja", "ui.palette.open", ""), "コマンドパレットを開く");
-    assert_eq!(lumencraft_ui_egui::i18n::translate_command_label("fr", "About LumenCraft"), "À propos de LumenCraft");
+    assert_eq!(curvebook_ui_egui::i18n::command_label("de", "project.save", ""), "Projekt speichern");
+    assert_eq!(curvebook_ui_egui::i18n::command_label("ja", "ui.palette.open", ""), "コマンドパレットを開く");
+    assert_eq!(curvebook_ui_egui::i18n::translate_command_label("fr", "About CurveBook"), "À propos de CurveBook");
 }
 
 #[test]
@@ -293,7 +293,7 @@ fn bundled_fonts_and_ui_app_defaults_handle_feature_modes_cleanly() {
     assert_eq!(installed, entries.len());
 
     if bundled_fonts_enabled() {
-        let expected = lumencraft_text::BUNDLED_FONTS.iter().filter(|(name, bytes)| !name.is_empty() && !bytes.is_empty()).count();
+        let expected = curvebook_text::BUNDLED_FONTS.iter().filter(|(name, bytes)| !name.is_empty() && !bytes.is_empty()).count();
         assert_eq!(installed, expected);
     } else {
         assert_eq!(installed, 0);

@@ -1,7 +1,7 @@
 //! MCP `resources/list` and `resources/read` handlers exposing active `Session` sheets and results.
 
-use lumencraft_doc::{ProjectDocument, SheetId, SheetSection};
-use lumencraft_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json};
+use curvebook_doc::{ProjectDocument, SheetId, SheetSection};
+use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -162,7 +162,7 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
                 "checklist": rs.checklist,
                 "upstream_dependencies": deps,
             });
-            if matches!(&rs.analysis.kind, lumencraft_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == lumencraft_doc::FitMethod::RobustCauchy)
+            if matches!(&rs.analysis.kind, curvebook_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == curvebook_doc::FitMethod::RobustCauchy)
                 && let Some(obj) = payload.as_object_mut()
             {
                 obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));

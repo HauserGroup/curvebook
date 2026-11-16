@@ -1,7 +1,7 @@
 //! Graph creation, styling, axis, series, overlay, bracket, annotation, canvas preset, and preflight commands.
 
-use lumencraft_chart::preflight_check_scene;
-use lumencraft_doc::{
+use curvebook_chart::preflight_check_scene;
+use curvebook_doc::{
     AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CanvasResizeMode,
     CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind, EquationDisplayMode,
     ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, ErrorCode, FigureCanvasPreset, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind,
@@ -9,8 +9,8 @@ use lumencraft_doc::{
     PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, ProjectDocument, RectPt,
     RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure, TickLabelFormat, WhiskerMethod,
 };
-use lumencraft_math::LogitDomain;
-use lumencraft_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
+use curvebook_math::LogitDomain;
+use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
@@ -911,13 +911,13 @@ fn schema_graph_set_compact_letter_display() -> Value {
 
 fn resolve_graph_create_source_sheet(
     doc: &ProjectDocument,
-    source_id: &lumencraft_doc::SheetId,
-) -> Result<(lumencraft_doc::DataSheet, Option<String>), EngineError> {
+    source_id: &curvebook_doc::SheetId,
+) -> Result<(curvebook_doc::DataSheet, Option<String>), EngineError> {
     if let Some(ds) = doc.data_sheet(source_id) {
         return Ok((ds.clone(), None));
     }
     let Some(initial_res) = doc.result_sheet(source_id) else {
-        return Err(lumencraft_doc::DocError::SheetNotFound { sheet_id: source_id.clone() }.into());
+        return Err(curvebook_doc::DocError::SheetNotFound { sheet_id: source_id.clone() }.into());
     };
     if let Some(ref analyzable) = initial_res.analyzable_data {
         return Ok((analyzable.clone(), None));
@@ -969,7 +969,7 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
         series.source_sheet_id = data_id.clone();
     }
     if let Some(ref title) = params.title {
-        lumencraft_doc::validate_title(title)?;
+        curvebook_doc::validate_title(title)?;
         graph.title = title.clone();
     }
     if let Some(ref kind_val) = params.kind {
@@ -979,7 +979,7 @@ fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
     } else if let Some(init) = params.initialized {
         graph.initialized = init;
     }
-    lumencraft_doc::validate_title(&graph.title)?;
+    curvebook_doc::validate_title(&graph.title)?;
     validate_graph_spec_in_doc(doc, &graph.id, &graph.spec)?;
 
     let title = graph.title.clone();
@@ -1000,7 +1000,7 @@ fn run_graph_initialize(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     let id = parse_sheet_id(&params.sheet_id)?;
     let kind_opt = params.kind.as_ref().map(parse_graph_kind).transpose()?;
     if let Some(ref title) = params.title {
-        lumencraft_doc::validate_title(title)?;
+        curvebook_doc::validate_title(title)?;
     }
 
     let mut updated_spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
@@ -1262,9 +1262,9 @@ fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
 }
 
 fn validate_source_sheet_ref(
-    doc: &lumencraft_doc::ProjectDocument,
-    graph_id: &lumencraft_doc::SheetId,
-    source_id: &lumencraft_doc::SheetId,
+    doc: &curvebook_doc::ProjectDocument,
+    graph_id: &curvebook_doc::SheetId,
+    source_id: &curvebook_doc::SheetId,
     role: &str,
 ) -> Result<(), EngineError> {
     if source_id == graph_id {
@@ -1274,19 +1274,19 @@ fn validate_source_sheet_ref(
         ));
     }
     match doc.sheet_section(source_id) {
-        Some(lumencraft_doc::SheetSection::Data | lumencraft_doc::SheetSection::Analyses) => Ok(()),
+        Some(curvebook_doc::SheetSection::Data | curvebook_doc::SheetSection::Analyses) => Ok(()),
         Some(_) => Err(EngineError::with_code(
             ErrorCode::BadInput,
             format!("{role} `{source_id}` on graph `{graph_id}` must reference a data or result sheet"),
         )),
-        None => Err(lumencraft_doc::DocError::SheetNotFound { sheet_id: source_id.clone() }.into()),
+        None => Err(curvebook_doc::DocError::SheetNotFound { sheet_id: source_id.clone() }.into()),
     }
 }
 
 fn validate_result_sheet_ref(
-    doc: &lumencraft_doc::ProjectDocument,
-    graph_id: &lumencraft_doc::SheetId,
-    result_id: &lumencraft_doc::SheetId,
+    doc: &curvebook_doc::ProjectDocument,
+    graph_id: &curvebook_doc::SheetId,
+    result_id: &curvebook_doc::SheetId,
     role: &str,
 ) -> Result<(), EngineError> {
     if result_id == graph_id {
@@ -1299,11 +1299,7 @@ fn validate_result_sheet_ref(
     Ok(())
 }
 
-fn validate_graph_spec_in_doc(
-    doc: &lumencraft_doc::ProjectDocument,
-    graph_id: &lumencraft_doc::SheetId,
-    spec: &GraphSpec,
-) -> Result<(), EngineError> {
+fn validate_graph_spec_in_doc(doc: &curvebook_doc::ProjectDocument, graph_id: &curvebook_doc::SheetId, spec: &GraphSpec) -> Result<(), EngineError> {
     spec.validate()?;
     validate_source_sheet_ref(doc, graph_id, &spec.primary_source_sheet_id, "primary_source_sheet_id")?;
     for (idx, series) in spec.series.iter().enumerate() {
@@ -1374,7 +1370,7 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
         new_spec.survival_number_at_risk = nar;
     }
     if let Some(ref title) = params.title {
-        lumencraft_doc::validate_title(title)?;
+        curvebook_doc::validate_title(title)?;
     }
     validate_graph_spec_in_doc(ctx.session.document(), &id, &new_spec)?;
 
@@ -3016,7 +3012,7 @@ fn parse_bracket_label_mode(val: Option<&Value>) -> Result<BracketLabelMode, Eng
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{Cell, DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
+    use curvebook_doc::{Cell, DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
     use serde_json::json;
 
     use super::*;

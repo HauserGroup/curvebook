@@ -1,13 +1,13 @@
 //! Graph and layout canvas interaction state machines emitting declarative engine command intents.
 
-use lumencraft_chart::equation_box::resolve_model_equation_hit_bounds;
-use lumencraft_chart::scales::{AxisOrientation, ResolvedAxis};
-use lumencraft_chart::{ChartScene, ChartWarning, PointPt, RectPt};
-use lumencraft_doc::{
+use curvebook_chart::equation_box::resolve_model_equation_hit_bounds;
+use curvebook_chart::scales::{AxisOrientation, ResolvedAxis};
+use curvebook_chart::{ChartScene, ChartWarning, PointPt, RectPt};
+use curvebook_doc::{
     AxisSpec, BracketLabelMode, BracketStyle, DataSheet, GraphAnnotation, GraphKind, GraphSheet, GraphSpec, GroupedArrangement, GroupedTable,
     LayoutItem, LayoutSpec, PairwiseBracketSpec, ProjectDocument, RectPt as DocRectPt, SheetFolderKind, SheetId, TableArchetype,
 };
-use lumencraft_palette::{LineDashStyle, Rgba8};
+use curvebook_palette::{LineDashStyle, Rgba8};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -56,7 +56,7 @@ fn serialize_value<T: Serialize>(value: &T) -> Value {
     serde_json::to_value(value).unwrap_or(Value::Null)
 }
 
-/// Declarative intent emitted by a UI/canvas tool to be executed by `lumencraft-engine`.
+/// Declarative intent emitted by a UI/canvas tool to be executed by `curvebook-engine`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ToolCommandIntent {
     pub command_id: String,
@@ -1597,7 +1597,7 @@ impl NavigatorDragState {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{AxisSegment, BreakOrnament, ColumnDesignHint, ColumnTable, DataSheet, GraphAxisScale, PageOrientation, TableArchetype};
+    use curvebook_doc::{AxisSegment, BreakOrnament, ColumnDesignHint, ColumnTable, DataSheet, GraphAxisScale, PageOrientation, TableArchetype};
 
     use super::*;
 
@@ -1828,7 +1828,7 @@ mod tests {
         spec.annotations.push(GraphAnnotation::ModelEquation {
             result_sheet_id: SheetId::new("res-fit"),
             data_set_index: 0,
-            mode: lumencraft_doc::EquationDisplayMode::Substituted,
+            mode: curvebook_doc::EquationDisplayMode::Substituted,
             bounds_pt: DocRectPt::new(80.0, 90.0, 140.0, 36.0),
             font_size_pt: 10.0,
             bordered: true,

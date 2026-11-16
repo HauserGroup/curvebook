@@ -5,7 +5,7 @@
 
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 
-use lumencraft_doc::ErrorCode;
+use curvebook_doc::ErrorCode;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -24,14 +24,14 @@ pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Guidance string advertised to MCP clients during `initialize`.
 pub const SERVER_INSTRUCTIONS: &str = "\
-LumenCraft MCP server for scientific tables, statistical analysis, curve fitting, and publication figures. \
+CurveBook MCP server for scientific tables, statistical analysis, curve fitting, and publication figures. \
 Use `doc_inspect` or MCP resources (`resources/list`, `resources/read` with `sheet://<id>` or `result://<id>`) to inspect active sheets and results. \
 Core tools are available immediately; call `list_toolsets` and `enable_toolset` to dynamically load per-command CommandGroup tools (which emits `notifications/tools/list_changed`). \
 Inspect each tool's `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) before executing mutating or filesystem commands, and use `prompts/list` + `prompts/get` for guided analysis workflows.";
 
 /// Guidance string advertised during `initialize` when strict `--gui-only` policy is active.
 pub const GUI_ONLY_SERVER_INSTRUCTIONS: &str = "\
-LumenCraft MCP server running under strict `--gui-only` policy. \
+CurveBook MCP server running under strict `--gui-only` policy. \
 Only the 8 human-equivalent GUI tools are exposed (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`). \
 Direct engine commands (`command_run`, `command_batch`, `enable_toolset`), `doc_inspect`, file shortcuts (`open_file`, `save_file`, `export`, `render_preview`), and `resources/read` are blocked with `gui_only_violation`.";
 
@@ -330,9 +330,9 @@ fn rpc_error_from_payload(id: Value, payload: StructuredErrorPayload) -> JsonRpc
 
 fn run_guarded_rpc<F>(id: Value, op: &str, f: F) -> JsonRpcResponse
 where
-    F: FnOnce(&Value) -> Result<JsonRpcResponse, lumencraft_engine::EngineError>,
+    F: FnOnce(&Value) -> Result<JsonRpcResponse, curvebook_engine::EngineError>,
 {
-    match lumencraft_engine::guard::run_guarded(op, || f(&id)) {
+    match curvebook_engine::guard::run_guarded(op, || f(&id)) {
         Ok(resp) => resp,
         Err(err) => rpc_error_from_payload(id, StructuredErrorPayload::from_engine_error(&err)),
     }
@@ -1212,7 +1212,7 @@ mod tests {
         assert_eq!(replies.len(), 3);
         assert_eq!(replies[0]["id"], json!(1));
         assert_eq!(replies[0]["result"]["protocolVersion"], json!("2024-11-05"));
-        assert_eq!(replies[0]["result"]["serverInfo"]["name"], json!("lumencraft"));
+        assert_eq!(replies[0]["result"]["serverInfo"]["name"], json!("curvebook"));
         assert!(replies[0]["result"]["instructions"].as_str().is_some_and(|s| !s.is_empty()));
         assert_eq!(replies[0]["result"]["capabilities"]["tools"]["listChanged"], json!(true));
         assert!(replies[0]["result"]["capabilities"]["resources"].is_object());

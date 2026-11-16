@@ -7,13 +7,13 @@
 use std::borrow::Borrow;
 
 use crate::i18n::LocalePreset;
-use lumencraft_doc::{
+use curvebook_doc::{
     CategoricalLevelSummary, Cell, CellCoord, CellValue, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind,
     LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId, SubcolumnMode, TableArchetype,
     TableKind, VariableRole, VariableSource, XColumnMode, default_column_label,
 };
-use lumencraft_palette::Rgba8;
-use lumencraft_tools::{GridCellCoord, GridToolState, GridVisibleWindow, SelectionQuickStats, ToolCommandIntent};
+use curvebook_palette::Rgba8;
+use curvebook_tools::{GridCellCoord, GridToolState, GridVisibleWindow, SelectionQuickStats, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -570,7 +570,7 @@ impl FormulaBarState {
             match validate_formula_syntax(body) {
                 Ok(()) => {
                     if let (Some(TableArchetype::MultipleVariables(mv)), Some(col)) = (sheet.map(|s| &s.archetype), self.target_column)
-                        && let Err(err) = lumencraft_transform::validate_no_formula_cycle(mv, col, body)
+                        && let Err(err) = curvebook_transform::validate_no_formula_cycle(mv, col, body)
                     {
                         self.parse_error = Some(err.to_string());
                         self.is_valid = false;
@@ -1082,7 +1082,7 @@ impl ImportPasteWizardState {
             grid = grid.into_iter().step_by(k).collect();
         }
         if self.placement.transpose {
-            grid = lumencraft_doc::transpose_cell_grid(&grid);
+            grid = curvebook_doc::transpose_cell_grid(&grid);
         }
         grid
     }
@@ -1857,7 +1857,7 @@ fn role_short_label(role: VariableRole, inferred: bool) -> String {
     if inferred && role != VariableRole::Calculated { format!("{base} (auto)") } else { String::from(base) }
 }
 
-fn build_variable_role_header(col_index: usize, var: &lumencraft_doc::VariableColumn) -> VariableRoleHeader {
+fn build_variable_role_header(col_index: usize, var: &curvebook_doc::VariableColumn) -> VariableRoleHeader {
     let is_calculated = matches!(var.source, VariableSource::Calculated { .. });
     let formula = match &var.source {
         VariableSource::Calculated { formula } => Some(formula.clone()),
@@ -2518,10 +2518,10 @@ fn validate_formula_syntax(body: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{GridQuickStats, GridViewState, ImportOriginKind, MoveDirection};
-    use lumencraft_doc::{
+    use curvebook_doc::{
         Cell, CellCoord, DataSheet, LinkBorderColor, MultipleVariablesTable, ProjectDocument, SubcolumnMode, TableArchetype, VariableRole, XyTable,
     };
-    use lumencraft_tools::GridCellCoord;
+    use curvebook_tools::GridCellCoord;
 
     #[test]
     fn quick_stats_computes_n_excluded_mean_sd_sem_median_sum() {

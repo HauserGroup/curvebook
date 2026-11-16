@@ -1,21 +1,21 @@
 [package]
-name = "lumencraft-doc"
+name = "curvebook-doc"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft project manifest, typed scientific data tables, analyses, graphs and layouts"
+description = "CurveBook project manifest, typed scientific data tables, analyses, graphs and layouts"
 
 [lints]
 workspace = true
 
 [dependencies]
-lumencraft-math = { workspace = true }
-lumencraft-palette = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-palette = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }

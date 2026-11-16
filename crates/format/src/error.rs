@@ -1,8 +1,8 @@
-//! Structured errors and non-fatal import diagnostics for `lumencraft-format`.
+//! Structured errors and non-fatal import diagnostics for `curvebook-format`.
 
 use std::fmt;
 
-use lumencraft_doc::{DocError, ProjectDocument, SheetId};
+use curvebook_doc::{DocError, ProjectDocument, SheetId};
 
 /// Structured error type returned by all archive, CSV/TSV, XML, and interchange operations.
 #[derive(Debug, Clone, PartialEq)]
@@ -90,14 +90,14 @@ impl From<serde_json::Error> for FormatError {
     }
 }
 
-impl From<lumencraft_platform::PlatformError> for FormatError {
-    fn from(value: lumencraft_platform::PlatformError) -> Self {
+impl From<curvebook_platform::PlatformError> for FormatError {
+    fn from(value: curvebook_platform::PlatformError) -> Self {
         match value {
-            lumencraft_platform::PlatformError::PathEscape { path, .. } => Self::UnsafePath { path },
-            lumencraft_platform::PlatformError::FileTooLarge { path, actual_bytes, limit_bytes } => {
+            curvebook_platform::PlatformError::PathEscape { path, .. } => Self::UnsafePath { path },
+            curvebook_platform::PlatformError::FileTooLarge { path, actual_bytes, limit_bytes } => {
                 Self::FileTooLarge { path, actual_bytes, limit_bytes }
             }
-            lumencraft_platform::PlatformError::InvalidPath { reason } => Self::Io(reason),
+            curvebook_platform::PlatformError::InvalidPath { reason } => Self::Io(reason),
             other => Self::Io(other.to_string()),
         }
     }

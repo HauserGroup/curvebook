@@ -1,4 +1,4 @@
-# LumenCraft Command Reference
+# CurveBook Command Reference
 
 Registered commands: 97
 
@@ -9,7 +9,7 @@ Registered commands: 97
 - **Effects:** `MUTATES_DOCUMENT | MAY_DISCARD_DATA`
 - **Menu:** `File/New Project`
 - **Shortcut:** `Cmd+N`
-- **Summary:** Create a fresh empty LumenCraft project.
+- **Summary:** Create a fresh empty CurveBook project.
 - **Beginner note:** Replaces the active workspace with an empty project document (preserving undo history in this session).
 - **Parameters:** `title` (any)
 
@@ -41,7 +41,7 @@ Registered commands: 97
 
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
 - **Menu:** `File/New From Template...`
-- **Summary:** Create a new project from a `.lctemplate` archive.
+- **Summary:** Create a new project from a `.cbtemplate` archive.
 - **Beginner note:** Loads a saved template with its analysis pipelines, graphs, and layouts ready for new experimental data.
 - **Parameters:** `bytes_base64` (any), `path` (any), `title` (any)
 
@@ -57,7 +57,7 @@ Registered commands: 97
 
 - **Effects:** `MUTATES_DOCUMENT | MAY_DISCARD_DATA`
 - **Menu:** `File/New Project`
-- **Summary:** Create a fresh empty LumenCraft project.
+- **Summary:** Create a fresh empty CurveBook project.
 - **Beginner note:** Creates a clean empty project document with an optional title; alias for `file.new`.
 - **Parameters:** `title` (any)
 
@@ -66,7 +66,7 @@ Registered commands: 97
 - **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM | MAY_DISCARD_DATA`
 - **Menu:** `File/Open...`
 - **Shortcut:** `Cmd+O`
-- **Summary:** Load a `.lumencraft` archive or unpacked `.lumencraft.d/` directory.
+- **Summary:** Load a `.curvebook` archive or unpacked `.curvebook.d/` directory.
 - **Beginner note:** Opens a project from a filesystem path or base64 archive payload and replaces the current session document.
 - **Parameters:** `bytes_base64` (any), `path` (any), `unpacked` (any)
 
@@ -91,7 +91,7 @@ Registered commands: 97
 - **Effects:** `WRITES_FILESYSTEM`
 - **Menu:** `File/Save`
 - **Shortcut:** `Cmd+S`
-- **Summary:** Save the active project atomically to `.lumencraft`, unpacked directory, or bytes.
+- **Summary:** Save the active project atomically to `.curvebook`, unpacked directory, or bytes.
 - **Beginner note:** Serializes the project document using atomic filesystem writes when a path is provided, or returns base64 bytes.
 - **Parameters:** `path` (any), `return_bytes` (any), `unpacked` (any)
 
@@ -99,7 +99,7 @@ Registered commands: 97
 
 - **Effects:** `WRITES_FILESYSTEM`
 - **Menu:** `File/Save Template...`
-- **Summary:** Export the project structure as a data-stripped `.lctemplate` file.
+- **Summary:** Export the project structure as a data-stripped `.cbtemplate` file.
 - **Beginner note:** Strips raw data values while preserving table schemas, analyses, graphs, and layouts, then writes atomically to disk or base64.
 - **Parameters:** `path` (any), `return_bytes` (any)
 

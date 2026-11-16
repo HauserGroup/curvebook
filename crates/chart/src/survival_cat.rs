@@ -1,17 +1,17 @@
 //! Survival Kaplan-Meier step curves, contingency bars, and parts-of-whole geometry builders,
-//! plus shared axis, marker, annotation, and table-grid primitives for `lumencraft-chart`.
+//! plus shared axis, marker, annotation, and table-grid primitives for `curvebook-chart`.
 
 use std::f64::consts::PI;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AxisSpec, AxisThreshold, CategoricalTickSource, DataSheet, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GraphSpec,
     GraphicalDataObject, GroupedArrangement, PartsOfWholeLayout, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind, SeriesSpec,
     SheetId, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, TableArchetype, TickLabelFormat,
 };
-use lumencraft_math::{AxisScale, ConfidenceLevel};
-use lumencraft_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
-use lumencraft_stats::survival::kaplan_meier_curve;
-use lumencraft_text::{LocaleNumberPolicy, RichText, TextMetricsPt, expand_template_hooks, measure_text_pt, parse_markup};
+use curvebook_math::{AxisScale, ConfidenceLevel};
+use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
+use curvebook_stats::survival::kaplan_meier_curve;
+use curvebook_text::{LocaleNumberPolicy, RichText, TextMetricsPt, expand_template_hooks, measure_text_pt, parse_markup};
 
 use crate::scales::{
     AxisMapping, AxisRenderOptions, ResolvedAdditionalTick, ResolvedSegment, compute_additional_ticks_for_segments, compute_segment_tick_values,
@@ -882,8 +882,8 @@ pub(crate) fn draw_graph_annotations(scene: &mut ChartScene, annotations: &[Grap
             GraphAnnotation::Shape { kind, bounds_pt, stroke_color, stroke_width_pt, dash, fill_color } => {
                 let rect = RectPt::from(*bounds_pt);
                 let path = match kind {
-                    lumencraft_doc::AnnotationShapeKind::Rectangle | lumencraft_doc::AnnotationShapeKind::RoundedRectangle => Path2D::rect(rect),
-                    lumencraft_doc::AnnotationShapeKind::Ellipse => {
+                    curvebook_doc::AnnotationShapeKind::Rectangle | curvebook_doc::AnnotationShapeKind::RoundedRectangle => Path2D::rect(rect),
+                    curvebook_doc::AnnotationShapeKind::Ellipse => {
                         ellipse_path(rect.x + rect.width * 0.5, rect.y + rect.height * 0.5, rect.width * 0.5, rect.height * 0.5, 0.0)
                     }
                 };
@@ -938,14 +938,14 @@ pub(crate) fn format_result_cell(cell: &ResultCell) -> String {
             out
         }
         ResultCell::ConfidenceInterval { lower, upper } => {
-            let fmt_b = |b: &lumencraft_doc::CiBound| match b {
-                lumencraft_doc::CiBound::Finite(v) if v.is_finite() => {
+            let fmt_b = |b: &curvebook_doc::CiBound| match b {
+                curvebook_doc::CiBound::Finite(v) if v.is_finite() => {
                     let mut s = format!("{v:.3}");
                     trim_trailing_zeros(&mut s);
                     s
                 }
-                lumencraft_doc::CiBound::Open => String::from("+∞"),
-                lumencraft_doc::CiBound::Finite(_) => String::from("NaN"),
+                curvebook_doc::CiBound::Open => String::from("+∞"),
+                curvebook_doc::CiBound::Finite(_) => String::from("NaN"),
             };
             format!("[{}, {}]", fmt_b(lower), fmt_b(upper))
         }
@@ -987,16 +987,16 @@ pub(crate) fn extract_sheet_grid(doc: &ProjectDocument, source_sheet_id: &SheetI
 }
 
 fn extract_data_sheet_grid(ds: &DataSheet) -> SheetGrid {
-    let fmt_cell = |c: &lumencraft_doc::Cell| -> String {
+    let fmt_cell = |c: &curvebook_doc::Cell| -> String {
         match &c.value {
-            lumencraft_doc::CellValue::Empty => String::new(),
-            lumencraft_doc::CellValue::Number(v) if v.is_finite() => {
+            curvebook_doc::CellValue::Empty => String::new(),
+            curvebook_doc::CellValue::Number(v) if v.is_finite() => {
                 let mut s = format!("{v:.4}");
                 trim_trailing_zeros(&mut s);
                 s
             }
-            lumencraft_doc::CellValue::Number(_) => String::from("NaN"),
-            lumencraft_doc::CellValue::Text(t) => t.clone(),
+            curvebook_doc::CellValue::Number(_) => String::from("NaN"),
+            curvebook_doc::CellValue::Text(t) => t.clone(),
         }
     };
     match &ds.archetype {
@@ -1266,7 +1266,7 @@ fn km_series_style(graph: &GraphSheet, data_set_idx: usize, fallback_idx: usize)
 fn build_km_from_survival_table(
     graph: &GraphSheet,
     sheet_id: &SheetId,
-    surv: &lumencraft_doc::SurvivalTable,
+    surv: &curvebook_doc::SurvivalTable,
     km_result: Option<&ResultSheet>,
 ) -> Vec<KmCurveData> {
     let indices: Vec<usize> = if graph.spec.series.is_empty() {
@@ -1350,7 +1350,7 @@ fn build_km_from_survival_table(
     out
 }
 
-fn result_curve_label(res: &ResultSheet, fc: &lumencraft_doc::FittedCurveOverlay, idx: usize) -> String {
+fn result_curve_label(res: &ResultSheet, fc: &curvebook_doc::FittedCurveOverlay, idx: usize) -> String {
     match fc.equation_id.as_str() {
         "cox_baseline" => String::from("Baseline"),
         "cox_covariate" => {
@@ -1939,7 +1939,7 @@ fn resolve_parts_of_whole_style(series: &[SeriesSpec]) -> (PartsOfWholeLayout, b
     (PartsOfWholeLayout::Donut, true)
 }
 
-fn extract_parts_of_whole_slices(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<lumencraft_doc::SliceFraction> {
+fn extract_parts_of_whole_slices(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<curvebook_doc::SliceFraction> {
     let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) else { return Vec::new() };
     let series_idx = graph.spec.series.first().map_or(0, |s| s.data_set_index);
     match &ds.archetype {
@@ -1958,7 +1958,7 @@ fn extract_parts_of_whole_slices(graph: &GraphSheet, doc: &ProjectDocument) -> V
                 }
             }
             raw.into_iter()
-                .map(|(row, label, value)| lumencraft_doc::SliceFraction {
+                .map(|(row, label, value)| curvebook_doc::SliceFraction {
                     row,
                     label,
                     value,
@@ -1970,13 +1970,7 @@ fn extract_parts_of_whole_slices(graph: &GraphSheet, doc: &ProjectDocument) -> V
     }
 }
 
-fn render_pie_or_donut(
-    scene: &mut ChartScene,
-    spec: &GraphSpec,
-    slices: &[lumencraft_doc::SliceFraction],
-    inner_ratio: f64,
-    show_center_total: bool,
-) {
+fn render_pie_or_donut(scene: &mut ChartScene, spec: &GraphSpec, slices: &[curvebook_doc::SliceFraction], inner_ratio: f64, show_center_total: bool) {
     let r = scene.plot_rect_pt;
     let cx = r.x + r.width * 0.5;
     let cy = r.y + r.height * 0.5;
@@ -2013,7 +2007,7 @@ fn render_pie_or_donut(
     }
 }
 
-fn render_stacked_fraction_bar(scene: &mut ChartScene, spec: &GraphSpec, slices: &[lumencraft_doc::SliceFraction]) {
+fn render_stacked_fraction_bar(scene: &mut ChartScene, spec: &GraphSpec, slices: &[curvebook_doc::SliceFraction]) {
     let r = scene.plot_rect_pt;
     let bar_h = crate::clamp_f64_safe(r.height * 0.36, 24.0, 56.0);
     let bar_y = r.y + (r.height - bar_h) * 0.5;
@@ -2062,7 +2056,7 @@ fn render_stacked_fraction_bar(scene: &mut ChartScene, spec: &GraphSpec, slices:
     }
 }
 
-fn render_waffle_10x10(scene: &mut ChartScene, spec: &GraphSpec, slices: &[lumencraft_doc::SliceFraction]) {
+fn render_waffle_10x10(scene: &mut ChartScene, spec: &GraphSpec, slices: &[curvebook_doc::SliceFraction]) {
     let r = scene.plot_rect_pt;
     let side = r.width.min(r.height).max(40.0) * 0.88;
     let gap = 2.0;
@@ -2102,7 +2096,7 @@ fn render_waffle_10x10(scene: &mut ChartScene, spec: &GraphSpec, slices: &[lumen
     }
 }
 
-fn largest_remainder_100(slices: &[lumencraft_doc::SliceFraction]) -> Vec<usize> {
+fn largest_remainder_100(slices: &[curvebook_doc::SliceFraction]) -> Vec<usize> {
     if slices.is_empty() {
         return Vec::new();
     }
@@ -2132,7 +2126,7 @@ fn largest_remainder_100(slices: &[lumencraft_doc::SliceFraction]) -> Vec<usize>
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         ContingencyTable, DataSheet, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, PartsOfWholeLayout,
         PartsOfWholeTable, ProjectDocument, SheetId, SurvivalTable, TableArchetype,
     };
@@ -2148,9 +2142,9 @@ mod tests {
         for (r, (t, s0, s1)) in
             [(2.0, 1.0, 0.0), (4.0, 1.0, 1.0), (6.0, 0.0, 0.0), (8.0, 1.0, 1.0), (10.0, 1.0, 0.0), (12.0, 1.0, 1.0)].into_iter().enumerate()
         {
-            surv.times[r] = lumencraft_doc::Cell::number(t);
-            surv.cohorts[0].cells[r][0] = lumencraft_doc::Cell::number(s0);
-            surv.cohorts[1].cells[r][0] = lumencraft_doc::Cell::number(s1);
+            surv.times[r] = curvebook_doc::Cell::number(t);
+            surv.cohorts[0].cells[r][0] = curvebook_doc::Cell::number(s0);
+            surv.cohorts[1].cells[r][0] = curvebook_doc::Cell::number(s1);
         }
         let ds = DataSheet::new(SheetId::new("surv-1"), "OS", TableArchetype::Survival(surv)).expect("ds");
         let mut graph = GraphSheet::new_uninitialized_for_data(SheetId::new("g-1"), &ds).expect("gs");
@@ -2174,7 +2168,7 @@ mod tests {
         let mut pow = PartsOfWholeTable::new(1, 3).expect("pow");
         pow.slice_labels = vec![String::from("Alpha"), String::from("Beta"), String::from("Gamma")];
         for (r, v) in [50.0, 30.0, 20.0].into_iter().enumerate() {
-            pow.data_sets[0].cells[r][0] = lumencraft_doc::Cell::number(v);
+            pow.data_sets[0].cells[r][0] = curvebook_doc::Cell::number(v);
         }
         let ds = DataSheet::new(SheetId::new("pow-1"), "Share", TableArchetype::PartsOfWhole(pow)).expect("ds");
         let mut doc = ProjectDocument::default();
@@ -2197,10 +2191,10 @@ mod tests {
     }
 
     trait PowHelper {
-        fn archetype_fractions_test(&self) -> Vec<lumencraft_doc::SliceFraction>;
+        fn archetype_fractions_test(&self) -> Vec<curvebook_doc::SliceFraction>;
     }
     impl PowHelper for DataSheet {
-        fn archetype_fractions_test(&self) -> Vec<lumencraft_doc::SliceFraction> {
+        fn archetype_fractions_test(&self) -> Vec<curvebook_doc::SliceFraction> {
             match &self.archetype {
                 TableArchetype::PartsOfWhole(p) => p.fractions_for_series(0).expect("fractions"),
                 _ => Vec::new(),
@@ -2214,10 +2208,10 @@ mod tests {
         cont.row_titles = vec![String::from("Control"), String::from("Treated")];
         cont.data_sets[0].title = String::from("Responder");
         cont.data_sets[1].title = String::from("NonResponder");
-        cont.data_sets[0].cells[0][0] = lumencraft_doc::Cell::number(10.0);
-        cont.data_sets[1].cells[0][0] = lumencraft_doc::Cell::number(30.0);
-        cont.data_sets[0].cells[1][0] = lumencraft_doc::Cell::number(24.0);
-        cont.data_sets[1].cells[1][0] = lumencraft_doc::Cell::number(16.0);
+        cont.data_sets[0].cells[0][0] = curvebook_doc::Cell::number(10.0);
+        cont.data_sets[1].cells[0][0] = curvebook_doc::Cell::number(30.0);
+        cont.data_sets[0].cells[1][0] = curvebook_doc::Cell::number(24.0);
+        cont.data_sets[1].cells[1][0] = curvebook_doc::Cell::number(16.0);
         let ds = DataSheet::new(SheetId::new("c-1"), "Contingency", TableArchetype::Contingency(cont)).expect("ds");
         let mut doc = ProjectDocument::default();
         doc.add_data_sheet(ds.clone()).expect("add");
@@ -2242,10 +2236,10 @@ mod tests {
         cont.row_titles = vec![String::from("Control"), String::from("Treated")];
         cont.data_sets[0].title = String::from("A");
         cont.data_sets[1].title = String::from("B");
-        cont.data_sets[0].cells[0][0] = lumencraft_doc::Cell::number(10.0);
-        cont.data_sets[1].cells[0][0] = lumencraft_doc::Cell::number(20.0);
-        cont.data_sets[0].cells[1][0] = lumencraft_doc::Cell::number(15.0);
-        cont.data_sets[1].cells[1][0] = lumencraft_doc::Cell::number(25.0);
+        cont.data_sets[0].cells[0][0] = curvebook_doc::Cell::number(10.0);
+        cont.data_sets[1].cells[0][0] = curvebook_doc::Cell::number(20.0);
+        cont.data_sets[0].cells[1][0] = curvebook_doc::Cell::number(15.0);
+        cont.data_sets[1].cells[1][0] = curvebook_doc::Cell::number(25.0);
         let ds = DataSheet::new(SheetId::new("c-narrow"), "Contingency", TableArchetype::Contingency(cont)).expect("ds");
         let mut doc = ProjectDocument::default();
         doc.add_data_sheet(ds.clone()).expect("add");
@@ -2259,7 +2253,7 @@ mod tests {
             gs.initialized = true;
             gs.spec = GraphSpec::default_for_data_sheet(&ds);
             gs.spec.y_axis.title = String::from("Count");
-            gs.spec.canvas_size_pt = lumencraft_doc::SizePt::new(w, h);
+            gs.spec.canvas_size_pt = curvebook_doc::SizePt::new(w, h);
             let default_scene = crate::compile_graph(&gs, &doc).expect("narrow default canvas should compile cleanly");
             assert!(!default_scene.primitives.is_empty());
 

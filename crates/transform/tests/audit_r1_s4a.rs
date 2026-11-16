@@ -1,8 +1,8 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkSource,
     MultipleVariablesTable, PlacementMode, SubcolumnMode, SurvivalTable, TableArchetype, VariableRole, XColumnMode, XyTable,
 };
-use lumencraft_transform::{
+use curvebook_transform::{
     ImportPipelineOptions, ImportSourcePayload, PruneMethod, TransformContext, TransformError, apply_import_link_pipeline,
     evaluate_calculated_variables, evaluate_formula_for_sheet, execute_prune, execute_transpose, parse_formula, validate_no_formula_cycle,
 };

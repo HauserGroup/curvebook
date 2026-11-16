@@ -6,11 +6,11 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::Instant;
 
+use curvebook_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
+use curvebook_palette::{OKABE_ITO_BLUE, Rgba8};
+use curvebook_pdf::{PdfExportOptions, PdfVersion, render_pdf, render_pdf_pages};
+use curvebook_text::{BUNDLED_FONTS, RichText, build_minimal_truetype_font, parse_markup, parse_truetype_font_info};
 use flate2::read::ZlibDecoder;
-use lumencraft_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
-use lumencraft_palette::{OKABE_ITO_BLUE, Rgba8};
-use lumencraft_pdf::{PdfExportOptions, PdfVersion, render_pdf, render_pdf_pages};
-use lumencraft_text::{BUNDLED_FONTS, RichText, build_minimal_truetype_font, parse_markup, parse_truetype_font_info};
 use serde::Deserialize;
 use serde::de::value::{Error as DeValueError, MapDeserializer};
 use serde::de::{Deserializer, IntoDeserializer, Visitor};
@@ -216,7 +216,7 @@ fn pdf_version_header_and_options_serde_defaults() {
         ("color_space", LegacyFieldValue::Str("Srgb")),
         ("compress_streams", LegacyFieldValue::Bool(true)),
         ("title", LegacyFieldValue::NoneOption),
-        ("creator", LegacyFieldValue::Str("LumenCraft")),
+        ("creator", LegacyFieldValue::Str("CurveBook")),
         ("outline_text", LegacyFieldValue::Bool(false)),
         ("trim_pt", LegacyFieldValue::NoneOption),
         ("bleed_pt", LegacyFieldValue::NoneOption),
@@ -529,8 +529,8 @@ fn non_winansi_cjk_cyrillic_and_hebrew_never_substitute_question_marks() {
 
 #[test]
 fn cld_compiled_graph_exports_deterministic_pdf17_with_selectable_and_outlined_letters() {
-    use lumencraft_chart::compile_graph;
-    use lumencraft_doc::{
+    use curvebook_chart::compile_graph;
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, CompactLetterDisplaySpec, DataSheet, GraphSheet, OneWayAnovaSpec,
         PairwiseComparisonRecord, PairwiseDisplayMode, ProjectDocument, ResultSheet, ResultStatus, SheetId, TableArchetype,
     };

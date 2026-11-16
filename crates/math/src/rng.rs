@@ -1,7 +1,7 @@
 //! Seeded, platform-deterministic pseudo-random number generator (`SplitMix64` + `xoshiro256**`).
 //!
 //! Used for Monte Carlo permutation tests, Horn's parallel analysis in PCA, and synthetic table
-//! simulation (`lumencraft-transform`). Identical bit-for-bit across x86_64, aarch64, and wasm32.
+//! simulation (`curvebook-transform`). Identical bit-for-bit across x86_64, aarch64, and wasm32.
 //!
 //! Reference:
 //! - Blackman, D., & Vigna, S. (2021). Scrambled linear pseudorandom number generators.

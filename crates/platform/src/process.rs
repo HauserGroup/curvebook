@@ -690,18 +690,17 @@ mod tests {
 
     #[test]
     fn missing_binary_returns_program_not_found() {
-        let err = ProcessCommand::new("lumencraft-definitely-missing-binary-xyz-123").run().unwrap_err();
-        assert_eq!(err, PlatformError::ProgramNotFound { program: String::from("lumencraft-definitely-missing-binary-xyz-123") });
+        let err = ProcessCommand::new("curvebook-definitely-missing-binary-xyz-123").run().unwrap_err();
+        assert_eq!(err, PlatformError::ProgramNotFound { program: String::from("curvebook-definitely-missing-binary-xyz-123") });
     }
 
     #[cfg(unix)]
     #[test]
     fn stdin_stdout_stderr_and_exit_code_work_cleanly() {
-        let out =
-            ProcessCommand::new("sh").args(["-c", "cat; echo warn >&2"]).stdin_bytes("hello lumencraft").env("LC_TEST_VAR", "ok").run().unwrap();
+        let out = ProcessCommand::new("sh").args(["-c", "cat; echo warn >&2"]).stdin_bytes("hello curvebook").env("CB_TEST_VAR", "ok").run().unwrap();
         assert!(out.success);
         assert_eq!(out.status_code, Some(0));
-        assert_eq!(out.stdout, b"hello lumencraft");
+        assert_eq!(out.stdout, b"hello curvebook");
         assert_eq!(out.stderr, b"warn\n");
 
         let nonzero = ProcessCommand::new("sh").args(["-c", "exit 7"]).run().unwrap();
@@ -740,7 +739,7 @@ mod tests {
     fn capped_stdout_terminates_without_deadlock() {
         let start = Instant::now();
         let err = ProcessCommand::new("sh")
-            .args(["-c", "yes lumencraft_output_stream"])
+            .args(["-c", "yes curvebook_output_stream"])
             .wall_timeout(Duration::from_secs(5))
             .idle_timeout(Duration::from_secs(5))
             .max_output_bytes(1024)
@@ -787,15 +786,15 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn timeout_kills_process_group_descendant_holding_pipes_after_child_exits() {
-        let dir = std::env::temp_dir().join(format!("lc-proc-pgid-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-proc-pgid-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let pid_file = dir.join("descendant.pid");
         let _ = std::fs::remove_file(&pid_file);
 
         let start = Instant::now();
         let err = ProcessCommand::new("sh")
-            .args(["-c", "sleep 10 & printf '%s' \"$!\" > \"$LC_PID_FILE\"; exit 0"])
-            .env("LC_PID_FILE", pid_file.to_string_lossy().as_ref())
+            .args(["-c", "sleep 10 & printf '%s' \"$!\" > \"$CB_PID_FILE\"; exit 0"])
+            .env("CB_PID_FILE", pid_file.to_string_lossy().as_ref())
             .wall_timeout(Duration::from_millis(500))
             .idle_timeout(Duration::from_secs(5))
             .run()
@@ -833,7 +832,7 @@ mod tests {
         let huge_stdin = vec![b'y'; 2 * 1024 * 1024];
         let start = Instant::now();
         let err = ProcessCommand::new("sh")
-            .args(["-c", "yes lumencraft_output_stream"])
+            .args(["-c", "yes curvebook_output_stream"])
             .stdin_bytes(huge_stdin)
             .wall_timeout(Duration::from_secs(5))
             .idle_timeout(Duration::from_secs(5))

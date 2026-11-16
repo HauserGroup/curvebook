@@ -1,7 +1,7 @@
 //! Multi-panel publication layout creation, panel composition, alignment, and canvas preset commands.
 
-use lumencraft_chart::preflight_check_scene;
-use lumencraft_doc::{
+use curvebook_chart::preflight_check_scene;
+use curvebook_doc::{
     CanvasResizeMode, DocError, ErrorCode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MAX_LAYOUT_ITEMS,
     PageOrientation, PanelBadgeStyle, PhysicalUnit, RectPt,
 };
@@ -309,8 +309,8 @@ fn run_layout_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
 }
 
 fn validate_layout_spec_in_doc(
-    doc: &lumencraft_doc::ProjectDocument,
-    layout_id: &lumencraft_doc::SheetId,
+    doc: &curvebook_doc::ProjectDocument,
+    layout_id: &curvebook_doc::SheetId,
     spec: &LayoutSpec,
 ) -> Result<(), EngineError> {
     spec.validate_item_count().map_err(DocError::from)?;
@@ -333,7 +333,7 @@ fn validate_layout_spec_in_doc(
                     ));
                 }
                 match doc.sheet_section(source_sheet_id) {
-                    Some(lumencraft_doc::SheetSection::Data | lumencraft_doc::SheetSection::Info | lumencraft_doc::SheetSection::Analyses) => {}
+                    Some(curvebook_doc::SheetSection::Data | curvebook_doc::SheetSection::Info | curvebook_doc::SheetSection::Analyses) => {}
                     Some(_) => {
                         return Err(EngineError::with_code(
                             ErrorCode::BadInput,
@@ -375,7 +375,7 @@ fn run_layout_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, 
         apply_layout_spec_fields(&mut spec, &params.fields)?;
     }
     if let Some(ref title) = params.title {
-        lumencraft_doc::validate_title(title)?;
+        curvebook_doc::validate_title(title)?;
     }
     validate_layout_spec_in_doc(doc, &id, &spec)?;
 
@@ -792,7 +792,7 @@ fn parse_panel_badge_style(val: &Value) -> Result<PanelBadgeStyle, EngineError> 
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{Cell, DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
+    use curvebook_doc::{Cell, DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
     use serde_json::json;
 
     use super::*;

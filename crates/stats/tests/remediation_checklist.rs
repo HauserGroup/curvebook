@@ -5,12 +5,12 @@
 //! and reports purely diagnostic metrics, statistical limitations, and tab references without
 //! recommending alternative tests or data transformations.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ClusterDistance, ClusterLinkage, ColumnDesignHint, ColumnTable, ContingencySpec, ContingencyTable,
     CoxTieMethod, DataSheet, DescriptiveSpec, GlmFamily, GlmSpec, MultipleVariablesTable, MultiplicitySpec, MultivariateSpec, OneWayAnovaSpec,
     OneWayMethod, OutlierSpec, RocSpec, SheetId, SurvivalAnalysisSpec, TableArchetype, TwoGroupMethod, TwoGroupSpec,
 };
-use lumencraft_stats::run_analysis;
+use curvebook_stats::run_analysis;
 
 const FORBIDDEN_RECOMMENDATION_PHRASES: &[&str] = &[
     "use mann-whitney",

@@ -1,7 +1,7 @@
 //! Two-pane `InfoSheet` model: structured hookable laboratory constants on the left pane and
 //! freeform Markdown experimental notes on the right pane (`docs/data-tables-and-transforms.md` §3).
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 
 use crate::error::{DocError, validate_title};
 use crate::ids::{FloatingNote, SheetId};

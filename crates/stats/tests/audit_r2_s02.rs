@@ -5,26 +5,26 @@
 
 use std::collections::BTreeMap;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, ClusterDistance, ClusterLinkage, ColumnDesignHint, ColumnTable, ContingencyMethod,
     ContingencySpec, ContingencyTable, CoxTieMethod, DataSheet, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec, GroupedTable,
     KappaWeighting, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, PartsOfWholeTable, RepeatedMeasuresDesign,
     ResultCell, ResultSheet, ResultTab, SheetId, SubcolumnMode, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TwoGroupMethod, TwoGroupSpec,
     VariableRole, XyTable,
 };
-use lumencraft_math::{ConfidenceLevel, MathError};
-use lumencraft_stats::categorical::cohens_kappa;
-use lumencraft_stats::error::StatsError;
-use lumencraft_stats::multivariate::{
+use curvebook_math::{ConfidenceLevel, MathError};
+use curvebook_stats::categorical::cohens_kappa;
+use curvebook_stats::error::StatsError;
+use curvebook_stats::multivariate::{
     MAX_CLUSTERING_N, cophenetic_correlation, cophenetic_distance_matrix, cut_dendrogram, hierarchical_clustering_with_metrics,
     kmeans_pp_with_distance, pairwise_distance_matrix,
 };
-use lumencraft_stats::power::{
+use curvebook_stats::power::{
     OneSidedDirection, PowerAnalysisRequest, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, TailMode, TwoProportionsMethod, compute_power_curve,
     compute_sensitivity_table, solve_power,
 };
-use lumencraft_stats::run_analysis;
-use lumencraft_stats::two_group::paired_sign_test;
+use curvebook_stats::run_analysis;
+use curvebook_stats::two_group::paired_sign_test;
 
 fn assert_close(actual: f64, expected: f64, tol: f64, ctx: &str) {
     assert!((actual - expected).abs() <= tol, "{ctx}: expected {expected} +/- {tol}, got {actual}");

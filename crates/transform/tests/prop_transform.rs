@@ -1,8 +1,8 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, ErrorPropagationMode, MathTransformPreset, NormalizeAnchor,
     TableArchetype, TransformAnalysisSpec, XColumnMode, XyTable,
 };
-use lumencraft_transform::{MathTransformOp, TransformContext, evaluate_formula_for_sheet, execute_math_transform, execute_transform, parse_formula};
+use curvebook_transform::{MathTransformOp, TransformContext, evaluate_formula_for_sheet, execute_math_transform, execute_transform, parse_formula};
 use proptest::prelude::*;
 
 proptest! {
@@ -10,8 +10,8 @@ proptest! {
     fn prop_exp_ln_and_log10_antilog_inverses(xs in prop::collection::vec(0.01_f64..1e4, 2..20)) {
         let n = xs.len();
         let mut xy = XyTable::new_with_x_mode(
-            XColumnMode::Numbers { subcolumn_mode: lumencraft_doc::SubcolumnMode::Single },
-            lumencraft_doc::SubcolumnMode::Single,
+            XColumnMode::Numbers { subcolumn_mode: curvebook_doc::SubcolumnMode::Single },
+            curvebook_doc::SubcolumnMode::Single,
             1,
             n,
         ).unwrap();

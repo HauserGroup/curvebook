@@ -1,11 +1,11 @@
 //! End-to-end integration tests for `cmd_sci`, `cmd::registry()`, and `compile_sheet_scene`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BreakOrnament, Cell, ColumnDesignHint, ColumnTable, DataSheet, FramePreset, GraphKind, MultipleVariablesTable,
     NonlinearFitSpec, ProjectDocument, ResultStatus, ResultTabKind, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, VariableRole, XyTable,
 };
-use lumencraft_engine::{CommandOutcome, Session, cmd, cmd::helpers::compile_sheet_scene};
+use curvebook_engine::{CommandOutcome, Session, cmd, cmd::helpers::compile_sheet_scene};
 use serde_json::{Value, json};
 
 fn ok_cmd(session: &mut Session, id: &str, params: Value) -> CommandOutcome {
@@ -13,7 +13,7 @@ fn ok_cmd(session: &mut Session, id: &str, params: Value) -> CommandOutcome {
 }
 
 fn temp_export_path(name: &str) -> std::path::PathBuf {
-    std::env::temp_dir().join("lumencraft-cmd-sci-tests").join(name)
+    std::env::temp_dir().join("curvebook-cmd-sci-tests").join(name)
 }
 
 fn sample_4pl_xy_sheet(id: &str) -> DataSheet {
@@ -247,7 +247,7 @@ fn test_4pl_fit_graph_overlay_styling_and_all_exports() {
 
     let svg_out = ok_cmd(&mut session, "export.svg", json!({ "sheet_id": "g-4pl", "path": svg_path.to_string_lossy() }));
     let svg_str = svg_out.payload["svg"].as_str().unwrap();
-    assert!(svg_str.contains("<svg") && lumencraft_svg::validate_svg_structure(svg_str).is_ok());
+    assert!(svg_str.contains("<svg") && curvebook_svg::validate_svg_structure(svg_str).is_ok());
     assert!(std::fs::read_to_string(&svg_path).unwrap().contains("<svg"));
 
     let pdf_out = ok_cmd(&mut session, "export.pdf", json!({ "sheet_id": "g-4pl", "color_space": "cmyk", "path": pdf_path.to_string_lossy() }));
@@ -473,7 +473,7 @@ fn test_aligned_layout_scene_compilation_and_exports() {
     assert!(scene.primitives.len() >= 4);
 
     let svg = ok_cmd(&mut session, "export.svg", json!({ "sheet_id": "layout-fig1" }));
-    assert!(lumencraft_svg::validate_svg_structure(svg.payload["svg"].as_str().unwrap()).is_ok());
+    assert!(curvebook_svg::validate_svg_structure(svg.payload["svg"].as_str().unwrap()).is_ok());
 
     let pdf = ok_cmd(&mut session, "export.pdf", json!({ "sheet_id": "layout-fig1" }));
     assert!(pdf.payload["byte_len"].as_u64().unwrap() > 100);

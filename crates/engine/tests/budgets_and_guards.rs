@@ -3,21 +3,21 @@
 
 use std::sync::atomic::AtomicBool;
 
-use lumencraft_chart::{ChartError, ChartScene, compile_layout, multivariate_layout::MAX_LAYOUT_PRIMITIVES};
-use lumencraft_doc::{
+use curvebook_chart::{ChartError, ChartScene, compile_layout, multivariate_layout::MAX_LAYOUT_PRIMITIVES};
+use curvebook_doc::{
     Cell, ColumnDesignHint, ColumnTable, DataSheet, DocError, GraphSheet, GroupedTable, LayoutItem, LayoutSheet, LayoutSpec, MAX_LAYOUT_ITEMS,
     MAX_PROJECT_CELLS, MAX_SHEET_CELLS, MultipleVariablesTable, NestedTable, ProjectDocument, RectPt, SheetId, SubcolumnMode, TableArchetype,
     XColumnMode, XyTable,
 };
-use lumencraft_engine::{Caller, ErrorCode, Session, cmd, guard};
-use lumencraft_pdf::{MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfError, PdfExportOptions, render_pdf_pages};
+use curvebook_engine::{Caller, ErrorCode, Session, cmd, guard};
+use curvebook_pdf::{MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfError, PdfExportOptions, render_pdf_pages};
 use serde_json::json;
 
 fn exec(
     session: &mut Session,
     command_id: &str,
     params: serde_json::Value,
-) -> Result<lumencraft_engine::CommandOutcome, lumencraft_engine::EngineError> {
+) -> Result<curvebook_engine::CommandOutcome, curvebook_engine::EngineError> {
     let cancel = AtomicBool::new(false);
     session.execute_with_caller(command_id, params, Caller::Cli, &cancel)
 }

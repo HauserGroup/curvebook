@@ -10,15 +10,15 @@ fn macos_live_pasteboard_de_de_tsv_formula_and_bundle_roundtrip() {
     use std::process::{Command, Stdio};
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use lumencraft_doc::{Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphKind, GraphSheet, ProjectDocument, TableArchetype};
-    use lumencraft_engine::Session;
-    use lumencraft_ui_egui::{
+    use curvebook_doc::{Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphKind, GraphSheet, ProjectDocument, TableArchetype};
+    use curvebook_engine::Session;
+    use curvebook_ui_egui::{
         ClipboardBundle, OsAdapterAvailability, UiApp, read_os_clipboard_pdf_bytes, read_os_clipboard_text, read_os_pasteboard,
         write_os_clipboard_bundle, write_os_pasteboard,
     };
 
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-    let sentinel = format!("LC_W7_{}_{}", std::process::id(), nonce);
+    let sentinel = format!("CB_W7_{}_{}", std::process::id(), nonce);
 
     let table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2).expect("col table");
     let mut sheet = DataSheet::new("data-de", &sentinel, TableArchetype::Column(table)).expect("datasheet");

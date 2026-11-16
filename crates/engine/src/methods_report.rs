@@ -6,7 +6,7 @@
 
 use std::fmt::Write as _;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage,
     ContingencyMethod, ContingencySpec, CorrelationPowerMethod, CoxTieMethod, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
     FitMethod, GlmFamily, GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec,
@@ -17,7 +17,7 @@ use lumencraft_doc::{
     SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod,
     WeightingScheme,
 };
-use lumencraft_fit::get_builtin_model;
+use curvebook_fit::get_builtin_model;
 
 use crate::EngineError;
 
@@ -208,7 +208,7 @@ fn append_methods_section(blocks: &mut Vec<ReportBlock>, res: &ResultSheet, sour
     let alpha = format_exact_float(spec.confidence_level.alpha());
 
     blocks.push(ReportBlock::Paragraph(vec![
-        plain("Analyses were conducted in LumenCraft with "),
+        plain("Analyses were conducted in CurveBook with "),
         math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")),
         plain(" confidence intervals and nominal significance threshold "),
         math(format!("alpha = {alpha}"), format!("alpha = {alpha}"), format!("\\alpha = {alpha}")),
@@ -1417,7 +1417,7 @@ fn count_active_exclusion_notes(ds: &DataSheet) -> usize {
 }
 
 fn count_excluded_cells(ds: &DataSheet) -> usize {
-    let cols_excluded = |cols: &[lumencraft_doc::DataSetColumn]| -> usize {
+    let cols_excluded = |cols: &[curvebook_doc::DataSetColumn]| -> usize {
         cols.iter().flat_map(|c| c.cells.iter()).flat_map(|row| row.iter()).filter(|cell| cell.excluded).count()
     };
     match &ds.archetype {
@@ -1438,12 +1438,12 @@ fn count_excluded_cells(ds: &DataSheet) -> usize {
     }
 }
 
-fn p_format_label(fmt: lumencraft_doc::PValueFormat) -> String {
+fn p_format_label(fmt: curvebook_doc::PValueFormat) -> String {
     match fmt {
-        lumencraft_doc::PValueFormat::FourDecimal => String::from("0.0001 style (4 decimals)"),
-        lumencraft_doc::PValueFormat::Apa => String::from("APA style (3 decimals, no leading zero)"),
-        lumencraft_doc::PValueFormat::Nejm => String::from("NEJM style (3 decimals with leading zero)"),
-        lumencraft_doc::PValueFormat::Custom { decimals, scientific_below } => match scientific_below {
+        curvebook_doc::PValueFormat::FourDecimal => String::from("0.0001 style (4 decimals)"),
+        curvebook_doc::PValueFormat::Apa => String::from("APA style (3 decimals, no leading zero)"),
+        curvebook_doc::PValueFormat::Nejm => String::from("NEJM style (3 decimals with leading zero)"),
+        curvebook_doc::PValueFormat::Custom { decimals, scientific_below } => match scientific_below {
             Some(thresh) => format!("custom ({decimals} decimals, scientific below {})", format_exact_float(thresh)),
             None => format!("custom ({decimals} decimals)"),
         },

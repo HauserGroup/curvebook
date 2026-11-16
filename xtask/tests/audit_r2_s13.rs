@@ -15,7 +15,7 @@ impl TempDirGuard {
     fn new(label: &str) -> Result<Self, String> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let path = std::env::temp_dir().join(format!("lc-audit-r2-s13-{label}-{}-{nanos}-{seq}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cb-audit-r2-s13-{label}-{}-{nanos}-{seq}", std::process::id()));
         fs::create_dir_all(&path).map_err(|e| format!("create_dir_all {}: {e}", path.display()))?;
         Ok(Self { path })
     }
@@ -74,7 +74,7 @@ fn r2_s13_02_release_workflow_freebsd_and_all_jobs_avoid_script_injection() {
     let root = workspace_root().unwrap();
     let release = fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
     assert!(release.contains("envs: 'INPUT_VERSION GITHUB_REF_TYPE GITHUB_REF_NAME'"));
-    assert!(!release.contains("LUMENCRAFT_VERSION=\"${{ inputs.version }}\""));
+    assert!(!release.contains("CURVEBOOK_VERSION=\"${{ inputs.version }}\""));
     assert!(!release.contains("nfpm_arch=\"${{"));
 
     let out = run_xtask(&["telemetry"], &[]).unwrap();
@@ -144,11 +144,11 @@ fn r2_s13_05_and_r2_s11_11_web_headers_coop_coep_csp_and_subpath_rules() {
         "/fonts/*",
         "/\n",
         "/index.html",
-        "/lumencraft/",
-        "/lumencraft/index.html",
-        "/lumencraft/*.wasm",
-        "/lumencraft/*.js",
-        "/lumencraft/fonts/*",
+        "/curvebook/",
+        "/curvebook/index.html",
+        "/curvebook/*.wasm",
+        "/curvebook/*.js",
+        "/curvebook/fonts/*",
     ] {
         assert!(headers.contains(expected), "_headers missing `{expected}`");
     }
@@ -232,10 +232,10 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
     );
     write_exe("lipo", "#!/usr/bin/env bash\necho 'x86_64 arm64'\n");
     write_exe("arch", "#!/usr/bin/env bash\nshift\nexec \"$@\"\n");
-    write_exe("ditto", &format!("#!/usr/bin/env bash\ncp \"{}/lumencraft-cli\" \"$4/lumencraft-cli\"\n", cli_bin_dir.display()));
+    write_exe("ditto", &format!("#!/usr/bin/env bash\ncp \"{}/curvebook-cli\" \"$4/curvebook-cli\"\n", cli_bin_dir.display()));
 
-    let mock_cli = cli_bin_dir.join("lumencraft-cli");
-    fs::write(&mock_cli, "#!/usr/bin/env bash\necho 'lumencraft-cli 0.1.0'\n").unwrap();
+    let mock_cli = cli_bin_dir.join("curvebook-cli");
+    fs::write(&mock_cli, "#!/usr/bin/env bash\necho 'curvebook-cli 0.1.0'\n").unwrap();
     let mut perms = fs::metadata(&mock_cli).unwrap().permissions();
     perms.set_mode(0o755);
     fs::set_permissions(&mock_cli, perms.clone()).unwrap();
@@ -246,7 +246,7 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
     fs::write(&zip, b"zip").unwrap();
 
     let path_env = format!("{}:/usr/bin:/bin", bin_dir.display());
-    // 1. Missing LumenCraft.app inside mounted DMG must fail.
+    // 1. Missing CurveBook.app inside mounted DMG must fail.
     let missing_app = Command::new("bash")
         .arg(&verify_sh)
         .args(["--arch", "universal", dmg.to_str().unwrap(), zip.to_str().unwrap()])
@@ -254,12 +254,12 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
         .output()
         .unwrap();
     assert!(!missing_app.status.success());
-    assert!(String::from_utf8_lossy(&missing_app.stderr).contains("LumenCraft.app"), "{}", String::from_utf8_lossy(&missing_app.stderr));
+    assert!(String::from_utf8_lossy(&missing_app.stderr).contains("CurveBook.app"), "{}", String::from_utf8_lossy(&missing_app.stderr));
 
-    // Create LumenCraft.app inside mounted DMG.
-    fs::create_dir_all(dmg_mount.join("LumenCraft.app/Contents/MacOS")).unwrap();
-    fs::write(dmg_mount.join("LumenCraft.app/Contents/Info.plist"), "<plist/>").unwrap();
-    let app_bin = dmg_mount.join("LumenCraft.app/Contents/MacOS/lumencraft");
+    // Create CurveBook.app inside mounted DMG.
+    fs::create_dir_all(dmg_mount.join("CurveBook.app/Contents/MacOS")).unwrap();
+    fs::write(dmg_mount.join("CurveBook.app/Contents/Info.plist"), "<plist/>").unwrap();
+    let app_bin = dmg_mount.join("CurveBook.app/Contents/MacOS/curvebook");
     fs::write(&app_bin, "#!/usr/bin/env bash\nexit 0\n").unwrap();
     fs::set_permissions(&app_bin, perms).unwrap();
 

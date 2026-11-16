@@ -12,13 +12,13 @@
 //! - Pre-summarized unpaired/Welch *t*-tests (`f_test` exactness & `levene_median == None`)
 //! - Consistent observed-direction one-tailed rank-test conventions across sign, Mann–Whitney, and Wilcoxon tests
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, ColumnDesignHint, ColumnTable, ConfidenceLevel, MultiplicitySpec, ResultCell, SheetId,
     SubcolumnMode, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus, SurvivalTable, TableArchetype, TwoGroupMethod, TwoGroupSpec,
 };
-use lumencraft_stats::run_analysis;
-use lumencraft_stats::survival::{kaplan_meier_curve, two_cohort_hazard_ratio};
-use lumencraft_stats::two_group::{
+use curvebook_stats::run_analysis;
+use curvebook_stats::survival::{kaplan_meier_curve, two_cohort_hazard_ratio};
+use curvebook_stats::two_group::{
     f_test_variances, mann_whitney_u, paired_sign_test, paired_t_test, unpaired_t_test, unpaired_t_test_from_summary, welch_t_test,
     welch_t_test_from_summary, wilcoxon_matched_pairs,
 };
@@ -42,7 +42,7 @@ fn conf(percent: f64) -> ConfidenceLevel {
     ConfidenceLevel::new(percent).unwrap()
 }
 
-fn raw_col_sheet(cols: &[(&str, &[f64])]) -> lumencraft_doc::DataSheet {
+fn raw_col_sheet(cols: &[(&str, &[f64])]) -> curvebook_doc::DataSheet {
     let max_len = cols.iter().map(|(_, v)| v.len()).max().unwrap_or(0);
     let mut tab = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, cols.len(), max_len).unwrap();
     for (c, (title, vals)) in cols.iter().enumerate() {
@@ -51,10 +51,10 @@ fn raw_col_sheet(cols: &[(&str, &[f64])]) -> lumencraft_doc::DataSheet {
             tab.data_sets[c].cells[r][0] = Cell::number(v);
         }
     }
-    lumencraft_doc::DataSheet::new(SheetId::new("r35-raw"), "Raw", TableArchetype::Column(tab)).unwrap()
+    curvebook_doc::DataSheet::new(SheetId::new("r35-raw"), "Raw", TableArchetype::Column(tab)).unwrap()
 }
 
-fn summary_mean_sd_n_sheet(cols: &[(&str, (f64, f64, f64))]) -> lumencraft_doc::DataSheet {
+fn summary_mean_sd_n_sheet(cols: &[(&str, (f64, f64, f64))]) -> curvebook_doc::DataSheet {
     let mut tab = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, SubcolumnMode::MeanSdN, cols.len(), 1).unwrap();
     for (c, &(title, (mean, sd, n))) in cols.iter().enumerate() {
         tab.data_sets[c].title = title.to_owned();
@@ -62,7 +62,7 @@ fn summary_mean_sd_n_sheet(cols: &[(&str, (f64, f64, f64))]) -> lumencraft_doc::
         tab.data_sets[c].cells[0][1] = Cell::number(sd);
         tab.data_sets[c].cells[0][2] = Cell::number(n);
     }
-    lumencraft_doc::DataSheet::new(SheetId::new("r35-sum"), "Summary", TableArchetype::Column(tab)).unwrap()
+    curvebook_doc::DataSheet::new(SheetId::new("r35-sum"), "Summary", TableArchetype::Column(tab)).unwrap()
 }
 
 #[test]
@@ -151,7 +151,7 @@ fn r35_surv_oe_hr_genuine_mh_and_peto_oracles() {
         srv2.times[7 + r] = Cell::number(o.time);
         srv2.cohorts[1].cells[7 + r][0] = Cell::number(if o.status == SurvivalStatus::Event { 1.0 } else { 0.0 });
     }
-    let sheet2 = lumencraft_doc::DataSheet::new(SheetId::new("srv-2"), "Surv2", TableArchetype::Survival(srv2)).unwrap();
+    let sheet2 = curvebook_doc::DataSheet::new(SheetId::new("srv-2"), "Surv2", TableArchetype::Survival(srv2)).unwrap();
     let km_spec = |sid: &str| {
         AnalysisSpec::new(
             SheetId::new(format!("r-{sid}")),
@@ -188,7 +188,7 @@ fn r35_surv_oe_hr_genuine_mh_and_peto_oracles() {
         srv3.times[8 + r] = Cell::number(t);
         srv3.cohorts[2].cells[8 + r][0] = Cell::number(1.0);
     }
-    let sheet3 = lumencraft_doc::DataSheet::new(SheetId::new("srv-3"), "Surv3", TableArchetype::Survival(srv3)).unwrap();
+    let sheet3 = curvebook_doc::DataSheet::new(SheetId::new("srv-3"), "Surv3", TableArchetype::Survival(srv3)).unwrap();
     let rs3 = run_analysis(&sheet3, &km_spec("srv-3")).unwrap();
     let pw = rs3.tabs.iter().find(|t| t.id == "survival-pairwise").unwrap();
     assert!(matches!(pw.rows[0][3], ResultCell::Empty), "Cohort 0 vs 1 (O_B == 0) HR cell must be Empty");

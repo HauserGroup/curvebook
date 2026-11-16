@@ -7,7 +7,7 @@
   the directory dimensions.
 #>
 param(
-  [string] $Path = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'assets\app-icon\lumencraft.ico')
+  [string] $Path = (Join-Path (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path 'assets\app-icon\curvebook.ico')
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest

@@ -12,5 +12,5 @@
 *.zip binary
 *.woff binary
 *.woff2 binary
-*.lumencraft binary
-*.lctemplate binary
+*.curvebook binary
+*.cbtemplate binary

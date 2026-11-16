@@ -1,6 +1,6 @@
 //! External multi-engine `%PDF-1.7` + `/FontFile2` visual QA harness (`G5`/`G13`).
 //!
-//! Exports real `%PDF-1.7` documents via `lumencraft_pdf`, rasterizes every page with BOTH Poppler
+//! Exports real `%PDF-1.7` documents via `curvebook_pdf`, rasterizes every page with BOTH Poppler
 //! (`pdftoppm -r 150 -f 1 -l 1`) and Ghostscript (`gs -dSAFER -dBATCH -dNOPAUSE -sDEVICE=ppmraw -r150`),
 //! parses binary `P6` PPM pixels, and asserts non-blank glyph ink, translucent `/CA`/`/ca` ribbon
 //! blending, CJK/RTL coverage, crop marks, zero engine stderr warnings/errors, and cross-engine
@@ -11,13 +11,11 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_chart::{ChartScene, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
-use lumencraft_palette::Rgba8;
-use lumencraft_pdf::{PdfExportOptions, PdfVersion, render_pdf};
-use lumencraft_text::glyph_paths::{GlyphOutlineCmd, outline_ttf_glyph};
-use lumencraft_text::{
-    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, TrueTypeFont, parse_truetype_font_info, shape_bidi_runs,
-};
+use curvebook_chart::{ChartScene, FillPaint, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
+use curvebook_palette::Rgba8;
+use curvebook_pdf::{PdfExportOptions, PdfVersion, render_pdf};
+use curvebook_text::glyph_paths::{GlyphOutlineCmd, outline_ttf_glyph};
+use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, TrueTypeFont, parse_truetype_font_info, shape_bidi_runs};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
@@ -28,7 +26,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(tag: &str) -> Result<Self, String> {
         let id = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lc-pdf-qa-{}-{}-{}", std::process::id(), tag, id));
+        let path = std::env::temp_dir().join(format!("cb-pdf-qa-{}-{}-{}", std::process::id(), tag, id));
         fs::create_dir_all(&path).map_err(|e| format!("create QA temp dir {}: {e}", path.display()))?;
         Ok(Self { path })
     }

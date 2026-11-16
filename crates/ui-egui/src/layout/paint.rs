@@ -5,8 +5,8 @@
 
 use std::sync::Arc;
 
-use lumencraft_palette::Rgba8;
-use lumencraft_render::RasterImage;
+use curvebook_palette::Rgba8;
+use curvebook_render::RasterImage;
 
 use super::{ClipId, LayoutRectPx, LayoutTree, WidgetId, ZLayer};
 use crate::text_bridge::{DesktopTextMeasurer, PaintClipPx, ShapedTextLine, SoftwareTextPainter, TextPaintStyle, UiTextStyle};

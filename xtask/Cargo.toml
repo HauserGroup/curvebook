@@ -7,14 +7,14 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-lumencraft-chart = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-engine = { workspace = true }
-lumencraft-format = { workspace = true }
-lumencraft-pdf = { workspace = true }
-lumencraft-svg = { workspace = true }
-lumencraft-testkit = { workspace = true }
-lumencraft-ui-egui = { workspace = true, default-features = false }
+curvebook-chart = { workspace = true }
+curvebook-doc = { workspace = true }
+curvebook-engine = { workspace = true }
+curvebook-format = { workspace = true }
+curvebook-pdf = { workspace = true }
+curvebook-svg = { workspace = true }
+curvebook-testkit = { workspace = true }
+curvebook-ui-egui = { workspace = true, default-features = false }
 serde_json = { workspace = true }
 
 [lints]

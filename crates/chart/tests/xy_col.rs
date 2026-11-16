@@ -1,5 +1,5 @@
-use lumencraft_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AnnotationShapeKind, AreaFillSpec, AxisSegment, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament,
     CategoricalTickSource, Cell, ColumnDesignHint, ColumnTable, ConnectingLineStyle, ConstantValue, DataSheet, EquationDisplayMode,
     ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement,
@@ -8,9 +8,9 @@ use lumencraft_doc::{
     ReplicateOverlayStyle, ResultScalarEntry, ResultSheet, ResultStatus, SheetId, SubcolumnMode, SummaryMeasure, TableArchetype, TickLabelFormat,
     WhiskerMethod, XColumnMode, XyTable,
 };
-use lumencraft_fit::{HookContext, execute_analysis};
-use lumencraft_math::{AxisScale, ConfidenceLevel, PValueFormat};
-use lumencraft_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
+use curvebook_fit::{HookContext, execute_analysis};
+use curvebook_math::{AxisScale, ConfidenceLevel, PValueFormat};
+use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 
 fn all_points_finite(scene: &ChartScene) -> bool {
     for prim in &scene.primitives {
@@ -98,7 +98,7 @@ fn slice_0_xy_dose_response_replicates_and_4pl_overlay() {
     nl.confidence_bands = true;
     nl.prediction_bands = true;
     let fit_spec = AnalysisSpec::new("fit-1", "data-1", AnalysisKind::NonlinearRegression(nl)).unwrap();
-    let fit_res = lumencraft_fit::execute_analysis(&fit_spec, doc.data_sheet(&SheetId::new("data-1")).unwrap(), &HookContext::default()).unwrap();
+    let fit_res = curvebook_fit::execute_analysis(&fit_spec, doc.data_sheet(&SheetId::new("data-1")).unwrap(), &HookContext::default()).unwrap();
     assert!(!fit_res.fitted_curves.is_empty());
     doc.add_result_sheet(fit_res).unwrap();
 
@@ -154,7 +154,7 @@ fn slice_0_xy_dose_response_replicates_and_4pl_overlay() {
     let texts = find_texts(&scene);
     assert!(texts.iter().any(|t| t == "Activity (LC-401, %)"), "template hook not expanded in {texts:?}");
     let has_superscript = scene.primitives.iter().any(|p| match p {
-        ScenePrimitive::Text(t) => t.rich.spans.iter().any(|sp| sp.script == lumencraft_text::SpanScript::Superscript),
+        ScenePrimitive::Text(t) => t.rich.spans.iter().any(|sp| sp.script == curvebook_text::SpanScript::Superscript),
         _ => false,
     });
     assert!(has_superscript, "expected 10^k superscript spans on log X ticks");
@@ -338,11 +338,11 @@ fn xy_broken_axes_split_curves_and_emit_log_warnings() {
 
     // Add fitted curve overlay spanning both broken segments [1..=10] and [100..=200]
     let fit_spec = AnalysisSpec::new("fit-brk", "d-brk", AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("michaelis_menten"))).unwrap();
-    let mut fit_res = lumencraft_doc::ResultSheet::new(fit_spec).unwrap();
+    let mut fit_res = curvebook_doc::ResultSheet::new(fit_spec).unwrap();
     let pts = (1..=200)
         .map(|i| {
             let x = i as f64;
-            lumencraft_doc::CurveSamplePoint {
+            curvebook_doc::CurveSamplePoint {
                 x,
                 y: 2.0 + 0.1 * x,
                 ci_lower: Some(1.0 + 0.1 * x),
@@ -352,7 +352,7 @@ fn xy_broken_axes_split_curves_and_emit_log_warnings() {
             }
         })
         .collect();
-    fit_res.fitted_curves.push(lumencraft_doc::FittedCurveOverlay {
+    fit_res.fitted_curves.push(curvebook_doc::FittedCurveOverlay {
         data_set_index: 0,
         equation_id: String::from("linear"),
         converged: true,
@@ -575,7 +575,7 @@ fn live_pairwise_brackets_auto_stacked_and_formatted_from_anova_results() {
     anova_spec.p_value_format = PValueFormat::Apa;
     anova_spec.confidence_level = ConfidenceLevel::DEFAULT_95;
 
-    let anova_res = lumencraft_stats::run_analysis(doc.data_sheet(&SheetId::new("d-anova")).unwrap(), &anova_spec).unwrap();
+    let anova_res = curvebook_stats::run_analysis(doc.data_sheet(&SheetId::new("d-anova")).unwrap(), &anova_spec).unwrap();
     assert!(!anova_res.pairwise_comparisons.is_empty());
     doc.add_result_sheet(anova_res).unwrap();
 
@@ -630,7 +630,7 @@ fn live_pairwise_brackets_auto_stacked_and_formatted_from_anova_results() {
         },
     ];
     graph.spec.annotations.push(GraphAnnotation::TextBox {
-        bounds_pt: lumencraft_doc::RectPt::new(60.0, 38.0, 90.0, 20.0),
+        bounds_pt: curvebook_doc::RectPt::new(60.0, 38.0, 90.0, 20.0),
         markdown: String::from("<b>Tukey</b> HSD"),
         bordered: true,
     });
@@ -683,7 +683,7 @@ fn frames_thresholds_dual_y2_tick_formats_and_annotations() {
         g.spec.annotations = vec![
             GraphAnnotation::Shape {
                 kind: AnnotationShapeKind::RoundedRectangle,
-                bounds_pt: lumencraft_doc::RectPt::new(80.0, 50.0, 40.0, 20.0),
+                bounds_pt: curvebook_doc::RectPt::new(80.0, 50.0, 40.0, 20.0),
                 stroke_color: Rgba8::BLACK,
                 stroke_width_pt: 0.8,
                 dash: LineDashStyle::Solid,

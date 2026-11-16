@@ -7,16 +7,16 @@
 //! - WF-43: XY Descriptive Analysis per-dataset Trapezoidal AUC (raw & pre-summarized)
 //! - WF-29: Row-wise descriptive statistics across active numeric columns (`MultipleVariables`, `Column`, `Grouped`)
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, ColumnDesignHint, ColumnTable, CoxTieMethod, DataSheet, DescriptiveSpec, GlmFamily, GlmSpec,
     GroupedTable, MultipleVariablesTable, ResultCell, ResultSheet, ResultTab, ResultTabKind, SheetId, SubcolumnAggregation, SubcolumnMode,
     SurvivalAnalysisSpec, TableArchetype, VariableRole, XyTable,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::linalg::DenseMatrix;
-use lumencraft_stats::regression::{multiple_linear_regression, multiple_logistic_regression, multiple_poisson_regression};
-use lumencraft_stats::run_analysis;
-use lumencraft_stats::survival::{CoxSubject, cox_ph_regression};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::linalg::DenseMatrix;
+use curvebook_stats::regression::{multiple_linear_regression, multiple_logistic_regression, multiple_poisson_regression};
+use curvebook_stats::run_analysis;
+use curvebook_stats::survival::{CoxSubject, cox_ph_regression};
 
 const FORBIDDEN_RECOMMENDATION_PHRASES: &[&str] = &[
     "use mann-whitney",

@@ -1,21 +1,21 @@
-//! Stage 3A regression tests for S02 silent-wrong-statistics fixes in `lumencraft-stats`.
+//! Stage 3A regression tests for S02 silent-wrong-statistics fixes in `curvebook-stats`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CiBound, ColumnDesignHint, ColumnTable, ContingencyMethod, ContingencySpec, ContingencyTable,
     CoxTieMethod, DataSheet, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, OneWayAnovaSpec, OneWayMethod, ResultCell, RocCiMethod,
     RocSpec, SheetId, SurvivalAnalysisSpec, TableArchetype,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_stats::categorical::{cochran_armitage_trend, fisher_exact_rxc};
-use lumencraft_stats::column::one_sample_wilcoxon;
-use lumencraft_stats::multiplicity::{
+use curvebook_math::ConfidenceLevel;
+use curvebook_stats::categorical::{cochran_armitage_trend, fisher_exact_rxc};
+use curvebook_stats::column::one_sample_wilcoxon;
+use curvebook_stats::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, adjust_p_values, compare_dunn_ranks, compare_groups_with_procedure,
 };
-use lumencraft_stats::roc::roc_curve_analysis;
-use lumencraft_stats::survival::{CoxSubject, cox_ph_regression};
-use lumencraft_stats::two_group::{mann_whitney_u, wilcoxon_matched_pairs};
-use lumencraft_stats::{StatsError, run_analysis};
+use curvebook_stats::roc::roc_curve_analysis;
+use curvebook_stats::survival::{CoxSubject, cox_ph_regression};
+use curvebook_stats::two_group::{mann_whitney_u, wilcoxon_matched_pairs};
+use curvebook_stats::{StatsError, run_analysis};
 
 fn contingency_sheet(rows: &[&[u64]]) -> DataSheet {
     let n_rows = rows.len();
@@ -41,7 +41,7 @@ fn column_sheet(cols: &[(&str, &[f64])]) -> DataSheet {
     DataSheet::new(SheetId::new("col-s"), "Columns", TableArchetype::Column(tab)).unwrap()
 }
 
-fn scalar_by_name(sheet: &lumencraft_doc::ResultSheet, name: &str) -> Option<f64> {
+fn scalar_by_name(sheet: &curvebook_doc::ResultSheet, name: &str) -> Option<f64> {
     sheet.scalars.iter().find(|s| s.key == name).map(|s| s.value)
 }
 

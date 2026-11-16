@@ -3,7 +3,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource,
     LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId,
     TableArchetype, VariableColumn, default_column_label, transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells,
@@ -554,7 +554,7 @@ fn apply_row_exclusion_predicate(grid: &mut [Vec<Cell>], pred: &str) -> Result<(
             bindings.push(("$row", (r + 1) as f64));
             bindings.push(("$index", r as f64));
         }
-        let col_names: Vec<String> = (0..row.len()).map(lumencraft_doc::default_column_label).collect();
+        let col_names: Vec<String> = (0..row.len()).map(curvebook_doc::default_column_label).collect();
         for (c, cell) in row.iter().enumerate() {
             if let Some(v) = cell.active_number() {
                 bindings.push((col_names[c].as_str(), v));

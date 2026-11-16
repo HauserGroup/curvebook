@@ -1,4 +1,4 @@
-//! Thin desktop and browser UI shell for LumenCraft: project navigator, typed data/results
+//! Thin desktop and browser UI shell for CurveBook: project navigator, typed data/results
 //! spreadsheet grid, statistical parameter dialogs, graph/layout canvas, menus, localization and
 //! local JSON-lines control channel.
 //!
@@ -26,12 +26,12 @@ pub mod theme;
 pub mod views;
 pub mod workspace_nav;
 
-pub use lumencraft_chart::{ChartScene, PointPt, PreflightIssue, SourceCellId};
-use lumencraft_doc::{ProjectDocument, SheetId, SheetSection, TableKind};
-use lumencraft_engine::{CommandOutcome, EngineError, Session};
-pub use lumencraft_palette::CanvasPreviewFilter;
-pub use lumencraft_render::{RasterImage, RenderError, RenderTargetSpec};
-use lumencraft_tools::{Cursor, GridCellCoord, GridVisibleWindow};
+pub use curvebook_chart::{ChartScene, PointPt, PreflightIssue, SourceCellId};
+use curvebook_doc::{ProjectDocument, SheetId, SheetSection, TableKind};
+use curvebook_engine::{CommandOutcome, EngineError, Session};
+pub use curvebook_palette::CanvasPreviewFilter;
+pub use curvebook_render::{RasterImage, RenderError, RenderTargetSpec};
+use curvebook_tools::{Cursor, GridCellCoord, GridVisibleWindow};
 pub use serde_json;
 
 pub use compositor::{
@@ -187,7 +187,7 @@ impl BatchUndoTracker {
     }
 }
 
-/// Top-level application state driving the LumenCraft native desktop UI.
+/// Top-level application state driving the CurveBook native desktop UI.
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiApp {
     pub(crate) session: Session,
@@ -392,12 +392,12 @@ impl UiApp {
     /// Return whether strict `--gui-only` enforcement is active on the underlying [`Session`].
     #[must_use]
     pub fn is_gui_only(&self) -> bool {
-        self.session.gui_only() == lumencraft_engine::GuiOnlyPolicy::Strict
+        self.session.gui_only() == curvebook_engine::GuiOnlyPolicy::Strict
     }
 
     /// Enable or disable strict `--gui-only` enforcement on the underlying [`Session`].
     pub fn set_gui_only(&mut self, gui_only: bool) {
-        let policy = if gui_only { lumencraft_engine::GuiOnlyPolicy::Strict } else { lumencraft_engine::GuiOnlyPolicy::Disabled };
+        let policy = if gui_only { curvebook_engine::GuiOnlyPolicy::Strict } else { curvebook_engine::GuiOnlyPolicy::Disabled };
         self.session.set_gui_only(policy);
     }
 
@@ -452,7 +452,7 @@ impl UiApp {
     pub fn execute_control_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
         let cancelled = std::sync::atomic::AtomicBool::new(false);
         let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), command_id, |session| {
-            session.execute_with_caller(command_id, params, lumencraft_engine::Caller::Control, &cancelled)
+            session.execute_with_caller(command_id, params, curvebook_engine::Caller::Control, &cancelled)
         })?;
         self.sync_views();
         Ok(outcome)
@@ -619,7 +619,7 @@ impl UiApp {
     /// Returns an error if spooling or staging fails.
     pub fn preview_print_dialog_spool(&mut self) -> Result<OsAdapterStatus, String> {
         let spool = self.execute_print_dialog_spool(false)?;
-        let title = self.canvas_dialogs.print.job.title.as_deref().unwrap_or("lumencraft-print");
+        let title = self.canvas_dialogs.print.job.title.as_deref().unwrap_or("curvebook-print");
         let status = os_integration::open_os_print_preview_dialog_titled(&spool, title)?;
         self.canvas_dialogs.print.last_status = Some(status.detail.clone());
         Ok(status)
@@ -665,7 +665,7 @@ impl UiApp {
         self.virtual_workspace.save_project_archive(file_name, self.session.document())
     }
 
-    /// Load a `.lumen` archive from [`Self::virtual_workspace`] into the active [`Session`] (`QOL-10`).
+    /// Load a `.curvebook` archive from [`Self::virtual_workspace`] into the active [`Session`] (`QOL-10`).
     ///
     /// # Errors
     /// Returns an error string if the entry is missing or fails validation.
@@ -726,7 +726,7 @@ impl UiApp {
 mod tests {
     use std::io::{BufReader, Cursor};
 
-    use lumencraft_doc::{CellCoord, SheetCellRange};
+    use curvebook_doc::{CellCoord, SheetCellRange};
     use serde_json::{Value, json};
 
     use super::menus::ui_commands::UI_COMMANDS;
@@ -861,7 +861,7 @@ mod tests {
         let bundle = ClipboardBundle::from_sheet(app.session(), &graph_id, 144)?;
         assert!(bundle.pdf_bytes.starts_with(b"%PDF-"));
         assert!(bundle.svg.contains("<svg"));
-        assert!(bundle.html.contains("<div class=\"lumencraft-figure\""));
+        assert!(bundle.html.contains("<div class=\"curvebook-figure\""));
         assert!(bundle.png_bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
 
         let data_sheet = app.document().data_sheets.first().ok_or("missing data sheet")?;

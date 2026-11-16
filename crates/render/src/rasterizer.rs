@@ -1,9 +1,9 @@
-//! Deterministic software rasterizer converting [`lumencraft_chart::ChartScene`] into RGBA pixels.
+//! Deterministic software rasterizer converting [`curvebook_chart::ChartScene`] into RGBA pixels.
 
-use lumencraft_chart::{ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
-use lumencraft_palette::{CanvasPreviewFilter, LineDashStyle, Rgba8, simulate_preview_filter};
-use lumencraft_text::metrics::split_rich_text_lines;
-use lumencraft_text::{GlyphOutlineCmd, outline_rich_text};
+use curvebook_chart::{ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
+use curvebook_palette::{CanvasPreviewFilter, LineDashStyle, Rgba8, simulate_preview_filter};
+use curvebook_text::metrics::split_rich_text_lines;
+use curvebook_text::{GlyphOutlineCmd, outline_rich_text};
 use serde::{Deserialize, Serialize};
 
 use crate::RenderTargetSpec;
@@ -1431,8 +1431,8 @@ fn flatten_glyph_commands(cmds: &[GlyphOutlineCmd], xform: TextTransform) -> Vec
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, ScenePrimitive, StrokePaint};
-    use lumencraft_palette::{LineDashStyle, Rgba8};
+    use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, ScenePrimitive, StrokePaint};
+    use curvebook_palette::{LineDashStyle, Rgba8};
 
     fn dashed_scene_for_line(x0: f64, y0: f64, x1: f64, y1: f64, dash: LineDashStyle) -> ChartScene {
         let mut scene = ChartScene::new("dash", "Dash", 200.0, 100.0, Some(Rgba8::WHITE));

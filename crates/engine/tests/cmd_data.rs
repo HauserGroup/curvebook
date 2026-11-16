@@ -3,19 +3,19 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, ConstantValue, FramePreset, GraphSheet, HookSource, JournalWidthPreset, LayoutItem,
     LayoutSheet, LayoutSpec, NonlinearFitSpec, ParameterRule, ParameterScope, ProjectDocument, RectPt, ResultSheet, ResultStatus, SheetId,
     TableArchetype, TableKind, VariableRole,
 };
-use lumencraft_engine::{Caller, Session, cmd};
+use curvebook_engine::{Caller, Session, cmd};
 use serde_json::{Value, json};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn unique_temp_path(stem: &str, ext: &str) -> PathBuf {
     let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    std::env::temp_dir().join(format!("lumencraft_engine_test_{stem}_{}_{seq}.{ext}", std::process::id()))
+    std::env::temp_dir().join(format!("curvebook_engine_test_{stem}_{}_{seq}.{ext}", std::process::id()))
 }
 
 fn data_cell(session: &Session, sheet_id: &str, row: usize, col: usize, subcol: usize) -> Option<Cell> {
@@ -155,8 +155,8 @@ fn sheet_create_all_eight_archetypes_auto_family_and_inspect() {
 
 #[test]
 fn project_new_save_open_and_template_round_trip() {
-    let proj_path = unique_temp_path("proj", "lumencraft");
-    let tpl_path = unique_temp_path("tpl", "lctemplate");
+    let proj_path = unique_temp_path("proj", "curvebook");
+    let tpl_path = unique_temp_path("tpl", "cbtemplate");
 
     let mut session = Session::new();
     session.execute("project.new", json!({ "title": "Ligand Panel" })).expect("project.new");
@@ -266,9 +266,9 @@ fn sheet_rename_delete_duplicate_reorder_and_select() {
 fn sheet_clone_pipeline_and_duplicate_family_for_fresh_assay_run() {
     // Construct a complete Data -> Info + Analysis + Styled Graph + Layout pipeline.
     let mut doc = ProjectDocument::new("Cloning Assay").expect("doc");
-    let mut xy = lumencraft_doc::XyTable::new(lumencraft_doc::SubcolumnMode::Single, 1, 5).expect("xy");
+    let mut xy = curvebook_doc::XyTable::new(curvebook_doc::SubcolumnMode::Single, 1, 5).expect("xy");
     xy.data_sets[0].title = String::from("Inhibitor A");
-    let mut data = lumencraft_doc::DataSheet::new(SheetId::new("data-base"), "Run 1", TableArchetype::Xy(xy)).expect("ds");
+    let mut data = curvebook_doc::DataSheet::new(SheetId::new("data-base"), "Run 1", TableArchetype::Xy(xy)).expect("ds");
     data.info_sheet_id = Some(SheetId::new("info-base"));
     let x_vals = [-8.0, -7.0, -6.0, -5.0, -4.0];
     let y_vals = [95.0, 82.0, 50.0, 18.0, 5.0];
@@ -278,7 +278,7 @@ fn sheet_clone_pipeline_and_duplicate_family_for_fresh_assay_run() {
     }
     doc.add_data_sheet(data).expect("add data");
 
-    let mut info = lumencraft_doc::InfoSheet::new_preseeded(SheetId::new("info-base"), "Run 1 Info").expect("info");
+    let mut info = curvebook_doc::InfoSheet::new_preseeded(SheetId::new("info-base"), "Run 1 Info").expect("info");
     info.set_constant("PlateBatch", ConstantValue::Text(String::from("B1")), None).expect("const");
     info.set_constant("MaxResp", ConstantValue::Number(100.0), None).expect("maxresp");
     doc.add_info_sheet(info).expect("add info");
@@ -296,7 +296,7 @@ fn sheet_clone_pipeline_and_duplicate_family_for_fresh_assay_run() {
     });
     let ana = AnalysisSpec::new(SheetId::new("res-base"), SheetId::new("data-base"), AnalysisKind::NonlinearRegression(nl)).expect("ana");
     let mut res = ResultSheet::new(ana).expect("res");
-    res.scalars.push(lumencraft_doc::ResultScalarEntry { key: String::from("LogEC50"), data_set_index: Some(0), value: -6.0, units: None });
+    res.scalars.push(curvebook_doc::ResultScalarEntry { key: String::from("LogEC50"), data_set_index: Some(0), value: -6.0, units: None });
     doc.add_result_sheet(res).expect("add res");
 
     let mut graph =
@@ -749,14 +749,14 @@ fn table_multiple_variables_and_simulate_xy_commands() {
 #[test]
 fn info_notes_constants_and_hooked_recalculation() {
     let mut doc = ProjectDocument::new("Info Hooks").expect("doc");
-    let info = lumencraft_doc::InfoSheet::new_preseeded(SheetId::new("info-1"), "Experiment Info").expect("info");
+    let info = curvebook_doc::InfoSheet::new_preseeded(SheetId::new("info-1"), "Experiment Info").expect("info");
     doc.add_info_sheet(info).expect("add info");
 
-    let mut mv = lumencraft_doc::MultipleVariablesTable::new(2, 2).expect("mv");
+    let mut mv = curvebook_doc::MultipleVariablesTable::new(2, 2).expect("mv");
     mv.variables[0].title = String::from("Raw");
     mv.variables[1].title = String::from("Scaled");
     mv.variables[1].set_calculated_formula("= [Raw] * Info(\"ScaleFactor\")");
-    let mut ds = lumencraft_doc::DataSheet::new(SheetId::new("mv-1"), "Assay", TableArchetype::MultipleVariables(mv)).expect("ds");
+    let mut ds = curvebook_doc::DataSheet::new(SheetId::new("mv-1"), "Assay", TableArchetype::MultipleVariables(mv)).expect("ds");
     ds.info_sheet_id = Some(SheetId::new("info-1"));
     ds.set_cell(CellCoord::new(0, 0, 0), Cell::number(5.0)).expect("set 5");
     doc.add_data_sheet(ds).expect("add ds");

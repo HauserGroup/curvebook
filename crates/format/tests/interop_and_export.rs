@@ -1,9 +1,9 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, FittedCurveOverlay, OneWayAnovaSpec,
     PairwiseComparisonRecord, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype,
     TableKind, VariableRole,
 };
-use lumencraft_format::{
+use curvebook_format::{
     CsvOptions, FormatError, ImportWarningKind, XmlLimits, ZipLimits, ZipWriter, export_result_sheet_json, export_result_sheet_tidy_csv,
     export_result_tab_csv, import_prism_bytes, import_prism_bytes_with_limits, import_pzfx_str, parse_delimited_records, parse_xml,
     parse_xml_with_limits,

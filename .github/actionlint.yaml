@@ -1,4 +1,4 @@
-# Actionlint configuration for LumenCraft GitHub Actions workflows.
+# Actionlint configuration for CurveBook GitHub Actions workflows.
 # Recognizes GitHub-hosted ARM runner labels and keeps config variables unrestricted.
 self-hosted-runner:
   labels:

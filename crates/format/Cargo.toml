@@ -1,11 +1,11 @@
 [package]
-name = "lumencraft-format"
+name = "curvebook-format"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft project archive, template and tabular scientific file format readers and writers"
+description = "CurveBook project archive, template and tabular scientific file format readers and writers"
 
 [lints]
 workspace = true
@@ -13,13 +13,13 @@ workspace = true
 [dependencies]
 crc32fast = { workspace = true }
 flate2 = { workspace = true }
-lumencraft-math = { workspace = true }
-lumencraft-palette = { workspace = true }
-lumencraft-platform = { workspace = true }
-lumencraft-doc = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-palette = { workspace = true }
+curvebook-platform = { workspace = true }
+curvebook-doc = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }
 proptest = { workspace = true }

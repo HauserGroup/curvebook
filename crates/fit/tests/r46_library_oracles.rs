@@ -1,7 +1,7 @@
 //! Regression reproducers and D1 primary-literature oracle tests for R4.6 equation library fixes.
 
-use lumencraft_doc::{ParameterRule, ParameterScope};
-use lumencraft_fit::{
+use curvebook_doc::{ParameterRule, ParameterScope};
+use curvebook_fit::{
     DataPoint, DatasetSeries, EquationCategory, FitStatus, HookContext, NonlinearFitResult, ParametricModel, SolverConfig, fit_nonlinear,
     format_model_equation_tex, get_builtin_model, list_builtin_equations,
 };

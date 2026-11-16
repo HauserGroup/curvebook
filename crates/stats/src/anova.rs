@@ -72,18 +72,18 @@
 //! - Tomczak, M., & Tomczak, E. (2014). The need to report effect size estimates revisited. An
 //!   overview of some recommended measures of effect size. *Trends in Sport Sciences* 1(21):19–25.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, FactorialAnovaSpec, MultiplicityMethod, MultiplicitySpec, NestedAnalysisSpec,
     OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultSheet,
     ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{
     chi2_sf, dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, f_sf, max_studentized_range_isf, max_studentized_range_sf,
     noncentral_f_ci, student_t_two_sided_isf, student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
 };
-use lumencraft_math::linalg::{DenseMatrix, cholesky, qr_col_pivoted, solve_linear_least_squares, sym_eigen};
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments};
+use curvebook_math::linalg::{DenseMatrix, cholesky, qr_col_pivoted, solve_linear_least_squares, sym_eigen};
+use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
 
 use crate::column::shapiro_wilk;
@@ -862,7 +862,7 @@ pub fn rm_one_way_anova(blocks: &[Vec<f64>]) -> Result<RmOneWayAnovaResult, Stat
     }
     for row in blocks {
         if row.len() != k {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: k, actual: row.len() }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: k, actual: row.len() }));
         }
         validate_finite_slice(row)?;
     }
@@ -1016,7 +1016,7 @@ fn pooled_within_group_cov(groups: &[Vec<Vec<f64>>]) -> Result<DenseMatrix, Stat
         let mut means = vec![0.0_f64; k];
         for row in grp {
             if row.len() != k {
-                return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: k, actual: row.len() }));
+                return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: k, actual: row.len() }));
             }
             for (c, &v) in row.iter().enumerate() {
                 means[c] += v / ng_f;
@@ -1182,7 +1182,7 @@ pub fn friedman_test(blocks: &[Vec<f64>]) -> Result<FriedmanResult, StatsError> 
 
     for row in blocks {
         if row.len() != k {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: k, actual: row.len() }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: k, actual: row.len() }));
         }
         let ranked = rank_with_ties(row)?;
         tie_sum += ranked.tie_sum_t3_minus_t;
@@ -1301,7 +1301,7 @@ fn build_cell_stats_map(rows: &[(Vec<usize>, f64)]) -> Result<std::collections::
 }
 
 /// Fit Type I (sequential) or Type III (partial, sum/effect-coded) general `N`-way factorial ANOVA
-/// via `lumencraft_math::linalg::solve_linear_least_squares`.
+/// via `curvebook_math::linalg::solve_linear_least_squares`.
 ///
 /// Sums of squares come from full-vs-reduced model comparisons (Maxwell & Delaney, 2004, ch. 7;
 /// Searle, 1987). Type I: sequential RSS reductions in term order. Type III: RSS increase from
@@ -1706,16 +1706,16 @@ fn fit_rm_two_way_anova_with_posthoc(
 
     for (s, mat) in subject_data.iter().enumerate() {
         if mat.len() != a {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: a, actual: mat.len() }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: a, actual: mat.len() }));
         }
         let mut s_acc = NeumaierSum::new();
         for (i, r_vec) in mat.iter().enumerate() {
             if r_vec.len() != b {
-                return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: b, actual: r_vec.len() }));
+                return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: b, actual: r_vec.len() }));
             }
             for (j, &v) in r_vec.iter().enumerate() {
                 if !v.is_finite() {
-                    return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "y", value: v }));
+                    return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "y", value: v }));
                 }
                 data_max_abs = data_max_abs.max(v.abs());
                 grand_sum.add(v);
@@ -1941,7 +1941,7 @@ fn symmetrize_dense(m: &DenseMatrix) -> Result<DenseMatrix, StatsError> {
     let nr = m.nrows();
     let nc = m.ncols();
     if nr != nc {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: nr, actual: nc }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: nr, actual: nc }));
     }
     let mut data = vec![0.0_f64; nr * nr];
     for i in 0..nr {
@@ -1962,7 +1962,7 @@ fn scale_dense(m: &DenseMatrix, factor: f64) -> Result<DenseMatrix, StatsError> 
 
 fn dense_sub(a: &DenseMatrix, b: &DenseMatrix) -> Result<DenseMatrix, StatsError> {
     if a.nrows() != b.nrows() || a.ncols() != b.ncols() {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: a.nrows(), actual: b.nrows() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: a.nrows(), actual: b.nrows() }));
     }
     let data: Vec<f64> = a.as_slice().iter().zip(b.as_slice().iter()).map(|(&x, &y)| x - y).collect();
     Ok(DenseMatrix::from_row_major(a.nrows(), a.ncols(), data)?)
@@ -2417,10 +2417,10 @@ fn fit_random_intercept_reml_with_core(
     let n = x.nrows();
     let p = x.ncols();
     if y.len() != n {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
     }
     if cluster_ids.len() != n {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: cluster_ids.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: cluster_ids.len() }));
     }
     if n <= p {
         return Err(StatsError::InsufficientSampleSize { context: "REML mixed model", required: p + 1, actual: n });
@@ -2720,7 +2720,7 @@ fn fit_multi_vc_reml_with_core(
     let n = x.nrows();
     let p = x.ncols();
     if y.len() != n {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
     }
     if n <= p {
         return Err(StatsError::InsufficientSampleSize { context: "multi-VC REML model", required: p + 1, actual: n });
@@ -2740,7 +2740,7 @@ fn fit_multi_vc_reml_with_core(
     dofs.push(n as f64);
     for (name, g_mat, rank_c) in random_effects {
         if g_mat.nrows() != n || g_mat.ncols() != n {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: g_mat.nrows().min(g_mat.ncols()) }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: g_mat.nrows().min(g_mat.ncols()) }));
         }
         gs.push(g_mat.clone());
         dofs.push((*rank_c).max(1) as f64);
@@ -3054,16 +3054,16 @@ fn unstructured_prepare_clusters(
 ) -> Result<UnstructuredPrepared, StatsError> {
     let n = x.nrows();
     if y.len() != n {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
     }
     if cluster_ids.len() != n {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: cluster_ids.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: cluster_ids.len() }));
     }
     if timepoint_ids.len() != n {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: timepoint_ids.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: timepoint_ids.len() }));
     }
     if !x.all_finite() {
-        return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "x", value: f64::NAN }));
+        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "x", value: f64::NAN }));
     }
     validate_finite_slice(y)?;
     let n_declared = timepoint_labels.len();
@@ -3721,13 +3721,13 @@ fn fit_unstructured_rm_reml_with_core(
 /// Kenward–Roger Wald *F*-test from [`fit_random_intercept_reml`] (Patterson & Thompson, 1971;
 /// Kenward & Roger, 1997). For two groups, the nested `t` is the signed square root of that
 /// adjusted Wald *F*.
-pub fn nested_one_way_anova(table: &lumencraft_doc::NestedTable, two_group_t_test: bool) -> Result<NestedAnovaResult, StatsError> {
+pub fn nested_one_way_anova(table: &curvebook_doc::NestedTable, two_group_t_test: bool) -> Result<NestedAnovaResult, StatsError> {
     let selected: Vec<usize> = (0..table.groups.len()).collect();
     nested_one_way_anova_selected(table, &selected, two_group_t_test)
 }
 
 fn nested_one_way_anova_selected(
-    table: &lumencraft_doc::NestedTable,
+    table: &curvebook_doc::NestedTable,
     selected_groups: &[usize],
     two_group_t_test: bool,
 ) -> Result<NestedAnovaResult, StatsError> {
@@ -5859,7 +5859,7 @@ fn run_factorial_multiplicity(
     Ok(())
 }
 
-fn grouped_row_levels(grouped: &lumencraft_doc::GroupedTable, n_rows: usize) -> Vec<String> {
+fn grouped_row_levels(grouped: &curvebook_doc::GroupedTable, n_rows: usize) -> Vec<String> {
     (0..n_rows).map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect()
 }
 
@@ -5964,7 +5964,7 @@ fn push_rm_sphericity_outputs(
 }
 
 fn run_grouped_factorial(
-    grouped: &lumencraft_doc::GroupedTable,
+    grouped: &curvebook_doc::GroupedTable,
     out: &mut ResultSheet,
     selected: &[usize],
     fac_spec: &FactorialAnovaSpec,
@@ -6195,7 +6195,7 @@ fn run_rm_two_way_unstructured_reml(
 }
 
 fn run_rm_two_way_reml_fallback(
-    grouped: &lumencraft_doc::GroupedTable,
+    grouped: &curvebook_doc::GroupedTable,
     out: &mut ResultSheet,
     selected_cols: &[usize],
     fac_spec: &FactorialAnovaSpec,
@@ -6429,7 +6429,7 @@ fn run_rm_two_way_reml_fallback(
 }
 
 fn run_multifactor_mv(
-    mv: &lumencraft_doc::MultipleVariablesTable,
+    mv: &curvebook_doc::MultipleVariablesTable,
     fac_spec: &FactorialAnovaSpec,
 ) -> Result<(FactorialAnovaResult, FactorialObservations, OlsPostHocModel), StatsError> {
     let resp_idx = fac_spec.response_column.ok_or(StatsError::MissingColumn { index: 0 })?;
@@ -6462,8 +6462,8 @@ fn run_multifactor_mv(
                 break;
             }
             let tok = match &cell.value {
-                lumencraft_doc::CellValue::Text(s) => s.trim().to_owned(),
-                lumencraft_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
+                curvebook_doc::CellValue::Text(s) => s.trim().to_owned(),
+                curvebook_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
                 _ => {
                     valid = false;
                     break;
@@ -6577,7 +6577,7 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
 
 fn append_nested_multiplicity(
     out: &mut ResultSheet,
-    nested: &lumencraft_doc::NestedTable,
+    nested: &curvebook_doc::NestedTable,
     selected_groups: &[usize],
     res: &NestedAnovaResult,
     spec: &AnalysisSpec,

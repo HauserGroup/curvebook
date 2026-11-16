@@ -1,10 +1,10 @@
 //! Device-independent vector scene intermediate representation (`ChartScene`) emitted by
-//! `lumencraft-chart` and consumed by SVG, PDF, CPU raster, and canvas backends.
+//! `curvebook-chart` and consumed by SVG, PDF, CPU raster, and canvas backends.
 
 use std::fmt;
 
-use lumencraft_palette::{LineDashStyle, Rgba8};
-use lumencraft_text::{RichSpan, RichText, SpanScript, measure_text_pt, metrics::split_rich_text_lines};
+use curvebook_palette::{LineDashStyle, Rgba8};
+use curvebook_text::{RichSpan, RichText, SpanScript, measure_text_pt, metrics::split_rich_text_lines};
 use serde::{Deserialize, Serialize};
 
 /// Two-dimensional point in PostScript points (`1 pt = 1/72 inch`).
@@ -62,13 +62,13 @@ impl RectPt {
     }
 }
 
-impl From<lumencraft_doc::RectPt> for RectPt {
-    fn from(rect: lumencraft_doc::RectPt) -> Self {
+impl From<curvebook_doc::RectPt> for RectPt {
+    fn from(rect: curvebook_doc::RectPt) -> Self {
         Self::new(rect.x, rect.y, rect.width, rect.height)
     }
 }
 
-impl From<RectPt> for lumencraft_doc::RectPt {
+impl From<RectPt> for curvebook_doc::RectPt {
     fn from(rect: RectPt) -> Self {
         Self::new(rect.x, rect.y, rect.width, rect.height)
     }
@@ -246,10 +246,10 @@ impl fmt::Display for ChartError {
 
 impl std::error::Error for ChartError {}
 
-/// Coordinate provenance pointing back to the originating [`lumencraft_doc::DataSheet`] cell (`QOL-5`).
+/// Coordinate provenance pointing back to the originating [`curvebook_doc::DataSheet`] cell (`QOL-5`).
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct SourceCellId {
-    pub sheet_id: lumencraft_doc::SheetId,
+    pub sheet_id: curvebook_doc::SheetId,
     pub row: usize,
     pub col: usize,
     pub subcol: usize,

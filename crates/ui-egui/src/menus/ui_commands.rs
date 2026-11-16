@@ -1,4 +1,4 @@
-//! UI-only commands handled by the front-end shell (`lumencraft-ui-egui`) rather than the headless
+//! UI-only commands handled by the front-end shell (`curvebook-ui-egui`) rather than the headless
 //! document engine. Mirrored to `crates/mcp/src/ui_catalog.rs` by `cargo xtask ui-commands`.
 
 /// Declarative metadata for a front-end UI command.
@@ -12,7 +12,7 @@ pub struct UiCommandSpec {
     pub beginner: &'static str,
 }
 
-/// Front-end UI commands handled by the desktop shell (`lumencraft-ui-egui`).
+/// Front-end UI commands handled by the desktop shell (`curvebook-ui-egui`).
 pub const UI_COMMANDS: &[UiCommandSpec] = &[
     UiCommandSpec {
         id: "ui.navigator.toggle",
@@ -244,7 +244,7 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         shortcut: "",
         params_doc: "{\"mode\":\"optional Plate96|Plate384|TidyLongPivot\"}",
         summary: "Open the microplate or tidy-long CSV reshape import dialog.",
-        beginner: "Converts 96/384-well plate grids or long-format CSV columns into structured LumenCraft data tables.",
+        beginner: "Converts 96/384-well plate grids or long-format CSV columns into structured CurveBook data tables.",
     },
     UiCommandSpec {
         id: "ui.print.open",
@@ -368,10 +368,10 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
     },
     UiCommandSpec {
         id: "app.about",
-        label: "About LumenCraft",
+        label: "About CurveBook",
         shortcut: "",
         params_doc: "{}",
-        summary: "Open the About LumenCraft version and build information dialog.",
+        summary: "Open the About CurveBook version and build information dialog.",
         beginner: "Displays the application version, bundled font status, and workspace licensing information.",
     },
 ];

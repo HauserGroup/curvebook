@@ -1,5 +1,5 @@
 //! Scientific typography, axis tick formatting, superscripts/subscripts, Greek symbols and p-value
-//! label layout for LumenCraft.
+//! label layout for CurveBook.
 //!
 //! Layer L2 crate. Governing spec: `docs/graphing-and-layouts.md` (§3.3) and `docs/development.md` (§Fonts).
 #![forbid(unsafe_code)]
@@ -52,7 +52,7 @@ impl std::error::Error for TextError {}
 
 include!(concat!(env!("OUT_DIR"), "/bundled_fonts.rs"));
 
-/// Whether bundled fonts are compiled into this build of `lumencraft-text`.
+/// Whether bundled fonts are compiled into this build of `curvebook-text`.
 #[must_use]
 pub const fn has_bundled_fonts_feature() -> bool {
     cfg!(feature = "bundled-fonts")
@@ -60,7 +60,7 @@ pub const fn has_bundled_fonts_feature() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_math::{AxisScale, PValueFormat};
+    use curvebook_math::{AxisScale, PValueFormat};
 
     use super::{
         BUNDLED_FONTS, LocaleNumberPolicy, SpanScript, SpanWeight, expand_template_hooks, format_axis_tick, format_pvalue_label, measure_text_pt,

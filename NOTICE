@@ -1,5 +1,5 @@
-LumenCraft
-Copyright (c) 2026 LumenCraft contributors.
+CurveBook
+Copyright (c) 2026 CurveBook contributors.
 Licensed under the MIT License or the Apache License, Version 2.0, at your option
 (LICENSE-MIT, LICENSE-APACHE).
 
@@ -8,6 +8,6 @@ Third-party material
 Per-file asset attribution (author, source, license) is maintained in ASSETS.md and ATTRIBUTION.md.
 Every asset committed to this repository is checked by `cargo xtask assets` (part of `cargo xtask ci`).
 
-Builds made with optional bundled fonts (`LUMENCRAFT_FONTS_DIR`) embed SIL Open Font License 1.1
-font faces from `$LUMENCRAFT_FONTS_DIR/fonts/` and ship their license texts alongside the release
-packages as `OFL-<family>.txt`. Builds without `LUMENCRAFT_FONTS_DIR` embed none of them.
+Builds made with optional bundled fonts (`CURVEBOOK_FONTS_DIR`) embed SIL Open Font License 1.1
+font faces from `$CURVEBOOK_FONTS_DIR/fonts/` and ship their license texts alongside the release
+packages as `OFL-<family>.txt`. Builds without `CURVEBOOK_FONTS_DIR` embed none of them.

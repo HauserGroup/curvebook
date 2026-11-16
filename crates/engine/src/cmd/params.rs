@@ -154,11 +154,11 @@ pub fn any_json_schema(description: &str) -> Value {
     json!({ "description": description })
 }
 
-/// Convert a [`lumencraft_doc::SchemaNode`] into a `serde_json::Value` schema document.
+/// Convert a [`curvebook_doc::SchemaNode`] into a `serde_json::Value` schema document.
 ///
 /// # Errors
 /// Returns [`EngineError`] if serialization fails.
-pub fn schema_node_to_value(node: &lumencraft_doc::SchemaNode) -> Result<Value, EngineError> {
+pub fn schema_node_to_value(node: &curvebook_doc::SchemaNode) -> Result<Value, EngineError> {
     serde_json::to_value(node).map_err(|err| EngineError::with_code(ErrorCode::InternalError, format!("failed to serialize schema node: {err}")))
 }
 

@@ -1,6 +1,6 @@
 # Licence & Attribution Policy
 
-LumenCraft is dual-licensed under **`MIT OR Apache-2.0`** ([Cargo.toml](../Cargo.toml)). Every dependency, asset, sample dataset, and contribution must remain compatible with this licence without introducing copyleft restrictions.
+CurveBook is dual-licensed under **`MIT OR Apache-2.0`** ([Cargo.toml](../Cargo.toml)). Every dependency, asset, sample dataset, and contribution must remain compatible with this licence without introducing copyleft restrictions.
 
 ---
 
@@ -27,7 +27,7 @@ Only permissive, copy-left-free SPDX licences listed below are permitted for Rus
 
 ## 2. Asset & Corpus Licences
 
-Every non-code asset (icons, SVGs, cursor bitmaps, sample `.csv`/`.lumencraft`/reference fixtures) must record its source and SPDX licence in [ASSETS.md](../ASSETS.md) (and [ATTRIBUTION.md](../ATTRIBUTION.md) for third-party works). Allowed asset/data licences include:
+Every non-code asset (icons, SVGs, cursor bitmaps, sample `.csv`/`.curvebook`/reference fixtures) must record its source and SPDX licence in [ASSETS.md](../ASSETS.md) (and [ATTRIBUTION.md](../ATTRIBUTION.md) for third-party works). Allowed asset/data licences include:
 - `MIT`, `Apache-2.0`, `CC0-1.0`, `LicenseRef-Public-Domain` (e.g., NIST StRD statistical reference datasets)
 - `CC-BY-4.0` and `CC-BY-SA-4.0` (where attribution is recorded in `ATTRIBUTION.md` and content remains separate from MIT/Apache-2.0 source code)
 - `OFL-1.1`, `Ubuntu-font-1.0`, `Bitstream-Vera` (documentation/attribution references only; binary font files are **never** tracked in the git repository—see the zero-bundled-font rule in [AGENTS.md](../AGENTS.md))

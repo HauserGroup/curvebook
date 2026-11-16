@@ -1,8 +1,8 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, DataSheet, MultipleVariablesTable, ResultCell, SimulationNoise, SubcolumnMode, TableArchetype,
     TransformAnalysisSpec, XyTable,
 };
-use lumencraft_transform::{TransformContext, TransformError, execute_analysis_transform, execute_transform, parse_formula};
+use curvebook_transform::{TransformContext, TransformError, execute_analysis_transform, execute_transform, parse_formula};
 
 fn assert_seed_summary_cell(summary_rows: &[Vec<ResultCell>], row_labels: &[String], expected_seed: u64) {
     let seed_row = row_labels.iter().position(|label| label == "Seed");

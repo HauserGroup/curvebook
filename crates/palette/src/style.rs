@@ -1,5 +1,5 @@
-//! Data-point marker glyphs and stroke dash styles shared across `lumencraft-doc`,
-//! `lumencraft-chart`, `lumencraft-svg`, `lumencraft-pdf`, and `lumencraft-render`.
+//! Data-point marker glyphs and stroke dash styles shared across `curvebook-doc`,
+//! `curvebook-chart`, `curvebook-svg`, `curvebook-pdf`, and `curvebook-render`.
 
 use crate::space::Rgba8;
 

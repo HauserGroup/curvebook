@@ -6,11 +6,11 @@
 //! labels, optional bottom-up BGRA `EMR_STRETCHDIBITS` bitmaps, and clean `EMR_DELETEOBJECT`
 //! handle lifecycle management.
 
-use lumencraft_chart::{
+use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
-use lumencraft_palette::{LineDashStyle, Rgba8};
-use lumencraft_text::{
+use curvebook_palette::{LineDashStyle, Rgba8};
+use curvebook_text::{
     RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, measure_text_pt,
     metrics::{char_advance_pt, split_rich_text_lines},
 };

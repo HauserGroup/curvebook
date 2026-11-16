@@ -4,7 +4,7 @@
 //! pointer coordinates, scroll wheels, focus navigation, raw keystrokes, and IME text events resolved
 //! against rendered [`LayoutTree`] bounds — measuring real input-to-paint latency (`R10.22 <= 50 ms`).
 
-use lumencraft_render::{RasterImage, RenderError, RenderTargetSpec};
+use curvebook_render::{RasterImage, RenderError, RenderTargetSpec};
 
 use crate::UiApp;
 use crate::compositor::render_workspace_rgba;

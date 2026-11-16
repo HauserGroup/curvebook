@@ -28,7 +28,7 @@ body:
   - type: textarea
     id: observed
     attributes:
-      label: What LumenCraft reports
+      label: What CurveBook reports
       description: The values, with as many digits as you can get. Include how you ran it (CLI command, MCP request, or the steps in the app).
       render: text
     validations:

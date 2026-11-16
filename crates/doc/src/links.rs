@@ -1,7 +1,7 @@
 //! Provenance-tracked `LinkedDataRegion` live links, four-stage `ImportLinkSpec` pipeline, and
 //! [`DataSheet`] (with `frozen: bool` mutation guards) (`docs/data-tables-and-transforms.md` §1.4 & §6).
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 
 use crate::TableKind;
 use crate::archetypes::{CellCoord, TableArchetype, default_column_label};

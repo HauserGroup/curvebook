@@ -1,16 +1,16 @@
 [package]
-name = "lumencraft-testkit"
+name = "curvebook-testkit"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft numerical reference assertions and synthetic dataset builders for tests"
+description = "CurveBook numerical reference assertions and synthetic dataset builders for tests"
 
 [lints]
 workspace = true
 
 [dependencies]
-lumencraft-math = { workspace = true }
-lumencraft-palette = { workspace = true }
-lumencraft-doc = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-palette = { workspace = true }
+curvebook-doc = { workspace = true }

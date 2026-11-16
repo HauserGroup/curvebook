@@ -1,18 +1,18 @@
 //! Column descriptive statistics, exact binomial median CIs, normality & lognormality tests,
 //! outlier identification (Grubbs & ROUT), and one-sample hypothesis tests.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveSpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet, ResultTab,
     ResultTabKind, SubcolumnAggregation, SummarizedPoint, TableArchetype, VariableRole,
 };
-use lumencraft_math::dist::{
+use curvebook_math::dist::{
     chi2_isf, chi2_ppf, chi2_sf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf,
     student_t_two_sided_p,
 };
-use lumencraft_math::noncentral_t_ci;
-use lumencraft_math::special::{gamma::gamma, inc_beta::reg_beta};
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments, lag1_autocorrelation};
-use lumencraft_math::{ConfidenceLevel, MathError};
+use curvebook_math::noncentral_t_ci;
+use curvebook_math::special::{gamma::gamma, inc_beta::reg_beta};
+use curvebook_math::sum::{NeumaierSum, SummaryMoments, lag1_autocorrelation};
+use curvebook_math::{ConfidenceLevel, MathError};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
@@ -311,7 +311,7 @@ fn compute_quadratic_stats(values: &[f64], confidence: ConfidenceLevel) -> Resul
     let sm = SummaryMoments::from_slice(&sqs)?;
     let rms = max_abs * sm.mean.max(0.0).sqrt();
     if !rms.is_finite() {
-        return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "quadratic_mean", value: rms }));
+        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "quadratic_mean", value: rms }));
     }
     let ci = if n >= 2 {
         if let Some((lo_sq, hi_sq)) = compute_mean_ci(sm.mean, sm.sem().ok(), n, confidence)? {
@@ -474,7 +474,7 @@ fn extract_indexed_series_for_descriptive(
     }
 }
 
-fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[usize]) -> Result<DescriptiveSeriesExtraction, StatsError> {
+fn extract_column_table_for_desc(t: &curvebook_doc::ColumnTable, selected: &[usize]) -> Result<DescriptiveSeriesExtraction, StatsError> {
     let indices = resolve_selected_indices(selected, t.data_sets.len());
     if t.subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
@@ -533,7 +533,7 @@ fn extract_column_table_for_desc(t: &lumencraft_doc::ColumnTable, selected: &[us
 }
 
 fn extract_xy_table_for_desc(
-    t: &lumencraft_doc::XyTable,
+    t: &curvebook_doc::XyTable,
     selected: &[usize],
     aggregation: SubcolumnAggregation,
 ) -> Result<DescriptiveSeriesExtraction, StatsError> {
@@ -563,7 +563,7 @@ fn extract_xy_table_for_desc(
 }
 
 fn extract_grouped_table_for_desc(
-    t: &lumencraft_doc::GroupedTable,
+    t: &curvebook_doc::GroupedTable,
     selected: &[usize],
     aggregation: SubcolumnAggregation,
 ) -> Result<DescriptiveSeriesExtraction, StatsError> {
@@ -593,7 +593,7 @@ fn extract_grouped_table_for_desc(
 }
 
 fn aggregate_replicate_datasets(
-    data_sets: &[lumencraft_doc::DataSetColumn],
+    data_sets: &[curvebook_doc::DataSetColumn],
     indices: &[usize],
     aggregation: SubcolumnAggregation,
 ) -> Vec<IndexedRawSeries> {
@@ -929,7 +929,7 @@ pub fn anderson_darling(values: &[f64], alpha: f64) -> Result<NormalityTestOutco
 }
 
 /// Kolmogorov–Smirnov normality test (`n >= 5`) using the clean-room Lilliefors (1967) /
-/// Stephens (1974) distribution in [`lumencraft_math::dist::lilliefors_p_value`].
+/// Stephens (1974) distribution in [`curvebook_math::dist::lilliefors_p_value`].
 pub fn lilliefors_ks(values: &[f64], alpha: f64) -> Result<NormalityTestOutcome, StatsError> {
     validate_finite_slice(values)?;
     let n = values.len();
@@ -1073,7 +1073,7 @@ pub fn grubbs_outliers(values: &[f64], alpha: f64, iterative: bool) -> Result<Gr
             }
         }
         let nf = n as f64;
-        let t_crit = lumencraft_math::dist::student_t_isf(alpha / (2.0 * nf), nf - 2.0)?;
+        let t_crit = curvebook_math::dist::student_t_isf(alpha / (2.0 * nf), nf - 2.0)?;
         let g_crit = ((nf - 1.0) / nf.sqrt()) * (t_crit * t_crit / (nf - 2.0 + t_crit * t_crit)).sqrt();
         if max_g > g_crit {
             let (orig_idx, val) = active.remove(max_pos);
@@ -1420,7 +1420,7 @@ pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLe
         if n < 4 {
             return Ok((hl, None));
         }
-        let z = lumencraft_math::dist::norm_two_sided_isf(confidence.alpha())?;
+        let z = curvebook_math::dist::norm_two_sided_isf(confidence.alpha())?;
         let nf = n as f64;
         let mu = nf * (nf + 1.0) / 4.0;
         let sd = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0).sqrt();
@@ -1443,7 +1443,7 @@ pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLe
         if n < 4 {
             return Ok((hl, None));
         }
-        let z = lumencraft_math::dist::norm_two_sided_isf(confidence.alpha())?;
+        let z = curvebook_math::dist::norm_two_sided_isf(confidence.alpha())?;
         let nf = n as f64;
         let mu = nf * (nf + 1.0) / 4.0;
         let sd = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0).sqrt();
@@ -1730,7 +1730,7 @@ fn append_row_descriptive_stats(
 }
 
 fn collect_dataset_rows_for_desc(
-    data_sets: &[lumencraft_doc::DataSetColumn],
+    data_sets: &[curvebook_doc::DataSetColumn],
     row_titles: &[String],
     selected: &[usize],
     aggregation: SubcolumnAggregation,

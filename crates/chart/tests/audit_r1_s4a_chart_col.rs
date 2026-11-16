@@ -1,8 +1,8 @@
 use std::error::Error;
 use std::time::Instant;
 
-use lumencraft_chart::{ChartScene, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BracketLabelMode, BracketStyle, Cell, ClusterDistance, ClusterLinkage, ColumnDesignHint, ColumnTable, DataSheet,
     DiagnosticPlotKind, ErrorCode, GraphKind, GraphSheet, GraphSpec, GroupedTable, MultipleVariablesTable, MultiplicitySpec, MultivariateSpec,
     OneWayAnovaSpec, OneWayMethod, PairwiseBracketSpec, PairwiseComparisonRecord, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab,

@@ -836,7 +836,7 @@ fn render_html_preamble(policy: &DenyPolicy) -> String {
     let mut out = String::from(
         "<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n  \
          <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n  \
-         <title>LumenCraft — Third-Party Software Licenses</title>\n  <style>\n    \
+         <title>CurveBook — Third-Party Software Licenses</title>\n  <style>\n    \
          body { font-family: -apple-system, BlinkMacSystemFont, \"Segoe UI\", Roboto, sans-serif; \
          line-height: 1.55; color: #1b2230; background: #fff; margin: 2rem auto; max-width: 960px; padding: 0 1.25rem; }\n    \
          h1, h2, h3 { color: #1b2d56; } h1 { border-bottom: 2px solid #d7dee8; padding-bottom: 0.5rem; }\n    \
@@ -844,7 +844,7 @@ fn render_html_preamble(policy: &DenyPolicy) -> String {
          th, td { border: 1px solid #d7dee8; padding: 0.45rem 0.65rem; text-align: left; font-size: 0.9rem; }\n    \
          th { background: #f5f8fc; color: #1b2d56; }\n    \
          pre { background: #f5f8fc; border: 1px solid #d7dee8; border-radius: 6px; padding: 0.9rem; white-space: pre-wrap; }\n  \
-         </style>\n</head>\n<body>\n  <header>\n    <h1>LumenCraft — Third-Party Software Licenses</h1>\n    \
+         </style>\n</head>\n<body>\n  <header>\n    <h1>CurveBook — Third-Party Software Licenses</h1>\n    \
          <p>Permitted crate SPDX allowlist from <code>deny.toml</code>: ",
     );
     let escaped_allow: Vec<String> = policy.allow_licenses.iter().map(|s| format!("<code>{}</code>", escape_html(s))).collect();
@@ -1047,7 +1047,7 @@ bad_inline = { version = \"1.*\", features = [\"x\"] }
 
         let lock = "\
 [[package]]
-name = \"lumencraft-doc\"
+name = \"curvebook-doc\"
 version = \"0.1.0\"
 
 [[package]]
@@ -1069,11 +1069,11 @@ source = \"registry+https://example.com/index\"
         let errs = verify_lock_sources(&pkgs, &policy);
         assert_eq!(errs.len(), 2, "{errs:?}");
 
-        let html = render_licenses_html(&policy, &pkgs, "| a | <script> |", "Copyright LumenCraft");
+        let html = render_licenses_html(&policy, &pkgs, "| a | <script> |", "Copyright CurveBook");
         assert!(html.contains("<!DOCTYPE html>"));
         assert!(html.contains("serde"));
         assert!(html.contains("&lt;script&gt;"));
-        assert!(html.contains("Copyright LumenCraft"));
+        assert!(html.contains("Copyright CurveBook"));
     }
 
     #[test]

@@ -4,18 +4,18 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, ChecklistItem, ChecklistStatus, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet,
     GraphAnnotation, GraphKind, GraphSheet, GroupedTable, InfoConstant, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec,
     ProjectDocument, RectPt, RemediationKind, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetFolderKind, SheetId,
     SubcolumnMode, TableArchetype, TableKind, TwoGroupMethod, TwoGroupSpec, XyTable,
 };
-use lumencraft_engine::Session;
-use lumencraft_palette::CanvasPreviewFilter;
-use lumencraft_tools::canvas::SnapOrientation;
-use lumencraft_tools::{CanvasToolMode, GridCellCoord};
-use lumencraft_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, compute_workspace_layout};
-use lumencraft_ui_egui::{
+use curvebook_engine::Session;
+use curvebook_palette::CanvasPreviewFilter;
+use curvebook_tools::canvas::SnapOrientation;
+use curvebook_tools::{CanvasToolMode, GridCellCoord};
+use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, compute_workspace_layout};
+use curvebook_ui_egui::{
     ClipboardBundle, GridViewState, KeyModifiers, PointerButton, UiApp, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, WorkspacePixelRect,
     write_os_clipboard_bundle,
 };
@@ -361,10 +361,10 @@ fn canvas_pinch_zoom_inertial_pan_and_annotation_panel_drag_snap() {
 
     let gmap2 = app.layout_map(metrics);
     let paper2 = gmap2.scene_paper.as_ref().expect("paper2");
-    let ann_center_pt = lumencraft_ui_egui::PointPt::new(185.0, 106.0);
+    let ann_center_pt = curvebook_ui_egui::PointPt::new(185.0, 106.0);
     let ann_px = paper2.scene_pt_to_pixel(ann_center_pt).expect("ann px");
     let ann_log = metrics.physical_to_logical_px(ann_px);
-    let drag_target_px = paper2.scene_pt_to_pixel(lumencraft_ui_egui::PointPt::new(208.0, 129.0)).expect("dst px");
+    let drag_target_px = paper2.scene_pt_to_pixel(curvebook_ui_egui::PointPt::new(208.0, 129.0)).expect("dst px");
     let drag_target_log = metrics.physical_to_logical_px(drag_target_px);
 
     let down_out = app
@@ -403,9 +403,9 @@ fn canvas_pinch_zoom_inertial_pan_and_annotation_panel_drag_snap() {
     app.execute_command("sheet.select", json!({ "sheet_id": "layout-1" })).expect("select layout");
     let lmap = app.layout_map(metrics);
     let lpaper = lmap.scene_paper.as_ref().expect("layout paper");
-    let panel_px = lpaper.scene_pt_to_pixel(lumencraft_ui_egui::PointPt::new(130.0, 100.0)).expect("panel px");
+    let panel_px = lpaper.scene_pt_to_pixel(curvebook_ui_egui::PointPt::new(130.0, 100.0)).expect("panel px");
     let panel_log = metrics.physical_to_logical_px(panel_px);
-    let panel_dst_px = lpaper.scene_pt_to_pixel(lumencraft_ui_egui::PointPt::new(150.0, 120.0)).expect("dst");
+    let panel_dst_px = lpaper.scene_pt_to_pixel(curvebook_ui_egui::PointPt::new(150.0, 120.0)).expect("dst");
     let panel_dst_log = metrics.physical_to_logical_px(panel_dst_px);
 
     let l_down = app
@@ -520,7 +520,7 @@ fn qol1_qol2_convert_archetype_and_import_reshape() {
     app.execute_command("edit.undo", json!({})).expect("undo exclude x");
 
     // QOL-2: Plate96, Plate384, and TidyLongPivot import reshape flows.
-    app.grid.import_reshape.mode = lumencraft_ui_egui::ImportReshapeMode::Plate96;
+    app.grid.import_reshape.mode = curvebook_ui_egui::ImportReshapeMode::Plate96;
     app.grid.import_reshape.title = String::from("Plate 96 Screening");
     app.grid.import_reshape.plate_values = vec![Some(10.0); 96];
     let mut roles_96 = vec![json!("Blank"); 96];
@@ -534,14 +534,14 @@ fn qol1_qol2_convert_archetype_and_import_reshape() {
     let p96_out = app.execute_command(&p96_intent.command_id, p96_intent.params).expect("import 96");
     assert!(app.document().data_sheets.iter().any(|s| s.id.as_str() == p96_out.payload["sheet_id"].as_str().unwrap()));
 
-    app.grid.import_reshape.mode = lumencraft_ui_egui::ImportReshapeMode::Plate384;
+    app.grid.import_reshape.mode = curvebook_ui_egui::ImportReshapeMode::Plate384;
     app.grid.import_reshape.title = String::from("Plate 384 Check");
     app.grid.import_reshape.plate_values = vec![Some(2.0); 384];
     app.grid.import_reshape.plate_roles = vec![json!({ "group_name": "Ctrl", "dilution_x": 1.0, "replicate": 1 }); 384];
     let p384_intent = app.grid.import_reshape.build_import_intent().expect("plate384 intent");
     assert_eq!(p384_intent.params["geometry"], "Wells384");
 
-    app.grid.import_reshape.mode = lumencraft_ui_egui::ImportReshapeMode::TidyLongPivot;
+    app.grid.import_reshape.mode = curvebook_ui_egui::ImportReshapeMode::TidyLongPivot;
     app.grid.import_reshape.title = String::from("Tidy Assay");
     app.grid.import_reshape.target_kind = TableKind::Column;
     app.grid.import_reshape.x_col = None;
@@ -577,7 +577,7 @@ fn qol3_qol6_qol7_exclude_reason_report_and_remediation_sibling() {
     // QOL-6: Copy Methods & Statistical Reporting (`skip_os_clipboard: true` keeps pasteboard isolated).
     app.execute_command("sheet.select", json!({ "sheet_id": "res-t" })).expect("select res-t");
     for fmt in ["plain", "markdown", "latex"] {
-        let rep = lumencraft_ui_egui::dispatch_ui_command(
+        let rep = curvebook_ui_egui::dispatch_ui_command(
             &mut app,
             "ui.result.copyMethodsReport",
             &json!({ "result_sheet_id": "res-t", "format": fmt, "skip_os_clipboard": true }),
@@ -620,7 +620,7 @@ fn qol3_qol6_qol7_exclude_reason_report_and_remediation_sibling() {
     assert_eq!(banner_click.command_result.as_ref().unwrap()["tab_id"], json!(banner.detail_tab_ids[0]));
 
     // Deprecated `ui.result.applyRemediation` must fail with clear `diagnostics_only_policy` error & zero mutation.
-    let rem_err = lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
+    let rem_err = curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
         .expect_err("QOL-7 diagnostics-only must reject applyRemediation");
     assert!(rem_err.contains("diagnostics_only_policy"));
     assert_eq!(app.document().result_sheets.len(), initial_result_count);
@@ -657,14 +657,14 @@ fn qol7_assumption_banner_reports_small_n_info_and_blocks_remediation_mutation()
         banner.limitation_note
     );
 
-    let inspected = lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.result.inspectDiagnostics", &json!({ "result_sheet_id": "res-t" }))
+    let inspected = curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.result.inspectDiagnostics", &json!({ "result_sheet_id": "res-t" }))
         .expect("inspectDiagnostics ok")
         .expect("handled");
     assert_eq!(inspected["mutated"], false);
     assert_eq!(inspected["tab_id"], "diagnostics");
 
     let initial_count = app.document().result_sheets.len();
-    let err = lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
+    let err = curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
         .expect_err("applyRemediation must reject under QOL-7 diagnostics-only policy");
     assert!(err.contains("diagnostics_only_policy"));
     assert_eq!(app.document().result_sheets.len(), initial_count);
@@ -677,7 +677,7 @@ fn qol8_qol9_qol10_presets_preflight_cvd_non_mutating_presentation_and_virtual_w
     let metrics = ViewportMetrics::new(1024.0, 640.0, 1.0);
 
     // QOL-8: Apply DoubleColumn180mm canvas preset & run preflight check.
-    let preset_res = lumencraft_ui_egui::dispatch_ui_command(
+    let preset_res = curvebook_ui_egui::dispatch_ui_command(
         &mut app,
         "ui.canvas.applyPreset",
         &json!({ "sheet_id": "graph-xy", "preset": "DoubleColumn180mm", "resize_mode": "KeepTypographyPt" }),
@@ -685,7 +685,7 @@ fn qol8_qol9_qol10_presets_preflight_cvd_non_mutating_presentation_and_virtual_w
     .expect("apply preset")
     .expect("ui handled");
     assert_eq!(preset_res["preset"], "DoubleColumn180mm");
-    let preflight_res = lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.canvas.preflight", &json!({ "sheet_id": "graph-xy" }))
+    let preflight_res = curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.canvas.preflight", &json!({ "sheet_id": "graph-xy" }))
         .expect("preflight")
         .expect("handled");
     assert!(preflight_res["issue_count"].as_u64().is_some());
@@ -695,7 +695,7 @@ fn qol8_qol9_qol10_presets_preflight_cvd_non_mutating_presentation_and_virtual_w
     let normal_rgba = app.render_rgba_for_metrics(metrics, 96).expect("normal render");
 
     for filter_name in ["deuteranopia", "protanopia", "tritanopia", "grayscale"] {
-        lumencraft_ui_egui::dispatch_ui_command(&mut app, "ui.previewFilter.set", &json!({ "filter": filter_name })).expect("set preview filter");
+        curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.previewFilter.set", &json!({ "filter": filter_name })).expect("set preview filter");
         let filtered_rgba = app.render_rgba_for_metrics(metrics, 96).expect("filtered render");
         assert_ne!(normal_rgba.rgba, filtered_rgba.rgba, "filter {filter_name} should alter rendered viewport");
         assert_eq!(
@@ -719,14 +719,14 @@ fn qol8_qol9_qol10_presets_preflight_cvd_non_mutating_presentation_and_virtual_w
     assert_eq!(pres_layout.inspector.width, 0);
     assert!(pres_layout.canvas.width > normal_layout.canvas.width);
 
-    // QOL-10b: VirtualWorkspaceFolder in-memory `.lumencraft` archive + unpacked snapshot round-trip + path safety.
+    // QOL-10b: VirtualWorkspaceFolder in-memory `.curvebook` archive + unpacked snapshot round-trip + path safety.
     assert!(VirtualWorkspaceFolder::normalize_rel_path("../etc/passwd").is_err());
     assert!(VirtualWorkspaceFolder::normalize_rel_path("/abs/path").is_err());
-    let archive_bytes_len = app.save_to_virtual_workspace("experiment.lumencraft").expect("save virtual archive");
+    let archive_bytes_len = app.save_to_virtual_workspace("experiment.curvebook").expect("save virtual archive");
     assert!(archive_bytes_len > 0);
     let mut reloaded_app = UiApp::new();
     reloaded_app.virtual_workspace = app.virtual_workspace.clone();
-    reloaded_app.load_from_virtual_workspace("experiment.lumencraft").expect("load virtual archive");
+    reloaded_app.load_from_virtual_workspace("experiment.curvebook").expect("load virtual archive");
     assert_eq!(reloaded_app.document().title, app.document().title);
 
     let reloaded_doc = reloaded_app.document().clone();

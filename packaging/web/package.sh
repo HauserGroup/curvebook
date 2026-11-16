@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build the browser version and zip it: $DIST/lumencraft-web-<version>.zip
+# Build the browser version and zip it: $DIST/curvebook-web-<version>.zip
 #
 # Usage: packaging/web/package.sh [--skip-build]
 set -euo pipefail
@@ -9,7 +9,7 @@ HERE="$ROOT/packaging/web"
 
 if [[ "${1:-}" != "--skip-build" ]]; then
   command -v trunk >/dev/null || { echo "error: trunk not found (cargo install trunk --locked)" >&2; exit 1; }
-  (cd "$ROOT/apps/lumencraft-web" && trunk build --release --cargo-profile web-release)
+  (cd "$ROOT/apps/curvebook-web" && trunk build --release --cargo-profile web-release)
 fi
 
 SITE="$ROOT/dist/web"
@@ -19,7 +19,7 @@ if grep -Eq '(src|href)="/[^/]' "$SITE/index.html"; then
   exit 1
 fi
 
-NAME="lumencraft-web-$VERSION"
+NAME="curvebook-web-$VERSION"
 WORK="$CARGO_TARGET_DIR/web-package"
 rm -rf "$WORK"
 mkdir -p "$WORK/$NAME"

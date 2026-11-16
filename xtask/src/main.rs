@@ -1,4 +1,4 @@
-//! Workspace quality gates, packaging helpers, and architectural checks for LumenCraft.
+//! Workspace quality gates, packaging helpers, and architectural checks for CurveBook.
 #![forbid(unsafe_code)]
 
 mod assets;
@@ -49,19 +49,19 @@ commands:
   brands                verify user-facing strings and packaging contain no competitor trademarks
   cleanroom             verify no vendor copyright headers or vendor-created fixtures exist
   cursors               verify Cursor variants match crates/tools/src/cursors.toml
-  i18n-report           report untranslated locale keys in lumencraft-ui-egui
+  i18n-report           report untranslated locale keys in curvebook-ui-egui
   ui-commands [--check] sync (or verify) crates/mcp/src/ui_catalog.rs from crates/ui-egui
-  commands [--check]    regenerate (or verify) docs/commands.md from lumencraft-engine
-  schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from lumencraft-format
+  commands [--check]    regenerate (or verify) docs/commands.md from curvebook-engine
+  schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from curvebook-format
   wasm                  check wasm32-unknown-unknown compilation across web-targeted crates
   corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
   coverage [-p <crate>] write a local cargo-llvm-cov lcov + HTML report (diagnostic; no threshold)
-  bundle                build release binaries and assemble dist/LumenCraft.app
+  bundle                build release binaries and assemble dist/CurveBook.app
   ico <out> <png...>    pack PNG frames (<=256px) into a Windows .ico container
   version [set <ver>]   print or update [workspace.package] version
   stats [--exact]       print line and test counts across workspace crates
   contributors          refresh contributors/contributors.json from git history and people.toml
-  web-fonts             stage optional LUMENCRAFT_FONTS_DIR faces into dist/web/fonts
+  web-fonts             stage optional CURVEBOOK_FONTS_DIR faces into dist/web/fonts
 ";
 
 fn main() -> ExitCode {
@@ -207,7 +207,7 @@ fn cmd_test(root: &Path, extra: &[String]) -> Result<(), String> {
 
 fn cmd_i18n_report(root: &Path) -> Result<(), String> {
     const TEST_PATH: &str = "i18n::tests::untranslated_report";
-    let args = ["test", "-p", "lumencraft-ui-egui", "--lib", TEST_PATH, "--", "--exact", "--nocapture"];
+    let args = ["test", "-p", "curvebook-ui-egui", "--lib", TEST_PATH, "--", "--exact", "--nocapture"];
     println!("+ cargo {}", args.join(" "));
     let out = Command::new("cargo").current_dir(root).args(args).output().map_err(|e| format!("cargo i18n-report: {e}"))?;
     let _ = std::io::stdout().write_all(&out.stdout);
@@ -255,11 +255,11 @@ fn verify_exact_single_test_passed(stdout: &str, test_name: &str) -> Result<(), 
 }
 
 fn cmd_wasm(root: &Path) -> Result<(), String> {
-    run_cargo_strs(root, &["check", "--target", "wasm32-unknown-unknown", "-p", "lumencraft-web", "-p", "lumencraft-engine", "--keep-going"])
+    run_cargo_strs(root, &["check", "--target", "wasm32-unknown-unknown", "-p", "curvebook-web", "-p", "curvebook-engine", "--keep-going"])
 }
 
 fn cmd_r10_gate(root: &Path) -> Result<(), String> {
-    run_cargo_strs(root, &["test", "-p", "lumencraft-ui-egui", "--test", "r10_core_and_spike"])
+    run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--test", "r10_core_and_spike"])
 }
 
 fn cmd_ci(root: &Path) -> Result<(), String> {
@@ -270,9 +270,9 @@ fn cmd_ci(root: &Path) -> Result<(), String> {
     run_cargo_strs(root, &["test", "--workspace", "--doc"])?;
 
     // Verify embedders can build and test text/ui/mcp without bundled fonts.
-    run_cargo_strs(root, &["test", "-p", "lumencraft-text", "--no-default-features"])?;
-    run_cargo_strs(root, &["test", "-p", "lumencraft-ui-egui", "--no-default-features"])?;
-    run_cargo_strs(root, &["check", "-p", "lumencraft-mcp", "--no-default-features"])?;
+    run_cargo_strs(root, &["test", "-p", "curvebook-text", "--no-default-features"])?;
+    run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--no-default-features"])?;
+    run_cargo_strs(root, &["check", "-p", "curvebook-mcp", "--no-default-features"])?;
 
     assets::run(root)?;
     brands::run(root)?;
@@ -338,7 +338,7 @@ mod tests {
     use super::{repo_files, verify_exact_single_test_passed};
 
     fn temp_git_dir(label: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lc-xtask-main-{}-{label}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-xtask-main-{}-{label}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         run_git(&dir, &["init"]);

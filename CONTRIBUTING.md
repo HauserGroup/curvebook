@@ -1,6 +1,6 @@
-# Contributing to LumenCraft
+# Contributing to CurveBook
 
-Thank you for contributing to **LumenCraft**! This repository is built in Rust (`edition = "2024"`, `rust-version = "1.99.1"`, pinned via `rust-toolchain.toml`) under `MIT OR Apache-2.0`.
+Thank you for contributing to **CurveBook**! This repository is built in Rust (`edition = "2024"`, `rust-version = "1.99.1"`, pinned via `rust-toolchain.toml`) under `MIT OR Apache-2.0`.
 
 Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [docs/pitfalls.md](docs/pitfalls.md)—all engineering, clean-room, statistical, and verification rules apply equally to human contributors and AI coding agents.
 
@@ -19,11 +19,11 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
 
 ## 2. Rules Every PR Must Respect
 
-1. **Strict clean-room development:** Never reference, reverse-engineer, copy UI/code/strings from, or use proprietary commercial statistical or curve-fitting applications as a source. Never depend on or translate copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) code. Write everything in LumenCraft's own words (`cargo xtask cleanroom` and `cargo xtask brands` verify this).
+1. **Strict clean-room development:** Never reference, reverse-engineer, copy UI/code/strings from, or use proprietary commercial statistical or curve-fitting applications as a source. Never depend on or translate copyleft (`GPL-*`, `AGPL-*`, `LGPL-*`) code. Write everything in CurveBook's own words (`cargo xtask cleanroom` and `cargo xtask brands` verify this).
 2. **Never crash:** Workspace clippy lints deny `unwrap_used`, `expect_used`, `panic`, `todo`, `unimplemented`, `unreachable`, and `unsafe_code`. Handle malformed files, empty selections, degenerate numerical inputs, and RPC/MCP calls via typed `Result` / `Option` errors and bounds-checked slices.
 3. **Statistical rigor & `D1` oracles:** Every routine in `crates/math`, `crates/stats`, `crates/fit`, and `crates/transform` must cite a peer-reviewed reference, document degenerate/edge cases, and validate against verified published/oracle datasets (such as NIST StRD) rather than unverified approximations.
 4. **Assets & zero bundled fonts:** Every asset added to the repository needs a row in [ASSETS.md](ASSETS.md) (and [ATTRIBUTION.md](ATTRIBUTION.md) if third-party). Never commit `.ttf`, `.otf`, `.woff`, or `.woff2` files (`cargo xtask assets`).
-5. **No `chrono` crate & no hardcoded prose counts:** Do not add `chrono` to `Cargo.toml` or hand-roll calendar math; use `std::time::SystemTime::UNIX_EPOCH` / `lumencraft-platform` timestamps (see [AGENTS.md](AGENTS.md)). Never hardcode volatile counts (commands, tests, lines) in prose outside machine-checked/generated files (`docs/STATUS.md`, `docs/commands.md`).
+5. **No `chrono` crate & no hardcoded prose counts:** Do not add `chrono` to `Cargo.toml` or hand-roll calendar math; use `std::time::SystemTime::UNIX_EPOCH` / `curvebook-platform` timestamps (see [AGENTS.md](AGENTS.md)). Never hardcode volatile counts (commands, tests, lines) in prose outside machine-checked/generated files (`docs/STATUS.md`, `docs/commands.md`).
 6. **Permissive licences only:** New dependencies must conform to the allowlist in [docs/licences.md](docs/licences.md).
 
 ---
@@ -50,7 +50,7 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    - Persisted schemas -> `cargo xtask schemas` *(R0)*
    - Windows icons -> `cargo xtask ico`
 4. **Pull request title & merge policy:** PRs are **squash-merged**. Use a plain-English PR title **ending with `(R<m>.<n>)`**, for example:
-   `Use atomic temp-and-rename saves via lumencraft-platform (R0.10)`
+   `Use atomic temp-and-rename saves via curvebook-platform (R0.10)`
 5. **Before you finish:** Fill out [.github/pull_request_template.md](.github/pull_request_template.md) honestly and pass the verification suite:
    ```sh
    cargo fmt --all -- --check

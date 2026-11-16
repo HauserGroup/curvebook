@@ -1,7 +1,7 @@
 //! Tidy RFC-4180 CSV and structured JSON exporters for [`ResultSheet`] outputs,
 //! designed for downstream R, Python, Snakemake, and Nextflow analysis pipelines.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisSpec, ChecklistItem, CiBound, FittedCurveOverlay, PairwiseComparisonRecord, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus,
     ResultTab, SheetId,
 };

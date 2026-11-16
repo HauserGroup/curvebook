@@ -5,11 +5,11 @@
 //! - `graph.setKind` honoring `option_id` while preserving full `kind` backward compatibility.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellValue, DataSheet, DiagnosticPlotKind, GraphKind, GraphicalDataObject, GroupedArrangement, GroupedTable, MultipleVariablesTable,
     ProjectDocument, SheetId, SubcolumnMode, TableArchetype, VariableSource,
 };
-use lumencraft_engine::{ErrorCode, Session};
+use curvebook_engine::{ErrorCode, Session};
 use serde_json::json;
 
 fn make_mv_sheet(id: &str) -> DataSheet {

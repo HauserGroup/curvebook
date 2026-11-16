@@ -1,9 +1,9 @@
 //! Progressive MCP toolset discovery (`list_toolsets`, `enable_toolset`), `Effects`-derived tool
-//! annotations, and deterministic `[a-z0-9_]` per-command tool mapping over `lumencraft_engine::cmd`.
+//! annotations, and deterministic `[a-z0-9_]` per-command tool mapping over `curvebook_engine::cmd`.
 
 use std::collections::BTreeSet;
 
-use lumencraft_engine::cmd::{CommandGroup, CommandSpec, Effects, registry};
+use curvebook_engine::cmd::{CommandGroup, CommandSpec, Effects, registry};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 

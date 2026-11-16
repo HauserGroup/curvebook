@@ -1,8 +1,8 @@
-//! Stage 3A regression tests for S01 fixes in `lumencraft-math`.
+//! Stage 3A regression tests for S01 fixes in `curvebook-math`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_math::dist::{nct_cdf, nct_sf, norm_cdf};
-use lumencraft_math::noncentral_t_ci;
+use curvebook_math::dist::{nct_cdf, nct_sf, norm_cdf};
+use curvebook_math::noncentral_t_ci;
 
 fn assert_near(actual: f64, expected: f64, tol: f64, label: &str) {
     assert!(actual.is_finite() && (actual - expected).abs() <= tol, "{label}: expected {expected} +/- {tol}, got {actual}");

@@ -1,6 +1,6 @@
 # Command ID Specification
 
-Every command executed by `lumencraft-engine` (`Session::execute`), bound to UI shortcuts/menus (`UI_COMMANDS`), exposed through `lumencraft-mcp`, recorded in crash-recovery journals (`ops.journal`), or scripted in `lumencraft.batch.v1` manifests uses a canonical **command ID**.
+Every command executed by `curvebook-engine` (`Session::execute`), bound to UI shortcuts/menus (`UI_COMMANDS`), exposed through `curvebook-mcp`, recorded in crash-recovery journals (`ops.journal`), or scripted in `curvebook.batch.v1` manifests uses a canonical **command ID**.
 
 The authoritative generated list of all current engine commands is maintained at [`docs/commands.md`](commands.md) (generated via `cargo xtask commands` and verified in CI via `cargo xtask commands --check`); UI-only commands are listed in the generated `crates/mcp/src/ui_catalog.rs` (`cargo xtask ui-commands --check`). Never duplicate full command tables manually in prose.
 
@@ -57,7 +57,7 @@ When deriving a command ID from Rust identifiers or CLI/JSON names:
 
 Reasons:
 1. **Crash recovery (`ops.journal`):** `crates/format/src/recovery.rs` logs executed engine commands verbatim to NDJSON (`command_json`) and replays them through `Session::execute` after an unclean exit. Renaming an ID breaks recovery of existing user journals.
-2. **Batch automation (`lumencraft.batch.v1`):** Headless CLI manifests (`apps/lumencraft-cli/src/cmd_run_batch.rs`) execute serialized command arrays in production pipelines.
-3. **Keybindings & MCP tooling:** User `shortcuts.json` bindings and external MCP workflows (`lumencraft-mcp`) persist IDs across upgrades.
+2. **Batch automation (`curvebook.batch.v1`):** Headless CLI manifests (`apps/curvebook-cli/src/cmd_run_batch.rs`) execute serialized command arrays in production pipelines.
+3. **Keybindings & MCP tooling:** User `shortcuts.json` bindings and external MCP workflows (`curvebook-mcp`) persist IDs across upgrades.
 
 If a command's canonical area or verb must evolve (for example, `file.new` superseded by `project.new`), register a compatibility alias that continues accepting and replaying historical payloads cleanly until an explicit major version migration rewrites stored records.

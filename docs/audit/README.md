@@ -1,6 +1,6 @@
 # Code audit playbook
 
-How independent reviewers audit LumenCraft in parallel. Reviewers may be people or AI agents, run different models, and work from different machines and accounts. Nothing here assumes a shared orchestrator. The repository and its GitHub issues are the only shared state.
+How independent reviewers audit CurveBook in parallel. Reviewers may be people or AI agents, run different models, and work from different machines and accounts. Nothing here assumes a shared orchestrator. The repository and its GitHub issues are the only shared state.
 
 Read [`AGENTS.md`](../../AGENTS.md) first. Its rules apply to every role below. This file adds the audit protocol on top of them.
 
@@ -42,7 +42,7 @@ git show origin/main:docs/gaps.md
 ```bash
 git fetch origin
 BASE=<current base SHA from origin/main:docs/audit/README.md>
-git worktree add "../lumencraft-audit-$BASE" "$BASE"
+git worktree add "../curvebook-audit-$BASE" "$BASE"
 ```
 
 **Moving the base.** The coordinator moves the current base forward with a one-line commit to this table, for example once a large change lands in a slice that has not been claimed yet. Claims already in progress keep their own base. A slice the coordinator wants re-audited at a newer base gets a new claim and new finding IDs; existing findings keep theirs.

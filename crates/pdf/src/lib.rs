@@ -1,5 +1,5 @@
 //! Publication PDF and Encapsulated PostScript figure and statistical report writer for
-//! LumenCraft.
+//! CurveBook.
 //!
 //! Layer L3 crate. Governing spec: `docs/graphing-and-layouts.md` (§6) and `docs/file-format-parity.md`.
 #![forbid(unsafe_code)]
@@ -30,8 +30,8 @@ pub enum PdfColorSpace {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_chart::ChartScene;
-    use lumencraft_palette::Rgba8;
+    use curvebook_chart::ChartScene;
+    use curvebook_palette::Rgba8;
 
     use super::{PdfColorSpace, PdfExportOptions, PdfVersion, render_pdf, render_pdf_pages};
 

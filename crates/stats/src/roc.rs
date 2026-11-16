@@ -3,12 +3,12 @@
 //! (correlated & uncorrelated), Hanley–McNeil SE, Youden's *J* optimal cutoff, PPV/NPV/LR+, and
 //! `ResultSheet` builders.
 
-pub use lumencraft_doc::RocCiMethod;
-use lumencraft_doc::{
+pub use curvebook_doc::RocCiMethod;
+use curvebook_doc::{
     AnalysisSpec, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, ResultSheet, ResultTabKind, RocSpec, TableArchetype,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{norm_two_sided_isf, norm_two_sided_p};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{norm_two_sided_isf, norm_two_sided_p};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{

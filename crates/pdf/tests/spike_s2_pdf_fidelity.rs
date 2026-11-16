@@ -7,13 +7,13 @@ use std::collections::BTreeMap;
 use std::io::Read;
 use std::time::Instant;
 
-use flate2::read::ZlibDecoder;
-use lumencraft_chart::{
+use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
-use lumencraft_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_ORANGE, OKABE_ITO_VERMILION, Rgba8};
-use lumencraft_pdf::{PdfColorSpace, PdfError, PdfExportOptions, render_pdf, render_pdf_pages};
-use lumencraft_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, parse_markup};
+use curvebook_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_ORANGE, OKABE_ITO_VERMILION, Rgba8};
+use curvebook_pdf::{PdfColorSpace, PdfError, PdfExportOptions, render_pdf, render_pdf_pages};
+use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, parse_markup};
+use flate2::read::ZlibDecoder;
 
 struct ParsedPdf {
     objects: BTreeMap<usize, Vec<u8>>,
@@ -259,7 +259,7 @@ fn verify_document_objects(parsed: &ParsedPdf) {
 
     let info = String::from_utf8_lossy(&parsed.objects[&8]);
     assert!(info.contains("/Title <FEFF"));
-    assert!(info.contains("/Creator (LumenCraft Spike S2)"));
+    assert!(info.contains("/Creator (CurveBook Spike S2)"));
 
     let all_obj_text: String = parsed.objects.values().map(|b| String::from_utf8_lossy(b).into_owned()).collect::<Vec<_>>().join("\n");
     assert!(all_obj_text.contains("/Type /ExtGState /ca 0.298 /CA 0.298"));
@@ -329,7 +329,7 @@ fn spike_s2_selectable_vector_pdf_greek_super_sub_rotation_and_xref_fidelity() -
         color_space: PdfColorSpace::Srgb,
         compress_streams: true,
         title: Some(String::from("Spike S2 — ΔG & IC50")),
-        creator: String::from("LumenCraft Spike S2"),
+        creator: String::from("CurveBook Spike S2"),
         outline_text: false,
         trim_pt: Some(RectPt::new(12.0, 10.0, 456.0, 320.0)),
         bleed_pt: Some(RectPt::new(4.0, 4.0, 472.0, 332.0)),

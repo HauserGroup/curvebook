@@ -4,18 +4,18 @@
 
 use std::collections::HashSet;
 
-use lumencraft_chart::compile_graph;
-use lumencraft_doc::{
+use curvebook_chart::compile_graph;
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, ChecklistItem, ChecklistStatus, CiBound, DataSheet, ErrorCode, FittedCurveOverlay, FloatingNote,
     GraphAnnotation, GraphSheet, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinkSource, NonlinearFitSpec,
     NormalizeAnchor, PairwiseComparisonRecord, ProjectDocument, RectPt, RegressionOverlaySpec, ResultCell, ResultScalarEntry, ResultSheet,
     ResultStatus, ResultTab, ResultTabKind, SheetCellRange, SheetId, SubcolumnMode, TableArchetype, TransformAnalysisSpec, XColumnMode, XyTable,
 };
-use lumencraft_engine::Session;
-use lumencraft_engine::dag::recalculate_project_with_report;
-use lumencraft_fit::HookContext;
-use lumencraft_testkit::metrics::assert_approx_eq;
-use lumencraft_transform::TransformContext;
+use curvebook_engine::Session;
+use curvebook_engine::dag::recalculate_project_with_report;
+use curvebook_fit::HookContext;
+use curvebook_testkit::metrics::assert_approx_eq;
+use curvebook_transform::TransformContext;
 use serde_json::json;
 
 fn xy_single(id: &str, xs: &[f64], ys: &[f64]) -> DataSheet {
@@ -135,7 +135,7 @@ fn r1_x2_01_failed_recompute_clears_stale_outputs_and_consumers_reject_failed() 
         equation_id: "straight_line".to_owned(),
         converged: true,
         ambiguous: false,
-        points: vec![lumencraft_doc::CurveSamplePoint { x: 1.0, y: 2.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None }],
+        points: vec![curvebook_doc::CurveSamplePoint { x: 1.0, y: 2.0, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None }],
     });
 
     assert!(stale_failed.lookup_scalar("Slope", None).is_none(), "Failed ResultSheet::lookup_scalar must return None");
@@ -201,7 +201,7 @@ fn r1_x2_01_failed_recompute_clears_stale_outputs_and_consumers_reject_failed() 
 
     // Linked DataSheet inside DAG must refuse non-UpToDate ResultSheet instead of copying stale analyzable_data.
     let mut linked_ds = xy_single("d-linked", &[1.0, 2.0], &[0.0, 0.0]);
-    linked_ds.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+    linked_ds.linked_regions.push(curvebook_doc::LinkedDataRegion {
         id: "link-1".to_owned(),
         spec: ImportLinkSpec {
             source: LinkSource::InternalSheet {

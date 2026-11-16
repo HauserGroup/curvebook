@@ -1,4 +1,4 @@
-//! Native `.lumencraft` / `.lctemplate` archive serialization, delimited tabular (CSV/TSV)
+//! Native `.curvebook` / `.cbtemplate` archive serialization, delimited tabular (CSV/TSV)
 //! import/export, `ImportLinkSpec` pipeline execution, tidy `ResultSheet` exports, and
 //! clean-room `.pzfx` / `.prism` adapters.
 //!
@@ -49,11 +49,11 @@ pub use versioned::{
 pub use xml::{MAX_XML_BYTES, MAX_XML_DEPTH, MAX_XML_NODES, XmlElement, XmlLimits, XmlNode, parse_xml, parse_xml_with_limits};
 pub use zip::{MAX_ZIP_ENTRIES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_UNCOMPRESSED_BYTES, ZipArchive, ZipLimits, ZipWriter, sanitize_zip_path};
 
-/// Canonical file extension for native LumenCraft project archives.
-pub const EXTENSION: &str = "lumencraft";
+/// Canonical file extension for native CurveBook project archives.
+pub const EXTENSION: &str = "curvebook";
 
-/// Canonical file extension for LumenCraft project templates.
-pub const TEMPLATE_EXTENSION: &str = "lctemplate";
+/// Canonical file extension for CurveBook project templates.
+pub const TEMPLATE_EXTENSION: &str = "cbtemplate";
 
 #[cfg(test)]
 mod tests {
@@ -61,7 +61,7 @@ mod tests {
 
     #[test]
     fn native_extensions_are_non_empty() {
-        assert_eq!(EXTENSION, "lumencraft");
-        assert_eq!(TEMPLATE_EXTENSION, "lctemplate");
+        assert_eq!(EXTENSION, "curvebook");
+        assert_eq!(TEMPLATE_EXTENSION, "cbtemplate");
     }
 }

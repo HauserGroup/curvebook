@@ -38,12 +38,12 @@ jobs:
       - name: Validate Linux desktop, AppStream and Flatpak metadata
         run: |
           set -euo pipefail
-          desktop-file-validate packaging/linux/org.lumencraft.LumenCraft.desktop
+          desktop-file-validate packaging/linux/org.curvebook.CurveBook.desktop
           work="$(mktemp -d)"
           sed -e 's/@VERSION@/0.1.0/g' -e 's/@DATE@/2026-11-13/g' \
-            packaging/linux/org.lumencraft.LumenCraft.metainfo.xml.in \
-            >"$work/org.lumencraft.LumenCraft.metainfo.xml"
-          appstreamcli validate --no-net "$work/org.lumencraft.LumenCraft.metainfo.xml"
+            packaging/linux/org.curvebook.CurveBook.metainfo.xml.in \
+            >"$work/org.curvebook.CurveBook.metainfo.xml"
+          appstreamcli validate --no-net "$work/org.curvebook.CurveBook.metainfo.xml"
           rm -rf "$work"
           ./packaging/check-app-specific.sh
 
@@ -58,7 +58,7 @@ jobs:
       - name: Install the pinned packaging toolchain
         shell: pwsh
         run: |
-          $tools = Join-Path $env:RUNNER_TEMP 'lumencraft-install-policy-wix'
+          $tools = Join-Path $env:RUNNER_TEMP 'curvebook-install-policy-wix'
           dotnet tool install --tool-path $tools wix --version 5.0.2
           if ($LASTEXITCODE -ne 0) { throw 'WiX installation failed.' }
           $tools >> $env:GITHUB_PATH
@@ -69,4 +69,4 @@ jobs:
           }
       - name: Build and check non-executable installer fixtures
         shell: pwsh
-        run: ./packaging/windows/test-install-policy.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'lumencraft-install-policy-tests')
+        run: ./packaging/windows/test-install-policy.ps1 -OutputDirectory (Join-Path $env:RUNNER_TEMP 'curvebook-install-policy-tests')

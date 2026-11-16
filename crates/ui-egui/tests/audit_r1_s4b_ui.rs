@@ -1,16 +1,16 @@
-//! Stage 4B regression tests for `lumencraft-ui-egui` (`R1-S10-07`, `R1-S11-11`, `R1-S11-12`).
+//! Stage 4B regression tests for `curvebook-ui-egui` (`R1-S10-07`, `R1-S11-11`, `R1-S11-12`).
 
-use lumencraft_chart::{PointPt, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{PointPt, compile_graph};
+use curvebook_doc::{
     Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphKind, ProjectDocument, SheetFolderKind, SheetId, SubcolumnMode, TableArchetype,
     XyTable,
 };
-use lumencraft_engine::Session;
-use lumencraft_render::RenderTargetSpec;
-use lumencraft_tools::CanvasToolMode;
-use lumencraft_tools::canvas::resolve_category_slots;
-use lumencraft_tools::grid::parse_tsv_clipboard;
-use lumencraft_ui_egui::{
+use curvebook_engine::Session;
+use curvebook_render::RenderTargetSpec;
+use curvebook_tools::CanvasToolMode;
+use curvebook_tools::canvas::resolve_category_slots;
+use curvebook_tools::grid::parse_tsv_clipboard;
+use curvebook_ui_egui::{
     KeyModifiers, PointerButton, ScenePaperMapping, UiApp, UiInputEvent, ViewportMetrics, WorkspaceNavState, WorkspacePixelRect,
     compositor::render_workspace_rgba, grid_view::format_cell_display,
 };

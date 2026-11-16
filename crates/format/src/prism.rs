@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeMap, HashSet};
 
-use lumencraft_doc::{ConstantValue, DataSheet, InfoConstant, InfoSheet, ProjectDocument, SheetId, SubcolumnMode, TableKind};
+use curvebook_doc::{ConstantValue, DataSheet, InfoConstant, InfoSheet, ProjectDocument, SheetId, SubcolumnMode, TableKind};
 
 use crate::archive::{migrate_document_json, validate_project_document};
 use crate::csv::{CsvOptions, import_csv_to_datasheet_with_budget, parse_delimited_records};
@@ -57,6 +57,15 @@ pub fn import_prism_bytes(bytes: &[u8]) -> Result<ImportReport, FormatError> {
 /// Import a `.prism` ZIP container enforcing explicit [`ZipLimits`].
 pub fn import_prism_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result<ImportReport, FormatError> {
     let archive = ZipArchive::from_bytes_with_limits(bytes, limits)?;
+    if let Some(manifest_bytes) = archive.get("manifest.json")
+        && let Ok(manifest_val) = serde_json::from_slice::<serde_json::Value>(manifest_bytes)
+        && let Some(format) = manifest_val.get("format").and_then(serde_json::Value::as_str)
+        && (format == crate::archive::LEGACY_FORMAT_MAGIC || format == "lumencraft")
+    {
+        return Err(FormatError::UnsupportedFormat {
+            reason: format!("legacy LumenCraft archive (`{format}`) cannot be imported as a `.prism` project"),
+        });
+    }
     let mut warnings = Vec::new();
 
     if let Some(doc_report) = try_load_embedded_project_json(&archive, &mut warnings)? {
@@ -193,7 +202,7 @@ fn try_load_embedded_project_json(archive: &ZipArchive, warnings: &mut Vec<Impor
     }
     let version = match val.get("schema_version") {
         None | Some(serde_json::Value::Null) => 0,
-        Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(lumencraft_doc::CURRENT_SCHEMA_VERSION),
+        Some(v) => v.as_u64().and_then(|n| u32::try_from(n).ok()).unwrap_or(curvebook_doc::CURRENT_SCHEMA_VERSION),
     };
     let migrated = migrate_document_json(val, version)?;
     let doc: ProjectDocument = serde_json::from_value(migrated)?;

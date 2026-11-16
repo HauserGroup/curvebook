@@ -4,15 +4,15 @@
 
 use std::collections::BTreeMap;
 
-use lumencraft_chart::PointPt;
-use lumencraft_doc::{
+use curvebook_chart::PointPt;
+use curvebook_doc::{
     CellCoord, CellValue, ConstantValue, DataSheet, GraphAnnotation, LayoutItem, LayoutSpec, ProjectDocument, RectPt, SheetFolderKind, SheetId,
     TableArchetype, XColumnMode,
 };
-use lumencraft_format::{export_datasheet_to_csv, open_project_bytes, save_project_bytes};
-use lumencraft_render::RenderTargetSpec;
-use lumencraft_tools::canvas::{CanvasHitTarget, ResizeHandleCorner, SnapGuide, SnapOrientation, SnapSource};
-use lumencraft_tools::{CanvasToolMode, GridCellCoord, ToolCommandIntent};
+use curvebook_format::{export_datasheet_to_csv, open_project_bytes, save_project_bytes};
+use curvebook_render::RenderTargetSpec;
+use curvebook_tools::canvas::{CanvasHitTarget, ResizeHandleCorner, SnapGuide, SnapOrientation, SnapSource};
+use curvebook_tools::{CanvasToolMode, GridCellCoord, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -27,7 +27,7 @@ use crate::layout::widgets::{DropdownOption, OpenDropdownState, TextFieldBufferM
 use crate::layout::{WidgetAction, ZLayer};
 use crate::modal_predicates::evaluate_dialog_widget;
 use crate::workspace_nav::{ActiveWorkspacePane, build_set_info_constant_command, build_set_info_notes_command, live_sheet_index_in_folder};
-use lumencraft_doc::GraphSheet;
+use curvebook_doc::GraphSheet;
 
 const MIN_SCALE_FACTOR: f64 = 0.5;
 const MAX_SCALE_FACTOR: f64 = 8.0;
@@ -330,7 +330,7 @@ impl VirtualWorkspaceFolder {
     #[must_use]
     pub fn new(root_name: impl Into<String>) -> Self {
         let raw = root_name.into();
-        let root_name = if raw.trim().is_empty() { String::from("workspace.lumencraft.d") } else { raw };
+        let root_name = if raw.trim().is_empty() { String::from("workspace.curvebook.d") } else { raw };
         Self { root_name, files: BTreeMap::new() }
     }
 
@@ -418,7 +418,7 @@ impl VirtualWorkspaceFolder {
         self.files.clear();
     }
 
-    /// Serialize `doc` as a `.lumencraft` archive at `file_name` inside this virtual workspace.
+    /// Serialize `doc` as a `.curvebook` archive at `file_name` inside this virtual workspace.
     ///
     /// # Errors
     /// Returns an error if archive serialization or path validation fails.
@@ -429,7 +429,7 @@ impl VirtualWorkspaceFolder {
         Ok(len)
     }
 
-    /// Deserialize a `.lumencraft` archive stored at `file_name` inside this virtual workspace.
+    /// Deserialize a `.curvebook` archive stored at `file_name` inside this virtual workspace.
     ///
     /// # Errors
     /// Returns an error if `file_name` is missing or archive decoding fails.
@@ -438,7 +438,7 @@ impl VirtualWorkspaceFolder {
         open_project_bytes(bytes).map_err(|err| err.to_string())
     }
 
-    /// Write an unpacked `.lumencraft.d`-compatible virtual snapshot (`document.json`, `manifest.json`,
+    /// Write an unpacked `.curvebook.d`-compatible virtual snapshot (`document.json`, `manifest.json`,
     /// and `sheets/<id>.csv`) directly into memory with zero filesystem access (`QOL-10`).
     ///
     /// # Errors
@@ -450,7 +450,7 @@ impl VirtualWorkspaceFolder {
         for ds in &doc.data_sheets {
             let safe_id: String = ds.id.as_str().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect();
             let csv_rel = format!("sheets/{safe_id}.csv");
-            let csv_text = export_datasheet_to_csv(ds, &lumencraft_format::CsvOptions::csv()).map_err(|err| err.to_string())?;
+            let csv_text = export_datasheet_to_csv(ds, &curvebook_format::CsvOptions::csv()).map_err(|err| err.to_string())?;
             self.write_file(&csv_rel, csv_text.into_bytes())?;
             sheet_entries.push(json!({ "id": ds.id.as_str(), "title": ds.title, "csv_path": csv_rel }));
         }
@@ -1588,7 +1588,7 @@ fn commit_bracket_drag_on_graph(app: &mut UiApp, sheet_id: &SheetId, end_pt: Poi
 }
 
 fn resolve_pairwise_result_sheet_id(doc: &ProjectDocument, graph: &GraphSheet, group_a: usize, group_b: usize) -> Option<SheetId> {
-    let matches_pair = |res: &&lumencraft_doc::ResultSheet| {
+    let matches_pair = |res: &&curvebook_doc::ResultSheet| {
         res.pairwise_comparisons.iter().any(|c| (c.group_a == group_a && c.group_b == group_b) || (c.group_a == group_b && c.group_b == group_a))
     };
     doc.result_sheets
@@ -1652,7 +1652,7 @@ fn handle_double_click(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
     if button != PointerButton::Primary {
         return UiEventOutcome { handled: false, action: String::from("double_click_ignored"), ..Default::default() };
     }
-    let initial_for = |cell: Option<&lumencraft_doc::Cell>| -> String {
+    let initial_for = |cell: Option<&curvebook_doc::Cell>| -> String {
         cell.map_or_else(String::new, |cell| match &cell.value {
             CellValue::Text(s) if s.starts_with('=') => s.clone(),
             _ => format_cell_display(cell, &app.locale_preset),
@@ -2418,7 +2418,7 @@ fn compute_layout_plot_origins(app: &UiApp, spec: &LayoutSpec) -> Vec<(usize, Po
 }
 
 fn compute_live_layout_drag_snap(
-    canvas: &lumencraft_tools::CanvasToolState,
+    canvas: &curvebook_tools::CanvasToolState,
     spec: &LayoutSpec,
     moving_index: usize,
     initial: RectPt,
@@ -2530,7 +2530,7 @@ fn nearest_plot_origin_coord(coord: f64, origins: &[PointPt], vertical: bool, to
 }
 
 fn snap_layout_resize(
-    canvas: &lumencraft_tools::CanvasToolState,
+    canvas: &curvebook_tools::CanvasToolState,
     spec: &LayoutSpec,
     moving_index: usize,
     candidate: RectPt,

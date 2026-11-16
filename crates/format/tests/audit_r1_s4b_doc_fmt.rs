@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AdditionalTick, AnalysisKind, AnalysisSpec, AxisThreshold, BracketLabelMode, BracketStyle, CellCoord, ColorChannelMapping, ColumnDesignHint,
     ColumnTable, ContingencySpec, DataSheet, DescriptiveSpec, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FactorialAnovaSpec, FitMethod,
     FloatingNote, GraphAnnotation, GraphSheet, GraphicalDataObject, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet,
@@ -11,11 +11,11 @@ use lumencraft_doc::{
     SimulationNoise, SizeChannelMapping, SizePt, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod,
     TwoGroupSpec, WeightingScheme, XyTable,
 };
-use lumencraft_format::{
+use curvebook_format::{
     FormatError, ImportBaselineAdjustment, apply_csv_import_link, open_project_bytes, open_project_unpacked_dir, save_project_bytes,
     save_project_unpacked_dir, save_template_bytes, validate_project_document,
 };
-use lumencraft_palette::{ColorRamp, ColorStop, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
+use curvebook_palette::{ColorRamp, ColorStop, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -26,7 +26,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(label: &str) -> Result<Self, FormatError> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lc-s4b-fmt-{label}-{}-{seq}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cb-s4b-fmt-{label}-{}-{seq}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path)?;
         Ok(Self { path })
@@ -93,13 +93,13 @@ fn build_rich_valid_project() -> Result<ProjectDocument, FormatError> {
                 stroke_color: Rgba8::BLACK,
                 fill_mode: MarkerFillMode::Filled,
             }),
-            line: Some(lumencraft_doc::ConnectingLineStyle {
-                kind: lumencraft_doc::LineConnectionKind::PointToPoint,
+            line: Some(curvebook_doc::ConnectingLineStyle {
+                kind: curvebook_doc::LineConnectionKind::PointToPoint,
                 dash_style: LineDashStyle::Solid,
                 stroke_width_pt: 1.5,
                 color: Rgba8::BLACK,
             }),
-            area_fill: Some(lumencraft_doc::AreaFillSpec { baseline_y: 0.0, fill_color: Rgba8::BLACK }),
+            area_fill: Some(curvebook_doc::AreaFillSpec { baseline_y: 0.0, fill_color: Rgba8::BLACK }),
         },
         y_error_bars: Some(ErrorBarSpec {
             metric: ErrorBarMetric::Sd,

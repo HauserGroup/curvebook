@@ -3,7 +3,7 @@
 //!
 //! Offline `cargo xtask corpus` never accesses the network: it verifies any locally cached files
 //! under `corpus/nist-strd/` (SHA-256 + byte size manifest + ASCII `.dat` structural parse) and
-//! runs the offline format, testkit, and `lumencraft-math` NIST StRD test suites. Passing `--fetch`
+//! runs the offline format, testkit, and `curvebook-math` NIST StRD test suites. Passing `--fetch`
 //! downloads the 58 public-domain NIST StRD `.dat` files via `curl -fsSL` into `corpus/nist-strd/`
 //! and records `corpus/nist-strd/sha256sums.txt`.
 
@@ -12,10 +12,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use lumencraft_testkit::nist_strd::{
+use curvebook_testkit::nist_strd::{
     MAX_STRD_BYTES, PINNED_NIST_STRD_CORPUS, PinnedStrdSpec, parse_anova_dat, parse_linear_regression_dat, parse_nonlinear_dat, parse_univariate_dat,
 };
-use lumencraft_testkit::{CorpusManifestEntry, load_verified_corpus_file, verify_blob};
+use curvebook_testkit::{CorpusManifestEntry, load_verified_corpus_file, verify_blob};
 
 const NIST_STRD_BASE_URL: &str = "https://www.itl.nist.gov/div898/strd";
 const MANIFEST_FILENAME: &str = "sha256sums.txt";
@@ -199,10 +199,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
 
     let require_corpus = nist_root.exists() || opts.fetch;
-    run_cargo_corpus(root, &["test", "-p", "lumencraft-format", "-p", "lumencraft-testkit"], require_corpus)?;
-    run_cargo_corpus(root, &["test", "-p", "lumencraft-math", "--test", "nist_strd"], require_corpus)?;
-    run_cargo_corpus(root, &["test", "-p", "lumencraft-stats", "--test", "nist_strd"], require_corpus)?;
-    run_cargo_corpus(root, &["test", "-p", "lumencraft-fit", "--test", "nist_strd"], require_corpus)?;
+    run_cargo_corpus(root, &["test", "-p", "curvebook-format", "-p", "curvebook-testkit"], require_corpus)?;
+    run_cargo_corpus(root, &["test", "-p", "curvebook-math", "--test", "nist_strd"], require_corpus)?;
+    run_cargo_corpus(root, &["test", "-p", "curvebook-stats", "--test", "nist_strd"], require_corpus)?;
+    run_cargo_corpus(root, &["test", "-p", "curvebook-fit", "--test", "nist_strd"], require_corpus)?;
     Ok(())
 }
 
@@ -211,7 +211,7 @@ fn run_cargo_corpus(root: &Path, args: &[&str], require_corpus: bool) -> Result<
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root).args(args);
     if require_corpus {
-        cmd.env("LUMENCRAFT_REQUIRE_CORPUS", "1");
+        cmd.env("CURVEBOOK_REQUIRE_CORPUS", "1");
     }
     let status = cmd.status().map_err(|e| format!("cargo {}: {e}", args.join(" ")))?;
     if !status.success() {
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn verify_corpus_dir_validates_manifest_digests_and_catches_tampering() {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let temp_root = std::env::temp_dir().join(format!("lumencraft-xtask-corpus-test-{}-{stamp}", std::process::id()));
+        let temp_root = std::env::temp_dir().join(format!("curvebook-xtask-corpus-test-{}-{stamp}", std::process::id()));
         fs::create_dir_all(temp_root.join("univ")).unwrap();
         fs::create_dir_all(temp_root.join("anova")).unwrap();
 
@@ -569,9 +569,9 @@ Data:  y   x
 
         let manifest = format!(
             "# test manifest\n{}  {}  univ/NumAcc1.dat\n{}  {}  anova/SiRstv.dat\n",
-            lumencraft_testkit::sha256_hex(uni_dat.as_bytes()),
+            curvebook_testkit::sha256_hex(uni_dat.as_bytes()),
             uni_dat.len(),
-            lumencraft_testkit::sha256_hex(anova_dat.as_bytes()),
+            curvebook_testkit::sha256_hex(anova_dat.as_bytes()),
             anova_dat.len(),
         );
         fs::write(temp_root.join(MANIFEST_FILENAME), manifest).unwrap();
@@ -589,7 +589,7 @@ Data:  y   x
     #[test]
     fn verify_corpus_dir_enforces_pinned_catalog_on_nist_strd_directory() {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let temp_parent = std::env::temp_dir().join(format!("lumencraft-xtask-pinned-test-{}-{stamp}", std::process::id()));
+        let temp_parent = std::env::temp_dir().join(format!("curvebook-xtask-pinned-test-{}-{stamp}", std::process::id()));
         let nist_dir = temp_parent.join("nist-strd");
         fs::create_dir_all(&nist_dir).unwrap();
 
@@ -600,8 +600,8 @@ Data:  y   x
         let _ = fs::remove_dir_all(&temp_parent);
 
         // When the workspace corpus is present on disk, verify_corpus_dir must verify all 58 pinned files.
-        let repo_corpus = lumencraft_testkit::nist_strd::default_nist_strd_dir();
-        if lumencraft_testkit::nist_strd::corpus_available(&repo_corpus) {
+        let repo_corpus = curvebook_testkit::nist_strd::default_nist_strd_dir();
+        if curvebook_testkit::nist_strd::corpus_available(&repo_corpus) {
             assert_eq!(verify_corpus_dir(&repo_corpus).unwrap(), 58);
         }
     }
@@ -626,7 +626,7 @@ Data:  y   x
     #[test]
     fn commit_verified_download_rejects_mismatch_and_preserves_existing_file() {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("lumencraft-xtask-fetch-pin-{}-{stamp}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("curvebook-xtask-fetch-pin-{}-{stamp}", std::process::id()));
         fs::create_dir_all(dir.join("univ")).unwrap();
 
         let dest = dir.join("univ/NumAcc1.dat");
@@ -653,7 +653,7 @@ Data:  y   x
     #[test]
     fn verify_corpus_dir_rejects_unmanifested_stray_dat_and_tampered_unmanifested_pinned_dat() {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("lumencraft-xtask-stray-dat-{}-{stamp}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("curvebook-xtask-stray-dat-{}-{stamp}", std::process::id()));
         fs::create_dir_all(dir.join("anova")).unwrap();
 
         // Unmanifested stray .dat file even in a non-nist-strd folder must fail instead of passing a self-digest tautology.
@@ -669,7 +669,7 @@ Data:  y   x
         let valid_anova = "Dataset Name:  SiRstv\nCertified Analysis of Variance Table:\nBetween Treatments   1   4.0   4.0   4.0\nWithin Treatments    2   2.0   1.0\nR-Squared: 0.66666666666667\nResidual Standard Deviation: 1.0\nData:  y   x\n 10.0   1\n 12.0   1\n 12.0   2\n 14.0   2\n";
         fs::write(nist_stray_dir.join("anova/stray.dat"), valid_anova).unwrap();
         let manifest =
-            format!("# NIST StRD SHA-256\n{}  {}  anova/stray.dat\n", lumencraft_testkit::sha256_hex(valid_anova.as_bytes()), valid_anova.len(),);
+            format!("# NIST StRD SHA-256\n{}  {}  anova/stray.dat\n", curvebook_testkit::sha256_hex(valid_anova.as_bytes()), valid_anova.len(),);
         fs::write(nist_stray_dir.join(MANIFEST_FILENAME), manifest).unwrap();
         let err_manifested = verify_corpus_dir(&nist_stray_dir).unwrap_err();
         assert!(

@@ -9,13 +9,13 @@
 
 #![forbid(unsafe_code)]
 
-use lumencraft_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, ContingencyMethod, GlmFamily, GraphKind, GroupedArrangement, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
     SheetId,
 };
-use lumencraft_palette::Rgba8;
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
+use curvebook_palette::Rgba8;
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;
@@ -273,7 +273,7 @@ fn wf16_linear_deming_passing_bablok_ancova_and_r8_r9_predicates() -> TestRes {
         gui(&mut app, "ui.pointer_gesture", json!({ "action": "double_click", "x": cx, "y": cy }))?;
         gui(&mut app, "ui.type_text", json!({ "text": "6.4", "clear_existing": true, "commit_enter": true }))?;
         let ds_check = app.document().data_sheet(&"wf16-xy".into()).ok_or("wf16-xy missing")?;
-        let edited = ds_check.cell(lumencraft_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number());
+        let edited = ds_check.cell(curvebook_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number());
         ensure(edited == Some(6.4), format!("inline double-click edit expected 6.4, got {edited:?}"))?;
     }
 

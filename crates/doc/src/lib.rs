@@ -1,4 +1,4 @@
-//! Document model for LumenCraft projects: sheet families (`Data`, `Info`, `Analyses`, `Graphs`,
+//! Document model for CurveBook projects: sheet families (`Data`, `Info`, `Analyses`, `Graphs`,
 //! `Layouts`), the eight typed scientific data-table schemas, replicate subcolumns, cell-exclusion
 //! masks, hookable `InfoSheet` constants, `AnalysisSpec` / `ResultSheet`, `GraphSpec` / `LayoutSpec`,
 //! and reactive dependency links between tables, analyses, and figures.
@@ -7,7 +7,7 @@
 //! rendering backends. Governing spec: `docs/data-tables-and-transforms.md`.
 //!
 //! ```
-//! use lumencraft_doc::{Cell, CellCoord, DataSheet, SubcolumnMode, TableArchetype, TableKind, XyTable};
+//! use curvebook_doc::{Cell, CellCoord, DataSheet, SubcolumnMode, TableArchetype, TableKind, XyTable};
 //!
 //! let xy = XyTable::new(SubcolumnMode::RawReplicates(3), 2, 4).unwrap();
 //! let mut sheet = DataSheet::new("data-1", "Dose Response", TableArchetype::Xy(xy)).unwrap();
@@ -81,7 +81,7 @@ pub use schema::{
     null_schema, nullable_schema, number_schema, object_schema, one_of_schema, project_document_schema, ref_schema, string_schema,
 };
 
-/// The eight typed scientific data-table families in a LumenCraft project.
+/// The eight typed scientific data-table families in a CurveBook project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TableKind {
     Xy,
@@ -129,7 +129,7 @@ impl TableKind {
     }
 }
 
-/// Top-level sheet sections in a LumenCraft project navigator.
+/// Top-level sheet sections in a CurveBook project navigator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SheetSection {
     Data,
@@ -141,7 +141,7 @@ pub enum SheetSection {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_palette::{LineDashStyle, PaletteId, Rgba8};
+    use curvebook_palette::{LineDashStyle, PaletteId, Rgba8};
 
     use super::{
         AnalysisKind, AnalysisSpec, AxisSegment, Cell, CellCoord, CiBound, ColumnDesignHint, ColumnTable, ConfidenceLevel, ConstantValue,
@@ -325,9 +325,9 @@ mod tests {
         let mut spec = AnalysisSpec::new("res-1", "data-1", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).unwrap();
         assert_eq!(spec.effective_title(), "Ordinary one-way ANOVA");
         spec.set_confidence_percent(99.0).unwrap();
-        assert_eq!(spec.confidence_level, lumencraft_math::ConfidenceLevel::PERCENT_99);
+        assert_eq!(spec.confidence_level, curvebook_math::ConfidenceLevel::PERCENT_99);
         assert!(matches!(spec.set_confidence_percent(105.0), Err(DocError::InvalidConfidenceLevel { percent }) if percent == 105.0));
-        assert_eq!(super::GraphAxisScale::Logit(super::LogitDomain::Proportion), lumencraft_math::AxisScale::LOGIT_PROPORTION);
+        assert_eq!(super::GraphAxisScale::Logit(super::LogitDomain::Proportion), curvebook_math::AxisScale::LOGIT_PROPORTION);
         assert_eq!(super::GraphAxisScale::Logit(super::LogitDomain::Proportion).transform(0.5), Some(0.0));
 
         // In-place parameter update dynamically re-derives the default sheet title.

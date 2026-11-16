@@ -56,10 +56,10 @@
       "type": "string"
     }
   },
-  "$id": "https://lumencraft.dev/schemas/archive-manifest.schema.json",
+  "$id": "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/archive-manifest.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Draft 2020-12 schema for LumenCraft .lumencraft / .lctemplate archive manifest.json files.",
+  "description": "Draft 2020-12 schema for CurveBook .curvebook / .cbtemplate archive manifest.json files.",
   "properties": {
     "document_crc32": {
       "maximum": 4294967295,
@@ -67,7 +67,7 @@
       "type": "integer"
     },
     "format": {
-      "const": "lumencraft-archive",
+      "const": "curvebook-archive",
       "type": "string"
     },
     "kind": {

@@ -1,7 +1,7 @@
 //! Aspect-ratio centered canvas & layout viewport mapping, zoom-to-fit / zoom-% selector,
 //! pan scrollbars, and hover/selected-only decoration visibility guards (`R10.15`).
 
-use lumencraft_doc::SheetId;
+use curvebook_doc::SheetId;
 
 use super::LayoutRectPx;
 use super::scroll::{compute_scrollbar_thumb, scrollbar_thickness_px};

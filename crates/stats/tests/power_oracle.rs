@@ -1,15 +1,15 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Decision D1 Numerical Verification Oracle Suite for `lumencraft_stats::power`.
+//! Decision D1 Numerical Verification Oracle Suite for `curvebook_stats::power`.
 //!
 //! Reference provenance:
-//! - Exact noncentral-t, noncentral-F, and noncentral-chi2 distributions (`lumencraft_math::dist::noncentral`).
+//! - Exact noncentral-t, noncentral-F, and noncentral-chi2 distributions (`curvebook_math::dist::noncentral`).
 //! - Published analytical power & sample-size benchmarks (Cohen 1988 *Statistical Power Analysis
 //!   for the Behavioral Sciences*; Fleiss 1981 *Statistical Methods for Rates and Proportions*;
 //!   R `pwr` package conventions for `pwr.t.test`, `pwr.t2n.test`, `pwr.anova.test`,
 //!   `pwr.2p.test`, `pwr.r.test`, `pwr.chisq.test`, and `pwr.f2.test`).
 
-use lumencraft_math::dist::{f_isf, ncf_sf};
-use lumencraft_stats::power::{
+use curvebook_math::dist::{f_isf, ncf_sf};
+use curvebook_stats::power::{
     CorrelationPowerMethod, OneSidedDirection, PowerAnalysisRequest, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, TailMode,
     TwoProportionsMethod, cohens_h, compute_power_curve, compute_sensitivity_table, solve_power,
 };

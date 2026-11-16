@@ -3,12 +3,12 @@
 use std::hint::black_box;
 use std::time::Instant;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellCoord, DataSheet, DocError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind, LinkBorderColor,
     LinkSource, LinkedDataRegion, MAX_ROWS, SheetCellRange, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_tools::grid::{GridDirection, GridNavAction, format_selection_tsv, parse_tsv_clipboard};
-use lumencraft_tools::{GridCellCoord, GridToolState, SelectionQuickStats};
+use curvebook_tools::grid::{GridDirection, GridNavAction, format_selection_tsv, parse_tsv_clipboard};
+use curvebook_tools::{GridCellCoord, GridToolState, SelectionQuickStats};
 
 fn percentile_sorted(sorted: &[f64], p: f64) -> f64 {
     if sorted.is_empty() {

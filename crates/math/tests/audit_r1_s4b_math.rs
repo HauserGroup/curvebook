@@ -1,7 +1,7 @@
 //! Stage 4B regression tests for `R1-S01-04` (`crates/math/src/linalg/cholesky.rs`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_math::{DenseMatrix, MathError, cholesky};
+use curvebook_math::{DenseMatrix, MathError, cholesky};
 
 #[test]
 fn r1_s01_04_cholesky_rejects_collinear_gram_and_singular_matrices_across_scales() {

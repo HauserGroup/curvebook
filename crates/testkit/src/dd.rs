@@ -1,5 +1,5 @@
 //! Exact error-free `DoubleDouble` (`hi + lo`, ~106-bit significand / ~31 decimal digits) reference
-//! arithmetic used inside `lumencraft-testkit` to certify synthetic stiff benchmarks without
+//! arithmetic used inside `curvebook-testkit` to certify synthetic stiff benchmarks without
 //! external multiprecision crates.
 
 use std::ops::{Add, AddAssign, Div, Mul, Neg, Sub, SubAssign};

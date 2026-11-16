@@ -1,7 +1,7 @@
-//! Structured MCP error payloads aligned with `lumencraft_engine::EngineError` diagnostics.
+//! Structured MCP error payloads aligned with `curvebook_engine::EngineError` diagnostics.
 
-use lumencraft_doc::{ErrorCategory, ErrorCode};
-use lumencraft_engine::EngineError;
+use curvebook_doc::{ErrorCategory, ErrorCode};
+use curvebook_engine::EngineError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 

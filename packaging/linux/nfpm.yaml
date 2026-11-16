@@ -1,5 +1,5 @@
 # .deb and .rpm packages (nfpm: https://nfpm.goreleaser.com). Run by package.sh.
-name: lumencraft
+name: curvebook
 arch: ${NFPM_ARCH}
 platform: linux
 version: ${VERSION}
@@ -7,15 +7,15 @@ version_schema: semver
 release: 1
 section: science
 priority: optional
-maintainer: ${LUMENCRAFT_MAINTAINER}
-vendor: LumenCraft Contributors
-homepage: https://github.com/lumencraft/lumencraft
+maintainer: ${CURVEBOOK_MAINTAINER}
+vendor: CurveBook Contributors
+homepage: https://github.com/HauserGroup/curvebook
 license: MIT OR Apache-2.0
 description: |-
   Open-source biostatistics, nonlinear regression, and scientific graphing app.
   Structured scientific data tables, parametric and nonparametric tests, curve
   fitting, survival analysis, and publication-grade SVG and PDF figure export.
-  Includes lumencraft-cli, a headless runner and MCP server.
+  Includes curvebook-cli, a headless runner and MCP server.
 
 overrides:
   deb:
@@ -50,11 +50,11 @@ overrides:
       - xdg-desktop-portal
 
 contents:
-  - src: ${STAGE}/usr/bin/lumencraft
-    dst: /usr/bin/lumencraft
+  - src: ${STAGE}/usr/bin/curvebook
+    dst: /usr/bin/curvebook
     file_info: { mode: 0755 }
-  - src: ${STAGE}/usr/bin/lumencraft-cli
-    dst: /usr/bin/lumencraft-cli
+  - src: ${STAGE}/usr/bin/curvebook-cli
+    dst: /usr/bin/curvebook-cli
     file_info: { mode: 0755 }
   - src: ${STAGE}/usr/share/
     dst: /usr/share/

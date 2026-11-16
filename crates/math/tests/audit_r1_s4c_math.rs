@@ -1,8 +1,8 @@
-//! Stage 4C audit regression tests for `R1-S01-08` in `lumencraft-math`.
+//! Stage 4C audit regression tests for `R1-S01-08` in `curvebook-math`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_math::MathError;
-use lumencraft_math::special::gamma;
+use curvebook_math::MathError;
+use curvebook_math::special::gamma;
 
 #[test]
 fn r1_s01_08_gamma_rejects_negative_infinity_and_poles_with_domain_error() {

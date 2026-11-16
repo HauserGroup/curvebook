@@ -1,19 +1,19 @@
-//! Stage 4A regression tests for S02, X2, and S05-01 twin fixes in `lumencraft-stats`.
+//! Stage 4A regression tests for S02, X2, and S05-01 twin fixes in `curvebook-stats`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, ColumnDesignHint, ColumnTable, ContingencyMethod, ContingencySpec, ContingencyTable,
     CoxTieMethod, DataSheet, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec, GroupedTable, MultipleVariablesTable, MultiplicityMethod,
     MultiplicitySpec, NestedAnalysisSpec, NestedTable, OneWayAnovaSpec, OneWayMethod, OutlierSpec, RepeatedMeasuresDesign, ResultCell, SheetId,
     SubcolumnAggregation, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, ThreeWayColumnGrouping, VariableRole,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_stats::anova::{ordinary_one_way_from_summary, rm_one_way_anova};
-use lumencraft_stats::column::rout_outliers;
-use lumencraft_stats::multiplicity::{GroupComparisonInput, MultiplicityProcedure, compare_groups_with_procedure};
-use lumencraft_stats::{StatsError, run_analysis};
+use curvebook_math::ConfidenceLevel;
+use curvebook_stats::anova::{ordinary_one_way_from_summary, rm_one_way_anova};
+use curvebook_stats::column::rout_outliers;
+use curvebook_stats::multiplicity::{GroupComparisonInput, MultiplicityProcedure, compare_groups_with_procedure};
+use curvebook_stats::{StatsError, run_analysis};
 
-fn scalar_val(sheet: &lumencraft_doc::ResultSheet, key: &str, ds_idx: Option<usize>) -> Option<f64> {
+fn scalar_val(sheet: &curvebook_doc::ResultSheet, key: &str, ds_idx: Option<usize>) -> Option<f64> {
     sheet.scalars.iter().find(|s| s.key == key && s.data_set_index == ds_idx).map(|s| s.value)
 }
 

@@ -7,12 +7,12 @@
 
 use std::sync::Arc;
 
-use lumencraft_chart::{ChartScene, PointPt, preflight_check_scene};
-use lumencraft_doc::{AnalysisKind, DataSheet, InfoSheet, LayoutItem, ResultSheet, SheetFolderKind, SheetId, SheetSection, TableArchetype};
-use lumencraft_palette::{CanvasPreviewFilter, Rgba8};
-use lumencraft_render::{RasterImage, RenderTargetSpec, apply_canvas_preview_filter, render_scene};
-use lumencraft_tools::canvas::{SnapOrientation, SnapSource};
-use lumencraft_tools::{GridCellCoord, PhysicalUnit, build_ruler_ticks};
+use curvebook_chart::{ChartScene, PointPt, preflight_check_scene};
+use curvebook_doc::{AnalysisKind, DataSheet, InfoSheet, LayoutItem, ResultSheet, SheetFolderKind, SheetId, SheetSection, TableArchetype};
+use curvebook_palette::{CanvasPreviewFilter, Rgba8};
+use curvebook_render::{RasterImage, RenderTargetSpec, apply_canvas_preview_filter, render_scene};
+use curvebook_tools::canvas::{SnapOrientation, SnapSource};
+use curvebook_tools::{GridCellCoord, PhysicalUnit, build_ruler_ticks};
 use serde_json::json;
 
 use crate::UiApp;
@@ -1540,7 +1540,7 @@ fn draw_scene_overlays(
             if should_show_graph_series_chip(app, s_idx) {
                 let bx = 8 + (s_idx as u32) * 14;
                 if bx + 10 < pw && 18 < ph {
-                    let col = variable_role_color(lumencraft_doc::VariableRole::Continuous, &app.theme);
+                    let col = variable_role_color(curvebook_doc::VariableRole::Continuous, &app.theme);
                     for y in 8..16 {
                         for x in bx..bx + 10 {
                             img.blend_pixel(x, y, col);
@@ -2605,6 +2605,6 @@ fn modal_title(dialog: &ActiveDialog) -> String {
         ActiveDialog::InsertModelEquation { .. } => String::from("Insert Model Equation"),
         ActiveDialog::ConstantHookPicker { .. } => String::from("Hook Constant"),
         ActiveDialog::ResultViewer { .. } => String::from("Result Viewer"),
-        ActiveDialog::About => String::from("About LumenCraft"),
+        ActiveDialog::About => String::from("About CurveBook"),
     }
 }

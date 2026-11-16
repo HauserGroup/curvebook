@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use lumencraft_doc::{DataSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
+use curvebook_doc::{DataSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
 
 use crate::archive::{
     MAX_ARCHIVE_FILE_BYTES, is_unpacked_project_dir, open_project_bytes, open_project_unpacked_dir, open_template_bytes, save_project_bytes,
@@ -34,7 +34,7 @@ pub enum FormatKind {
 /// Static metadata identifying a registered import or export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FormatDescriptor {
-    /// Canonical lowercase format identifier (e.g. `"lumencraft"`, `"lumencraft.d"`, `"tiff"`).
+    /// Canonical lowercase format identifier (e.g. `"curvebook"`, `"curvebook.d"`, `"tiff"`).
     pub id: &'static str,
     /// Human-readable display label.
     pub label: &'static str,
@@ -130,7 +130,7 @@ pub trait Importer: Send + Sync {
     /// Decode an in-memory byte slice into a typed [`ImportPayload`].
     fn import_bytes(&self, bytes: &[u8], opts: &ImportOptions) -> Result<ImportPayload, FormatError>;
 
-    /// Decode from a filesystem path (overridden by directory-backed formats such as `.lumencraft.d`).
+    /// Decode from a filesystem path (overridden by directory-backed formats such as `.curvebook.d`).
     fn import_path(&self, path: &Path, opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -153,7 +153,7 @@ pub trait Exporter: Send + Sync {
     /// Encode `source` into an in-memory byte buffer.
     fn export_bytes(&self, source: ExportSource<'_>, opts: &ExportOptions) -> Result<Vec<u8>, FormatError>;
 
-    /// Persist `source` to `path` atomically (overridden by directory-backed formats such as `.lumencraft.d`).
+    /// Persist `source` to `path` atomically (overridden by directory-backed formats such as `.curvebook.d`).
     fn export_path(&self, source: ExportSource<'_>, path: &Path, opts: &ExportOptions) -> Result<(), FormatError> {
         #[cfg(not(target_arch = "wasm32"))]
         {
@@ -163,7 +163,7 @@ pub trait Exporter: Send + Sync {
             {
                 std::fs::create_dir_all(parent)?;
             }
-            lumencraft_platform::fs::write_atomic(path, &bytes)?;
+            curvebook_platform::fs::write_atomic(path, &bytes)?;
             Ok(())
         }
         #[cfg(target_arch = "wasm32")]
@@ -202,21 +202,21 @@ impl FormatRegistry {
         Self { importers: Vec::new(), exporters: Vec::new() }
     }
 
-    /// Construct the standard registry populated with LumenCraft native, delimited-text,
+    /// Construct the standard registry populated with CurveBook native, delimited-text,
     /// foreign-project, result-table, and figure descriptors.
     pub fn default_registry() -> Self {
         let mut reg = Self::new();
-        reg.register_importer(Arc::new(LumencraftArchiveAdapter));
+        reg.register_importer(Arc::new(CurveBookArchiveAdapter));
         reg.register_importer(Arc::new(UnpackedProjectDirAdapter));
-        reg.register_importer(Arc::new(LctemplateAdapter));
+        reg.register_importer(Arc::new(CbtemplateAdapter));
         reg.register_importer(Arc::new(PrismAdapter));
         reg.register_importer(Arc::new(PzfxAdapter));
         reg.register_importer(Arc::new(CsvAdapter));
         reg.register_importer(Arc::new(TsvAdapter));
 
-        reg.register_exporter(Arc::new(LumencraftArchiveAdapter));
+        reg.register_exporter(Arc::new(CurveBookArchiveAdapter));
         reg.register_exporter(Arc::new(UnpackedProjectDirAdapter));
-        reg.register_exporter(Arc::new(LctemplateAdapter));
+        reg.register_exporter(Arc::new(CbtemplateAdapter));
         reg.register_exporter(Arc::new(CsvAdapter));
         reg.register_exporter(Arc::new(TsvAdapter));
         reg.register_exporter(Arc::new(JsonResultAdapter));
@@ -258,7 +258,7 @@ impl FormatRegistry {
     }
 
     /// Look up a registered [`Importer`] for `path`, checking unpacked project directories and
-    /// multi-dot suffixes like `.lumencraft.d` before single-extension matching, and rejecting
+    /// multi-dot suffixes like `.curvebook.d` before single-extension matching, and rejecting
     /// non-project directories from single-file adapters.
     pub fn importer_for_path(&self, path: &Path) -> Option<&dyn Importer> {
         if is_unpacked_project_dir(path) {
@@ -288,8 +288,8 @@ impl FormatRegistry {
     }
 
     /// Look up a registered [`Exporter`] for `path`, checking unpacked project directories and
-    /// multi-dot suffixes like `.lumencraft.d` before single-extension matching, and refusing to
-    /// treat arbitrary existing directories as `.lumencraft.d` targets.
+    /// multi-dot suffixes like `.curvebook.d` before single-extension matching, and refusing to
+    /// treat arbitrary existing directories as `.curvebook.d` targets.
     pub fn exporter_for_path(&self, path: &Path) -> Option<&dyn Exporter> {
         if is_unpacked_project_dir(path) {
             return self.exporter_by_format(DESC_PROJECT_DIR.id);
@@ -346,11 +346,11 @@ where
 }
 
 const DESC_ARCHIVE: FormatDescriptor =
-    FormatDescriptor { id: "lumencraft", label: "LumenCraft Project Archive", extensions: &["lumencraft"], kind: FormatKind::Archive };
+    FormatDescriptor { id: "curvebook", label: "CurveBook Project Archive", extensions: &["curvebook"], kind: FormatKind::Archive };
 const DESC_PROJECT_DIR: FormatDescriptor =
-    FormatDescriptor { id: "lumencraft.d", label: "LumenCraft Unpacked Project", extensions: &["lumencraft.d"], kind: FormatKind::ProjectDir };
+    FormatDescriptor { id: "curvebook.d", label: "CurveBook Unpacked Project", extensions: &["curvebook.d"], kind: FormatKind::ProjectDir };
 const DESC_TEMPLATE: FormatDescriptor =
-    FormatDescriptor { id: "lctemplate", label: "LumenCraft Template", extensions: &["lctemplate"], kind: FormatKind::Template };
+    FormatDescriptor { id: "cbtemplate", label: "CurveBook Template", extensions: &["cbtemplate"], kind: FormatKind::Template };
 const DESC_PRISM: FormatDescriptor =
     FormatDescriptor { id: "prism", label: "Prism Archive", extensions: &["prism"], kind: FormatKind::ForeignProject }; // brand-ok
 const DESC_PZFX: FormatDescriptor =
@@ -380,8 +380,8 @@ fn ensure_parent_dir_exists(path: &Path) -> Result<(), FormatError> {
     Ok(())
 }
 
-struct LumencraftArchiveAdapter;
-impl Importer for LumencraftArchiveAdapter {
+struct CurveBookArchiveAdapter;
+impl Importer for CurveBookArchiveAdapter {
     fn descriptor(&self) -> FormatDescriptor {
         DESC_ARCHIVE
     }
@@ -390,7 +390,7 @@ impl Importer for LumencraftArchiveAdapter {
         Ok(ImportPayload::Document(open_project_bytes(bytes)?))
     }
 }
-impl Exporter for LumencraftArchiveAdapter {
+impl Exporter for CurveBookArchiveAdapter {
     fn descriptor(&self) -> FormatDescriptor {
         DESC_ARCHIVE
     }
@@ -422,7 +422,7 @@ impl Importer for UnpackedProjectDirAdapter {
     }
 
     fn import_bytes(&self, _bytes: &[u8], _opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
-        Err(FormatError::UnsupportedFormat { reason: String::from("`lumencraft.d` requires a directory path rather than raw bytes") })
+        Err(FormatError::UnsupportedFormat { reason: String::from("`curvebook.d` requires a directory path rather than raw bytes") })
     }
 
     fn import_path(&self, path: &Path, _opts: &ImportOptions) -> Result<ImportPayload, FormatError> {
@@ -435,7 +435,7 @@ impl Exporter for UnpackedProjectDirAdapter {
     }
 
     fn export_bytes(&self, _source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
-        Err(FormatError::UnsupportedFormat { reason: String::from("`lumencraft.d` requires a directory path rather than raw bytes") })
+        Err(FormatError::UnsupportedFormat { reason: String::from("`curvebook.d` requires a directory path rather than raw bytes") })
     }
 
     fn export_path(&self, source: ExportSource<'_>, path: &Path, _opts: &ExportOptions) -> Result<(), FormatError> {
@@ -444,8 +444,8 @@ impl Exporter for UnpackedProjectDirAdapter {
     }
 }
 
-struct LctemplateAdapter;
-impl Importer for LctemplateAdapter {
+struct CbtemplateAdapter;
+impl Importer for CbtemplateAdapter {
     fn descriptor(&self) -> FormatDescriptor {
         DESC_TEMPLATE
     }
@@ -454,7 +454,7 @@ impl Importer for LctemplateAdapter {
         Ok(ImportPayload::Document(open_template_bytes(bytes)?))
     }
 }
-impl Exporter for LctemplateAdapter {
+impl Exporter for CbtemplateAdapter {
     fn descriptor(&self) -> FormatDescriptor {
         DESC_TEMPLATE
     }
@@ -582,7 +582,7 @@ impl Exporter for JsonResultAdapter {
                         validate_data_sheet_floats(ds)?;
                         serialize_json_text(ds, opts.pretty)?
                     } else {
-                        return Err(FormatError::Doc(lumencraft_doc::DocError::SheetNotFound { sheet_id: SheetId::new(target_id) }));
+                        return Err(FormatError::Doc(curvebook_doc::DocError::SheetNotFound { sheet_id: SheetId::new(target_id) }));
                     }
                 } else {
                     let Some(rs) = doc.result_sheets.first() else {
@@ -626,6 +626,9 @@ fn expect_document_source<'a>(source: ExportSource<'a>, format_id: &str) -> Resu
 }
 
 fn decode_utf8_input<'a>(bytes: &'a [u8], format_id: &str) -> Result<&'a str, FormatError> {
+    if bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06") {
+        return Err(FormatError::UnsupportedFormat { reason: format!("binary ZIP archive payload cannot be imported as `{format_id}`") });
+    }
     std::str::from_utf8(bytes).map_err(|err| FormatError::CsvParse { line: 1, reason: format!("invalid UTF-8 in {format_id} input: {err}") })
 }
 
@@ -655,7 +658,7 @@ fn export_document_delimited_text(
         if let Some(rs) = doc.result_sheets.iter().find(|s| s.id.as_str() == target_id) {
             return Ok(export_result_sheet_tidy_csv(rs, csv_opts));
         }
-        return Err(FormatError::Doc(lumencraft_doc::DocError::SheetNotFound { sheet_id: SheetId::new(target_id) }));
+        return Err(FormatError::Doc(curvebook_doc::DocError::SheetNotFound { sheet_id: SheetId::new(target_id) }));
     }
     if let Some(ds) = doc.data_sheets.first() {
         return export_datasheet_to_csv(ds, csv_opts);

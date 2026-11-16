@@ -2,7 +2,7 @@
 //!
 //! Enforces that workspace crates depend strictly downward in the layer hierarchy, that external
 //! suite crates (`craft-*`) never appear anywhere in the workspace, that UI toolkit crates (`egui`,
-//! `eframe`, `winit`, `rfd`, `bevy*`) never appear below L6, and that `lumencraft-testkit` is used
+//! `eframe`, `winit`, `rfd`, `bevy*`) never appear below L6, and that `curvebook-testkit` is used
 //! solely as a `[dev-dependencies]` entry.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
@@ -34,7 +34,7 @@ impl Class {
     }
 }
 
-/// Registered workspace crates (package names without the `lumencraft-` prefix).
+/// Registered workspace crates (package names without the `curvebook-` prefix).
 pub const TABLE: &[(&str, Class)] = &[
     // L0: numerical & colour/style foundations
     ("math", Class::Layer(0)),
@@ -63,7 +63,7 @@ pub const TABLE: &[(&str, Class)] = &[
     // Test helpers (dev-dependency only)
     ("testkit", Class::Testkit),
     // L7: apps and workspace tooling
-    ("lumencraft", Class::Exempt),
+    ("curvebook", Class::Exempt),
     ("cli", Class::Exempt),
     ("web", Class::Exempt),
     ("xtask", Class::Exempt),
@@ -89,7 +89,7 @@ pub const UI_MIN_LAYER: u8 = 6;
 
 #[must_use]
 pub fn short_name(pkg: &str) -> &str {
-    pkg.strip_prefix("lumencraft-").unwrap_or(pkg)
+    pkg.strip_prefix("curvebook-").unwrap_or(pkg)
 }
 
 #[must_use]
@@ -152,13 +152,13 @@ impl std::fmt::Display for Violation {
                 write!(f, "{krate}: standalone crate must not depend on workspace crate {dep}")
             }
             Violation::TestkitAsNormalDep { krate } => {
-                write!(f, "{krate}: lumencraft-testkit may only be a dev-dependency")
+                write!(f, "{krate}: curvebook-testkit may only be a dev-dependency")
             }
             Violation::UiBelowL6 { krate, dep, layer } => {
                 write!(f, "{krate} (L{layer}) depends on UI crate `{dep}`; UI toolkits are only allowed in L6+")
             }
             Violation::SuiteCrate { krate, dep } => {
-                write!(f, "{krate} depends on external suite crate `{dep}`; LumenCraft is standalone and may not depend on `craft-*` crates")
+                write!(f, "{krate} depends on external suite crate `{dep}`; CurveBook is standalone and may not depend on `craft-*` crates")
             }
         }
     }
@@ -271,8 +271,8 @@ fn collect_declared_deps(pkg: &Json, member_names: &BTreeSet<&str>) -> Vec<Dep> 
     for d in pkg.get("dependencies").and_then(Json::as_array).into_iter().flatten() {
         let dname = d.get("name").and_then(Json::as_str).unwrap_or_default().to_owned();
         let kind = parse_dep_kind_str(d.get("kind").and_then(Json::as_str));
-        let is_local_lumencraft = d.get("path").is_some_and(Json::is_string) && dname.starts_with("lumencraft-");
-        let workspace = member_names.contains(dname.as_str()) || classify(&dname).is_some() || is_local_lumencraft;
+        let is_local_curvebook = d.get("path").is_some_and(Json::is_string) && dname.starts_with("curvebook-");
+        let workspace = member_names.contains(dname.as_str()) || classify(&dname).is_some() || is_local_curvebook;
         deps.push(Dep { name: dname, kind, workspace });
     }
     deps
@@ -442,7 +442,7 @@ pub fn describe(class: Option<Class>) -> String {
 }
 
 /// Shrink-only baseline of workspace files temporarily exempted from the raw `std::process::Command`
-/// ban (`R0.10`). Keep empty once all production callers migrate to `lumencraft-platform`.
+/// ban (`R0.10`). Keep empty once all production callers migrate to `curvebook-platform`.
 pub const ALLOWED_RAW_PROCESS_BASELINE: &[&str] = &[];
 
 /// Shrink-only baseline of `crates/ui-egui/src` files temporarily exempted from raw filesystem or
@@ -1123,39 +1123,39 @@ mod tests {
     #[test]
     fn clean_downward_graph_passes() {
         let g = [
-            c("lumencraft-math", &[]),
-            c("lumencraft-palette", &[("lumencraft-math", DepKind::Normal, true)]),
-            c("lumencraft-doc", &[("lumencraft-math", DepKind::Normal, true)]),
-            c("lumencraft-stats", &[("lumencraft-doc", DepKind::Normal, true)]),
-            c("lumencraft-chart", &[("lumencraft-stats", DepKind::Normal, true)]),
-            c("lumencraft-engine", &[("lumencraft-chart", DepKind::Normal, true), ("lumencraft-testkit", DepKind::Dev, true)]),
-            c("lumencraft-ui-egui", &[("lumencraft-engine", DepKind::Normal, true), ("egui", DepKind::Normal, false)]),
-            c("lumencraft-cli", &[("lumencraft-mcp", DepKind::Normal, true)]),
+            c("curvebook-math", &[]),
+            c("curvebook-palette", &[("curvebook-math", DepKind::Normal, true)]),
+            c("curvebook-doc", &[("curvebook-math", DepKind::Normal, true)]),
+            c("curvebook-stats", &[("curvebook-doc", DepKind::Normal, true)]),
+            c("curvebook-chart", &[("curvebook-stats", DepKind::Normal, true)]),
+            c("curvebook-engine", &[("curvebook-chart", DepKind::Normal, true), ("curvebook-testkit", DepKind::Dev, true)]),
+            c("curvebook-ui-egui", &[("curvebook-engine", DepKind::Normal, true), ("egui", DepKind::Normal, false)]),
+            c("curvebook-cli", &[("curvebook-mcp", DepKind::Normal, true)]),
         ];
         assert!(check(&g).is_empty(), "{:?}", check(&g));
     }
 
     #[test]
     fn upward_and_sideways_dependencies_are_flagged() {
-        let up = check(&[c("lumencraft-doc", &[("lumencraft-engine", DepKind::Normal, true)])]);
+        let up = check(&[c("curvebook-doc", &[("curvebook-engine", DepKind::Normal, true)])]);
         assert!(matches!(up[..], [Violation::Upward { from: 1, to: 5, .. }]));
 
-        let side = check(&[c("lumencraft-stats", &[("lumencraft-fit", DepKind::Normal, true)])]);
+        let side = check(&[c("curvebook-stats", &[("curvebook-fit", DepKind::Normal, true)])]);
         assert!(matches!(side[..], [Violation::Upward { from: 2, to: 2, .. }]));
     }
 
     #[test]
     fn ui_crates_below_l6_and_testkit_normal_deps_are_flagged() {
-        let ui = check(&[c("lumencraft-engine", &[("egui", DepKind::Normal, false)])]);
+        let ui = check(&[c("curvebook-engine", &[("egui", DepKind::Normal, false)])]);
         assert!(matches!(ui[..], [Violation::UiBelowL6 { layer: 5, .. }]));
 
-        let tk = check(&[c("lumencraft-stats", &[("lumencraft-testkit", DepKind::Normal, true)])]);
+        let tk = check(&[c("curvebook-stats", &[("curvebook-testkit", DepKind::Normal, true)])]);
         assert!(matches!(tk[..], [Violation::TestkitAsNormalDep { .. }]));
 
-        let suite_ui = check(&[c("lumencraft-ui-egui", &[("craft-ui", DepKind::Normal, false)])]);
+        let suite_ui = check(&[c("curvebook-ui-egui", &[("craft-ui", DepKind::Normal, false)])]);
         assert!(matches!(suite_ui[..], [Violation::SuiteCrate { .. }]));
 
-        let suite_app = check(&[c("lumencraft", &[("craft-update", DepKind::Normal, false)])]);
+        let suite_app = check(&[c("curvebook", &[("craft-update", DepKind::Normal, false)])]);
         assert!(matches!(suite_app[..], [Violation::SuiteCrate { .. }]));
     }
 
@@ -1163,10 +1163,10 @@ mod tests {
     fn metadata_parsing_round_trip() {
         let meta = parse(
             r#"{"packages":[
-                {"name":"lumencraft-doc","dependencies":[
-                    {"name":"lumencraft-math","kind":null,"path":"/x/crates/math"},
-                    {"name":"lumencraft-testkit","kind":"dev","path":"/x/crates/testkit"}]},
-                {"name":"lumencraft-math","dependencies":[]}
+                {"name":"curvebook-doc","dependencies":[
+                    {"name":"curvebook-math","kind":null,"path":"/x/crates/math"},
+                    {"name":"curvebook-testkit","kind":"dev","path":"/x/crates/testkit"}]},
+                {"name":"curvebook-math","dependencies":[]}
             ]}"#,
         )
         .unwrap();
@@ -1180,17 +1180,17 @@ mod tests {
         for ui_dep in
             ["egui", "egui_extras", "epaint", "epaint_default_fonts", "emath", "ecolor", "eframe", "winit", "rfd", "wgpu", "wgpu-core", "bevy_math"]
         {
-            let hits = check(&[c("lumencraft-engine", &[(ui_dep, DepKind::Build, true)])]);
+            let hits = check(&[c("curvebook-engine", &[(ui_dep, DepKind::Build, true)])]);
             assert!(matches!(hits[..], [Violation::UiBelowL6 { layer: 5, .. }]), "expected UiBelowL6 for {ui_dep}, got {hits:?}");
         }
         // L6 crates may depend on UI crates.
-        assert!(check(&[c("lumencraft-ui-egui", &[("egui-winit", DepKind::Normal, false)])]).is_empty());
+        assert!(check(&[c("curvebook-ui-egui", &[("egui-winit", DepKind::Normal, false)])]).is_empty());
 
         // Vendored path dependency in metadata JSON has a `"path"` field without making it a workspace crate,
         // and UI checks still flag it below L6 (e.g., `egui = { path = "/x/vendor/egui" }`).
         let meta = parse(
             r#"{"packages":[
-                {"name":"lumencraft-fit","id":"fit 0.1.0","dependencies":[
+                {"name":"curvebook-fit","id":"fit 0.1.0","dependencies":[
                     {"name":"egui","kind":null,"path":"/x/vendor/egui"}
                 ]}
             ],"workspace_members":["fit 0.1.0"]}"#,
@@ -1206,10 +1206,10 @@ mod tests {
         let meta = parse(
             r#"{
                 "packages": [
-                    {"name":"lumencraft-math","id":"math 0.1.0","dependencies":[]},
-                    {"name":"lumencraft-doc","id":"doc 0.1.0","dependencies":[]},
-                    {"name":"lumencraft-stats","id":"stats 0.1.0","dependencies":[]},
-                    {"name":"lumencraft-testkit","id":"testkit 0.1.0","dependencies":[]},
+                    {"name":"curvebook-math","id":"math 0.1.0","dependencies":[]},
+                    {"name":"curvebook-doc","id":"doc 0.1.0","dependencies":[]},
+                    {"name":"curvebook-stats","id":"stats 0.1.0","dependencies":[]},
+                    {"name":"curvebook-testkit","id":"testkit 0.1.0","dependencies":[]},
                     {"name":"helper-crate","id":"helper 0.1.0","dependencies":[]},
                     {"name":"winit","id":"winit 0.30.0","dependencies":[]}
                 ],
@@ -1250,19 +1250,19 @@ mod tests {
         let g = from_metadata(&meta).unwrap();
         let hits = check(&g);
         assert_eq!(hits.len(), 1, "expected only transitive stats->winit violation, got {hits:?}");
-        assert!(matches!(&hits[0], Violation::UiBelowL6 { krate, dep, layer: 2 } if krate == "lumencraft-stats" && dep == "winit"));
+        assert!(matches!(&hits[0], Violation::UiBelowL6 { krate, dep, layer: 2 } if krate == "curvebook-stats" && dep == "winit"));
     }
 
     #[test]
     fn exempt_apps_forbid_testkit_as_normal_dep_except_xtask() {
-        let app_hit = check(&[c("lumencraft", &[("lumencraft-testkit", DepKind::Normal, true)])]);
+        let app_hit = check(&[c("curvebook", &[("curvebook-testkit", DepKind::Normal, true)])]);
         assert!(matches!(app_hit[..], [Violation::TestkitAsNormalDep { .. }]), "got {app_hit:?}");
 
-        let cli_hit = check(&[c("lumencraft-cli", &[("lumencraft-testkit", DepKind::Build, true)])]);
+        let cli_hit = check(&[c("curvebook-cli", &[("curvebook-testkit", DepKind::Build, true)])]);
         assert!(matches!(cli_hit[..], [Violation::TestkitAsNormalDep { .. }]), "got {cli_hit:?}");
 
-        assert!(check(&[c("lumencraft", &[("lumencraft-testkit", DepKind::Dev, true)])]).is_empty());
-        assert!(check(&[c("xtask", &[("lumencraft-testkit", DepKind::Normal, true)])]).is_empty());
+        assert!(check(&[c("curvebook", &[("curvebook-testkit", DepKind::Dev, true)])]).is_empty());
+        assert!(check(&[c("xtask", &[("curvebook-testkit", DepKind::Normal, true)])]).is_empty());
     }
 
     #[test]
@@ -1294,7 +1294,7 @@ serde = "1"
     #[test]
     fn table_registers_all_22_workspace_crates_including_platform() {
         assert_eq!(TABLE.len(), 22);
-        assert_eq!(classify("lumencraft-platform"), Some(Class::Layer(0)));
+        assert_eq!(classify("curvebook-platform"), Some(Class::Layer(0)));
         assert!(ALLOWED_RAW_PROCESS_BASELINE.is_empty());
         assert!(ALLOWED_UI_IO_BASELINE.is_empty());
     }
@@ -1302,7 +1302,7 @@ serde = "1"
     #[test]
     fn source_hygiene_flags_raw_command_and_ui_io_but_allows_cfg_test_and_platform() {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir().join(format!("lumencraft-xtask-hygiene-{}-{nanos}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("curvebook-xtask-hygiene-{}-{nanos}", std::process::id()));
         let write_rel = |rel: &str, content: &str| {
             let p = root.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -1327,7 +1327,7 @@ serde = "1"
         );
         write_rel(
             "crates/ui-egui/src/ok_platform.rs",
-            "pub fn ok() {\n    let _ = lumencraft_platform::fs::write_atomic(std::path::Path::new(\"a\"), b\"b\");\n    let _ = lumencraft_platform::ProcessCommand::new(\"pbcopy\");\n}\n",
+            "pub fn ok() {\n    let _ = curvebook_platform::fs::write_atomic(std::path::Path::new(\"a\"), b\"b\");\n    let _ = curvebook_platform::ProcessCommand::new(\"pbcopy\");\n}\n",
         );
 
         let hits = check_source_hygiene(&root);
@@ -1349,7 +1349,7 @@ serde = "1"
     #[test]
     fn r2_s13_06_cfg_not_test_not_masked_and_braced_command_imports_caught() {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let root = std::env::temp_dir().join(format!("lc-xtask-r2-s13-06-{}-{nanos}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("cb-xtask-r2-s13-06-{}-{nanos}", std::process::id()));
         let write_rel = |rel: &str, content: &str| {
             let p = root.join(rel);
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();

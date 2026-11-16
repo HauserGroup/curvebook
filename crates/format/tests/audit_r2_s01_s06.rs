@@ -4,21 +4,21 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Barrier};
 use std::time::{Duration, Instant};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, CURRENT_SCHEMA_VERSION, Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet,
     DescriptiveSpec, DocError, InfoConstant, InfoSheet, MAX_TITLE_BYTES, NamedCheckpoint, ProjectDocument, ResultScalarEntry, ResultSheet,
     ResultStatus, SheetId, SheetSection, TableArchetype,
 };
-use lumencraft_format::ZipArchive;
-use lumencraft_format::recovery::{DirectoryJournalBackend, JournalBackend, JournalLockLease, LOCKFILE_NAME};
-use lumencraft_format::{
+use curvebook_format::ZipArchive;
+use curvebook_format::recovery::{DirectoryJournalBackend, JournalBackend, JournalLockLease, LOCKFILE_NAME};
+use curvebook_format::{
     ArchiveManifest, ExportOptions, ExportSource, FormatError, FormatKind, FormatRegistry, MAX_ZIP_ENTRY_BYTES, SheetManifestEntry, ZipLimits,
     ZipWriter, batch_v1_schema, instantiate_template_bytes, journal_record_schema, open_project_file, open_project_unpacked_dir, open_template_bytes,
     preferences_schema, save_project_bytes, save_project_file, save_project_unpacked_dir, save_template_bytes, save_template_file,
     strip_project_data_for_template, validate_batch_manifest_version, validate_project_document,
 };
-use lumencraft_palette::CanvasPreviewFilter;
-use lumencraft_platform::{PathResolver, PlatformError, ProcessCommand, WorkdirGuard, write_atomic};
+use curvebook_palette::CanvasPreviewFilter;
+use curvebook_platform::{PathResolver, PlatformError, ProcessCommand, WorkdirGuard, write_atomic};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
@@ -34,7 +34,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(label: &str) -> Result<Self, std::io::Error> {
         let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lc_audit_r2_s01s06_{label}_{}_{seq}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cb_audit_r2_s01s06_{label}_{}_{seq}", std::process::id()));
         std::fs::create_dir_all(&path)?;
         Ok(Self {
             path,
@@ -119,8 +119,8 @@ fn r2_s01_01_process_runner_handles_stalled_stdin_and_descendant_pipes() -> Test
     assert!(start.elapsed() < Duration::from_secs(2));
 
     let pg_err = ProcessCommand::new("sh")
-        .args(["-c", "sleep 10 & printf '%s' \"$!\" > \"$LC_PID_FILE\"; exit 0"])
-        .env("LC_PID_FILE", pid_file.to_string_lossy().as_ref())
+        .args(["-c", "sleep 10 & printf '%s' \"$!\" > \"$CB_PID_FILE\"; exit 0"])
+        .env("CB_PID_FILE", pid_file.to_string_lossy().as_ref())
         .wall_timeout(Duration::from_millis(450))
         .idle_timeout(Duration::from_secs(5))
         .run()
@@ -155,18 +155,18 @@ fn r2_s01_02_path_guard_preserves_plate_template_and_guards_template_path() -> T
     let canon = std::fs::canonicalize(dir.path())?;
 
     let inline_tpl = json!({ "name": "Plate ../96", "geometry": "96", "wells": [] });
-    let inline_tpl_str = r#"{"format":"lumencraft-archive","kind":"template","note":"../keep"}"#;
+    let inline_tpl_str = r#"{"format":"curvebook-archive","kind":"template","note":"../keep"}"#;
 
     for resolver in [PathResolver::Unconstrained { base_dir: dir.path().to_path_buf() }, PathResolver::Sandboxed(guard.clone())] {
         let mut params = json!({
             "template": inline_tpl.clone(),
-            "template_path": "tpl/plate.lctemplate",
+            "template_path": "tpl/plate.cbtemplate",
         });
         resolver.sanitize_params(&mut params)?;
         assert_eq!(params["template"], inline_tpl);
         let expected = match &resolver {
-            PathResolver::Unconstrained { .. } => dir.path().join("tpl").join("plate.lctemplate"),
-            PathResolver::Sandboxed(_) => canon.join("tpl").join("plate.lctemplate"),
+            PathResolver::Unconstrained { .. } => dir.path().join("tpl").join("plate.cbtemplate"),
+            PathResolver::Sandboxed(_) => canon.join("tpl").join("plate.cbtemplate"),
         };
         assert_eq!(params["template_path"], json!(expected.to_string_lossy()));
 
@@ -176,7 +176,7 @@ fn r2_s01_02_path_guard_preserves_plate_template_and_guards_template_path() -> T
     }
 
     let sandbox = PathResolver::Sandboxed(guard);
-    let mut bad = json!({ "template": inline_tpl, "templatePath": "../escape.lctemplate" });
+    let mut bad = json!({ "template": inline_tpl, "templatePath": "../escape.cbtemplate" });
     assert!(matches!(sandbox.sanitize_params(&mut bad), Err(PlatformError::PathEscape { .. })));
     Ok(())
 }
@@ -187,8 +187,8 @@ fn r2_s01_03_atomic_writes_and_project_saves_preserve_mode_and_symlinks() -> Tes
     use std::os::unix::fs::{PermissionsExt as _, symlink};
 
     let dir = TempDirGuard::new("perms")?;
-    let real_file = dir.path().join("real.lumencraft");
-    let link_file = dir.path().join("link.lumencraft");
+    let real_file = dir.path().join("real.curvebook");
+    let link_file = dir.path().join("link.curvebook");
 
     let doc_v1 = build_sample_project()?;
     save_project_file(&real_file, &doc_v1)?;
@@ -242,8 +242,8 @@ fn r2_s05_02_templates_strip_checkpoints_and_notes_and_archive_validates_both() 
     let tpl_bytes = save_template_bytes(&doc)?;
     let tpl_zip = ZipArchive::from_bytes(&tpl_bytes)?;
     let tpl_doc_json = tpl_zip.get_utf8("document.json")?.ok_or("missing document.json")?;
-    assert!(!tpl_doc_json.contains("Private cohort snapshot"), "raw checkpoint data leaked into .lctemplate");
-    assert!(!tpl_doc_json.contains("Patient sample #4 hemolyzed"), "exclusion note leaked into .lctemplate");
+    assert!(!tpl_doc_json.contains("Private cohort snapshot"), "raw checkpoint data leaked into .cbtemplate");
+    assert!(!tpl_doc_json.contains("Patient sample #4 hemolyzed"), "exclusion note leaked into .cbtemplate");
     assert!(open_template_bytes(&tpl_bytes)?.checkpoints.is_empty());
     assert!(instantiate_template_bytes(&tpl_bytes, Some("Fresh"))?.checkpoints.is_empty());
 
@@ -325,7 +325,7 @@ fn r2_s05_04_preferences_and_journal_schemas_match_migrator_and_serde_contracts(
 #[test]
 fn r2_s06_01_unpacked_dir_preserves_untracked_files_and_rejects_untrusted_csv_paths() -> TestResult {
     let dir = TempDirGuard::new("prune")?;
-    let proj_dir = dir.path().join("study.lumencraft.d");
+    let proj_dir = dir.path().join("study.curvebook.d");
     let mut doc = build_sample_project()?;
     save_project_unpacked_dir(&doc, &proj_dir)?;
 
@@ -375,9 +375,9 @@ fn r2_s06_02_registry_distinguishes_unpacked_project_dirs_from_arbitrary_dirs() 
     let reg = FormatRegistry::default_registry();
 
     let arbitrary_dir = dir.path().join("workspace");
-    let dot_non_project_dir = dir.path().join("not_a_project.lumencraft");
+    let dot_non_project_dir = dir.path().join("not_a_project.curvebook");
     let json_dir = dir.path().join("export.json");
-    let empty_d_dir = dir.path().join("fresh.lumencraft.d");
+    let empty_d_dir = dir.path().join("fresh.curvebook.d");
     std::fs::create_dir_all(&arbitrary_dir)?;
     std::fs::create_dir_all(&dot_non_project_dir)?;
     std::fs::create_dir_all(&json_dir)?;
@@ -389,10 +389,10 @@ fn r2_s06_02_registry_distinguishes_unpacked_project_dirs_from_arbitrary_dirs() 
     assert!(reg.exporter_for_path(&dot_non_project_dir).is_none());
     assert!(reg.importer_for_path(&json_dir).is_none());
     assert!(reg.exporter_for_path(&json_dir).is_none());
-    assert_eq!(reg.exporter_for_path(&empty_d_dir).ok_or("missing .lumencraft.d exporter")?.descriptor().kind, FormatKind::ProjectDir);
+    assert_eq!(reg.exporter_for_path(&empty_d_dir).ok_or("missing .curvebook.d exporter")?.descriptor().kind, FormatKind::ProjectDir);
 
-    // Valid unpacked project directory whose folder name ends in `.lumencraft` must still resolve to `lumencraft.d`.
-    let valid_dot_dir = dir.path().join("study.lumencraft");
+    // Valid unpacked project directory whose folder name ends in `.curvebook` must still resolve to `curvebook.d`.
+    let valid_dot_dir = dir.path().join("study.curvebook");
     let doc = build_sample_project()?;
     save_project_unpacked_dir(&doc, &valid_dot_dir)?;
     assert_eq!(reg.importer_for_path(&valid_dot_dir).ok_or("importer")?.descriptor().kind, FormatKind::ProjectDir);
@@ -413,16 +413,13 @@ fn r2_s06_03_save_paths_reject_newer_schema_versions_on_doc_and_disk() -> TestRe
     future_doc.schema_version = CURRENT_SCHEMA_VERSION + 1;
     assert!(matches!(save_project_bytes(&future_doc), Err(FormatError::UnsupportedSchemaVersion { .. })));
     assert!(matches!(save_template_bytes(&future_doc), Err(FormatError::UnsupportedSchemaVersion { .. })));
-    assert!(matches!(save_project_file(&dir.path().join("fut.lumencraft"), &future_doc), Err(FormatError::UnsupportedSchemaVersion { .. })));
-    assert!(matches!(
-        save_project_unpacked_dir(&future_doc, &dir.path().join("fut.lumencraft.d")),
-        Err(FormatError::UnsupportedSchemaVersion { .. })
-    ));
+    assert!(matches!(save_project_file(&dir.path().join("fut.curvebook"), &future_doc), Err(FormatError::UnsupportedSchemaVersion { .. })));
+    assert!(matches!(save_project_unpacked_dir(&future_doc, &dir.path().join("fut.curvebook.d")), Err(FormatError::UnsupportedSchemaVersion { .. })));
 
-    // Build on-disk v+1 `.lumencraft` and `.lctemplate` ZIPs manually.
+    // Build on-disk v+1 `.curvebook` and `.cbtemplate` ZIPs manually.
     let future_ver = CURRENT_SCHEMA_VERSION + 2;
     let future_manifest = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": future_ver,
         "kind": "Project",
         "title": "Future",
@@ -435,8 +432,8 @@ fn r2_s06_03_save_paths_reject_newer_schema_versions_on_doc_and_disk() -> TestRe
     zip_w.add_file("document.json", format!(r#"{{"schema_version":{future_ver},"title":"Future"}}"#).into_bytes())?;
     let future_zip_bytes = zip_w.finish()?;
 
-    let proj_path = dir.path().join("vnext.lumencraft");
-    let tpl_path = dir.path().join("vnext.lctemplate");
+    let proj_path = dir.path().join("vnext.curvebook");
+    let tpl_path = dir.path().join("vnext.cbtemplate");
     std::fs::write(&proj_path, &future_zip_bytes)?;
     std::fs::write(&tpl_path, &future_zip_bytes)?;
 
@@ -444,7 +441,7 @@ fn r2_s06_03_save_paths_reject_newer_schema_versions_on_doc_and_disk() -> TestRe
     assert!(matches!(save_project_file(&proj_path, &doc), Err(FormatError::UnsupportedSchemaVersion { version, .. }) if version == future_ver));
     assert!(matches!(save_template_file(&tpl_path, &doc), Err(FormatError::UnsupportedSchemaVersion { version, .. }) if version == future_ver));
     assert!(matches!(
-        reg.exporter_by_format("lumencraft").ok_or("archive exporter")?.export_path(
+        reg.exporter_by_format("curvebook").ok_or("archive exporter")?.export_path(
             ExportSource::Document(&doc),
             &proj_path,
             &ExportOptions::default()
@@ -452,7 +449,7 @@ fn r2_s06_03_save_paths_reject_newer_schema_versions_on_doc_and_disk() -> TestRe
         Err(FormatError::UnsupportedSchemaVersion { .. })
     ));
     assert!(matches!(
-        reg.exporter_by_format("lctemplate").ok_or("template exporter")?.export_path(
+        reg.exporter_by_format("cbtemplate").ok_or("template exporter")?.export_path(
             ExportSource::Document(&doc),
             &tpl_path,
             &ExportOptions::default()
@@ -462,15 +459,15 @@ fn r2_s06_03_save_paths_reject_newer_schema_versions_on_doc_and_disk() -> TestRe
     assert_eq!(std::fs::read(&proj_path)?, future_zip_bytes);
     assert_eq!(std::fs::read(&tpl_path)?, future_zip_bytes);
 
-    // Unpacked `.lumencraft.d/` with future manifest OR future document.json.
-    let unpacked_vnext = dir.path().join("vnext.lumencraft.d");
+    // Unpacked `.curvebook.d/` with future manifest OR future document.json.
+    let unpacked_vnext = dir.path().join("vnext.curvebook.d");
     std::fs::create_dir_all(&unpacked_vnext)?;
     std::fs::write(unpacked_vnext.join("manifest.json"), serde_json::to_vec(&future_manifest)?)?;
     assert!(
         matches!(save_project_unpacked_dir(&doc, &unpacked_vnext), Err(FormatError::UnsupportedSchemaVersion { version, .. }) if version == future_ver)
     );
 
-    let unpacked_doc_vnext = dir.path().join("docvnext.lumencraft.d");
+    let unpacked_doc_vnext = dir.path().join("docvnext.curvebook.d");
     std::fs::create_dir_all(&unpacked_doc_vnext)?;
     std::fs::write(unpacked_doc_vnext.join("document.json"), format!(r#"{{"schema_version":{future_ver},"title":"FutureDoc"}}"#))?;
     assert!(
@@ -482,7 +479,7 @@ fn r2_s06_03_save_paths_reject_newer_schema_versions_on_doc_and_disk() -> TestRe
 #[test]
 fn r2_s06_04_unpacked_save_rejects_dir_conflicts_and_preserves_crc_consistency() -> TestResult {
     let mut dir = TempDirGuard::new("unpacked-tx")?;
-    let proj_dir = dir.path().join("tx.lumencraft.d");
+    let proj_dir = dir.path().join("tx.curvebook.d");
     let doc_v1 = build_sample_project()?;
     save_project_unpacked_dir(&doc_v1, &proj_dir)?;
 
@@ -518,7 +515,7 @@ fn r2_s06_04_unpacked_save_rejects_dir_conflicts_and_preserves_crc_consistency()
 #[test]
 fn r2_s06_05_unpacked_save_enforces_zip_limits_matching_reopen() -> TestResult {
     let dir = TempDirGuard::new("ziplimits")?;
-    let proj_dir = dir.path().join("limits.lumencraft.d");
+    let proj_dir = dir.path().join("limits.curvebook.d");
     let base_doc = build_sample_project()?;
     save_project_unpacked_dir(&base_doc, &proj_dir)?;
 
@@ -527,7 +524,7 @@ fn r2_s06_05_unpacked_save_enforces_zip_limits_matching_reopen() -> TestResult {
     let huge_name = "x".repeat(MAX_TITLE_BYTES);
     let mut info = InfoSheet::new_preseeded("info-big", "Big Constants")?;
     for i in 0..17_000 {
-        info.constants.push(InfoConstant { name: huge_name.clone(), value: lumencraft_doc::ConstantValue::Number(i as f64), units: None });
+        info.constants.push(InfoConstant { name: huge_name.clone(), value: curvebook_doc::ConstantValue::Number(i as f64), units: None });
     }
     big_doc.add_info_sheet(info)?;
 
@@ -542,7 +539,7 @@ fn r2_s06_05_unpacked_save_enforces_zip_limits_matching_reopen() -> TestResult {
 #[test]
 fn r2_s06_06_unique_sheet_csv_path_handles_case_collisions_long_ids_and_reserved_names() -> TestResult {
     let dir = TempDirGuard::new("csv-names")?;
-    let proj_dir = dir.path().join("portable.lumencraft.d");
+    let proj_dir = dir.path().join("portable.curvebook.d");
     let mut doc = ProjectDocument::new("Portable Names")?;
 
     let long_id = "L".repeat(300);
@@ -690,24 +687,24 @@ fn r2_s06_09_batch_schema_and_version_validator_match_cli_contract() -> TestResu
         assert!(exp_props.contains_key(expected_key), "BatchExport missing `{expected_key}`");
     }
     let formats: BTreeSet<&str> = exp_props["format"]["enum"].as_array().ok_or("format enum")?.iter().filter_map(Value::as_str).collect();
-    for required_fmt in ["tif", "lumencraft-dir", "unpacked", "dir", "emf"] {
+    for required_fmt in ["tif", "curvebook-dir", "unpacked", "dir", "emf"] {
         assert!(formats.contains(required_fmt), "BatchExport.format missing `{required_fmt}`");
     }
-    assert!(!formats.contains("lctemplate"), "BatchExport.format must not advertise unsupported `lctemplate`");
+    assert!(!formats.contains("cbtemplate"), "BatchExport.format must not advertise unsupported `cbtemplate`");
     assert_eq!(exp_props["dpi"]["type"], json!(["integer", "null"]));
     assert_eq!(exp_props["dpi"]["minimum"], 1);
     assert_eq!(exp_props["dpi"]["maximum"], 65_535);
 
-    assert!(validate_batch_manifest_version(&json!({ "schema": "lumencraft.batch.v1" })).is_ok());
+    assert!(validate_batch_manifest_version(&json!({ "schema": "curvebook.batch.v1" })).is_ok());
     assert!(matches!(
-        validate_batch_manifest_version(&json!({ "schema": "lumencraft.batch.v2" })),
+        validate_batch_manifest_version(&json!({ "schema": "curvebook.batch.v2" })),
         Err(FormatError::UnsupportedSchemaVersion { version: 2, max_supported: 1 })
     ));
     assert!(matches!(
-        validate_batch_manifest_version(&json!({ "schema": "lumencraft.batch.v0" })),
+        validate_batch_manifest_version(&json!({ "schema": "curvebook.batch.v0" })),
         Err(FormatError::UnsupportedSchemaVersion { version: 0, max_supported: 1 })
     ));
-    for malformed in ["lumencraft.batch.v01", "lumencraft.batch.v+1", "lumencraft.batch.v-1"] {
+    for malformed in ["curvebook.batch.v01", "curvebook.batch.v+1", "curvebook.batch.v-1", "lumencraft.batch.v1", "lumencraft.batch.v2"] {
         assert!(
             matches!(validate_batch_manifest_version(&json!({ "schema": malformed })), Err(FormatError::UnsupportedFormat { .. })),
             "`{malformed}` should be rejected as UnsupportedFormat"

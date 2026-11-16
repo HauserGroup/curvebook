@@ -1,6 +1,6 @@
 //! Top-level `ProjectDocument` container: five-section sheet catalog (`Data`, `Info`, `Analyses`,
 //! `Graphs`, `Layouts`), stable `family_anchor_sheet_id` navigation state, and canonical upstream
-//! dependency extraction for `lumencraft-engine`'s topological DAG.
+//! dependency extraction for `curvebook-engine`'s topological DAG.
 
 use crate::SheetSection;
 use crate::error::{CURRENT_SCHEMA_VERSION, DocError, MAX_SHEETS_PER_PROJECT, validate_title};
@@ -46,7 +46,7 @@ pub struct NamedCheckpoint {
     pub snapshot_json: String,
 }
 
-/// Complete serializable LumenCraft project model (`L1`).
+/// Complete serializable CurveBook project model (`L1`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectDocument {
     pub schema_version: u32,

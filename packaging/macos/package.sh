@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build, sign and (optionally) notarize the macOS release artifacts:
 #
-#   $DIST/lumencraft-<version>-macos-<arch>.dmg          LumenCraft.app on a drag-to-Applications DMG
-#   $DIST/lumencraft-cli-<version>-macos-<arch>.zip      the headless CLI
+#   $DIST/curvebook-<version>-macos-<arch>.dmg          CurveBook.app on a drag-to-Applications DMG
+#   $DIST/curvebook-cli-<version>-macos-<arch>.zip      the headless CLI
 #
 # Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--skip-build]
 set -euo pipefail
@@ -31,9 +31,9 @@ export MACOSX_DEPLOYMENT_TARGET=11.0
 IDENTITY="${MACOS_SIGN_IDENTITY:--}"
 SHORT_VERSION="${VERSION%%-*}"
 WORK="$CARGO_TARGET_DIR/macos-package"
-APP="$WORK/LumenCraft.app"
-DMG="$DIST/lumencraft-$VERSION-macos-$ARCH.dmg"
-CLI_ZIP="$DIST/lumencraft-cli-$VERSION-macos-$ARCH.zip"
+APP="$WORK/CurveBook.app"
+DMG="$DIST/curvebook-$VERSION-macos-$ARCH.dmg"
+CLI_ZIP="$DIST/curvebook-cli-$VERSION-macos-$ARCH.zip"
 
 NOTARIZE=0
 if [[ "$IDENTITY" = "-" ]]; then
@@ -44,17 +44,17 @@ else
   warn "macOS: APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID incomplete; signed but not notarized"
 fi
 
-echo "==> LumenCraft $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $NOTARIZE"
+echo "==> CurveBook $VERSION for macOS ($ARCH), identity: $IDENTITY, notarize: $NOTARIZE"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
   args=()
   for t in "${TARGETS[@]}"; do args+=(--target "$t"); done
-  (cd "$ROOT" && cargo build --release --locked -p lumencraft -p lumencraft-cli "${args[@]}")
+  (cd "$ROOT" && cargo build --release --locked -p curvebook -p curvebook-cli "${args[@]}")
 fi
 
 rm -rf "$WORK"
 mkdir -p "$WORK/bin"
-for bin in lumencraft lumencraft-cli; do
+for bin in curvebook curvebook-cli; do
   inputs=()
   for t in "${TARGETS[@]}"; do inputs+=("$CARGO_TARGET_DIR/$t/release/$bin"); done
   lipo -create -output "$WORK/bin/$bin" "${inputs[@]}"
@@ -99,24 +99,24 @@ stapler_retry() {
 
 echo "==> assembling $APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
-cp "$WORK/bin/lumencraft" "$APP/Contents/MacOS/lumencraft"
-cp "$WORK/bin/lumencraft-cli" "$APP/Contents/MacOS/lumencraft-cli"
-cp "$ROOT/assets/app-icon/lumencraft.icns" "$APP/Contents/Resources/lumencraft.icns"
+cp "$WORK/bin/curvebook" "$APP/Contents/MacOS/curvebook"
+cp "$WORK/bin/curvebook-cli" "$APP/Contents/MacOS/curvebook-cli"
+cp "$ROOT/assets/app-icon/curvebook.icns" "$APP/Contents/Resources/curvebook.icns"
 sed -e "s/@VERSION@/$VERSION/g" -e "s/@SHORT_VERSION@/$SHORT_VERSION/g" \
-  -e "s/@BUILD_SHA@/${LUMENCRAFT_BUILD_SHA:-unknown}/g" \
+  -e "s/@BUILD_SHA@/${CURVEBOOK_BUILD_SHA:-unknown}/g" \
   "$HERE/Info.plist.in" >"$APP/Contents/Info.plist"
 plutil -lint "$APP/Contents/Info.plist"
 printf 'APPL????' >"$APP/Contents/PkgInfo"
 copy_docs "$APP/Contents/Resources"
 
-sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/lumencraft-cli"
-sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/lumencraft"
+sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/curvebook-cli"
+sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP/Contents/MacOS/curvebook"
 sign --options runtime --entitlements "$HERE/entitlements.plist" "$APP"
 codesign --verify --strict --deep --verbose=2 "$APP"
 
 if [[ "$NOTARIZE" = 1 ]]; then
-  ditto -c -k --keepParent "$APP" "$WORK/LumenCraft-notarize.zip"
-  notarize "$WORK/LumenCraft-notarize.zip"
+  ditto -c -k --keepParent "$APP" "$WORK/CurveBook-notarize.zip"
+  notarize "$WORK/CurveBook-notarize.zip"
   stapler_retry staple "$APP"
   stapler_retry validate "$APP"
   spctl --assess --type execute -vvv "$APP"
@@ -125,7 +125,7 @@ fi
 echo "==> building $DMG"
 STAGE="$WORK/dmg"
 mkdir -p "$STAGE"
-ditto "$APP" "$STAGE/LumenCraft.app"
+ditto "$APP" "$STAGE/CurveBook.app"
 ln -s /Applications "$STAGE/Applications"
 if [[ -f "$HERE/dmg/background.tiff" ]] && [[ -f "$HERE/dmg/DS_Store" ]]; then
   mkdir -p "$STAGE/.background"
@@ -142,7 +142,7 @@ hdiutil_retry() {
     sleep $((attempt * 10))
   done
 }
-hdiutil_retry create create -srcfolder "$STAGE" -volname "LumenCraft" -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG"
+hdiutil_retry create create -srcfolder "$STAGE" -volname "CurveBook" -fs HFS+ -format UDZO -imagekey zlib-level=9 -ov "$DMG"
 sign "$DMG"
 codesign --verify --strict --verbose=2 "$DMG"
 if [[ "$NOTARIZE" = 1 ]]; then
@@ -153,16 +153,16 @@ if [[ "$NOTARIZE" = 1 ]]; then
 fi
 
 echo "==> building $CLI_ZIP"
-CLI_DIR="$WORK/lumencraft-cli-$VERSION-macos-$ARCH"
+CLI_DIR="$WORK/curvebook-cli-$VERSION-macos-$ARCH"
 mkdir -p "$CLI_DIR"
-cp "$WORK/bin/lumencraft-cli" "$CLI_DIR/"
+cp "$WORK/bin/curvebook-cli" "$CLI_DIR/"
 copy_docs "$CLI_DIR"
-sign --options runtime "$CLI_DIR/lumencraft-cli"
-codesign --verify --strict --verbose=2 "$CLI_DIR/lumencraft-cli"
+sign --options runtime "$CLI_DIR/curvebook-cli"
+codesign --verify --strict --verbose=2 "$CLI_DIR/curvebook-cli"
 rm -f "$CLI_ZIP"
 ditto -c -k --keepParent "$CLI_DIR" "$CLI_ZIP"
 if [[ "$NOTARIZE" = 1 ]]; then notarize "$CLI_ZIP"; fi
 
-"$WORK/bin/lumencraft-cli" --version
+"$WORK/bin/curvebook-cli" --version
 echo "==> done"
 ls -lh "$DMG" "$CLI_ZIP"

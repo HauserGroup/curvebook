@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<mime-info xmlns="http://www.freedesktop.org/standards/shared-mime-info">
+  <mime-type type="application/vnd.curvebook.project">
+    <comment>CurveBook Project</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.curvebook"/>
+    <icon name="org.curvebook.CurveBook"/>
+  </mime-type>
+  <mime-type type="application/vnd.curvebook.template">
+    <comment>CurveBook Project Template</comment>
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.cbtemplate"/>
+    <icon name="org.curvebook.CurveBook"/>
+  </mime-type>
+  <mime-type type="application/x-prism-project"> <!-- brand-ok -->
+    <comment>Prism Scientific Project</comment> <!-- brand-ok -->
+    <sub-class-of type="application/zip"/>
+    <glob pattern="*.prism"/>
+  </mime-type>
+  <mime-type type="application/x-prism-xml"> <!-- brand-ok -->
+    <comment>Prism XML Scientific Project</comment> <!-- brand-ok -->
+    <sub-class-of type="application/xml"/>
+    <glob pattern="*.pzfx"/>
+  </mime-type>
+</mime-info>

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 //! Reproducer and D1 reference-oracle suite for `R4.6` solver & results fixes in
-//! [`lumencraft_fit::solver`] and [`lumencraft_fit::result`].
+//! [`curvebook_fit::solver`] and [`curvebook_fit::result`].
 //!
 //! # References
 //! - Akaike, H. (1974). A new look at the statistical model identification.
@@ -20,11 +20,11 @@
 //! - Moré, J. J. (1978). The Levenberg–Marquardt algorithm: implementation and theory.
 //!   *Lecture Notes in Mathematics* 630, 105–116.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CiBound, DataSheet, FitMethod, LinearRegressionSpec, ModelComparisonSpec, NonlinearFitSpec, ParameterRule,
     ParameterScope, ResultCell, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
 };
-use lumencraft_fit::{
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, FitError, FitStatus, HookContext, ModelComparisonOutcome, SolverConfig, compare_models,
     compare_models_checked, execute_analysis, fit_nonlinear, get_builtin_model,
 };
@@ -53,7 +53,7 @@ fn make_series(ds_idx: usize, label: &str, xs: &[f64], ys: &[f64]) -> DatasetSer
     }
 }
 
-fn find_param(res: &lumencraft_fit::NonlinearFitResult, name: &str) -> f64 {
+fn find_param(res: &curvebook_fit::NonlinearFitResult, name: &str) -> f64 {
     res.parameters.iter().find(|p| p.name.eq_ignore_ascii_case(name)).unwrap_or_else(|| panic!("missing parameter `{name}`")).estimate
 }
 
@@ -78,7 +78,7 @@ fn r46_2_poisson_aic_aicc_bic_and_model_comparison_reproducer_and_oracle() {
     // yielding a nonsensical negative AICc around -42.7!
     let mut ll_expected = 0.0_f64;
     for (&y, &mu) in ys.iter().zip(fit2.datasets[0].y_hat.iter()) {
-        let lg = lumencraft_math::special::ln_gamma(y + 1.0).unwrap();
+        let lg = curvebook_math::special::ln_gamma(y + 1.0).unwrap();
         ll_expected += y * mu.ln() - mu - lg;
     }
     let neg2_ll = -2.0 * ll_expected;

@@ -1,6 +1,6 @@
-# Known Pitfalls (LumenCraft Incidents & Rules)
+# Known Pitfalls (CurveBook Incidents & Rules)
 
-Every item below records a real issue encountered in the LumenCraft codebase and the mandatory engineering rule adopted to prevent it from recurring.
+Every item below records a real issue encountered in the CurveBook codebase and the mandatory engineering rule adopted to prevent it from recurring.
 
 ---
 
@@ -32,10 +32,10 @@ Every item below records a real issue encountered in the LumenCraft codebase and
 
 ---
 
-## 5. Non-Atomic `.lumencraft` Saves Risking Truncation on Crash
+## 5. Non-Atomic `.curvebook` Saves Risking Truncation on Crash
 
-- **What happened:** `save_project_file` and `save_template_file` in `crates/format/src/archive.rs` wrote `.lumencraft` and `.lctemplate` archives directly using `std::fs::write(path, bytes)?`. If the process crashed, received a signal, or encountered an I/O failure partway through writing over an existing project file, the user's file on disk could be left truncated or empty.
-- **Resolution & Rule:** Resolved in `R0.10`: `crates/format/src/archive.rs` now saves through `lumencraft_platform::fs::write_atomic`. Never overwrite persisted user projects, templates, preferences, or critical state files with direct in-place `std::fs::write`. Perform all persistent saves atomically (write sibling temp file -> flush & sync -> atomic rename over target) via the shared helpers in `lumencraft-platform` (`crates/platform`, introduced in `R0.10`), keeping recovery journals intact until replacement completes.
+- **What happened:** `save_project_file` and `save_template_file` in `crates/format/src/archive.rs` wrote `.curvebook` and `.cbtemplate` archives directly using `std::fs::write(path, bytes)?`. If the process crashed, received a signal, or encountered an I/O failure partway through writing over an existing project file, the user's file on disk could be left truncated or empty.
+- **Resolution & Rule:** Resolved in `R0.10`: `crates/format/src/archive.rs` now saves through `curvebook_platform::fs::write_atomic`. Never overwrite persisted user projects, templates, preferences, or critical state files with direct in-place `std::fs::write`. Perform all persistent saves atomically (write sibling temp file -> flush & sync -> atomic rename over target) via the shared helpers in `curvebook-platform` (`crates/platform`, introduced in `R0.10`), keeping recovery journals intact until replacement completes.
 
 ---
 

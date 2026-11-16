@@ -312,7 +312,7 @@ mod tests {
 
     fn temp_dir(label: &str) -> PathBuf {
         let seq = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("lumencraft-platform-fs-{label}-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("curvebook-platform-fs-{label}-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -324,15 +324,15 @@ mod tests {
     #[test]
     fn write_atomic_happy_path_creates_and_replaces_without_leftover_temps() {
         let dir = temp_dir("happy");
-        let target = dir.join("project.lumencraft");
+        let target = dir.join("project.curvebook");
 
         write_atomic(&target, b"first payload").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"first payload");
-        assert_eq!(list_dir_entries(&dir), vec![String::from("project.lumencraft")]);
+        assert_eq!(list_dir_entries(&dir), vec![String::from("project.curvebook")]);
 
         write_atomic(&target, b"second longer payload").unwrap();
         assert_eq!(std::fs::read(&target).unwrap(), b"second longer payload");
-        assert_eq!(list_dir_entries(&dir), vec![String::from("project.lumencraft")]);
+        assert_eq!(list_dir_entries(&dir), vec![String::from("project.curvebook")]);
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -427,7 +427,7 @@ mod tests {
         use std::os::unix::fs::{PermissionsExt as _, symlink};
 
         let dir = temp_dir("perms-symlink");
-        let secret = dir.join("secret.lumencraft");
+        let secret = dir.join("secret.curvebook");
         std::fs::write(&secret, b"v1").unwrap();
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
 

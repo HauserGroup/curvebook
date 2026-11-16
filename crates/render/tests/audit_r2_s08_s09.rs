@@ -1,9 +1,9 @@
 //! Regression tests for Round 2 Slice S09 (`R2-S09-01`, `R2-S09-02`): ECMA-234 `.emf` path & text encoding.
 
-use lumencraft_chart::{ChartScene, FillPaint, Path2D, PathCmd, PointPt, PositionedText, ScenePrimitive, StrokePaint, TextAnchor};
-use lumencraft_palette::Rgba8;
-use lumencraft_render::encode_emf;
-use lumencraft_text::RichText;
+use curvebook_chart::{ChartScene, FillPaint, Path2D, PathCmd, PointPt, PositionedText, ScenePrimitive, StrokePaint, TextAnchor};
+use curvebook_palette::Rgba8;
+use curvebook_render::encode_emf;
+use curvebook_text::RichText;
 
 type TestResult = Result<(), Box<dyn std::error::Error>>;
 

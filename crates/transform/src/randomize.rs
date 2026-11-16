@@ -3,11 +3,11 @@
 
 use std::collections::{BTreeSet, HashMap};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, MultipleVariablesTable, SheetId,
     TableArchetype, VariableRole, validate_data_sets, validate_rows, validate_title,
 };
-use lumencraft_math::{
+use curvebook_math::{
     DeterministicRng,
     special::{deviance_bd0, stirling_err},
 };
@@ -848,12 +848,12 @@ fn ln_binomial_pmf(trials: u64, k: u64, q: f64) -> f64 {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, Cell, CellCoord, CellExclusionNote, ColumnTable, ContingencyTable, DataSheet, GroupedTable,
         MultipleVariablesTable, NestedTable, PartsOfWholeTable, SubcolumnMode, SurvivalTable, TableArchetype, TransformAnalysisSpec, VariableRole,
         XyTable,
     };
-    use lumencraft_math::sum::SummaryMoments;
+    use curvebook_math::sum::SummaryMoments;
     use serde::Deserialize;
 
     use super::{
@@ -1169,7 +1169,7 @@ mod tests {
         let col_sheet = DataSheet::new(
             "col-pop",
             "Col",
-            TableArchetype::Column(ColumnTable::new(lumencraft_doc::ColumnDesignHint::UnpairedReplicates, 2, 10).unwrap()),
+            TableArchetype::Column(ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 2, 10).unwrap()),
         )
         .unwrap();
         assert_eq!(sample_four(&col_sheet, 1), 4);

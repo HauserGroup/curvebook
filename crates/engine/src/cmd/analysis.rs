@@ -1,6 +1,6 @@
 //! Scientific transform, statistical test, curve fit, and result reporting/export commands.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
     CoxTieMethod, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting,
     LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
@@ -9,9 +9,9 @@ use lumencraft_doc::{
     RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec,
     TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
 };
-use lumencraft_fit::get_builtin_model;
-use lumencraft_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
-use lumencraft_math::PValueFormat;
+use curvebook_fit::get_builtin_model;
+use curvebook_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
+use curvebook_math::PValueFormat;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -2595,7 +2595,7 @@ fn parse_per_dataset_constants(val: &Value) -> Result<Vec<(usize, f64)>, EngineE
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{Cell, ColumnDesignHint, ColumnTable, DataSheet, ErrorCode, ProjectDocument, TableArchetype};
+    use curvebook_doc::{Cell, ColumnDesignHint, ColumnTable, DataSheet, ErrorCode, ProjectDocument, TableArchetype};
     use serde_json::json;
 
     use super::*;
@@ -2636,7 +2636,7 @@ mod tests {
         assert!(res.mutated);
         assert_eq!(res.payload["sheet_id"], json!("t1"));
 
-        let out_dir = std::env::temp_dir().join(format!("lc_ana_test_{}", std::process::id()));
+        let out_dir = std::env::temp_dir().join(format!("cb_ana_test_{}", std::process::id()));
         let report_path = out_dir.join("methods.md");
         let rep = session
             .execute("result.generateReport", json!({ "sheet_id": "t1", "format": "markdown", "path": report_path.to_string_lossy() }))

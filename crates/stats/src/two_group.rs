@@ -68,16 +68,16 @@
 //! - Bland, J. M., & Altman, D. G. (1999). Measuring agreement in method comparison studies.
 //!   *Statistical Methods in Medical Research* 8(2):135–160. doi:10.1177/096228029900800204
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisSpec, BlandAltmanSpec, Cell, CellValue, ChecklistItem, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay,
     MultipleRowTestsSpec, MultipleVariablesTable, PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, TableArchetype,
     TwoGroupMethod, TwoGroupSpec, VariableRole,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{f_sf, norm_sf, norm_two_sided_isf, student_t_cdf, student_t_sf, student_t_two_sided_p};
-use lumencraft_math::noncentral_t_ci;
-use lumencraft_math::special::inc_beta::reg_beta;
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{f_sf, norm_sf, norm_two_sided_isf, student_t_cdf, student_t_sf, student_t_two_sided_p};
+use curvebook_math::noncentral_t_ci;
+use curvebook_math::special::inc_beta::reg_beta;
+use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
 use crate::column::{
@@ -963,7 +963,7 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
             0.5 * mid_lo + 0.5 * mid_hi
         };
         if !hl.is_finite() {
-            return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
         }
         if na + nb < 4 {
             return Ok((hl, None));
@@ -989,7 +989,7 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
         diffs.sort_by(f64::total_cmp);
         let hl = quantile_type6_sorted(&diffs, 0.5).unwrap_or(diffs[0]);
         if !hl.is_finite() {
-            return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
         }
         if na + nb < 4 {
             return Ok((hl, None));
@@ -1465,7 +1465,7 @@ pub fn multiple_row_t_tests(
 // ============================================================================
 
 fn extract_pre_summarized_group(
-    col_tab: &lumencraft_doc::ColumnTable,
+    col_tab: &curvebook_doc::ColumnTable,
     col_idx: usize,
     conf: ConfidenceLevel,
 ) -> Result<(String, f64, f64, f64), StatsError> {

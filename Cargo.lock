@@ -731,6 +731,305 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f27ae1dd37df86211c42e150270f82743308803d90a6f6e6651cd730d5e1732f"
 
 [[package]]
+name = "curvebook"
+version = "0.1.0"
+dependencies = [
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-engine",
+ "curvebook-format",
+ "curvebook-pdf",
+ "curvebook-platform",
+ "curvebook-render",
+ "curvebook-svg",
+ "curvebook-text",
+ "curvebook-ui-egui",
+ "eframe",
+ "egui",
+ "rfd",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-chart"
+version = "0.1.0"
+dependencies = [
+ "curvebook-doc",
+ "curvebook-fit",
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-stats",
+ "curvebook-testkit",
+ "curvebook-text",
+ "curvebook-transform",
+ "proptest",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-cli"
+version = "0.1.0"
+dependencies = [
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-engine",
+ "curvebook-format",
+ "curvebook-mcp",
+ "curvebook-pdf",
+ "curvebook-platform",
+ "curvebook-render",
+ "curvebook-svg",
+ "curvebook-testkit",
+ "curvebook-text",
+ "curvebook-ui-egui",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-doc"
+version = "0.1.0"
+dependencies = [
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-testkit",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-engine"
+version = "0.1.0"
+dependencies = [
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-fit",
+ "curvebook-format",
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-pdf",
+ "curvebook-platform",
+ "curvebook-render",
+ "curvebook-stats",
+ "curvebook-svg",
+ "curvebook-testkit",
+ "curvebook-text",
+ "curvebook-tools",
+ "curvebook-transform",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-fit"
+version = "0.1.0"
+dependencies = [
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-testkit",
+ "proptest",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-format"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-platform",
+ "curvebook-testkit",
+ "flate2",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-math"
+version = "0.1.0"
+dependencies = [
+ "curvebook-testkit",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-mcp"
+version = "0.1.0"
+dependencies = [
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-engine",
+ "curvebook-format",
+ "curvebook-pdf",
+ "curvebook-platform",
+ "curvebook-render",
+ "curvebook-svg",
+ "curvebook-testkit",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-palette"
+version = "0.1.0"
+dependencies = [
+ "curvebook-math",
+ "curvebook-testkit",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-pdf"
+version = "0.1.0"
+dependencies = [
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-testkit",
+ "curvebook-text",
+ "flate2",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-platform"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-render"
+version = "0.1.0"
+dependencies = [
+ "crc32fast",
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-testkit",
+ "curvebook-text",
+ "flate2",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-stats"
+version = "0.1.0"
+dependencies = [
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-testkit",
+ "proptest",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-svg"
+version = "0.1.0"
+dependencies = [
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-testkit",
+ "curvebook-text",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-testkit"
+version = "0.1.0"
+dependencies = [
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-palette",
+]
+
+[[package]]
+name = "curvebook-text"
+version = "0.1.0"
+dependencies = [
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-testkit",
+ "proptest",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-tools"
+version = "0.1.0"
+dependencies = [
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-testkit",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-transform"
+version = "0.1.0"
+dependencies = [
+ "curvebook-doc",
+ "curvebook-math",
+ "curvebook-testkit",
+ "proptest",
+ "serde",
+]
+
+[[package]]
+name = "curvebook-ui-egui"
+version = "0.1.0"
+dependencies = [
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-engine",
+ "curvebook-format",
+ "curvebook-math",
+ "curvebook-palette",
+ "curvebook-pdf",
+ "curvebook-platform",
+ "curvebook-render",
+ "curvebook-stats",
+ "curvebook-svg",
+ "curvebook-testkit",
+ "curvebook-text",
+ "curvebook-tools",
+ "curvebook-transform",
+ "proptest",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "curvebook-web"
+version = "0.1.0"
+dependencies = [
+ "curvebook-engine",
+ "curvebook-format",
+ "curvebook-text",
+ "curvebook-ui-egui",
+ "js-sys",
+ "wasm-bindgen",
+ "web-sys",
+]
+
+[[package]]
 name = "dispatch"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1624,305 +1923,6 @@ name = "log"
 version = "0.4.35"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5d15f86d12da44cd8d4ec3c73984537eb7f4cadcb9776a575a0a8a05ca11005c"
-
-[[package]]
-name = "lumencraft"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui",
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-engine",
- "lumencraft-format",
- "lumencraft-pdf",
- "lumencraft-platform",
- "lumencraft-render",
- "lumencraft-svg",
- "lumencraft-text",
- "lumencraft-ui-egui",
- "rfd",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-chart"
-version = "0.1.0"
-dependencies = [
- "lumencraft-doc",
- "lumencraft-fit",
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-stats",
- "lumencraft-testkit",
- "lumencraft-text",
- "lumencraft-transform",
- "proptest",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-cli"
-version = "0.1.0"
-dependencies = [
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-engine",
- "lumencraft-format",
- "lumencraft-mcp",
- "lumencraft-pdf",
- "lumencraft-platform",
- "lumencraft-render",
- "lumencraft-svg",
- "lumencraft-testkit",
- "lumencraft-text",
- "lumencraft-ui-egui",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-doc"
-version = "0.1.0"
-dependencies = [
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-testkit",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-engine"
-version = "0.1.0"
-dependencies = [
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-fit",
- "lumencraft-format",
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-pdf",
- "lumencraft-platform",
- "lumencraft-render",
- "lumencraft-stats",
- "lumencraft-svg",
- "lumencraft-testkit",
- "lumencraft-text",
- "lumencraft-tools",
- "lumencraft-transform",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-fit"
-version = "0.1.0"
-dependencies = [
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-testkit",
- "proptest",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-format"
-version = "0.1.0"
-dependencies = [
- "crc32fast",
- "flate2",
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-platform",
- "lumencraft-testkit",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-math"
-version = "0.1.0"
-dependencies = [
- "lumencraft-testkit",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-mcp"
-version = "0.1.0"
-dependencies = [
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-engine",
- "lumencraft-format",
- "lumencraft-pdf",
- "lumencraft-platform",
- "lumencraft-render",
- "lumencraft-svg",
- "lumencraft-testkit",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-palette"
-version = "0.1.0"
-dependencies = [
- "lumencraft-math",
- "lumencraft-testkit",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-pdf"
-version = "0.1.0"
-dependencies = [
- "flate2",
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-testkit",
- "lumencraft-text",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-platform"
-version = "0.1.0"
-dependencies = [
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-render"
-version = "0.1.0"
-dependencies = [
- "crc32fast",
- "flate2",
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-testkit",
- "lumencraft-text",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-stats"
-version = "0.1.0"
-dependencies = [
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-testkit",
- "proptest",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-svg"
-version = "0.1.0"
-dependencies = [
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-testkit",
- "lumencraft-text",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-testkit"
-version = "0.1.0"
-dependencies = [
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-palette",
-]
-
-[[package]]
-name = "lumencraft-text"
-version = "0.1.0"
-dependencies = [
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-testkit",
- "proptest",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-tools"
-version = "0.1.0"
-dependencies = [
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-testkit",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-transform"
-version = "0.1.0"
-dependencies = [
- "lumencraft-doc",
- "lumencraft-math",
- "lumencraft-testkit",
- "proptest",
- "serde",
-]
-
-[[package]]
-name = "lumencraft-ui-egui"
-version = "0.1.0"
-dependencies = [
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-engine",
- "lumencraft-format",
- "lumencraft-math",
- "lumencraft-palette",
- "lumencraft-pdf",
- "lumencraft-platform",
- "lumencraft-render",
- "lumencraft-stats",
- "lumencraft-svg",
- "lumencraft-testkit",
- "lumencraft-text",
- "lumencraft-tools",
- "lumencraft-transform",
- "proptest",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lumencraft-web"
-version = "0.1.0"
-dependencies = [
- "js-sys",
- "lumencraft-engine",
- "lumencraft-format",
- "lumencraft-text",
- "lumencraft-ui-egui",
- "wasm-bindgen",
- "web-sys",
-]
 
 [[package]]
 name = "memchr"
@@ -4216,14 +4216,14 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 name = "xtask"
 version = "0.1.0"
 dependencies = [
- "lumencraft-chart",
- "lumencraft-doc",
- "lumencraft-engine",
- "lumencraft-format",
- "lumencraft-pdf",
- "lumencraft-svg",
- "lumencraft-testkit",
- "lumencraft-ui-egui",
+ "curvebook-chart",
+ "curvebook-doc",
+ "curvebook-engine",
+ "curvebook-format",
+ "curvebook-pdf",
+ "curvebook-svg",
+ "curvebook-testkit",
+ "curvebook-ui-egui",
  "serde_json",
 ]
 

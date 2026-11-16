@@ -2,7 +2,7 @@
 //! `DataSheet::set_excluded_with_reason`, `TableArchetype::allocated_cell_slots`, and
 //! `NamedCheckpoint` snapshots on `ProjectDocument`.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     CanvasResizeMode, CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, FigureCanvasPreset, GroupedTable, JournalWidthPreset,
     LayoutSpec, MultipleVariablesTable, NamedCheckpoint, NestedTable, PartsOfWholeTable, PhysicalUnit, ProjectDocument, SheetId, SubcolumnMode,
     SurvivalTable, TableArchetype, XyTable,

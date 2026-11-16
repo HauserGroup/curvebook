@@ -10,6 +10,13 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 $policy = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot 'install-policy.json') | ConvertFrom-Json
+if ($policy.upgradeCode -ne '570875D8-A8A5-4335-8646-C8CE385B27BD') {
+  throw "Unexpected UpgradeCode '$($policy.upgradeCode)' in install-policy.json."
+}
+if ($policy.componentGuids.CurveBookApp -ne '30074268-38AD-4435-82B7-E2E8948273F9' -or
+    $policy.componentGuids.DesktopShortcut -ne '5BFAC2A4-683C-40C9-B561-298D76308811') {
+  throw 'Unexpected component GUIDs in install-policy.json.'
+}
 [void](New-Item -ItemType Directory -Force -Path $OutputDirectory)
 $output = (Resolve-Path -LiteralPath $OutputDirectory).Path
 Add-Type -AssemblyName System.Drawing

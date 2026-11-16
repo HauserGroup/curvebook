@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-  Build, sign and package LumenCraft for Windows.
+  Build, sign and package CurveBook for Windows.
 
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
-    lumencraft-<version>-windows-<arch>.msi            installer (WiX v5)
-    lumencraft-<version>-windows-<arch>-portable.zip   lumencraft.exe + lumencraft-cli.exe + portable.txt
+    curvebook-<version>-windows-<arch>.msi            installer (WiX v5)
+    curvebook-<version>-windows-<arch>-portable.zip   curvebook.exe + curvebook-cli.exe + portable.txt
 #>
 param(
   [ValidateSet('x64', 'x86', 'arm64')] [string] $Arch = 'x64',
@@ -20,7 +20,7 @@ function Invoke-Native([string] $What, [scriptblock] $Block) {
   if ($LASTEXITCODE -ne 0) { throw "$What failed with exit code $LASTEXITCODE" }
 }
 
-$Version = $env:LUMENCRAFT_VERSION
+$Version = $env:CURVEBOOK_VERSION
 if (-not $Version) {
   $inPkg = $false
   foreach ($line in Get-Content (Join-Path $Root 'Cargo.toml')) {
@@ -36,16 +36,16 @@ $Dist = if ($env:DIST) { $env:DIST } else { Join-Path $Root 'dist\release' }
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
 
-if (-not $env:LUMENCRAFT_BUILD_SHA) { $env:LUMENCRAFT_BUILD_SHA = (git -C $Root rev-parse HEAD 2>$null) }
-if (-not $env:LUMENCRAFT_BUILD_DATE) { $env:LUMENCRAFT_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') }
+if (-not $env:CURVEBOOK_BUILD_SHA) { $env:CURVEBOOK_BUILD_SHA = (git -C $Root rev-parse HEAD 2>$null) }
+if (-not $env:CURVEBOOK_BUILD_DATE) { $env:CURVEBOOK_BUILD_DATE = (Get-Date).ToUniversalTime().ToString('yyyy-MM-dd') }
 
-Write-Output "LumenCraft $Version for Windows $Arch ($Target)"
+Write-Output "CurveBook $Version for Windows $Arch ($Target)"
 
 if (-not $SkipBuild) {
   $flagVar = 'CARGO_TARGET_' + ($Target.ToUpper() -replace '-', '_') + '_RUSTFLAGS'
   [Environment]::SetEnvironmentVariable($flagVar, '-C target-feature=+crt-static')
-  $env:LUMENCRAFT_REQUIRE_WINRES = '1'
-  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p lumencraft -p lumencraft-cli --target $Target }
+  $env:CURVEBOOK_REQUIRE_WINRES = '1'
+  Invoke-Native "cargo build ($Target)" { cargo build --release --locked -p curvebook -p curvebook-cli --target $Target }
 }
 
 $Bin = Join-Path $TargetDir "$Target\release"
@@ -56,7 +56,7 @@ function Get-PeHeader([string] $Path) {
   return @{ Machine = [BitConverter]::ToUInt16($bytes, $pe + 4); Subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C) }
 }
 $Machine = switch ($Arch) { 'x64' { 0x8664 } 'x86' { 0x14C } 'arm64' { 0xAA64 } }
-foreach ($check in @(@('lumencraft.exe', 2), @('lumencraft-cli.exe', 3))) {
+foreach ($check in @(@('curvebook.exe', 2), @('curvebook-cli.exe', 3))) {
   $h = Get-PeHeader (Join-Path $Bin $check[0])
   if ($h.Machine -ne $Machine) { throw "$($check[0]) is for machine 0x$('{0:X}' -f $h.Machine), expected 0x$('{0:X}' -f $Machine) ($Arch)" }
   if ($h.Subsystem -ne $check[1]) { throw "$($check[0]) has PE subsystem $($h.Subsystem), expected $($check[1])" }
@@ -65,9 +65,9 @@ foreach ($check in @(@('lumencraft.exe', 2), @('lumencraft-cli.exe', 3))) {
 $Stage = Join-Path $TargetDir "windows-package\$Arch"
 Remove-Item -Recurse -Force $Stage -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Stage | Out-Null
-Copy-Item (Join-Path $Bin 'lumencraft.exe'), (Join-Path $Bin 'lumencraft-cli.exe') $Stage
+Copy-Item (Join-Path $Bin 'curvebook.exe'), (Join-Path $Bin 'curvebook-cli.exe') $Stage
 
-& (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'lumencraft.exe') (Join-Path $Stage 'lumencraft-cli.exe')
+& (Join-Path $PSScriptRoot 'sign.ps1') (Join-Path $Stage 'curvebook.exe') (Join-Path $Stage 'curvebook-cli.exe')
 
 $Docs = Join-Path $Stage 'docs'
 New-Item -ItemType Directory -Force -Path $Docs | Out-Null
@@ -75,8 +75,8 @@ foreach ($f in 'README.md', 'LICENSE', 'LICENSE-MIT', 'LICENSE-APACHE', 'NOTICE'
   $p = Join-Path $Root $f
   if (Test-Path $p) { Copy-Item $p $Docs }
 }
-if ($env:LUMENCRAFT_FONTS_DIR) {
-  foreach ($ofl in Get-ChildItem -Path (Join-Path $env:LUMENCRAFT_FONTS_DIR 'fonts\*\OFL.txt') -ErrorAction SilentlyContinue) {
+if ($env:CURVEBOOK_FONTS_DIR) {
+  foreach ($ofl in Get-ChildItem -Path (Join-Path $env:CURVEBOOK_FONTS_DIR 'fonts\*\OFL.txt') -ErrorAction SilentlyContinue) {
     Copy-Item $ofl.FullName (Join-Path $Docs "OFL-$($ofl.Directory.Name).txt")
   }
 }
@@ -115,14 +115,14 @@ function New-InstallerArt([string] $IconPng, [string] $BannerOut, [string] $Dial
 }
 $Banner = Join-Path $Stage 'installer-banner.bmp'
 $Dialog = Join-Path $Stage 'installer-dialog.bmp'
-New-InstallerArt (Join-Path $Root 'assets\app-icon\hicolor\256x256\apps\org.lumencraft.LumenCraft.png') $Banner $Dialog
+New-InstallerArt (Join-Path $Root 'assets\app-icon\hicolor\256x256\apps\org.curvebook.CurveBook.png') $Banner $Dialog
 
-$Msi = Join-Path $Dist "lumencraft-$Version-windows-$Arch.msi"
+$Msi = Join-Path $Dist "curvebook-$Version-windows-$Arch.msi"
 Invoke-Native 'wix build' {
-  wix build (Join-Path $PSScriptRoot 'lumencraft.wxs') -arch $Arch `
+  wix build (Join-Path $PSScriptRoot 'curvebook.wxs') -arch $Arch `
     -ext WixToolset.UI.wixext -ext WixToolset.Util.wixext `
-    -culture en-US -loc (Join-Path $PSScriptRoot 'lumencraft.en-us.wxl') `
-    -d "Version=$MsiVersion" -d "DisplayVersion=$Version" -d "BinDir=$Stage" -d "IconPath=$(Join-Path $Root 'assets\app-icon\lumencraft.ico')" `
+    -culture en-US -loc (Join-Path $PSScriptRoot 'curvebook.en-us.wxl') `
+    -d "Version=$MsiVersion" -d "DisplayVersion=$Version" -d "BinDir=$Stage" -d "IconPath=$(Join-Path $Root 'assets\app-icon\curvebook.ico')" `
     -d "DocsDir=$Docs" -d "BannerBmp=$Banner" -d "DialogBmp=$Dialog" `
     -o $Msi
 }
@@ -130,20 +130,20 @@ Invoke-Native 'wix build' {
 Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($Msi, '.wixpdb'))
 & (Join-Path $PSScriptRoot 'sign.ps1') $Msi
 
-$Portable = Join-Path $TargetDir "windows-package\lumencraft-$Version-windows-$Arch-portable"
+$Portable = Join-Path $TargetDir "windows-package\curvebook-$Version-windows-$Arch-portable"
 Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force -Path $Portable | Out-Null
 Copy-Item (Join-Path $Stage '*.exe') $Portable
 Copy-Item -Recurse (Join-Path $Docs '*') $Portable
 Copy-Item (Join-Path $PSScriptRoot 'portable.txt') $Portable
-$Zip = Join-Path $Dist "lumencraft-$Version-windows-$Arch-portable.zip"
+$Zip = Join-Path $Dist "curvebook-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue
 Compress-Archive -Path $Portable -DestinationPath $Zip
 
 $HostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 if ($Arch -ne 'arm64' -or $HostArch -eq 'arm64') {
-  Invoke-Native 'lumencraft-cli --version' { & (Join-Path $Stage 'lumencraft-cli.exe') --version }
+  Invoke-Native 'curvebook-cli --version' { & (Join-Path $Stage 'curvebook-cli.exe') --version }
 } else {
-  Write-Output "skipping lumencraft-cli --version: an $Arch build doesn't run on this $HostArch machine"
+  Write-Output "skipping curvebook-cli --version: an $Arch build doesn't run on this $HostArch machine"
 }
 Get-Item $Msi, $Zip | Format-Table Name, Length

@@ -1,9 +1,9 @@
-//! Regression tests for Stage 4B S09 typography & layout fixes in `lumencraft-pdf`.
+//! Regression tests for Stage 4B S09 typography & layout fixes in `curvebook-pdf`.
 
-use lumencraft_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
-use lumencraft_palette::Rgba8;
-use lumencraft_pdf::{PdfExportOptions, render_pdf};
-use lumencraft_text::{RichSpan, RichText, SpanWeight, measure_text_pt};
+use curvebook_chart::{ChartScene, PointPt, PositionedText, ScenePrimitive, TextAnchor};
+use curvebook_palette::Rgba8;
+use curvebook_pdf::{PdfExportOptions, render_pdf};
+use curvebook_text::{RichSpan, RichText, SpanWeight, measure_text_pt};
 
 fn inflate_stream(pdf: &[u8]) -> String {
     let text = String::from_utf8_lossy(pdf);

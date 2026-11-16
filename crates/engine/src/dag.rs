@@ -2,14 +2,14 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashSet, VecDeque};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, CiBound, DataSetColumn, DataSheet, ErrorCode, HookSource, ImportLinkSpec, InfoSheet,
     InternalLinkKind, LayoutItem, LinkSource, PlacementMode, ProjectDocument, ResultCell, ResultSheet, ResultStatus, SheetCellRange, SheetId,
     TableArchetype, XColumnMode,
 };
-use lumencraft_fit::HookContext;
-use lumencraft_format::MAX_CSV_FILE_BYTES;
-use lumencraft_transform::{
+use curvebook_fit::HookContext;
+use curvebook_format::MAX_CSV_FILE_BYTES;
+use curvebook_transform::{
     ImportPipelineOptions, ImportSourcePayload, TransformContext, apply_import_link_pipeline, detect_link_cycles,
     evaluate_data_sheet_calculated_variables, execute_analysis_transform,
 };
@@ -43,7 +43,7 @@ impl RecalcReport {
 
 /// Break any circular `HookSource` loops in `doc` while preserving valid acyclic hooks.
 pub fn sanitize_circular_hooks(doc: &mut ProjectDocument) -> Vec<String> {
-    lumencraft_format::sanitize_circular_hooks(doc)
+    curvebook_format::sanitize_circular_hooks(doc)
 }
 
 /// Sanitize circular `HookSource` loops on a staged copy of `doc` and recalculate the reactive DAG atomically.
@@ -52,7 +52,7 @@ pub fn sanitize_circular_hooks(doc: &mut ProjectDocument) -> Vec<String> {
 /// `doc` is rolled back untouched and an [`EngineError`] is returned.
 pub fn recalculate_project_sanitized(doc: &mut ProjectDocument) -> Result<(usize, Vec<String>), EngineError> {
     let mut working = doc.clone();
-    let diagnostics = lumencraft_format::sanitize_circular_hooks(&mut working);
+    let diagnostics = curvebook_format::sanitize_circular_hooks(&mut working);
     let recalculated = recalculate_project(&mut working)?;
     *doc = working;
     Ok((recalculated, diagnostics))
@@ -156,8 +156,8 @@ fn check_explicit_self_cycles(doc: &ProjectDocument) -> Result<(), EngineError> 
             ));
         }
         for ann in &graph.spec.annotations {
-            if let lumencraft_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }
-            | lumencraft_doc::GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
+            if let curvebook_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }
+            | curvebook_doc::GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
                 && result_sheet_id == &graph.id
             {
                 return Err(EngineError::with_code(
@@ -249,20 +249,20 @@ pub fn topological_order(doc: &ProjectDocument) -> Result<Vec<SheetId>, EngineEr
     if order.len() != nodes.len() {
         return Err(EngineError::with_code(crate::ErrorCode::CycleDetected, "cyclic dependency detected across project sheets"));
     }
-    lumencraft_format::detect_dependency_cycles(doc)?;
+    curvebook_format::detect_dependency_cycles(doc)?;
     Ok(order)
 }
 
-fn push_spec_hook_dep(deps: &mut Vec<SheetId>, hook: &lumencraft_doc::HookSource, fallback_info: Option<&SheetId>) {
+fn push_spec_hook_dep(deps: &mut Vec<SheetId>, hook: &curvebook_doc::HookSource, fallback_info: Option<&SheetId>) {
     match hook {
-        lumencraft_doc::HookSource::InfoConstant { info_sheet_id: Some(id), .. } => deps.push(id.clone()),
-        lumencraft_doc::HookSource::InfoConstant { info_sheet_id: None, .. } => {
+        curvebook_doc::HookSource::InfoConstant { info_sheet_id: Some(id), .. } => deps.push(id.clone()),
+        curvebook_doc::HookSource::InfoConstant { info_sheet_id: None, .. } => {
             if let Some(id) = fallback_info {
                 deps.push(id.clone());
             }
         }
-        lumencraft_doc::HookSource::ResultScalar { result_sheet_id, .. } => deps.push(result_sheet_id.clone()),
-        lumencraft_doc::HookSource::ColumnTitleValue { data_sheet_id, .. } => deps.push(data_sheet_id.clone()),
+        curvebook_doc::HookSource::ResultScalar { result_sheet_id, .. } => deps.push(result_sheet_id.clone()),
+        curvebook_doc::HookSource::ColumnTitleValue { data_sheet_id, .. } => deps.push(data_sheet_id.clone()),
     }
 }
 
@@ -301,7 +301,7 @@ fn validate_spec_deps_acyclic(doc: &ProjectDocument, sheet_id: &SheetId, spec_de
 }
 
 /// Validate that inline template hooks do not self-reference `sheet_id` or point at wrong/missing sheets.
-pub(crate) fn validate_inline_hook_refs(doc: &ProjectDocument, sheet_id: &SheetId, hooks: &[lumencraft_doc::HookSource]) -> Result<(), EngineError> {
+pub(crate) fn validate_inline_hook_refs(doc: &ProjectDocument, sheet_id: &SheetId, hooks: &[curvebook_doc::HookSource]) -> Result<(), EngineError> {
     for hook in hooks {
         if hook.upstream_sheet_id() == Some(sheet_id) {
             return Err(EngineError::with_code(
@@ -310,14 +310,14 @@ pub(crate) fn validate_inline_hook_refs(doc: &ProjectDocument, sheet_id: &SheetI
             ));
         }
         match hook {
-            lumencraft_doc::HookSource::InfoConstant { info_sheet_id: Some(info_id), .. } => {
+            curvebook_doc::HookSource::InfoConstant { info_sheet_id: Some(info_id), .. } => {
                 let _ = crate::cmd::helpers::require_info_sheet(doc, info_id)?;
             }
-            lumencraft_doc::HookSource::InfoConstant { info_sheet_id: None, .. } => {}
-            lumencraft_doc::HookSource::ResultScalar { result_sheet_id, .. } => {
+            curvebook_doc::HookSource::InfoConstant { info_sheet_id: None, .. } => {}
+            curvebook_doc::HookSource::ResultScalar { result_sheet_id, .. } => {
                 let _ = crate::cmd::helpers::require_result_sheet(doc, result_sheet_id)?;
             }
-            lumencraft_doc::HookSource::ColumnTitleValue { data_sheet_id, .. } => {
+            curvebook_doc::HookSource::ColumnTitleValue { data_sheet_id, .. } => {
                 let _ = crate::cmd::helpers::require_data_sheet(doc, data_sheet_id)?;
             }
         }
@@ -326,7 +326,7 @@ pub(crate) fn validate_inline_hook_refs(doc: &ProjectDocument, sheet_id: &SheetI
 }
 
 /// Validate that candidate `spec` on `graph_id` introduces no self-reference or dependency cycle.
-pub(crate) fn validate_graph_spec_acyclic(doc: &ProjectDocument, graph_id: &SheetId, spec: &lumencraft_doc::GraphSpec) -> Result<(), EngineError> {
+pub(crate) fn validate_graph_spec_acyclic(doc: &ProjectDocument, graph_id: &SheetId, spec: &curvebook_doc::GraphSpec) -> Result<(), EngineError> {
     let default_info = doc.info_sheets.first().map(|s| s.id.clone());
     let mut deps = Vec::new();
     deps.push(spec.primary_source_sheet_id.clone());
@@ -343,8 +343,8 @@ pub(crate) fn validate_graph_spec_acyclic(doc: &ProjectDocument, graph_id: &Shee
         deps.push(cld.result_sheet_id.clone());
     }
     for ann in &spec.annotations {
-        if let lumencraft_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }
-        | lumencraft_doc::GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
+        if let curvebook_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }
+        | curvebook_doc::GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
         {
             deps.push(result_sheet_id.clone());
         }
@@ -356,14 +356,14 @@ pub(crate) fn validate_graph_spec_acyclic(doc: &ProjectDocument, graph_id: &Shee
 }
 
 /// Validate that candidate `spec` on `layout_id` introduces no self-reference or dependency cycle.
-pub(crate) fn validate_layout_spec_acyclic(doc: &ProjectDocument, layout_id: &SheetId, spec: &lumencraft_doc::LayoutSpec) -> Result<(), EngineError> {
+pub(crate) fn validate_layout_spec_acyclic(doc: &ProjectDocument, layout_id: &SheetId, spec: &curvebook_doc::LayoutSpec) -> Result<(), EngineError> {
     let default_info = doc.info_sheets.first().map(|s| s.id.clone());
     let mut deps = Vec::new();
     for item in &spec.items {
         match item {
-            lumencraft_doc::LayoutItem::LiveGraph { graph_sheet_id, .. } => deps.push(graph_sheet_id.clone()),
-            lumencraft_doc::LayoutItem::LiveTable { source_sheet_id, .. } => deps.push(source_sheet_id.clone()),
-            lumencraft_doc::LayoutItem::TextCallout { .. } => {}
+            curvebook_doc::LayoutItem::LiveGraph { graph_sheet_id, .. } => deps.push(graph_sheet_id.clone()),
+            curvebook_doc::LayoutItem::LiveTable { source_sheet_id, .. } => deps.push(source_sheet_id.clone()),
+            curvebook_doc::LayoutItem::TextCallout { .. } => {}
         }
     }
     for hook in spec.inline_hooks() {
@@ -989,7 +989,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
                     primary_info_sheet_id: primary_info_id,
                     visited_sheets: HashSet::new(),
                 };
-                lumencraft_fit::execute_analysis(&existing.analysis, &source_ds, &hooks).map_err(|err| err.to_string())
+                curvebook_fit::execute_analysis(&existing.analysis, &source_ds, &hooks).map_err(|err| err.to_string())
             }
         }
         _ => {
@@ -1001,7 +1001,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
                     source_ds.id
                 ))
             } else {
-                lumencraft_stats::run_analysis(&source_ds, &existing.analysis).map_err(|err| err.to_string())
+                curvebook_stats::run_analysis(&source_ds, &existing.analysis).map_err(|err| err.to_string())
             }
         }
     };
@@ -1017,17 +1017,17 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             computed.analysis = existing.analysis;
             computed.floating_notes = existing.floating_notes;
             computed.color_tag = existing.color_tag;
-            if let AnalysisKind::Survival(lumencraft_doc::SurvivalAnalysisSpec::CoxProportionalHazards { tie_method, .. }) = &computed.analysis.kind {
+            if let AnalysisKind::Survival(curvebook_doc::SurvivalAnalysisSpec::CoxProportionalHazards { tie_method, .. }) = &computed.analysis.kind {
                 let tie_label = match tie_method {
-                    lumencraft_doc::CoxTieMethod::Efron => "Efron",
-                    lumencraft_doc::CoxTieMethod::Breslow => "Breslow",
+                    curvebook_doc::CoxTieMethod::Efron => "Efron",
+                    curvebook_doc::CoxTieMethod::Breslow => "Breslow",
                 };
                 if let Some(tab) = computed.tabs.iter_mut().find(|t| t.id == "cox-ph") {
                     tab.footnotes.push(format!("Tie handling method: {tie_label}."));
                 }
-                computed.checklist.push(lumencraft_doc::ChecklistItem {
+                computed.checklist.push(curvebook_doc::ChecklistItem {
                     assumption: String::from("Cox tie handling"),
-                    status: lumencraft_doc::ChecklistStatus::Info,
+                    status: curvebook_doc::ChecklistStatus::Info,
                     diagnostic_metric: Some(format!("tie_method = {tie_label}")),
                     explanation: format!("Partial likelihood ties handled via {tie_label} approximation."),
                     remediation: None,
@@ -1160,7 +1160,7 @@ fn first_non_finite_1d(cells: &[Cell], prefix: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, ResultSheet, TableArchetype,
         TransformAnalysisSpec,
     };
@@ -1205,7 +1205,7 @@ mod tests {
 
     #[test]
     fn validate_result_sheet_finite_rejects_non_finite_outputs() {
-        use lumencraft_doc::{
+        use curvebook_doc::{
             CiBound, CurveSamplePoint, FittedCurveOverlay, LinearRegressionSpec, PairwiseComparisonRecord, ResultCell, ResultScalarEntry, ResultTab,
             ResultTabKind, SequenceProgression, XColumnMode, XyTable,
         };
@@ -1258,7 +1258,7 @@ mod tests {
         assert!(validate_result_sheet_finite(&r_curve, &id).is_err());
 
         let mut r_data = make_base();
-        let mut xy = XyTable::new(lumencraft_doc::SubcolumnMode::RawReplicates(1), 1, 1).expect("xy");
+        let mut xy = XyTable::new(curvebook_doc::SubcolumnMode::RawReplicates(1), 1, 1).expect("xy");
         xy.x_mode = XColumnMode::GeneratedSequence { start: 0.0, step: f64::NAN, progression: SequenceProgression::Arithmetic };
         r_data.analyzable_data = Some(DataSheet::new("res-nf-out", "Out", TableArchetype::Xy(xy)).expect("ds"));
         assert!(validate_result_sheet_finite(&r_data, &id).is_err());

@@ -13,9 +13,9 @@ Public behavioural references:
 
 ## 1. Scene-Graph Compilation Pipeline
 
-`lumencraft-chart` is a pure, deterministic compiler:
+`curvebook-chart` is a pure, deterministic compiler:
 $$\big(\text{GraphSpec},\, \text{DataSheet(s)},\, \text{ResultSheet(s)},\, \text{FontMetrics}\big) \longrightarrow \text{ChartScene}$$
-Neither `lumencraft-ui-egui`, `lumencraft-svg`, nor `lumencraft-pdf` ever computes error bars, kernel density estimates, axis ticks, or curve polylines on its own. All output backends (software/interactive workspace compositor, CPU rasterizer `lumencraft-render`, SVG writer `lumencraft-svg`, and pure-Rust `%PDF-1.7` / `1.4` writer `lumencraft-pdf`) consume the exact same `ChartScene` primitives (positioned `Path2D`, `PositionedText`/`RichText`, clip rects, and `StrokePaint`/`FillPaint`), guaranteeing sub-point visual parity between screen and journal export.
+Neither `curvebook-ui-egui`, `curvebook-svg`, nor `curvebook-pdf` ever computes error bars, kernel density estimates, axis ticks, or curve polylines on its own. All output backends (software/interactive workspace compositor, CPU rasterizer `curvebook-render`, SVG writer `curvebook-svg`, and pure-Rust `%PDF-1.7` / `1.4` writer `curvebook-pdf`) consume the exact same `ChartScene` primitives (positioned `Path2D`, `PositionedText`/`RichText`, clip rects, and `StrokePaint`/`FillPaint`), guaranteeing sub-point visual parity between screen and journal export.
 
 ---
 
@@ -70,7 +70,7 @@ Data series and fitted curves clip cleanly per segment without drawing spurious 
 ### 3.3 Framing, Ticks & Scientific Typography (`crates/text`)
 - **Frame presets:** Open L-axes (default), offset/Tufte range frame, plain boxed, four-axis with secondary right-Y (`Y2`), or origin-crossing axes ($X=0, Y=0$).
 - **Tick formatting:** Decimal, power-of-10 superscript ($10^{-6}$), scientific (`1e-6`), antilog (`0.001, 0.01, 0.1, 1, 10`), engineering SI prefixes, or custom text/categorical labels at $0^\circ, 45^\circ, 90^\circ$.
-- **Rich scientific text spans:** `lumencraft-text` parses lightweight markup for subscripts (`EC_{50}`), superscripts (`cm^{-2}`), italic mathematical symbols, Greek letters, and live hooked constants (`R^2 = {{result:fit-1:r2}}`) into positioned glyph runs shared identically across GPU, SVG, and PDF.
+- **Rich scientific text spans:** `curvebook-text` parses lightweight markup for subscripts (`EC_{50}`), superscripts (`cm^{-2}`), italic mathematical symbols, Greek letters, and live hooked constants (`R^2 = {{result:fit-1:r2}}`) into positioned glyph runs shared identically across GPU, SVG, and PDF.
 
 ---
 
@@ -78,7 +78,7 @@ Data series and fitted curves clip cleanly per segment without drawing spurious 
 
 `GraphSpec::comparisons` links directly to a post-hoc / *t*-test / survival `ResultSheet`:
 - **Automatic collision-free stacking:** Brackets sort by column span (`|col_b - col_a|` ascending, then left column ascending), measure the maximum rendered height of bars, error bars, and scatter points beneath `[col_a, col_b]`, and stack upward in crisp vertical increments (`bracket_step_pt`).
-- **Live recalculation:** Editing or excluding a replicate in the upstream `DataSheet` recomputes the *p*-value / *q*-value in `lumencraft-stats`, updates the bracket label (`****`, `***`, `**`, `*`, `ns`, or formatted numeric $p$/$q$ according to the analysis `PValueFormat`), and hides/shows non-significant brackets automatically when `"Show only significant comparisons"` is active.
+- **Live recalculation:** Editing or excluding a replicate in the upstream `DataSheet` recomputes the *p*-value / *q*-value in `curvebook-stats`, updates the bracket label (`****`, `***`, `**`, `*`, `ns`, or formatted numeric $p$/$q$ according to the analysis `PValueFormat`), and hides/shows non-significant brackets automatically when `"Show only significant comparisons"` is active.
 - **Bracket styles:** Classic square bracket, half-tick bracket, flat line, or curly brace, with configurable line weight and font size.
 - **Model equation callouts (`R9.16` / `QOL-16`, done; [equations-only specification](calculators-and-quick-stats.md#qol16-equations)):** One-click symbolic or live-substituted $\TeX$-subset best-fit model equation annotations on regression graphs (`GraphAnnotation::ModelEquation`, inserted via `graph.addAnnotation` with kind `model_equation` or the UI command `ui.graph.insertModelEquation`), recalculated when linked fits update. Rendering is currently single-line; the two-dimensional typeset upgrade is planned in [`R10.19`](ROADMAP.md#r1019-typeset-mathematical-equation-annotations). Group letters, pairwise-display modes, and additional fit-statistic callouts are outside this item; Compact Letter Display is planned separately in [`R10.11`](ROADMAP.md#r1011-compact-letter-display-cld) (todo); existing significance brackets remain unchanged.
 
@@ -98,16 +98,16 @@ A `LayoutSheet` arranges multiple live `GraphSheet` panels, live embedded `DataS
 - **Grid & alignment guides:** Configurable row $\times$ column layout templates, baseline alignment across adjacent Y axes (aligning plot-area origins even when Y-tick label widths differ!), and automatic panel badges (`A`, `B`, `C`, … or `a`, `b`, `c`).
 - **Export targets:**
   - **SVG (`crates/svg`):** Crisp vector paths, optional editable `<text>` vs. outlined glyph paths, non-scaling hairlines avoided, deterministic attribute ordering.
-  - **PDF 1.7 / 1.4 (`crates/pdf`):** Direct `%PDF-1.7` default vector writer (`--pdf-version 1.4|1.7`), `FlateDecode` streams, optional SFNT TrueType `/FontFile2` embedding (when supplied via `--ttf-font` or `LUMENCRAFT_FONTS_DIR`), Adobe Core-14 Helvetica/Symbol selectable text + outlined vector glyph-path fallback (with `BUNDLED_FONTS` optional/empty via `--no-default-features`), BiDi RTL reordering, sRGB / print CMYK / Grayscale colour spaces, exact `MediaBox` / `TrimBox` / `BleedBox`, and 20-byte `xref`. *(External-viewer PDF QA under `G5` is done; see [`R5`](ROADMAP.md).)*
+  - **PDF 1.7 / 1.4 (`crates/pdf`):** Direct `%PDF-1.7` default vector writer (`--pdf-version 1.4|1.7`), `FlateDecode` streams, optional SFNT TrueType `/FontFile2` embedding (when supplied via `--ttf-font` or `CURVEBOOK_FONTS_DIR`), Adobe Core-14 Helvetica/Symbol selectable text + outlined vector glyph-path fallback (with `BUNDLED_FONTS` optional/empty via `--no-default-features`), BiDi RTL reordering, sRGB / print CMYK / Grayscale colour spaces, exact `MediaBox` / `TrimBox` / `BleedBox`, and 20-byte `xref`. *(External-viewer PDF QA under `G5` is done; see [`R5`](ROADMAP.md).)*
   - **Raster (`crates/render`):** `72`–`1200` DPI anti-aliased PNG and uncompressed/Deflate/LZW TIFF with transparent, white, or custom paper fill, enforcing WCAG AA contrast checks in UI chrome while keeping figure paper crisp white by default (raster export stays on the CPU rasterizer; the native `eframe`/`wgpu` window from `R8.3` presents CPU-composited frames as a texture).
 
 ---
 
 ## 7. Risk Spike `S2` Decision (Text & PDF without Bundled Fonts): **GO**
 
-- **Decision:** **GO** — direct pure-Rust **`%PDF-1.7` / `1.4`** writer (`crates/pdf`) + optional `/FontFile2` SFNT embedding + `lumencraft-text` Core-14 metrics/glyph path engine. No external PDF/text engine or heavy desktop font rasterizer dependency is required.
+- **Decision:** **GO** — direct pure-Rust **`%PDF-1.7` / `1.4`** writer (`crates/pdf`) + optional `/FontFile2` SFNT embedding + `curvebook-text` Core-14 metrics/glyph path engine. No external PDF/text engine or heavy desktop font rasterizer dependency is required.
 - **Evidence (verified with `--no-default-features`, `BUNDLED_FONTS` empty, and default features):**
   - Historical `S2` baseline measurement (`spike_s2_` under `--no-default-features`): multi-page PDF generation with `BUNDLED_FONTS` empty completed in `0.293–0.395 ms` (`0.422 ms` default; compressed `2,898` B vs uncompressed `4,600` B; `pages = 2`, `total_objs = 15`, `xref_entries = 16`, `p1_stream_bytes = 1,997`, `p2_stream_bytes = 562`).
-  - Visual `L2`–`L3` verification (`--offline`) passed with zero failures under both default features and `--no-default-features` (`lumencraft-chart`, `lumencraft-text`, `lumencraft-pdf`, `lumencraft-svg`, `lumencraft-render`), `0` Clippy warnings; live per-crate test counts are tracked in [docs/STATUS.md](STATUS.md).
+  - Visual `L2`–`L3` verification (`--offline`) passed with zero failures under both default features and `--no-default-features` (`curvebook-chart`, `curvebook-text`, `curvebook-pdf`, `curvebook-svg`, `curvebook-render`), `0` Clippy warnings; live per-crate test counts are tracked in [docs/STATUS.md](STATUS.md).
   - Fidelity verified structurally and at pixel level: `%PDF-1.7` default header (`--pdf-version 1.4|1.7`), optional TrueType `/FontFile2` SFNT embedding, selectable Core-14 Helvetica + Symbol Greek/math text, superscripts & subscripts, BiDi RTL reordering, rotated axis titles, `AdditionalTick` across all 7 scales & broken segments, `sRGB` / `CMYK` / `Grayscale` colour spaces, `/MediaBox` / `/TrimBox` / `/BleedBox`, and outlined glyph path mode.
 - **Scope note:** Structural parsers and pixel raster tests validate xref tables, compressed streams, `/FontFile2` objects, operators, and XML/text geometry deterministically; interactive opening inside external GUI PDF viewers with installed external `.ttf` fonts was covered by the `G5` external-viewer QA (done).

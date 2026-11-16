@@ -1,5 +1,5 @@
 //! Test-only numerical tolerance assertions, 106-bit `DoubleDouble` reference oracles, SHA-256
-//! corpus verification, and NIST Statistical Reference Datasets (StRD) harness for LumenCraft.
+//! corpus verification, and NIST Statistical Reference Datasets (StRD) harness for CurveBook.
 //!
 //! May only be depended on as a `[dev-dependencies]` entry (enforced by `cargo xtask layers`).
 //! Governing spec: `docs/development.md` (§Tests & numerical verification, §Verified NIST StRD corpus).
@@ -7,8 +7,8 @@
 //! # Example
 //!
 //! ```
-//! use lumencraft_testkit::{assert_lre_at_least, oracle_univariate_f64, sha256_hex};
-//! use lumencraft_testkit::nist_strd::numacc4;
+//! use curvebook_testkit::{assert_lre_at_least, oracle_univariate_f64, sha256_hex};
+//! use curvebook_testkit::nist_strd::numacc4;
 //!
 //! let ds = numacc4();
 //! let (mean, sd, r1) = oracle_univariate_f64(&ds.values);

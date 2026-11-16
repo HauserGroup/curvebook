@@ -103,6 +103,6 @@ mod tests {
 
     #[test]
     fn classifies_platform_crate_as_layer_zero() {
-        assert_eq!(crate::layers::describe(crate::layers::classify("lumencraft-platform")), "L0");
+        assert_eq!(crate::layers::describe(crate::layers::classify("curvebook-platform")), "L0");
     }
 }

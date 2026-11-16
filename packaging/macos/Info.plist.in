@@ -5,24 +5,24 @@
   <key>CFBundleDevelopmentRegion</key>
   <string>en</string>
   <key>CFBundleDisplayName</key>
-  <string>LumenCraft</string>
+  <string>CurveBook</string>
   <key>CFBundleExecutable</key>
-  <string>lumencraft</string>
+  <string>curvebook</string>
   <key>CFBundleIconFile</key>
-  <string>lumencraft.icns</string>
+  <string>curvebook.icns</string>
   <key>CFBundleIdentifier</key>
-  <string>org.lumencraft.LumenCraft</string>
+  <string>org.curvebook.CurveBook</string>
   <key>CFBundleInfoDictionaryVersion</key>
   <string>6.0</string>
   <key>CFBundleName</key>
-  <string>LumenCraft</string>
+  <string>CurveBook</string>
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
   <string>@SHORT_VERSION@</string>
   <key>CFBundleVersion</key>
   <string>@VERSION@</string>
-  <key>LumenCraftBuildSHA</key>
+  <key>CurveBookBuildSHA</key>
   <string>@BUILD_SHA@</string>
   <key>LSApplicationCategoryType</key>
   <string>public.app-category.education</string>
@@ -36,26 +36,26 @@
   <array>
     <dict>
       <key>CFBundleTypeName</key>
-      <string>LumenCraft Project</string>
+      <string>CurveBook Project</string>
       <key>CFBundleTypeRole</key>
       <string>Editor</string>
       <key>LSHandlerRank</key>
       <string>Owner</string>
       <key>LSItemContentTypes</key>
       <array>
-        <string>org.lumencraft.project</string>
+        <string>org.curvebook.project</string>
       </array>
     </dict>
     <dict>
       <key>CFBundleTypeName</key>
-      <string>LumenCraft Project Template</string>
+      <string>CurveBook Project Template</string>
       <key>CFBundleTypeRole</key>
       <string>Editor</string>
       <key>LSHandlerRank</key>
       <string>Owner</string>
       <key>LSItemContentTypes</key>
       <array>
-        <string>org.lumencraft.template</string>
+        <string>org.curvebook.template</string>
       </array>
     </dict>
     <dict>
@@ -89,9 +89,9 @@
   <array>
     <dict>
       <key>UTTypeIdentifier</key>
-      <string>org.lumencraft.project</string>
+      <string>org.curvebook.project</string>
       <key>UTTypeDescription</key>
-      <string>LumenCraft Project</string>
+      <string>CurveBook Project</string>
       <key>UTTypeConformsTo</key>
       <array>
         <string>public.data</string>
@@ -101,19 +101,19 @@
       <dict>
         <key>public.filename-extension</key>
         <array>
-          <string>lumencraft</string>
+          <string>curvebook</string>
         </array>
         <key>public.mime-type</key>
         <array>
-          <string>application/vnd.lumencraft.project</string>
+          <string>application/vnd.curvebook.project</string>
         </array>
       </dict>
     </dict>
     <dict>
       <key>UTTypeIdentifier</key>
-      <string>org.lumencraft.template</string>
+      <string>org.curvebook.template</string>
       <key>UTTypeDescription</key>
-      <string>LumenCraft Project Template</string>
+      <string>CurveBook Project Template</string>
       <key>UTTypeConformsTo</key>
       <array>
         <string>public.data</string>
@@ -123,11 +123,11 @@
       <dict>
         <key>public.filename-extension</key>
         <array>
-          <string>lctemplate</string>
+          <string>cbtemplate</string>
         </array>
         <key>public.mime-type</key>
         <array>
-          <string>application/vnd.lumencraft.template</string>
+          <string>application/vnd.curvebook.template</string>
         </array>
       </dict>
     </dict>

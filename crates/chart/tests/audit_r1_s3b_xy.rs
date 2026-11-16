@@ -4,12 +4,12 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lumencraft_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     Cell, ColumnDesignHint, ColumnTable, DataSheet, GraphSheet, GraphSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, TickLabelFormat,
     XyTable,
 };
-use lumencraft_math::AxisScale;
+use curvebook_math::AxisScale;
 
 fn xy_doc(rows: &[(f64, f64)]) -> (ProjectDocument, GraphSheet) {
     let mut doc = ProjectDocument::new("S3B-XY").unwrap();

@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, GroupedTable, LevelOrderKind, LevelOrderSpec,
     MultipleVariablesTable, PartsOfWholeTable, SubcolumnMode, SurvivalTable, TableArchetype, VariableColumn, XyTable,
 };

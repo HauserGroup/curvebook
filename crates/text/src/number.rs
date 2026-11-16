@@ -1,6 +1,6 @@
 //! Locale-aware numeric formatting for scientific axis ticks and *p*-value labels.
 
-use lumencraft_math::{AxisScale, PValueFormat};
+use curvebook_math::{AxisScale, PValueFormat};
 use serde::{Deserialize, Serialize};
 
 /// Axis numeric tick formatting style (`docs/graphing-and-layouts.md` §3.3).

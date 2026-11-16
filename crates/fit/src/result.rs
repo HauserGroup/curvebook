@@ -14,13 +14,13 @@
 
 use std::collections::HashSet;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, LinearRegressionSpec,
     NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
 };
-use lumencraft_math::PValueFormat;
-use lumencraft_math::dist::norm_ppf;
-use lumencraft_math::sum::NeumaierSum;
+use curvebook_math::PValueFormat;
+use curvebook_math::dist::norm_ppf;
+use curvebook_math::sum::NeumaierSum;
 
 use crate::dsl::CompiledDslModel;
 use crate::error::{FitError, FitStatus, ParameterNote};
@@ -56,7 +56,7 @@ pub fn execute_analysis(spec: &AnalysisSpec, sheet: &DataSheet, hooks: &HookCont
         AnalysisKind::NonlinearRegression(nl) => execute_nonlinear_analysis(spec, nl, sheet, hooks),
         other => Err(FitError::InvalidParameter {
             name: "analysis.kind",
-            reason: format!("Unsupported analysis kind `{}` for lumencraft-fit", other.derive_auto_title()),
+            reason: format!("Unsupported analysis kind `{}` for curvebook-fit", other.derive_auto_title()),
         }),
     }
 }
@@ -256,7 +256,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
 fn build_deming_result_sheet(
     mut result: ResultSheet,
     datasets: &[crate::types::DatasetSeries],
-    confidence: lumencraft_math::ConfidenceLevel,
+    confidence: curvebook_math::ConfidenceLevel,
 ) -> Result<ResultSheet, FitError> {
     // `LinearRegressionSpec` currently does not carry a variance-ratio parameter, so orthogonal
     // Deming regression fixes `variance_ratio_lambda = 1.0` (equal measurement-error variances).
@@ -373,9 +373,9 @@ pub fn execute_nonlinear_analysis(
 
     if let Some(comp_spec) = &nl_spec.comparison {
         let alt_id = match comp_spec {
-            lumencraft_doc::ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id }
-            | lumencraft_doc::ModelComparisonSpec::Aicc { alternative_equation_id }
-            | lumencraft_doc::ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id } => alternative_equation_id,
+            curvebook_doc::ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id }
+            | curvebook_doc::ModelComparisonSpec::Aicc { alternative_equation_id }
+            | curvebook_doc::ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id } => alternative_equation_id,
         };
         let alt_model = get_builtin_model(alt_id).ok_or_else(|| FitError::UnknownEquation { id: alt_id.clone() })?;
         let comp = compare_models_checked(&fit, alt_model.as_ref(), &datasets, hooks, &config, comp_spec)?;
@@ -406,7 +406,7 @@ fn parameter_display_label(fit: &NonlinearFitResult, name: &str, dataset_index: 
 fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
     let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
     let mut param_labels = Vec::with_capacity(param_rows.capacity());
-    let is_robust = fit.is_robust_cauchy() || nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
+    let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
     let mut emitted_scalars: HashSet<(String, Option<usize>)> = HashSet::new();
 
     for p in &fit.parameters {
@@ -489,7 +489,7 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
 /// nonlinearity on the interpretation scale for Hougaard's skewness given by Ratkowsky (1990).
 fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
     append_nonlinear_parameter_tab(result, fit, nl_spec);
-    let is_robust = fit.is_robust_cauchy() || nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
+    let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
 
     // Goodness-of-fit summary tab.
     let mut gof_labels = vec![
@@ -1230,11 +1230,11 @@ fn append_auc_scalars_and_tab(
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, Cell, CellCoord, CiBound, DataSheet, LinearRegressionSpec, NonlinearFitSpec, ParameterRule, ParameterScope,
         ResultCell, ResultStatus, ResultTabKind, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
     };
-    use lumencraft_math::ConfidenceLevel;
+    use curvebook_math::ConfidenceLevel;
 
     use super::execute_analysis;
     use crate::library::get_builtin_model;
@@ -1615,7 +1615,7 @@ mod tests {
 
     #[test]
     fn compute_curve_overlay_auc_rejects_narrowed_or_disjoint_overlays() {
-        use lumencraft_doc::{CurveSamplePoint, FittedCurveOverlay};
+        use curvebook_doc::{CurveSamplePoint, FittedCurveOverlay};
 
         let pt = |x: f64, y: f64| CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None };
         let narrowed = FittedCurveOverlay {

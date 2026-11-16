@@ -1,6 +1,6 @@
 //! Regression tests for Round 2 Slice S09 (`R2-S09-03`): structured 2D equation segmentation.
 
-use lumencraft_text::{EquationSegment, RichSpan, SpanScript, SpanSlope, parse_equation_segments};
+use curvebook_text::{EquationSegment, RichSpan, SpanScript, SpanSlope, parse_equation_segments};
 
 #[test]
 fn r2_s09_03_equation_segments_preserve_math_multiplication_braces_and_script_fractions() -> Result<(), Box<dyn std::error::Error>> {

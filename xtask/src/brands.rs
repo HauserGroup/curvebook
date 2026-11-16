@@ -4,20 +4,20 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
-use lumencraft_chart::compile_graph;
-use lumencraft_doc::{
+use curvebook_chart::compile_graph;
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ConstantValue, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec, ProjectDocument, ResultSheet, SheetId,
     TableKind,
 };
-use lumencraft_engine::Session;
-use lumencraft_format::{ZipArchive, ZipLimits, save_project_bytes, save_template_bytes};
-use lumencraft_pdf::{PdfExportOptions, render_pdf};
-use lumencraft_svg::{SvgExportOptions, render_svg};
-use lumencraft_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, ActiveInspector, AnalysisCategory, CommandPaletteState};
-use lumencraft_ui_egui::i18n;
-use lumencraft_ui_egui::menus::{TOOLBAR_BUTTONS, menu_bar_tooltips, toolbar_tooltips};
-use lumencraft_ui_egui::workspace_nav::{SAMPLE_FIXTURES, TableCreationDraft, WelcomeMode, instantiate_sample_fixture};
-use lumencraft_ui_egui::{ActiveDialog, ClipboardBundle, UiApp, UiTreeSnapshot, inspect_ui_tree};
+use curvebook_engine::Session;
+use curvebook_format::{ZipArchive, ZipLimits, save_project_bytes, save_template_bytes};
+use curvebook_pdf::{PdfExportOptions, render_pdf};
+use curvebook_svg::{SvgExportOptions, render_svg};
+use curvebook_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, ActiveInspector, AnalysisCategory, CommandPaletteState};
+use curvebook_ui_egui::i18n;
+use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, menu_bar_tooltips, toolbar_tooltips};
+use curvebook_ui_egui::workspace_nav::{SAMPLE_FIXTURES, TableCreationDraft, WelcomeMode, instantiate_sample_fixture};
+use curvebook_ui_egui::{ActiveDialog, ClipboardBundle, UiApp, UiTreeSnapshot, inspect_ui_tree};
 
 /// Competitor vendor and product names checked on ASCII word boundaries (case-insensitive).
 const BRANDS: &[&str] =
@@ -78,8 +78,8 @@ const BINARY_ASSET_EXT: &[&str] = &[
     "eot",
     "pfb",
     "zip",
-    "lumencraft",
-    "lctemplate",
+    "curvebook",
+    "cbtemplate",
     "prism",
     "pzf",
     "xlsx",
@@ -1360,8 +1360,8 @@ fn is_dot_prism_extension_description(raw: &str) -> bool {
     }
     const FORMAT_TOKENS: &[&str] = &[
         ".pzfx",
-        ".lumencraft",
-        ".lctemplate",
+        ".curvebook",
+        ".cbtemplate",
         ".csv",
         ".tsv",
         "import",
@@ -1425,8 +1425,8 @@ fn is_prism_match_pattern(before: &str, after: &str) -> bool {
             || stmt_before.contains("matches!")
             || arm_after.contains("\"pzfx\"")
             || stmt_before.contains("\"pzfx\"")
-            || arm_after.contains("\"lumencraft\"")
-            || stmt_before.contains("\"lumencraft\"")
+            || arm_after.contains("\"curvebook\"")
+            || stmt_before.contains("\"curvebook\"")
         {
             return true;
         }
@@ -1498,7 +1498,7 @@ fn is_prism_extension_array_item(before: &str, after: &str) -> bool {
     };
     let inner_before = &before[open_idx..];
     let inner_after = &after[..close_idx];
-    const PEER_EXT_LITERALS: &[&str] = &["\"pzfx\"", "\"lctemplate\"", "\"lumencraft\"", "\"lumencraft.d\"", "\"csv\"", "\"tsv\""];
+    const PEER_EXT_LITERALS: &[&str] = &["\"pzfx\"", "\"cbtemplate\"", "\"curvebook\"", "\"curvebook.d\"", "\"csv\"", "\"tsv\""];
     if PEER_EXT_LITERALS.iter().any(|peer| inner_before.contains(peer) || inner_after.contains(peer)) {
         return true;
     }
@@ -2129,7 +2129,7 @@ fn flush_html_text(source: &str, start_line: usize, raw: &str, strict: bool, out
     }
 }
 
-/// Inspect `.lumencraft`/`.lctemplate` `manifest.json` keys and string values strictly.
+/// Inspect `.curvebook`/`.cbtemplate` `manifest.json` keys and string values strictly.
 #[must_use]
 pub fn check_manifest_metadata(source: &str, manifest_json: &str) -> Vec<BrandHit> {
     let mut out = Vec::new();
@@ -2228,7 +2228,7 @@ fn collect_snapshot_strings(snap: &UiTreeSnapshot, context: &str, hits: &mut Vec
     }
 }
 
-fn push_widget_node_runs(prefix: &str, node: &lumencraft_ui_egui::inspect::UiWidgetNode, out: &mut Vec<(String, String)>) {
+fn push_widget_node_runs(prefix: &str, node: &curvebook_ui_egui::inspect::UiWidgetNode, out: &mut Vec<(String, String)>) {
     out.push((format!("{prefix}:{}", node.widget_id), node.label.clone()));
     if let Some(reason) = &node.disabled_reason {
         out.push((format!("{prefix}:{}:disabled_reason", node.widget_id), reason.clone()));
@@ -2239,7 +2239,7 @@ fn push_widget_node_runs(prefix: &str, node: &lumencraft_ui_egui::inspect::UiWid
 }
 
 fn build_brands_sweep_document() -> Result<ProjectDocument, String> {
-    let mut doc = ProjectDocument::new("LumenCraft Brand Sweep").map_err(|e| format!("project init: {e}"))?;
+    let mut doc = ProjectDocument::new("CurveBook Brand Sweep").map_err(|e| format!("project init: {e}"))?;
     for (idx, fixture) in SAMPLE_FIXTURES.iter().enumerate() {
         let id = format!("data-{}", idx + 1);
         let ds = instantiate_sample_fixture(fixture.id, id).map_err(|e| format!("fixture {}: {e}", fixture.id))?;
@@ -2247,11 +2247,11 @@ fn build_brands_sweep_document() -> Result<ProjectDocument, String> {
     }
     let mut info = InfoSheet::new_preseeded("info-1", "Protocol Constants").map_err(|e| format!("info sheet: {e}"))?;
     info.constants
-        .push(lumencraft_doc::InfoConstant::new("ControlEC50", ConstantValue::Number(12.5), Some(String::from("nM"))).map_err(|e| e.to_string())?);
+        .push(curvebook_doc::InfoConstant::new("ControlEC50", ConstantValue::Number(12.5), Some(String::from("nM"))).map_err(|e| e.to_string())?);
     doc.add_info_sheet(info).map_err(|e| e.to_string())?;
 
     let spec =
-        AnalysisSpec::new("res-1", "data-2", AnalysisKind::OneWayAnova(lumencraft_doc::OneWayAnovaSpec::default())).map_err(|e| e.to_string())?;
+        AnalysisSpec::new("res-1", "data-2", AnalysisKind::OneWayAnova(curvebook_doc::OneWayAnovaSpec::default())).map_err(|e| e.to_string())?;
     let res = ResultSheet::new(spec).map_err(|e| e.to_string())?;
     doc.add_result_sheet(res).map_err(|e| e.to_string())?;
 
@@ -2271,7 +2271,7 @@ fn build_brands_sweep_document() -> Result<ProjectDocument, String> {
     layout_spec.items.push(LayoutItem::LiveGraph {
         id: String::from("panel-a"),
         graph_sheet_id: SheetId::new("graph-1"),
-        bounds_pt: lumencraft_doc::RectPt::new(18.0, 18.0, 220.0, 160.0),
+        bounds_pt: curvebook_doc::RectPt::new(18.0, 18.0, 220.0, 160.0),
         scale_percent: 100.0,
         badge_override: Some(String::from("A")),
     });
@@ -2438,8 +2438,8 @@ fn check_export_metadata_sweep(doc: &ProjectDocument, hits: &mut Vec<BrandHit>) 
         hits.extend(check_manifest_metadata(label, manifest));
     }
 
-    hits.extend(check_window_title("desktop:window_title:untitled", "Untitled — LumenCraft"));
-    hits.extend(check_window_title("desktop:window_title:dirty", "study.lumencraft * — LumenCraft"));
+    hits.extend(check_window_title("desktop:window_title:untitled", "Untitled — CurveBook"));
+    hits.extend(check_window_title("desktop:window_title:dirty", "study.curvebook * — CurveBook"));
     Ok(())
 }
 
@@ -2476,7 +2476,7 @@ mod tests {
 
     fn temp_dir(label: &str) -> PathBuf {
         let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-        let dir = std::env::temp_dir().join(format!("lc-brands-{}-{label}-{stamp}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-brands-{}-{label}-{stamp}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -2534,12 +2534,12 @@ fn unix_test_helper() {
 #[cfg(not(test))]
 pub const PROD: &str = \"Dotmatics\";
 ";
-        scan_file("apps/lumencraft/src/main.rs", src, &mut hits);
+        scan_file("apps/curvebook/src/main.rs", src, &mut hits);
         assert_eq!(
             hits,
             vec![
-                BrandHit { path: String::from("apps/lumencraft/src/main.rs"), line: 9, brand: "graphpad" },
-                BrandHit { path: String::from("apps/lumencraft/src/main.rs"), line: 18, brand: "dotmatics" },
+                BrandHit { path: String::from("apps/curvebook/src/main.rs"), line: 9, brand: "graphpad" },
+                BrandHit { path: String::from("apps/curvebook/src/main.rs"), line: 18, brand: "dotmatics" },
             ]
         );
     }
@@ -2578,7 +2578,7 @@ pub const ALLOWED: &str = \"Import from \\
         std::fs::create_dir_all(dir.join("assets")).unwrap();
 
         std::fs::write(dir.join("packaging/windows/app.rc"), to_utf16_bytes("VALUE \"Product\", \"GraphPad\"\n", true, true)).unwrap();
-        std::fs::write(dir.join("packaging/windows/clean.rc"), to_utf16_bytes("VALUE \"Product\", \"LumenCraft\"\n", false, true)).unwrap();
+        std::fs::write(dir.join("packaging/windows/clean.rc"), to_utf16_bytes("VALUE \"Product\", \"CurveBook\"\n", false, true)).unwrap();
         std::fs::write(dir.join("assets/icon.png"), [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0xFF]).unwrap();
 
         let files = vec![String::from("packaging/windows/app.rc"), String::from("packaging/windows/clean.rc"), String::from("assets/icon.png")];
@@ -2586,7 +2586,7 @@ pub const ALLOWED: &str = \"Import from \\
         assert_eq!(hits, vec![BrandHit { path: String::from("packaging/windows/app.rc"), line: 1, brand: "graphpad" }]);
 
         // Non-UTF-8 Latin-1 byte in a packaging file must fail rather than be silently skipped.
-        std::fs::write(dir.join("packaging/linux/latin1.desktop"), b"[Desktop Entry]\nComment=\xa9 LumenCraft\n").unwrap();
+        std::fs::write(dir.join("packaging/linux/latin1.desktop"), b"[Desktop Entry]\nComment=\xa9 CurveBook\n").unwrap();
         let err = scan_repo_checked(&dir, &[String::from("packaging/linux/latin1.desktop")]).unwrap_err();
         assert!(err.contains("cannot scan packaging/linux/latin1.desktop"), "{err}");
 
@@ -2600,18 +2600,18 @@ pub const ALLOWED: &str = \"Import from \\
         let mut hits = Vec::new();
         let desktop = "\
 [Desktop Entry]
-Name=LumenCraft
+Name=CurveBook
 # Compatibility search term: brand-ok
 Keywords=biostatistics;regression;GraphPad;
 ";
-        scan_file("packaging/linux/org.lumencraft.LumenCraft.desktop", desktop, &mut hits);
+        scan_file("packaging/linux/org.curvebook.CurveBook.desktop", desktop, &mut hits);
         assert!(hits.is_empty(), "{hits:?}");
     }
 
     #[test]
     fn flags_artcraft_suite_references_in_docs_and_workflows() {
         let mut hits = Vec::new();
-        scan_file("docs/releasing.md", "Installs under Programs\\ArtCraft\\LumenCraft or https://getartcraft.com\n", &mut hits);
+        scan_file("docs/releasing.md", "Installs under Programs\\ArtCraft\\CurveBook or https://getartcraft.com\n", &mut hits);
         assert_eq!(
             hits,
             vec![
@@ -2683,7 +2683,7 @@ mod tests {
     fn svg_allows_optical_prism_metadata_and_flags_non_optical_uses() {
         let mut hits = Vec::new();
         let svg = r#"<svg xmlns="http://www.w3.org/2000/svg">
-  <title>LumenCraft icon — Mole holding a refractive prism</title>
+  <title>CurveBook icon — Mole holding a refractive prism</title>
   <desc>Clean geometric vector icon holding a glowing triangular optical
   prism dispersing light into a spectrum.</desc>
   <title>Prism Scientific Studio</title>
@@ -2692,12 +2692,12 @@ mod tests {
   <title>Prism Archive</title>
 </svg>
 "#;
-        scan_file("assets/app-icon/lumencraft.svg", svg, &mut hits);
+        scan_file("assets/app-icon/curvebook.svg", svg, &mut hits);
         assert_eq!(
             hits,
             vec![
-                BrandHit { path: String::from("assets/app-icon/lumencraft.svg"), line: 5, brand: "prism" },
-                BrandHit { path: String::from("assets/app-icon/lumencraft.svg"), line: 6, brand: "prism" },
+                BrandHit { path: String::from("assets/app-icon/curvebook.svg"), line: 5, brand: "prism" },
+                BrandHit { path: String::from("assets/app-icon/curvebook.svg"), line: 6, brand: "prism" },
             ]
         );
     }
@@ -2720,15 +2720,15 @@ body:
         let html = "\
 <!doctype html>
 <html>
-  <head><title>LumenCraft</title></head>
+  <head><title>CurveBook</title></head>
   <body>
-    <input accept=\".lcf,.prism,.pzfx\">
+    <input accept=\".curvebook,.cbtemplate,.prism,.pzfx\">
     <p>Drop a Prism file here.</p>
     <p>Drop a Prism file here.</p> <!-- brand-ok -->
   </body>
 </html>
 ";
-        scan_file("apps/lumencraft-web/index.html", html, &mut hits);
+        scan_file("apps/curvebook-web/index.html", html, &mut hits);
 
         let web_rs = "\
 #[cfg(test)]
@@ -2737,15 +2737,15 @@ mod tests {
 }
 pub fn prod_format() -> &'static str { \"prism\" }
 ";
-        scan_file("apps/lumencraft-web/src/lib.rs", web_rs, &mut hits);
+        scan_file("apps/curvebook-web/src/lib.rs", web_rs, &mut hits);
 
         assert_eq!(
             hits,
             vec![
                 BrandHit { path: String::from(".github/ISSUE_TEMPLATE/numerical_result.yml"), line: 6, brand: "prism" },
                 BrandHit { path: String::from(".github/ISSUE_TEMPLATE/numerical_result.yml"), line: 6, brand: "originpro" },
-                BrandHit { path: String::from("apps/lumencraft-web/index.html"), line: 6, brand: "prism" },
-                BrandHit { path: String::from("apps/lumencraft-web/src/lib.rs"), line: 5, brand: "prism" },
+                BrandHit { path: String::from("apps/curvebook-web/index.html"), line: 6, brand: "prism" },
+                BrandHit { path: String::from("apps/curvebook-web/src/lib.rs"), line: 5, brand: "prism" },
             ]
         );
     }
@@ -2821,11 +2821,11 @@ serde = "1"
         let mut hits = Vec::new();
         let ui_rs = r#"
 pub fn dialog_strings() {
-    let ok_brand = "LumenCraft";
-    let ok_slug = "lumencraft";
+    let ok_brand = "CurveBook";
+    let ok_slug = "curvebook";
     let ok_art = "approved-seven-pane";
-    let ok_win95 = "lumencraft-win95-2508";
-    let ok_filter = "Import (*.lumencraft, *.pzfx, *.prism)";
+    let ok_win95 = "curvebook-win95-2508";
+    let ok_filter = "Import (*.curvebook, *.pzfx, *.prism)";
     let _ = (ok_brand, ok_slug, ok_art, ok_win95, ok_filter);
 
     let bad_bare = "prism";
@@ -2846,13 +2846,13 @@ pub fn detect_ext(ext: Option<&str>) -> &'static str {
     }
 }
 pub fn add_filters(dialog: DummyDialog) {
-    dialog.add_filter("Supported files", &["lumencraft", "pzfx", "prism"]);
+    dialog.add_filter("Supported files", &["curvebook", "pzfx", "prism"]);
 }
 pub fn status_line() -> &'static str {
     "prism"
 }
 "#;
-        scan_file("apps/lumencraft-web/src/lib.rs", app_rs, &mut hits);
+        scan_file("apps/curvebook-web/src/lib.rs", app_rs, &mut hits);
 
         assert_eq!(
             hits,
@@ -2862,7 +2862,7 @@ pub fn status_line() -> &'static str {
                 BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 11, brand: "prism" },
                 BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 12, brand: "graphpad" },
                 BrandHit { path: String::from("crates/ui-egui/src/dialogs_canvas.rs"), line: 14, brand: "prism" },
-                BrandHit { path: String::from("apps/lumencraft-web/src/lib.rs"), line: 12, brand: "prism" },
+                BrandHit { path: String::from("apps/curvebook-web/src/lib.rs"), line: 12, brand: "prism" },
             ]
         );
     }
@@ -2872,8 +2872,8 @@ pub fn status_line() -> &'static str {
         assert_eq!(check_i18n_catalog(), Vec::new());
 
         let entries = [
-            ("menu.file.open", "en", "LumenCraft Project"),
-            ("dialog.open.file_filter", "de", "Data files (*.lumencraft, *.pzfx, *.prism)"),
+            ("menu.file.open", "en", "CurveBook Project"),
+            ("dialog.open.file_filter", "de", "Data files (*.curvebook, *.pzfx, *.prism)"),
             ("menu.help.about", "fr", "Built for GraphPad users"),
             ("cmd.table.importPrism", "ja", "Prism からインポート"),
             ("toolbar.export", "ar", "Export prism archive"),
@@ -2896,7 +2896,7 @@ pub fn status_line() -> &'static str {
     #[test]
     fn checks_text_runs_and_labeled_text_runs() {
         let runs = [
-            "LumenCraft 1.0",
+            "CurveBook 1.0",
             "approved-seven-pane",
             "Import .pzfx / .prism archive",
             "Welcome to prism",
@@ -2914,12 +2914,12 @@ pub fn status_line() -> &'static str {
         );
 
         assert_eq!(
-            check_text_runs_strict("window_labels", ["LumenCraft", "Import .prism archive"]),
+            check_text_runs_strict("window_labels", ["CurveBook", "Import .prism archive"]),
             vec![BrandHit { path: String::from("window_labels"), line: 2, brand: "prism" }]
         );
 
         let labeled =
-            [("node#1", "LumenCraft Canvas"), ("node#2", "File formats: *.pzfx, *.prism"), ("node#3", "Open in OriginPro"), ("node#4", "prism mode")];
+            [("node#1", "CurveBook Canvas"), ("node#2", "File formats: *.pzfx, *.prism"), ("node#3", "Open in OriginPro"), ("node#4", "prism mode")];
         assert_eq!(
             check_labeled_text_runs(labeled),
             vec![
@@ -2931,7 +2931,7 @@ pub fn status_line() -> &'static str {
 
     #[test]
     fn checks_export_and_window_metadata() {
-        let clean_svg = r#"<svg><title>LumenCraft Chart</title><desc>Dose curve</desc><metadata>LumenCraft</metadata><text>Group A</text></svg>"#;
+        let clean_svg = r#"<svg><title>CurveBook Chart</title><desc>Dose curve</desc><metadata>CurveBook</metadata><text>Group A</text></svg>"#;
         assert_eq!(check_svg_metadata("clean.svg", clean_svg), Vec::new());
 
         let dirty_svg =
@@ -2946,7 +2946,7 @@ pub fn status_line() -> &'static str {
             ]
         );
 
-        let clean_pdf = b"%PDF-1.4\n1 0 obj\n<< /Title (LumenCraft) /Creator (LumenCraft) /Producer (LumenCraft) >>\nendobj\n";
+        let clean_pdf = b"%PDF-1.4\n1 0 obj\n<< /Title (CurveBook) /Creator (CurveBook) /Producer (CurveBook) >>\nendobj\n";
         assert_eq!(check_pdf_metadata("clean.pdf", clean_pdf), Vec::new());
 
         // UTF-16BE BOM + "GraphPad" = FEFF 0047 0072 0061 0070 0068 0050 0061 0064
@@ -2960,7 +2960,7 @@ pub fn status_line() -> &'static str {
             ]
         );
 
-        let clean_html = "<!doctype html>\n<html>\n<head><title>LumenCraft</title><meta name=\"generator\" content=\"LumenCraft\"></head>\n<body><input accept=\".lcf,.prism,.pzfx\"></body>\n</html>";
+        let clean_html = "<!doctype html>\n<html>\n<head><title>CurveBook</title><meta name=\"generator\" content=\"CurveBook\"></head>\n<body><input accept=\".curvebook,.cbtemplate,.prism,.pzfx\"></body>\n</html>";
         assert_eq!(check_html_metadata("clean.html", clean_html), Vec::new());
 
         let dirty_html = "<html>\n<head><title>Prism</title><meta name=\"author\" content=\"OriginLab\"></head>\n<body aria-label=\"GraphPad workspace\"></body>\n</html>";
@@ -2973,9 +2973,9 @@ pub fn status_line() -> &'static str {
             ]
         );
 
-        let clean_manifest = r#"{"app":"LumenCraft","schema_version":1,"title":"Dose-Response Study"}"#;
+        let clean_manifest = r#"{"app":"CurveBook","schema_version":1,"title":"Dose-Response Study"}"#;
         assert_eq!(check_manifest_metadata("manifest.json", clean_manifest), Vec::new());
-        let dirty_manifest = r#"{"app":"LumenCraft","format":".prism","generator":"Prism","vendor":"GraphPad"}"#;
+        let dirty_manifest = r#"{"app":"CurveBook","format":".prism","generator":"Prism","vendor":"GraphPad"}"#;
         assert_eq!(
             check_manifest_metadata("manifest.json", dirty_manifest),
             vec![
@@ -2985,9 +2985,9 @@ pub fn status_line() -> &'static str {
             ]
         );
 
-        assert_eq!(check_window_title("desktop_host", "LumenCraft — Study 1"), Vec::new());
+        assert_eq!(check_window_title("desktop_host", "CurveBook — Study 1"), Vec::new());
         assert_eq!(
-            check_window_title("desktop_host", "LumenCraft (prism)"),
+            check_window_title("desktop_host", "CurveBook (prism)"),
             vec![BrandHit { path: String::from("desktop_host"), line: 1, brand: "prism" }]
         );
     }

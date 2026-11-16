@@ -2,20 +2,20 @@
 //! axis segments, plus Diagnostic plots (`NormalQqPlot`, `Volcano`, `BlandAltman`, `ResidualPlot`)
 //! consuming live `ResultSheet` / `ResultTabKind` outputs.
 
-use lumencraft_chart::compile_graph;
-use lumencraft_chart::scales::{AxisRenderOptions, compute_additional_ticks, render_axes_and_frame, render_graph_chrome, resolve_axes_and_ticks};
-use lumencraft_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
-use lumencraft_doc::{
+use curvebook_chart::compile_graph;
+use curvebook_chart::scales::{AxisRenderOptions, compute_additional_ticks, render_axes_and_frame, render_graph_chrome, resolve_axes_and_ticks};
+use curvebook_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
+use curvebook_doc::{
     AdditionalTick, AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BlandAltmanSpec, Cell, ColumnDesignHint,
     ColumnTable, DataSheet, DescriptiveSpec, DiagnosticPlotKind, GraphKind, GraphSheet, GroupedTable, LogitDomain, MultipleRowTestsSpec,
     MultiplicityMethod, MultiplicitySpec, NonlinearFitSpec, ProjectDocument, ResultCell, ResultSheet, ResultTab, ResultTabKind, SheetId, SizePt,
     SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_fit::execute_analysis as execute_fit_analysis;
-use lumencraft_palette::{LineDashStyle, Rgba8};
-use lumencraft_stats::column::run_descriptive_analysis;
-use lumencraft_stats::two_group::{run_bland_altman_analysis, run_multiple_row_t_tests_analysis};
-use lumencraft_text::LocaleNumberPolicy;
+use curvebook_fit::execute_analysis as execute_fit_analysis;
+use curvebook_palette::{LineDashStyle, Rgba8};
+use curvebook_stats::column::run_descriptive_analysis;
+use curvebook_stats::two_group::{run_bland_altman_analysis, run_multiple_row_t_tests_analysis};
+use curvebook_text::LocaleNumberPolicy;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 type LineSeg = ((f64, f64), (f64, f64), LineDashStyle);
@@ -118,7 +118,7 @@ fn additional_ticks_map_across_all_scales_broken_segments_and_gridlines() -> Tes
     ];
 
     let mut s_probe = ChartScene::new("probe", "Probe", 400.0, 280.0, None);
-    s_probe.plot_rect_pt = lumencraft_chart::scales::compute_plot_rect(SizePt::new(400.0, 280.0), &gs.spec, &opts);
+    s_probe.plot_rect_pt = curvebook_chart::scales::compute_plot_rect(SizePt::new(400.0, 280.0), &gs.spec, &opts);
     let axes = resolve_axes_and_ticks(&gs.spec, &mut s_probe, &opts);
     let resolved_x = compute_additional_ticks(&axes.x_axis, &gs.spec.x_axis.additional_ticks, gs.spec.x_axis.tick_format, &policy);
     assert_eq!(resolved_x.len(), 3, "only 5, 75, 800 lie inside active segments; got {resolved_x:?}");
@@ -241,7 +241,7 @@ fn additional_ticks_map_across_all_scales_broken_segments_and_gridlines() -> Tes
         spec.y_axis.segments[0].max = Some(100.0);
 
         let mut sc = ChartScene::new("scale-case", "Scale Case", 360.0, 260.0, None);
-        sc.plot_rect_pt = lumencraft_chart::scales::compute_plot_rect(SizePt::new(360.0, 260.0), &spec, &opts);
+        sc.plot_rect_pt = curvebook_chart::scales::compute_plot_rect(SizePt::new(360.0, 260.0), &spec, &opts);
         render_axes_and_frame(&spec, &doc, &mut sc, &opts);
         let sc_texts = plain_texts(&sc);
         for lbl in expected {

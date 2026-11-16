@@ -1,11 +1,11 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     AdditionalTick, AxisSegment, AxisSpec, AxisThreshold, Cell, CellValue, ColorChannelMapping, DataSheet, DocError, ErrorBarDirection,
     ErrorBarMetric, ErrorBarSpec, ExplicitErrorBounds, FloatingNote, GraphAnnotation, GraphSheet, GraphicalDataObject, GroupedTable,
     JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec,
     PointStyleOverride, RectPt, SeriesSpec, SheetId, SizeChannelMapping, SizePt, SubcolumnMode, SummarizedPoint, SummaryMeasure, SummaryPointError,
     TableArchetype,
 };
-use lumencraft_palette::{ColorRamp, ColorStop, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
+use curvebook_palette::{ColorRamp, ColorStop, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 
 #[test]
 fn r1_s05_07_reconstruct_rejects_impossible_moments_and_overflows() -> Result<(), SummaryPointError> {

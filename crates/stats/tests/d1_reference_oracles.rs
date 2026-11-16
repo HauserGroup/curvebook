@@ -1,8 +1,8 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-//! Decision D1 Numerical Verification Oracle Suite for `lumencraft-stats`.
+//! Decision D1 Numerical Verification Oracle Suite for `curvebook-stats`.
 //!
 //! Reference provenance (zero competitor suite fixtures or proprietary text):
-//! - **NIST StRD (`corpus/nist-strd` & `lumencraft-testkit`):** Univariate (`univ`, 9 files +
+//! - **NIST StRD (`corpus/nist-strd` & `curvebook-testkit`):** Univariate (`univ`, 9 files +
 //!   5 offline stiff benchmarks), One-Way ANOVA (`anova`, 11 files + offline stiff benchmarks),
 //!   and Linear Least-Squares (`lls`, 11 files + offline stiff benchmarks).
 //! - **Published analytical literature:** Royston (1995) AS R94 `n = 25` lognormal Shapiro-Wilk
@@ -13,61 +13,61 @@
 //! - **Open-source black-box statistical reference (`D1`):** Generated on `2026-11-13` using
 //!   `R version 4.5.2 (2025-10-31)` with base `stats 4.5.2`, `survival 3.8.3`, and `nlme 3.1.168`.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, ConfidenceLevel, ContingencyMethod, ContingencySpec, ContingencyTable,
     CoxTieMethod, DataSheet, DescriptiveSpec, FactorialAnovaSpec, GlmFamily, GlmSpec, GroupedTable, LinearRegressionSpec, MultipleVariablesTable,
     MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NestedTable, OneWayAnovaSpec, OneWayMethod, RepeatedMeasuresDesign,
     ResultCell, ResultTabKind, RocCiMethod, RocSpec, SubcolumnMode, SumOfSquaresType, SummarizedPoint, SurvivalAnalysisSpec, SurvivalObservation,
     SurvivalStatus, SurvivalTable, TableArchetype, TwoGroupSpec,
 };
-use lumencraft_math::DenseMatrix;
-use lumencraft_stats::anova::{
+use curvebook_math::DenseMatrix;
+use curvebook_stats::anova::{
     FactorialObservations, compute_anova_effect_sizes, fit_factorial_anova, fit_random_intercept_reml, fit_rm_two_way_anova, friedman_test,
     kruskal_wallis_test, nested_one_way_anova, ordinary_one_way_anova, ordinary_one_way_from_summary, rm_one_way_anova,
     unequal_variance_one_way_anova, variance_homogeneity_tests,
 };
-use lumencraft_stats::categorical::{
+use curvebook_stats::categorical::{
     KappaWeighting, analyze_2x2_ratios, analyze_contingency, baptista_pike_or_ci, clopper_pearson_ci, cochran_armitage_trend, cohens_kappa,
     fisher_exact_2x2, fisher_exact_rxc, fleiss_kappa, koopman_rr_ci, mcnemar_test, wilson_score_ci,
 };
-use lumencraft_stats::column::{
+use curvebook_stats::column::{
     anderson_darling, dagostino_pearson_k2, exact_binomial_median_ci, grubbs_outliers, lilliefors_ks, normality_battery, one_sample_t_test,
     one_sample_wilcoxon, rout_outliers, shapiro_wilk, summarize_column, summarize_pre_summarized_points,
 };
-use lumencraft_stats::multiplicity::{
+use curvebook_stats::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, adjust_benjamini_hochberg, adjust_benjamini_yekutieli, adjust_bonferroni, adjust_holm_bonferroni,
     adjust_holm_sidak, adjust_sidak, adjust_two_stage_bky, compare_dunn_ranks, compare_groups_with_procedure, linear_trend_test,
 };
-use lumencraft_stats::multivariate::{
+use curvebook_stats::multivariate::{
     LinkageMethod, correlation_matrix, hierarchical_clustering, kendall_tau_b, kmeans_pp, pca_analysis, pearson_correlation, spearman_correlation,
 };
-use lumencraft_stats::regression::{multiple_linear_regression, multiple_logistic_regression, multiple_poisson_regression};
-use lumencraft_stats::roc::{compare_roc_delong_paired, compare_roc_unpaired, roc_curve_analysis};
-use lumencraft_stats::survival::{
+use curvebook_stats::regression::{multiple_linear_regression, multiple_logistic_regression, multiple_poisson_regression};
+use curvebook_stats::roc::{compare_roc_delong_paired, compare_roc_unpaired, roc_curve_analysis};
+use curvebook_stats::survival::{
     CoxSubject, compare_survival_curves, cox_ph_regression, kaplan_meier_curve, log_rank_trend_test, two_cohort_hazard_ratio,
 };
-use lumencraft_stats::two_group::{
+use curvebook_stats::two_group::{
     bland_altman, f_test_variances, ks_two_sample, levene_variance_test, lognormal_unpaired_t_test, mann_whitney_u, multiple_row_t_tests,
     paired_t_test, ratio_paired_t_test, unpaired_t_test, welch_t_test, wilcoxon_matched_pairs,
 };
-use lumencraft_stats::{StatsError, run_analysis};
-use lumencraft_testkit::nist_strd::{
+use curvebook_stats::{StatsError, run_analysis};
+use curvebook_testkit::nist_strd::{
     all_offline_anova_benchmarks, all_offline_linear_regression_benchmarks, all_offline_univariate_benchmarks, corpus_available,
     default_nist_strd_dir, load_corpus_anova_all, load_corpus_linear_all, load_corpus_univariate_all,
 };
-use lumencraft_testkit::{assert_approx_eq, assert_lre_at_least, oracle_univariate_f64};
+use curvebook_testkit::{assert_approx_eq, assert_lre_at_least, oracle_univariate_f64};
 
 /// The cached NIST StRD corpus (`corpus/nist-strd`, gitignored, `cargo xtask corpus --fetch`), or
 /// `None` when it is absent so offline runs and CI still exercise the generated benchmarks.
-/// `LUMENCRAFT_REQUIRE_CORPUS=1` turns a missing corpus into a failure.
+/// `CURVEBOOK_REQUIRE_CORPUS=1` turns a missing corpus into a failure.
 fn require_corpus_dir() -> Option<std::path::PathBuf> {
     let dir = default_nist_strd_dir();
     if corpus_available(&dir) {
         return Some(dir);
     }
     assert!(
-        std::env::var_os("LUMENCRAFT_REQUIRE_CORPUS").is_none_or(|v| v != "1"),
-        "LUMENCRAFT_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}",
+        std::env::var_os("CURVEBOOK_REQUIRE_CORPUS").is_none_or(|v| v != "1"),
+        "CURVEBOOK_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}",
         dir.display()
     );
     None
@@ -77,7 +77,7 @@ fn conf_95() -> ConfidenceLevel {
     ConfidenceLevel::DEFAULT_95
 }
 
-fn scalar_val(sheet: &lumencraft_doc::ResultSheet, key: &str) -> f64 {
+fn scalar_val(sheet: &curvebook_doc::ResultSheet, key: &str) -> f64 {
     sheet.scalars.iter().find(|s| s.key == key).map(|s| s.value).unwrap_or_else(|| panic!("missing scalar `{key}`"))
 }
 
@@ -1287,7 +1287,7 @@ fn oracle_end_to_end_run_analysis_sheets() {
     assert_approx_eq(scalar_val(&res_t, "t"), 5.447_846_144_605_422, 1e-10, 1e-10, "sheet Student t");
     assert_approx_eq(scalar_val(&res_t, "PValue"), 0.000_201_493_168_147, 1e-10, 1e-10, "sheet Student p");
 
-    // Verify curve fitting returns documented IncompatibleTable inside lumencraft-stats
+    // Verify curve fitting returns documented IncompatibleTable inside curvebook-stats
     let sp_fit = AnalysisSpec::new("res-fit", "col-1", AnalysisKind::LinearRegression(LinearRegressionSpec::default())).unwrap();
     assert!(matches!(run_analysis(&s_col, &sp_fit), Err(StatsError::IncompatibleTable { .. })));
 

@@ -40,8 +40,8 @@ if (-not $haveCert -and -not $haveAzure) {
 }
 
 $script:SignTool = Find-SignTool
-$common = @('sign', '/v', '/fd', 'SHA256', '/td', 'SHA256', '/d', 'LumenCraft', '/du', 'https://github.com/lumencraft/lumencraft')
-$tmp = Join-Path ([IO.Path]::GetTempPath()) "lumencraft-sign-$([IO.Path]::GetRandomFileName())"
+$common = @('sign', '/v', '/fd', 'SHA256', '/td', 'SHA256', '/d', 'CurveBook', '/du', 'https://github.com/HauserGroup/curvebook')
+$tmp = Join-Path ([IO.Path]::GetTempPath()) "curvebook-sign-$([IO.Path]::GetRandomFileName())"
 New-Item -ItemType Directory -Path $tmp | Out-Null
 
 try {

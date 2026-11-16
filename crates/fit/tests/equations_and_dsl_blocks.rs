@@ -1,9 +1,9 @@
-use lumencraft_doc::{ConstantValue, HookSource, InfoSheet, ParameterRule, ParameterScope, SheetId};
-use lumencraft_fit::{
+use curvebook_doc::{ConstantValue, HookSource, InfoSheet, ParameterRule, ParameterScope, SheetId};
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, FitStatus, HookContext, NonlinearFitResult, ParametricModel, SolverConfig, fit_nonlinear,
     get_builtin_model, list_builtin_equations,
 };
-use lumencraft_math::dist::norm_cdf;
+use curvebook_math::dist::norm_cdf;
 
 fn series(label: &str, xs: Vec<f64>, ys: Vec<f64>) -> DatasetSeries {
     series_idx(0, label, xs, ys)

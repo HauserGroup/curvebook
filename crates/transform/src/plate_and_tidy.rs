@@ -1,14 +1,14 @@
-//! 96/384-well microplate mapping, `.lctemplate` JSON serialization, and tidy long-to-wide
+//! 96/384-well microplate mapping, `.cbtemplate` JSON serialization, and tidy long-to-wide
 //! pivot transformations (`QOL-2`).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::{self, Write as _};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, FloatingNote, GroupedTable, MultipleVariablesTable,
     RectPt, SubcolumnMode, TableArchetype, TableKind, XColumnMode, XyTable, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
-use lumencraft_math::sum::SummaryMoments;
+use curvebook_math::sum::SummaryMoments;
 use serde::de::{self, DeserializeSeed, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
 use serde::ser::{
     self, SerializeMap, SerializeSeq, SerializeStruct, SerializeStructVariant, SerializeTuple, SerializeTupleStruct, SerializeTupleVariant,
@@ -20,7 +20,7 @@ use crate::error::TransformError;
 use crate::import::validate_cell_budget;
 
 const MAX_PLATE_WELLS: usize = PlateGeometry::Wells384.well_count();
-const MAX_LCTEMPLATE_JSON_BYTES: usize = 4 * 1024 * 1024;
+const MAX_CBTEMPLATE_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 /// Standard SBS microplate grid geometries supported by `QOL-2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -97,7 +97,7 @@ pub enum PlateWellRole {
     Excluded,
 }
 
-/// Serializable 96/384-well plate layout template (`.lctemplate` JSON).
+/// Serializable 96/384-well plate layout template (`.cbtemplate` JSON).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlateMapTemplate {
     pub name: String,
@@ -204,17 +204,17 @@ impl PlateMapTemplate {
         Ok(())
     }
 
-    /// Serialize this template as `.lctemplate` UTF-8 JSON.
-    pub fn to_lctemplate_json(&self) -> Result<String, TransformError> {
+    /// Serialize this template as `.cbtemplate` UTF-8 JSON.
+    pub fn to_cbtemplate_json(&self) -> Result<String, TransformError> {
         json_codec::to_json_string(self)
             .map_err(|err| TransformError::InvalidInput { message: format!("failed to serialize plate template JSON: {err}") })
     }
 
-    /// Parse a `.lctemplate` JSON string back into a validated [`PlateMapTemplate`].
-    pub fn from_lctemplate_json(json: &str) -> Result<Self, TransformError> {
-        if json.len() > MAX_LCTEMPLATE_JSON_BYTES {
+    /// Parse a `.cbtemplate` JSON string back into a validated [`PlateMapTemplate`].
+    pub fn from_cbtemplate_json(json: &str) -> Result<Self, TransformError> {
+        if json.len() > MAX_CBTEMPLATE_JSON_BYTES {
             return Err(TransformError::InvalidInput {
-                message: format!("plate template JSON length ({} bytes) exceeds maximum {MAX_LCTEMPLATE_JSON_BYTES} bytes", json.len()),
+                message: format!("plate template JSON length ({} bytes) exceeds maximum {MAX_CBTEMPLATE_JSON_BYTES} bytes", json.len()),
             });
         }
         let parsed: Self = json_codec::from_json_str(json)
@@ -1253,7 +1253,7 @@ fn header_or(headers: &[String], col: Option<usize>, fallback: &str) -> String {
     col.and_then(|c| headers.get(c)).map(|s| s.trim()).filter(|s| !s.is_empty()).map_or_else(|| String::from(fallback), str::to_owned)
 }
 
-fn fill_y_cells_and_notes(data_sets: &mut [lumencraft_doc::DataSetColumn], placed: PlacedCellGrid) -> Vec<CellExclusionNote> {
+fn fill_y_cells_and_notes(data_sets: &mut [curvebook_doc::DataSetColumn], placed: PlacedCellGrid) -> Vec<CellExclusionNote> {
     let mut notes = Vec::new();
     for ((r, c, s), (cell, maybe_note)) in placed {
         if let Some(slot) = data_sets.get_mut(c).and_then(|d| d.cells.get_mut(r)).and_then(|row| row.get_mut(s)) {
@@ -1397,8 +1397,8 @@ fn make_sheet_id(prefix: &str, title: &str) -> String {
     if slug.is_empty() || slug == prefix { format!("{prefix}-sheet") } else { slug }
 }
 
-/// Minimal RFC-8259 JSON `serde` serializer and deserializer so `.lctemplate` round-trips work
-/// inside `lumencraft-transform` without extra crate dependencies.
+/// Minimal RFC-8259 JSON `serde` serializer and deserializer so `.cbtemplate` round-trips work
+/// inside `curvebook-transform` without extra crate dependencies.
 mod json_codec {
     use super::*;
 

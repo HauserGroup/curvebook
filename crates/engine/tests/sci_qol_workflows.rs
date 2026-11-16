@@ -3,12 +3,12 @@
 
 use std::path::PathBuf;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, ColumnDesignHint, ColumnTable, DataSheet, FigureCanvasPreset, GraphAnnotation, GraphicalDataObject, LayoutItem, LayoutSheet, LayoutSpec,
     PhysicalUnit, ProjectDocument, RectPt, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_engine::{CommandOutcome, Session};
-use lumencraft_palette::Rgba8;
+use curvebook_engine::{CommandOutcome, Session};
+use curvebook_palette::Rgba8;
 use serde_json::{Value, json};
 
 fn ok_cmd(session: &mut Session, id: &str, params: Value) -> CommandOutcome {
@@ -16,7 +16,7 @@ fn ok_cmd(session: &mut Session, id: &str, params: Value) -> CommandOutcome {
 }
 
 fn temp_test_path(name: &str) -> PathBuf {
-    std::env::temp_dir().join("lumencraft-sci-qol-tests").join(name)
+    std::env::temp_dir().join("curvebook-sci-qol-tests").join(name)
 }
 
 fn decode_base64(input: &str) -> Vec<u8> {
@@ -263,11 +263,11 @@ fn qol8_graph_canvas_presets_keep_typography_vs_proportional_and_undo_redo() {
         json!({
             "sheet_id": "g-col",
             "annotation": GraphAnnotation::Shape {
-                kind: lumencraft_doc::AnnotationShapeKind::Rectangle,
+                kind: curvebook_doc::AnnotationShapeKind::Rectangle,
                 bounds_pt: RectPt::new(100.0, 100.0, 200.0, 100.0),
                 stroke_color: Rgba8::BLACK,
                 stroke_width_pt: 0.4,
-                dash: lumencraft_palette::LineDashStyle::Solid,
+                dash: curvebook_palette::LineDashStyle::Solid,
                 fill_color: None
             }
         }),

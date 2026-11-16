@@ -14,27 +14,27 @@
 //!   (Rubin/Barnard-Rubin *t*/df/CI oracle verified in R 4.5.2 `pt`/`qt` 2026-11-13).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, ContingencyMethod, ContingencySpec, ContingencyTable, DataSheet,
     MultipleVariablesTable, MultivariateSpec, PassingBablokSpec, ResultCell, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, VariableRole,
     XyTable,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_stats::categorical::{BarnardOrdering, barnard_exact_2x2, barnard_exact_2x2_with_ordering, fisher_exact_2x2};
-use lumencraft_stats::multivariate::{MultipleImputationConfig, mice_predictive_mean_matching, rubin_pool_estimates};
-use lumencraft_stats::regression::{execute_passing_bablok, passing_bablok_regression};
-use lumencraft_stats::{StatsError, run_analysis};
-use lumencraft_testkit::assert_approx_eq;
+use curvebook_math::ConfidenceLevel;
+use curvebook_stats::categorical::{BarnardOrdering, barnard_exact_2x2, barnard_exact_2x2_with_ordering, fisher_exact_2x2};
+use curvebook_stats::multivariate::{MultipleImputationConfig, mice_predictive_mean_matching, rubin_pool_estimates};
+use curvebook_stats::regression::{execute_passing_bablok, passing_bablok_regression};
+use curvebook_stats::{StatsError, run_analysis};
+use curvebook_testkit::assert_approx_eq;
 
 fn spec_for(id: &str, src: &str, kind: AnalysisKind) -> AnalysisSpec {
     AnalysisSpec::new(SheetId::new(id), SheetId::new(src), kind).unwrap()
 }
 
-fn scalar_by_key(sheet: &lumencraft_doc::ResultSheet, key: &str) -> f64 {
+fn scalar_by_key(sheet: &curvebook_doc::ResultSheet, key: &str) -> f64 {
     sheet.scalars.iter().find(|s| s.key == key).map(|s| s.value).unwrap_or_else(|| panic!("missing scalar {key}"))
 }
 
-fn tab_by_kind(sheet: &lumencraft_doc::ResultSheet, kind: ResultTabKind) -> &lumencraft_doc::ResultTab {
+fn tab_by_kind(sheet: &curvebook_doc::ResultSheet, kind: ResultTabKind) -> &curvebook_doc::ResultTab {
     sheet.tabs.iter().find(|t| t.kind == kind).unwrap_or_else(|| panic!("missing tab {kind:?}"))
 }
 

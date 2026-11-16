@@ -16,8 +16,8 @@ Slices `S01`–`S13` follow the crate layering. `X1` and `X2` cross crates on pu
 | `S08` | Chart compiler and scales | `crates/chart` | 12k | [graphing-and-layouts.md](../graphing-and-layouts.md) |
 | `S09` | Text, raster, SVG and PDF output | `crates/text`, `crates/render`, `crates/svg`, `crates/pdf` | 9k | [graphing-and-layouts.md](../graphing-and-layouts.md) |
 | `S10` | UI shell | `crates/ui-egui` | 12k | [ui-parity.md](../ui-parity.md), [control-protocol.md](../control-protocol.md) |
-| `S11` | Interactive tools and app entry points | `crates/tools`, `apps/lumencraft`, `apps/lumencraft-web` | 3.5k | [ui-parity.md](../ui-parity.md) |
-| `S12` | Headless CLI and MCP server | `apps/lumencraft-cli`, `crates/mcp` | 4.5k | [scripting-and-automation.md](../scripting-and-automation.md), [mcp.md](../mcp.md) |
+| `S11` | Interactive tools and app entry points | `crates/tools`, `apps/curvebook`, `apps/curvebook-web` | 3.5k | [ui-parity.md](../ui-parity.md) |
+| `S12` | Headless CLI and MCP server | `apps/curvebook-cli`, `crates/mcp` | 4.5k | [scripting-and-automation.md](../scripting-and-automation.md), [mcp.md](../mcp.md) |
 | `S13` | Build guards and test kit | `xtask`, `crates/testkit` | 5.5k | [development.md](../development.md) |
 | `X1` | Untrusted input, end to end | Entry points in `S10`–`S12` through `S07` to file I/O and allocation in `S06`/`S09` | — | [control-protocol.md](../control-protocol.md), [mcp.md](../mcp.md) |
 | `X2` | Data correctness, end to end | `S05` cells through `S04`/`S02`/`S03` results to `S06` save and reopen | — | [data-tables-and-transforms.md](../data-tables-and-transforms.md) |
@@ -36,7 +36,7 @@ These questions come first. The general checklist in [`README.md`](README.md#wha
 
 **`S05` Document model.** Invariants that constructors enforce but deserialization or mutation skips: row, column and subcolumn caps, ID uniqueness, link targets, and exclusion masks staying aligned with cells after resizing.
 
-**`S06` File formats.** ZIP, XML, CSV, PZFX, `.prism` and `.lumencraft` readers given hostile input: size and count caps, offset arithmetic, depth limits, and the cell budget on every table kind. Also check that save and reopen is lossless, including non-finite values and empty tables. `recovery.rs` is new: review it if it exists at your claimed base.
+**`S06` File formats.** ZIP, XML, CSV, PZFX, `.prism` and `.curvebook` readers given hostile input: size and count caps, offset arithmetic, depth limits, and the cell budget on every table kind. Also check that save and reopen is lossless, including non-finite values and empty tables. `recovery.rs` is new: review it if it exists at your claimed base.
 
 **`S07` Engine.** Does every command validate its parameters before mutating? Does it roll back cleanly on error? Is the DAG recalculation atomic? Look for filesystem reads and writes driven by parameters, and for errors swallowed while reading files. Undo memory growth is a Known defect. Look for anything else of that kind.
 

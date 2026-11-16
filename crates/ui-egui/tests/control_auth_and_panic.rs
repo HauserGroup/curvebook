@@ -2,7 +2,7 @@
 
 use std::io::{BufReader, Cursor};
 
-use lumencraft_ui_egui::{
+use curvebook_ui_egui::{
     CONTROL_HTTP_FORBIDDEN_RESPONSE, UiApp, handle_control_line, is_http_request_line, serve_control_stream_with_quit_and_token,
 };
 use serde_json::{Value, json};

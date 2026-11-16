@@ -5,8 +5,8 @@
 //! across both in-process [`GuiSessionHost`](crate::tools::GuiSessionHost) bindings and
 //! loopback `--control` desktop windows without reversing the `L6` layer boundary.
 
-use lumencraft_doc::ErrorCode;
-use lumencraft_engine::cmd::Effects;
+use curvebook_doc::ErrorCode;
+use curvebook_engine::cmd::Effects;
 use serde_json::{Map, Value, json};
 
 use crate::errors::{self, StructuredErrorPayload};
@@ -59,7 +59,7 @@ fn def_ui_inspect() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_inspect"),
         description: String::from(
-            "Inspect the visible LumenCraft GUI tree (shell, navigator, menus/toolbars, active modal/wizard with enabled/disabled_reason predicates, visible grid cells, and canvas hit targets).",
+            "Inspect the visible CurveBook GUI tree (shell, navigator, menus/toolbars, active modal/wizard with enabled/disabled_reason predicates, visible grid cells, and canvas hit targets).",
         ),
         input_schema: json!({
             "type": "object",
@@ -84,7 +84,7 @@ fn def_ui_screenshot() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_screenshot"),
         description: String::from(
-            "Capture a deterministic PNG screenshot of the live LumenCraft UI, returning inline PNG image content alongside pixel/DPI metadata.",
+            "Capture a deterministic PNG screenshot of the live CurveBook UI, returning inline PNG image content alongside pixel/DPI metadata.",
         ),
         input_schema: json!({
             "type": "object",

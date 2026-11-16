@@ -1,11 +1,11 @@
 //! Normalization (`0%..100%` / `0..1`) and baseline removal (`TransformAnalysisSpec::Normalize`,
 //! `TransformAnalysisSpec::RemoveBaseline`, `docs/data-tables-and-transforms.md` §5.2–§5.3).
 
-use lumencraft_doc::{
+use curvebook_doc::{
     BaselineOperation, Cell, CellValue, DataSetColumn, DataSheet, NormalizeAnchor, ResultCell, ResultScalarEntry, SheetId, SubcolumnMode,
     TableArchetype,
 };
-use lumencraft_math::sum;
+use curvebook_math::sum;
 
 use crate::error::TransformError;
 use crate::ops::{TransformContext, TransformOutput, build_summary_tab};

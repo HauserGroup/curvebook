@@ -1,4 +1,4 @@
-//! `cargo xtask telemetry`: enforce LumenCraft's zero-telemetry, zero-cloud, and local-only
+//! `cargo xtask telemetry`: enforce CurveBook's zero-telemetry, zero-cloud, and local-only
 //! networking policy across manifests, Rust sources, workflows, and web security headers (`R0.6`).
 
 use std::collections::BTreeMap;
@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use crate::licenses::parse_cargo_lock;
 
-const ALLOWED_LOOPBACK_NET_FILES: &[&str] = &["crates/ui-egui/src/control_io.rs", "crates/mcp/src/tools.rs", "apps/lumencraft/src/main.rs"];
+const ALLOWED_LOOPBACK_NET_FILES: &[&str] = &["crates/ui-egui/src/control_io.rs", "crates/mcp/src/tools.rs", "apps/curvebook/src/main.rs"];
 
 const ALWAYS_BANNED_NET_PATTERNS: &[&str] = &[
     "UdpSocket",
@@ -606,11 +606,11 @@ fn collect_non_test_src_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>)
     Ok(())
 }
 
-/// Check 3: scan `.github/workflows/*.yml`, `apps/lumencraft-web/**`, and `packaging/**` for
+/// Check 3: scan `.github/workflows/*.yml`, `apps/curvebook-web/**`, and `packaging/**` for
 /// telemetry/analytics/cloud-service markers and external URLs / browser network APIs across web assets.
 fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryViolation>) -> Result<usize, String> {
     let mut targets = collect_workflow_files(root)?;
-    for dir_name in ["apps/lumencraft-web", "packaging"] {
+    for dir_name in ["apps/curvebook-web", "packaging"] {
         let dir = root.join(dir_name);
         if dir.is_dir() {
             collect_all_files_under(root, &dir, &mut targets)?;
@@ -634,13 +634,13 @@ fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryV
         }
     }
 
-    let index_rel = "apps/lumencraft-web/index.html";
+    let index_rel = "apps/curvebook-web/index.html";
     if !root.join(index_rel).is_file() {
         violations.push(TelemetryViolation {
             check: 3,
             path: index_rel.to_owned(),
             line: 1,
-            detail: String::from("missing apps/lumencraft-web/index.html"),
+            detail: String::from("missing apps/curvebook-web/index.html"),
         });
     }
     for (rel, text) in web_asset_files {
@@ -651,7 +651,7 @@ fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryV
 }
 
 fn is_web_asset_file(rel: &str) -> bool {
-    let in_web = rel.starts_with("apps/lumencraft-web/") || rel.starts_with("packaging/web/");
+    let in_web = rel.starts_with("apps/curvebook-web/") || rel.starts_with("packaging/web/");
     if !in_web {
         return false;
     }
@@ -1847,7 +1847,7 @@ mod tests {
         fn new(label: &str) -> Self {
             let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
             let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
-            let path = std::env::temp_dir().join(format!("lumencraft-telemetry-{label}-{}-{nanos}-{seq}", std::process::id()));
+            let path = std::env::temp_dir().join(format!("curvebook-telemetry-{label}-{}-{nanos}-{seq}", std::process::id()));
             std::fs::create_dir_all(&path).unwrap();
             Self { path }
         }
@@ -1869,7 +1869,7 @@ mod tests {
         let dir = TempDirGuard::new(label);
         dir.write("Cargo.toml", "[workspace]\nmembers = [\"crates/core\", \"crates/mcp\"]\n");
         dir.write("Cargo.lock", "[[package]]\nname = \"serde\"\nversion = \"1.0.229\"\n");
-        dir.write("crates/core/Cargo.toml", "[package]\nname = \"lumencraft-core\"\nversion = \"0.1.0\"\n[dependencies]\nserde = \"1\"\n");
+        dir.write("crates/core/Cargo.toml", "[package]\nname = \"curvebook-core\"\nversion = \"0.1.0\"\n[dependencies]\nserde = \"1\"\n");
         dir.write(
             "crates/core/src/lib.rs",
             "// TcpStream in comment is fine\npub fn label() -> &'static str { \"std::net::TcpStream\" }\n#[cfg(test)]\nmod tests {\n    use std::net::UdpSocket;\n}\n",
@@ -1878,7 +1878,7 @@ mod tests {
             "crates/mcp/src/tools.rs",
             "use std::net::{SocketAddr, TcpStream};\npub fn addr(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }\n",
         );
-        dir.write("apps/lumencraft-web/index.html", "<!DOCTYPE html><html><body><svg xmlns=\"http://www.w3.org/2000/svg\"></svg></body></html>\n");
+        dir.write("apps/curvebook-web/index.html", "<!DOCTYPE html><html><body><svg xmlns=\"http://www.w3.org/2000/svg\"></svg></body></html>\n");
         dir.write(
             ".github/workflows/ci.yml",
             "name: CI\non: [push]\npermissions:\n  contents: read\njobs:\n  gate:\n    runs-on: ubuntu-latest\n    steps:\n      - run: cargo test\n",
@@ -1934,7 +1934,7 @@ mod tests {
         let dir = create_clean_fixture("check1-manifest");
         dir.write(
             "crates/core/Cargo.toml",
-            "[package]\nname = \"lumencraft-core\"\n[dependencies]\nclient = { package = \"reqwest\", version = \"0.12\" }\n",
+            "[package]\nname = \"curvebook-core\"\n[dependencies]\nclient = { package = \"reqwest\", version = \"0.12\" }\n",
         );
         let (_, hits) = run_checks(&dir.path).unwrap();
         assert!(hits.iter().any(|v| v.check == 1 && v.detail.contains("reqwest")), "{hits:?}");
@@ -1953,7 +1953,7 @@ mod tests {
         assert!(hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/net_bad.rs"), "{hits:?}");
 
         let dir2 = create_clean_fixture("check2-udp");
-        dir2.write("apps/lumencraft/src/main.rs", "use std::net::UdpSocket;\npub fn f() { let _ = UdpSocket::bind(\"127.0.0.1:0\"); }\n");
+        dir2.write("apps/curvebook/src/main.rs", "use std::net::UdpSocket;\npub fn f() { let _ = UdpSocket::bind(\"127.0.0.1:0\"); }\n");
         let (_, hits2) = run_checks(&dir2.path).unwrap();
         assert!(hits2.iter().any(|v| v.check == 2 && v.detail.contains("UdpSocket")), "{hits2:?}");
 
@@ -1978,7 +1978,7 @@ mod tests {
 
         let dir2 = create_clean_fixture("check3-web");
         dir2.write(
-            "apps/lumencraft-web/index.html",
+            "apps/curvebook-web/index.html",
             "<html><script>window.fetch('https://example.com/p'); navigator.sendBeacon('/t');</script></html>\n",
         );
         let (_, hits2) = run_checks(&dir2.path).unwrap();
@@ -2074,18 +2074,18 @@ mod tests {
         dir_net.write("crates/core/src/js.rs", "pub fn f() { let _ = js_sys::Reflect::get(&w, &\"fetch\".into()); }\n");
         dir_net.write(
             "crates/core/Cargo.toml",
-            "[package]\nname = \"lumencraft-core\"\n[dependencies]\nweb-sys = { version = \"0.3\", features = [\"Window\", \"WebSocket\"] }\n",
+            "[package]\nname = \"curvebook-core\"\n[dependencies]\nweb-sys = { version = \"0.3\", features = [\"Window\", \"WebSocket\"] }\n",
         );
-        dir_net.write("apps/lumencraft-web/extra.js", "fetch ('https://bad.example/p'); const ws = new WebSocket('//bad.example/s');\n");
+        dir_net.write("apps/curvebook-web/extra.js", "fetch ('https://bad.example/p'); const ws = new WebSocket('//bad.example/s');\n");
         let (_, net_hits) = run_checks(&dir_net.path).unwrap();
         assert!(net_hits.iter().any(|v| v.check == 1 && v.detail.contains("WebSocket")), "{net_hits:?}");
         assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/mcp/src/tools.rs" && v.detail.contains("loopback")), "{net_hits:?}");
         assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/text/build.rs"), "{net_hits:?}");
         assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/prod_cfg.rs" && v.detail.contains("core::net")), "{net_hits:?}");
         assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/js.rs" && v.detail.contains("fetch")), "{net_hits:?}");
-        assert!(net_hits.iter().any(|v| v.check == 3 && v.path == "apps/lumencraft-web/extra.js" && v.detail.contains("fetch")), "{net_hits:?}");
+        assert!(net_hits.iter().any(|v| v.check == 3 && v.path == "apps/curvebook-web/extra.js" && v.detail.contains("fetch")), "{net_hits:?}");
         assert!(
-            net_hits.iter().any(|v| v.check == 3 && v.path == "apps/lumencraft-web/extra.js" && v.detail.contains("//bad.example")),
+            net_hits.iter().any(|v| v.check == 3 && v.path == "apps/curvebook-web/extra.js" && v.detail.contains("//bad.example")),
             "{net_hits:?}"
         );
     }

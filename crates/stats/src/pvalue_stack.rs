@@ -30,11 +30,11 @@
 
 use std::collections::HashSet;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisSpec, Cell, CellValue, ChecklistStatus, DataSheet, PValueStackMethod, PValueStackSpec, ResultCell, ResultSheet, ResultTabKind,
     TableArchetype, VariableRole,
 };
-use lumencraft_math::MathError;
+use curvebook_math::MathError;
 use serde::{Deserialize, Serialize};
 
 use crate::common::{

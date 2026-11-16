@@ -7,7 +7,7 @@
 
 use std::collections::BTreeMap;
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 use serde::{Deserialize, Serialize};
 
 use super::a11y::{AccessibilityMeta, FocusScope, WidgetRole};

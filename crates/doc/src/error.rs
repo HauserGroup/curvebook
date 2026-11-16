@@ -1,9 +1,9 @@
 //! Bounded dimension limits, confidence-level validation, and structured error types for
-//! `lumencraft-doc` (`docs/data-tables-and-transforms.md` §1.3 & §2.1).
+//! `curvebook-doc` (`docs/data-tables-and-transforms.md` §1.3 & §2.1).
 
 use std::fmt;
 
-pub use lumencraft_math::ConfidenceLevel;
+pub use curvebook_math::ConfidenceLevel;
 
 use crate::ids::SheetId;
 use crate::layout::LayoutItemLimitError;
@@ -31,7 +31,7 @@ pub const MAX_SHEET_CELLS: usize = 30_000_000;
 /// Hard ceiling on cumulative allocated [`crate::Cell`] slots across all data sheets in one project.
 pub const MAX_PROJECT_CELLS: usize = 50_000_000;
 
-/// Current `.lumencraft` document schema version.
+/// Current `.curvebook` document schema version.
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Validate a title string against [`MAX_TITLE_BYTES`].
@@ -137,7 +137,7 @@ impl fmt::Display for SummaryPointError {
 
 impl std::error::Error for SummaryPointError {}
 
-/// Structured validation and mutation errors produced by `lumencraft-doc`.
+/// Structured validation and mutation errors produced by `curvebook-doc`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocError {
     EmptyIdentifier,

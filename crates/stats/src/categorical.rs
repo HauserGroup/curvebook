@@ -6,16 +6,16 @@
 //! Koopman score RR CI, Newcombe risk-difference CI, Cohen's kappa (unweighted/weighted),
 //! Fleiss' kappa, and phi / Cramér's `V` with exact noncentral chi-square CIs.
 
-pub use lumencraft_doc::KappaWeighting;
-use lumencraft_doc::{
+pub use curvebook_doc::KappaWeighting;
+use curvebook_doc::{
     AnalysisSpec, ChecklistStatus, ContingencyMethod, ContingencySpec, DataSheet, PValueFormat, ResultCell, ResultSheet, ResultTabKind,
     SubcolumnMode, TableArchetype,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, noncentral_chi2_ci, norm_sf, norm_two_sided_isf};
-use lumencraft_math::rng::DeterministicRng;
-use lumencraft_math::roots::{RootOptions, brent_root};
-use lumencraft_math::special::{ln_choose, ln_factorial, reg_beta_inv};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{chi2_sf, noncentral_chi2_ci, norm_sf, norm_two_sided_isf};
+use curvebook_math::rng::DeterministicRng;
+use curvebook_math::roots::{RootOptions, brent_root};
+use curvebook_math::special::{ln_choose, ln_factorial, reg_beta_inv};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
@@ -296,7 +296,7 @@ fn checked_table_margins(counts: &[Vec<u64>]) -> Result<(Vec<u64>, Vec<u64>, u64
     let mut total = 0_u64;
     for row in counts {
         if row.len() != n_cols {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n_cols, actual: row.len() }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n_cols, actual: row.len() }));
         }
         let r_sum = checked_sum_u64(row, "contingency_row_total")?;
         r_sums.push(r_sum);
@@ -893,7 +893,7 @@ pub fn cochran_armitage_trend(counts: &[Vec<u64>]) -> Result<(f64, f64), StatsEr
     }
     for row in counts {
         if row.len() != n_cols {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n_cols, actual: row.len() }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n_cols, actual: row.len() }));
         }
     }
     // Orient as k ordered levels x 2 outcomes.
@@ -2336,7 +2336,7 @@ fn run_exact_binomial_analysis(
 }
 
 fn run_parts_of_whole_gof(
-    pow: &lumencraft_doc::PartsOfWholeTable,
+    pow: &curvebook_doc::PartsOfWholeTable,
     cont_spec: &ContingencySpec,
     out: &mut ResultSheet,
     p_fmt: PValueFormat,
@@ -2458,8 +2458,8 @@ fn run_parts_of_whole_gof(
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_math::ConfidenceLevel;
-    use lumencraft_math::dist::norm_two_sided_isf;
+    use curvebook_math::ConfidenceLevel;
+    use curvebook_math::dist::norm_two_sided_isf;
 
     use super::{
         StatsError, baptista_pike_or_ci, checked_table_margins, fisher_exact_2x2, koopman_chi2_score, koopman_rr_ci, koopman_solve_lower,
@@ -2703,7 +2703,7 @@ mod tests {
         ));
         assert!(matches!(
             checked_table_margins(&[vec![1, 2], vec![3]]),
-            Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: 2, actual: 1 }))
+            Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: 2, actual: 1 }))
         ));
     }
 

@@ -1,12 +1,12 @@
-//! Standalone 4-stage Power & Sample Size Wizard backed by `lumencraft-stats` (`R8.7`, `WF-15`).
+//! Standalone 4-stage Power & Sample Size Wizard backed by `curvebook-stats` (`R8.7`, `WF-15`).
 //!
 //! Provides complete state, validation, Stage 4 curve hover inspection, sensitivity table
 //! projection, live sidebar recalculation, and GUI `Create` command emission producing both a
-//! Power & Sample Size [`lumencraft_doc::ResultSheet`] and linked [`lumencraft_doc::GraphSheet`].
+//! Power & Sample Size [`curvebook_doc::ResultSheet`] and linked [`curvebook_doc::GraphSheet`].
 
-use lumencraft_doc::SheetId;
-use lumencraft_engine::{EngineError, ErrorCode, Session};
-use lumencraft_stats::power::{
+use curvebook_doc::SheetId;
+use curvebook_engine::{EngineError, ErrorCode, Session};
+use curvebook_stats::power::{
     CorrelationPowerMethod, OneSidedDirection, PowerAnalysisRequest, PowerAnalysisResult, PowerCurvePoint, PowerEffectSpec, PowerSolveTarget,
     PowerTestFamily, SensitivityCell, TailMode, TwoProportionsMethod, cohens_d_from_means, cohens_dz_from_correlation, cohens_f_from_means,
     paired_sd_from_correlation, solve_power,
@@ -290,7 +290,7 @@ impl PowerWizardState {
             }
             (PowerTestFamily::OneWayAnova, PowerEffectInputMode::MeansAndSd) => cohens_f_from_means(&self.group_means, self.sd).ok(),
             (_, PowerEffectInputMode::MeansAndSd) => cohens_d_from_means(self.mean_diff, 0.0, self.sd).ok(),
-            (PowerTestFamily::TwoProportions, PowerEffectInputMode::Proportions) => lumencraft_stats::power::cohens_h(self.p1, self.p2).ok(),
+            (PowerTestFamily::TwoProportions, PowerEffectInputMode::Proportions) => curvebook_stats::power::cohens_h(self.p1, self.p2).ok(),
             (PowerTestFamily::SimpleLinearRegression, PowerEffectInputMode::RegressionRSquared) => {
                 (self.r_squared.is_finite() && self.r_squared >= 0.0 && self.r_squared < 1.0).then_some(self.r_squared / (1.0 - self.r_squared))
             }
@@ -691,7 +691,7 @@ impl PowerWizardState {
     /// command executor so batched UI transactions can record each engine step.
     pub fn execute_create_with(
         &mut self,
-        exec: &mut dyn FnMut(&str, Value) -> Result<lumencraft_engine::CommandOutcome, EngineError>,
+        exec: &mut dyn FnMut(&str, Value) -> Result<curvebook_engine::CommandOutcome, EngineError>,
     ) -> Result<PowerWizardCreatedSheets, EngineError> {
         self.recalculate().map_err(|msg| EngineError::with_code(ErrorCode::BadInput, msg))?;
         let res = self.result.clone().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "power calculation produced no result"))?;
@@ -776,7 +776,7 @@ impl PowerWizardState {
 }
 
 fn populate_power_info_sheet(
-    exec: &mut dyn FnMut(&str, Value) -> Result<lumencraft_engine::CommandOutcome, EngineError>,
+    exec: &mut dyn FnMut(&str, Value) -> Result<curvebook_engine::CommandOutcome, EngineError>,
     info_id: &str,
     res: &PowerAnalysisResult,
 ) -> Result<(), EngineError> {
@@ -807,7 +807,7 @@ fn populate_power_info_sheet(
 }
 
 fn configure_power_graph_sheet(
-    exec: &mut dyn FnMut(&str, Value) -> Result<lumencraft_engine::CommandOutcome, EngineError>,
+    exec: &mut dyn FnMut(&str, Value) -> Result<curvebook_engine::CommandOutcome, EngineError>,
     graph_id: &str,
     res: &PowerAnalysisResult,
 ) -> Result<(), EngineError> {
@@ -902,7 +902,7 @@ const fn solve_target_label(target: PowerSolveTarget) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumencraft_doc::ProjectDocument;
+    use curvebook_doc::ProjectDocument;
 
     #[test]
     fn all_eight_families_solve_and_produce_curve_and_sensitivity() {
@@ -983,17 +983,17 @@ mod tests {
     #[test]
     fn create_emits_linked_result_and_graph_under_gui_only() {
         let mut doc = ProjectDocument::new("Power Plan").expect("doc");
-        let ds = lumencraft_doc::DataSheet::new(
+        let ds = curvebook_doc::DataSheet::new(
             SheetId::try_new("data-base").expect("id"),
             "Base",
-            lumencraft_doc::TableArchetype::Column(
-                lumencraft_doc::ColumnTable::new(lumencraft_doc::ColumnDesignHint::UnpairedReplicates, 2, 4).expect("col"),
+            curvebook_doc::TableArchetype::Column(
+                curvebook_doc::ColumnTable::new(curvebook_doc::ColumnDesignHint::UnpairedReplicates, 2, 4).expect("col"),
             ),
         )
         .expect("ds");
         doc.add_data_sheet(ds).expect("add");
         let mut session = Session::from_document(doc);
-        session.set_gui_only(lumencraft_engine::GuiOnlyPolicy::Strict);
+        session.set_gui_only(curvebook_engine::GuiOnlyPolicy::Strict);
 
         let mut wizard = PowerWizardState::default();
         let created = wizard.execute_create(&mut session).expect("gui create succeeds even in gui_only");

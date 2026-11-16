@@ -77,7 +77,7 @@ pub fn specs() -> &'static [CommandSpec] {
 mod tests {
     use std::sync::atomic::AtomicBool;
 
-    use lumencraft_doc::{ErrorCode, ProjectDocument};
+    use curvebook_doc::{ErrorCode, ProjectDocument};
     use serde_json::json;
 
     use crate::Session;

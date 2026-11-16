@@ -1,11 +1,11 @@
 //! Permanent Round 2 (`R0.19`) Slice `S04` (`crates/transform`) audit regression tests.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, ColumnDesignHint, ColumnTable, DataSheet, DocError, GroupedTable, MAX_TITLE_BYTES, MultipleVariablesTable, SequenceProgression, SheetId,
     SubcolumnMode, TableArchetype, TableKind, VariableRole, VariableSource, XColumnMode, XyTable,
 };
-use lumencraft_transform::import::MAX_IMPORT_CELLS;
-use lumencraft_transform::{
+use curvebook_transform::import::MAX_IMPORT_CELLS;
+use curvebook_transform::{
     AllocationScheme, DistributionSimulationConfig, GroupAllocationWeight, PlateGeometry, PlateMapTemplate, PlateWellRole, RowSampleConfig,
     SelectRule, SimulatedColumnSpec, SimulatedDistribution, SubjectRandomizationConfig, TargetArchetypeKind, TidyColumnMapping, TransformContext,
     TransformError, convert_datasheet_archetype, evaluate_calculated_variables, map_plate_to_datasheet, pivot_tidy_long_to_datasheet,
@@ -502,8 +502,8 @@ fn r2_s04_08_title_length_validation_across_plate_tidy_and_convert() {
     let raw_over_role =
         PlateMapTemplate { name: String::from("Valid"), geometry: PlateGeometry::Wells96, x_title: String::from("Conc"), wells: bad_wells };
     assert!(matches!(raw_over_role.validate(), Err(TransformError::Doc(DocError::TitleTooLong { .. }))));
-    let json_over_role = raw_over_role.to_lctemplate_json().unwrap();
-    assert!(matches!(PlateMapTemplate::from_lctemplate_json(&json_over_role), Err(TransformError::Doc(DocError::TitleTooLong { .. }))));
+    let json_over_role = raw_over_role.to_cbtemplate_json().unwrap();
+    assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&json_over_role), Err(TransformError::Doc(DocError::TitleTooLong { .. }))));
 
     let ok_tpl = PlateMapTemplate::new("Valid", PlateGeometry::Wells96, "Conc").unwrap();
     let values = vec![Some(1.0); 96];
@@ -728,7 +728,7 @@ fn r2_s04_12_execute_select_clears_calculated_role_on_snapshot() {
     let sheet = DataSheet::new("mv_calc", "Calculated MV", TableArchetype::MultipleVariables(mv)).unwrap();
 
     let subset_ctx = TransformContext { selected_data_sets: vec![1, 2], ..TransformContext::default() };
-    let subset_out = lumencraft_transform::execute_select(&sheet, &[], TableKind::MultipleVariables, &subset_ctx).unwrap();
+    let subset_out = curvebook_transform::execute_select(&sheet, &[], TableKind::MultipleVariables, &subset_ctx).unwrap();
     let TableArchetype::MultipleVariables(sub_mv) = &subset_out.data_sheet.archetype else {
         panic!("expected MultipleVariables");
     };
@@ -744,7 +744,7 @@ fn r2_s04_12_execute_select_clears_calculated_role_on_snapshot() {
     assert_eq!(sub_mv.variables[1].cells[1].active_text(), Some("High"));
 
     let full_ctx = TransformContext::default();
-    let full_out = lumencraft_transform::execute_select(&sheet, &[SelectRule::RowRange(0, 1)], TableKind::MultipleVariables, &full_ctx).unwrap();
+    let full_out = curvebook_transform::execute_select(&sheet, &[SelectRule::RowRange(0, 1)], TableKind::MultipleVariables, &full_ctx).unwrap();
     let TableArchetype::MultipleVariables(full_mv) = &full_out.data_sheet.archetype else {
         panic!("expected MultipleVariables");
     };
@@ -814,15 +814,15 @@ fn r2_s04_13_plate_arm_collision_and_template_empty_name_json_guards() {
     let mut raw_tpl = PlateMapTemplate::new("Valid", PlateGeometry::Wells96, "Conc").unwrap();
     raw_tpl.name = String::from("  ");
     assert!(matches!(raw_tpl.validate(), Err(TransformError::InvalidSpec { .. })));
-    let bad_json = raw_tpl.to_lctemplate_json().unwrap();
-    assert!(matches!(PlateMapTemplate::from_lctemplate_json(&bad_json), Err(TransformError::InvalidSpec { .. })));
+    let bad_json = raw_tpl.to_cbtemplate_json().unwrap();
+    assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&bad_json), Err(TransformError::InvalidSpec { .. })));
 
     let huge_wells_json = format!(
         "{{\"name\":\"Huge\",\"geometry\":\"Wells96\",\"x_title\":\"X\",\"wells\":[{}]}}",
         std::iter::repeat_n("\"Blank\"", 385).collect::<Vec<_>>().join(",")
     );
-    assert!(PlateMapTemplate::from_lctemplate_json(&huge_wells_json).is_err());
+    assert!(PlateMapTemplate::from_cbtemplate_json(&huge_wells_json).is_err());
 
     let huge_json = " ".repeat((4 * 1024 * 1024) + 1);
-    assert!(matches!(PlateMapTemplate::from_lctemplate_json(&huge_json), Err(TransformError::InvalidInput { .. })));
+    assert!(matches!(PlateMapTemplate::from_cbtemplate_json(&huge_json), Err(TransformError::InvalidInput { .. })));
 }

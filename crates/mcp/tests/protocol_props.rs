@@ -3,7 +3,7 @@ use std::io::Cursor;
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lumencraft_mcp::{
+use curvebook_mcp::{
     ERR_INVALID_PARAMS, ERR_INVALID_REQUEST, ERR_METHOD_NOT_FOUND, ERR_PARSE_ERROR, MAX_BATCH_LEN, McpServerState, call_tool, list_tools, serve,
     serve_with_max_bytes,
 };
@@ -17,7 +17,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(prefix: &str) -> Self {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("lumencraft-{prefix}-{}-{nanos}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("curvebook-{prefix}-{}-{nanos}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         Self { path: dir }
     }

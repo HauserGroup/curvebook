@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Build lumencraft as an OCI container layout and optionally push it to GHCR.
+# Build curvebook as an OCI container layout and optionally push it to GHCR.
 #
 # Usage: packaging/linux/flatpak-oci.sh [--push] [TARBALL]
 set -euo pipefail
@@ -25,14 +25,16 @@ case "$ARCH" in
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
 
-BASENAME="lumencraft-$VERSION-linux-$ARCH"
+BASENAME="curvebook-$VERSION-linux-$ARCH"
 OUT_OCI="$DIST/$BASENAME-oci"
 
 echo "==> Building Flatpak OCI layout for $BASENAME"
 "$HERE/flatpak-bundle.sh" --oci --no-test "${TARBALL:-}"
 [[ -d "$OUT_OCI" ]] || { echo "error: $OUT_OCI layout not generated" >&2; exit 1; }
 
-REGISTRY="${REGISTRY:-ghcr.io/${GITHUB_REPOSITORY:-lumencraft/lumencraft}}"
+DEFAULT_REPO="${GITHUB_REPOSITORY:-HauserGroup/curvebook}"
+DEFAULT_REPO_LC="$(printf '%s' "$DEFAULT_REPO" | tr '[:upper:]' '[:lower:]')"
+REGISTRY="${REGISTRY:-ghcr.io/$DEFAULT_REPO_LC}"
 TAG="${TAG:-$VERSION-$ARCH}"
 echo "==> OCI layout ready at $OUT_OCI (Target: $REGISTRY:$TAG)"
 
@@ -40,7 +42,7 @@ if [[ "$PUSH" = 1 ]]; then
   command -v skopeo >/dev/null || { echo "error: skopeo is required to push OCI images" >&2; exit 1; }
   AUTH_ARGS=()
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-    AUTH_ARGS=(--dest-creds "${GITHUB_ACTOR:-lumencraft}:$GITHUB_TOKEN")
+    AUTH_ARGS=(--dest-creds "${GITHUB_ACTOR:-curvebook}:$GITHUB_TOKEN")
   fi
   skopeo copy --format oci "${AUTH_ARGS[@]}" "oci:$OUT_OCI" "docker://$REGISTRY:$TAG"
   skopeo copy --format oci "${AUTH_ARGS[@]}" "oci:$OUT_OCI" "docker://$REGISTRY:stable-$ARCH"

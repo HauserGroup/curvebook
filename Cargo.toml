@@ -1,39 +1,39 @@
 [workspace]
 resolver = "3"
 members = ["crates/*", "crates/platform", "apps/*", "xtask"]
-default-members = ["crates/*", "apps/lumencraft", "apps/lumencraft-cli", "xtask"]
+default-members = ["crates/*", "apps/curvebook", "apps/curvebook-cli", "xtask"]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.99.1"
-repository = "https://github.com/lumencraft/lumencraft"
+repository = "https://github.com/HauserGroup/curvebook"
 publish = false
 
 [workspace.dependencies]
 # internal workspace crates (L0 -> L6 + testkit)
-lumencraft-math = { path = "crates/math" }
-lumencraft-palette = { path = "crates/palette" }
-lumencraft-platform = { path = "crates/platform" }
-lumencraft-doc = { path = "crates/doc" }
-lumencraft-transform = { path = "crates/transform" }
-lumencraft-stats = { path = "crates/stats" }
-lumencraft-fit = { path = "crates/fit" }
+curvebook-math = { path = "crates/math" }
+curvebook-palette = { path = "crates/palette" }
+curvebook-platform = { path = "crates/platform" }
+curvebook-doc = { path = "crates/doc" }
+curvebook-transform = { path = "crates/transform" }
+curvebook-stats = { path = "crates/stats" }
+curvebook-fit = { path = "crates/fit" }
 # Without its default `bundled-fonts`: a crate that wants the fonts asks for them (the apps and
-# lumencraft-testkit through the engine's `bundled-fonts`), so a library crate never forces them on
+# curvebook-testkit through the engine's `bundled-fonts`), so a library crate never forces them on
 # an embedder that supplies its fonts at run time.
-lumencraft-text = { path = "crates/text", default-features = false }
-lumencraft-chart = { path = "crates/chart" }
-lumencraft-render = { path = "crates/render" }
-lumencraft-format = { path = "crates/format" }
-lumencraft-svg = { path = "crates/svg" }
-lumencraft-pdf = { path = "crates/pdf" }
-lumencraft-tools = { path = "crates/tools" }
-lumencraft-engine = { path = "crates/engine", default-features = false }
-lumencraft-ui-egui = { path = "crates/ui-egui" }
-lumencraft-mcp = { path = "crates/mcp" }
-lumencraft-testkit = { path = "crates/testkit" }
+curvebook-text = { path = "crates/text", default-features = false }
+curvebook-chart = { path = "crates/chart" }
+curvebook-render = { path = "crates/render" }
+curvebook-format = { path = "crates/format" }
+curvebook-svg = { path = "crates/svg" }
+curvebook-pdf = { path = "crates/pdf" }
+curvebook-tools = { path = "crates/tools" }
+curvebook-engine = { path = "crates/engine", default-features = false }
+curvebook-ui-egui = { path = "crates/ui-egui" }
+curvebook-mcp = { path = "crates/mcp" }
+curvebook-testkit = { path = "crates/testkit" }
 
 # serialization, archive compression & property testing (MIT OR Apache-2.0)
 crc32fast = "1.5"
@@ -58,7 +58,7 @@ cognitive_complexity = "deny"
 too_many_arguments = "deny"
 wildcard_imports = "deny"
 dbg_macro = "warn"
-# LumenCraft never crashes: shipped code returns `Result`/`Option` instead of panicking (see
+# CurveBook never crashes: shipped code returns `Result`/`Option` instead of panicking (see
 # AGENTS.md › Non-negotiables). Tests may unwrap (clippy.toml).
 unwrap_used = "deny"
 expect_used = "deny"

@@ -2,8 +2,8 @@
 //! machines, Command Palette (`Cmd+K`) fuzzy matching, and deterministic software frame
 //! compositing (`RasterImage` / PNG) for headless screenshots and visual regression tests.
 
-use lumencraft_chart::{ChartScene, PreflightIssue};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PreflightIssue};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
     CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, CldOrdering, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint,
     CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind,
@@ -17,12 +17,12 @@ use lumencraft_doc::{
     ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype,
     TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
 };
-use lumencraft_engine::{EngineError, Session, cmd};
-use lumencraft_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
-use lumencraft_render::TiffCompression;
+use curvebook_engine::{EngineError, Session, cmd};
+use curvebook_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
+use curvebook_render::TiffCompression;
 use std::collections::BTreeMap;
 
-use lumencraft_tools::{CanvasToolState, GridCellCoord, PanZoomInertiaState, PhysicalUnit, ToolCommandIntent};
+use curvebook_tools::{CanvasToolState, GridCellCoord, PanZoomInertiaState, PhysicalUnit, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -428,7 +428,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
                 (String::from("LogEC50"), -6.0),
                 (String::from("HillSlope"), 1.0),
             ],
-            noise: lumencraft_doc::SimulationNoise::Gaussian { sd: 4.0 },
+            noise: curvebook_doc::SimulationNoise::Gaussian { sd: 4.0 },
         })),
         "transform.random_sample" => Some(AnalysisKind::Transform(TransformAnalysisSpec::RandomSample {
             seed: 1,
@@ -476,8 +476,8 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         "stats.corr_matrix" => Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
         "stats.clustering" => Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: Some(3),
-            distance: lumencraft_doc::ClusterDistance::default(),
-            linkage: lumencraft_doc::ClusterLinkage::default(),
+            distance: curvebook_doc::ClusterDistance::default(),
+            linkage: curvebook_doc::ClusterLinkage::default(),
             k_sweep_max: None,
         })),
         "stats.multiple_row_t_tests" => Some(AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec::default())),
@@ -1536,7 +1536,7 @@ fn collect_variable_candidates(sheet: &DataSheet) -> Vec<VariableCandidate> {
         _ => (0..sheet.archetype.column_count())
             .map(|col_index| VariableCandidate {
                 col_index,
-                title: format!("Col {}", lumencraft_doc::default_column_label(col_index)),
+                title: format!("Col {}", curvebook_doc::default_column_label(col_index)),
                 role: VariableRole::Continuous,
                 role_inferred: true,
                 selected: true,
@@ -1926,7 +1926,7 @@ impl EditAnalysisParametersState {
             "mcnemar" | "edit.contingency.mcnemar" => Some(ContingencyMethod::McNemarPaired),
             "cochran_armitage" | "edit.contingency.cochran_armitage" => Some(ContingencyMethod::CochranArmitageTrend),
             "cohen_kappa" | "edit.contingency.cohen_kappa" => {
-                Some(ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Unweighted })
+                Some(ContingencyMethod::CohenKappa { weighting: curvebook_doc::KappaWeighting::Unweighted })
             }
             "fleiss_kappa" | "edit.contingency.fleiss_kappa" => Some(ContingencyMethod::FleissKappa),
             "exact_binomial" | "edit.contingency.exact_binomial" => Some(ContingencyMethod::ExactBinomial),
@@ -1989,7 +1989,7 @@ impl EditAnalysisParametersState {
         Ok(true)
     }
 
-    fn update_contingency_spec(&mut self, mutate: impl FnOnce(&mut lumencraft_doc::ContingencySpec)) {
+    fn update_contingency_spec(&mut self, mutate: impl FnOnce(&mut curvebook_doc::ContingencySpec)) {
         if let Some(spec) = &mut self.draft
             && let AnalysisKind::Contingency(mut c) = spec.kind.clone()
         {
@@ -2551,9 +2551,9 @@ fn parse_contingency_method_name(raw: &str) -> Result<ContingencyMethod, String>
         "barnard" | "barnardexact" => Ok(ContingencyMethod::BarnardExact),
         "cochranarmitage" | "cochranarmitagetrend" | "trend" => Ok(ContingencyMethod::CochranArmitageTrend),
         "mcnemar" | "mcnemarpaired" => Ok(ContingencyMethod::McNemarPaired),
-        "cohenkappa" | "kappa" | "unweightedkappa" => Ok(ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Unweighted }),
-        "linearkappa" => Ok(ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Linear }),
-        "quadratickappa" => Ok(ContingencyMethod::CohenKappa { weighting: lumencraft_doc::KappaWeighting::Quadratic }),
+        "cohenkappa" | "kappa" | "unweightedkappa" => Ok(ContingencyMethod::CohenKappa { weighting: curvebook_doc::KappaWeighting::Unweighted }),
+        "linearkappa" => Ok(ContingencyMethod::CohenKappa { weighting: curvebook_doc::KappaWeighting::Linear }),
+        "quadratickappa" => Ok(ContingencyMethod::CohenKappa { weighting: curvebook_doc::KappaWeighting::Quadratic }),
         "fleisskappa" => Ok(ContingencyMethod::FleissKappa),
         "exactbinomial" | "binomial" => Ok(ContingencyMethod::ExactBinomial),
         _ => Err(format!("unknown contingency test method `{raw}`")),
@@ -3120,7 +3120,7 @@ fn collect_column_title_hooks(doc: &ProjectDocument, out: &mut Vec<AvailableHook
             };
             if title.trim().parse::<f64>().ok().is_some_and(f64::is_finite) {
                 out.push(AvailableHookOption {
-                    label: format!("Column Title [{}]: Col {} = {title}", ds.title, lumencraft_doc::default_column_label(col_idx)),
+                    label: format!("Column Title [{}]: Col {} = {title}", ds.title, curvebook_doc::default_column_label(col_idx)),
                     preview_value: title.to_owned(),
                     template_token: format!("{{{{col:{}:{col_idx}}}}}", ds.id.as_str()),
                     source: HookSource::ColumnTitleValue { data_sheet_id: ds.id.clone(), data_set_index: col_idx },
@@ -5811,7 +5811,7 @@ impl SplitWorkspaceState {
     }
 }
 
-pub use lumencraft_doc::RemediationKind;
+pub use curvebook_doc::RemediationKind;
 
 /// Non-prescriptive assumption diagnostic strip displayed above a [`ResultSheet`] (`QOL-7`).
 ///
@@ -6127,7 +6127,7 @@ pub struct CanvasDialogState {
     #[serde(default)]
     pub ruler_unit: PhysicalUnit,
     #[serde(default)]
-    pub journal_preset: Option<lumencraft_tools::JournalWidthPreset>,
+    pub journal_preset: Option<curvebook_tools::JournalWidthPreset>,
     #[serde(default)]
     pub pan_zoom: PanZoomInertiaState,
     #[serde(default)]
@@ -6345,7 +6345,7 @@ impl CanvasDialogState {
 
     /// Refresh [`Self::preflight_issues`] directly from a compiled [`ChartScene`] (`QOL-8`).
     pub fn refresh_preflight(&mut self, scene: &ChartScene) {
-        self.preflight_issues = lumencraft_chart::preflight_check_scene(scene);
+        self.preflight_issues = curvebook_chart::preflight_check_scene(scene);
     }
 
     /// Synchronize inspector/dialog state when navigating to `sheet_id`.
@@ -6583,7 +6583,7 @@ pub use crate::compositor::{WorkspaceFrameLayout, WorkspacePixelRect, compute_wo
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, ConstantValue, DataSheet, GraphSheet, InfoConstant, InfoSheet,
         JournalWidthPreset, LayoutSheet, LayoutSpec, NonlinearFitSpec, OneWayAnovaSpec, PValueFormat, ProjectDocument, RemediationKind, ResultCell,
         ResultSheet, ResultStatus, TableArchetype, TwoGroupSpec, XyTable,
@@ -6625,7 +6625,7 @@ mod tests {
 
     #[test]
     fn format_axes_enforces_one_to_three_segments() {
-        let xy = XyTable::new(lumencraft_doc::SubcolumnMode::Single, 1, 4).expect("xy");
+        let xy = XyTable::new(curvebook_doc::SubcolumnMode::Single, 1, 4).expect("xy");
         let ds = DataSheet::new("d1", "Assay", TableArchetype::Xy(xy)).expect("ds");
         let gs = GraphSheet::new_uninitialized_for_data("g1", &ds).expect("gs");
         let mut axes = FormatAxesState::default();
@@ -6640,7 +6640,7 @@ mod tests {
     #[test]
     fn duplicate_prompt_and_checklist_counts_work() {
         let mut doc = ProjectDocument::default();
-        let xy = XyTable::new(lumencraft_doc::SubcolumnMode::Single, 1, 4).expect("xy");
+        let xy = XyTable::new(curvebook_doc::SubcolumnMode::Single, 1, 4).expect("xy");
         let ds = DataSheet::new("d1", "Assay", TableArchetype::Xy(xy)).expect("ds");
         doc.add_data_sheet(ds).expect("add data");
 
@@ -6677,7 +6677,7 @@ mod tests {
     #[test]
     fn constant_hook_picker_emits_engine_compatible_commands_by_target() {
         let mut doc = ProjectDocument::default();
-        let xy = XyTable::new(lumencraft_doc::SubcolumnMode::Single, 1, 4).expect("xy");
+        let xy = XyTable::new(curvebook_doc::SubcolumnMode::Single, 1, 4).expect("xy");
         let ds = DataSheet::new("d1", "Assay", TableArchetype::Xy(xy)).expect("ds");
         doc.add_data_sheet(ds).expect("add data");
         let mut info = InfoSheet::new_preseeded("info-1", "Protocol").expect("info");
@@ -6718,10 +6718,10 @@ mod tests {
         let tg_spec = AnalysisSpec::new("res-t", "d1", AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())).expect("spec");
         let mut res = ResultSheet::new(tg_spec).expect("result");
         res.status = ResultStatus::UpToDate;
-        res.tabs.push(lumencraft_doc::ResultTab {
+        res.tabs.push(curvebook_doc::ResultTab {
             id: String::from("diagnostics"),
             title: String::from("Diagnostics"),
-            kind: lumencraft_doc::ResultTabKind::Diagnostics,
+            kind: curvebook_doc::ResultTabKind::Diagnostics,
             column_headers: vec![String::from("Check")],
             row_labels: Vec::new(),
             rows: Vec::new(),

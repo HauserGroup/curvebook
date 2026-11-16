@@ -5,11 +5,11 @@ use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
-use lumencraft_chart::{ChartScene, compile_graph, compile_layout};
-use lumencraft_doc::{ErrorCode, ProjectDocument, SheetId};
-use lumencraft_pdf::{MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_page_refs};
-use lumencraft_render::{MAX_RASTER_PIXELS, RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
-use lumencraft_svg::{SvgExportOptions, render_svg};
+use curvebook_chart::{ChartScene, compile_graph, compile_layout};
+use curvebook_doc::{ErrorCode, ProjectDocument, SheetId};
+use curvebook_pdf::{MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_page_refs};
+use curvebook_render::{MAX_RASTER_PIXELS, RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
+use curvebook_svg::{SvgExportOptions, render_svg};
 use serde::Deserialize;
 use serde::de::{Deserializer, Error as DeError, Visitor};
 use serde_json::{Value, json};
@@ -185,7 +185,7 @@ pub(super) fn write_atomic_output_file(path: &str, bytes: &[u8]) -> Result<(), E
                     .with_details(json!({ "path": path, "parent": parent.display().to_string() }))
             })?;
         }
-        lumencraft_platform::fs::write_atomic(target, bytes)?;
+        curvebook_platform::fs::write_atomic(target, bytes)?;
         Ok(())
     }
     #[cfg(target_arch = "wasm32")]
@@ -630,7 +630,7 @@ fn resolve_raster_target(
         return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
             .with_details(json!({ "pointer": if w == 0 { "/width_px" } else { "/height_px" } })));
     }
-    let max_dim = lumencraft_render::rasterizer::MAX_RASTER_DIM_PX;
+    let max_dim = curvebook_render::rasterizer::MAX_RASTER_DIM_PX;
     if w > max_dim || h > max_dim {
         return Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("raster dimensions {w}x{h} exceed maximum {max_dim}x{max_dim}"))
             .with_remediation("Reduce `width_px`, `height_px`, or `dpi`.")
@@ -781,7 +781,7 @@ fn run_emf_with_kind(ctx: &mut Ctx<'_>, command_id: &str, is_layout: bool, raw: 
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         Cell, DataSheet, ErrorCode, GraphKind, GraphSheet, LayoutSheet, LayoutSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable,
     };
     use serde_json::json;
@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn export_commands_handle_float_dpi_and_atomic_file_writes() {
         let mut session = Session::from_document(doc_with_graph_and_layout());
-        let out_dir = std::env::temp_dir().join(format!("lc_exp_test_{}", std::process::id()));
+        let out_dir = std::env::temp_dir().join(format!("cb_exp_test_{}", std::process::id()));
         let svg_path = out_dir.join("nested").join("fig.svg");
         let png_res = session
             .execute("export.png", json!({ "sheet_id": "g1", "width_px": 64, "height_px": 48, "dpi": 300.0 }))

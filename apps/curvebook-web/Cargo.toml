@@ -1,0 +1,27 @@
+[package]
+name = "curvebook-web"
+description = "CurveBook in the browser (WebAssembly runner, WebGPU with WebGL2 fallback)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "curvebook-web"
+path = "src/main.rs"
+
+[dependencies]
+curvebook-engine = { workspace = true, features = ["bundled-fonts"] }
+curvebook-ui-egui = { workspace = true }
+curvebook-format = { workspace = true }
+curvebook-text = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = { workspace = true }
+wasm-bindgen = { workspace = true }
+web-sys = { workspace = true }

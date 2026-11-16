@@ -1,14 +1,14 @@
-//! Regression tests for `R1-S12-03` in `lumencraft-mcp`:
+//! Regression tests for `R1-S12-03` in `curvebook-mcp`:
 //! MCP `save_file {}` without `path` refuses with `InvalidParams` and never overwrites a previously
-//! opened `.lumencraft` archive after `project.new` or any other wholesale non-path replacement.
+//! opened `.curvebook` archive after `project.new` or any other wholesale non-path replacement.
 
 use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::ProjectDocument;
-use lumencraft_engine::Session;
-use lumencraft_mcp::{McpServerState, ToolCallError, call_tool};
+use curvebook_doc::ProjectDocument;
+use curvebook_engine::Session;
+use curvebook_mcp::{McpServerState, ToolCallError, call_tool};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -22,7 +22,7 @@ struct TempDir {
 impl TempDir {
     fn new(label: &str) -> Result<Self, String> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("lc-mcp-s3b-{label}-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-mcp-s3b-{label}-{}-{seq}", std::process::id()));
         fs::create_dir_all(&dir).map_err(|err| format!("create temp dir `{}`: {err}", dir.display()))?;
         Ok(Self { path: dir })
     }
@@ -48,11 +48,11 @@ fn call_json_str(state: &mut McpServerState, tool: &str, args: Value) -> Result<
 #[test]
 fn r1_s12_03_mcp_save_without_path_refuses_after_project_new_and_preserves_old_file() -> TestResult {
     let dir = TempDir::new("save-guard")?;
-    let path_a = dir.path.join("A.lumencraft");
-    let path_b = dir.path.join("B.lumencraft");
-    let path_tpl = dir.path.join("tpl.lctemplate");
+    let path_a = dir.path.join("A.curvebook");
+    let path_b = dir.path.join("B.curvebook");
+    let path_tpl = dir.path.join("tpl.cbtemplate");
 
-    // Seed A.lumencraft, B.lumencraft, and tpl.lctemplate on disk.
+    // Seed A.curvebook, B.curvebook, and tpl.cbtemplate on disk.
     let mut seed = Session::from_document(ProjectDocument::new("Original A").map_err(|e| e.to_string())?);
     seed.execute("sheet.createData", json!({ "sheet_id": "d1", "title": "Sentinel Data", "rows": 2, "cols": 1 })).map_err(|e| e.to_string())?;
     seed.execute("table.setCells", json!({ "sheet_id": "d1", "edits": [{ "row": 0, "col": 0, "value": 123.456 }] })).map_err(|e| e.to_string())?;
@@ -63,11 +63,11 @@ fn r1_s12_03_mcp_save_without_path_refuses_after_project_new_and_preserves_old_f
     let mut seed_b = Session::from_document(ProjectDocument::new("Original B").map_err(|e| e.to_string())?);
     seed_b.execute("project.save", json!({ "path": path_b.to_string_lossy() })).map_err(|e| e.to_string())?;
 
-    let original_a_bytes = fs::read(&path_a).map_err(|e| format!("read A.lumencraft: {e}"))?;
+    let original_a_bytes = fs::read(&path_a).map_err(|e| format!("read A.curvebook: {e}"))?;
 
     let mut state = McpServerState::new();
 
-    // 1. Open A.lumencraft -> project.new -> save_file {} must refuse and preserve A.lumencraft.
+    // 1. Open A.curvebook -> project.new -> save_file {} must refuse and preserve A.curvebook.
     call_json_str(&mut state, "open_file", json!({ "path": path_a.to_string_lossy() }))?;
     let inspected_before = call_json_str(&mut state, "doc_inspect", json!({}))?;
     if inspected_before.get("file_path").and_then(Value::as_str).is_none() {
@@ -84,12 +84,12 @@ fn r1_s12_03_mcp_save_without_path_refuses_after_project_new_and_preserves_old_f
         Err(ToolCallError::InvalidParams(_)) => {}
         other => return Err(format!("expected InvalidParams from save_file after project.new, got {other:?}")),
     }
-    let after_new_bytes = fs::read(&path_a).map_err(|e| format!("re-read A.lumencraft: {e}"))?;
+    let after_new_bytes = fs::read(&path_a).map_err(|e| format!("re-read A.curvebook: {e}"))?;
     if after_new_bytes != original_a_bytes {
-        return Err(String::from("A.lumencraft was modified after project.new + save_file {}"));
+        return Err(String::from("A.curvebook was modified after project.new + save_file {}"));
     }
 
-    // 2. Open A.lumencraft -> command_batch ending in project.new -> save_file {} refuses.
+    // 2. Open A.curvebook -> command_batch ending in project.new -> save_file {} refuses.
     call_json_str(&mut state, "open_file", json!({ "path": path_a.to_string_lossy() }))?;
     call_json_str(
         &mut state,
@@ -106,10 +106,10 @@ fn r1_s12_03_mcp_save_without_path_refuses_after_project_new_and_preserves_old_f
         other => return Err(format!("expected InvalidParams from save_file after batch project.new, got {other:?}")),
     }
     if fs::read(&path_a).map_err(|e| e.to_string())? != original_a_bytes {
-        return Err(String::from("A.lumencraft was modified after command_batch project.new"));
+        return Err(String::from("A.curvebook was modified after command_batch project.new"));
     }
 
-    // 3. Open A.lumencraft -> project.instantiateTemplate / project.open(bytes_base64) -> save_file {} refuses.
+    // 3. Open A.curvebook -> project.instantiateTemplate / project.open(bytes_base64) -> save_file {} refuses.
     for (cmd_id, params) in [
         ("project.instantiateTemplate", json!({ "path": path_tpl.to_string_lossy(), "title": "Tpl" })),
         ("project.open", json!({ "bytes_base64": bytes_b64 })),
@@ -121,11 +121,11 @@ fn r1_s12_03_mcp_save_without_path_refuses_after_project_new_and_preserves_old_f
             other => return Err(format!("expected InvalidParams from save_file after {cmd_id}, got {other:?}")),
         }
         if fs::read(&path_a).map_err(|e| e.to_string())? != original_a_bytes {
-            return Err(format!("A.lumencraft modified after {cmd_id}"));
+            return Err(format!("A.curvebook modified after {cmd_id}"));
         }
     }
 
-    // 4. Open A.lumencraft -> command_run project.open { path: B } -> save_file {} writes B, never A.
+    // 4. Open A.curvebook -> command_run project.open { path: B } -> save_file {} writes B, never A.
     call_json_str(&mut state, "open_file", json!({ "path": path_a.to_string_lossy() }))?;
     call_json_str(&mut state, "command_run", json!({ "command_id": "project.open", "params": { "path": path_b.to_string_lossy() } }))?;
     let inspected_b = call_json_str(&mut state, "doc_inspect", json!({}))?;
@@ -135,7 +135,7 @@ fn r1_s12_03_mcp_save_without_path_refuses_after_project_new_and_preserves_old_f
     }
     call_json_str(&mut state, "save_file", json!({}))?;
     if fs::read(&path_a).map_err(|e| e.to_string())? != original_a_bytes {
-        return Err(String::from("A.lumencraft modified after switching to B.lumencraft via project.open"));
+        return Err(String::from("A.curvebook modified after switching to B.curvebook via project.open"));
     }
 
     Ok(())

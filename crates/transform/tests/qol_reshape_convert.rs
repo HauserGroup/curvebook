@@ -1,8 +1,8 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, FloatingNote, GroupedTable,
     MultipleVariablesTable, RectPt, SheetId, SubcolumnMode, TableArchetype, TableKind, VariableRole, XColumnMode, XyTable,
 };
-use lumencraft_transform::{
+use curvebook_transform::{
     PlateGeometry, PlateMapTemplate, PlateWellRole, TargetArchetypeKind, TidyColumnMapping, TransformError, convert_datasheet_archetype,
     map_plate_to_datasheet, pivot_tidy_long_to_datasheet, preview_datasheet_conversion,
 };
@@ -265,7 +265,7 @@ fn qol1_lossy_guard_and_unsupported_archetype() {
 }
 
 #[test]
-fn qol2_plate_96_ic50_to_xy_blank_subtraction_excluded_and_lctemplate_roundtrip() {
+fn qol2_plate_96_ic50_to_xy_blank_subtraction_excluded_and_cbtemplate_roundtrip() {
     let mut template = PlateMapTemplate::new("96-Well IC50", PlateGeometry::Wells96, "Concentration_nM").expect("template");
     let mut values = vec![None; PlateGeometry::Wells96.well_count()];
 
@@ -305,9 +305,9 @@ fn qol2_plate_96_ic50_to_xy_blank_subtraction_excluded_and_lctemplate_roundtrip(
         }
     }
 
-    // `.lctemplate` JSON round-trip
-    let json = template.to_lctemplate_json().expect("to json");
-    let reloaded = PlateMapTemplate::from_lctemplate_json(&json).expect("from json");
+    // `.cbtemplate` JSON round-trip
+    let json = template.to_cbtemplate_json().expect("to json");
+    let reloaded = PlateMapTemplate::from_cbtemplate_json(&json).expect("from json");
     assert_eq!(reloaded, template);
 
     let xy_sheet = map_plate_to_datasheet("IC50 Screen", PlateGeometry::Wells96, &values, &reloaded, TargetArchetypeKind::Xy, true).expect("map Xy");

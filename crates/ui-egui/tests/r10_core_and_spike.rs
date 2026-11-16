@@ -10,23 +10,23 @@
 
 use std::time::Instant;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, Cell, ColumnDesignHint, ColumnTable, DataSheet, ErrorCode, GraphKind, GraphSheet, GroupedTable, LayoutItem, LayoutSheet,
     LayoutSpec, MultiplicityMethod, ProjectDocument, RectPt, ResultCell, ResultTab, ResultTabKind, SheetId, SubcolumnMode, TableArchetype,
 };
-use lumencraft_engine::Session;
-use lumencraft_render::RenderTargetSpec;
-use lumencraft_ui_egui::compositor::{FramePalette, compute_workspace_layout_map, render_workspace_rgba};
-use lumencraft_ui_egui::dialogs_canvas::ActiveDialog;
-use lumencraft_ui_egui::human_driver::HumanPathDriver;
-use lumencraft_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
-use lumencraft_ui_egui::layout::FocusScope;
-use lumencraft_ui_egui::layout::canvas_viewport::{
+use curvebook_engine::Session;
+use curvebook_render::RenderTargetSpec;
+use curvebook_ui_egui::compositor::{FramePalette, compute_workspace_layout_map, render_workspace_rgba};
+use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+use curvebook_ui_egui::human_driver::HumanPathDriver;
+use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
+use curvebook_ui_egui::layout::FocusScope;
+use curvebook_ui_egui::layout::canvas_viewport::{
     compute_aspect_ratio_paper_mapping, should_show_graph_series_chip, should_show_layout_panel_chrome,
 };
-use lumencraft_ui_egui::layout::verify::verify_click_action_parity;
-use lumencraft_ui_egui::text_bridge::{DesktopTextMeasurer, SoftwareTextPainter, TextMeasurer, UiTextStyle};
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
+use curvebook_ui_egui::layout::verify::verify_click_action_parity;
+use curvebook_ui_egui::text_bridge::{DesktopTextMeasurer, SoftwareTextPainter, TextMeasurer, UiTextStyle};
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::json;
 
 fn build_three_group_column_app() -> UiApp {
@@ -312,7 +312,7 @@ fn r10_15_aspect_ratio_viewport_and_hover_selected_only_chrome() {
     app = UiApp::from_session(Session::from_document(doc));
 
     // Wide pane (1000 x 600): paper preserves physical aspect ratio and stays centered.
-    let wide_outer = lumencraft_ui_egui::layout::LayoutRectPx::new(200, 40, 1000, 600);
+    let wide_outer = curvebook_ui_egui::layout::LayoutRectPx::new(200, 40, 1000, 600);
     let geom_wide = compute_aspect_ratio_paper_mapping(SheetId::from("l-ar"), wide_outer, page_pt.width, page_pt.height, &app, 1.0);
     let ratio_wide = f64::from(geom_wide.paper_rect_px.width) / f64::from(geom_wide.paper_rect_px.height.max(1));
     let expected_ratio = page_pt.width / page_pt.height;

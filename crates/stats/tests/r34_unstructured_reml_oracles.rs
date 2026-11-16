@@ -3,13 +3,13 @@
 //! Fai & Cornelius 1996) and factorial Dunnett control-column validation.
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, DataSheet, FactorialAnovaSpec, GroupedTable, MultiplicityMethod, MultiplicitySpec,
     RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultTabKind, SheetId, SubcolumnMode, TableArchetype,
 };
-use lumencraft_math::linalg::{DenseMatrix, sym_eigen};
-use lumencraft_stats::StatsError;
-use lumencraft_stats::anova::{UnstructuredFallbackReason, fit_random_intercept_reml, fit_unstructured_rm_reml, run_factorial_anova};
+use curvebook_math::linalg::{DenseMatrix, sym_eigen};
+use curvebook_stats::StatsError;
+use curvebook_stats::anova::{UnstructuredFallbackReason, fit_random_intercept_reml, fit_unstructured_rm_reml, run_factorial_anova};
 
 fn assert_approx_eq(actual: f64, expected: f64, abs_tol: f64, rel_tol: f64, label: &str) {
     assert!(actual.is_finite(), "{label}: expected finite {expected}, got {actual}");
@@ -38,7 +38,7 @@ fn sum_contrast_one_way_matrix(tps: &[usize], t_levels: usize) -> DenseMatrix {
     DenseMatrix::from_row_major(tps.len(), t_levels, raw).unwrap()
 }
 
-fn extract_cov_grid(tab: &lumencraft_doc::ResultTab) -> Vec<Vec<f64>> {
+fn extract_cov_grid(tab: &curvebook_doc::ResultTab) -> Vec<Vec<f64>> {
     tab.rows
         .iter()
         .map(|row| {

@@ -1,12 +1,12 @@
-//! Stage 4B regression tests for `lumencraft-tools` (`R1-S11-10`, `R1-S11-11`, `R1-S11-12`).
+//! Stage 4B regression tests for `curvebook-tools` (`R1-S11-10`, `R1-S11-11`, `R1-S11-12`).
 
-use lumencraft_chart::{PointPt, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{PointPt, compile_graph};
+use curvebook_doc::{
     BracketLabelMode, Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphSheet, GraphSpec, GroupedArrangement, GroupedTable,
     ProjectDocument, SheetFolderKind, SheetId, SizePt, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_tools::canvas::{BracketAnchor, hit_test_category_slot, resolve_category_slots};
-use lumencraft_tools::{CanvasToolMode, CanvasToolState, GridCellCoord, GridToolState, NavigatorDragState};
+use curvebook_tools::canvas::{BracketAnchor, hit_test_category_slot, resolve_category_slots};
+use curvebook_tools::{CanvasToolMode, CanvasToolState, GridCellCoord, GridToolState, NavigatorDragState};
 
 type TestRes = Result<(), String>;
 

@@ -1,10 +1,10 @@
-//! Stage 4C audit regression tests for `R1-S09-10` in `lumencraft-text`.
+//! Stage 4C audit regression tests for `R1-S09-10` in `curvebook-text`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::time::Instant;
 
-use lumencraft_text::TrueTypeFont;
-use lumencraft_text::glyph_paths::outline_ttf_glyph;
+use curvebook_text::TrueTypeFont;
+use curvebook_text::glyph_paths::outline_ttf_glyph;
 
 fn push_u16(buf: &mut Vec<u8>, v: u16) {
     buf.extend_from_slice(&v.to_be_bytes());

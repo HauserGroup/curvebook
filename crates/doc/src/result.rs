@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 
 use crate::analysis::AnalysisSpec;
 use crate::error::DocError;
@@ -192,7 +192,7 @@ impl<'de> serde::Deserialize<'de> for ErrorCode {
     }
 }
 
-/// Recalculation status of a [`ResultSheet`] inside `lumencraft-engine`'s reactive DAG.
+/// Recalculation status of a [`ResultSheet`] inside `curvebook-engine`'s reactive DAG.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ResultStatus {
     #[default]
@@ -294,7 +294,7 @@ pub struct PairwiseComparisonRecord {
     pub significant: bool,
 }
 
-/// Sampled curve coordinate plus optional confidence and prediction band bounds for `lumencraft-chart`.
+/// Sampled curve coordinate plus optional confidence and prediction band bounds for `curvebook-chart`.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CurveSamplePoint {
     pub x: f64,

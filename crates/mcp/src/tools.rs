@@ -7,12 +7,12 @@ use std::fmt;
 use std::path::Path;
 use std::sync::atomic::AtomicBool;
 
-use lumencraft_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
-use lumencraft_engine::cmd::{Caller, CommandGroup, Effects, registry};
-use lumencraft_engine::{EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
-use lumencraft_format::{CsvOptions, export_datasheet_to_csv};
+use curvebook_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
+use curvebook_engine::cmd::{Caller, CommandGroup, Effects, registry};
+use curvebook_engine::{EngineError, ExternalPathPolicy, GuiOnlyPolicy, Session};
+use curvebook_format::{CsvOptions, export_datasheet_to_csv};
 #[cfg(not(target_arch = "wasm32"))]
-use lumencraft_platform::{PlatformError, WorkdirGuard};
+use curvebook_platform::{PlatformError, WorkdirGuard};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
 
@@ -456,16 +456,14 @@ impl McpServerState {
         let ping = self.send_live_control_raw("ping", json!({}))?;
         let Some(remote_gui_only) = ping.get("gui_only").and_then(Value::as_bool) else {
             return Err(StructuredErrorPayload::new(ErrorCode::Conflict, "remote control host `ping` response omitted boolean `gui_only` policy")
-                .with_remediation("Attach only to a LumenCraft control server returning `gui_only` from `ping`."));
+                .with_remediation("Attach only to a CurveBook control server returning `gui_only` from `ping`."));
         };
         if self.control_requested_gui_only && !remote_gui_only {
             return Err(StructuredErrorPayload::new(
                 ErrorCode::GuiOnlyViolation,
                 "cannot enforce `--gui-only` over `--control-port`: remote desktop host does not have `--gui-only` enabled",
             )
-            .with_remediation(
-                "Restart the remote desktop host with `--gui-only` before attaching `lumencraft-cli mcp --control-port ... --gui-only`.",
-            )
+            .with_remediation("Restart the remote desktop host with `--gui-only` before attaching `curvebook-cli mcp --control-port ... --gui-only`.")
             .with_details(json!({ "local_gui_only": true, "remote_gui_only": false })));
         }
         self.apply_local_gui_only(remote_gui_only);
@@ -726,15 +724,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("open_file"),
-            description: String::from(
-                "Open or import a .lumencraft, .lumencraft.d, .lctemplate, .prism, .pzfx, .csv, or .tsv file into the session.",
-            ),
+            description: String::from("Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session."),
             input_schema: json!({
                 "type": "object",
                 "required": ["path"],
                 "properties": {
                     "path": { "type": "string", "description": "Filesystem path to open or import." },
-                    "format": { "type": "string", "enum": ["lumencraft", "lumencraft.d", "lctemplate", "prism", "pzfx", "csv", "tsv"] },
+                    "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "csv", "tsv"] },
                     "target_kind": { "type": "string", "enum": ["xy", "column", "grouped", "contingency", "survival", "parts_of_whole", "multiple_variables", "nested"] },
                     "subcolumn_mode": { "type": "string" },
                     "delimiter": { "type": "string", "description": "Optional single-character delimiter override for delimited text." },
@@ -748,14 +744,12 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("save_file"),
-            description: String::from(
-                "Save the current document as a .lumencraft archive, .lumencraft.d unpacked directory, or .lctemplate template.",
-            ),
+            description: String::from("Save the current document as a .curvebook archive, .curvebook.d unpacked directory, or .cbtemplate template."),
             input_schema: json!({
                 "type": "object",
                 "properties": {
                     "path": { "type": "string", "description": "Destination file path (defaults to current project path when available)." },
-                    "format": { "type": "string", "enum": ["lumencraft", "lumencraft.d", "lctemplate"] }
+                    "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate"] }
                 },
                 "additionalProperties": false
             }),
@@ -926,7 +920,7 @@ pub(crate) fn run_guarded_tool<F>(op: &str, f: F) -> Result<ToolCallResult, Tool
 where
     F: FnOnce() -> Result<ToolCallResult, ToolCallError>,
 {
-    match lumencraft_engine::guard::run_guarded(op, || Ok(f())) {
+    match curvebook_engine::guard::run_guarded(op, || Ok(f())) {
         Ok(inner_res) => inner_res,
         Err(engine_err) => Ok(errors::result_from_engine_error(&engine_err)),
     }
@@ -994,7 +988,7 @@ pub(crate) fn dispatch_gui_backend(state: &mut McpServerState, method: &str, par
         ErrorCode::Conflict,
         format!("GUI tool method '{method}' requires an in-process GuiSessionHost (--gui-only) or --control-port <PORT>"),
     )
-    .with_remediation("Attach an in-process GuiSessionHost (e.g. desktop `--gui-only` host) or pass `--control-port <PORT>` pointing to a running LumenCraft window.")
+    .with_remediation("Attach an in-process GuiSessionHost (e.g. desktop `--gui-only` host) or pass `--control-port <PORT>` pointing to a running CurveBook window.")
     .with_details(json!({
         "method": method,
         "gui_only": state.is_gui_only(),
@@ -1240,7 +1234,7 @@ fn summarize_result_sheet(rs: &ResultSheet, deps: &[SheetId]) -> Value {
         "checklist_count": rs.checklist.len(),
         "upstream_dependencies": deps,
     });
-    if matches!(&rs.analysis.kind, lumencraft_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == lumencraft_doc::FitMethod::RobustCauchy)
+    if matches!(&rs.analysis.kind, curvebook_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == curvebook_doc::FitMethod::RobustCauchy)
         && let Some(obj) = payload.as_object_mut()
     {
         obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
@@ -1687,8 +1681,8 @@ mod live_control {
     use std::path::PathBuf;
     use std::time::Duration;
 
-    use lumencraft_doc::ErrorCode;
-    use lumencraft_engine::EngineError;
+    use curvebook_doc::ErrorCode;
+    use curvebook_engine::EngineError;
     use serde::Deserialize;
     use serde_json::{Map, Value};
 
@@ -1734,7 +1728,7 @@ mod live_control {
                     return Ok(meta.uid());
                 }
                 for bin in ["/usr/bin/id", "/bin/id", "id"] {
-                    if let Ok(output) = lumencraft_platform::ProcessCommand::new(bin).arg("-u").run()
+                    if let Ok(output) = curvebook_platform::ProcessCommand::new(bin).arg("-u").run()
                         && output.success
                     {
                         let text = String::from_utf8_lossy(&output.stdout);
@@ -1786,44 +1780,44 @@ mod live_control {
         if let Some(raw_xdg_rt) = env_get("XDG_RUNTIME_DIR").filter(|v| !v.is_empty()) {
             let rt_dir = PathBuf::from(raw_xdg_rt);
             verify_private_dir(&rt_dir, uid, "XDG_RUNTIME_DIR", true)?;
-            let app_root = rt_dir.join("lumencraft");
+            let app_root = rt_dir.join("curvebook");
             verify_private_dir(&app_root, uid, "runtime directory", false)?;
             return Ok(app_root);
         }
         let tmp_base = env_get("TMPDIR").filter(|v| !v.is_empty()).map(PathBuf::from).unwrap_or_else(std::env::temp_dir);
-        let uid_root = tmp_base.join(format!("lumencraft-uid-{uid}"));
+        let uid_root = tmp_base.join(format!("curvebook-uid-{uid}"));
         verify_private_dir(&uid_root, uid, "per-user fallback directory", false)?;
         Ok(uid_root)
     }
 
     pub(crate) fn resolve_config_dir_with_env(env_get: &impl Fn(&str) -> Option<OsString>) -> Result<PathBuf, StructuredErrorPayload> {
         let nonempty_path = |key: &str| env_get(key).filter(|v| !v.is_empty()).map(PathBuf::from);
-        if let Some(raw_cfg) = env_get("LUMENCRAFT_CONFIG_DIR").filter(|v| !v.to_string_lossy().trim().is_empty()) {
+        if let Some(raw_cfg) = env_get("CURVEBOOK_CONFIG_DIR").filter(|v| !v.to_string_lossy().trim().is_empty()) {
             return Ok(PathBuf::from(raw_cfg));
         }
 
         #[cfg(target_os = "macos")]
         {
             if let Some(home) = nonempty_path("HOME") {
-                return Ok(home.join("Library").join("Application Support").join("LumenCraft"));
+                return Ok(home.join("Library").join("Application Support").join("CurveBook"));
             }
             resolve_unix_private_fallback_root(env_get)
         }
         #[cfg(target_os = "windows")]
         {
-            let fallback_base = nonempty_path("USERPROFILE").map(|h| h.join("AppData").join("Roaming").join("LumenCraft"));
-            nonempty_path("APPDATA").map(|p| p.join("LumenCraft")).or(fallback_base).ok_or_else(|| {
+            let fallback_base = nonempty_path("USERPROFILE").map(|h| h.join("AppData").join("Roaming").join("CurveBook"));
+            nonempty_path("APPDATA").map(|p| p.join("CurveBook")).or(fallback_base).ok_or_else(|| {
                 StructuredErrorPayload::new(
                     ErrorCode::BadInput,
-                    "cannot determine LumenCraft config directory: APPDATA and USERPROFILE are unset (set LUMENCRAFT_CONFIG_DIR)",
+                    "cannot determine CurveBook config directory: APPDATA and USERPROFILE are unset (set CURVEBOOK_CONFIG_DIR)",
                 )
             })
         }
         #[cfg(all(unix, not(target_os = "macos")))]
         {
             if let Some(dir) = nonempty_path("XDG_CONFIG_HOME")
-                .map(|p| p.join("lumencraft"))
-                .or_else(|| nonempty_path("HOME").map(|h| h.join(".config").join("lumencraft")))
+                .map(|p| p.join("curvebook"))
+                .or_else(|| nonempty_path("HOME").map(|h| h.join(".config").join("curvebook")))
             {
                 return Ok(dir);
             }
@@ -1850,28 +1844,28 @@ mod live_control {
         port: u16,
         env_get: &impl Fn(&str) -> Option<OsString>,
     ) -> Result<Option<String>, StructuredErrorPayload> {
-        if let Some(raw_env) = env_get("LUMENCRAFT_CONTROL_TOKEN") {
+        if let Some(raw_env) = env_get("CURVEBOOK_CONTROL_TOKEN") {
             let text =
-                raw_env.to_str().ok_or_else(|| StructuredErrorPayload::new(ErrorCode::BadInput, "LUMENCRAFT_CONTROL_TOKEN must be valid UTF-8"))?;
+                raw_env.to_str().ok_or_else(|| StructuredErrorPayload::new(ErrorCode::BadInput, "CURVEBOOK_CONTROL_TOKEN must be valid UTF-8"))?;
             let trimmed = text.trim();
             if !trimmed.is_empty() {
                 let tok = validate_control_token(trimmed)
-                    .map_err(|err| StructuredErrorPayload::new(ErrorCode::BadInput, format!("invalid LUMENCRAFT_CONTROL_TOKEN: {err}")))?;
+                    .map_err(|err| StructuredErrorPayload::new(ErrorCode::BadInput, format!("invalid CURVEBOOK_CONTROL_TOKEN: {err}")))?;
                 return Ok(Some(tok));
             }
         }
 
         let path = control_token_file_path_with_env(port, env_get)?;
-        let buf = match lumencraft_platform::fs::read_regular_file_bytes_if_exists(&path, MAX_CONTROL_TOKEN_FILE_BYTES) {
+        let buf = match curvebook_platform::fs::read_regular_file_bytes_if_exists(&path, MAX_CONTROL_TOKEN_FILE_BYTES) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
-            Err(lumencraft_platform::PlatformError::FileTooLarge { .. }) => {
+            Err(curvebook_platform::PlatformError::FileTooLarge { .. }) => {
                 return Err(StructuredErrorPayload::new(
                     ErrorCode::BadInput,
                     format!("control token file `{}` exceeds maximum {MAX_CONTROL_TOKEN_FILE_BYTES} bytes", path.display()),
                 ));
             }
-            Err(lumencraft_platform::PlatformError::InvalidPath { reason }) => {
+            Err(curvebook_platform::PlatformError::InvalidPath { reason }) => {
                 return Err(StructuredErrorPayload::new(ErrorCode::BadInput, format!("invalid control token file `{}`: {reason}", path.display())));
             }
             Err(err) => {
@@ -1996,7 +1990,7 @@ mod live_control {
                     payload = payload.with_remediation(rem);
                 } else if code_str == "unauthorized" {
                     payload = payload.with_remediation(
-                        "Pass matching --control-token <token>, set LUMENCRAFT_CONTROL_TOKEN, or verify control-<port>.token in the config directory.",
+                        "Pass matching --control-token <token>, set CURVEBOOK_CONTROL_TOKEN, or verify control-<port>.token in the config directory.",
                     );
                 }
                 if let Some(extra) = detail.get("details") {
@@ -2009,7 +2003,7 @@ mod live_control {
         let lower = msg.to_ascii_lowercase();
         if lower.contains("unauthorized") || lower.contains("invalid or missing control authentication token") {
             return StructuredErrorPayload::new(ErrorCode::BadInput, msg).with_remediation(
-                "Pass matching --control-token <token>, set LUMENCRAFT_CONTROL_TOKEN, or verify control-<port>.token in the config directory.",
+                "Pass matching --control-token <token>, set CURVEBOOK_CONTROL_TOKEN, or verify control-<port>.token in the config directory.",
             );
         }
         if lower.contains("gui_only_violation") || lower.contains("gui-only") || lower.contains("gui_only") {
@@ -2054,7 +2048,7 @@ mod live_control {
 mod tests {
     use std::collections::BTreeSet;
 
-    use lumencraft_engine::cmd::{CommandGroup, Effects, registry};
+    use curvebook_engine::cmd::{CommandGroup, Effects, registry};
     use serde_json::{Value, json};
 
     use super::{McpServerState, ToolAnnotations, ToolCallError, call_tool, encode_base64, list_tools, list_tools_for_state, run_guarded_tool};
@@ -2178,17 +2172,17 @@ mod tests {
 
     #[test]
     fn r1_s12_07_csv_export_with_tab_id_defaults_tidy_false_and_rejects_tidy_true() {
-        use lumencraft_doc::{
+        use curvebook_doc::{
             AnalysisKind, AnalysisSpec, DataSheet, DescriptiveSpec, ProjectDocument, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
             SubcolumnMode, TableArchetype, XyTable,
         };
-        use lumencraft_engine::Session;
+        use curvebook_engine::Session;
 
         let mut doc = ProjectDocument::new("Tab Export Doc").expect("doc");
         let xy = XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy");
         let ds = DataSheet::new("ds-1", "InputData", TableArchetype::Xy(xy)).expect("ds");
         doc.data_sheets.push(ds);
-        doc.active_sheet_id = Some(lumencraft_doc::SheetId::new("ds-1"));
+        doc.active_sheet_id = Some(curvebook_doc::SheetId::new("ds-1"));
 
         let spec = AnalysisSpec::new("res-1", "ds-1", AnalysisKind::DescriptiveStats(DescriptiveSpec::default())).expect("spec");
         let mut rs = ResultSheet::new(spec).expect("rs");
@@ -2314,14 +2308,14 @@ mod tests {
         );
         let parsed = super::live_control::send_control_envelope_on_io(&mut gui_err, &mut outbound, None, "ui.invoke_menu", json!({}), 4096)
             .expect_err("structured detail err");
-        assert_eq!(parsed.code, lumencraft_doc::ErrorCode::GuiOnlyViolation);
+        assert_eq!(parsed.code, curvebook_doc::ErrorCode::GuiOnlyViolation);
         assert_eq!(parsed.remediation.as_deref(), Some("Use visible UI"));
 
         let mut outbound = Vec::new();
         let mut disabled_err = Cursor::new(br#"{"id":"mcp-1","ok":false,"error":"control is disabled"}"#.as_slice());
         let fallback = super::live_control::send_control_envelope_on_io(&mut disabled_err, &mut outbound, None, "ui.switch_tab", json!({}), 4096)
             .expect_err("disabled heuristic");
-        assert_eq!(fallback.code, lumencraft_doc::ErrorCode::Conflict);
+        assert_eq!(fallback.code, curvebook_doc::ErrorCode::Conflict);
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -2354,11 +2348,11 @@ mod tests {
         );
         let err = super::live_control::send_control_with_token_on_io(&mut unauth, &mut outbound, Some("wrong-token"), "ping", json!({}), 4096)
             .expect_err("unauthorized");
-        assert_eq!(err.code, lumencraft_doc::ErrorCode::BadInput);
+        assert_eq!(err.code, curvebook_doc::ErrorCode::BadInput);
         assert!(err.remediation.as_deref().is_some_and(|r| r.contains("--control-token")));
 
-        // Platform token file discovery and LUMENCRAFT_CONTROL_TOKEN precedence.
-        let tmp_dir = std::env::temp_dir().join(format!("lc_mcp_tok_test_{}", std::process::id()));
+        // Platform token file discovery and CURVEBOOK_CONTROL_TOKEN precedence.
+        let tmp_dir = std::env::temp_dir().join(format!("cb_mcp_tok_test_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         std::fs::create_dir_all(&tmp_dir).expect("tempdir");
         let port = 52411;
@@ -2379,7 +2373,7 @@ mod tests {
         );
 
         let env_override = |key: &str| -> Option<OsString> {
-            if key == "LUMENCRAFT_CONTROL_TOKEN" {
+            if key == "CURVEBOOK_CONTROL_TOKEN" {
                 return Some(OsString::from("env-token-77"));
             }
             fake_env(key)
@@ -2389,7 +2383,7 @@ mod tests {
             Some(String::from("env-token-77"))
         );
 
-        // When HOME/XDG are unset on Unix, MCP resolves a UID-scoped path (never shared `/tmp/lumencraft`)
+        // When HOME/XDG are unset on Unix, MCP resolves a UID-scoped path (never shared `/tmp/curvebook`)
         // and rejects symlinked fallback directories explicitly.
         #[cfg(unix)]
         {
@@ -2401,12 +2395,12 @@ mod tests {
                 if key == "TMPDIR" { Some(unset_os.clone()) } else { None }
             })
             .expect("uid fallback");
-            assert_ne!(uid_path, std::env::temp_dir().join("lumencraft"));
-            assert!(uid_path.to_string_lossy().contains("lumencraft-uid-"));
+            assert_ne!(uid_path, std::env::temp_dir().join("curvebook"));
+            assert!(uid_path.to_string_lossy().contains("curvebook-uid-"));
 
             let decoy = tmp_dir.join("sym-decoy");
             std::fs::create_dir_all(&decoy).expect("decoy");
-            let uid_root_name = uid_path.iter().find(|part| part.to_string_lossy().starts_with("lumencraft-uid-")).expect("uid dir component");
+            let uid_root_name = uid_path.iter().find(|part| part.to_string_lossy().starts_with("curvebook-uid-")).expect("uid dir component");
             std::os::unix::fs::symlink(&decoy, unset_tmp.join(uid_root_name)).expect("symlink");
             assert!(super::live_control::resolve_config_dir_with_env(&|key| if key == "TMPDIR" { Some(unset_os.clone()) } else { None }).is_err());
 

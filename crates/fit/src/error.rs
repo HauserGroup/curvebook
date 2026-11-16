@@ -1,9 +1,9 @@
-//! Structured error and diagnostic status types for `lumencraft-fit`.
+//! Structured error and diagnostic status types for `curvebook-fit`.
 
 use std::fmt;
 
-use lumencraft_doc::{DocError, TableKind};
-use lumencraft_math::MathError;
+use curvebook_doc::{DocError, TableKind};
+use curvebook_math::MathError;
 
 /// Convergence or validity outcome of a linear or nonlinear regression fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -41,7 +41,7 @@ pub enum ParameterNote {
     UnboundedCi,
 }
 
-/// Structured error type returned by `lumencraft-fit` routines.
+/// Structured error type returned by `curvebook-fit` routines.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FitError {
     /// No active non-excluded observations were available.
@@ -70,9 +70,9 @@ pub enum FitError {
     ImplicitSolveFailed { reason: String },
     /// Referenced `HookSource` could not be resolved to a finite scalar.
     HookResolutionError { message: String },
-    /// Propagated linear-algebra or root-finding error from `lumencraft-math`.
+    /// Propagated linear-algebra or root-finding error from `curvebook-math`.
     Math(MathError),
-    /// Propagated document validation error from `lumencraft-doc`.
+    /// Propagated document validation error from `curvebook-doc`.
     Doc(DocError),
 }
 

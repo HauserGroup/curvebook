@@ -2,12 +2,12 @@
 
 use std::fmt::Write;
 
-use lumencraft_chart::{
+use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
-use lumencraft_palette::Rgba8;
-use lumencraft_text::metrics::split_rich_text_lines;
-use lumencraft_text::{BUNDLED_FONTS, GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
+use curvebook_palette::Rgba8;
+use curvebook_text::metrics::split_rich_text_lines;
+use curvebook_text::{BUNDLED_FONTS, GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
 use serde::{Deserialize, Serialize};
 
 use crate::SVG_XMLNS;

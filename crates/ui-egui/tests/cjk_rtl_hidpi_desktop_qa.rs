@@ -5,13 +5,13 @@
 use std::collections::HashSet;
 use std::path::Path;
 
-use lumencraft_chart::PointPt;
-use lumencraft_doc::{LayoutItem, SheetId};
-use lumencraft_palette::Rgba8;
-use lumencraft_render::RenderTargetSpec;
-use lumencraft_tools::canvas::SnapSource;
-use lumencraft_ui_egui::workspace_nav::ActiveWorkspacePane;
-use lumencraft_ui_egui::{
+use curvebook_chart::PointPt;
+use curvebook_doc::{LayoutItem, SheetId};
+use curvebook_palette::Rgba8;
+use curvebook_render::RenderTargetSpec;
+use curvebook_tools::canvas::SnapSource;
+use curvebook_ui_egui::workspace_nav::ActiveWorkspacePane;
+use curvebook_ui_egui::{
     ActiveDialog, CanvasDragTarget, FontBook, KeyModifiers, LayoutResizeHandle, OsAdapterAvailability, PointerButton, UiApp, UiInputEvent,
     ViewportMetrics, WorkspaceHitTarget, compute_workspace_layout_map, dispatch_ui_command, dispatch_ui_event, render_workspace_rgba,
 };
@@ -352,7 +352,7 @@ fn pinch_zoom_inertial_pan_coasting_and_print_dialog_flow() {
     let modal_img = render_workspace_rgba(&app, RenderTargetSpec { width_px: 800, height_px: 520, dpi: 144 }).expect("render print modal");
     assert!(distinct_colors_in_rect(&modal_img.rgba, modal_img.width_px, 200, 120, 400, 260) >= 3);
 
-    if std::env::var_os("LUMENCRAFT_ALLOW_OS_GUI_DIALOG").is_none() {
+    if std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {
         let preview_status = app.preview_print_dialog_spool().expect("deterministic print preview stage");
         assert_eq!(preview_status.availability, OsAdapterAvailability::Unavailable);
     }

@@ -10,7 +10,7 @@ use std::process::Command;
 const USAGE: &str = "usage: cargo xtask coverage [-p <crate>]... [-- <test-runner args>]";
 
 /// Packages left out of both the instrumented test run and the report.
-const EXCLUDED_PACKAGES: &[&str] = &["xtask", "lumencraft-testkit"];
+const EXCLUDED_PACKAGES: &[&str] = &["xtask", "curvebook-testkit"];
 
 /// Source files dropped from every report (build automation and dev-only fixtures).
 const IGNORE_FILENAME_REGEX: &str = r"(^|/)(xtask|crates/testkit)/";
@@ -224,8 +224,8 @@ mod tests {
 
     #[test]
     fn parse_accepts_packages_and_runner_args() {
-        let opts = parse_args(&strs(&["-p", "lumencraft-stats", "--package=lumencraft-fit", "-p", "lumencraft-stats", "--", "anova", "-p"]));
-        assert_eq!(opts, Ok(Options { packages: strs(&["lumencraft-stats", "lumencraft-fit"]), runner_args: strs(&["anova", "-p"]) }));
+        let opts = parse_args(&strs(&["-p", "curvebook-stats", "--package=curvebook-fit", "-p", "curvebook-stats", "--", "anova", "-p"]));
+        assert_eq!(opts, Ok(Options { packages: strs(&["curvebook-stats", "curvebook-fit"]), runner_args: strs(&["anova", "-p"]) }));
         assert_eq!(parse_args(&[]), Ok(Options::default()));
     }
 
@@ -246,7 +246,7 @@ mod tests {
         assert_eq!(steps.first(), Some(&strs(&["llvm-cov", "clean", "--workspace"])));
         assert_eq!(
             steps.get(1),
-            Some(&strs(&["llvm-cov", "--all-targets", "--no-report", "--workspace", "--exclude", "xtask", "--exclude", "lumencraft-testkit"]))
+            Some(&strs(&["llvm-cov", "--all-targets", "--no-report", "--workspace", "--exclude", "xtask", "--exclude", "curvebook-testkit"]))
         );
         for report in steps.iter().skip(2) {
             assert_eq!(report.get(..4), Some(strs(&["llvm-cov", "report", "--ignore-filename-regex", IGNORE_FILENAME_REGEX]).as_slice()));
@@ -258,9 +258,9 @@ mod tests {
 
     #[test]
     fn package_plan_uses_nextest_and_forwards_runner_args() {
-        let opts = Options { packages: strs(&["lumencraft-stats"]), runner_args: strs(&["anova"]) };
+        let opts = Options { packages: strs(&["curvebook-stats"]), runner_args: strs(&["anova"]) };
         let steps = plan(&opts, true, &Outputs::in_dir(Path::new("o")));
-        assert_eq!(steps.get(1), Some(&strs(&["llvm-cov", "nextest", "--no-report", "-p", "lumencraft-stats", "--", "anova"])));
+        assert_eq!(steps.get(1), Some(&strs(&["llvm-cov", "nextest", "--no-report", "-p", "curvebook-stats", "--", "anova"])));
     }
 
     #[test]

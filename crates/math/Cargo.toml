@@ -1,11 +1,11 @@
 [package]
-name = "lumencraft-math"
+name = "curvebook-math"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft numerical, linear-algebra, distribution and axis-scale primitives"
+description = "CurveBook numerical, linear-algebra, distribution and axis-scale primitives"
 
 [lints]
 workspace = true
@@ -14,4 +14,4 @@ workspace = true
 serde = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }

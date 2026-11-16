@@ -1,7 +1,7 @@
 use std::time::Instant;
 
-use lumencraft_palette::colormap::{ColorRampError, MAX_CUSTOM_STOPS};
-use lumencraft_palette::{ColorRamp, ColorStop, Rgba8};
+use curvebook_palette::colormap::{ColorRampError, MAX_CUSTOM_STOPS};
+use curvebook_palette::{ColorRamp, ColorStop, Rgba8};
 use serde::Deserialize;
 use serde::de::value::Error as DeValueError;
 use serde::de::{Deserializer, EnumAccess, MapAccess, SeqAccess, VariantAccess, Visitor};
@@ -27,7 +27,7 @@ fn reference_linear_sample(stops: &[ColorStop], t: f64) -> Rgba8 {
             if span <= 1e-12 {
                 return right.color;
             }
-            return lumencraft_palette::lerp_oklab(left.color, right.color, (t - left.position) / span);
+            return curvebook_palette::lerp_oklab(left.color, right.color, (t - left.position) / span);
         }
     }
     valid.last().map_or(first.color, |last| last.color)

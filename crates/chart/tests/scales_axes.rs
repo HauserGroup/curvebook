@@ -1,21 +1,21 @@
 #![allow(clippy::float_cmp, clippy::cast_lossless)]
 
-use lumencraft_chart::scales::{
+use curvebook_chart::scales::{
     AxisFrameMode, AxisMapping, AxisOrientation, AxisRenderOptions, CategoricalTick, LOG_POSITIVE_FLOOR_DEFAULT, LegendEntry, MAX_TICKS_PER_SEGMENT,
     ResolvedAxis, ScaleDiagnostics, TickComputeConfig, TickKind, compute_axis_ticks, compute_plot_rect, format_tick_rich,
     legend_entries_from_graph_spec, render_annotations, render_axes_and_frame, render_graph_chrome, render_legend, resolve_template_hooks,
     scale_inverse, scale_transform, split_polyline_across_segments,
 };
-use lumencraft_chart::{ChartScene, FillPaint, PathCmd, PointPt, RectPt, ScenePrimitive, TextAnchor};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, FillPaint, PathCmd, PointPt, RectPt, ScenePrimitive, TextAnchor};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BreakOrnament, CiBound, ConstantValue, DataSheet,
     DescriptiveSpec, EquationDisplayMode, FramePreset, GraphAnnotation, GraphSheet, InfoSheet, LegendSpec, LogitDomain, NonlinearFitSpec,
     ProjectDocument, RectPt as DocRectPt, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizePt,
     SubcolumnMode, TableArchetype, TickLabelFormat, XyTable,
 };
-use lumencraft_math::{AxisScale, dist::norm_ppf};
-use lumencraft_palette::{LineDashStyle, MarkerFillMode, MarkerShape, Rgba8};
-use lumencraft_text::{LocaleNumberPolicy, SpanScript};
+use curvebook_math::{AxisScale, dist::norm_ppf};
+use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, Rgba8};
+use curvebook_text::{LocaleNumberPolicy, SpanScript};
 use proptest::prelude::*;
 
 #[allow(clippy::expect_used)]
@@ -92,7 +92,7 @@ fn forward_and_inverse_mapping_roundtrip_all_seven_scales() {
         assert!((y_back - sample).abs() < 1e-8, "{scale:?} vertical roundtrip: {sample} -> {y_pt} -> {y_back}");
     }
 
-    // Probit explicitly uses lumencraft_math inverse normal CDF (Phi^{-1}(0.5) == 0, Phi^{-1}(0.841345) ~ +1)
+    // Probit explicitly uses curvebook_math inverse normal CDF (Phi^{-1}(0.5) == 0, Phi^{-1}(0.841345) ~ +1)
     let probit_map = AxisMapping { min: 5.0, max: 95.0, scale: AxisScale::Probit };
     let mid_pt = probit_map.map_value(50.0, 0.0, 100.0).expect("probit 50%");
     assert!((mid_pt - 50.0).abs() < 1e-12);
@@ -500,7 +500,7 @@ fn auto_nice_ticks_and_log10_minor_cadence_2_to_9() {
 }
 
 #[test]
-fn tick_formatting_modes_and_rotated_labels_use_lumencraft_text() {
+fn tick_formatting_modes_and_rotated_labels_use_curvebook_text() {
     let policy = LocaleNumberPolicy::publication();
     let sup = format_tick_rich(1e-6, AxisScale::Log10, TickLabelFormat::PowerOfTenSuperscript, &policy);
     assert_eq!(sup.spans.len(), 2);
@@ -521,7 +521,7 @@ fn tick_formatting_modes_and_rotated_labels_use_lumencraft_text() {
 
     // Rotated categorical labels expand plot bottom margin and attach rotation_deg + TextAnchor
     let (doc, mut graph) = build_sample_doc_and_graph();
-    graph.spec.x_axis.tick_format = TickLabelFormat::Categorical(lumencraft_doc::CategoricalTickSource::ColumnTitles);
+    graph.spec.x_axis.tick_format = TickLabelFormat::Categorical(curvebook_doc::CategoricalTickSource::ColumnTitles);
     graph.spec.x_axis.tick_angle_deg = 45.0;
     graph.spec.x_axis.segments[0].min = Some(-0.5);
     graph.spec.x_axis.segments[0].max = Some(2.5);
@@ -540,7 +540,7 @@ fn tick_formatting_modes_and_rotated_labels_use_lumencraft_text() {
     let mut scene = ChartScene::new("rot", "Rotated", 360.0, 260.0, None);
     scene.plot_rect_pt = rect_rot;
     render_axes_and_frame(&graph.spec, &doc, &mut scene, &opts_rot);
-    let rot_texts: Vec<&lumencraft_chart::PositionedText> = scene
+    let rot_texts: Vec<&curvebook_chart::PositionedText> = scene
         .primitives
         .iter()
         .filter_map(|p| match p {

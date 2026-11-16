@@ -1,7 +1,7 @@
-use lumencraft_doc::{MAX_TITLE_BYTES, TableArchetype};
-use lumencraft_format::{FormatError, ImportWarningKind, XmlLimits, import_pzfx_str, parse_xml, parse_xml_with_limits, validate_project_document};
-use lumencraft_palette::colormap::MAX_CUSTOM_STOPS;
-use lumencraft_palette::{ColorRamp, ColorStop, Rgba8};
+use curvebook_doc::{MAX_TITLE_BYTES, TableArchetype};
+use curvebook_format::{FormatError, ImportWarningKind, XmlLimits, import_pzfx_str, parse_xml, parse_xml_with_limits, validate_project_document};
+use curvebook_palette::colormap::MAX_CUSTOM_STOPS;
+use curvebook_palette::{ColorRamp, ColorStop, Rgba8};
 
 #[test]
 fn r1_s06_10_pzfx_overlong_row_titles_and_pow_slice_labels_truncate_safely() {

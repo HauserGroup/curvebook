@@ -1,4 +1,4 @@
-//! Publication-quality SVG figure and multi-panel layout export for LumenCraft.
+//! Publication-quality SVG figure and multi-panel layout export for CurveBook.
 //!
 //! Layer L3 crate. Governing spec: `docs/graphing-and-layouts.md` (§6) and `docs/file-format-parity.md`.
 #![forbid(unsafe_code)]
@@ -12,8 +12,8 @@ pub const SVG_XMLNS: &str = "http://www.w3.org/2000/svg";
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_chart::{ChartScene, Path2D, PointPt, ScenePrimitive, StrokePaint};
-    use lumencraft_palette::Rgba8;
+    use curvebook_chart::{ChartScene, Path2D, PointPt, ScenePrimitive, StrokePaint};
+    use curvebook_palette::Rgba8;
 
     use super::{SVG_XMLNS, SvgExportOptions, render_svg, validate_svg_structure};
 

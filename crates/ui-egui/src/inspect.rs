@@ -4,11 +4,11 @@
 //! declarative enablement (`enabled`, `disabled_reason`) from [`crate::modal_predicates`] and
 //! deterministic `[x, y, width, height]` screen bounds from [`compute_workspace_layout_map`].
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, ColorChannelMapping, ContingencyMethod, MultivariateSpec, OneWayMethod, PValueFormat, ProjectDocument, RepeatedMeasuresDesign,
     SheetId, SizeChannelMapping, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, VariableSource, XColumnMode,
 };
-use lumencraft_tools::GridCellCoord;
+use curvebook_tools::GridCellCoord;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -28,7 +28,7 @@ use crate::modal_predicates::{
     source_table_shape,
 };
 use crate::power_wizard::PowerWizardStage;
-use lumencraft_tools::SelectionQuickStats;
+use curvebook_tools::SelectionQuickStats;
 
 /// Uniform accessible node describing any interactive UI menu item, toolbar button, tab, canvas
 /// element, grid cell, modal control, or action button.
@@ -1204,7 +1204,7 @@ fn build_edit_params_dialog_nodes(
             "edit.post_hoc.tukey",
             "radio",
             "Tukey post-hoc",
-            json!(matches!(method, lumencraft_doc::MultiplicityMethod::TukeyHsd)),
+            json!(matches!(method, curvebook_doc::MultiplicityMethod::TukeyHsd)),
             r2_post_hoc_option_enabled(ep.assume_gaussian, true),
             pos(4),
         ),
@@ -1212,7 +1212,7 @@ fn build_edit_params_dialog_nodes(
             "edit.post_hoc.dunn",
             "radio",
             "Dunn's rank comparisons",
-            json!(matches!(method, lumencraft_doc::MultiplicityMethod::DunnRankSum)),
+            json!(matches!(method, curvebook_doc::MultiplicityMethod::DunnRankSum)),
             r2_post_hoc_option_enabled(ep.assume_gaussian, false),
             pos(5),
         ),
@@ -1284,7 +1284,7 @@ fn build_edit_params_dialog_nodes(
             "edit.contingency.fisher",
             "radio",
             "Fisher's exact test",
-            json!(cont_spec.method == lumencraft_doc::ContingencyMethod::FisherExact),
+            json!(cont_spec.method == curvebook_doc::ContingencyMethod::FisherExact),
             r5_contingency_2x2_effect_sizes(rows, cols),
             pos(14),
         ),
@@ -1292,7 +1292,7 @@ fn build_edit_params_dialog_nodes(
             "edit.contingency.mcnemar",
             "radio",
             "McNemar's test",
-            json!(cont_spec.method == lumencraft_doc::ContingencyMethod::McNemarPaired),
+            json!(cont_spec.method == curvebook_doc::ContingencyMethod::McNemarPaired),
             r5_contingency_2x2_effect_sizes(rows, cols),
             pos(15),
         ),
@@ -1300,7 +1300,7 @@ fn build_edit_params_dialog_nodes(
             "edit.contingency.cochran_armitage",
             "radio",
             "Cochran-Armitage trend test",
-            json!(cont_spec.method == lumencraft_doc::ContingencyMethod::CochranArmitageTrend),
+            json!(cont_spec.method == curvebook_doc::ContingencyMethod::CochranArmitageTrend),
             r5_contingency_cochran_armitage_trend(rows, cols),
             pos(16),
         ),
@@ -1582,18 +1582,18 @@ fn push_r9_edit_params_controls(
 
 fn extract_edit_params_details(
     ep: &crate::dialogs_canvas::EditAnalysisParametersState,
-) -> (lumencraft_doc::MultiplicityMethod, PValueFormat, lumencraft_doc::ContingencySpec, Option<lumencraft_doc::TwoGroupMethod>) {
+) -> (curvebook_doc::MultiplicityMethod, PValueFormat, curvebook_doc::ContingencySpec, Option<curvebook_doc::TwoGroupMethod>) {
     let Some(spec) = ep.draft.as_ref() else {
-        return (lumencraft_doc::MultiplicityMethod::None, PValueFormat::FourDecimal, lumencraft_doc::ContingencySpec::default(), None);
+        return (curvebook_doc::MultiplicityMethod::None, PValueFormat::FourDecimal, curvebook_doc::ContingencySpec::default(), None);
     };
     let mult = match &spec.kind {
         AnalysisKind::OneWayAnova(a) => a.multiplicity.method,
         AnalysisKind::FactorialAnova(f) => f.multiplicity.method,
-        _ => lumencraft_doc::MultiplicityMethod::None,
+        _ => curvebook_doc::MultiplicityMethod::None,
     };
     let cont = match &spec.kind {
         AnalysisKind::Contingency(c) => c.clone(),
-        _ => lumencraft_doc::ContingencySpec::default(),
+        _ => curvebook_doc::ContingencySpec::default(),
     };
     let two = match &spec.kind {
         AnalysisKind::TwoGroupComparison(t) => Some(t.method),
@@ -2068,19 +2068,19 @@ fn build_generic_dialog_nodes(dialog: &ActiveDialog, _bx: f64, _by: f64, _includ
         ActiveDialog::InsertModelEquation { graph_sheet_id } => ("Insert Model Equation", Some(graph_sheet_id)),
         ActiveDialog::Print { sheet_id } => ("Print...", sheet_id.as_ref()),
         ActiveDialog::CommandPalette => ("Command Palette (Cmd+K)", None),
-        ActiveDialog::About => ("About LumenCraft", None),
+        ActiveDialog::About => ("About CurveBook", None),
         _ => ("", None),
     };
     (title, target.map(|id| id.as_str().to_owned()), None, Vec::new(), Vec::new(), vec![("ok", "OK"), ("cancel", "Cancel")])
 }
 
-fn sheet_section_name(sec: lumencraft_doc::SheetSection) -> String {
+fn sheet_section_name(sec: curvebook_doc::SheetSection) -> String {
     match sec {
-        lumencraft_doc::SheetSection::Data => String::from("data"),
-        lumencraft_doc::SheetSection::Info => String::from("info"),
-        lumencraft_doc::SheetSection::Analyses => String::from("results"),
-        lumencraft_doc::SheetSection::Graphs => String::from("graphs"),
-        lumencraft_doc::SheetSection::Layouts => String::from("layouts"),
+        curvebook_doc::SheetSection::Data => String::from("data"),
+        curvebook_doc::SheetSection::Info => String::from("info"),
+        curvebook_doc::SheetSection::Analyses => String::from("results"),
+        curvebook_doc::SheetSection::Graphs => String::from("graphs"),
+        curvebook_doc::SheetSection::Layouts => String::from("layouts"),
     }
 }
 

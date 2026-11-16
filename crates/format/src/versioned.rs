@@ -14,7 +14,9 @@ pub const CURRENT_PREFERENCES_VERSION: u32 = 1;
 pub const MAX_PREFERENCES_FILE_BYTES: usize = 4 * 1024 * 1024;
 
 /// Expected `schema` identifier for v1 headless batch manifests.
-pub const BATCH_SCHEMA_V1: &str = "lumencraft.batch.v1";
+pub const BATCH_SCHEMA_V1: &str = "curvebook.batch.v1";
+
+const LEGACY_BATCH_SCHEMA_PREFIX: &str = "lumencraft.batch.v";
 
 /// Single forward migration step transforming raw JSON from `from_version` to `from_version + 1`.
 #[derive(Debug, Clone, Copy)]
@@ -131,7 +133,7 @@ pub fn parse_preferences_json(raw: &str) -> Result<PreferencesFile, FormatError>
 /// Load and migrate a [`PreferencesFile`] from disk.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn load_preferences_file(path: &Path) -> Result<PreferencesFile, FormatError> {
-    let raw = lumencraft_platform::fs::read_regular_file_utf8(path, MAX_PREFERENCES_FILE_BYTES)?;
+    let raw = curvebook_platform::fs::read_regular_file_utf8(path, MAX_PREFERENCES_FILE_BYTES)?;
     parse_preferences_json(&raw)
 }
 
@@ -143,7 +145,7 @@ pub fn load_preferences_file(_path: &Path) -> Result<PreferencesFile, FormatErro
 
 #[cfg(not(target_arch = "wasm32"))]
 fn ensure_existing_preferences_not_newer(path: &Path) -> Result<(), FormatError> {
-    let Some(bytes) = lumencraft_platform::fs::read_regular_file_bytes_if_exists(path, MAX_PREFERENCES_FILE_BYTES)? else {
+    let Some(bytes) = curvebook_platform::fs::read_regular_file_bytes_if_exists(path, MAX_PREFERENCES_FILE_BYTES)? else {
         return Ok(());
     };
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
@@ -180,7 +182,7 @@ pub fn save_preferences_file(path: &Path, prefs: &PreferencesFile) -> Result<(),
     {
         std::fs::create_dir_all(parent)?;
     }
-    lumencraft_platform::fs::write_atomic(path, &bytes)?;
+    curvebook_platform::fs::write_atomic(path, &bytes)?;
     Ok(())
 }
 
@@ -190,7 +192,7 @@ pub fn save_preferences_file(_path: &Path, _prefs: &PreferencesFile) -> Result<(
     Err(FormatError::Io(String::from("preferences file I/O is not supported on wasm32")))
 }
 
-/// Validate that a batch manifest JSON object declares `"schema": "lumencraft.batch.v1"`.
+/// Validate that a batch manifest JSON object declares `"schema": "curvebook.batch.v1"`.
 pub fn validate_batch_manifest_version(value: &serde_json::Value) -> Result<(), FormatError> {
     let Some(obj) = value.as_object() else {
         return Err(FormatError::Json(String::from("batch manifest root payload must be a JSON object")));
@@ -204,7 +206,12 @@ pub fn validate_batch_manifest_version(value: &serde_json::Value) -> Result<(), 
     if schema_str == BATCH_SCHEMA_V1 {
         return Ok(());
     }
-    if let Some(ver_suffix) = schema_str.strip_prefix("lumencraft.batch.v")
+    if schema_str.starts_with(LEGACY_BATCH_SCHEMA_PREFIX) {
+        return Err(FormatError::UnsupportedFormat {
+            reason: format!("legacy LumenCraft batch schema `{schema_str}` is not supported; expected `{BATCH_SCHEMA_V1}`"),
+        });
+    }
+    if let Some(ver_suffix) = schema_str.strip_prefix("curvebook.batch.v")
         && !ver_suffix.is_empty()
         && ver_suffix.bytes().all(|b| b.is_ascii_digit())
         && (ver_suffix == "0" || !ver_suffix.starts_with('0'))

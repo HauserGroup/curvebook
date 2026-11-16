@@ -1,4 +1,4 @@
-//! Permanent regression tests for `R1-X1-03` across `lumencraft-format`:
+//! Permanent regression tests for `R1-X1-03` across `curvebook-format`:
 //! - `open_project_file`, `open_template_file`, `load_preferences_file`, and `FormatRegistry::import_path`
 //!   enforce regular-file checks (no FIFO blocking, no directory/device reading) and per-format byte caps
 //!   before reading or allocating.
@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::Duration;
 
-use lumencraft_format::{
+use curvebook_format::{
     FormatError, FormatRegistry, ImportOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_PREFERENCES_FILE_BYTES, MAX_XML_BYTES,
     load_preferences_file, open_project_file, open_template_file,
 };
@@ -27,7 +27,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn create(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let id = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lc-s4a-x103-fmt-{label}-{}-{id}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("cb-s4a-x103-fmt-{label}-{}-{id}", std::process::id()));
         if path.exists() {
             let _ = fs::remove_dir_all(&path);
         }
@@ -70,7 +70,7 @@ fn r1_x1_03_format_readers_reject_fifo_symlink_and_devices_without_blocking() ->
             results.push(open_template_file(&owned).is_err());
             results.push(load_preferences_file(&owned).is_err());
             let reg = FormatRegistry::default_registry();
-            for fmt_id in ["lumencraft", "lctemplate", "prism", "pzfx", "csv", "tsv"] {
+            for fmt_id in ["curvebook", "cbtemplate", "prism", "pzfx", "csv", "tsv"] {
                 if let Some(imp) = reg.importer_by_format(fmt_id) {
                     results.push(imp.import_path(&owned, &ImportOptions::default()).is_err());
                 }
@@ -117,11 +117,11 @@ fn r1_x1_03_format_readers_enforce_per_format_caps_before_allocation() -> TestRe
     let dir = TempDirGuard::create("oversized")?;
     let reg = FormatRegistry::default_registry();
 
-    let big_proj = dir.child("big.lumencraft");
+    let big_proj = dir.child("big.curvebook");
     create_sparse_file(&big_proj, (MAX_ARCHIVE_FILE_BYTES as u64).saturating_add(1))?;
     assert!(matches!(open_project_file(&big_proj), Err(FormatError::FileTooLarge { limit_bytes, .. }) if limit_bytes == MAX_ARCHIVE_FILE_BYTES));
 
-    let big_tpl = dir.child("big.lctemplate");
+    let big_tpl = dir.child("big.cbtemplate");
     create_sparse_file(&big_tpl, (MAX_ARCHIVE_FILE_BYTES as u64).saturating_add(1))?;
     assert!(matches!(open_template_file(&big_tpl), Err(FormatError::FileTooLarge { limit_bytes, .. }) if limit_bytes == MAX_ARCHIVE_FILE_BYTES));
 
@@ -132,8 +132,8 @@ fn r1_x1_03_format_readers_enforce_per_format_caps_before_allocation() -> TestRe
     );
 
     let cases: [(&str, &str, usize); 6] = [
-        ("lumencraft", "a.lumencraft", MAX_ARCHIVE_FILE_BYTES),
-        ("lctemplate", "b.lctemplate", MAX_ARCHIVE_FILE_BYTES),
+        ("curvebook", "a.curvebook", MAX_ARCHIVE_FILE_BYTES),
+        ("cbtemplate", "b.cbtemplate", MAX_ARCHIVE_FILE_BYTES),
         ("prism", "c.prism", MAX_ARCHIVE_FILE_BYTES),
         ("pzfx", "d.pzfx", MAX_XML_BYTES),
         ("csv", "e.csv", MAX_CSV_FILE_BYTES),

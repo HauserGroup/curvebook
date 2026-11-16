@@ -3,7 +3,7 @@
 //! Single source of truth consumed by live egui dialog widgets (`.add_enabled` + disabled tooltips),
 //! `ui.inspect` (`ControlNode { enabled, disabled_reason }`), `ui.switch_tab`, and `ui.answer_dialog`.
 
-use lumencraft_doc::{AnalysisKind, ContingencySpec, MultiplicityMethod, PValueFormat, ProjectDocument, SheetId, TableArchetype, TwoGroupMethod};
+use curvebook_doc::{AnalysisKind, ContingencySpec, MultiplicityMethod, PValueFormat, ProjectDocument, SheetId, TableArchetype, TwoGroupMethod};
 use serde::{Deserialize, Serialize};
 
 use crate::dialogs_canvas::{ActiveDialog, AnalyzeDialogState, CanvasDialogState, EditAnalysisParametersState, PairwiseComparisonsState};
@@ -83,15 +83,15 @@ pub fn apply_r2_gaussian_toggle(kind: &mut AnalysisKind, assume_gaussian: bool, 
         AnalysisKind::OneWayAnova(spec) => {
             if assume_gaussian {
                 spec.method = if matched {
-                    lumencraft_doc::OneWayMethod::RepeatedMeasures { geisser_greenhouse: true }
+                    curvebook_doc::OneWayMethod::RepeatedMeasures { geisser_greenhouse: true }
                 } else {
-                    lumencraft_doc::OneWayMethod::OrdinaryAnova
+                    curvebook_doc::OneWayMethod::OrdinaryAnova
                 };
                 if spec.multiplicity.method == MultiplicityMethod::DunnRankSum {
                     spec.multiplicity.method = MultiplicityMethod::TukeyHsd;
                 }
             } else {
-                spec.method = if matched { lumencraft_doc::OneWayMethod::Friedman } else { lumencraft_doc::OneWayMethod::KruskalWallis };
+                spec.method = if matched { curvebook_doc::OneWayMethod::Friedman } else { curvebook_doc::OneWayMethod::KruskalWallis };
                 spec.multiplicity.method = MultiplicityMethod::DunnRankSum;
             }
         }
@@ -289,7 +289,7 @@ fn max_subcolumn_count(arch: &TableArchetype) -> usize {
     }
 }
 
-fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: Option<&SheetId>) -> Option<&'a lumencraft_doc::DataSheet> {
+fn resolve_data_sheet<'a>(doc: &'a ProjectDocument, id: Option<&SheetId>) -> Option<&'a curvebook_doc::DataSheet> {
     let id = id?;
     doc.data_sheet(id)
         .or_else(|| doc.result_sheet(id).and_then(|rs| rs.analyzable_data.as_ref()))
@@ -541,7 +541,7 @@ fn evaluate_edit_params_button(
     };
     let (rows, cols, _max_sub) = source_table_shape(doc, Some(result_sheet_id));
     if let AnalysisKind::Contingency(cont) = &spec.kind {
-        if cont.method == lumencraft_doc::ContingencyMethod::CochranArmitageTrend {
+        if cont.method == curvebook_doc::ContingencyMethod::CochranArmitageTrend {
             let trend = r5_contingency_cochran_armitage_trend(rows, cols);
             if !trend.enabled {
                 return trend;
@@ -691,7 +691,7 @@ fn normalize_key(raw: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lumencraft_doc::{OneWayAnovaSpec, OneWayMethod, TwoGroupSpec};
+    use curvebook_doc::{OneWayAnovaSpec, OneWayMethod, TwoGroupSpec};
 
     #[test]
     fn rules_r1_to_r5_cover_both_enabled_and_disabled_states() {
@@ -708,7 +708,7 @@ mod tests {
         let mut anova = AnalysisKind::OneWayAnova(OneWayAnovaSpec {
             method: OneWayMethod::OrdinaryAnova,
             compute_effect_sizes: true,
-            multiplicity: lumencraft_doc::MultiplicitySpec {
+            multiplicity: curvebook_doc::MultiplicitySpec {
                 method: MultiplicityMethod::TukeyHsd,
                 threshold: 0.05,
                 report_confidence_intervals: true,

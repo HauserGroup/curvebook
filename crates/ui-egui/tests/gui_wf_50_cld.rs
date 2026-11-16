@@ -2,14 +2,14 @@
 //! Compact Letter Display (Piepho 2004 insert-and-absorb + sweeping).
 //!
 //! Runs strictly under [`UiApp`] with `app.set_gui_only(true)` (`GuiOnlyPolicy::Strict`) and drives
-//! all interactions exclusively through [`lumencraft_ui_egui::dispatch_gui_action`].
+//! all interactions exclusively through [`curvebook_ui_egui::dispatch_gui_action`].
 #![forbid(unsafe_code)]
 
-use lumencraft_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
-use lumencraft_doc::{CldOrdering, GraphKind, PairwiseDisplayMode, ProjectDocument, SheetId};
-use lumencraft_svg::{SvgExportOptions, render_svg, validate_svg_structure};
-use lumencraft_ui_egui::dialogs_canvas::ActiveDialog;
-use lumencraft_ui_egui::{UiApp, ViewportMetrics, dispatch_gui_action};
+use curvebook_chart::{ChartScene, PathCmd, ScenePrimitive, compile_graph};
+use curvebook_doc::{CldOrdering, GraphKind, PairwiseDisplayMode, ProjectDocument, SheetId};
+use curvebook_svg::{SvgExportOptions, render_svg, validate_svg_structure};
+use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+use curvebook_ui_egui::{UiApp, ViewportMetrics, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;

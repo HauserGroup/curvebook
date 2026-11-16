@@ -1,10 +1,10 @@
 //! NIST StRD Nonlinear Least Squares Certification Suite (ALL 27 datasets x `start_1` & `start_2` = 54 fits).
 
-use lumencraft_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme};
-use lumencraft_fit::{DataPoint, DatasetSeries, FitStatus, HookContext, SolverConfig, fit_nonlinear, get_builtin_model};
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_testkit::metrics::{assert_lre_at_least, log_relative_error};
-use lumencraft_testkit::nist_strd::{NonlinearDataset, corpus_available, default_nist_strd_dir, load_corpus_nonlinear_all};
+use curvebook_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_fit::{DataPoint, DatasetSeries, FitStatus, HookContext, SolverConfig, fit_nonlinear, get_builtin_model};
+use curvebook_math::ConfidenceLevel;
+use curvebook_testkit::metrics::{assert_lre_at_least, log_relative_error};
+use curvebook_testkit::nist_strd::{NonlinearDataset, corpus_available, default_nist_strd_dir, load_corpus_nonlinear_all};
 
 fn build_dataset_series(ds: &NonlinearDataset) -> DatasetSeries {
     let is_nelson = ds.name.eq_ignore_ascii_case("Nelson");
@@ -127,8 +127,8 @@ fn verify_nist_start(ds: &NonlinearDataset, series: &DatasetSeries, start_name: 
 fn nist_strd_all_27_nonlinear_benchmarks_from_both_starts() {
     let dir = default_nist_strd_dir();
     if !corpus_available(&dir) {
-        if std::env::var("LUMENCRAFT_REQUIRE_CORPUS").ok().as_deref() == Some("1") {
-            panic!("LUMENCRAFT_REQUIRE_CORPUS=1 set, but NIST StRD corpus directory is missing");
+        if std::env::var("CURVEBOOK_REQUIRE_CORPUS").ok().as_deref() == Some("1") {
+            panic!("CURVEBOOK_REQUIRE_CORPUS=1 set, but NIST StRD corpus directory is missing");
         }
         eprintln!("Skipping NIST StRD nonlinear suite: corpus not present locally");
         return;

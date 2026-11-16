@@ -1,5 +1,5 @@
 //! Core session, undo/redo history, reactive `Data -> Analysis -> Graph -> Layout` recalculation
-//! pipeline, command registry and panic recovery boundary for LumenCraft.
+//! pipeline, command registry and panic recovery boundary for CurveBook.
 //!
 //! Layer L5 crate: shared identically by the desktop app, browser WASM build, headless CLI and MCP
 //! server. Nothing in or below this crate depends on a UI toolkit.
@@ -19,21 +19,21 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use lumencraft_chart::{ChartError, ChartScene};
-use lumencraft_doc::{DocError, ProjectDocument, SheetId, SummaryPointError};
-pub use lumencraft_doc::{ErrorCategory, ErrorCode, RemediationKind};
-use lumencraft_fit::FitError;
+use curvebook_chart::{ChartError, ChartScene};
+use curvebook_doc::{DocError, ProjectDocument, SheetId, SummaryPointError};
+pub use curvebook_doc::{ErrorCategory, ErrorCode, RemediationKind};
+use curvebook_fit::FitError;
 #[cfg(not(target_arch = "wasm32"))]
-use lumencraft_format::DirectoryJournalBackend;
-use lumencraft_format::FormatError;
-use lumencraft_format::recovery::{CrashRecoveryJournal, JournalBackend, RecoveryReport};
-use lumencraft_math::MathError;
-use lumencraft_pdf::PdfError;
-use lumencraft_platform::PlatformError;
-use lumencraft_render::RenderError;
-use lumencraft_stats::StatsError;
-use lumencraft_svg::SvgError;
-use lumencraft_transform::TransformError;
+use curvebook_format::DirectoryJournalBackend;
+use curvebook_format::FormatError;
+use curvebook_format::recovery::{CrashRecoveryJournal, JournalBackend, RecoveryReport};
+use curvebook_math::MathError;
+use curvebook_pdf::PdfError;
+use curvebook_platform::PlatformError;
+use curvebook_render::RenderError;
+use curvebook_stats::StatsError;
+use curvebook_svg::SvgError;
+use curvebook_transform::TransformError;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -260,7 +260,7 @@ impl From<FormatError> for EngineError {
             FormatError::UnsupportedSchemaVersion { version, max_supported } => (
                 ErrorCode::UnsupportedVersion,
                 Some(json!({ "version": version, "max_supported": max_supported })),
-                Some("Upgrade Lumencraft to open files created with a newer schema version."),
+                Some("Upgrade CurveBook to open files created with a newer schema version."),
                 false,
             ),
             FormatError::InvalidArchiveKind { expected, found } => {
@@ -518,7 +518,7 @@ impl From<PlatformError> for EngineError {
 
 #[cfg(test)]
 mod structured_error_and_dispatch_tests {
-    use lumencraft_platform::TimeoutKind;
+    use curvebook_platform::TimeoutKind;
 
     use super::*;
     use crate::cmd::params::empty_object_schema;
@@ -788,7 +788,7 @@ pub struct Session {
     redo_stack: Vec<ProjectDocument>,
 }
 
-/// Optional crash-recovery WAL journal hooks backed by `lumencraft_format::recovery`.
+/// Optional crash-recovery WAL journal hooks backed by `curvebook_format::recovery`.
 impl Session {
     /// Open or crash-recover a [`Session`] from `backend`, sanitizing any circular hooks and
     /// replaying committed journal commands on top of the latest snapshot.
@@ -800,7 +800,7 @@ impl Session {
     ) -> Result<(Self, CrashRecoveryJournal<B>, RecoveryReport), EngineError> {
         let (journal, report) = CrashRecoveryJournal::open_or_recover(backend, owner_id, ttl_ms, now_epoch_ms)?;
         let doc = match &report.snapshot {
-            Some(bytes) => lumencraft_format::open_project_bytes(bytes)?,
+            Some(bytes) => curvebook_format::open_project_bytes(bytes)?,
             None => ProjectDocument::default(),
         };
         let mut session = Self::from_document(doc);
@@ -904,16 +904,16 @@ impl Session {
         Ok(outcome)
     }
 
-    /// Persist a full `.lcproj` snapshot of the current document into `journal` and prune replayed WAL entries.
+    /// Persist a full `.curvebook` snapshot of the current document into `journal` and prune replayed WAL entries.
     pub fn checkpoint_journal<B: JournalBackend>(&self, journal: &mut CrashRecoveryJournal<B>) -> Result<(), EngineError> {
-        let snapshot_bytes = lumencraft_format::save_project_bytes(&self.doc)?;
+        let snapshot_bytes = curvebook_format::save_project_bytes(&self.doc)?;
         journal.checkpoint(&snapshot_bytes)?;
         Ok(())
     }
 
     /// Flush a clean final snapshot, remove the WAL log and lease lockfile, and return the underlying backend.
     pub fn close_journal_cleanly<B: JournalBackend>(&mut self, journal: CrashRecoveryJournal<B>) -> Result<B, EngineError> {
-        let final_snapshot_bytes = lumencraft_format::save_project_bytes(&self.doc)?;
+        let final_snapshot_bytes = curvebook_format::save_project_bytes(&self.doc)?;
         let backend = journal.close_cleanly(&final_snapshot_bytes)?;
         self.dirty = false;
         Ok(backend)
@@ -936,7 +936,7 @@ impl Session {
     /// Wrap an existing [`ProjectDocument`] in a clean session.
     #[must_use]
     pub fn from_document(mut document: ProjectDocument) -> Self {
-        let _ = lumencraft_format::sanitize_circular_hooks(&mut document);
+        let _ = curvebook_format::sanitize_circular_hooks(&mut document);
         Self {
             doc: document,
             file_path: None,
@@ -1153,7 +1153,7 @@ impl Session {
         match outcome {
             Ok(res) => {
                 if res.mutated {
-                    if let Err(err) = lumencraft_format::validate_project_document(&self.doc) {
+                    if let Err(err) = curvebook_format::validate_project_document(&self.doc) {
                         self.doc = before;
                         self.file_path = before_path;
                         self.dirty = before_dirty;
@@ -1217,7 +1217,7 @@ impl Session {
 mod tests {
     use std::sync::atomic::AtomicBool;
 
-    use lumencraft_doc::{ErrorCode, SheetId};
+    use curvebook_doc::{ErrorCode, SheetId};
     use serde_json::json;
 
     use super::{Caller, EngineError, GuiOnlyPolicy, Session, cmd};

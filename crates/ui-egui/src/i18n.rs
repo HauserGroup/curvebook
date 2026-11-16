@@ -1,16 +1,16 @@
-//! Interface localization catalog registry and regional number/delimiter presets for LumenCraft.
+//! Interface localization catalog registry and regional number/delimiter presets for CurveBook.
 //!
 //! Supports English (`en`), eight Tier-1 scientific locales (`de`, `es`, `fr`, `ja`, `ko`,
 //! `pt-BR`, `zh-CN`, `zh-TW`), five Tier-2 European locales (`it`, `nl`, `pl`, `ru`, `tr`), and
 //! two right-to-left (RTL) locales (`ar`, `he`), integrating with
-//! [`lumencraft_text::LocaleNumberPolicy`] and [`lumencraft_format::CsvOptions`].
+//! [`curvebook_text::LocaleNumberPolicy`] and [`curvebook_format::CsvOptions`].
 
 use std::borrow::Cow;
 
-use lumencraft_doc::{SheetSection, TableKind};
-use lumencraft_format::CsvOptions;
-use lumencraft_math::{AxisScale, PValueFormat};
-use lumencraft_text::{LocaleNumberPolicy, format_axis_tick, format_pvalue_label};
+use curvebook_doc::{SheetSection, TableKind};
+use curvebook_format::CsvOptions;
+use curvebook_math::{AxisScale, PValueFormat};
+use curvebook_text::{LocaleNumberPolicy, format_axis_tick, format_pvalue_label};
 use serde::{Deserialize, Serialize};
 
 /// Supported BCP-47 interface locale identifiers (`en` + 8 Tier-1 + 5 Tier-2 European + 2 RTL).
@@ -989,22 +989,22 @@ pub const CATALOG: &[CatalogEntry] = &[
         he: "רשימת בדיקה לניתוח",
     ]),
     entry!("menu.help.about" => [
-        en: "About LumenCraft",
-        de: "Über LumenCraft",
-        es: "Acerca de LumenCraft",
-        fr: "À propos de LumenCraft",
-        ja: "LumenCraft について",
-        ko: "LumenCraft 정보",
-        pt_br: "Sobre o LumenCraft",
-        zh_cn: "关于 LumenCraft",
-        zh_tw: "關於 LumenCraft",
-        it: "Informazioni su LumenCraft",
-        nl: "Over LumenCraft",
-        pl: "O programie LumenCraft",
-        ru: "О программе LumenCraft",
-        tr: "LumenCraft Hakkında",
-        ar: "حول LumenCraft",
-        he: "אודות LumenCraft",
+        en: "About CurveBook",
+        de: "Über CurveBook",
+        es: "Acerca de CurveBook",
+        fr: "À propos de CurveBook",
+        ja: "CurveBook について",
+        ko: "CurveBook 정보",
+        pt_br: "Sobre o CurveBook",
+        zh_cn: "关于 CurveBook",
+        zh_tw: "關於 CurveBook",
+        it: "Informazioni su CurveBook",
+        nl: "Over CurveBook",
+        pl: "O programie CurveBook",
+        ru: "О программе CurveBook",
+        tr: "CurveBook Hakkında",
+        ar: "حول CurveBook",
+        he: "אודות CurveBook",
     ]),
     // --- Navigator folders ---
     entry!("nav.data_tables" => [
@@ -3911,22 +3911,22 @@ pub const CATALOG: &[CatalogEntry] = &[
         he: "ייצא איור...",
     ]),
     entry!("cmd.app.about" => [
-        en: "About LumenCraft",
-        de: "Über LumenCraft",
-        es: "Acerca de LumenCraft",
-        fr: "À propos de LumenCraft",
-        ja: "LumenCraft について",
-        ko: "LumenCraft 정보",
-        pt_br: "Sobre o LumenCraft",
-        zh_cn: "关于 LumenCraft",
-        zh_tw: "關於 LumenCraft",
-        it: "Informazioni su LumenCraft",
-        nl: "Over LumenCraft",
-        pl: "O programie LumenCraft",
-        ru: "О LumenCraft",
-        tr: "LumenCraft Hakkında",
-        ar: "حول LumenCraft",
-        he: "אודות LumenCraft",
+        en: "About CurveBook",
+        de: "Über CurveBook",
+        es: "Acerca de CurveBook",
+        fr: "À propos de CurveBook",
+        ja: "CurveBook について",
+        ko: "CurveBook 정보",
+        pt_br: "Sobre o CurveBook",
+        zh_cn: "关于 CurveBook",
+        zh_tw: "關於 CurveBook",
+        it: "Informazioni su CurveBook",
+        nl: "Over CurveBook",
+        pl: "O programie CurveBook",
+        ru: "О CurveBook",
+        tr: "CurveBook Hakkında",
+        ar: "حول CurveBook",
+        he: "אודות CurveBook",
     ]),
     entry!("cmd.file.new" => [
         en: "New Project",
@@ -5952,7 +5952,7 @@ impl LocalePreset {
         is_rtl_locale(&self.locale)
     }
 
-    /// Build the [`LocaleNumberPolicy`] consumed by `lumencraft-text` axis and *p*-value formatters.
+    /// Build the [`LocaleNumberPolicy`] consumed by `curvebook-text` axis and *p*-value formatters.
     #[must_use]
     pub fn number_policy(&self) -> LocaleNumberPolicy {
         LocaleNumberPolicy {
@@ -5962,7 +5962,7 @@ impl LocalePreset {
         }
     }
 
-    /// Build matching [`CsvOptions`] for `lumencraft-format` delimited import/export dialogs.
+    /// Build matching [`CsvOptions`] for `curvebook-format` delimited import/export dialogs.
     #[must_use]
     pub fn csv_options(&self) -> CsvOptions {
         CsvOptions {
@@ -5990,7 +5990,7 @@ impl LocalePreset {
 mod tests {
     use std::collections::HashSet;
 
-    use lumencraft_math::{AxisScale, PValueFormat};
+    use curvebook_math::{AxisScale, PValueFormat};
 
     use super::{
         CATALOG, LOCALES, LocalePreset, catalog_len, command_label, is_rtl_locale, locale_display_name, mirror_x_for_rtl, missing_translations,
@@ -6073,7 +6073,7 @@ mod tests {
     }
 
     fn verify_command_catalog_coverage() {
-        let engine_specs: Vec<_> = lumencraft_engine::cmd::registry().specs().collect();
+        let engine_specs: Vec<_> = curvebook_engine::cmd::registry().specs().collect();
         assert_eq!(engine_specs.len(), 97, "expected 97 engine CommandSpec entries");
         assert_eq!(crate::menus::UI_COMMANDS.len(), 45, "expected 45 UiCommandSpec entries");
 

@@ -11,12 +11,12 @@
 //!   aliased factorial terms -> `df = 0.0` (`ss = 0.0, ms = 0.0, f_statistic = None, p_value = None`).
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ConfidenceLevel, DataSheet, FactorialAnovaSpec, GroupedTable, MultiplicityMethod, MultiplicitySpec,
     NestedAnalysisSpec, NestedTable, RepeatedMeasuresDesign, ResultCell, SheetId, SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
-use lumencraft_math::linalg::DenseMatrix;
-use lumencraft_stats::anova::{
+use curvebook_math::linalg::DenseMatrix;
+use curvebook_stats::anova::{
     FactorialObservations, RmSphericityCorrection, compute_anova_effect_sizes, compute_anova_effect_sizes_for_n, fit_factorial_anova,
     fit_multi_vc_reml, fit_random_intercept_reml, fit_rm_two_way_anova, fit_rm_two_way_anova_with_sphericity, kruskal_wallis_test,
     run_factorial_anova, run_nested_analysis, variance_homogeneity_tests,
@@ -32,7 +32,7 @@ fn assert_approx_eq(actual: f64, expected: f64, abs_tol: f64, rel_tol: f64, labe
     );
 }
 
-fn find_term<'a>(terms: &'a [lumencraft_stats::anova::FactorialAnovaTerm], name: &str) -> &'a lumencraft_stats::anova::FactorialAnovaTerm {
+fn find_term<'a>(terms: &'a [curvebook_stats::anova::FactorialAnovaTerm], name: &str) -> &'a curvebook_stats::anova::FactorialAnovaTerm {
     let found = terms.iter().find(|t| t.name == name);
     assert!(found.is_some(), "missing term `{name}` in {terms:?}");
     found.unwrap()

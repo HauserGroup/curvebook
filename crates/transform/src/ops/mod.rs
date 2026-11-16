@@ -8,7 +8,7 @@ pub use math::{MathTransformOp, execute_math_op, execute_math_transform};
 pub use normalize_baseline::{BaselineKind, execute_normalize, execute_remove_baseline, execute_remove_baseline_kind};
 pub use reshape_select::{PruneMethod, SelectRule, execute_prune, execute_select, execute_transpose};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, DataSheet, HookSource, InfoSheet, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
     TableArchetype, TransformAnalysisSpec,
 };

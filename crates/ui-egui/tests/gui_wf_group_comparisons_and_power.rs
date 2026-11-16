@@ -10,13 +10,13 @@
 
 #![forbid(unsafe_code)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, ChecklistStatus, GraphKind, GroupedArrangement, MultiplicityMethod, OneWayMethod, PValueFormat, RepeatedMeasuresDesign,
     ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, TwoGroupMethod,
 };
-use lumencraft_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
-use lumencraft_ui_egui::power_wizard::PowerWizardStage;
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
+use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
+use curvebook_ui_egui::power_wizard::PowerWizardStage;
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;
@@ -221,7 +221,7 @@ fn cell_number(cell: &ResultCell) -> Result<f64, String> {
 
 fn cell_ci(cell: &ResultCell) -> Result<(f64, f64), String> {
     match cell {
-        ResultCell::ConfidenceInterval { lower: lumencraft_doc::CiBound::Finite(lo), upper: lumencraft_doc::CiBound::Finite(hi) } => Ok((*lo, *hi)),
+        ResultCell::ConfidenceInterval { lower: curvebook_doc::CiBound::Finite(lo), upper: curvebook_doc::CiBound::Finite(hi) } => Ok((*lo, *hi)),
         other => Err(format!("expected finite ConfidenceInterval cell, got {other:?}")),
     }
 }
@@ -1247,7 +1247,7 @@ fn verify_created_power_sheets(app: &UiApp, data_id: &str, info_id: &str, res_id
             .iter()
             .find(|c| c.name == name)
             .and_then(|c| match c.value {
-                lumencraft_doc::ConstantValue::Number(v) => Some(v),
+                curvebook_doc::ConstantValue::Number(v) => Some(v),
                 _ => None,
             })
             .ok_or_else(|| format!("missing numeric constant `{name}` on Power InfoSheet"))

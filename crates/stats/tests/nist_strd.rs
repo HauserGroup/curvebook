@@ -1,18 +1,18 @@
-//! NIST StRD certification integration tests for `lumencraft-stats` across all 31 datasets:
+//! NIST StRD certification integration tests for `curvebook-stats` across all 31 datasets:
 //! 9 Univariate, 11 One-Way ANOVA, and 11 Linear Regression datasets.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeMap;
 
-use lumencraft_math::{ConfidenceLevel, DenseMatrix};
-use lumencraft_stats::anova::ordinary_one_way_anova;
-use lumencraft_stats::column::summarize_column;
-use lumencraft_stats::regression::multiple_linear_regression;
-use lumencraft_testkit::nist_strd::{
+use curvebook_math::{ConfidenceLevel, DenseMatrix};
+use curvebook_stats::anova::ordinary_one_way_anova;
+use curvebook_stats::column::summarize_column;
+use curvebook_stats::regression::multiple_linear_regression;
+use curvebook_testkit::nist_strd::{
     all_offline_anova_benchmarks, all_offline_linear_regression_benchmarks, all_offline_univariate_benchmarks, corpus_available,
     default_nist_strd_dir, load_corpus_anova_all, load_corpus_linear_all, load_corpus_univariate_all,
 };
-use lumencraft_testkit::{assert_approx_eq, assert_lre_at_least, log_relative_error as lre, oracle_univariate_f64};
+use curvebook_testkit::{assert_approx_eq, assert_lre_at_least, log_relative_error as lre, oracle_univariate_f64};
 
 fn require_corpus_dir() -> Option<std::path::PathBuf> {
     let dir = default_nist_strd_dir();
@@ -20,8 +20,8 @@ fn require_corpus_dir() -> Option<std::path::PathBuf> {
         return Some(dir);
     }
     assert!(
-        std::env::var_os("LUMENCRAFT_REQUIRE_CORPUS").is_none_or(|v| v != "1"),
-        "LUMENCRAFT_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}",
+        std::env::var_os("CURVEBOOK_REQUIRE_CORPUS").is_none_or(|v| v != "1"),
+        "CURVEBOOK_REQUIRE_CORPUS=1 set, but NIST StRD corpus is missing or incomplete at {}",
         dir.display()
     );
     None

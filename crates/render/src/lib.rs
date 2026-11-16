@@ -1,4 +1,4 @@
-//! Deterministic CPU rasterizer and compositor for LumenCraft graphs and multi-figure publication
+//! Deterministic CPU rasterizer and compositor for CurveBook graphs and multi-figure publication
 //! layouts.
 //!
 //! Layer L3 rendering crate. Governing spec: `docs/graphing-and-layouts.md` (§1, §6).
@@ -26,8 +26,8 @@ pub struct RenderTargetSpec {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_chart::{ChartScene, Path2D, PointPt, ScenePrimitive, StrokePaint};
-    use lumencraft_palette::Rgba8;
+    use curvebook_chart::{ChartScene, Path2D, PointPt, ScenePrimitive, StrokePaint};
+    use curvebook_palette::Rgba8;
 
     use super::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
 

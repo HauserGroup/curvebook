@@ -2,17 +2,17 @@
 //! Targeted regressions for Stage 3A S1 (`R1-S03-01`, `R1-S03-02`, `R1-S03-03`)
 //! and X2 (`R1-X2-02`) curve-fitting and summarized replicate fixes.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CiBound, DataSheet, FitMethod, LinearRegressionSpec, NonlinearFitSpec, ParameterRule, ParameterScope,
     ResultCell, SubcolumnMode, TableArchetype, WeightingScheme, XColumnMode, XyTable,
 };
-use lumencraft_fit::diagnostics::CovarianceDiagnostics;
-use lumencraft_fit::{
+use curvebook_fit::diagnostics::CovarianceDiagnostics;
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, HookContext, ParameterNote, SimpleLinearOptions, SolverConfig, compare_linear_lines,
     compute_deviance_profile_likelihood_cis, execute_analysis, fit_nonlinear, simple_linear_regression,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_testkit::metrics::assert_approx_eq;
+use curvebook_math::ConfidenceLevel;
+use curvebook_testkit::metrics::assert_approx_eq;
 
 fn ds(idx: usize, xs: &[f64], ys: &[f64]) -> DatasetSeries {
     DatasetSeries {

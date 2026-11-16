@@ -1,7 +1,7 @@
 //! Stage 4B regression tests for `R1-S02-13` (`ColumnTable::complete_paired_rows_with_report`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{Cell, ColumnDesignHint, ColumnTable};
+use curvebook_doc::{Cell, ColumnDesignHint, ColumnTable};
 
 #[test]
 fn r1_s02_13_complete_paired_rows_with_report_counts_omissions_and_trailing_blanks() {

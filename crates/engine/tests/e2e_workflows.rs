@@ -1,17 +1,17 @@
-//! End-to-end verification journeys through `lumencraft_engine::Session` covering
+//! End-to-end verification journeys through `curvebook_engine::Session` covering
 //! Alpha workflows 1-5, Core reactive/statistical/graphical workflows, and Beta G7-G11 additions.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, BreakOrnament, CellCoord, CellValue, DataSheet, ErrorPropagationMode,
     FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, GraphicalDataObject, HookSource, MathTransformPreset, ModelComparisonSpec, MultiplicityMethod,
     MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor, ParameterRule, ParameterScope, ProjectDocument, RepeatedMeasuresDesign, ResultCell,
     ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, TableArchetype, TransformAnalysisSpec, VariableRole,
 };
-use lumencraft_engine::{CommandOutcome, Session};
-use lumencraft_format::ZipWriter;
-use lumencraft_palette::Rgba8;
+use curvebook_engine::{CommandOutcome, Session};
+use curvebook_format::ZipWriter;
+use curvebook_palette::Rgba8;
 use serde_json::{Value, json};
 
 // ---------------------------------------------------------------------------
@@ -260,7 +260,7 @@ fn build_cleanroom_prism_zip_bytes() -> Vec<u8> {
 
 // ---------------------------------------------------------------------------
 // 1. Alpha Workflows 1-5: Dose-response, transforms, interpolation, exports,
-//    .lumencraft round-trip + edit.undo/edit.redo + multi-hop analyzable DAG
+//    .curvebook round-trip + edit.undo/edit.redo + multi-hop analyzable DAG
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -341,20 +341,20 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
     // because `crates/fit/src/result.rs::populate_nonlinear_result_sheet` omits pushing that tab.
     let doc_ref = session.document();
     let dose_log_ds = doc_ref.data_sheet(&SheetId::new("dose-log")).unwrap();
-    let ds_vec = lumencraft_fit::extract_datasets_from_sheet(dose_log_ds, &[]).unwrap();
-    let model_4pl = lumencraft_fit::get_builtin_model("log_agonist_vs_response_4pl").unwrap();
-    let hooks = lumencraft_fit::HookContext {
+    let ds_vec = curvebook_fit::extract_datasets_from_sheet(dose_log_ds, &[]).unwrap();
+    let model_4pl = curvebook_fit::get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let hooks = curvebook_fit::HookContext {
         info_sheets: &doc_ref.info_sheets,
         result_sheets: &doc_ref.result_sheets,
         data_sheets: &doc_ref.data_sheets,
         primary_info_sheet_id: None,
         visited_sheets: std::collections::HashSet::new(),
     };
-    let nl_res = lumencraft_fit::fit_nonlinear(
+    let nl_res = curvebook_fit::fit_nonlinear(
         model_4pl.as_ref(),
         &ds_vec,
         &hooks,
-        &lumencraft_fit::SolverConfig { interpolate_unknowns: true, ..lumencraft_fit::SolverConfig::default() },
+        &curvebook_fit::SolverConfig { interpolate_unknowns: true, ..curvebook_fit::SolverConfig::default() },
     )
     .unwrap();
     assert_eq!(nl_res.interpolated_x.len(), 2, "expected 2 interpolated unknown 4PL rows");
@@ -445,7 +445,7 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
     exec_ok(&mut session, "edit.undo", json!({}));
     assert!((scalar_val(result_sheet(&session, "fit-4pl"), "LogEC50", Some(0)) - log_ec50).abs() < 1e-12);
 
-    // Reopen saved .lumencraft bytes in a fresh Session -> recalculate -> identical ResultSheet & SVG.
+    // Reopen saved .curvebook bytes in a fresh Session -> recalculate -> identical ResultSheet & SVG.
     let mut reopened = Session::new();
     exec_ok(&mut reopened, "project.open", json!({ "bytes_base64": archive_b64 }));
     exec_ok(&mut reopened, "project.recalculate", json!({}));
@@ -761,10 +761,10 @@ fn core_workflow_kruskal_wallis_dunn_and_rm_reml_mixed_anova() {
     let cov_tabs: Vec<&ResultTab> = un_res.tabs.iter().filter(|t| t.kind == ResultTabKind::CovarianceMatrix).collect();
     assert_eq!(cov_tabs.len(), 2, "expected covariance and correlation tabs, got {}", cov_tabs.len());
     assert!(un_res.scalars.iter().any(|s| s.key == "REML mean diagonal variance" && s.value.is_finite()));
-    let methods = lumencraft_engine::methods_report::generate_methods_report(
+    let methods = curvebook_engine::methods_report::generate_methods_report(
         session.document(),
         &SheetId::new("rm-unstructured"),
-        lumencraft_engine::methods_report::ReportFormat::PlainText,
+        curvebook_engine::methods_report::ReportFormat::PlainText,
     )
     .unwrap();
     assert!(methods.contains("unstructured residual covariance"), "methods report missing unstructured wording:\n{methods}");
@@ -1029,11 +1029,11 @@ fn core_workflow_broken_axis_violin_before_after_and_stacked_brackets() {
 }
 
 // ---------------------------------------------------------------------------
-// 6. Beta G9: .lctemplate save + instantiate + InfoSheet constant hooks
+// 6. Beta G9: .cbtemplate save + instantiate + InfoSheet constant hooks
 // ---------------------------------------------------------------------------
 
 #[test]
-fn beta_g9_lctemplate_save_instantiate_and_info_constant_hooks() {
+fn beta_g9_cbtemplate_save_instantiate_and_info_constant_hooks() {
     let mut session = Session::new();
     exec_ok(&mut session, "project.new", json!({ "title": "Assay Template Master" }));
     populate_xy_dose_response(&mut session, "tpl-xy", true, false, 100.0);
@@ -1067,7 +1067,7 @@ fn beta_g9_lctemplate_save_instantiate_and_info_constant_hooks() {
     );
     exec_ok(&mut session, "graph.setRegressionOverlay", json!({ "sheet_id": "tpl-graph", "result_sheet_id": "tpl-fit" }));
 
-    // Save stripped .lctemplate archive.
+    // Save stripped .cbtemplate archive.
     let tpl_out = exec_ok(&mut session, "project.saveTemplate", json!({ "return_bytes": true }));
     let tpl_b64 = payload_str(&tpl_out, "bytes_base64").to_owned();
 

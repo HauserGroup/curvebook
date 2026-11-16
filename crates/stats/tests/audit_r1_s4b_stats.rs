@@ -1,19 +1,19 @@
-//! Stage 4B regression tests for `lumencraft-stats` findings (`R1-S02-12`, `R1-S02-13`, `R1-X2-08`,
+//! Stage 4B regression tests for `curvebook-stats` findings (`R1-S02-12`, `R1-S02-13`, `R1-X2-08`,
 //! `R1-X2-09`, and all 5 S3 title-only findings in `docs/audit/findings/r1/S02.md`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BlandAltmanSpec, Cell, ChecklistStatus, CiBound, ColumnDesignHint, ColumnTable, ContingencyMethod, ContingencySpec,
     ContingencyTable, CoxTieMethod, DataSheet, DescriptiveSpec, GroupedTable, KappaWeighting, MultipleVariablesTable, MultiplicityMethod,
     MultiplicitySpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec, ResultCell, ResultSheet, SheetId, SubcolumnMode, SurvivalAnalysisSpec,
     SurvivalTable, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::norm_sf;
-use lumencraft_stats::categorical::{baptista_pike_or_ci, cohens_kappa, fleiss_kappa};
-use lumencraft_stats::multiplicity::{GroupComparisonInput, MultiplicityProcedure, compare_groups_with_procedure};
-use lumencraft_stats::two_group::{bland_altman, mann_whitney_u, wilcoxon_matched_pairs};
-use lumencraft_stats::{StatsError, run_analysis};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::norm_sf;
+use curvebook_stats::categorical::{baptista_pike_or_ci, cohens_kappa, fleiss_kappa};
+use curvebook_stats::multiplicity::{GroupComparisonInput, MultiplicityProcedure, compare_groups_with_procedure};
+use curvebook_stats::two_group::{bland_altman, mann_whitney_u, wilcoxon_matched_pairs};
+use curvebook_stats::{StatsError, run_analysis};
 
 fn assert_all_sheet_numbers_finite(sheet: &ResultSheet, label: &str) {
     for s in &sheet.scalars {

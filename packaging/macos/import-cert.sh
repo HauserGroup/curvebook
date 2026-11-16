@@ -7,8 +7,8 @@ set -euo pipefail
 : "${APPLE_CERTIFICATE_PASSWORD:?APPLE_CERTIFICATE_PASSWORD secret missing}"
 : "${KEYCHAIN_PASSWORD:?KEYCHAIN_PASSWORD secret missing}"
 
-CERT_P12="${RUNNER_TEMP:-/tmp}/lumencraft-signing.p12"
-KEYCHAIN="${RUNNER_TEMP:-/tmp}/lumencraft-signing.keychain-db"
+CERT_P12="${RUNNER_TEMP:-/tmp}/curvebook-signing.p12"
+KEYCHAIN="${RUNNER_TEMP:-/tmp}/curvebook-signing.keychain-db"
 rm -f "$CERT_P12" "$KEYCHAIN"
 
 printf '%s' "$APPLE_CERTIFICATE" | base64 --decode >"$CERT_P12"

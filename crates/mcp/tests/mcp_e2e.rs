@@ -3,10 +3,10 @@ use std::io::{BufRead, BufReader, Cursor, Write};
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lumencraft_format::ZipWriter;
-use lumencraft_mcp::ui_catalog::UI_COMMANDS;
-use lumencraft_mcp::{McpServerState, serve};
-use lumencraft_svg::validate_svg_structure;
+use curvebook_format::ZipWriter;
+use curvebook_mcp::ui_catalog::UI_COMMANDS;
+use curvebook_mcp::{McpServerState, serve};
+use curvebook_svg::validate_svg_structure;
 use serde_json::{Value, json};
 
 struct TempDirGuard {
@@ -16,7 +16,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(prefix: &str) -> Self {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-        let dir = std::env::temp_dir().join(format!("lumencraft-{prefix}-{}-{nanos}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("curvebook-{prefix}-{}-{nanos}", std::process::id()));
         let _ = fs::create_dir_all(&dir);
         Self { path: dir }
     }
@@ -145,7 +145,7 @@ fn slice0_handshake_and_catalog(state: &mut McpServerState) -> Result<(), String
         return Err(format!("expected 3 handshake replies, got {}", hs_replies.len()));
     }
     if hs_replies[0]["result"]["protocolVersion"] != json!("2024-11-05")
-        || hs_replies[0]["result"]["serverInfo"]["name"] != json!("lumencraft")
+        || hs_replies[0]["result"]["serverInfo"]["name"] != json!("curvebook")
         || !hs_replies[0]["result"]["capabilities"]["tools"].is_object()
     {
         return Err(format!("unexpected initialize reply: {}", hs_replies[0]));
@@ -335,8 +335,8 @@ fn slice0_render_and_exports(state: &mut McpServerState, dir: &std::path::Path) 
 }
 
 fn slice0_save_and_reopen(state: &mut McpServerState, dir: &std::path::Path) -> Result<(), String> {
-    let project_path = dir.join("dose_response.lumencraft");
-    let template_path = dir.join("dose_response.lctemplate");
+    let project_path = dir.join("dose_response.curvebook");
+    let template_path = dir.join("dose_response.cbtemplate");
 
     let save_res = first_text_json(&call_tool_rpc(state, 18, "save_file", json!({ "path": project_path.display().to_string() }))?)?;
     if save_res["saved"] != json!(true) {

@@ -1,11 +1,11 @@
 [package]
-name = "lumencraft-text"
+name = "curvebook-text"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft scientific text, Greek symbols, superscript/subscript and math label layout"
+description = "CurveBook scientific text, Greek symbols, superscript/subscript and math label layout"
 
 [lints]
 workspace = true
@@ -15,10 +15,10 @@ default = ["bundled-fonts"]
 bundled-fonts = []
 
 [dependencies]
-lumencraft-math = { workspace = true }
-lumencraft-palette = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-palette = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }
 proptest = { workspace = true }

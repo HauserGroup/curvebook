@@ -1,22 +1,22 @@
 [package]
-name = "lumencraft-svg"
+name = "curvebook-svg"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft vector SVG figure exporter and reader"
+description = "CurveBook vector SVG figure exporter and reader"
 
 [lints]
 workspace = true
 
 [dependencies]
-lumencraft-chart = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-math = { workspace = true }
-lumencraft-palette = { workspace = true }
-lumencraft-text = { workspace = true }
+curvebook-chart = { workspace = true }
+curvebook-doc = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-palette = { workspace = true }
+curvebook-text = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }

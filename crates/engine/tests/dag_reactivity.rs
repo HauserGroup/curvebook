@@ -3,8 +3,8 @@
 //! cycle rejection rollback, and downstream graph style/annotation preservation.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_chart::compile_graph;
-use lumencraft_doc::{
+use curvebook_chart::compile_graph;
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, BracketLabelMode, BracketStyle, Cell, CellCoord, ColumnDesignHint, ColumnTable,
     ConstantValue, DataSheet, DescriptiveSpec, FloatingNote, GraphAnnotation, GraphSheet, GraphicalDataObject, HookSource, ImportFilterSpec,
     ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LinearRegressionSpec,
@@ -13,13 +13,13 @@ use lumencraft_doc::{
     ResultSheet, ResultStatus, SheetCellRange, SheetId, SubcolumnMode, TableArchetype, TickLabelFormat, TransformAnalysisSpec, WeightingScheme,
     WhiskerMethod, XColumnMode, XyTable,
 };
-use lumencraft_engine::dag::{recalculate_project, recalculate_project_with_report, topological_order};
-use lumencraft_engine::guard::run_guarded;
-use lumencraft_engine::{EngineError, Session};
-use lumencraft_fit::get_builtin_model;
-use lumencraft_palette::{MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
-use lumencraft_testkit::assert_approx_eq;
-use lumencraft_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
+use curvebook_engine::dag::{recalculate_project, recalculate_project_with_report, topological_order};
+use curvebook_engine::guard::run_guarded;
+use curvebook_engine::{EngineError, Session};
+use curvebook_fit::get_builtin_model;
+use curvebook_palette::{MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
+use curvebook_testkit::assert_approx_eq;
+use curvebook_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 
 fn approx_eq(actual: f64, expected: f64, tol: f64, label: &str) {
     assert_approx_eq(actual, expected, tol, tol, label);
@@ -290,7 +290,7 @@ fn hook_source_bindings_info_constant_result_scalar_and_column_title_reactivity(
         AnalysisKind::Transform(TransformAnalysisSpec::Math {
             x_transform: None,
             y_transform: Some(MathTransformPreset::LinearScale { slope: 1.0, intercept: 0.0 }),
-            error_propagation: lumencraft_doc::ErrorPropagationMode::FirstOrderDeltaMethod,
+            error_propagation: curvebook_doc::ErrorPropagationMode::FirstOrderDeltaMethod,
         }),
     )
     .expect("tr spec");
@@ -509,7 +509,7 @@ fn reactive_linked_region_and_transpose_propagation_without_duplication() {
         AnalysisKind::Transform(TransformAnalysisSpec::Math {
             x_transform: None,
             y_transform: Some(MathTransformPreset::LinearScale { slope: 10.0, intercept: 0.0 }),
-            error_propagation: lumencraft_doc::ErrorPropagationMode::FirstOrderDeltaMethod,
+            error_propagation: curvebook_doc::ErrorPropagationMode::FirstOrderDeltaMethod,
         }),
     )
     .expect("tr spec");
@@ -820,7 +820,7 @@ fn cycle_detection_and_atomic_rollback_across_all_topologies() {
         DataSheet::new("ds-a", "A", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).expect("t"))).expect("ds a");
     let mut ds_b =
         DataSheet::new("ds-b", "B", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).expect("t"))).expect("ds b");
-    ds_a.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+    ds_a.linked_regions.push(curvebook_doc::LinkedDataRegion {
         id: String::from("l1"),
         spec: ImportLinkSpec {
             source: LinkSource::InternalSheet {
@@ -835,7 +835,7 @@ fn cycle_detection_and_atomic_rollback_across_all_topologies() {
         target_range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1, 0, 0)),
         provenance_summary: String::from("b->a"),
     });
-    ds_b.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+    ds_b.linked_regions.push(curvebook_doc::LinkedDataRegion {
         id: String::from("l2"),
         spec: ImportLinkSpec {
             source: LinkSource::InternalSheet {
@@ -910,7 +910,7 @@ fn cycle_detection_and_atomic_rollback_across_all_topologies() {
     let mut doc_mixed_cycle = base_doc_with_valid_dirty_sheet();
     let mut ds_m =
         DataSheet::new("ds-m", "M", TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).expect("t"))).expect("ds m");
-    ds_m.linked_regions.push(lumencraft_doc::LinkedDataRegion {
+    ds_m.linked_regions.push(curvebook_doc::LinkedDataRegion {
         id: String::from("l-res"),
         spec: ImportLinkSpec {
             source: LinkSource::InternalSheet {

@@ -17,7 +17,7 @@ use crate::PlatformError;
 ///
 /// Bare `csv` and `template` are deliberately absent: `table.importCsv` and the paste command
 /// read `csv` as inline CSV text, and `table.importPlateMap` reads `template` as an inline
-/// `PlateMapTemplate` JSON object or inline `.lctemplate` JSON string. File-path parameters for
+/// `PlateMapTemplate` JSON object or inline `.cbtemplate` JSON string. File-path parameters for
 /// templates use `path`, `template_path`, or `templatePath`, while batch manifest `inputs[].csv`
 /// and root `template` paths are resolved separately by batch manifest loaders.
 pub const PATH_PARAM_KEYS: &[&str] = &[
@@ -278,7 +278,7 @@ mod tests {
 
     fn temp_dir(label: &str) -> PathBuf {
         let seq = TEST_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("lumencraft-platform-guard-{label}-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("curvebook-platform-guard-{label}-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
@@ -307,21 +307,21 @@ mod tests {
         let canonical = std::fs::canonicalize(&dir).unwrap();
 
         let tpl_obj = json!({ "name": "96-well ../layout", "geometry": "96", "wells": [] });
-        let tpl_str = r#"{"format":"lumencraft-archive","kind":"template","path":"../ignored"}"#;
+        let tpl_str = r#"{"format":"curvebook-archive","kind":"template","path":"../ignored"}"#;
 
         for resolver in [PathResolver::Unconstrained { base_dir: dir.clone() }, PathResolver::Sandboxed(guard)] {
             let mut obj_params = json!({
                 "template": tpl_obj.clone(),
-                "template_path": "templates/plate.lctemplate",
+                "template_path": "templates/plate.cbtemplate",
             });
             resolver.sanitize_params(&mut obj_params).unwrap();
             assert_eq!(obj_params["template"], tpl_obj);
             match &resolver {
                 PathResolver::Unconstrained { .. } => {
-                    assert_eq!(obj_params["template_path"], json!(dir.join("templates").join("plate.lctemplate").to_string_lossy()));
+                    assert_eq!(obj_params["template_path"], json!(dir.join("templates").join("plate.cbtemplate").to_string_lossy()));
                 }
                 PathResolver::Sandboxed(_) => {
-                    assert_eq!(obj_params["template_path"], json!(canonical.join("templates").join("plate.lctemplate").to_string_lossy()));
+                    assert_eq!(obj_params["template_path"], json!(canonical.join("templates").join("plate.cbtemplate").to_string_lossy()));
                 }
             }
 
@@ -332,7 +332,7 @@ mod tests {
 
         let escape_guard = WorkdirGuard::new(&dir).unwrap();
         let escape_resolver = PathResolver::Sandboxed(escape_guard);
-        let mut escape_params = json!({ "template": tpl_obj, "templatePath": "../outside.lctemplate" });
+        let mut escape_params = json!({ "template": tpl_obj, "templatePath": "../outside.cbtemplate" });
         assert!(matches!(escape_resolver.sanitize_params(&mut escape_params), Err(PlatformError::PathEscape { .. })));
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -3,14 +3,14 @@
 //! Multiple Logistic Regression (IRLS with separation safeguard, Hosmer–Lemeshow, pseudo-*R*^2,
 //! ROC AUC), and Multiple Poisson Regression (log-link IRLS, deviance & Pearson dispersion).
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, GlmFamily, GlmSpec, PValueFormat,
     PassingBablokSpec, ResultCell, ResultSheet, ResultTabKind, SheetId, TableArchetype, VariableColumn, VariableRole,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, f_sf, norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p};
-use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares};
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{chi2_sf, f_sf, norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p};
+use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares};
+use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, validate_finite_slice};
@@ -138,7 +138,7 @@ pub struct MultiplePoissonResult {
 /// Fit Ordinary Least Squares multiple linear regression on design matrix `x` (`n x p`,
 /// where column `0` is `1.0` if `has_intercept == true`) and response vector `y`.
 ///
-/// Uses `lumencraft_math::linalg::solve_linear_least_squares` (column-equilibrated pivoted QR with
+/// Uses `curvebook_math::linalg::solve_linear_least_squares` (column-equilibrated pivoted QR with
 /// Bjorck mixed-precision refinement and SVD fallback) for full precision on stiff/collinear
 /// benchmarks (`Wampler1..5`, `Filip`, `Longley`, `NoInt1`, `NoInt2`).
 pub fn multiple_linear_regression(
@@ -152,7 +152,7 @@ pub fn multiple_linear_regression(
     let n = x.nrows();
     let p = x.ncols();
     if y.len() != n || term_names.len() != p {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y.len() }));
     }
     if p == 0 || n <= p {
         return Err(StatsError::InsufficientSampleSize { context: "multiple linear regression", required: p + 1, actual: n });
@@ -495,7 +495,7 @@ pub fn multiple_logistic_regression(
     let n = x.nrows();
     let p = x.ncols();
     if y_binary.len() != n || term_names.len() != p {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y_binary.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y_binary.len() }));
     }
     if n <= p || p == 0 {
         return Err(StatsError::InsufficientSampleSize { context: "GLM regression", required: p + 1, actual: n });
@@ -663,7 +663,7 @@ pub fn multiple_poisson_regression(
     let n = x.nrows();
     let p = x.ncols();
     if y_counts.len() != n || term_names.len() != p {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: y_counts.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: y_counts.len() }));
     }
     if n <= p || p == 0 {
         return Err(StatsError::InsufficientSampleSize { context: "GLM regression", required: p + 1, actual: n });
@@ -679,7 +679,7 @@ pub fn multiple_poisson_regression(
     let mut beta = vec![0.0_f64; p];
     beta[0] = y_mean.ln();
 
-    let ln_fact = |y: f64| -> f64 { lumencraft_math::special::ln_gamma(y + 1.0).unwrap_or(0.0) };
+    let ln_fact = |y: f64| -> f64 { curvebook_math::special::ln_gamma(y + 1.0).unwrap_or(0.0) };
     let ll_null: f64 = y_counts.iter().map(|&y| y * y_mean.ln() - y_mean - ln_fact(y)).sum();
 
     let eval_poisson = |b: &[f64]| -> (f64, Vec<f64>) {
@@ -888,7 +888,7 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
                     }
                     if is_cat[pos] {
                         let tok = match &cell.value {
-                            lumencraft_doc::CellValue::Text(s) => {
+                            curvebook_doc::CellValue::Text(s) => {
                                 let trimmed = s.trim();
                                 if trimmed.is_empty() {
                                     ok = false;
@@ -896,7 +896,7 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
                                 }
                                 trimmed.to_owned()
                             }
-                            lumencraft_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
+                            curvebook_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
                             _ => {
                                 ok = false;
                                 break;
@@ -1833,7 +1833,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
 }
 
 /// Evaluate residual Gaussian normality for linear GLM without remediation suggestions (`QOL-7`).
-fn residual_normality_checklist_item(residuals: &[f64], alpha: f64) -> lumencraft_doc::ChecklistItem {
+fn residual_normality_checklist_item(residuals: &[f64], alpha: f64) -> curvebook_doc::ChecklistItem {
     let outcome = if residuals.len() < 3 {
         return checklist_item(
             "Residual normality",
@@ -1868,7 +1868,7 @@ fn residual_normality_checklist_item(residuals: &[f64], alpha: f64) -> lumencraf
 }
 
 /// Build logistic classification summary (cutoff 0.50) and cutoff-accuracy sweep (`0.1..=0.9`).
-fn build_logistic_classification_tab(y: &[f64], probs: &[f64]) -> lumencraft_doc::ResultTab {
+fn build_logistic_classification_tab(y: &[f64], probs: &[f64]) -> curvebook_doc::ResultTab {
     fn metrics_row(y: &[f64], probs: &[f64], cutoff: f64) -> Vec<ResultCell> {
         let mut tp = 0_usize;
         let mut fp = 0_usize;

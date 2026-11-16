@@ -1,5 +1,5 @@
 //! Integration tests for `R10.9` L2 proportional UI text shaping, tabular-numeral alignment,
-//! multi-script Unicode coverage, BiDi RTL ordering, HiDPI scaling, `LUMENCRAFT_FONTS_DIR`
+//! multi-script Unicode coverage, BiDi RTL ordering, HiDPI scaling, `CURVEBOOK_FONTS_DIR`
 //! discovery, and `missing_glyph` reporting.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
@@ -9,8 +9,8 @@ use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_testkit::assert_approx_eq;
-use lumencraft_text::{
+use curvebook_testkit::assert_approx_eq;
+use curvebook_text::{
     FontFamilyKind, MeasuredTextMetrics, SpanSlope, SpanWeight, SystemFontSet, TextDirection, TextMeasurer, TrueTypeFont, UiTextStyle,
     build_minimal_truetype_font, has_cleanroom_vector_outline,
 };
@@ -19,7 +19,7 @@ static TMP_SEQ: AtomicU64 = AtomicU64::new(1);
 
 fn temp_font_dir(label: &str) -> PathBuf {
     let seq = TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-    let dir = std::env::temp_dir().join(format!("lc-r10-ui-shaping-{label}-{}-{seq}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("cb-r10-ui-shaping-{label}-{}-{seq}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create temp font dir");
     dir
@@ -38,7 +38,7 @@ fn push_u32(buf: &mut Vec<u8>, v: u32) {
 }
 
 /// Build an SFNT font with custom per-glyph advance widths for testing proportional vs tabular metrics
-/// and `LUMENCRAFT_FONTS_DIR` override priority.
+/// and `CURVEBOOK_FONTS_DIR` override priority.
 /// Maps ASCII `' '..='~'` to `gid 1..=95`, where `override_widths` sets `(ch, advance_1000)`.
 fn build_custom_advance_sfnt(family_name: &str, override_widths: &[(char, u16)], is_fixed_pitch: bool) -> Vec<u8> {
     let num_glyphs: u16 = 96; // gid 0 (.notdef) + 95 printable ASCII (32..=126)
@@ -449,7 +449,7 @@ fn ttc_collection_and_fonts_dir_manifest_discovery_work_and_override_host() {
     assert_approx_eq(mono_shaped.glyphs[0].advance_px, 6.0, 1e-6, 1e-6, "ttc mono i");
     assert_approx_eq(mono_shaped.glyphs[1].advance_px, 6.0, 1e-6, 1e-6, "ttc mono W");
 
-    // LUMENCRAFT_FONTS_DIR layout with `fonts/manifest.txt`.
+    // CURVEBOOK_FONTS_DIR layout with `fonts/manifest.txt`.
     let dir = temp_font_dir("manifest");
     let fonts_sub = dir.join("fonts");
     std::fs::create_dir_all(&fonts_sub).expect("mkdir fonts");
@@ -462,20 +462,20 @@ fn ttc_collection_and_fonts_dir_manifest_discovery_work_and_override_host() {
     let w = dir_set.measure(&UiTextStyle::ui_sans(10.0), "A", 96).width_px;
     assert_approx_eq(w, 9.0, 1e-6, 1e-6, "dir override advance 900/1000 * 10");
 
-    // Verify LUMENCRAFT_FONTS_DIR env override inside a clean child process without unsafe set_var.
-    if std::env::var_os("LC_R10_FONT_ENV_CHILD").as_deref() == Some(std::ffi::OsStr::new("1")) {
+    // Verify CURVEBOOK_FONTS_DIR env override inside a clean child process without unsafe set_var.
+    if std::env::var_os("CB_R10_FONT_ENV_CHILD").as_deref() == Some(std::ffi::OsStr::new("1")) {
         let env_set = SystemFontSet::from_env_and_system();
         let env_w = env_set.measure(&UiTextStyle::ui_sans(10.0), "A", 96).width_px;
-        assert_approx_eq(env_w, 9.0, 1e-6, 1e-6, "LUMENCRAFT_FONTS_DIR env override priority");
+        assert_approx_eq(env_w, 9.0, 1e-6, 1e-6, "CURVEBOOK_FONTS_DIR env override priority");
     } else {
         let exe = std::env::current_exe().expect("current test exe");
         let status = Command::new(exe)
-            .env("LUMENCRAFT_FONTS_DIR", &dir)
-            .env("LC_R10_FONT_ENV_CHILD", "1")
+            .env("CURVEBOOK_FONTS_DIR", &dir)
+            .env("CB_R10_FONT_ENV_CHILD", "1")
             .args(["--exact", "ttc_collection_and_fonts_dir_manifest_discovery_work_and_override_host"])
             .status()
             .expect("spawn child test");
-        assert!(status.success(), "LUMENCRAFT_FONTS_DIR child process check failed");
+        assert!(status.success(), "CURVEBOOK_FONTS_DIR child process check failed");
     }
 
     let _ = std::fs::remove_dir_all(&dir);

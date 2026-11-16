@@ -1,4 +1,4 @@
-//! Regression tests for Stage 3B S1 fixes in `lumencraft-engine`:
+//! Regression tests for Stage 3B S1 fixes in `curvebook-engine`:
 //! - `R1-S07-10`: Cyclic graph/layout/result source chains terminate cleanly in `sheet.duplicateFamily` / `sheet.clonePipeline`.
 //! - `R1-S12-03`: Wholesale document-replacement commands clear/update `Session::file_path`.
 
@@ -9,11 +9,11 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ColumnDesignHint, ColumnTable, DataSheet, ErrorCode, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec,
     ProjectDocument, RectPt, ResultSheet, SheetId, TableArchetype,
 };
-use lumencraft_engine::Session;
+use curvebook_engine::Session;
 use serde_json::{Value, json};
 
 type TestResult = Result<(), String>;
@@ -27,7 +27,7 @@ struct TempDir {
 impl TempDir {
     fn new(label: &str) -> Result<Self, String> {
         let seq = TEMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!("lc-engine-s3b-{label}-{}-{seq}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-engine-s3b-{label}-{}-{seq}", std::process::id()));
         fs::create_dir_all(&dir).map_err(|err| format!("create temp dir `{}`: {err}", dir.display()))?;
         Ok(Self { path: dir })
     }
@@ -239,9 +239,9 @@ fn r1_s07_10_duplicate_family_terminates_on_layout_and_mixed_cycles_while_allowi
 #[test]
 fn r1_s12_03_wholesale_document_replacements_clear_or_update_session_file_path() -> TestResult {
     let dir = TempDir::new("file-path")?;
-    let path_a = dir.path().join("project_a.lumencraft");
-    let path_b = dir.path().join("project_b.lumencraft");
-    let path_tpl = dir.path().join("plate.lctemplate");
+    let path_a = dir.path().join("project_a.curvebook");
+    let path_b = dir.path().join("project_b.curvebook");
+    let path_tpl = dir.path().join("plate.cbtemplate");
 
     let mut builder = Session::new();
     builder
@@ -273,7 +273,7 @@ fn r1_s12_03_wholesale_document_replacements_clear_or_update_session_file_path()
     }
 
     // Failed `project.open` rolls back file_path cleanly.
-    let nonexistent = dir.path().join("missing.lumencraft");
+    let nonexistent = dir.path().join("missing.curvebook");
     if session.execute("project.open", json!({ "path": nonexistent.to_string_lossy() })).is_ok() {
         return Err(String::from("expected missing project.open to fail"));
     }

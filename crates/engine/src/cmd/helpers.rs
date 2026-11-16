@@ -3,12 +3,12 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use lumencraft_chart::ChartScene;
-use lumencraft_doc::{
+use curvebook_chart::ChartScene;
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, DataSetColumn, DataSheet, GraphAnnotation, GraphSheet, GraphSpec, HookSource, InfoSheet, LayoutItem, LayoutSheet,
     LayoutSpec, LinkSource, NormalizeAnchor, ParameterScope, ProjectDocument, ResultSheet, ResultTab, SheetId, TableArchetype, TransformAnalysisSpec,
 };
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 use serde_json::json;
 
 use crate::{EngineError, ErrorCode};
@@ -283,10 +283,10 @@ pub fn column_subcolumn_count(arch: &TableArchetype, col: usize) -> usize {
 pub fn compile_sheet_scene(doc: &ProjectDocument, sheet_id: &SheetId) -> Result<ChartScene, EngineError> {
     crate::guard::run_guarded("compile_sheet_scene", || {
         if let Some(graph) = doc.graph_sheet(sheet_id) {
-            return Ok(lumencraft_chart::compile_graph(graph, doc)?);
+            return Ok(curvebook_chart::compile_graph(graph, doc)?);
         }
         if let Some(layout) = doc.layout_sheet(sheet_id) {
-            return Ok(lumencraft_chart::compile_layout(layout, doc)?);
+            return Ok(curvebook_chart::compile_layout(layout, doc)?);
         }
         Err(EngineError::with_code(ErrorCode::NotFound, format!("sheet `{sheet_id}` is not a graph or layout sheet"))
             .with_details(json!({ "sheet_id": sheet_id.as_str() })))
@@ -591,7 +591,7 @@ pub(super) fn remap_layout_spec_references(spec: &mut LayoutSpec, id_map: &HashM
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument};
+    use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument};
 
     use super::*;
 

@@ -1,18 +1,18 @@
 //! XY scatter, line, error-bar, confidence-band, and fitted regression curve scene builder,
 //! plus shared multi-segment axis, tick, frame, marker, error-bar, annotation, and legend kernels.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AxisSpec, AxisThreshold, BreakOrnament, CurveSamplePoint, DataSheet, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FittedCurveOverlay,
     FramePreset, GraphAnnotation, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LineConnectionKind, ProjectDocument,
     RegressionOverlaySpec, ResultCell, ResultStatus, SeriesSpec, SheetId, SubcolumnMode, SummarizedPoint, SummaryMeasure, TableArchetype,
     TickLabelFormat, XColumnMode, XyTable,
 };
-use lumencraft_math::AxisScale;
-use lumencraft_math::dist::student_t_two_sided_isf;
-use lumencraft_math::sum::SummaryMoments;
-use lumencraft_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
-use lumencraft_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
-use lumencraft_text::{LocaleNumberPolicy, RichText, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
+use curvebook_math::AxisScale;
+use curvebook_math::dist::student_t_two_sided_isf;
+use curvebook_math::sum::SummaryMoments;
+use curvebook_palette::{LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
+use curvebook_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
+use curvebook_text::{LocaleNumberPolicy, RichText, expand_template_hooks, format_axis_tick, measure_text_pt, parse_markup};
 
 use crate::scales::{
     AxisOrientation, AxisRenderOptions, ResolvedAdditionalTick, ResolvedAxis, ResolvedSegment, compute_additional_ticks_for_segments,
@@ -214,7 +214,7 @@ pub(crate) fn compute_central_tendency(values: &[f64], summary: SummaryMeasure, 
 /// Summarize either pre-summarized subcolumns or raw replicates into `(center, lower_bound, upper_bound)`.
 pub(crate) fn summarize_subcells(
     mode: SubcolumnMode,
-    subcells: &[lumencraft_doc::Cell],
+    subcells: &[curvebook_doc::Cell],
     summary: SummaryMeasure,
     error_spec: Option<&ErrorBarSpec>,
     warnings: &mut Vec<ChartWarning>,
@@ -222,7 +222,7 @@ pub(crate) fn summarize_subcells(
     if mode.is_pre_summarized() {
         return summarize_pre_summarized(mode, subcells, error_spec, warnings);
     }
-    let raw: Vec<f64> = subcells.iter().filter_map(lumencraft_doc::Cell::active_number).collect();
+    let raw: Vec<f64> = subcells.iter().filter_map(curvebook_doc::Cell::active_number).collect();
     let center = compute_central_tendency(&raw, summary, warnings)?;
     let (lo, hi) = if let Some(eb) = error_spec { compute_raw_error_bounds(&raw, center, eb.metric, 0.05) } else { (center, center) };
     Some((center, lo, hi))
@@ -230,11 +230,11 @@ pub(crate) fn summarize_subcells(
 
 fn summarize_pre_summarized(
     mode: SubcolumnMode,
-    subcells: &[lumencraft_doc::Cell],
+    subcells: &[curvebook_doc::Cell],
     error_spec: Option<&ErrorBarSpec>,
     warnings: &mut Vec<ChartWarning>,
 ) -> Option<(f64, f64, f64)> {
-    let center_only = subcells.first().and_then(lumencraft_doc::Cell::active_number).filter(|v| v.is_finite());
+    let center_only = subcells.first().and_then(curvebook_doc::Cell::active_number).filter(|v| v.is_finite());
     let Some(eb) = error_spec else {
         return center_only.map(|c| (c, c, c));
     };
@@ -278,9 +278,9 @@ fn summarize_pre_summarized(
                 let center = center_only?;
                 let can_use_direct_spread = !matches!(
                     err,
-                    lumencraft_doc::SummaryPointError::NegativeSpread { .. }
-                        | lumencraft_doc::SummaryPointError::SampleSizeBelowOne { .. }
-                        | lumencraft_doc::SummaryPointError::MissingSpread
+                    curvebook_doc::SummaryPointError::NegativeSpread { .. }
+                        | curvebook_doc::SummaryPointError::SampleSizeBelowOne { .. }
+                        | curvebook_doc::SummaryPointError::MissingSpread
                 ) && matches!(
                     (mode, eb.metric),
                     (SubcolumnMode::MeanSdN | SubcolumnMode::MeanCvN, ErrorBarMetric::Sd | ErrorBarMetric::ExplicitSubcolumns)
@@ -993,9 +993,9 @@ fn render_annotation(scene: &mut ChartScene, doc: &ProjectDocument, info_id: Opt
         GraphAnnotation::Shape { kind, bounds_pt, stroke_color, stroke_width_pt, dash, fill_color } => {
             let r = RectPt::from(*bounds_pt);
             let path = match kind {
-                lumencraft_doc::AnnotationShapeKind::Rectangle => Path2D::rect(r),
-                lumencraft_doc::AnnotationShapeKind::RoundedRectangle => rounded_rect_path(r, 4.0),
-                lumencraft_doc::AnnotationShapeKind::Ellipse => build_ellipse_path(r.center(), 0.5 * r.width, 0.5 * r.height),
+                curvebook_doc::AnnotationShapeKind::Rectangle => Path2D::rect(r),
+                curvebook_doc::AnnotationShapeKind::RoundedRectangle => rounded_rect_path(r, 4.0),
+                curvebook_doc::AnnotationShapeKind::Ellipse => build_ellipse_path(r.center(), 0.5 * r.width, 0.5 * r.height),
             };
             scene.primitives.push(ScenePrimitive::Path {
                 path,
@@ -1443,7 +1443,7 @@ fn resolve_fitted_overlay(doc: &ProjectDocument, series: &SeriesSpec, warnings: 
     }
     let mut effective_spec = spec.clone();
     let mut effective_curve = curve.clone();
-    if matches!(&res.analysis.kind, lumencraft_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == lumencraft_doc::FitMethod::RobustCauchy) {
+    if matches!(&res.analysis.kind, curvebook_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == curvebook_doc::FitMethod::RobustCauchy) {
         if effective_spec.show_confidence_band || effective_spec.show_prediction_band {
             warnings.push(ChartWarning::new(
                 "robust_bands_suppressed",
@@ -2107,11 +2107,11 @@ fn emit_band_geometry(
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         Cell, DataSheet, GraphSheet, GraphicalDataObject, GroupedArrangement, PointStyleOverride, ProjectDocument, SheetId, SubcolumnMode,
         TableArchetype, XColumnMode, XyTable,
     };
-    use lumencraft_palette::{MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
+    use curvebook_palette::{MarkerFillMode, MarkerShape, MarkerStyle, Rgba8};
 
     use crate::{ScenePrimitive, compile_graph};
 
@@ -2176,8 +2176,8 @@ mod tests {
     #[test]
     fn log_tick_generator_handles_invalid_and_extreme_bounds() {
         use crate::scales::{MAX_TICKS_PER_SEGMENT, ResolvedSegment, compute_segment_tick_values, resolve_sample_segment_domain, scale_transform};
-        use lumencraft_doc::AxisSegment;
-        use lumencraft_math::AxisScale;
+        use curvebook_doc::AxisSegment;
+        use curvebook_math::AxisScale;
 
         let mk_seg = |domain_min: f64, domain_max: f64, scale: AxisScale| ResolvedSegment {
             segment_index: 0,

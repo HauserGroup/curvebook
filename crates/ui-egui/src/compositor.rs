@@ -5,8 +5,8 @@
 //! proportional/tabular coverage-mask text (`crate::text_bridge`, retiring `FONT_5X7` per `R10.9`),
 //! and preserves [`WorkspaceLayoutMap`] for physical/RTL interaction and accessibility tools.
 
-use lumencraft_palette::Rgba8;
-use lumencraft_render::{RasterImage, RenderError, RenderTargetSpec, encode_png};
+use curvebook_palette::Rgba8;
+use curvebook_render::{RasterImage, RenderError, RenderTargetSpec, encode_png};
 use serde::{Deserialize, Serialize};
 
 use crate::UiApp;

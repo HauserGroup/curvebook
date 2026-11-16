@@ -13,10 +13,10 @@ This document tracks quality-of-life (QoL) scope and its implementation evidence
 Every item in this backlog must satisfy five invariants:
 
 1. **Zero muscle-memory disruption:** Classic single-sheet navigation, keyboard range habits, and standard 8-archetype table layouts remain the default behavior. Every QoL workflow is additive or opt-in.
-2. **Additive, backward-compatible persistence:** New metadata fields in `.lumencraft` (`manifest.json`, sheet JSON specs) must use `#[serde(default, skip_serializing_if = "...")]` so older readers and clean-room CSV / `.pzfx` / `.prism` interchange pipelines never fail or silently alter numeric values.
+2. **Additive, backward-compatible persistence:** New metadata fields in `.curvebook` (`manifest.json`, sheet JSON specs) must use `#[serde(default, skip_serializing_if = "...")]` so older readers and clean-room CSV / `.pzfx` / `.prism` interchange pipelines never fail or silently alter numeric values.
 3. **Identical numerical & statistical results:** QoL features never alter solver tolerances, degrees-of-freedom formulas, tie handling, or NIST StRD benchmark outputs.
 4. **Everything is a serializable command:** Interactive helpers (table archetype conversion, plate mapping, split-view brushing) dispatch through `crates/engine` (`CommandSpec`) or `UI_COMMANDS` (`crates/ui-egui` -> `crates/mcp`) with full undo/redo coverage.
-5. **100% client-side WASM parity (`lumencraft-web`):** Features must compile cleanly under `wasm32-unknown-unknown` with `#![forbid(unsafe_code)]`, require no backend server for private experimental data, and degrade gracefully across Chromium, Firefox, and Safari filesystem sandboxes.
+5. **100% client-side WASM parity (`curvebook-web`):** Features must compile cleanly under `wasm32-unknown-unknown` with `#![forbid(unsafe_code)]`, require no backend server for private experimental data, and degrade gracefully across Chromium, Firefox, and Safari filesystem sandboxes.
 
 ---
 
@@ -35,7 +35,7 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 | [QOL-7](#qol-7-inline-assumption-diagnostic-banners-diagnostics-only) | Informational assumption diagnostics; no test recommendations or remediation actions | Biostatistics | `stats`, `ui-egui` | 0 | **Done (diagnostics only)** (`R9.7`, Waves 20–22b) |
 | [QOL-8](#qol-8-journal-figure-dimension-and-typography-lock-presets) | Journal column-width presets with locked print typography & stroke scaling | Graphing & Layouts | `doc`, `chart`, `engine`, `ui-egui` | 6–10 | **Done** (`R9.8`) |
 | [QOL-9](#qol-9-live-color-vision-deficiency-cvd-and-grayscale-canvas-preview) | Live colorblind (CVD) & grayscale print preflight toggle on canvas | Accessibility | `palette`, `render`, `ui-egui` | 4–7 | **Done** (`R9.9`) |
-| [QOL-10](#qol-10-zero-install-client-side-wasm-viewer-and-browser-folder-workspaces) | Zero-install client-side WASM collaborator viewer & browser folder workspaces | Web / Collaboration | `format`, `ui-egui`, `lumencraft-web` | Deferred | **Deferred; existing code retained** (`R9.10`) |
+| [QOL-10](#qol-10-zero-install-client-side-wasm-viewer-and-browser-folder-workspaces) | Zero-install client-side WASM collaborator viewer & browser folder workspaces | Web / Collaboration | `format`, `ui-egui`, `curvebook-web` | Deferred | **Deferred; existing code retained** (`R9.10`) |
 | [QOL-11](#qol-11-unpacked-git-friendly-project-directory-and-in-file-checkpoints) | Unpacked Git-friendly directory mode & named checkpoints | Persistence | `format`, `engine`, `ui-egui` | Deferred | **Deferred; existing code retained** (`R9.11`) |
 | **Wave A active scope** | **`QOL-1`–`QOL-9` (incl. diagnostics-only `QOL-7`)** | | | **0 remaining** | **Done (`R9.1`–`R9.9`)** |
 | [QOL-12](#qol-12-categorical-and-continuous-table-analysis-completions) | Factorial ANOVA post-hoc tabs, Cohen/Fleiss $\kappa$, `NNT` CIs, custom GOF $\chi^2$, Binomial/Sign tests, $\chi^2$ SD CIs & summary *t*-tests | Biostatistics | `doc`, `stats`, `engine`, `ui-egui` | 0 | **Done** (`R9.12`, Wave 21) |
@@ -56,7 +56,7 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 - **Scope:**
   - Add an engine command `table.convertArchetype` (`Column <-> Grouped`, `Column <-> Xy`, `Grouped <-> MultipleVariables`, `Xy <-> MultipleVariables`) with a live shape-mapping preview dialog before commit.
   - Explain clearly how replicate subcolumns, row titles, X columns, and cell exclusion masks map into the target archetype, warning explicitly before any lossy projection (and never truncating without confirmation).
-  - Record the entire conversion as a single atomic entry in the `lumencraft-engine` undo/redo journal, keeping the original `SheetId` intact where downstream `AnalysisSpec` / `GraphSpec` remain valid or prompting cleanly when downstream specs need retargeting.
+  - Record the entire conversion as a single atomic entry in the `curvebook-engine` undo/redo journal, keeping the original `SheetId` intact where downstream `AnalysisSpec` / `GraphSpec` remain valid or prompting cleanly when downstream specs need retargeting.
 - **Non-breaking invariant:** Existing `TableArchetype` variants and `DataSheet` storage invariants in `crates/doc` remain unchanged; conversion constructs a validated `DataSheet` replacement via existing constructors.
 
 ### QOL-2 Plate-reader (`8x12` / `16x24`) and tidy long-to-subcolumn paste mapper
@@ -64,7 +64,7 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 - **Problem:** Microplate readers (ELISA, luminescence, viability IC50 screens, qPCR) export `8×12` (96-well) or `16×24` (384-well) matrices, while R/Python/LIMS tools export tidy long-format tables (`Compound, Concentration, Replicate, Readout`). Reshaping these manually in external spreadsheets into wide replicate subcolumns is slow and error-prone.
 - **Scope:**
   - Extend the 4-stage `Import & Paste Special` pipeline ([`ui-parity.md`](ui-parity.md)) with two optional reshape modes in Stage 2 (`Filter & Reshape`):
-    1. **Microplate Mapper (`96` / `384` wells):** Interactive visual well-plate grid allowing drag-assignment of dilution series (X values), treatment groups (columns), and technical replicates (subcolumns), plus reusable `.lctemplate` plate maps and automatic blank-well baseline tagging.
+    1. **Microplate Mapper (`96` / `384` wells):** Interactive visual well-plate grid allowing drag-assignment of dilution series (X values), treatment groups (columns), and technical replicates (subcolumns), plus reusable `.cbtemplate` plate maps and automatic blank-well baseline tagging.
     2. **Tidy Pivot (`Long -> Wide Subcolumns`):** Column picker mapping `(X / Row Factor, Group Column, Optional Replicate Index, Value, Optional Exclusion Flag)` directly into typed `XY`, `Column`, or `Grouped` replicate subcolumns.
 - **Non-breaking invariant:** Outputs standard `DataSheet` cells and optional `ImportLinkSpec` provenance; downstream statistical and curve-fitting crates require zero awareness of plate geometry.
 
@@ -73,7 +73,7 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 - **Problem:** Non-destructive cell exclusions (`*` / blue-italic styling) preserve raw numbers, but months later collaborators or auditors cannot tell *why* replicate `B3` was excluded (e.g., pipetting error, air bubble, contaminated well, or manual vs. automated ROUT outlier masking).
 - **Scope:**
   - Allow an optional structured exclusion annotation `(reason_tag, note, timestamp_utc)` per excluded cell coordinate in `DataSheet` (defaulting to empty when toggling `Cmd/Ctrl+E` for zero extra keystrokes, with an optional `Shift+Cmd/Ctrl+E` *"Exclude with Reason…"* quick popover and hover tooltip).
-  - Include exclusion annotations in a dedicated audit summary table when exporting structured reports or `.lumencraft` archives.
+  - Include exclusion annotations in a dedicated audit summary table when exporting structured reports or `.curvebook` archives.
 - **Storage (landed, `R9.3`):** Exclusion masks stay as per-cell `excluded: bool` flags on the hot numerical path, while optional notes live in a sparse sidecar `DataSheet::exclusion_notes: Vec<CellExclusionNote>` (`coord`, `reason_tag`, `note`, `timestamp_utc`; `crates/doc/src/links.rs`) serialized with `skip_serializing_if = "Vec::is_empty"`. CSV and legacy exports ignore the sidecar cleanly.
 
 ### QOL-4 Optional side-by-side split workspace
@@ -81,8 +81,8 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 - **Problem:** Switching back and forth between a `Data` or `Result` sheet and its downstream `Graph` makes exploratory outlier checks, parameter constraint tuning, and axis adjustment tedious.
 - **Scope:**
   - Keep single-sheet view as the default, and add a toolbar/shortcut toggle (`View › Split Right`) docking a live `Graph` or `Result` pane beside the active `Data` or `Result` sheet.
-  - Edits in the spreadsheet grid, exclusions (`Cmd/Ctrl+E`), or non-modal inspector sliders immediately re-render the adjacent graph via the reactive `lumencraft-engine` DAG.
-- **Non-breaking invariant:** Pure `L6` (`lumencraft-ui-egui`) viewport state; does not change `ProjectDocument` semantics or headless CLI output.
+  - Edits in the spreadsheet grid, exclusions (`Cmd/Ctrl+E`), or non-modal inspector sliders immediately re-render the adjacent graph via the reactive `curvebook-engine` DAG.
+- **Non-breaking invariant:** Pure `L6` (`curvebook-ui-egui`) viewport state; does not change `ProjectDocument` semantics or headless CLI output.
 
 ### QOL-5 Two-way data-to-graph point brushing
 - **Crates:** `crates/chart`, `crates/render`, `crates/tools`, `crates/ui-egui` · **Est.:** `8–12 h`
@@ -129,11 +129,11 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 
 ### QOL-10 Zero-install client-side WASM viewer and browser folder workspaces
 - **Planning status:** Deferred without a scheduled milestone. The scope below is retained for reference, not active implementation. Existing code remains supported; baseline browser hosting and core WASM checks are separate requirements.
-- **Crates:** `crates/format`, `crates/ui-egui`, `apps/lumencraft-web` · **Est.:** `10–16 h`
+- **Crates:** `crates/format`, `crates/ui-egui`, `apps/curvebook-web` · **Est.:** `10–16 h`
 - **Problem:** Collaborators, principal investigators, students, and peer reviewers frequently receive project archives on machines without native software installed (or on Linux, Chromebooks, or tablets), while institutional data-governance policies prohibit uploading unpublished raw experimental data to third-party cloud servers.
 - **Scope:**
-  - **100% local WASM open/inspect/edit:** Visiting the hosted `lumencraft-web` URL lets any user open `.lumencraft`, CSV/TSV, or clean-room-imported `.prism`/`.pzfx` files via file picker or drag-and-drop, executing every solver and renderer locally inside the browser's WebAssembly sandbox with **zero network upload of user data**.
-  - **Browser Folder Attachment:** Support attaching a local experiment directory (read-only drag-and-drop / directory input across Safari, Firefox, and Chromium; direct read/write project & batch-export folder access via the File System Access API on Chromium browsers, falling back cleanly to bundled `.zip` / `.lumencraft` downloads elsewhere).
+  - **100% local WASM open/inspect/edit:** Visiting the hosted `curvebook-web` URL lets any user open `.curvebook`, CSV/TSV, or clean-room-imported `.prism`/`.pzfx` files via file picker or drag-and-drop, executing every solver and renderer locally inside the browser's WebAssembly sandbox with **zero network upload of user data**.
+  - **Browser Folder Attachment:** Support attaching a local experiment directory (read-only drag-and-drop / directory input across Safari, Firefox, and Chromium; direct read/write project & batch-export folder access via the File System Access API on Chromium browsers, falling back cleanly to bundled `.zip` / `.curvebook` downloads elsewhere).
   - **Optional Read-Only Presentation Mode:** A clean viewer toggle hiding editing chrome for lab meetings and supplementary-material inspection.
 - **Non-breaking invariant:** Preserves strict `wasm32-unknown-unknown` compatibility (`cargo xtask wasm`) and zero-JS/zero-backend architecture rules in [`AGENTS.md`](../AGENTS.md).
 
@@ -142,8 +142,8 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 - **Crates:** `crates/format`, `crates/engine`, `crates/ui-egui` · **Est.:** `10–16 h`
 - **Problem:** Researchers routinely duplicate entire project files (`Assay_v1.prism`, `Assay_v2_no_outlier.prism`, `Assay_FINAL.prism`) before trying alternative curve fits, and binary containers produce opaque diffs in Git/DVC repositories.
 - **Scope:**
-  - **Unpacked Directory Format (`.lumencraft.d/`):** Mirror the exact internal file tree of the deterministic `.lumencraft` ZIP container (`manifest.json`, canonical 2-space-indented JSON specs, RFC-4180 CSV data sheets) directly as a plain directory on disk so computational labs can track line-by-line Git diffs and attach folders directly in desktop or Chromium WASM workflows.
-  - **Named Checkpoints:** Allow users to record named snapshots (e.g., *"Pre-exclusion raw fit"*, *"Submitted revision 1"*) inside a `.lumencraft` session so they can compare or restore prior analysis states without file sprawl. Existing snapshots store full project JSON; no lightweight-storage claim is made.
+  - **Unpacked Directory Format (`.curvebook.d/`):** Mirror the exact internal file tree of the deterministic `.curvebook` ZIP container (`manifest.json`, canonical 2-space-indented JSON specs, RFC-4180 CSV data sheets) directly as a plain directory on disk so computational labs can track line-by-line Git diffs and attach folders directly in desktop or Chromium WASM workflows.
+  - **Named Checkpoints:** Allow users to record named snapshots (e.g., *"Pre-exclusion raw fit"*, *"Submitted revision 1"*) inside a `.curvebook` session so they can compare or restore prior analysis states without file sprawl. Existing snapshots store full project JSON; no lightweight-storage claim is made.
 - **Existing implementation:** Unpacked-directory I/O already ships as plain functions beside the ZIP path in `crates/format/src/archive.rs` (`is_unpacked_project_dir`, `save_project_unpacked_dir`, `open_project_unpacked_dir`) with the same schema validation; there is no `ArchiveReader` / `ArchiveWriter` trait.
 
 ### QOL-12 Categorical and continuous table-analysis completions
@@ -152,14 +152,14 @@ Unchanged estimates below are historical scope estimates, following [`target-app
   - Emit `ResultTabKind::MultipleComparisons` post-hoc tabs inside `run_factorial_anova` (`FactorialAnovaSpec::multiplicity`, also tracked on `R8.7` for `WF-09`/`WF-10`).
   - Expose `cohens_kappa` (`Unweighted`, `Linear`, `Quadratic`) and `fleiss_kappa` via `ContingencyMethod`, invert Newcombe `2×2` risk-difference bounds into Altman `NNTB`/`NNTH` CIs, emit McNemar discordant-pair OR CIs, add custom expected proportions to `PartsOfWhole` goodness-of-fit $\chi^2$, and add exact one-sample Binomial ($p_0 \in (0, 1)$) & paired Sign tests.
   - Add exact $\chi^2$ standard-deviation CIs (`sd_ci`) to `DescriptiveSummary` and direct `Mean + SD/SEM + N` support to `run_two_group_analysis`.
-- **Non-breaking invariant:** Additive `#[serde(default)]` enum variants and optional fields only; existing `.lumencraft` files and statistical oracle values remain unchanged.
+- **Non-breaking invariant:** Additive `#[serde(default)]` enum variants and optional fields only; existing `.curvebook` files and statistical oracle values remain unchanged.
 
 ### QOL-13 Instant statistical, distribution and Bayesian calculators
 - **Planning status:** Deferred without a scheduled milestone. The scope below is retained for reference; it does not authorize new calculator commands, formula builtins, or UI drawers.
 - **Crates:** `crates/stats`, `crates/transform`, `crates/engine`, `crates/mcp`, `crates/ui-egui` · **Est.:** `10–16 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#qol13-calculators)
 - **Scope:**
   - *Proposed (none of these IDs exist today):* add stateless read-only `calc.*` commands (a new `CommandGroup::Calculator` with `READ_ONLY` effects) and a non-modal **Calculators** drawer (`ui.calculator.open`) for table-free calculations: binomial proportion & Garwood exact Poisson count CIs, clinical Bayes PPV/NPV/$\text{LR}^{\pm}$ from sensitivity/specificity/prior prevalence, two-mean error propagation ($A \pm B$, $A \cdot B$, and Fieller's exact quotient CI for $A / B$), summary-table multi-way ANOVA post-tests, forward/inverse probability distributions ($z, t, F, r, \chi^2$, Binomial, Poisson, Gaussian — also exposed as scalar functions in `=` Calculated Variables), Sellke–Bayarri–Berger & Colquhoun Bayesian $P$-value / False Positive Risk interpretation, summary $F$/$\text{AIC}_c$ fit comparisons, and scalar $\text{EC}_F$ from $(\text{EC}_{50}, h, F)$.
-- **Non-breaking invariant:** Zero document or undo-stack mutation during calculation; zero `.lumencraft` archive version changes.
+- **Non-breaking invariant:** Zero document or undo-stack mutation during calculation; zero `.curvebook` archive version changes.
 
 ### QOL-14 Experimental subject randomization and random subset sampling
 - **Crates:** `crates/doc`, `crates/transform`, `crates/engine`, `crates/ui-egui` · **Est.:** `6–10 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#qol14-randomization)
@@ -188,6 +188,6 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 - **Crates:** `crates/ui-egui`, `crates/mcp`, `crates/testkit` · **Status:** Done (`0 h` remaining, Wave 23) · **Spec:** [`gui-workflows.md`](gui-workflows.md#5-extended-21-workflow-multivariable-clustering-glm--statistical-graphing-gui_only-matrix-r917--qol-17-implemented)
 - **Problem:** While `R8.8` (`WF-01`–`WF-28`) verifies Core two-group, ANOVA, regression, contingency, PCA/PCR, and foundational graph workflows under `GuiOnlyPolicy::Strict`, deeper multivariable role-bound workflows (formula-bar `Calculated Variables` circularity guards, $2^{-\Delta\Delta C_t}$ qPCR pipelines, direct `MultipleVariables` Welch *t* / Multifactor ANOVA / Kaplan–Meier / multi-series 4PL dose–response, Cox PH, Poisson count GLMs, full linkage/metric clustering sweeps, synchronized survival `Number at Risk` re-binning, multivariable symbol sizing, and `R9.16` live $\TeX$ equation annotations) benefit from dedicated end-to-end `gui_only` regression shards.
 - **Scope:**
-  - Add 21 strict `gui_only` integration workflows (`WF-29`–`WF-49`) across 3 shards (`gui_wf_multivariable_and_transforms`, `gui_wf_clustering_glm_and_pharma`, `gui_wf_advanced_statistical_graphs`) driving `UiApp` exclusively through the 8 `ui.*` / `gui` perception and input primitives over original synthetic datasets in `lumencraft-testkit`, closing any inspector/dialog `ui.inspect` control gaps surfaced along the way.
+  - Add 21 strict `gui_only` integration workflows (`WF-29`–`WF-49`) across 3 shards (`gui_wf_multivariable_and_transforms`, `gui_wf_clustering_glm_and_pharma`, `gui_wf_advanced_statistical_graphs`) driving `UiApp` exclusively through the 8 `ui.*` / `gui` perception and input primitives over original synthetic datasets in `curvebook-testkit`, closing any inspector/dialog `ui.inspect` control gaps surfaced along the way.
 - **Excluded from this item:** Compact Letter Display (`CLD`, tracked in `R10.11` as `WF-50`), group-letter displays, extra fit-statistic callouts (excluded per `QOL-16`), and assumption-banner test recommendations or remediation actions (excluded per `QOL-7`).
-- **Non-breaking invariant:** Pure `L6` inspection coverage and integration test shards; alters zero `.lumencraft` persistence formats or numerical solver tolerances.
+- **Non-breaking invariant:** Pure `L6` inspection coverage and integration test shards; alters zero `.curvebook` persistence formats or numerical solver tolerances.

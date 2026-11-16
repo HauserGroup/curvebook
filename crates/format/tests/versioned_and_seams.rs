@@ -6,11 +6,13 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
-use lumencraft_format::{
-    BATCH_SCHEMA_V1, CURRENT_JOURNAL_VERSION, CURRENT_LOCK_VERSION, CURRENT_PREFERENCES_VERSION, CrashRecoveryJournal, DirectoryJournalBackend,
-    ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatError, FormatKind, FormatRegistry, ImportOptions, ImportPayload, JournalLockLease,
-    JournalOpRecord, PreferencesFile, VersionStep, all_persisted_schemas, load_preferences_file, parse_preferences_json, save_preferences_file,
+use curvebook_doc::{CURRENT_SCHEMA_VERSION, Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
+use curvebook_format::{
+    BATCH_SCHEMA_V1, CURRENT_JOURNAL_VERSION, CURRENT_LOCK_VERSION, CURRENT_PREFERENCES_VERSION, CrashRecoveryJournal, CsvOptions,
+    DirectoryJournalBackend, ExportOptions, ExportSource, Exporter, FormatDescriptor, FormatError, FormatKind, FormatRegistry, ImportOptions,
+    ImportPayload, JournalLockLease, JournalOpRecord, PreferencesFile, VersionStep, ZipWriter, all_persisted_schemas, export_datasheet_to_csv,
+    import_prism_bytes, import_pzfx_bytes, instantiate_template_bytes, is_unpacked_project_dir, load_preferences_file, open_archive_bytes,
+    open_project_bytes, open_project_unpacked_dir, open_template_bytes, parse_preferences_json, recovery::is_dead_local_owner, save_preferences_file,
     save_project_file, save_project_unpacked_dir, save_template_file, upgrade, validate_batch_manifest_version,
 };
 
@@ -23,7 +25,7 @@ struct TempDir {
 impl TempDir {
     fn new() -> std::io::Result<Self> {
         let seq = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("lc-w8b-format-test-{}-{seq}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("cb-w8b-format-test-{}-{seq}", std::process::id()));
         if root.exists() {
             let _ = std::fs::remove_dir_all(&root);
         }
@@ -131,9 +133,13 @@ fn preferences_migration_and_refuse_overwrite_newer_version() {
 fn batch_manifest_version_validation() {
     assert!(validate_batch_manifest_version(&serde_json::json!({ "schema": BATCH_SCHEMA_V1 })).is_ok());
     assert_eq!(
-        validate_batch_manifest_version(&serde_json::json!({ "schema": "lumencraft.batch.v2" })).unwrap_err(),
+        validate_batch_manifest_version(&serde_json::json!({ "schema": "curvebook.batch.v2" })).unwrap_err(),
         FormatError::UnsupportedSchemaVersion { version: 2, max_supported: 1 }
     );
+    assert!(matches!(
+        validate_batch_manifest_version(&serde_json::json!({ "schema": "lumencraft.batch.v1" })),
+        Err(FormatError::UnsupportedFormat { .. })
+    ));
     assert!(matches!(validate_batch_manifest_version(&serde_json::json!({})), Err(FormatError::UnsupportedFormat { .. })));
     assert!(matches!(
         validate_batch_manifest_version(&serde_json::json!({ "schema": "unknown.format" })),
@@ -186,14 +192,14 @@ fn journal_and_lock_version_validation_and_atomic_cleanup() {
     let dir = TempDir::new().unwrap();
     let journal_dir = dir.path().join("recovery");
     let backend = DirectoryJournalBackend::open_dir(&journal_dir).unwrap();
-    std::fs::write(journal_dir.join(lumencraft_format::JOURNAL_FILE_NAME), format!("{future_record_json}\n")).unwrap();
+    std::fs::write(journal_dir.join(curvebook_format::JOURNAL_FILE_NAME), format!("{future_record_json}\n")).unwrap();
     let open_err = CrashRecoveryJournal::open_or_recover(backend, "writer-2", 5_000, 12_000).unwrap_err();
     assert_eq!(open_err, FormatError::UnsupportedSchemaVersion { version: 99, max_supported: CURRENT_JOURNAL_VERSION });
 
     // Future-version lockfile also rejects clean open.
     let lock_dir = dir.path().join("lock_recovery");
     let lock_backend = DirectoryJournalBackend::open_dir(&lock_dir).unwrap();
-    std::fs::write(lock_dir.join(lumencraft_format::LOCKFILE_NAME), &future_lease_bytes).unwrap();
+    std::fs::write(lock_dir.join(curvebook_format::LOCKFILE_NAME), &future_lease_bytes).unwrap();
     let lock_err = CrashRecoveryJournal::open_or_recover(lock_backend, "writer-3", 5_000, 12_000).unwrap_err();
     assert_eq!(lock_err, FormatError::UnsupportedSchemaVersion { version: 5, max_supported: CURRENT_LOCK_VERSION });
 
@@ -209,9 +215,9 @@ fn journal_and_lock_version_validation_and_atomic_cleanup() {
     let artifacts_dir = dir.path().join("artifacts");
     std::fs::create_dir_all(&artifacts_dir).unwrap();
     let doc = sample_project().unwrap();
-    save_project_file(&artifacts_dir.join("out.lumencraft"), &doc).unwrap();
-    save_template_file(&artifacts_dir.join("out.lctemplate"), &doc).unwrap();
-    save_project_unpacked_dir(&doc, &artifacts_dir.join("out.lumencraft.d")).unwrap();
+    save_project_file(&artifacts_dir.join("out.curvebook"), &doc).unwrap();
+    save_template_file(&artifacts_dir.join("out.cbtemplate"), &doc).unwrap();
+    save_project_unpacked_dir(&doc, &artifacts_dir.join("out.curvebook.d")).unwrap();
     for check_dir in [&artifacts_dir, &clean_dir] {
         let leftovers: Vec<String> = std::fs::read_dir(check_dir)
             .unwrap()
@@ -228,34 +234,34 @@ fn format_registry_lookup_and_roundtrips() {
     let mut reg = FormatRegistry::default_registry();
 
     let import_ids: Vec<&str> = reg.supported_import_formats().into_iter().map(|d| d.id).collect();
-    assert_eq!(import_ids, vec!["lumencraft", "lumencraft.d", "lctemplate", "prism", "pzfx", "csv", "tsv"]);
+    assert_eq!(import_ids, vec!["curvebook", "curvebook.d", "cbtemplate", "prism", "pzfx", "csv", "tsv"]);
 
     let export_ids: Vec<&str> = reg.supported_export_formats().into_iter().map(|d| d.id).collect();
-    assert_eq!(export_ids, vec!["lumencraft", "lumencraft.d", "lctemplate", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "emf"]);
+    assert_eq!(export_ids, vec!["curvebook", "curvebook.d", "cbtemplate", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "emf"]);
 
-    assert_eq!(reg.importer_by_format("lumencraft").unwrap().descriptor().kind, FormatKind::Archive);
-    assert_eq!(reg.importer_by_format(".LUMENCRAFT.D").unwrap().descriptor().id, "lumencraft.d");
-    assert_eq!(reg.importer_for_path(Path::new("/tmp/study.lumencraft.d")).unwrap().descriptor().id, "lumencraft.d");
+    assert_eq!(reg.importer_by_format("curvebook").unwrap().descriptor().kind, FormatKind::Archive);
+    assert_eq!(reg.importer_by_format(".CURVEBOOK.D").unwrap().descriptor().id, "curvebook.d");
+    assert_eq!(reg.importer_for_path(Path::new("nested/study.curvebook.d")).unwrap().descriptor().id, "curvebook.d");
     assert_eq!(reg.importer_for_path(Path::new("STUDY.PZFX")).unwrap().descriptor().id, "pzfx");
     assert_eq!(reg.importer_for_path(Path::new("legacy.prism")).unwrap().descriptor().id, "prism");
     assert_eq!(reg.exporter_by_format("tif").unwrap().descriptor().id, "tiff");
     assert_eq!(reg.exporter_for_path(Path::new("figure.TIFF")).unwrap().descriptor().id, "tiff");
-    assert_eq!(reg.exporter_for_path(Path::new("out.lumencraft.d")).unwrap().descriptor().kind, FormatKind::ProjectDir);
+    assert_eq!(reg.exporter_for_path(Path::new("out.curvebook.d")).unwrap().descriptor().kind, FormatKind::ProjectDir);
 
     let dir = TempDir::new().unwrap();
     let doc = sample_project().unwrap();
 
-    // Unpacked dir export + import via FormatRegistry seam (both `.lumencraft.d` and content detection).
-    let unpacked_path = dir.path().join("bundle.lumencraft.d");
+    // Unpacked dir export + import via FormatRegistry seam (both `.curvebook.d` and content detection).
+    let unpacked_path = dir.path().join("bundle.curvebook.d");
     reg.exporter_for_path(&unpacked_path).unwrap().export_path(ExportSource::Document(&doc), &unpacked_path, &ExportOptions::default()).unwrap();
     let imported_dir_doc =
         reg.importer_for_path(&unpacked_path).unwrap().import_path(&unpacked_path, &ImportOptions::default()).unwrap().into_document().unwrap();
     assert_eq!(imported_dir_doc.title, doc.title);
 
     // Archive byte round-trip via registry.
-    let archive_bytes = reg.exporter_by_format("lumencraft").unwrap().export_bytes(ExportSource::Document(&doc), &ExportOptions::default()).unwrap();
+    let archive_bytes = reg.exporter_by_format("curvebook").unwrap().export_bytes(ExportSource::Document(&doc), &ExportOptions::default()).unwrap();
     let archive_doc =
-        reg.importer_by_format("lumencraft").unwrap().import_bytes(&archive_bytes, &ImportOptions::default()).unwrap().into_document().unwrap();
+        reg.importer_by_format("curvebook").unwrap().import_bytes(&archive_bytes, &ImportOptions::default()).unwrap().into_document().unwrap();
     assert_eq!(archive_doc.data_sheets.len(), 1);
 
     // CSV round-trip via registry.
@@ -316,4 +322,130 @@ fn persisted_schemas_cover_all_five_draft_2020_12_formats() {
     assert_eq!(journal["oneOf"].as_array().map(Vec::len), Some(2));
     assert!(journal["$defs"].get("JournalOpRecord").is_some());
     assert!(journal["$defs"].get("JournalLockLease").is_some());
+}
+
+fn synthesize_legacy_archive_zip(doc: &ProjectDocument, kind: &str) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let doc_bytes = serde_json::to_vec_pretty(doc)?;
+    let csv_bytes = export_datasheet_to_csv(&doc.data_sheets[0], &CsvOptions::csv())?.into_bytes();
+    let manifest = serde_json::json!({
+        "format": "lumencraft-archive",
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "kind": kind,
+        "title": doc.title,
+        "document_crc32": crc32fast::hash(&doc_bytes),
+        "sheets": [{
+            "id": doc.data_sheets[0].id,
+            "section": "Data",
+            "title": doc.data_sheets[0].title,
+            "csv_path": "sheets/data-1.csv",
+            "crc32": crc32fast::hash(&csv_bytes),
+        }]
+    });
+    let mut writer = ZipWriter::new();
+    writer.add_file("document.json", doc_bytes)?;
+    writer.add_file("sheets/data-1.csv", csv_bytes)?;
+    writer.add_file("manifest.json", serde_json::to_vec_pretty(&manifest)?)?;
+    Ok(writer.finish()?)
+}
+
+#[test]
+fn explicit_rejection_of_legacy_lumencraft_archives_and_renamed_interchange_files() {
+    let reg = FormatRegistry::default_registry();
+
+    // 1. Legacy format IDs and extensions are absent from FormatRegistry lookup & path dispatch.
+    for legacy_id in ["lumencraft", ".lumencraft", "lumencraft.d", ".lumencraft.d", "lctemplate", ".lctemplate"] {
+        assert!(reg.importer_by_format(legacy_id).is_none(), "unexpected importer for `{legacy_id}`");
+        assert!(reg.exporter_by_format(legacy_id).is_none(), "unexpected exporter for `{legacy_id}`");
+    }
+    for legacy_path in ["legacy.lumencraft", "legacy.lctemplate", "legacy.lumencraft.d"] {
+        assert!(reg.importer_for_path(Path::new(legacy_path)).is_none(), "unexpected path importer for `{legacy_path}`");
+        assert!(reg.exporter_for_path(Path::new(legacy_path)).is_none(), "unexpected path exporter for `{legacy_path}`");
+    }
+
+    // 2. Synthesized legacy `lumencraft-archive` project & template ZIPs fail explicitly everywhere,
+    //    including when renamed to `.curvebook`, `.cbtemplate`, `.prism`, `.pzfx`, `.csv`, or `.tsv`.
+    let doc = sample_project().expect("sample project");
+    let legacy_project_zip = synthesize_legacy_archive_zip(&doc, "Project").expect("build legacy project zip");
+    let legacy_template_zip = synthesize_legacy_archive_zip(&doc, "Template").expect("build legacy template zip");
+
+    assert!(matches!(open_project_bytes(&legacy_project_zip), Err(FormatError::UnsupportedFormat { .. })));
+    assert!(matches!(open_archive_bytes(&legacy_project_zip), Err(FormatError::UnsupportedFormat { .. })));
+    assert!(matches!(open_template_bytes(&legacy_template_zip), Err(FormatError::UnsupportedFormat { .. })));
+    assert!(matches!(instantiate_template_bytes(&legacy_template_zip, Some("Renamed")), Err(FormatError::UnsupportedFormat { .. })));
+
+    assert!(matches!(import_prism_bytes(&legacy_project_zip), Err(FormatError::UnsupportedFormat { .. })));
+    assert!(matches!(import_prism_bytes(&legacy_template_zip), Err(FormatError::UnsupportedFormat { .. })));
+    assert!(import_pzfx_bytes(&legacy_project_zip).is_err());
+
+    let dir = TempDir::new().expect("temp dir");
+    for (suffix, bytes) in [
+        ("renamed.curvebook", &legacy_project_zip),
+        ("renamed.cbtemplate", &legacy_template_zip),
+        ("renamed.prism", &legacy_project_zip),
+        ("renamed_tpl.prism", &legacy_template_zip),
+        ("renamed.pzfx", &legacy_project_zip),
+        ("renamed.csv", &legacy_project_zip),
+        ("renamed.tsv", &legacy_project_zip),
+    ] {
+        let path = dir.path().join(suffix);
+        std::fs::write(&path, bytes).expect("write renamed legacy archive");
+        let importer = reg.importer_for_path(&path).unwrap_or_else(|| panic!("expected importer dispatch for `{suffix}`"));
+        assert!(
+            importer.import_path(&path, &ImportOptions::default()).is_err(),
+            "renamed legacy archive `{suffix}` must be rejected and never misidentified"
+        );
+    }
+}
+
+#[test]
+fn explicit_rejection_of_legacy_unpacked_dirs_batch_manifests_and_owner_pids() {
+    let reg = FormatRegistry::default_registry();
+    let doc = sample_project().expect("sample project");
+    let dir = TempDir::new().expect("temp dir");
+
+    // 1. Unpacked legacy directory (`lumencraft-archive` manifest.json) is rejected both under
+    //    `.lumencraft.d` and after renaming its suffix to `.curvebook.d`.
+    let doc_bytes = serde_json::to_vec_pretty(&doc).expect("serialize doc");
+    let legacy_manifest = serde_json::json!({
+        "format": "lumencraft-archive",
+        "schema_version": CURRENT_SCHEMA_VERSION,
+        "kind": "Project",
+        "title": doc.title,
+        "document_crc32": crc32fast::hash(&doc_bytes),
+        "sheets": []
+    });
+    let legacy_manifest_bytes = serde_json::to_vec_pretty(&legacy_manifest).expect("serialize legacy manifest");
+    for dir_name in ["old.lumencraft.d", "renamed.curvebook.d"] {
+        let unpacked = dir.path().join(dir_name);
+        std::fs::create_dir_all(&unpacked).expect("create unpacked legacy dir");
+        std::fs::write(unpacked.join("document.json"), &doc_bytes).expect("write legacy document.json");
+        std::fs::write(unpacked.join("manifest.json"), &legacy_manifest_bytes).expect("write legacy manifest.json");
+        assert!(!is_unpacked_project_dir(&unpacked));
+        assert!(matches!(open_project_unpacked_dir(&unpacked), Err(FormatError::UnsupportedFormat { .. })));
+    }
+    assert!(reg.importer_for_path(&dir.path().join("old.lumencraft.d")).is_none());
+    let renamed_dir = dir.path().join("renamed.curvebook.d");
+    let dir_importer = reg.importer_for_path(&renamed_dir).expect("unpacked dir importer");
+    assert!(matches!(dir_importer.import_path(&renamed_dir, &ImportOptions::default()), Err(FormatError::UnsupportedFormat { .. })));
+
+    // 2. Legacy batch manifests (`lumencraft.batch.v1` / `v2`) are rejected both directly and when
+    //    renamed to native/interchange extensions.
+    let legacy_batch = serde_json::to_vec(&serde_json::json!({ "schema": "lumencraft.batch.v1", "commands": [] })).expect("serialize legacy batch");
+    assert!(matches!(
+        validate_batch_manifest_version(&serde_json::json!({ "schema": "lumencraft.batch.v1" })),
+        Err(FormatError::UnsupportedFormat { .. })
+    ));
+    assert!(matches!(
+        validate_batch_manifest_version(&serde_json::json!({ "schema": "lumencraft.batch.v2" })),
+        Err(FormatError::UnsupportedFormat { .. })
+    ));
+    for suffix in ["batch.curvebook", "batch.cbtemplate", "batch.prism", "batch.pzfx"] {
+        let path = dir.path().join(suffix);
+        std::fs::write(&path, &legacy_batch).expect("write legacy batch");
+        let importer = reg.importer_for_path(&path).expect("importer dispatch");
+        assert!(importer.import_path(&path, &ImportOptions::default()).is_err());
+    }
+
+    // 3. Legacy PID owner prefix does not match CurveBook local PID reclamation.
+    assert!(!is_dead_local_owner("lumencraft-pid-999999999"));
 }

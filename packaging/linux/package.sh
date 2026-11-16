@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
-# Build and package LumenCraft for Linux (<arch> is x86_64, aarch64, or riscv64):
+# Build and package CurveBook for Linux (<arch> is x86_64, aarch64, or riscv64):
 #
-#   $DIST/lumencraft-<version>-linux-<arch>.AppImage
-#   $DIST/lumencraft-<version>-linux-<arch>.AppImage.zsync
-#   $DIST/lumencraft-<version>-linux-<arch>.deb
-#   $DIST/lumencraft-<version>-linux-<arch>.rpm
-#   $DIST/lumencraft-<version>-linux-<arch>.tar.gz
+#   $DIST/curvebook-<version>-linux-<arch>.AppImage
+#   $DIST/curvebook-<version>-linux-<arch>.AppImage.zsync
+#   $DIST/curvebook-<version>-linux-<arch>.deb
+#   $DIST/curvebook-<version>-linux-<arch>.rpm
+#   $DIST/curvebook-<version>-linux-<arch>.tar.gz
 #
 # Usage: packaging/linux/package.sh [--skip-build] [--formats "appimage deb rpm tar"]
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
 HERE="$ROOT/packaging/linux"
-APP_ID=org.lumencraft.LumenCraft
+APP_ID=org.curvebook.CurveBook
 
 SKIP_BUILD=0
 FORMATS="appimage deb rpm tar"
@@ -25,6 +25,18 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
+has() { case " $FORMATS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
+verify_sha256() { printf '%s  %s\n' "$1" "$2" | sha256sum -c -; }
+
+if has deb || has rpm; then
+  trimmed_maintainer="${CURVEBOOK_MAINTAINER:-}"
+  if [[ -z "${trimmed_maintainer//[[:space:]]/}" ]]; then
+    echo "error: CURVEBOOK_MAINTAINER must be set (for example 'Your Name <you@example.com>') when building deb or rpm packages" >&2
+    exit 1
+  fi
+  export CURVEBOOK_MAINTAINER
+fi
+
 ARCH="${CROSS_ARCH:-$(uname -m)}"
 case "$ARCH" in
   riscv64) DEB_ARCH=riscv64 ;;
@@ -32,16 +44,15 @@ case "$ARCH" in
   aarch64 | arm64) ARCH=aarch64; DEB_ARCH=arm64 ;;
   *) echo "unsupported architecture $ARCH" >&2; exit 2 ;;
 esac
-export LUMENCRAFT_MAINTAINER="${LUMENCRAFT_MAINTAINER:-LumenCraft Contributors <maintainers@lumencraft.org>}"
-BASENAME="lumencraft-$VERSION-linux-$ARCH"
+BASENAME="curvebook-$VERSION-linux-$ARCH"
 
-echo "==> LumenCraft $VERSION for Linux $ARCH ($FORMATS)"
+echo "==> CurveBook $VERSION for Linux $ARCH ($FORMATS)"
 
 if [[ "$SKIP_BUILD" = 0 ]]; then
   if [[ -n "${CROSS_TARGET:-}" ]]; then
-    (cd "$ROOT" && cargo build --release --locked -p lumencraft -p lumencraft-cli --target "$CROSS_TARGET")
+    (cd "$ROOT" && cargo build --release --locked -p curvebook -p curvebook-cli --target "$CROSS_TARGET")
   else
-    (cd "$ROOT" && cargo build --release --locked -p lumencraft -p lumencraft-cli)
+    (cd "$ROOT" && cargo build --release --locked -p curvebook -p curvebook-cli)
   fi
 fi
 BIN="$CARGO_TARGET_DIR/${CROSS_TARGET:+$CROSS_TARGET/}release"
@@ -49,18 +60,18 @@ WORK="$CARGO_TARGET_DIR/linux-package"
 STAGE="$WORK/root"
 rm -rf "$WORK"
 
-install -Dm755 "$BIN/lumencraft" "$STAGE/usr/bin/lumencraft"
-install -Dm755 "$BIN/lumencraft-cli" "$STAGE/usr/bin/lumencraft-cli"
-"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/lumencraft" "$STAGE/usr/bin/lumencraft-cli" 2>/dev/null || true
+install -Dm755 "$BIN/curvebook" "$STAGE/usr/bin/curvebook"
+install -Dm755 "$BIN/curvebook-cli" "$STAGE/usr/bin/curvebook-cli"
+"${CROSS_COMPILE:-}strip" "$STAGE/usr/bin/curvebook" "$STAGE/usr/bin/curvebook-cli" 2>/dev/null || true
 install -Dm644 "$HERE/$APP_ID.desktop" "$STAGE/usr/share/applications/$APP_ID.desktop"
 install -Dm644 "$HERE/$APP_ID.mime.xml" "$STAGE/usr/share/mime/packages/$APP_ID.xml"
 mkdir -p "$STAGE/usr/share/metainfo"
-sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$LUMENCRAFT_BUILD_DATE/g" \
+sed -e "s/@VERSION@/$VERSION/g" -e "s/@DATE@/$CURVEBOOK_BUILD_DATE/g" \
   "$HERE/$APP_ID.metainfo.xml.in" >"$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
 mkdir -p "$STAGE/usr/share/icons"
 cp -R "$ROOT/assets/app-icon/hicolor" "$STAGE/usr/share/icons/"
-mkdir -p "$STAGE/usr/share/doc/lumencraft"
-copy_docs "$STAGE/usr/share/doc/lumencraft"
+mkdir -p "$STAGE/usr/share/doc/curvebook"
+copy_docs "$STAGE/usr/share/doc/curvebook"
 
 if command -v desktop-file-validate >/dev/null; then
   desktop-file-validate "$STAGE/usr/share/applications/$APP_ID.desktop"
@@ -68,9 +79,6 @@ fi
 if command -v appstreamcli >/dev/null; then
   appstreamcli validate --no-net --explain "$STAGE/usr/share/metainfo/$APP_ID.metainfo.xml"
 fi
-
-has() { case " $FORMATS " in *" $1 "*) return 0 ;; *) return 1 ;; esac; }
-verify_sha256() { printf '%s  %s\n' "$1" "$2" | sha256sum -c -; }
 
 if has tar; then
   mkdir -p "$WORK/tar"
@@ -106,9 +114,9 @@ if has appimage; then
     echo "no pinned AppImage runtime for $ARCH; build the AppImage on x86_64 or aarch64" >&2
     exit 2
   fi
-  APPDIR="$WORK/LumenCraft.AppDir"
+  APPDIR="$WORK/CurveBook.AppDir"
   cp -R "$STAGE" "$APPDIR"
-  ln -s usr/bin/lumencraft "$APPDIR/AppRun"
+  ln -s usr/bin/curvebook "$APPDIR/AppRun"
   cp "$HERE/$APP_ID.desktop" "$APPDIR/$APP_ID.desktop"
   cp "$ROOT/assets/app-icon/hicolor/256x256/apps/$APP_ID.png" "$APPDIR/$APP_ID.png"
   ln -s "$APP_ID.png" "$APPDIR/.DirIcon"
@@ -144,8 +152,8 @@ if has appimage; then
   TOOL="$(cd "$(dirname "$TOOL")" && pwd)/$(basename "$TOOL")"
   RUNTIME="$(cd "$(dirname "$RUNTIME")" && pwd)/$(basename "$RUNTIME")"
   rm -f "$OUT.zsync"
-  REPO="${GITHUB_REPOSITORY:-lumencraft/lumencraft}"
-  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|lumencraft-*-linux-$ARCH.AppImage.zsync"
+  REPO="${GITHUB_REPOSITORY:-HauserGroup/curvebook}"
+  UPDATE_INFO="gh-releases-zsync|${REPO%%/*}|${REPO#*/}|latest|curvebook-*-linux-$ARCH.AppImage.zsync"
   (cd "$DIST" && ARCH="$ARCH" APPIMAGE_EXTRACT_AND_RUN=1 "$TOOL" --no-appstream --runtime-file "$RUNTIME" -u "$UPDATE_INFO" "$APPDIR" "$OUT")
   echo "wrote $OUT"
   if [[ -s "$OUT.zsync" ]]; then
@@ -156,9 +164,9 @@ if has appimage; then
 fi
 
 if [[ -z "${CROSS_TARGET:-}" ]]; then
-  "$STAGE/usr/bin/lumencraft-cli" --version
+  "$STAGE/usr/bin/curvebook-cli" --version
 elif [[ -n "${EMULATOR:-}" ]]; then
-  "$EMULATOR" "$STAGE/usr/bin/lumencraft-cli" --version
+  "$EMULATOR" "$STAGE/usr/bin/curvebook-cli" --version
 fi
 echo "==> done"
 ls -lh "$DIST"

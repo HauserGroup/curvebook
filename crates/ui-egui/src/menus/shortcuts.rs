@@ -2,7 +2,7 @@
 
 use std::collections::BTreeMap;
 
-use lumencraft_engine::cmd::registry;
+use curvebook_engine::cmd::registry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -54,7 +54,7 @@ impl Default for ShortcutRegistry {
 }
 
 impl ShortcutRegistry {
-    /// Seed the shortcut registry from engine [`lumencraft_engine::cmd::registry`] and front-end [`UI_COMMANDS`].
+    /// Seed the shortcut registry from engine [`curvebook_engine::cmd::registry`] and front-end [`UI_COMMANDS`].
     #[must_use]
     pub fn new() -> Self {
         let mut bindings = BTreeMap::new();

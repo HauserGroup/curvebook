@@ -1,13 +1,13 @@
 #![allow(clippy::unwrap_used, clippy::expect_used)]
 
-use lumencraft_chart::{
+use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
     compile_graph, compile_layout,
 };
-use lumencraft_doc::{DataSheet, GraphSheet, LayoutSheet, LayoutSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
-use lumencraft_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_VERMILION, Rgba8};
-use lumencraft_svg::{SVG_XMLNS, SvgError, SvgExportOptions, render_svg, validate_svg_structure};
-use lumencraft_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, parse_markup};
+use curvebook_doc::{DataSheet, GraphSheet, LayoutSheet, LayoutSpec, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
+use curvebook_palette::{LineDashStyle, OKABE_ITO_BLUE, OKABE_ITO_VERMILION, Rgba8};
+use curvebook_svg::{SVG_XMLNS, SvgError, SvgExportOptions, render_svg, validate_svg_structure};
+use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, parse_markup};
 
 fn sample_rich_scene() -> ChartScene {
     let mut scene = ChartScene::new("graph-dose", "IC50 & α-Curve <Test> \"1\" 'A'", 320.0, 240.0, Some(Rgba8::WHITE));
@@ -402,7 +402,7 @@ fn render_svg_strips_xml_forbidden_control_and_noncharacter_codepoints() {
 }
 
 fn cld_sample_document() -> (ProjectDocument, GraphSheet) {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, BracketLabelMode, BracketStyle, Cell, ColumnDesignHint, ColumnTable, CompactLetterDisplaySpec, OneWayAnovaSpec,
         PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, ResultSheet, ResultStatus,
     };
@@ -490,7 +490,7 @@ fn extract_svg_text_xy(svg: &str, tspan_text: &str) -> (f64, f64) {
 
 #[test]
 fn cld_compiled_graph_exports_deterministic_editable_and_outlined_svg() {
-    use lumencraft_doc::PairwiseDisplayMode;
+    use curvebook_doc::PairwiseDisplayMode;
 
     let (doc, gs_cld) = cld_sample_document();
     let mut gs_ctl = gs_cld.clone();

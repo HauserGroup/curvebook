@@ -27,11 +27,11 @@ def parse_top_flatpak(path):
         return data
 
 manifests = []
-for name in ("org.lumencraft.LumenCraft.yml", "org.lumencraft.LumenCraft.bundle.yml"):
+for name in ("org.curvebook.CurveBook.yml", "org.curvebook.CurveBook.bundle.yml"):
     manifest = parse_top_flatpak("packaging/linux/flatpak/" + name)
-    assert manifest["id"] == "org.lumencraft.LumenCraft" and manifest["command"] == "lumencraft", name
+    assert manifest["id"] == "org.curvebook.CurveBook" and manifest["command"] == "curvebook", name
     manifests.append(manifest)
 for key in ("runtime", "runtime-version", "sdk", "finish-args"):
     assert manifests[0][key] == manifests[1][key], f"Flatpak manifests disagree on {key}"
-print("LumenCraft package identity ok")
+print("CurveBook package identity ok")
 PYEOF

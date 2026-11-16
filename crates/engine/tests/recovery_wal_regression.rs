@@ -4,9 +4,9 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{CellCoord, SheetId, TableArchetype};
-use lumencraft_engine::Session;
-use lumencraft_format::{DirectoryJournalBackend, JOURNAL_FILE_NAME, MemoryJournalBackend};
+use curvebook_doc::{CellCoord, SheetId, TableArchetype};
+use curvebook_engine::Session;
+use curvebook_format::{DirectoryJournalBackend, JOURNAL_FILE_NAME, MemoryJournalBackend};
 use serde_json::json;
 
 static ENGINE_TEST_DIR_SEQ: AtomicU64 = AtomicU64::new(1);
@@ -18,7 +18,7 @@ struct TempDirGuard {
 impl TempDirGuard {
     fn new(label: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let id = ENGINE_TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lumencraft-engine-wal-{label}-{}-{id}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("curvebook-engine-wal-{label}-{}-{id}", std::process::id()));
         if path.exists() {
             let _ = fs::remove_dir_all(&path);
         }

@@ -5,8 +5,8 @@
 //!   (`to_web_storage_json` / `from_web_storage_json`) matching browser `localStorage` + Web Locks
 //!   so `wasm32` targets share identical recovery behavior.
 //! - [`DirectoryJournalBackend`] (`#[cfg(not(target_arch = "wasm32"))]`): native directory storage
-//!   using exclusive lockfile creation (`lumencraft.lock`), atomic temp-file + rename snapshots
-//!   (`snapshot.lumencraft`), and append-only NDJSON command records (`ops.journal`).
+//!   using exclusive lockfile creation (`curvebook.lock`), atomic temp-file + rename snapshots
+//!   (`snapshot.curvebook`), and append-only NDJSON command records (`ops.journal`).
 
 use serde::{Deserialize, Serialize};
 
@@ -25,7 +25,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Current persisted format version of [`JournalOpRecord`] entries in `ops.journal`.
 pub const CURRENT_JOURNAL_VERSION: u32 = 1;
-/// Current persisted format version of [`JournalLockLease`] files (`lumencraft.lock`).
+/// Current persisted format version of [`JournalLockLease`] files (`curvebook.lock`).
 pub const CURRENT_LOCK_VERSION: u32 = 1;
 
 /// Check whether `lease` may be reclaimed because its TTL expired or its local PID died.
@@ -34,14 +34,14 @@ pub fn is_lease_reclaimable(lease: &JournalLockLease, now_epoch_ms: u64) -> bool
     lease.is_stale(now_epoch_ms) || is_dead_local_owner(&lease.owner_id)
 }
 
-/// Return `true` only when `owner_id` encodes a local `lumencraft-pid-<N>` owner whose OS
+/// Return `true` only when `owner_id` encodes a local `curvebook-pid-<N>` owner whose OS
 /// process is verified absent (`ESRCH` / missing `/proc/<pid>`), falling back to `false` (TTL)
 /// whenever uncertain or on unsupported platforms.
 #[must_use]
 pub fn is_dead_local_owner(owner_id: &str) -> bool {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let Some(pid) = parse_local_lumencraft_pid(owner_id) else {
+        let Some(pid) = parse_local_curvebook_pid(owner_id) else {
             return false;
         };
         if pid == std::process::id() {
@@ -71,8 +71,8 @@ pub fn is_dead_local_owner(owner_id: &str) -> bool {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn parse_local_lumencraft_pid(owner_id: &str) -> Option<u32> {
-    let rest = owner_id.strip_prefix("lumencraft-pid-")?;
+fn parse_local_curvebook_pid(owner_id: &str) -> Option<u32> {
+    let rest = owner_id.strip_prefix("curvebook-pid-")?;
     let pid_part = rest.split('-').next()?;
     let pid: u32 = pid_part.parse().ok()?;
     if pid == 0 || i32::try_from(pid).is_err() {
@@ -84,7 +84,7 @@ fn parse_local_lumencraft_pid(owner_id: &str) -> Option<u32> {
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 fn is_unix_pid_absent(pid: u32) -> bool {
     let pid_arg = pid.to_string();
-    let Ok(output) = lumencraft_platform::ProcessCommand::new("/bin/kill").args(["-0", &pid_arg]).run() else {
+    let Ok(output) = curvebook_platform::ProcessCommand::new("/bin/kill").args(["-0", &pid_arg]).run() else {
         return false;
     };
     if output.success {
@@ -95,9 +95,9 @@ fn is_unix_pid_absent(pid: u32) -> bool {
 }
 
 /// Filename of the exclusive writer lease file on native backends.
-pub const LOCKFILE_NAME: &str = "lumencraft.lock";
+pub const LOCKFILE_NAME: &str = "curvebook.lock";
 /// Filename of the baseline atomic project snapshot on native backends.
-pub const SNAPSHOT_FILE_NAME: &str = "snapshot.lumencraft";
+pub const SNAPSHOT_FILE_NAME: &str = "snapshot.curvebook";
 /// Filename of the append-only NDJSON recovery journal on native backends.
 pub const JOURNAL_FILE_NAME: &str = "ops.journal";
 
@@ -128,7 +128,7 @@ impl Default for JournalLimits {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-const EVICTION_LOCK_FILE_NAME: &str = ".lumencraft.lock.evict";
+const EVICTION_LOCK_FILE_NAME: &str = ".curvebook.lock.evict";
 #[cfg(not(target_arch = "wasm32"))]
 const EVICTION_LOCK_TTL_MS: u64 = 5_000;
 #[cfg(not(target_arch = "wasm32"))]
@@ -150,7 +150,7 @@ fn default_v1() -> u32 {
     1
 }
 
-/// Exclusive writer lease stored in `lumencraft.lock` or serialized web-storage state.
+/// Exclusive writer lease stored in `curvebook.lock` or serialized web-storage state.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalLockLease {
     /// Persisted schema version of this lock lease (`1`).
@@ -287,14 +287,14 @@ pub fn compute_record_crc32(seq: u64, command_json: &serde_json::Value) -> Resul
 /// Filename of the snapshot coverage metadata sidecar on native backends.
 #[cfg(not(target_arch = "wasm32"))]
 const SNAPSHOT_META_FILE_NAME: &str = "snapshot.meta.json";
-/// Staging filename written before replacing `snapshot.lumencraft` so crashes during snapshot
+/// Staging filename written before replacing `snapshot.curvebook` so crashes during snapshot
 /// replacement still keep the covered journal sequence paired with the snapshot checksum.
 #[cfg(not(target_arch = "wasm32"))]
 const SNAPSHOT_PENDING_META_FILE_NAME: &str = "snapshot.pending.meta.json";
 #[cfg(not(target_arch = "wasm32"))]
 const CURRENT_SNAPSHOT_META_VERSION: u32 = 1;
 /// Sentinel key embedded in legacy-backend fallback checkpoint markers inside `ops.journal`.
-const SNAPSHOT_MARKER_KEY: &str = "__lumencraft_snapshot_marker__";
+const SNAPSHOT_MARKER_KEY: &str = "__curvebook_snapshot_marker__";
 
 /// Structured warning emitted when crash recovery quarantines a damaged journal entry without
 /// aborting recovery of intact records.
@@ -328,7 +328,7 @@ struct SnapshotMarkerPayload {
 /// Diagnostic and replayed payload returned by [`CrashRecoveryJournal::open_or_recover`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryReport {
-    /// Baseline snapshot payload read from `snapshot.lumencraft`, if present.
+    /// Baseline snapshot payload read from `snapshot.curvebook`, if present.
     pub snapshot: Option<Vec<u8>>,
     /// Highest journal sequence number covered by `snapshot`, when recorded atomically at checkpoint.
     #[serde(default)]
@@ -372,16 +372,16 @@ pub trait JournalBackend {
     /// Read the currently persisted lease, if any.
     fn read_lease(&self) -> Result<Option<JournalLockLease>, FormatError>;
 
-    /// Write `snapshot.lumencraft` atomically so readers never observe partial snapshot bytes.
+    /// Write `snapshot.curvebook` atomically so readers never observe partial snapshot bytes.
     fn write_snapshot_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError>;
 
-    /// Atomically replace `snapshot.lumencraft` and bind `covered_seq` to the new snapshot bytes.
+    /// Atomically replace `snapshot.curvebook` and bind `covered_seq` to the new snapshot bytes.
     fn write_snapshot_with_seq(&mut self, bytes: &[u8], covered_seq: u64) -> Result<(), FormatError> {
         let _ = covered_seq;
         self.write_snapshot_atomic(bytes)
     }
 
-    /// Read baseline `snapshot.lumencraft` bytes if present.
+    /// Read baseline `snapshot.curvebook` bytes if present.
     fn read_snapshot(&self) -> Result<Option<Vec<u8>>, FormatError>;
 
     /// Read the highest journal sequence covered by the persisted snapshot, if known.
@@ -813,7 +813,7 @@ impl JournalBackend for MemoryJournalBackend {
     }
 }
 
-/// Native filesystem crash-recovery backend storing `lumencraft.lock`, `snapshot.lumencraft`, and
+/// Native filesystem crash-recovery backend storing `curvebook.lock`, `snapshot.curvebook`, and
 /// `ops.journal` inside a dedicated recovery directory.
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
@@ -929,12 +929,12 @@ impl DirectoryJournalBackend {
         &self.dir
     }
 
-    /// Full path to `lumencraft.lock`.
+    /// Full path to `curvebook.lock`.
     pub fn lock_path(&self) -> PathBuf {
         self.dir.join(LOCKFILE_NAME)
     }
 
-    /// Full path to `snapshot.lumencraft`.
+    /// Full path to `snapshot.curvebook`.
     pub fn snapshot_path(&self) -> PathBuf {
         self.dir.join(SNAPSHOT_FILE_NAME)
     }
@@ -1047,7 +1047,7 @@ impl DirectoryJournalBackend {
     }
 
     fn reclaim_stale_eviction_lock(&self, evict_path: &Path, observed_bytes: &[u8]) -> Result<(), FormatError> {
-        let reclaim_path = self.next_unique_sibling_path("lumencraft.lock.evict.reclaim");
+        let reclaim_path = self.next_unique_sibling_path("curvebook.lock.evict.reclaim");
         match std::fs::rename(evict_path, &reclaim_path) {
             Ok(()) => {}
             Err(err) if err.kind() == ErrorKind::NotFound => return Ok(()),
@@ -1075,7 +1075,7 @@ impl DirectoryJournalBackend {
             EvictionLockRecord { owner_id: owner_id.to_owned(), acquired_wall_ms: current_wall_epoch_ms(), ttl_ms: EVICTION_LOCK_TTL_MS, nonce };
         let guard_bytes = serde_json::to_vec(&record)?;
 
-        if self.try_create_file_exclusively(&evict_path, "lumencraft.lock.evict", &guard_bytes, false)? {
+        if self.try_create_file_exclusively(&evict_path, "curvebook.lock.evict", &guard_bytes, false)? {
             return Ok(Some(EvictionLockGuard { path: evict_path, expected_bytes: guard_bytes }));
         }
 
@@ -1130,11 +1130,11 @@ impl DirectoryJournalBackend {
                         current.expires_epoch_ms()
                     )));
                 }
-                lumencraft_platform::fs::write_atomic(&self.lock_path(), lease_bytes)?;
+                curvebook_platform::fs::write_atomic(&self.lock_path(), lease_bytes)?;
                 Ok(Some(Some(current)))
             }
             LockfileState::Corrupt(err_msg) => {
-                lumencraft_platform::fs::write_atomic(&self.lock_path(), lease_bytes)?;
+                curvebook_platform::fs::write_atomic(&self.lock_path(), lease_bytes)?;
                 self.pending_warnings.push(JournalRecoveryWarning {
                     line: 0,
                     kind: String::from("corrupt_lockfile"),
@@ -1229,7 +1229,7 @@ impl JournalBackend for DirectoryJournalBackend {
         let mut refreshed = lease.clone();
         refreshed.acquired_epoch_ms = now_epoch_ms;
         let bytes = serde_json::to_vec(&refreshed)?;
-        lumencraft_platform::fs::write_atomic(&self.lock_path(), &bytes)?;
+        curvebook_platform::fs::write_atomic(&self.lock_path(), &bytes)?;
         Ok(())
     }
 
@@ -1263,7 +1263,7 @@ impl JournalBackend for DirectoryJournalBackend {
 
     fn write_snapshot_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
         self.clear_snapshot_covered_seq()?;
-        lumencraft_platform::fs::write_atomic(&self.snapshot_path(), bytes)?;
+        curvebook_platform::fs::write_atomic(&self.snapshot_path(), bytes)?;
         Ok(())
     }
 
@@ -1273,8 +1273,8 @@ impl JournalBackend for DirectoryJournalBackend {
         let meta_bytes = serde_json::to_vec(&meta)?;
         let pending_path = self.pending_snapshot_meta_path();
         let meta_path = self.snapshot_meta_path();
-        lumencraft_platform::fs::write_atomic(&pending_path, &meta_bytes)?;
-        lumencraft_platform::fs::write_atomic(&self.snapshot_path(), bytes)?;
+        curvebook_platform::fs::write_atomic(&pending_path, &meta_bytes)?;
+        curvebook_platform::fs::write_atomic(&self.snapshot_path(), bytes)?;
         std::fs::rename(&pending_path, &meta_path)?;
         sync_directory_best_effort(&self.dir);
         Ok(())
@@ -1351,7 +1351,7 @@ impl JournalBackend for DirectoryJournalBackend {
     }
 
     fn replace_journal_bytes_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
-        lumencraft_platform::fs::write_atomic(&self.journal_path(), bytes)?;
+        curvebook_platform::fs::write_atomic(&self.journal_path(), bytes)?;
         Ok(())
     }
 
@@ -1530,7 +1530,7 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
         Ok(())
     }
 
-    /// Write the final atomic snapshot, clear `ops.journal`, release `lumencraft.lock`, and return
+    /// Write the final atomic snapshot, clear `ops.journal`, release `curvebook.lock`, and return
     /// the underlying backend.
     pub fn close_cleanly(mut self, final_snapshot_bytes: &[u8]) -> Result<B, FormatError> {
         self.ensure_lease_ownership("close journal cleanly")?;

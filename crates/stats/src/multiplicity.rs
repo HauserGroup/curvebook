@@ -48,12 +48,12 @@
 //!   University (reprinted in *The Collected Works of John W. Tukey*, Vol. VIII, 1994).
 //! - Zar, J. H. (2010). *Biostatistical Analysis* (5th ed.). Pearson Prentice Hall.
 
-use lumencraft_doc::{MultiplicityMethod, MultiplicitySpec, PairwiseComparisonRecord, ResultCell, ResultTab};
-use lumencraft_math::dist::{
+use curvebook_doc::{MultiplicityMethod, MultiplicitySpec, PairwiseComparisonRecord, ResultCell, ResultTab};
+use curvebook_math::dist::{
     dunnett_loadings_from_sizes, dunnett_two_sided_crit, dunnett_two_sided_p, f_sf, max_studentized_range_isf, max_studentized_range_sf,
     norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
 };
-use lumencraft_math::sum::NeumaierSum;
+use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
 
 use crate::error::StatsError;
@@ -141,7 +141,7 @@ pub struct PairwiseComparisonDetail {
 }
 
 impl PairwiseComparisonDetail {
-    /// Convert to [`PairwiseComparisonRecord`] for [`lumencraft_doc::ResultSheet`].
+    /// Convert to [`PairwiseComparisonRecord`] for [`curvebook_doc::ResultSheet`].
     #[must_use]
     pub fn to_record(&self) -> PairwiseComparisonRecord {
         PairwiseComparisonRecord {
@@ -977,13 +977,13 @@ pub fn compare_dunn_ranks(
     Ok(out)
 }
 
-/// Convert pairwise details into a [`lumencraft_doc::ResultTab`] and attach
+/// Convert pairwise details into a [`curvebook_doc::ResultTab`] and attach
 /// [`PairwiseComparisonRecord`] entries (emitting an informational note if `m == 1`).
 pub fn build_multiplicity_tab(
     details: &[PairwiseComparisonDetail],
     title: &str,
-    p_fmt: lumencraft_doc::PValueFormat,
-    confidence: lumencraft_math::ConfidenceLevel,
+    p_fmt: curvebook_doc::PValueFormat,
+    confidence: curvebook_math::ConfidenceLevel,
 ) -> ResultTab {
     let headers = vec![
         String::from("Mean Diff."),
@@ -1015,7 +1015,7 @@ pub fn build_multiplicity_tab(
         ]);
     }
     let mut tab =
-        crate::common::build_tab("multiple-comparisons", title, lumencraft_doc::ResultTabKind::MultipleComparisons, headers, row_labels, rows);
+        crate::common::build_tab("multiple-comparisons", title, curvebook_doc::ResultTabKind::MultipleComparisons, headers, row_labels, rows);
     if details.len() == 1 {
         tab.footnotes.push(String::from("Only m = 1 comparison in family; multiplicity adjustment leaves the unadjusted P value unchanged."));
     }

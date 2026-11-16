@@ -12,9 +12,9 @@ use std::error::Error;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lumencraft_doc::{Cell, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
-use lumencraft_render::RenderTargetSpec;
-use lumencraft_ui_egui::{RenderError, UiApp, UiThemeMode, dispatch_ui_command, render_workspace_frame_png};
+use curvebook_doc::{Cell, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
+use curvebook_render::RenderTargetSpec;
+use curvebook_ui_egui::{RenderError, UiApp, UiThemeMode, dispatch_ui_command, render_workspace_frame_png};
 use serde_json::json;
 
 const WIDTH_PX: u32 = 1440;
@@ -157,7 +157,7 @@ fn build_split_fit_png() -> Result<Vec<u8>, Box<dyn Error>> {
     let mut doc = ProjectDocument::new("Dose-Response Assay Workspace")?;
     doc.add_data_sheet(build_synthetic_dose_response_sheet("xy-dose")?)?;
 
-    let mut app = UiApp::from_session(lumencraft_engine::Session::from_document(doc));
+    let mut app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
     app.set_theme_mode(UiThemeMode::Light);
 
     app.execute_command(
@@ -202,7 +202,7 @@ fn build_layout_dark_png() -> Result<Vec<u8>, Box<dyn Error>> {
     doc.add_data_sheet(build_synthetic_dose_response_sheet("xy-dose")?)?;
     doc.add_data_sheet(build_synthetic_efficacy_sheet("col-eff")?)?;
 
-    let mut app = UiApp::from_session(lumencraft_engine::Session::from_document(doc));
+    let mut app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
     app.set_theme_mode(UiThemeMode::Dark);
 
     app.execute_command(

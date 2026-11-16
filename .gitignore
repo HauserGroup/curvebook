@@ -7,7 +7,7 @@
 /corpus
 /log
 .DS_Store
-# Optional external font directory for LUMENCRAFT_FONTS_DIR
+# Optional external font directory for CURVEBOOK_FONTS_DIR
 /fonts
 # Secrets and local agent settings
 .env*

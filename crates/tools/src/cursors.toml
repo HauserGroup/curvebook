@@ -1,4 +1,4 @@
-# Cursor manifest for LumenCraft interactive tools (`crates/tools/src/lib.rs` `Cursor` enum).
+# Cursor manifest for CurveBook interactive tools (`crates/tools/src/lib.rs` `Cursor` enum).
 # Checked by `cargo xtask cursors` (and `cargo xtask brands` for vendor-neutral wording).
 
 [[cursor]]

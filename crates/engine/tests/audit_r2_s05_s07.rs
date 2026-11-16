@@ -6,16 +6,16 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AnnotationShapeKind, BlandAltmanSpec, BreakOrnament, Cell, CellCoord, ColumnDesignHint, ColumnTable, ConfidenceLevel,
     ContingencyMethod, ContingencySpec, ContingencyTable, CoxTieMethod, DataSheet, EquationDisplayMode, FramePreset, GraphAnnotation, GroupedTable,
     LevelOrderKind, MultipleVariablesTable, NonlinearFitSpec, OutlierSpec, PartsOfWholeTable, PowerAnalysisSpec, PowerEffectSpec, PowerSolveTarget,
     PowerTailMode, PowerTestFamily, ProjectDocument, RectPt, ResultCell, ResultSheet, ResultTab, ResultTabKind, SheetId, SubcolumnMode,
     SurvivalAnalysisSpec, SurvivalTable, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, XyTable,
 };
-use lumencraft_engine::methods_report::{ReportFormat, describe_power_analysis_spec, generate_methods_report};
-use lumencraft_engine::{Caller, ErrorCode, GuiOnlyPolicy, Session};
-use lumencraft_palette::{LineDashStyle, PaletteId, Rgba8};
+use curvebook_engine::methods_report::{ReportFormat, describe_power_analysis_spec, generate_methods_report};
+use curvebook_engine::{Caller, ErrorCode, GuiOnlyPolicy, Session};
+use curvebook_palette::{LineDashStyle, PaletteId, Rgba8};
 use serde_json::{Value, json};
 
 static SEQ: AtomicU64 = AtomicU64::new(1);
@@ -27,7 +27,7 @@ struct ScratchDir {
 impl ScratchDir {
     fn new(label: &str) -> Self {
         let id = SEQ.fetch_add(1, Ordering::Relaxed);
-        let root = std::env::temp_dir().join(format!("lc-r2-s05s07-{label}-{}-{id}", std::process::id()));
+        let root = std::env::temp_dir().join(format!("cb-r2-s05s07-{label}-{}-{id}", std::process::id()));
         fs::create_dir_all(&root).unwrap();
         Self { root }
     }
@@ -39,7 +39,7 @@ impl Drop for ScratchDir {
     }
 }
 
-fn ok_cmd(session: &mut Session, id: &str, params: Value) -> lumencraft_engine::CommandOutcome {
+fn ok_cmd(session: &mut Session, id: &str, params: Value) -> curvebook_engine::CommandOutcome {
     session.execute(id, params).unwrap_or_else(|err| panic!("command `{id}` failed: {err}"))
 }
 
@@ -144,10 +144,10 @@ fn r2_s07_01_convert_archetype_strict_policy_aliases_preview_and_undo() {
     assert!(committed.mutated);
     assert!(session.is_dirty());
     assert_eq!(session.undo_depth(), 1);
-    assert_eq!(session.document().data_sheet(&SheetId::new("col-1")).unwrap().kind(), lumencraft_doc::TableKind::Grouped);
+    assert_eq!(session.document().data_sheet(&SheetId::new("col-1")).unwrap().kind(), curvebook_doc::TableKind::Grouped);
 
     assert!(session.undo().unwrap());
-    assert_eq!(session.document().data_sheet(&SheetId::new("col-1")).unwrap().kind(), lumencraft_doc::TableKind::Column);
+    assert_eq!(session.document().data_sheet(&SheetId::new("col-1")).unwrap().kind(), curvebook_doc::TableKind::Column);
 }
 
 #[test]
@@ -281,7 +281,7 @@ fn r2_s07_03_and_12_methods_report_accuracy_latex_safety_and_audit_parity() {
 
     let mut tex_doc = session.document().clone();
     // Inject orphaned exclusion note directly into the isolated report doc (simulating historical project before R2-S05-01).
-    tex_doc.data_sheet_mut(&SheetId::new("xy-tr")).unwrap().exclusion_notes.push(lumencraft_doc::CellExclusionNote {
+    tex_doc.data_sheet_mut(&SheetId::new("xy-tr")).unwrap().exclusion_notes.push(curvebook_doc::CellExclusionNote {
         coord: CellCoord::new(0, 0, 0),
         reason_tag: String::from("orphan"),
         note: String::from("cleared previously"),
@@ -309,12 +309,12 @@ fn r2_s07_03_and_12_methods_report_accuracy_latex_safety_and_audit_parity() {
     // 6. R2-S07-12 table.exclusionAuditReport covers Xy.x_cells and Survival.times.
     let mut aud_doc = ProjectDocument::new("AuditParity").unwrap();
     let mut xy_aud = XyTable::new(SubcolumnMode::RawReplicates(1), 1, 2).unwrap();
-    xy_aud.x_cells[0][0] = Cell { value: lumencraft_doc::CellValue::Number(1.0), excluded: true };
+    xy_aud.x_cells[0][0] = Cell { value: curvebook_doc::CellValue::Number(1.0), excluded: true };
     xy_aud.data_sets[0].cells[0][0] = Cell::number(2.0);
     aud_doc.add_data_sheet(DataSheet::new("xy-aud", "XY Audit", TableArchetype::Xy(xy_aud)).unwrap()).unwrap();
 
     let mut srv_aud = SurvivalTable::new(1, 2).unwrap();
-    srv_aud.times[1] = Cell { value: lumencraft_doc::CellValue::Number(5.0), excluded: true };
+    srv_aud.times[1] = Cell { value: curvebook_doc::CellValue::Number(5.0), excluded: true };
     srv_aud.cohorts[0].cells[0][0] = Cell::number(1.0);
     srv_aud.cohorts[0].cells[1][0] = Cell::number(1.0);
     aud_doc.add_data_sheet(DataSheet::new("srv-aud", "Surv Audit", TableArchetype::Survival(srv_aud)).unwrap()).unwrap();
@@ -415,7 +415,7 @@ fn r2_s07_05_checkpoint_validation_caps_cycles_and_undo_byte_budget() {
     assert!(snap_val.get("checkpoints").is_none_or(|c| c.as_array().is_none_or(|a| a.is_empty())));
 
     let mut bad_doc = session.document().clone();
-    bad_doc.checkpoints.push(lumencraft_doc::NamedCheckpoint {
+    bad_doc.checkpoints.push(curvebook_doc::NamedCheckpoint {
         id: String::from("cp-corrupt"),
         name: String::from("Corrupt"),
         note: String::new(),
@@ -433,7 +433,7 @@ fn r2_s07_05_checkpoint_validation_caps_cycles_and_undo_byte_budget() {
     let bad_res = ResultSheet::new(bad_spec).unwrap();
     cyclic_snapshot["result_sheets"] = json!([bad_res]);
     let mut cyc_doc = session.document().clone();
-    cyc_doc.checkpoints.push(lumencraft_doc::NamedCheckpoint {
+    cyc_doc.checkpoints.push(curvebook_doc::NamedCheckpoint {
         id: String::from("cp-cyc"),
         name: String::from("Cyclic"),
         note: String::new(),
@@ -461,7 +461,7 @@ fn r2_s07_05_checkpoint_validation_caps_cycles_and_undo_byte_budget() {
     pad_doc.data_sheet_mut(&SheetId::new("d-big")).unwrap().set_cell(CellCoord::new(1, 0, 0), Cell::text("x".repeat(2 * 1024 * 1024))).unwrap();
     let big_payload = serde_json::to_string(&pad_doc).unwrap();
     for i in 0..3 {
-        big_doc.checkpoints.push(lumencraft_doc::NamedCheckpoint {
+        big_doc.checkpoints.push(curvebook_doc::NamedCheckpoint {
             id: format!("pad-{i}"),
             name: format!("Pad {i}"),
             note: String::new(),
@@ -695,7 +695,7 @@ fn r2_s07_11_extract_result_tab_control_sanitization_ci_cells_and_locked_label()
     assert_eq!(mv.variables[0].role, VariableRole::Label);
     assert!(!mv.variables[0].role_inferred);
     // ConfidenceInterval cell populated as readable interval string instead of empty.
-    assert!(mv.variables[0].cells.iter().any(|c| matches!(&c.value, lumencraft_doc::CellValue::Text(s) if s.contains('[') && s.contains(','))));
+    assert!(mv.variables[0].cells.iter().any(|c| matches!(&c.value, curvebook_doc::CellValue::Text(s) if s.contains('[') && s.contains(','))));
     // Reactive upstream edit + recalculation preserves locked Label role and formatted CI cells.
     ok_cmd(&mut session, "table.setCell", json!({ "sheet_id": "col-t", "row": 0, "col": 0, "value": 9.5 }));
     let TableArchetype::MultipleVariables(mv_after) = &session.document().data_sheet(&SheetId::new("mv-ext")).unwrap().archetype else {
@@ -703,7 +703,7 @@ fn r2_s07_11_extract_result_tab_control_sanitization_ci_cells_and_locked_label()
     };
     assert_eq!(mv_after.variables[0].role, VariableRole::Label);
     assert!(!mv_after.variables[0].role_inferred);
-    assert!(mv_after.variables[0].cells.iter().any(|c| matches!(&c.value, lumencraft_doc::CellValue::Text(s) if s.contains('[') && s.contains(','))));
+    assert!(mv_after.variables[0].cells.iter().any(|c| matches!(&c.value, curvebook_doc::CellValue::Text(s) if s.contains('[') && s.contains(','))));
 
     // Control characters inside ResultTab.row_labels are sanitized into row_titles.
     let mut san_doc = session.document().clone();
@@ -766,7 +766,7 @@ fn r2_s07_13_categorical_order_reference_level_and_randomize_groups_name_alias()
 #[test]
 fn r2_s07_14_info_remove_constant_if_exists_noop() {
     let mut doc = ProjectDocument::new("InfoNoop").unwrap();
-    doc.add_info_sheet(lumencraft_doc::InfoSheet::new_preseeded("info-1", "Study Info").unwrap()).unwrap();
+    doc.add_info_sheet(curvebook_doc::InfoSheet::new_preseeded("info-1", "Study Info").unwrap()).unwrap();
     let mut session = Session::from_document(doc);
     let out = ok_cmd(&mut session, "info.removeConstant", json!({ "sheet_id": "info-1", "name": "Missing", "if_exists": true }));
     assert!(!out.mutated);
@@ -858,23 +858,31 @@ fn r2_s07_18_random_sample_seed_validation_and_default_proportional() {
 }
 
 #[test]
-fn r2_s12_02_path_policy_rejects_arbitrary_directories_without_lumencraft_d() {
+fn r2_s12_02_path_policy_rejects_arbitrary_directories_without_curvebook_d() {
     let scratch = ScratchDir::new("dir-open-save");
     let plain_dir = scratch.root.join("plain_folder");
     fs::create_dir_all(&plain_dir).unwrap();
 
     let mut session = Session::new();
     let open_err = session.execute("project.open", json!({ "path": plain_dir.to_string_lossy() })).unwrap_err();
-    assert_eq!(open_err.code, ErrorCode::BadInput, "arbitrary directory without .lumencraft.d must be rejected on open: {open_err}");
+    assert_eq!(open_err.code, ErrorCode::BadInput, "arbitrary directory without .curvebook.d must be rejected on open: {open_err}");
 
     let save_err = session.execute("project.save", json!({ "path": plain_dir.to_string_lossy() })).unwrap_err();
-    assert_eq!(save_err.code, ErrorCode::BadInput, "arbitrary directory without .lumencraft.d / unpacked:true must be rejected on save: {save_err}");
+    assert_eq!(save_err.code, ErrorCode::BadInput, "arbitrary directory without .curvebook.d / unpacked:true must be rejected on save: {save_err}");
 
-    let unpacked_dir = scratch.root.join("valid_project.lumencraft.d");
+    let unpacked_dir = scratch.root.join("valid_project.curvebook.d");
     ok_cmd(&mut session, "project.save", json!({ "path": unpacked_dir.to_string_lossy() }));
     assert!(unpacked_dir.join("manifest.json").exists());
     let mut reopened = Session::new();
     ok_cmd(&mut reopened, "project.open", json!({ "path": unpacked_dir.to_string_lossy() }));
+
+    let legacy_dir = scratch.root.join("legacy_project.lumencraft.d");
+    fs::create_dir_all(&legacy_dir).expect("create legacy dir");
+    fs::copy(unpacked_dir.join("manifest.json"), legacy_dir.join("manifest.json")).expect("copy manifest");
+    let legacy_open = reopened.execute("project.open", json!({ "path": legacy_dir.to_string_lossy() })).expect_err("reject legacy open");
+    assert_eq!(legacy_open.code, ErrorCode::BadInput, "legacy .lumencraft.d directory must be rejected on open: {legacy_open}");
+    let legacy_save = session.execute("project.save", json!({ "path": legacy_dir.to_string_lossy() })).expect_err("reject legacy save");
+    assert_eq!(legacy_save.code, ErrorCode::BadInput, "legacy .lumencraft.d directory must be rejected on save: {legacy_save}");
 }
 
 #[test]

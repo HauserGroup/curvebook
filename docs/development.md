@@ -9,7 +9,7 @@
   - **macOS Homebrew note:** If both Homebrew `rust` and `rustup` are installed, `/opt/homebrew/bin/{cargo,rustc}` link directly to Homebrew's formula and bypass `rust-toolchain.toml` and `+<toolchain>` selection. Prepend `rustup`'s proxy bin directory (`export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`) ahead of `/opt/homebrew/bin` so `rust-toolchain.toml` takes effect.
 - Optional tools:
   - [`cargo-nextest`](https://nexte.st/) — used automatically by `cargo xtask test` when installed; falls back to `cargo test`.
-  - `wasm32-unknown-unknown` target — for `cargo xtask wasm`; plus [`trunk`](https://trunkrs.dev/) for browser builds in `apps/lumencraft-web`.
+  - `wasm32-unknown-unknown` target — for `cargo xtask wasm`; plus [`trunk`](https://trunkrs.dev/) for browser builds in `apps/curvebook-web`.
   - [`actionlint`](https://github.com/rhysd/actionlint) + [`shellcheck`](https://www.shellcheck.net/) — for `cargo xtask workflows`.
   - [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install --locked cargo-llvm-cov`) + the `llvm-tools-preview` rustup component — for `cargo xtask coverage` ([Coverage reports](#coverage-reports)).
   - `resvg`, `rsvg-convert`, or ImageMagick (`magick`), plus `iconutil` (macOS) — only when regenerating `assets/app-icon/` via `packaging/icons.sh`.
@@ -30,7 +30,7 @@
 | Verify offline corpus & NIST StRD suites (`--fetch` to download) | `cargo xtask corpus` |
 | Print per-crate LOC and test statistics | `cargo xtask stats` |
 | Write a local source-coverage report (lcov + HTML) | `cargo xtask coverage [-p <crate>]` |
-| Build macOS `dist/LumenCraft.app` bundle | `cargo xtask bundle` |
+| Build macOS `dist/CurveBook.app` bundle | `cargo xtask bundle` |
 | List every `xtask` subcommand (secrets, licences, telemetry, generated docs, …) | `cargo xtask --help` (see also [AGENTS.md](../AGENTS.md) §4) |
 
 ## Subsystem implementation guides
@@ -42,22 +42,22 @@ Before adding or modifying behaviour in any domain crate, read its governing spe
 - [`statistics-implementation.md`](statistics-implementation.md) — tail-safe special functions, *p*-value formatting, *t*-tests, 1/2/3-way & Multifactor ANOVA, REML mixed models, multiplicity/FDR, contingency, survival, ROC, GLMs & PCA (`crates/math`, `crates/stats`)
 - [`curve-fitting-implementation.md`](curve-fitting-implementation.md) — Moré Levenberg–Marquardt, weighting, Cauchy robust & ROUT fitting, shared global parameters, Venzon–Moolgavkar profile-likelihood CIs, AICc/*F*-tests, built-in equations & custom equation VM (`crates/fit`)
 - [`graphing-and-layouts.md`](graphing-and-layouts.md) — `GraphSpec -> ChartScene` compiler, nonlinear/discontinuous axes, live pairwise *p*-value brackets, style cloning, Page Layouts & SVG/PDF/PNG/TIFF export (`crates/chart`, `crates/text`, `crates/palette`, `crates/render`, `crates/svg`, `crates/pdf`)
-- [`scripting-and-automation.md`](scripting-and-automation.md), [`control-protocol.md`](control-protocol.md), [`mcp.md`](mcp.md) — `.lctemplate` batch workflows, `lumencraft-cli`, `--control` TCP JSONL, and `lumencraft-cli mcp`
+- [`scripting-and-automation.md`](scripting-and-automation.md), [`control-protocol.md`](control-protocol.md), [`mcp.md`](mcp.md) — `.cbtemplate` batch workflows, `curvebook-cli`, `--control` TCP JSONL, and `curvebook-cli mcp`
 
 ## Fonts
 
 Font binaries never live inside this repository ([`AGENTS.md`](../AGENTS.md) › Assets).
 
-- Set `LUMENCRAFT_FONTS_DIR` to an absolute directory of SIL OFL font faces when building if you want embedded fonts staged via `crates/text/build.rs` into `lumencraft_text::BUNDLED_FONTS` and copied into `dist/web/fonts/` via `cargo xtask web-fonts`. At runtime, pass `--ttf-font <path>` (to `lumencraft` or to `lumencraft-cli convert` / `export`) when you want an external `.ttf` file embedded as a TrueType `/FontFile2` font stream in `%PDF-1.7` exports; `LUMENCRAFT_FONTS_DIR` itself is read only at build time (`crates/text/build.rs`, `cargo xtask web-fonts`). Set `LUMENCRAFT_FONTS_REQUIRED=1` to make the build fail when `LUMENCRAFT_FONTS_DIR` is unset.
-- **Leaving out the bundled fonts:** `lumencraft-text`, `lumencraft-engine`, and `lumencraft-ui-egui` gate embedded font bytes behind the default-on `bundled-fonts` Cargo feature. Embedders can depend on them with `default-features = false`; `lumencraft_ui_egui::theme::install_fonts()` then reports `0` bundled faces. `cargo xtask ci` tests `lumencraft-text` and `lumencraft-ui-egui` and checks `lumencraft-mcp` with `--no-default-features`.
+- Set `CURVEBOOK_FONTS_DIR` to an absolute directory of SIL OFL font faces when building if you want embedded fonts staged via `crates/text/build.rs` into `curvebook_text::BUNDLED_FONTS` and copied into `dist/web/fonts/` via `cargo xtask web-fonts`. At runtime, pass `--ttf-font <path>` (to `curvebook` or to `curvebook-cli convert` / `export`) when you want an external `.ttf` file embedded as a TrueType `/FontFile2` font stream in `%PDF-1.7` exports; `CURVEBOOK_FONTS_DIR` itself is read only at build time (`crates/text/build.rs`, `cargo xtask web-fonts`). Set `CURVEBOOK_FONTS_REQUIRED=1` to make the build fail when `CURVEBOOK_FONTS_DIR` is unset.
+- **Leaving out the bundled fonts:** `curvebook-text`, `curvebook-engine`, and `curvebook-ui-egui` gate embedded font bytes behind the default-on `bundled-fonts` Cargo feature. Embedders can depend on them with `default-features = false`; `curvebook_ui_egui::theme::install_fonts()` then reports `0` bundled faces. `cargo xtask ci` tests `curvebook-text` and `curvebook-ui-egui` and checks `curvebook-mcp` with `--no-default-features`.
 
 ## Web build
 
-`apps/lumencraft-web` shares the same pure-Rust `UiApp` + `lumencraft-engine` codebase and presents the compositor's RGBA frame on a WebGL2 `<canvas>` (`R8.4`; `init_web_app()` tests also run on the host). `cargo xtask wasm` type-checks `lumencraft-web` and `lumencraft-engine` for `wasm32-unknown-unknown`; `./packaging/web/package.sh` produces the release zip. Web menus and toolbar are not built yet (`R10.7`):
+`apps/curvebook-web` shares the same pure-Rust `UiApp` + `curvebook-engine` codebase and presents the compositor's RGBA frame on a WebGL2 `<canvas>` (`R8.4`; `init_web_app()` tests also run on the host) using the `window.CurveBookHost` bridge (`curvebook.v1.*` storage namespaces). `cargo xtask wasm` type-checks `curvebook-web` and `curvebook-engine` for `wasm32-unknown-unknown`; `./packaging/web/package.sh` produces the release zip. Web menus and toolbar are not built yet (`R10.7`):
 
 ```sh
 rustup target add wasm32-unknown-unknown
-cd apps/lumencraft-web
+cd apps/curvebook-web
 trunk build --release   # writes ../../dist/web
 trunk serve --release   # serves on http://127.0.0.1:8767
 ```
@@ -66,14 +66,17 @@ trunk serve --release   # serves on http://127.0.0.1:8767
 
 | Variable | Effect |
 |---|---|
-| `LUMENCRAFT_CONTROL_PORT` | Equivalent to `--control <port>` (`1..=65535`, binds strictly to `127.0.0.1`) |
-| `LUMENCRAFT_FONTS_DIR` | Optional path to external SIL OFL fonts directory at build time |
-| `LUMENCRAFT_FONTS_REQUIRED` | Build-time: fail the `lumencraft-text` build when `LUMENCRAFT_FONTS_DIR` is unset |
-| `LUMENCRAFT_ALLOW_OS_GUI_DIALOG` | Allow print preview to launch the host OS dialog (otherwise the PDF spool is only staged) |
-| `LUMENCRAFT_REQUIRE_CORPUS` / `LUMENCRAFT_CORPUS_DIR` | Tests: require the cached NIST StRD corpus / override its location (see below) |
-| `WGPU_POWER_PREF` / `WGPU_BACKEND` | Graphics adapter overrides honoured by the third-party `wgpu` renderer used by `eframe` (not read by LumenCraft code) |
+| `CURVEBOOK_CONTROL_PORT` | Equivalent to `--control <port>` (`1..=65535`, binds strictly to `127.0.0.1`) |
+| `CURVEBOOK_CONTROL_TOKEN` | Bearer token for `--control` / `--control-port` authentication |
+| `CURVEBOOK_CONFIG_DIR` | Override platform config/recovery directory (and `control-<port>.token` location) |
+| `CURVEBOOK_NO_PREFS` | Skip reading/writing preferences and shared recovery directories when truthy (`1`/`true`/`yes`) |
+| `CURVEBOOK_FONTS_DIR` | Optional path to external SIL OFL fonts directory at build time (and runtime `FontBook` / `SystemFontSet` override) |
+| `CURVEBOOK_FONTS_REQUIRED` | Build-time: fail the `curvebook-text` build when `CURVEBOOK_FONTS_DIR` is unset |
+| `CURVEBOOK_ALLOW_OS_GUI_DIALOG` | Allow print preview to launch the host OS dialog (otherwise the PDF spool is only staged) |
+| `CURVEBOOK_REQUIRE_CORPUS` / `CURVEBOOK_CORPUS_DIR` | Tests: require the cached NIST StRD corpus / override its location (see below) |
+| `WGPU_POWER_PREF` / `WGPU_BACKEND` | Graphics adapter overrides honoured by the third-party `wgpu` renderer used by `eframe` (not read by CurveBook code) |
 
-To isolate configuration for test or agent runs, pass `--portable-dir <dir>` (or place a `portable.txt` next to the executable) so preferences, shortcuts, and the recovery journal live under `<dir>/lumencraft-data`. LumenCraft has no logging framework and reads no `RUST_LOG` filter.
+To isolate configuration for test or agent runs, pass `--portable-dir <dir>` (or place a `portable.txt` next to the executable) so preferences, shortcuts, and the recovery journal live under `<dir>/curvebook-data`. CurveBook has no logging framework and reads no `RUST_LOG` filter.
 
 ## Cursors
 
@@ -88,7 +91,7 @@ To isolate configuration for test or agent runs, pass `--portable-dir <dir>` (or
 ## Tests & numerical verification
 
 - `cargo xtask test` runs workspace unit and integration tests (`cargo nextest run` when installed, else `cargo test --workspace --lib --bins --tests`) followed by workspace doctests (`cargo test --workspace --doc`).
-- Every statistical test (`crates/stats`) and regression model (`crates/fit`) must carry analytical unit tests, certified reference-dataset tests (NIST StRD) with explicit relative/ULP tolerances in `lumencraft-testkit`, and property tests covering degenerate inputs.
+- Every statistical test (`crates/stats`) and regression model (`crates/fit`) must carry analytical unit tests, certified reference-dataset tests (NIST StRD) with explicit relative/ULP tolerances in `curvebook-testkit`, and property tests covering degenerate inputs.
 
 ### Coverage reports
 
@@ -100,11 +103,11 @@ To isolate configuration for test or agent runs, pass `--portable-dir <dir>` (or
 
 ```sh
 cargo xtask coverage                        # whole workspace (slow: rebuilds everything instrumented)
-cargo xtask coverage -p lumencraft-stats    # one crate's tests
-cargo xtask coverage -p lumencraft-fit -- solver   # forward a test filter to the runner
+cargo xtask coverage -p curvebook-stats     # one crate's tests
+cargo xtask coverage -p curvebook-fit -- solver   # forward a test filter to the runner
 ```
 
-- `-p` limits which tests run; the report still includes every workspace crate those tests reach. `xtask` and `lumencraft-testkit` are always left out.
+- `-p` limits which tests run; the report still includes every workspace crate those tests reach. `xtask` and `curvebook-testkit` are always left out.
 - The instrumented build lives in `<target dir>/llvm-cov-target`, separate from normal builds, and follows `CARGO_TARGET_DIR`, so parallel agents stay isolated.
 - `rustup` toolchains need `rustup component add llvm-tools-preview`. Toolchains without that component (for example Homebrew Rust) can set `LLVM_COV` and `LLVM_PROFDATA` to the `llvm-cov` / `llvm-profdata` of an LLVM with the same major version as `rustc -vV` reports.
 - Doctests and the `wasm32` build are not measured (doctest coverage needs nightly). Inline `#[cfg(test)]` modules count towards the totals.
@@ -112,9 +115,9 @@ cargo xtask coverage -p lumencraft-fit -- solver   # forward a test filter to th
 
 **Policy.** Coverage is a diagnostic for finding untested edge-case and error paths: `NaN`/`±Inf`, empty or degenerate input, singular matrices, and malformed-file branches in `crates/format`. It is not evidence that a routine is correct; only the `D1` oracle checks are. There is no coverage threshold, coverage reports are never uploaded to third-party services (`cargo xtask telemetry`), and coverage percentages are never written into hand-maintained docs ([pitfall #2](pitfalls.md#2-hardcoded-headline-counts-going-stale)). Do not add tests whose only purpose is to execute lines.
 
-## Robustness: LumenCraft never crashes
+## Robustness: CurveBook never crashes
 
-A crash destroys a researcher's unsaved experimental data tables, exclusions, and analyses. Everything the application reads — `.lumencraft`, `.prism`, `.pzfx`, CSV/TSV files, clipboard text, user-entered equations and column formulas, MCP requests, `--control` messages, and command JSON parameters — is untrusted input. Shipped code therefore never panics and contains zero `unsafe` (`#![forbid(unsafe_code)]`).
+A crash destroys a researcher's unsaved experimental data tables, exclusions, and analyses. Everything the application reads — `.curvebook`, `.prism`, `.pzfx`, CSV/TSV files, clipboard text, user-entered equations and column formulas, MCP requests, `--control` messages, and command JSON parameters — is untrusted input. Shipped code therefore never panics and contains zero `unsafe` (`#![forbid(unsafe_code)]`).
 
 ### Enforced by lints
 
@@ -138,20 +141,20 @@ A crash destroys a researcher's unsaved experimental data tables, exclusions, an
 
 ### The safety net
 
-`lumencraft_engine::guard::run_guarded` wraps command handlers inside `Session::execute` (and therefore GUI, CLI, and `--control` commands) and MCP `tools/call` dispatch (`crates/mcp/src/tools.rs`) to roll back partial mutations and return an `EngineError` with `ErrorCode::InternalPanic` if an unexpected bug ever unwinds. On `wasm32`, panics abort unconditionally, so `Result` discipline remains mandatory everywhere.
+`curvebook_engine::guard::run_guarded` wraps command handlers inside `Session::execute` (and therefore GUI, CLI, and `--control` commands) and MCP `tools/call` dispatch (`crates/mcp/src/tools.rs`) to roll back partial mutations and return an `EngineError` with `ErrorCode::InternalPanic` if an unexpected bug ever unwinds. On `wasm32`, panics abort unconditionally, so `Result` discipline remains mandatory everywhere.
 
 ### Fuzzing
 
 Untrusted boundaries carry `proptest` / fuzz suites that must never panic:
-- `crates/format/tests/prop_format.rs` — lossless `.lumencraft` round-trips plus truncated/mutated ZIP, CSV, XML, and JSON inputs.
+- `crates/format/tests/prop_format.rs` — lossless `.curvebook` round-trips plus truncated/mutated ZIP, CSV, XML, and JSON inputs.
 - `crates/fit/tests/dsl_fuzz_props.rs` — arbitrary/hostile user equation and formula strings.
 - `crates/engine/tests/command_sweep_props.rs` — every registered command invoked with arbitrary JSON payloads.
 - `crates/mcp/tests/protocol_props.rs` — malformed JSON-RPC frames.
 
 ## Verified NIST StRD corpus
 
-Public-domain [NIST Statistical Reference Datasets (StRD)](https://www.itl.nist.gov/div898/strd/) ASCII `.dat` files across all **58 canonical datasets** (`9` Univariate, `11` ANOVA, `11` Linear Regression, and `27` Nonlinear Regression) are fetched on demand into the gitignored `corpus/nist-strd/` directory (`univ/`, `anova/`, `lls/`, `nls/`) and verified against `sha256sums.txt` (SHA-256 digest + exact byte size) and clean-room `.dat` structural parsers in `lumencraft-testkit`:
+Public-domain [NIST Statistical Reference Datasets (StRD)](https://www.itl.nist.gov/div898/strd/) ASCII `.dat` files across all **58 canonical datasets** (`9` Univariate, `11` ANOVA, `11` Linear Regression, and `27` Nonlinear Regression) are fetched on demand into the gitignored `corpus/nist-strd/` directory (`univ/`, `anova/`, `lls/`, `nls/`) and verified against `sha256sums.txt` (SHA-256 digest + exact byte size) and clean-room `.dat` structural parsers in `curvebook-testkit`:
 
-- `cargo xtask corpus` runs strictly offline (zero network I/O): if `corpus/nist-strd/` is present it verifies every cached `.dat` file and manifest entry, then runs `lumencraft-format`, `lumencraft-testkit`, and `lumencraft-math --test nist_strd` with `LUMENCRAFT_REQUIRE_CORPUS=1` so corpus-backed checks enforce the cached dataset set when populated; when `corpus/nist-strd/` is absent, it runs the offline test suites directly.
-- `cargo xtask corpus --fetch` (or `--fetch-only` to skip running tests afterwards) downloads all 58 NIST StRD `.dat` files into `corpus/nist-strd/`, writes `corpus/nist-strd/sha256sums.txt`, and verifies the downloaded corpus with `LUMENCRAFT_REQUIRE_CORPUS=1`.
-- Small analytical and canonical stiffness benchmarks (`NumAcc1`–`NumAcc4`, `BinaryStiff1e8`, `Wampler1`–`2`, `WamplerOrtho1`–`3`, `NoInt1`–`2`, `FilipScaleVandermonde`, `SmLs` ANOVA) are generated directly in `lumencraft-testkit` so offline `cargo xtask ci` requires zero network access.
+- `cargo xtask corpus` runs strictly offline (zero network I/O): if `corpus/nist-strd/` is present it verifies every cached `.dat` file and manifest entry, then runs `curvebook-format`, `curvebook-testkit`, and `curvebook-math --test nist_strd` with `CURVEBOOK_REQUIRE_CORPUS=1` so corpus-backed checks enforce the cached dataset set when populated; when `corpus/nist-strd/` is absent, it runs the offline test suites directly.
+- `cargo xtask corpus --fetch` (or `--fetch-only` to skip running tests afterwards) downloads all 58 NIST StRD `.dat` files into `corpus/nist-strd/`, writes `corpus/nist-strd/sha256sums.txt`, and verifies the downloaded corpus with `CURVEBOOK_REQUIRE_CORPUS=1`.
+- Small analytical and canonical stiffness benchmarks (`NumAcc1`–`NumAcc4`, `BinaryStiff1e8`, `Wampler1`–`2`, `WamplerOrtho1`–`3`, `NoInt1`–`2`, `FilipScaleVandermonde`, `SmLs` ANOVA) are generated directly in `curvebook-testkit` so offline `cargo xtask ci` requires zero network access.

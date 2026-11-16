@@ -5,19 +5,19 @@
 use std::collections::BTreeSet;
 use std::sync::atomic::AtomicBool;
 
-use lumencraft_chart::ChartError;
-use lumencraft_doc::{DocError, SheetFolderKind, SheetId, SubcolumnMode, SummaryPointError, TableKind};
-use lumencraft_engine::cmd::{CommandGroup, Effects};
-use lumencraft_engine::{Caller, ErrorCode, Session, cmd};
-use lumencraft_fit::FitError;
-use lumencraft_format::{FormatError, MemoryJournalBackend};
-use lumencraft_math::MathError;
-use lumencraft_pdf::PdfError;
-use lumencraft_platform::{PlatformError, TimeoutKind};
-use lumencraft_render::RenderError;
-use lumencraft_stats::StatsError;
-use lumencraft_svg::SvgError;
-use lumencraft_transform::TransformError;
+use curvebook_chart::ChartError;
+use curvebook_doc::{DocError, SheetFolderKind, SheetId, SubcolumnMode, SummaryPointError, TableKind};
+use curvebook_engine::cmd::{CommandGroup, Effects};
+use curvebook_engine::{Caller, ErrorCode, Session, cmd};
+use curvebook_fit::FitError;
+use curvebook_format::{FormatError, MemoryJournalBackend};
+use curvebook_math::MathError;
+use curvebook_pdf::PdfError;
+use curvebook_platform::{PlatformError, TimeoutKind};
+use curvebook_render::RenderError;
+use curvebook_stats::StatsError;
+use curvebook_svg::SvgError;
+use curvebook_transform::TransformError;
 use serde_json::{Value, json};
 
 fn is_valid_command_id_format(id: &str) -> bool {
@@ -77,10 +77,7 @@ fn registry_matches_command_id_category_effect_and_schema_spec() {
     assert_eq!(group_total, 97, "CommandGroup::all() partition must sum to 97");
 
     let markdown = cmd::render_commands_markdown();
-    assert!(
-        markdown.starts_with("# LumenCraft Command Reference\n"),
-        "commands markdown must use canonical `# LumenCraft Command Reference` heading"
-    );
+    assert!(markdown.starts_with("# CurveBook Command Reference\n"), "commands markdown must use canonical `# CurveBook Command Reference` heading");
 
     for spec in reg.specs() {
         assert!(!spec.label.trim().is_empty(), "command `{}` must have non-empty label", spec.id);
@@ -198,7 +195,7 @@ fn expected_doc_code(err: &DocError) -> ErrorCode {
 
 fn check_doc_error(err: DocError) {
     let expected = expected_doc_code(&err);
-    let eng = lumencraft_engine::EngineError::from(err);
+    let eng = curvebook_engine::EngineError::from(err);
     assert_eq!(eng.code, expected);
     assert_eq!(eng.category, expected.category());
     assert!(!eng.message().is_empty());
@@ -225,7 +222,7 @@ fn check_format_error(err: FormatError) {
         FormatError::DependencyCycle { .. } => ErrorCode::CycleDetected,
         FormatError::InvalidPipeline { .. } => ErrorCode::BadInput,
     };
-    let eng = lumencraft_engine::EngineError::from(err);
+    let eng = curvebook_engine::EngineError::from(err);
     assert_eq!(eng.code, expected);
     assert_eq!(eng.category, expected.category());
 }
@@ -263,7 +260,7 @@ fn check_transform_error(err: TransformError) {
         TransformError::EvalError { .. } => ErrorCode::SolverFailed,
         TransformError::MissingHook { .. } | TransformError::UnknownEquation { .. } => ErrorCode::NotFound,
     };
-    let eng = lumencraft_engine::EngineError::from(err);
+    let eng = curvebook_engine::EngineError::from(err);
     assert_eq!(eng.code, expected);
     assert_eq!(eng.category, expected.category());
 }
@@ -282,7 +279,7 @@ fn check_stats_error(err: StatsError) {
         StatsError::Math(e) => expected_math_code(e),
         StatsError::Doc(e) => expected_doc_code(e),
     };
-    let eng = lumencraft_engine::EngineError::from(err);
+    let eng = curvebook_engine::EngineError::from(err);
     assert_eq!(eng.code, expected);
     assert_eq!(eng.category, expected.category());
 }
@@ -301,7 +298,7 @@ fn check_fit_error(err: FitError) {
         FitError::Math(e) => expected_math_code(e),
         FitError::Doc(e) => expected_doc_code(e),
     };
-    let eng = lumencraft_engine::EngineError::from(err);
+    let eng = curvebook_engine::EngineError::from(err);
     assert_eq!(eng.code, expected);
     assert_eq!(eng.category, expected.category());
 }
@@ -442,7 +439,7 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
             ChartError::ResourceLimit { .. } => ErrorCode::ResourceLimit,
             ChartError::CompileFailed { .. } => ErrorCode::InternalError,
         };
-        let eng = lumencraft_engine::EngineError::from(err);
+        let eng = curvebook_engine::EngineError::from(err);
         assert_eq!(eng.code, code);
         assert_eq!(eng.category, code.category());
     }
@@ -452,7 +449,7 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
             SvgError::InvalidScene { .. } => ErrorCode::BadInput,
             SvgError::ValidationFailed { .. } => ErrorCode::InternalError,
         };
-        let eng = lumencraft_engine::EngineError::from(err);
+        let eng = curvebook_engine::EngineError::from(err);
         assert_eq!(eng.code, code);
         assert_eq!(eng.category, code.category());
     }
@@ -468,7 +465,7 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
             PdfError::ResourceLimit { .. } => ErrorCode::ResourceLimit,
             PdfError::CompressionFailed { .. } => ErrorCode::InternalError,
         };
-        let eng = lumencraft_engine::EngineError::from(err);
+        let eng = curvebook_engine::EngineError::from(err);
         assert_eq!(eng.code, code);
         assert_eq!(eng.category, code.category());
     }
@@ -482,13 +479,13 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
             RenderError::InvalidTarget { .. } | RenderError::BufferSizeMismatch { .. } => ErrorCode::BadInput,
             RenderError::EncodingFailed { .. } => ErrorCode::InternalError,
         };
-        let eng = lumencraft_engine::EngineError::from(err);
+        let eng = curvebook_engine::EngineError::from(err);
         assert_eq!(eng.code, code);
         assert_eq!(eng.category, code.category());
     }
 
     assert_eq!(
-        lumencraft_engine::EngineError::from(PlatformError::TimedOut { program: String::from("rscript"), kind: TimeoutKind::Idle, limit_ms: 250 })
+        curvebook_engine::EngineError::from(PlatformError::TimedOut { program: String::from("rscript"), kind: TimeoutKind::Idle, limit_ms: 250 })
             .code,
         ErrorCode::IoError
     );
@@ -497,7 +494,7 @@ fn exhaustive_error_mappings_cover_all_nine_domain_enums() {
 #[test]
 fn deterministic_replay_parity_between_live_wal_and_batch_v1() {
     let batch_manifest = json!({
-        "schema": "lumencraft.batch.v1",
+        "schema": "curvebook.batch.v1",
         "commands": [
             { "cmd": "project.new", "params": { "title": "Replay Parity Study" } },
             {
@@ -561,7 +558,7 @@ fn deterministic_replay_parity_between_live_wal_and_batch_v1() {
     assert_eq!(rec_report.recovered_commands.len(), commands.len());
     drop(j2);
 
-    // 3. Sequential execution of the lumencraft.batch.v1 manifest via Caller::Cli.
+    // 3. Sequential execution of the curvebook.batch.v1 manifest via Caller::Cli.
     let mut batch_session = Session::new();
     let cancelled = AtomicBool::new(false);
     for entry in commands {

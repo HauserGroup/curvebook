@@ -13,15 +13,15 @@
 //!   backend readiness invariants, and `WF-49` live coefficient refresh on upstream edits.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_chart::equation_box::{ModelEquationParams, render_model_equation_annotation, render_tex_equation_box};
-use lumencraft_chart::{ChartScene, Path2D, PathCmd, PointPt, ScenePrimitive, compile_graph, preflight_check_scene};
-use lumencraft_doc::{
+use curvebook_chart::equation_box::{ModelEquationParams, render_model_equation_annotation, render_tex_equation_box};
+use curvebook_chart::{ChartScene, Path2D, PathCmd, PointPt, ScenePrimitive, compile_graph, preflight_check_scene};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, DataSheet, EquationDisplayMode, GraphAnnotation, GraphSheet, LinearRegressionSpec, NonlinearFitSpec,
     ProjectDocument, RectPt as DocRectPt, ResultScalarEntry, ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_fit::{HookContext, execute_analysis, list_builtin_equations};
-use lumencraft_palette::Rgba8;
-use lumencraft_text::{RichText, measure_text_pt};
+use curvebook_fit::{HookContext, execute_analysis, list_builtin_equations};
+use curvebook_palette::Rgba8;
+use curvebook_text::{RichText, measure_text_pt};
 
 #[derive(Debug, Clone)]
 struct TextBox {

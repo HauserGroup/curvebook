@@ -3,11 +3,11 @@
 
 use std::collections::HashMap;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, DataSheet, MultipleVariablesTable, NonlinearFitSpec, ParameterRule, ParameterScope, ResultSheet,
     ResultStatus, SubcolumnMode, TableArchetype, XyTable,
 };
-use lumencraft_fit::{
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, FitStatus, HookContext, SolverConfig, execute_analysis, fit_nonlinear, format_model_equation_tex,
     format_model_equation_tex_for_dataset, format_polynomial_equation_tex, get_builtin_model,
 };

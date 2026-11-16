@@ -1,6 +1,6 @@
 # Live TCP Control Protocol (`--control`)
 
-When launched with `lumencraft --control <port>` (or with `LUMENCRAFT_CONTROL_PORT=<port>`), the desktop application binds strictly to loopback (`127.0.0.1:<port>`) and serves a line-delimited JSON (`JSONL`) automation channel (`crates/ui-egui/src/control_io.rs`) backed by the same typed command registries as `lumencraft-cli` and `lumencraft-mcp` ([`commands.md`](commands.md), [`mcp.md`](mcp.md), [`STATUS.md`](STATUS.md)). By default both `--control <port>` and `LUMENCRAFT_CONTROL_PORT=<port>` run headless without opening a GUI window; pass the opt-in `--window` flag (`lumencraft --control <port> --window` or `LUMENCRAFT_CONTROL_PORT=<port> lumencraft --window`) to attach a visible `eframe`/`egui` desktop window sharing the same live `UiApp` / `Session` (`apps/lumencraft/src/main.rs`; cannot be combined with `--headless-once`).
+When launched with `curvebook --control <port>` (or with `CURVEBOOK_CONTROL_PORT=<port>`), the desktop application binds strictly to loopback (`127.0.0.1:<port>`) and serves a line-delimited JSON (`JSONL`) automation channel (`crates/ui-egui/src/control_io.rs`) backed by the same typed command registries as `curvebook-cli` and `curvebook-mcp` ([`commands.md`](commands.md), [`mcp.md`](mcp.md), [`STATUS.md`](STATUS.md)). By default both `--control <port>` and `CURVEBOOK_CONTROL_PORT=<port>` run headless without opening a GUI window; pass the opt-in `--window` flag (`curvebook --control <port> --window` or `CURVEBOOK_CONTROL_PORT=<port> curvebook --window`) to attach a visible `eframe`/`egui` desktop window sharing the same live `UiApp` / `Session` (`apps/curvebook/src/main.rs`; cannot be combined with `--headless-once`).
 
 ## Framing
 
@@ -47,7 +47,7 @@ Intentional socket termination occurs only on:
 Implemented in `crates/ui-egui/src/{control_io.rs, gui_actions.rs, inspect.rs}` and `crates/engine/src/lib.rs` ([`gui-workflows.md`](gui-workflows.md)):
 
 ### 1. Strict `--gui-only` Enforcement (`Caller::Control` vs. `Caller::Ui`)
-- Passing `--gui-only` on launch (`lumencraft --control <port> --gui-only`, with `--window`, or via `LUMENCRAFT_CONTROL_PORT`) configures every `DesktopHostRuntime` window with `GuiOnlyPolicy::Strict` (`app.set_gui_only(true)`).
+- Passing `--gui-only` on launch (`curvebook --control <port> --gui-only`, with `--window`, or via `CURVEBOOK_CONTROL_PORT`) configures every `DesktopHostRuntime` window with `GuiOnlyPolicy::Strict` (`app.set_gui_only(true)`).
 - **Direct domain commands (`Caller::Control`):** `command.run`, `command.batch`, `engine.execute`, and raw domain command IDs run through `app.execute_control_command` (`Caller::Control`). Under `GuiOnlyPolicy::Strict`, `Session::execute_with_caller` blocks any command called by `Caller::Control` (as well as `Caller::Mcp` or `Caller::Cli`) unless it is read-only without `Effects::READS_FILESYSTEM` (or `table.convertArchetype` with `preview_only` / `previewOnly` / `preview` / `dry_run` / `dryRun: true`), returning `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`, `ErrorCategory::Policy`).
 - **Direct `ui.*` / menu bypasses:** Under `--gui-only`, `dispatch_command_by_id` in `control_io.rs` rejects direct `ui.*` commands, `"app.about"`, and `"file.print"` with `ErrorCode::GuiOnlyViolation`, **except** the 8 interactive GUI JSON-lines actions below and the read-only `"ui.canvas.preflight"` check.
 - **Internal UI execution (`Caller::Ui`):** Visible menus, shortcuts, palette actions, and modal commit handlers inside `UiApp` execute via `Caller::Ui` (`app.execute_command` / `dispatch_ui_command_as_ui`), remaining permitted so human-equivalent UI actions drive the live `Session`.
@@ -72,6 +72,6 @@ These actions form the **semantic agent harness** used by the `gui_only` suites 
 ## Security Invariants
 
 - Never binds to `0.0.0.0` or `::`; loopback (`127.0.0.1` / `::1` via `validate_loopback_addr`) only (`cargo xtask telemetry`).
-- Disabled by default unless `--control <port>` (`1..=65535`) or `LUMENCRAFT_CONTROL_PORT` is explicitly set.
-- Requires bearer-token authentication (`ControlAuth`, via `--control-token` / `LUMENCRAFT_CONTROL_TOKEN` or an auto-generated session token) supplied via `"auth"` handshake or per-request `"token"`.
+- Disabled by default unless `--control <port>` (`1..=65535`) or `CURVEBOOK_CONTROL_PORT` is explicitly set.
+- Requires bearer-token authentication (`ControlAuth`, via `--control-token` / `CURVEBOOK_CONTROL_TOKEN` or an auto-generated session token) supplied via `"auth"` handshake or per-request `"token"`.
 - Rejects HTTP request lines (`403 Forbidden`) and bounds line framing (`MAX_CONTROL_LINE_BYTES = 16 MiB`, 2s TCP idle timeout).

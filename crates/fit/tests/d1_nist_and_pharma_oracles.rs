@@ -1,4 +1,4 @@
-//! D1 public-oracle verification suite for `lumencraft-fit`.
+//! D1 public-oracle verification suite for `curvebook-fit`.
 //!
 //! Oracles and literature references verified here:
 //! - NIST Statistical Reference Datasets (StRD), Nonlinear Least Squares:
@@ -19,23 +19,21 @@
 //! - Deming (1943) Model II orthogonal & weighted total least squares.
 //! - Motulsky & Brown (2006) ROUT outlier elimination (`Q = 1%`).
 
-use std::path::{Path, PathBuf};
-
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CiBound, ConstantValue, DataSheet, FitMethod, HookSource, InfoSheet, LinearRegressionSpec,
     ModelComparisonSpec, NonlinearFitSpec, ParameterRule, ParameterScope, ResultSheet, SheetId, SubcolumnMode, TableArchetype, WeightingScheme,
     XyTable,
 };
-use lumencraft_fit::{
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, DemingOptions, FitError, FitStatus, FittedParameterSummary, HookContext, ModelComparisonOutcome,
     NonlinearFitResult, ParameterNote, ParametricModel, SolverConfig, compare_models, compare_models_aicc, compare_models_f_test, deming_regression,
     execute_linear_analysis, execute_nonlinear_analysis, fit_nonlinear, get_builtin_model, rout_detect_outliers, simple_linear_regression,
 };
-use lumencraft_testkit::nist_strd::{NistDifficulty, load_corpus_nonlinear_all};
-use lumencraft_testkit::{assert_approx_eq, assert_lre_at_least, log_relative_error};
+use curvebook_testkit::nist_strd::{NistDifficulty, default_nist_strd_dir, load_corpus_nonlinear_all};
+use curvebook_testkit::{assert_approx_eq, assert_lre_at_least, log_relative_error};
 
-fn nist_strd_dir() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../../corpus/nist-strd")
+fn nist_strd_dir() -> std::path::PathBuf {
+    default_nist_strd_dir()
 }
 
 fn series_idx(idx: usize, label: &str, x: Vec<f64>, y: Vec<f64>) -> DatasetSeries {
@@ -97,7 +95,7 @@ fn eval_model_at(model: &dyn ParametricModel, res: &NonlinearFitResult, ds_idx: 
     val.unwrap_or(f64::NAN)
 }
 
-fn build_xy_sheet(sheet_id: &str, title: &str, x: &[f64], columns: &[(&str, &[f64])]) -> Result<DataSheet, lumencraft_doc::DocError> {
+fn build_xy_sheet(sheet_id: &str, title: &str, x: &[f64], columns: &[(&str, &[f64])]) -> Result<DataSheet, curvebook_doc::DocError> {
     let mut xy = XyTable::new(SubcolumnMode::Single, columns.len(), x.len())?;
     for (c_idx, (col_title, _)) in columns.iter().enumerate() {
         xy.data_sets[c_idx].title = (*col_title).to_owned();
@@ -160,7 +158,7 @@ fn assert_normal_equations_small(model: &dyn ParametricModel, res: &NonlinearFit
 fn verify_nist_tier(difficulty: NistDifficulty, expected_count: usize) {
     let dir = nist_strd_dir();
     if !dir.exists() {
-        assert_ne!(std::env::var("LUMENCRAFT_REQUIRE_CORPUS").ok().as_deref(), Some("1"), "missing NIST StRD corpus at {}", dir.display());
+        assert_ne!(std::env::var("CURVEBOOK_REQUIRE_CORPUS").ok().as_deref(), Some("1"), "missing NIST StRD corpus at {}", dir.display());
         return;
     }
 

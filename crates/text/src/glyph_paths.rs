@@ -8,7 +8,7 @@
 
 use std::borrow::Cow;
 
-use lumencraft_palette::Rgba8;
+use curvebook_palette::Rgba8;
 use serde::{Deserialize, Serialize};
 
 use crate::markup::{RichText, SpanSlope, SpanWeight};

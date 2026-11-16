@@ -1,5 +1,5 @@
 //! Clean-room `D1` oracle tests for `R0.17`:
-//! - Lilliefors normality test (`lumencraft_fit::diagnostics::lilliefors_ks_test`),
+//! - Lilliefors normality test (`curvebook_fit::diagnostics::lilliefors_ks_test`),
 //! - Clean-room Bessel functions (`j0`, `j1`, `jn`, `y0`, `y1`, `yn` via `CompiledDslModel`),
 //! - Confluent hypergeometric functions (`hyp1f1` and `confluent_u` via `CompiledDslModel`).
 //!
@@ -8,12 +8,12 @@
 //! Laguerre/spherical Bessel closed forms, and published Dallal & Wilkinson 1986 / Stephens 1974
 //! Lilliefors tables) rather than copied coefficients.
 
-use lumencraft_fit::{CompiledDslModel, ParametricModel, lilliefors_ks_test};
-use lumencraft_math::DeterministicRng;
-use lumencraft_math::dist::{lilliefors_p_value, norm_cdf};
-use lumencraft_math::quad::gauss_legendre_64;
-use lumencraft_math::special::{erf, erfcx, gamma};
-use lumencraft_math::sum::SummaryMoments;
+use curvebook_fit::{CompiledDslModel, ParametricModel, lilliefors_ks_test};
+use curvebook_math::DeterministicRng;
+use curvebook_math::dist::{lilliefors_p_value, norm_cdf};
+use curvebook_math::quad::gauss_legendre_64;
+use curvebook_math::special::{erf, erfcx, gamma};
+use curvebook_math::sum::SummaryMoments;
 
 fn assert_close(actual: f64, expected: f64, abs_tol: f64, rel_tol: f64, ctx: &str) {
     assert!(actual.is_finite(), "{ctx}: actual is not finite ({actual})");

@@ -59,7 +59,7 @@ pub fn list_prompts_for_mode(gui_only: bool) -> Vec<PromptDescriptor> {
     } else {
         [
             "Step-by-step workflow to fit a 4-parameter agonist/antagonist dose-response curve, overlay it on a graph, and inspect EC50/IC50 scalars.",
-            "Decision checklist and LumenCraft command sequence for choosing between parametric and non-parametric two-group comparisons.",
+            "Decision checklist and CurveBook command sequence for choosing between parametric and non-parametric two-group comparisons.",
             "Preflight and export workflow for producing vector (SVG/PDF) or high-DPI raster (TIFF/PNG) publication figures.",
         ]
     };
@@ -199,7 +199,7 @@ fn build_two_group_prompt(args: &Map<String, Value>, gui_only: bool) -> Result<P
         format!(
             "Selecting a two-group comparison for sheet '{sheet_id}' in `--gui-only` mode (paired={paired}, parametric={parametric}):\n\
              - Guidance: {recommendation}\n\
-             - Steps in LumenCraft GUI:\n\
+             - Steps in CurveBook GUI:\n\
                1. Focus '{sheet_id}' via `ui_switch_tab` and review visible columns/exclusions via `ui_inspect` (`{{\"scope\":\"grid\"}}`).\n\
                2. Open `Analyze/Analyze...` via `ui_invoke_menu`, choose the matching test family in `ui_answer_dialog`, and confirm (`action: \"ok\"`).\n\
                3. Review the visible result summary and diagnostics via `ui_inspect`, then format comparison brackets via `Format/Pairwise Comparison Brackets...` and `ui_screenshot`."
@@ -208,7 +208,7 @@ fn build_two_group_prompt(args: &Map<String, Value>, gui_only: bool) -> Result<P
         format!(
             "Selecting a two-group comparison for sheet '{sheet_id}' (paired={paired}, parametric={parametric}):\n\
              - Guidance: {recommendation}\n\
-             - Steps in LumenCraft:\n\
+             - Steps in CurveBook:\n\
                1. Read `sheet://{sheet_id}` (or call `doc_inspect`) to check group counts, missing values, and excluded cells.\n\
                2. Execute `stats.run` via `command_run` (or enable the `analysis` toolset) to compute test statistics, unrounded p-values, effect-size CI bounds, and assumption `checklist` checks.\n\
                3. Read `result://<result_id>` to verify assumption diagnostics before plotting comparison brackets via `graph.addComparisonBrackets`."

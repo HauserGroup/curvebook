@@ -1,23 +1,23 @@
 [package]
-name = "lumencraft-pdf"
+name = "curvebook-pdf"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish.workspace = true
-description = "LumenCraft publication PDF and EPS figure and analysis-report exporter"
+description = "CurveBook publication PDF and EPS figure and analysis-report exporter"
 
 [lints]
 workspace = true
 
 [dependencies]
 flate2 = { workspace = true }
-lumencraft-chart = { workspace = true }
-lumencraft-doc = { workspace = true }
-lumencraft-math = { workspace = true }
-lumencraft-palette = { workspace = true }
-lumencraft-text = { workspace = true }
+curvebook-chart = { workspace = true }
+curvebook-doc = { workspace = true }
+curvebook-math = { workspace = true }
+curvebook-palette = { workspace = true }
+curvebook-text = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
-lumencraft-testkit = { workspace = true }
+curvebook-testkit = { workspace = true }

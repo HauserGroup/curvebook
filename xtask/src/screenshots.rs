@@ -1,6 +1,6 @@
 //! Deterministic workspace screenshot generation and offline PNG integrity check (`R0.14`).
 //!
-//! `cargo xtask screenshots` invokes the clean-room `lumencraft-ui-egui` `doc_screenshots`
+//! `cargo xtask screenshots` invokes the clean-room `curvebook-ui-egui` `doc_screenshots`
 //! example to regenerate `docs/images/workspace-split-fit.png` and
 //! `docs/images/workspace-layout-dark.png`.
 //! `cargo xtask screenshots --check` runs purely in-process (no nested Cargo build) and verifies:
@@ -59,7 +59,7 @@ fn generate_and_verify(root: &Path) -> Result<(), String> {
     fs::create_dir_all(&out_dir).map_err(|e| format!("create {}: {e}", out_dir.display()))?;
 
     let nested_target = nested_target_dir(root);
-    let args = ["run", "--offline", "--locked", "--quiet", "-p", "lumencraft-ui-egui", "--example", "doc_screenshots", "--", "docs/images"];
+    let args = ["run", "--offline", "--locked", "--quiet", "-p", "curvebook-ui-egui", "--example", "doc_screenshots", "--", "docs/images"];
     println!("+ CARGO_TARGET_DIR={} cargo {}", nested_target.display(), args.join(" "));
 
     let status = Command::new("cargo")

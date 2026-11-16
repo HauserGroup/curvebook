@@ -32,11 +32,11 @@ use std::fmt;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_math::dist::{norm_cdf, norm_ppf};
-use lumencraft_math::quad::{QuadOptions, integrate_adaptive};
-use lumencraft_math::roots::{RootOptions, brent_root};
-use lumencraft_math::special::{beta, digamma, erf, erfc, gamma, ln_gamma};
-use lumencraft_math::sum::NeumaierSum;
+use curvebook_math::dist::{norm_cdf, norm_ppf};
+use curvebook_math::quad::{QuadOptions, integrate_adaptive};
+use curvebook_math::roots::{RootOptions, brent_root};
+use curvebook_math::special::{beta, digamma, erf, erfc, gamma, ln_gamma};
+use curvebook_math::sum::NeumaierSum;
 
 use crate::error::FitError;
 use crate::library::{ParametricModel, estimate_x_at_ymid};

@@ -1,6 +1,6 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AdditionalTick, AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, BlandAltmanSpec, Cell, CellCoord, CellValue, ChecklistItem,
     ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint, ColumnTable, ConfidenceLevel, ConstantValue,
     ContingencyMethod, ContingencySpec, ContingencyTable, CurveSamplePoint, DataSheet, DescriptiveSpec, DiagnosticPlotKind, DocError,
@@ -17,7 +17,7 @@ use lumencraft_doc::{
     SurvivalTable, TableArchetype, TableKind, TickLabelFormat, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
     WhiskerMethod, XColumnMode, XyTable,
 };
-use lumencraft_palette::{
+use curvebook_palette::{
     CategoricalPalette, Cmyk, ColorRamp, ColorStop, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8,
 };
 use proptest::prelude::*;
@@ -255,7 +255,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
     sim_spec.p_value_format = PValueFormat::new_custom(3, Some(1e-4));
 
     let mut res_sheet = ResultSheet::new(sim_spec).unwrap();
-    res_sheet.status = ResultStatus::Failed { code: lumencraft_doc::ErrorCode::SolverFailed, message: String::from("Synthetic diagnostic") };
+    res_sheet.status = ResultStatus::Failed { code: curvebook_doc::ErrorCode::SolverFailed, message: String::from("Synthetic diagnostic") };
     res_sheet.tabs.push(ResultTab {
         id: String::from("tab-1"),
         title: String::from("Summary"),
@@ -376,18 +376,18 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
         result_sheet_id: SheetId::new("res-sim"),
         group_a: 0,
         group_b: 1,
-        style: lumencraft_doc::BracketStyle::CurlyBrace,
-        label_mode: lumencraft_doc::BracketLabelMode::SummaryStars,
+        style: curvebook_doc::BracketStyle::CurlyBrace,
+        label_mode: curvebook_doc::BracketLabelMode::SummaryStars,
         hide_if_non_significant: true,
         stroke_width_pt: 1.0,
         font_size_pt: 9.0,
         bracket_step_pt: 12.0,
     });
-    gsheet.spec.pairwise_display_mode = lumencraft_doc::PairwiseDisplayMode::BracketsAndCompactLetterDisplay;
-    gsheet.spec.compact_letter_display = Some(lumencraft_doc::CompactLetterDisplaySpec {
+    gsheet.spec.pairwise_display_mode = curvebook_doc::PairwiseDisplayMode::BracketsAndCompactLetterDisplay;
+    gsheet.spec.compact_letter_display = Some(curvebook_doc::CompactLetterDisplaySpec {
         result_sheet_id: SheetId::new("res-sim"),
         alpha_override: Some(0.05),
-        ordering: lumencraft_doc::CldOrdering::AscendingMean,
+        ordering: curvebook_doc::CldOrdering::AscendingMean,
         uppercase: true,
         font_size_pt: 10.0,
         offset_pt: 7.0,
@@ -446,7 +446,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
         AnalysisKind::Transform(TransformAnalysisSpec::Math {
             x_transform: Some(MathTransformPreset::ConcentrationToNegativeLogM { molar_unit_factor: 1e-9 }),
             y_transform: Some(MathTransformPreset::LinearScale { slope: 2.0, intercept: -1.0 }),
-            error_propagation: lumencraft_doc::ErrorPropagationMode::FirstOrderDeltaMethod,
+            error_propagation: curvebook_doc::ErrorPropagationMode::FirstOrderDeltaMethod,
         }),
         AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
             zero_anchor: NormalizeAnchor::FixedValue(0.0),
@@ -469,7 +469,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
             ss_type: SumOfSquaresType::TypeIII,
             repeated_measures: RepeatedMeasuresDesign::RowFactorMatched,
-            residual_covariance: lumencraft_doc::ResidualCovariance::Unstructured,
+            residual_covariance: curvebook_doc::ResidualCovariance::Unstructured,
             ..FactorialAnovaSpec::default()
         }),
         AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, multiplicity: MultiplicitySpec::default() }),
@@ -672,7 +672,7 @@ fn extended_nonlinear_parameters_tabs_and_axis_additional_ticks() {
     assert_json_roundtrip(&axis);
 
     let mut bad_axis = AxisSpec::linear("TooLongTick");
-    bad_axis.additional_ticks.push(AdditionalTick { value: 1.0, label: Some("x".repeat(lumencraft_doc::MAX_TITLE_BYTES + 1)), draw_gridline: false });
+    bad_axis.additional_ticks.push(AdditionalTick { value: 1.0, label: Some("x".repeat(curvebook_doc::MAX_TITLE_BYTES + 1)), draw_gridline: false });
     assert!(matches!(bad_axis.validate(), Err(DocError::TitleTooLong { .. })));
 }
 
@@ -982,7 +982,7 @@ fn project_document_reorder_sheet_across_all_folders_and_bounds() {
     assert_eq!(proj.graph_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["g-b", "g-a", "g-c"]);
     assert_eq!(proj.layout_sheets.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["l-c", "l-a", "l-b"]);
 
-    assert_eq!(SheetFolderKind::Results.section(), lumencraft_doc::SheetSection::Analyses);
+    assert_eq!(SheetFolderKind::Results.section(), curvebook_doc::SheetSection::Analyses);
     assert_json_roundtrip(&proj);
 }
 
@@ -1039,7 +1039,7 @@ proptest! {
 
 #[test]
 fn pvalue_stack_spec_defaults_compatibility_and_serde_roundtrip() {
-    use lumencraft_doc::{PValueStackMethod, PValueStackSpec};
+    use curvebook_doc::{PValueStackMethod, PValueStackSpec};
 
     let minimal_json = r#"{}"#;
     let decoded_default: PValueStackSpec = serde_json::from_str(minimal_json).unwrap();

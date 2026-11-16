@@ -4,26 +4,26 @@
 
 use std::time::Instant;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, DataSheet, DescriptiveSpec,
     GraphSheet, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LayoutItem, LayoutSheet,
     LayoutSpec, LevelOrderKind, LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, MultipleVariablesTable, NestedTable, NormalizeAnchor,
     RectPt, ResultSheet, ResultStatus, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, TransformAnalysisSpec,
     VariableRole, VariableSource,
 };
-use lumencraft_engine::Session;
-use lumencraft_tools::{GridCellCoord, GridViewportSpec};
-use lumencraft_ui_egui::UiApp;
-use lumencraft_ui_egui::grid_view::{
+use curvebook_engine::Session;
+use curvebook_tools::{GridCellCoord, GridViewportSpec};
+use curvebook_ui_egui::UiApp;
+use curvebook_ui_egui::grid_view::{
     GridQuickStats, GridViewState, ImportOriginKind, ImportWizardStage, MoveDirection, provenance_border_rgba, total_flat_data_subcolumns,
 };
-use lumencraft_ui_egui::workspace_nav::{
+use curvebook_ui_egui::workspace_nav::{
     ClonePipelineDraft, FamilyRelation, NavigatorBadgeColor, NavigatorBadgeKind, NavigatorNestingMode, SAMPLE_FIXTURES, TableCreationDraft,
     WelcomeWizardState, WorkspaceNavState, instantiate_sample_fixture,
 };
 
-fn build_large_grouped_doc() -> Result<lumencraft_doc::ProjectDocument, lumencraft_doc::DocError> {
-    let mut doc = lumencraft_doc::ProjectDocument::default();
+fn build_large_grouped_doc() -> Result<curvebook_doc::ProjectDocument, curvebook_doc::DocError> {
+    let mut doc = curvebook_doc::ProjectDocument::default();
 
     // Small internal donor sheet to attach a live Blue provenance link inside the 1M-cell grid.
     let mut src_col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 4)?;
@@ -201,7 +201,7 @@ fn spike_s1_multiple_variables_one_million_cells_scroll_and_role_strip() {
     mv.variables[999].set_calculated_formula("= Var_1 + Var_2");
     let sheet = DataSheet::new("mv-1m", "Cohort 1M", TableArchetype::MultipleVariables(mv)).expect("sheet");
 
-    let mut doc = lumencraft_doc::ProjectDocument::default();
+    let mut doc = curvebook_doc::ProjectDocument::default();
     doc.add_data_sheet(sheet).expect("add mv-1m");
     let mut app = UiApp::from_session(Session::from_document(doc));
     app.sync_views();
@@ -232,7 +232,7 @@ fn spike_s1_multiple_variables_one_million_cells_scroll_and_role_strip() {
 
 #[test]
 fn two_tier_headers_and_all_four_provenance_colors() {
-    let mut doc = lumencraft_doc::ProjectDocument::default();
+    let mut doc = curvebook_doc::ProjectDocument::default();
 
     let mut nested = NestedTable::new(2, 3, 4).expect("nested table");
     nested.groups[0].title = String::from("Wildtype");
@@ -323,7 +323,7 @@ fn two_tier_headers_and_all_four_provenance_colors() {
 
 #[test]
 fn navigator_five_folders_nesting_transitive_bold_badges_and_family_anchor() {
-    let mut doc = lumencraft_doc::ProjectDocument::default();
+    let mut doc = curvebook_doc::ProjectDocument::default();
 
     let mut d1 = instantiate_sample_fixture("dose-response-4pl", "d1").expect("d1");
     d1.title = String::from("Binding Assay");
@@ -449,7 +449,7 @@ fn navigator_five_folders_nesting_transitive_bold_badges_and_family_anchor() {
 
 #[test]
 fn welcome_wizard_all_archetypes_fixtures_and_clone_pipeline() {
-    let mut doc = lumencraft_doc::ProjectDocument::default();
+    let mut doc = curvebook_doc::ProjectDocument::default();
     let mut wizard = WelcomeWizardState::default();
 
     for (idx, kind) in TableKind::ALL.iter().enumerate() {
@@ -533,7 +533,7 @@ fn welcome_wizard_all_archetypes_fixtures_and_clone_pipeline() {
 
 #[test]
 fn multivar_variables_formula_bar_import_wizard_and_quick_stats() {
-    let mut doc = lumencraft_doc::ProjectDocument::default();
+    let mut doc = curvebook_doc::ProjectDocument::default();
     let mut mv = MultipleVariablesTable::new(3, 6).expect("mv table");
     mv.variables[0].title = String::from("Group");
     mv.variables[1].title = String::from("Response");

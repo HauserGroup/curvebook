@@ -2,12 +2,12 @@
 //! (`TransformAnalysisSpec::Transpose`, `PruneRows`, `SelectAndTransform`,
 //! `docs/data-tables-and-transforms.md` §5.4).
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedTable,
     PartsOfWholeTable, ResultCell, SheetId, SubcolumnMode, SummarizedPoint, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole,
     VariableSource, XColumnMode, XyTable, default_column_label, transpose_cell_grid, validate_data_sets, validate_rows,
 };
-use lumencraft_math::sum;
+use curvebook_math::sum;
 
 use crate::error::TransformError;
 use crate::formula::{TableEvalContext, eval_column_expr, parse_formula};
@@ -37,7 +37,7 @@ pub enum SelectRule {
     BottomN { column: usize, n: usize },
 }
 
-/// Transpose rows and data-set columns using [`lumencraft_doc::transpose_cell_grid`].
+/// Transpose rows and data-set columns using [`curvebook_doc::transpose_cell_grid`].
 pub fn execute_transpose(source: &DataSheet, swap_titles: bool, ctx: &TransformContext<'_>) -> Result<TransformOutput, TransformError> {
     let (id, title) = ctx.derived_ids(source, "transpose", "Transposed");
     let (archetype, warnings) = transpose_archetype(&source.archetype, swap_titles)?;
@@ -830,7 +830,7 @@ pub fn execute_select(
             TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
             TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
             TableArchetype::Nested(t) => {
-                selected_cols.iter().filter_map(|&c| t.groups.get(c).map(lumencraft_doc::NestedGroupColumn::biological_unit_count)).max().unwrap_or(1)
+                selected_cols.iter().filter_map(|&c| t.groups.get(c).map(curvebook_doc::NestedGroupColumn::biological_unit_count)).max().unwrap_or(1)
             }
             _ => 1,
         };
@@ -1234,7 +1234,7 @@ fn flatten_primary_columns(arch: &TableArchetype, selected: &[usize]) -> (Vec<St
     for r in 0..rows {
         let mut row = Vec::with_capacity(selected.len());
         for &c in selected {
-            let cell = arch.data_cell(lumencraft_doc::CellCoord::new(r, c, 0)).cloned().unwrap_or_default();
+            let cell = arch.data_cell(curvebook_doc::CellCoord::new(r, c, 0)).cloned().unwrap_or_default();
             row.push(cell);
         }
         grid.push(row);

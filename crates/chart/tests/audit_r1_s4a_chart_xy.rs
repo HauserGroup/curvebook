@@ -1,13 +1,13 @@
 //! Regression tests for Stage 4A `S2` XY / survival-cat chart findings (`R1-S08-04..06`, `R1-S08-08`, `R1-X2-06`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_chart::{ChartScene, PathCmd, PointPt, ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ChartScene, PathCmd, PointPt, ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, Cell, CurveSamplePoint, DataSheet, ErrorBarMetric, ErrorBarSpec, FittedCurveOverlay, GraphSheet,
     NonlinearFitSpec, ProjectDocument, RegressionOverlaySpec, ResultSheet, ResultStatus, SheetId, SubcolumnMode, SurvivalTable, TableArchetype,
     XyTable,
 };
-use lumencraft_math::{AxisScale, LogitDomain};
+use curvebook_math::{AxisScale, LogitDomain};
 
 fn all_points_finite(scene: &ChartScene) -> bool {
     scene.primitives.iter().all(|p| match p {
@@ -435,7 +435,7 @@ fn r1_x2_06_fitted_overlay_never_borrows_wrong_dataset_or_failed_result() {
 
     // Failed ResultSheet must NEVER draw overlay even if data_set_index matches.
     let mut failed_res = ResultSheet::new(AnalysisSpec::new("res-fail", "d-ov", fit_spec.kind).unwrap()).unwrap();
-    failed_res.status = ResultStatus::Failed { code: lumencraft_doc::ErrorCode::SolverFailed, message: String::from("failed") };
+    failed_res.status = ResultStatus::Failed { code: curvebook_doc::ErrorCode::SolverFailed, message: String::from("failed") };
     failed_res.fitted_curves.push(FittedCurveOverlay {
         data_set_index: 0,
         equation_id: String::from("linear"),

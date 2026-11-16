@@ -4,17 +4,17 @@
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;
 
-use lumencraft_chart::ChartScene;
-use lumencraft_doc::{DataSheet, SheetCellRange, SheetId};
-use lumencraft_engine::Session;
-use lumencraft_format::{CsvOptions, export_datasheet_to_csv, format_cell_token, write_delimited_records};
-use lumencraft_pdf::{PdfExportOptions, render_pdf};
+use curvebook_chart::ChartScene;
+use curvebook_doc::{DataSheet, SheetCellRange, SheetId};
+use curvebook_engine::Session;
+use curvebook_format::{CsvOptions, export_datasheet_to_csv, format_cell_token, write_delimited_records};
+use curvebook_pdf::{PdfExportOptions, render_pdf};
 #[cfg(not(target_arch = "wasm32"))]
-use lumencraft_platform::PlatformError;
+use curvebook_platform::PlatformError;
 #[cfg(not(target_arch = "wasm32"))]
-use lumencraft_platform::process::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_WALL_TIMEOUT, ProcessCommand, ProcessOutput};
-use lumencraft_render::{RenderTargetSpec, encode_emf, encode_png, render_scene};
-use lumencraft_svg::{SvgExportOptions, render_svg};
+use curvebook_platform::process::{DEFAULT_IDLE_TIMEOUT, DEFAULT_MAX_OUTPUT_BYTES, DEFAULT_WALL_TIMEOUT, ProcessCommand, ProcessOutput};
+use curvebook_render::{RenderTargetSpec, encode_emf, encode_png, render_scene};
+use curvebook_svg::{SvgExportOptions, render_svg};
 use serde::{Deserialize, Serialize};
 
 const MIN_DPI: u16 = 72;
@@ -251,7 +251,7 @@ impl StageDirGuard {
     fn create(prefix: &str) -> Result<Self, String> {
         let seq = STAGE_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("lumencraft-{prefix}-{pid}-{seq}"));
+        let path = std::env::temp_dir().join(format!("curvebook-{prefix}-{pid}-{seq}"));
         std::fs::create_dir_all(&path).map_err(|err| format!("failed to create staging dir '{}': {err}", path.display()))?;
         #[cfg(unix)]
         {
@@ -445,7 +445,7 @@ Write-Output $wrote
     let svg_arg = stage_optional_file(stage_dir.path(), "clip.svg", bundle.svg.as_bytes())?;
     let txt_arg = stage_optional_file(stage_dir.path(), "clip.txt", primary_text.as_bytes())?;
     let ps1_path = stage_dir.path().join("write_bundle.ps1");
-    lumencraft_platform::write_atomic(&ps1_path, PS_WRITE_PASTEBOARD.as_bytes())
+    curvebook_platform::write_atomic(&ps1_path, PS_WRITE_PASTEBOARD.as_bytes())
         .map_err(|err| format!("failed to stage PowerShell clipboard helper: {err}"))?;
 
     let candidate = OsCommandCandidate {
@@ -544,7 +544,7 @@ fn stage_optional_file(dir: &std::path::Path, filename: &str, bytes: &[u8]) -> R
         return Ok(String::new());
     }
     let path = dir.join(filename);
-    lumencraft_platform::write_atomic(&path, bytes).map_err(|err| format!("failed to stage '{filename}': {err}"))?;
+    curvebook_platform::write_atomic(&path, bytes).map_err(|err| format!("failed to stage '{filename}': {err}"))?;
     Ok(path.to_string_lossy().into_owned())
 }
 
@@ -589,7 +589,7 @@ function run(argv) {
             return Err(String::from("failed to write pasteboard PDF bytes to staging file"));
         }
         const MAX_PASTEBOARD_PDF_BYTES: usize = 128 * 1024 * 1024;
-        let bytes = lumencraft_platform::fs::read_regular_file_bytes(&out_path, MAX_PASTEBOARD_PDF_BYTES)
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(&out_path, MAX_PASTEBOARD_PDF_BYTES)
             .map_err(|err| format!("failed to read staged pasteboard PDF: {err}"))?;
         if bytes.is_empty() {
             return Err(String::from("staged pasteboard `com.adobe.pdf` entry was empty"));
@@ -743,17 +743,17 @@ fn sanitize_print_title(raw: &str) -> String {
         }
     }
     let trimmed = out.trim_matches('-');
-    if trimmed.is_empty() { String::from("lumencraft-print") } else { trimmed.to_owned() }
+    if trimmed.is_empty() { String::from("curvebook-print") } else { trimmed.to_owned() }
 }
 
-/// Stage a print spool PDF cleanly via `lumencraft_platform::write_atomic` and launch OS print preview
-/// only when `LUMENCRAFT_ALLOW_OS_GUI_DIALOG` is set in the environment.
+/// Stage a print spool PDF cleanly via `curvebook_platform::write_atomic` and launch OS print preview
+/// only when `CURVEBOOK_ALLOW_OS_GUI_DIALOG` is set in the environment.
 ///
 /// # Errors
 /// Returns an error if `spool` does not contain a valid `%PDF-` payload or if atomic staging fails.
 #[cfg(not(target_arch = "wasm32"))]
 pub fn open_os_print_preview_dialog(spool: &crate::PrintSpoolOutput) -> Result<OsAdapterStatus, String> {
-    open_os_print_preview_dialog_titled(spool, "lumencraft-print")
+    open_os_print_preview_dialog_titled(spool, "curvebook-print")
 }
 
 /// Stage a print spool PDF cleanly under `<safe_title>.pdf` and open host print preview when enabled.
@@ -768,14 +768,14 @@ pub fn open_os_print_preview_dialog_titled(spool: &crate::PrintSpoolOutput, titl
     let safe_title = sanitize_print_title(title);
     let mut stage_dir = StageDirGuard::create("print-preview")?;
     let pdf_path = stage_dir.path().join(format!("{safe_title}.pdf"));
-    lumencraft_platform::write_atomic(&pdf_path, &spool.pdf_bytes)
+    curvebook_platform::write_atomic(&pdf_path, &spool.pdf_bytes)
         .map_err(|err| format!("failed to stage print preview PDF '{}': {err}", pdf_path.display()))?;
 
-    if std::env::var_os("LUMENCRAFT_ALLOW_OS_GUI_DIALOG").is_none() {
+    if std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {
         return Ok(OsAdapterStatus::unavailable(
             "os-print-preview",
             format!(
-                "staged {} PDF bytes as `{safe_title}.pdf` (GUI launch disabled unless LUMENCRAFT_ALLOW_OS_GUI_DIALOG is set)",
+                "staged {} PDF bytes as `{safe_title}.pdf` (GUI launch disabled unless CURVEBOOK_ALLOW_OS_GUI_DIALOG is set)",
                 spool.pdf_bytes.len()
             ),
         ));
@@ -888,7 +888,7 @@ fn write_os_clipboard_bundle_with(
     flavors: &[&str],
 ) -> Result<OsAdapterStatus, String> {
     let fallback_svg_or_html =
-        if primary_text.is_empty() { format!("lumencraft-figure {}x{}", bundle.width_px, bundle.height_px) } else { primary_text.to_owned() };
+        if primary_text.is_empty() { format!("curvebook-figure {}x{}", bundle.width_px, bundle.height_px) } else { primary_text.to_owned() };
     let mut status = write_os_pasteboard_with(candidates, &fallback_svg_or_html)?;
     if status.available {
         status.detail = format!("wrote clipboard bundle ({}) via {}", flavors.join(", "), status.backend);
@@ -1130,7 +1130,7 @@ fn build_html_clipboard_wrapper(title: &str, svg: &str, width_pt: f64, height_pt
     let escaped_title = escape_html(title);
     format!(
         "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>{escaped_title}</title></head>\
-<body><div class=\"lumencraft-figure\" style=\"width:{width_pt:.3}pt;height:{height_pt:.3}pt;\">{svg}</div></body></html>"
+<body><div class=\"curvebook-figure\" style=\"width:{width_pt:.3}pt;height:{height_pt:.3}pt;\">{svg}</div></body></html>"
     )
 }
 
@@ -1151,8 +1151,8 @@ fn escape_html(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_chart::{ChartScene, PointPt, RectPt, ScenePrimitive, StrokePaint};
-    use lumencraft_palette::Rgba8;
+    use curvebook_chart::{ChartScene, PointPt, RectPt, ScenePrimitive, StrokePaint};
+    use curvebook_palette::Rgba8;
 
     use super::{
         ClipboardBundle, OsAdapterAvailability, OsCommandCandidate, read_os_pasteboard_with, submit_os_print_bytes_with, submit_os_print_job,
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn os_adapters_handle_missing_tools_and_invalid_inputs_safely() -> Result<(), Box<dyn std::error::Error>> {
-        let missing = [OsCommandCandidate::new("lumencraft-nonexistent-os-tool-1", &[])];
+        let missing = [OsCommandCandidate::new("curvebook-nonexistent-os-tool-1", &[])];
         let write_unavail = write_os_pasteboard_with(&missing, "hello")?;
         assert!(!write_unavail.available);
         assert_eq!(write_unavail.availability, OsAdapterAvailability::Unavailable);
@@ -1190,7 +1190,7 @@ mod tests {
 
         #[cfg(unix)]
         {
-            let write_fallback = [OsCommandCandidate::new("lumencraft-missing-bin", &[]), OsCommandCandidate::new("sh", &["-c", "cat >/dev/null"])];
+            let write_fallback = [OsCommandCandidate::new("curvebook-missing-bin", &[]), OsCommandCandidate::new("sh", &["-c", "cat >/dev/null"])];
             let ok_write = write_os_pasteboard_with(&write_fallback, "x\ty\n1\t2\n")?;
             assert!(ok_write.available);
             assert_eq!(ok_write.availability, OsAdapterAvailability::Submitted);
@@ -1220,7 +1220,7 @@ mod tests {
     fn clipboard_bundle_populates_valid_emf_and_writes_bundle_status() -> Result<(), Box<dyn std::error::Error>> {
         let mut scene = ChartScene::new("s1", "Bundle Test", 200.0, 120.0, None);
         scene.primitives.push(ScenePrimitive::Path {
-            path: lumencraft_chart::Path2D::line(PointPt::new(10.0, 10.0), PointPt::new(190.0, 110.0)),
+            path: curvebook_chart::Path2D::line(PointPt::new(10.0, 10.0), PointPt::new(190.0, 110.0)),
             fill: None,
             stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)),
             clip: None,
@@ -1255,7 +1255,7 @@ mod tests {
         let err = run_candidate(&sleepy, None, timeout_bounds).unwrap_err();
         assert!(err.contains("timed out"), "unexpected timeout err: {err}");
 
-        let noisy = OsCommandCandidate::new("sh", &["-c", "yes lumencraft_cap_test"]);
+        let noisy = OsCommandCandidate::new("sh", &["-c", "yes curvebook_cap_test"]);
         let cap_bounds = ProcessBounds { wall_timeout: Duration::from_secs(2), idle_timeout: Duration::from_secs(2), max_output_bytes: 512 };
         let cap_err = run_candidate(&noisy, None, cap_bounds).unwrap_err();
         assert!(cap_err.contains("output cap"), "unexpected cap err: {cap_err}");
@@ -1326,7 +1326,7 @@ Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
             page_sizes_pt: vec![(612.0, 792.0)],
             scale_percent: 100.0,
         };
-        if std::env::var_os("LUMENCRAFT_ALLOW_OS_GUI_DIALOG").is_none() {
+        if std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {
             let status = super::open_os_print_preview_dialog_titled(&valid_spool, "Dose Response Figure").expect("stage print preview");
             assert_eq!(status.availability, OsAdapterAvailability::Unavailable);
             assert!(status.detail.contains("Dose-Response-Figure.pdf"));

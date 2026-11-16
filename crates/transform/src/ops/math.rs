@@ -1,11 +1,11 @@
 //! Mathematical transforms on X and/or Y series with analytical and endpoint error
 //! propagation (`TransformAnalysisSpec::Math`, `docs/data-tables-and-transforms.md` §5.1).
 
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, CellValue, DataSetColumn, DataSheet, ErrorPropagationMode, InfoSheet, MathTransformPreset, ResultCell, SubcolumnMode, TableArchetype,
     XColumnMode,
 };
-use lumencraft_math::dist;
+use curvebook_math::dist;
 
 use crate::error::TransformError;
 use crate::formula::{Expr, ScalarEnv, eval_scalar_expr, parse_formula};
@@ -251,7 +251,7 @@ pub fn execute_math_transform(
 
     let mut out = source.clone();
     let (id, title) = ctx.derived_ids(source, "math", "Transform");
-    out.id = lumencraft_doc::SheetId::new(id);
+    out.id = curvebook_doc::SheetId::new(id);
     out.title = title;
     out.frozen = false;
     out.linked_regions.clear();
@@ -298,7 +298,7 @@ pub fn execute_math_transform(
 }
 
 fn transform_xy_x_axis(
-    xy: &mut lumencraft_doc::XyTable,
+    xy: &mut curvebook_doc::XyTable,
     op: &CompiledOp,
     err_mode: ErrorPropagationMode,
     info: Option<&InfoSheet>,

@@ -4,8 +4,8 @@ use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lumencraft_doc::{AnalysisKind, AnalysisSpec, ErrorCode, NamedCheckpoint, ParameterScope, ProjectDocument, SheetId, validate_title};
-use lumencraft_format::{
+use curvebook_doc::{AnalysisKind, AnalysisSpec, ErrorCode, NamedCheckpoint, ParameterScope, ProjectDocument, SheetId, validate_title};
+use curvebook_format::{
     MAX_ARCHIVE_FILE_BYTES, instantiate_template_bytes, migrate_document_json, open_project_bytes, open_project_file, open_project_unpacked_dir,
     sanitize_circular_hooks, save_project_bytes, save_project_unpacked_dir, save_template_bytes, validate_project_document,
 };
@@ -113,9 +113,9 @@ struct OpenProjectParams {
 fn open_project_schema() -> Value {
     obj_schema_with_aliases(
         vec![
-            ("path", nullable_schema(str_schema("Filesystem path to `.lumencraft` archive or `.lumencraft.d/` directory"))),
-            ("bytes_base64", nullable_schema(str_schema("Base64-encoded `.lumencraft` zip archive bytes"))),
-            ("unpacked", nullable_schema(bool_schema("Treat `path` as an unpacked `.lumencraft.d/` project directory"))),
+            ("path", nullable_schema(str_schema("Filesystem path to `.curvebook` archive or `.curvebook.d/` directory"))),
+            ("bytes_base64", nullable_schema(str_schema("Base64-encoded `.curvebook` zip archive bytes"))),
+            ("unpacked", nullable_schema(bool_schema("Treat `path` as an unpacked `.curvebook.d/` project directory"))),
         ],
         &[],
         vec![
@@ -176,12 +176,12 @@ struct SaveProjectParams {
 fn save_project_schema() -> Value {
     obj_schema_with_aliases(
         vec![
-            ("path", nullable_schema(str_schema("Destination `.lumencraft` archive path or `.lumencraft.d/` directory"))),
+            ("path", nullable_schema(str_schema("Destination `.curvebook` archive path or `.curvebook.d/` directory"))),
             (
                 "return_bytes",
-                nullable_schema(bool_schema("Include base64-encoded `.lumencraft` bytes in response (defaults to true when `path` is omitted)")),
+                nullable_schema(bool_schema("Include base64-encoded `.curvebook` bytes in response (defaults to true when `path` is omitted)")),
             ),
-            ("unpacked", nullable_schema(bool_schema("Save as an unpacked `.lumencraft.d/` project directory"))),
+            ("unpacked", nullable_schema(bool_schema("Save as an unpacked `.curvebook.d/` project directory"))),
         ],
         &[],
         vec![
@@ -247,7 +247,7 @@ struct SaveTemplateParams {
 fn save_template_schema() -> Value {
     obj_schema_with_aliases(
         vec![
-            ("path", nullable_schema(str_schema("Destination `.lctemplate` file path"))),
+            ("path", nullable_schema(str_schema("Destination `.cbtemplate` file path"))),
             (
                 "return_bytes",
                 nullable_schema(bool_schema("Include base64-encoded template bytes in response (defaults to true when `path` is omitted)")),
@@ -292,8 +292,8 @@ struct InstantiateTemplateParams {
 fn instantiate_template_schema() -> Value {
     obj_schema_with_aliases(
         vec![
-            ("path", nullable_schema(str_schema("Path to `.lctemplate` archive file"))),
-            ("bytes_base64", nullable_schema(str_schema("Base64-encoded `.lctemplate` archive bytes"))),
+            ("path", nullable_schema(str_schema("Path to `.cbtemplate` archive file"))),
+            ("bytes_base64", nullable_schema(str_schema("Base64-encoded `.cbtemplate` archive bytes"))),
             ("title", nullable_schema(str_schema("Optional title override for the instantiated project"))),
         ],
         &[],
@@ -753,7 +753,7 @@ static SPECS: [CommandSpec; 12] = [
         label: "New Project",
         menu_path: "File/New Project",
         shortcut: "Cmd+N",
-        summary: "Create a fresh empty LumenCraft project.",
+        summary: "Create a fresh empty CurveBook project.",
         beginner: "Replaces the active workspace with an empty project document (preserving undo history in this session).",
         group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
@@ -766,7 +766,7 @@ static SPECS: [CommandSpec; 12] = [
         label: "New Project",
         menu_path: "File/New Project",
         shortcut: "",
-        summary: "Create a fresh empty LumenCraft project.",
+        summary: "Create a fresh empty CurveBook project.",
         beginner: "Creates a clean empty project document with an optional title; alias for `file.new`.",
         group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA),
@@ -779,7 +779,7 @@ static SPECS: [CommandSpec; 12] = [
         label: "Open Project",
         menu_path: "File/Open...",
         shortcut: "Cmd+O",
-        summary: "Load a `.lumencraft` archive or unpacked `.lumencraft.d/` directory.",
+        summary: "Load a `.curvebook` archive or unpacked `.curvebook.d/` directory.",
         beginner: "Opens a project from a filesystem path or base64 archive payload and replaces the current session document.",
         group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
@@ -792,7 +792,7 @@ static SPECS: [CommandSpec; 12] = [
         label: "Save Project",
         menu_path: "File/Save",
         shortcut: "Cmd+S",
-        summary: "Save the active project atomically to `.lumencraft`, unpacked directory, or bytes.",
+        summary: "Save the active project atomically to `.curvebook`, unpacked directory, or bytes.",
         beginner: "Serializes the project document using atomic filesystem writes when a path is provided, or returns base64 bytes.",
         group: CommandGroup::Project,
         effects: Effects::WRITES_FILESYSTEM,
@@ -805,7 +805,7 @@ static SPECS: [CommandSpec; 12] = [
         label: "Save Template",
         menu_path: "File/Save Template...",
         shortcut: "",
-        summary: "Export the project structure as a data-stripped `.lctemplate` file.",
+        summary: "Export the project structure as a data-stripped `.cbtemplate` file.",
         beginner: "Strips raw data values while preserving table schemas, analyses, graphs, and layouts, then writes atomically to disk or base64.",
         group: CommandGroup::Project,
         effects: Effects::WRITES_FILESYSTEM,
@@ -818,7 +818,7 @@ static SPECS: [CommandSpec; 12] = [
         label: "New Project From Template",
         menu_path: "File/New From Template...",
         shortcut: "",
-        summary: "Create a new project from a `.lctemplate` archive.",
+        summary: "Create a new project from a `.cbtemplate` archive.",
         beginner: "Loads a saved template with its analysis pipelines, graphs, and layouts ready for new experimental data.",
         group: CommandGroup::Project,
         effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM).with(Effects::MAY_DISCARD_DATA),
@@ -916,7 +916,7 @@ pub fn specs() -> &'static [CommandSpec] {
 mod tests {
     use std::sync::atomic::AtomicBool;
 
-    use lumencraft_doc::{DataSheet, InfoSheet, TableArchetype, XyTable};
+    use curvebook_doc::{DataSheet, InfoSheet, TableArchetype, XyTable};
     use serde_json::json;
 
     use crate::cmd::Caller;
@@ -950,7 +950,7 @@ mod tests {
 
         let info = InfoSheet::new_preseeded("info-1", "Info").unwrap();
         session.doc.add_info_sheet(info).unwrap();
-        let xy = XyTable::new(lumencraft_doc::SubcolumnMode::Single, 1, 3).unwrap();
+        let xy = XyTable::new(curvebook_doc::SubcolumnMode::Single, 1, 3).unwrap();
         let mut ds = DataSheet::new("data-1", "Dose", TableArchetype::Xy(xy)).unwrap();
         ds.info_sheet_id = Some(SheetId::new("info-1"));
         session.doc.add_data_sheet(ds).unwrap();
@@ -963,10 +963,10 @@ mod tests {
         let recalc = exec_cmd(&mut session, "project.recalculate", Caller::Mcp, json!({ "include_external_links": false })).unwrap();
         assert!(recalc.mutated);
 
-        let dir = std::env::temp_dir().join(format!("lc-proj-cmd-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("cb-proj-cmd-test-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
-        let save_path = dir.join("study.lumencraft");
-        let tpl_path = dir.join("nested").join("study.lctemplate");
+        let save_path = dir.join("study.curvebook");
+        let tpl_path = dir.join("nested").join("study.cbtemplate");
 
         let saved =
             exec_cmd(&mut session, "project.save", Caller::Cli, json!({ "path": save_path.display().to_string(), "include_bytes": true })).unwrap();
@@ -1016,7 +1016,7 @@ mod tests {
 
         exec_cmd(&mut session, "project.new", Caller::Ui, json!({ "title": "Modified" })).unwrap();
         session.undo().unwrap();
-        let xy = XyTable::new(lumencraft_doc::SubcolumnMode::Single, 1, 2).unwrap();
+        let xy = XyTable::new(curvebook_doc::SubcolumnMode::Single, 1, 2).unwrap();
         session.doc.add_data_sheet(DataSheet::new("d-added", "Added", TableArchetype::Xy(xy)).unwrap()).unwrap();
 
         let listed = exec_cmd(&mut session, "project.listCheckpoints", Caller::Mcp, json!({})).unwrap();

@@ -4,21 +4,21 @@
 //! with explicit numerical tolerances and citations.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{MultiplicityMethod, MultiplicitySpec};
-use lumencraft_math::dist::{
+use curvebook_doc::{MultiplicityMethod, MultiplicitySpec};
+use curvebook_math::dist::{
     chi2_pdf, dunnett_two_sided_p, f_sf, nct_cdf, nct_sf, student_t_isf, student_t_two_sided_isf, student_t_two_sided_p, studentized_range_sf,
 };
-use lumencraft_math::quad::gauss_legendre_32;
-use lumencraft_stats::StatsError;
-use lumencraft_stats::multiplicity::{
+use curvebook_math::quad::gauss_legendre_32;
+use curvebook_stats::StatsError;
+use curvebook_stats::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, adjust_p_values, compare_dunn_ranks, compare_groups_pairwise, compare_groups_with_procedure,
     linear_trend_test,
 };
-use lumencraft_stats::power::{
+use curvebook_stats::power::{
     CorrelationPowerMethod, OneSidedDirection, PowerAnalysisRequest, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, TailMode, solve_power,
 };
-use lumencraft_stats::two_group::multiple_row_t_tests;
-use lumencraft_testkit::assert_approx_eq;
+use curvebook_stats::two_group::multiple_row_t_tests;
+use curvebook_testkit::assert_approx_eq;
 
 fn welch_se_and_df(a: &GroupComparisonInput, b: &GroupComparisonInput) -> (f64, f64) {
     let va = (a.sd * a.sd) / a.n;

@@ -3,13 +3,13 @@
 //!
 //! Every workflow runs strictly under `UiApp` with `app.set_gui_only(true)` (`GuiOnlyPolicy::Strict`)
 //! and drives all mutations, selections, brushing, dialogs, menu commands, shortcuts, tab
-//! switches, and screenshots exclusively through `lumencraft_ui_egui::dispatch_gui_action`.
+//! switches, and screenshots exclusively through `curvebook_ui_egui::dispatch_gui_action`.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, CellCoord, MathTransformPreset, MultivariateSpec, ResultCell, ResultStatus, SheetId, TableArchetype, TableKind,
     TransformAnalysisSpec,
 };
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action, handle_control_line};
+use curvebook_ui_egui::{UiApp, dispatch_gui_action, handle_control_line};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;

@@ -3,14 +3,14 @@
 //! `R2-S07-16`, `R2-S07-18`, and `#357` `PointStyleOverride::subcol`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnnotationShapeKind, BreakOrnament, Cell, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyMethod,
     ContingencySpec, CorrelationPowerMethod, DataSheet, EquationDisplayMode, ErrorBarSpec, ErrorCode, FramePreset, GraphAnnotation, GraphSpec,
     JsonSchema, KappaWeighting, PointStyleOverride, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
     PowerTestFamily, ProjectDocument, RectPt, SheetId, SizePt, SubcolumnMode, TableArchetype, TransformAnalysisSpec, TwoProportionsMethod, XyTable,
     project_document_schema,
 };
-use lumencraft_palette::{LineDashStyle, MarkerShape, PaletteId, Rgba8};
+use curvebook_palette::{LineDashStyle, MarkerShape, PaletteId, Rgba8};
 use serde_json::json;
 
 fn sample_column_sheet(id: &str) -> DataSheet {
@@ -102,7 +102,7 @@ fn r2_s05_03_schema_matches_runtime_checkpoints_errors_sheet_id_and_utf8_titles(
 
     // UTF-8 byte ceiling description on titles matches runtime MAX_TITLE_BYTES semantics.
     let proj_title = &val["properties"]["title"];
-    assert_eq!(proj_title["maxLength"], lumencraft_doc::MAX_TITLE_BYTES);
+    assert_eq!(proj_title["maxLength"], curvebook_doc::MAX_TITLE_BYTES);
     let desc = proj_title["description"].as_str().unwrap_or_default();
     assert!(desc.contains("UTF-8") || desc.contains("bytes"), "expected UTF-8 byte ceiling note in description: {desc}");
 }
@@ -119,12 +119,12 @@ fn r2_s07_07_parts_of_whole_rejects_kappa_and_other_contingency_methods() {
         ContingencyMethod::McNemarPaired,
     ] {
         let kind = AnalysisKind::Contingency(ContingencySpec { method, ..ContingencySpec::default() });
-        assert!(!kind.is_compatible_with(lumencraft_doc::TableKind::PartsOfWhole), "{method:?} must be incompatible with PartsOfWhole");
+        assert!(!kind.is_compatible_with(curvebook_doc::TableKind::PartsOfWhole), "{method:?} must be incompatible with PartsOfWhole");
     }
 
     for allowed in [ContingencyMethod::PearsonChiSquare { yates_continuity: false }, ContingencyMethod::ExactBinomial] {
         let kind = AnalysisKind::Contingency(ContingencySpec { method: allowed, ..ContingencySpec::default() });
-        assert!(kind.is_compatible_with(lumencraft_doc::TableKind::PartsOfWhole), "{allowed:?} must remain compatible with PartsOfWhole");
+        assert!(kind.is_compatible_with(curvebook_doc::TableKind::PartsOfWhole), "{allowed:?} must remain compatible with PartsOfWhole");
     }
 }
 

@@ -7,18 +7,18 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
 
-use flate2::Compression;
-use flate2::write::ZlibEncoder;
-use lumencraft_chart::{
+use curvebook_chart::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
 };
-use lumencraft_palette::Rgba8;
-use lumencraft_text::glyph_paths::{outline_ttf_glyph, outline_visual_rich_text_rotated};
-use lumencraft_text::metrics::{core14_advance_em, reorder_rich_text_bidi, rich_contains_rtl, split_rich_text_lines};
-use lumencraft_text::{
+use curvebook_palette::Rgba8;
+use curvebook_text::glyph_paths::{outline_ttf_glyph, outline_visual_rich_text_rotated};
+use curvebook_text::metrics::{core14_advance_em, reorder_rich_text_bidi, rich_contains_rtl, split_rich_text_lines};
+use curvebook_text::{
     BUNDLED_FONTS, GlyphOutlineCmd, PositionedGlyphOutline, RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, TrueTypeFont, TrueTypeFontInfo,
     parse_truetype_font_info,
 };
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
 use serde::{Deserialize, Serialize};
 
 pub use crate::{PdfColorSpace, PdfVersion};
@@ -46,7 +46,7 @@ impl Default for PdfExportOptions {
             color_space: PdfColorSpace::Srgb,
             compress_streams: true,
             title: None,
-            creator: String::from("LumenCraft"),
+            creator: String::from("CurveBook"),
             outline_text: false,
             trim_pt: None,
             bleed_pt: None,
@@ -190,7 +190,7 @@ fn sanitize_pdf_font_name(primary: &str, fallback: &str) -> String {
         return clean;
     }
     let fb = pick(fallback);
-    if !fb.is_empty() { fb } else { String::from("LumenCraftEmbedded") }
+    if !fb.is_empty() { fb } else { String::from("CurveBookEmbedded") }
 }
 
 fn resolve_embedded_truetype(options: &PdfExportOptions) -> Result<Option<EmbeddedTrueTypeFont>, PdfError> {
@@ -411,12 +411,12 @@ fn build_info_dict(pages: &[&ChartScene], options: &PdfExportOptions) -> String 
         .as_deref()
         .filter(|t| !t.is_empty())
         .or_else(|| (pages.len() == 1).then(|| pages.first().map(|p| p.title.as_str()).unwrap_or("")).filter(|t| !t.is_empty()));
-    let creator = if options.creator.is_empty() { "LumenCraft" } else { options.creator.as_str() };
+    let creator = if options.creator.is_empty() { "CurveBook" } else { options.creator.as_str() };
     let mut dict = String::from("<< ");
     if let Some(t) = title {
         let _ = write!(dict, "/Title {} ", format_pdf_info_string(t));
     }
-    let _ = writeln!(dict, "/Creator {} /Producer (LumenCraft) >>", format_pdf_info_string(creator));
+    let _ = writeln!(dict, "/Creator {} /Producer (CurveBook) >>", format_pdf_info_string(creator));
     dict
 }
 

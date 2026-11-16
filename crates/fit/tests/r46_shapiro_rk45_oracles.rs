@@ -1,5 +1,5 @@
 //! Regression reproducers and D1 primary-literature oracle tests for `R4.6` fixes in
-//! [`lumencraft_fit::diagnostics`] and [`lumencraft_fit::dsl`]:
+//! [`curvebook_fit::diagnostics`] and [`curvebook_fit::dsl`]:
 //! - Shapiro–Wilk `n = 4..5` Royston (1992/1995) AS R94 polynomial weights (and `n = 3..5000` oracles)
 //! - Dormand–Prince RK45 rejected-step shrink exponent `-1/5` (Hairer, Nørsett & Wanner 1993, §II.4)
 //! - ROUT Motulsky & Brown (2006) top-30% furthest-point FDR scope in `rout_detect_outliers`
@@ -22,12 +22,12 @@
 //! - Benjamini, Y. & Hochberg, Y. (1995). Controlling the false discovery rate. *JRSS-B* 57(1), 289–300.
 //! - Draper, N. R. & Smith, H. (1998). *Applied Regression Analysis*, 3rd ed., §1.5. Wiley.
 
-use lumencraft_fit::diagnostics::{replicates_lack_of_fit, rout_detect_outliers, shapiro_wilk_test};
-use lumencraft_fit::dsl::{CompiledDslModel, integrate_rk45};
-use lumencraft_fit::{
+use curvebook_fit::diagnostics::{replicates_lack_of_fit, rout_detect_outliers, shapiro_wilk_test};
+use curvebook_fit::dsl::{CompiledDslModel, integrate_rk45};
+use curvebook_fit::{
     DataPoint, DatasetSeries, FitError, HookContext, ParametricModel, SimpleLinearOptions, SolverConfig, fit_nonlinear, simple_linear_regression,
 };
-use lumencraft_math::dist::student_t_two_sided_p;
+use curvebook_math::dist::student_t_two_sided_p;
 
 fn assert_close(actual: f64, expected: f64, abs_tol: f64, rel_tol: f64, label: &str) {
     assert!(actual.is_finite(), "{label}: expected finite near {expected}, got {actual}");

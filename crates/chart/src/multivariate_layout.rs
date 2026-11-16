@@ -3,21 +3,21 @@
 
 use std::collections::BTreeMap;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, ClusterDistance, ClusterLinkage, ColorChannelMapping, DataSheet, DiagnosticPlotKind, GraphKind, GraphSheet, GraphSpec,
     GraphicalDataObject, LayoutItem, LayoutSheet, LevelOrderSpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, ProjectDocument,
     ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SizeChannelMapping, SubcolumnMode, TableArchetype, VariableColumn,
     VariableRole, WhiskerMethod,
 };
-use lumencraft_math::dist::{chi2_isf, norm_ppf};
-use lumencraft_math::sum::{covariance, sample_sd};
-use lumencraft_math::{AxisScale, ConfidenceLevel};
-use lumencraft_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
-use lumencraft_stats::common::quartiles_hinge;
-use lumencraft_stats::multivariate::{DendrogramMerge, hierarchical_clustering_with_metrics};
-use lumencraft_stats::roc::{RocCiMethod, roc_curve_analysis};
-use lumencraft_stats::two_group::bland_altman;
-use lumencraft_text::{RichText, parse_markup};
+use curvebook_math::dist::{chi2_isf, norm_ppf};
+use curvebook_math::sum::{covariance, sample_sd};
+use curvebook_math::{AxisScale, ConfidenceLevel};
+use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
+use curvebook_stats::common::quartiles_hinge;
+use curvebook_stats::multivariate::{DendrogramMerge, hierarchical_clustering_with_metrics};
+use curvebook_stats::roc::{RocCiMethod, roc_curve_analysis};
+use curvebook_stats::two_group::bland_altman;
+use curvebook_text::{RichText, parse_markup};
 
 use crate::scales::AxisMapping;
 use crate::scene::{
@@ -104,7 +104,7 @@ fn compile_multiple_variables(graph: &GraphSheet, doc: &ProjectDocument, scene: 
     }
 }
 
-fn default_mv_encoding(graph: &GraphSheet, mv: &lumencraft_doc::MultipleVariablesTable) -> MultivariateGraphEncoding {
+fn default_mv_encoding(graph: &GraphSheet, mv: &curvebook_doc::MultipleVariablesTable) -> MultivariateGraphEncoding {
     if let Some(enc) = &graph.spec.multivariate {
         return enc.clone();
     }
@@ -132,19 +132,19 @@ fn cell_token(col: &VariableColumn, row: usize) -> Option<String> {
         return None;
     }
     match &cell.value {
-        lumencraft_doc::CellValue::Empty => None,
-        lumencraft_doc::CellValue::Text(s) => {
+        curvebook_doc::CellValue::Empty => None,
+        curvebook_doc::CellValue::Text(s) => {
             let tr = s.trim();
             (!tr.is_empty()).then(|| tr.to_owned())
         }
-        lumencraft_doc::CellValue::Number(v) if v.is_finite() => Some(format!("{v}")),
-        lumencraft_doc::CellValue::Number(_) => None,
+        curvebook_doc::CellValue::Number(v) if v.is_finite() => Some(format!("{v}")),
+        curvebook_doc::CellValue::Number(_) => None,
     }
 }
 
 fn compile_bubble_scatter(
     graph: &GraphSheet,
-    mv: &lumencraft_doc::MultipleVariablesTable,
+    mv: &curvebook_doc::MultipleVariablesTable,
     enc: &MultivariateGraphEncoding,
     doc: &ProjectDocument,
     scene: &mut ChartScene,
@@ -310,7 +310,7 @@ fn compile_bubble_scatter(
 type ColorChannelResolved = (Vec<String>, PaletteId, Option<ColorRamp>, Option<(f64, f64)>);
 
 fn resolve_color_channel(
-    mv: &lumencraft_doc::MultipleVariablesTable,
+    mv: &curvebook_doc::MultipleVariablesTable,
     enc: &MultivariateGraphEncoding,
     default_pal: PaletteId,
 ) -> ColorChannelResolved {
@@ -325,7 +325,7 @@ fn resolve_color_channel(
 }
 
 fn extract_row_color(
-    mv: &lumencraft_doc::MultipleVariablesTable,
+    mv: &curvebook_doc::MultipleVariablesTable,
     color: &ColorChannelMapping,
     cat_levels: &[String],
     row: usize,
@@ -344,7 +344,7 @@ fn extract_row_color(
     }
 }
 
-fn extract_row_size(mv: &lumencraft_doc::MultipleVariablesTable, size: SizeChannelMapping, row: usize) -> f64 {
+fn extract_row_size(mv: &curvebook_doc::MultipleVariablesTable, size: SizeChannelMapping, row: usize) -> f64 {
     match size {
         SizeChannelMapping::Constant { .. } => 1.0,
         SizeChannelMapping::Variable { column, .. } => {
@@ -490,7 +490,7 @@ fn resolve_categorical_cld_overlay(
 fn draw_categorical_summary_slot(
     scene: &mut ChartScene,
     gdo: &GraphicalDataObject,
-    y_error_bars: Option<lumencraft_doc::ErrorBarSpec>,
+    y_error_bars: Option<curvebook_doc::ErrorBarSpec>,
     color: Rgba8,
     r: RectPt,
     cx: f64,
@@ -607,13 +607,13 @@ fn draw_categorical_summary_slot(
         emit_error_bar(scene, cx, values, sorted, center_y, eb, y_map);
         let sd = sample_sd(values).unwrap_or(0.0);
         let err_top = match eb.metric {
-            lumencraft_doc::ErrorBarMetric::Sd | lumencraft_doc::ErrorBarMetric::ExplicitSubcolumns => center_y + sd,
-            lumencraft_doc::ErrorBarMetric::Sem => center_y + sd / (values.len().max(1) as f64).sqrt(),
-            lumencraft_doc::ErrorBarMetric::ConfidenceInterval95 => center_y + 1.96 * sd / (values.len().max(1) as f64).sqrt(),
-            lumencraft_doc::ErrorBarMetric::InterquartileRange => quartiles_hinge(sorted).map_or(center_y, |(_, _, q3)| q3),
-            lumencraft_doc::ErrorBarMetric::Range => sorted.last().copied().unwrap_or(center_y),
+            curvebook_doc::ErrorBarMetric::Sd | curvebook_doc::ErrorBarMetric::ExplicitSubcolumns => center_y + sd,
+            curvebook_doc::ErrorBarMetric::Sem => center_y + sd / (values.len().max(1) as f64).sqrt(),
+            curvebook_doc::ErrorBarMetric::ConfidenceInterval95 => center_y + 1.96 * sd / (values.len().max(1) as f64).sqrt(),
+            curvebook_doc::ErrorBarMetric::InterquartileRange => quartiles_hinge(sorted).map_or(center_y, |(_, _, q3)| q3),
+            curvebook_doc::ErrorBarMetric::Range => sorted.last().copied().unwrap_or(center_y),
         };
-        if !matches!(eb.direction, lumencraft_doc::ErrorBarDirection::LowerOnly) {
+        if !matches!(eb.direction, curvebook_doc::ErrorBarDirection::LowerOnly) {
             top_data_val = top_data_val.max(err_top);
         }
     }
@@ -622,10 +622,10 @@ fn draw_categorical_summary_slot(
 
 fn compile_categorical_summary(
     graph: &GraphSheet,
-    mv: &lumencraft_doc::MultipleVariablesTable,
+    mv: &curvebook_doc::MultipleVariablesTable,
     enc: &MultivariateGraphEncoding,
     gdo: &GraphicalDataObject,
-    y_error_bars: Option<lumencraft_doc::ErrorBarSpec>,
+    y_error_bars: Option<curvebook_doc::ErrorBarSpec>,
     doc: &ProjectDocument,
     scene: &mut ChartScene,
 ) -> Result<(), ChartError> {
@@ -749,19 +749,19 @@ fn compile_categorical_summary(
     Ok(())
 }
 
-fn summary_measure_from_gdo(gdo: &GraphicalDataObject) -> lumencraft_doc::SummaryMeasure {
+fn summary_measure_from_gdo(gdo: &GraphicalDataObject) -> curvebook_doc::SummaryMeasure {
     match gdo {
         GraphicalDataObject::BarWithReplicates { summary, .. } | GraphicalDataObject::AlignedDotPlot { summary, .. } => *summary,
         GraphicalDataObject::FloatingBar { summary: Some(s), .. } => *s,
-        _ => lumencraft_doc::SummaryMeasure::Mean,
+        _ => curvebook_doc::SummaryMeasure::Mean,
     }
 }
 
-fn summary_center(values: &[f64], sorted: &[f64], measure: lumencraft_doc::SummaryMeasure) -> f64 {
+fn summary_center(values: &[f64], sorted: &[f64], measure: curvebook_doc::SummaryMeasure) -> f64 {
     match measure {
-        lumencraft_doc::SummaryMeasure::Mean => values.iter().sum::<f64>() / (values.len().max(1) as f64),
-        lumencraft_doc::SummaryMeasure::Median => percentile_linear(sorted, 0.5),
-        lumencraft_doc::SummaryMeasure::GeometricMean => {
+        curvebook_doc::SummaryMeasure::Mean => values.iter().sum::<f64>() / (values.len().max(1) as f64),
+        curvebook_doc::SummaryMeasure::Median => percentile_linear(sorted, 0.5),
+        curvebook_doc::SummaryMeasure::GeometricMean => {
             if values.iter().all(|&v| v > 0.0) {
                 (values.iter().map(|v| v.ln()).sum::<f64>() / (values.len() as f64)).exp()
             } else {
@@ -984,15 +984,7 @@ fn draw_violin_slot(scene: &mut ChartScene, sorted: &[f64], slot: &ViolinSlotSpe
     }
 }
 
-fn emit_error_bar(
-    scene: &mut ChartScene,
-    cx: f64,
-    values: &[f64],
-    sorted: &[f64],
-    center: f64,
-    eb: lumencraft_doc::ErrorBarSpec,
-    y_map: AxisMapping,
-) {
+fn emit_error_bar(scene: &mut ChartScene, cx: f64, values: &[f64], sorted: &[f64], center: f64, eb: curvebook_doc::ErrorBarSpec, y_map: AxisMapping) {
     let clip = scene.plot_rect_pt;
     let n = values.len();
     if n == 0 {
@@ -1000,27 +992,27 @@ fn emit_error_bar(
     }
     let sd = sample_sd(values).unwrap_or(0.0);
     let (lo, hi) = match eb.metric {
-        lumencraft_doc::ErrorBarMetric::Sd => (center - sd, center + sd),
-        lumencraft_doc::ErrorBarMetric::Sem => {
+        curvebook_doc::ErrorBarMetric::Sd => (center - sd, center + sd),
+        curvebook_doc::ErrorBarMetric::Sem => {
             let sem = sd / (n as f64).sqrt();
             (center - sem, center + sem)
         }
-        lumencraft_doc::ErrorBarMetric::ConfidenceInterval95 => {
+        curvebook_doc::ErrorBarMetric::ConfidenceInterval95 => {
             let half = 1.96 * sd / (n as f64).sqrt();
             (center - half, center + half)
         }
-        lumencraft_doc::ErrorBarMetric::InterquartileRange => {
+        curvebook_doc::ErrorBarMetric::InterquartileRange => {
             if let Some((q1, _, q3)) = quartiles_hinge(sorted) {
                 (q1, q3)
             } else {
                 (center, center)
             }
         }
-        lumencraft_doc::ErrorBarMetric::Range => (sorted.first().copied().unwrap_or(center), sorted.last().copied().unwrap_or(center)),
-        lumencraft_doc::ErrorBarMetric::ExplicitSubcolumns => (center - sd, center + sd),
+        curvebook_doc::ErrorBarMetric::Range => (sorted.first().copied().unwrap_or(center), sorted.last().copied().unwrap_or(center)),
+        curvebook_doc::ErrorBarMetric::ExplicitSubcolumns => (center - sd, center + sd),
     };
-    let y_lo_val = if matches!(eb.direction, lumencraft_doc::ErrorBarDirection::UpperOnly) { center } else { lo };
-    let y_hi_val = if matches!(eb.direction, lumencraft_doc::ErrorBarDirection::LowerOnly) { center } else { hi };
+    let y_lo_val = if matches!(eb.direction, curvebook_doc::ErrorBarDirection::UpperOnly) { center } else { lo };
+    let y_hi_val = if matches!(eb.direction, curvebook_doc::ErrorBarDirection::LowerOnly) { center } else { hi };
     let (Some(y_lo), Some(y_hi)) = (y_map.map_value(y_lo_val, clip.bottom(), clip.y), y_map.map_value(y_hi_val, clip.bottom(), clip.y)) else {
         return;
     };
@@ -1071,7 +1063,7 @@ struct DiagPoint {
     series_label: String,
 }
 
-fn active_xy_pairs_with_sources(sheet_id: &SheetId, xy: &lumencraft_doc::XyTable, data_set: usize) -> Vec<(f64, f64, SourceCellId, String)> {
+fn active_xy_pairs_with_sources(sheet_id: &SheetId, xy: &curvebook_doc::XyTable, data_set: usize) -> Vec<(f64, f64, SourceCellId, String)> {
     let Some(ds) = xy.data_sets.get(data_set) else {
         return Vec::new();
     };
@@ -3008,7 +3000,7 @@ fn extract_forest_entries(graph: &GraphSheet, doc: &ProjectDocument) -> Vec<Fore
             .unwrap_or(0);
         for (r, row) in tab.rows.iter().enumerate() {
             if let Some((lo, hi)) = row.iter().find_map(|c| match c {
-                ResultCell::ConfidenceInterval { lower: lumencraft_doc::CiBound::Finite(lo), upper: lumencraft_doc::CiBound::Finite(hi) } => {
+                ResultCell::ConfidenceInterval { lower: curvebook_doc::CiBound::Finite(lo), upper: curvebook_doc::CiBound::Finite(hi) } => {
                     Some((*lo, *hi))
                 }
                 _ => None,
@@ -3880,13 +3872,13 @@ fn transform_primitive(prim: &ScenePrimitive, tx: f64, ty: f64, s: f64) -> Scene
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AxisSpec, ColorChannelMapping, DataSheet, DiagnosticPlotKind, GraphKind, GraphSheet, LayoutItem, LayoutSheet, LayoutSpec,
         MultipleVariablesTable, MultivariateGraphEncoding, MultivariatePlotMode, ProjectDocument, RectPt as DocRectPt, SheetId, SizeChannelMapping,
         SubcolumnMode, TableArchetype, VariableRole, XyTable,
     };
-    use lumencraft_palette::{ColormapId, PaletteId, Rgba8};
-    use lumencraft_text::SpanWeight;
+    use curvebook_palette::{ColormapId, PaletteId, Rgba8};
+    use curvebook_text::SpanWeight;
 
     use super::{compile_layout_scene, compile_multivariate_or_diagnostic_graph};
     use crate::scene::{ChartScene, ScenePrimitive};
@@ -3904,10 +3896,10 @@ mod tests {
                 .into_iter()
                 .enumerate()
         {
-            mv.variables[0].cells[r] = lumencraft_doc::Cell::number(x);
-            mv.variables[1].cells[r] = lumencraft_doc::Cell::number(y);
-            mv.variables[2].cells[r] = lumencraft_doc::Cell::text(g);
-            mv.variables[3].cells[r] = lumencraft_doc::Cell::number(sz);
+            mv.variables[0].cells[r] = curvebook_doc::Cell::number(x);
+            mv.variables[1].cells[r] = curvebook_doc::Cell::number(y);
+            mv.variables[2].cells[r] = curvebook_doc::Cell::text(g);
+            mv.variables[3].cells[r] = curvebook_doc::Cell::number(sz);
         }
         let ds = DataSheet::new(SheetId::new("mv-1"), "Bubble", TableArchetype::MultipleVariables(mv)).expect("ds");
         let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-mv"), &ds).expect("gs");
@@ -3931,13 +3923,13 @@ mod tests {
             scene
                 .primitives
                 .iter()
-                .any(|p| matches!(p, ScenePrimitive::Path { stroke: Some(st), .. } if st.dash == lumencraft_palette::LineDashStyle::Dashed))
+                .any(|p| matches!(p, ScenePrimitive::Path { stroke: Some(st), .. } if st.dash == curvebook_palette::LineDashStyle::Dashed))
         );
     }
 
     #[test]
     fn categorical_summary_renders_cld_letters_above_error_bars() {
-        use lumencraft_doc::{
+        use curvebook_doc::{
             AnalysisKind, AnalysisSpec, CompactLetterDisplaySpec, ErrorBarSpec, GraphicalDataObject, OneWayAnovaSpec, PairwiseComparisonRecord,
             PairwiseDisplayMode, ResultSheet, ResultStatus, SummaryMeasure,
         };
@@ -3947,8 +3939,8 @@ mod tests {
         mv.variables[0].lock_role(VariableRole::Categorical);
         mv.variables[1].title = String::from("Response");
         for (r, (g, y)) in [("Ctrl", 10.0), ("Ctrl", 12.0), ("Drug", 24.0), ("Drug", 26.0), ("Ref", 18.0), ("Ref", 20.0)].into_iter().enumerate() {
-            mv.variables[0].cells[r] = lumencraft_doc::Cell::text(g);
-            mv.variables[1].cells[r] = lumencraft_doc::Cell::number(y);
+            mv.variables[0].cells[r] = curvebook_doc::Cell::text(g);
+            mv.variables[1].cells[r] = curvebook_doc::Cell::number(y);
         }
         let ds = DataSheet::new(SheetId::new("mv-cat"), "Cat Summary", TableArchetype::MultipleVariables(mv)).expect("ds");
 
@@ -4038,10 +4030,10 @@ mod tests {
         let mut xy_small = XyTable::new(SubcolumnMode::Single, 1, 3).expect("xy1");
         let mut xy_big = XyTable::new(SubcolumnMode::Single, 1, 3).expect("xy2");
         for r in 0..3 {
-            xy_small.x_cells[r][0] = lumencraft_doc::Cell::number(r as f64);
-            xy_small.data_sets[0].cells[r][0] = lumencraft_doc::Cell::number((r as f64) * 1.0);
-            xy_big.x_cells[r][0] = lumencraft_doc::Cell::number(r as f64);
-            xy_big.data_sets[0].cells[r][0] = lumencraft_doc::Cell::number((r as f64) * 1_000_000.0);
+            xy_small.x_cells[r][0] = curvebook_doc::Cell::number(r as f64);
+            xy_small.data_sets[0].cells[r][0] = curvebook_doc::Cell::number((r as f64) * 1.0);
+            xy_big.x_cells[r][0] = curvebook_doc::Cell::number(r as f64);
+            xy_big.data_sets[0].cells[r][0] = curvebook_doc::Cell::number((r as f64) * 1_000_000.0);
         }
         let d1 = DataSheet::new(SheetId::new("d1"), "Small", TableArchetype::Xy(xy_small)).expect("d1");
         let d2 = DataSheet::new(SheetId::new("d2"), "Big", TableArchetype::Xy(xy_big)).expect("d2");
@@ -4097,8 +4089,8 @@ mod tests {
 
     #[test]
     fn dendrogram_node_conversion_guards_extreme_and_malformed_ids() {
-        use lumencraft_doc::{ResultCell, ResultTab, ResultTabKind};
-        use lumencraft_stats::multivariate::DendrogramMerge;
+        use curvebook_doc::{ResultCell, ResultTab, ResultTabKind};
+        use curvebook_stats::multivariate::DendrogramMerge;
 
         use super::{dendrogram_leaf_order, draw_left_dendrogram, extract_dendro_merges_from_tab};
         use crate::scene::{PathCmd, RectPt};

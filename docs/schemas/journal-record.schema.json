@@ -60,9 +60,9 @@
       "type": "object"
     }
   },
-  "$id": "https://lumencraft.dev/schemas/journal-record.schema.json",
+  "$id": "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/journal-record.schema.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "description": "Draft 2020-12 schema for crash-recovery ops.journal NDJSON lines and lumencraft.lock leases.",
+  "description": "Draft 2020-12 schema for crash-recovery ops.journal NDJSON lines and curvebook.lock leases.",
   "oneOf": [
     {
       "$ref": "#/$defs/JournalOpRecord"

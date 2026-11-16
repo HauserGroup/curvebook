@@ -1,11 +1,11 @@
-//! Regression tests for Stage 4B S09 typography & layout fixes in `lumencraft-text`.
+//! Regression tests for Stage 4B S09 typography & layout fixes in `curvebook-text`.
 
 use std::time::Instant;
 
-use lumencraft_palette::Rgba8;
-use lumencraft_text::glyph_paths::{GlyphOutlineCmd, outline_rich_text, outline_rich_text_rotated};
-use lumencraft_text::metrics::{core14_advance_em, is_combining_mark, reorder_rich_text_bidi, rich_contains_rtl, split_rich_text_lines};
-use lumencraft_text::{BUNDLED_FONTS, RichSpan, RichText, measure_text_pt, parse_markup, parse_truetype_font_info};
+use curvebook_palette::Rgba8;
+use curvebook_text::glyph_paths::{GlyphOutlineCmd, outline_rich_text, outline_rich_text_rotated};
+use curvebook_text::metrics::{core14_advance_em, is_combining_mark, reorder_rich_text_bidi, rich_contains_rtl, split_rich_text_lines};
+use curvebook_text::{BUNDLED_FONTS, RichSpan, RichText, measure_text_pt, parse_markup, parse_truetype_font_info};
 
 fn bbox_of_cmds(cmds: &[GlyphOutlineCmd]) -> Option<(f64, f64, f64, f64)> {
     let mut min_x = f64::INFINITY;
@@ -173,7 +173,7 @@ fn r1_s09_07_accented_latin_and_combining_marks_do_not_collapse_to_fallback_box(
 
     // Combining marks must carry zero advance and sit above their base glyph rather than after advance.
     assert!(is_combining_mark('\u{0301}'));
-    assert_eq!(core14_advance_em('\u{0301}', lumencraft_text::SpanWeight::Regular, lumencraft_text::SpanSlope::Upright), 0.0);
+    assert_eq!(core14_advance_em('\u{0301}', curvebook_text::SpanWeight::Regular, curvebook_text::SpanSlope::Upright), 0.0);
     let combined = outline_rich_text(&RichText::plain("e\u{0301}"), 0.0, 20.0, 12.0);
     assert_eq!(combined.len(), 2);
     assert_eq!(combined[1].advance_x_pt, 0.0);

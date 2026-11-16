@@ -6,7 +6,7 @@ reviews:
       - "dependabot[bot]"
   path_instructions:
     - path: "crates/**"
-      instructions: "Enforce AGENTS.md and docs/development.md#robustness-lumencraft-never-crashes: zero unsafe, zero unwrap/expect/panic/todo/unimplemented/unreachable in non-test code, bounded allocations and safe slice indexing (.get), and strict L0-L7 crate layering (docs/architecture.md)."
+      instructions: "Enforce AGENTS.md and docs/development.md#robustness-curvebook-never-crashes: zero unsafe, zero unwrap/expect/panic/todo/unimplemented/unreachable in non-test code, bounded allocations and safe slice indexing (.get), and strict L0-L7 crate layering (docs/architecture.md)."
     - path: "crates/{math,stats}/**"
       instructions: "Check mathematical accuracy, tail-safe probability evaluation (never 1.0 - cdf(x)), missing/excluded-value and tie handling, and NIST StRD / analytical test coverage per docs/statistics-implementation.md."
     - path: "crates/fit/**"

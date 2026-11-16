@@ -58,14 +58,14 @@
 //! - Therneau, T. M., & Grambsch, P. M. (2000). *Modeling Survival Data: Extending the Cox Model*.
 //!   New York: Springer. `doi:10.1007/978-1-4757-3294-8`.
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisSpec, Cell, CellValue, ChecklistStatus, CoxTieMethod, CurveSamplePoint, DataSheet, FittedCurveOverlay, MultipleVariablesTable,
     PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus,
     TableArchetype, VariableColumn, VariableRole,
 };
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
-use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
+use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
@@ -1359,7 +1359,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 let med_ci = match km.median_ci {
                     (Some(lo), Some(hi)) => ci_cell(lo, hi),
                     (Some(lo), None) => {
-                        ResultCell::ConfidenceInterval { lower: lumencraft_doc::CiBound::Finite(lo), upper: lumencraft_doc::CiBound::Open }
+                        ResultCell::ConfidenceInterval { lower: curvebook_doc::CiBound::Finite(lo), upper: curvebook_doc::CiBound::Open }
                     }
                     _ => ResultCell::Empty,
                 };
@@ -2117,7 +2117,7 @@ fn append_survival_pairwise(
     indices: &[usize],
     km_results: &[KaplanMeierCohortResult],
     cohort_obs: &[Vec<SurvivalObservation>],
-    mult: &lumencraft_doc::MultiplicitySpec,
+    mult: &curvebook_doc::MultiplicitySpec,
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
@@ -2183,7 +2183,7 @@ fn append_survival_pairwise(
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{SurvivalObservation, SurvivalStatus};
+    use curvebook_doc::{SurvivalObservation, SurvivalStatus};
 
     use super::{SurvivalWeight, compare_survival_curves, weighted_log_rank_stats};
 

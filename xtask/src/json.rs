@@ -264,10 +264,10 @@ mod tests {
 
     #[test]
     fn parses_nested_metadata_shape() {
-        let j = parse(r#"{"packages":[{"name":"lumencraft-doc","kind":null,"path":"/x\\y"}]}"#).unwrap();
+        let j = parse(r#"{"packages":[{"name":"curvebook-doc","kind":null,"path":"/x\\y"}]}"#).unwrap();
         let pkgs = j.get("packages").and_then(Json::as_array).unwrap();
         assert_eq!(pkgs.len(), 1);
-        assert_eq!(pkgs[0].get("name").and_then(Json::as_str), Some("lumencraft-doc"));
+        assert_eq!(pkgs[0].get("name").and_then(Json::as_str), Some("curvebook-doc"));
         assert_eq!(pkgs[0].get("path").and_then(Json::as_str), Some("/x\\y"));
         assert_eq!(pkgs[0].get("kind"), Some(&Json::Null));
     }

@@ -4,7 +4,7 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, Cell, CellCoord, ChecklistItem, ChecklistStatus, CiBound, ColorChannelMapping, ColumnDesignHint,
     ColumnTable, ConstantValue, ContingencyTable, DataSheet, FramePreset, GraphAnnotation, GraphKind, GraphSheet, GroupedTable, HookSource,
     InfoConstant, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec,
@@ -12,18 +12,18 @@ use lumencraft_doc::{
     PanelBadgeStyle, ParameterScope, ProjectDocument, RectPt, RemediationKind, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab,
     ResultTabKind, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TableKind, VariableRole, XyTable, extract_template_hooks,
 };
-use lumencraft_engine::Session;
-use lumencraft_palette::{ColormapId, CvdKind, LineDashStyle, MarkerFillMode, PaletteId};
-use lumencraft_render::RenderTargetSpec;
-use lumencraft_tools::{GridCellCoord, JournalWidthPreset as ToolJournalWidthPreset, PhysicalUnit, SelectionQuickStats};
-use lumencraft_ui_egui::dialogs_canvas::{
+use curvebook_engine::Session;
+use curvebook_palette::{ColormapId, CvdKind, LineDashStyle, MarkerFillMode, PaletteId};
+use curvebook_render::RenderTargetSpec;
+use curvebook_tools::{GridCellCoord, JournalWidthPreset as ToolJournalWidthPreset, PhysicalUnit, SelectionQuickStats};
+use curvebook_ui_egui::dialogs_canvas::{
     ANALYSIS_CATALOG, ActiveDialog, ActiveInspector, AnalyzeDialogState, AnalyzeDuplicateChoice, AxisTarget, CommandOrigin, CommandPaletteState,
     VariableRoleFilter, compute_workspace_layout, default_analysis_kind_for_id, render_workspace_frame_png, render_workspace_rgba,
     variable_role_badge, variable_role_color,
 };
-use lumencraft_ui_egui::theme::{UiThemeSpec, font_diagnostics};
-use lumencraft_ui_egui::workspace_nav::ActiveWorkspacePane;
-use lumencraft_ui_egui::{UiApp, dispatch_gui_action};
+use curvebook_ui_egui::theme::{UiThemeSpec, font_diagnostics};
+use curvebook_ui_egui::workspace_nav::ActiveWorkspacePane;
+use curvebook_ui_egui::{UiApp, dispatch_gui_action};
 use serde_json::json;
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -64,8 +64,8 @@ fn build_rich_test_project() -> ProjectDocument {
     xy.data_sets[0].title = String::from("10.5");
     xy.data_sets[1].title = String::from("Dose B");
     let mut ds_xy = DataSheet::new("data-xy", "Dose Response", TableArchetype::Xy(xy)).expect("ds xy");
-    ds_xy.set_cell(lumencraft_doc::CellCoord::new(0, 0, 0), lumencraft_doc::Cell::number(1.0)).expect("c0");
-    ds_xy.set_cell(lumencraft_doc::CellCoord::new(1, 0, 0), lumencraft_doc::Cell::excluded_number(99.0)).expect("c1");
+    ds_xy.set_cell(curvebook_doc::CellCoord::new(0, 0, 0), curvebook_doc::Cell::number(1.0)).expect("c0");
+    ds_xy.set_cell(curvebook_doc::CellCoord::new(1, 0, 0), curvebook_doc::Cell::excluded_number(99.0)).expect("c1");
     doc.add_data_sheet(ds_xy).expect("add xy");
 
     let col = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 5).expect("col");
@@ -294,11 +294,11 @@ fn result_viewer_checklist_and_constant_hook_picker_work() {
     assert!(app.canvas_dialogs.result_view.select_tab_by_id(res, "comparisons"));
     assert_eq!(app.canvas_dialogs.result_view.active_tab(res).map(|t| t.id.as_str()), Some("comparisons"));
 
-    assert_eq!(lumencraft_ui_egui::dialogs_canvas::ResultSheetViewState::checklist_summary_counts(res), (1, 1, 0, 0));
-    app.canvas_dialogs.result_view.checklist_filter = lumencraft_ui_egui::dialogs_canvas::ChecklistSeverityFilter::WarningsAndViolations;
+    assert_eq!(curvebook_ui_egui::dialogs_canvas::ResultSheetViewState::checklist_summary_counts(res), (1, 1, 0, 0));
+    app.canvas_dialogs.result_view.checklist_filter = curvebook_ui_egui::dialogs_canvas::ChecklistSeverityFilter::WarningsAndViolations;
     assert_eq!(app.canvas_dialogs.result_view.visible_checklist(res).len(), 1);
 
-    let open_ci = lumencraft_ui_egui::dialogs_canvas::ResultSheetViewState::format_result_cell(
+    let open_ci = curvebook_ui_egui::dialogs_canvas::ResultSheetViewState::format_result_cell(
         &ResultCell::ConfidenceInterval { lower: CiBound::Finite(4.2), upper: CiBound::Open },
         PValueFormat::Apa,
     );
@@ -694,7 +694,7 @@ fn engine_command_round_trips_for_graph_and_layout_inspectors() {
     app.execute_command(&cld_intent.command_id, cld_intent.params).expect("execute compact letter display");
     let g_col_after = app.document().graph_sheet(&"graph-col".into()).expect("g_col after cld");
     assert!(g_col_after.spec.compact_letter_display.is_some());
-    assert_ne!(g_col_after.spec.pairwise_display_mode, lumencraft_doc::PairwiseDisplayMode::BracketsOnly);
+    assert_ne!(g_col_after.spec.pairwise_display_mode, curvebook_doc::PairwiseDisplayMode::BracketsOnly);
 
     let snap2 = app.document().clone();
     app.canvas_dialogs.pairwise.sync_from_graph(snap2.graph_sheet(&"graph-col".into()).expect("g_col snap2"), &snap2);

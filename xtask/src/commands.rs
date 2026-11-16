@@ -1,4 +1,4 @@
-//! Regenerate or verify [`docs/commands.md`](../../docs/commands.md) from `lumencraft_engine::cmd`.
+//! Regenerate or verify [`docs/commands.md`](../../docs/commands.md) from `curvebook_engine::cmd`.
 
 use std::fs;
 use std::path::Path;
@@ -20,16 +20,16 @@ pub fn run_cli(root: &Path, args: &[String]) -> Result<(), String> {
     run(root, check)
 }
 
-/// Regenerate or verify `docs/commands.md` against `lumencraft_engine::cmd::render_commands_markdown()`.
+/// Regenerate or verify `docs/commands.md` against `curvebook_engine::cmd::render_commands_markdown()`.
 pub fn run(root: &Path, check: bool) -> Result<(), String> {
-    let expected = normalize_newlines(&lumencraft_engine::cmd::render_commands_markdown());
+    let expected = normalize_newlines(&curvebook_engine::cmd::render_commands_markdown());
     let path = root.join(COMMANDS_DOC_REL);
 
     if check {
         let actual =
             fs::read_to_string(&path).map_err(|err| format!("commands: failed to read `{}` ({err}); run `cargo xtask commands`", path.display()))?;
         if normalize_newlines(&actual) != expected {
-            return Err(format!("commands: `{}` is out of sync with lumencraft_engine::cmd::registry(); run `cargo xtask commands`", path.display()));
+            return Err(format!("commands: `{}` is out of sync with curvebook_engine::cmd::registry(); run `cargo xtask commands`", path.display()));
         }
         println!("commands: {} is up to date", path.display());
         return Ok(());
@@ -62,7 +62,7 @@ mod tests {
     impl TempDir {
         fn new(prefix: &str) -> Self {
             let seq = COUNTER.fetch_add(1, Ordering::Relaxed);
-            let dir = std::env::temp_dir().join(format!("lumencraft-xtask-commands-{prefix}-{}-{seq}", std::process::id()));
+            let dir = std::env::temp_dir().join(format!("curvebook-xtask-commands-{prefix}-{}-{seq}", std::process::id()));
             let _ = fs::remove_dir_all(&dir);
             fs::create_dir_all(&dir).expect("create tempdir");
             Self(dir)
@@ -83,8 +83,8 @@ mod tests {
         run(&tmp.0, false).expect("generate docs/commands.md in tempdir");
         let generated_path = tmp.0.join("docs/commands.md");
         let contents = fs::read_to_string(&generated_path).expect("read generated commands.md");
-        assert!(contents.starts_with("# LumenCraft Command Reference\n"));
-        let command_count = lumencraft_engine::cmd::registry().len();
+        assert!(contents.starts_with("# CurveBook Command Reference\n"));
+        let command_count = curvebook_engine::cmd::registry().len();
         assert!(command_count >= 92, "expected >= 92 registered commands, got {command_count}");
         assert!(contents.contains(&format!("Registered commands: {command_count}\n")));
 

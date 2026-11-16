@@ -8,9 +8,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use lumencraft_doc::{ErrorCode, LinkSource};
+use curvebook_doc::{ErrorCode, LinkSource};
 #[cfg(not(target_arch = "wasm32"))]
-use lumencraft_platform::{PlatformError, WorkdirGuard, ensure_regular_file};
+use curvebook_platform::{PlatformError, WorkdirGuard, ensure_regular_file};
 use serde_json::{Value, json};
 
 use crate::EngineError;
@@ -139,7 +139,7 @@ impl ExternalPathPolicy {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let resolved = self.resolve_target_path(raw_path, label)?;
-            lumencraft_platform::fs::read_regular_file_utf8(&resolved, max_bytes).map_err(|err| map_read_platform_err(err, raw_path, label))
+            curvebook_platform::fs::read_regular_file_utf8(&resolved, max_bytes).map_err(|err| map_read_platform_err(err, raw_path, label))
         }
     }
 
@@ -167,7 +167,7 @@ impl ExternalPathPolicy {
         #[cfg(not(target_arch = "wasm32"))]
         {
             let resolved = self.resolve_target_path(raw_path, label)?;
-            lumencraft_platform::fs::read_regular_file_bytes(&resolved, max_bytes).map_err(|err| map_read_platform_err(err, raw_path, label))
+            curvebook_platform::fs::read_regular_file_bytes(&resolved, max_bytes).map_err(|err| map_read_platform_err(err, raw_path, label))
         }
     }
 
@@ -208,7 +208,7 @@ impl ExternalPathPolicy {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let use_unpacked = explicit_unpacked || has_unpacked_dir_suffix(&resolved) || lumencraft_format::is_unpacked_project_dir(&resolved);
+            let use_unpacked = explicit_unpacked || has_unpacked_dir_suffix(&resolved) || curvebook_format::is_unpacked_project_dir(&resolved);
             if use_unpacked {
                 ensure_unpacked_dir_if_present(&resolved, raw_path)?;
             } else {
@@ -228,14 +228,14 @@ impl ExternalPathPolicy {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let use_unpacked = explicit_unpacked || has_unpacked_dir_suffix(&resolved) || lumencraft_format::is_unpacked_project_dir(&resolved);
+            let use_unpacked = explicit_unpacked || has_unpacked_dir_suffix(&resolved) || curvebook_format::is_unpacked_project_dir(&resolved);
             if use_unpacked {
                 ensure_unpacked_dir_if_present(&resolved, raw_path)?;
             } else if resolved.is_dir() {
                 return Err(EngineError::with_code(
                     ErrorCode::BadInput,
                     format!(
-                        "output path `{raw_path}` is an existing directory; specify a `.lumencraft` archive file, a `.lumencraft.d` directory, or set `unpacked: true`"
+                        "output path `{raw_path}` is an existing directory; specify a `.curvebook` archive file, a `.curvebook.d` directory, or set `unpacked: true`"
                     ),
                 )
                 .with_details(json!({ "path": raw_path })));
@@ -313,7 +313,7 @@ fn write_resolved_atomic(resolved: &Path, display_path: &str, bytes: &[u8]) -> R
                 .with_details(json!({ "path": display_path }))
         })?;
     }
-    lumencraft_platform::fs::write_atomic(resolved, bytes).map_err(|err| {
+    curvebook_platform::fs::write_atomic(resolved, bytes).map_err(|err| {
         EngineError::with_code(ErrorCode::IoError, format!("failed writing file `{display_path}`: {err}"))
             .with_remediation("Ensure the target directory is writable and has sufficient disk space.")
             .with_retryable(true)
@@ -322,7 +322,7 @@ fn write_resolved_atomic(resolved: &Path, display_path: &str, bytes: &[u8]) -> R
 }
 
 fn has_unpacked_dir_suffix(path: &Path) -> bool {
-    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.to_ascii_lowercase().ends_with(".lumencraft.d"))
+    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.to_ascii_lowercase().ends_with(".curvebook.d"))
 }
 
 fn sanitize_param_value(policy: &ExternalPathPolicy, val: &mut Value) -> Result<(), EngineError> {

@@ -7,15 +7,15 @@
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisSpec, ChecklistStatus, DataSheet, MultivariateSpec, ResultCell, ResultSheet, ResultTabKind, TableArchetype, VariableRole,
 };
-pub use lumencraft_doc::{ClusterDistance, ClusterLinkage};
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_p};
-use lumencraft_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, svd, sym_eigen};
-use lumencraft_math::rng::DeterministicRng;
-use lumencraft_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
+pub use curvebook_doc::{ClusterDistance, ClusterLinkage};
+use curvebook_math::ConfidenceLevel;
+use curvebook_math::dist::{norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_p};
+use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, svd, sym_eigen};
+use curvebook_math::rng::DeterministicRng;
+use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
@@ -163,7 +163,7 @@ pub struct MultipleImputationResult {
 /// Pearson product-moment correlation with Fisher-*z* confidence interval and exact *t*-test *p*.
 pub fn pearson_correlation(x: &[f64], y: &[f64], confidence: ConfidenceLevel) -> Result<CorrelationPairResult, StatsError> {
     if x.len() != y.len() {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
     }
     let n = x.len();
     if n < 3 {
@@ -193,7 +193,7 @@ pub fn pearson_correlation(x: &[f64], y: &[f64], confidence: ConfidenceLevel) ->
 /// Spearman rank-order correlation (`O(n log n)` with exact average tie handling).
 pub fn spearman_correlation(x: &[f64], y: &[f64]) -> Result<CorrelationPairResult, StatsError> {
     if x.len() != y.len() {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
     }
     let n = x.len();
     if n < 3 {
@@ -215,7 +215,7 @@ pub fn spearman_correlation(x: &[f64], y: &[f64]) -> Result<CorrelationPairResul
 /// Kendall's *tau_b* rank correlation with tie-adjusted asymptotic normal *p*-value.
 pub fn kendall_tau_b(x: &[f64], y: &[f64]) -> Result<CorrelationPairResult, StatsError> {
     if x.len() != y.len() {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
     }
     validate_finite_slice(x)?;
     validate_finite_slice(y)?;
@@ -362,7 +362,7 @@ pub fn pca_analysis(
         return Err(StatsError::InsufficientSampleSize { context: "PCA", required: 3, actual: n });
     }
     if variable_labels.len() != p {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: p, actual: variable_labels.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: p, actual: variable_labels.len() }));
     }
 
     let mut scaled_cols = Vec::with_capacity(p);
@@ -371,7 +371,7 @@ pub fn pca_analysis(
         for r in 0..n {
             let v = data.get(r, c).unwrap_or(f64::NAN);
             if !v.is_finite() {
-                return Err(StatsError::Math(lumencraft_math::MathError::DomainError { name: "pca_x", value: v }));
+                return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "pca_x", value: v }));
             }
             col.push(v);
         }
@@ -507,7 +507,7 @@ pub fn kmeans_pp(rows: &[Vec<f64>], k: usize, seed: u64) -> Result<KMeansResult,
     }
     for r in rows {
         if r.len() != d {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: d, actual: r.len() }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: d, actual: r.len() }));
         }
         validate_finite_slice(r)?;
     }
@@ -598,7 +598,7 @@ pub fn kmeans_pp(rows: &[Vec<f64>], k: usize, seed: u64) -> Result<KMeansResult,
 /// Pairwise dissimilarity between two equal-length finite feature vectors under [`ClusterDistance`].
 pub fn pairwise_distance_value(a: &[f64], b: &[f64], metric: ClusterDistance) -> Result<f64, StatsError> {
     if a.len() != b.len() {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: a.len(), actual: b.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: a.len(), actual: b.len() }));
     }
     if a.is_empty() {
         return Err(StatsError::EmptyInput);
@@ -672,7 +672,7 @@ pub fn pairwise_distance_matrix(rows: &[Vec<f64>], metric: ClusterDistance) -> R
     }
     for r in rows {
         if r.len() != d {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: d, actual: r.len() }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: d, actual: r.len() }));
         }
         validate_finite_slice(r)?;
     }
@@ -725,7 +725,7 @@ fn kmeans_pp_from_dist(rows: &[Vec<f64>], k: usize, distance: ClusterDistance, d
         return Err(StatsError::InvalidParameter { name: "k_means_k", value: k as f64 });
     }
     if dist_mat.len() != n {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: dist_mat.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: dist_mat.len() }));
     }
     let sq_dist = |a: &[f64], b: &[f64]| -> f64 {
         let v = pairwise_distance_unchecked(a, b, distance);
@@ -1106,7 +1106,7 @@ fn hierarchical_clustering_from_dist(dist_mat: &[Vec<f64>], linkage: ClusterLink
         return Err(StatsError::InvalidParameter { name: "clustering_n", value: n as f64 });
     }
     if let Some(bad) = dist_mat.iter().find(|r| r.len() != n) {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: bad.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: bad.len() }));
     }
     Ok(match linkage {
         ClusterLinkage::Single | ClusterLinkage::Complete | ClusterLinkage::Upgma | ClusterLinkage::Wpgma | ClusterLinkage::Ward => {
@@ -1596,7 +1596,7 @@ pub fn rubin_pool_estimates(
 ) -> Result<RubinPooledEstimate, StatsError> {
     let m = estimates.len();
     if variances.len() != m {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: m, actual: variances.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: m, actual: variances.len() }));
     }
     if m < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "Rubin pooling imputations (m)", required: 2, actual: m });
@@ -1707,7 +1707,7 @@ pub fn mice_predictive_mean_matching(
         return Err(StatsError::EmptyInput);
     }
     if labels.len() != p {
-        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: p, actual: labels.len() }));
+        return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: p, actual: labels.len() }));
     }
     let n_rows = cols[0].len();
     if n_rows < 3 {
@@ -1715,7 +1715,7 @@ pub fn mice_predictive_mean_matching(
     }
     for col in cols {
         if col.len() != n_rows {
-            return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n_rows, actual: col.len() }));
+            return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n_rows, actual: col.len() }));
         }
     }
 
@@ -2255,7 +2255,7 @@ fn extract_mi_columns(
     Ok(ExtractedMiData { labels, cols: padded_cols, model_response_col, model_predictor_cols })
 }
 
-fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResult, p_fmt: lumencraft_doc::PValueFormat, confidence: ConfidenceLevel) {
+fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResult, p_fmt: curvebook_doc::PValueFormat, confidence: ConfidenceLevel) {
     push_scalar(out, "Imputations (m)", None, res.m as f64);
     push_scalar(out, "Max iterations", None, res.max_iters as f64);
     push_scalar(out, "Total missing cells", None, res.total_missing as f64);
@@ -2518,7 +2518,7 @@ pub fn ci_cell_from_option(ci: Option<(f64, f64)>) -> ResultCell {
 
 #[cfg(test)]
 mod tests {
-    use lumencraft_doc::{
+    use curvebook_doc::{
         AnalysisKind, AnalysisSpec, Cell, ClusterDistance, ClusterLinkage, DataSheet, MultipleVariablesTable, MultivariateSpec, SheetId,
         TableArchetype, VariableRole,
     };

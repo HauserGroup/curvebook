@@ -2,18 +2,18 @@
 //! brushing across XY, Column, Grouped, Nested, Survival, Multivariate, and Layout scenes,
 //! plus `preflight_check_scene` publication QA checks.
 
-use lumencraft_chart::{
+use curvebook_chart::{
     ChartScene, FillPaint, Path2D, PointPt, PositionedText, RectPt, ScenePrimitive, SourceCellId, StrokePaint, TextAnchor, compile_graph,
     compile_layout, preflight_check_scene,
 };
-use lumencraft_doc::{
+use curvebook_doc::{
     Cell, ColorChannelMapping, ColumnDesignHint, ColumnTable, DataSheet, ErrorBarMetric, ErrorBarSpec, GraphSheet, GraphicalDataObject, GroupedTable,
     JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MultipleVariablesTable, MultivariateGraphEncoding, MultivariatePlotMode, NestedTable,
     ProjectDocument, RectPt as DocRectPt, ReplicateOverlayStyle, SheetId, SizeChannelMapping, SubcolumnMode, SummaryMeasure, SurvivalTable,
     TableArchetype, WhiskerMethod, XyTable,
 };
-use lumencraft_palette::{MarkerShape, MarkerStyle, Rgba8};
-use lumencraft_text::RichText;
+use curvebook_palette::{MarkerShape, MarkerStyle, Rgba8};
+use curvebook_text::RichText;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

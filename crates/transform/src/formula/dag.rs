@@ -4,7 +4,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};
 
-use lumencraft_doc::{DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, VariableSource, default_column_label};
+use curvebook_doc::{DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, VariableSource, default_column_label};
 
 use crate::error::TransformError;
 use crate::formula::eval::{MultipleVariablesContext, eval_column_expr, is_builtin_constant, resolve_mv_column};

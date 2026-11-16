@@ -1,8 +1,8 @@
-use lumencraft_doc::{
+use curvebook_doc::{
     CURRENT_SCHEMA_VERSION, Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, DocError, ImportFilterSpec, ImportLinkSpec,
     ImportPlacementSpec, LinkSource, PlacementMode, ProjectDocument, SubcolumnMode, TableArchetype, TableKind, XColumnMode, XyTable,
 };
-use lumencraft_format::{
+use curvebook_format::{
     CsvOptions, FormatError, ImportBaselineAdjustment, ZipWriter, apply_csv_import_link, import_csv_to_datasheet, open_project_bytes,
     parse_delimited_records, save_project_bytes, validate_project_document,
 };
@@ -10,7 +10,7 @@ use lumencraft_format::{
 #[allow(clippy::unwrap_used)]
 fn build_zip_with_doc_bytes(doc_bytes: Vec<u8>, manifest_schema_version: u32) -> Vec<u8> {
     let manifest = serde_json::json!({
-        "format": "lumencraft-archive",
+        "format": "curvebook-archive",
         "schema_version": manifest_schema_version,
         "kind": "Project",
         "title": "Audit Test",

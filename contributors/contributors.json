@@ -1,11 +1,16 @@
 {
   "schema": 1,
-  "repo": "lumencraft/lumencraft",
-  "branch": "main",
-  "head": "0000000000000000000000000000000000000000",
-  "head_date": "2026-11-13T00:00:00Z",
-  "commits": 0,
-  "unattributed_commits": 0,
-  "contributors": [],
+  "repo": "HauserGroup/curvebook",
+  "branch": "refactor/R0.20-curvebook-rename",
+  "head": "8bb1198e4f4a44bfc62794235aa3b06004c57762",
+  "head_date": "2026-11-16T16:40:12+01:00",
+  "commits": 244,
+  "unattributed_commits": 3,
+  "contributors": [
+    {
+      "login": "jsture",
+      "commits": 241
+    }
+  ],
   "models": []
 }

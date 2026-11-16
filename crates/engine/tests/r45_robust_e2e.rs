@@ -1,12 +1,12 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_chart::{ScenePrimitive, compile_graph};
-use lumencraft_doc::{
+use curvebook_chart::{ScenePrimitive, compile_graph};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CiBound, DataSheet, FitMethod, GraphSheet, ModelComparisonSpec, NonlinearFitSpec, ProjectDocument,
     RegressionOverlaySpec, ResultCell, SheetId, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
 };
-use lumencraft_engine::{CommandOutcome, Session};
-use lumencraft_fit::{
+use curvebook_engine::{CommandOutcome, Session};
+use curvebook_fit::{
     DataPoint, DatasetSeries, HookContext, InferenceAvailability, ModelComparisonOutcome, ModelComparisonResult, NonlinearFitResult, SolverConfig,
     compare_models_checked, execute_analysis, fit_nonlinear, get_builtin_model,
 };

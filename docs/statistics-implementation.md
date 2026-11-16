@@ -20,7 +20,7 @@ Public behavioural & mathematical references:
 
 ### 1.1 Tail-Safe Distribution Primitives
 
-Never compute small upper-tail probabilities via `1.0 - cdf(x)` (which loses all significant bits below $10^{-16}$ and collapses to `0.0`). Every continuous distribution in `lumencraft-math` exposes direct lower-tail `cdf`, upper-tail `sf`, and log-survival `ln_sf` evaluators backed by continued fractions and asymptotic expansions:
+Never compute small upper-tail probabilities via `1.0 - cdf(x)` (which loses all significant bits below $10^{-16}$ and collapses to `0.0`). Every continuous distribution in `curvebook-math` exposes direct lower-tail `cdf`, upper-tail `sf`, and log-survival `ln_sf` evaluators backed by continued fractions and asymptotic expansions:
 
 - **Two-sided Student $t$ probability** ($\nu > 0$ real, supporting Welch–Satterthwaite fractional degrees of freedom):
   $$p_{2}(t, \nu) = I_{\frac{\nu}{\nu + t^2}}\!\left(\frac{\nu}{2}, \frac{1}{2}\right)$$
@@ -32,7 +32,7 @@ Never compute small upper-tail probabilities via `1.0 - cdf(x)` (which loses all
   where $Q(a, x) = \Gamma(a, x)/\Gamma(a)$ is the upper regularized incomplete gamma function (series expansion for $x < a + 1$, Legendre continued fraction for $x \ge a + 1$, Temme uniform asymptotic expansion for large $a$).
 - **Standard normal two-sided probability:** $p_2(z) = \operatorname{erfc}\!\left(|z| / \sqrt{2}\right)$.
 - **Studentized range distribution $q(k, \nu)$** (for Tukey HSD and Newman–Keuls): Gauss–Legendre quadrature over the inner normal integral + outer $\chi$ density (Copenhaver & Holland 1988), accurate to $\ge 10$ digits for $2 \le k \le 200$.
-- **Multivariate Student $t$ integral** (for Dunnett's many-to-one test with unequal group sizes): 1D Gauss–Legendre quadrature (`lumencraft_math::quad::gauss_legendre_32`, `crates/math/src/dist/dunnett.rs`) conditioning over the shared control group normal variate + common $\chi_\nu$ scale factor, yielding exact Dunnett *p*-values and critical values without table-interpolation caps.
+- **Multivariate Student $t$ integral** (for Dunnett's many-to-one test with unequal group sizes): 1D Gauss–Legendre quadrature (`curvebook_math::quad::gauss_legendre_32`, `crates/math/src/dist/dunnett.rs`) conditioning over the shared control group normal variate + common $\chi_\nu$ scale factor, yielding exact Dunnett *p*-values and critical values without table-interpolation caps.
 
 ### 1.2 Arbitrary Confidence Levels & P-Value Formatting
 
@@ -46,7 +46,7 @@ Never compute small upper-tail probabilities via `1.0 - cdf(x)` (which loses all
 
 ### 1.3 Compensated Summation & Rank-Revealing Linear Algebra
 
-- Sample variance, covariance, and ANOVA sums of squares use two-pass mean-centered Neumaier compensated summation (`lumencraft_math::sum`) so NIST StRD stiffness benchmarks (`NumAcc1`–`NumAcc4`) match an exact-arithmetic `f64` oracle to LRE $\ge 14.5$ even when $\bar{x} / s > 10^8$; against the certified decimal values the SD LRE floor is relaxed to $\ge 9.2$ (`NumAcc3`) and $\ge 8.0$ (`NumAcc4`) because those inputs are not exactly representable in `f64` (tolerances documented in `crates/stats/tests/nist_strd.rs`).
+- Sample variance, covariance, and ANOVA sums of squares use two-pass mean-centered Neumaier compensated summation (`curvebook_math::sum`) so NIST StRD stiffness benchmarks (`NumAcc1`–`NumAcc4`) match an exact-arithmetic `f64` oracle to LRE $\ge 14.5$ even when $\bar{x} / s > 10^8$; against the certified decimal values the SD LRE floor is relaxed to $\ge 9.2$ (`NumAcc3`) and $\ge 8.0$ (`NumAcc4`) because those inputs are not exactly representable in `f64` (tolerances documented in `crates/stats/tests/nist_strd.rs`).
 - Design matrices $X \in \mathbb{R}^{n \times p}$ use column-pivoted Householder QR (`qr_col_pivoted`) with explicit rank-deficiency detection (`|R_{kk}| \le \epsilon \cdot \max(n, p) \cdot |R_{00}|`), falling back cleanly to SVD pseudoinverse or reporting aliased/collinear predictors rather than dividing by zero.
 
 ---
@@ -85,7 +85,7 @@ Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognorm
 ### 3.1 Two-Group Comparisons & Standardized Effect Sizes
 - **Unpaired *t*-test** (pooled SD + *F*-test of variances), **Welch's *t*-test** (Welch–Satterthwaite $\nu$), **Paired *t*-test**, **Ratio paired *t*-test** (paired *t* on $\ln x_i$, reporting geometric mean of ratios), and **Unpaired lognormal *t*-test**.
 - **Standardized effect sizes (Prism 11.0 parity):**
-  - Unpaired: **Cohen's $d$** $= (\bar{x}_1 - \bar{x}_2)/s_{\text{pooled}}$, **Hedges' $g$** $= J(\nu)\,d$ with exact gamma bias factor $J(\nu) = \frac{\Gamma(\nu/2)}{\sqrt{\nu/2}\,\Gamma((\nu-1)/2)}$, and **Glass's $\Delta$** $= (\bar{x}_1 - \bar{x}_2)/s_{\text{control}}$, with noncentral-$t$ exact confidence intervals (`lumencraft_math::noncentral_t_ci`).
+  - Unpaired: **Cohen's $d$** $= (\bar{x}_1 - \bar{x}_2)/s_{\text{pooled}}$, **Hedges' $g$** $= J(\nu)\,d$ with exact gamma bias factor $J(\nu) = \frac{\Gamma(\nu/2)}{\sqrt{\nu/2}\,\Gamma((\nu-1)/2)}$, and **Glass's $\Delta$** $= (\bar{x}_1 - \bar{x}_2)/s_{\text{control}}$, with noncentral-$t$ exact confidence intervals (`curvebook_math::noncentral_t_ci`).
   - Paired: $d_z = \bar{d} / s_d$ and Hedges' corrected $g_z$ with noncentral-$t$ CIs.
 - **Nonparametric two-group:**
   - **Mann–Whitney $U$:** Exact dynamic-programming distribution for small/medium samples (including exact tie permutation up to bounded state-space limit), normal approximation with tie variance correction beyond threshold, plus exact Hodges–Lehmann median difference and CI.
@@ -150,13 +150,13 @@ Supports both classic `Survival` sheets and `MultipleVariables` variable assignm
 - **Method Comparison (`BlandAltman` & `PassingBablok`):** Bland–Altman difference / ratio / percent-difference bias and $95\%$ limits of agreement ($\bar{d} \pm 1.96 s_d$) with exact CIs; Passing–Bablok nonparametric median shifted slope and intercept regression with rank-order CIs and CUSUM linearity test.
 - **Multiple Linear, Logistic & Poisson GLMs:** IRLS solver with configurable categorical **Reference-level contrast coding** (selecting reference level $r$ for a $K$-level predictor emits $K - 1$ named indicator columns `Var[Level vs. Ref]` in parameter and VIF tables), full Type I / Type III omnibus ANOVA / Deviance tables (including categorical $\times$ categorical interaction blocks), VIF multicollinearity diagnostics, AICc, pseudo-$R^2$ (Tjur, McFadden, Nagelkerke), Hosmer–Lemeshow goodness-of-fit, classification confusion matrices, and ROC curves.
 - **Multiple Imputation (`MultipleImputation`):** Multivariate Imputation by Chained Equations (MICE) using Type-1 Predictive Mean Matching (PMM) seeded via `DeterministicRng`, pooled across $M$ completed datasets with Rubin's rules and Barnard–Rubin small-sample degrees of freedom.
-- **PCA & Clustering:** Mean-centered / standardized correlation or covariance SVD, Kaiser criterion ($\lambda > 1$), Horn's parallel analysis (Monte Carlo random eigenvalues via `lumencraft_math::rng`), scree/loading/biplot coordinates, plus K-means++ and agglomerative hierarchical clustering (alphabetical cluster label normalization for deterministic palette mapping).
+- **PCA & Clustering:** Mean-centered / standardized correlation or covariance SVD, Kaiser criterion ($\lambda > 1$), Horn's parallel analysis (Monte Carlo random eigenvalues via `curvebook_math::rng`), scree/loading/biplot coordinates, plus K-means++ and agglomerative hierarchical clustering (alphabetical cluster label normalization for deterministic palette mapping).
 
 ---
 
 ## 6. Plain-Language Analysis Checklists & Verification Standard
 
-Every `ResultSheet` produced by `lumencraft-stats` includes a structured `checklist: Vec<ChecklistItem>` (`crates/doc/src/result.rs`: `assumption`, `status: ChecklistStatus` = `Pass | Warn | Violated | Info`, `diagnostic_metric`, `explanation`, optional `remediation`) written in original clean-room scientific prose (checking independence, normality/lognormality test results, SD ratio / variance homogeneity, sample size adequacy, sphericity $\hat{\varepsilon}$, expected contingency counts $< 5$, proportional hazards).
+Every `ResultSheet` produced by `curvebook-stats` includes a structured `checklist: Vec<ChecklistItem>` (`crates/doc/src/result.rs`: `assumption`, `status: ChecklistStatus` = `Pass | Warn | Violated | Info`, `diagnostic_metric`, `explanation`, optional `remediation`) written in original clean-room scientific prose (checking independence, normality/lognormality test results, SD ratio / variance homogeneity, sample size adequacy, sphericity $\hat{\varepsilon}$, expected contingency counts $< 5$, proportional hazards).
 
 **Mandatory test gate:** Every statistical module in `crates/stats` must carry:
 1. Analytical / textbook exact-value unit tests,

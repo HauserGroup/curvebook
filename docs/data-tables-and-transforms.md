@@ -12,14 +12,14 @@ Public behavioural references:
 
 ## 1. Core Architectural Invariants
 
-1. **Typed experimental semantics, never untyped A1 spreadsheets.** Every `DataSheet` in `lumencraft-doc` carries an explicit `TableArchetype` variant that governs valid subcolumn layouts, compatible analyses, and default graph types.
-2. **Non-destructive exclusions and missingness.** Every cell is an explicit enum (`CellValue::Number(f64)`, `CellValue::Text(String)`, `CellValue::Empty`) paired with an `excluded: bool` mask. Excluded cells remain visible in the grid (styled in blue italics with an `*` badge) and remain stored in `.lumencraft` files, while downstream transforms, statistical tests, curve fits, and graphs treat them as masked observations without mutating raw values.
+1. **Typed experimental semantics, never untyped A1 spreadsheets.** Every `DataSheet` in `curvebook-doc` carries an explicit `TableArchetype` variant that governs valid subcolumn layouts, compatible analyses, and default graph types.
+2. **Non-destructive exclusions and missingness.** Every cell is an explicit enum (`CellValue::Number(f64)`, `CellValue::Text(String)`, `CellValue::Empty`) paired with an `excluded: bool` mask. Excluded cells remain visible in the grid (styled in blue italics with an `*` badge) and remain stored in `.curvebook` files, while downstream transforms, statistical tests, curve fits, and graphs treat them as masked observations without mutating raw values.
 3. **Bounded untrusted dimensions.** Project loaders, CSV importers, clipboard paste handlers, and command parameters enforce explicit caps (`MAX_ROWS = 1_000_000`, `MAX_DATA_SETS = 1_024`, `MAX_SUBCOLUMNS = 512`, `MAX_TITLE_BYTES = 4_096`) and return `DocError` / `EngineError` rather than panicking or exhausting memory.
 4. **Freeze state.** A `DataSheet` exposes `frozen: bool` (matching the Prism 11.0 Freeze/Unfreeze table workflow). When `frozen` is `true`, cell-edit, paste, row/column insertion, and formula-edit commands return `DocError::SheetFrozen` (surfaced as `ErrorCode::FrozenSheet`, `"frozen_sheet"`) while read-only inspection, downstream analyses, and graph styling remain active.
 
 ---
 
-## 2. The Eight Data Table Archetypes (`lumencraft_doc::TableArchetype`)
+## 2. The Eight Data Table Archetypes (`curvebook_doc::TableArchetype`)
 
 | Archetype | Row Semantics | X Column | Data-Set Columns (`A`, `B`, …) | Subcolumn Modes | Primary Downstream Analyses |
 |---|---|---|---|---|---|
@@ -77,7 +77,7 @@ Info constants and upstream `ResultSheet` scalars (such as a fitted $K_d$ from a
 - Standard-curve dilution factors and baseline offsets,
 - Dynamic axis titles, callout text boxes, and layout headers (`{{info:Ligand}}`, `{{result:fit-1:EC50}}`).
 
-`lumencraft-engine` validates all constant hooks through its topological DAG before execution; circular parameter/constant references are rejected with `ErrorCode::CycleDetected` (`"cycle_detected"`, from `FormatError::DependencyCycle` / link-cycle detection in `crates/engine/src/dag.rs`) and never recurse infinitely (preventing the cyclic-hook corruption class).
+`curvebook-engine` validates all constant hooks through its topological DAG before execution; circular parameter/constant references are rejected with `ErrorCode::CycleDetected` (`"cycle_detected"`, from `FormatError::DependencyCycle` / link-cycle detection in `crates/engine/src/dag.rs`) and never recurse infinitely (preventing the cyclic-hook corruption class).
 
 ---
 
@@ -90,7 +90,7 @@ In `MultipleVariables` sheets, a column may declare `VariableSource::Calculated 
 - Formulas begin with `=` in UI entry (stored normalized without leading `=`).
 - Variable references resolve column names (`[Body Mass] / ([Height_m]^2)` or bare identifiers when unambiguous). Self-references and multi-column cycles are rejected during DAG compilation.
 - Missing (`Empty`), excluded, or non-numeric cells propagate `Empty` (`NaN` internally mapped back to `CellValue::Empty` with a diagnostic badge, never panicking on `0.0 / 0.0` or `ln(-1.0)`).
-- Arithmetic & scalar functions are evaluated by the `lumencraft-transform` formula engine (`crates/transform/src/formula/`; the curve-fit equation DSL in `crates/fit/src/dsl.rs` is a separate compiler with an overlapping function set) (`abs`, `sqrt`, `sqr`, `ln`, `log`/`log10`, `log2`, `exp`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `arctan2(x, y)`, `logit`, `probit` [$5 + \Phi^{-1}(p)$], `round`, `floor`, `ceil`, `int`, `sgn`, `min`, `max`, `if`, `and`, `or`, `not`, `is_defined`).
+- Arithmetic & scalar functions are evaluated by the `curvebook-transform` formula engine (`crates/transform/src/formula/`; the curve-fit equation DSL in `crates/fit/src/dsl.rs` is a separate compiler with an overlapping function set) (`abs`, `sqrt`, `sqr`, `ln`, `log`/`log10`, `log2`, `exp`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `arctan2(x, y)`, `logit`, `probit` [$5 + \Phi^{-1}(p)$], `round`, `floor`, `ceil`, `int`, `sgn`, `min`, `max`, `if`, `and`, `or`, `not`, `is_defined`).
 - **Aggregate & conditional column functions** (available in Calculated Variables and Select-and-Transform, disallowed inside nonlinear regression models):
   - `count(var)`, `sum(var)`, `mean(var)`, `sd(var)`, `sem(var)`, `median(var)`, `iqr(var)`, `min_col(var)`, `max_col(var)`, `percentile(var, p)`
   - `countif`, `sumif`, `meanif`
@@ -114,7 +114,7 @@ Transforms never overwrite a `DataSheet` in place; they execute as pure function
 4. **Transpose, Prune Rows & Binning (`Transpose`, `PruneRows`, `SelectAndTransform`):**
    - Swap rows $\leftrightarrow$ data sets while preserving titles; decimate every $k$-th row or average $k$-row windows for high-frequency time-series traces; Select & Transform subsetting (`MultipleVariables` $\to$ `XY` / `Column` / `Grouped` / `Survival`).
 5. **Simulate XY / Column / Contingency Data (`TransformAnalysisSpec::Simulate`):**
-   - Deterministic seeded PRNG (`lumencraft_math::rng::DeterministicRng`) parameterized by `seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise` (`SimulationNoise`: `None`, `Gaussian`, `RelativePercent`, or `Poisson`) to generate synthetic curves or distributions for Monte Carlo validation, power exploration, and teaching workflows.
+   - Deterministic seeded PRNG (`curvebook_math::rng::DeterministicRng`) parameterized by `seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise` (`SimulationNoise`: `None`, `Gaussian`, `RelativePercent`, or `Poisson`) to generate synthetic curves or distributions for Monte Carlo validation, power exploration, and teaching workflows.
 
 ---
 
@@ -134,7 +134,7 @@ Beyond derived `ResultSheet` transforms, a `DataSheet` may embed live, provenanc
    - **Charcoal border:** Live link to an external CSV/TSV file on disk.
 3. **Reactive cross-table transposition (`Grouped` $\leftrightarrow$ `Column`):**
    - Linking a single row's horizontal replicate subcolumns (`1 × N`) from a `Grouped` sheet into a `Column` sheet with `transpose: true` reshapes the slice into `(N × 1)` vertical replicates; anchoring the link in the target's column-title header row also propagates the upstream row title as the target column title.
-   - Any upstream cell edit, value exclusion, or title rename invalidates the `LinkedDataRegion` in `lumencraft-engine`'s DAG and automatically recomputes all downstream `Column` analyses and graphs.
+   - Any upstream cell edit, value exclusion, or title rename invalidates the `LinkedDataRegion` in `curvebook-engine`'s DAG and automatically recomputes all downstream `Column` analyses and graphs.
 
 ---
 

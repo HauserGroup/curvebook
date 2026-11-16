@@ -4,9 +4,9 @@ use std::error::Error;
 use std::io::{self, Cursor};
 use std::path::Path;
 
-use lumencraft_ui_egui::UiApp;
-use lumencraft_ui_egui::control_io::{ControlAuth, MAX_CONTROL_LINE_BYTES, handle_control_line, serve_control_stream};
-use lumencraft_ui_egui::menus::ui_commands::UI_COMMANDS;
+use curvebook_ui_egui::UiApp;
+use curvebook_ui_egui::control_io::{ControlAuth, MAX_CONTROL_LINE_BYTES, handle_control_line, serve_control_stream};
+use curvebook_ui_egui::menus::ui_commands::UI_COMMANDS;
 use serde_json::{Value, json};
 
 #[test]

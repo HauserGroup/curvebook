@@ -4,16 +4,16 @@
 //! - WF-37: Heatmap row clustering linked to `MultivariateSpec::Clustering` (`distance` + `linkage`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_chart::compile_graph;
-use lumencraft_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
-use lumencraft_doc::{
+use curvebook_chart::compile_graph;
+use curvebook_chart::scene::{ChartScene, PathCmd, ScenePrimitive};
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ClusterDistance, ClusterLinkage, CoxTieMethod, DataSheet, DiagnosticPlotKind, GlmFamily, GlmSpec, GraphKind,
     GraphSheet, MultipleVariablesTable, MultivariateSpec, ProjectDocument, SheetId, SurvivalAnalysisSpec, TableArchetype, VariableRole,
 };
-use lumencraft_palette::LineDashStyle;
-use lumencraft_stats::multivariate::run_multivariate_analysis;
-use lumencraft_stats::regression::run_glm_analysis;
-use lumencraft_stats::survival::run_survival_analysis;
+use curvebook_palette::LineDashStyle;
+use curvebook_stats::multivariate::run_multivariate_analysis;
+use curvebook_stats::regression::run_glm_analysis;
+use curvebook_stats::survival::run_survival_analysis;
 
 type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
 

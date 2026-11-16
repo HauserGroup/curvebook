@@ -1,20 +1,20 @@
 //! Property-based tests (`proptest`) verifying statistical invariances, bounds, equivariances,
-//! and algebraic identities across `lumencraft-stats`.
+//! and algebraic identities across `curvebook-stats`.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_math::sum::SummaryMoments;
-use lumencraft_math::{ConfidenceLevel, DenseMatrix};
-use lumencraft_stats::anova::ordinary_one_way_anova;
-use lumencraft_stats::categorical::fisher_exact_2x2;
-use lumencraft_stats::column::{one_sample_t_test, one_sample_wilcoxon, summarize_column};
-use lumencraft_stats::multiplicity::{
+use curvebook_math::sum::SummaryMoments;
+use curvebook_math::{ConfidenceLevel, DenseMatrix};
+use curvebook_stats::anova::ordinary_one_way_anova;
+use curvebook_stats::categorical::fisher_exact_2x2;
+use curvebook_stats::column::{one_sample_t_test, one_sample_wilcoxon, summarize_column};
+use curvebook_stats::multiplicity::{
     adjust_benjamini_hochberg, adjust_benjamini_yekutieli, adjust_bonferroni, adjust_holm_bonferroni, adjust_holm_sidak, adjust_sidak,
     adjust_two_stage_bky,
 };
-use lumencraft_stats::multivariate::{pca_analysis, pearson_correlation, spearman_correlation};
-use lumencraft_stats::regression::multiple_linear_regression;
-use lumencraft_stats::two_group::{mann_whitney_u, paired_t_test, unpaired_t_test};
-use lumencraft_testkit::assert_approx_eq;
+use curvebook_stats::multivariate::{pca_analysis, pearson_correlation, spearman_correlation};
+use curvebook_stats::regression::multiple_linear_regression;
+use curvebook_stats::two_group::{mann_whitney_u, paired_t_test, unpaired_t_test};
+use curvebook_testkit::assert_approx_eq;
 use proptest::prelude::*;
 
 fn non_constant_vec(min_len: usize, max_len: usize) -> impl Strategy<Value = Vec<f64>> {

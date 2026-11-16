@@ -41,11 +41,11 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
 fi
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
-  DMG="$DIST/lumencraft-$VERSION-macos-$ARCH.dmg"
-  CLI_ZIP="$DIST/lumencraft-cli-$VERSION-macos-$ARCH.zip"
+  DMG="$DIST/curvebook-$VERSION-macos-$ARCH.dmg"
+  CLI_ZIP="$DIST/curvebook-cli-$VERSION-macos-$ARCH.zip"
   TARGETS=("$DMG" "$CLI_ZIP")
-  if [[ -d "$ROOT/dist/LumenCraft.app" ]]; then
-    TARGETS=("$ROOT/dist/LumenCraft.app" "${TARGETS[@]}")
+  if [[ -d "$ROOT/dist/CurveBook.app" ]]; then
+    TARGETS=("$ROOT/dist/CurveBook.app" "${TARGETS[@]}")
   fi
 fi
 
@@ -108,9 +108,9 @@ verify_dmg() {
   mkdir -p "$mp"
   hdiutil attach "$dmg" -mountpoint "$mp" -nobrowse -readonly -quiet
   MOUNT_POINTS+=("$mp")
-  app_in_dmg="$mp/LumenCraft.app"
+  app_in_dmg="$mp/CurveBook.app"
   if [[ ! -d "$app_in_dmg" ]]; then
-    echo "error: LumenCraft.app not found inside $dmg (expected $app_in_dmg)" >&2
+    echo "error: CurveBook.app not found inside $dmg (expected $app_in_dmg)" >&2
     exit 1
   fi
   verify_app "$app_in_dmg"
@@ -124,8 +124,8 @@ verify_cli_zip() {
   stage="$WORK/cli-$(basename "$zip_path" .zip)"
   mkdir -p "$stage"
   ditto -x -k "$zip_path" "$stage"
-  bin="$(find "$stage" -type f -name 'lumencraft-cli' | head -n 1)"
-  [[ -n "$bin" ]] || { echo "error: lumencraft-cli binary not found inside $zip_path" >&2; exit 1; }
+  bin="$(find "$stage" -type f -name 'curvebook-cli' | head -n 1)"
+  [[ -n "$bin" ]] || { echo "error: curvebook-cli binary not found inside $zip_path" >&2; exit 1; }
   codesign --verify --strict --deep --verbose=2 "$bin"
   if is_adhoc_signed "$bin"; then
     if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then

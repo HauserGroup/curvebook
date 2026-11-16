@@ -1,10 +1,10 @@
 use std::time::Instant;
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, ChecklistStatus, CiBound, DataSheet, FitMethod, LinearRegressionSpec, ModelComparisonSpec,
     NonlinearFitSpec, ResultCell, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
 };
-use lumencraft_fit::{
+use curvebook_fit::{
     CompiledDslModel, DataPoint, DatasetSeries, DslEquationKind, FitError, HookContext, ParameterNote, ParametricModel, SolverConfig, compare_models,
     execute_analysis, extract_datasets_from_sheet, fit_nonlinear, get_builtin_model,
 };

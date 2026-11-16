@@ -4,13 +4,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 
-use lumencraft_doc::{AnalysisKind, AnalysisSpec, Cell, ContingencyMethod, ContingencySpec, ContingencyTable, DataSheet, SheetId, TableArchetype};
-use lumencraft_math::ConfidenceLevel;
-use lumencraft_stats::categorical::{
+use curvebook_doc::{AnalysisKind, AnalysisSpec, Cell, ContingencyMethod, ContingencySpec, ContingencyTable, DataSheet, SheetId, TableArchetype};
+use curvebook_math::ConfidenceLevel;
+use curvebook_stats::categorical::{
     KappaWeighting, analyze_2x2_ratios, analyze_contingency, baptista_pike_or_ci, clopper_pearson_ci, cochran_armitage_trend, cohens_kappa,
     exact_binomial_test, fisher_exact_2x2, fisher_exact_rxc, fleiss_kappa, mcnemar_detailed, mcnemar_test,
 };
-use lumencraft_stats::{StatsError, run_analysis};
+use curvebook_stats::{StatsError, run_analysis};
 
 fn run_with_timeout<F, R>(timeout: Duration, f: F) -> R
 where
@@ -36,7 +36,7 @@ fn make_contingency_sheet(rows: &[&[u64]]) -> DataSheet {
     DataSheet::new(SheetId::new("audit-sheet"), "Audit", TableArchetype::Contingency(table)).expect("sheet")
 }
 
-fn run_contingency_spec(rows: &[&[u64]], method: ContingencyMethod) -> Result<lumencraft_doc::ResultSheet, StatsError> {
+fn run_contingency_spec(rows: &[&[u64]], method: ContingencyMethod) -> Result<curvebook_doc::ResultSheet, StatsError> {
     let sheet = make_contingency_sheet(rows);
     let spec =
         AnalysisSpec::new(SheetId::new("audit-res"), sheet.id.clone(), AnalysisKind::Contingency(ContingencySpec { method, ..Default::default() }))
@@ -105,7 +105,7 @@ fn fisher_exact_rxc_guards_and_accuracy() {
     // Ragged 2x2 and ragged RxC tables return DimensionMismatch rather than indexing panics.
     assert!(matches!(
         fisher_exact_rxc(&[vec![1, 2], vec![3]]),
-        Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: 2, actual: 1 }))
+        Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: 2, actual: 1 }))
     ));
 
     // Valid 3x3 table keeps deterministic result.
@@ -210,6 +210,6 @@ fn proportion_kappa_and_ratio_overflow_guards() {
     // Cochran-Armitage rejects ragged matrices without indexing panics.
     assert!(matches!(
         cochran_armitage_trend(&[vec![1, 2], vec![3], vec![4, 5]]),
-        Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: 2, actual: 1 }))
+        Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: 2, actual: 1 }))
     ));
 }

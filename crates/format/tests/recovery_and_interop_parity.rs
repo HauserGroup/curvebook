@@ -4,12 +4,12 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, CURRENT_SCHEMA_VERSION, Cell, CellValue, ConstantValue, FitMethod, GraphSheet, HookSource, InfoSheet, LayoutItem,
     LayoutSheet, LayoutSpec, NonlinearFitSpec, NormalizeAnchor, ParameterRule, ParameterScope, ProjectDocument, ResultSheet, SheetId, SubcolumnMode,
     TableArchetype, TransformAnalysisSpec, VariableRole, WeightingScheme,
 };
-use lumencraft_format::{
+use curvebook_format::{
     CrashRecoveryJournal, CsvOptions, DirectoryJournalBackend, FormatError, JOURNAL_FILE_NAME, JournalBackend, JournalLockLease, JournalOpRecord,
     LOCKFILE_NAME, MemoryJournalBackend, SNAPSHOT_FILE_NAME, ZipWriter, detect_dependency_cycles, export_datasheet_to_csv, import_prism_bytes,
     import_pzfx_str, migrate_document_json, open_project_bytes, sanitize_circular_hooks, save_project_bytes, validate_project_document,
@@ -24,7 +24,7 @@ struct TempRecoveryDir {
 impl TempRecoveryDir {
     fn new(label: &str) -> Self {
         let id = TEST_DIR_SEQ.fetch_add(1, Ordering::Relaxed);
-        let path = std::env::temp_dir().join(format!("lumencraft-format-{label}-{}-{id}", std::process::id()));
+        let path = std::env::temp_dir().join(format!("curvebook-format-{label}-{}-{id}", std::process::id()));
         if path.exists() {
             let _ = fs::remove_dir_all(&path);
         }
@@ -118,7 +118,7 @@ fn directory_journal_recovers_stale_lock_and_truncates_torn_tail_without_crashin
     assert_eq!(
         report.recovered_from_stale_lock,
         Some(JournalLockLease {
-            format_version: lumencraft_format::CURRENT_LOCK_VERSION,
+            format_version: curvebook_format::CURRENT_LOCK_VERSION,
             owner_id: String::from("writer-1"),
             acquired_epoch_ms: 11_000,
             ttl_ms: 5_000,
@@ -285,7 +285,7 @@ fn sanitize_circular_hooks_breaks_cycles_while_preserving_valid_hooks() {
     doc.add_info_sheet(info).expect("add info");
 
     let ds =
-        lumencraft_doc::DataSheet::new("data-1", "Raw", TableArchetype::Xy(lumencraft_doc::XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy")))
+        curvebook_doc::DataSheet::new("data-1", "Raw", TableArchetype::Xy(curvebook_doc::XyTable::new(SubcolumnMode::Single, 1, 2).expect("xy")))
             .expect("ds");
     doc.add_data_sheet(ds).expect("add ds");
 
@@ -362,7 +362,7 @@ fn sanitize_circular_hooks_breaks_cycles_while_preserving_valid_hooks() {
     layout_spec.items.push(LayoutItem::TextCallout {
         id: String::from("callout-1"),
         markdown: String::from("Notes: {{info:info-1:Km}}"),
-        bounds_pt: lumencraft_doc::RectPt::new(10.0, 10.0, 100.0, 40.0),
+        bounds_pt: curvebook_doc::RectPt::new(10.0, 10.0, 100.0, 40.0),
         font_size_pt: 11.0,
     });
     doc.add_layout_sheet(LayoutSheet::new("layout-1", "Fig 1", layout_spec).expect("ls")).expect("add layout");
@@ -445,9 +445,9 @@ fn cleanroom_pzfx_and_prism_edge_archetypes_entities_info_and_exclusions_roundtr
     let doc = &report.document;
     verify_cleanroom_pzfx_edge_contents(doc);
 
-    // Round-trip through .lumencraft archive bytes
-    let saved = save_project_bytes(doc).expect("save lumencraft bytes");
-    let reopened = open_project_bytes(&saved).expect("open lumencraft bytes");
+    // Round-trip through .curvebook archive bytes
+    let saved = save_project_bytes(doc).expect("save curvebook bytes");
+    let reopened = open_project_bytes(&saved).expect("open curvebook bytes");
     assert_eq!(&reopened, doc);
 
     // Export all 5 sheets to CSV and pack into a clean-room .prism ZIP container, then re-import and compare!
@@ -462,7 +462,7 @@ fn verify_cleanroom_pzfx_edge_contents(doc: &ProjectDocument) {
     verify_edge_survival_mv_contingency_pow(&doc.data_sheets[1..]);
 }
 
-fn verify_edge_info_and_nested(info: &InfoSheet, nested_sheet: &lumencraft_doc::DataSheet) {
+fn verify_edge_info_and_nested(info: &InfoSheet, nested_sheet: &curvebook_doc::DataSheet) {
     assert_eq!(info.get_constant("Km").and_then(|c| c.units.as_deref()), Some("μM"));
     assert_eq!(info.get_constant("ΔG").and_then(|c| c.value.as_finite_f64()), Some(-14.2));
     assert_eq!(info.get_constant("Vehicle").map(|c| &c.value), Some(&ConstantValue::Text(String::from("10-6 M α-Toxin"))));
@@ -482,7 +482,7 @@ fn verify_edge_info_and_nested(info: &InfoSheet, nested_sheet: &lumencraft_doc::
     assert_eq!(nested.groups[1].cells[1][1], Cell { value: CellValue::Number(2.4), excluded: true });
 }
 
-fn verify_edge_survival_mv_contingency_pow(sheets: &[lumencraft_doc::DataSheet]) {
+fn verify_edge_survival_mv_contingency_pow(sheets: &[curvebook_doc::DataSheet]) {
     let TableArchetype::Survival(ref surv) = sheets[0].archetype else {
         panic!("expected Survival");
     };
@@ -782,12 +782,12 @@ impl DirBackendBytesExt for DirectoryJournalBackend {
 
 #[test]
 fn r1_s11_02_dead_local_pid_lock_reclaimed_without_waiting_ttl() {
-    use lumencraft_format::recovery::{is_dead_local_owner, is_lease_reclaimable};
+    use curvebook_format::recovery::{is_dead_local_owner, is_lease_reclaimable};
 
     // Synthetic non-PID owner IDs and live current PID must NOT be classified as dead.
     assert!(!is_dead_local_owner("writer-1"));
-    assert!(!is_dead_local_owner("lumencraft-pid-0"));
-    let self_owner = format!("lumencraft-pid-{}", std::process::id());
+    assert!(!is_dead_local_owner("curvebook-pid-0"));
+    let self_owner = format!("curvebook-pid-{}", std::process::id());
     assert!(!is_dead_local_owner(&self_owner));
 
     let dir_live = TempRecoveryDir::new("s11-02-live-pid");
@@ -806,7 +806,7 @@ fn r1_s11_02_dead_local_pid_lock_reclaimed_without_waiting_ttl() {
 
     #[cfg(unix)]
     {
-        let dead_owner = "lumencraft-pid-999999999";
+        let dead_owner = "curvebook-pid-999999999";
         assert!(is_dead_local_owner(dead_owner), "nonexistent PID must be detected cleanly without unsafe");
         let dir_dead = TempRecoveryDir::new("s11-02-dead-pid");
         let (mut crashed, _) =

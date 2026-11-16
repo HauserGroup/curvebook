@@ -1,6 +1,6 @@
 //! Data-table transformations, calculated-variable formula DAG, normalization, baseline removal,
 //! transpose, row/column pruning, curve calculus, 4-stage import pipeline, and Monte Carlo data
-//! simulation for LumenCraft.
+//! simulation for CurveBook.
 //!
 //! Layer L2 domain crate. Governing spec: `docs/data-tables-and-transforms.md` (§4–§6).
 #![forbid(unsafe_code)]

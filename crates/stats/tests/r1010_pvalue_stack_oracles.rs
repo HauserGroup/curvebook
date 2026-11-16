@@ -2,13 +2,13 @@
 //! ("Analyze a stack of P values") across all 7 multiplicity procedures.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use lumencraft_doc::{
+use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellValue, ColumnDesignHint, ColumnTable, DataSheet, GroupedTable, MultipleVariablesTable, PValueFormat,
     PValueStackMethod, PValueStackSpec, ResultCell, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole, XyTable,
 };
-use lumencraft_math::MathError;
-use lumencraft_stats::pvalue_stack::{analyze_pvalue_stack, validate_pvalue_threshold, validate_raw_pvalues};
-use lumencraft_stats::{StatsError, run_analysis};
+use curvebook_math::MathError;
+use curvebook_stats::pvalue_stack::{analyze_pvalue_stack, validate_pvalue_threshold, validate_raw_pvalues};
+use curvebook_stats::{StatsError, run_analysis};
 
 const TOL: f64 = 1e-12;
 
@@ -27,7 +27,7 @@ fn col_sheet_with_values(cells: Vec<Cell>) -> DataSheet {
     DataSheet::new("ds-pvals", "P-Value Stack", TableArchetype::Column(table)).expect("data sheet")
 }
 
-/// Independent textbook reference implementations (no calls into `lumencraft_stats::multiplicity`)
+/// Independent textbook reference implementations (no calls into `curvebook_stats::multiplicity`)
 /// derived directly from the 7 primary papers for differential oracle checking.
 mod independent_oracle {
     pub fn bonferroni(raw: &[f64]) -> Vec<f64> {
@@ -454,7 +454,7 @@ fn multi_column_selection_missing_column_and_incompatible_tables() {
     assert!(matches!(run_analysis(&pre_sheet, &pre_spec), Err(StatsError::RequiresRawReplicates)));
 
     // Incompatible ContingencyTable -> IncompatibleTable
-    let cont = lumencraft_doc::ContingencyTable::new(2, 2).unwrap();
+    let cont = curvebook_doc::ContingencyTable::new(2, 2).unwrap();
     let cont_sheet = DataSheet::new("ds-cont", "Cont", TableArchetype::Contingency(cont)).unwrap();
     let cont_spec = AnalysisSpec::new("res-cont", "ds-cont", AnalysisKind::PValueStack(PValueStackSpec::default())).unwrap();
     assert!(matches!(run_analysis(&cont_sheet, &cont_spec), Err(StatsError::IncompatibleTable { .. })));
