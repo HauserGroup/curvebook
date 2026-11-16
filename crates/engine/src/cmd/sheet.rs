@@ -661,7 +661,8 @@ fn has_live_dependents(doc: &ProjectDocument, id: &SheetId, section: SheetSectio
             .with_remediation("Delete or unlink dependent sheets first, or pass `cascade: true` on unfrozen sheets."));
     }
     if matches!(section, SheetSection::Data | SheetSection::Analyses)
-        && let Some(rs) = doc.result_sheets.iter().find(|r| r.id != *id && r.analysis.source_sheet_id == *id)
+        && let Some(rs) =
+            doc.result_sheets.iter().find(|r| r.id != *id && (r.analysis.source_sheet_id == *id || result_hooks_data_or_result_sheet(r, id)))
     {
         return Err(EngineError::with_code(
             ErrorCode::Conflict,
@@ -669,13 +670,13 @@ fn has_live_dependents(doc: &ProjectDocument, id: &SheetId, section: SheetSectio
         )
         .with_remediation("Pass `cascade: true` or remove dependent analyses first."));
     }
-    if let Some(gs) = doc.graph_sheets.iter().find(|g| g.id != *id && graph_references_sheet(g, id)) {
+    if let Some(gs) = doc.graph_sheets.iter().find(|g| g.id != *id && graph_references_sheet(doc, g, id)) {
         return Err(EngineError::with_code(
             ErrorCode::Conflict,
             format!("cannot delete `{}` while graph `{}` depends on it", id.as_str(), gs.id.as_str()),
         ));
     }
-    if let Some(ls) = doc.layout_sheets.iter().find(|l| l.id != *id && layout_references_sheet(l, id)) {
+    if let Some(ls) = doc.layout_sheets.iter().find(|l| l.id != *id && layout_references_sheet(doc, l, id)) {
         return Err(EngineError::with_code(
             ErrorCode::Conflict,
             format!("cannot delete `{}` while layout `{}` embeds it", id.as_str(), ls.id.as_str()),
@@ -714,7 +715,20 @@ fn result_origin_info_sheet_id<'a>(doc: &'a ProjectDocument, rs: &'a ResultSheet
     None
 }
 
+fn result_hooks_data_or_result_sheet(rs: &ResultSheet, target_id: &SheetId) -> bool {
+    rs.analysis.kind.hooked_sources().into_iter().any(|hook| match hook {
+        HookSource::ResultScalar { result_sheet_id, .. } => &result_sheet_id == target_id,
+        HookSource::ColumnTitleValue { data_sheet_id, .. } => &data_sheet_id == target_id,
+        HookSource::InfoConstant { .. } => false,
+    })
+}
+
 fn result_hooks_info_sheet(doc: &ProjectDocument, rs: &ResultSheet, info_id: &SheetId) -> bool {
+    if let AnalysisKind::PowerAnalysis(p) = &rs.analysis.kind
+        && p.info_sheet_id.as_ref() == Some(info_id)
+    {
+        return true;
+    }
     rs.analysis.kind.hooked_sources().into_iter().any(|hook| match hook {
         HookSource::InfoConstant { info_sheet_id: Some(iid), .. } => &iid == info_id,
         HookSource::InfoConstant { info_sheet_id: None, .. } => result_origin_info_sheet_id(doc, rs) == Some(info_id),
@@ -722,16 +736,12 @@ fn result_hooks_info_sheet(doc: &ProjectDocument, rs: &ResultSheet, info_id: &Sh
     })
 }
 
-fn graph_references_sheet(gs: &GraphSheet, id: &SheetId) -> bool {
-    gs.spec.primary_source_sheet_id == *id || gs.spec.series.iter().any(|s| s.source_sheet_id == *id)
+fn graph_references_sheet(doc: &ProjectDocument, gs: &GraphSheet, id: &SheetId) -> bool {
+    doc.upstream_dependencies(&gs.id).contains(id)
 }
 
-fn layout_references_sheet(ls: &LayoutSheet, id: &SheetId) -> bool {
-    ls.spec.items.iter().any(|item| match item {
-        LayoutItem::LiveGraph { graph_sheet_id, .. } => graph_sheet_id == id,
-        LayoutItem::LiveTable { source_sheet_id, .. } => source_sheet_id == id,
-        LayoutItem::TextCallout { .. } => false,
-    })
+fn layout_references_sheet(doc: &ProjectDocument, ls: &LayoutSheet, id: &SheetId) -> bool {
+    doc.upstream_dependencies(&ls.id).contains(id)
 }
 
 fn collect_downstream_for_delete(doc: &ProjectDocument, root_id: &SheetId, include_paired_info: bool, to_delete: &mut HashSet<SheetId>) {
@@ -851,8 +861,31 @@ fn prune_deleted_sheets(doc: &mut ProjectDocument, to_delete: &HashSet<SheetId>)
         }
         ds.linked_regions.retain(|r| r.spec.source.upstream_sheet_id().is_none_or(|up| !to_delete.contains(up)));
     }
+    for rs in &mut doc.result_sheets {
+        if let AnalysisKind::PowerAnalysis(p) = &mut rs.analysis.kind
+            && p.info_sheet_id.as_ref().is_some_and(|iid| to_delete.contains(iid))
+        {
+            p.info_sheet_id = None;
+        }
+    }
     for gs in &mut doc.graph_sheets {
         gs.spec.series.retain(|s| !to_delete.contains(&s.source_sheet_id));
+        for series in &mut gs.spec.series {
+            if series.regression_overlay.as_ref().is_some_and(|ov| to_delete.contains(&ov.result_sheet_id)) {
+                series.regression_overlay = None;
+            }
+        }
+        gs.spec.comparisons.retain(|cmp| !to_delete.contains(&cmp.result_sheet_id));
+        if gs.spec.compact_letter_display.as_ref().is_some_and(|cld| to_delete.contains(&cld.result_sheet_id)) {
+            gs.spec.compact_letter_display = None;
+            gs.spec.pairwise_display_mode = curvebook_doc::PairwiseDisplayMode::BracketsOnly;
+        }
+        gs.spec.annotations.retain(|ann| match ann {
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                !to_delete.contains(result_sheet_id)
+            }
+            GraphAnnotation::TextBox { .. } | GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => true,
+        });
     }
     for ls in &mut doc.layout_sheets {
         ls.spec.items.retain(|item| match item {

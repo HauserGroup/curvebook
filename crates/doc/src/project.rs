@@ -290,8 +290,13 @@ impl ProjectDocument {
                     GraphAnnotation::TextBox { .. } | GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => {}
                 }
             }
+            let paired_info = self
+                .data_sheet(&gs.spec.primary_source_sheet_id)
+                .or_else(|| self.result_sheet(&gs.spec.primary_source_sheet_id).and_then(|res| res.analyzable_data.as_ref()))
+                .and_then(|d| d.info_sheet_id.clone())
+                .or_else(|| default_info.clone());
             for hook in gs.spec.inline_hooks() {
-                push_hook_dep(&mut deps, &hook, default_info.as_ref());
+                push_hook_dep(&mut deps, &hook, paired_info.as_ref());
             }
         } else if let Some(ls) = self.layout_sheet(id) {
             for item in &ls.spec.items {

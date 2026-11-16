@@ -1070,6 +1070,27 @@ impl GraphSpec {
         }
         hooks
     }
+
+    /// Update any multivariate `x_level_order_override` or categorical colour `level_order_override`
+    /// bound to `(source_sheet_id, col_idx)` when categorical levels are recoded.
+    pub fn recode_variable_levels(&mut self, source_sheet_id: &SheetId, col_idx: usize, mappings: &[(String, String)]) {
+        if self.primary_source_sheet_id != *source_sheet_id || mappings.is_empty() {
+            return;
+        }
+        let Some(enc) = &mut self.multivariate else {
+            return;
+        };
+        if enc.x_column == col_idx
+            && let Some(ov) = &mut enc.x_level_order_override
+        {
+            ov.recode_levels(mappings);
+        }
+        if let ColorChannelMapping::Categorical { column, level_order_override: Some(ov), .. } = &mut enc.color
+            && *column == col_idx
+        {
+            ov.recode_levels(mappings);
+        }
+    }
 }
 
 fn default_marker_shape(index: usize) -> MarkerShape {
