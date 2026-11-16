@@ -11,6 +11,7 @@ Two entry points matter throughout:
 - **Native desktop path:** `desktop_host.rs` → `interaction::dispatch_ui_event` directly. It never goes through `gui_actions`.
 
 Several of the real problems below are differences between these two paths, not duplication inside one of them.
+- **Main re-check (`1e9dc59`, 2026-11-16):** 5 confirmed items (`1`, `3`, `4`, `5`, `NEW-1`) re-checked against `main`: `0 FIXED_ON_MAIN`, `0 PARTIAL_ON_MAIN`, `5 LIVE_ON_MAIN`.
 
 ## Verdict summary
 
@@ -117,3 +118,13 @@ Several of the real problems below are differences between these two paths, not 
 3. 1 and 3 together, as one shared key-routing chain in `interaction::handle_key_down` used by both paths
 4. 4
 5. Info items as cleanup
+
+## Main re-check (`1e9dc59`)
+
+| # | Verified Sev | Status on `1e9dc59` | Current Location & Evidence |
+|---|---|---|---|
+| `1` | Med | `LIVE_ON_MAIN` | `crates/ui-egui/src/gui_actions.rs:1083-1091`, `crates/ui-egui/src/interaction.rs:1643-1657`, `apps/lumencraft/src/desktop_host.rs:1714` — `handle_press_key` still falls through to `interaction::handle_key_down`, running shortcuts while a modal dialog is open. |
+| `3` | Low–Med | `LIVE_ON_MAIN` | `crates/ui-egui/src/gui_actions.rs:1043-1081`, `crates/ui-egui/src/interaction.rs:1625-1660` — `Enter`, `Escape`, and `Tab` priority still diverges between MCP (`ui.press_key`) and native (`desktop_host` -> `interaction`). |
+| `4` | Low | `LIVE_ON_MAIN` | `crates/ui-egui/src/gui_actions.rs:638-645`, `crates/ui-egui/src/interaction.rs:1083-1124` — Secondary click miss still leaves `context_menu_target` stale and MCP fallback still writes `"Format Selected Points..."` into a region field. |
+| `5` | Med | `LIVE_ON_MAIN` | `crates/ui-egui/src/gui_actions.rs:801-834, 875-919, 945-955`, `crates/engine/src/cmd/table.rs:1423` — `ui.type_text` still parses scalars with ASCII `str::parse::<f64>()` and omits `decimal_separator` from `table.paste`, `table.setCell`, and `table.setXCells`. |
+| `NEW-1` | Med | `LIVE_ON_MAIN` | `crates/ui-egui/src/interaction.rs:190-196, 953-1081, 1479-1541` — Pointer-down and `inline_editor.begin` sites still neither commit nor cancel an active inline cell edit when clicking elsewhere or starting another edit. |

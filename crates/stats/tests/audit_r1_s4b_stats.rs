@@ -1,5 +1,5 @@
 //! Stage 4B regression tests for `lumencraft-stats` findings (`R1-S02-12`, `R1-S02-13`, `R1-X2-08`,
-//! `R1-X2-09`, and all 5 S3 title-only findings in `docs/audit/findings/S02.md`).
+//! `R1-X2-09`, and all 5 S3 title-only findings in `docs/audit/findings/r1/S02.md`).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use lumencraft_doc::{

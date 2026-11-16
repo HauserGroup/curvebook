@@ -4,6 +4,7 @@
 - **Input:** an external audit report of `desktop_host.rs` dated 2026-11-15, with items B1–B4, U1–U10 and M1–M5. Each item below was checked against the code at the base above. The original IDs are kept so this file can be read alongside that report.
 - **Out-of-file context read:** `apps/lumencraft/src/main.rs` (200–379, 493), `apps/lumencraft/src/gui_window.rs` (440–470, 655–665), `crates/ui-egui/src/interaction.rs` (55–68, 156–157, 1480–1513), `crates/ui-egui/src/control_io.rs` (386–460, 1185, 1251, 1311, 1580), `crates/ui-egui/src/os_integration.rs` (181, 835), `crates/ui-egui/src/lib.rs` (147), `crates/format/src/archive.rs` (178, 203–243).
 - **Not run:** no tests and no crash reproductions. Every verdict comes from reading the code.
+- **Main re-check (`1e9dc59`, 2026-11-16):** 11 confirmed items re-checked against `main`: `2 FIXED_ON_MAIN` (`B1` in `c7298fe`, `U9`), `1 PARTIAL_ON_MAIN` (`NEW-1` — overlaps `R1-S11-01`; empty-args launch fixed in `a1a9ecb`, CLI file-args launch still unjournaled), `8 LIVE_ON_MAIN`.
 
 ## Verdict summary
 
@@ -118,7 +119,7 @@
 - **Failure scenario:** Launch `lumencraft` with no flags, make edits, and kill the process. On the next launch, `open_dir_with_recovery` finds a stale lease but none of the edits from that session.
 - **Why it matters for B3:** This is the real problem behind B3's concern that the first document has no crash protection. It lives in `main.rs`, not in the audited branch.
 - **Suggested fix:** Hand the startup journal to the window session instead of holding it in `main.rs`. That needs a `DesktopHostRuntime` entry point that takes a session together with an already-open journal, like `install_window_session`'s `recovery` tuple. Then close it through `close_all_force`. Confirm with a kill-and-relaunch integration test.
-- **Note:** Check this against [Known defects](../gaps.md#known-defects) before filing. No match was found when searching for `desktop_host`, `recovery journal` and `single-instance`.
+- **Note:** Check this against [Known defects](../../../gaps.md#known-defects) before filing. No match was found when searching for `desktop_host`, `recovery journal` and `single-instance`.
 
 ### NEW-2 · Med (latent) · Opening a window with a document overwrites any crash journal already in its recovery directory
 
@@ -158,3 +159,19 @@
 3. B2, then NEW-2 before anyone changes the recovery-attach logic in B3
 4. U9, U8, M3, M2
 5. Info items as cleanup
+
+## Main re-check (`1e9dc59`)
+
+| ID | Verified Sev | Status on `1e9dc59` | Current Location & Evidence |
+|---|---|---|---|
+| `B1` | High | `FIXED_ON_MAIN` | Fixed in `c7298fe` (`apps/lumencraft/src/desktop_host.rs:415-477`): `open_document_from_files` rejects multiple project archives, defers CSV merges until after archive load, and passes `clean_archive && !merged_delimited` to `set_file_path`. |
+| `B2` | Med | `LIVE_ON_MAIN` | `apps/lumencraft/src/desktop_host.rs:1876-1892` — `handle_menu_action`'s `dispatch_ui_command` branch still skips `record_ui_mutation_checkpoint`. |
+| `B4` | Med–High | `LIVE_ON_MAIN` | `apps/lumencraft/src/desktop_host.rs:1631-1646`, `apps/lumencraft/src/gui_window.rs:608-621` — Unmodified vertical wheel/trackpad scroll still triggers `WheelZoom` whenever `delta_x == 0`. |
+| `U7` | Med | `LIVE_ON_MAIN` | `apps/lumencraft/src/desktop_host.rs:1938-1940, 1950, 1955-1982` — `handle_clipboard_paste` still prefers `self.clipboard_text` over `read_os_pasteboard()`, ignoring external OS copies and pasting graph SVG/HTML into cells. |
+| `U8` | Low | `LIVE_ON_MAIN` | `apps/lumencraft/src/desktop_host.rs:1930, 1937, 1952` — `write_os_pasteboard` and `write_os_clipboard_bundle` outcomes are still discarded via `let _ =`. |
+| `U9` | Low–Med | `FIXED_ON_MAIN` | Fixed in Round 1 (`apps/lumencraft/src/desktop_host.rs:1397-1407, 1505-1514`): `close_all_force` now closes every window and collects errors instead of early-returning on the first failure. |
+| `M2` | Low | `LIVE_ON_MAIN` | `apps/lumencraft/src/desktop_host.rs:318-320, 358` — `is_unpacked_project_target` still ends with `|| path.is_dir()`. |
+| `M3` | Low–Med | `LIVE_ON_MAIN` | `apps/lumencraft/src/desktop_host.rs:811, 900-902` — `render_frame` still deep-clones `output` (`~16.4 MB` at 1280×800 @ 2x) into `self.last_frame` on every redraw (`Arc<[u8]>` sharing still needed). |
+| `NEW-1` | High | `PARTIAL_ON_MAIN` | Overlaps `R1-S11-01`: `a1a9ecb` attached the startup recovery journal in default single-instance mode when `files.is_empty()` (`apps/lumencraft/src/main.rs:396-402`), **but** passing CLI file arguments (`!files.is_empty()`, `main.rs:404, 707-710`) still opens window 1 with `attach_recovery = false` (`recovery_journal = None`). |
+| `NEW-2` | Med (latent) | `LIVE_ON_MAIN` | `apps/lumencraft/src/desktop_host.rs:1303-1320, 1348-1360` — `open_window_internal` still overwrites any crashed journal in its target recovery directory via `session.checkpoint_journal` when opening a document-bearing session (reachable on `recovery/win-2` now that default mode sets `recovery_root = Some(...)`). |
+| `NEW-3` | Low | `LIVE_ON_MAIN` | `apps/lumencraft/src/desktop_host.rs:553-576, 1276-1288`, `apps/lumencraft/src/main.rs:389-406` — Startup still never scans `app_paths.recovery_dir` for stale crashed `instance-<pid>-win-<n>` or `win-<n>` journals. |

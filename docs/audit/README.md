@@ -4,14 +4,23 @@ How independent reviewers audit LumenCraft in parallel. Reviewers may be people 
 
 Read [`AGENTS.md`](../../AGENTS.md) first. Its rules apply to every role below. This file adds the audit protocol on top of them.
 
-## Round 1
+## Directory index & audit rounds
+
+| Round / Document | Baseline & Range | Status on `main` (`1e9dc59`) | Files |
+|---|---|---|---|
+| **Slice catalog** | `S01`–`S13`, `X1`, `X2` | Active reference | [`slices.md`](slices.md) |
+| **Round 1 full audit** | `ebcc622` -> Stage 1 re-check `fda1cc0` -> Stages 2–5 merged in `833e98d` | **Closed** — all **`156`** unique survivors (`32 S1, 60 S2, 58 S3, 6 S4`) + dup `R1-S07-02` fixed with permanent regression tests; `0` live defects in Stage 5 sweep | [`progress.md`](progress.md), [`findings/r1/`](findings/r1/) (`S01.md`–`S13.md`, `X1.md`, `X2.md`) |
+| **Round 2 delta audit** | `ebcc622..fda1cc0` (`38` commits), re-verified at `1e9dc59` (`2026-11-16`) | **Open (`149` surviving items)** — `154` audited (`138` `R2-*` + `16` companion): **`5` `FIXED_ON_MAIN`**, **`18` `PARTIAL_ON_MAIN`**, **`131` `LIVE_ON_MAIN`** -> **`135` `R2-*` survivors** (`36 S1, 66 S2, 31 S3, 2 S4`) + **`14` companion survivors** | [`round2-post-ebcc622.md`](round2-post-ebcc622.md), [`findings/r2/`](findings/r2/) (`R2-S01.md`–`R2-S13.md`, [`desktop_host.md`](findings/r2/desktop_host.md), [`interaction-gui_actions.md`](findings/r2/interaction-gui_actions.md)) |
+
+## Playbook baseline & git-worktree workflow
 
 | Field | Value |
 |---|---|
-| Current base | `71f37d8bd5a748127fbefe2c4e77a302dda75f30` (`origin/main`, 2026-11-13). The coordinator may move it forward at any time during the round. |
+| Round 1 base (completed) | `ebcc622b32fc526c545aad8439e3e580d04b478c` (`origin/main`, 2026-11-14; initial playbook draft `71f37d8`, closed via `833e98d`) |
+| Round 2 delta range | `ebcc622..fda1cc0` (re-verified against `main` `1e9dc59` on 2026-11-16) |
 | Scope | Every slice in [`slices.md`](slices.md) |
 | Already known | [Known defects in `docs/gaps.md`](../gaps.md#known-defects). Do not report these again. |
-| Tracking | One GitHub issue per slice, titled `Audit R1 <slice id>: <slice name>`, created by the coordinator |
+| Tracking | Local slice files under `findings/r<n>/` (or one GitHub issue per slice titled `Audit R<n> <slice id>: <slice name>` when run distributed) |
 
 **Instructions come from `origin/main`. Code comes from your claimed base.** Read this playbook, [`slices.md`](slices.md) and [Known defects](../gaps.md#known-defects) on the current `origin/main`, not in your audit worktree. Your base may predate them, and the coordinator may update them during the round. Re-read them from `origin/main` each time you claim a slice or post findings:
 
