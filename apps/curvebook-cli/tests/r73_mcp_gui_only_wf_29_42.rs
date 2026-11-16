@@ -119,7 +119,11 @@ fn r73_gui_only_wf29_to_wf32_mv_transforms_formulas_chaining_welch() -> Result<(
     let grid30_a = gui.ui_inspect("grid", false)?;
     assert_approx(mv_cell_f64(&grid30_a, 3, 4)?, -4.0, 1e-6, "WF-30 Delta D1")?;
 
-    gui.ui_pointer(json!({ "action": "click", "widget_id": "formula_bar.open_col.5" }))?;
+    gui.ui_pointer(json!({
+        "action": "click",
+        "widget_id": "formula_bar.open_col.5",
+        "metrics": { "logical_width": 1280.0, "logical_height": 800.0, "scale_factor": 1.0 }
+    }))?;
     let bad_syn = gui.ui_type(Some("formula_bar.input"), "= [RawSignal +", true, false)?;
     if bad_syn["is_valid"] != json!(false) {
         return Err(format!("WF-30 invalid syntax expected is_valid=false: {bad_syn}"));
