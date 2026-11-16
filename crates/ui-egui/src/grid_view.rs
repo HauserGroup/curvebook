@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 const MAX_QUICK_STATS_CELLS_FOR_CLONE_PASS: usize = 50_000;
+const MAX_MATERIALIZED_SELECTION_COORDS: usize = 4_096;
 
 /// Cardinal arrow navigation direction inside the spreadsheet grid.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -1256,93 +1257,135 @@ impl GridViewState {
         self.selected_coords.clear();
     }
 
-    /// Extend a contiguous rectangular / multi-row selection (`Shift+Click` or pointer drag).
+    /// Extend a contiguous rectangular / multi-row selection (`Shift+Click` or pointer drag) in `O(1)`
+    /// range bounds without materializing every cell coordinate in multi-million-cell ranges (`RV-50`).
     pub fn extend_shift_range(&mut self, sheet: &DataSheet, coord: GridCellCoord) {
         self.active_x_cell = None;
         self.tool.extend_selection(coord);
-        self.selected_coords = self.selection_coords(sheet);
-        let mut rows: Vec<usize> = self.selected_coords.iter().map(|c| c.row).collect();
-        rows.sort_unstable();
-        rows.dedup();
-        self.selected_rows = rows;
+        self.selected_coords.clear();
+        self.selected_rows = self.bounded_selected_rows(sheet);
     }
 
     /// Toggle a cell coordinate in a discontiguous multi-selection (`Cmd/Ctrl+Click`).
     pub fn toggle_cmd_selection(&mut self, sheet: &DataSheet, coord: GridCellCoord) {
+        use std::collections::BTreeSet;
+
         self.active_x_cell = None;
-        let mut union = self.all_selected_coords(sheet);
-        if let Some(pos) = union.iter().position(|c| *c == coord) {
-            if union.len() > 1 {
-                union.remove(pos);
-            }
+        let mut set: BTreeSet<GridCellCoord> = if !self.selected_coords.is_empty() {
+            self.selected_coords.iter().copied().collect()
         } else {
-            union.push(coord);
+            self.selection_coords(sheet).into_iter().collect()
+        };
+        if set.contains(&coord) {
+            if set.len() > 1 {
+                set.remove(&coord);
+            }
+        } else if set.len() < MAX_MATERIALIZED_SELECTION_COORDS {
+            set.insert(coord);
         }
         self.tool.active = Some(coord);
         if self.tool.anchor.is_none() {
             self.tool.anchor = Some(coord);
         }
-        self.selected_coords = union;
-        self.sync_selected_rows_from_coords();
+        self.selected_rows = set.iter().map(|c| c.row).collect::<BTreeSet<_>>().into_iter().collect();
+        self.selected_coords = set.into_iter().collect();
     }
 
     /// Select or toggle an entire row (across all data columns of `sheet`), supporting `Shift+Click`
     /// range and `Cmd/Ctrl+Click` discontiguous multi-row selection (`WF-22`).
     pub fn select_row_click(&mut self, sheet: &DataSheet, row: usize, shift: bool, command: bool) {
         self.active_x_cell = None;
-        let max_row = sheet.archetype.row_count().saturating_sub(1);
+        let total_rows = sheet.archetype.row_count();
+        if total_rows == 0 {
+            self.selected_rows.clear();
+            self.selected_coords.clear();
+            return;
+        }
+        let max_row = total_rows - 1;
         let clamped_row = row.min(max_row);
         let col_count = sheet.archetype.column_count().max(1);
-        let first_coord = GridCellCoord::new(clamped_row, 0, 0);
         let last_col = col_count - 1;
-        let last_coord = GridCellCoord::new(clamped_row, last_col, 0);
+        let last_subcol = data_set_subcolumn_count(&sheet.archetype, last_col).saturating_sub(1);
+        let first_coord = GridCellCoord::new(clamped_row, 0, 0);
+        let last_coord = GridCellCoord::new(clamped_row, last_col, last_subcol);
 
         if shift {
-            let anchor_row = self.tool.anchor.map_or(clamped_row, |a| a.row);
+            let anchor_row = self.tool.anchor.map_or(clamped_row, |a| a.row.min(max_row));
             self.tool.select_single(GridCellCoord::new(anchor_row, 0, 0));
             self.tool.extend_selection(last_coord);
-            let lo = anchor_row.min(clamped_row);
-            let hi = anchor_row.max(clamped_row);
-            self.selected_rows = (lo..=hi).collect();
-            self.selected_coords = self.selection_coords(sheet);
+            self.selected_coords.clear();
+            self.selected_rows = bounded_row_range_vec(sheet, anchor_row.min(clamped_row), anchor_row.max(clamped_row));
         } else if command {
-            if let Some(pos) = self.selected_rows.iter().position(|&r| r == clamped_row) {
-                if self.selected_rows.len() > 1 {
-                    self.selected_rows.remove(pos);
-                    self.selected_coords.retain(|c| c.row != clamped_row);
-                }
-            } else {
-                if self.selected_coords.is_empty() {
-                    self.selected_coords = self.selection_coords(sheet);
-                }
-                self.selected_rows.push(clamped_row);
-                for col in 0..col_count {
-                    let c = GridCellCoord::new(clamped_row, col, 0);
-                    if !self.selected_coords.contains(&c) {
-                        self.selected_coords.push(c);
-                    }
-                }
-            }
-            self.selected_rows.sort_unstable();
-            self.selected_rows.dedup();
-            self.tool.active = Some(first_coord);
-            if self.tool.anchor.is_none() {
-                self.tool.anchor = Some(first_coord);
-            }
+            self.toggle_command_row_selection(sheet, clamped_row, col_count, first_coord);
         } else {
             self.tool.select_single(first_coord);
             self.tool.extend_selection(last_coord);
             self.selected_rows = vec![clamped_row];
-            self.selected_coords = self.selection_coords(sheet);
+            self.selected_coords.clear();
         }
-        self.refresh_selection_stats_slice(sheet);
+        self.refresh_selection_stats_for_sheet(sheet);
     }
 
-    fn sync_selected_rows_from_coords(&mut self) {
-        let mut rows: Vec<usize> = self.selected_coords.iter().map(|c| c.row).collect();
-        rows.sort_unstable();
-        rows.dedup();
-        self.selected_rows = rows;
+    fn toggle_command_row_selection(&mut self, sheet: &DataSheet, clamped_row: usize, col_count: usize, first_coord: GridCellCoord) {
+        use std::collections::BTreeSet;
+
+        let mut row_set: BTreeSet<usize> = self.selected_rows.iter().copied().collect();
+        let mut coord_set: BTreeSet<GridCellCoord> = if !self.selected_coords.is_empty() {
+            self.selected_coords.iter().copied().collect()
+        } else {
+            self.selection_coords(sheet).into_iter().collect()
+        };
+        if row_set.contains(&clamped_row) {
+            if row_set.len() > 1 {
+                row_set.remove(&clamped_row);
+                coord_set.retain(|c| c.row != clamped_row);
+            }
+        } else {
+            if row_set.len() < MAX_MATERIALIZED_SELECTION_COORDS {
+                row_set.insert(clamped_row);
+            }
+            append_row_coords_bounded(&sheet.archetype, clamped_row, col_count, &mut coord_set);
+        }
+        self.selected_rows = row_set.into_iter().collect();
+        self.selected_coords = coord_set.into_iter().collect();
+        self.tool.active = Some(first_coord);
+        if self.tool.anchor.is_none() {
+            self.tool.anchor = Some(first_coord);
+        }
+    }
+
+    fn bounded_selected_rows(&self, sheet: &DataSheet) -> Vec<usize> {
+        let total_rows = sheet.archetype.row_count();
+        let Some((min_c, max_c)) = self.tool.selection_bounds() else {
+            return Vec::new();
+        };
+        if total_rows == 0 || min_c.row >= total_rows {
+            return Vec::new();
+        }
+        bounded_row_range_vec(sheet, min_c.row, max_c.row.min(total_rows - 1))
+    }
+
+    /// Check in `O(1)` time for rectangular ranges (or `O(log k)` for discontiguous selections)
+    /// whether `coord` is currently selected on `sheet`.
+    #[must_use]
+    pub fn is_cell_selected(&self, sheet: &DataSheet, coord: GridCellCoord) -> bool {
+        let total_rows = sheet.archetype.row_count();
+        let total_flat = total_flat_data_subcolumns(&sheet.archetype);
+        if coord.row >= total_rows || total_flat == 0 {
+            return false;
+        }
+        if self.has_discontiguous_selection() {
+            return self.selected_coords.binary_search(&coord).is_ok() || self.selected_coords.contains(&coord);
+        }
+        let Some((r0, r1, f0, f1)) = selection_flat_bounds(&sheet.archetype, self.tool.anchor, self.tool.active) else {
+            return false;
+        };
+        let flat = flat_index_for_coord(&sheet.archetype, coord.col, coord.subcol);
+        (r0..=r1).contains(&coord.row) && (f0..=f1).contains(&flat)
+    }
+
+    fn has_discontiguous_selection(&self) -> bool {
+        self.selected_coords.len() > 1 || (!self.selected_coords.is_empty() && self.tool.anchor == self.tool.active)
     }
 
     fn refresh_selection_stats_slice(&mut self, sheet: &DataSheet) {
@@ -1372,16 +1415,41 @@ impl GridViewState {
         }
     }
 
+    fn refresh_selection_stats_for_sheet(&mut self, sheet: &DataSheet) {
+        if !self.selected_coords.is_empty() {
+            self.refresh_selection_stats_slice(sheet);
+            return;
+        }
+        let (Some(a), Some(b)) = (self.tool.anchor, self.tool.active) else {
+            self.quick_stats = None;
+            self.extended_stats = None;
+            return;
+        };
+        let selected_cells = selection_cell_count(sheet, a, b);
+        if selected_cells <= MAX_QUICK_STATS_CELLS_FOR_CLONE_PASS {
+            self.extended_stats = Some(GridQuickStats::from_data_sheet(sheet, a, b));
+            self.quick_stats = Some(SelectionQuickStats::from_data_sheet(sheet, a, b));
+        } else {
+            self.extended_stats = Some(GridQuickStats { selected_cells, ..GridQuickStats::default() });
+            self.quick_stats = None;
+        }
+    }
+
     /// Return all currently selected [`GridCellCoord`] entries (combining rectangular range and
-    /// discontiguous `Cmd/Ctrl+Click` selections).
+    /// discontiguous `Cmd/Ctrl+Click` selections), bounded to populated sheet dimensions.
     #[must_use]
     pub fn all_selected_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
         if !self.selected_coords.is_empty() {
-            let mut seen = HashSet::with_capacity(self.selected_coords.len());
-            let mut out = Vec::with_capacity(self.selected_coords.len());
+            let total_rows = sheet.archetype.row_count();
+            let cap = self.selected_coords.len().min(MAX_MATERIALIZED_SELECTION_COORDS);
+            let mut seen = HashSet::with_capacity(cap);
+            let mut out = Vec::with_capacity(cap);
             for &c in &self.selected_coords {
-                if seen.insert((c.row, c.col, c.subcol)) {
+                if c.row < total_rows && seen.insert((c.row, c.col, c.subcol)) {
                     out.push(c);
+                    if out.len() >= MAX_MATERIALIZED_SELECTION_COORDS {
+                        break;
+                    }
                 }
             }
             return out;
@@ -1392,61 +1460,151 @@ impl GridViewState {
     /// Map currently selected grid rows/cells into graph `(series_index, point_index)` targets.
     #[must_use]
     pub fn selected_graph_point_indices(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize)> {
-        self.selected_graph_point_targets(sheet, max_series).into_iter().map(|(s, p, _)| (s, p)).collect()
-    }
-
-    /// Map currently selected grid rows/cells into `(series_index, point_index, subcol)` targets.
-    #[must_use]
-    pub fn selected_graph_point_targets(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize, Option<usize>)> {
-        let coords = self.all_selected_coords(sheet);
-        let mut out: Vec<(usize, usize, Option<usize>)> = Vec::new();
-        for c in coords {
-            let series = if max_series == 0 { c.col } else { c.col.min(max_series - 1) };
-            let subcols = data_set_subcolumn_count(&sheet.archetype, c.col);
-            let subcol = (subcols > 1).then_some(c.subcol);
-            let target = (series, c.row, subcol);
-            if !out.contains(&target) {
-                out.push(target);
+        let targets = self.selected_graph_point_targets(sheet, max_series);
+        let mut seen = HashSet::with_capacity(targets.len());
+        let mut out = Vec::with_capacity(targets.len());
+        for (s, p, _) in targets {
+            if seen.insert((s, p)) {
+                out.push((s, p));
             }
         }
-        if out.is_empty() {
+        out
+    }
+
+    /// Map currently selected grid rows/cells into `(series_index, point_index, subcol)` targets,
+    /// intersecting with populated sheet rows and deduplicating in `O(n)` via `HashSet` (`RV-50`).
+    #[must_use]
+    pub fn selected_graph_point_targets(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize, Option<usize>)> {
+        if !self.selected_coords.is_empty() {
+            return self.discontiguous_graph_point_targets(sheet, max_series);
+        }
+        let mut out = self.rectangular_graph_point_targets(sheet, max_series);
+        if out.is_empty() && !self.selected_rows.is_empty() {
+            let row_cap = populated_row_bound_for_sheet(sheet);
+            let mut seen = HashSet::with_capacity(self.selected_rows.len().min(MAX_MATERIALIZED_SELECTION_COORDS));
             for &row in &self.selected_rows {
-                let target = (0, row, None);
-                if !out.contains(&target) {
-                    out.push(target);
+                if row < row_cap && seen.insert(row) {
+                    out.push((0, row, None));
+                    if out.len() >= MAX_MATERIALIZED_SELECTION_COORDS {
+                        break;
+                    }
                 }
             }
         }
         out
     }
 
-    /// Expand the current rectangular selection into concrete [`GridCellCoord`] coordinates bounded to `sheet`.
-    #[must_use]
-    pub fn selection_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
+    fn discontiguous_graph_point_targets(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize, Option<usize>)> {
         let total_rows = sheet.archetype.row_count();
-        let total_flat = total_flat_data_subcolumns(&sheet.archetype);
-        if total_rows == 0 || total_flat == 0 {
-            return Vec::new();
-        }
-        let Some((min_c, max_c)) = self.tool.selection_bounds() else {
-            return Vec::new();
-        };
-        let r0 = min_c.row.min(total_rows - 1);
-        let r1 = max_c.row.min(total_rows - 1);
-        let f0 = flat_index_for_coord(&sheet.archetype, min_c.col, min_c.subcol);
-        let f1 = flat_index_for_coord(&sheet.archetype, max_c.col, max_c.subcol);
-        let lo = f0.min(f1).min(total_flat - 1);
-        let hi = f0.max(f1).min(total_flat - 1);
-
-        let mut coords = Vec::with_capacity((r1 - r0 + 1).saturating_mul(hi - lo + 1));
-        for row in r0..=r1 {
-            for flat in lo..=hi {
-                if let Some((col, subcol)) = resolve_flat_coord(&sheet.archetype, flat) {
-                    coords.push(GridCellCoord::new(row, col, subcol));
+        let cap = self.selected_coords.len().min(MAX_MATERIALIZED_SELECTION_COORDS);
+        let mut seen = HashSet::with_capacity(cap);
+        let mut out = Vec::with_capacity(cap);
+        for &c in &self.selected_coords {
+            if c.row >= total_rows {
+                continue;
+            }
+            let target = graph_target_for_coord(&sheet.archetype, c.col, c.row, c.subcol, max_series);
+            if seen.insert(target) {
+                out.push(target);
+                if out.len() >= MAX_MATERIALIZED_SELECTION_COORDS {
+                    break;
                 }
             }
         }
+        out
+    }
+
+    fn rectangular_graph_point_targets(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize, Option<usize>)> {
+        let Some((r0, r1, lo, hi)) = self.materialized_selection_flat_rect(sheet, true) else {
+            return Vec::new();
+        };
+        let mut col_targets = Vec::with_capacity(hi - lo + 1);
+        let mut seen_cols = HashSet::with_capacity(hi - lo + 1);
+        for flat in lo..=hi {
+            if let Some((col, subcol)) = resolve_flat_coord(&sheet.archetype, flat) {
+                let series = if max_series == 0 { col } else { col.min(max_series - 1) };
+                let sub_opt = (data_set_subcolumn_count(&sheet.archetype, col) > 1).then_some(subcol);
+                if seen_cols.insert((series, sub_opt)) {
+                    col_targets.push((series, sub_opt));
+                }
+            }
+        }
+        if col_targets.is_empty() {
+            return Vec::new();
+        }
+        let max_rows = (MAX_MATERIALIZED_SELECTION_COORDS / col_targets.len()).max(1);
+        let eff_r1 = r1.min(r0.saturating_add(max_rows - 1));
+        let mut out = Vec::with_capacity((eff_r1 - r0 + 1).saturating_mul(col_targets.len()).min(MAX_MATERIALIZED_SELECTION_COORDS));
+        for row in r0..=eff_r1 {
+            for &(series, sub_opt) in &col_targets {
+                if out.len() >= MAX_MATERIALIZED_SELECTION_COORDS {
+                    return out;
+                }
+                out.push((series, row, sub_opt));
+            }
+        }
+        out
+    }
+
+    /// Expand the current rectangular selection into concrete [`GridCellCoord`] coordinates
+    /// intersected with populated sheet dimensions and capped safely (`RV-50`).
+    #[must_use]
+    pub fn selection_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
+        let Some((r0, r1, lo, hi)) = self.materialized_selection_flat_rect(sheet, false) else {
+            return Vec::new();
+        };
+        let flat_coords: Vec<(usize, usize)> = (lo..=hi).filter_map(|flat| resolve_flat_coord(&sheet.archetype, flat)).collect();
+        if flat_coords.is_empty() {
+            return Vec::new();
+        }
+        let max_rows = (MAX_MATERIALIZED_SELECTION_COORDS / flat_coords.len()).max(1);
+        let eff_r1 = r1.min(r0.saturating_add(max_rows - 1));
+        let mut coords = Vec::with_capacity((eff_r1 - r0 + 1).saturating_mul(flat_coords.len()).min(MAX_MATERIALIZED_SELECTION_COORDS));
+        for row in r0..=eff_r1 {
+            for &(col, subcol) in &flat_coords {
+                if coords.len() >= MAX_MATERIALIZED_SELECTION_COORDS {
+                    return coords;
+                }
+                coords.push(GridCellCoord::new(row, col, subcol));
+            }
+        }
         coords
+    }
+
+    fn materialized_selection_flat_rect(&self, sheet: &DataSheet, require_populated_on_small: bool) -> Option<(usize, usize, usize, usize)> {
+        let total_rows = sheet.archetype.row_count();
+        let total_flat = total_flat_data_subcolumns(&sheet.archetype);
+        if total_rows == 0 || total_flat == 0 {
+            return None;
+        }
+        let (min_c, max_c) = self.tool.selection_bounds()?;
+        if min_c.row >= total_rows {
+            return None;
+        }
+        let r0 = min_c.row;
+        let raw_r1 = max_c.row.min(total_rows - 1);
+        let f0 = flat_index_for_coord(&sheet.archetype, min_c.col, min_c.subcol);
+        let f1 = flat_index_for_coord(&sheet.archetype, max_c.col, max_c.subcol);
+        let lo = f0.min(f1);
+        if lo >= total_flat {
+            return None;
+        }
+        let hi = f0.max(f1).min(total_flat - 1);
+
+        if min_c == max_c && !require_populated_on_small {
+            return Some((r0, r0, lo, hi));
+        }
+
+        let max_rows_for_cols = (MAX_MATERIALIZED_SELECTION_COORDS / (hi - lo + 1).max(1)).max(1);
+        let window_r1 = raw_r1.min(r0.saturating_add(max_rows_for_cols - 1));
+        if let Some(last_pop) = last_populated_row_in_range(sheet, r0, window_r1) {
+            return Some((r0, last_pop, lo, hi));
+        }
+        let span_cells = (raw_r1 - r0 + 1).saturating_mul(hi - lo + 1);
+        if !require_populated_on_small && span_cells <= MAX_MATERIALIZED_SELECTION_COORDS && total_rows <= MAX_MATERIALIZED_SELECTION_COORDS {
+            return Some((r0, window_r1, lo, hi));
+        }
+        None
     }
 
     /// Recompute quick summary statistics (`n`, `excluded`, `mean`, `SD`, `SEM`, `median`, `sum`)
@@ -1462,24 +1620,7 @@ impl GridViewState {
             self.extended_stats = None;
             return;
         };
-        if !self.selected_coords.is_empty() {
-            self.refresh_selection_stats_slice(sheet);
-            return;
-        }
-        let (Some(a), Some(b)) = (self.tool.anchor, self.tool.active) else {
-            self.quick_stats = None;
-            self.extended_stats = None;
-            return;
-        };
-
-        let selected_cells = selection_cell_count(sheet, a, b);
-        if selected_cells <= MAX_QUICK_STATS_CELLS_FOR_CLONE_PASS {
-            self.extended_stats = Some(GridQuickStats::from_data_sheet(sheet, a, b));
-            self.quick_stats = Some(SelectionQuickStats::from_data_sheet(sheet, a, b));
-        } else {
-            self.extended_stats = Some(GridQuickStats { selected_cells, ..GridQuickStats::default() });
-            self.quick_stats = None;
-        }
+        self.refresh_selection_stats_for_sheet(sheet);
     }
 
     /// Visible row/column window for the currently selected [`DataSheet`].
@@ -1775,6 +1916,140 @@ fn selection_cell_count(sheet: &DataSheet, a: GridCellCoord, b: GridCellCoord) -
     let end_flat = f0.max(f1).min(total_flat - 1);
 
     r1.saturating_sub(r0).saturating_add(1).saturating_mul(end_flat.saturating_sub(start_flat).saturating_add(1))
+}
+
+fn graph_target_for_coord(arch: &TableArchetype, col: usize, row: usize, subcol: usize, max_series: usize) -> (usize, usize, Option<usize>) {
+    let series = if max_series == 0 { col } else { col.min(max_series - 1) };
+    let sub_opt = (data_set_subcolumn_count(arch, col) > 1).then_some(subcol);
+    (series, row, sub_opt)
+}
+
+fn append_row_coords_bounded(arch: &TableArchetype, row: usize, col_count: usize, coord_set: &mut std::collections::BTreeSet<GridCellCoord>) {
+    for col in 0..col_count {
+        let subs = data_set_subcolumn_count(arch, col);
+        for subcol in 0..subs {
+            if coord_set.len() >= MAX_MATERIALIZED_SELECTION_COORDS {
+                return;
+            }
+            coord_set.insert(GridCellCoord::new(row, col, subcol));
+        }
+    }
+}
+
+fn bounded_row_range_vec(sheet: &DataSheet, r0: usize, r1: usize) -> Vec<usize> {
+    let total_rows = sheet.archetype.row_count();
+    if total_rows == 0 || r0 > r1 || r0 >= total_rows {
+        return Vec::new();
+    }
+    let clamped_r1 = r1.min(total_rows - 1);
+    if clamped_r1 - r0 < MAX_MATERIALIZED_SELECTION_COORDS && total_rows <= MAX_MATERIALIZED_SELECTION_COORDS {
+        let end = last_populated_row_in_range(sheet, r0, clamped_r1).unwrap_or(clamped_r1);
+        return (r0..=end).collect();
+    }
+    let window_r1 = clamped_r1.min(r0.saturating_add(MAX_MATERIALIZED_SELECTION_COORDS - 1));
+    match last_populated_row_in_range(sheet, r0, window_r1) {
+        Some(last_pop) => (r0..=last_pop).collect(),
+        None if r0 == clamped_r1 => vec![r0],
+        None => Vec::new(),
+    }
+}
+
+fn populated_row_bound_for_sheet(sheet: &DataSheet) -> usize {
+    let total_rows = sheet.archetype.row_count();
+    if total_rows == 0 {
+        return 0;
+    }
+    let window_end = (total_rows - 1).min(MAX_MATERIALIZED_SELECTION_COORDS - 1);
+    if let Some(last_pop) = last_populated_row_in_range(sheet, 0, window_end) {
+        if window_end == total_rows - 1 || last_pop < window_end {
+            return last_pop + 1;
+        }
+        return total_rows;
+    }
+    0
+}
+
+fn is_cell_populated(cell: &Cell) -> bool {
+    !cell.is_empty() || cell.excluded
+}
+
+fn is_subrow_populated(subs: &[Cell]) -> bool {
+    subs.iter().any(is_cell_populated)
+}
+
+fn rfind_in_window<T, F>(slice: &[T], r0: usize, r1: usize, best: Option<usize>, is_pop: F) -> Option<usize>
+where
+    F: Fn(&T) -> bool,
+{
+    if r0 > r1 || r0 >= slice.len() {
+        return best;
+    }
+    let hi = r1.min(slice.len() - 1);
+    let lo = best.map_or(r0, |b| (b + 1).max(r0));
+    if lo > hi {
+        return best;
+    }
+    slice[lo..=hi].iter().rposition(is_pop).map_or(best, |rel| Some(lo + rel))
+}
+
+fn last_populated_row_in_range(sheet: &DataSheet, r0: usize, r1: usize) -> Option<usize> {
+    let mut best = None;
+    match &sheet.archetype {
+        TableArchetype::Xy(t) => {
+            if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. }) {
+                return (r0 <= r1 && r0 < t.row_count()).then(|| r1.min(t.row_count() - 1));
+            }
+            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
+            best = rfind_in_window(&t.x_cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            for col in &t.data_sets {
+                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            }
+        }
+        TableArchetype::Column(t) => {
+            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
+            for col in &t.data_sets {
+                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            }
+        }
+        TableArchetype::Grouped(t) => {
+            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
+            for col in &t.data_sets {
+                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            }
+        }
+        TableArchetype::Contingency(t) => {
+            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
+            for col in &t.data_sets {
+                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            }
+        }
+        TableArchetype::Survival(t) => {
+            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
+            best = rfind_in_window(&t.times, r0, r1, best, is_cell_populated);
+            for col in &t.cohorts {
+                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            }
+        }
+        TableArchetype::PartsOfWhole(t) => {
+            best = rfind_in_window(&t.slice_labels, r0, r1, best, |s| !s.is_empty());
+            for col in &t.data_sets {
+                best = rfind_in_window(&col.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            }
+        }
+        TableArchetype::MultipleVariables(t) => {
+            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
+            for var in &t.variables {
+                best = rfind_in_window(&var.cells, r0, r1, best, is_cell_populated);
+            }
+        }
+        TableArchetype::Nested(t) => {
+            best = rfind_in_window(&t.row_titles, r0, r1, best, |s| !s.is_empty());
+            for grp in &t.groups {
+                best = rfind_in_window(&grp.cells, r0, r1, best, |subs| is_subrow_populated(subs));
+            }
+        }
+    }
+    best
 }
 
 fn build_exclusion_ranges(arch: &TableArchetype, r0: usize, r1: usize, c0: usize, c1: usize) -> Vec<SheetCellRange> {
@@ -2734,5 +3009,46 @@ mod tests {
         let preview = grid.import_wizard.preview_grid(Some(&doc));
         assert!(preview[0][0].excluded);
         assert_eq!(preview[0][0].value.finite_f64(), Some(12.5));
+    }
+
+    #[test]
+    fn rv50_one_million_row_range_selection_and_brushing_completes_under_5ms_without_giant_alloc() {
+        use std::time::Instant;
+
+        use curvebook_doc::MAX_ROWS;
+
+        // Allocate a 1,000,000-row sheet with 25 populated rows (outside timed selection/brushing region).
+        let mut xy = XyTable::new(SubcolumnMode::Single, 2, MAX_ROWS).expect("1M-row XyTable");
+        for r in 0..25 {
+            xy.x_cells[r][0] = Cell::number(r as f64);
+            xy.data_sets[0].cells[r][0] = Cell::number((r as f64) * 2.0);
+            xy.data_sets[1].cells[r][0] = Cell::number((r as f64) * 3.0);
+        }
+        let sheet = DataSheet::new("xy-rv50-1m", "1M Sheet", TableArchetype::Xy(xy)).expect("datasheet");
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(sheet).expect("add sheet");
+        doc.active_sheet_id = Some("xy-rv50-1m".into());
+        let ds = doc.data_sheet(&"xy-rv50-1m".into()).expect("active ds");
+
+        let mut grid = GridViewState::default();
+        let t0 = Instant::now();
+        grid.select_single_sync(GridCellCoord::new(0, 0, 0));
+        grid.extend_shift_range(ds, GridCellCoord::new(MAX_ROWS - 1, 1, 0));
+        grid.refresh_selection_stats(&doc);
+        let coords = grid.all_selected_coords(ds);
+        let targets = grid.selected_graph_point_targets(ds, 2);
+        let frame = grid.visible_frame(&doc).expect("visible frame");
+        let elapsed = t0.elapsed();
+
+        assert!(elapsed < std::time::Duration::from_millis(5), "1,000,000-row selection + brushing exceeded 5 ms budget: {elapsed:?}");
+        // Contiguous range selection stays in O(1) bounds (`selected_coords` unmaterialized) while `is_cell_selected` covers all 1M rows.
+        assert!(grid.selected_coords.is_empty(), "rectangular range must not materialize millions of selected_coords");
+        assert!(grid.is_cell_selected(ds, GridCellCoord::new(0, 0, 0)));
+        assert!(grid.is_cell_selected(ds, GridCellCoord::new(MAX_ROWS - 1, 1, 0)));
+        assert_eq!(grid.extended_stats.map(|s| s.selected_cells), Some(MAX_ROWS * 2));
+        // Materialized brushing / coordinates intersect `0..populated_rows` (`25 * 2 = 50` cells, not 2,000,000).
+        assert_eq!(coords.len(), 50);
+        assert_eq!(targets.len(), 50);
+        assert!(frame.rows.iter().all(|r| r.cells.iter().all(|c| c.visual.is_selected)));
     }
 }

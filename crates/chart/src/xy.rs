@@ -1749,57 +1749,111 @@ fn build_connecting_path(run: &[PointPt], kind: LineConnectionKind) -> Option<Pa
         return None;
     }
     let mut commands = Vec::with_capacity(run.len() * 2);
-    commands.push(PathCmd::MoveTo(run[0]));
     match kind {
         LineConnectionKind::PointToPoint => {
+            commands.push(PathCmd::MoveTo(run[0]));
             for &p in &run[1..] {
                 commands.push(PathCmd::LineTo(p));
             }
         }
         LineConnectionKind::Staircase => {
+            commands.push(PathCmd::MoveTo(run[0]));
             for win in run.windows(2) {
                 commands.push(PathCmd::LineTo(PointPt::new(win[1].x, win[0].y)));
                 commands.push(PathCmd::LineTo(win[1]));
             }
         }
         LineConnectionKind::MonotonicCubicSpline => {
-            append_hermite_segments(&mut commands, run, false);
+            append_hermite_path(&mut commands, run, false);
         }
         LineConnectionKind::AkimaSpline => {
-            append_hermite_segments(&mut commands, run, true);
+            append_hermite_path(&mut commands, run, true);
         }
     }
     Some(Path2D { commands })
 }
 
+fn path_start_and_end(path: &Path2D) -> Option<(PointPt, PointPt)> {
+    let first = match path.commands.first()? {
+        PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::QuadTo { to: p, .. } | PathCmd::CubicTo { to: p, .. } => *p,
+        PathCmd::Close => return None,
+    };
+    let last = path.commands.iter().rev().find_map(|cmd| match cmd {
+        PathCmd::MoveTo(p) | PathCmd::LineTo(p) | PathCmd::QuadTo { to: p, .. } | PathCmd::CubicTo { to: p, .. } => Some(*p),
+        PathCmd::Close => None,
+    })?;
+    Some((first, last))
+}
+
 fn build_area_polygon(run: &[PointPt], kind: LineConnectionKind, baseline_py: f64) -> Option<Path2D> {
     let mut top_path = build_connecting_path(run, kind)?;
-    let first = run.first()?;
-    let last = run.last()?;
+    let (first, last) = path_start_and_end(&top_path)?;
     top_path.commands.push(PathCmd::LineTo(PointPt::new(last.x, baseline_py)));
     top_path.commands.push(PathCmd::LineTo(PointPt::new(first.x, baseline_py)));
     top_path.commands.push(PathCmd::Close);
     Some(top_path)
 }
 
-fn append_hermite_segments(commands: &mut Vec<PathCmd>, pts: &[PointPt], use_akima: bool) {
+/// Append a `MoveTo` + cubic Hermite spline segments (Fritsch & Carlson, *SIAM J. Numer. Anal.*
+/// 17(2):238–246, 1980; Akima, *J. ACM* 17(4):589–602, 1970).
+///
+/// Supports strictly increasing scene `x`, strictly decreasing scene `x` (reversed X axes), and
+/// unsorted runs with distinct `x` coordinates. Falls back deterministically to straight `LineTo`
+/// segments when `n == 2` or when any two points have tied scene `x` (`|dx| <= 1e-9`).
+fn append_hermite_path(commands: &mut Vec<PathCmd>, pts: &[PointPt], use_akima: bool) {
     let n = pts.len();
     if n < 2 {
         return;
     }
-    if n == 2 || pts.windows(2).any(|w| w[1].x <= w[0].x + 1e-9) {
+    if n == 2 {
+        commands.push(PathCmd::MoveTo(pts[0]));
+        commands.push(PathCmd::LineTo(pts[1]));
+        return;
+    }
+
+    if pts.windows(2).all(|w| w[1].x > w[0].x + 1e-9) {
+        let tangents = compute_spline_slopes_increasing(pts, use_akima);
+        emit_cubic_hermite_run(commands, pts, &tangents);
+        return;
+    }
+
+    if pts.windows(2).all(|w| w[1].x < w[0].x - 1e-9) {
+        let rev_pts: Vec<PointPt> = pts.iter().copied().rev().collect();
+        let mut tangents = compute_spline_slopes_increasing(&rev_pts, use_akima);
+        tangents.reverse();
+        emit_cubic_hermite_run(commands, pts, &tangents);
+        return;
+    }
+
+    let mut sorted = pts.to_vec();
+    sorted.sort_by(|a, b| a.x.total_cmp(&b.x));
+    if sorted.windows(2).all(|w| w[1].x > w[0].x + 1e-9) {
+        let tangents = compute_spline_slopes_increasing(&sorted, use_akima);
+        emit_cubic_hermite_run(commands, &sorted, &tangents);
+    } else {
+        commands.push(PathCmd::MoveTo(pts[0]));
         for &p in &pts[1..] {
             commands.push(PathCmd::LineTo(p));
         }
-        return;
     }
-    let tangents = if use_akima { akima_slopes(pts) } else { fritsch_carlson_slopes(pts) };
-    for i in 0..(n - 1) {
-        let p0 = pts[i];
-        let p1 = pts[i + 1];
+}
+
+fn compute_spline_slopes_increasing(pts: &[PointPt], use_akima: bool) -> Vec<f64> {
+    if use_akima { akima_slopes(pts) } else { fritsch_carlson_slopes(pts) }
+}
+
+fn emit_cubic_hermite_run(commands: &mut Vec<PathCmd>, pts: &[PointPt], tangents: &[f64]) {
+    let Some(&first) = pts.first() else {
+        return;
+    };
+    commands.push(PathCmd::MoveTo(first));
+    for i in 0..(pts.len().saturating_sub(1)) {
+        let (Some(&p0), Some(&p1), Some(&m0), Some(&m1)) = (pts.get(i), pts.get(i + 1), tangents.get(i), tangents.get(i + 1)) else {
+            continue;
+        };
         let dx = p1.x - p0.x;
-        let c1 = PointPt::new(p0.x + dx / 3.0, p0.y + tangents[i] * dx / 3.0);
-        let c2 = PointPt::new(p1.x - dx / 3.0, p1.y - tangents[i + 1] * dx / 3.0);
+        let c1 = PointPt::new(p0.x + dx / 3.0, p0.y + m0 * dx / 3.0);
+        let c2 = PointPt::new(p1.x - dx / 3.0, p1.y - m1 * dx / 3.0);
         commands.push(PathCmd::CubicTo { c1, c2, to: p1 });
     }
 }
@@ -2218,6 +2272,96 @@ mod tests {
             let (dmin, dmax) = resolve_sample_segment_domain(&seg_spec, &[5e-324, f64::MAX], false, 0.05, &mut warnings);
             assert!(dmin.is_finite() && dmax.is_finite() && dmin > 0.0 && dmin < dmax);
             assert!(scale_transform(scale, dmin).is_some() && scale_transform(scale, dmax).is_some());
+        }
+    }
+
+    #[test]
+    fn rv22_monotone_cubic_and_akima_splines_render_smooth_curves_on_reversed_and_unsorted_x() {
+        use curvebook_doc::{ConnectingLineStyle, LineConnectionKind};
+        use curvebook_palette::LineDashStyle;
+
+        use crate::PathCmd;
+
+        let make_spline_graph = |rows: &[(f64, f64)], kind: LineConnectionKind, reversed_x: bool| -> crate::ChartScene {
+            let mut xy = XyTable::new(SubcolumnMode::Single, 1, rows.len()).expect("xy");
+            for (r, &(x, y)) in rows.iter().enumerate() {
+                xy.set_x_cell(r, Cell::number(x)).expect("set x");
+                xy.data_sets[0].cells[r][0] = Cell::number(y);
+            }
+            let ds = DataSheet::new(SheetId::new("xy_rv22"), "Spline", TableArchetype::Xy(xy)).expect("ds");
+            let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_rv22"), &ds).expect("gs");
+            gs.initialized = true;
+            if reversed_x {
+                gs.spec.x_axis.segments[0].min = Some(10.0);
+                gs.spec.x_axis.segments[0].max = Some(0.0);
+            } else {
+                gs.spec.x_axis.segments[0].min = Some(0.0);
+                gs.spec.x_axis.segments[0].max = Some(10.0);
+            }
+            gs.spec.y_axis.segments[0].min = Some(0.0);
+            gs.spec.y_axis.segments[0].max = Some(100.0);
+            gs.spec.series[0].gdo = GraphicalDataObject::ScatterAndLine {
+                marker: None,
+                line: Some(ConnectingLineStyle { kind, color: Rgba8::BLACK, stroke_width_pt: 1.5, dash_style: LineDashStyle::Solid }),
+                area_fill: None,
+            };
+            let mut doc = ProjectDocument::default();
+            doc.add_data_sheet(ds).expect("add data");
+            doc.add_graph_sheet(gs.clone()).expect("add graph");
+            compile_graph(&gs, &doc).expect("compile spline graph")
+        };
+
+        let sample_pts = [(1.0, 10.0), (3.0, 25.0), (6.0, 75.0), (9.0, 90.0)];
+        let unsorted_pts = [(6.0, 75.0), (1.0, 10.0), (9.0, 90.0), (3.0, 25.0)];
+        let tied_pts = [(1.0, 10.0), (3.0, 25.0), (3.0, 60.0), (9.0, 90.0)];
+
+        for kind in [LineConnectionKind::MonotonicCubicSpline, LineConnectionKind::AkimaSpline] {
+            // Reversed X axis (`[10.0 -> 0.0]`, strictly decreasing scene `x`) must emit 3 `CubicTo` segments (not `LineTo` polyline).
+            let rev_scene = make_spline_graph(&sample_pts, kind, true);
+            let rev_cubic_paths: Vec<_> = rev_scene
+                .primitives
+                .iter()
+                .filter_map(|p| match p {
+                    ScenePrimitive::Path { path, clip: Some(_), stroke: Some(_), fill: None } => Some(path),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(rev_cubic_paths.len(), 1, "expected 1 clipped spline path for {kind:?} on reversed X");
+            let cubic_count = rev_cubic_paths[0].commands.iter().filter(|c| matches!(c, PathCmd::CubicTo { .. })).count();
+            assert_eq!(cubic_count, 3, "{kind:?} on reversed X fell back to straight segments: {:?}", rev_cubic_paths[0].commands);
+
+            // Unsorted distinct-X rows must sort cleanly and match the forward sorted spline path.
+            let fwd_scene = make_spline_graph(&sample_pts, kind, false);
+            let uns_scene = make_spline_graph(&unsorted_pts, kind, false);
+            let fwd_path = fwd_scene
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    ScenePrimitive::Path { path, clip: Some(_), stroke: Some(_), fill: None } => Some(path),
+                    _ => None,
+                })
+                .expect("fwd path");
+            let uns_path = uns_scene
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    ScenePrimitive::Path { path, clip: Some(_), stroke: Some(_), fill: None } => Some(path),
+                    _ => None,
+                })
+                .expect("unsorted path");
+            assert_eq!(fwd_path.commands, uns_path.commands, "{kind:?} unsorted X rows must match sorted forward spline");
+
+            // Tied X coordinates fall back deterministically to straight `LineTo` segments without NaN/Inf.
+            let tied_scene = make_spline_graph(&tied_pts, kind, false);
+            let tied_path = tied_scene
+                .primitives
+                .iter()
+                .find_map(|p| match p {
+                    ScenePrimitive::Path { path, clip: Some(_), stroke: Some(_), fill: None } => Some(path),
+                    _ => None,
+                })
+                .expect("tied path");
+            assert!(tied_path.commands.iter().all(|c| matches!(c, PathCmd::MoveTo(_) | PathCmd::LineTo(_))));
         }
     }
 }

@@ -1278,7 +1278,8 @@ fn build_km_from_survival_table(
     let mut out = Vec::with_capacity(indices.len());
     for (pos, &c_idx) in indices.iter().enumerate() {
         let Some(cohort_col) = surv.cohorts.get(c_idx) else { continue };
-        let Ok(obs) = surv.cohort_observations(c_idx) else { continue };
+        let Ok(raw_obs) = surv.cohort_observations(c_idx) else { continue };
+        let obs = filter_finite_survival_observations(raw_obs);
         if obs.is_empty() {
             continue;
         }
@@ -1294,43 +1295,35 @@ fn build_km_from_survival_table(
             let steps: Vec<KmPointStep> = curve
                 .points
                 .iter()
+                .filter(|p| p.x.is_finite() && p.y.is_finite())
                 .map(|p| KmPointStep {
                     time: p.x,
                     survival: p.y,
-                    ci_lower: p.ci_lower.unwrap_or(p.y),
-                    ci_upper: p.ci_upper.unwrap_or(p.y),
+                    ci_lower: p.ci_lower.filter(|v| v.is_finite()).unwrap_or(p.y),
+                    ci_upper: p.ci_upper.filter(|v| v.is_finite()).unwrap_or(p.y),
                     n_at_risk_before: obs.iter().filter(|o| o.time >= p.x).count(),
                 })
                 .collect();
-            out.push(KmCurveData {
-                sheet_id: Some(sheet_id.clone()),
-                col_index: c_idx,
-                label,
-                color,
-                stroke_width_pt: stroke_w,
-                show_censored_ticks: show_censor,
-                show_greenwood_ci: show_ci,
-                ci_dashed,
-                n_total: obs.len(),
-                steps,
-                censored_times,
-                observations: obs,
-            });
-            continue;
+            if !steps.is_empty() {
+                out.push(KmCurveData {
+                    sheet_id: Some(sheet_id.clone()),
+                    col_index: c_idx,
+                    label,
+                    color,
+                    stroke_width_pt: stroke_w,
+                    show_censored_ticks: show_censor,
+                    show_greenwood_ci: show_ci,
+                    ci_dashed,
+                    n_total: obs.len(),
+                    steps,
+                    censored_times,
+                    observations: obs,
+                });
+                continue;
+            }
         }
 
-        if let Ok(km) = kaplan_meier_curve(&label, &obs, false, ConfidenceLevel::DEFAULT_95) {
-            let mut steps = Vec::with_capacity(km.steps.len() + 1);
-            steps.push(KmPointStep { time: 0.0, survival: 1.0, ci_lower: 1.0, ci_upper: 1.0, n_at_risk_before: km.n_total });
-            for s in &km.steps {
-                steps.push(KmPointStep {
-                    time: s.time,
-                    survival: s.survival,
-                    ci_lower: s.ci_lower,
-                    ci_upper: s.ci_upper,
-                    n_at_risk_before: s.n_at_risk,
-                });
-            }
+        if let Some((n_total, steps)) = compute_km_steps_guarded(&label, &obs) {
             out.push(KmCurveData {
                 sheet_id: Some(sheet_id.clone()),
                 col_index: c_idx,
@@ -1340,7 +1333,7 @@ fn build_km_from_survival_table(
                 show_censored_ticks: show_censor,
                 show_greenwood_ci: show_ci,
                 ci_dashed,
-                n_total: km.n_total,
+                n_total,
                 steps,
                 censored_times,
                 observations: obs,
@@ -1348,6 +1341,24 @@ fn build_km_from_survival_table(
         }
     }
     out
+}
+
+fn filter_finite_survival_observations(obs: Vec<curvebook_doc::SurvivalObservation>) -> Vec<curvebook_doc::SurvivalObservation> {
+    obs.into_iter().filter(|o| o.time.is_finite()).collect()
+}
+
+fn compute_km_steps_guarded(label: &str, obs: &[curvebook_doc::SurvivalObservation]) -> Option<(usize, Vec<KmPointStep>)> {
+    let finite_obs: Vec<curvebook_doc::SurvivalObservation> = obs.iter().copied().filter(|o| o.time.is_finite()).collect();
+    if finite_obs.is_empty() {
+        return None;
+    }
+    let km = kaplan_meier_curve(label, &finite_obs, false, ConfidenceLevel::DEFAULT_95).ok()?;
+    let mut steps = Vec::with_capacity(km.steps.len() + 1);
+    steps.push(KmPointStep { time: 0.0, survival: 1.0, ci_lower: 1.0, ci_upper: 1.0, n_at_risk_before: km.n_total });
+    for s in &km.steps {
+        steps.push(KmPointStep { time: s.time, survival: s.survival, ci_lower: s.ci_lower, ci_upper: s.ci_upper, n_at_risk_before: s.n_at_risk });
+    }
+    Some((km.n_total, steps))
 }
 
 fn result_curve_label(res: &ResultSheet, fc: &curvebook_doc::FittedCurveOverlay, idx: usize) -> String {
@@ -2262,5 +2273,27 @@ mod tests {
             let stacked_scene = crate::compile_graph(&gs, &doc).expect("narrow stacked canvas should compile cleanly");
             assert!(!stacked_scene.primitives.is_empty());
         }
+    }
+
+    #[test]
+    fn rv31_survival_chart_filters_non_finite_times_before_kaplan_meier() {
+        use curvebook_doc::{SurvivalObservation, SurvivalStatus};
+
+        let mixed = [
+            SurvivalObservation { row: 0, time: f64::NAN, status: SurvivalStatus::Event },
+            SurvivalObservation { row: 1, time: 2.0, status: SurvivalStatus::Event },
+            SurvivalObservation { row: 2, time: f64::INFINITY, status: SurvivalStatus::Censored },
+            SurvivalObservation { row: 3, time: f64::NEG_INFINITY, status: SurvivalStatus::Event },
+            SurvivalObservation { row: 4, time: 5.0, status: SurvivalStatus::Censored },
+        ];
+        let (n_total, steps) = super::compute_km_steps_guarded("Cohort A", &mixed).expect("valid finite subset");
+        assert_eq!(n_total, 2);
+        assert!(steps.iter().all(|s| s.time.is_finite() && s.survival.is_finite()));
+
+        let all_non_finite = [
+            SurvivalObservation { row: 0, time: f64::NAN, status: SurvivalStatus::Event },
+            SurvivalObservation { row: 1, time: f64::INFINITY, status: SurvivalStatus::Censored },
+        ];
+        assert!(super::compute_km_steps_guarded("Bad", &all_non_finite).is_none());
     }
 }
