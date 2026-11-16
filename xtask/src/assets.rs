@@ -2,10 +2,62 @@
 //! `ATTRIBUTION.md` for third-party / attribution-bearing works) with an allowlisted permissive
 //! licence, and zero font binaries may be tracked in the repository.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 const FONT_EXT: &[&str] = &["ttf", "otf", "ttc", "woff", "woff2", "eot", "pfb"];
+
+const VISUAL_ASSET_EXT: &[&str] =
+    &["png", "jpg", "jpeg", "gif", "webp", "bmp", "tif", "tiff", "ico", "icns", "svg", "svgz", "avif", "pdf", "eps", "cur", "ani"];
+
+const ORIGINAL_PROVENANCE_PREFIXES: &[&str] = &[
+    "assets/app-icon/",
+    "assets/ui/",
+    "assets/icons/",
+    "assets/diagrams/",
+    "assets/schematics/",
+    "assets/thumbnails/",
+    "assets/screenshots/",
+    "docs/images/",
+];
+
+const ORIGINAL_PROVENANCE_KEYWORDS: &[&str] =
+    &["icon", "logo", "schematic", "diagram", "thumb", "screenshot", "archetype", "baseline", "cursor", "toolbar", "badge", "splash"];
+
+const FORBIDDEN_PROVENANCE_PHRASES: &[&str] = &[
+    "reference frame",
+    "reference video",
+    "video frame",
+    "reference screenshot",
+    "reference app",
+    "reference application",
+    "copied from",
+    "scraped from",
+    "extracted from",
+    "traced from",
+    "captured from",
+    "derived from vendor",
+    "derived from reference",
+    "stock icon",
+];
+
+const FORBIDDEN_PROVENANCE_BRANDS: &[&str] = &[
+    "graphpad",
+    "dotmatics",
+    "prism",
+    "instat",
+    "statmate",
+    "originlab",
+    "originpro",
+    "sigmaplot",
+    "minitab",
+    "spss",
+    "jmp",
+    "systat",
+    "artcraft",
+    "storytold",
+    "storyteller",
+];
 
 const ASSET_EXT: &[&str] = &[
     "png",
@@ -75,6 +127,7 @@ struct AssetRow {
     author: String,
     source: String,
     licence_tokens: Vec<String>,
+    notes: String,
 }
 
 fn lower_ext(path: &str) -> String {
@@ -91,6 +144,19 @@ pub fn is_font_file(path: &str) -> bool {
 pub fn is_asset(path: &str) -> bool {
     let ext = lower_ext(path);
     ASSET_DIRS.iter().any(|d| path.starts_with(d)) || ASSET_EXT.contains(&ext.as_str())
+}
+
+#[must_use]
+pub fn is_original_only_visual_asset(path: &str) -> bool {
+    let ext = lower_ext(path);
+    if !VISUAL_ASSET_EXT.contains(&ext.as_str()) {
+        return false;
+    }
+    if matches!(ext.as_str(), "cur" | "ani") || ORIGINAL_PROVENANCE_PREFIXES.iter().any(|prefix| path.starts_with(prefix)) {
+        return true;
+    }
+    let lower = path.to_ascii_lowercase();
+    ORIGINAL_PROVENANCE_KEYWORDS.iter().any(|kw| lower.contains(kw))
 }
 
 fn is_placeholder_cell(cell: &str) -> bool {
@@ -190,9 +256,10 @@ fn parse_attribution_table(md: &str, table_name: &str) -> Result<BTreeMap<String
         if rows.contains_key(path) {
             return Err(format!("{table_name}:{line_no}: duplicate row for `{path}`"));
         }
+        let notes = cells.get(4).map(|s| (*s).trim().to_owned()).unwrap_or_default();
         rows.insert(
             path.to_owned(),
-            AssetRow { path: path.to_owned(), author: (*author_cell).to_owned(), source: (*source_cell).to_owned(), licence_tokens },
+            AssetRow { path: path.to_owned(), author: (*author_cell).to_owned(), source: (*source_cell).to_owned(), licence_tokens, notes },
         );
     }
     Ok(rows)
@@ -202,6 +269,126 @@ fn row_requires_attribution_entry(row: &AssetRow) -> bool {
     let third_party_author = !row.author.to_ascii_lowercase().contains("lumencraft");
     let attr_licence = row.licence_tokens.iter().any(|tok| ATTRIBUTION_REQUIRED_LICENCES.contains(&tok.as_str()));
     third_party_author || attr_licence
+}
+
+fn has_ascii_word(lower: &str, word: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let wlen = word.len();
+    let mut start = 0usize;
+    while let Some(rel) = lower[start..].find(word) {
+        let pos = start + rel;
+        let end = pos + wlen;
+        let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
+        let right_ok = end == bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
+}
+
+fn check_forbidden_provenance_text(path: &str, field_name: &str, value: &str) -> Result<(), String> {
+    let lower = value.to_ascii_lowercase();
+    for phrase in FORBIDDEN_PROVENANCE_PHRASES {
+        if lower.contains(phrase) {
+            return Err(format!("{path}: {field_name} contains forbidden non-original provenance phrase `{phrase}`"));
+        }
+    }
+    for brand in FORBIDDEN_PROVENANCE_BRANDS {
+        if has_ascii_word(&lower, brand) {
+            return Err(format!("{path}: {field_name} references forbidden external product or vendor `{brand}`"));
+        }
+    }
+    Ok(())
+}
+
+fn check_row_safety(row: &AssetRow) -> Result<(), String> {
+    check_forbidden_provenance_text(&row.path, "author", &row.author)?;
+    check_forbidden_provenance_text(&row.path, "source", &row.source)?;
+    check_forbidden_provenance_text(&row.path, "notes", &row.notes)?;
+    Ok(())
+}
+
+fn extract_backticked_asset_refs(source: &str) -> Vec<&str> {
+    let mut refs = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find('`') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('`') else {
+            break;
+        };
+        let token = after[..end].trim();
+        if token.contains('/') {
+            refs.push(token);
+        }
+        rest = &after[end + 1..];
+    }
+    refs
+}
+
+fn is_direct_original_source(source: &str) -> bool {
+    let lower = source.to_ascii_lowercase();
+    if lower.contains("original")
+        || lower.contains("cargo xtask screenshots")
+        || lower.contains("generated in code")
+        || lower.contains("rendered in-process")
+    {
+        return true;
+    }
+    lower.contains("lumencraft")
+        && (lower.contains("approved")
+            || lower.contains("artwork")
+            || lower.contains("generated")
+            || lower.contains("created")
+            || lower.contains("drawn")
+            || lower.contains("authored")
+            || lower.contains("rendered")
+            || lower.contains("user-supplied"))
+}
+
+fn verify_original_provenance_chain(row: &AssetRow, all_rows: &BTreeMap<String, AssetRow>, visited: &mut BTreeSet<String>) -> Result<(), String> {
+    if !visited.insert(row.path.clone()) {
+        return Err(format!("{}: circular asset provenance chain in ASSETS.md", row.path));
+    }
+    check_row_safety(row)?;
+    if !row.author.to_ascii_lowercase().contains("lumencraft") {
+        return Err(format!(
+            "{}: UI icon, schematic, thumbnail, or screenshot baseline must declare LumenCraft authorship (got `{}`)",
+            row.path, row.author
+        ));
+    }
+    let src_lower = row.source.to_ascii_lowercase();
+    let notes_lower = row.notes.to_ascii_lowercase();
+    if src_lower.contains("http://") || src_lower.contains("https://") || notes_lower.contains("http://") || notes_lower.contains("https://") {
+        return Err(format!("{}: UI icon, schematic, thumbnail, or screenshot baseline cannot cite external URLs in ASSETS.md", row.path));
+    }
+
+    let parent_refs = extract_backticked_asset_refs(&row.source);
+    if !parent_refs.is_empty() {
+        for parent_path in parent_refs {
+            let Some(parent_row) = all_rows.get(parent_path) else {
+                return Err(format!("{}: cites parent asset `{parent_path}` missing from ASSETS.md", row.path));
+            };
+            verify_original_provenance_chain(parent_row, all_rows, visited)?;
+        }
+        visited.remove(&row.path);
+        return Ok(());
+    }
+
+    if !is_direct_original_source(&row.source) {
+        return Err(format!(
+            "{}: UI icon, schematic, thumbnail, or screenshot baseline must declare original LumenCraft provenance in ASSETS.md (source: `{}`)",
+            row.path, row.source
+        ));
+    }
+    visited.remove(&row.path);
+    Ok(())
+}
+
+fn verify_original_provenance(row: &AssetRow, all_rows: &BTreeMap<String, AssetRow>) -> Result<(), String> {
+    let mut visited = BTreeSet::new();
+    verify_original_provenance_chain(row, all_rows, &mut visited)
 }
 
 /// Paths that require an `ASSETS.md` row (`path` in backticks with valid author, source, and
@@ -252,6 +439,19 @@ pub fn verify_assets(files: &[String], assets_md: &str, attribution_md: &str) ->
     let attr_rows = parse_attribution_table(attribution_md, "ATTRIBUTION.md")?;
 
     let mut errors = Vec::new();
+    for row in asset_rows.values().chain(attr_rows.values()) {
+        if let Err(err) = check_row_safety(row) {
+            errors.push(err);
+        }
+    }
+    for row in asset_rows.values() {
+        if is_original_only_visual_asset(&row.path)
+            && let Err(err) = verify_original_provenance(row, &asset_rows)
+        {
+            errors.push(err);
+        }
+    }
+
     let mut asset_count = 0usize;
     for file in files {
         if !is_asset(file) {
@@ -267,6 +467,8 @@ pub fn verify_assets(files: &[String], assets_md: &str, attribution_md: &str) ->
         }
     }
 
+    errors.sort();
+    errors.dedup();
     if errors.is_empty() { Ok(asset_count) } else { Err(format!("{} asset attribution error(s):\n  {}", errors.len(), errors.join("\n  "))) }
 }
 
@@ -281,7 +483,9 @@ pub fn run(root: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_asset, is_font_file, missing, verify_assets};
+    use std::path::PathBuf;
+
+    use super::{is_asset, is_font_file, is_original_only_visual_asset, missing, verify_assets};
 
     #[test]
     fn detects_unattributed_assets() {
@@ -353,5 +557,84 @@ See also `assets/prose.png` in prose.
 | `assets/third.svg` | Upstream Icon Set | https://example.org/icon | CC-BY-4.0 | attributed |
 ";
         assert_eq!(verify_assets(&files, assets_ok, attr_ok).unwrap(), 2);
+    }
+
+    #[test]
+    fn enforces_original_provenance_on_ui_icons_schematics_thumbnails_and_screenshots() {
+        for path in [
+            "assets/ui/archetypes/xy.svg",
+            "assets/icons/toolbar-analyze.svg",
+            "assets/diagrams/anova-schematic.svg",
+            "assets/thumbnails/bar-thumb.png",
+            "docs/images/workspace-split-fit.png",
+            "assets/app-icon/source/approved-seven-pane.png",
+            "assets/app-icon/lumencraft-win95-2508.png",
+        ] {
+            assert!(is_original_only_visual_asset(path), "expected original provenance check on {path}");
+        }
+
+        let good_files = vec![
+            String::from("assets/ui/archetypes/xy.svg"),
+            String::from("assets/diagrams/anova-schematic.svg"),
+            String::from("assets/thumbnails/bar-thumb.png"),
+            String::from("docs/images/welcome.png"),
+        ];
+        let good_md = "\
+| Asset | Author | Source | Licence | Notes |
+|---|---|---|---|---|
+| `assets/ui/archetypes/xy.svg` | LumenCraft contributors | Original SVG schematic drawn for LumenCraft | MIT OR Apache-2.0 | Archetype icon |
+| `assets/diagrams/anova-schematic.svg` | LumenCraft contributors | Original diagram created for LumenCraft | MIT OR Apache-2.0 | Schematic |
+| `assets/thumbnails/bar-thumb.png` | LumenCraft contributors | Rendered from `assets/ui/archetypes/xy.svg` | MIT OR Apache-2.0 | Thumbnail |
+| `docs/images/welcome.png` | LumenCraft contributors | Deterministic workspace screenshot generated by cargo xtask screenshots | MIT OR Apache-2.0 | Baseline |
+";
+        assert_eq!(verify_assets(&good_files, good_md, "").unwrap(), 4);
+
+        // Reject third-party icon / external URL even if listed in ATTRIBUTION.md.
+        let third_party_files = vec![String::from("assets/ui/icons/save.svg")];
+        let third_party_md = "| `assets/ui/icons/save.svg` | Upstream Icon Set | https://example.org/save.svg | CC-BY-4.0 | imported |\n";
+        let third_party_attr = "| `assets/ui/icons/save.svg` | Upstream Icon Set | https://example.org/save.svg | CC-BY-4.0 | imported |\n";
+        let err_third = verify_assets(&third_party_files, third_party_md, third_party_attr).unwrap_err();
+        assert!(err_third.contains("LumenCraft authorship"), "{err_third}");
+
+        // Reject reference frame / derived vendor wording.
+        let ref_files = vec![String::from("docs/images/frame.png")];
+        let ref_md = "| `docs/images/frame.png` | LumenCraft contributors | Derived from reference frame 12 | MIT OR Apache-2.0 | screenshot |\n";
+        let err_ref = verify_assets(&ref_files, ref_md, "").unwrap_err();
+        assert!(err_ref.contains("non-original provenance phrase"), "{err_ref}");
+
+        // Reject non-original ambiguous source on a UI thumbnail.
+        let vague_files = vec![String::from("assets/thumbnails/card.png")];
+        let vague_md = "| `assets/thumbnails/card.png` | LumenCraft contributors | Exported raster image | MIT OR Apache-2.0 | card |\n";
+        let err_vague = verify_assets(&vague_files, vague_md, "").unwrap_err();
+        assert!(err_vague.contains("original LumenCraft provenance"), "{err_vague}");
+
+        // Reject dangling and circular provenance chains.
+        let bad_chain_files = vec![String::from("assets/ui/a.png"), String::from("assets/ui/b.png")];
+        let cycle_md = "\
+| `assets/ui/a.png` | LumenCraft contributors | Rendered from `assets/ui/b.png` | MIT OR Apache-2.0 | a |
+| `assets/ui/b.png` | LumenCraft contributors | Rendered from `assets/ui/a.png` | MIT OR Apache-2.0 | b |
+";
+        let err_cycle = verify_assets(&bad_chain_files, cycle_md, "").unwrap_err();
+        assert!(err_cycle.contains("circular asset provenance chain"), "{err_cycle}");
+
+        let dangling_files = vec![String::from("assets/ui/orphan.png")];
+        let dangling_md = "| `assets/ui/orphan.png` | LumenCraft contributors | Rendered from `assets/ui/missing.svg` | MIT OR Apache-2.0 | x |\n";
+        let err_dangling = verify_assets(&dangling_files, dangling_md, "").unwrap_err();
+        assert!(err_dangling.contains("missing from ASSETS.md"), "{err_dangling}");
+    }
+
+    #[test]
+    fn repo_assets_md_preserves_seven_pane_art_and_passes_provenance() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
+        let assets_md = std::fs::read_to_string(root.join("ASSETS.md")).unwrap();
+        let attr_md = std::fs::read_to_string(root.join("ATTRIBUTION.md")).unwrap();
+        let files = vec![
+            String::from("assets/app-icon/source/approved-seven-pane.png"),
+            String::from("assets/app-icon/lumencraft-win95-2508.png"),
+            String::from("assets/app-icon/lumencraft.svg"),
+            String::from("docs/images/workspace-split-fit.png"),
+            String::from("docs/images/workspace-layout-dark.png"),
+        ];
+        assert_eq!(verify_assets(&files, &assets_md, &attr_md).unwrap(), 5);
     }
 }
