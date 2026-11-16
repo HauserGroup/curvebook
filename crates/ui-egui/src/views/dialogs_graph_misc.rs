@@ -101,22 +101,28 @@ pub fn build_canvas_or_layout_view(builder: &mut LayoutBuilder<'_>, sheet_id: &S
     builder.tree.scene_papers.push(geom.mapping.clone());
     if !builder.app.presentation_mode && geom.mat_rect_px.width >= 60 && geom.mat_rect_px.height >= 60 {
         let p = geom.paper_rect_px;
-        builder.tree.canvas_title_rect = Some(WorkspacePixelRect::new(
-            u32::try_from((geom.mat_rect_px.x + 8).max(0)).unwrap_or(0),
-            u32::try_from((geom.mat_rect_px.y + 4).max(0)).unwrap_or(0),
-            geom.mat_rect_px.width.saturating_sub(16),
-            16,
-        ));
-        let xr = LayoutRectPx::new(p.x + i32::try_from(p.width / 4).unwrap_or(0), p.bottom() - 24, (p.width / 2).max(16), 20);
-        builder.tree.x_axis_title_rect = Some(xr.to_workspace_rect());
-        let y_local_x = crate::i18n::mirror_x_for_rtl(4, 24, p.width, builder.tree.is_rtl);
-        let yr = LayoutRectPx::new(
-            p.x + i32::try_from(y_local_x).unwrap_or(4),
-            p.y + i32::try_from(p.height / 4).unwrap_or(0),
-            24,
-            (p.height / 2).max(16),
-        );
-        builder.tree.y_axis_title_rect = Some(yr.to_workspace_rect());
+        if slot_tag != "secondary" || builder.tree.canvas_title_rect.is_none() {
+            builder.tree.canvas_title_rect = Some(WorkspacePixelRect::new(
+                u32::try_from((geom.mat_rect_px.x + 8).max(0)).unwrap_or(0),
+                u32::try_from((geom.mat_rect_px.y + 4).max(0)).unwrap_or(0),
+                geom.mat_rect_px.width.saturating_sub(16),
+                16,
+            ));
+        }
+        if slot_tag != "secondary" || builder.tree.x_axis_title_rect.is_none() {
+            let xr = LayoutRectPx::new(p.x + i32::try_from(p.width / 4).unwrap_or(0), p.bottom() - 24, (p.width / 2).max(16), 20);
+            builder.tree.x_axis_title_rect = Some(xr.to_workspace_rect());
+        }
+        if slot_tag != "secondary" || builder.tree.y_axis_title_rect.is_none() {
+            let y_local_x = crate::i18n::mirror_x_for_rtl(4, 24, p.width, builder.tree.is_rtl);
+            let yr = LayoutRectPx::new(
+                p.x + i32::try_from(y_local_x).unwrap_or(4),
+                p.y + i32::try_from(p.height / 4).unwrap_or(0),
+                24,
+                (p.height / 2).max(16),
+            );
+            builder.tree.y_axis_title_rect = Some(yr.to_workspace_rect());
+        }
     }
 
     if let Some(scene) = scene_opt {

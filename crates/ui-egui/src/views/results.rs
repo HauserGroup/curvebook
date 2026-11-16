@@ -27,7 +27,7 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut ResultsViewState, paylo
 }
 
 /// Build the scrollable multi-tab [`ResultSheet`] viewer inside `rect`.
-pub fn build_result_viewer_view(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, rect: LayoutRectPx) {
+pub fn build_result_viewer_view(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, rect: LayoutRectPx, slot_tag: &str) {
     let box_rect = rect.inset(6);
     if box_rect.width < 60 || box_rect.height < 60 {
         return;
@@ -171,8 +171,10 @@ pub fn build_result_viewer_view(builder: &mut LayoutBuilder<'_>, rs: &ResultShee
             );
             lx += 76;
         }
-        builder.tree.result_banner_rect = Some(banner_rect.to_workspace_rect());
-        builder.tree.result_banner_sheet_id = Some(rs.id.clone());
+        if slot_tag != "secondary" || builder.tree.result_banner_rect.is_none() {
+            builder.tree.result_banner_rect = Some(banner_rect.to_workspace_rect());
+            builder.tree.result_banner_sheet_id = Some(rs.id.clone());
+        }
         body_y += 26;
     }
 

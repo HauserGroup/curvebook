@@ -1976,6 +1976,12 @@ pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: Vi
             app.interaction.context_menu_target = None;
             Ok(UiEventOutcome { handled: true, action: String::from("popup_or_modal.closed"), ..Default::default() })
         }
+        WidgetAction::Custom { domain, payload } => {
+            let mut shard_states = std::mem::take(&mut app.view_shards);
+            let res = crate::views::dispatch_custom_view_action(app, &mut shard_states, domain, payload);
+            app.view_shards = shard_states;
+            res
+        }
         other => execute_dialog_widget_action(app, other, metrics),
     }
 }

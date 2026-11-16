@@ -9,9 +9,9 @@ use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::i18n::{EXTRA_SHARD_CATALOGS, LOCALES, all_keys, missing_translations, try_tr};
-use curvebook_ui_egui::interaction::KeyModifiers;
-use curvebook_ui_egui::layout::WidgetId;
+use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics, execute_widget_action};
 use curvebook_ui_egui::layout::a11y::{FocusScope, WidgetRole};
+use curvebook_ui_egui::layout::{WidgetAction, WidgetId};
 use curvebook_ui_egui::views::{ViewShardStates, a11y::validate_interactive_a11y, dispatch_custom_view_action};
 
 fn make_smoke_app() -> Result<UiApp, String> {
@@ -35,6 +35,7 @@ fn view_shards_and_custom_action_dispatch_smoke() -> Result<(), String> {
     let mut shards = ViewShardStates::default();
 
     let domains = [
+        "a11y",
         "welcome",
         "nav_notes",
         "toolbar_menus",
@@ -52,10 +53,22 @@ fn view_shards_and_custom_action_dispatch_smoke() -> Result<(), String> {
     for domain in domains {
         let out = dispatch_custom_view_action(&mut app, &mut shards, domain, "smoke")?;
         assert!(!out.handled);
+        let action_out = execute_widget_action(
+            &mut app,
+            &WidgetAction::Custom { domain: domain.to_owned(), payload: String::from("smoke") },
+            ViewportMetrics::default(),
+        )?;
+        assert!(!action_out.handled);
     }
 
     let err = dispatch_custom_view_action(&mut app, &mut shards, "nonexistent_domain", "payload");
     assert!(err.is_err(), "unknown custom view action domain must return Err");
+    let action_err = execute_widget_action(
+        &mut app,
+        &WidgetAction::Custom { domain: String::from("nonexistent_domain"), payload: String::from("payload") },
+        ViewportMetrics::default(),
+    );
+    assert!(action_err.is_err(), "execute_widget_action with unknown Custom domain must return Err");
 
     let valid_meta = curvebook_ui_egui::views::a11y::labeled_meta(WidgetRole::Button, "Run", FocusScope::Workspace, "Enter");
     validate_interactive_a11y(&valid_meta)?;

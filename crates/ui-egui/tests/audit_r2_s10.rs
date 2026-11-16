@@ -1,8 +1,8 @@
 //! Round 2 S10 & companion `interaction-gui_actions.md` regression tests (`R0.19`).
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, CellCoord, CellValue, ErrorCode, GraphAnnotation, GraphicalDataObject, InfoSheet, OneWayAnovaSpec, OneWayMethod,
-    PValueStackSpec, PowerAnalysisSpec, ResultSheet, SheetId, SheetSection,
+    AnalysisKind, AnalysisSpec, CellCoord, CellValue, ChecklistItem, ChecklistStatus, ErrorCode, GraphAnnotation, GraphSheet, GraphicalDataObject,
+    InfoSheet, OneWayAnovaSpec, OneWayMethod, PValueStackSpec, PowerAnalysisSpec, ResultSheet, SheetId, SheetSection,
 };
 use curvebook_tools::GridCellCoord;
 use curvebook_ui_egui::control_io::{dispatch_gui_action, handle_control_line};
@@ -12,8 +12,8 @@ use curvebook_ui_egui::menus::tooltips::menu_bar_tooltips;
 use curvebook_ui_egui::modal_predicates::evaluate_dialog_widget;
 use curvebook_ui_egui::power_wizard::PowerWizardStage;
 use curvebook_ui_egui::{
-    HumanPathDriver, KeyModifiers, LocalePreset, PointerButton, UiApp, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, WidgetAction,
-    dispatch_ui_event, execute_widget_action, inspect_ui_tree, inspect_ui_tree_for_metrics,
+    HumanPathDriver, KeyModifiers, LayoutTree, LocalePreset, PointerButton, UiApp, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder,
+    WidgetAction, WorkspacePixelRect, dispatch_ui_event, execute_widget_action, inspect_ui_tree, inspect_ui_tree_for_metrics,
 };
 use serde_json::{Value, json};
 
@@ -535,6 +535,14 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
     {
         return Err(format!("formula_bar.commit unexpectedly disabled for new named formula column: {:?}", commit_node.disabled_reason));
     }
+    let fb_tree = app.build_and_cache_layout_tree(ViewportMetrics::default());
+    let commit_widget = fb_tree.node("formula_bar.commit").ok_or_else(|| String::from("missing formula_bar.commit in LayoutTree"))?;
+    if !commit_widget.state.enablement.enabled || commit_widget.action == WidgetAction::NoOp {
+        return Err(format!(
+            "R2-S10-13 visual formula_bar.commit unexpectedly disabled for non-empty target_title: enabled={}, reason={:?}",
+            commit_widget.state.enablement.enabled, commit_widget.state.enablement.disabled_reason
+        ));
+    }
     app.grid.formula_bar.active = false;
 
     // R2-S10-14: Discontiguous Cmd+Click preserves exact 2 selected cells in visible_frame, inspect, quick_stats, exclude intents.
@@ -707,6 +715,124 @@ fn interaction_gui_actions_items_1_3_4_5_new1() -> TestRes {
     if saved != Some(42.5) || app.inline_editor.active {
         return Err(format!("expected NEW-1 auto-commit to save 42.5, got {saved:?}, active={}", app.inline_editor.active));
     }
+
+    Ok(())
+}
+
+fn assert_rect_inside(outer: WorkspacePixelRect, inner: WorkspacePixelRect, label: &str) -> TestRes {
+    if inner.x < outer.x || inner.y < outer.y || inner.right() > outer.right() || inner.bottom() > outer.bottom() {
+        return Err(format!("{label} rect {inner:?} escaped primary split pane {outer:?}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn r2_s10_09_split_pane_preserves_primary_singleton_geometry() -> TestRes {
+    let (mut app, ds_id, ds2_id, gs_id, _) = ok_doc_and_app()?;
+
+    let rs1_spec =
+        AnalysisSpec::new("rs-split-1", ds_id.clone(), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).map_err(|e| format!("{e}"))?;
+    let rs2_spec =
+        AnalysisSpec::new("rs-split-2", ds2_id.clone(), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).map_err(|e| format!("{e}"))?;
+    let mut rs1 = ResultSheet::new(rs1_spec).map_err(|e| format!("{e}"))?;
+    let mut rs2 = ResultSheet::new(rs2_spec).map_err(|e| format!("{e}"))?;
+    let warn_item = ChecklistItem {
+        assumption: String::from("Normality"),
+        status: ChecklistStatus::Warn,
+        diagnostic_metric: None,
+        explanation: String::from("Minor skew"),
+        remediation: None,
+    };
+    rs1.checklist.push(warn_item.clone());
+    rs2.checklist.push(warn_item);
+    let rs1_id = rs1.id.clone();
+    let rs2_id = rs2.id.clone();
+
+    let info1_id = SheetId::from("info-1");
+    let info2 = InfoSheet::new_preseeded("info-2", "Secondary Info").map_err(|e| format!("{e}"))?;
+    let info2_id = info2.id.clone();
+
+    let gs2_id = {
+        let mut doc = app.document().clone();
+        let ds2 = doc.data_sheet(&ds2_id).ok_or_else(|| String::from("missing ds2"))?.clone();
+        let gs2 = GraphSheet::new_uninitialized_for_data("g-split-2", &ds2).map_err(|e| format!("{e}"))?;
+        let gs2_id = gs2.id.clone();
+        doc.add_graph_sheet(gs2).map_err(|e| format!("{e}"))?;
+        doc.add_result_sheet(rs1).map_err(|e| format!("{e}"))?;
+        doc.add_result_sheet(rs2).map_err(|e| format!("{e}"))?;
+        doc.add_info_sheet(info2).map_err(|e| format!("{e}"))?;
+        app = UiApp::from_session(curvebook_engine::Session::from_document(doc));
+        gs2_id
+    };
+
+    let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
+    app.split.enabled = true;
+
+    // 1. Two DataSheets: primary grid_geometry preserved.
+    app.split.primary_sheet_id = Some(ds_id.clone());
+    app.split.secondary_sheet_id = Some(ds2_id.clone());
+    let grid_tree = LayoutTree::build(&app, metrics);
+    let grid_prim = grid_tree.split_primary.ok_or_else(|| String::from("missing split_primary for grid"))?;
+    let grid_geom = grid_tree.grid_geometry.as_ref().ok_or_else(|| String::from("missing grid_geometry"))?;
+    if grid_geom.sheet_id != ds_id {
+        return Err(format!("secondary DataSheet overwrote primary grid_geometry: expected {ds_id:?}, got {:?}", grid_geom.sheet_id));
+    }
+    assert_rect_inside(grid_prim, grid_geom.sheet_rect, "grid_geometry.sheet_rect")?;
+
+    // 2. Two GraphSheets: both scene_papers kept, primary title/axis rects preserved.
+    app.split.primary_sheet_id = Some(gs_id.clone());
+    app.split.secondary_sheet_id = Some(gs2_id.clone());
+    let graph_tree = LayoutTree::build(&app, metrics);
+    let graph_prim = graph_tree.split_primary.ok_or_else(|| String::from("missing split_primary for graph"))?;
+    let paper_ids: Vec<&SheetId> = graph_tree.scene_papers.iter().map(|p| &p.sheet_id).collect();
+    if paper_ids != vec![&gs_id, &gs2_id] {
+        return Err(format!("expected both scene_papers [{gs_id:?}, {gs2_id:?}], got {paper_ids:?}"));
+    }
+    let graph_map = graph_tree.to_workspace_layout_map();
+    if graph_map.scene_paper.as_ref().map(|p| &p.sheet_id) != Some(&gs_id) {
+        return Err(format!("expected map.scene_paper == {gs_id:?}, got {:?}", graph_map.scene_paper.as_ref().map(|p| &p.sheet_id)));
+    }
+    for (label, rect_opt) in [
+        ("canvas_title_rect", graph_tree.canvas_title_rect),
+        ("x_axis_title_rect", graph_tree.x_axis_title_rect),
+        ("y_axis_title_rect", graph_tree.y_axis_title_rect),
+    ] {
+        let rect = rect_opt.ok_or_else(|| format!("missing {label}"))?;
+        assert_rect_inside(graph_prim, rect, label)?;
+    }
+
+    // 3. Two ResultSheets with diagnostic banners: primary banner rect & sheet ID preserved.
+    app.split.primary_sheet_id = Some(rs1_id.clone());
+    app.split.secondary_sheet_id = Some(rs2_id);
+    let res_tree = LayoutTree::build(&app, metrics);
+    let res_prim = res_tree.split_primary.ok_or_else(|| String::from("missing split_primary for result"))?;
+    if res_tree.result_banner_sheet_id.as_ref() != Some(&rs1_id) {
+        return Err(format!("secondary ResultSheet overwrote result_banner_sheet_id: {:?}", res_tree.result_banner_sheet_id));
+    }
+    let banner_rect = res_tree.result_banner_rect.ok_or_else(|| String::from("missing result_banner_rect"))?;
+    assert_rect_inside(res_prim, banner_rect, "result_banner_rect")?;
+
+    // 4. Two InfoSheets: primary info_sheet_id & notes rect preserved.
+    app.split.primary_sheet_id = Some(info1_id.clone());
+    app.split.secondary_sheet_id = Some(info2_id);
+    let info_tree = LayoutTree::build(&app, metrics);
+    let info_prim = info_tree.split_primary.ok_or_else(|| String::from("missing split_primary for info"))?;
+    if info_tree.info_sheet_id.as_ref() != Some(&info1_id) {
+        return Err(format!("secondary InfoSheet overwrote info_sheet_id: {:?}", info_tree.info_sheet_id));
+    }
+    let notes_rect = info_tree.info_notes_rect.ok_or_else(|| String::from("missing info_notes_rect"))?;
+    assert_rect_inside(info_prim, notes_rect, "info_notes_rect")?;
+
+    // 5. Disjoint categories (Data primary + Graph secondary): secondary populates empty singleton slots.
+    app.split.primary_sheet_id = Some(ds_id.clone());
+    app.split.secondary_sheet_id = Some(gs_id.clone());
+    let mixed_tree = LayoutTree::build(&app, metrics);
+    let mixed_sec = mixed_tree.split_secondary.ok_or_else(|| String::from("missing split_secondary for mixed"))?;
+    if mixed_tree.grid_geometry.as_ref().map(|g| &g.sheet_id) != Some(&ds_id) {
+        return Err(String::from("mixed split missing primary grid_geometry"));
+    }
+    let mixed_title = mixed_tree.canvas_title_rect.ok_or_else(|| String::from("mixed split missing secondary canvas_title_rect"))?;
+    assert_rect_inside(mixed_sec, mixed_title, "mixed secondary canvas_title_rect")?;
 
     Ok(())
 }

@@ -262,6 +262,10 @@ pub enum WidgetAction {
     SelectCanvasTool(String),
     SelectLayoutPanel(String),
     ClosePopupOrModal,
+    Custom {
+        domain: String,
+        payload: String,
+    },
 }
 
 /// Single retained node in [`LayoutTree`], driving paint, hit-testing, accessibility, and `inspect.rs`.
@@ -756,6 +760,7 @@ pub fn compute_ui_state_fingerprint(app: &UiApp, metrics: ViewportMetrics) -> u6
         &app.nav.gallery.open,
         &app.nav.gallery.selected_ids,
         &app.nav.active_pane,
+        &app.view_shards,
     )) {
         feed_bytes(&s3);
     }

@@ -116,6 +116,7 @@ pub(crate) struct UiShellSnapshot {
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
     pub human_path_only: bool,
+    pub view_shards: views::ViewShardStates,
 }
 
 /// Equality-transparent cache slot storing the latest finalized [`layout::RetainedLayoutFrame`].
@@ -211,6 +212,7 @@ pub struct UiApp {
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
     pub human_path_only: bool,
+    pub view_shards: views::ViewShardStates,
     pub(crate) retained_layout: CachedLayoutSlot,
     pub(crate) batch_undo_log: Option<BatchUndoTracker>,
 }
@@ -253,6 +255,7 @@ impl UiApp {
             focus_widget_id: None,
             power_wizards_by_sheet: std::collections::BTreeMap::new(),
             human_path_only: false,
+            view_shards: views::ViewShardStates::default(),
             retained_layout: CachedLayoutSlot::default(),
             batch_undo_log: None,
         };
@@ -284,6 +287,7 @@ impl UiApp {
             focus_widget_id: self.focus_widget_id.clone(),
             power_wizards_by_sheet: self.power_wizards_by_sheet.clone(),
             human_path_only: self.human_path_only,
+            view_shards: self.view_shards.clone(),
         }
     }
 
@@ -309,6 +313,7 @@ impl UiApp {
         self.focus_widget_id = snap.focus_widget_id;
         self.power_wizards_by_sheet = snap.power_wizards_by_sheet;
         self.human_path_only = snap.human_path_only;
+        self.view_shards = snap.view_shards;
         self.retained_layout.0 = None;
         self.sync_views();
     }

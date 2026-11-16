@@ -49,7 +49,8 @@ pub fn build_formula_bar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, sh
             },
         );
         let fb = &builder.app.grid.formula_bar;
-        let commit_ok = !ds.frozen && fb.active && fb.target_column.is_some() && fb.is_valid && fb.parse_error.is_none();
+        let commit_ok =
+            !ds.frozen && fb.active && (fb.target_column.is_some() || !fb.target_title.trim().is_empty()) && fb.is_valid && fb.parse_error.is_none();
         let commit_en = if commit_ok { ControlEnablement::enabled() } else { ControlEnablement::disabled("Formula bar inactive or incomplete") };
         emit_button(
             builder,

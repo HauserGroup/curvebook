@@ -58,6 +58,7 @@ use welcome::{WelcomeViewState, build_portfolio_gallery};
 /// Aggregated transient UI state for all interactive view shards wired onto [`UiApp`].
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct ViewShardStates {
+    pub a11y: a11y::A11yViewState,
     pub welcome: WelcomeViewState,
     pub nav_notes: NavNotesViewState,
     pub toolbar_menus: ToolbarMenusViewState,
@@ -84,6 +85,7 @@ pub fn dispatch_custom_view_action(
     payload: &str,
 ) -> Result<UiEventOutcome, String> {
     match domain {
+        "a11y" => a11y::handle_custom_action(app, &mut shard_states.a11y, payload),
         "welcome" => welcome::handle_custom_action(app, &mut shard_states.welcome, payload),
         "nav_notes" => nav_notes::handle_custom_action(app, &mut shard_states.nav_notes, payload),
         "toolbar_menus" => toolbar_menus::handle_custom_action(app, &mut shard_states.toolbar_menus, payload),
@@ -281,13 +283,13 @@ fn build_sheet_pane(builder: &mut LayoutBuilder<'_>, sheet_id: &SheetId, rect: L
         build_canvas_or_layout_view(builder, sheet_id, rect, slot_tag);
     } else if let Some(ds) = doc.data_sheet(sheet_id) {
         let ds_cloned = ds.clone();
-        build_data_grid_view(builder, &ds_cloned, rect);
+        build_data_grid_view(builder, &ds_cloned, rect, slot_tag);
     } else if let Some(rs) = doc.result_sheet(sheet_id) {
         let rs_cloned = rs.clone();
-        build_result_viewer_view(builder, &rs_cloned, rect);
+        build_result_viewer_view(builder, &rs_cloned, rect, slot_tag);
     } else if let Some(info) = doc.info_sheet(sheet_id) {
         let info_cloned = info.clone();
-        build_info_sheet_view(builder, &info_cloned, rect);
+        build_info_sheet_view(builder, &info_cloned, rect, slot_tag);
     }
 }
 

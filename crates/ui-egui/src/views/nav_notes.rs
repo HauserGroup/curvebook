@@ -240,7 +240,7 @@ pub fn build_family_pane(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
 }
 
 /// Build the Info Sheet constants + notes editor view inside `rect`.
-pub fn build_info_sheet_view(builder: &mut LayoutBuilder<'_>, info: &InfoSheet, rect: LayoutRectPx) {
+pub fn build_info_sheet_view(builder: &mut LayoutBuilder<'_>, info: &InfoSheet, rect: LayoutRectPx, slot_tag: &str) {
     let box_rect = rect.inset(8);
     if box_rect.width < 60 || box_rect.height < 60 {
         return;
@@ -254,8 +254,10 @@ pub fn build_info_sheet_view(builder: &mut LayoutBuilder<'_>, info: &InfoSheet, 
         box_rect.x + i32::try_from(crate::i18n::mirror_x_for_rtl(half_w, box_rect.width - half_w, box_rect.width, builder.tree.is_rtl)).unwrap_or(0);
     let notes_rect = LayoutRectPx::new(notes_x + 6, box_rect.y + 24, box_rect.width.saturating_sub(half_w + 12), box_rect.height.saturating_sub(30));
 
-    builder.tree.info_notes_rect = Some(notes_rect.to_workspace_rect());
-    builder.tree.info_sheet_id = Some(info.id.clone());
+    if slot_tag != "secondary" || builder.tree.info_notes_rect.is_none() {
+        builder.tree.info_notes_rect = Some(notes_rect.to_workspace_rect());
+        builder.tree.info_sheet_id = Some(info.id.clone());
+    }
 
     let size_px = (12.0 * builder.scale()).clamp(9.0, 22.0);
     let st = UiTextStyle::ui_sans(size_px);

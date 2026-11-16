@@ -1,6 +1,22 @@
 //! View-level accessibility metadata and `R10.20` verification helpers.
 
+use serde::{Deserialize, Serialize};
+
+use crate::UiApp;
+use crate::interaction::UiEventOutcome;
 use crate::layout::a11y::{AccessibilityMeta, FocusScope, WidgetRole};
+
+/// Transient view state owned by the accessibility shard.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct A11yViewState {}
+
+/// Dispatch custom `WidgetAction::Custom` events targeting the `a11y` domain.
+///
+/// # Errors
+/// Never returns an error in the Wave 5 scaffold; reserved for future accessibility actions.
+pub fn handle_custom_action(_app: &mut UiApp, _state: &mut A11yViewState, _payload: &str) -> Result<UiEventOutcome, String> {
+    Ok(UiEventOutcome::default())
+}
 
 /// Construct [`AccessibilityMeta`] for a view node with a required `keyboard_path`.
 #[must_use]

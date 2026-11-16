@@ -32,7 +32,7 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut GridCoreViewState, payl
 }
 
 /// Build the virtualized data table grid view for `ds` inside `rect`.
-pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rect: LayoutRectPx) {
+pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rect: LayoutRectPx, slot_tag: &str) {
     let sheet_rect = LayoutRectPx::new(rect.x + 6, rect.y + 6, rect.width.saturating_sub(12), rect.height.saturating_sub(12));
     if sheet_rect.width < 40 || sheet_rect.height < 40 {
         return;
@@ -265,7 +265,9 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
         }
     }
 
-    builder.tree.grid_geometry = Some(geom);
+    if slot_tag != "secondary" || builder.tree.grid_geometry.is_none() {
+        builder.tree.grid_geometry = Some(geom);
+    }
     builder.pop_clip();
 }
 
