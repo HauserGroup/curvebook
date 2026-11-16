@@ -252,4 +252,4 @@ Importing a pre-built `.pzfx`, `.prism`, or `.csv` file bypasses `B2`, but `B1`,
 | `WF-50` Compact Letter Display | Pass | `0 / 1` | `B1`–`B5` | Live right-hand Graph Inspector ([`R10.18`](ROADMAP.md#r1018-live-right-hand-inspector)); pairwise modal controls inert (`R10.3`) |
 | **Total** | **50 / 50** | **`0 / 50`** | | |
 
-The human-path column is updated only from observed `R10.2` harness runs and recorded manual walkthroughs ([`R10.13`](ROADMAP.md#r1013-human-operable-50-workflow-acceptance--manual-qa)).
+The human-path column is updated only from observed `R10.2` human-path tests (citing the passing test name inside the `Human path` cell) and recorded manual walkthroughs ([`R10.13`](ROADMAP.md#r1013-human-operable-50-workflow-acceptance--manual-qa)), enforced by `cargo xtask status` per [Pitfall #6](pitfalls.md#6-treating-semantic-agent-harness-tests-as-proof-of-human-gui-parity) (`--control` / `--event-script` / agent-harness tests never count).
