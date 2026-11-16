@@ -4,11 +4,15 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::net::SocketAddr;
+use std::io::{BufReader, Read};
+use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use lumencraft::desktop_host::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowSession, open_document_from_files};
+use lumencraft::gui_window::{LiveControlChannel, LiveControlPostHook, run_native_desktop_with_control};
+use lumencraft::live_control::{LiveControlBridge, LiveControlServerGuard, serve_live_control_io, spawn_live_control_accept_loop};
 use lumencraft_engine::Session;
 use lumencraft_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, RecoveryReport};
 use lumencraft_format::versioned::{
@@ -16,6 +20,7 @@ use lumencraft_format::versioned::{
 };
 use lumencraft_render::RenderTargetSpec;
 use lumencraft_text::{TrueTypeFontInfo, parse_truetype_font_info};
+use lumencraft_ui_egui::control_io::CONTROL_CLIENT_IDLE_TIMEOUT;
 use lumencraft_ui_egui::dialogs_canvas::render_workspace_frame_png;
 use lumencraft_ui_egui::interaction::ViewportMetrics;
 use lumencraft_ui_egui::theme::install_fonts;
@@ -34,6 +39,7 @@ usage: lumencraft [options] [--] [file...]
 options:
   --control <port>         listen on 127.0.0.1:<port> for authenticated JSON-lines automation
   --control-token <token>  bearer token for --control authentication (or LUMENCRAFT_CONTROL_TOKEN)
+  --window                 attach a visible desktop window to --control <port> (instead of headless)
   --gui-only               restrict automation (--control) to interactive GUI actions only
   --in-window-menus     render the menu bar inside the window on macOS
   --new-instance        open files in a separate application window
@@ -58,6 +64,7 @@ enum CliAction {
 struct LaunchConfig {
     control_port: Option<u16>,
     control_token: Option<String>,
+    window: bool,
     gui_only: bool,
     in_window_menus: bool,
     new_instance: bool,
@@ -169,6 +176,10 @@ fn parse_args_with_env(args: &[String], env_port: Option<&str>, env_token: Optio
                 cfg.control_token = Some(validated.as_str().to_owned());
                 i += 2;
             }
+            "--window" => {
+                cfg.window = true;
+                i += 1;
+            }
             "--gui-only" => {
                 cfg.gui_only = true;
                 i += 1;
@@ -230,8 +241,16 @@ fn parse_args_with_env(args: &[String], env_port: Option<&str>, env_token: Optio
     }
 
     apply_env_control_overrides(&mut cfg, env_port, env_token)?;
+    validate_launch_config(&cfg)?;
 
     Ok(CliAction::Launch(cfg))
+}
+
+fn validate_launch_config(cfg: &LaunchConfig) -> Result<(), String> {
+    if cfg.window && cfg.headless_once {
+        return Err(String::from("--window cannot be combined with --headless-once"));
+    }
+    Ok(())
 }
 
 fn apply_env_control_overrides(cfg: &mut LaunchConfig, env_port: Option<&str>, env_token: Option<&str>) -> Result<(), String> {
@@ -340,6 +359,7 @@ fn launch_application(cfg: &LaunchConfig) -> Result<(), String> {
 }
 
 fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Option<OsString>) -> Result<(), String> {
+    validate_launch_config(cfg)?;
     let _loaded_fonts = install_fonts();
     let _ = lumencraft_ui_egui::bundled_fonts_enabled();
     let _ = lumencraft_format::EXTENSION;
@@ -349,9 +369,9 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
     let app_paths = resolve_app_paths_with_env(exe_dir.as_deref(), cfg.portable_dir.as_deref(), &env_get)?;
     let _validated_font = cfg.ttf_font.as_deref().map(load_validated_ttf_font).transpose()?;
 
-    let interactive_gui = !cfg.headless_once && cfg.event_script.is_none() && cfg.control_port.is_none();
+    let launch_window = !cfg.headless_once && (cfg.window || (cfg.event_script.is_none() && cfg.control_port.is_none()));
     let enable_recovery = !no_prefs && (app_paths.portable || !cfg.headless_once);
-    let initial_viewport = if interactive_gui { ViewportMetrics::new(1280.0, 800.0, 2.0) } else { ViewportMetrics::new(400.0, 260.0, 2.0) };
+    let initial_viewport = if launch_window { ViewportMetrics::new(1280.0, 800.0, 2.0) } else { ViewportMetrics::new(400.0, 260.0, 2.0) };
     let recovery_root =
         if enable_recovery && can_create_recovery_root(&app_paths.recovery_dir)? { Some(app_paths.recovery_dir.clone()) } else { None };
 
@@ -397,7 +417,13 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         });
     }
 
-    if interactive_gui {
+    if let Some(script_path) = cfg.event_script.as_deref() {
+        let script = lumencraft_platform::fs::read_regular_file_utf8(script_path, MAX_EVENT_SCRIPT_BYTES)
+            .map_err(|err| format!("failed to read --event-script `{}`: {err}", script_path.display()))?;
+        let _ = runtime_guard.get_mut()?.run_event_script_jsonl(&script)?;
+    }
+
+    if launch_window {
         let extra_ttf_bytes = cfg
             .ttf_font
             .as_deref()
@@ -414,14 +440,17 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
             }
             Ok(())
         });
+        let (live_guards, live_control) = match cfg.control_port {
+            Some(port) => {
+                let (guards, channel) = start_live_window_control_server(port, cfg, &app_paths, no_prefs)?;
+                (Some(guards), Some(channel))
+            }
+            None => (None, None),
+        };
         let runtime = runtime_guard.take()?;
-        return lumencraft::gui_window::run_native_desktop(runtime, extra_ttf_bytes, cleanup);
-    }
-
-    if let Some(script_path) = cfg.event_script.as_deref() {
-        let script = lumencraft_platform::fs::read_regular_file_utf8(script_path, MAX_EVENT_SCRIPT_BYTES)
-            .map_err(|err| format!("failed to read --event-script `{}`: {err}", script_path.display()))?;
-        let _ = runtime_guard.get_mut()?.run_event_script_jsonl(&script)?;
+        let res = run_native_desktop_with_control(runtime, extra_ttf_bytes, cleanup, live_control);
+        drop(live_guards);
+        return res;
     }
 
     if cfg.headless_once {
@@ -511,6 +540,38 @@ fn theme_mode_pref_str(mode: UiThemeMode) -> &'static str {
     }
 }
 
+fn maybe_persist_changed_control_prefs(
+    app: &UiApp,
+    ctx: &ControlPostRequestContext<'_>,
+    prev_prefs: &mut Option<(String, UiThemeMode, Option<String>)>,
+    app_paths: &AppPaths,
+    no_prefs: bool,
+) {
+    if no_prefs {
+        return;
+    }
+    let baseline = prev_prefs.get_or_insert_with(|| capture_control_pref_fingerprint(app));
+    if ctx.request_ok && !ctx.rolled_back {
+        let current = capture_control_pref_fingerprint(app);
+        if *baseline != current {
+            *baseline = current;
+            persist_window_preferences_best_effort(app, app_paths, false);
+        }
+    }
+}
+
+fn make_control_pref_persist_hook(app_paths: &AppPaths, no_prefs: bool) -> Option<LiveControlPostHook> {
+    if no_prefs {
+        return None;
+    }
+    let paths = app_paths.clone();
+    let mut prev_prefs = None;
+    Some(Box::new(move |app: &UiApp, ctx: &ControlPostRequestContext<'_>| {
+        maybe_persist_changed_control_prefs(app, ctx, &mut prev_prefs, &paths, false);
+        Ok(())
+    }))
+}
+
 fn serve_control_with_pref_persistence<F>(win: &mut DesktopWindowSession, app_paths: &AppPaths, no_prefs: bool, mut runner: F) -> Result<(), String>
 where
     F: FnMut(&mut UiApp, &mut dyn FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>) -> std::io::Result<()>,
@@ -522,13 +583,7 @@ where
         }
         let mut persist_after_control = |app: &UiApp, ctx: &ControlPostRequestContext<'_>| -> Result<(), String> {
             on_post_request(app, ctx)?;
-            if !no_prefs && ctx.request_ok && !ctx.rolled_back {
-                let current = capture_control_pref_fingerprint(app);
-                if prev_prefs.as_ref() != Some(&current) {
-                    prev_prefs = Some(current);
-                    persist_window_preferences_best_effort(app, app_paths, false);
-                }
-            }
+            maybe_persist_changed_control_prefs(app, ctx, &mut prev_prefs, app_paths, no_prefs);
             Ok(())
         };
         runner(app, &mut persist_after_control)
@@ -551,6 +606,70 @@ fn run_authenticated_control_server(
     write_control_token_file(&token_path, &auth)?;
     let _token_guard = ControlTokenFileGuard { path: token_path };
     serve_control_with_pref_persistence(win, app_paths, no_prefs, |app, hook| serve_control_listener_with_hook(app, &listener, &auth, hook))
+}
+
+struct LiveControlServerGuards {
+    _server_guard: LiveControlServerGuard,
+    _token_guard: ControlTokenFileGuard,
+}
+
+fn start_live_window_control_server(
+    port: u16,
+    cfg: &LaunchConfig,
+    app_paths: &AppPaths,
+    no_prefs: bool,
+) -> Result<(LiveControlServerGuards, LiveControlChannel), String> {
+    let auth = resolve_control_auth(cfg)?;
+    let addr = SocketAddr::from(([127, 0, 0, 1], port));
+    let checked = validate_loopback_addr(addr)?;
+    let listener = bind_control_tcp_listener(checked).map_err(|err| format!("failed to bind control socket {checked}: {err}"))?;
+    let token_path = control_token_file_path(&app_paths.config_dir, port);
+    write_control_token_file(&token_path, &auth)?;
+    let token_guard = ControlTokenFileGuard { path: token_path };
+    start_live_window_control_on_listener(listener, auth, app_paths, no_prefs, token_guard)
+}
+
+fn start_live_window_control_on_listener(
+    listener: TcpListener,
+    auth: ControlAuth,
+    app_paths: &AppPaths,
+    no_prefs: bool,
+    token_guard: ControlTokenFileGuard,
+) -> Result<(LiveControlServerGuards, LiveControlChannel), String> {
+    listener.set_nonblocking(true).map_err(|err| format!("failed to configure nonblocking control listener: {err}"))?;
+    let (bridge, mut channel) = LiveControlBridge::new(auth);
+    if let Some(hook) = make_control_pref_persist_hook(app_paths, no_prefs) {
+        channel = channel.with_post_hook(hook);
+    }
+    let server_guard = spawn_live_control_accept_loop(bridge, move || listener.accept().map(|(stream, _)| stream), serve_live_control_tcp_stream)?;
+    let guards = LiveControlServerGuards { _server_guard: server_guard, _token_guard: token_guard };
+    Ok((guards, channel))
+}
+
+fn serve_live_control_tcp_stream(mut stream: TcpStream, bridge: &LiveControlBridge) -> std::io::Result<()> {
+    // Accepted sockets inherit non-blocking mode from the listener on macOS/BSD.
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_IDLE_TIMEOUT))?;
+    let reader_stream = stream.try_clone()?;
+    let mut reader = BufReader::new(reader_stream);
+    serve_live_control_io(&mut reader, &mut stream, bridge, drain_oversized_tcp_stream)
+}
+
+fn drain_oversized_tcp_stream(tcp: &mut TcpStream) {
+    let _ = tcp.shutdown(Shutdown::Write);
+    // Drain bounded trailing frame bytes briefly after FIN so BSD/macOS sockets do not send TCP RST
+    // and discard the JSON error response still in the client's receive buffer.
+    let _ = tcp.set_read_timeout(Some(Duration::from_millis(20)));
+    let mut discard = [0u8; 8192];
+    let mut drained = 0usize;
+    let deadline = Instant::now() + Duration::from_millis(50);
+    while drained < 2 * 1024 * 1024 && Instant::now() < deadline {
+        match tcp.read(&mut discard) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => drained += n,
+        }
+    }
 }
 
 fn should_persist_preferences(app: &UiApp, paths: &AppPaths) -> Result<bool, String> {
@@ -939,6 +1058,7 @@ mod tests {
             Some(CliAction::Launch(LaunchConfig {
                 control_port: Some(9123),
                 control_token: None,
+                window: false,
                 gui_only: false,
                 in_window_menus: true,
                 new_instance: true,
@@ -957,6 +1077,7 @@ mod tests {
             Some(CliAction::Launch(LaunchConfig {
                 control_port: Some(9124),
                 control_token: None,
+                window: false,
                 gui_only: true,
                 in_window_menus: false,
                 new_instance: false,
@@ -969,6 +1090,30 @@ mod tests {
             }))
         );
         assert!(super::USAGE.contains("--gui-only"));
+        assert!(super::USAGE.contains("--window"));
+
+        let window_args = vec![String::from("--control"), String::from("9125"), String::from("--window"), String::from("--gui-only")];
+        assert_eq!(
+            parse_args(&window_args, None).ok(),
+            Some(CliAction::Launch(LaunchConfig {
+                control_port: Some(9125),
+                control_token: None,
+                window: true,
+                gui_only: true,
+                in_window_menus: false,
+                new_instance: false,
+                headless_once: false,
+                portable_dir: None,
+                ttf_font: None,
+                rulers: false,
+                event_script: None,
+                files: Vec::new(),
+            }))
+        );
+        assert!(
+            super::parse_args(&[String::from("--control"), String::from("9125"), String::from("--window"), String::from("--headless-once")], None)
+                .is_err()
+        );
 
         let portable_args = vec![
             String::from("--portable-dir"),
@@ -984,6 +1129,7 @@ mod tests {
             Some(CliAction::Launch(LaunchConfig {
                 control_port: None,
                 control_token: None,
+                window: false,
                 gui_only: false,
                 in_window_menus: false,
                 new_instance: false,
@@ -1710,6 +1856,105 @@ mod tests {
         assert!(paths.recovery_dir.join(lumencraft_format::LOCKFILE_NAME).is_file(), "primary lock must remain untouched");
 
         drop(primary_journal.abandon());
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn live_window_control_server_roundtrip_and_token_cleanup() -> Result<(), Box<dyn std::error::Error>> {
+        use std::io::{BufRead, BufReader, BufWriter, ErrorKind, Write};
+        use std::net::{SocketAddr, TcpStream};
+        use std::time::{Duration, Instant};
+
+        use lumencraft::desktop_host::{DesktopHostConfig, DesktopHostRuntime};
+        use lumencraft::gui_window::{LumenCraftNativeApp, build_egui_font_definitions};
+        use lumencraft_ui_egui::{ControlAuth, ViewportMetrics, bind_control_tcp_listener};
+
+        let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+            Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+            other => other?,
+        };
+        let addr = listener.local_addr()?;
+        match TcpStream::connect_timeout(&addr, Duration::from_millis(250)) {
+            Ok(probe) => {
+                drop(probe);
+                let _ = listener.accept();
+            }
+            Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => return Ok(()),
+            Err(err) => return Err(Box::new(err)),
+        }
+
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("lc-main-live-win-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let app_paths = super::resolve_app_paths(None, Some(&dir))?;
+        let token_path = super::control_token_file_path(&app_paths.config_dir, addr.port());
+        let auth = ControlAuth::generate()?;
+        super::write_control_token_file(&token_path, &auth)?;
+        let token_guard = super::ControlTokenFileGuard { path: token_path.clone() };
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+            in_window_menus: true,
+            new_instance: false,
+            gui_only: false,
+            locale_override: None,
+            theme_override: None,
+            recovery_root: None,
+            initial_viewport: ViewportMetrics::new(960.0, 640.0, 1.0),
+        });
+        let win_id = rt.open_window(None, ViewportMetrics::new(960.0, 640.0, 1.0))?;
+        let (guards, channel) = super::start_live_window_control_on_listener(listener, auth.clone(), &app_paths, false, token_guard)?;
+
+        let ctx = egui::Context::default();
+        ctx.set_fonts(build_egui_font_definitions(None));
+        let mut native_app = LumenCraftNativeApp::new(rt, win_id, None).with_live_control(channel);
+
+        let token_owned = auth.as_str().to_owned();
+        let client = std::thread::spawn(move || -> Result<Vec<serde_json::Value>, String> {
+            let stream = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
+            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+            let _ = stream.set_write_timeout(Some(Duration::from_secs(5)));
+            let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
+            let mut writer = BufWriter::new(stream);
+            let reqs = [
+                format!("{{\"id\":1,\"method\":\"auth\",\"params\":{{\"token\":\"{token_owned}\"}}}}\n"),
+                String::from("{\"id\":2,\"method\":\"sheet.createData\",\"params\":{\"sheet_id\":\"live-1\",\"title\":\"Live Window\"}}\n"),
+                String::from("{\"id\":3,\"method\":\"ui.theme.set\",\"params\":{\"mode\":\"dark\"}}\n"),
+                String::from("{\"id\":4,\"method\":\"app.quit\"}\n"),
+            ];
+            let mut replies = Vec::new();
+            for req in reqs {
+                writer.write_all(req.as_bytes()).map_err(|e| e.to_string())?;
+                writer.flush().map_err(|e| e.to_string())?;
+                let mut line = String::new();
+                reader.read_line(&mut line).map_err(|e| e.to_string())?;
+                let parsed: serde_json::Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+                replies.push(parsed);
+            }
+            Ok(replies)
+        });
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !native_app.close_confirmed() && Instant::now() < deadline {
+            let raw_input =
+                egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(960.0, 640.0))), ..Default::default() };
+            let mut out = ctx.run_ui(raw_input, |ui| native_app.step_ui(ui));
+            out.textures_delta.clear();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+
+        let replies = client.join().map_err(|_| "client thread panicked")??;
+        assert_eq!(replies.len(), 4);
+        assert!(replies.iter().all(|r| r["ok"] == serde_json::json!(true)));
+        assert!(native_app.close_confirmed());
+        let win = native_app.runtime().window(win_id)?;
+        assert!(win.app().document().data_sheet(&lumencraft_doc::SheetId::new("live-1")).is_some());
+        assert_eq!(win.app().theme.mode, lumencraft_ui_egui::UiThemeMode::Dark);
+        assert!(app_paths.preferences_file.is_file());
+
+        native_app.finish_exit();
+        drop(guards);
+        assert!(!token_path.exists(), "token file must be removed when live server guards drop");
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

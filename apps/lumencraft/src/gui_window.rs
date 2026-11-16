@@ -3,15 +3,19 @@
 //! Interactive `eframe` + `egui` + `wgpu` native desktop window host for LumenCraft.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 
 use eframe::egui;
 use lumencraft_text::{BUNDLED_FONTS, TrueTypeFont, build_minimal_truetype_font};
 use lumencraft_ui_egui::interaction::{KeyModifiers, PointerButton};
+use lumencraft_ui_egui::{ControlAuth, ControlPostRequestContext, UiApp};
 use serde_json::json;
 
-use crate::desktop_host::{CloseDisposition, DesktopFrameOutput, DesktopHostEvent, DesktopHostRuntime, DesktopMenuChromeState, DesktopWindowId};
+use crate::desktop_host::{
+    CloseDisposition, DesktopFrameOutput, DesktopHostEvent, DesktopHostRuntime, DesktopMenuChromeState, DesktopWindowId, LiveControlFrameOutput,
+};
 
 const MIN_WINDOW_WIDTH_PT: f32 = 640.0;
 const MIN_WINDOW_HEIGHT_PT: f32 = 420.0;
@@ -42,6 +46,34 @@ const HOST_MONOSPACE_TTF_CANDIDATES: &[&str] = &[
 ];
 
 type CleanupHook = Box<dyn FnOnce(&mut DesktopHostRuntime) -> Result<(), String>>;
+
+/// UI-thread callback invoked after each live-control request executes.
+pub type LiveControlPostHook = Box<dyn FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>>;
+
+/// One inbound control request queued for execution on the live UI thread.
+pub struct LiveControlRequest {
+    pub raw_bytes: Vec<u8>,
+    pub auth: ControlAuth,
+    pub conn_authenticated: bool,
+    pub reply_tx: mpsc::Sender<Result<LiveControlFrameOutput, String>>,
+}
+
+/// Non-blocking channel and repaint/shutdown handles wiring a live control server into [`LumenCraftNativeApp`].
+pub struct LiveControlChannel {
+    pub request_rx: mpsc::Receiver<LiveControlRequest>,
+    pub egui_ctx_cell: Arc<OnceLock<egui::Context>>,
+    pub shutdown: Arc<AtomicBool>,
+    pub post_hook: Option<LiveControlPostHook>,
+}
+
+impl LiveControlChannel {
+    /// Attach a UI-thread post-request hook invoked after each live-control request executes.
+    #[must_use]
+    pub fn with_post_hook(mut self, hook: LiveControlPostHook) -> Self {
+        self.post_hook = Some(hook);
+        self
+    }
+}
 
 struct CanvasPointerButtonArgs {
     window_id: DesktopWindowId,
@@ -141,6 +173,7 @@ pub struct LumenCraftNativeApp {
     close_confirmed: bool,
     status_banner: Option<String>,
     on_exit_cleanup: Option<CleanupHook>,
+    live_control: Option<LiveControlChannel>,
 }
 
 impl LumenCraftNativeApp {
@@ -163,7 +196,131 @@ impl LumenCraftNativeApp {
             close_confirmed: false,
             status_banner: None,
             on_exit_cleanup,
+            live_control: None,
         }
+    }
+
+    /// Attach a [`LiveControlChannel`] so inbound control requests share this live desktop window.
+    #[must_use]
+    pub fn with_live_control(mut self, control: LiveControlChannel) -> Self {
+        self.live_control = Some(control);
+        self
+    }
+
+    /// Borrow the underlying [`DesktopHostRuntime`].
+    #[must_use]
+    pub const fn runtime(&self) -> &DesktopHostRuntime {
+        &self.runtime
+    }
+
+    /// Mutably borrow the underlying [`DesktopHostRuntime`].
+    pub fn runtime_mut(&mut self) -> &mut DesktopHostRuntime {
+        &mut self.runtime
+    }
+
+    /// Whether shutdown was confirmed (for example via `app.quit` over `--control`).
+    #[must_use]
+    pub const fn close_confirmed(&self) -> bool {
+        self.close_confirmed
+    }
+
+    /// Drain and process all currently queued live-control requests without blocking rendering.
+    pub fn poll_live_control(&mut self, ctx: &egui::Context) -> usize {
+        let mut pending = Vec::new();
+        if let Some(ref ctrl) = self.live_control {
+            let _ = ctrl.egui_ctx_cell.set(ctx.clone());
+            while let Ok(req) = ctrl.request_rx.try_recv() {
+                pending.push(req);
+            }
+        }
+        if pending.is_empty() {
+            return 0;
+        }
+        let count = pending.len();
+        let quit_requested = self.dispatch_pending_live_requests(pending);
+        if quit_requested {
+            self.close_confirmed = true;
+            self.close_dialog_open = false;
+            if let Some(ref ctrl) = self.live_control {
+                ctrl.shutdown.store(true, Ordering::Release);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+        count
+    }
+
+    fn dispatch_pending_live_requests(&mut self, pending: Vec<LiveControlRequest>) -> bool {
+        let mut quit_requested = false;
+        let mut post_hook = self.live_control.as_mut().and_then(|ctrl| ctrl.post_hook.take());
+        for req in pending {
+            if quit_requested {
+                let _ = req.reply_tx.send(Err(String::from("desktop window is closing")));
+                continue;
+            }
+            let win_id = self.active_window_id();
+            let res = match self.runtime.window_mut(win_id) {
+                Ok(win) => win.dispatch_live_control_frame_with_hook(&req.raw_bytes, &req.auth, req.conn_authenticated, |app, hook_ctx| {
+                    if let Some(ref mut hook) = post_hook {
+                        hook(app, hook_ctx)?;
+                    }
+                    Ok(())
+                }),
+                Err(err) => Err(err),
+            };
+            if res.as_ref().is_ok_and(|out| out.quit) {
+                quit_requested = true;
+            }
+            let _ = req.reply_tx.send(res);
+        }
+        if let Some(ref mut ctrl) = self.live_control {
+            ctrl.post_hook = post_hook;
+        }
+        quit_requested
+    }
+
+    fn drain_pending_control_on_exit(&mut self) {
+        let Some(ctrl) = self.live_control.take() else {
+            return;
+        };
+        ctrl.shutdown.store(true, Ordering::Release);
+        while let Ok(req) = ctrl.request_rx.try_recv() {
+            let _ = req.reply_tx.send(Err(String::from("desktop window is closing")));
+        }
+    }
+
+    /// Execute one UI frame (polling live control requests, handling OS events, and rendering).
+    pub fn step_ui(&mut self, ui: &mut egui::Ui) {
+        let ctx = ui.ctx().clone();
+        let _ = self.poll_live_control(&ctx);
+        let window_id = self.active_window_id();
+
+        self.handle_close_request(&ctx, window_id);
+        self.render_top_menu_bar(ui, window_id);
+
+        egui::CentralPanel::no_frame().show(ui, |ui| {
+            let canvas_rect = ui.available_rect_before_wrap();
+            let ppp = ctx.pixels_per_point().max(1.0);
+            self.sync_canvas_viewport(window_id, canvas_rect, ppp);
+            self.process_canvas_input(ui, window_id, canvas_rect);
+
+            if let Some(frame) = self.tick_animations_and_redraw(&ctx, window_id) {
+                self.upload_and_paint_frame(ui, canvas_rect, &frame);
+            }
+        });
+
+        self.render_unsaved_close_modal(&ctx, window_id);
+        self.sync_window_title(&ctx, window_id);
+    }
+
+    /// Run shutdown cleanup, signal any attached live-control server to stop, and close all windows.
+    pub fn finish_exit(&mut self) {
+        self.drain_pending_control_on_exit();
+        if let Some(cleanup) = self.on_exit_cleanup.take()
+            && let Err(err) = cleanup(&mut self.runtime)
+        {
+            eprintln!("lumencraft shutdown cleanup warning: {err}");
+        }
+        let _ = self.runtime.close_all_force();
     }
 
     fn active_window_id(&self) -> DesktopWindowId {
@@ -632,36 +789,19 @@ impl LumenCraftNativeApp {
     }
 }
 
+impl Drop for LumenCraftNativeApp {
+    fn drop(&mut self) {
+        self.drain_pending_control_on_exit();
+    }
+}
+
 impl eframe::App for LumenCraftNativeApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
-        let ctx = ui.ctx().clone();
-        let window_id = self.active_window_id();
-
-        self.handle_close_request(&ctx, window_id);
-        self.render_top_menu_bar(ui, window_id);
-
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            let canvas_rect = ui.available_rect_before_wrap();
-            let ppp = ctx.pixels_per_point().max(1.0);
-            self.sync_canvas_viewport(window_id, canvas_rect, ppp);
-            self.process_canvas_input(ui, window_id, canvas_rect);
-
-            if let Some(frame) = self.tick_animations_and_redraw(&ctx, window_id) {
-                self.upload_and_paint_frame(ui, canvas_rect, &frame);
-            }
-        });
-
-        self.render_unsaved_close_modal(&ctx, window_id);
-        self.sync_window_title(&ctx, window_id);
+        self.step_ui(ui);
     }
 
     fn on_exit(&mut self) {
-        if let Some(cleanup) = self.on_exit_cleanup.take()
-            && let Err(err) = cleanup(&mut self.runtime)
-        {
-            eprintln!("lumencraft shutdown cleanup warning: {err}");
-        }
-        let _ = self.runtime.close_all_force();
+        self.finish_exit();
     }
 }
 
@@ -775,6 +915,20 @@ fn egui_key_to_name(key: egui::Key) -> Option<String> {
 /// # Errors
 /// Returns an error if no open window is present or `eframe` window startup fails.
 pub fn run_native_desktop(runtime: DesktopHostRuntime, extra_ttf: Option<Vec<u8>>, on_exit_cleanup: CleanupHook) -> Result<(), String> {
+    run_native_desktop_with_control(runtime, extra_ttf, on_exit_cleanup, None)
+}
+
+/// Launch the interactive native desktop window while optionally attaching a [`LiveControlChannel`]
+/// so external `--control` automation and human window input share the same live `UiApp` session.
+///
+/// # Errors
+/// Returns an error if no open window is present or `eframe` window startup fails.
+pub fn run_native_desktop_with_control(
+    runtime: DesktopHostRuntime,
+    extra_ttf: Option<Vec<u8>>,
+    on_exit_cleanup: CleanupHook,
+    control: Option<LiveControlChannel>,
+) -> Result<(), String> {
     let primary_window_id = runtime
         .focused_window_id()
         .or_else(|| runtime.window_ids().into_iter().next())
@@ -796,7 +950,13 @@ pub fn run_native_desktop(runtime: DesktopHostRuntime, extra_ttf: Option<Vec<u8>
         Box::new(move |cc| {
             let fonts = build_egui_font_definitions(font_bytes.as_deref());
             cc.egui_ctx.set_fonts(fonts);
-            Ok(Box::new(LumenCraftNativeApp::new(runtime, primary_window_id, Some(on_exit_cleanup))))
+            let mut app = LumenCraftNativeApp::new(runtime, primary_window_id, Some(on_exit_cleanup));
+            if let Some(ctrl) = control {
+                let _ = ctrl.egui_ctx_cell.set(cc.egui_ctx.clone());
+                cc.egui_ctx.request_repaint();
+                app = app.with_live_control(ctrl);
+            }
+            Ok(Box::new(app))
         }),
     )
     .map_err(|err| format!("failed to start native desktop window: {err}"))

@@ -1,6 +1,6 @@
 # Model Context Protocol Server (`lumencraft-mcp`)
 
-`lumencraft-cli mcp` runs a stdio [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server (`crates/mcp`) over an in-memory `lumencraft-engine` session, or attached to a running `lumencraft --control <port>` instance via `lumencraft-cli mcp --control-port <port>` ([`control-protocol.md`](control-protocol.md)). That instance currently runs headless, without a visible window ([`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window)).
+`lumencraft-cli mcp` runs a stdio [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server (`crates/mcp`) over an in-memory `lumencraft-engine` session, or attached to a running `lumencraft --control <port>` instance via `lumencraft-cli mcp --control-port <port>` ([`control-protocol.md`](control-protocol.md)). By default `lumencraft --control <port>` runs headless; pass the opt-in `--window` flag (`lumencraft --control <port> --window`) to attach a visible desktop window sharing the same live `UiApp` session ([`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window)).
 
 > Related specifications: [`commands.md`](commands.md), [`gui-workflows.md`](gui-workflows.md), [`control-protocol.md`](control-protocol.md) · Live test & command counts: [`STATUS.md`](STATUS.md)
 
@@ -24,10 +24,10 @@ MCP is currently the most complete way to drive LumenCraft; the rendered GUI is 
 | Mode | Reach |
 |---|---|
 | `lumencraft-cli mcp` (in-process, headless) | Every engine command in `cmd::registry()` through `command_run`, `command_batch`, and per-command toolset tools, plus open/save/export and previews. All document work is reachable. `ui.*` UI commands report `"available": false`, `"requires_live_attach": true` in `command_list` and are not executable in headless mode. |
-| `--control-port <port>` | Same, forwarded to a running `lumencraft --control`; adds the UI-only `ui.*` commands. |
+| `--control-port <port>` | Same, forwarded to a running `lumencraft --control <port>` (headless by default, or add `--window` for a shared visible desktop window); adds the UI-only `ui.*` commands. |
 | `--gui-only` | Only the 8 `gui` tools, driving `UiApp` through the semantic agent harness used by the `WF-01`–`WF-49` tests. |
 
-Limits: "Analyze a stack of *P* values" ([`R10.10`](ROADMAP.md#r1010-standalone-analyze-a-stack-of-p-values-analysis)) and Compact Letter Display ([`R10.11`](ROADMAP.md#r1011-compact-letter-display-cld)) are not implemented by any route; `WF-01`–`WF-49` are verified in-process, not yet over MCP stdio; and an agent cannot share a visible window with a person. The last two are tracked in [`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window).
+Limits: "Analyze a stack of *P* values" ([`R10.10`](ROADMAP.md#r1010-standalone-analyze-a-stack-of-p-values-analysis)) and Compact Letter Display ([`R10.11`](ROADMAP.md#r1011-compact-letter-display-cld)) are not implemented by any route; `WF-01`–`WF-49` are verified in-process, not yet over MCP stdio (tracked in [`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window); shared visible desktop window is opt-in via `lumencraft --control <port> --window`).
 
 **Roadmap priority:** [`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window) is the next feature priority after the Rust 1.99.1 upgrade (`R0.18`) and before new human-operable GUI work (`R10`). Completion requires real MCP transport coverage of existing engine capabilities and an opt-in shared visible session. Tests for later engine features are added when those features land and do not postpone this gate. This is a sequencing decision, not a claim that the remaining MCP gaps are fixed. After implementation is verified, [`R7.4`](ROADMAP.md#r74-accessible-mcp-guide-and-minimal-readme) adds a short beginner guide to a simplified README; this document remains the detailed reference.
 
@@ -46,7 +46,11 @@ Every handler executes inside `run_guarded` with structured error payloads (`Err
 | MCP Resources & Prompts | Read `sheet://<id>` and `result://<id>` resources (from the live desktop session when `--control-port` is attached, or the local session in headless mode) and guided statistical/curve-fitting workflow prompts. |
 
 ### Live-Attach Mode (`--control-port` / `LUMENCRAFT_CONTROL_PORT`)
-- Pass `--control-port <port>` (or set `LUMENCRAFT_CONTROL_PORT=<port>`, overridden by `--control-port`) to attach MCP to a running `lumencraft --control <port>` desktop window over `127.0.0.1:<port>`.
+- Pass `--control-port <port>` (or set `LUMENCRAFT_CONTROL_PORT=<port>`, overridden by `--control-port`) to attach MCP to a running `lumencraft --control <port>` instance over loopback `127.0.0.1:<port>`.
+- **Headless vs. shared visible window (`--window`):**
+  - `lumencraft --control <port>` (default, `--window` omitted) runs headless for scripts and CI automation.
+  - `lumencraft --control <port> --window` (also compatible with `LUMENCRAFT_CONTROL_PORT=<port>`) opens a visible `eframe`/`egui` desktop window sharing the same live `UiApp` / `Session` and crash-recovery WAL journal between interactive window input and remote MCP/control requests (`127.0.0.1:<port>` loopback-only via `validate_loopback_addr`; cannot be combined with `--headless-once`).
+  - Add `--gui-only` (`lumencraft --control <port> --window --gui-only`) to enforce `Caller::Control` `--gui-only` restrictions on the control socket while keeping the shared window live.
 - Authentication uses `--control-token <token>`, `LUMENCRAFT_CONTROL_TOKEN`, or the per-UID `control-<port>.token` file located under `$LUMENCRAFT_CONFIG_DIR`, `$XDG_CONFIG_HOME/lumencraft` / `$HOME` config directories, or (when `HOME` is unset on Unix) a validated `0700` non-symlink `$XDG_RUNTIME_DIR/lumencraft` or `$TMPDIR/lumencraft-uid-<uid>` directory.
 - When attached, `doc_inspect`, `open_file`, `save_file`, `render_preview`, `export`, `command_list`, `command_run`, `command_batch`, `resources/list`, and `resources/read` operate against the live desktop window session rather than a disconnected local `Session`, while local `--workdir` containment is still enforced for file paths.
 
@@ -59,7 +63,7 @@ Verified in `crates/mcp/src/{gui_tools.rs, tools.rs, protocol.rs}` and `apps/lum
 - **`InProcessUiGuiHost` (`apps/lumencraft-cli/src/main.rs`):** Wraps an in-process `UiApp` for `lumencraft-cli mcp --gui-only`, normalizing `"workspace"`/`"viewport"` screenshot targets to `"full_window"`, `"wheel"` gestures to `"scroll"`, and array menu `path`s into `"/"`-joined strings before delegating to `lumencraft_ui_egui::dispatch_gui_action`.
 - **Two `--gui-only` launch modes:**
   - `lumencraft-cli mcp --gui-only` — in-process `UiApp` via `InProcessUiGuiHost` with `GuiOnlyPolicy::Strict`.
-  - `lumencraft-cli mcp --control-port <N> --gui-only` — attaches over loopback `127.0.0.1:<N>` to a running desktop window (typically launched with `lumencraft --control <N> --gui-only`).
+  - `lumencraft-cli mcp --control-port <N> --gui-only` — attaches over loopback `127.0.0.1:<N>` to a running `lumencraft --control <N> --gui-only` instance (or `lumencraft --control <N> --window --gui-only` for a visible shared desktop window).
 
 ### 2. The 8-Tool `gui` Surface (`GUI_TOOL_NAMES`)
 In normal mode, `enable_toolset` with `{ "group": "gui" }` (or attaching a `GuiSessionHost`) appends the 8 `gui` tools alongside the core tools in the table above (and any enabled `CommandGroup` tools). Under `--gui-only`, `list_tools_for_state` shrinks `tools/list` strictly to these 8 tools:

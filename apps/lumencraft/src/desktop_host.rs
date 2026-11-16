@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::io::{BufRead, Write};
+use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
@@ -22,8 +22,8 @@ use lumencraft_ui_egui::interaction::{KeyModifiers, PointerButton, UiEventOutcom
 use lumencraft_ui_egui::menus::{MenuSectionTooltips, menu_bar_tooltips};
 use lumencraft_ui_egui::theme::UiThemeMode;
 use lumencraft_ui_egui::{
-    ClipboardBundle, ControlAuth, ControlPostRequestContext, UiApp, dispatch_ui_command, read_os_pasteboard, serve_control_stream_with_quit_and_hook,
-    write_os_clipboard_bundle, write_os_pasteboard,
+    ClipboardBundle, ControlAuth, ControlPostRequestContext, UiApp, dispatch_ui_command, is_http_request_line, read_os_pasteboard,
+    serve_control_stream_with_quit_and_hook, write_os_clipboard_bundle, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -636,6 +636,146 @@ fn apply_control_journal_steps(
     Ok(())
 }
 
+/// Classification of one incoming control-protocol line before dispatching against [`DesktopWindowSession`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ControlFrameKind {
+    Empty,
+    InvalidUtf8,
+    Http,
+    Auth,
+    Command,
+}
+
+/// Output produced by [`DesktopWindowSession::dispatch_live_control_frame_with_hook`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LiveControlFrameOutput {
+    pub response_bytes: Vec<u8>,
+    pub quit: bool,
+    pub close_connection: bool,
+    pub auth_succeeded: Option<bool>,
+}
+
+/// Classify a raw bounded control line (`Empty`, `InvalidUtf8`, `Http`, `Auth`, or `Command`).
+#[must_use]
+pub fn classify_control_frame(raw_bytes: &[u8]) -> ControlFrameKind {
+    let Ok(text) = std::str::from_utf8(raw_bytes) else {
+        return ControlFrameKind::InvalidUtf8;
+    };
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return ControlFrameKind::Empty;
+    }
+    if is_http_request_line(trimmed) {
+        return ControlFrameKind::Http;
+    }
+    if is_auth_handshake_line(trimmed) {
+        return ControlFrameKind::Auth;
+    }
+    ControlFrameKind::Command
+}
+
+fn is_auth_handshake_line(trimmed: &str) -> bool {
+    serde_json::from_str::<Value>(trimmed)
+        .ok()
+        .and_then(|val| {
+            val.as_object().and_then(|obj| obj.get("method").or_else(|| obj.get("op"))).and_then(Value::as_str).map(|m| m.trim() == "auth")
+        })
+        .unwrap_or(false)
+}
+
+/// Build an internal single-line `"auth"` handshake frame for preserving authenticated connection state.
+///
+/// # Errors
+/// Returns an error if serializing the bearer token fails.
+pub fn build_control_reauth_line(auth: &ControlAuth) -> Result<String, String> {
+    let tok_json = serde_json::to_string(auth.as_str()).map_err(|err| format!("failed to serialize reauth token: {err}"))?;
+    Ok(format!("{{\"id\":\"__reauth__\",\"method\":\"auth\",\"params\":{{\"token\":{tok_json}}}}}\n"))
+}
+
+fn strip_first_control_response_line(bytes: &[u8]) -> Result<Vec<u8>, String> {
+    let Some(nl_pos) = bytes.iter().position(|&b| b == b'\n') else {
+        return Err(String::from("missing reauth response delimiter"));
+    };
+    Ok(bytes.get(nl_pos + 1..).unwrap_or_default().to_vec())
+}
+
+fn parse_auth_response_ok(response_bytes: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(response_bytes).ok().and_then(|val| val.get("ok").and_then(Value::as_bool)).unwrap_or(false)
+}
+
+fn extract_project_save_path(params: &Value) -> Option<PathBuf> {
+    params
+        .get("path")
+        .or_else(|| params.get("file_path"))
+        .or_else(|| params.get("filePath"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+}
+
+fn dispatch_live_control_frame_with_hook<F>(
+    win: &mut DesktopWindowSession,
+    raw_bytes: &[u8],
+    auth: &ControlAuth,
+    conn_authenticated: bool,
+    on_post_request: &mut F,
+) -> Result<LiveControlFrameOutput, String>
+where
+    F: FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>,
+{
+    let kind = classify_control_frame(raw_bytes);
+    if kind == ControlFrameKind::Empty {
+        return Ok(LiveControlFrameOutput { response_bytes: Vec::new(), quit: false, close_connection: false, auth_succeeded: None });
+    }
+
+    let prepended_reauth = conn_authenticated && kind == ControlFrameKind::Command;
+    let reauth_line = if prepended_reauth { Some(build_control_reauth_line(auth)?) } else { None };
+    let mut out_bytes = Vec::new();
+    let mut last_saved_path: Option<PathBuf> = None;
+    let mut clean_after_save = false;
+    let quit = win
+        .with_control_journal_hook(|app, journal_hook| {
+            let mut combined_hook = |app_ref: &UiApp, ctx: &ControlPostRequestContext<'_>| -> Result<(), String> {
+                if ctx.request_ok && !ctx.rolled_back {
+                    for step in ctx.steps {
+                        if step.command_id == "project.save"
+                            && let Some(path) = extract_project_save_path(&step.params)
+                        {
+                            last_saved_path = Some(path);
+                            clean_after_save = true;
+                        } else if step.mutated {
+                            clean_after_save = false;
+                        }
+                    }
+                }
+                journal_hook(app_ref, ctx)?;
+                on_post_request(app_ref, ctx)
+            };
+            if let Some(ref prefix) = reauth_line {
+                let mut reader = BufReader::new(Cursor::new(prefix.as_bytes()).chain(Cursor::new(raw_bytes)));
+                serve_control_stream_with_quit_and_hook(app, &mut reader, &mut out_bytes, auth, &mut combined_hook)
+            } else {
+                let mut reader = BufReader::new(Cursor::new(raw_bytes));
+                serve_control_stream_with_quit_and_hook(app, &mut reader, &mut out_bytes, auth, &mut combined_hook)
+            }
+        })
+        .map_err(|err| format!("control dispatch I/O error: {err}"))?;
+    if let Some(saved_path) = last_saved_path {
+        win.app_mut().session_mut().set_file_path(Some(saved_path), clean_after_save);
+        if clean_after_save {
+            win.dirty_commands.clear();
+            win.checkpoint_recovery_journal()?;
+        }
+    }
+    win.app_mut().sync_views();
+
+    let response_bytes = if prepended_reauth { strip_first_control_response_line(&out_bytes)? } else { out_bytes };
+    let auth_succeeded = (kind == ControlFrameKind::Auth).then(|| parse_auth_response_ok(&response_bytes));
+    let close_connection = quit || kind == ControlFrameKind::Http;
+    Ok(LiveControlFrameOutput { response_bytes, quit, close_connection, auth_succeeded })
+}
+
 fn configure_app_overrides(app: &mut UiApp, cfg: &DesktopHostConfig) -> Result<(), String> {
     if let Some(locale) = cfg.locale_override.as_deref() {
         let _ = app.set_locale(locale);
@@ -811,9 +951,14 @@ impl DesktopWindowSession {
                     .record_outcome_to_journal(journal, command_id, &params, outcome.mutated)
                     .map_err(|err| format!("failed to record WAL entry `{command_id}`: {err}"))?;
             }
-        } else if command_id == "project.save" && !self.app.session().is_dirty() {
-            self.dirty_commands.clear();
-            self.checkpoint_recovery_journal()?;
+        } else if command_id == "project.save" {
+            if let Some(saved_path) = extract_project_save_path(&params) {
+                self.app.session_mut().set_file_path(Some(saved_path), true);
+            }
+            if !self.app.session().is_dirty() {
+                self.dirty_commands.clear();
+                self.checkpoint_recovery_journal()?;
+            }
         }
         self.app.sync_views();
         Ok(outcome)
@@ -847,6 +992,25 @@ impl DesktopWindowSession {
         auth: &ControlAuth,
     ) -> std::io::Result<bool> {
         self.with_control_journal_hook(|app, on_post_request| serve_control_stream_with_quit_and_hook(app, reader, writer, auth, on_post_request))
+    }
+
+    /// Dispatch one raw JSON-lines control frame against this window while invoking both WAL
+    /// journaling and `on_post_request`, preserving `conn_authenticated` session state cleanly.
+    ///
+    /// # Errors
+    /// Returns an error if serializing auth framing fails, running the control handler hits an
+    /// unrecoverable stream I/O failure, or extracting the response line fails.
+    pub fn dispatch_live_control_frame_with_hook<F>(
+        &mut self,
+        raw_bytes: &[u8],
+        auth: &ControlAuth,
+        conn_authenticated: bool,
+        mut on_post_request: F,
+    ) -> Result<LiveControlFrameOutput, String>
+    where
+        F: FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>,
+    {
+        dispatch_live_control_frame_with_hook(self, raw_bytes, auth, conn_authenticated, &mut on_post_request)
     }
 
     /// Persist a full `.lumencraft` recovery snapshot and truncate replayed WAL entries.
