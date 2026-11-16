@@ -18,6 +18,7 @@ bundled-fonts = ["curvebook-engine/bundled-fonts", "curvebook-text/bundled-fonts
 curvebook-chart = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-engine = { workspace = true }
+curvebook-fit = { workspace = true }
 curvebook-format = { workspace = true }
 curvebook-math = { workspace = true }
 curvebook-palette = { workspace = true }
