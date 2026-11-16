@@ -169,17 +169,23 @@ fn ln_legendre_cf_reciprocal(a: f64, x: f64) -> Result<f64, MathError> {
     Err(MathError::NotConverged { algorithm: "inc_gamma_cf", iterations: MAX_GAMMA_ITERS })
 }
 
-/// Temme's (1979) uniform asymptotic expansion `(P(a, x), Q(a, x))` for large `a` near `x ~ a`.
-fn temme_uniform_pq(a: f64, x: f64) -> (f64, f64) {
+/// Shared Sterbenz-exact `(z^2, z, corr)` evaluation for Temme's (1979) uniform asymptotic
+/// expansion inside `|x - a| <= 0.25 * a`, where `Q(a, x) ~ e^{-z^2} (0.5 * erfcx(z) + corr)` for
+/// `z >= 0` and `P(a, x) ~ e^{-z^2} (0.5 * erfcx(-z) - corr)` for `z < 0`.
+fn temme_corr_and_z(a: f64, x: f64) -> (f64, f64, f64) {
+    let dx = x - a;
+    let mu = dx / a;
     let lambda = x / a;
-    let mu = lambda - 1.0;
-    let half_eta2 = deviance_bd0(1.0, lambda);
-    let eta = (2.0 * half_eta2).sqrt().copysign(mu);
+    let z_sq = gamma_deviance(a, x);
+    let z = z_sq.sqrt().copysign(mu);
+    let eta = z * (2.0 / a).sqrt();
 
     let (c0, c1, c2) = if eta.abs() < 0.02 {
         let e = eta;
-        let c0 = -1.0 / 3.0 + e * (1.0 / 12.0 + e * (-2.0 / 135.0 + e * (1.0 / 864.0 + e / 2835.0)));
-        let c1 = -1.0 / 540.0 + e * (-1.0 / 288.0 + e * (25.0 / 12_096.0));
+        // Exact rational Taylor expansions of c0(eta), c1(eta), c2(eta) around eta = 0 (Temme 1979, §3; DLMF §8.11(iii)).
+        let c0 =
+            -1.0 / 3.0 + e * (1.0 / 12.0 + e * (-2.0 / 135.0 + e * (1.0 / 864.0 + e * (1.0 / 2835.0 + e * (-139.0 / 777_600.0 + e / 25_515.0)))));
+        let c1 = -1.0 / 540.0 + e * (-1.0 / 288.0 + e * (1.0 / 378.0 + e * (-77.0 / 77_760.0)));
         let c2 = 25.0 / 6048.0;
         (c0, c1, c2)
     } else {
@@ -197,15 +203,75 @@ fn temme_uniform_pq(a: f64, x: f64) -> (f64, f64) {
 
     let inv_a = 1.0 / a;
     let series = c0 + inv_a * (c1 + inv_a * c2);
-    let z = eta * (0.5 * a).sqrt();
-    let r_a = exp_neg_sq(z) * series / (std::f64::consts::TAU * a).sqrt();
-    let q = (0.5 * erfc(z) + r_a).clamp(0.0, 1.0);
-    let p = (0.5 * erfc(-z) - r_a).clamp(0.0, 1.0);
-    (p, q)
+    let corr = series / (std::f64::consts::TAU * a).sqrt();
+    (z_sq, z, corr)
 }
 
+/// Temme's (1979) uniform asymptotic expansion `(P(a, x), Q(a, x))` for large `a` across `|x - a| <= 0.25 * a`.
+fn temme_uniform_pq(a: f64, x: f64) -> (f64, f64) {
+    let (z_sq, z, corr) = temme_corr_and_z(a, x);
+    if z >= 0.0 {
+        if z <= 2.0 {
+            let r_a = exp_neg_sq(z) * corr;
+            let q = (0.5 * erfc(z) + r_a).clamp(0.0, 1.0);
+            let p = (0.5 * erfc(-z) - r_a).clamp(0.0, 1.0);
+            (p, q)
+        } else {
+            let scaled_q = (0.5 * erfcx(z) + corr).max(0.0);
+            if scaled_q == 0.0 {
+                return (1.0, 0.0);
+            }
+            let ln_q = (-z_sq + scaled_q.ln()).min(0.0);
+            ((-ln_q.exp_m1()).clamp(0.0, 1.0), ln_q.exp().clamp(0.0, 1.0))
+        }
+    } else {
+        let w = -z;
+        if w <= 2.0 {
+            let r_a = exp_neg_sq(w) * corr;
+            let p = (0.5 * erfc(w) - r_a).clamp(0.0, 1.0);
+            let q = (0.5 * erfc(-w) + r_a).clamp(0.0, 1.0);
+            (p, q)
+        } else {
+            let scaled_p = (0.5 * erfcx(w) - corr).max(0.0);
+            if scaled_p == 0.0 {
+                return (0.0, 1.0);
+            }
+            let ln_p = (-z_sq + scaled_p.ln()).min(0.0);
+            (ln_p.exp().clamp(0.0, 1.0), (-ln_p.exp_m1()).clamp(0.0, 1.0))
+        }
+    }
+}
+
+fn temme_ln_p(a: f64, x: f64) -> f64 {
+    let (z_sq, z, corr) = temme_corr_and_z(a, x);
+    if z < 0.0 {
+        let scaled_p = (0.5 * erfcx(-z) - corr).max(f64::MIN_POSITIVE);
+        (-z_sq + scaled_p.ln()).min(0.0)
+    } else {
+        let scaled_q = (0.5 * erfcx(z) + corr).max(f64::MIN_POSITIVE);
+        let ln_q = (-z_sq + scaled_q.ln()).min(0.0);
+        ln_one_minus_exp(ln_q)
+    }
+}
+
+fn temme_ln_q(a: f64, x: f64) -> f64 {
+    let (z_sq, z, corr) = temme_corr_and_z(a, x);
+    if z >= 0.0 {
+        let scaled_q = (0.5 * erfcx(z) + corr).max(f64::MIN_POSITIVE);
+        (-z_sq + scaled_q.ln()).min(0.0)
+    } else {
+        let scaled_p = (0.5 * erfcx(-z) - corr).max(f64::MIN_POSITIVE);
+        let ln_p = (-z_sq + scaled_p.ln()).min(0.0);
+        ln_one_minus_exp(ln_p)
+    }
+}
+
+/// Use Temme's uniform expansion across the entire proportional band `|x - a| <= 0.25 * a` for
+/// `a >= 4096` (`>= ±16 * sqrt(a)` at `a = 4096`, `>= ±559 * sqrt(a)` at `a = 5e6`), so outside
+/// the band the power series (`x / a < 0.75`) and Legendre CF (`x - a > 0.25 * a`) always converge
+/// in `< 160` iterations regardless of how large `a` is.
 fn use_temme(a: f64, x: f64) -> bool {
-    a >= TEMME_A_THRESHOLD && (x - a).abs() <= 6.0 * a.sqrt()
+    a >= TEMME_A_THRESHOLD && (x - a).abs() <= 0.25 * a
 }
 
 /// Cancellation-free evaluation of `ln(1 - exp(ln_val))` for `ln_val <= 0`.
@@ -284,8 +350,7 @@ pub fn ln_reg_gamma_p(a: f64, x: f64) -> Result<f64, MathError> {
         return Ok(0.0);
     }
     if use_temme(a, x) {
-        let (p, q) = temme_uniform_pq(a, x);
-        return Ok(if p >= 0.5 { (-q).ln_1p() } else { p.ln() });
+        return Ok(temme_ln_p(a, x));
     }
     if x < a + 1.0 {
         ln_p_series(a, x)
@@ -309,16 +374,7 @@ pub fn ln_reg_gamma_q(a: f64, x: f64) -> Result<f64, MathError> {
         return Ok(f64::NEG_INFINITY);
     }
     if use_temme(a, x) {
-        let (p, q) = temme_uniform_pq(a, x);
-        if q > 0.0 && q < 0.5 {
-            return Ok(q.ln());
-        }
-        if q >= 0.5 {
-            return Ok((-p).ln_1p());
-        }
-        let lambda = x / a;
-        let z = (2.0 * deviance_bd0(1.0, lambda)).sqrt().copysign(lambda - 1.0) * (0.5 * a).sqrt();
-        return Ok(-std::f64::consts::LN_2 - z * z + erfcx(z).ln());
+        return Ok(temme_ln_q(a, x));
     }
     if x >= a + 1.0 {
         Ok((ln_gamma_kernel(a, x)? + ln_legendre_cf_reciprocal(a, x)?).min(0.0))

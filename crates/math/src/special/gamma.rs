@@ -23,6 +23,7 @@ const STIRLING_COEFFS: [f64; 8] =
 const DIGAMMA_COEFFS: [f64; 8] = [1.0 / 12.0, -1.0 / 120.0, 1.0 / 252.0, -1.0 / 240.0, 1.0 / 132.0, -691.0 / 32_760.0, 1.0 / 12.0, -3617.0 / 8160.0];
 
 static ZETA_MINUS_ONE: OnceLock<[f64; 32]> = OnceLock::new();
+static FACTORIAL_TABLE: OnceLock<[f64; 171]> = OnceLock::new();
 static LN_FACTORIAL_TABLE: OnceLock<[f64; 171]> = OnceLock::new();
 
 fn zeta_minus_one_table() -> &'static [f64; 32] {
@@ -49,13 +50,35 @@ fn zeta_minus_one_table() -> &'static [f64; 32] {
     })
 }
 
+fn factorial_table() -> &'static [f64; 171] {
+    FACTORIAL_TABLE.get_or_init(|| {
+        let mut table = [1.0_f64; 171];
+        let mut hi = 1.0_f64;
+        let mut lo = 0.0_f64;
+        for (n, slot) in table.iter_mut().enumerate().skip(2) {
+            let kf = n as f64;
+            let p = hi * kf;
+            let err = hi.mul_add(kf, -p) + lo * kf;
+            hi = p + err;
+            lo = err - (hi - p);
+            *slot = hi;
+        }
+        table
+    })
+}
+
 fn ln_factorial_table() -> &'static [f64; 171] {
     LN_FACTORIAL_TABLE.get_or_init(|| {
         let mut table = [0.0_f64; 171];
-        let mut prod = 1.0_f64;
+        let mut hi = 1.0_f64;
+        let mut lo = 0.0_f64;
         for (n, slot) in table.iter_mut().enumerate().skip(2) {
-            prod *= n as f64;
-            *slot = prod.ln();
+            let kf = n as f64;
+            let p = hi * kf;
+            let err = hi.mul_add(kf, -p) + lo * kf;
+            hi = p + err;
+            lo = err - (hi - p);
+            *slot = hi.ln() + lo / hi;
         }
         table
     })
@@ -206,12 +229,8 @@ pub fn gamma(x: f64) -> Result<f64, MathError> {
     }
     if x <= 171.0 && x.fract() == 0.0 {
         let n = (x as usize).saturating_sub(1);
-        if n <= 20 {
-            let mut f = 1.0_f64;
-            for k in 2..=n {
-                f *= k as f64;
-            }
-            return Ok(f);
+        if let Some(&val) = factorial_table().get(n) {
+            return Ok(val);
         }
     }
     Ok(ln_gamma(x)?.exp())
@@ -232,10 +251,12 @@ pub fn ln_beta(a: f64, b: f64) -> Result<f64, MathError> {
     let (small, large) = if a <= b { (a, b) } else { (b, a) };
     if small >= STIRLING_CUTOFF {
         // Both large: exact Stirling decomposition with ln_1p.
+        // (small - 0.5) * ln(small / (small + large)) + (large - 0.5) * ln(large) - large * ln(small + large)
+        //   = (small - 0.5) * (ln(small / large) - ln1p(small / large)) - large * ln1p(small / large) - 0.5 * ln(large).
         let sum = small + large;
+        let u = small / large;
         let corr = stirling_err(small) + stirling_err(large) - stirling_err(sum);
-        let main =
-            (small - 0.5) * (small / sum).ln() - large * (small / large).ln_1p() + HALF_LN_2PI - 0.5 * large.ln() + 0.5 * (small / large).ln_1p();
+        let main = (small - 0.5) * (u.ln() - u.ln_1p()) - large * u.ln_1p() + HALF_LN_2PI - 0.5 * large.ln();
         return Ok(main + corr);
     }
     if large >= STIRLING_CUTOFF {
@@ -333,8 +354,10 @@ pub fn ln_choose(n: u64, k: u64) -> Result<f64, MathError> {
         }
         return Ok(acc);
     }
-    let corr = stirling_err(nf + 1.0) - stirling_err(kf + 1.0) - stirling_err(mf + 1.0);
-    let main = -HALF_LN_2PI + 0.5 * (nf / (kf * mf)).ln() - kf * (kf / nf).ln() - mf * (mf / nf).ln();
+    // Because ln(r!) = ln(r * Gamma(r)) = (r + 0.5) * ln(r) - r + 0.5 * ln(2 pi) + stirling_err(r),
+    // Loader's decomposition at (n, k, m = n - k) evaluates stirling_err at (nf, kf, mf), not +1.
+    let corr = stirling_err(nf) - stirling_err(kf) - stirling_err(mf);
+    let main = -HALF_LN_2PI + 0.5 * (nf / (kf * mf)).ln() - kf * (kf / nf).ln() - mf * (-kf / nf).ln_1p();
     Ok(main + corr)
 }
 

@@ -246,8 +246,10 @@ fn invert_normal_upper_tail(r: f64) -> f64 {
             let g = ln_sf - target_ln;
             let g1 = -SQRT_2_OVER_PI / ex;
             let newton = g / g1;
-            let d2_over_d1 = z + g1;
-            let step = newton / (1.0 - 0.5 * newton * d2_over_d1).clamp(0.25, 4.0);
+            // Since g'(z) = g1 = -phi(z)/S(z) and g''(z) = -g1 * (z + g1), g''(z)/g'(z) = -(z + g1),
+            // so the Halley denominator 1 - 0.5 * newton * (g''/g') equals 1 + 0.5 * newton * (z + g1).
+            let denom = (1.0 + 0.5 * newton * (z + g1)).clamp(0.25, 4.0);
+            let step = newton / denom;
             z = (z - step).max(0.0);
             if step.abs() <= 0.5 * f64::EPSILON * z {
                 break;
