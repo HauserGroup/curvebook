@@ -694,18 +694,24 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
     obj_runs.push(plain(format!(" (maximum iterations = {}). ", s.clamped_max_iters())));
     obj_runs.extend(describe_weighting_runs(s.weighting));
 
-    // Confidence interval method (profile likelihood vs Wald asymptotic)
-    let conf_pct = format_exact_float(res.analysis.confidence_level.percent());
-    if s.profile_likelihood_ci {
-        obj_runs.push(plain(" Asymmetrical "));
-        obj_runs.push(math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")));
+    // Confidence interval & parametric inference availability
+    if s.method == FitMethod::RobustCauchy {
         obj_runs.push(plain(
-            " confidence intervals were computed by Venzon-Moolgavkar profile-likelihood root finding (supporting open/unbounded bounds on flat likelihood plateaus).",
+            " In Robust (Cauchy) regression mode, least-squares standard errors, parameter confidence intervals, covariance matrices, confidence/prediction bands, AICc/BIC, and Extra-SS F / AICc / LRT model comparisons are not applicable (NotApplicableInRobustMode); best-fit parameter estimates, residuals, and RSDR are reported.",
         ));
     } else {
-        obj_runs.push(plain(" Symmetric asymptotic "));
-        obj_runs.push(math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")));
-        obj_runs.push(plain(" confidence intervals were computed from the Jacobian covariance matrix and Student's t critical value."));
+        let conf_pct = format_exact_float(res.analysis.confidence_level.percent());
+        if s.profile_likelihood_ci {
+            obj_runs.push(plain(" Asymmetrical "));
+            obj_runs.push(math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")));
+            obj_runs.push(plain(
+                " confidence intervals were computed by Venzon-Moolgavkar profile-likelihood root finding (supporting open/unbounded bounds on flat likelihood plateaus).",
+            ));
+        } else {
+            obj_runs.push(plain(" Symmetric asymptotic "));
+            obj_runs.push(math(format!("{conf_pct}%"), format!("{conf_pct}%"), format!("{conf_pct}\\%")));
+            obj_runs.push(plain(" confidence intervals were computed from the Jacobian covariance matrix and Student's t critical value."));
+        }
     }
     blocks.push(ReportBlock::Paragraph(obj_runs));
 
@@ -722,7 +728,13 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
     // 4. Model comparison and residual / range diagnostics
     let mut extras = Vec::new();
     if let Some(cmp) = &s.comparison {
-        extras.push(describe_model_comparison_runs(cmp));
+        if s.method == FitMethod::RobustCauchy {
+            extras.push(vec![plain(
+                "Model comparison was marked Not applicable (NotApplicableInRobustMode) because Robust (Cauchy) regression does not support least-squares F, AICc, or likelihood-ratio tests.",
+            )]);
+        } else {
+            extras.push(describe_model_comparison_runs(cmp));
+        }
     }
     if let Some((x_lo, x_hi)) = s.x_range_filter {
         extras.push(vec![plain(format!("X range filter: [{} , {}].", opt_bound_str(x_lo), opt_bound_str(x_hi)))]);
@@ -731,7 +743,7 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
         extras.push(vec![plain(format!("Y range filter: [{} , {}].", opt_bound_str(y_lo), opt_bound_str(y_hi)))]);
     }
     let mut checks = Vec::new();
-    if s.replicates_lack_of_fit_test {
+    if s.replicates_lack_of_fit_test && s.method != FitMethod::RobustCauchy {
         checks.push("replicates lack-of-fit F-test");
     }
     if s.normality_of_residuals {
@@ -741,7 +753,11 @@ fn describe_nonlinear_regression(s: &NonlinearFitSpec, res: &ResultSheet) -> Vec
         checks.push("Spearman homoscedasticity test");
     }
     if s.interpolate_unknowns {
-        checks.push("unknown interpolation via Brent root finding");
+        if s.method == FitMethod::RobustCauchy {
+            checks.push("unknown point interpolation via Brent root finding (confidence intervals not applicable in Robust mode)");
+        } else {
+            checks.push("unknown interpolation via Brent root finding");
+        }
     }
     if !checks.is_empty() {
         extras.push(vec![plain(format!("Diagnostic checks enabled: {}.", checks.join("; ")))]);

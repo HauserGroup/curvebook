@@ -1441,7 +1441,28 @@ fn resolve_fitted_overlay(doc: &ProjectDocument, series: &SeriesSpec, warnings: 
     } else if curve.ambiguous {
         warnings.push(ChartWarning::new("ambiguous_fitted_curve", format!("fitted curve '{}' has ambiguous parameters", curve.equation_id)));
     }
-    Some(FittedOverlayData { spec: spec.clone(), curve: curve.clone() })
+    let mut effective_spec = spec.clone();
+    let mut effective_curve = curve.clone();
+    if matches!(&res.analysis.kind, lumencraft_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == lumencraft_doc::FitMethod::RobustCauchy) {
+        if effective_spec.show_confidence_band || effective_spec.show_prediction_band {
+            warnings.push(ChartWarning::new(
+                "robust_bands_suppressed",
+                format!(
+                    "confidence and prediction bands suppressed for Robust (Cauchy) regression result '{}' (NotApplicableInRobustMode)",
+                    spec.result_sheet_id
+                ),
+            ));
+        }
+        effective_spec.show_confidence_band = false;
+        effective_spec.show_prediction_band = false;
+        for pt in &mut effective_curve.points {
+            pt.ci_lower = None;
+            pt.ci_upper = None;
+            pt.pred_lower = None;
+            pt.pred_upper = None;
+        }
+    }
+    Some(FittedOverlayData { spec: effective_spec, curve: effective_curve })
 }
 
 fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {

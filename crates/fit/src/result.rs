@@ -24,7 +24,7 @@ use crate::dsl::CompiledDslModel;
 use crate::error::{FitError, FitStatus, ParameterNote};
 use crate::library::{ParametricModel, get_builtin_model};
 use crate::linear::{DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, simple_linear_regression};
-use crate::solver::{ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models, fit_nonlinear};
+use crate::solver::{ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear};
 use crate::types::{
     DataPoint, DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options,
     filter_datasets_by_range,
@@ -360,8 +360,8 @@ pub fn execute_nonlinear_analysis(
             | lumencraft_doc::ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id } => alternative_equation_id,
         };
         let alt_model = get_builtin_model(alt_id).ok_or_else(|| FitError::UnknownEquation { id: alt_id.clone() })?;
-        let (alt_fit, outcome) = compare_models(&fit, alt_model.as_ref(), &datasets, hooks, &config, comp_spec)?;
-        append_comparison_tab(&mut result, &fit, &alt_fit, &outcome, spec.p_value_format);
+        let comp = compare_models_checked(&fit, alt_model.as_ref(), &datasets, hooks, &config, comp_spec)?;
+        append_comparison_tab(&mut result, &fit, &comp.alternative_fit, &comp.outcome, spec.p_value_format);
     }
 
     let mut filtered_datasets: Option<Vec<DatasetSeries>> = None;
@@ -387,12 +387,12 @@ fn parameter_display_label(fit: &NonlinearFitResult, name: &str, dataset_index: 
 fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
     let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
     let mut param_labels = Vec::with_capacity(param_rows.capacity());
-    let is_robust = nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
+    let is_robust = fit.is_robust_cauchy() || nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
 
     for p in &fit.parameters {
         param_labels.push(parameter_display_label(fit, &p.name, p.dataset_index));
         let prefix = if p.notes.contains(&ParameterNote::Ambiguous) { Some("~".to_owned()) } else { None };
-        let row = if is_robust {
+        let row = if is_robust || !p.inference_availability.is_available() {
             let na = ResultCell::Text("Not applicable".to_owned());
             vec![ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]
         } else {
@@ -415,7 +415,10 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     }
 
     let sy_x_str = if is_robust {
-        "Not applicable (NotApplicableInRobustMode)".to_owned()
+        fit.rsdr.filter(|v| v.is_finite()).map_or_else(
+            || "Not applicable (NotApplicableInRobustMode)".to_owned(),
+            |rsdr| format!("Not applicable (NotApplicableInRobustMode), RSDR = {rsdr:.6}"),
+        )
     } else if fit.rsd.is_finite() {
         format!("{:.6}", fit.rsd)
     } else {
@@ -448,7 +451,7 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
 /// nonlinearity on the interpretation scale for Hougaard's skewness given by Ratkowsky (1990).
 fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
     append_nonlinear_parameter_tab(result, fit, nl_spec);
-    let is_robust = nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
+    let is_robust = fit.is_robust_cauchy() || nl_spec.method == lumencraft_doc::FitMethod::RobustCauchy;
 
     // Goodness-of-fit summary tab.
     let mut gof_labels = vec![
@@ -470,6 +473,10 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
         vec![if is_robust { na_cell() } else { fit.bic.map_or(ResultCell::Empty, num_cell) }],
         vec![num_cell(fit.n_obs as f64)],
     ];
+    if is_robust && let Some(rsdr) = fit.rsdr.filter(|v| v.is_finite()) {
+        gof_labels.insert(4, "RSDR (Robust SD of residuals)".to_owned());
+        gof_vals.insert(4, vec![num_cell(rsdr)]);
+    }
     if let Some(r) = &fit.runs_test {
         gof_labels.push("Runs test P value".to_owned());
         gof_vals.push(vec![p_cell(p_fmt, r.p_too_few_runs)]);
@@ -524,6 +531,9 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     }
     result.scalars.push(ResultScalarEntry { key: "R2".to_owned(), data_set_index: None, value: fit.r_squared, units: None });
     result.scalars.push(ResultScalarEntry { key: "RSS".to_owned(), data_set_index: None, value: fit.rss, units: None });
+    if is_robust && let Some(rsdr) = fit.rsdr.filter(|v| v.is_finite()) {
+        result.scalars.push(ResultScalarEntry { key: "RSDR".to_owned(), data_set_index: None, value: rsdr, units: None });
+    }
 
     append_nonlinear_checklist(result, fit, is_robust);
 }
@@ -564,7 +574,8 @@ fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult
         });
     }
 
-    if let Some(max_g1) = fit.parameters.iter().map(|p| p.hougaard_g1.abs()).reduce(f64::max)
+    if !is_robust
+        && let Some(max_g1) = fit.parameters.iter().map(|p| p.hougaard_g1.abs()).filter(|v| v.is_finite()).reduce(f64::max)
         && max_g1 > 1.0
     {
         result.checklist.push(ChecklistItem {
@@ -720,6 +731,39 @@ fn append_comparison_tab(
                 footnotes: Vec::new(),
             });
         }
+        ModelComparisonOutcome::NotApplicableInRobustMode { requested_test, reason } => {
+            let id = if requested_test.contains("AICc") {
+                "model_comparison_aicc"
+            } else if requested_test.contains("Likelihood Ratio") {
+                "model_comparison_lrt"
+            } else {
+                "model_comparison_f"
+            };
+            let na = || ResultCell::Text("Not applicable".to_owned());
+            result.tabs.push(ResultTab {
+                id: id.to_owned(),
+                title: format!("Comparison of Models ({requested_test})"),
+                kind: ResultTabKind::ModelComparison,
+                column_headers: vec!["Value".to_owned()],
+                row_labels: vec![
+                    "Null hypothesis model".to_owned(),
+                    "Alternative model".to_owned(),
+                    "Test statistic".to_owned(),
+                    "P value".to_owned(),
+                    "Preferred model".to_owned(),
+                    "Inference availability".to_owned(),
+                ],
+                rows: vec![
+                    vec![ResultCell::Text(primary.equation_name.clone())],
+                    vec![ResultCell::Text(alt.equation_name.clone())],
+                    vec![na()],
+                    vec![na()],
+                    vec![na()],
+                    vec![ResultCell::Text("Not applicable (NotApplicableInRobustMode)".to_owned())],
+                ],
+                footnotes: vec![reason.clone()],
+            });
+        }
     }
 }
 
@@ -757,9 +801,13 @@ fn append_nonlinear_residuals_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
             let yh = ds.y_hat[i];
             let res = ds.residuals.get(i).copied().unwrap_or(f64::NAN);
             let w_res = ds.weighted_residuals.get(i).copied().unwrap_or(f64::NAN);
-            let stud_res = ds.studentized_residuals.get(i).copied().unwrap_or(f64::NAN);
+            let stud_cell = if fit.is_robust_cauchy() {
+                ResultCell::Text("Not applicable".to_owned())
+            } else {
+                num_cell(ds.studentized_residuals.get(i).copied().unwrap_or(f64::NAN))
+            };
             let qq = qq_quantiles[flat_idx];
-            rows.push(vec![num_cell(yh), num_cell(res), num_cell(w_res), num_cell(stud_res), num_cell(qq)]);
+            rows.push(vec![num_cell(yh), num_cell(res), num_cell(w_res), stud_cell, num_cell(qq)]);
             flat_idx += 1;
         }
     }
@@ -807,6 +855,7 @@ fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFi
     let mut interp_labels = Vec::with_capacity(total);
     let mut footnotes = Vec::new();
 
+    let mut has_robust_ci_suppression = false;
     for (items, direction) in [(&fit.interpolated_x, "X from Y"), (&fit.interpolated_y, "Y from X")] {
         for item in items {
             let lbl = fit
@@ -815,10 +864,15 @@ fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFi
                 .find(|d| d.data_set_index == item.data_set_index)
                 .map_or_else(|| format!("DS{}", item.data_set_index + 1), |d| d.label.clone());
             interp_labels.push(format!("{lbl} ({direction}={:.4})", item.input_value));
+            let suppress_ci = fit.is_robust_cauchy() || !item.inference_availability.is_available();
+            if suppress_ci {
+                has_robust_ci_suppression = true;
+            }
+            let ci_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.ci_lower, item.ci_upper) };
             interp_rows.push(vec![
                 num_cell(item.input_value),
                 num_cell(item.output_estimate),
-                ci_cell(item.ci_lower, item.ci_upper),
+                ci_rendered,
                 ResultCell::Text(direction.to_owned()),
                 ResultCell::Text(lbl.clone()),
             ]);
@@ -826,6 +880,12 @@ fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFi
                 footnotes.push(format!("{lbl} (row {}, {direction}): {note}", item.row + 1));
             }
         }
+    }
+    if has_robust_ci_suppression {
+        footnotes.push(
+            "Confidence intervals for interpolated unknowns are not applicable under Robust (Cauchy) regression (NotApplicableInRobustMode)."
+                .to_owned(),
+        );
     }
 
     result.tabs.push(ResultTab {

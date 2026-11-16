@@ -906,7 +906,7 @@ fn ensure_result_succeeded(res: &ResultSheet) -> Result<(), EngineError> {
 fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
     let scalars: Map<String, Value> =
         res.scalars.iter().map(|s| (s.key.clone(), json!({ "data_set_index": s.data_set_index, "value": s.value, "units": s.units }))).collect();
-    json!({
+    let mut payload = json!({
         "sheet_id": res.id.as_str(),
         "source_sheet_id": res.analysis.source_sheet_id.as_str(),
         "title": res.analysis.effective_title(),
@@ -917,7 +917,13 @@ fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
         "scalars": scalars,
         "pairwise_comparisons_count": res.pairwise_comparisons.len(),
         "fitted_curves_count": res.fitted_curves.len(),
-    })
+    });
+    if matches!(&res.analysis.kind, AnalysisKind::NonlinearRegression(nl) if nl.method == FitMethod::RobustCauchy)
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
+    }
+    payload
 }
 
 // ---------------------------------------------------------------------------

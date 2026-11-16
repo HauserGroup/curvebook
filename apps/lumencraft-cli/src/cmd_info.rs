@@ -151,7 +151,7 @@ fn summarize_result_sheet_json(res: &ResultSheet) -> Value {
         })
         .collect();
 
-    json!({
+    let mut payload = json!({
         "id": res.id.as_str(),
         "title": res.title(),
         "source_sheet_id": res.analysis.source_sheet_id.as_str(),
@@ -161,7 +161,13 @@ fn summarize_result_sheet_json(res: &ResultSheet) -> Value {
         "tabs": tabs,
         "fitted_curve_count": res.fitted_curves.len(),
         "fitted_curves": fitted_curves,
-    })
+    });
+    if matches!(&res.analysis.kind, lumencraft_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == lumencraft_doc::FitMethod::RobustCauchy)
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
+    }
+    payload
 }
 
 fn format_result_status(status: &ResultStatus) -> Value {
@@ -294,14 +300,23 @@ fn print_human_sections(doc: &ProjectDocument) {
     if !doc.result_sheets.is_empty() {
         println!("Analyses:");
         for res in &doc.result_sheets {
+            let inference_note = if matches!(
+                &res.analysis.kind,
+                lumencraft_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == lumencraft_doc::FitMethod::RobustCauchy
+            ) {
+                ", inference: not applicable (Robust mode)"
+            } else {
+                ""
+            };
             println!(
-                "  - {} `{}` (source: {}, tabs: {}, scalars: {}, curves: {})",
+                "  - {} `{}` (source: {}, tabs: {}, scalars: {}, curves: {}{})",
                 sanitize_terminal_text(res.id.as_str()),
                 sanitize_terminal_text(res.title()),
                 sanitize_terminal_text(res.analysis.source_sheet_id.as_str()),
                 res.tabs.len(),
                 res.scalars.len(),
-                res.fitted_curves.len()
+                res.fitted_curves.len(),
+                inference_note
             );
         }
     }

@@ -1072,7 +1072,7 @@ fn build_document_summary(session: &Session) -> Value {
 }
 
 fn summarize_result_sheet(rs: &ResultSheet, deps: &[SheetId]) -> Value {
-    json!({
+    let mut payload = json!({
         "section": "analyses",
         "id": rs.id,
         "title": rs.title(),
@@ -1086,7 +1086,13 @@ fn summarize_result_sheet(rs: &ResultSheet, deps: &[SheetId]) -> Value {
         "fitted_curves_count": rs.fitted_curves.len(),
         "checklist_count": rs.checklist.len(),
         "upstream_dependencies": deps,
-    })
+    });
+    if matches!(&rs.analysis.kind, lumencraft_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == lumencraft_doc::FitMethod::RobustCauchy)
+        && let Some(obj) = payload.as_object_mut()
+    {
+        obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
+    }
+    payload
 }
 
 fn collect_variables_and_hooks(doc: &ProjectDocument) -> (Value, Vec<Value>) {

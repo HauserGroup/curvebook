@@ -28,8 +28,8 @@ pub use linear::{
 };
 pub use result::{execute_analysis, execute_linear_analysis, execute_nonlinear_analysis, resolve_model_from_spec};
 pub use solver::{
-    FittedDatasetResult, FittedParameterSummary, InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models,
-    fit_nonlinear,
+    FittedDatasetResult, FittedParameterSummary, InferenceAvailability, InterpolatedUnknown, ModelComparisonOutcome, ModelComparisonResult,
+    NonlinearFitResult, SolverConfig, compare_models, compare_models_checked, fit_nonlinear,
 };
 pub use tex_format::{format_model_equation_tex, format_number_sig_figs, format_polynomial_equation_tex};
 pub use types::{

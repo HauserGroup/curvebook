@@ -146,7 +146,7 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
             })
         }),
         SheetSection::Analyses => doc.result_sheet(&target).map(|rs| {
-            json!({
+            let mut payload = json!({
                 "uri": uri,
                 "section": "analyses",
                 "id": rs.id,
@@ -161,7 +161,13 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
                 "fitted_curves": rs.fitted_curves,
                 "checklist": rs.checklist,
                 "upstream_dependencies": deps,
-            })
+            });
+            if matches!(&rs.analysis.kind, lumencraft_doc::AnalysisKind::NonlinearRegression(nl) if nl.method == lumencraft_doc::FitMethod::RobustCauchy)
+                && let Some(obj) = payload.as_object_mut()
+            {
+                obj.insert(String::from("inference_availability"), Value::String(String::from("NotApplicableInRobustMode")));
+            }
+            payload
         }),
         SheetSection::Graphs => doc.graph_sheet(&target).map(|gs| {
             json!({

@@ -127,6 +127,109 @@ impl Default for SolverConfig {
     }
 }
 
+fn default_fit_method() -> FitMethod {
+    FitMethod::LeastSquares
+}
+
+fn deserialize_f64_or_nan<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(<Option<f64> as serde::Deserialize>::deserialize(deserializer)?.unwrap_or(f64::NAN))
+}
+
+fn deserialize_opt_f64_vec<'de, D>(deserializer: D) -> Result<Vec<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = <Vec<Option<f64>> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(raw.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect())
+}
+
+fn deserialize_opt_f64_matrix<'de, D>(deserializer: D) -> Result<Vec<Vec<f64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = <Vec<Vec<Option<f64>>> as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(raw.into_iter().map(|row| row.into_iter().map(|v| v.unwrap_or(f64::NAN)).collect()).collect())
+}
+
+#[derive(serde::Deserialize)]
+struct CovarianceDiagnosticsCompat {
+    #[serde(default, deserialize_with = "deserialize_opt_f64_vec")]
+    standard_errors: Vec<f64>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_vec")]
+    symmetric_ci_lower: Vec<f64>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_vec")]
+    symmetric_ci_upper: Vec<f64>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_matrix")]
+    covariance_matrix: Vec<Vec<f64>>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_matrix")]
+    correlation_matrix: Vec<Vec<f64>>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_vec")]
+    dependencies: Vec<f64>,
+    #[serde(default)]
+    numerical_rank: usize,
+    #[serde(default)]
+    ambiguous: bool,
+}
+
+fn deserialize_covariance_diagnostics<'de, D>(deserializer: D) -> Result<CovarianceDiagnostics, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let compat = <CovarianceDiagnosticsCompat as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(CovarianceDiagnostics {
+        standard_errors: compat.standard_errors,
+        symmetric_ci_lower: compat.symmetric_ci_lower,
+        symmetric_ci_upper: compat.symmetric_ci_upper,
+        covariance_matrix: compat.covariance_matrix,
+        correlation_matrix: compat.correlation_matrix,
+        dependencies: compat.dependencies,
+        numerical_rank: compat.numerical_rank,
+        ambiguous: compat.ambiguous,
+    })
+}
+
+/// Availability of parametric least-squares / likelihood statistical inference for a fit or comparison.
+///
+/// Under [`FitMethod::RobustCauchy`], Cauchy IRLS regression minimizes a robust Lorentzian merit
+/// rather than a Gaussian least-squares likelihood. Parameter point estimates, residuals, `RSDR`,
+/// and interpolated point predictions remain valid, whereas least-squares inference (parameter SEs
+/// and CIs, covariance/correlation matrices, confidence and prediction bands, `AICc`/`BIC`, and
+/// `Extra-SS F` / `AICc` / `LRT` model comparisons) is [`Self::NotApplicableInRobustMode`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum InferenceAvailability {
+    /// Parametric least-squares / likelihood inference is valid and populated.
+    #[default]
+    Available,
+    /// Least-squares inference is suppressed because regression used [`FitMethod::RobustCauchy`].
+    NotApplicableInRobustMode,
+}
+
+impl InferenceAvailability {
+    /// Return `true` when parametric least-squares / likelihood inference is available.
+    #[must_use]
+    pub const fn is_available(self) -> bool {
+        matches!(self, Self::Available)
+    }
+
+    /// Return `true` when inference was suppressed for pure Robust (Cauchy) regression.
+    #[must_use]
+    pub const fn is_not_applicable_in_robust_mode(self) -> bool {
+        matches!(self, Self::NotApplicableInRobustMode)
+    }
+
+    /// Canonical machine-readable status string for diagnostics, JSON payloads, and reports.
+    #[must_use]
+    pub const fn status_code(self) -> &'static str {
+        match self {
+            Self::Available => "Available",
+            Self::NotApplicableInRobustMode => "NotApplicableInRobustMode",
+        }
+    }
+}
+
 /// Fitted value for a single free parameter slot (local or globally shared).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedParameterSummary {
@@ -134,14 +237,54 @@ pub struct FittedParameterSummary {
     pub name: String,
     pub dataset_index: Option<usize>,
     pub estimate: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub se: f64,
     pub ci_lower: CiBound,
     pub ci_upper: CiBound,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub symmetric_ci_lower: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub symmetric_ci_upper: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub dependency: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub hougaard_g1: f64,
     pub notes: Vec<ParameterNote>,
+    #[serde(default)]
+    pub inference_availability: InferenceAvailability,
+}
+
+impl FittedParameterSummary {
+    /// Typed parameter standard error (`None` in pure Robust Cauchy mode or when non-finite).
+    #[must_use]
+    pub fn se_option(&self) -> Option<f64> {
+        (self.inference_availability.is_available() && self.se.is_finite()).then_some(self.se)
+    }
+
+    /// Typed profile/Wald confidence interval bounds (`None` in pure Robust Cauchy mode).
+    #[must_use]
+    pub fn ci_bounds_option(&self) -> Option<(CiBound, CiBound)> {
+        self.inference_availability.is_available().then_some((self.ci_lower, self.ci_upper))
+    }
+
+    /// Typed symmetric Wald confidence interval (`None` in pure Robust Cauchy mode or when non-finite).
+    #[must_use]
+    pub fn symmetric_ci_option(&self) -> Option<(f64, f64)> {
+        (self.inference_availability.is_available() && self.symmetric_ci_lower.is_finite() && self.symmetric_ci_upper.is_finite())
+            .then_some((self.symmetric_ci_lower, self.symmetric_ci_upper))
+    }
+
+    /// Typed multicollinearity dependency index (`None` in pure Robust Cauchy mode or when non-finite).
+    #[must_use]
+    pub fn dependency_option(&self) -> Option<f64> {
+        (self.inference_availability.is_available() && self.dependency.is_finite()).then_some(self.dependency)
+    }
+
+    /// Typed Hougaard skewness `|g1|` (`None` in pure Robust Cauchy mode or when non-finite).
+    #[must_use]
+    pub fn hougaard_g1_option(&self) -> Option<f64> {
+        (self.inference_availability.is_available() && self.hougaard_g1.is_finite()).then_some(self.hougaard_g1)
+    }
 }
 
 /// Interpolated unknown (`X` from `Y` or `Y` from `X`) with confidence interval.
@@ -150,10 +293,21 @@ pub struct InterpolatedUnknown {
     pub data_set_index: usize,
     pub row: usize,
     pub input_value: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub output_estimate: f64,
     pub ci_lower: CiBound,
     pub ci_upper: CiBound,
     pub note: Option<String>,
+    #[serde(default)]
+    pub inference_availability: InferenceAvailability,
+}
+
+impl InterpolatedUnknown {
+    /// Typed confidence interval for the interpolated value (`None` in pure Robust Cauchy mode).
+    #[must_use]
+    pub fn ci_bounds_option(&self) -> Option<(CiBound, CiBound)> {
+        self.inference_availability.is_available().then_some((self.ci_lower, self.ci_upper))
+    }
 }
 
 /// Per-dataset fitted curve summary.
@@ -166,19 +320,64 @@ pub struct FittedDatasetResult {
     pub y_hat: Vec<f64>,
     pub residuals: Vec<f64>,
     pub weighted_residuals: Vec<f64>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64_vec")]
     pub studentized_residuals: Vec<f64>,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub ss_residual: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub r_squared: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub sy_x: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rsdr: Option<f64>,
     pub curve_overlay: Option<FittedCurveOverlay>,
 }
 
-/// Model comparison output (`Extra-SS F`, `AICc`, or Likelihood Ratio Test).
+/// Model comparison output (`Extra-SS F`, `AICc`, Likelihood Ratio Test, or `NotApplicableInRobustMode`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ModelComparisonOutcome {
     ExtraSumOfSquaresF(ExtraSumOfSquaresResult),
     Aicc(AiccComparisonResult),
     LikelihoodRatioTest(LikelihoodRatioResult),
+    /// Least-squares / likelihood model comparison is not applicable when either model uses Robust (Cauchy) regression.
+    NotApplicableInRobustMode {
+        requested_test: String,
+        reason: String,
+    },
+}
+
+impl ModelComparisonOutcome {
+    /// Return `true` if a statistical model comparison test was computed.
+    #[must_use]
+    pub const fn is_applicable(&self) -> bool {
+        !matches!(self, Self::NotApplicableInRobustMode { .. })
+    }
+
+    /// Typed inference availability status for this comparison outcome.
+    #[must_use]
+    pub const fn inference_availability(&self) -> InferenceAvailability {
+        match self {
+            Self::NotApplicableInRobustMode { .. } => InferenceAvailability::NotApplicableInRobustMode,
+            Self::ExtraSumOfSquaresF(_) | Self::Aicc(_) | Self::LikelihoodRatioTest(_) => InferenceAvailability::Available,
+        }
+    }
+}
+
+/// Complete model comparison response pairing availability status, alternative fit, and comparison outcome.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct ModelComparisonResult {
+    #[serde(default)]
+    pub inference_availability: InferenceAvailability,
+    pub outcome: ModelComparisonOutcome,
+    pub alternative_fit: NonlinearFitResult,
+}
+
+impl ModelComparisonResult {
+    /// Return `true` when statistical model comparison inference was computed.
+    #[must_use]
+    pub const fn is_applicable(&self) -> bool {
+        self.inference_availability.is_available() && self.outcome.is_applicable()
+    }
 }
 
 /// Complete nonlinear regression result across one or multiple globally fitted datasets.
@@ -186,6 +385,10 @@ pub enum ModelComparisonOutcome {
 pub struct NonlinearFitResult {
     pub equation_id: String,
     pub equation_name: String,
+    #[serde(default = "default_fit_method")]
+    pub fit_method: FitMethod,
+    #[serde(default)]
+    pub inference_availability: InferenceAvailability,
     pub status: FitStatus,
     pub iterations: usize,
     pub n_obs: usize,
@@ -194,12 +397,17 @@ pub struct NonlinearFitResult {
     pub df: usize,
     pub rss: f64,
     pub weighted_ss: f64,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub rsd: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rsdr: Option<f64>,
+    #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub r_squared: f64,
     pub aic_c: Option<f64>,
     pub bic: Option<f64>,
     pub parameters: Vec<FittedParameterSummary>,
     pub fixed_constants: Vec<(String, f64, Vec<ParameterNote>)>,
+    #[serde(deserialize_with = "deserialize_covariance_diagnostics")]
     pub covariance: CovarianceDiagnostics,
     pub datasets: Vec<FittedDatasetResult>,
     pub derived_scalars: Vec<Vec<DerivedScalar>>,
@@ -212,6 +420,38 @@ pub struct NonlinearFitResult {
     pub rout: Option<RoutDetectionResult>,
     pub interpolated_x: Vec<InterpolatedUnknown>,
     pub interpolated_y: Vec<InterpolatedUnknown>,
+}
+
+impl NonlinearFitResult {
+    /// Return `true` when parametric least-squares inference is suppressed due to Robust (Cauchy) fitting.
+    #[must_use]
+    pub fn is_robust_cauchy(&self) -> bool {
+        self.fit_method == FitMethod::RobustCauchy || self.inference_availability.is_not_applicable_in_robust_mode()
+    }
+
+    /// Typed residual standard deviation (`None` in pure Robust Cauchy mode or when non-finite).
+    #[must_use]
+    pub fn rsd_option(&self) -> Option<f64> {
+        (!self.is_robust_cauchy() && self.rsd.is_finite()).then_some(self.rsd)
+    }
+
+    /// Typed corrected Akaike information criterion (`None` in pure Robust Cauchy mode).
+    #[must_use]
+    pub fn aic_c_option(&self) -> Option<f64> {
+        if self.is_robust_cauchy() { None } else { self.aic_c }
+    }
+
+    /// Typed Bayesian information criterion (`None` in pure Robust Cauchy mode).
+    #[must_use]
+    pub fn bic_option(&self) -> Option<f64> {
+        if self.is_robust_cauchy() { None } else { self.bic }
+    }
+
+    /// Typed asymptotic covariance access, returning `Err(InferenceAvailability::NotApplicableInRobustMode)`
+    /// in pure Robust (Cauchy) regression.
+    pub fn covariance_if_available(&self) -> Result<&CovarianceDiagnostics, InferenceAvailability> {
+        if self.is_robust_cauchy() { Err(InferenceAvailability::NotApplicableInRobustMode) } else { Ok(&self.covariance) }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1448,7 +1688,8 @@ fn compute_residual_diagnostics(
         None
     };
 
-    let lof_res = if config.compute_lack_of_fit { replicates_lack_of_fit(points, weighted_ss, df) } else { None };
+    let lof_res =
+        if config.compute_lack_of_fit && config.method != FitMethod::RobustCauchy { replicates_lack_of_fit(points, weighted_ss, df) } else { None };
 
     let (norm_main, norm_ad, norm_ks) = if config.compute_normality {
         (
@@ -1537,6 +1778,8 @@ fn fit_plot_function_only(
     let layout = ParameterLayout::build(model, datasets, hooks, &config.parameter_rules)?;
     let k_free = layout.k_free();
     let theta: Vec<f64> = layout.free_slots.iter().map(|s| s.init).collect();
+    let is_robust = config.method == FitMethod::RobustCauchy;
+    let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
     let mut parameters = Vec::with_capacity(k_free);
     for (idx, slot) in layout.free_slots.iter().enumerate() {
         parameters.push(FittedParameterSummary {
@@ -1549,9 +1792,10 @@ fn fit_plot_function_only(
             ci_upper: CiBound::Open,
             symmetric_ci_lower: f64::NAN,
             symmetric_ci_upper: f64::NAN,
-            dependency: 0.0,
-            hougaard_g1: 0.0,
-            notes: vec![ParameterNote::UnboundedCi],
+            dependency: if is_robust { f64::NAN } else { 0.0 },
+            hougaard_g1: if is_robust { f64::NAN } else { 0.0 },
+            notes: if is_robust { Vec::new() } else { vec![ParameterNote::UnboundedCi] },
+            inference_availability,
         });
     }
 
@@ -1607,17 +1851,18 @@ fn fit_plot_function_only(
             y_hat: ds_yh,
             residuals: ds_res.clone(),
             weighted_residuals: ds_res.clone(),
-            studentized_residuals: vec![0.0; ds_res.len()],
+            studentized_residuals: if is_robust { Vec::new() } else { vec![0.0; ds_res.len()] },
             ss_residual: ds_ss,
             r_squared: 1.0,
-            sy_x: 0.0,
+            sy_x: if is_robust { f64::NAN } else { 0.0 },
+            rsdr: None,
             curve_overlay: Some(overlay),
         });
     }
 
     let raw_rss = raw_rss_acc.total();
     let df = total_obs.saturating_sub(k_free);
-    let rsd = if df > 0 && config.method != FitMethod::RobustCauchy { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
+    let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
     let r_squared = if y_vals_all.len() > 1 {
         let ym = y_vals_all.iter().sum::<f64>() / (y_vals_all.len() as f64);
         let tss: f64 = y_vals_all.iter().map(|v| (v - ym) * (v - ym)).sum();
@@ -1629,6 +1874,8 @@ fn fit_plot_function_only(
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
         equation_name: model.name().to_owned(),
+        fit_method: config.method,
+        inference_availability,
         status: FitStatus::Converged,
         iterations: 0,
         n_obs: total_obs,
@@ -1638,6 +1885,7 @@ fn fit_plot_function_only(
         rss: raw_rss,
         weighted_ss: raw_rss,
         rsd,
+        rsdr: None,
         r_squared,
         aic_c: None,
         bic: None,
@@ -1647,9 +1895,9 @@ fn fit_plot_function_only(
             standard_errors: vec![f64::NAN; k_free],
             symmetric_ci_lower: vec![f64::NAN; k_free],
             symmetric_ci_upper: vec![f64::NAN; k_free],
-            covariance_matrix: vec![vec![0.0; k_free]; k_free],
-            correlation_matrix: vec![vec![0.0; k_free]; k_free],
-            dependencies: vec![0.0; k_free],
+            covariance_matrix: if is_robust { Vec::new() } else { vec![vec![0.0; k_free]; k_free] },
+            correlation_matrix: if is_robust { Vec::new() } else { vec![vec![0.0; k_free]; k_free] },
+            dependencies: if is_robust { vec![f64::NAN; k_free] } else { vec![0.0; k_free] },
             numerical_rank: 0,
             ambiguous: false,
         },
@@ -1837,9 +2085,10 @@ fn fit_single_or_shared(
     let n_obs = obs_replicate_count(&obs);
     let df = n_obs.saturating_sub(k_free);
 
+    let is_robust = config.method == FitMethod::RobustCauchy;
+    let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
     let unc = finalize_fit_uncertainty(model, &layout, &obs, &mut lm_out, df, ss_within_total, config)?;
-    let parameters =
-        build_fitted_parameter_summaries(&layout, &lm_out.theta, &unc.cov, &unc.hougaard, &unc.profile_cis, config.method == FitMethod::RobustCauchy);
+    let parameters = build_fitted_parameter_summaries(&layout, &lm_out.theta, &unc.cov, &unc.hougaard, &unc.profile_cis, inference_availability);
 
     let mut raw_rss_acc = NeumaierSum::new();
     let mut y_mean_acc = NeumaierSum::new();
@@ -1866,7 +2115,11 @@ fn fit_single_or_shared(
     let ic = if is_robust { None } else { compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok() };
     let cov = unc.cov;
 
-    let all_stud = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous);
+    let all_stud = if is_robust {
+        Vec::new()
+    } else {
+        compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous)
+    };
     let assembled = assemble_dataset_results(
         model,
         &layout,
@@ -1885,12 +2138,20 @@ fn fit_single_or_shared(
     );
 
     let raw_residuals_all: Vec<f64> = obs.iter().zip(lm_out.y_hat.iter()).map(|(o, yh)| o.point.y - yh).collect();
+    let rsdr = if is_robust {
+        let abs_res: Vec<f64> = raw_residuals_all.iter().map(|r| r.abs()).collect();
+        Some(compute_rsdr(&abs_res, k_free))
+    } else {
+        None
+    };
     let clean_points: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
     let res_diag = compute_residual_diagnostics(&clean_points, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
         equation_name: model.name().to_owned(),
+        fit_method: config.method,
+        inference_availability,
         status: lm_out.status,
         iterations: lm_out.iterations,
         n_obs,
@@ -1900,6 +2161,7 @@ fn fit_single_or_shared(
         rss: raw_rss,
         weighted_ss: lm_out.weighted_ss,
         rsd,
+        rsdr,
         r_squared,
         aic_c: ic.as_ref().map(|x| x.aicc),
         bic: ic.as_ref().map(|x| x.bic),
@@ -1975,7 +2237,11 @@ fn solve_single_dataset_unit(
         raw_rss_d.add(rec.ss_within);
     }
     let rsd_d = if df_d > 0 && config.method != FitMethod::RobustCauchy { (raw_rss_d.total() / (df_d as f64)).sqrt() } else { f64::NAN };
-    let stud_d = compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous);
+    let stud_d = if config.method == FitMethod::RobustCauchy {
+        Vec::new()
+    } else {
+        compute_studentized_residuals(&lm_out.j_mat, &lm_out.weighted_res, unc.cov_unscaled.as_ref(), unc.sigma_w, cov.ambiguous)
+    };
 
     let assembled = assemble_dataset_results(
         model,
@@ -2192,14 +2458,10 @@ fn fit_independent_datasets(
         numerical_rank: total_rank,
         ambiguous: any_ambiguous,
     };
-    let parameters = build_fitted_parameter_summaries(
-        &global_layout,
-        &global_theta,
-        &cov,
-        &global_hougaard,
-        &global_profile_cis,
-        config.method == FitMethod::RobustCauchy,
-    );
+    let is_robust = config.method == FitMethod::RobustCauchy;
+    let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
+    let parameters =
+        build_fitted_parameter_summaries(&global_layout, &global_theta, &cov, &global_hougaard, &global_profile_cis, inference_availability);
 
     let raw_rss = total_raw_rss.total();
     let weighted_ss = total_weighted_ss.total();
@@ -2214,6 +2476,16 @@ fn fit_independent_datasets(
     let tss = tss_acc.total();
     let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
     let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
+    let rsdr = if is_robust {
+        if ds_results.len() == 1 {
+            ds_results[0].rsdr
+        } else {
+            let abs_res: Vec<f64> = all_raw_residuals.iter().map(|r| r.abs()).collect();
+            Some(compute_rsdr(&abs_res, k_free))
+        }
+    } else {
+        None
+    };
     let ic = if is_robust { None } else { compute_information_criteria(weighted_ss, n_obs, k_free).ok() };
 
     let res_diag = compute_residual_diagnostics(&all_points, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
@@ -2221,6 +2493,8 @@ fn fit_independent_datasets(
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
         equation_name: model.name().to_owned(),
+        fit_method: config.method,
+        inference_availability,
         status,
         iterations: max_iterations,
         n_obs,
@@ -2230,6 +2504,7 @@ fn fit_independent_datasets(
         rss: raw_rss,
         weighted_ss,
         rsd,
+        rsdr,
         r_squared,
         aic_c: ic.as_ref().map(|x| x.aicc),
         bic: ic.as_ref().map(|x| x.bic),
@@ -2256,8 +2531,9 @@ fn build_fitted_parameter_summaries(
     cov: &CovarianceDiagnostics,
     hougaard: &[f64],
     profile_cis: &[(CiBound, CiBound)],
-    suppress_unbounded_ci_note: bool,
+    inference_availability: InferenceAvailability,
 ) -> Vec<FittedParameterSummary> {
+    let is_robust = inference_availability.is_not_applicable_in_robust_mode();
     let mut parameters = Vec::with_capacity(layout.k_free());
     for (idx, slot) in layout.free_slots.iter().enumerate() {
         let est = theta[idx];
@@ -2271,10 +2547,10 @@ fn build_fitted_parameter_summaries(
         if slot.upper.is_some_and(|u| (u - est).abs() <= 1e-9 * est.abs().max(1.0)) {
             notes.push(ParameterNote::HitUpperBound);
         }
-        if cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
+        if !is_robust && cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
             notes.push(ParameterNote::Ambiguous);
         }
-        if !suppress_unbounded_ci_note && (matches!(profile_cis[idx].0, CiBound::Open) || matches!(profile_cis[idx].1, CiBound::Open)) {
+        if !is_robust && (matches!(profile_cis[idx].0, CiBound::Open) || matches!(profile_cis[idx].1, CiBound::Open)) {
             notes.push(ParameterNote::UnboundedCi);
         }
 
@@ -2283,14 +2559,15 @@ fn build_fitted_parameter_summaries(
             name: slot.name.clone(),
             dataset_index: slot.dataset_idx,
             estimate: est,
-            se: cov.standard_errors.get(idx).copied().unwrap_or(f64::NAN),
-            ci_lower: profile_cis[idx].0,
-            ci_upper: profile_cis[idx].1,
-            symmetric_ci_lower: cov.symmetric_ci_lower.get(idx).copied().unwrap_or(f64::NAN),
-            symmetric_ci_upper: cov.symmetric_ci_upper.get(idx).copied().unwrap_or(f64::NAN),
-            dependency: cov.dependencies.get(idx).copied().unwrap_or(f64::NAN),
-            hougaard_g1: hougaard.get(idx).copied().unwrap_or(f64::NAN),
+            se: if is_robust { f64::NAN } else { cov.standard_errors.get(idx).copied().unwrap_or(f64::NAN) },
+            ci_lower: if is_robust { CiBound::Open } else { profile_cis[idx].0 },
+            ci_upper: if is_robust { CiBound::Open } else { profile_cis[idx].1 },
+            symmetric_ci_lower: if is_robust { f64::NAN } else { cov.symmetric_ci_lower.get(idx).copied().unwrap_or(f64::NAN) },
+            symmetric_ci_upper: if is_robust { f64::NAN } else { cov.symmetric_ci_upper.get(idx).copied().unwrap_or(f64::NAN) },
+            dependency: if is_robust { f64::NAN } else { cov.dependencies.get(idx).copied().unwrap_or(f64::NAN) },
+            hougaard_g1: if is_robust { f64::NAN } else { hougaard.get(idx).copied().unwrap_or(f64::NAN) },
             notes,
+            inference_availability,
         });
     }
     parameters
@@ -2347,7 +2624,9 @@ fn assemble_dataset_results(
                 ds_y_hat.push(yh);
                 ds_res.push(r);
                 ds_w_res.push(lm_out.weighted_res[i]);
-                ds_stud_res.push(studentized_all.get(i).copied().unwrap_or(0.0));
+                if cfg.solver.method != FitMethod::RobustCauchy {
+                    ds_stud_res.push(studentized_all.get(i).copied().unwrap_or(0.0));
+                }
                 ds_rss.add(w_rep * r * r);
                 ds_rss.add(rec.ss_within);
                 ds_n += rec.rep_n;
@@ -2369,12 +2648,21 @@ fn assemble_dataset_results(
         } else {
             1.0
         };
-        let ds_sy_x = if cfg.solver.method == FitMethod::RobustCauchy {
+        let is_robust = cfg.solver.method == FitMethod::RobustCauchy;
+        let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
+        let ds_sy_x = if is_robust {
             f64::NAN
         } else if ds_n > k_free {
             (ds_ss / ((ds_n - k_free) as f64)).sqrt()
         } else {
             cfg.rsd
+        };
+        let ds_rsdr = if is_robust {
+            let abs_res: Vec<f64> = ds_res.iter().map(|r| r.abs()).collect();
+            let k_ds = layout.bindings[ds_local_idx].iter().filter(|b| matches!(b, ParamBinding::Free(_))).count();
+            Some(compute_rsdr(&abs_res, k_ds))
+        } else {
+            None
         };
 
         let converged_or_ambig = lm_out.status == FitStatus::Converged || lm_out.status == FitStatus::Ambiguous;
@@ -2386,16 +2674,19 @@ fn assemble_dataset_results(
                 ds_params: &ds_params,
                 ds,
                 ds_local_idx,
-                cov_unscaled: cfg.cov_unscaled,
-                sigma: cfg.sigma_w,
-                t_crit: cfg.t_crit,
+                cov_unscaled: if is_robust { None } else { cfg.cov_unscaled },
+                sigma: if is_robust { f64::NAN } else { cfg.sigma_w },
+                t_crit: if is_robust { f64::NAN } else { cfg.t_crit },
                 converged: converged_or_ambig,
-                ambiguous: cfg.ambiguous,
+                ambiguous: if is_robust { false } else { cfg.ambiguous },
                 solver: cfg.solver,
             })
         });
 
         if cfg.solver.interpolate_unknowns {
+            let interp_cov = if is_robust { None } else { cfg.cov_unscaled };
+            let interp_sigma = if is_robust { f64::NAN } else { cfg.sigma_w };
+            let interp_t = if is_robust { f64::NAN } else { cfg.t_crit };
             for &(row, y_target) in &ds.unknowns_y {
                 interpolated_x.push(interpolate_x_from_y(
                     model,
@@ -2406,9 +2697,10 @@ fn assemble_dataset_results(
                     ds_local_idx,
                     row,
                     y_target,
-                    cfg.cov_unscaled,
-                    cfg.sigma_w,
-                    cfg.t_crit,
+                    interp_cov,
+                    interp_sigma,
+                    interp_t,
+                    inference_availability,
                 ));
             }
             for &(row, x_val) in &ds.unknowns_x {
@@ -2421,9 +2713,10 @@ fn assemble_dataset_results(
                     ds_local_idx,
                     row,
                     x_val,
-                    cfg.cov_unscaled,
-                    cfg.sigma_w,
-                    cfg.t_crit,
+                    interp_cov,
+                    interp_sigma,
+                    interp_t,
+                    inference_availability,
                 ));
             }
         }
@@ -2440,11 +2733,20 @@ fn assemble_dataset_results(
             ss_residual: ds_ss,
             r_squared: ds_r2,
             sy_x: ds_sy_x,
+            rsdr: ds_rsdr,
             curve_overlay,
         });
     }
 
     AssembledDatasets { ds_results, derived_scalars, interpolated_x, interpolated_y }
+}
+
+fn comparison_test_label(spec: &ModelComparisonSpec) -> &'static str {
+    match spec {
+        ModelComparisonSpec::ExtraSumOfSquaresF { .. } => "Extra sum-of-squares F test",
+        ModelComparisonSpec::Aicc { .. } => "AICc",
+        ModelComparisonSpec::LikelihoodRatioTest { .. } => "Likelihood Ratio Test",
+    }
 }
 
 /// Compare primary fitted model against an alternative nested/non-nested model via Extra-SS *F*,
@@ -2457,7 +2759,10 @@ fn assemble_dataset_results(
 ///
 /// Note: all three statistics are computed from `weighted_ss`. Under
 /// `FitMethod::PoissonDeviance` that value is the Poisson deviance, which is the correct input
-/// for the deviance LRT but not for the Gaussian-likelihood *F* test or AICc formula.
+/// for the deviance LRT but not for the Gaussian-likelihood *F* test or AICc formula. If **either**
+/// the primary or alternative model uses `FitMethod::RobustCauchy`, returns
+/// `FitError::InvalidParameter` carrying `NotApplicableInRobustMode` (use
+/// [`compare_models_checked`] when a typed [`ModelComparisonResult`] is desired).
 pub fn compare_models(
     primary: &NonlinearFitResult,
     alt_model: &dyn ParametricModel,
@@ -2466,13 +2771,19 @@ pub fn compare_models(
     config: &SolverConfig,
     spec: &ModelComparisonSpec,
 ) -> Result<(NonlinearFitResult, ModelComparisonOutcome), FitError> {
-    if config.method == FitMethod::RobustCauchy {
+    if primary.is_robust_cauchy() || config.method == FitMethod::RobustCauchy {
         return Err(FitError::InvalidParameter {
             name: "comparison",
             reason: "NotApplicableInRobustMode: F, AICc, and LRT model comparisons are not applicable under Robust (Cauchy) regression".to_owned(),
         });
     }
     let alt = fit_nonlinear(alt_model, datasets, hooks, config)?;
+    if alt.is_robust_cauchy() {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: "NotApplicableInRobustMode: F, AICc, and LRT model comparisons are not applicable under Robust (Cauchy) regression".to_owned(),
+        });
+    }
     let outcome = match spec {
         ModelComparisonSpec::ExtraSumOfSquaresF { .. } => {
             let (ss_simple, df_simple, ss_complex, df_complex) = if primary.df >= alt.df {
@@ -2506,6 +2817,32 @@ pub fn compare_models(
         }
     };
     Ok((alt, outcome))
+}
+
+/// Compare two models and return a typed [`ModelComparisonResult`] that cleanly carries
+/// [`InferenceAvailability::NotApplicableInRobustMode`] instead of failing whenever either model
+/// uses [`FitMethod::RobustCauchy`].
+pub fn compare_models_checked(
+    primary: &NonlinearFitResult,
+    alt_model: &dyn ParametricModel,
+    datasets: &[DatasetSeries],
+    hooks: &HookContext,
+    config: &SolverConfig,
+    spec: &ModelComparisonSpec,
+) -> Result<ModelComparisonResult, FitError> {
+    if primary.is_robust_cauchy() || config.method == FitMethod::RobustCauchy {
+        let alternative_fit = fit_nonlinear(alt_model, datasets, hooks, config)?;
+        return Ok(ModelComparisonResult {
+            inference_availability: InferenceAvailability::NotApplicableInRobustMode,
+            outcome: ModelComparisonOutcome::NotApplicableInRobustMode {
+                requested_test: comparison_test_label(spec).to_owned(),
+                reason: "NotApplicableInRobustMode: F, AICc, and LRT model comparisons are not applicable when either model uses Robust (Cauchy) regression".to_owned(),
+            },
+            alternative_fit,
+        });
+    }
+    let (alternative_fit, outcome) = compare_models(primary, alt_model, datasets, hooks, config, spec)?;
+    Ok(ModelComparisonResult { inference_availability: outcome.inference_availability(), outcome, alternative_fit })
 }
 
 /// Poisson maximum-likelihood regression by iteratively reweighted least squares
@@ -2888,7 +3225,12 @@ fn build_curve_overlay(ctx: &CurveOverlayContext<'_>) -> FittedCurveOverlay {
     let mut work_theta = ctx.theta.to_vec();
     let mut work_params = vec![0.0_f64; p_m];
 
-    let active_cov = if ctx.solver.plot_function_only || !ctx.solver.compute_bands || !ctx.t_crit.is_finite() { None } else { ctx.cov_unscaled };
+    let active_cov =
+        if ctx.solver.method == FitMethod::RobustCauchy || ctx.solver.plot_function_only || !ctx.solver.compute_bands || !ctx.t_crit.is_finite() {
+            None
+        } else {
+            ctx.cov_unscaled
+        };
 
     for i in 0..n_grid {
         let frac = (i as f64) / ((n_grid - 1) as f64);
@@ -3119,6 +3461,7 @@ fn interpolate_x_from_y(
     cov_unscaled: Option<&DenseMatrix>,
     sigma: f64,
     t_crit: f64,
+    inference_availability: InferenceAvailability,
 ) -> InterpolatedUnknown {
     let xb = dataset_x_bounds(ds);
     let scan_lo = xb.scan_x_min - 0.5 * xb.span;
@@ -3176,10 +3519,12 @@ fn interpolate_x_from_y(
             ci_lower: CiBound::Open,
             ci_upper: CiBound::Open,
             note: Some(note),
+            inference_availability,
         };
     };
 
-    let (ci_lower, ci_upper) = if let Some(cov_u) = cov_unscaled
+    let (ci_lower, ci_upper) = if inference_availability.is_available()
+        && let Some(cov_u) = cov_unscaled
         && t_crit.is_finite()
     {
         let band_lo_fn = |x: f64| -> f64 {
@@ -3228,7 +3573,16 @@ fn interpolate_x_from_y(
         note = Some("Non-monotone fitted curve: multiple X roots exist inside measured standard range".to_owned());
     }
 
-    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: y_target, output_estimate: x_hat, ci_lower, ci_upper, note }
+    InterpolatedUnknown {
+        data_set_index: ds.data_set_index,
+        row,
+        input_value: y_target,
+        output_estimate: x_hat,
+        ci_lower,
+        ci_upper,
+        note,
+        inference_availability,
+    }
 }
 
 /// Predict `Y` at `x_val` with the pointwise delta-method confidence interval for the mean
@@ -3246,6 +3600,7 @@ fn interpolate_y_from_x(
     cov_unscaled: Option<&DenseMatrix>,
     sigma: f64,
     t_crit: f64,
+    inference_availability: InferenceAvailability,
 ) -> InterpolatedUnknown {
     let xb = dataset_x_bounds(ds);
     let Some(y_hat) = model.eval(&[x_val], ds_params, ds.data_set_index) else {
@@ -3257,9 +3612,11 @@ fn interpolate_y_from_x(
             ci_lower: CiBound::Open,
             ci_upper: CiBound::Open,
             note: Some("X outside fitted model domain".to_owned()),
+            inference_availability,
         };
     };
-    let (ci_lower, ci_upper) = if let Some(cov_u) = cov_unscaled
+    let (ci_lower, ci_upper) = if inference_availability.is_available()
+        && let Some(cov_u) = cov_unscaled
         && t_crit.is_finite()
     {
         let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x_val);
@@ -3269,7 +3626,16 @@ fn interpolate_y_from_x(
         (CiBound::Open, CiBound::Open)
     };
     let note = extrapolation_note_for_x(&xb, x_val, None);
-    InterpolatedUnknown { data_set_index: ds.data_set_index, row, input_value: x_val, output_estimate: y_hat, ci_lower, ci_upper, note }
+    InterpolatedUnknown {
+        data_set_index: ds.data_set_index,
+        row,
+        input_value: x_val,
+        output_estimate: y_hat,
+        ci_lower,
+        ci_upper,
+        note,
+        inference_availability,
+    }
 }
 
 fn scan_interval_first_root_and_crossings<F: Fn(f64) -> f64>(f: &F, lo: f64, hi: f64) -> (Option<f64>, usize) {
