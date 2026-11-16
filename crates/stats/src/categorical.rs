@@ -1618,7 +1618,8 @@ pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: 
     }
     let kappa = (po - pe) / (1.0 - pe);
 
-    // Asymptotic SE (Fleiss, Cohen & Everitt 1969).
+    // Asymptotic SE (Fleiss, Cohen & Everitt 1969, Psychol. Bull. 72:323-327):
+    // subtract the squared expectation [p_o - 2 * p_e * (1 - kappa)]^2 before normalizing by N(1 - p_e)^2.
     let mut var_sum = 0.0_f64;
     for i in 0..k {
         for j in 0..k {
@@ -1628,7 +1629,8 @@ pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: 
         }
     }
     let denom_sq = (1.0 - pe) * (1.0 - pe);
-    let se = ((var_sum - (kappa * (1.0 - pe) - (po - pe)).powi(2)).max(0.0) / (nf * denom_sq)).sqrt();
+    let mean_term = po - 2.0 * pe * (1.0 - kappa);
+    let se = ((var_sum - mean_term * mean_term).max(0.0) / (nf * denom_sq)).sqrt();
 
     let z_crit = norm_two_sided_isf(confidence.alpha()).unwrap_or(1.959_963_984_540_054);
     let ci = ((kappa - z_crit * se).clamp(-1.0, 1.0), (kappa + z_crit * se).clamp(-1.0, 1.0));
@@ -2367,6 +2369,7 @@ fn run_parts_of_whole_gof(
 
     let mut chi2 = 0.0_f64;
     let mut g2 = 0.0_f64;
+    let mut active_categories = 0_usize;
     let mut min_expected = f64::INFINITY;
     let mut lt5_count = 0_usize;
     let mut cat_labels = Vec::with_capacity(k);
@@ -2378,11 +2381,12 @@ fn run_parts_of_whole_gof(
         if exp <= 0.0 && obs > 0.0 {
             return Err(StatsError::InvalidParameter { name: "expected_proportions_zero_for_nonzero_observed", value: obs });
         }
-        min_expected = min_expected.min(exp);
-        if exp < 5.0 {
-            lt5_count += 1;
-        }
         let pearson_resid = if exp > 0.0 {
+            active_categories += 1;
+            min_expected = min_expected.min(exp);
+            if exp < 5.0 {
+                lt5_count += 1;
+            }
             let diff = obs - exp;
             chi2 += (diff * diff) / exp;
             if obs > 0.0 {
@@ -2397,7 +2401,12 @@ fn run_parts_of_whole_gof(
         cat_rows.push(vec![num_cell(obs), num_cell(obs / total), num_cell(p_exp), num_cell(exp), num_cell(pearson_resid)]);
     }
 
-    let df = (k - 1) as f64;
+    if active_categories < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "parts-of-whole goodness-of-fit", required: 2, actual: active_categories });
+    }
+    let chi2 = if chi2 <= 0.0 { 0.0 } else { chi2 };
+    let g2 = if g2 <= 0.0 { 0.0 } else { g2 };
+    let df = (active_categories - 1) as f64;
     let p_val = chi2_sf(chi2, df)?;
     let g2_p = chi2_sf(g2, df)?;
     push_scalar(out, "Goodness-of-fit chi-square", None, chi2);
@@ -2432,11 +2441,11 @@ fn run_parts_of_whole_gof(
         cat_rows,
     ));
 
-    let expected_ok = min_expected >= 5.0 || (k > 2 && (lt5_count as f64) / (k as f64) <= 0.2 && min_expected >= 1.0);
+    let expected_ok = min_expected >= 5.0 || (active_categories > 2 && (lt5_count as f64) / (active_categories as f64) <= 0.2 && min_expected >= 1.0);
     out.checklist.push(checklist_item(
         "Minimum expected category count",
         if expected_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
-        Some(format!("min E = {min_expected:.2}, {lt5_count}/{k} categories < 5")),
+        Some(format!("min E = {min_expected:.2}, {lt5_count}/{active_categories} categories < 5")),
         if expected_ok {
             "Expected category counts satisfy guidelines for asymptotic chi-square goodness-of-fit approximation."
         } else {

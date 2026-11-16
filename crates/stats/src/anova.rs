@@ -78,7 +78,10 @@ use lumencraft_doc::{
     ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
 use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{chi2_sf, f_sf, noncentral_f_ci};
+use lumencraft_math::dist::{
+    chi2_sf, dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, f_sf, max_studentized_range_isf, max_studentized_range_sf,
+    noncentral_f_ci, student_t_two_sided_isf, student_t_two_sided_p, studentized_range_isf, studentized_range_sf,
+};
 use lumencraft_math::linalg::{DenseMatrix, cholesky, qr_col_pivoted, solve_linear_least_squares, sym_eigen};
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
@@ -91,8 +94,8 @@ use crate::common::{
 };
 use crate::error::StatsError;
 use crate::multiplicity::{
-    GroupComparisonInput, MultiplicityProcedure, PairwiseComparisonDetail, build_multiplicity_tab, compare_dunn_ranks, compare_groups_pairwise,
-    compare_groups_with_procedure, linear_trend_test,
+    GroupComparisonInput, MultiplicityProcedure, PairwiseComparisonDetail, adjust_p_values, build_multiplicity_tab, compare_dunn_ranks,
+    compare_groups_pairwise, compare_groups_with_procedure, linear_trend_test,
 };
 
 // ============================================================================
@@ -1231,6 +1234,72 @@ struct TermSpec {
     col_count: usize,
 }
 
+#[derive(Debug, Clone)]
+struct CellSampleStats {
+    count: usize,
+    var_unbiased: f64,
+}
+
+#[derive(Debug, Clone)]
+struct OlsPostHocModel {
+    factor_levels: Vec<Vec<String>>,
+    factor_basis: Vec<Vec<Vec<f64>>>,
+    subsets: Vec<Vec<usize>>,
+    total_cols: usize,
+    beta: Vec<f64>,
+    cov_unscaled: DenseMatrix,
+    row_proj: DenseMatrix,
+    ms_resid: f64,
+    df_resid: f64,
+    cell_stats: std::collections::BTreeMap<Vec<usize>, CellSampleStats>,
+}
+
+fn build_xtx_pinv_and_proj(x: &DenseMatrix) -> Result<(DenseMatrix, DenseMatrix), StatsError> {
+    let p = x.ncols();
+    let xtx = symmetrize_dense(&x.transpose().matmul(x)?)?;
+    let eig = sym_eigen(&xtx)?;
+    let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+    let tol = max_ev.max(1.0) * (p.max(1) as f64) * 1e-11;
+    let mut pinv = vec![0.0_f64; p * p];
+    let mut proj = vec![0.0_f64; p * p];
+    for (k, &ev) in eig.eigenvalues.iter().enumerate() {
+        if ev <= tol {
+            continue;
+        }
+        let inv_ev = 1.0 / ev;
+        for i in 0..p {
+            let qi = eig.eigenvectors.get(i, k).unwrap_or(0.0);
+            for j in i..p {
+                let qj = eig.eigenvectors.get(j, k).unwrap_or(0.0);
+                let dp = qi * qj;
+                let di = dp * inv_ev;
+                proj[i * p + j] += dp;
+                pinv[i * p + j] += di;
+                if i != j {
+                    proj[j * p + i] += dp;
+                    pinv[j * p + i] += di;
+                }
+            }
+        }
+    }
+    Ok((DenseMatrix::from_row_major(p, p, pinv)?, DenseMatrix::from_row_major(p, p, proj)?))
+}
+
+fn build_cell_stats_map(rows: &[(Vec<usize>, f64)]) -> Result<std::collections::BTreeMap<Vec<usize>, CellSampleStats>, StatsError> {
+    let mut grouped: std::collections::BTreeMap<Vec<usize>, Vec<f64>> = std::collections::BTreeMap::new();
+    for (lvls, y) in rows {
+        grouped.entry(lvls.clone()).or_default().push(*y);
+    }
+    let mut out = std::collections::BTreeMap::new();
+    for (cell, vals) in grouped {
+        let count = vals.len();
+        let m = SummaryMoments::from_slice(&vals)?;
+        let var_unbiased = if count >= 2 && m.css.is_finite() { (m.css / ((count - 1) as f64)).max(0.0) } else { 0.0 };
+        out.insert(cell, CellSampleStats { count, var_unbiased });
+    }
+    Ok(out)
+}
+
 /// Fit Type I (sequential) or Type III (partial, sum/effect-coded) general `N`-way factorial ANOVA
 /// via `lumencraft_math::linalg::solve_linear_least_squares`.
 ///
@@ -1244,6 +1313,15 @@ pub fn fit_factorial_anova(
     max_interaction_order: usize,
     ss_type: SumOfSquaresType,
 ) -> Result<FactorialAnovaResult, StatsError> {
+    let (res, _) = fit_factorial_anova_with_model(data, max_interaction_order, ss_type)?;
+    Ok(res)
+}
+
+fn fit_factorial_anova_with_model(
+    data: &FactorialObservations,
+    max_interaction_order: usize,
+    ss_type: SumOfSquaresType,
+) -> Result<(FactorialAnovaResult, OlsPostHocModel), StatsError> {
     let n_obs = data.rows.len();
     let n_factors = data.factor_names.len();
     if n_obs < 3 || n_factors == 0 {
@@ -1334,7 +1412,21 @@ pub fn fit_factorial_anova(
         ss_type,
     };
     finalize_term_p_values(&mut res)?;
-    Ok(res)
+    let (cov_unscaled, row_proj) = build_xtx_pinv_and_proj(&full_x)?;
+    let cell_stats = build_cell_stats_map(&data.rows)?;
+    let model = OlsPostHocModel {
+        factor_levels: data.factor_levels.clone(),
+        factor_basis,
+        subsets,
+        total_cols,
+        beta: full_sol.coefficients,
+        cov_unscaled,
+        row_proj,
+        ms_resid,
+        df_resid,
+        cell_stats,
+    };
+    Ok((res, model))
 }
 
 fn build_factorial_term(name: &str, ss: f64, df: f64, ms_resid: f64, ss_resid: f64, ss_total: f64) -> Result<FactorialAnovaTerm, StatsError> {
@@ -1542,6 +1634,24 @@ fn compute_rm_two_way_sphericities(
     }
 }
 
+#[derive(Debug, Clone)]
+struct RmBalancedPostHocModel {
+    design: RepeatedMeasuresDesign,
+    s_count: usize,
+    a_count: usize,
+    b_count: usize,
+    row_means: Vec<f64>,
+    col_means: Vec<f64>,
+    cell_means: Vec<Vec<f64>>,
+    err_a_ms: f64,
+    err_a_df: f64,
+    err_b_ms: f64,
+    err_b_df: f64,
+    err_ab_ms: f64,
+    err_ab_df: f64,
+    subject_data: Vec<Vec<Vec<f64>>>,
+}
+
 /// Repeated-measures two-way ANOVA (`RowFactorMatched`, `ColumnFactorMatched`, or
 /// `BothFactorsMatched`) on complete balanced subject blocks `subject_data[subject][row][col]`,
 /// returning separate sphericity diagnostics for all within-subject factors and applying the
@@ -1560,6 +1670,17 @@ pub fn fit_rm_two_way_anova_with_sphericity(
     rm_design: RepeatedMeasuresDesign,
     correction: RmSphericityCorrection,
 ) -> Result<RmTwoWayAnovaResult, StatsError> {
+    let (res, _) = fit_rm_two_way_anova_with_posthoc(subject_data, row_name, col_name, rm_design, correction)?;
+    Ok(res)
+}
+
+fn fit_rm_two_way_anova_with_posthoc(
+    subject_data: &[Vec<Vec<f64>>],
+    row_name: &str,
+    col_name: &str,
+    rm_design: RepeatedMeasuresDesign,
+    correction: RmSphericityCorrection,
+) -> Result<(RmTwoWayAnovaResult, RmBalancedPostHocModel), StatsError> {
     let s_count = subject_data.len();
     if s_count < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "RM two-way subjects", required: 2, actual: s_count });
@@ -1738,7 +1859,24 @@ pub fn fit_rm_two_way_anova_with_sphericity(
         unbalanced: false,
         ss_type: SumOfSquaresType::TypeIII,
     };
-    Ok(RmTwoWayAnovaResult { anova, design: rm_design, sphericities, correction, term_error_dfs: [err_a_df, err_b_df, err_ab_df] })
+    let rm_res = RmTwoWayAnovaResult { anova, design: rm_design, sphericities, correction, term_error_dfs: [err_a_df, err_b_df, err_ab_df] };
+    let post_hoc = RmBalancedPostHocModel {
+        design: rm_design,
+        s_count,
+        a_count: a,
+        b_count: b,
+        row_means,
+        col_means,
+        cell_means,
+        err_a_ms: err_a_ss / err_a_df.max(1.0),
+        err_a_df,
+        err_b_ms: err_b_ss / err_b_df.max(1.0),
+        err_b_df,
+        err_ab_ms: ms_resid,
+        err_ab_df,
+        subject_data: subject_data.to_vec(),
+    };
+    Ok((rm_res, post_hoc))
 }
 
 /// Repeated-measures two-way ANOVA (`RowFactorMatched`, `ColumnFactorMatched`, or `BothFactorsMatched`)
@@ -2187,14 +2325,25 @@ fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &str, start: usize, q: u
 
 type RemlWaldTermsOut = (Vec<FactorialAnovaTerm>, Vec<f64>, Vec<f64>);
 
-fn eval_reml_wald_terms_from_mats(
+struct RemlContrastCore {
+    beta: Vec<f64>,
+    phi: DenseMatrix,
+    phi_a: DenseMatrix,
+    w_info_inv: DenseMatrix,
+    phi_m_phi: Vec<DenseMatrix>,
+    n_minus_p: f64,
+    y_scale: f64,
+    col_map: Vec<Option<usize>>,
+}
+
+fn eval_reml_wald_terms_with_core(
     phi: &DenseMatrix,
     beta: &[f64],
     sigma2_e: f64,
     fisher: &OwnedRemlFisherMats,
     terms: &[(&str, usize, usize)],
     n_minus_p: f64,
-) -> Result<RemlWaldTermsOut, StatsError> {
+) -> Result<(RemlWaldTermsOut, RemlContrastCore), StatsError> {
     let w_info_inv = invert_reml_info(&fisher.info_e)?;
     let n_vc = fisher.m_mats.len();
     let p = phi.nrows();
@@ -2234,7 +2383,17 @@ fn eval_reml_wald_terms_from_mats(
         satt_dfs.push(nu_sat);
         kr_dfs.push(nu_kr);
     }
-    Ok((fixed_terms, satt_dfs, kr_dfs))
+    let core = RemlContrastCore {
+        beta: beta.to_vec(),
+        phi: phi.clone(),
+        phi_a,
+        w_info_inv,
+        phi_m_phi,
+        n_minus_p,
+        y_scale: 1.0,
+        col_map: (0..p).map(Some).collect(),
+    };
+    Ok(((fixed_terms, satt_dfs, kr_dfs), core))
 }
 
 /// Fit a linear mixed-effects random-intercept model via Restricted Maximum Likelihood (REML)
@@ -2246,6 +2405,15 @@ pub fn fit_random_intercept_reml(
     cluster_ids: &[usize],
     terms: &[(&str, usize, usize)],
 ) -> Result<MixedRemlResult, StatsError> {
+    fit_random_intercept_reml_with_core(x, y, cluster_ids, terms).map(|(res, _)| res)
+}
+
+fn fit_random_intercept_reml_with_core(
+    x: &DenseMatrix,
+    y: &[f64],
+    cluster_ids: &[usize],
+    terms: &[(&str, usize, usize)],
+) -> Result<(MixedRemlResult, RemlContrastCore), StatsError> {
     let n = x.nrows();
     let p = x.ncols();
     if y.len() != n {
@@ -2341,9 +2509,9 @@ pub fn fit_random_intercept_reml(
     let phi = scale_dense(&xtvx_rel_inv, sigma2_e)?;
 
     let fisher = ri_build_fisher_mats(&clusters, p, n, tau_hat, sigma2_e, &xtvx_rel_inv)?;
-    let (fixed_terms, satterthwaite_df, kenward_roger_df) = eval_reml_wald_terms_from_mats(&phi, &beta, sigma2_e, &fisher, terms, n_minus_p)?;
+    let ((fixed_terms, satterthwaite_df, kenward_roger_df), core) = eval_reml_wald_terms_with_core(&phi, &beta, sigma2_e, &fisher, terms, n_minus_p)?;
 
-    Ok(MixedRemlResult {
+    let res = MixedRemlResult {
         sigma2_random: sigma2_u,
         sigma2_error: sigma2_e,
         icc,
@@ -2353,7 +2521,8 @@ pub fn fit_random_intercept_reml(
         fixed_terms,
         satterthwaite_df,
         kenward_roger_df,
-    })
+    };
+    Ok((res, core))
 }
 
 fn cluster_ids_to_g_matrix(cluster_ids: &[usize]) -> Result<(DenseMatrix, usize), StatsError> {
@@ -2539,6 +2708,15 @@ pub fn fit_multi_vc_reml(
     random_effects: &[(&str, DenseMatrix, usize)],
     terms: &[(&str, usize, usize)],
 ) -> Result<MultiVcRemlResult, StatsError> {
+    fit_multi_vc_reml_with_core(x, y, random_effects, terms).map(|(res, _)| res)
+}
+
+fn fit_multi_vc_reml_with_core(
+    x: &DenseMatrix,
+    y: &[f64],
+    random_effects: &[(&str, DenseMatrix, usize)],
+    terms: &[(&str, usize, usize)],
+) -> Result<(MultiVcRemlResult, RemlContrastCore), StatsError> {
     let n = x.nrows();
     let p = x.ncols();
     if y.len() != n {
@@ -2611,8 +2789,9 @@ pub fn fit_multi_vc_reml(
     }
     let fisher = OwnedRemlFisherMats { info_e: DenseMatrix::from_row_major(n_vc, n_vc, ie_data)?, m_mats, q_mats };
     let sigma2_error = theta[0] * y_scale * y_scale;
-    let (mut fixed_terms, satterthwaite_df, kenward_roger_df) =
-        eval_reml_wald_terms_from_mats(&st.phi, &st.beta, theta[0], &fisher, terms, n_minus_p)?;
+    let ((mut fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
+        eval_reml_wald_terms_with_core(&st.phi, &st.beta, theta[0], &fisher, terms, n_minus_p)?;
+    core.y_scale = y_scale;
     for term in &mut fixed_terms {
         if let Some(f_val) = term.f_statistic {
             let ms = f_val * sigma2_error;
@@ -2623,7 +2802,8 @@ pub fn fit_multi_vc_reml(
     let variance_components = names.into_iter().zip(theta.iter().skip(1).map(|&v| v * y_scale * y_scale)).collect();
     let reml_log_lik = st.ll - n_minus_p * y_scale.ln();
 
-    Ok(MultiVcRemlResult { variance_components, sigma2_error, reml_log_lik, fixed_terms, satterthwaite_df, kenward_roger_df })
+    let res = MultiVcRemlResult { variance_components, sigma2_error, reml_log_lik, fixed_terms, satterthwaite_df, kenward_roger_df };
+    Ok((res, core))
 }
 
 const LOG_CHOL_DIAG_MIN: f64 = -9.0;
@@ -2655,6 +2835,7 @@ struct UnstructuredEval {
 struct UnstructuredPrepared {
     blocks: Vec<UnstructuredClusterBlock>,
     reduced_terms: Vec<(String, usize, usize)>,
+    col_map: Vec<Option<usize>>,
     active_tp_indices: Vec<usize>,
     active_labels: Vec<String>,
     p_eff: usize,
@@ -2791,7 +2972,7 @@ fn unstructured_shrink_spd(mat: &DenseMatrix, target_ratio: f64, fallback_var: f
     symmetrize_dense(&DenseMatrix::from_row_major(t, t, psd)?)
 }
 
-type ReducedDesignOut = (DenseMatrix, Vec<(String, usize, usize)>, usize);
+type ReducedDesignOut = (DenseMatrix, Vec<(String, usize, usize)>, Vec<Option<usize>>, usize);
 
 fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&str, usize, usize)]) -> Result<ReducedDesignOut, StatsError> {
     let n = x.nrows();
@@ -2799,7 +2980,8 @@ fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&str, usize, usize)]) -
     let qr = qr_col_pivoted(x)?;
     if qr.rank() == p {
         let kept_terms = terms.iter().map(|&(name, s, l)| (name.to_owned(), s, l)).collect();
-        return Ok((x.clone(), kept_terms, p));
+        let col_map = (0..p).map(Some).collect();
+        return Ok((x.clone(), kept_terms, col_map, p));
     }
 
     // Sequential re-orthogonalized Modified Gram-Schmidt preserves term column ordering while
@@ -2859,7 +3041,7 @@ fn unstructured_reduce_design(x: &DenseMatrix, terms: &[(&str, usize, usize)]) -
         let new_start = mapped.first().copied().unwrap_or(0);
         reduced_terms.push((name.to_owned(), new_start, mapped.len()));
     }
-    Ok((x_red, reduced_terms, p_eff))
+    Ok((x_red, reduced_terms, col_map, p_eff))
 }
 
 fn unstructured_prepare_clusters(
@@ -2910,7 +3092,7 @@ fn unstructured_prepare_clusters(
         return Err(StatsError::EmptyInput);
     }
 
-    let (x_red, reduced_terms, p_eff) = unstructured_reduce_design(x, terms)?;
+    let (x_red, reduced_terms, col_map, p_eff) = unstructured_reduce_design(x, terms)?;
     if n <= p_eff {
         return Err(StatsError::InsufficientSampleSize { context: "unstructured RM REML", required: p_eff + 1, actual: n });
     }
@@ -2946,7 +3128,7 @@ fn unstructured_prepare_clusters(
         blocks.push(UnstructuredClusterBlock { x_c, y_c, tps });
     }
 
-    Ok(UnstructuredPrepared { blocks, reduced_terms, active_tp_indices, active_labels, p_eff, n_obs: n, y_scale })
+    Ok(UnstructuredPrepared { blocks, reduced_terms, col_map, active_tp_indices, active_labels, p_eff, n_obs: n, y_scale })
 }
 
 fn unstructured_eval_state(sigma: &DenseMatrix, blocks: &[UnstructuredClusterBlock], p_eff: usize) -> Result<UnstructuredEval, StatsError> {
@@ -3434,6 +3616,17 @@ pub fn fit_unstructured_rm_reml(
     timepoint_labels: &[String],
     terms: &[(&str, usize, usize)],
 ) -> Result<UnstructuredRemlResult, StatsError> {
+    fit_unstructured_rm_reml_with_core(x, y, cluster_ids, timepoint_ids, timepoint_labels, terms).map(|(res, _)| res)
+}
+
+fn fit_unstructured_rm_reml_with_core(
+    x: &DenseMatrix,
+    y: &[f64],
+    cluster_ids: &[usize],
+    timepoint_ids: &[usize],
+    timepoint_labels: &[String],
+    terms: &[(&str, usize, usize)],
+) -> Result<(UnstructuredRemlResult, RemlContrastCore), StatsError> {
     let prep = unstructured_prepare_clusters(x, y, cluster_ids, timepoint_ids, timepoint_labels, terms)?;
     let t_obs = prep.active_tp_indices.len();
     let n_clusters = prep.blocks.len();
@@ -3473,8 +3666,10 @@ pub fn fit_unstructured_rm_reml(
     let term_refs: Vec<(&str, usize, usize)> = prep.reduced_terms.iter().map(|(n, s, l)| (n.as_str(), *s, *l)).collect();
     let mean_diag_scaled: f64 = (0..t_obs).map(|i| sigma_scaled.get(i, i).unwrap_or(1.0)).sum::<f64>() / (t_obs as f64);
 
-    let (mut fixed_terms, satterthwaite_df, kenward_roger_df) =
-        eval_reml_wald_terms_from_mats(&st_final.phi, &st_final.beta, mean_diag_scaled, &fisher, &term_refs, n_minus_p)?;
+    let ((mut fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
+        eval_reml_wald_terms_with_core(&st_final.phi, &st_final.beta, mean_diag_scaled, &fisher, &term_refs, n_minus_p)?;
+    core.y_scale = prep.y_scale;
+    core.col_map = prep.col_map;
 
     let var_scale = prep.y_scale * prep.y_scale;
     let mean_diagonal_variance = mean_diag_scaled * var_scale;
@@ -3495,7 +3690,7 @@ pub fn fit_unstructured_rm_reml(
     let correlation_matrix = unstructured_corr_from_cov(&covariance_matrix);
     let reml_log_lik = st_final.ll - n_minus_p * prep.y_scale.ln();
 
-    Ok(UnstructuredRemlResult {
+    let res = UnstructuredRemlResult {
         timepoint_labels: prep.active_labels,
         active_timepoint_indices: prep.active_tp_indices,
         covariance_matrix,
@@ -3508,7 +3703,8 @@ pub fn fit_unstructured_rm_reml(
         converged,
         iterations,
         fallback_reason,
-    })
+    };
+    Ok((res, core))
 }
 
 // ============================================================================
@@ -4192,24 +4388,7 @@ fn push_pairwise_outputs_with_id(
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) {
-    if details.is_empty() {
-        return;
-    }
-    let mut tab = build_multiplicity_tab(details, title, p_fmt, confidence);
-    tab.id = tab_id.to_owned();
-    out.tabs.push(tab);
-    for d in details {
-        out.pairwise_comparisons.push(PairwiseComparisonRecord {
-            group_a: d.group_a,
-            group_b: d.group_b,
-            label_a: d.label_a.clone(),
-            label_b: d.label_b.clone(),
-            estimate_diff: Some(d.mean_diff),
-            raw_p_or_q: d.adjusted_p_or_q,
-            is_fdr_q: d.is_fdr_q,
-            significant: d.significant,
-        });
-    }
+    push_pairwise_outputs_with_footnote(out, details, tab_id, title, p_fmt, confidence, None);
 }
 
 fn append_group_normality_checklist(checklist: &mut Vec<ChecklistItem>, raw_slices: &[Vec<f64>], alpha: f64, assumption: &str) {
@@ -4277,14 +4456,14 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     let p_fmt = spec.p_value_format;
     let confidence = spec.confidence_level;
 
-    let (mut result, obs, aux_tabs) = match &sheet.archetype {
+    let (mut result, obs, post_hoc, aux_tabs) = match &sheet.archetype {
         TableArchetype::Grouped(grouped) => {
             let outcome = run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt)?;
-            (outcome.result, outcome.observations, outcome.aux_tabs)
+            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs)
         }
         TableArchetype::MultipleVariables(mv) => {
-            let (res, obs) = run_multifactor_mv(mv, fac_spec)?;
-            (res, obs, Vec::new())
+            let (res, obs, model) = run_multifactor_mv(mv, fac_spec)?;
+            (res, obs, FactorialPostHocContext::Ols(model), Vec::new())
         }
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
     };
@@ -4341,7 +4520,7 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     out.tabs.push(build_tab("factorial-anova", tab_title, ResultTabKind::AnovaTable, headers, row_labels, rows));
     out.tabs.extend(aux_tabs);
 
-    run_factorial_multiplicity(&mut out, &obs, &result, &fac_spec.multiplicity, p_fmt, confidence)?;
+    run_factorial_multiplicity(&mut out, &obs, &post_hoc, &result, &fac_spec.multiplicity, p_fmt, confidence)?;
 
     out.checklist.push(checklist_item(
         "Cell balance & sums of squares",
@@ -4361,27 +4540,1097 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     Ok(out)
 }
 
-fn build_factorial_group_inputs(labels: &[String], bins: Vec<Vec<f64>>, ms_residual: f64) -> Result<Vec<GroupComparisonInput>, StatsError> {
-    let fallback_sd = ms_residual.max(0.0).sqrt();
-    let mut inputs = Vec::with_capacity(labels.len());
-    for (idx, (label, vals)) in labels.iter().zip(bins).enumerate() {
-        if vals.is_empty() {
-            continue;
-        }
-        let m = SummaryMoments::from_slice(&vals)?;
-        let sd = if vals.len() >= 2 && m.css.is_finite() { (m.css / ((vals.len() - 1) as f64)).max(0.0).sqrt() } else { fallback_sd };
-        inputs.push(GroupComparisonInput { index: idx, label: label.clone(), n: vals.len() as f64, mean: m.mean, sd });
-    }
-    Ok(inputs)
+#[derive(Debug, Clone)]
+struct RemlContrastModel {
+    n_rows: usize,
+    n_cols: usize,
+    include_interaction: bool,
+    row_basis: Vec<Vec<f64>>,
+    col_basis: Vec<Vec<f64>>,
+    row_proj: DenseMatrix,
+    col_map: Vec<Option<usize>>,
+    beta: Vec<f64>,
+    phi: DenseMatrix,
+    phi_a: DenseMatrix,
+    w_info_inv: DenseMatrix,
+    phi_m_phi: Vec<DenseMatrix>,
+    n_minus_p: f64,
+    y_scale: f64,
+    observed_cells: Vec<Vec<bool>>,
 }
 
-fn effective_factorial_mult_spec(spec: &MultiplicitySpec, inputs: &[GroupComparisonInput]) -> Result<MultiplicitySpec, StatsError> {
-    if let MultiplicityMethod::Dunnett { control_column } = spec.method
-        && !inputs.iter().any(|g| g.index == control_column)
-    {
-        return Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 });
+#[derive(Debug, Clone)]
+enum FactorialPostHocContext {
+    Ols(OlsPostHocModel),
+    RmBalanced(RmBalancedPostHocModel),
+    Reml(RemlContrastModel),
+}
+
+struct ContrastEstimate {
+    diff: f64,
+    se: f64,
+    df: f64,
+    ctrl_var_pair: Option<(f64, f64)>,
+}
+
+#[derive(Clone, Copy)]
+struct NamedSliceContrast<'a> {
+    id_a: usize,
+    id_b: usize,
+    label_a: &'a str,
+    label_b: &'a str,
+    diff: f64,
+    se: f64,
+    df: f64,
+}
+
+#[inline]
+fn dot_slice(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b.iter()).map(|(&x, &y)| x * y).sum()
+}
+
+fn quad_form(v: &[f64], mat: &DenseMatrix) -> f64 {
+    let n = v.len();
+    let mut acc = 0.0_f64;
+    for (r, &vr) in v.iter().enumerate() {
+        if vr == 0.0 {
+            continue;
+        }
+        let mut row_dot = 0.0_f64;
+        for (c, &vc) in v.iter().enumerate() {
+            if vc != 0.0 {
+                row_dot += mat.get(r, c).unwrap_or(0.0) * vc;
+            }
+        }
+        acc += vr * row_dot;
     }
-    Ok(*spec)
+    let _ = n;
+    acc
+}
+
+fn is_vec_estimable(row_proj: &DenseMatrix, v: &[f64]) -> Result<bool, StatsError> {
+    let norm_sq = dot_slice(v, v);
+    if norm_sq <= 0.0 {
+        return Ok(true);
+    }
+    let pv = row_proj.matvec(v)?;
+    let err_sq: f64 = v.iter().zip(pv.iter()).map(|(&a, &b)| (a - b) * (a - b)).sum();
+    Ok(err_sq <= 1e-12 * norm_sq.max(1.0))
+}
+
+fn satterthwaite_two_term_df(t1_ms: f64, df1: f64, t2_ms: f64, df2: f64) -> f64 {
+    let num = t1_ms + t2_ms;
+    let den = (t1_ms * t1_ms) / df1.max(1.0) + (t2_ms * t2_ms) / df2.max(1.0);
+    if den > 0.0 { (num * num / den).max(1.0) } else { df1.max(df2).max(1.0) }
+}
+
+fn welch_stats_from_weighted_terms(terms: &[(f64, f64)]) -> (f64, f64) {
+    let v_sum: f64 = terms.iter().map(|&(v, _)| v.max(0.0)).sum();
+    if v_sum <= 0.0 {
+        let df_fallback = terms.iter().map(|&(_, df)| df).fold(0.0_f64, f64::max).max(1.0);
+        return (0.0, df_fallback);
+    }
+    let denom: f64 = terms.iter().filter(|&&(v, _)| v > 0.0).map(|&(v, df)| (v * v) / df.max(1.0)).sum();
+    let df = if denom > 0.0 { (v_sum * v_sum / denom).max(1.0) } else { 1.0 };
+    (v_sum.sqrt(), df)
+}
+
+fn welch_two_slice_stats(a: &[f64], b: &[f64]) -> Result<(f64, f64, f64), StatsError> {
+    let ma = SummaryMoments::from_slice(a)?;
+    let mb = SummaryMoments::from_slice(b)?;
+    let va = if a.len() >= 2 { (ma.css / ((a.len() - 1) as f64)).max(0.0) / (a.len() as f64) } else { 0.0 };
+    let vb = if b.len() >= 2 { (mb.css / ((b.len() - 1) as f64)).max(0.0) / (b.len() as f64) } else { 0.0 };
+    let dfa = (a.len().saturating_sub(1)).max(1) as f64;
+    let dfb = (b.len().saturating_sub(1)).max(1) as f64;
+    let (se, df) = welch_stats_from_weighted_terms(&[(va, dfa), (vb, dfb)]);
+    Ok((ma.mean - mb.mean, se, df))
+}
+
+fn paired_diff_stats(diffs: &[f64]) -> Result<(f64, f64, f64), StatsError> {
+    let m = SummaryMoments::from_slice(diffs)?;
+    let n = diffs.len();
+    let df = (n.saturating_sub(1)).max(1) as f64;
+    let se = if n >= 2 { ((m.css / df).max(0.0) / (n as f64)).sqrt() } else { 0.0 };
+    Ok((m.mean, se, df))
+}
+
+fn enumerate_cartesian(radices: &[usize]) -> Result<Vec<Vec<usize>>, StatsError> {
+    let mut total = 1usize;
+    for &r in radices {
+        total = total.saturating_mul(r.max(1));
+        if total > 8192 {
+            return Err(StatsError::InvalidParameter { name: "factorial_levels", value: total as f64 });
+        }
+    }
+    let mut out = vec![Vec::with_capacity(radices.len())];
+    for &r in radices {
+        let mut next = Vec::with_capacity(out.len() * r.max(1));
+        for prefix in &out {
+            for lvl in 0..r.max(1) {
+                let mut row = prefix.clone();
+                row.push(lvl);
+                next.push(row);
+            }
+        }
+        out = next;
+    }
+    Ok(out)
+}
+
+impl OlsPostHocModel {
+    fn design_vector(&self, cell: &[usize]) -> Vec<f64> {
+        let mut row = Vec::with_capacity(self.total_cols);
+        row.push(1.0);
+        for sub in &self.subsets {
+            let mut prod = vec![1.0_f64];
+            for &f_idx in sub {
+                let b_row = &self.factor_basis[f_idx][cell[f_idx]];
+                if b_row.is_empty() {
+                    prod.clear();
+                    break;
+                }
+                let mut next = Vec::with_capacity(prod.len() * b_row.len());
+                for &pv in &prod {
+                    for &bv in b_row {
+                        next.push(pv * bv);
+                    }
+                }
+                prod = next;
+            }
+            row.extend(prod);
+        }
+        row
+    }
+
+    fn avg_design_over(&self, other_factors: &[usize], tuples: &[Vec<usize>], fixed: &[(usize, usize)]) -> Vec<f64> {
+        let n_factors = self.factor_levels.len();
+        let mut sum_vec = vec![0.0_f64; self.total_cols];
+        let mut cell = vec![0_usize; n_factors];
+        for &(f, lvl) in fixed {
+            cell[f] = lvl;
+        }
+        for tup in tuples {
+            for (&f, &v) in other_factors.iter().zip(tup.iter()) {
+                cell[f] = v;
+            }
+            let dv = self.design_vector(&cell);
+            for (dst, &val) in sum_vec.iter_mut().zip(dv.iter()) {
+                *dst += val;
+            }
+        }
+        let inv = 1.0 / (tuples.len().max(1) as f64);
+        for dst in &mut sum_vec {
+            *dst *= inv;
+        }
+        sum_vec
+    }
+
+    fn pair_cells_exist(&self, other_factors: &[usize], tup: &[usize], fixed_a: &[(usize, usize)], fixed_b: &[(usize, usize)]) -> bool {
+        let mut cell = vec![0_usize; self.factor_levels.len()];
+        for (&f, &v) in other_factors.iter().zip(tup.iter()) {
+            cell[f] = v;
+        }
+        for &(f, lvl) in fixed_a {
+            cell[f] = lvl;
+        }
+        if !self.cell_stats.contains_key(&cell) {
+            return false;
+        }
+        for &(f, lvl) in fixed_b {
+            cell[f] = lvl;
+        }
+        self.cell_stats.contains_key(&cell)
+    }
+
+    fn eval_contrast_from_tuples(
+        &self,
+        other_factors: &[usize],
+        tuples: &[Vec<usize>],
+        fixed_a: &[(usize, usize)],
+        fixed_b: &[(usize, usize)],
+        unequal_var: bool,
+    ) -> Result<Option<ContrastEstimate>, StatsError> {
+        let shared: Vec<Vec<usize>> = tuples.iter().filter(|t| self.pair_cells_exist(other_factors, t, fixed_a, fixed_b)).cloned().collect();
+        let all_a = self.avg_design_over(other_factors, tuples, fixed_a);
+        let all_b = self.avg_design_over(other_factors, tuples, fixed_b);
+        let all_l: Vec<f64> = all_a.iter().zip(all_b.iter()).map(|(&a, &b)| a - b).collect();
+
+        let (chosen, w_a, w_b, l) = if is_vec_estimable(&self.row_proj, &all_l)? {
+            let use_tups = if shared.len() == tuples.len() {
+                tuples
+            } else if !shared.is_empty() && unequal_var {
+                shared.as_slice()
+            } else {
+                tuples
+            };
+            let wa = self.avg_design_over(other_factors, use_tups, fixed_a);
+            let wb = self.avg_design_over(other_factors, use_tups, fixed_b);
+            let lv: Vec<f64> = wa.iter().zip(wb.iter()).map(|(&a, &b)| a - b).collect();
+            (use_tups, wa, wb, lv)
+        } else if !shared.is_empty() {
+            let wa = self.avg_design_over(other_factors, &shared, fixed_a);
+            let wb = self.avg_design_over(other_factors, &shared, fixed_b);
+            let lv: Vec<f64> = wa.iter().zip(wb.iter()).map(|(&a, &b)| a - b).collect();
+            if !is_vec_estimable(&self.row_proj, &lv)? {
+                return Ok(None);
+            }
+            (shared.as_slice(), wa, wb, lv)
+        } else {
+            return Ok(None);
+        };
+
+        let diff = dot_slice(&l, &self.beta);
+        if unequal_var && chosen.iter().all(|t| self.pair_cells_exist(other_factors, t, fixed_a, fixed_b)) {
+            let w = 1.0 / (chosen.len() as f64);
+            let w2 = w * w;
+            let mut terms = Vec::with_capacity(chosen.len() * 2);
+            let mut cell = vec![0_usize; self.factor_levels.len()];
+            for tup in chosen {
+                for (&f, &v) in other_factors.iter().zip(tup.iter()) {
+                    cell[f] = v;
+                }
+                for fixed in [fixed_a, fixed_b] {
+                    for &(f, lvl) in fixed {
+                        cell[f] = lvl;
+                    }
+                    if let Some(st) = self.cell_stats.get(&cell) {
+                        let (v_c, df_c) =
+                            if st.count >= 2 { (st.var_unbiased / (st.count as f64), (st.count - 1) as f64) } else { (self.ms_resid, self.df_resid) };
+                        terms.push((w2 * v_c, df_c));
+                    }
+                }
+            }
+            let (se, df) = welch_stats_from_weighted_terms(&terms);
+            return Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair: None }));
+        }
+
+        let se = (self.ms_resid * quad_form(&l, &self.cov_unscaled)).max(0.0).sqrt();
+        let ctrl_var_pair = if is_vec_estimable(&self.row_proj, &w_a)? && is_vec_estimable(&self.row_proj, &w_b)? {
+            Some(((self.ms_resid * quad_form(&w_a, &self.cov_unscaled)).max(0.0), (self.ms_resid * quad_form(&w_b, &self.cov_unscaled)).max(0.0)))
+        } else {
+            None
+        };
+        Ok(Some(ContrastEstimate { diff, se, df: self.df_resid, ctrl_var_pair }))
+    }
+
+    fn eval_marginal_pair(&self, f_idx: usize, lvl_a: usize, lvl_b: usize, unequal_var: bool) -> Result<Option<ContrastEstimate>, StatsError> {
+        let other_factors: Vec<usize> = (0..self.factor_levels.len()).filter(|&f| f != f_idx).collect();
+        let radices: Vec<usize> = other_factors.iter().map(|&f| self.factor_levels[f].len()).collect();
+        let tuples = enumerate_cartesian(&radices)?;
+        self.eval_contrast_from_tuples(&other_factors, &tuples, &[(f_idx, lvl_a)], &[(f_idx, lvl_b)], unequal_var)
+    }
+
+    fn eval_simple_pair(
+        &self,
+        cond_f: usize,
+        cond_lvl: usize,
+        tgt_f: usize,
+        t_a: usize,
+        t_b: usize,
+        unequal_var: bool,
+    ) -> Result<Option<ContrastEstimate>, StatsError> {
+        let other_factors: Vec<usize> = (0..self.factor_levels.len()).filter(|&f| f != cond_f && f != tgt_f).collect();
+        let radices: Vec<usize> = other_factors.iter().map(|&f| self.factor_levels[f].len()).collect();
+        let tuples = enumerate_cartesian(&radices)?;
+        let has_shared =
+            tuples.iter().any(|t| self.pair_cells_exist(&other_factors, t, &[(cond_f, cond_lvl), (tgt_f, t_a)], &[(cond_f, cond_lvl), (tgt_f, t_b)]));
+        if !has_shared {
+            return Ok(None);
+        }
+        self.eval_contrast_from_tuples(&other_factors, &tuples, &[(cond_f, cond_lvl), (tgt_f, t_a)], &[(cond_f, cond_lvl), (tgt_f, t_b)], unequal_var)
+    }
+
+    fn level_mean_estimate(&self, f_idx: usize, lvl: usize) -> Result<Option<f64>, StatsError> {
+        let other_factors: Vec<usize> = (0..self.factor_levels.len()).filter(|&f| f != f_idx).collect();
+        let radices: Vec<usize> = other_factors.iter().map(|&f| self.factor_levels[f].len()).collect();
+        let tuples = enumerate_cartesian(&radices)?;
+        let w = self.avg_design_over(&other_factors, &tuples, &[(f_idx, lvl)]);
+        if is_vec_estimable(&self.row_proj, &w)? { Ok(Some(dot_slice(&w, &self.beta))) } else { Ok(None) }
+    }
+}
+
+impl RmBalancedPostHocModel {
+    fn subject_marginal_values(&self, factor_idx: usize, lvl: usize) -> Vec<f64> {
+        let s = self.s_count;
+        if factor_idx == 0 {
+            let inv_b = 1.0 / (self.b_count as f64);
+            (0..s).map(|si| self.subject_data[si][lvl].iter().sum::<f64>() * inv_b).collect()
+        } else {
+            let inv_a = 1.0 / (self.a_count as f64);
+            (0..s).map(|si| (0..self.a_count).map(|ai| self.subject_data[si][ai][lvl]).sum::<f64>() * inv_a).collect()
+        }
+    }
+
+    fn eval_marginal_pair(&self, f_idx: usize, lvl_a: usize, lvl_b: usize, unequal_var: bool) -> Result<Option<ContrastEstimate>, StatsError> {
+        let sf = self.s_count as f64;
+        let diff = if f_idx == 0 { self.row_means[lvl_a] - self.row_means[lvl_b] } else { self.col_means[lvl_a] - self.col_means[lvl_b] };
+        if !unequal_var {
+            let (ms, df, n_eff) = if f_idx == 0 {
+                (self.err_a_ms, self.err_a_df, sf * (self.b_count as f64))
+            } else {
+                (self.err_b_ms, self.err_b_df, sf * (self.a_count as f64))
+            };
+            let v_lvl = (ms / n_eff).max(0.0);
+            return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df, ctrl_var_pair: Some((v_lvl, v_lvl)) }));
+        }
+
+        let is_between =
+            matches!((self.design, f_idx), (RepeatedMeasuresDesign::ColumnFactorMatched, 0) | (RepeatedMeasuresDesign::RowFactorMatched, 1));
+        if is_between {
+            let va = self.subject_marginal_values(f_idx, lvl_a);
+            let vb = self.subject_marginal_values(f_idx, lvl_b);
+            let (d, se, df) = welch_two_slice_stats(&va, &vb)?;
+            return Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None }));
+        }
+
+        if self.design == RepeatedMeasuresDesign::BothFactorsMatched {
+            let va = self.subject_marginal_values(f_idx, lvl_a);
+            let vb = self.subject_marginal_values(f_idx, lvl_b);
+            let diffs: Vec<f64> = va.into_iter().zip(vb).map(|(x, y)| x - y).collect();
+            let (d, se, df) = paired_diff_stats(&diffs)?;
+            return Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None }));
+        }
+
+        // Mixed design within-subject factor: paired diffs stratified by the between-subject factor.
+        let n_between = if f_idx == 1 { self.a_count } else { self.b_count };
+        let inv_g = 1.0 / (n_between as f64);
+        let w2 = inv_g * inv_g;
+        let mut terms = Vec::with_capacity(n_between);
+        for g in 0..n_between {
+            let diffs: Vec<f64> = (0..self.s_count)
+                .map(|si| {
+                    if f_idx == 1 {
+                        self.subject_data[si][g][lvl_a] - self.subject_data[si][g][lvl_b]
+                    } else {
+                        self.subject_data[si][lvl_a][g] - self.subject_data[si][lvl_b][g]
+                    }
+                })
+                .collect();
+            let (_, g_se, g_df) = paired_diff_stats(&diffs)?;
+            terms.push((w2 * g_se * g_se, g_df));
+        }
+        let (se, df) = welch_stats_from_weighted_terms(&terms);
+        Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair: None }))
+    }
+
+    fn eval_simple_pair(
+        &self,
+        cond_f: usize,
+        cond_lvl: usize,
+        tgt_f: usize,
+        t_a: usize,
+        t_b: usize,
+        unequal_var: bool,
+    ) -> Result<Option<ContrastEstimate>, StatsError> {
+        let _ = cond_f;
+        let cell = |tgt: usize| -> (usize, usize) { if tgt_f == 0 { (tgt, cond_lvl) } else { (cond_lvl, tgt) } };
+        let (ra, ca) = cell(t_a);
+        let (rb, cb) = cell(t_b);
+        let diff = self.cell_means[ra][ca] - self.cell_means[rb][cb];
+        let sf = self.s_count as f64;
+
+        if !unequal_var {
+            let is_pure_within =
+                matches!((self.design, tgt_f), (RepeatedMeasuresDesign::ColumnFactorMatched, 1) | (RepeatedMeasuresDesign::RowFactorMatched, 0));
+            let (ms_pool, df_pool) = if is_pure_within {
+                (self.err_ab_ms, self.err_ab_df)
+            } else {
+                let (err_t_ms, err_t_df, n_other) = if tgt_f == 0 {
+                    (self.err_a_ms, self.err_a_df, self.b_count as f64)
+                } else {
+                    (self.err_b_ms, self.err_b_df, self.a_count as f64)
+                };
+                let ms_num = err_t_ms + (n_other - 1.0) * self.err_ab_ms;
+                let df = satterthwaite_two_term_df(err_t_ms, err_t_df, (n_other - 1.0) * self.err_ab_ms, self.err_ab_df);
+                (ms_num / n_other, df)
+            };
+            let v_lvl = (ms_pool / sf).max(0.0);
+            return Ok(Some(ContrastEstimate { diff, se: (2.0 * v_lvl).sqrt(), df: df_pool, ctrl_var_pair: Some((v_lvl, v_lvl)) }));
+        }
+
+        let is_between =
+            matches!((self.design, tgt_f), (RepeatedMeasuresDesign::ColumnFactorMatched, 0) | (RepeatedMeasuresDesign::RowFactorMatched, 1));
+        let va: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][ra][ca]).collect();
+        let vb: Vec<f64> = (0..self.s_count).map(|si| self.subject_data[si][rb][cb]).collect();
+        if is_between {
+            let (d, se, df) = welch_two_slice_stats(&va, &vb)?;
+            Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None }))
+        } else {
+            let diffs: Vec<f64> = va.into_iter().zip(vb).map(|(x, y)| x - y).collect();
+            let (d, se, df) = paired_diff_stats(&diffs)?;
+            Ok(Some(ContrastEstimate { diff: d, se, df, ctrl_var_pair: None }))
+        }
+    }
+}
+
+impl RemlContrastModel {
+    fn cell_design_vector(&self, r: usize, c: usize) -> Vec<f64> {
+        let n_r = self.n_rows.saturating_sub(1);
+        let n_c = self.n_cols.saturating_sub(1);
+        let inter_df = if self.include_interaction { n_r * n_c } else { 0 };
+        let mut v = Vec::with_capacity(1 + n_r + n_c + inter_df);
+        v.push(1.0);
+        v.extend_from_slice(&self.row_basis[r]);
+        v.extend_from_slice(&self.col_basis[c]);
+        if self.include_interaction {
+            for &rb in &self.row_basis[r] {
+                for &cb in &self.col_basis[c] {
+                    v.push(rb * cb);
+                }
+            }
+        }
+        v
+    }
+
+    fn map_to_eff(&self, v_orig: &[f64]) -> Vec<f64> {
+        let mut out = vec![0.0_f64; self.beta.len()];
+        for (&src, opt_dst) in v_orig.iter().zip(self.col_map.iter()) {
+            if let Some(dst) = *opt_dst {
+                out[dst] = src;
+            }
+        }
+        out
+    }
+
+    fn eval_weight_vecs(&self, wa_orig: &[f64], wb_orig: &[f64]) -> Result<Option<ContrastEstimate>, StatsError> {
+        let l_orig: Vec<f64> = wa_orig.iter().zip(wb_orig.iter()).map(|(&a, &b)| a - b).collect();
+        if !is_vec_estimable(&self.row_proj, &l_orig)? {
+            return Ok(None);
+        }
+        let l = self.map_to_eff(&l_orig);
+        let diff = dot_slice(&l, &self.beta) * self.y_scale;
+        let v = quad_form(&l, &self.phi).max(0.0);
+        let v_a = quad_form(&l, &self.phi_a).max(0.0);
+        let se = v_a.sqrt() * self.y_scale;
+        let grad: Vec<f64> = self.phi_m_phi.iter().map(|pmp| quad_form(&l, pmp)).collect();
+        let wg = self.w_info_inv.matvec(&grad)?;
+        let denom = dot_slice(&grad, &wg);
+        let df = if v > 0.0 && denom > 1e-30 * v * v { (2.0 * v * v / denom).clamp(1.0, self.n_minus_p) } else { self.n_minus_p };
+
+        let ctrl_var_pair = if is_vec_estimable(&self.row_proj, wa_orig)? && is_vec_estimable(&self.row_proj, wb_orig)? {
+            let wa = self.map_to_eff(wa_orig);
+            let wb = self.map_to_eff(wb_orig);
+            let y2 = self.y_scale * self.y_scale;
+            Some(((quad_form(&wa, &self.phi_a) * y2).max(0.0), (quad_form(&wb, &self.phi_a) * y2).max(0.0)))
+        } else {
+            None
+        };
+        Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair }))
+    }
+
+    fn avg_cell_vec(&self, f_idx: usize, lvl: usize, other_indices: &[usize]) -> Vec<f64> {
+        let p = self.row_proj.nrows();
+        let mut acc = vec![0.0_f64; p];
+        for &o in other_indices {
+            let (r, c) = if f_idx == 0 { (lvl, o) } else { (o, lvl) };
+            let dv = self.cell_design_vector(r, c);
+            for (dst, &val) in acc.iter_mut().zip(dv.iter()) {
+                *dst += val;
+            }
+        }
+        let inv = 1.0 / (other_indices.len().max(1) as f64);
+        for dst in &mut acc {
+            *dst *= inv;
+        }
+        acc
+    }
+
+    fn eval_marginal_pair(&self, f_idx: usize, lvl_a: usize, lvl_b: usize) -> Result<Option<ContrastEstimate>, StatsError> {
+        let n_other = if f_idx == 0 { self.n_cols } else { self.n_rows };
+        let all_other: Vec<usize> = (0..n_other).collect();
+        let wa_all = self.avg_cell_vec(f_idx, lvl_a, &all_other);
+        let wb_all = self.avg_cell_vec(f_idx, lvl_b, &all_other);
+        if let Some(est) = self.eval_weight_vecs(&wa_all, &wb_all)? {
+            return Ok(Some(est));
+        }
+        let shared: Vec<usize> = all_other
+            .into_iter()
+            .filter(|&o| {
+                let (ra, ca) = if f_idx == 0 { (lvl_a, o) } else { (o, lvl_a) };
+                let (rb, cb) = if f_idx == 0 { (lvl_b, o) } else { (o, lvl_b) };
+                self.observed_cells[ra][ca] && self.observed_cells[rb][cb]
+            })
+            .collect();
+        if shared.is_empty() {
+            return Ok(None);
+        }
+        let wa = self.avg_cell_vec(f_idx, lvl_a, &shared);
+        let wb = self.avg_cell_vec(f_idx, lvl_b, &shared);
+        self.eval_weight_vecs(&wa, &wb)
+    }
+
+    fn eval_simple_pair(&self, cond_lvl: usize, tgt_f: usize, t_a: usize, t_b: usize) -> Result<Option<ContrastEstimate>, StatsError> {
+        let (ra, ca) = if tgt_f == 0 { (t_a, cond_lvl) } else { (cond_lvl, t_a) };
+        let (rb, cb) = if tgt_f == 0 { (t_b, cond_lvl) } else { (cond_lvl, t_b) };
+        if !self.observed_cells[ra][ca] || !self.observed_cells[rb][cb] {
+            return Ok(None);
+        }
+        let wa = self.cell_design_vector(ra, ca);
+        let wb = self.cell_design_vector(rb, cb);
+        self.eval_weight_vecs(&wa, &wb)
+    }
+}
+
+impl FactorialPostHocContext {
+    fn eval_marginal_pair(&self, f_idx: usize, lvl_a: usize, lvl_b: usize, unequal_var: bool) -> Result<Option<ContrastEstimate>, StatsError> {
+        match self {
+            Self::Ols(m) => m.eval_marginal_pair(f_idx, lvl_a, lvl_b, unequal_var),
+            Self::RmBalanced(m) => m.eval_marginal_pair(f_idx, lvl_a, lvl_b, unequal_var),
+            Self::Reml(m) => m.eval_marginal_pair(f_idx, lvl_a, lvl_b),
+        }
+    }
+
+    fn eval_simple_pair(
+        &self,
+        cond_f: usize,
+        cond_lvl: usize,
+        tgt_f: usize,
+        t_a: usize,
+        t_b: usize,
+        unequal_var: bool,
+    ) -> Result<Option<ContrastEstimate>, StatsError> {
+        match self {
+            Self::Ols(m) => m.eval_simple_pair(cond_f, cond_lvl, tgt_f, t_a, t_b, unequal_var),
+            Self::RmBalanced(m) => m.eval_simple_pair(cond_f, cond_lvl, tgt_f, t_a, t_b, unequal_var),
+            Self::Reml(m) => m.eval_simple_pair(cond_lvl, tgt_f, t_a, t_b),
+        }
+    }
+
+    fn level_mean_estimate(&self, f_idx: usize, lvl: usize) -> Result<Option<f64>, StatsError> {
+        match self {
+            Self::Ols(m) => m.level_mean_estimate(f_idx, lvl),
+            Self::RmBalanced(m) => Ok(Some(if f_idx == 0 { m.row_means[lvl] } else { m.col_means[lvl] })),
+            Self::Reml(m) => {
+                let n_other = if f_idx == 0 { m.n_cols } else { m.n_rows };
+                let other: Vec<usize> = (0..n_other).collect();
+                let w_orig = m.avg_cell_vec(f_idx, lvl, &other);
+                if is_vec_estimable(&m.row_proj, &w_orig)? {
+                    let w = m.map_to_eff(&w_orig);
+                    Ok(Some(dot_slice(&w, &m.beta) * m.y_scale))
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+}
+
+fn push_pairwise_outputs_with_footnote(
+    out: &mut ResultSheet,
+    details: &[PairwiseComparisonDetail],
+    tab_id: &str,
+    title: &str,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+    extra_footnote: Option<String>,
+) {
+    if details.is_empty() {
+        return;
+    }
+    let mut tab = build_multiplicity_tab(details, title, p_fmt, confidence);
+    tab.id = tab_id.to_owned();
+    if let Some(note) = extra_footnote
+        && details.len() > 1
+    {
+        tab.footnotes.push(note);
+    }
+    out.tabs.push(tab);
+    for d in details {
+        out.pairwise_comparisons.push(PairwiseComparisonRecord {
+            group_a: d.group_a,
+            group_b: d.group_b,
+            label_a: d.label_a.clone(),
+            label_b: d.label_b.clone(),
+            estimate_diff: Some(d.mean_diff),
+            raw_p_or_q: d.adjusted_p_or_q,
+            is_fdr_q: d.is_fdr_q,
+            significant: d.significant,
+        });
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_pair_detail(
+    group_a: usize,
+    group_b: usize,
+    label_a: String,
+    label_b: String,
+    diff: f64,
+    se_diff: f64,
+    df: f64,
+    statistic: f64,
+    raw_p: f64,
+    adjusted_p_or_q: f64,
+    is_fdr_q: bool,
+    ci: Option<(f64, f64)>,
+    threshold: f64,
+) -> PairwiseComparisonDetail {
+    PairwiseComparisonDetail {
+        group_a,
+        group_b,
+        label_a,
+        label_b,
+        mean_diff: diff,
+        se_diff,
+        statistic,
+        df,
+        raw_p,
+        adjusted_p_or_q,
+        is_fdr_q,
+        ci,
+        significant: adjusted_p_or_q <= threshold,
+    }
+}
+
+fn zero_se_pair(diff: f64, unsigned: bool) -> (f64, f64) {
+    if diff != 0.0 { (if unsigned { f64::INFINITY } else { diff.signum() * f64::INFINITY }, 0.0) } else { (0.0, 1.0) }
+}
+
+fn compare_independent_contrast_family(
+    entries: &[NamedSliceContrast<'_>],
+    proc_req: MultiplicityProcedure,
+    threshold: f64,
+    report_ci: bool,
+) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    let m = entries.len();
+    if m == 0 {
+        return Ok(Vec::new());
+    }
+    if !threshold.is_finite() || threshold <= 0.0 || threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "threshold", value: threshold });
+    }
+    let uses_q_stat =
+        matches!(proc_req, MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::NewmanKeuls | MultiplicityProcedure::GamesHowell);
+    let mut raw_p = Vec::with_capacity(m);
+    let mut stats = Vec::with_capacity(m);
+    for e in entries {
+        if e.se > 0.0 {
+            let t = e.diff / e.se;
+            let rp = student_t_two_sided_p(t, e.df)?;
+            raw_p.push(rp);
+            stats.push(if uses_q_stat { t.abs() * std::f64::consts::SQRT_2 } else { t });
+        } else {
+            let (st, rp) = zero_se_pair(e.diff, uses_q_stat);
+            raw_p.push(rp);
+            stats.push(st);
+        }
+    }
+
+    if m == 1 || matches!(proc_req, MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd) {
+        let mut out = Vec::with_capacity(m);
+        for (idx, e) in entries.iter().enumerate() {
+            let ci = if report_ci && !matches!(proc_req, MultiplicityProcedure::NewmanKeuls) {
+                let tc = student_t_two_sided_isf(threshold.clamp(1e-12, 0.9999), e.df)?;
+                Some((e.diff - tc * e.se, e.diff + tc * e.se))
+            } else {
+                None
+            };
+            out.push(build_pair_detail(
+                e.id_a,
+                e.id_b,
+                e.label_a.to_owned(),
+                e.label_b.to_owned(),
+                e.diff,
+                e.se,
+                e.df,
+                stats[idx],
+                raw_p[idx],
+                raw_p[idx],
+                false,
+                ci,
+                threshold,
+            ));
+        }
+        return Ok(out);
+    }
+
+    match proc_req {
+        MultiplicityProcedure::TukeyKramer
+        | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::GamesHowell
+        | MultiplicityProcedure::DunnettT3
+        | MultiplicityProcedure::Dunnett { .. } => {
+            let allow_ci = report_ci && !matches!(proc_req, MultiplicityProcedure::NewmanKeuls);
+            let mut out = Vec::with_capacity(m);
+            for (idx, e) in entries.iter().enumerate() {
+                let adj_p = if e.se > 0.0 {
+                    let t_abs = (e.diff / e.se).abs();
+                    max_studentized_range_sf(std::f64::consts::SQRT_2 * t_abs, m, 2, e.df)?
+                } else {
+                    raw_p[idx]
+                };
+                let ci = if allow_ci {
+                    let crit = max_studentized_range_isf(threshold, m, 2, e.df)? * std::f64::consts::FRAC_1_SQRT_2;
+                    Some((e.diff - crit * e.se, e.diff + crit * e.se))
+                } else {
+                    None
+                };
+                out.push(build_pair_detail(
+                    e.id_a,
+                    e.id_b,
+                    e.label_a.to_owned(),
+                    e.label_b.to_owned(),
+                    e.diff,
+                    e.se,
+                    e.df,
+                    stats[idx],
+                    raw_p[idx],
+                    adj_p,
+                    false,
+                    ci,
+                    threshold,
+                ));
+            }
+            Ok(out)
+        }
+        _ => {
+            let eff_proc = if matches!(proc_req, MultiplicityProcedure::TamhaneT2) { MultiplicityProcedure::Sidak } else { proc_req };
+            let (adj_p, is_fdr) = adjust_p_values(&raw_p, eff_proc, threshold);
+            let per_alpha = match eff_proc {
+                MultiplicityProcedure::Bonferroni => Some(threshold / (m as f64)),
+                MultiplicityProcedure::Sidak => Some(1.0 - (1.0 - threshold).powf(1.0 / (m as f64))),
+                _ => None,
+            };
+            let mut out = Vec::with_capacity(m);
+            for (idx, e) in entries.iter().enumerate() {
+                let ci = match (report_ci, per_alpha) {
+                    (true, Some(a)) => {
+                        let tc = student_t_two_sided_isf(a.clamp(1e-12, 0.9999), e.df)?;
+                        Some((e.diff - tc * e.se, e.diff + tc * e.se))
+                    }
+                    _ => None,
+                };
+                out.push(build_pair_detail(
+                    e.id_a,
+                    e.id_b,
+                    e.label_a.to_owned(),
+                    e.label_b.to_owned(),
+                    e.diff,
+                    e.se,
+                    e.df,
+                    stats[idx],
+                    raw_p[idx],
+                    adj_p[idx],
+                    is_fdr,
+                    ci,
+                    threshold,
+                ));
+            }
+            Ok(out)
+        }
+    }
+}
+
+struct ContrastFamilyEval<'a> {
+    levels: &'a [(usize, String)],
+    level_means: &'a [Option<f64>],
+    mult_spec: &'a MultiplicitySpec,
+    pairs: Vec<(usize, usize, ContrastEstimate)>,
+}
+
+fn compare_contrast_family(eval: ContrastFamilyEval<'_>) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    let k = eval.levels.len();
+    let proc_req = MultiplicityProcedure::from(eval.mult_spec.method);
+    let threshold = eval.mult_spec.threshold;
+    let report_ci = eval.mult_spec.report_confidence_intervals;
+    if !threshold.is_finite() || threshold <= 0.0 || threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "threshold", value: threshold });
+    }
+    if eval.pairs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut used = vec![false; k];
+    for &(i, j, _) in &eval.pairs {
+        used[i] = true;
+        used[j] = true;
+    }
+    let k_eff = used.iter().filter(|&&u| u).count().max(2);
+
+    match proc_req {
+        MultiplicityProcedure::Dunnett { .. } => compare_contrast_dunnett(&eval, threshold, report_ci),
+        MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::GamesHowell => {
+            let mut out = Vec::with_capacity(eval.pairs.len());
+            for &(i, j, ref est) in &eval.pairs {
+                let se_q = est.se * std::f64::consts::FRAC_1_SQRT_2;
+                let (q_stat, raw_p, adj_p) = if se_q > 0.0 {
+                    let q = est.diff.abs() / se_q;
+                    let rp = student_t_two_sided_p(est.diff / est.se, est.df)?;
+                    (q, rp, studentized_range_sf(q, k_eff, est.df)?)
+                } else {
+                    let (st, rp) = zero_se_pair(est.diff, true);
+                    (st, rp, rp)
+                };
+                let ci = if report_ci {
+                    let qc = studentized_range_isf(threshold, k_eff, est.df)?;
+                    Some((est.diff - qc * se_q, est.diff + qc * se_q))
+                } else {
+                    None
+                };
+                out.push(build_pair_detail(
+                    eval.levels[i].0,
+                    eval.levels[j].0,
+                    eval.levels[i].1.clone(),
+                    eval.levels[j].1.clone(),
+                    est.diff,
+                    est.se,
+                    est.df,
+                    q_stat,
+                    raw_p,
+                    adj_p,
+                    false,
+                    ci,
+                    threshold,
+                ));
+            }
+            Ok(out)
+        }
+        MultiplicityProcedure::NewmanKeuls => compare_contrast_newman_keuls(&eval, threshold),
+        MultiplicityProcedure::DunnettT3 => {
+            let m = eval.pairs.len();
+            let mut out = Vec::with_capacity(m);
+            for &(i, j, ref est) in &eval.pairs {
+                let (t_stat, raw_p, adj_p) = if est.se > 0.0 {
+                    let t = est.diff / est.se;
+                    let rp = student_t_two_sided_p(t, est.df)?;
+                    (t, rp, max_studentized_range_sf(std::f64::consts::SQRT_2 * t.abs(), m.max(1), 2, est.df)?)
+                } else {
+                    let (st, rp) = zero_se_pair(est.diff, false);
+                    (st, rp, rp)
+                };
+                let ci = if report_ci {
+                    let crit = max_studentized_range_isf(threshold, m.max(1), 2, est.df)? * std::f64::consts::FRAC_1_SQRT_2;
+                    Some((est.diff - crit * est.se, est.diff + crit * est.se))
+                } else {
+                    None
+                };
+                out.push(build_pair_detail(
+                    eval.levels[i].0,
+                    eval.levels[j].0,
+                    eval.levels[i].1.clone(),
+                    eval.levels[j].1.clone(),
+                    est.diff,
+                    est.se,
+                    est.df,
+                    t_stat,
+                    raw_p,
+                    adj_p,
+                    false,
+                    ci,
+                    threshold,
+                ));
+            }
+            Ok(out)
+        }
+        _ => {
+            let entries: Vec<NamedSliceContrast<'_>> = eval
+                .pairs
+                .iter()
+                .map(|&(i, j, ref est)| NamedSliceContrast {
+                    id_a: eval.levels[i].0,
+                    id_b: eval.levels[j].0,
+                    label_a: eval.levels[i].1.as_str(),
+                    label_b: eval.levels[j].1.as_str(),
+                    diff: est.diff,
+                    se: est.se,
+                    df: est.df,
+                })
+                .collect();
+            let m = entries.len();
+            let mut raw_p = Vec::with_capacity(m);
+            let mut t_stats = Vec::with_capacity(m);
+            for e in &entries {
+                if e.se > 0.0 {
+                    let t = e.diff / e.se;
+                    t_stats.push(t);
+                    raw_p.push(student_t_two_sided_p(t, e.df)?);
+                } else {
+                    let (st, rp) = zero_se_pair(e.diff, false);
+                    t_stats.push(st);
+                    raw_p.push(rp);
+                }
+            }
+            let eff_proc = if matches!(proc_req, MultiplicityProcedure::TamhaneT2) { MultiplicityProcedure::Sidak } else { proc_req };
+            let (adj_p, is_fdr) = adjust_p_values(&raw_p, eff_proc, threshold);
+            let per_alpha = match eff_proc {
+                MultiplicityProcedure::Bonferroni => Some(threshold / (m as f64)),
+                MultiplicityProcedure::Sidak => Some(1.0 - (1.0 - threshold).powf(1.0 / (m as f64))),
+                MultiplicityProcedure::None | MultiplicityProcedure::FisherLsd => Some(threshold),
+                _ => None,
+            };
+            let mut out = Vec::with_capacity(m);
+            for (idx, e) in entries.iter().enumerate() {
+                let ci = match (report_ci, per_alpha) {
+                    (true, Some(a)) => {
+                        let tc = student_t_two_sided_isf(a.clamp(1e-12, 0.9999), e.df)?;
+                        Some((e.diff - tc * e.se, e.diff + tc * e.se))
+                    }
+                    _ => None,
+                };
+                out.push(build_pair_detail(
+                    e.id_a,
+                    e.id_b,
+                    e.label_a.to_owned(),
+                    e.label_b.to_owned(),
+                    e.diff,
+                    e.se,
+                    e.df,
+                    t_stats[idx],
+                    raw_p[idx],
+                    adj_p[idx],
+                    is_fdr,
+                    ci,
+                    threshold,
+                ));
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn compare_contrast_dunnett(eval: &ContrastFamilyEval<'_>, threshold: f64, report_ci: bool) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    let m = eval.pairs.len();
+    let df_joint = eval.pairs.iter().map(|(_, _, e)| e.df).fold(f64::INFINITY, f64::min).max(1.0);
+    let loadings: Vec<f64> = eval
+        .pairs
+        .iter()
+        .map(|(_, _, e)| match e.ctrl_var_pair {
+            Some((v_tr, v_ctrl)) if v_tr + v_ctrl > 0.0 => (v_ctrl / (v_tr + v_ctrl)).sqrt().clamp(0.0, 0.999999),
+            _ => std::f64::consts::FRAC_1_SQRT_2,
+        })
+        .collect();
+    let d_crit = if report_ci {
+        Some(if m == 1 {
+            student_t_two_sided_isf(threshold.clamp(1e-12, 0.9999), df_joint)?
+        } else {
+            dunnett_two_sided_crit_loadings(threshold, df_joint, &loadings)?
+        })
+    } else {
+        None
+    };
+
+    let mut out = Vec::with_capacity(m);
+    for &(i, j, ref est) in &eval.pairs {
+        let (t_stat, raw_p, adj_p) = if est.se > 0.0 {
+            let t = est.diff / est.se;
+            let rp = student_t_two_sided_p(t, est.df)?;
+            let ap = if m == 1 { rp } else { dunnett_two_sided_p_loadings(t.abs(), df_joint, &loadings)? };
+            (t, rp, ap)
+        } else {
+            let (st, rp) = zero_se_pair(est.diff, false);
+            (st, rp, rp)
+        };
+        let ci = d_crit.map(|dc| (est.diff - dc * est.se, est.diff + dc * est.se));
+        out.push(build_pair_detail(
+            eval.levels[i].0,
+            eval.levels[j].0,
+            eval.levels[i].1.clone(),
+            eval.levels[j].1.clone(),
+            est.diff,
+            est.se,
+            est.df,
+            t_stat,
+            raw_p,
+            adj_p,
+            false,
+            ci,
+            threshold,
+        ));
+    }
+    Ok(out)
+}
+
+fn resolve_level_order_for_nk(k: usize, eval: &ContrastFamilyEval<'_>) -> Vec<usize> {
+    let mut means = vec![None; k];
+    for (idx, m) in means.iter_mut().enumerate() {
+        *m = eval.level_means.get(idx).copied().flatten();
+    }
+    let mut part: Vec<usize> = Vec::new();
+    for i in 0..k {
+        if eval.pairs.iter().any(|&(a, b, _)| a == i || b == i) {
+            part.push(i);
+        }
+    }
+    if part.iter().any(|&idx| means[idx].is_none()) && !part.is_empty() {
+        means[part[0]] = Some(0.0);
+        for _ in 0..part.len() {
+            for &(a, b, ref est) in &eval.pairs {
+                if let (Some(ma), None) = (means[a], means[b]) {
+                    means[b] = Some(ma - est.diff);
+                } else if let (None, Some(mb)) = (means[a], means[b]) {
+                    means[a] = Some(mb + est.diff);
+                }
+            }
+        }
+    }
+    part.sort_by(|&a, &b| means[a].unwrap_or(0.0).total_cmp(&means[b].unwrap_or(0.0)));
+    part
+}
+
+fn compare_contrast_newman_keuls(eval: &ContrastFamilyEval<'_>, threshold: f64) -> Result<Vec<PairwiseComparisonDetail>, StatsError> {
+    let k_total = eval.levels.len();
+    let sorted_idx = resolve_level_order_for_nk(k_total, eval);
+    let k = sorted_idx.len();
+    if k < 2 {
+        return Ok(Vec::new());
+    }
+    let mut pair_map: std::collections::BTreeMap<(usize, usize), &ContrastEstimate> = std::collections::BTreeMap::new();
+    for &(i, j, ref est) in &eval.pairs {
+        pair_map.insert((i.min(j), i.max(j)), est);
+    }
+
+    let mut p_mat = vec![vec![1.0_f64; k]; k];
+    for span in (2..=k).rev() {
+        for lo in 0..=(k - span) {
+            let hi = lo + span - 1;
+            let u = sorted_idx[lo];
+            let v = sorted_idx[hi];
+            let raw_p = if let Some(&est) = pair_map.get(&(u.min(v), u.max(v))) {
+                let se_q = est.se * std::f64::consts::FRAC_1_SQRT_2;
+                if se_q > 0.0 { studentized_range_sf(est.diff.abs() / se_q, span, est.df)? } else { zero_se_pair(est.diff, true).1 }
+            } else {
+                0.0
+            };
+            let mut adj = raw_p;
+            if lo > 0 {
+                adj = adj.max(p_mat[lo - 1][hi]);
+            }
+            if hi + 1 < k {
+                adj = adj.max(p_mat[lo][hi + 1]);
+            }
+            p_mat[lo][hi] = adj.clamp(0.0, 1.0);
+        }
+    }
+
+    let mut pos_of = vec![0_usize; k_total];
+    for (pos, &orig) in sorted_idx.iter().enumerate() {
+        pos_of[orig] = pos;
+    }
+
+    let mut out = Vec::with_capacity(eval.pairs.len());
+    for &(i, j, ref est) in &eval.pairs {
+        let se_q = est.se * std::f64::consts::FRAC_1_SQRT_2;
+        let (q_stat, raw_p) =
+            if se_q > 0.0 { (est.diff.abs() / se_q, student_t_two_sided_p(est.diff / est.se, est.df)?) } else { zero_se_pair(est.diff, true) };
+        let (p_lo, p_hi) = (pos_of[i].min(pos_of[j]), pos_of[i].max(pos_of[j]));
+        let adj_p = p_mat[p_lo][p_hi];
+        out.push(build_pair_detail(
+            eval.levels[i].0,
+            eval.levels[j].0,
+            eval.levels[i].1.clone(),
+            eval.levels[j].1.clone(),
+            est.diff,
+            est.se,
+            est.df,
+            q_stat,
+            raw_p,
+            adj_p,
+            false,
+            None,
+            threshold,
+        ));
+    }
+    Ok(out)
 }
 
 struct SimpleEffectsSpec<'a> {
@@ -4394,47 +5643,140 @@ struct SimpleEffectsSpec<'a> {
     confidence: ConfidenceLevel,
 }
 
+fn validate_dunnett_ctrl(mult_spec: &MultiplicitySpec, n_levels: usize) -> Result<(), StatsError> {
+    if let MultiplicityMethod::Dunnett { control_column } = mult_spec.method
+        && control_column >= n_levels
+    {
+        return Err(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 });
+    }
+    Ok(())
+}
+
+fn is_unequal_variance_method(method: MultiplicityMethod) -> bool {
+    matches!(method, MultiplicityMethod::GamesHowell | MultiplicityMethod::TamhaneT2 | MultiplicityMethod::DunnettT3)
+}
+
+fn collect_factor_pairs<F>(n_levels: usize, method: MultiplicityMethod, mut eval_pair: F) -> Result<Vec<(usize, usize, ContrastEstimate)>, StatsError>
+where
+    F: FnMut(usize, usize) -> Result<Option<ContrastEstimate>, StatsError>,
+{
+    let mut pairs = Vec::new();
+    if let MultiplicityMethod::Dunnett { control_column } = method {
+        for tr in 0..n_levels {
+            if tr == control_column {
+                continue;
+            }
+            if let Some(est) = eval_pair(tr, control_column)? {
+                pairs.push((tr, control_column, est));
+            }
+        }
+    } else {
+        for i in 0..n_levels {
+            for j in (i + 1)..n_levels {
+                if let Some(est) = eval_pair(i, j)? {
+                    pairs.push((i, j, est));
+                }
+            }
+        }
+    }
+    Ok(pairs)
+}
+
 fn run_simple_effects_for_pair(
     out: &mut ResultSheet,
     obs: &FactorialObservations,
-    result: &FactorialAnovaResult,
+    post_hoc: &FactorialPostHocContext,
     cfg: &SimpleEffectsSpec<'_>,
+    next_group_id: &mut usize,
 ) -> Result<(), StatsError> {
     let cond_levels = &obs.factor_levels[cfg.cond_factor];
     let target_levels = &obs.factor_levels[cfg.target_factor];
-    if target_levels.len() < 2 {
+    let k_t = target_levels.len();
+    if k_t < 2 {
         return Ok(());
     }
-    let mut combined = Vec::new();
-    for (c_idx, cond_label) in cond_levels.iter().enumerate() {
-        let mut bins = vec![Vec::new(); target_levels.len()];
-        for (lvls, y) in &obs.rows {
-            if lvls.get(cfg.cond_factor) == Some(&c_idx)
-                && let Some(&t_idx) = lvls.get(cfg.target_factor)
-                && t_idx < bins.len()
-            {
-                bins[t_idx].push(*y);
+    validate_dunnett_ctrl(cfg.mult_spec, k_t)?;
+    let unequal = is_unequal_variance_method(cfg.mult_spec.method);
+
+    if k_t == 2 {
+        let (idx_a, idx_b) = match cfg.mult_spec.method {
+            MultiplicityMethod::Dunnett { control_column: 0 } => (1, 0),
+            _ => (0, 1),
+        };
+        struct TwoLvlItem {
+            id_a: usize,
+            id_b: usize,
+            lbl_a: String,
+            lbl_b: String,
+            est: ContrastEstimate,
+        }
+        let mut items = Vec::with_capacity(cond_levels.len());
+        for (c_idx, cond_label) in cond_levels.iter().enumerate() {
+            if let Some(est) = post_hoc.eval_simple_pair(cfg.cond_factor, c_idx, cfg.target_factor, idx_a, idx_b, unequal)? {
+                let id_a = *next_group_id;
+                let id_b = *next_group_id + 1;
+                *next_group_id += 2;
+                items.push(TwoLvlItem {
+                    id_a,
+                    id_b,
+                    lbl_a: format!("{cond_label} | {}", target_levels[idx_a]),
+                    lbl_b: format!("{cond_label} | {}", target_levels[idx_b]),
+                    est,
+                });
             }
         }
-        let inputs = build_factorial_group_inputs(target_levels, bins, result.ms_residual)?;
-        if inputs.len() < 2 {
+        let slice_refs: Vec<NamedSliceContrast<'_>> = items
+            .iter()
+            .map(|it| NamedSliceContrast {
+                id_a: it.id_a,
+                id_b: it.id_b,
+                label_a: it.lbl_a.as_str(),
+                label_b: it.lbl_b.as_str(),
+                diff: it.est.diff,
+                se: it.est.se,
+                df: it.est.df,
+            })
+            .collect();
+        let combined = compare_independent_contrast_family(
+            &slice_refs,
+            cfg.mult_spec.method.into(),
+            cfg.mult_spec.threshold,
+            cfg.mult_spec.report_confidence_intervals,
+        )?;
+        let note = if combined.len() >= 2 && !matches!(cfg.mult_spec.method, MultiplicityMethod::None | MultiplicityMethod::FisherLsd) {
+            Some(format!("Multiplicity adjusted across all {} simple-effect comparisons.", combined.len()))
+        } else {
+            None
+        };
+        push_pairwise_outputs_with_footnote(out, &combined, cfg.tab_id, cfg.title, cfg.p_fmt, cfg.confidence, note);
+        return Ok(());
+    }
+
+    let mut combined = Vec::new();
+    for (c_idx, cond_label) in cond_levels.iter().enumerate() {
+        let base_id = *next_group_id;
+        *next_group_id += k_t;
+        let slice_levels: Vec<(usize, String)> =
+            target_levels.iter().enumerate().map(|(i, l)| (base_id + i, format!("{cond_label} | {l}"))).collect();
+        let pairs = collect_factor_pairs(k_t, cfg.mult_spec.method, |i, j| {
+            post_hoc.eval_simple_pair(cfg.cond_factor, c_idx, cfg.target_factor, i, j, unequal)
+        })?;
+        if pairs.is_empty() {
             continue;
         }
-        let eff_spec = effective_factorial_mult_spec(cfg.mult_spec, &inputs)?;
-        let mut details = compare_groups_pairwise(&inputs, result.ms_residual, result.df_residual, &eff_spec)?;
-        for d in &mut details {
-            d.label_a = format!("{cond_label} | {}", d.label_a);
-            d.label_b = format!("{cond_label} | {}", d.label_b);
-        }
+        let level_means: Vec<Option<f64>> = vec![None; k_t];
+        let details =
+            compare_contrast_family(ContrastFamilyEval { levels: &slice_levels, level_means: &level_means, mult_spec: cfg.mult_spec, pairs })?;
         combined.extend(details);
     }
-    push_pairwise_outputs_with_id(out, &combined, cfg.tab_id, cfg.title, cfg.p_fmt, cfg.confidence);
+    push_pairwise_outputs_with_footnote(out, &combined, cfg.tab_id, cfg.title, cfg.p_fmt, cfg.confidence, None);
     Ok(())
 }
 
 fn run_factorial_multiplicity(
     out: &mut ResultSheet,
     obs: &FactorialObservations,
+    post_hoc: &FactorialPostHocContext,
     result: &FactorialAnovaResult,
     mult_spec: &MultiplicitySpec,
     p_fmt: PValueFormat,
@@ -4446,33 +5788,35 @@ fn run_factorial_multiplicity(
     if !result.df_residual.is_finite() || result.df_residual < 1.0 || !result.ms_residual.is_finite() || result.ms_residual < 0.0 {
         return Ok(());
     }
+    let unequal = is_unequal_variance_method(mult_spec.method);
+    let mut next_group_id = 0_usize;
 
     for (f_idx, levels) in obs.factor_levels.iter().enumerate() {
-        if levels.len() < 2 {
+        let k = levels.len();
+        if k < 2 {
             continue;
         }
-        let mut bins = vec![Vec::new(); levels.len()];
-        for (lvls, y) in &obs.rows {
-            if let Some(&lvl) = lvls.get(f_idx)
-                && lvl < bins.len()
-            {
-                bins[lvl].push(*y);
-            }
-        }
-        let inputs = build_factorial_group_inputs(levels, bins, result.ms_residual)?;
-        if inputs.len() < 2 {
+        validate_dunnett_ctrl(mult_spec, k)?;
+        let base_id = next_group_id;
+        next_group_id += k;
+        let numbered_levels: Vec<(usize, String)> = levels.iter().enumerate().map(|(i, l)| (base_id + i, l.clone())).collect();
+        let pairs = collect_factor_pairs(k, mult_spec.method, |i, j| post_hoc.eval_marginal_pair(f_idx, i, j, unequal))?;
+        if pairs.is_empty() {
             continue;
         }
-        let eff_spec = effective_factorial_mult_spec(mult_spec, &inputs)?;
-        let details = compare_groups_pairwise(&inputs, result.ms_residual, result.df_residual, &eff_spec)?;
+        let mut level_means = Vec::with_capacity(k);
+        for lvl in 0..k {
+            level_means.push(post_hoc.level_mean_estimate(f_idx, lvl)?);
+        }
+        let details = compare_contrast_family(ContrastFamilyEval { levels: &numbered_levels, level_means: &level_means, mult_spec, pairs })?;
         let tab_id = match f_idx {
             0 => String::from("multiple-comparisons-factor-a"),
             1 => String::from("multiple-comparisons-factor-b"),
-            k => format!("multiple-comparisons-factor-{}", k + 1),
+            n => format!("multiple-comparisons-factor-{}", n + 1),
         };
         let f_name = obs.factor_names.get(f_idx).map_or("Factor", String::as_str);
         let title = format!("Multiple comparisons: {f_name} (marginal means)");
-        push_pairwise_outputs_with_id(out, &details, &tab_id, &title, p_fmt, confidence);
+        push_pairwise_outputs_with_footnote(out, &details, &tab_id, &title, p_fmt, confidence, None);
     }
 
     if obs.factor_levels.len() >= 2 {
@@ -4482,7 +5826,7 @@ fn run_factorial_multiplicity(
         run_simple_effects_for_pair(
             out,
             obs,
-            result,
+            post_hoc,
             &SimpleEffectsSpec {
                 cond_factor: 1,
                 target_factor: 0,
@@ -4492,12 +5836,13 @@ fn run_factorial_multiplicity(
                 p_fmt,
                 confidence,
             },
+            &mut next_group_id,
         )?;
         let title_b_within_a = format!("Simple effects: {name_b} within {name_a}");
         run_simple_effects_for_pair(
             out,
             obs,
-            result,
+            post_hoc,
             &SimpleEffectsSpec {
                 cond_factor: 0,
                 target_factor: 1,
@@ -4507,6 +5852,7 @@ fn run_factorial_multiplicity(
                 p_fmt,
                 confidence,
             },
+            &mut next_group_id,
         )?;
     }
 
@@ -4520,6 +5866,7 @@ fn grouped_row_levels(grouped: &lumencraft_doc::GroupedTable, n_rows: usize) -> 
 struct GroupedFactorialOutcome {
     result: FactorialAnovaResult,
     observations: FactorialObservations,
+    post_hoc: FactorialPostHocContext,
     aux_tabs: Vec<ResultTab>,
 }
 
@@ -4657,7 +6004,7 @@ fn run_grouped_factorial(
                 }
             }
         }
-        let rm_res = fit_rm_two_way_anova_with_sphericity(
+        let (rm_res, rm_post_hoc) = fit_rm_two_way_anova_with_posthoc(
             &subject_data,
             &grouped.row_factor_title,
             &grouped.column_factor_title,
@@ -4670,7 +6017,12 @@ fn run_grouped_factorial(
             factor_levels: vec![grouped_row_levels(grouped, n_rows), selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect()],
             rows: obs,
         };
-        return Ok(GroupedFactorialOutcome { result: rm_res.anova, observations: data, aux_tabs: sph_tab.into_iter().collect() });
+        return Ok(GroupedFactorialOutcome {
+            result: rm_res.anova,
+            observations: data,
+            post_hoc: FactorialPostHocContext::RmBalanced(rm_post_hoc),
+            aux_tabs: sph_tab.into_iter().collect(),
+        });
     }
 
     // Three-way 2 x 2 x K path.
@@ -4695,8 +6047,8 @@ fn run_grouped_factorial(
         }
         let data =
             FactorialObservations { factor_names: vec![f1_name, f2_name, f3_name], factor_levels: vec![f1_levels, f2_levels, f3_levels], rows: obs };
-        let res = fit_factorial_anova(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
-        return Ok(GroupedFactorialOutcome { result: res, observations: data, aux_tabs: Vec::new() });
+        let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
+        return Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Ols(model), aux_tabs: Vec::new() });
     }
 
     // Standard Two-Way ANOVA (Row Factor x Column Factor).
@@ -4715,8 +6067,8 @@ fn run_grouped_factorial(
         factor_levels: vec![row_levels, col_levels],
         rows: obs,
     };
-    let res = fit_factorial_anova(&data, fac_spec.max_interaction_order.clamp(1, 2), fac_spec.ss_type)?;
-    Ok(GroupedFactorialOutcome { result: res, observations: data, aux_tabs: Vec::new() })
+    let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 2), fac_spec.ss_type)?;
+    Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Ols(model), aux_tabs: Vec::new() })
 }
 
 fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[FactorialAnovaTerm], satt: &[f64], kr: &[f64]) {
@@ -4763,7 +6115,7 @@ fn build_matrix_tab(id: &str, title: &str, labels: &[String], matrix: &[Vec<f64>
 fn run_rm_two_way_unstructured_reml(
     out: &mut ResultSheet,
     ctx: &RmUnstructuredDesign<'_>,
-) -> Result<(Vec<FactorialAnovaTerm>, f64, f64), StatsError> {
+) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, RemlContrastCore), StatsError> {
     let n_cols = ctx.col_levels.len();
     let (cluster_ids, tp_ids, tp_labels): (Vec<usize>, Vec<usize>, Vec<String>) = match ctx.design {
         RepeatedMeasuresDesign::ColumnFactorMatched => (ctx.subj_row_ids.to_vec(), ctx.col_ids.to_vec(), ctx.col_levels.to_vec()),
@@ -4780,7 +6132,7 @@ fn run_rm_two_way_unstructured_reml(
         }
     };
 
-    let ures = fit_unstructured_rm_reml(ctx.x_mat, ctx.y_vec, &cluster_ids, &tp_ids, &tp_labels, ctx.term_slices)?;
+    let (ures, core) = fit_unstructured_rm_reml_with_core(ctx.x_mat, ctx.y_vec, &cluster_ids, &tp_ids, &tp_labels, ctx.term_slices)?;
     push_scalar(out, "REML mean diagonal variance", None, ures.mean_diagonal_variance);
     push_scalar(out, "REML log-likelihood", None, ures.reml_log_lik);
     push_reml_df_scalars(out, &ures.fixed_terms, &ures.satterthwaite_df, &ures.kenward_roger_df);
@@ -4839,7 +6191,7 @@ fn run_rm_two_way_unstructured_reml(
 
     let df_sum: f64 = ures.fixed_terms.iter().map(|t| t.df).sum();
     let df_resid = ((ctx.y_vec.len() as f64) - 1.0 - df_sum).max(1.0);
-    Ok((ures.fixed_terms, ures.mean_diagonal_variance, df_resid))
+    Ok((ures.fixed_terms, ures.mean_diagonal_variance, df_resid, core))
 }
 
 fn run_rm_two_way_reml_fallback(
@@ -4870,6 +6222,7 @@ fn run_rm_two_way_reml_fallback(
     let mut subj_col_ids: Vec<usize> = Vec::new();
     let mut row_ids: Vec<usize> = Vec::new();
     let mut col_ids: Vec<usize> = Vec::new();
+    let mut observed_cells = vec![vec![false; n_cols]; n_rows];
     for s in 0..n_subs {
         for (r, r_basis) in row_basis.iter().enumerate() {
             for (c_pos, (&orig_c, c_basis)) in selected_cols.iter().zip(col_basis.iter()).enumerate() {
@@ -4888,6 +6241,7 @@ fn run_rm_two_way_reml_fallback(
                     x_rows.extend_from_slice(&row_x);
                     y_vec.push(v);
                     obs.push((vec![r, c_pos], v));
+                    observed_cells[r][c_pos] = true;
                     subj_ids.push(s);
                     subj_row_ids.push(s * n_rows + r);
                     subj_col_ids.push(s * n_cols + c_pos);
@@ -4914,7 +6268,7 @@ fn run_rm_two_way_reml_fallback(
     let row_levels = grouped_row_levels(grouped, n_rows);
     let col_levels: Vec<String> = selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
 
-    let (fixed_terms, sigma2_e, df_residual) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
+    let (fixed_terms, sigma2_e, df_residual, reml_core) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
         run_rm_two_way_unstructured_reml(
             out,
             &RmUnstructuredDesign {
@@ -4932,14 +6286,14 @@ fn run_rm_two_way_reml_fallback(
             },
         )?
     } else {
-        let (fixed_terms, sigma2_e, reml_ll, icc_subj, vc_tab) = match fac_spec.repeated_measures {
+        let (fixed_terms, sigma2_e, reml_ll, icc_subj, vc_tab, reml_core) = match fac_spec.repeated_measures {
             RepeatedMeasuresDesign::BothFactorsMatched => {
                 let (g_s, c_s) = cluster_ids_to_g_matrix(&subj_ids)?;
                 let (g_sr, c_sr) = cluster_ids_to_g_matrix(&subj_row_ids)?;
                 let (g_sc, c_sc) = cluster_ids_to_g_matrix(&subj_col_ids)?;
                 let sr_name = format!("subject × {}", grouped.row_factor_title);
                 let sc_name = format!("subject × {}", grouped.column_factor_title);
-                let mres = fit_multi_vc_reml(
+                let (mres, core) = fit_multi_vc_reml_with_core(
                     &x_mat,
                     &y_vec,
                     &[("subject", g_s, c_s), (sr_name.as_str(), g_sr, c_sr), (sc_name.as_str(), g_sc, c_sc)],
@@ -4981,7 +6335,7 @@ fn run_rm_two_way_reml_fallback(
                     vec![String::from("Subject"), sr_title, sc_title, String::from("Residual")],
                     vc_rows,
                 );
-                (mres.fixed_terms, mres.sigma2_error, mres.reml_log_lik, icc, tab)
+                (mres.fixed_terms, mres.sigma2_error, mres.reml_log_lik, icc, tab, core)
             }
             design => {
                 let cluster_ids: Vec<usize> = match design {
@@ -4989,7 +6343,7 @@ fn run_rm_two_way_reml_fallback(
                     RepeatedMeasuresDesign::RowFactorMatched => subj_col_ids.clone(),
                     _ => subj_ids,
                 };
-                let reml = fit_random_intercept_reml(&x_mat, &y_vec, &cluster_ids, &term_slices)?;
+                let (reml, core) = fit_random_intercept_reml_with_core(&x_mat, &y_vec, &cluster_ids, &term_slices)?;
                 push_scalar(out, "REML sigma^2 (subject)", None, reml.sigma2_random);
                 push_scalar(out, "REML sigma^2 (residual)", None, reml.sigma2_error);
                 push_scalar(out, "REML ICC", None, reml.icc);
@@ -5022,7 +6376,7 @@ fn run_rm_two_way_reml_fallback(
                     vec![String::from("Subject"), String::from("Residual")],
                     reml_rows,
                 );
-                (reml.fixed_terms, reml.sigma2_error, reml.reml_log_lik, reml.icc, tab)
+                (reml.fixed_terms, reml.sigma2_error, reml.reml_log_lik, reml.icc, tab, core)
             }
         };
 
@@ -5033,7 +6387,7 @@ fn run_rm_two_way_reml_fallback(
             Some(format!("ICC = {icc_subj:.3}, REML logL = {reml_ll:.2}")),
             "Missing replicates detected in repeated-measures cells; fitted linear mixed-effects REML with Kenward-Roger degrees of freedom instead of listwise deletion.",
         ));
-        (fixed_terms, sigma2_e, (n_obs - p_total) as f64)
+        (fixed_terms, sigma2_e, (n_obs - p_total) as f64, reml_core)
     };
 
     let ym = SummaryMoments::from_slice(&y_vec)?;
@@ -5053,13 +6407,31 @@ fn run_rm_two_way_reml_fallback(
         factor_levels: vec![row_levels, col_levels],
         rows: obs,
     };
-    Ok(GroupedFactorialOutcome { result: res, observations: data, aux_tabs: Vec::new() })
+    let (_, row_proj) = build_xtx_pinv_and_proj(&x_mat)?;
+    let reml_model = RemlContrastModel {
+        n_rows,
+        n_cols,
+        include_interaction,
+        row_basis,
+        col_basis,
+        row_proj,
+        col_map: reml_core.col_map,
+        beta: reml_core.beta,
+        phi: reml_core.phi,
+        phi_a: reml_core.phi_a,
+        w_info_inv: reml_core.w_info_inv,
+        phi_m_phi: reml_core.phi_m_phi,
+        n_minus_p: reml_core.n_minus_p,
+        y_scale: reml_core.y_scale,
+        observed_cells,
+    };
+    Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Reml(reml_model), aux_tabs: Vec::new() })
 }
 
 fn run_multifactor_mv(
     mv: &lumencraft_doc::MultipleVariablesTable,
     fac_spec: &FactorialAnovaSpec,
-) -> Result<(FactorialAnovaResult, FactorialObservations), StatsError> {
+) -> Result<(FactorialAnovaResult, FactorialObservations, OlsPostHocModel), StatsError> {
     let resp_idx = fac_spec.response_column.ok_or(StatsError::MissingColumn { index: 0 })?;
     let resp_var = mv.variables.get(resp_idx).ok_or(StatsError::MissingColumn { index: resp_idx })?;
     if fac_spec.multifactor_columns.is_empty() {
@@ -5108,8 +6480,8 @@ fn run_multifactor_mv(
         }
     }
     let data = FactorialObservations { factor_names, factor_levels, rows: obs };
-    let res = fit_factorial_anova(&data, fac_spec.max_interaction_order, fac_spec.ss_type)?;
-    Ok((res, data))
+    let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order, fac_spec.ss_type)?;
+    Ok((res, data, model))
 }
 
 /// Execute a [`NestedAnalysisSpec`] against a `Nested` [`DataSheet`].

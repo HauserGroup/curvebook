@@ -1583,7 +1583,8 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
 }
 
 /// Compute per-dataset trapezoidal area under curve (`sum_i 0.5 * (x_{i+1} - x_i) * (y_i + y_{i+1})`)
-/// for [`TableArchetype::Xy`] when at least 2 sorted finite `(x, mean_y)` points exist.
+/// for [`TableArchetype::Xy`] when at least 2 distinct sorted finite `(x, mean_y)` knots exist.
+/// Tied `X` rows are collapsed to their replicate-weighted mean `Y` before integration.
 fn append_xy_trapezoidal_auc(res: &mut ResultSheet, sheet: &DataSheet, selected: &[usize]) -> Result<(), StatsError> {
     let TableArchetype::Xy(xy) = &sheet.archetype else {
         return Ok(());
@@ -1591,28 +1592,57 @@ fn append_xy_trapezoidal_auc(res: &mut ResultSheet, sheet: &DataSheet, selected:
     let ds_indices = resolve_selected_indices(selected, xy.data_sets.len());
     for ds_idx in ds_indices {
         let ds = &xy.data_sets[ds_idx];
-        let mut pts: Vec<(f64, f64)> = Vec::new();
+        let mut raw_pts: Vec<(f64, f64, f64)> = Vec::new();
         for r in 0..xy.row_count() {
-            let Some(x) = xy.x_value_at(r) else { continue };
-            if !x.is_finite() {
+            let Some(x_raw) = xy.x_value_at(r) else { continue };
+            if !x_raw.is_finite() {
                 continue;
             }
-            let mean_y = if xy.y_subcolumn_mode.supports_parametric_moments() {
-                xy.summarized_y_point(r, ds_idx)?.map(|p| p.mean).filter(|v| v.is_finite())
-            } else if !xy.y_subcolumn_mode.is_pre_summarized() {
-                let y_vals: Vec<f64> = ds.cells.get(r).map(|row| row.iter().filter_map(|c| c.active_number()).collect()).unwrap_or_default();
-                if y_vals.is_empty() { None } else { Some(SummaryMoments::from_slice(&y_vals)?.mean) }
-            } else {
-                None
-            };
-            if let Some(y) = mean_y {
-                pts.push((x, y));
+            let x = if x_raw == 0.0 { 0.0 } else { x_raw };
+            if xy.y_subcolumn_mode.supports_parametric_moments() {
+                if let Some(pt) = xy.summarized_y_point(r, ds_idx)?
+                    && pt.mean.is_finite()
+                    && pt.n.is_finite()
+                    && pt.n > 0.0
+                {
+                    raw_pts.push((x, pt.mean, pt.n));
+                }
+            } else if !xy.y_subcolumn_mode.is_pre_summarized()
+                && let Some(row) = ds.cells.get(r)
+            {
+                for y in row.iter().filter_map(|c| c.active_number()) {
+                    raw_pts.push((x, y, 1.0));
+                }
             }
         }
-        pts.sort_by(|a, b| a.0.total_cmp(&b.0));
-        if pts.len() >= 2 {
+        raw_pts.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+        let mut knots: Vec<(f64, f64)> = Vec::new();
+        let mut i = 0_usize;
+        while i < raw_pts.len() {
+            let x_k = raw_pts[i].0;
+            let mut j = i + 1;
+            while j < raw_pts.len() && raw_pts[j].0 == x_k {
+                j += 1;
+            }
+            let mut w_acc = NeumaierSum::new();
+            for &(_, _, w) in &raw_pts[i..j] {
+                w_acc.add(w);
+            }
+            let tot_w = w_acc.total();
+            let mut y_acc = NeumaierSum::new();
+            if tot_w > 0.0 && tot_w.is_finite() {
+                for &(_, y, w) in &raw_pts[i..j] {
+                    y_acc.add((w / tot_w) * y);
+                }
+            }
+            knots.push((x_k, y_acc.total()));
+            i = j;
+        }
+
+        if knots.len() >= 2 {
             let mut auc_acc = NeumaierSum::new();
-            for w in pts.windows(2) {
+            for w in knots.windows(2) {
                 auc_acc.add(0.5 * (w[1].0 - w[0].0) * (w[0].1 + w[1].1));
             }
             push_scalar(res, "Trapezoidal AUC", Some(ds_idx), auc_acc.total());
@@ -1636,7 +1666,7 @@ fn append_row_descriptive_stats(
                 .into_iter()
                 .filter(|&idx| {
                     let var = &mv.variables[idx];
-                    var.role != VariableRole::Categorical && var.cells.iter().any(|c| c.active_number().is_some())
+                    !matches!(var.role, VariableRole::Categorical | VariableRole::Label) && var.cells.iter().any(|c| c.active_number().is_some())
                 })
                 .collect();
             if active_cols.len() < 2 {

@@ -4,6 +4,9 @@
 //! Hierarchical Clustering (Single, Complete, Average/UPGMA, Ward.D2 dendrogram linkage), and
 //! Multiple Imputation by Chained Equations (MICE PMM) with Rubin (1987) / Barnard–Rubin (1999) pooling.
 
+use std::cmp::Ordering;
+use std::collections::BinaryHeap;
+
 use lumencraft_doc::{
     AnalysisSpec, ChecklistStatus, DataSheet, MultivariateSpec, ResultCell, ResultSheet, ResultTabKind, TableArchetype, VariableRole,
 };
@@ -652,12 +655,20 @@ fn pairwise_distance_unchecked(a: &[f64], b: &[f64], metric: ClusterDistance) ->
     }
 }
 
+/// Maximum observation count accepted by hierarchical clustering and pairwise distance matrices.
+pub const MAX_CLUSTERING_N: usize = 2_000;
+const MAX_CLUSTER_MATRIX_TAB_N: usize = 500;
+const MAX_CLUSTER_K_SWEEP: usize = 50;
+
 /// Compute the symmetric `n x n` pairwise dissimilarity matrix for `rows` under `metric`.
 pub fn pairwise_distance_matrix(rows: &[Vec<f64>], metric: ClusterDistance) -> Result<Vec<Vec<f64>>, StatsError> {
     let n = rows.len();
     let d = rows.first().map_or(0, Vec::len);
     if n < 2 || d == 0 {
         return Err(StatsError::InsufficientSampleSize { context: "pairwise distance matrix", required: 2, actual: n });
+    }
+    if n > MAX_CLUSTERING_N {
+        return Err(StatsError::InvalidParameter { name: "clustering_n", value: n as f64 });
     }
     for r in rows {
         if r.len() != d {
@@ -688,7 +699,7 @@ fn transform_row_for_centroid(row: &[f64], metric: ClusterDistance) -> Vec<f64> 
             let mean = row.iter().sum::<f64>() / (d as f64);
             let centered: Vec<f64> = row.iter().map(|x| x - mean).collect();
             let norm = centered.iter().map(|x| x * x).sum::<f64>().sqrt();
-            if norm > 1e-15 { centered.into_iter().map(|x| x / norm).collect() } else { row.to_vec() }
+            if norm > 1e-15 { centered.into_iter().map(|x| x / norm).collect() } else { vec![0.0; d] }
         }
     }
 }
@@ -704,6 +715,18 @@ pub fn kmeans_pp_with_distance(rows: &[Vec<f64>], k: usize, distance: ClusterDis
         return Err(StatsError::InvalidParameter { name: "k_means_k", value: k as f64 });
     }
     let dist_mat = pairwise_distance_matrix(rows, distance)?;
+    kmeans_pp_from_dist(rows, k, distance, &dist_mat, seed)
+}
+
+fn kmeans_pp_from_dist(rows: &[Vec<f64>], k: usize, distance: ClusterDistance, dist_mat: &[Vec<f64>], seed: u64) -> Result<KMeansResult, StatsError> {
+    let n = rows.len();
+    let d = rows.first().map_or(0, Vec::len);
+    if n < 2 || d == 0 || k == 0 || k > n {
+        return Err(StatsError::InvalidParameter { name: "k_means_k", value: k as f64 });
+    }
+    if dist_mat.len() != n {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: dist_mat.len() }));
+    }
     let sq_dist = |a: &[f64], b: &[f64]| -> f64 {
         let v = pairwise_distance_unchecked(a, b, distance);
         v * v
@@ -796,9 +819,13 @@ pub fn kmeans_pp_with_distance(rows: &[Vec<f64>], k: usize, distance: ClusterDis
 
     let mut wcss = 0.0_f64;
     for (r, &c_idx) in rows.iter().zip(assignments.iter()) {
-        wcss += sq_dist(r, &centroids[c_idx]);
+        wcss += if distance == ClusterDistance::Manhattan {
+            pairwise_distance_unchecked(r, &centroids[c_idx], distance)
+        } else {
+            sq_dist(r, &centroids[c_idx])
+        };
     }
-    let mean_silhouette = compute_mean_silhouette_from_dist(&dist_mat, &assignments, k);
+    let mean_silhouette = compute_mean_silhouette_from_dist(dist_mat, &assignments, k);
     Ok(KMeansResult { k, assignments, centroids, wcss, mean_silhouette })
 }
 
@@ -869,6 +896,226 @@ pub fn hierarchical_clustering(rows: &[Vec<f64>], linkage: LinkageMethod) -> Res
     hierarchical_clustering_with_metrics(rows, ClusterDistance::Euclidean, map_legacy_linkage(linkage))
 }
 
+#[inline]
+fn lance_williams_distance(linkage: ClusterLinkage, dik: f64, djk: f64, dij: f64, ni: f64, nj: f64, nk: f64) -> f64 {
+    let nij = ni + nj;
+    match linkage {
+        ClusterLinkage::Single => dik.min(djk),
+        ClusterLinkage::Complete => dik.max(djk),
+        ClusterLinkage::Upgma => (ni * dik + nj * djk) / nij,
+        ClusterLinkage::Wpgma => 0.5 * (dik + djk),
+        ClusterLinkage::Centroid => ((ni * dik * dik + nj * djk * djk) / nij - (ni * nj * dij * dij) / (nij * nij)).max(0.0).sqrt(),
+        ClusterLinkage::Median => (0.5 * dik * dik + 0.5 * djk * djk - 0.25 * dij * dij).max(0.0).sqrt(),
+        ClusterLinkage::Ward => (((ni + nk) * dik * dik + (nj + nk) * djk * djk - nk * dij * dij) / (nij + nk)).max(0.0).sqrt(),
+    }
+}
+
+/// O(n^2) nearest-neighbor chain agglomerative clustering (Murtagh 1983) for reducible linkages.
+fn nn_chain_linkage(dist_mat: &[Vec<f64>], linkage: ClusterLinkage) -> Vec<DendrogramMerge> {
+    let n = dist_mat.len();
+    let mut active = vec![true; n];
+    let mut dmat = vec![0.0_f64; n * n];
+    for (i, row) in dist_mat.iter().enumerate() {
+        dmat[i * n..(i + 1) * n].copy_from_slice(row);
+    }
+    let mut ids: Vec<isize> = (0..n).map(|i| -((i as isize) + 1)).collect();
+    let mut sizes = vec![1_usize; n];
+    let mut raw_merges: Vec<DendrogramMerge> = Vec::with_capacity(n - 1);
+    let mut chain: Vec<usize> = Vec::with_capacity(n);
+
+    while raw_merges.len() < n - 1 {
+        if chain.is_empty() {
+            if let Some(first) = active.iter().position(|&a| a) {
+                chain.push(first);
+            } else {
+                break;
+            }
+        }
+        let curr = chain[chain.len() - 1];
+        let prev = if chain.len() >= 2 { Some(chain[chain.len() - 2]) } else { None };
+        let row_off = curr * n;
+        let mut best_j = usize::MAX;
+        let mut best_d = f64::INFINITY;
+        for (j, &is_act) in active.iter().enumerate() {
+            if !is_act || j == curr {
+                continue;
+            }
+            let d = dmat[row_off + j];
+            if d < best_d || (d == best_d && j < best_j) {
+                best_d = d;
+                best_j = j;
+            }
+        }
+        // Break ties in favor of the chain predecessor to avoid zero-distance cycles.
+        if let Some(p) = prev
+            && active[p]
+            && dmat[row_off + p] <= best_d
+        {
+            best_j = p;
+            best_d = dmat[row_off + p];
+        }
+        if best_j == usize::MAX {
+            break;
+        }
+
+        if Some(best_j) == prev {
+            chain.pop();
+            chain.pop();
+            let keep = curr.min(best_j);
+            let drop_slot = curr.max(best_j);
+            let step = raw_merges.len();
+            let ni = sizes[keep] as f64;
+            let nj = sizes[drop_slot] as f64;
+            let new_size = sizes[keep] + sizes[drop_slot];
+            raw_merges.push(DendrogramMerge { left: ids[keep], right: ids[drop_slot], distance: best_d, cluster_size: new_size });
+            for (k, &is_act) in active.iter().enumerate() {
+                if !is_act || k == keep || k == drop_slot {
+                    continue;
+                }
+                let updated = lance_williams_distance(linkage, dmat[keep * n + k], dmat[drop_slot * n + k], best_d, ni, nj, sizes[k] as f64);
+                dmat[keep * n + k] = updated;
+                dmat[k * n + keep] = updated;
+            }
+            active[drop_slot] = false;
+            ids[keep] = step as isize;
+            sizes[keep] = new_size;
+        } else {
+            chain.push(best_j);
+        }
+    }
+
+    // Reorder subtrees into ascending merge height while preserving topological parent-after-child order.
+    let m = raw_merges.len();
+    let mut order: Vec<usize> = (0..m).collect();
+    order.sort_by(|&a, &b| raw_merges[a].distance.total_cmp(&raw_merges[b].distance).then_with(|| a.cmp(&b)));
+    let mut remap = vec![0_isize; m];
+    for (new_idx, &orig_idx) in order.iter().enumerate() {
+        remap[orig_idx] = new_idx as isize;
+    }
+    let mut sorted = Vec::with_capacity(m);
+    for orig_idx in order {
+        let mut entry = raw_merges[orig_idx].clone();
+        if entry.left >= 0 {
+            entry.left = remap[entry.left as usize];
+        }
+        if entry.right >= 0 {
+            entry.right = remap[entry.right as usize];
+        }
+        sorted.push(entry);
+    }
+    sorted
+}
+
+#[derive(Clone, Copy)]
+struct LinkageHeapEntry {
+    dist: f64,
+    i: usize,
+    j: usize,
+    gen_i: usize,
+    gen_j: usize,
+}
+
+impl PartialEq for LinkageHeapEntry {
+    fn eq(&self, other: &Self) -> bool {
+        self.dist.to_bits() == other.dist.to_bits()
+            && self.i == other.i
+            && self.j == other.j
+            && self.gen_i == other.gen_i
+            && self.gen_j == other.gen_j
+    }
+}
+
+impl Eq for LinkageHeapEntry {}
+
+impl Ord for LinkageHeapEntry {
+    fn cmp(&self, other: &Self) -> Ordering {
+        other
+            .dist
+            .total_cmp(&self.dist)
+            .then_with(|| other.i.cmp(&self.i))
+            .then_with(|| other.j.cmp(&self.j))
+            .then_with(|| other.gen_i.cmp(&self.gen_i))
+            .then_with(|| other.gen_j.cmp(&self.gen_j))
+    }
+}
+
+impl PartialOrd for LinkageHeapEntry {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+/// O(n^2 log n) lazy-deletion min-heap linkage for non-reducible Centroid and Median rules.
+fn heap_linkage(dist_mat: &[Vec<f64>], linkage: ClusterLinkage) -> Vec<DendrogramMerge> {
+    let n = dist_mat.len();
+    let mut active = vec![true; n];
+    let mut dmat = vec![0.0_f64; n * n];
+    let mut initial = Vec::with_capacity(n * (n - 1) / 2);
+    for (i, row) in dist_mat.iter().enumerate() {
+        dmat[i * n..(i + 1) * n].copy_from_slice(row);
+        for (j, &d) in row.iter().enumerate().skip(i + 1) {
+            initial.push(LinkageHeapEntry { dist: d, i, j, gen_i: 0, gen_j: 0 });
+        }
+    }
+    let mut heap = BinaryHeap::from(initial);
+    let mut gens = vec![0_usize; n];
+    let mut ids: Vec<isize> = (0..n).map(|i| -((i as isize) + 1)).collect();
+    let mut sizes = vec![1_usize; n];
+    let mut merges = Vec::with_capacity(n - 1);
+
+    while merges.len() < n - 1 {
+        let Some(top) = heap.pop() else {
+            break;
+        };
+        if !active[top.i] || !active[top.j] || top.gen_i != gens[top.i] || top.gen_j != gens[top.j] {
+            continue;
+        }
+        let keep = top.i.min(top.j);
+        let drop_slot = top.i.max(top.j);
+        let step = merges.len();
+        let ni = sizes[keep] as f64;
+        let nj = sizes[drop_slot] as f64;
+        let new_size = sizes[keep] + sizes[drop_slot];
+        merges.push(DendrogramMerge { left: ids[keep], right: ids[drop_slot], distance: top.dist, cluster_size: new_size });
+
+        active[drop_slot] = false;
+        gens[keep] += 1;
+        ids[keep] = step as isize;
+        sizes[keep] = new_size;
+
+        for (k, &is_act) in active.iter().enumerate() {
+            if !is_act || k == keep {
+                continue;
+            }
+            let updated = lance_williams_distance(linkage, dmat[keep * n + k], dmat[drop_slot * n + k], top.dist, ni, nj, sizes[k] as f64);
+            dmat[keep * n + k] = updated;
+            dmat[k * n + keep] = updated;
+            let (u, v) = if keep < k { (keep, k) } else { (k, keep) };
+            heap.push(LinkageHeapEntry { dist: updated, i: u, j: v, gen_i: gens[u], gen_j: gens[v] });
+        }
+    }
+    merges
+}
+
+fn hierarchical_clustering_from_dist(dist_mat: &[Vec<f64>], linkage: ClusterLinkage) -> Result<Vec<DendrogramMerge>, StatsError> {
+    let n = dist_mat.len();
+    if n < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "hierarchical clustering", required: 2, actual: n });
+    }
+    if n > MAX_CLUSTERING_N {
+        return Err(StatsError::InvalidParameter { name: "clustering_n", value: n as f64 });
+    }
+    if let Some(bad) = dist_mat.iter().find(|r| r.len() != n) {
+        return Err(StatsError::Math(lumencraft_math::MathError::DimensionMismatch { expected: n, actual: bad.len() }));
+    }
+    Ok(match linkage {
+        ClusterLinkage::Single | ClusterLinkage::Complete | ClusterLinkage::Upgma | ClusterLinkage::Wpgma | ClusterLinkage::Ward => {
+            nn_chain_linkage(dist_mat, linkage)
+        }
+        ClusterLinkage::Centroid | ClusterLinkage::Median => heap_linkage(dist_mat, linkage),
+    })
+}
+
 /// Agglomerative hierarchical clustering across all [`ClusterDistance`] metrics (`Euclidean`,
 /// `Manhattan`, `Pearson`, `Cosine`) and all 7 [`ClusterLinkage`] criteria (`Ward`, `Complete`,
 /// `Single`, `Upgma`, `Wpgma`, `Centroid`, `Median`) via Lance–Williams updates.
@@ -877,72 +1124,8 @@ pub fn hierarchical_clustering_with_metrics(
     distance: ClusterDistance,
     linkage: ClusterLinkage,
 ) -> Result<Vec<DendrogramMerge>, StatsError> {
-    let mut dist_mat = pairwise_distance_matrix(rows, distance)?;
-    let n = rows.len();
-    let mut active = vec![true; n];
-    let mut ids: Vec<isize> = (0..n).map(|i| -((i as isize) + 1)).collect();
-    let mut sizes = vec![1_usize; n];
-
-    let mut merges = Vec::with_capacity(n - 1);
-    for step in 0..(n - 1) {
-        let mut best_i = 0_usize;
-        let mut best_j = 1_usize;
-        let mut best_d = f64::INFINITY;
-        for i in 0..n {
-            if !active[i] {
-                continue;
-            }
-            for j in (i + 1)..n {
-                if active[j] && dist_mat[i][j] < best_d {
-                    best_d = dist_mat[i][j];
-                    best_i = i;
-                    best_j = j;
-                }
-            }
-        }
-
-        let ni = sizes[best_i] as f64;
-        let nj = sizes[best_j] as f64;
-        let new_size = sizes[best_i] + sizes[best_j];
-        merges.push(DendrogramMerge { left: ids[best_i], right: ids[best_j], distance: best_d, cluster_size: new_size });
-
-        // Lance-Williams dissimilarity update into slot `best_i`, deactivate `best_j`.
-        for k in 0..n {
-            if !active[k] || k == best_i || k == best_j {
-                continue;
-            }
-            let dik = dist_mat[best_i][k];
-            let djk = dist_mat[best_j][k];
-            let nk = sizes[k] as f64;
-            let nij = ni + nj;
-            let updated = match linkage {
-                ClusterLinkage::Single => dik.min(djk),
-                ClusterLinkage::Complete => dik.max(djk),
-                ClusterLinkage::Upgma => (ni * dik + nj * djk) / nij,
-                ClusterLinkage::Wpgma => 0.5 * (dik + djk),
-                ClusterLinkage::Centroid => {
-                    let sq = (ni * dik * dik + nj * djk * djk) / nij - (ni * nj * best_d * best_d) / (nij * nij);
-                    sq.max(0.0).sqrt()
-                }
-                ClusterLinkage::Median => {
-                    let sq = 0.5 * dik * dik + 0.5 * djk * djk - 0.25 * best_d * best_d;
-                    sq.max(0.0).sqrt()
-                }
-                ClusterLinkage::Ward => {
-                    let denom = nij + nk;
-                    let sq = ((ni + nk) * dik * dik + (nj + nk) * djk * djk - nk * best_d * best_d) / denom;
-                    sq.max(0.0).sqrt()
-                }
-            };
-            dist_mat[best_i][k] = updated;
-            dist_mat[k][best_i] = updated;
-        }
-        active[best_j] = false;
-        ids[best_i] = step as isize;
-        sizes[best_i] = new_size;
-    }
-
-    Ok(merges)
+    let dist_mat = pairwise_distance_matrix(rows, distance)?;
+    hierarchical_clustering_from_dist(&dist_mat, linkage)
 }
 
 fn resolve_node_members(node_id: isize, leaf_n: usize, merged_members: &[Vec<usize>]) -> Result<&[usize], StatsError> {
@@ -965,6 +1148,9 @@ fn resolve_node_members(node_id: isize, leaf_n: usize, merged_members: &[Vec<usi
 pub fn cophenetic_distance_matrix(n: usize, merges: &[DendrogramMerge]) -> Result<Vec<Vec<f64>>, StatsError> {
     if n < 2 || merges.len() != n - 1 {
         return Err(StatsError::DimensionMismatch { expected: n.saturating_sub(1), actual: merges.len() });
+    }
+    if n > MAX_CLUSTERING_N {
+        return Err(StatsError::InvalidParameter { name: "clustering_n", value: n as f64 });
     }
     let mut coph = vec![vec![0.0_f64; n]; n];
     let mut members: Vec<Vec<usize>> = (0..n).map(|i| vec![i]).collect();
@@ -1162,22 +1348,25 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             }
             let (var_labels, obs_labels, rows) = extract_complete_matrix_rows_with_names(sheet, &spec.selected_data_sets)?;
             let n = rows.len();
+            if n > MAX_CLUSTERING_N {
+                return Err(StatsError::InvalidParameter { name: "clustering_n", value: n as f64 });
+            }
             let p = var_labels.len();
             let dist_metric = *distance;
             let link_rule = *linkage;
 
             let dist_mat = pairwise_distance_matrix(&rows, dist_metric)?;
-            let merges = hierarchical_clustering_with_metrics(&rows, dist_metric, link_rule)?;
+            let merges = hierarchical_clustering_from_dist(&dist_mat, link_rule)?;
             let coph_mat = cophenetic_distance_matrix(n, &merges)?;
             let cophenetic_r = cophenetic_correlation(&dist_mat, &coph_mat);
 
             let k_max = match k_sweep_max {
-                Some(req) => (*req).min(n).max(2.min(n)),
+                Some(req) => (*req).min(n).min(MAX_CLUSTER_K_SWEEP).max(2.min(n)),
                 None => 6.min(n.saturating_sub(1)).max(2).min(n),
             };
             let mut sweep_results: Vec<KMeansResult> = Vec::new();
             for k_try in 2..=k_max {
-                if let Ok(res) = kmeans_pp_with_distance(&rows, k_try, dist_metric, 0xC105_7E57) {
+                if let Ok(res) = kmeans_pp_from_dist(&rows, k_try, dist_metric, &dist_mat, 0xC105_7E57) {
                     sweep_results.push(res);
                 }
             }
@@ -1186,7 +1375,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 if let Some(found) = sweep_results.iter().find(|r| r.k == *k) {
                     found.clone()
                 } else {
-                    kmeans_pp_with_distance(&rows, *k, dist_metric, 0xC105_7E57)?
+                    kmeans_pp_from_dist(&rows, *k, dist_metric, &dist_mat, 0xC105_7E57)?
                 }
             } else if let Some(best) = sweep_results
                 .iter()
@@ -1196,7 +1385,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             {
                 best.clone()
             } else {
-                kmeans_pp_with_distance(&rows, 2.min(n), dist_metric, 0xC105_7E57)?
+                kmeans_pp_from_dist(&rows, 2.min(n), dist_metric, &dist_mat, 0xC105_7E57)?
             };
 
             push_scalar(&mut out, "Clusters (k)", None, km.k as f64);
@@ -1308,25 +1497,34 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 ));
             }
 
-            let dist_rows: Vec<Vec<ResultCell>> = dist_mat.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-            out.tabs.push(build_tab(
-                "clustering-distance-matrix",
-                format!("Pairwise dissimilarity matrix ({dist_label})"),
-                ResultTabKind::CovarianceMatrix,
-                obs_labels.clone(),
-                obs_labels.clone(),
-                dist_rows,
-            ));
+            if n <= MAX_CLUSTER_MATRIX_TAB_N {
+                let dist_rows: Vec<Vec<ResultCell>> = dist_mat.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+                out.tabs.push(build_tab(
+                    "clustering-distance-matrix",
+                    format!("Pairwise dissimilarity matrix ({dist_label})"),
+                    ResultTabKind::CovarianceMatrix,
+                    obs_labels.clone(),
+                    obs_labels.clone(),
+                    dist_rows,
+                ));
 
-            let coph_rows: Vec<Vec<ResultCell>> = coph_mat.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-            out.tabs.push(build_tab(
-                "cophenetic-distance-matrix",
-                format!("Cophenetic distance matrix ({link_label})"),
-                ResultTabKind::CovarianceMatrix,
-                obs_labels.clone(),
-                obs_labels,
-                coph_rows,
-            ));
+                let coph_rows: Vec<Vec<ResultCell>> = coph_mat.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+                out.tabs.push(build_tab(
+                    "cophenetic-distance-matrix",
+                    format!("Cophenetic distance matrix ({link_label})"),
+                    ResultTabKind::CovarianceMatrix,
+                    obs_labels.clone(),
+                    obs_labels,
+                    coph_rows,
+                ));
+            } else {
+                out.checklist.push(checklist_item(
+                    "Dense pairwise & cophenetic matrices omitted for large n",
+                    ChecklistStatus::Info,
+                    Some(format!("n = {n} exceeds dense table cap ({MAX_CLUSTER_MATRIX_TAB_N})")),
+                    "Cophenetic correlation (r), dendrogram linkage schedule, and cluster assignments are still reported.",
+                ));
+            }
 
             out.tabs.push(build_tab(
                 "clustering-diagnostics",

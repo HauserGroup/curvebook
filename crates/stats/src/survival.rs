@@ -61,7 +61,7 @@
 use lumencraft_doc::{
     AnalysisSpec, Cell, CellValue, ChecklistStatus, CoxTieMethod, CurveSamplePoint, DataSheet, FittedCurveOverlay, MultipleVariablesTable,
     PValueFormat, PairwiseComparisonRecord, ResultCell, ResultSheet, ResultTabKind, SurvivalAnalysisSpec, SurvivalObservation, SurvivalStatus,
-    TableArchetype, VariableRole,
+    TableArchetype, VariableColumn, VariableRole,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
@@ -1633,6 +1633,17 @@ fn cell_has_entry(cell: Option<&Cell>) -> bool {
     cell.is_some_and(|c| !c.is_empty() || c.excluded)
 }
 
+enum RetainedCoxPred {
+    Categorical(String),
+    Numeric(f64),
+}
+
+struct RetainedCoxRow {
+    time: f64,
+    event: bool,
+    preds: Vec<RetainedCoxPred>,
+}
+
 fn build_cox_design_subjects(
     mv: &MultipleVariablesTable,
     time_column: usize,
@@ -1642,13 +1653,103 @@ fn build_cox_design_subjects(
 ) -> Result<CoxDesignExtraction, StatsError> {
     let time_var = mv.variables.get(time_column).ok_or(StatsError::MissingColumn { index: time_column })?;
     let status_var = mv.variables.get(status_column).ok_or(StatsError::MissingColumn { index: status_column })?;
-
-    let mut cat_levels: Vec<Option<(String, Vec<String>)>> = Vec::with_capacity(predictor_columns.len());
+    let mut is_cat = Vec::with_capacity(predictor_columns.len());
     for &pc in predictor_columns {
         let pv = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
-        if pv.role == VariableRole::Categorical {
+        is_cat.push(pv.role == VariableRole::Categorical);
+    }
+
+    let active_end = (0..mv.row_count()).rfind(|&r| {
+        cell_has_entry(time_var.cells.get(r))
+            || cell_has_entry(status_var.cells.get(r))
+            || predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)))
+    });
+    let mut retained_rows = Vec::new();
+    let mut skipped_rows = 0_usize;
+    let mut time_non_num = 0_usize;
+    let mut status_non_num = 0_usize;
+    let mut pred_non_num = vec![0_usize; predictor_columns.len()];
+
+    if let Some(end_row) = active_end {
+        for r in 0..=end_row {
+            let tc = time_var.cells.get(r);
+            let sc = status_var.cells.get(r);
+            let has_entry =
+                cell_has_entry(tc) || cell_has_entry(sc) || predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)));
+            if !has_entry {
+                continue;
+            }
+            if tc.is_some_and(is_ignored_non_numeric_cell) {
+                time_non_num += 1;
+            }
+            if sc.is_some_and(is_ignored_non_numeric_cell) {
+                status_non_num += 1;
+            }
+            for (pos, &pc) in predictor_columns.iter().enumerate() {
+                if !is_cat[pos] && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
+                    pred_non_num[pos] += 1;
+                }
+            }
+            let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
+                skipped_rows += 1;
+                continue;
+            };
+            let status = parse_survival_status(st)?;
+            let mut row_preds = Vec::with_capacity(predictor_columns.len());
+            let mut ok = true;
+            for (pos, &pc) in predictor_columns.iter().enumerate() {
+                let Some(cell) = mv.variables[pc].cells.get(r) else {
+                    ok = false;
+                    break;
+                };
+                if cell.excluded {
+                    ok = false;
+                    break;
+                }
+                if is_cat[pos] {
+                    let Some(tok) = mv_survival_token(cell) else {
+                        ok = false;
+                        break;
+                    };
+                    row_preds.push(RetainedCoxPred::Categorical(tok));
+                } else if let Some(xv) = cell.active_number() {
+                    row_preds.push(RetainedCoxPred::Numeric(xv));
+                } else {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                retained_rows.push(RetainedCoxRow { time: t, event: matches!(status, SurvivalStatus::Event), preds: row_preds });
+            } else {
+                skipped_rows += 1;
+            }
+        }
+    }
+
+    // Derive observed categorical levels and reference levels strictly from complete-case retained rows
+    // so incomplete/excluded rows never introduce all-zero phantom dummy columns.
+    let mut cat_levels: Vec<Option<(String, Vec<String>)>> = Vec::with_capacity(predictor_columns.len());
+    for (pos, &pc) in predictor_columns.iter().enumerate() {
+        let pv = &mv.variables[pc];
+        if is_cat[pos] {
+            let cells: Vec<Cell> = retained_rows
+                .iter()
+                .filter_map(|row| match &row.preds[pos] {
+                    RetainedCoxPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
+                    RetainedCoxPred::Numeric(_) => None,
+                })
+                .collect();
+            let retained_col = VariableColumn {
+                title: pv.title.clone(),
+                role: pv.role,
+                role_inferred: pv.role_inferred,
+                source: pv.source.clone(),
+                level_order: pv.level_order.clone(),
+                cells,
+            };
             let mut lvls: Vec<String> =
-                pv.ordered_levels_with(&pv.level_order).into_iter().filter(|s| s.included_count > 0).map(|s| s.level).collect();
+                retained_col.ordered_levels_with(&pv.level_order).into_iter().filter(|s| s.included_count > 0).map(|s| s.level).collect();
             let ref_lvl = reference_levels
                 .iter()
                 .find(|(idx, _)| *idx == pc)
@@ -1678,78 +1779,25 @@ fn build_cox_design_subjects(
         }
     }
 
-    let active_end = (0..mv.row_count()).rfind(|&r| {
-        cell_has_entry(time_var.cells.get(r))
-            || cell_has_entry(status_var.cells.get(r))
-            || predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)))
-    });
-    let mut subjects = Vec::new();
-    let mut skipped_rows = 0_usize;
-    let mut time_non_num = 0_usize;
-    let mut status_non_num = 0_usize;
-    let mut pred_non_num = vec![0_usize; predictor_columns.len()];
+    if !retained_rows.is_empty() && pred_names.is_empty() {
+        return Err(StatsError::ZeroVariance { context: "Cox PH predictor has fewer than 2 levels after complete-case filtering" });
+    }
 
-    if let Some(end_row) = active_end {
-        for r in 0..=end_row {
-            let tc = time_var.cells.get(r);
-            let sc = status_var.cells.get(r);
-            let has_entry =
-                cell_has_entry(tc) || cell_has_entry(sc) || predictor_columns.iter().any(|&pc| cell_has_entry(mv.variables[pc].cells.get(r)));
-            if !has_entry {
-                continue;
-            }
-            if tc.is_some_and(is_ignored_non_numeric_cell) {
-                time_non_num += 1;
-            }
-            if sc.is_some_and(is_ignored_non_numeric_cell) {
-                status_non_num += 1;
-            }
-            for (pos, &pc) in predictor_columns.iter().enumerate() {
-                if cat_levels[pos].is_none() && mv.variables[pc].cells.get(r).is_some_and(is_ignored_non_numeric_cell) {
-                    pred_non_num[pos] += 1;
-                }
-            }
-            let (Some(t), Some(st)) = (tc.and_then(Cell::active_number), sc.and_then(Cell::active_number)) else {
-                skipped_rows += 1;
-                continue;
-            };
-            let status = parse_survival_status(st)?;
-            let mut x_vals = Vec::with_capacity(pred_names.len());
-            let mut ok = true;
-            for (pos, &pc) in predictor_columns.iter().enumerate() {
-                let Some(cell) = mv.variables[pc].cells.get(r) else {
-                    ok = false;
-                    break;
-                };
-                if cell.excluded {
-                    ok = false;
-                    break;
-                }
-                if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
-                    let Some(tok) = mv_survival_token(cell) else {
-                        ok = false;
-                        break;
-                    };
-                    if tok != *ref_lvl && !non_refs.contains(&tok) {
-                        ok = false;
-                        break;
-                    }
+    let mut subjects = Vec::with_capacity(retained_rows.len());
+    for row in retained_rows {
+        let mut x_vals = Vec::with_capacity(pred_names.len());
+        for (pos, pred) in row.preds.into_iter().enumerate() {
+            match (pred, &cat_levels[pos]) {
+                (RetainedCoxPred::Categorical(tok), Some((_, non_refs))) => {
                     for lv in non_refs {
                         x_vals.push(if &tok == lv { 1.0 } else { 0.0 });
                     }
-                } else if let Some(xv) = cell.active_number() {
-                    x_vals.push(xv);
-                } else {
-                    ok = false;
-                    break;
                 }
-            }
-            if ok {
-                subjects.push(CoxSubject { time: t, event: matches!(status, SurvivalStatus::Event), x: x_vals });
-            } else {
-                skipped_rows += 1;
+                (RetainedCoxPred::Numeric(xv), None) => x_vals.push(xv),
+                _ => {}
             }
         }
+        subjects.push(CoxSubject { time: row.time, event: row.event, x: x_vals });
     }
 
     let mut ignored_non_numeric = Vec::new();
@@ -1811,8 +1859,7 @@ fn append_cox_curve_overlays(out: &mut ResultSheet, cox: &CoxPhResult) {
             if !pt.time.is_finite() || !pt.cum_hazard.is_finite() {
                 continue;
             }
-            let s0 = (-pt.cum_hazard).exp().clamp(0.0, 1.0);
-            let s_shifted = s0.powf(hr_shift).clamp(0.0, 1.0);
+            let s_shifted = (-pt.cum_hazard * hr_shift).exp().clamp(0.0, 1.0);
             if s_shifted.is_finite() {
                 cov_pts.push(CurveSamplePoint { x: pt.time, y: s_shifted, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
             }

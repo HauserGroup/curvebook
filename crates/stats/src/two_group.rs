@@ -1160,6 +1160,7 @@ pub fn paired_sign_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Conf
         return Err(StatsError::DimensionMismatch { expected: a.len(), actual: b.len() });
     }
     let diffs: Vec<f64> = a.iter().zip(b.iter()).map(|(&x, &y)| x - y).collect();
+    validate_finite_slice(&diffs)?;
     let n_total = diffs.len();
     let n_positive = diffs.iter().filter(|&&d| d > 0.0).count();
     let n_negative = diffs.iter().filter(|&&d| d < 0.0).count();
@@ -1175,7 +1176,7 @@ pub fn paired_sign_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Conf
     };
 
     let sorted = sorted_finite(&diffs);
-    let median_difference = quartiles_hinge(&sorted).map_or(sorted[0], |(_, med, _)| med);
+    let (_, median_difference, _) = quartiles_hinge(&sorted).ok_or(StatsError::EmptyInput)?;
     let (ci, ci_actual_confidence_percent) = match exact_binomial_median_ci(&diffs, confidence) {
         Ok(mci) => (Some((mci.lower, mci.upper)), Some(mci.actual_confidence_percent)),
         Err(_) => (None, None),

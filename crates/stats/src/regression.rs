@@ -4,8 +4,8 @@
 //! ROC AUC), and Multiple Poisson Regression (log-link IRLS, deviance & Pearson dispersion).
 
 use lumencraft_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, GlmFamily, GlmSpec, PassingBablokSpec,
-    ResultCell, ResultSheet, ResultTabKind, SheetId, TableArchetype, VariableRole,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, GlmFamily, GlmSpec, PValueFormat,
+    PassingBablokSpec, ResultCell, ResultSheet, ResultTabKind, SheetId, TableArchetype, VariableColumn, VariableRole,
 };
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{chi2_sf, f_sf, norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p};
@@ -325,18 +325,25 @@ pub fn multiple_linear_regression(
     })
 }
 
-fn drop_matrix_column(x: &DenseMatrix, drop_col: usize) -> Result<DenseMatrix, StatsError> {
+fn drop_matrix_columns(x: &DenseMatrix, drop_start: usize, drop_end: usize) -> Result<DenseMatrix, StatsError> {
     let nr = x.nrows();
     let nc = x.ncols();
-    let mut data = Vec::with_capacity(nr * (nc - 1));
+    let drop_end = drop_end.min(nc);
+    let drop_start = drop_start.min(drop_end);
+    let kept = nc - (drop_end - drop_start);
+    let mut data = Vec::with_capacity(nr * kept);
     for r in 0..nr {
         for c in 0..nc {
-            if c != drop_col {
+            if c < drop_start || c >= drop_end {
                 data.push(x.get(r, c).unwrap_or(0.0));
             }
         }
     }
-    Ok(DenseMatrix::from_row_major(nr, nc - 1, data)?)
+    Ok(DenseMatrix::from_row_major(nr, kept, data)?)
+}
+
+fn drop_matrix_column(x: &DenseMatrix, drop_col: usize) -> Result<DenseMatrix, StatsError> {
+    drop_matrix_columns(x, drop_col, drop_col.saturating_add(1))
 }
 
 fn compute_vifs_from_matrix(x: &DenseMatrix, has_intercept: bool) -> Vec<Option<f64>> {
@@ -833,29 +840,108 @@ pub fn multiple_poisson_regression(
 // Design Matrix Builder & ResultSheet Builder
 // ============================================================================
 
-/// Assemble `(X, y, term_names)` from a `MultipleVariablesTable` (with categorical reference-level
-/// dummy encoding) or `XyTable` (polynomial/single predictor).
-fn build_glm_design(sheet: &DataSheet, glm_spec: &GlmSpec) -> Result<(DenseMatrix, Vec<f64>, Vec<String>), StatsError> {
+struct GlmFactorSpan {
+    label: String,
+    col_start: usize,
+    col_end: usize,
+}
+
+enum RetainedGlmPred {
+    Categorical(String),
+    Numeric(f64),
+}
+
+struct GlmDesignMatrix {
+    x_mat: DenseMatrix,
+    y_vec: Vec<f64>,
+    term_names: Vec<String>,
+    factor_spans: Vec<GlmFactorSpan>,
+}
+
+/// Assemble `(X, y, term_names, factor_spans)` from a `MultipleVariablesTable` (with categorical
+/// reference-level dummy encoding derived strictly after complete-case filtering) or `XyTable`.
+fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
     match &sheet.archetype {
         TableArchetype::MultipleVariables(mv) => {
             let resp_var = mv.variables.get(glm_spec.response_column).ok_or(StatsError::MissingColumn { index: glm_spec.response_column })?;
             if glm_spec.predictor_columns.is_empty() {
                 return Err(StatsError::InsufficientSampleSize { context: "GLM predictors", required: 1, actual: 0 });
             }
+            let mut is_cat = Vec::with_capacity(glm_spec.predictor_columns.len());
             for &pc in &glm_spec.predictor_columns {
-                if pc >= mv.variables.len() {
-                    return Err(StatsError::MissingColumn { index: pc });
+                let var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
+                is_cat.push(var.role == VariableRole::Categorical);
+            }
+
+            let mut retained_rows: Vec<(f64, Vec<RetainedGlmPred>)> = Vec::new();
+            for r in 0..mv.row_count() {
+                let Some(yv) = resp_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
+                let mut row_preds = Vec::with_capacity(glm_spec.predictor_columns.len());
+                let mut ok = true;
+                for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+                    let pred_var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
+                    let cell =
+                        pred_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: mv.row_count(), actual: pred_var.cells.len() })?;
+                    if cell.excluded {
+                        ok = false;
+                        break;
+                    }
+                    if is_cat[pos] {
+                        let tok = match &cell.value {
+                            lumencraft_doc::CellValue::Text(s) => {
+                                let trimmed = s.trim();
+                                if trimmed.is_empty() {
+                                    ok = false;
+                                    break;
+                                }
+                                trimmed.to_owned()
+                            }
+                            lumencraft_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
+                            _ => {
+                                ok = false;
+                                break;
+                            }
+                        };
+                        row_preds.push(RetainedGlmPred::Categorical(tok));
+                    } else if let Some(xv) = cell.active_number() {
+                        row_preds.push(RetainedGlmPred::Numeric(xv));
+                    } else {
+                        ok = false;
+                        break;
+                    }
+                }
+                if ok {
+                    retained_rows.push((yv, row_preds));
                 }
             }
 
-            // Prepare reference-coded levels for categorical columns.
             let mut cat_levels: Vec<Option<(String, Vec<String>)>> = Vec::with_capacity(glm_spec.predictor_columns.len());
-            for &pc in &glm_spec.predictor_columns {
+            for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
                 let var = &mv.variables[pc];
-                if var.role == VariableRole::Categorical {
-                    let mut lvls: Vec<String> = var.ordered_levels_with(&var.level_order).into_iter().map(|s| s.level).collect();
-                    let ref_lvl =
-                        glm_spec.reference_levels.iter().find(|(idx, _)| *idx == pc).map(|(_, l)| l.clone()).or_else(|| lvls.first().cloned());
+                if is_cat[pos] {
+                    let cells: Vec<Cell> = retained_rows
+                        .iter()
+                        .filter_map(|(_, preds)| match &preds[pos] {
+                            RetainedGlmPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
+                            RetainedGlmPred::Numeric(_) => None,
+                        })
+                        .collect();
+                    let retained_col = VariableColumn {
+                        title: var.title.clone(),
+                        role: var.role,
+                        role_inferred: var.role_inferred,
+                        source: var.source.clone(),
+                        level_order: var.level_order.clone(),
+                        cells,
+                    };
+                    let mut lvls: Vec<String> = retained_col.ordered_levels_with(&var.level_order).into_iter().map(|s| s.level).collect();
+                    let ref_lvl = glm_spec
+                        .reference_levels
+                        .iter()
+                        .find(|(idx, _)| *idx == pc)
+                        .map(|(_, l)| l.clone())
+                        .filter(|l| lvls.iter().any(|existing| existing == l))
+                        .or_else(|| lvls.first().cloned());
                     if let Some(rl) = ref_lvl {
                         lvls.retain(|l| l != &rl);
                         cat_levels.push(Some((rl, lvls)));
@@ -868,8 +954,10 @@ fn build_glm_design(sheet: &DataSheet, glm_spec: &GlmSpec) -> Result<(DenseMatri
             }
 
             let mut term_names = vec![String::from("Intercept")];
+            let mut factor_spans = Vec::with_capacity(glm_spec.predictor_columns.len());
             for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
                 let title = &mv.variables[pc].title;
+                let col_start = term_names.len();
                 if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
                     for lv in non_refs {
                         term_names.push(format!("{title}[{lv} vs {ref_lvl}]"));
@@ -877,58 +965,42 @@ fn build_glm_design(sheet: &DataSheet, glm_spec: &GlmSpec) -> Result<(DenseMatri
                 } else {
                     term_names.push(title.clone());
                 }
+                let col_end = term_names.len();
+                let col_count = col_end - col_start;
+                if col_count == 1 {
+                    factor_spans.push(GlmFactorSpan { label: term_names[col_start].clone(), col_start, col_end });
+                } else if col_count >= 2 {
+                    factor_spans.push(GlmFactorSpan { label: title.clone(), col_start, col_end });
+                }
             }
 
             let n_cols = term_names.len();
-            let mut x_rows = Vec::new();
-            let mut y_vec = Vec::new();
-            for r in 0..mv.row_count() {
-                let Some(yv) = resp_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-                let mut row_x = Vec::with_capacity(n_cols);
-                row_x.push(1.0);
-                let mut ok = true;
-                for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-                    let pred_var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
-                    let cell =
-                        pred_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: mv.row_count(), actual: pred_var.cells.len() })?;
-                    if cell.excluded {
-                        ok = false;
-                        break;
-                    }
-                    if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
-                        let tok = match &cell.value {
-                            lumencraft_doc::CellValue::Text(s) => s.trim().to_owned(),
-                            lumencraft_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
-                            _ => {
-                                ok = false;
-                                break;
-                            }
-                        };
-                        if tok != *ref_lvl && !non_refs.contains(&tok) {
-                            ok = false;
-                            break;
-                        }
-                        for lv in non_refs {
-                            row_x.push(if &tok == lv { 1.0 } else { 0.0 });
-                        }
-                    } else if let Some(xv) = cell.active_number() {
-                        row_x.push(xv);
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-                if ok {
-                    x_rows.extend_from_slice(&row_x);
-                    y_vec.push(yv);
-                }
+            if !retained_rows.is_empty() && n_cols <= 1 {
+                return Err(StatsError::ZeroVariance { context: "GLM categorical predictor has fewer than 2 levels after complete-case filtering" });
             }
-            let n_obs = y_vec.len();
+            let n_obs = retained_rows.len();
             if n_obs <= n_cols {
                 return Err(StatsError::InsufficientSampleSize { context: "GLM observations", required: n_cols + 1, actual: n_obs });
             }
+            let mut x_rows = Vec::with_capacity(n_obs * n_cols);
+            let mut y_vec = Vec::with_capacity(n_obs);
+            for (yv, preds) in retained_rows {
+                y_vec.push(yv);
+                x_rows.push(1.0);
+                for (pos, pred) in preds.into_iter().enumerate() {
+                    match (pred, &cat_levels[pos]) {
+                        (RetainedGlmPred::Categorical(tok), Some((_, non_refs))) => {
+                            for lv in non_refs {
+                                x_rows.push(if &tok == lv { 1.0 } else { 0.0 });
+                            }
+                        }
+                        (RetainedGlmPred::Numeric(xv), None) => x_rows.push(xv),
+                        _ => {}
+                    }
+                }
+            }
             let x_mat = DenseMatrix::from_row_major(n_obs, n_cols, x_rows)?;
-            Ok((x_mat, y_vec, term_names))
+            Ok(GlmDesignMatrix { x_mat, y_vec, term_names, factor_spans })
         }
         TableArchetype::Xy(xy) => {
             let mut x_rows = Vec::new();
@@ -946,7 +1018,9 @@ fn build_glm_design(sheet: &DataSheet, glm_spec: &GlmSpec) -> Result<(DenseMatri
                 return Err(StatsError::InsufficientSampleSize { context: "GLM XY observations", required: 3, actual: n_obs });
             }
             let x_mat = DenseMatrix::from_row_major(n_obs, 2, x_rows)?;
-            Ok((x_mat, y_vec, vec![String::from("Intercept"), xy.x_title.clone()]))
+            let term_names = vec![String::from("Intercept"), xy.x_title.clone()];
+            let factor_spans = vec![GlmFactorSpan { label: xy.x_title.clone(), col_start: 1, col_end: 2 }];
+            Ok(GlmDesignMatrix { x_mat, y_vec, term_names, factor_spans })
         }
         other => Err(StatsError::IncompatibleTable { analysis: "generalized linear model", actual: other.kind() }),
     }
@@ -1373,12 +1447,74 @@ pub fn execute_passing_bablok(sheet: &DataSheet, spec: &PassingBablokSpec, conf:
     run_passing_bablok_analysis(sheet, &analysis, spec)
 }
 
+fn append_linear_type_iii_tab(
+    out: &mut ResultSheet,
+    res: &MultipleLinearResult,
+    x_mat: &DenseMatrix,
+    y_vec: &[f64],
+    factor_spans: &[GlmFactorSpan],
+    p_fmt: PValueFormat,
+) -> Result<(), StatsError> {
+    let mut type_iii_labels = Vec::new();
+    let mut type_iii_rows = Vec::new();
+    let mse = res.residual_sd * res.residual_sd;
+    for span in factor_spans {
+        let col_count = span.col_end.saturating_sub(span.col_start);
+        if col_count == 0 {
+            continue;
+        }
+        if col_count == 1 {
+            if let Some(t) = res.terms.get(span.col_start)
+                && let (Some(ss), Some(f_val), Some(p_val)) = (t.type_iii_ss, t.type_iii_f, t.type_iii_p)
+            {
+                type_iii_labels.push(span.label.clone());
+                type_iii_rows.push(vec![num_cell(ss), num_cell(1.0), num_cell(ss), num_cell(f_val), p_cell(p_val, p_fmt)]);
+            }
+            continue;
+        }
+        let x_red = drop_matrix_columns(x_mat, span.col_start, span.col_end)?;
+        if let Ok((red_sol, _)) = solve_linear_least_squares(&x_red, y_vec) {
+            let df_factor = res.rank.saturating_sub(red_sol.rank) as f64;
+            if df_factor <= 0.0 {
+                continue;
+            }
+            let ss_drop = (red_sol.rss - res.rss).max(0.0);
+            let ms_drop = ss_drop / df_factor;
+            let f_drop = if mse > 0.0 {
+                ms_drop / mse
+            } else if ms_drop > 0.0 {
+                f64::INFINITY
+            } else {
+                0.0
+            };
+            let p_drop = f_sf(f_drop, df_factor, res.df_residual).unwrap_or(1.0);
+            type_iii_labels.push(span.label.clone());
+            type_iii_rows.push(vec![num_cell(ss_drop), num_cell(df_factor), num_cell(ms_drop), num_cell(f_drop), p_cell(p_drop, p_fmt)]);
+        }
+    }
+    if !type_iii_rows.is_empty() {
+        out.tabs.push(build_tab(
+            "glm-linear-type-iii",
+            "Type III partial sums of squares",
+            ResultTabKind::AnovaTable,
+            vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")],
+            type_iii_labels,
+            type_iii_rows,
+        ));
+    }
+    Ok(())
+}
+
 /// Execute a [`GlmSpec`] (`Linear`, `Logistic`, or `Poisson`) against a `DataSheet`.
 pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSpec) -> Result<ResultSheet, StatsError> {
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;
-    let (x_mat, y_vec, term_names) = build_glm_design(sheet, glm_spec)?;
+    let design = build_glm_design_with_factors(sheet, glm_spec)?;
+    let x_mat = design.x_mat;
+    let y_vec = design.y_vec;
+    let term_names = design.term_names;
+    let factor_spans = design.factor_spans;
 
     match glm_spec.family {
         GlmFamily::Linear => {
@@ -1442,25 +1578,9 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 anova_rows,
             ));
 
-            // Type III partial sum of squares table.
-            let mut type_iii_labels = Vec::new();
-            let mut type_iii_rows = Vec::new();
-            for t in &res.terms {
-                if let (Some(ss), Some(f_val), Some(p_val)) = (t.type_iii_ss, t.type_iii_f, t.type_iii_p) {
-                    type_iii_labels.push(t.name.clone());
-                    type_iii_rows.push(vec![num_cell(ss), num_cell(1.0), num_cell(ss), num_cell(f_val), p_cell(p_val, p_fmt)]);
-                }
-            }
-            if !type_iii_rows.is_empty() {
-                out.tabs.push(build_tab(
-                    "glm-linear-type-iii",
-                    "Type III partial sums of squares",
-                    ResultTabKind::AnovaTable,
-                    vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")],
-                    type_iii_labels,
-                    type_iii_rows,
-                ));
-            }
+            // Type III partial sum of squares table: joint (K - 1)-df F tests for multi-level
+            // categorical factors and 1-df tests for continuous / 2-level predictors.
+            append_linear_type_iii_tab(&mut out, &res, &x_mat, &y_vec, &factor_spans, p_fmt)?;
 
             // Parameter covariance matrix sigma^2 * (X'X)^-1.
             let cov_rows: Vec<Vec<ResultCell>> = res.cov_beta.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
