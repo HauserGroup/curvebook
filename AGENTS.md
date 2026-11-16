@@ -56,38 +56,7 @@ Never delete, truncate, or omit contributor attributions in [docs/contributors.m
 
 ---
 
-## 2. Workspace Map (22 Crates)
-
-Dependency direction strictly flows downward (`L0` -> `L1` -> ... -> `L6`), verified by `cargo xtask layers`:
-
-| Crate | Layer | Path | Purpose |
-| :--- | :--- | :--- | :--- |
-| `lumencraft-math` | `L0` | `crates/math` | Special functions, PRNG/distributions, linear algebra, numeric tolerances |
-| `lumencraft-palette` | `L0` | `crates/palette` | Accessible colour palettes, colour-blind-safe schemes, contrast checks |
-| `lumencraft-platform` | `L0` | `crates/platform` | Atomic file writes, bounded subprocesses, `WorkdirGuard`/`PathResolver`, wasm-safe shims *(added in `R0.10`; `layers.rs` & caller migration in Wave 8B)* |
-| `lumencraft-doc` | `L1` | `crates/doc` | Core project model (`Project`, tables, sheets, analyses, graphs, layouts, schema errors) |
-| `lumencraft-transform` | `L2` | `crates/transform` | Data table transforms, normalisation, baseline subtraction, derivatives, smoothing |
-| `lumencraft-stats` | `L2` | `crates/stats` | Descriptive statistics, t-tests, ANOVA, non-parametric tests, survival, correlation, diagnostics |
-| `lumencraft-fit` | `L2` | `crates/fit` | Nonlinear regression (Levenberg-Marquardt), parametric model library, bands, model comparison |
-| `lumencraft-text` | `L2` | `crates/text` | Rich text spans, scientific/statistical notation, glyph shaping abstractions |
-| `lumencraft-chart` | `L2` | `crates/chart` | Plot layouts, axes, scales, ticks, legends, plot primitives, themes *(may also depend on other `L2` math/text crates)* |
-| `lumencraft-format` | `L3` | `crates/format` | `.lumencraft` / `.lumencraft.d/` / `.lctemplate` archives, migrations, `ops.journal` recovery, `.pzfx`/`.prism`/CSV/text I/O |
-| `lumencraft-svg` | `L3` | `crates/svg` | Pure-Rust vector SVG renderer for graphs and multi-panel layouts |
-| `lumencraft-pdf` | `L3` | `crates/pdf` | Pure-Rust vector PDF exporter for publication figures and reports |
-| `lumencraft-render` | `L3` | `crates/render` | Deterministic CPU rasterizer, PNG/TIFF, and ECMA-234 `.emf` renderer |
-| `lumencraft-tools` | `L4` | `crates/tools` | Interactive canvas hit-testing, selection handles, annotation/zoom tools, `cursors.toml` |
-| `lumencraft-engine` | `L5` | `crates/engine` | Headless `Session` execution, undo/redo (`MAX_UNDO_ENTRIES = 64`), command registry, `guard.rs` boundary, journaling |
-| `lumencraft-ui-egui` | `L6` | `crates/ui-egui` | UI state shell (`UiApp`), software RGBA compositor, `ui.inspect` (`UiTreeSnapshot`), Power wizard, modal predicates, menus, inspectors, `UI_COMMANDS`, and `i18n.rs` driving `lumencraft-engine` |
-| `lumencraft-mcp` | `L6` | `crates/mcp` | Model Context Protocol server exposing document inspection, commands, headless tools, and the 8-tool `gui` / `--gui-only` UI surface (`GuiSessionHost`) |
-| `lumencraft` | `L7` *(app)* | `apps/lumencraft` | Native `eframe`/`egui`/`wgpu` desktop GUI application (`gui_window.rs` + `rfd`, `UiApp` shell, `--control [--gui-only]` JSONL server, OS integration, `preferences.json`/`shortcuts.json`, crash recovery) |
-| `lumencraft-cli` | `L7` *(app)* | `apps/lumencraft-cli` | Headless CLI (`convert`, `run-batch`, `lumencraft.batch.v1`, exports, and `mcp [--control-port <p>] [--gui-only]` via `InProcessUiGuiHost`) |
-| `lumencraft-web` | `L7` *(app)* | `apps/lumencraft-web` | WebAssembly browser workspace host (`wasm32-unknown-unknown` `+simd128` + `wasm-bindgen`/WebGL2/2D Trunk bundle, `R8.4`) |
-| `lumencraft-testkit` | `dev-only` | `crates/testkit` | Shared fixtures, NIST StRD corpus helpers, and headless harnesses (`[dev-dependencies]` only) |
-| `xtask` | `exempt` | `xtask/` | Workspace verification, codegen, and release-prep CLI (`cargo xtask <cmd>`) |
-
----
-
-## 3. Command Registries
+## 2. Command Registries
 
 One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came from describing an unimplemented command table before it landed and deserializing raw positional tuples. Keep docs and generated files synchronized with the landed typed registries:
 
@@ -97,43 +66,7 @@ One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came 
 
 ---
 
-## 4. `xtask` Command Reference
-
-Run workspace checks through `cargo xtask <command>` (invokes `xtask/`):
-
-| Command | Purpose |
-| :--- | :--- |
-| `cargo xtask ci` | Full local CI gate suite (fmt, clippy, tests, doctests, layers, assets, brands, cleanroom, cursors, ui-commands, wasm, and active `R0` checks) |
-| `cargo xtask test` | Workspace unit tests, integration tests, and doctests |
-| `cargo xtask layers` | Verify crate layer DAG (`L0`–`L6`), `testkit` dev-only rule, and banned crate patterns |
-| `cargo xtask assets` | Verify every non-code asset against `ASSETS.md` / `ATTRIBUTION.md` and confirm zero bundled font files |
-| `cargo xtask brands` | Verify prohibited competitor or placeholder suite brand names do not appear |
-| `cargo xtask cleanroom` | Enforce clean-room boundaries and reject copyleft/copied headers |
-| `cargo xtask cursors` | Validate `crates/tools/src/cursors.toml` and cursor SVG/PNG assets |
-| `cargo xtask i18n-report` | Report missing, unused, or drifted keys in `crates/ui-egui/src/i18n.rs` |
-| `cargo xtask ui-commands [--check]` | Regenerate (or `--check`) `crates/mcp/src/ui_catalog.rs` from `UI_COMMANDS` |
-| `cargo xtask secrets [--history]` | Scan working tree (or `--history` across commits) for secrets, tokens, or private keys *(R0.3)* |
-| `cargo xtask pending [--count]` | List remaining uncompleted roadmap items/defects (or print counts with `--count`) *(R0.4)* |
-| `cargo xtask status` | Verify `docs/STATUS.md` live metrics and table Column 1 uniqueness *(R0.4)* |
-| `cargo xtask licenses [--html [out]]` | Verify crate licences offline against `deny.toml` / `Cargo.lock` (plus `cargo deny check licenses` when installed / `CI=true`) and optionally generate `THIRD-PARTY-LICENSES.html` *(R0.5)* |
-| `cargo xtask telemetry` | Enforce zero telemetry/egress crates, loopback-only sockets, workflow hygiene, and web security headers *(R0.6)* |
-| `cargo xtask workflows` | Lint GitHub Actions workflows (`actionlint -config-file .github/actionlint.yaml`) and shell scripts (`shellcheck -x`) *(R0.6)* |
-| `cargo xtask screenshots [--check]` | Regenerate (or `--check` in-process PNG magic/dimensions/CRCs & `ASSETS.md` attribution for) `docs/images/*.png` *(R0.14)* |
-| `cargo xtask commands [--check]` | Regenerate (or `--check`) `docs/commands.md` from engine `CommandSpec` registry *(R0.7)* |
-| `cargo xtask schemas [--check]` | Regenerate (or `--check`) `docs/schemas/*.schema.json` from persisted document/manifest schemas *(R0.7)* |
-| `cargo xtask wasm` | Verify `wasm32-unknown-unknown` builds for web and core headless crates |
-| `cargo xtask corpus [--fetch\|--fetch-only]` | Verify (or fetch locally) external NIST StRD & regression test corpora |
-| `cargo xtask coverage [-p <crate>]` | Write a local `cargo-llvm-cov` lcov + HTML coverage report; diagnostic only, no threshold, never uploaded *(R0.16)* |
-| `cargo xtask bundle` | Assemble macOS `.app` bundle and run `plutil -lint` + ad-hoc `codesign` |
-| `cargo xtask ico` | Regenerate Windows `.ico` icon bundles from source SVGs |
-| `cargo xtask version [set <ver>]` | Print or update `[workspace.package] version` and synced packaging manifests |
-| `cargo xtask stats [--exact]` | Print workspace line, test, and command counts |
-| `cargo xtask contributors` | Verify or update `docs/contributors.md` from repository attribution metadata |
-| `cargo xtask web-fonts` | Download untracked dev/test fonts locally for optional `bundled-fonts` builds |
-
----
-
-## 5. Working Rules (Mandatory)
+## 3. Working Rules (Mandatory)
 
 ### Roles & Ownership
 - Roadmap items in `docs/ROADMAP.md` carry `Owner: maintainers` (maintainer-steered foundation, security, or release tasks) or `Owner: open` (available for any contributor or agent to pick up). Ownership is **never** assigned to an individual handle as a permanent lock.
