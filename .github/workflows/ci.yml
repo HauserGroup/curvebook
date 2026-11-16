@@ -53,8 +53,8 @@ jobs:
           if ! command -v cargo-deny >/dev/null 2>&1; then
             cargo install --locked cargo-deny --version 0.20.2
           fi
-      - name: Check license policy (cargo-deny)
-        run: cargo deny check licenses
+      - name: Check licences, advisories, yanked crates, bans and sources (cargo-deny)
+        run: cargo deny check
       - name: Run cargo xtask ci
         env:
           CI: "true"

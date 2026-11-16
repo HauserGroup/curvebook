@@ -1,8 +1,22 @@
 # Dependency supply-chain, security advisory, and licence policy (`cargo deny check`).
 # Keep aligned with `AGENTS.md` (Licence Allowlist) and `about.toml`.
 
+# Include optional dependency branches in the policy graph. This is one all-features
+# metadata resolution, not a build or test of every possible feature combination.
+[graph]
+all-features = true
+
 [advisories]
-ignore = []
+yanked = "deny"
+# The Linux accesskit/atspi dependency chain still uses the pre-zbus-6 API.
+# Accept only these unmaintained-component advisories, not unrelated vulnerabilities.
+# Review the dependency chain by 2027-02-16. cargo-deny 0.20.2 does not support
+# per-advisory expiry; this date is a maintainer review obligation, not an automated gate.
+ignore = [
+  { id = "RUSTSEC-2026-0370", reason = "zvariant is transitive through the Linux accessibility stack; await an accesskit/atspi migration to zbus 6" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names is transitive through the Linux accessibility stack; await an accesskit/atspi migration to zbus 6" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive is transitive through the Linux accessibility stack; await an accesskit/atspi migration to zbus 6" },
+]
 
 [licenses]
 allow = [
@@ -21,6 +35,8 @@ unused-allowed-license = "allow"
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal workspace dependencies use sibling paths without registry versions.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"
