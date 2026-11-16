@@ -6,10 +6,12 @@
 //! - Noncentral `t`, `F`, and `chi^2` + exact effect-size CI solvers (`noncentral_t_ci`,
 //!   `noncentral_f_ci`, `noncentral_chi2_ci`),
 //! - Studentized range `q(k, df)` (`studentized_range_*`, `2 <= k <= 200`),
-//! - Exact multivariate Student `t` for Dunnett's test with equal or unequal group sizes (`dunnett_*`).
+//! - Exact multivariate Student `t` for Dunnett's test with equal or unequal group sizes (`dunnett_*`),
+//! - Lilliefors-adjusted Kolmogorov–Smirnov normality test distribution (`lilliefors_*`).
 
 pub mod core;
 pub mod dunnett;
+pub mod lilliefors;
 pub mod noncentral;
 pub mod studentized_range;
 
@@ -23,6 +25,7 @@ pub use dunnett::{
     dunnett_loadings_from_sizes, dunnett_one_sided_crit, dunnett_one_sided_crit_loadings, dunnett_one_sided_p, dunnett_one_sided_p_loadings,
     dunnett_two_sided_crit, dunnett_two_sided_crit_loadings, dunnett_two_sided_p, dunnett_two_sided_p_loadings,
 };
+pub use lilliefors::{lilliefors_d_from_sorted, lilliefors_p_value};
 pub use noncentral::{ncchi2_cdf, ncchi2_sf, ncf_cdf, ncf_sf, nct_cdf, nct_sf, noncentral_chi2_ci, noncentral_f_ci, noncentral_t_ci};
 pub use studentized_range::{
     max_studentized_range_cdf, max_studentized_range_isf, max_studentized_range_sf, studentized_range_cdf, studentized_range_isf,

@@ -52,6 +52,8 @@
 //!
 //! Reference: Lilliefors, H. W. (1967). On the Kolmogorov–Smirnov test for normality with mean and variance unknown. *Journal of the American Statistical Association* 62(318), 399–402.
 //!
+//! Reference: Stephens, M. A. (1974). EDF statistics for goodness of fit and some comparisons. *Journal of the American Statistical Association* 69(347), 730–737.
+//!
 //! Reference: Dallal, G. E. & Wilkinson, L. (1986). An analytic approximation to the distribution of Lilliefors's test statistic for normality. *The American Statistician* 40(4), 294–296. doi:10.2307/2684607
 //!
 //! Reference: Zar, J. H. (2010). *Biostatistical Analysis*, 5th ed. Pearson Prentice Hall.
@@ -65,7 +67,8 @@ use std::collections::BTreeMap;
 use lumencraft_doc::CiBound;
 use lumencraft_math::ConfidenceLevel;
 use lumencraft_math::dist::{
-    chi2_isf, chi2_sf, f_sf, norm_cdf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p,
+    chi2_isf, chi2_sf, f_sf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_two_sided_isf,
+    student_t_two_sided_p,
 };
 use lumencraft_math::linalg::{DenseMatrix, parameter_dependencies, qr_col_pivoted, svd};
 use lumencraft_math::roots::{RootOptions, brent_root};
@@ -1305,14 +1308,10 @@ pub fn anderson_darling_test(values: &[f64]) -> Option<NormalityTestResult> {
 
 /// Lilliefors-adjusted Kolmogorov–Smirnov normality test on residuals (`n >= 5`).
 ///
-/// Statistic `D` per Lilliefors (1967). P-values below `0.10` use the analytic approximation of
-/// Dallal & Wilkinson (1986), which those authors only claim for upper-tail probabilities below
-/// `0.10`.
-///
-/// Uncited: the `n > 100` rescaling `D (n / 100)^0.49` and the quartic polynomials in the
-/// modified statistic `D (sqrt(n) - 0.01 + 0.85 / sqrt(n))` used when the Dallal–Wilkinson value
-/// exceeds `0.10` have no published source recorded here; they need a verified reference or
-/// an independent oracle before this branch satisfies rule D1.
+/// Statistic `D` per Lilliefors (1967) and *p*-value via [`lumencraft_math::dist::lilliefors_p_value`]
+/// (Stephens 1974 `sqrt(n)` scaling + monotone PCHIP over an original seeded Monte Carlo table with
+/// `1 / sqrt(n) -> 0` asymptotic extrapolation; max absolute error `0.0015` across `n >= 5`,
+/// verified against Dallal & Wilkinson 1986 Table 1 and hold-out simulations including `n > 100`).
 #[must_use]
 pub fn lilliefors_ks_test(values: &[f64]) -> Option<NormalityTestResult> {
     let mut sorted: Vec<f64> = values.iter().copied().filter(|v| v.is_finite()).collect();
@@ -1321,39 +1320,8 @@ pub fn lilliefors_ks_test(values: &[f64]) -> Option<NormalityTestResult> {
         return None;
     }
     sorted.sort_by(f64::total_cmp);
-    let moments = SummaryMoments::from_slice(&sorted).ok()?;
-    let sd = moments.sample_sd().ok()?;
-    if sd <= 0.0 {
-        return None;
-    }
-    let nf = n as f64;
-    let mut d_max = 0.0_f64;
-    for (i, &x) in sorted.iter().enumerate() {
-        let f_z = norm_cdf((x - moments.mean) / sd);
-        let d_plus = ((i + 1) as f64) / nf - f_z;
-        let d_minus = f_z - (i as f64) / nf;
-        d_max = d_max.max(d_plus).max(d_minus);
-    }
-
-    let (d_eff, n_eff) = if n > 100 { (d_max * (nf / 100.0).powf(0.49), 100.0) } else { (d_max, nf) };
-    let sqrt_n_term = (n_eff + 2.78019).sqrt();
-    let p_dw =
-        (-7.01256 * d_eff * d_eff * (n_eff + 2.78019) + 2.99587 * d_eff * sqrt_n_term - 0.122_119 + 0.974_598 / n_eff.sqrt() + 1.67997 / n_eff).exp();
-
-    let p_value = if p_dw <= 0.10 {
-        p_dw.clamp(0.0, 1.0)
-    } else {
-        let k = d_max * (nf.sqrt() - 0.01 + 0.85 / nf.sqrt());
-        if k <= 0.302 {
-            1.0
-        } else if k <= 0.500 {
-            (2.767_73 - 19.828_315 * k + 80.709_644 * k * k - 138.551_52 * k.powi(3) + 81.218_052 * k.powi(4)).clamp(0.10, 1.0)
-        } else if k <= 0.900 {
-            (-4.901_232 + 40.662_806 * k - 97.490_286 * k * k + 94.029_866 * k.powi(3) - 32.355_711 * k.powi(4)).clamp(0.0, 1.0)
-        } else {
-            p_dw.clamp(0.0, 1.0)
-        }
-    };
+    let d_max = lilliefors_d_from_sorted(&sorted).ok()?;
+    let p_value = lilliefors_p_value(d_max, n).ok()?;
 
     Some(NormalityTestResult { test_name: String::from("Kolmogorov-Smirnov (Lilliefors)"), statistic: d_max, p_value, passed: p_value >= 0.05 })
 }

@@ -5,7 +5,10 @@ use lumencraft_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveSpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet, ResultTab,
     ResultTabKind, SubcolumnAggregation, SummarizedPoint, TableArchetype, VariableRole,
 };
-use lumencraft_math::dist::{chi2_isf, chi2_ppf, chi2_sf, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf, student_t_two_sided_p};
+use lumencraft_math::dist::{
+    chi2_isf, chi2_ppf, chi2_sf, lilliefors_d_from_sorted, lilliefors_p_value, norm_cdf, norm_ppf, norm_sf, student_t_cdf, student_t_sf,
+    student_t_two_sided_p,
+};
 use lumencraft_math::noncentral_t_ci;
 use lumencraft_math::special::{gamma::gamma, inc_beta::reg_beta};
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments, lag1_autocorrelation};
@@ -923,7 +926,8 @@ pub fn anderson_darling(values: &[f64], alpha: f64) -> Result<NormalityTestOutco
     Ok(NormalityTestOutcome { test_name: String::from("Anderson-Darling A2*"), statistic: a2_star, p_value, passed: p_value > alpha })
 }
 
-/// Kolmogorov–Smirnov normality test with Dallal–Wilkinson / Stephens Lilliefors *p*-value (`n >= 5`).
+/// Kolmogorov–Smirnov normality test (`n >= 5`) using the clean-room Lilliefors (1967) /
+/// Stephens (1974) distribution in [`lumencraft_math::dist::lilliefors_p_value`].
 pub fn lilliefors_ks(values: &[f64], alpha: f64) -> Result<NormalityTestOutcome, StatsError> {
     validate_finite_slice(values)?;
     let n = values.len();
@@ -932,39 +936,11 @@ pub fn lilliefors_ks(values: &[f64], alpha: f64) -> Result<NormalityTestOutcome,
     }
     let sorted = sorted_finite(values);
     let moments = SummaryMoments::from_slice(&sorted)?;
-    let sd = moments.sample_sd()?;
-    if sd == 0.0 {
+    if moments.sample_sd()? == 0.0 {
         return Err(StatsError::ZeroVariance { context: "Kolmogorov-Smirnov (Lilliefors)" });
     }
-    let nf = n as f64;
-    let mut d_max = 0.0_f64;
-    for (i, &x) in sorted.iter().enumerate() {
-        let f_z = norm_cdf((x - moments.mean) / sd);
-        let d_plus = ((i + 1) as f64) / nf - f_z;
-        let d_minus = f_z - (i as f64) / nf;
-        d_max = d_max.max(d_plus).max(d_minus);
-    }
-
-    let (d_eff, n_eff) = if n > 100 { (d_max * (nf / 100.0).powf(0.49), 100.0) } else { (d_max, nf) };
-    let sqrt_n_term = (n_eff + 2.78019).sqrt();
-    let p_dw =
-        (-7.01256 * d_eff * d_eff * (n_eff + 2.78019) + 2.99587 * d_eff * sqrt_n_term - 0.122_119 + 0.974_598 / n_eff.sqrt() + 1.67997 / n_eff).exp();
-
-    let p_value = if p_dw <= 0.10 {
-        p_dw.clamp(0.0, 1.0)
-    } else {
-        // Stephens / Lilliefors upper-body continuation (`p > 0.10`).
-        let k = d_max * (nf.sqrt() - 0.01 + 0.85 / nf.sqrt());
-        if k <= 0.302 {
-            1.0
-        } else if k <= 0.500 {
-            (2.767_73 - 19.828_315 * k + 80.709_644 * k * k - 138.551_52 * k.powi(3) + 81.218_052 * k.powi(4)).clamp(0.10, 1.0)
-        } else if k <= 0.900 {
-            (-4.901_232 + 40.662_806 * k - 97.490_286 * k * k + 94.029_866 * k.powi(3) - 32.355_711 * k.powi(4)).clamp(0.0, 1.0)
-        } else {
-            p_dw.clamp(0.0, 1.0)
-        }
-    };
+    let d_max = lilliefors_d_from_sorted(&sorted)?;
+    let p_value = lilliefors_p_value(d_max, n)?;
 
     Ok(NormalityTestOutcome { test_name: String::from("Kolmogorov-Smirnov (Lilliefors)"), statistic: d_max, p_value, passed: p_value > alpha })
 }
